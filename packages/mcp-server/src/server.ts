@@ -47,6 +47,7 @@ import {
 } from "./config.ts";
 import { Admission, admitBatch, budgetBody, budgetRefusal, routeClass, type AdmissionVerdict } from "./admission.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
+import { parseBriefProfile } from "./brief-profile.ts";
 import { DATASET_TRIGGERS } from "./docs-datasets.ts";
 import { freshnessGauges } from "./docs-freshness.ts";
 import { scanIngestPages } from "./docs-ingest.ts";
@@ -665,6 +666,8 @@ export function createHttpServer(
 					memo = healthMemo;
 				} else {
 					const health = await substrate.health();
+					const hindsight = substrate.hindsightInventoryHealth();
+					const recall = substrate.recallHealth();
 					memo = {
 						status: healthStatus(health, config.greptime !== null),
 						at: nowMs,
@@ -682,6 +685,11 @@ export function createHttpServer(
 							...(observability.audit.missingHistory
 								? { auditMissingHistory: observability.audit.missingHistory }
 								: {}),
+							// The read-only Hindsight inventory (uplift-4 S5): the newest probe, from memory. Absent when
+							// SUBSTRATE_HINDSIGHT_INVENTORY is off; no existing field changes.
+							...(hindsight !== null ? { hindsight } : {}),
+							// Recall in the brief (uplift-4 S5): how many pairs the prefetcher can keep fresh; absent while it is off.
+							...(recall !== null ? { recall } : {}),
 						},
 					};
 					healthMemo = memo;
@@ -699,7 +707,10 @@ export function createHttpServer(
 				// gauges (`substrate.docs.freshness_seconds`, `substrate.docs.trigger_lag_seconds`)
 				// are served ONLY here, under `gauges`, and are not in OTLP. The key is absent
 				// until a dataset has data. A read: nothing is settled or written here.
-				const gauges = freshnessGauges(await substrate.evaluateDocsFreshness().catch(() => []));
+				// The Hindsight per-bank gauges (uplift-4 S5) ride in the same key. The outbox gauges are in
+				// the snapshot below: the call refreshes them first, from in-process state, with no plane call.
+				const bankGauges = substrate.hindsightGauges();
+				const gauges = [...freshnessGauges(await substrate.evaluateDocsFreshness().catch(() => [])), ...bankGauges];
 				sendJson(res, 200, {
 					startedAt: new Date(observability.startedAt).toISOString(),
 					metrics: observability.snapshot(),
@@ -747,6 +758,11 @@ export function createHttpServer(
 				const surfaces = observability.evaluateBriefSurfaces();
 				// The capacity runway (uplift-3 N2): one row over the `/healthz` size ring.
 				const capacity = observability.evaluateCapacity();
+				// The estimated-spend row per surface (uplift-4 S1): what was served, by
+				// bytes/4, against SUBSTRATE_SERVED_TOKENS_PER_HOUR. Beside the catalogue,
+				// never folded into `breached`, and never part of `burn` — those are
+				// model-reported tokens.
+				const served = observability.evaluateServedTokens();
 				// The index archive age (uplift-4 S2): one row, present only when an archive directory is configured; report-only until its ceiling is set.
 				const indexArchive = await substrate.indexArchiveSlo();
 				// 200 either way. A breached objective is information, not a broken service,
@@ -769,6 +785,7 @@ export function createHttpServer(
 					docs,
 					surfaces,
 					capacity,
+					served,
 					...(indexArchive !== null ? { indexArchive: [indexArchive] } : {}),
 					history: observability.history(),
 				});
@@ -825,6 +842,13 @@ export function createHttpServer(
 				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
 				rememberClaim(claim, body);
 				if (!(await auditedRest(res, observability, surface, "brief", body))) return;
+				// uplift-4 S1: an unknown profile is the caller's mistake, refused here
+				// and never coerced to one the caller did not ask for.
+				const requested = parseBriefProfile(body.profile);
+				if (!requested.ok) {
+					sendJson(res, 400, { error: requested.error });
+					return;
+				}
 				const { detail: brief, notModified } = await substrate.briefConditional(
 					{
 						repo: typeof body.repo === "string" ? body.repo : undefined,
@@ -833,6 +857,9 @@ export function createHttpServer(
 						surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
 					},
 					req.headers["if-none-match"],
+					requested.profile,
+					// The profile follows the resolved bearer, never the body's `surface` (attribution only).
+					surface,
 				);
 				// uplift-2 R1: the caller can tell a degraded or snapshot brief from a
 				// complete one and skip one it already holds. A degraded answer is still
@@ -842,7 +869,10 @@ export function createHttpServer(
 					etag: brief.etag,
 					"cache-control": "no-cache",
 					"x-substrate-brief": brief.state,
+					"x-substrate-brief-profile": brief.profile,
 					...(brief.failed.length > 0 ? { "x-substrate-brief-failed": brief.failed.join(",") } : {}),
+					// uplift-4 S4: additive; present only when the text is a last-good served inside the stale window.
+					...(brief.ageS !== undefined ? { "x-substrate-brief-age": String(brief.ageS) } : {}),
 				};
 				if (notModified) {
 					res.writeHead(304, headers);

@@ -16,13 +16,29 @@ import {
 	type AdmissionDecision,
 	type BreakerSnapshot,
 	type BriefResult,
+	type BriefRecallResult,
 	type BriefState,
 	type DocsSearchSample,
 	type PlaneName,
 	type PlaneSample,
+	type RecallPrefetchResult,
+	type ServedTokenTool,
 } from "@substrate/observability";
 import { DEVNET_GENESIS_HASH } from "./anchor.ts";
-import { composeBrief, type BriefRequest, type BriefSource } from "./brief.ts";
+import { composeBriefSections, type BriefOptions, type BriefRequest, type BriefSource } from "./brief.ts";
+import {
+	briefStateLine,
+	decodeSections,
+	encodeSections,
+	parseSections,
+	renderCompactBrief,
+	renderFullBrief,
+	resolveBriefProfile,
+	utf8Bytes,
+	type BriefProfile,
+	type BriefProfileMode,
+	type BriefSection,
+} from "./brief-profile.ts";
 import {
 	DOCS_GENERATION_KEY,
 	GRAPHS_GENERATION_KEY,
@@ -86,6 +102,7 @@ import {
 	type LedgerProbe,
 	type QueryableColumn,
 } from "./greptime.ts";
+import { HindsightInventory, type BankGaugeSample, type InventoryHealth, type InventoryReport } from "./hindsight-inventory.ts";
 import { IndexStore, leaseSnapshot, type GraphBindResult, type IndexCapacity, type MemoryExpiredSample } from "./index-store.ts";
 import { IndexArchiveWatch, evaluateIndexArchiveSlo, type IndexArchiveReading, type IndexArchiveSloResult } from "./index-archive-watch.ts";
 import {
@@ -111,6 +128,17 @@ import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, p
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
+import {
+	RecallPrefetcher,
+	parseRecallSnapshot,
+	recallBriefResult,
+	recallKey,
+	RECALL_TITLE_PREFIX,
+	recallSnapshotArgs,
+	snapshotState,
+	type RecallLook,
+	type RecallSnapshot,
+} from "./recall-snapshot.ts";
 import {
 	createExecFileRunner,
 	createSkillProposer,
@@ -351,6 +379,14 @@ export interface EventQueryResult {
 	error?: string;
 }
 
+/** Bound a surface name to the surface list for a metric label; anything else, a body-claimed name included, is `unknown`. */
+function boundedSurface(surface: string | null | undefined): string {
+	return typeof surface === "string" && (SURFACES as readonly string[]).includes(surface) ? surface : "unknown";
+}
+
+/** Keeps the section-shaped brief entry apart from the plain-text entries older processes wrote under the same cache class. */
+const BRIEF_CACHE_SHAPE = "sections-v1";
+
 /**
  * The brief as `POST /brief` answers it (uplift-2 R1). `text` is what every
  * caller gets; the rest lets an HTTP caller tell a complete brief from a
@@ -366,6 +402,14 @@ export interface BriefDetail {
 	etag: string;
 	/** When the served snapshot was composed; null unless `state` is `snapshot`. */
 	snapshotAt: string | null;
+	/** The rendering `text` is (uplift-4 S1): `compact` only under `SUBSTRATE_BRIEF_PROFILE=enforce`, and `full` whenever the compact one could not be built. */
+	profile: BriefProfile;
+	/** `SUBSTRATE_BRIEF_PROFILE` as this answer was served under. */
+	mode: BriefProfileMode;
+	/** Full minus compact UTF-8 bytes of this answer (negative when compact is longer); null under `off` or when no compact rendering exists. */
+	bytesSaved: number | null;
+	/** Seconds since a last-good brief was composed, present only when it was served stale (uplift-4 S4, `SUBSTRATE_CACHE_SWR=enforce`); `state` stays `complete`. */
+	ageS?: number;
 }
 
 /**
@@ -382,6 +426,16 @@ export interface BriefAnswer {
 interface BriefSnapshot {
 	text: string;
 	at: string;
+	/** The brief's sections, so a snapshot can be served as `compact` too; absent on a snapshot written before profiles. */
+	sections?: unknown;
+	/** Epoch ms the text stops being true (a lease or reverify deadline); null for none. Absent on snapshots written before uplift-4 S4. */
+	until?: number | null;
+}
+
+/** What one brief saw of the recall snapshot (uplift-4 S5): the snapshot itself and how it judged. */
+interface RecallRead {
+	look: RecallLook;
+	snapshot: RecallSnapshot | null;
 }
 
 /** Weak, so a proxy that re-encodes the body still matches; 32 hex is plenty against collision for a brief. */
@@ -576,6 +630,10 @@ export interface SubstrateObserver {
 	 * (`unknown` otherwise) because `POST /brief` takes the body's surface unchecked.
 	 */
 	briefResult?(sample: { surface: string; state: BriefState; result: BriefResult }): void;
+	/** One brief answered with its profile (uplift-4 S1); `bytesSaved` only for a fresh answer measured under `shadow` or `enforce`. */
+	briefProfiled?(sample: { surface: string; profile: BriefProfile; mode: BriefProfileMode; bytesSaved: number | null }): void;
+	/** One reply served to a caller, sized for the estimated-spend counter (uplift-4 S1). `surface` is bounded to the surface list. */
+	servedTokens?(sample: { surface: string; tool: ServedTokenTool; bytes: number }): void;
 	emitted?(sample: {
 		surface: Surface;
 		graph_id: string | null;
@@ -597,6 +655,12 @@ export interface SubstrateObserver {
 	capacity?(sample: { at: number; databaseBytes: number }): void;
 	/** Offered once at construction when `SUBSTRATE_INDEX_ARCHIVE_DIR` is set (uplift-4 S2): `newestAtMs` answers the newest complete index archive's creation time, which `substrate.index.archive.age_seconds` is computed from at snapshot time. */
 	indexArchive?(source: { newestAtMs(): number | null }): void;
+	/** One brief's use of the recall snapshot (uplift-4 S5), recorded when `SUBSTRATE_BRIEF_RECALL` is not `off`. `surface` is bounded to the surface list. */
+	briefRecall?(sample: { surface: string; result: BriefRecallResult }): void;
+	/** One recall prefetch attempt (uplift-4 S5). `surface` is bounded to the surface list. */
+	recallPrefetch?(sample: { surface: string; result: RecallPrefetchResult }): void;
+	/** The retain outbox's state (uplift-4 S5): size, oldest parked entry's age and durability, read in-process. */
+	hindsightOutbox?(sample: { size: number; oldestAgeSeconds: number; durable: boolean }): void;
 	claimed?(sample: {
 		surface: Surface;
 		graph_id: string;
@@ -910,6 +974,11 @@ export class Substrate {
 	// uplift-2 R1 — brief fast path. The options `composeBrief` runs under, read
 	// once from config so a brief does not re-derive them per call.
 	private readonly briefOptions: { budgetMs: number; recentWindowDays: number };
+	// uplift-4 S5 — recall in the brief and the Hindsight inventory
+	/** The wanted registry, the prefetch timer and the post-retain refresh; inert unless `SUBSTRATE_BRIEF_RECALL` is `shadow` or `enforce`. */
+	private readonly recall: RecallPrefetcher;
+	/** The read-only bank inventory; inert unless `SUBSTRATE_HINDSIGHT_INVENTORY=on`. */
+	private readonly hindsightInventory: HindsightInventory;
 	// uplift-2 R5 — ledger emit serialisation
 	/**
 	 * `session_id` → tail of that session's append chain. Two concurrent emits
@@ -1024,6 +1093,46 @@ export class Substrate {
 			onUnsaved: (entry) => warnRetain(entry, "outbox-unsaved"),
 		});
 		if (this.retainOutbox.size() > 0) this.ensureRetainDrainTimer();
+		// uplift-4 S5: the recall prefetcher (inert unless SUBSTRATE_BRIEF_RECALL is shadow or enforce) and the
+		// read-only Hindsight inventory (inert unless SUBSTRATE_HINDSIGHT_INVENTORY=on). Neither starts a timer here.
+		this.recall = new RecallPrefetcher({
+			config: config.briefRecall,
+			bankFor: (surface) => {
+				const hindsight = hindsightFromEnv();
+				return hindsight === null || config.vmGuest ? null : bankForSurface(hindsight, surface);
+			},
+			breakerOpen: () => this.planes.gate("hindsight").breaker?.state() === "open",
+			cacheAvailable: () => this.cache.health().enabled,
+			recall: async ({ surface, bank, query, budgetMs }) => {
+				const hindsight = hindsightFromEnv();
+				if (hindsight === null || bankForSurface(hindsight, surface) !== bank) return { ok: false };
+				// `banks: null`: the surface's OWN bank only, never the HINDSIGHT_BANKS fan-out. The
+				// deadline `budgetMs` is the recall's abort signal, so it fires inside the gated fetch.
+				const reply = await recallMemories({ config: hindsight, banks: null, vmGuest: config.vmGuest, fetchImpl: this.hindsightFetch, budgetMs }, query, surface);
+				if (reply.degraded) return { ok: false };
+				return {
+					ok: true,
+					hits: reply.results.map((hit) => ({
+						bank: hit.bank,
+						text: hit.text,
+						...(hit.scope !== undefined ? { scope: hit.scope } : {}),
+						...(hit.type !== undefined ? { type: hit.type } : {}),
+					})),
+				};
+			},
+			peek: async (surface, repo, bank) => parseRecallSnapshot(await this.cache.peekQuiet("recall-snapshot", surface, recallSnapshotArgs(repo, bank))),
+			put: (surface, repo, bank, snapshot, ttlS) => this.cache.put("recall-snapshot", surface, recallSnapshotArgs(repo, bank), snapshot, ttlS),
+			observe: (sample) => this.observer.recallPrefetch?.({ surface: boundedSurface(sample.surface), result: sample.result }),
+			warn: (line) => process.stderr.write(`[substrate] ${line}\n`),
+		});
+		this.hindsightInventory = new HindsightInventory({
+			config: config.hindsightInventory,
+			hindsight: () => (config.vmGuest ? null : hindsightFromEnv()),
+			banks: () => hindsightBanksFromEnv(),
+			fetchImpl: this.hindsightFetch,
+			breakerOpen: () => this.planes.gate("hindsight").breaker?.state() === "open",
+		});
+		this.noteHindsightOutbox();
 	}
 
 	/**
@@ -1113,7 +1222,8 @@ export class Substrate {
 
 	/** The brief as text — what every caller without a validator to offer wants. */
 	async brief(request: BriefRequest): Promise<string> {
-		return (await this.briefDetailed(request)).text;
+		// In-process callers read the whole brief whatever the wire profile is.
+		return (await this.briefDetailed(request, "full")).text;
 	}
 
 	/**
@@ -1129,14 +1239,29 @@ export class Substrate {
 	 * both doors count alike; `surface` is bounded to the surface list first
 	 * because the REST body's surface is not validated.
 	 */
-	async briefConditional(request: BriefRequest, ifNoneMatch: string | string[] | undefined): Promise<BriefAnswer> {
-		const detail = await this.briefDetailed(request);
+	async briefConditional(
+		request: BriefRequest,
+		ifNoneMatch: string | string[] | undefined,
+		profile?: BriefProfile,
+		bearerSurface?: string | null,
+	): Promise<BriefAnswer> {
+		const detail = await this.briefDetailed(request, profile, bearerSurface);
 		const notModified = etagMatches(ifNoneMatch, detail.etag);
+		const surface = boundedSurface(request.surface);
 		this.observer.briefResult?.({
-			surface: (SURFACES as readonly string[]).includes(request.surface) ? request.surface : "unknown",
+			surface,
 			state: detail.state,
 			result: notModified ? "not_modified" : "fresh",
 		});
+		// The profile counter and the spend estimate are measurements about an
+		// answer already decided; neither may fail it. A 304 carried no text, so
+		// it saved nothing and cost the model nothing to read.
+		try {
+			this.observer.briefProfiled?.({ surface, profile: detail.profile, mode: detail.mode, bytesSaved: notModified ? null : detail.bytesSaved });
+			if (!notModified) this.observer.servedTokens?.({ surface, tool: "brief", bytes: utf8Bytes(detail.text) });
+		} catch (cause) {
+			process.stderr.write(`[substrate] brief: profile metrics unavailable — ${String(cause).slice(0, 200)}\n`);
+		}
 		return { detail, notModified };
 	}
 
@@ -1151,14 +1276,68 @@ export class Substrate {
 	 * when the live compose was degraded. Degraded text is never stored
 	 * anywhere, so an outage cannot outlive the store. Every cache step is
 	 * fail-open: the brief is the answer whatever the cache did.
+	 *
+	 * uplift-4 S1: the cache holds the brief as sections (`brief-profile.ts`),
+	 * not as text, so one entry — and one set of source reads — renders as
+	 * either profile. The profile is therefore chosen when the answer is served
+	 * and is in no cache key: an entry written under `shadow` serves `compact`
+	 * after a restart into `enforce`, and the reverse. `requestedProfile` is the
+	 * caller's own word (`profile` on the REST body or MCP call), resolved by
+	 * `resolveBriefProfile` against the mode and the surface list.
 	 */
-	async briefDetailed(request: BriefRequest): Promise<BriefDetail> {
+	async briefDetailed(request: BriefRequest, requestedProfile?: BriefProfile, bearerSurface?: string | null): Promise<BriefDetail> {
 		const started = performance.now();
 		let ok = false;
 		try {
 			const noted: Array<number | null> = [];
 			const failed: BriefSource[] = [];
 			let loaded = false;
+			let liveSections: BriefSection[] | null = null;
+			let staleAgeS: number | undefined;
+			// uplift-4 S5: with recall `off` none of this runs and every key and text is today's.
+			const recallMode = this.config.briefRecall.mode;
+			const recallRepo = normalizeIdentifier(request.repo);
+			// Recall is for the caller whose bearer IS the surface the brief names: the snapshot is that
+			// surface's own bank. The body or argument `surface` is attribution only, so a bearer that names
+			// another surface, and an anonymous caller, get no recall: nothing is registered, read or
+			// composed, and their keys are the recall-off keys (never an enforce entry written for the real surface).
+			const recallActive = recallMode !== "off" && bearerSurface != null && bearerSurface === request.surface;
+			const recallRead: Promise<RecallRead> | null =
+				recallMode === "off" ? null : recallActive ? this.readRecall(request, recallRepo) : Promise.resolve<RecallRead>({ look: "disabled", snapshot: null });
+			const recallOptions = recallRead === null || !recallActive ? {} : this.recallBriefOptions(request, recallRepo, recallRead);
+			const noteRecall = (served: readonly BriefSection[] | null, detail: BriefDetail): Promise<void> => this.noteBriefRecall(request, recallRead, served, detail);
+			// One compose, parameterised by where it reports its lease note and failed sources, so a
+			// background refresh never touches this call's `failed` (S4) and every caller gets the
+			// brief as sections (S1).
+			const compose = (into: Array<number | null>, lost: BriefSource[]): Promise<BriefSection[]> =>
+				composeBriefSections(
+					request,
+					{ index: this.index, greptime: this.greptime },
+					(at) => {
+						into.push(at);
+					},
+					(source) => {
+						lost.push(source);
+					},
+					{ ...this.briefOptions, ...recallOptions },
+				);
+			// The last-good snapshot: the rendered text, its sections (so it can be served compact and
+			// as stale-while-revalidate), when it was composed and when it stops being true.
+			// Sections go into the snapshot only when they would decode again: a value `decodeSections` rejects
+			// would make every later hit a miss, so such a snapshot keeps its text alone.
+			const keep = (text: string, sections: readonly BriefSection[], until: number | null) => {
+				const decodable = decodeSections(encodeSections(sections)) !== null;
+				// Without sections the fallback cannot strip recall later, so the text saved then is rendered
+				// without it: the stored snapshot never carries derived recall.
+				const saved = decodable ? text : renderFullBrief(sections.filter((section) => section.id !== "recall"));
+				return this.cache.put(
+					"brief-snapshot",
+					request.surface,
+					args,
+					{ text: saved, at: new Date().toISOString(), ...(decodable ? { sections } : {}), until },
+					this.config.briefSnapshotTtlS,
+				);
+			};
 			// The expiry mode is part of the key for the same reason it is on a
 			// search (uplift-3 N4): a `report` brief carries expired advice, tagged,
 			// and must not be served `complete` — nor replayed as a snapshot — after
@@ -1168,11 +1347,16 @@ export class Substrate {
 				branch: request.branch ?? null,
 				graph_id: request.graph_id ?? null,
 				...this.expiryKey(undefined),
+				// The recall mode changes the rendered text, so it is in every key the text lives under
+				// (answer, last-good snapshot): a shadow entry is never served as enforce, nor the reverse.
+				...recallKey(recallActive ? recallMode : "off", recallActive ? this.recallBankOf(request.surface) : null),
 			};
-			const live = await this.cache.getOrLoad({
+			const encoded = await this.cache.getOrLoad({
 				klass: "brief",
 				surface: request.surface,
-				args,
+				// `shape` keeps this entry apart from the plain-text values older
+				// processes wrote under the same class, so neither reads the other's.
+				args: { ...args, shape: BRIEF_CACHE_SHAPE },
 				// The shared graphs generation covers repo briefs and the other
 				// graphs a single-graph brief lists. The graph's own key still
 				// moves when that graph is written.
@@ -1180,36 +1364,97 @@ export class Substrate {
 					? [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY, graphGenerationKey(request.graph_id)]
 					: [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY],
 				refreshAt: () => noted.at(-1) ?? null,
-				store: () => failed.length === 0,
-				load: () => {
+				store: (value: string) => failed.length === 0 && decodeSections(value) !== null,
+				load: async () => {
 					loaded = true;
-					return composeBrief(
-						request,
-						{ index: this.index, greptime: this.greptime },
-						(at) => {
-							noted.push(at);
-						},
-						(source) => {
-							failed.push(source);
-						},
-						this.briefOptions,
-					);
+					liveSections = await compose(noted, failed);
+					return encodeSections(liveSections);
 				},
+				// Stale-while-revalidate (uplift-4 S4) reuses the last-good snapshot above. A
+				// refresh composes with its own state, so it never touches this call's `failed`.
+				// The cached value is the encoded sections (uplift-4 S1), so the last-good is too:
+				// a snapshot without readable sections is not a last-good, and nothing here ever
+				// composes synchronously.
+				swr:
+					this.config.briefSnapshotTtlS > 0
+						? {
+								lastGood: async () => {
+									const good = await this.cache.peekQuiet<BriefSnapshot>("brief-snapshot", request.surface, args);
+									if (good === null) return null;
+									const atMs = Date.parse(good.at);
+									// An absent `until` is a snapshot from before the deadline was recorded: its lease or
+									// reverify time is unknown, so it is not a last-good. Null means "no deadline", a number
+									// is one; anything else is refused.
+									const until = good.until;
+									if (until === undefined || (until !== null && !Number.isFinite(until)) || !Number.isFinite(atMs)) return null;
+									const sections = parseSections(good.sections);
+									if (sections === null) return null;
+									return { value: encodeSections(sections), atMs, untilMs: until };
+								},
+								refresh: () => {
+									const refreshNoted: Array<number | null> = [];
+									const refreshFailed: BriefSource[] = [];
+									return {
+										load: async () => encodeSections(await compose(refreshNoted, refreshFailed)),
+										refreshAt: () => refreshNoted.at(-1) ?? null,
+										// The same rule as the foreground write: a value `decodeSections` would reject is not stored, so the stale one is kept.
+										store: (value: string) => refreshFailed.length === 0 && decodeSections(value) !== null,
+										stored: async (value: string) => {
+											const fresh = decodeSections(value);
+											if (fresh !== null) await keep(renderFullBrief(fresh), fresh, refreshNoted.at(-1) ?? null);
+										},
+									};
+								},
+								served: (ageMs: number) => {
+									staleAgeS = Math.floor(ageMs / 1000);
+								},
+							}
+						: undefined,
 			});
+			// What this call composed itself is used as it is: a brief too large to cache would not decode,
+			// and decoding it is what used to compose it a second time.
+			let sections = loaded && liveSections !== null ? liveSections : decodeSections(encoded);
+			if (sections === null) {
+				// Not an encoding this process wrote (an entry from before profiles, or
+				// a foreign value): a miss. Compose afresh, leave the entry to expire. What is
+				// served is live, so nothing is advertised as stale.
+				failed.length = 0;
+				noted.length = 0;
+				staleAgeS = undefined;
+				loaded = true;
+				sections = await compose(noted, failed);
+			}
 			ok = true;
+			const live = renderFullBrief(sections);
+			const profileSurface = bearerSurface ?? request.surface;
 			if (failed.length === 0) {
 				if (loaded) {
-					await this.cache.put("brief-snapshot", request.surface, args, { text: live, at: new Date().toISOString() }, this.config.briefSnapshotTtlS);
+					await keep(live, sections, noted.at(-1) ?? null);
 				}
-				return { text: live, state: "complete", failed, etag: briefEtag(live), snapshotAt: null };
+				const detail = this.servedBrief(live, sections, "complete", failed, null, requestedProfile, profileSurface, staleAgeS);
+				await noteRecall(sections, detail);
+				return detail;
 			}
 			const snapshot =
 				this.config.briefSnapshotTtlS > 0 ? await this.cache.peek<BriefSnapshot>("brief-snapshot", request.surface, args) : null;
 			if (snapshot === null) {
-				return { text: live, state: "degraded", failed, etag: briefEtag(live), snapshotAt: null };
+				const detail = this.servedBrief(live, sections, "degraded", failed, null, requestedProfile, profileSurface);
+				await noteRecall(sections, detail);
+				return detail;
 			}
+			// `snapshot.text` is the rendered brief, never the encoded sections.
 			const text = `_(substrate brief snapshot from ${snapshot.at}; live sources degraded: ${failed.join(", ")})_\n${snapshot.text}`;
-			return { text, state: "snapshot", failed, etag: briefEtag(text), snapshotAt: snapshot.at };
+			// A snapshot is served because a live source is down: it never carries derived recall, whose age is
+			// bounded only for a brief composed live. The sections are filtered and the text re-rendered from them.
+			const stored = parseSections(snapshot.sections);
+			const snapshotSections = stored === null ? null : stored.filter((section) => section.id !== "recall");
+			const snapshotText =
+				stored !== null && snapshotSections !== null && snapshotSections.length !== stored.length
+					? `_(substrate brief snapshot from ${snapshot.at}; live sources degraded: ${failed.join(", ")})_\n${renderFullBrief(snapshotSections)}`
+					: text;
+			const detail = this.servedBrief(snapshotText, snapshotSections, "snapshot", failed, snapshot.at, requestedProfile, profileSurface);
+			await noteRecall(snapshotSections, detail);
+			return detail;
 		} finally {
 			// Timed in `finally` so a brief that threw is still in the histogram. The SLO
 			// is about what the caller waited for, and a failure is a wait too.
@@ -1220,6 +1465,99 @@ export class Substrate {
 				durationMs: performance.now() - started,
 			});
 		}
+	}
+
+	/**
+	 * What a brief sees of the warm recall snapshot (uplift-4 S5). Registers the (surface, repo)
+	 * pair for the prefetcher (a map write) and reads the snapshot with a cache read that counts
+	 * nothing: no Hindsight call is ever made on this path, and a failed read is a cold snapshot,
+	 * never an error. The key holds the surface, the repo and the surface's own bank.
+	 */
+	/** The bank a surface's recall reads, or null with no Hindsight configured. */
+	private recallBankOf(surface: string): string | null {
+		const hindsight = hindsightFromEnv();
+		return hindsight === null ? null : bankForSurface(hindsight, surface);
+	}
+
+	private async readRecall(request: BriefRequest, repo: string | null): Promise<RecallRead> {
+		const hindsight = hindsightFromEnv();
+		if (repo === null || hindsight === null || this.config.vmGuest || !this.cache.health().enabled || !(SURFACES as readonly string[]).includes(request.surface)) {
+			return { look: "disabled", snapshot: null };
+		}
+		this.recall.want(request.surface, repo);
+		try {
+			const stored = await this.cache.peekQuiet<unknown>("recall-snapshot", request.surface, recallSnapshotArgs(repo, bankForSurface(hindsight, request.surface)));
+			const snapshot = parseRecallSnapshot(stored);
+			return { look: snapshotState(snapshot, Date.now(), this.config.briefRecall.ttlS), snapshot };
+		} catch {
+			return { look: "cold", snapshot: null };
+		}
+	}
+
+	/** The compose options recall adds: the subject sink in `shadow` and `enforce`, the snapshot read only in `enforce` (the shadow text is exactly today's). */
+	private recallBriefOptions(request: BriefRequest, repo: string | null, read: Promise<RecallRead>): Partial<BriefOptions> {
+		return {
+			...(repo !== null ? { noteSubjects: (subjects: string[]) => this.recall.noteSubjects(request.surface, repo, subjects) } : {}),
+			...(this.config.briefRecall.mode === "enforce" ? { recall: { read: async () => (await read).snapshot, ttlS: this.config.briefRecall.ttlS } } : {}),
+		};
+	}
+
+	/** `substrate.brief.recall` for one answered brief: what the served sections carry against what the snapshot offered. A metric never fails the brief. */
+	private async noteBriefRecall(request: BriefRequest, read: Promise<RecallRead> | null, served: readonly BriefSection[] | null, detail: BriefDetail): Promise<void> {
+		const mode = this.config.briefRecall.mode;
+		if (read === null || mode === "off") return;
+		try {
+			const { look } = await read;
+			const composed = served?.some((section) => section.id === "recall") === true;
+			// `included` is what the text the caller RECEIVED carries: the compact profile's byte cap drops
+			// recall first, so a section that was composed but cut is its own result.
+			const delivered = composed && detail.text.includes(RECALL_TITLE_PREFIX);
+			const result: BriefRecallResult = mode === "enforce" && composed && !delivered ? "dropped_by_cap" : recallBriefResult(mode, look, delivered);
+			this.observer.briefRecall?.({ surface: boundedSurface(request.surface), result });
+		} catch (cause) {
+			process.stderr.write(`[substrate] brief: recall metric unavailable — ${redact(String(cause)).slice(0, 200)}\n`);
+		}
+	}
+
+	/**
+	 * One brief as the profile in force serves it. The compact rendering is built
+	 * from `sections` whenever the mode is not `off` (so `shadow` can measure it)
+	 * and served only when the profile resolves to `compact`; a rendering that
+	 * cannot be built — an exception, or a snapshot with no sections — serves the
+	 * full text, the unchanged behaviour.
+	 */
+	private servedBrief(
+		full: string,
+		sections: readonly BriefSection[] | null,
+		state: BriefState,
+		failed: BriefSource[],
+		snapshotAt: string | null,
+		requested: BriefProfile | undefined,
+		surface: string,
+		ageS?: number,
+	): BriefDetail {
+		const config = this.config.briefProfile;
+		let compact: string | null = null;
+		if (config.mode !== "off" && sections !== null) {
+			try {
+				compact = renderCompactBrief(sections, briefStateLine(state, failed, snapshotAt, ageS), config);
+			} catch (cause) {
+				process.stderr.write(`[substrate] brief: compact profile unavailable — ${String(cause).slice(0, 200)}\n`);
+			}
+		}
+		const served: BriefProfile = compact !== null && resolveBriefProfile(config, surface, requested) === "compact" ? "compact" : "full";
+		const text = served === "compact" ? compact! : full;
+		return {
+			text,
+			state,
+			failed,
+			etag: briefEtag(text),
+			snapshotAt,
+			profile: served,
+			mode: config.mode,
+			bytesSaved: compact === null ? null : utf8Bytes(full) - utf8Bytes(compact),
+			...(ageS !== undefined ? { ageS } : {}),
+		};
 	}
 
 	/**
@@ -1464,7 +1802,7 @@ export class Substrate {
 					.then((outcome) => {
 						if (!outcome.forwarded) return;
 						this.retainOutbox.forget(outcome.bank, outcome.document_id);
-						this.afterLiveRetain();
+						this.afterLiveRetain(result.writer);
 						return this.cache.bump(MEMORY_GENERATION_KEY);
 					})
 					.then(() => undefined)
@@ -1580,7 +1918,7 @@ export class Substrate {
 			load: async () => {
 				const [entries, recall] = await Promise.all([
 					this.index ? this.index.searchMemory(query, scope, limit, includeSuperseded, read) : Promise.resolve([]),
-					this.recallMemories({ query }, surface, this.config.hindsightBudgets.searchRecallBudgetMs),
+					this.recallUncounted({ query }, surface, this.config.hindsightBudgets.searchRecallBudgetMs),
 				]);
 				return mergeDerivedHits(entries, recall, scope);
 			},
@@ -1682,6 +2020,28 @@ export class Substrate {
 
 	/**
 	 * `memory_recall`: Hindsight recall as an explicit tool (D26-03, D26-05).
+	 * The reply's size is counted into the estimated-spend series
+	 * (`substrate.served.tokens_est`, tool `recall`); the recall leg inside
+	 * `memory_search` is not a reply to a caller and is not counted.
+	 */
+	async recallMemories(input: { query?: unknown }, callerSurface: string | null): Promise<RecallReply> {
+		const reply = await this.recallUncounted(input, callerSurface);
+		this.noteServed("recall", callerSurface, reply);
+		return reply;
+	}
+
+	/** Size one reply for `substrate.served.tokens_est`; a failed measurement never fails the reply. */
+	private noteServed(tool: ServedTokenTool, surface: string | null, reply: unknown): void {
+		if (this.observer.servedTokens === undefined) return;
+		try {
+			this.observer.servedTokens({ surface: boundedSurface(surface), tool, bytes: utf8Bytes(JSON.stringify(reply)) });
+		} catch (cause) {
+			process.stderr.write(`[substrate] ${tool}: served-token estimate unavailable — ${String(cause).slice(0, 200)}\n`);
+		}
+	}
+
+	/**
+	 * Hindsight recall, uncounted.
 	 *
 	 * Read-only and fail-open: an unconfigured plane or an unreachable bank
 	 * answers empty with a reason, never a throw. Reads emit nothing. Never
@@ -1692,7 +2052,7 @@ export class Substrate {
 	 * shorter one (the search leg does); a non-degraded reply is budget-
 	 * independent, so the cache key ignores it.
 	 */
-	async recallMemories(input: { query?: unknown }, callerSurface: string | null, budgetMs?: number): Promise<RecallReply> {
+	private async recallUncounted(input: { query?: unknown }, callerSurface: string | null, budgetMs?: number): Promise<RecallReply> {
 		if (this.config.vmGuest) {
 			return { results: [], degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: "vm-guest" };
 		}
@@ -1710,6 +2070,11 @@ export class Substrate {
 			// A degraded answer (outage, partial) is still the answer, but it
 			// must not sit in the cache: the next call re-probes the plane.
 			store: (reply) => !reply.degraded,
+			// This caller's own budget: a search leg (short) that joins a recall (long) already in
+			// flight answers its own `recall-timeout` reply when its budget is spent, instead of
+			// waiting out the owner's. The reply is the shape `recallMemories` gives on a budget miss.
+			deadlineMs: budgetMs ?? this.config.hindsightBudgets.recallBudgetMs,
+			onDeadline: () => ({ results: [], degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: "recall-timeout: budget exceeded" }),
 			load: () =>
 				recallMemories(
 					{
@@ -1774,6 +2139,62 @@ export class Substrate {
 		return this.retainOutbox.stats();
 	}
 
+	// uplift-4 S5 — the recall snapshot, the Hindsight inventory and the outbox gauges
+
+	/** Read the retain outbox's in-process state into its three gauges. No external call; a failure never fails the caller. */
+	private noteHindsightOutbox(): void {
+		if (this.observer.hindsightOutbox === undefined) return;
+		try {
+			const stats = this.retainOutbox.stats();
+			const oldest = stats.oldestAt === null ? Number.NaN : Date.parse(stats.oldestAt);
+			const oldestAgeSeconds = Number.isFinite(oldest) ? Math.max(0, Math.floor((Date.now() - oldest) / 1000)) : 0;
+			this.observer.hindsightOutbox({ size: stats.size, oldestAgeSeconds, durable: stats.durable });
+		} catch (cause) {
+			process.stderr.write(`[substrate] hindsight: outbox gauges unavailable — ${redact(String(cause)).slice(0, 200)}\n`);
+		}
+	}
+
+	/** Start the recall prefetch and the Hindsight inventory timers. Each is a no-op while its flag is off; each timer is unref'd. */
+	startRecall(): { recall: boolean; inventory: boolean } {
+		return { recall: this.recall.start(), inventory: this.hindsightInventory.start() };
+	}
+
+	/** Clear both timers and wait, bounded, for the work in flight. No final refresh: the snapshot is cache-only. */
+	async stopRecall(): Promise<void> {
+		await Promise.all([this.recall.stop(), this.hindsightInventory.stop()]);
+	}
+
+	/** Run one prefetch tick now (the interval's body): at most two due pairs, single-flight. Off: nothing. */
+	runRecallTick(): Promise<void> {
+		return this.recall.tick();
+	}
+
+	/** Run the debounced post-retain refresh now instead of after its 5 s wait. Off, or nothing wanted: nothing. */
+	flushRecallRetain(): Promise<void> {
+		return this.recall.flush();
+	}
+
+	/** Probe the Hindsight inventory now (single-flight, forced past the 60 s memo). Off: null and no call. */
+	refreshHindsightInventory(): Promise<InventoryReport | null> {
+		return this.hindsightInventory.refresh({ force: true });
+	}
+
+	/** `/healthz.recall`: the prefetcher's capacity and whether more pairs are wanted than it can keep fresh; null while recall is off. */
+	recallHealth(): { mode: string; capacity: number; wanted: number; saturated: boolean } | null {
+		return this.config.briefRecall.mode === "off" ? null : this.recall.health();
+	}
+
+	/** `/healthz.hindsight`: the inventory's newest probe, or null when it is off. Memory only, no call. */
+	hindsightInventoryHealth(): InventoryHealth | null {
+		return this.hindsightInventory.health();
+	}
+
+	/** The per-bank gauge points `/metrics` serves under `gauges`. Also refreshes the outbox gauges, which are read in-process. */
+	hindsightGauges(): BankGaugeSample[] {
+		this.noteHindsightOutbox();
+		return this.hindsightInventory.gauges();
+	}
+
 	/**
 	 * The forward's dependencies. The live forward parks transient failures in
 	 * the outbox; a replay hands in a sink that only says "deferred", because
@@ -1787,6 +2208,7 @@ export class Substrate {
 				: {
 						enqueue: (candidate) => {
 							this.retainOutbox.enqueue(candidate);
+							this.noteHindsightOutbox();
 							this.ensureRetainDrainTimer();
 							// Parked while the breaker is not closed: the first live
 							// success after it closes replays everything early.
@@ -1808,8 +2230,19 @@ export class Substrate {
 		};
 	}
 
-	/** A live retain landed: if the plane had been refusing, replay the whole backlog now rather than on its schedule. */
-	private afterLiveRetain(): void {
+	/**
+	 * A live retain landed on `surface`. Two jobs, the second independent of the first: schedule the
+	 * debounced recall refresh of that surface's wanted pairs (uplift-4 S5; a no-op while recall is
+	 * `off` or nothing wants the surface, so it never sends a call by itself), and, if the plane had
+	 * been refusing, replay the whole backlog now rather than on its schedule.
+	 */
+	private afterLiveRetain(surface: string): void {
+		try {
+			this.recall.noteRetain(surface);
+			this.noteHindsightOutbox();
+		} catch (cause) {
+			process.stderr.write(`[substrate] recall: post-retain hook failed — ${redact(String(cause)).slice(0, 200)}\n`);
+		}
 		if (!this.retainRecoverPending && !this.retainOutbox.held()) return;
 		this.retainRecoverPending = false;
 		if (this.retainOutbox.size() > 0) void this.drainRetainOutbox({ all: true });
@@ -1829,7 +2262,7 @@ export class Substrate {
 	 * recovery path and tests use it; the timer and shutdown replay due entries.
 	 */
 	drainRetainOutbox(options: { all?: boolean } = {}): Promise<void> {
-		return this.retainOutbox.drain((entry) => this.deliverParkedRetain(entry), options);
+		return this.retainOutbox.drain((entry) => this.deliverParkedRetain(entry), options).finally(() => this.noteHindsightOutbox());
 	}
 
 	/**
@@ -2942,6 +3375,7 @@ export class Substrate {
 			reply = await this.searchDocsUnmeasured(input, surface, () => {
 				loaded = true;
 			});
+			this.noteServed("docs", surface, reply);
 			return reply;
 		} finally {
 			// Timed in `finally` so a search that threw is still in the histogram:

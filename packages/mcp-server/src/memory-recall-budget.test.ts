@@ -9,6 +9,7 @@
  * banks collapses to its best-scoring copy before the sort.
  */
 import { describe, expect, test } from "bun:test";
+import { ReadThroughCache, type CacheRedis } from "./cache.ts";
 import { DEFAULT_RETAIN_TIMEOUT_MS, DEFAULT_SEARCH_RECALL_BUDGET_MS, loadConfig } from "./config.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import { DEFAULT_RECALL_BUDGET_MS, dedupeHits, recallMemories, type RecallDeps } from "./memory-recall.ts";
@@ -91,6 +92,63 @@ describe("recall budget", () => {
 			const recalled = await substrate.recallMemories({ query: "lease" }, "cursor");
 			expect(recalled.degraded).toBe(false);
 			expect(recalled.results.map((found) => found.bank)).toEqual(["sub-hermes", "sub-cursor"]);
+		} finally {
+			restore();
+		}
+	});
+});
+
+/** The three commands the cache needs; the same shape `cache-swr.test.ts` uses (its helper is not exported, and importing a test file would re-run it). */
+class MapRedis implements CacheRedis {
+	private readonly values = new Map<string, string>();
+	async get(key: string): Promise<string | null> {
+		return this.values.get(key) ?? null;
+	}
+	async set(key: string, value: string): Promise<void> {
+		this.values.set(key, value);
+	}
+	async incr(key: string): Promise<number> {
+		const next = Number(this.values.get(key) ?? "0") + 1;
+		this.values.set(key, String(next));
+		return next;
+	}
+}
+
+describe("a search joining an in-flight recall keeps its own budget", () => {
+	test("memory_recall in flight, memory_search with the short budget answers recall-timeout at its own deadline and starts no second load", async () => {
+		const restore = hindsightEnv();
+		try {
+			const fake = new HindsightFake();
+			// The caller's own bank (`sub-cursor`) is always recalled beside the configured one; an unseeded
+			// bank answers 404, which is a partial recall and would degrade the tool's reply for a reason
+			// unrelated to the waiter.
+			fake.seed("sub-cursor", [hit("c1", "fence the lease", 0.5, "mwd_c1")]);
+			fake.seed("sub-hermes", [hit("h1", "rotate the key", 0.9, "mwd_h1")]);
+			// The recall tool's budget (2000) outlasts this bank's latency; the search leg's (40) does not.
+			fake.recallDelayMs["sub-hermes"] = 300;
+			const config = loadConfig({ HINDSIGHT_SEARCH_RECALL_BUDGET_MS: "40", HINDSIGHT_RECALL_BUDGET_MS: "2000" });
+			// Single-flight lives in the cache layer: without one nothing is shared.
+			const cache = new ReadThroughCache({ redis: new MapRedis(), enabled: true, log: () => {} });
+			const substrate = new Substrate(config, { index: null, greptime: null, hindsightFetch: fake.fetch, cache });
+
+			const recall = substrate.recallMemories({ query: "lease" }, "cursor");
+			// Let the recall register its flight and send its one request.
+			while (fake.recalls().length === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+			const started = Date.now();
+			const searched = await substrate.searchMemory("lease", undefined, undefined, undefined, "cursor");
+			expect(searched.degraded).toBe(true);
+			expect(searched.reason?.startsWith("recall-timeout")).toBe(true);
+			// Answered at its own deadline, well before the recall's 300 ms plane latency.
+			expect(Date.now() - started).toBeLessThan(250);
+			// It joined the recall's load rather than starting another.
+
+			const recalled = await recall;
+			expect(recalled.degraded).toBe(false);
+			expect(recalled.results.map((found) => found.bank)).toEqual(["sub-hermes", "sub-cursor"]);
+			// One load fans out once over every configured bank; a second load would query a bank twice.
+			const banksQueried = fake.requests.filter((request) => request.path.endsWith("/memories/recall")).map((request) => request.path);
+			expect(banksQueried.sort()).toEqual(["/v1/default/banks/sub-cursor/memories/recall", "/v1/default/banks/sub-hermes/memories/recall"]);
+			expect(new Set(banksQueried).size).toBe(banksQueried.length);
 		} finally {
 			restore();
 		}
