@@ -18,6 +18,7 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import { ARCHIVE_TABLE_NAMES } from "./index-archive-spec.ts";
 
 /** How long one directory read serves every caller. */
 export const INDEX_ARCHIVE_MEMO_MS = 60_000;
@@ -44,10 +45,28 @@ export interface IndexArchiveReading {
 	reason: string | null;
 }
 
-/** The two fields the watch reads; the full manifest is `index-archive.ts`'s to verify. */
-const WatchedManifest = z.object({ kind: z.literal("index-archive"), createdAt: z.string() });
+/** What the watch reads of a manifest: its kind and time, and each table's data file name and size (the full check is `verify-archive`'s). */
+const WatchedManifest = z.object({
+	kind: z.literal("index-archive"),
+	createdAt: z.string(),
+	tables: z.record(z.string(), z.object({ file: z.string(), bytes: z.number() })),
+});
 
-/** The newest complete snapshot's `createdAt` in `dir`, by directory name; `null` when none has a readable manifest. */
+/**
+ * Whether every archived table's data file the manifest lists is on disk with the listed size: nine `stat`s, no
+ * reads. A manifest over missing or truncated files is not a backup, however it got that way. The file names are
+ * taken from the closed table list, never from the manifest, so a manifest cannot point a stat elsewhere.
+ */
+async function dataFilesPresent(snapshotDir: string, tables: z.infer<typeof WatchedManifest>["tables"]): Promise<boolean> {
+	for (const name of ARCHIVE_TABLE_NAMES) {
+		const entry = Object.hasOwn(tables, name) ? tables[name] : undefined;
+		if (entry === undefined || entry.file !== `${name}.ndjson`) return false;
+		if ((await stat(join(snapshotDir, entry.file))).size !== entry.bytes) return false;
+	}
+	return true;
+}
+
+/** The newest complete snapshot's `createdAt` in `dir`, by directory name; `null` when none has a readable manifest over its data files. */
 async function newestArchive(dir: string): Promise<{ snapshot: string; createdAt: number } | null> {
 	const names = (await readdir(dir)).filter((name) => SNAPSHOT_RE.test(name)).sort().reverse();
 	for (const snapshot of names.slice(0, MAX_MANIFESTS_TRIED)) {
@@ -56,7 +75,7 @@ async function newestArchive(dir: string): Promise<{ snapshot: string; createdAt
 			if ((await stat(path)).size > MAX_MANIFEST_BYTES) continue;
 			const parsed = WatchedManifest.safeParse(JSON.parse(await readFile(path, "utf8")));
 			const createdAt = parsed.success ? Date.parse(parsed.data.createdAt) : Number.NaN;
-			if (parsed.success && Number.isFinite(createdAt)) return { snapshot, createdAt };
+			if (parsed.success && Number.isFinite(createdAt) && (await dataFilesPresent(join(dir, snapshot), parsed.data.tables))) return { snapshot, createdAt };
 		} catch {
 			// No manifest (an incomplete snapshot) or one that does not parse: not an archive; try the next older one.
 		}

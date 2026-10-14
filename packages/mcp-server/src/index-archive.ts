@@ -249,6 +249,8 @@ export interface IndexArchiveOptions {
 	maxBytes?: number;
 	/** Told the names of unfinished snapshot directories a killed earlier run left and this run removed. */
 	onSwept?: (names: readonly string[]) => void;
+	/** `chmodSync`, injected by tests to fail a mode change on a chosen file. */
+	chmod?: (path: string, mode: number) => void;
 }
 
 /** One data file under construction: its `.part` path, the digest of every byte appended, and the size. */
@@ -260,6 +262,7 @@ class NdjsonPart {
 	constructor(
 		readonly dir: string,
 		readonly name: string,
+		private readonly chmod: (path: string, mode: number) => void = chmodSync,
 	) {
 		this.part = join(dir, `${name}.part`);
 		rmSync(this.part, { force: true });
@@ -278,8 +281,9 @@ class NdjsonPart {
 	}
 
 	commit(): void {
+		// The mode is set on the `.part` before the rename, so the rename is the only step left.
+		this.chmod(this.part, PRIVATE_FILE_MODE);
 		renameSync(this.part, join(this.dir, this.name));
-		chmodSync(join(this.dir, this.name), PRIVATE_FILE_MODE);
 	}
 
 	/** Remove the `.part` and, when it was already renamed into place, the data file: an abandoned export leaves neither. */
@@ -410,6 +414,8 @@ export async function archiveIndex(source: IndexArchiveSource, options: IndexArc
 	const maxBytes = options.maxBytes ?? DEFAULT_ARCHIVE_MAX_BYTES;
 	const snapshot = snapshotName(startedAt);
 	const dir = join(outDir, snapshot);
+	// The one place a mode is set before a rename; injectable so a test can make it fail on a chosen file.
+	const chmod = options.chmod ?? chmodSync;
 	// A killed earlier run (no catch ran) leaves a manifest-less directory; sweep those, and only those, and say so.
 	const swept = sweepStaleSnapshots(outDir, startedAt, Math.max(STALE_SNAPSHOT_MS, 2 * (options.maxSeconds ?? DEFAULT_ARCHIVE_MAX_SECONDS) * 1000));
 	if (swept.length > 0) options.onSwept?.(swept);
@@ -431,7 +437,7 @@ export async function archiveIndex(source: IndexArchiveSource, options: IndexArc
 			let written = 0;
 			for (const spec of ARCHIVE_TABLES) {
 				const expected = await withDeadline(reader.count(spec.name), deadline - now(), `${spec.name} count`);
-				const part = new NdjsonPart(dir, `${spec.name}.ndjson`);
+				const part = new NdjsonPart(dir, `${spec.name}.ndjson`, chmod);
 				opened.push(part);
 				const digests = new TableDigests(spec);
 				let rows = 0;
@@ -492,16 +498,20 @@ export async function archiveIndex(source: IndexArchiveSource, options: IndexArc
 			schemaHash: schemaHash(),
 			tables: manifestTables,
 		};
+		// Every fallible step but the last happens before the manifest exists: modes are set on the `.part` files
+		// (and created with them), so once the manifest rename succeeds nothing can fail and leave a published,
+		// half-removed snapshot.
 		for (const part of opened) part.commit();
-		// Last: its presence means every data file above is complete.
 		const manifestPart = join(dir, `${MANIFEST_FILE}.part`);
 		writeFileSync(manifestPart, `${JSON.stringify(manifest, null, "\t")}\n`, { mode: PRIVATE_FILE_MODE });
+		chmod(manifestPart, PRIVATE_FILE_MODE);
+		// Last: its presence means every data file above is complete.
 		renameSync(manifestPart, join(dir, MANIFEST_FILE));
-		chmodSync(join(dir, MANIFEST_FILE), PRIVATE_FILE_MODE);
 		return manifest;
 	} catch (cause) {
-		// Everything this run created, committed or not: a failure after the renames
-		// (the manifest write, a full disk) must not leave manifest-less data files.
+		// The manifest is the publish marker, so it goes first: whatever else fails to be removed, nothing
+		// that remains can be mistaken for a complete archive. Removal failures are not thrown over the cause.
+		quietly(() => rmSync(join(dir, MANIFEST_FILE), { force: true }));
 		for (const part of opened) quietly(() => part.discard());
 		quietly(() => rmSync(join(dir, `${MANIFEST_FILE}.part`), { force: true, recursive: true }));
 		quietly(() => rmdirSync(dir));

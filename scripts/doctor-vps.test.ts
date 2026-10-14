@@ -28,6 +28,8 @@ import {
 	humanBytes,
 	NESTED_SCAN_ENTRIES,
 	nestedNewest,
+	realScanFs,
+	type ScanFs,
 	type IoEvidence,
 	parseAuditStat,
 	parseDu,
@@ -296,60 +298,114 @@ describe("state directory, journal and audit rows", () => {
 	});
 
 	describe("a directory's age is the newest mtime inside it", () => {
-		function findHost(nested: string) {
-			const calls: string[][] = [];
+		interface FakeEntry {
+			name: string;
+			isDir: boolean;
+			mtime: number;
+		}
+		/** A tree of directories by path; `reads` counts every entry a scan pulls out of any directory, `opens` every directory opened. */
+		function fakeFs(tree: Record<string, FakeEntry[]>) {
+			const counters = { reads: 0, opens: [] as string[] };
+			const mtimes: Record<string, number> = {};
+			for (const [dir, entries] of Object.entries(tree)) for (const e of entries) mtimes[`${dir}/${e.name}`] = e.mtime;
+			const scan: ScanFs = {
+				open(path) {
+					counters.opens.push(path);
+					const entries = tree[path];
+					if (entries === undefined) return null;
+					let at = 0;
+					return {
+						next() {
+							const entry = entries[at];
+							if (entry === undefined) return null;
+							at += 1;
+							counters.reads += 1;
+							return { name: entry.name, isDir: entry.isDir };
+						},
+						close() {},
+					};
+				},
+				mtime: (path) => mtimes[path] ?? null,
+			};
+			return { scan, counters };
+		}
+		const OLD = NOW - 90 * DAY;
+		const file = (name: string, mtime: number): FakeEntry => ({ name, isDir: false, mtime });
+
+		test("nestedNewest takes the freshest child over the directory's own old mtime, at depth 2 and no deeper", () => {
+			const { scan, counters } = fakeFs({
+				"/d": [file("a", OLD), { name: "sub", isDir: true, mtime: OLD }],
+				"/d/sub": [file("b", NOW - 120), { name: "deep", isDir: true, mtime: OLD }],
+				"/d/sub/deep": [file("too-deep", NOW - 1)],
+			});
+			expect(nestedNewest(scan, "/d", OLD)).toEqual({ mtime: NOW - 120, cut: false });
+			expect(counters.opens).toEqual(["/d", "/d/sub"]);
+		});
+
+		test("a directory of 5000 entries is scanned for at most 200 entries and marked incomplete", () => {
+			const big = Array.from({ length: 5000 }, (_, i) => file(`f${i}`, i < 200 ? OLD : NOW - 5));
+			const { scan, counters } = fakeFs({ "/big": big });
+			expect(nestedNewest(scan, "/big", OLD)).toEqual({ mtime: OLD, cut: true });
+			// 200 visited plus the one extra read that proves there is more; never the other 4799.
+			expect(counters.reads).toBeLessThanOrEqual(NESTED_SCAN_ENTRIES + 1);
+		});
+
+		test("the budget is shared across levels: many small subdirectories also stop at 200 visited entries", () => {
+			const tree: Record<string, FakeEntry[]> = { "/m": Array.from({ length: 100 }, (_, i) => ({ name: `s${i}`, isDir: true, mtime: OLD })) };
+			for (let i = 0; i < 100; i += 1) tree[`/m/s${i}`] = Array.from({ length: 50 }, (_, k) => file(`f${k}`, OLD));
+			const { scan, counters } = fakeFs(tree);
+			expect(nestedNewest(scan, "/m", OLD).cut).toBe(true);
+			expect(counters.reads).toBeLessThanOrEqual(NESTED_SCAN_ENTRIES + 2);
+			expect(counters.opens.length).toBeLessThan(100);
+		});
+
+		test("a small directory is scanned fully and not marked incomplete, including exactly 200 entries", () => {
+			const small = fakeFs({ "/s": [file("a", OLD), file("b", NOW - 30)] });
+			expect(nestedNewest(small.scan, "/s", OLD)).toEqual({ mtime: NOW - 30, cut: false });
+			expect(small.counters.reads).toBe(2);
+			const exact = fakeFs({ "/e": Array.from({ length: NESTED_SCAN_ENTRIES }, (_, i) => file(`f${i}`, OLD)) });
+			expect(nestedNewest(exact.scan, "/e", OLD)).toEqual({ mtime: OLD, cut: false });
+		});
+
+		test("an unreadable directory leaves the directory's own mtime", () => {
+			expect(nestedNewest(fakeFs({}).scan, "/gone", 123)).toEqual({ mtime: 123, cut: false });
+		});
+
+		test("the real filesystem scan reads a scratch directory and sees its newest file", () => {
+			const dir = mkdtempSync(join(tmpdir(), "doctor-vps-scan-"));
+			try {
+				mkdirSync(join(dir, "sub"));
+				writeFileSync(join(dir, "sub", "fresh.txt"), "x");
+				const seen = nestedNewest(realScanFs, dir, 1);
+				expect(seen.cut).toBe(false);
+				expect(seen.mtime).toBeGreaterThan(1_000_000_000);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
+		test("end to end: an old baseline directory with a fresh file inside is not would-reclaim; with nothing fresh it is", () => {
 			const host: Host = {
 				run(argv) {
-					calls.push([...argv]);
-					return { code: 0, out: nested };
+					if (argv[0] === "find") {
+						return { code: 0, out: `/var/lib/substrate/phase6-baseline\t${OLD}.0\td\n/var/lib/substrate/other\t${OLD}.0\td\n` };
+					}
+					if (argv[0] === "du") return { code: 0, out: argv.slice(4).map((p) => `${100 * MIB}\t${p}\n`).join("") };
+					return null;
 				},
 				readText: () => null,
 				sleep: async () => {},
 				now: () => NOW,
 			};
-			return { host, calls };
-		}
-
-		test("nestedNewest takes the freshest child over the directory's own old mtime, at depth 2", () => {
-			const { host, calls } = findHost(`${NOW - 90 * DAY}.0\n${NOW - 90 * DAY}.0\n${NOW - 120}.5\n`);
-			expect(nestedNewest(host, "/var/lib/substrate/phase5-baseline", NOW - 90 * DAY)).toEqual({ mtime: NOW - 120 + 0.5, cut: false });
-			expect(calls).toEqual([["find", "/var/lib/substrate/phase5-baseline", "-maxdepth", "2", "-printf", "%T@\\n"]]);
-		});
-
-		test("more than 200 entries sets cut and reads only the first 200", () => {
-			const lines = Array.from({ length: 250 }, (_, i) => `${i < 200 ? NOW - 90 * DAY : NOW - 5}.0`).join("\n");
-			const { host } = findHost(`${lines}\n`);
-			expect(nestedNewest(host, "/x", NOW - 90 * DAY)).toEqual({ mtime: NOW - 90 * DAY, cut: true });
-			const exact = findHost(`${Array(NESTED_SCAN_ENTRIES).fill(`${NOW - 90 * DAY}.0`).join("\n")}\n`);
-			expect(nestedNewest(exact.host, "/x", NOW - 90 * DAY).cut).toBe(false);
-		});
-
-		test("garbage lines and a failed find leave the directory's own mtime", () => {
-			expect(nestedNewest(findHost("not a number\n\n").host, "/x", 123)).toEqual({ mtime: 123, cut: false });
-			const failing: Host = { run: () => null, readText: () => null, sleep: async () => {}, now: () => NOW };
-			expect(nestedNewest(failing, "/x", 123)).toEqual({ mtime: 123, cut: false });
-		});
-
-		test("end to end: an old baseline directory with a fresh file inside is not would-reclaim; with nothing fresh it is", () => {
-			function host(freshInside: boolean): Host {
-				return {
-					run(argv) {
-						if (argv[0] === "find" && argv[1] === "/var/lib/substrate") {
-							return { code: 0, out: `/var/lib/substrate/phase6-baseline\t${NOW - 90 * DAY}.0\td\n/var/lib/substrate/other\t${NOW - 90 * DAY}.0\td\n` };
-						}
-						if (argv[0] === "find") return { code: 0, out: `${NOW - 90 * DAY}.0\n${freshInside ? `${NOW - 30}.0` : `${NOW - 91 * DAY}.0`}\n` };
-						if (argv[0] === "du") return { code: 0, out: argv.slice(4).map((p) => `${100 * MIB}\t${p}\n`).join("") };
-						return null;
-					},
-					readText: () => null,
-					sleep: async () => {},
-					now: () => NOW,
-				};
-			}
+			const inside = (fresh: boolean): ScanFs =>
+				fakeFs({
+					"/var/lib/substrate/phase6-baseline": [file("f", fresh ? NOW - 30 : OLD - DAY)],
+					"/var/lib/substrate/other": [file("g", OLD)],
+				}).scan;
 			const guard = { ...GUARD, stateMaxBytes: MIB };
-			const fresh = gatherDiskGuardrails(host(true), guard);
+			const fresh = gatherDiskGuardrails(host, guard, inside(true));
 			expect(fresh.filter((r) => r.check.startsWith("would-reclaim state"))).toEqual([]);
-			const stale = gatherDiskGuardrails(host(false), guard);
+			const stale = gatherDiskGuardrails(host, guard, inside(false));
 			// `other` is an unknown owner: never proposed, only the baseline directory is.
 			expect(stale.filter((r) => r.check.startsWith("would-reclaim state")).map((r) => r.check)).toEqual(["would-reclaim state phase6-baseline"]);
 			expect(stale.find((r) => r.check === "state child other")?.hint).toContain("unknown owner");

@@ -4,13 +4,16 @@
  * health and SLO surfaces and the tune's default. Scratch directories only.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { INDEX_ARCHIVE_AGE_METRIC, MetricRegistry, SubstrateInstruments } from "@substrate/observability";
 import { createObservability } from "./observe.ts";
 import { loadConfig } from "./config.ts";
 import { IndexArchiveWatch, evaluateIndexArchiveSlo } from "./index-archive-watch.ts";
+import { ARCHIVE_TABLES, ARCHIVE_TABLE_NAMES } from "./index-archive-spec.ts";
+import { archiveIndex } from "./index-archive.ts";
+import type { IndexSnapshotReader } from "./index-store.ts";
 import { IndexStore } from "./index-store.ts";
 import { Substrate } from "./service.ts";
 
@@ -22,9 +25,16 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
+/** A snapshot directory; with a time it carries a manifest that lists, and a directory that holds, every table's data file. */
 function snapshot(name: string, createdAt: string | null, kind = "index-archive"): void {
 	mkdirSync(join(dir, name), { recursive: true });
-	if (createdAt !== null) writeFileSync(join(dir, name, "manifest.json"), JSON.stringify({ kind, createdAt }));
+	if (createdAt === null) return;
+	const tables: Record<string, { file: string; bytes: number }> = {};
+	for (const table of ARCHIVE_TABLE_NAMES) {
+		writeFileSync(join(dir, name, `${table}.ndjson`), "x\n");
+		tables[table] = { file: `${table}.ndjson`, bytes: 2 };
+	}
+	writeFileSync(join(dir, name, "manifest.json"), JSON.stringify({ kind, createdAt, tables }));
 }
 
 describe("IndexArchiveWatch", () => {
@@ -43,6 +53,50 @@ describe("IndexArchiveWatch", () => {
 		writeFileSync(join(dir, "index-20261013T034500Z", "manifest.json"), "{nope");
 		snapshot("index-20261014T034500Z", "2026-10-14T03:45:00.000Z", "something-else");
 		expect((await new IndexArchiveWatch(dir).read(T0)).status?.snapshot).toBe("index-20261012T034500Z");
+	});
+
+	test("a manifest whose data file is missing or the wrong size is not the newest complete archive; the older complete one is", async () => {
+		snapshot("index-20261012T034500Z", "2026-10-12T03:45:00.000Z");
+		snapshot("index-20261013T034500Z", "2026-10-13T03:45:00.000Z");
+		rmSync(join(dir, "index-20261013T034500Z", "memory_entries.ndjson"));
+		snapshot("index-20261014T034500Z", "2026-10-14T03:45:00.000Z");
+		writeFileSync(join(dir, "index-20261014T034500Z", "graph_index.ndjson"), "short");
+		expect((await new IndexArchiveWatch(dir).read(T0)).status?.snapshot).toBe("index-20261012T034500Z");
+		// A manifest that omits a table, or names a different file for it, is not complete either.
+		snapshot("index-20261015T034500Z", "2026-10-15T03:45:00.000Z");
+		const manifestPath = join(dir, "index-20261015T034500Z", "manifest.json");
+		const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { tables: Record<string, unknown> };
+		delete manifest.tables.graph_steps;
+		writeFileSync(manifestPath, JSON.stringify(manifest));
+		expect((await new IndexArchiveWatch(dir).read(T0)).status?.snapshot).toBe("index-20261012T034500Z");
+	});
+
+	test("an archive that failed while its modes were being set leaves no manifest, and the watch reports no archive", async () => {
+		const out = mkdtempSync(join(tmpdir(), "index-archive-watch-run-"));
+		try {
+			const sizes = Object.fromEntries(ARCHIVE_TABLES.map((spec) => [spec.name, 0]));
+			const source = { withExportSnapshot: async <T>(work: (reader: IndexSnapshotReader) => Promise<T>): Promise<T> => work({ serverVersion: async () => "16", count: async (table) => sizes[table] ?? 0, page: async () => [] }) };
+			for (const failing of ["manifest.json.part", "graph_edges.ndjson.part"]) {
+				await expect(
+					archiveIndex(source, {
+						outDir: out,
+						cwd: dir,
+						dev: (path) => (path === "/" ? 1 : path === "/opt/agent-substrate" ? 3 : 2),
+						df: () => "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/x 999999999 1 999999999 1% /mnt\n",
+						minFreeGb: 5,
+						now: () => T0,
+						chmod: (path) => {
+							if (path.endsWith(failing)) throw new Error("EPERM");
+						},
+					}),
+				).rejects.toThrow("EPERM");
+				// Nothing is left: no manifest, no data files, no directory.
+				expect(readdirSync(out)).toEqual([]);
+				expect((await new IndexArchiveWatch(out).read(T0)).status?.snapshot).toBeNull();
+			}
+		} finally {
+			rmSync(out, { recursive: true, force: true });
+		}
 	});
 
 	test("an empty directory reads as no archive; an unreadable one as null with the error code only", async () => {

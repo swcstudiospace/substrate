@@ -11,6 +11,7 @@
  *
  * Imports from `doctor-runtime.ts` are types only: that module imports this one.
  */
+import { lstatSync, opendirSync } from "node:fs";
 import type { Host, Row, Status } from "./doctor-runtime.ts";
 
 // ── Shared small helpers ─────────────────────────────────────────────────────
@@ -483,25 +484,90 @@ function releaseUsage(host: Host, root: string): ReleaseUsage {
 export const NESTED_SCAN_DEPTH = 2;
 export const NESTED_SCAN_ENTRIES = 200;
 
-/**
- * Newest mtime (epoch seconds) of a directory and what is inside it, to depth NESTED_SCAN_DEPTH. Only the
- * first NESTED_SCAN_ENTRIES lines are read; more than that sets `cut`, and the caller then treats the age
- * as unprovable. A directory's own mtime changes only when an entry directly in it is added or removed,
- * so it can stay old while files inside are written every minute.
- */
-export function nestedNewest(host: Host, dir: string, ownMtime: number | null): { mtime: number | null; cut: boolean } {
-	const out = runOut(host, ["find", dir, "-maxdepth", String(NESTED_SCAN_DEPTH), "-printf", "%T@\\n"]);
-	if (out === null) return { mtime: ownMtime, cut: false };
-	const lines = out.split("\n").filter((line) => line !== "");
-	let newest = ownMtime;
-	for (const line of lines.slice(0, NESTED_SCAN_ENTRIES)) {
-		const seconds = /^\d{1,12}(?:\.\d+)?$/.test(line) ? Number(line) : Number.NaN;
-		if (Number.isFinite(seconds) && (newest === null || seconds > newest)) newest = seconds;
-	}
-	return { mtime: newest, cut: lines.length > NESTED_SCAN_ENTRIES };
+/** A lazily read directory: `next` yields one entry at a time, so a caller can stop without listing the rest. */
+export interface ScanDir {
+	next(): { name: string; isDir: boolean } | null;
+	close(): void;
 }
 
-function stateChildren(host: Host, stateDir: string): { children: StateChild[]; auditPaths: string[]; notMeasured: number } {
+/** The filesystem the nested scan walks. Injectable so tests count every entry it reads. */
+export interface ScanFs {
+	/** Null when the directory cannot be opened. */
+	open(path: string): ScanDir | null;
+	/** Epoch seconds of the entry's own mtime (not following links), or null. */
+	mtime(path: string): number | null;
+}
+
+/** `node:fs` `opendirSync` / `lstatSync`: no subprocess, entries read one at a time. */
+export const realScanFs: ScanFs = {
+	open(path) {
+		try {
+			const dir = opendirSync(path);
+			return {
+				next() {
+					const entry = dir.readSync();
+					return entry === null ? null : { name: entry.name, isDir: entry.isDirectory() };
+				},
+				close() {
+					try {
+						dir.closeSync();
+					} catch {
+						// Already closed.
+					}
+				},
+			};
+		} catch {
+			return null;
+		}
+	},
+	mtime(path) {
+		try {
+			return lstatSync(path).mtimeMs / 1000;
+		} catch {
+			return null;
+		}
+	},
+};
+
+/**
+ * Newest mtime (epoch seconds) of a directory and what is inside it, to depth NESTED_SCAN_DEPTH. The walk
+ * itself is bounded: it visits at most NESTED_SCAN_ENTRIES entries, reading each directory lazily, and
+ * stops the moment one more entry exists beyond that, so work and memory do not grow with the directory
+ * (a counter, not wall time, is the bound). Stopping early sets `cut`, and the caller then treats the age
+ * as a floor it cannot prove. Links are not followed. A directory's own mtime changes only when an entry
+ * directly in it is added or removed, so it can stay old while files inside are written every minute.
+ */
+export function nestedNewest(scan: ScanFs, dir: string, ownMtime: number | null): { mtime: number | null; cut: boolean } {
+	let newest = ownMtime;
+	let visited = 0;
+	let cut = false;
+	const walk = (path: string, depth: number): void => {
+		const handle = scan.open(path);
+		if (handle === null) return;
+		try {
+			for (let entry = handle.next(); entry !== null; entry = handle.next()) {
+				if (visited >= NESTED_SCAN_ENTRIES) {
+					cut = true;
+					return;
+				}
+				visited += 1;
+				const child = `${path}/${entry.name}`;
+				const seconds = scan.mtime(child);
+				if (seconds !== null && Number.isFinite(seconds) && (newest === null || seconds > newest)) newest = seconds;
+				if (entry.isDir && depth < NESTED_SCAN_DEPTH) {
+					walk(child, depth + 1);
+					if (cut) return;
+				}
+			}
+		} finally {
+			handle.close();
+		}
+	};
+	walk(dir, 1);
+	return { mtime: newest, cut };
+}
+
+function stateChildren(host: Host, stateDir: string, scan: ScanFs): { children: StateChild[]; auditPaths: string[]; notMeasured: number } {
 	const found = runOut(host, ["find", stateDir, "-mindepth", "1", "-maxdepth", "1", "-printf", "%p\\t%T@\\t%y\\n"]);
 	if (found === null) return { children: [], auditPaths: [], notMeasured: 0 };
 	const listed: Array<{ path: string; type: string; mtime: number | null }> = [];
@@ -519,7 +585,7 @@ function stateChildren(host: Host, stateDir: string): { children: StateChild[]; 
 	const children = slice.flatMap((e) => {
 		const size = bytes.get(e.path);
 		if (size === undefined) return [];
-		const nested = e.type === "d" ? nestedNewest(host, e.path, e.mtime) : { mtime: e.mtime, cut: false };
+		const nested = e.type === "d" ? nestedNewest(scan, e.path, e.mtime) : { mtime: e.mtime, cut: false };
 		return [{ name: e.path.slice(stateDir.length).replace(/^\/+/, ""), type: e.type, bytes: size, mtime: nested.mtime, ...(nested.cut ? { ageCut: true } : {}) }];
 	});
 	return {
@@ -534,10 +600,10 @@ function stateChildren(host: Host, stateDir: string): { children: StateChild[]; 
  * through the doctor's host; a command that is missing or fails makes its rows
  * `unknown`, never a drift. Report-only: no row here can fail the run.
  */
-export function gatherDiskGuardrails(host: Host, g: DiskGuardrails): Row[] {
+export function gatherDiskGuardrails(host: Host, g: DiskGuardrails, scan: ScanFs = realScanFs): Row[] {
 	const rows: Row[] = [];
 	rows.push(...compareReleases(releaseUsage(host, g.releaseRoot), g.releaseMaxBytes, `${g.releaseRoot}/releases`));
-	const { children, auditPaths, notMeasured } = stateChildren(host, g.stateDir);
+	const { children, auditPaths, notMeasured } = stateChildren(host, g.stateDir, scan);
 	rows.push(...compareState(children, g.stateMaxBytes, host.now(), g.stateDir, notMeasured));
 	const journal = runOut(host, ["journalctl", "--disk-usage"]);
 	rows.push(...compareJournal(journal === null ? null : parseJournalUsage(journal), g.journalMaxBytes));
