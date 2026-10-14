@@ -50,6 +50,8 @@ export class FakeStore implements MemoryStore {
 	failFinish: string | null = null;
 	/** Makes the read throw, which must never be read as "the row is not there". */
 	failReadEntry: string | null = null;
+	/** A source fill that the store declines, so the gate cannot report it as saved. */
+	failAttachSource = false;
 	/**
 	 * Makes resolving a parked proposal throw, after the entry has committed.
 	 *
@@ -275,6 +277,16 @@ export class FakeStore implements MemoryStore {
 		return this.rows.get(id)?.entry ?? null;
 	}
 
+	async attachSource(id: string, sourceEvent: string): Promise<MemoryEntry | null> {
+		if (this.failAttachSource) return null;
+		const row = this.rows.get(id);
+		if (!row) return null;
+		const current = row.entry.source_event ?? null;
+		if (current !== null && current !== sourceEvent) return null;
+		if (current === null) row.entry = { ...row.entry, source_event: sourceEvent };
+		return row.entry;
+	}
+
 	async quarantineEntry(row: NewMemoryEntry & { reason: QuarantineReason; detail: string }): Promise<string> {
 		const existing = this.quarantined.find((held) => held.entry_hash === row.entry_hash);
 		if (existing) return existing.id;
@@ -385,6 +397,154 @@ describe("denied — default-deny RBAC", () => {
 
 	test("an empty entry is a denial", async () => {
 		expect((await write({ text: "   " })).reason).toBe("text.empty");
+	});
+
+	test("a title-only lesson is a denial and a lesson with a fact is stored", async () => {
+		const empty = await write({ subject: "lesson:v1.3/session/retry-budget", text: "Retry budget" });
+		expect(empty.outcome).toBe("denied");
+		expect(empty.reason).toBe("lesson.empty");
+		expect(store.entries()).toEqual([]);
+
+		const headed = await write({
+			subject: "lesson:v1.3/session/lease-epochs",
+			text: "[lessonbank]\nmilestone: v1.3\nphase: session\n\n",
+		});
+		expect(headed.reason).toBe("lesson.empty");
+		expect(store.entries()).toEqual([]);
+
+		const stored = await write({
+			subject: "lesson:v1.3/session/lease-epochs",
+			text: "[lessonbank]\nmilestone: v1.3\nphase: session\n\nLease epochs fence stale holders.",
+			source_event: "session:sess-1",
+			session_id: "sess-1",
+		});
+		expect(stored.outcome).toBe("accepted");
+		expect(stored.verified_persisted).toBe(true);
+		expect(stored.entry?.text).toContain("Lease epochs fence stale holders.");
+		expect(stored.entry?.session_id).toBe("sess-1");
+	});
+
+	test("a short sentence is stored, and punctuation or a title is not", async () => {
+		for (const text of [".", "TODO:", "Retry budget."]) {
+			const refused = await write({
+				subject: "lesson:v1.3/session/not-a-fact",
+				text,
+				source_event: "session:sess-marker",
+			});
+			expect(refused.outcome).toBe("denied");
+			expect(refused.reason).toBe("lesson.empty");
+		}
+		expect(store.entries()).toEqual([]);
+
+		const short = await write({
+			subject: "lesson:v1.3/session/cache-disabled",
+			text: "The cache is disabled",
+			source_event: "session:sess-short",
+			session_id: "sess-short",
+		});
+		expect(short.outcome).toBe("accepted");
+		expect(short.verified_persisted).toBe(true);
+		expect(short.entry?.text).toBe("The cache is disabled");
+	});
+
+	test("a secret-only lesson is not stored, and a lesson with no source is not stored", async () => {
+		const secret = `sk-ant-api03-${"e".repeat(40)}`;
+		const redacted = await write({
+			subject: "lesson:v1.3/session/secret-only",
+			text: secret,
+			source_event: "session:sess-secret",
+			session_id: "sess-secret",
+		});
+		expect(redacted.outcome).toBe("denied");
+		expect(redacted.reason).toBe("lesson.empty");
+		expect(store.entries()).toEqual([]);
+		expect(store.quarantined).toEqual([]);
+		expect(JSON.stringify(redacted)).not.toContain(secret);
+
+		const unsourced = await write({
+			subject: "lesson:v1.3/session/lease-epochs",
+			text: "Lease epochs fence stale holders from releasing a lease.",
+		});
+		expect(unsourced.outcome).toBe("denied");
+		expect(unsourced.reason).toBe("lesson.unsourced");
+		expect(store.entries()).toEqual([]);
+
+		const fromSession = await write({
+			subject: "lesson:v1.3/session/lease-epochs",
+			text: "Lease epochs fence stale holders from releasing a lease.",
+			session_id: "sess-2",
+		});
+		expect(fromSession.outcome).toBe("accepted");
+		expect(fromSession.entry?.source_event).toBe("session:sess-2");
+		expect(fromSession.entry?.text).toContain("Lease epochs fence stale holders");
+
+		const digest = await write({
+			subject: "lesson-digest:v1.3",
+			text: "[lessonbankdigest]\nmilestone: v1.3\n\nMilestone v1.3 rolls up the lease lessons.",
+		});
+		expect(digest.reason).not.toBe("lesson.empty");
+		expect(digest.outcome).toBe("accepted");
+	});
+
+	test("a later source on the same body replays the stored row", async () => {
+		const first = await write({ text: "hermes finished n2 with the lease held", idempotency_key: "k-source" });
+		expect(first.outcome).toBe("accepted");
+		const again = await write({
+			text: "hermes finished n2 with the lease held",
+			idempotency_key: "k-source",
+			source_event: "session:sess-old",
+		});
+		expect(again.outcome).toBe("accepted");
+		expect(again.reason).toBe("idempotent.replay");
+		expect(again.entry?.id).toBe(first.entry?.id);
+		expect(again.entry?.source_event).toBe("session:sess-old");
+		expect(store.entries()).toHaveLength(1);
+		expect(store.entries()[0]?.source_event).toBe("session:sess-old");
+
+		const repeated = await write({
+			text: "hermes finished n2 with the lease held",
+			idempotency_key: "k-source",
+			source_event: "session:sess-old",
+		});
+		expect(repeated.reason).toBe("idempotent.replay");
+		expect(store.entries()).toHaveLength(1);
+
+		const changed = await write({
+			text: "hermes finished n2 with the lease held",
+			idempotency_key: "k-source",
+			source_event: "session:sess-old",
+			ttl: "30d",
+		});
+		expect(changed.reason).toBe("idempotency.reused");
+		expect(store.entries()).toHaveLength(1);
+	});
+
+	test("a source backfill does not confirm a different trust, and a fill that is not saved is not a success", async () => {
+		const first = await write({ text: "hermes finished n2 with the lease held", idempotency_key: "k-trust" });
+		expect(first.entry?.trust).toBe("agent-claimed");
+		const confirmed = await write({
+			text: "hermes finished n2 with the lease held",
+			idempotency_key: "k-trust",
+			source_event: "session:sess-trust",
+			trust: "human-confirmed",
+			review_token: REVIEW_TOKEN,
+		});
+		expect(confirmed.reason).toBe("idempotency.reused");
+		expect(confirmed.verified_persisted).toBe(false);
+		expect(store.entries()).toHaveLength(1);
+		expect(store.entries()[0]?.trust).toBe("agent-claimed");
+		expect(store.entries()[0]?.source_event).toBeUndefined();
+
+		await write({ text: "hermes finished n2 with the lease held", idempotency_key: "k-save" });
+		store.failAttachSource = true;
+		const unsaved = await write({
+			text: "hermes finished n2 with the lease held",
+			idempotency_key: "k-save",
+			source_event: "session:sess-save",
+		});
+		expect(unsaved.reason).toBe("idempotency.reused");
+		expect(unsaved.verified_persisted).toBe(false);
+		expect(store.entries().find((entry) => entry.idempotency_key === "k-save")?.source_event).toBeUndefined();
 	});
 
 	test("a refusal spends no idempotency key", async () => {

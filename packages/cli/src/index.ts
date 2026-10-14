@@ -581,7 +581,7 @@ switch (command) {
 				"substrate handoff --to S --goal G [--files a,b] [--dod 'x;y'] [--blockers 'z']\n" +
 				"                  [--graph G] [--node N] [--lease L] [--release] [--session I]\n" +
 				"substrate evidence --graph <graph_id> [--format json|html] [--out PATH]\n" +
-				"substrate lessons add|recall|digest|outcome ...   (substrate lessons help)\n" +
+				"substrate lessons add|ingest|recall|digest|outcome ...   (substrate lessons help)\n" +
 				"substrate skills propose --dir PATH [--name N] [--rationale R] [--remove a,b] [--session I] [--graph G]\n" +
 				"                         [--dry-run] [--replace] [--reopen] [--allow-doc-examples pem,jwt]\n" +
 				"substrate skills list [--state approved|proposed|declined|retired|all]\n" +

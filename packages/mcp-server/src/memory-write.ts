@@ -27,6 +27,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { canonicalJson, normalizeIdentifier, sha256Hex } from "./event.ts";
+import { isLessonWrite, lessonWriteIssue } from "./lesson-content.ts";
 import { classify } from "./memory-classify.ts";
 import {
 	conflictKey,
@@ -208,6 +209,15 @@ export interface MemoryStore {
 		{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" | "standing-exists" }
 	>;
 	readEntry(id: string): Promise<MemoryEntry | null>;
+	/**
+	 * Fill `source_event` on a row that has none.
+	 *
+	 * Conditional on the column still being null, so two retries cannot overwrite
+	 * each other's provenance. A row that already holds this same source is
+	 * returned unchanged. Anything else — a different source, or a missing row —
+	 * is null, and the gate must not report that write as saved.
+	 */
+	attachSource?(id: string, sourceEvent: string): Promise<MemoryEntry | null>;
 	/**
 	 * Park a classified write. Idempotent on `entry_hash` — a retried write that is
 	 * quarantined again must return the existing row rather than pile up duplicates
@@ -456,6 +466,14 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	if (!raw) {
 		return refuse("denied", "text.empty", "text is required — an empty memory entry tells the next agent nothing.");
 	}
+	// Judge the text that would be stored. A body that is only a secret redacts
+	// to a label, and that label is not a lesson.
+	const judged = redact(raw);
+	const subjectInput = typeof request.subject === "string" ? request.subject : null;
+	const lessonIssue = lessonWriteIssue(judged, subjectInput);
+	if (lessonIssue) {
+		return refuse("denied", "lesson.empty", `${lessonIssue}. An empty lesson is not stored.`);
+	}
 
 	// ── 2. RBAC, default-deny ──────────────────────────────────────────────────
 	const grant = grantFor(writer, scope, kind, grants);
@@ -479,8 +497,26 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	// Redact before capping, for the reason `normalizeEvent` does: truncating first
 	// can cut a token in half so its own pattern no longer matches.
 	const text = redact(raw).slice(0, MAX_MEMORY_TEXT);
+	// The cap can cut a valid body down to a header. Judge the text that will be stored.
+	const storedIssue = lessonWriteIssue(text, subjectInput);
+	if (storedIssue) {
+		return refuse("denied", "lesson.empty", `${storedIssue}. An empty lesson is not stored.`);
+	}
 	const subject = normalizeSubject(request.subject);
-	const sourceEvent = normalizeIdentifier(request.source_event);
+	let sourceEvent = normalizeIdentifier(request.source_event);
+	const sessionId = normalizeIdentifier(request.session_id);
+	// The memory-bank retain drops a fact that names no source. A lesson without
+	// one would read as saved in the index and never come back from the bank.
+	if (isLessonWrite(judged, subjectInput) && !sourceEvent && sessionId) {
+		sourceEvent = normalizeIdentifier(`session:${sessionId}`);
+	}
+	if (isLessonWrite(judged, subjectInput) && !sourceEvent) {
+		return refuse(
+			"denied",
+			"lesson.unsourced",
+			"A lesson needs source_event or session_id so the memory bank can retain it. Nothing was stored.",
+		);
+	}
 	const graphId = normalizeIdentifier(request.graph_id);
 	const repo = normalizeIdentifier(request.repo);
 	// v1 passes the historical object and nothing else. A null `hv` or `tenant`
@@ -523,6 +559,30 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	const asked = hashVersion === "v2" ? askedV2 : askedV1;
 	const priorEntry = hashVersion === "v2" ? contentV1 : contentV2;
 	const priorAsked = hashVersion === "v2" ? askedV1 : askedV2;
+	// The same ask with no source. A retry that only fills one in has to hash
+	// equal to this, or trust and actor would ride along unrecorded.
+	const askedV1Bare = requestHash({
+		entryHash: contentV1,
+		ttl,
+		trust: request.trust,
+		actor: request.actor,
+		sourceEvent: null,
+		graphId,
+		repo,
+	});
+	const askedV2Bare = requestHash({
+		entryHash: contentV2,
+		ttl,
+		trust: request.trust,
+		actor: request.actor,
+		sourceEvent: null,
+		graphId,
+		repo,
+		hv: HASH_VERSION_MARKER,
+		tenant: HASH_TENANT,
+	});
+	const askedBare = hashVersion === "v2" ? askedV2Bare : askedV1Bare;
+	const priorAskedBare = hashVersion === "v2" ? askedV1Bare : askedV2Bare;
 
 	/**
 	 * The fields every row the gate can write shares; only the target table, the id
@@ -610,7 +670,11 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 		alsoRequestHash: priorAsked,
 	});
 	if (!claim.claimed) {
-		const replayed = await replay(store, key, claim.existing, grant.name, entryHash, asked, priorEntry, priorAsked);
+		const replayed = await replay(store, key, claim.existing, grant.name, entryHash, asked, priorEntry, priorAsked, {
+			sourceEvent,
+			askedBare,
+			priorAskedBare,
+		});
 		// Reconcile the proposal this key's write installed but may not have resolved.
 		//
 		// Resolving is guarded down in the accepted path, deliberately: the entry is
@@ -967,6 +1031,11 @@ async function replay(
 	asked: string,
 	priorEntry: string | null,
 	priorAsked: string | null,
+	current: {
+		sourceEvent: string | null;
+		askedBare: string;
+		priorAskedBare: string | null;
+	},
 ): Promise<Decision> {
 	if (existing.outcome === "in-flight") {
 		// A key held for a *different* ask is spent, not merely busy. No amount of waiting
@@ -1012,15 +1081,40 @@ async function replay(
 	const divergent = existing.request_hash
 		? !digestMatches(existing.request_hash, asked, priorAsked)
 		: entry !== null && !digestMatches(entry.entry_hash, entryHash, priorEntry);
-	if (divergent) return reused(key, grant, entry);
+	// A row stored before source_event was sent can take one on retry. The stored
+	// request hash has to equal this ask with the source removed, so a new trust
+	// or actor is still a different write. The source is written onto the row
+	// before the replay is reported: the retain queue re-reads that column, and
+	// a success that leaves it null drops the lesson as unsourced.
+	const storedSource = entry?.source_event ?? null;
+	const sameExceptSource =
+		existing.request_hash !== null &&
+		digestMatches(existing.request_hash, current.askedBare, current.priorAskedBare);
+	const sourceFill =
+		entry !== null &&
+		sameExceptSource &&
+		current.sourceEvent !== null &&
+		(storedSource === null || storedSource === current.sourceEvent);
+	if (divergent && !sourceFill) return reused(key, grant, entry);
+
+	let recorded = entry;
+	if (sourceFill && entry !== null && storedSource === null && current.sourceEvent !== null) {
+		if (store.attachSource === undefined) return reused(key, grant, entry);
+		const saved = await store.attachSource(entry.id, current.sourceEvent);
+		if (saved === null || (saved.source_event ?? null) !== current.sourceEvent) return reused(key, grant, entry);
+		recorded = saved;
+	}
 
 	// Past the check above, any row there is this request's own content.
-	const verified = entry !== null;
+	const verified = recorded !== null;
+	const filledSource = storedSource === null && (recorded?.source_event ?? null) !== null;
 	return {
 		outcome: "accepted",
 		reason: "idempotent.replay",
 		remedy: verified
-			? "This key was already spent; the entry it wrote is returned unchanged. Nothing was written again."
+			? filledSource
+				? "This key was already spent. Its missing source was recorded on that entry; nothing else was written."
+				: "This key was already spent; the entry it wrote is returned unchanged. Nothing was written again."
 			: // Nothing is in the index under this key, so a fresh key writes one entry rather
 				// than a second. That is only true because the read above proved the absence.
 				"This key was already spent, but the entry it recorded is no longer in the index. Nothing is stored " +
@@ -1030,7 +1124,7 @@ async function replay(
 		idempotency_key: key,
 		deduplicated: true,
 		grant,
-		...(entry ? { entry } : {}),
+		...(recorded ? { entry: recorded } : {}),
 	};
 }
 

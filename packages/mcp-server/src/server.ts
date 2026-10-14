@@ -327,6 +327,25 @@ export function streamRefusal(
  * outside of. Node writes IPv4 remotes as a dotted quad and IPv6 remotes
  * either bare or v4-mapped; a DNS name never appears in `remoteAddress`.
  */
+/** Set by the public nginx vhost only. Local clients never send it, so the anonymous bridge stays on loopback. */
+export const PUBLIC_EDGE_HEADER = "x-substrate-edge";
+
+/**
+ * A request that arrived through the public edge without a surface token.
+ * `GET /healthz` stays open: it carries no lesson or session content.
+ * Every other route needs a bearer even while `SUBSTRATE_ALLOW_ANONYMOUS=1`.
+ */
+export function publicEdgeNeedsBearer(
+	edgeHeader: string | string[] | undefined,
+	method: string | undefined,
+	pathname: string,
+	surface: Surface | null,
+): boolean {
+	const edge = Array.isArray(edgeHeader) ? edgeHeader[0] : edgeHeader;
+	if (edge !== "public" || surface !== null) return false;
+	return !((method ?? "GET") === "GET" && pathname === "/healthz");
+}
+
 export function isLoopbackRemote(remoteAddress: string | undefined): boolean {
 	const address = (remoteAddress ?? "").toLowerCase().replace(/^::ffff:/, "");
 	if (address === "::1") return true;
@@ -646,7 +665,15 @@ export function createHttpServer(
 		// of knowing who used it.
 		// A bearer that names no surface is not an untokened caller. The bridge
 		// accepts the absence of a token; this used to be 401 and still is.
-		if (unmappedBearer(config, authorization) || (!config.allowAnonymous && surface === null)) {
+		// GET /healthz stays open with no bearer: it names the origin and the
+		// store state, and it carries no lesson or session content. A present
+		// bearer that names no surface is still refused above.
+		const openHealth = (req.method ?? "GET") === "GET" && url.pathname === "/healthz";
+		if (
+			unmappedBearer(config, authorization) ||
+			publicEdgeNeedsBearer(req.headers[PUBLIC_EDGE_HEADER], req.method, url.pathname, surface) ||
+			(!openHealth && !config.allowAnonymous && surface === null)
+		) {
 			if (req.method === "POST" && url.pathname === "/events") eventRefusal = "auth";
 			sendJson(res, 401, { error: "unknown or missing bearer token" });
 			return;
@@ -683,6 +710,7 @@ export function createHttpServer(
 						at: nowMs,
 						body: {
 							...health,
+							publicOrigin: config.publicOrigin,
 							// U5-4a: what a replaying client may rely on. It MUST NOT replay against `off` (or a body
 							// without this field); the mode is static config, so the memo cannot make it stale.
 							idempotency: config.eventIdempotency,

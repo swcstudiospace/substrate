@@ -1,13 +1,13 @@
 /**
  * The replay gate against the REAL `substrate-mcp` HTTP handler on a deployment that requires a bearer.
  *
- * The other spool tests use a stub server that serves `/healthz` to anyone. The real server checks the
- * bearer before it routes `/healthz`, so a probe that sends no credential is answered 401 and never learns
- * whether idempotency is on: the spool could never replay in production. These tests start `createHttpServer`
- * with surface tokens configured and anonymous callers disallowed, in front of a duck-typed ledger, and prove
- * that an unauthenticated probe holds as `healthz-auth` (no attempt consumed) while the replay's own credential
- * — explicit, from `SUBSTRATE_TOKEN`, or from the per-surface token file — lets the probe through and the
- * replay is delivered.
+ * The other spool tests use a stub server. The real server leaves GET /healthz open and checks the bearer
+ * on every other route, so a probe that sends no credential learns the idempotency mode and the replay's
+ * POST /events is what answers 401. A present bearer that names no surface is still refused on /healthz.
+ * These tests start `createHttpServer` with surface tokens configured and anonymous callers disallowed, in
+ * front of a duck-typed ledger, and prove that an unauthenticated replay is skipped without an attempt
+ * consumed, that a wrong credential holds as `healthz-auth`, and that the replay's own credential — explicit,
+ * from `SUBSTRATE_TOKEN`, or from the per-surface token file — lets the probe through and the replay is delivered.
  *
  * The server runs in `SUBSTRATE_EVENT_IDEMPOTENCY=accept`, so its own `/healthz` advertises the mode the spool
  * requires and a replay-marked, keyed request takes the real ledger lookup (a duck-typed ledger that finds nothing).
@@ -118,13 +118,26 @@ function depth(): number {
 }
 
 describe("replay against the real server with a bearer required", () => {
-	test("the real server refuses an anonymous /healthz, so a probe without the credential holds as healthz-auth and consumes no attempt", async () => {
+	test("GET /healthz is open, so a probe without a credential learns the mode and /events refuses without consuming an attempt", async () => {
 		const server = await startRealServer();
 		park("anonymous probe");
 
 		const result = await drainEventSpool({ all: true, url: server.url });
 
-		expect(result).toEqual({ status: "held", reason: "healthz-auth", dropped: 0, remaining: expect.any(Number) });
+		expect(result).toEqual({
+			status: "ran",
+			delivered: 0,
+			refused: 0,
+			retried: 0,
+			skipped: 1,
+			dropped: 0,
+			held: "unauthorized",
+			budgetExhausted: false,
+			remaining: 1,
+			readFailed: false,
+			writeFailed: false,
+			pendingUnsaved: false,
+		});
 		expect(server.healthAuth).toEqual([null]);
 		expect(server.written).toEqual([]);
 		expect(new EventSpool({ path: join(stateDir, "event-spool.jsonl") }).list()[0]?.attempts).toBe(1);

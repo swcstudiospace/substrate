@@ -1666,6 +1666,25 @@ export class IndexStore implements MemoryStore {
 		return row ? toMemoryEntry(row) : null;
 	}
 
+	/**
+	 * Record a source on an entry that has none. The retain replay reads this
+	 * column, so a retry that only reports the source leaves the queued lesson
+	 * unsourced. A row that already has this source is unchanged; a different
+	 * source is left alone and reported as not saved.
+	 */
+	async attachSource(id: string, sourceEvent: string): Promise<MemoryEntry | null> {
+		const updated = (await this.sql`
+			update memory_entries
+			set source_event = ${sourceEvent}
+			where id = ${id} and source_event is null
+			returning *`) as Array<Record<string, unknown>>;
+		const row = updated[0];
+		if (row) return toMemoryEntry(row);
+		const current = await this.readEntry(id);
+		if (current && (current.source_event ?? null) === sourceEvent) return current;
+		return null;
+	}
+
 	/** Park a classified write. Idempotent on the content hash. */
 	async quarantineEntry(row: NewMemoryEntry & { reason: QuarantineReason; detail: string }): Promise<string> {
 		const inserted = (await this.sql`

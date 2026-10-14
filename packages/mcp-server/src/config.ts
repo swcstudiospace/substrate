@@ -42,6 +42,11 @@ export interface GreptimeConfig {
 export interface SubstrateConfig {
 	host: string;
 	port: number;
+	/**
+	 * Canonical public origin. The process still binds `host` (loopback).
+	 * nginx terminates TLS for this name and proxies to the loopback port.
+	 */
+	publicOrigin: string;
 	greptime: GreptimeConfig | null;
 	postgresUrl: string | undefined;
 	/**
@@ -654,6 +659,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		leaseTtlSeconds: normalizeTtlSeconds(Number.isFinite(leaseTtl) ? leaseTtl : undefined),
 		host: env.SUBSTRATE_HOST?.trim() || "127.0.0.1",
 		port: Number(env.SUBSTRATE_PORT ?? 7410),
+		publicOrigin: (env.SUBSTRATE_PUBLIC_ORIGIN?.trim() || "https://substrate.swcstudio.space").replace(/\/+$/, ""),
 		greptime: greptimeUrl
 			? {
 					url: greptimeUrl.replace(/\/+$/, ""),

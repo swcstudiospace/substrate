@@ -14,6 +14,7 @@ import {
 	createHttpServer,
 	healthStatus,
 	isLoopbackRemote,
+	publicEdgeNeedsBearer,
 	memoryWriteStatus,
 	memoryWriter,
 	streamRefusal,
@@ -859,6 +860,32 @@ describe("GET /events/stream", () => {
 		expect(String(streamRefusal("omp" as Surface, "10.1.2.3")?.error)).toContain("loopback");
 		expect(streamRefusal("omp" as Surface, "127.9.240.1")).toBeNull();
 		expect(streamRefusal("omp" as Surface, "::1")).toBeNull();
+	});
+
+	test("the public edge requires a bearer except for GET /healthz", () => {
+		expect(publicEdgeNeedsBearer("public", "POST", "/memory", null)).toBe(true);
+		expect(publicEdgeNeedsBearer("public", "GET", "/brief", null)).toBe(true);
+		expect(publicEdgeNeedsBearer("public", "GET", "/healthz", null)).toBe(false);
+		expect(publicEdgeNeedsBearer("public", "GET", "/memory", "omp" as Surface)).toBe(false);
+		expect(publicEdgeNeedsBearer(undefined, "POST", "/memory", null)).toBe(false);
+		expect(publicEdgeNeedsBearer(["public"], "POST", "/events", null)).toBe(true);
+	});
+
+	test("GET /healthz stays open when anonymous callers are refused", async () => {
+		const stub = streamLedger([]);
+		const { get, stop } = await serve(stub, {
+			SUBSTRATE_TOKEN_OMP: "tok-omp",
+			SUBSTRATE_ALLOW_ANONYMOUS: "0",
+		});
+		try {
+			const health = await get("/healthz");
+			expect(health.status).not.toBe(401);
+			const body = (await health.json()) as { publicOrigin?: string };
+			expect(body.publicOrigin).toBe("https://substrate.swcstudio.space");
+			expect((await get("/brief")).status).toBe(401);
+		} finally {
+			await stop();
+		}
 	});
 
 	test("an untokened caller is refused, even on a run that allows anonymous callers", async () => {

@@ -473,11 +473,13 @@ export function resetSpoolReplayState(): void {
  * `greptime: false` (the ledger is down), `eventsWritable: false` or
  * `ledger.writable: false` (reachable but refusing writes) and any non-200
  * answer also hold, so a long ledger outage does not burn attempts. The probe
- * sends a replay credential: a deployment with surface tokens answers
- * `/healthz` 401 before it reads the route. A 401 or 403 is reported as
- * `healthz-auth` and is NEVER cached, so a corrected or rotated token is tried
- * at once; every other answer is cached for `PROBE_TTL_MS`, keyed by URL and a
- * fingerprint of the credential (in memory only, never logged or written).
+ * sends a replay credential. GET /healthz stays open when no bearer is sent, so
+ * an anonymous probe reads the body and the replay's own POST /events is what
+ * refuses. A present bearer that names no surface is answered 401 or 403 before
+ * the route; that is `healthz-auth` and is NEVER cached, so a corrected or
+ * rotated token is tried at once. Every other answer is cached for
+ * `PROBE_TTL_MS`, keyed by URL and a fingerprint of the credential (in memory
+ * only, never logged or written).
  */
 async function probeReplay(base: string, timeoutMs: number, bearer: string): Promise<Probe> {
 	const cacheKey = `${base}|${credentialFingerprint(bearer)}`;

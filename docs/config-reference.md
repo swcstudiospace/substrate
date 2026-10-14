@@ -33,6 +33,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_HOST` | string | 127.0.0.1 | bind address | loopback | mcp-server/config.ts | yes |
 | `SUBSTRATE_PORT` | number | 7410 | port | 7410 | mcp-server/config.ts | yes |
 | `SUBSTRATE_URL` | string | http://127.0.0.1:7410 | base URL | clients use the loopback default; a swarm workspace with it unset is off | cli, projector, scripts/doctor-runtime.ts | yes |
+| `SUBSTRATE_PUBLIC_ORIGIN` | string | https://substrate.swcstudio.space | https origin | https://substrate.swcstudio.space | mcp-server/config.ts | yes |
 | `SUBSTRATE_DESKTOP_SURFACES` | list | none | comma separated known surfaces | nobody may call desktop_run. See `docs/runbooks/desktop.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DESKTOP_DIR` | path | /var/lib/substrate/desktop | absolute path | the default; a relative value is refused with a boot warning. See `docs/runbooks/desktop.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_SKILLS_REPO` | string | swcstudiospace/agent-skills | owner/repo | the production skills library. See `docs/skills-propose.md` | mcp-server/config.ts | yes |
