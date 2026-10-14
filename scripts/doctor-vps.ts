@@ -12,7 +12,7 @@
  * Imports from `doctor-runtime.ts` are types only: that module imports this one.
  */
 import { lstatSync, opendirSync } from "node:fs";
-import type { Host, Row, Status } from "./doctor-runtime.ts";
+import type { Host, Row, RunResult, Status } from "./doctor-runtime.ts";
 
 // ── Shared small helpers ─────────────────────────────────────────────────────
 
@@ -148,12 +148,20 @@ export function compareSliceWeights(
 
 /** The kernel-side evidence, read through the doctor's host. No command is run for the cgroup files. */
 export function gatherIoEvidence(host: Host): IoEvidence {
-	const lsblk = host.run(["lsblk", "-dno", "NAME,SCHED"]);
+	// Each read is guarded: evidence that cannot be read is null (-> `unknown`), never an abort.
+	const read = (path: string): string | null => {
+		try {
+			return host.readText(path);
+		} catch {
+			return null;
+		}
+	};
+	const lsblk = runOut(host, ["lsblk", "-dno", "NAME,SCHED"]);
 	return {
-		rootControllers: host.readText("/sys/fs/cgroup/cgroup.controllers"),
-		sliceIoWeight: host.readText("/sys/fs/cgroup/substrate.slice/io.weight") ?? host.readText("/sys/fs/cgroup/substrate.slice/io.bfq.weight"),
-		costQos: host.readText("/sys/fs/cgroup/io.cost.qos"),
-		schedulers: lsblk !== null && lsblk.code === 0 ? lsblk.out : null,
+		rootControllers: read("/sys/fs/cgroup/cgroup.controllers"),
+		sliceIoWeight: read("/sys/fs/cgroup/substrate.slice/io.weight") ?? read("/sys/fs/cgroup/substrate.slice/io.bfq.weight"),
+		costQos: read("/sys/fs/cgroup/io.cost.qos"),
+		schedulers: lsblk,
 	};
 }
 
@@ -175,6 +183,8 @@ const MAX_DU_PATHS = 64;
 const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
 export interface DiskGuardrails {
+	/** The filesystem the nested state scan walks; the real one when absent. Tests inject one. */
+	scan?: ScanFs;
 	releaseRoot: string;
 	stateDir: string;
 	/** 0 disables the compare (the rows still report). */
@@ -455,7 +465,12 @@ export function compareAudit(files: readonly AuditFile[], nowSeconds: number): R
 }
 
 function runOut(host: Host, argv: readonly string[]): string | null {
-	const result = host.run(argv);
+	let result: RunResult | null;
+	try {
+		result = host.run(argv);
+	} catch {
+		return null;
+	}
 	// du and find exit non-zero when one entry is unreadable and still print the rest.
 	return result === null || (result.code !== 0 && result.out === "") ? null : result.out;
 }
@@ -498,7 +513,11 @@ export interface ScanFs {
 	mtime(path: string): number | null;
 }
 
-/** `node:fs` `opendirSync` / `lstatSync`: no subprocess, entries read one at a time. */
+/**
+ * `node:fs` `opendirSync` / `lstatSync`: no subprocess, entries read one at a time. Every call is
+ * guarded here AND by `nestedNewest`: a directory another process removes between `opendirSync` and
+ * `readSync` throws ENOENT from the read, and that must end the scan of that directory, not the doctor.
+ */
 export const realScanFs: ScanFs = {
 	open(path) {
 		try {
@@ -512,7 +531,7 @@ export const realScanFs: ScanFs = {
 					try {
 						dir.closeSync();
 					} catch {
-						// Already closed.
+						// Already closed or gone.
 					}
 				},
 			};
@@ -542,25 +561,49 @@ export function nestedNewest(scan: ScanFs, dir: string, ownMtime: number | null)
 	let visited = 0;
 	let cut = false;
 	const walk = (path: string, depth: number): void => {
-		const handle = scan.open(path);
-		if (handle === null) return;
+		let handle: ScanDir | null = null;
 		try {
-			for (let entry = handle.next(); entry !== null; entry = handle.next()) {
+			handle = scan.open(path);
+		} catch {
+			handle = null;
+		}
+		if (handle === null) {
+			// Unreadable or vanished: what is inside is unknown, so the age is only a floor.
+			cut = true;
+			return;
+		}
+		try {
+			for (;;) {
+				const entry = handle.next();
+				if (entry === null) return;
 				if (visited >= NESTED_SCAN_ENTRIES) {
 					cut = true;
 					return;
 				}
 				visited += 1;
 				const child = `${path}/${entry.name}`;
-				const seconds = scan.mtime(child);
-				if (seconds !== null && Number.isFinite(seconds) && (newest === null || seconds > newest)) newest = seconds;
+				let seconds: number | null = null;
+				try {
+					seconds = scan.mtime(child);
+				} catch {
+					seconds = null;
+				}
+				if (seconds === null || !Number.isFinite(seconds)) cut = true;
+				else if (newest === null || seconds > newest) newest = seconds;
 				if (entry.isDir && depth < NESTED_SCAN_DEPTH) {
 					walk(child, depth + 1);
 					if (cut) return;
 				}
 			}
+		} catch {
+			// readSync threw (ENOENT after a concurrent removal, EIO, ...): stop this directory, keep the floor.
+			cut = true;
 		} finally {
-			handle.close();
+			try {
+				handle.close();
+			} catch {
+				// A close that fails changes nothing about what was read.
+			}
 		}
 	};
 	walk(dir, 1);
@@ -600,14 +643,37 @@ function stateChildren(host: Host, stateDir: string, scan: ScanFs): { children: 
  * through the doctor's host; a command that is missing or fails makes its rows
  * `unknown`, never a drift. Report-only: no row here can fail the run.
  */
-export function gatherDiskGuardrails(host: Host, g: DiskGuardrails, scan: ScanFs = realScanFs): Row[] {
+export function gatherDiskGuardrails(host: Host, g: DiskGuardrails, scan: ScanFs = g.scan ?? realScanFs): Row[] {
+	// Each section is independent and cannot throw: a vanished release directory, state child or journal
+	// path makes that section's rows `unknown`, and every other row (and the doctor's drift report) survives.
+	const section = (check: string, build: () => Row[]): Row[] => {
+		try {
+			return build();
+		} catch {
+			return [row("disk", check, "unknown", "report only", "n/a", "the read failed unexpectedly (a path vanished mid-scan?); nothing was changed")];
+		}
+	};
 	const rows: Row[] = [];
-	rows.push(...compareReleases(releaseUsage(host, g.releaseRoot), g.releaseMaxBytes, `${g.releaseRoot}/releases`));
-	const { children, auditPaths, notMeasured } = stateChildren(host, g.stateDir, scan);
-	rows.push(...compareState(children, g.stateMaxBytes, host.now(), g.stateDir, notMeasured));
-	const journal = runOut(host, ["journalctl", "--disk-usage"]);
-	rows.push(...compareJournal(journal === null ? null : parseJournalUsage(journal), g.journalMaxBytes));
-	const stat = auditPaths.length === 0 ? null : runOut(host, ["stat", "-c", "%W\t%s\t%n", "--", ...auditPaths]);
-	rows.push(compareAudit(stat === null ? [] : parseAuditStat(stat), host.now()));
+	rows.push(...section("releases unique bytes", () => compareReleases(releaseUsage(host, g.releaseRoot), g.releaseMaxBytes, `${g.releaseRoot}/releases`)));
+	let auditPaths: string[] = [];
+	rows.push(
+		...section(`state ${g.stateDir}`, () => {
+			const state = stateChildren(host, g.stateDir, scan);
+			auditPaths = state.auditPaths;
+			return compareState(state.children, g.stateMaxBytes, host.now(), g.stateDir, state.notMeasured);
+		}),
+	);
+	rows.push(
+		...section("journal size", () => {
+			const journal = runOut(host, ["journalctl", "--disk-usage"]);
+			return compareJournal(journal === null ? null : parseJournalUsage(journal), g.journalMaxBytes);
+		}),
+	);
+	rows.push(
+		...section("audit chain size", () => {
+			const stat = auditPaths.length === 0 ? null : runOut(host, ["stat", "-c", "%W\t%s\t%n", "--", ...auditPaths]);
+			return [compareAudit(stat === null ? [] : parseAuditStat(stat), host.now())];
+		}),
+	);
 	return rows;
 }

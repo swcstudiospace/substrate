@@ -25,6 +25,7 @@ import {
 	type DiskGuardrails,
 	diskGuardrailsFromEnv,
 	gatherDiskGuardrails,
+	gatherIoEvidence,
 	humanBytes,
 	NESTED_SCAN_ENTRIES,
 	nestedNewest,
@@ -367,8 +368,8 @@ describe("state directory, journal and audit rows", () => {
 			expect(nestedNewest(exact.scan, "/e", OLD)).toEqual({ mtime: OLD, cut: false });
 		});
 
-		test("an unreadable directory leaves the directory's own mtime", () => {
-			expect(nestedNewest(fakeFs({}).scan, "/gone", 123)).toEqual({ mtime: 123, cut: false });
+		test("an unreadable directory leaves the directory's own mtime as an incomplete floor", () => {
+			expect(nestedNewest(fakeFs({}).scan, "/gone", 123)).toEqual({ mtime: 123, cut: true });
 		});
 
 		test("the real filesystem scan reads a scratch directory and sees its newest file", () => {
@@ -656,5 +657,69 @@ describe("through gatherRows", () => {
 		expect(guardrailRows.length).toBeGreaterThan(5);
 		expect(guardrailRows.some((r) => r.status === "drift")).toBe(false);
 		expect(withDisk.filter((r) => r.status === "drift").length).toBe(without.filter((r) => r.status === "drift").length);
+	});
+
+	/** A ScanFs whose directories open fine and then throw ENOENT, as one removed by another process does. */
+	function vanishing(where: "read" | "lstat" | "close" | "open"): ScanFs {
+		const enoent = (): never => {
+			throw Object.assign(new Error("ENOENT: no such file or directory"), { code: "ENOENT" });
+		};
+		return {
+			open() {
+				if (where === "open") return enoent();
+				let at = 0;
+				return {
+					next() {
+						if (where === "read") return enoent();
+						at += 1;
+						return at === 1 ? { name: "f", isDir: false } : null;
+					},
+					close() {
+						if (where === "close") enoent();
+					},
+				};
+			},
+			mtime() {
+				return where === "lstat" ? enoent() : NOW - 5;
+			},
+		};
+	}
+
+	test("a state directory that vanishes mid-scan (ENOENT from open, read, lstat or close) never aborts gatherRows: every other row is still returned", async () => {
+		const { host } = diskHost();
+		const base = { minFreeGb: 5, maxSwapPagesPerSecond: 0, envFile: "/etc/substrate/substrate.env" };
+		const reference = await gatherRows(policy, systemctlHost(host), { ...base, disk: { ...GUARD, scan: vanishing("close") } });
+		for (const where of ["open", "read", "lstat", "close"] as const) {
+			const rows = await gatherRows(policy, systemctlHost(host), { ...base, disk: { ...GUARD, stateMaxBytes: MIB, scan: vanishing(where) } });
+			expect(rows.map((r) => r.check)).toEqual(expect.arrayContaining(["journal size", "audit chain size", "state /var/lib/substrate"]));
+			expect(rows.length).toBeGreaterThanOrEqual(reference.length - 2);
+			// Nothing about the unreadable directories is offered for reclaim.
+			if (where !== "close") expect(rows.filter((r) => r.check.startsWith("would-reclaim state"))).toEqual([]);
+		}
+	});
+
+	test("nestedNewest marks the directory incomplete when any scan call throws, and never throws itself", () => {
+		for (const where of ["open", "read", "lstat"] as const) {
+			expect(nestedNewest(vanishing(where), "/d", 7).cut).toBe(true);
+		}
+		// A close that throws loses nothing that was read.
+		expect(nestedNewest(vanishing("close"), "/d", 7)).toEqual({ mtime: NOW - 5, cut: false });
+		// An open that reports null (unreadable) is a floor too, not "fully scanned".
+		expect(nestedNewest({ open: () => null, mtime: () => null }, "/gone", 123)).toEqual({ mtime: 123, cut: true });
+	});
+
+	test("a host whose commands throw leaves every disk section as an unknown row instead of throwing", () => {
+		const exploding: Host = {
+			run() {
+				throw new Error("spawn exploded");
+			},
+			readText: () => null,
+			sleep: async () => {},
+			now: () => NOW,
+		};
+		const rows = gatherDiskGuardrails(exploding, GUARD, vanishing("read"));
+		expect(rows.length).toBeGreaterThanOrEqual(4);
+		expect(rows.every((r) => r.status === "unknown")).toBe(true);
+		expect(gatherIoEvidence(exploding).schedulers).toBeNull();
 	});
 });
