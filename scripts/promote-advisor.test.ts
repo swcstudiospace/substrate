@@ -336,19 +336,16 @@ describe("verdicts and precedence for the cache stale-while-revalidate flag", ()
 });
 
 describe("the manual check still applies when the history says ready", () => {
-	const readyMemory = fixtureOf({
-		"memory.expired": ok("memory.expired", "mode", [{ ago: 100, label: "hidden", value: 5 }], 168),
-		[EXTENDED_COVERAGE_SERIES]: ok(EXTENDED_COVERAGE_SERIES, null, [{ ago: 165, value: 0, count: 1 }], 168),
-	});
+	const readyBudgets = fixtureOf({ "admission.decisions": decisions({ allowed: 990, shadow_limited: 6 }) });
 
 	test("a ready verdict carries the policy's manual check in the JSON and prints it beside the step", async () => {
-		const json = (await run(["--flag", "SUBSTRATE_MEMORY_EXPIRY", "--offline", "f.json", "--json"], { "f.json": readyMemory })).json;
-		const flag = verdictOf(json, "SUBSTRATE_MEMORY_EXPIRY");
+		const json = (await run(["--flag", "SUBSTRATE_BUDGETS", "--offline", "f.json", "--json"], { "f.json": readyBudgets })).json;
+		const flag = verdictOf(json, "SUBSTRATE_BUDGETS");
 		expect(flag.verdict).toBe("ready");
-		expect(flag.manual).toBe(flagByName("SUBSTRATE_MEMORY_EXPIRY")!.policy!.manual!);
-		const text = (await run(["--flag", "SUBSTRATE_MEMORY_EXPIRY", "--offline", "f.json"], { "f.json": readyMemory })).stdout;
+		expect(flag.manual).toBe(flagByName("SUBSTRATE_BUDGETS")!.policy!.manual!);
+		const text = (await run(["--flag", "SUBSTRATE_BUDGETS", "--offline", "f.json"], { "f.json": readyBudgets })).stdout;
 		expect(text).toContain("READY");
-		expect(text).toContain("also check: substrate index sweep (dry-run) lists no kind=decision entries");
+		expect(text).toContain("also check: per surface and class shadow-limited counts");
 		expect(text.indexOf("when ready:")).toBeLessThan(text.indexOf("also check:"));
 		expect(text.indexOf("also check:")).toBeLessThan(text.indexOf("rollback:"));
 	});
@@ -390,9 +387,13 @@ describe("ratio, sum and share criteria with hand-computed boundaries", () => {
 		expect(judgeCriterion(profile, results({ "brief.profile_bytes_saved": saved, "brief.p95": briefs }, "3d"))).toMatchObject({ verdict: "insufficient-data", samples: 29 });
 	});
 
-	test("memory expiry: no served expired entry over a covered 7 d is ready (observed 0); 3 served is a hold; hidden is not counted", () => {
+	test("memory expiry: nothing served is never ready (not observed cannot be told from zero); 3 served is a hold, even from young data", () => {
 		const served = (n: number) => ok("memory.expired", "mode", [{ ago: 100, label: "hidden", value: 5 }, ...(n > 0 ? [{ ago: 50, label: "served", value: n }] : [])], 168);
-		expect(judgeCriterion(expiry, results({ "memory.expired": served(0) }, "7d"))).toMatchObject({ verdict: "ready", observed: 0 });
+		const none = judgeCriterion(expiry, results({ "memory.expired": served(0) }, "7d"));
+		expect(none).toMatchObject({ verdict: "insufficient-data", observed: null });
+		expect(none.detail).toContain("no points recorded");
+		expect(none.detail).toContain("cannot tell not-observed from zero");
+		expect(none.hint).toContain("manual check");
 		expect(judgeCriterion(expiry, results({ "memory.expired": served(3) }, "7d"))).toMatchObject({ verdict: "hold", observed: 3 });
 	});
 
@@ -407,11 +408,13 @@ describe("ratio, sum and share criteria with hand-computed boundaries", () => {
 		expect(result.detail).toContain("covers 1.0 h of the 7d window");
 	});
 
-	test("memory expiry: an extended gauge with a hole is insufficient-data, and one that spans the week lets an empty answer mean zero", () => {
+	test("memory expiry: an extended gauge with a hole is insufficient-data; an empty series is insufficient-data even with full gauge coverage", () => {
 		const empty = ok("memory.expired", "mode", [], 168);
 		const holey = ok(EXTENDED_COVERAGE_SERIES, null, [{ ago: 166, value: 0, count: 1 }, { ago: 20, value: 0, count: 1 }], 168, { fill: false });
-		expect(judgeCriterion(expiry, results({ "memory.expired": empty, [EXTENDED_COVERAGE_SERIES]: holey }, "7d"))).toMatchObject({ verdict: "insufficient-data" });
-		expect(judgeCriterion(expiry, results({ "memory.expired": empty }, "7d"))).toMatchObject({ verdict: "ready", observed: 0 });
+		const gap = judgeCriterion(expiry, results({ "memory.expired": empty, [EXTENDED_COVERAGE_SERIES]: holey }, "7d"));
+		expect(gap.verdict).toBe("insufficient-data");
+		expect(gap.detail).toContain("gap");
+		expect(judgeCriterion(expiry, results({ "memory.expired": empty }, "7d")).detail).toContain("cannot tell");
 	});
 
 	test("an unrecorded extended coverage gauge is series-unavailable with the hint to enable extended", () => {
@@ -426,6 +429,33 @@ describe("ratio, sum and share criteria with hand-computed boundaries", () => {
 			ok("brief.recall", "result", Object.entries(counts).map(([label, value], index) => ({ ago: 70 - index, label, value })), 72);
 		expect(judgeCriterion(include, results({ "brief.recall": counts({ would_include: 40, included: 20, cold: 30, stale: 10 }) }, "3d"))).toMatchObject({ verdict: "ready", observed: 0.6, samples: 100 });
 		expect(judgeCriterion(include, results({ "brief.recall": counts({ would_include: 49, cold: 51 }) }, "3d"))).toMatchObject({ verdict: "hold", observed: 0.49 });
+	});
+
+	test("recall: three days of extended gauge but recall's own series started 3 hours ago is insufficient-data for all three criteria", () => {
+		const own = (series: string, labels: Record<string, number>) =>
+			ok(series, "result", Object.entries(labels).map(([label, value], index) => ({ ago: 3 - index * 0.1, label, value })), 72);
+		const young = results({
+			"brief.recall": own("brief.recall", { would_include: 90, cold: 10 }),
+			"recall.prefetch": own("recall.prefetch", { ok: 150, error: 1 }),
+		}, "3d");
+		for (const criterion of recall) {
+			const result = judgeCriterion(criterion, young);
+			expect({ id: criterion.id, verdict: result.verdict }).toEqual({ id: criterion.id, verdict: "insufficient-data" });
+			expect(result.detail).toContain("started only");
+			expect(result.detail).toContain("it records nothing while the flag is off");
+		}
+	});
+
+	test("recall: own history that starts inside the first 10 % of the window passes; just after it does not", () => {
+		const startingAt = (ago: number) => ok("brief.recall", "result", [{ ago, label: "would_include", value: 80 }, { ago: ago - 1, label: "cold", value: 20 }], 72);
+		// 72 h window: 10 % is 7.2 h, so a first point 65 h ago is inside the allowance and 64 h ago is not.
+		expect(judgeCriterion(recall[0]!, results({ "brief.recall": startingAt(65) }, "3d")).verdict).toBe("ready");
+		expect(judgeCriterion(recall[0]!, results({ "brief.recall": startingAt(64) }, "3d")).verdict).toBe("insufficient-data");
+	});
+
+	test("recall: a young own series with a measured miss is still a hold (only a pass needs the proof)", () => {
+		const young = ok("brief.recall", "result", [{ ago: 3, label: "would_include", value: 10 }, { ago: 2, label: "cold", value: 90 }], 72);
+		expect(judgeCriterion(recall[1]!, results({ "brief.recall": young }, "3d"))).toMatchObject({ verdict: "hold", observed: 0.9 });
 	});
 
 	test("recall cold+stale is strictly under 30 %: exactly 30 of 100 holds, 29 passes", () => {

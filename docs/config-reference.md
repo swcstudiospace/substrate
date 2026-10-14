@@ -313,7 +313,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 
 ## Promotion policies
 
-The policy flags: the value that preserves today's behaviour or only reports (**safe**), the value that makes the policy bite (**enforcing**), the operator's step and the rollback. Code never performs a flip. A flag with evidence is judged by `bun run advisor:promote` against the PROPOSED thresholds in `docs/runbooks/flag-promotion.md`; a flag without evidence has a manual check instead. A flag with BOTH has a manual check that still applies when the advisor says `ready`: the advisor prints it as `also check:` and carries it in its JSON.
+The policy flags: the value that preserves today's behaviour or only reports (**safe**), the value that makes the policy bite (**enforcing**), the operator's step and the rollback. Code never performs a flip. A flag with evidence is judged by `bun run advisor:promote` against the PROPOSED thresholds in `docs/runbooks/flag-promotion.md`; a flag without evidence has a manual check instead. Extended-series criteria are judged only when the extended gauge covers the window AND the policy's own series has been recording for at least 90 % of it (a policy records nothing while its flag is off; a series with no points cannot tell not-observed from zero), as `docs/runbooks/flag-promotion.md` states exactly. A flag with BOTH has a manual check that still applies when the advisor says `ready`: the advisor prints it as `also check:` and carries it in its JSON.
 
 | Flag | Safe | Enforcing | Step | Rollback | Evidence |
 | --- | --- | --- | --- | --- | --- |

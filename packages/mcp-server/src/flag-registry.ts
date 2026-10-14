@@ -365,7 +365,7 @@ export const FLAGS: readonly FlagSpec[] = [
 					window: "7d",
 					needs: "extended",
 					rationale:
-						"PROPOSED. Under report an expired entry is still served (mode=served), so a non-zero count is exactly what enforce would start hiding. The series is not split by memory kind, so any served expired entry holds the flip until the operator has read the sweep dry-run for kind=decision entries; zero over a covered week is the clean case. A counter has no row for an interval with nothing to count, so zero is believed only when extended sampling itself covered the whole window (the extended coverage gauge has a row in every interval); extended history starts when the flag was enabled, never earlier.",
+						"PROPOSED. Under report an expired entry is still served (mode=served), so a non-zero count is exactly what enforce would start hiding. The series is not split by memory kind, so any served expired entry holds the flip until the operator has read the sweep dry-run for kind=decision entries; a count of zero cannot be told from 'not observed', because a counter has no row for an interval with nothing to count, so the advisor reports hold when something was served and insufficient-data otherwise: the decision rests on the manual check. Extended history starts when SUBSTRATE_METRICS_HISTORY_SERIES=extended was enabled, never earlier.",
 					proposed: true,
 				},
 			],

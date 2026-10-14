@@ -47,6 +47,11 @@
  *   criterion the extended gauge `EXTENDED_COVERAGE_SERIES`, because extended
  *   history starts when `SUBSTRATE_METRICS_HISTORY_SERIES=extended` was enabled
  *   and a missing extended counter row before that is absent, not zero.
+ *   For an extended criterion the policy's OWN series must also have its first
+ *   point within the first 10 % of the window (the policy records nothing while
+ *   its flag is off, so the gauge proves sampling, not the policy), and a series
+ *   with no points cannot tell not-observed from zero: `insufficient-data`.
+ *   These block only a pass; a measured miss stays a hold.
  * - A policy's manual check (`also check:`, JSON `manual`) is printed with the
  *   verdict and applies whatever it is, ready included.
  * - The bearer is resolved like the runtime doctor (`doctorBearer`), sent only as
@@ -277,6 +282,20 @@ export function judgeCriterion(evidence: Evidence, results: ReadonlyMap<string, 
 		return unjudged(`${why}${coverageTerm.series} has a ${hours(widest)} gap in the ${evidence.window} window (allowed ${hours(MAX_GAP_FRACTION * windowMs)}): the sampler or the ledger was down, or there was no traffic`, "check the sampler and the ledger plane in /healthz; rerun when the window is continuous");
 	}
 
+	// Extended criteria also need the policy's OWN series to have been producing evidence for the window: it records nothing while the flag is off, so the gauge (which proves sampling) cannot vouch for it. A counter has no row for an empty interval, so only the age of the first point is checked, not gaps. This blocks only a pass: a measured miss stays a hold.
+	let ownBlock: Criterion | null = null;
+	if (evidence.needs === "extended") {
+		const ownTerm = evidence.stat === "share" ? (evidence.denominator ?? { series: evidence.numerator.series }) : evidence.numerator;
+		const ownAnswer = answered.get(ownTerm.series)!;
+		const own = pick(ownAnswer.points, ownTerm);
+		const firstMs = own.reduce((min, point) => Math.min(min, point.tsMs), Number.POSITIVE_INFINITY);
+		if (own.length === 0) {
+			// Nothing to hold on either: the numerator cannot be non-empty when its own population is empty.
+			return unjudged(`${ownTerm.series} has no points recorded in the ${evidence.window} window: cannot tell not-observed from zero`, "use the manual check (also check:); the history cannot decide this criterion");
+		} else if (firstMs > ownAnswer.toMs - windowMs + (1 - COVERAGE_MIN) * windowMs) {
+			ownBlock = unjudged(`the policy's own series ${ownTerm.series} started only ${hours(ownAnswer.toMs - firstMs)} ago of the ${evidence.window} window (it records nothing while the flag is off; needs ${Math.round(COVERAGE_MIN * 100)} %)`, "let the policy run in its safe mode for the whole window; rerun then");
+		}
+	}
 	const numeratorPoints = pick(answered.get(evidence.numerator.series)!.points, evidence.numerator);
 	const thin = (samples: number): Criterion => unjudged(`${samples} samples in the window, needs ${evidence.minSamples}`, "let it soak in the safe mode; rerun when there is traffic", samples);
 	let observed: number;
@@ -305,6 +324,8 @@ export function judgeCriterion(evidence: Evidence, results: ReadonlyMap<string, 
 		detail = `${numeratorPoints.length} intervals with a count`;
 	}
 	const met = compare(observed, evidence.comparator, evidence.threshold);
+	// A measured miss is a hold whatever the age of the data; only a pass needs the own-series proof.
+	if (met && ownBlock !== null) return { ...ownBlock, samples };
 	return { ...base, verdict: met ? "ready" : "hold", observed, samples, detail, hint: null };
 }
 
