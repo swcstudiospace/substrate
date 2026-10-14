@@ -652,8 +652,14 @@ drops, capped at 500 000 events — a day above the cap refuses to archive rathe
 than count real events as `ingestMissing`. `ts` is collector-supplied, so a
 backdated event's record is *later* than its `ts` and a future-stamped event's is
 *earlier*, by any distance; keying on `event_ts` and not on `ingested_at` finds
-both. `event_id` is not a key, so this is still one scan of `event_ingest` per
-day (what `graphIngest` and `hourLeaves`'s lookback pay too), not one per page.
+both. `event_id` is not a key, so the bulk read is still one scan of
+`event_ingest` per day (what `graphIngest` and `hourLeaves`'s lookback pay too),
+not one per page. An event on a later page whose id is not in the map — its
+record was stored after the map was built, as when a collector backfills the day
+during the export — is looked up by id (`event_id IN (…)`, 500 at a time, under
+the same `event_ts` window) and merged in before anything is counted missing, so
+only an id still absent is `ingestMissing`; a page whose ids are all in the map
+costs no extra statement.
 `hourlyRoots` are
 RFC 6962 roots per *first-ingest* hour over the day's members in
 `(ingested_at, event_id)` order — exactly the anchor job's grouping — and

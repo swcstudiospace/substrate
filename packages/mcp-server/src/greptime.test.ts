@@ -1993,9 +1993,12 @@ describe("exportWindow (uplift-3 N6)", () => {
 	/**
 	 * A server that honours the keyset predicates and the LIMITs, so paging is exercised rather than
 	 * scripted. `filler` adds that many other events' ingest records, all inside the window and all
-	 * ingested before the page's events, so the day's ingest read needs several pages.
+	 * ingested before the page's events, so the day's ingest read needs several pages. `noRecord` are
+	 * events with no ingest record at all (evt_c, a legacy row, by default); `late` are events whose
+	 * record the bulk scan does not return but a lookup by id does — stored after the scan ran.
 	 */
-	function stubWindow(filler = 0): { sql: string[]; served: string[] } {
+	function stubWindow(options: { filler?: number; noRecord?: string[]; late?: string[] } = {}): { sql: string[]; served: string[] } {
+		const { filler = 0, noRecord = ["evt_c"], late = [] } = options;
 		/** Every ingest row the fake returned, as `id@ingested_at`, across all statements. */
 		const served: string[] = [];
 		const { sql } = stubFetch((statement) => {
@@ -2012,7 +2015,7 @@ describe("exportWindow (uplift-3 N6)", () => {
 			if (statement.includes('FROM "event_ingest"')) {
 				// evt_c has no ingest record (a legacy row); evt_a has a retry one second
 				// later; evt_e carries a collector-supplied `ts` a day after it was ingested.
-				const rows: Array<[string, number, number]> = EVENTS.filter((event) => event.id !== "evt_c").map((event) => [
+				const rows: Array<[string, number, number]> = EVENTS.filter((event) => !noRecord.includes(event.id)).map((event) => [
 					event.id,
 					event.id === "evt_e" ? event.ts - 86_400_000 : event.ts + 100,
 					event.ts,
@@ -2022,8 +2025,13 @@ describe("exportWindow (uplift-3 N6)", () => {
 				for (let i = 0; i < filler; i++) rows.push([`fill_${String(i).padStart(4, "0")}`, T1 - 10_000_000 + Math.floor(i / 2), T1]);
 				const tsBound = /"event_ts" >= '([^']+)' AND "event_ts" < '([^']+)'/.exec(statement);
 				const cursor = /\("ingested_at" > '([^']+)' OR \("ingested_at" = '([^']+)' AND "event_id" > '([^']+)'\)\)/.exec(statement);
-				const limit = Number(/LIMIT (\d+)/.exec(statement)?.[1]);
+				const inList = /"event_id" IN \(([^)]*)\)/.exec(statement);
+				const wanted = inList ? [...(inList[1] ?? "").matchAll(/'([^']*)'/g)].map((m) => m[1]) : null;
+				const limit = Number(/LIMIT (\d+)/.exec(statement)?.[1] ?? "100000");
 				const selected = rows
+					// A late record is not there yet for the bulk scan, only for a lookup by id.
+					.filter(([id]) => wanted !== null || !late.includes(id))
+					.filter(([id]) => wanted === null || wanted.includes(id))
 					.filter(([, , eventTs]) => !tsBound || (eventTs >= Date.parse(tsBound[1] ?? "") && eventTs < Date.parse(tsBound[2] ?? "")))
 					.filter(([id, ingestedAt]) => {
 						if (!cursor) return true;
@@ -2086,18 +2094,21 @@ describe("exportWindow (uplift-3 N6)", () => {
 		// evt_e was ingested a day before its `ts`: its record is on the page, with that stamp.
 		expect(page.ingest[3]).toEqual({ event_id: "evt_e", ingested_at: new Date(T3 - 86_400_000).toISOString(), event_ts: new Date(T3).toISOString() });
 		const ingest = sql.filter((s) => s.includes('FROM "event_ingest"'));
-		expect(ingest).toHaveLength(1);
+		// The bulk read, then one bounded lookup for evt_c, which it did not return.
+		expect(ingest).toHaveLength(2);
 		// The window is bounded on `event_ts` (the event's own `ts`); nothing bounds `ingested_at`, and there is no per-id IN scan.
 		expect(ingest[0]).toContain(`"event_ts" >= '${FROM}' AND "event_ts" < '${TO}'`);
 		expect(ingest[0]?.split("WHERE")[1]).not.toContain('"ingested_at" >=');
 		expect(ingest[0]).not.toContain('"event_id" IN (');
+		expect(ingest[1]).toContain('"event_id" IN (');
+		expect(ingest[1]).toContain("'evt_c'");
 		expect(ingest[0]).toContain('ORDER BY "ingested_at" ASC, "event_id" ASC LIMIT 500');
 		expect(() => assertAppendOnly(ingest[0] ?? "")).not.toThrow();
 	});
 
 	test("reads the day's ingest records once for all event pages, not once per page, and pages them through a keyset cursor on the time index", async () => {
 		// 1100 earlier records of other events in the window: three ingest pages of 500, 500 and 100.
-		const { sql, served } = stubWindow(1100);
+		const { sql, served } = stubWindow({ filler: 1100 });
 		const client = new GreptimeClient(config);
 		const perPage: string[][] = [];
 		let after: { ts: string; id: string } | undefined;
@@ -2109,7 +2120,8 @@ describe("exportWindow (uplift-3 N6)", () => {
 		}
 		expect(perPage).toEqual([["evt_a", "evt_b"], ["evt_d"], ["evt_e"]]);
 		const ingest = sql.filter((s) => s.includes('FROM "event_ingest"'));
-		expect(ingest).toHaveLength(3);
+		// Three bulk pages of 500, 500 and 100; page two of events adds one lookup for evt_c, which has no record.
+		expect(ingest).toHaveLength(4);
 		expect(ingest[0]).not.toContain("OR (");
 		// evt_e was ingested a day before its `ts`, so it opens page one and the 500th row is fill_0498.
 		// fill_0498 and fill_0499 share an ingest millisecond: the page boundary splits the tie, and the
@@ -2122,7 +2134,58 @@ describe("exportWindow (uplift-3 N6)", () => {
 
 		// A fresh export of the same window starts again from its first page: the map is re-read, never trusted across runs.
 		await client.exportWindow({ from: FROM, to: TO, limit: 10 });
-		expect(sql.filter((s) => s.includes('FROM "event_ingest"'))).toHaveLength(6);
+		// The three bulk pages, plus one lookup for evt_c — a legacy row with no record anywhere.
+		expect(sql.filter((s) => s.includes('"event_id" IN ('))).toHaveLength(2);
+		expect(sql.filter((s) => s.includes('FROM "event_ingest"'))).toHaveLength(8);
+	});
+
+	test("an event whose ingest record was stored after the day's map was built is found by the bounded fallback lookup, not counted as missing", async () => {
+		// evt_d's record lands after page one built the map: the bulk scan never returns it, an id lookup does.
+		const { sql } = stubWindow({ noRecord: [], late: ["evt_d"] });
+		const client = new GreptimeClient(config);
+		const first = await client.exportWindow({ from: FROM, to: TO, limit: 2 });
+		expect(first.ingest.map((row) => row.event_id)).toEqual(["evt_a", "evt_b"]);
+		expect(sql.filter((s) => s.includes('FROM "event_ingest"'))).toHaveLength(1);
+		const second = await client.exportWindow({ from: FROM, to: TO, after: first.next ?? undefined, limit: 2 });
+		// Both events on page two have a record; without the fallback evt_d would be absent and count as `ingestMissing`.
+		expect(second.ingest.map((row) => row.event_id)).toEqual(["evt_c", "evt_d"]);
+		const lookups = sql.filter((s) => s.includes('FROM "event_ingest"') && s.includes('"event_id" IN ('));
+		expect(lookups).toHaveLength(1);
+		// Only the id the map lacked, under the same `event_ts` window, and append-only.
+		expect(lookups[0]).toContain("'evt_d'");
+		expect(lookups[0]).not.toContain("'evt_c'");
+		expect(lookups[0]).toContain(`"event_ts" >= '${FROM}' AND "event_ts" < '${TO}'`);
+		assertAppendOnly(lookups[0] ?? "");
+		// The merged record is cached: a later page naming evt_d again would not look it up twice.
+		const third = await client.exportWindow({ from: FROM, to: TO, after: second.next ?? undefined, limit: 2 });
+		expect(third.ingest.map((row) => row.event_id)).toEqual(["evt_e"]);
+		expect(sql.filter((s) => s.includes('"event_id" IN ('))).toHaveLength(1);
+	});
+
+	test("an id still absent after the fallback lookup stays missing", async () => {
+		const { sql } = stubWindow({ noRecord: ["evt_c"] });
+		const client = new GreptimeClient(config);
+		const first = await client.exportWindow({ from: FROM, to: TO, limit: 2 });
+		const second = await client.exportWindow({ from: FROM, to: TO, after: first.next ?? undefined, limit: 2 });
+		expect(second.ingest.map((row) => row.event_id)).toEqual(["evt_d"]);
+		const lookups = sql.filter((s) => s.includes('"event_id" IN ('));
+		expect(lookups).toHaveLength(1);
+		expect(lookups[0]).toContain("'evt_c'");
+		expect(lookups[0]).not.toContain("'evt_d'");
+	});
+
+	test("no fallback lookup is issued when every id on the page is already in the map", async () => {
+		const { sql } = stubWindow({ noRecord: [] });
+		const client = new GreptimeClient(config);
+		let after: { ts: string; id: string } | undefined;
+		for (;;) {
+			const page = await client.exportWindow({ from: FROM, to: TO, after, limit: 2 });
+			if (page.next === null) break;
+			after = page.next;
+		}
+		const ingest = sql.filter((s) => s.includes('FROM "event_ingest"'));
+		expect(ingest).toHaveLength(1);
+		expect(ingest[0]).not.toContain('"event_id" IN (');
 	});
 
 	test("refuses a window that is not two ISO instants in order", async () => {

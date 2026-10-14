@@ -1847,7 +1847,11 @@ export class GreptimeClient {
 	 * event's is later than its `ts`, a future-stamped one's far earlier — and
 	 * no clock-skew bound is assumed. `event_id` is not a key, so the read is a
 	 * scan of `event_ingest` once per day (what `graphIngest` and `hourLeaves`'s
-	 * lookback pay too). An event with no record is simply absent from `ingest`;
+	 * lookback pay too). Events on a page whose id is not in that map — a
+	 * record stored after the map was built, e.g. a backfill during the export —
+	 * get a bounded `event_id IN (…)` lookup under the same `event_ts` window and
+	 * are merged in, so only an id still absent is counted by the archive as
+	 * without a record. An event with no record is simply absent from `ingest`;
 	 * the archive counts those. Anchors are read on every page because they are
 	 * a handful of rows and a page is then self-contained.
 	 */
@@ -1876,6 +1880,7 @@ export class GreptimeClient {
 			cache = { window: windowKey, first: await this.readExportIngest(fromMs, toMs) };
 			this.exportIngest = cache;
 		}
+		await this.fillExportIngest(cache.first, events.map((row) => String(row.id)), fromMs, toMs);
 		const ingest: ExportIngestRow[] = [];
 		for (const row of events) {
 			const id = String(row.id);
@@ -1900,16 +1905,58 @@ export class GreptimeClient {
 	}
 
 	/**
+	 * Merge ingest rows into the day's map, the first record by `ingested_at`
+	 * winning. The map is capped at {@link EXPORT_INGEST_CAP} events and a day
+	 * above it throws rather than archiving with records silently missing,
+	 * which would count real events as `ingestMissing` and change the hourly
+	 * roots; the cap applies to the merged map ({@link fillExportIngest} adds
+	 * to it) too.
+	 */
+	private mergeExportIngest(first: Map<string, { ingested_at: number; event_ts: number }>, rows: Array<Record<string, unknown>>): void {
+		for (const row of rows) {
+			const id = String(row.event_id);
+			const ingested_at = epochMsAnyUnit(row.ingested_at);
+			const event_ts = epochMsAnyUnit(row.event_ts);
+			if (!Number.isFinite(ingested_at) || !Number.isFinite(event_ts)) {
+				throw new GreptimeError(`ingest record for ${id} has a time that is not a number`);
+			}
+			const seen = first.get(id);
+			if (seen === undefined && first.size >= EXPORT_INGEST_CAP) {
+				throw new GreptimeError(`the export window holds more than ${EXPORT_INGEST_CAP} ingest records; refusing to archive it with records missing`);
+			}
+			if (!seen || ingested_at < seen.ingested_at) first.set(id, { ingested_at, event_ts });
+		}
+	}
+
+	/**
+	 * Records for page events the day's map does not hold: an event backfilled
+	 * (or its ingest record stored) after the first page built the map. Looked
+	 * up by id in batches of {@link IN_BATCH}, bounded by the same `event_ts`
+	 * window, and merged into the map; an id still absent is genuinely without
+	 * a record. Costs nothing when every id is already in the map.
+	 */
+	private async fillExportIngest(first: Map<string, { ingested_at: number; event_ts: number }>, ids: string[], fromMs: number, toMs: number): Promise<void> {
+		const at = (ms: number): string => this.q(new Date(ms).toISOString());
+		const missing = ids.filter((id) => !first.has(id));
+		for (let i = 0; i < missing.length; i += IN_BATCH) {
+			const batch = missing.slice(i, i + IN_BATCH).map((id) => this.q(id)).join(", ");
+			const rows = await this.sql(
+				`SELECT "event_id", "ingested_at", "event_ts" FROM "event_ingest" WHERE "event_ts" >= ${at(fromMs)} AND "event_ts" < ${at(toMs)} AND "event_id" IN (${batch})`,
+				this.timeoutMs,
+				"export",
+			);
+			this.mergeExportIngest(first, rows);
+		}
+	}
+
+	/**
 	 * Every first ingest record whose `event_ts` falls in `[fromMs, toMs)`,
 	 * keyed by event id, for {@link exportWindow}. `event_ts` is stored verbatim
 	 * from the event's own `ts` (`emit`'s INSERT), so this is exactly the set
 	 * of records of the window's events — a future-stamped or backdated event
 	 * resolves like any other, whatever its `ingested_at`. Read through a
 	 * keyset cursor on the time index, `(ingested_at, event_id)`, in pages of
-	 * {@link MAX_QUERY_LIMIT}; the first record by `ingested_at` wins. The map
-	 * is capped at {@link EXPORT_INGEST_CAP} events and a day above it throws
-	 * rather than archiving with records silently missing, which would count
-	 * real events as `ingestMissing` and change the hourly roots.
+	 * {@link MAX_QUERY_LIMIT}; the first record by `ingested_at` wins.
 	 */
 	private async readExportIngest(fromMs: number, toMs: number): Promise<Map<string, { ingested_at: number; event_ts: number }>> {
 		const at = (ms: number): string => this.q(new Date(ms).toISOString());
@@ -1925,19 +1972,7 @@ export class GreptimeClient {
 				this.timeoutMs,
 				"export",
 			);
-			for (const row of rows) {
-				const id = String(row.event_id);
-				const ingested_at = epochMsAnyUnit(row.ingested_at);
-				const event_ts = epochMsAnyUnit(row.event_ts);
-				if (!Number.isFinite(ingested_at) || !Number.isFinite(event_ts)) {
-					throw new GreptimeError(`ingest record for ${id} has a time that is not a number`);
-				}
-				const seen = first.get(id);
-				if (seen === undefined && first.size >= EXPORT_INGEST_CAP) {
-					throw new GreptimeError(`the export window holds more than ${EXPORT_INGEST_CAP} ingest records; refusing to archive it with records missing`);
-				}
-				if (!seen || ingested_at < seen.ingested_at) first.set(id, { ingested_at, event_ts });
-			}
+			this.mergeExportIngest(first, rows);
 			const last = rows[rows.length - 1];
 			if (rows.length < MAX_QUERY_LIMIT || last === undefined) return first;
 			cursor = { ms: epochMsAnyUnit(last.ingested_at), id: String(last.event_id) };
