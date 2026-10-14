@@ -578,6 +578,14 @@ the client never sends one for this table, and never `DROP`s it.
 | `docs.p95` | histogram | — | ms |
 | `capacity.runway_days` | gauge | — | days, only when the runway is judged |
 
+That is the **`core`** allow-list, the only one unless `SUBSTRATE_METRICS_HISTORY_SERIES=extended`
+(uplift-5 S6, default `core`, an unknown value is `core` and named at boot). `extended` adds
+`cache.operations`, `brief.profile_bytes_saved`, `brief.recall`, `recall.prefetch`, `memory.expired`
+and three gauges (`hindsight.outbox_size`, `hindsight.outbox_oldest_age_s`, `index.archive_age_s`)
+for the promotion evidence and the data-plane dashboards; the series, the row-growth estimate against
+the 14-day TTL and why it is opt-in are in [`dashboards.md`](dashboards.md). With `core` the sampler,
+the rows and the route are exactly those described here.
+
 Counters and histograms are **deltas since the previous sample**, so a row says
 what happened in its interval; `count` is the interval's sample count. A value
 below the previous one is a reset (a restart) and counts as everything since the
@@ -620,7 +628,7 @@ flushes.
 
 **Reading it back.** `GET /slo/history?series=<name>&window=<n><m|h|d>&step=<s>`,
 served beside `/slo` (not audited, metered as a read). `series` must be one of the
-names above (a 400 lists them); `window` defaults to `1h` and is capped at the
+names above for the mode in force (a 400 lists them; `extended` adds the series in [`dashboards.md`](dashboards.md)); `window` defaults to `1h` and is capped at the
 configured TTL (`retentionDays` in the answer says what that is — an existing table
 keeps the retention it was created with, see the variable's row below); `step` is
 whole seconds or `<n>s|m|h`, clamped to 15 s – 1 day. **The step actually used is
@@ -911,6 +919,7 @@ substrate-specific spelling.
 | `SUBSTRATE_METRICS_HISTORY` | off | `on` samples the registry into `metric_samples` and serves `/slo/history`; anything else is off. It also needs the ledger: with no ledger configured it stays off, the route answers `404 {"enabled":false}` and boot says why. |
 | `SUBSTRATE_METRICS_HISTORY_INTERVAL_S` | `60` | Seconds between samples; floor 15, ceiling 3600. |
 | `SUBSTRATE_METRICS_HISTORY_TTL` | `14d` | Whole days `1d`–`90d`, applied when the table is **created**; anything else falls back to `14d`. An existing table keeps the retention it was created with, so a raised value needs an operator `ALTER TABLE "metric_samples" SET 'ttl'='<n>d'` on it; until then `/slo/history` accepts windows up to the configured value (`retentionDays`) but the table holds no more than its own TTL. |
+| `SUBSTRATE_METRICS_HISTORY_SERIES` | `core` | `core` \| `extended` (any case; uplift-5 S6). `core` is the 11 series above; `extended` also samples and serves the evidence series in [`dashboards.md`](dashboards.md), at an estimated 10 to 17 more rows per 60 s interval in normal use. Opt-in because the volume size is unresolved. Anything else is `core`, named at boot. |
 | `SUBSTRATE_BRIEF_RECALL` | `off` | `off` \| `shadow` \| `enforce` (uplift-4 S5, Build Plan BP-5.0): `off` adds no Hindsight traffic and leaves every brief, ETag and cache key as it was; `shadow` runs the prefetcher and counts `would_include` while serving today's text; `enforce` appends the `Recalled context` section. An unknown value is `off`, named at boot. |
 | `SUBSTRATE_BRIEF_RECALL_INTERVAL_S` | `120` | Seconds between prefetch ticks (floor 30, ceiling 3600); each tick refreshes `ceil(wanted / ticks per half TTL)` due pairs, at most 8 and at most what fits in 80% of the interval at `SUBSTRATE_BRIEF_RECALL_BUDGET_MS` (docs/data-planes.md § Recall in the brief). |
 | `SUBSTRATE_BRIEF_RECALL_TTL_S` | `900` | How long a recall snapshot lives in the `recall-snapshot` cache class (60–86400). The entry lives twice this: fresh up to it, `stale` (omitted from the brief, counted) up to twice it. A pair is refreshed once its snapshot is older than half of it. |

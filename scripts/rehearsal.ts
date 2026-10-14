@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Scratch rehearsal harness (`bun run rehearsal up|down|status|smoke`).
+ * Scratch rehearsal harness (`bun run rehearsal up|down|status|smoke|pause|unpause`).
  *
  * One command starts this checkout's substrate-mcp on a scratch loopback port
  * against a scratch Postgres and a scratch ledger in local Docker containers,
@@ -11,6 +11,13 @@
  * server's /healthz, and the server's store environment is built by
  * `packages/mcp-server/src/rehearsal-env.ts`. Nothing printed here but hosts,
  * ports, the checkout commit and image tags — never a credential.
+ *
+ * `pause`/`unpause --store ledger|index` freeze and thaw one of an instance's own labelled
+ * scratch containers (`docker pause`: the store accepts connections and answers nothing, which is
+ * what a dropped-packet outage looks like to the server). They are the only way a proof can inject
+ * a REAL outage into a twin without a script of its own holding a ledger credential name.
+ * `up --extra-env KEY=VALUE` adds one allowlisted, non-secret server flag
+ * (`EXTRA_ENV_ALLOWLIST` in rehearsal-env.ts); anything else is refused with a rule name.
  */
 import { randomBytes } from "node:crypto";
 import {
@@ -33,6 +40,7 @@ import { dlopen, FFIType, read } from "bun:ffi";
 import {
 	buildRehearsalEnv,
 	consumerEnvRecord,
+	parseExtraEnv,
 	RehearsalEnvError,
 	storesEnvRecord,
 	toShellExports,
@@ -587,6 +595,50 @@ function removeLabelledContainers(name: string): number {
 	return resolveContainerRemoval(name, ps, rm, verify);
 }
 
+/** The two scratch stores a proof may freeze. `index` is the Postgres container, `ledger` the other. */
+export const PAUSE_STORES = ["ledger", "index"] as const;
+export type PauseStore = (typeof PAUSE_STORES)[number];
+
+/** The container name `up` gives an instance's store: one place, so `up` and `pause` cannot drift. */
+export function storeContainerName(name: string, store: PauseStore): string {
+	return `substrate-rehearsal-${name}-${store === "ledger" ? "ledger" : "pg"}`;
+}
+
+/** `--store ledger|index`; anything else, or nothing, refuses with the rule name `pause-store`. */
+export function parseStore(raw: string | undefined): PauseStore {
+	if (raw !== undefined && (PAUSE_STORES as readonly string[]).includes(raw)) return raw as PauseStore;
+	throw new RehearsalRefused(`rule pause-store: --store must be one of ${PAUSE_STORES.join(", ")}`);
+}
+
+/**
+ * The container id `pause`/`unpause` may act on, from a `docker ps --filter label=<instance> --format
+ * '{{.ID}} {{.Names}}'` listing. The listing is already limited to this instance's label; the exact
+ * deterministic name is checked again here so a labelled container of some other role, a look-alike
+ * name, or two matches never gets a verb. A failed listing refuses (never "nothing to do"). Rule
+ * `pause-target`.
+ */
+export function selectStoreContainer(
+	name: string,
+	store: PauseStore,
+	ps: { ok: boolean; out: string; err: string },
+): string {
+	if (!ps.ok) throw new RehearsalRefused(`rule pause-target: could not list scratch containers for ${name}`);
+	const want = storeContainerName(name, store);
+	const ids: string[] = [];
+	for (const line of ps.out.split("\n")) {
+		const [id, names] = line.trim().split(/\s+/, 2);
+		if (id === undefined || names === undefined) continue;
+		if (!/^[0-9a-f]{12,64}$/.test(id)) continue;
+		if (names.split(",").includes(want)) ids.push(id);
+	}
+	if (ids.length !== 1) {
+		throw new RehearsalRefused(
+			`rule pause-target: instance ${name} has ${ids.length === 0 ? "no running" : "more than one"} ${store} scratch container named ${want}`,
+		);
+	}
+	return ids[0] as string;
+}
+
 function hex(bytes: number): string {
 	return randomBytes(bytes).toString("hex");
 }
@@ -624,6 +676,8 @@ interface UpOptions {
 	anonymous: boolean;
 	/** Build the skills library fixture (`--skills-fixture`): a throwaway bare repository, a mirror and a recording `gh`. */
 	skillsFixture: boolean;
+	/** Allowlisted extra server settings (`--extra-env`), already validated by `parseExtraEnv`. */
+	extraEnv: Record<string, string>;
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
@@ -991,8 +1045,8 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		if (tok !== undefined) writeMode(join(tokensDir, surface), `${tok}\n`);
 	}
 
-	const pgContainer = `substrate-rehearsal-${opts.name}-pg`;
-	const ledgerContainer = `substrate-rehearsal-${opts.name}-ledger`;
+	const pgContainer = storeContainerName(opts.name, "index");
+	const ledgerContainer = storeContainerName(opts.name, "ledger");
 	const usersLine = `${secrets.ledgerUser}=${secrets.ledgerPassword}`;
 
 	const pg = docker(
@@ -1104,6 +1158,7 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 			runDir,
 			parentEnv,
 			skillsFixture: skills?.env ?? null,
+			extraEnv: opts.extraEnv,
 		});
 	} catch (cause) {
 		// The scratch containers are already healthy here; a builder throw must
@@ -1239,6 +1294,7 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		process.stdout.write(`[rehearsal] commit ${state.commit} dirty=${dirtyOut === null ? "unknown" : String(dirtyOut.length > 0)}\n`);
 		process.stdout.write(`[rehearsal] images pg=${pgImage} ledger=${ledgerImage}\n`);
 		if (skills) process.stdout.write(`[rehearsal] skills fixture: library ${skills.repo} (a throwaway bare repository, a recording gh)\n`);
+		for (const [key, value] of Object.entries(opts.extraEnv)) process.stdout.write(`[rehearsal] extra-env ${key}=${value}\n`);
 		return 0;
 	} catch (cause) {
 		// An unexpected throw after the spawn must not leak the twin: stop
@@ -1309,6 +1365,46 @@ async function runDownInner(name: string, runDir: string): Promise<number> {
 	const removed = removeLabelledContainers(name);
 	rmSync(runDir, { recursive: true, force: true });
 	process.stdout.write(`[rehearsal] down ${name}: stopped pid ${state.pid}, removed ${removed} containers.\n`);
+	return 0;
+}
+
+async function runPause(name: string, store: PauseStore, action: "pause" | "unpause"): Promise<number> {
+	const runDir = runDirFor(name);
+	return await withNameLock(runDir, name, () => runPauseInner(name, store, action));
+}
+
+/**
+ * Freeze or thaw one scratch store of one instance. Under the instance lock like `down`; the
+ * container is found by the instance label and its exact name and nothing else is touched. Idempotent:
+ * a store already in the asked state is reported and left alone, so a cleanup `unpause` after a
+ * failed run never errors on a store that was never frozen. The result is read back from the daemon
+ * (`State.Paused`), never assumed from the exit code.
+ */
+async function runPauseInner(name: string, store: PauseStore, action: "pause" | "unpause"): Promise<number> {
+	const dockerRefused = refuseDockerLocality();
+	if (dockerRefused !== null) throw new RehearsalRefused(dockerRefused);
+	const ps = docker(["ps", "--filter", `label=${REHEARSAL_LABEL}=${name}`, "--format", "{{.ID}} {{.Names}}"]);
+	const id = selectStoreContainer(name, store, ps);
+	const want = action === "pause";
+	const readPaused = (): boolean => {
+		const inspected = docker(["inspect", "-f", "{{.State.Paused}}", id]);
+		const text = inspected.out.trim();
+		if (!inspected.ok || (text !== "true" && text !== "false")) {
+			throw new RehearsalRefused(`rule pause-state: could not read the ${store} container's state for ${name}`);
+		}
+		return text === "true";
+	};
+	if (readPaused() === want) {
+		process.stdout.write(`[rehearsal] ${action} ${name}: ${store} already ${want ? "paused" : "running"}.\n`);
+		return 0;
+	}
+	const changed = docker([action, id]);
+	if (!changed.ok) {
+		const detail = changed.err.trim().split("\n")[0];
+		throw new RehearsalRefused(`docker ${action} of the ${store} container failed${detail ? `: ${detail}` : ""}`);
+	}
+	if (readPaused() !== want) throw new RehearsalRefused(`the ${store} container did not ${action} for ${name}`);
+	process.stdout.write(`[rehearsal] ${action} ${name}: ${store} ${want ? "paused" : "running"}.\n`);
 	return 0;
 }
 
@@ -1576,11 +1672,23 @@ async function runSmokeInner(name: string, runDir: string): Promise<number> {
  * when argv holds only the subcommand and known flags.
  */
 export function refuseExtraArgs(argv: string[]): string | null {
-	const valued: Record<string, true> = { "--name": true, "--port": true, "--surfaces": true, "--operator": true, "--desktop-surfaces": true };
+	const valued: Record<string, true> = {
+		"--name": true,
+		"--port": true,
+		"--surfaces": true,
+		"--operator": true,
+		"--desktop-surfaces": true,
+		"--store": true,
+		"--extra-env": true,
+	};
 	const bare: Record<string, true> = { "--anonymous": true, "--skills-fixture": true };
 	for (let i = 1; i < argv.length; i++) {
 		const token = argv[i] ?? "";
 		if (valued[token] === true) {
+			// A flag only its own subcommand reads is refused elsewhere, never ignored: a `--store`
+			// on `down` or an `--extra-env` on `smoke` is a typo about what the command will do.
+			if (token === "--store" && argv[0] !== "pause" && argv[0] !== "unpause") return "--store is only valid with pause and unpause";
+			if (token === "--extra-env" && argv[0] !== "up") return "--extra-env is only valid with up";
 			i++;
 			continue;
 		}
@@ -1598,9 +1706,22 @@ export function flag(argv: string[], name: string): string | undefined | null {
 	return value === undefined || value.startsWith("--") ? null : value;
 }
 
+/** Every value of a repeatable flag, in order; null when any occurrence has no value. */
+export function flagAll(argv: string[], name: string): string[] | null {
+	const out: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		if (argv[i] !== name) continue;
+		const value = argv[i + 1];
+		if (value === undefined || value.startsWith("--")) return null;
+		out.push(value);
+		i++;
+	}
+	return out;
+}
+
 function usage(message: string): never {
 	process.stderr.write(
-		`[rehearsal] ${message}\nusage: rehearsal up|down|status|smoke [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--desktop-surfaces a,b] [--anonymous] [--skills-fixture]\n`,
+		`[rehearsal] ${message}\nusage: rehearsal up|down|status|smoke|pause|unpause [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--desktop-surfaces a,b] [--anonymous] [--skills-fixture] [--extra-env KEY=VALUE]... [--store ledger|index]\n`,
 	);
 	process.exit(2);
 }
@@ -1608,19 +1729,23 @@ function usage(message: string): never {
 async function main(argv: string[]): Promise<number> {
 	const sub = argv[0];
 	if (sub === undefined) usage("need a subcommand");
-	if (sub !== "up" && sub !== "down" && sub !== "status" && sub !== "smoke") usage(`unknown subcommand ${sub}`);
+	if (sub !== "up" && sub !== "down" && sub !== "status" && sub !== "smoke" && sub !== "pause" && sub !== "unpause") usage(`unknown subcommand ${sub}`);
 
 	const nameRaw = flag(argv, "--name");
 	const portRaw = flag(argv, "--port");
 	const surfacesRaw = flag(argv, "--surfaces");
 	const operatorRaw = flag(argv, "--operator");
 	const desktopSurfacesRaw = flag(argv, "--desktop-surfaces");
+	const storeRaw = flag(argv, "--store");
+	const extraEnvRaw = flagAll(argv, "--extra-env");
 	for (const [key, value] of [
 		["--name", nameRaw],
 		["--port", portRaw],
 		["--surfaces", surfacesRaw],
 		["--operator", operatorRaw],
 		["--desktop-surfaces", desktopSurfacesRaw],
+		["--store", storeRaw],
+		["--extra-env", extraEnvRaw],
 	] as const) {
 		if (value === null) usage(`${key} needs a value`);
 	}
@@ -1633,12 +1758,21 @@ async function main(argv: string[]): Promise<number> {
 		if (sub === "down") return await runDown(name);
 		if (sub === "status") return await runStatus(name);
 		if (sub === "smoke") return await runSmoke(name);
+		if (sub === "pause" || sub === "unpause") return await runPause(name, parseStore(storeRaw ?? undefined), sub);
+		let extraEnv: Record<string, string>;
+		try {
+			// Before the lock and before any docker call: a refused flag costs nothing.
+			extraEnv = parseExtraEnv(extraEnvRaw ?? []);
+		} catch (cause) {
+			if (cause instanceof RehearsalEnvError) throw new RehearsalRefused(cause.message);
+			throw cause;
+		}
 		const port = Number(portRaw ?? String(DEFAULT_MCP_PORT));
 		if (!Number.isInteger(port) || port < 0 || port > 65535) usage(`bad --port ${portRaw ?? ""}`);
 		const surfaces = parseSurfaces(surfacesRaw ?? undefined);
 		const operator = parseOperator(operatorRaw ?? undefined, surfaces, anonymous);
 		const desktopSurfaces = parseDesktopSurfaces(desktopSurfacesRaw ?? undefined, surfaces, anonymous);
-		return await runUp({ name, port, surfaces, operator, desktopSurfaces, anonymous, skillsFixture }, process.cwd());
+		return await runUp({ name, port, surfaces, operator, desktopSurfaces, anonymous, skillsFixture, extraEnv }, process.cwd());
 	} catch (cause) {
 		if (cause instanceof RehearsalRefused) {
 			process.stderr.write(`[rehearsal] refused: ${cause.message}.\n`);

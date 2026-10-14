@@ -7,7 +7,9 @@
  * Everything here is REPORT-ONLY. A row is `ok`, `warn`, `drift` or `unknown`;
  * the disk guardrails never go past `warn` (the doctor exits 0 on `warn`), and
  * a `would-reclaim` row names bytes an operator could free, it frees nothing.
- * Nothing in this file deletes, vacuums, prunes or writes.
+ * Nothing in this file deletes, vacuums, prunes or writes. The one docker call
+ * (`gatherDockerReclaim`, uplift-5 U5-2) is `docker system df`: read-only, bounded
+ * by a timeout, and its row is `ok` or `unknown`, never `warn` and never `drift`.
  *
  * Imports from `doctor-runtime.ts` are types only: that module imports this one.
  */
@@ -676,4 +678,84 @@ export function gatherDiskGuardrails(host: Host, g: DiskGuardrails, scan: ScanFs
 		}),
 	);
 	return rows;
+}
+
+// ── Docker reclaimable space (uplift-5 U5-2) ─────────────────────────────────
+
+/** `timeout` kills `docker system df` after this many seconds; the doctor's own spawn bound is the outer guard. */
+export const DOCKER_DF_TIMEOUT_S = 10;
+/** The exact argv: read-only. Never `prune`, `rm` or `image` anything (the test pins this). */
+export const DOCKER_DF_ARGV: readonly string[] = ["timeout", String(DOCKER_DF_TIMEOUT_S), "docker", "system", "df", "--format", "{{json .}}"];
+
+const DECIMAL_UNITS: Record<string, number> = { B: 1, KB: 1e3, MB: 1e6, GB: 1e9, TB: 1e12, PB: 1e15 };
+
+/** docker prints decimal sizes (`21.65GB`, `1.5kB`, `0B`); bytes, or null when it is not one. */
+export function parseDockerSize(text: string): number | null {
+	const m = /^\s*(\d+(?:\.\d+)?)\s*([kKMGTP]?B)\b/.exec(text);
+	if (!m?.[1] || !m[2]) return null;
+	const unit = DECIMAL_UNITS[m[2].toUpperCase()];
+	return unit === undefined ? null : Math.round(Number(m[1]) * unit);
+}
+
+export interface DockerReclaim {
+	type: string;
+	/** docker's own `Reclaimable` text, e.g. `21.65GB (79%)`. */
+	text: string;
+	bytes: number;
+}
+
+/** `docker system df --format '{{json .}}'`: one JSON object per line (Images, Containers, Local Volumes, Build Cache). */
+export function parseDockerDf(out: string): DockerReclaim[] {
+	const found: DockerReclaim[] = [];
+	for (const line of out.split("\n")) {
+		if (line.trim() === "") continue;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(line);
+		} catch {
+			continue;
+		}
+		if (parsed === null || typeof parsed !== "object") continue;
+		const type: unknown = (parsed as Record<string, unknown>).Type;
+		const reclaimable: unknown = (parsed as Record<string, unknown>).Reclaimable;
+		if (typeof type !== "string" || typeof reclaimable !== "string") continue;
+		const bytes = parseDockerSize(reclaimable);
+		if (bytes !== null) found.push({ type: safeName(type), text: reclaimable.replace(/[^\x20-\x7e]/g, "?").slice(0, 32), bytes });
+	}
+	return found;
+}
+
+/**
+ * What `docker system df` says is reclaimable, as ONE report-only row. This is the
+ * Docker engine's space, shared with every other tenant of the host (the VPS runs
+ * other projects' containers); it is NOT space Agent Substrate owns, and the doctor
+ * never prunes, removes or stops anything. A missing docker, a daemon that is not
+ * answering, a permission error or a timeout is `unknown`; nothing here is ever `warn` or `drift`.
+ */
+export function gatherDockerReclaim(host: Host): Row[] {
+	const check = "docker reclaimable";
+	const want = "report only; not substrate-owned space; never pruned";
+	let result: RunResult | null;
+	try {
+		result = host.run(DOCKER_DF_ARGV);
+	} catch {
+		result = null;
+	}
+	if (result === null) return [row("disk", check, "unknown", want, "unavailable", "timeout or docker could not be run; nothing was changed")];
+	if (result.code === 124) return [row("disk", check, "unknown", want, "unavailable", `docker system df did not answer within ${DOCKER_DF_TIMEOUT_S}s; nothing was changed`)];
+	if (result.code === 127) return [row("disk", check, "unknown", want, "unavailable", "docker is not installed on this host; nothing was changed")];
+	if (result.code !== 0) return [row("disk", check, "unknown", want, "unavailable", `docker system df exited ${result.code} (daemon down or no access to the socket); nothing was changed`)];
+	const entries = parseDockerDf(result.out);
+	if (entries.length === 0) return [row("disk", check, "unknown", want, "unavailable", "docker system df printed nothing parseable; nothing was changed")];
+	const total = entries.reduce((sum, e) => sum + e.bytes, 0);
+	return [
+		row(
+			"disk",
+			check,
+			"ok",
+			want,
+			`${(total / 1e9).toFixed(1)} GB reclaimable (${entries.map((e) => `${e.type} ${e.text}`).join(", ")})`,
+			"the Docker engine's space, shared with other tenants of this host and not Agent Substrate's; nothing was pruned or removed. Look before acting: docs/runbooks/disk-pressure.md",
+		),
+	];
 }

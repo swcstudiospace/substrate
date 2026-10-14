@@ -16,19 +16,38 @@
  *
  * Off unless `SUBSTRATE_METRICS_HISTORY=on`. Off, nothing here runs: no timer, no
  * table, no instrument, and the route answers `{ enabled: false }`.
+ *
+ * The allow-list has two tiers (uplift-5 S6). `core` is the original 11 series
+ * and is what every deployment gets. `extended` (`SUBSTRATE_METRICS_HISTORY_SERIES`)
+ * adds the evidence the promotion advisor reads and the data-plane dashboards
+ * draw: cache results, brief profile bytes saved, brief recall results, recall
+ * prefetch results, expired-memory reads and three in-process gauges. The mode
+ * decides what the sampler tracks and writes and what the route serves; a
+ * stored row of an extended series stays readable by name to the ledger client
+ * (it validates against the union), but no caller reaches it unless the route
+ * is in `extended` mode. It is opt-in because the table's volume is unsized
+ * (500 MB in one record, 5 GB in another); the row-growth bound is in
+ * `docs/dashboards.md`.
  */
 import {
 	ADMISSION_DECISIONS,
+	BRIEF_RECALL_RESULTS,
+	CACHE_METRIC_RESULTS,
 	DOCS_SEARCH_OUTCOMES,
+	INDEX_ARCHIVE_AGE_METRIC,
+	MEMORY_EXPIRED_MODES,
 	METRIC,
+	OUTBOX_OLDEST_METRIC,
+	OUTBOX_SIZE_METRIC,
 	PLANES,
+	RECALL_PREFETCH_RESULTS,
 	attributeKey,
 	quantileFromBuckets,
 	type Attributes,
 	type MetricRegistry,
 	type MetricSnapshot,
 } from "@substrate/observability";
-import type { MetricsHistorySettings } from "./config.ts";
+import type { MetricsHistorySeriesMode, MetricsHistorySettings } from "./config.ts";
 import type { GreptimeClient, MetricHistoryPoint } from "./greptime.ts";
 import { SURFACES } from "./types.ts";
 
@@ -47,7 +66,7 @@ export const MAX_METRIC_POINTS = 2000;
 export const MAX_TRACKED_POINTS = 16_384;
 
 export type SampleKind = "counter" | "gauge" | "histogram" | "ratio";
-type LabelKey = "surface" | "plane" | "decision" | "outcome";
+type LabelKey = "surface" | "plane" | "decision" | "outcome" | "result" | "mode";
 
 /**
  * How a readback folds the rows of one step bucket into one number: `sum` for
@@ -75,8 +94,9 @@ const DECISION_VALUES: ReadonlySet<string> = new Set<string>(ADMISSION_DECISIONS
 const OUTCOME_VALUES: ReadonlySet<string> = new Set<string>(DOCS_SEARCH_OUTCOMES);
 
 /**
- * The only series the history carries. A series name from a request or a row is
- * looked up with `Object.hasOwn` here and nowhere else; anything absent is
+ * The core series: the only ones a default deployment samples and serves. A
+ * series name from a request or a row is looked up with `Object.hasOwn` in
+ * this record or {@link ALL_METRIC_SERIES} and nowhere else; anything absent is
  * refused before a statement is built.
  */
 export const METRIC_SERIES: Readonly<Record<string, SeriesSpec>> = {
@@ -92,6 +112,43 @@ export const METRIC_SERIES: Readonly<Record<string, SeriesSpec>> = {
 	"docs.p95": { kind: "histogram", label: null, values: null, agg: "max", unit: "ms" },
 	"capacity.runway_days": { kind: "gauge", label: null, values: null, agg: "avg", unit: "days" },
 };
+
+const CACHE_RESULT_VALUES: ReadonlySet<string> = new Set<string>(CACHE_METRIC_RESULTS);
+const RECALL_RESULT_VALUES: ReadonlySet<string> = new Set<string>(BRIEF_RECALL_RESULTS);
+const PREFETCH_RESULT_VALUES: ReadonlySet<string> = new Set<string>(RECALL_PREFETCH_RESULTS);
+const MEMORY_MODE_VALUES: ReadonlySet<string> = new Set<string>(MEMORY_EXPIRED_MODES);
+
+/**
+ * The opt-in series (`SUBSTRATE_METRICS_HISTORY_SERIES=extended`). Every one is
+ * read from an instrument that exists in `instruments.ts`; counters are the
+ * interval's delta with the label folded into a closed set (the `class` and
+ * `mode` attributes of the cache counter are summed over, the series carries
+ * only `result`), gauges are the reading at the sample. `cache.operations`
+ * carries `would_serve_stale` (counted only under `SUBSTRATE_CACHE_SWR=shadow`,
+ * only for the brief class) beside `miss`; because the other cache classes' `miss`
+ * rows are in the same series, a ratio such as `would_serve_stale / miss` is a
+ * LOWER BOUND on the brief class's own share, never an exact one;
+ * `admission.decisions` already carries `limited` and
+ * `shadow_limited`, so nothing is added for admission.
+ */
+export const EXTENDED_METRIC_SERIES: Readonly<Record<string, SeriesSpec>> = {
+	"cache.operations": { kind: "counter", label: "result", values: CACHE_RESULT_VALUES, agg: "sum", unit: "{operation}" },
+	"brief.profile_bytes_saved": { kind: "counter", label: null, values: null, agg: "sum", unit: "By" },
+	"brief.recall": { kind: "counter", label: "result", values: RECALL_RESULT_VALUES, agg: "sum", unit: "{brief}" },
+	"recall.prefetch": { kind: "counter", label: "result", values: PREFETCH_RESULT_VALUES, agg: "sum", unit: "{refresh}" },
+	"memory.expired": { kind: "counter", label: "mode", values: MEMORY_MODE_VALUES, agg: "sum", unit: "{entry}" },
+	"hindsight.outbox_size": { kind: "gauge", label: null, values: null, agg: "max", unit: "{entry}" },
+	"hindsight.outbox_oldest_age_s": { kind: "gauge", label: null, values: null, agg: "max", unit: "s" },
+	"index.archive_age_s": { kind: "gauge", label: null, values: null, agg: "max", unit: "s" },
+};
+
+/** Core plus extended: what the ledger client can store and read, whatever the mode. Never what a caller may ask for; that is {@link metricSeriesFor}. */
+export const ALL_METRIC_SERIES: Readonly<Record<string, SeriesSpec>> = { ...METRIC_SERIES, ...EXTENDED_METRIC_SERIES };
+
+/** The allow-list a mode serves and samples: `extended` only when asked for, `core` for anything else. */
+export function metricSeriesFor(mode: MetricsHistorySeriesMode | undefined): Readonly<Record<string, SeriesSpec>> {
+	return mode === "extended" ? ALL_METRIC_SERIES : METRIC_SERIES;
+}
 
 /** One row as the sampler hands it to the client. `kind` is not here: the client takes it from the series' spec. */
 export interface MetricSampleRow {
@@ -109,8 +166,8 @@ export interface MetricSampleRow {
  * member of every closed set is a short slug with no quote or backslash.
  */
 export function canonicalLabels(series: string, labels: Record<string, unknown>): string | null {
-	if (!Object.hasOwn(METRIC_SERIES, series)) return null;
-	const spec = METRIC_SERIES[series]!;
+	if (!Object.hasOwn(ALL_METRIC_SERIES, series)) return null;
+	const spec = ALL_METRIC_SERIES[series]!;
 	const keys = Object.keys(labels);
 	if (spec.label === null) return keys.length === 0 ? "{}" : null;
 	if (keys.length !== 1 || keys[0] !== spec.label) return null;
@@ -125,8 +182,8 @@ export function canonicalLabels(series: string, labels: Record<string, unknown>)
  * reads back as no labels.
  */
 export function readLabels(series: string, raw: unknown): Record<string, string> {
-	if (!Object.hasOwn(METRIC_SERIES, series)) return {};
-	const spec = METRIC_SERIES[series]!;
+	if (!Object.hasOwn(ALL_METRIC_SERIES, series)) return {};
+	const spec = ALL_METRIC_SERIES[series]!;
 	if (spec.label === null || typeof raw !== "string") return {};
 	try {
 		const parsed = JSON.parse(raw) as unknown;
@@ -140,8 +197,8 @@ export function readLabels(series: string, raw: unknown): Record<string, string>
 
 // ── delta logic ──────────────────────────────────────────────────────────────
 
-/** Metrics the collector reads; every other instrument in the snapshot is ignored. */
-const TRACKED: ReadonlySet<string> = new Set([
+/** Metrics the collector reads in `core` mode; every other instrument in the snapshot is ignored. */
+const CORE_TRACKED: ReadonlySet<string> = new Set([
 	METRIC.briefDuration,
 	METRIC.emitDuration,
 	METRIC.emitTotal,
@@ -150,6 +207,14 @@ const TRACKED: ReadonlySet<string> = new Set([
 	METRIC.admissionDecisions,
 	METRIC.docsSearch,
 	METRIC.docsDuration,
+]);
+/** `extended` adds the counters of {@link EXTENDED_COUNTER_SOURCES}; the gauges are read by name, not tracked as deltas. */
+const EXTENDED_TRACKED: ReadonlySet<string> = new Set([
+	...CORE_TRACKED,
+	METRIC.briefProfileBytesSaved,
+	METRIC.briefRecall,
+	METRIC.recallPrefetch,
+	METRIC.memoryExpired,
 ]);
 
 interface CounterDelta {
@@ -206,6 +271,12 @@ export class SampleCollector {
 	private counters = new Map<string, number>();
 	private histograms = new Map<string, HistogramBaseline>();
 	private primed = false;
+	private readonly tracked: ReadonlySet<string>;
+
+	/** `mode` is the series tier: `core` (the default) is exactly the original 11 series. */
+	constructor(private readonly mode: MetricsHistorySeriesMode = "core") {
+		this.tracked = mode === "extended" ? EXTENDED_TRACKED : CORE_TRACKED;
+	}
 
 	/** Take the baseline without producing rows. */
 	prime(snapshot: MetricSnapshot[]): void {
@@ -217,10 +288,11 @@ export class SampleCollector {
 		const deltas = this.advance(snapshot);
 		const first = !this.primed;
 		this.primed = true;
-		const rows: MetricSampleRow[] = first ? [] : rowsFrom(deltas, tsMs);
+		const rows: MetricSampleRow[] = first ? [] : rowsFrom(deltas, tsMs, this.mode);
 		if (runwayDays !== null && Number.isFinite(runwayDays)) {
 			rows.push({ tsMs, series: "capacity.runway_days", labels: {}, value: runwayDays, count: 1 });
 		}
+		if (this.mode === "extended") rows.push(...gaugeRows(snapshot, tsMs));
 		return rows;
 	}
 
@@ -231,7 +303,7 @@ export class SampleCollector {
 		const histograms: HistogramDelta[] = [];
 		let tracked = 0;
 		for (const metric of snapshot) {
-			if (!TRACKED.has(metric.name)) continue;
+			if (!this.tracked.has(metric.name)) continue;
 			if (metric.kind === "counter") {
 				for (const point of metric.points) {
 					if (tracked >= MAX_TRACKED_POINTS) break;
@@ -267,7 +339,7 @@ export class SampleCollector {
 
 /** The label value for an attribute, folded into the closed set; `null` when the series should skip the point. */
 function labelFor(series: string, raw: unknown): string | null {
-	const spec = METRIC_SERIES[series]!;
+	const spec = ALL_METRIC_SERIES[series]!;
 	const value = String(raw ?? "");
 	if (spec.values!.has(value)) return value;
 	return spec.values === SURFACE_VALUES ? "other" : null;
@@ -306,7 +378,52 @@ function quantileOf(group: MergedBuckets, q: number): number {
 	return quantileFromBuckets({ count: group.count, bucketCounts: group.buckets, bounds: group.bounds }, q) ?? group.bounds.at(-1) ?? 0;
 }
 
-function rowsFrom(deltas: { counters: CounterDelta[]; histograms: HistogramDelta[] }, tsMs: number): MetricSampleRow[] {
+/** The gauges `extended` samples: the reading itself, one row per interval, whether or not the interval had traffic. */
+const EXTENDED_GAUGE_SOURCES: ReadonlyArray<{ series: string; metric: string }> = [
+	{ series: "hindsight.outbox_size", metric: OUTBOX_SIZE_METRIC },
+	{ series: "hindsight.outbox_oldest_age_s", metric: OUTBOX_OLDEST_METRIC },
+	{ series: "index.archive_age_s", metric: INDEX_ARCHIVE_AGE_METRIC },
+];
+
+/** A gauge nobody set has no point (the archive age before a first archive), and a non-finite reading is not a number to store: both are skipped. */
+function gaugeRows(snapshot: readonly MetricSnapshot[], tsMs: number): MetricSampleRow[] {
+	const rows: MetricSampleRow[] = [];
+	for (const source of EXTENDED_GAUGE_SOURCES) {
+		for (const metric of snapshot) {
+			if (metric.kind !== "gauge" || metric.name !== source.metric) continue;
+			const point = metric.points.find((candidate) => Number.isFinite(candidate.value));
+			if (point !== undefined) rows.push({ tsMs, series: source.series, labels: {}, value: point.value, count: 1 });
+			break;
+		}
+	}
+	return rows;
+}
+
+/** The counters `extended` samples as interval deltas: the series, the instrument and the attribute that becomes the label (`null`: none). */
+const EXTENDED_COUNTER_SOURCES: ReadonlyArray<{ series: string; metric: string; attribute: "result" | "mode" | null }> = [
+	{ series: "cache.operations", metric: METRIC.cacheOperations, attribute: "result" },
+	{ series: "brief.profile_bytes_saved", metric: METRIC.briefProfileBytesSaved, attribute: null },
+	{ series: "brief.recall", metric: METRIC.briefRecall, attribute: "result" },
+	{ series: "recall.prefetch", metric: METRIC.recallPrefetch, attribute: "result" },
+	{ series: "memory.expired", metric: METRIC.memoryExpired, attribute: "mode" },
+];
+
+/** Appends one row per series and label value whose delta over the interval is positive; every other attribute (class, mode, surface) is summed over. */
+function extendedCounterRows(counters: readonly CounterDelta[], tsMs: number, rows: MetricSampleRow[]): void {
+	for (const source of EXTENDED_COUNTER_SOURCES) {
+		const totals = new Map<string, number>();
+		for (const delta of counters) {
+			if (delta.name !== source.metric) continue;
+			const label = source.attribute === null ? "" : labelFor(source.series, delta.attributes[source.attribute]);
+			if (label !== null) totals.set(label, (totals.get(label) ?? 0) + delta.delta);
+		}
+		for (const [label, total] of totals) {
+			if (total > 0) rows.push({ tsMs, series: source.series, labels: source.attribute === null ? {} : { [source.attribute]: label }, value: total, count: total });
+		}
+	}
+}
+
+function rowsFrom(deltas: { counters: CounterDelta[]; histograms: HistogramDelta[] }, tsMs: number, mode: MetricsHistorySeriesMode): MetricSampleRow[] {
 	const rows: MetricSampleRow[] = [];
 
 	const quantiles = (series: string, metric: string, q: number, pick: (attributes: Attributes) => string | null): void => {
@@ -370,6 +487,7 @@ function rowsFrom(deltas: { counters: CounterDelta[]; histograms: HistogramDelta
 	for (const [outcome, total] of outcomes) {
 		if (total > 0) rows.push({ tsMs, series: "docs.search", labels: { outcome }, value: total, count: total });
 	}
+	if (mode === "extended") extendedCounterRows(deltas.counters, tsMs, rows);
 	return rows;
 }
 
@@ -384,7 +502,7 @@ export interface TimerApi {
 }
 
 export interface MetricsHistorySamplerDeps {
-	settings: Pick<MetricsHistorySettings, "enabled" | "intervalS">;
+	settings: Pick<MetricsHistorySettings, "enabled" | "intervalS"> & { series?: MetricsHistorySeriesMode };
 	/** The registry snapshot, as `/metrics` serves it. */
 	snapshot: () => MetricSnapshot[];
 	/** The capacity runway in days, or `null` when it is not judged. */
@@ -414,7 +532,7 @@ export function registerMetricsHistoryMetrics(registry: MetricRegistry): void {
  * `flush()` waits for the write in flight and then does one fresh sample.
  */
 export class MetricsHistorySampler {
-	private readonly collector = new SampleCollector();
+	private readonly collector: SampleCollector;
 	private readonly clock: () => number;
 	private readonly timers: TimerApi;
 	private timer: { unref(): unknown } | null = null;
@@ -424,6 +542,7 @@ export class MetricsHistorySampler {
 	constructor(private readonly deps: MetricsHistorySamplerDeps) {
 		this.clock = deps.clock ?? Date.now;
 		this.timers = deps.timers ?? { setInterval: (handler, ms) => setInterval(handler, ms), clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>) };
+		this.collector = new SampleCollector(deps.settings.series);
 	}
 
 	/** Start sampling. `false`, and nothing scheduled, when the history is off. Idempotent. */
@@ -533,7 +652,7 @@ const HISTORY_RETRY_AFTER_S = 5;
  * and is only ever raised, never lowered.
  */
 export function effectiveHistoryStep(series: string, windowMs: number, requestedStepS: number): number {
-	const labelValues = Object.hasOwn(METRIC_SERIES, series) ? (METRIC_SERIES[series]!.values?.size ?? 1) : 1;
+	const labelValues = Object.hasOwn(ALL_METRIC_SERIES, series) ? (ALL_METRIC_SERIES[series]!.values?.size ?? 1) : 1;
 	const maxBuckets = Math.max(1, Math.floor(MAX_METRIC_POINTS / labelValues) - 1);
 	const needed = Math.ceil(windowMs / 1000 / maxBuckets);
 	const requested = Math.min(MAX_STEP_S, Math.max(MIN_STEP_S, Math.ceil(requestedStepS)));
@@ -622,7 +741,7 @@ function metricHistoryBusy(): MetricHistoryAnswer {
 
 export interface MetricHistoryDeps {
 	/** `enabled` is the effective flag (switch on AND a ledger), see `loadMetricsHistorySettings`. */
-	settings: Pick<MetricsHistorySettings, "enabled" | "intervalS" | "ttl" | "ttlDays">;
+	settings: Pick<MetricsHistorySettings, "enabled" | "intervalS" | "ttl" | "ttlDays"> & { series?: MetricsHistorySeriesMode };
 	greptime: Pick<GreptimeClient, "readMetricHistory"> | null;
 	now: () => number;
 	/** Absent in tests that want every request to read; the server passes one. */
@@ -649,8 +768,9 @@ export interface MetricHistoryAnswer {
 export async function metricHistoryAnswer(deps: MetricHistoryDeps, params: URLSearchParams): Promise<MetricHistoryAnswer> {
 	if (!deps.settings.enabled || deps.greptime === null) return { status: 404, body: { enabled: false } };
 	const series = params.get("series") ?? "";
-	if (!Object.hasOwn(METRIC_SERIES, series)) {
-		return { status: 400, body: { enabled: true, error: "series is not one of the recorded series", series: Object.keys(METRIC_SERIES) } };
+	const allowed = metricSeriesFor(deps.settings.series);
+	if (!Object.hasOwn(allowed, series)) {
+		return { status: 400, body: { enabled: true, error: "series is not one of the recorded series", series: Object.keys(allowed) } };
 	}
 	const windowS = parseHistoryWindow(params.get("window") ?? DEFAULT_WINDOW);
 	if (windowS === null) {
@@ -673,7 +793,7 @@ export async function metricHistoryAnswer(deps: MetricHistoryDeps, params: URLSe
 		} catch {
 			return { status: 503, body: { enabled: true, error: "the history store could not answer" } };
 		}
-		const spec = METRIC_SERIES[series]!;
+		const spec = allowed[series]!;
 		return {
 			status: 200,
 			body: {

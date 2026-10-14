@@ -32,7 +32,7 @@ import {
 	MAX_METRIC_BATCH,
 	MAX_METRIC_POINTS,
 	effectiveHistoryStep,
-	METRIC_SERIES,
+	ALL_METRIC_SERIES,
 	canonicalLabels,
 	readLabels,
 	type MetricDropReason,
@@ -2120,7 +2120,7 @@ export class GreptimeClient {
 				.map(
 					({ row, labels }) =>
 						`(${this.q(new Date(row.tsMs).toISOString())}, ${this.q(row.series)}, ${this.q(labels)}, ` +
-						`${this.q(METRIC_SERIES[row.series]!.kind)}, ${this.q(row.value)}, ${this.q(row.count)})`,
+						`${this.q(ALL_METRIC_SERIES[row.series]!.kind)}, ${this.q(row.value)}, ${this.q(row.count)})`,
 				)
 				.join(", ");
 			await this.sql(
@@ -2150,8 +2150,8 @@ export class GreptimeClient {
 	 * through the ledger's breaker.
 	 */
 	async readMetricHistory(query: MetricHistoryQuery): Promise<MetricHistoryResult> {
-		if (!Object.hasOwn(METRIC_SERIES, query.series)) throw new MetricHistoryInputError("the series is not one this substrate records");
-		const spec = METRIC_SERIES[query.series]!;
+		if (!Object.hasOwn(ALL_METRIC_SERIES, query.series)) throw new MetricHistoryInputError("the series is not one this substrate records");
+		const spec = ALL_METRIC_SERIES[query.series]!;
 		const retention = parseMetricsHistoryTtl(query.ttl ?? DEFAULT_METRICS_HISTORY_TTL);
 		if (retention === null) throw new MetricHistoryInputError("the metrics history ttl is not a whole number of days from 1d to 90d");
 		const limit = 8.64e15;

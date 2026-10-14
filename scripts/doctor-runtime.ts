@@ -29,11 +29,16 @@
  *   `SUBSTRATE_DOCTOR_EMIT=1`, and only when that class's drift set changed
  *   since the last emit (state file). The bearer is resolved like the other
  *   host jobs and never printed.
+ * - Sandbox rows (uplift-5 U5-2, `doctor-sandbox.ts`): each loaded unit's
+ *   `systemd-analyze security` exposure, report-only unless
+ *   `SUBSTRATE_EXPOSURE_MAX` is a number, and an INSTALLED sandbox drop-in
+ *   against its effective `systemctl show` values. Nothing is installed.
  */
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveBearer } from "../packages/cli/src/token.ts";
 import { LEGACY_ENV_KEYS, type LegacyEnvKey } from "../packages/mcp-server/src/legacy-env.ts";
+import { gatherHardeningRows, type HardeningOptions, hardeningOptionsFromEnv, parseSandboxExample, SANDBOX_EXAMPLE_SUFFIX, type SandboxSpec } from "./doctor-sandbox.ts";
 import { isSubstrateUnit, logicalLines, SHARED_ENV_FILE } from "./doctor-units.ts";
 import {
 	compareSliceWeights,
@@ -41,6 +46,7 @@ import {
 	type DiskGuardrails,
 	diskGuardrailsFromEnv,
 	gatherDiskGuardrails,
+	gatherDockerReclaim,
 	gatherIoEvidence,
 } from "./doctor-vps.ts";
 import { parseSystemctlShow, systemdTimestampToEpoch } from "./parity-check.ts";
@@ -143,6 +149,8 @@ export interface DeclaredUnit {
 	tasksMax: string | null;
 	/** `Environment=` NAMES from the unit and its drop-ins; values stay in the files. */
 	environmentNames: readonly string[];
+	/** The staged `<NN>-sandbox.conf.example` (uplift-5 U5-2), when the unit has one. Compared only once it is installed. */
+	sandbox?: SandboxSpec;
 }
 
 /** The `[Service]` (or `[Slice]`) directives of one unit text as ordered pairs; repeated keys stay repeated. */
@@ -232,15 +240,28 @@ function splitQuoted(value: string): string[] {
 	return tokens;
 }
 
-/** Every `substrate-*.service` under `dir` as declared ceilings, with its `.d/*.conf` drop-ins applied. */
+/** Every `substrate-*.service` under `dir` as declared ceilings, with its `.d/*.conf` drop-ins applied and its staged sandbox example attached. */
 export function loadDeclaredUnits(dir: string): DeclaredUnit[] {
 	const units: DeclaredUnit[] = [];
 	for (const name of readdirSync(dir).sort()) {
 		if (!isSubstrateUnit(name)) continue;
 		const base = readFileSync(join(dir, name), "utf8");
-		units.push(declaredUnit(name, base, readDropIns(join(dir, `${name}.d`))));
+		const dropInDir = join(dir, `${name}.d`);
+		const sandbox = readSandboxExample(dropInDir);
+		units.push({ ...declaredUnit(name, base, readDropIns(dropInDir)), ...(sandbox === undefined ? {} : { sandbox }) });
 	}
 	return units;
+}
+
+function readSandboxExample(dir: string): SandboxSpec | undefined {
+	let names: string[];
+	try {
+		names = readdirSync(dir).sort();
+	} catch {
+		return undefined;
+	}
+	const example = names.find((n) => n.endsWith(SANDBOX_EXAMPLE_SUFFIX));
+	return example === undefined ? undefined : parseSandboxExample(example, readFileSync(join(dir, example), "utf8"));
 }
 
 function readDropIns(dir: string): string[] {
@@ -744,6 +765,10 @@ export interface DoctorOptions {
 	envFile: string;
 	/** Disk guardrails (uplift-4 S3). Absent: those rows are not gathered. */
 	disk?: DiskGuardrails;
+	/** Exposure and installed-drop-in rows (uplift-5 U5-2). Absent: those rows are not gathered. */
+	hardening?: HardeningOptions;
+	/** The report-only `docker reclaimable` row (uplift-5 U5-2). Absent or false: no docker call. */
+	dockerReclaim?: boolean;
 }
 
 /** The deploy floor as `deploy-release.sh` reads it: 0-9999 whole gigabytes, default 5. */
@@ -765,13 +790,21 @@ export function optionsFromEnv(env: Record<string, string | undefined>): DoctorO
 		maxSwapPagesPerSecond: nonNegativeOr(env.SUBSTRATE_DOCTOR_SWAP_PAGES_PER_S, DEFAULT_SWAP_PAGES_PER_SECOND),
 		envFile: SHARED_ENV_FILE,
 		disk: diskGuardrailsFromEnv(env, RELEASE_ROOT),
+		hardening: hardeningOptionsFromEnv(env),
+		dockerReclaim: true,
 	};
 }
 
 /** Every check, in class order. The only function that touches the host. */
 export async function gatherRows(policy: Policy, host: Host, options: DoctorOptions): Promise<Row[]> {
 	const rows: Row[] = [];
-	for (const unit of policy.units) rows.push(...compareUnit(unit, show(host, unit.name, SYSTEMCTL_UNIT_PROPS)));
+	const loaded: DeclaredUnit[] = [];
+	for (const unit of policy.units) {
+		const shownUnit = show(host, unit.name, SYSTEMCTL_UNIT_PROPS);
+		rows.push(...compareUnit(unit, shownUnit));
+		if (shownUnit?.get("LoadState") === "loaded") loaded.push(unit);
+	}
+	if (options.hardening !== undefined) rows.push(...gatherHardeningRows(host, loaded, (name, props) => show(host, name, props), options.hardening));
 	const sliceShown = show(host, SLICE_UNIT, SYSTEMCTL_SLICE_PROPS);
 	rows.push(compareSlice(policy.sliceMemoryLow, sliceShown));
 	rows.push(...compareSliceWeights(policy.sliceWeights, sliceShown, gatherIoEvidence(host)));
@@ -780,6 +813,7 @@ export async function gatherRows(policy: Policy, host: Host, options: DoctorOpti
 	const df = host.run(["df", "-Pk", "--", RELEASE_ROOT]);
 	rows.push(compareDisk(df === null || df.code !== 0 ? null : parseDfAvailableKb(df.out), options.minFreeGb));
 	if (options.disk !== undefined) rows.push(...gatherDiskGuardrails(host, options.disk));
+	if (options.dockerReclaim === true) rows.push(...gatherDockerReclaim(host));
 	const before = parseVmstatSwap(host.readText("/proc/vmstat") ?? "");
 	await host.sleep(SWAP_SAMPLE_MS);
 	const after = parseVmstatSwap(host.readText("/proc/vmstat") ?? "");
@@ -994,6 +1028,11 @@ the policy declared under infra/vps. Read-only. Exit 0 when nothing drifts,
 2 on any drift, 1 on a usage error. --emit posts one warning per drift class
 to SUBSTRATE_URL/events when SUBSTRATE_DOCTOR_EMIT=1, deduplicated through
 SUBSTRATE_DOCTOR_STATE (default ${DEFAULT_STATE_FILE}).
+
+Exposure rows (systemd-analyze security, per loaded unit) are report-only until
+SUBSTRATE_EXPOSURE_MAX is a number from 0 to 10; a unit above it is drift. An
+installed 30-sandbox.conf drop-in is compared with systemctl show. The
+"docker reclaimable" row is report-only and never prunes.
 `;
 
 export const realHost: Host = {

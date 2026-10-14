@@ -116,6 +116,8 @@ Each step is its own decision. Stop when `df -h /` is above the floor you need.
 A deploy refused by the floor has written nothing: no tree, no symlink, no
 restart. Reclaim, then run the same command again.
 
+The runtime doctor prints one report-only `docker reclaimable` row (`docker system df`, ten-second bound) so the Docker share of the disk is visible next to the root-disk row; it is the engine's space, mostly not substrate's, and the doctor never prunes it (steps 2-4 stay the operator's).
+
 The runtime doctor reports the deploy reserve before a deploy trips over it:
 `bun scripts/doctor-runtime.ts` (`infra/vps/README.md`, "Runtime doctor")
 reads `df -Pk /opt/agent-substrate` and prints a `disk` row — `drift` below

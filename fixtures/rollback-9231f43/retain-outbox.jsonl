@@ -1,0 +1,4 @@
+{"id":"rob_aaaaaaaaaaaa","bank":"sub-cursor","document_id":"doc-1","entry_id":"mem_1","surface":"cursor","entry_hash":"h1","attempts":1,"next_at":1760428830000,"last_reason":"retain-timeout","enqueued_at":1760428800000}
+{"id":"rob_bbbbbbbbbbbb","bank":"sub-grok-bot","document_id":"doc-2","entry_id":"mem_2","surface":"grok-bot","entry_hash":"h2","session_id":"sess-1","attempts":2,"next_at":1760428900000,"last_reason":"retain-server","enqueued_at":1760428810000}
+{"id":"rob_cccccccccccc","bank":"sub-cursor","document_id":"doc-1","entry_id":"mem_1","surface":"cursor","entry_hash":"h1","attempts":3,"next_at":1760429000000,"last_reason":"retain-rate-limit","enqueued_at":1760428820000}
+{"id":"rob_torn

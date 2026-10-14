@@ -73,6 +73,25 @@ esac
 	writeExec(
 		join(bin, "bun"),
 		`#!/usr/bin/env bash
+# The two pre-swap hooks are recorded apart from installs, so the install
+# assertions below keep counting installs only. Each records what it saw of the
+# release link: the hooks must run while \`current\` still names the old release.
+case "\${1:-}" in
+  scripts/deploy-preflight.ts) hook=preflight ;;
+  scripts/release-gate.ts) hook=gate ;;
+  *) hook="" ;;
+esac
+if [[ -n "$hook" ]]; then
+  printf '%s\\n' "$*" >> "$STUB_LOG/$hook"
+  printf '%s\\n' "$PWD" >> "$STUB_LOG/$hook-cwd"
+  printf '%s\\n' "\${SUBSTRATE_DEPLOY_MIN_FREE_GB:-}" >> "$STUB_LOG/$hook-floor"
+  printf '%s\\n' "$(readlink "$SUBSTRATE_RELEASE_ROOT/current" 2>/dev/null || echo none)" >> "$STUB_LOG/$hook-current"
+  printf '%s\\n' "$hook" >> "$STUB_LOG/hook-order"
+  if [[ -f "$STUB_LOG/$hook-output" ]]; then cat "$STUB_LOG/$hook-output"; fi
+  code=0
+  if [[ -f "$STUB_LOG/$hook-exit" ]]; then code=$(cat "$STUB_LOG/$hook-exit"); fi
+  exit "$code"
+fi
 printf '%s\\n' "$*" >> "$STUB_LOG/bun"
 printf '%s\\n' "$PWD" >> "$STUB_LOG/bun-cwd"
 if [[ "\${FAIL_BUN:-}" == "1" ]]; then exit 1; fi
@@ -189,6 +208,9 @@ function stage(env: NodeJS.ProcessEnv, tag: string, sha: string, onMain: boolean
 	writeFileSync(join(tree, "packages/collectors/src/grok.ts"), "");
 	writeFileSync(join(tree, "packages/collectors/src/herdr.ts"), "");
 	writeFileSync(join(tree, "packages/collectors/src/muse.ts"), "");
+	mkdirSync(join(tree, "scripts"), { recursive: true });
+	writeFileSync(join(tree, "scripts/deploy-preflight.ts"), "");
+	writeFileSync(join(tree, "scripts/release-gate.ts"), "");
 	if (onMain) writeFileSync(join(state, "main"), `${readFileSync(join(state, "main"), "utf8")}${sha}\n`);
 }
 
@@ -662,6 +684,298 @@ describe("deploy-release.sh", () => {
 		expect(dry.status).toBe(1);
 		expect(dry.stdout).toContain("refuse: releases/not-a-sha");
 		expect(existsSync(join(h.root, "releases", "not-a-sha"))).toBe(true);
+	});
+});
+
+/** What a hook stub recorded, one entry per call (empty when it never ran). */
+function seen(h: Harness, name: string): string[] {
+	const path = join(h.log, name);
+	return existsSync(path) ? readFileSync(path, "utf8").split("\n").filter((line) => line !== "") : [];
+}
+
+/** Makes the stubbed preflight or gate exit with `code`. */
+function hookExits(h: Harness, hook: "preflight" | "gate", code: number): void {
+	writeFileSync(join(h.log, `${hook}-exit`), String(code));
+}
+
+/** A harness with v1 and v2 staged, v1 already deployed and the hook logs cleared, so what follows is one deploy over a live release. */
+function live(): { h: Harness; before: { systemctl: string; health: string[] } } {
+	const h = harness();
+	stage(h.env, "v1", SHA1, true);
+	stage(h.env, "v2", SHA2, true);
+	expect(deploy(h, ["v1"]).status).toBe(0);
+	for (const name of ["preflight", "preflight-cwd", "preflight-floor", "preflight-current", "gate", "gate-cwd", "gate-current", "hook-order"]) rmSync(join(h.log, name), { force: true });
+	return { h, before: { systemctl: readFileSync(join(h.log, "systemctl"), "utf8"), health: seen(h, "health") } };
+}
+
+/** `current` was not touched, nothing restarted, nothing health-checked: the refusal came before the swap. */
+function expectUntouched(h: Harness, before: { systemctl: string; health: string[] }, stderr: string): void {
+	expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+	expect(existsSync(join(h.root, "previous"))).toBe(false);
+	expect(readFileSync(join(h.log, "systemctl"), "utf8")).toBe(before.systemctl);
+	expect(seen(h, "health")).toEqual(before.health);
+	expect(stderr).not.toContain("rolling back");
+}
+
+describe("deploy-release.sh pre-swap hooks", () => {
+	const bareBin = "/usr/bin:/bin";
+	const bunOnBarePath = spawnSync("sh", ["-c", "command -v bun"], { env: { PATH: bareBin }, encoding: "utf8" }).status === 0;
+
+	test("report is the default: the preflight runs once per deploy, from the new release, while current still names the old one", () => {
+		const { h } = live();
+		const env = { ...h.env, SUBSTRATE_PREFLIGHT_STATE_DIR: "/state/dir", SUBSTRATE_PREFLIGHT_INSTALLED_UNITS_DIR: "/units/dir" };
+		const result = deploy(h, ["v2"], env);
+		expect(result.status).toBe(0);
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA2}`);
+		expect(seen(h, "preflight")).toEqual([
+			`scripts/deploy-preflight.ts ${join(h.root, "releases", SHA2)} --env-file ${h.env.SUBSTRATE_HEALTH_ENV_FILE} --state-dir /state/dir --installed-units-dir /units/dir`,
+		]);
+		expect(seen(h, "preflight-cwd")[0]).toBe(join(h.root, "releases", SHA2));
+		// The same floor the build gate uses, so the two cannot disagree.
+		expect(seen(h, "preflight-floor")).toEqual(["5"]);
+		// It ran BEFORE the swap: a refusal here has nothing to roll back.
+		expect(seen(h, "preflight-current")).toEqual([`releases/${SHA1}`]);
+		expect(result.stderr).toContain("preflight passed (mode report)");
+		// stdout is still the one parseable line.
+		expect(result.stdout.trim()).toBe(`current -> releases/${SHA2}`);
+		// A first deploy, with no current at all, runs it too.
+		const first = harness();
+		stage(first.env, "v1", SHA1, true);
+		expect(deploy(first, ["v1"]).status).toBe(0);
+		expect(seen(first, "preflight-current")).toEqual(["none"]);
+	});
+
+	test("report never changes a deploy outcome: a failing, unavailable or crashing preflight still deploys, and its table goes to stderr", () => {
+		for (const code of [1, 2, 139]) {
+			const { h } = live();
+			hookExits(h, "preflight", code);
+			writeFileSync(join(h.log, "preflight-output"), "TABLE-ROW config loadConfig error\n");
+			const result = deploy(h, ["v2"]);
+			expect(result.status).toBe(0);
+			expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA2}`);
+			expect(result.stderr).toContain("TABLE-ROW config loadConfig error");
+			expect(result.stderr).toContain(`preflight did not pass (exit ${code}); SUBSTRATE_DEPLOY_PREFLIGHT=report continues`);
+			expect(result.stdout).not.toContain("TABLE-ROW");
+			expect(result.stdout.trim()).toBe(`current -> releases/${SHA2}`);
+		}
+	});
+
+	test("enforce refuses before the swap when the preflight does not pass, and leaves current, the units and the health check alone", () => {
+		const { h, before } = live();
+		hookExits(h, "preflight", 1);
+		const refused = deploy(h, ["v2"], { ...h.env, SUBSTRATE_DEPLOY_PREFLIGHT: "enforce" });
+		expect(refused.status).not.toBe(0);
+		expect(refused.stderr).toContain("refusing to swap current");
+		expect(refused.stderr).toContain("SUBSTRATE_DEPLOY_PREFLIGHT=enforce");
+		expect(refused.stderr).toContain("current was not changed");
+		expectUntouched(h, before, refused.stderr);
+
+		// Exit 2 (the preflight itself failed to run) refuses the same way: enforce is fail-closed.
+		hookExits(h, "preflight", 2);
+		const crashed = deploy(h, ["v2"], { ...h.env, SUBSTRATE_DEPLOY_PREFLIGHT: "enforce" });
+		expect(crashed.status).not.toBe(0);
+		expectUntouched(h, before, crashed.stderr);
+
+		// On a first deploy nothing is published either.
+		const first = harness();
+		stage(first.env, "v1", SHA1, true);
+		hookExits(first, "preflight", 1);
+		expect(deploy(first, ["v1"], { ...first.env, SUBSTRATE_DEPLOY_PREFLIGHT: "enforce" }).status).not.toBe(0);
+		expect(existsSync(join(first.root, "current"))).toBe(false);
+		expect(existsSync(join(first.log, "systemctl"))).toBe(false);
+
+		// A pass under enforce deploys.
+		hookExits(h, "preflight", 0);
+		expect(deploy(h, ["v2"], { ...h.env, SUBSTRATE_DEPLOY_PREFLIGHT: "enforce" }).status).toBe(0);
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA2}`);
+	});
+
+	test("off skips the preflight entirely", () => {
+		const { h } = live();
+		hookExits(h, "preflight", 1);
+		const result = deploy(h, ["v2"], { ...h.env, SUBSTRATE_DEPLOY_PREFLIGHT: "off" });
+		expect(result.status).toBe(0);
+		expect(seen(h, "preflight")).toEqual([]);
+		expect(result.stderr).not.toContain("preflight");
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA2}`);
+	});
+
+	test("a mode that is not off, report or enforce is refused before git is asked or anything is built, and the lock is released", () => {
+		for (const [name, value] of [
+			["SUBSTRATE_DEPLOY_PREFLIGHT", "enforc"],
+			["SUBSTRATE_DEPLOY_PREFLIGHT", ""],
+			["SUBSTRATE_DEPLOY_GATE", "on"],
+		] as const) {
+			const h = harness();
+			stage(h.env, "v1", SHA1, true);
+			// An empty value is the same as unset: the default applies and the deploy goes ahead.
+			const result = deploy(h, ["v1"], { ...h.env, [name]: value });
+			if (value === "") {
+				expect(result.status).toBe(0);
+				continue;
+			}
+			expect(result.status).not.toBe(0);
+			expect(result.stderr).toContain(`${name} must be off, report or enforce`);
+			expect(seen(h, "git")).toEqual([]);
+			expect(seen(h, "bun")).toEqual([]);
+			expect(releases(h.root)).toEqual([]);
+			expect(existsSync(join(h.root, ".deploy.lock"))).toBe(false);
+		}
+	});
+
+	test.skipIf(bunOnBarePath)("without bun on PATH report continues and enforce refuses, current untouched", () => {
+		const h = harness();
+		stage(h.env, "v1", SHA1, true);
+		stage(h.env, "v2", SHA2, true);
+		// Both trees built (no restart, so nothing is pruned), current back on v1; only then does bun go away.
+		const norestart = { ...h.env, SUBSTRATE_RELEASE_RESTART: "0" };
+		expect(deploy(h, ["v2"], norestart).status).toBe(0);
+		expect(deploy(h, ["v1"], norestart).status).toBe(0);
+		rmSync(join(h.log, "..", "bin", "bun"));
+		const noBun = { ...h.env, PATH: `${join(h.log, "..", "bin")}:${bareBin}` };
+
+		const report = deploy(h, ["v2"], noBun);
+		expect(report.status).toBe(0);
+		expect(report.stderr).toContain("bun is not on PATH, so scripts/deploy-preflight.ts did not run");
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA2}`);
+
+		expect(deploy(h, ["v1"], { ...noBun, SUBSTRATE_RELEASE_RESTART: "0" }).status).toBe(0);
+		const enforce = deploy(h, ["v2"], { ...noBun, SUBSTRATE_DEPLOY_PREFLIGHT: "enforce" });
+		expect(enforce.status).not.toBe(0);
+		expect(enforce.stderr).toContain("refusing to swap current");
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+	});
+
+	test("a release that does not ship the preflight is unavailable: report continues, enforce refuses", () => {
+		const h = harness();
+		stage(h.env, "v1", SHA1, true);
+		stage(h.env, "v2", SHA2, true);
+		rmSync(join(h.env.STUB_STATE ?? "", "trees", SHA2, "scripts/deploy-preflight.ts"));
+		expect(deploy(h, ["v1"]).status).toBe(0);
+		const enforce = deploy(h, ["v2"], { ...h.env, SUBSTRATE_DEPLOY_PREFLIGHT: "enforce" });
+		expect(enforce.status).not.toBe(0);
+		expect(enforce.stderr).toContain("the release has no scripts/deploy-preflight.ts");
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+		const report = deploy(h, ["v2"]);
+		expect(report.status).toBe(0);
+		expect(report.stderr).toContain("the release has no scripts/deploy-preflight.ts");
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA2}`);
+	});
+
+	test("the gate is off by default: the script is never run and no receipt is printed", () => {
+		const { h } = live();
+		hookExits(h, "gate", 1);
+		const result = deploy(h, ["v2"]);
+		expect(result.status).toBe(0);
+		expect(seen(h, "gate")).toEqual([]);
+		expect(result.stderr).not.toContain("gate-receipt");
+	});
+
+	test("gate report prints a receipt and continues on pass, fail and unavailable; it runs from the new release after the preflight", () => {
+		for (const [code, result] of [
+			[0, "pass"],
+			[1, "fail"],
+			[2, "unavailable"],
+		] as const) {
+			const { h } = live();
+			hookExits(h, "gate", code);
+			const deployed = deploy(h, ["v2"], { ...h.env, SUBSTRATE_DEPLOY_GATE: "report" });
+			expect(deployed.status).toBe(0);
+			expect(deployed.stderr).toContain(`gate-receipt mode=report result=${result} exit=${code}`);
+			expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA2}`);
+			expect(seen(h, "gate")).toEqual(["scripts/release-gate.ts"]);
+			expect(seen(h, "gate-cwd")).toEqual([join(h.root, "releases", SHA2)]);
+			expect(seen(h, "gate-current")).toEqual([`releases/${SHA1}`]);
+			expect(seen(h, "hook-order")).toEqual(["preflight", "gate"]);
+		}
+	});
+
+	test("gate enforce refuses before the swap on a failed AND on an unavailable gate, and passes only on 0", () => {
+		for (const [code, result] of [
+			[1, "fail"],
+			[2, "unavailable"],
+			[3, "unavailable"],
+		] as const) {
+			const { h, before } = live();
+			hookExits(h, "gate", code);
+			const refused = deploy(h, ["v2"], { ...h.env, SUBSTRATE_DEPLOY_GATE: "enforce" });
+			expect(refused.status).not.toBe(0);
+			expect(refused.stderr).toContain(`the release gate is ${result} (exit ${code}) under SUBSTRATE_DEPLOY_GATE=enforce`);
+			expectUntouched(h, before, refused.stderr);
+		}
+		const { h } = live();
+		const passed = deploy(h, ["v2"], { ...h.env, SUBSTRATE_DEPLOY_GATE: "enforce" });
+		expect(passed.status).toBe(0);
+		expect(passed.stderr).toContain("gate-receipt mode=enforce result=pass exit=0");
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA2}`);
+	});
+
+	test("a release without a gate script is unavailable: enforce refuses it", () => {
+		const h = harness();
+		stage(h.env, "v1", SHA1, true);
+		stage(h.env, "v2", SHA2, true);
+		rmSync(join(h.env.STUB_STATE ?? "", "trees", SHA2, "scripts/release-gate.ts"));
+		expect(deploy(h, ["v1"]).status).toBe(0);
+		const refused = deploy(h, ["v2"], { ...h.env, SUBSTRATE_DEPLOY_GATE: "enforce" });
+		expect(refused.status).not.toBe(0);
+		expect(refused.stderr).toContain("the release has no scripts/release-gate.ts");
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+	});
+
+	test("an enforced preflight refusal stops the deploy before the gate runs", () => {
+		const { h } = live();
+		hookExits(h, "preflight", 1);
+		const refused = deploy(h, ["v2"], { ...h.env, SUBSTRATE_DEPLOY_PREFLIGHT: "enforce", SUBSTRATE_DEPLOY_GATE: "enforce" });
+		expect(refused.status).not.toBe(0);
+		expect(seen(h, "hook-order")).toEqual(["preflight"]);
+	});
+
+	test("--dry-run runs the preflight against the current release with report semantics, never the gate, and changes nothing", () => {
+		const { h, before } = live();
+		hookExits(h, "preflight", 1);
+		writeFileSync(join(h.log, "preflight-output"), "TABLE-ROW units drift warn\n");
+		const releasesBefore = releases(h.root);
+		const dry = deploy(h, ["--dry-run"], { ...h.env, SUBSTRATE_DEPLOY_PREFLIGHT: "enforce", SUBSTRATE_DEPLOY_GATE: "enforce" });
+		// Enforce does not turn a dry run into a refusal: it is a report.
+		expect(dry.status).toBe(0);
+		expect(dry.stdout).toContain(`dry-run: preflight of the current release ${SHA1}, report only`);
+		expect(dry.stdout).toContain("TABLE-ROW units drift warn");
+		expect(dry.stdout).toContain("dry-run: preflight exit 1; nothing was changed");
+		expect(seen(h, "preflight-cwd")).toEqual([join(h.root, "releases", SHA1)]);
+		expect(seen(h, "gate")).toEqual([]);
+		expect(readFileSync(join(h.log, "systemctl"), "utf8")).toBe(before.systemctl);
+		expect(releases(h.root)).toEqual(releasesBefore);
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+		expect(existsSync(join(h.root, ".deploy.lock"))).toBe(false);
+
+		// Off prints nothing about it; with no current release there is nothing to run it against.
+		rmSync(join(h.log, "preflight"));
+		const off = deploy(h, ["--dry-run"], { ...h.env, SUBSTRATE_DEPLOY_PREFLIGHT: "off" });
+		expect(off.status).toBe(0);
+		expect(off.stdout).not.toContain("preflight");
+		expect(seen(h, "preflight")).toEqual([]);
+		const bare = harness();
+		mkdirSync(join(bare.root, "releases"), { recursive: true });
+		const none = deploy(bare, ["--dry-run"]);
+		expect(none.status).toBe(0);
+		expect(none.stdout).toContain("dry-run: preflight skipped: there is no current release to run it against");
+		const typo = deploy(h, ["--dry-run"], { ...h.env, SUBSTRATE_DEPLOY_PREFLIGHT: "enforc" });
+		expect(typo.status).toBe(0);
+		expect(typo.stdout).toContain("is not off, report or enforce");
+		expect(seen(h, "preflight")).toEqual([]);
+	});
+
+	test("rollback is never gated: no preflight, no gate, and a mistyped mode does not block it", () => {
+		const { h } = live();
+		expect(deploy(h, ["v2"]).status).toBe(0);
+		const ran = seen(h, "preflight").length;
+		hookExits(h, "preflight", 1);
+		hookExits(h, "gate", 1);
+		const rolled = deploy(h, ["rollback"], { ...h.env, SUBSTRATE_DEPLOY_PREFLIGHT: "bogus", SUBSTRATE_DEPLOY_GATE: "enforce" });
+		expect(rolled.status).toBe(0);
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+		expect(seen(h, "preflight")).toHaveLength(ran);
+		expect(seen(h, "gate")).toEqual([]);
 	});
 });
 
