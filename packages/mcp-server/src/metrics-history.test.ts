@@ -5,11 +5,25 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { AddressInfo } from "node:net";
-import { MetricRegistry, SubstrateInstruments } from "@substrate/observability";
+import {
+	ADMISSION_DECISIONS,
+	BRIEF_RECALL_RESULTS,
+	CACHE_METRIC_RESULTS,
+	DOCS_SEARCH_OUTCOMES,
+	MEMORY_EXPIRED_MODES,
+	METRIC,
+	MetricRegistry,
+	PLANES,
+	RECALL_PREFETCH_RESULTS,
+	SubstrateInstruments,
+} from "@substrate/observability";
 import { loadConfig, loadMetricsHistorySettings } from "./config.ts";
 import type { MetricHistoryPoint } from "./greptime.ts";
 import {
+	ALL_METRIC_SERIES,
 	DROPPED_METRIC,
+	EXTENDED_METRIC_SERIES,
+	MAX_METRIC_BATCH,
 	MAX_METRIC_POINTS,
 	METRIC_SERIES,
 	MetricHistoryMemo,
@@ -20,6 +34,7 @@ import {
 	counterDelta,
 	effectiveHistoryStep,
 	metricHistoryAnswer,
+	metricSeriesFor,
 	parseHistoryStep,
 	parseHistoryWindow,
 	readLabels,
@@ -30,6 +45,7 @@ import {
 import { createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
+import { SURFACES } from "./types.ts";
 
 /** What the route hands the client; the fakes below take it and report the step the real client would run at. */
 type ReadQuery = {
@@ -42,7 +58,7 @@ type ReadQuery = {
 
 describe("SUBSTRATE_METRICS_HISTORY*", () => {
 	test("defaults: off, 60 s, 14d", () => {
-		expect(loadMetricsHistorySettings({})).toEqual({ enabled: false, intervalS: 60, ttl: "14d", ttlDays: 14, problems: [] });
+		expect(loadMetricsHistorySettings({})).toEqual({ enabled: false, intervalS: 60, ttl: "14d", ttlDays: 14, series: "core", problems: [] });
 		expect(loadConfig({}).metricsHistory.enabled).toBe(false);
 	});
 
@@ -875,5 +891,303 @@ describe("GET /slo/history over HTTP", () => {
 		} finally {
 			harness.close();
 		}
+	});
+
+	test("SUBSTRATE_METRICS_HISTORY_SERIES reaches the route: an extended series is a 400 by default and a 200 under `extended`, and unknown values fall back with a boot problem", async () => {
+		const fake = {
+			async readMetricHistory(query: ReadQuery) {
+				return { points: [{ tsMs: Date.now() - 1000, labels: { result: "would_include" }, value: 3, count: 3 }], stepS: effectiveHistoryStep(query.series, query.toMs - query.fromMs, query.stepS) };
+			},
+		};
+		const base = { ...WITH_LEDGER, SUBSTRATE_METRICS_HISTORY: "on" };
+		const core = await serve(base, fake);
+		try {
+			const refused = await fetch(`${core.base}/slo/history?series=brief.recall`);
+			expect(refused.status).toBe(400);
+			expect(((await refused.json()) as { series: string[] }).series).toEqual(Object.keys(METRIC_SERIES));
+		} finally {
+			core.close();
+		}
+
+		const extended = await serve({ ...base, SUBSTRATE_METRICS_HISTORY_SERIES: "extended" }, fake);
+		try {
+			const served = await fetch(`${extended.base}/slo/history?series=brief.recall&window=2h`);
+			expect(served.status).toBe(200);
+			expect(await served.json()).toMatchObject({ series: "brief.recall", kind: "counter", unit: "{brief}", aggregate: "sum", points: [{ labels: { result: "would_include" }, value: 3 }] });
+			const stillCore = await fetch(`${extended.base}/slo/history?series=plane.availability&window=2h`);
+			expect(stillCore.status).toBe(200);
+		} finally {
+			extended.close();
+		}
+
+		expect(loadConfig({ ...base, SUBSTRATE_METRICS_HISTORY_SERIES: "everything" }).metricsHistory).toMatchObject({ series: "core" });
+	});
+});
+
+/** One interval of activity that touches every instrument an extended series reads. */
+function extendedActivity(instruments: SubstrateInstruments): void {
+	for (let i = 0; i < 3; i++) instruments.recordCache({ result: "hit", mode: "on", cacheClass: "brief" });
+	for (let i = 0; i < 2; i++) instruments.recordCache({ result: "miss", mode: "on", cacheClass: "memory-search" });
+	instruments.recordCache({ result: "would_serve_stale", mode: "on", cacheClass: "brief" });
+	instruments.recordCache({ result: "stale", mode: "on", cacheClass: "brief" });
+	instruments.recordCache({ result: "refresh", mode: "degraded", cacheClass: "brief" });
+	instruments.recordBriefProfile({ surface: "grok-bot", profile: "full", mode: "shadow", bytesSaved: 1200 });
+	instruments.recordBriefProfile({ surface: "claude-code", profile: "full", mode: "shadow", bytesSaved: 300 });
+	// A profile with nothing measured adds nothing to the saved bytes.
+	instruments.recordBriefProfile({ surface: "grok-bot", profile: "full", mode: "off", bytesSaved: null });
+	for (let i = 0; i < 2; i++) instruments.recordBriefRecall({ surface: "grok-bot", result: "included" });
+	instruments.recordBriefRecall({ surface: "claude-code", result: "cold" });
+	instruments.recordBriefRecall({ surface: "grok-bot", result: "stale" });
+	for (let i = 0; i < 3; i++) instruments.recordRecallPrefetch({ surface: "grok-bot", result: "ok" });
+	instruments.recordRecallPrefetch({ surface: "grok-bot", result: "error" });
+	for (let i = 0; i < 4; i++) instruments.recordMemoryExpired({ surface: "grok-bot", kind: "note", mode: "served" });
+	instruments.recordMemoryExpired({ surface: "claude-code", kind: "decision", mode: "hidden" });
+	instruments.setHindsightOutbox({ size: 7, oldestAgeSeconds: 31.5, durable: true });
+	instruments.observeIndexArchiveAge(() => 1_000, () => 61_000);
+}
+
+/** Rows of one series as `{label: value}` (or the single value of an unlabelled one). */
+function byLabel(rows: MetricSampleRow[], series: string): Record<string, number> {
+	return Object.fromEntries(seriesRows(rows, series).map((row) => [Object.values(row.labels)[0] ?? "", row.value]));
+}
+
+describe("the extended series (uplift-5 S6)", () => {
+	const core = Object.keys(METRIC_SERIES);
+	const extra = Object.keys(EXTENDED_METRIC_SERIES);
+
+	test("the allow-list is two tiers: core is exactly today's 11, extended adds distinct closed series, and the mode picks one", () => {
+		expect(core).toHaveLength(11);
+		expect(extra.length).toBeGreaterThan(0);
+		expect(extra.filter((name) => core.includes(name))).toEqual([]);
+		expect(Object.keys(ALL_METRIC_SERIES)).toEqual([...core, ...extra]);
+		expect(metricSeriesFor(undefined)).toBe(METRIC_SERIES);
+		expect(metricSeriesFor("core")).toBe(METRIC_SERIES);
+		expect(metricSeriesFor("extended")).toBe(ALL_METRIC_SERIES);
+		for (const name of extra) {
+			expect(name).toMatch(/^[a-z0-9_.]+$/);
+			const spec = EXTENDED_METRIC_SERIES[name]!;
+			// Counters add; a gauge is the worst reading in a step. Neither is ever averaged.
+			expect(spec.agg).toBe(spec.kind === "counter" ? "sum" : "max");
+			expect(spec.kind === "counter" || spec.kind === "gauge").toBe(true);
+			if (spec.label !== null) expect(spec.values?.size).toBeGreaterThan(0);
+		}
+	});
+
+	test("SUBSTRATE_METRICS_HISTORY_SERIES: core by default; `extended` in any case; anything else is core with a problem that quotes nothing", () => {
+		expect(loadMetricsHistorySettings({})).toMatchObject({ series: "core", problems: [] });
+		expect(loadMetricsHistorySettings({ SUBSTRATE_METRICS_HISTORY_SERIES: "core" })).toMatchObject({ series: "core", problems: [] });
+		expect(loadMetricsHistorySettings({ SUBSTRATE_METRICS_HISTORY_SERIES: "" })).toMatchObject({ series: "core", problems: [] });
+		for (const raw of ["extended", " EXTENDED ", "Extended"]) {
+			expect(loadMetricsHistorySettings({ SUBSTRATE_METRICS_HISTORY_SERIES: raw })).toMatchObject({ series: "extended", problems: [] });
+		}
+		for (const raw of ["all", "ext", "1", "true", "extended; DROP TABLE metric_samples"]) {
+			const settings = loadMetricsHistorySettings({ SUBSTRATE_METRICS_HISTORY_SERIES: raw });
+			expect(settings.series).toBe("core");
+			expect(settings.problems).toHaveLength(1);
+			expect(settings.problems[0]).toContain("SUBSTRATE_METRICS_HISTORY_SERIES");
+			expect(settings.problems[0]).not.toContain("DROP");
+		}
+		expect(loadConfig({ SUBSTRATE_METRICS_HISTORY_SERIES: "extended" }).metricsHistory.series).toBe("extended");
+	});
+
+	test("core mode is today's behaviour: the default and an explicit `core` sample the same rows, and none of them is an extended series", () => {
+		const instruments = new SubstrateInstruments();
+		const collectors = [new SampleCollector(), new SampleCollector("core"), new SampleCollector("extended")];
+		for (const collector of collectors) collector.prime(instruments.snapshot());
+		extendedActivity(instruments);
+		for (let i = 0; i < 5; i++) instruments.recordBrief({ surface: "grok-bot", ok: true, durationMs: 40 });
+		instruments.recordEmit({ surface: "grok-bot", kind: "note", stored: true, durationMs: 10 });
+		const snapshot = instruments.snapshot();
+		const [byDefault, explicit, extended] = collectors.map((collector) => collector.collect(snapshot, 11, 5000)) as [MetricSampleRow[], MetricSampleRow[], MetricSampleRow[]];
+
+		expect(explicit).toEqual(byDefault);
+		expect(byDefault.length).toBeGreaterThan(0);
+		for (const row of byDefault) expect(Object.hasOwn(METRIC_SERIES, row.series)).toBe(true);
+		// Extended is core plus more, never core changed.
+		expect(extended.filter((row) => Object.hasOwn(METRIC_SERIES, row.series))).toEqual(byDefault);
+		expect(extended.length).toBeGreaterThan(byDefault.length);
+	});
+
+	test("extended counters are the interval's delta summed over class and mode, one row per closed label value", () => {
+		const instruments = new SubstrateInstruments();
+		// Lifetime activity before the baseline must not show up as one interval's.
+		for (let i = 0; i < 100; i++) {
+			instruments.recordCache({ result: "hit", mode: "on", cacheClass: "brief" });
+			instruments.recordBriefRecall({ surface: "grok-bot", result: "included" });
+		}
+		const collector = new SampleCollector("extended");
+		collector.prime(instruments.snapshot());
+		extendedActivity(instruments);
+		const rows = collector.collect(instruments.snapshot(), null, 8000);
+
+		expect(byLabel(rows, "cache.operations")).toEqual({ hit: 3, miss: 2, would_serve_stale: 1, stale: 1, refresh: 1 });
+		expect(seriesRows(rows, "brief.profile_bytes_saved")).toEqual([{ tsMs: 8000, series: "brief.profile_bytes_saved", labels: {}, value: 1500, count: 1500 }]);
+		expect(byLabel(rows, "brief.recall")).toEqual({ included: 2, cold: 1, stale: 1 });
+		expect(byLabel(rows, "recall.prefetch")).toEqual({ ok: 3, error: 1 });
+		expect(byLabel(rows, "memory.expired")).toEqual({ served: 4, hidden: 1 });
+		for (const row of seriesRows(rows, "cache.operations")) expect(row.count).toBe(row.value);
+		// The core ratio is still taken from the same counter: 3 hits of 5 lookups.
+		expect(seriesRows(rows, "cache.hit_ratio")[0]).toMatchObject({ value: 0.6, count: 5 });
+		for (const row of rows) expect(canonicalLabels(row.series, row.labels)).not.toBeNull();
+	});
+
+	test("the gauges are the reading at the sample, every interval, and a gauge nobody set has no row", () => {
+		const instruments = new SubstrateInstruments();
+		const collector = new SampleCollector("extended");
+		// Before anything is set: no outbox, no archive, so no gauge row. This first call is also the counters' baseline.
+		expect(collector.collect(instruments.snapshot(), null, 1000)).toEqual([]);
+
+		instruments.setHindsightOutbox({ size: 7, oldestAgeSeconds: 31.5, durable: true });
+		instruments.observeIndexArchiveAge(() => 1_000, () => 61_000);
+		// A gauge is a reading, not a delta: it is a row whatever the counters did.
+		const afterStart = collector.collect(instruments.snapshot(), null, 2000);
+		expect(afterStart).toEqual([
+			{ tsMs: 2000, series: "hindsight.outbox_size", labels: {}, value: 7, count: 1 },
+			{ tsMs: 2000, series: "hindsight.outbox_oldest_age_s", labels: {}, value: 31.5, count: 1 },
+			{ tsMs: 2000, series: "index.archive_age_s", labels: {}, value: 60, count: 1 },
+		]);
+
+		// An idle interval still reports the gauges, and nothing else.
+		const idle = collector.collect(instruments.snapshot(), null, 3000);
+		expect(idle.map((row) => row.series)).toEqual(["hindsight.outbox_size", "hindsight.outbox_oldest_age_s", "index.archive_age_s"]);
+		instruments.setHindsightOutbox({ size: 0, oldestAgeSeconds: 0, durable: true });
+		expect(seriesRows(collector.collect(instruments.snapshot(), null, 4000), "hindsight.outbox_size")[0]?.value).toBe(0);
+
+		// Core never reads them.
+		expect(new SampleCollector().collect(instruments.snapshot(), null, 5000)).toEqual([]);
+	});
+
+	test("a label value outside the closed set mints no series", () => {
+		const instruments = new SubstrateInstruments();
+		const collector = new SampleCollector("extended");
+		collector.prime(instruments.snapshot());
+		instruments.registry.counter(METRIC.memoryExpired).add(9, { mode: "bogus" });
+		instruments.registry.counter(METRIC.briefRecall).add(9, { result: "x'); DROP TABLE metric_samples; --" });
+		instruments.registry.counter(METRIC.cacheOperations).add(9, { result: "other", mode: "on", class: "brief" });
+		instruments.recordMemoryExpired({ surface: "grok-bot", kind: "note", mode: "served" });
+		const rows = collector.collect(instruments.snapshot(), null, 6000);
+		expect(byLabel(rows, "memory.expired")).toEqual({ served: 1 });
+		expect(seriesRows(rows, "brief.recall")).toEqual([]);
+		expect(seriesRows(rows, "cache.operations")).toEqual([]);
+	});
+
+	async function sampled(series: "core" | "extended" | undefined): Promise<MetricSampleRow[]> {
+		const instruments = new SubstrateInstruments();
+		const written: MetricSampleRow[] = [];
+		const sampler = new MetricsHistorySampler({
+			settings: series === undefined ? { enabled: true, intervalS: 60 } : { enabled: true, intervalS: 60, series },
+			snapshot: () => instruments.snapshot(),
+			runwayDays: () => null,
+			record: async (rows) => {
+				written.push(...rows);
+				return { stored: rows.length, drops: {} };
+			},
+			onDrop: () => undefined,
+			timers: fakeTimers().timers,
+		});
+		sampler.start();
+		extendedActivity(instruments);
+		for (let i = 0; i < 5; i++) instruments.recordBrief({ surface: "grok-bot", ok: true, durationMs: 40 });
+		await sampler.sample();
+		sampler.stop();
+		return written;
+	}
+
+	test("the sampler writes only the series of its mode: no setting and `core` write core only, `extended` also writes the evidence", async () => {
+		for (const series of [undefined, "core"] as const) {
+			const rows = await sampled(series);
+			expect(rows.length).toBeGreaterThan(0);
+			expect(rows.filter((row) => !Object.hasOwn(METRIC_SERIES, row.series))).toEqual([]);
+		}
+		const rows = await sampled("extended");
+		expect(new Set(rows.map((row) => row.series))).toEqual(new Set(["brief.p50", "brief.p95", "cache.hit_ratio", ...extra]));
+	});
+
+	describe("GET /slo/history answer by mode", () => {
+		const now = () => Date.parse("2026-10-14T12:00:00Z");
+		const settings = { enabled: true, intervalS: 60, ttl: "14d", ttlDays: 14 };
+		function store(seen: Array<Record<string, unknown>>) {
+			return {
+				async readMetricHistory(query: ReadQuery) {
+					seen.push(query);
+					return { points: [{ tsMs: now() - 60_000, labels: { result: "miss" }, value: 5, count: 5 }], stepS: effectiveHistoryStep(query.series, query.toMs - query.fromMs, query.stepS) };
+				},
+			};
+		}
+
+		test("an extended series is a 400 in core mode (no setting too), listing exactly the core series; the store is never asked", async () => {
+			const seen: Array<Record<string, unknown>> = [];
+			for (const mode of [{}, { series: "core" as const }]) {
+				for (const series of extra) {
+					const answer = await metricHistoryAnswer({ settings: { ...settings, ...mode }, greptime: store(seen) as never, now }, new URLSearchParams({ series }));
+					expect(answer.status).toBe(400);
+					expect(answer.body.series).toEqual(core);
+				}
+			}
+			expect(seen).toEqual([]);
+		});
+
+		test("every series is served in extended mode with its own spec and closed labels; a name outside both tiers is still a 400 listing all of them", async () => {
+			const seen: Array<Record<string, unknown>> = [];
+			const extended = { ...settings, series: "extended" as const };
+			for (const [name, spec] of Object.entries(ALL_METRIC_SERIES)) {
+				const answer = await metricHistoryAnswer({ settings: extended, greptime: store(seen) as never, now }, new URLSearchParams({ series: name }));
+				expect(answer.status).toBe(200);
+				expect(answer.body).toMatchObject({ series: name, kind: spec.kind, unit: spec.unit, aggregate: spec.agg });
+			}
+			expect(seen.map((query) => query.series)).toEqual(Object.keys(ALL_METRIC_SERIES));
+			const refused = await metricHistoryAnswer({ settings: extended, greptime: store(seen) as never, now }, new URLSearchParams({ series: "nope" }));
+			expect(refused.status).toBe(400);
+			expect(refused.body.series).toEqual(Object.keys(ALL_METRIC_SERIES));
+		});
+	});
+
+	test("the step rule counts an extended series' label values: 8 cache results mean at most 2000 / 8 - 1 buckets in 14 days", () => {
+		const windowMs = 14 * 86_400_000;
+		const labels = EXTENDED_METRIC_SERIES["cache.operations"]!.values!.size;
+		expect(labels).toBe(8);
+		const maxBuckets = Math.floor(MAX_METRIC_POINTS / labels) - 1;
+		expect(effectiveHistoryStep("cache.operations", windowMs, 60)).toBe(Math.ceil(windowMs / 1000 / maxBuckets));
+		// An unlabelled extended series keeps the unlabelled rule.
+		expect(effectiveHistoryStep("hindsight.outbox_size", windowMs, 60)).toBe(Math.ceil(windowMs / 1000 / (MAX_METRIC_POINTS - 1)));
+	});
+
+	test("the worst case is under the batch cap: every label of every series active in one tick is the sum of the specs, and the real collector emits exactly that many rows", () => {
+		// What the specs allow: one row per label value (or one row) per series.
+		const bound = Object.values(ALL_METRIC_SERIES).reduce((total, spec) => total + (spec.values?.size ?? 1), 0);
+		expect(bound).toBeLessThan(MAX_METRIC_BATCH);
+
+		const instruments = new SubstrateInstruments();
+		const collector = new SampleCollector("extended");
+		collector.prime(instruments.snapshot());
+		// Every surface (and one outside the list, which folds into `other`), plane, decision, outcome and result at once.
+		for (const surface of [...SURFACES, "not-a-surface"]) instruments.recordBrief({ surface, ok: true, durationMs: 30 });
+		for (const plane of PLANES) instruments.recordPlane({ plane, op: "select", outcome: "ok", durationMs: 20 });
+		for (const decision of ADMISSION_DECISIONS) instruments.recordAdmission({ surface: "grok-bot", klass: "read", decision });
+		for (const outcome of DOCS_SEARCH_OUTCOMES) instruments.recordDocsSearch({ surface: "grok-bot", outcome, cached: false, durationMs: 50, citations: {} });
+		instruments.recordEmit({ surface: "grok-bot", kind: "note", stored: true, durationMs: 10 });
+		for (const result of CACHE_METRIC_RESULTS) instruments.recordCache({ result, mode: "on", cacheClass: "brief" });
+		instruments.recordBriefProfile({ surface: "grok-bot", profile: "compact", mode: "enforce", bytesSaved: 10 });
+		for (const result of BRIEF_RECALL_RESULTS) instruments.recordBriefRecall({ surface: "grok-bot", result });
+		for (const result of RECALL_PREFETCH_RESULTS) instruments.recordRecallPrefetch({ surface: "grok-bot", result });
+		for (const mode of MEMORY_EXPIRED_MODES) instruments.recordMemoryExpired({ surface: "grok-bot", kind: "note", mode });
+		instruments.setHindsightOutbox({ size: 1, oldestAgeSeconds: 1, durable: true });
+		instruments.observeIndexArchiveAge(() => 0, () => 1000);
+
+		const rows = collector.collect(instruments.snapshot(), 20, 9000);
+		expect(rows).toHaveLength(bound);
+		expect(rows.length).toBeLessThan(MAX_METRIC_BATCH);
+		// Core alone is the same exercise with the extended rows left out.
+		expect(Object.values(METRIC_SERIES).reduce((total, spec) => total + (spec.values?.size ?? 1), 0)).toBe(rows.filter((row) => Object.hasOwn(METRIC_SERIES, row.series)).length);
+	});
+
+	test("the ledger-side label check knows the extended series: its closed label is kept and a foreign one is not", () => {
+		expect(canonicalLabels("cache.operations", { result: "would_serve_stale" })).toBe('{"result":"would_serve_stale"}');
+		expect(canonicalLabels("memory.expired", { mode: "served" })).toBe('{"mode":"served"}');
+		expect(canonicalLabels("hindsight.outbox_size", {})).toBe("{}");
+		expect(canonicalLabels("cache.operations", { result: "weird" })).toBeNull();
+		expect(canonicalLabels("cache.operations", { mode: "served" })).toBeNull();
+		expect(readLabels("brief.recall", '{"result":"cold","x":"y"}')).toEqual({ result: "cold" });
+		expect(readLabels("brief.recall", '{"result":"https://internal.example"}')).toEqual({});
 	});
 });

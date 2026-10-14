@@ -1,0 +1,92 @@
+# substrate-skills-sync.service sandbox drop-in (uplift-5 U5-2). AN EXAMPLE: the `.example` suffix keeps it out of
+# every `*.conf` reader (systemd, doctor-units.ts, doctor-runtime.ts), and nothing in this repo
+# installs it. It is operator-installed, in its own window, after the transient test below.
+# See docs/runbooks/vps-hardening.md for the class rationale and the full procedure.
+#
+# sandbox-class: B
+# exposure-ceiling: 6.0
+#
+# Purpose: take the skills library sync and projection from the shipped 8.1 EXPOSED (`systemd-analyze
+#   security`) to about 5.5 by ending its access to what it does not use. Measured offline with
+#   `systemd-analyze security --offline=true` (systemd 255): 5.5. The shipped hardening block of the base
+#   unit stays; this file only adds directives.
+# Class B: it writes inside operator checkouts or tool homes under /root, so ProtectHome=false
+# STAYS and ReadWritePaths= lists exactly what it needs. ProtectSystem=strict still makes /usr,
+# /etc, /boot, /opt and /srv read-only. User= stays unset (root).
+#
+# Writes: the library checkout /root/agent-skills (`git fetch` and `merge --ff-only`,
+#   packages/projector/src/skills-sync.ts:145; skills.ts:103), the projection targets of
+#   packages/projector/src/skills.ts:83-104 (/root/.claude, /root/.grok, /root/.agents, /root/.config/muse,
+#   /root/.openclaw, /root/.cursor) AND the shared state directory /var/lib/substrate: skills-sync.ts:86
+#   (skills/refresh-pending.json), skills.ts:105 (phase4-baseline/projector backups), skills.ts:106
+#   (skills/projector-warned.json) and the flag files at skills.ts:90,100. The BASE UNIT HAS NO
+#   StateDirectory=, so under ProtectSystem=strict /var/lib/substrate would be read-only without the
+#   ReadWritePaths= line below.
+# Reads: /opt/agent-substrate/current, the bun binary, and gh's stored credential under /root (HOME=/root,
+#   hosts.yml), read-only.
+# ReadWritePaths: /var/lib/substrate is listed here and NOT as StateDirectory=substrate on purpose:
+#   StateDirectory= would re-apply systemd's default 0755 mode to the shared directory that holds the audit
+#   chain (the other units declare StateDirectoryMode=0700). The `-` prefix makes a target that does not
+#   exist on this host a no-op; /root/.config/muse must exist already (the projector creates only its
+#   `skills` child).
+#
+# Directive reasons (the shared rationale and every REJECTED directive are in the runbook):
+#  - ProtectKernelModules/ProtectKernelLogs/ProtectClock/ProtectHostname: no unit loads modules, reads
+#    dmesg, sets the clock or renames the host.
+#  - LockPersonality/RestrictRealtime/RestrictSUIDSGID: no unit changes its ABI personality, takes a
+#    realtime class or creates setuid files.
+#  - SystemCallArchitectures=native: bun, node and python3 are native binaries of the host architecture.
+#  - RestrictNamespaces=true: nothing here unshares a namespace.
+#  - CapabilityBoundingSet=~...: a DENY list that keeps CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH, CAP_FOWNER,
+#    CAP_CHOWN, CAP_SETUID/GID and CAP_KILL (an empty or allow-list set was rejected, see the runbook).
+#
+# Test first, as a transient unit (changes no unit file; the properties are the drop-in's below). The state
+# directory (when there is one) is a THROWAWAY name on purpose: never put StateDirectory=substrate in a
+# transient unit, systemd would re-apply its default 0755 mode to the shared /var/lib/substrate (audit chain).
+#
+#   systemd-run --pipe --wait --collect \
+#     -p ProtectSystem=strict \
+#     -p ProtectHome=false \
+#     -p ProtectKernelModules=true \
+#     -p ProtectKernelLogs=true \
+#     -p ProtectClock=true \
+#     -p ProtectHostname=true \
+#     -p LockPersonality=true \
+#     -p RestrictRealtime=true \
+#     -p RestrictSUIDSGID=true \
+#     -p RestrictNamespaces=true \
+#     -p SystemCallArchitectures=native \
+#     -p 'CapabilityBoundingSet=~CAP_SYS_RAWIO CAP_SYS_BOOT CAP_SYS_PACCT CAP_SYS_TTY_CONFIG CAP_LINUX_IMMUTABLE CAP_BPF CAP_SYSLOG CAP_BLOCK_SUSPEND CAP_AUDIT_CONTROL CAP_AUDIT_READ CAP_AUDIT_WRITE CAP_LEASE CAP_MAC_ADMIN CAP_MAC_OVERRIDE' \
+#     -p 'ReadWritePaths=-/var/lib/substrate -/root/agent-skills -/root/.claude -/root/.grok -/root/.agents -/root/.config/muse -/root/.openclaw -/root/.cursor' \
+#     /bin/sh -c '/root/.local/share/reflex/bun/bin/bun --version && test -w /var/lib/substrate && ! test -w /usr && test -w /root/agent-skills'
+#
+# Success prints the version and exits 0. Failure looks like: `Read-only file system` or `Permission
+# denied` naming a path (add it to ReadWritePaths= only if the unit really writes there), exit status
+# 226/NAMESPACE (a ReadWritePaths= path without a `-` prefix is missing), 218/CAPABILITIES (a denied capability is needed)
+# or the process killed by SIGSYS (a non-native syscall architecture).
+#
+# Install (nothing below runs unless the operator runs it):
+#
+#   install -d -m 0755 /etc/systemd/system/substrate-skills-sync.service.d
+#   install -m 0644 infra/vps/substrate-skills-sync.service.d/30-sandbox.conf.example \
+#     /etc/systemd/system/substrate-skills-sync.service.d/30-sandbox.conf
+#   systemctl daemon-reload && systemctl restart substrate-skills-sync.service
+#   bun scripts/doctor-runtime.ts   # the exposure and sandbox rows for this unit
+#
+# Rollback: rm /etc/systemd/system/substrate-skills-sync.service.d/30-sandbox.conf
+#   then `systemctl daemon-reload` and `systemctl restart substrate-skills-sync.service`. Back to the base unit.
+
+[Service]
+ProtectSystem=strict
+ProtectHome=false
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=~CAP_SYS_RAWIO CAP_SYS_BOOT CAP_SYS_PACCT CAP_SYS_TTY_CONFIG CAP_LINUX_IMMUTABLE CAP_BPF CAP_SYSLOG CAP_BLOCK_SUSPEND CAP_AUDIT_CONTROL CAP_AUDIT_READ CAP_AUDIT_WRITE CAP_LEASE CAP_MAC_ADMIN CAP_MAC_OVERRIDE
+ReadWritePaths=-/var/lib/substrate -/root/agent-skills -/root/.claude -/root/.grok -/root/.agents -/root/.config/muse -/root/.openclaw -/root/.cursor

@@ -24,7 +24,9 @@ import {
 	DEFAULT_STATE_MAX_GB,
 	type DiskGuardrails,
 	diskGuardrailsFromEnv,
+	DOCKER_DF_ARGV,
 	gatherDiskGuardrails,
+	gatherDockerReclaim,
 	gatherIoEvidence,
 	humanBytes,
 	NESTED_SCAN_ENTRIES,
@@ -33,6 +35,8 @@ import {
 	type ScanFs,
 	type IoEvidence,
 	parseAuditStat,
+	parseDockerDf,
+	parseDockerSize,
 	parseDu,
 	parseJournalUsage,
 	safeName,
@@ -721,5 +725,108 @@ describe("through gatherRows", () => {
 		expect(rows.length).toBeGreaterThanOrEqual(4);
 		expect(rows.every((r) => r.status === "unknown")).toBe(true);
 		expect(gatherIoEvidence(exploding).schedulers).toBeNull();
+	});
+});
+
+describe("docker reclaimable (uplift-5 U5-2)", () => {
+	/** `docker system df --format '{{json .}}'` as the engine prints it: one object per line, decimal sizes. */
+	const DF_JSON = [
+		'{"Active":"12","Reclaimable":"4.2GB (21%)","Size":"19.9GB","TotalCount":"35","Type":"Images"}',
+		'{"Active":"3","Reclaimable":"120MB (100%)","Size":"120MB","TotalCount":"3","Type":"Containers"}',
+		'{"Active":"2","Reclaimable":"1.5GB (60%)","Size":"2.5GB","TotalCount":"9","Type":"Local Volumes"}',
+		'{"Active":"0","Reclaimable":"17.3GB","Size":"17.3GB","TotalCount":"410","Type":"Build Cache"}',
+		"",
+	].join("\n");
+
+	function dockerHost(answer: { code: number; out: string } | null | "throw") {
+		const calls: string[][] = [];
+		const host: Host = {
+			run(argv) {
+				calls.push([...argv]);
+				if (answer === "throw") throw new Error("spawn failed");
+				return answer;
+			},
+			readText: () => null,
+			sleep: async () => {},
+			now: () => NOW,
+		};
+		return { host, calls };
+	}
+
+	test("sizes are docker's decimal units, and anything else is not a size", () => {
+		expect(parseDockerSize("21.65GB (79%)")).toBe(21_650_000_000);
+		expect(parseDockerSize("1.5kB")).toBe(1500);
+		expect(parseDockerSize("0B")).toBe(0);
+		expect(parseDockerSize("120MB (100%)")).toBe(120_000_000);
+		expect(parseDockerSize("lots")).toBeNull();
+		expect(parseDockerSize("")).toBeNull();
+	});
+
+	test("every line is read, a malformed or foreign line is skipped, and the control characters of a name cannot reach a row", () => {
+		const entries = parseDockerDf(`${DF_JSON}not json\n{"Type":"x"}\n{"Type":"Evil\\u001b[31m","Reclaimable":"1GB"}\n[1]\n`);
+		expect(entries.map((e) => e.type)).toEqual(["Images", "Containers", "Local Volumes", "Build Cache", "Evil?[31m"]);
+		expect(entries.reduce((sum, e) => sum + e.bytes, 0)).toBe(4_200_000_000 + 120_000_000 + 1_500_000_000 + 17_300_000_000 + 1_000_000_000);
+	});
+
+	test("one ok row: the summed reclaimable bytes, each type, and the words that say it is not substrate's and nothing was pruned", () => {
+		const { host } = dockerHost({ code: 0, out: DF_JSON });
+		const rows = gatherDockerReclaim(host);
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toMatchObject({ class: "disk", check: "docker reclaimable", status: "ok" });
+		expect(rows[0]?.actual).toContain("23.1 GB reclaimable");
+		expect(rows[0]?.actual).toContain("Build Cache 17.3GB");
+		expect(rows[0]?.expected).toContain("not substrate-owned");
+		expect(rows[0]?.hint).toContain("nothing was pruned");
+	});
+
+	test("the only command is a bounded read-only `docker system df`: never prune, rm, image, volume or a shell", () => {
+		const { host, calls } = dockerHost({ code: 0, out: DF_JSON });
+		gatherDockerReclaim(host);
+		expect(calls).toEqual([[...DOCKER_DF_ARGV]]);
+		expect(DOCKER_DF_ARGV.slice(0, 2)).toEqual(["timeout", "10"]);
+		expect(DOCKER_DF_ARGV.slice(2)).toEqual(["docker", "system", "df", "--format", "{{json .}}"]);
+		for (const forbidden of ["prune", "rm", "rmi", "stop", "kill", "sh", "-c"]) expect(DOCKER_DF_ARGV).not.toContain(forbidden);
+	});
+
+	test("docker absent, slow, down, denied, silent or throwing is `unavailable` (unknown), never warn or drift", () => {
+		const cases: Array<[{ code: number; out: string } | null | "throw", string]> = [
+			[null, "timeout or docker could not be run"],
+			["throw", "timeout or docker could not be run"],
+			[{ code: 127, out: "" }, "not installed"],
+			[{ code: 124, out: "" }, "did not answer within 10s"],
+			[{ code: 1, out: "Cannot connect to the Docker daemon" }, "exited 1"],
+			[{ code: 0, out: "" }, "nothing parseable"],
+			[{ code: 0, out: "garbage\n" }, "nothing parseable"],
+		];
+		for (const [answer, hint] of cases) {
+			const rows = gatherDockerReclaim(dockerHost(answer).host);
+			expect(rows).toHaveLength(1);
+			expect(rows[0]).toMatchObject({ check: "docker reclaimable", status: "unknown", actual: "unavailable" });
+			expect(rows[0]?.hint).toContain(hint);
+			expect(rows[0]?.hint).toContain("nothing was changed");
+		}
+	});
+
+	test("however large docker says the reclaimable space is, the row is ok: no drift or warn can come from it", () => {
+		const huge = '{"Reclaimable":"900TB (99%)","Type":"Images"}\n';
+		const rows = gatherDockerReclaim(dockerHost({ code: 0, out: huge }).host);
+		expect(rows[0]?.status).toBe("ok");
+		expect(rows.some((r) => r.status === "drift" || r.status === "warn")).toBe(false);
+	});
+
+	test("the docker row never appears unless the caller asks, and asking does not change any other row", async () => {
+		const policy = loadPolicy(infraDir);
+		const host: Host = {
+			run: (argv) => (argv.includes("docker") ? { code: 0, out: DF_JSON } : argv[0] === "systemctl" ? { code: 0, out: "LoadState=not-found\n" } : null),
+			readText: () => null,
+			sleep: async () => {},
+			now: () => NOW,
+		};
+		const options = { minFreeGb: 5, maxSwapPagesPerSecond: 0, envFile: "/etc/substrate/substrate.env" };
+		const without = await gatherRows(policy, host, options);
+		const withDocker = await gatherRows(policy, host, { ...options, dockerReclaim: true });
+		expect(without.some((r) => r.check === "docker reclaimable")).toBe(false);
+		expect(withDocker.filter((r) => r.check !== "docker reclaimable")).toEqual(without);
+		expect(withDocker.find((r) => r.check === "docker reclaimable")?.status).toBe("ok");
 	});
 });

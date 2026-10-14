@@ -2301,6 +2301,23 @@ describe("metric_samples (uplift-4 S6)", () => {
 		expect(statement).toContain("'admission.decisions', '{\"decision\":\"allowed\"}', 'counter', 3, 3)");
 	});
 
+	test("an extended series (uplift-5 S6) is stored with its own kind and labels, and a label outside its closed set is still invalid", async () => {
+		const { sql } = stubFetch();
+		const result = await new GreptimeClient(config).recordMetricSamples([
+			row({ series: "cache.operations", labels: { result: "would_serve_stale" }, value: 4, count: 4 }),
+			row({ series: "hindsight.outbox_size", labels: {}, value: 7, count: 1 }),
+			row({ series: "memory.expired", labels: { mode: "served" }, value: 2, count: 2 }),
+			row({ series: "cache.operations", labels: { result: "x'); DROP TABLE metric_samples; --" } }),
+			row({ series: "cache.operations", labels: { mode: "served" } }),
+		]);
+		expect(result).toEqual({ stored: 3, drops: { invalid: 2 } });
+		const statement = inserts(sql)[0]!;
+		expect(statement).toContain("'cache.operations', '{\"result\":\"would_serve_stale\"}', 'counter', 4, 4)");
+		expect(statement).toContain("'hindsight.outbox_size', '{}', 'gauge', 7, 1)");
+		expect(statement).toContain("'memory.expired', '{\"mode\":\"served\"}', 'counter', 2, 2)");
+		expect(statement).not.toContain("DROP");
+	});
+
 	test("hostile series and label text cannot reach the statement: those rows are dropped as invalid", async () => {
 		const hostile = [
 			row({ series: "brief.p95', 1, 1); DROP TABLE metric_samples; --" }),

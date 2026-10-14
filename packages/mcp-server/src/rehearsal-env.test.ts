@@ -26,7 +26,9 @@ import {
 	assertOperatorAllowed,
 	buildRehearsalEnv,
 	consumerEnvRecord,
+	EXTRA_ENV_KEYS,
 	LEDGER_KEYS,
+	parseExtraEnv,
 	RehearsalEnvError,
 	storesEnvRecord,
 	toShellExports,
@@ -506,5 +508,75 @@ describe("the opt-in tracker block", () => {
 		}
 		expect(first.LINEAR_API_KEY).not.toBe(second.LINEAR_API_KEY);
 		expect(first.NOTION_API_KEY).not.toBe(second.NOTION_API_KEY);
+	});
+});
+
+describe("the extra-env allowlist (--extra-env)", () => {
+	test("accepts each listed flag with a value it takes and returns them as a record", () => {
+		expect(
+			parseExtraEnv([
+				"SUBSTRATE_BRIEF_PROFILE=shadow",
+				"SUBSTRATE_METRICS_HISTORY=on",
+				"SUBSTRATE_CACHE_SWR=enforce",
+				"SUBSTRATE_SLO_MIN_SAMPLES=5",
+			]),
+		).toEqual({
+			SUBSTRATE_BRIEF_PROFILE: "shadow",
+			SUBSTRATE_METRICS_HISTORY: "on",
+			SUBSTRATE_CACHE_SWR: "enforce",
+			SUBSTRATE_SLO_MIN_SAMPLES: "5",
+		});
+		expect(parseExtraEnv([])).toEqual({});
+	});
+
+	test("refuses with the rule name: format, key, value and duplicate", () => {
+		expect(() => parseExtraEnv(["SUBSTRATE_BRIEF_PROFILE"])).toThrow("rule extra-env-format");
+		expect(() => parseExtraEnv(["=shadow"])).toThrow("rule extra-env-format");
+		expect(() => parseExtraEnv(["SUBSTRATE_PORT=7410"])).toThrow("rule extra-env-key");
+		expect(() => parseExtraEnv(["SUBSTRATE_BRIEF_PROFILE=loud"])).toThrow("rule extra-env-value");
+		expect(() => parseExtraEnv(["SUBSTRATE_SLO_MIN_SAMPLES=0"])).toThrow("rule extra-env-value");
+		expect(() => parseExtraEnv(["SUBSTRATE_SLO_MIN_SAMPLES=5000"])).toThrow("rule extra-env-value");
+		expect(() => parseExtraEnv(["SUBSTRATE_CACHE_SWR=shadow", "SUBSTRATE_CACHE_SWR=off"])).toThrow("rule extra-env-duplicate");
+		expect(() => parseExtraEnv(["SUBSTRATE_BRIEF_PROFILE=shadow\n"])).toThrow("rule extra-env-value");
+	});
+
+	test("a key outside the list is refused by name and never by its value, including prototype keys", () => {
+		for (const key of ["__proto__", "constructor", "toString", "SUBSTRATE_PG_URL", "PATH", "SUBSTRATE_OPERATOR_TOKENS"]) {
+			expect(() => parseExtraEnv([`${key}=x`])).toThrow(RehearsalEnvError);
+			expect(() => parseExtraEnv([`${key}=x`])).toThrow("rule extra-env-key");
+		}
+		const secretish = randomBytes(8).toString("hex");
+		try {
+			parseExtraEnv([`SUBSTRATE_PG_URL=${secretish}`]);
+		} catch (cause) {
+			expect(String(cause)).not.toContain(secretish);
+		}
+	});
+
+	test("the list holds no store, token, path or host setting", () => {
+		for (const key of EXTRA_ENV_KEYS) expect(key).not.toMatch(/URL|TOKEN|KEY|PASSWORD|PATH|DIR|HOST|PORT/);
+	});
+
+	test("the builder applies them, and the real loadConfig reads them", () => {
+		const env = buildRehearsalEnv(
+			scratchInput({ extraEnv: { SUBSTRATE_BRIEF_PROFILE: "enforce", SUBSTRATE_METRICS_HISTORY: "on" } }),
+		);
+		expect(env.SUBSTRATE_BRIEF_PROFILE).toBe("enforce");
+		expect(env.SUBSTRATE_METRICS_HISTORY).toBe("on");
+		const config = loadConfig(env);
+		expect(config.briefProfile.mode).toBe("enforce");
+		expect(config.metricsHistory.enabled).toBe(true);
+	});
+
+	test("the builder holds the allowlist for its own callers: a store key cannot ride in", () => {
+		expect(() => buildRehearsalEnv(scratchInput({ extraEnv: { SUBSTRATE_PG_URL: "postgres://elsewhere" } }))).toThrow("rule extra-env-key");
+		expect(() => buildRehearsalEnv(scratchInput({ extraEnv: { SUBSTRATE_BRIEF_PROFILE: "loud" } }))).toThrow("rule extra-env-value");
+	});
+
+	test("without --extra-env the environment is exactly what it was", () => {
+		const parentEnv = { PATH: "/usr/bin:/bin", HOME: "/root", SUBSTRATE_BRIEF_PROFILE: "enforce", SUBSTRATE_METRICS_HISTORY: "on" };
+		const env = buildRehearsalEnv(scratchInput({ parentEnv }));
+		expect(Object.hasOwn(env, "SUBSTRATE_BRIEF_PROFILE")).toBe(false);
+		expect(Object.hasOwn(env, "SUBSTRATE_METRICS_HISTORY")).toBe(false);
 	});
 });

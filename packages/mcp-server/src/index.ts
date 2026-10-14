@@ -106,7 +106,7 @@ for (const problem of migration.errors) {
 // Samples the registry into `metric_samples` through the ledger client; fail-open,
 // a failed write is a counted drop. Needs the ledger, so without one it stays off.
 const metricsHistory = new MetricsHistorySampler({
-	settings: { enabled: config.metricsHistory.enabled, intervalS: config.metricsHistory.intervalS },
+	settings: { enabled: config.metricsHistory.enabled, intervalS: config.metricsHistory.intervalS, series: config.metricsHistory.series },
 	snapshot: () => observability.snapshot(),
 	runwayDays: () => observability.evaluateCapacity()[0]?.observed ?? null,
 	record: async (rows) =>
@@ -116,7 +116,8 @@ const metricsHistory = new MetricsHistorySampler({
 	onDrop: (reason, rows) => observability.instruments.registry.counter(DROPPED_METRIC).add(rows, { reason }),
 });
 if (metricsHistory.start()) {
-	process.stdout.write(`[substrate] metrics history: every ${config.metricsHistory.intervalS} s, ttl ${config.metricsHistory.ttl}\n`);
+	const seriesNote = config.metricsHistory.series === "extended" ? ", extended series" : "";
+	process.stdout.write(`[substrate] metrics history: every ${config.metricsHistory.intervalS} s, ttl ${config.metricsHistory.ttl}${seriesNote}\n`);
 }
 
 // uplift-4 S7: the docs merge-trigger lag warning is settled here, on an unref'd

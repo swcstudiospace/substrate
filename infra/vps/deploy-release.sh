@@ -7,12 +7,25 @@
 # the next deploy of a NEW tag, would prune, with the bytes each would free; it
 # deletes, creates and locks nothing.
 #
-# The script never prints an environment file and never talks to a host other
-# than the health URL (loopback by default). It reads /etc/substrate only to
+# The script never prints an environment file and, apart from the opt-in gate
+# below, never talks to a host other than the health URL (loopback by default).
+# It reads /etc/substrate only to
 # ask whether GREPTIME_URL and SUBSTRATE_PG_URL are set there — by name, with
 # grep -q, never into a variable — so the store gate knows which stores the
 # new process is expected to reach. It refuses to build below a free-disk
 # floor (docs/runbooks/disk-pressure.md).
+#
+# Before the swap it runs two hooks from the NEW release tree. The preflight,
+# scripts/deploy-preflight.ts (SUBSTRATE_DEPLOY_PREFLIGHT=off|report|enforce,
+# default report), is read-only: it writes, starts and contacts nothing. The
+# gate, scripts/release-gate.ts (SUBSTRATE_DEPLOY_GATE, default off), is NOT
+# read-only: it boots scratch store containers through docker, pauses one of
+# them, writes a run directory and needs disk and an image already present.
+# For both, report prints and continues whatever happened; enforce refuses
+# while current still points at the old release. The preflight is handed the
+# env file's path and reads it itself, to run the new loadConfig against it; it
+# prints names and verdicts only. This script still never reads it. The gate
+# uses the rehearsal harness: scratch stores on loopback, never the production ports.
 # Tests point SUBSTRATE_RELEASE_ROOT, PATH (git, bun, systemctl, curl, df),
 # SUBSTRATE_HEALTH_ENV_FILE and SUBSTRATE_HEALTH_CMD at stubs. See
 # infra/vps/README.md.
@@ -33,6 +46,9 @@ UNIT_SETTLE="${SUBSTRATE_UNIT_SETTLE:-2}"
 MIN_FREE_GB="${SUBSTRATE_DEPLOY_MIN_FREE_GB:-5}"
 REQUIRE_STORES="${SUBSTRATE_HEALTH_REQUIRE_STORES:-1}"
 HEALTH_ENV_FILE="${SUBSTRATE_HEALTH_ENV_FILE:-/etc/substrate/substrate.env}"
+PREFLIGHT="${SUBSTRATE_DEPLOY_PREFLIGHT:-report}"
+GATE="${SUBSTRATE_DEPLOY_GATE:-off}"
+preflight_args=()
 lockdir=""
 tmp_link=""
 health_config=""
@@ -59,6 +75,12 @@ deploy would prune, in both cases: a redeploy of the current tag keeps current
 and previous; the next deploy of a new tag keeps only the present current (it
 becomes previous), so the present previous is listed as removable after it.
 Bytes are unique bytes, counting hardlinks once.
+
+Before the swap it also runs scripts/deploy-preflight.ts from the NEW release
+(SUBSTRATE_DEPLOY_PREFLIGHT=off|report|enforce, default report) and, when
+SUBSTRATE_DEPLOY_GATE is report or enforce (default off), scripts/release-gate.ts.
+report prints and always continues; enforce refuses before current is changed.
+--dry-run runs the preflight (report only) against the release that is current.
 EOF
 	exit 2
 }
@@ -574,6 +596,7 @@ cmd_dry_run() {
 	done
 	if [[ ${#ordered[@]} -eq 0 ]]; then
 		printf '%s\n' "dry-run: no release directories under ${root}/releases; nothing would be removed"
+		dry_run_preflight
 		return "$refused"
 	fi
 	local -a paths=()
@@ -611,7 +634,113 @@ cmd_dry_run() {
 	if [[ -z "$cur" ]]; then
 		printf '%s\n' "dry-run: current is not set, so every release is listed as removable; a deploy would keep the new release and its predecessor"
 	fi
+	# After the prune report, so what it printed stays first; the preflight only prints and returns 0,
+	# so the exit code stays the prune report's.
+	dry_run_preflight
 	return "$refused"
+}
+
+# SUBSTRATE_DEPLOY_PREFLIGHT and SUBSTRATE_DEPLOY_GATE take exactly these three
+# values. A typo is refused before anything is built: an `enforce` that quietly
+# became `report` would let through the very deploy it was set to stop.
+validate_hook_modes() {
+	[[ "$PREFLIGHT" == "off" || "$PREFLIGHT" == "report" || "$PREFLIGHT" == "enforce" ]] || die "SUBSTRATE_DEPLOY_PREFLIGHT must be off, report or enforce"
+	[[ "$GATE" == "off" || "$GATE" == "report" || "$GATE" == "enforce" ]] || die "SUBSTRATE_DEPLOY_GATE must be off, report or enforce"
+}
+
+# Run one bun script from inside a release tree. Returns the script's exit code,
+# or 2 when it cannot run at all (no bun on PATH, or the release does not ship
+# the script) — callers treat 2 as "unavailable", never as a pass. Never exits
+# the shell, so `report` mode can always continue.
+run_release_script() {
+	local dest="$1" script="$2" status=0
+	shift 2
+	if ! command -v bun > /dev/null 2>&1; then
+		printf '%s\n' "deploy-release: bun is not on PATH, so ${script} did not run" >&2
+		return 2
+	fi
+	if [[ ! -f "$dest/$script" || -L "$dest/$script" ]]; then
+		printf '%s\n' "deploy-release: the release has no ${script}" >&2
+		return 2
+	fi
+	(cd -- "$dest" && SUBSTRATE_DEPLOY_MIN_FREE_GB="$MIN_FREE_GB" bun "$script" "$@") || status=$?
+	return "$status"
+}
+
+# The preflight's arguments for a release tree. It reads the unit's env file
+# itself and prints names and verdicts only; this script never loads the file.
+# The two overrides exist so tests (and a host with a non-default layout) can
+# point it elsewhere; unset, the preflight's own defaults apply.
+build_preflight_args() {
+	preflight_args=("$1" --env-file "$HEALTH_ENV_FILE")
+	[[ -z "${SUBSTRATE_PREFLIGHT_STATE_DIR:-}" ]] || preflight_args+=(--state-dir "$SUBSTRATE_PREFLIGHT_STATE_DIR")
+	[[ -z "${SUBSTRATE_PREFLIGHT_INSTALLED_UNITS_DIR:-}" ]] || preflight_args+=(--installed-units-dir "$SUBSTRATE_PREFLIGHT_INSTALLED_UNITS_DIR")
+}
+
+# Before the swap: would the NEW release's config loader, state files and unit
+# settings start against this host (scripts/deploy-preflight.ts, read-only).
+# `report` prints the table and ALWAYS continues, whatever happened to the
+# preflight. `enforce` refuses while `current` still points at the old
+# release, so nothing needs rolling back. The table goes to stderr: stdout
+# stays the one `current -> ...` line a caller may parse.
+run_preflight() {
+	local dest="$1" status=0
+	[[ "$PREFLIGHT" != "off" ]] || return 0
+	build_preflight_args "$dest"
+	run_release_script "$dest" scripts/deploy-preflight.ts "${preflight_args[@]}" >&2 || status=$?
+	if [[ "$status" -eq 0 ]]; then
+		printf '%s\n' "deploy-release: preflight passed (mode ${PREFLIGHT})" >&2
+		return 0
+	fi
+	if [[ "$PREFLIGHT" == "enforce" ]]; then
+		die "refusing to swap current: the preflight did not pass (exit ${status}) under SUBSTRATE_DEPLOY_PREFLIGHT=enforce; current was not changed"
+	fi
+	printf '%s\n' "deploy-release: preflight did not pass (exit ${status}); SUBSTRATE_DEPLOY_PREFLIGHT=report continues" >&2
+}
+
+# Before the swap: the boot-and-prove gate from the NEW tree
+# (scripts/release-gate.ts). Its exit codes: 0 pass, 1 a check failed, 2
+# unavailable (docker, image or disk). `report` prints the receipt and
+# continues. `enforce` refuses on anything but 0, an unavailable gate
+# included: a gate that could not run proved nothing.
+run_gate() {
+	local dest="$1" status=0 result
+	[[ "$GATE" != "off" ]] || return 0
+	run_release_script "$dest" scripts/release-gate.ts >&2 || status=$?
+	case "$status" in
+	0) result="pass" ;;
+	1) result="fail" ;;
+	*) result="unavailable" ;;
+	esac
+	printf '%s\n' "deploy-release: gate-receipt mode=${GATE} result=${result} exit=${status} release=${dest##*/}" >&2
+	if [[ "$status" -ne 0 && "$GATE" == "enforce" ]]; then
+		die "refusing to swap current: the release gate is ${result} (exit ${status}) under SUBSTRATE_DEPLOY_GATE=enforce; current was not changed"
+	fi
+}
+
+# --dry-run: the preflight of the release that is current now, report only
+# (the dry-run has no tag to build). Prints and changes nothing, and always
+# returns 0 so it can never alter the prune report's exit code.
+dry_run_preflight() {
+	local requested="${SUBSTRATE_RELEASE_ROOT:-/opt/agent-substrate}" root cur="" status=0
+	[[ "$PREFLIGHT" != "off" ]] || return 0
+	if [[ "$PREFLIGHT" != "report" && "$PREFLIGHT" != "enforce" ]]; then
+		printf '%s\n' "dry-run: SUBSTRATE_DEPLOY_PREFLIGHT=${PREFLIGHT//[^[:print:]]/?} is not off, report or enforce; a deploy would refuse it, and no preflight ran"
+		return 0
+	fi
+	root=$(CDPATH='' cd -- "$requested" && pwd) || return 0
+	if [[ -L "$root/current" ]]; then
+		cur=$(read_rel "$root/current") || cur=""
+	fi
+	if [[ -z "$cur" || ! -d "$root/$cur" ]]; then
+		printf '%s\n' "dry-run: preflight skipped: there is no current release to run it against"
+		return 0
+	fi
+	printf '%s\n' "dry-run: preflight of the current release ${cur#releases/}, report only (a deploy runs it against the new release)"
+	build_preflight_args "$root/$cur"
+	run_release_script "$root/$cur" scripts/deploy-preflight.ts "${preflight_args[@]}" || status=$?
+	printf '%s\n' "dry-run: preflight exit ${status}; nothing was changed"
+	return 0
 }
 
 restore_current() {
@@ -626,6 +755,7 @@ restore_current() {
 
 cmd_deploy() {
 	local tag="$1" sha old="" keep_prev="" prev_rel=""
+	validate_hook_modes
 	if ! sha=$(resolve_tag "$tag"); then
 		exit 1
 	fi
@@ -633,6 +763,8 @@ cmd_deploy() {
 	require_free_space
 	build_release "$sha"
 	require_release_entries "$ROOT/releases/$sha"
+	run_preflight "$ROOT/releases/$sha"
+	run_gate "$ROOT/releases/$sha"
 	prepare_health
 	if [[ -L "$ROOT/current" ]]; then
 		if ! old=$(read_rel "$ROOT/current"); then

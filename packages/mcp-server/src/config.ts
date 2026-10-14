@@ -1284,9 +1284,14 @@ export interface MetricsHistorySettings {
 	ttl: string;
 	/** The same retention in days, for the readback window cap. */
 	ttlDays: number;
+	/** Which series tier is sampled and served (`SUBSTRATE_METRICS_HISTORY_SERIES`, `core` | `extended`, default `core`). `core` is the original 11 series, byte-identical. */
+	series: MetricsHistorySeriesMode;
 	/** What was wrong with a set value, for the boot warning; empty when every value was usable. Names the key, never quotes a value. */
 	problems: string[];
 }
+
+/** The tiers of the metrics-history allow-list (uplift-5 S6); `extended` is opt-in because the table's volume is unsized. */
+export type MetricsHistorySeriesMode = "core" | "extended";
 
 export const DEFAULT_METRICS_HISTORY_TTL = "14d";
 export const MIN_METRICS_HISTORY_TTL_DAYS = 1;
@@ -1332,12 +1337,17 @@ export function loadMetricsHistorySettings(env: Record<string, string | undefine
 	if (flag === "on" && !ledgerConfigured) {
 		problems.push("SUBSTRATE_METRICS_HISTORY=on needs the event ledger, which is not configured, so the metrics history stays off");
 	}
+	const seriesRaw = (env.SUBSTRATE_METRICS_HISTORY_SERIES?.trim() ?? "").toLowerCase();
+	if (seriesRaw !== "" && seriesRaw !== "core" && seriesRaw !== "extended") {
+		problems.push("SUBSTRATE_METRICS_HISTORY_SERIES is neither `core` nor `extended`, so the core series are used");
+	}
 	const retention = parsed ?? parseMetricsHistoryTtl(DEFAULT_METRICS_HISTORY_TTL)!;
 	return {
 		enabled: flag === "on" && ledgerConfigured,
 		intervalS: boundedInt(env.SUBSTRATE_METRICS_HISTORY_INTERVAL_S, 60, MIN_METRICS_HISTORY_INTERVAL_S, 3600),
 		ttl: retention.ttl,
 		ttlDays: retention.days,
+		series: seriesRaw === "extended" ? "extended" : "core",
 		problems,
 	};
 }
