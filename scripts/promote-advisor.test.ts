@@ -24,7 +24,7 @@
  *   `--offline` fixture makes no request.
  */
 import { describe, expect, test } from "bun:test";
-import { type Evidence, flagByName, policyFlags } from "../packages/mcp-server/src/flag-registry.ts";
+import { EXTENDED_COVERAGE_SERIES, type Evidence, flagByName, policyFlags } from "../packages/mcp-server/src/flag-registry.ts";
 import {
 	type Criterion,
 	type FlagVerdict,
@@ -68,8 +68,10 @@ interface BodyOptions {
 function steady(points: readonly PointSpec[]): PointSpec[] {
 	if (points.length === 0) return [...points];
 	const oldest = Math.max(...points.map((point) => point.ago));
-	const fillers: PointSpec[] = [{ ago: 0.1, value: 0, count: 0 }];
-	for (let ago = oldest - 3; ago > 0.5; ago -= 3) fillers.push({ ago, value: 0, count: 0 });
+	// The rows carry the first point's label: a sampler row is about one label value, and coverage is judged per label.
+	const label = points[0]!.label;
+	const fillers: PointSpec[] = [{ ago: 0.1, value: 0, count: 0, ...(label === undefined ? {} : { label }) }];
+	for (let ago = oldest - 3; ago > 0.5; ago -= 3) fillers.push({ ago, value: 0, count: 0, ...(label === undefined ? {} : { label }) });
 	return [...points, ...fillers];
 }
 
@@ -249,7 +251,7 @@ describe("verdicts for the admission budgets (shadow share of decisions)", () =>
 describe("verdicts and precedence for the cache stale-while-revalidate flag", () => {
 	/** Two criteria: would_serve_stale share of misses (extended) and the brief p95 (core). */
 	const swr = (cache: { status: number; body: unknown }, brief: { status: number; body: unknown }) =>
-		fixtureOf({ "cache.operations": cache, "brief.p95": brief });
+		fixtureOf({ "cache.operations": cache, "brief.p95": brief, [EXTENDED_COVERAGE_SERIES]: ok(EXTENDED_COVERAGE_SERIES, null, [{ ago: 23.5, value: 0, count: 1 }], 24) });
 	const cacheOps = (counts: Record<string, number>) =>
 		ok(
 			"cache.operations",
@@ -319,14 +321,60 @@ describe("verdicts and precedence for the cache stale-while-revalidate flag", ()
 		const text = (await run(["--flag", "SUBSTRATE_CACHE_SWR", "--offline", "f.json"], { "f.json": fixture })).stdout;
 		expect(text).toContain("(lower bound: cache.operations sums every cache class, would_serve_stale is brief-only)");
 	});
+
+	test("coverage is judged for the criterion's own label: another surface's full day does not vouch for a recent grok-bot burst", async () => {
+		const everyHour = Array.from({ length: 24 }, (_, index) => ({ ago: 23.5 - index, label: "grok-build", value: 300, count: 40 }));
+		const burst = [{ ago: 2, label: "grok-bot", value: 300, count: 60 }, { ago: 1.5, label: "grok-bot", value: 300, count: 60 }];
+		const mixed = ok("brief.p95", "surface", [...everyHour, ...burst], 24, { fill: false });
+		const verdict = await judge(swr(cacheOps({ miss: 900, would_serve_stale: 100 }), mixed));
+		expect(verdict.criteria[1]).toMatchObject({ verdict: "insufficient-data", observed: null });
+		expect(verdict.criteria[1]!.detail).toContain("brief.p95 covers 2.0 h of the 24h window");
+		// The same day for grok-bot itself is judged on the numbers.
+		const own = ok("brief.p95", "surface", everyHour.map((point) => ({ ...point, label: "grok-bot" })), 24, { fill: false });
+		expect((await judge(swr(cacheOps({ miss: 900, would_serve_stale: 100 }), own))).criteria[1]).toMatchObject({ verdict: "ready", observed: 300 });
+	});
+});
+
+describe("the manual check still applies when the history says ready", () => {
+	const readyMemory = fixtureOf({
+		"memory.expired": ok("memory.expired", "mode", [{ ago: 100, label: "hidden", value: 5 }], 168),
+		[EXTENDED_COVERAGE_SERIES]: ok(EXTENDED_COVERAGE_SERIES, null, [{ ago: 165, value: 0, count: 1 }], 168),
+	});
+
+	test("a ready verdict carries the policy's manual check in the JSON and prints it beside the step", async () => {
+		const json = (await run(["--flag", "SUBSTRATE_MEMORY_EXPIRY", "--offline", "f.json", "--json"], { "f.json": readyMemory })).json;
+		const flag = verdictOf(json, "SUBSTRATE_MEMORY_EXPIRY");
+		expect(flag.verdict).toBe("ready");
+		expect(flag.manual).toBe(flagByName("SUBSTRATE_MEMORY_EXPIRY")!.policy!.manual!);
+		const text = (await run(["--flag", "SUBSTRATE_MEMORY_EXPIRY", "--offline", "f.json"], { "f.json": readyMemory })).stdout;
+		expect(text).toContain("READY");
+		expect(text).toContain("also check: substrate index sweep (dry-run) lists no kind=decision entries");
+		expect(text.indexOf("when ready:")).toBeLessThan(text.indexOf("also check:"));
+		expect(text.indexOf("also check:")).toBeLessThan(text.indexOf("rollback:"));
+	});
+
+	test("every policy flag with both history evidence and a manual check reports it, and one without a manual check reports null", async () => {
+		const json = (await run(["--offline", "f.json", "--json"], { "f.json": fixtureOf({}) })).json;
+		const both = policyFlags().filter((flag) => flag.policy!.evidence.length > 0 && flag.policy!.manual !== undefined).map((flag) => flag.name);
+		expect(both).toEqual(expect.arrayContaining(["SUBSTRATE_MEMORY_EXPIRY", "SUBSTRATE_BRIEF_RECALL", "SUBSTRATE_BUDGETS"]));
+		for (const name of both) expect(verdictOf(json, name).manual).toBe(flagByName(name)!.policy!.manual!);
+		expect(verdictOf(json, "SUBSTRATE_CACHE_SWR").manual).toBeNull();
+		const text = (await run(["--offline", "f.json"], { "f.json": fixtureOf({}) })).stdout;
+		expect(text.match(/also check:/g)?.length).toBe(both.length);
+	});
 });
 
 describe("ratio, sum and share criteria with hand-computed boundaries", () => {
 	const profile = flagByName("SUBSTRATE_BRIEF_PROFILE")!.policy!.evidence[0]!;
 	const expiry = flagByName("SUBSTRATE_MEMORY_EXPIRY")!.policy!.evidence[0]!;
 	const recall = flagByName("SUBSTRATE_BRIEF_RECALL")!.policy!.evidence;
-	const results = (entries: Record<string, { status: number; body: unknown }>, window: string, needs: Evidence["needs"] = "core") =>
-		new Map(Object.entries(entries).map(([series, fixture]) => [keyOf(series, window), answer(fixture, series === "brief.profile_bytes_saved" || series === "memory.expired" ? "extended" : needs)]));
+	/** Answers keyed by series for one window; an extended criterion also gets the extended coverage gauge, spanning 98 % of the window, unless the entries bring their own. */
+	const results = (entries: Record<string, { status: number; body: unknown }>, window: string, needs: Evidence["needs"] = "core") => {
+		const hours = Number(window.slice(0, -1)) * (window.endsWith("d") ? 24 : 1);
+		const all = { [EXTENDED_COVERAGE_SERIES]: ok(EXTENDED_COVERAGE_SERIES, null, [{ ago: hours * 0.98, value: 0, count: 1 }], hours), ...entries };
+		const extended = new Set(["brief.profile_bytes_saved", "memory.expired", "brief.recall", "recall.prefetch", EXTENDED_COVERAGE_SERIES]);
+		return new Map(Object.entries(all).map(([series, fixture]) => [keyOf(series, window), answer(fixture, extended.has(series) ? "extended" : needs)]));
+	};
 
 	test("bytes saved per brief: 42000 bytes over 60 briefs is exactly 700, which meets >= 700; 41940 is 699 and holds", () => {
 		const briefs = ok("brief.p95", "surface", [{ ago: 70, label: "grok-bot", value: 300, count: 30 }, { ago: 2, label: "grok-bot", value: 300, count: 30 }], 72);
@@ -343,16 +391,33 @@ describe("ratio, sum and share criteria with hand-computed boundaries", () => {
 	});
 
 	test("memory expiry: no served expired entry over a covered 7 d is ready (observed 0); 3 served is a hold; hidden is not counted", () => {
-		const covered = ok("emit.success", null, [{ ago: 160, value: 1, count: 10 }, { ago: 3, value: 1, count: 10 }], 168);
 		const served = (n: number) => ok("memory.expired", "mode", [{ ago: 100, label: "hidden", value: 5 }, ...(n > 0 ? [{ ago: 50, label: "served", value: n }] : [])], 168);
-		expect(judgeCriterion(expiry, results({ "memory.expired": served(0), "emit.success": covered }, "7d"))).toMatchObject({ verdict: "ready", observed: 0 });
-		expect(judgeCriterion(expiry, results({ "memory.expired": served(3), "emit.success": covered }, "7d"))).toMatchObject({ verdict: "hold", observed: 3 });
+		expect(judgeCriterion(expiry, results({ "memory.expired": served(0) }, "7d"))).toMatchObject({ verdict: "ready", observed: 0 });
+		expect(judgeCriterion(expiry, results({ "memory.expired": served(3) }, "7d"))).toMatchObject({ verdict: "hold", observed: 3 });
 	});
 
-	test("memory expiry: an empty answer is only ready when something else proves the 7 d were covered", () => {
+	test("memory expiry: a core-only week followed by an extended hour is NOT ready: the missing extended rows are not zeros", () => {
+		// emit.success (core) spans the whole week, memory.expired (extended) has nothing because extended sampling began an hour ago.
+		const emptyExtended = ok("memory.expired", "mode", [], 168);
+		const justEnabled = ok(EXTENDED_COVERAGE_SERIES, null, [{ ago: 1, value: 0, count: 1 }], 168);
+		const coreWeek = ok("emit.success", null, [{ ago: 160, value: 1, count: 10 }, { ago: 3, value: 1, count: 10 }], 168);
+		const result = judgeCriterion(expiry, new Map([...results({ "memory.expired": emptyExtended, [EXTENDED_COVERAGE_SERIES]: justEnabled }, "7d"), [keyOf("emit.success", "7d"), answer(coreWeek)]]));
+		expect(result).toMatchObject({ verdict: "insufficient-data", observed: null });
+		expect(result.detail).toContain("extended history only starts when SUBSTRATE_METRICS_HISTORY_SERIES=extended was enabled");
+		expect(result.detail).toContain("covers 1.0 h of the 7d window");
+	});
+
+	test("memory expiry: an extended gauge with a hole is insufficient-data, and one that spans the week lets an empty answer mean zero", () => {
 		const empty = ok("memory.expired", "mode", [], 168);
-		const thin = ok("emit.success", null, [{ ago: 5, value: 1, count: 10 }], 168);
-		expect(judgeCriterion(expiry, results({ "memory.expired": empty, "emit.success": thin }, "7d"))).toMatchObject({ verdict: "insufficient-data", observed: null });
+		const holey = ok(EXTENDED_COVERAGE_SERIES, null, [{ ago: 166, value: 0, count: 1 }, { ago: 20, value: 0, count: 1 }], 168, { fill: false });
+		expect(judgeCriterion(expiry, results({ "memory.expired": empty, [EXTENDED_COVERAGE_SERIES]: holey }, "7d"))).toMatchObject({ verdict: "insufficient-data" });
+		expect(judgeCriterion(expiry, results({ "memory.expired": empty }, "7d"))).toMatchObject({ verdict: "ready", observed: 0 });
+	});
+
+	test("an unrecorded extended coverage gauge is series-unavailable with the hint to enable extended", () => {
+		const result = judgeCriterion(expiry, new Map([[keyOf("memory.expired", "7d"), answer(ok("memory.expired", "mode", [], 168), "extended")], [keyOf(EXTENDED_COVERAGE_SERIES, "7d"), answer(NOT_RECORDED, "extended")]]));
+		expect(result.verdict).toBe("series-unavailable");
+		expect(result.hint).toContain("SUBSTRATE_METRICS_HISTORY_SERIES=extended");
 	});
 
 	test("recall shares: would_include + included over every brief counted; 60 of 100 is 60 % (>= 50 %), 49 of 100 holds", () => {
@@ -563,14 +628,14 @@ describe("the CLI", () => {
 });
 
 describe("buildReport and parseFixture", () => {
-	test("each distinct series and window is fetched once; the coverage series of a memory criterion is fetched too", async () => {
+	test("each distinct series and window is fetched once; the extended coverage gauge of a memory criterion is fetched too", async () => {
 		const asked: string[] = [];
 		const get: Getter = async (path) => {
 			asked.push(path);
 			return { status: 404, body: { enabled: false } };
 		};
 		await buildReport([flagByName("SUBSTRATE_MEMORY_EXPIRY")!], get, "live");
-		expect(asked).toEqual(["/slo/history?series=memory.expired&window=7d", "/slo/history?series=emit.success&window=7d", "/slo"]);
+		expect(asked).toEqual([`/slo/history?series=memory.expired&window=7d`, `/slo/history?series=${EXTENDED_COVERAGE_SERIES}&window=7d`, "/slo"]);
 	});
 
 	test("a fixture needs a series object and integer statuses", () => {

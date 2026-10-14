@@ -42,6 +42,13 @@
  *   window (`MAX_GAP_FRACTION`), so a sampler or ledger that was down for most of
  *   the window cannot read as covered. A quiet period with no traffic also leaves
  *   no counter rows; that is `insufficient-data` too, which is the safe answer.
+ *   Coverage is judged on the criterion's own points: its label terms (another
+ *   surface's full day does not vouch for a recent burst), and for an extended
+ *   criterion the extended gauge `EXTENDED_COVERAGE_SERIES`, because extended
+ *   history starts when `SUBSTRATE_METRICS_HISTORY_SERIES=extended` was enabled
+ *   and a missing extended counter row before that is absent, not zero.
+ * - A policy's manual check (`also check:`, JSON `manual`) is printed with the
+ *   verdict and applies whatever it is, ready included.
  * - The bearer is resolved like the runtime doctor (`doctorBearer`), sent only as
  *   an `Authorization` header to the URL it was resolved for (redirects are not
  *   followed, so it cannot be forwarded), and is never printed or put in JSON.
@@ -52,7 +59,7 @@
  * name, unreadable or invalid `--offline` fixture).
  */
 import { readFileSync } from "node:fs";
-import { type Evidence, type FlagSpec, flagByName, policyFlags, type SeriesTerm } from "../packages/mcp-server/src/flag-registry.ts";
+import { EXTENDED_COVERAGE_SERIES, type Evidence, type FlagSpec, flagByName, policyFlags, type SeriesTerm } from "../packages/mcp-server/src/flag-registry.ts";
 import { doctorBearer } from "./doctor-runtime.ts";
 
 export const VERDICTS = ["ready", "hold", "insufficient-data", "series-unavailable"] as const;
@@ -158,12 +165,18 @@ export const keyOf = (series: string, window: string): string => `${series}@${wi
 export function requiredSeries(evidence: Evidence): string[] {
 	const names = [evidence.numerator.series];
 	if (evidence.denominator !== undefined) names.push(evidence.denominator.series);
-	names.push(coverageSeriesOf(evidence));
+	names.push(coverageTermOf(evidence).series);
 	return [...new Set(names)];
 }
 
-function coverageSeriesOf(evidence: Evidence): string {
-	return evidence.coverageSeries ?? evidence.denominator?.series ?? evidence.numerator.series;
+/**
+ * The points whose presence proves the window was sampled. An extended criterion is covered by the extended
+ * gauge (a row every interval, from the moment extended sampling started); a core criterion by the points it is
+ * about, with its own label terms: the denominator's for a share or ratio, else the numerator's.
+ */
+function coverageTermOf(evidence: Evidence): SeriesTerm {
+	if (evidence.needs === "extended") return { series: EXTENDED_COVERAGE_SERIES };
+	return evidence.stat === "share" || evidence.stat === "ratio" ? (evidence.denominator ?? { series: evidence.numerator.series }) : evidence.numerator;
 }
 
 function pick(points: readonly HistoryPoint[], term: SeriesTerm): HistoryPoint[] {
@@ -247,17 +260,21 @@ export function judgeCriterion(evidence: Evidence, results: ReadonlyMap<string, 
 	if ([...answered.values()].some((result) => result.windowCapped)) {
 		return unjudged(`history retention is shorter than the ${evidence.window} window`, "raise SUBSTRATE_METRICS_HISTORY_TTL (an existing table needs an operator ALTER, docs/observability.md)");
 	}
-	const coverage = answered.get(coverageSeriesOf(evidence))!;
-	const earliest = coverage.points.reduce((min, point) => Math.min(min, point.tsMs), Number.POSITIVE_INFINITY);
-	const coveredMs = coverage.points.length === 0 ? 0 : Math.max(0, coverage.toMs - earliest);
+	const coverageTerm = coverageTermOf(evidence);
+	const coverageAnswer = answered.get(coverageTerm.series)!;
+	// Coverage is judged on the points the criterion is about (its own label terms), so another surface's full day cannot vouch for a recent burst; an extended criterion is judged on the extended gauge, because extended history only starts when the flag was enabled.
+	const coveragePoints = pick(coverageAnswer.points, coverageTerm);
+	const why = evidence.needs === "extended" ? "extended history only starts when SUBSTRATE_METRICS_HISTORY_SERIES=extended was enabled, and a missing extended counter row is zero only after that; " : "";
+	const earliest = coveragePoints.reduce((min, point) => Math.min(min, point.tsMs), Number.POSITIVE_INFINITY);
+	const coveredMs = coveragePoints.length === 0 ? 0 : Math.max(0, coverageAnswer.toMs - earliest);
 	if (coveredMs < COVERAGE_MIN * windowMs) {
-		return unjudged(`history covers ${hours(coveredMs)} of the ${evidence.window} window (needs ${Math.round(COVERAGE_MIN * 100)} %)`, "let it soak in the safe mode; rerun when the window is covered");
+		return unjudged(`${why}${coverageTerm.series} covers ${hours(coveredMs)} of the ${evidence.window} window (needs ${Math.round(COVERAGE_MIN * 100)} %)`, "let it soak in the safe mode; rerun when the window is covered");
 	}
 	// Coverage from the first point to now says nothing about a hole in the middle (sampler or ledger down): no stretch of the window, between points or after the last one, may exceed MAX_GAP_FRACTION of it.
-	const stamps = [...new Set(coverage.points.map((point) => point.tsMs))].sort((a, b) => a - b);
-	const widest = stamps.reduce((gap, stamp, index) => Math.max(gap, index === 0 ? 0 : stamp - stamps[index - 1]!), Math.max(0, coverage.toMs - stamps[stamps.length - 1]!));
+	const stamps = [...new Set(coveragePoints.map((point) => point.tsMs))].sort((a, b) => a - b);
+	const widest = stamps.reduce((gap, stamp, index) => Math.max(gap, index === 0 ? 0 : stamp - stamps[index - 1]!), Math.max(0, coverageAnswer.toMs - stamps[stamps.length - 1]!));
 	if (widest > MAX_GAP_FRACTION * windowMs) {
-		return unjudged(`the history has a ${hours(widest)} gap in the ${evidence.window} window (allowed ${hours(MAX_GAP_FRACTION * windowMs)}): the sampler or the ledger was down, or there was no traffic`, "check the sampler and the ledger plane in /healthz; rerun when the window is continuous");
+		return unjudged(`${why}${coverageTerm.series} has a ${hours(widest)} gap in the ${evidence.window} window (allowed ${hours(MAX_GAP_FRACTION * windowMs)}): the sampler or the ledger was down, or there was no traffic`, "check the sampler and the ledger plane in /healthz; rerun when the window is continuous");
 	}
 
 	const numeratorPoints = pick(answered.get(evidence.numerator.series)!.points, evidence.numerator);
@@ -298,6 +315,8 @@ export interface FlagVerdict {
 	verdict: Verdict;
 	step: string;
 	rollback: string;
+	/** The policy's manual check, which still applies when the verdict is `ready`; null when the policy has none. */
+	manual: string | null;
 	criteria: Criterion[];
 }
 
@@ -308,7 +327,7 @@ export function judgeFlag(flag: FlagSpec, results: ReadonlyMap<string, SeriesRes
 	const policy = flag.policy!;
 	const criteria = policy.evidence.map((evidence) => judgeCriterion(evidence, results));
 	const verdict = PRECEDENCE.find((candidate) => criteria.some((criterion) => criterion.verdict === candidate)) ?? "ready";
-	return { flag: flag.name, safe: policy.safe, enforcing: policy.enforcing, verdict, step: policy.step, rollback: policy.rollback, criteria };
+	return { flag: flag.name, safe: policy.safe, enforcing: policy.enforcing, verdict, step: policy.step, rollback: policy.rollback, manual: policy.manual ?? null, criteria };
 }
 
 // ── I/O ──────────────────────────────────────────────────────────────────────
@@ -420,9 +439,8 @@ export async function buildReport(flags: readonly FlagSpec[], get: Getter, sourc
 		for (const evidence of flag.policy?.evidence ?? []) {
 			for (const series of requiredSeries(evidence)) {
 				const key = keyOf(series, evidence.window);
-				// `needs` describes the series the criterion measures; a series that only proves coverage is a core series.
-				const measured = series === evidence.numerator.series || series === evidence.denominator?.series;
-				const needs = measured ? evidence.needs : "core";
+				// `needs` describes the series the criterion measures (its numerator) and the extended coverage gauge; a denominator or a coverage series of a core criterion is a core series.
+				const needs = (series === evidence.numerator.series && evidence.needs === "extended") || series === EXTENDED_COVERAGE_SERIES ? "extended" : "core";
 				if (!wanted.has(key)) wanted.set(key, { series, window: evidence.window, needs });
 			}
 		}
@@ -477,7 +495,10 @@ export function formatReport(report: Report): string {
 	for (const flag of report.flags) {
 		lines.push(`${flag.flag}  ${flag.safe} -> ${flag.enforcing}  ${flag.verdict.toUpperCase()}`);
 		for (const criterion of flag.criteria) lines.push(formatCriterion(criterion));
-		lines.push(`  when ready: ${flag.step}`, `  rollback:   ${flag.rollback}`, "");
+		lines.push(`  when ready: ${flag.step}`);
+		// A verdict from the history is not the whole decision: the manual check still applies, ready included.
+		if (flag.manual !== null) lines.push(`  also check: ${flag.manual}  (applies whatever the verdict, ready included)`);
+		lines.push(`  rollback:   ${flag.rollback}`, "");
 	}
 	if (report.notJudged.length > 0) {
 		lines.push("not judged from the history (read the manual evidence):");

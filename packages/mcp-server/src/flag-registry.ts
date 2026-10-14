@@ -90,6 +90,15 @@ export interface SeriesTerm {
 export type EvidenceStat = "share" | "ratio" | "max" | "sum";
 
 /**
+ * The extended series that proves EXTENDED sampling covered a window: a gauge the extended sampler writes in
+ * every interval (the retain outbox depth is set at boot and never absent), so a row exists whether or not the
+ * interval had any traffic. A criterion over an extended series treats a missing counter row as zero only if this
+ * series spans the window without a long gap; core series cannot prove it, because extended history starts when
+ * `SUBSTRATE_METRICS_HISTORY_SERIES=extended` was enabled and the series before that are absent, not zero.
+ */
+export const EXTENDED_COVERAGE_SERIES = "hindsight.outbox_size";
+
+/**
  * One promotion criterion, judged from `GET /slo/history`. `proposed` is the
  * literal `true`: every threshold here is a proposal, never a measured SLO.
  */
@@ -110,8 +119,6 @@ export interface Evidence {
 	window: string;
 	/** `extended` series exist only with `SUBSTRATE_METRICS_HISTORY_SERIES=extended`; without it the criterion is series-unavailable. */
 	needs: "core" | "extended";
-	/** A series whose points prove the history covers the window; the criterion's own series when omitted (a counter has no row for an interval with nothing to count). */
-	coverageSeries?: string;
 	rationale: string;
 	/** One short caveat the advisor prints on the criterion's line and the runbook table carries (for example that the measured number is a bound). */
 	note?: string;
@@ -357,9 +364,8 @@ export const FLAGS: readonly FlagSpec[] = [
 					minSamples: 0,
 					window: "7d",
 					needs: "extended",
-					coverageSeries: "emit.success",
 					rationale:
-						"PROPOSED. Under report an expired entry is still served (mode=served), so a non-zero count is exactly what enforce would start hiding. The series is not split by memory kind, so any served expired entry holds the flip until the operator has read the sweep dry-run for kind=decision entries; zero over a covered week is the clean case. Coverage is proven by emit.success because a counter has no row for an interval with nothing to count.",
+						"PROPOSED. Under report an expired entry is still served (mode=served), so a non-zero count is exactly what enforce would start hiding. The series is not split by memory kind, so any served expired entry holds the flip until the operator has read the sweep dry-run for kind=decision entries; zero over a covered week is the clean case. A counter has no row for an interval with nothing to count, so zero is believed only when extended sampling itself covered the whole window (the extended coverage gauge has a row in every interval); extended history starts when the flag was enabled, never earlier.",
 					proposed: true,
 				},
 			],

@@ -23,7 +23,7 @@ import { join } from "node:path";
 import { BRIEF_RECALL_RESULTS, CACHE_METRIC_RESULTS, MEMORY_EXPIRED_MODES, RECALL_PREFETCH_RESULTS } from "@substrate/observability";
 import { loadConfig } from "./config.ts";
 import { envReadSources, scanFiles, scanSource, type EnvRead } from "./flag-registry-scan.ts";
-import { FLAGS, FLAG_FAMILIES, REGISTRY_EXEMPT, findUnregistered, policyFlags, registeredNames } from "./flag-registry.ts";
+import { EXTENDED_COVERAGE_SERIES, FLAGS, FLAG_FAMILIES, REGISTRY_EXEMPT, findUnregistered, policyFlags, registeredNames } from "./flag-registry.ts";
 import { sweepModeFromEnv } from "./index-sweep.ts";
 import { METRIC_SERIES } from "./metrics-history.ts";
 
@@ -303,6 +303,14 @@ describe("promotion policies", () => {
 			if (policy.safe !== "unset") expect({ flag: flag.name, safe: accepted.has(policy.safe) }).toEqual({ flag: flag.name, safe: true });
 			expect({ flag: flag.name, enforcing: accepted.has(policy.enforcing) }).toEqual({ flag: flag.name, enforcing: true });
 		}
+	});
+
+	test("extended criteria are covered by an extended gauge that is not a core series, so core history cannot vouch for them", () => {
+		expect(Object.hasOwn(METRIC_SERIES, EXTENDED_COVERAGE_SERIES)).toBe(false);
+		const extended = policyFlags().flatMap((flag) => flag.policy!.evidence).filter((evidence) => evidence.needs === "extended");
+		expect(extended.length).toBeGreaterThan(0);
+		// An evidence row has no way to name a core series as its coverage: the field is gone, the advisor derives it.
+		for (const evidence of extended) expect(Object.hasOwn(evidence, "coverageSeries")).toBe(false);
 	});
 
 	test("a flag with no history evidence says how the operator judges it instead", () => {

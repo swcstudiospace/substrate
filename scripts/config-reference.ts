@@ -121,14 +121,15 @@ export function renderReference(): string {
 	out.push(
 		"## Promotion policies",
 		"",
-		"The policy flags: the value that preserves today's behaviour or only reports (**safe**), the value that makes the policy bite (**enforcing**), the operator's step and the rollback. Code never performs a flip. A flag with evidence is judged by `bun run advisor:promote` against the PROPOSED thresholds in `docs/runbooks/flag-promotion.md`; a flag without evidence has a manual check instead.",
+		"The policy flags: the value that preserves today's behaviour or only reports (**safe**), the value that makes the policy bite (**enforcing**), the operator's step and the rollback. Code never performs a flip. A flag with evidence is judged by `bun run advisor:promote` against the PROPOSED thresholds in `docs/runbooks/flag-promotion.md`; a flag without evidence has a manual check instead. A flag with BOTH has a manual check that still applies when the advisor says `ready`: the advisor prints it as `also check:` and carries it in its JSON.",
 		"",
 		"| Flag | Safe | Enforcing | Step | Rollback | Evidence |",
 		"| --- | --- | --- | --- | --- | --- |",
 	);
 	for (const flag of policyFlags()) {
 		const policy = flag.policy!;
-		const evidence = policy.evidence.length > 0 ? policy.evidence.map((item) => `${item.id} (${item.needs})`).join("; ") : `manual: ${policy.manual ?? "none"}`;
+		const also = policy.manual === undefined ? "" : `; ALSO manual (applies even when the advisor says ready): ${policy.manual}`;
+		const evidence = policy.evidence.length > 0 ? `${policy.evidence.map((item) => `${item.id} (${item.needs})`).join("; ")}${also}` : `manual: ${policy.manual ?? "none"}`;
 		out.push(`| ${code(flag.name)} | ${code(policy.safe)} | ${code(policy.enforcing)} | ${cell(policy.step)} | ${cell(policy.rollback)} | ${cell(evidence)} |`);
 	}
 	out.push("", "## Names composed at run time", "", "The scan sees only the prefix of a name the code builds, so each family is registered by pattern and by the members it can read.", "", "| Pattern | Prefix | Members |", "| --- | --- | --- |");
