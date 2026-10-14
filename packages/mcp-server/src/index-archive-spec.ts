@@ -8,8 +8,11 @@
  * refused by {@link tableSpec} before any SQL exists.
  *
  * The list is `IndexStore.migrate()`'s, in foreign-key order (`graph_nodes`
- * references `graph_index`; nothing else has a foreign key). There is no
- * `skills` table in the index: skills live in the skills library, not here.
+ * references `graph_index`; nothing else has a foreign key). `skills_registry`
+ * (uplift-5 S5a) is deliberately not in it: adding a table changes `schemaHash`,
+ * which would make every earlier archive fail `verify-archive`. It is the source
+ * of truth for skill approvals; its `skill.*` ledger events are only a
+ * best-effort trail, so they are not a restore source.
  * `index-archive.test.ts` compares these columns against `information_schema`
  * on a live database, so a column added to `migrate()` and not here fails CI.
  *

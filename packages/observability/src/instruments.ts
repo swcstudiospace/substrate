@@ -42,6 +42,7 @@ export const METRIC = {
 	servedTokensEst: "substrate.served.tokens_est",
 	briefRecall: "substrate.brief.recall",
 	recallPrefetch: "substrate.recall.prefetch",
+	eventsReplay: "substrate.events.replay",
 } as const;
 
 /**
@@ -181,6 +182,15 @@ export const EVENT_REFUSAL_REASONS = ["auth", "validation", "attribution", "grap
 export type EventRefusalReason = (typeof EVENT_REFUSAL_REASONS)[number];
 
 /**
+ * What an idempotent `POST /events` came to (U5-4a). `deduplicated`: the key was already
+ * stored, nothing written. `appended`: the lookup missed and the event was appended.
+ * `refused`: a 400 on the idempotency rules (bad key, replay stamped past the clock bound).
+ * `lookup_failed`: the ledger read errored, so the request was answered 503 and nothing written.
+ */
+export const EVENT_REPLAY_RESULTS = ["deduplicated", "appended", "refused", "lookup_failed"] as const;
+export type EventReplayResult = (typeof EVENT_REPLAY_RESULTS)[number];
+
+/**
  * The only 400 whose reason is `graph_id`. Matched whole, because the message
  * of every other 400 can quote a caller-supplied value — `unknown kind: graph_id`
  * is a bad kind, not a bad graph id.
@@ -292,6 +302,7 @@ export class SubstrateInstruments {
 	readonly docsCitations: Counter;
 	readonly docsDuration: Histogram;
 	readonly memoryExpired: Counter;
+	readonly eventsReplay: Counter;
 	readonly briefResult: Counter;
 	readonly briefProfileBytesSaved: Counter;
 	readonly briefProfile: Counter;
@@ -358,6 +369,11 @@ export class SubstrateInstruments {
 		});
 		this.eventsRefused = registry.counter(METRIC.eventsRefused, {
 			description: "POST /events refusals by reason (auth|validation|attribution|graph_id).",
+			unit: "{event}",
+		});
+		this.eventsReplay = registry.counter(METRIC.eventsReplay, {
+			description:
+				"POST /events idempotency outcomes by result (deduplicated|appended|refused|lookup_failed): a replay (or a keyed request under enforce) that took the lookup, or a request refused on the idempotency rules. Silent while SUBSTRATE_EVENT_IDEMPOTENCY is off.",
 			unit: "{event}",
 		});
 		this.anonymousRequests = registry.counter(METRIC.anonymousRequests, {
@@ -513,6 +529,11 @@ export class SubstrateInstruments {
 	/** One refused `POST /events`. The reason is the closed set in `EVENT_REFUSAL_REASONS`. */
 	recordEventRefusal(sample: { reason: EventRefusalReason }): void {
 		this.eventsRefused.add(1, { reason: sample.reason });
+	}
+
+	/** One replay or keyed `POST /events` and what became of it. The result is the closed set in `EVENT_REPLAY_RESULTS`. */
+	recordEventReplay(sample: { result: EventReplayResult }): void {
+		this.eventsReplay.add(1, { result: sample.result });
 	}
 
 	recordCache(sample: { result: CacheMetricResult; mode: "off" | "on" | "degraded"; cacheClass?: string }): void {

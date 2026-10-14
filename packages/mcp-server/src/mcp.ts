@@ -26,6 +26,7 @@ import {
 	type Substrate,
 } from "./service.ts";
 import { proposalFailure } from "./skills/request.ts";
+import { approvalFailure } from "./skills/registry.ts";
 import {
 	ACTORS,
 	EDGE_KINDS,
@@ -1073,6 +1074,72 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				return json(await substrate.proposeSkill(request, { surface: callerSurface, isOperator }));
 			} catch (cause) {
 				const failure = proposalFailure(cause);
+				if (failure === null) throw cause;
+				return { ...json(failure.body), isError: true };
+			}
+		},
+	);
+
+	server.registerTool(
+		"skills_approve",
+		{
+			title: "Approve, decline or retire a skill",
+			description:
+				"Operator only: record the decision on a skill pull request in the skills registry. The pull request must be " +
+				"on the skills library's default branch and bound to `name`: a proposal branch this substrate opened for " +
+				"`name`, OR a pull request whose changed files include exactly `<name>/SKILL.md`. `approve` needs it MERGED " +
+				"with a merge commit, `decline` needs it CLOSED without merging, `retire` needs an approved row for that " +
+				"skill and pull request (no GitHub call). Asking again for the state a row already has answers `exists` and " +
+				"changes nothing. A name stays approved while any of its rows is approved: the answer's " +
+				"`remaining_approved_for_name` says how many remain, so to withdraw a name retire every approved row. " +
+				"`noted` says whether the decision's event reached the ledger. `decision` is approve, decline or retire; " +
+				"`reason` is at most 500 characters and is redacted. Nothing is installed, linked, unlinked or deleted: " +
+				"this records state, and a reader decides what to do with it.",
+			// Typed loosely on purpose: values are judged after authority, so a refusal for a missing operator token is
+			// the same whatever the arguments say, and every value refusal is recorded.
+			inputSchema: {
+				name: z.string().describe("The skill's name: lowercase letters, digits and hyphens."),
+				pr_number: z.number().describe("The skills library pull request number."),
+				decision: z.string().describe("approve, decline or retire."),
+				reason: z.string().optional().describe("Why, at most 500 characters. Redacted before it is stored."),
+			},
+			annotations: { destructiveHint: false, openWorldHint: true },
+		},
+		async (request) => {
+			try {
+				return json(await substrate.approveSkill(request, { surface: callerSurface, isOperator }));
+			} catch (cause) {
+				const failure = approvalFailure(cause);
+				if (failure === null) throw cause;
+				return { ...json(failure.body), isError: true };
+			}
+		},
+	);
+
+	server.registerTool(
+		"skills_list",
+		{
+			title: "List approved skills",
+			description:
+				"The skills registry. By default the APPROVED skills, `{ governance, library, skills, truncated }` (`library` is the " +
+				"configured skills library's owner/repo slug), sorted by name, ONE " +
+				"entry per name (its most recent approved row; a name stays listed while any of its rows is approved): each " +
+				"entry has the skill's name, its proposal `content_sha256` (empty when the pull request was not proposed " +
+				"through this substrate), the `merge_sha` that was approved, `pr_url`, `approved_at` and `proposed_by`. " +
+				"`governance` is SUBSTRATE_SKILLS_GOVERNANCE (off, report or enforce); the registry is returned in every mode, " +
+				"so an empty list under `off` means nothing has been recorded, not that nothing is published. At most 500 " +
+				"entries; `truncated` says more exist. `state` proposed, declined, retired or all is an operator action and " +
+				"lists every row, several per name. Needs an authenticated surface.",
+			inputSchema: {
+				state: z.string().optional().describe("approved (the default), or proposed, declined, retired, all (operator only)."),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async (request) => {
+			try {
+				return json(await substrate.listSkills(request, { surface: callerSurface, isOperator }));
+			} catch (cause) {
+				const failure = approvalFailure(cause);
 				if (failure === null) throw cause;
 				return { ...json(failure.body), isError: true };
 			}

@@ -75,6 +75,15 @@ export function classOf(key: string): CacheKeyClass | null {
 
 export const MEMORY_GENERATION_KEY = `${CACHE_PREFIX}:gen:memory`;
 
+/**
+ * `SUBSTRATE_CACHE_BUMP_SCOPE=narrow` (uplift-5 U5-3): bumped after a successful Hindsight
+ * retain and after an outbox replay, instead of the memory generation. Read only by the entries
+ * whose answer holds a Hindsight recall (`memory_recall`, and the merged `memory_search`); a brief
+ * reads recall through the generation-free `recall-snapshot` and a paged search reads the index
+ * alone, so neither lists it. Under `legacy` nothing writes or reads it.
+ */
+export const RECALL_GENERATION_KEY = `${CACHE_PREFIX}:gen:recall`;
+
 /** Bumped on every graph write, so a brief that lists other graphs refreshes too. */
 export const GRAPHS_GENERATION_KEY = `${CACHE_PREFIX}:gen:graphs`;
 

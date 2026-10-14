@@ -27,6 +27,10 @@
  * appends its undo line to `<backupDir>/RESTORE.md` (backupDir created 0700 on the first change).
  * `--check` exits 1 when any change is pending and writes nothing; skip-warn entries are not drift.
  * With nothing pending it prints an "already current" line and exits 0.
+ *
+ * `SUBSTRATE_SKILLS_GOVERNANCE=off|report|enforce` (default off) adds approval gating — see
+ * skills-governance.ts: `report` projects everything and warns once about unapproved skills,
+ * `enforce` holds back NEW links for unapproved skills and never unlinks anything.
  */
 import { createHash } from "node:crypto";
 import {
@@ -46,6 +50,18 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { SKILL_NAME_RE } from "../../mcp-server/src/skills/propose.ts";
+import {
+	evaluateGovernance,
+	type GovernanceOptions,
+	type GovernanceRun,
+	governanceFromEnv,
+	governancePaths,
+	resolveSurfaceToken,
+	usesHostJobToken,
+	RENOTIFY_MS,
+	reportGovernance,
+	skillsGovernanceConfigWarnings,
+} from "./skills-governance.ts";
 import type { EventInput, Surface } from "../../mcp-server/src/types.ts";
 
 export interface Root {
@@ -379,16 +395,31 @@ export async function apply(actions: readonly Action[], ctx: ApplyContext): Prom
 	return { actions: changed, warnings: emitted };
 }
 
-/** Fail-open POST /events; false when the substrate did not accept it. */
-export async function postWarning(event: WarningEvent): Promise<boolean> {
+/**
+ * Fail-open POST /events; false when the substrate did not accept it. The bearer is the one the
+ * governance fetch uses (`resolveSurfaceToken`: the unit's `SUBSTRATE_TOKEN_SUBSTRATE`, then the
+ * generic `SUBSTRATE_TOKEN`, first entry of a list), so the shipped unit's events are not anonymous.
+ *
+ * The unit's token is the `substrate` host-job surface token, and the server refuses (403) an event
+ * that names another surface with it. Posted with that token, an event for a root's surface
+ * (claude-code, grok-build, ...) therefore goes out as `substrate` and keeps the root's surface in
+ * `payload.root_surface`; the root id stays in `payload.root`. With only the generic token (or none)
+ * the event goes out exactly as built.
+ */
+export async function postWarning(event: WarningEvent, env: NodeJS.ProcessEnv = process.env, fetchImpl: typeof fetch = fetch): Promise<boolean> {
+	const token = resolveSurfaceToken(env);
+	const posted: WarningEvent =
+		usesHostJobToken(env) && event.surface !== "substrate"
+			? { ...event, surface: "substrate", payload: { ...event.payload, root_surface: event.surface } }
+			: event;
 	try {
-		const response = await fetch(`${SUBSTRATE_URL}/events`, {
+		const response = await fetchImpl(`${SUBSTRATE_URL}/events`, {
 			method: "POST",
 			headers: {
 				"content-type": "application/json",
-				...(process.env.SUBSTRATE_TOKEN ? { authorization: `Bearer ${process.env.SUBSTRATE_TOKEN}` } : {}),
+				...(token === "" ? {} : { authorization: `Bearer ${token}` }),
 			},
-			body: JSON.stringify(event),
+			body: JSON.stringify(posted),
 			signal: AbortSignal.timeout(3000),
 		});
 		return response.ok;
@@ -405,6 +436,11 @@ export interface ProjectOptions {
 	stateFile: string;
 	stdout: (line: string) => void;
 	emitWarning: EmitWarning;
+	/**
+	 * Approval-gated projection (skills-governance.ts). Absent or mode `off`: nothing extra runs, the
+	 * run is byte-identical to the ungoverned projector. `defaultOptions()` reads it from the env.
+	 */
+	governance?: GovernanceOptions;
 }
 
 export function defaultOptions(): ProjectOptions {
@@ -416,18 +452,41 @@ export function defaultOptions(): ProjectOptions {
 		stateFile: WARNED_STATE,
 		stdout: (line) => process.stdout.write(`${line}\n`),
 		emitWarning: postWarning,
+		governance: governanceFromEnv(),
 	};
 }
 
-function planFor(opts: ProjectOptions): Action[] {
+/**
+ * The planner's actions for this run. With governance on, the approved list is consulted once (a
+ * bounded, fail-open fetch) and in `enforce` the new links for unapproved skills are held back;
+ * `persist` lets the real run refresh the approved cache while `--check` writes nothing.
+ */
+async function planFor(opts: ProjectOptions, persist: boolean): Promise<{ actions: Action[]; governance: GovernanceRun | null; libraryCount: number }> {
 	const names = libraryNames(opts.libraryDir);
 	if (names.length === 0) throw new Error(`no library skills under ${opts.libraryDir}; refusing to project`);
-	return plan(activeRoots(opts.roots).map(inventory), names, opts);
+	const actions = plan(activeRoots(opts.roots).map(inventory), names, opts);
+	const gov = opts.governance;
+	if (gov === undefined || gov.mode === "off") {
+		// A rejected flag value is named once per run; a valid or unset one prints nothing.
+		if (gov !== undefined) for (const line of skillsGovernanceConfigWarnings(gov)) opts.stdout(`[projector] ${line}`);
+		return { actions, governance: null, libraryCount: names.length };
+	}
+	const governance = await evaluateGovernance(gov, names, actions, { cache: governancePaths(opts.stateFile).cache, persist });
+	return { actions: governance?.actions ?? actions, governance, libraryCount: names.length };
 }
 
 /** One projector run: plan, apply, print the totals. Used by the CLI and by skills-sync. */
 export async function project(opts: ProjectOptions): Promise<ApplyResult> {
-	const actions = planFor(opts);
+	const { actions, governance, libraryCount } = await planFor(opts, true);
+	if (governance !== null && opts.governance !== undefined) {
+		await reportGovernance(governance, libraryCount, {
+			warnedFile: governancePaths(opts.stateFile).warned,
+			emitWarning: opts.emitWarning,
+			log: opts.stdout,
+			now: opts.governance.now ?? Date.now,
+			renotifyMs: opts.governance.renotifyMs ?? RENOTIFY_MS,
+		});
+	}
 	const ts = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
 	const result = await apply(actions, {
 		backupDir: join(opts.backupRoot, ts),
@@ -456,7 +515,7 @@ export async function main(args: readonly string[], base: ProjectOptions = defau
 		await project(opts);
 		return 0;
 	}
-	const pending = planFor(opts).filter((a) => a.kind !== "skip-warn");
+	const pending = (await planFor(opts, false)).actions.filter((a) => a.kind !== "skip-warn");
 	if (pending.length === 0) {
 		opts.stdout(`[projector] already current (${activeRoots(opts.roots).map((r) => r.id).join(", ")})`);
 		return 0;

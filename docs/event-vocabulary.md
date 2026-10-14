@@ -24,7 +24,8 @@ These apply to every source:
 - **`payload.action` is the discriminator** for events a component records
   about itself, following the existing use (`action: "expired"` on the reap
   event, `"released"` / `"stolen"` on lease events). New concepts become
-  `payload.action` values, never kinds: `skill.propose`, `docs.ingest`,
+  `payload.action` values, never kinds: `skill.propose`, `skill.approve`,
+  `skill.decline`, `skill.retire`, `skill.approve.refused`, `docs.ingest`,
   `docs.search`, `teachable`, `anchor`, `mirror`, `dispatch`, `approval`,
   `skills.sync`, `dod`, `doctor`, `slo.transition`, `docs.freshness`, `docs.canary`,
   `index.archive`, `alert`.
@@ -85,6 +86,10 @@ These apply to every source:
 | `skills.propose` | 21 | `note` | `caller` | `skill.propose` | — | `swcstudiospace/agent-skills` | no |
 | `skills.propose.refused` | 21 | `warning` | `caller` | `skill.propose` | — | — | no |
 | `skills.propose.failed` | 21 | `warning` | `caller` | `skill.propose` | — | — | no |
+| `skills.approve` | 21 | `note` | `caller` | `skill.approve` | — | `swcstudiospace/agent-skills` | no |
+| `skills.decline` | 21 | `note` | `caller` | `skill.decline` | — | `swcstudiospace/agent-skills` | no |
+| `skills.retire` | 21 | `note` | `caller` | `skill.retire` | — | `swcstudiospace/agent-skills` | no |
+| `skills.approve.refused` | 21 | `warning` | `caller` | `skill.approve.refused` | — | — | no |
 | `skills.sync.refused` | 22 | `warning` | `substrate` | `skills.sync` | `skills-sync` | — | yes |
 | `docs.search` | 25 | `note` | `caller` | `docs.search` | — | — | no |
 | `docs.search.failed` | 25 | `warning` | `caller` | `docs.search` | — | — | no |
@@ -138,6 +143,14 @@ apart by kind and `payload.status`: a `note` for an outcome, a `warning` with st
 `refused` for a guard's refusal, a `warning` with status `failed` for a git or `gh`
 step that failed. Their payloads carry hashes, names and rule names, never skill
 content; the detail is in [skills-propose.md](skills-propose.md).
+
+The four `skills.approve`, `skills.decline`, `skills.retire` and `skills.approve.refused`
+rows are the operator's decisions on the skills registry (`skills_approve`, uplift-5 S5a):
+a `note` carrying `name`, `pr_number`, `pr_url`, `decided_by` and, for approve and retire,
+the `merge_sha` the decision is about; a `warning` for an attempt the rules refused,
+carrying `decision`, `name` when it was a valid one, and `rule` from a closed list and no
+free text. A decision that changed nothing (`exists`) emits nothing. See
+[skills-propose.md](skills-propose.md#approving-a-skill).
 
 ## Silent sources
 

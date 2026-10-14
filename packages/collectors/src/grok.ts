@@ -14,10 +14,11 @@
  * about what is happening now and would bury every brief. `--backfill`
  * overrides that when the history is actually wanted.
  */
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { decodeSessionCwd, mapGrokEvent, type GrokEvent } from "./grok-map.ts";
-import { COUNTERS_KEY, countOutcome, emptyCounters, postEvent, type EmitCounters } from "./emit.ts";
+import { COUNTERS_KEY, countOutcome, drainEventSpool, emptyCounters, postEvent, type EmitCounters } from "./emit.ts";
 import { branchFor, repoSlug } from "./git-context.ts";
 
 const POLL_MS = 5000;
@@ -162,6 +163,16 @@ export function logEmitRefusal(
 	return true;
 }
 
+/**
+ * The idempotency key for one source line: file, session, the offset the line
+ * starts at and the line's own bytes. A re-read of the same line yields the same
+ * key, and a truncated-and-rewritten log (Grok rotates by truncating) cannot
+ * reuse an offset for different content, because the content is part of it.
+ */
+export function grokEventKey(path: string, sessionId: string, offset: number, line: string): string {
+	return `gk1:${createHash("sha256").update(JSON.stringify([path, sessionId, offset, line])).digest("hex")}`;
+}
+
 export async function pass(offsets: Offsets, backfill: boolean): Promise<{ read: number; emitted: number }> {
 	let read = 0;
 	let emitted = 0;
@@ -206,7 +217,10 @@ export async function pass(offsets: Offsets, backfill: boolean): Promise<{ read:
 			branch: cwd ? branchFor(cwd) : undefined,
 		};
 
+		let lineAt = from;
 		for (const line of complete) {
+			const at = lineAt;
+			lineAt += Buffer.byteLength(line) + 1;
 			if (!line.trim()) continue;
 			read++;
 			let parsed: GrokEvent;
@@ -220,7 +234,12 @@ export async function pass(offsets: Offsets, backfill: boolean): Promise<{ read:
 			// The shared emit never throws and records refusals itself; the
 			// collector only counts the outcome and keeps its rate-limited
 			// journal summary. Offsets advance either way: fail-open (D19-06).
-			const outcome = await postEvent(event, { timeoutMs: 3000, collector: "grok", source: "grok" });
+			const outcome = await postEvent(event, {
+				timeoutMs: 3000,
+				collector: "grok",
+				source: "grok",
+				idempotencyKey: grokEventKey(log.path, log.sessionId, at, line),
+			});
 			countOutcome(counters, outcome);
 			if (outcome.kind === "stored") emitted++;
 			else if (outcome.kind === "refused") logEmitRefusal(outcome.status, outcome.error);
@@ -234,6 +253,19 @@ export async function pass(offsets: Offsets, backfill: boolean): Promise<{ read:
 	return { read, emitted };
 }
 
+/** Replay parked events once, when the spool is on; says so on stdout only when something moved. */
+async function replaySpool(): Promise<void> {
+	const result = await drainEventSpool({ budgetMs: 10_000 });
+	if (result.status === "off") return;
+	const delivered = result.status === "ran" ? result.delivered : 0;
+	const failed = result.status === "ran" ? result.readFailed || result.writeFailed : result.failure !== undefined;
+	if (delivered > 0 || result.dropped > 0 || failed) {
+		const left = result.status === "ran" ? `, left ${result.remaining}` : `, held ${result.reason}${result.remaining === null ? "" : `, left ${result.remaining}`}`;
+		const note = failed ? " (spool read or write failed; see stderr)" : "";
+		process.stdout.write(`[grok-collector] spool replayed ${delivered}, dropped ${result.dropped}${left}${note}\n`);
+	}
+}
+
 async function main(): Promise<void> {
 	const args = process.argv.slice(2);
 	const backfill = args.includes("--backfill");
@@ -242,6 +274,7 @@ async function main(): Promise<void> {
 	const offsets = loadOffsets();
 	const first = await pass(offsets, backfill);
 	process.stdout.write(`[grok-collector] read ${first.read} lines, emitted ${first.emitted}\n`);
+	await replaySpool();
 
 	if (watch) {
 		process.stdout.write(`[grok-collector] watching ${sessionsDir()} every ${POLL_MS}ms\n`);
@@ -249,6 +282,7 @@ async function main(): Promise<void> {
 			await new Promise((resolve) => setTimeout(resolve, POLL_MS));
 			const round = await pass(offsets, false);
 			if (round.emitted > 0) process.stdout.write(`[grok-collector] emitted ${round.emitted}\n`);
+			await replaySpool();
 		}
 	}
 }

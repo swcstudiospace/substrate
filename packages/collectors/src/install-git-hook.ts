@@ -9,12 +9,27 @@
  * is left alone and reported, because a repo's own post-commit hook may be
  * doing something the owner cares about.
  */
-import { chmodSync, copyFileSync, existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const MARKER = "Agent Substrate — git post-commit collector";
 const SOURCE = join(import.meta.dir, "git", "post-commit");
+/**
+ * The hook is copied, not linked, so it cannot find `emit.ts` (the event spool,
+ * `SUBSTRATE_EVENT_SPOOL=on`) on its own. The installer writes this checkout's
+ * collectors directory into the placeholder; a hook copied by hand keeps the
+ * placeholder, which the hook treats as "no spool available".
+ */
+const SRC_PLACEHOLDER = "__SUBSTRATE_COLLECTORS_SRC__";
+
+function writeHook(path: string): void {
+	// A directory with shell metacharacters is never written into the script: the placeholder stays and the spool is unavailable.
+	const safeDir = /^[A-Za-z0-9._/@+-]+$/.test(import.meta.dir) ? import.meta.dir : SRC_PLACEHOLDER;
+	const body = readFileSync(SOURCE, "utf8").replaceAll(SRC_PLACEHOLDER, safeDir);
+	writeFileSync(path, body, { mode: 0o755 });
+	chmodSync(path, 0o755);
+}
 
 function hooksDir(repo: string): string | null {
 	const result = spawnSync("git", ["-C", repo, "rev-parse", "--git-path", "hooks"], { encoding: "utf8" });
@@ -58,8 +73,7 @@ for (const repo of repos) {
 	}
 	if (status === "already-ours") {
 		if (!checkOnly && path) {
-			copyFileSync(SOURCE, path);
-			chmodSync(path, 0o755);
+			writeHook(path);
 		}
 		process.stdout.write(`✓ ${repo} — ${checkOnly ? "present" : "refreshed"}\n`);
 		continue;
@@ -69,8 +83,7 @@ for (const repo of repos) {
 		continue;
 	}
 	if (path) {
-		copyFileSync(SOURCE, path);
-		chmodSync(path, 0o755);
+		writeHook(path);
 		process.stdout.write(`✓ ${repo} — installed\n`);
 	}
 }

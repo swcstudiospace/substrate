@@ -66,6 +66,7 @@ import {
 	type ReleaseDecision,
 } from "./lease.ts";
 import { redact } from "./redact.ts";
+import { transition, type SkillDecision, type SkillDecisionResult, type SkillRegistryRow, type SkillState } from "./skills/registry.ts";
 
 /**
  * Statuses that mean a graph is finished, so it is no longer "open" in a brief.
@@ -463,6 +464,27 @@ export class IndexStore implements MemoryStore {
 				decided_by      text,
 				created         timestamptz not null default now()
 			)`;
+		// Skills governance (uplift-5 S5a). The registry of which merged skill pull request an
+		// operator approved, declined or retired. A row is never deleted; see skills/registry.ts.
+		await this.sql`
+			create table if not exists skills_registry (
+				repo            text not null,
+				name            text not null,
+				pr_number       integer not null,
+				content_sha256  text not null default '',
+				state           text not null check (state in ('proposed', 'approved', 'declined', 'retired')),
+				proposed_by     text,
+				pr_url          text,
+				branch          text,
+				merge_sha       text,
+				decided_by      text,
+				decided_at      timestamptz,
+				reason          text,
+				created         timestamptz not null default now(),
+				updated         timestamptz not null default now(),
+				primary key (repo, name, pr_number)
+			)`;
+		await this.sql`create index if not exists skills_registry_state_idx on skills_registry (repo, state, name)`;
 
 		await this.sql`create index if not exists graph_index_repo_idx on graph_index (repo)`;
 		await this.sql`create index if not exists graph_nodes_claimed_idx on graph_nodes (claimed_by)`;
@@ -611,6 +633,29 @@ export class IndexStore implements MemoryStore {
 			const edges = (await this.sql`
 				select * from graph_edges where graph_id = ${graphId} order by from_node, to_node, kind`) as GraphEdge[];
 			return { ...row, nodes, steps, edges };
+		});
+	}
+
+	/**
+	 * The graph as a brief reads it (uplift-5 U5-3, `SUBSTRATE_BRIEF_GRAPH_READ=lite`): the
+	 * `graph_index` row and the `graph_nodes` rows, issued together, with `steps` and `edges`
+	 * left empty. The brief prints status, surface, pr_url and the nodes and nothing else, so two
+	 * statements in one round trip replace `getGraph`'s four in sequence, and the view is
+	 * `openGraphs`' own shape. Same answers as `getGraph` where the brief looks: no row is `null`
+	 * (whatever the nodes read did), a failed index read throws, and a failed node read throws
+	 * only when there is a row to attach its nodes to.
+	 */
+	async getGraphForBrief(graphId: string): Promise<GraphView | null> {
+		return this.plane("graph.brief", async () => {
+			const [indexRead, nodesRead] = await Promise.allSettled([
+				this.sql`select * from graph_index where graph_id = ${graphId}`,
+				this.sql`select * from graph_nodes where graph_id = ${graphId} order by node_id`,
+			]);
+			if (indexRead.status === "rejected") throw indexRead.reason;
+			const row = (indexRead.value as GraphIndexRow[])[0];
+			if (!row) return null;
+			if (nodesRead.status === "rejected") throw nodesRead.reason;
+			return { ...row, nodes: (nodesRead.value as GraphNode[]).map(toNode), steps: [], edges: [] };
 		});
 	}
 
@@ -1571,6 +1616,151 @@ export class IndexStore implements MemoryStore {
 		return { reviews: reviews.map(toQueueRow), quarantined: quarantined.map(toQueueRow) };
 	}
 
+	// ── skills registry (uplift-5 S5a) ─────────────────────────────────────────
+	//
+	// One row per (repo, name, pr_number); rows are never deleted. The state machine and the
+	// reasons behind it are in `skills/registry.ts`; this is the storage half.
+
+	/**
+	 * Record that `skills_propose` opened (or found) a pull request. Idempotent: a row that exists
+	 * is left as it is, except that a row an approval created before the proposal was recorded
+	 * (no content hash) learns it. State is never touched here, so a retry after a decision cannot
+	 * move a decided row back to `proposed`.
+	 */
+	async upsertProposedSkill(input: {
+		repo: string;
+		name: string;
+		pr_number: number;
+		pr_url: string;
+		branch: string | null;
+		content_sha256: string;
+		proposed_by: string;
+	}): Promise<void> {
+		await this.plane("skills.propose", async () => {
+			await this.sql`
+				insert into skills_registry (repo, name, pr_number, content_sha256, state, proposed_by, pr_url, branch)
+				values (${input.repo}, ${input.name}, ${input.pr_number}, ${input.content_sha256}, 'proposed',
+				        ${input.proposed_by}, ${input.pr_url}, ${input.branch})
+				on conflict (repo, name, pr_number) do update
+				set content_sha256 = excluded.content_sha256,
+				    proposed_by = coalesce(skills_registry.proposed_by, excluded.proposed_by),
+				    branch = coalesce(skills_registry.branch, excluded.branch),
+				    updated = now()
+				where skills_registry.content_sha256 = ''`;
+		});
+	}
+
+	/**
+	 * Apply one operator decision to the registry, atomically. Decisions are serialised per (repo, name) by a
+	 * transaction-scoped advisory lock taken first, so `remaining_approved` is the true post-decision total of
+	 * the name. Then the row is locked, the pure `transition` judges it, and only an `apply` writes: `exists`
+	 * leaves the row (and so the caller emits nothing), a refusal leaves it too. A row that does not exist yet
+	 * is created in the decided state, which is how a pull request proposed while the registry was off is
+	 * approved.
+	 */
+	async decideSkill(input: {
+		repo: string;
+		name: string;
+		pr_number: number;
+		decision: SkillDecision;
+		/** The merge commit an approve is about; null for decline and retire. */
+		merge_sha: string | null;
+		pr_url: string | null;
+		branch: string | null;
+		/** `proposed_by` for a row this decision creates. */
+		proposed_by: string | null;
+		decided_by: string;
+		reason: string | null;
+	}): Promise<SkillDecisionResult> {
+		return this.plane("skills.decide", async () =>
+			this.sql.begin(async (tx: SQL) => {
+				// How many approved rows the name has once this decision stands, in the same transaction.
+				const remaining = async (): Promise<number> => {
+					const counted = (await tx`
+						select count(*)::int as n from skills_registry
+						where repo = ${input.repo} and name = ${input.name} and state = 'approved'`) as Array<Record<string, unknown>>;
+					return Number(counted[0]?.n ?? 0);
+				};
+				// Serialise decisions per (repo, name) BEFORE locking the row or counting: the row lock below is one
+				// pull request's, but `remaining` counts every approved row of the name, so two concurrent decisions on
+				// different pull requests of one name could each see the other's row still approved and both answer a
+				// count that is not the final total. The transaction-scoped advisory lock (released at commit or
+				// rollback) makes the count the true post-decision total. The key is a stable 64-bit hash of repo+name
+				// (a collision only makes two unrelated names wait for each other).
+				await tx`select pg_advisory_xact_lock(hashtextextended(${skillDecisionLockKey(input.repo, input.name)}::text, 0))`;
+				for (let attempt = 0; attempt < 2; attempt++) {
+					const found = (await tx`
+						select * from skills_registry
+						where repo = ${input.repo} and name = ${input.name} and pr_number = ${input.pr_number}
+						for update`) as Array<Record<string, unknown>>;
+					const current = found[0] ? toSkillRow(found[0]) : null;
+					const verdict = transition(current, input.decision, input.merge_sha);
+					if (verdict.kind === "exists" && current) return { outcome: "exists" as const, row: current, remaining_approved: await remaining() };
+					if (verdict.kind === "refuse") return { outcome: "refused" as const, rule: verdict.rule, row: current };
+					if (verdict.kind !== "apply") continue;
+					if (current) {
+						const updated = (await tx`
+							update skills_registry
+							set state = ${verdict.to},
+							    merge_sha = coalesce(${input.merge_sha}::text, merge_sha),
+							    pr_url = coalesce(${input.pr_url}::text, pr_url),
+							    branch = coalesce(${input.branch}::text, branch),
+							    decided_by = ${input.decided_by}, decided_at = now(), reason = ${input.reason},
+							    updated = now()
+							where repo = ${input.repo} and name = ${input.name} and pr_number = ${input.pr_number}
+							returning *`) as Array<Record<string, unknown>>;
+						return { outcome: "applied" as const, row: toSkillRow(updated[0] as Record<string, unknown>), remaining_approved: await remaining() };
+					}
+					const inserted = (await tx`
+						insert into skills_registry (
+							repo, name, pr_number, content_sha256, state, proposed_by, pr_url, branch, merge_sha,
+							decided_by, decided_at, reason)
+						values (${input.repo}, ${input.name}, ${input.pr_number}, '', ${verdict.to}, ${input.proposed_by},
+						        ${input.pr_url}, ${input.branch}, ${input.merge_sha}, ${input.decided_by}, now(), ${input.reason})
+						on conflict (repo, name, pr_number) do nothing
+						returning *`) as Array<Record<string, unknown>>;
+					// A concurrent decision created the row between the select and the insert: judge it on the next pass.
+					if (inserted[0]) return { outcome: "applied" as const, row: toSkillRow(inserted[0]), remaining_approved: await remaining() };
+				}
+				throw new Error("skills registry row kept changing under the decision");
+			}) as Promise<SkillDecisionResult>,
+		);
+	}
+
+	/**
+	 * What `skills_list` reads, at most `limit` entries, ordered by name in code-unit order
+	 * (`collate "C"`, so `a-b` sorts before `ab`, as a JS string compare does; the database's own
+	 * collation ignores the hyphen at the first level).
+	 *
+	 * `state` `approved` is BY NAME: one row per name, its most recent approved row (latest
+	 * `decided_at`, then highest pull request number), because a reader builds a set of names and a
+	 * name stays approved while any of its rows is. Any other `state` (null is every state) is every
+	 * matching row by name then pull request number. Callers ask for `LIST_MAX + 1` to learn whether
+	 * the answer was cut.
+	 */
+	async listSkills(repo: string, state: SkillState | null, limit: number): Promise<SkillRegistryRow[]> {
+		return this.plane("skills.list", async () => {
+			const rows = (
+				state === "approved"
+					? await this.sql`
+						select * from (
+							select distinct on (name) *
+							from skills_registry
+							where repo = ${repo} and state = 'approved'
+							order by name, decided_at desc nulls last, pr_number desc
+						) latest
+						order by name collate "C" asc
+						limit ${limit}`
+					: await this.sql`
+						select * from skills_registry
+						where repo = ${repo} and (${state}::text is null or state = ${state})
+						order by name collate "C" asc, pr_number asc
+						limit ${limit}`
+			) as Array<Record<string, unknown>>;
+			return rows.map(toSkillRow);
+		});
+	}
+
 	/**
 	 * Full-text search. Superseded entries are excluded by default: an agent asking
 	 * what is true wants what is in force, not every version of it. A decision log is
@@ -1770,14 +1960,22 @@ export class IndexStore implements MemoryStore {
 			const [size, tables, nodes] = (await Promise.all([
 				this.sql`
 					select pg_database_size(current_database())::text as bytes`,
+				// `pg_total_relation_size` once per relation. The order is on `relations.total_bytes`, the number: a bare
+				// `total_bytes` would name the text output column and sort "9" above "10".
 				this.sql`
-					select relname as name,
-					       pg_total_relation_size(relid)::text as total_bytes,
-					       n_live_tup::text as live_rows,
-					       n_dead_tup::text as dead_rows
-					from pg_stat_user_tables
-					where left(schemaname, 13) <> '_timescaledb_'
-					order by pg_total_relation_size(relid) desc
+					select name,
+					       total_bytes::text as total_bytes,
+					       live_rows::text as live_rows,
+					       dead_rows::text as dead_rows
+					from (
+						select relname as name,
+						       pg_total_relation_size(relid) as total_bytes,
+						       n_live_tup as live_rows,
+						       n_dead_tup as dead_rows
+						from pg_stat_user_tables
+						where left(schemaname, 13) <> '_timescaledb_'
+					) as relations
+					order by relations.total_bytes desc
 					limit 10`,
 				// Lease-table bloat, visibility only: how many updates were HOT (no new
 				// index entries) and how much of the heap is dead. `null` ratios while the
@@ -2048,6 +2246,37 @@ function toQueueRow(row: Record<string, unknown>): GovernanceQueueRow {
 		// quarantined write never got as far as being kept for anything.
 		...(optional(row.ttl) ? { ttl: optional(row.ttl) } : {}),
 		...(optional(row.detail) ? { detail: optional(row.detail) } : {}),
+	};
+}
+
+/**
+ * The text `decideSkill` hashes into its per-(repo, name) advisory lock key:
+ * `pg_advisory_xact_lock(hashtextextended(<this>::text, 0))`. Exported so the live test holds the very same
+ * key and proves the lock is what serialises decisions.
+ */
+export function skillDecisionLockKey(repo: string, name: string): string {
+	return `${repo}\n${name}`;
+}
+
+function toSkillRow(row: Record<string, unknown>): SkillRegistryRow {
+	const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
+	const time = (value: unknown): string | null => (value === null || value === undefined ? null : timestamp(value));
+	return {
+		repo: String(row.repo),
+		name: String(row.name),
+		pr_number: Number(row.pr_number),
+		// '' is a value here (a pull request not proposed through the substrate), not "unset".
+		content_sha256: String(row.content_sha256),
+		state: String(row.state) as SkillState,
+		proposed_by: text(row.proposed_by),
+		pr_url: text(row.pr_url),
+		branch: text(row.branch),
+		merge_sha: text(row.merge_sha),
+		decided_by: text(row.decided_by),
+		decided_at: time(row.decided_at),
+		reason: text(row.reason),
+		created: timestamp(row.created),
+		updated: timestamp(row.updated),
 	};
 }
 

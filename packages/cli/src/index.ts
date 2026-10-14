@@ -19,6 +19,11 @@
  *       off-box archive (docs/greptime-ledger.md, "Coverage and archive")
  *   substrate index archive|verify-archive|restore   the verified logical export of the Postgres
  *       index and its restore-to-scratch proof (docs/runbooks/index-archive.md)
+ *   substrate spool status|flush             the collector event spool (docs/collectors.md, "Event spool")
+ *
+ * With `SUBSTRATE_EVENT_SPOOL=on`, `emit` parks an event that failed for a retryable reason
+ * (network error, timeout, 5xx) in the spool and returns at once — it never replays; `spool flush`
+ * does. With the flag off `emit` is the single POST it always was.
  *
  * Exit status is always 0 for `brief`, `emit` and `handoff`. These run inside
  * git hooks and editor hooks, where a non-zero exit can abort the user's commit
@@ -42,6 +47,8 @@ import { docsTimeout, runDocs } from "./docs.ts";
 import { httpMemory, lessonsTimeout, runLessons } from "./lessons.ts";
 import { runSkills, skillsTimeout } from "./skills.ts";
 import { runLedger } from "./ledger.ts";
+import { runSpool } from "./spool.ts";
+import { spoolConfig } from "../../collectors/src/spool.ts";
 import { INDEX_ARCHIVE_SUBCOMMANDS, INDEX_ARCHIVE_USAGE, runIndexArchive } from "./index-archive.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -146,22 +153,31 @@ async function cmdEmit(args: Record<string, string | true>): Promise<void> {
 		}
 	}
 	const surface = str(args.surface) ?? "claude-code";
-	await post(
-		"/events",
-		{
-			kind,
-			summary,
-			surface,
-			session_id: str(args.session),
-			graph_id: str(args.graph),
-			node_id: str(args.node),
-			repo: str(args.repo) ?? repoSlug(),
-			branch: str(args.branch) ?? branch(),
-			actor: str(args.actor) ?? "agent",
-			payload,
-		},
+	const body = {
+		kind,
+		summary,
 		surface,
-	);
+		session_id: str(args.session),
+		graph_id: str(args.graph),
+		node_id: str(args.node),
+		repo: str(args.repo) ?? repoSlug(),
+		branch: str(args.branch) ?? branch(),
+		actor: str(args.actor) ?? "agent",
+		payload,
+	};
+	if (spoolConfig().mode === "on") {
+		// The shared emit stamps `ts` and the idempotency key at this first attempt and parks a
+		// retryable failure in the spool; the CLI never replays (`substrate spool flush` does).
+		const { postEvent } = await import("../../collectors/src/emit.ts");
+		await postEvent(body as Parameters<typeof postEvent>[0], {
+			timeoutMs: timeout(),
+			collector: "cli",
+			source: "cli.emit",
+			url: base(),
+		});
+		return;
+	}
+	await post("/events", body, surface);
 }
 
 /** Write the brief to disk, then exec the agent. For surfaces with no hook API. */
@@ -548,6 +564,13 @@ switch (command) {
 		process.exit(cmdIndex(rest, args));
 	case "ledger":
 		process.exit(cmdLedger(rest, args));
+	case "spool":
+		process.exit(
+			await runSpool(rest, {
+				out: (text) => process.stdout.write(text),
+				err: (text) => process.stderr.write(text),
+			}),
+		);
 	default:
 		process.stdout.write(
 			"substrate brief [--repo R] [--branch B] [--graph G] [--surface S] [--write]\n" +
@@ -564,7 +587,8 @@ switch (command) {
 				"substrate docs ingest --dataset NAME --path PATH --source-url URL [--commit C] [--heading H] [--session I]\n" +
 				"substrate index sweep [--apply] [--json]   (--apply also needs SUBSTRATE_INDEX_SWEEP=apply)\n" +
 				"substrate index archive [--out DIR] [--page-size N] | verify-archive <dir> | restore --scratch URL <dir>\n" +
-				"substrate ledger coverage [--json] | archive [--until D] [--out DIR] [--page-size N] | verify-archive <dir> [--day D]\n",
+				"substrate ledger coverage [--json] | archive [--until D] [--out DIR] [--page-size N] | verify-archive <dir> [--day D]\n" +
+				"substrate spool status [--json] | flush [--json] [--budget-ms N]   (the event spool needs SUBSTRATE_EVENT_SPOOL=on)\n",
 		);
 		process.exit(command ? 2 : 0);
 }

@@ -363,6 +363,99 @@ say the hour will be uncovered.
 There is **no backfill**: events stored before this table first existed belong to no
 hour, and the first anchored hour is Phase 28's decision.
 
+## Idempotent replay (U5-4a)
+
+The ledger is append-only and `normalizeEvent` mints a new id, hash and row on every
+call, so a client that retries an event whose first attempt timed out **after** the
+ledger stored it would write a duplicate. `POST /events` therefore accepts an optional
+key and a replay marker, behind `SUBSTRATE_EVENT_IDEMPOTENCY=off|accept|enforce`
+(default `off`).
+
+**Request.** The body is today's `EventInput` plus an optional
+`"idempotency_key"`: 8–128 characters from `[A-Za-z0-9._:-]`. The header
+`x-substrate-replay: 1` marks the request as a replay of an earlier attempt. The
+client fixes the event's `ts` (ISO) and the key at its first attempt and re-sends both
+unchanged; the server honours a client `ts` exactly as it always has.
+
+| Mode | Key and marker | Lookup |
+| --- | --- | --- |
+| `off` (default) | Ignored unread: nothing stored, no validation, no lookup, the same statements and responses as before the flag existed. A caller-supplied payload `_ik` is left as it was. | never |
+| `accept` | A valid key is stored in the event's payload under the reserved key `_ik`. | only a replay-marked request that carries a key; every other request costs zero extra reads |
+| `enforce` | As `accept`. | every request that carries a key |
+
+Under `accept` and `enforce` any payload `_ik` the caller wrote is stripped first and
+never trusted. `_ik` is appended as the payload's **last** key after redaction and the
+size cap, so it is inside the hashed event (no schema change, no `ALTER`: the
+append-only guard is untouched) and survives a payload that was replaced for its size.
+It adds at most about 140 bytes beyond the 16 000-byte payload cap.
+
+**Lookup.** One bounded `SELECT` in `GreptimeClient.findByIdempotencyKey`: the
+primary-key prefix (`surface`, `repo`, `graph_id`, `kind`; a NULL `repo` or `graph_id`
+is `IS NULL`) plus the exact normalised `ts`, with the payload matched against
+`…"_ik":"<key>"}` at the end of its text, at most 5 rows (`LIKE` reads `_` as a wildcard,
+so a lookalike key can match too; each returned row is checked for the exact suffix, and a full read with no exact match is treated as a failed lookup — `503`, nothing written, `result=lookup_failed` — never as a miss, so an unusual key whose pattern matches five other rows in its cell can be answered 503 but never duplicated). It runs inside the per-session
+emit turn (`emitChains`), so two concurrent same-key requests leave one row, and a
+replay waits for the original attempt still in flight. A keyed event with no session
+takes its turn on the key instead.
+
+- **Hit:** `202` with the usual body plus `"deduplicated": true` and the **existing**
+  event's `id` and `hash`. No second `agent_events` row is written and the session's
+  chain tip is neither read nor moved. A hit also reads the event's `event_ingest`
+  membership (one point read by event id, `GreptimeClient.cursorPosition`, the read the
+  stream already uses to resolve a cursor), because the original attempt may have landed
+  its row and then ended before writing the record, and a client that drops its copy on
+  this answer would otherwise leave the event outside every hourly anchor.
+  - Membership **found**: nothing is written and the answer is the plain hit. A second
+    record is never added to an event that has one: the stream would deliver the event
+    again as a new position once its original record is older than the stream's
+    one-hour retry window, and the coverage histogram would count the later hour while
+    `hourLeaves` (which keeps each event's earliest record) excludes it.
+  - Membership **confirmed missing**: the normal path's write (`recordIngest`, same
+    table, 1 s budget and two attempts) records it. It becomes the event's first record,
+    so the stream, the anchor and coverage each see it once, in the hour of the
+    **server's** time at the replay (the hour anchoring rule above), not the event's `ts`.
+  - The membership read **fails**, or the repair write fails: nothing further is
+    written, the answer is still `202` `stored: true`, and it carries the warning a
+    normal append gives when its ingest write cannot be confirmed (the event is stored;
+    do not re-emit it; hourly coverage may be missing). A journal line names the event
+    id only. Never a 5xx, never a second event.
+
+  A hit is counted in `substrate.events.replay{result=deduplicated}` and not as an emit,
+  so the tokens and cost in its payload are not counted twice.
+- **Miss:** a normal append with `_ik` stored (`result=appended`).
+- **Lookup error** (an unreachable ledger, an open breaker, a malformed row): `503`
+  `stored: false`, nothing written, `result=lookup_failed`. A lookup that errors is
+  never read as a miss, because that would write the duplicate this exists to prevent;
+  the client keeps its copy and retries.
+- **Refused:** `400` with a `rule` field and the same name opening `error`, nothing
+  written, `result=refused`. The closed set is `idempotency_key_type`,
+  `idempotency_key_format`, `replay_ts_missing` (a replay-marked request that carries a
+  key but no `ts`: a replay must carry the original `ts`, since the server would stamp
+  its own clock and the lookup could never match) and `replay_ts_future` (a replay-marked
+  request whose `ts`, as a string or a number, is more than 24 hours ahead of the
+  server's clock). Key rules apply only when the mode is not `off`.
+
+**What it costs.** Each lookup is one ledger read, and a hit adds a second one (the
+membership read: a single event-id read of `event_ingest`; a repair write follows only
+when that membership is missing). Both are expected to be cheap because the lookup
+carries the key prefix and an exact time and the membership read is keyed by the event
+id, but neither has been measured on the production image; an operator should `EXPLAIN`
+the lookup before turning on `enforce`. `accept` costs nothing on an ordinary emit.
+
+**Capability.** `GET /healthz` carries `"idempotency": "off" | "accept" | "enforce"`.
+A client MUST NOT replay against a server that reports `off` or lacks the field: it
+keeps its copy and retries later.
+
+**Honest limits.** Dedupe applies only to replay-marked requests (or any keyed request
+in `enforce`) within the same `surface`, `repo`, `graph_id`, `kind` and `ts` cell. `_ik`
+is a reserved payload key. A miss costs one ledger read and a hit two. With the server
+at `off`, replays can duplicate, which is why the client checks `/healthz` first.
+
+**Enable order.** Set `SUBSTRATE_EVENT_IDEMPOTENCY=accept` on the server and confirm
+`/healthz` reports it; only then enable a client spool. `enforce` is for after replays
+have been seen to dedupe. Rollback is setting the variable back to `off`: `_ik` already
+stored is ordinary payload data and nothing needs cleaning.
+
 ## Anchoring (Phase 28)
 
 Every closed, non-empty UTC ingest hour is anchored exactly once on Solana
@@ -826,6 +919,7 @@ Plus switches, none of which is a credential:
 | `SUBSTRATE_LEDGER_CHAIN_LOOKBACK_DAYS` | how far back in `ts` the one seeding read looks before it falls back to the whole session, 1..3650; default 30. |
 | `SUBSTRATE_LEDGER_WRITE_PROBE_S` | seconds between `/healthz` write probes, 0..86400; default 60. `0` never probes, and `eventsWritable` is metadata-only again. |
 | `SUBSTRATE_LEDGER_TTL` | retention applied to `agent_events` and `event_ingest` at boot, a Greptime duration such as `180d`. Unset by default: nothing is altered. Invalid refuses to boot. See *Retention*. |
+| `SUBSTRATE_EVENT_IDEMPOTENCY` | `off` (default), `accept` or `enforce`. Anything else is `off` with a boot warning. See *Idempotent replay*. |
 | `SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS` | uncovered eligible hours `substrate ledger coverage` tolerates before exiting 2, 0..100000; default 2. Report-only on `/healthz`. See *Coverage and archive*. |
 | `SUBSTRATE_LEDGER_ARCHIVE_DIR` | where `substrate ledger archive` writes when `--out` is omitted, and what the archive unit's `ExecStart` expands. Unset by default: the command refuses by name. An off-box mount, never the root disk. |
 

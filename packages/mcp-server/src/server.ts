@@ -8,6 +8,8 @@
  *   GET  /events/stream replay the ledger as Server-Sent Events, loopback only
  *   POST /memory        write a memory entry through the governance gate
  *   POST /skills/propose propose a skill as a reviewable PR on the skills library
+ *   POST /skills/approve approve, decline or retire a skill pull request in the skills registry, operators only
+ *   GET  /skills        the skills registry: approved skills by default, `?state=` for the rest (operators only)
  *   POST /verify        recompute a graph's hash chain
  *   POST /evidence      the per-graph evidence bundle, as JSON or HTML
  *   GET  /healthz       store reachability, whether events can actually be written, each plane's breaker, and the ledger jobs' coverage
@@ -52,7 +54,7 @@ import { DATASET_TRIGGERS } from "./docs-datasets.ts";
 import { freshnessGauges } from "./docs-freshness.ts";
 import { scanIngestPages } from "./docs-ingest.ts";
 import { formatDrift } from "./drift.ts";
-import { InvalidEventError } from "./event.ts";
+import { IdempotencyRefusal, InvalidEventError } from "./event.ts";
 import { type CursorPosition, type GreptimeClient } from "./greptime.ts";
 import { InvalidHandoffError } from "./handoff.ts";
 import { attributedSurface, createMcpServer, type McpCaller } from "./mcp.ts";
@@ -70,6 +72,7 @@ import { MetricHistoryMemo, metricHistoryAnswer } from "./metrics-history.ts";
 import { redact } from "./redact.ts";
 import type { Substrate } from "./service.ts";
 import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
+import { approvalBodyProblem, approvalFailure, toApprovalRequest } from "./skills/registry.ts";
 import { EVENT_KINDS, SURFACES, type Surface } from "./types.ts";
 import { isLocalPeer, livezBody, LoopLagMonitor } from "./watchdog.ts";
 
@@ -255,6 +258,12 @@ export class BodyTooLargeError extends Error {
 
 /** Why an anonymous proposal is refused, even on a run that allows anonymous callers. */
 const PROPOSAL_NEEDS_SURFACE = "skills_propose needs an authenticated surface; nothing was proposed";
+/** Why an anonymous approval is refused, even on a run that allows anonymous callers. */
+const APPROVAL_NEEDS_SURFACE = "skills_approve needs an authenticated surface; nothing was changed";
+/** Why a non-operator approval is refused: the same words the service uses. */
+const APPROVAL_NEEDS_OPERATOR = "skills_approve needs an operator token; nothing was changed";
+/** Why an anonymous registry read is refused, even on a run that allows anonymous callers. */
+const LIST_NEEDS_SURFACE = "skills_list needs an authenticated surface";
 /** Why an anonymous ingest is refused, even on a run that allows anonymous callers. */
 const INGEST_NEEDS_SURFACE = "docs_ingest needs an authenticated surface; nothing was ingested";
 /** Why an anonymous merge-trigger is refused, even on a run that allows anonymous callers. */
@@ -541,6 +550,10 @@ export function createHttpServer(
 	// The last `/healthz` body, served again for `config.healthzCacheMs` (uplift-2 R1).
 	const now = options.now ?? Date.now;
 	let healthMemo: HealthMemo | null = null;
+	// uplift-5 U5-3: the computation in flight. Pollers that arrive while it runs inside the memo window
+	// join it instead of starting their own (each compute is a round trip per configured plane on the
+	// same small pool); cleared in `finally`, so a compute that throws is not joined by the next poll.
+	let healthFlight: Promise<HealthMemo> | null = null;
 	// uplift-4 S6: `/slo/history` answers, 15 s per validated request, one read per key in flight.
 	const historyMemo = new MetricHistoryMemo(now);
 	// uplift-3 N3: the bucket per surface × class, on the cache plane. The
@@ -661,18 +674,18 @@ export function createHttpServer(
 				const ttl = config.healthzCacheMs;
 				const nowMs = now();
 				const stale = ttl > 0 && healthMemo !== null && nowMs - healthMemo.at < ttl;
-				let memo: HealthMemo;
-				if (stale && healthMemo !== null) {
-					memo = healthMemo;
-				} else {
+				const compute = async (): Promise<HealthMemo> => {
 					const health = await substrate.health();
 					const hindsight = substrate.hindsightInventoryHealth();
 					const recall = substrate.recallHealth();
-					memo = {
+					return {
 						status: healthStatus(health, config.greptime !== null),
 						at: nowMs,
 						body: {
 							...health,
+							// U5-4a: what a replaying client may rely on. It MUST NOT replay against `off` (or a body
+							// without this field); the mode is static config, so the memo cannot make it stale.
+							idempotency: config.eventIdempotency,
 							// A deployment whose audit chain is in memory is one restart from having no
 							// trail. That is a fact about the deployment, so it is reported — but it is
 							// not a 503: the substrate is serving, and refusing would be worse.
@@ -692,6 +705,26 @@ export function createHttpServer(
 							...(recall !== null ? { recall } : {}),
 						},
 					};
+				};
+				let memo: HealthMemo;
+				if (stale && healthMemo !== null) {
+					memo = healthMemo;
+				} else if (ttl > 0 && healthFlight !== null) {
+					// A caller that joins a compute waited for it: its body is fresh, not memoised (`stale: false`).
+					memo = await healthFlight;
+				} else if (ttl > 0) {
+					const flight = compute().then((computed) => {
+						healthMemo = computed;
+						return computed;
+					});
+					healthFlight = flight;
+					try {
+						memo = await flight;
+					} finally {
+						if (healthFlight === flight) healthFlight = null;
+					}
+				} else {
+					memo = await compute();
 					healthMemo = memo;
 				}
 				sendJson(res, memo.status, { ...memo.body, cachedAt: new Date(memo.at).toISOString(), stale });
@@ -922,10 +955,15 @@ export function createHttpServer(
 					sendJson(res, 403, { error: "an untokened caller cannot emit as a surface that has a token" });
 					return;
 				}
-				const result = await substrate.emit({
-					...(body as object),
-					surface: attribution.surface,
-				} as Parameters<Substrate["emit"]>[0]);
+				// `x-substrate-replay: 1` marks a re-send of an earlier attempt (U5-4a). Read here, honoured
+				// (or ignored, under `off`) by `Substrate.emit`.
+				const result = await substrate.emit(
+					{
+						...(body as object),
+						surface: attribution.surface,
+					} as Parameters<Substrate["emit"]>[0],
+					{ replay: req.headers["x-substrate-replay"] === "1" },
+				);
 				// 503 when the ledger did not take it. The `substrate` CLI ignores the
 				// status and exits 0 either way — failing open is the client's job, and
 				// this surface owes its caller the truth about durability.
@@ -936,6 +974,7 @@ export function createHttpServer(
 					stored: result.stored,
 					...(result.error ? { error: result.error } : {}),
 					...(result.warning ? { warning: result.warning } : {}),
+					...(result.deduplicated ? { deduplicated: true } : {}),
 				});
 				return;
 			}
@@ -1352,6 +1391,56 @@ export function createHttpServer(
 				return;
 			}
 
+			// An approval is an operator's decision on what the registry says is published, and it asks the owner's
+			// GitHub credential about a pull request. A caller with no surface (401) and one that is not an operator (403;
+			// a swarm surface and `substrate` never are) are both refused before the body is read, parsed or audited: an
+			// oversize or malformed body, or an audit outage, never changes a refusal into another status.
+			if (req.method === "POST" && url.pathname === "/skills/approve") {
+				if (surface === null) {
+					sendJson(res, 401, { error: APPROVAL_NEEDS_SURFACE });
+					return;
+				}
+				if (!caller.isOperator) {
+					sendJson(res, 403, { error: APPROVAL_NEEDS_OPERATOR });
+					return;
+				}
+				const body = JSON.parse(await readBody(req)) as unknown;
+				const fields = body !== null && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
+				if (fields && !(await auditedRest(res, observability, surface, "skills_approve", fields))) return;
+				const problem = approvalBodyProblem(body);
+				if (problem) {
+					sendJson(res, 400, { error: problem });
+					return;
+				}
+				try {
+					sendJson(res, 200, await substrate.approveSkill(toApprovalRequest(fields ?? {}), { surface, isOperator: caller.isOperator }));
+				} catch (cause) {
+					const failure = approvalFailure(cause);
+					if (failure === null) throw cause;
+					sendJson(res, failure.status, failure.body);
+				}
+				return;
+			}
+
+			// The registry read: approved skills by default, any authenticated surface (the projector's is `substrate`).
+			// A caller with no surface is refused before the audit and the read.
+			if (req.method === "GET" && url.pathname === "/skills") {
+				if (surface === null) {
+					sendJson(res, 401, { error: LIST_NEEDS_SURFACE });
+					return;
+				}
+				const state = url.searchParams.get("state") ?? undefined;
+				if (!(await auditedRest(res, observability, surface, "skills_list", state === undefined ? {} : { state }))) return;
+				try {
+					sendJson(res, 200, await substrate.listSkills(state === undefined ? {} : { state }, { surface, isOperator: caller.isOperator }));
+				} catch (cause) {
+					const failure = approvalFailure(cause);
+					if (failure === null) throw cause;
+					sendJson(res, failure.status, failure.body);
+				}
+				return;
+			}
+
 			if (url.pathname === "/mcp") {
 				await handleMcp(req, res, substrate, caller, observability, claim, admission);
 				return;
@@ -1359,7 +1448,7 @@ export function createHttpServer(
 
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
-			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/docs/ingest" || url.pathname === "/mcp")) {
+			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/mcp")) {
 				sendJson(res, 413, { error: cause.message });
 				return;
 			}
@@ -1367,7 +1456,7 @@ export function createHttpServer(
 				if (req.method === "POST" && url.pathname === "/events" && cause instanceof InvalidEventError) {
 					eventRefusal = classifyEventRefusal(400, cause.message) ?? "validation";
 				}
-				sendJson(res, 400, { error: cause.message });
+				sendJson(res, 400, { error: cause.message, ...(cause instanceof IdempotencyRefusal ? { rule: cause.rule } : {}) });
 				return;
 			}
 			if (cause instanceof SyntaxError) {

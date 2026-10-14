@@ -173,6 +173,8 @@ export const ROUTE_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	"/docs/ingest": "write",
 	"/docs/merge-trigger": "write",
 	"/skills/propose": "write",
+	"/skills": "read",
+	"/skills/approve": "write",
 	"/handoff": "write",
 	"/slo/history": "read",
 };
@@ -205,6 +207,8 @@ export const TOOL_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	events_emit: "write",
 	docs_ingest: "write",
 	skills_propose: "write",
+	skills_approve: "write",
+	skills_list: "read",
 	coord_handoff: "write",
 	desktop_run: "write",
 	graph_register: "write",

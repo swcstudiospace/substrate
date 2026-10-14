@@ -50,6 +50,12 @@ export interface BriefOptions {
 	recall?: { read: () => Promise<RecallSnapshot | null>; ttlS: number };
 	/** Receives the subjects of the composed memory's decisions and warnings, so the prefetcher can build its query from them. */
 	noteSubjects?: (subjects: string[]) => void;
+	/**
+	 * uplift-5 U5-3: `lite` reads the graph with `getGraphForBrief` (index row and nodes together, no steps or
+	 * edges); anything else, unset included, is `getGraph`. The brief prints neither steps nor edges, so the
+	 * text is the same either way; a failed read is the same `graph` failure.
+	 */
+	graphRead?: "full" | "lite";
 }
 
 /** The most nodes one brief lists; past it the line says how many were left out (the cached encoding caps a section at 2000 items). */
@@ -252,7 +258,10 @@ export async function composeBriefSections(
 
 	// All four reads leave now; the sections below await them in order.
 	const { index, greptime } = sources;
-	const graphRead = index && graphId ? start("graph", () => index.getGraph(graphId), null as GraphView | null) : null;
+	const graphRead =
+		index && graphId
+			? start("graph", () => (options.graphRead === "lite" ? index.getGraphForBrief(graphId) : index.getGraph(graphId)), null as GraphView | null)
+			: null;
 	// Recent actions in this repo, from any surface. The repo is matched in the form
 	// the write path stores it, not as the caller spelled it — see normalizeIdentifier.
 	// Bounded in time so an uncached brief never scans the repo's whole history,

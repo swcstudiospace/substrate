@@ -358,12 +358,15 @@ export function reconcile(state: HerdrStateFile, panes: readonly HerdrPane[], op
 	return { transitions, silent, seen_unmapped: seen, unmapped };
 }
 
-export type TransitionOutcome = "stored" | "refused" | "failed" | "skipped";
+export type TransitionOutcome = "stored" | "refused" | "failed" | "spooled" | "skipped";
 
 /**
  * Apply a pass. A failed transition does not advance, and neither does any
  * later transition for that same identity (`skipped` — not counted, not
- * applied). Stored and refused both advance. Silent bookkeeping applies
+ * applied). Stored and refused both advance. `spooled` advances too: the
+ * event is parked in the event spool with its own `ts` and key, so emitting it
+ * again next pass would write a second row; it is counted `failed` because the
+ * live attempt did fail. Silent bookkeeping applies
  * only for identities this pass did not try to emit.
  */
 export function commitReconcile(
@@ -397,6 +400,7 @@ export function commitReconcile(
 			return;
 		}
 		if (outcome === "stored") counters.stored += 1;
+		else if (outcome === "spooled") counters.failed += 1;
 		else counters.refused += 1;
 		if (transition.pane) panes[transition.identity] = transition.pane;
 		else delete panes[transition.identity];

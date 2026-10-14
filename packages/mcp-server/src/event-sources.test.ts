@@ -214,6 +214,28 @@ describe("the skills.propose rows", () => {
 	});
 });
 
+describe("the skills approval rows", () => {
+	const row = (id: string) => {
+		const found = EVENT_SOURCES.find((candidate) => candidate.id === id);
+		if (!found) throw new Error(`no EVENT_SOURCES row ${id}`);
+		return found;
+	};
+
+	test("a decision is a note from the caller carrying the library repo; a refusal is a warning with no repo", () => {
+		for (const [id, action] of [["skills.approve", "skill.approve"], ["skills.decline", "skill.decline"], ["skills.retire", "skill.retire"]] as const) {
+			expect(row(id)).toMatchObject({ kind: "note", surface: "caller", actions: [action], carriesRepo: true, periodic: false });
+		}
+		expect(row("skills.approve.refused")).toMatchObject({ kind: "warning", surface: "caller", actions: ["skill.approve.refused"], carriesRepo: false, periodic: false });
+	});
+
+	test("a refusal's sample names a rule and carries no free text; a decision names the pull request and who decided", () => {
+		expect(Object.keys(row("skills.approve.refused").sample().payload ?? {}).sort()).toEqual(["action", "decision", "name", "rule"]);
+		for (const id of ["skills.approve", "skills.decline", "skills.retire"]) {
+			expect(Object.keys(row(id).sample().payload ?? {})).toEqual(expect.arrayContaining(["action", "name", "pr_number", "pr_url", "decided_by"]));
+		}
+	});
+});
+
 describe("the memory.write verdict rows", () => {
 	const row = (id: string) => {
 		const found = EVENT_SOURCES.find((candidate) => candidate.id === id);

@@ -356,6 +356,14 @@ describe("auditToolCalls", () => {
 		expect(normalizeRoute("/skills/propose/../../etc")).toBe("other");
 	});
 
+	test("the skills registry doors are known tools and known routes", () => {
+		expect(toolLabel("skills_approve")).toBe("skills_approve");
+		expect(toolLabel("skills_list")).toBe("skills_list");
+		expect(normalizeRoute("/skills/approve")).toBe("/skills/approve");
+		expect(normalizeRoute("/skills")).toBe("/skills");
+		expect(normalizeRoute("/skills/approve/../../etc")).toBe("other");
+	});
+
 	test("toolLabel keeps the tools that exist", () => {
 		expect(toolLabel("graph_claim")).toBe("graph_claim");
 		expect(toolLabel("desktop_run")).toBe("desktop_run");
