@@ -22,7 +22,7 @@ import {
 	type HttpServerOptions,
 } from "./server.ts";
 import { Substrate } from "./service.ts";
-import type { SubstrateEvent, Surface } from "./types.ts";
+import type { MemoryEntry, SubstrateEvent, Surface } from "./types.ts";
 
 /** Shorthand for a health report; every field defaults to the unhealthy value. */
 function health(over: Partial<Parameters<typeof healthStatus>[0]> = {}) {
