@@ -25,7 +25,22 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
-import { effectivePorcelain } from "../packages/projector/src/skills-sync.ts";
+/**
+ * Drop untracked Python bytecode from `git status --porcelain` so a library
+ * checkout is not reported dirty for `__pycache__` or `.pyc` alone.
+ */
+function effectivePorcelain(raw: string): string {
+	const kept: string[] = [];
+	for (const line of raw.split("\n")) {
+		if (line === "") continue;
+		if (line.startsWith("??")) {
+			const path = line.slice(3).trim().replace(/^"(.*)"$/, "$1");
+			if (path.split("/").includes("__pycache__") || path.endsWith(".pyc")) continue;
+		}
+		kept.push(line);
+	}
+	return kept.length === 0 ? "" : `${kept.join("\n")}\n`;
+}
 
 export type FindingCode =
 	| "library-dirty"
