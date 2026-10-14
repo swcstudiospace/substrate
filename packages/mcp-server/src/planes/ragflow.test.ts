@@ -95,6 +95,64 @@ describe("retrieveChunks", () => {
 		expect(fake.requests).toHaveLength(0);
 	});
 
+	test("serveUploadsAsChunks serves that dataset's uploads then seeds, and leaves the contract corpus alone", async () => {
+		const plain = new RagflowFake();
+		const contract = await plain.fetch("http://ragflow.test/api/v1/retrieval", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ question: "q", dataset_ids: ["ds-berlin-agent-substrate"], page_size: 10 }),
+		});
+		const contractBody = (await contract.json()) as { data: { chunks: Array<Record<string, unknown>> } };
+		expect(contractBody.data.chunks.length).toBeGreaterThan(0);
+		expect(contractBody.data.chunks.every((chunk) => !("source_url" in chunk))).toBe(true);
+
+		const fake = new RagflowFake();
+		fake.serveUploadsAsChunks = true;
+		fake.uploads.push({
+			dataset_id: "ds-berlin-agent-substrate",
+			document_id: "doc-upload-1",
+			name: "docs__smoke.md",
+			content: "uploaded page",
+			metadata: { source_url: "https://example.com/smoke", heading_path: "Smoke" },
+		});
+		fake.seeds.push({
+			dataset_id: "ds-berlin-agent-substrate",
+			document_id: "seed-1",
+			content: "planted seed",
+			source_url: "https://example.com/seed/1",
+			heading_path: "Seed",
+			score: 0.5,
+		});
+		fake.seeds.push({
+			dataset_id: "ds-hamm-programming-desk",
+			document_id: "seed-other",
+			content: "other dataset seed",
+			source_url: "https://example.com/seed/other",
+		});
+		const response = await fake.fetch("http://ragflow.test/api/v1/retrieval", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ question: "q", dataset_ids: ["ds-berlin-agent-substrate"], page_size: 10 }),
+		});
+		const body = (await response.json()) as { data: { chunks: Array<Record<string, unknown>>; total: number } };
+		expect(body.data.total).toBe(2);
+		expect(body.data.chunks.map((chunk) => chunk["content"])).toEqual(["uploaded page", "planted seed"]);
+		expect(body.data.chunks.map((chunk) => chunk["source_url"])).toEqual(["https://example.com/smoke", "https://example.com/seed/1"]);
+		expect(body.data.chunks.map((chunk) => chunk["similarity"])).toEqual([0.9, 0.5]);
+		expect(JSON.stringify(body)).not.toContain("other dataset seed");
+		expect(JSON.stringify(body)).not.toContain("The substrate is the only door");
+
+		fake.seeds.length = 0;
+		fake.uploads.length = 0;
+		const cleared = await fake.fetch("http://ragflow.test/api/v1/retrieval", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ question: "q", dataset_ids: ["ds-berlin-agent-substrate"], page_size: 10 }),
+		});
+		const clearedBody = (await cleared.json()) as { data: { total: number } };
+		expect(clearedBody.data.total).toBe(0);
+	});
+
 	test("the fake fails a raw retrieval without dataset_ids", async () => {
 		const fake = new RagflowFake();
 		const response = await fake.fetch("http://ragflow.test/api/v1/retrieval", {

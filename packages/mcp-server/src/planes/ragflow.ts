@@ -75,7 +75,8 @@ export function ragflowFromEnv(env: Record<string, string | undefined> = process
  * earlier rehearsal names (`document_name`, `chunk_id`, `score`) are still
  * read when present (U-01), as are `heading_path` and `source_url` should a
  * deployment echo document metadata on chunks — the reference does not
- * promise either, and the fake serves neither.
+ * promise either. The contract fake omits both; the rehearsal stand-in
+ * echoes them only when `serveUploadsAsChunks` is set.
  */
 export interface RagflowChunk {
 	content: string;

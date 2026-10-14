@@ -126,6 +126,26 @@ export class RagflowFake {
 	chunkShape: FakeChunkShape = "full";
 	/** When set, every retrieval answers with this status instead. */
 	failRetrievalWith: number | null = null;
+	/**
+	 * Fixture stand-in only. When true, a retrieval serves that dataset's
+	 * uploads (score 0.9, metadata echoed) and then `seeds`, instead of the
+	 * contract `chunks` table. Default false, so the contract corpus and its
+	 * response shape stay unchanged.
+	 */
+	serveUploadsAsChunks = false;
+	/**
+	 * Synthetic chunks planted by the rehearsal stand-in. Served after
+	 * uploads when `serveUploadsAsChunks` is set, and never counted as
+	 * uploads. Empty unless a fixture control pushes into it.
+	 */
+	readonly seeds: Array<{
+		dataset_id: string;
+		document_id: string;
+		content: string;
+		source_url?: string;
+		heading_path?: string;
+		score?: number;
+	}> = [];
 	/** When set, every dataset list answers with this status instead. */
 	failListWith: number | null = null;
 	/** When set, every document delete answers with this status instead. */
@@ -212,6 +232,41 @@ export class RagflowFake {
 		return Response.json({ error: `fake has no route for ${method} ${url.pathname}` }, { status: 404 });
 	};
 
+	/**
+	 * Uploads for one dataset, then seeds for that dataset. Used only when
+	 * `serveUploadsAsChunks` is set, so the contract chunk table is not served
+	 * beside a planted corpus.
+	 */
+	private fixtureChunks(datasetId: string): FakeChunk[] {
+		const fromUploads: FakeChunk[] = [];
+		for (const upload of this.uploads) {
+			if (upload.dataset_id !== datasetId) continue;
+			fromUploads.push({
+				content: upload.content,
+				document_name: upload.name,
+				document_id: upload.document_id,
+				chunk_id: `chunk-upload-${upload.document_id}`,
+				heading_path: upload.metadata["heading_path"] ?? "",
+				source_url: upload.metadata["source_url"] ?? "",
+				score: 0.9,
+			});
+		}
+		const fromSeeds: FakeChunk[] = [];
+		for (const seed of this.seeds) {
+			if (seed.dataset_id !== datasetId) continue;
+			fromSeeds.push({
+				content: seed.content,
+				document_name: seed.document_id,
+				document_id: seed.document_id,
+				chunk_id: `chunk-seed-${seed.document_id}`,
+				heading_path: seed.heading_path ?? "",
+				source_url: seed.source_url ?? "",
+				score: seed.score ?? 0.5,
+			});
+		}
+		return [...fromUploads, ...fromSeeds];
+	}
+
 	/** Every retrieval request body received, in order. */
 	retrievals(): unknown[] {
 		return this.requests.filter((request) => request.path === "/api/v1/retrieval").map((request) => request.body);
@@ -243,7 +298,9 @@ export class RagflowFake {
 		try {
 			for (const id of body.dataset_ids) {
 				if (typeof id !== "string") continue;
-				const served = this.answer !== null ? await this.answer(id, question) : (this.chunks[id] ?? []);
+				const served =
+					this.answer !== null ? await this.answer(id, question) : this.serveUploadsAsChunks ? this.fixtureChunks(id) : (this.chunks[id] ?? []);
+				const echoMeta = this.serveUploadsAsChunks && this.answer === null;
 				for (const chunk of served) {
 					if (this.chunkShape === "minimal") {
 						out.push({ content: chunk.content, document_keyword: chunk.document_name });
@@ -262,6 +319,8 @@ export class RagflowFake {
 							similarity: chunk.score ?? 0,
 							term_similarity: chunk.score ?? 0,
 							vector_similarity: chunk.score ?? 0,
+							...(echoMeta && chunk.source_url ? { source_url: chunk.source_url } : {}),
+							...(echoMeta && chunk.heading_path ? { heading_path: chunk.heading_path } : {}),
 						});
 					}
 				}
