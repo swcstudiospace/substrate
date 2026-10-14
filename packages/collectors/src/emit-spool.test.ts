@@ -944,6 +944,133 @@ describe("replay", () => {
 				};
 			}
 
+			/** Runs `act` the first time the spool reports a failed rewrite on stderr: the moment another process could get in. */
+			function onFirstCompactFailure(act: () => void): () => void {
+				const original = process.stderr.write;
+				let fired = false;
+				process.stderr.write = ((chunk: Uint8Array | string) => {
+					if (!fired && String(chunk).includes("event spool compact failed")) {
+						fired = true;
+						act();
+					}
+					return true;
+				}) as typeof process.stderr.write;
+				return () => {
+					process.stderr.write = original;
+				};
+			}
+
+			test("another collector empties the file between a failed sweep and the re-sweep: remaining is read afresh (0), not the old count, and nothing is double-counted", async () => {
+				seed("claude-code", "expired", 2 * 3_600_000);
+				const server = serve(ACCEPTING);
+				process.env.SUBSTRATE_URL = server.url;
+				failFirstRewrites(1);
+				const restore = onFirstCompactFailure(() => writeFileSync(spoolPath(), ""));
+				const out: string[] = [];
+
+				try {
+					await runSpool(["flush"], { out: (text) => out.push(text), err: () => undefined });
+				} finally {
+					restore();
+				}
+
+				expect(out.join("")).toContain("remaining=0");
+				expect(out.join("")).toContain("dropped=0");
+				expect(out.join("")).not.toContain("remaining=1");
+				expect(out.join("")).not.toContain("write failed");
+			});
+
+			test("the same on the probe-held path: a fresh read after the failed sweep, not the stale snapshot", async () => {
+				seed("claude-code", "live", 120_000);
+				seed("claude-code", "expired", 2 * 3_600_000);
+				// Another process empties the file while the probe is in flight, after the first sweep failed.
+				const server = serve({
+					healthz: () => {
+						writeFileSync(spoolPath(), "");
+						return Response.json({ idempotency: "off" });
+					},
+					events: ACCEPTING.events,
+				});
+				process.env.SUBSTRATE_URL = server.url;
+				failFirstRewrites(1);
+
+				const result = await drainEventSpool({ all: true });
+
+				expect(result).toMatchObject({ status: "held", reason: "idempotency-off", remaining: 0, dropped: 0 });
+			});
+
+			/**
+			 * Counts the live spool's file reads (`io.readFile`) and lets a test fail or blank chosen ones, so that ONLY the final
+			 * depth read fails while every earlier read of the pass succeeds. Reads per pass, in order: the opening depth, the
+			 * sweep's, then (per path) the eligibility read, any rewrite's own re-read, the replay's, and the final depth read.
+			 */
+			function scriptReads(script: Record<number, "fail" | "empty">): { count: () => number } {
+				const live = eventSpool() as unknown as { io: { readFile: (path: string) => string } };
+				const real = live.io.readFile;
+				let n = 0;
+				live.io.readFile = (path) => {
+					n += 1;
+					const action = script[n];
+					if (action === "fail") throw Object.assign(new Error("i/o error"), { code: "EIO" });
+					if (action === "empty") return "";
+					return real(path);
+				};
+				return { count: () => n };
+			}
+
+			test("no-eligible path: only the final depth read fails => held read failure, the earlier count, no invented 0", async () => {
+				seed("claude-code", "live", 120_000);
+				const server = serve(ACCEPTING);
+				process.env.SUBSTRATE_URL = server.url;
+				// Read 1 opening depth, 2 sweep, 3 eligibility (another collector emptied the file), 4 the final depth read.
+				const reads = scriptReads({ 3: "empty", 4: "fail" });
+
+				const result = await drainEventSpool({ all: true });
+
+				expect(reads.count()).toBe(4);
+				expect(result).toEqual({ status: "held", reason: "spool-unreadable", dropped: 0, remaining: 1, failure: "read" });
+			});
+
+			test("probe-held path: only the final depth read fails => failure read with the earlier count", async () => {
+				seed("claude-code", "live", 120_000);
+				const server = serve({ healthz: () => Response.json({ idempotency: "off" }), events: ACCEPTING.events });
+				process.env.SUBSTRATE_URL = server.url;
+				// Read 1 opening depth, 2 sweep, 3 eligibility, 4 the final depth read.
+				const reads = scriptReads({ 4: "fail" });
+
+				const result = await drainEventSpool({ all: true });
+
+				expect(reads.count()).toBe(4);
+				expect(result).toEqual({ status: "held", reason: "idempotency-off", dropped: 0, remaining: 1, failure: "read" });
+			});
+
+			test("ran + settleAgain: only the final depth read fails => readFailed reported, the earlier count kept, the CLI says it could not read", async () => {
+				process.env.SUBSTRATE_TOKEN = GOOD;
+				seed("claude-code", "expired", 2 * 3_600_000);
+				seed("claude-code", "live", 120_000);
+				const server = serve(ACCEPTING);
+				process.env.SUBSTRATE_URL = server.url;
+				failFirstRewrites(1);
+				// Probe the read count of a healthy pass first: the final depth read is the last one.
+				const probeReads = scriptReads({});
+				await drainEventSpool({ all: true });
+				const total = probeReads.count();
+				// Rebuild the same situation and fail exactly that last read.
+				for (const entry of readdirSync(stateDir)) if (entry.startsWith("event-spool")) rmSync(join(stateDir, entry), { force: true });
+				resetSpoolReplayState();
+				seed("claude-code", "expired", 2 * 3_600_000);
+				seed("claude-code", "live", 120_000);
+				failFirstRewrites(1);
+				const reads = scriptReads({ [total]: "fail" });
+				const out: string[] = [];
+
+				await runSpool(["flush"], { out: (text) => out.push(text), err: () => undefined });
+
+				expect(reads.count()).toBe(total);
+				expect(out.join("")).toContain("spool file could not be read");
+				expect(out.join("")).toContain("remaining=");
+			});
+
 			test("(a) expired + a skipped entry: first sweep and write-back fail, the re-sweep commits => failure cleared, drop counted once, CLI clean", async () => {
 				tokenFor("omp", BAD);
 				seed("omp", "expired", 2 * 3_600_000);

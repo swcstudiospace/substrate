@@ -127,6 +127,14 @@ caps above their ceilings (100000 lines, 64 MiB, 720 h, 100 attempts) are clampe
 - `SpoolDrainReport.pendingUnsaved`: a failed write-back leaves `writeFailed` outstanding only when it holds delivered/refused removals or retry deltas; a settle-only re-sweep (`settleAgain`, used by the ran, probe-held and no-eligible branches) clears it when everything unsaved was an expired/exhausted removal, drops counted once.
 - Docs: the append-refusal paragraph now describes herdr (pending, re-emitted), Grok (offset still advances, no automatic retry), hooks and `substrate emit` (dropped as with the flag off) separately.
 
+## Review round 10 (Greptile round 3)
+
+- Stale `remaining` after a failed cleanup: `settleAgain` and every unreadable/held/no-eligible branch now take the committed re-sweep depth, else a fresh `currentDepth()` read, and keep the earlier count only when that read fails.
+
+## Review round 11
+
+- A failed fresh depth read keeps the earlier count but is no longer swallowed: `freshDepth()` returns the failure, `settleAgain` sets `readFailed` (and does not clear `writeFailed` on an unread state), and the no-eligible / probe-held branches return the held `failure: "read"` shape.
+
 ## Smoke commands for the orchestrator
 
 ```

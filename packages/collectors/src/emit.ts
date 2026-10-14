@@ -636,6 +636,16 @@ function currentDepth(spool: EventSpool): number | null {
 }
 
 /**
+ * A fresh depth read with its failure kept: the earlier count stands in as the number when the read fails, but the
+ * failure is never swallowed, so a caller reports it (`readFailed` / `failure: "read"`) and never treats the state as
+ * confirmed.
+ */
+function freshDepth(spool: EventSpool, earlier: number): { depth: number; readFailed: boolean } {
+	const fresh = currentDepth(spool);
+	return fresh === null ? { depth: earlier, readFailed: true } : { depth: fresh, readFailed: false };
+}
+
+/**
  * The second chance for a failed cleanup. Folds a settle-only sweep into `report`: its drops and committed depth are
  * the newest word on the file, and `writeFailed` stays set only when something unsaved still needs it
  * (`pendingUnsaved`) or the sweep itself failed again.
@@ -643,8 +653,21 @@ function currentDepth(spool: EventSpool): number | null {
 function settleAgain(spool: EventSpool, report: SpoolDrainReport): void {
 	const again = spool.sweepSettled();
 	report.dropped += again.dropped;
-	if (again.remaining !== null) report.remaining = again.remaining;
-	if (again.failure === "read") {
+	// A committed rewrite is the newest word. Without one (another process may have cleaned the file since the depth in
+	// `report` was read) the depth is read afresh; the earlier count stays only when that read fails too.
+	let freshReadFailed = false;
+	if (again.remaining !== null) {
+		report.remaining = again.remaining;
+	} else {
+		const fresh = freshDepth(spool, report.remaining);
+		report.remaining = fresh.depth;
+		freshReadFailed = fresh.readFailed;
+	}
+	if (freshReadFailed) {
+		// The state could not be read: it is reported, and a pending failure is not cleared on the strength of it.
+		report.readFailed = true;
+		report.writeFailed = report.writeFailed || again.failure === "write";
+	} else if (again.failure === "read") {
 		report.readFailed = true;
 		report.writeFailed = report.pendingUnsaved;
 	} else {
@@ -669,20 +692,25 @@ async function runDrain(spool: EventSpool, opts: DrainOptions): Promise<DrainRes
 	if (swept.failure === "read") {
 		logHeld("spool-unreadable");
 		// The depth read at the start of this pass is the last trustworthy one: the sweep read nothing and wrote nothing.
-		return { status: "held", reason: "spool-unreadable", dropped: 0, remaining: before.depth, failure: "read" };
+		return { status: "held", reason: "spool-unreadable", dropped: 0, remaining: freshDepth(spool, before.depth).depth, failure: "read" };
 	}
 	const sweepWriteFailed = swept.failure === "write";
 	const eligible = spool.eligible(opts.all === true);
 	if (eligible === null) {
 		logHeld("spool-unreadable");
-		return { status: "held", reason: "spool-unreadable", dropped: swept.dropped, remaining: swept.remaining ?? before.depth, failure: "read" };
+		return { status: "held", reason: "spool-unreadable", dropped: swept.dropped, remaining: swept.remaining ?? freshDepth(spool, before.depth).depth, failure: "read" };
 	}
 	if (eligible.length === 0) {
 		// No replay ran, so the only thing that can be outstanding is the failed cleanup, and it gets its second chance.
 		const done: SpoolDrainReport = { ...NOTHING_TO_DO, dropped: swept.dropped, writeFailed: sweepWriteFailed, remaining: swept.remaining ?? before.depth };
 		if (sweepWriteFailed) settleAgain(spool, done);
-		const depth = swept.remaining !== null || sweepWriteFailed ? done.remaining : currentDepth(spool);
-		if (done.readFailed || depth === null) {
+		let depth = done.remaining;
+		if (swept.remaining === null && !sweepWriteFailed) {
+			const fresh = freshDepth(spool, before.depth);
+			depth = fresh.depth;
+			if (fresh.readFailed) done.readFailed = true;
+		}
+		if (done.readFailed) {
 			return { status: "held", reason: "spool-unreadable", dropped: done.dropped, remaining: depth, failure: "read" };
 		}
 		return { status: "ran", ...done, remaining: depth };
@@ -692,13 +720,20 @@ async function runDrain(spool: EventSpool, opts: DrainOptions): Promise<DrainRes
 		logHeld(probe.reason);
 		// The failed cleanup gets its second chance here too: if this rewrite commits, its drops and depth are the truth.
 		const again = sweepWriteFailed ? spool.sweepSettled() : null;
-		const failure = again === null ? undefined : again.failure === "read" ? ("read" as const) : again.failure === "write" ? ("write" as const) : undefined;
+		let failure: "read" | "write" | undefined = again === null ? undefined : again.failure === "read" ? "read" : again.failure === "write" ? "write" : undefined;
+		let remaining = again?.remaining ?? swept.remaining;
+		if (remaining === null) {
+			// No committed depth: read afresh, keep the earlier count if that fails, and report the failure either way.
+			const fresh = freshDepth(spool, before.depth);
+			remaining = fresh.depth;
+			// An unreadable state is the stronger report: it outranks a write failure, which only says a rewrite did not land.
+			if (fresh.readFailed) failure = "read";
+		}
 		return {
 			status: "held",
 			reason: probe.reason,
 			dropped: swept.dropped + (again?.dropped ?? 0),
-			// A committed rewrite is the truth; failing that, the file's depth now; an unreadable file has no depth to report.
-			remaining: again?.remaining ?? swept.remaining ?? currentDepth(spool),
+			remaining,
 			...(failure !== undefined ? { failure } : {}),
 		};
 	}

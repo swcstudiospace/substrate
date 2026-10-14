@@ -316,7 +316,11 @@ sweep cannot apply: a delivered or refused entry that is still in the file and
 will be replayed again (the server dedupes it), or a retried entry's attempt and
 backoff update. The depth in every result (`remaining`, also on a held result) is what is on
 disk after the last rewrite that committed, so entries the pass already removed
-are not reported as still there. When the file could not be read and this pass has no trustworthy depth
+are not reported as still there. When no rewrite committed (another process
+may have cleaned the file since the earlier count), the depth is read afresh; the
+earlier count is kept only if that read fails, and then the failed read is
+reported too (`readFailed`, or a held result with `failure: "read"`): the count
+is not confirmed and a pending write failure is not cleared on the strength of it. When the file could not be read and this pass has no trustworthy depth
 (an earlier snapshot or a committed rewrite), the depth is unknown: `remaining`
 is `null` in the JSON, and the flush line and the Grok summary leave the count
 out instead of printing 0.
