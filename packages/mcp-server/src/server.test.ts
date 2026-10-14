@@ -1274,15 +1274,19 @@ describe("agent card route", () => {
 		}
 	});
 
-	test("tokens configured still serves the card and still closes authoring", async () => {
+	test("a configured token closes the card and authoring until a bearer is sent", async () => {
 		const { get, post, stop } = await serveCard([teachable("mem_7", "hermes")], {
 			SUBSTRATE_TOKEN_HERMES: "tok-hermes",
 		});
 		try {
-			const card = await get("/.well-known/agent-card.json?surface=hermes");
+			// Same gate as every other route: only /healthz stays open once a token exists.
+			expect((await get("/.well-known/agent-card.json?surface=hermes")).status).toBe(401);
+			expect((await post("/events/query")).status).toBe(401);
+			const card = await get("/.well-known/agent-card.json?surface=hermes", {
+				authorization: "Bearer tok-hermes",
+			});
 			expect(card.status).toBe(200);
 			expect(validateAgentCard((await card.json()) as Record<string, unknown>)).toEqual([]);
-			expect((await post("/events/query")).status).toBe(401);
 		} finally {
 			await stop();
 		}
