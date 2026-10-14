@@ -5070,14 +5070,26 @@ export class Substrate {
 	 * be had. It does not touch the status code.
 	 */
 	async health(): Promise<SubstrateHealth> {
-		const greptime = this.greptime ? await this.greptime.ping() : false;
+		// A store that throws is down. `/healthz` has to answer that; a 500 would hide the outage from the monitor.
+		let greptime = false;
+		if (this.greptime) {
+			try {
+				greptime = await this.greptime.ping();
+			} catch {
+				greptime = false;
+			}
+		}
 		const appendOnly = greptime ? (await this.greptime?.ensureAppendMode().catch(() => null)) ?? null : null;
 		const quotingDialectKnown = greptime
 			? await this.greptime?.probeDialect().then(() => this.greptime?.quotingDialectKnown === true).catch(() => false) ?? false
 			: false;
 		const hindsight = hindsightFromEnv();
 		const [index, capacity, hindsightOk, ragflowOk, probe, ledgerCapacity] = await Promise.all([
-			this.index ? this.index.ping(HEALTH_PROBE_MS).catch(() => false) : Promise.resolve(false),
+			this.index
+				? Promise.resolve()
+						.then(() => this.index!.ping(HEALTH_PROBE_MS))
+						.catch(() => false)
+				: Promise.resolve(false),
 			this.index ? this.indexCapacityForHealth(this.index) : Promise.resolve(null),
 			hindsight
 				? probeHealth(hindsight, this.hindsightFetch, HEALTH_PROBE_MS).then((probed) => probed.ok, () => false)

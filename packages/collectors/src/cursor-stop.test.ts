@@ -178,6 +178,29 @@ describe("runStop", () => {
 		expect(Date.now() - started).toBeLessThan(500);
 	});
 
+	test("session.end is posted with the time still left, and its park finishes before the hook returns", async () => {
+		const path = transcript("Decision: The index sweep prints ttl candidate ids and does not delete documents.\n");
+		const raw = JSON.stringify({ conversation_id: ID, transcript_path: path, status: "completed" });
+		let timeoutMs = -1;
+		let parked = false;
+		const started = Date.now();
+		await runStop(raw, {
+			root,
+			destDir: dest,
+			budgetMs: 80,
+			flushLesson: () => new Promise(() => {}),
+			emit: async (_event, ms) => {
+				timeoutMs = ms;
+				await new Promise((resolve) => setTimeout(resolve, ms + 20));
+				parked = true;
+			},
+		});
+		expect(parked).toBe(true);
+		expect(timeoutMs).toBeGreaterThanOrEqual(0);
+		expect(timeoutMs).toBeLessThanOrEqual(80);
+		expect(Date.now() - started).toBeLessThan(500);
+	});
+
 	test("chatter does not flush an empty lesson", async () => {
 		const { emit } = recorder();
 		const flushed: unknown[] = [];

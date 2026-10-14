@@ -594,7 +594,7 @@ describe("GET /livez over a real socket", () => {
 		return `http://127.0.0.1:${port}`;
 	}
 
-	test("answers {ok, uptime_s, loop_lag_ms} to a loopback caller with no bearer, touching no store, while the stores are down and /healthz refuses", async () => {
+	test("answers {ok, uptime_s, loop_lag_ms} to a loopback caller with no bearer, touching no store, while the stores are down", async () => {
 		const touches: string[] = [];
 		const base = await start({ SUBSTRATE_TOKEN_SUBSTRATE: SURFACE_BEARER }, touches);
 		const before = touches.length;
@@ -606,8 +606,9 @@ describe("GET /livez over a real socket", () => {
 		expect(body.loop_lag_ms).toBeGreaterThanOrEqual(0);
 		expect(Object.keys(body).sort()).toEqual(["loop_lag_ms", "ok", "uptime_s"]);
 		expect(touches.length).toBe(before);
-		// The bearer-gated routes still refuse the same caller: /livez is not a hole in the gate.
-		expect((await fetch(`${base}/healthz`)).status).toBe(401);
+		// GET /healthz stays open and reports the outage. The bearer-gated routes still refuse: /livez is not a hole in the gate.
+		expect((await fetch(`${base}/healthz`)).status).toBe(503);
+		expect((await fetch(`${base}/brief`)).status).toBe(401);
 		expect((await fetch(`${base}/livez`, { method: "POST" })).status).not.toBe(200);
 		// The watchdog's own probe, end to end, against this server.
 		const probe = createLoopbackProbe(`${base}/livez`, 2000);

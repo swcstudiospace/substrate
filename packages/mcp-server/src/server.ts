@@ -665,6 +665,9 @@ export function createHttpServer(
 		// of knowing who used it.
 		// A bearer that names no surface is not an untokened caller. The bridge
 		// accepts the absence of a token; this used to be 401 and still is.
+		// GET /healthz stays open with no bearer: it names the origin and the
+		// store state, and it carries no lesson or session content. A present
+		// bearer that names no surface is still refused above.
 		const openHealth = (req.method ?? "GET") === "GET" && url.pathname === "/healthz";
 		if (
 			unmappedBearer(config, authorization) ||

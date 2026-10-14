@@ -14,7 +14,9 @@
  * Fails open: the hook never fails a Cursor turn and prints nothing on stdout,
  * because Cursor auto-submits a followup found there. The process always exits 0.
  * The lesson flush and `session.end` share one hook budget, so a slow bank cannot
- * add a second full timeout before the event. A 4xx is counted as refused.
+ * add a second full timeout before the event. The event is posted with the time
+ * still left, and the hook waits for that post to park a failure before it
+ * exits. A 4xx is counted as refused.
  * `SUBSTRATE_CURSOR_ROOT` and `SUBSTRATE_TRANSCRIPTS_DIR` override the defaults,
  * and are read when the hook runs, not when the module loads.
  */
@@ -60,7 +62,8 @@ export function sessionLessonText(transcript: string, limit = 3000): string {
 }
 
 export interface StopDeps {
-	emit: (event: EventInput) => Promise<unknown>;
+	/** Post `session.end`. `timeoutMs` is the fetch bound still left in the hook. The promise includes the spool park after a timeout, and the hook awaits it. */
+	emit: (event: EventInput, timeoutMs: number) => Promise<unknown>;
 	/** Transcripts outside this directory (after realpath) are refused. */
 	root?: string;
 	destDir?: string;
@@ -73,8 +76,8 @@ export interface StopDeps {
 	flushLesson?: (lesson: { sessionId: string; text: string }) => Promise<void>;
 	/**
 	 * Wall-clock budget shared by the lesson flush and `session.end`.
-	 * Defaults to the hook timeout. The event keeps at least half of it, and
-	 * never less than nothing, so the flush cannot spend the whole wait.
+	 * Defaults to the hook timeout. The flush keeps all but a reserve (at most
+	 * 400 ms, and at most half), and the event is posted with whatever remains.
 	 */
 	budgetMs?: number;
 }
@@ -266,7 +269,10 @@ export async function runStop(raw: string, deps: StopDeps): Promise<CopyResult> 
 		// Fall through with the "hook error" event.
 	}
 	try {
-		await finishWithin(deps.emit(event), left());
+		// The post's own timeout is the time still left, and this wait includes
+		// the spool park that follows a timeout. Abandoning the post at the same
+		// instant the fetch aborts would exit before that park runs.
+		await deps.emit(event, left());
 	} catch {
 		// An unreachable substrate must not fail the Cursor turn.
 	}
@@ -317,7 +323,7 @@ if (import.meta.main) {
 		const paths = hookPaths();
 		const repo = originRepo();
 		await runStop(raw, {
-			emit: (event) => postEvent(event, { timeoutMs: HOOK_TIMEOUT_MS, collector: "cursor-stop", source: "cursor.stop" }),
+			emit: (event, timeoutMs) => postEvent(event, { timeoutMs, collector: "cursor-stop", source: "cursor.stop" }),
 			root: paths.root,
 			destDir: paths.destDir,
 			budgetMs: HOOK_TIMEOUT_MS,
