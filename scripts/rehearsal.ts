@@ -49,6 +49,7 @@ import {
 	verifyIndexArchive,
 } from "../packages/mcp-server/src/index-archive.ts";
 import { IndexStore } from "../packages/mcp-server/src/index-store.ts";
+import { redact } from "../packages/mcp-server/src/redact.ts";
 import {
 	buildRehearsalEnv,
 	consumerEnvRecord,
@@ -1855,10 +1856,6 @@ export interface RehearsalHookContext {
 	env: Record<string, string | undefined>;
 }
 
-function redactConnectionText(text: string): string {
-	return text.replace(/postgres(?:ql)?:\/\/[^@\s/]+@/gi, "postgres://");
-}
-
 /** `gate_idx_` plus the instance name, hyphens as underscores. Empty when it is not a safe identifier. */
 export function indexDrillDatabaseName(instance: string): string | null {
 	const name = `gate_idx_${instance.replace(/-/g, "_")}`;
@@ -1923,7 +1920,7 @@ export async function indexArchiveRestoreDrill(ctx: RehearsalHookContext): Promi
 		if (body !== tag) return { ok: false, detail: `index drill scratch row ${describePgUrl(scratchUrl)} did not return the drilled text` };
 		return { ok: true, detail: `index drill restored ${describePgUrl(scratchUrl)}` };
 	} catch (cause) {
-		return { ok: false, detail: `index drill failed: ${redactConnectionText(String((cause as Error)?.message ?? cause)).split("\n")[0]?.slice(0, 300) ?? "unknown"}` };
+		return { ok: false, detail: `index drill failed: ${redact(String((cause as Error)?.message ?? cause)).split("\n")[0]?.slice(0, 300) ?? "unknown"}` };
 	} finally {
 		await scratchStore?.close().catch(() => undefined);
 		if (created && admin !== null && dbName !== null) {
