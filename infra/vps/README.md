@@ -69,8 +69,8 @@ All the units in this directory use `WorkingDirectory=/opt/agent-substrate/curre
 | `substrate-collector-grok.service` | `substrate-collector-grok.service.d/10-environment.conf` | `/etc/substrate/collector-grok.env` |
 | `substrate-collector-herdr.service` | `substrate-collector-herdr.service.d/10-environment.conf` | `/etc/substrate/substrate-collector-herdr.env` |
 | `substrate-collector-muse.service` | `substrate-collector-muse.service.d/10-environment.conf` | `/etc/substrate/substrate-collector-muse.env` |
-| `substrate-skills-sync.service` | `substrate-skills-sync.service.d/10-environment.conf` | `/etc/substrate/substrate-skills-sync.env` |
-| `substrate-skills-bridge.service` | `substrate-skills-bridge.service.d/10-environment.conf` | `/etc/substrate/substrate-bridge.env` |
+| `substrate-skills-sync.service` | `substrate-skills-sync.service` | `/etc/substrate/substrate-skills-sync.env` |
+| `substrate-skills-bridge.service` | `substrate-skills-bridge.service` | `/etc/substrate/substrate-bridge.env` |
 | `substrate-anchor.service` (+ `substrate-anchor.timer`) | `substrate-anchor.service.d/10-environment.conf` | `/etc/substrate/substrate.env` |
 | `substrate-index-sweep.service` (+ `substrate-index-sweep.timer`, staged: install and enable are operator steps after the dry-run report has been read for a few days) | `substrate-index-sweep.service.d/10-environment.conf` (also carries `Environment=SUBSTRATE_INDEX_SWEEP=dry-run`) | `/etc/substrate/substrate.env` |
 | `substrate-ledger-archive.service` (+ `substrate-ledger-archive.timer`, staged: install and enable are operator steps after the off-box archive path is mounted; see *Daily ledger archive*) | `substrate-ledger-archive.service.d/10-environment.conf` (carries `SUBSTRATE_LEDGER_ARCHIVE_DIR` once the operator sets it) | `/etc/substrate/substrate.env` |
