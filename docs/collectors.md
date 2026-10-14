@@ -281,11 +281,21 @@ written. When the byte cap would be crossed, or the line cap may be, room is
 made first: the oldest entries are dropped in one rewrite that already contains
 the new line and that must succeed before anything changes. If that rewrite
 fails (a full disk, say) the append is refused, the event is not spooled, the
-file does not grow past the cap, and the caller treats it as it treats any
-write failure (the collector keeps its own state, as with the flag off). The
-byte cap is exact, a file that ends in a torn line included (the separator the
-append would add is counted before the append is chosen); the line cap is checked every tenth of its capacity of file
-growth, so the file can briefly hold up to a tenth of the cap more lines.
+file does not grow past the cap, and the outcome is the same "failed, not
+spooled" as with the flag off. What each caller then does is its own, unchanged
+behaviour:
+
+- herdr keeps the transition pending and emits it again on its next pass.
+- Grok still advances and saves its offset (it is fail-open, D19-06) and will
+  not retry that event automatically.
+- The git post-commit and Cursor stop hooks, and `substrate emit`, drop the
+  event exactly as they do with the flag off: each reports the outcome the way it
+  always did (the hooks fail open, `substrate emit` exits 0) and nothing is retried.
+
+The byte cap is exact, a file that ends in a torn line included (the separator
+the append would add is counted before the append is chosen). The line cap is
+checked every tenth of its capacity of file growth, so the file can briefly hold
+up to a tenth of the cap more lines.
 
 A file that exists but cannot be read (an I/O error, not a missing file) is
 never treated as empty: no rewrite, sweep, replay or room-making append touches
@@ -298,9 +308,13 @@ not reach the disk is reported (`write failed` in the flush line) and its
 settled entries are not counted as removed; they are retried at the next pass.
 The report names the kind of failure: a write-back whose re-read failed is a
 read failure (`readFailed`), not a write failure. A failed cleanup before the
-replay is reported only until a later rewrite in the same pass commits; if the
-replay's write-back succeeds, nothing is outstanding and each drop is counted
-once. The depth in every result (`remaining`, also on a held result) is what is on
+replay, or a failed write-back whose only unsaved changes were the removal of
+expired or exhausted entries, is retried by a settle-only sweep at the end of
+the pass; if that commits, nothing is outstanding and each drop is counted once.
+A failed write-back stays reported (`write failed`) while it holds changes the
+sweep cannot apply: a delivered or refused entry that is still in the file and
+will be replayed again (the server dedupes it), or a retried entry's attempt and
+backoff update. The depth in every result (`remaining`, also on a held result) is what is on
 disk after the last rewrite that committed, so entries the pass already removed
 are not reported as still there. When the file could not be read and this pass has no trustworthy depth
 (an earlier snapshot or a committed rewrite), the depth is unknown: `remaining`

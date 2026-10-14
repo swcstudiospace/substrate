@@ -122,6 +122,11 @@ caps above their ceilings (100000 lines, 64 MiB, 720 h, 100 attempts) are clampe
 
 - `DrainResult.held.remaining` is `number | null`: null when the spool is unreadable and no earlier snapshot or committed depth exists; the CLI line and Grok summary omit the count, JSON carries null. Depth-only fallbacks check `stats().unreadable` first.
 
+## Review round 9 (Greptile round 2)
+
+- `SpoolDrainReport.pendingUnsaved`: a failed write-back leaves `writeFailed` outstanding only when it holds delivered/refused removals or retry deltas; a settle-only re-sweep (`settleAgain`, used by the ran, probe-held and no-eligible branches) clears it when everything unsaved was an expired/exhausted removal, drops counted once.
+- Docs: the append-refusal paragraph now describes herdr (pending, re-emitted), Grok (offset still advances, no automatic retry), hooks and `substrate emit` (dropped as with the flag off) separately.
+
 ## Smoke commands for the orchestrator
 
 ```

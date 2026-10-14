@@ -116,9 +116,9 @@ describe("flush", () => {
 	test("replays everything regardless of backoff, under the budget it was given, and exits 0 whatever happened", async () => {
 		const calls: Array<{ all: boolean; budgetMs: number }> = [];
 		const results: DrainResult[] = [
-			{ status: "ran", delivered: 2, refused: 1, retried: 0, skipped: 0, dropped: 0, held: null, budgetExhausted: false, remaining: 0, readFailed: false, writeFailed: false },
+			{ status: "ran", delivered: 2, refused: 1, retried: 0, skipped: 0, dropped: 0, held: null, budgetExhausted: false, remaining: 0, readFailed: false, writeFailed: false, pendingUnsaved: false },
 			{ status: "held", reason: "idempotency-off", dropped: 0, remaining: 4 },
-			{ status: "ran", delivered: 0, refused: 0, retried: 0, skipped: 0, dropped: 0, held: "unreachable", budgetExhausted: false, remaining: 4, readFailed: false, writeFailed: false },
+			{ status: "ran", delivered: 0, refused: 0, retried: 0, skipped: 0, dropped: 0, held: "unreachable", budgetExhausted: false, remaining: 4, readFailed: false, writeFailed: false, pendingUnsaved: false },
 		];
 		const lines: string[] = [];
 		for (const result of results) {
@@ -146,7 +146,7 @@ describe("flush", () => {
 
 	test("a flush that could not read or write the spool says so, and never reports a write that failed as a removal", async () => {
 		const results: DrainResult[] = [
-			{ status: "ran", delivered: 0, refused: 0, retried: 0, skipped: 0, dropped: 0, held: null, budgetExhausted: false, remaining: 3, readFailed: false, writeFailed: true },
+			{ status: "ran", delivered: 0, refused: 0, retried: 0, skipped: 0, dropped: 0, held: null, budgetExhausted: false, remaining: 3, readFailed: false, writeFailed: true, pendingUnsaved: false },
 			{ status: "held", reason: "spool-unreadable", dropped: 0, remaining: 4, failure: "read" },
 			{ status: "held", reason: "healthz-auth", dropped: 0, remaining: 4, failure: "write" },
 		];

@@ -243,6 +243,13 @@ export interface SpoolDrainReport {
 	readFailed: boolean;
 	/** The last write-back did not reach the disk: its settled entries are still in the file and `dropped` does not count them. */
 	writeFailed: boolean;
+	/**
+	 * True when a failed write-back left changes that a settle-only sweep cannot apply: deliveries and refusals
+	 * (those entries are still in the file and will be replayed again, which the server dedupes) or retry
+	 * attempt/backoff deltas. False when everything that could not be saved was the removal of an expired or
+	 * exhausted entry, which a later sweep can redo. Meaningful only when `writeFailed` is true.
+	 */
+	pendingUnsaved: boolean;
 }
 
 /** What a local sweep of expired and exhausted entries did. */
@@ -526,7 +533,7 @@ export class EventSpool {
 	drain(deliver: (entry: SpoolEntry) => Promise<SpoolDelivery>, options: { budgetMs: number; all?: boolean }): Promise<SpoolDrainReport> {
 		if (this.draining) return this.draining;
 		this.draining = this.runDrain(deliver, options.budgetMs, options.all === true)
-			.catch((): SpoolDrainReport => ({ delivered: 0, refused: 0, retried: 0, skipped: 0, dropped: 0, held: "error", budgetExhausted: false, remaining: 0, readFailed: false, writeFailed: false }))
+			.catch((): SpoolDrainReport => ({ delivered: 0, refused: 0, retried: 0, skipped: 0, dropped: 0, held: "error", budgetExhausted: false, remaining: 0, readFailed: false, writeFailed: false, pendingUnsaved: false }))
 			.finally(() => {
 				this.draining = null;
 			});
@@ -586,7 +593,7 @@ export class EventSpool {
 	}
 
 	private async runDrain(deliver: (entry: SpoolEntry) => Promise<SpoolDelivery>, budgetMs: number, all: boolean): Promise<SpoolDrainReport> {
-		const report: SpoolDrainReport = { delivered: 0, refused: 0, retried: 0, skipped: 0, dropped: 0, held: null, budgetExhausted: false, remaining: 0, readFailed: false, writeFailed: false };
+		const report: SpoolDrainReport = { delivered: 0, refused: 0, retried: 0, skipped: 0, dropped: 0, held: null, budgetExhausted: false, remaining: 0, readFailed: false, writeFailed: false, pendingUnsaved: false };
 		const read = this.tryRead();
 		if ("error" in read) {
 			// An unreadable file is not an empty one: nothing is replayed, nothing is rewritten.
@@ -677,6 +684,7 @@ export class EventSpool {
 		if (updates.size > 0) {
 			if (lastFailure === "read") report.readFailed = true;
 			else report.writeFailed = true;
+			report.pendingUnsaved = [...updates.values()].some((update) => update.kind !== "drop");
 		}
 		return report;
 	}

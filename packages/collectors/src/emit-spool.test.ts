@@ -929,6 +929,80 @@ describe("replay", () => {
 				expect(out.join("")).toContain("depth: 1");
 			});
 
+			/**
+			 * Fails the first `failures` rewrites of the process's live spool (the first sweep, the replay write-back), then lets
+			 * the re-sweep through. Patches the spool's disk seam, because the drain reaches the spool through `eventSpool()`.
+			 */
+			function failFirstRewrites(failures: number): void {
+				const live = eventSpool() as unknown as { io: { writeFile: (path: string, body: string, options: { mode: number }) => void } };
+				const real = live.io.writeFile;
+				let calls = 0;
+				live.io.writeFile = (path, body, options) => {
+					calls += 1;
+					if (calls <= failures) throw Object.assign(new Error("no space"), { code: "ENOSPC" });
+					real(path, body, options);
+				};
+			}
+
+			test("(a) expired + a skipped entry: first sweep and write-back fail, the re-sweep commits => failure cleared, drop counted once, CLI clean", async () => {
+				tokenFor("omp", BAD);
+				seed("omp", "expired", 2 * 3_600_000);
+				seed("omp", "skipped", 120_000);
+				const server = authServer(true);
+				process.env.SUBSTRATE_URL = server.url;
+				failFirstRewrites(2);
+				const out: string[] = [];
+
+				await runSpool(["flush"], { out: (text) => out.push(text), err: () => undefined });
+
+				expect(out.join("")).toContain("dropped=1");
+				expect(out.join("")).toContain("remaining=1");
+				expect(out.join("")).toContain("skipped=1");
+				expect(out.join("")).not.toContain("write failed");
+				expect(spooled().map((entry) => [entry.event.summary, entry.attempts])).toEqual([["skipped", 1]]);
+				expect(countSpoolDrops(stateDir)).toEqual({ ttl: 1 });
+			});
+
+			test("(a2) the same through the result object", async () => {
+				tokenFor("omp", BAD);
+				seed("omp", "expired", 2 * 3_600_000);
+				seed("omp", "skipped", 120_000);
+				const server = authServer(true);
+				process.env.SUBSTRATE_URL = server.url;
+				failFirstRewrites(2);
+
+				expect(await drainEventSpool({ all: true })).toMatchObject({ status: "ran", dropped: 1, remaining: 1, writeFailed: false, readFailed: false, skipped: 1 });
+			});
+
+			test("(b) a delivered entry whose removal could not be saved keeps the failure reported, though the re-sweep committed", async () => {
+				process.env.SUBSTRATE_TOKEN = GOOD;
+				seed("claude-code", "expired", 2 * 3_600_000);
+				seed("claude-code", "delivered", 120_000);
+				const server = serve(ACCEPTING);
+				process.env.SUBSTRATE_URL = server.url;
+				failFirstRewrites(2);
+
+				const result = await drainEventSpool({ all: true });
+
+				expect(result).toMatchObject({ status: "ran", delivered: 1, dropped: 1, writeFailed: true, remaining: 1 });
+				// The delivered entry is still on disk and will be replayed (and deduplicated) next pass.
+				expect(spooled().map((entry) => entry.event.summary)).toEqual(["delivered"]);
+			});
+
+			test("(c) a retried entry whose attempt delta could not be saved keeps the failure reported", async () => {
+				process.env.SUBSTRATE_TOKEN = GOOD;
+				seed("claude-code", "expired", 2 * 3_600_000);
+				seed("claude-code", "retried", 120_000);
+				const server = serve({ healthz: ACCEPTING.healthz, events: () => Response.json({ stored: false }, { status: 503 }) });
+				process.env.SUBSTRATE_URL = server.url;
+				failFirstRewrites(2);
+
+				const result = await drainEventSpool({ all: true });
+
+				expect(result).toMatchObject({ status: "ran", retried: 1, dropped: 1, writeFailed: true });
+				expect(spooled().map((entry) => [entry.event.summary, entry.attempts])).toEqual([["retried", 1]]);
+			});
+
 			test("a sweep failure with nothing eligible to replay stays reported, and counts nothing as dropped", async () => {
 				seed("claude-code", "expired", 2 * 3_600_000);
 				blockRewrite();

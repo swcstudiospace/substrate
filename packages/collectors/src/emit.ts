@@ -626,13 +626,30 @@ export type DrainResult =
 	| { status: "held"; reason: string; dropped: number; remaining: number | null; failure?: "read" | "write" }
 	| ({ status: "ran" } & SpoolDrainReport);
 
-const NOTHING_TO_DO: SpoolDrainReport = { delivered: 0, refused: 0, retried: 0, skipped: 0, dropped: 0, held: null, budgetExhausted: false, remaining: 0, readFailed: false, writeFailed: false };
+const NOTHING_TO_DO: SpoolDrainReport = { delivered: 0, refused: 0, retried: 0, skipped: 0, dropped: 0, held: null, budgetExhausted: false, remaining: 0, readFailed: false, writeFailed: false, pendingUnsaved: false };
 let draining: Promise<DrainResult> | null = null;
 
 /** The depth on disk right now, or null when the file cannot be read (an unreadable spool is never "0 entries"). */
 function currentDepth(spool: EventSpool): number | null {
 	const stats = spool.stats();
 	return stats.unreadable === null ? stats.depth : null;
+}
+
+/**
+ * The second chance for a failed cleanup. Folds a settle-only sweep into `report`: its drops and committed depth are
+ * the newest word on the file, and `writeFailed` stays set only when something unsaved still needs it
+ * (`pendingUnsaved`) or the sweep itself failed again.
+ */
+function settleAgain(spool: EventSpool, report: SpoolDrainReport): void {
+	const again = spool.sweepSettled();
+	report.dropped += again.dropped;
+	if (again.remaining !== null) report.remaining = again.remaining;
+	if (again.failure === "read") {
+		report.readFailed = true;
+		report.writeFailed = report.pendingUnsaved;
+	} else {
+		report.writeFailed = again.failure === "write" || (report.writeFailed && report.pendingUnsaved);
+	}
 }
 
 async function runDrain(spool: EventSpool, opts: DrainOptions): Promise<DrainResult> {
@@ -661,9 +678,14 @@ async function runDrain(spool: EventSpool, opts: DrainOptions): Promise<DrainRes
 		return { status: "held", reason: "spool-unreadable", dropped: swept.dropped, remaining: swept.remaining ?? before.depth, failure: "read" };
 	}
 	if (eligible.length === 0) {
-		const depth = swept.remaining ?? currentDepth(spool);
-		if (depth === null) return { status: "held", reason: "spool-unreadable", dropped: swept.dropped, remaining: null, failure: "read" };
-		return { status: "ran", ...NOTHING_TO_DO, dropped: swept.dropped, writeFailed: sweepWriteFailed, remaining: depth };
+		// No replay ran, so the only thing that can be outstanding is the failed cleanup, and it gets its second chance.
+		const done: SpoolDrainReport = { ...NOTHING_TO_DO, dropped: swept.dropped, writeFailed: sweepWriteFailed, remaining: swept.remaining ?? before.depth };
+		if (sweepWriteFailed) settleAgain(spool, done);
+		const depth = swept.remaining !== null || sweepWriteFailed ? done.remaining : currentDepth(spool);
+		if (done.readFailed || depth === null) {
+			return { status: "held", reason: "spool-unreadable", dropped: done.dropped, remaining: depth, failure: "read" };
+		}
+		return { status: "ran", ...done, remaining: depth };
 	}
 	const probe = await probeAny(base, timeoutMs, eligible, opts.token);
 	if (!probe.ok) {
@@ -690,16 +712,13 @@ async function runDrain(spool: EventSpool, opts: DrainOptions): Promise<DrainRes
 		report.held = "unauthorized";
 	}
 	report.dropped += swept.dropped;
-	// A sweep rewrite that failed is outstanding only if nothing committed since: the replay write-back rewrites the
-	// whole file (expired entries included), so after a successful pass there is nothing left to settle. Ask again;
-	// the re-sweep is a no-op when the file is clean, so a recovered failure is cleared and never double-counted.
-	if (sweepWriteFailed) {
-		const again = spool.sweepSettled();
-		report.dropped += again.dropped;
-		// A re-sweep that committed is the newest word on what is on disk: the pass already removed those entries.
-		if (again.remaining !== null) report.remaining = again.remaining;
-		if (again.failure === "write") report.writeFailed = true;
-		else if (again.failure === "read") report.readFailed = true;
+	// A failure is outstanding only while changes that need it are unsaved. A failed first sweep, or a failed
+	// write-back whose pending changes were all removals of expired or exhausted entries, is redone by a settle-only
+	// sweep, so ask again: the re-sweep is a no-op on a clean file, its drops are counted once (the failed rewrite
+	// counted none), and a committed re-sweep clears the failure. Deliveries, refusals and retry deltas the write-back
+	// could not save stay reported: those entries are still in the file as they were.
+	if (sweepWriteFailed || (report.writeFailed && !report.pendingUnsaved)) {
+		settleAgain(spool, report);
 	}
 	if (report.held !== null) logHeld(report.held);
 	return { status: "ran", ...report };
