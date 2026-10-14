@@ -90,7 +90,7 @@ describe("collectStats", () => {
 		expect(byClass.other).toMatchObject({ keys: 1 });
 		expect(stats.server).toEqual({ usedMemoryBytes: 1048576, maxmemoryBytes: 268435456, maxmemoryPolicy: "volatile-lru", evictedKeys: 7 });
 		// p99 of the 7 sized values is the largest (4000); 4000 x 8 x 4 = 128000 B, rounded up to 1 MiB.
-		expect(stats.recommendation.inputs).toEqual({ p99Bytes: 4000, observedKeys: 8, headroom: 4, truncated: false });
+		expect(stats.recommendation.inputs).toEqual({ p99Bytes: 4000, observedKeys: 8, headroom: 4, truncated: false, totalValueBytes: 9512, floorBytes: 15068 });
 		expect(stats.recommendation.maxmemory).toBe("1mb");
 	});
 
@@ -162,7 +162,7 @@ describe("collectStats", () => {
 		expect(stats.scanned).toBe(0);
 		expect(stats.classes).toEqual([]);
 		expect(stats.recommendation.maxmemory).toBeNull();
-		expect(recommend(0, 0, 4, false, 0).maxmemoryBytes).toBeNull();
+		expect(recommend(0, 0, 4, false, 0, 0).maxmemoryBytes).toBeNull();
 	});
 
 	test("the table and the JSON name classes and numbers, never a key or a value", async () => {
@@ -173,6 +173,24 @@ describe("collectStats", () => {
 		for (const key of entries.keys()) expect(text).not.toContain(key.slice("substrate:v1:".length));
 		expect(text).toContain("brief");
 		expect(text).toContain("recommended maxmemory");
+	});
+});
+
+describe("recommendation floor", () => {
+	test("many tiny keys and a few large values: the recommendation covers the measured total, not just p99 x keys", async () => {
+		const entries = new Map<string, { type: string; length: number }>();
+		for (let index = 0; index < 1000; index += 1) entries.set(`substrate:v1:gen:g${index}`, { type: "string", length: 1 });
+		for (let index = 0; index < 5; index += 1) entries.set(cacheKey("brief", "cursor", String(index), { index }), { type: "string", length: 256 * 1024 });
+		const stats = await collectStats(new FakeServer(entries), { headroom: 4 });
+		const total = 1000 + 5 * 256 * 1024;
+
+		expect(stats.recommendation.inputs.p99Bytes).toBe(1);
+		expect(stats.recommendation.inputs.totalValueBytes).toBe(total);
+		expect(stats.recommendation.inputs.floorBytes).toBe(Math.ceil(total * 1.5 + 1005 * 100));
+		// The old formula gave p99 1 x 1005 x 4, i.e. 1 MiB, below the 1.25 MiB of values already seen.
+		expect(stats.recommendation.maxmemoryBytes).toBe(2 * 1024 * 1024);
+		expect(stats.recommendation.maxmemoryBytes as number).toBeGreaterThan(total);
+		expect(stats.recommendation.note).toContain("estimates");
 	});
 });
 

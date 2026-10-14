@@ -95,7 +95,8 @@ export interface InventoryBank {
 	/** A name from the configured list, never from the plane. */
 	bank: string;
 	/** The deployment lists it. */
-	present: boolean;
+	/** `null`: the listing was cut before this bank and a direct read did not settle it. Never counted as missing. */
+	present: boolean | null;
 	facts: number | null;
 	pendingOperations: number | null;
 	failedOperations: number | null;
@@ -140,7 +141,7 @@ export interface InventoryHealth {
 	truncated: boolean;
 	banks: Array<{
 		bank: string;
-		present: boolean;
+		present: boolean | null;
 		facts: number | null;
 		pendingOperations: number | null;
 		failedOperations: number | null;
@@ -300,7 +301,7 @@ export class HindsightInventory {
 			if (value !== null) samples.push({ name, unit, description, attributes: { bank }, value });
 		};
 		for (const bank of report.banks) {
-			if (!bank.present) continue;
+			if (bank.present !== true) continue;
 			point(GAUGE_BANK_FACTS, "{fact}", "Facts the bank holds, as the deployment lists it", bank.bank, bank.facts);
 			point(GAUGE_BANK_PENDING, "{operation}", "Operations the bank has queued", bank.bank, bank.pendingOperations);
 			point(GAUGE_BANK_FAILED, "{operation}", "Operations the bank has failed", bank.bank, bank.failedOperations);
@@ -334,17 +335,19 @@ export class HindsightInventory {
 		let halted = false;
 		for (const name of configured) {
 			const summary = upstream.get(name);
-			if (summary === undefined) {
+			// A listing cut at 200 banks says nothing about a bank it did not reach: that one is asked for directly
+			// below (its stats), and is `unknown`, never `missing`, until the plane answers.
+			if (summary === undefined && !listed.value.truncated) {
 				banks.push({ bank: name, present: false, facts: null, pendingOperations: null, failedOperations: null, lastWriteMs: null, extractionMode: null, error: null });
 				continue;
 			}
 			const entry: InventoryBank = {
 				bank: name,
-				present: true,
-				facts: summary.fact_count,
+				present: summary === undefined ? null : true,
+				facts: summary?.fact_count ?? null,
 				pendingOperations: null,
 				failedOperations: null,
-				lastWriteMs: summary.last_write_at === null ? null : toMs(summary.last_write_at),
+				lastWriteMs: summary?.last_write_at == null ? null : toMs(summary.last_write_at),
 				extractionMode: null,
 				error: null,
 			};
@@ -354,7 +357,12 @@ export class HindsightInventory {
 				continue;
 			}
 			const stats = await bankStats(hindsight, name, this.deps.fetchImpl, { signal });
+			if (entry.present === null && !stats.ok && stats.error.kind === "not-found") {
+				entry.present = false;
+				continue;
+			}
 			if (stats.ok) {
+				entry.present ??= true;
 				entry.pendingOperations = stats.value.pending_operations;
 				entry.failedOperations = stats.value.failed_operations;
 				const written = stats.value.last_write_at === null ? null : toMs(stats.value.last_write_at);
@@ -380,12 +388,12 @@ export class HindsightInventory {
 		}
 		const configuredSet = new Set(configured);
 		const prefix = hindsight.bankPrefix;
-		const missing = dedupeBounded(configured.filter((name) => !upstream.has(name)).map(safeBankName));
+		const missing = dedupeBounded(banks.filter((bank) => bank.present === false).map((bank) => safeBankName(bank.bank)));
 		const unconfigured = dedupeBounded(
 			[...upstream.keys()].filter((name) => name.startsWith(prefix) && !configuredSet.has(name)).map(safeBankName),
 		);
 		const notChunks = dedupeBounded(
-			banks.filter((bank) => bank.present && bank.extractionMode !== null && bank.extractionMode !== "chunks").map((bank) => safeBankName(bank.bank)),
+			banks.filter((bank) => bank.present !== false && bank.extractionMode !== null && bank.extractionMode !== "chunks").map((bank) => safeBankName(bank.bank)),
 		);
 		return {
 			at,

@@ -78,7 +78,7 @@ export const BRIEF_RECALL_MODES = ["off", "shadow", "enforce"] as const;
 export type BriefRecallMode = (typeof BRIEF_RECALL_MODES)[number];
 
 /** What one brief did with the recall snapshot (`substrate.brief.recall{result}`): a metric label, so the set stays closed. */
-export const BRIEF_RECALL_RESULTS = ["included", "would_include", "cold", "stale", "disabled"] as const;
+export const BRIEF_RECALL_RESULTS = ["included", "would_include", "cold", "stale", "disabled", "dropped_by_cap"] as const;
 export type BriefRecallResult = (typeof BRIEF_RECALL_RESULTS)[number];
 
 /** What one prefetch attempt did (`substrate.recall.prefetch{result}`). */
@@ -421,7 +421,7 @@ export class SubstrateInstruments {
 		});
 		this.briefRecall = registry.counter(METRIC.briefRecall, {
 			description:
-				"Briefs answered under SUBSTRATE_BRIEF_RECALL=shadow|enforce, by surface and result (included|would_include|cold|stale|disabled).",
+				"Briefs answered under SUBSTRATE_BRIEF_RECALL=shadow|enforce, by surface and result (included|would_include|cold|stale|disabled|dropped_by_cap).",
 			unit: "{brief}",
 		});
 		this.recallPrefetch = registry.counter(METRIC.recallPrefetch, {

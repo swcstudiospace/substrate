@@ -486,6 +486,29 @@ describe("the degraded last-good snapshot carries no derived recall", () => {
 	});
 });
 
+describe("a brief too large to cache", () => {
+	test("is composed once: the live sections are used directly, never decoded back", async () => {
+		const huge = [1, 2, 3, 4].map((n) => entry("decision", `d${n} ${"x".repeat(300_000)}`));
+		let graphReads = 0;
+		const index = { ...indexOf(), getGraph: async () => { graphReads += 1; return graph(); }, memoryForBrief: async () => huge };
+		const w = world({}, { index });
+		const first = await w.substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
+		expect(first.state).toBe("complete");
+		expect(first.text).toContain("d4 ");
+		expect(graphReads).toBe(1);
+	});
+
+	test("a node label is bounded at compose time", async () => {
+		const index = {
+			...indexOf(),
+			getGraph: async () => ({ ...graph(), nodes: [{ graph_id: "ut-1", node_id: "n".repeat(5000), linear_identifier: null, state: "todo", lease_epoch: 1 }] }),
+		};
+		const w = world({}, { index });
+		const brief = await w.substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
+		expect(brief.text).not.toContain("n".repeat(200));
+	});
+});
+
 describe("a graph past the cached encoding's caps", () => {
 	test("2500 nodes: the brief lists the first 1000 and says so, and the second call is a cache hit", async () => {
 		const w = world({}, { index: indexOf({ nodes: 2500 }) });
@@ -563,6 +586,7 @@ describe("the compact profile", () => {
 			seedSnapshot(roomy.redis, 1000, [{ text: "use pnpm, not npm", type: "world" }, { text: "fence the lease" }]);
 			const wide = await roomy.substrate.briefDetailed(WITH_GRAPH, undefined, (WITH_GRAPH).surface);
 			expect(wide.text).toContain("Recalled context");
+			expect(roomy.briefRecall).toEqual([{ surface: "grok-bot", result: "included" }]);
 
 			const tight = world({ ...compactEnv, SUBSTRATE_BRIEF_COMPACT_BYTES: String(cap) });
 			seedSnapshot(tight.redis, 1000, [{ text: "use pnpm, not npm", type: "world" }, { text: "fence the lease" }]);
@@ -570,6 +594,8 @@ describe("the compact profile", () => {
 			expect(dropped.text).toBe(`${cold.text}${OMITTED}`);
 			expect(dropped.text).not.toContain("Recalled context");
 			expect(utf8Bytes(dropped.text)).toBeLessThanOrEqual(cap);
+			// The section was composed and then cut by the byte cap: the counter must not claim delivery.
+			expect(tight.briefRecall).toEqual([{ surface: "grok-bot", result: "dropped_by_cap" }]);
 		});
 	});
 });

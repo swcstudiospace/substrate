@@ -133,6 +133,7 @@ import {
 	parseRecallSnapshot,
 	recallBriefResult,
 	recallKey,
+	RECALL_TITLE_PREFIX,
 	recallSnapshotArgs,
 	snapshotState,
 	type RecallLook,
@@ -1291,6 +1292,7 @@ export class Substrate {
 			const noted: Array<number | null> = [];
 			const failed: BriefSource[] = [];
 			let loaded = false;
+			let liveSections: BriefSection[] | null = null;
 			let staleAgeS: number | undefined;
 			// uplift-4 S5: with recall `off` none of this runs and every key and text is today's.
 			const recallMode = this.config.briefRecall.mode;
@@ -1303,7 +1305,7 @@ export class Substrate {
 			const recallRead: Promise<RecallRead> | null =
 				recallMode === "off" ? null : recallActive ? this.readRecall(request, recallRepo) : Promise.resolve<RecallRead>({ look: "disabled", snapshot: null });
 			const recallOptions = recallRead === null || !recallActive ? {} : this.recallBriefOptions(request, recallRepo, recallRead);
-			const noteRecall = (served: readonly BriefSection[] | null): Promise<void> => this.noteBriefRecall(request, recallRead, served);
+			const noteRecall = (served: readonly BriefSection[] | null, detail: BriefDetail): Promise<void> => this.noteBriefRecall(request, recallRead, served, detail);
 			// One compose, parameterised by where it reports its lease note and failed sources, so a
 			// background refresh never touches this call's `failed` (S4) and every caller gets the
 			// brief as sections (S1).
@@ -1360,7 +1362,8 @@ export class Substrate {
 				store: (value: string) => failed.length === 0 && decodeSections(value) !== null,
 				load: async () => {
 					loaded = true;
-					return encodeSections(await compose(noted, failed));
+					liveSections = await compose(noted, failed);
+					return encodeSections(liveSections);
 				},
 				// Stale-while-revalidate (uplift-4 S4) reuses the last-good snapshot above. A
 				// refresh composes with its own state, so it never touches this call's `failed`.
@@ -1402,7 +1405,9 @@ export class Substrate {
 							}
 						: undefined,
 			});
-			let sections = decodeSections(encoded);
+			// What this call composed itself is used as it is: a brief too large to cache would not decode,
+			// and decoding it is what used to compose it a second time.
+			let sections = loaded && liveSections !== null ? liveSections : decodeSections(encoded);
 			if (sections === null) {
 				// Not an encoding this process wrote (an entry from before profiles, or
 				// a foreign value): a miss. Compose afresh, leave the entry to expire. What is
@@ -1420,14 +1425,16 @@ export class Substrate {
 				if (loaded) {
 					await keep(live, sections, noted.at(-1) ?? null);
 				}
-				await noteRecall(sections);
-				return this.servedBrief(live, sections, "complete", failed, null, requestedProfile, profileSurface, staleAgeS);
+				const detail = this.servedBrief(live, sections, "complete", failed, null, requestedProfile, profileSurface, staleAgeS);
+				await noteRecall(sections, detail);
+				return detail;
 			}
 			const snapshot =
 				this.config.briefSnapshotTtlS > 0 ? await this.cache.peek<BriefSnapshot>("brief-snapshot", request.surface, args) : null;
 			if (snapshot === null) {
-				await noteRecall(sections);
-				return this.servedBrief(live, sections, "degraded", failed, null, requestedProfile, profileSurface);
+				const detail = this.servedBrief(live, sections, "degraded", failed, null, requestedProfile, profileSurface);
+				await noteRecall(sections, detail);
+				return detail;
 			}
 			// `snapshot.text` is the rendered brief, never the encoded sections.
 			const text = `_(substrate brief snapshot from ${snapshot.at}; live sources degraded: ${failed.join(", ")})_\n${snapshot.text}`;
@@ -1439,8 +1446,9 @@ export class Substrate {
 				stored !== null && snapshotSections !== null && snapshotSections.length !== stored.length
 					? `_(substrate brief snapshot from ${snapshot.at}; live sources degraded: ${failed.join(", ")})_\n${renderFullBrief(snapshotSections)}`
 					: text;
-			await noteRecall(snapshotSections);
-			return this.servedBrief(snapshotText, snapshotSections, "snapshot", failed, snapshot.at, requestedProfile, profileSurface);
+			const detail = this.servedBrief(snapshotText, snapshotSections, "snapshot", failed, snapshot.at, requestedProfile, profileSurface);
+			await noteRecall(snapshotSections, detail);
+			return detail;
 		} finally {
 			// Timed in `finally` so a brief that threw is still in the histogram. The SLO
 			// is about what the caller waited for, and a failure is a wait too.
@@ -1489,13 +1497,17 @@ export class Substrate {
 	}
 
 	/** `substrate.brief.recall` for one answered brief: what the served sections carry against what the snapshot offered. A metric never fails the brief. */
-	private async noteBriefRecall(request: BriefRequest, read: Promise<RecallRead> | null, served: readonly BriefSection[] | null): Promise<void> {
+	private async noteBriefRecall(request: BriefRequest, read: Promise<RecallRead> | null, served: readonly BriefSection[] | null, detail: BriefDetail): Promise<void> {
 		const mode = this.config.briefRecall.mode;
 		if (read === null || mode === "off") return;
 		try {
 			const { look } = await read;
-			const included = served?.some((section) => section.id === "recall") === true;
-			this.observer.briefRecall?.({ surface: boundedSurface(request.surface), result: recallBriefResult(mode, look, included) });
+			const composed = served?.some((section) => section.id === "recall") === true;
+			// `included` is what the text the caller RECEIVED carries: the compact profile's byte cap drops
+			// recall first, so a section that was composed but cut is its own result.
+			const delivered = composed && detail.text.includes(RECALL_TITLE_PREFIX);
+			const result: BriefRecallResult = mode === "enforce" && composed && !delivered ? "dropped_by_cap" : recallBriefResult(mode, look, delivered);
+			this.observer.briefRecall?.({ surface: boundedSurface(request.surface), result });
 		} catch (cause) {
 			process.stderr.write(`[substrate] brief: recall metric unavailable — ${redact(String(cause)).slice(0, 200)}\n`);
 		}

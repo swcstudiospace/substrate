@@ -54,6 +54,8 @@ export interface BriefOptions {
 
 /** The most nodes one brief lists; past it the line says how many were left out (the cached encoding caps a section at 2000 items). */
 export const MAX_BRIEF_NODES = 1000;
+/** The longest node label (id and tracker identifier) a brief prints. */
+export const MAX_NODE_LABEL_CHARS = 120;
 const RECENT_ACTION_LIMIT = 5;
 export const DEFAULT_RECENT_WINDOW_DAYS = 30;
 const DAY_MS = 86_400_000;
@@ -107,7 +109,9 @@ function clock(value: unknown): string {
  * because who was there last is still worth knowing.
  */
 function describeNode(node: GraphView["nodes"][number], now = Date.now()): string {
-	const label = node.linear_identifier ? `${node.node_id} ${node.linear_identifier}` : node.node_id;
+	// Bounded: a node id is a caller's string, and the cached sections must fit the encoding's size cap.
+	const full = node.linear_identifier ? `${node.node_id} ${node.linear_identifier}` : String(node.node_id);
+	const label = full.length > MAX_NODE_LABEL_CHARS ? `${full.slice(0, MAX_NODE_LABEL_CHARS - 1)}…` : full;
 	if (node.state === "completed") return `${label} done${node.claimed_by ? ` (${node.claimed_by})` : ""}`;
 	if (node.claimed_by) {
 		const state = leaseState(leaseSnapshot(node), now);

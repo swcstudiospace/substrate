@@ -93,7 +93,7 @@ interface Rig {
 	stored: Map<string, RecallSnapshot>;
 	observed: Array<{ surface: string; result: string }>;
 	clock: { at: number };
-	control: { breakerOpen: boolean; cacheUp: boolean; configured: boolean; outcome: (request: { surface: string; bank: string; query: string }) => Promise<RecallOutcome>; peekThrows: boolean };
+	control: { peekGate: Promise<void> | null; breakerOpen: boolean; cacheUp: boolean; configured: boolean; outcome: (request: { surface: string; bank: string; query: string }) => Promise<RecallOutcome>; peekThrows: boolean };
 }
 
 function rig(mode: "off" | "shadow" | "enforce" = "shadow"): Rig {
@@ -104,6 +104,7 @@ function rig(mode: "off" | "shadow" | "enforce" = "shadow"): Rig {
 	const puts: Rig["puts"] = [];
 	const observed: Rig["observed"] = [];
 	const control: Rig["control"] = {
+		peekGate: null,
 		breakerOpen: false,
 		cacheUp: true,
 		configured: true,
@@ -120,6 +121,7 @@ function rig(mode: "off" | "shadow" | "enforce" = "shadow"): Rig {
 			return control.outcome(request);
 		},
 		peek: async (surface, repo) => {
+			if (control.peekGate !== null) await control.peekGate;
 			if (control.peekThrows) throw new Error("cache down");
 			return stored.get(`${surface}|${repo}`) ?? null;
 		},
@@ -185,7 +187,7 @@ describe("briefRecallConfigWarnings", () => {
 
 describe("closed label sets", () => {
 	test("the result vocabularies are the specified ones", () => {
-		expect([...BRIEF_RECALL_RESULTS]).toEqual(["included", "would_include", "cold", "stale", "disabled"]);
+		expect([...BRIEF_RECALL_RESULTS]).toEqual(["included", "would_include", "cold", "stale", "disabled", "dropped_by_cap"]);
 		expect([...RECALL_PREFETCH_RESULTS]).toEqual(["ok", "empty", "error", "skipped_breaker", "skipped_unconfigured", "skipped_cache"]);
 	});
 });
@@ -654,6 +656,29 @@ describe("RecallPrefetcher", () => {
 		prefetcher.noteRetain("cursor");
 		prefetcher.noteRetain("not-a-surface");
 		expect(timers.handles).toEqual([]);
+	});
+
+	test("a brief that re-registers the pair while a tick awaits its peek does not lose the retry floor", async () => {
+		const { prefetcher, recalls, control, clock } = rig();
+		const gate = Promise.withResolvers<void>();
+		control.peekGate = gate.promise;
+		prefetcher.want("omp", "acme/a");
+		const ticking = prefetcher.tick();
+		await settle();
+		// The pair is asked about again while the tick is suspended in `peek`.
+		prefetcher.want("omp", "acme/a");
+		gate.resolve();
+		await ticking;
+		expect(recalls).toHaveLength(1);
+		control.peekGate = null;
+		clock.at += 5000;
+		prefetcher.noteRetain("omp");
+		await prefetcher.flush();
+		expect(recalls).toHaveLength(1);
+		clock.at += MIN_RECALL_REFRESH_S * 1000;
+		prefetcher.noteRetain("omp");
+		await prefetcher.flush();
+		expect(recalls).toHaveLength(2);
 	});
 
 	test("without a usable cache no recall is sent, on a tick or a flush, and it is counted skipped_cache", async () => {

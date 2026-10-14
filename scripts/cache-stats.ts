@@ -62,7 +62,16 @@ export interface Recommendation {
 	/** Null when no string value was sized, so there is nothing to recommend from. */
 	maxmemory: string | null;
 	maxmemoryBytes: number | null;
-	inputs: { p99Bytes: number; observedKeys: number; headroom: number; truncated: boolean };
+	inputs: {
+		p99Bytes: number;
+		observedKeys: number;
+		headroom: number;
+		truncated: boolean;
+		/** Sum of every sized value, bytes: measured. */
+		totalValueBytes: number;
+		/** `total x 1.5 + keys x 100`, bytes: an estimate of what the observed keys need, the lower bound of the recommendation. */
+		floorBytes: number;
+	};
 	note: string;
 }
 
@@ -156,24 +165,40 @@ async function info(client: StatsClient, section: string, names: readonly string
 	}
 }
 
+/** Estimated server bytes per key beyond the value (key name, dict entry, expiry); an estimate, not a measurement. */
+export const KEY_OVERHEAD_BYTES = 100;
+/** Estimated allocator and fragmentation factor over the measured value bytes; an estimate. */
+export const VALUE_OVERHEAD_FACTOR = 1.5;
+
 /**
- * `p99 value bytes × observed keys × headroom`, rounded up to whole MiB. The
- * value length is `STRLEN`, so the per-key overhead of the server is inside
- * the headroom, not the product. A truncated census under-counts the keys.
+ * The larger of two terms, rounded up to whole MiB (1 MiB at least):
+ * - p99 headroom: `p99 value bytes x observed keys x headroom`, which allows for growth;
+ * - floor: `measured total of value bytes x 1.5 + observed keys x 100 B`, which is what the
+ *   keys already seen need (the 1.5 and the 100 B are estimates, labelled so).
+ * The p99 term alone under-sizes a cache of many tiny keys and a few large values, so it is
+ * never the only term. A truncated census under-counts the keys, so its result is a floor.
  */
-export function recommend(p99Bytes: number, observedKeys: number, headroom: number, truncated: boolean, sized: number): Recommendation {
-	const inputs = { p99Bytes, observedKeys, headroom, truncated };
+export function recommend(
+	p99Bytes: number,
+	observedKeys: number,
+	headroom: number,
+	truncated: boolean,
+	sized: number,
+	totalValueBytes: number,
+): Recommendation {
+	const floorBytes = Math.ceil(totalValueBytes * VALUE_OVERHEAD_FACTOR + observedKeys * KEY_OVERHEAD_BYTES);
+	const inputs = { p99Bytes, observedKeys, headroom, truncated, totalValueBytes, floorBytes };
 	if (sized === 0) {
 		return { maxmemory: null, maxmemoryBytes: null, inputs, note: "no string value was sized, so there is nothing to recommend from" };
 	}
-	const bytes = Math.max(MIB, Math.ceil((p99Bytes * observedKeys * headroom) / MIB) * MIB);
+	const bytes = Math.max(MIB, Math.ceil(Math.max(p99Bytes * observedKeys * headroom, floorBytes) / MIB) * MIB);
 	return {
 		maxmemory: `${bytes / MIB}mb`,
 		maxmemoryBytes: bytes,
 		inputs,
 		note: truncated
-			? "census was truncated: observed keys is a lower bound, so this is a floor"
-			: "value bytes only; server per-key overhead is inside the headroom",
+			? "census was truncated: observed keys is a lower bound, so this is a floor; overhead terms are estimates"
+			: "max(p99 x keys x headroom, measured total x 1.5 + keys x 100 B); the 1.5 and 100 B are estimates",
 	};
 }
 
@@ -280,7 +305,7 @@ export async function collectStats(client: StatsClient, options: CollectOptions 
 			maxmemoryPolicy: memory.get("maxmemory_policy") ?? null,
 			evictedKeys: numberOrNull(stats.get("evicted_keys")),
 		},
-		recommendation: recommend(percentile(everySize, 0.99), seen.size, headroom, truncated !== null, everySize.length),
+		recommendation: recommend(percentile(everySize, 0.99), seen.size, headroom, truncated !== null, everySize.length, everySize.reduce((total, value) => total + value, 0)),
 		ratios: null,
 		ratiosNote: null,
 	};
@@ -308,7 +333,7 @@ export function renderTable(stats: Stats): string {
 		"",
 		`scanned ${stats.scanned} keys in ${stats.wallMs} ms${stats.truncated ? ` (truncated: ${stats.truncated} budget)` : ""}`,
 		`server: used_memory=${server.usedMemoryBytes ?? "?"} maxmemory=${server.maxmemoryBytes ?? "?"} policy=${server.maxmemoryPolicy ?? "?"} evicted_keys=${server.evictedKeys ?? "?"}`,
-		`recommended maxmemory: ${rec.maxmemory ?? "none"}  = p99 ${rec.inputs.p99Bytes} B x ${rec.inputs.observedKeys} keys x headroom ${rec.inputs.headroom}`,
+		`recommended maxmemory: ${rec.maxmemory ?? "none"}  = p99 ${rec.inputs.p99Bytes} B x ${rec.inputs.observedKeys} keys x headroom ${rec.inputs.headroom}, floor ${rec.inputs.floorBytes} B (estimate from ${rec.inputs.totalValueBytes} B measured)`,
 		`  ${rec.note}`,
 		stats.ratios === null
 			? (stats.ratiosNote ?? "ratios: unavailable (the running substrate-mcp /healthz was not read)")

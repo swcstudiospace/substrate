@@ -39,7 +39,7 @@ describe("substrate.brief.recall", () => {
 
 	test("the vocabularies are the specified ones", () => {
 		expect([...BRIEF_RECALL_MODES]).toEqual(["off", "shadow", "enforce"]);
-		expect([...BRIEF_RECALL_RESULTS]).toEqual(["included", "would_include", "cold", "stale", "disabled"]);
+		expect([...BRIEF_RECALL_RESULTS]).toEqual(["included", "would_include", "cold", "stale", "disabled", "dropped_by_cap"]);
 	});
 });
 

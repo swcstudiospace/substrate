@@ -344,6 +344,31 @@ describe("HindsightInventory", () => {
 		expect(inventory.gauges().some((sample) => sample.attributes.bank === "sub-b55" && sample.name === GAUGE_BANK_FACTS)).toBe(true);
 	});
 
+	test("a configured bank beyond a truncated listing is asked for directly: present with gauges, never missing", async () => {
+		const fake = new HindsightFake();
+		for (let i = 0; i < 250; i++) seed(fake, `sub-b${i}`, 1);
+		const { inventory, calls } = rig({ fake, banks: ["sub-b3", "sub-b240", "sub-gone"] });
+		const report = await inventory.refresh();
+		expect(report?.truncated).toBe(true);
+		const beyond = report?.banks.find((bank) => bank.bank === "sub-b240");
+		expect(beyond?.present).toBe(true);
+		expect(calls.some((call) => call.path === "/v1/default/banks/sub-b240/stats")).toBe(true);
+		// A bank the plane answers 404 for is missing; one it never listed but serves is not.
+		expect(report?.drift.missing).toEqual(["sub-gone"]);
+		expect(inventory.gauges().some((sample) => sample.attributes.bank === "sub-b240" && sample.name === GAUGE_BANK_PENDING)).toBe(true);
+	});
+
+	test("a bank beyond a truncated listing whose direct read fails is unknown, not missing", async () => {
+		const fake = new HindsightFake();
+		for (let i = 0; i < 250; i++) seed(fake, `sub-b${i}`, 1);
+		const failing = (input: string | URL | Request, init?: RequestInit): Promise<Response> =>
+			String(input).endsWith("/sub-b240/stats") ? Promise.resolve(Response.json({ detail: "bad" }, { status: 400 })) : fake.fetch(input, init);
+		const { inventory } = rig({ fake, banks: ["sub-b240"], fetchImpl: failing });
+		const report = await inventory.refresh();
+		expect(report?.banks[0]?.present).toBeNull();
+		expect(report?.drift.missing).toEqual([]);
+	});
+
 	test("a server that never ends its pages is cut at the page bound and said to be", async () => {
 		const forever: FetchLike = async () => Response.json({ banks: [{ bank_id: 7 }], total: 1_000_000 });
 		const listed = await listBanks(CONFIG, forever);

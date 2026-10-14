@@ -64,7 +64,7 @@ substrate is keyed by. `surface` says which of the eight agents on the host;
 | `substrate.brief.profile_bytes_saved` | counter | `surface` (a known surface or `unknown`) — full minus compact UTF-8 bytes of a fresh brief, recorded in `shadow` and `enforce` only and never below zero (uplift-4 S1; `docs/grok-bot.md` § The brief profile) |
 | `substrate.brief.profile` | counter | `surface`, `profile` = `full` \| `compact`, `mode` = `off` \| `shadow` \| `enforce` — one per brief answered; `profile` is what was served |
 | `substrate.served.tokens_est` | counter | `surface`, `tool` = `brief` \| `recall` \| `docs` — an **estimate**, `ceil(bytes / 4)` of the reply text (fresh briefs only, not a 304); a separate series, never added to the model-reported `substrate.tokens` (uplift-4 S1) |
-| `substrate.brief.recall` | counter | `surface` (a known surface or `unknown`), `result` = `included` \| `would_include` \| `cold` \| `stale` (older than `SUBSTRATE_BRIEF_RECALL_TTL_S`, up to twice it) \| `disabled` (no repo, no Hindsight, no cache, a bearer that is not the surface named, or an anonymous caller) — one per brief answered while `SUBSTRATE_BRIEF_RECALL` is `shadow` or `enforce`; nothing under `off` (uplift-4 S5; `docs/data-planes.md` § Recall in the brief) |
+| `substrate.brief.recall` | counter | `surface` (a known surface or `unknown`), `result` = `included` \| `would_include` \| `cold` \| `stale` (older than `SUBSTRATE_BRIEF_RECALL_TTL_S`, up to twice it) \| `dropped_by_cap` (enforce: the section was composed but the compact profile's byte cap cut it, so the text served carries none; `included` means the served text carries it) \| `disabled` (no repo, no Hindsight, no cache, a bearer that is not the surface named, or an anonymous caller) — one per brief answered while `SUBSTRATE_BRIEF_RECALL` is `shadow` or `enforce`; nothing under `off` (uplift-4 S5; `docs/data-planes.md` § Recall in the brief) |
 | `substrate.recall.prefetch` | counter | `surface`, `result` = `ok` \| `empty` \| `error` \| `skipped_breaker` \| `skipped_unconfigured` \| `skipped_cache` — one per recall snapshot refresh attempt (uplift-4 S5; `skipped_cache`: the cache cannot hold a snapshot, so no recall was sent) |
 | `substrate.hindsight.retain_outbox.size`, `.oldest_age_seconds`, `.durable` | gauge | none — the retain outbox's depth, the age of its oldest parked forward (0 when empty) and 1 when it survives a restart; read in-process, always present (uplift-4 S5) |
 | `substrate.hindsight.bank.facts`, `.pending_operations`, `.failed_operations`, `.last_write_age_seconds` | gauge (served on `GET /metrics` under `gauges`, not in `metrics`) | `bank` — only a bank named in `HINDSIGHT_BANKS`, never a string the plane sent; present only with `SUBSTRATE_HINDSIGHT_INVENTORY=on` and after a probe that answered |
@@ -491,6 +491,8 @@ What it exports:
   `notChunks` (configured banks whose retain extraction mode is known and is not
   `chunks`). A name from the plane is reduced to `[A-Za-z0-9._:-]` and 64 characters
   before it is reported.
+
+When the plane holds more than 200 banks the listing is cut (`truncated`); a configured bank the listing did not reach is then read directly (`GET {bank}/stats`, within the same 16-bank cap): a 404 is `missing`, an answer is present, and any other outcome leaves its `present` as `null` (unknown, never in `missing`).
 
 The drift report is a report. Nothing creates, patches, consolidates or deletes a bank,
 and the status code of `/healthz` does not move.
