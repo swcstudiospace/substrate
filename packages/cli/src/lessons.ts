@@ -100,7 +100,7 @@ export function extractDurableFacts(sessionText: string): DurableExtraction {
 		const trimmed = line.trim();
 		if (trimmed.length === 0) continue;
 		const labeled = /^(?:goal|decision|preference|outcome|blocker|fact)\s*:\s*(.*)$/i.exec(trimmed);
-		const candidate = (labeled ? labeled[1] : trimmed).trim();
+		const candidate = (labeled ? (labeled[1] ?? "") : trimmed).trim();
 		if (candidate.length === 0 || CHATTER.test(candidate) || lessonContentIssue(candidate)) {
 			dropped++;
 			continue;
