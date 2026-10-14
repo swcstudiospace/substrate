@@ -118,6 +118,100 @@ export function versionsFromJson(value: unknown): VersionStore {
 	return store;
 }
 
+// uplift-4 S7 — accepted merge-trigger bookkeeping
+
+/** How many accepted triggers each dataset keeps in the state file. */
+export const DATASET_TRIGGER_RETENTION = 20;
+
+/**
+ * Rows read from the tail of a stored trigger list. Enforced while reading,
+ * so a state file holding thousands of bogus rows costs a bounded scan and
+ * never a bounded-after-the-fact copy.
+ */
+export const TRIGGER_SCAN_MAX = 4 * DATASET_TRIGGER_RETENTION;
+
+/** Longest commit, hash or timestamp string a stored trigger may carry; a longer one is not a trigger. */
+export const TRIGGER_FIELD_MAX = 200;
+
+/** One accepted `POST /docs/merge-trigger`: what was asked for, and when this process accepted it. */
+export interface AcceptedTrigger {
+	commit: string;
+	content_sha256: string;
+	received_at: string;
+}
+
+/** Per-dataset accepted triggers, oldest first, at most `DATASET_TRIGGER_RETENTION` each. */
+export type TriggerStore = Map<string, AcceptedTrigger[]>;
+
+export function createTriggerStore(): TriggerStore {
+	return new Map<string, AcceptedTrigger[]>();
+}
+
+/**
+ * Record an accepted trigger. The same commit and hash again (a webhook
+ * retry) moves to the newest position but keeps its first `received_at`:
+ * the lag is measured from the first acceptance, so a retry loop cannot
+ * keep a missed ingest looking young.
+ */
+export function recordTrigger(store: TriggerStore, dataset: string, trigger: AcceptedTrigger): AcceptedTrigger[] {
+	const held = store.get(dataset) ?? [];
+	const same = held.find((entry) => entry.commit === trigger.commit && entry.content_sha256 === trigger.content_sha256);
+	const next = { ...trigger, ...(same !== undefined ? { received_at: same.received_at } : {}) };
+	const kept = [...held.filter((entry) => entry !== same), next].slice(-DATASET_TRIGGER_RETENTION);
+	store.set(dataset, kept);
+	return kept;
+}
+
+/**
+ * The trigger lists as the state file stores them: one object keyed by
+ * dataset, empty lists left out, so a run that never accepted a trigger
+ * writes no `triggers` member at all. Undefined when there is nothing to store.
+ */
+export function triggersToJson(store: TriggerStore): Record<string, AcceptedTrigger[]> | undefined {
+	const entries = [...store].filter(([, list]) => list.length > 0);
+	return entries.length === 0 ? undefined : Object.fromEntries(entries);
+}
+
+/**
+ * The trigger store a state file's `triggers` member describes. Only the
+ * trigger table's own dataset names are read (`Object.hasOwn`, never `in`),
+ * each list is scanned from its tail for at most `TRIGGER_SCAN_MAX` rows,
+ * and a malformed, oversized or unparseable row is skipped. Never throws.
+ */
+export function triggersFromJson(value: unknown): TriggerStore {
+	const store = createTriggerStore();
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return store;
+	for (const dataset of Object.keys(DATASET_TRIGGERS)) {
+		if (!Object.hasOwn(value, dataset)) continue;
+		const rows: unknown = (value as Record<string, unknown>)[dataset];
+		if (!Array.isArray(rows)) continue;
+		const kept: AcceptedTrigger[] = [];
+		const floor = Math.max(0, rows.length - TRIGGER_SCAN_MAX);
+		for (let index = rows.length - 1; index >= floor && kept.length < DATASET_TRIGGER_RETENTION; index -= 1) {
+			const row: unknown = rows[index];
+			if (row === null || typeof row !== "object") continue;
+			const candidate = row as Record<string, unknown>;
+			const { commit, content_sha256: sha, received_at: receivedAt } = candidate;
+			if (
+				typeof commit !== "string" ||
+				typeof sha !== "string" ||
+				typeof receivedAt !== "string" ||
+				commit.length === 0 ||
+				sha.length === 0 ||
+				commit.length > TRIGGER_FIELD_MAX ||
+				sha.length > TRIGGER_FIELD_MAX ||
+				receivedAt.length > TRIGGER_FIELD_MAX ||
+				!Number.isFinite(Date.parse(receivedAt))
+			) {
+				continue;
+			}
+			kept.push({ commit, content_sha256: sha, received_at: receivedAt });
+		}
+		if (kept.length > 0) store.set(dataset, kept.reverse());
+	}
+	return store;
+}
+
 /**
  * Where a dataset list comes from. Production hands every reader the
  * `DatasetListCache`; the module tests and the default use the plane

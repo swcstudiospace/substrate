@@ -510,4 +510,25 @@ export class SubstrateInstruments {
 	recordBriefResult(sample: { surface: string; state: BriefState; result: BriefResult }): void {
 		this.briefResult.add(1, cleanAttributes({ surface: sample.surface, state: sample.state, result: sample.result }));
 	}
+
+	/**
+	 * The age of the newest complete index archive (a snapshot whose manifest is
+	 * on disk — the manifest is written last — not one re-verified), in seconds
+	 * (uplift-4 S2). `newestAtMs` answers the newest archive's creation time or
+	 * `null`; the age is computed from it when the registry is snapshotted, so an
+	 * export that nobody polls `/healthz` for still reports an age that grows,
+	 * never a frozen young one. The gauge has no point until there is an
+	 * archive, and a deployment that never sets `SUBSTRATE_INDEX_ARCHIVE_DIR`
+	 * never installs it.
+	 */
+	observeIndexArchiveAge(newestAtMs: () => number | null, now: () => number = Date.now): void {
+		const gauge = this.registry.gauge(INDEX_ARCHIVE_AGE_METRIC, { description: "Age of the newest complete index archive snapshot", unit: "s" });
+		gauge.observe = () => {
+			const at = newestAtMs();
+			return at === null ? null : Math.max(0, (now() - at) / 1000);
+		};
+	}
 }
+
+/** The gauge `observeIndexArchiveAge` installs (uplift-4 S2). */
+export const INDEX_ARCHIVE_AGE_METRIC = "substrate.index.archive.age_seconds";

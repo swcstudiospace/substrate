@@ -727,6 +727,131 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 			payload: { conversation_id: "conv-p17-1", transcript_ref: "cursor-transcript-conv-p17-1", status: "completed" },
 		}),
 	},
+	{
+		// uplift-4 S7: an accepted docs merge-trigger whose commit has no recorded
+		// version after SUBSTRATE_DOCS_TRIGGER_LAG_MIN. One warning per dataset per
+		// breach, deduped through the docs state file; evaluated in-process on the
+		// SUBSTRATE_DOCS_LAG_CHECK_S timer, never by a /slo or /metrics read.
+		id: "docs.freshness",
+		phase: 25,
+		kind: "warning",
+		surface: { fixed: "substrate" },
+		actions: ["docs.freshness"],
+		runtime: "docs-freshness",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "warning",
+			summary: "docs agent-substrate: merge-trigger for 0123456789ab has no recorded ingest after 20 min",
+			session_id: "docs-freshness:agent-substrate",
+			payload: {
+				action: "docs.freshness",
+				runtime: "docs-freshness",
+				state: "lagging",
+				dataset: "agent-substrate",
+				commit: "0123456789abcdef0123456789abcdef01234567",
+				lag_seconds: 1200,
+				threshold_minutes: 15,
+			},
+		}),
+	},
+	{
+		// uplift-4 S7: the same breach clearing, a note because it is good news.
+		id: "docs.freshness.recovered",
+		phase: 25,
+		kind: "note",
+		surface: { fixed: "substrate" },
+		actions: ["docs.freshness"],
+		runtime: "docs-freshness",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "note",
+			summary: "docs agent-substrate: merge-trigger lag cleared (0123456789ab)",
+			session_id: "docs-freshness:agent-substrate",
+			payload: {
+				action: "docs.freshness",
+				runtime: "docs-freshness",
+				state: "recovered",
+				dataset: "agent-substrate",
+				commit: "0123456789abcdef0123456789abcdef01234567",
+				threshold_minutes: 15,
+			},
+		}),
+	},
+	{
+		// uplift-4 S7: the opt-in live golden canary (scripts/docs-golden.ts --live
+		// --emit, SUBSTRATE_DOCS_CANARY=1) posts one warning when its failing set
+		// changes, deduped through SUBSTRATE_DOCS_CANARY_STATE.
+		id: "docs.canary",
+		phase: 25,
+		kind: "warning",
+		surface: { fixed: "substrate" },
+		actions: ["docs.canary"],
+		runtime: "docs-canary",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "warning",
+			summary: "docs canary regression: review-gate",
+			session_id: "docs-canary:2026-10-14T03:00:00.000Z",
+			payload: {
+				action: "docs.canary",
+				runtime: "docs-canary",
+				total: 4,
+				failing: [{ fixture: "review-gate", failed: ["recall", "commit_match"] }],
+			},
+		}),
+	},
+	{
+		// uplift-4 S2: `substrate index archive` records one finished snapshot:
+		// counts and digests per table, never rows or a path.
+		id: "index.archive",
+		phase: 28,
+		kind: "note",
+		surface: { fixed: "substrate" },
+		actions: ["index.archive"],
+		runtime: "index-archive",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "note",
+			summary: "index archive index-20261014T034500Z: 1200 rows in 1 tables",
+			session_id: "index-archive:index-20261014T034500Z",
+			payload: {
+				action: "index.archive",
+				runtime: "index-archive",
+				snapshot: "index-20261014T034500Z",
+				createdAt: "2026-10-14T03:45:00.000Z",
+				serverVersion: "0.0.0",
+				schemaHash: HEX_64,
+				tables: { graph_nodes: { rows: 1200, bytes: 480_000, sha256: HEX_64 } },
+			},
+		}),
+	},
+	{
+		// uplift-4 S3: `substrate-alert@.service` (OnFailure= on substrate-mcp) posts
+		// one warning naming the failed unit and systemd's result, nothing else.
+		id: "alert",
+		phase: 33,
+		kind: "warning",
+		surface: { fixed: "substrate" },
+		actions: ["alert"],
+		runtime: "alert",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "warning",
+			summary: "unit failed: substrate-mcp.service (watchdog)",
+			session_id: "alert:2026-10-14T03:00:00.000Z",
+			payload: { action: "alert", runtime: "alert", unit: "substrate-mcp.service", result: "watchdog" },
+		}),
+	},
 ];
 
 export const SILENT_SOURCES: readonly SilentSource[] = [

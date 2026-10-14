@@ -17,6 +17,8 @@
  *       AND SUBSTRATE_INDEX_SWEEP=apply are both given)
  *   substrate ledger coverage|archive|verify-archive   anchor coverage and the verified
  *       off-box archive (docs/greptime-ledger.md, "Coverage and archive")
+ *   substrate index archive|verify-archive|restore   the verified logical export of the Postgres
+ *       index and its restore-to-scratch proof (docs/runbooks/index-archive.md)
  *
  * Exit status is always 0 for `brief`, `emit` and `handoff`. These run inside
  * git hooks and editor hooks, where a non-zero exit can abort the user's commit
@@ -40,6 +42,7 @@ import { docsTimeout, runDocs } from "./docs.ts";
 import { httpMemory, lessonsTimeout, runLessons } from "./lessons.ts";
 import { runSkills, skillsTimeout } from "./skills.ts";
 import { runLedger } from "./ledger.ts";
+import { INDEX_ARCHIVE_SUBCOMMANDS, INDEX_ARCHIVE_USAGE, runIndexArchive } from "./index-archive.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -449,8 +452,17 @@ async function cmdEvidence(args: Record<string, string | true>): Promise<number>
  * spawn and not an import.
  */
 function cmdIndex(argv: string[], args: Record<string, string | true>): number {
+	if ((INDEX_ARCHIVE_SUBCOMMANDS as readonly string[]).includes(argv[0] ?? "")) {
+		// uplift-4 S2: the same spawn-the-runner shape, for the verified index archive.
+		const archiveRunner = join(import.meta.dir, "..", "..", "mcp-server", "src", "index-run.ts");
+		return runIndexArchive(argv, args, {
+			spawn: (runnerArgs) => spawnSync(process.execPath, [archiveRunner, ...runnerArgs], { stdio: "inherit", env: process.env }).status ?? 1,
+			err: (text) => process.stderr.write(text),
+			env: process.env,
+		});
+	}
 	if (argv[0] !== "sweep") {
-		process.stderr.write("usage: substrate index sweep [--apply] [--json]\n");
+		process.stderr.write(`usage: substrate index sweep [--apply] [--json]\n${INDEX_ARCHIVE_USAGE}`);
 		return 2;
 	}
 	const runner = join(import.meta.dir, "..", "..", "mcp-server", "src", "index-sweep-run.ts");
@@ -551,6 +563,7 @@ switch (command) {
 				"                         [--dry-run] [--replace] [--reopen] [--allow-doc-examples pem,jwt]\n" +
 				"substrate docs ingest --dataset NAME --path PATH --source-url URL [--commit C] [--heading H] [--session I]\n" +
 				"substrate index sweep [--apply] [--json]   (--apply also needs SUBSTRATE_INDEX_SWEEP=apply)\n" +
+				"substrate index archive [--out DIR] [--page-size N] | verify-archive <dir> | restore --scratch URL <dir>\n" +
 				"substrate ledger coverage [--json] | archive [--until D] [--out DIR] [--page-size N] | verify-archive <dir> [--day D]\n",
 		);
 		process.exit(command ? 2 : 0);

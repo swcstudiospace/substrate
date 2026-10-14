@@ -117,6 +117,23 @@ names only.
    (`docs/observability.md`, "The chaos smoke"); run it against the rehearsal
    twin, never against production during an incident.
 
+### Hung, not down
+
+A process that is alive but not serving (a blocked event loop) is invisible to
+`Restart=always`, and `/healthz` cannot tell it from a slow store. `GET
+http://127.0.0.1:7410/livez` is the store-free probe: it answers
+`{ok, uptime_s, loop_lag_ms}` from the process alone, so a refused or slow
+`/livez` with a healthy `systemctl status` is a hang, while a healthy `/livez`
+with a red `/healthz` is a plane problem (use the triage above). With the
+operator-installed watchdog drop-in (`infra/vps/README.md`, "VPS runtime
+hardening": `Type=notify`, `WatchdogSec=30`) systemd kills and restarts a hung
+unit within about 30 s and `substrate-alert@.service` lands one `warning` event
+(`payload.unit`, `payload.result`). Without the drop-in the watchdog is off:
+nothing restarts the hang, nothing logs a lag figure, and the only signal is the
+`/livez` that no longer answers (or answers with a large `loop_lag_ms`), so
+restart by hand (`systemctl restart substrate-mcp`) and read `journalctl -u
+substrate-mcp` for what the process printed before it stopped.
+
 ## Kill switch
 
 If a breaker is refusing a plane that is demonstrably healthy — `ok: true` on

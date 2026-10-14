@@ -42,6 +42,7 @@ import {
 	type DatasetVersion,
 	type VersionStore,
 } from "./docs-datasets.ts";
+import { createFreshnessState, freshnessStateFromJson, freshnessStateToJson, type FreshnessState, type LagMarker } from "./docs-freshness.ts";
 import {
 	deleteDocuments,
 	documentName,
@@ -543,27 +544,37 @@ export interface IngestStateFile {
 	version: 2;
 	records: Record<string, IngestRecord>;
 	versions: Record<string, DatasetVersion[]>;
+	/** uplift-4 S7: accepted merge-triggers per dataset; absent until one was accepted. */
+	triggers?: Record<string, unknown>;
+	/** uplift-4 S7: breaches in progress (the lag warning's dedupe); absent while none is. */
+	lag?: Record<string, LagMarker>;
 }
 
 export async function loadIngestRecords(
 	file: string,
-): Promise<{ records: Map<string, IngestRecord>; versions: VersionStore; problem?: string }> {
+): Promise<{ records: Map<string, IngestRecord>; versions: VersionStore; freshness: FreshnessState; problem?: string }> {
 	let raw: string;
 	try {
 		raw = await readFile(file, "utf8");
 	} catch {
-		return { records: new Map<string, IngestRecord>(), versions: createVersionStore() };
+		return { records: new Map<string, IngestRecord>(), versions: createVersionStore(), freshness: createFreshnessState() };
 	}
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(raw);
 	} catch {
-		return { records: new Map<string, IngestRecord>(), versions: createVersionStore(), problem: `${file} is not valid JSON; starting with empty ingest records` };
+		return {
+			records: new Map<string, IngestRecord>(),
+			versions: createVersionStore(),
+			freshness: createFreshnessState(),
+			problem: `${file} is not valid JSON; starting with empty ingest records`,
+		};
 	}
 	if (parsed === null || typeof parsed !== "object" || !("records" in parsed) || parsed.records === null || typeof parsed.records !== "object") {
 		return {
 			records: new Map<string, IngestRecord>(),
 			versions: createVersionStore(),
+			freshness: createFreshnessState(),
 			problem: `${file} has no records table; starting with empty ingest records`,
 		};
 	}
@@ -592,7 +603,7 @@ export async function loadIngestRecords(
 		});
 	}
 	const versions = "versions" in parsed ? versionsFromJson(parsed.versions) : createVersionStore();
-	return { records, versions };
+	return { records, versions, freshness: freshnessStateFromJson(parsed) };
 }
 
 /**
@@ -600,9 +611,14 @@ export async function loadIngestRecords(
  * caller logs and continues. Written to a sibling temp file and renamed,
  * so a crash mid-write never leaves half a JSON document behind.
  */
-export async function saveIngestRecords(file: string, seen: Map<string, IngestRecord>, versions: VersionStore = createVersionStore()): Promise<void> {
+export async function saveIngestRecords(
+	file: string,
+	seen: Map<string, IngestRecord>,
+	versions: VersionStore = createVersionStore(),
+	freshness: FreshnessState = createFreshnessState(),
+): Promise<void> {
 	await mkdir(dirname(file), { recursive: true });
-	const state: IngestStateFile = { version: 2, records: Object.fromEntries(seen), versions: versionsToJson(versions) };
+	const state: IngestStateFile = { version: 2, records: Object.fromEntries(seen), versions: versionsToJson(versions), ...freshnessStateToJson(freshness) };
 	const tmp = `${file}.${process.pid}.tmp`;
 	await writeFile(tmp, `${JSON.stringify(state)}\n`, "utf8");
 	await rename(tmp, file);

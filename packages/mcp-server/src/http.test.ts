@@ -949,6 +949,38 @@ describe("the anonymous bridge", () => {
 		expect(lines[0]).not.toContain("payload-secret-marker");
 	});
 
+	test("the watchdog's tokenless /livez probe is not an anonymous caller, while a tokenless /slo still is", async () => {
+		const lines: string[] = [];
+		let now = 1_000;
+		const harness = await start(BRIDGE, {}, {
+			now: () => now,
+			anonymousLog: (line) => {
+				lines.push(line);
+			},
+			anonymousIntervalMs: 60 * 60 * 1000,
+		});
+
+		expect((await fetch(`${harness.base}/livez`)).status).toBe(200);
+		expect((await fetch(`${harness.base}/livez`)).status).toBe(200);
+		expect((await fetch(`${harness.base}/slo`)).status).toBe(200);
+
+		const body = (await (await fetch(`${harness.base}/metrics`)).json()) as {
+			metrics: Array<{ name: string; points: Array<{ attributes: Record<string, string>; value: number }> }>;
+		};
+		const routes = (body.metrics.find((metric) => metric.name === "substrate.anonymous.requests")?.points ?? []).map((entry) => entry.attributes.route);
+		expect(routes).toContain("/slo");
+		expect(routes).not.toContain("/livez");
+		// The request counters still see the probe.
+		const requests = body.metrics.find((metric) => metric.name === "substrate.request.total")?.points ?? [];
+		expect(requests.some((entry) => entry.attributes.route === "/livez")).toBe(true);
+
+		now += 60 * 60 * 1000;
+		await fetch(`${harness.base}/healthz`);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain("/slo");
+		expect(lines[0]).not.toContain("/livez");
+	});
+
 	test("refused events are logged hourly by reason, caller, surface and kind, without payload", async () => {
 		const lines: string[] = [];
 		let now = 1_000;

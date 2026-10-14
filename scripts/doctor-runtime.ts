@@ -35,6 +35,14 @@ import { join } from "node:path";
 import { resolveBearer } from "../packages/cli/src/token.ts";
 import { LEGACY_ENV_KEYS, type LegacyEnvKey } from "../packages/mcp-server/src/legacy-env.ts";
 import { isSubstrateUnit, logicalLines, SHARED_ENV_FILE } from "./doctor-units.ts";
+import {
+	compareSliceWeights,
+	type DeclaredWeights,
+	type DiskGuardrails,
+	diskGuardrailsFromEnv,
+	gatherDiskGuardrails,
+	gatherIoEvidence,
+} from "./doctor-vps.ts";
 import { parseSystemctlShow, systemdTimestampToEpoch } from "./parity-check.ts";
 
 export type Status = "ok" | "warn" | "drift" | "unknown";
@@ -117,11 +125,11 @@ export const EXPECTED_TIMERS: readonly ExpectedTimer[] = [
  */
 export const LEGACY_KEYS: readonly LegacyEnvKey[] = LEGACY_ENV_KEYS;
 
-const SYSTEMCTL_UNIT_PROPS = "LoadState,ActiveState,SubState,Slice,MemoryMax,TasksMax,NRestarts,FragmentPath,Environment";
-const SYSTEMCTL_SLICE_PROPS = "LoadState,ActiveState,MemoryLow";
+const SYSTEMCTL_UNIT_PROPS = "LoadState,ActiveState,SubState,Slice,MemoryMax,MemorySwapMax,TasksMax,NRestarts,FragmentPath,Environment";
+const SYSTEMCTL_SLICE_PROPS = "LoadState,ActiveState,MemoryLow,CPUWeight,IOWeight";
 const SYSTEMCTL_TIMER_PROPS = "LoadState,ActiveState,UnitFileState,LastTriggerUSec,NextElapseUSecRealtime";
 const SPAWN_TIMEOUT_MS = 15_000;
-const REQUEST_TIMEOUT_MS = 10_000;
+export const REQUEST_TIMEOUT_MS = 10_000;
 const CLASS_ORDER: readonly CheckClass[] = ["units", "slice", "redis", "timers", "disk", "swap", "env"];
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -131,6 +139,7 @@ export interface DeclaredUnit {
 	name: string;
 	slice: string | null;
 	memoryMax: string | null;
+	memorySwapMax: string | null;
 	tasksMax: string | null;
 	/** `Environment=` NAMES from the unit and its drop-ins; values stay in the files. */
 	environmentNames: readonly string[];
@@ -159,12 +168,14 @@ export function sectionDirectives(text: string, section: string): Array<[string,
 export function declaredUnit(name: string, baseText: string, dropIns: readonly string[] = []): DeclaredUnit {
 	let slice: string | null = null;
 	let memoryMax: string | null = null;
+	let memorySwapMax: string | null = null;
 	let tasksMax: string | null = null;
 	const names = new Set<string>();
 	for (const text of [baseText, ...dropIns]) {
 		for (const [key, value] of sectionDirectives(text, "Service")) {
 			if (key === "Slice") slice = value || null;
 			else if (key === "MemoryMax") memoryMax = value || null;
+			else if (key === "MemorySwapMax") memorySwapMax = value || null;
 			else if (key === "TasksMax") tasksMax = value || null;
 			else if (key === "Environment") {
 				if (value === "") names.clear();
@@ -172,7 +183,7 @@ export function declaredUnit(name: string, baseText: string, dropIns: readonly s
 			}
 		}
 	}
-	return { name, slice, memoryMax, tasksMax, environmentNames: [...names].sort() };
+	return { name, slice, memoryMax, memorySwapMax, tasksMax, environmentNames: [...names].sort() };
 }
 
 /**
@@ -247,6 +258,16 @@ export function declaredSliceMemoryLow(text: string): string | null {
 	let low: string | null = null;
 	for (const [key, value] of sectionDirectives(text, "Slice")) if (key === "MemoryLow") low = value || null;
 	return low;
+}
+
+/** `CPUWeight` and `IOWeight` from the repo `substrate.slice`. */
+export function declaredSliceWeights(text: string): DeclaredWeights {
+	const weights: DeclaredWeights = { cpuWeight: null, ioWeight: null };
+	for (const [key, value] of sectionDirectives(text, "Slice")) {
+		if (key === "CPUWeight") weights.cpuWeight = value || null;
+		else if (key === "IOWeight") weights.ioWeight = value || null;
+	}
+	return weights;
 }
 
 export interface DeclaredRedis {
@@ -351,6 +372,7 @@ export function compareUnit(declared: DeclaredUnit, shown: ReadonlyMap<string, s
 	const want = [
 		declared.slice === null ? null : `Slice=${declared.slice}`,
 		declared.memoryMax === null ? null : `MemoryMax=${declared.memoryMax}`,
+		declared.memorySwapMax === null ? null : `MemorySwapMax=${declared.memorySwapMax}`,
 		declared.tasksMax === null ? null : `TasksMax=${declared.tasksMax}`,
 	]
 		.filter((s): s is string => s !== null)
@@ -378,6 +400,9 @@ export function compareUnit(declared: DeclaredUnit, shown: ReadonlyMap<string, s
 	if (declared.slice !== null && hostSlice !== declared.slice) diffs.push([`Slice=${declared.slice}`, `Slice=${hostSlice || "n/a"}`]);
 	if (declared.memoryMax !== null && !sameBytes(declared.memoryMax, shown.get("MemoryMax"))) {
 		diffs.push([`MemoryMax=${declared.memoryMax}`, `MemoryMax=${formatBytes(parseBytes(shown.get("MemoryMax")))}`]);
+	}
+	if (declared.memorySwapMax !== null && !sameBytes(declared.memorySwapMax, shown.get("MemorySwapMax"))) {
+		diffs.push([`MemorySwapMax=${declared.memorySwapMax}`, `MemorySwapMax=${formatBytes(parseBytes(shown.get("MemorySwapMax")))}`]);
 	}
 	if (declared.tasksMax !== null && (shown.get("TasksMax") ?? "").trim() !== declared.tasksMax) {
 		diffs.push([`TasksMax=${declared.tasksMax}`, `TasksMax=${shown.get("TasksMax") || "n/a"}`]);
@@ -668,6 +693,7 @@ export function compareLegacyKey(key: LegacyEnvKey, present: boolean | null, fil
 export interface Policy {
 	units: readonly DeclaredUnit[];
 	sliceMemoryLow: string | null;
+	sliceWeights: DeclaredWeights;
 	redis: DeclaredRedis;
 	redisUnitMemoryMax: string | null;
 }
@@ -678,6 +704,7 @@ export function loadPolicy(infraDir: string): Policy {
 	return {
 		units: loadDeclaredUnits(infraDir),
 		sliceMemoryLow: declaredSliceMemoryLow(readFileSync(join(infraDir, SLICE_UNIT), "utf8")),
+		sliceWeights: declaredSliceWeights(readFileSync(join(infraDir, SLICE_UNIT), "utf8")),
 		redis: parseRedisConf(readFileSync(join(infraDir, REDIS_CONF), "utf8")),
 		redisUnitMemoryMax: redisDropIn.memoryMax,
 	};
@@ -715,6 +742,8 @@ export interface DoctorOptions {
 	minFreeGb: number;
 	maxSwapPagesPerSecond: number;
 	envFile: string;
+	/** Disk guardrails (uplift-4 S3). Absent: those rows are not gathered. */
+	disk?: DiskGuardrails;
 }
 
 /** The deploy floor as `deploy-release.sh` reads it: 0-9999 whole gigabytes, default 5. */
@@ -735,6 +764,7 @@ export function optionsFromEnv(env: Record<string, string | undefined>): DoctorO
 		minFreeGb: minFreeGbFromEnv(env),
 		maxSwapPagesPerSecond: nonNegativeOr(env.SUBSTRATE_DOCTOR_SWAP_PAGES_PER_S, DEFAULT_SWAP_PAGES_PER_SECOND),
 		envFile: SHARED_ENV_FILE,
+		disk: diskGuardrailsFromEnv(env, RELEASE_ROOT),
 	};
 }
 
@@ -742,11 +772,14 @@ export function optionsFromEnv(env: Record<string, string | undefined>): DoctorO
 export async function gatherRows(policy: Policy, host: Host, options: DoctorOptions): Promise<Row[]> {
 	const rows: Row[] = [];
 	for (const unit of policy.units) rows.push(...compareUnit(unit, show(host, unit.name, SYSTEMCTL_UNIT_PROPS)));
-	rows.push(compareSlice(policy.sliceMemoryLow, show(host, SLICE_UNIT, SYSTEMCTL_SLICE_PROPS)));
+	const sliceShown = show(host, SLICE_UNIT, SYSTEMCTL_SLICE_PROPS);
+	rows.push(compareSlice(policy.sliceMemoryLow, sliceShown));
+	rows.push(...compareSliceWeights(policy.sliceWeights, sliceShown, gatherIoEvidence(host)));
 	rows.push(...compareRedis(policy.redis, policy.redisUnitMemoryMax, redisFromHost(host), show(host, REDIS_UNIT, "LoadState,MemoryMax")));
 	for (const timer of EXPECTED_TIMERS) rows.push(compareTimer(timer, show(host, timer.name, SYSTEMCTL_TIMER_PROPS), host.now()));
 	const df = host.run(["df", "-Pk", "--", RELEASE_ROOT]);
 	rows.push(compareDisk(df === null || df.code !== 0 ? null : parseDfAvailableKb(df.out), options.minFreeGb));
+	if (options.disk !== undefined) rows.push(...gatherDiskGuardrails(host, options.disk));
 	const before = parseVmstatSwap(host.readText("/proc/vmstat") ?? "");
 	await host.sleep(SWAP_SAMPLE_MS);
 	const after = parseVmstatSwap(host.readText("/proc/vmstat") ?? "");
@@ -983,7 +1016,7 @@ export const realHost: Host = {
 	now: () => Math.floor(Date.now() / 1000),
 };
 
-async function postEvent(url: string, body: EmitEvent, bearer: string): Promise<boolean> {
+export async function postEvent(url: string, body: object, bearer: string): Promise<boolean> {
 	try {
 		const res = await fetch(url, {
 			method: "POST",

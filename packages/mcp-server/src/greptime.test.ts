@@ -19,6 +19,9 @@ import {
 	EVENT_COLUMNS,
 	EXPORT_INGEST_SKEW_MS,
 	GreptimeClient,
+	GreptimeBreakerOpen,
+	METRIC_SAMPLES_TABLE,
+	MetricHistoryInputError,
 	GreptimeError,
 	GreptimeUnavailable,
 	HEALTH_TABLE,
@@ -34,6 +37,7 @@ import {
 } from "./greptime.ts";
 import { ConfigError, loadConfig, loadLedgerSettings, type GreptimeConfig } from "./config.ts";
 import type { EventInput } from "./types.ts";
+import { MAX_METRIC_BATCH, MAX_METRIC_POINTS, METRIC_SERIES, type MetricSampleRow } from "./metrics-history.ts";
 
 const config: GreptimeConfig = { url: "http://greptime.test", user: "u", password: "p", db: "substrate" };
 
@@ -64,6 +68,10 @@ function defaultReply(statement: string): unknown {
 	// A stub that cannot answer would look like "not confirmed" and refuse the hour.
 	if (statement.includes('SHOW CREATE TABLE "event_ingest"')) {
 		return records(["Table", "Create Table"], [["event_ingest", "... WITH( append_mode = 'true' )"]]);
+	}
+	// ensureMetricSamples asks the live table for append_mode before it is ready.
+	if (statement.includes('SHOW CREATE TABLE "metric_samples"')) {
+		return records(["Table", "Create Table"], [["metric_samples", "... WITH( append_mode = 'true', ttl = '14d' )"]]);
 	}
 	return affected;
 }
@@ -2229,5 +2237,386 @@ describe("exportWindow (uplift-3 N6)", () => {
 		const client = new GreptimeClient(config);
 		await expect(client.exportWindow({ from: TO, to: FROM })).rejects.toThrow("from < to");
 		await expect(client.exportWindow({ from: "yesterday", to: TO })).rejects.toThrow("ISO");
+	});
+});
+
+describe("metric_samples (uplift-4 S6)", () => {
+	const NOW = 1_790_000_000_000;
+	const row = (over: Partial<MetricSampleRow> = {}): MetricSampleRow => ({
+		tsMs: NOW,
+		series: "brief.p95",
+		labels: { surface: "grok-bot" },
+		value: 41.5,
+		count: 12,
+		...over,
+	});
+	const creates = (sql: string[]): string[] => sql.filter((statement) => statement.startsWith(`CREATE TABLE IF NOT EXISTS "${METRIC_SAMPLES_TABLE}"`));
+	const inserts = (sql: string[]): string[] => sql.filter((statement) => statement.startsWith(`INSERT INTO "${METRIC_SAMPLES_TABLE}"`));
+
+	test("the table is created on first use only, with append_mode and the TTL in the CREATE", async () => {
+		const { sql } = stubFetch();
+		const client = new GreptimeClient(config);
+		expect(await client.recordMetricSamples([row()])).toEqual({ stored: 1, drops: {} });
+		expect(await client.recordMetricSamples([row({ tsMs: NOW + 60_000 })])).toEqual({ stored: 1, drops: {} });
+
+		expect(creates(sql)).toHaveLength(1);
+		const create = creates(sql)[0]!;
+		expect(create).toContain("WITH ('append_mode' = 'true', 'ttl' = '14d')");
+		for (const column of ['"ts" TIMESTAMP TIME INDEX', '"series" STRING', '"labels" STRING', '"kind" STRING', '"value" DOUBLE', '"count" BIGINT']) {
+			expect(create).toContain(column);
+		}
+		// `create` is already an allowed verb and the TTL needs no ALTER, so the append-only guard is untouched.
+		expect(() => assertAppendOnly(create)).not.toThrow();
+		expect(sql.some((statement) => /^ALTER/i.test(statement))).toBe(false);
+		expect(inserts(sql)).toHaveLength(2);
+		for (const statement of inserts(sql)) expect(() => assertAppendOnly(statement)).not.toThrow();
+	});
+
+	test("a configured TTL goes into the CREATE; a hostile one is refused before anything is sent", async () => {
+		const accepted = stubFetch();
+		await new GreptimeClient(config).recordMetricSamples([row()], "30d");
+		expect(creates(accepted.sql)[0]).toContain("'ttl' = '30d'");
+
+		for (const ttl of ["14d'); DROP TABLE metric_samples; --", "14d', 'append_mode' = 'false", "999d", "0d", "14 d", "1h", "", "forever", "14d; SELECT 1"]) {
+			const refused = stubFetch();
+			const result = await new GreptimeClient(config).recordMetricSamples([row(), row()], ttl);
+			expect(result).toEqual({ stored: 0, drops: { ddl: 2 } });
+			expect(refused.sql).toEqual([]);
+		}
+	});
+
+	test("one multi-row INSERT per batch, every value a literal, the kind taken from the series", async () => {
+		const { sql } = stubFetch();
+		await new GreptimeClient(config).recordMetricSamples([
+			row(),
+			row({ series: "emit.success", labels: {}, value: 0.9, count: 10 }),
+			row({ series: "admission.decisions", labels: { decision: "allowed" }, value: 3, count: 3 }),
+		]);
+		const statement = inserts(sql)[0]!;
+		expect(inserts(sql)).toHaveLength(1);
+		expect(statement).toContain('("ts", "series", "labels", "kind", "value", "count") VALUES ');
+		expect(statement.match(/\), \(/g)).toHaveLength(2);
+		expect(statement).toContain(`('${new Date(NOW).toISOString()}', 'brief.p95', '{"surface":"grok-bot"}', 'histogram', 41.5, 12)`);
+		expect(statement).toContain("'emit.success', '{}', 'ratio', 0.9, 10)");
+		expect(statement).toContain("'admission.decisions', '{\"decision\":\"allowed\"}', 'counter', 3, 3)");
+	});
+
+	test("hostile series and label text cannot reach the statement: those rows are dropped as invalid", async () => {
+		const hostile = [
+			row({ series: "brief.p95', 1, 1); DROP TABLE metric_samples; --" }),
+			row({ series: "nope" }),
+			row({ series: "__proto__" }),
+			row({ labels: { surface: "x'); DROP TABLE metric_samples; --" } }),
+			row({ labels: { surface: "back\\slash'" } }),
+			row({ labels: { surface: "grok-bot", extra: "x" } }),
+			row({ labels: {} }),
+		];
+		const onlyHostile = stubFetch();
+		const client = new GreptimeClient(config);
+		expect(await client.recordMetricSamples(hostile)).toEqual({ stored: 0, drops: { invalid: hostile.length } });
+		expect(onlyHostile.sql).toEqual([]);
+
+		const mixed = stubFetch();
+		const result = await new GreptimeClient(config).recordMetricSamples([...hostile, row()]);
+		expect(result).toEqual({ stored: 1, drops: { invalid: hostile.length } });
+		const statement = inserts(mixed.sql)[0]!;
+		expect(statement).not.toContain("DROP");
+		expect(statement).not.toContain("nope");
+		expect(statement).not.toContain("slash");
+	});
+
+	test("numbers the columns cannot hold are dropped as invalid", async () => {
+		const { sql } = stubFetch();
+		const result = await new GreptimeClient(config).recordMetricSamples([
+			row({ value: Number.NaN }),
+			row({ value: Number.POSITIVE_INFINITY }),
+			row({ count: -1 }),
+			row({ count: 1.5 }),
+			row({ tsMs: Number.NaN }),
+			row({ tsMs: 0 }),
+			row({ tsMs: 9e15 }),
+		]);
+		expect(result).toEqual({ stored: 0, drops: { invalid: 7 } });
+		expect(sql).toEqual([]);
+	});
+
+	test("a batch is capped at 200 rows; the rest are counted, not sent", async () => {
+		const { sql } = stubFetch();
+		const rows = Array.from({ length: MAX_METRIC_BATCH + 50 }, (_, i) => row({ tsMs: NOW + i }));
+		const result = await new GreptimeClient(config).recordMetricSamples(rows);
+		expect(result).toEqual({ stored: MAX_METRIC_BATCH, drops: { capped: 50 } });
+		expect(inserts(sql)[0]!.match(/\), \(/g)).toHaveLength(MAX_METRIC_BATCH - 1);
+	});
+
+	test("Greptime down: the batch is dropped with a counted reason and nothing throws", async () => {
+		globalThis.fetch = (() => Promise.reject(new Error("connect ECONNREFUSED"))) as unknown as typeof fetch;
+		const result = await new GreptimeClient(config).recordMetricSamples([row(), row()]);
+		expect(result).toEqual({ stored: 0, drops: { unavailable: 2 } });
+
+		stubFetch(() => new Response("bad gateway", { status: 502 }));
+		expect(await new GreptimeClient(config).recordMetricSamples([row()])).toEqual({ stored: 0, drops: { unavailable: 1 } });
+	});
+
+	test("a refused statement is a counted reason by stage, and a failed CREATE is retried on the next call", async () => {
+		let creating = true;
+		const { sql } = stubFetch((statement) => {
+			if (statement.startsWith('CREATE TABLE IF NOT EXISTS "metric_samples"') && creating) return { error: "unsupported option" };
+			if (statement.startsWith('INSERT INTO "metric_samples"')) return { error: "column count mismatch" };
+			return defaultReply(statement);
+		});
+		const client = new GreptimeClient(config);
+		expect(await client.recordMetricSamples([row()])).toEqual({ stored: 0, drops: { ddl: 1 } });
+		creating = false;
+		expect(await client.recordMetricSamples([row(), row()])).toEqual({ stored: 0, drops: { rejected: 2 } });
+		expect(creates(sql)).toHaveLength(2);
+		// Created now: the next batch goes straight to the INSERT.
+		await client.recordMetricSamples([row()]);
+		expect(creates(sql)).toHaveLength(2);
+	});
+
+	test("an existing table without append_mode is not ready: nothing is inserted, the drop is `schema`, one line names the operator action, and a recreated table is picked up", async () => {
+		let appendMode = false;
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes('SHOW CREATE TABLE "metric_samples"')) {
+				return records(["Table", "Create Table"], [["metric_samples", appendMode ? "... WITH( append_mode = 'true' )" : "... WITH( ttl = '14d' )"]]);
+			}
+			return defaultReply(statement);
+		});
+		const written: string[] = [];
+		const realWrite = process.stderr.write.bind(process.stderr);
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			written.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			const client = new GreptimeClient(config);
+			expect(await client.recordMetricSamples([row(), row()])).toEqual({ stored: 0, drops: { schema: 2 } });
+			expect(await client.recordMetricSamples([row()])).toEqual({ stored: 0, drops: { schema: 1 } });
+			expect(inserts(sql)).toHaveLength(0);
+			// One named line, however many ticks, and it says what the operator must do (the client never drops).
+			const lines = written.filter((line) => line.includes("metric_samples"));
+			expect(lines).toHaveLength(1);
+			expect(lines[0]).toContain("append_mode");
+			expect(lines[0]).toContain("drop and recreate");
+			expect(sql.some((statement) => /^(DROP|ALTER)/i.test(statement))).toBe(false);
+
+			// The operator recreates it: the next sample re-asks and writes.
+			appendMode = true;
+			expect(await client.recordMetricSamples([row()])).toEqual({ stored: 1, drops: {} });
+			expect(inserts(sql)).toHaveLength(1);
+		} finally {
+			process.stderr.write = realWrite;
+		}
+	});
+
+	test("a table whose options cannot be read is not ready either: a counted ddl drop, retried next tick", async () => {
+		const { sql } = stubFetch((statement) => (statement.includes('SHOW CREATE TABLE "metric_samples"') ? affected : defaultReply(statement)));
+		expect(await new GreptimeClient(config).recordMetricSamples([row()])).toEqual({ stored: 0, drops: { ddl: 1 } });
+		expect(inserts(sql)).toHaveLength(0);
+	});
+
+	test("an open breaker drops the batch as breaker_open without touching the network; a timeout is a breaker failure", async () => {
+		const samples: PlaneSample[] = [];
+		const breaker = new CircuitBreaker("greptime", { failureThreshold: 2, openMs: 30_000 }, () => 0);
+		const gate: PlaneGate = { plane: "greptime", breaker, observe: (sample) => samples.push(sample) };
+		let fetches = 0;
+		globalThis.fetch = (() => {
+			fetches += 1;
+			return Promise.reject(new DOMException("timed out", "TimeoutError"));
+		}) as unknown as typeof fetch;
+		const client = new GreptimeClient(config, { gate });
+
+		expect(await client.recordMetricSamples([row()])).toEqual({ stored: 0, drops: { unavailable: 1 } });
+		expect(await client.recordMetricSamples([row()])).toEqual({ stored: 0, drops: { unavailable: 1 } });
+		expect(samples.map((sample) => sample.outcome)).toEqual(["timeout", "timeout"]);
+		expect(breaker.state()).toBe("open");
+
+		const before = fetches;
+		const started = performance.now();
+		expect(await client.recordMetricSamples([row(), row(), row()])).toEqual({ stored: 0, drops: { breaker_open: 3 } });
+		expect(fetches).toBe(before);
+		expect(performance.now() - started).toBeLessThan(50);
+		expect(new GreptimeBreakerOpen("x")).toBeInstanceOf(GreptimeUnavailable);
+	});
+
+	test("the write carries a deadline inside the gated call", async () => {
+		let signal: AbortSignal | null | undefined;
+		globalThis.fetch = (async (_url: string, init: RequestInit) => {
+			signal ??= init.signal;
+			return new Response(JSON.stringify(affected), { status: 200 });
+		}) as unknown as typeof fetch;
+		await new GreptimeClient(config).recordMetricSamples([row()]);
+		expect(signal).toBeInstanceOf(AbortSignal);
+	});
+
+	test("flag-off parity: nothing in boot or the ledger's own paths creates or touches metric_samples", async () => {
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes("SHOW CREATE TABLE")) return records(["Table", "Create Table"], [["agent_events", "... WITH( append_mode = 'true' )"]]);
+			return defaultReply(statement);
+		});
+		const client = new GreptimeClient(config);
+		await client.migrate();
+		await client.insertEvent(normalizeEvent(input, null));
+		await client.probeWritable(1000);
+		expect(sql.length).toBeGreaterThan(5);
+		expect(sql.some((statement) => statement.includes(METRIC_SAMPLES_TABLE))).toBe(false);
+	});
+
+	describe("readMetricHistory", () => {
+		const TO = NOW;
+		const reply = (statement: string): unknown => {
+			if (!statement.includes("date_bin")) return defaultReply(statement);
+			return records(
+				["bucket", "labels", "value", "count"],
+				[
+					[TO - 60_000, '{"surface":"grok-bot"}', 55, 3],
+					[TO - 120_000, '{"surface":"https://internal.example","extra":1}', "7", 2],
+					[TO - 180_000, null, null, 1],
+				],
+			);
+		};
+		const select = (sql: string[]): string => sql.find((statement) => statement.includes("date_bin")) ?? "";
+
+		test("a bounded, ordered, allow-listed query; points come back oldest first with only closed labels", async () => {
+			const { sql } = stubFetch(reply);
+			const { points } = await new GreptimeClient(config).readMetricHistory({ series: "brief.p95", fromMs: TO - 3_600_000, toMs: TO, stepS: 60 });
+			const statement = select(sql);
+			expect(() => assertAppendOnly(statement)).not.toThrow();
+			expect(statement).toContain(`date_bin(INTERVAL '60 seconds', "ts") AS "bucket"`);
+			expect(statement).toContain(`FROM "metric_samples" WHERE "series" = 'brief.p95'`);
+			expect(statement).toContain(`"ts" >= '${new Date(TO - 3_600_000).toISOString()}' AND "ts" < '${new Date(TO).toISOString()}'`);
+			expect(statement).toContain('MAX("value")');
+			expect(statement).toContain(`GROUP BY "bucket", "labels" ORDER BY "bucket" DESC LIMIT ${MAX_METRIC_POINTS}`);
+			expect(points).toEqual([
+				{ tsMs: TO - 180_000, labels: {}, value: null, count: 1 },
+				{ tsMs: TO - 120_000, labels: {}, value: 7, count: 2 },
+				{ tsMs: TO - 60_000, labels: { surface: "grok-bot" }, value: 55, count: 3 },
+			]);
+		});
+
+		test("the window is capped at the TTL and the step raised until the window fits the point cap", async () => {
+			const { sql } = stubFetch(reply);
+			const client = new GreptimeClient(config);
+			const result = await client.readMetricHistory({ series: "emit.p95", fromMs: TO - 90 * 86_400_000, toMs: TO, stepS: 60 });
+			const statement = select(sql);
+			expect(statement).toContain(`"ts" >= '${new Date(TO - 14 * 86_400_000).toISOString()}'`);
+			// An unlabelled series: (buckets + 1) <= 2000, so 14 days / 1999 buckets = 605.8 s, rounded up.
+			expect(statement).toContain("INTERVAL '606 seconds'");
+			expect(result.stepS).toBe(606);
+
+			const seven = stubFetch(reply);
+			await client.readMetricHistory({ series: "emit.p95", fromMs: TO - 90 * 86_400_000, toMs: TO, stepS: 60, ttl: "7d" });
+			expect(select(seven.sql)).toContain(`"ts" >= '${new Date(TO - 7 * 86_400_000).toISOString()}'`);
+		});
+
+		test("each series is folded by its own rule", async () => {
+			const folds: Array<[string, string]> = [
+				["admission.decisions", 'SUM("value") AS "value"'],
+				["emit.success", 'SUM("value" * "count") / SUM("count") AS "value"'],
+				["brief.p50", 'AVG("value") AS "value"'],
+				["docs.p95", 'MAX("value") AS "value"'],
+			];
+			for (const [series, expression] of folds) {
+				const { sql } = stubFetch(reply);
+				await new GreptimeClient(config).readMetricHistory({ series, fromMs: TO - 3_600_000, toMs: TO, stepS: 60 });
+				expect(select(sql)).toContain(expression);
+			}
+		});
+
+		test("no SQL from input: a series outside the allow-list, a hostile TTL or a bad window never reaches the network", async () => {
+			const { sql } = stubFetch(reply);
+			const client = new GreptimeClient(config);
+			for (const series of ["", "nope", "__proto__", "constructor", "brief.p95' OR '1'='1", 'agent_events"; DROP TABLE x; --']) {
+				await expect(client.readMetricHistory({ series, fromMs: TO - 1000, toMs: TO, stepS: 60 })).rejects.toBeInstanceOf(MetricHistoryInputError);
+			}
+			await expect(client.readMetricHistory({ series: "brief.p95", fromMs: TO - 1000, toMs: TO, stepS: 60, ttl: "14d'); DROP TABLE x; --" })).rejects.toBeInstanceOf(
+				MetricHistoryInputError,
+			);
+			await expect(client.readMetricHistory({ series: "brief.p95", fromMs: TO, toMs: TO, stepS: 60 })).rejects.toBeInstanceOf(MetricHistoryInputError);
+			await expect(client.readMetricHistory({ series: "brief.p95", fromMs: Number.NaN, toMs: TO, stepS: 60 })).rejects.toBeInstanceOf(MetricHistoryInputError);
+			await expect(client.readMetricHistory({ series: "brief.p95", fromMs: TO - 1000, toMs: TO, stepS: Number.NaN })).rejects.toBeInstanceOf(MetricHistoryInputError);
+			expect(sql).toEqual([]);
+		});
+
+		test("an unreachable store is a GreptimeUnavailable the route turns into a 503", async () => {
+			globalThis.fetch = (() => Promise.reject(new Error("connect ECONNREFUSED"))) as unknown as typeof fetch;
+			await expect(new GreptimeClient(config).readMetricHistory({ series: "brief.p95", fromMs: TO - 1000, toMs: TO, stepS: 60 })).rejects.toBeInstanceOf(
+				GreptimeUnavailable,
+			);
+		});
+
+		test("a read never runs DDL, creates nothing and sends no probe: it is one SELECT", async () => {
+			const { sql } = stubFetch(reply);
+			await new GreptimeClient(config).readMetricHistory({ series: "emit.success", fromMs: TO - 3_600_000, toMs: TO, stepS: 60 });
+			expect(sql).toHaveLength(1);
+			expect(sql[0]).toMatch(/^SELECT /);
+			expect(sql.some((statement) => /^(CREATE|ALTER|DROP|INSERT)/i.test(statement) || statement.includes("LENGTH"))).toBe(false);
+		});
+
+		test("a table that does not exist yet is an empty history, with the step reported; any other error is still an error", async () => {
+			for (const message of ["Table not found: greptime.public.metric_samples", "Failed to plan SQL: Table not found: metric_samples (code 4001)"]) {
+				stubFetch(() => ({ error: message }));
+				expect(await new GreptimeClient(config).readMetricHistory({ series: "emit.success", fromMs: TO - 3_600_000, toMs: TO, stepS: 60 })).toEqual({
+					points: [],
+					stepS: 60,
+				});
+			}
+			stubFetch(() => ({ error: "Invalid argument: unknown function date_bin" }));
+			await expect(new GreptimeClient(config).readMetricHistory({ series: "emit.success", fromMs: TO - 3_600_000, toMs: TO, stepS: 60 })).rejects.toBeInstanceOf(
+				GreptimeError,
+			);
+			// A store that is down is not an empty history either, even when its text mentions a table.
+			stubFetch(() => new Response("table not found upstream", { status: 503 }));
+			await expect(new GreptimeClient(config).readMetricHistory({ series: "emit.success", fromMs: TO - 3_600_000, toMs: TO, stepS: 60 })).rejects.toBeInstanceOf(
+				GreptimeUnavailable,
+			);
+		});
+
+		test("the read carries a deadline inside the gated call", async () => {
+			let signal: AbortSignal | null | undefined;
+			globalThis.fetch = (async (_url: string, init: RequestInit) => {
+				signal ??= init.signal;
+				return new Response(JSON.stringify(reply("date_bin")), { status: 200 });
+			}) as unknown as typeof fetch;
+			const samples: PlaneSample[] = [];
+			const gate: PlaneGate = { plane: "greptime", breaker: new CircuitBreaker("greptime", { failureThreshold: 5, openMs: 1000 }, () => 0), observe: (sample) => samples.push(sample) };
+			await new GreptimeClient(config, { gate }).readMetricHistory({ series: "emit.success", fromMs: TO - 3_600_000, toMs: TO, stepS: 60 });
+			expect(signal).toBeInstanceOf(AbortSignal);
+			expect(samples.map((sample) => sample.op)).toEqual(["history"]);
+		});
+
+		test("the effective step is returned, and a labelled series over a long window keeps its OLDEST bucket inside the point cap", async () => {
+			const surfaces = [...METRIC_SERIES["brief.p95"]!.values!];
+			expect(surfaces).toHaveLength(28);
+			// A store holding a row for every surface in every bucket, answering the way the statement asks: newest first, cut at LIMIT.
+			const store = (statement: string): unknown => {
+				if (!statement.includes("date_bin")) return defaultReply(statement);
+				const step = Number(/INTERVAL '(\d+) seconds'/.exec(statement)![1]);
+				const [, from, to] = /"ts" >= '([^']+)' AND "ts" < '([^']+)'/.exec(statement)!;
+				const limit = Number(/LIMIT (\d+)$/.exec(statement)![1]);
+				const first = Math.floor(Date.parse(from!) / 1000 / step) * step * 1000;
+				const buckets: number[] = [];
+				for (let at = first; at < Date.parse(to!); at += step * 1000) buckets.push(at);
+				const rows = buckets.reverse().flatMap((at) => surfaces.map((surface) => [at, JSON.stringify({ surface }), 10, 1]));
+				return records(["bucket", "labels", "value", "count"], rows.slice(0, limit));
+			};
+			for (const days of [1, 14]) {
+				const { sql } = stubFetch(store);
+				const result = await new GreptimeClient(config).readMetricHistory({ series: "brief.p95", fromMs: TO - days * 86_400_000, toMs: TO, stepS: 60 });
+				const step = Number(/INTERVAL '(\d+) seconds'/.exec(select(sql))![1]);
+				expect(result.stepS).toBe(step);
+				// Raised far above the 60 s asked for: one day is ~20 minutes, 14 days ~5 hours.
+				expect(step).toBeGreaterThan(60);
+				const oldestBucket = Math.floor((TO - days * 86_400_000) / 1000 / step) * step * 1000;
+				expect(result.points[0]?.tsMs).toBe(oldestBucket);
+				expect(result.points.length).toBeLessThanOrEqual(MAX_METRIC_POINTS);
+				// Nothing was cut: every bucket of the window has all 28 surfaces.
+				expect(result.points.length % 28).toBe(0);
+				expect(new Set(result.points.map((point) => point.labels.surface)).size).toBe(28);
+			}
+			// The old rule (step raised only to window / 2000, ignoring labels) would have cut the oldest days: pin that the cap bites without the label term.
+			const old = Math.ceil((14 * 86_400) / MAX_METRIC_POINTS);
+			expect(Math.ceil((14 * 86_400) / old + 1) * 28).toBeGreaterThan(MAX_METRIC_POINTS);
+		});
 	});
 });

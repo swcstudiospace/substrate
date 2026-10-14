@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { METRIC, SubstrateInstruments } from "./instruments.ts";
 import {
+	DOCS_FRESHNESS_ID,
+	evaluateDocsFreshnessSlo,
+	type DocsFreshnessReading,
 	ADMISSION_SLO,
 	CAPACITY_RING_MAX,
 	CapacityRing,
@@ -879,5 +882,63 @@ describe("the capacity runway objective (uplift-3 N2)", () => {
 		const samples = new CapacityRing();
 		for (let t = 0; t <= 23 * 3_600_000; t += 5_000) samples.record(T0 + t, 2 * GB);
 		expect(evaluateCapacitySlos(samples, { volumeBytes: 10 * GB })[0]!.status).toBe("insufficient-data");
+	});
+});
+
+describe("docs.freshness (uplift-4 S7)", () => {
+	const options = { maxAgeHours: 168, triggerLagMinutes: 15 };
+	const reading = (overrides: Partial<DocsFreshnessReading> = {}): DocsFreshnessReading => ({
+		dataset: "agent-substrate",
+		freshnessSeconds: 7200,
+		triggerLagSeconds: 0,
+		stale: false,
+		lagging: false,
+		...overrides,
+	});
+
+	test("is absent with no readings, so a deployment that never ingested sees no false ok", () => {
+		expect(evaluateDocsFreshnessSlo([], options)).toEqual([]);
+	});
+
+	test("reads ok with fresh datasets, observing the oldest one in hours", () => {
+		const [row] = evaluateDocsFreshnessSlo([reading(), reading({ dataset: "kanbanos", freshnessSeconds: 36_000 })], options);
+		expect(row).toMatchObject({ id: DOCS_FRESHNESS_ID, status: "ok", observed: 10, unit: "hours", target: 168, samples: 2 });
+		expect(row?.detail).toContain("agent-substrate 2.0 h old");
+	});
+
+	test("breaches on a stale dataset or a lagging trigger and names which", () => {
+		const stale = evaluateDocsFreshnessSlo([reading({ freshnessSeconds: 200 * 3600, stale: true })], options)[0];
+		expect(stale?.status).toBe("breached");
+		expect(stale?.detail).toContain("(stale)");
+		const lagging = evaluateDocsFreshnessSlo([reading({ lagging: true, triggerLagSeconds: 1500 })], options)[0];
+		expect(lagging?.status).toBe("breached");
+		expect(lagging?.detail).toContain("trigger unrecorded for 25 min");
+		expect(lagging?.datasets).toEqual([{ dataset: "agent-substrate", freshness_seconds: 7200, trigger_lag_seconds: 1500, stale: false, lagging: true }]);
+	});
+
+	test("a dataset with only a trigger and no ingest has no age to observe: insufficient-data, never ok", () => {
+		const [row] = evaluateDocsFreshnessSlo([reading({ freshnessSeconds: null, triggerLagSeconds: 60 })], options);
+		expect(row?.observed).toBeNull();
+		expect(row?.status).toBe("insufficient-data");
+		expect(row?.detail).toContain("no ingest recorded");
+	});
+
+	test("both thresholds 0 reports unconfigured, not ok; age alone or lag alone with an observation is still judged", () => {
+		const off = evaluateDocsFreshnessSlo([reading()], { maxAgeHours: 0, triggerLagMinutes: 0 })[0];
+		expect(off?.status).toBe("unconfigured");
+		expect(off?.statement).toContain("(age not judged)");
+		expect(off?.statement).toContain("(lag not detected)");
+		expect(off?.detail).toContain("neither threshold is set");
+		expect(evaluateDocsFreshnessSlo([reading()], { maxAgeHours: 168, triggerLagMinutes: 0 })[0]?.status).toBe("ok");
+		// Age off, lag on: judged only once a trigger has been read.
+		expect(evaluateDocsFreshnessSlo([reading({ triggerLagSeconds: null })], { maxAgeHours: 0, triggerLagMinutes: 15 })[0]?.status).toBe("insufficient-data");
+		expect(evaluateDocsFreshnessSlo([reading({ triggerLagSeconds: 0 })], { maxAgeHours: 0, triggerLagMinutes: 15 })[0]?.status).toBe("ok");
+		// A breach still wins over an unconfigured reading.
+		expect(evaluateDocsFreshnessSlo([reading({ lagging: true, triggerLagSeconds: 1500 })], { maxAgeHours: 0, triggerLagMinutes: 0 })[0]?.status).toBe("breached");
+	});
+
+	test("the statement follows the thresholds", () => {
+		expect(evaluateDocsFreshnessSlo([reading()], options)[0]?.statement).toContain("<= 168 h old");
+		expect(evaluateDocsFreshnessSlo([reading()], options)[0]?.statement).toContain("15 min");
 	});
 });

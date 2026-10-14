@@ -193,7 +193,7 @@ export function daysToArchive(options: { firstDay: string; until: string; dir: s
 }
 
 /** The nearest existing ancestor's real path joined with the rest, so a dir that does not exist yet still resolves symlinks above it. */
-function realish(path: string): string {
+export function realish(path: string): string {
 	let probe = path;
 	const tail: string[] = [];
 	while (!existsSync(probe)) {
@@ -228,7 +228,7 @@ export function refusedOutDir(outDir: string, options: { cwd: string; releaseRoo
 }
 
 /** The nearest existing ancestor of `path`, itself included: what the filesystem can be asked about before the directory exists. */
-function existingAncestor(path: string): string {
+export function existingAncestor(path: string): string {
 	let probe = path;
 	while (!existsSync(probe)) {
 		const parent = dirname(probe);

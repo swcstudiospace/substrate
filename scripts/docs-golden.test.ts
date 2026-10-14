@@ -4,7 +4,7 @@
  * without its variables exits 2 and never opens a socket.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadGoldenCorpus, searchGoldenOffline } from "../packages/mcp-server/src/docs-golden.ts";
@@ -16,7 +16,10 @@ import {
 	loadFixtures,
 	main,
 	parseArgs,
+	resolveEmitBearer,
+	resolveSearchBearer,
 	scoreReply,
+	writeStateAtomically,
 	type GoldenFixture,
 	type GoldenIo,
 	type ScoredReply,
@@ -259,5 +262,287 @@ describe("the CLI", () => {
 		const { goldenIo, out } = io({});
 		expect(await main(["--manifest"], goldenIo)).toBe(0);
 		expect(out).toEqual([corpusManifest()]);
+	});
+});
+
+describe("the live canary (uplift-4 S7)", () => {
+	const MANIFEST_PATH = "/scratch/canary-manifest.json";
+	const goodManifest = (commit: string = COMMIT) => JSON.stringify({ sha256: corpusManifest(), dataset_commit: commit });
+
+	interface Recorded {
+		url: string;
+		authorization: string | null;
+		body: Record<string, unknown>;
+	}
+
+	/** A canary run against an in-memory deployment: replies per question, an events sink, a dedupe record and a token reader that logs every path. */
+	function canary(options: { env?: Record<string, string | undefined>; manifest?: string | null; state?: string | null; eventStatus?: number; searchStatus?: number; writeOk?: boolean; servedCommit?: string } = {}) {
+		const out: string[] = [];
+		const err: string[] = [];
+		const requests: Recorded[] = [];
+		const tokenReads: string[] = [];
+		const overrides = new Map<string, (reply: ScoredReply) => ScoredReply>();
+		let state: string | null = options.state ?? null;
+		const env = {
+			SUBSTRATE_DOCS_CANARY: "1",
+			SUBSTRATE_DOCS_CANARY_MANIFEST: MANIFEST_PATH,
+			SUBSTRATE_TOKEN_OMP: "tok-omp tok-ignored",
+			SUBSTRATE_TOKEN_SUBSTRATE: "tok-substrate",
+			...options.env,
+		};
+		const goldenIo: GoldenIo = {
+			env,
+			fetchImpl: async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+				const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+				requests.push({ url, authorization: new Headers(init?.headers).get("authorization"), body });
+				if (url.endsWith("/events")) return new Response("{}", { status: options.eventStatus ?? 202 });
+				if (options.searchStatus !== undefined) return new Response("nope", { status: options.searchStatus });
+				const fixture = fixtures.find((candidate) => candidate.question === body.question);
+				if (fixture === undefined) throw new Error("unknown question");
+				const offline = (await searchGoldenOffline(corpus, fixture, { commit: options.servedCommit ?? COMMIT })).reply as ScoredReply;
+				return Response.json(overrides.get(fixture.id)?.(offline) ?? offline);
+			},
+			stdout: (line: string) => out.push(line),
+			stderr: (line: string) => err.push(line),
+			offline: async (fixture: GoldenFixture): Promise<ScoredReply> => (await searchGoldenOffline(corpus, fixture, { commit: COMMIT })).reply,
+			readFile: (path: string) => (path === MANIFEST_PATH ? (options.manifest === undefined ? goodManifest(options.servedCommit) : options.manifest) : null),
+			readToken: (path: string) => {
+				tokenReads.push(path);
+				return null;
+			},
+			readState: () => state,
+			writeState: (text: string) => {
+				if (options.writeOk === false) return false;
+				state = text;
+				return true;
+			},
+			now: () => new Date("2026-10-14T03:00:00.000Z"),
+		};
+		return { goldenIo, out, err, requests, tokenReads, overrides, state: () => state };
+	}
+
+	const events = (requests: Recorded[]) => requests.filter((request) => request.url.endsWith("/events"));
+	const answerable = () => {
+		const first = fixtures.find((fixture) => fixture.answerable && fixture.expected.length > 0);
+		if (first === undefined) throw new Error("no answerable fixture");
+		return first;
+	};
+
+	test("parses --live --emit in either order and refuses --emit alone", () => {
+		expect(parseArgs(["--live", "--emit"])).toEqual({ mode: "canary" });
+		expect(parseArgs(["--emit", "--live"])).toEqual({ mode: "canary" });
+		expect(parseArgs(["--emit"])).toEqual({ error: USAGE });
+		expect(parseArgs(["--live"])).toEqual({ mode: "live" });
+	});
+
+	test("refuses by name, before reading a token or opening a socket, when it is not configured", async () => {
+		for (const [env, named, absent] of [
+			[{ SUBSTRATE_DOCS_CANARY: undefined, SUBSTRATE_DOCS_CANARY_MANIFEST: undefined }, ["SUBSTRATE_DOCS_CANARY=1", "SUBSTRATE_DOCS_CANARY_MANIFEST"], []],
+			[{ SUBSTRATE_DOCS_CANARY: undefined }, ["SUBSTRATE_DOCS_CANARY=1"], ["SUBSTRATE_DOCS_CANARY_MANIFEST"]],
+			[{ SUBSTRATE_DOCS_CANARY: "yes" }, ["SUBSTRATE_DOCS_CANARY=1"], ["SUBSTRATE_DOCS_CANARY_MANIFEST"]],
+			[{ SUBSTRATE_DOCS_CANARY_MANIFEST: "  " }, ["SUBSTRATE_DOCS_CANARY_MANIFEST"], ["SUBSTRATE_DOCS_CANARY=1"]],
+		] as const) {
+			const run = canary({ env });
+			expect(await main(["--live", "--emit"], run.goldenIo)).toBe(2);
+			for (const name of named) expect(run.err[0]).toContain(name);
+			for (const name of absent) expect(run.err[0]).not.toContain(name);
+			expect(run.requests).toEqual([]);
+			expect(run.tokenReads).toEqual([]);
+		}
+	});
+
+	test("refuses a SUBSTRATE_URL that is not loopback, and an environment with no omp bearer", async () => {
+		const remote = canary({ env: { SUBSTRATE_URL: "https://substrate.example.com" } });
+		expect(await main(["--live", "--emit"], remote.goldenIo)).toBe(2);
+		expect(remote.err[0]).toContain("not a loopback address");
+		expect(remote.requests).toEqual([]);
+
+		const bare = canary({ env: { SUBSTRATE_TOKEN_OMP: undefined, SUBSTRATE_TOKEN: undefined, SUBSTRATE_TOKENS_DIR: "/scratch/tokens" } });
+		expect(await main(["--live", "--emit"], bare.goldenIo)).toBe(2);
+		expect(bare.err[0]).toContain("SUBSTRATE_TOKEN_OMP");
+		expect(bare.requests).toEqual([]);
+		// Only the injected directory was asked about, never the host's.
+		expect(bare.tokenReads).toEqual([join("/scratch/tokens", "omp")]);
+	});
+
+	test("the search bearer is the first entry of SUBSTRATE_TOKEN_OMP, then the injected tokens dir, then SUBSTRATE_TOKEN", () => {
+		expect(resolveSearchBearer({ SUBSTRATE_TOKEN_OMP: " a ,b c" }, () => "never")).toBe("a");
+		const reads: string[] = [];
+		const viaDir = resolveSearchBearer({ SUBSTRATE_TOKENS_DIR: "/scratch/tokens", SUBSTRATE_TOKEN: "fallback" }, (path) => {
+			reads.push(path);
+			return "from-file";
+		});
+		expect(viaDir).toBe("from-file");
+		expect(reads).toEqual([join("/scratch/tokens", "omp")]);
+		expect(resolveSearchBearer({ SUBSTRATE_TOKENS_DIR: "/scratch/tokens", SUBSTRATE_TOKEN: "fallback" }, () => null)).toBe("fallback");
+		expect(resolveSearchBearer({ SUBSTRATE_TOKENS_DIR: "/scratch/tokens" }, () => null)).toBeNull();
+		expect(resolveEmitBearer({ SUBSTRATE_TOKEN_SUBSTRATE: "x y" }, () => "never")).toBe("x");
+	});
+
+	test("an unreadable, malformed or mismatched attested manifest is refused (3) before any search", async () => {
+		for (const manifest of [null, "not json", JSON.stringify({ sha256: "x" }), JSON.stringify({ sha256: "0".repeat(64), dataset_commit: COMMIT })]) {
+			const run = canary({ manifest });
+			expect(await main(["--live", "--emit"], run.goldenIo)).toBe(3);
+			expect(run.err[0]).toContain("refusing the docs canary");
+			expect(run.requests).toEqual([]);
+		}
+	});
+
+	test("a corpus ingested under a release sha with a matching manifest passes: the live expectations use the attested commit", async () => {
+		const run = canary({ servedCommit: "rel-0123456789ab" });
+		expect(await main(["--live", "--emit"], run.goldenIo)).toBe(0);
+		expect(run.out.filter((line) => line.startsWith(" FAIL "))).toEqual([]);
+		expect(events(run.requests)).toEqual([]);
+		// The committed fixtures themselves still state the golden commit (offline tier unchanged).
+		expect(fixtures.some((fixture) => fixture.expected.some((entry) => entry.commit === COMMIT))).toBe(true);
+	});
+
+	test("a dataset with no recorded version pin is a named setup failure (3): nothing posted, record untouched", async () => {
+		const run = canary({ state: JSON.stringify({ failing: ["earlier"] }) });
+		const target = answerable();
+		run.overrides.set(target.id, (reply) => ({ ...reply, chunks: reply.chunks.map(({ dataset_commit: _pin, ...rest }) => rest) }));
+		expect(await main(["--live", "--emit"], run.goldenIo)).toBe(3);
+		expect(run.err[0]).toContain("no recorded version pin");
+		expect(run.err[0]).toContain(target.id);
+		expect(events(run.requests)).toEqual([]);
+		expect(JSON.parse(run.state() ?? "{}")).toEqual({ failing: ["earlier"] });
+	});
+
+	test("a missing manifest read by the real reader is the named refusal (3), not a crash", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "docs-canary-"));
+		try {
+			const run = canary({ env: { SUBSTRATE_DOCS_CANARY_MANIFEST: join(dir, "absent.json") } });
+			delete run.goldenIo.readFile;
+			expect(await main(["--live", "--emit"], run.goldenIo)).toBe(3);
+			expect(run.err[0]).toContain("SUBSTRATE_DOCS_CANARY_MANIFEST cannot be read");
+			expect(run.requests).toEqual([]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("every fixture passing: a table, exit 0, searches as omp's first token, no event, no state written", async () => {
+		const run = canary();
+		expect(await main(["--live", "--emit"], run.goldenIo)).toBe(0);
+		expect(run.out.filter((line) => line.startsWith("  ok  "))).toHaveLength(fixtures.length);
+		expect(run.out.at(-1)).toBe(`${fixtures.length}/${fixtures.length} fixtures passed the live canary`);
+		expect(run.requests).toHaveLength(fixtures.length);
+		expect(run.requests.every((request) => request.url === "http://127.0.0.1:7410/docs/search" && request.authorization === "Bearer tok-omp")).toBe(true);
+		expect(run.state()).toBeNull();
+		expect([...run.out, ...run.err].some((line) => line.includes("tok-"))).toBe(false);
+	});
+
+	test("a wrong source exits 1 and posts ONE deduped warning as substrate; the same failing set is silent, a pass clears the record, a new failure posts again", async () => {
+		const target = answerable();
+		const run = canary();
+		const wrongSource = (reply: ScoredReply): ScoredReply => ({ ...reply, chunks: reply.chunks.map((chunk) => ({ ...chunk, source_url: "https://example.com/elsewhere/other" })) });
+		run.overrides.set(target.id, wrongSource);
+		expect(await main(["--live", "--emit"], run.goldenIo)).toBe(1);
+		expect(run.out.some((line) => line.startsWith(" FAIL ") && line.includes(target.id))).toBe(true);
+		const posted = events(run.requests);
+		expect(posted).toHaveLength(1);
+		expect(posted[0]?.authorization).toBe("Bearer tok-substrate");
+		expect(posted[0]?.body).toMatchObject({ surface: "substrate", kind: "warning", payload: { action: "docs.canary", runtime: "docs-canary", total: fixtures.length } });
+		expect(JSON.stringify(posted[0]?.body)).toContain(target.id);
+		expect(JSON.parse(run.state() ?? "{}")).toEqual({ failing: [target.id] });
+
+		// The same failing set on the next run: still a non-zero exit, no second warning.
+		const again = canary({ state: run.state() });
+		again.overrides.set(target.id, wrongSource);
+		expect(await main(["--live", "--emit"], again.goldenIo)).toBe(1);
+		expect(events(again.requests)).toEqual([]);
+
+		// A passing run clears the record; the next failure announces again.
+		const healed = canary({ state: again.state() });
+		expect(await main(["--live", "--emit"], healed.goldenIo)).toBe(0);
+		expect(JSON.parse(healed.state() ?? "{}")).toEqual({ failing: [] });
+		const broken = canary({ state: healed.state() });
+		broken.overrides.set(target.id, wrongSource);
+		expect(await main(["--live", "--emit"], broken.goldenIo)).toBe(1);
+		expect(events(broken.requests)).toHaveLength(1);
+	});
+
+	test("a missing commit pin fails commit_match, and a citation from another dataset commit fails the attested pin", async () => {
+		const withCommit = fixtures.find((fixture) => fixture.thresholds.commit_match !== undefined && fixture.expected.some((entry) => entry.commit !== undefined));
+		if (withCommit === undefined) throw new Error("no fixture with a commit pin");
+		const lost = canary();
+		lost.overrides.set(withCommit.id, (reply) => ({ ...reply, chunks: reply.chunks.map((chunk) => ({ ...chunk, commit: "some-other-commit" })) }));
+		expect(await main(["--live", "--emit"], lost.goldenIo)).toBe(1);
+		expect(lost.out.find((line) => line.includes(withCommit.id))).toContain("commit_match");
+		expect(JSON.stringify(events(lost.requests)[0]?.body)).toContain("commit_match");
+
+		const foreign = canary();
+		foreign.overrides.set(withCommit.id, (reply) => ({ ...reply, chunks: reply.chunks.map((chunk) => ({ ...chunk, dataset_commit: "not-attested" })) }));
+		expect(await main(["--live", "--emit"], foreign.goldenIo)).toBe(1);
+		expect(foreign.out.find((line) => line.includes(withCommit.id))).toContain("dataset_commit");
+	});
+
+	test("a degraded reply is an outage, not a regression: exit 3, a line on stderr, nothing posted and the dedupe record untouched", async () => {
+		const degraded = canary({ state: JSON.stringify({ failing: ["earlier"] }) });
+		degraded.overrides.set(answerable().id, (reply) => ({ ...reply, degraded: true, reason: "ragflow-unavailable" }));
+		expect(await main(["--live", "--emit"], degraded.goldenIo)).toBe(3);
+		expect(degraded.err[0]).toContain("answered degraded (ragflow-unavailable)");
+		expect(events(degraded.requests)).toEqual([]);
+		expect(JSON.parse(degraded.state() ?? "{}")).toEqual({ failing: ["earlier"] });
+
+		const refused = canary({ searchStatus: 401 });
+		expect(await main(["--live", "--emit"], refused.goldenIo)).toBe(3);
+		expect(refused.err[0]).toContain("answered 401");
+		expect(events(refused.requests)).toEqual([]);
+	});
+
+	test("a lost clear of the dedupe record is logged distinctly and exits 4; a lost write after a stored warning is logged and still exits 1", async () => {
+		const lostClear = canary({ state: JSON.stringify({ failing: ["earlier"] }), writeOk: false });
+		expect(await main(["--live", "--emit"], lostClear.goldenIo)).toBe(4);
+		expect(lostClear.err.at(-1)).toContain("could not be cleared");
+		expect(events(lostClear.requests)).toEqual([]);
+
+		const lostWrite = canary({ writeOk: false });
+		lostWrite.overrides.set(answerable().id, (reply) => ({ ...reply, chunks: [] }));
+		expect(await main(["--live", "--emit"], lostWrite.goldenIo)).toBe(1);
+		expect(events(lostWrite.requests)).toHaveLength(1);
+		expect(lostWrite.err.at(-1)).toContain("could not be written");
+	});
+
+	test("the dedupe record is written through a temp file and a rename, leaving no temp file, and a failure keeps the old record", () => {
+		const dir = mkdtempSync(join(tmpdir(), "docs-canary-"));
+		try {
+			const file = join(dir, "last.json");
+			expect(writeStateAtomically(file, '{"failing":["a"]}\n')).toBe(true);
+			expect(writeStateAtomically(file, '{"failing":[]}\n')).toBe(true);
+			expect(readFileSync(file, "utf8")).toBe('{"failing":[]}\n');
+			expect(readdirSync(dir)).toEqual(["last.json"]);
+			// An unwritable location reports false and never touches the record that exists.
+			expect(writeStateAtomically(join(dir, "missing", "last.json"), "x")).toBe(false);
+			expect(readFileSync(file, "utf8")).toBe('{"failing":[]}\n');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a warning the ledger did not store keeps the old record so the next run posts again; no substrate bearer posts nothing", async () => {
+		const target = answerable();
+		const failing = (overrides: Map<string, (reply: ScoredReply) => ScoredReply>) => overrides.set(target.id, (reply) => ({ ...reply, chunks: [] }));
+		const unstored = canary({ eventStatus: 500 });
+		failing(unstored.overrides);
+		expect(await main(["--live", "--emit"], unstored.goldenIo)).toBe(1);
+		expect(events(unstored.requests)).toHaveLength(1);
+		expect(unstored.state()).toBeNull();
+		expect(unstored.err.at(-1)).toContain("will be posted again");
+
+		const silent = canary({ env: { SUBSTRATE_TOKEN_SUBSTRATE: undefined, SUBSTRATE_TOKEN: undefined, SUBSTRATE_TOKENS_DIR: "/scratch/tokens" } });
+		failing(silent.overrides);
+		expect(await main(["--live", "--emit"], silent.goldenIo)).toBe(1);
+		expect(events(silent.requests)).toEqual([]);
+		expect(silent.err.at(-1)).toContain("no substrate bearer");
+		expect(silent.tokenReads).toEqual([join("/scratch/tokens", "substrate")]);
+	});
+
+	test("plain --live is unchanged: it prints, never asserts, and needs no canary variables", async () => {
+		const run = canary({ env: { SUBSTRATE_DOCS_CANARY: undefined, SUBSTRATE_DOCS_CANARY_MANIFEST: undefined, SUBSTRATE_URL: "http://127.0.0.1:7410", SUBSTRATE_TOKEN: "plain" } });
+		expect(await main(["--live"], run.goldenIo)).toBe(0);
+		expect(run.out.at(-1)).toContain("printed, not asserted");
+		expect(events(run.requests)).toEqual([]);
 	});
 });

@@ -290,6 +290,9 @@ export interface SubstrateConfig {
 	 * from `SUBSTRATE_LEDGER_*`. See `docs/greptime-ledger.md`.
 	 */
 	ledger: LedgerSettings;
+	// uplift-4 S2
+	/** Index archive directory, SLO age and export bounds, and the opt-in lease-table tune, from `SUBSTRATE_INDEX_ARCHIVE_*` and `SUBSTRATE_INDEX_TUNE`. See `docs/runbooks/index-archive.md`. */
+	indexArchive: IndexArchiveSettings;
 	// uplift-2 R3
 	/**
 	 * Hindsight time bounds (uplift-2 R3): the `memory_recall` fan-out budget
@@ -377,6 +380,19 @@ export interface SubstrateConfig {
 	 * ledger (and one POST to `webhookUrl` when set). See `slo-notify.ts`.
 	 */
 	sloNotify: SloNotifySettings;
+	// uplift-4 S7 — docs freshness SLI and merge-trigger lag
+	/**
+	 * `SUBSTRATE_DOCS_FRESHNESS_MAX_AGE_H` (default 168; `0` reports freshness
+	 * without judging it) and `SUBSTRATE_DOCS_TRIGGER_LAG_MIN` (default 15; `0`
+	 * stops recording accepted triggers and detecting lag). `lagCheckS` is
+	 * `SUBSTRATE_DOCS_LAG_CHECK_S` (default 60, 15..3600): how often the timer
+	 * settles the lag warning, so `/slo` and `/metrics` only read. Report-only:
+	 * nothing is refused or deleted, a breach is a `/slo` row and one `warning` event.
+	 */
+	docsFreshness: { maxAgeHours: number; triggerLagMinutes: number; lagCheckS: number };
+	// uplift-4 S6
+	/** The durable metrics history (`SUBSTRATE_METRICS_HISTORY*`, default off). See `metrics-history.ts`. */
+	metricsHistory: MetricsHistorySettings;
 }
 
 /** The knobs behind `SUBSTRATE_SLO_NOTIFY*` and `SUBSTRATE_SLO_WEBHOOK_URL` (uplift-3 N2). */
@@ -630,6 +646,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		healthzCacheMs: nonNegativeOr(env.SUBSTRATE_HEALTHZ_CACHE_MS, 5000),
 		// uplift-2 R5
 		ledger: loadLedgerSettings(env),
+		// uplift-4 S2
+		indexArchive: loadIndexArchiveSettings(env),
 		// uplift-2 R3
 		hindsightBudgets: {
 			recallBudgetMs: positiveIntOr(env.HINDSIGHT_RECALL_BUDGET_MS, DEFAULT_RECALL_BUDGET_MS),
@@ -669,6 +687,13 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 			sustainS: boundedInt(env.SUBSTRATE_SLO_NOTIFY_SUSTAIN_S, 300, 0, 86_400),
 			webhookUrl: /^https?:\/\//i.test(env.SUBSTRATE_SLO_WEBHOOK_URL?.trim() ?? "") ? env.SUBSTRATE_SLO_WEBHOOK_URL!.trim() : null,
 		},
+		docsFreshness: {
+			maxAgeHours: boundedInt(env.SUBSTRATE_DOCS_FRESHNESS_MAX_AGE_H, 168, 0, 8760),
+			triggerLagMinutes: boundedInt(env.SUBSTRATE_DOCS_TRIGGER_LAG_MIN, 15, 0, 10_080),
+			lagCheckS: boundedInt(env.SUBSTRATE_DOCS_LAG_CHECK_S, 60, 15, 3600),
+		},
+		// uplift-4 S6
+		metricsHistory: loadMetricsHistorySettings(env, greptimeUrl !== undefined && greptimeUrl !== ""),
 	};
 }
 
@@ -1165,6 +1190,118 @@ export function loadLedgerSettings(env: Record<string, string | undefined> = pro
 		// itself refuses the repo, the release root and a filesystem below the floor.
 		maxUncoveredHours: boundedInt(env.SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS, DEFAULT_LEDGER_SETTINGS.maxUncoveredHours, 0, 100_000),
 		archiveDir: env.SUBSTRATE_LEDGER_ARCHIVE_DIR?.trim() ? env.SUBSTRATE_LEDGER_ARCHIVE_DIR.trim() : null,
+	};
+}
+
+// uplift-4 S2 — index disaster-recovery archive
+
+/** The knobs behind `SUBSTRATE_INDEX_ARCHIVE_*` and `SUBSTRATE_INDEX_TUNE` (uplift-4 S2). */
+export interface IndexArchiveSettings {
+	/** Where `substrate index archive` writes when `--out` is omitted (`SUBSTRATE_INDEX_ARCHIVE_DIR`); `null` refuses by name, and the health row is absent. */
+	dir: string | null;
+	/** Hours the newest archive may be old before `index.archive.age` is breached (`SUBSTRATE_INDEX_ARCHIVE_MAX_AGE_H`); `null` keeps the row report-only. */
+	maxAgeHours: number | null;
+	/** Seconds one export may run before it is abandoned (`SUBSTRATE_INDEX_ARCHIVE_MAX_SECONDS`, default 900). */
+	maxSeconds: number;
+	/** Bytes one export may write (`SUBSTRATE_INDEX_ARCHIVE_MAX_BYTES`, default 1 GiB). */
+	maxBytes: number;
+	/** `SUBSTRATE_INDEX_TUNE=apply` applies the `graph_nodes` storage tune at boot; anything else is `off`. */
+	tune: "off" | "apply";
+}
+
+export const DEFAULT_INDEX_ARCHIVE_SETTINGS: IndexArchiveSettings = {
+	dir: null,
+	maxAgeHours: null,
+	maxSeconds: 900,
+	maxBytes: 1024 * 1024 * 1024,
+	tune: "off",
+};
+
+/**
+ * `SUBSTRATE_INDEX_ARCHIVE_*` as the runner and the health row read them. The
+ * directory is a path taken as given (the archive command refuses the repo,
+ * the release root, the root filesystem and a disk below the floor); numbers
+ * clamp and fall back like the ledger's. An age that is not a positive whole
+ * number of hours leaves the SLO row report-only rather than guessing one.
+ */
+export function loadIndexArchiveSettings(env: Record<string, string | undefined> = process.env): IndexArchiveSettings {
+	const dir = env.SUBSTRATE_INDEX_ARCHIVE_DIR?.trim();
+	const age = env.SUBSTRATE_INDEX_ARCHIVE_MAX_AGE_H?.trim() ?? "";
+	return {
+		dir: dir ? dir : null,
+		maxAgeHours: /^\d{1,6}$/.test(age) && Number(age) > 0 ? Number(age) : null,
+		maxSeconds: boundedInt(env.SUBSTRATE_INDEX_ARCHIVE_MAX_SECONDS, DEFAULT_INDEX_ARCHIVE_SETTINGS.maxSeconds, 10, 86_400),
+		maxBytes: boundedInt(env.SUBSTRATE_INDEX_ARCHIVE_MAX_BYTES, DEFAULT_INDEX_ARCHIVE_SETTINGS.maxBytes, 1024 * 1024, 1024 ** 4),
+		tune: /^apply$/i.test(env.SUBSTRATE_INDEX_TUNE?.trim() ?? "") ? "apply" : "off",
+	};
+}
+
+// uplift-4 S6
+/** The knobs behind `SUBSTRATE_METRICS_HISTORY*`: a durable, TTL-bounded `metric_samples` table fed from the registry. */
+export interface MetricsHistorySettings {
+	/** The effective flag: `SUBSTRATE_METRICS_HISTORY=on` AND a configured ledger. Anything else is off, so a typo never starts a writer. */
+	enabled: boolean;
+	/** Seconds between samples (`SUBSTRATE_METRICS_HISTORY_INTERVAL_S`, default 60, floor 15, ceiling 3600). */
+	intervalS: number;
+	/** The table's retention as it goes into `CREATE TABLE` (`SUBSTRATE_METRICS_HISTORY_TTL`, whole days, `1d` to `90d`, default `14d`). */
+	ttl: string;
+	/** The same retention in days, for the readback window cap. */
+	ttlDays: number;
+	/** What was wrong with a set value, for the boot warning; empty when every value was usable. Names the key, never quotes a value. */
+	problems: string[];
+}
+
+export const DEFAULT_METRICS_HISTORY_TTL = "14d";
+export const MIN_METRICS_HISTORY_TTL_DAYS = 1;
+export const MAX_METRICS_HISTORY_TTL_DAYS = 90;
+export const MIN_METRICS_HISTORY_INTERVAL_S = 15;
+
+/**
+ * A metrics-history retention, or `null`. Strictly `<1-3 digits>d` inside the
+ * day bounds, because this string is interpolated into a `CREATE TABLE` — no
+ * other unit, no spaces, no sign, nothing a Greptime duration parser or an
+ * attacker's quote could do anything with. Case-sensitive on purpose.
+ */
+export function parseMetricsHistoryTtl(raw: string): { ttl: string; days: number } | null {
+	const match = /^([1-9][0-9]{0,2})d$/.exec(raw);
+	if (match === null) return null;
+	const days = Number(match[1]);
+	if (days < MIN_METRICS_HISTORY_TTL_DAYS || days > MAX_METRICS_HISTORY_TTL_DAYS) return null;
+	return { ttl: `${days}d`, days };
+}
+
+/**
+ * `SUBSTRATE_METRICS_HISTORY*` as the sampler reads them. Never throws: a bad
+ * TTL falls back to the default and is carried back as a problem, because a
+ * knob on a best-effort history must not stop the substrate from booting.
+ *
+ * `enabled` is the ONE effective flag: the switch is `on` AND the event ledger
+ * is configured (`ledgerConfigured`). The sampler, the route and the drop
+ * counter all read it, so with no ledger none of them exists.
+ */
+export function loadMetricsHistorySettings(env: Record<string, string | undefined> = process.env, ledgerConfigured = true): MetricsHistorySettings {
+	const problems: string[] = [];
+	const flag = (env.SUBSTRATE_METRICS_HISTORY?.trim() ?? "").toLowerCase();
+	if (flag !== "" && flag !== "on" && flag !== "off") {
+		problems.push("SUBSTRATE_METRICS_HISTORY is neither `on` nor `off`, so the metrics history stays off");
+	}
+	const ttlRaw = env.SUBSTRATE_METRICS_HISTORY_TTL?.trim() ?? "";
+	const parsed = ttlRaw === "" ? null : parseMetricsHistoryTtl(ttlRaw);
+	if (ttlRaw !== "" && parsed === null) {
+		problems.push(
+			`SUBSTRATE_METRICS_HISTORY_TTL is not a whole number of days from ${MIN_METRICS_HISTORY_TTL_DAYS}d to ${MAX_METRICS_HISTORY_TTL_DAYS}d (for example 14d), so ${DEFAULT_METRICS_HISTORY_TTL} is used`,
+		);
+	}
+	if (flag === "on" && !ledgerConfigured) {
+		problems.push("SUBSTRATE_METRICS_HISTORY=on needs the event ledger, which is not configured, so the metrics history stays off");
+	}
+	const retention = parsed ?? parseMetricsHistoryTtl(DEFAULT_METRICS_HISTORY_TTL)!;
+	return {
+		enabled: flag === "on" && ledgerConfigured,
+		intervalS: boundedInt(env.SUBSTRATE_METRICS_HISTORY_INTERVAL_S, 60, MIN_METRICS_HISTORY_INTERVAL_S, 3600),
+		ttl: retention.ttl,
+		ttlDays: retention.days,
+		problems,
 	};
 }
 

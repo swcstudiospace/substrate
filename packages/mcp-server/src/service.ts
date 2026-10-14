@@ -45,6 +45,8 @@ import {
 	latestVersion,
 	noteSkillsSyncFastForward,
 	pinsFromVersions,
+	recordTrigger,
+	TRIGGER_FIELD_MAX,
 	refreshDataset,
 	resolveDatasets,
 	type DatasetVersion,
@@ -61,6 +63,7 @@ import {
 	type IngestRecord,
 	type PageSettlement,
 } from "./docs-ingest.ts";
+import { LagSettler, TRIGGER_RECORD_DEADLINE_MS, withDeadline, createFreshnessState, evaluateFreshness, type DatasetFreshness, type FreshnessState } from "./docs-freshness.ts";
 import { DEFAULT_SEARCH_DATASET_NAMES, citationProvenanceCounts, searchDocs, searchReplyStorable, type SearchReply } from "./docs-search.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
@@ -84,6 +87,7 @@ import {
 	type QueryableColumn,
 } from "./greptime.ts";
 import { IndexStore, leaseSnapshot, type GraphBindResult, type IndexCapacity, type MemoryExpiredSample } from "./index-store.ts";
+import { IndexArchiveWatch, evaluateIndexArchiveSlo, type IndexArchiveReading, type IndexArchiveSloResult } from "./index-archive-watch.ts";
 import {
 	buildHandoff,
 	handoffGaps,
@@ -591,6 +595,8 @@ export interface SubstrateObserver {
 	memoryExpired?(sample: MemoryExpiredSample): void;
 	/** One `/healthz` index size read (uplift-3 N2), the sample the capacity runway is fitted over. */
 	capacity?(sample: { at: number; databaseBytes: number }): void;
+	/** Offered once at construction when `SUBSTRATE_INDEX_ARCHIVE_DIR` is set (uplift-4 S2): `newestAtMs` answers the newest complete index archive's creation time, which `substrate.index.archive.age_seconds` is computed from at snapshot time. */
+	indexArchive?(source: { newestAtMs(): number | null }): void;
 	claimed?(sample: {
 		surface: Surface;
 		graph_id: string;
@@ -890,6 +896,15 @@ export class Substrate {
 	private readonly docsRefreshChains = new Map<string, Promise<void>>();
 	private readonly docsRefreshPending = new Map<string, DocsRefreshJob>();
 	private docsRefreshSeq = 0;
+	// uplift-4 S7 — docs freshness and merge-trigger lag
+	/** Accepted merge-triggers and the lag warning's dedupe markers; persisted in the docs state file only once non-empty. */
+	private readonly docsFreshnessState: FreshnessState = createFreshnessState();
+	/** Runs lag transitions in the background, one pass at a time; reads never wait on it. */
+	private readonly docsLagSettler = new LagSettler(this.docsFreshnessState.lag, {
+		persist: () => this.persistDocsSeen(),
+		emit: (event) => this.emit(event),
+		report: (line) => process.stderr.write(`[substrate] ${line}\n`),
+	});
 	/** `graphId/nodeId` → tail of that node's gated-completion chain. */
 	private readonly completionChains = new Map<string, Promise<void>>();
 	// uplift-2 R1 — brief fast path. The options `composeBrief` runs under, read
@@ -921,6 +936,12 @@ export class Substrate {
 		observer: SubstrateObserver = {},
 	) {
 		this.observer = observer;
+		if (config.indexArchive.dir !== null) {
+			const watch = new IndexArchiveWatch(config.indexArchive.dir);
+			this.indexArchiveWatch = watch;
+			// The age gauge asks the watch at snapshot time (an export tick), not only when someone polls `/healthz` or `/slo`.
+			this.observer.indexArchive?.({ newestAtMs: () => watch.peekCreatedAt() });
+		}
 		// Built first: the stores below take their gates from it. The breaker
 		// settings come from config so a test can inject them; the observer feeds
 		// the per-plane series.
@@ -933,6 +954,7 @@ export class Substrate {
 				: config.postgresUrl
 					? new IndexStore(config.postgresUrl, {
 							gate: this.planes.gate("index"),
+							tune: config.indexArchive.tune,
 							// uplift-3 N4: the mode is config, the count goes to the observer.
 							memoryExpiry: {
 								mode: config.memoryExpiry,
@@ -2995,9 +3017,11 @@ export class Substrate {
 			this.docsSeenReady = (async () => {
 				const file = this.config.docsStateFile;
 				if (!file) return;
-				const { records, versions, problem } = await loadIngestRecords(file);
+				const { records, versions, freshness, problem } = await loadIngestRecords(file);
 				for (const [key, record] of records) this.docsIngestSeen.set(key, record);
 				for (const [dataset, list] of versions) if (!this.docsVersions.has(dataset)) this.docsVersions.set(dataset, list);
+				for (const [dataset, list] of freshness.triggers) if (!this.docsFreshnessState.triggers.has(dataset)) this.docsFreshnessState.triggers.set(dataset, list);
+				for (const [dataset, marker] of freshness.lag) if (!this.docsFreshnessState.lag.has(dataset)) this.docsFreshnessState.lag.set(dataset, marker);
 				if (problem) process.stderr.write(`[substrate] ${problem}\n`);
 			})();
 		}
@@ -3014,7 +3038,7 @@ export class Substrate {
 		const file = this.config.docsStateFile;
 		if (!file) return Promise.resolve();
 		this.docsSaveChain = this.docsSaveChain.then(() =>
-			saveIngestRecords(file, this.docsIngestSeen, this.docsVersions).catch((cause: unknown) => {
+			saveIngestRecords(file, this.docsIngestSeen, this.docsVersions, this.docsFreshnessState).catch((cause: unknown) => {
 				process.stderr.write(`[substrate] docs ingest records not saved — ${String(cause)}\n`);
 			}),
 		);
@@ -3144,6 +3168,11 @@ export class Substrate {
 	 * operators and tests: 200 with the version, 503 with the reason.
 	 */
 	async startDocsRefresh(request: DocsRefreshRequest, surface: Surface, options: { wait?: boolean } = {}): Promise<DocsRefreshAccepted> {
+		// Recorded in the background and awaited only up to a short deadline, after
+		// the job is queued: a slow or hung state save must never delay the answer
+		// (the skills-sync caller gives up after 3 s). A late or failed record is
+		// logged by `recordAcceptedTrigger` and changes nothing the caller sees.
+		const recording = this.recordAcceptedTrigger(request);
 		const sameIdentity = (job: DocsRefreshJob): boolean =>
 			job.dataset === request.dataset && job.commit === request.commit && job.content_sha256 === request.content_sha256;
 		let job = [...this.docsRefreshPending.values()].find(sameIdentity);
@@ -3165,6 +3194,9 @@ export class Substrate {
 				if (this.docsRefreshChains.get(request.dataset) === settled) this.docsRefreshChains.delete(request.dataset);
 			});
 		}
+		await withDeadline(recording, TRIGGER_RECORD_DEADLINE_MS).catch(() => {
+			process.stderr.write("[substrate] docs trigger record is still pending; the job was queued and the answer is unchanged\n");
+		});
 		if (options.wait === true) {
 			const outcome = await job.done;
 			return outcome.ok ? { status: 200, body: outcome } : { status: 503, body: outcome };
@@ -3203,6 +3235,79 @@ export class Substrate {
 		} catch (cause) {
 			return finish({ ok: false, reason: redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200), job });
 		}
+	}
+
+	// ── uplift-4 S7: docs freshness and trigger lag ────────────────────────────
+
+	/**
+	 * Remember an accepted merge-trigger before its job runs, so a job that never
+	 * records a version leaves the evidence the lag check needs. Off at
+	 * `SUBSTRATE_DOCS_TRIGGER_LAG_MIN=0`. A commit or hash longer than a real
+	 * one is not recorded (it could not be read back). Never throws: the
+	 * trigger is answered whatever this does.
+	 */
+	private async recordAcceptedTrigger(request: DocsRefreshRequest): Promise<void> {
+		if (this.config.docsFreshness.triggerLagMinutes === 0) return;
+		if (request.commit.length > TRIGGER_FIELD_MAX || request.content_sha256.length > TRIGGER_FIELD_MAX) return;
+		try {
+			await this.hydrateDocsSeen();
+			recordTrigger(this.docsFreshnessState.triggers, request.dataset, {
+				commit: request.commit,
+				content_sha256: request.content_sha256,
+				received_at: new Date().toISOString(),
+			});
+			await this.persistDocsSeen();
+		} catch (cause) {
+			process.stderr.write(`[substrate] docs trigger not recorded — ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
+		}
+	}
+
+	/**
+	 * The freshness and trigger-lag verdict per dataset, from the persisted docs
+	 * state alone (no RAGFlow call). A pure read for `/slo` and `/metrics`: it
+	 * answers at once from the in-memory state, never awaits the state-file
+	 * hydrate (a slow disk must not slow a monitor route; the hydrate is only
+	 * started in the background, so the first answers after boot can be empty),
+	 * and never emits or writes: the lag warning is settled by
+	 * {@link settleDocsLag} on a timer.
+	 */
+	async evaluateDocsFreshness(now: number = Date.now()): Promise<DatasetFreshness[]> {
+		void this.hydrateDocsSeen().catch(() => undefined);
+		return this.docsFreshnessRows(now);
+	}
+
+	private docsFreshnessRows(now: number): DatasetFreshness[] {
+		const settings = this.config.docsFreshness;
+		return evaluateFreshness({
+			versions: this.docsVersions,
+			triggers: settings.triggerLagMinutes === 0 ? new Map() : this.docsFreshnessState.triggers,
+			now,
+			settings,
+		});
+	}
+
+	/**
+	 * One timer pass over the lag verdicts: hydrate the state file, evaluate,
+	 * and start the background settle (one `warning` when a dataset enters the
+	 * breach, one `note` when it clears, deduplicated through the state file's
+	 * markers). Returns at once after starting it; `LagSettler` keeps a pass
+	 * single-flight, deadline-bounded and retry-limited, and a failed delivery
+	 * is retried no sooner than a minute later. With
+	 * `SUBSTRATE_DOCS_TRIGGER_LAG_MIN=0` and no marker left behind nothing is
+	 * owed, so nothing is emitted or written. Never throws.
+	 */
+	async settleDocsLag(now: number = Date.now()): Promise<void> {
+		try {
+			await this.hydrateDocsSeen();
+			this.docsLagSettler.settle(this.docsFreshnessRows(now), this.config.docsFreshness, now);
+		} catch (cause) {
+			process.stderr.write(`[substrate] docs lag pass failed — ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
+		}
+	}
+
+	/** Resolves when no lag pass is in flight; the shutdown seam (and a test's), never on a request path. */
+	async docsLagIdle(): Promise<void> {
+		await this.docsLagSettler.flight;
 	}
 
 	/**
@@ -4206,6 +4311,7 @@ export class Substrate {
 		// only a failed one overrides the metadata.
 		const eventsWritable = metadataWritable && probe?.lastProbeOk !== false;
 		const ledgerJobs = await this.ledgerJobs();
+		const indexArchive = await this.indexArchiveHealth();
 		return {
 			index,
 			greptime,
@@ -4223,13 +4329,41 @@ export class Substrate {
 			cache,
 			planes,
 			capacity: { index: capacity, ledger: ledgerCapacity },
-			jobs: { ledger: ledgerJobs.ledger, ledgerReason: ledgerJobs.reason },
+			jobs: { ledger: ledgerJobs.ledger, ledgerReason: ledgerJobs.reason, ...(indexArchive !== null ? { index: indexArchive } : {}) },
 		};
 	}
 
 	/** The last coverage read: when it started and its value, or why it has none. */
 	private ledgerJobsMemo: { at: number; value: LedgerJobsHealth | null; reason: string | null } | null = null;
 	private ledgerJobsInFlight: Promise<void> | null = null;
+
+	/** The index archive directory's watch; `null` when `SUBSTRATE_INDEX_ARCHIVE_DIR` is unset (uplift-4 S2). Built in the constructor so the age gauge exists before any poll. */
+	private indexArchiveWatch: IndexArchiveWatch | null = null;
+
+	/** The watch's reading, bounded like every `/healthz` probe; `null` when no archive directory is configured. */
+	private async indexArchiveReading(): Promise<IndexArchiveReading | null> {
+		const watch = this.indexArchiveWatch;
+		if (watch === null) return null;
+		return (await bounded(() => watch.read(), HEALTH_PROBE_MS)) ?? { status: null, reason: `archive directory read still running after ${HEALTH_PROBE_MS} ms` };
+	}
+
+	/** `/healthz.jobs.index` (uplift-4 S2); `null` when no archive directory is configured. */
+	async indexArchiveHealth(): Promise<IndexArchiveHealth | null> {
+		const reading = await this.indexArchiveReading();
+		if (reading === null) return null;
+		return {
+			lastArchiveAt: reading.status?.lastArchiveAt ?? null,
+			ageSeconds: reading.status?.ageSeconds ?? null,
+			snapshot: reading.status?.snapshot ?? null,
+			reason: reading.reason,
+		};
+	}
+
+	/** The `index.archive.age` row for `/slo` (uplift-4 S2); `null` when no archive directory is configured. */
+	async indexArchiveSlo(): Promise<IndexArchiveSloResult | null> {
+		const reading = await this.indexArchiveReading();
+		return reading === null ? null : evaluateIndexArchiveSlo(reading, this.config.indexArchive.maxAgeHours);
+	}
 
 	/**
 	 * `/healthz.jobs.ledger` (uplift-3 N6): the anchor's lag and uncovered hours
@@ -4359,7 +4493,17 @@ export interface SubstrateHealth {
 	planes: Record<PlaneName, PlaneHealth>;
 	capacity: { index: IndexCapacity | null; ledger: LedgerCapacity | null };
 	/** Scheduled-job health (uplift-3 N6): `ledger` is `null` with `ledgerReason` set when the ledger is unconfigured, unreachable or still being read. */
-	jobs: { ledger: LedgerJobsHealth | null; ledgerReason: string | null };
+	jobs: { ledger: LedgerJobsHealth | null; ledgerReason: string | null; index?: IndexArchiveHealth };
+}
+
+/** `/healthz.jobs.index` (uplift-4 S2): present only when `SUBSTRATE_INDEX_ARCHIVE_DIR` is set. */
+export interface IndexArchiveHealth {
+	/** `createdAt` of the newest complete index archive, or `null` when there is none or the directory could not be read (see `reason`). */
+	lastArchiveAt: string | null;
+	ageSeconds: number | null;
+	snapshot: string | null;
+	/** Why the directory could not be read, or `null`. */
+	reason: string | null;
 }
 
 /** `fn`'s answer, or `null` when it throws or outlasts `ms`. */

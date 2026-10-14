@@ -111,7 +111,16 @@ export interface HistogramSnapshot {
 	overflowed: number;
 }
 
-export type MetricSnapshot = CounterSnapshot | HistogramSnapshot;
+export interface GaugeSnapshot {
+	kind: "gauge";
+	name: string;
+	description: string;
+	unit: string;
+	points: CounterPoint[];
+	overflowed: number;
+}
+
+export type MetricSnapshot = CounterSnapshot | HistogramSnapshot | GaugeSnapshot;
 
 /**
  * A stable key for an attribute set: keys sorted, values stringified, joined on
@@ -673,6 +682,59 @@ export function quantileFromBuckets(
 }
 
 /**
+ * The latest value of one reading, with no attributes. Not cumulative: it
+ * reports whatever was last set or observed, which is why it never rides a checkpoint.
+ */
+export class Gauge {
+	private value: number | null = null;
+	/** Computes the reading at snapshot time; replaces `set` when installed (`null` means no reading yet). */
+	observe: (() => number | null) | null = null;
+	readonly description: string;
+	readonly unit: string;
+
+	constructor(
+		readonly name: string,
+		options: InstrumentOptions = {},
+	) {
+		this.description = options.description ?? "";
+		this.unit = options.unit ?? "";
+	}
+
+	/** Replace the reading. A non-finite value is ignored: a bad caller must not be able to fail what it is instrumenting. */
+	set(value: number): void {
+		if (Number.isFinite(value)) this.value = value;
+	}
+
+	/**
+	 * The current reading: the observer's answer when one is installed (computed
+	 * now, at snapshot time, so an export that nobody else triggers is never
+	 * stale), else the last `set`. A throwing or non-finite observer reads as no
+	 * point — a gauge must not be able to fail the export that reads it.
+	 */
+	private current(): number | null {
+		if (this.observe === null) return this.value;
+		try {
+			const observed = this.observe();
+			return observed !== null && Number.isFinite(observed) ? observed : null;
+		} catch {
+			return null;
+		}
+	}
+
+	snapshot(): GaugeSnapshot {
+		const value = this.current();
+		return {
+			kind: "gauge",
+			name: this.name,
+			description: this.description,
+			unit: this.unit,
+			overflowed: 0,
+			points: value === null ? [] : [{ attributes: {}, value }],
+		};
+	}
+}
+
+/**
  * Every instrument the process owns, plus the process start time.
  *
  * `startedAt` is the `start_time_unix_nano` every cumulative point carries: it is
@@ -682,6 +744,7 @@ export function quantileFromBuckets(
 export class MetricRegistry {
 	private readonly counters = new Map<string, Counter>();
 	private readonly histograms = new Map<string, Histogram>();
+	private readonly gauges = new Map<string, Gauge>();
 
 	constructor(readonly startedAt: number = Date.now()) {}
 
@@ -701,10 +764,24 @@ export class MetricRegistry {
 		return created;
 	}
 
+	/**
+	 * One observed value (uplift-4 S2), created on first use so a process that
+	 * never sets it carries no extra series. A gauge is a reading, not history:
+	 * it is not checkpointed and not seeded across restarts.
+	 */
+	gauge(name: string, options: InstrumentOptions = {}): Gauge {
+		const existing = this.gauges.get(name);
+		if (existing) return existing;
+		const created = new Gauge(name, options);
+		this.gauges.set(name, created);
+		return created;
+	}
+
 	snapshot(): MetricSnapshot[] {
 		return [
 			...[...this.counters.values()].map((instrument) => instrument.snapshot()),
 			...[...this.histograms.values()].map((instrument) => instrument.snapshot()),
+			...[...this.gauges.values()].map((instrument) => instrument.snapshot()),
 		];
 	}
 

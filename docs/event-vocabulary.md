@@ -26,7 +26,8 @@ These apply to every source:
   event, `"released"` / `"stolen"` on lease events). New concepts become
   `payload.action` values, never kinds: `skill.propose`, `docs.ingest`,
   `docs.search`, `teachable`, `anchor`, `mirror`, `dispatch`, `approval`,
-  `skills.sync`, `dod`, `doctor`, `slo.transition`.
+  `skills.sync`, `dod`, `doctor`, `slo.transition`, `docs.freshness`, `docs.canary`,
+  `index.archive`, `alert`.
 - **`payload.runtime` names a non-agent producer** acting for an agent or for
   the host (`herdr`, `agentos`, `anchor`, `dispatcher`, `skills-sync`,
   `doctor` — the runtime doctor, uplift-3 N1, one `warning` per drift class
@@ -34,7 +35,18 @@ These apply to every source:
   a value from an env file; `slo` — the SLO notifier, uplift-3 N2, one
   `warning` per sustained breach or open breaker and one `note` per sustained
   recovery, with `payload.objective`, `state`, `observed`, `target`, deduped
-  through the SLO checkpoint so a restart never repeats a transition).
+  through the SLO checkpoint so a restart never repeats a transition;
+  `docs-freshness` — uplift-4 S7, one `warning` per dataset per breach when an
+  accepted merge-trigger has no recorded ingest after
+  `SUBSTRATE_DOCS_TRIGGER_LAG_MIN` and one `note` when it clears, with
+  `payload.state`, `dataset`, `commit`, `lag_seconds`, deduped through the
+  docs state file; `docs-canary` — the opt-in live golden canary, one
+  `warning` per changed failing set, with `payload.failing[{fixture, failed}]`;
+  `index-archive` — uplift-4 S2, one `note` per finished index snapshot with
+  `payload.snapshot`, `createdAt`, `serverVersion`, `schemaHash` and per-table
+  `rows`, `bytes`, `sha256`, never rows or a path; `alert` — uplift-4 S3, one
+  `warning` from `substrate-alert@.service` when a watched unit fails, with
+  `payload.unit` and `payload.result`).
 - **The original type always travels.** Where a source has its own event type
   (herdr's `pane.*`), the exact type is kept in a payload field
   (`payload.herdr_type`), the v1.1 swarm precedent (`payload.swarm_type`). An
@@ -89,6 +101,11 @@ These apply to every source:
 | `doctor.drift` | 33 | `warning` | `substrate` | `doctor` | `doctor` | — | yes |
 | `slo.transition` | 33 | `warning` | `substrate` | `slo.transition` | `slo` | — | yes |
 | `slo.recovered` | 33 | `note` | `substrate` | `slo.transition` | `slo` | — | yes |
+| `docs.freshness` | 25 | `warning` | `substrate` | `docs.freshness` | `docs-freshness` | — | yes |
+| `docs.freshness.recovered` | 25 | `note` | `substrate` | `docs.freshness` | `docs-freshness` | — | yes |
+| `docs.canary` | 25 | `warning` | `substrate` | `docs.canary` | `docs-canary` | — | yes |
+| `index.archive` | 28 | `note` | `substrate` | `index.archive` | `index-archive` | — | yes |
+| `alert` | 33 | `warning` | `substrate` | `alert` | `alert` | — | yes |
 | `teachable.accepted` | 29 | `note` | `memory-writer` | `teachable` | — | — | no |
 | `mirror.failed` | 23 | `warning` | `lease-holder` | `mirror` | — | — | no |
 | `lease.release.dod` | 23 | `note` | `lease-holder` | `released` | — | graph repo via placeOf | no |

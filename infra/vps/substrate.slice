@@ -21,3 +21,23 @@ Documentation=https://github.com/swcstudiospace/agent-substrate
 
 [Slice]
 MemoryLow=2G
+# Priority (uplift-4 S3). CPUWeight and IOWeight are relative shares against
+# siblings under the parent slice, not caps: they matter only while something
+# else on the host wants the same CPU or disk. This host's co-tenants (the
+# operator's agents and containers) sit in system.slice at the default weight
+# of 100, so 300 gives the substrate three shares to their one when the host
+# is saturated (load 10 on 8 vCPU measured 2026-10-13) and costs nothing when
+# it is idle. CPUQuota in the unit files stays the ceiling.
+#
+# IOWeight is honoured only when the io controller is enabled for the cgroup
+# AND the block device's scheduler is BFQ, or io.cost is enabled (io.cost.qos
+# `enable=1`). Under `none` or `mq-deadline` without io.cost the value is
+# accepted and has no effect. `bun scripts/doctor-runtime.ts` reports whether
+# this host can honour it (the `substrate.slice IOWeight honoured` row); this
+# file does not enable BFQ or io.cost and nothing here claims it works.
+CPUWeight=300
+IOWeight=300
+# systemd-oomd (when it runs) picks victims by this preference; `avoid` takes
+# the slice out of the first rank of candidates. It does not stop the kernel
+# OOM killer, and MemoryMax in each unit still ends a runaway process.
+ManagedOOMPreference=avoid

@@ -1,0 +1,296 @@
+/**
+ * What the index archive may read, and how a row of it is written (uplift-4 S2).
+ *
+ * This is the CLOSED whitelist: the table names, the column names and the key
+ * columns below are the only identifiers `index-store.ts` ever puts into an
+ * export or restore statement. Nothing here, and nothing a caller supplies,
+ * composes one from input — a name that is not in {@link ARCHIVE_TABLES} is
+ * refused by {@link tableSpec} before any SQL exists.
+ *
+ * The list is `IndexStore.migrate()`'s, in foreign-key order (`graph_nodes`
+ * references `graph_index`; nothing else has a foreign key). There is no
+ * `skills` table in the index: skills live in the skills library, not here.
+ * `index-archive.test.ts` compares these columns against `information_schema`
+ * on a live database, so a column added to `migrate()` and not here fails CI.
+ *
+ * SECRET HANDLING. `memory_quarantine` and `memory_reviews` hold writes the
+ * governance gate parked because they were classified as secret, PII or
+ * speculative. The stored body is only redacted by pattern, and PII is by
+ * definition not a pattern the redactor rewrites, so those two tables can hold
+ * unredacted personal text. `withheld` names the columns that never leave the
+ * box: the archive carries every other column (ids, scope, writer, the
+ * `entry_hash` of the content, the reason, the dates) and restore refills a
+ * NOT NULL withheld column with a fixed placeholder. The counts and the
+ * `entry_hash` digest still verify; the text is not recoverable from the
+ * archive, by design. `graph_nodes.lease_id` and `memory_writes.holder` are
+ * fencing tokens (a bearer-like secret only the holder may see, `lease.ts`):
+ * they are withheld too, restored as NULL. Every other column was checked: ids,
+ * surfaces, session ids, URLs, timestamps and content hashes are already in the
+ * ledger or the brief; `idempotency_key` is the `memory_writes` key (a derived
+ * hash or a caller-supplied key redacted on write) and cannot be withheld.
+ * See `docs/runbooks/index-archive.md`.
+ */
+import { createHash } from "node:crypto";
+
+export type ColumnType = "text" | "int" | "bigint" | "bool" | "timestamptz";
+
+export interface ArchiveColumn {
+	name: string;
+	type: ColumnType;
+}
+
+export interface ArchiveTableSpec {
+	name: string;
+	/** Every column `migrate()` leaves the table with, in the order it adds them. */
+	columns: readonly ArchiveColumn[];
+	/** The primary key, in key order: the keyset the export pages by. Never withheld. */
+	key: readonly string[];
+	/** Columns that are never exported. */
+	withheld: readonly string[];
+	/** What restore writes into a withheld column; `null` leaves the column unset (NULL). */
+	placeholders: Readonly<Record<string, string | null>>;
+	/** Whether the table carries an `entry_hash`, which the archive digests separately. */
+	hasEntryHash: boolean;
+}
+
+/** What restore writes where a withheld, NOT NULL column has nothing to restore from. */
+export const WITHHELD_PLACEHOLDER = "[withheld by index-archive]";
+
+const text = (name: string): ArchiveColumn => ({ name, type: "text" });
+const ts = (name: string): ArchiveColumn => ({ name, type: "timestamptz" });
+
+/** The closed table list, in foreign-key order: restore loads top to bottom. */
+export const ARCHIVE_TABLES: readonly ArchiveTableSpec[] = [
+	{
+		name: "graph_index",
+		columns: [text("graph_id"), text("notion_task_page"), text("repo"), text("branch"), text("surface"), text("status"), text("pr_url"), ts("created"), ts("updated")],
+		key: ["graph_id"],
+		withheld: [],
+		placeholders: {},
+		hasEntryHash: false,
+	},
+	{
+		name: "graph_nodes",
+		columns: [
+			text("graph_id"),
+			text("node_id"),
+			text("linear_issue_id"),
+			text("linear_identifier"),
+			text("notion_page"),
+			text("state"),
+			text("claimed_by"),
+			ts("claimed_at"),
+			text("claim_session"),
+			text("lease_id"),
+			ts("lease_expires_at"),
+			ts("lease_heartbeat_at"),
+			{ name: "lease_epoch", type: "bigint" },
+		],
+		key: ["graph_id", "node_id"],
+		// `lease_id` is the lease's fencing token (lease.ts: only the holder may see it); a restored lease has none and simply lapses.
+		withheld: ["lease_id"],
+		placeholders: { lease_id: null },
+		hasEntryHash: false,
+	},
+	{
+		name: "graph_edges",
+		columns: [text("graph_id"), text("from_node"), text("to_node"), text("kind")],
+		key: ["graph_id", "from_node", "to_node", "kind"],
+		withheld: [],
+		placeholders: {},
+		hasEntryHash: false,
+	},
+	{
+		name: "graph_steps",
+		columns: [text("graph_id"), text("node_id"), { name: "step", type: "int" }, text("linear_sub_issue_id"), text("notion_page"), text("state")],
+		key: ["graph_id", "node_id", "step"],
+		withheld: [],
+		placeholders: {},
+		hasEntryHash: false,
+	},
+	{
+		name: "graph_bindings",
+		columns: [text("correlation_id"), text("graph_id"), text("bound_by"), ts("created")],
+		key: ["correlation_id"],
+		withheld: [],
+		placeholders: {},
+		hasEntryHash: false,
+	},
+	{
+		name: "memory_entries",
+		columns: [
+			text("id"),
+			text("scope"),
+			text("kind"),
+			text("body"),
+			text("source_event"),
+			text("writer"),
+			text("trust"),
+			text("ttl"),
+			ts("created"),
+			text("subject"),
+			text("actor"),
+			text("session_id"),
+			text("graph_id"),
+			text("repo"),
+			text("conflict_key"),
+			{ name: "version", type: "int" },
+			text("supersedes"),
+			text("superseded_by"),
+			text("entry_hash"),
+			ts("reverify_after"),
+			text("idempotency_key"),
+		],
+		key: ["id"],
+		withheld: [],
+		placeholders: {},
+		hasEntryHash: true,
+	},
+	{
+		name: "memory_writes",
+		columns: [text("idempotency_key"), { name: "explicit", type: "bool" }, text("outcome"), text("entry_id"), text("entry_hash"), text("request_hash"), text("holder"), ts("claimed")],
+		key: ["idempotency_key"],
+		// `holder` is the claim's fencing token (lease.ts: only the holder may see it).
+		withheld: ["holder"],
+		placeholders: { holder: null },
+		hasEntryHash: true,
+	},
+	{
+		name: "memory_quarantine",
+		columns: [
+			text("id"),
+			text("scope"),
+			text("kind"),
+			text("body"),
+			text("subject"),
+			text("writer"),
+			text("source_event"),
+			text("session_id"),
+			text("graph_id"),
+			text("repo"),
+			text("entry_hash"),
+			text("reason"),
+			text("detail"),
+			ts("created"),
+		],
+		key: ["id"],
+		withheld: ["body", "subject"],
+		placeholders: { body: WITHHELD_PLACEHOLDER, subject: null },
+		hasEntryHash: true,
+	},
+	{
+		name: "memory_reviews",
+		columns: [
+			text("id"),
+			text("scope"),
+			text("kind"),
+			text("body"),
+			text("subject"),
+			text("writer"),
+			text("source_event"),
+			text("session_id"),
+			text("graph_id"),
+			text("repo"),
+			text("ttl"),
+			text("entry_hash"),
+			text("reason"),
+			text("state"),
+			text("entry_id"),
+			ts("decided"),
+			text("decided_by"),
+			ts("created"),
+		],
+		key: ["id"],
+		withheld: ["body", "subject"],
+		placeholders: { body: WITHHELD_PLACEHOLDER, subject: null },
+		hasEntryHash: true,
+	},
+];
+
+const BY_NAME: ReadonlyMap<string, ArchiveTableSpec> = new Map(ARCHIVE_TABLES.map((spec) => [spec.name, spec]));
+
+/** The whitelisted table names, in foreign-key order. */
+export const ARCHIVE_TABLE_NAMES: readonly string[] = ARCHIVE_TABLES.map((spec) => spec.name);
+
+/** The spec for a whitelisted table; throws for any other name, before a statement can be composed. */
+export function tableSpec(name: string): ArchiveTableSpec {
+	const spec = BY_NAME.get(name);
+	if (spec === undefined) throw new Error(`${JSON.stringify(name).slice(0, 60)} is not an archived index table`);
+	return spec;
+}
+
+/** The columns the archive writes for a table: every column but the withheld ones, in table order. */
+export function exportedColumns(spec: ArchiveTableSpec): ArchiveColumn[] {
+	return spec.columns.filter((column) => !spec.withheld.includes(column.name));
+}
+
+/**
+ * The hash of the archived schema: table names, column names and types in
+ * order, the keys and the withheld lists. An archive written under another
+ * column list than the running code's is refused by `verify-archive` (kind
+ * `schema`) before restore can load it into a table that does not match.
+ */
+export function schemaHash(): string {
+	const canonical = ARCHIVE_TABLES.map((spec) => ({
+		name: spec.name,
+		columns: spec.columns.map((column) => [column.name, column.type]),
+		key: spec.key,
+		withheld: spec.withheld,
+	}));
+	return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+/** One archived row: exported columns only, JSON-safe, in column order. */
+export type ArchiveRow = Record<string, string | number | boolean | null>;
+
+/** A row's key values in key order, the cursor the next page continues after. */
+export function rowKey(spec: ArchiveTableSpec, row: ArchiveRow): Array<string | number> {
+	return spec.key.map((name) => {
+		const value = row[name];
+		if (typeof value !== "string" && typeof value !== "number") throw new Error(`${spec.name}: key column ${name} is not a string or number`);
+		return value;
+	});
+}
+
+/** The ISO form a timestamp column is written in: UTC, microseconds, so a restore reproduces the stored instant exactly. */
+const ISO_MICROS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
+
+/** The verdict of {@link coerceRow}: the typed row, or why the record is not one. */
+export type CoercedRow = { ok: true; row: ArchiveRow } | { ok: false; reason: string };
+
+/**
+ * A parsed NDJSON record as a row of `spec`, or the reason it is not one. The
+ * reason names the column and the expectation, never the value: a rejected
+ * line may be anything.
+ */
+export function coerceRow(spec: ArchiveTableSpec, record: unknown): CoercedRow {
+	if (record === null || typeof record !== "object" || Array.isArray(record)) return { ok: false, reason: "record is not an object" };
+	const columns = exportedColumns(spec);
+	const source = record as Record<string, unknown>;
+	const keys = Object.keys(source);
+	if (keys.length !== columns.length || !columns.every((column, i) => keys[i] === column.name)) {
+		return { ok: false, reason: "record keys differ from the table's exported columns" };
+	}
+	const row: ArchiveRow = {};
+	for (const column of columns) {
+		const value = source[column.name];
+		if (value === null) {
+			if (spec.key.includes(column.name)) return { ok: false, reason: `key column ${column.name} is null` };
+			row[column.name] = null;
+			continue;
+		}
+		const fine =
+			column.type === "text"
+				? typeof value === "string"
+				: column.type === "int"
+					? typeof value === "number" && Number.isSafeInteger(value)
+					: column.type === "bool"
+						? typeof value === "boolean"
+						: column.type === "bigint"
+							? typeof value === "string" && /^-?\d{1,19}$/.test(value)
+							: typeof value === "string" && ISO_MICROS.test(value);
+		if (!fine) return { ok: false, reason: `column ${column.name} is not a ${column.type}` };
+		row[column.name] = value as string | number | boolean;
+	}
+	return { ok: true, row };
+}

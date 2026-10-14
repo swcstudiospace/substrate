@@ -54,11 +54,15 @@ substrate is keyed by. `surface` says which of the eight agents on the host;
 | `substrate.plane.duration` | histogram, ms | `plane`, `op`, `outcome` = `ok` \| `error` \| `timeout` \| `open` |
 | `substrate.plane.errors` | counter | `plane`, `reason` = `timeout` \| `network` \| `server` \| `open` \| `other` |
 | `substrate.admission.decisions` | counter | `surface` (a known surface or `anonymous`), `class` = `read` \| `write` \| `coordination`, `decision` = `allowed` \| `limited` \| `shadow_limited` \| `bypass` |
+| `substrate.metrics.history.dropped` | counter | `reason` = `breaker_open` \| `unavailable` \| `rejected` \| `ddl` \| `schema` \| `invalid` \| `capped` \| `internal` (rows not stored; registered only with `SUBSTRATE_METRICS_HISTORY=on` and a ledger) |
 | `substrate.docs.search` | counter | `surface`, `outcome` = `hit` \| `empty` \| `degraded`, `cached` = `true` \| `false` |
 | `substrate.docs.citations` | counter | `provenance` = `recorded` \| `unrecorded` \| `unpinned` |
 | `substrate.docs.duration` | histogram, ms (own edges, incl. 2000 and 4000) | `surface`, `cached` |
 | `substrate.memory.expired` | counter | `surface`, `kind` (memory kind), `mode` = `served` \| `hidden` — entries past their `ttl` met by an index read (uplift-3 N4; `docs/memory-governance.md` § Lifetime) |
 | `substrate.brief.result` | counter | `surface` (a known surface or `unknown`), `state` = `complete` \| `degraded` \| `snapshot`, `result` = `fresh` \| `not_modified` — one per brief answered at either door; `not_modified` is a REST 304 or an MCP `not_modified: true` (uplift-3 N7) |
+| `substrate.index.archive.age_seconds` | gauge, s (a registry gauge: in `/metrics` `metrics[]` and OTLP, not checkpointed) | — (no attributes; absent until an archive exists, installed only with `SUBSTRATE_INDEX_ARCHIVE_DIR`) |
+| `substrate.docs.freshness_seconds` | gauge, s (**`/metrics` `gauges` only**, not in `metrics[]` and not OTLP) | `dataset` (a configured dataset name; absent until the dataset has a recorded version) |
+| `substrate.docs.trigger_lag_seconds` | gauge, s (**`/metrics` `gauges` only**, as above) | `dataset`; `0` once the newest accepted merge-trigger's commit has a recorded version |
 
 `status` is a class (`2xx`, `5xx`), not a code, and `route` is one of the known
 paths or `other` — an unauthenticated caller walking random URLs must not be able
@@ -68,7 +72,7 @@ client — a SQL verb for the ledger, a route-table entry for the HTTP planes
 (`recall`, `retain`, `retrieve`, `datasets`, …), a command name for the cache —
 never a statement or a URL.
 
-Everything is **cumulative and monotonic**. The exporter pushes the same running
+Every counter and histogram is **cumulative and monotonic** (a gauge is a reading, recomputed after a restart and never checkpointed). The exporter pushes the same running
 totals every interval and never resets, so a missed export is harmless: the next
 one carries what the lost one would have.
 
@@ -404,6 +408,34 @@ runbook's arithmetic is checkable. No `index.pool.wait_p95` row: `IndexStore`
 measures statement time through the plane gate, not pool acquisition, and the
 row is not invented from a number that is not measured.
 
+`capacity.index.graphNodes` (uplift-4 S2) adds lease-table bloat visibility to the
+same read, from `pg_stat_user_tables` and report-only (no objective):
+`hotUpdateRatio` is `n_tup_hot_upd / n_tup_upd` and `deadRatio` is
+`n_dead_tup / (n_live_tup + n_dead_tup)` for `graph_nodes`, each `null` while its
+denominator is 0. Heartbeats rewrite the indexed `lease_expires_at`, so a low HOT
+ratio is expected; the numbers say whether it has become a problem. The opt-in
+tune is `SUBSTRATE_INDEX_TUNE=apply`.
+
+### Index archive age (uplift-4 S2)
+
+With `SUBSTRATE_INDEX_ARCHIVE_DIR` set, `GET /healthz` carries
+`jobs.index = { lastArchiveAt, ageSeconds, snapshot, reason }`, the
+`substrate.index.archive.age_seconds` gauge (an OTLP gauge with no attributes,
+computed at each metrics snapshot from the newest archive's creation time, so it
+grows without anyone polling `/healthz`; not checkpointed) tracks it, and `GET /slo` carries an
+`indexArchive` array with one row:
+
+| Objective | Statement |
+| --- | --- |
+| `index.archive.age` | the newest complete index archive is at most `SUBSTRATE_INDEX_ARCHIVE_MAX_AGE_H` hours old |
+
+The row is `report-only` while that variable is unset; set, it is `ok`, `breached`
+(older, or no archive in a readable directory) or `insufficient-data` (the
+directory could not be read). It is never folded into `breached`. The read is the
+directory's manifests, memoised for 60 s and bounded to the 1 s probe; with the
+variable unset the key and the row are absent. The archive itself:
+`docs/runbooks/index-archive.md`.
+
 ### Notifications (uplift-3 N2)
 
 `SUBSTRATE_SLO_NOTIFY=1` schedules an evaluator every `SUBSTRATE_SLO_NOTIFY_S`
@@ -432,6 +464,131 @@ a webhook that is down must not become a second incident. The URL is never
 printed. Both rows (`slo.transition`, `slo.recovered`) are in
 [`event-vocabulary.md`](event-vocabulary.md); the operator view is in
 [`runbooks/substrate-red.md`](runbooks/substrate-red.md).
+
+### Durable metrics history (uplift-4 S6)
+
+The checkpoint above keeps the *current* windows across a restart; it cannot
+answer "what was `brief.p95` on Tuesday". `SUBSTRATE_METRICS_HISTORY=on`
+(default **off**) adds a TTL-bounded table, `metric_samples`, in the same
+GreptimeDB the ledger uses, written through the ledger client and nothing else.
+
+**Why this sink, and not OTLP or Prometheus remote-write.** GreptimeDB's OTLP
+metrics endpoint takes binary protobuf only; this repo's exporter is JSON by
+design (see *Why it is hand-rolled*), and a hand-rolled protobuf encoder would
+give up that property for a table Greptime names after the metric and gives no
+TTL header for. Prometheus remote-write needs snappy-compressed protobuf and
+Bun has no built-in snappy. The `/v1/sql` path the ledger already uses needs
+neither, and it lets the TTL sit in the `CREATE TABLE`.
+
+**The table.** Created by the sampler's first write (never at boot, never by a read, never with the flag off),
+idempotently:
+
+```sql
+CREATE TABLE IF NOT EXISTS "metric_samples" (
+  "ts" TIMESTAMP TIME INDEX, "series" STRING, "labels" STRING, "kind" STRING,
+  "value" DOUBLE, "count" BIGINT, PRIMARY KEY ("series")
+) WITH ('append_mode' = 'true', 'ttl' = '14d')
+```
+
+`append_mode` so two series sampled in the same millisecond cannot replace each
+other; `ttl` in the `CREATE`, so no new `ALTER` shape exists in the client and
+`assertAppendOnly` is unchanged (`create` was already an allowed verb). The TTL is
+`SUBSTRATE_METRICS_HISTORY_TTL`: whole days, `1d` to `90d`, default `14d`; anything
+else falls back to `14d` and is named at boot. It is re-rendered from the parsed
+number before it reaches a statement. **A table that already exists keeps the
+retention it has** — changing it later is the operator's `ALTER TABLE … SET 'ttl'`;
+the client never sends one for this table, and never `DROP`s it.
+
+**What is sampled.** A fixed allow-list, every `SUBSTRATE_METRICS_HISTORY_INTERVAL_S`
+(default 60, floor 15), from the same registry snapshot `/metrics` serves:
+
+| Series | Kind | Label | Value |
+| --- | --- | --- | --- |
+| `brief.p50`, `brief.p95` | histogram | `surface` (the 27 surfaces, else `other`) | ms, of the interval's briefs |
+| `emit.success` | ratio | — | stored / (stored + dropped) |
+| `emit.p95` | histogram | — | ms |
+| `plane.availability` | ratio | `plane` | ok / every outcome |
+| `plane.p95` | histogram | `plane` | ms; refused (`open`) calls carry no duration and are left out |
+| `cache.hit_ratio` | ratio | — | hit / (hit + miss) |
+| `admission.decisions` | counter | `decision` | count in the interval |
+| `docs.search` | counter | `outcome` | count in the interval |
+| `docs.p95` | histogram | — | ms |
+| `capacity.runway_days` | gauge | — | days, only when the runway is judged |
+
+Counters and histograms are **deltas since the previous sample**, so a row says
+what happened in its interval; `count` is the interval's sample count. A value
+below the previous one is a reset (a restart) and counts as everything since the
+reset — a delta is never negative. The first snapshot after start is a baseline
+and writes only the gauge, so a checkpoint-seeded registry cannot draw a spike.
+Quantiles come from the interval's bucket counts; one above the top bucket bound
+reads as that bound. A series with no activity in an interval writes no row.
+`labels` is canonical JSON of the one closed-set label the series carries.
+
+**Rate and size (estimates).** A typical interval writes **20–30 rows** (a few
+active surfaces at two rows each, up to five planes at two, the emit, cache, docs
+and admission series, the runway), so about **29 000–43 000 rows a day at 60 s**.
+The ceiling is the 200-row batch cap: **288 000 rows a day**, about **4 million
+over 14 days**, reached only if every surface, plane and label is active at once.
+These are estimates from the series count, not measurements, and no per-row size has
+been measured: read the real figure from the ledger's `capacity` read (`/healthz`,
+the ten largest tables by disk) after a day of running.
+
+**Volume size (operator note).** The Greptime volume is recorded as **500 MB** in
+one place (uplift-2 context) and as **5 GB** in the Notion build plan; the
+Dragonfly instance is recorded with 5 GB. Nothing here resolves the conflict, and
+no claim is made about what share of either the history takes: confirm the real
+volume and the measured table size before enabling it, and before raising the TTL.
+
+**Failure behaviour.** Nothing on a request path waits for it. One multi-row
+`INSERT` per interval (at most 200 rows), through the ledger's plane gate with the
+deadline (3 s) inside the gated call, so a timeout counts as a breaker failure
+and an open breaker costs no network. On any failure the batch is **dropped, not
+retried**, and counted as `substrate.metrics.history.dropped{reason}` in rows, with
+`reason` one of `breaker_open`, `unavailable`, `rejected`, `ddl`, `schema`, `invalid`,
+`capped`, `internal`. `schema` is a `metric_samples` table that already exists
+without `append_mode` (checked on the live table before the first write, as the
+ledger tables are): rows of different labels would replace one another, so nothing
+is written, one boot-log line names the table, and an operator must drop and
+recreate it — the client never does. A write still in flight when the next tick fires skips that
+tick (the deltas accumulate into the next sample, so only a *failed* batch loses
+data). The timer is unref'd; shutdown waits for the write in flight and then
+takes one fresh sample, within the same two-second bound as the other final
+flushes.
+
+**Reading it back.** `GET /slo/history?series=<name>&window=<n><m|h|d>&step=<s>`,
+served beside `/slo` (not audited, metered as a read). `series` must be one of the
+names above (a 400 lists them); `window` defaults to `1h` and is capped at the
+configured TTL (`retentionDays` in the answer says what that is — an existing table
+keeps the retention it was created with, see the variable's row below); `step` is
+whole seconds or `<n>s|m|h`, clamped to 15 s – 1 day. **The step actually used is
+`stepS` in the answer**, and it is raised until `(buckets + 1) × label values` fits
+**2000 points**: a bucket can hold one row per label value (28 for `brief.*`, 5 for
+`plane.*`), so a day of `brief.p95` runs at about 20-minute buckets and 14 days at
+about 5 hours, and the oldest bucket of the window is always present. The answer is
+`date_bin` buckets folded per series (`sum` for counters, `max` for p95, `avg` for
+p50 and gauges, sample-weighted average for ratios), oldest first, with only the
+series' closed label.
+
+With the history off, or no ledger configured, it is `404 {"enabled": false}`; a
+store that cannot answer is `503` with a fixed message, never the store's error text.
+**A read never creates the table**: only the sampler's first write does, so before
+that (or if the history was never on) the answer is an empty list. The route needs a
+bearer exactly like `/slo` (unless `SUBSTRATE_ALLOW_ANONYMOUS=1`), and every miss scans
+the whole window through the ledger's breaker, so each validated request key is
+memoised for 15 s (200 answers only, at most 64 kept) and the read has its own 2.5 s
+deadline — a timeout counts as a ledger failure like any other. A request for a key
+already being read joins that read, and running reads are held apart from kept
+answers, so they are never evicted while they run. At most **16 reads** run at once:
+past that a new key starts no read and is answered with its last kept answer if there
+is one, else `503 {"enabled": true, "busy": true}` with `Retry-After: 5`. A refused
+request is never a key.
+
+**Rollback.** `SUBSTRATE_METRICS_HISTORY=off` (or unset) and restart: no timer,
+no write, `/slo/history` answers 404. The table stays and its rows expire on the
+TTL; dropping it is an operator action (`DROP TABLE "metric_samples"` run by hand —
+the client refuses `DROP`). Turning the flag off after it was on leaves one line in
+the next boot's log: the checkpoint still carries the drop counter, which the
+running release no longer registers.
 
 ### Two things the evaluator does on purpose
 
@@ -622,6 +779,7 @@ checks and the bearer order.
 | `GET /slo` | the verdicts computed from it, the breached ids (catalogue, plane and burn), `burn`, the per-plane `planes`, the `admission` refusal rate, the `docs` row, the `capacity` runway row and `history` |
 | `POST /evidence` | `{ "graph_id": "ut-…", "format": "json" \| "html" }` |
 | `GET /healthz` | now also `auditDurable`, `auditRecords`, `planes`, `capacity`, `cachedAt` and `stale` |
+| `GET /slo/history` | `?series=&window=&step=`: durable, aggregated metric history from `metric_samples` (uplift-4 S6); `404 {"enabled":false}` unless `SUBSTRATE_METRICS_HISTORY=on` and a ledger is configured |
 
 `/metrics` and `/slo` are served whether or not a collector is configured, so an
 operator can read the same numbers the SLOs are computed from without standing one
@@ -659,6 +817,10 @@ substrate-specific spelling.
 | `SUBSTRATE_SLO_PLANE_AVAILABILITY` | `0.99` | Floor for every `plane.<name>.availability` over the rolling hour. |
 | `SUBSTRATE_SLO_RUNWAY_DAYS` | `14` | Floor for `capacity.index.runway_days`. |
 | `SUBSTRATE_INDEX_VOLUME_BYTES` | — | The index volume's size; unset leaves the runway `insufficient-data` with the reason. |
+| `SUBSTRATE_INDEX_ARCHIVE_DIR` | — | Where `substrate index archive` writes (uplift-4 S2). Set on the server too, and `/healthz.jobs.index` and the `index.archive.age` row appear; unset leaves both absent. |
+| `SUBSTRATE_INDEX_ARCHIVE_MAX_AGE_H` | — | Hours the newest complete index archive may be old; unset keeps `index.archive.age` report-only (26 once the timer is installed). |
+| `SUBSTRATE_INDEX_ARCHIVE_MAX_SECONDS`, `SUBSTRATE_INDEX_ARCHIVE_MAX_BYTES` | `900`, 1 GiB | Bounds on one export; past either the transaction rolls back and nothing is left behind. |
+| `SUBSTRATE_INDEX_TUNE` | off | `apply` runs the idempotent `graph_nodes` storage tune at boot (`docs/runbooks/index-archive.md`). |
 | `SUBSTRATE_SLO_CHECKPOINT` | `/var/lib/substrate/slo-checkpoint.json` when that directory exists, else off | Absolute path of the SLO checkpoint; `off` disables; a relative path disables and is named at boot. |
 | `SUBSTRATE_SLO_CHECKPOINT_S` | `60` | Seconds between checkpoint writes; `0` writes only at shutdown. |
 | `SUBSTRATE_SLO_NOTIFY` | off | `1` schedules the transition notifier. |
@@ -676,11 +838,14 @@ substrate-specific spelling.
 | `SUBSTRATE_CACHE_CONNECT_TIMEOUT_MS` | `250` | One cache connect. |
 | `SUBSTRATE_HEALTHZ_CACHE_MS` | `5000` | How long a computed `/healthz` body is served to pollers; `0` = recompute per call. |
 | `SUBSTRATE_BUDGETS` | `shadow` | `off` \| `shadow` \| `enforce`: whether the admission buckets are skipped, decided and counted only, or answered with 429. |
-| `SUBSTRATE_BUDGET_READ_RPS` / `_BURST` | `20` / `40` | Per surface and second, with one second of headroom; reads are the GET routes, `/brief`, `/memory/recall`, `/docs/search`, `/events/query`, `/verify`, `/evidence`, `/drift` and the read tools. |
+| `SUBSTRATE_BUDGET_READ_RPS` / `_BURST` | `20` / `40` | Per surface and second, with one second of headroom; reads are the GET routes, `/brief`, `/memory/recall`, `/docs/search`, `/events/query`, `/verify`, `/evidence`, `/drift`, `/slo/history` and the read tools. |
 | `SUBSTRATE_BUDGET_WRITE_RPS` / `_BURST` | `10` / `20` | `/events`, `/memory`, `/docs/ingest`, `/docs/merge-trigger`, `/skills/propose`, `/handoff` and the write tools. |
 | `SUBSTRATE_BUDGET_COORDINATION_RPS` / `_BURST` | `30` / `60` | `graph_claim`, `graph_heartbeat`, `graph_release`, `graph_complete`, `coord_reap_leases`: its own bucket, so reads never starve a heartbeat. |
 | `SUBSTRATE_BUDGET_ANONYMOUS_RPS` / `_BURST` | `2` / `4` | Every class of the bucket all accepted untokened bridge callers share. |
 | `SUBSTRATE_BUDGET_<SURFACE>_<CLASS>_RPS` / `_BURST` | — | Per-surface override (`GROK_BOT`, `SWARM_A01_ORCH`, …, the `SUBSTRATE_TOKEN_*` spelling); a half left unset is the class value. |
+| `SUBSTRATE_METRICS_HISTORY` | off | `on` samples the registry into `metric_samples` and serves `/slo/history`; anything else is off. It also needs the ledger: with no ledger configured it stays off, the route answers `404 {"enabled":false}` and boot says why. |
+| `SUBSTRATE_METRICS_HISTORY_INTERVAL_S` | `60` | Seconds between samples; floor 15, ceiling 3600. |
+| `SUBSTRATE_METRICS_HISTORY_TTL` | `14d` | Whole days `1d`–`90d`, applied when the table is **created**; anything else falls back to `14d`. An existing table keeps the retention it was created with, so a raised value needs an operator `ALTER TABLE "metric_samples" SET 'ttl'='<n>d'` on it; until then `/slo/history` accepts windows up to the configured value (`retentionDays`) but the table holds no more than its own TTL. |
 
 An endpoint pasted as `https://collector/v1/metrics` is accepted: the trailing
 `/v1/metrics` is stripped, because appending it again would 404 on every export —

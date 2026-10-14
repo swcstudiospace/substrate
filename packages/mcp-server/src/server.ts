@@ -11,8 +11,10 @@
  *   POST /verify        recompute a graph's hash chain
  *   POST /evidence      the per-graph evidence bundle, as JSON or HTML
  *   GET  /healthz       store reachability, whether events can actually be written, each plane's breaker, and the ledger jobs' coverage
- *   GET  /metrics       the OTLP metric snapshot this process holds
+ *   GET  /metrics       the OTLP metric snapshot this process holds (counters, histograms, registry gauges), plus the labelled docs gauges
  *   GET  /slo           the SLO verdicts computed from it, plus burn and per-plane availability
+ *   GET  /slo/history   the durable metrics history behind /slo (uplift-4 S6), metered as a `read`, off unless the history is on
+ *   GET  /livez         process liveness for the systemd watchdog: uptime and event-loop lag, no store I/O, local peers only
  *
  * Hooks get REST because a hook process cannot call an MCP tool — it has no
  * client. Both paths run the same service code.
@@ -22,7 +24,9 @@
  * for both transports: every route that reaches the service goes through `auditedRest`
  * under the same tool name and the same audit mode its MCP equivalent has, and a
  * fail-closed route whose record the chain refuses is answered 503 rather than served.
- * Only `/healthz`, `/metrics` and `/slo` are exempt, and no agent action is behind them.
+ * Only `/healthz`, `/metrics`, `/slo`, `/slo/history` and `/livez` are exempt, and no agent action is behind them.
+ * `/slo/history` is served beside `/slo` under the same bearer rule (a token, unless `SUBSTRATE_ALLOW_ANONYMOUS=1`)
+ * and is admission-metered as a `read` (`ROUTE_CLASSES`). `/livez` is also answered before the bearer check, to a peer that is this host only.
  *
  * Since uplift-3 N3 every other request also passes the admission budget of its
  * bearer's surface — after the 401, before the handler and before the audit —
@@ -32,7 +36,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { auditMode } from "@substrate/audit";
-import { classifyEventRefusal, evaluateAdmissionSlo, loadBurnThresholds, type EventRefusalReason } from "@substrate/observability";
+import { classifyEventRefusal, evaluateAdmissionSlo, evaluateDocsFreshnessSlo, loadBurnThresholds, type EventRefusalReason } from "@substrate/observability";
 import {
 	anonymousBridge,
 	isOperator,
@@ -44,6 +48,7 @@ import {
 import { Admission, admitBatch, budgetBody, budgetRefusal, routeClass, type AdmissionVerdict } from "./admission.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
 import { DATASET_TRIGGERS } from "./docs-datasets.ts";
+import { freshnessGauges } from "./docs-freshness.ts";
 import { scanIngestPages } from "./docs-ingest.ts";
 import { formatDrift } from "./drift.ts";
 import { InvalidEventError } from "./event.ts";
@@ -60,10 +65,12 @@ import {
 	toolCallsIn,
 	type Observability,
 } from "./observe.ts";
+import { MetricHistoryMemo, metricHistoryAnswer } from "./metrics-history.ts";
 import { redact } from "./redact.ts";
 import type { Substrate } from "./service.ts";
 import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
 import { EVENT_KINDS, SURFACES, type Surface } from "./types.ts";
+import { isLocalPeer, livezBody, LoopLagMonitor } from "./watchdog.ts";
 
 /** One hour. Anonymous callers are logged once per window, not once per request. */
 const ANONYMOUS_LOG_INTERVAL_MS = 60 * 60 * 1000;
@@ -86,6 +93,8 @@ const ANONYMOUS_ROUTES = new Set([
 	"/metrics",
 	"/slo",
 	"/evidence",
+	"/slo/history",
+	"/livez",
 ]);
 
 function anonymousRoute(pathname: string): string {
@@ -447,7 +456,7 @@ function bodySurface(body: Record<string, unknown>): Surface | null {
  * is the wrapper every route goes through, so honouring it is not a line a future route
  * has to remember.
  *
- * `/healthz`, `/metrics` and `/slo` are not audited: they are monitoring traffic, no
+ * `/healthz`, `/metrics`, `/slo`, `/slo/history` and `/livez` are not audited: they are monitoring traffic, no
  * agent action is behind them, and a trail dominated by a Prometheus scrape is a
  * trail nobody reads.
  */
@@ -514,6 +523,9 @@ export function createHttpServer(
 ) {
 	const anonymousLog = new AnonymousCallerLog(options.anonymousIntervalMs, options.now, options.anonymousLog);
 	anonymousLog.start();
+	// `/livez` (uplift-4 S3) answers from this monitor alone: no store, no plane.
+	const loopLag = new LoopLagMonitor();
+	loopLag.start();
 	// Read once here so a malformed `SUBSTRATE_BURN_*` ceiling warns at boot, not on
 	// the first scrape; the route re-reads the environment per request and the
 	// reader warns once per variable, so this line never repeats itself.
@@ -528,6 +540,8 @@ export function createHttpServer(
 	// The last `/healthz` body, served again for `config.healthzCacheMs` (uplift-2 R1).
 	const now = options.now ?? Date.now;
 	let healthMemo: HealthMemo | null = null;
+	// uplift-4 S6: `/slo/history` answers, 15 s per validated request, one read per key in flight.
+	const historyMemo = new MetricHistoryMemo(now);
 	// uplift-3 N3: the bucket per surface × class, on the cache plane. The
 	// decision is recorded through the same observer the service reports to.
 	const admission = new Admission(config.admission, {
@@ -562,6 +576,8 @@ export function createHttpServer(
 		let eventRefusal: EventRefusalReason | null = null;
 		let eventShape: { surface: string; kind: string } = { surface: "none", kind: "none" };
 		const claim = { surface: "none" };
+		// Set when the request is answered as the host's own liveness probe.
+		let selfProbe = false;
 		res.on("close", () => {
 			span.setAttribute("http.response.status_code", res.statusCode);
 			if (res.statusCode >= 500) span.fail(`HTTP ${res.statusCode}`);
@@ -581,12 +597,26 @@ export function createHttpServer(
 				);
 			}
 			// Accepted untokened callers only. A 401 was refused, not served anonymously.
-			if (config.allowAnonymous && surface === null && res.statusCode !== 401) {
+			// The watchdog's own `/livez` probe is not a caller: counting it would keep
+			// "any anonymous callers left?" above zero for as long as the host runs.
+			if (config.allowAnonymous && surface === null && res.statusCode !== 401 && !selfProbe) {
 				const anonRoute = anonymousRoute(url.pathname);
 				observability.instruments.recordAnonymous({ route: anonRoute, claimedSurface: claim.surface });
 				anonymousLog.record(anonRoute, claim.surface);
 			}
 		});
+
+		// `GET /livez` (uplift-4 S3): the systemd watchdog's probe. Answered before
+		// the bearer check because the watchdog sends none, and only to a peer that
+		// is this host (a loopback client, or a client at the address it connected
+		// to); anyone else falls through to the checks below. It reads the lag
+		// monitor and the process clock and touches no store, plane, cache or audit
+		// chain, so a store outage can never fail it. No agent action is behind it.
+		if (req.method === "GET" && url.pathname === "/livez" && isLocalPeer(req.socket.remoteAddress, req.socket.localAddress)) {
+			selfProbe = true;
+			sendJson(res, 200, livezBody(loopLag));
+			return;
+		}
 
 		// A configured deployment requires a token that names a surface, unless
 		// `SUBSTRATE_ALLOW_ANONYMOUS=1` is keeping untokened callers during migration.
@@ -664,7 +694,17 @@ export function createHttpServer(
 				// The snapshot this process holds, in the shape `otlp.ts` encodes. Served
 				// whether or not a collector is configured, so an operator can read the same
 				// numbers the SLOs are computed from without standing one up.
-				sendJson(res, 200, { startedAt: new Date(observability.startedAt).toISOString(), metrics: observability.snapshot() });
+				// The docs gauges ride beside the snapshot (uplift-4 S7). `metrics` holds
+				// counters, histograms and the registry's unlabelled gauges; the labelled docs
+				// gauges (`substrate.docs.freshness_seconds`, `substrate.docs.trigger_lag_seconds`)
+				// are served ONLY here, under `gauges`, and are not in OTLP. The key is absent
+				// until a dataset has data. A read: nothing is settled or written here.
+				const gauges = freshnessGauges(await substrate.evaluateDocsFreshness().catch(() => []));
+				sendJson(res, 200, {
+					startedAt: new Date(observability.startedAt).toISOString(),
+					metrics: observability.snapshot(),
+					...(gauges.length > 0 ? { gauges } : {}),
+				});
 				return;
 			}
 
@@ -686,13 +726,29 @@ export function createHttpServer(
 				// The docs-search latency objective (uplift-3 N5) rides beside it too:
 				// one row, `docs.search.p95`, in the catalogue's entry shape, never
 				// folded into `breached`.
-				const docs = observability.evaluateDocs();
+				// `docs.freshness` (uplift-4 S7) joins it when a dataset has data: report-only too.
+				const freshness = await substrate.evaluateDocsFreshness().catch(() => []);
+				const docs = [
+					...observability.evaluateDocs(),
+					...evaluateDocsFreshnessSlo(
+						freshness.map((row) => ({
+							dataset: row.dataset,
+							freshnessSeconds: row.freshness_seconds,
+							triggerLagSeconds: row.trigger_lag_seconds,
+							stale: row.stale,
+							lagging: row.lagging,
+						})),
+						config.docsFreshness,
+					),
+				];
 				// `brief.p95` per surface (uplift-3 N7): one row per surface with enough
 				// samples, same shape plus `surface`; empty until a surface qualifies and
 				// never folded into `breached` — the global row is still the catalogue's.
 				const surfaces = observability.evaluateBriefSurfaces();
 				// The capacity runway (uplift-3 N2): one row over the `/healthz` size ring.
 				const capacity = observability.evaluateCapacity();
+				// The index archive age (uplift-4 S2): one row, present only when an archive directory is configured; report-only until its ceiling is set.
+				const indexArchive = await substrate.indexArchiveSlo();
 				// 200 either way. A breached objective is information, not a broken service,
 				// and a monitor that read this as an outage would page on a slow hour.
 				//
@@ -713,8 +769,17 @@ export function createHttpServer(
 					docs,
 					surfaces,
 					capacity,
+					...(indexArchive !== null ? { indexArchive: [indexArchive] } : {}),
 					history: observability.history(),
 				});
+				return;
+			}
+
+			// uplift-4 S6: the durable metrics history, aggregated numbers only. 404 with
+			// the history off or no ledger; the answer (and its validation) lives in `metrics-history.ts`.
+			if (req.method === "GET" && url.pathname === "/slo/history") {
+				const answer = await metricHistoryAnswer({ settings: config.metricsHistory, greptime: substrate.greptime, now, memo: historyMemo }, url.searchParams);
+				send(res, answer.status, JSON.stringify(answer.body), "application/json", answer.headers);
 				return;
 			}
 
@@ -1291,6 +1356,7 @@ export function createHttpServer(
 	server.close = ((callback?: (err?: Error) => void) => {
 		anonymousLog.stop();
 		refusalLog.stop();
+		loopLag.stop();
 		// A request still in flight can finish after the timers stop. Flush once more when
 		// the server has actually closed, so its count still reaches stderr.
 		return close((err?: Error) => {
