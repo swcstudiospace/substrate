@@ -61,7 +61,7 @@ The rollback side of the same question — what a rollback leaves behind and why
 
 ## Units
 
-Every service in this directory uses `WorkingDirectory=/opt/agent-substrate/current`. The MCP, herdr and muse units also set `ConditionPathExists` on their entry file under that symlink, so a missing entry skips the start instead of crash-looping. The Grok unit has no such guard. Install the matching drop-in with each unit:
+All the units in this directory use `WorkingDirectory=/opt/agent-substrate/current`. The MCP, herdr, muse, skills and anchor units also set `ConditionPathExists` on their entry file under that symlink, so a missing entry skips the start instead of crash-looping. The Grok unit has no such guard. Install the matching drop-in with each unit:
 
 | Unit | Drop-in | EnvironmentFile |
 | --- | --- | --- |
@@ -69,6 +69,8 @@ Every service in this directory uses `WorkingDirectory=/opt/agent-substrate/curr
 | `substrate-collector-grok.service` | `substrate-collector-grok.service.d/10-environment.conf` | `/etc/substrate/collector-grok.env` |
 | `substrate-collector-herdr.service` | `substrate-collector-herdr.service.d/10-environment.conf` | `/etc/substrate/substrate-collector-herdr.env` |
 | `substrate-collector-muse.service` | `substrate-collector-muse.service.d/10-environment.conf` | `/etc/substrate/substrate-collector-muse.env` |
+| `substrate-skills-sync.service` | `substrate-skills-sync.service` | `/etc/substrate/substrate-skills-sync.env` |
+| `substrate-skills-bridge.service` | `substrate-skills-bridge.service` | `/etc/substrate/substrate-bridge.env` |
 | `substrate-anchor.service` (+ `substrate-anchor.timer`) | `substrate-anchor.service.d/10-environment.conf` | `/etc/substrate/substrate.env` |
 | `substrate-index-sweep.service` (+ `substrate-index-sweep.timer`, staged: install and enable are operator steps after the dry-run report has been read for a few days) | `substrate-index-sweep.service.d/10-environment.conf` (also carries `Environment=SUBSTRATE_INDEX_SWEEP=dry-run`) | `/etc/substrate/substrate.env` |
 | `substrate-ledger-archive.service` (+ `substrate-ledger-archive.timer`, staged: install and enable are operator steps after the off-box archive path is mounted; see *Daily ledger archive*) | `substrate-ledger-archive.service.d/10-environment.conf` (carries `SUBSTRATE_LEDGER_ARCHIVE_DIR` once the operator sets it) | `/etc/substrate/substrate.env` |
@@ -248,9 +250,7 @@ Rollback: remove the `20-watchdog.conf` drop-in, `daemon-reload`, restart (back 
 
 ## Code that reaches main through v1.3, not this PR
 
-herdr and muse are on `main` since Phase 19 (LANEB-01 to LANEB-04) and run from the release like the Grok collector. `skills-sync.ts` and `substrate_miner` are still not on `main`.
-
-- skills-sync and the miner bridge land through Phase 22, from commits `354310c` and `be77187` on `docs/data-planes-tailscale`, with Phase 18's shared redactor. `354310c` also contains herdr and muse; Phase 19 still owns that recovery. Phase 22 owns `skills-sync.ts` and `packages/miner`.
+herdr and muse are on `main` since Phase 19 (LANEB-01 to LANEB-04) and run from the release like the Grok collector. `skills-sync.ts`, `substrate_miner` and the Omp extension landed on `main` through Phase 22 (plans 22-01 to 22-03), with Phase 18's shared redactor. The four skills units in this directory are the Phase 22 wiring for that code.
 
 ## Operator steps
 
