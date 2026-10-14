@@ -212,8 +212,8 @@ export async function composeBriefSections(
 	const budgetMs = options.budgetMs ?? 0;
 	const windowDays = options.recentWindowDays ?? DEFAULT_RECENT_WINDOW_DAYS;
 	const sections: BriefSection[] = [];
-	const section = (id: BriefSectionId, lines: string[], items: BriefItem[], title?: string): void => {
-		sections.push({ id, lines, ...(title !== undefined ? { title } : {}), items });
+	const section = (id: BriefSectionId, lines: string[], items: BriefItem[], title?: string, unlisted = 0): void => {
+		sections.push({ id, lines, ...(title !== undefined ? { title } : {}), items, ...(unlisted > 0 ? { unlisted } : {}) });
 	};
 	const deadlines: Array<string | null | undefined> = [];
 	const failed = new Set<BriefSource>();
@@ -296,10 +296,12 @@ export async function composeBriefSections(
 			const shown = graph.nodes.slice(0, MAX_BRIEF_NODES);
 			const left = graph.nodes.length - shown.length;
 			const described = shown.map((node) => describeNode(node));
-			const more = left > 0 ? ` · … and ${left} more node${left === 1 ? "" : "s"} not listed` : "";
 			const items: BriefItem[] = shown.map((node, i) => ({ text: `- ${described[i]}`, rank: nodeRank(node) }));
-			if (left > 0) items.push({ text: `- … and ${left} more node${left === 1 ? "" : "s"} not listed`, rank: 99 });
-			section("nodes", [`Nodes: ${described.join(" · ")}${more}`], items, "Nodes:");
+			// The notice is its own line after the nodes in the full text; in the compact profile it is not
+			// an item but a count (`unlisted`) that joins the omitted line, so no node cap can drop it or miscount it.
+			const lines = [`Nodes: ${described.join(" · ")}`];
+			if (left > 0) lines.push(`… and ${left} more node${left === 1 ? "" : "s"} not listed`);
+			section("nodes", lines, items, "Nodes:", left);
 			for (const node of graph.nodes) deadlines.push(node.lease_expires_at);
 		}
 	} else if (graphId) {

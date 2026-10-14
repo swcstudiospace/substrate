@@ -77,7 +77,7 @@ interface Rig {
 	cache: ReadThroughCache;
 	redis: MapRedis;
 	config: SubstrateConfig;
-	state: { status: string; down: boolean; lease: string | null; reads: number };
+	state: { status: string; down: boolean; lease: string | null; reads: number; memory: unknown[] };
 }
 
 /** `offsetMs` runs the cache's clock ahead of the snapshot's own timestamp, so a stale age is exact. */
@@ -85,7 +85,7 @@ function rigOf(mode: CacheSwrMode, offsetMs = 0): Rig {
 	const redis = new MapRedis();
 	const config = loadConfig({});
 	const cache = new ReadThroughCache({ redis, enabled: true, log: () => {}, now: () => Date.now() + offsetMs, swr: { mode, windowS: 30 } });
-	const state = { status: "active", down: false, lease: null as string | null, reads: 0 };
+	const state = { status: "active", down: false, lease: null as string | null, reads: 0, memory: [] as unknown[] };
 	const index = {
 		getGraph: async () => {
 			state.reads += 1;
@@ -93,7 +93,7 @@ function rigOf(mode: CacheSwrMode, offsetMs = 0): Rig {
 			return graphView(state.status, state.lease);
 		},
 		openGraphs: async () => [],
-		memoryForBrief: async () => [],
+		memoryForBrief: async () => state.memory,
 	};
 	return { substrate: new Substrate(config, { index: index as never, greptime: null, cache }), cache, redis, config, state };
 }
@@ -150,6 +150,8 @@ describe("read-your-writes with SUBSTRATE_CACHE_SWR off and shadow (uplift-4 S4)
 			expect(after.ageS).toBeUndefined();
 			expect(after.state).toBe("complete");
 			// Shadow saw that enforce could have served stale; it served live regardless.
+			// The shadow probe is off the answer path; let it settle before reading its count.
+			await settle();
 			expect(cache.health().wouldServeStale).toBe(mode === "shadow" ? 1 : 0);
 			expect(cache.health().stale).toBe(0);
 		});
@@ -294,6 +296,25 @@ describe("the snapshot records its own deadline (uplift-4 S4)", () => {
 		const next = await substrate.briefDetailed(request);
 		expect(next.text).toContain("blocked");
 		expect(next.ageS).toBeUndefined();
+	});
+});
+
+describe("an oversized background refresh (uplift-4 S4 x S5)", () => {
+	const snapshot = (redis: MapRedis) => JSON.parse(redis.values.get(snapshotKey("brief-snapshot", "cursor", SNAPSHOT_ARGS)) ?? "null") as { v: { text: string; at: string } };
+
+	test("is not stored: the stale brief's snapshot is kept", async () => {
+		const { substrate, cache, redis, state } = rigOf("enforce", 7_000);
+		await substrate.briefDetailed(request);
+		const before = snapshot(redis).v;
+		// The refresh composes a brief whose encoding is past the cache's decode limit.
+		state.memory = [1, 2, 3, 4].map((n) => ({ id: `m${n}`, kind: "decision", text: `d${n} ${"x".repeat(300_000)}`, writer: "hermes", trust: "human-confirmed", version: 1, created: new Date().toISOString() }));
+		await cache.bump(MEMORY_GENERATION_KEY);
+		const stale = await substrate.briefDetailed(request);
+		expect(stale.ageS).toBe(7);
+		for (let turn = 0; turn < 16; turn += 1) await settle();
+		const after = snapshot(redis).v;
+		expect(after.text).toBe(before.text);
+		expect(after.at).toBe(before.at);
 	});
 });
 

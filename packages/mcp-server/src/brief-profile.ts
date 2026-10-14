@@ -80,6 +80,8 @@ export interface BriefSection {
 	title?: string;
 	/** Compact: the selectable lines, in the section's own order. */
 	items: BriefItem[];
+	/** Items the compose step left out before any profile applied (nodes past the compose cap): never selectable, always counted as omitted. */
+	unlisted?: number;
 }
 
 export const DEFAULT_COMPACT_NODES = 12;
@@ -336,7 +338,7 @@ export function renderCompactBrief(sections: readonly BriefSection[], stateLine:
 			for (let i = 0; i < group.kept; i++) out.push(group.lines[i]!);
 		}
 		const missing = groups
-			.map((group) => ({ label: OMIT_LABEL[group.section.id], count: group.capped + group.lines.length - group.kept }))
+			.map((group) => ({ label: OMIT_LABEL[group.section.id], count: group.capped + group.lines.length - group.kept + (group.section.unlisted ?? 0) }))
 			.filter((entry) => entry.count > 0);
 		if (missing.length > 0) {
 			out.push(`...omitted: ${missing.map((entry) => `${entry.label} ${entry.count}`).join(", ")} (profile=compact; request profile=full)`);
@@ -393,6 +395,7 @@ const SectionSchema = z.object({
 	lines: z.array(z.string()).max(MAX_ENTRIES),
 	title: z.string().optional(),
 	items: z.array(ItemSchema).max(MAX_ENTRIES),
+	unlisted: z.number().int().min(0).optional(),
 });
 
 const SectionsSchema = z.array(SectionSchema).max(MAX_SECTIONS);

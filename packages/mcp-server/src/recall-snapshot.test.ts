@@ -13,7 +13,9 @@ import {
 	MAX_RECALL_HITS,
 	MAX_RECALL_HIT_CHARS,
 	MAX_SUBJECT_CHARS,
-	PREFETCH_PER_TICK,
+	PREFETCH_HARD_MAX,
+	recallCapacity,
+	recallPerTick,
 	RECALL_STALE_FACTOR,
 	MIN_RECALL_REFRESH_S,
 	RETAIN_DEBOUNCE_MS,
@@ -182,6 +184,59 @@ describe("briefRecallConfigWarnings", () => {
 		expect(needs({ SUBSTRATE_BRIEF_RECALL: "shadow", ...cacheOn, SUBSTRATE_CACHE: "0" })).toHaveLength(1);
 		expect(needs({ SUBSTRATE_BRIEF_RECALL: "enforce", ...cacheOn })).toEqual([]);
 		expect(needs({})).toEqual([]);
+	});
+});
+
+describe("recall capacity and saturation", () => {
+	test("capacity is derived from the interval and TTL: 32 at the defaults, 8 with an hourly interval", () => {
+		expect(WANTED_MAX).toBe(32);
+		expect(PREFETCH_HARD_MAX).toBe(8);
+		expect(recallCapacity({ intervalS: 120, ttlS: 900 })).toBe(32);
+		expect(recallCapacity({ intervalS: 3600, ttlS: 900 })).toBe(8);
+		expect(recallPerTick({ intervalS: 120, ttlS: 900 }, 32)).toBe(8);
+		expect(recallPerTick({ intervalS: 120, ttlS: 900 }, 1)).toBe(1);
+	});
+
+	test("32 wanted pairs under sustained traffic and no retains stay fresh across three TTLs at the defaults", async () => {
+		const { prefetcher, stored, clock, control } = rig();
+		control.outcome = async ({ bank, query }) => ({ ok: true, hits: good(bank, query.replace("Decisions and warnings for ", "")) });
+		const repos = Array.from({ length: 32 }, (_, i) => `acme/r${i}`);
+		const worst: number[] = [];
+		for (let tickNo = 0; tickNo < 23; tickNo++) {
+			// Every pair is asked about on each tick: sustained traffic keeps the whole set wanted.
+			for (const repo of repos) prefetcher.want("omp", repo);
+			await prefetcher.tick();
+			clock.at += 120_000;
+			if (tickNo >= 6) {
+				for (const repo of repos) {
+					const held = stored.get(`omp|${repo}`);
+					worst.push(held === undefined ? Number.POSITIVE_INFINITY : clock.at - Date.parse(held.at));
+				}
+			}
+		}
+		// 23 ticks of 120 s is more than three 900 s TTLs; nothing was ever older than the TTL, and nothing was dropped.
+		expect(Math.max(...worst)).toBeLessThanOrEqual(TTL_S * 1000);
+		expect(prefetcher.health()).toMatchObject({ capacity: 32, wanted: 32, saturated: false });
+	});
+
+	test("an interval too slow for the TTL reports its capacity and saturates; boot says so once", () => {
+		const slow = new RecallPrefetcher({
+			config: { mode: "shadow", intervalS: 3600, ttlS: TTL_S, budgetMs: 1500 },
+			bankFor: () => "sub-omp",
+			breakerOpen: () => false,
+			cacheAvailable: () => true,
+			recall: async () => ({ ok: false }),
+			peek: async () => null,
+			put: async () => true,
+			now: () => T0,
+			timers: new FakeTimers(),
+		});
+		for (let i = 0; i < 10; i++) slow.want("omp", `acme/r${i}`);
+		expect(slow.health()).toEqual({ mode: "shadow", capacity: 8, wanted: 8, saturated: true });
+		const lines = (env: Record<string, string>) => briefRecallConfigWarnings(loadConfig(env)).filter((line) => line.includes("(surface, repo) pairs fresh"));
+		expect(lines({ SUBSTRATE_BRIEF_RECALL: "shadow", SUBSTRATE_BRIEF_RECALL_INTERVAL_S: "3600", DRAGONFLY_URL: "redis://127.0.0.1:6379" })).toHaveLength(1);
+		expect(lines({ SUBSTRATE_BRIEF_RECALL: "shadow", DRAGONFLY_URL: "redis://127.0.0.1:6379" })).toEqual([]);
+		expect(lines({ SUBSTRATE_BRIEF_RECALL_INTERVAL_S: "3600" })).toEqual([]);
 	});
 });
 
@@ -392,16 +447,16 @@ describe("recallSection", () => {
 // ── the wanted registry ──────────────────────────────────────────────────────
 
 describe("WantedRegistry", () => {
-	test("holds at most 64 pairs and evicts the least recently asked about", () => {
+	test("holds at most WANTED_MAX (32) pairs and evicts the least recently asked about", () => {
 		const registry = new WantedRegistry();
 		for (let i = 0; i < WANTED_MAX; i++) registry.want("omp", `acme/r${i}`, T0 + i);
 		expect(registry.size).toBe(WANTED_MAX);
 		registry.want("omp", "acme/r0", T0 + 100);
-		registry.want("omp", "acme/r64", T0 + 101);
+		registry.want("omp", `acme/r${WANTED_MAX}`, T0 + 101);
 		expect(registry.size).toBe(WANTED_MAX);
 		expect(registry.has("omp", "acme/r0")).toBe(true);
 		expect(registry.has("omp", "acme/r1")).toBe(false);
-		expect(registry.has("omp", "acme/r64")).toBe(true);
+		expect(registry.has("omp", `acme/r${WANTED_MAX}`)).toBe(true);
 	});
 
 	test("a pair nobody asks about for an hour is dropped", () => {
@@ -473,7 +528,7 @@ describe("RecallPrefetcher", () => {
 		expect(observed).toEqual([]);
 	});
 
-	test("a tick refreshes at most two due pairs, one after another, then the rest on the next", async () => {
+	test("a tick refreshes ceil(wanted / ticks per half TTL) due pairs, one after another, then the rest on the next", async () => {
 		const { prefetcher, recalls, puts, observed, control } = rig();
 		let running = 0;
 		let overlapped = false;
@@ -487,9 +542,11 @@ describe("RecallPrefetcher", () => {
 		};
 		for (const repo of ["acme/a", "acme/b", "acme/c"]) prefetcher.want("omp", repo);
 		await prefetcher.tick();
-		expect(PREFETCH_PER_TICK).toBe(2);
-		expect(recalls).toHaveLength(2);
+		// Three wanted pairs, three ticks per half TTL at the defaults: one pair a tick.
+		expect(recallPerTick({ intervalS: 120, ttlS: TTL_S }, 3)).toBe(1);
+		expect(recalls).toHaveLength(1);
 		expect(overlapped).toBe(false);
+		await prefetcher.tick();
 		await prefetcher.tick();
 		expect(recalls).toHaveLength(3);
 		expect(new Set(recalls.map((request) => request.query)).size).toBe(3);

@@ -494,6 +494,8 @@ What it exports:
 
 When the plane holds more than 200 banks the listing is cut (`truncated`); a configured bank the listing did not reach is then read directly (`GET {bank}/stats`, within the same 16-bank cap): a 404 is `missing`, an answer is present, and any other outcome leaves its `present` as `null` (unknown, never in `missing`).
 
+`GET /healthz` also carries an additive `recall` block while `SUBSTRATE_BRIEF_RECALL` is not `off`: `{mode, capacity, wanted, saturated}` (the pairs the prefetcher can keep fresh at the configured interval and TTL, the pairs wanted now, and whether a live pair was evicted for room within the hour).
+
 The drift report is a report. Nothing creates, patches, consolidates or deletes a bank,
 and the status code of `/healthz` does not move.
 

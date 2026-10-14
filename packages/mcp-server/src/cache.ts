@@ -507,6 +507,14 @@ export class ReadThroughCache {
 		store?: (value: T) => boolean;
 		/** Stale-while-revalidate for this call (uplift-4 S4); absent means single-flight only. */
 		swr?: StaleServing<T>;
+		/**
+		 * This caller's own budget, ms, with `onDeadline` building the answer it gives when the budget
+		 * runs out (its degraded reply). A caller that joins another caller's load waits at most this
+		 * long for it, however long the owner's own budget is, and then answers `onDeadline()` without
+		 * starting a load of its own and without cancelling the shared one. Both must be set.
+		 */
+		deadlineMs?: number;
+		onDeadline?: () => T;
 	}): Promise<T> {
 		const klass = request.klass;
 		if (!this.enabled || !this.redis) {
@@ -570,14 +578,14 @@ export class ReadThroughCache {
 		} else if (request.swr && this.swrMode === "shadow") {
 			// Shadow takes the same decision beside the load, so it adds no serial
 			// round trip; the caller is served live exactly as under `off`.
-			const probe = this.staleDecision(request.swr).then((stale) => {
-				if (stale !== null) this.count("would_serve_stale", klass);
-			});
-			try {
-				return await this.loadShared(klass, key, redis, request, malformed);
-			} finally {
-				await probe;
-			}
+			// The probe only records a count, so it is started and never awaited: a slow
+			// snapshot read must not hold a finished answer, nor the flight slot. It cannot
+			// reject (`staleDecision` swallows its own failures); the catch is belt and braces.
+			void this.staleDecision(request.swr)
+				.then((stale) => {
+					if (stale !== null) this.count("would_serve_stale", klass);
+				})
+				.catch(() => {});
 		}
 		return this.loadShared(klass, key, redis, request, malformed);
 	}
@@ -618,12 +626,40 @@ export class ReadThroughCache {
 		const existing = this.liveFlight(key);
 		if (existing !== null) {
 			this.count("coalesced", klass);
-			const shared = (await existing.promise) as Flight<T>;
+			const startedAt = this.now();
+			// A waiter keeps its own deadline: the owner may have a longer budget than this caller.
+			const shared = await this.withDeadline(existing.promise as Promise<Flight<T>>, spec.onDeadline !== undefined, spec.deadlineMs);
+			if (shared === TIMED_OUT) return (spec.onDeadline as () => T)();
 			if (shared.storable) return cloneShared(shared.value);
-			return (await this.loadStore(klass, key, redis, spec, malformed)).value;
+			// The owner's answer was degraded: load for ourselves, inside what is left of our own budget.
+			const left = spec.deadlineMs === undefined ? undefined : spec.deadlineMs - (this.now() - startedAt);
+			const own = await this.withDeadline(this.loadStore(klass, key, redis, spec, malformed), spec.onDeadline !== undefined, left);
+			return own === TIMED_OUT ? (spec.onDeadline as () => T)() : own.value;
 		}
 		if (this.inflight.size >= this.maxInflight) return (await this.loadStore(klass, key, redis, spec, malformed)).value;
 		return (await this.registerFlight(key, this.loadStore(klass, key, redis, spec, malformed))).value;
+	}
+
+	/**
+	 * `work`, or `TIMED_OUT` once `ms` has passed, when the caller gave both a budget and an
+	 * `onDeadline` to answer with. Neither a budget nor an answer: `work` unchanged. The losing
+	 * side is left running (a shared load must finish for its other waiters); the timer is
+	 * unref'd and cleared on every path.
+	 */
+	private async withDeadline<V>(work: Promise<V>, canAnswer: boolean, ms: number | undefined): Promise<V | typeof TIMED_OUT> {
+		if (ms === undefined || !canAnswer) return work;
+		if (ms <= 0) {
+			work.catch(() => {});
+			return TIMED_OUT;
+		}
+		const expired = Promise.withResolvers<typeof TIMED_OUT>();
+		const timer = setTimeout(() => expired.resolve(TIMED_OUT), ms);
+		timer.unref?.();
+		try {
+			return await Promise.race([work, expired.promise]);
+		} finally {
+			clearTimeout(timer);
+		}
 	}
 
 	/** The registered load for `key` unless it is older than `flightMaxAgeMs` (a hung loader must not capture every later caller). */
@@ -951,7 +987,12 @@ interface RefreshAbort {
 	timedOut: boolean;
 }
 
+/** What a deadline-bound wait answers when its own timer wins. */
+const TIMED_OUT = Symbol("cache wait timed out");
+
 interface LoadSpec<T> {
+	deadlineMs?: number;
+	onDeadline?: () => T;
 	load: () => Promise<T>;
 	refreshAt?: (value: T) => number | null;
 	store?: (value: T) => boolean;

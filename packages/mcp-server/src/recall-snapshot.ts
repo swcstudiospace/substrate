@@ -103,6 +103,11 @@ export function loadRecallConfig(env: Record<string, string | undefined>): Recal
 /** The boot warnings for a loaded recall config, in the shape `index.ts` prints. */
 export function briefRecallConfigWarnings(config: { briefRecall: RecallConfig; cacheEnabled: boolean }): string[] {
 	const warnings = [...config.briefRecall.warnings];
+	if (config.briefRecall.mode !== "off" && recallCapacity(config.briefRecall) < WANTED_MAX) {
+		warnings.push(
+			`SUBSTRATE_BRIEF_RECALL_INTERVAL_S=${config.briefRecall.intervalS} with SUBSTRATE_BRIEF_RECALL_TTL_S=${config.briefRecall.ttlS} can keep ${recallCapacity(config.briefRecall)} (surface, repo) pairs fresh, below the ${WANTED_MAX} the registry supports: beyond that the least recently asked about lose recall (see /healthz.recall)`,
+		);
+	}
 	if (config.briefRecall.mode !== "off" && !config.cacheEnabled) {
 		warnings.push("SUBSTRATE_BRIEF_RECALL is not off but the cache is disabled, so no recall snapshot can be held: nothing is prefetched and no brief carries recall (set DRAGONFLY_URL, or SUBSTRATE_BRIEF_RECALL=off)");
 	}
@@ -300,7 +305,28 @@ export function buildRecallLines(hits: readonly RecallHitInput[], bank: string, 
 
 // ── the wanted registry ──────────────────────────────────────────────────────
 
-export const WANTED_MAX = 64;
+/** The most pairs the registry holds at its largest; the configured interval and TTL may lower it (`recallCapacity`). */
+export const WANTED_MAX = 32;
+/** The most pairs one tick refreshes, sequentially, each under its own deadline. */
+export const PREFETCH_HARD_MAX = 8;
+
+/**
+ * The pairs the configured interval and TTL can keep fresh. A pair is revisited
+ * once per cycle of at most `ticksPerTtl` ticks (the TTL less one interval, so a
+ * snapshot is refreshed before it stops being fresh), `PREFETCH_HARD_MAX` pairs
+ * a tick, capped at `WANTED_MAX`. At the defaults (120 s, 900 s) that is
+ * min(32, 8 x 6) = 32; an interval of an hour gives 8.
+ */
+export function recallCapacity(config: Pick<RecallConfig, "intervalS" | "ttlS">): number {
+	const ticksPerTtl = Math.max(1, Math.floor(config.ttlS / config.intervalS) - 1);
+	return Math.min(WANTED_MAX, PREFETCH_HARD_MAX * ticksPerTtl);
+}
+
+/** Pairs one tick refreshes for `wanted` pairs: enough to cover them all within half a TTL, at most `PREFETCH_HARD_MAX`. */
+export function recallPerTick(config: Pick<RecallConfig, "intervalS" | "ttlS">, wanted: number): number {
+	const ticksPerHalfTtl = Math.max(1, Math.floor(config.ttlS / 2 / config.intervalS));
+	return Math.max(1, Math.min(PREFETCH_HARD_MAX, Math.ceil(wanted / ticksPerHalfTtl)));
+}
 export const WANTED_EXPIRY_MS = 3_600_000;
 
 /** One (surface, repo) a brief asked about. */
@@ -319,7 +345,7 @@ export interface WantedPair {
 const KNOWN_SURFACES: ReadonlySet<string> = new Set(SURFACES);
 
 /**
- * The (surface, repo) pairs the prefetcher refreshes: LRU, 64 entries, and an
+ * The (surface, repo) pairs the prefetcher refreshes: LRU, at most `max` entries (32, or less when the interval cannot keep that many fresh), and an
  * entry nobody has asked about for an hour is dropped. Registering is a map
  * write and nothing else, so `briefDetailed` can do it on the request path.
  * A surface outside the surface list and a repo that is empty or over 200
@@ -327,11 +353,21 @@ const KNOWN_SURFACES: ReadonlySet<string> = new Set(SURFACES);
  */
 export class WantedRegistry {
 	private readonly entries = new Map<string, WantedPair>();
+	private lastEvictedAt: number | null = null;
 
 	constructor(
 		private readonly max = WANTED_MAX,
 		private readonly expiryMs = WANTED_EXPIRY_MS,
 	) {}
+
+	get capacity(): number {
+		return this.max;
+	}
+
+	/** A live pair was evicted for room within the expiry window: more pairs are wanted than can be kept. */
+	saturated(now: number): boolean {
+		return this.lastEvictedAt !== null && now - this.lastEvictedAt <= this.expiryMs;
+	}
 
 	get size(): number {
 		return this.entries.size;
@@ -357,6 +393,8 @@ export class WantedRegistry {
 			const oldest = this.entries.keys().next();
 			if (oldest.done === true) break;
 			this.entries.delete(oldest.value);
+			// A pair somebody asked about within the hour was dropped for lack of room: the registry is saturated.
+			this.lastEvictedAt = now;
 		}
 		return true;
 	}
@@ -437,10 +475,6 @@ export async function withDeadline<T>(work: Promise<T>, ms: number, timers: Time
 
 // ── the prefetcher ───────────────────────────────────────────────────────────
 
-/** Pairs one tick refreshes, at most. */
-export const PREFETCH_PER_TICK = 2;
-/** Pairs one tick looks at, so a registry of stale-looking pairs never costs more than this many cache reads. */
-const PREFETCH_EXAMINED = 16;
 /** Pairs one post-retain flush refreshes, at most. */
 export const PREFETCH_PER_RETAIN = 8;
 /** No pair is recalled again sooner than this, whichever path (tick or post-retain flush) asks. */
@@ -502,13 +536,20 @@ export class RecallPrefetcher {
 	private stopped = false;
 
 	constructor(private readonly deps: RecallPrefetcherDeps) {
-		this.registry = deps.registry ?? new WantedRegistry();
+		this.registry = deps.registry ?? new WantedRegistry(recallCapacity(deps.config));
 		this.now = deps.now ?? Date.now;
 		this.timers = deps.timers ?? SYSTEM_TIMERS;
 	}
 
 	get mode(): BriefRecallMode {
 		return this.deps.config.mode;
+	}
+
+	/** What `/healthz.recall` reports: the configured mode, how many pairs can be kept fresh, how many are wanted and whether eviction has happened. */
+	health(): { mode: BriefRecallMode; capacity: number; wanted: number; saturated: boolean } {
+		const now = this.now();
+		this.registry.sweep(now);
+		return { mode: this.deps.config.mode, capacity: this.registry.capacity, wanted: this.registry.size, saturated: this.registry.saturated(now) };
 	}
 
 	/** Register a pair a brief asked about. No I/O. */
@@ -601,8 +642,9 @@ export class RecallPrefetcher {
 			const halfMs = (this.deps.config.ttlS * 1000) / 2;
 			const now = this.now();
 			let attempted = 0;
-			for (const pair of this.registry.due(now, PREFETCH_EXAMINED)) {
-				if (attempted >= PREFETCH_PER_TICK || this.stopped) break;
+			const perTick = recallPerTick(this.deps.config, this.registry.size);
+			for (const pair of this.registry.due(now, this.registry.capacity)) {
+				if (attempted >= perTick || this.stopped) break;
 				const bank = this.deps.bankFor(pair.surface);
 				if (bank !== null && !this.deps.breakerOpen()) {
 					const held = await this.deps.peek(pair.surface, pair.repo, bank).catch(() => null);

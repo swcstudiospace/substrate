@@ -1575,6 +1575,116 @@ describe("single-flight (uplift-4 S4)", () => {
 	});
 });
 
+describe("a waiter keeps its own deadline (uplift-4 S4)", () => {
+	const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+	const DEGRADED = ["degraded"];
+
+	/** Real timers, kept to tens of ms: the point is that the waiter's own timer fires while the shared load is still running. */
+	test("a short-budget search joining a long-budget recall answers degraded at its own deadline and starts no load of its own", async () => {
+		const redis = new FakeRedis();
+		const cache = cacheOf(redis);
+		const gate = Promise.withResolvers<string[]>();
+		let loads = 0;
+		const recall = cache.getOrLoad({
+			...read,
+			load: () => {
+				loads += 1;
+				return gate.promise;
+			},
+		});
+		await settle();
+		const started = Date.now();
+		const search = await cache.getOrLoad({
+			...read,
+			load: async () => {
+				loads += 1;
+				return ["its own load"];
+			},
+			deadlineMs: 25,
+			onDeadline: () => DEGRADED,
+		});
+		expect(search).toBe(DEGRADED);
+		expect(Date.now() - started).toBeLessThan(500);
+		// Exactly one load ran, and the shared one was not cancelled: its owner still gets its answer.
+		expect(loads).toBe(1);
+		gate.resolve(["recall answer"]);
+		expect(await recall).toEqual(["recall answer"]);
+		expect(cache.health().coalesced).toBe(1);
+	});
+
+	test("a waiter whose owner comes back degraded loads once for itself, inside what is left of its budget", async () => {
+		const cache = cacheOf(new FakeRedis());
+		const gate = Promise.withResolvers<string[]>();
+		let own = 0;
+		const owner = cache.getOrLoad({ ...read, store: () => false, load: () => gate.promise });
+		await settle();
+		const waiter = cache.getOrLoad({
+			...read,
+			deadlineMs: 5_000,
+			onDeadline: () => DEGRADED,
+			load: async () => {
+				own += 1;
+				return ["waiter load"];
+			},
+		});
+		await settle();
+		gate.resolve(["thin"]);
+		expect(await owner).toEqual(["thin"]);
+		expect(await waiter).toEqual(["waiter load"]);
+		expect(own).toBe(1);
+
+		// And a waiter whose own load then outlives the budget answers degraded rather than waiting for it.
+		const slowGate = Promise.withResolvers<string[]>();
+		const gate2 = Promise.withResolvers<string[]>();
+		const owner2 = cache.getOrLoad({ ...read, args: { query: "other" }, store: () => false, load: () => gate2.promise });
+		await settle();
+		const waiter2 = cache.getOrLoad({
+			...read,
+			args: { query: "other" },
+			deadlineMs: 25,
+			onDeadline: () => DEGRADED,
+			load: () => slowGate.promise,
+		});
+		await settle();
+		gate2.resolve(["thin"]);
+		await owner2;
+		expect(await waiter2).toBe(DEGRADED);
+		slowGate.resolve([]);
+	});
+
+	test("callers with the same budget still coalesce, and a caller without a budget waits as before", async () => {
+		const cache = cacheOf(new FakeRedis());
+		const gate = Promise.withResolvers<string[]>();
+		let loads = 0;
+		const load = () => {
+			loads += 1;
+			return gate.promise;
+		};
+		const calls = [
+			cache.getOrLoad({ ...read, load, deadlineMs: 5_000, onDeadline: () => DEGRADED }),
+			cache.getOrLoad({ ...read, load, deadlineMs: 5_000, onDeadline: () => DEGRADED }),
+			cache.getOrLoad({ ...read, load }),
+		];
+		await settle();
+		gate.resolve(["shared"]);
+		expect(await Promise.all(calls)).toEqual([["shared"], ["shared"], ["shared"]]);
+		expect(loads).toBe(1);
+		expect(cache.health().coalesced).toBe(2);
+	});
+
+	test("a deadline without an onDeadline answer is ignored: there is nothing to answer with", async () => {
+		const cache = cacheOf(new FakeRedis());
+		const gate = Promise.withResolvers<string[]>();
+		const owner = cache.getOrLoad({ ...read, load: () => gate.promise });
+		await settle();
+		const waiter = cache.getOrLoad({ ...read, load: async () => ["x"], deadlineMs: 1 });
+		await settle();
+		gate.resolve(["shared"]);
+		expect(await waiter).toEqual(["shared"]);
+		expect(await owner).toEqual(["shared"]);
+	});
+});
+
 describe("stale-while-revalidate (uplift-4 S4)", () => {
 	const clock = { now: 1_000_000 };
 	const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -1648,6 +1758,8 @@ describe("stale-while-revalidate (uplift-4 S4)", () => {
 		await seed(cache, "old", 5_000);
 
 		expect(await call(cache, probe)).toBe("live");
+		// The probe is not on the answer path; let it settle before reading its count.
+		await settle();
 		expect(probe).toMatchObject({ loads: 1, refreshLoads: 0, served: [] });
 		expect(cache.health()).toMatchObject({ wouldServeStale: 1, stale: 0, refreshes: 0 });
 	});
@@ -1899,23 +2011,36 @@ describe("stale-while-revalidate (uplift-4 S4)", () => {
 		expect(probe.refreshLoads).toBe(MAX_REFRESHES + 1);
 	});
 
-	test("shadow probes beside the load: the load starts while the probe is still waiting", async () => {
+	test("shadow never waits for its probe: a probe that has not settled does not delay the answer, and the count lands when it does", async () => {
 		const redis = new FakeRedis();
 		const cache = cacheWith(redis, "shadow");
 		const probe = probeOf();
 		const parked = Promise.withResolvers<void>();
-		const answer = call(cache, probe, {
+		const answer = await call(cache, probe, {
 			lastGood: async () => {
 				await parked.promise;
 				return { value: "old", atMs: clock.now - 1_000, untilMs: null };
 			},
 		});
-		await settle();
-		// A serial probe would not have loaded yet.
+		// Awaiting the probe on the answer path would never return here: it is parked.
+		expect(answer).toBe("live");
 		expect(probe.loads).toBe(1);
+		expect(cache.health().wouldServeStale).toBe(0);
 		parked.resolve();
-		expect(await answer).toBe("live");
+		await settle();
 		expect(cache.health()).toMatchObject({ wouldServeStale: 1, stale: 0 });
+	});
+
+	test("a probe that never settles neither delays the answer nor holds the flight slot", async () => {
+		const redis = new FakeRedis();
+		const cache = cacheWith(redis, "shadow");
+		const probe = probeOf();
+		const never = () => new Promise<null>(() => {});
+		expect(await call(cache, probe, { lastGood: never })).toBe("live");
+		// Settled: the key is free, so the next miss on a new generation loads again rather than joining.
+		await cache.bump(MEMORY_GENERATION_KEY);
+		expect(await call(cache, probe, { lastGood: never })).toBe("live");
+		expect(probe.loads).toBe(2);
 	});
 
 	test("a failing last-good read is silent: no error, no bypass, the cache stays on, in both modes", async () => {

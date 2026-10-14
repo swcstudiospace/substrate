@@ -1325,14 +1325,19 @@ export class Substrate {
 			// as stale-while-revalidate), when it was composed and when it stops being true.
 			// Sections go into the snapshot only when they would decode again: a value `decodeSections` rejects
 			// would make every later hit a miss, so such a snapshot keeps its text alone.
-			const keep = (text: string, sections: readonly BriefSection[], until: number | null) =>
-				this.cache.put(
+			const keep = (text: string, sections: readonly BriefSection[], until: number | null) => {
+				const decodable = decodeSections(encodeSections(sections)) !== null;
+				// Without sections the fallback cannot strip recall later, so the text saved then is rendered
+				// without it: the stored snapshot never carries derived recall.
+				const saved = decodable ? text : renderFullBrief(sections.filter((section) => section.id !== "recall"));
+				return this.cache.put(
 					"brief-snapshot",
 					request.surface,
 					args,
-					{ text, at: new Date().toISOString(), ...(decodeSections(encodeSections(sections)) !== null ? { sections } : {}), until },
+					{ text: saved, at: new Date().toISOString(), ...(decodable ? { sections } : {}), until },
 					this.config.briefSnapshotTtlS,
 				);
+			};
 			// The expiry mode is part of the key for the same reason it is on a
 			// search (uplift-3 N4): a `report` brief carries expired advice, tagged,
 			// and must not be served `complete` — nor replayed as a snapshot — after
@@ -1392,7 +1397,8 @@ export class Substrate {
 									return {
 										load: async () => encodeSections(await compose(refreshNoted, refreshFailed)),
 										refreshAt: () => refreshNoted.at(-1) ?? null,
-										store: () => refreshFailed.length === 0,
+										// The same rule as the foreground write: a value `decodeSections` would reject is not stored, so the stale one is kept.
+										store: (value: string) => refreshFailed.length === 0 && decodeSections(value) !== null,
 										stored: async (value: string) => {
 											const fresh = decodeSections(value);
 											if (fresh !== null) await keep(renderFullBrief(fresh), fresh, refreshNoted.at(-1) ?? null);
@@ -2064,6 +2070,11 @@ export class Substrate {
 			// A degraded answer (outage, partial) is still the answer, but it
 			// must not sit in the cache: the next call re-probes the plane.
 			store: (reply) => !reply.degraded,
+			// This caller's own budget: a search leg (short) that joins a recall (long) already in
+			// flight answers its own `recall-timeout` reply when its budget is spent, instead of
+			// waiting out the owner's. The reply is the shape `recallMemories` gives on a budget miss.
+			deadlineMs: budgetMs ?? this.config.hindsightBudgets.recallBudgetMs,
+			onDeadline: () => ({ results: [], degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: "recall-timeout: budget exceeded" }),
 			load: () =>
 				recallMemories(
 					{
@@ -2166,6 +2177,11 @@ export class Substrate {
 	/** Probe the Hindsight inventory now (single-flight, forced past the 60 s memo). Off: null and no call. */
 	refreshHindsightInventory(): Promise<InventoryReport | null> {
 		return this.hindsightInventory.refresh({ force: true });
+	}
+
+	/** `/healthz.recall`: the prefetcher's capacity and whether more pairs are wanted than it can keep fresh; null while recall is off. */
+	recallHealth(): { mode: string; capacity: number; wanted: number; saturated: boolean } | null {
+		return this.config.briefRecall.mode === "off" ? null : this.recall.health();
 	}
 
 	/** `/healthz.hindsight`: the inventory's newest probe, or null when it is off. Memory only, no call. */

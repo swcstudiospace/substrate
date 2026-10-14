@@ -667,6 +667,7 @@ export function createHttpServer(
 				} else {
 					const health = await substrate.health();
 					const hindsight = substrate.hindsightInventoryHealth();
+					const recall = substrate.recallHealth();
 					memo = {
 						status: healthStatus(health, config.greptime !== null),
 						at: nowMs,
@@ -687,6 +688,8 @@ export function createHttpServer(
 							// The read-only Hindsight inventory (uplift-4 S5): the newest probe, from memory. Absent when
 							// SUBSTRATE_HINDSIGHT_INVENTORY is off; no existing field changes.
 							...(hindsight !== null ? { hindsight } : {}),
+							// Recall in the brief (uplift-4 S5): how many pairs the prefetcher can keep fresh; absent while it is off.
+							...(recall !== null ? { recall } : {}),
 						},
 					};
 					healthMemo = memo;

@@ -509,7 +509,58 @@ describe("a brief too large to cache", () => {
 	});
 });
 
+describe("recallHealth", () => {
+	test("is absent while recall is off and reports capacity and saturation otherwise", async () => {
+		await withHindsight(async () => {
+			expect(world({}).substrate.recallHealth()).toBeNull();
+			const w = world({ SUBSTRATE_BRIEF_RECALL: "shadow" });
+			await w.substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
+			expect(w.substrate.recallHealth()).toEqual({ mode: "shadow", capacity: 32, wanted: 1, saturated: false });
+		});
+	});
+});
+
+describe("an oversized brief and the recall-free fallback", () => {
+	test("a complete brief too large to keep its sections saves recall-free fallback text: a later source failure serves no recall", async () => {
+		await withHindsight(async () => {
+			const huge = [1, 2, 3, 4].map((n) => entry("decision", `big${n} ${"x".repeat(300_000)}`));
+			let failing = false;
+			const index = { ...indexOf({ failGraph: () => failing }), memoryForBrief: async () => huge };
+			const w = world({ SUBSTRATE_BRIEF_RECALL: "enforce" }, { index });
+			seedSnapshot(w.redis, 1000);
+			const complete = await w.substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
+			expect(complete.text).toContain("Recalled context");
+			const [key] = w.redis.keysOf("brief-snapshot");
+			const stored = JSON.parse(w.redis.values.get(key!)!) as { v: { text: string; sections?: unknown } };
+			expect(stored.v.sections).toBeUndefined();
+			expect(stored.v.text).not.toContain("Recalled context");
+			failing = true;
+			await w.cache.bump(MEMORY_GENERATION_KEY);
+			const degraded = await w.substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
+			expect(degraded.state).toBe("snapshot");
+			expect(degraded.text).not.toContain("Recalled context");
+			expect(degraded.text).not.toContain("use pnpm, not npm");
+		});
+	});
+});
+
 describe("a graph past the cached encoding's caps", () => {
+	test("1500 nodes: the notice is its own line, and the compact omitted count is exact", async () => {
+		const w = world({ SUBSTRATE_BRIEF_PROFILE: "enforce" }, { index: indexOf({ nodes: 1500 }) });
+		const full = await w.substrate.briefDetailed(WITH_GRAPH, "full", "grok-bot");
+		const lines = full.text.split("\n");
+		const at = lines.findIndex((line) => line.startsWith("Nodes: n0 todo"));
+		expect(lines[at + 1]).toBe("… and 500 more nodes not listed");
+		expect(lines[at]).not.toContain("not listed");
+		const compact = await w.substrate.briefDetailed(WITH_GRAPH, "compact", "grok-bot");
+		expect(compact.profile).toBe("compact");
+		const rows = compact.text.split("\n");
+		// 1000 listed, 12 shown: 988 held back by the profile and 500 left out at compose time.
+		expect(rows.filter((line) => /^- n\d+ todo$/.test(line))).toHaveLength(12);
+		expect(rows.at(-1)).toBe("...omitted: nodes 1488 (profile=compact; request profile=full)");
+		expect(utf8Bytes(compact.text)).toBeLessThanOrEqual(3500);
+	});
+
 	test("2500 nodes: the brief lists the first 1000 and says so, and the second call is a cache hit", async () => {
 		const w = world({}, { index: indexOf({ nodes: 2500 }) });
 		const first = await w.substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
