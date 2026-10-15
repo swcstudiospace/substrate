@@ -18,8 +18,8 @@ Each node is one Linear issue under graph `ut-mv9377hx-a66cb8e4`. Status is as o
 | 4 | SOLANA_LEDGER_FEASIBILITY | none | Done | Verdicts checked against the primary pages. CONDITIONAL_GO for the devnet anchor. The validator is NOT_FEASIBLE_NOW. |
 | Closeout | Ship PR 70 and sync tracking | none | Done | PR #70 merged as `9cd6bf9`. The Notion row and Linear were updated. |
 | Closeout | Fund the anchor key on devnet | none | Blocked | Every airdrop attempt was rate-limited, the latest one included. The key holds 0 SOL. Operator step. |
-| Closeout | MILESTONE_COMPLETE | none | Blocked on your approval | Seven criteria FAIL (`MILESTONE-AUDIT.md`). It needs your approval and no unresolved FAIL. |
-| Closeout | CLEANUP | none | In progress | Done when this run's worktree and scratch copies are removed after the merge. Archives and legacy material are not touched. |
+| Closeout | MILESTONE_COMPLETE | none | Blocked on your approval | Six criteria FAIL (`MILESTONE-AUDIT.md`): milestone 3, substrate 3. It needs your approval and no unresolved FAIL. |
+| Closeout | CLEANUP | none | Done | Recorded as PASS in `MILESTONE-AUDIT.md` (PR #76). This run's worktrees, scratch clones, containers, and logs are removed. Archives and legacy material are not touched. |
 | Closeout | Closeout report | none | Done | The chat report, with the same numbers as `MILESTONE-AUDIT.md`, and the content listed below. |
 
 ## Deviations from the n4 spec
