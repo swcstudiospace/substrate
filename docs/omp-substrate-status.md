@@ -69,6 +69,37 @@ and planes are labelled `last known`, and the output says to run `/substrate`
 again. On an auth failure it shows no counters, and one hint line that names
 where the token comes from.
 
+## Ultrathink bar
+
+The extension also publishes its status on the Omp event bus (`pi.events`) for the
+Ultrathink bar, the widget above the composer. The footer, the widget, and
+`/substrate` print the same text as before.
+
+- `substrate:status`: published after each render. Payload `SubstrateBusStatus`:
+  `{ v, state, usage, omp, coverage, planesDown, updatedAt, reason }`.
+- `substrate:status-request`: the bar sends `{}` when it subscribes. The extension
+  answers at once by emitting `substrate:status` with its current status.
+
+Fields:
+
+- `state`: `checking` before the first probe, or with no good snapshot yet; `ok`
+  after a good probe; `error` when the last probe failed; `access-denied` on 401 or 403.
+- `usage`: `IN_USE` or `NOT_OBSERVED_IN_WINDOW` when `state` is `ok`; `UNKNOWN` otherwise.
+- `omp`: `{ req, emit, tool }` for surface omp, or `null`.
+- `coverage`: `{ observed, known }` over the known clients, with `observed <= known`,
+  or `null`. Unregistered surfaces are not counted.
+- `planesDown`: the planes in `/healthz` with `ok: false`, or `null`.
+- `updatedAt`: the local `HH:MM` of the last good poll (of the failed poll on
+  `access-denied`), or `""`.
+- `reason`: the probe reason, cut to 40 characters, or `null`.
+
+On `error`, `omp`, `coverage` and `planesDown` carry the last good values, and
+`usage` is `UNKNOWN`. On `access-denied` they are `null`, and no counts are sent.
+
+To remove the publisher, delete the `publish` function, its call at the end of
+`render`, and the `substrate:status-request` subscription. The footer, widget and
+`/substrate` need no change. `busStatus` and the two channel constants can go too.
+
 ## Refresh
 
 Polls run at session start, every 30 seconds, after each agent turn, and on

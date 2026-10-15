@@ -20,6 +20,8 @@
  * - Widget: the last three polls with a nonzero omp change, under a caption that states the cap and the refresh.
  * - /substrate: one fresh probe (or the poll already in flight), then the usage definition, coverage, omp counters,
  *   planes, cache and ledger. On error the counters are labelled last known, and the line says to run /substrate again.
+ * - Ultrathink bar: after each render, publishes `busStatus` on the `substrate:status` event-bus channel, and republishes
+ *   when `substrate:status-request` arrives. Footer, widget, and /substrate are unchanged by it. See the docs.
  *
  * Auth: both polls send the omp bearer whenever one resolves. /metrics may require it once the server has tokens
  * configured. An unauthenticated loopback GET answered 200 when checked on 2026-10-15, so it is not assumed.
@@ -136,6 +138,11 @@ export interface OmpContext {
 	sessionManager?: { getSessionId?(): unknown };
 }
 
+export interface OmpEventBus {
+	emit(channel: string, data: unknown): void;
+	on(channel: string, handler: (data: unknown) => void): () => void;
+}
+
 export interface OmpPi {
 	on(
 		event: "session_start" | "agent_end" | "session_shutdown",
@@ -145,6 +152,24 @@ export interface OmpPi {
 		name: string,
 		options: { description?: string; handler: (args: string, ctx: OmpContext) => Promise<void> },
 	): void;
+	/** Shared Omp event bus. Optional: without it the Ultrathink bar publisher does nothing. */
+	events?: OmpEventBus;
+}
+
+export const SUBSTRATE_STATUS_CHANNEL = "substrate:status";
+export const SUBSTRATE_STATUS_REQUEST = "substrate:status-request";
+const BUS_REASON_MAX = 40;
+
+/** The payload on SUBSTRATE_STATUS_CHANNEL. These keys and types are the bar contract. */
+export interface SubstrateBusStatus {
+	v: 1;
+	state: "checking" | "ok" | "error" | "access-denied";
+	usage: "IN_USE" | "NOT_OBSERVED_IN_WINDOW" | "UNKNOWN";
+	omp: Totals | null;
+	coverage: { observed: number; known: number } | null;
+	planesDown: number | null;
+	updatedAt: string;
+	reason: string | null;
 }
 
 const DEFAULT_BASE = "http://127.0.0.1:7410";
@@ -613,6 +638,61 @@ export function formatSummary(state: State, now: number): string[] {
 	return lines;
 }
 
+/** The reason as the bar carries it: at most BUS_REASON_MAX characters. */
+function busReason(reason: string | null): string | null {
+	return reason === null ? null : reason.slice(0, BUS_REASON_MAX);
+}
+
+type BusFields = Pick<SubstrateBusStatus, "state"> & Partial<Omit<SubstrateBusStatus, "v" | "state">>;
+
+function busFrame({ state, ...rest }: BusFields): SubstrateBusStatus {
+	return { v: 1, state, usage: "UNKNOWN", omp: null, coverage: null, planesDown: null, updatedAt: "", reason: null, ...rest };
+}
+
+function ompTotals(snap: Snapshot): Totals {
+	const c = surfaceTotals(snap.metrics, SURFACE);
+	return { req: c.req, emit: c.emit, tool: c.tool };
+}
+
+/** Known clients only. Observed: counted, and not NOT_INSTRUMENTED. */
+function busCoverage(state: State, asOf: number): { observed: number; known: number } {
+	const rows = coverageRows(state, asOf).filter((row) => row.coverage !== "UNREGISTERED_CLIENT");
+	return { observed: rows.filter((row) => row.coverage !== "NOT_INSTRUMENTED").length, known: rows.length };
+}
+
+/**
+ * The Ultrathink bar's view of the state. Pure: `now` is the only clock. Counts come from the last good
+ * snapshot. An auth failure carries no counts.
+ */
+export function busStatus(state: State, now: number): SubstrateBusStatus {
+	const probe = state.lastProbe;
+	const snap = state.last;
+	if (!probe) return busFrame({ state: "checking" });
+	if (!probe.ok && isAuth(probe.reason)) {
+		return busFrame({ state: "access-denied", updatedAt: hhmm(probe.at), reason: busReason(probe.reason) });
+	}
+	if (!snap) return busFrame(probe.ok ? { state: "checking" } : { state: "error", reason: busReason(probe.reason) });
+	if (!probe.ok) {
+		return busFrame({
+			state: "error",
+			omp: ompTotals(snap),
+			coverage: busCoverage(state, snap.at),
+			planesDown: Object.values(snap.health.planes).filter((plane) => !plane.ok).length,
+			updatedAt: hhmm(snap.at),
+			reason: busReason(probe.reason),
+		});
+	}
+	return busFrame({
+		state: "ok",
+		usage: usageOf(state, now),
+		omp: ompTotals(snap),
+		coverage: busCoverage(state, now),
+		planesDown: Object.values(snap.health.planes).filter((plane) => !plane.ok).length,
+		updatedAt: hhmm(probe.at),
+		reason: null,
+	});
+}
+
 function sessionIdOf(ctx: OmpContext): string | undefined {
 	try {
 		const id = ctx.sessionManager?.getSessionId?.();
@@ -639,7 +719,17 @@ export default function (pi: OmpPi): void {
 		ctx.ui.setStatus("substrate", formatFooter(state, Date.now()));
 		const lines = formatWidget(state);
 		ctx.ui.setWidget("substrate", lines.length > 0 ? lines : undefined, { placement: "belowEditor" });
+		publish();
 	};
+
+	const publish = (): void => {
+		try {
+			pi.events?.emit(SUBSTRATE_STATUS_CHANNEL, busStatus(state, Date.now()));
+		} catch {}
+	};
+	try {
+		pi.events?.on(SUBSTRATE_STATUS_REQUEST, () => publish());
+	} catch {}
 
 	const poll = async (ctx: OmpContext, force: boolean): Promise<void> => {
 		lastCtx = ctx;
