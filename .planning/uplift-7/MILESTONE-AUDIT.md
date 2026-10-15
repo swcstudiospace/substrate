@@ -37,9 +37,9 @@ Evidence: PR #70 at `aad5347`. `bun test packages/projector/omp/` 68 pass, inclu
 | With the event source stopped, the panel shows ERROR, last-known data, and a retry control. No zero counts appear for unknown values | PASS | Tests for ERROR with and without a good poll. Live closed-port read: `ERROR (unreachable) · no data yet · /substrate retries`. The retry control is `/substrate`. |
 | Credential-like values seeded into test records do not appear in the panel | PASS | Test "a credential-like value in a health record never reaches the summary or the footer". The panel shows counters and names only; it never renders record content. |
 | Injected markup in a test record renders as text and does not execute | PASS | The terminal host interprets no markup. Control and bidi-override characters are removed from names (test "control characters in a surface name are not printed"). |
-| Every control works with keyboard alone; focus is visible | WAIVED (proposed; decision needed) | The terminal host has no focusable controls. The only control is typing `/substrate`. |
-| Status changes are announced without moving focus; reduced motion is honored | WAIVED (proposed; decision needed) | The footer updates in place: no focus move and no animation. The terminal host has no live region, so nothing is announced. |
-| Text and status indicators meet WCAG 2.2 AA contrast | WAIVED (proposed; decision needed) | The extension sets no colour; the colours come from the user's terminal theme. WCAG is a web criterion and cannot be measured here. |
+| Every control works with keyboard alone; focus is visible | WAIVED | Accepted by you at closeout. The terminal host has no focusable controls. The only control is typing `/substrate`. |
+| Status changes are announced without moving focus; reduced motion is honored | WAIVED | Accepted by you at closeout. The footer updates in place: no focus move and no animation. The terminal host has no live region. |
+| Text and status indicators meet WCAG 2.2 AA contrast | WAIVED | Accepted by you at closeout. The extension sets no colour; the colours come from the user's terminal theme. WCAG is a web criterion and cannot be measured here. |
 | The usage definition is visible on screen | PASS | `/substrate` prints the definition (test "the summary states the usage definition on screen"). |
 
 ## SVM and Solana
@@ -50,12 +50,12 @@ Evidence: PR #70 at `aad5347`. `bun test packages/projector/omp/` 68 pass, inclu
 | Each claim cites a primary source with an access date, or is marked UNVERIFIED | PASS | Sources S1–S8, dated 2026-10-15, flagged as search excerpts |
 | The memo states the ledger role it evaluated and the open question about it | PASS | Anchor role (q2 default); defer option stated |
 | A labeled cost estimate with its assumptions | PASS | Validator cost section |
-| During the run, no Railway service was created, no networked key was generated, no funds moved, and nothing was pushed to a remote | FAIL | Branches were pushed and PRs opened. The airdrop attempts failed; no funds moved. The pushes were the approved repo PR path; a waiver is needed to record that. |
+| During the run, no Railway service was created, no networked key was generated, no funds moved, and nothing was pushed to a remote | WAIVED | Accepted by you at closeout. No Railway service, key, or funds were touched. The pushes were the approved repo PR path. |
 | The go/no-go recommendation appears as a VALIDATION_REQUEST at closeout | PASS | Closeout report |
 
 ## Summary
 
-- Unresolved FAILs: 10 (milestone 4, substrate 4, Omp UI 1, SVM 1). MILESTONE_COMPLETE is blocked.
-- Proposed WAIVED, awaiting your decision: 3 (Omp terminal-host accessibility rows).
-- Documented gaps, not criteria: the STALE state (needs event times); activity-feed rows and filters (the panel shows counts, not records, and the window is fixed at five minutes); a server-side last-seen value per surface.
-- Decisions that clear the FAILs: waive or fix the accessibility rows; decide the appended-phase SCOPE_CHANGE; waive the SVM "nothing pushed" row; accept or schedule the substrate gaps (cross-agent, invalid writes, concurrency, degraded mode); run the write-to-footer check (operator); approve MILESTONE_COMPLETE and CLEANUP.
+- Unresolved FAILs: 9 (milestone 4, substrate 4, Omp UI 1). MILESTONE_COMPLETE is blocked.
+- WAIVED by your decision at closeout: 4 (three Omp terminal-host accessibility rows; the SVM "nothing pushed" row).
+- Documented gaps, not criteria: the STALE state (needs event times); activity-feed rows and filters (the panel shows counts, not records, and the window is fixed at five minutes). A server-side last-seen value per surface was declined for now: the window uses the viewer's poll clock.
+- Next, by your choice: fix cross-agent visibility (substrate, not yet built). The other three substrate gaps stay open with no date set. The write-to-footer check is an operator step. MILESTONE_COMPLETE and CLEANUP need your approval once the FAILs are cleared.
