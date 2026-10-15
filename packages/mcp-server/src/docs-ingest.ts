@@ -15,6 +15,9 @@
  * Uploads are idempotent by content hash, keyed by dataset plus source URL,
  * with per-page in-flight locks so concurrent retries share one upload.
  * Every upload carries `{source_url, commit, heading_path}` metadata (U-03).
+ * Each record carries a `version` (1 on first ingest, +1 per replacement). A page may name the
+ * `expected_version` it replaces; a mismatch refuses the whole call as `version.stale` (memory's
+ * contract, answered 409) before anything is uploaded. Absent, the page ingests as before.
  * A replacement reports the superseded document id; with
  * `SUBSTRATE_DOCS_PRUNE_SUPERSEDED=1` (uplift-2 R6) the superseded document
  * is deleted through the documented delete call once the replacement has
@@ -160,6 +163,12 @@ export interface IngestPage {
 	source_url?: string;
 	body: string;
 	heading_path?: string;
+	/**
+	 * The version of this source URL's record the caller believes it is replacing (memory's
+	 * `expected_version` contract). Absent keeps today's behaviour; a mismatch refuses the call with
+	 * `version.stale` before anything is uploaded.
+	 */
+	expected_version?: number;
 }
 
 export interface IngestInput {
@@ -199,7 +208,20 @@ export type PageSettlement =
  */
 export type IngestOutcome =
 	| { ok: true; results: IngestPageResult[]; stripped_images: number; changed: boolean }
-	| { ok: false; refused: true; reason: string; rules?: string[]; page?: string; changed: boolean };
+	| {
+			ok: false;
+			refused: true;
+			reason: string;
+			rules?: string[];
+			page?: string;
+			changed: boolean;
+			/** On `version.stale`: what to re-submit against (memory's remedy). */
+			remedy?: string;
+			/** The record's version now; null when nothing is recorded for the source URL. */
+			current_version?: number | null;
+			/** The document id of the record a stale write collided with. */
+			conflict_with?: string;
+	  };
 
 /** A document this record's source URL once published, still on the plane unless pruned. */
 export interface SupersededDocument {
@@ -224,6 +246,8 @@ export interface IngestRecord {
 	document_id: string;
 	commit?: string;
 	superseded?: SupersededDocument[];
+	/** Monotonic per record: 1 on first ingest, +1 on each replacement. A legacy record loads as 1. */
+	version: number;
 }
 
 /** What a citation needs to know about a document id: its source URL and the commit it was uploaded under, if any. */
@@ -337,7 +361,7 @@ function refused(
 	deps: IngestDeps,
 	sessionId: string,
 	reason: string,
-	extra?: { rules?: string[]; page?: string; changed?: boolean },
+	extra?: { rules?: string[]; page?: string; changed?: boolean; remedy?: string; current_version?: number | null; conflict_with?: string },
 ): Promise<IngestOutcome> {
 	const { changed = false, ...locator } = extra ?? {};
 	const outcome: IngestOutcome = { ok: false, refused: true, reason, ...locator, changed };
@@ -370,6 +394,35 @@ function underRoot(path: string, roots: readonly string[]): boolean {
 
 function recordKey(datasetId: string, sourceUrl: string): string {
 	return `${datasetId}::${sourceUrl}`;
+}
+
+/**
+ * Memory's `expected_version` rule (`versionMismatch` in memory-write.ts), for one source URL's
+ * record. Absent `expected` is today's behaviour. A missing record is version 0, so only an expected
+ * 0 (or none) passes; a mismatch returns what a stale write should re-submit against.
+ */
+function staleVersion(
+	prior: IngestRecord | undefined,
+	expected: number | undefined,
+): { remedy: string; current_version: number | null; conflict_with?: string } | null {
+	if (expected === undefined) return null;
+	if (!prior) {
+		if (expected === 0) return null;
+		return {
+			remedy:
+				`No document is recorded for this source URL, so there is no version ${expected} to replace. ` +
+				"Re-submit without expected_version to record the first one.",
+			current_version: null,
+		};
+	}
+	if (expected === prior.version) return null;
+	return {
+		remedy:
+			`The record for this source URL is version ${prior.version} (${prior.document_id}), not ${expected}. ` +
+			"Somebody changed it since — re-submit against the current version (current_version).",
+		current_version: prior.version,
+		conflict_with: prior.document_id,
+	};
 }
 
 export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<IngestOutcome> {
@@ -408,6 +461,12 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	const dataset = listed.datasets.find((entry) => entry.name === input.dataset);
 	if (!dataset) return refused(deps, sessionId, "unknown-dataset");
 	const commit = input.commit ?? "unpinned";
+	// memory's `expected_version` contract, checked for every page before the first upload: a stale
+	// page leaves the whole call unwritten. The loop below re-checks each page at its own store point.
+	for (const { page, sourceUrl } of prepared) {
+		const stale = staleVersion(seen.get(recordKey(dataset.id, sourceUrl)), page.expected_version);
+		if (stale) return refused(deps, sessionId, "version.stale", { page: page.path, ...stale });
+	}
 
 	const results: IngestPageResult[] = [];
 	// True once any page of this call stored a document (and so a record).
@@ -416,6 +475,9 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 		const key = recordKey(dataset.id, sourceUrl);
 		for (;;) {
 			const prior = seen.get(key);
+			// Re-checked here: a concurrent writer may have moved this record since the pre-check.
+			const stale = staleVersion(prior, page.expected_version);
+			if (stale) return refused(deps, sessionId, "version.stale", { page: page.path, changed: changed(), ...stale });
 			if (prior && prior.sha === sha) {
 				results.push({ path: page.path, source_url: sourceUrl, status: "unchanged", document_id: prior.document_id, content_sha256: sha });
 				break;
@@ -489,6 +551,7 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 						dataset_id: dataset.id,
 						source_url: sourceUrl,
 						document_id: uploaded.document_id,
+						version: replacedPrior ? replacedPrior.version + 1 : 1,
 						...(input.commit !== undefined ? { commit: input.commit } : {}),
 						...(lineage.length > 0 ? { superseded: lineage } : {}),
 					});
@@ -600,6 +663,8 @@ export async function loadIngestRecords(
 			document_id: record.document_id,
 			...("commit" in record && typeof record.commit === "string" ? { commit: record.commit } : {}),
 			...(superseded.length > 0 ? { superseded } : {}),
+			// A record written before versions existed was ingested once: version 1.
+			version: "version" in record && typeof record.version === "number" && Number.isInteger(record.version) && record.version >= 1 ? record.version : 1,
 		});
 	}
 	const versions = "versions" in parsed ? versionsFromJson(parsed.versions) : createVersionStore();

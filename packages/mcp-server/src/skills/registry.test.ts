@@ -332,6 +332,7 @@ describe("toListEntry", () => {
 		decided_by: "omp",
 		decided_at: "2026-10-14T13:00:00.000Z",
 		reason: "reviewed",
+		version: 1,
 		created: "2026-10-14T12:00:00.000Z",
 		updated: "2026-10-14T13:00:00.000Z",
 	};

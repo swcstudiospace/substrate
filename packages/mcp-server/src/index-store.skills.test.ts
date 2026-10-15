@@ -244,6 +244,32 @@ describeLive("the skills registry against a live index", () => {
 		}
 	});
 
+	test("a skill's version is monotonic per name: a new proposal takes the next, a retry keeps its own, an approval that creates a row takes the next, and the read is the highest", async () => {
+		// Its own repo, so the row count below stays about REPO alone; removed here.
+		const repo = `ut-skills-${RUN}/versioned`;
+		try {
+			expect(await a.skillVersion(repo, "demo-skill")).toBeNull();
+			await a.upsertProposedSkill(proposal({ repo, pr_number: 1, pr_url: "https://github.com/x/y/pull/1" }));
+			await a.upsertProposedSkill(proposal({ repo, pr_number: 2, pr_url: "https://github.com/x/y/pull/2" }));
+			// A retry of pull request 1 is the same row: its version does not move.
+			await a.upsertProposedSkill(proposal({ repo, pr_number: 1, pr_url: "https://github.com/x/y/pull/1" }));
+			// An approval with no proposal recorded creates a row, under the same per-name lock: the next version.
+			await a.decideSkill(decision({ repo, pr_number: 3, pr_url: "https://github.com/x/y/pull/3" }));
+			const versions = (await raw`select pr_number, version from skills_registry where repo = ${repo} order by pr_number`) as Array<{
+				pr_number: number;
+				version: number;
+			}>;
+			expect(versions).toEqual([
+				{ pr_number: 1, version: 1 },
+				{ pr_number: 2, version: 2 },
+				{ pr_number: 3, version: 3 },
+			]);
+			expect(await a.skillVersion(repo, "demo-skill")).toEqual({ version: 3, pr_url: "https://github.com/x/y/pull/3" });
+		} finally {
+			await raw`delete from skills_registry where repo = ${repo}`;
+		}
+	});
+
 	test("nothing in the store deletes: every row written above is still there", async () => {
 		const rows = (await raw`select count(*)::int as n from skills_registry where repo = ${REPO}`) as Array<{ n: number }>;
 		// idem, known, unproposed, walk, no-skill, race, evolving (three), the hyphen pair (two) and two retired pairs (four) = 15 rows; "never-approved" left none.

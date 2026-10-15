@@ -19,7 +19,7 @@ import { loadConfig, skillsGovernanceConfigWarnings, type SubstrateConfig } from
 import { createMcpServer } from "./mcp.ts";
 import { createObservability, type Observability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
-import { Substrate } from "./service.ts";
+import { SkillProposalStale, Substrate } from "./service.ts";
 import { branchName, type ProposeResult, type Runner, type SkillProposer } from "./skills/propose.ts";
 import {
 	LIST_MAX,
@@ -77,6 +77,7 @@ class FakeRegistry {
 			decided_by: null,
 			decided_at: null,
 			reason: null,
+			version: this.nextVersion(input.repo, input.name),
 			created: now,
 			updated: now,
 		});
@@ -128,6 +129,7 @@ class FakeRegistry {
 			decided_by: input.decided_by,
 			decided_at: now,
 			reason: input.reason,
+			version: this.nextVersion(input.repo, input.name),
 			created: now,
 			updated: now,
 		};
@@ -137,6 +139,21 @@ class FakeRegistry {
 
 	private approvedCount(repo: string, name: string): number {
 		return this.rows.filter((row) => row.repo === repo && row.name === name && row.state === "approved").length;
+	}
+
+	/** The next version a new row of `name` takes: one past the highest recorded, as the store does. */
+	private nextVersion(repo: string, name: string): number {
+		return this.rows.filter((row) => row.repo === repo && row.name === name).reduce((max, row) => Math.max(max, row.version), 0) + 1;
+	}
+
+	/** The highest version recorded for `name` in any state, as `IndexStore.skillVersion` answers it. */
+	async skillVersion(repo: string, name: string): Promise<{ version: number; pr_url: string | null } | null> {
+		this.calls.push("version");
+		if (this.failReads) throw this.failReads;
+		const latest = this.rows
+			.filter((row) => row.repo === repo && row.name === name)
+			.sort((a, b) => b.version - a.version || b.pr_number - a.pr_number)[0];
+		return latest ? { version: latest.version, pr_url: latest.pr_url } : null;
 	}
 
 	async listSkills(repo: string, state: string | null, limit: number): Promise<SkillRegistryRow[]> {
@@ -706,6 +723,55 @@ describe("skills_propose and the registry", () => {
 	});
 });
 
+describe("skills_propose expected_version (memory's contract)", () => {
+	const request = { name: "demo-skill", files: { "SKILL.md": "x" }, rationale: "why" };
+
+	test("a stale expected_version is refused before git: nothing is proposed, no row changes, nothing is emitted", async () => {
+		const w = world({ SUBSTRATE_SKILLS_GOVERNANCE: "report" });
+		await w.substrate.proposeSkill(request, asAgent);
+		const rowsBefore = JSON.stringify(w.registry.rows);
+		const proposalsBefore = w.proposals.length;
+		const eventsBefore = w.events.length;
+
+		const failure = await error(w.substrate.proposeSkill({ ...request, expected_version: 5 }, asAgent));
+		expect(failure).toBeInstanceOf(SkillProposalStale);
+		expect(failure).toMatchObject({ current_version: 1, conflict_with: PR_URL(12) });
+		expect(w.proposals).toHaveLength(proposalsBefore);
+		expect(JSON.stringify(w.registry.rows)).toBe(rowsBefore);
+		expect(w.registry.calls.filter((call) => call === "upsert")).toHaveLength(1);
+		expect(w.events).toHaveLength(eventsBefore);
+	});
+
+	test("a matching expected_version is accepted, and the new proposal takes the next version", async () => {
+		const propose: ProposeResult = { status: "opened", pr_url: PR_URL(12), pr_number: 12, branch: BRANCH, content_sha256: HASH, redactions: [] };
+		const w = world({ SUBSTRATE_SKILLS_GOVERNANCE: "report" }, { propose });
+		await w.substrate.proposeSkill(request, asAgent);
+		expect(w.registry.rows[0]?.version).toBe(1);
+
+		// The proposer answers with the same object, so a second proposal is a second pull request.
+		Object.assign(propose, { pr_number: 13, pr_url: PR_URL(13) });
+		const result = await w.substrate.proposeSkill({ ...request, expected_version: 1 }, asAgent);
+		expect(result.status).toBe("opened");
+		expect(w.proposals).toHaveLength(2);
+		expect(w.registry.rows.map((row) => [row.pr_number, row.version])).toEqual([
+			[12, 1],
+			[13, 2],
+		]);
+	});
+
+	test("an absent expected_version keeps today's behaviour: no version is read, and a retry changes no row", async () => {
+		const w = world({ SUBSTRATE_SKILLS_GOVERNANCE: "report" });
+		await w.substrate.proposeSkill(request, asAgent);
+		expect(w.registry.calls).toEqual(["upsert"]);
+		expect(w.registry.rows[0]?.version).toBe(1);
+
+		const retry = await w.substrate.proposeSkill(request, asAgent);
+		expect(retry.status).toBe("opened");
+		expect(w.registry.rows).toHaveLength(1);
+		expect(w.registry.rows[0]?.version).toBe(1);
+	});
+});
+
 describe("skills_list", () => {
 	async function seeded() {
 		const w = world({ SUBSTRATE_SKILLS_GOVERNANCE: "report" });
@@ -723,6 +789,7 @@ describe("skills_list", () => {
 			decided_by: state === "proposed" ? null : "omp",
 			decided_at: state === "proposed" ? null : now,
 			reason: null,
+			version: pr,
 			created: now,
 			updated: now,
 		});

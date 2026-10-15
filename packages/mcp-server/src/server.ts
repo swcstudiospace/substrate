@@ -1274,10 +1274,11 @@ export function createHttpServer(
 							typeof page.body === "string" &&
 							(!("source_url" in page) || typeof page.source_url === "string") &&
 							(!("real_path" in page) || typeof page.real_path === "string") &&
-							(!("heading_path" in page) || typeof page.heading_path === "string"),
-					);
+							(!("heading_path" in page) || typeof page.heading_path === "string") &&
+							(!("expected_version" in page) || (typeof page.expected_version === "number" && Number.isInteger(page.expected_version) && page.expected_version >= 0)),
+				);
 				if (!pagesValid || (commit !== undefined && typeof commit !== "string") || (ingestSession !== undefined && typeof ingestSession !== "string")) {
-					sendJson(res, 400, { error: "pages must carry string path and body; commit and session_id must be strings" });
+					sendJson(res, 400, { error: "pages must carry string path and body, and expected_version a non-negative integer; commit and session_id must be strings" });
 					return;
 				}
 				const ingestFields: Record<string, unknown> = {
@@ -1289,7 +1290,7 @@ export function createHttpServer(
 				if (!(await auditedRest(res, observability, surface, "docs_ingest", ingestFields))) return;
 				const outcome = await substrate.ingestDocs(ingestFields, surface);
 				if (!outcome.ok) {
-					sendJson(res, outcome.reason === "vm-guest" ? 403 : 400, outcome);
+					sendJson(res, outcome.reason === "vm-guest" ? 403 : outcome.reason === "version.stale" ? 409 : 400, outcome);
 					return;
 				}
 				sendJson(res, 200, outcome);

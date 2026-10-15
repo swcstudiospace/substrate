@@ -1066,6 +1066,15 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					.array(z.enum(["pem", "jwt"]))
 					.optional()
 					.describe("Operator only. Documentation examples of these shapes are redacted instead of refused."),
+				expected_version: z
+					.number()
+					.int()
+					.min(0)
+					.optional()
+					.describe(
+						"the skill version this proposal revises (current_version on a stale reply); a mismatch is refused " +
+							"with reason version.stale and nothing is proposed. Absent keeps today's behaviour.",
+					),
 			},
 			annotations: { destructiveHint: false, openWorldHint: true },
 		},

@@ -452,3 +452,65 @@ describe("scanIngestPages", () => {
 		}
 	});
 });
+
+describe("docs_ingest expected_version (memory's contract)", () => {
+	// Each test builds its own harness: its own record map and fake, so no state is shared between them.
+	test("a stale expected_version is refused with nothing written: the stored record is byte-identical", async () => {
+		const fake = new RagflowFake();
+		const { events, seen, ingest } = harness(fake);
+		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
+		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
+		const recordBefore = JSON.stringify([...seen.entries()]);
+		const uploadsBefore = fake.uploads.length;
+
+		const stale = await ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, body: `${PAGE.body} Stale.`, expected_version: 7 }] });
+		if (stale.ok) throw new Error("expected a version.stale refusal");
+		expect(stale).toMatchObject({
+			refused: true,
+			reason: "version.stale",
+			page: PAGE.path,
+			current_version: 1,
+			conflict_with: first.results[0]?.document_id,
+			changed: false,
+		});
+		expect(stale.remedy).toContain("current_version");
+		expect(fake.uploads).toHaveLength(uploadsBefore);
+		expect(JSON.stringify([...seen.entries()])).toBe(recordBefore);
+		const warnings = events.filter((event) => event.kind === "warning");
+		expect(warnings.at(-1)?.payload).toMatchObject({ action: "docs.ingest", status: "refused", reason: "version.stale" });
+	});
+
+	test("a matching expected_version is accepted and the record version increments", async () => {
+		const fake = new RagflowFake();
+		const { seen, ingest } = harness(fake);
+		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
+		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
+		expect([...seen.values()][0]?.version).toBe(1);
+
+		const replaced = await ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, body: `${PAGE.body} Second.`, expected_version: 1 }] });
+		if (!replaced.ok) throw new Error(`expected replace: ${replaced.reason}`);
+		expect(replaced.results[0]?.status).toBe("replaced");
+		expect(fake.uploads).toHaveLength(2);
+		expect([...seen.values()][0]?.version).toBe(2);
+
+		// Version 1 is now stale: the caller must re-submit against the version it was told.
+		const again = await ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, body: `${PAGE.body} Third.`, expected_version: 1 }] });
+		expect(again).toMatchObject({ ok: false, reason: "version.stale", current_version: 2 });
+	});
+
+	test("an absent expected_version keeps today's behaviour: the write proceeds and the version still counts", async () => {
+		const fake = new RagflowFake();
+		const { seen, ingest } = harness(fake);
+		await ingest({ dataset: "agent-substrate", pages: [PAGE] });
+		const replaced = await ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, body: `${PAGE.body} Second.` }] });
+		if (!replaced.ok) throw new Error(`expected replace: ${replaced.reason}`);
+		expect(replaced.results[0]?.status).toBe("replaced");
+		expect(fake.uploads).toHaveLength(2);
+		expect([...seen.values()][0]?.version).toBe(2);
+
+		const skipped = await ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, body: `${PAGE.body} Second.` }] });
+		if (!skipped.ok) throw new Error(`expected skip: ${skipped.reason}`);
+		expect(skipped.results[0]?.status).toBe("unchanged");
+		expect([...seen.values()][0]?.version).toBe(2);
+	});
+});

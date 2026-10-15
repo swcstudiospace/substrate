@@ -115,6 +115,8 @@ export interface SkillRegistryRow {
 	decided_by: string | null;
 	decided_at: string | null;
 	reason: string | null;
+	/** Monotonic per (repo, name): the proposal that created the row took the name's next version. */
+	version: number;
 	created: string;
 	updated: string;
 }
