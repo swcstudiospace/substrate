@@ -1,5 +1,5 @@
 /**
- * Omp extension: Agent Substrate usage in the Omp TUI (design v2).
+ * Omp extension: Agent Substrate usage in the Omp TUI (design v3).
  *
  * Installed as a symlink: ~/.omp/agent/extensions/substrate-status.ts → this file, the same way
  * substrate-skills.ts is installed. Omp's loader auto-discovers that directory and accepts symlinks.
@@ -9,16 +9,23 @@
  * attributes traffic to surface "omp" itself; this extension reads GET /metrics and GET /healthz and
  * turns consecutive polls into deltas.
  *
- * - Footer: `substrate · omp +N req · +M emit · <status>`, status healthy | idle | degraded (<plane>),
- *   or unreachable (<reason>) | auth required | auth failed when the last probe failed.
- * - Widget: the last three polls in which omp had a nonzero delta.
- * - /substrate: one fresh probe (or the poll already in flight), then a summary per surface.
+ * - Footer: `substrate · IN_USE | NOT_OBSERVED_IN_WINDOW · omp +N req +M emit · planes ok | <plane> down · HH:MM`.
+ *   On a failed probe: `substrate · ERROR (<reason>) · last good HH:MM | no data yet · /substrate retries`.
+ *   On an auth failure: `substrate · ACCESS_DENIED <reason>`, with no counts. Before the first probe: `substrate · checking`.
+ * - Usage: IN_USE when an omp change was seen in the last five minutes; otherwise NOT_OBSERVED_IN_WINDOW.
+ *   The window and every time shown are this viewer's poll clock, because /metrics carries no event timestamps.
+ * - Coverage: the known clients are the token file names in SUBSTRATE_TOKENS_DIR, with omp always included.
+ *   A known client with no counters is NOT_INSTRUMENTED. One with counters is OBSERVED when it changed in the
+ *   window, else NO_ACTIVITY_IN_WINDOW. A counted surface outside the list is UNREGISTERED_CLIENT: shown, not dropped.
+ * - Widget: the last three polls with a nonzero omp change, under a caption that states the cap and the refresh.
+ * - /substrate: one fresh probe (or the poll already in flight), then the usage definition, coverage, omp counters,
+ *   planes, cache and ledger. On error the counters are labelled last known, and the line says to run /substrate again.
  *
- * Auth: /metrics requires the omp bearer once the server has tokens configured (anonymous access is off
- * by default). /healthz accepts a request without one. Both polls send the bearer whenever one resolves.
+ * Auth: both polls send the omp bearer whenever one resolves. /metrics may require it once the server has tokens
+ * configured. An unauthenticated loopback GET answered 200 when checked on 2026-10-15, so it is not assumed.
  *
  * Monitoring routes (/healthz, /metrics, /livez, /slo, /slo/history) are left out of the request counts.
- * Without that, this extension's own polls would appear as omp requests and "idle" would never be reached.
+ * Without that, this extension's own polls would appear as omp requests and NOT_OBSERVED_IN_WINDOW would never show.
  *
  * Fail-open: a failed probe shows its reason and keeps the last good snapshot. No hook throws out.
  * The bearer is resolved per probe, sent only as the Authorization header, and never stored, logged,
@@ -26,13 +33,14 @@
  *
  * No import from the Omp package or the repo's module graph: the types below are structural copies.
  */
-import { readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { clearInterval, clearTimeout, setInterval, setTimeout } from "node:timers";
 
 export type Env = Record<string, string | undefined>;
 export type ReadFile = (path: string) => string | null;
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
+export type ReadDir = (path: string) => string[] | null;
 
 export interface Duration {
 	count: number;
@@ -94,13 +102,25 @@ export interface ProbeStatus {
 	at: number;
 }
 
+/** Coverage of one known client, or of a counted surface outside the known list. */
+export type Coverage = "OBSERVED" | "NO_ACTIVITY_IN_WINDOW" | "NOT_INSTRUMENTED" | "UNREGISTERED_CLIENT";
+
+export interface ClientRow {
+	name: string;
+	coverage: Coverage;
+	counters: Totals;
+}
+
 export interface State {
 	sessionId: string | undefined;
 	last: Snapshot | null;
 	lastDelta: Totals | null;
 	lastProbe: ProbeStatus | null;
 	lastPollAt: number | null;
-	lastActiveAt: number | null;
+	/** Poll time at which each surface last showed a change, keyed by surface name. */
+	surfaceActiveAt: Record<string, number>;
+	/** The known clients: omp plus the token file names. The poller sets this before each probe. */
+	known: string[];
 	recent: Recent[];
 	/** The poll in flight, if any. A refresh made meanwhile awaits this same promise. */
 	inFlight: Promise<void> | null;
@@ -136,7 +156,7 @@ export const PROBE_TIMEOUT_MS = 3000;
 /** How long /substrate waits for a poll already in flight before it renders what it has. */
 export const SUBSTRATE_WAIT_MS = 4000;
 const POLL_MS = 30_000;
-const ACTIVE_WINDOW_MS = 5 * 60_000;
+const USAGE_WINDOW_MS = 5 * 60_000;
 const FOOTER_MAX = 79;
 export const AUTH_REQUIRED = "auth required";
 export const AUTH_FAILED = "auth failed";
@@ -168,7 +188,8 @@ export function createState(sessionId?: string): State {
 		lastDelta: null,
 		lastProbe: null,
 		lastPollAt: null,
-		lastActiveAt: null,
+		surfaceActiveAt: {},
+		known: [SURFACE],
 		recent: [],
 		inFlight: null,
 	};
@@ -369,17 +390,19 @@ export async function probe(deps: ProbeDeps = {}): Promise<ProbeResult> {
  */
 export function applySnapshot(state: State, snapshot: Snapshot, at: number): void {
 	const prev = state.last;
-	let delta: Totals = { req: 0, emit: 0, tool: 0 };
-	if (prev && prev.metrics.startedAt === snapshot.metrics.startedAt) {
-		delta = diffTotals(surfaceTotals(prev.metrics, SURFACE), surfaceTotals(snapshot.metrics, SURFACE));
+	const sameRun = prev !== null && prev.metrics.startedAt === snapshot.metrics.startedAt;
+	let omp: Totals = { req: 0, emit: 0, tool: 0 };
+	if (prev && sameRun) {
+		omp = diffTotals(surfaceTotals(prev.metrics, SURFACE), surfaceTotals(snapshot.metrics, SURFACE));
+		for (const name of Object.keys(snapshot.metrics.surfaces)) {
+			const delta = diffTotals(surfaceTotals(prev.metrics, name), surfaceTotals(snapshot.metrics, name));
+			if (delta.req + delta.emit + delta.tool > 0) state.surfaceActiveAt[name] = at;
+		}
 	}
 	state.last = snapshot;
-	state.lastDelta = delta;
+	state.lastDelta = omp;
 	state.lastProbe = { ok: true, reason: null, at };
-	if (delta.req + delta.emit + delta.tool > 0) {
-		state.lastActiveAt = at;
-		state.recent = [...state.recent, { at, delta }].slice(-3);
-	}
+	if (omp.req + omp.emit + omp.tool > 0) state.recent = [...state.recent, { at, delta: omp }].slice(-3);
 }
 
 /**
@@ -431,33 +454,104 @@ function clip(text: string): string {
 	return text.length > FOOTER_MAX ? text.slice(0, FOOTER_MAX) : text;
 }
 
-/** The text for a failed probe: the auth states, or unreachable with its reason. */
-function failureText(reason: string | null): string {
-	if (reason === AUTH_REQUIRED || reason === AUTH_FAILED) return reason;
-	return `unreachable (${reason ?? "unknown"})`;
+/** Drops control and bidi-override characters, so a name from the server cannot move the cursor or reorder a line. */
+export function safeText(text: string): string {
+	let out = "";
+	for (const ch of text) {
+		const code = ch.codePointAt(0) ?? 0;
+		const control = code < 0x20 || (code >= 0x7f && code <= 0x9f);
+		const bidi = (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069);
+		if (!control && !bidi) out += ch;
+	}
+	return out;
 }
 
-/** The footer line. Priority: failed probe, then degraded, then idle (no omp delta in five minutes), then healthy. */
+const KNOWN_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** The known clients: omp first, then the token file names in SUBSTRATE_TOKENS_DIR that are plain names. */
+export function knownClients(env: Env, readDir: ReadDir): string[] {
+	const dir = (env.SUBSTRATE_TOKENS_DIR ?? "").trim() || DEFAULT_TOKENS_DIR;
+	const others = new Set<string>();
+	for (const name of readDir(dir) ?? []) {
+		if (name !== SURFACE && KNOWN_NAME.test(name)) others.add(name);
+	}
+	return [SURFACE, ...[...others].sort()];
+}
+
+function readTokenNames(dir: string): string[] | null {
+	try {
+		return readdirSync(dir);
+	} catch {
+		return null;
+	}
+}
+
+function inWindow(at: number | undefined, now: number): boolean {
+	return at !== undefined && now - at < USAGE_WINDOW_MS;
+}
+
+function usageOf(state: State, now: number): "IN_USE" | "NOT_OBSERVED_IN_WINDOW" {
+	return inWindow(state.surfaceActiveAt[SURFACE], now) ? "IN_USE" : "NOT_OBSERVED_IN_WINDOW";
+}
+
+function isAuth(reason: string | null): boolean {
+	return reason === AUTH_REQUIRED || reason === AUTH_FAILED;
+}
+
+/** One row per known client, then any counted surface outside the list. Counters come from the last good snapshot. */
+export function coverageRows(state: State, now: number): ClientRow[] {
+	const parsed = state.last?.metrics ?? null;
+	const countersOf = (name: string): Totals => {
+		const c = parsed ? surfaceTotals(parsed, name) : emptyCounters();
+		return { req: c.req, emit: c.emit, tool: c.tool };
+	};
+	const emitting = (totals: Totals): boolean => totals.req + totals.emit + totals.tool > 0;
+	const rows: ClientRow[] = [];
+	for (const name of state.known) {
+		const counters = countersOf(name);
+		let coverage: Coverage = "NOT_INSTRUMENTED";
+		if (emitting(counters)) coverage = inWindow(state.surfaceActiveAt[name], now) ? "OBSERVED" : "NO_ACTIVITY_IN_WINDOW";
+		rows.push({ name, coverage, counters });
+	}
+	const known = new Set(state.known);
+	for (const name of Object.keys(parsed?.surfaces ?? {}).sort()) {
+		const counters = countersOf(name);
+		if (!known.has(name) && emitting(counters)) rows.push({ name, coverage: "UNREGISTERED_CLIENT", counters });
+	}
+	return rows;
+}
+
+const USAGE_CAPTION = `usage: IN_USE = an omp read or write counted by the substrate in the last ${USAGE_WINDOW_MS / 60_000} min; NOT_OBSERVED_IN_WINDOW = none in that window; UNKNOWN = the source is unavailable. Counts are the server's, not Omp tool calls.`;
+
+/** The footer line: checking, ACCESS_DENIED, ERROR, or usage with planes and the poll time. Never shows zeros for an unknown value. */
 export function formatFooter(state: State, now: number): string {
 	if (!state.lastProbe) return "substrate · checking";
-	if (!state.lastProbe.ok) return clip(`substrate · ${failureText(state.lastProbe.reason)}`);
+	if (!state.lastProbe.ok) return clip(errorFooter(state));
 	const snap = state.last;
 	if (!snap) return "substrate · checking";
 	const delta = state.lastDelta ?? { req: 0, emit: 0, tool: 0 };
 	const down = Object.entries(snap.health.planes)
 		.filter(([, plane]) => !plane.ok)
-		.map(([name]) => name)
+		.map(([name]) => safeText(name))
 		.sort();
-	const idle = state.lastActiveAt === null || now - state.lastActiveAt >= ACTIVE_WINDOW_MS;
-	const status = down.length > 0 ? `degraded (${down.join(",")})` : idle ? "idle" : "healthy";
-	return clip(`substrate · omp +${delta.req} req · +${delta.emit} emit · ${status}`);
+	const planes = down.length === 0 ? "planes ok" : down.length === 1 ? `${down[0]} down` : `${down.length} planes down`;
+	return clip(`substrate · ${usageOf(state, now)} · omp +${delta.req} req +${delta.emit} emit · ${planes} · ${hhmm(state.lastProbe.at)}`);
 }
 
-/** Widget lines for the last three polls with a nonzero omp delta. Empty when there are none. */
+function errorFooter(state: State): string {
+	const reason = state.lastProbe?.reason ?? null;
+	if (isAuth(reason)) return `substrate · ACCESS_DENIED ${reason}`;
+	const seen = state.last ? `last good ${hhmm(state.last.at)}` : "no data yet";
+	return `substrate · ERROR (${reason ?? "unknown"}) · ${seen} · /substrate retries`;
+}
+
+/** Widget lines: a caption that states the feed cap and the refresh, then the last three polls with a nonzero omp change. Empty when there are none. */
 export function formatWidget(state: State): string[] {
-	return state.recent
+	const rows = state.recent
 		.slice(-3)
 		.map((entry) => `${hhmm(entry.at)}  +${entry.delta.req} req  +${entry.delta.emit} emit  +${entry.delta.tool} tool`);
+	if (rows.length === 0) return [];
+	return [`omp changes, newest last · feed cap 3 polls · refresh every ${POLL_MS / 1000} s`, ...rows];
 }
 
 /** The one hint line for an auth failure. It names where the token comes from and never includes its value. */
@@ -468,27 +562,42 @@ function authHint(reason: string): string {
 	return "hint: the omp token was refused; check SUBSTRATE_TOKEN, SUBSTRATE_TOKEN_FILE, or the omp token file";
 }
 
-/** Lines for the /substrate notification: a probe result, counters per surface (omp first), planes, cache and ledger. */
+/** Lines for /substrate: the probe state and usage definition, omp counters, client coverage, planes, cache and ledger. */
 export function formatSummary(state: State, now: number): string[] {
 	const probeStatus = state.lastProbe;
-	if (!probeStatus) return ["substrate: no probe yet"];
-	const lines: string[] = [probeStatus.ok ? "substrate: ok" : `substrate: ${failureText(probeStatus.reason)}`];
-	if (!probeStatus.ok && (probeStatus.reason === AUTH_REQUIRED || probeStatus.reason === AUTH_FAILED)) {
-		lines.push(authHint(probeStatus.reason));
+	if (!probeStatus) return ["substrate: checking, no probe yet"];
+	const reason = probeStatus.reason;
+	if (!probeStatus.ok && reason !== null && isAuth(reason)) {
+		return [`substrate: ACCESS_DENIED (${reason})`, authHint(reason)];
 	}
+	const lines = [probeStatus.ok ? `substrate: OK, updated ${hhmm(probeStatus.at)}` : `substrate: ERROR (${reason ?? "unknown"})`];
+	lines.push(USAGE_CAPTION);
+	if (!probeStatus.ok) lines.push("retry: run /substrate again");
 	const snap = state.last;
 	if (!snap) return lines;
-	if (!probeStatus.ok) lines.push(`last good snapshot: ${formatAge(now - snap.at)} ago`);
-	lines.push(`counters since ${snap.metrics.startedAt} (monitoring routes excluded):`);
-	const names = [SURFACE, ...Object.keys(snap.metrics.surfaces).filter((name) => name !== SURFACE).sort()];
-	for (const name of names) {
-		const c = surfaceTotals(snap.metrics, name);
-		lines.push(`  ${name}: req ${c.req}, emit ${c.emit}, tool ${c.tool}`);
+	const basis = probeStatus.ok ? "" : " (last known)";
+	const omp = surfaceTotals(snap.metrics, SURFACE);
+	const usage = probeStatus.ok ? usageOf(state, now) : "UNKNOWN";
+	const stamp = probeStatus.ok ? `counted since ${snap.metrics.startedAt}` : `last good at ${hhmm(snap.at)}`;
+	lines.push(`omp: ${usage} · req ${omp.req}, emit ${omp.emit}, tool ${omp.tool} · ${stamp}`);
+	const rows = coverageRows(state, now);
+	const known = rows.filter((row) => row.coverage !== "UNREGISTERED_CLIENT");
+	const missing = known.filter((row) => row.coverage === "NOT_INSTRUMENTED").map((row) => safeText(row.name));
+	const banner = missing.length > 0 ? `; NOT_INSTRUMENTED: ${missing.join(", ")}; the headline covers observed clients only` : "";
+	lines.push(`coverage${basis}: ${known.length - missing.length} of ${known.length} known clients observed${banner}`);
+	for (const row of known) {
+		const shown =
+			row.coverage === "NOT_INSTRUMENTED"
+				? row.coverage
+				: `${row.coverage} · req ${row.counters.req}, emit ${row.counters.emit}, tool ${row.counters.tool}`;
+		lines.push(`  ${safeText(row.name)}: ${shown}`);
 	}
+	const unregistered = rows.filter((row) => row.coverage === "UNREGISTERED_CLIENT").map((row) => safeText(row.name));
+	if (unregistered.length > 0) lines.push(`unregistered (counted, not in the known list): ${unregistered.join(", ")}`);
 	const planes = Object.entries(snap.health.planes).map(
-		([name, plane]) => `${name} ${plane.ok ? "ok" : "down"}${plane.breaker ? ` (${plane.breaker})` : ""}`,
+		([name, plane]) => `${safeText(name)} ${plane.ok ? "ok" : "down"}${plane.breaker ? ` (${safeText(plane.breaker)})` : ""}`,
 	);
-	lines.push(`planes: ${planes.length > 0 ? planes.join(", ") : "none reported"}`);
+	lines.push(`planes${basis}: ${planes.length > 0 ? planes.join(", ") : "none reported"}`);
 	lines.push(`cache: hits ${snap.health.cacheHits ?? "n/a"}, misses ${snap.health.cacheMisses ?? "n/a"}`);
 	lines.push(`ledger rows ${snap.health.ledgerRows ?? "n/a"}, anchors rows ${snap.health.anchorRows ?? "n/a"}`);
 	return lines;
@@ -512,6 +621,9 @@ export default function (pi: OmpPi): void {
 	let state = createState();
 	let lastCtx: OmpContext | undefined;
 	let timer: ReturnType<typeof setInterval> | undefined;
+	const reloadKnown = (): void => {
+		state.known = knownClients(process.env, readTokenNames);
+	};
 
 	const render = (ctx: OmpContext): void => {
 		ctx.ui.setStatus("substrate", formatFooter(state, Date.now()));
@@ -522,6 +634,7 @@ export default function (pi: OmpPi): void {
 	const poll = async (ctx: OmpContext, force: boolean): Promise<void> => {
 		lastCtx = ctx;
 		if (!force && !shouldPoll(Date.now(), state.lastPollAt, POLL_MS)) return;
+		reloadKnown();
 		await refresh(state);
 		render(ctx);
 	};
@@ -552,6 +665,7 @@ export default function (pi: OmpPi): void {
 		handler: async (_args, ctx) => {
 			lastCtx = ctx;
 			try {
+				reloadKnown();
 				await settleWithin(refresh(state), SUBSTRATE_WAIT_MS);
 				render(ctx);
 				ctx.ui.notify(formatSummary(state, Date.now()).join("\n"), state.lastProbe?.ok ? "info" : "warning");

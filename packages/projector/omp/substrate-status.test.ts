@@ -1,17 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import {
 	applySnapshot,
+	coverageRows,
 	createState,
 	diffTotals,
 	formatFooter,
 	formatSummary,
 	formatWidget,
+	knownClients,
 	parseHealthz,
 	parseMetrics,
 	PROBE_TIMEOUT_MS,
 	probe,
 	refresh,
 	resolveToken,
+	safeText,
 	shouldPoll,
 	surfaceTotals,
 	type FetchLike,
@@ -99,6 +102,23 @@ function snapshot(at: number, startedAt: string, omp: { req: number; emit: numbe
 	return { at, metrics, health };
 }
 
+/** A snapshot whose request counter is given per surface, for coverage and change tests. */
+function countsBySurface(at: number, counts: Record<string, number>): Snapshot {
+	const metrics = parseMetrics({
+		startedAt: STARTED,
+		metrics: [
+			{
+				kind: "counter",
+				name: "substrate.request.total",
+				points: Object.entries(counts).map(([surface, value]) => ({ attributes: { surface, route: "/brief", status: "2xx" }, value })),
+			},
+		],
+	});
+	const health = parseHealthz(healthFixture());
+	if (!metrics || !health) throw new Error("fixture did not parse");
+	return { at, metrics, health };
+}
+
 /** A fake fetch that answers /metrics and /healthz from the fixtures and records each Authorization header. */
 function fakeFetch(seen: Array<string | undefined>, metrics = metricsFixture(STARTED, { req: 10, emit: 4, tool: 3 })): FetchLike {
 	return async (url, init) => {
@@ -179,62 +199,210 @@ describe("footer and widget", () => {
 		expect(formatFooter(createState("session-1"), 1_000)).toBe("substrate · checking");
 	});
 
-	test("a failed first probe renders unreachable, not checking", async () => {
+	test("an error before any good snapshot shows no counts and no zeros", async () => {
 		const state = createState("session-1");
 		await refresh(state, { fetchImpl: refusedFetch, env: {}, readFile: () => null, now: () => 1_000 });
-		expect(state.last).toBeNull();
-		expect(formatFooter(state, 2_000)).toBe("substrate · unreachable (unreachable)");
+		const footer = formatFooter(state, 2_000);
+		expect(footer).toContain("ERROR (unreachable)");
+		expect(footer).toContain("no data yet");
+		expect(footer).not.toMatch(/\d req|\+\d/);
 	});
 
-	test("idle when omp deltas stay at zero", () => {
-		const state = createState("session-1");
-		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
-		expect(formatFooter(state, 2_000)).toBe("substrate · omp +0 req · +0 emit · idle");
-	});
-
-	test("healthy shows the last poll's deltas", () => {
+	test("an error after a good poll shows the last good time and no counts", async () => {
 		const state = createState("session-1");
 		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
 		applySnapshot(state, snapshot(2_000, STARTED, { req: 12, emit: 9, tool: 3 }), 2_000);
-		expect(formatFooter(state, 3_000)).toBe("substrate · omp +2 req · +5 emit · healthy");
+		await refresh(state, { fetchImpl: refusedFetch, env: {}, readFile: () => null, now: () => 3_000 });
+		const footer = formatFooter(state, 3_000);
+		expect(footer).toContain("ERROR (unreachable)");
+		expect(footer).toContain("last good");
+		expect(footer).toContain("/substrate retries");
+		expect(footer).not.toContain("omp +");
 	});
 
-	test("idle again once five minutes pass without an omp delta", () => {
+	test("NOT_OBSERVED_IN_WINDOW while omp is unchanged, never IN_USE", () => {
 		const state = createState("session-1");
 		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
-		applySnapshot(state, snapshot(2_000, STARTED, { req: 12, emit: 4, tool: 3 }), 2_000);
-		expect(formatFooter(state, 2_000 + 5 * 60_000)).toBe("substrate · omp +2 req · +0 emit · idle");
+		applySnapshot(state, snapshot(2_000, STARTED, { req: 10, emit: 4, tool: 3 }), 2_000);
+		const footer = formatFooter(state, 2_000);
+		expect(footer).toContain("NOT_OBSERVED_IN_WINDOW");
+		expect(footer).not.toContain("IN_USE");
 	});
 
-	test("degraded names the plane that is not ok", () => {
+	test("IN_USE after an omp change, back to NOT_OBSERVED_IN_WINDOW once five minutes pass", () => {
+		const state = createState("session-1");
+		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
+		applySnapshot(state, snapshot(2_000, STARTED, { req: 12, emit: 9, tool: 3 }), 2_000);
+		expect(formatFooter(state, 3_000)).toContain("IN_USE");
+		expect(formatFooter(state, 2_000 + 5 * 60_000)).toContain("NOT_OBSERVED_IN_WINDOW");
+	});
+
+	test("the footer shows the last poll's omp change", () => {
+		const state = createState("session-1");
+		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
+		applySnapshot(state, snapshot(2_000, STARTED, { req: 12, emit: 9, tool: 3 }), 2_000);
+		expect(formatFooter(state, 3_000)).toContain("omp +2 req +5 emit");
+	});
+
+	test("a plane that is down is named, and usage is still reported", () => {
 		const state = createState("session-1");
 		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }, false), 1_000);
-		expect(formatFooter(state, 2_000)).toBe("substrate · omp +0 req · +0 emit · degraded (ragflow)");
+		applySnapshot(state, snapshot(2_000, STARTED, { req: 12, emit: 4, tool: 3 }, false), 2_000);
+		const footer = formatFooter(state, 2_500);
+		expect(footer).toContain("ragflow down");
+		expect(footer).toContain("IN_USE");
 	});
 
-	test("unreachable shows the reason", () => {
+	test("ACCESS_DENIED shows no counts", async () => {
 		const state = createState("session-1");
 		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
-		state.lastProbe = { ok: false, reason: "timeout", at: 2_000 };
-		expect(formatFooter(state, 2_000)).toBe("substrate · unreachable (timeout)");
+		await refresh(state, { fetchImpl: denyFetch, env: {}, readFile: () => null, now: () => 2_000 });
+		const footer = formatFooter(state, 2_000);
+		expect(footer).toContain("ACCESS_DENIED auth required");
+		expect(footer).not.toContain("omp +");
 	});
 
-	test("widget is empty with no nonzero polls, and filled after one", () => {
+	test("the footer never exceeds 79 characters, even for a long error reason", () => {
+		const state = createState("session-1");
+		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
+		state.lastProbe = { ok: false, reason: "x".repeat(200), at: 2_000 };
+		expect(formatFooter(state, 2_000).length).toBeLessThanOrEqual(79);
+	});
+
+	test("the widget is empty until omp changes, then states its cap and shows the change", () => {
 		const state = createState("session-1");
 		expect(formatWidget(state)).toEqual([]);
 		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
 		const at = new Date(2026, 9, 13, 10, 5).getTime();
 		applySnapshot(state, snapshot(at, STARTED, { req: 15, emit: 6, tool: 4 }), at);
-		expect(formatWidget(state)).toEqual(["10:05  +5 req  +2 emit  +1 tool"]);
+		const lines = formatWidget(state);
+		expect(lines[0]).toContain("cap 3");
+		expect(lines.slice(1)).toEqual(["10:05  +5 req  +2 emit  +1 tool"]);
 	});
 
-	test("widget keeps only the last three nonzero polls", () => {
+	test("the widget keeps only the last three changes", () => {
 		const state = createState("session-1");
 		applySnapshot(state, snapshot(1_000, STARTED, { req: 0, emit: 0, tool: 0 }), 1_000);
 		for (let step = 1; step <= 4; step++) {
 			applySnapshot(state, snapshot(1_000 + step * 1_000, STARTED, { req: step, emit: 0, tool: 0 }), 1_000 + step * 1_000);
 		}
-		expect(formatWidget(state)).toHaveLength(3);
+		expect(formatWidget(state).slice(1)).toHaveLength(3);
+	});
+});
+
+describe("usage, coverage and /substrate", () => {
+	test("the summary states the usage definition on screen", () => {
+		const state = createState("session-1");
+		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
+		const text = formatSummary(state, 1_000).join("\n");
+		expect(text).toContain("IN_USE");
+		expect(text).toContain("NOT_OBSERVED_IN_WINDOW");
+		expect(text).toContain("last 5 min");
+	});
+
+	test("a known client with no counters is NOT_INSTRUMENTED; one with counters is not", () => {
+		const state = createState("session-1");
+		state.known = ["omp", "grok-bot", "codex"];
+		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
+		const coverage = Object.fromEntries(coverageRows(state, 1_000).map((row) => [row.name, row.coverage]));
+		expect(coverage.codex).toBe("NOT_INSTRUMENTED");
+		expect(coverage["grok-bot"]).not.toBe("NOT_INSTRUMENTED");
+		expect(coverage.omp).not.toBe("NOT_INSTRUMENTED");
+	});
+
+	test("a client with a change in the window is OBSERVED, and NO_ACTIVITY_IN_WINDOW after five minutes", () => {
+		const state = createState("session-1");
+		state.known = ["omp", "grok-bot"];
+		applySnapshot(state, countsBySurface(1_000, { omp: 10, "grok-bot": 7 }), 1_000);
+		applySnapshot(state, countsBySurface(2_000, { omp: 10, "grok-bot": 9 }), 2_000);
+		const grokAt = (now: number) => coverageRows(state, now).find((row) => row.name === "grok-bot")?.coverage;
+		expect(grokAt(2_500)).toBe("OBSERVED");
+		expect(grokAt(2_000 + 5 * 60_000)).toBe("NO_ACTIVITY_IN_WINDOW");
+	});
+
+	test("a counted surface outside the known list is flagged, not dropped", () => {
+		const state = createState("session-1");
+		state.known = ["omp"];
+		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
+		const flagged = coverageRows(state, 1_000).find((row) => row.name === "grok-bot");
+		expect(flagged?.coverage).toBe("UNREGISTERED_CLIENT");
+	});
+
+	test("partial coverage names the NOT_INSTRUMENTED clients", () => {
+		const state = createState("session-1");
+		state.known = ["omp", "codex"];
+		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
+		const text = formatSummary(state, 1_000).join("\n");
+		expect(text).toContain("NOT_INSTRUMENTED: codex");
+		expect(text).toContain("covers observed clients only");
+	});
+
+	test("control characters in a surface name are not printed", () => {
+		const state = createState("session-1");
+		state.known = ["omp"];
+		applySnapshot(state, countsBySurface(1_000, { omp: 10, "ev\u001b[2Jil": 3 }), 1_000);
+		const text = formatSummary(state, 1_000).join("\n");
+		expect(text).not.toContain("\u001b");
+		expect(text).toContain("unregistered");
+	});
+
+	test("a credential-like value in a health record never reaches the summary or the footer", () => {
+		const state = createState("session-1");
+		const raw = healthFixture();
+		const health = parseHealthz({
+			...raw,
+			token: "CANARY-TOKEN-VALUE",
+			planes: { ...raw.planes, ragflow: { ok: true, breaker: { state: "closed" }, token: "CANARY-TOKEN-VALUE" } },
+		});
+		const metrics = parseMetrics(metricsFixture(STARTED, { req: 10, emit: 4, tool: 3 }));
+		if (!health || !metrics) throw new Error("fixture did not parse");
+		applySnapshot(state, { at: 1_000, metrics, health }, 1_000);
+		expect(formatSummary(state, 1_000).join("\n")).not.toContain("CANARY-TOKEN-VALUE");
+		expect(formatFooter(state, 1_000)).not.toContain("CANARY-TOKEN-VALUE");
+	});
+
+	test("an error shows last-known counters labelled as such, a retry line, and no usage claim", async () => {
+		const state = createState("session-1");
+		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
+		await refresh(state, { fetchImpl: refusedFetch, env: {}, readFile: () => null, now: () => 2_000 });
+		const text = formatSummary(state, 2_000).join("\n");
+		expect(text).toContain("last known");
+		expect(text).toContain("retry: run /substrate again");
+		expect(text).toContain("omp: UNKNOWN");
+	});
+
+	test("an error before any good poll prints no counters", async () => {
+		const state = createState("session-1");
+		await refresh(state, { fetchImpl: refusedFetch, env: {}, readFile: () => null, now: () => 1_000 });
+		const text = formatSummary(state, 1_000).join("\n");
+		expect(text).toContain("ERROR");
+		expect(text).not.toMatch(/req \d/);
+	});
+
+	test("access denied prints no counters", async () => {
+		const state = createState("session-1");
+		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
+		await refresh(state, { fetchImpl: denyFetch, env: {}, readFile: () => null, now: () => 2_000 });
+		const text = formatSummary(state, 2_000).join("\n");
+		expect(text).toContain("ACCESS_DENIED");
+		expect(text).not.toMatch(/req \d/);
+	});
+});
+
+describe("known clients and terminal text", () => {
+	test("token file names are the known list, omp first, and names that are not plain are left out", () => {
+		const names = knownClients({ SUBSTRATE_TOKENS_DIR: "/tokens" }, (dir) =>
+			dir === "/tokens" ? ["codex", "omp", "bad name!", "grok-bot"] : null,
+		);
+		expect(names).toEqual(["omp", "codex", "grok-bot"]);
+	});
+
+	test("an unreadable tokens dir leaves omp as the only known client", () => {
+		expect(knownClients({}, () => null)).toEqual(["omp"]);
+	});
+
+	test("safeText drops control and bidi-override characters", () => {
+		expect(safeText("a\u001b[31mb\u202ec\u0007")).toBe("a[31mbc");
 	});
 });
 
@@ -292,9 +460,9 @@ describe("probe", () => {
 
 		const state = createState("session-1");
 		await refresh(state, deps);
-		expect(formatFooter(state, 2)).toBe("substrate · auth failed");
+		expect(formatFooter(state, 2)).not.toContain(TOKEN);
 		const summary = formatSummary(state, 2).join("\n");
-		expect(summary).toContain("substrate: auth failed");
+		expect(summary).toContain("auth failed");
 		expect(summary).toContain("hint:");
 		for (const output of [formatFooter(state, 2), summary, JSON.stringify(result)]) {
 			expect(output).not.toContain(TOKEN);
@@ -333,7 +501,7 @@ describe("probe", () => {
 		await refresh(state, { fetchImpl: refusedFetch, env: {}, readFile: () => null, now: () => 2_000 });
 		expect(state.lastProbe).toEqual({ ok: false, reason: "unreachable", at: 2_000 });
 		expect(state.last).not.toBeNull();
-		expect(formatSummary(state, 2_000).join("\n")).toContain("last good snapshot: 1s ago");
+		expect(formatSummary(state, 2_000).join("\n")).toContain("req 10");
 	});
 });
 
