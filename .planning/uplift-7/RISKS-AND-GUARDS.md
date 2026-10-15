@@ -20,6 +20,7 @@
 | R14 | The live write-to-footer latency was unproven | Proven on a scratch twin on 2026-10-15: one `omp` write, footer `IN_USE` after 29.9 s, on the extension's 30-second timer. A live production check is optional. | Operator | Closed (scratch) |
 | R15 | Pre-existing worktrees under `/tmp/pr-merges` and `/tmp/agent-substrate-p15-before-oct08` | Not from this run. Left untouched. | You | Open |
 | R16 | The anchor fee assumption | Checked against the Solana fees page: 5,000 lamports per signature. The hourly cost is 0.0438 SOL per year. | Me | Closed |
+| R17 | Per-surface counts can include events a caller declared for another surface | For ordinary callers the stored `surface` is the body's declared value (`attributedSurface`, `mcp.ts`). Swarm and `substrate` tokens are bound to their own surface. The panel's counts are attributed by declaration for ordinary callers, not by verified identity. | You: accept and document, or change the substrate | Open |
 
 ## Run guard checks (node n6 list)
 

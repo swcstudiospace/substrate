@@ -19,7 +19,7 @@ Each node is one Linear issue under graph `ut-mv9377hx-a66cb8e4`. Status is as o
 | Closeout | Ship PR 70 and sync tracking | none | Done | PR #70 merged as `9cd6bf9`. The Notion row and Linear were updated. |
 | Closeout | Fund the anchor key on devnet | none | Blocked | Every airdrop attempt was rate-limited, the latest one included. The key holds 0 SOL. Operator step. |
 | Closeout | MILESTONE_COMPLETE | none | Blocked on your approval | Seven criteria FAIL (`MILESTONE-AUDIT.md`). It needs your approval and no unresolved FAIL. |
-| Closeout | CLEANUP | none | Done after merge | This run's worktrees, scratch clones, containers, and temporary files were removed. Archives and legacy material were not touched. |
+| Closeout | CLEANUP | none | In progress | Done when this run's worktree and scratch copies are removed after the merge. Archives and legacy material are not touched. |
 | Closeout | Closeout report | none | Done | The chat report, with the same numbers as `MILESTONE-AUDIT.md`, and the content listed below. |
 
 ## Deviations from the n4 spec
@@ -39,7 +39,7 @@ Verification commands come from `package.json`: `bun test`, `bunx tsc --noEmit`,
 | U2 Substrate: expected-version for skills and docs | `packages/mcp-server/src/index-store.ts` (skills path), `docs-ingest.ts` | A versioned write path, with a two-client race test | the PG suite | GREY_AREA_ACCEPTANCE |
 | U3 Substrate: degraded-mode queue | `packages/mcp-server` queue (new), its tests | Queued writes apply exactly once when the substrate returns | `bun test`; one chaos check on the scratch twin | GREY_AREA_ACCEPTANCE: design first |
 | U4 Omp latency test | none in the repo | Done on a scratch twin: one `omp` write; the footer showed `IN_USE` after 29.9 s. The twin was torn down with no residue. | the rehearsal twin, then the footer | DEFAULT_PROCEED (scratch, approved) |
-| U5 Omp STALE state | `packages/projector/omp/substrate-status.ts`, its tests | Only if you choose `POST /events/query` for a server clock | `bun test packages/projector/omp/` | GREY_AREA_ACCEPTANCE |
+| U5 Omp STALE state | `packages/projector/omp/substrate-status.ts`, its tests | Only if you choose `POST /events/query` for event times (source time, not ingest time) | `bun test packages/projector/omp/` | GREY_AREA_ACCEPTANCE |
 | U6 Operator steps | none (operator) | Fund the key; install and enable the timer; ANCHOR-06 proof; deploy `main`; skills timers; Cursor rotation; optionally, one live write through Omp | the operator reports; I verify read-only | EXTERNAL_EFFECT |
 | U7 Audit regrade and MILESTONE_COMPLETE | `.planning/uplift-7/MILESTONE-AUDIT.md` | Regrade after U1 to U6 | no unresolved FAIL | VALIDATION_REQUEST (your approval) |
 | U8 CLEANUP | this run's temporary files and worktrees only | Remove after the merges | `git worktree list` and `git status` | DEFAULT_PROCEED |

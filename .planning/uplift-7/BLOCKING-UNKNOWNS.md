@@ -14,7 +14,7 @@ Each unknown from the planning spec, with its status after this run. "Answered" 
 | 8 | The Railway budget ceiling | Default | $50 per month at test scale. Confirm. |
 | 9 | Which host shows the panel | Answered | The Omp TUI, at the GREY_AREA pause. |
 | 10 | Whether to add a per-surface last-seen value to `/metrics` | Answered | No. Keep the viewer's poll clock, at closeout. |
-| 11 | Whether the STALE state can be shown | Open | It needs an event time, and `/metrics` carries none. `POST /events/query` returns server timestamps, so reading it is an option you have not decided. |
+| 11 | Whether the STALE state can be shown | Open | It needs an event time, and `/metrics` carries none. `POST /events/query` returns each stored event's `ts`, which is source event time and not a guaranteed server ingest time. Reading it is an option you have not decided. |
 | 12 | Cross-agent memory visibility | Answered and fixed | Agent scope is private; shared scopes are visible. PR #73, merged as `33b4677`. |
 | 13 | Routine and category gaps | Default | Reported, not built. |
 | 14 | The known-client list source | Default | The ten token files in `SUBSTRATE_TOKENS_DIR`, with `omp` always included. Confirm. |
