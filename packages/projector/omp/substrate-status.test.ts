@@ -747,6 +747,8 @@ describe("Ultrathink bar publisher", () => {
 			const sessionStart = handlers.get("session_start");
 			if (!sessionStart) throw new Error("session hooks were not registered");
 			sessionStart({}, ctx);
+			expect(statusCalls).toEqual([["substrate", undefined]]);
+			expect(widgetCalls).toEqual([["substrate", undefined, { placement: "belowEditor" }]]);
 			await until(() => statuses().some((status) => status.state === "ok"));
 			metricsBody = metricsFixture(STARTED, { req: 13, emit: 4, tool: 3 });
 			sessionStart({}, ctx);

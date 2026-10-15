@@ -9,8 +9,9 @@
  * attributes traffic to surface "omp" itself; this extension reads GET /metrics and GET /healthz and
  * turns consecutive polls into deltas.
  *
- * - Chrome: each render clears the `substrate` footer and the below-editor widget so an older install
- *   drops them. Those slots are not part of this plugin. Usage still reaches the Ultrathink bar.
+ * - Chrome: session start clears the `substrate` footer and the below-editor widget before the first
+ *   probe, and every render clears them again. Those slots are not part of this plugin. An older install
+ *   drops them. Usage still reaches the Ultrathink bar.
  * - Usage: IN_USE when an omp change was seen in the last five minutes; otherwise NOT_OBSERVED_IN_WINDOW.
  *   The window and every time shown are this viewer's poll clock, because /metrics carries no event timestamps.
  * - Coverage: the known clients are the token file names in SUBSTRATE_TOKENS_DIR, with omp always included.
@@ -717,9 +718,15 @@ export default function (pi: OmpPi): void {
 		state.known = knownClients(process.env, readTokenNames);
 	};
 
+	const dropChrome = (ctx: OmpContext): void => {
+		try {
+			ctx.ui.setStatus("substrate", undefined);
+			ctx.ui.setWidget("substrate", undefined, { placement: "belowEditor" });
+		} catch {}
+	};
+
 	const render = (ctx: OmpContext): void => {
-		ctx.ui.setStatus("substrate", undefined);
-		ctx.ui.setWidget("substrate", undefined, { placement: "belowEditor" });
+		dropChrome(ctx);
 		publish();
 	};
 
@@ -742,6 +749,7 @@ export default function (pi: OmpPi): void {
 
 	pi.on("session_start", (_event, ctx) =>
 		guard(async () => {
+			dropChrome(ctx);
 			const id = sessionIdOf(ctx);
 			if (id !== state.sessionId) state = createState(id);
 			clearInterval(timer);
@@ -753,7 +761,6 @@ export default function (pi: OmpPi): void {
 			await poll(ctx, true);
 		}),
 	);
-
 	pi.on("agent_end", (_event, ctx) => guard(() => poll(ctx, false)));
 
 	pi.on("session_shutdown", () => {

@@ -46,11 +46,12 @@ omp requests, and usage would never reach `NOT_OBSERVED_IN_WINDOW`.
 The installed surfaces are the Ultrathink bar and the explicit `/substrate`
 command.
 
-The extension does not mount an Omp footer or a below-editor widget. On each
-render it calls `setStatus("substrate", undefined)` and
-`setWidget("substrate", undefined, { placement: "belowEditor" })` so a session
-that already has the old chrome drops it. `formatFooter` and `formatWidget`
-remain as unused formatters; they are not passed to those setters.
+The extension does not mount an Omp footer or a below-editor widget. Session start
+clears those slots before the first probe, and every render clears them again, so
+a session that already has the old chrome drops it:
+`setStatus("substrate", undefined)` and
+`setWidget("substrate", undefined, { placement: "belowEditor" })`. `formatFooter`
+and `formatWidget` remain as unused formatters; they are not passed to those setters.
 
 `/substrate`: runs one fresh probe, or waits up to 4 seconds for the poll
 already in flight. It shows the probe state with `updated HH:MM`, the usage
@@ -112,6 +113,10 @@ Symlink the extension into Omp's auto-discovered directory, as
 
 Remove the symlink to disable it.
 
+The Ultrathink bar is a separate Omp host extension. This symlink does not install
+it. Without that bar, `/substrate` is the only status surface. Either way, this
+extension does not mount a footer or a below-editor widget.
+
 ## Configuration and the token rule
 
 - `SUBSTRATE_URL`: base URL. Default `http://127.0.0.1:7410`.
@@ -140,5 +145,6 @@ Remove the symlink to disable it.
 
 ## Fail-open
 
-Nothing throws into Omp. Probe failures become a status line. The extension
-makes only the two GETs above and never writes to the substrate.
+Nothing throws into Omp. A failed probe is not drawn as a footer or widget. The
+bar payload and `/substrate` carry the reason. The extension makes only the two
+GETs above and never writes to the substrate.
