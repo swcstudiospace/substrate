@@ -228,6 +228,17 @@ describe("scoped merge", () => {
 		const texts = (hits: Array<{ text: string }>) => hits.map((hit) => hit.text).sort();
 		expect(texts(mergeDerivedHits([], reply, undefined, "omp").derived)).toEqual(["shared repo rule"]);
 		expect(mergeDerivedHits([], reply, "agent:hermes", "omp").derived).toEqual([]);
-		expect(texts(mergeDerivedHits([], reply, undefined, "hermes").derived)).toEqual(["hermes private note", "shared repo rule"]);
+		const asHermes = await recallMemories(deps(fake), "rule", "hermes");
+		expect(texts(mergeDerivedHits([], asHermes, undefined, "hermes").derived)).toEqual(["hermes private note", "shared repo rule"]);
+	});
+
+	test("a private copy that outscores a shared one does not hide the shared one", async () => {
+		const fake = new HindsightFake();
+		fake.seed("sub-hermes", [
+			{ id: "p1", text: "fence the lease", document_id: "mwd_p1", tags: ["hermes"], metadata: { scope: "agent:hermes" }, score: 0.9 },
+			{ id: "s1", text: "fence the lease", document_id: "mwd_s1", tags: ["hermes"], metadata: { scope: "repo:acme/app" }, score: 0.5 },
+		]);
+		const reply = await recallMemories(deps(fake), "lease", "cursor");
+		expect(reply.results.map((hit) => hit.scope)).toEqual(["repo:acme/app"]);
 	});
 });
