@@ -732,7 +732,7 @@ describe("Ultrathink bar publisher", () => {
 		try {
 			for (const key of envKeys) delete process.env[key];
 			process.env.SUBSTRATE_URL = `http://127.0.0.1:${server.port}`;
-			process.env.SUBSTRATE_TOKENS_DIR = "/nonexistent/substrate-status-test-tokens";
+			process.env.SUBSTRATE_TOKENS_DIR = "/no-such-dir";
 			substrateStatus(pi);
 			const sessionStart = handlers.get("session_start");
 			const sessionShutdown = handlers.get("session_shutdown");
