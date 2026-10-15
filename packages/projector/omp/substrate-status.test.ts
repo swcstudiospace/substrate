@@ -719,8 +719,18 @@ describe("Ultrathink bar publisher", () => {
 				},
 			},
 		};
+		const statusCalls: Array<[string, string | undefined]> = [];
+		const widgetCalls: Array<[string, string[] | undefined, { placement?: "aboveEditor" | "belowEditor" } | undefined]> = [];
 		const ctx: OmpContext = {
-			ui: { setStatus: () => {}, setWidget: () => {}, notify: () => {} },
+			ui: {
+				setStatus: (key, text) => {
+					statusCalls.push([key, text]);
+				},
+				setWidget: (key, content, options) => {
+					widgetCalls.push([key, content, options]);
+				},
+				notify: () => {},
+			},
 			sessionManager: { getSessionId: () => "publisher-test" },
 		};
 		const statuses = (): SubstrateBusStatus[] =>
@@ -742,6 +752,11 @@ describe("Ultrathink bar publisher", () => {
 			sessionStart({}, ctx);
 			await until(() => statuses().some((status) => status.usage === "IN_USE"));
 			expect(emitted.some((entry) => entry.channel === SUBSTRATE_STATUS_REQUEST)).toBe(false);
+			expect(statusCalls.length).toBeGreaterThan(0);
+			expect(widgetCalls.length).toBeGreaterThan(0);
+			for (const call of statusCalls) expect(call).toEqual(["substrate", undefined]);
+			for (const call of widgetCalls) expect(call).toEqual(["substrate", undefined, { placement: "belowEditor" }]);
+			expect(statuses().some((status) => status.usage === "IN_USE")).toBe(true);
 		} finally {
 			handlers.get("session_shutdown")?.({}, ctx);
 			server.stop(true);

@@ -9,19 +9,17 @@
  * attributes traffic to surface "omp" itself; this extension reads GET /metrics and GET /healthz and
  * turns consecutive polls into deltas.
  *
- * - Footer: `substrate · IN_USE | NOT_OBSERVED_IN_WINDOW · omp +N req +M emit · planes ok | <plane> down · HH:MM`.
- *   On a failed probe: `substrate · ERROR (<reason>) · last good HH:MM | no data yet · /substrate retries`.
- *   On an auth failure: `substrate · ACCESS_DENIED <reason>`, with no counts. Before the first probe: `substrate · checking`.
+ * - Chrome: each render clears the `substrate` footer and the below-editor widget so an older install
+ *   drops them. Those slots are not part of this plugin. Usage still reaches the Ultrathink bar.
  * - Usage: IN_USE when an omp change was seen in the last five minutes; otherwise NOT_OBSERVED_IN_WINDOW.
  *   The window and every time shown are this viewer's poll clock, because /metrics carries no event timestamps.
  * - Coverage: the known clients are the token file names in SUBSTRATE_TOKENS_DIR, with omp always included.
  *   A known client with no counters is NOT_INSTRUMENTED. One with counters is OBSERVED when it changed in the
  *   window, else NO_ACTIVITY_IN_WINDOW. A counted surface outside the list is UNREGISTERED_CLIENT: shown, not dropped.
- * - Widget: the last three polls with a nonzero omp change, under a caption that states the cap and the refresh.
  * - /substrate: one fresh probe (or the poll already in flight), then the usage definition, coverage, omp counters,
  *   planes, cache and ledger. On error the counters are labelled last known, and the line says to run /substrate again.
- * - Ultrathink bar: after each render, publishes `busStatus` on the `substrate:status` event-bus channel, and republishes
- *   when `substrate:status-request` arrives. Footer, widget, and /substrate are unchanged by it. See the docs.
+ * - Ultrathink bar: after clearing those slots, publishes `busStatus` on the `substrate:status` event-bus channel,
+ *   and republishes when `substrate:status-request` arrives. See the docs.
  *
  * Auth: both polls send the omp bearer whenever one resolves. /metrics may require it once the server has tokens
  * configured. An unauthenticated loopback GET answered 200 when checked on 2026-10-15, so it is not assumed.
@@ -720,9 +718,8 @@ export default function (pi: OmpPi): void {
 	};
 
 	const render = (ctx: OmpContext): void => {
-		ctx.ui.setStatus("substrate", formatFooter(state, Date.now()));
-		const lines = formatWidget(state);
-		ctx.ui.setWidget("substrate", lines.length > 0 ? lines : undefined, { placement: "belowEditor" });
+		ctx.ui.setStatus("substrate", undefined);
+		ctx.ui.setWidget("substrate", undefined, { placement: "belowEditor" });
 		publish();
 	};
 
