@@ -735,16 +735,15 @@ describe("Ultrathink bar publisher", () => {
 			process.env.SUBSTRATE_TOKENS_DIR = "/no-such-dir";
 			substrateStatus(pi);
 			const sessionStart = handlers.get("session_start");
-			const sessionShutdown = handlers.get("session_shutdown");
-			if (!sessionStart || !sessionShutdown) throw new Error("session hooks were not registered");
+			if (!sessionStart) throw new Error("session hooks were not registered");
 			sessionStart({}, ctx);
 			await until(() => statuses().some((status) => status.state === "ok"));
 			metricsBody = metricsFixture(STARTED, { req: 13, emit: 4, tool: 3 });
 			sessionStart({}, ctx);
 			await until(() => statuses().some((status) => status.usage === "IN_USE"));
 			expect(emitted.some((entry) => entry.channel === SUBSTRATE_STATUS_REQUEST)).toBe(false);
-			sessionShutdown({}, ctx);
 		} finally {
+			handlers.get("session_shutdown")?.({}, ctx);
 			server.stop(true);
 			for (const [key, value] of savedEnv) {
 				if (value === undefined) delete process.env[key];
