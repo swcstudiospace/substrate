@@ -478,9 +478,16 @@ export function knownClients(env: Env, readDir: ReadDir): string[] {
 	return [SURFACE, ...[...others].sort()];
 }
 
-function readTokenNames(dir: string): string[] | null {
+/** The names of the regular files in a directory, symlinks followed. A folder is not a client. Null when the directory cannot be read. */
+export function readTokenNames(dir: string): string[] | null {
 	try {
-		return readdirSync(dir);
+		return readdirSync(dir).filter((name) => {
+			try {
+				return statSync(join(dir, name)).isFile();
+			} catch {
+				return false;
+			}
+		});
 	} catch {
 		return null;
 	}
@@ -580,7 +587,8 @@ export function formatSummary(state: State, now: number): string[] {
 	const usage = probeStatus.ok ? usageOf(state, now) : "UNKNOWN";
 	const stamp = probeStatus.ok ? `counted since ${snap.metrics.startedAt}` : `last good at ${hhmm(snap.at)}`;
 	lines.push(`omp: ${usage} · req ${omp.req}, emit ${omp.emit}, tool ${omp.tool} · ${stamp}`);
-	const rows = coverageRows(state, now);
+	const asOf = probeStatus.ok ? now : snap.at;
+	const rows = coverageRows(state, asOf);
 	const known = rows.filter((row) => row.coverage !== "UNREGISTERED_CLIENT");
 	const missing = known.filter((row) => row.coverage === "NOT_INSTRUMENTED").map((row) => safeText(row.name));
 	const banner = missing.length > 0 ? `; NOT_INSTRUMENTED: ${missing.join(", ")}; the headline covers observed clients only` : "";
@@ -592,8 +600,10 @@ export function formatSummary(state: State, now: number): string[] {
 				: `${row.coverage} · req ${row.counters.req}, emit ${row.counters.emit}, tool ${row.counters.tool}`;
 		lines.push(`  ${safeText(row.name)}: ${shown}`);
 	}
-	const unregistered = rows.filter((row) => row.coverage === "UNREGISTERED_CLIENT").map((row) => safeText(row.name));
-	if (unregistered.length > 0) lines.push(`unregistered (counted, not in the known list): ${unregistered.join(", ")}`);
+	const unregistered = rows
+		.filter((row) => row.coverage === "UNREGISTERED_CLIENT")
+		.map((row) => `${safeText(row.name)} req ${row.counters.req}, emit ${row.counters.emit}, tool ${row.counters.tool}`);
+	if (unregistered.length > 0) lines.push(`unregistered (counted, not in the known list): ${unregistered.join("; ")}`);
 	const planes = Object.entries(snap.health.planes).map(
 		([name, plane]) => `${safeText(name)} ${plane.ok ? "ok" : "down"}${plane.breaker ? ` (${safeText(plane.breaker)})` : ""}`,
 	);

@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	applySnapshot,
 	coverageRows,
@@ -12,6 +15,7 @@ import {
 	parseMetrics,
 	PROBE_TIMEOUT_MS,
 	probe,
+	readTokenNames,
 	refresh,
 	resolveToken,
 	safeText,
@@ -387,6 +391,23 @@ describe("usage, coverage and /substrate", () => {
 		expect(text).toContain("ACCESS_DENIED");
 		expect(text).not.toMatch(/req \d/);
 	});
+
+	test("a counted surface outside the known list keeps its counters in the summary", () => {
+		const state = createState("session-1");
+		state.known = ["omp"];
+		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
+		expect(formatSummary(state, 1_000).join("\n")).toContain("grok-bot req 7, emit 0, tool 0");
+	});
+
+	test("after a failed poll, each client's coverage stays as it was at the last good poll", async () => {
+		const state = createState("session-1");
+		state.known = ["omp"];
+		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
+		applySnapshot(state, snapshot(2_000, STARTED, { req: 12, emit: 4, tool: 3 }), 2_000);
+		const later = 2_000 + 10 * 60_000;
+		await refresh(state, { fetchImpl: refusedFetch, env: {}, readFile: () => null, now: () => later });
+		expect(formatSummary(state, later).join("\n")).toContain("omp: OBSERVED");
+	});
 });
 
 describe("known clients and terminal text", () => {
@@ -403,6 +424,18 @@ describe("known clients and terminal text", () => {
 
 	test("safeText drops control and bidi-override characters", () => {
 		expect(safeText("a\u001b[31mb\u202ec\u0007")).toBe("a[31mbc");
+	});
+
+	test("a folder in the tokens dir is not a client; a symlinked token file is", () => {
+		const dir = mkdtempSync(join(tmpdir(), "substrate-tokens-"));
+		try {
+			writeFileSync(join(dir, "codex"), "token");
+			mkdirSync(join(dir, "backup"));
+			symlinkSync(join(dir, "codex"), join(dir, "pi"));
+			expect(readTokenNames(dir)?.sort()).toEqual(["codex", "pi"]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 
