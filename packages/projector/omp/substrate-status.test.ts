@@ -2,8 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
+import substrateStatus, {
 	applySnapshot,
+	busStatus,
 	coverageRows,
 	createState,
 	diffTotals,
@@ -11,6 +12,8 @@ import {
 	formatSummary,
 	formatWidget,
 	knownClients,
+	type OmpContext,
+	type OmpPi,
 	parseHealthz,
 	parseMetrics,
 	PROBE_TIMEOUT_MS,
@@ -20,11 +23,14 @@ import {
 	resolveToken,
 	safeText,
 	shouldPoll,
+	SUBSTRATE_STATUS_CHANNEL,
+	SUBSTRATE_STATUS_REQUEST,
 	surfaceTotals,
 	type FetchLike,
 	type ProbeDeps,
 	type Snapshot,
 	type State,
+	type SubstrateBusStatus,
 } from "./substrate-status.ts";
 
 const TOKEN = "TEST-TOKEN-VALUE";
@@ -556,5 +562,197 @@ describe("token resolution", () => {
 	test("falls back to the omp file in the tokens dir, then null", () => {
 		expect(resolveToken({ SUBSTRATE_TOKENS_DIR: "/d" }, (path) => (path === "/d/omp" ? "dir-token" : null))).toBe("dir-token");
 		expect(resolveToken({}, () => null)).toBeNull();
+	});
+});
+
+describe("Ultrathink bar status", () => {
+	const HHMM = /^\d{2}:\d{2}$/;
+
+	test("before any probe the status is checking, with no counts", () => {
+		const status = busStatus(createState("session-1"), 1_000);
+		expect(status.state).toBe("checking");
+		expect(status.usage).toBe("UNKNOWN");
+		expect(status.omp).toBeNull();
+		expect(status.coverage).toBeNull();
+		expect(status.planesDown).toBeNull();
+		expect(status.updatedAt).toBe("");
+		expect(status.reason).toBeNull();
+	});
+
+	test("after a good snapshot the status is ok, with omp counts, coverage and planes", () => {
+		const state = createState("session-1");
+		state.known = ["omp", "codex"];
+		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
+		const status = busStatus(state, 1_000);
+		expect(status.state).toBe("ok");
+		expect(status.usage).toBe("NOT_OBSERVED_IN_WINDOW");
+		expect(status.omp).toEqual({ req: 10, emit: 4, tool: 3 });
+		expect(status.coverage).toEqual({ observed: 1, known: 2 });
+		expect(status.planesDown).toBe(0);
+		expect(status.updatedAt).toMatch(HHMM);
+		expect(status.reason).toBeNull();
+	});
+
+	test("a plane reported down is counted in planesDown", () => {
+		const state = createState("session-1");
+		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }, false), 1_000);
+		expect(busStatus(state, 1_000).planesDown).toBe(1);
+	});
+
+	test("a failed probe after a good snapshot is error, with the last good counts and the probe reason", async () => {
+		const state = createState("session-1");
+		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
+		await refresh(state, { fetchImpl: refusedFetch, env: {}, readFile: () => null, now: () => 2_000 });
+		const status = busStatus(state, 2_000);
+		expect(status.state).toBe("error");
+		expect(status.usage).toBe("UNKNOWN");
+		expect(status.omp).toEqual({ req: 10, emit: 4, tool: 3 });
+		expect(status.reason).toBe(state.lastProbe?.reason ?? null);
+		expect(status.updatedAt).toMatch(HHMM);
+	});
+
+	test("a failed poll keeps the coverage of the last good poll, not the current known list", () => {
+		const state = createState("session-1");
+		state.known = ["omp", "codex"];
+		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
+		const good = busStatus(state, 1_000);
+		state.known = ["omp"];
+		state.lastProbe = { ok: false, reason: "timeout", at: 2_000 };
+		const status = busStatus(state, 2_000);
+		expect(status.state).toBe("error");
+		expect(status.reason).toBe("timeout");
+		expect(status.coverage).toEqual({ observed: 1, known: 2 });
+		expect(status.updatedAt).toBe(good.updatedAt);
+	});
+
+	test("a failed probe with no good snapshot is error with no counts", async () => {
+		const state = createState("session-1");
+		await refresh(state, { fetchImpl: refusedFetch, env: {}, readFile: () => null, now: () => 1_000 });
+		expect(busStatus(state, 1_000)).toMatchObject({
+			state: "error",
+			usage: "UNKNOWN",
+			omp: null,
+			coverage: null,
+			planesDown: null,
+			updatedAt: "",
+			reason: "unreachable",
+		});
+	});
+
+	test("an auth failure is access-denied with no counts", async () => {
+		const state = createState("session-1");
+		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
+		await refresh(state, { fetchImpl: denyFetch, env: {}, readFile: () => null, now: () => 2_000 });
+		const status = busStatus(state, 2_000);
+		expect(status.state).toBe("access-denied");
+		expect(status.omp).toBeNull();
+		expect(status.coverage).toBeNull();
+		expect(status.planesDown).toBeNull();
+		expect(status.reason).toBe("auth required");
+	});
+
+	test("a reason longer than 40 characters is cut to 40", () => {
+		const state = createState("session-1");
+		state.lastProbe = { ok: false, reason: "x".repeat(60), at: 2_000 };
+		expect(busStatus(state, 2_000).reason).toBe("x".repeat(40));
+	});
+});
+
+describe("Ultrathink bar publisher", () => {
+	test("a status request is answered at once with the current status on the status channel", () => {
+		const handlers = new Map<string, (data: unknown) => void>();
+		const emitted: Array<{ channel: string; data: unknown }> = [];
+		const pi: OmpPi = {
+			on: () => {},
+			registerCommand: () => {},
+			events: {
+				emit: (channel, data) => {
+					emitted.push({ channel, data });
+				},
+				on: (channel, handler) => {
+					handlers.set(channel, handler);
+					return () => {
+						handlers.delete(channel);
+					};
+				},
+			},
+		};
+		substrateStatus(pi);
+		const request = handlers.get(SUBSTRATE_STATUS_REQUEST);
+		if (!request) throw new Error("no subscription to the status request");
+		request({});
+		expect(emitted).toHaveLength(1);
+		expect(emitted[0]?.channel).toBe(SUBSTRATE_STATUS_CHANNEL);
+		expect((emitted[0]?.data as SubstrateBusStatus).state).toBe("checking");
+	});
+
+	test("an automatic poll publishes IN_USE on the status channel without a request", async () => {
+		let metricsBody: unknown = metricsFixture(STARTED, { req: 10, emit: 4, tool: 3 });
+		const server = Bun.serve({
+			port: 0,
+			fetch(req) {
+				const path = new URL(req.url).pathname;
+				if (path === "/metrics") return Response.json(metricsBody);
+				if (path === "/healthz") return Response.json(healthFixture());
+				return new Response("not found", { status: 404 });
+			},
+		});
+		const envKeys = ["SUBSTRATE_URL", "SUBSTRATE_TOKENS_DIR", "SUBSTRATE_TOKEN", "SUBSTRATE_TOKEN_FILE"] as const;
+		const savedEnv = envKeys.map((key) => [key, process.env[key]] as const);
+		const handlers = new Map<string, (event: unknown, ctx: OmpContext) => unknown>();
+		const requestHandlers = new Map<string, (data: unknown) => void>();
+		const emitted: Array<{ channel: string; data: unknown }> = [];
+		const pi: OmpPi = {
+			on: (event, handler) => {
+				handlers.set(event, handler);
+			},
+			registerCommand: () => {},
+			events: {
+				emit: (channel, data) => {
+					emitted.push({ channel, data });
+				},
+				on: (channel, handler) => {
+					requestHandlers.set(channel, handler);
+					return () => {
+						requestHandlers.delete(channel);
+					};
+				},
+			},
+		};
+		const ctx: OmpContext = {
+			ui: { setStatus: () => {}, setWidget: () => {}, notify: () => {} },
+			sessionManager: { getSessionId: () => "publisher-test" },
+		};
+		const statuses = (): SubstrateBusStatus[] =>
+			emitted.filter((entry) => entry.channel === SUBSTRATE_STATUS_CHANNEL).map((entry) => entry.data as SubstrateBusStatus);
+		const until = async (done: () => boolean): Promise<void> => {
+			for (let i = 0; i < 200 && !done(); i++) await Bun.sleep(25);
+			if (!done()) throw new Error("no matching status payload within 5 s");
+		};
+		try {
+			for (const key of envKeys) delete process.env[key];
+			process.env.SUBSTRATE_URL = `http://127.0.0.1:${server.port}`;
+			process.env.SUBSTRATE_TOKENS_DIR = "/no-such-dir";
+			substrateStatus(pi);
+			const sessionStart = handlers.get("session_start");
+			if (!sessionStart) throw new Error("session hooks were not registered");
+			sessionStart({}, ctx);
+			await until(() => statuses().some((status) => status.state === "ok"));
+			metricsBody = metricsFixture(STARTED, { req: 13, emit: 4, tool: 3 });
+			sessionStart({}, ctx);
+			await until(() => statuses().some((status) => status.usage === "IN_USE"));
+			expect(emitted.some((entry) => entry.channel === SUBSTRATE_STATUS_REQUEST)).toBe(false);
+		} finally {
+			handlers.get("session_shutdown")?.({}, ctx);
+			server.stop(true);
+			for (const [key, value] of savedEnv) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	}, SLOW_TEST_MS);
+
+	test("without a bus the extension loads and publishes nothing", () => {
+		expect(() => substrateStatus({ on: () => {}, registerCommand: () => {} })).not.toThrow();
 	});
 });
