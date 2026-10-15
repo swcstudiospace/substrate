@@ -247,6 +247,8 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_JOURNAL_MAX_MB` | number | 400 | non-negative (0 disables the compare) | 400 MB | scripts/doctor-vps.ts | yes |
 | `SUBSTRATE_DEPLOY_MIN_FREE_GB` | number | 5 | 0..9999 whole gigabytes (0 disables the gate) | 5 GB. See `docs/runbooks/disk-pressure.md` | mcp-server/index-run.ts, ledger-run.ts, scripts/doctor-runtime.ts, scripts/deploy-preflight.ts, infra/vps/deploy-release.sh (set in the shell that runs the script; the preflight and the gate inherit it) | yes |
 | `SUBSTRATE_REPO` | path | the checkout of this script | absolute path | the repo the script lives in. See `docs/runbooks/production-parity.md` | scripts/parity-check.ts | yes |
+| `SUBSTRATE_SKILLS_LIBRARY` | path | /root/agent-skills | absolute path to the library checkout | /root/agent-skills. See `docs/skills-plane.md` | scripts/skills-doctor.ts | no |
+| `SUBSTRATE_SKILLS_BRIDGE_ENV` | path | /etc/substrate/substrate-bridge.env | absolute path to the bridge env file | /etc/substrate/substrate-bridge.env. See `docs/skills-plane.md` | scripts/skills-doctor.ts | no |
 
 ## Substrate host (VM sandboxes)
 
@@ -318,6 +320,13 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_REHEARSAL_SKILLS_REPO` | path | none | harness-owned | the skills smokes refuse to run. See `docs/rehearsal.md` | scripts/skills-sync-smoke.ts, skills-propose-smoke.ts | no |
 | `SUBSTRATE_REHEARSAL_SKILLS_STATE` | path | none | harness-owned | the skills smokes refuse to run. See `docs/rehearsal.md` | scripts/skills-sync-smoke.ts, skills-propose-smoke.ts | no |
 | `SUBSTRATE_REHEARSAL_TOKENS_DIR` | path | none | harness-owned | the smokes refuse to run. See `docs/rehearsal.md` | scripts/desktop-smoke.ts, skills-sync-smoke.ts | no |
+| `SUBSTRATE_REHEARSAL_NAME` | string | none | run name the rehearsal wrote to consumer.env | empty: the docs smoke's run-name check refuses the run. See `docs/rehearsal.md` | scripts/docs-smoke.ts | no |
+| `SUBSTRATE_REHEARSAL_DOCS_STATE_FILE` | path | none | file inside the rehearsal run directory | empty: the docs state is read as absent. See `docs/rehearsal.md` | scripts/docs-smoke.ts | no |
+| `SUBSTRATE_RAGFLOW_FIXTURE_URL` | string | none | loopback http URL of the RAGFlow stand-in | empty: the docs smoke refuses the fixture target. See `docs/rehearsal.md` | packages/mcp-server/src/rehearsal-ragflow.ts, scripts/docs-smoke.ts | no |
+| `SUBSTRATE_RAGFLOW_FIXTURE_READY` | string | none | 1 once the stand-in answers its health probe | empty: the fixture is not marked ready. See `docs/rehearsal.md` | packages/mcp-server/src/rehearsal-ragflow.ts, scripts/docs-smoke.ts | no |
+| `SUBSTRATE_RAGFLOW_FIXTURE_PID` | number | none | process id of the RAGFlow stand-in | empty: the fixture pid check refuses. See `docs/rehearsal.md` | packages/mcp-server/src/rehearsal-ragflow.ts, scripts/docs-smoke.ts | no |
+| `RAGFLOW_FIXTURE_KEY` | secret-ref | none | per-run scratch key, at least 32 characters | the stand-in refuses to start (exit 2). See `docs/rehearsal.md` | packages/mcp-server/src/rehearsal-ragflow-server.ts | no |
+| `RAGFLOW_FIXTURE_PORT` | number | none | TCP port 1-65535 | the stand-in refuses to start (exit 2). See `docs/rehearsal.md` | packages/mcp-server/src/rehearsal-ragflow-server.ts | no |
 | `SUBSTRATE_GATE_INDEX_DRILL` | toggle | off | 1 | off: gate:boot does not archive or restore the scratch index. See `docs/runbooks/release-gate.md` | scripts/rehearsal.ts | no |
 | `SUBSTRATE_GATE_CHAOS_PLANES` | toggle | off | 1 | off: the rehearsal does not pause the scratch index or probe the other planes. See `docs/runbooks/release-gate.md` | scripts/chaos-planes.ts | no |
 | `CHAOS_REHEARSAL` | toggle | off | 1 \| true \| yes (case-insensitive) | the chaos smoke asserts a degraded deployment. See `docs/observability.md` | scripts/chaos-smoke.ts | yes |

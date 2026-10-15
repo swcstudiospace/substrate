@@ -37,22 +37,6 @@ export interface IssueContext {
 	comments: string[];
 }
 
-/**
- * One unstarted issue for the dispatcher poll (DISP-01). Title and
- * description are deliberately absent: the poll must never select them.
- */
-export interface DispatchCandidate {
-	id: string;
-	identifier: string;
-	labels: Array<{ id: string; name: string }>;
-}
-
-/** One page of the dispatcher poll, keyed by the `issues` connection cursor. */
-export interface DispatchCandidatePage {
-	nodes: DispatchCandidate[];
-	pageInfo: { hasNextPage: boolean; endCursor: string | null };
-}
-
 /** The lowest-position `started` state of the issue's own team. Never a `completed` state. */
 export function firstStartedStateId(ctx: IssueContext): string {
 	const candidates = ctx.team.states.filter((s) => s.type === "started").sort((a, b) => a.position - b.position);
@@ -196,34 +180,6 @@ export class LinearClient {
 		);
 		if (!data.issue) throw new LinearError(`issue ${ref} not found`);
 		return data.issue;
-	}
-
-	/**
-	 * One page of unstarted issues for the dispatcher poll (DISP-01).
-	 * Selects only id, identifier, and label id/name plus the connection
-	 * cursor: never title or description, so issue text cannot leak into a
-	 * launch prompt. The caller pages with `after` until `hasNextPage` is
-	 * false.
-	 */
-	async listUnstartedIssues(after?: string | null): Promise<DispatchCandidatePage> {
-		const data = await this.graphql<{
-			issues: {
-				nodes: Array<{ id: string; identifier: string; labels: { nodes: Array<{ id: string; name: string }> } }>;
-				pageInfo: { hasNextPage: boolean; endCursor: string | null };
-			};
-		}>(
-			`query DispatchCandidates($after: String) {
-				issues(first: 50, after: $after, filter: { state: { type: { eq: "unstarted" } } }) {
-					nodes { id identifier labels { nodes { id name } } }
-					pageInfo { hasNextPage endCursor }
-				}
-			}`,
-			{ after: after ?? null },
-		);
-		return {
-			nodes: data.issues.nodes.map((node) => ({ id: node.id, identifier: node.identifier, labels: node.labels.nodes })),
-			pageInfo: data.issues.pageInfo,
-		};
 	}
 
 	/**
