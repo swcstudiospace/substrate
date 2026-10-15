@@ -2010,6 +2010,10 @@ export class IndexStore implements MemoryStore {
 			: beforeId === null
 				? this.sql`and created < ${before}::timestamptz`
 				: this.sql`and (created, id) < (${before}::timestamptz, ${beforeId}::text)`;
+		// `agent:` rows belong to one surface. A caller with a surface sees only its own, the same rule
+		// the brief applies (global, repo and graph only). An internal read with no `read` is unfiltered,
+		// as the write gate's own lookups have always been.
+		const agentScope = read === undefined ? null : `agent:${(normalizeIdentifier(read.surface) ?? "unattributed").toLowerCase()}`;
 		return this.plane("memory.search", async () => {
 			const rows = (await this.sql`
 				select *, to_char(created at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_created
@@ -2021,6 +2025,7 @@ export class IndexStore implements MemoryStore {
 				  ${prefix === null ? this.sql`` : this.sql`and left(subject, char_length(${prefix}::text)) = ${prefix}::text`}
 				  ${search.writer == null ? this.sql`` : this.sql`and writer = ${search.writer}`}
 				  ${search.kind == null ? this.sql`` : this.sql`and kind = ${search.kind}`}
+				  ${agentScope === null ? this.sql`` : this.sql`and (lower(scope) not like 'agent:%' or lower(scope) = ${agentScope})`}
 				  ${cursor}
 				order by created desc, id desc
 				limit ${limit}`) as Array<Record<string, unknown>>;
