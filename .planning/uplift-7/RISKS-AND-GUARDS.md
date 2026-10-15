@@ -17,7 +17,7 @@
 | R11 | Greptile findings on each PR | Each finding was fixed in code. Two threads were resolved after their fixes: PR #73 (recall dedupe, covered by a test that fails on the old code) and PR #74 (waiver count). | Me | Closed |
 | R12 | PG-gated tests skipped locally | The suites ran against a throwaway Postgres 16 container on loopback, which was removed afterwards. CI runs them too. | Me | Closed |
 | R13 | The contract-fix subagent wrote into the main checkout instead of its worktree | The patch was moved, the checkout restored, and the fix re-verified in the worktree. | Me | Closed |
-| R14 | The live write-to-footer latency is unproven | An operator makes one substrate write through Omp and checks the footer within 30 s plus the 3 s probe. | Operator | Open |
+| R14 | The live write-to-footer latency was unproven | Proven on a scratch twin on 2026-10-15: one `omp` write, footer `IN_USE` after 29.9 s, on the extension's 30-second timer. A live production check is optional. | Operator | Closed (scratch) |
 | R15 | Pre-existing worktrees under `/tmp/pr-merges` and `/tmp/agent-substrate-p15-before-oct08` | Not from this run. Left untouched. | You | Open |
 | R16 | The anchor fee assumption | Checked against the Solana fees page: 5,000 lamports per signature. The hourly cost is 0.0438 SOL per year. | Me | Closed |
 

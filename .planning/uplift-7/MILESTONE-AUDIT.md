@@ -32,7 +32,7 @@ Evidence: PR #70 at `aad5347`. `bun test packages/projector/omp/` 68 pass, inclu
 | Criterion | Grade | Evidence |
 | --- | --- | --- |
 | With an observed client and no events in the window, the headline reads NOT_OBSERVED_IN_WINDOW, never IN_USE | PASS | Test "NOT_OBSERVED_IN_WINDOW while omp is unchanged, never IN_USE". Live footer read `NOT_OBSERVED_IN_WINDOW`. |
-| A substrate write by an observed client appears in the activity feed within the documented refresh latency | FAIL | The 30-second poll bound is tested (throttle test). The write-to-footer check needs a real write, and the agent makes no production writes. Operator step. |
+| A substrate write by an observed client appears in the activity feed within the documented refresh latency | PASS | Scratch twin, 2026-10-15: one `omp` write (HTTP 202) reached the footer as `IN_USE` with `+1 req +1 emit` after 29.9 s, on the extension's 30-second timer (3-second probe timeout). The twin was torn down with no residue. A live production write remains an optional operator check. |
 | A known but uninstrumented client shows NOT_INSTRUMENTED, never inactive | PASS | Live coverage: `codex`, `grok-build`, `opencode`, `pi` are NOT_INSTRUMENTED. Known list is the token file names. |
 | With the event source stopped, the panel shows ERROR, last-known data, and a retry control. No zero counts appear for unknown values | PASS | Tests for ERROR with and without a good poll. Live closed-port read: `ERROR (unreachable) · no data yet · /substrate retries`. The retry control is `/substrate`. |
 | Credential-like values seeded into test records do not appear in the panel | PASS | Test "a credential-like value in a health record never reaches the summary or the footer". The panel shows counters and names only; it never renders record content. |
@@ -55,7 +55,7 @@ Evidence: PR #70 at `aad5347`. `bun test packages/projector/omp/` 68 pass, inclu
 
 ## Summary
 
-- Unresolved FAILs: 8 (milestone 4, substrate 3, Omp UI 1). MILESTONE_COMPLETE is blocked.
+- Unresolved FAILs: 7 (milestone 4, substrate 3). MILESTONE_COMPLETE is blocked.
 - WAIVED by your decision at closeout: 5 (three Omp terminal-host accessibility rows; the SVM "nothing pushed" row; agent-scope visibility, private by decision).
 - Documented gaps, not criteria: the STALE state (needs event times); activity-feed rows and filters (the panel shows counts, not records, and the window is fixed at five minutes). A server-side last-seen value per surface was declined for now: the window uses the viewer's poll clock.
-- Next, by your choice: the other three substrate gaps (invalid-write round trip, expected-version for skills and docs, degraded-mode queue) stay open with no date set. The write-to-footer check is an operator step. MILESTONE_COMPLETE and CLEANUP need your approval once the FAILs are cleared.
+- Next, by your choice: the three other substrate gaps (invalid-write round trip, expected-version for skills and docs, degraded-mode queue) stay open with no date set. The STALE state needs your decision (`POST /events/query`). MILESTONE_COMPLETE and CLEANUP need your approval once the FAILs are cleared.
