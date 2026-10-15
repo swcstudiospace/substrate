@@ -12,6 +12,7 @@ import substrateStatus, {
 	formatSummary,
 	formatWidget,
 	knownClients,
+	type OmpContext,
 	type OmpPi,
 	parseHealthz,
 	parseMetrics,
@@ -610,6 +611,20 @@ describe("Ultrathink bar status", () => {
 		expect(status.updatedAt).toMatch(HHMM);
 	});
 
+	test("a failed poll keeps the coverage of the last good poll, not the current known list", () => {
+		const state = createState("session-1");
+		state.known = ["omp", "codex"];
+		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
+		const good = busStatus(state, 1_000);
+		state.known = ["omp"];
+		state.lastProbe = { ok: false, reason: "timeout", at: 2_000 };
+		const status = busStatus(state, 2_000);
+		expect(status.state).toBe("error");
+		expect(status.reason).toBe("timeout");
+		expect(status.coverage).toEqual({ observed: 1, known: 2 });
+		expect(status.updatedAt).toBe(good.updatedAt);
+	});
+
 	test("a failed probe with no good snapshot is error with no counts", async () => {
 		const state = createState("session-1");
 		await refresh(state, { fetchImpl: refusedFetch, env: {}, readFile: () => null, now: () => 1_000 });
@@ -670,6 +685,73 @@ describe("Ultrathink bar publisher", () => {
 		expect(emitted[0]?.channel).toBe(SUBSTRATE_STATUS_CHANNEL);
 		expect((emitted[0]?.data as SubstrateBusStatus).state).toBe("checking");
 	});
+
+	test("an automatic poll publishes IN_USE on the status channel without a request", async () => {
+		let metricsBody: unknown = metricsFixture(STARTED, { req: 10, emit: 4, tool: 3 });
+		const server = Bun.serve({
+			port: 0,
+			fetch(req) {
+				const path = new URL(req.url).pathname;
+				if (path === "/metrics") return Response.json(metricsBody);
+				if (path === "/healthz") return Response.json(healthFixture());
+				return new Response("not found", { status: 404 });
+			},
+		});
+		const envKeys = ["SUBSTRATE_URL", "SUBSTRATE_TOKENS_DIR", "SUBSTRATE_TOKEN", "SUBSTRATE_TOKEN_FILE"] as const;
+		const savedEnv = envKeys.map((key) => [key, process.env[key]] as const);
+		const handlers = new Map<string, (event: unknown, ctx: OmpContext) => unknown>();
+		const requestHandlers = new Map<string, (data: unknown) => void>();
+		const emitted: Array<{ channel: string; data: unknown }> = [];
+		const pi: OmpPi = {
+			on: (event, handler) => {
+				handlers.set(event, handler);
+			},
+			registerCommand: () => {},
+			events: {
+				emit: (channel, data) => {
+					emitted.push({ channel, data });
+				},
+				on: (channel, handler) => {
+					requestHandlers.set(channel, handler);
+					return () => {
+						requestHandlers.delete(channel);
+					};
+				},
+			},
+		};
+		const ctx: OmpContext = {
+			ui: { setStatus: () => {}, setWidget: () => {}, notify: () => {} },
+			sessionManager: { getSessionId: () => "publisher-test" },
+		};
+		const statuses = (): SubstrateBusStatus[] =>
+			emitted.filter((entry) => entry.channel === SUBSTRATE_STATUS_CHANNEL).map((entry) => entry.data as SubstrateBusStatus);
+		const until = async (done: () => boolean): Promise<void> => {
+			for (let i = 0; i < 200 && !done(); i++) await Bun.sleep(25);
+			if (!done()) throw new Error("no matching status payload within 5 s");
+		};
+		try {
+			for (const key of envKeys) delete process.env[key];
+			process.env.SUBSTRATE_URL = `http://127.0.0.1:${server.port}`;
+			process.env.SUBSTRATE_TOKENS_DIR = "/nonexistent/substrate-status-test-tokens";
+			substrateStatus(pi);
+			const sessionStart = handlers.get("session_start");
+			const sessionShutdown = handlers.get("session_shutdown");
+			if (!sessionStart || !sessionShutdown) throw new Error("session hooks were not registered");
+			sessionStart({}, ctx);
+			await until(() => statuses().some((status) => status.state === "ok"));
+			metricsBody = metricsFixture(STARTED, { req: 13, emit: 4, tool: 3 });
+			sessionStart({}, ctx);
+			await until(() => statuses().some((status) => status.usage === "IN_USE"));
+			expect(emitted.some((entry) => entry.channel === SUBSTRATE_STATUS_REQUEST)).toBe(false);
+			sessionShutdown({}, ctx);
+		} finally {
+			server.stop(true);
+			for (const [key, value] of savedEnv) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	}, SLOW_TEST_MS);
 
 	test("without a bus the extension loads and publishes nothing", () => {
 		expect(() => substrateStatus({ on: () => {}, registerCommand: () => {} })).not.toThrow();

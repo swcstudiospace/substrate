@@ -118,6 +118,8 @@ export interface State {
 	last: Snapshot | null;
 	lastDelta: Totals | null;
 	lastProbe: ProbeStatus | null;
+	/** Coverage as of the last good poll. A failed poll reports this, not the live known list. */
+	lastCoverage: { observed: number; known: number } | null;
 	lastPollAt: number | null;
 	/** Poll time at which each surface last showed a change, keyed by surface name. */
 	surfaceActiveAt: Record<string, number>;
@@ -212,6 +214,7 @@ export function createState(sessionId?: string): State {
 		last: null,
 		lastDelta: null,
 		lastProbe: null,
+		lastCoverage: null,
 		lastPollAt: null,
 		surfaceActiveAt: {},
 		known: [SURFACE],
@@ -425,6 +428,7 @@ export function applySnapshot(state: State, snapshot: Snapshot, at: number): voi
 		}
 	}
 	state.last = snapshot;
+	state.lastCoverage = busCoverage(state, at);
 	state.lastDelta = omp;
 	state.lastProbe = { ok: true, reason: null, at };
 	if (omp.req + omp.emit + omp.tool > 0) state.recent = [...state.recent, { at, delta: omp }].slice(-3);
@@ -676,7 +680,7 @@ export function busStatus(state: State, now: number): SubstrateBusStatus {
 		return busFrame({
 			state: "error",
 			omp: ompTotals(snap),
-			coverage: busCoverage(state, snap.at),
+			coverage: state.lastCoverage,
 			planesDown: Object.values(snap.health.planes).filter((plane) => !plane.ok).length,
 			updatedAt: hhmm(snap.at),
 			reason: busReason(probe.reason),
