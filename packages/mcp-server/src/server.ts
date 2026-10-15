@@ -245,9 +245,9 @@ const MAX_BODY_BYTES = 1_000_000;
 const DOCS_MAX_BODY_BYTES = 6_000_000;
 
 /**
- * A body over the route's cap. Final for that body: the uploading routes
- * answer it 413. Every other route still answers it with the generic 500
- * it always has.
+ * A body over the route's cap. Final for that body: the routes named in the
+ * request handler's catch answer it 413. Every other route still answers it
+ * with the generic 500 it always has.
  */
 export class BodyTooLargeError extends Error {
 	constructor() {
@@ -1476,7 +1476,7 @@ export function createHttpServer(
 
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
-			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/mcp")) {
+			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/mcp" || url.pathname === "/memory")) {
 				sendJson(res, 413, { error: cause.message });
 				return;
 			}

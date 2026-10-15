@@ -1561,6 +1561,31 @@ describe("verified_persisted", () => {
 	});
 });
 
+describe("the text cap", () => {
+	test("a text of 4001 characters is accepted, stored as its first 4000, and the reply says it was cut", async () => {
+		const long = "lorem ipsum ".repeat(400).slice(0, 4001);
+		expect(long.length).toBe(4001);
+		const result = await write({ text: long });
+
+		expect(result.outcome).toBe("accepted");
+		expect(result.verified_persisted).toBe(true);
+		expect(store.entries()[0]?.text).toBe(long.slice(0, 4000));
+		expect(store.entries()[0]?.text.length).toBe(4000);
+		expect(result).toMatchObject({ truncated: true, limit: 4000 });
+	});
+
+	test("a text of 100 characters is accepted with no truncated field", async () => {
+		const short = "lorem ipsum ".repeat(9).slice(0, 100);
+		expect(short.length).toBe(100);
+		const result = await write({ text: short });
+
+		expect(result.outcome).toBe("accepted");
+		expect(result.entry?.text).toBe(short);
+		expect(result).not.toHaveProperty("truncated");
+		expect(result).not.toHaveProperty("limit");
+	});
+});
+
 describe("provenance", () => {
 	test("the entry carries where it came from", async () => {
 		const result = await write({
