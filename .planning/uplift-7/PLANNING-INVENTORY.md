@@ -6,7 +6,7 @@ Date: 2026-10-15. Read-only. Sources: `.planning/ROADMAP.md`, `.planning/STATE.m
 
 - ROADMAP lists phases 0–33 as complete, with a progress table summing to 76 plans. Phase 0.5 and phases 1–6 are closed in the v1.0 archive.
 - The v1.3 audit (2026-10-12) is newest. It records `gaps_found` and `human_needed`, with 43 live behaviors unverified (`milestones/v1.3-MILESTONE-AUDIT.md`).
-- STATE.md is stale. It reads "Awaiting next milestone" and stops at phase 18 (10-08).
+- STATE.md frontmatter: 18/18 phases and 76/76 plans complete, current_phase 33, status "Awaiting next milestone", archived 2026-10-11. Its Session Continuity section (line 177) is stale and stops at phase 18 (10-08). Current progress comes from the frontmatter and the v1.3 audit.
 - Decision: the newest evidence wins. The audit governs v1.3. No completed phase is rewritten.
 
 ## Conflicts (top items; all 15 were recorded in the inventory run)
@@ -37,7 +37,7 @@ Default applied: the three uncovered workstreams are recorded as uplift-7 artifa
 
 ## Legacy and archived material (corrected)
 
-The earlier LEGACY-DISPOSITION note was right on most drafts. The corrected dispositions follow the spec's rules: RESTORE is incomplete and archived with no supersession marker, ALREADY_DONE means the SUMMARY shows completion, and DISPUTED means superseded, dropped, or unclear.
+The earlier note (`LEGACY-DISPOSITION.md`, on PR #70) was right on most drafts. The corrected dispositions follow the spec's rules: RESTORE is incomplete and archived with no supersession marker, ALREADY_DONE means the SUMMARY shows completion, and DISPUTED means superseded, dropped, or unclear.
 
 | Source | Disposition | Reason |
 | --- | --- | --- |
@@ -49,7 +49,7 @@ The earlier LEGACY-DISPOSITION note was right on most drafts. The corrected disp
 | 25-05 (SUMMARY) | ALREADY_DONE for the CLI; timer clause DISPUTED | D25-07 rules out new timers; only the canary timer exists |
 | 25-06 (SUMMARY) | ALREADY_DONE | `scripts/docs-smoke.ts` present; audit records the artifacts complete |
 | 29-01..03 | ALREADY_DONE | Archived roadmap: 3/3 complete |
-| 13 and 14 drafts (deleted in `427eb78`) | ALREADY_DONE | Moved to the v1.2 archive. Not in the earlier note. |
+| 13 and 14 drafts (moved to `milestones/v1.2-phases/` by the commit "docs(milestone): complete and archive milestone v1.2") | ALREADY_DONE | Archived with their SUMMARY files (13-01, 14-01) and 13-VERIFICATION. Not in the earlier note. |
 | v1.0 stub phases 0.5, 3–6 | DISPUTED (superseded by 21–33) | Stub wording; no check counts. Not in the earlier note. |
 | `uplift-6/` (no SUMMARY) | DISPUTED (status unknown) | Not in the earlier note. |
 | `SELF_IMPROVING_MEMORY_BANK_PROPOSAL.md` | DISPUTED (not phase material) | Not in the earlier note. |

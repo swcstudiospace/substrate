@@ -7,8 +7,8 @@ Each criterion from the planning spec is graded PASS, FAIL, or WAIVED. WAIVED ne
 | Criterion | Grade | Evidence |
 | --- | --- | --- |
 | Every roadmap phase, including appended ones, has CONTEXT, PLAN, and SUMMARY, or is BLOCKED or DEFERRED with a decision request | FAIL | Phases 0 and 0.5 lack SUMMARY and PLAN artifacts (planning inventory). The three workstreams were not appended to ROADMAP.md (default applied; SCOPE_CHANGE pending). |
-| Every legacy or archived phase found is listed with its source and disposition | PASS | `.planning/uplift-7/PLANNING-INVENTORY.md` and the corrected `LEGACY-DISPOSITION.md` |
-| Each completed phase has STATE.md and ROADMAP.md updates in phase order | FAIL | STATE.md still reads "Awaiting next milestone" and stops at phase 18. No roadmap phase was completed in this run. |
+| Every legacy or archived phase found is listed with its source and disposition | PASS | `.planning/uplift-7/PLANNING-INVENTORY.md`, corrected legacy table (in this PR). The earlier note `LEGACY-DISPOSITION.md` is on PR #70 and is superseded by that table. |
+| Each completed phase has STATE.md and ROADMAP.md updates in phase order | FAIL | This run completed no roadmap phase and recorded no STATE or ROADMAP entry for its workstreams. The workstreams are not in ROADMAP.md (SCOPE_CHANGE pending). STATE frontmatter is 18/18 complete; its Session Continuity section is stale at phase 18 (see PLANNING-INVENTORY.md). |
 | Each discuss, plan, and execute step ran as its own flat Skill() call, with no nesting | FAIL | The phase loop was not run for the appended workstreams. Work was done directly and by subagents. |
 | Each pause is labeled with exactly one PAUSE_POLICY category | PASS | Closeout labels: GREY_AREA (panel host, answered), VALIDATION_REQUEST (SVM go/no-go), EXTERNAL_EFFECT (merges, anchor funding, rotation), SCOPE_CHANGE (appends; DISPUTED items) |
 | The audit report grades each criterion; MILESTONE_COMPLETE only with no unresolved FAIL | PASS | This file. MILESTONE_COMPLETE is not run. |

@@ -72,3 +72,19 @@ Anchor the closed-hour Merkle roots of the substrate event ledger to Solana devn
 ## Not verified in this run
 
 Test-validator resource needs. The embedded SVM harness. Railway behavior for split services. Full Anza and Railway pages, which were read as search excerpts only.
+
+## Next steps for the unverified items
+
+Nothing below changes the verdicts above. The NO-GO for a Railway validator rests on the Anza and Railway limits in the cited sources (excerpts; full pages not fetched). The items below refine the local and feasibility picture.
+
+- Test-validator resource needs. A local-only spike can settle this. The spec allows it at $0, with a throwaway keypair and no networked key: run a local test validator, record peak RAM and disk, then delete the ledger directory and keypair. Not run in this pass. Decision: approve or decline.
+- Embedded SVM harness. Not researched. Next step: read the candidate harness's documentation, then decide whether it helps tests or simulation. Until then the verdict stays UNVERIFIED. No phase is proposed.
+- Railway behavior for split services. Testing it needs a Railway service, which is an external effect and needs your approval. If approved: create a throwaway project, check whether two services can share one validator's disks, then delete it. Not run.
+- Full Anza and Railway pages. Next step: fetch S1 to S4 in full and check the excerpts. Read-only.
+
+Follow-up phase breakdown, only if the anchor path is approved:
+
+1. Operator: fund the devnet anchor key and install `substrate-anchor.timer` (`infra/vps/README.md`).
+2. Operator: run the ANCHOR-06 proof in an approved window, then `substrate verify <graph>`.
+
+No Railway validator phase is proposed.
