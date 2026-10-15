@@ -19,7 +19,7 @@ Each criterion from the planning spec is graded PASS, FAIL, or WAIVED. Four WAIV
 | Criterion | Grade | Evidence |
 | --- | --- | --- |
 | HEALTH_REPORT has PASS or NOT_APPLICABLE per category check, or lists each FAIL with a fix or decision | PASS | `.planning/uplift-7/SUBSTRATE-HEALTH.md` lists every FAIL with an action |
-| Cross-agent check: a record written by client A is readable by client B, with attribution intact | FAIL | Not run live. The baseline reports visibility PARTIAL (`agent:<surface>` memories are excluded from the brief). |
+| Cross-agent check: a record written by client A is readable by client B, with attribution intact | PASS for shared scopes; agent scope WAIVED | Shared scopes (`global`, `repo:`, `graph:`) are returned to every surface by the brief and by `memory_search`, with the writer on each row (PR #73, merged as `33b4677`; tests in `memory-recall.test.ts` and `index-store.memory.test.ts`). Agent-scoped memory is private to its surface by your decision at closeout, so other agents' reads exclude it. |
 | Invalid writes are rejected, with nothing partially persisted | FAIL | Shape refusals exist in code; the round-trip check was not run in an isolated namespace |
 | A stale concurrent update is rejected or resolved under the documented policy | FAIL | Memory decisions have `expected_version`. Skills and docs do not. |
 | With the substrate unavailable, a dependent client finishes degraded; queued writes apply exactly once | FAIL | 503 behavior exists; no queued replay for memory or skills; not tested |
@@ -55,7 +55,7 @@ Evidence: PR #70 at `aad5347`. `bun test packages/projector/omp/` 68 pass, inclu
 
 ## Summary
 
-- Unresolved FAILs: 9 (milestone 4, substrate 4, Omp UI 1). MILESTONE_COMPLETE is blocked.
-- WAIVED by your decision at closeout: 4 (three Omp terminal-host accessibility rows; the SVM "nothing pushed" row).
+- Unresolved FAILs: 8 (milestone 4, substrate 3, Omp UI 1). MILESTONE_COMPLETE is blocked.
+- WAIVED by your decision at closeout: 5 (three Omp terminal-host accessibility rows; the SVM "nothing pushed" row; agent-scope visibility, private by decision).
 - Documented gaps, not criteria: the STALE state (needs event times); activity-feed rows and filters (the panel shows counts, not records, and the window is fixed at five minutes). A server-side last-seen value per surface was declined for now: the window uses the viewer's poll clock.
-- Next, by your choice: fix cross-agent visibility (substrate, not yet built). The other three substrate gaps stay open with no date set. The write-to-footer check is an operator step. MILESTONE_COMPLETE and CLEANUP need your approval once the FAILs are cleared.
+- Next, by your choice: the other three substrate gaps (invalid-write round trip, expected-version for skills and docs, degraded-mode queue) stay open with no date set. The write-to-footer check is an operator step. MILESTONE_COMPLETE and CLEANUP need your approval once the FAILs are cleared.
