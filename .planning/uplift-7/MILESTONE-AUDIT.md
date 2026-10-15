@@ -1,6 +1,6 @@
 # Milestone audit (uplift-7, 2026-10-15)
 
-Each criterion from the planning spec is graded PASS, FAIL, or WAIVED. WAIVED needs your decision, and none is recorded yet. A row marked "proposed WAIVED" is a request, not a decision. Any unresolved FAIL blocks MILESTONE_COMPLETE, which is not run.
+Each criterion from the planning spec is graded PASS, FAIL, or WAIVED. Four WAIVED rows carry your decision from closeout: three Omp terminal-host accessibility rows, and the SVM "nothing pushed" row. Any unresolved FAIL blocks MILESTONE_COMPLETE, which is not run.
 
 ## Milestone
 
