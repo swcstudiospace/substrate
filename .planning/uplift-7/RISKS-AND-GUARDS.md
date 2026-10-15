@@ -1,5 +1,7 @@
 # Run risks and guards (uplift-7, node n6)
 
+## Risks
+
 | ID | Risk | Guard | Owner | Status |
 | --- | --- | --- | --- | --- |
 | R1 | Production runs release `9231f43`, not `main`. Fixes on `main` are not live. | Operator deploys after the rehearsal gate passes on the release head. Gate receipts: 20/20 on `608926b`, `426ac1b`, `27d2235`, and `6ff8be5` (scratch); 16/16 on `5aa4494` when it was run. | Operator | Open |
@@ -18,3 +20,23 @@
 | R14 | The live write-to-footer latency is unproven | An operator makes one substrate write through Omp and checks the footer within 30 s plus the 3 s probe. | Operator | Open |
 | R15 | Pre-existing worktrees under `/tmp/pr-merges` and `/tmp/agent-substrate-p15-before-oct08` | Not from this run. Left untouched. | You | Open |
 | R16 | The anchor fee assumption | Checked against the Solana fees page: 5,000 lamports per signature. The hourly cost is 0.0438 SOL per year. | Me | Closed |
+
+## Run guard checks (node n6 list)
+
+| Check | Outcome |
+| --- | --- |
+| 1. A DISPUTED or done legacy phase revived without a restore gate | Not revived. 22-06 is the only RESTORE candidate, and it is blocked on live approval. |
+| 2. STATE or ROADMAP written out of order | Not written this run. STATE.md and ROADMAP.md are unchanged. |
+| 3. Nested skill calls | No skill phases ran. Work was done by direct calls and subagents. |
+| 4. Retries duplicating writes | The airdrop retries were the only retries, and they are refused, not repeated writes. No substrate write was retried. |
+| 5. An unchecked SUMMARY trusted | No SUMMARY was trusted without a re-check. The legacy table was checked against the files. |
+| 6. Inherited failures counted as introduced | The baseline records pre-existing defects separately (`SUBSTRATE-HEALTH.md`). |
+| 7. Live data written | None. Production was read with GET requests only (`/metrics`, `/healthz`). |
+| 8. Unobserved clients shown active or zero | Tests cover empty windows and NOT_INSTRUMENTED. The live read shows the four silent clients as NOT_INSTRUMENTED. |
+| 9. Credential or markup leak | Test: a credential-like value in a health record never reaches the summary or footer. Control and bidirectional characters are stripped. |
+| 10. Lost concurrent update | Not tested. Open substrate gap: expected-version for skills and docs. |
+| 11. Railway, key, or push on a substrate request | No Railway service, no key generation, no funds moved. Repo pushes were the approved PR path. |
+| 12. Uncommitted work clobbered | The main checkout was clean at each step. The worktree patch was moved, not overwritten. |
+| 13. The gsd-autonomous skill edited | None. No skill files changed. |
+
+Open defaults: git is present (yes). The isolated namespace is fixtures; the PG tests use a throwaway container.

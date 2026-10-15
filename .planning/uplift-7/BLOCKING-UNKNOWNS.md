@@ -21,3 +21,5 @@ Each unknown from the planning spec, with its status after this run. "Answered" 
 | 15 | Remaining substrate gaps: invalid-write round trip; expected-version for skills and docs; degraded-mode queue | Open | No date set. |
 | 16 | Whether the devnet anchor key can be funded from here | Operator | Every airdrop attempt is rate-limited, and the key holds 0 SOL. |
 | 17 | Whether the three uncovered workstreams need ROADMAP phases | Default | Recorded as uplift-7 records, not phases. This is a SCOPE_CHANGE. Confirm. |
+| 18 | STATE and ROADMAP conflicts | Default | Newer evidence wins: the v1.3 audit (2026-10-12) governs v1.3. STATE.md frontmatter is 18/18 complete, and its Session Continuity section is stale (`PLANNING-INVENTORY.md`). Confirm. |
+| 19 | Whether DISPUTED legacy phases are revived | Default | Not revived. The only RESTORE candidate is 22-06, blocked on live approval. The rest are listed for your decision as SCOPE_CHANGE (`LEGACY-DISPOSITION.md`, PR #70). |
