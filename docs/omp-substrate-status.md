@@ -31,9 +31,7 @@ omp requests, and the footer would never reach `NOT_OBSERVED_IN_WINDOW`.
   definition on screen.
 - The window and every time shown are this viewer's poll clock. `/metrics`
   carries no per-event timestamps, so a change is dated by the poll that saw it.
-- **Known clients** are the token file names in `SUBSTRATE_TOKENS_DIR`
-  (default `/etc/substrate/tokens`), with `omp` always included. A name that is
-  not a plain identifier is left out. The list is the configuration, not a guess.
+- **Known clients** are the regular files named in `SUBSTRATE_TOKENS_DIR` (default `/etc/substrate/tokens`); symlinks are followed and folders are skipped. `omp` is always included. A name that is not a plain identifier is left out. The list is the configuration, not a guess.
 - Each known client has one coverage status:
   - `OBSERVED`: counted, with a change in the window.
   - `NO_ACTIVITY_IN_WINDOW`: counted, with no change in the window.
