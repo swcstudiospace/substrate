@@ -175,7 +175,7 @@ describe("derived merge into memory_search", () => {
 	test("attribution survives the merge with index results first and unmarked", async () => {
 		const fake = new HindsightFake();
 		seedTwo(fake);
-		const merged = mergeDerivedHits(indexed, await recallMemories(deps(fake), "lease", "cursor"));
+		const merged = mergeDerivedHits(indexed, await recallMemories(deps(fake), "lease", "cursor"), undefined, "cursor");
 		expect(merged.entries).toEqual(indexed);
 		const first = merged.entries.at(0);
 		expect(first).toEqual(indexed.at(0));
@@ -193,7 +193,7 @@ describe("derived merge into memory_search", () => {
 		const fake = new HindsightFake();
 		seedTwo(fake);
 		fake.failRecallWith = 500;
-		const merged = mergeDerivedHits(indexed, await recallMemories(deps(fake), "lease", "cursor"));
+		const merged = mergeDerivedHits(indexed, await recallMemories(deps(fake), "lease", "cursor"), undefined, "cursor");
 		expect(merged.entries).toEqual(indexed);
 		expect(merged.derived).toEqual([]);
 		expect(merged.degraded).toBe(true);
@@ -212,9 +212,22 @@ describe("scoped merge", () => {
 		]);
 		const reply = await recallMemories(deps(fake), "rule", "cursor");
 		expect(reply.results.map((hit) => hit.bank)).toEqual(["sub-hermes", "sub-cursor"]);
-		const scoped = mergeDerivedHits([], reply, "repo:acme/app");
+		const scoped = mergeDerivedHits([], reply, "repo:acme/app", "cursor");
 		expect(scoped.derived.map((hit) => `${hit.bank}:${hit.scope}`)).toEqual(["sub-cursor:repo:acme/app"]);
-		const unscoped = mergeDerivedHits([], reply);
+		const unscoped = mergeDerivedHits([], reply, undefined, "cursor");
 		expect(unscoped.derived.length).toBe(2);
+	});
+
+	test("an agent's derived hit reaches only its own surface, scoped request or not", async () => {
+		const fake = new HindsightFake();
+		fake.seed("sub-hermes", [
+			{ id: "h1", text: "hermes private note", document_id: "mwd_h1", tags: ["hermes"], metadata: { scope: "agent:hermes" }, score: 0.9 },
+			{ id: "h2", text: "shared repo rule", document_id: "mwd_h2", tags: ["hermes"], metadata: { scope: "repo:acme/app" }, score: 0.8 },
+		]);
+		const reply = await recallMemories(deps(fake), "rule", "cursor");
+		const texts = (hits: Array<{ text: string }>) => hits.map((hit) => hit.text).sort();
+		expect(texts(mergeDerivedHits([], reply, undefined, "omp").derived)).toEqual(["shared repo rule"]);
+		expect(mergeDerivedHits([], reply, "agent:hermes", "omp").derived).toEqual([]);
+		expect(texts(mergeDerivedHits([], reply, undefined, "hermes").derived)).toEqual(["hermes private note", "shared repo rule"]);
 	});
 });

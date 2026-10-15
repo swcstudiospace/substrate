@@ -70,7 +70,7 @@ describe("recall budget", () => {
 		fake.seed("sub-cursor", [hit("c1", "fence the lease", 0.5, "mwd_c1")]);
 		fake.recallDelayMs["sub-cursor"] = 30_000;
 		const recall = await recallMemories({ ...deps(fake, null), budgetMs: 50 }, "lease", "cursor");
-		const merged = mergeDerivedHits([], recall);
+		const merged = mergeDerivedHits([], recall, undefined, "cursor");
 		expect(merged).toMatchObject({ entries: [], derived: [], degraded: true });
 		expect(merged.reason?.startsWith("recall-timeout")).toBe(true);
 	});

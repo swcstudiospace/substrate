@@ -408,3 +408,15 @@ export function memoryExpiry(
 	}
 	return NOT_EXPIRED;
 }
+
+/**
+ * Whether a caller on `surface` may see a row kept at `scope`. Only an `agent:` scope is restricted: it is
+ * its own surface's alone, and every other scope is shared. A missing scope is shared, as it always was.
+ * The index query and the derived-hit merge both apply this rule, so they cannot disagree.
+ */
+export function visibleToSurface(scope: string | undefined, surface: string): boolean {
+	if (scope === undefined) return true;
+	const normalized = scope.trim().toLowerCase();
+	if (!normalized.startsWith("agent:")) return true;
+	return normalized === `agent:${surface.trim().toLowerCase()}`;
+}
