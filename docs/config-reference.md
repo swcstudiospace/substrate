@@ -320,7 +320,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_REHEARSAL_SKILLS_REPO` | path | none | harness-owned | the skills smokes refuse to run. See `docs/rehearsal.md` | scripts/skills-sync-smoke.ts, skills-propose-smoke.ts | no |
 | `SUBSTRATE_REHEARSAL_SKILLS_STATE` | path | none | harness-owned | the skills smokes refuse to run. See `docs/rehearsal.md` | scripts/skills-sync-smoke.ts, skills-propose-smoke.ts | no |
 | `SUBSTRATE_REHEARSAL_TOKENS_DIR` | path | none | harness-owned | the smokes refuse to run. See `docs/rehearsal.md` | scripts/desktop-smoke.ts, skills-sync-smoke.ts | no |
-| `SUBSTRATE_REHEARSAL_NAME` | string | none | run name the rehearsal wrote to consumer.env | empty: the docs smoke's run-name check refuses the run. See `docs/rehearsal.md` | scripts/docs-smoke.ts | no |
+| `SUBSTRATE_REHEARSAL_NAME` | string | none | run name the rehearsal wrote to consumer.env | empty: the run-name comparison is skipped. See `docs/rehearsal.md` | scripts/docs-smoke.ts | no |
 | `SUBSTRATE_REHEARSAL_DOCS_STATE_FILE` | path | none | file inside the rehearsal run directory | empty: the docs state is read as absent. See `docs/rehearsal.md` | scripts/docs-smoke.ts | no |
 | `SUBSTRATE_RAGFLOW_FIXTURE_URL` | string | none | loopback http URL of the RAGFlow stand-in | empty: the docs smoke refuses the fixture target. See `docs/rehearsal.md` | packages/mcp-server/src/rehearsal-ragflow.ts, scripts/docs-smoke.ts | no |
 | `SUBSTRATE_RAGFLOW_FIXTURE_READY` | string | none | 1 once the stand-in answers its health probe | empty: the fixture is not marked ready. See `docs/rehearsal.md` | packages/mcp-server/src/rehearsal-ragflow.ts, scripts/docs-smoke.ts | no |
