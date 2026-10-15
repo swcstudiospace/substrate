@@ -1233,6 +1233,22 @@ describe("a 500 does not echo the cause", () => {
 	});
 });
 
+describe("POST /memory", () => {
+	test("an oversize body is 413, not 500, and nothing is stored", async () => {
+		// The body is read before the gate, so a refusal here means no audit record and no index access.
+		const touched: string[] = [];
+		const index = new Proxy({}, { get: (_target, name) => { touched.push(String(name)); return async () => undefined; } });
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() }, { index });
+		touched.length = 0;
+		const response = await fetch(`${harness.base}/memory`, { method: "POST", body: "x".repeat(1_000_001) });
+
+		expect(response.status).toBe(413);
+		expect(await response.json()).toEqual({ error: "request body too large" });
+		expect(touched).toEqual([]);
+		expect(harness.observability.audit.recent()).toEqual([]);
+	});
+});
+
 describe("POST /skills/propose", () => {
 	const TOKENS = {
 		SUBSTRATE_TOKEN_CLAUDE_CODE: "tok-agent",

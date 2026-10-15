@@ -412,20 +412,26 @@ async function releaseCompatibleReviews(
 	if (priorEntry !== entryHash) await store.releaseReviews(priorEntry, entryId, writer).catch(() => undefined);
 }
 
+/** A reply's one addition to `MemoryWriteResult`: set only when the text was cut to `MAX_MEMORY_TEXT`. */
+type MemoryWriteReply = MemoryWriteResult & { truncated?: true; limit?: number };
+
 export async function governMemoryWrite(
 	request: MemoryWriteRequest,
 	deps: GovernanceDeps,
 ): Promise<MemoryWriteResult> {
-	const result = await decide(request, deps);
+	const cut = { truncated: false };
+	const result = await decide(request, deps, cut);
 	// Every reply says who the write was attributed to, on every outcome.
 	//
 	// The caller does not get to assume it: a bearer token overrides a caller-named
 	// surface, so the writer a caller asked to be and the writer it got can differ —
 	// and a parameter that is silently ignored is a footgun. RBAC was decided on this
 	// name, so this name is what the caller has to be told.
-	const answered: MemoryWriteResult = {
+	const answered: MemoryWriteReply = {
 		...result,
 		writer: typeof request.writer === "string" ? request.writer.trim() : "",
+		// Only a write whose text the cap cut carries the cut. Every other reply has no such field.
+		...(cut.truncated ? { truncated: true as const, limit: MAX_MEMORY_TEXT } : {}),
 	};
 	return answered;
 }
@@ -433,7 +439,7 @@ export async function governMemoryWrite(
 /** Everything but the attribution, which `governMemoryWrite` stamps on every reply. */
 type Decision = Omit<MemoryWriteResult, "writer">;
 
-async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promise<Decision> {
+async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { truncated: boolean }): Promise<Decision> {
 	const { store } = deps;
 	const now = deps.now?.() ?? new Date();
 	const newId = deps.newId ?? defaultId;
@@ -496,7 +502,9 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	const reviewed = deps.isReviewToken(request.review_token);
 	// Redact before capping, for the reason `normalizeEvent` does: truncating first
 	// can cut a token in half so its own pattern no longer matches.
-	const text = redact(raw).slice(0, MAX_MEMORY_TEXT);
+	const redacted = redact(raw);
+	const text = redacted.slice(0, MAX_MEMORY_TEXT);
+	cut.truncated = redacted.length > MAX_MEMORY_TEXT;
 	// The cap can cut a valid body down to a header. Judge the text that will be stored.
 	const storedIssue = lessonWriteIssue(text, subjectInput);
 	if (storedIssue) {
