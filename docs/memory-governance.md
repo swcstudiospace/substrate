@@ -466,6 +466,7 @@ state this gate exists to surface.
 | 422 | quarantined |
 | 403 | denied by policy |
 | 503 | denied because the index is missing or refusing |
+| 400 | the body is not a JSON object; no audit record is written and the gate is not run |
 
 ## Reading memory back: `memory_search`
 
