@@ -9,14 +9,18 @@
  * attributes traffic to surface "omp" itself; this extension reads GET /metrics and GET /healthz and
  * turns consecutive polls into deltas.
  *
- * - Footer: `substrate · omp +N req · +M emit · <status>`, status healthy | idle | degraded (<plane>).
+ * - Footer: `substrate · omp +N req · +M emit · <status>`, status healthy | idle | degraded (<plane>),
+ *   or unreachable (<reason>) | auth required | auth failed when the last probe failed.
  * - Widget: the last three polls in which omp had a nonzero delta.
- * - /substrate: one fresh probe, then a summary per surface, planes, cache and ledger rows.
+ * - /substrate: one fresh probe (or the poll already in flight), then a summary per surface.
+ *
+ * Auth: /metrics requires the omp bearer once the server has tokens configured (anonymous access is off
+ * by default). /healthz accepts a request without one. Both polls send the bearer whenever one resolves.
  *
  * Monitoring routes (/healthz, /metrics, /livez, /slo, /slo/history) are left out of the request counts.
  * Without that, this extension's own polls would appear as omp requests and "idle" would never be reached.
  *
- * Fail-open: a failed probe shows "unreachable" and keeps the last good snapshot. No hook throws out.
+ * Fail-open: a failed probe shows its reason and keeps the last good snapshot. No hook throws out.
  * The bearer is resolved per probe, sent only as the Authorization header, and never stored, logged,
  * or returned in any output string.
  *
@@ -24,7 +28,7 @@
  */
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { clearInterval, setInterval } from "node:timers";
+import { clearInterval, clearTimeout, setInterval, setTimeout } from "node:timers";
 
 export type Env = Record<string, string | undefined>;
 export type ReadFile = (path: string) => string | null;
@@ -98,7 +102,8 @@ export interface State {
 	lastPollAt: number | null;
 	lastActiveAt: number | null;
 	recent: Recent[];
-	inFlight: boolean;
+	/** The poll in flight, if any. A refresh made meanwhile awaits this same promise. */
+	inFlight: Promise<void> | null;
 }
 
 /** Structural subset of Omp's ExtensionContext: getSessionId is a method, so call it as one. */
@@ -126,10 +131,15 @@ const DEFAULT_BASE = "http://127.0.0.1:7410";
 const DEFAULT_TOKENS_DIR = "/etc/substrate/tokens";
 const SURFACE = "omp";
 const MAX_TOKEN_FILE_BYTES = 4096;
-const TIMEOUT_MS = 1000;
+/** Per request. A cold /healthz can take longer than one second. */
+export const PROBE_TIMEOUT_MS = 3000;
+/** How long /substrate waits for a poll already in flight before it renders what it has. */
+export const SUBSTRATE_WAIT_MS = 4000;
 const POLL_MS = 30_000;
 const ACTIVE_WINDOW_MS = 5 * 60_000;
 const FOOTER_MAX = 79;
+export const AUTH_REQUIRED = "auth required";
+export const AUTH_FAILED = "auth failed";
 /** Monitoring traffic: the substrate does not audit it and no agent action is behind it. Not counted as requests. */
 const MONITORING_ROUTES: Record<string, true> = {
 	"/healthz": true,
@@ -160,7 +170,7 @@ export function createState(sessionId?: string): State {
 		lastPollAt: null,
 		lastActiveAt: null,
 		recent: [],
-		inFlight: false,
+		inFlight: null,
 	};
 }
 
@@ -292,31 +302,47 @@ export function resolveToken(env: Env, readFile: ReadFile): string | null {
 	return fromDir ? fromDir : null;
 }
 
-type JsonResult = { ok: true; json: unknown } | { ok: false; reason: string };
+interface JsonFailure {
+	ok: false;
+	reason: string;
+	/** The HTTP status when the server answered; null for a transport failure or an unreadable body. */
+	status: number | null;
+}
+
+type JsonResult = { ok: true; json: unknown } | JsonFailure;
 
 async function getJson(url: string, token: string | null, fetchImpl: FetchLike): Promise<JsonResult> {
 	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+	const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
 	try {
 		const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {};
 		const response = await fetchImpl(url, { headers, signal: controller.signal });
-		if (!response.ok) return { ok: false, reason: `http ${response.status}` };
+		if (!response.ok) return { ok: false, reason: `http ${response.status}`, status: response.status };
 		const text = await response.text();
 		try {
 			return { ok: true, json: JSON.parse(text) };
 		} catch {
-			return { ok: false, reason: "parse" };
+			return { ok: false, reason: "parse", status: null };
 		}
 	} catch {
-		return { ok: false, reason: controller.signal.aborted ? "timeout" : "unreachable" };
+		return { ok: false, reason: controller.signal.aborted ? "timeout" : "unreachable", status: null };
 	} finally {
 		clearTimeout(timer);
 	}
 }
 
+/** A 401 or 403 is an auth failure: "auth required" when no token was sent, "auth failed" when one was. */
+function failure(result: JsonFailure, token: string | null): ProbeResult {
+	if (result.status === 401 || result.status === 403) {
+		return { ok: false, reason: token ? AUTH_FAILED : AUTH_REQUIRED };
+	}
+	return { ok: false, reason: result.reason };
+}
+
 /**
- * One poll: GET /metrics and GET /healthz in parallel, each bounded by 1000 ms. Returns the parsed
- * snapshot, or a short reason (timeout, http <status>, unreachable, parse). Never throws.
+ * One poll: GET /metrics and GET /healthz in parallel, each bounded by PROBE_TIMEOUT_MS, both with the
+ * omp bearer when one resolves. Returns the parsed snapshot, or a short reason (timeout, http <status>,
+ * unreachable, parse, auth required, auth failed). Never throws.
  */
 export async function probe(deps: ProbeDeps = {}): Promise<ProbeResult> {
 	const env = deps.env ?? process.env;
@@ -329,8 +355,8 @@ export async function probe(deps: ProbeDeps = {}): Promise<ProbeResult> {
 		getJson(`${base}/metrics`, token, fetchImpl),
 		getJson(`${base}/healthz`, token, fetchImpl),
 	]);
-	if (!metrics.ok) return { ok: false, reason: metrics.reason };
-	if (!health.ok) return { ok: false, reason: health.reason };
+	if (!metrics.ok) return failure(metrics, token);
+	if (!health.ok) return failure(health, token);
 	const parsedMetrics = parseMetrics(metrics.json);
 	const parsedHealth = parseHealthz(health.json);
 	if (!parsedMetrics || !parsedHealth) return { ok: false, reason: "parse" };
@@ -356,19 +382,38 @@ export function applySnapshot(state: State, snapshot: Snapshot, at: number): voi
 	}
 }
 
-/** Run one probe into the state. A failure keeps the last good snapshot. At most one poll is in flight. */
-export async function refresh(state: State, deps: ProbeDeps = {}): Promise<void> {
-	if (state.inFlight) return;
-	state.inFlight = true;
+/**
+ * Run one probe into the state. A failure keeps the last good snapshot. While a poll is in flight, a
+ * refresh returns that same promise, so every caller sees the result of the poll already running.
+ */
+export function refresh(state: State, deps: ProbeDeps = {}): Promise<void> {
+	if (state.inFlight) return state.inFlight;
 	const now = deps.now ?? Date.now;
 	state.lastPollAt = now();
+	const task = (async (): Promise<void> => {
+		try {
+			const result = await probe(deps);
+			const at = now();
+			if (result.ok) applySnapshot(state, result.snapshot, at);
+			else state.lastProbe = { ok: false, reason: result.reason, at };
+		} finally {
+			state.inFlight = null;
+		}
+	})();
+	state.inFlight = task;
+	return task;
+}
+
+/** Waits for a task for at most `ms`. A slower task keeps running; its result lands in the state when it finishes. */
+async function settleWithin(task: Promise<void>, ms: number): Promise<void> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<void>((resolve) => {
+		timer = setTimeout(resolve, ms);
+	});
 	try {
-		const result = await probe(deps);
-		const at = now();
-		if (result.ok) applySnapshot(state, result.snapshot, at);
-		else state.lastProbe = { ok: false, reason: result.reason, at };
+		await Promise.race([task, deadline]);
 	} finally {
-		state.inFlight = false;
+		clearTimeout(timer);
 	}
 }
 
@@ -386,12 +431,20 @@ function clip(text: string): string {
 	return text.length > FOOTER_MAX ? text.slice(0, FOOTER_MAX) : text;
 }
 
-/** The footer line. Priority: unreachable, then degraded, then idle (no omp delta in five minutes), then healthy. */
+/** The text for a failed probe: the auth states, or unreachable with its reason. */
+function failureText(reason: string | null): string {
+	if (reason === AUTH_REQUIRED || reason === AUTH_FAILED) return reason;
+	return `unreachable (${reason ?? "unknown"})`;
+}
+
+/** The footer line. Priority: failed probe, then degraded, then idle (no omp delta in five minutes), then healthy. */
 export function formatFooter(state: State, now: number): string {
-	if (!state.lastProbe || !state.last) return "substrate · checking";
-	if (!state.lastProbe.ok) return clip(`substrate · unreachable (${state.lastProbe.reason ?? "unknown"})`);
+	if (!state.lastProbe) return "substrate · checking";
+	if (!state.lastProbe.ok) return clip(`substrate · ${failureText(state.lastProbe.reason)}`);
+	const snap = state.last;
+	if (!snap) return "substrate · checking";
 	const delta = state.lastDelta ?? { req: 0, emit: 0, tool: 0 };
-	const down = Object.entries(state.last.health.planes)
+	const down = Object.entries(snap.health.planes)
 		.filter(([, plane]) => !plane.ok)
 		.map(([name]) => name)
 		.sort();
@@ -407,15 +460,25 @@ export function formatWidget(state: State): string[] {
 		.map((entry) => `${hhmm(entry.at)}  +${entry.delta.req} req  +${entry.delta.emit} emit  +${entry.delta.tool} tool`);
 }
 
+/** The one hint line for an auth failure. It names where the token comes from and never includes its value. */
+function authHint(reason: string): string {
+	if (reason === AUTH_REQUIRED) {
+		return "hint: set SUBSTRATE_TOKEN, SUBSTRATE_TOKEN_FILE, or the omp file in SUBSTRATE_TOKENS_DIR";
+	}
+	return "hint: the omp token was refused; check SUBSTRATE_TOKEN, SUBSTRATE_TOKEN_FILE, or the omp token file";
+}
+
 /** Lines for the /substrate notification: a probe result, counters per surface (omp first), planes, cache and ledger. */
 export function formatSummary(state: State, now: number): string[] {
-	if (!state.lastProbe) return ["substrate: no probe yet"];
-	const lines: string[] = [
-		state.lastProbe.ok ? "substrate: ok" : `substrate: unreachable (${state.lastProbe.reason ?? "unknown"})`,
-	];
+	const probeStatus = state.lastProbe;
+	if (!probeStatus) return ["substrate: no probe yet"];
+	const lines: string[] = [probeStatus.ok ? "substrate: ok" : `substrate: ${failureText(probeStatus.reason)}`];
+	if (!probeStatus.ok && (probeStatus.reason === AUTH_REQUIRED || probeStatus.reason === AUTH_FAILED)) {
+		lines.push(authHint(probeStatus.reason));
+	}
 	const snap = state.last;
 	if (!snap) return lines;
-	if (!state.lastProbe.ok) lines.push(`last good snapshot: ${formatAge(now - snap.at)} ago`);
+	if (!probeStatus.ok) lines.push(`last good snapshot: ${formatAge(now - snap.at)} ago`);
 	lines.push(`counters since ${snap.metrics.startedAt} (monitoring routes excluded):`);
 	const names = [SURFACE, ...Object.keys(snap.metrics.surfaces).filter((name) => name !== SURFACE).sort()];
 	for (const name of names) {
@@ -489,7 +552,7 @@ export default function (pi: OmpPi): void {
 		handler: async (_args, ctx) => {
 			lastCtx = ctx;
 			try {
-				await refresh(state);
+				await settleWithin(refresh(state), SUBSTRATE_WAIT_MS);
 				render(ctx);
 				ctx.ui.notify(formatSummary(state, Date.now()).join("\n"), state.lastProbe?.ok ? "info" : "warning");
 			} catch {

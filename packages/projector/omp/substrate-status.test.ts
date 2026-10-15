@@ -8,11 +8,13 @@ import {
 	formatWidget,
 	parseHealthz,
 	parseMetrics,
+	PROBE_TIMEOUT_MS,
 	probe,
 	refresh,
 	resolveToken,
 	shouldPoll,
 	surfaceTotals,
+	type FetchLike,
 	type ProbeDeps,
 	type Snapshot,
 	type State,
@@ -21,6 +23,8 @@ import {
 const TOKEN = "TEST-TOKEN-VALUE";
 const STARTED = "2026-10-13T21:32:58.788Z";
 const LATER = "2026-10-14T08:00:00.000Z";
+/** Real timers on purpose, the rare exception to deterministic time control: these cases check the 3000 ms client timeout against the platform clock, the behaviour the spec names. */
+const SLOW_TEST_MS = 10_000;
 
 /** Synthetic GET /metrics body, field names as the real payload uses them. */
 function metricsFixture(startedAt: string, omp: { req: number; emit: number; tool: number }) {
@@ -96,14 +100,28 @@ function snapshot(at: number, startedAt: string, omp: { req: number; emit: numbe
 }
 
 /** A fake fetch that answers /metrics and /healthz from the fixtures and records each Authorization header. */
-function fakeFetch(seen: Array<string | undefined>, metrics = metricsFixture(STARTED, { req: 10, emit: 4, tool: 3 })) {
-	return async (url: string, init: RequestInit): Promise<Response> => {
+function fakeFetch(seen: Array<string | undefined>, metrics = metricsFixture(STARTED, { req: 10, emit: 4, tool: 3 })): FetchLike {
+	return async (url, init) => {
 		const headers = init.headers as Record<string, string>;
 		seen.push(headers.authorization);
 		const body = url.endsWith("/metrics") ? metrics : healthFixture();
 		return new Response(JSON.stringify(body), { status: 200 });
 	};
 }
+
+/** Delays every answer by `delayMs` before handing the request to `inner`. */
+function delayed(inner: FetchLike, delayMs: number): FetchLike {
+	return async (url, init) => {
+		await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+		return inner(url, init);
+	};
+}
+
+const refusedFetch: FetchLike = async () => {
+	throw new TypeError("connection refused");
+};
+
+const denyFetch: FetchLike = async () => new Response("", { status: 401 });
 
 describe("parsing", () => {
 	test("surface totals sum per surface and skip monitoring routes", () => {
@@ -157,6 +175,17 @@ describe("diff and restart", () => {
 });
 
 describe("footer and widget", () => {
+	test("checking before any probe has completed", () => {
+		expect(formatFooter(createState("session-1"), 1_000)).toBe("substrate · checking");
+	});
+
+	test("a failed first probe renders unreachable, not checking", async () => {
+		const state = createState("session-1");
+		await refresh(state, { fetchImpl: refusedFetch, env: {}, readFile: () => null, now: () => 1_000 });
+		expect(state.last).toBeNull();
+		expect(formatFooter(state, 2_000)).toBe("substrate · unreachable (unreachable)");
+	});
+
 	test("idle when omp deltas stay at zero", () => {
 		const state = createState("session-1");
 		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
@@ -221,25 +250,55 @@ describe("poll throttle", () => {
 });
 
 describe("probe", () => {
-	test("a request that never answers is unreachable with reason timeout", async () => {
+	test("the client timeout is 3000 ms", () => {
+		expect(PROBE_TIMEOUT_MS).toBe(3000);
+	});
+
+	test("a probe that resolves after 2000 ms still succeeds", async () => {
+		const started = Date.now();
+		const result = await probe({ fetchImpl: delayed(fakeFetch([]), 2000), env: {}, readFile: () => null, now: () => 7 });
+		expect(result.ok).toBe(true);
+		expect(Date.now() - started).toBeLessThan(PROBE_TIMEOUT_MS);
+	}, SLOW_TEST_MS);
+
+	test("a request that never answers is unreachable with reason timeout after the client timeout", async () => {
 		const fetchImpl = (_url: string, init: RequestInit): Promise<Response> =>
 			new Promise<Response>((_resolve, reject) => {
 				init.signal?.addEventListener("abort", () => reject(new Error("aborted")));
 			});
+		const started = Date.now();
 		const result = await probe({ fetchImpl, env: {}, readFile: () => null, now: () => 5 });
 		expect(result).toEqual({ ok: false, reason: "timeout" });
-	});
+		expect(Date.now() - started).toBeGreaterThanOrEqual(PROBE_TIMEOUT_MS - 50);
+	}, SLOW_TEST_MS);
 
 	test("a refused connection is unreachable", async () => {
-		const fetchImpl = async (): Promise<Response> => {
-			throw new TypeError("connection refused");
-		};
-		expect(await probe({ fetchImpl, env: {}, readFile: () => null })).toEqual({ ok: false, reason: "unreachable" });
+		expect(await probe({ fetchImpl: refusedFetch, env: {}, readFile: () => null })).toEqual({ ok: false, reason: "unreachable" });
 	});
 
-	test("a non-2xx answer gives http <status>", async () => {
+	test("a non-2xx answer other than auth gives http <status>", async () => {
 		const fetchImpl = async (): Promise<Response> => new Response("", { status: 503 });
 		expect(await probe({ fetchImpl, env: {}, readFile: () => null })).toEqual({ ok: false, reason: "http 503" });
+	});
+
+	test("a 401 with no token is auth required", async () => {
+		expect(await probe({ fetchImpl: denyFetch, env: {}, readFile: () => null })).toEqual({ ok: false, reason: "auth required" });
+	});
+
+	test("a 401 with a token sent is auth failed, and the token never appears in the rendered text", async () => {
+		const deps: ProbeDeps = { fetchImpl: denyFetch, env: { SUBSTRATE_TOKEN: TOKEN }, readFile: () => null, now: () => 1 };
+		const result = await probe(deps);
+		expect(result).toEqual({ ok: false, reason: "auth failed" });
+
+		const state = createState("session-1");
+		await refresh(state, deps);
+		expect(formatFooter(state, 2)).toBe("substrate · auth failed");
+		const summary = formatSummary(state, 2).join("\n");
+		expect(summary).toContain("substrate: auth failed");
+		expect(summary).toContain("hint:");
+		for (const output of [formatFooter(state, 2), summary, JSON.stringify(result)]) {
+			expect(output).not.toContain(TOKEN);
+		}
 	});
 
 	test("the token travels only as the Authorization header and never appears in output", async () => {
@@ -255,14 +314,23 @@ describe("probe", () => {
 		for (const output of outputs) expect(output).not.toContain(TOKEN);
 	});
 
+	test("two overlapping refresh calls issue one probe, and both see its result", async () => {
+		const seen: Array<string | undefined> = [];
+		const state = createState("session-1");
+		const deps: ProbeDeps = { fetchImpl: fakeFetch(seen), env: {}, readFile: () => null, now: () => 1_000 };
+		const first = refresh(state, deps);
+		const second = refresh(state, deps);
+		expect(second).toBe(first);
+		await Promise.all([first, second]);
+		expect(seen).toHaveLength(2); // one /metrics and one /healthz
+		expect(state.last).not.toBeNull();
+	});
+
 	test("refresh keeps the last good snapshot when a later poll fails", async () => {
 		const state: State = createState("session-1");
 		await refresh(state, { fetchImpl: fakeFetch([]), env: {}, readFile: () => null, now: () => 1_000 });
 		expect(state.last).not.toBeNull();
-		const refused = async (): Promise<Response> => {
-			throw new TypeError("connection refused");
-		};
-		await refresh(state, { fetchImpl: refused, env: {}, readFile: () => null, now: () => 2_000 });
+		await refresh(state, { fetchImpl: refusedFetch, env: {}, readFile: () => null, now: () => 2_000 });
 		expect(state.lastProbe).toEqual({ ok: false, reason: "unreachable", at: 2_000 });
 		expect(state.last).not.toBeNull();
 		expect(formatSummary(state, 2_000).join("\n")).toContain("last good snapshot: 1s ago");
