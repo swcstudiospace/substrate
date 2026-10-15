@@ -27,7 +27,7 @@ Each criterion from the planning spec is graded PASS, FAIL, or WAIVED. WAIVED ne
 
 ## Omp UI
 
-Evidence: PR #70 at `fb7bb0b`. `bun test packages/projector/omp/` 65 pass. Live read-only check on loopback, 2026-10-15.
+Evidence: PR #70 at `aad5347`. `bun test packages/projector/omp/` 68 pass, including the Greptile regressions. Live read-only check on loopback, 2026-10-15.
 
 | Criterion | Grade | Evidence |
 | --- | --- | --- |
