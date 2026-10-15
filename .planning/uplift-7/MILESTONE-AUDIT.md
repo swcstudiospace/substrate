@@ -1,6 +1,6 @@
 # Milestone audit (uplift-7, 2026-10-15)
 
-Each criterion from the planning spec is graded PASS, FAIL, or WAIVED. Four WAIVED rows carry your decision from closeout: three Omp terminal-host accessibility rows, and the SVM "nothing pushed" row. Any unresolved FAIL blocks MILESTONE_COMPLETE, which is not run.
+Each criterion from the planning spec is graded PASS, FAIL, or WAIVED. Five WAIVED rows carry your decision from closeout: three Omp terminal-host accessibility rows, the SVM "nothing pushed" row, and the agent-scope part of the cross-agent row. Any unresolved FAIL blocks MILESTONE_COMPLETE, which is not run.
 
 ## Milestone
 
