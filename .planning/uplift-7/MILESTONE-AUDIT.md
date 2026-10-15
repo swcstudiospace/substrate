@@ -12,7 +12,7 @@ Each criterion from the planning spec is graded PASS, FAIL, or WAIVED. Five WAIV
 | Each discuss, plan, and execute step ran as its own flat Skill() call, with no nesting | FAIL | The phase loop was not run for the appended workstreams. Work was done directly and by subagents. |
 | Each pause is labeled with exactly one PAUSE_POLICY category | PASS | Closeout labels: GREY_AREA (panel host, answered), VALIDATION_REQUEST (SVM go/no-go), EXTERNAL_EFFECT (merges, anchor funding, rotation), SCOPE_CHANGE (appends; DISPUTED items) |
 | The audit report grades each criterion; MILESTONE_COMPLETE only with no unresolved FAIL | PASS | This file. MILESTONE_COMPLETE is not run. |
-| CLEANUP removed only this run's temp files; archives and legacy material intact | FAIL | Not yet run. Worktrees and temp files remain until PRs 70–72 are merged. |
+| CLEANUP removed only this run's temp files; archives and legacy material intact | PASS | After the merges: this run's worktrees, scratch clones, containers, and logs are removed, and `git worktree list` shows none of them. Pre-existing worktrees under `/tmp/pr-merges` and `/tmp/agent-substrate-p15-before-oct08` were not from this run and were left alone. The main checkout is clean on `main`. Archives and legacy material were not touched. |
 
 ## Substrate
 
@@ -55,7 +55,7 @@ Evidence: PR #70 at `aad5347`. `bun test packages/projector/omp/` 68 pass, inclu
 
 ## Summary
 
-- Unresolved FAILs: 7 (milestone 4, substrate 3). MILESTONE_COMPLETE is blocked.
+- Unresolved FAILs: 6 (milestone 3, substrate 3). MILESTONE_COMPLETE is blocked.
 - WAIVED by your decision at closeout: 5 (three Omp terminal-host accessibility rows; the SVM "nothing pushed" row; agent-scope visibility, private by decision).
 - Documented gaps, not criteria: the STALE state (needs event times); activity-feed rows and filters (the panel shows counts, not records, and the window is fixed at five minutes). A server-side last-seen value per surface was declined for now: the window uses the viewer's poll clock.
-- Next, by your choice: the three other substrate gaps (invalid-write round trip, expected-version for skills and docs, degraded-mode queue) stay open with no date set. The STALE state needs your decision (`POST /events/query`). MILESTONE_COMPLETE and CLEANUP need your approval once the FAILs are cleared.
+- Next, by your choice: the three other substrate gaps (invalid-write round trip, expected-version for skills and docs, degraded-mode queue) stay open with no date set. The STALE state needs your decision (`POST /events/query`). MILESTONE_COMPLETE needs your approval once the FAILs are cleared. CLEANUP ran after the merges and is recorded as PASS.
