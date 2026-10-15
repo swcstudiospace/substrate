@@ -27,10 +27,6 @@
       "name": "@substrate/collectors",
       "version": "0.1.0",
     },
-    "packages/dispatcher": {
-      "name": "@substrate/dispatcher",
-      "version": "0.1.0",
-    },
     "packages/evidence": {
       "name": "@substrate/evidence",
       "version": "0.1.0",
@@ -460,8 +456,6 @@
     "@substrate/cli": ["@substrate/cli@workspace:packages/cli"],
 
     "@substrate/collectors": ["@substrate/collectors@workspace:packages/collectors"],
-
-    "@substrate/dispatcher": ["@substrate/dispatcher@workspace:packages/dispatcher"],
 
     "@substrate/evidence": ["@substrate/evidence@workspace:packages/evidence"],
 
