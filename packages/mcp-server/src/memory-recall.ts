@@ -26,6 +26,7 @@ import {
 } from "./planes/hindsight.ts";
 import { redactValue } from "./redact.ts";
 import { SURFACES } from "./types.ts";
+import { visibleToSurface } from "./memory-policy.ts";
 
 /** The known surfaces as plain strings, for bank-set membership checks. */
 const KNOWN_SURFACES: readonly string[] = SURFACES;
@@ -189,7 +190,10 @@ export async function recallMemories(
 			if (outcome.value.timedOut === true) timedOut = true;
 			continue;
 		}
-		for (const hit of outcome.value.hits.slice(0, MAX_RECALL_PER_BANK)) scored.push({ bank, hit });
+		const visible = outcome.value.hits.filter((raw) =>
+			visibleToSurface(typeof raw.metadata.scope === "string" ? raw.metadata.scope : undefined, callerSurface ?? "unattributed"),
+		);
+		for (const hit of visible.slice(0, MAX_RECALL_PER_BANK)) scored.push({ bank, hit });
 	}
 	const results = dedupeHits(scored)
 		.sort((left, right) => (right.hit.score ?? 0) - (left.hit.score ?? 0))

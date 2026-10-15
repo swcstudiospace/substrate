@@ -2062,14 +2062,14 @@ export class Substrate {
 		return this.cache.getOrLoad({
 			klass: "memory-search",
 			surface,
-			// The shape marker keeps pre-upgrade bare-list entries under their
-			// old key: a hit must return the merged shape, never a stale array.
+			// The shape marker keeps pre-upgrade entries under their old key. A pre-upgrade reply can carry another
+			// surface's agent: rows or hits, so v2 must never serve one: the key moves with the visibility rule.
 			args: {
 				query,
 				scope: scope ?? null,
 				limit: limit ?? null,
 				includeSuperseded: includeSuperseded ?? false,
-				shape: "merged-v1",
+				shape: "merged-v2",
 				...this.expiryKey(includeExpired),
 			},
 			// The merged search holds a Hindsight recall, so under `narrow` it lists the recall generation too.
@@ -2083,7 +2083,7 @@ export class Substrate {
 					this.index ? this.index.searchMemory(query, scope, limit, includeSuperseded, read) : Promise.resolve([]),
 					this.recallUncounted({ query }, surface, this.config.hindsightBudgets.searchRecallBudgetMs),
 				]);
-				return mergeDerivedHits(entries, recall, scope);
+				return mergeDerivedHits(entries, recall, scope, surface);
 			},
 		});
 	}
@@ -2100,7 +2100,7 @@ export class Substrate {
 		return this.cache.getOrLoad({
 			klass: "memory-search",
 			surface,
-			args: { ...search, ...this.expiryKey(request.include_expired) },
+			args: { ...search, rule: "agent-own-v2", ...this.expiryKey(request.include_expired) },
 			generations: this.memoryGenerations(),
 			refreshAt: (page) => earliestRefreshAt(page.entries.flatMap((entry) => [entry.reverify_after, entry.expires_at])),
 			load: async () => {

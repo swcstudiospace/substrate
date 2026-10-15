@@ -586,4 +586,27 @@ describeLive("memory governance against a live index", () => {
 		expect(retry.entry?.version).toBe(3);
 		expect(retry.entry?.supersedes).toBe(competitor!.entry!.id);
 	});
+
+	test("an agent's own notes are readable in search by that agent only; shared scopes stay visible to every surface", async () => {
+		const shared = await write(a, { scope: SCOPE, kind: "fact", writer: "hermes", subject: `shared-${RUN}`, text: `${MARKER} shared fact` });
+		const hermesNote = await write(a, { scope: "agent:hermes", kind: "fact", writer: "hermes", subject: `hermes-${RUN}`, text: `${MARKER} hermes private note` });
+		const ompNote = await write(a, { scope: "agent:omp", kind: "fact", writer: "omp", subject: `omp-${RUN}`, text: `${MARKER} omp private note` });
+		expect(shared.verified_persisted).toBe(true);
+		expect(hermesNote.verified_persisted).toBe(true);
+		expect(ompNote.verified_persisted).toBe(true);
+
+		// What one reader sees of this run's rows, through the call memory_search makes.
+		const seen = async (read: { surface: string } | undefined, scope?: string): Promise<string[]> => {
+			const page = await a.searchMemoryPage({ limit: 500, ...(scope === undefined ? {} : { scope }) }, read);
+			return page.entries.map((entry) => entry.text).filter((text) => text.includes(MARKER));
+		};
+
+		const asOmp = await seen({ surface: "omp" });
+		expect(asOmp).toContain(`${MARKER} shared fact`);
+		expect(asOmp).toContain(`${MARKER} omp private note`);
+		expect(asOmp).not.toContain(`${MARKER} hermes private note`);
+		expect(await seen({ surface: "omp" }, "agent:hermes")).toEqual([]);
+		expect(await seen({ surface: "hermes" }, "agent:hermes")).toEqual([`${MARKER} hermes private note`]);
+		expect(await seen(undefined, "agent:hermes")).toEqual([`${MARKER} hermes private note`]);
+	});
 });
