@@ -12,6 +12,8 @@ import {
 	PLANES,
 	PlaneRegistry,
 	gatedFetch,
+	EnterpriseFabric,
+	createEnterpriseFabric,
 	type AdmissionClass,
 	type AdmissionDecision,
 	type BreakerSnapshot,
@@ -20,6 +22,9 @@ import {
 	type BriefState,
 	type DocsSearchSample,
 	type EventReplayResult,
+	type FabricStatus,
+	type OptimizationSuggestion,
+	type ComplianceReport,
 	type PlaneName,
 	type PlaneSample,
 	type RecallPrefetchResult,
@@ -975,6 +980,8 @@ export class Substrate {
 	 * instead of a timeout per caller and lets `/healthz` name the plane.
 	 */
 	readonly planes: PlaneRegistry;
+	/** Enterprise Unified Fabric for cross-resource (enh7): observability, opt, compliance. */
+	readonly fabric: EnterpriseFabric;
 	/** Connector-gate overrides for tests (connector fetch, URL, timeout); production reads config. */
 	private readonly dodGateTest: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
 	/** RAGFlow fetch, gated. Tests inject the fake underneath; production uses the global fetch. */
@@ -1076,6 +1083,7 @@ export class Substrate {
 		this.planes = new PlaneRegistry(config.breaker, (sample) => {
 			this.observer.plane?.(sample);
 		});
+		this.fabric = createEnterpriseFabric(this.planes);
 		this.index =
 			stores?.index !== undefined
 				? stores.index
@@ -5022,6 +5030,25 @@ export class Substrate {
 		};
 	}
 
+	/** Cross-resource unified fabric status (enh #7). Uses states, breakers merged. */
+	fabricStatus(): FabricStatus {
+		// trigger probes (async, nonblock) for railway/tailscale/dragonfly to populate loading->success/error states
+		// (probes use retry/backoff, validation, sanitize inside fabric)
+		for (const r of ["railway", "tailscale", "dragonfly"] as const) {
+			this.fabric.probe(r).catch(() => { /* graceful: errors already set state=error */ });
+		}
+		return this.fabric.getStatus(this.planes.snapshots());
+	}
+
+	/** SOTA auto opt suggestions from fabric states + breakers. */
+	suggestOptimizations(): OptimizationSuggestion[] {
+		return this.fabric.suggestOptimizations(this.planes.snapshots());
+	}
+
+	/** Enterprise compliance report across resources. */
+	complianceReport(): ComplianceReport {
+		return this.fabric.complianceReport();
+	}
 	/**
 	 * The admission bucket's round trip (uplift-3 N3): one script on the cache
 	 * plane, through its gate, timeout and cooldown. The cache stays private;
@@ -5154,6 +5181,7 @@ export class Substrate {
 			planes,
 			capacity: { index: capacity, ledger: ledgerCapacity },
 			jobs: { ledger: ledgerJobs.ledger, ledgerReason: ledgerJobs.reason, ...(indexArchive !== null ? { index: indexArchive } : {}) },
+			fabric: this.fabricStatus(),
 		};
 	}
 
@@ -5296,6 +5324,80 @@ export class Substrate {
 		if (memo === null || now - memo.at >= LEDGER_JOBS_MEMO_MS) return null;
 		return { ledger: memo.value, reason: memo.reason };
 	}
+
+	// RailwayOrch enh1: list/scale/cost/monitor via forwarder+API. Prod: states, retry/backoff, graceful unavail, val, redact errs, no token leak.
+	private async railwayGraphql<T>(query: string, variables: Record<string, unknown> = {}): Promise<{ data?: T; errors?: unknown[] }> {
+		const cfg = this.config.railway;
+		if (!cfg) throw new Error("railway-not-configured");
+		const base = cfg.forwarderUrl || cfg.apiUrl;
+		const headers: Record<string, string> = { "Content-Type": "application/json", Accept: "application/json", Authorization: `Bearer ${cfg.token}` };
+		const body = JSON.stringify({ query, variables });
+		const max = 3;
+		let last: unknown;
+		for (let a = 0; a < max; a++) {
+			try {
+				const res = await fetch(base, { method: "POST", headers, body });
+				if (!res.ok) throw new Error(`http ${res.status} ${(await res.text().catch(() => "")).slice(0,180)}`);
+				return await res.json();
+			} catch (e) { last = e; if (a < max-1) await Bun.sleep(150 * (1 << a)); }
+		}
+		throw last;
+	}
+
+	async railwayList(args: { projectId?: unknown } = {}): Promise<{ state: "success" | "empty" | "error" | "unavailable"; resources: unknown[]; reason?: string }> {
+		if (!this.config.railway) return { state: "unavailable", resources: [], reason: "railway-not-configured" };
+		try {
+			const q = "query { projects { edges { node { id name environments { edges { node { id name } } } services { edges { node { id name } } } } } }";
+			const r = await this.railwayGraphql<any>(q);
+			if (r.errors?.length) return { state: "error", resources: [], reason: JSON.stringify(r.errors).slice(0, 280) };
+			const res = (r.data?.projects?.edges || []).map((e: any) => e.node);
+			return { state: res.length ? "success" : "empty", resources: res };
+		} catch (e) {
+			return { state: "error", resources: [], reason: redact(String(e instanceof Error ? e.message : e)).slice(0, 300) };
+		}
+	}
+
+	async railwayScale(args: { serviceId?: unknown; environmentId?: unknown; replicas?: unknown }): Promise<{ state: "success" | "error" | "unavailable"; ok?: boolean; reason?: string }> {
+		if (!this.config.railway) return { state: "unavailable", reason: "railway-not-configured" };
+		const sid = typeof args.serviceId === "string" ? args.serviceId.trim() : "";
+		const eid = typeof args.environmentId === "string" ? args.environmentId.trim() : "";
+		const reps = Number(args.replicas);
+		if (!sid || !eid || !Number.isFinite(reps) || reps < 0) return { state: "error", reason: "validation: serviceId+environmentId req; replicas>=0" };
+		try {
+			const q = "mutation($s:String!,$e:String!,$r:Int!){serviceInstanceUpdate(serviceId:$s,environmentId:$e,input:{numReplicas:$r}){id}}";
+			const r = await this.railwayGraphql(q, { s: sid, e: eid, r: Math.floor(reps) });
+			if (r.errors?.length) return { state: "error", reason: JSON.stringify(r.errors).slice(0, 280) };
+			return { state: "success", ok: true };
+		} catch (e) {
+			return { state: "error", reason: redact(String(e instanceof Error ? e.message : e)).slice(0, 300) };
+		}
+	}
+
+	async railwayCost(args: { projectId?: unknown } = {}): Promise<{ state: "success" | "empty" | "error" | "unavailable"; usage?: unknown; reason?: string }> {
+		if (!this.config.railway) return { state: "unavailable", reason: "railway-not-configured" };
+		try {
+			const q = "query { me { usage { estimatedCost projects { projectId cost } } } }";
+			const r = await this.railwayGraphql<any>(q);
+			if (r.errors?.length) return { state: "error", reason: JSON.stringify(r.errors).slice(0, 280) };
+			const u = r.data?.me?.usage || null;
+			return { state: u ? "success" : "empty", usage: u };
+		} catch (e) {
+			return { state: "error", reason: redact(String(e instanceof Error ? e.message : e)).slice(0, 300) };
+		}
+	}
+
+	async railwayMonitor(args: { serviceId?: unknown; environmentId?: unknown } = {}): Promise<{ state: "success" | "empty" | "error" | "unavailable"; status?: unknown; reason?: string }> {
+		if (!this.config.railway) return { state: "unavailable", reason: "railway-not-configured" };
+		try {
+			const sid = typeof args.serviceId === "string" ? args.serviceId.trim() : "";
+			const q = sid ? "query($id:String!){ service(id:$id){ id name deployments(first:5){edges{node{id status updatedAt}}}} }" : "query { projects(first:3){edges{node{id name services(first:1){edges{node{id name deployments(first:1){edges{node{status}}}}}}}} }";
+			const r = await this.railwayGraphql<any>(q, sid ? { id: sid } : {});
+			if (r.errors?.length) return { state: "error", reason: JSON.stringify(r.errors).slice(0, 280) };
+			return { state: "success", status: r.data || {} };
+		} catch (e) {
+			return { state: "error", reason: redact(String(e instanceof Error ? e.message : e)).slice(0, 300) };
+		}
+	}
 }
 
 /** How long one `anchorCoverage` read serves `/healthz.jobs.ledger` (uplift-3 N6). */
@@ -5351,6 +5453,8 @@ export interface SubstrateHealth {
 	capacity: { index: IndexCapacity | null; ledger: LedgerCapacity | null };
 	/** Scheduled-job health (uplift-3 N6): `ledger` is `null` with `ledgerReason` set when the ledger is unconfigured, unreachable or still being read. */
 	jobs: { ledger: LedgerJobsHealth | null; ledgerReason: string | null; index?: IndexArchiveHealth };
+	/** Unified enterprise fabric (enh7) for cross-resource obs/opt/compliance. */
+	fabric: FabricStatus;
 }
 
 /** `/healthz.jobs.index` (uplift-4 S2): present only when `SUBSTRATE_INDEX_ARCHIVE_DIR` is set. */

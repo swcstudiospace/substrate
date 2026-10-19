@@ -1160,6 +1160,60 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 	);
 
 	server.registerTool(
+		"railway_list",
+		{
+			title: "List Railway resources",
+			description:
+				"List projects, environments and services via Railway API (or forwarder). Returns {state, resources, reason?}. " +
+				"state: success | empty | error | unavailable (no token). Read-only, redacted errors. Graceful when unconfigured or rate-limited.",
+			inputSchema: { projectId: z.string().optional() },
+			annotations: { readOnlyHint: true },
+		},
+		async (args) => json(await substrate.railwayList(args)),
+	);
+
+	server.registerTool(
+		"railway_scale",
+		{
+			title: "Scale Railway service",
+			description:
+				"Scale replicas for service in env. Validates inputs; returns {state, ok?, reason}. Destructive. " +
+				"Uses retries+backoff, forwarder if set. Errors redacted; unavailable if no Railway config.",
+			inputSchema: {
+				serviceId: z.string().describe("Railway service id"),
+				environmentId: z.string().describe("Environment id"),
+				replicas: z.number().int().min(0).describe("Desired replica count"),
+			},
+			annotations: { destructiveHint: true },
+		},
+		async (args) => json(await substrate.railwayScale(args)),
+	);
+
+	server.registerTool(
+		"railway_cost",
+		{
+			title: "Railway cost/usage",
+			description:
+				"Report estimated cost and usage. {state, usage?, reason?}. States support client loading/empty/error/success rendering.",
+			inputSchema: { projectId: z.string().optional() },
+			annotations: { readOnlyHint: true },
+		},
+		async (args) => json(await substrate.railwayCost(args)),
+	);
+
+	server.registerTool(
+		"railway_monitor",
+		{
+			title: "Monitor Railway resource",
+			description:
+				"Current status/deployments for service or projects. Production: retry, degrade, validate, states for UX.",
+			inputSchema: { serviceId: z.string().optional(), environmentId: z.string().optional() },
+			annotations: { readOnlyHint: true },
+		},
+		async (args) => json(await substrate.railwayMonitor(args)),
+	);
+
+	server.registerTool(
 		"desktop_run",
 		{
 			title: "Drive the substrate desktop",

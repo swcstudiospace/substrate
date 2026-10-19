@@ -213,6 +213,7 @@ async function forwardEntry(deps: RetainDeps, config: HindsightConfig, target: R
 		created: entry.created,
 	};
 	if (typeof entry.subject === "string" && entry.subject.length > 0) metadata.subject = entry.subject;
+	if (typeof entry.graph_id === "string" && entry.graph_id.length > 0) metadata.graph_id = entry.graph_id;
 	const texts = [entry.text, context, ...Object.values(metadata)];
 	const rules = [...new Set(texts.flatMap((text) => findingRules(text)))];
 	if (rules.length > 0) {
@@ -245,7 +246,10 @@ async function forwardEntry(deps: RetainDeps, config: HindsightConfig, target: R
 		return { forwarded: false, bank, document_id: documentId, reason };
 	};
 	const fetchImpl = deps.fetchImpl ?? fetch;
-	const items = [{ content: entry.text, context, tags: [writer, entry.kind], metadata, document_id: documentId }];
+	const graphTag = typeof entry.graph_id === "string" && entry.graph_id ? `graph:${entry.graph_id}` : null;
+	const retainTags = graphTag ? [writer, entry.kind, graphTag] : [writer, entry.kind];
+	const causal = (typeof entry.graph_id === "string" && entry.graph_id) || source ? { graph_id: entry.graph_id, source_event: source } : undefined;
+	const items = [{ content: entry.text, context, tags: retainTags, metadata, document_id: documentId, ...(causal ? { causal } : {}) }];
 	const retain = (): Promise<HindsightResult<{ items_count: number }>> =>
 		deps.retainTimeoutMs !== undefined
 			? retainMemories(config, bank, items, fetchImpl, deps.retainTimeoutMs)

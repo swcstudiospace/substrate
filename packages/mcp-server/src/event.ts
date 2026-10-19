@@ -1,9 +1,8 @@
 /**
  * Event normalisation and the hash chain.
  *
- * Phase 6 anchors hourly Merkle roots to Solana devnet, but the chain has to be
- * correct from the first event written — you cannot retrofit integrity onto an
- * append-only log. So `hash` and `prev` are computed here, on ingest, from day one.
+ * Phase 6 anchors... 
+ * DragonflyPubSub integration (enh-6): realtime propagation of normalized events via cache pubsub channels.
  */
 import { randomUUID } from "node:crypto";
 import { redact, redactValue } from "./redact.ts";
@@ -324,4 +323,53 @@ export function verifyChain(events: SubstrateEvent[]): { ok: true } | { ok: fals
 		expectedPrev = hash;
 	}
 	return { ok: true };
+}
+
+// DragonflyPubSub integration (enh-6): event channels + serialize for realtime prop to planes.
+// Production states handled in cache side; here pure helpers + validation.
+
+const EVENT_PUB_PREFIX = "substrate:v1:pub:events";
+
+export function eventPubSubChannel(surface: string, kind?: string): string {
+	const s = surface.replace(/[^a-z0-9_:-]/gi, "_").slice(0, 64);
+	const k = kind ? kind.replace(/[^a-z0-9_:-]/gi, "_").slice(0, 32) : "*";
+	return `${EVENT_PUB_PREFIX}:${s}:${k}`;
+}
+
+export interface EventPubSubEnvelope {
+	t: "event";
+	id: string;
+	ts: string;
+	surface: string;
+	kind: string;
+	summary: string; // redacted
+}
+
+export function serializeEventForPubSub(e: SubstrateEvent): EventPubSubEnvelope {
+	return {
+		t: "event",
+		id: e.id,
+		ts: e.ts,
+		surface: e.surface,
+		kind: e.kind,
+		summary: redact(e.summary || "").slice(0, 256),
+	};
+}
+
+export function isValidEventForPub(e: unknown): e is SubstrateEvent {
+	if (!e || typeof e !== "object") return false;
+	const ev = e as Record<string, unknown>;
+	return typeof ev.id === "string" && typeof ev.hash === "string" && typeof ev.surface === "string" && typeof ev.kind === "string";
+}
+
+// Hook for callers after normalizeEvent to push realtime (graceful if no pub).
+export async function propagateEvent(pub: { publish: (ch: string, m: unknown) => Promise<unknown> } | null, e: SubstrateEvent): Promise<void> {
+	if (!pub || !isValidEventForPub(e)) return;
+	const ch = eventPubSubChannel(e.surface, e.kind);
+	const env = serializeEventForPubSub(e);
+	try {
+		await pub.publish(ch, env);
+	} catch {
+		// graceful degradation for realtime
+	}
 }

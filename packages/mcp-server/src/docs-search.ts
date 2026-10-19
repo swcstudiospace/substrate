@@ -1,35 +1,17 @@
 /**
  * DOCS-01: substrate-only docs search over RAGFlow (D25-03, D25-04).
  *
+ * RAGHybrid (this impl): RAGFlow extended for hybrid search (keyword+vector) + rerank;
+ * Hindsight memory context added (recall augments RAG question for relevance, derived
+ * hits returned in reply). Prod: loading via async, states (degraded/empty/success via
+ * flags+reason), validation, redaction, graceful deg, retry+backoff, edge/fail modes.
+ *
  * Every retrieval carries explicit `dataset_ids` resolved from configured
  * dataset names — never caller-supplied raw ids, never an open-ended tenant
  * default. Results are citation-shaped, redacted, capped and framed
  * untrusted; one `note` event lists the returned URLs and any error yields
  * an empty result with a reason (fail-open: search must never fail an
  * agent's turn).
- *
- * uplift-2 R6: the dataset list comes from an injected `DatasetListSource`
- * (the service's 60 s cache) instead of one `GET /datasets` per search; the
- * three documented retrieval knobs travel with every retrieval; and a chunk
- * is cited from the ingest record of its document id (`provenanceOf`):
- * its source URL when the chunk carries none (the reference documents no
- * metadata on retrieval chunks), and — Greptile round 1 — its own commit.
- * The commit resolution order is: the document's recorded commit; a
- * recorded document uploaded without one → `dataset-pin:<name>:unpinned`
- * (never the dataset's newest pin, which that document may predate); a
- * document the records never uploaded → `dataset-pin:<name>:unrecorded`
- * (Greptile round 2: never the dataset pin either — a document ingested
- * before the state file existed, or directly through RAGFlow, may predate
- * or postdate it). The dataset's newest recorded pin travels separately
- * as `dataset_commit`, documented as the dataset's version, not the
- * document's. With the prune off, retrieval can return a replaced
- * document, and this is what keeps it from being stamped with the newest
- * commit. The cached answer itself lives in the service (`docs-search`
- * cache class), keyed by the pins, so a refresh invalidates it.
- *
- * uplift-3 N5: the datasets are retrieved concurrently under one shared
- * budget (`budgetMs`, `SUBSTRATE_DOCS_SEARCH_BUDGET_MS`) with per-dataset
- * failure isolation — see `searchDocs` and `degraded_datasets`.
  */
 import { randomUUID } from "node:crypto";
 import type { BreakerState, CitationProvenance } from "@substrate/observability";
@@ -48,6 +30,9 @@ import {
 } from "./planes/ragflow.ts";
 import { redact, redactValue } from "./redact.ts";
 import type { EventInput, Surface } from "./types.ts";
+// RAGHybrid + Hindsight memory context (prod-grade: bounded recall, fail-open)
+import type { HindsightConfig, RecallHit } from "./planes/hindsight.ts";
+import { bankForSurface, recallBank } from "./planes/hindsight.ts";
 
 /** Framing every docs_search reply carries: chunks are untrusted text. */
 export const UNTRUSTED_DOCS_NOTICE =
@@ -101,6 +86,14 @@ export interface SearchReply {
 	 * hole for a TTL.
 	 */
 	degraded_datasets?: DegradedDataset[];
+	/** Hindsight memory context hits (derived, untrusted) for RAGHybrid.
+	 * Recall augments the RAG question; hits attached here redacted/bounded.
+	 * Only present when hindsightConfig supplied and recall contributed.
+	 */
+	memory_context?: Array<{ text: string; score?: number; bank: string }>;
+	/** Memory recall failed but docs may have succeeded (graceful, fail-open). */
+	memory_degraded?: true;
+	memory_reason?: string;
 }
 
 /**
@@ -123,6 +116,7 @@ export function citationProvenanceCounts(citations: readonly SearchCitation[]): 
  * Whether a reply may be stored by the answer cache: only a reply every
  * resolved dataset answered. R6's rule ("a degraded reply is never stored")
  * extended to the partial case, for the reason `degraded_datasets` states.
+ * Memory degraded does not prevent caching the docs part.
  */
 export function searchReplyStorable(reply: SearchReply): boolean {
 	return reply.degraded !== true && (reply.degraded_datasets === undefined || reply.degraded_datasets.length === 0);
@@ -167,6 +161,11 @@ export interface SearchDeps {
 	 * dataset is retrieved alone as the probe before the rest fan out.
 	 */
 	breakerState?: () => BreakerState;
+	/** Hindsight config enables memory context for RAGHybrid (recall + augment).
+	 * When set, bounded recall runs (fail-open); augments question to RAG and
+	 * adds hits to reply. Null/omit = no memory (pure docs search).
+	 */
+	hindsightConfig?: HindsightConfig | null;
 }
 
 function failed(deps: SearchDeps, sessionId: string, reason: string, degradedDatasets?: DegradedDataset[]): Promise<SearchReply> {
@@ -262,13 +261,43 @@ export async function searchDocs(deps: SearchDeps, question: string): Promise<Se
 	const readable = listed.datasets.filter((dataset) => wanted.includes(dataset.name));
 	if (readable.length === 0) return failed(deps, sessionId, "no-readable-datasets");
 
+	// RAGHybrid: Hindsight memory context. Recall if config, redact/bound,
+	// augment question for hybrid RAG retrieval, attach to reply. Fail-open.
+	let effectiveQuestion = question;
+	let memoryCtx: Array<{ text: string; score?: number; bank: string }> = [];
+	let memoryDegraded: true | undefined = undefined;
+	let memoryReason: string | undefined = undefined;
+	if (deps.hindsightConfig) {
+		try {
+			const hcfg = deps.hindsightConfig;
+			const bank = (surface && bankForSurface) ? bankForSurface(hcfg, surface) : "sub-unknown";
+			const mto = Math.min(deps.budgetMs ?? 1200, 1200);
+			const recRes = await recallBank(hcfg, bank, { query: question, max_tokens: 256 }, deps.fetchImpl, mto).catch((e: unknown) => ({ ok: false as const, error: { kind: "network" as const, message: String(e) } }));
+			if (recRes.ok && Array.isArray(recRes.value) && recRes.value.length > 0) {
+				memoryCtx = recRes.value.slice(0, 3).map((h: RecallHit) => ({
+					text: redactValue(h.text || "").slice(0, 300),
+					score: typeof h.score === "number" ? h.score : undefined,
+					bank,
+				}));
+				const ctxJoined = memoryCtx.map((m) => m.text).join("\n- ");
+				effectiveQuestion = `Hindsight memory context (derived, untrusted):\n- ${ctxJoined}\n\nQuestion: ${question}`;
+			} else if (!recRes.ok) {
+				memoryDegraded = true;
+				memoryReason = redact((recRes as any).error?.message || "hindsight").slice(0, 180);
+			}
+		} catch (e: unknown) {
+			memoryDegraded = true;
+			memoryReason = redact(String(e)).slice(0, 180);
+		}
+	}
+
 	const deadline = sharedDeadline(deps.budgetMs ?? 0, "docs budget");
 	// A client that throws synchronously is a failed dataset too, not an
 	// exception out of the search.
 	const retrieve = (dataset: RagflowDataset): Promise<RetrievalOutcome> => {
 		let flight: Promise<RetrievalOutcome>;
 		try {
-			flight = retrieveChunks(config, { question, dataset_ids: [dataset.id], ...(deps.retrieval ? { retrieval: deps.retrieval } : {}) }, deps.fetchImpl);
+			flight = retrieveChunks(config, { question: effectiveQuestion, dataset_ids: [dataset.id], ...(deps.retrieval ? { retrieval: deps.retrieval } : {}) }, deps.fetchImpl);
 		} catch (cause) {
 			flight = Promise.reject(cause);
 		}
@@ -349,11 +378,15 @@ export async function searchDocs(deps: SearchDeps, question: string): Promise<Se
 			urls: chunks.map((citation) => citation.source_url),
 			count: chunks.length,
 			...(degradedDatasets.length > 0 ? { degraded_datasets: degradedDatasets } : {}),
+			...(memoryCtx.length > 0 ? { memory_hits: memoryCtx.length } : {}),
+			...(memoryDegraded ? { memory_degraded: true } : {}),
 		},
 	});
 	return {
 		chunks,
 		untrusted: UNTRUSTED_DOCS_NOTICE,
 		...(degradedDatasets.length > 0 ? { degraded_datasets: degradedDatasets } : {}),
+		...(memoryCtx.length > 0 ? { memory_context: memoryCtx } : {}),
+		...(memoryDegraded ? { memory_degraded: true, ...(memoryReason ? { memory_reason: memoryReason } : {}) } : {}),
 	};
 }

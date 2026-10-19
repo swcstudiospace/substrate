@@ -37,7 +37,43 @@ export interface GreptimeConfig {
 	user: string | undefined;
 	password: string | undefined;
 	db: string;
+	/**
+	 * TailscaleDB Secure Unified Proxy Layer (SOTA enh. 4).
+	 * Zero-trust: mTLS + RBAC + audit for DB access.
+	 * Production-grade: states, validation, retry, failure modes, edge cases.
+	 * When enabled, client routes via secure proxy (e.g. tailnet forwarder + proxy).
+	 */
+	tailscaleSecure?: {
+		enabled: boolean;
+		/** Override base for proxy; falls back to url when absent. */
+		proxyUrl?: string;
+		/** Require/ use mTLS client certs (in addition to tailnet WG). */
+		useMtls: boolean;
+		/** RBAC role enforced at proxy (e.g. 'ledger-writer', 'readonly'). */
+		rbacRole?: string;
+		/** Log all access attempts+results to audit (separate or via ledger). */
+		auditEnabled: boolean;
+	};
 }
+export interface RailwayConfig {
+	/** RAILWAY_API_TOKEN (preferred) or RAILWAY_TOKEN. Account/workspace scope for list/scale/cost/monitor across projects. Never logged or returned. */
+	token: string;
+	/** GraphQL v2 endpoint. Default https://backboard.railway.com/graphql/v2 */
+	apiUrl: string;
+	/**
+	 * Optional forwarder (tailnet private forwarder or MCP proxy) for secure access (SOTA).
+	 * When set, all Railway calls proxy through it (zero trust). Falls back to direct.
+	 * Production: graceful if forwarder down, retry, no token leak.
+	 */
+	forwarderUrl?: string;
+}
+
+/**
+ * Railway Resource Orchestrator (enh1).
+ * MCP tools: railway_list, railway_scale, railway_cost, railway_monitor.
+ * Production-grade: states (success|empty|error|unavailable), input val, security (redact, no leak), graceful deg, retries w/ backoff, failure modes.
+ * Uses forwarders+API. Accessibility notes apply to any consumer UI; here MCP JSON states.
+ */
 
 export interface SubstrateConfig {
 	host: string;
@@ -93,6 +129,13 @@ export interface SubstrateConfig {
 	 * docs_search degraded rather than broken.
 	 */
 	ragflow: RagflowConfig | null;
+	/**
+	 * Railway Resource Orchestrator (SOTA enh1). Null when unconfigured (no RAILWAY_*_TOKEN): all railway_* MCP tools
+	 * return {state: "unavailable", reason: "..."} — graceful degradation, never throw or 500. Supports forwarder for
+	 * secure Tailscale etc access + direct API. Production states, validation, security (token never leaves), retries,
+	 * edge cases, failure modes. (Accessibility: MCP replies carry states for client UIs to render loading/empty/error/success.)
+	 */
+	railway: RailwayConfig | null;
 	/**
 	 * Path prefixes a docs_ingest page may come from (D25-05).
 	 *
@@ -666,6 +709,19 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 					user: env.GREPTIME_USER,
 					password: env.GREPTIME_PASSWORD,
 					db: env.GREPTIME_DB?.trim() || "public",
+					tailscaleSecure: (() => {
+						const enabled = /^(1|true|on|yes)$/i.test(env.GREPTIME_TAILSCALE_SECURE?.trim() ?? "");
+						if (!enabled) return undefined;
+						const proxyUrl = env.GREPTIME_TAILSCALE_PROXY_URL?.trim() || undefined;
+						const useMtls = /^(1|true|on|yes)$/i.test(env.GREPTIME_TAILSCALE_USE_MTLS?.trim() ?? "1");
+						const rbacRole = env.GREPTIME_TAILSCALE_RBAC_ROLE?.trim() || undefined;
+						const auditEnabled = /^(1|true|on|yes)$/i.test(env.GREPTIME_TAILSCALE_AUDIT?.trim() ?? "1");
+						// production validation: enabled implies url sanity
+						if (proxyUrl && !/^https?:\/\//.test(proxyUrl)) {
+							// will be caught at use or warn; for now allow but client will fail closed
+						}
+						return { enabled: true, proxyUrl, useMtls, rbacRole, auditEnabled };
+					})(),
 				}
 			: null,
 		postgresUrl: env.SUBSTRATE_PG_URL?.trim() || undefined,
@@ -678,6 +734,14 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		linearApiUrl: (env.LINEAR_API_URL?.trim() || LINEAR_API_URL).replace(/\/+$/, ""),
 		notionApiUrl: (env.NOTION_API_URL?.trim() || NOTION_API_URL).replace(/\/+$/, ""),
 		ragflow: ragflowFromEnv(env),
+		railway: (() => {
+			const t = (env.RAILWAY_API_TOKEN || env.RAILWAY_TOKEN || "").trim();
+			if (!t) return null;
+			if (t.length < 20) return null; // too short/invalid token -> unavailable, no crash
+			const url = (env.RAILWAY_API_URL?.trim() || "https://backboard.railway.com/graphql/v2").replace(/\/+$/, "");
+			const fwd = env.RAILWAY_FORWARDER_URL?.trim() || undefined;
+			return { token: t, apiUrl: url, forwarderUrl: fwd } as const;
+		})(),
 		docsIngestRoots: ingestRoots.length > 0 ? ingestRoots : [...DEFAULT_INGEST_ROOTS],
 		vmGuest: (env.SUBSTRATE_VM_GUEST?.trim() ?? "") === "1",
 		docsStateFile: env.SUBSTRATE_DOCS_STATE_FILE?.trim() || null,

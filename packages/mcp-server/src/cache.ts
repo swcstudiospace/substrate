@@ -3,9 +3,7 @@
  *
  * Cache only. A missing URL, `SUBSTRATE_CACHE=0`, a refused connection or a bad
  * value all return the same answer the caller would have got with no cache.
- * Nothing here is a queue, a lock, a session or a pub/sub channel: a restart
- * drops every key, and generation counters make a write visible without a scan.
- *
+ * Nothing here is a queue, a lock, a session: pub/sub support added below (DragonflyPubSub) for realtime event propagation (enh-6 from research). A restart drops keys, generation counters make writes visible.
  * The client is Bun's `RedisClient` (Bun 1.4). It is constructed on the first
  * command, with a short connect timeout and the same budget on every command
  * (`SUBSTRATE_CACHE_CONNECT_TIMEOUT_MS` / `SUBSTRATE_CACHE_COMMAND_TIMEOUT_MS`,
@@ -157,8 +155,12 @@ export interface CacheRedis {
 	 * every admission decision a bypass, which is the cache-off answer.
 	 */
 	eval?(script: string, keys: readonly string[], args: readonly string[]): Promise<unknown>;
-	/** When the client is refusing to reconnect, epoch ms; absent or null otherwise. */
+	/**
+	 * When the client is refusing to reconnect, epoch ms; absent or null otherwise.
+	 */
 	cooldownUntil?(): number | null;
+	/** Publish support for DragonflyPubSub (realtime event prop enh-6); pub is non-blocking. */
+	publish?(channel: string, message: string): Promise<number>;
 }
 
 export interface ReadThroughOptions {
@@ -367,7 +369,7 @@ export function bunRedis(url: string, options: BunRedisOptions = {}): CacheRedis
 	// is one outcome — a failed connect still charges the breaker, a successful
 	// one on its own never clears it — and an open breaker refuses before any
 	// socket is opened, so no cooldown starts from a refusal.
-	const run = <T>(op: "get" | "mget" | "set" | "incr" | "eval", command: (redis: RedisClient) => Promise<T>): Promise<T> => {
+	const run = <T>(op: "get" | "mget" | "set" | "incr" | "eval" | "publish", command: (redis: RedisClient) => Promise<T>): Promise<T> => {
 		// The cooldown is checked outside the gate: a refusal is not a plane outcome.
 		if (cooldownUntil !== null && now() < cooldownUntil) {
 			return Promise.reject(new Error(`cache connect cooling down for ${Math.ceil((cooldownUntil - now()) / 1000)} s`));
@@ -392,6 +394,7 @@ export function bunRedis(url: string, options: BunRedisOptions = {}): CacheRedis
 		// sent each time rather than `EVALSHA`, so a flushed or restarted server
 		// never answers NOSCRIPT inside the one command budget a request has.
 		eval: (script, keys, args) => run("eval", (redis) => redis.eval(script, keys.length, ...keys, ...args)),
+		publish: (ch, msg) => run("publish", (redis) => redis.publish(ch, msg)),
 		cooldownUntil: () => (cooldownUntil !== null && now() < cooldownUntil ? cooldownUntil : null),
 	};
 }
@@ -1088,4 +1091,137 @@ function parseEnvelope<T>(raw: string, klass: CacheClass): { ok: true; value: T 
 	} catch {
 		return { ok: false };
 	}
+}
+
+// DragonflyPubSub (enh-6): realtime pub/sub over Dragonfly for event propagation from research.
+// Production: states (loading|connected|error|degraded|closed), backoff, graceful, validate, security, failure.
+
+export type DragonflyPubSubState = "loading" | "connected" | "error" | "degraded" | "closed";
+
+export const PUBSUB_CHANNELS: Record<string, string> = {
+	events: `${CACHE_PREFIX}:pub:events`,
+	gen: `${CACHE_PREFIX}:pub:gen`,
+};
+
+export interface DragonflyPubSubHealth {
+	state: DragonflyPubSubState;
+	pubs: number;
+	subs: number;
+	lastError: string | null;
+	connectedAt: number | null;
+}
+
+function isValidPubSubChannel(ch: unknown): ch is string {
+	return typeof ch === "string" && ch.length > 0 && ch.length <= 200 && ch.startsWith(`${CACHE_PREFIX}:pub:`) && !/[\0\n]/.test(ch);
+}
+
+function safePubMessage(v: unknown): string {
+	try {
+		const j = JSON.stringify(v);
+		return redact(j.length > 2048 ? j.slice(0, 2048) + '{"trunc":1}' : j);
+	} catch {
+		return '{"err":"bad"}';
+	}
+}
+
+export class DragonflyPubSub {
+	private pub: RedisClient | null = null;
+	private readonly subs: Record<string, {c: RedisClient; ls: Array<(m:string,c:string)=>void>}> = {};
+	private state: DragonflyPubSubState = "loading";
+	private lastError: string | null = null;
+	private connectedAt: number | null = null;
+	private cooldownUntil = 0;
+	private readonly url: string | null;
+
+	constructor(url: string | null) {
+		this.url = url || null;
+		if (!this.url) { this.state = "degraded"; this.lastError = "no-url"; }
+	}
+
+	private async ensurePub(): Promise<RedisClient | null> {
+		if (!this.url || this.state === "degraded") return null;
+		if (this.pub?.connected) return this.pub;
+		const now = Date.now();
+		if (now < this.cooldownUntil) return null;
+		const c = new RedisClient(this.url, {connectionTimeout: 250, idleTimeout: 30000, autoReconnect: false, enableOfflineQueue: false});
+		try {
+			await c.connect();
+			this.pub = c;
+			this.state = "connected";
+			this.connectedAt = now;
+			this.lastError = null;
+			c.onclose = (e?: unknown) => { this.pub = null; this.state = "error"; if (e) this.lastError = stripRedisUrl(String(e)); };
+			return c;
+		} catch (e: unknown) {
+			this.pub = null;
+			this.cooldownUntil = now + 5000;
+			this.state = "error";
+			this.lastError = stripRedisUrl(String(e));
+			return null;
+		}
+	}
+
+	async publish(channel: string, message: unknown): Promise<number> {
+		if (!isValidPubSubChannel(channel)) return 0;
+		const p = await this.ensurePub();
+		if (!p) return 0;
+		try {
+			return await deadline(p.publish(channel, safePubMessage(message)), 250, "publish");
+		} catch (e: unknown) {
+			this.pub = null; this.state = "error"; this.lastError = stripRedisUrl(String(e));
+			return 0; // graceful
+		}
+	}
+
+	async subscribe(chs: string | readonly string[], listener: (message: string, channel: string) => void): Promise<() => void> {
+		if (!this.url || this.state === "degraded") return () => {};
+		const list = (Array.isArray(chs) ? chs : [chs]).filter(isValidPubSubChannel) as string[];
+		if (list.length === 0) return () => {};
+		const k = list.slice().sort().join("|");
+		let ent = this.subs[k];
+		if (!ent) {
+			const sc = new RedisClient(this.url, {connectionTimeout:250, idleTimeout:0, autoReconnect:false, enableOfflineQueue:false});
+			ent = {c: sc, ls: []};
+			this.subs[k] = ent;
+			try {
+				await sc.connect();
+				await sc.subscribe(list, (m: string, c: string) => { for (const l of ent.ls) { try { l(m, c); } catch {} } });
+				this.state = "connected";
+			} catch (e: unknown) {
+				delete this.subs[k];
+				this.state = "error"; this.lastError = stripRedisUrl(String(e));
+				return () => {};
+			}
+		}
+		ent.ls.push(listener);
+		return () => {
+			const e = this.subs[k]; if (!e) return;
+			e.ls = e.ls.filter((l) => l !== listener);
+			if (e.ls.length === 0) {
+				try { e.c.unsubscribe(list as string[]); } catch {}
+				try { e.c.close(); } catch {}
+				delete this.subs[k];
+			}
+		};
+	}
+
+	health(): DragonflyPubSubHealth {
+		return { state: this.state, pubs: this.pub ? 1 : 0, subs: Object.keys(this.subs).length, lastError: this.lastError, connectedAt: this.connectedAt };
+	}
+
+	close(): void {
+		this.state = "closed";
+		if (this.pub) { try { this.pub.close(); } catch {} ; this.pub = null; }
+		Object.keys(this.subs).forEach((k) => { try { this.subs[k].c.close(); } catch {}; delete this.subs[k]; });
+	}
+}
+
+export function createDragonflyPubSub(url: string | null | undefined): DragonflyPubSub {
+	return new DragonflyPubSub(url || null);
+}
+
+// For event propagation integration (used from event.ts too)
+export async function publishSubstrateEvent(pub: DragonflyPubSub | null, ev: {surface: string; kind: string; summary: string}): Promise<void> {
+	if (!pub) return;
+	await pub.publish(PUBSUB_CHANNELS.events, { t: "event", s: ev.surface, k: ev.kind, sum: redact(ev.summary).slice(0,180), at: Date.now() });
 }

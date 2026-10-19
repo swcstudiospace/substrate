@@ -731,6 +731,9 @@ export function createHttpServer(
 							...(hindsight !== null ? { hindsight } : {}),
 							// Recall in the brief (uplift-4 S5): how many pairs the prefetcher can keep fresh; absent while it is off.
 							...(recall !== null ? { recall } : {}),
+							// enh7: fabric opt/compliance surfaced on health for cross-resource view.
+							fabricOptimizations: substrate.suggestOptimizations(),
+							fabricCompliance: substrate.complianceReport(),
 						},
 					};
 				};
@@ -849,6 +852,10 @@ export function createHttpServer(
 					served,
 					...(indexArchive !== null ? { indexArchive: [indexArchive] } : {}),
 					history: observability.history(),
+					// Enterprise Unified Fabric (enh #7): cross-resource obs, opt suggestions, compliance.
+					fabric: substrate.fabricStatus(),
+					fabricOptimizations: substrate.suggestOptimizations(),
+					fabricCompliance: substrate.complianceReport(),
 				});
 				return;
 			}

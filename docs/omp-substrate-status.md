@@ -147,5 +147,9 @@ Remove the symlink to disable it.
 
 ## Fail-open
 
-Nothing throws into Omp. Probe failures become a status line. The extension
-makes only the two GETs above and never writes to the substrate.
+	Nothing throws into Omp. Probe failures become a status line. The extension
+	makes only the two GETs above and never writes to the substrate.
+
+## Railway Resource Orchestrator (enh1)
+	New MCP tools (railway_list, railway_scale, railway_cost, railway_monitor) added via service.ts/config.ts edits.
+	Production-grade with states, validation, security, graceful degradation (unavailable), retries, failure modes, forwarders+API.

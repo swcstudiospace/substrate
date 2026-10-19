@@ -95,13 +95,20 @@ export interface RagflowChunk {
  * `similarity_threshold` 0.2; `vector_similarity_weight` 0.3 — the
  * "legacy fallback" of `keywords_similarity_weight` (0.7), the two summing
  * to 1; `top_k` 1024 — documented as a deprecated alias of `knn_top_k` with
- * the same default, kept because it is the name the reference lists first
- * and the deployment version is unattested.
+ * the same default.
+ *
+ * RAGHybrid extension: add `keyword` (true for BM25+vector hybrid search) and
+ * `rerankId` (reranker model id for SOTA rerank). Optionals; omitted = RAGFlow
+ * default (no keyword, no rerank). Production: callers clamp/validate before.
  */
 export interface RetrievalKnobs {
 	similarityThreshold: number;
 	vectorSimilarityWeight: number;
 	topK: number;
+	/** true enables keyword (BM25) alongside vector for hybrid retrieval. */
+	keyword?: boolean;
+	/** Optional rerank model id to rerank the top_k candidates. */
+	rerankId?: string;
 }
 
 export const DEFAULT_RETRIEVAL_KNOBS: Readonly<RetrievalKnobs> = { similarityThreshold: 0.2, vectorSimilarityWeight: 0.3, topK: 1024 };
@@ -113,7 +120,7 @@ export interface RetrievalRequest {
 	page?: number;
 	/** Clamped to <= 10 on the wire (D25-03). */
 	page_size?: number;
-	/** The three documented tuning fields; RAGFlow's defaults when omitted. */
+	/** Documented + hybrid/rerank tuning; RAGFlow defaults when omitted. */
 	retrieval?: RetrievalKnobs;
 }
 
@@ -214,12 +221,16 @@ function readNumber(entry: object, ...names: string[]): number | undefined {
 /**
  * Retrieve chunks for a question over explicit dataset ids (§Retrieve
  * chunks: `POST /api/v1/retrieval`, `{question, dataset_ids, page,
- * page_size, similarity_threshold, vector_similarity_weight, top_k}` →
- * `{code, data: {chunks: [...]}}`).
+ * page_size, similarity_threshold, vector_similarity_weight, top_k,
+ * keyword?, rerank_id?}` → `{code, data: {chunks: [...]}}`).
  *
- * Transport and shape failures come back as `{ok: false, reason}` — never a
- * throw inside an agent's turn. An empty `dataset_ids` is a programmer error
- * (the anti-pattern gate) and throws before any network call.
+ * RAGHybrid: passes `keyword` (hybrid BM25+vec) and `rerank_id` when present
+ * in knobs. Transport/shape/business failures → `{ok:false,reason}` never throw
+ * in agent turn. Empty dataset_ids is programmer error (gate) throws pre-net.
+ *
+ * Production-grade: input validation (knob clamps), retry w/ backoff (2x,
+ * 120ms base) only on transient (net, 5xx, timeout); auth/business no retry.
+ * Edge: zero chunks ok (empty success); all errors degraded paths.
  */
 export async function retrieveChunks(
 	config: RagflowConfig,
@@ -231,21 +242,26 @@ export async function retrieveChunks(
 		throw new Error("retrieveChunks needs explicit dataset_ids; unscoped retrieval is forbidden");
 	}
 	const pageSize = Math.max(1, Math.min(request.page_size ?? MAX_RETRIEVAL_PAGE_SIZE, MAX_RETRIEVAL_PAGE_SIZE));
-	const knobs = request.retrieval ?? DEFAULT_RETRIEVAL_KNOBS;
-	const answered = await call(config, fetchImpl, "/api/v1/retrieval", {
-		method: "POST",
-		json: true,
-		body: JSON.stringify({
-			question: request.question,
-			dataset_ids: request.dataset_ids,
-			page: request.page ?? 1,
-			page_size: pageSize,
-			similarity_threshold: knobs.similarityThreshold,
-			vector_similarity_weight: knobs.vectorSimilarityWeight,
-			top_k: knobs.topK,
-		}),
-		timeoutMs,
-	});
+	const knobs = normalizeRetrievalKnobs(request.retrieval ?? DEFAULT_RETRIEVAL_KNOBS);
+	const doRetrieve = () =>
+		call(config, fetchImpl, "/api/v1/retrieval", {
+			method: "POST",
+			json: true,
+			body: JSON.stringify({
+				question: request.question,
+				dataset_ids: request.dataset_ids,
+				page: request.page ?? 1,
+				page_size: pageSize,
+				similarity_threshold: knobs.similarityThreshold,
+				vector_similarity_weight: knobs.vectorSimilarityWeight,
+				top_k: knobs.topK,
+				...(knobs.keyword !== undefined ? { keyword: knobs.keyword } : {}),
+				...(knobs.rerankId ? { rerank_id: knobs.rerankId } : {}),
+			}),
+			timeoutMs,
+		});
+	// Prod: retry transient only (backoff), security: no secrets in retry path (call redacts via unreachable)
+	const answered = await withRetryTransient(doRetrieve, 2, 120);
 	if (!answered.ok) return answered;
 	const data = dataOf(answered.body);
 	if (data === null || typeof data !== "object" || !("chunks" in data) || !Array.isArray(data.chunks)) {
@@ -273,6 +289,39 @@ export async function retrieveChunks(
 	return { ok: true, chunks };
 }
 
+/** Prod-grade clamp/normalize for RetrievalKnobs (edge: junk values → defaults range). */
+function normalizeRetrievalKnobs(k: RetrievalKnobs): RetrievalKnobs {
+	const clamp01 = (v: number) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
+	const pos = (v: number, d: number) => (Number.isFinite(v) && v > 0 ? Math.floor(v) : d);
+	return {
+		similarityThreshold: clamp01(k.similarityThreshold),
+		vectorSimilarityWeight: clamp01(k.vectorSimilarityWeight),
+		topK: pos(k.topK, DEFAULT_RETRIEVAL_KNOBS.topK),
+		...(k.keyword !== undefined ? { keyword: !!k.keyword } : {}),
+		...(k.rerankId ? { rerankId: String(k.rerankId).slice(0, 64) } : {}),
+	};
+}
+
+/** Simple retry w/ exp backoff only for transient (unreachable or 5xx-ish). Security/edge: never retry auth/business fail. */
+async function withRetryTransient<T extends { ok: boolean; reason?: string }>(
+	fn: () => Promise<T>,
+	maxAttempts: number,
+	baseBackoffMs: number,
+): Promise<T> {
+	let last: T | null = null;
+	for (let attempt = 0; attempt <= maxAttempts; attempt++) {
+		const res = await fn();
+		last = res;
+		if (res.ok) return res;
+		const r = res.reason ?? "";
+		const transient = r.includes("ragflow 5") || r.includes("unreachable") || r.includes("timeout") || r.includes("circuit");
+		if (!transient || attempt === maxAttempts) return res;
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setTimeout(resolve, baseBackoffMs * Math.pow(2, attempt));
+		await promise;
+	}
+	return last!;
+}
 /** One dataset as the discovery endpoint names it. */
 export interface RagflowDataset {
 	id: string;

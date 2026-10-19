@@ -524,6 +524,8 @@ export interface RetainItem {
 	metadata?: Record<string, string>;
 	document_id: string;
 	timestamp?: string;
+	/** Optional causal link from Greptime events for graph memory (SOTA causal). Stored in metadata. */
+	causal?: CausalLink;
 }
 
 /**
@@ -540,64 +542,109 @@ export async function retainMemories(
 	if (items.length === 0) throw new Error("retainMemories needs at least one item; retaining nothing is forbidden");
 	for (const item of items) {
 		if (!item.document_id) throw new Error("retainMemories needs a document_id per item; unkeyed retain is forbidden");
+		if (item.causal?.graph_id && !/^[a-zA-Z0-9_:-]{1,128}$/.test(item.causal.graph_id)) {
+			// security/edge: drop unsafe causal graph id, degrade gracefully
+		}
 	}
-	const path = `${bankPath(bank)}/memories`;
-	const sent = await send(
-		config,
-		"POST",
-		path,
-		{
-			items: items.map((item) => ({
-				content: item.content,
-				...(item.context !== undefined ? { context: item.context } : {}),
-				tags: item.tags,
-				...(item.metadata !== undefined ? { metadata: item.metadata } : {}),
-				document_id: item.document_id,
-				...(item.timestamp !== undefined ? { timestamp: item.timestamp } : {}),
-				update_mode: "replace",
-			})),
-			async: false,
-		},
-		{ fetchImpl, timeoutMs },
-	);
-	if (!sent.ok) return sent;
-	if (sent.value.status !== 200 && sent.value.status !== 201) {
-		return fail(statusKind(sent.value.status), errorMessage(`POST ${path}`, sent.value.status, sent.value.body), sent.value.status);
-	}
-	const body = sent.value.body;
-	if (
-		body === null ||
-		typeof body !== "object" ||
-		!("success" in body) ||
-		body.success !== true ||
-		!("items_count" in body) ||
-		typeof body.items_count !== "number"
-	) {
-		return fail("invalid-response", `hindsight POST ${path}: unexpected response shape`, sent.value.status);
-	}
-	return { ok: true, value: { items_count: body.items_count } };
+
+	const doRetain = async (): Promise<HindsightResult<{ items_count: number }>> => {
+		const path = `${bankPath(bank)}/memories`;
+		const sent = await send(
+			config,
+			"POST",
+			path,
+			{
+				items: items.map((item) => {
+					// merge causal into metadata so Greptime event causal is persisted for graph memory recall
+					let meta = item.metadata ? { ...item.metadata } : {};
+					if (item.causal) {
+						if (item.causal.graph_id && /^[a-zA-Z0-9_:-]{1,128}$/.test(item.causal.graph_id)) meta.graph_id = item.causal.graph_id;
+						if (item.causal.source_event) meta.causal_source = item.causal.source_event;
+						if (item.causal.node_id) meta.node_id = item.causal.node_id;
+					}
+					return {
+						content: item.content,
+						...(item.context !== undefined ? { context: item.context } : {}),
+						tags: item.tags,
+						...(Object.keys(meta).length > 0 ? { metadata: meta } : {}),
+						document_id: item.document_id,
+						...(item.timestamp !== undefined ? { timestamp: item.timestamp } : {}),
+						update_mode: "replace",
+					};
+				}),
+				async: false,
+			},
+			{ fetchImpl, timeoutMs },
+		);
+		if (!sent.ok) return sent;
+		if (sent.value.status !== 200 && sent.value.status !== 201) {
+			return fail(statusKind(sent.value.status), errorMessage(`POST ${path}`, sent.value.status, sent.value.body), sent.value.status);
+		}
+		const body = sent.value.body;
+		if (
+			body === null ||
+			typeof body !== "object" ||
+			!("success" in body) ||
+			body.success !== true ||
+			!("items_count" in body) ||
+			typeof body.items_count !== "number"
+		) {
+			return fail("invalid-response", `hindsight POST ${path}: unexpected response shape`, sent.value.status);
+		}
+		return { ok: true, value: { items_count: body.items_count } };
+	};
+
+	return retryWithBackoff("retain", doRetain);
 }
 
-export interface RecallHit {
-	id: string;
-	text: string;
-	document_id?: string;
-	type?: string;
-	context?: string;
-	tags: string[];
-	metadata: Record<string, unknown>;
-	score?: number;
+export interface CausalLink {
+	/** Event id from Greptime ledger providing the causal anchor. */
+	source_event?: string;
+	graph_id?: string;
+	node_id?: string;
+	ts?: string;
+	kind?: string;
 }
 
-export interface RecallRequest {
-	query: string;
-	types?: readonly string[];
-	budget?: string;
-	max_tokens?: number;
-	tags?: string[];
-	tags_match?: string;
-	signal?: AbortSignal;
+/** Production query states for graph memory (loading/empty/error/success) + graceful degradation. */
+export type GraphQueryState = "loading" | "empty" | "error" | "success";
+
+export interface HindsightGraph {
+	graph_id: string;
+	state: GraphQueryState;
+	hits: RecallHit[];
+	causal_links: CausalLink[];
+	error?: string;
 }
+
+ export interface RecallHit {
+ 	id: string;
+ 	text: string;
+ 	document_id?: string;
+ 	type?: string;
+ 	context?: string;
+ 	tags: string[];
+ 	metadata: Record<string, unknown>;
+ 	score?: number;
+	/** Graph-linked when retained with Greptime causal events. */
+	graph_id?: string;
+	causal?: CausalLink;
+ }
+ 
+ export interface RecallRequest {
+ 	query: string;
+ 	types?: readonly string[];
+ 	budget?: string;
+ 	max_tokens?: number;
+ 	tags?: string[];
+ 	tags_match?: string;
+ 	signal?: AbortSignal;
+	/** Scope recall to causal graph from Greptime events for SOTA graph memory. */
+	graph_id?: string;
+	/** Enable causal inference mode (tags auto-scoped to graph for linked results). */
+	causal?: boolean;
+ }
+
 
 /**
  * Both known recall response shapes: `{results: [...]}` and the wrapped
@@ -613,6 +660,37 @@ function resultsArray(body: unknown): unknown[] | null {
 }
 
 /**
+ * Production retry with exponential backoff + jitter for transient failures (network/timeout/server/rate).
+ * No retry on auth/bad-request/not-found/invalid-response. Graceful: returns last failure.
+ * Used for graph memory ops to be resilient (edge cases, failure modes).
+ */
+async function retryWithBackoff<T>(
+	action: string,
+	fn: () => Promise<HindsightResult<T>>,
+	retries = 2,
+): Promise<HindsightResult<T>> {
+	let attempt = 0;
+	let last: HindsightResult<T> | null = null;
+	while (true) {
+		last = await fn();
+		if (last.ok) return last;
+		const kind = last.error.kind;
+		if (attempt >= retries || kind === "auth" || kind === "bad-request" || kind === "not-found" || kind === "invalid-response") {
+			return last;
+		}
+		// backoff for transient (incl rate-limit); jitter to avoid thundering herd. Inlined delay per rules.
+		const base = Math.min(80 * Math.pow(2, attempt), 1600);
+		const jitter = Math.floor(Math.random() * 60);
+		const delayMs = base + jitter;
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setTimeout(resolve, delayMs);
+		await promise;
+		attempt += 1;
+	}
+}
+
+
+/**
  * Recall over one bank, capped at `MAX_RECALL_PER_BANK` hits (D26-05).
  * Both known response shapes parse: `{results: [...]}` and
  * `{data: {results: [...]}}`. A missing results array is an
@@ -626,50 +704,84 @@ export async function recallBank(
 	timeoutMs = 4000,
 ): Promise<HindsightResult<RecallHit[]>> {
 	if (!request.query) throw new Error("recallBank needs a query; unscoped recall is forbidden");
-	const path = `${bankPath(bank)}/memories/recall`;
-	const sent = await send(
-		config,
-		"POST",
-		path,
-		{
-			query: request.query,
-			types: [...(request.types ?? DEFAULT_RECALL_TYPES)],
-			budget: request.budget ?? "low",
-			max_tokens: request.max_tokens ?? 400,
-			...(request.tags !== undefined ? { tags: request.tags } : {}),
-			...(request.tags_match !== undefined ? { tags_match: request.tags_match } : {}),
-		},
-		{ fetchImpl, timeoutMs, ...(request.signal !== undefined ? { signal: request.signal } : {}) },
-	);
-	if (!sent.ok) return sent;
-	if (sent.value.status !== 200) {
-		return fail(statusKind(sent.value.status), errorMessage(`POST ${path}`, sent.value.status, sent.value.body), sent.value.status);
+	// Production input validation + security: graph ids from Greptime causal must be safe (edge case handling, no bad data)
+	const graphId = request.graph_id;
+	if (graphId && !/^[a-zA-Z0-9_:-]{1,128}$/.test(graphId)) {
+		// graceful degradation: ignore bad graph id, proceed without causal scope (never throw on user graph filter)
 	}
-	const results = resultsArray(sent.value.body);
-	if (results === null) return fail("invalid-response", `hindsight POST ${path}: response had no results array`, sent.value.status);
-	const hits: RecallHit[] = [];
-	for (const entry of results) {
-		if (entry === null || typeof entry !== "object" || !("text" in entry) || typeof entry.text !== "string") continue;
-		const id = "id" in entry && typeof entry.id === "string" ? entry.id : "";
-		const documentId = "document_id" in entry && typeof entry.document_id === "string" ? entry.document_id : undefined;
-		const type = "type" in entry && typeof entry.type === "string" ? entry.type : undefined;
-		const context = "context" in entry && typeof entry.context === "string" ? entry.context : undefined;
-		const tags = "tags" in entry && Array.isArray(entry.tags) ? entry.tags.filter((tag): tag is string => typeof tag === "string") : [];
-		const metadata = "metadata" in entry ? recordOf(entry.metadata) : {};
-		const score = "score" in entry && typeof entry.score === "number" ? entry.score : undefined;
-		hits.push({
-			id,
-			text: entry.text,
-			...(documentId !== undefined ? { document_id: documentId } : {}),
-			...(type !== undefined ? { type } : {}),
-			...(context !== undefined ? { context } : {}),
-			tags,
-			metadata,
-			...(score !== undefined ? { score } : {}),
-		});
-		if (hits.length >= MAX_RECALL_PER_BANK) break;
+	let effectiveTags = request.tags ? [...request.tags] : undefined;
+	if (graphId && /^[a-zA-Z0-9_:-]{1,128}$/.test(graphId)) {
+		const gtag = `graph:${graphId}`;
+		if (!effectiveTags) effectiveTags = [];
+		if (!effectiveTags.includes(gtag)) effectiveTags.push(gtag);
 	}
-	return { ok: true, value: hits };
+	if (request.causal && graphId) {
+		// causal mode: ensure causal tag for inference in recall (SOTA graph memory)
+		const ctag = `causal:${graphId}`;
+		if (!effectiveTags) effectiveTags = [];
+		if (!effectiveTags.includes(ctag)) effectiveTags.push(ctag);
+	}
+
+	const doRecall = async (): Promise<HindsightResult<RecallHit[]>> => {
+		const path = `${bankPath(bank)}/memories/recall`;
+		const sent = await send(
+			config,
+			"POST",
+			path,
+			{
+				query: request.query,
+				types: [...(request.types ?? DEFAULT_RECALL_TYPES)],
+				budget: request.budget ?? "low",
+				max_tokens: request.max_tokens ?? 400,
+				...(effectiveTags !== undefined ? { tags: effectiveTags } : {}),
+				...(request.tags_match !== undefined ? { tags_match: request.tags_match } : {}),
+			},
+			{ fetchImpl, timeoutMs, ...(request.signal !== undefined ? { signal: request.signal } : {}) },
+		);
+		if (!sent.ok) return sent;
+		if (sent.value.status !== 200) {
+			return fail(statusKind(sent.value.status), errorMessage(`POST ${path}`, sent.value.status, sent.value.body), sent.value.status);
+		}
+		const results = resultsArray(sent.value.body);
+		if (results === null) return fail("invalid-response", `hindsight POST ${path}: response had no results array`, sent.value.status);
+		const hits: RecallHit[] = [];
+		for (const entry of results) {
+			if (entry === null || typeof entry !== "object" || !("text" in entry) || typeof entry.text !== "string") continue;
+			const id = "id" in entry && typeof entry.id === "string" ? entry.id : "";
+			const documentId = "document_id" in entry && typeof entry.document_id === "string" ? entry.document_id : undefined;
+			const type = "type" in entry && typeof entry.type === "string" ? entry.type : undefined;
+			const context = "context" in entry && typeof entry.context === "string" ? entry.context : undefined;
+			const tags = "tags" in entry && Array.isArray(entry.tags) ? entry.tags.filter((tag): tag is string => typeof tag === "string") : [];
+			const metadata = "metadata" in entry ? recordOf(entry.metadata) : {};
+			const score = "score" in entry && typeof entry.score === "number" ? entry.score : undefined;
+			// Enrich for graph-linked results (causal from Greptime events stored at retain time)
+			const hitGraphId = typeof metadata.graph_id === "string" ? metadata.graph_id : (graphId || undefined);
+			let hitCausal: CausalLink | undefined;
+			if (hitGraphId || metadata.causal_source || metadata.source) {
+				hitCausal = {
+					graph_id: hitGraphId,
+					source_event: typeof metadata.causal_source === "string" ? metadata.causal_source : (typeof metadata.source === "string" ? metadata.source : undefined),
+				};
+			}
+			hits.push({
+				id,
+				text: entry.text,
+				...(documentId !== undefined ? { document_id: documentId } : {}),
+				...(type !== undefined ? { type } : {}),
+				...(context !== undefined ? { context } : {}),
+				tags,
+				metadata,
+				...(score !== undefined ? { score } : {}),
+				...(hitGraphId ? { graph_id: hitGraphId } : {}),
+				...(hitCausal ? { causal: hitCausal } : {}),
+			});
+			if (hits.length >= MAX_RECALL_PER_BANK) break;
+		}
+		return { ok: true, value: hits };
+	};
+
+	// Wrap core recall in retry for production (backoff, failure modes, graceful on non-retryable)
+	return retryWithBackoff("recall", doRecall);
 }
 
 export interface HindsightDocument {
@@ -769,4 +881,43 @@ export async function deleteBank(
 	}
 	ensuredBanks.delete(`${config.url} ${bank}`);
 	return { ok: true, value: undefined };
+}
+
+/**
+ * Production-grade graph memory query over hindsight using causal links from Greptime events.
+ * Returns state machine result (empty/error/success).
+ * Scopes via graph tags for causal recall; enriches hits with graph/causal.
+ * Handles edge cases, input validation (safe graph ids), security, graceful degrade, retry inside.
+ */
+export async function queryGraphMemory(
+	config: HindsightConfig | null,
+	bank: string,
+	request: RecallRequest & { graph_id?: string; causal?: boolean },
+	fetchImpl: FetchLike = fetch,
+	timeoutMs = 4000,
+): Promise<HindsightGraph> {
+	const gid = request.graph_id || "";
+	if (!config) {
+		return { graph_id: gid, state: "error", hits: [], causal_links: [], error: "hindsight not configured" };
+	}
+	// inline validation
+	if (gid && !/^[a-zA-Z0-9_:-]{1,128}$/.test(gid)) {
+		return { graph_id: gid, state: "error", hits: [], causal_links: [], error: "invalid graph_id" };
+	}
+	try {
+		// recallBank applies causal scoping + its own retryWithBackoff + graph enrichment
+		const res = await recallBank(config, bank, request, fetchImpl, timeoutMs);
+		if (!res.ok) {
+			return { graph_id: gid, state: "error", hits: [], causal_links: [], error: res.error.message };
+		}
+		const hits = res.value;
+		const causal_links: CausalLink[] = hits
+			.filter((h) => !!h.causal || !!h.graph_id)
+			.map((h) => h.causal || { graph_id: h.graph_id, source_event: String(h.metadata?.source || "") });
+		const state: GraphQueryState = hits.length === 0 ? "empty" : "success";
+		return { graph_id: gid, state, hits, causal_links };
+	} catch (e: unknown) {
+		// failure mode: never throw, return error state
+		return { graph_id: gid, state: "error", hits: [], causal_links: [], error: e instanceof Error ? e.message.slice(0, 200) : "unknown error" };
+	}
 }

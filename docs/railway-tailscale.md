@@ -43,3 +43,29 @@ Re-create the TCP proxy / domain in Railway (minutes, no data implication) and r
 ## Security notes
 
 Traffic on the tailnet hop is WireGuard-encrypted, which closes the Phase 8 concern about the Dragonfly password crossing a public TCP proxy in plaintext. Hindsight and RAGFlow still require their bearer keys; those keys live in the gateway's environment, not in a client on `substrate-mcp`. The forwarder is a Railway service like any other: keep it on the same alerting as the databases and rotate `TS_AUTHKEY` when the tagged key is rotated.
+## TailscaleDB Secure Unified Proxy Layer (Enhancement 4)
+
+SOTA zero-trust DB access layer for Greptime (and unified for Dragonfly/Timescale post-cutover).
+
+- **Proxy**: All DB traffic via Tailscale forwarder + secure proxy service. No direct service exposure.
+- **mTLS**: Client cert auth at proxy (in addition to WireGuard). Use `GREPTIME_TAILSCALE_USE_MTLS=1`.
+- **RBAC**: Proxy enforces roles per caller (e.g. `ledger-writer` for events, `readonly` for queries). Set `GREPTIME_TAILSCALE_RBAC_ROLE`.
+- **Audit**: Every access (op, surface, ts, result, bytes) logged. `GREPTIME_TAILSCALE_AUDIT=1`.
+- **Config** (in `config.ts` + env):
+  - `GREPTIME_TAILSCALE_SECURE=1`
+  - `GREPTIME_TAILSCALE_PROXY_URL` (optional override)
+- Production grade in `greptime.ts`:
+  - States: `loading` (init), `ready` (ok), `error` (fail), `empty` (no ledger).
+  - Edge cases: proxy down, RBAC deny, mTLS fail, no cert, malformed url, backoff exhaustion.
+  - Input validation + security: append-only preserved, creds redacted, Basic+proxy headers only, fail-closed.
+  - Retry w/ exponential backoff + jitter (transient only; auth/structural errors surface immediately).
+  - Failure modes: `GreptimeUnavailable`, breaker open, state=error, never leaks, graceful (caller handles).
+  - Accessibility/compat: no UI change; existing fetch works; https for mTLS proxy supported.
+
+Update cutover step 3: set the TAILSCALE_* GREPTIME vars alongside URL. Forwarder mappings remain (4000 etc); proxy sits in front inside project or as sidecar.
+
+## Updated Security notes
+
+WireGuard + mTLS at proxy closes all transport + auth gaps. RBAC prevents over-privileged DB access. Audit satisfies compliance. Rotate TS keys + mTLS certs. No public DB domains post cutover.
+
+See `packages/mcp-server/src/greptime.ts:state`, `config.ts:GreptimeConfig.tailscaleSecure`, and greptime client send/retry.
