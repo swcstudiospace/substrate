@@ -279,3 +279,22 @@ Fifth standalone post-close series — proposal: [uplift-5/PROPOSAL.md](uplift-5
 PR A's defaults: `SUBSTRATE_DEPLOY_PREFLIGHT=report` (prints a table, never changes a deploy), `SUBSTRATE_DEPLOY_GATE=off`, `SUBSTRATE_EXPOSURE_MAX` unset (the doctor only reports exposure), `SUBSTRATE_METRICS_HISTORY_SERIES=core`; the sandbox drop-ins ship as `.example` files and nothing installs them; the `boot-gate` CI job needs both `vars.CI_ENABLED` and `vars.BOOT_GATE`. The one runtime-visible change in PR A is the `SUBSTRATE_METRICS_HISTORY_SERIES` parser (default core, byte-identical); everything else is scripts, infra examples, tests and docs.
 
 PR B's defaults: `SUBSTRATE_BRIEF_GRAPH_READ=full`, `SUBSTRATE_CACHE_BUMP_SCOPE=legacy`, `SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S=0`, `SUBSTRATE_EVENT_IDEMPOTENCY=off`, `SUBSTRATE_EVENT_SPOOL=off`, `SUBSTRATE_SKILLS_GOVERNANCE=off`. Default-on and additive: concurrent `/healthz` probes share one computation; `/healthz` carries an `idempotency` field; `refused-emits.jsonl` rotates to one `.1` file at 1 MiB; the skills projector resolves its bearer the way its fetch does (surface token first, first entry of a list); `skills_registry` is created at boot; `skills_approve` and `skills_list` exist (operator-only and approved-only by default). Handoff and operator steps: [uplift-5/HANDOFF.md](uplift-5/HANDOFF.md). Nothing was deployed.
+
+## Post-milestone 7 SOTA Enhancements (2026-10-19)
+
+Post-v1.3 initiative to activate idle resources (Railway, RAGFlow, Hindsight, Tailscale, GreptimeDB, DragonflyDB) for production-grade SOTA capabilities. Documentation updates completed; code enhancements in follow-up per plan (see .planning/7-SOTA-ENHANCEMENTS.md, CONTEXT.md). All follow Desk rules.
+
+| Item | Status | Evidence |
+|------|--------|----------|
+| Review application and integrations | done | .planning/CONTEXT.md |
+| Document 7 enhancements in AGENTS.md, CLAUDE.md, README.md | done | AGENTS.md §7 SOTA, CLAUDE.md, README.md |
+| Update planning state and roadmap | done | .planning/STATE.md, .planning/ROADMAP.md |
+| Verify | done | grep for names + CONTEXT |
+
+Current status: docs updated with usage, mappings, gaps. Code partial in branch (tsc clean after fixes). No merge per AGENTS.md. Greptile gate applies for any PRs.
+
+## Current (post 7 SOTA review)
+
+**Status:** Documentation for 7 SOTA enhancements complete. CONTEXT.md created with resource mappings and gaps. STATE updated. Verification passed.
+
+**Next:** Per plan, implementation in follow-up waves if approved. Preserve non-negotiables.

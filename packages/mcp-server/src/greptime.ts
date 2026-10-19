@@ -2430,7 +2430,7 @@ export class GreptimeClient {
 	private linearForecast(points: Array<{ tsMs: number; value: number }>, horizonS: number): Array<{ tsMs: number; predictedValue: number | null }> {
 		if (points.length === 0) return [];
 		if (points.length < 2) {
-			const last = points[points.length - 1];
+			const last = points[points.length - 1]!;
 			return [{ tsMs: last.tsMs + horizonS * 1000, predictedValue: last.value }];
 		}
 		// production: bounded linear reg on time deltas

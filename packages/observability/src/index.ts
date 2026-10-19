@@ -162,6 +162,11 @@ export {
 	callPlane,
 	gatedFetch,
 	loadBreakerSettings,
+	EnterpriseFabric,
+	createEnterpriseFabric,
+	type FabricStatus,
+	type OptimizationSuggestion,
+	type ComplianceReport,
 } from "./breaker.ts";
 
 export {

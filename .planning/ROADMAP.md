@@ -452,3 +452,12 @@ Plans:
 | 31. Lane A runtime: spike, packaging and VM host | v1.3 | 3/3 | Complete    | 2026-10-11 |
 | 32. Lane A host core | v1.3 | 3/3 | Complete    | 2026-10-11 |
 | 33. Lane A dispatch route and approvals | v1.3 | 3/3 | Complete    | 2026-10-11 |
+
+## Post v1.3: 7 SOTA Enhancements (2026-10-19)
+
+Initiative to leverage idle resources for SOTA (see .planning/7-SOTA-ENHANCEMENTS.md).
+Documentation complete in AGENTS.md, CLAUDE.md, README.md, CONTEXT.md.
+Code changes partial; follow-up waves for implementation.
+Status: docs updated. Verification passed. No merge (per AGENTS.md).
+
+See STATE.md for details.

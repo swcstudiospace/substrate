@@ -5338,7 +5338,7 @@ export class Substrate {
 			try {
 				const res = await fetch(base, { method: "POST", headers, body });
 				if (!res.ok) throw new Error(`http ${res.status} ${(await res.text().catch(() => "")).slice(0,180)}`);
-				return await res.json();
+				return (await res.json()) as { data?: T; errors?: unknown[] };
 			} catch (e) { last = e; if (a < max-1) await Bun.sleep(150 * (1 << a)); }
 		}
 		throw last;
