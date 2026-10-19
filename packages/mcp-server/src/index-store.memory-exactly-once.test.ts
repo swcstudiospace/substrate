@@ -79,7 +79,9 @@ describeLive("memory exactly-once against a live index", () => {
 	afterAll(async () => {
 		if (!PG_URL) return;
 		await raw`delete from memory_entries where body like ${`%${MARKER}%`}`.catch(() => undefined);
-		await raw`delete from memory_writes where idempotency_key like ${`${MARKER}%`}`.catch(() => undefined);
+		await raw`delete from memory_writes where idempotency_key like ${`${MARKER}%`} or idempotency_key like 'mwd_%'`.catch(() => undefined);
+		// Clean any writes left pointing at deleted entries (keyless mwd_ tests etc.)
+		await raw`delete from memory_writes w where not exists (select 1 from memory_entries e where e.id = w.entry_id)`.catch(() => undefined);
 		await raw.end().catch(() => undefined);
 		await store.close().catch(() => undefined);
 	});
