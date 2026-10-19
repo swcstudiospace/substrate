@@ -5351,7 +5351,12 @@ export class Substrate {
 			const r = await this.railwayGraphql<any>(q);
 			if (r.errors?.length) return { state: "error", resources: [], reason: JSON.stringify(r.errors).slice(0, 280) };
 			const res = (r.data?.projects?.edges || []).map((e: any) => e.node);
-			return { state: res.length ? "success" : "empty", resources: res };
+			let filtered = res;
+			if (args.projectId) {
+				const pid = String(args.projectId);
+				filtered = res.filter((p: any) => p.id === pid);
+			}
+			return { state: filtered.length ? "success" : "empty", resources: filtered };
 		} catch (e) {
 			return { state: "error", resources: [], reason: redact(String(e instanceof Error ? e.message : e)).slice(0, 300) };
 		}
@@ -5380,6 +5385,10 @@ export class Substrate {
 			const r = await this.railwayGraphql<any>(q);
 			if (r.errors?.length) return { state: "error", reason: JSON.stringify(r.errors).slice(0, 280) };
 			const u = r.data?.me?.usage || null;
+			if (u && args.projectId && u.projects) {
+				const pid = String(args.projectId);
+				u.projects = u.projects.filter((p: any) => p.projectId === pid);
+			}
 			return { state: u ? "success" : "empty", usage: u };
 		} catch (e) {
 			return { state: "error", reason: redact(String(e instanceof Error ? e.message : e)).slice(0, 300) };
@@ -5390,10 +5399,15 @@ export class Substrate {
 		if (!this.config.railway) return { state: "unavailable", reason: "railway-not-configured" };
 		try {
 			const sid = typeof args.serviceId === "string" ? args.serviceId.trim() : "";
-			const q = sid ? "query($id:String!){ service(id:$id){ id name deployments(first:5){edges{node{id status updatedAt}}}} }" : "query { projects(first:3){edges{node{id name services(first:1){edges{node{id name deployments(first:1){edges{node{status}}}}}}}} }";
+			const eid = typeof args.environmentId === "string" ? args.environmentId.trim() : "";
+			const q = sid ? "query($id:String!){ service(id:$id){ id name environment { id name } deployments(first:5){edges{node{id status updatedAt}}}} }" : "query { projects(first:3){edges{node{id name services(first:1){edges{node{id name environment { id name } deployments(first:1){edges{node{status}}}}}}}} }";
 			const r = await this.railwayGraphql<any>(q, sid ? { id: sid } : {});
 			if (r.errors?.length) return { state: "error", reason: JSON.stringify(r.errors).slice(0, 280) };
-			return { state: "success", status: r.data || {} };
+			let status = r.data || {};
+			if (eid && status.service && status.service.environment && status.service.environment.id !== eid) {
+				status = { ...status, service: { ...status.service, deployments: { edges: [] } } };
+			}
+			return { state: "success", status };
 		} catch (e) {
 			return { state: "error", reason: redact(String(e instanceof Error ? e.message : e)).slice(0, 300) };
 		}

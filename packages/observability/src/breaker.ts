@@ -479,14 +479,15 @@ export class EnterpriseFabric {
 	}
 
 	complianceReport(): ComplianceReport {
+		const hasError = Array.from(this.statuses.values()).some((s) => s.state === "error");
 		const checks = [
 			{ name: "resources_registered", pass: this.statuses.size >= 3 },
-			{ name: "errors_sanitized", pass: true },
+			{ name: "errors_sanitized", pass: !hasError },
 			{ name: "retry_backoff_enabled", pass: true },
 			{ name: "states_enforced", pass: this.statuses.size > 0 },
 		];
-		const compliant = checks.every((c) => c.pass);
-		return { compliant, checks, auditCoverage: this.statuses.size > 0 ? 1.0 : 0 };
+		const compliant = checks.every((c) => c.pass) && !hasError;
+		return { compliant, checks, auditCoverage: 0 };
 	}
 
 	reset(): void { this.statuses.clear(); }
