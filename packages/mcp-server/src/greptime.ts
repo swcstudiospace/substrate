@@ -847,7 +847,7 @@ export class GreptimeClient {
 					};
 					if (sec?.useMtls) {
 						fetchOptions.tls = {
-							rejectUnauthorized: false,
+							rejectUnauthorized: true,
 							cert: process.env.GREPTIME_TAILSCALE_CLIENT_CERT,
 							key: process.env.GREPTIME_TAILSCALE_CLIENT_KEY,
 						};
