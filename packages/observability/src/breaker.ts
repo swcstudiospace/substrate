@@ -412,12 +412,15 @@ export class EnterpriseFabric {
 	async probe(name: string, probeImpl?: () => Promise<boolean>): Promise<FabricResourceStatus> {
 		const res = validateResourceName(name);
 		const at = this.now();
+		if (!probeImpl) {
+			// No check exists for this resource: it stays unchecked ("empty"), never reported healthy.
+			const unchecked: FabricResourceStatus = { name: res, state: "empty", healthy: false, lastChecked: at };
+			this.statuses.set(res, unchecked);
+			return unchecked;
+		}
 		this.statuses.set(res, { name: res, state: "loading", healthy: false, lastChecked: at });
 		try {
-			let healthy = true;
-			if (probeImpl) {
-				healthy = await this.withRetryBackoff(probeImpl, res);
-			}
+			const healthy = await this.withRetryBackoff(probeImpl, res);
 			const state: FabricResourceState = healthy ? "success" : "error";
 			const st: FabricResourceStatus = { name: res, state, healthy, lastChecked: this.now() };
 			this.statuses.set(res, st);
@@ -456,7 +459,7 @@ export class EnterpriseFabric {
 			}
 		}
 		const healthy = resources.filter((r) => r.healthy).length;
-		const degraded = resources.length - healthy;
+		const degraded = resources.filter((r) => r.state === "error").length;
 		const overall: FabricResourceState = degraded === 0 ? "success" : "error";
 		return { state: overall, resources, observabilitySummary: { total: resources.length, healthy, degraded }, timestamp: this.now() };
 	}
@@ -498,6 +501,12 @@ export class EnterpriseFabric {
 		this.statuses.set(res, { name: res, state: healthy ? "success" : "error", healthy, lastChecked: this.now() });
 	}
 
+	/** Seed a non-plane resource as loading until its probe answers; never reports it healthy. */
+	seedLoading(name: string): void {
+		const res = validateResourceName(name);
+		this.statuses.set(res, { name: res, state: "loading", healthy: false, lastChecked: this.now() });
+	}
+
 	/** Internal for create helper; typed no-any. */
 	seedPlane(name: FabricResourceName, healthy: boolean): void {
 		this.statuses.set(name, { name, state: healthy ? "success" : "error", healthy, lastChecked: this.now() });
@@ -516,8 +525,7 @@ export function createEnterpriseFabric(registry?: PlaneRegistry): EnterpriseFabr
 	}
 	// seed cross-resource infra (enh7) as loading; probes will update asynchronously
 	for (const r of ["railway", "tailscale", "dragonfly"] as const) {
-		const res = validateResourceName(r);
-		f.statuses.set(res, { name: res, state: "loading", healthy: false, lastChecked: f.now ? f.now() : Date.now() });
+		f.seedLoading(r);
 	}
 	return f;
 }
