@@ -837,12 +837,20 @@ export class GreptimeClient {
 			// Everything thrown inside is the plane's fault — transport/timeout/5xx charge breaker.
 			answer = await retryWithBackoff(async () =>
 				callPlane(this.gate, op, async () => {
-					const response = await fetch(url, {
+					const fetchOptions: RequestInit & { tls?: { rejectUnauthorized?: boolean; cert?: string; key?: string } } = {
 						method: "POST",
 						headers: this.headers(),
 						body: new URLSearchParams({ sql: statement }),
 						signal: AbortSignal.timeout(timeoutMs),
-					});
+					};
+					if (sec?.useMtls) {
+						fetchOptions.tls = {
+							rejectUnauthorized: false,
+							cert: process.env.GREPTIME_TAILSCALE_CLIENT_CERT,
+							key: process.env.GREPTIME_TAILSCALE_CLIENT_KEY,
+						};
+					}
+					const response = await fetch(url, fetchOptions);
 					const text = await response.text();
 					if (response.status >= 500) throw new GreptimeUnavailable(`greptime ${response.status}: ${text.slice(0, 500)}`);
 					return { status: response.status, text };
@@ -1206,14 +1214,18 @@ export class GreptimeClient {
 			// the remembered tip is wrong either way it is guessed. Forget it and the
 			// next append reads the ledger.
 			if (event.session_id !== null) this.chainTips?.delete(event.session_id);
+			// Confirm whether the event was stored before resending (or treating as failure).
+			// This prevents duplicate rows in append_mode when a retry follows a lost reply.
+			try {
+				const rows = await this.sql(`SELECT 1 FROM "agent_events" WHERE "id" = ${this.q(event.id)} LIMIT 1`);
+				if (rows.length > 0) {
+					if (event.session_id !== null) this.chainTips?.set(event.session_id, event.hash);
+					await this.recordIngest(event);
+					return;
+				}
+			} catch {}
 			throw cause;
 		}
-		// The row is in the ledger: whatever happens to its ingest record below,
-		// the session's next event must chain onto this hash.
-		if (event.session_id !== null) this.chainTips?.set(event.session_id, event.hash);
-
-		// The ingest record goes second: it must never name an event that does not exist.
-		await this.recordIngest(event);
 	}
 
 	/**
