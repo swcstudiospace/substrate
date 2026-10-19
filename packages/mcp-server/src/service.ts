@@ -5336,18 +5336,17 @@ export class Substrate {
 		let last: unknown;
 		for (let a = 0; a < max; a++) {
 			try {
-				const res = await fetch(base, { method: "POST", headers, body });
+				const res = await fetch(base, { method: "POST", headers, body, signal: AbortSignal.timeout(10000) });
 				if (!res.ok) throw new Error(`http ${res.status} ${(await res.text().catch(() => "")).slice(0,180)}`);
 				return (await res.json()) as { data?: T; errors?: unknown[] };
 			} catch (e) { last = e; if (a < max-1) await Bun.sleep(150 * (1 << a)); }
 		}
 		throw last;
 	}
-
 	async railwayList(args: { projectId?: unknown } = {}): Promise<{ state: "success" | "empty" | "error" | "unavailable"; resources: unknown[]; reason?: string }> {
 		if (!this.config.railway) return { state: "unavailable", resources: [], reason: "railway-not-configured" };
 		try {
-			const q = "query { projects { edges { node { id name environments { edges { node { id name } } } services { edges { node { id name } } } } } }";
+			const q = "query { projects { edges { node { id name environments { edges { node { id name } } } services { edges { node { id name } } } } } } }";
 			const r = await this.railwayGraphql<any>(q);
 			if (r.errors?.length) return { state: "error", resources: [], reason: JSON.stringify(r.errors).slice(0, 280) };
 			const res = (r.data?.projects?.edges || []).map((e: any) => e.node);

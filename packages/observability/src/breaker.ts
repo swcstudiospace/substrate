@@ -451,7 +451,7 @@ export class EnterpriseFabric {
 		const resources = Array.from(this.statuses.values());
 		for (const r of resources) {
 			const b = breakers?.[r.name as PlaneName];
-			if (b && b.state !== "closed") {
+			if (b?.state === "open") {
 				r.state = "error"; r.healthy = false; r.details = { ...(r.details ?? {}), breaker: b.state };
 			}
 		}
@@ -514,10 +514,10 @@ export function createEnterpriseFabric(registry?: PlaneRegistry): EnterpriseFabr
 			f.seedPlane(p as FabricResourceName, healthy);
 		}
 	}
-	// seed cross-resource infra (enh7) as success by default (graceful); real probes can override
+	// seed cross-resource infra (enh7) as loading; probes will update asynchronously
 	for (const r of ["railway", "tailscale", "dragonfly"] as const) {
-		f.seedResource(r);
+		const res = validateResourceName(r);
+		f.statuses.set(res, { name: res, state: "loading", healthy: false, lastChecked: f.now ? f.now() : Date.now() });
 	}
 	return f;
 }
-

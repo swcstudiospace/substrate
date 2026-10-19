@@ -823,7 +823,7 @@ describe("append-mode enforcement", () => {
 			capacity: { index: null, ledger: null },
 			// The stub has no `anchorCoverage`: the jobs row is null with the reason, never a throw.
 			jobs: { ledger: null, ledgerReason: expect.stringContaining("anchorCoverage") },
-			fabric: { state: "success", resources: [], observabilitySummary: { total: 0, healthy: 0, degraded: 0 }, timestamp: expect.any(Number) },
+			fabric: { state: "success", resources: ["railway", "tailscale", "dragonfly"], observabilitySummary: { total: 0, healthy: 0, degraded: 0 }, timestamp: expect.any(Number) },
 		});
 	});
 

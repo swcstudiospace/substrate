@@ -1165,7 +1165,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			title: "List Railway resources",
 			description:
 				"List projects, environments and services via Railway API (or forwarder). Returns {state, resources, reason?}. " +
-				"state: success | empty | error | unavailable (no token). Read-only, redacted errors. Graceful when unconfigured or rate-limited.",
+				"state: success | empty | error | unavailable (no token). Read-only, redacted errors. Graceful when unconfigured or rate-limited. (server token full account scope)",
 			inputSchema: { projectId: z.string().optional() },
 			annotations: { readOnlyHint: true },
 		},
@@ -1178,7 +1178,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			title: "Scale Railway service",
 			description:
 				"Scale replicas for service in env. Validates inputs; returns {state, ok?, reason}. Destructive. " +
-				"Uses retries+backoff, forwarder if set. Errors redacted; unavailable if no Railway config.",
+				"Uses retries+backoff, forwarder if set. Errors redacted; unavailable if no Railway config. (server token full account scope)",
 			inputSchema: {
 				serviceId: z.string().describe("Railway service id"),
 				environmentId: z.string().describe("Environment id"),
@@ -1194,7 +1194,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		{
 			title: "Railway cost/usage",
 			description:
-				"Report estimated cost and usage. {state, usage?, reason?}. States support client loading/empty/error/success rendering.",
+				"Report estimated cost and usage. {state, usage?, reason?}. States support client loading/empty/error/success rendering. (server token full account scope)",
 			inputSchema: { projectId: z.string().optional() },
 			annotations: { readOnlyHint: true },
 		},
@@ -1206,7 +1206,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		{
 			title: "Monitor Railway resource",
 			description:
-				"Current status/deployments for service or projects. Production: retry, degrade, validate, states for UX.",
+				"Current status/deployments for service or projects. Production: retry, degrade, validate, states for UX. (server token full account scope)",
 			inputSchema: { serviceId: z.string().optional(), environmentId: z.string().optional() },
 			annotations: { readOnlyHint: true },
 		},

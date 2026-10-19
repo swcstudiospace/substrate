@@ -836,7 +836,7 @@ export class GreptimeClient {
 			}
 			// Everything thrown inside is the plane's fault — transport/timeout/5xx charge breaker.
 			const isEventInsert = statement.includes('INSERT INTO "agent_events"');
-			const maxAttempts = isEventInsert ? 1 : 3;
+			const maxAttempts = isEventInsert ? 1 : 2;
 			answer = await retryWithBackoff(async () =>
 				callPlane(this.gate, op, async () => {
 					const fetchOptions: RequestInit & { tls?: { rejectUnauthorized?: boolean; cert?: string; key?: string } } = {
@@ -1212,6 +1212,9 @@ export class GreptimeClient {
 		const values = EVENT_COLUMNS.map(cell).join(", ");
 		try {
 			await this.sql(`INSERT INTO "agent_events" (${EVENT_COLUMN_LIST}) VALUES (${values})`);
+			// success path: update bookkeeping
+			if (event.session_id !== null) this.chainTips?.set(event.session_id, event.hash);
+			await this.recordIngest(event);
 		} catch (cause) {
 			// The row may or may not have landed — a timeout is not a refusal — so
 			// the remembered tip is wrong either way it is guessed. Forget it and the
@@ -1223,7 +1226,11 @@ export class GreptimeClient {
 				const rows = await this.sql(`SELECT 1 FROM "agent_events" WHERE "id" = ${this.q(event.id)} LIMIT 1`);
 				if (rows.length > 0) {
 					if (event.session_id !== null) this.chainTips?.set(event.session_id, event.hash);
-					await this.recordIngest(event);
+					try {
+						await this.recordIngest(event);
+					} catch (e) {
+						// ingest record failed but event stored; still success for caller
+					}
 					return;
 				}
 			} catch {}
