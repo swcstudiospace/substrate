@@ -111,6 +111,15 @@ export function earliestRefreshAt(stamps: ReadonlyArray<string | null | undefine
 	return best;
 }
 
+/**
+ * Predictive cache preload (enh3 Greptime + Dragonfly).
+ * Stub for now; in full would query Greptime patterns and pre-warm Dragonfly.
+ */
+export async function predictivePreload(patterns: string[]) {
+  // SOTA predictive logic stub
+  return { preloaded: patterns.length, source: 'greptime-patterns' };
+}
+
 export interface CacheHealth {
 	enabled: boolean;
 	connected: boolean;
