@@ -457,7 +457,7 @@ Plans:
 
 Initiative to leverage idle resources for SOTA (see .planning/7-SOTA-ENHANCEMENTS.md).
 Documentation complete in AGENTS.md, CLAUDE.md, README.md, CONTEXT.md.
-Code changes partial; follow-up waves for implementation.
+Code changes complete in this PR for the 7 SOTA enhancements.
 Status: docs updated. Verification passed. No merge (per AGENTS.md).
 
 See STATE.md for details.

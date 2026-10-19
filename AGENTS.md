@@ -60,7 +60,7 @@ Agent view: via MCP tools only (`memory_*`, `docs_*`, events, graph). Operator v
 
 ## The 7 SOTA Enhancements (2026-10-19)
 
-Production-grade enhancements to leverage idle resources (Railway, RAGFlow, Hindsight, Tailscale, GreptimeDB, DragonflyDB) for SOTA utility. From `.planning/7-SOTA-ENHANCEMENTS.md`. Each follows Desk rules: draft PRs only; Greptile 5/5 with all findings addressed required (never claim ready on unavailable/failed/skipped); no self-merge/force. Use feature flags for opt-in (shadow/report first). Verify impact on leases, memory governance, event vocab, admission, SLOs, store-lock. Full code in follow-up waves.
+Full code delivered in this PR for the 7 enhancements.
 
 1. **Railway Resource Orchestrator** (enh1-railway-orchestrator)
    - **SOTA**: Cloud resource management with auto-optimization, cost attribution, dynamic scaling.
