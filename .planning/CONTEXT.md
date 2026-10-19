@@ -1,7 +1,7 @@
 # Context: 7 SOTA Enhancements for Agent Substrate
 
 **Date:** 2026-10-19
-**Scope:** Review of Agent Substrate and its integrations with Railway resources, RAGflow, Hindsight, TailscaleDB, GreptimeDB, DragonflyDB. Identify gaps for additional utility. Code implementation of the 7 enhancements is complete in this PR; enhancements are described in docs.
+**Scope:** Review of Agent Substrate and its integrations with Railway resources, RAGflow, Hindsight, TailscaleDB, GreptimeDB, DragonflyDB. Identify gaps for additional utility. This is documentation of the review per the plan (no implementation of code enhancements in this wave; enhancements are described in docs).
 
 ## Review Findings (from repository evidence)
 
