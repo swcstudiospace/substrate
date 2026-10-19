@@ -113,8 +113,8 @@ Symlink the extension into Omp's auto-discovered directory, as
 
 Remove the symlink to disable it.
 
-The Ultrathink bar is a separate Omp host extension. This symlink does not install
-it. Without that bar, `/substrate` is the only status surface. Either way, this
+The Ultrathink bar is a separate Omp host extension and a prerequisite for automatic status display on the bar. This symlink does not install
+it. Install and enable the bar host extension separately via your Omp setup (see Omp docs for the Ultrathink bar). Without that bar, `/substrate` is the only status surface. Either way, this
 extension does not mount a footer or a below-editor widget.
 
 ## Configuration and the token rule
