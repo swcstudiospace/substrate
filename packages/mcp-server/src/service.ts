@@ -3967,6 +3967,7 @@ export class Substrate {
 						...("source_url" in page && typeof page.source_url === "string" ? { source_url: page.source_url } : {}),
 						body: typeof page.body === "string" ? page.body : "",
 						...("heading_path" in page && typeof page.heading_path === "string" ? { heading_path: page.heading_path } : {}),
+						...("expected_version" in page && typeof page.expected_version === "number" && Number.isInteger(page.expected_version) && page.expected_version >= 0 ? { expected_version: page.expected_version } : {}),
 					})),
 				...(sessionId !== undefined ? { session_id: sessionId } : {}),
 			},

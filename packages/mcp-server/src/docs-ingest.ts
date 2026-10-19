@@ -462,9 +462,15 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	if (!dataset) return refused(deps, sessionId, "unknown-dataset");
 	const commit = input.commit ?? "unpinned";
 	// memory's `expected_version` contract, checked for every page before the first upload: a stale
-	// page leaves the whole call unwritten. The loop below re-checks each page at its own store point.
+	// page leaves the whole call unwritten. Snapshot priors for the *entire batch* before any
+	// upload side-effect so a re-check race on a later page cannot cause a stale refusal after
+	// earlier pages have already uploaded/parsed/pruned.
+	const batchPriors: Record<string, IngestRecord | undefined> = {};
 	for (const { page, sourceUrl } of prepared) {
-		const stale = staleVersion(seen.get(recordKey(dataset.id, sourceUrl)), page.expected_version);
+		const key = recordKey(dataset.id, sourceUrl);
+		const prior = seen.get(key);
+		batchPriors[key] = prior;
+		const stale = staleVersion(prior, page.expected_version);
 		if (stale) return refused(deps, sessionId, "version.stale", { page: page.path, ...stale });
 	}
 
@@ -474,8 +480,9 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	for (const { page, sourceUrl, body, sha } of prepared) {
 		const key = recordKey(dataset.id, sourceUrl);
 		for (;;) {
-			const prior = seen.get(key);
+			const prior = batchPriors[key] ?? seen.get(key);
 			// Re-checked here: a concurrent writer may have moved this record since the pre-check.
+			// Version decision used the pre-batch snapshot; inner only for sha/lock races now.
 			const stale = staleVersion(prior, page.expected_version);
 			if (stale) return refused(deps, sessionId, "version.stale", { page: page.path, changed: changed(), ...stale });
 			if (prior && prior.sha === sha) {
