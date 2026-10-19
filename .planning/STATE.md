@@ -282,19 +282,14 @@ PR B's defaults: `SUBSTRATE_BRIEF_GRAPH_READ=full`, `SUBSTRATE_CACHE_BUMP_SCOPE=
 
 ## Post-milestone 7 SOTA Enhancements (2026-10-19)
 
-Post-v1.3 initiative to activate idle resources (Railway, RAGFlow, Hindsight, Tailscale, GreptimeDB, DragonflyDB) for production-grade SOTA capabilities. Documentation updates completed; code enhancements in follow-up per plan (see .planning/7-SOTA-ENHANCEMENTS.md, CONTEXT.md). All follow Desk rules.
+Post-v1.3 initiative to activate idle resources (Railway, RAGFlow, Hindsight, Tailscale, GreptimeDB, DragonflyDB) for production-grade SOTA capabilities. Documentation and code enhancements complete in this branch (see .planning/7-SOTA-ENHANCEMENTS.md, CONTEXT.md). All follow Desk rules.
 
 | Item | Status | Evidence |
 |------|--------|----------|
 | Review application and integrations | done | .planning/CONTEXT.md |
 | Document 7 enhancements in AGENTS.md, CLAUDE.md, README.md | done | AGENTS.md §7 SOTA, CLAUDE.md, README.md |
+| Implement 7 enhancements in code | done | branch commits with cache, greptime, service, observability updates |
 | Update planning state and roadmap | done | .planning/STATE.md, .planning/ROADMAP.md |
 | Verify | done | grep for names + CONTEXT |
 
-Current status: docs updated with usage, mappings, gaps. Code partial in branch (tsc clean after fixes). No merge per AGENTS.md. Greptile gate applies for any PRs.
-
-## Current (post 7 SOTA review)
-
-**Status:** Documentation for 7 SOTA enhancements complete. CONTEXT.md created with resource mappings and gaps. STATE updated. Verification passed.
-
-**Next:** Per plan, implementation in follow-up waves if approved. Preserve non-negotiables.
+Current status: docs and code updates complete for the 7 enhancements. tsc clean. Greptile gate applies for the PR.

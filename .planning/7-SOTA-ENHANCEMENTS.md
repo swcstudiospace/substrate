@@ -71,6 +71,6 @@ From investigation:
 - docs/data-planes.md, docs-plane.md, config-reference.md: Expand with new features.
 - New runbooks for fabric and TailscaleDB.
 
-Current PR baseline (from gh): Open drafts 80,81,82 etc still UNSTABLE, Greptile has unaddressed (e.g. 0/1 for 82), not 5/5. Per AGENTS.md: Draft only, no self-merge, Greptile gate required. Will open new drafts for these 7, wait for 5/5, human merge.
+Current PR baseline (from gh): Open drafts 80,81,82 etc still UNSTABLE, Greptile has unaddressed (e.g. 0/1 for 82), not 5/5. Per AGENTS.md: Draft only, no self-merge, Greptile gate required. This PR #83 covers the 7.
 
-This introduces the enhancements. Full code changes in follow-up waves per gsd flow.
+This introduces the enhancements. Code changes included in branch commits.
