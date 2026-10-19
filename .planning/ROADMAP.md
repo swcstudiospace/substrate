@@ -443,7 +443,7 @@ Plans:
 **Success Criteria** (what must be TRUE):
 
   1. Memory, skill, and docs writes refuse an invalid payload with the surface's documented error status.
-  2. The target table's row count is unchanged after a refused write, proven in an isolated namespace.
+  2. Before-and-after checks of stored content (memory records, docs state, uploaded documents) prove nothing was persisted or mutated on a refusal (row count alone is insufficient because `decideSkill` can mutate without changing count, and docs perform uploads + disk writes). Row counts kept as an extra check. Proven in an isolated namespace per surface.
 **Plans**: 0/1 plans complete
 
 ### Phase 35: expected_version for skills and docs
