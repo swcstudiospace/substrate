@@ -1183,9 +1183,10 @@ export class DragonflyPubSub {
 			const sc = new RedisClient(this.url, {connectionTimeout:250, idleTimeout:0, autoReconnect:false, enableOfflineQueue:false});
 			ent = {c: sc, ls: []};
 			this.subs[k] = ent;
+			const entForCallback = ent;
 			try {
 				await sc.connect();
-				await sc.subscribe(list, (m: string, c: string) => { for (const l of ent.ls) { try { l(m, c); } catch {} } });
+				await sc.subscribe(list, (m: string, c: string) => { for (const l of entForCallback.ls) { try { l(m, c); } catch {} } });
 				this.state = "connected";
 			} catch (e: unknown) {
 				delete this.subs[k];
@@ -1212,7 +1213,13 @@ export class DragonflyPubSub {
 	close(): void {
 		this.state = "closed";
 		if (this.pub) { try { this.pub.close(); } catch {} ; this.pub = null; }
-		Object.keys(this.subs).forEach((k) => { try { this.subs[k].c.close(); } catch {}; delete this.subs[k]; });
+		for (const k of Object.keys(this.subs)) {
+			const e = this.subs[k];
+			if (e) {
+				try { e.c.close(); } catch {};
+				delete this.subs[k];
+			}
+		}
 	}
 }
 
@@ -1223,5 +1230,5 @@ export function createDragonflyPubSub(url: string | null | undefined): Dragonfly
 // For event propagation integration (used from event.ts too)
 export async function publishSubstrateEvent(pub: DragonflyPubSub | null, ev: {surface: string; kind: string; summary: string}): Promise<void> {
 	if (!pub) return;
-	await pub.publish(PUBSUB_CHANNELS.events, { t: "event", s: ev.surface, k: ev.kind, sum: redact(ev.summary).slice(0,180), at: Date.now() });
+	await pub.publish(PUBSUB_CHANNELS.events as string, { t: "event", s: ev.surface, k: ev.kind, sum: redact(ev.summary).slice(0,180), at: Date.now() });
 }
