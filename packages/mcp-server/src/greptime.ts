@@ -835,6 +835,8 @@ export class GreptimeClient {
 				// Real impl would emit to SUBSTRATE_AUDIT or greptime audit table (redacted).
 			}
 			// Everything thrown inside is the plane's fault — transport/timeout/5xx charge breaker.
+			const isEventInsert = statement.includes('INSERT INTO "agent_events"');
+			const maxAttempts = isEventInsert ? 1 : 3;
 			answer = await retryWithBackoff(async () =>
 				callPlane(this.gate, op, async () => {
 					const fetchOptions: RequestInit & { tls?: { rejectUnauthorized?: boolean; cert?: string; key?: string } } = {
@@ -855,6 +857,7 @@ export class GreptimeClient {
 					if (response.status >= 500) throw new GreptimeUnavailable(`greptime ${response.status}: ${text.slice(0, 500)}`);
 					return { status: response.status, text };
 				}),
+				maxAttempts
 			);
 			this.connectionState = "ready";
 		} catch (cause) {
