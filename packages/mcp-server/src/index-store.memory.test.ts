@@ -32,7 +32,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { IndexStore } from "./index-store.ts";
 import { governMemoryWrite, type MemoryStore, type NewMemoryEntry } from "./memory-write.ts";
 import { conflictKey, parseScope } from "./memory-policy.ts";
-import type { MemoryWriteRequest, MemoryWriteResult } from "./types.ts";
+import type { MemoryReadOptions, MemoryWriteRequest, MemoryWriteResult } from "./types.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
 const RUN = Date.now().toString(36);
@@ -79,6 +79,12 @@ describeLive("memory governance against a live index", () => {
 			{ scope: SCOPE, kind: "decision", writer: "hermes", repo: REPO, text: `${MARKER} placeholder`, ...request },
 			{ store, isReviewToken: (token) => token === REVIEW_TOKEN },
 		);
+	}
+
+	/** What one reader sees of this run's rows, through the call `memory_search` makes. */
+	async function seenBy(read: MemoryReadOptions | undefined, scope?: string): Promise<string[]> {
+		const page = await a.searchMemoryPage({ limit: 500, ...(scope === undefined ? {} : { scope }) }, read);
+		return page.entries.map((entry) => entry.text).filter((text) => text.includes(MARKER));
 	}
 
 	/** A row as the gate would hand it to the store: a first write, retiring nothing. */
@@ -595,18 +601,56 @@ describeLive("memory governance against a live index", () => {
 		expect(hermesNote.verified_persisted).toBe(true);
 		expect(ompNote.verified_persisted).toBe(true);
 
-		// What one reader sees of this run's rows, through the call memory_search makes.
-		const seen = async (read: { surface: string } | undefined, scope?: string): Promise<string[]> => {
-			const page = await a.searchMemoryPage({ limit: 500, ...(scope === undefined ? {} : { scope }) }, read);
-			return page.entries.map((entry) => entry.text).filter((text) => text.includes(MARKER));
-		};
-
-		const asOmp = await seen({ surface: "omp" });
+		const asOmp = await seenBy({ surface: "omp", repo: REPO });
 		expect(asOmp).toContain(`${MARKER} shared fact`);
 		expect(asOmp).toContain(`${MARKER} omp private note`);
 		expect(asOmp).not.toContain(`${MARKER} hermes private note`);
-		expect(await seen({ surface: "omp" }, "agent:hermes")).toEqual([]);
-		expect(await seen({ surface: "hermes" }, "agent:hermes")).toEqual([`${MARKER} hermes private note`]);
-		expect(await seen(undefined, "agent:hermes")).toEqual([`${MARKER} hermes private note`]);
+		expect(await seenBy({ surface: "omp", repo: REPO }, "agent:hermes")).toEqual([]);
+		expect(await seenBy({ surface: "hermes", repo: REPO }, "agent:hermes")).toEqual([`${MARKER} hermes private note`]);
+		expect(await seenBy(undefined, "agent:hermes")).toEqual([`${MARKER} hermes private note`]);
+	});
+
+	test("an agent's note is read only in the repo it was written for, and by no caller that names none", async () => {
+		const OTHER_REPO = "swcstudiospace/other-repo";
+		const inRepo = await write(a, { scope: "agent:omp", kind: "fact", writer: "omp", repo: REPO, subject: `repo-a-${RUN}`, text: `${MARKER} omp note for repo a` });
+		const inOther = await write(a, { scope: "agent:omp", kind: "fact", writer: "omp", repo: OTHER_REPO, subject: `repo-b-${RUN}`, text: `${MARKER} omp note for repo b` });
+		const noRepo = await write(a, { scope: "agent:omp", kind: "fact", writer: "omp", repo: undefined, subject: `no-repo-${RUN}`, text: `${MARKER} omp note naming no repo` });
+		expect(inRepo.verified_persisted).toBe(true);
+		expect(inOther.verified_persisted).toBe(true);
+		expect(noRepo.verified_persisted).toBe(true);
+
+		const inA = await seenBy({ surface: "omp", repo: REPO }, "agent:omp");
+		expect(inA).toContain(`${MARKER} omp note for repo a`);
+		expect(inA).not.toContain(`${MARKER} omp note for repo b`);
+		expect(inA).not.toContain(`${MARKER} omp note naming no repo`);
+
+		const inB = await seenBy({ surface: "omp", repo: OTHER_REPO }, "agent:omp");
+		expect(inB).toContain(`${MARKER} omp note for repo b`);
+		expect(inB).not.toContain(`${MARKER} omp note for repo a`);
+
+		expect(await seenBy({ surface: "omp" }, "agent:omp")).toEqual([]);
+	});
+
+	test("a legacy agent row, written before a repo was recorded, is read by no caller", async () => {
+		const legacy = `${MARKER} legacy omp note`;
+		await raw`
+			insert into memory_entries (id, scope, kind, body, writer, entry_hash)
+			values (${`legacy-${RUN}`}, 'agent:omp', 'fact', ${legacy}, 'omp', ${`legacy-hash-${RUN}`})`;
+		const stored = (await raw`select repo from memory_entries where id = ${`legacy-${RUN}`}`) as Array<{ repo: string | null }>;
+		expect(stored[0]?.repo).toBeNull();
+		expect(await seenBy({ surface: "omp", repo: REPO }, "agent:omp")).not.toContain(legacy);
+		expect(await seenBy({ surface: "omp" }, "agent:omp")).not.toContain(legacy);
+	});
+
+	test("the repo index is built onto a database that already holds entries, from its ledger entry alone", async () => {
+		await raw`drop index if exists memory_entries_repo_idx`;
+		await raw`delete from schema_migrations where version = 31`;
+		await a.migrate();
+		const indexes = ((await raw`select indexname from pg_indexes where tablename = 'memory_entries'`) as Array<{ indexname: string }>).map(
+			(row) => row.indexname,
+		);
+		expect(indexes).toContain("memory_entries_repo_idx");
+		const rows = (await raw`select count(*)::int as n from memory_entries where body like ${`%${MARKER}%`}`) as Array<{ n: number }>;
+		expect(rows[0]?.n ?? 0).toBeGreaterThan(0);
 	});
 });

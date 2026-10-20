@@ -64,7 +64,7 @@ implicit allow.
 - `repo:` carries no `handoff`. A handoff is to a session or an agent; a repo-wide
   one addresses nobody and sits in every brief forever.
 - `global` carries no `todo` and no `handoff`. A global todo is nobody's todo.
-- `agent:` is self-only, for writes and for reads. An agent does not write into another agent's scope, and `memory_search` returns an `agent:` row only to its own surface. The brief reads `global`, `repo:` and `graph:` only, so it never carries another agent's `agent:` notes. A `handoff` at graph scope is how one agent addresses another.
+- `agent:` is self-only, for writes and for reads. An agent does not write into another agent's scope. `memory_search` returns an `agent:` row only to its own surface and only in the repo it was written for: the caller names that repo with `repo`, and a caller that names none gets no `agent:` row. A row written with no repo, or from before repos were recorded, is read by no caller. The brief reads `global`, `repo:` and `graph:` only, so it never carries another agent's `agent:` notes. A `handoff` at graph scope is how one agent addresses another.
 - `"*"` means every *known* surface and never an unrecognised writer. An
   unauthenticated caller arrives as `unknown` and writes nothing at all. This
   is the teeth: default-deny that a wildcard quietly defeats is not default-deny.

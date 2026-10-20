@@ -14,7 +14,7 @@
  */
 import { UNTRUSTED_MEMORY_NOTICE, type DerivedMemoryHit, type RecallReply } from "./memory-recall.ts";
 import type { MemoryEntry } from "./types.ts";
-import { visibleToSurface } from "./memory-policy.ts";
+import { visibleToCaller, type MemoryCaller } from "./memory-policy.ts";
 
 /** The list reply: index entries first, derived plane hits after. */
 export interface MergedMemoryResults {
@@ -34,15 +34,16 @@ export interface MergedMemoryResults {
  * only hits retained for that scope survive (the forward stores it in
  * metadata and each derived hit carries it as a locator). Without a scope
  * every hit survives, exactly as before.
- * An `agent:` hit reaches only the surface it belongs to, scoped request or not. A hit with no scope is shared.
+ * An `agent:` hit reaches only the surface it belongs to, and only in the repo it was retained for; a caller that
+ * names no repo gets none of them. A hit with no scope is shared.
  */
 export function mergeDerivedHits(
 	entries: MemoryEntry[],
 	recall: RecallReply,
 	scope: string | undefined,
-	surface: string,
+	caller: MemoryCaller,
 ): MergedMemoryResults {
-	const visible = recall.results.filter((hit) => visibleToSurface(hit.scope, surface));
+	const visible = recall.results.filter((hit) => visibleToCaller(hit.scope, hit.repo, caller));
 	return {
 		entries,
 		derived: scope === undefined ? visible : visible.filter((hit) => hit.scope === scope),

@@ -4,6 +4,28 @@
  * after. A refusal that changed a row count is a partial persistence, which is what this file
  * exists to catch.
  *
+ * Each refusal is also checked against the audit chain: the records appended while the request
+ * ran. Which of two outcomes is asserted depends on where the door refuses:
+ *  - a body refused before the audit call leaves no record at all;
+ *  - a body that reaches the gate leaves exactly one record, `allowed` on its transport. The
+ *    audit records the decision to dispatch before the handler runs, so a handler refusal that
+ *    follows does not change the record.
+ * Moving a refusal across the audit call flips which outcome holds, and these assertions catch it.
+ *
+ * MCP calls go over `POST /mcp` (streamable HTTP) through the SDK client: the door production
+ * serves. Checked 2026-10-20 against the audit path:
+ *  - REST: `auditedRest` (server.ts:534) runs at `/memory` server.ts:1086, `/docs/ingest` :1297,
+ *    `/skills/propose` :1414 and `/skills/approve` :1445. Each is preceded by the shape check that
+ *    refuses a non-object body before any record (`/memory` :1070-1085, `/docs/ingest` :1255-1296;
+ *    `/skills/*` skip the audit when the body is not an object, `fields &&` at :1414 and :1445).
+ *  - MCP: `handleMcp` (server.ts:1722) calls `auditToolCalls` (server.ts:1751) before it creates the
+ *    MCP server (:1759). `auditToolCalls` (observe.ts:679) appends `allowed` per `tools/call` before
+ *    dispatch, so an argument the SDK then rejects still has its record.
+ *  - The chain is memory-only here (`SUBSTRATE_AUDIT_PATH` unset): `AuditLog.append` commits without a
+ *    file (audit/src/log.ts:434-440) and `recent` returns the retained records (log.ts:622).
+ * The in-process harness this file used before built `createMcpServer` directly, so it never reached
+ * `handleMcp` and produced no audit record by construction.
+ *
  * Each suite first sends one valid control. A count that does not move on a valid write would
  * make every zero-delta assertion meaningless, so the control is what shows the counter works.
  *
@@ -20,11 +42,11 @@
 import { SQL } from "bun";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import type { AuditRecord } from "@substrate/audit";
 import { loadConfig } from "./config.ts";
 import { IndexStore } from "./index-store.ts";
-import { createMcpServer, type McpCaller } from "./mcp.ts";
 import { createObservability, type Observability } from "./observe.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
 import { createHttpServer } from "./server.ts";
@@ -49,12 +71,16 @@ const BASE_ENV: Record<string, string> = {
 };
 
 const TOKEN = "tok-omp";
-const OMP: McpCaller = { surface: "omp", isOperator: false };
-const OPERATOR: McpCaller = { surface: "omp", isOperator: true };
+/** The MCP cases run as the omp surface without operator rights, as the in-process caller did before. */
+const NON_OPERATOR = { SUBSTRATE_OPERATOR_TOKENS: "" };
 
-/** The REST door over a socket. `send` posts a JSON value, or sends a string verbatim. */
+/** The REST door and the MCP door over a socket, with the audit chain the door appends to. */
 interface HttpHarness {
+	/** POST a JSON value, or send a string verbatim. */
 	send(path: string, body: unknown, token?: string | null): Promise<Response>;
+	/** An MCP client over streamable HTTP: each call is a `POST /mcp`, through the same audit gate production runs. */
+	mcp(): Promise<Client>;
+	readonly audit: Observability["audit"];
 }
 
 /** A ledger that accepts every append and keeps nothing, so refusal events cannot fail a request. */
@@ -79,7 +105,7 @@ function ledgerStub() {
 
 const stops: Array<() => void> = [];
 
-/** Starts the real REST door on an ephemeral port, over the given stores. */
+/** Starts the real REST and MCP door on an ephemeral port, over the given stores. */
 async function startHttp(stores: Record<string, unknown>, env: Record<string, string> = {}): Promise<HttpHarness> {
 	const merged = { ...BASE_ENV, ...env };
 	const config = loadConfig(merged);
@@ -96,6 +122,7 @@ async function startHttp(stores: Record<string, unknown>, env: Record<string, st
 		server.close();
 	});
 	return {
+		audit: observability.audit,
 		send(path, body, token = TOKEN) {
 			return fetch(`${base}${path}`, {
 				method: "POST",
@@ -103,17 +130,18 @@ async function startHttp(stores: Record<string, unknown>, env: Record<string, st
 				body: typeof body === "string" ? body : JSON.stringify(body),
 			});
 		},
+		async mcp() {
+			const client = new Client({ name: "invalid-write-roundtrip", version: "0.0.0" });
+			const transport = new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
+				requestInit: { headers: { authorization: `Bearer ${TOKEN}` } },
+			});
+			await client.connect(transport);
+			stops.push(() => {
+				client.close().catch(() => undefined);
+			});
+			return client;
+		},
 	};
-}
-
-/** Connects the MCP door in memory, over the given stores, for one caller. `env` overrides the shared defaults. */
-async function connectMcp(stores: Record<string, unknown>, caller: McpCaller, env: Record<string, string> = {}): Promise<Client> {
-	const substrate = new Substrate(loadConfig({ ...BASE_ENV, ...env }), stores as never);
-	const server = createMcpServer(substrate, caller);
-	const client = new Client({ name: "invalid-write-roundtrip", version: "0.0.0" });
-	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-	await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-	return client;
 }
 
 /**
@@ -191,10 +219,41 @@ const NON_OBJECT_BODIES: Array<[string, string]> = [
 	["malformed JSON", '{"scope":'],
 ];
 
+/**
+ * The 400 reason for a body that is not a JSON object. Malformed JSON is answered by the JSON parse, which every route
+ * shares; a parseable value that is not an object is answered by the route's own check, named by `notAnObject`.
+ */
+function refusalReason(payload: string, notAnObject: string): string {
+	try {
+		JSON.parse(payload);
+	} catch {
+		return "request body is not valid JSON";
+	}
+	return notAnObject;
+}
+
 /** A body with one key removed. */
 function without(body: Record<string, unknown>, key: string): Record<string, unknown> {
 	const { [key]: _removed, ...rest } = body;
 	return rest;
+}
+
+/**
+ * The audit records appended after position `mark`, oldest first. The chain is memory-only in this file, so its retained
+ * buffer holds every record a request wrote.
+ */
+function auditAfter(audit: Observability["audit"], mark: number): AuditRecord[] {
+	return audit.recent(1_000).filter((record) => record.seq > mark);
+}
+
+/** The fields of audit records that say what happened: the tool, the door and the decision. */
+function auditedFields(records: AuditRecord[]): Array<{ tool: string; transport: string; decision: string }> {
+	return records.map(({ tool, transport, decision }) => ({ tool, transport, decision }));
+}
+
+/** What a request that reached the gate leaves in the chain: one `allowed` record on its door, written before dispatch. */
+function reachedGate(tool: string, transport: "rest" | "mcp"): Array<{ tool: string; transport: string; decision: string }> {
+	return [{ tool, transport, decision: "allowed" }];
 }
 
 // ── Postgres-backed state, shared by the three live suites ──────────────────────────────────────
@@ -272,8 +331,9 @@ describeLive("memory writes: POST /memory and MCP memory_write", () => {
 			http = await startHttp({ index: store, greptime: ledger.greptime });
 		});
 
-		test("a valid control is accepted, read back, and moves the row count by one", async () => {
+		test("a valid control is accepted, read back, moves the row count by one, and is audited once", async () => {
 			const before = await rowCounts(MEMORY_TABLES);
+			const mark = http.audit.seq;
 			const response = await http.send("/memory", valid);
 			const reply: unknown = await response.json();
 
@@ -281,12 +341,14 @@ describeLive("memory writes: POST /memory and MCP memory_write", () => {
 			expect(reply).toMatchObject({ outcome: "accepted", verified_persisted: true });
 			expect(await store.readEntry(entryIdOf(reply))).not.toBeNull();
 			expect((await rowCounts(MEMORY_TABLES)).memory_entries).toBe(before.memory_entries! + 1);
+			expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("memory_write", "rest"));
 		});
 
 		for (const [label, body] of invalid) {
-			test(`refuses ${label} with the policy status 403, records the refusal, and writes no row`, async () => {
+			test(`refuses ${label} with the policy status 403, records the refusal, writes no row, and is audited once`, async () => {
 				const before = await rowCounts(MEMORY_TABLES);
 				const denialsBefore = ledger.written.filter((event) => event.kind === "warning" && event.payload.outcome === "denied").length;
+				const mark = http.audit.seq;
 				const response = await http.send("/memory", body);
 
 				expect(response.status).toBe(403);
@@ -294,55 +356,70 @@ describeLive("memory writes: POST /memory and MCP memory_write", () => {
 				const denials = ledger.written.filter((event) => event.kind === "warning" && event.payload.outcome === "denied");
 				expect(denials.length).toBe(denialsBefore + 1);
 				expect(denials.at(-1)?.summary).toMatch(/^memory\.write denied: /);
+				// An object reaches the gate (server.ts:1086) before the handler refuses it.
+				expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("memory_write", "rest"));
 			});
 		}
 
 		for (const [label, payload] of NON_OBJECT_BODIES) {
-			test(`refuses ${label} with 400 and writes no row`, async () => {
+			test(`refuses ${label} with 400, writes no row, and leaves no audit record`, async () => {
 				const before = await rowCounts(MEMORY_TABLES);
+				const mark = http.audit.seq;
 				const response = await http.send("/memory", payload);
 
 				expect(response.status).toBe(400);
+				expect(await response.json()).toEqual({ error: refusalReason(payload, "request body must be a JSON object") });
 				expect(await rowCounts(MEMORY_TABLES)).toEqual(before);
+				// Refused before the audit call (server.ts:1074-1085): a body that is not an object is never recorded.
+				expect(auditedFields(auditAfter(http.audit, mark))).toEqual([]);
 			});
 		}
 	});
 
 	describe("MCP memory_write", () => {
+		let http: HttpHarness;
 		let client: Client;
 		beforeAll(async () => {
-			client = await connectMcp({ index: store, greptime: ledger.greptime }, OMP);
+			http = await startHttp({ index: store, greptime: ledger.greptime }, NON_OPERATOR);
+			client = await http.mcp();
 		});
 
-		test("a valid control is accepted and moves the row count by one", async () => {
+		test("a valid control is accepted, moves the row count by one, and is audited once", async () => {
 			const before = await rowCounts(MEMORY_TABLES);
+			const mark = http.audit.seq;
 			const reply = await replyOf(client, "memory_write", { ...valid, idempotency_key: `${MARKER}-mcp-ok` });
 
 			expect(reply).toMatchObject({ outcome: "accepted", verified_persisted: true });
 			expect((await rowCounts(MEMORY_TABLES)).memory_entries).toBe(before.memory_entries! + 1);
+			expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("memory_write", "mcp"));
 		});
 
 		for (const [label, body] of invalid) {
-			test(`refuses ${label} at the protocol and writes no row`, async () => {
+			test(`refuses ${label} at the protocol, writes no row, and is audited before dispatch`, async () => {
 				const before = await rowCounts(MEMORY_TABLES);
+				const mark = http.audit.seq;
 
 				expect(await refuses(client, "memory_write", body)).toBe(true);
 				expect(await rowCounts(MEMORY_TABLES)).toEqual(before);
+				expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("memory_write", "mcp"));
 			});
 		}
 
-		test("refuses a non-object argument list and writes no row", async () => {
+		test("refuses a non-object argument list at the protocol, writes no row, and is audited before dispatch", async () => {
 			const before = await rowCounts(MEMORY_TABLES);
+			const mark = http.audit.seq;
 
 			expect(await refuses(client, "memory_write", [])).toBe(true);
 			expect(await rowCounts(MEMORY_TABLES)).toEqual(before);
+			expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("memory_write", "mcp"));
 		});
 
-		// The schema refusals above never reach the gate, so nothing records them in-process. This write is valid
-		// against the schema and refused by policy, so it takes the same audit path POST /memory's refusal takes.
-		test("a write the gate refuses is recorded as a denial and writes no row", async () => {
+		// This write is valid against the schema and refused by policy. It is audited as a dispatch, then the gate
+		// refuses it, and the gate records the denial in the ledger.
+		test("a write the gate refuses is recorded as a denial, writes no row, and is audited once", async () => {
 			const before = await rowCounts(MEMORY_TABLES);
 			const denialsBefore = ledger.written.filter((event) => event.kind === "warning" && event.payload.outcome === "denied").length;
+			const mark = http.audit.seq;
 			const reply = await replyOf(client, "memory_write", {
 				scope: `person:${MARKER}`,
 				kind: "fact",
@@ -355,6 +432,7 @@ describeLive("memory writes: POST /memory and MCP memory_write", () => {
 			const denials = ledger.written.filter((event) => event.kind === "warning" && event.payload.outcome === "denied");
 			expect(denials.length).toBe(denialsBefore + 1);
 			expect(denials.at(-1)?.summary).toMatch(/^memory\.write denied: rbac\.no-grant \(fact at person:/);
+			expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("memory_write", "mcp"));
 		});
 	});
 });
@@ -382,14 +460,15 @@ describeLive("skill proposals: POST /skills/propose and MCP skills_propose", () 
 		["a skill name that breaks the rule", { ...valid, name: "Not A Valid Name" }],
 		["a missing SKILL.md (engine refusal)", { ...valid, files: { "README.md": "hello" } }],
 	];
+	const governed = { SUBSTRATE_SKILLS_GOVERNANCE: "report" };
 
 	describe("POST /skills/propose", () => {
 		let http: HttpHarness;
 		beforeAll(async () => {
-			http = await startHttp({ index: store, greptime: ledgerStub().greptime, skillRun: run }, { SUBSTRATE_SKILLS_GOVERNANCE: "report" });
+			http = await startHttp({ index: store, greptime: ledgerStub().greptime, skillRun: run }, governed);
 		});
 
-		test("a valid control is opened and records one registry row", async () => {
+		test("a valid control is opened, records one registry row, and is audited once", async () => {
 			const proposer: SkillProposer = {
 				propose: async (): Promise<ProposeResult> => ({
 					status: "opened",
@@ -400,40 +479,49 @@ describeLive("skill proposals: POST /skills/propose and MCP skills_propose", () 
 					redactions: [],
 				}),
 			};
-			const control = await startHttp({ index: store, greptime: ledgerStub().greptime, skills: proposer }, { SUBSTRATE_SKILLS_GOVERNANCE: "report" });
+			const control = await startHttp({ index: store, greptime: ledgerStub().greptime, skills: proposer }, governed);
 			const before = await rowCounts(SKILL_TABLES);
+			const mark = control.audit.seq;
 			const response = await control.send("/skills/propose", valid);
 
 			expect(response.status).toBe(200);
 			expect(await response.json()).toMatchObject({ status: "opened" });
 			expect((await rowCounts(SKILL_TABLES)).skills_registry).toBe(before.skills_registry! + 1);
+			expect(auditedFields(auditAfter(control.audit, mark))).toEqual(reachedGate("skills_propose", "rest"));
 		});
 
 		for (const [label, body] of invalid) {
-			test(`refuses ${label} with 400, asks git nothing, and writes no row`, async () => {
+			test(`refuses ${label} with 400, asks git nothing, writes no row, and is audited once`, async () => {
 				gitCalls = [];
 				const before = await rowCounts(SKILL_TABLES);
 				const rowsBefore = await registryState(name);
+				const mark = http.audit.seq;
 				const response = await http.send("/skills/propose", body);
 
 				expect(response.status).toBe(400);
 				expect(gitCalls).toEqual([]);
 				expect(await rowCounts(SKILL_TABLES)).toEqual(before);
 				expect(await registryState(name)).toEqual(rowsBefore);
+				// An object reaches the audit (server.ts:1414) before the field check.
+				expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("skills_propose", "rest"));
 			});
 		}
 
 		for (const [label, payload] of NON_OBJECT_BODIES) {
-			test(`refuses ${label} with 400, asks git nothing, and writes no row`, async () => {
+			test(`refuses ${label} with 400, asks git nothing, writes no row, and leaves no audit record`, async () => {
 				gitCalls = [];
 				const before = await rowCounts(SKILL_TABLES);
 				const rowsBefore = await registryState(name);
+				const mark = http.audit.seq;
 				const response = await http.send("/skills/propose", payload);
 
 				expect(response.status).toBe(400);
+				expect(await response.json()).toEqual({ error: refusalReason(payload, "body must be a JSON object") });
 				expect(gitCalls).toEqual([]);
 				expect(await rowCounts(SKILL_TABLES)).toEqual(before);
 				expect(await registryState(name)).toEqual(rowsBefore);
+				// A body that is not an object skips the audit (server.ts:1414, `fields &&`).
+				expect(auditedFields(auditAfter(http.audit, mark))).toEqual([]);
 			});
 		}
 	});
@@ -441,13 +529,14 @@ describeLive("skill proposals: POST /skills/propose and MCP skills_propose", () 
 	describe("MCP skills_propose", () => {
 		// Governance is `report`, as on the REST door: the registry is written only under report or enforce, so with it
 		// off the registry assertions could never see a row.
-		const governed = { SUBSTRATE_SKILLS_GOVERNANCE: "report" };
+		let http: HttpHarness;
 		let client: Client;
 		beforeAll(async () => {
-			client = await connectMcp({ index: store, greptime: ledgerStub().greptime, skillRun: run }, OMP, governed);
+			http = await startHttp({ index: store, greptime: ledgerStub().greptime, skillRun: run }, { ...governed, ...NON_OPERATOR });
+			client = await http.mcp();
 		});
 
-		test("a valid control is opened and records one registry row", async () => {
+		test("a valid control is opened, records one registry row, and is audited once", async () => {
 			const proposer: SkillProposer = {
 				propose: async (): Promise<ProposeResult> => ({
 					status: "opened",
@@ -458,38 +547,45 @@ describeLive("skill proposals: POST /skills/propose and MCP skills_propose", () 
 					redactions: [],
 				}),
 			};
-			const control = await connectMcp({ index: store, greptime: ledgerStub().greptime, skills: proposer }, OMP, governed);
+			const control = await startHttp({ index: store, greptime: ledgerStub().greptime, skills: proposer }, { ...governed, ...NON_OPERATOR });
+			const controlClient = await control.mcp();
 			const before = await rowCounts(SKILL_TABLES);
-			const reply = await replyOf(control, "skills_propose", valid);
+			const mark = control.audit.seq;
+			const reply = await replyOf(controlClient, "skills_propose", valid);
 
 			expect(reply).toMatchObject({ status: "opened" });
 			expect((await rowCounts(SKILL_TABLES)).skills_registry).toBe(before.skills_registry! + 1);
 			expect(await registryState(name)).toContainEqual({ pr_number: 4343, state: "proposed", decided_by: null, decided_at: null });
+			expect(auditedFields(auditAfter(control.audit, mark))).toEqual(reachedGate("skills_propose", "mcp"));
 		});
 
 		for (const [label, body] of invalid) {
-			test(`refuses ${label} and writes no row`, async () => {
+			test(`refuses ${label}, writes no row, and is audited before dispatch`, async () => {
 				gitCalls = [];
 				const before = await rowCounts(SKILL_TABLES);
 				// Counts alone cannot see an UPDATE: the row of `name`, written by the control above, is compared as well.
 				const rowsBefore = await registryState(name);
+				const mark = http.audit.seq;
 
 				expect(await refuses(client, "skills_propose", body)).toBe(true);
 				expect(gitCalls).toEqual([]);
 				expect(await rowCounts(SKILL_TABLES)).toEqual(before);
 				expect(await registryState(name)).toEqual(rowsBefore);
+				expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("skills_propose", "mcp"));
 			});
 		}
 
-		test("refuses a non-object argument list and writes no row", async () => {
+		test("refuses a non-object argument list, writes no row, and is audited before dispatch", async () => {
 			gitCalls = [];
 			const before = await rowCounts(SKILL_TABLES);
 			const rowsBefore = await registryState(name);
+			const mark = http.audit.seq;
 
 			expect(await refuses(client, "skills_propose", [])).toBe(true);
 			expect(gitCalls).toEqual([]);
 			expect(await rowCounts(SKILL_TABLES)).toEqual(before);
 			expect(await registryState(name)).toEqual(rowsBefore);
+			expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("skills_propose", "mcp"));
 		});
 	});
 });
@@ -533,41 +629,52 @@ describeLive("skill approvals: POST /skills/approve and MCP skills_approve", () 
 		});
 
 		for (const [label, body] of invalid) {
-			test(`refuses ${label} with 400 and writes no registry row`, async () => {
+			test(`refuses ${label} with 400, writes no registry row, and is audited once`, async () => {
 				const before = await rowCounts(SKILL_TABLES);
+				const mark = http.audit.seq;
 				const response = await http.send("/skills/approve", body);
 
 				expect(response.status).toBe(400);
 				expect(await rowCounts(SKILL_TABLES)).toEqual(before);
 				expect(await registryState(valid.name)).toEqual(PENDING);
+				// An object reaches the audit (server.ts:1445) before the field check.
+				expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("skills_approve", "rest"));
 			});
 		}
 
 		for (const [label, payload] of NON_OBJECT_BODIES) {
-			test(`refuses ${label} with 400 and writes no registry row`, async () => {
+			test(`refuses ${label} with 400, writes no registry row, and leaves no audit record`, async () => {
 				const before = await rowCounts(SKILL_TABLES);
+				const mark = http.audit.seq;
 				const response = await http.send("/skills/approve", payload);
 
 				expect(response.status).toBe(400);
+				expect(await response.json()).toEqual({ error: refusalReason(payload, "body must be a JSON object") });
 				expect(await rowCounts(SKILL_TABLES)).toEqual(before);
 				expect(await registryState(valid.name)).toEqual(PENDING);
+				// A body that is not an object skips the audit (server.ts:1445, `fields &&`).
+				expect(auditedFields(auditAfter(http.audit, mark))).toEqual([]);
 			});
 		}
 	});
 
 	describe("MCP skills_approve", () => {
+		let http: HttpHarness;
 		let client: Client;
 		beforeAll(async () => {
-			client = await connectMcp({ index: store, greptime: ledgerStub().greptime }, OPERATOR);
+			http = await startHttp({ index: store, greptime: ledgerStub().greptime });
+			client = await http.mcp();
 		});
 
 		for (const [label, body] of invalid) {
-			test(`refuses ${label} and writes no registry row`, async () => {
+			test(`refuses ${label}, writes no registry row, and is audited before dispatch`, async () => {
 				const before = await rowCounts(SKILL_TABLES);
+				const mark = http.audit.seq;
 
 				expect(await refuses(client, "skills_approve", body)).toBe(true);
 				expect(await rowCounts(SKILL_TABLES)).toEqual(before);
 				expect(await registryState(valid.name)).toEqual(PENDING);
+				expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("skills_approve", "mcp"));
 			});
 		}
 	});
@@ -584,58 +691,74 @@ describe("docs ingest: POST /docs/ingest and MCP docs_ingest", () => {
 		...over,
 	});
 	const valid = { dataset: "agent-substrate", pages: [page()] };
-	/** Refused batches. None may reach an upload. */
-	const invalid: Array<[string, Record<string, unknown>]> = [
-		["a missing required field (dataset)", without(valid, "dataset")],
-		["a wrong type (pages is a string)", { ...valid, pages: "docs/data-planes.md" }],
-		["a wrong type (page path is a number)", { ...valid, pages: [page({ path: 7 })] }],
-		["a wrong type (page body is missing)", { ...valid, pages: [without(page(), "body")] }],
-		["a page with no source URL", { ...valid, pages: [without(page(), "source_url")] }],
-		["an unknown dataset", { ...valid, dataset: "no-such-dataset" }],
+	/**
+	 * Refused batches. None may reach an upload. The third field says where the door refuses: `false` is the shape check
+	 * before the audit call (server.ts:1262-1296), so no record is written; `true` is a batch the shape check passes, which
+	 * reaches `auditedRest` (server.ts:1297) and is refused by the service after it.
+	 */
+	const invalid: Array<[string, Record<string, unknown>, boolean]> = [
+		["a missing required field (dataset)", without(valid, "dataset"), false],
+		["a wrong type (pages is a string)", { ...valid, pages: "docs/data-planes.md" }, false],
+		["a wrong type (page path is a number)", { ...valid, pages: [page({ path: 7 })] }, false],
+		["a wrong type (page body is missing)", { ...valid, pages: [without(page(), "body")] }, false],
+		["a page with no source URL", { ...valid, pages: [without(page(), "source_url")] }, true],
+		["an unknown dataset", { ...valid, dataset: "no-such-dataset" }, true],
 		[
 			"a valid page followed by an invalid one (the valid page must not upload)",
 			{ ...valid, pages: [page({ path: "docs/first.md" }), without(page({ path: "docs/second.md" }), "source_url")] },
+			true,
 		],
 	];
 
-	test("a valid control is stored and makes exactly one upload", async () => {
+	test("a valid control is stored, makes exactly one upload, and is audited once", async () => {
 		const fake = new RagflowFake();
 		const http = await startHttp({ index: null, greptime: ledgerStub().greptime, ragflowFetch: fake.fetch });
+		const mark = http.audit.seq;
 		const response = await http.send("/docs/ingest", valid);
 
 		expect(response.status).toBe(200);
 		expect(fake.uploads).toHaveLength(1);
+		expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("docs_ingest", "rest"));
 	});
 
-	for (const [label, body] of invalid) {
-		test(`POST /docs/ingest refuses ${label} with 400 and uploads nothing`, async () => {
+	for (const [label, body, reachesGate] of invalid) {
+		const audit = reachesGate ? "is audited once" : "leaves no audit record";
+		test(`POST /docs/ingest refuses ${label} with 400, uploads nothing, and ${audit}`, async () => {
 			const fake = new RagflowFake();
 			const http = await startHttp({ index: null, greptime: ledgerStub().greptime, ragflowFetch: fake.fetch });
+			const mark = http.audit.seq;
 			const response = await http.send("/docs/ingest", body);
 
 			expect(response.status).toBe(400);
 			expect(fake.uploads).toEqual([]);
+			expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachesGate ? reachedGate("docs_ingest", "rest") : []);
 		});
 	}
 
 	for (const [label, payload] of NON_OBJECT_BODIES) {
-		test(`POST /docs/ingest refuses ${label} with 400 and uploads nothing`, async () => {
+		test(`POST /docs/ingest refuses ${label} with 400, uploads nothing, and leaves no audit record`, async () => {
 			const fake = new RagflowFake();
 			const http = await startHttp({ index: null, greptime: ledgerStub().greptime, ragflowFetch: fake.fetch });
+			const mark = http.audit.seq;
 			const response = await http.send("/docs/ingest", payload);
 
 			expect(response.status).toBe(400);
+			expect(await response.json()).toEqual({ error: refusalReason(payload, "request body must be a JSON object") });
 			expect(fake.uploads).toEqual([]);
+			expect(auditedFields(auditAfter(http.audit, mark))).toEqual([]);
 		});
 	}
 
 	for (const [label, body] of invalid) {
-		test(`MCP docs_ingest refuses ${label} and uploads nothing`, async () => {
+		test(`MCP docs_ingest refuses ${label}, uploads nothing, and is audited before dispatch`, async () => {
 			const fake = new RagflowFake();
-			const client = await connectMcp({ index: null, greptime: ledgerStub().greptime, ragflowFetch: fake.fetch }, OMP);
+			const http = await startHttp({ index: null, greptime: ledgerStub().greptime, ragflowFetch: fake.fetch }, NON_OPERATOR);
+			const client = await http.mcp();
+			const mark = http.audit.seq;
 
 			expect(await refuses(client, "docs_ingest", body)).toBe(true);
 			expect(fake.uploads).toEqual([]);
+			expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("docs_ingest", "mcp"));
 		});
 	}
 });
