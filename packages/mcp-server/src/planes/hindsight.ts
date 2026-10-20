@@ -597,6 +597,8 @@ export interface RecallRequest {
 	tags?: string[];
 	tags_match?: string;
 	signal?: AbortSignal;
+	/** Keeps a hit only when true. Applied before the per-bank cap, so a dropped hit never uses up one of its slots. */
+	keep?: (hit: RecallHit) => boolean;
 }
 
 /**
@@ -657,7 +659,7 @@ export async function recallBank(
 		const tags = "tags" in entry && Array.isArray(entry.tags) ? entry.tags.filter((tag): tag is string => typeof tag === "string") : [];
 		const metadata = "metadata" in entry ? recordOf(entry.metadata) : {};
 		const score = "score" in entry && typeof entry.score === "number" ? entry.score : undefined;
-		hits.push({
+		const hit: RecallHit = {
 			id,
 			text: entry.text,
 			...(documentId !== undefined ? { document_id: documentId } : {}),
@@ -666,7 +668,9 @@ export async function recallBank(
 			tags,
 			metadata,
 			...(score !== undefined ? { score } : {}),
-		});
+		};
+		if (request.keep !== undefined && !request.keep(hit)) continue;
+		hits.push(hit);
 		if (hits.length >= MAX_RECALL_PER_BANK) break;
 	}
 	return { ok: true, value: hits };

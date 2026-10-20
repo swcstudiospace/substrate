@@ -161,13 +161,21 @@ export async function recallMemories(
 	}
 	const config = deps.config;
 	const fetchImpl = deps.fetchImpl ?? fetch;
+	const caller: MemoryCaller = { surface: callerSurface ?? "unattributed", repo: callerRepo };
+	// A predicate, not a post-filter: recallBank stops at MAX_RECALL_PER_BANK, so a hit this caller may not see must go before that cap counts it.
+	const keep = (hit: RecallHit): boolean =>
+		visibleToCaller(
+			typeof hit.metadata.scope === "string" ? hit.metadata.scope : undefined,
+			typeof hit.metadata.repo === "string" ? hit.metadata.repo : undefined,
+			caller,
+		);
 	const controller = new AbortController();
 	const budget = setTimeout(() => controller.abort(), deps.budgetMs ?? DEFAULT_RECALL_BUDGET_MS);
 	let settled: PromiseSettledResult<{ bank: string; hits: RecallHit[]; reason?: string; timedOut?: boolean }>[];
 	try {
 		settled = await Promise.allSettled(
 			resolved.banks.map(async (bank) => {
-				const recalled = await recallBank(config, bank, { query, signal: controller.signal }, fetchImpl);
+				const recalled = await recallBank(config, bank, { query, signal: controller.signal, keep }, fetchImpl);
 				if (!recalled.ok) {
 					// The shared budget is the only abort source on this leg, so a
 					// timeout here is the budget firing (uplift-2 R3): named as such,
@@ -195,15 +203,7 @@ export async function recallMemories(
 			if (outcome.value.timedOut === true) timedOut = true;
 			continue;
 		}
-		const caller: MemoryCaller = { surface: callerSurface ?? "unattributed", repo: callerRepo };
-		const visible = outcome.value.hits.filter((raw) =>
-			visibleToCaller(
-				typeof raw.metadata.scope === "string" ? raw.metadata.scope : undefined,
-				typeof raw.metadata.repo === "string" ? raw.metadata.repo : undefined,
-				caller,
-			),
-		);
-		for (const hit of visible.slice(0, MAX_RECALL_PER_BANK)) scored.push({ bank, hit });
+		for (const hit of outcome.value.hits) scored.push({ bank, hit });
 	}
 	const results = dedupeHits(scored)
 		.sort((left, right) => (right.hit.score ?? 0) - (left.hit.score ?? 0))

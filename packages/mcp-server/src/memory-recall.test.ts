@@ -97,6 +97,44 @@ describe("recallMemories", () => {
 		expect(reply.results.map((hit) => hit.bank)).toEqual(["sub-cursor"]);
 	});
 
+	test("the cap applies after the repo filter: a matching hit past four other-repo hits is returned", async () => {
+		const fake = new HindsightFake();
+		const elsewhere = Array.from({ length: 4 }, (_, index) => ({
+			id: `elsewhere${index}`,
+			text: `lease note for another repo ${index}`,
+			document_id: `mwd_elsewhere${index}`,
+			tags: ["hermes"],
+			metadata: { scope: "agent:hermes", repo: "acme/elsewhere" },
+			score: 0.9,
+		}));
+		fake.seed("sub-hermes", [
+			...elsewhere,
+			{ id: "mine", text: "lease fenced for acme", document_id: "mwd_mine", tags: ["hermes"], metadata: { scope: "agent:hermes", repo: "acme/app" }, score: 0.1 },
+		]);
+		const reply = await recallMemories(deps(fake), "lease", "hermes", "acme/app");
+		expect(reply.results.map((hit) => hit.document_id)).toEqual(["mwd_mine"]);
+	});
+
+	test("a caller that names no repo sees no agent-scope row", async () => {
+		const fake = new HindsightFake();
+		fake.seed("sub-hermes", [
+			{ id: "a1", text: "agent note for acme", document_id: "mwd_a1", tags: ["hermes"], metadata: { scope: "agent:hermes", repo: "acme/app" }, score: 0.9 },
+			{ id: "r1", text: "shared repo lease rule", document_id: "mwd_r1", tags: ["hermes"], metadata: { scope: "repo:acme/app" }, score: 0.5 },
+		]);
+		const reply = await recallMemories(deps(fake), "lease", "hermes");
+		expect(reply.results.map((hit) => hit.document_id)).toEqual(["mwd_r1"]);
+	});
+
+	test("a legacy agent row with no repo stays hidden from a repo-scoped read", async () => {
+		const fake = new HindsightFake();
+		fake.seed("sub-hermes", [
+			{ id: "legacy", text: "legacy agent lease note", document_id: "mwd_legacy", tags: ["hermes"], metadata: { scope: "agent:hermes" }, score: 0.9 },
+			{ id: "a1", text: "agent note for acme", document_id: "mwd_a1", tags: ["hermes"], metadata: { scope: "agent:hermes", repo: "acme/app" }, score: 0.5 },
+		]);
+		const reply = await recallMemories(deps(fake), "lease", "hermes", "acme/app");
+		expect(reply.results.map((hit) => hit.document_id)).toEqual(["mwd_a1"]);
+	});
+
 describe("registration", () => {
 	test("the decided fail-open policy covers the new tool and route names", () => {
 		expect(toolLabel("memory_recall")).toBe("memory_recall");
