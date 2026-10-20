@@ -266,6 +266,41 @@ describe("a quoted credential value with spaces loses every word", () => {
 		expect(redact("DB_PASS=abc def")).toBe(`DB_PASS=${REDACTED} def`);
 		expect(redactSkillContent("DB_PASS=abc def").text).toBe(`DB_PASS=${REDACTED} def`);
 	});
+	test("an escaped-quote JSON string loses every word on both paths", () => {
+		for (const line of [String.raw`{\"password\": \"${SPACED}\"}`, String.raw`\"password\": \"${SPACED}\"`]) {
+			lostEvery(redact(line));
+			lostEvery(redactSkillContent(line).text);
+		}
+		expect(redact(String.raw`{\"password\": \"${SPACED}\"}`)).toBe(String.raw`{\"password\": ${REDACTED}}`);
+		expect(redact(String.raw`\"password\": \"${SPACED}\"`)).toBe(String.raw`\"password\": ${REDACTED}`);
+	});
+	test("an escaped-quote bare assignment loses every word, double or single quoted", () => {
+		for (const line of [
+			String.raw`password=\"${SPACED}\"`,
+			String.raw`password=\'${SPACED}\'`,
+			String.raw`DB_PASS=\"${SPACED}\"`,
+			String.raw`DB_PASS=\'${SPACED}\'`,
+		]) {
+			lostEvery(redact(line));
+			lostEvery(redactSkillContent(line).text);
+		}
+		expect(redact(String.raw`password=\"${SPACED}\"`)).toBe(`password=${REDACTED}`);
+		expect(redact(String.raw`password=\'${SPACED}\'`)).toBe(`password=${REDACTED}`);
+	});
+	test("an escaped value ends at its own closing escaped quote", () => {
+		const out = redact(String.raw`password=\"x\", other: \"y\"`);
+		expect(out).toContain(`password=${REDACTED}`);
+		expect(out).toContain(String.raw`other: \"y\"`);
+		expect(out).not.toContain(String.raw`\"x\"`);
+	});
+	test("plain quoted values keep the same placeholder shape", () => {
+		expect(redact(`{"password": "${SPACED}"}`)).toBe(`{"password": ${REDACTED}}`);
+		expect(redact(`password="${SPACED}"`)).toBe(`password=${REDACTED}`);
+		for (const line of [`{"password": "${SPACED}"}`, `password="${SPACED}"`]) {
+			lostEvery(redact(line));
+			lostEvery(redactSkillContent(line).text);
+		}
+	});
 });
 
 // ── One planted secret per named rule (D-04 merge, D18-04) ────────────────────
