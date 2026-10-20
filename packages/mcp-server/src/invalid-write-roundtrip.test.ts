@@ -52,6 +52,7 @@ import { RagflowFake } from "./ragflow-fake.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 import type { ProposeResult, Runner, SkillProposer } from "./skills/propose.ts";
+import { APPROVAL_RULES } from "./skills/registry.ts";
 import type { SubstrateEvent } from "./types.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
@@ -148,7 +149,7 @@ async function startHttp(stores: Record<string, unknown>, env: Record<string, st
  * Calls a tool and reports whether it refused. Two shapes count as a refusal, and only the one this call produces:
  *  - the SDK's input validation for this tool: an `isError` reply reading `Invalid arguments for tool <name>:` (SDK 1.32
  *    prefixes it with `Input validation error:`), which a missing field, a wrong type or a value outside an enum gets;
- *  - the tool's own refusal: an `isError` reply whose text is a JSON object, as the skill and docs handlers answer.
+ *  - the tool's own refusal: an `isError` reply whose text is a JSON object carrying the refusal field its handler sets (see REFUSAL_BODY).
  * A non-object argument list never reaches a tool. The protocol rejects the request, and the client gets a thrown McpError
  * with code InternalError whose message is zod's `expected record` error on `arguments`.
  * A call that succeeds is not a refusal (false). Anything else fails the test on the real fault instead of passing as a
@@ -169,7 +170,7 @@ async function refuses(client: Client, name: string, args: unknown): Promise<boo
 	const text = textOf(result);
 	const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 	if (new RegExp(`^(MCP error -?\\d+: )?(Input validation error: )?Invalid arguments for tool ${escaped}: `).test(text)) return true;
-	if (isJsonObject(text)) return true;
+	if (isRefusalBody(name, text)) return true;
 	throw new Error(`${name} failed, and not as a refusal: ${text.slice(0, 200)}`);
 }
 
@@ -181,14 +182,32 @@ function textOf(result: unknown): string {
 	return first !== null && typeof first === "object" && "text" in first && typeof first.text === "string" ? first.text : "";
 }
 
-/** Whether a reply's text is a JSON object: a tool's refusal body, as opposed to a bare error message. */
-function isJsonObject(text: string): boolean {
+/**
+ * The refusal field each tool's handler sets on its JSON reply, tested on the parsed object. A JSON object that fails
+ * its tool's test is not a refusal: a handler crash whose message happens to be JSON fails here.
+ *  - `docs_ingest`: `refused: true`, the shape of every refused ingest (docs-ingest.ts:202, :343; mcp.ts:928).
+ *  - `skills_approve`: `rule`, one of APPROVAL_RULES, on every value refusal (registry.ts:69, :176-179, :210-212; mcp.ts:1126).
+ *  - `skills_propose`: `refused: true` on every refusal and denial (request.ts:81, :84). The failure body (request.ts:87)
+ *    carries no marker, so a handler crash whose message happens to be a JSON object is not accepted.
+ * `memory_write` answers no JSON refusal (mcp.ts:348 sends no `isError`), so any JSON reply from it is not one.
+ */
+const REFUSAL_BODY: Record<string, (body: Record<string, unknown>) => boolean> = {
+	docs_ingest: (body) => body.refused === true,
+	skills_approve: (body) => typeof body.rule === "string" && (APPROVAL_RULES as readonly string[]).includes(body.rule),
+	skills_propose: (body) => body.refused === true,
+};
+
+/** Whether a reply's text is the refusal body of `name`: a JSON object carrying that tool's refusal field. */
+function isRefusalBody(name: string, text: string): boolean {
+	let parsed: unknown;
 	try {
-		const parsed: unknown = JSON.parse(text);
-		return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed);
+		parsed = JSON.parse(text);
 	} catch {
 		return false;
 	}
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+	const refusalBody = Object.hasOwn(REFUSAL_BODY, name) ? REFUSAL_BODY[name] : undefined;
+	return refusalBody !== undefined && refusalBody(parsed as Record<string, unknown>);
 }
 
 /** The first text block of a tool reply, parsed. A non-JSON reply parses to `undefined`. */

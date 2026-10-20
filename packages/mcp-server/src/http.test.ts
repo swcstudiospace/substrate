@@ -1394,7 +1394,7 @@ describe("POST /skills/propose", () => {
 		const reply = await propose(harness, "tok-agent");
 
 		expect(reply.status).toBe(400);
-		expect(reply.json).toEqual({ error: refusal.message, findings: [{ file: "SKILL.md", line: 4, rule: "github" }] });
+		expect(reply.json).toEqual({ error: refusal.message, findings: [{ file: "SKILL.md", line: 4, rule: "github" }], refused: true });
 	});
 
 	test("a failed git or gh step is 502, redacted and at most 400 characters", async () => {

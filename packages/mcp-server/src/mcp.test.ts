@@ -722,7 +722,7 @@ describe("skills_propose", () => {
 		const reply = await call(client, "skills_propose", args);
 
 		expect(reply.isError).toBe(true);
-		expect(reply.json()).toEqual({ error: refusal.message, findings: [{ file: "SKILL.md", line: 4, rule: "github" }] });
+		expect(reply.json()).toEqual({ error: refusal.message, findings: [{ file: "SKILL.md", line: 4, rule: "github" }], refused: true });
 	});
 
 	test("a failed git or gh step is an error with the redacted, capped reason", async () => {

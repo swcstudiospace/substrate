@@ -69,7 +69,7 @@ export function toProposalRequest(body: Record<string, unknown>): SkillProposalR
 /** What a failed proposal answers with: the route's status and JSON body, and the tool's refusal payload. */
 export interface ProposalFailure {
 	status: 400 | 401 | 403 | 502;
-	body: { error: string; findings?: Array<{ file: string; line: number; rule: string }> };
+	body: { refused?: true; error: string; findings?: Array<{ file: string; line: number; rule: string }> };
 }
 
 /**
@@ -78,10 +78,10 @@ export interface ProposalFailure {
  * never a value; a failed git or gh step is redacted and capped.
  */
 export function proposalFailure(cause: unknown): ProposalFailure | null {
-	if (cause instanceof SkillProposalDenied) return { status: cause.status, body: { error: cause.message } };
+	if (cause instanceof SkillProposalDenied) return { status: cause.status, body: { error: cause.message, refused: true } };
 	if (cause instanceof ProposeRefused) {
 		const findings = cause.findings?.map(({ file, line, rule }) => ({ file, line, rule }));
-		return { status: 400, body: { error: cause.message, ...(findings ? { findings } : {}) } };
+		return { status: 400, body: { error: cause.message, refused: true, ...(findings ? { findings } : {}) } };
 	}
 	if (cause instanceof ProposeFailed) {
 		return { status: 502, body: { error: redact(cause.message).slice(0, FAILURE_MESSAGE_MAX) } };
