@@ -52,6 +52,7 @@ function fixture(): Fixture {
 	mkdirSync(worktree);
 	mkdirSync(gitDir, { recursive: true });
 	writeFileSync(join(worktree, ".git"), `gitdir: ${gitDir}\n`);
+	writeFileSync(join(gitDir, "gitdir"), `${join(worktree, ".git")}\n`);
 	return { root, worktree, gitDir: realpathSync(gitDir) };
 }
 
@@ -330,6 +331,21 @@ describe("worktree .git trust boundary: the guest can rewrite .git through the m
 				const file = join(f.root, "repo", ".git", "worktrees", "file");
 				writeFileSync(file, "");
 				pointAt(f, file);
+			},
+		],
+		[
+			"a gitdir with no back-pointer",
+			(f) => rmSync(join(f.gitDir, "gitdir")),
+		],
+		[
+			"a gitdir registered to another graph's worktree",
+			(f) => {
+				const other = join(f.root, `${GID}-other`);
+				const otherGitDir = join(f.root, "repo", ".git", "worktrees", `${GID}-other`);
+				mkdirSync(other);
+				mkdirSync(otherGitDir, { recursive: true });
+				writeFileSync(join(otherGitDir, "gitdir"), `${join(other, ".git")}\n`);
+				pointAt(f, otherGitDir);
 			},
 		],
 	];

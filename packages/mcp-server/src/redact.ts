@@ -524,7 +524,7 @@ const SKILL_RULES: readonly SkillRule[] = [
 		replacement: REDACTED,
 		accept: (matched) => /[0-9]/.test(matched),
 	},
-	{ name: "password", rule: "password", pattern: /(password["']?[ \t]*[:=][ \t]*)(\S+)/dgi, value: 2, replacement: REDACTED },
+	{ name: "password", rule: "password", pattern: /(password["']?[ \t]*[:=][ \t]*)("[^"\n]*"|'[^'\n]*'|\S+)/dgi, value: 2, replacement: REDACTED },
 	{ name: "password-env", rule: "password", pattern: /\b([A-Z0-9_]*(?:PASSWORD|PASSWD|PASS)[ \t]*=[ \t]*)(\S+)/dgi, value: 2, replacement: REDACTED },
 	{ name: "daytona", rule: "assignment", pattern: /\b(DAYTONA_(?:API_)?KEY[ \t]*=[ \t]*)(\S+)/dgi, value: 2, replacement: REDACTED },
 	{ name: "vault", rule: "assignment", pattern: /\b((?:VAULT_TOKEN|VAULT_TOKEN_ID|X-VAULT-TOKEN)[ \t]*[:=][ \t]*)(\S+)/dgi, value: 2, replacement: REDACTED },

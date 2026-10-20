@@ -106,10 +106,15 @@ export const INGEST_LAG_MS = 300_000;
 export const INGEST_BUDGET_MS = 1_000;
 
 /**
- * Rows one idempotency lookup reads: the cell's rows at one exact `ts`, matched against the key in
- * code. A hard bound, well above the handful of rows one (surface, repo, graph_id, kind, ts) cell holds.
+ * Rows one page of the idempotency lookup reads: the cell's rows at one exact `ts`, in `id` order,
+ * matched against the key in code. The lookup pages through the cell, so this is a page size and
+ * not a cap on the rows a cell may hold; see {@link IDEMPOTENCY_LOOKUP_MAX_PAGES}.
  */
 export const IDEMPOTENCY_LOOKUP_LIMIT = 5;
+/** Full pages one lookup reads before it gives up as inconclusive. */
+export const IDEMPOTENCY_LOOKUP_MAX_PAGES = 20;
+/** The ids keyset paging can carry safely: the substrate's `evt_<hex>` and anything shaped like it. */
+const IDEMPOTENCY_ID = /^[A-Za-z0-9_-]{1,200}$/;
 
 /** Columns of `agent_events`, in the order every statement uses them. */
 export const EVENT_COLUMNS = [
@@ -1208,24 +1213,30 @@ export class GreptimeClient {
 	}
 
 	/**
-	 * The stored event a replay duplicates, if any (U5-4a). One bounded read, run only for a
-	 * replay-marked request (`accept`) or a keyed one (`enforce`), and by `Substrate.append`
-	 * INSIDE the per-session emit gate so two concurrent same-key requests cannot both miss.
+	 * The stored event a replay duplicates, if any (U5-4a). Run only for a replay-marked request
+	 * (`accept`) or a keyed one (`enforce`), and by `Substrate.append` INSIDE the per-session emit
+	 * gate so two concurrent same-key requests cannot both miss.
 	 *
 	 * The cell is the table's primary-key prefix (`surface`, `repo`, `graph_id`, `kind`) plus the
 	 * exact normalised `ts` the client fixed at its first attempt. A NULL `repo` or `graph_id` is
-	 * `IS NULL`: `= NULL` matches nothing. `LIMIT` {@link IDEMPOTENCY_LOOKUP_LIMIT}, a small bound.
+	 * `IS NULL`: `= NULL` matches nothing.
+	 *
+	 * The cell is read a page at a time, {@link IDEMPOTENCY_LOOKUP_LIMIT} rows per statement, in
+	 * `"id"` order. Every page after the first is keyset-paged: it asks only for ids after the last
+	 * one the previous page returned, never OFFSET.
 	 *
 	 * The key is matched in code, never in SQL. `normalizeEvent` appends `_ik` as the payload's last
 	 * key, so the stored text ends `"_ik":"<key>"}`; each returned payload is checked for that exact
 	 * suffix, and anchoring there means a caller who buried a nested `_ik` in their own payload cannot
 	 * masquerade as the original. A `LIKE` pattern is not used: `_` in a key is a wildcard in that
 	 * dialect, so a lookalike key would match, and an `ESCAPE` clause is unverified here. A row without
-	 * the exact suffix is skipped, never taken as a hit that would swallow a new event. If the read
-	 * comes back FULL ({@link IDEMPOTENCY_LOOKUP_LIMIT} rows) and none carries the exact suffix, the real
-	 * row may be hiding past the limit, so the answer is inconclusive and this throws like any lookup
-	 * error rather than reporting a miss that would append a duplicate. A short read without an exact
-	 * match is a genuine miss.
+	 * the exact suffix is skipped, never taken as a hit that would swallow a new event.
+	 *
+	 * A short page without an exact match is a genuine miss. A full page without one means the cell may
+	 * hold more rows, so the next page is read. If {@link IDEMPOTENCY_LOOKUP_MAX_PAGES} full pages pass
+	 * without an exact match, the real row may still be past the bound, so the answer is inconclusive and
+	 * this throws like any lookup error rather than reporting a miss that would append a duplicate. A page
+	 * whose last id is not a plain identifier cannot be keyset-paged safely, so it throws the same way.
 	 *
 	 * It does not catch what it did not look for: only the same cell and `ts`. That is the contract,
 	 * not an accident. Whether the exact-`ts` cell read is cheap on the production image has not been
@@ -1249,24 +1260,35 @@ export class GreptimeClient {
 		const equals = (column: "surface" | "repo" | "graph_id" | "kind", value: string | null): string =>
 			value === null ? `"${column}" IS NULL` : `"${column}" = ${this.q(value)}`;
 		const suffix = `"${IDEMPOTENCY_PAYLOAD_KEY}":"${key}"}`;
-		const rows = await this.sql(
-			`SELECT "id", "hash", "payload" FROM "agent_events" WHERE ${equals("surface", cell.surface)} AND ${equals("repo", cell.repo)} ` +
-				`AND ${equals("graph_id", cell.graph_id)} AND ${equals("kind", cell.kind)} AND "ts" = ${this.q(cell.ts)} ` +
-				`LIMIT ${IDEMPOTENCY_LOOKUP_LIMIT}`,
-		);
-		let found: { id: string; hash: string } | null = null;
-		for (const row of rows) {
-			if (typeof row.id !== "string" || typeof row.hash !== "string") {
-				throw new GreptimeError("idempotency lookup returned a row without a string id and hash");
-			}
-			if (found === null && typeof row.payload === "string" && row.payload.endsWith(suffix)) found = { id: row.id, hash: row.hash };
-		}
-		if (found === null && rows.length >= IDEMPOTENCY_LOOKUP_LIMIT) {
-			throw new GreptimeError(
-				`idempotency lookup inconclusive: ${rows.length} rows matched the key pattern and none ends with the exact key`,
+		const cellWhere =
+			`${equals("surface", cell.surface)} AND ${equals("repo", cell.repo)} AND ${equals("graph_id", cell.graph_id)} ` +
+			`AND ${equals("kind", cell.kind)} AND "ts" = ${this.q(cell.ts)}`;
+		let after: string | null = null;
+		for (let page = 0; page < IDEMPOTENCY_LOOKUP_MAX_PAGES; page++) {
+			const rows = await this.sql(
+				`SELECT "id", "hash", "payload" FROM "agent_events" WHERE ${cellWhere}` +
+					(after === null ? "" : ` AND "id" > ${this.q(after)}`) +
+					` ORDER BY "id" ASC LIMIT ${IDEMPOTENCY_LOOKUP_LIMIT}`,
 			);
+			let found: { id: string; hash: string } | null = null;
+			for (const row of rows) {
+				if (typeof row.id !== "string" || typeof row.hash !== "string") {
+					throw new GreptimeError("idempotency lookup returned a row without a string id and hash");
+				}
+				if (found === null && typeof row.payload === "string" && row.payload.endsWith(suffix)) found = { id: row.id, hash: row.hash };
+			}
+			if (found !== null) return found;
+			// A short page is the whole rest of the cell: no exact match there is a genuine miss.
+			if (rows.length < IDEMPOTENCY_LOOKUP_LIMIT) return null;
+			const last = rows[rows.length - 1]!.id;
+			if (typeof last !== "string" || !IDEMPOTENCY_ID.test(last)) {
+				throw new GreptimeError("idempotency lookup refused a row id it cannot page past safely");
+			}
+			after = last;
 		}
-		return found;
+		throw new GreptimeError(
+			`idempotency lookup inconclusive: ${IDEMPOTENCY_LOOKUP_MAX_PAGES * IDEMPOTENCY_LOOKUP_LIMIT} rows of the cell matched none with the exact key`,
+		);
 	}
 
 	/**

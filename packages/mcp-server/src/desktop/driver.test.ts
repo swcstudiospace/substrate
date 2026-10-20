@@ -469,6 +469,30 @@ describe("createDesktopDriver", () => {
 			expect((refused as Error).message).not.toContain("other-host");
 			expect(calls).toEqual([contextArgv()]);
 		});
+
+		test("a hung context probe refuses the run before any action runs, naming no endpoint", async () => {
+			let hang = true;
+			const { calls, run } = recorder((argv) => (argv[1] === "context" && hang ? new Promise<BufferRunResult>(() => {}) : undefined));
+			const events: EventInput[] = [];
+			const driver = createDesktopDriver({ run, dir: tmpShots(), sleep: noSleep });
+
+			const refused = await driver
+				.run({ actions: [{ type: "key", keys: "Return" }], timeout: 1 }, { surface: "omp", emit: recording(events) })
+				.then(
+					() => null,
+					(error: unknown) => error,
+				);
+
+			expect(refused).toBeInstanceOf(Error);
+			expect((refused as Error).message).toContain("docker context probe failed; refusing desktop_run");
+			expect(calls).toEqual([contextArgv()]);
+			expect(events).toEqual([]);
+
+			hang = false;
+			const later = await driver.run({ actions: [{ type: "key", keys: "Return" }], timeout: 30 }, { surface: "omp", emit: recording(events) });
+			expect(later.log[0]?.ok).toBe(true);
+			expect(events).toHaveLength(1);
+		});
 	});
 
 	describe("failure diagnostics carry no caller text", () => {

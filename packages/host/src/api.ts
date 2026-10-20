@@ -100,7 +100,7 @@ export function createApiServer(service: ApiService, options: ApiOptions): Serve
 				sendJson(res, 401, { error: "unauthorized" });
 				return;
 			}
-			if (!isHealthz && req.method === "POST" && !(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+			if (!isHealthz && req.method === "POST" && !/^application\/json\s*(;|$)/i.test((req.headers["content-type"] ?? "").trim())) {
 				sendJson(res, 415, { error: "POST requires content-type application/json" });
 				return;
 			}

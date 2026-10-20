@@ -466,6 +466,14 @@ describe("redactSkillContent redacts real values", () => {
 			findings: [],
 		});
 	});
+	test("a quoted password redacts its whole value, not just the first word", () => {
+		expect(redactSkillContent('{"password": "correct horse battery"}')).toEqual({
+			text: `{"password": ${REDACTED}}`,
+			redactions: [{ line: 1, rule: "password" }],
+			findings: [],
+		});
+		expect(redactSkillContent("password: 'two words here'").text).toBe(`password: ${REDACTED}`);
+	});
 	test("redacting already-redacted text changes nothing more", () => {
 		const once = redactSkillContent(`LINEAR_API_KEY=${rnd(ALNUM, 16)}\nAuthorization: Bearer ` + "z".repeat(40));
 		expect(redactSkillContent(once.text)).toEqual({ text: once.text, redactions: [], findings: [] });

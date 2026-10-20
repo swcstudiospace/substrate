@@ -677,6 +677,22 @@ describe("findByIdempotencyKey", () => {
 		expect(await new GreptimeClient(config).findByIdempotencyKey(cell, "sess_key_1")).toEqual({ id: "real", hash: "hash-real" });
 	});
 
+	test("an exact match behind five non-matching rows is found on a later page", async () => {
+		const rows = [1, 2, 3, 4, 5, 6].map((index) => row(index === 6 ? "sess_key_1" : `other-key-${index}`, `e${index}`));
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes("LENGTH")) return records(["n"], [[3]]);
+			// Served as Greptime would: ids past the keyset bound, in id order, capped at the statement's LIMIT.
+			const after = /"id" > '([^']*)'/.exec(statement)?.[1];
+			const limit = Number(/LIMIT (\d+)$/.exec(statement)?.[1]);
+			return records(
+				["id", "hash", "payload"],
+				rows.filter((candidate) => after === undefined || String(candidate[0]) > after).slice(0, limit),
+			);
+		});
+		expect(await new GreptimeClient(config).findByIdempotencyKey(cell, "sess_key_1")).toEqual({ id: "e6", hash: "hash-e6" });
+		expect(sql.filter((statement) => statement.includes('FROM "agent_events"'))).toHaveLength(2);
+	});
+
 	test("a full read with no exact key is inconclusive, never a miss that would append a duplicate", async () => {
 		const rows = Array.from({ length: IDEMPOTENCY_LOOKUP_LIMIT }, (_, index) => row(`other-key-${index}`, `e${index}`));
 		cellRows(rows);

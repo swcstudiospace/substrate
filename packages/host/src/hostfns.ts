@@ -9,7 +9,7 @@
 
 import { execFile } from "node:child_process";
 import { closeSync, constants as fsConstants, lstatSync, openSync, readFileSync, realpathSync, type Stats, statSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { dirname, isAbsolute } from "node:path";
 import { redact } from "../../mcp-server/src/redact.ts";
 import { worktreeFor } from "./options.ts";
 import { isValidRepoSlug } from "./seed.ts";
@@ -194,8 +194,9 @@ export type GitSiteResult = { site: GitSite } | HostFnError;
 
 /**
  * The worktree's `.git` must be a regular file holding `gitdir: <absolute path>`, the path an existing directory
- * under `.git/worktrees/` and outside the worktree. The guest writes the worktree, so any other shape (directory,
- * symlink, pointer elsewhere) is refused, never followed.
+ * under `.git/worktrees/`, outside the worktree, and registered to this worktree: its `gitdir` back-pointer must name
+ * this worktree's own `.git`. The guest writes the worktree, so any other shape (directory, symlink, pointer into
+ * another graph's registration) is refused, never followed.
  */
 function resolveGitSite(worktree: string): GitSiteResult {
 	const dotGit = `${worktree}/.git`;
@@ -231,7 +232,30 @@ function resolveGitSite(worktree: string): GitSiteResult {
 	if (!gitDir.includes("/.git/worktrees/")) return { error: "worktree .git names a gitdir outside .git/worktrees/" };
 	if (gitDir.startsWith(`${worktreeReal}/`)) return { error: "worktree .git names a gitdir inside the worktree" };
 	if (!statSync(gitDir).isDirectory()) return { error: "worktree .git names a gitdir that is not a directory" };
+	if (!registeredTo(gitDir, worktreeReal)) return { error: "worktree .git names a gitdir not registered to this worktree" };
 	return { site: { worktree, gitDir } };
+}
+
+/**
+ * Git records each linked worktree in its gitdir: `<gitdir>/gitdir` holds the absolute path of that worktree's
+ * `.git` file. A gitdir whose back-pointer names any other path (another graph's worktree included) is refused.
+ */
+function registeredTo(gitDir: string, worktreeReal: string): boolean {
+	const backFile = `${gitDir}/gitdir`;
+	let back: string;
+	try {
+		const st = lstatSync(backFile);
+		if (!st.isFile() || st.size > GITDIR_FILE_MAX) return false;
+		back = readFileSync(backFile, "utf8").replace(/\r?\n$/, "");
+	} catch {
+		return false;
+	}
+	if (!isAbsolute(back) || !back.endsWith("/.git")) return false;
+	try {
+		return realpathSync(dirname(back)) === worktreeReal;
+	} catch {
+		return false;
+	}
 }
 
 export type GitPushResult = { pushed: string; output: string } | HostFnError;

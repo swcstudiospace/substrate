@@ -13,7 +13,7 @@ import type { AddressInfo } from "node:net";
 import { METRIC, findCounter } from "@substrate/observability";
 import { eventIdempotencyConfigWarnings, loadConfig, type GreptimeConfig } from "./config.ts";
 import { IDEMPOTENCY_RULES, IdempotencyRefusal, InvalidEventError, normalizeEvent, verifyChain } from "./event.ts";
-import { GreptimeClient } from "./greptime.ts";
+import { GreptimeClient, IDEMPOTENCY_LOOKUP_LIMIT, IDEMPOTENCY_LOOKUP_MAX_PAGES } from "./greptime.ts";
 import { createObservability, type Observability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate, type SubstrateObserver } from "./service.ts";
@@ -157,13 +157,16 @@ function fakeLedger(): FakeLedger {
 			};
 			const ts = /"ts" = '([^']*)'/.exec(statement)?.[1];
 			const limit = Number(/LIMIT (\d+)$/.exec(statement)?.[1] ?? 0);
-			// Insertion order, capped at the statement's own LIMIT: a lookalike stored first comes back first.
+			// The keyset bound a later page carries, and id order as `ORDER BY "id"` returns it.
+			const after = /"id" > '((?:[^']|'')*)'/.exec(statement)?.[1]?.replace(/''/g, "'");
 			const hits = ledger.rows
 				.filter(
 					(row) =>
 						(["surface", "repo", "graph_id", "kind"] as const).every((column) => row[column] === text(column)) &&
-						row.ts === ts,
+						row.ts === ts &&
+						(after === undefined || row.id > after),
 				)
+				.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 				.slice(0, limit);
 			return records(["id", "hash", "payload"], hits.map((hit) => [hit.id, hit.hash, hit.payload]));
 		}
@@ -594,22 +597,59 @@ describe("what the key does not do", () => {
 		expect(ledger.rows).toHaveLength(2);
 	});
 
-	test("five lookalikes in front of the real row make the lookup inconclusive: 503, nothing written, never a duplicate", async () => {
+	test("a matching row beyond the first five is found on a later page: deduplicated, nothing written", async () => {
 		const ledger = fakeLedger();
 		const seen: Seen = { replays: [], emitted: 0 };
 		const substrate = substrateWith(ACCEPT, seen);
 		for (const key of ["event001", "event002", "event003", "event004", "event005", "event___"]) {
 			await substrate.emit(base({ idempotency_key: key }));
 		}
+		// Id order is the order the lookup pages through: make the real row the sixth one in it.
+		ledger.rows.forEach((row, index) => {
+			row.id = `evt_${String(index).padStart(3, "0")}`;
+		});
 		const inserts = ledger.inserts().length;
+		const lookupsBefore = ledger.lookups().length;
+
+		const replay = await substrate.emit(base({ idempotency_key: "event___" }), { replay: true });
+
+		expect(replay.deduplicated).toBe(true);
+		expect(replay.stored).toBe(true);
+		expect(replay.lookupFailed).toBeUndefined();
+		expect(replay.event.id).toBe("evt_005");
+		expect(ledger.lookups()).toHaveLength(lookupsBefore + 2);
+		expect(ledger.inserts()).toHaveLength(inserts);
+		expect(ledger.rows).toHaveLength(6);
+		expect(seen.replays).toEqual(["deduplicated"]);
+	});
+
+	test("a full page on every lookup page is inconclusive: 503, nothing written, never a miss that appends", async () => {
+		const ledger = fakeLedger();
+		const seen: Seen = { replays: [], emitted: 0 };
+		const substrate = substrateWith(ACCEPT, seen);
+		const inserts = ledger.inserts().length;
+		// Every page is full of rows that are not the key, so the real row could sit past the bound.
+		ledger.before = async (statement) =>
+			statement.startsWith(LOOKUP_PREFIX)
+				? new Response(
+						JSON.stringify(
+							records(
+								["id", "hash", "payload"],
+								Array.from({ length: IDEMPOTENCY_LOOKUP_LIMIT }, (_, index) => [`evt_${index}`, `hash-${index}`, `{"_ik":"other-${index}"}`]),
+							),
+						),
+						{ status: 200, headers: { "content-type": "application/json" } },
+					)
+				: undefined;
 
 		const replay = await substrate.emit(base({ idempotency_key: "event___" }), { replay: true });
 
 		expect(replay.stored).toBe(false);
 		expect(replay.lookupFailed).toBe(true);
 		expect(replay.error).toContain("inconclusive");
+		expect(ledger.lookups()).toHaveLength(IDEMPOTENCY_LOOKUP_MAX_PAGES);
 		expect(ledger.inserts()).toHaveLength(inserts);
-		expect(ledger.rows).toHaveLength(6);
+		expect(ledger.rows).toHaveLength(0);
 		expect(seen.replays).toEqual(["lookup_failed"]);
 	});
 

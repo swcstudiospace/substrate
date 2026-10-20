@@ -296,6 +296,15 @@ function derivedKey(entryHash: string, sourceEvent: string | null, reviewed: boo
 }
 
 /**
+ * The key an explicit key spent by another writer falls back to. It names the writer and the caller's
+ * key together, so the same writer's retry computes the same key and replays it. It is claimed explicit,
+ * so it never expires: a derived key's day-long window would let a retry a day later write the row again.
+ */
+function writerKey(writer: string, explicitKey: string): string {
+	return `mwk_${sha256Hex(canonicalJson({ writer, key: explicitKey }))}`;
+}
+
+/**
  * The hash `verified_persisted` compares, and the identity a parked review is
  * released by. Over the *governed* content only: the same claim re-submitted with
  * a reviewer's token has to hash the same, or approval-by-resubmit could never
@@ -702,12 +711,13 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 		});
 	let claim = await claimWith(key, explicit);
 	// An explicit key is one row for every writer that sends it. A key another writer spent is not
-	// this writer's to replay or be refused by, so this write goes under the derived key its own
-	// content mints. That key already folds the writer in, so it cannot collide with the other
-	// writer's; the explicit key itself is left exactly as it was.
+	// this writer's to replay or be refused by, so this write goes under the key that names this writer
+	// and the caller's key together. The same writer retrying the same key computes the same key and
+	// replays it. It is claimed explicit, so it never expires: a derived key's day-long window would let
+	// a retry a day later write the row a second time. The explicit key itself is left exactly as it was.
 	if (!claim.claimed && explicit && (await heldByAnotherWriter(store, claim.existing, writer, asked, priorAsked))) {
-		key = await idempotencyKey(store, derivedKey(entryHash, sourceEvent, reviewed), false, entryHash, asked, priorEntry, priorAsked, sourceEvent, reviewed);
-		claim = await claimWith(key, false);
+		key = writerKey(writer, minted.key);
+		claim = await claimWith(key, true);
 	}
 	if (!claim.claimed) {
 		const replayed = await replay(store, key, claim.existing, grant.name, entryHash, asked, priorEntry, priorAsked, {

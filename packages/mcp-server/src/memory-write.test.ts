@@ -1459,6 +1459,22 @@ describe("exactly-once", () => {
 		expect(store.entries()).toHaveLength(2);
 	});
 
+	test("a writer whose explicit key another writer spent replays its own write on a retry a day later", async () => {
+		const first = await write({ writer: "hermes", text: "hermes finished n2", idempotency_key: "k-shared" });
+		expect(first.outcome).toBe("accepted");
+		const other = await write({ writer: "omp", text: "omp finished n4", idempotency_key: "k-shared" });
+		expect(other.entry?.writer).toBe("omp");
+		expect(store.entries()).toHaveLength(2);
+
+		store.clock += DERIVED_KEY_WINDOW_MS + 1;
+		const again = await write({ writer: "omp", text: "omp finished n4", idempotency_key: "k-shared" });
+
+		expect(again.outcome).toBe("accepted");
+		expect(again.deduplicated).toBe(true);
+		expect(again.entry?.id).toBe(other.entry?.id);
+		expect(store.entries()).toHaveLength(2);
+	});
+
 	test("a key reused with different content by its own writer is still refused", async () => {
 		await write({ writer: "hermes", text: "hermes finished n2", idempotency_key: "k-shared" });
 		const changed = await write({ writer: "hermes", text: "hermes changed n2", idempotency_key: "k-shared" });
