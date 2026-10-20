@@ -1100,7 +1100,7 @@ export function createHttpServer(
 			}
 			const repo = "repo" in parsed && typeof parsed.repo === "string" ? parsed.repo : undefined;
 			const fields: Record<string, unknown> = { query: parsed.query };
-			if (!(await auditedRest(res, observability, surface, "memory_recall", fields))) return;
+			if (!(await auditedRest(res, observability, surface, "memory_recall", repo === undefined ? fields : { ...fields, repo }))) return;
 			sendJson(res, 200, await substrate.recallMemories(fields, surface, repo));
 			return;
 		}
