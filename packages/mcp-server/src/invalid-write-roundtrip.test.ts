@@ -21,7 +21,7 @@ import { SQL } from "bun";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpError } from "@modelcontextprotocol/sdk/types.js";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { loadConfig } from "./config.ts";
 import { IndexStore } from "./index-store.ts";
 import { createMcpServer, type McpCaller } from "./mcp.ts";
@@ -117,18 +117,49 @@ async function connectMcp(stores: Record<string, unknown>, caller: McpCaller, en
 }
 
 /**
- * Calls a tool and reports whether it refused: an `isError` result, or an SDK input-validation protocol error (zod's
- * "Invalid input" / "expected record", or "Invalid arguments for tool", whatever the code). Any other thrown error, "tool not found" included, is re-thrown so the test
- * fails on the real fault. An `isError` result also covers a handler exception, which the SDK answers the same way, so
- * the row counts are what show whether anything was written.
+ * Calls a tool and reports whether it refused. Two shapes count as a refusal, and only the one this call produces:
+ *  - the SDK's input validation for this tool: an `isError` reply reading `Invalid arguments for tool <name>:` (SDK 1.32
+ *    prefixes it with `Input validation error:`), which a missing field, a wrong type or a value outside an enum gets;
+ *  - the tool's own refusal: an `isError` reply whose text is a JSON object, as the skill and docs handlers answer.
+ * A non-object argument list never reaches a tool. The protocol rejects the request, and the client gets a thrown McpError
+ * with code InternalError whose message is zod's `expected record` error on `arguments`.
+ * A call that succeeds is not a refusal (false). Anything else fails the test on the real fault instead of passing as a
+ * refusal: a handler crash (the SDK answers it as an `isError` reply carrying the bare error message), `Tool <name> not
+ * found`, or a reply that is neither shape.
  */
 async function refuses(client: Client, name: string, args: unknown): Promise<boolean> {
+	let result;
 	try {
-		const result = await client.callTool({ name, arguments: args as Record<string, unknown> });
-		return result.isError === true;
+		result = await client.callTool({ name, arguments: args as Record<string, unknown> });
 	} catch (err: unknown) {
-		if (err instanceof McpError && /Invalid input|expected record|Invalid arguments for tool/.test(err.message)) return true;
+		if (err instanceof McpError && err.code === ErrorCode.InternalError && /expected record/.test(err.message) && /"arguments"/.test(err.message)) {
+			return true;
+		}
 		throw err;
+	}
+	if (result.isError !== true) return false;
+	const text = textOf(result);
+	const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	if (new RegExp(`^(MCP error -?\\d+: )?(Input validation error: )?Invalid arguments for tool ${escaped}: `).test(text)) return true;
+	if (isJsonObject(text)) return true;
+	throw new Error(`${name} failed, and not as a refusal: ${text.slice(0, 200)}`);
+}
+
+/** The text of a tool reply's first block, or "" when it has none. */
+function textOf(result: unknown): string {
+	const content = result !== null && typeof result === "object" && "content" in result ? result.content : undefined;
+	const blocks: unknown[] = Array.isArray(content) ? content : [];
+	const first = blocks[0];
+	return first !== null && typeof first === "object" && "text" in first && typeof first.text === "string" ? first.text : "";
+}
+
+/** Whether a reply's text is a JSON object: a tool's refusal body, as opposed to a bare error message. */
+function isJsonObject(text: string): boolean {
+	try {
+		const parsed: unknown = JSON.parse(text);
+		return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed);
+	} catch {
+		return false;
 	}
 }
 
@@ -306,6 +337,25 @@ describeLive("memory writes: POST /memory and MCP memory_write", () => {
 			expect(await refuses(client, "memory_write", [])).toBe(true);
 			expect(await rowCounts(MEMORY_TABLES)).toEqual(before);
 		});
+
+		// The schema refusals above never reach the gate, so nothing records them in-process. This write is valid
+		// against the schema and refused by policy, so it takes the same audit path POST /memory's refusal takes.
+		test("a write the gate refuses is recorded as a denial and writes no row", async () => {
+			const before = await rowCounts(MEMORY_TABLES);
+			const denialsBefore = ledger.written.filter((event) => event.kind === "warning" && event.payload.outcome === "denied").length;
+			const reply = await replyOf(client, "memory_write", {
+				scope: `person:${MARKER}`,
+				kind: "fact",
+				text: `${MARKER} the owner is out`,
+				idempotency_key: `${MARKER}-mcp-denied`,
+			});
+
+			expect(reply).toMatchObject({ outcome: "denied", reason: "rbac.no-grant" });
+			expect(await rowCounts(MEMORY_TABLES)).toEqual(before);
+			const denials = ledger.written.filter((event) => event.kind === "warning" && event.payload.outcome === "denied");
+			expect(denials.length).toBe(denialsBefore + 1);
+			expect(denials.at(-1)?.summary).toMatch(/^memory\.write denied: rbac\.no-grant \(fact at person:/);
+		});
 	});
 });
 
@@ -363,11 +413,13 @@ describeLive("skill proposals: POST /skills/propose and MCP skills_propose", () 
 			test(`refuses ${label} with 400, asks git nothing, and writes no row`, async () => {
 				gitCalls = [];
 				const before = await rowCounts(SKILL_TABLES);
+				const rowsBefore = await registryState(name);
 				const response = await http.send("/skills/propose", body);
 
 				expect(response.status).toBe(400);
 				expect(gitCalls).toEqual([]);
 				expect(await rowCounts(SKILL_TABLES)).toEqual(before);
+				expect(await registryState(name)).toEqual(rowsBefore);
 			});
 		}
 
@@ -375,11 +427,13 @@ describeLive("skill proposals: POST /skills/propose and MCP skills_propose", () 
 			test(`refuses ${label} with 400, asks git nothing, and writes no row`, async () => {
 				gitCalls = [];
 				const before = await rowCounts(SKILL_TABLES);
+				const rowsBefore = await registryState(name);
 				const response = await http.send("/skills/propose", payload);
 
 				expect(response.status).toBe(400);
 				expect(gitCalls).toEqual([]);
 				expect(await rowCounts(SKILL_TABLES)).toEqual(before);
+				expect(await registryState(name)).toEqual(rowsBefore);
 			});
 		}
 	});
@@ -417,20 +471,25 @@ describeLive("skill proposals: POST /skills/propose and MCP skills_propose", () 
 			test(`refuses ${label} and writes no row`, async () => {
 				gitCalls = [];
 				const before = await rowCounts(SKILL_TABLES);
+				// Counts alone cannot see an UPDATE: the row of `name`, written by the control above, is compared as well.
+				const rowsBefore = await registryState(name);
 
 				expect(await refuses(client, "skills_propose", body)).toBe(true);
 				expect(gitCalls).toEqual([]);
 				expect(await rowCounts(SKILL_TABLES)).toEqual(before);
+				expect(await registryState(name)).toEqual(rowsBefore);
 			});
 		}
 
 		test("refuses a non-object argument list and writes no row", async () => {
 			gitCalls = [];
 			const before = await rowCounts(SKILL_TABLES);
+			const rowsBefore = await registryState(name);
 
 			expect(await refuses(client, "skills_propose", [])).toBe(true);
 			expect(gitCalls).toEqual([]);
 			expect(await rowCounts(SKILL_TABLES)).toEqual(before);
+			expect(await registryState(name)).toEqual(rowsBefore);
 		});
 	});
 });
