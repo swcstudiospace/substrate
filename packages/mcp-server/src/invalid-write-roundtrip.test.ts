@@ -116,31 +116,20 @@ async function connectMcp(stores: Record<string, unknown>, caller: McpCaller): P
 }
 
 /**
-<<<<<<< HEAD
- * Calls a tool and reports whether it refused. The protocol refuses bad arguments as an
- * `isError` result or as a thrown error, depending on where the check sits, so both count.
-=======
  * Calls a tool and reports whether it refused. 
  * - Accepts isError results.
  * - For thrown errors, only counts as refusal if the message indicates bad input (argument error).
  * - Unexpected handler errors or missing tools are re-thrown so they fail the test (row counts would be unchanged but for the wrong reason).
->>>>>>> pr-81
  */
 async function refuses(client: Client, name: string, args: unknown): Promise<boolean> {
 	try {
 		const result = await client.callTool({ name, arguments: args as Record<string, unknown> });
-<<<<<<< HEAD
-		return result.isError === true;
-	} catch {
-		return true;
-=======
 		if (result.isError === true) return true;
 		return false;
-	} catch (err) {
-		const msg = String(err?.message ?? err);
+	} catch (err: unknown) {
+		const msg = err instanceof Error ? err.message : String(err);
 		if (/invalid|must be|required|argument|type/i.test(msg)) return true;
 		throw err;
->>>>>>> pr-81
 	}
 }
 
