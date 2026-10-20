@@ -272,6 +272,11 @@ export interface MemoryReadOptions {
 	includeExpired?: boolean;
 	/** The caller, for the `substrate.memory.expired` series; `unattributed` when absent. */
 	surface?: string;
+	/**
+	 * The repo the caller works in. An `agent:` row is read only in the repo it was written for, so a read that
+	 * names none sees no agent row. Normalised with `normalizeIdentifier`, as the write stores it.
+	 */
+	repo?: string;
 }
 
 /** One parked write, as a reviewer's queue lists it. */

@@ -877,6 +877,8 @@ export interface MemorySearchRequest {
 	subject_prefix?: string;
 	before?: string;
 	before_id?: string;
+	/** The repo the caller works in. Only `agent:` entries written for it are returned; without it, none are. */
+	repo?: string;
 }
 
 /** Whether a search asks for a page — a cursor back, rather than the bare newest-N list. */
@@ -1164,12 +1166,12 @@ export class Substrate {
 			},
 			breakerOpen: () => this.planes.gate("hindsight").breaker?.state() === "open",
 			cacheAvailable: () => this.cache.health().enabled,
-			recall: async ({ surface, bank, query, budgetMs }) => {
+			recall: async ({ surface, repo, bank, query, budgetMs }) => {
 				const hindsight = hindsightFromEnv();
 				if (hindsight === null || bankForSurface(hindsight, surface) !== bank) return { ok: false };
 				// `banks: null`: the surface's OWN bank only, never the HINDSIGHT_BANKS fan-out. The
 				// deadline `budgetMs` is the recall's abort signal, so it fires inside the gated fetch.
-				const reply = await recallMemories({ config: hindsight, banks: null, vmGuest: config.vmGuest, fetchImpl: this.hindsightFetch, budgetMs }, query, surface);
+				const reply = await recallMemories({ config: hindsight, banks: null, vmGuest: config.vmGuest, fetchImpl: this.hindsightFetch, budgetMs }, query, surface, repo);
 				if (reply.degraded) return { ok: false };
 				return {
 					ok: true,
@@ -2057,19 +2059,22 @@ export class Substrate {
 		includeSuperseded?: boolean,
 		surface = "unattributed",
 		includeExpired?: boolean,
+		repo?: string,
 	): Promise<MergedMemoryResults> {
-		const read = this.memoryRead(surface, includeExpired);
+		const read = this.memoryRead(surface, includeExpired, repo);
+		const callerRepo = read.repo ?? null;
 		return this.cache.getOrLoad({
 			klass: "memory-search",
 			surface,
 			// The shape marker keeps pre-upgrade entries under their old key. A pre-upgrade reply can carry another
-			// surface's agent: rows or hits, so v2 must never serve one: the key moves with the visibility rule.
+			// surface's or another repo's agent: rows or hits, so v3 must never serve one: the key moves with the rule.
 			args: {
 				query,
 				scope: scope ?? null,
 				limit: limit ?? null,
 				includeSuperseded: includeSuperseded ?? false,
-				shape: "merged-v2",
+				repo: callerRepo,
+				shape: "merged-v3",
 				...this.expiryKey(includeExpired),
 			},
 			// The merged search holds a Hindsight recall, so under `narrow` it lists the recall generation too.
@@ -2081,9 +2086,9 @@ export class Substrate {
 			load: async () => {
 				const [entries, recall] = await Promise.all([
 					this.index ? this.index.searchMemory(query, scope, limit, includeSuperseded, read) : Promise.resolve([]),
-					this.recallUncounted({ query }, surface, this.config.hindsightBudgets.searchRecallBudgetMs),
+					this.recallUncounted({ query }, surface, this.config.hindsightBudgets.searchRecallBudgetMs, callerRepo),
 				]);
-				return mergeDerivedHits(entries, recall, scope, surface);
+				return mergeDerivedHits(entries, recall, scope, { surface, repo: callerRepo });
 			},
 		});
 	}
@@ -2096,11 +2101,11 @@ export class Substrate {
 	 */
 	async searchMemoryPage(request: MemorySearchRequest, surface = "unattributed"): Promise<MemorySearchPage> {
 		const search = parseMemorySearch(request);
-		const read = this.memoryRead(surface, request.include_expired);
+		const read = this.memoryRead(surface, request.include_expired, request.repo);
 		return this.cache.getOrLoad({
 			klass: "memory-search",
 			surface,
-			args: { ...search, rule: "agent-own-v2", ...this.expiryKey(request.include_expired) },
+			args: { ...search, rule: "agent-repo-v3", repo: read.repo ?? null, ...this.expiryKey(request.include_expired) },
 			generations: this.memoryGenerations(),
 			refreshAt: (page) => earliestRefreshAt(page.entries.flatMap((entry) => [entry.reverify_after, entry.expires_at])),
 			load: async () => {
@@ -2110,9 +2115,17 @@ export class Substrate {
 		});
 	}
 
-	/** The per-call lifetime options for an index read (uplift-3 N4): who is asking, and whether expired entries were asked for. */
-	private memoryRead(surface: string, includeExpired: boolean | undefined): MemoryReadOptions {
-		return { surface, ...(includeExpired === true ? { includeExpired: true } : {}) };
+	/**
+	 * The per-call options for an index read: who is asking, whether expired entries were asked for (uplift-3 N4),
+	 * and the repo the caller works in, which decides the `agent:` rows it may read.
+	 */
+	private memoryRead(surface: string, includeExpired: boolean | undefined, repo?: string): MemoryReadOptions {
+		const callerRepo = normalizeIdentifier(repo);
+		return {
+			surface,
+			...(includeExpired === true ? { includeExpired: true } : {}),
+			...(callerRepo !== null ? { repo: callerRepo } : {}),
+		};
 	}
 
 	/**
@@ -2194,8 +2207,8 @@ export class Substrate {
 	 * (`substrate.served.tokens_est`, tool `recall`); the recall leg inside
 	 * `memory_search` is not a reply to a caller and is not counted.
 	 */
-	async recallMemories(input: { query?: unknown }, callerSurface: string | null): Promise<RecallReply> {
-		const reply = await this.recallUncounted(input, callerSurface);
+	async recallMemories(input: { query?: unknown }, callerSurface: string | null, callerRepo?: string): Promise<RecallReply> {
+		const reply = await this.recallUncounted(input, callerSurface, undefined, normalizeIdentifier(callerRepo));
 		this.noteServed("recall", callerSurface, reply);
 		return reply;
 	}
@@ -2222,7 +2235,12 @@ export class Substrate {
 	 * shorter one (the search leg does); a non-degraded reply is budget-
 	 * independent, so the cache key ignores it.
 	 */
-	private async recallUncounted(input: { query?: unknown }, callerSurface: string | null, budgetMs?: number): Promise<RecallReply> {
+	private async recallUncounted(
+		input: { query?: unknown },
+		callerSurface: string | null,
+		budgetMs?: number,
+		callerRepo: string | null = null,
+	): Promise<RecallReply> {
 		if (this.config.vmGuest) {
 			return { results: [], degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: "vm-guest" };
 		}
@@ -2233,7 +2251,7 @@ export class Substrate {
 		return this.cache.getOrLoad({
 			klass: "memory-search",
 			surface,
-			args: { recall: true, query, banks: banks ?? null },
+			args: { recall: true, query, banks: banks ?? null, repo: callerRepo },
 			// An accepted memory write bumps the memory generation, so a fresh
 			// retain is never hidden behind a stale recall (D26-06a). The retain
 			// itself lands later: under `narrow` it bumps the recall generation,
@@ -2258,6 +2276,7 @@ export class Substrate {
 					},
 					query,
 					callerSurface,
+					callerRepo,
 				),
 		});
 	}

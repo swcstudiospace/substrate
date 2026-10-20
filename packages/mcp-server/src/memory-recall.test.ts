@@ -175,7 +175,7 @@ describe("derived merge into memory_search", () => {
 	test("attribution survives the merge with index results first and unmarked", async () => {
 		const fake = new HindsightFake();
 		seedTwo(fake);
-		const merged = mergeDerivedHits(indexed, await recallMemories(deps(fake), "lease", "cursor"), undefined, "cursor");
+		const merged = mergeDerivedHits(indexed, await recallMemories(deps(fake), "lease", "cursor"), undefined, { surface: "cursor", repo: null });
 		expect(merged.entries).toEqual(indexed);
 		const first = merged.entries.at(0);
 		expect(first).toEqual(indexed.at(0));
@@ -193,7 +193,7 @@ describe("derived merge into memory_search", () => {
 		const fake = new HindsightFake();
 		seedTwo(fake);
 		fake.failRecallWith = 500;
-		const merged = mergeDerivedHits(indexed, await recallMemories(deps(fake), "lease", "cursor"), undefined, "cursor");
+		const merged = mergeDerivedHits(indexed, await recallMemories(deps(fake), "lease", "cursor"), undefined, { surface: "cursor", repo: null });
 		expect(merged.entries).toEqual(indexed);
 		expect(merged.derived).toEqual([]);
 		expect(merged.degraded).toBe(true);
@@ -212,24 +212,30 @@ describe("scoped merge", () => {
 		]);
 		const reply = await recallMemories(deps(fake), "rule", "cursor");
 		expect(reply.results.map((hit) => hit.bank)).toEqual(["sub-hermes", "sub-cursor"]);
-		const scoped = mergeDerivedHits([], reply, "repo:acme/app", "cursor");
+		const scoped = mergeDerivedHits([], reply, "repo:acme/app", { surface: "cursor", repo: null });
 		expect(scoped.derived.map((hit) => `${hit.bank}:${hit.scope}`)).toEqual(["sub-cursor:repo:acme/app"]);
-		const unscoped = mergeDerivedHits([], reply, undefined, "cursor");
+		const unscoped = mergeDerivedHits([], reply, undefined, { surface: "cursor", repo: null });
 		expect(unscoped.derived.length).toBe(2);
 	});
 
-	test("an agent's derived hit reaches only its own surface, scoped request or not", async () => {
+	test("an agent's derived hit reaches only its own surface, in the repo it was retained for", async () => {
 		const fake = new HindsightFake();
 		fake.seed("sub-hermes", [
-			{ id: "h1", text: "hermes private note", document_id: "mwd_h1", tags: ["hermes"], metadata: { scope: "agent:hermes" }, score: 0.9 },
+			{ id: "h1", text: "hermes private note", document_id: "mwd_h1", tags: ["hermes"], metadata: { scope: "agent:hermes", repo: "acme/app" }, score: 0.9 },
 			{ id: "h2", text: "shared repo rule", document_id: "mwd_h2", tags: ["hermes"], metadata: { scope: "repo:acme/app" }, score: 0.8 },
+			{ id: "h3", text: "hermes note from another repo", document_id: "mwd_h3", tags: ["hermes"], metadata: { scope: "agent:hermes", repo: "other/repo" }, score: 0.7 },
 		]);
-		const reply = await recallMemories(deps(fake), "rule", "cursor");
 		const texts = (hits: Array<{ text: string }>) => hits.map((hit) => hit.text).sort();
-		expect(texts(mergeDerivedHits([], reply, undefined, "omp").derived)).toEqual(["shared repo rule"]);
-		expect(mergeDerivedHits([], reply, "agent:hermes", "omp").derived).toEqual([]);
-		const asHermes = await recallMemories(deps(fake), "rule", "hermes");
-		expect(texts(mergeDerivedHits([], asHermes, undefined, "hermes").derived)).toEqual(["hermes private note", "shared repo rule"]);
+		const reply = await recallMemories(deps(fake), "rule", "cursor");
+		expect(texts(mergeDerivedHits([], reply, undefined, { surface: "omp", repo: "acme/app" }).derived)).toEqual(["shared repo rule"]);
+		expect(mergeDerivedHits([], reply, "agent:hermes", { surface: "omp", repo: "acme/app" }).derived).toEqual([]);
+		const asHermes = await recallMemories(deps(fake), "rule", "hermes", "acme/app");
+		expect(texts(mergeDerivedHits([], asHermes, undefined, { surface: "hermes", repo: "acme/app" }).derived)).toEqual([
+			"hermes private note",
+			"shared repo rule",
+		]);
+		const noRepo = await recallMemories(deps(fake), "rule", "hermes");
+		expect(texts(mergeDerivedHits([], noRepo, undefined, { surface: "hermes", repo: null }).derived)).toEqual(["shared repo rule"]);
 	});
 
 	test("a private copy that outscores a shared one does not hide the shared one", async () => {

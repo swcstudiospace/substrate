@@ -566,6 +566,9 @@ export const MIGRATION_STEPS: ReadonlyArray<{ version: number; name: string; sql
 			create unique index if not exists memory_reviews_pending_idx on memory_reviews (entry_hash)
 			where state = 'pending'`,
 	},
+	// The index behind the agent-scope read rule, which matches `repo` on every `agent:` row. The column is
+	// migration 11's and legacy rows keep NULL, so they match no caller. Nothing is backfilled.
+	{ version: 31, name: "memory_entries_repo_idx", sql: `create index if not exists memory_entries_repo_idx on memory_entries (repo)` },
 ];
 
 export class IndexStore implements MemoryStore {
@@ -2010,10 +2013,12 @@ export class IndexStore implements MemoryStore {
 			: beforeId === null
 				? this.sql`and created < ${before}::timestamptz`
 				: this.sql`and (created, id) < (${before}::timestamptz, ${beforeId}::text)`;
-		// `agent:` rows belong to one surface. A caller with a surface sees only its own, the same rule
-		// the brief applies (global, repo and graph only). An internal read with no `read` is unfiltered,
-		// as the write gate's own lookups have always been.
+		// `agent:` rows belong to one surface and to the repo they were written for. A caller sees its own
+		// surface's rows in its own repo; a caller that names no repo sees none. `visibleToCaller` applies the
+		// same rule to derived hits. An internal read with no `read` is unfiltered, as the write gate's own
+		// lookups have always been.
 		const agentScope = read === undefined ? null : `agent:${(normalizeIdentifier(read.surface) ?? "unattributed").toLowerCase()}`;
+		const agentRepo = read === undefined ? null : normalizeIdentifier(read.repo);
 		return this.plane("memory.search", async () => {
 			const rows = (await this.sql`
 				select *, to_char(created at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_created
@@ -2025,7 +2030,7 @@ export class IndexStore implements MemoryStore {
 				  ${prefix === null ? this.sql`` : this.sql`and left(subject, char_length(${prefix}::text)) = ${prefix}::text`}
 				  ${search.writer == null ? this.sql`` : this.sql`and writer = ${search.writer}`}
 				  ${search.kind == null ? this.sql`` : this.sql`and kind = ${search.kind}`}
-				  ${agentScope === null ? this.sql`` : this.sql`and (lower(scope) not like 'agent:%' or lower(scope) = ${agentScope})`}
+				  ${agentScope === null ? this.sql`` : agentRepo === null ? this.sql`and lower(scope) not like 'agent:%'` : this.sql`and (lower(scope) not like 'agent:%' or (lower(scope) = ${agentScope} and repo = ${agentRepo}))`}
 				  ${cursor}
 				order by created desc, id desc
 				limit ${limit}`) as Array<Record<string, unknown>>;

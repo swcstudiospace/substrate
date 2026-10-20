@@ -26,7 +26,7 @@ import {
 } from "./planes/hindsight.ts";
 import { redactValue } from "./redact.ts";
 import { SURFACES } from "./types.ts";
-import { visibleToSurface } from "./memory-policy.ts";
+import { visibleToCaller, type MemoryCaller } from "./memory-policy.ts";
 
 /** The known surfaces as plain strings, for bank-set membership checks. */
 const KNOWN_SURFACES: readonly string[] = SURFACES;
@@ -44,6 +44,8 @@ export interface DerivedMemoryHit {
 	type?: string;
 	/** The scope the memory was retained for — a locator the merge filters on. */
 	scope?: string;
+	/** The repo the memory was retained for, when the retain carried one. Agent-scope hits are read only in it. */
+	repo?: string;
 	tags: string[];
 	score?: number;
 }
@@ -95,6 +97,7 @@ export function resolveRecallBanks(
 function derive(bank: string, hit: RecallHit): DerivedMemoryHit {
 	const tags = [...hit.tags];
 	const scope = typeof hit.metadata.scope === "string" ? hit.metadata.scope : undefined;
+	const repo = typeof hit.metadata.repo === "string" ? hit.metadata.repo : undefined;
 	return {
 		bank,
 		id: hit.id,
@@ -103,6 +106,7 @@ function derive(bank: string, hit: RecallHit): DerivedMemoryHit {
 		...(hit.document_id !== undefined ? { document_id: hit.document_id } : {}),
 		...(hit.type !== undefined ? { type: hit.type } : {}),
 		...(scope !== undefined ? { scope } : {}),
+		...(repo !== undefined ? { repo } : {}),
 		tags,
 		...(hit.score !== undefined ? { score: hit.score } : {}),
 	};
@@ -140,6 +144,7 @@ export async function recallMemories(
 	deps: RecallDeps,
 	query: string,
 	callerSurface: string | null,
+	callerRepo: string | null = null,
 ): Promise<RecallReply> {
 	if (!query) return { results: [], degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: "memory_recall needs a query" };
 	if (deps.vmGuest === true) {
@@ -190,8 +195,13 @@ export async function recallMemories(
 			if (outcome.value.timedOut === true) timedOut = true;
 			continue;
 		}
+		const caller: MemoryCaller = { surface: callerSurface ?? "unattributed", repo: callerRepo };
 		const visible = outcome.value.hits.filter((raw) =>
-			visibleToSurface(typeof raw.metadata.scope === "string" ? raw.metadata.scope : undefined, callerSurface ?? "unattributed"),
+			visibleToCaller(
+				typeof raw.metadata.scope === "string" ? raw.metadata.scope : undefined,
+				typeof raw.metadata.repo === "string" ? raw.metadata.repo : undefined,
+				caller,
+			),
 		);
 		for (const hit of visible.slice(0, MAX_RECALL_PER_BANK)) scored.push({ bank, hit });
 	}
