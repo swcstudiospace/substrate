@@ -46,6 +46,7 @@ The status surfaces are the Ultrathink bar and the explicit `/substrate` command
 extension never calls `setStatus` or `setWidget`: it mounts no Omp footer and no
 below-editor widget, and it does not clear those slots either. An install that predates
 this change may still show its old footer or widget until that install is removed.
+The Ultrathink bar is a separate install. The Install section below lists both steps.
 
 `/substrate`: runs one fresh probe, or waits up to 4 seconds for the poll
 already in flight. It shows the probe state with `updated HH:MM`, the usage
