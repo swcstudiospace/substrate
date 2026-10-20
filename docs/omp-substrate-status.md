@@ -1,9 +1,8 @@
 # Omp substrate status
 
-An Omp extension that publishes Agent Substrate usage to the Ultrathink bar and
-answers an explicit `/substrate` command. It does not mount an Omp footer or a
-below-editor widget. On each render it clears those slots so an older install
-disappears. Read-only and fail-open.
+An Omp extension that publishes Agent Substrate status to the Ultrathink bar and
+answers an explicit `/substrate` command. It mounts no Omp footer and no below-editor
+widget. Read-only and fail-open.
 
 ## What the numbers mean
 
@@ -27,9 +26,9 @@ omp requests, and usage would never reach `NOT_OBSERVED_IN_WINDOW`.
 ## Usage and coverage
 
 - **IN_USE**: at least one omp read or write counted by the substrate in the
-  last five minutes. **NOT_OBSERVED_IN_WINDOW**: none in that window. **UNKNOWN**
-  (in `/substrate` only): the source is unavailable. `/substrate` prints this
-  definition on screen.
+  last five minutes. **NOT_OBSERVED_IN_WINDOW**: none in that window. **UNKNOWN**:
+  the source is unavailable. The bar's `usage` field carries it, and `/substrate` prints
+  this definition on screen.
 - The window and every time shown are this viewer's poll clock. `/metrics`
   carries no per-event timestamps, so a change is dated by the poll that saw it.
 - **Known clients** are the regular files named in `SUBSTRATE_TOKENS_DIR` (default `/etc/substrate/tokens`); symlinks are followed and folders are skipped. `omp` is always included. A name that is not a plain identifier is left out. The list is the configuration, not a guess.
@@ -43,15 +42,10 @@ omp requests, and usage would never reach `NOT_OBSERVED_IN_WINDOW`.
 
 ## Surfaces
 
-The installed surfaces are the Ultrathink bar and the explicit `/substrate`
-command.
-
-The extension does not mount an Omp footer or a below-editor widget. Session start
-clears those slots before the first probe, and every render clears them again, so
-a session that already has the old chrome drops it:
-`setStatus("substrate", undefined)` and
-`setWidget("substrate", undefined, { placement: "belowEditor" })`. `formatFooter`
-and `formatWidget` remain as unused formatters; they are not passed to those setters.
+The status surfaces are the Ultrathink bar and the explicit `/substrate` command. The
+extension never calls `setStatus` or `setWidget`: it mounts no Omp footer and no
+below-editor widget, and it does not clear those slots either. An install that predates
+this change may still show its old footer or widget until that install is removed.
 
 `/substrate`: runs one fresh probe, or waits up to 4 seconds for the poll
 already in flight. It shows the probe state with `updated HH:MM`, the usage
@@ -64,12 +58,11 @@ where the token comes from.
 
 ## Ultrathink bar
 
-The extension publishes its status on the Omp event bus (`pi.events`) for the
-Ultrathink bar, the widget above the composer. That is the status surface.
-IN_USE, NOT_OBSERVED_IN_WINDOW, and coverage still reach the bar through
-`busStatus`. `/substrate` is unchanged.
+The extension publishes its status on the Omp event bus (`pi.events`) for the Ultrathink
+bar. The bar is the status surface: IN_USE, NOT_OBSERVED_IN_WINDOW, and coverage reach it
+through `busStatus`. `/substrate` serves the detail and is unchanged.
 
-- `substrate:status`: published after each render. Payload `SubstrateBusStatus`:
+- `substrate:status`: published after each poll and each `/substrate` run. Payload `SubstrateBusStatus`:
   `{ v, state, usage, omp, coverage, planesDown, updatedAt, reason }`.
 - `substrate:status-request`: the bar sends `{}` when it subscribes. The extension
   answers at once by emitting `substrate:status` with its current status.
@@ -90,9 +83,9 @@ Fields:
 On `error`, `omp`, `coverage` and `planesDown` carry the last good values, and
 `usage` is `UNKNOWN`. On `access-denied` they are `null`, and no counts are sent.
 
-To remove the publisher, delete the `publish` function, its call at the end of
-`render`, and the `substrate:status-request` subscription. The slot clears and
-`/substrate` need no change. `busStatus` and the two channel constants can go too.
+To remove the publisher, delete the `publish` function, its calls in `poll` and in the
+`/substrate` handler, and the `substrate:status-request` subscription. `busStatus` and the
+two channel constants can go too. `/substrate` keeps working without the publisher.
 
 ## Refresh
 
@@ -106,16 +99,21 @@ The end-to-end check, a real write seen on the Ultrathink bar, is an operator st
 
 ## Install
 
-Symlink the extension into Omp's auto-discovered directory, as
-`substrate-skills.ts` is installed:
+Two parts. Both are needed for the status to reach the Ultrathink bar automatically.
 
-`ln -s "$PWD/packages/projector/omp/substrate-status.ts" ~/.omp/agent/extensions/substrate-status.ts`
+1. **The Ultrathink bar.** A separate Omp extension in the `claude-ultrathink` clone
+   (`https://github.com/swcstudiospace/claude-ultrathink`). It subscribes to `substrate:status`
+   and draws the substrate segment. Link it from that clone:
 
-Remove the symlink to disable it.
+   `omp plugin link <clone>`
 
-The Ultrathink bar is a separate Omp host extension and a prerequisite for automatic status display on the bar. This symlink does not install
-it. Install and enable the bar host extension separately via your Omp setup (see Omp docs for the Ultrathink bar). Without that bar, `/substrate` is the only status surface. Either way, this
-extension does not mount a footer or a below-editor widget.
+2. **This extension.** Symlink it into Omp's auto-discovered directory, as
+   `substrate-skills.ts` is installed:
+
+   `ln -s "$PWD/packages/projector/omp/substrate-status.ts" ~/.omp/agent/extensions/substrate-status.ts`
+
+Remove the symlink to disable this extension. Without the bar, `/substrate` is the only
+status surface. This extension sets no footer and no widget either way.
 
 ## Configuration and the token rule
 
@@ -130,7 +128,7 @@ extension does not mount a footer or a below-editor widget.
   3. the file `omp` in `SUBSTRATE_TOKENS_DIR`
 - The bearer goes only in the `Authorization` header. It is resolved on every
   poll and never stored, logged, or put in any output string.
-- Panel text is plain text. Control and bidirectional-override characters in a
+- Status text is plain text. Control and bidirectional-override characters in a
   surface or plane name are removed before display.
 
 ## Limits
@@ -138,13 +136,13 @@ extension does not mount a footer or a below-editor widget.
 - `STALE` is not shown. A stale state needs an event time, and `/metrics` does not
   carry one. A per-surface last-seen counter on the server would fix this; it is a
   server change, and it is pending a decision.
-- The panel shows counts, not records. No record body or activity feed row can
+- The status shows counts, not records. No record body or activity feed row can
   reach it, so credential-like values in records cannot appear.
 - Filters and a time-window selector are not provided. The window is fixed at
   five minutes.
 
 ## Fail-open
 
-Nothing throws into Omp. A failed probe is not drawn as a footer or widget. The
-bar payload and `/substrate` carry the reason. The extension makes only the two
+Nothing throws into Omp. A failed probe reaches the bar as `state` `error` or `access-denied`,
+with its reason, and `/substrate` shows the same reason. The extension makes only the two
 GETs above and never writes to the substrate.
