@@ -69,6 +69,7 @@ function recorder() {
 		if (argv.includes("getdisplaygeometry")) return res("1280 800\n");
 		if (argv.includes("getwindowname")) return res("stub-window\n");
 		if (argv.includes("xwd")) return res(xwd());
+		if (argv[1] === "context") return res("unix:///var/run/docker.sock\n");
 		return res("");
 	};
 	return { calls, run };

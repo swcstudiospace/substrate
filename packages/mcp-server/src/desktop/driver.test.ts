@@ -69,7 +69,7 @@ function xwd(o: { byteOrder: 0 | 1; version?: number; format?: number; bpp?: num
 	return Buffer.concat([header, name, Buffer.alloc((o.ncolors ?? 0) * 12), pixels]);
 }
 
-/** A recording fake: geometry 1280×800, a title per call, the synthetic XWD for xwd, "" otherwise. */
+/** A recording fake: geometry 1280×800, a title per call, the synthetic XWD for xwd, a local docker socket for the context probe, "" otherwise. */
 function recorder(overrides: (argv: readonly string[]) => BufferRunResult | Promise<BufferRunResult> | undefined = () => undefined) {
 	const calls: string[][] = [];
 	const run: BufferRunner = async (argv) => {
@@ -79,6 +79,7 @@ function recorder(overrides: (argv: readonly string[]) => BufferRunResult | Prom
 		if (argv.includes("getdisplaygeometry")) return res("1280 800\n");
 		if (argv.includes("getwindowname")) return res(`Terminal ${calls.length}\n`);
 		if (argv.includes("xwd")) return res(xwd({ byteOrder: 0 }));
+		if (argv[1] === "context") return res("unix:///var/run/docker.sock\n");
 		return res("");
 	};
 	return { calls, run };
@@ -325,7 +326,7 @@ describe("createDesktopDriver", () => {
 
 	test("a stopped or missing container fails the run as not running", async () => {
 		for (const stderr of ["Error response from daemon: container 1917e37f is not running", "Error: No such container: substrate-desktop"]) {
-			const { run } = recorder(() => res("", 1, stderr));
+			const { run } = recorder((argv) => (argv.includes("getdisplaygeometry") ? res("", 1, stderr) : undefined));
 			const driver = createDesktopDriver({ run, dir: tmpShots(), sleep: noSleep });
 
 			await expect(driver.run(SMOKE, { surface: "omp", emit: storedTrue })).rejects.toThrow("substrate-desktop is not running");
@@ -366,6 +367,7 @@ describe("createDesktopDriver", () => {
 		});
 		const run: BufferRunner = async (argv) => {
 			calls.push([...argv]);
+			if (argv[1] === "context") return res("unix:///var/run/docker.sock\n");
 			if (argv.includes("getdisplaygeometry")) return res("1280 800\n");
 			if (argv.includes("getwindowname")) return res("w\n");
 			return gate;
@@ -409,11 +411,33 @@ describe("createDesktopDriver", () => {
 		for (const name of left) expect(now - statSync(join(shotsDir, name)).mtimeMs).toBeLessThan(7 * 86_400_000);
 	});
 	describe("docker locality preflight", () => {
-		test("a non-local context endpoint refuses the run before anything runs", async () => {
+		test("a non-local context endpoint refuses the run before anything runs, naming no endpoint", async () => {
 			const { calls, run } = recorder((argv) => (argv[1] === "context" ? res("tcp://other-host:2375\n") : undefined));
 			const driver = createDesktopDriver({ run, dir: tmpShots(), sleep: noSleep });
 
-			await expect(driver.run(SMOKE, { surface: "omp", emit: storedTrue })).rejects.toThrow("is not local");
+			const refused = await driver.run(SMOKE, { surface: "omp", emit: storedTrue }).then(
+				() => null,
+				(error: unknown) => error,
+			);
+
+			expect(refused).toBeInstanceOf(Error);
+			expect((refused as Error).message).toContain("is not local");
+			expect((refused as Error).message).not.toContain("other-host");
+			expect((refused as Error).message).not.toContain("tcp://");
+			expect(calls).toEqual([contextArgv()]);
+		});
+
+		test("an empty context endpoint refuses the run before anything runs", async () => {
+			const { calls, run } = recorder((argv) => (argv[1] === "context" ? res("\n") : undefined));
+			const driver = createDesktopDriver({ run, dir: tmpShots(), sleep: noSleep });
+
+			const refused = await driver.run(SMOKE, { surface: "omp", emit: storedTrue }).then(
+				() => null,
+				(error: unknown) => error,
+			);
+
+			expect(refused).toBeInstanceOf(Error);
+			expect((refused as Error).message).toContain("is empty");
 			expect(calls).toEqual([contextArgv()]);
 		});
 
@@ -429,14 +453,21 @@ describe("createDesktopDriver", () => {
 			expect(events).toHaveLength(1);
 		});
 
-		test("a failed probe proves nothing and proceeds; later calls fail truthfully", async () => {
-			const { calls, run } = recorder((argv) => (argv[1] === "context" ? res("", 1, "cannot connect to the Docker daemon") : undefined));
+		test("a failed probe refuses the run before anything runs, naming no stderr", async () => {
+			const { calls, run } = recorder((argv) =>
+				argv[1] === "context" ? res("", 1, "cannot connect to the Docker daemon at tcp://other-host:2375") : undefined,
+			);
 			const driver = createDesktopDriver({ run, dir: tmpShots(), sleep: noSleep });
 
-			const result = await driver.run({ actions: [{ type: "key", keys: "Return" }] }, { surface: "omp", emit: storedTrue });
+			const refused = await driver.run(SMOKE, { surface: "omp", emit: storedTrue }).then(
+				() => null,
+				(error: unknown) => error,
+			);
 
-			expect(result.log[0]?.ok).toBe(true);
-			expect(calls[0]).toEqual(contextArgv());
+			expect(refused).toBeInstanceOf(Error);
+			expect((refused as Error).message).toContain("refusing desktop_run");
+			expect((refused as Error).message).not.toContain("other-host");
+			expect(calls).toEqual([contextArgv()]);
 		});
 	});
 
@@ -544,6 +575,74 @@ describe("createDesktopDriver", () => {
 				await new Promise<void>((resolve) => server.close(() => resolve()));
 			}
 		});
+
+		/**
+		 * Holds the host lock from a real run parked at its geometry read, so the lock
+		 * server is the driver's own. `release` lets the run finish and free the port.
+		 */
+		async function holdLock(port: number): Promise<{ release: () => Promise<void> }> {
+			const reached = Promise.withResolvers<void>();
+			const gate = Promise.withResolvers<void>();
+			const { run } = recorder((argv) => {
+				if (!argv.includes("getdisplaygeometry")) return undefined;
+				reached.resolve();
+				return gate.promise.then(() => res("1280 800\n"));
+			});
+			const driver = createDesktopDriver({ run, dir: tmpShots(), lockPort: port, sleep: noSleep });
+			const running = driver.run({ actions: [{ type: "key", keys: "Return" }] }, { surface: "omp", emit: storedTrue });
+			await reached.promise;
+			return { release: async () => { gate.resolve(); await running; } };
+		}
+
+		/** A client that connects and never reads, so the server's side of the socket stays open. */
+		function openIdle(port: number): Promise<Socket> {
+			const socket = createConnection(port, "127.0.0.1");
+			socket.on("error", () => {});
+			const { promise, resolve } = Promise.withResolvers<Socket>();
+			socket.once("connect", () => resolve(socket));
+			return promise;
+		}
+
+		/** Reads what the server sends before it closes; "" when the server drops the connection unanswered. */
+		async function readToClose(socket: Socket): Promise<string> {
+			let text = "";
+			socket.setEncoding("utf8");
+			socket.on("error", () => {});
+			socket.on("data", (chunk: string) => {
+				text += chunk;
+			});
+			const { promise, resolve } = Promise.withResolvers<void>();
+			socket.once("close", () => resolve());
+			await promise;
+			return text;
+		}
+
+		test("the lock serves at most four connections; a fifth is dropped unanswered", async () => {
+			const port = await freePort();
+			const held = await holdLock(port);
+			try {
+				const idle = await Promise.all([openIdle(port), openIdle(port), openIdle(port), openIdle(port)]);
+				expect(await readToClose(await openIdle(port))).toBe("");
+				for (const socket of idle) socket.destroy();
+			} finally {
+				await held.release();
+			}
+		});
+
+		test("a lock connection idle past the identity timeout frees its slot", async () => {
+			const port = await freePort();
+			const held = await holdLock(port);
+			try {
+				const idle = await Promise.all([openIdle(port), openIdle(port), openIdle(port), openIdle(port)]);
+				// Real time on purpose: the identity timeout is a net-layer socket timer that fake timers cannot advance.
+				await Bun.sleep(3_000);
+				const text = await readToClose(await openIdle(port));
+				expect(text).toMatch(/^\d+ dr-\d{8}T\d{6}Z-[0-9a-f]{6}$/);
+				for (const socket of idle) socket.destroy();
+			} finally {
+				await held.release();
+			}
+		}, 15_000);
 	});
 
 	describe("screenshot storage errors stay out of the event", () => {

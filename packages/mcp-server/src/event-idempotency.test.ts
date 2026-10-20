@@ -3,7 +3,8 @@
  *
  * The ledger here is an in-memory `agent_events` behind a replaced `fetch`. It keeps every column of
  * every INSERT and answers the replay lookup by evaluating that statement's own predicates — equality
- * on the primary-key prefix, `IS NULL`, exact `ts`, and `LIKE` with its real `%` / `_` wildcards — so
+ * on the cell's columns, `IS NULL`, exact `ts`, and the statement's `LIMIT`. The key is not in that
+ * statement: the real client matches it exactly in code, so a lookalike row comes back and is refused — so
  * the assertions are about the statements the real `GreptimeClient` sends and the real
  * `Substrate.emit`, not about a fake's idea of either. No network, no fixed ports.
  */
@@ -82,11 +83,8 @@ function insertedValues(statement: string): Array<string | number | null> {
 	);
 }
 
-/** SQL `LIKE`: `%` any run, `_` any one character. Everything else literal. */
-function like(value: string, pattern: string): boolean {
-	const source = [...pattern].map((char) => (char === "%" ? ".*" : char === "_" ? "." : char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))).join("");
-	return new RegExp(`^${source}$`, "s").test(value);
-}
+/** The replay lookup's statement opening, as `GreptimeClient.findByIdempotencyKey` sends it. */
+const LOOKUP_PREFIX = 'SELECT "id", "hash", "payload" FROM "agent_events"';
 
 function fakeLedger(): FakeLedger {
 	const ledger: FakeLedger = {
@@ -96,7 +94,7 @@ function fakeLedger(): FakeLedger {
 		ingestStamps: [],
 		sql: [],
 		before: async () => undefined,
-		lookups: () => ledger.sql.filter((statement) => statement.includes('"payload" LIKE')),
+		lookups: () => ledger.sql.filter((statement) => statement.startsWith(LOOKUP_PREFIX)),
 		inserts: () => ledger.sql.filter((statement) => statement.startsWith('INSERT INTO "agent_events"')),
 		events: () =>
 			ledger.rows.map((row) => ({ ...row, step: row.step, actor: row.actor, payload: JSON.parse(row.payload) }) as unknown as SubstrateEvent),
@@ -150,21 +148,21 @@ function fakeLedger(): FakeLedger {
 				.sort((a, b) => a.ingested_at - b.ingested_at);
 			return records(["event_id", "ingested_at", "event_ts"], fresh.map((row) => [row.event_id, row.ingested_at, FIRST_TS && Date.parse(FIRST_TS)]));
 		}
-		if (statement.includes('"payload" LIKE')) {
+		if (statement.startsWith(LOOKUP_PREFIX)) {
+			// The replay lookup as the client sends it: the cell's rows at the exact `ts`, capped at the
+			// statement's own LIMIT. No payload predicate: the client matches the key, so lookalikes come back.
 			const text = (column: string): string | null | undefined => {
 				const match = new RegExp(`"${column}" (?:= '((?:[^']|'')*)'|(IS NULL))`).exec(statement);
 				return match === null ? undefined : match[2] !== undefined ? null : match[1]!.replace(/''/g, "'");
 			};
 			const ts = /"ts" = '([^']*)'/.exec(statement)?.[1];
-			const pattern = /"payload" LIKE '((?:[^']|'')*)'/.exec(statement)?.[1]?.replace(/''/g, "'") ?? "";
 			const limit = Number(/LIMIT (\d+)$/.exec(statement)?.[1] ?? 0);
 			// Insertion order, capped at the statement's own LIMIT: a lookalike stored first comes back first.
 			const hits = ledger.rows
 				.filter(
 					(row) =>
 						(["surface", "repo", "graph_id", "kind"] as const).every((column) => row[column] === text(column)) &&
-						row.ts === ts &&
-						like(row.payload, pattern),
+						row.ts === ts,
 				)
 				.slice(0, limit);
 			return records(["id", "hash", "payload"], hits.map((hit) => [hit.id, hit.hash, hit.payload]));
@@ -398,7 +396,7 @@ describe("accept: store the key, look it up only for a marked replay", () => {
 		expect(coverage.uncoveredHours).toEqual([new Date(Math.floor(originalAt / HOUR_MS) * HOUR_MS).toISOString()]);
 	});
 
-	test("the lookup is the contract's: key prefix, exact ts, NULL as IS NULL, a small LIMIT", async () => {
+	test("the lookup is the contract's: exact cell and ts, NULL as IS NULL, a small LIMIT, no key in the SQL", async () => {
 		const ledger = fakeLedger();
 		const substrate = substrateWith(ACCEPT);
 		await substrate.emit({ surface: "omp", kind: "note", summary: "bare", idempotency_key: KEY, ts: FIRST_TS }, { replay: true });
@@ -408,7 +406,8 @@ describe("accept: store the key, look it up only for a marked replay", () => {
 		expect(lookup).toContain(`"graph_id" IS NULL`);
 		expect(lookup).toContain(`"kind" = 'note'`);
 		expect(lookup).toContain(`"ts" = '${FIRST_TS}'`);
-		expect(lookup).toContain(`LIKE '%"_ik":"${KEY}"}'`);
+		expect(lookup).toStartWith(LOOKUP_PREFIX);
+		expect(lookup).not.toContain(KEY);
 		expect(lookup).toEndWith("LIMIT 5");
 		// A sessionless keyed event is a miss here, then a normal append with no chain read.
 		expect(ledger.rows).toHaveLength(1);
@@ -465,7 +464,7 @@ describe("inside the emit turn", () => {
 		const reached = Promise.withResolvers<void>();
 		let stalled = false;
 		ledger.before = async (statement) => {
-			if (!statement.includes('"payload" LIKE') || stalled) return undefined;
+			if (!statement.startsWith(LOOKUP_PREFIX) || stalled) return undefined;
 			stalled = true;
 			reached.resolve();
 			await release.promise;
@@ -588,7 +587,7 @@ describe("what the key does not do", () => {
 		const ledger = fakeLedger();
 		const substrate = substrateWith(ACCEPT);
 		await substrate.emit(base({ idempotency_key: "abcd-efghij" }));
-		// `LIKE` reads `_` as any character: this key's pattern matches the stored row's text.
+		// A `_` is a literal here: this key differs from the stored one only where a LIKE wildcard would have matched it.
 		const lookalike = await substrate.emit(base({ idempotency_key: "abcd_efghij" }), { replay: true });
 		expect(lookalike.deduplicated).toBeUndefined();
 		expect(lookalike.stored).toBe(true);
@@ -631,7 +630,7 @@ describe("what the key does not do", () => {
 		const substrate = substrateWith(ACCEPT);
 		await substrate.emit(base({ idempotency_key: "abcd-efghij" }));
 		const real = await substrate.emit(base({ idempotency_key: "abcd_efghij" }));
-		// Both rows match the `LIKE` pattern, the lookalike first.
+		// Both rows sit in the cell at this ts, the lookalike first; only the exact key may match.
 		const replay = await substrate.emit(base({ idempotency_key: "abcd_efghij" }), { replay: true });
 
 		expect(ledger.rows).toHaveLength(2);
@@ -691,7 +690,7 @@ describe("every refusal and failure writes nothing", () => {
 		const substrate = substrateWith(ACCEPT, seen);
 		await substrate.emit(base({ idempotency_key: KEY }));
 		const inserts = ledger.inserts().length;
-		ledger.before = async (statement) => (statement.includes('"payload" LIKE') ? new Response("boom postgres://u:hunter2@h/db", { status: 503 }) : undefined);
+		ledger.before = async (statement) => (statement.startsWith(LOOKUP_PREFIX) ? new Response("boom postgres://u:hunter2@h/db", { status: 503 }) : undefined);
 
 		const result = await substrate.emit(base({ idempotency_key: KEY }), { replay: true });
 
@@ -712,7 +711,7 @@ describe("every refusal and failure writes nothing", () => {
 		const ledger = fakeLedger();
 		const substrate = substrateWith(ACCEPT);
 		ledger.before = async (statement) =>
-			statement.includes('"payload" LIKE')
+			statement.startsWith(LOOKUP_PREFIX)
 				? new Response(JSON.stringify(records(["id", "hash", "payload"], [[null, null, null]])), { status: 200 })
 				: undefined;
 		const result = await substrate.emit(base({ idempotency_key: KEY }), { replay: true });
@@ -885,7 +884,7 @@ describe("over HTTP", () => {
 
 	/** `fetch` is replaced by the fake ledger, so the test's own calls go through the real one. */
 	const post = (harness: { base: string }, body: unknown, headers: Record<string, string> = {}) =>
-		originalFetch(`${harness.base}/events`, { method: "POST", headers, body: JSON.stringify(body) });
+		originalFetch(`${harness.base}/events`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
 
 	const wire = (extra: Record<string, unknown> = {}) => ({
 		surface: "omp",
@@ -939,7 +938,7 @@ describe("over HTTP", () => {
 	test("a lookup the ledger fails is 503 with `stored: false` and nothing written", async () => {
 		const ledger = fakeLedger();
 		const harness = await serve(ACCEPT);
-		ledger.before = async (statement) => (statement.includes('"payload" LIKE') ? new Response("down", { status: 503 }) : undefined);
+		ledger.before = async (statement) => (statement.startsWith(LOOKUP_PREFIX) ? new Response("down", { status: 503 }) : undefined);
 		const response = await post(harness, wire({ idempotency_key: KEY }), { "x-substrate-replay": "1" });
 		const body = (await response.json()) as { stored: boolean; error: string };
 		expect(response.status).toBe(503);

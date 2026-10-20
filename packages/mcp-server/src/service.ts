@@ -1772,11 +1772,22 @@ export class Substrate {
 			if (settled !== null) return settled;
 		}
 		let prev: string | null = null;
+		let tipError: string | null = null;
 		if (this.greptime && sessionId) {
-			prev = await this.greptime.lastHash(sessionId).catch(() => null);
+			// A tip that cannot be read is not an empty session: a null prev here would start a second
+			// chain beside the stored one. Only an answered read yields a prev; a failed one refuses the write.
+			try {
+				prev = await this.greptime.lastHash(sessionId);
+			} catch (cause) {
+				tipError = redact(String(cause));
+			}
 		}
 		const event = idem === null ? normalizeEvent(input, prev) : normalizeEvent(input, prev, { key: idem.key });
 		if (!this.greptime) return { event, stored: false, error: "GREPTIME_URL is not set" };
+		if (tipError !== null) {
+			process.stderr.write(`[substrate] event ${event.id} not stored — chain tip unreadable: ${tipError}\n`);
+			return { event, stored: false, error: `chain tip unreadable: ${tipError}` };
+		}
 
 		// Fail closed: a ledger that may deduplicate does not get the write unless an
 		// operator has explicitly accepted that loss.
@@ -4209,7 +4220,7 @@ export class Substrate {
 		packet: HandoffPacket;
 		signed: boolean;
 		stored: boolean;
-		event: { id: string; ts: string; hash: string; prev: string | null };
+		event: { id: string; ts: string; hash: string; prev: string | null } | null;
 		gaps: string[];
 		error?: string;
 		warning?: string;
@@ -4218,8 +4229,17 @@ export class Substrate {
 		const place = input.graph_id ? await this.placeOf(input.graph_id) : {};
 		const sessionId = normalizeIdentifier(input.from?.session_id);
 		// The sender's chain tip, read from the ledger. There is deliberately no way
-		// for a caller to supply this.
-		const prev = this.greptime && sessionId ? await this.greptime.lastHash(sessionId).catch(() => null) : null;
+		// for a caller to supply this. A tip that cannot be read is not an empty session, so the
+		// packet is refused below rather than signed with a predecessor nobody confirmed.
+		let prev: string | null = null;
+		let tipError: string | null = null;
+		if (this.greptime && sessionId) {
+			try {
+				prev = await this.greptime.lastHash(sessionId);
+			} catch (cause) {
+				tipError = redact(String(cause));
+			}
+		}
 
 		const built = buildHandoff({
 			...input,
@@ -4228,6 +4248,19 @@ export class Substrate {
 			prev_event_hash: prev,
 			handover_lease_id: input.handover_lease_id ?? null,
 		});
+		if (tipError !== null) {
+			// Nothing is signed, stored or released: the packet is handed back unsigned, as on any
+			// refused write, and the sender keeps its lease.
+			const unsigned = signHandoff(built, null);
+			return {
+				packet: unsigned,
+				signed: false,
+				stored: false,
+				event: null,
+				gaps: handoffGaps(unsigned),
+				error: `chain tip unreadable: ${tipError}`,
+			};
+		}
 		const signer = this.config.handoffKeyId
 			? { key_id: this.config.handoffKeyId, key: this.config.handoffKeys.get(this.config.handoffKeyId) ?? "" }
 			: null;

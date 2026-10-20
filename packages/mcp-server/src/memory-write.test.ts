@@ -566,6 +566,23 @@ describe("quarantined", () => {
 		expect(store.quarantined[0]?.text).not.toContain("ghp_");
 	});
 
+	test("a subject carrying an email is parked, as a body carrying one would be", async () => {
+		const result = await write({ subject: "jane@corp.com" });
+		expect(result.outcome).toBe("quarantined");
+		expect(result.quarantine_reason).toBe("pii");
+		expect(store.entries()).toEqual([]);
+		expect(store.quarantined[0]?.subject).toBe("jane@corp.com");
+	});
+
+	test("a subject carrying a credential is parked with the credential redacted, not cut", async () => {
+		// The token starts before the 200th character and runs past it.
+		const token = `ghp_${"a".repeat(40)}`;
+		const result = await write({ subject: `${"x".repeat(185)} ${token}` });
+		expect(result.outcome).toBe("quarantined");
+		expect(result.quarantine_reason).toBe("secret");
+		expect(store.quarantined[0]?.subject).toBe(`${"x".repeat(185)} [redacted]`);
+	});
+
 	test("a reviewer's token does not release a secret", async () => {
 		const result = await write({ text: "password: hunter2", review_token: REVIEW_TOKEN });
 		expect(result.outcome).toBe("quarantined");
@@ -1409,6 +1426,43 @@ describe("exactly-once", () => {
 		await write({ idempotency_key: "k1" });
 		store.clock += DERIVED_KEY_WINDOW_MS * 3;
 		expect((await write({ idempotency_key: "k1" })).deduplicated).toBe(true);
+		expect(store.entries()).toHaveLength(1);
+	});
+
+	test("an explicit key spent by one writer is not reused against another writer", async () => {
+		const first = await write({ writer: "hermes", text: "hermes finished n2", idempotency_key: "k-shared" });
+		expect(first.outcome).toBe("accepted");
+
+		// The second writer's write is its own: it is not refused as a reuse of the first writer's key,
+		// and it does not come back carrying the first writer's entry.
+		const other = await write({ writer: "omp", text: "omp finished n4", idempotency_key: "k-shared" });
+		expect(other.reason).not.toBe("idempotency.reused");
+		expect(other.outcome).toBe("accepted");
+		expect(other.verified_persisted).toBe(true);
+		expect(other.entry?.writer).toBe("omp");
+		expect(other.entry?.id).not.toBe(first.entry?.id);
+		expect(store.entries()).toHaveLength(2);
+	});
+
+	test("each writer still replays its own explicit key", async () => {
+		const first = await write({ writer: "hermes", text: "hermes finished n2", idempotency_key: "k-shared" });
+		const other = await write({ writer: "omp", text: "omp finished n4", idempotency_key: "k-shared" });
+
+		const again = await write({ writer: "hermes", text: "hermes finished n2", idempotency_key: "k-shared" });
+		expect(again.outcome).toBe("accepted");
+		expect(again.deduplicated).toBe(true);
+		expect(again.entry?.id).toBe(first.entry?.id);
+
+		const otherAgain = await write({ writer: "omp", text: "omp finished n4", idempotency_key: "k-shared" });
+		expect(otherAgain.deduplicated).toBe(true);
+		expect(otherAgain.entry?.id).toBe(other.entry?.id);
+		expect(store.entries()).toHaveLength(2);
+	});
+
+	test("a key reused with different content by its own writer is still refused", async () => {
+		await write({ writer: "hermes", text: "hermes finished n2", idempotency_key: "k-shared" });
+		const changed = await write({ writer: "hermes", text: "hermes changed n2", idempotency_key: "k-shared" });
+		expect(changed.reason).toBe("idempotency.reused");
 		expect(store.entries()).toHaveLength(1);
 	});
 

@@ -10,7 +10,9 @@ name: CI
 # `gh variable set CI_ENABLED --body true` turns the gate on; `gh variable delete CI_ENABLED`
 # is the kill switch.
 #
-# The scratch Postgres is published on host port 54321. Port 5432 on that runner is already taken.
+# Pull requests from forks never reach the runner: a fork's code would otherwise run on the VPS.
+#
+# The scratch Postgres is published on 127.0.0.1:54321 only. Port 5432 on that runner is already taken.
 #
 # The third job, `boot-gate`, is report-only and opt-in twice over: it needs CI_ENABLED and its own
 # repository variable BOOT_GATE, because it starts Docker containers on the shared runner.
@@ -32,7 +34,7 @@ permissions:
 jobs:
   verify:
     name: Typecheck, tests and repo locks
-    if: vars.CI_ENABLED == 'true' && github.event_name != 'schedule'
+    if: vars.CI_ENABLED == 'true' && github.event_name != 'schedule' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 20
     services:
@@ -43,7 +45,7 @@ jobs:
           POSTGRES_PASSWORD: ci-scratch-only
           POSTGRES_DB: substrate_test
         ports:
-          - 54321:5432
+          - 127.0.0.1:54321:5432
         options: >-
           --health-cmd "pg_isready -U postgres -d substrate_test"
           --health-interval 5s
@@ -118,7 +120,7 @@ jobs:
     # and removes everything. `continue-on-error` keeps it advisory: a red run is a report, never a
     # block. It starts containers, so it is off until `gh variable set BOOT_GATE --body true`, and it
     # does not run on the weekly schedule. No `services:` block: the harness owns its own stores.
-    if: vars.CI_ENABLED == 'true' && vars.BOOT_GATE == 'true' && github.event_name != 'schedule'
+    if: vars.CI_ENABLED == 'true' && vars.BOOT_GATE == 'true' && github.event_name != 'schedule' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     continue-on-error: true
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 15

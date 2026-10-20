@@ -8,6 +8,8 @@
 // built by a pure function pinned by tests; every result is JSON with no environment content.
 
 import { execFile } from "node:child_process";
+import { closeSync, constants as fsConstants, lstatSync, openSync, readFileSync, realpathSync, type Stats, statSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { redact } from "../../mcp-server/src/redact.ts";
 import { worktreeFor } from "./options.ts";
 import { isValidRepoSlug } from "./seed.ts";
@@ -28,22 +30,39 @@ export const COMMIT_USER_EMAIL = "claude-code@substrate.local";
 const BASE_BRANCH_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 const RUN_TIMEOUT_MS = 120_000;
 const OUTPUT_TAIL_CHARS = 400;
+const GITDIR_FILE_MAX = 4_096;
+/** Config every host git call carries: hooks and fsmonitor are programs a worktree could supply, so both stay off. */
+const GIT_GUARD_ARGS = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
 
 export function branchFor(graphId: string): string {
 	worktreeFor(graphId); // validates the id
 	return `substrate/${graphId}`;
 }
 
+/** A base branch this host accepts: the BASE_BRANCH_RE shape, no `..`, no `.lock` suffix. */
+function validBase(base: string): boolean {
+	return BASE_BRANCH_RE.test(base) && !base.includes("..") && !base.endsWith(".lock");
+}
+
 function requireBase(base: string): string {
-	if (!BASE_BRANCH_RE.test(base) || base.includes("..") || base.endsWith(".lock")) {
-		throw new Error(`invalid base branch ${JSON.stringify(base)}`);
-	}
+	if (!validBase(base)) throw new Error(`invalid base branch ${JSON.stringify(base)}`);
 	return base;
 }
 
-/** `git -C <worktree> push origin substrate/<gid>` — nothing else, ever. */
-export function pushArgv(graphId: string): string[] {
-	return ["git", "-C", worktreeFor(graphId), "push", "origin", branchFor(graphId)];
+/** A host git location: the worktree (`-C`, `--work-tree`) and the gitdir (`--git-dir`), both resolved by the host. */
+export type GitSite = { worktree: string; gitDir: string };
+
+/**
+ * Every host git argv starts here: the site pinned by path, hooks and fsmonitor off. The explicit gitdir
+ * means git never reads the worktree's own `.git` file, which the guest can rewrite through the mount.
+ */
+export function gitArgv(site: GitSite, args: readonly string[]): string[] {
+	return ["git", "-C", site.worktree, `--git-dir=${site.gitDir}`, `--work-tree=${site.worktree}`, ...GIT_GUARD_ARGS, ...args];
+}
+
+/** `git push origin substrate/<gid>` in the site — nothing else, ever. */
+export function pushArgv(site: GitSite, graphId: string): string[] {
+	return gitArgv(site, ["push", "origin", branchFor(graphId)]);
 }
 
 export type PrCreateInput = { repo: string; graphId: string; base: string; title: string; body: string };
@@ -62,15 +81,14 @@ export function prCreateArgv(input: PrCreateInput): string[] {
  * c:hostfn_commit: two argvs run in order on the host worktree. The add step excludes every
  * `.substrate-*` path at any depth, so a hook's scratch file can never be staged (T-03-07-07).
  */
-export function commitArgv(graphId: string, message: string): [string[], string[]] {
-	const worktree = worktreeFor(graphId);
+export function commitArgv(site: GitSite, message: string): [string[], string[]] {
 	if (message.trim().length === 0 || message.length > COMMIT_MESSAGE_MAX) {
 		throw new Error(`message must be 1..${COMMIT_MESSAGE_MAX} characters`);
 	}
 	if (message.startsWith("-")) throw new Error("message must not start with -");
 	return [
-		["git", "-C", worktree, "add", "-A", "--", ".", SCRATCH_EXCLUDE_PATHSPEC],
-		["git", "-C", worktree, "-c", `user.name=${COMMIT_USER_NAME}`, "-c", `user.email=${COMMIT_USER_EMAIL}`, "commit", "-m", message],
+		gitArgv(site, ["add", "-A", "--", ".", SCRATCH_EXCLUDE_PATHSPEC]),
+		gitArgv(site, ["-c", `user.name=${COMMIT_USER_NAME}`, "-c", `user.email=${COMMIT_USER_EMAIL}`, "commit", "-m", message]),
 	];
 }
 
@@ -82,27 +100,31 @@ export function scratchPaths(diffNameOnly: string): string[] {
 		.filter((line) => line.length > 0 && (line.split("/").at(-1) ?? "").startsWith(SCRATCH_PREFIX));
 }
 
-/** worktree.py `_origin_matches`: exactly this owner/repo (case-insensitive, `.git` ignored, path or scp suffix). */
+/**
+ * The origin is this GitHub repo and no other: https://github.com/<owner>/<repo> or git@github.com:<owner>/<repo>,
+ * optionally ending in `.git`. Owner and repo match exactly, case-insensitively.
+ */
 export function originMatches(url: string, slug: string): boolean {
-	let norm = url.trim().toLowerCase().replace(/\/+$/, "");
-	if (norm.endsWith(".git")) norm = norm.slice(0, -".git".length);
-	const want = slug.toLowerCase();
-	return norm === want || norm.endsWith(`/${want}`) || norm.endsWith(`:${want}`);
+	const [owner, repo, ...rest] = slug.toLowerCase().split("/");
+	if (!owner || !repo || rest.length > 0) return false;
+	const match = /^(?:https:\/\/github\.com\/|git@github\.com:)([^/\s]+)\/([^/\s]+?)(?:\.git)?$/i.exec(url.trim());
+	return match?.[1]?.toLowerCase() === owner && match?.[2]?.toLowerCase() === repo;
 }
 
 export type RunResult = { code: number | null; stdout: string; stderr: string };
 export type Runner = (argv: readonly string[]) => Promise<RunResult>;
 
 /**
- * The production runner: execFile with an argv (never a shell), 120 s, HOME=/root so gh's stored
- * credential helper answers git and gh. Only the exit code and the two streams come back.
+ * The production runner: execFile with an argv (never a shell), 120 s, HOME=/root, no system git config
+ * (GIT_CONFIG_NOSYSTEM=1) and no terminal prompt (GIT_TERMINAL_PROMPT=0). Only the exit code and the two
+ * streams come back.
  */
 export function execFileRunner(argv: readonly string[]): Promise<RunResult> {
 	const { promise, resolve } = Promise.withResolvers<RunResult>();
 	execFile(
 		argv[0] as string,
 		argv.slice(1),
-		{ timeout: RUN_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, encoding: "utf8", env: { ...process.env, HOME: "/root" } },
+		{ timeout: RUN_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, encoding: "utf8", env: { ...process.env, HOME: "/root", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" } },
 		(error, stdout, stderr) => {
 			const code = error ? (typeof error.code === "number" ? error.code : null) : 0;
 			resolve({ code, stdout: String(stdout), stderr: String(stderr) });
@@ -120,9 +142,12 @@ export type ScratchCheck = { ok: true } | { ok: false; reason: string; paths: st
  * Before any network call: the branch's diff against origin/<base> must list no scratch path.
  * A diff that cannot be computed refuses too — the push never runs on an unknown branch state.
  */
-export async function checkScratch(input: { graphId: string; base: string; run: Runner }): Promise<ScratchCheck> {
-	const base = requireBase(input.base);
-	const diff = await input.run(["git", "-C", worktreeFor(input.graphId), "diff", "--name-only", `origin/${base}...HEAD`]);
+export async function checkScratch(input: { graphId: string; base: string; run: Runner; worktreeRoot?: string }): Promise<ScratchCheck> {
+	if (!validBase(input.base)) return { ok: false, reason: `invalid base branch ${JSON.stringify(input.base)}`, paths: [] };
+	const resolved = siteFor(input.graphId, input.worktreeRoot);
+	if ("error" in resolved) return { ok: false, reason: resolved.error, paths: [] };
+	const base = input.base;
+	const diff = await input.run(gitArgv(resolved.site, ["diff", "--name-only", `origin/${base}...HEAD`]));
 	if (diff.code !== 0) return { ok: false, reason: `git diff against origin/${base} exited ${String(diff.code)}: ${tail(diff)}`, paths: [] };
 	const paths = scratchPaths(diff.stdout);
 	if (paths.length > 0) return { ok: false, reason: `branch contains substrate scratch files: ${paths.join(", ")}`, paths };
@@ -138,6 +163,8 @@ export type HostFnContext = {
 	store: HostFnStore;
 	substrate: { graphGet(graphId: string): Promise<GraphView | null> };
 	run: Runner;
+	/** Where worktrees live. Unset in production (worktreeFor); tests point it at a temp root. */
+	worktreeRoot?: string;
 	log?: (line: string) => void;
 };
 
@@ -153,8 +180,58 @@ async function target(ctx: HostFnContext): Promise<Target> {
 	const repo = graph.repo ?? record.repo;
 	if (!isValidRepoSlug(repo)) return { error: `graph ${ctx.graphId} names no valid repo` };
 	const base = graph.branch ?? "main";
-	if (!BASE_BRANCH_RE.test(base) || base.includes("..")) return { error: `graph ${ctx.graphId} names no valid base branch` };
+	if (!validBase(base)) return { error: `graph ${ctx.graphId} names no valid base branch` };
 	return { record, graph, repo, base };
+}
+
+/** The worktree the host runs git in: `<root>/<gid>` (worktreeFor unless a root is given), resolved and checked. */
+function siteFor(graphId: string, worktreeRoot: string | undefined): GitSiteResult {
+	const canonical = worktreeFor(graphId); // validates the graph id
+	return resolveGitSite(worktreeRoot === undefined ? canonical : `${worktreeRoot}/${graphId}`);
+}
+
+export type GitSiteResult = { site: GitSite } | HostFnError;
+
+/**
+ * The worktree's `.git` must be a regular file holding `gitdir: <absolute path>`, the path an existing directory
+ * under `.git/worktrees/` and outside the worktree. The guest writes the worktree, so any other shape (directory,
+ * symlink, pointer elsewhere) is refused, never followed.
+ */
+function resolveGitSite(worktree: string): GitSiteResult {
+	const dotGit = `${worktree}/.git`;
+	let st: Stats;
+	try {
+		st = lstatSync(dotGit);
+	} catch {
+		return { error: "worktree .git is missing" };
+	}
+	if (!st.isFile() || st.size > GITDIR_FILE_MAX) return { error: "worktree .git is not a regular file" };
+	let text: string;
+	try {
+		const fd = openSync(dotGit, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+		try {
+			text = readFileSync(fd, "utf8");
+		} finally {
+			closeSync(fd);
+		}
+	} catch {
+		return { error: "worktree .git is not a regular file" };
+	}
+	const line = text.replace(/\r?\n$/, "");
+	const declared = line.startsWith("gitdir: ") ? line.slice("gitdir: ".length) : "";
+	if (!isAbsolute(declared) || declared.includes("\n")) return { error: "worktree .git does not name a gitdir" };
+	let gitDir: string;
+	let worktreeReal: string;
+	try {
+		gitDir = realpathSync(declared);
+		worktreeReal = realpathSync(worktree);
+	} catch {
+		return { error: "worktree .git names a gitdir that does not exist" };
+	}
+	if (!gitDir.includes("/.git/worktrees/")) return { error: "worktree .git names a gitdir outside .git/worktrees/" };
+	if (gitDir.startsWith(`${worktreeReal}/`)) return { error: "worktree .git names a gitdir inside the worktree" };
+	if (!statSync(gitDir).isDirectory()) return { error: "worktree .git names a gitdir that is not a directory" };
+	return { site: { worktree, gitDir } };
 }
 
 export type GitPushResult = { pushed: string; output: string } | HostFnError;
@@ -166,21 +243,23 @@ export type GitPushResult = { pushed: string; output: string } | HostFnError;
 export async function gitPush(ctx: HostFnContext): Promise<GitPushResult> {
 	const t = await target(ctx);
 	if ("error" in t) return t;
-	const worktree = worktreeFor(ctx.graphId);
 	const branch = branchFor(ctx.graphId);
+	const resolved = siteFor(ctx.graphId, ctx.worktreeRoot);
+	if ("error" in resolved) return resolved;
+	const site = resolved.site;
 
-	const head = await ctx.run(["git", "-C", worktree, "rev-parse", "--abbrev-ref", "HEAD"]);
+	const head = await ctx.run(gitArgv(site, ["rev-parse", "--abbrev-ref", "HEAD"]));
 	const onBranch = head.stdout.trim();
 	if (head.code !== 0 || onBranch !== branch) return { error: `worktree is on ${onBranch || "an unknown ref"}, not ${branch}` };
 
-	const origin = await ctx.run(["git", "-C", worktree, "remote", "get-url", "origin"]);
+	const origin = await ctx.run(gitArgv(site, ["remote", "get-url", "origin"]));
 	if (origin.code !== 0 || !originMatches(origin.stdout, t.repo)) return { error: `origin does not name ${t.repo}` };
 
-	const scratch = await checkScratch({ graphId: ctx.graphId, base: t.base, run: ctx.run });
+	const scratch = await checkScratch({ graphId: ctx.graphId, base: t.base, run: ctx.run, worktreeRoot: ctx.worktreeRoot });
 	if (!scratch.ok) return { error: scratch.reason };
 
 	ctx.log?.(`[substrate-host] git-push ${ctx.graphId}/${ctx.nodeId} ${branch} → ${t.repo}`);
-	const push = await ctx.run(pushArgv(ctx.graphId));
+	const push = await ctx.run(pushArgv(site, ctx.graphId));
 	if (push.code !== 0) return { error: `git push exited ${String(push.code)}: ${tail(push)}` };
 	return { pushed: branch, output: tail(push) };
 }
@@ -236,9 +315,11 @@ export async function commit(ctx: HostFnContext & { message: string }): Promise<
 	if (ctx.message.length > COMMIT_MESSAGE_MAX) return { error: `message exceeds ${COMMIT_MESSAGE_MAX} characters` };
 	const record = ctx.store.get(ctx.graphId, ctx.nodeId);
 	if (!record) return { error: `no task for node ${ctx.nodeId} in this VM` };
+	const resolved = siteFor(ctx.graphId, ctx.worktreeRoot);
+	if ("error" in resolved) return resolved;
 	let argvs: [string[], string[]];
 	try {
-		argvs = commitArgv(ctx.graphId, ctx.message);
+		argvs = commitArgv(resolved.site, ctx.message);
 	} catch (cause) {
 		return { error: cause instanceof Error ? cause.message : String(cause) };
 	}
@@ -247,7 +328,7 @@ export async function commit(ctx: HostFnContext & { message: string }): Promise<
 	if (added.code !== 0) return { error: `git add exited ${String(added.code)}: ${tail(added)}` };
 	const committed = await ctx.run(commitArgs);
 	if (committed.code !== 0) return { error: `git commit exited ${String(committed.code)}: ${tail(committed)}` };
-	const head = await ctx.run(["git", "-C", worktreeFor(ctx.graphId), "rev-parse", "HEAD"]);
+	const head = await ctx.run(gitArgv(resolved.site, ["rev-parse", "HEAD"]));
 	const sha = head.stdout.trim();
 	ctx.log?.(`[substrate-host] commit ${ctx.graphId}/${ctx.nodeId} ${sha.slice(0, 12)}`);
 	return { committed: true, sha };

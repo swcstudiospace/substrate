@@ -10,7 +10,12 @@
  *
  * Transport copied from packages/mcp-server/src/server.ts: one createServer handler, bounded body,
  * SyntaxError → 400, anything else → stderr + 500. Path segments are validated before use.
+ *
+ * Every route but GET /healthz needs `Authorization: Bearer <SUBSTRATE_HOST_API_TOKEN>` (401). POST needs
+ * `content-type: application/json` (415). The Host header must name this listener on 127.0.0.1, localhost,
+ * or [::1] with the bound port (421; a malformed Host or URL is 400).
  */
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { isValidGraphId } from "./sandbox-options.ts";
 import { isValidNodeId } from "./seed.ts";
@@ -28,6 +33,8 @@ export type ApiService = {
 };
 
 export type ApiOptions = {
+	/** Bearer secret every route but GET /healthz requires (SUBSTRATE_HOST_API_TOKEN). */
+	token: string;
 	/** Reports whether the rivet engine finished starting; defaults to true. */
 	engineReady?: () => boolean;
 };
@@ -50,12 +57,55 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
 
 const TASK_PATH_RE = /^\/tasks\/([^/]+)\/([^/]+)(?:\/(terminate|kill))?$/;
 
-export function createApiServer(service: ApiService, options: ApiOptions = {}): Server {
+const LOOPBACK_HOSTNAMES: Record<string, true> = { "127.0.0.1": true, localhost: true, "[::1]": true };
+
+/** The Host header and the request target, both parsed; undefined when either is malformed. */
+function parseTarget(req: IncomingMessage): { host: URL; url: URL } | undefined {
+	try {
+		const host = new URL(`http://${req.headers.host ?? ""}`);
+		return { host, url: new URL(req.url ?? "/", host) };
+	} catch {
+		return undefined;
+	}
+}
+
+/** Bearer check on SHA-256 digests: both sides are 32 bytes, so timingSafeEqual never sees unequal lengths. */
+function bearerMatches(req: IncomingMessage, expected: Buffer): boolean {
+	const header = req.headers.authorization ?? "";
+	const presented = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+	return timingSafeEqual(createHash("sha256").update(presented).digest(), expected);
+}
+
+export function createApiServer(service: ApiService, options: ApiOptions): Server {
 	const engineReady = options.engineReady ?? (() => true);
+	const expectedToken = createHash("sha256").update(options.token).digest();
 	return createServer(async (req, res) => {
-		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
+		let pathname = "";
 		try {
-			if (req.method === "GET" && url.pathname === "/healthz") {
+			const target = parseTarget(req);
+			if (!target) {
+				sendJson(res, 400, { error: "malformed Host header or request URL" });
+				return;
+			}
+			const { host, url } = target;
+			pathname = url.pathname;
+			const onListener = LOOPBACK_HOSTNAMES[host.hostname] === true && (host.port || "80") === String(req.socket.localPort);
+			if (!onListener) {
+				sendJson(res, 421, { error: "Host must be 127.0.0.1, localhost, or [::1] on this listener's port" });
+				return;
+			}
+
+			const isHealthz = req.method === "GET" && url.pathname === "/healthz";
+			if (!isHealthz && !bearerMatches(req, expectedToken)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			if (!isHealthz && req.method === "POST" && !(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+				sendJson(res, 415, { error: "POST requires content-type application/json" });
+				return;
+			}
+
+			if (isHealthz) {
 				sendJson(res, 200, { engine: engineReady(), api: true });
 				return;
 			}
@@ -103,7 +153,7 @@ export function createApiServer(service: ApiService, options: ApiOptions = {}): 
 				sendJson(res, 400, { error: "request body is not valid JSON" });
 				return;
 			}
-			process.stderr.write(`[substrate-host] ${req.method} ${url.pathname}: ${String(cause)}\n`);
+			process.stderr.write(`[substrate-host] ${req.method} ${pathname}: ${String(cause)}\n`);
 			if (!res.headersSent) sendJson(res, 500, { error: String(cause) });
 		}
 	});

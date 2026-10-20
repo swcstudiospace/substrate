@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import * as redactModule from "./redact.ts";
 import {
 	REDACTED,
+	REDACTED_PEM,
 	REDACTION_RULES,
 	SKILL_EXCLUSIONS,
 	SKILL_HIGH_CONFIDENCE_RULES,
@@ -191,6 +192,52 @@ describe("over-redaction guards", () => {
 	});
 })
 
+describe("redaction coverage gaps", () => {
+	test("provider token shapes that leaked before are redacted and their surroundings kept", () => {
+		const probes = [
+			"sk_live_" + "a".repeat(24),
+			"rk_live_" + "a".repeat(24),
+			"xoxp-" + "1".repeat(12),
+			"xapp-1-" + "A".repeat(12),
+			"ASIA" + "ABCDEFGHIJKLMNOP",
+			"sk-svcacct-" + "a".repeat(20),
+			"sk-admin-" + "a".repeat(20),
+			"hf_" + "a".repeat(20),
+			"ya29." + "a".repeat(20),
+			"SG." + "a".repeat(22) + "." + "b".repeat(43),
+			"shpat_" + "a".repeat(20),
+			"sbp_" + "a".repeat(20),
+			"glsoat-" + "a".repeat(20),
+			"SK" + "0".repeat(32),
+		];
+		for (const probe of probes) expect(redact(`ship ${probe} now`)).toBe(`ship ${REDACTED} now`);
+	});
+
+	test("credential keys with a closing quote or a lowercase name lose the value and keep the JSON shape", () => {
+		expect(redact('{"password": "hunter2"}')).toBe(`{"password": ${REDACTED}}`);
+		expect(redact("client_secret=abc123")).toBe(`client_secret=${REDACTED}`);
+		expect(redact('{"client_secret": "abc123"}')).toBe(`{"client_secret": ${REDACTED}}`);
+		expect(redact('{"api_key": "abcdefghijklmnopqrstuvwx"}')).toBe(`{"api_key": "${REDACTED}"}`);
+	});
+
+	test("Basic and Token authorization credentials are redacted, not only the scheme word", () => {
+		expect(redact("Authorization: Basic dXNlcjpwYXNz")).toBe(`Authorization: ${REDACTED}`);
+		expect(redact("Authorization: Token abc123def456")).toBe(`Authorization: ${REDACTED}`);
+	});
+
+	test("a PGP block and a PEM block with no END line are redacted, text outside them kept", () => {
+		expect(redact("-----BEGIN PGP PRIVATE KEY BLOCK-----")).toBe(REDACTED_PEM);
+		const pgp = "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOY\n-----END PGP PRIVATE KEY BLOCK-----";
+		expect(redact(`before ${pgp} after`)).toBe(`before ${REDACTED_PEM} after`);
+		expect(redact("keep this\n-----BEGIN RSA PRIVATE KEY-----\nMIIEow")).toBe(`keep this\n${REDACTED_PEM}`);
+	});
+
+	test("a password containing @ is redacted up to the last @ before the host", () => {
+		expect(redact("https://u:p@ss@host")).toBe(`https://u:${REDACTED}@host`);
+		expect(redact("https://u:p@ss@host/path")).toBe(`https://u:${REDACTED}@host/path`);
+	});
+});
+
 // ── One planted secret per named rule (D-04 merge, D18-04) ────────────────────
 // Deterministic runtime fixtures: the source never holds a literal token shape.
 // Rule names come from REDACTION_RULES, so tsc fails when a rule lacks a fixture.
@@ -250,6 +297,15 @@ const FIXTURES: Record<RedactionRuleName, readonly RuleFixture[]> = {
 	// The key prefix is a literal like the other provider prefixes above; the
 	// tail is deterministic runtime output, never a real credential.
 	ragflow: [{ text: "ragflow-" + rnd(ALNUM, 40), secret: "ragflow-" + rnd(ALNUM, 40) }],
+	// Provider shapes added with the SOTA pass; the skill pass shares each name.
+	stripe: [{ text: "sk_live_" + rnd(ALNUM, 24), secret: "sk_live_" + rnd(ALNUM, 24) }],
+	huggingface: [{ text: "hf_" + rnd(ALNUM, 34), secret: "hf_" + rnd(ALNUM, 34) }],
+	"google-oauth": [{ text: "ya29." + rnd(ALNUM, 40), secret: "ya29." + rnd(ALNUM, 40) }],
+	sendgrid: [{ text: "SG." + rnd(ALNUM, 22) + "." + rnd(ALNUM, 43), secret: "SG." + rnd(ALNUM, 22) + "." + rnd(ALNUM, 43) }],
+	shopify: [{ text: "shpat_" + rnd(HEX, 32), secret: "shpat_" + rnd(HEX, 32) }],
+	supabase: [{ text: "sbp_" + rnd(HEX, 40), secret: "sbp_" + rnd(HEX, 40) }],
+	glitch: [{ text: "glsoat-" + rnd(ALNUM, 32), secret: "glsoat-" + rnd(ALNUM, 32) }],
+	twilio: [{ text: "SK" + rnd(HEX, 32), secret: "SK" + rnd(HEX, 32) }],
 	// Two fixtures: one pk- body and one rk- body, each digit-bearing per D18-21.
 	"pk-rk": [
 		{ text: "pk-" + pkBody, secret: "pk-" + pkBody },
@@ -279,7 +335,7 @@ describe("one fixture per named rule", () => {
 	test("every rule carries a unique stable name", () => {
 		const names = REDACTION_RULES.map((entry) => entry.name);
 		expect(new Set(names).size).toBe(names.length);
-		expect(names.length).toBe(31);
+		expect(names.length).toBe(39);
 	});
 
 	test("every rule name has at least one fixture", () => {
@@ -449,6 +505,14 @@ describe("redactSkillContent rejects high-confidence secrets", () => {
 			digitalocean: "dop_v1_" + rnd(HEX, 64),
 			"openai-proj": "sk-proj-" + rnd(ALNUM, 40),
 			ragflow: "ragflow-" + rnd(ALNUM, 40),
+			stripe: "sk_live_" + rnd(ALNUM, 24),
+			huggingface: "hf_" + rnd(ALNUM, 34),
+			"google-oauth": "ya29." + rnd(ALNUM, 40),
+			sendgrid: "SG." + rnd(ALNUM, 22) + "." + rnd(ALNUM, 43),
+			shopify: "shpat_" + rnd(HEX, 32),
+			supabase: "sbp_" + rnd(HEX, 40),
+			glitch: "glsoat-" + rnd(ALNUM, 32),
+			twilio: "SK" + rnd(HEX, 32),
 		};
 		for (const rule of SKILL_HIGH_CONFIDENCE_RULES) {
 			const sample = samples[rule];

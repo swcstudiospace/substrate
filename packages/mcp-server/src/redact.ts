@@ -24,7 +24,7 @@ const REDACTED_TSKEY = "[REDACTED_TSKEY]";
  * `open` and `close` are literal-shaped patterns searched with `exec`, so each byte is
  * visited a bounded number of times.
  */
-function delimitedSpans(text: string, open: RegExp, close: RegExp): Array<[number, number]> {
+function delimitedSpans(text: string, open: RegExp, close: RegExp, unclosedToEnd = false): Array<[number, number]> {
 	const spans: Array<[number, number]> = [];
 	let from = 0;
 	for (;;) {
@@ -33,7 +33,11 @@ function delimitedSpans(text: string, open: RegExp, close: RegExp): Array<[numbe
 		if (!opening) break;
 		close.lastIndex = opening.index + opening[0].length;
 		const closing = close.exec(text);
-		if (!closing) break;
+		if (!closing) {
+			// An unterminated PEM block runs to the end of the text: a key body with no end line is still a key.
+			if (unclosedToEnd) spans.push([opening.index, text.length]);
+			break;
+		}
 		const end = closing.index + closing[0].length;
 		spans.push([opening.index, end]);
 		from = end;
@@ -41,8 +45,8 @@ function delimitedSpans(text: string, open: RegExp, close: RegExp): Array<[numbe
 	return spans;
 }
 
-function redactDelimited(text: string, open: RegExp, close: RegExp, replacement: string): string {
-	const spans = delimitedSpans(text, open, close);
+function redactDelimited(text: string, open: RegExp, close: RegExp, replacement: string, unclosedToEnd = false): string {
+	const spans = delimitedSpans(text, open, close, unclosedToEnd);
 	if (spans.length === 0) return text;
 	let out = "";
 	let copied = 0;
@@ -53,11 +57,11 @@ function redactDelimited(text: string, open: RegExp, close: RegExp, replacement:
 	return out + text.slice(copied);
 }
 
-const URL_PASSWORD = /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+):([^\s@]+)@/gi;
+const URL_PASSWORD = /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+):([^\s/]+)@/gi;
 const PRIVATE_OPEN = /<private>/gi;
 const PRIVATE_CLOSE = /<\/private>/gi;
-const PEM_OPEN = /-----BEGIN[ A-Z]*PRIVATE KEY-----/g;
-const PEM_CLOSE = /-----END[ A-Z]*PRIVATE KEY-----/g;
+const PEM_OPEN = /-----BEGIN[ A-Z]*PRIVATE KEY( BLOCK)?-----/g;
+const PEM_CLOSE = /-----END[ A-Z]*PRIVATE KEY( BLOCK)?-----/g;
 
 interface StructuralMark {
 	start: number;
@@ -80,7 +84,7 @@ function redactStructural(text: string): string {
 			end,
 			with: REDACTED,
 		})),
-		...delimitedSpans(text, PEM_OPEN, PEM_CLOSE).map(([start, end]) => ({
+		...delimitedSpans(text, PEM_OPEN, PEM_CLOSE, true).map(([start, end]) => ({
 			start,
 			end,
 			with: REDACTED_PEM,
@@ -134,12 +138,12 @@ const RULES = [
 	// ── from redactor.py ──────────────────────────────────────────────────────
 	{
 		name: "pem",
-		pattern: /-----BEGIN[ A-Z]*PRIVATE KEY-----[\s\S]*?-----END[ A-Z]*PRIVATE KEY-----/g,
+		pattern: /-----BEGIN[ A-Z]*PRIVATE KEY( BLOCK)?-----[\s\S]*?(?:-----END[ A-Z]*PRIVATE KEY( BLOCK)?-----|$)/g,
 		replacement: REDACTED_PEM,
-		apply: (text: string) => redactDelimited(text, PEM_OPEN, PEM_CLOSE, REDACTED_PEM),
+		apply: (text: string) => redactDelimited(text, PEM_OPEN, PEM_CLOSE, REDACTED_PEM, true),
 	},
 	{ name: "tailscale", pattern: /tskey-[A-Za-z0-9_-]+/g, replacement: REDACTED_TSKEY },
-	{ name: "password", pattern: /(password\s*[:=]\s*)(\S+)/gi, replacement: `$1${REDACTED}` },
+	{ name: "password", pattern: /(password["']?\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|\S+)/gi, replacement: `$1${REDACTED}` },
 	{ name: "password-env", pattern: /\b([A-Z0-9_]*(?:PASSWORD|PASSWD|PASS)\s*=\s*)(\S+)/gi, replacement: `$1${REDACTED}` },
 	{ name: "daytona", pattern: /\b(DAYTONA_(?:API_)?KEY\s*=\s*)(\S+)/gi, replacement: `$1${REDACTED}` },
 	{ name: "vault", pattern: /\b((?:VAULT_TOKEN|VAULT_TOKEN_ID|X-VAULT-TOKEN)\s*[:=]\s*)(\S+)/gi, replacement: `$1${REDACTED}` },
@@ -148,20 +152,22 @@ const RULES = [
 	// Any FOO_TOKEN / FOO_KEY_BAR / FOO_SECRET assignment, incl. our own
 	// SUBSTRATE_TOKEN_* where the keyword sits mid-name. The keyword must be a
 	// whole underscore-delimited segment, so KEYBOARD_LAYOUT is not a secret.
-	{ name: "assignment", pattern: /\b((?:[A-Z0-9]+_)*(?:API_?KEY|APIKEY|TOKEN|SECRET|KEY)(?:_[A-Z0-9]+)*\s*[:=]\s*)(\S+)/g, replacement: `$1${REDACTED}` },
+	// Lowercase `token` and `secret` keys (client_secret=...) match too. A bare lowercase
+	// api_key stays with api-key-lower, whose 16-character floor leaves `api_key: short` alone.
+	{ name: "assignment", pattern: /\b((?:[A-Z0-9]+_)*(?:API_?KEY|APIKEY|TOKEN|SECRET|KEY)(?:_[A-Z0-9]+)*["']?\s*[:=]\s*|(?:[a-z0-9]+_)*(?:token|secret)(?:_[a-z0-9]+)*["']?\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|\S+)/g, replacement: `$1${REDACTED}` },
 	// D-04 api-key-lower: api_key / apiKey / api-key assignments, any case; keeps the key.
 	// The value runs on past its charset to the end of the token (`[^\s"'`,;)]*`), so a value that
 	// carries punctuation is redacted whole rather than left with a tail.
-	{ name: "api-key-lower", pattern: /\b(api[_-]?key)(\s*[:=]\s*["']?)[A-Za-z0-9_\-/.+]{16,}[^\s"'`,;)]*/gi, replacement: `$1$2${REDACTED}` },
+	{ name: "api-key-lower", pattern: /\b(api[_-]?key["']?\s*[:=]\s*["']?)[A-Za-z0-9_\-/.+]{16,}[^\s"'`,;)]*/gi, replacement: `$1${REDACTED}` },
 	// Authorization headers, however cased.
-	{ name: "authorization", pattern: /\b(authorization\s*[:=]\s*)(?:bearer\s+)?(\S+)/gi, replacement: `$1${REDACTED}` },
+	{ name: "authorization", pattern: /\b(authorization\s*[:=]\s*)(?:(?:bearer|basic|token)\s+)?(\S+)/gi, replacement: `$1${REDACTED}` },
 	{ name: "bearer", pattern: /\bBearer\s+[A-Za-z0-9._~+/-]{12,}=*/g, replacement: `Bearer ${REDACTED}` },
 	// Connection URLs carrying a password.
 	// A match needs a literal `://`, so text without one is skipped: from every word boundary the
 	// scheme scan otherwise runs to the end of the run, which is quadratic on a long hyphenated run.
 	{
 		name: "url-password",
-		pattern: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+):([^\s@]+)@/gi,
+		pattern: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+):([^\s/]+)@/gi,
 		replacement: `$1:${REDACTED}@`,
 		apply: (text: string) => (text.includes("://") ? text.replace(URL_PASSWORD, `$1:${REDACTED}@`) : text),
 	},
@@ -176,22 +182,31 @@ const RULES = [
 	{ name: "openai", pattern: /\bsk-(?!ant-)[A-Za-z0-9]{20,}/g, replacement: REDACTED },
 	// ── D-04: shapes agentmemory's /remember does not filter ──────────────────
 	// aws: AWS access key id.
-	{ name: "aws", pattern: /\bAKIA[0-9A-Z]{16}\b/g, replacement: REDACTED },
+	{ name: "aws", pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, replacement: REDACTED },
 	// google: Google API key.
 	{ name: "google", pattern: /\bAIza[0-9A-Za-z_-]{35}/g, replacement: REDACTED },
 	// slack: Slack bot token.
-	{ name: "slack", pattern: /\bxoxb-[0-9A-Za-z-]{10,}/g, replacement: REDACTED },
+	{ name: "slack", pattern: /\bxox[abprs]-[0-9A-Za-z-]{10,}|\bxapp-[0-9A-Za-z-]{10,}/g, replacement: REDACTED },
 	// npm: npm access token.
 	{ name: "npm", pattern: /\bnpm_[A-Za-z0-9]{36}/g, replacement: REDACTED },
 	// gitlab: GitLab personal access token.
 	{ name: "gitlab", pattern: /\bglpat-[A-Za-z0-9_-]{20,}/g, replacement: REDACTED },
 	// digitalocean: DigitalOcean personal access token.
 	{ name: "digitalocean", pattern: /\bdop_v1_[a-f0-9]{64}/g, replacement: REDACTED },
-	// openai-proj: OpenAI project key (the sk- rule above stops at its second hyphen).
-	{ name: "openai-proj", pattern: /\bsk-proj-[A-Za-z0-9_-]{20,}/g, replacement: REDACTED },
+	// openai-proj: OpenAI project and service-account keys (the sk- rule above stops at its second hyphen).
+	{ name: "openai-proj", pattern: /\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}/g, replacement: REDACTED },
 	// ragflow: RAGFlow API key (D25-23). High-confidence on both passes, so a
 	// key pasted into a doc page is refused, never uploaded.
 	{ name: "ragflow", pattern: /\bragflow-[A-Za-z0-9]{20,}/g, replacement: REDACTED },
+	// Provider shapes added with the SOTA pass; each has a skill counterpart with the same name.
+	{ name: "stripe", pattern: /\b(?:sk|rk)_live_[A-Za-z0-9]{24,}/g, replacement: REDACTED },
+	{ name: "huggingface", pattern: /\bhf_[A-Za-z0-9]{20,}/g, replacement: REDACTED },
+	{ name: "google-oauth", pattern: /\bya29\.[A-Za-z0-9_-]{20,}/g, replacement: REDACTED },
+	{ name: "sendgrid", pattern: /\bSG\.[A-Za-z0-9_-]{16,}(?:\.[A-Za-z0-9_-]{16,})?/g, replacement: REDACTED },
+	{ name: "shopify", pattern: /\bshpat_[A-Za-z0-9]{20,}/g, replacement: REDACTED },
+	{ name: "supabase", pattern: /\bsbp_[A-Za-z0-9]{20,}/g, replacement: REDACTED },
+	{ name: "glitch", pattern: /\bglsoat-[A-Za-z0-9_-]{20,}/g, replacement: REDACTED },
+	{ name: "twilio", pattern: /\bSK[0-9a-fA-F]{32}\b/g, replacement: REDACTED },
 	// pk / rk: publishable and restricted keys. D18-21 narrowed: the matched tail
 	// must contain at least one digit, so word-only slugs are not secrets.
 	{
@@ -368,6 +383,14 @@ export type SkillRedactionRule =
 	| "digitalocean"
 	| "openai-proj"
 	| "ragflow"
+	| "stripe"
+	| "huggingface"
+	| "google-oauth"
+	| "sendgrid"
+	| "shopify"
+	| "supabase"
+	| "glitch"
+	| "twilio"
 	| "private-tag"
 	| "pk-rk"
 	| "api-key-lower"
@@ -394,6 +417,14 @@ export const SKILL_HIGH_CONFIDENCE_RULES: readonly SkillRedactionRule[] = [
 	"digitalocean",
 	"openai-proj",
 	"ragflow",
+	"stripe",
+	"huggingface",
+	"google-oauth",
+	"sendgrid",
+	"shopify",
+	"supabase",
+	"glitch",
+	"twilio",
 ];
 /** The only high-confidence rules a caller may downgrade from finding to redaction. */
 export type SkillDocExampleRule = "pem" | "jwt";
@@ -443,10 +474,10 @@ const SKILL_RULES: readonly SkillRule[] = [
 	{
 		name: "pem",
 		rule: "pem",
-		pattern: /-----BEGIN[ A-Z]*PRIVATE KEY-----[\s\S]*?-----END[ A-Z]*PRIVATE KEY-----/dg,
+		pattern: /-----BEGIN[ A-Z]*PRIVATE KEY( BLOCK)?-----[\s\S]*?(?:-----END[ A-Z]*PRIVATE KEY( BLOCK)?-----|$)/dg,
 		value: 0,
 		replacement: REDACTED_PEM,
-		scan: (text) => delimitedSpans(text, PEM_OPEN, PEM_CLOSE),
+		scan: (text) => delimitedSpans(text, PEM_OPEN, PEM_CLOSE, true),
 	},
 	{ name: "jwt", rule: "jwt", pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/dg, value: 0, replacement: REDACTED },
 	{ name: "github", rule: "github", pattern: /\bgh[pousr]_[A-Za-z0-9]{20,}/dg, value: 0, replacement: REDACTED },
@@ -458,14 +489,23 @@ const SKILL_RULES: readonly SkillRule[] = [
 	{ name: "linear-oauth", rule: "linear", pattern: /\blin_oauth_[A-Za-z0-9]{20,}/dg, value: 0, replacement: REDACTED },
 	{ name: "notion", rule: "notion", pattern: /\b(?:ntn_|secret_)[A-Za-z0-9]{30,}/dg, value: 0, replacement: REDACTED },
 	{ name: "tailscale", rule: "tailscale", pattern: /tskey-[A-Za-z0-9_-]+/dg, value: 0, replacement: REDACTED_TSKEY },
-	{ name: "aws", rule: "aws", pattern: /\bAKIA[0-9A-Z]{16}\b/dg, value: 0, replacement: REDACTED },
+	{ name: "aws", rule: "aws", pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/dg, value: 0, replacement: REDACTED },
 	{ name: "google", rule: "google", pattern: /\bAIza[0-9A-Za-z_-]{35}/dg, value: 0, replacement: REDACTED },
-	{ name: "slack", rule: "slack", pattern: /\bxoxb-[0-9A-Za-z-]{10,}/dg, value: 0, replacement: REDACTED },
+	{ name: "slack", rule: "slack", pattern: /\bxox[abprs]-[0-9A-Za-z-]{10,}|\bxapp-[0-9A-Za-z-]{10,}/dg, value: 0, replacement: REDACTED },
 	{ name: "npm", rule: "npm", pattern: /\bnpm_[A-Za-z0-9]{36}/dg, value: 0, replacement: REDACTED },
 	{ name: "gitlab", rule: "gitlab", pattern: /\bglpat-[A-Za-z0-9_-]{20,}/dg, value: 0, replacement: REDACTED },
 	{ name: "digitalocean", rule: "digitalocean", pattern: /\bdop_v1_[a-f0-9]{64}/dg, value: 0, replacement: REDACTED },
-	{ name: "openai-proj", rule: "openai-proj", pattern: /\bsk-proj-[A-Za-z0-9_-]{20,}/dg, value: 0, replacement: REDACTED },
+	{ name: "openai-proj", rule: "openai-proj", pattern: /\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}/dg, value: 0, replacement: REDACTED },
 	{ name: "ragflow", rule: "ragflow", pattern: /\bragflow-[A-Za-z0-9]{20,}/dg, value: 0, replacement: REDACTED },
+	// Provider shapes shared with RULES under the same names (D-04 / SOTA pass).
+	{ name: "stripe", rule: "stripe", pattern: /\b(?:sk|rk)_live_[A-Za-z0-9]{24,}/dg, value: 0, replacement: REDACTED },
+	{ name: "huggingface", rule: "huggingface", pattern: /\bhf_[A-Za-z0-9]{20,}/dg, value: 0, replacement: REDACTED },
+	{ name: "google-oauth", rule: "google-oauth", pattern: /\bya29\.[A-Za-z0-9_-]{20,}/dg, value: 0, replacement: REDACTED },
+	{ name: "sendgrid", rule: "sendgrid", pattern: /\bSG\.[A-Za-z0-9_-]{16,}(?:\.[A-Za-z0-9_-]{16,})?/dg, value: 0, replacement: REDACTED },
+	{ name: "shopify", rule: "shopify", pattern: /\bshpat_[A-Za-z0-9]{20,}/dg, value: 0, replacement: REDACTED },
+	{ name: "supabase", rule: "supabase", pattern: /\bsbp_[A-Za-z0-9]{20,}/dg, value: 0, replacement: REDACTED },
+	{ name: "glitch", rule: "glitch", pattern: /\bglsoat-[A-Za-z0-9_-]{20,}/dg, value: 0, replacement: REDACTED },
+	{ name: "twilio", rule: "twilio", pattern: /\bSK[0-9a-fA-F]{32}\b/dg, value: 0, replacement: REDACTED },
 	{
 		name: "private-tag",
 		rule: "private-tag",
@@ -484,19 +524,19 @@ const SKILL_RULES: readonly SkillRule[] = [
 		replacement: REDACTED,
 		accept: (matched) => /[0-9]/.test(matched),
 	},
-	{ name: "password", rule: "password", pattern: /(password[ \t]*[:=][ \t]*)(\S+)/dgi, value: 2, replacement: REDACTED },
+	{ name: "password", rule: "password", pattern: /(password["']?[ \t]*[:=][ \t]*)(\S+)/dgi, value: 2, replacement: REDACTED },
 	{ name: "password-env", rule: "password", pattern: /\b([A-Z0-9_]*(?:PASSWORD|PASSWD|PASS)[ \t]*=[ \t]*)(\S+)/dgi, value: 2, replacement: REDACTED },
 	{ name: "daytona", rule: "assignment", pattern: /\b(DAYTONA_(?:API_)?KEY[ \t]*=[ \t]*)(\S+)/dgi, value: 2, replacement: REDACTED },
 	{ name: "vault", rule: "assignment", pattern: /\b((?:VAULT_TOKEN|VAULT_TOKEN_ID|X-VAULT-TOKEN)[ \t]*[:=][ \t]*)(\S+)/dgi, value: 2, replacement: REDACTED },
-	{ name: "assignment", rule: "assignment", pattern: /\b((?:[A-Z0-9]+_)*(?:API_?KEY|APIKEY|TOKEN|SECRET|KEY)(?:_[A-Z0-9]+)*[ \t]*[:=][ \t]*)(\S+)/dg, value: 2, replacement: REDACTED },
-	{ name: "api-key-lower", rule: "api-key-lower", pattern: /\b(api[_-]?key)([ \t]*[:=][ \t]*["']?)([A-Za-z0-9_\-/.+]{16,}[^\s"'`,;)]*)/dgi, value: 3, replacement: REDACTED },
+	{ name: "assignment", rule: "assignment", pattern: /\b((?:[A-Z0-9]+_)*(?:API_?KEY|APIKEY|TOKEN|SECRET|KEY)(?:_[A-Z0-9]+)*["']?[ \t]*[:=][ \t]*|(?:[a-z0-9]+_)*(?:token|secret)(?:_[a-z0-9]+)*["']?[ \t]*[:=][ \t]*)(\S+)/dg, value: 2, replacement: REDACTED },
+	{ name: "api-key-lower", rule: "api-key-lower", pattern: /\b(api[_-]?key["']?[ \t]*[:=][ \t]*["']?)([A-Za-z0-9_\-/.+]{16,}[^\s"'`,;)]*)/dgi, value: 2, replacement: REDACTED },
 	// Before `authorization`, so a literal after "Authorization: Bearer" is reported as bearer.
 	{ name: "bearer", rule: "bearer", pattern: /\b(Bearer[ \t]+)([A-Za-z0-9._~+/-]{12,}=*)/dg, value: 2, replacement: REDACTED },
-	{ name: "authorization", rule: "authorization", pattern: /\b(authorization[ \t]*[:=][ \t]*)(?:bearer[ \t]+)?(\S+)/dgi, value: 2, replacement: REDACTED },
+	{ name: "authorization", rule: "authorization", pattern: /\b(authorization[ \t]*[:=][ \t]*)(?:(?:bearer|basic|token)[ \t]+)?(\S+)/dgi, value: 2, replacement: REDACTED },
 	{
 		name: "url-password",
 		rule: "url-password",
-		pattern: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+):([^\s@]+)@/dgi,
+		pattern: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+):([^\s/]+)@/dgi,
 		value: 2,
 		replacement: REDACTED,
 		gate: (text) => text.includes("://"),

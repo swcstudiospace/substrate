@@ -12,9 +12,10 @@
  * The server runs in `SUBSTRATE_EVENT_IDEMPOTENCY=accept`, so its own `/healthz` advertises the mode the spool
  * requires and a replay-marked, keyed request takes the real ledger lookup (a duck-typed ledger that finds nothing).
  * A thin proxy in front only records the `authorization` header of every `/healthz` request; it forwards
- * everything, headers included, untouched, so the real bearer check, route and `/events` handler are what answer.
+ * everything except Host (the proxy's own port, which the real listener refuses with 421), so the real bearer check, route and `/events` handler are what answer.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -27,7 +28,8 @@ import { drainEventSpool, parkEvent, prepareEvent, resetSpoolReplayState } from 
 import { EventSpool } from "./spool.ts";
 import { isolateSpoolEnv } from "./spool-test-env.ts";
 
-const BEARER = "tok-cc";
+const BEARER = `tok-${randomBytes(16).toString("hex")}`;
+const WRONG_BEARER = `tok-${randomBytes(16).toString("hex")}`;
 
 interface Running {
 	url: string;
@@ -90,7 +92,10 @@ async function startRealServer(): Promise<Running> {
 		fetch: async (req) => {
 			const path = new URL(req.url).pathname;
 			if (path === "/healthz") healthAuth.push(req.headers.get("authorization"));
-			const answer = await fetch(`${realUrl}${path}`, { method: req.method, headers: req.headers, body: req.method === "GET" ? undefined : await req.text() });
+			// The proxy's Host names its own port. The real listener checks its own, so the forwarded Host is dropped and fetch sets the real one.
+			const headers = new Headers(req.headers);
+			headers.delete("host");
+			const answer = await fetch(`${realUrl}${path}`, { method: req.method, headers, body: req.method === "GET" ? undefined : await req.text() });
 			return answer;
 		},
 	});
@@ -147,7 +152,7 @@ describe("replay against the real server with a bearer required", () => {
 		const server = await startRealServer();
 		park("wrong bearer");
 
-		const result = await drainEventSpool({ all: true, url: server.url, token: "tok-not-a-token" });
+		const result = await drainEventSpool({ all: true, url: server.url, token: WRONG_BEARER });
 
 		expect(result).toEqual({ status: "held", reason: "healthz-auth", dropped: 0, remaining: expect.any(Number) });
 		expect(server.written).toEqual([]);

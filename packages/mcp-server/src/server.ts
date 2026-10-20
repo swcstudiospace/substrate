@@ -57,7 +57,7 @@ import { formatDrift } from "./drift.ts";
 import { IdempotencyRefusal, InvalidEventError } from "./event.ts";
 import { type CursorPosition, type GreptimeClient } from "./greptime.ts";
 import { InvalidHandoffError } from "./handoff.ts";
-import { attributedSurface, createMcpServer, type McpCaller } from "./mcp.ts";
+import { attributedSurface, createMcpServer, surfaceClaimRefusal, type McpCaller } from "./mcp.ts";
 import {
 	auditRefusal,
 	auditToolCalls,
@@ -244,6 +244,32 @@ const MAX_BODY_BYTES = 1_000_000;
  */
 const DOCS_MAX_BODY_BYTES = 6_000_000;
 
+/** How long a request may take to arrive: its headers, then the whole request. Bounds a slow client, not a response. */
+const HEADERS_TIMEOUT_MS = 30_000;
+const REQUEST_TIMEOUT_MS = 120_000;
+
+/** Hostnames a loopback caller uses. The bound port is checked beside them. */
+const LOOPBACK_HOSTNAMES: Record<string, true> = { "127.0.0.1": true, localhost: true, "[::1]": true };
+
+/** POST routes whose body is parsed as JSON. Any other media type is refused with 415. */
+const JSON_BODY_ROUTES: Record<string, true> = {
+	"/evidence": true,
+	"/brief": true,
+	"/events": true,
+	"/events/query": true,
+	"/memory": true,
+	"/memory/recall": true,
+	"/handoff": true,
+	"/drift": true,
+	"/verify": true,
+	"/docs/search": true,
+	"/docs/ingest": true,
+	"/docs/merge-trigger": true,
+	"/skills/propose": true,
+	"/skills/approve": true,
+	"/mcp": true,
+};
+
 /**
  * A body over the route's cap. Final for that body: the routes named in the
  * request handler's catch answer it 413. Every other route still answers it
@@ -351,6 +377,37 @@ export function isLoopbackRemote(remoteAddress: string | undefined): boolean {
 	if (address === "::1") return true;
 	const octets = address.split(".");
 	return octets.length === 4 && octets[0] === "127" && octets.slice(1).every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
+}
+
+/** The configured public origin as a URL, or null when it does not parse. */
+function parsePublicOrigin(value: string): URL | null {
+	try {
+		return new URL(value);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Whether a Host header names this listener: loopback on the bound port, or the public origin's host.
+ * Throws on a malformed authority, which the caller answers 400.
+ */
+function hostAllowed(hostHeader: string, boundPort: number, publicOrigin: URL | null): boolean {
+	const authority = new URL(`http://${hostHeader}`);
+	if (publicOrigin !== null && authority.host === publicOrigin.host) return true;
+	return LOOPBACK_HOSTNAMES[authority.hostname] === true && Number(authority.port || "80") === boundPort;
+}
+
+/** Whether an Origin names the public origin or a loopback origin. `null`, junk and other hosts are refused. */
+function originAllowed(origin: string, publicOrigin: URL | null): boolean {
+	let parsed: URL;
+	try {
+		parsed = new URL(origin);
+	} catch {
+		return false;
+	}
+	if (publicOrigin !== null && parsed.origin === publicOrigin.origin) return true;
+	return (parsed.protocol === "http:" || parsed.protocol === "https:") && LOOPBACK_HOSTNAMES[parsed.hostname] === true;
 }
 
 /**
@@ -582,8 +639,33 @@ export function createHttpServer(
 		now,
 		record: (verdict) => observability.observer.admission?.(verdict),
 	});
+	// The configured public origin, parsed once. When it does not parse, only loopback is answered.
+	const publicOrigin = parsePublicOrigin(config.publicOrigin);
 	const server = createServer(async (req, res) => {
-		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
+		// A malformed Host or request target is the caller's error: a 400, not a throw out of this async listener,
+		// which used to take the process down. A Host that is neither loopback on the bound port nor the public
+		// origin's host is a 421 (DNS rebinding); an Origin that is neither is a 403.
+		let url: URL;
+		let hostOk: boolean;
+		try {
+			const host = req.headers.host;
+			if (host === undefined) throw new TypeError("the Host header is required");
+			const address = server.address();
+			hostOk = hostAllowed(host, typeof address === "object" && address !== null ? address.port : 0, publicOrigin);
+			url = new URL(req.url ?? "/", `http://${host}`);
+		} catch {
+			sendJson(res, 400, { error: "malformed Host header or request target" });
+			return;
+		}
+		if (!hostOk) {
+			sendJson(res, 421, { error: "Host does not name this substrate" });
+			return;
+		}
+		const origin = req.headers.origin;
+		if (origin !== undefined && !originAllowed(origin, publicOrigin)) {
+			sendJson(res, 403, { error: "Origin is not allowed" });
+			return;
+		}
 		const authorization = req.headers.authorization ?? null;
 		const surface: Surface | null = surfaceForToken(config, authorization);
 		// What the transport establishes about the caller, before any request body is
@@ -676,6 +758,13 @@ export function createHttpServer(
 		) {
 			if (req.method === "POST" && url.pathname === "/events") eventRefusal = "auth";
 			sendJson(res, 401, { error: "unknown or missing bearer token" });
+			return;
+		}
+		// Every POST that parses a JSON body answers 415 to any other media type. This runs after the bearer, so a
+		// caller with none still gets its 401, and before admission, so a refused request spends no budget.
+		const jsonBody = /^application\/json\s*(;|$)/i.test((req.headers["content-type"] ?? "").trim());
+		if (req.method === "POST" && JSON_BODY_ROUTES[url.pathname] === true && !jsonBody) {
+			sendJson(res, 415, { error: "request body must be application/json" });
 			return;
 		}
 
@@ -867,16 +956,22 @@ export function createHttpServer(
 			// surfaces; the ?surface= parameter demultiplexes, and its absence
 			// is a 400, never a silent default.
 			if (req.method === "GET" && url.pathname === "/.well-known/agent-card.json") {
-				const surface = url.searchParams.get("surface");
-				if (!surface) {
+				const cardSurface = url.searchParams.get("surface");
+				if (!cardSurface) {
 					sendJson(res, 400, { error: "surface query parameter is required" });
 					return;
 				}
-				if (!isKnownCardSurface(surface)) {
-					sendJson(res, 400, { error: `unknown surface ${JSON.stringify(surface.slice(0, 80))}` });
+				if (!isKnownCardSurface(cardSurface)) {
+					sendJson(res, 400, { error: `unknown surface ${JSON.stringify(cardSurface.slice(0, 80))}` });
 					return;
 				}
-				sendJson(res, 200, buildAgentCard(surface, await substrate.teachablesForSurface(surface)));
+				// A tokened caller's card is its own surface's: another surface's is refused, not described.
+				const cardRefusal = surfaceClaimRefusal(surface, cardSurface);
+				if (cardRefusal !== null) {
+					sendJson(res, 403, { error: cardRefusal });
+					return;
+				}
+				sendJson(res, 200, buildAgentCard(cardSurface, await substrate.teachablesForSurface(cardSurface)));
 				return;
 			}
 
@@ -902,6 +997,12 @@ export function createHttpServer(
 				const raw = await readBody(req);
 				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
 				rememberClaim(claim, body);
+				// A tokened caller's brief is its own surface's: a body naming another is refused, not served as theirs.
+				const briefRefusal = surfaceClaimRefusal(surface, body.surface);
+				if (briefRefusal !== null) {
+					sendJson(res, 403, { error: briefRefusal });
+					return;
+				}
 				if (!(await auditedRest(res, observability, surface, "brief", body))) return;
 				// uplift-4 S1: an unknown profile is the caller's mistake, refused here
 				// and never coerced to one the caller did not ask for.
@@ -1109,6 +1210,12 @@ export function createHttpServer(
 			if (req.method === "POST" && url.pathname === "/handoff") {
 				const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
 				rememberClaim(claim, body);
+				// A tokened caller hands off as its own surface. A body naming another is refused, never re-attributed.
+				const handoffRefusal = surfaceClaimRefusal(surface, body.surface);
+				if (handoffRefusal !== null) {
+					sendJson(res, 403, { error: handoffRefusal });
+					return;
+				}
 				// `coord_handoff`, as MCP audits it, and fail-closed for the same reason: a
 				// handoff transfers work and a lease to another agent, and one nobody recorded
 				// is a transfer that cannot be reconstructed afterwards.
@@ -1499,6 +1606,10 @@ export function createHttpServer(
 			if (!res.headersSent) sendJson(res, 500, { error: "internal error", correlation_id: correlationId });
 		}
 	});
+	// These bound how long a request may take to arrive, not how long a response may run. There is no connection
+	// cap: `/events/stream` holds its connection open by design.
+	server.headersTimeout = HEADERS_TIMEOUT_MS;
+	server.requestTimeout = REQUEST_TIMEOUT_MS;
 	const close = server.close.bind(server);
 	server.close = ((callback?: (err?: Error) => void) => {
 		anonymousLog.stop();
@@ -1723,6 +1834,13 @@ async function handleMcp(
 	if (req.method !== "POST") {
 		// Stateless mode has no server-initiated stream to attach to.
 		res.writeHead(405, { allow: "POST" }).end();
+		return;
+	}
+	// Refused on the declared size before a byte of the body is read. `readBody`'s cap still holds for a body
+	// that declares less than it sends.
+	const declared = Number(req.headers["content-length"] ?? 0);
+	if (declared > DOCS_MAX_BODY_BYTES) {
+		send(res, 413, JSON.stringify({ error: `request body is over ${DOCS_MAX_BODY_BYTES} bytes` }), "application/json", { connection: "close" });
 		return;
 	}
 	const raw = await readBody(req, DOCS_MAX_BODY_BYTES);

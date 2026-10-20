@@ -390,6 +390,27 @@ async function idempotencyKey(
 	return sameContent && sameAsk ? other : currentKey;
 }
 
+/**
+ * Whether an explicit key's record was spent by a different writer.
+ *
+ * The store keys a claim on the raw key, so every writer that sends one shares one row. A record whose
+ * request hash is this request's belongs to this writer, because that hash folds the writer in. Otherwise
+ * the entry the record names says who wrote it. A record that names no readable entry is not treated as
+ * another writer's: it stays with the replay path, which answers a different ask with `idempotency.reused`.
+ */
+async function heldByAnotherWriter(
+	store: MemoryStore,
+	existing: WriteRecord,
+	writer: string,
+	asked: string,
+	priorAsked: string,
+): Promise<boolean> {
+	if (existing.request_hash !== null && digestMatches(existing.request_hash, asked, priorAsked)) return false;
+	if (existing.entry_id === null) return false;
+	const spent = await store.readEntry(existing.entry_id);
+	return spent !== null && spent.writer !== writer;
+}
+
 async function parkedContent(
 	find: ((entryHash: string) => Promise<string | null>) | undefined,
 	current: string,
@@ -619,7 +640,8 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 	};
 
 	// ── 3. quarantine ──────────────────────────────────────────────────────────
-	const classification = classify(raw, kind);
+	// The subject is stored and it is what a conflict resolves on, so it is judged by the same rule as the body.
+	const classification = classify(raw, kind) ?? (subjectInput ? classify(subjectInput, kind) : null);
 	if (classification && !(classification.reviewable && reviewed)) {
 		const minted = candidateKey(request.idempotency_key, entryHash, sourceEvent, reviewed);
 		const key = await idempotencyKey(store, minted.key, minted.explicit, entryHash, asked, priorEntry, priorAsked, sourceEvent, reviewed);
@@ -657,8 +679,8 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 
 	// ── 4. exactly-once ────────────────────────────────────────────────────────
 	const minted = candidateKey(request.idempotency_key, entryHash, sourceEvent, reviewed);
-	const explicitKey = minted.explicit ? minted.key : null;
-	const key = await idempotencyKey(store, minted.key, minted.explicit, entryHash, asked, priorEntry, priorAsked, sourceEvent, reviewed);
+	const explicit = minted.explicit;
+	let key = await idempotencyKey(store, minted.key, minted.explicit, entryHash, asked, priorEntry, priorAsked, sourceEvent, reviewed);
 	// Minted before the claim, so the claim can reserve it. An attempt that inserts its
 	// row and then dies is otherwise indistinguishable from one that never got that far,
 	// and its successor has to guess — which means either duplicating the row or losing
@@ -668,15 +690,25 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 	// reservation rather than replacing it with this one, so the pointer to a row that
 	// may already exist is never overwritten before it has been resolved. See `rowId`.
 	const entryId = newId("mem");
-	const claim = await store.claimWrite({
-		key,
-		explicit: explicitKey !== null,
-		entryHash,
-		requestHash: asked,
-		entryId,
-		alsoEntryHash: priorEntry,
-		alsoRequestHash: priorAsked,
-	});
+	const claimWith = (claimKey: string, keyExplicit: boolean) =>
+		store.claimWrite({
+			key: claimKey,
+			explicit: keyExplicit,
+			entryHash,
+			requestHash: asked,
+			entryId,
+			alsoEntryHash: priorEntry,
+			alsoRequestHash: priorAsked,
+		});
+	let claim = await claimWith(key, explicit);
+	// An explicit key is one row for every writer that sends it. A key another writer spent is not
+	// this writer's to replay or be refused by, so this write goes under the derived key its own
+	// content mints. That key already folds the writer in, so it cannot collide with the other
+	// writer's; the explicit key itself is left exactly as it was.
+	if (!claim.claimed && explicit && (await heldByAnotherWriter(store, claim.existing, writer, asked, priorAsked))) {
+		key = await idempotencyKey(store, derivedKey(entryHash, sourceEvent, reviewed), false, entryHash, asked, priorEntry, priorAsked, sourceEvent, reviewed);
+		claim = await claimWith(key, false);
+	}
 	if (!claim.claimed) {
 		const replayed = await replay(store, key, claim.existing, grant.name, entryHash, asked, priorEntry, priorAsked, {
 			sourceEvent,

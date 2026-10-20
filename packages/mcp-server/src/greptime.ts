@@ -106,9 +106,8 @@ export const INGEST_LAG_MS = 300_000;
 export const INGEST_BUDGET_MS = 1_000;
 
 /**
- * Rows one idempotency lookup reads. More than one because `LIKE` reads `_` as a wildcard, so
- * lookalike keys in the same cell and millisecond can precede the real row; still a hard bound,
- * and well above the handful of rows one (surface, repo, graph_id, kind, ts) cell holds.
+ * Rows one idempotency lookup reads: the cell's rows at one exact `ts`, matched against the key in
+ * code. A hard bound, well above the handful of rows one (surface, repo, graph_id, kind, ts) cell holds.
  */
 export const IDEMPOTENCY_LOOKUP_LIMIT = 5;
 
@@ -1217,21 +1216,20 @@ export class GreptimeClient {
 	 * exact normalised `ts` the client fixed at its first attempt. A NULL `repo` or `graph_id` is
 	 * `IS NULL`: `= NULL` matches nothing. `LIMIT` {@link IDEMPOTENCY_LOOKUP_LIMIT}, a small bound.
 	 *
-	 * The key is matched against the end of the stored payload text. `normalizeEvent` appends `_ik`
-	 * as the payload's last key, so the stored text ends `"_ik":"<key>"}`; anchoring there means a
-	 * caller who buried a nested `_ik` in their own payload cannot masquerade as the original. `LIKE`
-	 * reads `_` as a wildcard, so a lookalike row in the same cell and millisecond can match the
-	 * pattern too and come back first; that is why the read takes a few rows rather than one, and
-	 * why each is checked here against the exact suffix. A row that only over-matches is skipped,
-	 * never taken as a hit that would swallow a new event. If the read comes back FULL
-	 * ({@link IDEMPOTENCY_LOOKUP_LIMIT} rows) and none carries the exact suffix, the real row may be
-	 * hiding past the limit, so the answer is inconclusive and this throws like any lookup error
-	 * rather than reporting a miss that would append a duplicate. A short read without an exact
+	 * The key is matched in code, never in SQL. `normalizeEvent` appends `_ik` as the payload's last
+	 * key, so the stored text ends `"_ik":"<key>"}`; each returned payload is checked for that exact
+	 * suffix, and anchoring there means a caller who buried a nested `_ik` in their own payload cannot
+	 * masquerade as the original. A `LIKE` pattern is not used: `_` in a key is a wildcard in that
+	 * dialect, so a lookalike key would match, and an `ESCAPE` clause is unverified here. A row without
+	 * the exact suffix is skipped, never taken as a hit that would swallow a new event. If the read
+	 * comes back FULL ({@link IDEMPOTENCY_LOOKUP_LIMIT} rows) and none carries the exact suffix, the real
+	 * row may be hiding past the limit, so the answer is inconclusive and this throws like any lookup
+	 * error rather than reporting a miss that would append a duplicate. A short read without an exact
 	 * match is a genuine miss.
 	 *
 	 * It does not catch what it did not look for: only the same cell and `ts`. That is the contract,
-	 * not an accident. Whether the exact-`ts` + key-prefix predicate is cheap on the production
-	 * image has not been measured; the operator step is an `EXPLAIN` of this statement.
+	 * not an accident. Whether the exact-`ts` cell read is cheap on the production image has not been
+	 * measured; the operator step is an `EXPLAIN` of this statement.
 	 *
 	 * Throws on any ledger error, an open breaker included, and on a hit that is not a well-formed
 	 * row: the caller answers 503 and writes nothing, because a lookup that errors must never be
@@ -1254,7 +1252,7 @@ export class GreptimeClient {
 		const rows = await this.sql(
 			`SELECT "id", "hash", "payload" FROM "agent_events" WHERE ${equals("surface", cell.surface)} AND ${equals("repo", cell.repo)} ` +
 				`AND ${equals("graph_id", cell.graph_id)} AND ${equals("kind", cell.kind)} AND "ts" = ${this.q(cell.ts)} ` +
-				`AND "payload" LIKE ${this.q(`%${suffix}`)} LIMIT ${IDEMPOTENCY_LOOKUP_LIMIT}`,
+				`LIMIT ${IDEMPOTENCY_LOOKUP_LIMIT}`,
 		);
 		let found: { id: string; hash: string } | null = null;
 		for (const row of rows) {
