@@ -78,10 +78,16 @@ describeLive("memory exactly-once against a live index", () => {
 
 	afterAll(async () => {
 		if (!PG_URL) return;
+		// Ledger rows go first, while the entries they point at still exist. Only rows this run
+		// wrote are removed: an explicit key carrying MARKER, or a derived (mwd_) key or entry hash
+		// taken from an entry whose body carries MARKER. Other writers' rows are not touched.
+		await raw`
+			delete from memory_writes
+			where idempotency_key like ${`${MARKER}%`}
+			   or idempotency_key in (select idempotency_key from memory_entries where body like ${`%${MARKER}%`})
+			   or entry_hash in (select entry_hash from memory_entries where body like ${`%${MARKER}%`})
+			   or entry_id in (select id from memory_entries where body like ${`%${MARKER}%`})`.catch(() => undefined);
 		await raw`delete from memory_entries where body like ${`%${MARKER}%`}`.catch(() => undefined);
-		await raw`delete from memory_writes where idempotency_key like ${`${MARKER}%`} or idempotency_key like 'mwd_%'`.catch(() => undefined);
-		// Clean any writes left pointing at deleted entries (keyless mwd_ tests etc.)
-		await raw`delete from memory_writes w where not exists (select 1 from memory_entries e where e.id = w.entry_id)`.catch(() => undefined);
 		await raw.end().catch(() => undefined);
 		await store.close().catch(() => undefined);
 	});
@@ -96,6 +102,10 @@ describeLive("memory exactly-once against a live index", () => {
 		expect(second.outcome).toBe("accepted");
 		expect(second.deduplicated).toBe(true);
 		expect(second.idempotency_key).toBe(key);
+		expect(first.entry?.id).toBeDefined();
+		expect(second.entry?.id).toBeDefined();
+		expect(first.entry?.text).toBeDefined();
+		expect(second.entry?.text).toBeDefined();
 		expect(second.entry?.id).toBe(first.entry?.id);
 		expect(second.entry?.text).toBe(first.entry?.text);
 		expect(await rowsFor("replay")).toBe(1);
@@ -109,8 +119,11 @@ describeLive("memory exactly-once against a live index", () => {
 		expect(first.outcome).toBe("accepted");
 		expect(second.outcome).toBe("accepted");
 		expect(second.deduplicated).toBeUndefined();
+		expect(first.entry?.id).toBeDefined();
+		expect(second.entry?.id).toBeDefined();
 		expect(second.entry?.id).not.toBe(first.entry?.id);
 		expect(retry.deduplicated).toBe(true);
+		expect(retry.entry?.id).toBeDefined();
 		expect(retry.entry?.id).toBe(second.entry?.id);
 		expect(await rowsFor("keyless-a")).toBe(1);
 		expect(await rowsFor("keyless-b")).toBe(1);
