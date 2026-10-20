@@ -8,9 +8,7 @@ import substrateStatus, {
 	coverageRows,
 	createState,
 	diffTotals,
-	formatFooter,
 	formatSummary,
-	formatWidget,
 	knownClients,
 	type OmpContext,
 	type OmpPi,
@@ -197,106 +195,10 @@ describe("diff and restart", () => {
 		const state = createState("session-1");
 		applySnapshot(state, snapshot(1_000, STARTED, { req: 100, emit: 50, tool: 20 }), 1_000);
 		applySnapshot(state, snapshot(2_000, LATER, { req: 5, emit: 1, tool: 0 }), 2_000);
-		expect(state.lastDelta).toEqual({ req: 0, emit: 0, tool: 0 });
 		expect(state.last?.metrics.startedAt).toBe(LATER);
 		applySnapshot(state, snapshot(3_000, LATER, { req: 9, emit: 1, tool: 0 }), 3_000);
-		expect(state.lastDelta).toEqual({ req: 4, emit: 0, tool: 0 });
-	});
-});
-
-describe("footer and widget", () => {
-	test("checking before any probe has completed", () => {
-		expect(formatFooter(createState("session-1"), 1_000)).toBe("substrate · checking");
-	});
-
-	test("an error before any good snapshot shows no counts and no zeros", async () => {
-		const state = createState("session-1");
-		await refresh(state, { fetchImpl: refusedFetch, env: {}, readFile: () => null, now: () => 1_000 });
-		const footer = formatFooter(state, 2_000);
-		expect(footer).toContain("ERROR (unreachable)");
-		expect(footer).toContain("no data yet");
-		expect(footer).not.toMatch(/\d req|\+\d/);
-	});
-
-	test("an error after a good poll shows the last good time and no counts", async () => {
-		const state = createState("session-1");
-		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
-		applySnapshot(state, snapshot(2_000, STARTED, { req: 12, emit: 9, tool: 3 }), 2_000);
-		await refresh(state, { fetchImpl: refusedFetch, env: {}, readFile: () => null, now: () => 3_000 });
-		const footer = formatFooter(state, 3_000);
-		expect(footer).toContain("ERROR (unreachable)");
-		expect(footer).toContain("last good");
-		expect(footer).toContain("/substrate retries");
-		expect(footer).not.toContain("omp +");
-	});
-
-	test("NOT_OBSERVED_IN_WINDOW while omp is unchanged, never IN_USE", () => {
-		const state = createState("session-1");
-		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
-		applySnapshot(state, snapshot(2_000, STARTED, { req: 10, emit: 4, tool: 3 }), 2_000);
-		const footer = formatFooter(state, 2_000);
-		expect(footer).toContain("NOT_OBSERVED_IN_WINDOW");
-		expect(footer).not.toContain("IN_USE");
-	});
-
-	test("IN_USE after an omp change, back to NOT_OBSERVED_IN_WINDOW once five minutes pass", () => {
-		const state = createState("session-1");
-		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
-		applySnapshot(state, snapshot(2_000, STARTED, { req: 12, emit: 9, tool: 3 }), 2_000);
-		expect(formatFooter(state, 3_000)).toContain("IN_USE");
-		expect(formatFooter(state, 2_000 + 5 * 60_000)).toContain("NOT_OBSERVED_IN_WINDOW");
-	});
-
-	test("the footer shows the last poll's omp change", () => {
-		const state = createState("session-1");
-		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
-		applySnapshot(state, snapshot(2_000, STARTED, { req: 12, emit: 9, tool: 3 }), 2_000);
-		expect(formatFooter(state, 3_000)).toContain("omp +2 req +5 emit");
-	});
-
-	test("a plane that is down is named, and usage is still reported", () => {
-		const state = createState("session-1");
-		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }, false), 1_000);
-		applySnapshot(state, snapshot(2_000, STARTED, { req: 12, emit: 4, tool: 3 }, false), 2_000);
-		const footer = formatFooter(state, 2_500);
-		expect(footer).toContain("ragflow down");
-		expect(footer).toContain("IN_USE");
-	});
-
-	test("ACCESS_DENIED shows no counts", async () => {
-		const state = createState("session-1");
-		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
-		await refresh(state, { fetchImpl: denyFetch, env: {}, readFile: () => null, now: () => 2_000 });
-		const footer = formatFooter(state, 2_000);
-		expect(footer).toContain("ACCESS_DENIED auth required");
-		expect(footer).not.toContain("omp +");
-	});
-
-	test("the footer never exceeds 79 characters, even for a long error reason", () => {
-		const state = createState("session-1");
-		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
-		state.lastProbe = { ok: false, reason: "x".repeat(200), at: 2_000 };
-		expect(formatFooter(state, 2_000).length).toBeLessThanOrEqual(79);
-	});
-
-	test("the widget is empty until omp changes, then states its cap and shows the change", () => {
-		const state = createState("session-1");
-		expect(formatWidget(state)).toEqual([]);
-		applySnapshot(state, snapshot(1_000, STARTED, { req: 10, emit: 4, tool: 3 }), 1_000);
-		const at = new Date(2026, 9, 13, 10, 5).getTime();
-		applySnapshot(state, snapshot(at, STARTED, { req: 15, emit: 6, tool: 4 }), at);
-		const lines = formatWidget(state);
-		expect(lines[0]).toContain("cap 3");
-		expect(lines.slice(1)).toEqual(["10:05  +5 req  +2 emit  +1 tool"]);
-	});
-
-	test("the widget keeps only the last three changes", () => {
-		const state = createState("session-1");
-		applySnapshot(state, snapshot(1_000, STARTED, { req: 0, emit: 0, tool: 0 }), 1_000);
-		for (let step = 1; step <= 4; step++) {
-			applySnapshot(state, snapshot(1_000 + step * 1_000, STARTED, { req: step, emit: 0, tool: 0 }), 1_000 + step * 1_000);
-		}
-		expect(formatWidget(state).slice(1)).toHaveLength(3);
+		// The change is measured from the restart baseline: 9 - 5, not 9 - 100.
+		expect(busStatus(state, 3_500).usage).toBe("IN_USE");
 	});
 });
 
@@ -356,7 +258,7 @@ describe("usage, coverage and /substrate", () => {
 		expect(text).toContain("unregistered");
 	});
 
-	test("a credential-like value in a health record never reaches the summary or the footer", () => {
+	test("a credential-like value in a health record never reaches the summary", () => {
 		const state = createState("session-1");
 		const raw = healthFixture();
 		const health = parseHealthz({
@@ -368,7 +270,6 @@ describe("usage, coverage and /substrate", () => {
 		if (!health || !metrics) throw new Error("fixture did not parse");
 		applySnapshot(state, { at: 1_000, metrics, health }, 1_000);
 		expect(formatSummary(state, 1_000).join("\n")).not.toContain("CANARY-TOKEN-VALUE");
-		expect(formatFooter(state, 1_000)).not.toContain("CANARY-TOKEN-VALUE");
 	});
 
 	test("an error shows last-known counters labelled as such, a retry line, and no usage claim", async () => {
@@ -499,11 +400,10 @@ describe("probe", () => {
 
 		const state = createState("session-1");
 		await refresh(state, deps);
-		expect(formatFooter(state, 2)).not.toContain(TOKEN);
 		const summary = formatSummary(state, 2).join("\n");
 		expect(summary).toContain("auth failed");
 		expect(summary).toContain("hint:");
-		for (const output of [formatFooter(state, 2), summary, JSON.stringify(result)]) {
+		for (const output of [summary, JSON.stringify(busStatus(state, 2)), JSON.stringify(result)]) {
 			expect(output).not.toContain(TOKEN);
 		}
 	});
@@ -517,7 +417,7 @@ describe("probe", () => {
 
 		const state = createState("session-1");
 		if (result.ok) applySnapshot(state, result.snapshot, 42);
-		const outputs = [formatFooter(state, 42), ...formatWidget(state), ...formatSummary(state, 42), JSON.stringify(result)];
+		const outputs = [formatSummary(state, 42).join("\n"), JSON.stringify(busStatus(state, 42)), JSON.stringify(result)];
 		for (const output of outputs) expect(output).not.toContain(TOKEN);
 	});
 
@@ -720,7 +620,7 @@ describe("Ultrathink bar publisher", () => {
 			},
 		};
 		const ctx: OmpContext = {
-			ui: { setStatus: () => {}, setWidget: () => {}, notify: () => {} },
+			ui: { notify: () => {} },
 			sessionManager: { getSessionId: () => "publisher-test" },
 		};
 		const statuses = (): SubstrateBusStatus[] =>

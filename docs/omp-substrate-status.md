@@ -1,8 +1,8 @@
 # Omp substrate status
 
-An Omp extension that shows Agent Substrate usage in the Omp TUI: a footer
-status, a widget with recent activity, and a `/substrate` command. Read-only and
-fail-open.
+An Omp extension that publishes Agent Substrate status on the omp event bus for
+the Ultrathink bar, with a `/substrate` command for on-demand detail. Read-only
+and fail-open.
 
 ## What the numbers mean
 
@@ -17,11 +17,11 @@ surface `omp`:
 
 - `req`: `substrate.request.total` for `omp`, summed over routes.
 - `emit`: `substrate.emit.total` for `omp`, summed over kinds.
-- `tool`: `substrate.tool.calls` for `omp`. Shown in the widget and in `/substrate`, not in the footer.
+- `tool`: `substrate.tool.calls` for `omp`. Shown in `/substrate`.
 
 Monitoring routes (`/healthz`, `/metrics`, `/livez`, `/slo`, `/slo/history`) are
 not counted as requests. Otherwise this extension's own polls would show up as
-omp requests, and the footer would never reach `NOT_OBSERVED_IN_WINDOW`.
+omp requests, and `/substrate` would never reach `NOT_OBSERVED_IN_WINDOW`.
 
 ## Usage and coverage
 
@@ -42,24 +42,6 @@ omp requests, and the footer would never reach `NOT_OBSERVED_IN_WINDOW`.
 
 ## Surfaces
 
-Footer, one line under 80 columns:
-
-- `substrate · IN_USE · omp +N req +M emit · planes ok · HH:MM`: a change in the
-  window. `HH:MM` is the last good poll.
-- `substrate · NOT_OBSERVED_IN_WINDOW · …`: no omp change in the last five minutes.
-- `… · <plane> down` or `… · N planes down`: a plane in `/healthz` reports `ok: false`.
-- `substrate · ERROR (<reason>) · last good HH:MM · /substrate retries`: the last
-  probe failed. The time is the last good poll. With no good poll yet, the footer
-  reads `no data yet`. Counts are never replaced by zeros.
-- `substrate · ACCESS_DENIED auth required` or `auth failed`: the server answered
-  401 or 403. No counts are shown.
-- `substrate · checking`: before the first probe completes.
-
-Widget, below the editor: a caption that states the feed cap (the last three
-polls) and the refresh interval (30 seconds), then one row per poll with a
-nonzero omp change, as `HH:MM  +N req  +M emit  +K tool` in local time. Hidden
-when empty.
-
 `/substrate`: runs one fresh probe, or waits up to 4 seconds for the poll
 already in flight. It shows the probe state with `updated HH:MM`, the usage
 definition, the omp counters with their basis, the coverage banner, one row per
@@ -72,8 +54,7 @@ where the token comes from.
 ## Ultrathink bar
 
 The extension also publishes its status on the Omp event bus (`pi.events`) for the
-Ultrathink bar, the widget above the composer. The footer, the widget, and
-`/substrate` print the same text as before.
+Ultrathink bar, the widget above the composer.
 
 - `substrate:status`: published after each render. Payload `SubstrateBusStatus`:
   `{ v, state, usage, omp, coverage, planesDown, updatedAt, reason }`.
@@ -97,8 +78,8 @@ On `error`, `omp`, `coverage` and `planesDown` carry the last good values, and
 `usage` is `UNKNOWN`. On `access-denied` they are `null`, and no counts are sent.
 
 To remove the publisher, delete the `publish` function, its call at the end of
-`render`, and the `substrate:status-request` subscription. The footer, widget and
-`/substrate` need no change. `busStatus` and the two channel constants can go too.
+`render`, and the `substrate:status-request` subscription. The `/substrate`
+command needs no change. `busStatus` and the two channel constants can go too.
 
 ## Refresh
 
@@ -108,7 +89,7 @@ one poll. A failed probe keeps the last good snapshot.
 
 A write that changes an omp counter shows on the first poll after it: at most
 30 seconds, plus up to 3 seconds for the probe. The throttle is covered by a test.
-The end-to-end check, a real write seen in the footer, is an operator step.
+The end-to-end check, a real write seen via `/substrate`, is an operator step.
 
 ## Install
 
@@ -131,7 +112,7 @@ Remove the symlink to disable it.
   2. the file named by `SUBSTRATE_TOKEN_FILE`
   3. the file `omp` in `SUBSTRATE_TOKENS_DIR`
 - The bearer goes only in the `Authorization` header. It is resolved on every
-  poll and never stored, logged, or put in any footer, widget, or notification.
+  poll and never stored, logged, or put in any notification or bus payload.
 - Panel text is plain text. Control and bidirectional-override characters in a
   surface or plane name are removed before display.
 

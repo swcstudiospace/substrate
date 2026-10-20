@@ -1,27 +1,24 @@
 /**
- * Omp extension: Agent Substrate usage in the Omp TUI (design v3).
+ * Omp extension: Agent Substrate status for the Ultrathink bar.
  *
  * Installed as a symlink: ~/.omp/agent/extensions/substrate-status.ts → this file, the same way
  * substrate-skills.ts is installed. Omp's loader auto-discovers that directory and accepts symlinks.
  *
- * What it shows is the server's own counters, not Omp's tool calls. Omp has no substrate MCP server
+ * What it reports is the server's own counters, not Omp's tool calls. Omp has no substrate MCP server
  * (mcp.json has no substrate entry), so tool calls made inside Omp are not counted here. The substrate
  * attributes traffic to surface "omp" itself; this extension reads GET /metrics and GET /healthz and
  * turns consecutive polls into deltas.
  *
- * - Footer: `substrate · IN_USE | NOT_OBSERVED_IN_WINDOW · omp +N req +M emit · planes ok | <plane> down · HH:MM`.
- *   On a failed probe: `substrate · ERROR (<reason>) · last good HH:MM | no data yet · /substrate retries`.
- *   On an auth failure: `substrate · ACCESS_DENIED <reason>`, with no counts. Before the first probe: `substrate · checking`.
  * - Usage: IN_USE when an omp change was seen in the last five minutes; otherwise NOT_OBSERVED_IN_WINDOW.
  *   The window and every time shown are this viewer's poll clock, because /metrics carries no event timestamps.
  * - Coverage: the known clients are the token file names in SUBSTRATE_TOKENS_DIR, with omp always included.
  *   A known client with no counters is NOT_INSTRUMENTED. One with counters is OBSERVED when it changed in the
  *   window, else NO_ACTIVITY_IN_WINDOW. A counted surface outside the list is UNREGISTERED_CLIENT: shown, not dropped.
- * - Widget: the last three polls with a nonzero omp change, under a caption that states the cap and the refresh.
- * - /substrate: one fresh probe (or the poll already in flight), then the usage definition, coverage, omp counters,
- *   planes, cache and ledger. On error the counters are labelled last known, and the line says to run /substrate again.
- * - Ultrathink bar: after each render, publishes `busStatus` on the `substrate:status` event-bus channel, and republishes
- *   when `substrate:status-request` arrives. Footer, widget, and /substrate are unchanged by it. See the docs.
+ * - Ultrathink bar: after each render, publishes `busStatus` on the `substrate:status` event-bus channel
+ *   (consumed by the Ultrathink bar), and republishes when `substrate:status-request` arrives.
+ * - /substrate: detail is served through its notifications only — one fresh probe (or the poll already in
+ *   flight), then the usage definition, coverage, omp counters, planes, cache and ledger. On error the
+ *   counters are labelled last known, and the line says to run /substrate again.
  *
  * Auth: both polls send the omp bearer whenever one resolves. /metrics may require it once the server has tokens
  * configured. An unauthenticated loopback GET answered 200 when checked on 2026-10-15, so it is not assumed.
@@ -93,11 +90,6 @@ export interface ProbeDeps {
 	now?: () => number;
 }
 
-export interface Recent {
-	at: number;
-	delta: Totals;
-}
-
 export interface ProbeStatus {
 	ok: boolean;
 	reason: string | null;
@@ -116,7 +108,6 @@ export interface ClientRow {
 export interface State {
 	sessionId: string | undefined;
 	last: Snapshot | null;
-	lastDelta: Totals | null;
 	lastProbe: ProbeStatus | null;
 	/** Coverage as of the last good poll. A failed poll reports this, not the live known list. */
 	lastCoverage: { observed: number; known: number } | null;
@@ -125,7 +116,6 @@ export interface State {
 	surfaceActiveAt: Record<string, number>;
 	/** The known clients: omp plus the token file names. The poller sets this before each probe. */
 	known: string[];
-	recent: Recent[];
 	/** The poll in flight, if any. A refresh made meanwhile awaits this same promise. */
 	inFlight: Promise<void> | null;
 }
@@ -133,8 +123,6 @@ export interface State {
 /** Structural subset of Omp's ExtensionContext: getSessionId is a method, so call it as one. */
 export interface OmpContext {
 	ui: {
-		setStatus(key: string, text: string | undefined): void;
-		setWidget(key: string, content: string[] | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }): void;
 		notify(message: string, type?: "info" | "warning" | "error"): void;
 	};
 	sessionManager?: { getSessionId?(): unknown };
@@ -184,7 +172,6 @@ export const PROBE_TIMEOUT_MS = 3000;
 export const SUBSTRATE_WAIT_MS = 4000;
 const POLL_MS = 30_000;
 const USAGE_WINDOW_MS = 5 * 60_000;
-const FOOTER_MAX = 79;
 export const AUTH_REQUIRED = "auth required";
 export const AUTH_FAILED = "auth failed";
 /** Monitoring traffic: the substrate does not audit it and no agent action is behind it. Not counted as requests. */
@@ -212,13 +199,11 @@ export function createState(sessionId?: string): State {
 	return {
 		sessionId,
 		last: null,
-		lastDelta: null,
 		lastProbe: null,
 		lastCoverage: null,
 		lastPollAt: null,
 		surfaceActiveAt: {},
 		known: [SURFACE],
-		recent: [],
 		inFlight: null,
 	};
 }
@@ -419,9 +404,7 @@ export async function probe(deps: ProbeDeps = {}): Promise<ProbeResult> {
 export function applySnapshot(state: State, snapshot: Snapshot, at: number): void {
 	const prev = state.last;
 	const sameRun = prev !== null && prev.metrics.startedAt === snapshot.metrics.startedAt;
-	let omp: Totals = { req: 0, emit: 0, tool: 0 };
 	if (prev && sameRun) {
-		omp = diffTotals(surfaceTotals(prev.metrics, SURFACE), surfaceTotals(snapshot.metrics, SURFACE));
 		for (const name of Object.keys(snapshot.metrics.surfaces)) {
 			const delta = diffTotals(surfaceTotals(prev.metrics, name), surfaceTotals(snapshot.metrics, name));
 			if (delta.req + delta.emit + delta.tool > 0) state.surfaceActiveAt[name] = at;
@@ -429,9 +412,7 @@ export function applySnapshot(state: State, snapshot: Snapshot, at: number): voi
 	}
 	state.last = snapshot;
 	state.lastCoverage = busCoverage(state, at);
-	state.lastDelta = omp;
 	state.lastProbe = { ok: true, reason: null, at };
-	if (omp.req + omp.emit + omp.tool > 0) state.recent = [...state.recent, { at, delta: omp }].slice(-3);
 }
 
 /**
@@ -472,15 +453,6 @@ async function settleWithin(task: Promise<void>, ms: number): Promise<void> {
 function hhmm(at: number): string {
 	const d = new Date(at);
 	return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-}
-
-function formatAge(ms: number): string {
-	const seconds = Math.max(0, Math.round(ms / 1000));
-	return seconds < 60 ? `${seconds}s` : `${Math.round(seconds / 60)}m`;
-}
-
-function clip(text: string): string {
-	return text.length > FOOTER_MAX ? text.slice(0, FOOTER_MAX) : text;
 }
 
 /** Drops control and bidi-override characters, so a name from the server cannot move the cursor or reorder a line. */
@@ -558,37 +530,6 @@ export function coverageRows(state: State, now: number): ClientRow[] {
 }
 
 const USAGE_CAPTION = `usage: IN_USE = an omp read or write counted by the substrate in the last ${USAGE_WINDOW_MS / 60_000} min; NOT_OBSERVED_IN_WINDOW = none in that window; UNKNOWN = the source is unavailable. Counts are the server's, not Omp tool calls.`;
-
-/** The footer line: checking, ACCESS_DENIED, ERROR, or usage with planes and the poll time. Never shows zeros for an unknown value. */
-export function formatFooter(state: State, now: number): string {
-	if (!state.lastProbe) return "substrate · checking";
-	if (!state.lastProbe.ok) return clip(errorFooter(state));
-	const snap = state.last;
-	if (!snap) return "substrate · checking";
-	const delta = state.lastDelta ?? { req: 0, emit: 0, tool: 0 };
-	const down = Object.entries(snap.health.planes)
-		.filter(([, plane]) => !plane.ok)
-		.map(([name]) => safeText(name))
-		.sort();
-	const planes = down.length === 0 ? "planes ok" : down.length === 1 ? `${down[0]} down` : `${down.length} planes down`;
-	return clip(`substrate · ${usageOf(state, now)} · omp +${delta.req} req +${delta.emit} emit · ${planes} · ${hhmm(state.lastProbe.at)}`);
-}
-
-function errorFooter(state: State): string {
-	const reason = state.lastProbe?.reason ?? null;
-	if (isAuth(reason)) return `substrate · ACCESS_DENIED ${reason}`;
-	const seen = state.last ? `last good ${hhmm(state.last.at)}` : "no data yet";
-	return `substrate · ERROR (${reason ?? "unknown"}) · ${seen} · /substrate retries`;
-}
-
-/** Widget lines: a caption that states the feed cap and the refresh, then the last three polls with a nonzero omp change. Empty when there are none. */
-export function formatWidget(state: State): string[] {
-	const rows = state.recent
-		.slice(-3)
-		.map((entry) => `${hhmm(entry.at)}  +${entry.delta.req} req  +${entry.delta.emit} emit  +${entry.delta.tool} tool`);
-	if (rows.length === 0) return [];
-	return [`omp changes, newest last · feed cap 3 polls · refresh every ${POLL_MS / 1000} s`, ...rows];
-}
 
 /** The one hint line for an auth failure. It names where the token comes from and never includes its value. */
 function authHint(reason: string): string {
@@ -719,10 +660,7 @@ export default function (pi: OmpPi): void {
 		state.known = knownClients(process.env, readTokenNames);
 	};
 
-	const render = (ctx: OmpContext): void => {
-		ctx.ui.setStatus("substrate", formatFooter(state, Date.now()));
-		const lines = formatWidget(state);
-		ctx.ui.setWidget("substrate", lines.length > 0 ? lines : undefined, { placement: "belowEditor" });
+	const render = (_ctx: OmpContext): void => {
 		publish();
 	};
 
