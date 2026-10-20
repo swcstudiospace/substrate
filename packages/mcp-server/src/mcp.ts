@@ -904,6 +904,12 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 							source_url: z.string().optional(),
 							body: z.string(),
 							heading_path: z.string().optional(),
+							expected_version: z
+								.number()
+								.int()
+								.min(0)
+								.optional()
+								.describe("The version of this source URL's record the page replaces (current_version on a stale reply). A mismatch refuses the call as version.stale; absent ingests as before."),
 						}),
 					)
 					.describe("Pages to ingest, each with a repo-rooted path and body."),

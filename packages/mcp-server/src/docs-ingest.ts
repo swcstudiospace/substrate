@@ -16,8 +16,8 @@
  * with per-page in-flight locks so concurrent retries share one upload.
  * Every upload carries `{source_url, commit, heading_path}` metadata (U-03).
  * Each record carries a `version` (1 on first ingest, +1 per replacement). A page may name the
- * `expected_version` it replaces; a mismatch refuses the whole call as `version.stale` (memory's
- * contract, answered 409) before anything is uploaded. Absent, the page ingests as before.
+ * `expected_version` it replaces; a mismatch refuses the call as `version.stale` (memory's
+ * contract, answered 409). A mismatch found before the first upload writes nothing; one a concurrent ingest causes mid-call refuses the remaining pages, and `changed` reports what already landed. Absent, the page ingests as before.
  * A replacement reports the superseded document id; with
  * `SUBSTRATE_DOCS_PRUNE_SUPERSEDED=1` (uplift-2 R6) the superseded document
  * is deleted through the documented delete call once the replacement has
@@ -221,6 +221,8 @@ export type IngestOutcome =
 			current_version?: number | null;
 			/** The document id of the record a stale write collided with. */
 			conflict_with?: string;
+			/** On `version.stale`: `false`, since the refused page was not stored. */
+			verified_persisted?: false;
 	  };
 
 /** A document this record's source URL once published, still on the plane unless pruned. */
@@ -361,7 +363,7 @@ function refused(
 	deps: IngestDeps,
 	sessionId: string,
 	reason: string,
-	extra?: { rules?: string[]; page?: string; changed?: boolean; remedy?: string; current_version?: number | null; conflict_with?: string },
+	extra?: { rules?: string[]; page?: string; changed?: boolean; remedy?: string; current_version?: number | null; conflict_with?: string; verified_persisted?: false },
 ): Promise<IngestOutcome> {
 	const { changed = false, ...locator } = extra ?? {};
 	const outcome: IngestOutcome = { ok: false, refused: true, reason, ...locator, changed };
@@ -404,7 +406,7 @@ function recordKey(datasetId: string, sourceUrl: string): string {
 function staleVersion(
 	prior: IngestRecord | undefined,
 	expected: number | undefined,
-): { remedy: string; current_version: number | null; conflict_with?: string } | null {
+): { remedy: string; current_version: number | null; conflict_with?: string; verified_persisted: false } | null {
 	if (expected === undefined) return null;
 	if (!prior) {
 		if (expected === 0) return null;
@@ -413,6 +415,7 @@ function staleVersion(
 				`No document is recorded for this source URL, so there is no version ${expected} to replace. ` +
 				"Re-submit without expected_version to record the first one.",
 			current_version: null,
+			verified_persisted: false,
 		};
 	}
 	if (expected === prior.version) return null;
@@ -421,6 +424,7 @@ function staleVersion(
 			`The record for this source URL is version ${prior.version} (${prior.document_id}), not ${expected}. ` +
 			"Somebody changed it since — re-submit against the current version (current_version).",
 		current_version: prior.version,
+		verified_persisted: false,
 		conflict_with: prior.document_id,
 	};
 }
@@ -462,15 +466,9 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	if (!dataset) return refused(deps, sessionId, "unknown-dataset");
 	const commit = input.commit ?? "unpinned";
 	// memory's `expected_version` contract, checked for every page before the first upload: a stale
-	// page leaves the whole call unwritten. Snapshot priors for the *entire batch* before any
-	// upload side-effect so a re-check race on a later page cannot cause a stale refusal after
-	// earlier pages have already uploaded/parsed/pruned.
-	const batchPriors: Record<string, IngestRecord | undefined> = {};
+	// page leaves the whole call unwritten. Each check reads the record as it stands at that moment.
 	for (const { page, sourceUrl } of prepared) {
-		const key = recordKey(dataset.id, sourceUrl);
-		const prior = seen.get(key);
-		batchPriors[key] = prior;
-		const stale = staleVersion(prior, page.expected_version);
+		const stale = staleVersion(seen.get(recordKey(dataset.id, sourceUrl)), page.expected_version);
 		if (stale) return refused(deps, sessionId, "version.stale", { page: page.path, ...stale });
 	}
 
@@ -480,9 +478,11 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	for (const { page, sourceUrl, body, sha } of prepared) {
 		const key = recordKey(dataset.id, sourceUrl);
 		for (;;) {
-			const prior = batchPriors[key] ?? seen.get(key);
-			// Re-checked here: a concurrent writer may have moved this record since the pre-check.
-			// Version decision used the pre-batch snapshot; inner only for sha/lock races now.
+			// The record as it stands when this page is written: an earlier page of this call on the
+			// same source URL, or a concurrent ingest, may have stored a newer version since the pre-check.
+			const prior = seen.get(key);
+			// Checked against that current record, never a snapshot, so a stale page cannot replace a
+			// newer version. Pages this call already stored are reported through `changed`.
 			const stale = staleVersion(prior, page.expected_version);
 			if (stale) return refused(deps, sessionId, "version.stale", { page: page.path, changed: changed(), ...stale });
 			if (prior && prior.sha === sha) {
