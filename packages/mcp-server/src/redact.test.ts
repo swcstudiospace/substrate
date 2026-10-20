@@ -293,6 +293,22 @@ describe("a quoted credential value with spaces loses every word", () => {
 		expect(out).toContain(String.raw`other: \"y\"`);
 		expect(out).not.toContain(String.raw`\"x\"`);
 	});
+	test("an escaped value takes the non-space text attached after its closing quote", () => {
+		const line = String.raw`DB_PASS=\"first\"tail`;
+		for (const out of [redact(line), redactSkillContent(line).text]) {
+			expect(out).toBe(`DB_PASS=${REDACTED}`);
+			expect(out).not.toContain("first");
+			expect(out).not.toContain("tail");
+		}
+	});
+	test("an escaped env reference inside JSON is kept on the skill path", () => {
+		const line = String.raw`curl -d "{\"password\": \"$DB_PASS\"}"`;
+		expect(redactSkillContent(line).text).toBe(line);
+	});
+	test("an escaped env reference with attached text is still redacted on the skill path", () => {
+		const line = String.raw`DB_PASS=\"$DB_PASS\"tail`;
+		expect(redactSkillContent(line).text).toBe(`DB_PASS=${REDACTED}`);
+	});
 	test("plain quoted values keep the same placeholder shape", () => {
 		expect(redact(`{"password": "${SPACED}"}`)).toBe(`{"password": ${REDACTED}}`);
 		expect(redact(`password="${SPACED}"`)).toBe(`password=${REDACTED}`);
