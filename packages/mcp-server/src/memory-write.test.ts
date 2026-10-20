@@ -583,6 +583,26 @@ describe("quarantined", () => {
 		expect(store.quarantined[0]?.subject).toBe(`${"x".repeat(185)} [redacted]`);
 	});
 
+	test("a secret subject is parked even when the body is empty", async () => {
+		const result = await write({ subject: "password: hunter2", text: "" });
+		expect(result.outcome).toBe("quarantined");
+		expect(result.quarantine_reason).toBe("secret");
+		expect(store.entries()).toEqual([]);
+		expect(store.quarantined).toHaveLength(1);
+		expect(store.quarantined[0]?.subject).not.toContain("hunter2");
+	});
+
+	test("a reviewed PII body does not release a secret subject", async () => {
+		const result = await write({
+			text: "escalate to ove.govender@spectrumweb.test.net",
+			subject: "password: hunter2",
+			review_token: REVIEW_TOKEN,
+		});
+		expect(result.outcome).toBe("quarantined");
+		expect(result.quarantine_reason).toBe("secret");
+		expect(store.entries()).toEqual([]);
+	});
+
 	test("a reviewer's token does not release a secret", async () => {
 		const result = await write({ text: "password: hunter2", review_token: REVIEW_TOKEN });
 		expect(result.outcome).toBe("quarantined");
@@ -1472,6 +1492,21 @@ describe("exactly-once", () => {
 		expect(again.outcome).toBe("accepted");
 		expect(again.deduplicated).toBe(true);
 		expect(again.entry?.id).toBe(other.entry?.id);
+		expect(store.entries()).toHaveLength(2);
+	});
+
+	test("a same-writer explicit retry a day later inserts no second row, when another writer spent the key first", async () => {
+		await write({ writer: "omp", text: "omp finished n4", idempotency_key: "k-shared" });
+		const first = await write({ writer: "hermes", text: "hermes finished n2", idempotency_key: "k-shared" });
+		expect(first.outcome).toBe("accepted");
+		expect(store.entries()).toHaveLength(2);
+
+		store.clock += DERIVED_KEY_WINDOW_MS + 1;
+		const retry = await write({ writer: "hermes", text: "hermes finished n2", idempotency_key: "k-shared" });
+
+		expect(retry.outcome).toBe("accepted");
+		expect(retry.deduplicated).toBe(true);
+		expect(retry.entry?.id).toBe(first.entry?.id);
 		expect(store.entries()).toHaveLength(2);
 	});
 

@@ -238,6 +238,36 @@ describe("redaction coverage gaps", () => {
 	});
 });
 
+describe("a quoted credential value with spaces loses every word", () => {
+	const SPACED = "correct horse battery";
+	const lostEvery = (out: string) => {
+		expect(out).toContain(REDACTED);
+		for (const word of SPACED.split(" ")) expect(out).not.toContain(word);
+	};
+	test("the event path drops a JSON value and a quoted assignment whole", () => {
+		expect(redact(`{"password": "${SPACED}"}`)).toBe(`{"password": ${REDACTED}}`);
+		expect(redact(`{"client_secret": "${SPACED}"}`)).toBe(`{"client_secret": ${REDACTED}}`);
+		expect(redact(`DB_PASS="${SPACED}"`)).toBe(`DB_PASS=${REDACTED}`);
+		expect(redact(`DB_PASS='${SPACED}'`)).toBe(`DB_PASS=${REDACTED}`);
+	});
+	test("the skill path drops a JSON value and quoted assignments whole", () => {
+		for (const line of [
+			`{"client_secret": "${SPACED}"}`,
+			`LINEAR_API_KEY="${SPACED}"`,
+			`DB_PASS='${SPACED}'`,
+			`DAYTONA_API_KEY="${SPACED}"`,
+			`X-VAULT-TOKEN: "${SPACED}"`,
+			`Authorization: "${SPACED}"`,
+		]) {
+			lostEvery(redactSkillContent(line).text);
+		}
+	});
+	test("an unquoted value still ends at its first space", () => {
+		expect(redact("DB_PASS=abc def")).toBe(`DB_PASS=${REDACTED} def`);
+		expect(redactSkillContent("DB_PASS=abc def").text).toBe(`DB_PASS=${REDACTED} def`);
+	});
+});
+
 // ── One planted secret per named rule (D-04 merge, D18-04) ────────────────────
 // Deterministic runtime fixtures: the source never holds a literal token shape.
 // Rule names come from REDACTION_RULES, so tsc fails when a rule lacks a fixture.

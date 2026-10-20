@@ -499,13 +499,16 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 	const ttl: MemoryTtl = request.ttl ?? "permanent";
 
 	const raw = typeof request.text === "string" ? request.text.trim() : "";
-	if (!raw) {
+	const subjectInput = typeof request.subject === "string" ? request.subject : null;
+	// The subject is judged on its own, so a body that is empty can still be parked for what the subject
+	// carries. Every other empty entry is refused: it tells the next agent nothing.
+	const subjectFinding = subjectInput === null ? null : classify(subjectInput, kind);
+	if (!raw && !subjectFinding) {
 		return refuse("denied", "text.empty", "text is required — an empty memory entry tells the next agent nothing.");
 	}
 	// Judge the text that would be stored. A body that is only a secret redacts
 	// to a label, and that label is not a lesson.
 	const judged = redact(raw);
-	const subjectInput = typeof request.subject === "string" ? request.subject : null;
 	const lessonIssue = lessonWriteIssue(judged, subjectInput);
 	if (lessonIssue) {
 		return refuse("denied", "lesson.empty", `${lessonIssue}. An empty lesson is not stored.`);
@@ -649,9 +652,11 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 	};
 
 	// ── 3. quarantine ──────────────────────────────────────────────────────────
-	// The subject is stored and it is what a conflict resolves on, so it is judged by the same rule as the body.
-	const classification = classify(raw, kind) ?? (subjectInput ? classify(subjectInput, kind) : null);
-	if (classification && !(classification.reviewable && reviewed)) {
+	// The subject is stored and it is what a conflict resolves on, so it is judged by the same rule as the body,
+	// and on its own: a body a reviewer may release (PII) must not hide a subject that is not releasable.
+	const bodyFinding = raw ? classify(raw, kind) : null;
+	const classification = [bodyFinding, subjectFinding].find((found) => found && !(found.reviewable && reviewed)) ?? null;
+	if (classification) {
 		const minted = candidateKey(request.idempotency_key, entryHash, sourceEvent, reviewed);
 		const key = await idempotencyKey(store, minted.key, minted.explicit, entryHash, asked, priorEntry, priorAsked, sourceEvent, reviewed);
 		const parkedAlready = await parkedContent(store.findQuarantineByHash?.bind(store), entryHash, priorEntry);
@@ -684,6 +689,11 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 			quarantine_reason: classification.reason,
 			grant: grant.name,
 		};
+	}
+
+	// An empty body gets here only when a reviewed subject cleared quarantine. Nothing empty is stored.
+	if (!raw) {
+		return refuse("denied", "text.empty", "text is required — an empty memory entry tells the next agent nothing.");
 	}
 
 	// ── 4. exactly-once ────────────────────────────────────────────────────────

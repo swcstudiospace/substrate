@@ -144,9 +144,9 @@ const RULES = [
 	},
 	{ name: "tailscale", pattern: /tskey-[A-Za-z0-9_-]+/g, replacement: REDACTED_TSKEY },
 	{ name: "password", pattern: /(password["']?\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|\S+)/gi, replacement: `$1${REDACTED}` },
-	{ name: "password-env", pattern: /\b([A-Z0-9_]*(?:PASSWORD|PASSWD|PASS)\s*=\s*)(\S+)/gi, replacement: `$1${REDACTED}` },
-	{ name: "daytona", pattern: /\b(DAYTONA_(?:API_)?KEY\s*=\s*)(\S+)/gi, replacement: `$1${REDACTED}` },
-	{ name: "vault", pattern: /\b((?:VAULT_TOKEN|VAULT_TOKEN_ID|X-VAULT-TOKEN)\s*[:=]\s*)(\S+)/gi, replacement: `$1${REDACTED}` },
+	{ name: "password-env", pattern: /\b([A-Z0-9_]*(?:PASSWORD|PASSWD|PASS)\s*=\s*)("[^"\n]*"|'[^'\n]*'|\S+)/gi, replacement: `$1${REDACTED}` },
+	{ name: "daytona", pattern: /\b(DAYTONA_(?:API_)?KEY\s*=\s*)("[^"\n]*"|'[^'\n]*'|\S+)/gi, replacement: `$1${REDACTED}` },
+	{ name: "vault", pattern: /\b((?:VAULT_TOKEN|VAULT_TOKEN_ID|X-VAULT-TOKEN)\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|\S+)/gi, replacement: `$1${REDACTED}` },
 
 	// ── credentials this substrate touches ────────────────────────────────────
 	// Any FOO_TOKEN / FOO_KEY_BAR / FOO_SECRET assignment, incl. our own
@@ -160,7 +160,7 @@ const RULES = [
 	// carries punctuation is redacted whole rather than left with a tail.
 	{ name: "api-key-lower", pattern: /\b(api[_-]?key["']?\s*[:=]\s*["']?)[A-Za-z0-9_\-/.+]{16,}[^\s"'`,;)]*/gi, replacement: `$1${REDACTED}` },
 	// Authorization headers, however cased.
-	{ name: "authorization", pattern: /\b(authorization\s*[:=]\s*)(?:(?:bearer|basic|token)\s+)?(\S+)/gi, replacement: `$1${REDACTED}` },
+	{ name: "authorization", pattern: /\b(authorization\s*[:=]\s*)(?:(?:bearer|basic|token)\s+)?("[^"\n]*"|'[^'\n]*'|\S+)/gi, replacement: `$1${REDACTED}` },
 	{ name: "bearer", pattern: /\bBearer\s+[A-Za-z0-9._~+/-]{12,}=*/g, replacement: `Bearer ${REDACTED}` },
 	// Connection URLs carrying a password.
 	// A match needs a literal `://`, so text without one is skipped: from every word boundary the
@@ -525,14 +525,14 @@ const SKILL_RULES: readonly SkillRule[] = [
 		accept: (matched) => /[0-9]/.test(matched),
 	},
 	{ name: "password", rule: "password", pattern: /(password["']?[ \t]*[:=][ \t]*)("[^"\n]*"|'[^'\n]*'|\S+)/dgi, value: 2, replacement: REDACTED },
-	{ name: "password-env", rule: "password", pattern: /\b([A-Z0-9_]*(?:PASSWORD|PASSWD|PASS)[ \t]*=[ \t]*)(\S+)/dgi, value: 2, replacement: REDACTED },
-	{ name: "daytona", rule: "assignment", pattern: /\b(DAYTONA_(?:API_)?KEY[ \t]*=[ \t]*)(\S+)/dgi, value: 2, replacement: REDACTED },
-	{ name: "vault", rule: "assignment", pattern: /\b((?:VAULT_TOKEN|VAULT_TOKEN_ID|X-VAULT-TOKEN)[ \t]*[:=][ \t]*)(\S+)/dgi, value: 2, replacement: REDACTED },
-	{ name: "assignment", rule: "assignment", pattern: /\b((?:[A-Z0-9]+_)*(?:API_?KEY|APIKEY|TOKEN|SECRET|KEY)(?:_[A-Z0-9]+)*["']?[ \t]*[:=][ \t]*|(?:[a-z0-9]+_)*(?:token|secret)(?:_[a-z0-9]+)*["']?[ \t]*[:=][ \t]*)(\S+)/dg, value: 2, replacement: REDACTED },
+	{ name: "password-env", rule: "password", pattern: /\b([A-Z0-9_]*(?:PASSWORD|PASSWD|PASS)[ \t]*=[ \t]*)("[^"\n]*"|'[^'\n]*'|\S+)/dgi, value: 2, replacement: REDACTED },
+	{ name: "daytona", rule: "assignment", pattern: /\b(DAYTONA_(?:API_)?KEY[ \t]*=[ \t]*)("[^"\n]*"|'[^'\n]*'|\S+)/dgi, value: 2, replacement: REDACTED },
+	{ name: "vault", rule: "assignment", pattern: /\b((?:VAULT_TOKEN|VAULT_TOKEN_ID|X-VAULT-TOKEN)[ \t]*[:=][ \t]*)("[^"\n]*"|'[^'\n]*'|\S+)/dgi, value: 2, replacement: REDACTED },
+	{ name: "assignment", rule: "assignment", pattern: /\b((?:[A-Z0-9]+_)*(?:API_?KEY|APIKEY|TOKEN|SECRET|KEY)(?:_[A-Z0-9]+)*["']?[ \t]*[:=][ \t]*|(?:[a-z0-9]+_)*(?:token|secret)(?:_[a-z0-9]+)*["']?[ \t]*[:=][ \t]*)("[^"\n]*"|'[^'\n]*'|\S+)/dg, value: 2, replacement: REDACTED },
 	{ name: "api-key-lower", rule: "api-key-lower", pattern: /\b(api[_-]?key["']?[ \t]*[:=][ \t]*["']?)([A-Za-z0-9_\-/.+]{16,}[^\s"'`,;)]*)/dgi, value: 2, replacement: REDACTED },
 	// Before `authorization`, so a literal after "Authorization: Bearer" is reported as bearer.
 	{ name: "bearer", rule: "bearer", pattern: /\b(Bearer[ \t]+)([A-Za-z0-9._~+/-]{12,}=*)/dg, value: 2, replacement: REDACTED },
-	{ name: "authorization", rule: "authorization", pattern: /\b(authorization[ \t]*[:=][ \t]*)(?:(?:bearer|basic|token)[ \t]+)?(\S+)/dgi, value: 2, replacement: REDACTED },
+	{ name: "authorization", rule: "authorization", pattern: /\b(authorization[ \t]*[:=][ \t]*)(?:(?:bearer|basic|token)[ \t]+)?("[^"\n]*"|'[^'\n]*'|\S+)/dgi, value: 2, replacement: REDACTED },
 	{
 		name: "url-password",
 		rule: "url-password",
