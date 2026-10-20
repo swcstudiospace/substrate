@@ -6,6 +6,7 @@
 - ✅ **v1.1 Swarm correlation, governed memory and orchestrate integrations** — Phases 7-10 with inserted 8.1, shipped 2026-10-07 (ADR 0001 S1 and S3). Archive: [milestones/v1.1-ROADMAP.md](milestones/v1.1-ROADMAP.md)
 - ✅ **v1.2 Swarm leases, workspace install and lessons bank** — Phases 11-15, shipped 2026-10-08 (ADR 0001 S2, S4, SPE-5830). Archive: [milestones/v1.2-ROADMAP.md](milestones/v1.2-ROADMAP.md) · audit: [milestones/v1.2-MILESTONE-AUDIT.md](milestones/v1.2-MILESTONE-AUDIT.md)
 - 🚧 **v1.3 Build plan completion** — Phases 16–33, in progress. Tracking: [SPE-8292](https://linear.app/swcstudio/issue/SPE-8292/n7-final-ordered-execution-plan-in-waves)
+- 🚧 **v1.4 Substrate contract hardening** — Phases 34-36: the three uplift-7 substrate gaps (invalid writes, expected_version for skills and docs, degraded-mode exactly-once). Source: [.planning/uplift-7/MILESTONE-AUDIT.md](uplift-7/MILESTONE-AUDIT.md) rows 23-25.
 
 ## Phases
 
@@ -75,6 +76,9 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 31: Lane A runtime: spike, packaging and VM host** - `substrate-host` runs from `main` with one agentos VM per Graph ID, inside the host's disk and port limits (completed 2026-10-11)
 - [x] **Phase 32: Lane A host core** - A host task works its node under the `claude-code` lease, survives a restart and keeps credentials on the host (completed 2026-10-11)
 - [x] **Phase 33: Lane A dispatch route and approvals** - `dispatch:claude-code` takes an issue to a gated Done through a Lane A VM, with human approval of permissions (completed 2026-10-11)
+- [ ] **Phase 34: Invalid-write round trip** - every client-input write surface refuses an invalid payload with zero rows persisted, proven in an isolated namespace.
+- [ ] **Phase 35: expected_version for skills and docs** - a stale skill or docs write is rejected with the memory contract's error; an absent field keeps today's behavior.
+- [ ] **Phase 36: Degraded-mode exactly-once replay** - a write carrying an idempotency key applies once across replays; the dependent client's queue is built or recorded as a decision.
 
 ## Phase Details
 
@@ -430,6 +434,46 @@ Plans:
 - [x] 33-02-PLAN.md — Approval timeout plus single-use button rehearsal with fake transport (LANEA-06)
 - [x] 33-03-PLAN.md — Fake label-to-Done chain plus docs plus G1-G5 gated tail (LANEA-08)
 
+### Phase 34: Invalid-write round trip
+
+**Goal**: Every client-input write surface refuses an invalid payload, and nothing is persisted when it does.
+**Depends on**: none (uplift-7 gap, base `main` at `05d8f45`)
+**Repos**: agent-substrate (`packages/mcp-server`)
+**Requirements**: uplift-7 audit row "Invalid writes are rejected, with nothing partially persisted"
+**Success Criteria** (what must be TRUE):
+
+  1. Memory, skill, and docs writes refuse an invalid payload with the surface's documented error status.
+  2. Before-and-after checks of stored content (memory records, docs state, uploaded documents) prove nothing was persisted or mutated on a refusal (row count alone is insufficient because `decideSkill` can mutate without changing count, and docs perform uploads + disk writes). Row counts kept as an extra check. Proven in an isolated namespace per surface.
+**Plans**: 0/1 plans complete
+
+### Phase 35: expected_version for skills and docs
+
+**Goal**: Skill and docs writes enforce the same optimistic-concurrency contract memory decisions already use.
+**Depends on**: none (uplift-7 gap, base `main` at `05d8f45`)
+**Repos**: agent-substrate (`packages/mcp-server`)
+**Requirements**: uplift-7 audit row "A stale concurrent update is rejected or resolved under the documented policy"
+**Success Criteria** (what must be TRUE):
+
+  1. A skill or docs write with a stale `expected_version` is rejected with the memory path's error, and the stored row is unchanged.
+  2. A matching `expected_version` is accepted and the version increments.
+  3. A write without the field behaves exactly as it does today.
+**Plans**: 0/1 plans complete
+
+### Phase 36: Degraded-mode exactly-once replay
+
+**Goal**: With the substrate unavailable, a dependent client finishes degraded, and queued writes apply exactly once when it recovers.
+**Depends on**: none (uplift-7 gap, base `main` at `05d8f45`)
+**Repos**: agent-substrate (`packages/mcp-server`, and the dependent client if identified)
+**Requirements**: uplift-7 audit row "With the substrate unavailable, a dependent client finishes degraded; queued writes apply exactly once"
+**Success Criteria** (what must be TRUE):
+
+  1. A memory or skill write carrying an idempotency key applies once across replays and returns the original result.
+  2. A write without a key behaves exactly as it does today.
+  3. The 503 path is covered by a test.
+  4. The dependent client's local queue is built for the identified client, or recorded as a decision request with a default.
+**Plans**: 0/1 plans complete
+
+
 ## Progress
 
 | Phase | Milestone | Plans Complete | Status | Completed |
@@ -452,3 +496,6 @@ Plans:
 | 31. Lane A runtime: spike, packaging and VM host | v1.3 | 3/3 | Complete    | 2026-10-11 |
 | 32. Lane A host core | v1.3 | 3/3 | Complete    | 2026-10-11 |
 | 33. Lane A dispatch route and approvals | v1.3 | 3/3 | Complete    | 2026-10-11 |
+| 34. Invalid-write round trip | v1.4 | 0/1 | Executing | - |
+| 35. expected_version for skills and docs | v1.4 | 0/1 | Executing | - |
+| 36. Degraded-mode exactly-once replay | v1.4 | 0/1 | Executing | - |

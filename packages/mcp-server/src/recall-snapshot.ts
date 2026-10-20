@@ -512,7 +512,7 @@ export interface RecallPrefetcherDeps {
 	 * One recall on `bank` and nothing else. The deadline `budgetMs` must sit
 	 * inside the breaker-gated call, so a timeout counts as a plane failure.
 	 */
-	recall: (request: { surface: string; bank: string; query: string; budgetMs: number }) => Promise<RecallOutcome>;
+	recall: (request: { surface: string; repo: string; bank: string; query: string; budgetMs: number }) => Promise<RecallOutcome>;
 	/** The stored snapshot (a cache read that counts nothing), or null. */
 	peek: (surface: string, repo: string, bank: string) => Promise<RecallSnapshot | null>;
 	/** Store a snapshot for `ttlS` seconds (the caller passes twice the configured TTL); false when it could not be stored. */
@@ -714,7 +714,7 @@ export class RecallPrefetcher {
 		let outcome: RecallOutcome;
 		try {
 			outcome = await withDeadline(
-				this.deps.recall({ surface: pair.surface, bank, query: buildRecallQuery(pair.repo, pair.subjects), budgetMs: config.budgetMs }),
+				this.deps.recall({ surface: pair.surface, repo: pair.repo, bank, query: buildRecallQuery(pair.repo, pair.subjects), budgetMs: config.budgetMs }),
 				config.budgetMs + BUDGET_SLACK_MS,
 				this.timers,
 				"recall",

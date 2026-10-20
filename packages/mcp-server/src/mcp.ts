@@ -392,6 +392,13 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					.boolean()
 					.optional()
 					.describe("also return entries past their ttl under SUBSTRATE_MEMORY_EXPIRY=enforce; needs an operator token"),
+				repo: z
+					.string()
+					.optional()
+					.describe(
+						"owner/name of the repo you are working in. `agent:` entries come back only when they were written " +
+							"for this repo, so without it none do",
+					),
 				subject_prefix: z
 					.string()
 					.optional()
@@ -425,6 +432,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 						request.include_superseded,
 						callerSurface ?? "unattributed",
 						request.include_expired,
+						request.repo,
 					),
 				);
 			} catch (cause) {
@@ -447,10 +455,14 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"inside the brief.",
 			inputSchema: {
 				query: z.string().describe("What to recall, in your words."),
+				repo: z
+					.string()
+					.optional()
+					.describe("owner/name of the repo you are working in. Agent-scope memories come back only when written for this repo; without it, none do"),
 			},
 			annotations: { readOnlyHint: true },
 		},
-		async ({ query }) => json(await substrate.recallMemories({ query }, callerSurface)),
+		async ({ query, repo }) => json(await substrate.recallMemories({ query }, callerSurface, repo)),
 	);
 
 	server.registerTool(

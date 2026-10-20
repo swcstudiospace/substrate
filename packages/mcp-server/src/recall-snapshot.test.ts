@@ -92,7 +92,7 @@ function good(bank: string, repo = "acme/app", text = "use pnpm, not npm"): Reca
 interface Rig {
 	prefetcher: RecallPrefetcher;
 	timers: FakeTimers;
-	recalls: Array<{ surface: string; bank: string; query: string; budgetMs: number }>;
+	recalls: Array<{ surface: string; repo: string; bank: string; query: string; budgetMs: number }>;
 	puts: Array<{ surface: string; repo: string; bank: string; snapshot: RecallSnapshot; ttlS: number }>;
 	stored: Map<string, RecallSnapshot>;
 	observed: Array<{ surface: string; result: string }>;
@@ -600,7 +600,7 @@ describe("RecallPrefetcher", () => {
 		prefetcher.want("omp", "acme/app");
 		prefetcher.noteSubjects("omp", "acme/app", ["lease fencing"]);
 		await prefetcher.tick();
-		expect(recalls).toEqual([{ surface: "omp", bank: "sub-omp", query: "Decisions and warnings for acme/app: lease fencing", budgetMs: 1500 }]);
+		expect(recalls).toEqual([{ surface: "omp", repo: "acme/app", bank: "sub-omp", query: "Decisions and warnings for acme/app: lease fencing", budgetMs: 1500 }]);
 		expect(puts).toHaveLength(1);
 		expect(puts[0]).toMatchObject({ surface: "omp", repo: "acme/app", bank: "sub-omp", ttlS: TTL_S * 2 });
 		expect(puts[0]?.snapshot).toEqual({ bank: "sub-omp", at: new Date(T0).toISOString(), hits: [{ text: "use pnpm, not npm", type: "world" }] });
