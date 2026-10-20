@@ -355,7 +355,7 @@ describe("ingest record persistence", () => {
 		try {
 			const file = join(dir, "ingest.json");
 			const seen = new Map<string, IngestRecord>([
-				["ds-1::https://example.com/a", { sha: "s1", dataset_id: "ds-1", source_url: "https://example.com/a", document_id: "doc-1" }],
+				["ds-1::https://example.com/a", { sha: "s1", dataset_id: "ds-1", source_url: "https://example.com/a", document_id: "doc-1", version: 1 }],
 			]);
 			await saveIngestRecords(file, seen);
 			const loaded = await loadIngestRecords(file);

@@ -833,6 +833,7 @@ describe("skills_list", () => {
 			w.registry.rows.push({
 				repo: REPO, name, pr_number: pr, content_sha256: HASH, state: "approved", proposed_by: "claude-code", pr_url: PR_URL(pr),
 				branch: BRANCH, merge_sha: merge, decided_by: "omp", decided_at, reason: null, created: decided_at, updated: decided_at,
+				version: 1,
 			});
 		// alpha already has PR 1 approved at 12:00. PR 30 decided later wins; PR 31 decided at the same instant loses to the higher number only on a tie.
 		later("alpha", 30, "2026-10-14T13:00:00.000Z", "a".repeat(40));
@@ -901,6 +902,7 @@ describe("skills_list", () => {
 				reason: null,
 				created: "2026-10-14T12:00:00.000Z",
 				updated: "2026-10-14T12:00:00.000Z",
+				version: 1,
 			});
 		}
 		const listed = await w.substrate.listSkills({}, asAgent);
@@ -1156,6 +1158,7 @@ describe("the REST doors", () => {
 			branch: BRANCH,
 			merge_sha: MERGE,
 			decided_by: "omp",
+			version: 1,
 			decided_at: now,
 			reason: null,
 			created: now,
