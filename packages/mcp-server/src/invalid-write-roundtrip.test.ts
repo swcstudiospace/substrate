@@ -21,6 +21,7 @@ import { SQL } from "bun";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import { loadConfig } from "./config.ts";
 import { IndexStore } from "./index-store.ts";
 import { createMcpServer, type McpCaller } from "./mcp.ts";
@@ -105,9 +106,9 @@ async function startHttp(stores: Record<string, unknown>, env: Record<string, st
 	};
 }
 
-/** Connects the MCP door in memory, over the given stores, for one caller. */
-async function connectMcp(stores: Record<string, unknown>, caller: McpCaller): Promise<Client> {
-	const substrate = new Substrate(loadConfig(BASE_ENV), stores as never);
+/** Connects the MCP door in memory, over the given stores, for one caller. `env` overrides the shared defaults. */
+async function connectMcp(stores: Record<string, unknown>, caller: McpCaller, env: Record<string, string> = {}): Promise<Client> {
+	const substrate = new Substrate(loadConfig({ ...BASE_ENV, ...env }), stores as never);
 	const server = createMcpServer(substrate, caller);
 	const client = new Client({ name: "invalid-write-roundtrip", version: "0.0.0" });
 	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -116,19 +117,17 @@ async function connectMcp(stores: Record<string, unknown>, caller: McpCaller): P
 }
 
 /**
- * Calls a tool and reports whether it refused. 
- * - Accepts isError results.
- * - For thrown errors, only counts as refusal if the message indicates bad input (argument error).
- * - Unexpected handler errors or missing tools are re-thrown so they fail the test (row counts would be unchanged but for the wrong reason).
+ * Calls a tool and reports whether it refused: an `isError` result, or an SDK input-validation protocol error (zod's
+ * "Invalid input" / "expected record", or "Invalid arguments for tool", whatever the code). Any other thrown error, "tool not found" included, is re-thrown so the test
+ * fails on the real fault. An `isError` result also covers a handler exception, which the SDK answers the same way, so
+ * the row counts are what show whether anything was written.
  */
 async function refuses(client: Client, name: string, args: unknown): Promise<boolean> {
 	try {
 		const result = await client.callTool({ name, arguments: args as Record<string, unknown> });
-		if (result.isError === true) return true;
-		return false;
+		return result.isError === true;
 	} catch (err: unknown) {
-		const msg = err instanceof Error ? err.message : String(err);
-		if (/invalid|must be|required|argument|type/i.test(msg)) return true;
+		if (err instanceof McpError && /Invalid input|expected record|Invalid arguments for tool/.test(err.message)) return true;
 		throw err;
 	}
 }
@@ -188,6 +187,11 @@ async function rowCounts(tables: readonly string[]): Promise<Record<string, numb
 	return counts;
 }
 
+/** The registry rows of one skill name, with the columns a decision changes: state and who decided when. */
+async function registryState(name: string): Promise<unknown> {
+	return raw`select pr_number, state, decided_by, decided_at from skills_registry where name = ${name} order by pr_number`;
+}
+
 async function cleanup(): Promise<void> {
 	const like = `${MARKER}%`;
 	await raw`delete from memory_entries where scope like ${`graph:${like}`}`.catch(() => undefined);
@@ -216,6 +220,7 @@ afterAll(async () => {
 // ── POST /memory and MCP memory_write ───────────────────────────────────────────────────────────
 
 describeLive("memory writes: POST /memory and MCP memory_write", () => {
+	const ledger = ledgerStub();
 	const valid = {
 		scope: `graph:${MARKER}-memory`,
 		kind: "fact",
@@ -233,7 +238,7 @@ describeLive("memory writes: POST /memory and MCP memory_write", () => {
 	describe("POST /memory", () => {
 		let http: HttpHarness;
 		beforeAll(async () => {
-			http = await startHttp({ index: store, greptime: ledgerStub().greptime });
+			http = await startHttp({ index: store, greptime: ledger.greptime });
 		});
 
 		test("a valid control is accepted, read back, and moves the row count by one", async () => {
@@ -248,12 +253,16 @@ describeLive("memory writes: POST /memory and MCP memory_write", () => {
 		});
 
 		for (const [label, body] of invalid) {
-			test(`refuses ${label} with the policy status 403 and writes no row`, async () => {
+			test(`refuses ${label} with the policy status 403, records the refusal, and writes no row`, async () => {
 				const before = await rowCounts(MEMORY_TABLES);
+				const denialsBefore = ledger.written.filter((event) => event.kind === "warning" && event.payload.outcome === "denied").length;
 				const response = await http.send("/memory", body);
 
 				expect(response.status).toBe(403);
 				expect(await rowCounts(MEMORY_TABLES)).toEqual(before);
+				const denials = ledger.written.filter((event) => event.kind === "warning" && event.payload.outcome === "denied");
+				expect(denials.length).toBe(denialsBefore + 1);
+				expect(denials.at(-1)?.summary).toMatch(/^memory\.write denied: /);
 			});
 		}
 
@@ -271,7 +280,7 @@ describeLive("memory writes: POST /memory and MCP memory_write", () => {
 	describe("MCP memory_write", () => {
 		let client: Client;
 		beforeAll(async () => {
-			client = await connectMcp({ index: store, greptime: ledgerStub().greptime }, OMP);
+			client = await connectMcp({ index: store, greptime: ledger.greptime }, OMP);
 		});
 
 		test("a valid control is accepted and moves the row count by one", async () => {
@@ -376,9 +385,32 @@ describeLive("skill proposals: POST /skills/propose and MCP skills_propose", () 
 	});
 
 	describe("MCP skills_propose", () => {
+		// Governance is `report`, as on the REST door: the registry is written only under report or enforce, so with it
+		// off the registry assertions could never see a row.
+		const governed = { SUBSTRATE_SKILLS_GOVERNANCE: "report" };
 		let client: Client;
 		beforeAll(async () => {
-			client = await connectMcp({ index: store, greptime: ledgerStub().greptime, skillRun: run }, OMP);
+			client = await connectMcp({ index: store, greptime: ledgerStub().greptime, skillRun: run }, OMP, governed);
+		});
+
+		test("a valid control is opened and records one registry row", async () => {
+			const proposer: SkillProposer = {
+				propose: async (): Promise<ProposeResult> => ({
+					status: "opened",
+					pr_url: "https://github.com/swcstudiospace/agent-skills/pull/4343",
+					pr_number: 4343,
+					branch: `skill/omp/${name}-1-efgh`,
+					content_sha256: "ef".repeat(32),
+					redactions: [],
+				}),
+			};
+			const control = await connectMcp({ index: store, greptime: ledgerStub().greptime, skills: proposer }, OMP, governed);
+			const before = await rowCounts(SKILL_TABLES);
+			const reply = await replyOf(control, "skills_propose", valid);
+
+			expect(reply).toMatchObject({ status: "opened" });
+			expect((await rowCounts(SKILL_TABLES)).skills_registry).toBe(before.skills_registry! + 1);
+			expect(await registryState(name)).toContainEqual({ pr_number: 4343, state: "proposed", decided_by: null, decided_at: null });
 		});
 
 		for (const [label, body] of invalid) {
@@ -416,6 +448,25 @@ describeLive("skill approvals: POST /skills/approve and MCP skills_approve", () 
 		["a name that breaks the rule", { ...valid, name: "Not_A_Name" }],
 	];
 
+	/** The seeded proposal, undecided: the row every refused decision must leave exactly as it is. */
+	const PENDING = [{ pr_number: valid.pr_number, state: "proposed", decided_by: null, decided_at: null }];
+
+	beforeAll(async () => {
+		await store.upsertProposedSkill({
+			repo: loadConfig(BASE_ENV).skills.repo,
+			name: valid.name,
+			pr_number: valid.pr_number,
+			pr_url: `https://github.com/swcstudiospace/agent-skills/pull/${valid.pr_number}`,
+			branch: null,
+			content_sha256: "cd".repeat(32),
+			proposed_by: "omp",
+		});
+	});
+
+	test("the seeded proposal is pending and undecided", async () => {
+		expect(await registryState(valid.name)).toEqual(PENDING);
+	});
+
 	describe("POST /skills/approve", () => {
 		let http: HttpHarness;
 		beforeAll(async () => {
@@ -429,6 +480,7 @@ describeLive("skill approvals: POST /skills/approve and MCP skills_approve", () 
 
 				expect(response.status).toBe(400);
 				expect(await rowCounts(SKILL_TABLES)).toEqual(before);
+				expect(await registryState(valid.name)).toEqual(PENDING);
 			});
 		}
 
@@ -439,6 +491,7 @@ describeLive("skill approvals: POST /skills/approve and MCP skills_approve", () 
 
 				expect(response.status).toBe(400);
 				expect(await rowCounts(SKILL_TABLES)).toEqual(before);
+				expect(await registryState(valid.name)).toEqual(PENDING);
 			});
 		}
 	});
@@ -455,6 +508,7 @@ describeLive("skill approvals: POST /skills/approve and MCP skills_approve", () 
 
 				expect(await refuses(client, "skills_approve", body)).toBe(true);
 				expect(await rowCounts(SKILL_TABLES)).toEqual(before);
+				expect(await registryState(valid.name)).toEqual(PENDING);
 			});
 		}
 	});
