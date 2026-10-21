@@ -89,7 +89,7 @@ Anti-features, from `.planning/research/SUMMARY.md` line 72:
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| A-D1 | 37 | Pending |
+| A-D1 | 37 | Verified, PR open |
 | B-D1 | 38 | Pending |
 | B-D3 | 38 | Pending |
 | C-D2 | 39 | Pending |
