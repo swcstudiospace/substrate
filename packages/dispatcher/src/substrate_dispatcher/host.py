@@ -4,8 +4,8 @@
 the same ``Launched`` shape as launcher.launch, with ``pid`` 0 and ``proc`` a ``RemoteTask``.
 ``RemoteTask`` serves exactly the Popen subset ``sessions.SessionRegistry._reap_one`` uses —
 ``poll()``, ``terminate()``, ``kill()`` — so the D-14 cap, the claim timeout and the landed-claim
-rule apply to a VM task unchanged. The host, not the dispatcher, holds the session (D-05): a
-dispatcher restart forgets the handle, the VM keeps running.
+rule apply to a VM task unchanged. The host, not the dispatcher, holds the session (D-05): the
+dispatcher re-adopts persisted VM tasks from ``vm_tasks.json`` on its next start.
 
 Nothing here logs or returns more than ids, HTTP codes and at most 200 characters of an error body.
 The host bearer is never logged; error text is redacted of it before the 200-character cap.
@@ -30,6 +30,8 @@ TASKS_DIR = Path("/var/lib/substrate/agentos/tasks")
 UNREACHABLE_LIMIT = 3
 # The host answered and will not open the task: bad request, claimed elsewhere, a step failed.
 REFUSAL_STATUSES = frozenset({400, 409, 502})
+# The host rejected the bearer before it opened any task.
+AUTH_REJECTION_STATUSES = frozenset({401, 403})
 ERROR_TEXT_LIMIT = 200
 
 Log = Callable[[str], None]
@@ -41,12 +43,15 @@ class HostRefused(Exception):
 
     ``marker`` is the once-only Linear comment key, as WorktreeRefused: "host-refused" when the
     host answered 400/409/502, "host-unreachable" for a transport error or any other status.
+    ``may_be_open`` is False only when the host certainly did not open the task: the connection
+    never opened, or the host refused it. Otherwise it is True, and the caller keeps the record.
     """
 
-    def __init__(self, reason: str, marker: str) -> None:
+    def __init__(self, reason: str, marker: str, *, may_be_open: bool = True) -> None:
         super().__init__(reason)
         self.reason = reason
         self.marker = marker
+        self.may_be_open = may_be_open
 
 
 def _error_text(resp: httpx.Response, secret: str | None) -> str:
@@ -123,7 +128,10 @@ class HostClient:
         try:
             resp = self._client.post("/tasks", json=body, headers=self._headers())
         except httpx.HTTPError as exc:
-            raise HostRefused(f"POST /tasks failed: {type(exc).__name__}", "host-unreachable") from None
+            raise HostRefused(
+                f"POST /tasks failed: {type(exc).__name__}", "host-unreachable",
+                may_be_open=not isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)),
+            ) from None
         if resp.status_code in (200, 202):
             try:
                 payload = resp.json()
@@ -134,8 +142,9 @@ class HostClient:
             return payload
         reason = f"HTTP {resp.status_code}: {_error_text(resp, self._bearer)}"
         if resp.status_code in REFUSAL_STATUSES:
-            raise HostRefused(reason, "host-refused")
-        raise HostRefused(reason, "host-unreachable")
+            raise HostRefused(reason, "host-refused", may_be_open=False)
+        may_be_open = resp.status_code not in AUTH_REJECTION_STATUSES
+        raise HostRefused(reason, "host-unreachable", may_be_open=may_be_open)
 
     def status(self, graph_id: str, node_id: str) -> dict | None:
         """GET the task's status JSON; None on 404; HostRefused("host-unreachable") otherwise."""

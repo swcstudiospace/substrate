@@ -40,12 +40,11 @@ the tag is among the issue's last 50 comments.
 | `path-conflict` | worktree path taken by something untracked | next tick |
 | `git-failed` | git could not prepare the worktree | next tick |
 | `host-refused` | substrate-host refused the task | next tick |
-| `host-unreachable` | substrate-host not reachable | next tick, emits nothing |
+| `host-unreachable` | substrate-host not reachable, or a 401/403 rejection | next tick after a connect failure or a 401/403; after an ambiguous reply, when `readopt()` resolves the kept record; emits nothing |
 | `exited-unclaimed` | hermes exited without claiming; label removed | no, gives up |
 | `claim-timeout` | no claim in 15 min; label removed | no, gives up |
 
-Give-ups persist in `STATE_DIR/given_up.json` (0600, atomic replace) and
-survive a restart: a new process never relaunches a given-up issue.
+Give-ups persist in `STATE_DIR/given_up.json` (0600, atomic replace) and survive a restart: a new process never relaunches a given-up issue. A dispatcher restart ends every dispatched Hermes session, by design: the unit keeps the default `KillMode=control-group`, so a stop or restart takes the sessions in its cgroup with it. VM tasks (`dispatch:claude-code`) run on substrate-host outside that cgroup, and the dispatcher re-adopts their persisted records from `vm_tasks.json` under `STATE_DIR` on its next start.
 
 ## Session lifecycle
 
@@ -79,8 +78,12 @@ and `scripts/dispatcher-driver.py` S11–S16, and end to end in
 landed-claim (`claimed_by`, state transition, or mirror comment) → success
 with `dispatch.outcome{launched}`; 400/409/502 → `host-refused` once-only
 comment (the host's text stays in the journal, never in the comment) and one
-`dispatch.failed`; unreachable/non-JSON/wrong-shape → `host-unreachable`
-comment with no event, retried on a later tick. The G4 restart flips live
+`dispatch.failed`; a connect failure → `host-unreachable` comment with no event, retried on a
+later tick; a 401 or 403 (the bearer was rejected before any task opened) → the `host-unreachable`
+comment with no event, and the record is dropped, so a later tick retries; a reply the host may have
+acted on (a 5xx other than 502, which is a refusal; a read failure after send; or a 2xx that cannot be
+read) → the same comment, but the task's record stays until `readopt()` resolves it, so
+the next tick does not post a second task. The G4 restart flips live
 behavior with no dispatcher code change.
 
 ### host-unreachable → live transition (Phase 31, no dispatcher code change)
