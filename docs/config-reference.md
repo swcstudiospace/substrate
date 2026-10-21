@@ -258,6 +258,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_TESTS_ROUTE` | string | none | route from the 03-01 spike | the host refuses to start. See `docs/runbooks/lane-a-host.md` | host/main.ts | yes |
 | `SUBSTRATE_HOST_MODEL` | string | grok-4.6 | model id | grok-4.6. See `docs/runbooks/lane-a-host.md` | host/main.ts | yes |
 | `SUBSTRATE_HOST_PORT` | number | 7411 | port | 7411. See `docs/runbooks/lane-a-host.md` | host/main.ts | yes |
+| `SUBSTRATE_HOST_API_TOKEN` | secret-ref | none | bearer token for the host task API (value never logged) | the host refuses to start. See `docs/runbooks/lane-a-host.md` | host/main.ts | yes |
 | `SUBSTRATE_SANDBOX_NET` | mode | published_loopback | published_loopback \| internal | published_loopback; any other value refuses to start. See `docs/runbooks/lane-a-host.md` | host/main.ts | yes |
 | `SUBSTRATE_SANDBOX_HOSTFN` | string | sandbox | collection name | sandbox. See `docs/runbooks/lane-a-host.md` | host/main.ts | yes |
 | `SUBSTRATE_SANDBOX_EGRESS` | list | none (deny-all) | comma separated host:port | deny-all; a malformed entry refuses naming it. See `docs/runbooks/lane-a-host.md` | host/sandbox-options.ts | yes |

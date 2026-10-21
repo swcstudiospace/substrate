@@ -4,9 +4,10 @@ import { loadConfig } from "./config.ts";
 import { dirname, join } from "node:path";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { request as httpRequest } from "node:http";
 import { scanIngestPages } from "./docs-ingest.ts";
 import type { EventQuery } from "./greptime.ts";
-import { memoryToolWriter } from "./mcp.ts";
+import { memoryToolWriter, surfaceClaimRefusal } from "./mcp.ts";
 import { createObservability } from "./observe.ts";
 import type { FetchLike } from "./planes/ragflow.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
@@ -82,6 +83,7 @@ async function serve(
 	const address = server.address();
 	const port = typeof address === "object" && address ? address.port : 0;
 	return {
+		port,
 		post: (path: string, body: unknown, headers: Record<string, string> = {}) =>
 			fetch(`http://127.0.0.1:${port}${path}`, {
 				method: "POST",
@@ -97,6 +99,25 @@ async function serve(
 			return closed.promise;
 		},
 	};
+}
+
+/**
+ * One request sent with exactly the headers given. `fetch` sets or drops `host` and `origin` itself, and these tests are
+ * about what the caller sent. Resolves with the status alone. `agent: false` keeps the socket out of the pool, so
+ * `server.close` is not left waiting on it.
+ */
+function rawRequest(port: number, options: { path: string; method?: string; headers?: Record<string, string> }): Promise<number> {
+	const { promise, resolve, reject } = Promise.withResolvers<number>();
+	const request = httpRequest(
+		{ host: "127.0.0.1", port, method: options.method ?? "GET", path: options.path, headers: options.headers, agent: false },
+		(response) => {
+			response.resume();
+			resolve(response.statusCode ?? 0);
+		},
+	);
+	request.on("error", reject);
+	request.end();
+	return promise;
 }
 
 /**
@@ -1220,6 +1241,7 @@ describe("agent card route", () => {
 		const address = server.address();
 		const port = typeof address === "object" && address ? address.port : 0;
 		return {
+			port,
 			get: (path: string, headers: Record<string, string> = {}) =>
 				fetch(`http://127.0.0.1:${port}${path}`, { headers }),
 			post: (path: string, headers: Record<string, string> = {}) =>
@@ -1306,6 +1328,124 @@ describe("agent card route", () => {
 		} finally {
 			await stop();
 		}
+	});
+
+	test("a tokened caller asks only for its own surface's card: another is 403, its own is 200", async () => {
+		const { get, stop } = await serveCard([teachable("mem_7", "cursor")], { SUBSTRATE_TOKEN_CURSOR: "tok-cursor" });
+		try {
+			const bearer = { authorization: "Bearer tok-cursor" };
+			expect((await get("/.well-known/agent-card.json?surface=swarm-a05-be", bearer)).status).toBe(403);
+			expect((await get("/.well-known/agent-card.json?surface=cursor", bearer)).status).toBe(200);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a hostile Origin is refused even with a valid bearer, and a loopback Origin is not", async () => {
+		const { port, stop } = await serveCard([teachable("mem_7", "cursor")], { SUBSTRATE_TOKEN_CURSOR: "tok-cursor" });
+		try {
+			const path = "/.well-known/agent-card.json?surface=cursor";
+			const authorization = "Bearer tok-cursor";
+			expect(await rawRequest(port, { path, headers: { authorization, origin: "https://evil.example" } })).toBe(403);
+			expect(await rawRequest(port, { path, headers: { authorization, origin: "http://localhost:5173" } })).toBe(200);
+		} finally {
+			await stop();
+		}
+	});
+});
+
+describe("HTTP edge", () => {
+	const bearer = { authorization: "Bearer tok-omp" };
+
+	test("a POST from a hostile Origin is 403 even with a valid bearer", async () => {
+		const { port, stop } = await serve(null, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		try {
+			const status = await rawRequest(port, {
+				method: "POST",
+				path: "/events/query",
+				headers: { ...bearer, "content-type": "application/json", origin: "https://evil.example" },
+			});
+			expect(status).toBe(403);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a Host that is neither loopback on the bound port nor the public origin is 421", async () => {
+		const { port, stop } = await serve(null, { SUBSTRATE_PUBLIC_ORIGIN: "https://substrate.example.test" });
+		try {
+			expect(await rawRequest(port, { path: "/livez", headers: { host: "evil.example" } })).toBe(421);
+			expect(await rawRequest(port, { path: "/livez", headers: { host: "127.0.0.1:1" } })).toBe(421);
+			expect(await rawRequest(port, { path: "/livez", headers: { host: `localhost:${port}` } })).toBe(200);
+			expect(await rawRequest(port, { path: "/livez", headers: { host: "substrate.example.test" } })).toBe(200);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a malformed Host is a 400, and the next request is still answered", async () => {
+		const { port, stop } = await serve(null);
+		try {
+			expect(await rawRequest(port, { path: "/livez", headers: { host: "bad host" } })).toBe(400);
+			expect(await rawRequest(port, { path: "/livez", headers: { host: `127.0.0.1:${port}` } })).toBe(200);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a POST whose body is not application/json is 415, and an unauthenticated one is still 401", async () => {
+		const { post, stop } = await serve(null, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		try {
+			expect((await post("/events/query", {}, { ...bearer, "content-type": "text/plain" })).status).toBe(415);
+			expect((await post("/memory/recall", {}, { ...bearer, "content-type": "text/plain" })).status).toBe(415);
+			expect((await post("/events/query", {}, { "content-type": "text/plain" })).status).toBe(401);
+			expect((await post("/events/query", {}, { ...bearer, "content-type": "application/json; charset=utf-8" })).status).not.toBe(415);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("/mcp refuses a declared body over the cap before reading it", async () => {
+		const { port, stop } = await serve(null, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		try {
+			// No body is sent. A server that read first would wait for one; this one answers at once. The cap is 6 000 000 bytes.
+			const status = await rawRequest(port, {
+				method: "POST",
+				path: "/mcp",
+				headers: { ...bearer, "content-type": "application/json", "content-length": "6000001" },
+			});
+			expect(status).toBe(413);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a tokened caller's /brief body cannot name another surface", async () => {
+		const { post, stop } = await serve(null, { SUBSTRATE_TOKEN_CURSOR: "tok-cursor" });
+		try {
+			const response = await post("/brief", { repo: "owner/name", surface: "swarm-a05-be" }, { authorization: "Bearer tok-cursor" });
+			expect(response.status).toBe(403);
+			expect(String(((await response.json()) as Record<string, unknown>).error)).toContain("swarm-a05-be");
+		} finally {
+			await stop();
+		}
+	});
+});
+
+describe("surfaceClaimRefusal", () => {
+	test("a tokened caller's own surface, or no claim at all, stands", () => {
+		expect(surfaceClaimRefusal("cursor", "cursor")).toBeNull();
+		expect(surfaceClaimRefusal("cursor", undefined)).toBeNull();
+		expect(surfaceClaimRefusal("cursor", null)).toBeNull();
+	});
+
+	test("another surface is refused, and a value that is not a surface is named as unrecognised", () => {
+		expect(surfaceClaimRefusal("cursor", "swarm-a05-be")).toBe("this token is cursor and cannot act as swarm-a05-be");
+		expect(surfaceClaimRefusal("cursor", { surface: "hermes" })).toBe("this token is cursor and cannot act as an unrecognised surface");
+	});
+
+	test("an untokened caller's claim is not refused here", () => {
+		expect(surfaceClaimRefusal(null, "swarm-a05-be")).toBeNull();
 	});
 });
 

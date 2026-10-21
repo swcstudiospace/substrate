@@ -677,17 +677,22 @@ describe("emit", () => {
 		expect(written[0]?.prev).toBeNull();
 	});
 
-	test("an unreadable previous hash starts a new chain rather than failing the append", async () => {
+	test("an unreadable previous hash refuses the write rather than starting a second chain", async () => {
+		// A null prev written beside a stored tip is a fork: `verify` finds it later and nothing stops it now.
+		const written: SubstrateEvent[] = [];
 		const greptime = {
 			ensureAppendMode: async () => true,
 			lastHash: async () => {
 				throw new Error("greptime unreachable");
 			},
-			insertEvent: async () => undefined,
+			insertEvent: async (event: SubstrateEvent) => {
+				written.push(event);
+			},
 		};
 		const result = await substrateWith(greptime).emit(input);
-		expect(result.stored).toBe(true);
-		expect(result.event.prev).toBeNull();
+		expect(result.stored).toBe(false);
+		expect(result.error).toContain("chain tip unreadable");
+		expect(written).toEqual([]);
 	});
 });
 
@@ -1296,7 +1301,8 @@ describe("handoff", () => {
 		// The handoff event chains from the same tip, so the packet and the event it
 		// arrived in agree about where the sender's trail had reached.
 		expect(written[0]?.prev).toBe("tip-hash");
-		expect(result.event.prev).toBe("tip-hash");
+		expect(result.event).not.toBeNull();
+		expect(result.event?.prev).toBe("tip-hash");
 	});
 
 	test("a caller cannot pin the anchor: a hash nothing checked would be signed and believed", async () => {
@@ -1309,6 +1315,40 @@ describe("handoff", () => {
 		const result = await substrate.handoff({ ...input, prev_event_hash: "d".repeat(64) } as never);
 
 		expect(result.packet.prev_event_hash).toBe("tip-hash");
+	});
+
+	test("an unreadable tip refuses the handoff: nothing signed, written or released", async () => {
+		// A packet signed with no predecessor, while the event's own read could still chain onto a real
+		// tip, is a receiver's false anchor. Nothing is signed, written or released instead.
+		const written: SubstrateEvent[] = [];
+		const released: string[] = [];
+		const greptime = {
+			ensureAppendMode: async () => true,
+			lastHash: async () => {
+				throw new Error("greptime unreachable");
+			},
+			insertEvent: async (event: SubstrateEvent) => {
+				written.push(event);
+			},
+		};
+		const index = {
+			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
+			releaseNode: async (_g: string, nodeId: string) => {
+				released.push(nodeId);
+				return { released: true };
+			},
+		};
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never });
+
+		const result = await substrate.handoff({ ...input, handover_lease_id: "lse_a", release_lease: true });
+
+		expect(result.stored).toBe(false);
+		expect(result.signed).toBe(false);
+		expect(result.packet.signature).toBeNull();
+		expect(result.event).toBeNull();
+		expect(result.error).toContain("chain tip unreadable");
+		expect(written).toEqual([]);
+		expect(released).toEqual([]);
 	});
 
 	test("the lease is released only once the packet is durable", async () => {

@@ -11,7 +11,7 @@ and output; the labelled table only names what was already there.
 
 ## The rule table
 
-Thirty-one named rules on the event pass. The skill pass mirrors each one under
+Thirty-nine named rules on the event pass. The skill pass mirrors each one under
 the same name, except where the exclusion list says otherwise. The table
 below names each rule and the shape it catches; the middle column is the
 reported skill family, which groups shapes that mean the same credential.
@@ -38,14 +38,22 @@ reported skill family, which groups shapes that mean the same credential.
 | `xai` | `xai` | An `xai-` key |
 | `anthropic` | `anthropic` | An `sk-ant-` key |
 | `openai` | `openai` | An `sk-` key that is not an Anthropic one |
-| `aws` | `aws` | An access key id |
+| `aws` | `aws` | An `AKIA` or `ASIA` access key id |
 | `google` | `google` | A Google API key |
-| `slack` | `slack` | A Slack bot token |
+| `slack` | `slack` | A Slack `xox[abprs]-` token or `xapp-` app token |
 | `npm` | `npm` | An `npm_` token |
 | `gitlab` | `gitlab` | A personal access token |
 | `digitalocean` | `digitalocean` | A personal access token |
-| `openai-proj` | `openai-proj` | An `sk-proj-` key, which the `sk-` rule stops short of |
+| `openai-proj` | `openai-proj` | An `sk-proj-`, `sk-svcacct-` or `sk-admin-` key, which the `sk-` rule stops short of |
 | `ragflow` | `ragflow` | A RAGFlow API key (D25-23); a key pasted into a doc page is refused, never uploaded |
+| `stripe` | `stripe` | A Stripe `sk_live_` or `rk_live_` key |
+| `huggingface` | `huggingface` | An `hf_` token |
+| `google-oauth` | `google-oauth` | A `ya29.` OAuth access token |
+| `sendgrid` | `sendgrid` | An `SG.` key |
+| `shopify` | `shopify` | A `shpat_` access token |
+| `supabase` | `supabase` | An `sbp_` token |
+| `glitch` | `glitch` | A `glsoat-` token |
+| `twilio` | `twilio` | An `SK` key id: `SK` followed by 32 hex digits |
 | `pk-rk` | `pk-rk` | A publishable or restricted key — digit-bearing only, see below |
 | `jwt` | `jwt` | A JWT |
 | `keypair-array` | — (excluded) | A pasted private keypair array; byte arrays are ordinary code in docs |

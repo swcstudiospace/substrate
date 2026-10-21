@@ -1416,6 +1416,7 @@ describe("GET /healthz", () => {
 
 		const brief = await fetch(`http://127.0.0.1:${port}/brief`, {
 			method: "POST",
+			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ surface: "cursor", graph_id: "ut-1" }),
 		});
 		expect(brief.status).toBe(200);

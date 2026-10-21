@@ -4,6 +4,7 @@
  * Deployment reads /etc/substrate/substrate.env via the systemd unit's
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
+import { createHash, timingSafeEqual } from "node:crypto";
 import { SOLANA_CLI_DEFAULT } from "@substrate/ledger";
 import { ADMISSION_CLASSES, loadBreakerSettings, type AdmissionClass, type BreakerSettings } from "@substrate/observability";
 import { loadBriefProfileConfig, type BriefProfileConfig } from "./brief-profile.ts";
@@ -1164,6 +1165,12 @@ function cacheSettings(env: Record<string, string | undefined>): {
 	return { dragonflyUrl, cacheEnabled: dragonflyUrl !== undefined && !off, dragonflyRefused: null };
 }
 
+/**
+ * The shortest bearer a token may be. Reviewer tokens shorter than this are dropped;
+ * a surface token shorter than this still authenticates but is reported at boot.
+ */
+const MIN_TOKEN_LENGTH = 16;
+
 /** Comma- or whitespace-separated, so an operator can wrap the line in the env file. */
 function readReviewTokens(raw: string | undefined): Set<string> {
 	return new Set(
@@ -1172,7 +1179,7 @@ function readReviewTokens(raw: string | undefined): Set<string> {
 			.map((token) => token.trim())
 			// A short string is a placeholder or a typo, not a token, and accepting one
 			// would hand reviewer authority to anybody who guessed it.
-			.filter((token) => token.length >= 16),
+			.filter((token) => token.length >= MIN_TOKEN_LENGTH),
 	);
 }
 
@@ -1191,10 +1198,29 @@ function bearer(authorization: string | null): string | null {
 	return token.length > 0 ? token : null;
 }
 
+/**
+ * The configured token equal to `presented`, or `undefined`.
+ *
+ * Every configured token is digested and compared before the answer is known: there is
+ * no early exit on the first match, so how long a lookup takes says nothing about which
+ * configured token, or how much of one, matched. Digests are fixed width, so
+ * `timingSafeEqual` never sees a length mismatch. Bearer tokens are compared only here.
+ */
+function configuredMatch(configured: Iterable<string>, presented: string): string | undefined {
+	const digest = createHash("sha256").update(presented).digest();
+	let match: string | undefined;
+	for (const candidate of configured) {
+		if (timingSafeEqual(digest, createHash("sha256").update(candidate).digest())) match = candidate;
+	}
+	return match;
+}
+
 /** Resolve a request's bearer token to the surface it belongs to. */
 export function surfaceForToken(config: SubstrateConfig, authorization: string | null): Surface | null {
 	const token = bearer(authorization);
-	return token === null ? null : config.tokens.get(token) ?? null;
+	if (token === null) return null;
+	const match = configuredMatch(config.tokens.keys(), token);
+	return match === undefined ? null : config.tokens.get(match) ?? null;
 }
 
 /**
@@ -1221,8 +1247,9 @@ export function isOperator(config: SubstrateConfig, authorization: string | null
 	// merely because untokened callers are still accepted.
 	if (config.tokens.size === 0 && config.allowAnonymous && config.operatorTokens.size === 0) return true;
 	const token = bearer(authorization);
-	if (token === null || !config.operatorTokens.has(token)) return false;
-	const named = config.tokens.get(token);
+	const match = token === null ? undefined : configuredMatch(config.operatorTokens, token);
+	if (match === undefined) return false;
+	const named = config.tokens.get(match);
 	// Once any surface token exists, operator authority is an attribute of one of
 	// them. A bearer listed only in SUBSTRATE_OPERATOR_TOKENS used to be 401; the
 	// bridge must not turn that 401 into `force` with no named surface.
@@ -1241,7 +1268,7 @@ export function isOperator(config: SubstrateConfig, authorization: string | null
 export function unmappedBearer(config: SubstrateConfig, authorization: string | null): boolean {
 	if (config.tokens.size === 0) return false;
 	const token = bearer(authorization);
-	return token !== null && !config.tokens.has(token);
+	return token !== null && configuredMatch(config.tokens.keys(), token) === undefined;
 }
 
 /**
@@ -1255,7 +1282,7 @@ export function unmappedBearer(config: SubstrateConfig, authorization: string | 
 export function isReviewToken(config: SubstrateConfig, token: string | undefined): boolean {
 	if (typeof token !== "string") return false;
 	const trimmed = token.trim();
-	return trimmed.length > 0 && config.memoryReviewTokens.has(trimmed);
+	return trimmed.length > 0 && configuredMatch(config.memoryReviewTokens, trimmed) !== undefined;
 }
 
 /**
@@ -1280,6 +1307,18 @@ export function configWarnings(config: SubstrateConfig): string[] {
 	// Named by key, never by value: the warning goes to a log.
 	if (config.skills.problem) {
 		warnings.push(`skill proposals are refused until the skills library is fixed: ${config.skills.problem}`);
+	}
+
+	// Named by variable, never by token: the warning goes to a log. Such a token still
+	// authenticates; enforcing the floor now would refuse tokens already deployed, so it
+	// waits for rotation.
+	const short = new Set<Surface>();
+	for (const [token, surface] of config.tokens) if (token.length < MIN_TOKEN_LENGTH) short.add(surface);
+	for (const surface of short) {
+		warnings.push(
+			`${tokenEnvName(surface)} holds a token shorter than ${MIN_TOKEN_LENGTH} characters; it still authenticates, ` +
+				"but rotate it to a longer one",
+		);
 	}
 	if (config.operatorTokens.size === 0) return warnings;
 
@@ -1450,6 +1489,14 @@ export function loadLedgerSettings(env: Record<string, string | undefined> = pro
 		throw new ConfigError(
 			`SUBSTRATE_LEDGER_TTL=${JSON.stringify(ttlRaw)} is not a GreptimeDB time duration; use spans like 180d, 4320h or 1h30m ` +
 				"(integer + unit, no decimals), or unset it to leave the tables' retention unchanged",
+		);
+	}
+	// The syntax check above admits digits only inside spans, so a total of zero is
+	// exactly a value with no non-zero digit.
+	if (ttlRaw !== "" && !/[1-9]/.test(ttlRaw)) {
+		throw new ConfigError(
+			`SUBSTRATE_LEDGER_TTL=${JSON.stringify(ttlRaw)} totals zero, which is not a retention; use spans of at least one unit, ` +
+				"like 180d or 1h30m, or unset it to leave the tables' retention unchanged",
 		);
 	}
 	return {

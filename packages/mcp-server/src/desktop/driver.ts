@@ -147,6 +147,8 @@ let active: string | null = null;
 export const DESKTOP_LOCK_PORT = 45931;
 /** How long a refused caller waits for the holder to name its run. */
 const LOCK_IDENTITY_TIMEOUT_MS = 2000;
+/** Lock connections served at once; a connection past this is dropped unanswered. */
+const LOCK_MAX_CONNECTIONS = 4;
 
 /** Ask the lock holder for its run id; null when it cannot answer. */
 function readDesktopIdentity(port: number): Promise<string | null> {
@@ -198,8 +200,11 @@ function claimDesktopPort(port: number, runId: string): Promise<DesktopPortClaim
 	const server = createServer((socket) => {
 		sockets.add(socket);
 		socket.once("close", () => sockets.delete(socket));
+		// An idle connection holds a slot; the identity timeout frees it.
+		socket.setTimeout(LOCK_IDENTITY_TIMEOUT_MS, () => socket.destroy());
 		serveIdentity(socket, runId);
 	});
+	server.maxConnections = LOCK_MAX_CONNECTIONS;
 	server.on("error", (error) => {
 		// A bound server only sees accept-time failures; the bind outcome
 		// is decided below, once, while `listening` is still false.
@@ -347,17 +352,14 @@ export function createDesktopDriver(deps: {
 		// never reaches it — so the fixed EXEC prefix alone does not pin the local
 		// desktop. The probe runs through the same runner, hence the same child
 		// environment, and only `unix://` endpoints proceed, as the rehearsal
-		// harness's `refuseDockerEnv`/`refuseDockerEndpoint` already require. A
-		// failed or empty probe proves nothing and proceeds: the client is broken,
-		// so every later docker call fails with its own truthful error and nothing
-		// remote can happen.
+		// harness's `refuseDockerEnv`/`refuseDockerEndpoint` already require. A probe that
+		// fails or times out proves nothing, so it refuses, as an empty endpoint does, and
+		// a non-local endpoint is refused the same way. No refusal names the endpoint.
 		const locality = await call(contextArgv(), Math.max(1, Math.min(ACTION_TIMEOUT_MS, deadline - now())));
-		if (locality !== TIMEOUT && locality.code === 0) {
-			const endpoint = locality.stdout.toString("utf8").trim().split("\n")[0] ?? "";
-			if (endpoint !== "" && !endpoint.startsWith("unix://")) {
-				throw new Error(`docker context endpoint is not local (${endpoint}); refusing desktop_run`);
-			}
-		}
+		if (locality === TIMEOUT || locality.code !== 0) throw new Error("docker context probe failed; refusing desktop_run");
+		const endpoint = locality.stdout.toString("utf8").trim().split("\n")[0] ?? "";
+		if (endpoint === "") throw new Error("docker context endpoint is empty; refusing desktop_run");
+		if (!endpoint.startsWith("unix://")) throw new Error("docker context endpoint is not local; refusing desktop_run");
 
 		const geo = await call(geometryArgv(), Math.max(1, Math.min(ACTION_TIMEOUT_MS, deadline - now())));
 		if (geo === TIMEOUT) throw new Error("substrate-desktop did not answer the geometry read");

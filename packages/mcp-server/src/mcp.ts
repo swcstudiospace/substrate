@@ -106,6 +106,20 @@ export function attributedSurface(callerSurface: Surface | null, supplied: strin
 }
 
 /**
+ * Why a surface a caller names is refused, or null when it may stand.
+ *
+ * A tokened caller acts as its own surface. A brief, a card or a handoff that names another surface is refused
+ * rather than served under that name, so no reply says it was composed for an agent the token is not. An untokened
+ * caller's claim is left as it has always been. `claimed` is whatever a REST body or query held, so a value that is
+ * not a surface is named as unrecognised, and an absent one is no claim at all.
+ */
+export function surfaceClaimRefusal(callerSurface: Surface | null, claimed: unknown): string | null {
+	if (callerSurface === null || claimed === undefined || claimed === null || claimed === callerSurface) return null;
+	const named = typeof claimed === "string" && (SURFACES as readonly string[]).includes(claimed) ? claimed : "an unrecognised surface";
+	return `this token is ${callerSurface} and cannot act as ${named}`;
+}
+
+/**
  * The surface a `graph_claim` is taken as — `attributedSurface`, narrowed once more.
  *
  * A swarm surface's lease is that agent's alone, so an authenticated caller may claim
@@ -253,6 +267,9 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			// which surface its token resolved to, and the smoke refuses a wrong one.
 			const requested = parseBriefProfile(profile);
 			if (!requested.ok) return refusal(requested.error);
+			// A tokened caller's brief is its own surface's: a `surface` argument naming another is refused, not served.
+			const refusedSurface = surfaceClaimRefusal(callerSurface, surface);
+			if (refusedSurface !== null) return refusal(refusedSurface);
 			const briefSurface = surface ?? callerSurface ?? "claude-code";
 			// The profile follows the bearer's own surface, not an `surface` argument a caller may set for attribution.
 			const { detail, notModified } = await substrate.briefConditional({ repo, branch, graph_id, surface: briefSurface }, if_none_match, requested.profile, callerSurface);

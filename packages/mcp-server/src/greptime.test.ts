@@ -25,6 +25,7 @@ import {
 	GreptimeError,
 	GreptimeUnavailable,
 	HEALTH_TABLE,
+	IDEMPOTENCY_LOOKUP_LIMIT,
 	INGEST_LAG_MS,
 	INGEST_BUDGET_MS,
 	INGEST_RETRY_LOOKBACK_MS,
@@ -36,7 +37,7 @@ import {
 	ttlOf,
 } from "./greptime.ts";
 import { ConfigError, loadConfig, loadLedgerSettings, type GreptimeConfig } from "./config.ts";
-import type { EventInput } from "./types.ts";
+import type { EventInput, SubstrateEvent } from "./types.ts";
 import { MAX_METRIC_BATCH, MAX_METRIC_POINTS, METRIC_SERIES, type MetricSampleRow } from "./metrics-history.ts";
 
 const config: GreptimeConfig = { url: "http://greptime.test", user: "u", password: "p", db: "substrate" };
@@ -638,6 +639,75 @@ describe("reads", () => {
 			),
 		);
 		expect(await new GreptimeClient(config).lastHash("sess-1")).toBe("second");
+	});
+});
+
+describe("findByIdempotencyKey", () => {
+	const cell: Pick<SubstrateEvent, "surface" | "repo" | "graph_id" | "kind" | "ts"> = {
+		surface: "omp",
+		repo: "acme/widgets",
+		graph_id: "ut-1",
+		kind: "shell",
+		ts: "2026-10-20T10:00:00.000Z",
+	};
+
+	/** A stored row as `normalizeEvent` leaves it: `_ik` is the payload's last key. */
+	const row = (key: string, id: string): unknown[] => [id, `hash-${id}`, `{"a":1,"_ik":"${key}"}`];
+
+	/** Answer the dialect probe, then return `rows` for every other read, as a read of the cell at this `ts` would. */
+	function cellRows(rows: unknown[][]) {
+		return stubFetch((statement) => (statement.includes("LENGTH") ? records(["n"], [[3]]) : records(["id", "hash", "payload"], rows)));
+	}
+
+	test("returns the row whose payload ends with the exact key, reading the cell at its exact ts", async () => {
+		const { sql } = cellRows([row("sess_key-1", "e1")]);
+		expect(await new GreptimeClient(config).findByIdempotencyKey(cell, "sess_key-1")).toEqual({ id: "e1", hash: "hash-e1" });
+		const lookup = sql.find((statement) => statement.includes('FROM "agent_events"')) ?? "";
+		expect(lookup).toContain(`"ts" = '${cell.ts}'`);
+		expect(lookup).toContain(`LIMIT ${IDEMPOTENCY_LOOKUP_LIMIT}`);
+	});
+
+	test("an underscore in the key is not a wildcard: a stored key that differs only there is a miss", async () => {
+		cellRows([row("sess-key-1", "e1")]);
+		expect(await new GreptimeClient(config).findByIdempotencyKey(cell, "sess_key_1")).toBeNull();
+	});
+
+	test("a lookalike row ahead of the real one does not hide it", async () => {
+		cellRows([row("sess-key-1", "lookalike"), row("sess_key_1", "real")]);
+		expect(await new GreptimeClient(config).findByIdempotencyKey(cell, "sess_key_1")).toEqual({ id: "real", hash: "hash-real" });
+	});
+
+	test("an exact match behind five non-matching rows is found on a later page", async () => {
+		const rows = [1, 2, 3, 4, 5, 6].map((index) => row(index === 6 ? "sess_key_1" : `other-key-${index}`, `e${index}`));
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes("LENGTH")) return records(["n"], [[3]]);
+			// Served as Greptime would: ids past the keyset bound, in id order, capped at the statement's LIMIT.
+			const after = /"id" > '([^']*)'/.exec(statement)?.[1];
+			const limit = Number(/LIMIT (\d+)$/.exec(statement)?.[1]);
+			return records(
+				["id", "hash", "payload"],
+				rows.filter((candidate) => after === undefined || String(candidate[0]) > after).slice(0, limit),
+			);
+		});
+		expect(await new GreptimeClient(config).findByIdempotencyKey(cell, "sess_key_1")).toEqual({ id: "e6", hash: "hash-e6" });
+		expect(sql.filter((statement) => statement.includes('FROM "agent_events"'))).toHaveLength(2);
+	});
+
+	test("a full read with no exact key is inconclusive, never a miss that would append a duplicate", async () => {
+		const rows = Array.from({ length: IDEMPOTENCY_LOOKUP_LIMIT }, (_, index) => row(`other-key-${index}`, `e${index}`));
+		cellRows(rows);
+		await expect(new GreptimeClient(config).findByIdempotencyKey(cell, "sess_key_1")).rejects.toThrow("inconclusive");
+	});
+
+	test("a short read with no exact key is a genuine miss", async () => {
+		cellRows([row("other-key-1", "e1")]);
+		expect(await new GreptimeClient(config).findByIdempotencyKey(cell, "sess_key_1")).toBeNull();
+	});
+
+	test("a malformed key is refused before anything is read", async () => {
+		const { sql } = cellRows([]);
+		await expect(new GreptimeClient(config).findByIdempotencyKey(cell, "bad key!")).rejects.toThrow("malformed");
+		expect(sql).toEqual([]);
 	});
 });
 

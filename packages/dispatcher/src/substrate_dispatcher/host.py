@@ -8,10 +8,12 @@ rule apply to a VM task unchanged. The host, not the dispatcher, holds the sessi
 dispatcher restart forgets the handle, the VM keeps running.
 
 Nothing here logs or returns more than ids, HTTP codes and at most 200 characters of an error body.
+The host bearer is never logged; error text is redacted of it before the 200-character cap.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from pathlib import Path
@@ -22,6 +24,7 @@ import httpx
 from .launcher import Launched
 
 DEFAULT_HOST_URL = "http://127.0.0.1:7411"
+HOST_TOKEN_ENV = "SUBSTRATE_HOST_API_TOKEN"
 TASKS_DIR = Path("/var/lib/substrate/agentos/tasks")
 # poll() answers None through this many consecutive failed status reads, then 2.
 UNREACHABLE_LIMIT = 3
@@ -30,6 +33,7 @@ REFUSAL_STATUSES = frozenset({400, 409, 502})
 ERROR_TEXT_LIMIT = 200
 
 Log = Callable[[str], None]
+logger = logging.getLogger(__name__)
 
 
 class HostRefused(Exception):
@@ -45,7 +49,7 @@ class HostRefused(Exception):
         self.marker = marker
 
 
-def _error_text(resp: httpx.Response) -> str:
+def _error_text(resp: httpx.Response, secret: str | None) -> str:
     try:
         payload = resp.json()
     except ValueError:
@@ -53,6 +57,8 @@ def _error_text(resp: httpx.Response) -> str:
     text = payload.get("error") if isinstance(payload, dict) else None
     if not isinstance(text, str):
         text = resp.text
+    if secret:
+        text = text.replace(secret, "[redacted]")
     return text[:ERROR_TEXT_LIMIT]
 
 
@@ -73,12 +79,16 @@ class HostClient:
         self._client = httpx.Client(**kwargs)
 
     @classmethod
-    def from_env(cls) -> HostClient:
-        from .mcp import resolve_substrate_bearer
-
+    def from_env(cls, *, transport: httpx.BaseTransport | None = None) -> HostClient:
+        """SUBSTRATE_HOST_URL and SUBSTRATE_HOST_API_TOKEN from the environment. The token is the
+        bearer on every host API request; when it is unset, one warning names the variable."""
+        token = (os.environ.get(HOST_TOKEN_ENV) or "").strip()
+        if not token:
+            logger.warning("%s is unset; substrate-host requests carry no bearer", HOST_TOKEN_ENV)
         return cls(
             os.environ.get("SUBSTRATE_HOST_URL") or DEFAULT_HOST_URL,
-            bearer=resolve_substrate_bearer(),
+            bearer=token,
+            transport=transport,
         )
 
     def _headers(self) -> dict[str, str]:
@@ -122,7 +132,7 @@ class HostClient:
             if not isinstance(payload, dict):
                 raise HostRefused(f"HTTP {resp.status_code}: unexpected reply shape", "host-unreachable")
             return payload
-        reason = f"HTTP {resp.status_code}: {_error_text(resp)}"
+        reason = f"HTTP {resp.status_code}: {_error_text(resp, self._bearer)}"
         if resp.status_code in REFUSAL_STATUSES:
             raise HostRefused(reason, "host-refused")
         raise HostRefused(reason, "host-unreachable")
@@ -136,7 +146,7 @@ class HostClient:
         if resp.status_code == 404:
             return None
         if resp.status_code != 200:
-            raise HostRefused(f"HTTP {resp.status_code}: {_error_text(resp)}", "host-unreachable")
+            raise HostRefused(f"HTTP {resp.status_code}: {_error_text(resp, self._bearer)}", "host-unreachable")
         try:
             payload = resp.json()
         except ValueError:
@@ -147,11 +157,11 @@ class HostClient:
 
     def _post_verb(self, graph_id: str, node_id: str, verb: str) -> None:
         try:
-            resp = self._client.post(f"{self._task_path(graph_id, node_id)}/{verb}", headers=self._headers())
+            resp = self._client.post(f"{self._task_path(graph_id, node_id)}/{verb}", json={}, headers=self._headers())
         except httpx.HTTPError as exc:
             raise HostRefused(f"POST {verb} failed: {type(exc).__name__}", "host-unreachable") from None
         if resp.status_code != 202:
-            raise HostRefused(f"HTTP {resp.status_code}: {_error_text(resp)}", "host-unreachable")
+            raise HostRefused(f"HTTP {resp.status_code}: {_error_text(resp, self._bearer)}", "host-unreachable")
 
     def terminate(self, graph_id: str, node_id: str) -> None:
         """POST …/terminate (cancel the running turn); HostRefused when not accepted."""
