@@ -3,7 +3,7 @@
  * with untrusted framing and a URL-listing note event; errors yield empty
  * plus reason. Proved against the recording fake.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -15,6 +15,8 @@ import { citationProvenanceCounts, searchDocs, searchReplyStorable, SNIPPET_CAP,
 import type { DatasetListSource } from "./docs-datasets.ts";
 import { nodeIo, readSkillsCheckoutPages, skillsCheckoutRoots, type ScanIo } from "./docs-ingest.ts";
 import { RagflowFake, type FakeChunk } from "./ragflow-fake.ts";
+import type { GreptimeClient } from "./greptime.ts";
+import { HindsightFake } from "./hindsight-fake.ts";
 import { ragflowOp } from "./planes/ragflow.ts";
 import type { EventInput } from "./types.ts";
 import { loadConfig } from "./config.ts";
@@ -698,5 +700,310 @@ describe("docs_search after an agent-skills refresh (phase 42)", () => {
 			rmSync(prior, { recursive: true, force: true });
 			rmSync(wide, { recursive: true, force: true });
 		}
+	});
+});
+
+/** Point the Hindsight reads at the fake: recall reads the environment at call time. */
+function hindsightEnv(banks: string): () => void {
+	const names = ["HINDSIGHT_URL", "HINDSIGHT_API_KEY", "HINDSIGHT_BANKS"];
+	const saved = new Map(names.map((name) => [name, process.env[name]]));
+	process.env.HINDSIGHT_URL = "http://fake";
+	process.env.HINDSIGHT_API_KEY = "test-bearer";
+	process.env.HINDSIGHT_BANKS = banks;
+	return () => {
+		for (const [name, value] of saved) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+	};
+}
+
+/**
+ * A ledger seam answering the reads a docs search reaches, recording the
+ * session reads. A `failure` makes every read reject with that message.
+ */
+function ledgerStub(rows: Array<Record<string, unknown>>, failure?: string): { greptime: GreptimeClient; reads: Array<[string, string]> } {
+	const reads: Array<[string, string]> = [];
+	const stub = {
+		ensureAppendMode: async () => true,
+		lastHash: async (): Promise<string | null> => null,
+		insertEvent: async () => {},
+		readEvents: async (column: "session_id" | "graph_id", value: string) => {
+			reads.push([column, value]);
+			if (failure !== undefined) throw new Error(failure);
+			return rows;
+		},
+	};
+	// The seam takes the full client; these tests reach only the four methods the stub implements.
+	const greptime: GreptimeClient = stub as never;
+	return { greptime, reads };
+}
+
+/** Seven rows in time order, one second apart, all in session `s-1`. */
+function sessionRows(count: number): Array<Record<string, unknown>> {
+	return Array.from({ length: count }, (_, index) => ({
+		id: `evt-${index}`,
+		ts: 1_700_000_000_000 + index * 1000,
+		kind: "note",
+		surface: "cursor",
+		summary: `event ${index}`,
+		session_id: "s-1",
+	}));
+}
+
+describe("docs_search context (D46-d, D46-e)", () => {
+	const config = loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" });
+	let restoreEnv: () => void = () => {};
+	beforeEach(() => {
+		restoreEnv = hindsightEnv("sub-cursor");
+	});
+	afterEach(() => {
+		restoreEnv();
+	});
+
+	/** Four memories in the caller's bank; by score the best three are m2, m4 and m3. */
+	function recallable(): HindsightFake {
+		const hindsight = new HindsightFake();
+		hindsight.seed("sub-cursor", [
+			{ id: "m1", text: "fence the lease", document_id: "mwd_1", tags: ["cursor"], metadata: {}, score: 0.4 },
+			{ id: "m2", text: "quote every version", document_id: "mwd_2", tags: ["cursor"], metadata: {}, score: 0.9 },
+			{ id: "m3", text: "rotate the bearer", document_id: "mwd_3", tags: ["cursor"], metadata: {}, score: 0.7 },
+			{ id: "m4", text: "drain the outbox", document_id: "mwd_4", tags: ["cursor"], metadata: {}, score: 0.8 },
+		]);
+		return hindsight;
+	}
+
+	function substrateWith(options: { fake: RagflowFake; hindsight: HindsightFake; greptime: GreptimeClient; cache?: ReadThroughCache }): Substrate {
+		const cache = options.cache ?? new ReadThroughCache({ redis: null, enabled: false, log: () => {} });
+		return new Substrate(config, {
+			index: null,
+			greptime: options.greptime,
+			ragflowFetch: options.fake.fetch,
+			hindsightFetch: options.hindsight.fetch,
+			cache,
+		});
+	}
+
+	test("without the flag the reply has no context key, and neither recall nor the ledger is read", async () => {
+		const fake = new RagflowFake();
+		const hindsight = recallable();
+		const { greptime, reads } = ledgerStub(sessionRows(7));
+		const reply = await substrateWith({ fake, hindsight, greptime }).searchDocs({ question: "who reads RAGFlow?", session_id: "s-1" }, "cursor");
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(Object.hasOwn(reply, "context")).toBe(false);
+		expect(hindsight.recalls()).toEqual([]);
+		expect(reads).toEqual([]);
+	});
+
+	test("with the flag, memories come from recall and events from the session's last five ledger rows", async () => {
+		const fake = new RagflowFake();
+		const { greptime, reads } = ledgerStub(sessionRows(7));
+		const reply = await substrateWith({ fake, hindsight: recallable(), greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
+			"cursor",
+		);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.context?.untrusted).toBe(UNTRUSTED_DOCS_NOTICE);
+		expect(reply.context?.degraded).toBeUndefined();
+		expect(reply.context?.memories.map((memory) => memory.id)).toEqual(["m2", "m4", "m3"]);
+		expect(reply.context?.memories[0]).toEqual({ id: "m2", text: "quote every version", scope: null, repo: null });
+		expect(reply.context?.events.map((event) => event.id)).toEqual(["evt-2", "evt-3", "evt-4", "evt-5", "evt-6"]);
+		expect(reply.context?.events[0]).toEqual({
+			id: "evt-2",
+			ts: new Date(1_700_000_002_000).toISOString(),
+			kind: "note",
+			surface: "cursor",
+			summary: "event 2",
+		});
+		expect(reads).toEqual([["session_id", "s-1"]]);
+	});
+
+	test("no session: events are empty, degraded is no-session, and the memories still come", async () => {
+		const fake = new RagflowFake();
+		const { greptime, reads } = ledgerStub(sessionRows(7));
+		const reply = await substrateWith({ fake, hindsight: recallable(), greptime }).searchDocs({ question: "who reads RAGFlow?", context: true }, "cursor");
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.context?.events).toEqual([]);
+		expect(reply.context?.degraded).toBe("no-session");
+		expect(reply.context?.memories).toHaveLength(3);
+		expect(reads).toEqual([]);
+	});
+
+	test("a recall failure keeps the chunks and names the recall as degraded", async () => {
+		const fake = new RagflowFake();
+		const hindsight = recallable();
+		hindsight.failRecallWith = 503;
+		const { greptime } = ledgerStub(sessionRows(2));
+		const reply = await substrateWith({ fake, hindsight, greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
+			"cursor",
+		);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.context?.memories).toEqual([]);
+		expect(reply.context?.degraded).toStartWith("recall: hindsight recall failed");
+		expect(reply.context?.events).toHaveLength(2);
+	});
+
+	test("a ledger failure keeps the chunks and the memories, and names the ledger", async () => {
+		const fake = new RagflowFake();
+		const { greptime, reads } = ledgerStub([], "greptime unreachable");
+		const reply = await substrateWith({ fake, hindsight: recallable(), greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
+			"cursor",
+		);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.context?.memories).toHaveLength(3);
+		expect(reply.context?.events).toEqual([]);
+		expect(reply.context?.degraded).toStartWith("ledger: ");
+		expect(reads).toEqual([["session_id", "s-1"]]);
+	});
+
+	test("a ledger read that never answers does not hold the reply: chunks come back, events are empty, and the reply returns within the ledger budget", async () => {
+		const fake = new RagflowFake();
+		const { greptime } = ledgerStub([]);
+		Object.assign(greptime, { readEvents: () => new Promise<never>(() => {}) });
+		const started = performance.now();
+		const reply = await substrateWith({ fake, hindsight: recallable(), greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
+			"cursor",
+		);
+		const elapsed = performance.now() - started;
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.context?.events).toEqual([]);
+		expect(reply.context?.degraded).toContain("ledger");
+		// The ledger budget is 1000 ms (DOCS_CONTEXT_LEDGER_BUDGET_MS); the 3000 ms bound leaves room for scheduling.
+		expect(elapsed).toBeLessThan(3000);
+	});
+
+	test("a context reply is never stored: the cache keeps the chunk answer, and no stored value carries context", async () => {
+		const fake = new RagflowFake();
+		const redis = new FakeRedis();
+		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
+		const { greptime } = ledgerStub(sessionRows(7));
+		const substrate = substrateWith({ fake, hindsight: recallable(), greptime, cache });
+		const request = { question: "who reads RAGFlow?", session_id: "s-1", context: true };
+		const first = await substrate.searchDocs(request, "cursor");
+		expect(first.context?.memories).toHaveLength(3);
+		expect(searchReplyStorable(first)).toBe(false);
+		const stored = [...redis.values].filter(([key]) => key.startsWith("substrate:v1:docs-search:"));
+		expect(stored).toHaveLength(1);
+		const envelope: { v?: Record<string, unknown> } = JSON.parse(stored[0]?.[1] ?? "{}");
+		expect(envelope.v).toBeDefined();
+		expect(Object.hasOwn(envelope.v ?? {}, "context")).toBe(false);
+		const second = await substrate.searchDocs(request, "cursor");
+		expect(second.chunks).toEqual(first.chunks);
+		expect(second.context?.events).toHaveLength(5);
+	});
+
+	test("docs_search over MCP passes context through to the service", async () => {
+		const fake = new RagflowFake();
+		const { greptime } = ledgerStub(sessionRows(7));
+		const substrate = substrateWith({ fake, hindsight: recallable(), greptime });
+		const server = createMcpServer(substrate, "cursor");
+		const client = new Client({ name: "substrate-test", version: "0.0.0" });
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+		try {
+			const result = await client.callTool({
+				name: "docs_search",
+				arguments: { question: "who reads RAGFlow?", session_id: "s-1", context: true },
+			});
+			const content = result.content as Array<{ type: string; text?: string }>;
+			const reply: { context?: { memories: unknown[]; events: unknown[] } } = JSON.parse(content[0]?.text ?? "{}");
+			expect(reply.context?.memories).toHaveLength(3);
+			expect(reply.context?.events).toHaveLength(5);
+		} finally {
+			await client.close();
+			await server.close();
+		}
+	});
+
+	test("an anonymous caller reads no recall bank: memories are empty and the reason is the refusal memory_recall gives", async () => {
+		const fake = new RagflowFake();
+		const hindsight = recallable();
+		const { greptime } = ledgerStub(sessionRows(7));
+		const reply = await substrateWith({ fake, hindsight, greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
+			null,
+		);
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.context?.memories).toEqual([]);
+		expect(reply.context?.degraded).toBe("recall: no recall bank for surface unattributed: configure HINDSIGHT_BANKS");
+		expect(hindsight.recalls()).toEqual([]);
+		expect(reply.context?.events).toHaveLength(5);
+	});
+
+	test("a recall the plane does not serve names its reason, so a missing source is visible in the context", async () => {
+		delete process.env.HINDSIGHT_URL;
+		const fake = new RagflowFake();
+		const { greptime } = ledgerStub(sessionRows(7));
+		const reply = await substrateWith({ fake, hindsight: new HindsightFake(), greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
+			"cursor",
+		);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.context?.memories).toEqual([]);
+		expect(reply.context?.degraded).toBe("recall: hindsight is not configured");
+		expect(reply.context?.events).toHaveLength(5);
+	});
+
+	test("a search with no matches and no degradation carries no degraded key in the context", async () => {
+		const fake = new RagflowFake();
+		const hindsight = new HindsightFake();
+		hindsight.seed("sub-cursor", []);
+		const { greptime } = ledgerStub(sessionRows(7));
+		const reply = await substrateWith({ fake, hindsight, greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
+			"cursor",
+		);
+		expect(reply.context?.memories).toEqual([]);
+		expect(Object.hasOwn(reply.context ?? {}, "degraded")).toBe(false);
+		expect(reply.context?.events).toHaveLength(5);
+	});
+
+	test("one deadline bounds the whole recall: a recall that outlives the search budget answers empty and names the recall deadline", async () => {
+		const fake = new RagflowFake();
+		const hindsight = recallable();
+		hindsight.recallDeafMs["sub-cursor"] = 2000;
+		const { greptime } = ledgerStub(sessionRows(2));
+		const budgeted = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", HINDSIGHT_SEARCH_RECALL_BUDGET_MS: "200" }), {
+			index: null,
+			greptime,
+			ragflowFetch: fake.fetch,
+			hindsightFetch: hindsight.fetch,
+			cache: new ReadThroughCache({ redis: null, enabled: false, log: () => {} }),
+		});
+		const started = performance.now();
+		const reply = await budgeted.searchDocs({ question: "who reads RAGFlow?", session_id: "s-1", context: true }, "cursor");
+		const elapsed = performance.now() - started;
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.context?.memories).toEqual([]);
+		expect(reply.context?.degraded).toContain("recall deadline");
+		// The outer deadline is the 200 ms budget plus its 500 ms margin; the further 500 ms leaves room for scheduling.
+		expect(elapsed).toBeLessThan(200 + 500 + 500);
+	});
+
+	test("the ledger is read under the session id the events were written with, so a capped id still finds its rows", async () => {
+		const fake = new RagflowFake();
+		const stored = "s".repeat(512);
+		const rows = sessionRows(7).map((row) => ({ ...row, session_id: stored }));
+		const reads: string[] = [];
+		const { greptime } = ledgerStub([]);
+		Object.assign(greptime, {
+			readEvents: async (_column: string, value: string) => {
+				reads.push(value);
+				return value === stored ? rows : [];
+			},
+		});
+		const reply = await substrateWith({ fake, hindsight: recallable(), greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s".repeat(600), context: true },
+			"cursor",
+		);
+		expect(reads).toEqual([stored]);
+		expect(reply.context?.events).toHaveLength(5);
 	});
 });

@@ -12,6 +12,7 @@ import { memoryToolWriter, surfaceClaimRefusal } from "./mcp.ts";
 import { createObservability } from "./observe.ts";
 import type { FetchLike } from "./planes/ragflow.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
+import { HindsightFake } from "./hindsight-fake.ts";
 import {
 	STREAM_BATCH,
 	createHttpServer,
@@ -67,7 +68,7 @@ describe("healthStatus", () => {
 async function serve(
 	greptime: unknown,
 	env: Record<string, string | undefined> = {},
-	stores: { ragflowFetch?: FetchLike } = {},
+	stores: { ragflowFetch?: FetchLike; hindsightFetch?: FetchLike } = {},
 	options: HttpServerOptions = {},
 ) {
 	const config = loadConfig(env);
@@ -295,6 +296,109 @@ describe("routes", () => {
 		try {
 			const response = await post("/docs/search", { datasets: ["agent-substrate"] });
 			expect(response.status).toBe(400);
+		} finally {
+			await stop();
+		}
+	});
+
+	/** The ledger stub plus the session read the docs context makes: each read is recorded and answers with no rows. */
+	function sessionLedger() {
+		const base = ledger();
+		const reads: Array<[string, string]> = [];
+		return {
+			reads,
+			greptime: {
+				...base.greptime,
+				readEvents: async (column: string, value: string) => {
+					reads.push([column, value]);
+					return [];
+				},
+			},
+		};
+	}
+
+	/** A Hindsight fake with one memory in the omp bank, so a recall that reaches it is answered. */
+	function ompBank(): HindsightFake {
+		const hindsight = new HindsightFake();
+		hindsight.seed("sub-omp", [{ id: "m1", text: "quote every version", document_id: "mwd_1", tags: ["omp"], metadata: {}, score: 0.9 }]);
+		return hindsight;
+	}
+
+	/** Recall reads the process environment at call time, so the Hindsight variables are set around the requests made inside `run`. */
+	async function withHindsightEnv<T>(banks: string, run: () => Promise<T>): Promise<T> {
+		const names = ["HINDSIGHT_URL", "HINDSIGHT_API_KEY", "HINDSIGHT_BANKS"] as const;
+		const saved = names.map((name) => [name, process.env[name]] as const);
+		process.env.HINDSIGHT_URL = "http://fake";
+		process.env.HINDSIGHT_API_KEY = "test-bearer";
+		process.env.HINDSIGHT_BANKS = banks;
+		try {
+			return await run();
+		} finally {
+			for (const [name, value] of saved) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
+	}
+
+	const OMP_ENV = { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" };
+	const OMP_AUTH = { authorization: "Bearer tok-omp" };
+
+	test("POST /docs/search with context true reaches the service and answers a context block", async () => {
+		const fake = new RagflowFake();
+		const hindsight = ompBank();
+		const { reads, greptime } = sessionLedger();
+		const { post, stop } = await serve(greptime, OMP_ENV, { ragflowFetch: fake.fetch, hindsightFetch: hindsight.fetch });
+		try {
+			const response = await withHindsightEnv("sub-omp", () =>
+				post("/docs/search", { question: "who reads RAGFlow?", session_id: "s-1", context: true }, OMP_AUTH),
+			);
+			const body = (await response.json()) as Record<string, unknown>;
+			expect(response.status).toBe(200);
+			expect(Object.hasOwn(body, "context")).toBe(true);
+			expect(hindsight.recalls()).toHaveLength(1);
+			expect(reads).toEqual([["session_id", "s-1"]]);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/search with context false or absent answers without a context key and reads neither source", async () => {
+		const fake = new RagflowFake();
+		const hindsight = ompBank();
+		const { reads, greptime } = sessionLedger();
+		const { post, stop } = await serve(greptime, OMP_ENV, { ragflowFetch: fake.fetch, hindsightFetch: hindsight.fetch });
+		try {
+			await withHindsightEnv("sub-omp", async () => {
+				for (const extra of [{ context: false }, {}]) {
+					const response = await post("/docs/search", { question: "who reads RAGFlow?", session_id: "s-1", ...extra }, OMP_AUTH);
+					const body = (await response.json()) as Record<string, unknown>;
+					expect(response.status).toBe(200);
+					expect(Object.hasOwn(body, "context")).toBe(false);
+				}
+			});
+			expect(hindsight.recalls()).toEqual([]);
+			expect(reads).toEqual([]);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/search refuses a string or null context with a 400, before recall or the ledger", async () => {
+		const fake = new RagflowFake();
+		const hindsight = ompBank();
+		const { reads, greptime } = sessionLedger();
+		const { post, stop } = await serve(greptime, OMP_ENV, { ragflowFetch: fake.fetch, hindsightFetch: hindsight.fetch });
+		try {
+			await withHindsightEnv("sub-omp", async () => {
+				for (const context of ["true", null]) {
+					const response = await post("/docs/search", { question: "who reads RAGFlow?", session_id: "s-1", context }, OMP_AUTH);
+					expect(response.status).toBe(400);
+					expect(String(((await response.json()) as Record<string, unknown>).error)).toContain("context a boolean");
+				}
+			});
+			expect(hindsight.recalls()).toEqual([]);
+			expect(reads).toEqual([]);
 		} finally {
 			await stop();
 		}
