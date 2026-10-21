@@ -6,9 +6,10 @@
  *
  * The advisories are `bun audit --json` (run here, or read from `--input`, a saved copy of
  * that output). Bun's `--audit-level` does not filter the JSON, so severity is filtered here.
- * An advisory passes only when `.github/audit-accepted-risk.json` lists the same GHSA id and
- * package at the version the lockfile installs, and that package is installed at no other
- * version. Any other high or critical advisory fails the gate. An accepted advisory past its
+ * An advisory passes only when `.github/audit-accepted-risk.json` lists the same GHSA id,
+ * package, and severity at the version the lockfile installs, and that package is installed at
+ * no other version. Any other high or critical advisory fails the gate, including one whose
+ * severity has risen since it was accepted. An accepted advisory past its
  * `review_by` date still passes, with a warning. Exit 0 when nothing fails, 1 when something
  * does, 2 on a usage or input error. See docs/ci.md.
  */
@@ -91,7 +92,7 @@ export function filterAdvisories(
 				severity: advisory.severity,
 				title: advisory.title ?? "",
 			};
-			const risk = version === undefined ? undefined : accepted.find((r) => r.id === finding.id && r.package === pkg && r.version === version);
+			const risk = version === undefined ? undefined : accepted.find((r) => r.id === finding.id && r.package === pkg && r.version === version && r.severity === finding.severity);
 			if (risk === undefined) {
 				result.failing.push(finding);
 				continue;
@@ -163,7 +164,22 @@ function parseAuditJson(text: string): AuditJson {
 		throw new GateInputError("the audit output is not JSON");
 	}
 	if (data === null || typeof data !== "object" || Array.isArray(data)) throw new GateInputError("the audit output is not an object");
+	for (const [pkg, advisories] of Object.entries(data)) {
+		if (!Array.isArray(advisories)) throw new GateInputError(`the audit output: ${pkg} is not an array`);
+		advisories.forEach((advisory, index) => checkAdvisory(advisory, `${pkg}[${index}]`));
+	}
 	return data as AuditJson;
+}
+
+/** Checks the fields `filterAdvisories` reads, so a malformed record fails here instead of being skipped. */
+function checkAdvisory(advisory: unknown, where: string): void {
+	if (typeof advisory !== "object" || advisory === null || Array.isArray(advisory)) throw new GateInputError(`the audit output: ${where} is not an object`);
+	const record = advisory as Record<string, unknown>;
+	if (typeof record.id !== "number") throw new GateInputError(`the audit output: ${where} has no numeric id`);
+	if (typeof record.severity !== "string") throw new GateInputError(`the audit output: ${where} has no severity`);
+	for (const field of ["url", "title"] as const) {
+		if (record[field] !== undefined && typeof record[field] !== "string") throw new GateInputError(`the audit output: ${where}.${field} is not a string`);
+	}
 }
 
 async function readAudit(input: string | undefined, root: string): Promise<AuditJson> {

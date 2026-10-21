@@ -1,5 +1,8 @@
-import { describe, expect, test } from "bun:test";
-import { type AcceptedRisk, type AuditJson, filterAdvisories, installedVersions, parseAllowlist } from "./audit-gate.ts";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, spyOn, test } from "bun:test";
+import { type AcceptedRisk, type AuditJson, filterAdvisories, installedVersions, main, parseAllowlist } from "./audit-gate.ts";
 
 const PI_URL = "https://github.com/advisories/GHSA-jfgx-wxx8-mp94";
 const FTP_URL = "https://github.com/advisories/GHSA-c475-qrg2-pj4r";
@@ -74,6 +77,14 @@ describe("filterAdvisories", () => {
 		expect(result.failing[0]).toMatchObject({ id: "GHSA-jfgx-wxx8-mp94", version: "0.61.0" });
 	});
 
+	test("an allowlisted advisory whose severity rose above the allowlisted one fails until re-reviewed", () => {
+		const raised: AuditJson = { [PI]: [{ id: 1123902, url: PI_URL, title: "Pi Agent: extension install paths", severity: "critical" }] };
+		const result = filterAdvisories(raised, installed, [risk], TODAY);
+		expect(result.accepted).toEqual([]);
+		expect(result.failing).toHaveLength(1);
+		expect(result.failing[0]).toMatchObject({ id: "GHSA-jfgx-wxx8-mp94", severity: "critical" });
+	});
+
 	test("an allowlisted advisory fails when the package is installed at more than one version", () => {
 		const duplicated = new Map([[PI, new Set(["0.60.0", "0.61.0"])]]);
 		const result = filterAdvisories(audit, duplicated, [risk], TODAY);
@@ -112,5 +123,22 @@ describe("parseAllowlist", () => {
 		const { owner: _owner, ...incomplete } = risk;
 		expect(() => parseAllowlist(JSON.stringify({ accepted: [incomplete] }))).toThrow("missing owner");
 		expect(() => parseAllowlist(JSON.stringify({ accepted: [{ ...risk, review_by: "19/01/2027" }] }))).toThrow("YYYY-MM-DD");
+	});
+});
+
+describe("main", () => {
+	test("exits 2 for malformed audit output instead of skipping the records", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "audit-gate-"));
+		const stderr = spyOn(process.stderr, "write").mockImplementation(() => true);
+		try {
+			const file = join(dir, "audit.json");
+			for (const body of ['{"basic-ftp":[{}]}', '{"basic-ftp":{}}', '{"basic-ftp":[null]}', '{"basic-ftp":[{"id":1,"url":5,"severity":"high"}]}', "[]"]) {
+				await writeFile(file, body);
+				expect(await main(["--input", file])).toBe(2);
+			}
+		} finally {
+			stderr.mockRestore();
+			await rm(dir, { recursive: true, force: true });
+		}
 	});
 });
