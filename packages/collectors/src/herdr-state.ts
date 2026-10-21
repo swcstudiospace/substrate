@@ -14,6 +14,7 @@ import {
 	type HerdrTransition,
 } from "./herdr-map.ts";
 import type { EventInput, Surface } from "../../mcp-server/src/types.ts";
+import { graphIdForWorktree } from "./worktree-graph.ts";
 
 export const HERDR_STATE_VERSION = 2 as const;
 
@@ -27,6 +28,8 @@ export interface HerdrPaneRecord {
 	session_id: string;
 	repo?: string;
 	branch?: string;
+	/** The graph whose worktree holds the pane's working directory (worktree-graph.ts). */
+	graph_id?: string;
 	started_at: string;
 	pane_id: string;
 	terminal_id: string;
@@ -69,8 +72,10 @@ export interface ReconcileOptions {
 	/** First run: write state for the current snapshot and emit nothing. */
 	seed?: boolean;
 	now?: string;
-	/** Repo and branch for a pane. Omitted cwd yields an event without repo. */
+	/** Repo and branch for a pane. Runs Git, so it is called only where a transition needs it. */
 	attribute?: (pane: HerdrPane) => { repo?: string; branch?: string };
+	/** The graph a pane's directory names. Pure path work, checked on every snapshot. Defaults to `graphOfPane`. */
+	graphOf?: (pane: HerdrPane) => string | undefined;
 }
 
 export function emptyHerdrState(): HerdrStateFile {
@@ -138,6 +143,7 @@ function normalizeState(raw: Record<string, unknown>): HerdrStateFile {
 				session_id: typeof value.session_id === "string" ? value.session_id : `herdr:${value.terminal_id}:restored`,
 				repo: typeof value.repo === "string" ? value.repo : undefined,
 				branch: typeof value.branch === "string" ? value.branch : undefined,
+				graph_id: typeof value.graph_id === "string" ? value.graph_id : undefined,
 				started_at: typeof value.started_at === "string" ? value.started_at : new Date(0).toISOString(),
 				pane_id: value.pane_id,
 				terminal_id: value.terminal_id,
@@ -199,6 +205,15 @@ export function saveHerdrState(path: string, state: HerdrStateFile): boolean {
 	}
 }
 
+/** The graph a pane's directory names. Pure path work: no Git, so it is safe on every snapshot. */
+export function graphOfPane(pane: HerdrPane): string | undefined {
+	return graphIdForWorktree(pane.cwd ?? pane.foreground_cwd) ?? undefined;
+}
+
+function graphFor(pane: HerdrPane, options: ReconcileOptions): string | undefined {
+	return (options.graphOf ?? graphOfPane)(pane);
+}
+
 function attribute(pane: HerdrPane, options: ReconcileOptions): { repo?: string; branch?: string } {
 	const cwd = pane.cwd ?? pane.foreground_cwd;
 	if (!cwd || !options.attribute) return {};
@@ -216,6 +231,7 @@ function recordFor(pane: HerdrPane, agent: string, surface: Surface, now: string
 		session_id: `herdr:${pane.terminal_id}:${now}`,
 		repo: attr.repo,
 		branch: attr.branch,
+		graph_id: graphFor(pane, options),
 		started_at: now,
 		pane_id: pane.pane_id,
 		terminal_id: pane.terminal_id ?? "",
@@ -237,12 +253,13 @@ function startOf(identity: string, pane: HerdrPane, agent: string, surface: Surf
 		session_id: next.session_id,
 		repo: next.repo,
 		branch: next.branch,
+		graph_id: next.graph_id,
 		status: next.status,
 		herdr_type: "pane.agent_detected",
 	}, next);
 }
 
-function endOf(identity: string, prev: HerdrPaneRecord, reason: "pane_gone" | "agent_released"): PlannedTransition {
+function endOf(identity: string, prev: HerdrPaneRecord, reason: "pane_gone" | "agent_released" | "graph_changed"): PlannedTransition {
 	return planned(identity, {
 		rowId: "herdr.pane_exited",
 		surface: prev.surface,
@@ -252,6 +269,7 @@ function endOf(identity: string, prev: HerdrPaneRecord, reason: "pane_gone" | "a
 		session_id: prev.session_id,
 		repo: prev.repo,
 		branch: prev.branch,
+		graph_id: prev.graph_id,
 		end_reason: reason,
 		herdr_type: "pane.exited",
 	});
@@ -320,6 +338,14 @@ export function reconcile(state: HerdrStateFile, panes: readonly HerdrPane[], op
 			transitions.push(startOf(identity, pane, agent, surface, now, options));
 			continue;
 		}
+		// One session never spans two graphs. A directory that names another graph, or none, ends this session and
+		// starts a new one. That also closes a session that began before graph attribution existed. A snapshot that
+		// reports no directory says nothing about the graph, so it keeps the session as it is.
+		if ((pane.cwd ?? pane.foreground_cwd) && graphFor(pane, options) !== prev.graph_id) {
+			transitions.push(endOf(identity, prev, "graph_changed"));
+			transitions.push(startOf(identity, pane, agent, surface, now, options));
+			continue;
+		}
 		const raw = pane.agent_status ?? prev.raw_status;
 		if (raw === "unknown") {
 			if (prev.raw_status !== "unknown") silent.push({ identity, pane: { ...prev, raw_status: "unknown" } });
@@ -339,6 +365,7 @@ export function reconcile(state: HerdrStateFile, panes: readonly HerdrPane[], op
 				session_id: prev.session_id,
 				repo: next.repo,
 				branch: next.branch,
+				graph_id: next.graph_id,
 				status: raw,
 				previous_status: prev.status,
 				herdr_type: "pane.agent_status_changed",

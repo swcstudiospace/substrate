@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
 	commitReconcile,
 	emptyHerdrState,
+	graphOfPane,
 	loadHerdrState,
 	paneIdentity,
 	reconcile,
@@ -228,5 +229,86 @@ describe("state file", () => {
 		const text = readFileSync(path, "utf8");
 		expect(text.endsWith("\n")).toBe(true);
 		expect(JSON.parse(text).version).toBe(2);
+	});
+
+	test("a graph named at start stays on the pane record, so the session end after a restart still names it", () => {
+		const GID = "ut-mugzzzzz-0123abcd";
+		const named = { attribute: () => ({ repo: "swcstudiospace/agent-substrate", branch: "main" }), graphOf: () => GID };
+		const started = reconcile(emptyHerdrState(), [pane()], { now: NOW, ...named });
+		expect(started.transitions[0]?.event.graph_id).toBe(GID);
+		const dir = mkdtempSync(join(tmpdir(), "herdr-graph-"));
+		const path = join(dir, "herdr-offsets.json");
+		expect(saveHerdrState(path, commitReconcile(emptyHerdrState(), started, ["stored"]))).toBe(true);
+		const ended = reconcile(loadHerdrState(path).state, [], { now: LATER, attribute });
+		expect(ended.transitions.map((transition) => transition.event.kind)).toEqual(["session.end"]);
+		expect(ended.transitions[0]?.event.graph_id).toBe(GID);
+	});
+});
+
+describe("one session, one graph", () => {
+	const A = "ut-aaaa-00000001";
+	const B = "ut-bbbb-00000002";
+	const LATEST = "2026-10-09T00:00:10.000Z";
+	const repoAndBranch = () => ({ repo: "swcstudiospace/agent-substrate", branch: "main" });
+	const inGraph = (graph: string | undefined) => ({ attribute: repoAndBranch, graphOf: () => graph });
+
+	test("a pane that moves to another graph and back starts a new session at each move", () => {
+		const started = reconcile(emptyHerdrState(), [pane()], { now: NOW, ...inGraph(A) });
+		let state = commitReconcile(emptyHerdrState(), started, ["stored"]);
+		const moved = reconcile(state, [pane()], { now: LATER, ...inGraph(B) });
+		expect(moved.transitions.map((transition) => transition.event.kind)).toEqual(["session.end", "session.start"]);
+		expect(moved.transitions[0]?.event).toMatchObject({ graph_id: A, payload: { end_reason: "graph_changed" } });
+		expect(moved.transitions[1]?.event.graph_id).toBe(B);
+		expect(moved.transitions[1]?.event.session_id).not.toBe(started.transitions[0]?.event.session_id);
+		state = commitReconcile(state, moved, ["stored", "stored"]);
+		const back = reconcile(state, [pane()], { now: LATEST, ...inGraph(A) });
+		expect(back.transitions.map((transition) => transition.event.kind)).toEqual(["session.end", "session.start"]);
+		expect(back.transitions[0]?.event.graph_id).toBe(B);
+		expect(back.transitions[1]?.event.graph_id).toBe(A);
+	});
+
+	test("a session that began before graph attribution is closed at the first snapshot that names a graph", () => {
+		const old = seeded([pane()]);
+		const upgraded = reconcile(old, [pane()], { now: LATER, ...inGraph(A) });
+		expect(upgraded.transitions.map((transition) => transition.event.kind)).toEqual(["session.end", "session.start"]);
+		expect(upgraded.transitions[0]?.event.graph_id).toBeUndefined();
+		expect(upgraded.transitions[1]?.event.graph_id).toBe(A);
+		const closed = reconcile(commitReconcile(old, upgraded, ["stored", "stored"]), [], { now: LATEST, attribute });
+		expect(closed.transitions[0]?.event.graph_id).toBe(A);
+	});
+
+	test("a snapshot that reports no directory keeps the session and its graph", () => {
+		const started = reconcile(emptyHerdrState(), [pane()], { now: NOW, ...inGraph(A) });
+		const state = commitReconcile(emptyHerdrState(), started, ["stored"]);
+		const quiet = reconcile(state, [pane({ cwd: undefined, foreground_cwd: undefined, agent_status: "idle" })], {
+			now: LATER,
+			...inGraph(A),
+		});
+		expect(quiet.transitions.map((transition) => transition.event.kind)).toEqual(["note"]);
+		expect(quiet.transitions[0]?.event.graph_id).toBe(A);
+	});
+
+	test("a pane that stays put is attributed once, at its start, so Git does not run on steady snapshots", () => {
+		let attributed = 0;
+		const counted = () => {
+			attributed += 1;
+			return { repo: "swcstudiospace/agent-substrate", branch: "main" };
+		};
+		let state = emptyHerdrState();
+		for (const at of [NOW, LATER, LATEST]) {
+			const result = reconcile(state, [pane()], { now: at, attribute: counted, graphOf: () => A });
+			state = commitReconcile(state, result, result.transitions.map(() => "stored"));
+		}
+		expect(attributed).toBe(1);
+	});
+});
+
+describe("the graph a pane's directory names", () => {
+	test("comes from the directory, falling back to the foreground process, and is empty elsewhere", () => {
+		const GID = "ut-mugzzzzz-0123abcd";
+		expect(graphOfPane(pane({ cwd: `/var/lib/substrate/worktrees/${GID}/packages/collectors` }))).toBe(GID);
+		expect(graphOfPane(pane({ cwd: undefined, foreground_cwd: `/var/lib/substrate/worktrees/${GID}` }))).toBe(GID);
+		expect(graphOfPane(pane({ cwd: "/home/ops/src/agent-substrate" }))).toBeUndefined();
+		expect(graphOfPane(pane({ cwd: "/var/lib/substrate/worktrees" }))).toBeUndefined();
 	});
 });

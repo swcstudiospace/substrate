@@ -96,9 +96,10 @@ export interface HerdrTransition {
 	session_id: string;
 	repo?: string;
 	branch?: string;
+	graph_id?: string;
 	status?: string;
 	previous_status?: string;
-	end_reason?: "pane_gone" | "agent_released";
+	end_reason?: "pane_gone" | "agent_released" | "graph_changed";
 	herdr_type: "pane.agent_detected" | "pane.agent_status_changed" | "pane.exited";
 }
 
@@ -153,6 +154,7 @@ export function transitionToEvent(transition: HerdrTransition): EventInput {
 	};
 	if (transition.repo) event.repo = transition.repo;
 	if (transition.branch) event.branch = transition.branch;
+	if (transition.graph_id) event.graph_id = transition.graph_id;
 	return event;
 }
 

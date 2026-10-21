@@ -510,7 +510,7 @@ Plans:
 
   1. Lane B events reach the graph's brief and evidence without agents passing ids.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete (PLAN.md); verified in phases/37-laneb-graph-attribution/VERIFICATION.md, PR open
 
 ### Phase 38: MIRROR
 
@@ -781,7 +781,7 @@ Plans:
 | 34. Invalid-write round trip | v1.4 | 1/1 | Complete | 2026-10-21 |
 | 35. expected_version for skills and docs | v1.4 | 1/1 | Complete | 2026-10-21 |
 | 36. Degraded-mode exactly-once replay | v1.4 | 1/1 | Complete | 2026-10-21 |
-| 37. LANEB | v1.3.x | 0/0 | Not started | - |
+| 37. LANEB | v1.3.x | 1/1 | Verified, PR open | - |
 | 38. MIRROR | v1.3.x | 0/0 | Not started | - |
 | 39. DISPATCH | v1.3.x | 0/0 | Not started | - |
 | 40. DOCS-MEMORY | v1.3.x | 0/0 | Not started | - |
