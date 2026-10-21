@@ -4,7 +4,7 @@ verified: 2026-10-21
 status: passed in-repo. The live egress proof and the live restart are operator-gated and were not run
 score: 2 of 2 criteria proven in-repo (H-D1 egress composition, H-D3 VM-task re-adoption); live proofs not run
 verified_on: gsd/v13x-43-lane-a on its final tree, against origin/main 3e9a106 as the base
-covered_files: ["packages/dispatcher/src/substrate_dispatcher/sessions.py", "packages/dispatcher/src/substrate_dispatcher/dispatch.py", "packages/dispatcher/src/substrate_dispatcher/__main__.py", "packages/dispatcher/src/substrate_dispatcher/host.py", "packages/dispatcher/tests/test_readoption.py", "packages/host/src/sandbox-options.test.ts", "docs/runbooks/lane-a-host.md", "docs/dispatcher.md"]
+covered_files: ["packages/dispatcher/src/substrate_dispatcher/sessions.py", "packages/dispatcher/src/substrate_dispatcher/dispatch.py", "packages/dispatcher/src/substrate_dispatcher/__main__.py", "packages/dispatcher/src/substrate_dispatcher/host.py", "packages/dispatcher/tests/test_readoption.py", "packages/dispatcher/tests/test_dispatch.py", "packages/dispatcher/tests/test_claude_code_route.py", "packages/host/src/sandbox-options.test.ts", "docs/runbooks/lane-a-host.md", "docs/dispatcher.md"]
 ---
 
 # 43-VERIFICATION: LANE-A
@@ -13,8 +13,8 @@ covered_files: ["packages/dispatcher/src/substrate_dispatcher/sessions.py", "pac
 
 | Check | Command | Result |
 |---|---|---|
-| Dispatcher suite | `python3 -m pytest packages/dispatcher/tests` | 262 passed |
-| Re-adoption tests | `packages/dispatcher/tests/test_readoption.py` (within the suite) | 10 new tests, all pass |
+| Dispatcher suite | `python3 -m pytest packages/dispatcher/tests` | 267 passed |
+| Re-adoption tests | `packages/dispatcher/tests/test_readoption.py` (within the suite) | 15 tests, all pass |
 | Host egress composition | `bun test packages/host/src/sandbox-options.test.ts` | 35 pass, 0 fail |
 | Typecheck | `bunx tsc --noEmit` | exit 0 |
 | Full bun suite | `bun test` against `substrate_test_p43` | 5824 pass, 2 skip, 0 fail (5826 tests, 217 files) |
