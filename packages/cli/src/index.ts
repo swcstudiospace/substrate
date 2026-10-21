@@ -56,6 +56,8 @@ import { spawnSync } from "node:child_process";
 
 const DEFAULT_URL = "http://127.0.0.1:7410";
 const DEFAULT_TIMEOUT_MS = 1500;
+/** Added to the verify budget for `/evidence`: the server builds the bundle after its hour loop, outside that budget. */
+const EVIDENCE_RESPONSE_MARGIN_MS = 5_000;
 
 function base(): string {
 	return (process.env.SUBSTRATE_URL?.trim() || DEFAULT_URL).replace(/\/+$/, "");
@@ -69,6 +71,16 @@ function base(): string {
 function headers(surface: string): Record<string, string> {
 	const token = resolveBearer(surface, process.env);
 	return { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) };
+}
+
+/**
+ * The whole-verify budget (D28-18), read as the server reads `SUBSTRATE_VERIFY_TIMEOUT_MS`. The hour
+ * loop of `/verify` and `/evidence` runs under it, so a client that waits less gives up on a report
+ * the server is still building.
+ */
+function verifyBudgetMs(): number {
+	const raw = Number(process.env.SUBSTRATE_VERIFY_TIMEOUT_MS);
+	return Number.isFinite(raw) && raw > 0 ? raw : 30_000;
 }
 
 function timeout(): number {
@@ -199,8 +211,7 @@ async function cmdVerify(graphId: string | undefined): Promise<number> {
 	}
 	// The `/verify` request may wait out the hour loop's devnet reads, so it
 	// shares the server's whole-verify budget (D28-18), not the brief timeout.
-	const budgetRaw = Number(process.env.SUBSTRATE_VERIFY_TIMEOUT_MS);
-	const budgetMs = Number.isFinite(budgetRaw) && budgetRaw > 0 ? budgetRaw : 30_000;
+	const budgetMs = verifyBudgetMs();
 	const response = await post("/verify", { graph_id: graphId }, "claude-code", budgetMs);
 	if (!response) {
 		process.stderr.write("[substrate] unreachable\n");
@@ -364,7 +375,9 @@ async function cmdEvidence(args: Record<string, string | true>): Promise<number>
 	// entirely and exited 0 over a broken chain. Asking twice would be worse: the two
 	// bundles are taken at different instants, so the verdict could describe numbers the
 	// document does not contain.
-	const response = await post("/evidence", { graph_id: graphId, format: "json" });
+	// `/evidence` runs the same hour loop as `/verify`, so it waits out the same whole-verify budget,
+	// plus a margin for the reads the server makes after that loop (teachables, audit) and the response.
+	const response = await post("/evidence", { graph_id: graphId, format: "json" }, "claude-code", verifyBudgetMs() + EVIDENCE_RESPONSE_MARGIN_MS);
 	if (!response) {
 		process.stderr.write(`[substrate] unreachable at ${base()}; evidence needs a running substrate-mcp\n`);
 		return 1;
@@ -444,6 +457,17 @@ async function cmdEvidence(args: Record<string, string | true>): Promise<number>
 			`[substrate] the audit decisions for ${graphId} cannot be attributed to it alone: its identifier is stored in a ` +
 				"cleaned form, and another graph cleaning to the same string would share this selection\n" +
 				"[substrate] the bundle was written, but its audit tally is not this graph's alone\n",
+		);
+		return 1;
+	}
+	// An hour devnet could not confirm fails closed (D41-5): the bundle is written with that hour
+	// marked `unverified`, and this command exits non-zero. A `pending` hour is not a failure.
+	const unverified = (bundle.anchors ?? []).filter((anchor) => anchor.status === "unverified");
+	if (unverified.length > 0) {
+		process.stderr.write(
+			`[substrate] ${unverified.length} hour${unverified.length === 1 ? "" : "s"} of ${graphId} could not be verified against devnet: ` +
+				`${unverified.map((anchor) => anchor.period_start).join(", ")}\n` +
+				"[substrate] the bundle was written, but it does not attest to those hours\n",
 		);
 		return 1;
 	}
