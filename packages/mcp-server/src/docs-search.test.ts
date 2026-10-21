@@ -983,8 +983,8 @@ describe("docs_search context (D46-d, D46-e)", () => {
 		expect(reply.chunks.length).toBeGreaterThan(0);
 		expect(reply.context?.memories).toEqual([]);
 		expect(reply.context?.degraded).toContain("recall deadline");
-		// The search budget is 200 ms; the 500 ms bound leaves room for scheduling.
-		expect(elapsed).toBeLessThan(200 + 500);
+		// The outer deadline is the 200 ms budget plus its 500 ms margin; the further 500 ms leaves room for scheduling.
+		expect(elapsed).toBeLessThan(200 + 500 + 500);
 	});
 
 	test("the ledger is read under the session id the events were written with, so a capped id still finds its rows", async () => {

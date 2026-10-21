@@ -217,6 +217,8 @@ import {
 
 /** The refusal `resolveRecallBanks` gives an anonymous caller with no bank of its own; the docs context's recall gives the same. */
 const ANONYMOUS_RECALL_REFUSAL = "no recall bank for surface unattributed: configure HINDSIGHT_BANKS";
+/** The context recall's margin over the fan-out budget: the fan-out returns completed banks at its budget, and this only covers cache reads around it. */
+const CONTEXT_RECALL_MARGIN_MS = 500;
 
 /**
  * Greptime gives back loosely typed rows; rebuild the exact shape that was hashed.
@@ -4222,8 +4224,9 @@ export class Substrate {
 	private async recallForContext(question: string, caller: Surface | null): Promise<{ memories: DocsContextMemory[]; reason?: string }> {
 		if (caller === null) return { memories: [], reason: `recall: ${ANONYMOUS_RECALL_REFUSAL}` };
 		const budgetMs = this.config.hindsightBudgets.searchRecallBudgetMs;
+		const deadlineMs = budgetMs + CONTEXT_RECALL_MARGIN_MS;
 		const expired = Promise.withResolvers<never>();
-		const deadline = setTimeout(() => expired.reject(new Error(`recall deadline of ${budgetMs} ms exceeded`)), budgetMs);
+		const deadline = setTimeout(() => expired.reject(new Error(`recall deadline of ${deadlineMs} ms exceeded`)), deadlineMs);
 		deadline.unref();
 		try {
 			const reply = await Promise.race([this.recallUncounted({ query: question }, caller, budgetMs), expired.promise]);
