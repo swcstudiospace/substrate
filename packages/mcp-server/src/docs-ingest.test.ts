@@ -17,6 +17,8 @@ import {
 	nodeIo,
 	saveIngestRecords,
 	scanIngestPages,
+	readSkillsCheckoutPages,
+	skillsCheckoutRoots,
 	stripRemoteImages,
 	type IngestDeps,
 	type IngestInput,
@@ -450,6 +452,75 @@ describe("scanIngestPages", () => {
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 			rmSync(outside, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("agent-skills checkout roots and scan", () => {
+	test("a directory without SKILL.md contributes no roots, so its notes never become searchable", async () => {
+		const root = mkdtempSync(join(tmpdir(), "substrate-skills-roots-"));
+		try {
+			mkdirSync(join(root, "demo-skill", "references"), { recursive: true });
+			writeFileSync(join(root, "demo-skill", "SKILL.md"), "Demo skill body.\n");
+			writeFileSync(join(root, "demo-skill", "references", "api.md"), "The demo API reference.\n");
+			// Not skills: a directory with a references tree but no SKILL.md, a dot-directory, and a bare file.
+			mkdirSync(join(root, "notes", "references"), { recursive: true });
+			writeFileSync(join(root, "notes", "references", "api.md"), "Notes, not a skill.\n");
+			mkdirSync(join(root, ".hidden"));
+			writeFileSync(join(root, ".hidden", "SKILL.md"), "Hidden.\n");
+			writeFileSync(join(root, "README.md"), "The checkout readme.\n");
+			const roots = await skillsCheckoutRoots(root);
+			expect(roots).toEqual(["demo-skill/SKILL.md", "demo-skill/references/"]);
+			const pages = await readSkillsCheckoutPages(root, roots);
+			expect(pages.map((page) => page.path)).toEqual(["demo-skill/SKILL.md", "demo-skill/references/api.md"]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("a skill with no references directory yields its SKILL.md alone; the missing tree is not an error", async () => {
+		const root = mkdtempSync(join(tmpdir(), "substrate-skills-bare-"));
+		try {
+			mkdirSync(join(root, "demo-skill"));
+			writeFileSync(join(root, "demo-skill", "SKILL.md"), "Demo skill body.\n");
+			const pages = await readSkillsCheckoutPages(root, await skillsCheckoutRoots(root));
+			expect(pages.map((page) => page.path)).toEqual(["demo-skill/SKILL.md"]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("an unreadable references directory fails the skills scan; the skip scan keeps the rest", async () => {
+		const root = mkdtempSync(join(tmpdir(), "substrate-skills-denied-"));
+		try {
+			mkdirSync(join(root, "demo-skill", "references"), { recursive: true });
+			writeFileSync(join(root, "demo-skill", "SKILL.md"), "Demo skill body.\n");
+			writeFileSync(join(root, "demo-skill", "references", "api.md"), "The demo API reference.\n");
+			const io: ScanIo = {
+				...nodeIo,
+				readdir: (path, options) => (path.endsWith(join("demo-skill", "references")) ? Promise.reject(Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" })) : nodeIo.readdir(path, options)),
+			};
+			const roots = ["demo-skill/SKILL.md", "demo-skill/references/"];
+			await expect(readSkillsCheckoutPages(root, roots, io)).rejects.toThrow("EACCES");
+			const kept = await scanIngestPages(root, roots, io);
+			expect(kept.map((page) => page.path)).toEqual(["demo-skill/SKILL.md"]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("an unreadable SKILL.md check fails the roots listing instead of dropping the skill", async () => {
+		const root = mkdtempSync(join(tmpdir(), "substrate-skills-manifest-"));
+		try {
+			mkdirSync(join(root, "demo-skill"));
+			writeFileSync(join(root, "demo-skill", "SKILL.md"), "Demo skill body.\n");
+			const io: Pick<ScanIo, "readdir" | "lstat"> = {
+				readdir: nodeIo.readdir,
+				lstat: (path) => (path.endsWith("SKILL.md") ? Promise.reject(Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" })) : nodeIo.lstat(path)),
+			};
+			await expect(skillsCheckoutRoots(root, io)).rejects.toThrow("EACCES");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
 		}
 	});
 });

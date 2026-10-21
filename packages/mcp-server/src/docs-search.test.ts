@@ -13,7 +13,7 @@ import { CircuitBreaker, gatedFetch, type DocsSearchSample, type PlaneGate } fro
 import { ReadThroughCache, type CacheRedis } from "./cache.ts";
 import { citationProvenanceCounts, searchDocs, searchReplyStorable, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type SearchReply } from "./docs-search.ts";
 import type { DatasetListSource } from "./docs-datasets.ts";
-import { scanIngestPages, skillsCheckoutRoots } from "./docs-ingest.ts";
+import { nodeIo, readSkillsCheckoutPages, skillsCheckoutRoots, type ScanIo } from "./docs-ingest.ts";
 import { RagflowFake, type FakeChunk } from "./ragflow-fake.ts";
 import { ragflowOp } from "./planes/ragflow.ts";
 import type { EventInput } from "./types.ts";
@@ -550,8 +550,11 @@ describe("docs_search after an agent-skills refresh (phase 42)", () => {
 		return root;
 	}
 
-	/** The refresh the merge-trigger route runs for agent-skills: the trigger is noted, then the job runs and is awaited. */
-	function refresh(substrate: Substrate, checkout: string, commit: string) {
+	/**
+	 * The refresh the merge-trigger route runs for agent-skills: the trigger is noted, then the job runs and is awaited.
+	 * `io` is the file system the scan reads through; a test passes one that cannot read a path.
+	 */
+	function refresh(substrate: Substrate, checkout: string, commit: string, io: ScanIo = nodeIo) {
 		substrate.noteDocsTrigger("agent-skills");
 		return substrate.startDocsRefresh(
 			{
@@ -559,7 +562,7 @@ describe("docs_search after an agent-skills refresh (phase 42)", () => {
 				commit,
 				content_sha256: `sha-${commit}`,
 				roots: () => skillsCheckoutRoots(checkout),
-				pages: (roots) => scanIngestPages(checkout, roots),
+				pages: (roots) => readSkillsCheckoutPages(checkout, roots, io),
 			},
 			"omp",
 			{ wait: true },
@@ -605,6 +608,34 @@ describe("docs_search after an agent-skills refresh (phase 42)", () => {
 			const cited = reply.chunks.find((chunk) => chunk.source_url.endsWith("/demo-skill/SKILL.md"));
 			expect(cited).toMatchObject({ commit: "skills-v1", dataset_commit: "skills-v1" });
 			expect(typeof cited?.pin_age_ms).toBe("number");
+		} finally {
+			rmSync(checkout, { recursive: true, force: true });
+		}
+	});
+
+	test("an unreadable references directory fails the refresh: the pinned version keeps serving and no version is recorded", async () => {
+		const fake = new RagflowFake();
+		fake.serveUploadsAsChunks = true;
+		fake.parseDonePolls = 1;
+		const checkout = skillsCheckout({
+			"demo-skill/SKILL.md": "Demo skill body.\n",
+			"demo-skill/references/api.md": "The demo API reference.\n",
+		});
+		try {
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			expect((await refresh(substrate, checkout, "skills-v1")).status).toBe(200);
+			// The references tree exists but its listing is denied: the scan fails rather than yielding SKILL.md alone under a fresh version.
+			const unreadable: ScanIo = {
+				...nodeIo,
+				readdir: (path, options) => (path.endsWith(join("demo-skill", "references")) ? Promise.reject(Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" })) : nodeIo.readdir(path, options)),
+			};
+			const failed = await refresh(substrate, checkout, "skills-v2", unreadable);
+			expect(failed.status).toBe(503);
+			expect(failed.body).toMatchObject({ ok: false, reason: "checkout-unreadable" });
+			expect(await substrate.latestDocsVersion("agent-skills")).toMatchObject({ commit: "skills-v1" });
+			const reply = await substrate.searchDocs({ question: "demo API reference" }, "omp");
+			const cited = reply.chunks.find((chunk) => chunk.source_url.endsWith("/demo-skill/references/api.md"));
+			expect(cited).toMatchObject({ commit: "skills-v1", dataset_commit: "skills-v1" });
 		} finally {
 			rmSync(checkout, { recursive: true, force: true });
 		}

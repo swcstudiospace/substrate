@@ -988,6 +988,13 @@ export interface DocsRefreshRequest {
 	roots?: () => Promise<readonly string[]>;
 	/** The pages of the checkout under `roots`, read when the job runs — not when it is accepted. */
 	pages: (roots: readonly string[]) => Promise<IngestPage[]>;
+	/**
+	 * The commit the checkout's HEAD names, read when the job runs. Present, the job refuses unless it is
+	 * `commit` (`commit-mismatch`) before and after the pages are read, so a checkout that moved on
+	 * after the trigger was queued never records the requested commit over other content. `null` means
+	 * HEAD could not be read, which refuses the job too (`checkout-unreadable`). Absent: no check.
+	 */
+	head?: () => Promise<string | null>;
 }
 
 /** How one merge-trigger job ended, as `?wait=1` and the stderr line report it. */
@@ -4244,6 +4251,17 @@ export class Substrate {
 		};
 	}
 
+	/**
+	 * Why this job must not ingest the checkout as it stands, or `null` when HEAD is the requested commit.
+	 * Only a request that carries `head` is checked; the agent-skills refresh always does.
+	 */
+	private async checkoutRefusal(request: DocsRefreshRequest): Promise<string | null> {
+		if (request.head === undefined) return null;
+		const head = await request.head();
+		if (head === null) return "checkout-unreadable";
+		return head === request.commit ? null : "commit-mismatch";
+	}
+
 	/** One merge-trigger job: ensure, ingest, record; never throws. */
 	private async runDocsRefresh(job: string, request: DocsRefreshRequest, surface: Surface): Promise<DocsRefreshOutcome> {
 		const finish = (outcome: DocsRefreshOutcome): DocsRefreshOutcome => {
@@ -4265,6 +4283,10 @@ export class Substrate {
 			} catch {
 				return finish({ ok: false, reason: "checkout-unreadable", job });
 			}
+			// HEAD must be the requested commit before the plane is touched. A queued job reads the live
+			// checkout, which may have moved on since the trigger was accepted; it is checked again below.
+			const refusedBefore = await this.checkoutRefusal(request);
+			if (refusedBefore !== null) return finish({ ok: false, reason: refusedBefore, job });
 			// The guarded ingest reads the plane's dataset by name and refuses
 			// `unknown-dataset`, so on a configured plane without the dataset it
 			// must exist before that ingest runs: discover first, create only on
@@ -4273,7 +4295,17 @@ export class Substrate {
 			const ensured = await resolveDatasets({ config: this.config.ragflow, fetchImpl: this.ragflowFetch, datasets: this.docsDatasetList }, [request.dataset]);
 			if (!ensured.ok) return finish({ ok: false, reason: ensured.reason, job });
 			const created = ensured.datasets[0]?.created === true;
-			const ingested = await this.ingestDocs({ dataset: request.dataset, commit: request.commit, pages: await request.pages(roots) }, surface, roots);
+			// A path that exists but cannot be read fails the job here, not as a smaller page set.
+			let pages: IngestPage[];
+			try {
+				pages = await request.pages(roots);
+			} catch {
+				return finish({ ok: false, reason: "checkout-unreadable", job });
+			}
+			// The pages came from the checkout as it was after the read: HEAD must still be the requested commit.
+			const refusedAfter = await this.checkoutRefusal(request);
+			if (refusedAfter !== null) return finish({ ok: false, reason: refusedAfter, job });
+			const ingested = await this.ingestDocs({ dataset: request.dataset, commit: request.commit, pages }, surface, roots);
 			if (!ingested.ok) return finish({ ok: false, reason: ingested.reason, job });
 			const refreshed = await this.recordDocsVersion(request, surface);
 			if (!refreshed.ok) return finish({ ok: false, reason: refreshed.reason, job });

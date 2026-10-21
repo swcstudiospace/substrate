@@ -103,72 +103,89 @@ export const nodeIo: ScanIo = { lstat, stat, readdir, readFile };
  * result is sorted by path, so a refresh ingests in a stable order.
  */
 export async function scanIngestPages(baseDir: string, roots: readonly string[], io: ScanIo = nodeIo): Promise<IngestPage[]> {
+	return scanPages(baseDir, roots, io, "skip");
+}
+
+/**
+ * The pages of an agent-skills checkout under `roots`: {@link scanIngestPages}, except that a path
+ * which exists but cannot be listed, stat'ed or read fails the scan. A skill whose `references/` tree
+ * is unreadable then fails its refresh, instead of ingesting fewer pages under a version that looks
+ * fresh. A missing path is still just absent; the size and link rules are unchanged.
+ */
+export async function readSkillsCheckoutPages(baseDir: string, roots: readonly string[], io: ScanIo = nodeIo): Promise<IngestPage[]> {
+	return scanPages(baseDir, roots, io, "fail");
+}
+
+async function scanPages(baseDir: string, roots: readonly string[], io: ScanIo, unreadable: Unreadable): Promise<IngestPage[]> {
 	const pages: IngestPage[] = [];
 	for (const root of roots) {
 		const absolute = resolve(baseDir, root);
-		let info: Stats;
-		try {
-			info = await io.lstat(absolute);
-		} catch {
-			continue; // absent or unreadable root: skipped, not fatal
-		}
+		const info = await tolerant(() => io.lstat(absolute), unreadable);
+		if (info === undefined) continue; // absent or unreadable root: skipped, not fatal under "skip"
 		if (info.isSymbolicLink()) continue; // a root that is itself a link is never followed
-		if (root.endsWith("/")) await collectDirectory(absolute, root, pages, io);
-		else if (info.isFile()) await addFilePage(absolute, root, pages, io);
+		if (root.endsWith("/")) await collectDirectory(absolute, root, pages, io, unreadable);
+		else if (info.isFile()) await addFilePage(absolute, root, pages, io, unreadable);
 	}
 	pages.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 	return pages;
 }
 
 /**
- * The roots of an agent-skills checkout (phase 42, D42-2). Each directory `<name>/` at the checkout
- * root is a skill, so its roots are `<name>/SKILL.md` (one file) and `<name>/references/` (a tree):
- * the layout `writeTree` writes and the library projector reads. Dot-directories and links are not
- * skills. The listing throws when the checkout cannot be read; the caller fails that refresh.
+ * The roots of an agent-skills checkout (phase 42, D42-2). A directory `<name>/` at the checkout root
+ * is a skill only when it holds a regular `SKILL.md`; its roots are that file and `<name>/references/`
+ * (a tree): the layout `writeTree` writes and the library projector reads. A directory without
+ * `SKILL.md` contributes no roots, so its notes never become searchable. Dot-directories and links are
+ * not skills. The listing throws when the checkout cannot be read, and so does a `SKILL.md` check that
+ * fails for any reason but the file being absent; the caller fails that refresh.
  */
-export async function skillsCheckoutRoots(checkout: string, io: Pick<ScanIo, "readdir"> = nodeIo): Promise<string[]> {
+export async function skillsCheckoutRoots(checkout: string, io: Pick<ScanIo, "readdir" | "lstat"> = nodeIo): Promise<string[]> {
 	const entries = await io.readdir(checkout, { withFileTypes: true });
 	const roots: string[] = [];
 	for (const entry of entries) {
 		if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-		roots.push(`${entry.name}/SKILL.md`, `${entry.name}/references/`);
+		const manifest = await tolerant(() => io.lstat(join(checkout, entry.name, "SKILL.md")), "fail");
+		if (manifest?.isFile() === true) roots.push(`${entry.name}/SKILL.md`, `${entry.name}/references/`);
 	}
 	return roots;
 }
 
-async function collectDirectory(dir: string, prefix: string, pages: IngestPage[], io: ScanIo): Promise<void> {
-	let entries: Dirent[];
+/** How a scan treats a path it cannot read: skip it (agent-substrate), or fail the scan (an agent-skills checkout). */
+type Unreadable = "skip" | "fail";
+
+/**
+ * One filesystem read. A missing path yields undefined under either policy; any other failure yields
+ * undefined under "skip" and rethrows under "fail".
+ */
+async function tolerant<T>(read: () => Promise<T>, unreadable: Unreadable): Promise<T | undefined> {
 	try {
-		entries = await io.readdir(dir, { withFileTypes: true });
-	} catch {
-		return; // missing or unreadable: skipped, not fatal
-	}
-	for (const entry of entries) {
-		if (entry.isSymbolicLink()) continue;
-		const relative = `${prefix}${entry.name}`;
-		if (entry.isDirectory()) await collectDirectory(join(dir, entry.name), `${relative}/`, pages, io);
-		else if (entry.isFile()) await addFilePage(join(dir, entry.name), relative, pages, io);
+		return await read();
+	} catch (cause) {
+		const missing = cause instanceof Error && "code" in cause && cause.code === "ENOENT";
+		if (unreadable === "fail" && !missing) throw cause;
+		return undefined;
 	}
 }
 
-async function addFilePage(absolute: string, path: string, pages: IngestPage[], io: ScanIo): Promise<void> {
+async function collectDirectory(dir: string, prefix: string, pages: IngestPage[], io: ScanIo, unreadable: Unreadable): Promise<void> {
+	const entries = await tolerant(() => io.readdir(dir, { withFileTypes: true }), unreadable);
+	if (entries === undefined) return; // a missing directory is skipped; an unreadable one only under "skip"
+	for (const entry of entries) {
+		if (entry.isSymbolicLink()) continue;
+		const relative = `${prefix}${entry.name}`;
+		if (entry.isDirectory()) await collectDirectory(join(dir, entry.name), `${relative}/`, pages, io, unreadable);
+		else if (entry.isFile()) await addFilePage(join(dir, entry.name), relative, pages, io, unreadable);
+	}
+}
+
+async function addFilePage(absolute: string, path: string, pages: IngestPage[], io: ScanIo, unreadable: Unreadable): Promise<void> {
 	// The size cap applies to the stat, before anything is read: a file the
 	// ingest would refuse as page-too-large is never loaded just to be thrown
 	// away. It is skipped like every other page the sweep cannot take —
 	// quietly, and counted only by its absence from the result.
-	let size: number;
-	try {
-		size = (await io.stat(absolute)).size;
-	} catch {
-		return; // missing or unreadable: skipped, not fatal
-	}
-	if (size > INGEST_PAGE_MAX_BYTES) return;
-	let body: string;
-	try {
-		body = await io.readFile(absolute, "utf8");
-	} catch {
-		return;
-	}
+	const stats = await tolerant(() => io.stat(absolute), unreadable);
+	if (stats === undefined || stats.size > INGEST_PAGE_MAX_BYTES) return;
+	const body = await tolerant(() => io.readFile(absolute, "utf8"), unreadable);
+	if (body === undefined) return;
 	pages.push({ path, source_url: pathToFileURL(absolute).href, body });
 }
 

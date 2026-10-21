@@ -52,9 +52,10 @@ import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
 import { parseBriefProfile } from "./brief-profile.ts";
 import { DATASET_TRIGGERS } from "./docs-datasets.ts";
 import { freshnessGauges } from "./docs-freshness.ts";
-import { scanIngestPages, skillsCheckoutRoots } from "./docs-ingest.ts";
+import { scanIngestPages, readSkillsCheckoutPages, skillsCheckoutRoots, type IngestPage } from "./docs-ingest.ts";
 import { formatDrift } from "./drift.ts";
 import { IdempotencyRefusal, InvalidEventError } from "./event.ts";
+import { checkoutHead } from "./git.ts";
 import { type CursorPosition, type GreptimeClient } from "./greptime.ts";
 import { InvalidHandoffError } from "./handoff.ts";
 import { attributedSurface, createMcpServer, surfaceClaimRefusal, type McpCaller } from "./mcp.ts";
@@ -298,30 +299,36 @@ const MERGE_TRIGGER_NEEDS_SURFACE = "docs merge-trigger needs an authenticated s
 const MERGE_TRIGGER_DATASET = "agent-substrate";
 
 /**
- * A dataset's local checkout (phase 42): where its refresh reads pages, and the path prefixes those
- * pages must sit under. `roots` is read when the job runs, so a checkout that cannot be read fails
- * that job alone.
+ * A dataset's local checkout (phase 42): where its refresh reads pages, and how. `roots` is read when the
+ * job runs, so a checkout that cannot be read fails that job alone. `pages` reads the files under those
+ * roots; `head`, when present, reads the checkout's HEAD commit, which the job must match before it ingests.
  */
 interface LocalIngestSource {
-	baseDir: string;
 	roots: () => Promise<readonly string[]>;
+	pages: (roots: readonly string[]) => Promise<IngestPage[]>;
+	head?: () => Promise<string | null>;
 }
 
 /**
  * The local checkout a dataset's refresh reads (D42-3), or undefined when this server holds none.
  * `agent-substrate` reads the directory the server runs from with `config.docsIngestRoots`, as it always
- * has. `agent-skills` reads the checkout named by `SUBSTRATE_AGENT_SKILLS_ROOT`. Any other dataset gets a
- * truthful noop: the other rows name checkouts this server does not hold, and a recorded version over
- * documents that were never ingested would only lie to search.
+ * has. `agent-skills` reads the checkout named by `SUBSTRATE_AGENT_SKILLS_ROOT`, fail-closed on an
+ * unreadable skill and checked against the checkout's HEAD. Any other dataset gets a truthful noop: the
+ * other rows name checkouts this server does not hold, and a recorded version over documents that were
+ * never ingested would only lie to search.
  */
 function localIngestSource(dataset: string, config: SubstrateConfig, agentSubstrateBaseDir: string): LocalIngestSource | undefined {
 	if (dataset === MERGE_TRIGGER_DATASET) {
 		const substrateRoots = config.docsIngestRoots;
-		return { baseDir: agentSubstrateBaseDir, roots: async () => substrateRoots };
+		return { roots: async () => substrateRoots, pages: (roots) => scanIngestPages(agentSubstrateBaseDir, roots) };
 	}
 	const skillsCheckout = config.agentSkillsRoot;
 	if (dataset === "agent-skills" && skillsCheckout !== null) {
-		return { baseDir: skillsCheckout, roots: () => skillsCheckoutRoots(skillsCheckout) };
+		return {
+			roots: () => skillsCheckoutRoots(skillsCheckout),
+			pages: (roots) => readSkillsCheckoutPages(skillsCheckout, roots),
+			head: async () => checkoutHead(skillsCheckout),
+		};
 	}
 	return undefined;
 }
@@ -1526,7 +1533,7 @@ export function createHttpServer(
 				// permission decision about the caller: 503 with the reason. A checkout that
 				// cannot be read fails the job the same way and the pinned version keeps serving.
 				const accepted = await substrate.startDocsRefresh(
-					{ ...fields, roots: source.roots, pages: (roots) => scanIngestPages(source.baseDir, roots) },
+					{ ...fields, roots: source.roots, pages: source.pages, head: source.head },
 					surface,
 					{ wait: url.searchParams.get("wait") === "1" },
 				);

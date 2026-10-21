@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { validateAgentCard } from "./agent-card.ts";
 import { loadConfig } from "./config.ts";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -412,6 +413,22 @@ describe("routes", () => {
 		return root;
 	}
 
+	/** Run git in a checkout with a fixed identity and no signing; returns trimmed stdout. */
+	function git(root: string, ...args: string[]): string {
+		return execFileSync("git", ["-C", root, "-c", "user.name=substrate", "-c", "user.email=substrate@example.test", "-c", "commit.gpgsign=false", ...args], {
+			encoding: "utf8",
+		}).trim();
+	}
+
+	/** A checkout that is a git repository holding `files` in one commit: the HEAD an agent-skills trigger names. */
+	function gitCheckout(files: Record<string, string>): string {
+		const root = docsFixture(files);
+		git(root, "init", "-q");
+		git(root, "add", "-A");
+		git(root, "commit", "-q", "-m", "skills");
+		return root;
+	}
+
 	/** The refresh versions the ledger recorded, so a test sees versions without pins. */
 	function refreshEvents(written: SubstrateEvent[]): Array<Record<string, unknown>> {
 		return ingestEvents(written).filter((payload) => "version" in payload);
@@ -566,24 +583,50 @@ describe("routes", () => {
 		const restore = patchFetch(fake.fetch);
 		// The library layout: each skill is a `<name>/` directory holding SKILL.md and a references/ tree. A
 		// directory with no SKILL.md is not a skill, so its file never reaches the plane.
-		const checkout = docsFixture({
+		const checkout = gitCheckout({
 			"demo-skill/SKILL.md": "---\nname: demo-skill\n---\nDemo skill body.\n",
 			"demo-skill/references/api.md": "The demo API reference.\n",
 			"notes/scratch.md": "Not a skill.\n",
 		});
 		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_AGENT_SKILLS_ROOT: checkout });
 		try {
-			const response = await post("/docs/merge-trigger?wait=1", { dataset: "agent-skills", commit: "c-skills", content_sha256: "sha-skills" }, { authorization: "Bearer tok-omp" });
+			const head = git(checkout, "rev-parse", "HEAD");
+			const response = await post("/docs/merge-trigger?wait=1", { dataset: "agent-skills", commit: head, content_sha256: "sha-skills" }, { authorization: "Bearer tok-omp" });
 			const body = (await response.json()) as { ok: boolean; version?: { version: string; commit: string; dataset_id: string } };
 			expect(response.status).toBe(200);
 			expect(body.ok).toBe(true);
-			expect(body.version).toMatchObject({ version: "v1", commit: "c-skills", dataset_id: "ds-leipzig-agent-skills" });
+			expect(body.version).toMatchObject({ version: "v1", commit: head, dataset_id: "ds-leipzig-agent-skills" });
 			// Exactly the skill's SKILL.md and its reference reach the plane, each cited by its own file.
 			const sources = uploadsFor(fake, "ds-leipzig-agent-skills").map((upload) => upload.metadata.source_url ?? "");
 			expect(sources).toHaveLength(2);
 			expect(sources.some((url) => url.endsWith("/demo-skill/SKILL.md"))).toBe(true);
 			expect(sources.some((url) => url.endsWith("/demo-skill/references/api.md"))).toBe(true);
 			expect(refreshEvents(written)).toHaveLength(1);
+		} finally {
+			restore();
+			await stop();
+			rmSync(checkout, { recursive: true, force: true });
+		}
+	});
+
+	test("POST /docs/merge-trigger for agent-skills refuses a checkout that moved past the requested commit: commit-mismatch, nothing recorded", async () => {
+		const { greptime, written } = ledger();
+		const fake = new RagflowFake();
+		fake.parseDonePolls = 1;
+		const restore = patchFetch(fake.fetch);
+		const checkout = gitCheckout({ "demo-skill/SKILL.md": "---\nname: demo-skill\n---\nDemo skill body.\n" });
+		const requested = git(checkout, "rev-parse", "HEAD");
+		// The trigger names `requested`, then the checkout advances: the job must not ingest the newer content under that name.
+		writeFileSync(join(checkout, "demo-skill", "SKILL.md"), "---\nname: demo-skill\n---\nRevised skill body.\n");
+		git(checkout, "commit", "-q", "-am", "revise skill");
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_AGENT_SKILLS_ROOT: checkout });
+		try {
+			const response = await post("/docs/merge-trigger?wait=1", { dataset: "agent-skills", commit: requested, content_sha256: "sha-moved" }, { authorization: "Bearer tok-omp" });
+			const body = (await response.json()) as { ok: boolean; reason?: string };
+			expect(response.status).toBe(503);
+			expect(body).toMatchObject({ ok: false, reason: "commit-mismatch" });
+			expect(fake.uploads).toHaveLength(0);
+			expect(refreshEvents(written)).toHaveLength(0);
 		} finally {
 			restore();
 			await stop();
