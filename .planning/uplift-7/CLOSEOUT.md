@@ -62,6 +62,8 @@ WP-U5 is a user decision (`WAVE-PLAN.md:17`).
 
 Items 3, 8, 11, 13, and 14. Status and basis are quoted from `uplift-7/BLOCKING-UNKNOWNS.md`. Legend at `:3`: "Default" means "a documented default applied and is still open for your confirmation"; "Open" means "no decision yet".
 
+Snapshot before the 2026-10-21 decisions. Item 8 is now confirmed: $50 per month at test scale, which unparks ROADMAP phase 45. Items 3, 11, 13, and 14 remain open.
+
 | Item | Line | Status (quoted) | Basis (quoted) |
 | --- | --- | --- | --- |
 | 3. Event retention, and who may view it | `:9` | `Default` | "Inherits the substrate's controls. The panel shows counts and names, never record content. Confirm." |
