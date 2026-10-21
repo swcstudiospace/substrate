@@ -509,8 +509,9 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 	// Judge the text that would be stored. A body that is only a secret redacts
 	// to a label, and that label is not a lesson.
 	const judged = redact(raw);
+	// A subject finding parks the write instead, so the lesson checks yield to it.
 	const lessonIssue = lessonWriteIssue(judged, subjectInput);
-	if (lessonIssue) {
+	if (lessonIssue && !subjectFinding) {
 		return refuse("denied", "lesson.empty", `${lessonIssue}. An empty lesson is not stored.`);
 	}
 
@@ -540,7 +541,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 	cut.truncated = redacted.length > MAX_MEMORY_TEXT;
 	// The cap can cut a valid body down to a header. Judge the text that will be stored.
 	const storedIssue = lessonWriteIssue(text, subjectInput);
-	if (storedIssue) {
+	if (storedIssue && !subjectFinding) {
 		return refuse("denied", "lesson.empty", `${storedIssue}. An empty lesson is not stored.`);
 	}
 	const subject = normalizeSubject(request.subject);
@@ -551,7 +552,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 	if (isLessonWrite(judged, subjectInput) && !sourceEvent && sessionId) {
 		sourceEvent = normalizeIdentifier(`session:${sessionId}`);
 	}
-	if (isLessonWrite(judged, subjectInput) && !sourceEvent) {
+	if (isLessonWrite(judged, subjectInput) && !sourceEvent && !subjectFinding) {
 		return refuse(
 			"denied",
 			"lesson.unsourced",

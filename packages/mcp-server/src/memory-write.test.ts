@@ -486,6 +486,32 @@ describe("denied — default-deny RBAC", () => {
 		expect(digest.outcome).toBe("accepted");
 	});
 
+	test("a lesson whose subject carries a secret is parked even when the body is empty", async () => {
+		// The subject is judged on its own, so the lesson checks must not refuse the write first.
+		const token = `ghp_${"a".repeat(40)}`;
+		const parked = await write({ subject: `lesson:v1.3/session/${token}`, text: "" });
+		expect(parked.outcome).toBe("quarantined");
+		expect(parked.quarantine_reason).toBe("secret");
+		expect(store.entries()).toEqual([]);
+		expect(store.quarantined).toHaveLength(1);
+		expect(store.quarantined[0]?.subject).not.toContain(token);
+		expect(JSON.stringify(parked)).not.toContain(token);
+	});
+
+	test("an empty lesson with an ordinary subject is still refused as lesson.empty", async () => {
+		const headerOnly = await write({
+			subject: "lesson:v1.3/session/lease-epochs",
+			text: "[lessonbank]\nmilestone: v1.3\nphase: session\n\n",
+			source_event: "session:sess-empty",
+		});
+		expect(headerOnly.outcome).toBe("denied");
+		expect(headerOnly.reason).toBe("lesson.empty");
+		const bare = await write({ subject: "lesson:v1.3/session/lease-epochs", text: "" });
+		expect(bare.reason).toBe("text.empty");
+		expect(store.entries()).toEqual([]);
+		expect(store.quarantined).toEqual([]);
+	});
+
 	test("a later source on the same body replays the stored row", async () => {
 		const first = await write({ text: "hermes finished n2 with the lease held", idempotency_key: "k-source" });
 		expect(first.outcome).toBe("accepted");
@@ -1677,6 +1703,22 @@ describe("the text cap", () => {
 		expect(store.entries()[0]?.text).toBe(long.slice(0, 4000));
 		expect(store.entries()[0]?.text.length).toBe(4000);
 		expect(result).toMatchObject({ truncated: true, limit: 4000 });
+	});
+
+	test("a secret that straddles the cap is redacted before the cut", async () => {
+		// The token starts before the 4000th character and runs past it. Cutting first
+		// would leave its prefix in the stored text, and the pattern would no longer match it.
+		const token = `ghp_${"a".repeat(36)}`;
+		const result = await write({ text: `${"x".repeat(3990)} ${token}` });
+
+		expect(result.outcome).toBe("quarantined");
+		expect(result.quarantine_reason).toBe("secret");
+		expect(result).toMatchObject({ truncated: true, limit: 4000 });
+		const stored = store.quarantined[0]?.text ?? "";
+		expect(stored).toContain("[REDACTED");
+		expect(stored).not.toContain("ghp_");
+		expect(stored).not.toContain(token.slice(0, 8));
+		expect(stored.length).toBe(4000);
 	});
 
 	test("a text of 100 characters is accepted with no truncated field", async () => {
