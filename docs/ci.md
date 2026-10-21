@@ -60,7 +60,7 @@ Accepted by the owner (SomeRandmGuyy, decision of 2026-10-21, review by 2027-01-
 | GHSA-jmr9-qjv8-65gv | `extract-zip`@2.0.1 | high | No patched version. | SomeRandmGuyy | 2027-01-19 | the advisory stops appearing in `bun audit` |
 | GHSA-7pqw-9j4j-h8q3 | `extract-zip`@2.0.1 | high | No patched version. | SomeRandmGuyy | 2027-01-19 | the advisory stops appearing in `bun audit` |
 
-Adding or changing an entry is a reviewed change to `.github/audit-accepted-risk.json`, with the owner's name in `owner`. Removing an entry is needed once its removal condition holds, or the gate fails again for that advisory.
+Adding or changing an entry is a reviewed change to `.github/audit-accepted-risk.json`, with the owner's name in `owner`. Remove an entry once its removal condition holds; the gate does not flag unused entries. Removing an exception while its advisory is still reported makes the gate fail again.
 
 ### The boot-gate job
 
