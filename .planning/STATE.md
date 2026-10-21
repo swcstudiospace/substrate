@@ -22,17 +22,12 @@ current_phase_name: tailscaledb-proxy-layer
 
 ## Current
 
-**v1.3 Build plan completion is planned:** 18 phases (16–33), 68 requirements, roadmap approved by the operator on 2026-10-08. Research: `.planning/research/` (SUMMARY.md first). Primary port source: branch `docs/data-planes-tailscale` (`acc30a8`), ported onto `main`'s v1.2 lease model.
-
-**v1.3 decisions (operator, 2026-10-08):**
-
-- Scope: finish the build plan — every unfinished area, in build-plan order, plus the deferred Phase 0 UAT.
-- Shipping: one PR per phase, each cut from `main`; the milestone-definition docs ship first. `ultrathink-ship` runs with `--ignore-gsd` per phase (the operator's explicit choice), Greptile 5/5 with no open threads, auto-merge.
-- Defaults accepted for user-visible choices: swarm-surface claims add only a note in Linear (no label or state change); Lane A claims as `claude-code`; the data planes are reached only through the substrate and Hindsight retains only gate-accepted memories; teachables are tagged governed facts, anchored by hash only; `desktop_run` is fail-closed to operator-listed surfaces; production tokens are provisioned in Phase 20 after the collectors carry them; the stray process on `:7410` is stopped in an operator-approved window in Phase 16.
-- Run rules: grey areas auto-accept unless they change a user-visible contract; every live run (production service, real stores, Linear or Notion writes, devnet, GitHub PRs on other repos, model quota) waits for operator approval; failures already present at HEAD are recorded, not fixed.
-- Baseline at `ab62c91`: `bun test` 1129 pass / 56 skip / 0 fail across 40 files; `bunx tsc --noEmit` clean.
-
-Shipped before: **v1.2** (2026-10-08), archived in `.planning/milestones/v1.2-*`.
+- **v1.3 closed 2026-10-21 with accepted debt.** v1.2 shipped 2026-10-08 (archived in `.planning/milestones/v1.2-*`).
+- **v1.3.x phases 37-44 complete on main**; phases 40 and 41 complete with no residual.
+- **v1.5 SOTA phases 45-47 and 49-50 complete on main.**
+- **Phase 48 in review on draft PR #102** (CI audit gate blocked by PR #99).
+- **Phase 51 in progress on branch `gsd/p51-fabric-impl`** (not yet on origin).
+- **Phases 52-54 planned** (defined in ROADMAP.md, not started).
 
 ## Historical v1.0 execution record
 
