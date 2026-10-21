@@ -18,12 +18,12 @@ Source for all entries: `.planning/research/FEATURES.md` lines 197–222 and `.p
 
 - [x] **A-D1**: Lane B events reach the graph's brief and evidence without agents passing ids
   - Item: Infer the graph from the per-Graph-ID worktree path for herdr and Muse events. Area: A (Lane B collectors). Complexity: LOW. Notes: Needs C-T3. Phase: 37. Source: FEATURES.md:197
-- [ ] **B-D1**: Closes `coordination.md:321` "Not done"
+- [x] **B-D1**: Closes `coordination.md:321` "Not done"
   - Item: Mirror graph edges (`requires` / `blocks` / `gated_by`) into Linear relations. Area: B (claim mirror). Complexity: MEDIUM. Notes: not stated. Phase: 38. Source: FEATURES.md:200
-- [ ] **B-D3**: One artifact shows claim → Linear → Notion → DoD
+- [x] **B-D3**: One artifact shows claim → Linear → Notion → DoD
   - Item: Put mirror outcomes in `substrate evidence` per node. Area: B (claim mirror). Complexity: LOW. Notes: M6. Phase: 38. Source: FEATURES.md:202
 - [ ] **C-D2**: The dispatched context can be replayed from the ledger (v0.3 §2)
-  - Item: Dispatch as a signed handoff packet (goal from the issue, DoD lines, files). Area: C (dispatcher). Complexity: LOW-MEDIUM. Notes: M2. Phase: 39. Source: FEATURES.md:204
+  - Item: Dispatch as a signed handoff packet (goal from the issue, DoD lines, files). Area: C (dispatcher). Complexity: LOW-MEDIUM. Notes: M2. Phase: 39. Source: FEATURES.md:204. Decision (2026-10-21): the goal is the issue identifier and the DoD lines are fixed; issue prose stays out of the packet (DISP-07).
 - [ ] **C-D4**: A stale-brief warning before acting (v0.3 §2)
   - Item: Run `coord_drift_scan` on the worktree before launch. Area: C (dispatcher). Complexity: LOW. Notes: M2. Phase: 39. Source: FEATURES.md:206
 - [ ] **D-D1**: `data-planes.md:34`
@@ -90,10 +90,10 @@ Anti-features, from `.planning/research/SUMMARY.md` line 72:
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | A-D1 | 37 | Complete (PR #89) |
-| B-D1 | 38 | In review (draft PR) |
-| B-D3 | 38 | In review (draft PR) |
-| C-D2 | 39 | Pending |
-| C-D4 | 39 | Pending |
+| B-D1 | 38 | Complete (PR #90) |
+| B-D3 | 38 | Complete (PR #90) |
+| C-D2 | 39 | In review (draft PR) |
+| C-D4 | 39 | In review (draft PR) |
 | D-D1 | 40 | Pending |
 | D-D3 | 40 | Pending |
 | D-D4 | 40 | Pending |
