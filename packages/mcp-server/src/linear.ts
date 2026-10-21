@@ -86,6 +86,13 @@ interface LabelQueryResult {
 	issueLabels: { nodes: Array<{ id: string; name: string; team: { id: string } | null }> };
 }
 
+/** An issue as `issueRelations` reads it: its UUID, identifier, and the relations it is the source of. */
+export interface IssueRelations {
+	id: string;
+	identifier: string;
+	relations: Array<{ type: string; relatedIssueId: string }>;
+}
+
 export class LinearClient {
 	private readonly fetchImpl: typeof fetch;
 	private readonly timeoutMs: number;
@@ -255,5 +262,42 @@ export class LinearClient {
 			{ input: { issueId, body } },
 		);
 		if (!data.commentCreate.success) throw new LinearError(`commentCreate on ${issueId} did not succeed`);
+	}
+
+	/**
+	 * An issue's UUID, identifier and the relations it is the source of, in one query. `ref` may be a UUID or an
+	 * identifier like SWC-12. A `blocks` relation is stored on the blocking issue.
+	 */
+	async issueRelations(ref: string): Promise<IssueRelations> {
+		const data = await this.graphql<{
+			issue: { id: string; identifier: string; relations: { nodes: Array<{ type: string; relatedIssue: { id: string } | null }> } } | null;
+		}>(
+			`query IssueRelations($id: String!) {
+				issue(id: $id) { id identifier relations { nodes { type relatedIssue { id } } } }
+			}`,
+			{ id: ref },
+		);
+		const issue = data.issue;
+		if (!issue) throw new LinearError(`no issue ${ref}`);
+		return {
+			id: issue.id,
+			identifier: issue.identifier,
+			relations: issue.relations.nodes.flatMap((relation) =>
+				relation.relatedIssue ? [{ type: relation.type, relatedIssueId: relation.relatedIssue.id }] : [],
+			),
+		};
+	}
+
+	/** Create a relation from `issueId` to `relatedIssueId`. For `blocks`, `issueId` is the blocking issue. */
+	async createIssueRelation(issueId: string, relatedIssueId: string, type: "blocks"): Promise<void> {
+		const data = await this.graphql<{ issueRelationCreate: { success: boolean } }>(
+			`mutation IssueRelationCreate($input: IssueRelationCreateInput!) {
+				issueRelationCreate(input: $input) { success }
+			}`,
+			{ input: { issueId, relatedIssueId, type } },
+		);
+		if (!data.issueRelationCreate.success) {
+			throw new LinearError(`issueRelationCreate ${type} from ${issueId} to ${relatedIssueId} did not succeed`);
+		}
 	}
 }

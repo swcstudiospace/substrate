@@ -29,9 +29,15 @@ import {
 } from "./linear.ts";
 import { NotionClient, notionPageId, type PropertyValue } from "./notion.ts";
 import { redact } from "./redact.ts";
-import { isSwarmSurface, type Surface } from "./types.ts";
+import { type EdgeKind, isSwarmSurface, type Surface } from "./types.ts";
 
 export type MirrorOp = "claim" | "steal" | "release" | "expire" | "force" | "review" | "done" | "close";
+
+/** A target that wrote cleanly for one op. Reported through `MirrorContext.report`, so the node's evidence shows each step that landed. */
+export interface MirrorSuccess {
+	target: "linear" | "notion";
+	op: MirrorOp;
+}
 
 export interface MirrorContext {
 	graphId: string;
@@ -45,6 +51,8 @@ export interface MirrorContext {
 	/** `linear_issue_id ?? linear_identifier`; null when the node has no Linear reference. */
 	linearRef: string | null;
 	notionPage: string | null;
+	/** Told each target that wrote cleanly. Optional: a caller that does not need outcomes passes nothing. */
+	report?: (success: MirrorSuccess) => void;
 }
 
 export interface MirrorFailure {
@@ -95,6 +103,21 @@ type NotionWants = (linearOk: boolean, linearState: string | null) => Record<str
 
 function stateNameById(issue: IssueContext, stateId: string): string {
 	return issue.team.states.find((s) => s.id === stateId)?.name ?? stateId;
+}
+
+/** One graph edge to mirror, read from the waiting node's side: `waitingNode` cannot proceed until `blockerNode` completes. */
+export interface EdgeRelation {
+	kind: EdgeKind;
+	waitingNode: string;
+	waitingRef: string | null;
+	blockerNode: string;
+	blockerRef: string | null;
+}
+
+/** What one edge did. `skipped` means a side has no tracker issue, so nothing was asked of Linear. */
+export interface EdgeOutcome extends EdgeRelation {
+	status: "created" | "existing" | "skipped" | "failed";
+	reason?: string;
 }
 
 export class Mirror {
@@ -297,6 +320,7 @@ export class Mirror {
 			const issue = await this.linearIssue(this.linear, ctx);
 			const body = transitionComment(op, ctx);
 			if (!issue.comments.includes(body)) await this.linear.createComment(issue.id, body);
+			ctx.report?.({ target: "linear", op });
 			return [];
 		} catch (cause) {
 			return [{ target: "linear", op, reason: reasonOf(cause) }];
@@ -316,6 +340,7 @@ export class Mirror {
 			try {
 				linearState = await linearStep(this.linear);
 				linearOk = true;
+				ctx.report?.({ target: "linear", op });
 			} catch (cause) {
 				if (cause instanceof ClaimCommentFailed) {
 					// The state move landed and only the courtesy comment did
@@ -330,8 +355,10 @@ export class Mirror {
 			}
 		}
 		if (this.notion) {
-			const failure = await this.notionStep(this.notion, ctx, notionWants(linearOk, linearState));
+			const wants = notionWants(linearOk, linearState);
+			const failure = await this.notionStep(this.notion, ctx, wants);
 			if (failure) failures.push({ target: "notion", op, reason: failure });
+			else if (ctx.notionPage && Object.keys(wants).length > 0) ctx.report?.({ target: "notion", op });
 		}
 		return failures;
 	}
@@ -399,6 +426,37 @@ export class Mirror {
 			removedLabelIds: issue.labels.filter((l) => l.name.startsWith("agent:")).map((l) => l.id),
 		});
 		return stateNameById(issue, stateId);
+	}
+
+	/**
+	 * Graph edges into Linear `blocks` relations. The blocking issue is the source, so the waiting issue is
+	 * blocked by it. A relation that already exists in that direction is read, not written again. An edge with no
+	 * tracker issue on either side is skipped. Each edge stands alone: a failure on one never stops the rest.
+	 * Never throws.
+	 */
+	async relateEdges(edges: EdgeRelation[]): Promise<EdgeOutcome[]> {
+		const outcomes: EdgeOutcome[] = [];
+		for (const edge of edges) {
+			const linear = this.linear;
+			if (!linear || !edge.waitingRef || !edge.blockerRef) {
+				outcomes.push({ ...edge, status: "skipped" });
+				continue;
+			}
+			try {
+				const blocker = await linear.issueRelations(edge.blockerRef);
+				const waiting = await linear.issueRelations(edge.waitingRef);
+				if (blocker.relations.some((relation) => relation.type === "blocks" && relation.relatedIssueId === waiting.id)) {
+					outcomes.push({ ...edge, status: "existing" });
+					continue;
+				}
+				await linear.createIssueRelation(blocker.id, waiting.id, "blocks");
+				outcomes.push({ ...edge, status: "created" });
+			} catch (cause) {
+				const reason = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 300);
+				outcomes.push({ ...edge, status: "failed", reason });
+			}
+		}
+		return outcomes;
 	}
 }
 	/**

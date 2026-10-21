@@ -306,6 +306,8 @@ mirroring the Linear sub-issue relations the same nodes carry. They are held in
 the index so a scan can check a claim against them without a Linear round-trip
 on the critical path; Linear remains the source of truth.
 
+Registering edges also writes them to Linear as `blocks` relations. The blocking issue is the source, so the waiting issue shows as blocked by it: `requires` and `gated_by` make the node that declares them wait on the other, and `blocks` makes the node it points at wait on its declarer. A relation already present in that direction is read and not written again, so re-registering a graph repeats nothing. An edge whose node has no tracker issue is skipped. A created or failed relation leaves one outcome on the waiting node, so it appears in that node's evidence. A Linear failure never fails the registration.
+
 Edges **replace** rather than accumulate: `edges` present is the authoritative
 set for that graph, `edges` absent leaves them untouched, and `edges: []` clears
 them. Nodes and steps upsert field by field, because a partial register should
@@ -328,8 +330,16 @@ hermes-linear-connector's Definition-of-Done gate can mark an issue Done.
 The mirror is told each final lease decision — it never decides ownership —
 runs awaited inside the tool call, serializes per node, never throws, and a
 failure becomes one `mirror.failed` warning per failed target without
-rolling the lease back. It never sees a lease id. A successful mirror emits
-nothing; the Linear comment is its trail.
+rolling the lease back. It never sees a lease id. A successful mirror writes one
+`mirror.ok` note per target that landed; the Linear comment is its trail.
+
+**The node artifact.** `POST /evidence` with `node_id` (JSON reply; `format: "html"`
+ignores it) adds `node`: that node's `claim`, `linear`, `notion` and `dod` steps, in
+time order. `claim` is every lease decision the ledger recorded for the node, whether
+or not a tracker was bound. `linear` also carries the relation outcomes, with the
+blocker and the edge kind. The steps are read from the graph's whole ledger, not a
+browse window, and only events carrying the node's id count. An unreadable ledger is
+`node.error`, never an empty artifact.
 
 Claims move the issue to the team's first `started` state, set
 `agent:<surface>`, remove every `dispatch:*` and every other `agent:*`, and
