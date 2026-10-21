@@ -85,7 +85,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 ### 🚧 v1.3.x Should-have hardening (Planned)
 
 - [x] **Phase 37: LANEB** - graph inference from worktree path
-- [ ] **Phase 38: MIRROR** - mirror graph edges into Linear relations and outcomes into evidence
+- [x] **Phase 38: MIRROR** - mirror graph edges into Linear relations and outcomes into evidence
 - [ ] **Phase 39: DISPATCH** - signed handoff packet and coord drift scan before launch
 - [ ] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (decided 2026-10-21)
 - [ ] **Phase 41: ANCHOR** - anchor evidence and teachables
@@ -527,7 +527,7 @@ Plans:
   1. Graph edges (`requires` / `blocks` / `gated_by`) mirror into Linear relations, closing `coordination.md:321` "Not done".
   2. One artifact per node shows claim → Linear → Notion → DoD.
 
-**Plans**: 1 plan (PLAN.md); verified in phases/38-mirror/VERIFICATION.md; draft PR open
+**Plans**: 1 plan (PLAN.md); verified in phases/38-mirror/VERIFICATION.md; merged in PR #90 (1d4e4aa)
 
 ### Phase 39: DISPATCH
 
@@ -544,7 +544,7 @@ Plans:
   1. Dispatch is a signed handoff packet (goal from the issue, DoD lines, files), and the dispatched context can be replayed from the ledger.
   2. `coord_drift_scan` runs on the worktree before launch, giving a stale-brief warning before acting (v0.3 §2).
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1 plan (PLAN.md, verification and records); verified in phases/39-dispatch/VERIFICATION.md; draft PR open. The C-D2 goal is the issue identifier (DISP-07, decided 2026-10-21)
 
 ### Phase 40: DOCS-MEMORY
 
@@ -782,8 +782,8 @@ Plans:
 | 35. expected_version for skills and docs | v1.4 | 1/1 | Complete | 2026-10-21 |
 | 36. Degraded-mode exactly-once replay | v1.4 | 1/1 | Complete | 2026-10-21 |
 | 37. LANEB | v1.3.x | 1/1 | Complete | 2026-10-21 |
-| 38. MIRROR | v1.3.x | 1/1 | In review (draft PR) | - |
-| 39. DISPATCH | v1.3.x | 0/0 | Not started | - |
+| 38. MIRROR | v1.3.x | 1/1 | Complete | 2026-10-21 |
+| 39. DISPATCH | v1.3.x | 1/1 | In review (draft PR) | - |
 | 40. DOCS-MEMORY | v1.3.x | 0/0 | Not started | - |
 | 41. ANCHOR | v1.3.x | 0/0 | Not started | - |
 | 42. SKILL-CARD | v1.3.x | 0/0 | Not started | - |
