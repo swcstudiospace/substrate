@@ -30,7 +30,8 @@ describe("planningChangeEvent", () => {
 	test("uses an existing kind on the substrate surface and the planning payload shape", () => {
 		const event = planningChangeEvent({ repo: REPO, sessionId: SESSION, diff: DIFF });
 		expect(event).not.toBeNull();
-		expect(EVENT_KINDS).toContain(event?.kind ?? "");
+		const kinds: readonly string[] = EVENT_KINDS;
+		expect(kinds).toContain(event?.kind ?? "");
 		expect(event).toMatchObject({ surface: "substrate", kind: "note", repo: REPO, session_id: SESSION });
 		expect(event?.payload).toEqual({
 			kind: PLANNING_CHANGED,

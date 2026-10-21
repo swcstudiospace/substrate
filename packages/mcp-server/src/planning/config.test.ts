@@ -58,7 +58,6 @@ describe("loadPlanningSettings: numeric settings", () => {
 	test.each([
 		["90s"],
 		["-1"],
-		["0"],
 		["1.5"],
 		["1e3"],
 		[" 90"],
@@ -79,6 +78,10 @@ describe("loadPlanningSettings: numeric settings", () => {
 		expect(loadPlanningSettings({ [PLANNING_MAX_BYTES_ENV]: "1023" })).toEqual({
 			ok: false,
 			errors: [{ key: PLANNING_MAX_BYTES_ENV, reason: "out-of-range", min: 1_024, max: 4_194_304 }],
+		});
+		expect(loadPlanningSettings({ [PLANNING_PRESENCE_TTL_ENV]: "0" })).toEqual({
+			ok: false,
+			errors: [{ key: PLANNING_PRESENCE_TTL_ENV, reason: "out-of-range", min: 1, max: 86_400 }],
 		});
 	});
 

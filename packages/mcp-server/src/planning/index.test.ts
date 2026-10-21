@@ -162,7 +162,10 @@ describe("buildPlanningIndex: refuses anything that resolves outside the root", 
 		const { index } = await indexOf(BASE, { [`${P}/phases/50-dragonfly-pubsub/alias.md`]: `${P}/STATE.md` });
 		const alias = index.records.find((record) => record.path.endsWith("alias.md"));
 		const state = index.records.find((record) => record.path === ".planning/STATE.md");
-		expect(alias && !isErrorRecord(alias) ? alias.sha256 : null).toBe(state && !isErrorRecord(state) ? state.sha256 : undefined);
+		const aliasSha = alias && !isErrorRecord(alias) ? alias.sha256 : null;
+		const stateSha = state && !isErrorRecord(state) ? state.sha256 : null;
+		expect(stateSha).not.toBeNull();
+		expect(aliasSha).toBe(stateSha);
 	});
 });
 
