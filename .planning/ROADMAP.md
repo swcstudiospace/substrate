@@ -78,7 +78,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 31: Lane A runtime: spike, packaging and VM host** - `substrate-host` runs from `main` with one agentos VM per Graph ID, inside the host's disk and port limits (completed 2026-10-11)
 - [x] **Phase 32: Lane A host core** - A host task works its node under the `claude-code` lease, survives a restart and keeps credentials on the host (completed 2026-10-11)
 - [x] **Phase 33: Lane A dispatch route and approvals** - `dispatch:claude-code` takes an issue to a gated Done through a Lane A VM, with human approval of permissions (completed 2026-10-11)
-- [ ] **Phase 34: Invalid-write round trip** - every client-input write surface refuses an invalid payload with zero rows persisted, proven in an isolated namespace.
+- [x] **Phase 34: Invalid-write round trip** - every client-input write surface refuses an invalid payload with zero rows persisted, proven in an isolated namespace.
 - [x] **Phase 35: expected_version for skills and docs** - a stale skill or docs write is rejected with the memory contract's error; an absent field keeps today's behavior.
 - [x] **Phase 36: Degraded-mode exactly-once replay** - a write carrying an idempotency key applies once across replays; the dependent client's queue is built or recorded as a decision.
 
@@ -467,7 +467,7 @@ Plans:
 
   1. Memory, skill, and docs writes refuse an invalid payload with the surface's documented error status.
   2. Before-and-after checks of stored content (memory records, docs state, uploaded documents) prove nothing was persisted or mutated on a refusal (row count alone is insufficient because `decideSkill` can mutate without changing count, and docs perform uploads + disk writes). Row counts kept as an extra check. Proven in an isolated namespace per surface.
-**Plans**: 1/1 plans complete; verification gaps_found on criterion 2 (content-level checks missing), see 34-VERIFICATION.md
+**Plans**: 1/1 plans complete; verified 2026-10-21, all criteria PASS, see 34-VERIFICATION.md
 
 ### Phase 35: expected_version for skills and docs
 
@@ -778,7 +778,7 @@ Plans:
 | 31. Lane A runtime: spike, packaging and VM host | v1.3 | 3/3 | Complete    | 2026-10-11 |
 | 32. Lane A host core | v1.3 | 3/3 | Complete    | 2026-10-11 |
 | 33. Lane A dispatch route and approvals | v1.3 | 3/3 | Complete    | 2026-10-11 |
-| 34. Invalid-write round trip | v1.4 | 1/1 | Gaps found | - |
+| 34. Invalid-write round trip | v1.4 | 1/1 | Complete | 2026-10-21 |
 | 35. expected_version for skills and docs | v1.4 | 1/1 | Complete | 2026-10-21 |
 | 36. Degraded-mode exactly-once replay | v1.4 | 1/1 | Complete | 2026-10-21 |
 | 37. LANEB | v1.3.x | 0/0 | Not started | - |
