@@ -30,6 +30,8 @@ TASKS_DIR = Path("/var/lib/substrate/agentos/tasks")
 UNREACHABLE_LIMIT = 3
 # The host answered and will not open the task: bad request, claimed elsewhere, a step failed.
 REFUSAL_STATUSES = frozenset({400, 409, 502})
+# The host rejected the bearer before it opened any task.
+AUTH_REJECTION_STATUSES = frozenset({401, 403})
 ERROR_TEXT_LIMIT = 200
 
 Log = Callable[[str], None]
@@ -141,7 +143,8 @@ class HostClient:
         reason = f"HTTP {resp.status_code}: {_error_text(resp, self._bearer)}"
         if resp.status_code in REFUSAL_STATUSES:
             raise HostRefused(reason, "host-refused", may_be_open=False)
-        raise HostRefused(reason, "host-unreachable")
+        may_be_open = resp.status_code not in AUTH_REJECTION_STATUSES
+        raise HostRefused(reason, "host-unreachable", may_be_open=may_be_open)
 
     def status(self, graph_id: str, node_id: str) -> dict | None:
         """GET the task's status JSON; None on 404; HostRefused("host-unreachable") otherwise."""

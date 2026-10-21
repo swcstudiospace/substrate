@@ -40,7 +40,7 @@ the tag is among the issue's last 50 comments.
 | `path-conflict` | worktree path taken by something untracked | next tick |
 | `git-failed` | git could not prepare the worktree | next tick |
 | `host-refused` | substrate-host refused the task | next tick |
-| `host-unreachable` | substrate-host not reachable | next tick after a connect failure; after an ambiguous reply, when `readopt()` resolves the kept record; emits nothing |
+| `host-unreachable` | substrate-host not reachable, or a 401/403 rejection | next tick after a connect failure or a 401/403; after an ambiguous reply, when `readopt()` resolves the kept record; emits nothing |
 | `exited-unclaimed` | hermes exited without claiming; label removed | no, gives up |
 | `claim-timeout` | no claim in 15 min; label removed | no, gives up |
 
@@ -79,8 +79,10 @@ landed-claim (`claimed_by`, state transition, or mirror comment) → success
 with `dispatch.outcome{launched}`; 400/409/502 → `host-refused` once-only
 comment (the host's text stays in the journal, never in the comment) and one
 `dispatch.failed`; a connect failure → `host-unreachable` comment with no event, retried on a
-later tick; a reply the host may have acted on (a 5xx, a read failure after send, or a 2xx that
-cannot be read) → the same comment, but the task's record stays until `readopt()` resolves it, so
+later tick; a 401 or 403 (the bearer was rejected before any task opened) → the `host-unreachable`
+comment with no event, and the record is dropped, so a later tick retries; a reply the host may have
+acted on (a 5xx other than 502, which is a refusal; a read failure after send; or a 2xx that cannot be
+read) → the same comment, but the task's record stays until `readopt()` resolves it, so
 the next tick does not post a second task. The G4 restart flips live
 behavior with no dispatcher code change.
 

@@ -499,6 +499,10 @@ def _launch_recorded(
     )
     try:
         return launch_fn(candidate, found)
+    except WorktreeRefused:
+        # Refused before any host request: no task was opened, so the record goes.
+        registry.forget_vm_launch(candidate.issue_id)
+        raise
     except HostRefused as refused:
         # Only a refusal that proves no task was opened drops the record; anything the host may have accepted stays for readopt().
         if not refused.may_be_open:

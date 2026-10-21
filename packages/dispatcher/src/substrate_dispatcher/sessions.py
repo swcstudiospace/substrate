@@ -38,6 +38,8 @@ LANDED_STATES = frozenset({"started_review", "completed"})
 # D43-A: a persisted VM task that substrate-host stays unreachable for is dropped after this many
 # failed re-adoption attempts in a row.
 READOPT_UNREACHABLE_LIMIT = 60
+# The 15-minute claim timeout: a younger record's 404 means the host may still be opening the task.
+PENDING_GRACE_S = 900
 VM_SURFACE = "claude-code"
 VM_TASKS_FILE = "vm_tasks.json"
 VM_RECORD_TEXT_FIELDS = (
@@ -383,16 +385,18 @@ class SessionRegistry:
         """Free slots for a new launch: a live session and a pending VM task each hold one."""
         return max(0, self.max_sessions - self._held_slots())
 
-    def readopt(self) -> None:
+    def readopt(self, now: float | None = None) -> None:
         """Re-adopt persisted VM tasks that have no live session (D43-A); call before each tick.
 
-        substrate-host answers for each record: 404 drops it; a running or finished task becomes a
+        substrate-host answers for each record: a 404 drops it once the record is older than
+        PENDING_GRACE_S, and otherwise waits; a running or finished task becomes a
         session (a finished one is reaped like any other exit); an unreachable host keeps the record
         for a later call, and READOPT_UNREACHABLE_LIMIT failed attempts in a row drop it. Records
         beyond the free session slots stay recorded for a later call.
         """
         if self._host is None:
             return
+        now = time.time() if now is None else now
         live_keys = {
             _vm_key(session.graph_id, session.node_id)
             for session in self._sessions.values()
@@ -418,6 +422,12 @@ class SessionRegistry:
                 self._forget_vm_task(issue_id)
                 continue
             self._vm_failures.pop(key, None)
+            if status is None and now - record["started_at"] < PENDING_GRACE_S:
+                self._log(
+                    f"{record['identifier']}: substrate-host has no VM task {graph_id}/{node_id} yet; "
+                    "waiting for it"
+                )
+                continue
             if status is None:
                 self._log(
                     f"{record['identifier']}: substrate-host no longer knows VM task "

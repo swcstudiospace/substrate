@@ -203,6 +203,20 @@ def test_claude_code_connect_failure_retries_next_tick_with_comment_but_no_event
     assert registry.given_up == set() and registry.active_issue_ids() == set() and world.requests == 2
 
 
+def test_claude_code_auth_rejection_drops_the_record_so_no_task_is_adopted(tmp_path, env_file):
+    state_dir = tmp_path / "state"
+    world = FakeHostWorld(status=401, payload={"error": "bearer rejected"})
+    mcp = ClaimMcp(default=dict(FOUND))
+    linear = FakeLinear([cand(identifier="SWC-9", surface="claude-code")])
+    registry = SessionRegistry(state_dir=state_dir)
+    launch_via_tick(world, mcp, linear, env_file, registry, tmp_path)
+    assert registry.active_issue_ids() == set() and registry.given_up == set()
+    assert SessionRegistry(state_dir=state_dir).active_issue_ids() == set()
+    posted = linear.named("comment")
+    assert len(posted) == 1 and "[host-unreachable]" in posted[0][2]
+    assert mcp.events == []
+
+
 @pytest.mark.parametrize("body", [b"not json{", ["a", "list"]])
 def test_claude_code_accepted_but_unreadable_reply_keeps_its_record_and_is_not_reposted(tmp_path, env_file, body):
     world = FakeHostWorld(status=200, payload=body)

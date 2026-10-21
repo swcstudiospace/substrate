@@ -15,7 +15,7 @@ import pytest
 
 from substrate_dispatcher.dispatch import make_launch_fn
 from substrate_dispatcher.host import HostClient, HostRefused, RemoteTask
-from substrate_dispatcher.sessions import SessionRegistry, landed_claim
+from substrate_dispatcher.sessions import PENDING_GRACE_S, SessionRegistry, landed_claim
 from test_dispatch import FOUND, GID, EventMcp, FakeLinear, FakeMcp, RecordingLaunch, cand, env_file, run_tick  # noqa: F401 — env_file is a fixture
 
 
@@ -146,15 +146,36 @@ def test_a_claim_from_an_earlier_session_is_not_counted_for_a_readopted_task(tmp
 def test_a_vm_task_the_host_no_longer_knows_is_dropped_from_the_record_store(tmp_path, env_file):
     state, world, lines = tmp_path / "state", HostWorld(), []
     linear = FakeLinear([cand(identifier="SWC-9", surface="claude-code")])
-    launch_vm(registry_for(state, world, lines), world, linear, ReapMcp(default=dict(FOUND)), env_file, lines)
+    first = registry_for(state, world, lines)
+    launch_vm(first, world, linear, ReapMcp(default=dict(FOUND)), env_file, lines)
+    started = first.get("i-1").started_at
     world.tasks.clear()  # substrate-host answers 404 from now on
 
     second = registry_for(state, world, lines)
     before = len(lines)
-    second.readopt()
+    second.readopt(now=started + PENDING_GRACE_S)  # old enough: the 404 drops it
     assert second.get("i-1") is None
     named = lines[before:]
     assert len(named) == 1 and GID in named[0]
+    assert registry_for(state, world, lines).active_issue_ids() == set()
+
+
+def test_a_404_keeps_a_young_record_for_the_host_to_open_and_drops_an_old_one(tmp_path, env_file):
+    state, world, lines = tmp_path / "state", HostWorld(), []
+    linear = FakeLinear([cand(identifier="SWC-9", surface="claude-code")])
+    first = registry_for(state, world, lines)
+    launch_vm(first, world, linear, ReapMcp(default=dict(FOUND)), env_file, lines)
+    started = first.get("i-1").started_at
+    world.tasks.clear()  # the host has not opened the task yet: 404
+
+    second = registry_for(state, world, lines)
+    before = len(lines)
+    second.readopt(now=started + PENDING_GRACE_S - 1.0)
+    assert second.get("i-1") is None and second.active_issue_ids() == {"i-1"}
+    assert len(lines) - before == 1 and "waiting" in lines[before]
+
+    second.readopt(now=started + PENDING_GRACE_S)
+    assert second.active_issue_ids() == set()
     assert registry_for(state, world, lines).active_issue_ids() == set()
 
 
