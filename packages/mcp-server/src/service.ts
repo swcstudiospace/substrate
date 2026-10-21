@@ -1926,10 +1926,12 @@ export class Substrate {
 	 */
 	async nodeArtifactOf(graphId: string, nodeId: string): Promise<{ artifact: NodeArtifact } | { error: string }> {
 		if (!this.greptime) return { error: "GREPTIME_URL is not set" };
+		// The ledger keeps an identifier as `normalizeIdentifier` cleaned it, so the node is matched in that form.
+		const node = normalizeIdentifier(nodeId) ?? nodeId;
 		try {
 			const rows = await this.greptime.readEvents("graph_id", normalizeIdentifier(graphId) ?? graphId);
-			const events = rows.map((row) => rowToLedgerEvent(row, true)).filter((event) => event.node_id === nodeId);
-			return { artifact: nodeArtifact(events, nodeId) };
+			const events = rows.map((row) => rowToLedgerEvent(row, true)).filter((event) => event.node_id === node);
+			return { artifact: nodeArtifact(events, node) };
 		} catch (cause) {
 			return { error: redact(String(cause)) };
 		}
@@ -2638,20 +2640,27 @@ export class Substrate {
 	}
 
 	async registerGraph(plan: Parameters<IndexStore["registerGraph"]>[0]) {
-		if (!this.index) throw new Error("graph_register requires SUBSTRATE_PG_URL");
+		const index = this.index;
+		if (!index) throw new Error("graph_register requires SUBSTRATE_PG_URL");
 		// Re-registering a graph whose nodes are held echoes them back, so this reply
 		// is a reader's view as much as `graph_get` is.
 		//
 		// The index commits graph and node rows before its final read-back. A throw
 		// from that read, or from any later statement, can leave Postgres ahead of
 		// the cache. Refresh either way; a throw still reaches the caller.
-		try {
-			const view = withoutLeaseIds(await this.index.registerGraph(plan));
-			await this.mirrorEdges(view);
-			return view;
-		} finally {
-			await this.bumpGraph(plan.graph_id);
-		}
+		//
+		// The refresh comes before the Linear relations, so a slow tracker never keeps
+		// the old graph on show. Relations are written only for a request that carried
+		// edges: an update that names none changes no relation.
+		const view = await (async () => {
+			try {
+				return withoutLeaseIds(await index.registerGraph(plan));
+			} finally {
+				await this.bumpGraph(plan.graph_id);
+			}
+		})();
+		if (plan.edges !== undefined) await this.mirrorEdges(view);
+		return view;
 	}
 
 	/**
@@ -3183,7 +3192,10 @@ export class Substrate {
 		}
 	}
 
-	/** One `mirror` note per target that wrote cleanly, so the node's evidence shows each step that landed. */
+	/**
+	 * One `mirror` note per target that wrote cleanly, so the node's evidence shows each step that landed. Its own
+	 * session, named for the graph and node: a holder's session can span graphs, and one session must hold one graph's events.
+	 */
 	private async emitMirrorSuccesses(ctx: MirrorContext, successes: MirrorSuccess[]): Promise<void> {
 		for (const success of successes) {
 			await this.emit({
@@ -3192,7 +3204,7 @@ export class Substrate {
 				summary: `claim mirror ok: ${success.target} ${success.op}`,
 				graph_id: ctx.graphId,
 				node_id: ctx.nodeId,
-				session_id: ctx.sessionId,
+				session_id: `mirror:${ctx.graphId}:${ctx.nodeId}`,
 				payload: { action: "mirror", target: success.target, op: success.op, status: "ok" },
 			}).catch(() => undefined);
 		}
@@ -3744,7 +3756,7 @@ export class Substrate {
 				summary: `dod gate approved for ${reviewed.node.linear_identifier ?? nodeId}`,
 				graph_id: graphId,
 				node_id: nodeId,
-				session_id: ctx.sessionId,
+				session_id: `dod:${graphId}:${nodeId}`,
 				payload: { action: "dod", status: "approved", already_done: gate.alreadyDone },
 				...place,
 			}).catch(() => undefined);

@@ -335,9 +335,11 @@ rolling the lease back. It never sees a lease id. A successful mirror writes one
 
 **The node artifact.** `POST /evidence` with `node_id` (JSON reply; `format: "html"`
 ignores it) adds `node`: that node's `claim`, `linear`, `notion` and `dod` steps, in
-ledger order. The steps are read from the graph's whole ledger, not a browse window,
-and only events carrying the node's id count. A Linear relation sits in `linear` on
-the waiting node. An unreadable ledger is `node.error`, never an empty artifact.
+time order. `claim` is every lease decision the ledger recorded for the node, whether
+or not a tracker was bound. `linear` also carries the relation outcomes, with the
+blocker and the edge kind. The steps are read from the graph's whole ledger, not a
+browse window, and only events carrying the node's id count. An unreadable ledger is
+`node.error`, never an empty artifact.
 
 Claims move the issue to the team's first `started` state, set
 `agent:<surface>`, remove every `dispatch:*` and every other `agent:*`, and

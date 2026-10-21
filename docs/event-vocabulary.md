@@ -114,9 +114,11 @@ These apply to every source:
 | `teachable.accepted` | 29 | `note` | `memory-writer` | `teachable` | — | — | no |
 | `mirror.failed` | 23 | `warning` | `lease-holder` | `mirror` | — | — | no |
 | `mirror.ok` | 38 | `note` | `lease-holder` | `mirror` | — | — | no |
+| `mirror.relation.ok` | 38 | `note` | `substrate` | `mirror` | — | — | no |
+| `mirror.relation.failed` | 38 | `warning` | `substrate` | `mirror` | — | — | no |
 | `lease.release.dod` | 23 | `note` | `lease-holder` | `released` | — | graph repo via placeOf | no |
 | `dod.refused` | 23 | `warning` | `lease-holder` | `dod` | — | — | no |
-| `dod.approved` | 38 | `note` | `lease-holder` | `dod` | — | — | no |
+| `dod.approved` | 38 | `note` | `lease-holder` | `dod` | — | graph repo via placeOf | no |
 | `dispatch.outcome` | 24 | `note` | `substrate` | `dispatch` | `dispatcher` | — | yes |
 | `dispatch.failed` | 24 | `warning` | `substrate` | `dispatch` | `dispatcher` | — | yes |
 | `lanea.session_start` | 32 | `session.start` | `claude-code` | — | `agentos` | — | no |

@@ -350,7 +350,7 @@ describe("POST /evidence", () => {
 
 		expect(response.status).toBe(200);
 		expect(body.node.node_id).toBe("n1");
-		expect(body.node.linear).toEqual([{ ts: new Date(1_700_000_000_001).toISOString(), op: "claim", status: "ok", reason: null }]);
+		expect(body.node.linear).toEqual([{ ts: new Date(1_700_000_000_001).toISOString(), op: "claim", status: "ok", reason: null, blocker_node: null, edge_kind: null }]);
 		expect(body.node.dod).toEqual([{ ts: new Date(1_700_000_000_003).toISOString(), status: "approved", reason: null }]);
 	});
 

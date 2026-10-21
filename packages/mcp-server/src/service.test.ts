@@ -2773,6 +2773,7 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 			["ut-1", "n4"],
 			["ut-1", "n4"],
 		]);
+		expect(notes.every((e) => e.session_id !== "sess-1" && e.session_id?.includes("ut-1"))).toBe(true);
 	});
 
 	test("a stolen claim mirrors as steal with the evicted holder", async () => {
@@ -3331,6 +3332,8 @@ describe("completeNode DoD gate (D23-14, D23-15)", () => {
 			node_id: "n2",
 			payload: { action: "dod", status: "approved", already_done: false },
 		});
+		expect(approved[0]?.session_id).toContain("ut-1");
+		expect(approved[0]?.session_id).not.toBe("sess-a");
 		expect(JSON.stringify(approved)).not.toContain(summary);
 	});
 

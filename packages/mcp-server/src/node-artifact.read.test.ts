@@ -37,24 +37,41 @@ function substrateWith(greptime: unknown): Substrate {
 const at = (id: number) => new Date(1_700_000_000_000 + id).toISOString();
 
 describe("the per-node artifact read", () => {
-	test("one node's events come back in ledger order, and another node's or an unbound event never reaches it", async () => {
+	test("one node's events come back as its steps, in time order, and another node's or an unbound event never reaches it", async () => {
 		const rows = [
-			row(1, "n1", { action: "mirror", target: "linear", op: "claim", status: "ok" }),
+			row(1, "n1", { action: "granted", lease_epoch: 1 }),
 			row(2, "n2", { action: "mirror", target: "linear", op: "claim", status: "ok" }),
-			row(3, "n1", { action: "mirror", target: "notion", op: "claim", status: "ok" }),
-			row(4, null, { action: "mirror", target: "linear", op: "review", status: "ok" }),
-			row(5, "n1", { action: "dod", status: "approved", already_done: false }),
+			row(3, "n1", { action: "mirror", target: "linear", op: "claim", status: "ok" }),
+			row(4, "n1", { action: "mirror", target: "notion", op: "claim", status: "ok" }),
+			row(5, null, { action: "mirror", target: "linear", op: "review", status: "ok" }),
+			row(6, "n1", { action: "dod", status: "approved", already_done: false }),
 		];
+
 		const read = await substrateWith({ readEvents: async () => rows }).nodeArtifactOf(GRAPH, "n1");
 
 		expect(read).toEqual({
 			artifact: {
 				node_id: "n1",
-				claim: [{ ts: at(1), op: "claim" }],
-				linear: [{ ts: at(1), op: "claim", status: "ok", reason: null }],
-				notion: [{ ts: at(3), op: "claim", status: "ok", reason: null }],
-				dod: [{ ts: at(5), status: "approved", reason: null }],
+				claim: [{ ts: at(1), action: "granted" }],
+				linear: [{ ts: at(3), op: "claim", status: "ok", reason: null, blocker_node: null, edge_kind: null }],
+				notion: [{ ts: at(4), op: "claim", status: "ok", reason: null }],
+				dod: [{ ts: at(6), status: "approved", reason: null }],
 			},
+		});
+	});
+
+	test("a node id is matched in the form the ledger stored it, so a long id keeps its history", async () => {
+		const longId = "n".repeat(600);
+		const stored = longId.slice(0, 512);
+		const rows = [row(1, stored, { action: "mirror", target: "linear", op: "claim", status: "ok" })];
+
+		const read = await substrateWith({ readEvents: async () => rows }).nodeArtifactOf(GRAPH, longId);
+
+		expect(read).toEqual({
+			artifact: expect.objectContaining({
+				node_id: stored,
+				linear: [expect.objectContaining({ op: "claim", status: "ok" })],
+			}),
 		});
 	});
 
