@@ -1,21 +1,21 @@
 ---
 gsd_state_version: "1.0"
-milestone: v1.3.x
-milestone_name: Should-have hardening (Planned)
-status: "v1.3.x phases 37-39 merged (PR #89 a1b7152, PR #90 1d4e4aa, PR #91 acb6767). Phase 40 (DOCS-MEMORY) in review as a draft PR: D-D1 in-repo, D-D3 blocked on a restore drill and approval, D-D4 narrowed and awaiting the user's acceptance. Phases 41-44 not started"
-stopped_at: phase 40 in review (draft PR); awaiting gates and the user's merge decision
-last_updated: "2026-10-21"
-last_activity: 2026-10-21
-last_activity_desc: phase 40 (DOCS-MEMORY) draft PR; phase 39 merged as PR #91
-state_head: 1a9f4fd365ede291c4e21be71b6ff236e0e49c67
+milestone: v1.5
+milestone_name: SOTA (phases 45-54)
+status: "v1.5 in progress: phases 45, 46, 47, 49, 50 complete on main; 48 in review (draft PR #102); 51 in progress; 52-54 defined, not started. v1.3.x phases 37-44 complete on main; phases 40 and 41 have no residual"
+stopped_at: "phase 48 in review as draft PR #102, blocked by PR #99 (known-vulnerability audit gate)"
+last_updated: "2026-10-22"
+last_activity: 2026-10-22
+last_activity_desc: "roadmap and state reconciled with merged PRs #89-#103; phases 52-54 defined (SOTA-08..10)"
+state_head: bdda262de1569c04b582b2ade159a9dc0825a0e3
 progress:
-  total_phases: 8
-  completed_phases: 2
-  total_plans: 3
-  completed_plans: 2
-  percent: 25
-current_phase: 40
-current_phase_name: docs-memory
+  total_phases: 10
+  completed_phases: 5
+  total_plans: 5
+  completed_plans: 5
+  percent: 50
+current_phase: 48
+current_phase_name: tailscaledb-proxy-layer
 ---
 
 # State
@@ -154,10 +154,19 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: Milestone v1.3 complete
+Phase: 48 (TailscaleDB secure proxy layer) in review as draft PR #102; 51 in progress; 52-54 defined, not started
 Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-10-11 — Milestone v1.3 completed and archived
+Status: v1.5 SOTA in progress: 5 of 10 phases complete on main (45, 46, 47, 49, 50)
+Last activity: 2026-10-22 — roadmap and state reconciled with merged PRs #89-#103 (see Reconciliation 2026-10-22)
+
+## Reconciliation 2026-10-22
+
+- Merged to main 2026-10-21 (UTC; mergedAt and merge SHAs read with `gh pr view`): #89 (37, a1b7152), #90 (38, 1d4e4aa), #91 (39, acb6767), #92 (40, 6b7c4f2), #93 (41, 3466c50), #94 (42, 3e9a106), #95 (44, 92ef7c2), #96 (45, 93acd8a), #97 (43, f2138e1), #98 (46, 4c2c48e), #100 (47, d8accda), #101 (49, 2495a14), #103 (50, bdda262 = origin/main).
+- Open: #102 draft (48, branch gsd/v15-48-proxy, head 4b660f1, docs-only fix); its known-vulnerability audit check is SKIPPED, not passed; #99 (non-draft, chore/known-vuln-accepted-risk) owns that gate.
+- Phases 40 and 41: complete on main via #92 and #93 with no residual; origin/main bdda262 already contains both phases (orchestrator's merge-file analysis).
+- Phase 51: no PR; origin holds gsd/v15-51-fabric at 87c2bdc (plan commit only); gsd/p51-fabric-impl is not on origin yet.
+- Phases 52-54 defined in ROADMAP.md (SOTA-08 to SOTA-10), not started; phases 48 and 51-54 have no plans on main.
+- Docs-only change: no gate or test was run for this reconciliation.
 
 ## Deferred Items
 
