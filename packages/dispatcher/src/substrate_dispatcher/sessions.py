@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from . import dispatch
+from .host import TASKS_DIR, HostClient, HostRefused, RemoteTask
 
 # Must outlast one Hermes 429 rate-limit backoff (HERMES_RATE_LIMIT_BACKOFF_SECONDS) plus startup:
 # in 02-08 a 600 s timeout equal to that backoff turned every first-call 429 into a certain
@@ -34,6 +35,14 @@ CLAIM_TIMEOUT_SECONDS = 900
 # Hermes was seen ignoring SIGTERM (02-09 tracer): terminate, then kill once this has passed.
 TERMINATE_GRACE_SECONDS = 10
 LANDED_STATES = frozenset({"started_review", "completed"})
+# D43-A: a persisted VM task that substrate-host stays unreachable for is dropped after this many
+# failed re-adoption attempts in a row.
+READOPT_UNREACHABLE_LIMIT = 60
+VM_SURFACE = "claude-code"
+VM_TASKS_FILE = "vm_tasks.json"
+VM_RECORD_TEXT_FIELDS = (
+    "issue_id", "identifier", "graph_id", "node_id", "surface", "dispatch_label_id", "repo",
+)
 
 Log = Callable[[str], None]
 
@@ -55,6 +64,7 @@ class Session:
     terminated_at: float | None = None
     launch_state: str | None = None
     prior_claim_sessions: frozenset[str] = frozenset()
+    repo: str = ""
 
 
 def _claim_comment_re(*, surface: str, graph_id: str, node_id: str) -> re.Pattern[str]:
@@ -115,24 +125,73 @@ def landed_claim(
     return None
 
 
+def _vm_key(graph_id: str, node_id: str) -> str:
+    """The VM task record key: ``graph_id/node_id``, one record per graph node."""
+    return f"{graph_id}/{node_id}"
+
+
+def _valid_vm_record(record: object) -> bool:
+    """True for a record shaped as ``SessionRegistry._remember_vm_task`` writes it."""
+    if not isinstance(record, dict):
+        return False
+    if not all(isinstance(record.get(field), str) for field in VM_RECORD_TEXT_FIELDS):
+        return False
+    if not isinstance(record.get("started_at"), (int, float)):
+        return False
+    prior = record.get("prior_claim_sessions", [])
+    return isinstance(prior, list) and all(isinstance(sid, str) for sid in prior)
+
+
+def _write_private_json(path: Path, payload: object) -> None:
+    """Atomically replace ``path`` with ``payload`` as JSON: a 0600 file in a 0700 directory."""
+    tmp = path.with_suffix(".json.tmp")
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+
 class SessionRegistry:
     """Dispatched sessions by Linear issue id: at most ``max_sessions``, one per issue (D-14).
 
     A terminated session keeps its slot until its process has exited or been killed.
     The given-up set survives a restart (D24-05, DISP-06): with ``state_dir`` the
     registry loads ``given_up.json`` (0600, atomic replace) at construction and saves
-    on every give-up, so a new process never relaunches a given-up issue.
+    on every give-up, so a new process never relaunches a given-up issue. VM tasks
+    (claude-code) are recorded in ``vm_tasks.json`` the same way until their session
+    leaves, and ``readopt`` re-adopts the ones substrate-host still holds (D43-A).
     """
 
-    def __init__(self, max_sessions: int = 2, *, state_dir: Any = None, log: Log | None = None) -> None:
+    def __init__(
+        self, max_sessions: int = 2, *, state_dir: Any = None, log: Log | None = None,
+        host: HostClient | None = None,
+    ) -> None:
         self.max_sessions = max_sessions
         self._sessions: dict[str, Session] = {}
         self.given_up: set[str] = set()
         self.pending_label_removal: dict[str, str] = {}
         self._log: Log = log or (lambda line: print(f"[substrate-dispatcher] {line}", file=sys.stderr))
+        self._host = host
+        self._vm_tasks: dict[str, dict] = {}
+        self._vm_failures: dict[str, int] = {}
         self._given_up_path = Path(state_dir) / "given_up.json" if state_dir is not None else None
+        self._vm_tasks_path = Path(state_dir) / VM_TASKS_FILE if state_dir is not None else None
         if self._given_up_path is not None:
             self._load_given_up()
+        if self._vm_tasks_path is not None:
+            self._load_vm_tasks()
 
     def _load_given_up(self) -> None:
         """Re-read the persisted given-up set before the first tick (D24-05)."""
@@ -174,8 +233,41 @@ class SessionRegistry:
             except OSError:
                 pass
 
+    def _load_vm_tasks(self) -> None:
+        """Re-read the persisted VM task records before the first tick (D43-A); corrupt starts empty."""
+        assert self._vm_tasks_path is not None
+        try:
+            raw = self._vm_tasks_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            self._log(f"vm_tasks.json unreadable ({type(exc).__name__}); VM tasks are not re-adopted")
+            return
+        try:
+            records = json.loads(raw)
+        except ValueError:
+            records = None
+        if not isinstance(records, dict) or not all(_valid_vm_record(r) for r in records.values()):
+            self._log("vm_tasks.json corrupt; starting with no VM task records")
+            return
+        for record in records.values():
+            self._vm_tasks[_vm_key(record["graph_id"], record["node_id"])] = record
+
+    def _save_vm_tasks(self) -> None:
+        """Atomically persist the VM task records (0600); a failed save can leave a stale record."""
+        assert self._vm_tasks_path is not None
+        try:
+            _write_private_json(self._vm_tasks_path, self._vm_tasks)
+        except OSError as exc:
+            self._log(f"vm_tasks.json save failed ({type(exc).__name__}); restart re-adoption may be stale")
+
     def give_up(self, issue_id: str) -> None:
-        """Record a give-up and persist it when a state dir is configured."""
+        """Record a give-up and persist it when a state dir is configured.
+
+        The VM task record goes first, so a crash between the two saves can only leave an issue
+        given up without its VM task record.
+        """
+        self._forget_vm_task(issue_id)
         self.given_up.add(issue_id)
         if self._given_up_path is not None:
             self._save_given_up()
@@ -186,19 +278,115 @@ class SessionRegistry:
         if self.capacity_left() <= 0:
             raise ValueError(f"at capacity ({self.max_sessions} sessions)")
         self._sessions[session.issue_id] = session
+        if session.surface == VM_SURFACE:
+            self._remember_vm_task(session)
+
+    def _remember_vm_task(self, session: Session) -> None:
+        """Record an opened VM task so a restarted dispatcher can re-adopt it: ids and times only."""
+        self._vm_tasks[_vm_key(session.graph_id, session.node_id)] = {
+            "issue_id": session.issue_id,
+            "identifier": session.identifier,
+            "graph_id": session.graph_id,
+            "node_id": session.node_id,
+            "surface": session.surface,
+            "dispatch_label_id": session.dispatch_label_id,
+            "started_at": session.started_at,
+            "repo": session.repo,
+            "prior_claim_sessions": sorted(session.prior_claim_sessions),
+        }
+        if self._vm_tasks_path is not None:
+            self._save_vm_tasks()
+
+    def _drop_session(self, issue_id: str) -> None:
+        """A session leaves the registry; its VM task record leaves with it (D43-A)."""
+        del self._sessions[issue_id]
+        self._forget_vm_task(issue_id)
+
+    def _forget_vm_task(self, issue_id: str) -> None:
+        keys = [key for key, record in self._vm_tasks.items() if record["issue_id"] == issue_id]
+        if not keys:
+            return
+        for key in keys:
+            del self._vm_tasks[key]
+            self._vm_failures.pop(key, None)
+        if self._vm_tasks_path is not None:
+            self._save_vm_tasks()
 
     def get(self, issue_id: str) -> Session | None:
         return self._sessions.get(issue_id)
 
     def active_issue_ids(self) -> set[str]:
-        return set(self._sessions)
+        """Live sessions and pending VM tasks: a task awaiting re-adoption is never launched again."""
+        return set(self._sessions) | {record["issue_id"] for record in self._vm_tasks.values()}
 
     def active_graph_ids(self) -> set[str]:
-        """Graphs with a live session: one worktree, one writer (Greptile P1)."""
-        return {session.graph_id for session in self._sessions.values()}
+        """Graphs with a live session or a pending VM task: one worktree, one writer (Greptile P1)."""
+        return {session.graph_id for session in self._sessions.values()} | {
+            record["graph_id"] for record in self._vm_tasks.values()
+        }
 
     def capacity_left(self) -> int:
         return self.max_sessions - len(self._sessions)
+
+    def readopt(self) -> None:
+        """Re-adopt persisted VM tasks that have no live session (D43-A); call before each tick.
+
+        substrate-host answers for each record: 404 drops it; a running or finished task becomes a
+        session (a finished one is reaped like any other exit); an unreachable host keeps the record
+        for a later call, and READOPT_UNREACHABLE_LIMIT failed attempts in a row drop it. Records
+        beyond capacity_left() stay recorded for a later call.
+        """
+        if self._host is None:
+            return
+        live_keys = {
+            _vm_key(session.graph_id, session.node_id)
+            for session in self._sessions.values()
+            if session.surface == VM_SURFACE
+        }
+        for key, record in list(self._vm_tasks.items()):
+            issue_id, graph_id, node_id = record["issue_id"], record["graph_id"], record["node_id"]
+            if key in live_keys or issue_id in self._sessions:
+                continue
+            if self.capacity_left() <= 0:
+                return
+            try:
+                status = self._host.status(graph_id, node_id)
+            except HostRefused:
+                failures = self._vm_failures.get(key, 0) + 1
+                if failures < READOPT_UNREACHABLE_LIMIT:
+                    self._vm_failures[key] = failures
+                    continue
+                self._log(
+                    f"{record['identifier']}: substrate-host unreachable for VM task {graph_id}/{node_id} "
+                    f"{failures} times; dropping its record"
+                )
+                self._forget_vm_task(issue_id)
+                continue
+            self._vm_failures.pop(key, None)
+            if status is None:
+                self._log(
+                    f"{record['identifier']}: substrate-host no longer knows VM task "
+                    f"{graph_id}/{node_id}; dropping its record"
+                )
+                self._forget_vm_task(issue_id)
+                continue
+            # launch_state stays None: the node's state at launch was never recorded.
+            self._sessions[issue_id] = Session(
+                issue_id=issue_id,
+                identifier=record["identifier"],
+                graph_id=graph_id,
+                node_id=node_id,
+                surface=record["surface"],
+                dispatch_label_id=record["dispatch_label_id"],
+                proc=RemoteTask(self._host, graph_id, node_id, log=self._log),
+                pid=0,
+                started_at=record["started_at"],
+                log_path=TASKS_DIR / f"{graph_id}--{node_id}.json",
+                repo=record["repo"],
+                prior_claim_sessions=frozenset(record.get("prior_claim_sessions", [])),
+            )
+            finished = " (finished while the dispatcher was down)" if status.get("exit_code") is not None else ""
+            self._log(f"{record['identifier']}: re-adopted VM task {graph_id}/{node_id}{finished}")
 
     def reap(self, now: float, *, mcp: Any, linear: Any, log: Log) -> None:
         """Retry failed label removals, then watch, time out, kill or remove every session."""
@@ -215,7 +403,7 @@ class SessionRegistry:
         code = session.proc.poll()
         if session.terminated_at is not None:
             if code is not None:
-                del self._sessions[session.issue_id]
+                self._drop_session(session.issue_id)
                 log(f"{session.identifier}: terminated session pid {session.pid} ended (code {code})")
             elif now - session.terminated_at >= TERMINATE_GRACE_SECONDS:
                 session.proc.kill()
@@ -279,7 +467,7 @@ class SessionRegistry:
                 mcp, graph_id=session.graph_id, node_id=session.node_id,
                 identifier=session.identifier, reason="exited-unclaimed", log=log,
             )
-            del self._sessions[session.issue_id]
+            self._drop_session(session.issue_id)
             return
 
         log(f"{session.identifier}: no claim within {CLAIM_TIMEOUT_SECONDS} s; terminating pid {session.pid}")
@@ -299,7 +487,7 @@ class SessionRegistry:
         log(f"claim landed for {session.identifier} ({kind}, session {claim_session or 'unknown'})")
 
     def _remove_exited(self, session: Session, code: int, log: Log) -> None:
-        del self._sessions[session.issue_id]
+        self._drop_session(session.issue_id)
         log(
             f"{session.identifier}: hermes pid {session.pid} exited (code {code}) "
             f"after its claim (session {session.claim_session or 'unknown'})"

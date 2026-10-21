@@ -4,8 +4,8 @@
 the same ``Launched`` shape as launcher.launch, with ``pid`` 0 and ``proc`` a ``RemoteTask``.
 ``RemoteTask`` serves exactly the Popen subset ``sessions.SessionRegistry._reap_one`` uses —
 ``poll()``, ``terminate()``, ``kill()`` — so the D-14 cap, the claim timeout and the landed-claim
-rule apply to a VM task unchanged. The host, not the dispatcher, holds the session (D-05): a
-dispatcher restart forgets the handle, the VM keeps running.
+rule apply to a VM task unchanged. The host, not the dispatcher, holds the session (D-05): the
+dispatcher re-adopts persisted VM tasks from ``vm_tasks.json`` on its next start.
 
 Nothing here logs or returns more than ids, HTTP codes and at most 200 characters of an error body.
 The host bearer is never logged; error text is redacted of it before the 200-character cap.

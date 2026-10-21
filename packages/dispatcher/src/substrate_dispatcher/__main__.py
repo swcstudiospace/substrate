@@ -73,7 +73,7 @@ def run_loop(
     log: Log,
     slo: Callable[[], Any] | None = None,
 ) -> int:
-    """reap → tick → sleep until ``iterations`` ran or SIGTERM/SIGINT; returns iterations run.
+    """readopt → reap → tick → sleep until ``iterations`` ran or SIGTERM/SIGINT; returns iterations run.
 
     A signal sets the stop flag: the current iteration finishes and the loop returns. The
     default sleep waits on that flag, so a stop never waits out the poll interval.
@@ -88,6 +88,11 @@ def run_loop(
     ran = 0
     try:
         while not stop.is_set():
+            if not dry_run:
+                try:
+                    registry.readopt()
+                except Exception as exc:  # noqa: BLE001 — the loop outlives any one failure
+                    log(f"readopt failed: {type(exc).__name__}: {exc}")
             try:
                 registry.reap(clock(), mcp=mcp, linear=linear, log=log)
             except Exception as exc:  # noqa: BLE001 — the loop outlives any one failure
@@ -148,8 +153,9 @@ def main(argv: list[str] | None = None) -> int:
             run_loop(
                 linear=linear,
                 mcp=mcp,
-                # D24-05: the registry re-reads given_up.json before the first tick.
-                registry=SessionRegistry(state_dir=STATE_DIR, log=log),
+                # D24-05: the registry re-reads given_up.json before the first tick; D43-A: and
+                # vm_tasks.json, whose VM tasks readopt() re-adopts from substrate-host.
+                registry=SessionRegistry(state_dir=STATE_DIR, log=log, host=host),
                 # U3: the launch path writes the signed handoff packet and runs the
                 # pre-launch drift scan over the worktree, both fail-open.
                 launch_fn=make_launch_fn(log=log, open_task=host.launch, prelaunch=make_prelaunch(mcp)),

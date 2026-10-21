@@ -44,8 +44,7 @@ the tag is among the issue's last 50 comments.
 | `exited-unclaimed` | hermes exited without claiming; label removed | no, gives up |
 | `claim-timeout` | no claim in 15 min; label removed | no, gives up |
 
-Give-ups persist in `STATE_DIR/given_up.json` (0600, atomic replace) and
-survive a restart: a new process never relaunches a given-up issue.
+Give-ups persist in `STATE_DIR/given_up.json` (0600, atomic replace) and survive a restart: a new process never relaunches a given-up issue. A dispatcher restart ends every dispatched Hermes session, by design: the unit keeps the default `KillMode=control-group`, so a stop or restart takes the sessions in its cgroup with it. VM tasks (`dispatch:claude-code`) run on substrate-host outside that cgroup, and the dispatcher re-adopts their persisted records from `vm_tasks.json` under `STATE_DIR` on its next start.
 
 ## Session lifecycle
 

@@ -426,6 +426,7 @@ def tick(
                         pid=launched.pid,
                         started_at=launched.started_at,
                         log_path=launched.log_path,
+                        repo=found["repo"],
                         launch_state=(found.get("node") or {}).get("state"),
                         prior_claim_sessions=frozenset(
                             sessions.claim_comment_sessions(
