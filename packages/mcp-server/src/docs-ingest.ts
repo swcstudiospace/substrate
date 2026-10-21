@@ -56,6 +56,7 @@ import {
 	type RagflowConfig,
 } from "./planes/ragflow.ts";
 import { REDACTION_RULES, redact, redactSkillContent } from "./redact.ts";
+import { SKILL_NAME_RE } from "./skills/propose.ts";
 import type { EventInput, Surface } from "./types.ts";
 
 /** One page may not exceed 1 MB (D25-05, Phase 21 precedent). */
@@ -132,17 +133,18 @@ async function scanPages(baseDir: string, roots: readonly string[], io: ScanIo, 
 
 /**
  * The roots of an agent-skills checkout (phase 42, D42-2). A directory `<name>/` at the checkout root
- * is a skill only when it holds a regular `SKILL.md`; its roots are that file and `<name>/references/`
- * (a tree): the layout `writeTree` writes and the library projector reads. A directory without
- * `SKILL.md` contributes no roots, so its notes never become searchable. Dot-directories and links are
- * not skills. The listing throws when the checkout cannot be read, and so does a `SKILL.md` check that
- * fails for any reason but the file being absent; the caller fails that refresh.
+ * is a skill only when its name passes `SKILL_NAME_RE` (the rule `libraryNames` applies) and it holds a
+ * regular `SKILL.md`; its roots are that file and `<name>/references/` (a tree): the layout `writeTree`
+ * writes and the library projector reads. A directory that fails either check contributes no roots, so
+ * its notes never become searchable. Links are not skills. The listing throws when the checkout cannot be
+ * read, and so does a `SKILL.md` check that fails for any reason but the file being absent; the caller
+ * fails that refresh.
  */
 export async function skillsCheckoutRoots(checkout: string, io: Pick<ScanIo, "readdir" | "lstat"> = nodeIo): Promise<string[]> {
 	const entries = await io.readdir(checkout, { withFileTypes: true });
 	const roots: string[] = [];
 	for (const entry of entries) {
-		if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+		if (!entry.isDirectory() || !SKILL_NAME_RE.test(entry.name)) continue;
 		const manifest = await tolerant(() => io.lstat(join(checkout, entry.name, "SKILL.md")), "fail");
 		if (manifest?.isFile() === true) roots.push(`${entry.name}/SKILL.md`, `${entry.name}/references/`);
 	}

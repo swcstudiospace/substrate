@@ -457,6 +457,28 @@ describe("scanIngestPages", () => {
 });
 
 describe("agent-skills checkout roots and scan", () => {
+	test("a folder whose name fails the skill-name rule is not a skill, even with SKILL.md and references/", async () => {
+		const root = mkdtempSync(join(tmpdir(), "substrate-skills-name-"));
+		try {
+			mkdirSync(join(root, "demo-skill", "references"), { recursive: true });
+			writeFileSync(join(root, "demo-skill", "SKILL.md"), "Demo skill body.\n");
+			writeFileSync(join(root, "demo-skill", "references", "api.md"), "The demo API reference.\n");
+			// Folders the library projector never takes as skills: their names fail SKILL_NAME_RE (upper case,
+			// an underscore, a leading hyphen), yet each holds a SKILL.md and a references tree.
+			for (const name of ["Bad_Name", "-leading", "UPPER"]) {
+				mkdirSync(join(root, name, "references"), { recursive: true });
+				writeFileSync(join(root, name, "SKILL.md"), "Not a valid skill name.\n");
+				writeFileSync(join(root, name, "references", "api.md"), "An unnamed reference.\n");
+			}
+			const roots = await skillsCheckoutRoots(root);
+			expect(roots).toEqual(["demo-skill/SKILL.md", "demo-skill/references/"]);
+			const pages = await readSkillsCheckoutPages(root, roots);
+			expect(pages.map((page) => page.path)).toEqual(["demo-skill/SKILL.md", "demo-skill/references/api.md"]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	test("a directory without SKILL.md contributes no roots, so its notes never become searchable", async () => {
 		const root = mkdtempSync(join(tmpdir(), "substrate-skills-roots-"));
 		try {
