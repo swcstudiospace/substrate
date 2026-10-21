@@ -84,7 +84,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 
 ### 🚧 v1.3.x Should-have hardening (Planned)
 
-- [ ] **Phase 37: LANEB** - graph inference from worktree path
+- [x] **Phase 37: LANEB** - graph inference from worktree path
 - [ ] **Phase 38: MIRROR** - mirror graph edges into Linear relations and outcomes into evidence
 - [ ] **Phase 39: DISPATCH** - signed handoff packet and coord drift scan before launch
 - [ ] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (decided 2026-10-21)
@@ -510,7 +510,7 @@ Plans:
 
   1. Lane B events reach the graph's brief and evidence without agents passing ids.
 
-**Plans**: 1/1 plans complete (PLAN.md); verified in phases/37-laneb-graph-attribution/VERIFICATION.md, PR open
+**Plans**: 1/1 plans complete (PLAN.md); verified in phases/37-laneb-graph-attribution/VERIFICATION.md, merged in PR #89 (a1b7152)
 
 ### Phase 38: MIRROR
 
@@ -527,7 +527,7 @@ Plans:
   1. Graph edges (`requires` / `blocks` / `gated_by`) mirror into Linear relations, closing `coordination.md:321` "Not done".
   2. One artifact per node shows claim → Linear → Notion → DoD.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1 plan (PLAN.md); verified in phases/38-mirror/VERIFICATION.md; draft PR open
 
 ### Phase 39: DISPATCH
 
@@ -781,8 +781,8 @@ Plans:
 | 34. Invalid-write round trip | v1.4 | 1/1 | Complete | 2026-10-21 |
 | 35. expected_version for skills and docs | v1.4 | 1/1 | Complete | 2026-10-21 |
 | 36. Degraded-mode exactly-once replay | v1.4 | 1/1 | Complete | 2026-10-21 |
-| 37. LANEB | v1.3.x | 1/1 | Verified, PR open | - |
-| 38. MIRROR | v1.3.x | 0/0 | Not started | - |
+| 37. LANEB | v1.3.x | 1/1 | Complete | 2026-10-21 |
+| 38. MIRROR | v1.3.x | 1/1 | In review (draft PR) | - |
 | 39. DISPATCH | v1.3.x | 0/0 | Not started | - |
 | 40. DOCS-MEMORY | v1.3.x | 0/0 | Not started | - |
 | 41. ANCHOR | v1.3.x | 0/0 | Not started | - |

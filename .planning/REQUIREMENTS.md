@@ -16,7 +16,7 @@ Column mapping. The FEATURES.md Differentiators header is `| ID | Area | Feature
 
 Source for all entries: `.planning/research/FEATURES.md` lines 197–222 and `.planning/research/SUMMARY.md` line 68. Phase mapping is set by the program plan, not by the sources.
 
-- [ ] **A-D1**: Lane B events reach the graph's brief and evidence without agents passing ids
+- [x] **A-D1**: Lane B events reach the graph's brief and evidence without agents passing ids
   - Item: Infer the graph from the per-Graph-ID worktree path for herdr and Muse events. Area: A (Lane B collectors). Complexity: LOW. Notes: Needs C-T3. Phase: 37. Source: FEATURES.md:197
 - [ ] **B-D1**: Closes `coordination.md:321` "Not done"
   - Item: Mirror graph edges (`requires` / `blocks` / `gated_by`) into Linear relations. Area: B (claim mirror). Complexity: MEDIUM. Notes: not stated. Phase: 38. Source: FEATURES.md:200
@@ -89,9 +89,9 @@ Anti-features, from `.planning/research/SUMMARY.md` line 72:
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| A-D1 | 37 | Verified, PR open |
-| B-D1 | 38 | Pending |
-| B-D3 | 38 | Pending |
+| A-D1 | 37 | Complete (PR #89) |
+| B-D1 | 38 | In review (draft PR) |
+| B-D3 | 38 | In review (draft PR) |
 | C-D2 | 39 | Pending |
 | C-D4 | 39 | Pending |
 | D-D1 | 40 | Pending |

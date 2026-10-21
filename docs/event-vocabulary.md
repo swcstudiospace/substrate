@@ -113,8 +113,10 @@ These apply to every source:
 | `alert` | 33 | `warning` | `substrate` | `alert` | `alert` | — | yes |
 | `teachable.accepted` | 29 | `note` | `memory-writer` | `teachable` | — | — | no |
 | `mirror.failed` | 23 | `warning` | `lease-holder` | `mirror` | — | — | no |
+| `mirror.ok` | 38 | `note` | `lease-holder` | `mirror` | — | — | no |
 | `lease.release.dod` | 23 | `note` | `lease-holder` | `released` | — | graph repo via placeOf | no |
 | `dod.refused` | 23 | `warning` | `lease-holder` | `dod` | — | — | no |
+| `dod.approved` | 38 | `note` | `lease-holder` | `dod` | — | — | no |
 | `dispatch.outcome` | 24 | `note` | `substrate` | `dispatch` | `dispatcher` | — | yes |
 | `dispatch.failed` | 24 | `warning` | `substrate` | `dispatch` | `dispatcher` | — | yes |
 | `lanea.session_start` | 32 | `session.start` | `claude-code` | — | `agentos` | — | no |
@@ -129,7 +131,6 @@ These apply to every source:
 | `issue_get` | 23 | — | — | — | — | — | no |
 | `graph_find` | 23 | — | — | — | — | — | no |
 | `skills.sync` | 22 | — | — | — | — | — | no |
-| `mirror` | 23 | — | — | — | — | — | no |
 
 <!-- event-sources:end -->
 
@@ -158,8 +159,7 @@ These deliberately emit nothing. A successful retain and every recall emit
 nothing (reads do not emit, like `memory_search`); Agent Cards and `verify`
 are reads; `issue_get` and `graph_find` are reads. A successful skills sync
 emits nothing — only a refusal is a warning — and the synced tree is its
-trail; a successful mirror emits nothing — only a failure is a warning — and
-the Linear comment is its trail. The Muse brief writer is
+trail. The Muse brief writer is
 deliberately not an event: a `note` with `repo` per refresh would enter that
 repo's brief, change it, and re-trigger itself — the written `BRIEF.md` and
 the writer's local counters are its trail.
