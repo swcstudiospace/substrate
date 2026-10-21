@@ -24,6 +24,8 @@ callers get `unauthenticated` with no RAGFlow call and no event; every
 authenticated search emits exactly one event (`docs.search` note or warning),
 fail-open, without the query text.
 
+`docs_search` also takes an optional `context` boolean, default `false`. With `true`, the reply adds recalled memories and the session's recent events, framed as untrusted. The section "Hybrid retrieval and context augmentation" in `docs/docs-search-ingest.md` sets out its budgets and degraded reasons.
+
 `docs_ingest` (DOCS-02) is a publication path: only `substrate` and operator
 tokens (anonymous 401 before the body is read, agent surfaces 403). The page
 carries `dataset`, `source_url` (canonical

@@ -97,11 +97,14 @@ export interface RagflowChunk {
  * to 1; `top_k` 1024 — documented as a deprecated alias of `knn_top_k` with
  * the same default, kept because it is the name the reference lists first
  * and the deployment version is unattested.
+ * `rerankId` is sent as `rerank_id` only when set: RAGFlow ships no reranker by default (D46-b).
  */
 export interface RetrievalKnobs {
 	similarityThreshold: number;
 	vectorSimilarityWeight: number;
 	topK: number;
+	/** A reranker model id sent as `rerank_id`; absent means no reranker and no field on the wire. */
+	rerankId?: string;
 }
 
 export const DEFAULT_RETRIEVAL_KNOBS: Readonly<RetrievalKnobs> = { similarityThreshold: 0.2, vectorSimilarityWeight: 0.3, topK: 1024 };
@@ -214,7 +217,7 @@ function readNumber(entry: object, ...names: string[]): number | undefined {
 /**
  * Retrieve chunks for a question over explicit dataset ids (§Retrieve
  * chunks: `POST /api/v1/retrieval`, `{question, dataset_ids, page,
- * page_size, similarity_threshold, vector_similarity_weight, top_k}` →
+ * page_size, similarity_threshold, vector_similarity_weight, top_k[, rerank_id]}` →
  * `{code, data: {chunks: [...]}}`).
  *
  * Transport and shape failures come back as `{ok: false, reason}` — never a
@@ -243,6 +246,7 @@ export async function retrieveChunks(
 			similarity_threshold: knobs.similarityThreshold,
 			vector_similarity_weight: knobs.vectorSimilarityWeight,
 			top_k: knobs.topK,
+			...(knobs.rerankId !== undefined ? { rerank_id: knobs.rerankId } : {}),
 		}),
 		timeoutMs,
 	});

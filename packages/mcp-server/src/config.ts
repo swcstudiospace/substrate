@@ -376,7 +376,7 @@ export interface SubstrateConfig {
 	 * The three documented retrieval knobs sent on every `docs_search`
 	 * retrieval, from `SUBSTRATE_DOCS_SIMILARITY_THRESHOLD` (0.2),
 	 * `SUBSTRATE_DOCS_VECTOR_WEIGHT` (0.3) and `SUBSTRATE_DOCS_TOP_K` (1024).
-	 * The defaults are RAGFlow's own; junk or out-of-range values fall back.
+	 * The weight is `SUBSTRATE_DOCS_VECTOR_WEIGHT` when set, else `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT`; junk or out-of-range docs values fall back to that. `rerankId` comes only from `SUBSTRATE_RAGFLOW_RERANK_ID`.
 	 */
 	docsRetrieval: RetrievalKnobs;
 	// uplift-3 N3 — admission budgets
@@ -667,6 +667,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 	const greptimeUrl = env.GREPTIME_URL?.trim();
 	const leaseTtl = Number(env.SUBSTRATE_LEASE_TTL_SECONDS);
 	const tokens = tokenConfig(env);
+	const ragflowRetrieval = loadRagflowRetrievalSettings(env);
 	const desktopNames = (env.SUBSTRATE_DESKTOP_SURFACES ?? "")
 		.split(",")
 		.map((name) => name.trim())
@@ -772,8 +773,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		docsPruneSuperseded: (env.SUBSTRATE_DOCS_PRUNE_SUPERSEDED?.trim() ?? "") === "1",
 		docsRetrieval: {
 			similarityThreshold: unitIntervalOr(env.SUBSTRATE_DOCS_SIMILARITY_THRESHOLD, DEFAULT_RETRIEVAL_KNOBS.similarityThreshold),
-			vectorSimilarityWeight: unitIntervalOr(env.SUBSTRATE_DOCS_VECTOR_WEIGHT, DEFAULT_RETRIEVAL_KNOBS.vectorSimilarityWeight),
+			vectorSimilarityWeight: unitIntervalOr(env.SUBSTRATE_DOCS_VECTOR_WEIGHT, ragflowRetrieval.vectorSimilarityWeight),
 			topK: positiveOr(env.SUBSTRATE_DOCS_TOP_K, DEFAULT_RETRIEVAL_KNOBS.topK),
+			...(ragflowRetrieval.rerankId !== undefined ? { rerankId: ragflowRetrieval.rerankId } : {}),
 		},
 		// uplift-3 N3
 		admission: loadAdmissionSettings(env),
@@ -1021,6 +1023,22 @@ function positiveOr(raw: string | undefined, fallback: number): number {
 function unitIntervalOr(raw: string | undefined, fallback: number): number {
 	const value = Number(raw?.trim());
 	return raw !== undefined && raw.trim() !== "" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : fallback;
+}
+
+/**
+ * The RAGFlow retrieval settings (D46-a, D46-b). `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT`
+ * is a number in [0, 1], default 0.3 (RAGFlow's own). `SUBSTRATE_RAGFLOW_RERANK_ID`
+ * names a reranker; unset or blank, no `rerankId` is returned and no `rerank_id`
+ * goes on the wire. A non-numeric or out-of-range weight refuses to start.
+ */
+function loadRagflowRetrievalSettings(env: Record<string, string | undefined>): Pick<RetrievalKnobs, "vectorSimilarityWeight" | "rerankId"> {
+	const rawWeight = env.SUBSTRATE_RAGFLOW_VECTOR_WEIGHT?.trim() ?? "";
+	const weight = rawWeight === "" ? DEFAULT_RETRIEVAL_KNOBS.vectorSimilarityWeight : Number(rawWeight);
+	if (!Number.isFinite(weight) || weight < 0 || weight > 1) {
+		throw new ConfigError("SUBSTRATE_RAGFLOW_VECTOR_WEIGHT must be a number in [0, 1]; unset it for RAGFlow's default 0.3");
+	}
+	const rerankId = env.SUBSTRATE_RAGFLOW_RERANK_ID?.trim() ?? "";
+	return { vectorSimilarityWeight: weight, ...(rerankId !== "" ? { rerankId } : {}) };
 }
 
 /** uplift-4 S4: `off`, `shadow` or `enforce` (case-insensitive); anything else, unset included, is `shadow`, which only reports. */
