@@ -15,7 +15,6 @@ import { createConnection, type Socket } from "node:net";
 import { drainEventSpool, postEvent, SPOOL_DRAIN_MS, type EmitOutcome } from "./emit.ts";
 import { spoolConfig } from "./spool.ts";
 import { branchFor, repoSlug } from "./git-context.ts";
-import { graphIdForWorktree } from "./worktree-graph.ts";
 import type { HerdrPane } from "./herdr-map.ts";
 import {
 	commitReconcile,
@@ -31,11 +30,11 @@ export const DEBOUNCE_MS = 150;
 const CALL_TIMEOUT_MS = 5000;
 const JOURNAL_INTERVAL_MS = 60_000;
 
-/** Repo, branch and graph for a pane, from its working directory. Empty when the pane reports none. */
-export function attributePane(pane: HerdrPane): { repo?: string; branch?: string; graph_id?: string } {
+/** Repo and branch for a pane, from its working directory. Runs Git: call it only where a transition needs it. */
+export function attributePane(pane: HerdrPane): { repo?: string; branch?: string } {
 	const cwd = pane.cwd ?? pane.foreground_cwd;
 	if (!cwd) return {};
-	return { repo: repoSlug(cwd), branch: branchFor(cwd), graph_id: graphIdForWorktree(cwd) ?? undefined };
+	return { repo: repoSlug(cwd), branch: branchFor(cwd) };
 }
 
 /** Global lifecycle types. One subscribe, no pane id. */

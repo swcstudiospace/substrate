@@ -14,6 +14,7 @@ import {
 	type HerdrTransition,
 } from "./herdr-map.ts";
 import type { EventInput, Surface } from "../../mcp-server/src/types.ts";
+import { graphIdForWorktree } from "./worktree-graph.ts";
 
 export const HERDR_STATE_VERSION = 2 as const;
 
@@ -71,8 +72,10 @@ export interface ReconcileOptions {
 	/** First run: write state for the current snapshot and emit nothing. */
 	seed?: boolean;
 	now?: string;
-	/** Repo and branch for a pane. Omitted cwd yields an event without repo. */
-	attribute?: (pane: HerdrPane) => { repo?: string; branch?: string; graph_id?: string };
+	/** Repo and branch for a pane. Runs Git, so it is called only where a transition needs it. */
+	attribute?: (pane: HerdrPane) => { repo?: string; branch?: string };
+	/** The graph a pane's directory names. Pure path work, checked on every snapshot. Defaults to `graphOfPane`. */
+	graphOf?: (pane: HerdrPane) => string | undefined;
 }
 
 export function emptyHerdrState(): HerdrStateFile {
@@ -202,7 +205,16 @@ export function saveHerdrState(path: string, state: HerdrStateFile): boolean {
 	}
 }
 
-function attribute(pane: HerdrPane, options: ReconcileOptions): { repo?: string; branch?: string; graph_id?: string } {
+/** The graph a pane's directory names. Pure path work: no Git, so it is safe on every snapshot. */
+export function graphOfPane(pane: HerdrPane): string | undefined {
+	return graphIdForWorktree(pane.cwd ?? pane.foreground_cwd) ?? undefined;
+}
+
+function graphFor(pane: HerdrPane, options: ReconcileOptions): string | undefined {
+	return (options.graphOf ?? graphOfPane)(pane);
+}
+
+function attribute(pane: HerdrPane, options: ReconcileOptions): { repo?: string; branch?: string } {
 	const cwd = pane.cwd ?? pane.foreground_cwd;
 	if (!cwd || !options.attribute) return {};
 	return options.attribute(pane);
@@ -219,7 +231,7 @@ function recordFor(pane: HerdrPane, agent: string, surface: Surface, now: string
 		session_id: `herdr:${pane.terminal_id}:${now}`,
 		repo: attr.repo,
 		branch: attr.branch,
-		graph_id: attr.graph_id,
+		graph_id: graphFor(pane, options),
 		started_at: now,
 		pane_id: pane.pane_id,
 		terminal_id: pane.terminal_id ?? "",
@@ -329,7 +341,7 @@ export function reconcile(state: HerdrStateFile, panes: readonly HerdrPane[], op
 		// One session never spans two graphs. A directory that names another graph, or none, ends this session and
 		// starts a new one. That also closes a session that began before graph attribution existed. A snapshot that
 		// reports no directory says nothing about the graph, so it keeps the session as it is.
-		if ((pane.cwd ?? pane.foreground_cwd) && attribute(pane, options).graph_id !== prev.graph_id) {
+		if ((pane.cwd ?? pane.foreground_cwd) && graphFor(pane, options) !== prev.graph_id) {
 			transitions.push(endOf(identity, prev, "graph_changed"));
 			transitions.push(startOf(identity, pane, agent, surface, now, options));
 			continue;
