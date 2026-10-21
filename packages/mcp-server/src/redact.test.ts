@@ -301,6 +301,33 @@ describe("a quoted credential value with spaces loses every word", () => {
 			expect(out).not.toContain("tail");
 		}
 	});
+	test("a credential value stops at a shell operator, so the command after it survives", () => {
+		for (const line of [`DB_PASS="first"tail`, `DB_PASS='first'tail`, String.raw`DB_PASS=\"first\"tail`]) {
+			for (const out of [redact(line), redactSkillContent(line).text]) {
+				expect(out).toBe(`DB_PASS=${REDACTED}`);
+				expect(out).not.toContain("first");
+				expect(out).not.toContain("tail");
+			}
+		}
+		for (const line of [`export DB_PASS="first"&&printf ready`, String.raw`export DB_PASS=\"first\"&&printf ready`]) {
+			for (const out of [redact(line), redactSkillContent(line).text]) {
+				expect(out).toContain("&&printf ready");
+				expect(out).not.toContain("first");
+			}
+		}
+		expect(redact(`export DB_PASS="first"&&printf ready`)).toBe(`export DB_PASS=${REDACTED}&&printf ready`);
+		expect(redact(String.raw`export DB_PASS=\"first\"&&printf ready`)).toBe(`export DB_PASS=${REDACTED}&&printf ready`);
+		expect(redactSkillContent(String.raw`export DB_PASS=\"first\"&&printf ready`).text).toBe(`export DB_PASS=${REDACTED}&&printf ready`);
+	});
+	test("a placeholder value followed by a shell operator is kept on the skill path and still redacted on the event path", () => {
+		expect(redact(`export DB_PASS="example"&&printf ready`)).toBe(`export DB_PASS=${REDACTED}&&printf ready`);
+		expect(redactSkillContent(`export DB_PASS="example"&&printf ready`).text).toBe(`export DB_PASS="example"&&printf ready`);
+		expect(redact(`export DB_PASS="example"; printf ready`)).toBe(`export DB_PASS=${REDACTED}; printf ready`);
+		expect(redactSkillContent(`export DB_PASS="example"; printf ready`).text).toBe(`export DB_PASS="example"; printf ready`);
+		// The escaped form is a placeholder too: the skill path unescapes it before the placeholder check.
+		expect(redact(String.raw`export DB_PASS=\"example\"&&printf ready`)).toBe(`export DB_PASS=${REDACTED}&&printf ready`);
+		expect(redactSkillContent(String.raw`export DB_PASS=\"example\"&&printf ready`).text).toBe(String.raw`export DB_PASS=\"example\"&&printf ready`);
+	});
 	test("an escaped env reference inside JSON is kept on the skill path", () => {
 		const line = String.raw`curl -d "{\"password\": \"$DB_PASS\"}"`;
 		expect(redactSkillContent(line).text).toBe(line);
