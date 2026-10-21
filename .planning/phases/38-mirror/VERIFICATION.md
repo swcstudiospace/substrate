@@ -3,25 +3,26 @@ phase: 38-mirror
 verified: 2026-10-21
 status: passed
 score: 2 of 2 success criteria proven in the repository. Live Linear and Notion writes and a live server run are not proven, and need operator approval
-verified_on: gsd/v13x-38-mirror d01252a (code, after the PR #90 review fixes). This record is committed after d01252a.
+verified_on: gsd/v13x-38-mirror 3aea2d0 (code, after the PR #90 review fixes). This record is committed after 3aea2d0.
 covered_files: ["packages/mcp-server/src/node-artifact.ts", "packages/mcp-server/src/node-artifact.test.ts", "packages/mcp-server/src/node-artifact.read.test.ts", "packages/mcp-server/src/mirror.ts", "packages/mcp-server/src/mirror.test.ts", "packages/mcp-server/src/mirror-edges.test.ts", "packages/mcp-server/src/linear.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/graph-edges.mirror.test.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/http.test.ts", "packages/mcp-server/src/event-sources.ts", "docs/event-vocabulary.md", "docs/coordination.md"]
 ---
 
 # 38-VERIFICATION: MIRROR, graph edges into Linear, outcomes into node evidence
 
-Verified on the code at d01252a. Requirements B-D1 and B-D3 (REQUIREMENTS.md). Criteria from ROADMAP Phase 38.
+Verified on the code at 3aea2d0. Requirements B-D1 and B-D3 (REQUIREMENTS.md). Criteria from ROADMAP Phase 38.
 
 ## Proven in-repo
 
 | Claim | Evidence |
 |---|---|
-| Full repository suite passes on a throwaway Postgres 16 (`substrate_test`) | `bun test` on d01252a: 5745 pass, 2 skip, 0 fail, 5747 tests across 212 files, 127 s, exit 0, no `ENOSPC` line |
+| Full repository suite passes on a throwaway Postgres 16 (`substrate_test`) | `bun test` on 3aea2d0: 5746 pass, 2 skip, 0 fail, 5748 tests across 212 files, 123 s, exit 0, no `ENOSPC` line |
 | The two skips are the same environment gates as before | `cache-conformance.test.ts:127` and `redact.test.ts:813` (the rehearsal round trip) |
-| Types clean | `bunx tsc --noEmit` exit 0 on d01252a |
+| Types clean | `bunx tsc --noEmit` exit 0 on 3aea2d0 |
 | Relation direction and idempotency | `mirror-edges.test.ts` and `graph-edges.mirror.test.ts` pass. Mutation check on the B-D1 slice: a reversed direction and a disabled existing-relation check each failed their named Linear-level tests, and `mirror.ts` was restored byte for byte |
 | Registration refreshes the graph before any Linear wait | `graph-edges.mirror.test.ts` "while a Linear relation is still being written, reads already show the registered graph" reads through a real read-through cache after the index write. Mutation check: with the relation written before the refresh it fails (exit 1); `service.ts` restored byte for byte, and it passes again (exit 0) |
-| An edge-less, node-status-only update writes no relation | `graph-edges.mirror.test.ts` "a request that names no edges writes no relation, so a status-only update touches no tracker" |
+| An update that names no edges and gives no node a tracker reference writes no relation | `graph-edges.mirror.test.ts` "a request that names no edges writes no relation, so a status-only update touches no tracker" |
 | A node that gains a Linear reference relates its saved edges | `graph-edges.mirror.test.ts` "a node that gains a Linear reference relates the graph's saved edges, though the request names none" |
+| A null tracker field changes no link, and relates nothing | `graph-edges.mirror.test.ts` "a null tracker field changes no link, so it relates nothing" |
 | Each landed target reports its success; failures do not | `mirror.test.ts` "success reports" (5): a claim on both trackers reports Linear then Notion; a Linear failure is not reported ok while Notion still reports; no Notion page reports Linear alone; no Linear ref reports Notion alone; the swarm comment reports Linear; done reports Notion only |
 | Each landed target leaves one mirror note on the node, in its own graph-scoped session | `service.test.ts` "a claim that lands on each tracker leaves one mirror note per target, on the node": each note is on the node, carries `status: ok`, and its session is not the holder's and names the graph |
 | An approved DoD gate leaves one approved note on the node, in its own session, with no summary text | `service.test.ts` "an approval leaves one approved dod note on the node, and no summary text" |
@@ -30,9 +31,9 @@ Verified on the code at d01252a. Requirements B-D1 and B-D3 (REQUIREMENTS.md). C
 | The catalog and the vocabulary doc agree with the code | `event-sources.test.ts` and `vocabulary-lock.test.ts` pass. `dod.approved` carries the repo; `mirror.relation.ok` and `mirror.relation.failed` are listed with the substrate surface |
 | The "Not done" line that criterion 1 closes is gone | `grep` for "Not done" and the old no-write wording in `docs/` returns nothing |
 
-## PR #90 review: eight findings, all fixed
+## PR #90 review: nine findings, all fixed
 
-Greptile raised seven unresolved threads on 0f3ec19; they were fixed in d1aad36. Greptile raised an eighth on 0da10af; it was fixed in d01252a. Each was checked against the code before the change. Each thread has a reply that cites its fixing commit, and each is resolved.
+Greptile raised seven unresolved threads on 0f3ec19, fixed in d1aad36. It raised an eighth on 0da10af, fixed in d01252a, and a ninth on b0e302a, fixed in 3aea2d0. Each was checked against the code before the change. Each thread has a reply that cites its fixing commit, and each is resolved.
 
 | Finding | Fix | Test |
 |---|---|---|
@@ -43,7 +44,8 @@ Greptile raised seven unresolved threads on 0f3ec19; they were fixed in d1aad36.
 | Equal timestamps scramble steps | Time order, with same-millisecond events in chain order where linked (d1aad36) | "events in one millisecond follow the chain that links them"; "... that the chain does not link keep the order they were given" |
 | Relation steps lose their blocker | Linear steps carry `blocker_node` and `edge_kind` (d1aad36) | "a relation outcome keeps its blocker and edge kind on the Linear step, and a failed one keeps its reason" |
 | Catalog disagrees with emitted notes | `dod.approved` carries the repo; relation outcomes have their own substrate rows (d1aad36) | `event-sources.test.ts` and `vocabulary-lock.test.ts` pass |
-| A node that gains a Linear reference leaves its saved edges unrelated (P2) | A node update that sets `linear_issue_id` or `linear_identifier` relates the saved edges; a status-only update stays silent (d01252a) | "a node that gains a Linear reference relates the graph's saved edges, though the request names none" |
+| A node that gains a Linear reference leaves its saved edges unrelated (P2) | A node update that sets a Linear reference relates the saved edges; a status-only update stays silent (d01252a) | "a node that gains a Linear reference relates the graph's saved edges, though the request names none" |
+| A null tracker field triggers a Linear sweep the index never needed (P2) | Only non-null references count, as the index's coalesce does (3aea2d0) | "a null tracker field changes no link, so it relates nothing" |
 
 ## Failures met on the way, and their causes
 

@@ -1,7 +1,7 @@
 ---
 phase: 38-mirror
 requirements: [B-D1, B-D3]
-status: code and tests complete; PR #90 review addressed in d1aad36 and d01252a; live effects await operator approval
+status: code and tests complete; PR #90 review addressed in d1aad36, d01252a and 3aea2d0; live effects await operator approval
 ---
 
 # 38-SUMMARY: MIRROR
@@ -19,11 +19,11 @@ status: code and tests complete; PR #90 review addressed in d1aad36 and d01252a;
 - **One status vocabulary.** A landed target is `ok`. A failed target is a `mirror.failed` warning, or a relation outcome with `status: "failed"`. The artifact reads `ok` as landed and anything else as failed.
 - **Removed edges keep their Linear relations** (CONTEXT decision 7). Recorded as a known gap, not a change.
 
-## Decisions taken in the PR #90 review (d1aad36, d01252a)
+## Decisions taken in the PR #90 review (d1aad36, d01252a, 3aea2d0)
 
 - **Graph-scoped sessions for the notes.** A holder's session can span graphs, so a note in that session could sit between another graph's events and break that graph's chain. The success and approval notes take their own sessions, named for the graph and node, the same way relation outcomes already do.
 - **The cache is refreshed before the Linear wait.** `registerGraph` refreshes the graph cache right after the index write, in the `finally`, and then writes relations.
-- **Relations follow the tracker, not only the edges.** A request that carried edges, or that gave a node a Linear reference, relates the graph's saved edges. A saved edge may have waited for a link, so a node that gains one must relate them. A status-only update that does neither writes no relation.
+- **Relations follow a tracker reference, not only the edges.** A request that carried edges, or that gave a node a non-null Linear reference, relates the graph's saved edges. A saved edge may have waited for a link, so a node that gains one must relate them. A null field leaves the link unchanged, as the index's coalesce does, so it is not tracker work. A status-only update that does neither writes no relation.
 - **Claims come from the lease decisions.** A claim step used to come from mirror outcomes, so a node without a tracker showed no claims. Now every lease decision the ledger recorded for the node is a claim step.
 - **Time order with chain tie-break.** Events in one millisecond are placed in chain order where the chain links them, and keep the ledger's order where it does not.
 - **Node ids match the stored form.** The ledger stores an identifier as `normalizeIdentifier` cleans it (redacted and truncated to 512 characters). The read matches that form.
