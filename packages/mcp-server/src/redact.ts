@@ -143,10 +143,10 @@ const RULES = [
 		apply: (text: string) => redactDelimited(text, PEM_OPEN, PEM_CLOSE, REDACTED_PEM, true),
 	},
 	{ name: "tailscale", pattern: /tskey-[A-Za-z0-9_-]+/g, replacement: REDACTED_TSKEY },
-	{ name: "password", pattern: /(password(?:\\?["'])?\s*[:=]\s*)("[^"\n]*"[^\s"'`,;&|<>)}\]]*|'[^'\n]*'[^\s"'`,;&|<>)}\]]*|\\"[^\n]*?\\"[^\s"'`,;&|<>)}\]]*|\\'[^\n]*?\\'[^\s"'`,;&|<>)}\]]*|\S+)/gi, replacement: `$1${REDACTED}` },
-	{ name: "password-env", pattern: /\b([A-Z0-9_]*(?:PASSWORD|PASSWD|PASS)\s*=\s*)("[^"\n]*"[^\s"'`,;&|<>)}\]]*|'[^'\n]*'[^\s"'`,;&|<>)}\]]*|\\"[^\n]*?\\"[^\s"'`,;&|<>)}\]]*|\\'[^\n]*?\\'[^\s"'`,;&|<>)}\]]*|\S+)/gi, replacement: `$1${REDACTED}` },
-	{ name: "daytona", pattern: /\b(DAYTONA_(?:API_)?KEY\s*=\s*)("[^"\n]*"[^\s"'`,;&|<>)}\]]*|'[^'\n]*'[^\s"'`,;&|<>)}\]]*|\\"[^\n]*?\\"[^\s"'`,;&|<>)}\]]*|\\'[^\n]*?\\'[^\s"'`,;&|<>)}\]]*|\S+)/gi, replacement: `$1${REDACTED}` },
-	{ name: "vault", pattern: /\b((?:VAULT_TOKEN|VAULT_TOKEN_ID|X-VAULT-TOKEN)\s*[:=]\s*)("[^"\n]*"[^\s"'`,;&|<>)}\]]*|'[^'\n]*'[^\s"'`,;&|<>)}\]]*|\\"[^\n]*?\\"[^\s"'`,;&|<>)}\]]*|\\'[^\n]*?\\'[^\s"'`,;&|<>)}\]]*|\S+)/gi, replacement: `$1${REDACTED}` },
+	{ name: "password", pattern: /(password(?:\\?["'])?\s*[:=]\s*)("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)/gi, replacement: `$1${REDACTED}` },
+	{ name: "password-env", pattern: /\b([A-Z0-9_]*(?:PASSWORD|PASSWD|PASS)\s*=\s*)("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)/gi, replacement: `$1${REDACTED}` },
+	{ name: "daytona", pattern: /\b(DAYTONA_(?:API_)?KEY\s*=\s*)("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)/gi, replacement: `$1${REDACTED}` },
+	{ name: "vault", pattern: /\b((?:VAULT_TOKEN|VAULT_TOKEN_ID|X-VAULT-TOKEN)\s*[:=]\s*)("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)/gi, replacement: `$1${REDACTED}` },
 
 	// ── credentials this substrate touches ────────────────────────────────────
 	// Any FOO_TOKEN / FOO_KEY_BAR / FOO_SECRET assignment, incl. our own
@@ -154,13 +154,13 @@ const RULES = [
 	// whole underscore-delimited segment, so KEYBOARD_LAYOUT is not a secret.
 	// Lowercase `token` and `secret` keys (client_secret=...) match too. A bare lowercase
 	// api_key stays with api-key-lower, whose 16-character floor leaves `api_key: short` alone.
-	{ name: "assignment", pattern: /\b((?:[A-Z0-9]+_)*(?:API_?KEY|APIKEY|TOKEN|SECRET|KEY)(?:_[A-Z0-9]+)*(?:\\?["'])?\s*[:=]\s*|(?:[a-z0-9]+_)*(?:token|secret)(?:_[a-z0-9]+)*(?:\\?["'])?\s*[:=]\s*)("[^"\n]*"[^\s"'`,;&|<>)}\]]*|'[^'\n]*'[^\s"'`,;&|<>)}\]]*|\\"[^\n]*?\\"[^\s"'`,;&|<>)}\]]*|\\'[^\n]*?\\'[^\s"'`,;&|<>)}\]]*|\S+)/g, replacement: `$1${REDACTED}` },
+	{ name: "assignment", pattern: /\b((?:[A-Z0-9]+_)*(?:API_?KEY|APIKEY|TOKEN|SECRET|KEY)(?:_[A-Z0-9]+)*(?:\\?["'])?\s*[:=]\s*|(?:[a-z0-9]+_)*(?:token|secret)(?:_[a-z0-9]+)*(?:\\?["'])?\s*[:=]\s*)("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)/g, replacement: `$1${REDACTED}` },
 	// D-04 api-key-lower: api_key / apiKey / api-key assignments, any case; keeps the key.
 	// The value runs on past its charset to the end of the token (`[^\s"'`,;)]*`), so a value that
 	// carries punctuation is redacted whole rather than left with a tail.
 	{ name: "api-key-lower", pattern: /\b(api[_-]?key["']?\s*[:=]\s*["']?)[A-Za-z0-9_\-/.+]{16,}[^\s"'`,;)]*/gi, replacement: `$1${REDACTED}` },
 	// Authorization headers, however cased.
-	{ name: "authorization", pattern: /\b(authorization\s*[:=]\s*)(?:(?:bearer|basic|token)\s+)?("[^"\n]*"[^\s"'`,;&|<>)}\]]*|'[^'\n]*'[^\s"'`,;&|<>)}\]]*|\\"[^\n]*?\\"[^\s"'`,;&|<>)}\]]*|\\'[^\n]*?\\'[^\s"'`,;&|<>)}\]]*|\S+)/gi, replacement: `$1${REDACTED}` },
+	{ name: "authorization", pattern: /\b(authorization\s*[:=]\s*)(?:(?:bearer|basic|token)\s+)?("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)/gi, replacement: `$1${REDACTED}` },
 	{ name: "bearer", pattern: /\bBearer\s+[A-Za-z0-9._~+/-]{12,}=*/g, replacement: `Bearer ${REDACTED}` },
 	// Connection URLs carrying a password.
 	// A match needs a literal `://`, so text without one is skipped: from every word boundary the
@@ -524,15 +524,15 @@ const SKILL_RULES: readonly SkillRule[] = [
 		replacement: REDACTED,
 		accept: (matched) => /[0-9]/.test(matched),
 	},
-	{ name: "password", rule: "password", pattern: /(password(?:\\?["'])?[ \t]*[:=][ \t]*)("[^"\n]*"[^\s"'`,;&|<>)}\]]*|'[^'\n]*'[^\s"'`,;&|<>)}\]]*|\\"[^\n]*?\\"[^\s"'`,;&|<>)}\]]*|\\'[^\n]*?\\'[^\s"'`,;&|<>)}\]]*|\S+)/dgi, value: 2, replacement: REDACTED },
-	{ name: "password-env", rule: "password", pattern: /\b([A-Z0-9_]*(?:PASSWORD|PASSWD|PASS)[ \t]*=[ \t]*)("[^"\n]*"[^\s"'`,;&|<>)}\]]*|'[^'\n]*'[^\s"'`,;&|<>)}\]]*|\\"[^\n]*?\\"[^\s"'`,;&|<>)}\]]*|\\'[^\n]*?\\'[^\s"'`,;&|<>)}\]]*|\S+)/dgi, value: 2, replacement: REDACTED },
-	{ name: "daytona", rule: "assignment", pattern: /\b(DAYTONA_(?:API_)?KEY[ \t]*=[ \t]*)("[^"\n]*"[^\s"'`,;&|<>)}\]]*|'[^'\n]*'[^\s"'`,;&|<>)}\]]*|\\"[^\n]*?\\"[^\s"'`,;&|<>)}\]]*|\\'[^\n]*?\\'[^\s"'`,;&|<>)}\]]*|\S+)/dgi, value: 2, replacement: REDACTED },
-	{ name: "vault", rule: "assignment", pattern: /\b((?:VAULT_TOKEN|VAULT_TOKEN_ID|X-VAULT-TOKEN)[ \t]*[:=][ \t]*)("[^"\n]*"[^\s"'`,;&|<>)}\]]*|'[^'\n]*'[^\s"'`,;&|<>)}\]]*|\\"[^\n]*?\\"[^\s"'`,;&|<>)}\]]*|\\'[^\n]*?\\'[^\s"'`,;&|<>)}\]]*|\S+)/dgi, value: 2, replacement: REDACTED },
-	{ name: "assignment", rule: "assignment", pattern: /\b((?:[A-Z0-9]+_)*(?:API_?KEY|APIKEY|TOKEN|SECRET|KEY)(?:_[A-Z0-9]+)*(?:\\?["'])?[ \t]*[:=][ \t]*|(?:[a-z0-9]+_)*(?:token|secret)(?:_[a-z0-9]+)*(?:\\?["'])?[ \t]*[:=][ \t]*)("[^"\n]*"[^\s"'`,;&|<>)}\]]*|'[^'\n]*'[^\s"'`,;&|<>)}\]]*|\\"[^\n]*?\\"[^\s"'`,;&|<>)}\]]*|\\'[^\n]*?\\'[^\s"'`,;&|<>)}\]]*|\S+)/dg, value: 2, replacement: REDACTED },
+	{ name: "password", rule: "password", pattern: /(password(?:\\?["'])?[ \t]*[:=][ \t]*)("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)/dgi, value: 2, replacement: REDACTED },
+	{ name: "password-env", rule: "password", pattern: /\b([A-Z0-9_]*(?:PASSWORD|PASSWD|PASS)[ \t]*=[ \t]*)("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)/dgi, value: 2, replacement: REDACTED },
+	{ name: "daytona", rule: "assignment", pattern: /\b(DAYTONA_(?:API_)?KEY[ \t]*=[ \t]*)("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)/dgi, value: 2, replacement: REDACTED },
+	{ name: "vault", rule: "assignment", pattern: /\b((?:VAULT_TOKEN|VAULT_TOKEN_ID|X-VAULT-TOKEN)[ \t]*[:=][ \t]*)("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)/dgi, value: 2, replacement: REDACTED },
+	{ name: "assignment", rule: "assignment", pattern: /\b((?:[A-Z0-9]+_)*(?:API_?KEY|APIKEY|TOKEN|SECRET|KEY)(?:_[A-Z0-9]+)*(?:\\?["'])?[ \t]*[:=][ \t]*|(?:[a-z0-9]+_)*(?:token|secret)(?:_[a-z0-9]+)*(?:\\?["'])?[ \t]*[:=][ \t]*)("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)/dg, value: 2, replacement: REDACTED },
 	{ name: "api-key-lower", rule: "api-key-lower", pattern: /\b(api[_-]?key["']?[ \t]*[:=][ \t]*["']?)([A-Za-z0-9_\-/.+]{16,}[^\s"'`,;)]*)/dgi, value: 2, replacement: REDACTED },
 	// Before `authorization`, so a literal after "Authorization: Bearer" is reported as bearer.
 	{ name: "bearer", rule: "bearer", pattern: /\b(Bearer[ \t]+)([A-Za-z0-9._~+/-]{12,}=*)/dg, value: 2, replacement: REDACTED },
-	{ name: "authorization", rule: "authorization", pattern: /\b(authorization[ \t]*[:=][ \t]*)(?:(?:bearer|basic|token)[ \t]+)?("[^"\n]*"[^\s"'`,;&|<>)}\]]*|'[^'\n]*'[^\s"'`,;&|<>)}\]]*|\\"[^\n]*?\\"[^\s"'`,;&|<>)}\]]*|\\'[^\n]*?\\'[^\s"'`,;&|<>)}\]]*|\S+)/dgi, value: 2, replacement: REDACTED },
+	{ name: "authorization", rule: "authorization", pattern: /\b(authorization[ \t]*[:=][ \t]*)(?:(?:bearer|basic|token)[ \t]+)?("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)/dgi, value: 2, replacement: REDACTED },
 	{
 		name: "url-password",
 		rule: "url-password",

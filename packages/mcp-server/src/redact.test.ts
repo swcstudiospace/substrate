@@ -344,6 +344,23 @@ describe("a quoted credential value with spaces loses every word", () => {
 			lostEvery(redactSkillContent(line).text);
 		}
 	});
+	test("a backslash continuation after a quoted env reference survives on the skill path", () => {
+		const line = 'PGPASSWORD="$DB_PASS"\\\n  psql app';
+		expect(redactSkillContent(line).text).toBe(line);
+	});
+	test("a quoted value with attached text loses that text on both paths, plain or escaped", () => {
+		for (const line of [`DB_PASS="first"tail`, String.raw`DB_PASS=\"first\"tail`]) {
+			for (const out of [redact(line), redactSkillContent(line).text]) {
+				expect(out).toBe(`DB_PASS=${REDACTED}`);
+				expect(out).not.toContain("first");
+				expect(out).not.toContain("tail");
+			}
+		}
+	});
+	test("a placeholder followed by a shell operator keeps the operator on both paths", () => {
+		expect(redact(`export DB_PASS="example"&&printf ready`)).toBe(`export DB_PASS=${REDACTED}&&printf ready`);
+		expect(redactSkillContent(`export DB_PASS="example"&&printf ready`).text).toBe(`export DB_PASS="example"&&printf ready`);
+	});
 });
 
 // ── One planted secret per named rule (D-04 merge, D18-04) ────────────────────
