@@ -8,6 +8,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { auditMode } from "@substrate/audit";
 import { toolClass } from "./admission.ts";
 import { loadConfig } from "./config.ts";
+import type { FabricSuggestion } from "./fabric/types.ts";
 import { createMcpServer, type McpCaller } from "./mcp.ts";
 import { railwayFromEnv, RailwayClient, type RailwayFetch } from "./railway.ts";
 import { Substrate } from "./service.ts";
@@ -88,7 +89,7 @@ describe("fabric tools", () => {
 		const reply = await call(client, "fabric_optimize");
 		expect(reply.isError).toBe(false);
 		expect(reply.text).not.toContain(TOKEN);
-		const body = reply.json() as { suggestions: Array<{ id: string; resource: string; evidence: string }> };
+		const body = reply.json() as { suggestions: FabricSuggestion[] };
 		expect(body.suggestions).toEqual([
 			{
 				id: "railway-over-budget",

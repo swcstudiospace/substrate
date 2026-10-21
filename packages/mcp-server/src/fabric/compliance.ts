@@ -32,7 +32,7 @@ export function buildFabricCompliance(input: {
 		endpointsPrivateCheck(facts),
 		endpointPolicyCheck(facts),
 		auditCheck(),
-		redactionCheck(status, suggestions),
+		secretFreeReportCheck(status, suggestions),
 		...status.resources.map(resourceCheck),
 	];
 	const counts: Record<FabricCheckStatus, number> = { PASS: 0, FAIL: 0, NOT_APPLICABLE: 0 };
@@ -73,7 +73,7 @@ function auditCheck(): FabricCheck {
 }
 
 /** The report, as serialised, is unchanged by the redaction rules: no field carries a secret-shaped value. */
-function redactionCheck(status: FabricStatus, suggestions: readonly FabricSuggestion[]): FabricCheck {
+function secretFreeReportCheck(status: FabricStatus, suggestions: readonly FabricSuggestion[]): FabricCheck {
 	const id = "report-redaction";
 	const report = JSON.stringify({ resources: status.resources, suggestions });
 	if (redact(report) !== report) return { id, status: "FAIL", evidence: "a report field matched a redaction rule" };

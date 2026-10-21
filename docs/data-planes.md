@@ -240,6 +240,8 @@ The `fabric_status`, `fabric_optimize` and `fabric_compliance` MCP tools give on
 - **Compliance.** `fabric_compliance` reports PASS, FAIL or NOT_APPLICABLE per check. The endpoint checks read `SUBSTRATE_DB_ENDPOINT_POLICY`. An unconfigured resource is NOT_APPLICABLE, never PASS.
 - **Environment.** The fabric adds no environment variable. It reads only names documented elsewhere in this file: `SUBSTRATE_DB_ENDPOINT_POLICY`, `SUBSTRATE_DB_PROXY_ALLOW`, `SUBSTRATE_CACHE`, `SUBSTRATE_EVENT_BUS` and the `SUBSTRATE_RAILWAY_*` budget and price names.
 
+Limitation: the cache client has no ping, so a configured Dragonfly reads `unavailable` until a cache command has connected, and the fabric sends no command of its own to probe it.
+
 ## Fail-open budget (unchanged)
 
 A substrate outage never blocks a prompt. `fetchBrief` returns `""` within 1.5 s. Every cache miss and every Dragonfly, Hindsight or RAGFlow error falls through to the next source or to an empty result with a logged reason. Writes to Greptime and Timescale are the only calls allowed to fail closed, and only for the caller that asked for durability.
