@@ -35,7 +35,7 @@ interface Harness {
 const running: Harness[] = [];
 const directories: string[] = [];
 
-async function start(env: Record<string, string | undefined> = {}, stores: Partial<{ index: unknown }> = {}): Promise<Harness> {
+async function start(env: Record<string, string | undefined> = {}, stores: Partial<{ index: unknown; greptime: unknown }> = {}): Promise<Harness> {
 	const config = loadConfig(env);
 	const observability = createObservability(config, env);
 	const warnings = await observability.start();
@@ -358,5 +358,39 @@ describe("/slo.capacity", () => {
 
 		const tight = await start({ SUBSTRATE_SLO_CHECKPOINT: path, SUBSTRATE_INDEX_VOLUME_BYTES: String(2300 * MB) });
 		expect((await slo(tight)).capacity[0]?.status).toBe("breached");
+	});
+});
+
+describe("/slo.forecast", () => {
+	const LEDGER_URL_KEY = ["GREPTIME", "URL"].join("_");
+	const OBJECTIVES = ["brief.p95", "emit.success", "lease.steal_rate", "quarantine.rate"];
+	interface ForecastBody {
+		forecast: Array<{ id: string; status: string; predicted: number | null; samples: number }>;
+		breached: string[];
+	}
+
+	test("one row per objective; history off says so with no value; a predicted breach is report-only and never folds into breached", async () => {
+		const off = await start({});
+		const offBody = (await (await fetch(`${off.base}/slo`)).json()) as ForecastBody;
+		expect(offBody.forecast.map((row) => row.id)).toEqual(OBJECTIVES);
+		expect(offBody.forecast.every((row) => row.status === "history-off" && row.predicted === null)).toBe(true);
+
+		const now = Date.now();
+		const greptime = {
+			async readMetricHistory(query: { series: string; stepS: number }) {
+				const rising = query.series === "brief.p95";
+				const points = rising ? Array.from({ length: 24 }, (_, i) => ({ tsMs: now - (24 - i) * 300_000, labels: { surface: "chat" }, value: 100 + 40 * i, count: 5 })) : [];
+				return { points, stepS: query.stepS };
+			},
+		};
+		const on = await start({ [LEDGER_URL_KEY]: "http://ledger.test", SUBSTRATE_METRICS_HISTORY: "on" }, { greptime });
+		const onBody = (await (await fetch(`${on.base}/slo`)).json()) as ForecastBody;
+		expect(onBody.forecast.map((row) => row.id)).toEqual(OBJECTIVES);
+		const latency = onBody.forecast.find((row) => row.id === "brief.p95");
+		expect(latency).toMatchObject({ status: "predicted-breach", samples: 24 });
+		expect(latency?.predicted).toBeGreaterThan(800);
+		expect(onBody.forecast.find((row) => row.id === "emit.success")).toMatchObject({ status: "insufficient-data", predicted: null, samples: 0 });
+		expect(onBody.breached).toEqual(offBody.breached);
+		expect(onBody.breached).not.toContain("brief.p95");
 	});
 });

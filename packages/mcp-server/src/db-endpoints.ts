@@ -82,7 +82,7 @@ function endpointTarget(url: string): { host: string; port: string } | undefined
  */
 function canonicalHost(text: string): string | undefined {
 	try {
-		return new URL(`http://${text}/`).hostname;
+		return new URL(`http://${text}/`).hostname.replace(/\.+$/, "");
 	} catch {
 		return undefined;
 	}

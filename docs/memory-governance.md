@@ -578,6 +578,17 @@ For the before-only variant, prepare the same statement with
 `created < $2` instead of the row comparison; the timestamp must remain in
 `Index Cond`. Omitting `superseded_by is null` checks the history path.
 
+### Graph-linked results and causal recall
+
+Two optional booleans on `memory_search` add context to the reply. Both default to `false`, so a call that omits them gets the same reply as before. The paged listing takes the same two options, with the same meaning.
+
+- **`graph_linked`.** The reply gains `graph_links`, one entry per distinct `graph_id` among the returned entries. Each entry holds up to five of that graph's newest ledger events, newest first, reduced to `id`, `ts`, `kind`, `surface`, `node_id` and a `summary` cut to 200 characters. The summary is redacted before the cut. A graph with no events has an empty `events` list. The key `graph_links_notice` carries the untrusted notice.
+- **`causal`.** Each returned entry with a `source_event` gains `causal_chain`: up to five events from that event's session that come before it in session order, nearest first, reduced the same way. The chain is read from the session's newest 200 events, so a source older than those gets an empty chain. An entry without a `source_event`, or whose source event is not in its session, gets an empty chain. The key `causal_notice` says that the chain is the events that preceded the memory in its session, not proof of cause, that a source older than the session's newest 200 events gets an empty chain, and that the content is untrusted.
+
+Each ledger read runs under a 1000 millisecond budget. A timeout or error drops only that part of the reply and adds a reason to `degraded`, for example `ledger: graph reads timed out` or `ledger: session reads failed`. An unconfigured ledger gives `ledger: not configured`. Each graph and each session is read once per request, never once per entry, and at most eight distinct graphs and eight distinct sessions are read per request. Past that cap the rest are not read and the reason says so, for example `ledger: graph reads capped at 8 of 12`.
+
+Nothing new is stored for this. There is no schema change, no new event kind, no new tool and no new audit class, and the ledger table is not altered. Causality is the session order that already exists, not a stored edge.
+
 ## Derived hits and the retain outbox
 
 The index is the governed store; Hindsight holds a *derived* copy of every

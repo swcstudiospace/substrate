@@ -169,6 +169,8 @@ export type QueryableColumn = (typeof QUERYABLE_COLUMNS)[number];
  */
 export const MAX_QUERY_LIMIT = 500;
 export const DEFAULT_QUERY_LIMIT = 50;
+/** Rows one `readRecentEvents` read may return at most. */
+export const MAX_RECENT_EVENTS = 200;
 
 /** A ledger read. Values are expected already normalised — see `Substrate.queryEvents`. */
 export interface EventQuery {
@@ -1511,6 +1513,20 @@ export class GreptimeClient {
 		return this.sql(
 			`SELECT ${EVENT_COLUMN_LIST} FROM "agent_events" WHERE "${column}" = ${this.q(value)}
 			 ORDER BY "ts", "id"`,
+		);
+	}
+
+	/**
+	 * The newest rows of one session or graph, summary columns only, newest first: the bounded read behind
+	 * `memory_search`'s graph links and causal chains. `limit` is clamped to 1..{@link MAX_RECENT_EVENTS} here, so no
+	 * caller can read a whole history through it. `payload` and the hash columns are left out on purpose.
+	 */
+	async readRecentEvents(column: "session_id" | "graph_id", value: string, limit: number): Promise<Array<Record<string, unknown>>> {
+		const whole = Number.isNaN(limit) ? 1 : Math.trunc(limit);
+		const rows = Math.min(MAX_RECENT_EVENTS, Math.max(1, whole));
+		return this.sql(
+			`SELECT "id", "ts", "kind", "surface", "node_id", "summary" FROM "agent_events" WHERE "${column}" = ${this.q(value)}
+			 ORDER BY "ts" DESC, "id" DESC LIMIT ${rows}`,
 		);
 	}
 

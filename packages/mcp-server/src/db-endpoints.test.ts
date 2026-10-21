@@ -51,6 +51,7 @@ describe("classifyEndpoint", () => {
 			"postgres://127.10.0.1:5432/substrate",
 			"redis://[::1]:6379",
 			"rediss://LOCALHOST:6379",
+			"redis://localhost.:6379",
 			"postgresql://[0:0:0:0:0:0:0:1]:5432/substrate",
 		];
 		for (const plane of PLANES) {

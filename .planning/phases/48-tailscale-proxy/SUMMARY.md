@@ -32,9 +32,15 @@ status: in review (draft PR). In-repo gates green. The forwarders, their ACL, th
 
 - Typecheck: `bunx tsc --noEmit` exit 0.
 - Targeted: `db-endpoints.test.ts`, `config.test.ts`, `event-sources.test.ts`, `flag-registry.test.ts` and `store-lock.test.ts` pass, 222 and 79 in the two runs.
-- Full suite: `bun test` 5927 pass, 2 skip (pre-existing), 0 fail, over 5929 tests in 220 files.
+- Full suite: `bun test` 5983 pass, 2 skip (pre-existing), 0 fail, over 5985 tests in 223 files, on the tree merged with the current main.
 - Repo locks: `bun run check:phase-close` green (the event row and the vocabulary row match; the secret scan is clean).
 - Config reference: regenerated and checked.
+
+## Merge and review round (PR 102)
+
+- **Merge with main.** Phases 47 and 49 changed the cache settings. The cache settings take the endpoint allow set, the cache value is spread as main has it, and the endpoint settings are kept.
+- **`localhost.` is loopback.** A trailing dot is stripped before the loopback check, as `localhost` is accepted, with a regression case in the classifier test.
+- **Boot notes are tested.** Five direct tests cover the configured and unset planes, a refused Dragonfly URL, secret-free payloads, and failed writes that do not reject.
 
 ## Not proven and not done
 

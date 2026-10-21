@@ -31,6 +31,7 @@ import {
 	INGEST_RETRY_LOOKBACK_MS,
 	IngestNotRecorded,
 	MAX_QUERY_LIMIT,
+	MAX_RECENT_EVENTS,
 	queryLimit,
 	quote,
 	sqlOp,
@@ -767,6 +768,23 @@ describe("chainTip", () => {
 		await new GreptimeClient(config).readEvents("graph_id", "ut-1");
 		for (const column of EVENT_COLUMNS) expect(sql[0]).toContain(`"${column}"`);
 		expect(sql[0]).toContain('ORDER BY "ts"');
+	});
+
+	test("readRecentEvents reads only the summary columns, newest first, under a clamped limit", async () => {
+		const { sql } = stubFetch(() => records(["id"], []));
+		const client = new GreptimeClient(config);
+		await client.readRecentEvents("session_id", "s-1", 5);
+		await client.readRecentEvents("graph_id", "ut-1", 1_000);
+		await client.readRecentEvents("graph_id", "ut-1", 0);
+		const [first, capped, floored] = sql;
+		for (const column of ["id", "ts", "kind", "surface", "node_id", "summary"]) expect(first).toContain(`"${column}"`);
+		expect(first).not.toContain('"payload"');
+		expect(first).not.toContain('"hash"');
+		expect(first).toContain(`WHERE "session_id" = 's-1'`);
+		expect(first).toContain('ORDER BY "ts" DESC, "id" DESC');
+		expect(first).toMatch(/LIMIT 5$/);
+		expect(capped).toMatch(new RegExp(`LIMIT ${MAX_RECENT_EVENTS}$`));
+		expect(floored).toMatch(/LIMIT 1$/);
 	});
 
 	test("ping reports reachability without throwing", async () => {

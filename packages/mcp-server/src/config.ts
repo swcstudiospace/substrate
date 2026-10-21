@@ -331,6 +331,8 @@ export interface SubstrateConfig {
 	cacheSwr: "off" | "shadow" | "enforce";
 	/** How old a last-good brief may be and still be served stale, s (`SUBSTRATE_CACHE_SWR_WINDOW_S`, default 30, max 300). */
 	cacheSwrWindowS: number;
+	/** Pattern-based cache preload (phase 47): `SUBSTRATE_CACHE_PRELOAD` (on | off, default off), `_TOP` (1..20, default 3) and `_S` (10..3600, default 300). See `preload.ts`. */
+	cachePreload: CachePreloadSettings;
 	// uplift-5 U5-3
 	/**
 	 * Request-path flags, each defaulting to today's behaviour: `SUBSTRATE_BRIEF_GRAPH_READ=full|lite`,
@@ -682,6 +684,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		.split(",")
 		.map((root) => root.trim())
 		.filter((root) => root.length > 0);
+	const cache = cacheSettings(env, dbEndpoints.allow);
+	const cachePreload = loadCachePreloadSettings(env);
+	if (cachePreload.enabled && !cache.cacheEnabled) {
+		throw new ConfigError("SUBSTRATE_CACHE_PRELOAD=on needs the cache, which is off: set DRAGONFLY_URL to an accepted URL and leave SUBSTRATE_CACHE unset or not 0, or set SUBSTRATE_CACHE_PRELOAD=off");
+	}
 	return {
 		...readHandoffKeys(env),
 		leaseTtlSeconds: normalizeTtlSeconds(Number.isFinite(leaseTtl) ? leaseTtl : undefined),
@@ -698,7 +705,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 			: null,
 		postgresUrl: env.SUBSTRATE_PG_URL?.trim() || undefined,
 		dbEndpoints,
-		...cacheSettings(env, dbEndpoints.allow),
+		...cache,
 		linearApiKey: env.LINEAR_API_KEY?.trim() || undefined,
 		notionApiKey: env.NOTION_API_KEY?.trim() || undefined,
 		notionTaskGraphDataSource: env.NOTION_TASK_GRAPH_DS?.trim() || "be3418f0-d2d8-411b-8677-fa8a95ee63be",
@@ -752,6 +759,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// uplift-4 S4
 		cacheSwr: cacheSwrOr(env.SUBSTRATE_CACHE_SWR),
 		cacheSwrWindowS: Math.min(300, positiveOr(env.SUBSTRATE_CACHE_SWR_WINDOW_S, 30)),
+		cachePreload,
 		// uplift-5 U5-3
 		requestPath: loadRequestPathSettings(env),
 		// uplift-2 R5
@@ -1051,6 +1059,47 @@ function loadRagflowRetrievalSettings(env: Record<string, string | undefined>): 
 function cacheSwrOr(raw: string | undefined): "off" | "shadow" | "enforce" {
 	const value = raw?.trim().toLowerCase();
 	return value === "off" || value === "enforce" ? value : "shadow";
+}
+
+/** `SUBSTRATE_CACHE_PRELOAD*` (phase 47, D47-d): the pattern-based cache preload. Off unless `SUBSTRATE_CACHE_PRELOAD=on`. */
+export interface CachePreloadSettings {
+	enabled: boolean;
+	/** Repos composed per tick (`SUBSTRATE_CACHE_PRELOAD_TOP`, default 3). */
+	top: number;
+	/** Seconds between ticks (`SUBSTRATE_CACHE_PRELOAD_S`, default 300). */
+	intervalS: number;
+}
+
+export const DEFAULT_CACHE_PRELOAD_TOP = 3;
+export const DEFAULT_CACHE_PRELOAD_S = 300;
+
+/** A whole number in `[min, max]`, or `fallback` when unset. Anything else is a ConfigError naming the variable, so boot refuses it. */
+function cacheWholeNumberOr(name: string, raw: string | undefined, fallback: number, min: number, max: number): number {
+	const trimmed = raw?.trim() ?? "";
+	if (trimmed === "") return fallback;
+	const value = Number(trimmed);
+	if (!/^\d+$/.test(trimmed) || value < min || value > max) {
+		throw new ConfigError(`${name}=${JSON.stringify(trimmed)} is not a whole number from ${min} to ${max}; set one in that range or unset it for ${fallback}`);
+	}
+	return value;
+}
+
+/**
+ * `SUBSTRATE_CACHE_PRELOAD*` as the preloader reads them. A mode that is not
+ * on or off, and a number outside its range, refuse boot with a ConfigError
+ * that names the variable: a typo must not leave the preload silently off or
+ * on a different cadence.
+ */
+export function loadCachePreloadSettings(env: Record<string, string | undefined> = process.env): CachePreloadSettings {
+	const rawMode = env.SUBSTRATE_CACHE_PRELOAD?.trim().toLowerCase() ?? "";
+	if (rawMode !== "" && rawMode !== "on" && rawMode !== "off") {
+		throw new ConfigError(`SUBSTRATE_CACHE_PRELOAD=${JSON.stringify(rawMode)} is not on or off; set on or off, or unset it for off`);
+	}
+	return {
+		enabled: rawMode === "on",
+		top: cacheWholeNumberOr("SUBSTRATE_CACHE_PRELOAD_TOP", env.SUBSTRATE_CACHE_PRELOAD_TOP, DEFAULT_CACHE_PRELOAD_TOP, 1, 20),
+		intervalS: cacheWholeNumberOr("SUBSTRATE_CACHE_PRELOAD_S", env.SUBSTRATE_CACHE_PRELOAD_S, DEFAULT_CACHE_PRELOAD_S, 10, 3600),
+	};
 }
 
 /** The three uplift-5 U5-3 request-path flags, parsed. */
