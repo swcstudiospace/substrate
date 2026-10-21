@@ -11,13 +11,13 @@ import { describe, expect, test } from "bun:test";
 import { SubstrateInstruments, findCounter, sumCounter } from "@substrate/observability";
 import { MAX_BRIEF_NODES, MAX_NODE_LABEL_CHARS, composeBrief } from "./brief.ts";
 import { MAX_ENCODED_CHARS, decodeSections, encodeSections, utf8Bytes } from "./brief-profile.ts";
-import { CACHE_TTL, GRAPHS_GENERATION_KEY, MEMORY_GENERATION_KEY, ReadThroughCache, cacheKey, classOf, snapshotKey, type CacheKeyClass, type CacheRedis } from "./cache.ts";
+import { GRAPHS_GENERATION_KEY, MEMORY_GENERATION_KEY, ReadThroughCache, cacheKey, classOf, snapshotKey, type CacheKeyClass, type CacheRedis } from "./cache.ts";
 import { loadConfig } from "./config.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import { resolveRecallBanks } from "./memory-recall.ts";
 import { FakeStore } from "./memory-write.test.ts";
 import { clearEnsuredBanks } from "./planes/hindsight.ts";
-import { RECALL_TITLE_PREFIX, buildRecallQuery, fanoutSnapshotArgs, recallSnapshotArgs, type RecallSnapshot } from "./recall-snapshot.ts";
+import { DEFAULT_RECALL_TTL_S, RECALL_STALE_FACTOR, RECALL_TITLE_PREFIX, buildRecallQuery, fanoutSnapshotArgs, recallSnapshotArgs, type RecallSnapshot } from "./recall-snapshot.ts";
 import { Substrate, briefEtag, type SubstrateObserver } from "./service.ts";
 
 const SECRET = `ghp_${"a".repeat(40)}`;
@@ -259,7 +259,7 @@ describe("SUBSTRATE_BRIEF_RECALL=shadow", () => {
 			expect(w.prefetch).toEqual([{ surface: "grok-bot", result: "ok" }]);
 			const [key] = w.redis.keysOf("recall-snapshot");
 			expect(key).toBeDefined();
-			expect(w.redis.ttls.get(key!)).toBe(CACHE_TTL["recall-snapshot"]);
+			expect(w.redis.ttls.get(key!)).toBe(DEFAULT_RECALL_TTL_S * RECALL_STALE_FACTOR);
 
 			await w.cache.bump(MEMORY_GENERATION_KEY);
 			const warm = await w.substrate.briefDetailed(WITH_GRAPH, undefined, (WITH_GRAPH).surface);

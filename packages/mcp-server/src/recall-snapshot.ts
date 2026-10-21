@@ -38,12 +38,18 @@ export const MIN_RECALL_INTERVAL_S = 30;
 const MAX_RECALL_INTERVAL_S = 3600;
 export const DEFAULT_RECALL_TTL_S = 900;
 const MIN_RECALL_TTL_S = 60;
-const MAX_RECALL_TTL_S = 86_400;
+export const MAX_RECALL_TTL_S = 86_400;
 export const DEFAULT_RECALL_BUDGET_MS = 1500;
 const MIN_RECALL_BUDGET_MS = 100;
 const MAX_RECALL_BUDGET_MS = 10_000;
 /** The brief's wait for its recall read in `enforce`: outside the brief budget, and never longer than this. Not an env knob. */
 export const BRIEF_RECALL_CAP_MS = 3000;
+/** The fan-out's own abort budget ends this far inside the brief's cap, so a bank still running at the budget is cut before the cap fires. Not an env knob. */
+export const BRIEF_RECALL_BANK_MARGIN_MS = 250;
+/** The shared abort budget of the brief's fan-out: the configured budget, never past the cap less the margin. */
+export function briefRecallBudgetMs(budgetMs: number, capMs = BRIEF_RECALL_CAP_MS): number {
+	return Math.min(budgetMs, capMs - BRIEF_RECALL_BANK_MARGIN_MS);
+}
 
 /** `SUBSTRATE_BRIEF_RECALL*` as the service reads them. */
 export interface RecallConfig {
@@ -291,6 +297,11 @@ export function buildRecallQuery(repo: string, subjects: readonly string[]): str
 	return clip(named.length > 0 ? `${head}: ${named.join("; ")}` : head, MAX_QUERY_CHARS);
 }
 
+/** The `metadata.scope` a retain writes for one repo: the scope a brief's fan-out keeps. */
+export function repoScope(repo: string): string {
+	return `repo:${repo}`;
+}
+
 /**
  * The lines a snapshot keeps from one recall on `bank`, the surface's own. See `buildFanoutLines`.
  */
@@ -307,7 +318,7 @@ export function buildRecallLines(hits: readonly RecallHitInput[], bank: string, 
  * characters and deduplicated; at most three survive, in recall order.
  */
 export function buildFanoutLines(hits: readonly RecallHitInput[], banks: readonly string[], repo: string): RecallLine[] {
-	const wanted = `repo:${repo}`;
+	const wanted = repoScope(repo);
 	const lines: RecallLine[] = [];
 	const seen = new Set<string>();
 	for (const hit of hits) {

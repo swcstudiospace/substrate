@@ -122,7 +122,7 @@ import { createMirror, type EdgeOutcome, type EdgeRelation, type Mirror, type Mi
 import { runDodGate, type DodEvidence } from "./dod-gate.ts";
 import { nodeArtifact, type NodeArtifact } from "./node-artifact.ts";
 import { normalizeSubject } from "./memory-policy.ts";
-import { fanOutBriefRecall, recallMemories, resolveRecallBanks, UNTRUSTED_MEMORY_NOTICE, type RecallReply } from "./memory-recall.ts";
+import { briefFanoutOf, fanOutBriefRecall, recallMemories, resolveRecallBanks, UNTRUSTED_MEMORY_NOTICE, type BankAnswer, type RecallReply } from "./memory-recall.ts";
 import { emitRetainWarning, forwardRetain, replayRetain, retainDocumentId, type RetainDeps, type RetainOutboxSink } from "./memory-retain.ts";
 import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
@@ -134,6 +134,7 @@ import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type 
 import {
 	RecallPrefetcher,
 	WANTED_MAX,
+	briefRecallBudgetMs,
 	buildRecallQuery,
 	fanoutFresh,
 	fanoutSnapshot,
@@ -143,6 +144,7 @@ import {
 	recallKey,
 	RECALL_TITLE_PREFIX,
 	recallSnapshotArgs,
+	repoScope,
 	snapshotState,
 	type RecallLook,
 	type RecallSnapshot,
@@ -1627,32 +1629,48 @@ export class Substrate {
 		}
 	}
 
+	/** The Hindsight config and the banks a brief's fan-out reads, or null when there is nothing to read. */
+	private recallTarget(request: BriefRequest, repo: string): { hindsight: HindsightConfig; banks: string[] } | null {
+		const hindsight = this.recallGate(request, repo);
+		if (hindsight === null) return null;
+		const resolved = resolveRecallBanks(request.surface, hindsightBanksFromEnv(), hindsight.bankPrefix);
+		return "refused" in resolved ? null : { hindsight, banks: resolved.banks };
+	}
+
 	/**
 	 * The brief's recall read in `enforce`. The fan-out's answer is the `recall-snapshot` entry for the repo, the sorted banks and
 	 * the query, listed under the memory and recall generations: a memory write or a retain landing moves one of them, so the next
 	 * brief fans out again, and the TTL bounds only what no write touches. A held answer is served with no bank call while it is
-	 * within the TTL. Otherwise `memory_recall`'s fan-out runs once over the caller's own bank and the configured `sub-*` set, and its
-	 * answer is stored only when at least one bank answered; with none the read is `null` and the section is omitted. The brief bounds the wait.
+	 * within the TTL. Otherwise `memory_recall`'s fan-out runs once over the caller's own bank and the configured `sub-*` set. Its
+	 * budget ends inside the brief's cap, each bank's answer lands in `answers` as it settles, and the answer is stored only when at
+	 * least one bank answered; with none the read is `null` and the section is omitted.
 	 */
-	private async recallFanout(request: BriefRequest, repo: string | null): Promise<RecallSnapshot | null> {
-		const hindsight = this.recallGate(request, repo);
-		if (repo === null || hindsight === null) return null;
+	private async recallFanout(request: BriefRequest, repo: string | null, answers: Map<string, BankAnswer>): Promise<RecallSnapshot | null> {
+		if (repo === null) return null;
+		const target = this.recallTarget(request, repo);
+		if (target === null) return null;
+		const { hindsight, banks } = target;
 		const surface = request.surface;
-		const resolved = resolveRecallBanks(surface, hindsightBanksFromEnv(), hindsight.bankPrefix);
-		if ("refused" in resolved) return null;
 		const now = Date.now();
 		const ttlS = this.config.briefRecall.ttlS;
 		const subjects = this.recall.registry.forSurface(surface, now, WANTED_MAX).find((pair) => pair.repo === repo)?.subjects ?? [];
 		const query = buildRecallQuery(repo, subjects);
-		const args = fanoutSnapshotArgs(repo, resolved.banks, query);
+		const args = fanoutSnapshotArgs(repo, banks, query);
 		const fanOut = async (): Promise<RecallSnapshot | null> => {
-			const answer = await fanOutBriefRecall(
-				{ config: hindsight, banks: resolved.banks, fetchImpl: this.hindsightFetch, budgetMs: this.config.briefRecall.budgetMs },
+			const fanout = await fanOutBriefRecall(
+				{ config: hindsight, banks, fetchImpl: this.hindsightFetch, budgetMs: briefRecallBudgetMs(this.config.briefRecall.budgetMs) },
 				query,
 				{ surface, repo },
+				{
+					// Another repo's copy of the same text must not reach the cross-bank dedupe, where it could hide this repo's own copy.
+					keep: (hit) => hit.metadata.scope === repoScope(repo),
+					onAnswer: (bankAnswer) => {
+						answers.set(bankAnswer.bank, bankAnswer);
+					},
+				},
 			);
-			if (answer.answered.length === 0) return null;
-			return fanoutSnapshot(answer.answered, answer.hits, repo, bankForSurface(hindsight, surface), now);
+			if (fanout.answered.length === 0) return null;
+			return fanoutSnapshot(fanout.answered, fanout.hits, repo, bankForSurface(hindsight, surface), now);
 		};
 		let fetched = false;
 		// A hit returns the stored entry, which is validated below; a load runs the fan-out and stores its answer.
@@ -1676,11 +1694,32 @@ export class Substrate {
 		return fanOut();
 	}
 
+	/**
+	 * The brief's recall read at its cap: the snapshot of the banks whose answers have completed, stamped when the cap fires, or null
+	 * when none has. The fan-out keeps running past the cap, so its full answer still reaches the cache when it lands.
+	 */
+	private recallPartial(request: BriefRequest, repo: string | null, answers: ReadonlyMap<string, BankAnswer>): RecallSnapshot | null {
+		if (repo === null) return null;
+		const target = this.recallTarget(request, repo);
+		if (target === null) return null;
+		const completed = target.banks.flatMap((bank) => {
+			const answer = answers.get(bank);
+			return answer === undefined ? [] : [answer];
+		});
+		const fanout = briefFanoutOf(completed);
+		if (fanout.answered.length === 0) return null;
+		return fanoutSnapshot(fanout.answered, fanout.hits, repo, bankForSurface(target.hindsight, request.surface), Date.now());
+	}
+
 	/** The compose options recall adds: the subject sink in `shadow` and `enforce`, and the fan-out read only in `enforce` (the shadow text is exactly today's). */
 	private recallBriefOptions(request: BriefRequest, repo: string | null): Partial<BriefOptions> {
+		// The banks that have answered this brief's fan-out, filled as each one settles: the read at the cap takes whatever is here.
+		const answers = new Map<string, BankAnswer>();
 		return {
 			...(repo !== null ? { noteSubjects: (subjects: string[]) => this.recall.noteSubjects(request.surface, repo, subjects) } : {}),
-			...(this.config.briefRecall.mode === "enforce" ? { recall: { read: () => this.recallFanout(request, repo), ttlS: this.config.briefRecall.ttlS } } : {}),
+			...(this.config.briefRecall.mode === "enforce"
+				? { recall: { read: () => this.recallFanout(request, repo, answers), partial: () => this.recallPartial(request, repo, answers), ttlS: this.config.briefRecall.ttlS } }
+				: {}),
 		};
 	}
 

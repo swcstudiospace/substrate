@@ -145,6 +145,14 @@ export interface BankAnswer {
 	failure?: { reason: string; timedOut: boolean };
 }
 
+/** Options a fan-out adds to the caller's visibility. Both are optional. */
+export interface FanOutOptions {
+	/** Keeps a hit only when true. A dropped hit never counts against its bank's cap, and cannot hide a copy of the same text on another bank. */
+	keep?: (hit: RecallHit) => boolean;
+	/** Called once per bank as its answer settles, so a caller that stops waiting still holds the banks that answered. */
+	onAnswer?: (answer: BankAnswer) => void;
+}
+
 /**
  * `query` on every bank in `banks` at once, under one shared abort budget, so a
  * slow bank is cut at `budgetMs` while the others still answer. A hit this
@@ -158,6 +166,7 @@ export async function recallAcrossBanks(
 	caller: MemoryCaller,
 	fetchImpl: FetchLike,
 	budgetMs: number,
+	options: FanOutOptions = {},
 ): Promise<BankAnswer[]> {
 	// A predicate, not a post-filter: recallBank stops at MAX_RECALL_PER_BANK, so a hit this caller may not see must go before that cap counts it.
 	const keep = (hit: RecallHit): boolean =>
@@ -165,22 +174,27 @@ export async function recallAcrossBanks(
 			typeof hit.metadata.scope === "string" ? hit.metadata.scope : undefined,
 			typeof hit.metadata.repo === "string" ? hit.metadata.repo : undefined,
 			caller,
-		);
+		) && (options.keep === undefined || options.keep(hit));
 	const controller = new AbortController();
 	const budget = setTimeout(() => controller.abort(), budgetMs);
+	const ask = async (bank: string): Promise<BankAnswer> => {
+		const recalled = await recallBank(config, bank, { query, signal: controller.signal, keep }, fetchImpl);
+		if (!recalled.ok) {
+			// The shared budget is the only abort source on this leg, so a
+			// timeout here is the budget firing (uplift-2 R3): named as such,
+			// so `memory_search` can tell "Hindsight was slow" from "down".
+			if (recalled.error.kind === "timeout") return { bank, hits: [], failure: { reason: "budget exceeded", timedOut: true } };
+			return { bank, hits: [], failure: { reason: recalled.error.message, timedOut: false } };
+		}
+		return { bank, hits: recalled.value };
+	};
 	let settled: PromiseSettledResult<BankAnswer>[];
 	try {
 		settled = await Promise.allSettled(
 			banks.map(async (bank): Promise<BankAnswer> => {
-				const recalled = await recallBank(config, bank, { query, signal: controller.signal, keep }, fetchImpl);
-				if (!recalled.ok) {
-					// The shared budget is the only abort source on this leg, so a
-					// timeout here is the budget firing (uplift-2 R3): named as such,
-					// so `memory_search` can tell "Hindsight was slow" from "down".
-					if (recalled.error.kind === "timeout") return { bank, hits: [], failure: { reason: "budget exceeded", timedOut: true } };
-					return { bank, hits: [], failure: { reason: recalled.error.message, timedOut: false } };
-				}
-				return { bank, hits: recalled.value };
+				const answer = await ask(bank);
+				options.onAnswer?.(answer);
+				return answer;
 			}),
 		);
 	} finally {
@@ -252,14 +266,20 @@ export interface BriefFanout {
 /**
  * The brief's recall read: the fan-out `memory_recall` runs (`recallAcrossBanks`)
  * over `banks`, the caller's own bank first, under the caller's visibility. A
- * bank that fails is left out. This does not bound the wait; the brief does.
+ * bank that fails is left out. This does not bound the wait; the brief does, and
+ * `options.onAnswer` lets the brief keep the banks that answered by then.
  */
 export async function fanOutBriefRecall(
 	deps: { config: HindsightConfig; banks: readonly string[]; fetchImpl?: FetchLike; budgetMs: number },
 	query: string,
 	caller: MemoryCaller,
+	options: FanOutOptions = {},
 ): Promise<BriefFanout> {
-	const answers = await recallAcrossBanks(deps.config, deps.banks, query, caller, deps.fetchImpl ?? fetch, deps.budgetMs);
+	return briefFanoutOf(await recallAcrossBanks(deps.config, deps.banks, query, caller, deps.fetchImpl ?? fetch, deps.budgetMs, options));
+}
+
+/** The brief's view of bank answers, in the order given: the banks that answered, and their hits, best first. */
+export function briefFanoutOf(answers: readonly BankAnswer[]): BriefFanout {
 	return {
 		answered: answers.filter((answer) => answer.failure === undefined).map((answer) => answer.bank),
 		hits: rankedHits(answers),

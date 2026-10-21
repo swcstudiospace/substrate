@@ -11,7 +11,7 @@ import { loadConfig } from "./config.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import { fanOutBriefRecall } from "./memory-recall.ts";
 import { clearEnsuredBanks, hindsightFromEnv } from "./planes/hindsight.ts";
-import { BRIEF_RECALL_CAP_MS, DEFAULT_RECALL_TTL_S, RECALL_TITLE_PREFIX, buildRecallQuery, fanoutSnapshot, type RecallSnapshot } from "./recall-snapshot.ts";
+import { BRIEF_RECALL_CAP_MS, DEFAULT_RECALL_TTL_S, RECALL_TITLE_PREFIX, briefRecallBudgetMs, buildRecallQuery, fanoutSnapshot, type RecallSnapshot } from "./recall-snapshot.ts";
 import { Substrate } from "./service.ts";
 
 const REQUEST = { repo: "acme/app", surface: "grok-bot" } as const;
@@ -198,10 +198,20 @@ describe("brief recall fan-out (SUBSTRATE_BRIEF_RECALL=enforce)", () => {
 		const sections = await composeBriefSections(REQUEST, { index: null, greptime: null }, undefined, undefined, {
 			budgetMs: 1200,
 			recentWindowDays: 30,
-			recall: { read: () => new Promise<RecallSnapshot | null>(() => {}), ttlS: DEFAULT_RECALL_TTL_S, capMs: 50 },
+			recall: { read: () => new Promise<RecallSnapshot | null>(() => {}), partial: () => null, ttlS: DEFAULT_RECALL_TTL_S, capMs: 50 },
 		});
 		expect(performance.now() - started).toBeLessThan(1000);
 		expect(sections.some((section) => section.id === "recall")).toBe(false);
+	});
+
+	test("a recall read that never answers falls back to its partial snapshot at the cap", async () => {
+		const partial = fanoutSnapshot(["sub-omp"], [{ bank: "sub-omp", text: "omp lesson: fence the lease", scope: `repo:${REPO}` }], REPO, OWN_BANK, Date.now());
+		const sections = await composeBriefSections(REQUEST, { index: null, greptime: null }, undefined, undefined, {
+			budgetMs: 1200,
+			recentWindowDays: 30,
+			recall: { read: () => new Promise<RecallSnapshot | null>(() => {}), partial: () => partial, ttlS: DEFAULT_RECALL_TTL_S, capMs: 50 },
+		});
+		expect(sections.find((section) => section.id === "recall")?.lines.join("\n")).toContain("- omp lesson: fence the lease");
 	});
 
 	test("a bank that answers after the injected cap does not hold the brief past it", async () => {
@@ -220,7 +230,7 @@ describe("brief recall fan-out (SUBSTRATE_BRIEF_RECALL=enforce)", () => {
 			const sections = await composeBriefSections(REQUEST, { index: null, greptime: null }, undefined, undefined, {
 				budgetMs: 1200,
 				recentWindowDays: 30,
-				recall: { read, ttlS: DEFAULT_RECALL_TTL_S, capMs: 50 },
+				recall: { read, partial: () => null, ttlS: DEFAULT_RECALL_TTL_S, capMs: 50 },
 			});
 			expect(performance.now() - started).toBeLessThan(300);
 			expect(sections.some((section) => section.id === "recall")).toBe(false);
@@ -229,6 +239,65 @@ describe("brief recall fan-out (SUBSTRATE_BRIEF_RECALL=enforce)", () => {
 
 	test("the cap is BRIEF_RECALL_CAP_MS, 3000 ms", () => {
 		expect(BRIEF_RECALL_CAP_MS).toBe(3000);
+	});
+
+	test("the fan-out's budget ends before the cap, and a configured budget under the cap is kept", () => {
+		expect(briefRecallBudgetMs(5000)).toBeLessThan(BRIEF_RECALL_CAP_MS);
+		expect(briefRecallBudgetMs(1500)).toBe(1500);
+	});
+
+	test("a bank slower than the cap is cut inside it, and the banks that answered stay in the brief", async () => {
+		await withHindsight(async () => {
+			const fake = new HindsightFake();
+			seedBanks(fake);
+			fake.recallDelayMs["sub-omp"] = 3500;
+			const w = world({ ...ENFORCE, SUBSTRATE_BRIEF_RECALL_BUDGET_MS: "5000" }, fake);
+			const text = (await w.substrate.briefDetailed(REQUEST, undefined, REQUEST.surface)).text;
+			expect(text).toContain(RECALL_TITLE_PREFIX);
+			expect(text).toContain("- use pnpm, not npm");
+			expect(text).toContain("- hermes lesson: rotate keys");
+			expect(text).toContain("- cursor lesson: index first");
+			expect(text).not.toContain("omp lesson");
+		});
+	}, 15_000);
+
+	test("a bank that ignores the fan-out's abort is passed over at the cap, and the banks that completed stay in the brief", async () => {
+		await withHindsight(async () => {
+			const fake = new HindsightFake();
+			seedBanks(fake);
+			fake.recallDeafMs["sub-omp"] = 3500;
+			const w = world({ ...ENFORCE, SUBSTRATE_BRIEF_RECALL_BUDGET_MS: "5000" }, fake);
+			const text = (await w.substrate.briefDetailed(REQUEST, undefined, REQUEST.surface)).text;
+			expect(text).toContain(RECALL_TITLE_PREFIX);
+			expect(text).toContain("- use pnpm, not npm");
+			expect(text).toContain("- hermes lesson: rotate keys");
+			expect(text).not.toContain("omp lesson");
+		});
+	}, 15_000);
+
+	test("another repo's copy of the same text, scored higher on another bank, does not hide the repo's own copy", async () => {
+		await withHindsight(async () => {
+			const fake = new HindsightFake();
+			seedBanks(fake);
+			// The same text retained for another repo ranks first on sub-omp; the own bank's copy for this repo must survive the dedupe.
+			fake.seed("sub-omp", [{ id: "omp-other", text: "use pnpm, not npm", document_id: "omp-other-doc", tags: [], metadata: { scope: "repo:other/app" }, score: 0.95 }]);
+			const w = world(ENFORCE, fake);
+			const text = (await w.substrate.briefDetailed(REQUEST, undefined, REQUEST.surface)).text;
+			expect(text.split("\n").filter((line) => line === "- use pnpm, not npm")).toHaveLength(1);
+		});
+	});
+
+	test("a configured one-hour TTL is the fan-out entry's life, not the 30-minute class cap", async () => {
+		await withHindsight(async () => {
+			const fake = new HindsightFake();
+			seedBanks(fake);
+			const w = world({ ...ENFORCE, SUBSTRATE_BRIEF_RECALL_TTL_S: "3600" }, fake);
+			await w.substrate.briefDetailed(REQUEST, undefined, REQUEST.surface);
+			const [key] = w.redis.keysOf("recall-snapshot");
+			const ttl = w.redis.ttls.get(key ?? "") ?? -1;
+			expect(ttl).toBeLessThanOrEqual(3600);
+			expect(ttl).toBeGreaterThanOrEqual(3598);
+		});
 	});
 });
 
