@@ -490,7 +490,7 @@ Plans:
 **Requirements**: uplift-7 audit row "With the substrate unavailable, a dependent client finishes degraded; queued writes apply exactly once"
 **Success Criteria** (what must be TRUE):
 
-  1. A memory write carrying an idempotency key applies once across replays and returns the original result. A skill write dedupes on its natural key: a replay answers `existing` (propose) or `exists` (approve) with the existing record, and writes no second row, event, push or PR. Amended 2026-10-21 by the project owner's decision: skills have no idempotency key.
+  1. A memory write carrying an idempotency key applies once across replays and returns the original result. A skill approve replay answers `exists` with the existing record and writes no second row or event. A skill propose replay answers `existing` with no second push or PR. Amended 2026-10-21 by the project owner's decision: skills have no idempotency key. A propose replay still emits one `skill.propose` audit event per call (service.ts:2772-2788).
   2. A write without a key behaves exactly as it does today.
   3. The 503 path is covered by a test.
   4. The dependent client's local queue is built for the identified client, or recorded as a decision request with a default.
