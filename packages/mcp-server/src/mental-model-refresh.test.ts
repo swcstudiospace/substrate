@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { MentalModelRef } from "./config.ts";
+import { EVENT_SOURCES } from "./event-sources.ts";
 import type { TimerApi } from "./metrics-history.ts";
 import { MentalModelRefresh, REFRESH_ACTION, REFRESH_INTERVAL_MS, isoWeek } from "./mental-model-refresh.ts";
 import type { FetchLike, HindsightConfig } from "./planes/hindsight.ts";
@@ -171,6 +172,26 @@ describe("the weekly mental-model refresh", () => {
 				payload: { action: "memory.mental_model.refresh", bank: "sub-omp", mental_model_id: "mm_a", status: "ok" },
 			},
 		]);
+		refresh.stop();
+	});
+
+	test("each emitted outcome equals the catalog sample of its row: the accepted note and the failed warning", async () => {
+		const { refresh, fake, events } = setup({
+			models: [
+				{ bank: "sub-omp", id: "mm_a" },
+				{ bank: "sub-omp", id: "mm_b" },
+			],
+			answer: (url) => (url.includes("mm_a") ? accepted() : new Response(JSON.stringify({ detail: "down" }), { status: 500, headers: { "content-type": "application/json" } })),
+		});
+		refresh.start();
+		fake.fire();
+		await refresh.flush();
+		const sampleOf = (id: string) => {
+			const row = EVENT_SOURCES.find((source) => source.id === id);
+			if (row === undefined) throw new Error(`no catalog row ${id}`);
+			return row.sample();
+		};
+		expect(events).toEqual([sampleOf("memory.mental_model.refresh"), sampleOf("memory.mental_model.refresh.failed")]);
 		refresh.stop();
 	});
 

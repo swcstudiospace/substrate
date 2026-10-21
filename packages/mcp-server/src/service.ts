@@ -1423,7 +1423,11 @@ export class Substrate {
 			const recallActive = recallMode !== "off" && bearerSurface != null && bearerSurface === request.surface;
 			const recallRead: Promise<RecallRead> | null =
 				recallMode === "off" ? null : recallActive ? this.readRecall(request, recallRepo) : Promise.resolve<RecallRead>({ look: "disabled", snapshot: null });
-			const recallOptions = recallRead === null || !recallActive ? {} : this.recallBriefOptions(request, recallRepo);
+			// Set when a compose's recall read is cut at its cap: that brief is served without the fan-out's late answer, so it is not stored.
+			let recallCut = false;
+			const recallOptions = recallRead === null || !recallActive ? {} : this.recallBriefOptions(request, recallRepo, () => {
+				recallCut = true;
+			});
 			const noteRecall = (served: readonly BriefSection[] | null, detail: BriefDetail): Promise<void> => this.noteBriefRecall(request, recallRead, served, detail);
 			// One compose, parameterised by where it reports its lease note and failed sources, so a
 			// background refresh never touches this call's `failed` (S4) and every caller gets the
@@ -1493,7 +1497,7 @@ export class Substrate {
 					...(recallMode === "enforce" ? [RECALL_GENERATION_KEY] : []),
 				],
 				refreshAt: () => noted.at(-1) ?? null,
-				store: (value: string) => failed.length === 0 && decodeSections(value) !== null,
+				store: (value: string) => failed.length === 0 && !recallCut && decodeSections(value) !== null,
 				load: async () => {
 					loaded = true;
 					liveSections = await compose(noted, failed);
@@ -1527,7 +1531,7 @@ export class Substrate {
 										load: async () => encodeSections(await compose(refreshNoted, refreshFailed)),
 										refreshAt: () => refreshNoted.at(-1) ?? null,
 										// The same rule as the foreground write: a value `decodeSections` would reject is not stored, so the stale one is kept.
-										store: (value: string) => refreshFailed.length === 0 && decodeSections(value) !== null,
+										store: (value: string) => refreshFailed.length === 0 && !recallCut && decodeSections(value) !== null,
 										stored: async (value: string) => {
 											const fresh = decodeSections(value);
 											if (fresh !== null) await keep(renderFullBrief(fresh), fresh, refreshNoted.at(-1) ?? null);
@@ -1557,7 +1561,7 @@ export class Substrate {
 			const live = renderFullBrief(sections);
 			const profileSurface = bearerSurface ?? request.surface;
 			if (failed.length === 0) {
-				if (loaded) {
+				if (loaded && !recallCut) {
 					await keep(live, sections, noted.at(-1) ?? null);
 				}
 				const detail = this.servedBrief(live, sections, "complete", failed, null, requestedProfile, profileSurface, staleAgeS);
@@ -1711,14 +1715,14 @@ export class Substrate {
 		return fanoutSnapshot(fanout.answered, fanout.hits, repo, bankForSurface(target.hindsight, request.surface), Date.now());
 	}
 
-	/** The compose options recall adds: the subject sink in `shadow` and `enforce`, and the fan-out read only in `enforce` (the shadow text is exactly today's). */
-	private recallBriefOptions(request: BriefRequest, repo: string | null): Partial<BriefOptions> {
+	/** The compose options recall adds: the subject sink in `shadow` and `enforce`, and the fan-out read only in `enforce` (the shadow text is exactly today's). `onCut` runs when the read is cut at the cap. */
+	private recallBriefOptions(request: BriefRequest, repo: string | null, onCut: () => void): Partial<BriefOptions> {
 		// The banks that have answered this brief's fan-out, filled as each one settles: the read at the cap takes whatever is here.
 		const answers = new Map<string, BankAnswer>();
 		return {
 			...(repo !== null ? { noteSubjects: (subjects: string[]) => this.recall.noteSubjects(request.surface, repo, subjects) } : {}),
 			...(this.config.briefRecall.mode === "enforce"
-				? { recall: { read: () => this.recallFanout(request, repo, answers), partial: () => this.recallPartial(request, repo, answers), ttlS: this.config.briefRecall.ttlS } }
+				? { recall: { read: () => this.recallFanout(request, repo, answers), partial: () => { onCut(); return this.recallPartial(request, repo, answers); }, ttlS: this.config.briefRecall.ttlS } }
 				: {}),
 		};
 	}

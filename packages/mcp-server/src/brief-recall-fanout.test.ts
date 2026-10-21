@@ -287,6 +287,29 @@ describe("brief recall fan-out (SUBSTRATE_BRIEF_RECALL=enforce)", () => {
 		});
 	});
 
+	test("a brief whose recall read is cut at the cap is not stored, so no later brief is served without its recall", async () => {
+		await withHindsight(async () => {
+			const fake = new HindsightFake();
+			seedBanks(fake);
+			fake.recallDeafMs["sub-omp"] = 3500;
+			const w = world({ ...ENFORCE, SUBSTRATE_BRIEF_RECALL_BUDGET_MS: "5000" }, fake);
+			const detail = await w.substrate.briefDetailed(REQUEST, undefined, REQUEST.surface);
+			expect(detail.text).toContain(RECALL_TITLE_PREFIX);
+			expect(w.redis.keysOf("brief")).toEqual([]);
+			expect(w.redis.keysOf("brief-snapshot")).toEqual([]);
+		});
+	}, 15_000);
+
+	test("a brief whose recall read finishes inside the cap is stored", async () => {
+		await withHindsight(async () => {
+			const fake = new HindsightFake();
+			seedBanks(fake);
+			const w = world(ENFORCE, fake);
+			await w.substrate.briefDetailed(REQUEST, undefined, REQUEST.surface);
+			expect(w.redis.keysOf("brief")).toHaveLength(1);
+		});
+	});
+
 	test("a configured one-hour TTL is the fan-out entry's life, not the 30-minute class cap", async () => {
 		await withHindsight(async () => {
 			const fake = new HindsightFake();

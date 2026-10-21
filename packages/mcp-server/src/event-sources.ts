@@ -1023,7 +1023,7 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		sample: () => ({
 			surface: "substrate",
 			kind: "note",
-			summary: "mental model refresh ok: sub-omp mm_a",
+			summary: "mental model refresh accepted: sub-omp/mm_a",
 			session_id: "mental-model:sub-omp:mm_a:2026-W43",
 			payload: { action: "memory.mental_model.refresh", bank: "sub-omp", mental_model_id: "mm_a", status: "ok" },
 		}),
