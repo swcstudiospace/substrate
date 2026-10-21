@@ -162,9 +162,15 @@ Admission budgets (uplift-3 N3) are the one key class that is not a cached answe
 `SUBSTRATE_CACHE_PRELOAD` is `on` or `off`, default `off`. `SUBSTRATE_CACHE_PRELOAD_TOP`
 is an integer from 1 to 20, default 3. `SUBSTRATE_CACHE_PRELOAD_S` is an integer from
 10 to 3600, default 300. An out-of-range value, or any other switch value, refuses boot
-and names the variable. `on` with no cache (`DRAGONFLY_URL` unset or refused, or
-`SUBSTRATE_CACHE=0`) refuses boot too, and names `SUBSTRATE_CACHE_PRELOAD`: a warm-up
+and names the variable. `on` with no cache because `DRAGONFLY_URL` is unset or
+`SUBSTRATE_CACHE=0` refuses boot too, and names `SUBSTRATE_CACHE_PRELOAD`: a warm-up
 with nowhere to store would only compose.
+
+A `DRAGONFLY_URL` refused by the endpoint policy is a different case. Under `warn` the refusal
+is fail-open, as for the cache: the server boots uncached with the preload off, and stderr logs
+`SUBSTRATE_CACHE_PRELOAD=on skipped: the cache endpoint is refused, so the cache is off`. Under
+`enforce` the refused endpoint refuses boot first (see Endpoint policy), so the preload's own
+check is never reached.
 
 With the switch on, the substrate counts brief requests per repo over a sliding hour,
 for at most 256 repos, and remembers the last brief request seen for each repo: its
