@@ -2650,8 +2650,9 @@ export class Substrate {
 		// the cache. Refresh either way; a throw still reaches the caller.
 		//
 		// The refresh comes before the Linear relations, so a slow tracker never keeps
-		// the old graph on show. Relations are written only for a request that carried
-		// edges: an update that names none changes no relation.
+		// the old graph on show. Relations are written for a request that carried edges, or
+		// that gives a node a Linear reference: a saved edge may have waited for that link.
+		// An update that does neither changes no relation.
 		const view = await (async () => {
 			try {
 				return withoutLeaseIds(await index.registerGraph(plan));
@@ -2659,7 +2660,8 @@ export class Substrate {
 				await this.bumpGraph(plan.graph_id);
 			}
 		})();
-		if (plan.edges !== undefined) await this.mirrorEdges(view);
+		const tracker = (plan.nodes ?? []).some((node) => node.linear_issue_id !== undefined || node.linear_identifier !== undefined);
+		if (plan.edges !== undefined || tracker) await this.mirrorEdges(view);
 		return view;
 	}
 

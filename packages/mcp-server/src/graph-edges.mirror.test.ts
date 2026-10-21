@@ -176,6 +176,22 @@ describe("graph edges at registration", () => {
 		expect(emitted).toEqual([]);
 	});
 
+	test("a node that gains a Linear reference relates the graph's saved edges, though the request names none", async () => {
+		const view = viewOf(REFS, [{ from_node: "n2", to_node: "n1", kind: "requires" }]);
+		const related: unknown[] = [];
+		const mirror = {
+			relateEdges: async (edges: unknown[]) => {
+				related.push(edges);
+				return [];
+			},
+		} as unknown as Mirror;
+		const { substrate } = harness(view, mirror);
+
+		await substrate.registerGraph({ graph_id: GRAPH, nodes: [{ node_id: "n2", linear_identifier: "SWC-2" }] } as never);
+
+		expect(related).toHaveLength(1);
+	});
+
 	test("while a Linear relation is still being written, reads already show the registered graph", async () => {
 		const view = viewOf(REFS, [{ from_node: "n2", to_node: "n1", kind: "requires" }]);
 		let stored = { ...view, notion_task_page: "before" };
