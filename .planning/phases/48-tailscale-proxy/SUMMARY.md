@@ -32,7 +32,7 @@ status: in review (draft PR). In-repo gates green. The forwarders, their ACL, th
 
 - Typecheck: `bunx tsc --noEmit` exit 0.
 - Targeted: `db-endpoints.test.ts`, `config.test.ts`, `event-sources.test.ts`, `flag-registry.test.ts` and `store-lock.test.ts` pass, 222 and 79 in the two runs.
-- Full suite: `bun test` 6014 pass, 2 skip (pre-existing), 0 fail, over 6016 tests in 224 files, on the tree merged with the current main (which includes phase 50).
+- Full suite: `bun test` 6015 pass, 2 skip (pre-existing), 0 fail, over 6017 tests in 224 files, on the tree merged with the current main (which includes phase 50).
 - Repo locks: `bun run check:phase-close` green (the event row and the vocabulary row match; the secret scan is clean).
 - Config reference: regenerated and checked.
 
@@ -41,6 +41,8 @@ status: in review (draft PR). In-repo gates green. The forwarders, their ACL, th
 - **Merge with main.** Phases 47 and 49 changed the cache settings. The cache settings take the endpoint allow set, the cache value is spread as main has it, and the endpoint settings are kept.
 - **`localhost.` is loopback.** A trailing dot is stripped before the loopback check, as `localhost` is accepted, with a regression case in the classifier test.
 - **Boot notes are tested.** Five direct tests cover the configured and unset planes, a refused Dragonfly URL, secret-free payloads, and failed writes that do not reject.
+- **Preload and a refused endpoint.** `SUBSTRATE_CACHE_PRELOAD=on` with a refused Dragonfly URL now boots in warn mode with the preload off and one stderr note. Enforce still refuses boot, and every other cache-off case still refuses boot. Before this, the refusal turned the cache off and the preload guard then stopped startup with exit 78.
+- **Secret test.** The secret-free boot note test searches the event payloads only. The random ids and hashes can contain the port digits.
 
 ## Not proven and not done
 

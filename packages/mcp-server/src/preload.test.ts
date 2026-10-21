@@ -379,6 +379,15 @@ describe("SUBSTRATE_CACHE_PRELOAD settings", () => {
 		expect(loadConfig({ SUBSTRATE_CACHE_PRELOAD: "off" }).cachePreload.enabled).toBe(false);
 		expect(loadConfig({}).cachePreload.enabled).toBe(false);
 	});
+
+	test("preload on with a refused Dragonfly URL boots in warn mode with the preload off, and enforce still refuses boot", () => {
+		const refusedEnv = { SUBSTRATE_CACHE_PRELOAD: "on", DRAGONFLY_URL: "redis://cache.test.invalid:6379/0" };
+		const warned = loadConfig(refusedEnv);
+		expect(warned.dragonflyRefused).not.toBeNull();
+		expect(warned.cacheEnabled).toBe(false);
+		expect(warned.cachePreload.enabled).toBe(false);
+		expect(() => loadConfig({ ...refusedEnv, SUBSTRATE_DB_ENDPOINT_POLICY: "enforce" })).toThrow(ConfigError);
+	});
 });
 
 describe("RepoAccess field bounds", () => {

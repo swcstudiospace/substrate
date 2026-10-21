@@ -687,10 +687,15 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		.map((root) => root.trim())
 		.filter((root) => root.length > 0);
 	const cache = cacheSettings(env, dbEndpoints.allow);
-	const cachePreload = loadCachePreloadSettings(env);
-	if (cachePreload.enabled && !cache.cacheEnabled) {
+	const cachePreloadRequested = loadCachePreloadSettings(env);
+	if (cachePreloadRequested.enabled && !cache.cacheEnabled && cache.dragonflyRefused === null) {
 		throw new ConfigError("SUBSTRATE_CACHE_PRELOAD=on needs the cache, which is off: set DRAGONFLY_URL to an accepted URL and leave SUBSTRATE_CACHE unset or not 0, or set SUBSTRATE_CACHE_PRELOAD=off");
 	}
+	// A refused Dragonfly URL is fail-open in warn mode, and enforce already refused boot in loadDbEndpointSettings. The cache is off, so the preload is skipped, not refused.
+	if (cachePreloadRequested.enabled && !cache.cacheEnabled) {
+		process.stderr.write("[substrate] SUBSTRATE_CACHE_PRELOAD=on skipped: the cache endpoint is refused, so the cache is off\n");
+	}
+	const cachePreload = cache.cacheEnabled ? cachePreloadRequested : { ...cachePreloadRequested, enabled: false };
 	return {
 		...readHandoffKeys(env),
 		leaseTtlSeconds: normalizeTtlSeconds(Number.isFinite(leaseTtl) ? leaseTtl : undefined),
