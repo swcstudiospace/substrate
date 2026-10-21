@@ -181,7 +181,8 @@ describe("recommendation floor", () => {
 		const entries = new Map<string, { type: string; length: number }>();
 		for (let index = 0; index < 1000; index += 1) entries.set(`substrate:v1:gen:g${index}`, { type: "string", length: 1 });
 		for (let index = 0; index < 5; index += 1) entries.set(cacheKey("brief", "cursor", String(index), { index }), { type: "string", length: 256 * 1024 });
-		const stats = await collectStats(new FakeServer(entries), { headroom: 4 });
+		// The wall budget is explicit: the default 250 ms can end this 1005-key scan early on a loaded host, which is not what this test checks.
+		const stats = await collectStats(new FakeServer(entries), { headroom: 4, wallBudgetMs: 60_000 });
 		const total = 1000 + 5 * 256 * 1024;
 
 		expect(stats.recommendation.inputs.p99Bytes).toBe(1);

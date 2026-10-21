@@ -6,7 +6,7 @@ import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PRODUCTION_PORTS, pickFreePort, refuseSmokeUrl, smokeToolResult } from "./rehearsal.ts";
-import { resolveBearer } from "../packages/cli/src/token.ts";
+import { DEFAULT_TOKENS_DIR, firstLine, resolveBearer } from "../packages/cli/src/token.ts";
 import { mapNotionRows, type NotionRow } from "../packages/mcp-server/src/backfill.ts";
 
 /**
@@ -372,6 +372,7 @@ export function scratchGitEnv(hooksDir: string): Record<string, string | undefin
 export interface RunContext {
 	base: string;
 	bearer: string | null;
+	surfaceBearers: Readonly<Record<string, string | null>>;
 	tag: string;
 	repo: string;
 	live: string | undefined;
@@ -645,6 +646,19 @@ function checkoutArgv(rel: string, ...args: string[]): string[] {
 	return [process.execPath, `${CHECKOUT_ROOT}/${rel}`, ...args];
 }
 
+/** Store URL variables no child inherits: the UAT reaches the substrate over HTTP only. The ledger name is composed, as in rehearsal.ts. */
+const STORE_ENV_KEYS = [`${"GREPTIME"}_URL`, "SUBSTRATE_PG_URL", "DRAGONFLY_URL"] as const;
+
+/** The child environment: the parent's variables with `env` on top; `undefined` clears one, and store URLs never pass. */
+export function childProcessEnv(env: Record<string, string | undefined>): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const [key, value] of Object.entries({ ...process.env, ...env })) {
+		if (value !== undefined) out[key] = value;
+	}
+	for (const key of STORE_ENV_KEYS) delete out[key];
+	return out;
+}
+
 export async function runChild(
 	argv: string[],
 	env: Record<string, string | undefined>,
@@ -653,12 +667,7 @@ export async function runChild(
 	timeoutMs = 30000,
 ): Promise<{ status: number; stdout: string; elapsedMs: number; error?: string }> {
 	const started = performance.now();
-	// An `undefined` entry clears an inherited variable (see scratchGitEnv):
-	// drop it rather than passing it to the spawn, which takes strings only.
-	const childEnv: Record<string, string> = {};
-	for (const [key, value] of Object.entries({ ...process.env, ...env })) {
-		if (value !== undefined) childEnv[key] = value;
-	}
+	const childEnv = childProcessEnv(env);
 	try {
 		const proc = Bun.spawn(argv, { env: childEnv, stdin: stdin === undefined ? "ignore" : "pipe", stdout: "pipe", stderr: "pipe", cwd });
 		if (stdin !== undefined && proc.stdin) {
@@ -717,8 +726,10 @@ async function scenario6(ctx: RunContext): Promise<ScenarioVerdict> {
 			return problems;
 		}
 
+		const cursorBearer: string | null = ctx.surfaceBearers.cursor ?? null;
 		const scratch = mkdtempSync(join(tmpdir(), "uat6-"));
-		const repoEnv = { SUBSTRATE_URL: ctx.base, SUBSTRATE_TOKEN: ctx.bearer ?? "" };
+		// No surface token means no bearer, never the operator's: the token and its file variable are cleared for children.
+		const repoEnv = { SUBSTRATE_URL: ctx.base, SUBSTRATE_TOKEN: cursorBearer ?? undefined, SUBSTRATE_TOKEN_FILE: undefined };
 		const { mkdirSync, writeFileSync } = await import("node:fs");
 		const hooksDir = join(scratch, "hooks");
 		mkdirSync(hooksDir, { recursive: true });
@@ -729,7 +740,7 @@ async function scenario6(ctx: RunContext): Promise<ScenarioVerdict> {
 		await runChild(["git", "-C", scratch, "config", "user.name", "uat"], gitEnv);
 		await runChild(["git", "-C", scratch, "commit", "-q", "--allow-empty", "-m", "seed"], gitEnv);
 
-		const before = (await mcpTool(ctx.base, ctx.bearer, "events_query", { surface: "cursor", kind: "tool.call", repo: ctx.repo, limit: 100 })) as {
+		const before = (await mcpTool(ctx.base, cursorBearer, "events_query", { surface: "cursor", kind: "tool.call", repo: ctx.repo, limit: 100 })) as {
 			events?: unknown[];
 		} | null;
 		const beforeCount = before?.events?.length ?? 0;
@@ -740,7 +751,7 @@ async function scenario6(ctx: RunContext): Promise<ScenarioVerdict> {
 		if (briefRun.status !== 0) problems.push(`sessionStart brief exited ${briefRun.status}`);
 		if (!existsSync(join(scratch, ".substrate", "BRIEF.md"))) problems.push("sessionStart wrote no .substrate/BRIEF.md");
 		else evidence.push("sessionStart: BRIEF.md written");
-		const afterBrief = (await mcpTool(ctx.base, ctx.bearer, "events_query", { surface: "cursor", kind: "tool.call", repo: ctx.repo, limit: 100 })) as {
+		const afterBrief = (await mcpTool(ctx.base, cursorBearer, "events_query", { surface: "cursor", kind: "tool.call", repo: ctx.repo, limit: 100 })) as {
 			events?: unknown[];
 		} | null;
 		if ((afterBrief?.events?.length ?? 0) !== beforeCount) problems.push("sessionStart emitted an event");
@@ -784,7 +795,7 @@ async function scenario6(ctx: RunContext): Promise<ScenarioVerdict> {
 			SUBSTRATE_SURFACE: "cursor",
 			SUBSTRATE_HOOK_WAIT: "1",
 		});
-		const commits = (await mcpTool(ctx.base, ctx.bearer, "events_query", {
+		const commits = (await mcpTool(ctx.base, cursorBearer, "events_query", {
 			surface: "cursor",
 			kind: "commit",
 			repo: ctx.repo,
@@ -795,7 +806,7 @@ async function scenario6(ctx: RunContext): Promise<ScenarioVerdict> {
 		if (matched < 1) problems.push("commit event not matched by surface, kind, repo and since");
 		else evidence.push(`commit: ${matched} event(s) matched by surface, kind, repo and since`);
 
-		const toolCalls = (await mcpTool(ctx.base, ctx.bearer, "events_query", {
+		const toolCalls = (await mcpTool(ctx.base, cursorBearer, "events_query", {
 			surface: "cursor",
 			kind: "tool.call",
 			repo: ctx.repo,
@@ -804,7 +815,7 @@ async function scenario6(ctx: RunContext): Promise<ScenarioVerdict> {
 		const toolCallCount = (toolCalls?.events ?? []).length;
 		if (toolCallCount < 1) problems.push("tool.call event not stored for the synthetic emit");
 		else evidence.push(`tool.call read-back: ${toolCallCount} row(s), synthetic emit stored`);
-		const stops = (await mcpTool(ctx.base, ctx.bearer, "events_query", {
+		const stops = (await mcpTool(ctx.base, cursorBearer, "events_query", {
 			surface: "cursor",
 			kind: "session.end",
 			since,
@@ -912,7 +923,8 @@ async function scenario8(ctx: RunContext): Promise<ScenarioVerdict> {
 		evidence.push(`graph_claim: decision ${decision === null ? "unusable" : String(decision)}`);
 		ctx.graphs.push(graph);
 
-		const emitted = await httpCall(ctx.base, ctx.bearer, "/events", {
+		const cursorBearer: string | null = ctx.surfaceBearers.cursor ?? null;
+		const emitted = await httpCall(ctx.base, cursorBearer, "/events", {
 			kind: "file.edit",
 			summary: "uat phase0 cross-surface edit",
 			surface: "cursor",
@@ -924,7 +936,8 @@ async function scenario8(ctx: RunContext): Promise<ScenarioVerdict> {
 		if (emitted.status !== 202 || !stored) problems.push(`file.edit emit status ${emitted.status ?? "unreachable"}, stored ${stored}`);
 		evidence.push(`file.edit emit: status ${emitted.status ?? "unreachable"}, stored ${stored}`);
 
-		const brief = await httpCall(ctx.base, ctx.bearer, "/brief", { repo: ctx.repo, graph_id: graph, surface: "hermes" });
+		const hermesBearer: string | null = ctx.surfaceBearers.hermes ?? null;
+		const brief = await httpCall(ctx.base, hermesBearer, "/brief", { repo: ctx.repo, graph_id: graph, surface: "hermes" });
 		if (brief.status !== 200 || typeof brief.body !== "string") return [...problems, `brief status ${brief.status ?? "unreachable"}`];
 		const briefProblems = expectCrossSurface(brief.body, ctx.repo, "claude-code");
 		problems.push(...briefProblems);
@@ -981,6 +994,19 @@ export function parseOptions(argv: string[]): UatOptions {
 	return { scenarios: scenarios ?? [], report: flag(argv, "--report"), tag, live, graph: flag(argv, "--graph") };
 }
 
+/**
+ * The bearer a non-operator surface sends: its own file in the tokens dir.
+ *
+ * The dir is `SUBSTRATE_TOKENS_DIR`, else `SUBSTRATE_REHEARSAL_TOKENS_DIR`, else
+ * the CLI default. `SUBSTRATE_TOKEN` is the operator's bearer and is never read
+ * here, so a surface request never carries it. Null when the file is missing or
+ * empty; the value is never logged.
+ */
+export function surfaceBearer(surface: string, env: Record<string, string | undefined>): string | null {
+	const dir = env.SUBSTRATE_TOKENS_DIR?.trim() || env.SUBSTRATE_REHEARSAL_TOKENS_DIR?.trim() || DEFAULT_TOKENS_DIR;
+	return firstLine(join(dir, surface));
+}
+
 export async function runUat(opts: UatOptions, env: Record<string, string | undefined>): Promise<{ report: UatReport; exit: number }> {
 	const base = (env.SUBSTRATE_URL ?? "").trim().replace(/\/+$/, "");
 	if (!base) throw new UatRefused("SUBSTRATE_URL is not set: source the harness consumer.env first");
@@ -995,9 +1021,11 @@ export async function runUat(opts: UatOptions, env: Record<string, string | unde
 	const refused = refuseWriteScenarios(selected, target, opts.live);
 	if (refused !== null) throw new UatRefused(refused);
 
+	// Identity is the bearer's surface, so a request naming another surface uses that surface's bearer.
 	const bearer = resolveBearer("claude-code", env);
+	const surfaceBearers: Readonly<Record<string, string | null>> = { cursor: surfaceBearer("cursor", env), hermes: surfaceBearer("hermes", env) };
 	const repo = runRepo(opts.tag);
-	const ctx: RunContext = { base, bearer, tag: opts.tag, repo, live: opts.live, graph: opts.graph, pluginDir: null, graphs: [] };
+	const ctx: RunContext = { base, bearer, surfaceBearers, tag: opts.tag, repo, live: opts.live, graph: opts.graph, pluginDir: null, graphs: [] };
 	const verdicts: ScenarioVerdict[] = [];
 	for (const id of selected) {
 		const runner = SCENARIO_RUNNERS[id];
