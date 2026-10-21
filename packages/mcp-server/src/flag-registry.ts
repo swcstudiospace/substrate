@@ -496,6 +496,10 @@ export const FLAGS: readonly FlagSpec[] = [
 		},
 	},
 	{ name: "SUBSTRATE_INDEX_VOLUME_BYTES", kind: "number", plane: "index", default: "none", allowed: "bytes", unset: "no capacity runway row (the ceiling is unknown)", readBy: "observability/config.ts", documented: true, doc: "docs/observability.md" },
+	{ name: "SUBSTRATE_PLANNING_ROOT", kind: "path", plane: "index", default: "none", allowed: "absolute checkout path", unset: "planning plane disabled: nothing under .planning/ is read and no default path exists", readBy: "mcp-server/planning/config.ts", documented: true },
+	{ name: "SUBSTRATE_PLANNING_PRESENCE_TTL_S", kind: "number", plane: "index", default: "90", allowed: "1..86400", unset: "90 s: a session with no heartbeat for longer is stale", readBy: "mcp-server/planning/config.ts", documented: true },
+	{ name: "SUBSTRATE_PLANNING_MAX_FILES", kind: "number", plane: "index", default: "500", allowed: "1..10000", unset: "500 documents per planning index; the rest are counted as truncated", readBy: "mcp-server/planning/config.ts", documented: true },
+	{ name: "SUBSTRATE_PLANNING_MAX_BYTES", kind: "number", plane: "index", default: "262144", allowed: "1024..4194304", unset: "256 KiB per document; a larger document is an error record", readBy: "mcp-server/planning/config.ts", documented: true },
 
 	// ── cache ─────────────────────────────────────────────────────────────────
 	{ name: "DRAGONFLY_URL", kind: "string", plane: "cache", default: "none", allowed: "loopback redis URL", unset: "no cache; a non-loopback URL is refused with a boot warning", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },
