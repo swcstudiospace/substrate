@@ -4182,7 +4182,7 @@ describe("verifyGraph hour report", () => {
 		expect(verdict.reason).toContain(extra.id);
 	});
 
-	test("anchors off stays chain-only for evidence", async () => {
+	test("anchors off returns the chain verdict only", async () => {
 		const world = sessionRows();
 		const substrate = substrateWith({ readEvents: async () => world.rows });
 		const verdict = await substrate.verifyGraph("ut-1", { anchors: false });

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { NO_POSITION, buildRecord } from "@substrate/audit";
 import { SubstrateInstruments, evaluateSlos } from "@substrate/observability";
 import { escapeHtml, renderEvidenceHtml } from "./html.ts";
-import { buildEvidence, type EvidenceInput } from "./report.ts";
+import { buildEvidence, type EvidenceBundle, type EvidenceInput } from "./report.ts";
 
 function input(overrides: Partial<EvidenceInput> = {}): EvidenceInput {
 	return {
@@ -88,11 +88,10 @@ describe("renderEvidenceHtml", () => {
 		expect(html).not.toContain("</pre><script>");
 	});
 
-	test("shows the stub warning and the pending list", () => {
+	test("shows the stub warning", () => {
 		const html = renderEvidenceHtml(buildEvidence(input()));
 
 		expect(html).toContain("This bundle is a stub");
-		expect(html).toContain("Merkle anchor");
 	});
 
 	test("renders each SLO verdict with its sample count", () => {
@@ -204,5 +203,126 @@ describe("renderEvidenceHtml", () => {
 		const html = renderEvidenceHtml(buildEvidence(input()));
 		expect(html).toContain("prefers-color-scheme: dark");
 		expect(html).toContain("color-scheme: light dark");
+	});
+
+	test("renders each anchored hour with its devnet transaction as an explorer link", () => {
+		const html = renderEvidenceHtml(
+			buildEvidence(
+				input({
+					anchors: [
+						{
+							period_start: "2026-09-01T10:00:00.000Z",
+							period_end: "2026-09-01T11:00:00.000Z",
+							status: "anchored",
+							event_count: 2,
+							root: "a".repeat(64),
+							tx_sig: "sig-anchored-1",
+							slot: 42,
+							explorer_url: "https://explorer.solana.com/tx/sig-anchored-1?cluster=devnet",
+						},
+					],
+				}),
+			),
+		);
+
+		expect(html).toContain("<h2>Anchors</h2>");
+		expect(html).toContain("2026-09-01T10:00:00.000Z");
+		expect(html).toContain('<span class="pill pill--intact">anchored</span>');
+		expect(html).toContain('href="https://explorer.solana.com/tx/sig-anchored-1?cluster=devnet"');
+		expect(html).toContain("sig-anchored-1");
+	});
+
+	test("renders an unverified hour as broken, with the reason it could not be checked", () => {
+		const html = renderEvidenceHtml(
+			buildEvidence(
+				input({
+					anchors: [
+						{
+							period_start: "2026-09-01T10:00:00.000Z",
+							period_end: "2026-09-01T11:00:00.000Z",
+							status: "unverified",
+							event_count: 2,
+							root: "a".repeat(64),
+							reason: "transaction not found on devnet",
+						},
+					],
+				}),
+			),
+		);
+
+		expect(html).toContain('<span class="pill pill--broken">unverified</span>');
+		expect(html).toContain("transaction not found on devnet");
+	});
+
+	test("renders each teachable with its digest, its hour and that hour's transaction", () => {
+		const html = renderEvidenceHtml(
+			buildEvidence(
+				input({
+					teachables: [
+						{
+							event_id: "evt_teach_1",
+							graph_id: "ut-abc123-deadbeef",
+							session_id: "sess-teach-1",
+							content_sha256: "b".repeat(64),
+							hour: "2026-09-01T10:00:00.000Z",
+							anchored: true,
+							tx_sig: "sig-anchored-1",
+							explorer_url: "https://explorer.solana.com/tx/sig-anchored-1?cluster=devnet",
+						},
+						{
+							event_id: "evt_teach_2",
+							graph_id: "ut-abc123-deadbeef",
+							content_sha256: "c".repeat(64),
+							hour: null,
+							anchored: false,
+						},
+					],
+				}),
+			),
+		);
+
+		expect(html).toContain("<h2>Teachable moments</h2>");
+		expect(html).toContain("evt_teach_1");
+		expect(html).toContain("sess-teach-1");
+		expect(html).toContain("b".repeat(64));
+		expect(html).toContain('<span class="pill pill--intact">anchored</span>');
+		expect(html).toContain('href="https://explorer.solana.com/tx/sig-anchored-1?cluster=devnet"');
+		expect(html).toContain("no ingest record");
+		expect(html).toContain('<span class="pill pill--unknown">not anchored</span>');
+	});
+
+	test("renders a tampered teachable as not anchored, with its reason", () => {
+		const html = renderEvidenceHtml(
+			buildEvidence(
+				input({
+					teachables: [
+						{
+							event_id: "evt_teach_3",
+							graph_id: "ut-abc123-deadbeef",
+							content_sha256: "d".repeat(64),
+							hour: "2026-09-01T10:00:00.000Z",
+							anchored: false,
+							reason: "tampered",
+						},
+					],
+				}),
+			),
+		);
+
+		expect(html).toContain('<span class="pill pill--unknown">not anchored</span>');
+		expect(html).toContain("tampered");
+	});
+
+	test("renders a bundle written before anchors and teachables existed, without throwing", () => {
+		// A `substrate.evidence/v0` bundle from before Phase 41 has neither array. Absent is not empty:
+		// the sections must say the data is unavailable, and the rest of the document must still render.
+		const { anchors: _anchors, teachables: _teachables, ...older } = buildEvidence(input());
+		const withEmptyLists = renderEvidenceHtml(buildEvidence(input()));
+		const html = renderEvidenceHtml(older as EvidenceBundle);
+
+		expect(html).toContain("<h2>Anchors</h2>");
+		expect(html).toContain("<h2>Teachable moments</h2>");
+		expect(html).toContain("pill--intact");
+		expect(html).not.toBe(withEmptyLists);
 	});
 });

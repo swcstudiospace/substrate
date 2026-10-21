@@ -519,7 +519,13 @@ counted, never failing. Events with no record at or after the coverage start
 are `uncovered` and fail verify naming the event — they are not anchored, and
 passing them would let an injected row through. Devnet reads run sequentially
 under `SUBSTRATE_VERIFY_TIMEOUT_MS`; the CLI's `/verify` request shares that
-budget. `buildGraphEvidence` calls verify with anchors off and stays chain-only.
+budget. `buildGraphEvidence` calls the same verify with the hour report on, so the bundle's `anchors` are this verdict's hours (below).
+
+**The evidence bundle.** `substrate evidence --graph <id>` and `POST /evidence` list every hour of the verify report in `anchors`, each with its `status`, `root` and `event_count`. `status` is `anchored`, `pending` or `unverified`. `unanchored`, `mismatch` and `unverified` all fail verify, so all of them read as `unverified` and carry the verify reason. An anchored hour carries its `tx_sig`, `slot` and `explorer_url`. An unverified hour carries `tx_sig` and `explorer_url` when it has an anchor row, and a pending hour carries neither. The explorer URL is the Solana devnet transaction page for the signature, `https://explorer.solana.com/tx/<sig>?cluster=devnet`, built locally with no network call.
+
+Each teachable moment is listed in `teachables`: `graph_id`, `session_id` (when present), `event_id`, `content_sha256` (the observation digest), its `hour`, and that hour's `tx_sig` and `explorer_url` when the hour has them. A teachable is `anchored` when its hour is, because the hour's root holds the event. A teachable with no ingest record has no hour and is not anchored.
+
+`substrate evidence` exits 1 when any hour is `unverified`, and does not fail on `pending`. The memo format, the `anchors` row and the signer are unchanged: the bundle reads what the hourly job already wrote. The live devnet send is operator-gated (`docs/agent-cards.md` G1 to G3) and is not run by the tests, which use a fake read-back.
 
 **The D-era window keeps today's verify behaviour.** The per-session check
 already reports D-era multi-event sessions (2026-09-27 to 10-01) as broken —

@@ -705,7 +705,7 @@ describe("the evidence bundle's app chain state", () => {
 		const observed = createObservability(loadConfig({}));
 		await observed.start();
 		const substrate = {
-			verifyGraph: () => Promise.resolve({ ok: true, events: 3, brokenAt: null, reason: null }),
+		verifyGraph: () => Promise.resolve({ ok: true, events: 3, chain: { ok: true }, hours: [], uncovered: { count: 0, ids: [] }, legacy: { count: 0, ids: [] } }),
 		} as unknown as Substrate;
 
 		expect((await buildGraphEvidence(observed, substrate, "ut-1")).chains.app_events.state).toBe("verified");
