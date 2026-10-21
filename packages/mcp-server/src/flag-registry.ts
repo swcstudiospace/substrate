@@ -548,6 +548,9 @@ export const FLAGS: readonly FlagSpec[] = [
 		},
 	},
 	{ name: "SUBSTRATE_CACHE_SWR_WINDOW_S", kind: "number", plane: "cache", default: "30", allowed: "1..300", unset: "30 s", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },
+	{ name: "SUBSTRATE_CACHE_PRELOAD", kind: "toggle", plane: "cache", default: "off", allowed: "on | off", unset: "off: no preload timer, no compose, no request counting", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },
+	{ name: "SUBSTRATE_CACHE_PRELOAD_TOP", kind: "number", plane: "cache", default: "3", allowed: "1..20", unset: "3 repos per tick", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },
+	{ name: "SUBSTRATE_CACHE_PRELOAD_S", kind: "number", plane: "cache", default: "300", allowed: "10..3600", unset: "300 s", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },
 	{
 		name: "SUBSTRATE_CACHE_BUMP_SCOPE",
 		kind: "mode",

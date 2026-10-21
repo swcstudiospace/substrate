@@ -132,6 +132,38 @@ Staleness: under `narrow` a recall cached after an accept and before its retain 
 
 Admission budgets (uplift-3 N3) are the one key class that is not a cached answer. `substrate:v1:budget:<surface>:<class>` is a hash `{t, at}` — the tokens left and the epoch ms of the last step — written by one `EVAL` (`BUDGET_SCRIPT` in `packages/mcp-server/src/admission.ts`) that refills at the class rate, checks, debits and `PEXPIRE`s the key to the burst's refill time (≥ 1 s), so an idle surface costs no key and a counter never outlives the state it carries. The identity is the bearer's surface, never a body-claimed one; accepted untokened bridge callers share `anonymous`. The call goes through the cache's plane gate like every other command (`op=eval`), so a timeout, an open breaker or the connect cooldown admits the caller and counts a `bypass` rather than refusing: the budgets bound load on the planes and must not make the cache a way to fail them. `SUBSTRATE_BUDGETS=off|shadow|enforce` (default `shadow`: decide and count, never refuse) and `SUBSTRATE_BUDGET_<CLASS>_RPS` / `_BURST` with per-surface `SUBSTRATE_BUDGET_<SURFACE>_<CLASS>_*` overrides are in `.env.example`; `docs/observability.md` has the metric and the `/slo` row, `docs/grok-bot.md` what a refused caller sees.
 
+### Cache preload
+
+`SUBSTRATE_CACHE_PRELOAD` is `on` or `off`, default `off`. `SUBSTRATE_CACHE_PRELOAD_TOP`
+is an integer from 1 to 20, default 3. `SUBSTRATE_CACHE_PRELOAD_S` is an integer from
+10 to 3600, default 300. An out-of-range value, or any other switch value, refuses boot
+and names the variable. `on` with no cache (`DRAGONFLY_URL` unset or refused, or
+`SUBSTRATE_CACHE=0`) refuses boot too, and names `SUBSTRATE_CACHE_PRELOAD`: a warm-up
+with nowhere to store would only compose.
+
+With the switch on, the substrate counts brief requests per repo over a sliding hour,
+for at most 256 repos, and remembers the last brief request seen for each repo: its
+branch, graph_id and surface, the fields its cache key is built from. The least
+recently seen repos are evicted at the cap.
+
+Every interval the preload composes the brief for the top K repos (K is
+`SUBSTRATE_CACHE_PRELOAD_TOP`), each as the last request named for it, through the
+uncounted brief path, so its own warm-up never raises a repo's count. A warm-up refreshes
+its entry: it composes and stores over a fresh entry, so the entry is replaced before it
+expires. A warm-up that composes degraded or as a snapshot is counted as a failure and
+stores nothing. It writes through the existing brief cache: there is no new cache class
+and no new key scheme.
+
+The surface stands as its own bearer during the warm-up, so the warmed keys are the keys
+a real request reads. The consequence is that the preload performs that surface's recall
+reads for its own bank, at most K per interval, on the schedule above. Any authenticated
+caller can name a surface in a request, so this is a bounded amplification of traffic the
+caller could already send.
+
+It runs as one unref'd interval, started by the recall start path while the switch is on
+and stopped at shutdown. A tick is skipped while the previous tick is still running. A
+failed warm-up is counted and logged once per tick and is never thrown.
+
 ## Target after the private-forwarder cutover
 
 | Store | Reader | Env var | Reach |

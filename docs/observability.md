@@ -354,6 +354,40 @@ contract check beside it.
 
 `GET /slo` also carries a `served` array: one `served.tokens_est` row per surface that has been served anything, in the shape of the `burn` rows plus `surface`, unit `tokens/h (estimated)`. It is the hourly rate of `substrate.served.tokens_est` against `SUBSTRATE_SERVED_TOKENS_PER_HOUR`; unset is `unconfigured` (reported, never judged), as for `burn.tokens`. It is judged like the burn rows: every `/slo` read is a sample, a rate needs two reads at least five minutes apart, and the samples live in the burn ledger under their own `substrate.served.tokens_est|<surface>` keys, so the checkpoint restores them. The row is an estimate of what a surface's model had to read, not what it was billed: `burn.tokens` stays model-reported, and a breached `served` row is never folded into `breached`.
 
+### Predictive SLO rows
+
+`GET /slo` also carries a `forecast` key with one row per objective: `brief.p95`,
+`emit.success`, `lease.steal_rate` and `quarantine.rate`. Each row projects the value its
+history measures over a horizon and reports whether that projection crosses the
+objective's target. Each row carries a `basis`: `service` for a service-wide history
+(`emit.success`, `lease.steal_rate`, `quarantine.rate`), and `worst-surface` for
+`brief.p95`, whose history is the largest surface value in each bucket, not a
+service-wide figure.
+
+The source is the durable metrics history that `/slo/history` reads. The forecast
+therefore needs `SUBSTRATE_METRICS_HISTORY=on` and a ledger. With history off, every
+row has status `history-off` and `predicted` `null`, and no value is shown.
+
+The model is Holt's double exponential smoothing with alpha 0.5 and beta 0.3. The
+horizon is 60 minutes. The window is 2h at a 300-second step. A row needs at least
+12 finite points; with fewer it is `insufficient-data`.
+
+| Status | Meaning |
+| --- | --- |
+| `predicted-breach` | the value at the horizon crosses the objective's target in its direction |
+| `ok` | the value at the horizon does not cross the target |
+| `insufficient-data` | fewer than 12 finite points in the window |
+| `history-off` | history is off; `predicted` is `null` |
+
+The forecast is report-only: it is never folded into `breached`.
+
+`lease.steal_rate` and `quarantine.rate` have no history series, so they are always
+`insufficient-data` with `samples` 0.
+
+Missing buckets are not filled in, and Holt treats the values as evenly spaced, so a
+gap in the history distorts the trend. Each `/slo` read makes up to two history reads,
+which the existing 15-second history memo bounds.
+
 ### History across restarts (uplift-3 N2)
 
 The catalogue is a process-lifetime aggregate and the plane and burn windows

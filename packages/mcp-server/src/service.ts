@@ -154,6 +154,7 @@ import {
 	type RecallLook,
 	type RecallSnapshot,
 } from "./recall-snapshot.ts";
+import { RepoAccess, requireComplete, startPreloader, type Preloader } from "./preload.ts";
 import {
 	createExecFileRunner,
 	createSkillProposer,
@@ -1064,6 +1065,10 @@ export class Substrate {
 	readonly desktop: DesktopDriver | null;
 	private readonly observer: SubstrateObserver;
 	private readonly cache: ReadThroughCache;
+	/** Brief requests per repo over a sliding hour, for the cache preloader (phase 47). Written only while the preloader is on. */
+	readonly repoAccess = new RepoAccess();
+	/** The cache preloader (phase 47): started by `startRecall` while `SUBSTRATE_CACHE_PRELOAD=on`; null while it is off or stopped. */
+	private preloader: Preloader | null = null;
 	/**
 	 * One circuit breaker per data plane (uplift-2 R2). Every outbound call —
 	 * ledger SQL, index query, cache command, Hindsight and RAGFlow request —
@@ -1449,6 +1454,19 @@ export class Substrate {
 	 * `resolveBriefProfile` against the mode and the surface list.
 	 */
 	async briefDetailed(request: BriefRequest, requestedProfile?: BriefProfile, bearerSurface?: string | null): Promise<BriefDetail> {
+		// Phase 47 (D47-d): one count per caller's brief request for the preloader. Off, nothing is counted.
+		if (this.config.cachePreload.enabled && request.repo !== undefined && normalizeIdentifier(request.repo) !== null) {
+			this.repoAccess.record(Date.now(), { ...request, repo: request.repo });
+		}
+		return this.briefUncounted(request, requestedProfile, bearerSurface, true, false);
+	}
+
+	/**
+	 * The brief compose behind `briefDetailed`, with no preload count. `observed` is true for a caller's request, and only
+	 * then is its latency and recall metric recorded; the preloader passes false, so its warm-ups are neither demand nor a
+	 * caller's wait. It reads and writes the brief cache as a request does; a `refresh` warm-up skips the fresh read, so it composes and stores over a live entry.
+	 */
+	private async briefUncounted(request: BriefRequest, requestedProfile: BriefProfile | undefined, bearerSurface: string | null | undefined, observed: boolean, refresh: boolean): Promise<BriefDetail> {
 		const started = performance.now();
 		let ok = false;
 		try {
@@ -1472,7 +1490,9 @@ export class Substrate {
 			const recallOptions = recallRead === null || !recallActive ? {} : this.recallBriefOptions(request, recallRepo, () => {
 				recallCut = true;
 			});
-			const noteRecall = (served: readonly BriefSection[] | null, detail: BriefDetail): Promise<void> => this.noteBriefRecall(request, recallRead, served, detail);
+			// A brief no caller asked for, the preloader's, reports no recall metric.
+			const noteRecall = (served: readonly BriefSection[] | null, detail: BriefDetail): Promise<void> =>
+				observed ? this.noteBriefRecall(request, recallRead, served, detail) : Promise.resolve();
 			// One compose, parameterised by where it reports its lease note and failed sources, so a
 			// background refresh never touches this call's `failed` (S4) and every caller gets the
 			// brief as sections (S1).
@@ -1526,6 +1546,7 @@ export class Substrate {
 			};
 			const encoded = await this.cache.getOrLoad({
 				klass: "brief",
+				refresh,
 				surface: request.surface,
 				// `shape` keeps this entry apart from the plain-text values older
 				// processes wrote under the same class, so neither reads the other's.
@@ -1641,7 +1662,7 @@ export class Substrate {
 		} finally {
 			// Timed in `finally` so a brief that threw is still in the histogram. The SLO
 			// is about what the caller waited for, and a failure is a wait too.
-			this.observer.briefed?.({
+			if (observed) this.observer.briefed?.({
 				surface: request.surface,
 				graph_id: normalizeIdentifier(request.graph_id),
 				ok,
@@ -2580,14 +2601,37 @@ export class Substrate {
 		}
 	}
 
-	/** Start the recall prefetch and the Hindsight inventory timers. Each is a no-op while its flag is off; each timer is unref'd. */
+	/** Start the recall prefetch, the Hindsight inventory and the cache preloader (phase 47). The first two are no-ops while their flags are off; each timer is unref'd. */
 	startRecall(): { recall: boolean; inventory: boolean } {
+		this.startPreload();
 		return { recall: this.recall.start(), inventory: this.hindsightInventory.start() };
 	}
 
 	/** Clear both timers and wait, bounded, for the work in flight. No final refresh: the snapshot is cache-only. */
 	async stopRecall(): Promise<void> {
 		await Promise.all([this.recall.stop(), this.hindsightInventory.stop()]);
+	}
+
+	/** Start the cache preloader (phase 47): one unref'd interval, and nothing while `SUBSTRATE_CACHE_PRELOAD` is off or it is already running. */
+	startPreload(): void {
+		if (!this.config.cachePreload.enabled || this.preloader !== null) return;
+		this.preloader = startPreloader({
+			settings: this.config.cachePreload,
+			access: this.repoAccess,
+			// The request is repeated as last named, branch and graph_id too, so the warmed keys are the keys a request reads. Its surface stands as its own bearer, as a request for it does.
+			// The warm-up refreshes its entry, and a brief that did not compose completely throws, so the tick counts it.
+			compose: async (shape) => {
+				requireComplete(await this.briefUncounted(shape, undefined, shape.surface, false, true), shape);
+			},
+			now: () => Date.now(),
+			intervalMs: this.config.cachePreload.intervalS * 1000,
+		});
+	}
+
+	/** Clear the preloader's timer. A tick in flight finishes; no new tick starts. */
+	stopPreload(): void {
+		this.preloader?.stop();
+		this.preloader = null;
 	}
 
 	/** Run one prefetch tick now (the interval's body): at most two due pairs, single-flight. Off: nothing. */
