@@ -85,8 +85,8 @@ describe("toProposalRequest", () => {
 
 describe("proposalFailure", () => {
 	test("a denial keeps its status and message", () => {
-		expect(proposalFailure(new SkillProposalDenied(401, "no surface"))).toEqual({ status: 401, body: { error: "no surface" } });
-		expect(proposalFailure(new SkillProposalDenied(403, "wrong surface"))).toEqual({ status: 403, body: { error: "wrong surface" } });
+		expect(proposalFailure(new SkillProposalDenied(401, "no surface"))).toEqual({ status: 401, body: { error: "no surface", refused: true } });
+		expect(proposalFailure(new SkillProposalDenied(403, "wrong surface"))).toEqual({ status: 403, body: { error: "wrong surface", refused: true } });
 	});
 
 	test("a refusal is 400 and its findings are file, line and rule, nothing more", () => {
@@ -96,13 +96,13 @@ describe("proposalFailure", () => {
 		const failure = proposalFailure(refusal);
 		expect(failure).toEqual({
 			status: 400,
-			body: { error: "secret-like content in 1 place(s)", findings: [{ file: "SKILL.md", line: 4, rule: "github" }] },
+			body: { error: "secret-like content in 1 place(s)", refused: true, findings: [{ file: "SKILL.md", line: 4, rule: "github" }] },
 		});
 		expect(JSON.stringify(failure)).not.toContain("never copied");
 	});
 
 	test("a refusal without findings has no findings key", () => {
-		expect(proposalFailure(new ProposeRefused("invalid skill name"))).toEqual({ status: 400, body: { error: "invalid skill name" } });
+		expect(proposalFailure(new ProposeRefused("invalid skill name"))).toEqual({ status: 400, body: { error: "invalid skill name", refused: true } });
 	});
 
 	test("a failed git or gh step is 502, redacted and capped at 400 characters", () => {
@@ -113,6 +113,7 @@ describe("proposalFailure", () => {
 		expect(failure?.body.error.length).toBeLessThanOrEqual(400);
 		expect(failure?.body.error).not.toContain(token);
 		expect(failure?.body.error).toContain(REDACTED);
+		expect(failure?.body).not.toHaveProperty("refused");
 	});
 
 	test("an error that is not the proposal's own is not mapped", () => {

@@ -1041,7 +1041,7 @@ describe("the REST doors", () => {
 	async function post(base: string, token: string | null, payload: unknown) {
 		const response = await fetch(`${base}/skills/approve`, {
 			method: "POST",
-			headers: token === null ? {} : { authorization: `Bearer ${token}` },
+			headers: { "content-type": "application/json", ...(token === null ? {} : { authorization: `Bearer ${token}` }) },
 			body: typeof payload === "string" ? payload : JSON.stringify(payload),
 		});
 		return { status: response.status, json: (await response.json()) as Record<string, unknown> };

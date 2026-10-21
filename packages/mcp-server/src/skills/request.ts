@@ -74,6 +74,7 @@ export function toProposalRequest(body: Record<string, unknown>): SkillProposalR
 export interface ProposalFailure {
 	status: 400 | 401 | 403 | 409 | 502;
 	body: {
+		refused?: true;
 		error: string;
 		findings?: Array<{ file: string; line: number; rule: string }>;
 		/** On a 409 `version.stale`: memory's conflict fields, so a caller reads one shape for both. */
@@ -92,7 +93,7 @@ export interface ProposalFailure {
  * never a value; a failed git or gh step is redacted and capped.
  */
 export function proposalFailure(cause: unknown): ProposalFailure | null {
-	if (cause instanceof SkillProposalDenied) return { status: cause.status, body: { error: cause.message } };
+	if (cause instanceof SkillProposalDenied) return { status: cause.status, body: { error: cause.message, refused: true } };
 	if (cause instanceof SkillProposalStale) {
 		return {
 			status: 409,
@@ -109,7 +110,7 @@ export function proposalFailure(cause: unknown): ProposalFailure | null {
 	}
 	if (cause instanceof ProposeRefused) {
 		const findings = cause.findings?.map(({ file, line, rule }) => ({ file, line, rule }));
-		return { status: 400, body: { error: cause.message, ...(findings ? { findings } : {}) } };
+		return { status: 400, body: { error: cause.message, refused: true, ...(findings ? { findings } : {}) } };
 	}
 	if (cause instanceof ProposeFailed) {
 		return { status: 502, body: { error: redact(cause.message).slice(0, FAILURE_MESSAGE_MAX) } };

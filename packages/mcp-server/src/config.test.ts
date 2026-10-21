@@ -15,9 +15,11 @@
  */
 import { describe, expect, test } from "bun:test";
 import { SOLANA_CLI_DEFAULT } from "@substrate/ledger";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+	ConfigError,
 	DEFAULT_SKILLS_GH,
 	DEFAULT_SKILLS_REMOTE_URL,
 	DEFAULT_SKILLS_REPO,
@@ -25,9 +27,18 @@ import {
 	configWarnings,
 	isOperator,
 	loadConfig,
+	loadLedgerSettings,
 	parseRedisUrl,
 	surfaceForToken,
 } from "./config.ts";
+
+// Generated for each run, so no token-shaped literal sits in the repository.
+const HERMES_TOKEN = `hermes-${randomUUID()}`;
+const GROK_TOKEN = `grok-bot-${randomUUID()}`;
+const CURSOR_TOKEN = `cursor-${randomUUID()}`;
+const OPERATOR_TOKEN = `operator-${randomUUID()}`;
+const SWARM_A05_TOKEN = `swarm-a05-${randomUUID()}`;
+const HOST_JOB_TOKEN = `host-job-${randomUUID()}`;
 
 describe("SUBSTRATE_ALLOW_ANONYMOUS", () => {
 	test("unset with a token keeps today's rule: untokened callers are refused", () => {
@@ -118,32 +129,32 @@ describe("a substrate token is never an operator", () => {
 
 	test("boot names the substrate surface, without printing its token", () => {
 		const config = loadConfig({
-			SUBSTRATE_TOKEN_CURSOR: "tok-operator",
-			SUBSTRATE_TOKEN_SUBSTRATE: "tok-substrate",
-			SUBSTRATE_OPERATOR_TOKENS: "tok-operator,tok-substrate",
+			SUBSTRATE_TOKEN_CURSOR: OPERATOR_TOKEN,
+			SUBSTRATE_TOKEN_SUBSTRATE: HOST_JOB_TOKEN,
+			SUBSTRATE_OPERATOR_TOKENS: `${OPERATOR_TOKEN},${HOST_JOB_TOKEN}`,
 		});
 		const warnings = configWarnings(config);
 
 		expect(warnings).toHaveLength(1);
 		expect(warnings[0]).toContain("substrate");
-		expect(warnings[0]).not.toContain("tok-substrate");
+		expect(warnings[0]).not.toContain(HOST_JOB_TOKEN);
 	});
 
 	test("a listed swarm token and a listed substrate token warn side by side", () => {
 		const config = loadConfig({
-			SUBSTRATE_TOKEN_CURSOR: "tok-operator",
-			SUBSTRATE_TOKEN_SWARM_A05_BE: "tok-a05",
-			SUBSTRATE_TOKEN_SUBSTRATE: "tok-substrate",
-			SUBSTRATE_OPERATOR_TOKENS: "tok-operator,tok-a05,tok-substrate",
+			SUBSTRATE_TOKEN_CURSOR: OPERATOR_TOKEN,
+			SUBSTRATE_TOKEN_SWARM_A05_BE: SWARM_A05_TOKEN,
+			SUBSTRATE_TOKEN_SUBSTRATE: HOST_JOB_TOKEN,
+			SUBSTRATE_OPERATOR_TOKENS: `${OPERATOR_TOKEN},${SWARM_A05_TOKEN},${HOST_JOB_TOKEN}`,
 		});
 
-		expect(isOperator(config, "Bearer tok-a05")).toBe(false);
-		expect(isOperator(config, "Bearer tok-substrate")).toBe(false);
+		expect(isOperator(config, `Bearer ${SWARM_A05_TOKEN}`)).toBe(false);
+		expect(isOperator(config, `Bearer ${HOST_JOB_TOKEN}`)).toBe(false);
 		const warnings = configWarnings(config);
 		expect(warnings).toHaveLength(2);
 		expect(warnings.join("\n")).toContain("swarm-a05-be");
 		expect(warnings.join("\n")).toContain("substrate");
-		expect(warnings.join("\n")).not.toContain("tok-substrate");
+		expect(warnings.join("\n")).not.toContain(HOST_JOB_TOKEN);
 	});
 });
 
@@ -215,8 +226,8 @@ describe("SUBSTRATE_SKILLS_*", () => {
 
 	test("a valid library warns nothing on its own", () => {
 		const config = loadConfig({
-			SUBSTRATE_TOKEN_CURSOR: "tok-operator",
-			SUBSTRATE_OPERATOR_TOKENS: "tok-operator",
+			SUBSTRATE_TOKEN_CURSOR: OPERATOR_TOKEN,
+			SUBSTRATE_OPERATOR_TOKENS: OPERATOR_TOKEN,
 		});
 
 		expect(configWarnings(config)).toEqual([]);
@@ -324,5 +335,74 @@ describe("parseRedisUrl refuses plaintext non-loopback redis (DOCS-06)", () => {
 		expect(loopback.cacheEnabled).toBe(true);
 		expect(loopback.dragonflyUrl).toBe("redis://127.0.0.1:6379");
 		expect(loopback.dragonflyRefused).toBeNull();
+	});
+});
+
+describe("a surface token's length and comparison", () => {
+	test("a short surface token still authenticates, and boot names only its variable", () => {
+		const config = loadConfig({ SUBSTRATE_TOKEN_GROK_BOT: "tok-grok" });
+
+		expect(surfaceForToken(config, "Bearer tok-grok")).toBe("grok-bot");
+		const warnings = configWarnings(config);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("SUBSTRATE_TOKEN_GROK_BOT");
+		expect(warnings[0]).not.toContain("tok-grok");
+	});
+
+	test("the floor is 16 characters: 15 is reported, 16 is not", () => {
+		expect(configWarnings(loadConfig({ SUBSTRATE_TOKEN_GROK_BOT: "f".repeat(15) }))).toHaveLength(1);
+		expect(configWarnings(loadConfig({ SUBSTRATE_TOKEN_GROK_BOT: "f".repeat(16) }))).toEqual([]);
+	});
+
+	test("a short surface token is reported even when operator tokens are configured", () => {
+		const config = loadConfig({ SUBSTRATE_TOKEN_CURSOR: "tok-operator", SUBSTRATE_OPERATOR_TOKENS: "tok-operator" });
+
+		const warnings = configWarnings(config);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("SUBSTRATE_TOKEN_CURSOR");
+		expect(isOperator(config, "Bearer tok-operator")).toBe(true);
+	});
+
+	test("every configured token authenticates to its own surface, and a near miss does not", () => {
+		const config = loadConfig({
+			SUBSTRATE_TOKEN_GROK_BOT: GROK_TOKEN,
+			SUBSTRATE_TOKEN_HERMES: HERMES_TOKEN,
+			SUBSTRATE_TOKEN_CURSOR: CURSOR_TOKEN,
+		});
+
+		expect(surfaceForToken(config, `Bearer ${GROK_TOKEN}`)).toBe("grok-bot");
+		expect(surfaceForToken(config, `Bearer ${HERMES_TOKEN}`)).toBe("hermes");
+		expect(surfaceForToken(config, `Bearer ${CURSOR_TOKEN}`)).toBe("cursor");
+		for (const near of [GROK_TOKEN.slice(0, -1), `${GROK_TOKEN}0`, GROK_TOKEN.replace("grok", "GROK"), `${CURSOR_TOKEN}x`]) {
+			expect(surfaceForToken(config, `Bearer ${near}`)).toBeNull();
+		}
+	});
+
+	test("operator authority follows the same exact match", () => {
+		const config = loadConfig({
+			SUBSTRATE_TOKEN_CURSOR: CURSOR_TOKEN,
+			SUBSTRATE_TOKEN_HERMES: HERMES_TOKEN,
+			SUBSTRATE_OPERATOR_TOKENS: CURSOR_TOKEN,
+		});
+
+		expect(isOperator(config, `Bearer ${CURSOR_TOKEN}`)).toBe(true);
+		expect(isOperator(config, `Bearer ${CURSOR_TOKEN.slice(0, -1)}`)).toBe(false);
+		expect(isOperator(config, `Bearer ${HERMES_TOKEN}`)).toBe(false);
+	});
+});
+
+describe("SUBSTRATE_LEDGER_TTL floor", () => {
+	test("a total of zero is refused, with the reason", () => {
+		for (const ttl of ["0d", "0h", "0m", "0h 0m", "00d"]) {
+			expect(() => loadConfig({ SUBSTRATE_LEDGER_TTL: ttl })).toThrow(ConfigError);
+			expect(() => loadLedgerSettings({ SUBSTRATE_LEDGER_TTL: ttl })).toThrow("totals zero");
+		}
+	});
+
+	test("a span that totals at least one unit is kept as written", () => {
+		for (const ttl of ["180d", "1h", "1h 30m", "0d 1h"]) {
+			expect(loadLedgerSettings({ SUBSTRATE_LEDGER_TTL: ttl }).ttl).toBe(ttl);
+		}
+		expect(loadLedgerSettings({}).ttl).toBeNull();
 	});
 });

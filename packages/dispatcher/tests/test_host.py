@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import httpx
@@ -16,7 +17,7 @@ from substrate_dispatcher.host import (
     HostRefused,
     RemoteTask,
 )
-from substrate_dispatcher.launcher import Launched
+from substrate_dispatcher.launcher import Launched, child_env
 
 GID = "ut-mugzzzzz-0123abcd"
 WT = Path(f"/var/lib/substrate/worktrees/{GID}")
@@ -190,8 +191,8 @@ def test_terminate_and_kill_post_the_host_routes():
     task.terminate()
     task.kill()
     assert host.requests == [
-        ("POST", f"{STATUS_PATH}/terminate", None),
-        ("POST", f"{STATUS_PATH}/kill", None),
+        ("POST", f"{STATUS_PATH}/terminate", {}),
+        ("POST", f"{STATUS_PATH}/kill", {}),
     ]
 
 
@@ -254,3 +255,85 @@ def test_open_task_wrong_shape_reply_is_host_unreachable():
     with pytest.raises(HostRefused) as err:
         HostClient(transport=httpx.MockTransport(handler)).open_task(**OPEN)
     assert err.value.marker == "host-unreachable" and "unexpected reply shape" in err.value.reason
+
+
+def test_from_env_sends_the_host_api_token_as_the_bearer(monkeypatch, caplog):
+    monkeypatch.setenv("SUBSTRATE_HOST_API_TOKEN", "host-api-token-value")
+    seen: dict[str, str | None] = {}
+    host = FakeHost({("POST", "/tasks"): (202, TASK)})
+
+    def watching(request: httpx.Request) -> httpx.Response:
+        seen["auth"] = request.headers.get("Authorization")
+        return host.handler(request)
+
+    with caplog.at_level(logging.WARNING, logger="substrate_dispatcher.host"):
+        HostClient.from_env(transport=httpx.MockTransport(watching)).open_task(**OPEN)
+    assert seen["auth"] == "Bearer host-api-token-value"
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+def test_from_env_without_the_token_sends_no_header_and_warns_once_naming_only_the_variable(
+    monkeypatch, caplog
+):
+    monkeypatch.delenv("SUBSTRATE_HOST_API_TOKEN", raising=False)
+    seen: dict[str, str | None] = {}
+    host = FakeHost({("POST", "/tasks"): (202, TASK)})
+
+    def watching(request: httpx.Request) -> httpx.Response:
+        seen["auth"] = request.headers.get("Authorization")
+        return host.handler(request)
+
+    with caplog.at_level(logging.WARNING, logger="substrate_dispatcher.host"):
+        client = HostClient.from_env(transport=httpx.MockTransport(watching))
+        client.open_task(**OPEN)
+    assert seen["auth"] is None
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "SUBSTRATE_HOST_API_TOKEN" in warnings[0]
+
+
+def test_a_bearer_echoed_in_an_error_body_is_redacted_from_the_refusal_and_the_log(monkeypatch):
+    secret = "host-api-token-value"
+    monkeypatch.setenv("SUBSTRATE_HOST_API_TOKEN", secret)
+
+    def echoing(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"error": f"rejected {request.headers['Authorization']}"})
+
+    client = HostClient.from_env(transport=httpx.MockTransport(echoing))
+    with pytest.raises(HostRefused) as err:
+        client.open_task(**OPEN)
+    assert secret not in err.value.reason and "rejected Bearer [redacted]" in err.value.reason
+    lines: list[str] = []
+    RemoteTask(client, GID, "n1", log=lines.append).kill()
+    assert len(lines) == 1 and secret not in lines[0] and "[redacted]" in lines[0]
+
+
+def test_child_env_never_carries_the_host_api_token():
+    env = child_env({
+        "PATH": "/usr/bin",
+        "HOME": "/root",
+        "SUBSTRATE_HOST_API_TOKEN": "host-api-token-value",
+    })
+    assert "SUBSTRATE_HOST_API_TOKEN" not in env
+    assert "host-api-token-value" not in env.values()
+
+
+def test_every_post_including_the_verb_posts_is_sent_as_application_json():
+    seen: list[tuple[str, str, str | None]] = []
+    host = FakeHost({
+        ("POST", "/tasks"): (202, TASK),
+        ("POST", f"{STATUS_PATH}/terminate"): (202, {"terminate": "accepted"}),
+        ("POST", f"{STATUS_PATH}/kill"): (202, {"kill": "accepted"}),
+    })
+
+    def recording(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, request.headers.get("Content-Type")))
+        return host.handler(request)
+
+    client = HostClient(transport=httpx.MockTransport(recording))
+    client.open_task(**OPEN)
+    task = RemoteTask(client, GID, "n1")
+    task.terminate()
+    task.kill()
+    posts = [(path, ctype) for method, path, ctype in seen if method == "POST"]
+    assert [path for path, _ in posts] == ["/tasks", f"{STATUS_PATH}/terminate", f"{STATUS_PATH}/kill"]
+    assert all(ctype == "application/json" for _, ctype in posts)

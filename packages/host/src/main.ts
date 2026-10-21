@@ -37,6 +37,8 @@ function fail(message: string): never {
 	process.exit(2);
 }
 
+// The task API is fail-closed: no bearer token, no listener. The value is never logged.
+const apiToken = env("SUBSTRATE_HOST_API_TOKEN") ?? fail("SUBSTRATE_HOST_API_TOKEN is required (bearer token for the host task API)");
 const routeValue = env("SUBSTRATE_HOST_ROUTE") ?? fail("SUBSTRATE_HOST_ROUTE is required (03-01-SPIKE.md route_choice)");
 let route: Route;
 try {
@@ -292,7 +294,7 @@ if (broker.enabled) {
 	log("[substrate-host] telegram approvals off");
 }
 
-const server = createApiServer(service, { engineReady: () => engineReady });
+const server = createApiServer(service, { engineReady: () => engineReady, token: apiToken });
 server.listen(apiPort, "127.0.0.1", () => {
 	log(`[substrate-host] api 127.0.0.1:${apiPort}`);
 	log(`[substrate-host] route ${formatRoute(route)}`);

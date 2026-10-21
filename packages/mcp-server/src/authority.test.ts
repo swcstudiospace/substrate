@@ -14,6 +14,7 @@
  * and these are the tests that say so.
  */
 import { describe, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -23,6 +24,14 @@ import { createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 import { SURFACES, SWARM_SURFACES, type SubstrateEvent } from "./types.ts";
+
+// Generated for each run, so no token-shaped literal sits in the repository.
+const HERMES_TOKEN = `hermes-${randomUUID()}`;
+const GROK_TOKEN = `grok-bot-${randomUUID()}`;
+const OPERATOR_TOKEN = `operator-${randomUUID()}`;
+const NOWHERE_TOKEN = `nowhere-${randomUUID()}`;
+const SWARM_A05_TOKEN = `swarm-a05-${randomUUID()}`;
+const SWARM_A09_TOKEN = `swarm-a09-${randomUUID()}`;
 
 /**
  * An operator credential is a *surface* token that is also listed as an
@@ -34,25 +43,25 @@ import { SURFACES, SWARM_SURFACES, type SubstrateEvent } from "./types.ts";
  * have signed a handoff as any agent it named.
  */
 const TOKENS = {
-	SUBSTRATE_TOKEN_HERMES: "tok-hermes",
-	SUBSTRATE_TOKEN_GROK_BOT: "tok-grok",
-	SUBSTRATE_TOKEN_CURSOR: "tok-operator",
-	SUBSTRATE_OPERATOR_TOKENS: "tok-operator",
+	SUBSTRATE_TOKEN_HERMES: HERMES_TOKEN,
+	SUBSTRATE_TOKEN_GROK_BOT: GROK_TOKEN,
+	SUBSTRATE_TOKEN_CURSOR: OPERATOR_TOKEN,
+	SUBSTRATE_OPERATOR_TOKENS: OPERATOR_TOKEN,
 };
 
 describe("isOperator", () => {
 	test("a surface token is not an operator token", () => {
 		const config = loadConfig(TOKENS);
-		expect(surfaceForToken(config, "Bearer tok-hermes")).toBe("hermes");
-		expect(isOperator(config, "Bearer tok-hermes")).toBe(false);
-		expect(isOperator(config, "Bearer tok-grok")).toBe(false);
+		expect(surfaceForToken(config, `Bearer ${HERMES_TOKEN}`)).toBe("hermes");
+		expect(isOperator(config, `Bearer ${HERMES_TOKEN}`)).toBe(false);
+		expect(isOperator(config, `Bearer ${GROK_TOKEN}`)).toBe(false);
 	});
 
 	test("an operator token is, and still names its surface", () => {
 		const config = loadConfig(TOKENS);
-		expect(isOperator(config, "Bearer tok-operator")).toBe(true);
+		expect(isOperator(config, `Bearer ${OPERATOR_TOKEN}`)).toBe(true);
 		// So a forced release is always attributable to whoever used it.
-		expect(surfaceForToken(config, "Bearer tok-operator")).toBe("cursor");
+		expect(surfaceForToken(config, `Bearer ${OPERATOR_TOKEN}`)).toBe("cursor");
 	});
 
 	test("several operators may be configured", () => {
@@ -70,10 +79,10 @@ describe("isOperator", () => {
 	test("an operator token that names no surface is reported at boot, not left silent", () => {
 		// It could never authenticate — the HTTP surface requires a token that names
 		// a surface — so it would look configured and do nothing.
-		const stranded = loadConfig({ SUBSTRATE_TOKEN_HERMES: "tok-hermes", SUBSTRATE_OPERATOR_TOKENS: "tok-nowhere" });
+		const stranded = loadConfig({ SUBSTRATE_TOKEN_HERMES: HERMES_TOKEN, SUBSTRATE_OPERATOR_TOKENS: NOWHERE_TOKEN });
 		expect(configWarnings(stranded)).toHaveLength(1);
 		expect(configWarnings(stranded)[0]).toContain("cannot authenticate");
-		expect(isOperator(stranded, "Bearer tok-nowhere")).toBe(false);
+		expect(isOperator(stranded, `Bearer ${NOWHERE_TOKEN}`)).toBe(false);
 
 		expect(configWarnings(loadConfig(TOKENS))).toEqual([]);
 		expect(configWarnings(loadConfig({}))).toEqual([]);
@@ -126,27 +135,27 @@ describe("isOperator", () => {
 		// lease again, and the list is a configuration someone can get wrong.
 		const config = loadConfig({
 			...TOKENS,
-			SUBSTRATE_TOKEN_SWARM_A05_BE: "tok-a05",
-			SUBSTRATE_OPERATOR_TOKENS: "tok-operator,tok-a05",
+			SUBSTRATE_TOKEN_SWARM_A05_BE: SWARM_A05_TOKEN,
+			SUBSTRATE_OPERATOR_TOKENS: `${OPERATOR_TOKEN},${SWARM_A05_TOKEN}`,
 		});
 
-		expect(isOperator(config, "Bearer tok-a05")).toBe(false);
-		expect(isOperator(config, "Bearer tok-operator")).toBe(true);
+		expect(isOperator(config, `Bearer ${SWARM_A05_TOKEN}`)).toBe(false);
+		expect(isOperator(config, `Bearer ${OPERATOR_TOKEN}`)).toBe(true);
 	});
 
 	test("and boot says which swarm surface was listed, without printing its token", () => {
 		const config = loadConfig({
 			...TOKENS,
-			SUBSTRATE_TOKEN_SWARM_A05_BE: "tok-a05",
-			SUBSTRATE_TOKEN_SWARM_A09_REV: "tok-a09",
-			SUBSTRATE_OPERATOR_TOKENS: "tok-operator,tok-a05",
+			SUBSTRATE_TOKEN_SWARM_A05_BE: SWARM_A05_TOKEN,
+			SUBSTRATE_TOKEN_SWARM_A09_REV: SWARM_A09_TOKEN,
+			SUBSTRATE_OPERATOR_TOKENS: `${OPERATOR_TOKEN},${SWARM_A05_TOKEN}`,
 		});
 		const warnings = configWarnings(config);
 
 		expect(warnings).toHaveLength(1);
 		expect(warnings[0]).toContain("swarm-a05-be");
 		expect(warnings[0]).not.toContain("swarm-a09-rev");
-		expect(warnings[0]).not.toContain("tok-a05");
+		expect(warnings[0]).not.toContain(SWARM_A05_TOKEN);
 	});
 });
 

@@ -13,6 +13,7 @@
  * failing open; this does not.
  */
 import { normalizeIdentifier } from "./event.ts";
+import { redact } from "./redact.ts";
 import { TERMINAL_GRAPH_STATUSES } from "./index-sweep.ts";
 import {
 	MEMORY_KINDS,
@@ -81,10 +82,12 @@ function isKnownSurface(value: string): boolean {
 	return (SURFACES as readonly string[]).includes(value);
 }
 
-/** Trim, cap and lowercase-fold a subject into the identity a conflict resolves on. */
+/** Redact, then cap and lowercase-fold, a subject into the identity a conflict resolves on. */
 export function normalizeSubject(subject: unknown): string | null {
 	if (typeof subject !== "string") return null;
-	const cleaned = normalizeIdentifier(subject.trim().slice(0, MAX_SUBJECT));
+	// Redact before capping, for the reason `normalizeIdentifier` does: a cap first can cut a
+	// token so its own pattern no longer matches, and the fragment is what would be stored.
+	const cleaned = redact(subject.trim()).slice(0, MAX_SUBJECT);
 	return cleaned ? cleaned.toLowerCase() : null;
 }
 
