@@ -308,6 +308,67 @@ describe("POST /evidence", () => {
 
 		expect(response.status).toBe(400);
 	});
+
+	test("a node_id adds that node's artifact, read from the whole ledger, to the JSON reply", async () => {
+		const row = (id: number, nodeId: string, payload: Record<string, unknown>) => ({
+			id: `evt_${id}`,
+			ts: 1_700_000_000_000 + id,
+			surface: "substrate",
+			session_id: "sess-1",
+			graph_id: "ut-1",
+			node_id: nodeId,
+			linear_identifier: null,
+			step: null,
+			repo: null,
+			branch: null,
+			actor: "agent",
+			kind: "note",
+			summary: `event ${id}`,
+			payload: JSON.stringify(payload),
+			hash: `h${id}`,
+			prev: null,
+		});
+		const harness = await start(
+			{},
+			{
+				greptime: {
+					readEvents: async () => [
+						row(1, "n1", { action: "mirror", target: "linear", op: "claim", status: "ok" }),
+						row(2, "n2", { action: "mirror", target: "linear", op: "claim", status: "ok" }),
+						row(3, "n1", { action: "dod", status: "approved", already_done: false }),
+					],
+				},
+			},
+		);
+
+		const response = await fetch(`${harness.base}/evidence`, {
+			method: "POST",
+			headers: JSON_HEADERS,
+			body: JSON.stringify({ graph_id: "ut-1", node_id: "n1" }),
+		});
+		const body = (await response.json()) as { node: { node_id: string; linear: unknown[]; dod: unknown[] } };
+
+		expect(response.status).toBe(200);
+		expect(body.node.node_id).toBe("n1");
+		expect(body.node.linear).toEqual([{ ts: new Date(1_700_000_000_001).toISOString(), op: "claim", status: "ok", reason: null }]);
+		expect(body.node.dod).toEqual([{ ts: new Date(1_700_000_000_003).toISOString(), status: "approved", reason: null }]);
+	});
+
+	test("an unreadable ledger is node.error on the node_id reply, never an empty artifact", async () => {
+		const harness = await start(
+			{},
+			{ greptime: { readEvents: () => Promise.reject(new Error("greptime unreachable: connect ETIMEDOUT")) } },
+		);
+
+		const response = await fetch(`${harness.base}/evidence`, {
+			method: "POST",
+			headers: JSON_HEADERS,
+			body: JSON.stringify({ graph_id: "ut-1", node_id: "n1" }),
+		});
+		const body = (await response.json()) as { node: unknown };
+
+		expect(body.node).toEqual({ error: expect.stringContaining("unreachable") });
+	});
 });
 
 describe("the MCP audit gate", () => {

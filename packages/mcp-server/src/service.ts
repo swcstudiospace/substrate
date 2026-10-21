@@ -118,8 +118,9 @@ import {
 	type HandoffVerdict,
 } from "./handoff.ts";
 import { holderOf, leaseView, normalizeTtlSeconds, type LeaseView } from "./lease.ts";
-import { createMirror, type Mirror, type MirrorContext, type MirrorFailure, type MirrorOp } from "./mirror.ts";
+import { createMirror, type EdgeOutcome, type EdgeRelation, type Mirror, type MirrorContext, type MirrorFailure, type MirrorOp, type MirrorSuccess } from "./mirror.ts";
 import { runDodGate, type DodEvidence } from "./dod-gate.ts";
+import { nodeArtifact, type NodeArtifact } from "./node-artifact.ts";
 import { normalizeSubject } from "./memory-policy.ts";
 import { recallMemories, UNTRUSTED_MEMORY_NOTICE, type RecallReply } from "./memory-recall.ts";
 import { emitRetainWarning, forwardRetain, replayRetain, retainDocumentId, type RetainDeps, type RetainOutboxSink } from "./memory-retain.ts";
@@ -1919,6 +1920,22 @@ export class Substrate {
 	}
 
 	/**
+	 * One node's artifact, read completely from the graph's ledger: every event that carries the node's id, with its
+	 * payload. Not a browse window, so nothing is cut off by a limit. An unreachable ledger is an error, not an empty
+	 * artifact, so the caller can tell the two apart.
+	 */
+	async nodeArtifactOf(graphId: string, nodeId: string): Promise<{ artifact: NodeArtifact } | { error: string }> {
+		if (!this.greptime) return { error: "GREPTIME_URL is not set" };
+		try {
+			const rows = await this.greptime.readEvents("graph_id", normalizeIdentifier(graphId) ?? graphId);
+			const events = rows.map((row) => rowToLedgerEvent(row, true)).filter((event) => event.node_id === nodeId);
+			return { artifact: nodeArtifact(events, nodeId) };
+		} catch (cause) {
+			return { error: redact(String(cause)) };
+		}
+	}
+
+	/**
 	 * Write a memory entry through the governance gate.
 	 *
 	 * **This is the fail-closed path.** `emit` hands a caller its event back even
@@ -2629,7 +2646,9 @@ export class Substrate {
 		// from that read, or from any later statement, can leave Postgres ahead of
 		// the cache. Refresh either way; a throw still reaches the caller.
 		try {
-			return withoutLeaseIds(await this.index.registerGraph(plan));
+			const view = withoutLeaseIds(await this.index.registerGraph(plan));
+			await this.mirrorEdges(view);
+			return view;
 		} finally {
 			await this.bumpGraph(plan.graph_id);
 		}
@@ -3026,6 +3045,64 @@ export class Substrate {
 	}
 
 	/**
+	 * Graph edges into Linear relations. Each edge that was created or failed leaves one outcome event on its waiting
+	 * node, so the outcome sits in that node's evidence. A relation that already exists records nothing, so a
+	 * re-registration repeats no event. A skipped edge has no tracker issue, so it records nothing either.
+	 * Never throws: a Linear failure must not fail the registration behind it.
+	 */
+	private async mirrorEdges(view: { graph_id: string; nodes: GraphNode[]; edges: GraphEdge[] }): Promise<void> {
+		const mirror = this.mirror;
+		if (!mirror || view.edges.length === 0) return;
+		const byNode = new Map(view.nodes.map((node) => [node.node_id, node] as const));
+		const trackerRef = (nodeId: string): string | null => {
+			const node = byNode.get(nodeId);
+			return node?.linear_issue_id ?? node?.linear_identifier ?? null;
+		};
+		const relations: EdgeRelation[] = view.edges.map((edge) => {
+			// `requires` and `gated_by` are written from the waiting node; `blocks` is written from the blocking one.
+			const waiting = edge.kind === "blocks" ? edge.to_node : edge.from_node;
+			const blocker = edge.kind === "blocks" ? edge.from_node : edge.to_node;
+			return {
+				kind: edge.kind,
+				waitingNode: waiting,
+				waitingRef: trackerRef(waiting),
+				blockerNode: blocker,
+				blockerRef: trackerRef(blocker),
+			};
+		});
+		let outcomes: EdgeOutcome[];
+		try {
+			outcomes = await mirror.relateEdges(relations);
+		} catch (cause) {
+			const reason = (cause instanceof Error ? cause.message : String(cause)).slice(0, 300);
+			outcomes = relations.map((relation) => ({ ...relation, status: "failed", reason }));
+		}
+		for (const outcome of outcomes) {
+			if (outcome.status !== "created" && outcome.status !== "failed") continue;
+			await this.emit({
+				surface: "substrate",
+				kind: outcome.status === "failed" ? "warning" : "note",
+				summary: `linear relation ${outcome.status}: ${outcome.blockerNode} blocks ${outcome.waitingNode} (${outcome.kind})`,
+				graph_id: view.graph_id,
+				node_id: outcome.waitingNode,
+				// Its own one-event session, as the bind and claim events are, so no chain spans two relations.
+				session_id: `relation:${view.graph_id}:${outcome.blockerNode}:${outcome.waitingNode}:${outcome.kind}`,
+				actor: "agent",
+				payload: {
+					action: "mirror",
+					target: "linear",
+					op: "relate",
+					edge_kind: outcome.kind,
+					blocker_node: outcome.blockerNode,
+					waiting_node: outcome.waitingNode,
+					status: outcome.status === "created" ? "ok" : "failed",
+					...(outcome.reason ? { reason: outcome.reason } : {}),
+				},
+			}).catch(() => undefined);
+		}
+	}
+
+	/**
 	 * Mirror one final lease decision out to the trackers, awaited inside the
 	 * tool call. The decision already stands: a mirror failure becomes one
 	 * `mirror.failed` warning per failed target and never rolls anything back.
@@ -3054,14 +3131,17 @@ export class Substrate {
 			if (current && Number(current.lease_epoch ?? 0) > ctx.epoch) return;
 		}
 		let failures: MirrorFailure[];
+		const successes: MirrorSuccess[] = [];
+		const reporting: MirrorContext = { ...ctx, report: (success) => successes.push(success) };
 		try {
-			failures = await this.mirror[op](ctx);
+			failures = await this.mirror[op](reporting);
 		} catch (cause) {
 			failures = [
 				{ target: "linear", op, reason: (cause instanceof Error ? cause.message : String(cause)).slice(0, 300) },
 			];
 		}
 		await this.emitMirrorFailures(ctx, failures);
+		await this.emitMirrorSuccesses(ctx, successes);
 	}
 
 	/**
@@ -3099,6 +3179,21 @@ export class Substrate {
 				node_id: ctx.nodeId,
 				session_id: ctx.sessionId,
 				payload: { action: "mirror", target: failure.target, op: failure.op, reason: failure.reason },
+			}).catch(() => undefined);
+		}
+	}
+
+	/** One `mirror` note per target that wrote cleanly, so the node's evidence shows each step that landed. */
+	private async emitMirrorSuccesses(ctx: MirrorContext, successes: MirrorSuccess[]): Promise<void> {
+		for (const success of successes) {
+			await this.emit({
+				surface: ctx.holder,
+				kind: "note",
+				summary: `claim mirror ok: ${success.target} ${success.op}`,
+				graph_id: ctx.graphId,
+				node_id: ctx.nodeId,
+				session_id: ctx.sessionId,
+				payload: { action: "mirror", target: success.target, op: success.op, status: "ok" },
 			}).catch(() => undefined);
 		}
 	}
@@ -3628,6 +3723,8 @@ export class Substrate {
 		// Steps 2-4: skip when Linear already shows Done, mirror review, ask
 		// the connector only with evidence. Review failures come back for the
 		// warning ledger, never as a refusal.
+		const successes: MirrorSuccess[] = [];
+		const reporting: MirrorContext = { ...ctx, report: (success) => successes.push(success) };
 		const gate = await runDodGate(
 			{
 				mirror: this.mirror!,
@@ -3635,10 +3732,23 @@ export class Substrate {
 				hermesLinearUrl: this.dodGateTest.hermesLinearUrl ?? this.config.hermesLinearUrl,
 				timeoutMs,
 			},
-			ctx,
+			reporting,
 			request.dod,
 		);
 		await this.emitMirrorFailures(ctx, gate.mirrorFailures);
+		await this.emitMirrorSuccesses(ctx, successes);
+		if (gate.gate === "approved") {
+			await this.emit({
+				surface: ctx.holder,
+				kind: "note",
+				summary: `dod gate approved for ${reviewed.node.linear_identifier ?? nodeId}`,
+				graph_id: graphId,
+				node_id: nodeId,
+				session_id: ctx.sessionId,
+				payload: { action: "dod", status: "approved", already_done: gate.alreadyDone },
+				...place,
+			}).catch(() => undefined);
+		}
 		if (gate.gate === "refused") {
 			await this.emit({
 				surface: ctx.holder,

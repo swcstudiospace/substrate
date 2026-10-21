@@ -2727,7 +2727,7 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 	}
 
 	const mirrorWarnings = (emitted: SubstrateEvent[]) =>
-		emitted.filter((e) => e.payload["action"] === "mirror");
+		emitted.filter((e) => e.kind === "warning" && e.payload["action"] === "mirror");
 
 	test("a granted claim mirrors once with holder, session, epoch and refs", async () => {
 		const mirror = fakeMirror();
@@ -2737,7 +2737,7 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 
 		expect(result.claimed).toBe(true);
 		expect(mirror.calls).toHaveLength(1);
-		expect(mirror.calls[0]).toEqual({
+		expect(mirror.calls[0]).toMatchObject({
 			op: "claim",
 			ctx: {
 				graphId: "ut-1",
@@ -2749,6 +2749,30 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 				notionPage: null,
 			},
 		});
+	});
+
+	test("a claim that lands on each tracker leaves one mirror note per target, on the node", async () => {
+		const mirror = fakeMirror();
+		mirror.mirror.claim = async (ctx) => {
+			const reporting = ctx as MirrorCall["ctx"] & { report?: (success: { target: "linear" | "notion"; op: string }) => void };
+			reporting.report?.({ target: "linear", op: "claim" });
+			reporting.report?.({ target: "notion", op: "claim" });
+			return [];
+		};
+		const { stores, substrate } = claimedSubstrate({ action: "granted" }, mirror);
+
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+		expect(result.claimed).toBe(true);
+		const notes = stores.emitted.filter((e) => e.kind === "note" && e.payload["action"] === "mirror");
+		expect(notes.map((e) => [e.payload["target"], e.payload["op"], e.payload["status"]])).toEqual([
+			["linear", "claim", "ok"],
+			["notion", "claim", "ok"],
+		]);
+		expect(notes.map((e) => [e.graph_id, e.node_id])).toEqual([
+			["ut-1", "n4"],
+			["ut-1", "n4"],
+		]);
 	});
 
 	test("a stolen claim mirrors as steal with the evicted holder", async () => {
@@ -2992,7 +3016,7 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 		await substrate.reapExpiredLeases("swcstudiospace/x");
 
 		expect(mirror.calls).toHaveLength(1);
-		expect(mirror.calls[0]).toEqual({
+		expect(mirror.calls[0]).toMatchObject({
 			op: "expire",
 			ctx: {
 				graphId: "ut-1",
@@ -3200,7 +3224,7 @@ describe("completeNode DoD gate (D23-14, D23-15)", () => {
 		};
 	}
 
-	const dodWarnings = (emitted: SubstrateEvent[]) => emitted.filter((e) => e.payload["action"] === "dod");
+	const dodWarnings = (emitted: SubstrateEvent[]) => emitted.filter((e) => e.kind === "warning" && e.payload["action"] === "dod");
 
 	test("a node with no Linear reference completes on main's path with zero mirror calls", async () => {
 		const world = gateWorld({ linearIssueId: null, linearIdentifier: null, notionPage: null });
@@ -3282,9 +3306,32 @@ describe("completeNode DoD gate (D23-14, D23-15)", () => {
 			review_pass: true,
 		});
 		expect(world.mirrorCalls.map((c) => c.op)).toEqual(["review", "done"]);
-		const releaseNote = world.emitted.find((e) => e.kind === "note");
+		const releaseNote = world.emitted.find((e) => e.payload["dod"] !== undefined);
 		expect(releaseNote?.payload["dod"]).toEqual({ tests_pass: true, review_pass: true, summary_chars: summary.length });
 		expect(JSON.stringify(world.emitted)).not.toContain(summary);
+	});
+
+	test("an approval leaves one approved dod note on the node, and no summary text", async () => {
+		const world = gateWorld();
+		const summary = "unit and review evidence recorded";
+
+		const result = await world.substrate.completeNode(
+			"ut-1",
+			"n2",
+			{ lease_id: "lse_live", dod: { summary, tests_pass: true, review_pass: true } },
+			"hermes",
+		);
+
+		expect(result.completed).toBe(true);
+		const approved = world.emitted.filter((e) => e.payload["action"] === "dod" && e.payload["status"] === "approved");
+		expect(approved).toHaveLength(1);
+		expect(approved[0]).toMatchObject({
+			kind: "note",
+			graph_id: "ut-1",
+			node_id: "n2",
+			payload: { action: "dod", status: "approved", already_done: false },
+		});
+		expect(JSON.stringify(approved)).not.toContain(summary);
 	});
 
 	test("an issue already Done in Linear skips review and the connector", async () => {

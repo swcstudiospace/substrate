@@ -977,7 +977,7 @@ export function createHttpServer(
 
 			if (req.method === "POST" && url.pathname === "/evidence") {
 				const raw = await readBody(req);
-				const body = raw ? (JSON.parse(raw) as { graph_id?: unknown; format?: unknown }) : {};
+				const body = raw ? (JSON.parse(raw) as { graph_id?: unknown; format?: unknown; node_id?: unknown }) : {};
 				rememberClaim(claim, body);
 				if (typeof body.graph_id !== "string" || body.graph_id.length === 0) {
 					sendJson(res, 400, { error: "graph_id is required" });
@@ -987,6 +987,11 @@ export function createHttpServer(
 				const bundle = await buildGraphEvidence(observability, substrate, body.graph_id);
 				if (body.format === "html") {
 					send(res, 200, renderEvidenceHtml(bundle), "text/html; charset=utf-8");
+					return;
+				}
+				if (typeof body.node_id === "string" && body.node_id.length > 0) {
+					const node = await substrate.nodeArtifactOf(body.graph_id, body.node_id);
+					sendJson(res, 200, { ...bundle, node: "error" in node ? { error: node.error } : node.artifact });
 					return;
 				}
 				sendJson(res, 200, bundle);
