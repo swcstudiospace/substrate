@@ -8,7 +8,7 @@ The gate is four checks, run in this order. `bun run verify` runs them locally; 
 | `types` | `bunx tsc --noEmit` | the whole workspace typechecks |
 | `tests` | `bun test` | the full suite passes |
 | `locks` | `bun run check:phase-close` | the event vocabulary, store lock, audit policy and redaction locks hold |
-| `audit` (opt-in) | `bun audit --audit-level=high` | no known high or critical advisory in the lockfile; needs the network |
+| `audit` (opt-in) | `bun scripts/audit-gate.ts` | no high or critical advisory in the lockfile, except the accepted risks below; needs the network |
 
 ## Run it locally
 
@@ -41,10 +41,26 @@ Nothing in the suite needs GreptimeDB; the real-store proofs are the rehearsal s
 | Job | When | Steps |
 |---|---|---|
 | `verify` ("Typecheck, tests and repo locks") | pull request, push to `main`, on demand | the four steps above, with a Postgres 16 service container and a full-history checkout (`check:phase-close` diffs against a baseline commit) |
-| `dependency-audit` ("Known-vulnerability audit") | push to `main`, Mondays 03:17 UTC, on demand (never on a pull request) | `bun install --frozen-lockfile --ignore-scripts`, `bun audit --audit-level=high` |
+| `dependency-audit` ("Known-vulnerability audit") | push to `main`, Mondays 03:17 UTC, on demand (never on a pull request) | `bun install --frozen-lockfile --ignore-scripts`, `bun scripts/audit-gate.ts` |
 | `boot-gate` ("Boot and prove (report-only)") | pull request, push to `main`, on demand (never on the schedule); only when `BOOT_GATE` is `true` | `bun install --frozen-lockfile`, `bun run gate:boot` |
 
 The audit does not gate pull requests on purpose: advisories appear without any change here. A red scheduled run is the signal to upgrade.
+
+### Accepted risk and the audit gate
+
+`bun scripts/audit-gate.ts` reads `bun audit --json`, the machine-readable form of the audit. It filters the advisories to `high` and `critical` itself, because `bun audit --audit-level` does not filter the JSON. It fails the job (exit 1) on any high or critical advisory except the ones below. Each accepted advisory must match on GHSA id, package and version, and the lockfile must install that package at exactly that one version. Anything else fails: a new advisory, an upgrade or downgrade of an accepted package, or a second installed version of one. Each entry lives in `.github/audit-accepted-risk.json`. When an accepted advisory's `review_by` date has passed, the gate still passes and prints a warning.
+
+Accepted by the owner (SomeRandmGuyy, decision of 2026-10-21, review by 2027-01-19):
+
+| Advisory | Package@version | Severity | Reason | Owner | Review by | Removal condition |
+|---|---|---|---|---|---|---|
+| GHSA-jfgx-wxx8-mp94 (CVE-2026-54328) | `@mariozechner/pi-coding-agent`@0.60.0 | high | Predictable temporary extension install paths allow local privilege escalation on shared Linux hosts. No patched version. Pulled in by `@agentos-software/pi`. | SomeRandmGuyy | 2027-01-19 | the advisory stops appearing in `bun audit` (a fixed release is installed, or the package is removed) |
+| GHSA-c475-qrg2-pj4r | `basic-ftp`@5.3.1 | high | Patched in 6.2.1, with no in-range fix. Reached only through the pi-ai and proxy-agent chain (`get-uri`). | SomeRandmGuyy | 2027-01-19 | the chain moves to basic-ftp 6.2.1 or later, or the package is removed |
+| GHSA-gpj5-g38j-94v9 | `drizzle-orm`@0.44.7 | high | Patched in 0.45.2. Reached through `rivetkit` 2.3.10, which `agentos` 0.2.21 pins. | SomeRandmGuyy | 2027-01-19 | `rivetkit` and `agentos` accept drizzle-orm 0.45.2 or later |
+| GHSA-jmr9-qjv8-65gv | `extract-zip`@2.0.1 | high | No patched version. | SomeRandmGuyy | 2027-01-19 | the advisory stops appearing in `bun audit` |
+| GHSA-7pqw-9j4j-h8q3 | `extract-zip`@2.0.1 | high | No patched version. | SomeRandmGuyy | 2027-01-19 | the advisory stops appearing in `bun audit` |
+
+Adding or changing an entry is a reviewed change to `.github/audit-accepted-risk.json`, with the owner's name in `owner`. Removing an entry is needed once its removal condition holds, or the gate fails again for that advisory.
 
 ### The boot-gate job
 
