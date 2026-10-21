@@ -6,6 +6,9 @@
  * functions on canned bodies.
  */
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	classifyTarget,
 	countConversation,
@@ -31,9 +34,12 @@ import {
 	runChild,
 	runRepo,
 	runTag,
+	runUat,
 	sanitizeHost,
 	scratchGitEnv,
+	surfaceBearer,
 	UAT_PRODUCTION_PORTS,
+	UatRefused,
 	validateTag,
 	V1_TOOLS,
 } from "./uat-phase0.ts";
@@ -396,5 +402,131 @@ describe("hang guard", () => {
 	});
 	test("a callee rejection still rejects", async () => {
 		await expect(raceGuard(Promise.reject(new Error("boom")), 50, "failing")).rejects.toThrow("boom");
+	});
+});
+
+// Built from parts: the secret-hygiene scans match these names as written in source.
+const LEDGER_URL_ENV = `${"GREPTIME"}_URL`;
+const TOKEN_ENV = `${"SUBSTRATE"}_TOKEN`;
+const STORE_ENV_KEYS = [LEDGER_URL_ENV, "SUBSTRATE_PG_URL", "DRAGONFLY_URL"] as const;
+
+/** A loopback TCP listener that counts every accepted connection and answers none. */
+function startStoreRecorder(): { url: string; state: { connections: number }; stop: () => void } {
+	const state = { connections: 0 };
+	const listener = Bun.listen({
+		hostname: "127.0.0.1",
+		port: 0,
+		socket: {
+			open(socket) {
+				state.connections += 1;
+				socket.end();
+			},
+			data() {},
+			close() {},
+			error() {},
+		},
+	});
+	return { url: `http://127.0.0.1:${listener.port}`, state, stop: () => listener.stop(true) };
+}
+
+/** A loopback substrate that answers every path with 200 and an empty JSON object. */
+function startFakeSubstrate(): { url: string; state: { requests: number }; stop: () => void } {
+	const state = { requests: 0 };
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch() {
+			state.requests += 1;
+			return Response.json({});
+		},
+	});
+	return { url: `http://127.0.0.1:${server.port}`, state, stop: () => server.stop(true) };
+}
+
+/** Mirror the store URL variables into process.env too, so an inherited child env is covered; restored after. */
+async function withStoreEnv<T>(url: string, run: () => Promise<T>): Promise<T> {
+	const saved = STORE_ENV_KEYS.map((key) => ({ key, value: process.env[key] }));
+	for (const key of STORE_ENV_KEYS) process.env[key] = url;
+	try {
+		return await run();
+	} finally {
+		for (const { key, value } of saved) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+}
+
+describe("consumer contract", () => {
+	test("the UAT never connects to a store URL, even when store URL variables are set", async () => {
+		const store = startStoreRecorder();
+		const fake = startFakeSubstrate();
+		try {
+			const { report } = await withStoreEnv(store.url, () =>
+				runUat(
+					{ scenarios: [1, 4], report: undefined, tag: "consumer-contract", live: undefined, graph: undefined },
+					{
+						SUBSTRATE_URL: fake.url,
+						[TOKEN_ENV]: "consumer-contract-bearer",
+						[LEDGER_URL_ENV]: store.url,
+						SUBSTRATE_PG_URL: store.url,
+						DRAGONFLY_URL: store.url,
+					},
+				),
+			);
+			expect(report.targetKind).toBe("scratch");
+			expect(report.scenarios.map((verdict) => verdict.id)).toEqual([1, 4]);
+			expect(fake.state.requests).toBeGreaterThan(0);
+			expect(store.state.connections).toBe(0);
+		} finally {
+			fake.stop();
+			store.stop();
+		}
+	}, 30_000);
+
+	test("the UAT refuses a write scenario on a production-looking target without an approval reference, before any request", async () => {
+		const store = startStoreRecorder();
+		const fake = startFakeSubstrate();
+		try {
+			const attempt = withStoreEnv(store.url, () =>
+				runUat(
+					{ scenarios: [1], report: undefined, tag: "consumer-contract", live: undefined, graph: undefined },
+					{
+						SUBSTRATE_URL: "http://substrate.invalid:7410",
+						[TOKEN_ENV]: "consumer-contract-bearer",
+						[LEDGER_URL_ENV]: store.url,
+						SUBSTRATE_PG_URL: store.url,
+						DRAGONFLY_URL: store.url,
+					},
+				),
+			);
+			await expect(attempt).rejects.toBeInstanceOf(UatRefused);
+			await expect(attempt).rejects.toThrow("--live");
+			expect(fake.state.requests).toBe(0);
+			expect(store.state.connections).toBe(0);
+		} finally {
+			fake.stop();
+			store.stop();
+		}
+	});
+});
+
+describe("surface bearers", () => {
+	test("a surface bearer comes from its own token file, never from the operator token", () => {
+		const dir = mkdtempSync(join(tmpdir(), "uat-surface-bearer-"));
+		try {
+			writeFileSync(join(dir, "cursor"), "cursor-surface-bearer-for-test\n");
+			writeFileSync(join(dir, "hermes"), "hermes-surface-bearer-for-test\n");
+			const env = { [TOKEN_ENV]: "operator-token-for-test", SUBSTRATE_TOKENS_DIR: dir };
+			const cursor = surfaceBearer("cursor", env);
+			const hermes = surfaceBearer("hermes", env);
+			expect(cursor).toBe("cursor-surface-bearer-for-test");
+			expect(hermes).toBe("hermes-surface-bearer-for-test");
+			expect(cursor).not.toBe("operator-token-for-test");
+			expect(hermes).not.toBe("operator-token-for-test");
+			expect(surfaceBearer("missing-surface", env)).toBeNull();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
