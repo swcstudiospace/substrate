@@ -219,6 +219,15 @@ answer for operators and tests: 200 with the version (and `job`), 503
 with the reason. The skills-sync tick (`packages/projector/src/skills-sync.ts`)
 treats any 2xx as delivered, so its 3 s budget now holds.
 
+The `agent-skills` refresh reads a local checkout when `SUBSTRATE_AGENT_SKILLS_ROOT` names one: an
+absolute path (a relative value is refused with a boot warning and treated as unset). Each directory
+`<name>/` at the checkout root contributes its `<name>/SKILL.md` and its `<name>/references/` tree,
+when it has them, read with the scanner and size caps the `agent-substrate` checkout uses. Dot-directories
+and links are skipped. Only those roots pass the ingest guard for that dataset; `agent-substrate` keeps
+`SUBSTRATE_DOCS_INGEST_ROOTS`. Unset, the trigger is the noop above and records no version. A checkout
+that cannot be read fails the job with `checkout-unreadable` (503 under `?wait=1`) and records no version;
+the pinned version keeps serving, with `pin_age_ms` on its citations, until a refresh succeeds (D42-5).
+
 ### Freshness and trigger lag (uplift-4 S7)
 
 Two signals, both computed in-process from the persisted state file
@@ -400,10 +409,11 @@ adds `dataset_commit` to a citation only from a dataset's recorded version
 (the `versions` list of `SUBSTRATE_DOCS_STATE_FILE`); `docs ingest` stores
 documents and ingest records but records no version. The only route that
 records a version is a merge-trigger job (`recordDocsVersion` in the refresh),
-and the route runs one only for `agent-substrate`, from the checkout's
-configured roots; for every other dataset the trigger is a noop. The fixtures
-use `agent-substrate`, `programming-desk` and `agent-skills`, so the pins for
-the last two cannot come from an HTTP route and are written by the operator.
+and the route runs one only for `agent-substrate`, from the checkout's configured
+roots, and for `agent-skills` once `SUBSTRATE_AGENT_SKILLS_ROOT` names a checkout;
+for every other dataset the trigger is a noop. The fixtures use `agent-substrate`,
+`programming-desk` and `agent-skills`, so the `programming-desk` pin cannot come from
+an HTTP route and is written by the operator.
 Pick one commit value `COMMIT` (a release SHA is fine) and use it everywhere:
 
 1. Make the pages ingestible: set `SUBSTRATE_DOCS_INGEST_ROOTS` on substrate-mcp

@@ -559,7 +559,39 @@ describe("routes", () => {
 		}
 	});
 
-	test("POST /docs/merge-trigger answers a dataset it holds no checkout of with a truthful noop", async () => {
+	test("POST /docs/merge-trigger ingests the agent-skills checkout when SUBSTRATE_AGENT_SKILLS_ROOT names one, then records the version", async () => {
+		const { greptime, written } = ledger();
+		const fake = new RagflowFake();
+		fake.parseDonePolls = 1;
+		const restore = patchFetch(fake.fetch);
+		// The library layout: each skill is a `<name>/` directory holding SKILL.md and a references/ tree. A
+		// directory with no SKILL.md is not a skill, so its file never reaches the plane.
+		const checkout = docsFixture({
+			"demo-skill/SKILL.md": "---\nname: demo-skill\n---\nDemo skill body.\n",
+			"demo-skill/references/api.md": "The demo API reference.\n",
+			"notes/scratch.md": "Not a skill.\n",
+		});
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_AGENT_SKILLS_ROOT: checkout });
+		try {
+			const response = await post("/docs/merge-trigger?wait=1", { dataset: "agent-skills", commit: "c-skills", content_sha256: "sha-skills" }, { authorization: "Bearer tok-omp" });
+			const body = (await response.json()) as { ok: boolean; version?: { version: string; commit: string; dataset_id: string } };
+			expect(response.status).toBe(200);
+			expect(body.ok).toBe(true);
+			expect(body.version).toMatchObject({ version: "v1", commit: "c-skills", dataset_id: "ds-leipzig-agent-skills" });
+			// Exactly the skill's SKILL.md and its reference reach the plane, each cited by its own file.
+			const sources = uploadsFor(fake, "ds-leipzig-agent-skills").map((upload) => upload.metadata.source_url ?? "");
+			expect(sources).toHaveLength(2);
+			expect(sources.some((url) => url.endsWith("/demo-skill/SKILL.md"))).toBe(true);
+			expect(sources.some((url) => url.endsWith("/demo-skill/references/api.md"))).toBe(true);
+			expect(refreshEvents(written)).toHaveLength(1);
+		} finally {
+			restore();
+			await stop();
+			rmSync(checkout, { recursive: true, force: true });
+		}
+	});
+
+	test("POST /docs/merge-trigger for agent-skills is a truthful noop when SUBSTRATE_AGENT_SKILLS_ROOT is unset", async () => {
 		const { greptime, written } = ledger();
 		const fake = new RagflowFake();
 		const restore = patchFetch(fake.fetch);
@@ -571,9 +603,9 @@ describe("routes", () => {
 			{ docsIngestBaseDir: docs },
 		);
 		try {
-			// agent-skills is a known trigger row, but this server holds no checkout
-			// of it: a recorded version over documents that were never ingested
-			// would only lie to search, so the noop says what happened instead.
+			// agent-skills is a known trigger row, but with no checkout named this server holds none of it: a
+			// recorded version over documents that were never ingested would only lie to search, so the noop
+			// says what happened instead.
 			const response = await post("/docs/merge-trigger", { dataset: "agent-skills", commit: "c-ff", content_sha256: "sha-ff" }, { authorization: "Bearer tok-omp" });
 			const body = (await response.json()) as { ok: boolean; dataset: string; noop?: boolean; reason?: string };
 			expect(response.status).toBe(200);
@@ -587,6 +619,27 @@ describe("routes", () => {
 			restore();
 			await stop();
 			rmSync(docs, { recursive: true, force: true });
+		}
+	});
+
+	test("POST /docs/merge-trigger for agent-skills fails with checkout-unreadable when the named checkout is gone", async () => {
+		const { greptime, written } = ledger();
+		const fake = new RagflowFake();
+		const restore = patchFetch(fake.fetch);
+		// The named checkout does not exist, so its roots cannot be listed: the job fails before any plane call.
+		const gone = docsFixture({ "demo-skill/SKILL.md": "Demo skill body.\n" });
+		rmSync(gone, { recursive: true, force: true });
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_AGENT_SKILLS_ROOT: gone });
+		try {
+			const response = await post("/docs/merge-trigger?wait=1", { dataset: "agent-skills", commit: "c-gone", content_sha256: "sha-gone" }, { authorization: "Bearer tok-omp" });
+			const body = (await response.json()) as { ok: boolean; reason?: string };
+			expect(response.status).toBe(503);
+			expect(body).toMatchObject({ ok: false, reason: "checkout-unreadable" });
+			expect(fake.uploads).toHaveLength(0);
+			expect(refreshEvents(written)).toHaveLength(0);
+		} finally {
+			restore();
+			await stop();
 		}
 	});
 

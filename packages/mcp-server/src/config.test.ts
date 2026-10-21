@@ -406,3 +406,23 @@ describe("SUBSTRATE_LEDGER_TTL floor", () => {
 		expect(loadLedgerSettings({}).ttl).toBeNull();
 	});
 });
+
+describe("SUBSTRATE_AGENT_SKILLS_ROOT (phase 42, D42-1)", () => {
+	test("unset names no checkout and warns nothing", () => {
+		const config = loadConfig({});
+		expect(config.agentSkillsRoot).toBeNull();
+		expect(configWarnings(config)).toEqual([]);
+	});
+
+	test("an absolute path is the checkout, trimmed, and warns nothing", () => {
+		const config = loadConfig({ SUBSTRATE_AGENT_SKILLS_ROOT: " /srv/agent-skills " });
+		expect(config.agentSkillsRoot).toBe("/srv/agent-skills");
+		expect(configWarnings(config)).toEqual([]);
+	});
+
+	test("a relative path is treated as unset and named at boot", () => {
+		const config = loadConfig({ SUBSTRATE_AGENT_SKILLS_ROOT: "agent-skills" });
+		expect(config.agentSkillsRoot).toBeNull();
+		expect(configWarnings(config)).toEqual([expect.stringContaining('SUBSTRATE_AGENT_SKILLS_ROOT="agent-skills"')]);
+	});
+});

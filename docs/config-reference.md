@@ -163,6 +163,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `RAGFLOW_API_KEY` | secret-ref | none | API key | the plane is unconfigured. See `docs/docs-search-ingest.md` | mcp-server/planes/ragflow.ts | yes |
 | `RAGFLOW_DATASET_ID` | string | none | dataset id | nothing: no code reads it today (docs_ingest names the dataset after the repo) (UNREAD: no code reads it today). See `docs/docs-search-ingest.md` | none | yes |
 | `SUBSTRATE_DOCS_INGEST_ROOTS` | list | docs/, README.md, .planning/PROJECT.md | comma separated path prefixes | the default roots. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_AGENT_SKILLS_ROOT` | path | none | absolute path to an agent-skills checkout | the merge-trigger for agent-skills is a noop: no checkout, no version recorded. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_VM_GUEST` | toggle | off | 1 | docs_ingest is allowed; 1 refuses it before any network call. See `docs/docs-search-ingest.md` | mcp-server/config.ts, cli/index.ts | yes |
 | `SUBSTRATE_DOCS_STATE_FILE` | path | none | file path | ingest records and version pins stay process-local. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_PRUNE_SUPERSEDED` | toggle | off | 1 | off: every superseded document stays on the plane. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |

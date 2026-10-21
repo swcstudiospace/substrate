@@ -120,6 +120,22 @@ export async function scanIngestPages(baseDir: string, roots: readonly string[],
 	return pages;
 }
 
+/**
+ * The roots of an agent-skills checkout (phase 42, D42-2). Each directory `<name>/` at the checkout
+ * root is a skill, so its roots are `<name>/SKILL.md` (one file) and `<name>/references/` (a tree):
+ * the layout `writeTree` writes and the library projector reads. Dot-directories and links are not
+ * skills. The listing throws when the checkout cannot be read; the caller fails that refresh.
+ */
+export async function skillsCheckoutRoots(checkout: string, io: Pick<ScanIo, "readdir"> = nodeIo): Promise<string[]> {
+	const entries = await io.readdir(checkout, { withFileTypes: true });
+	const roots: string[] = [];
+	for (const entry of entries) {
+		if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+		roots.push(`${entry.name}/SKILL.md`, `${entry.name}/references/`);
+	}
+	return roots;
+}
+
 async function collectDirectory(dir: string, prefix: string, pages: IngestPage[], io: ScanIo): Promise<void> {
 	let entries: Dirent[];
 	try {

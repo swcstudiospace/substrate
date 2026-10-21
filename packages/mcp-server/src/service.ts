@@ -981,8 +981,13 @@ export interface DocsRefreshRequest {
 	dataset: string;
 	commit: string;
 	content_sha256: string;
-	/** The pages of the checkout, read when the job runs — not when it is accepted. */
-	pages: () => Promise<IngestPage[]>;
+	/**
+	 * The path prefixes this checkout's pages may come from, read when the job runs; the ingest guard
+	 * refuses any page outside them. Absent: the configured docs roots (the agent-substrate checkout).
+	 */
+	roots?: () => Promise<readonly string[]>;
+	/** The pages of the checkout under `roots`, read when the job runs — not when it is accepted. */
+	pages: (roots: readonly string[]) => Promise<IngestPage[]>;
 }
 
 /** How one merge-trigger job ended, as `?wait=1` and the stderr line report it. */
@@ -1063,6 +1068,8 @@ export class Substrate {
 	private readonly docsDatasetList = new DatasetListCache();
 	/** Skills-sync fast-forward evidence: flipped by the first `agent-skills` merge-trigger this process sees (D25-07). */
 	private readonly docsSkillsSync: SkillsSyncTracker = createSkillsSyncTracker();
+	/** Set while the last agent-skills refresh failed: its citations keep `pin_age_ms` on the pin that still serves (D42-5). */
+	private docsSkillsRefreshFailed = false;
 	/** The merge-trigger jobs: one chain per dataset (a trigger queues behind the running one), plus every job still pending by id. */
 	private readonly docsRefreshChains = new Map<string, Promise<void>>();
 	private readonly docsRefreshPending = new Map<string, DocsRefreshJob>();
@@ -3996,7 +4003,7 @@ export class Substrate {
 			: [...DEFAULT_SEARCH_DATASET_NAMES];
 		await this.hydrateDocsSeen();
 		const pins = pinsFromVersions(this.docsVersions);
-		const degradedDatasets = isSyncLive(this.docsSkillsSync) ? [] : ["agent-skills"];
+		const degradedDatasets = isSyncLive(this.docsSkillsSync) && !this.docsSkillsRefreshFailed ? [] : ["agent-skills"];
 		const load = (): Promise<SearchReply> => {
 			noteLoaded();
 			return searchDocs(
@@ -4089,6 +4096,7 @@ export class Substrate {
 	async ingestDocs(
 		input: { dataset?: unknown; commit?: unknown; pages?: unknown; session_id?: unknown },
 		callerSurface: Surface | null,
+		roots?: readonly string[],
 	): Promise<IngestOutcome> {
 		const sessionId = typeof input.session_id === "string" && input.session_id.length > 0 ? input.session_id : undefined;
 		const pages = Array.isArray(input.pages) ? input.pages : [];
@@ -4096,7 +4104,7 @@ export class Substrate {
 		const outcome = await ingestDocs(
 			{
 				config: this.config.ragflow,
-				roots: this.config.docsIngestRoots,
+				roots: roots ?? this.config.docsIngestRoots,
 				vmGuest: this.config.vmGuest,
 				seen: this.docsIngestSeen,
 				locks: this.docsIngestFlight,
@@ -4239,6 +4247,7 @@ export class Substrate {
 	/** One merge-trigger job: ensure, ingest, record; never throws. */
 	private async runDocsRefresh(job: string, request: DocsRefreshRequest, surface: Surface): Promise<DocsRefreshOutcome> {
 		const finish = (outcome: DocsRefreshOutcome): DocsRefreshOutcome => {
+			if (request.dataset === "agent-skills") this.docsSkillsRefreshFailed = !outcome.ok;
 			process.stderr.write(
 				`[substrate] docs merge-trigger ${job} ${request.dataset} ${request.commit.slice(0, 12)}: ${
 					outcome.ok ? `${outcome.version.version} recorded${outcome.created ? " (dataset created)" : ""}` : `failed — ${redact(outcome.reason)}`
@@ -4248,6 +4257,14 @@ export class Substrate {
 		};
 		try {
 			if (this.config.ragflow === null) return finish({ ok: false, reason: "ragflow-not-configured", job });
+			// The checkout's roots are read before any plane call: a checkout that cannot be read
+			// fails this job alone, and the pinned version keeps serving with its age (D42-5).
+			let roots: readonly string[];
+			try {
+				roots = request.roots ? await request.roots() : this.config.docsIngestRoots;
+			} catch {
+				return finish({ ok: false, reason: "checkout-unreadable", job });
+			}
 			// The guarded ingest reads the plane's dataset by name and refuses
 			// `unknown-dataset`, so on a configured plane without the dataset it
 			// must exist before that ingest runs: discover first, create only on
@@ -4256,7 +4273,7 @@ export class Substrate {
 			const ensured = await resolveDatasets({ config: this.config.ragflow, fetchImpl: this.ragflowFetch, datasets: this.docsDatasetList }, [request.dataset]);
 			if (!ensured.ok) return finish({ ok: false, reason: ensured.reason, job });
 			const created = ensured.datasets[0]?.created === true;
-			const ingested = await this.ingestDocs({ dataset: request.dataset, commit: request.commit, pages: await request.pages() }, surface);
+			const ingested = await this.ingestDocs({ dataset: request.dataset, commit: request.commit, pages: await request.pages(roots) }, surface, roots);
 			if (!ingested.ok) return finish({ ok: false, reason: ingested.reason, job });
 			const refreshed = await this.recordDocsVersion(request, surface);
 			if (!refreshed.ok) return finish({ ok: false, reason: refreshed.reason, job });

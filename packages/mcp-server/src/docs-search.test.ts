@@ -4,12 +4,16 @@
  * plus reason. Proved against the recording fake.
  */
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CircuitBreaker, gatedFetch, type DocsSearchSample, type PlaneGate } from "@substrate/observability";
 import { ReadThroughCache, type CacheRedis } from "./cache.ts";
 import { citationProvenanceCounts, searchDocs, searchReplyStorable, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type SearchReply } from "./docs-search.ts";
 import type { DatasetListSource } from "./docs-datasets.ts";
+import { scanIngestPages, skillsCheckoutRoots } from "./docs-ingest.ts";
 import { RagflowFake, type FakeChunk } from "./ragflow-fake.ts";
 import { ragflowOp } from "./planes/ragflow.ts";
 import type { EventInput } from "./types.ts";
@@ -532,5 +536,77 @@ describe("docs_search outcome metrics (uplift-3 N5)", () => {
 				{ ...citation, commit: "dataset-pin:agent-skills:unpinned" },
 			]),
 		).toEqual({ recorded: 1, unrecorded: 1, unpinned: 2 });
+	});
+});
+
+describe("docs_search after an agent-skills refresh (phase 42)", () => {
+	/** A checkout in the library layout: each `<name>/` holds its `SKILL.md` and a `references/` tree. */
+	function skillsCheckout(files: Record<string, string>): string {
+		const root = mkdtempSync(join(tmpdir(), "substrate-skills-"));
+		for (const [path, body] of Object.entries(files)) {
+			mkdirSync(dirname(join(root, path)), { recursive: true });
+			writeFileSync(join(root, path), body);
+		}
+		return root;
+	}
+
+	/** The refresh the merge-trigger route runs for agent-skills: the trigger is noted, then the job runs and is awaited. */
+	function refresh(substrate: Substrate, checkout: string, commit: string) {
+		substrate.noteDocsTrigger("agent-skills");
+		return substrate.startDocsRefresh(
+			{
+				dataset: "agent-skills",
+				commit,
+				content_sha256: `sha-${commit}`,
+				roots: () => skillsCheckoutRoots(checkout),
+				pages: (roots) => scanIngestPages(checkout, roots),
+			},
+			"omp",
+			{ wait: true },
+		);
+	}
+
+	test("docs_search answers from the new agent-skills version after the refresh", async () => {
+		const fake = new RagflowFake();
+		fake.serveUploadsAsChunks = true;
+		fake.parseDonePolls = 1;
+		const checkout = skillsCheckout({
+			"demo-skill/SKILL.md": "---\nname: demo-skill\n---\nDemo skill body.\n",
+			"demo-skill/references/api.md": "The demo API reference.\n",
+		});
+		try {
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			const outcome = await refresh(substrate, checkout, "skills-v2");
+			expect(outcome.status).toBe(200);
+			const reply = await substrate.searchDocs({ question: "demo API reference" }, "omp");
+			const cited = reply.chunks.filter((chunk) => chunk.source_url.endsWith("/demo-skill/references/api.md"));
+			expect(cited).toHaveLength(1);
+			expect(cited[0]).toMatchObject({ commit: "skills-v2", dataset_commit: "skills-v2" });
+			expect(cited[0]?.pin_age_ms).toBeUndefined();
+			expect(reply.chunks.some((chunk) => chunk.source_url.endsWith("/demo-skill/SKILL.md"))).toBe(true);
+		} finally {
+			rmSync(checkout, { recursive: true, force: true });
+		}
+	});
+
+	test("a checkout that cannot be read keeps the pinned version serving, with its age", async () => {
+		const fake = new RagflowFake();
+		fake.serveUploadsAsChunks = true;
+		fake.parseDonePolls = 1;
+		const checkout = skillsCheckout({ "demo-skill/SKILL.md": "Demo skill body.\n" });
+		try {
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			expect((await refresh(substrate, checkout, "skills-v1")).status).toBe(200);
+			rmSync(checkout, { recursive: true, force: true });
+			const failed = await refresh(substrate, checkout, "skills-v2");
+			expect(failed.status).toBe(503);
+			expect(failed.body).toMatchObject({ ok: false, reason: "checkout-unreadable" });
+			const reply = await substrate.searchDocs({ question: "demo skill" }, "omp");
+			const cited = reply.chunks.find((chunk) => chunk.source_url.endsWith("/demo-skill/SKILL.md"));
+			expect(cited).toMatchObject({ commit: "skills-v1", dataset_commit: "skills-v1" });
+			expect(typeof cited?.pin_age_ms).toBe("number");
+		} finally {
+			rmSync(checkout, { recursive: true, force: true });
+		}
 	});
 });
