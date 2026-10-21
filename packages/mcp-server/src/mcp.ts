@@ -1252,9 +1252,10 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		}
 		if ("outcome" in outcome) {
 			await record("warning", "unknown", "transport", { failure: "transport" });
-			const message =
-				"Railway did not confirm this write, so it may or may not have been applied. Nothing was retried. " +
-				"Check status with railway_list or railway_monitor before retrying.";
+			const check = limits
+				? "Check the limits with railway_scale_suggest once fresh samples arrive, or in the Railway dashboard, before retrying."
+				: "Check status with railway_list or railway_monitor before retrying.";
+			const message = `Railway did not confirm this write, so it may or may not have been applied. Nothing was retried. ${check}`;
 			return { ...json({ applied: false, outcome: "unknown", message }), isError: true };
 		}
 		await record("warning", "refused", outcome.refusal, { refusal: outcome.refusal });
