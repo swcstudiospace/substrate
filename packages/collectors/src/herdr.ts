@@ -15,6 +15,7 @@ import { createConnection, type Socket } from "node:net";
 import { drainEventSpool, postEvent, SPOOL_DRAIN_MS, type EmitOutcome } from "./emit.ts";
 import { spoolConfig } from "./spool.ts";
 import { branchFor, repoSlug } from "./git-context.ts";
+import { graphIdForWorktree } from "./worktree-graph.ts";
 import type { HerdrPane } from "./herdr-map.ts";
 import {
 	commitReconcile,
@@ -29,6 +30,13 @@ export const POLL_MS = 5000;
 export const DEBOUNCE_MS = 150;
 const CALL_TIMEOUT_MS = 5000;
 const JOURNAL_INTERVAL_MS = 60_000;
+
+/** Repo, branch and graph for a pane, from its working directory. Empty when the pane reports none. */
+export function attributePane(pane: HerdrPane): { repo?: string; branch?: string; graph_id?: string } {
+	const cwd = pane.cwd ?? pane.foreground_cwd;
+	if (!cwd) return {};
+	return { repo: repoSlug(cwd), branch: branchFor(cwd), graph_id: graphIdForWorktree(cwd) ?? undefined };
+}
 
 /** Global lifecycle types. One subscribe, no pane id. */
 export const GLOBAL_SUBSCRIPTIONS = [
@@ -140,11 +148,7 @@ export class HerdrCollector {
 		this.debounceMs = options.debounceMs ?? DEBOUNCE_MS;
 		this.pollMs = options.pollMs ?? POLL_MS;
 		this.post = options.post ?? ((event, source) => postEvent(event, { timeoutMs: 3000, collector: "herdr", source }));
-		this.attribute = options.attribute ?? ((pane) => {
-			const cwd = pane.cwd ?? pane.foreground_cwd;
-			if (!cwd) return {};
-			return { repo: repoSlug(cwd), branch: branchFor(cwd) };
-		});
+		this.attribute = options.attribute ?? attributePane;
 		this.now = options.now ?? (() => new Date().toISOString());
 		this.drain = options.drain ?? (spoolConfig().mode === "on" ? () => drainEventSpool({ budgetMs: 10_000 }) : null);
 		this.drainMs = options.drainMs ?? SPOOL_DRAIN_MS;

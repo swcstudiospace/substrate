@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EventInput } from "../../mcp-server/src/types.ts";
-import { GLOBAL_SUBSCRIPTIONS as GLOBAL, HerdrCollector, resolveSocketPath } from "./herdr.ts";
+import { attributePane, GLOBAL_SUBSCRIPTIONS as GLOBAL, HerdrCollector, resolveSocketPath } from "./herdr.ts";
 import type { HerdrPane } from "./herdr-map.ts";
 
 interface Conn {
@@ -26,6 +26,30 @@ describe("socket resolution", () => {
 		expect(resolveSocketPath([], { HOME: "/home/a", HERDR_SESSION: "named" })).toBe("/home/a/.config/herdr/sessions/named/herdr.sock");
 		expect(resolveSocketPath([], {})).toBe("/root/.config/herdr/herdr.sock");
 		expect(resolveSocketPath(["--once", "--watch"], { HOME: "/home/a" })).toBe("/home/a/.config/herdr/herdr.sock");
+	});
+});
+
+describe("graph attribution from the pane's directory", () => {
+	const GID = "ut-mugzzzzz-0123abcd";
+	const pane = (over: Partial<HerdrPane>): HerdrPane => ({
+		pane_id: "w1:p1",
+		terminal_id: "term_a",
+		agent: "omp",
+		agent_status: "working",
+		workspace_id: "w1",
+		tab_id: "t1",
+		...over,
+	});
+
+	test("a pane working in a graph's worktree names that graph, from cwd or from the foreground process", () => {
+		expect(attributePane(pane({ cwd: `/var/lib/substrate/worktrees/${GID}/packages/collectors` })).graph_id).toBe(GID);
+		expect(attributePane(pane({ cwd: undefined, foreground_cwd: `/var/lib/substrate/worktrees/${GID}` })).graph_id).toBe(GID);
+	});
+
+	test("a pane elsewhere, at the worktree root itself, or with no directory names no graph", () => {
+		expect(attributePane(pane({ cwd: "/home/ops/src/agent-substrate" })).graph_id).toBeUndefined();
+		expect(attributePane(pane({ cwd: "/var/lib/substrate/worktrees" })).graph_id).toBeUndefined();
+		expect(attributePane(pane({ cwd: undefined, foreground_cwd: undefined })).graph_id).toBeUndefined();
 	});
 });
 

@@ -180,3 +180,20 @@ describe("muse writer and the brief ETag", () => {
 		expect(loaded.counters.unchanged).toBe(0);
 	});
 });
+
+describe("the graph on the brief request", () => {
+	test("names the graph when one is given, and sends no graph field otherwise", async () => {
+		process.env.SUBSTRATE_URL = "http://127.0.0.1:9";
+		const bodies: unknown[] = [];
+		globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+			bodies.push(JSON.parse(String(init?.body)));
+			return new Response("# Brief\n", { status: 200, headers: { etag: 'W/"aaaa"' } });
+		}) as typeof fetch;
+		await fetchBrief("acme/widgets", "main", null, "ut-mugzzzzz-0123abcd");
+		await fetchBrief("acme/widgets", "main");
+		expect(bodies).toEqual([
+			{ repo: "acme/widgets", branch: "main", surface: "muse", graph_id: "ut-mugzzzzz-0123abcd" },
+			{ repo: "acme/widgets", branch: "main", surface: "muse" },
+		]);
+	});
+});

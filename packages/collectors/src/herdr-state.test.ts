@@ -229,4 +229,17 @@ describe("state file", () => {
 		expect(text.endsWith("\n")).toBe(true);
 		expect(JSON.parse(text).version).toBe(2);
 	});
+
+	test("a graph named at start stays on the pane record, so the session end after a restart still names it", () => {
+		const GID = "ut-mugzzzzz-0123abcd";
+		const named = () => ({ repo: "swcstudiospace/agent-substrate", branch: "main", graph_id: GID });
+		const started = reconcile(emptyHerdrState(), [pane()], { now: NOW, attribute: named });
+		expect(started.transitions[0]?.event.graph_id).toBe(GID);
+		const dir = mkdtempSync(join(tmpdir(), "herdr-graph-"));
+		const path = join(dir, "herdr-offsets.json");
+		expect(saveHerdrState(path, commitReconcile(emptyHerdrState(), started, ["stored"]))).toBe(true);
+		const ended = reconcile(loadHerdrState(path).state, [], { now: LATER, attribute });
+		expect(ended.transitions.map((transition) => transition.event.kind)).toEqual(["session.end"]);
+		expect(ended.transitions[0]?.event.graph_id).toBe(GID);
+	});
 });

@@ -27,6 +27,8 @@ export interface HerdrPaneRecord {
 	session_id: string;
 	repo?: string;
 	branch?: string;
+	/** The graph whose worktree holds the pane's working directory (worktree-graph.ts). */
+	graph_id?: string;
 	started_at: string;
 	pane_id: string;
 	terminal_id: string;
@@ -70,7 +72,7 @@ export interface ReconcileOptions {
 	seed?: boolean;
 	now?: string;
 	/** Repo and branch for a pane. Omitted cwd yields an event without repo. */
-	attribute?: (pane: HerdrPane) => { repo?: string; branch?: string };
+	attribute?: (pane: HerdrPane) => { repo?: string; branch?: string; graph_id?: string };
 }
 
 export function emptyHerdrState(): HerdrStateFile {
@@ -138,6 +140,7 @@ function normalizeState(raw: Record<string, unknown>): HerdrStateFile {
 				session_id: typeof value.session_id === "string" ? value.session_id : `herdr:${value.terminal_id}:restored`,
 				repo: typeof value.repo === "string" ? value.repo : undefined,
 				branch: typeof value.branch === "string" ? value.branch : undefined,
+				graph_id: typeof value.graph_id === "string" ? value.graph_id : undefined,
 				started_at: typeof value.started_at === "string" ? value.started_at : new Date(0).toISOString(),
 				pane_id: value.pane_id,
 				terminal_id: value.terminal_id,
@@ -199,7 +202,7 @@ export function saveHerdrState(path: string, state: HerdrStateFile): boolean {
 	}
 }
 
-function attribute(pane: HerdrPane, options: ReconcileOptions): { repo?: string; branch?: string } {
+function attribute(pane: HerdrPane, options: ReconcileOptions): { repo?: string; branch?: string; graph_id?: string } {
 	const cwd = pane.cwd ?? pane.foreground_cwd;
 	if (!cwd || !options.attribute) return {};
 	return options.attribute(pane);
@@ -216,6 +219,7 @@ function recordFor(pane: HerdrPane, agent: string, surface: Surface, now: string
 		session_id: `herdr:${pane.terminal_id}:${now}`,
 		repo: attr.repo,
 		branch: attr.branch,
+		graph_id: attr.graph_id,
 		started_at: now,
 		pane_id: pane.pane_id,
 		terminal_id: pane.terminal_id ?? "",
@@ -237,6 +241,7 @@ function startOf(identity: string, pane: HerdrPane, agent: string, surface: Surf
 		session_id: next.session_id,
 		repo: next.repo,
 		branch: next.branch,
+		graph_id: next.graph_id,
 		status: next.status,
 		herdr_type: "pane.agent_detected",
 	}, next);
@@ -252,6 +257,7 @@ function endOf(identity: string, prev: HerdrPaneRecord, reason: "pane_gone" | "a
 		session_id: prev.session_id,
 		repo: prev.repo,
 		branch: prev.branch,
+		graph_id: prev.graph_id,
 		end_reason: reason,
 		herdr_type: "pane.exited",
 	});
@@ -330,6 +336,7 @@ export function reconcile(state: HerdrStateFile, panes: readonly HerdrPane[], op
 			const attr = attribute(pane, options);
 			next.repo = attr.repo;
 			next.branch = attr.branch;
+			next.graph_id = attr.graph_id;
 			transitions.push(planned(identity, {
 				rowId: "herdr.status_changed",
 				surface,
@@ -339,6 +346,7 @@ export function reconcile(state: HerdrStateFile, panes: readonly HerdrPane[], op
 				session_id: prev.session_id,
 				repo: next.repo,
 				branch: next.branch,
+				graph_id: next.graph_id,
 				status: raw,
 				previous_status: prev.status,
 				herdr_type: "pane.agent_status_changed",
