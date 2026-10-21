@@ -503,15 +503,18 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 	// The subject is judged on its own, so a body that is empty can still be parked for what the subject
 	// carries. Every other empty entry is refused: it tells the next agent nothing.
 	const subjectFinding = subjectInput === null ? null : classify(subjectInput, kind);
+	const reviewed = deps.isReviewToken(request.review_token);
+	// A subject finding parks the write unless review clears it; only then do the lesson checks apply.
+	const subjectParks = subjectFinding !== null && !(subjectFinding.reviewable && reviewed);
 	if (!raw && !subjectFinding) {
 		return refuse("denied", "text.empty", "text is required — an empty memory entry tells the next agent nothing.");
 	}
 	// Judge the text that would be stored. A body that is only a secret redacts
 	// to a label, and that label is not a lesson.
 	const judged = redact(raw);
-	// A subject finding parks the write instead, so the lesson checks yield to it.
+	// A subject finding that parks the write makes the lesson checks yield to it.
 	const lessonIssue = lessonWriteIssue(judged, subjectInput);
-	if (lessonIssue && !subjectFinding) {
+	if (lessonIssue && !subjectParks) {
 		return refuse("denied", "lesson.empty", `${lessonIssue}. An empty lesson is not stored.`);
 	}
 
@@ -533,7 +536,6 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 		);
 	}
 
-	const reviewed = deps.isReviewToken(request.review_token);
 	// Redact before capping, for the reason `normalizeEvent` does: truncating first
 	// can cut a token in half so its own pattern no longer matches.
 	const redacted = redact(raw);
@@ -541,7 +543,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 	cut.truncated = redacted.length > MAX_MEMORY_TEXT;
 	// The cap can cut a valid body down to a header. Judge the text that will be stored.
 	const storedIssue = lessonWriteIssue(text, subjectInput);
-	if (storedIssue && !subjectFinding) {
+	if (storedIssue && !subjectParks) {
 		return refuse("denied", "lesson.empty", `${storedIssue}. An empty lesson is not stored.`);
 	}
 	const subject = normalizeSubject(request.subject);
@@ -552,7 +554,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 	if (isLessonWrite(judged, subjectInput) && !sourceEvent && sessionId) {
 		sourceEvent = normalizeIdentifier(`session:${sessionId}`);
 	}
-	if (isLessonWrite(judged, subjectInput) && !sourceEvent && !subjectFinding) {
+	if (isLessonWrite(judged, subjectInput) && !sourceEvent && !subjectParks) {
 		return refuse(
 			"denied",
 			"lesson.unsourced",

@@ -512,6 +512,20 @@ describe("denied — default-deny RBAC", () => {
 		expect(store.quarantined).toEqual([]);
 	});
 
+	test("a reviewed lesson subject that is only a placeholder still runs the lesson checks", async () => {
+		const placeholder = await write({
+			subject: "lesson:v1.3/session/tbd",
+			text: "[lessonbank]\nmilestone: v1.3\nphase: session\n\n",
+			kind: "fact",
+			source_event: "session:sess-tbd",
+			review_token: REVIEW_TOKEN,
+		});
+		expect(placeholder.outcome).toBe("denied");
+		expect(placeholder.reason).toBe("lesson.empty");
+		expect(store.entries()).toEqual([]);
+		expect(store.quarantined).toEqual([]);
+	});
+
 	test("a later source on the same body replays the stored row", async () => {
 		const first = await write({ text: "hermes finished n2 with the lease held", idempotency_key: "k-source" });
 		expect(first.outcome).toBe("accepted");
