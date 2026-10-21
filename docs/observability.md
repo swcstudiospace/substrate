@@ -473,8 +473,8 @@ priced with the operator's unit prices, against `SUBSTRATE_RAILWAY_BUDGET_USD`. 
 report-only: it is never folded into `breached`, so a cost overrun does not page or trip the
 storm-breaker. Its `status` is `ok`, `over-budget`, `unpriced`, `unavailable` or `unconfigured`
 (no token). A Railway error gives `unavailable` in the key and `/slo` still answers 200. The
-report is cached in process for 15 minutes, so a monitor's scrape frequency does not reach the
-Railway API.
+report is cached in process for 15 minutes. A failed read is not cached, so a scrape during an outage reaches the Railway API
+again; concurrent scrapes share one read.
 
 ### Hindsight outbox gauges, inventory and drift (uplift-4 S5)
 

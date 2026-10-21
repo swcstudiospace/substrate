@@ -1213,6 +1213,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		ref: ServiceRef,
 		approvalRef: string | undefined,
 		write: (gate: WriteGate) => Promise<WriteOutcome>,
+		limits?: { readonly vcpus: number; readonly memory_gb: number },
 	) => {
 		const validRef = approvalRef !== undefined && approvalRefValid(approvalRef) ? approvalRef : null;
 		const gate: WriteGate = { isOperator, approvalRef: validRef };
@@ -1227,7 +1228,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			kind: "note" | "warning",
 			status: "applied" | "refused",
 			reason: string | null,
-			detail: { refusal?: WriteRefusal; failure?: string },
+			detail: { refusal?: WriteRefusal; failure?: string; vcpus?: number; memory_gb?: number },
 		) =>
 			substrate
 				.emit({
@@ -1247,7 +1248,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			return { ...json({ applied: false, error: cause.kind, message: cause.message }), isError: true };
 		}
 		if (outcome.applied) {
-			await record("note", "applied", null, {});
+			await record("note", "applied", null, limits ?? {});
 			return json(outcome);
 		}
 		await record("warning", "refused", outcome.refusal, { refusal: outcome.refusal });
@@ -1339,6 +1340,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					{ vCPUs: vcpus, memoryGB: memory_gb },
 					gate,
 				),
+				{ vcpus, memory_gb },
 			),
 	);
 

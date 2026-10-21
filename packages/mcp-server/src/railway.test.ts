@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	RAILWAY_API_URL,
 	RAILWAY_COST_CACHE_MS,
+	RAILWAY_REQUEST_TIMEOUT_MS,
 	RailwayClient,
 	RailwayRequestError,
 	type RailwayFetch,
@@ -113,6 +114,7 @@ describe("railwayFromEnv", () => {
 		expect(railwayFromEnv({ RAILWAY_API_TOKEN: "   " }).apiToken).toBeNull();
 		expect(railwayFromEnv({ RAILWAY_API_TOKEN: `  ${TOKEN}  ` }).apiToken).toBe(TOKEN);
 		expect(railwayFromEnv({ SUBSTRATE_RAILWAY_PROJECT_IDS: " a, ,b " }).projectIds).toEqual(["a", "b"]);
+		expect(railwayFromEnv({ SUBSTRATE_RAILWAY_PROJECT_IDS: "b, a,b" }).projectIds).toEqual(["b", "a"]);
 	});
 });
 
@@ -296,6 +298,7 @@ describe("reads and errors", () => {
 					services: [{ id: "svc-1", name: "forwarder" }],
 				},
 			],
+			truncated: false,
 		});
 		expect(sent).toHaveLength(1);
 		expect(sent[0]?.url).toBe(RAILWAY_API_URL);
@@ -479,5 +482,138 @@ describe("cost report", () => {
 		clock += RAILWAY_COST_CACHE_MS + 1;
 		await client.costReport();
 		expect(sent).toHaveLength(2);
+	});
+});
+
+describe("client deadline, single flight, scale bounds and pages", () => {
+	test("every request carries an AbortSignal and a stalled request fails as transport", async () => {
+		expect(RAILWAY_REQUEST_TIMEOUT_MS).toBe(5_000);
+		const signals: AbortSignal[] = [];
+		const fetch: RailwayFetch = (_input, init) => {
+			signals.push(init.signal);
+			return new Promise<never>(() => undefined);
+		};
+		const client = new RailwayClient(railwayFromEnv(READABLE_ENV), { fetch, timeoutMs: 10 });
+		expect((await rejectionOf(client.monitor(REF))).kind).toBe("transport");
+		expect(signals).toHaveLength(1);
+		expect(signals[0]?.aborted).toBe(true);
+	});
+
+	test("a body that never finishes is bounded by the same deadline and reads as unavailable", async () => {
+		const fetch: RailwayFetch = async () => ({ ok: true, status: 200, text: () => new Promise<string>(() => undefined) });
+		const client = new RailwayClient(railwayFromEnv(READABLE_ENV), { fetch, timeoutMs: 10 });
+		const report = await client.costReport();
+		expect(report.status).toBe("unavailable");
+		expect(report.projectedMonthlyUsd).toBeNull();
+	});
+
+	test("a failed cost read clears the slot and is not cached", async () => {
+		let calls = 0;
+		const fetch: RailwayFetch = async () => {
+			calls += 1;
+			if (calls === 1) throw new Error("socket reset");
+			return { ok: true, status: 200, text: async () => JSON.stringify({ data: { estimatedUsage: [{ measurement: "CPU_USAGE", estimatedValue: 100, projectId: "proj-1" }] } }) };
+		};
+		const client = new RailwayClient(railwayFromEnv({ ...READABLE_ENV, SUBSTRATE_RAILWAY_PRICE_CPU_USD: "0.02" }), { fetch });
+		expect((await client.costReport()).status).toBe("unavailable");
+		expect((await client.costReport()).status).toBe("ok");
+		expect(calls).toBe(2);
+	});
+
+	test("concurrent cost reads share one request", async () => {
+		let calls = 0;
+		let release: () => void = () => undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = () => resolve();
+		});
+		const fetch: RailwayFetch = async () => {
+			calls += 1;
+			await gate;
+			return { ok: true, status: 200, text: async () => JSON.stringify({ data: { estimatedUsage: [{ measurement: "CPU_USAGE", estimatedValue: 100, projectId: "proj-1" }] } }) };
+		};
+		const client = new RailwayClient(railwayFromEnv({ ...READABLE_ENV, SUBSTRATE_RAILWAY_PRICE_CPU_USD: "0.02" }), { fetch });
+		const first = client.costReport();
+		const second = client.costReport();
+		release();
+		const [a, b] = await Promise.all([first, second]);
+		expect(calls).toBe(1);
+		expect(b).toBe(a);
+		expect(a.status).toBe("ok");
+	});
+
+	test("a repeated project id is summed once", async () => {
+		const { fetch, sent } = recordingFetch(() => ({ status: 200, body: { data: { estimatedUsage: [{ measurement: "CPU_USAGE", estimatedValue: 100, projectId: "proj-1" }] } } }));
+		const client = new RailwayClient(railwayFromEnv({ ...READABLE_ENV, SUBSTRATE_RAILWAY_PROJECT_IDS: "proj-1,proj-1", SUBSTRATE_RAILWAY_PRICE_CPU_USD: "0.02" }), { fetch });
+		const report = await client.costReport();
+		expect(sent).toHaveLength(1);
+		expect(report.projectedMonthlyUsd).toBeCloseTo(2);
+	});
+
+	test("suggestScale reads the window, parses the series and takes the newest limit", async () => {
+		const now = Date.parse(GENERATED_AT);
+		const points = (count: number, value: number) => Array.from({ length: count }, (_, index) => ({ ts: now - index * 300_000, value }));
+		const metrics = [
+			{ measurement: "CPU_USAGE", values: points(30, 0.5) },
+			{ measurement: "MEMORY_USAGE_GB", values: points(30, 0.2) },
+			{
+				measurement: "CPU_LIMIT",
+				values: [
+					{ ts: now - 600_000, value: 2 },
+					{ ts: now, value: 1 },
+					{ ts: now - 300_000, value: 4 },
+				],
+			},
+			{
+				measurement: "MEMORY_LIMIT_GB",
+				values: [
+					{ ts: now - 300_000, value: 0.5 },
+					{ ts: now, value: 2 },
+				],
+			},
+		];
+		const { fetch, sent } = recordingFetch(() => ({ status: 200, body: { data: { metrics } } }));
+		const client = new RailwayClient(railwayFromEnv(READABLE_ENV), { fetch, now: () => new Date(now) });
+		const suggestion = await client.suggestScale(REF);
+		expect(sent).toHaveLength(1);
+		expect(sent[0]?.variables).toEqual({
+			environmentId: "env-1",
+			serviceId: "svc-1",
+			startDate: "2026-10-20T00:00:00.000Z",
+			endDate: "2026-10-21T00:00:00.000Z",
+		});
+		expect(sent[0]?.query).toContain("CPU_LIMIT");
+		expect(suggestion).toMatchObject({
+			status: "ok",
+			current: { vCPUs: 1, memoryGB: 2 },
+			p95: { vCPUs: 0.5, memoryGB: 0.2 },
+			suggested: { vCPUs: 0.75, memoryGB: 0.5 },
+			samples: 30,
+			windowSeconds: 86_400,
+		});
+	});
+
+	test("inverted scale bounds refuse the suggestion before any request", async () => {
+		const { fetch, sent } = recordingFetch(() => ({ status: 200, body: { data: { metrics: [] } } }));
+		const vcpus = new RailwayClient(railwayFromEnv({ ...READABLE_ENV, SUBSTRATE_RAILWAY_SCALE_MIN_VCPUS: "8" }), { fetch });
+		const memory = new RailwayClient(railwayFromEnv({ ...READABLE_ENV, SUBSTRATE_RAILWAY_SCALE_MIN_MEMORY_GB: "16" }), { fetch });
+		const vcpusError = await rejectionOf(vcpus.suggestScale(REF));
+		expect(vcpusError.kind).toBe("configuration");
+		expect(vcpusError.message).toContain("SUBSTRATE_RAILWAY_SCALE_MIN_VCPUS (8)");
+		expect((await rejectionOf(memory.suggestScale(REF))).message).toContain("SUBSTRATE_RAILWAY_SCALE_MIN_MEMORY_GB (16)");
+		expect(sent).toHaveLength(0);
+	});
+
+	test("a full page of items marks the resources truncated, a short page does not", async () => {
+		const services = (count: number) => Array.from({ length: count }, (_, index) => ({ node: { id: `svc-${index}`, name: "svc" } }));
+		const projectWith = (count: number) => ({ id: "proj-1", name: "substrate", environments: { edges: [] }, services: { edges: services(count) } });
+		const short = new RailwayClient(railwayFromEnv(READABLE_ENV), { fetch: recordingFetch(() => ({ status: 200, body: { data: { project: projectWith(99) } } })).fetch });
+		expect((await short.listResources()).truncated).toBe(false);
+		const full = new RailwayClient(railwayFromEnv(READABLE_ENV), { fetch: recordingFetch(() => ({ status: 200, body: { data: { project: projectWith(100) } } })).fetch });
+		expect((await full.listResources()).truncated).toBe(true);
+		const listed = Array.from({ length: 100 }, (_, index) => ({ node: { id: `p-${index}`, name: "p", environments: { edges: [] }, services: { edges: [] } } }));
+		const all = new RailwayClient(railwayFromEnv({ RAILWAY_API_TOKEN: TOKEN }), { fetch: recordingFetch(() => ({ status: 200, body: { data: { projects: { edges: listed } } } })).fetch });
+		const resources = await all.listResources();
+		expect(resources.projects).toHaveLength(100);
+		expect(resources.truncated).toBe(true);
 	});
 });

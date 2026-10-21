@@ -12,6 +12,7 @@
 export const RAILWAY_API_URL = "https://backboard.railway.app/graphql/v2";
 export const RAILWAY_DEFAULT_BUDGET_USD = 50;
 export const RAILWAY_COST_CACHE_MS = 900_000;
+export const RAILWAY_REQUEST_TIMEOUT_MS = 5_000;
 export const RAILWAY_SCALE_MIN_SAMPLES = 24;
 export const RAILWAY_SCALE_QUANTUM = 0.25;
 export const COST_MEASUREMENTS = ["CPU_USAGE", "MEMORY_USAGE_GB", "DISK_USAGE_GB", "NETWORK_TX_GB"] as const;
@@ -25,6 +26,7 @@ const DEFAULT_MIN_MEMORY_GB = 0.25;
 const DEFAULT_MAX_MEMORY_GB = 8;
 const DEFAULT_HEADROOM = 0.3;
 const DEFAULT_WINDOW_SECONDS = 86_400;
+const RAILWAY_PAGE_SIZE = 100; // the `first:` of every connection read below, and the size at which a read may be truncated
 
 const PRICE_ENV: Readonly<Record<CostMeasurement, string>> = {
 	CPU_USAGE: "SUBSTRATE_RAILWAY_PRICE_CPU_USD",
@@ -44,7 +46,7 @@ export interface RailwayConfig {
 	readonly apiToken: string | null; // RAILWAY_API_TOKEN, trimmed; null when unset
 	readonly writesEnabled: boolean; // SUBSTRATE_RAILWAY_WRITES === "on" exactly
 	readonly budgetUsd: number; // SUBSTRATE_RAILWAY_BUDGET_USD, default RAILWAY_DEFAULT_BUDGET_USD
-	readonly projectIds: readonly string[]; // SUBSTRATE_RAILWAY_PROJECT_IDS, comma list, trimmed, empty dropped
+	readonly projectIds: readonly string[]; // SUBSTRATE_RAILWAY_PROJECT_IDS, comma list, trimmed, empty and repeated ids dropped
 	readonly prices: Readonly<Partial<Record<CostMeasurement, number>>>; // USD per unit; unset key = unpriced
 	readonly scale: ScaleBounds & { readonly headroom: number; readonly windowSeconds: number };
 }
@@ -77,10 +79,14 @@ export function railwayFromEnv(env: Record<string, string | undefined> = process
 		apiToken: token === "" ? null : token,
 		writesEnabled: env.SUBSTRATE_RAILWAY_WRITES === "on",
 		budgetUsd: positiveNumber(env.SUBSTRATE_RAILWAY_BUDGET_USD) ?? RAILWAY_DEFAULT_BUDGET_USD,
-		projectIds: (env.SUBSTRATE_RAILWAY_PROJECT_IDS ?? "")
-			.split(",")
-			.map((id) => id.trim())
-			.filter((id) => id !== ""),
+		projectIds: [
+			...new Set(
+				(env.SUBSTRATE_RAILWAY_PROJECT_IDS ?? "")
+					.split(",")
+					.map((id) => id.trim())
+					.filter((id) => id !== ""),
+			),
+		],
 		prices: pricesFromEnv(env),
 		scale: {
 			minVcpus: positiveNumber(env.SUBSTRATE_RAILWAY_SCALE_MIN_VCPUS) ?? DEFAULT_MIN_VCPUS,
@@ -105,6 +111,7 @@ export interface RailwayResources {
 		readonly environments: readonly { readonly id: string; readonly name: string; readonly isEphemeral: boolean }[];
 		readonly services: readonly { readonly id: string; readonly name: string }[];
 	}[];
+	readonly truncated: boolean; // true when a page of RAILWAY_PAGE_SIZE items was full: later items may exist and were not read
 }
 
 export interface RailwayMonitor {
@@ -152,6 +159,17 @@ export function boundsRefusal(bounds: ScaleBounds, limits: WriteLimits): WriteRe
 	const vcpuOk = Number.isFinite(limits.vCPUs) && limits.vCPUs >= bounds.minVcpus && limits.vCPUs <= bounds.maxVcpus;
 	const memoryOk = Number.isFinite(limits.memoryGB) && limits.memoryGB >= bounds.minMemoryGb && limits.memoryGB <= bounds.maxMemoryGb;
 	return vcpuOk && memoryOk ? null : "out-of-bounds";
+}
+
+/** The first inverted scale pair, named by its environment variables; null when every minimum is at most its maximum. */
+export function scaleBoundsError(scale: ScaleBounds): string | null {
+	if (scale.minVcpus > scale.maxVcpus) {
+		return `SUBSTRATE_RAILWAY_SCALE_MIN_VCPUS (${scale.minVcpus}) is above SUBSTRATE_RAILWAY_SCALE_MAX_VCPUS (${scale.maxVcpus}).`;
+	}
+	if (scale.minMemoryGb > scale.maxMemoryGb) {
+		return `SUBSTRATE_RAILWAY_SCALE_MIN_MEMORY_GB (${scale.minMemoryGb}) is above SUBSTRATE_RAILWAY_SCALE_MAX_MEMORY_GB (${scale.maxMemoryGb}).`;
+	}
+	return null;
 }
 
 /** True when the ref matches ^[A-Za-z0-9._:/#-]{1,128}$. */
@@ -281,7 +299,7 @@ export function buildCostReport(input: {
 	};
 }
 
-export type RailwayErrorKind = "not-configured" | "transport" | "graphql" | "shape";
+export type RailwayErrorKind = "not-configured" | "configuration" | "transport" | "graphql" | "shape";
 
 export class RailwayRequestError extends Error {
 	readonly kind: RailwayErrorKind;
@@ -293,16 +311,15 @@ export class RailwayRequestError extends Error {
 	}
 }
 
-export type RailwayFetch = (input: string, init: { method: string; headers: Record<string, string>; body: string }) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
+export type RailwayFetch = (input: string, init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal }) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
 
 interface Sample {
 	readonly ts: number;
 	readonly value: number;
 }
 
-const PROJECT_FIELDS =
-	"id name environments(first: 100) { edges { node { id name isEphemeral } } } services(first: 100) { edges { node { id name } } }";
-const PROJECTS_QUERY = `query { projects(first: 100) { edges { node { ${PROJECT_FIELDS} } } } }`;
+const PROJECT_FIELDS = `id name environments(first: ${RAILWAY_PAGE_SIZE}) { edges { node { id name isEphemeral } } } services(first: ${RAILWAY_PAGE_SIZE}) { edges { node { id name } } }`;
+const PROJECTS_QUERY = `query { projects(first: ${RAILWAY_PAGE_SIZE}) { edges { node { ${PROJECT_FIELDS} } } } }`;
 const PROJECT_QUERY = `query ($id: String!) { project(id: $id) { ${PROJECT_FIELDS} } }`;
 const MONITOR_QUERY =
 	"query ($environmentId: String!, $serviceId: String!) { serviceInstance(environmentId: $environmentId, serviceId: $serviceId) { serviceId serviceName environmentId numReplicas region latestDeployment { id status createdAt } } }";
@@ -362,6 +379,13 @@ function nodesOf(connection: unknown, where: string): Record<string, unknown>[] 
 	const edges = recordAt(connection, where).edges;
 	if (!Array.isArray(edges)) throw shapeError(where);
 	return edges.map((edge) => recordAt(recordAt(edge, where).node, where));
+}
+
+/** True when a project's environments or services page is full, so items beyond it may exist and were not read. */
+function projectIsTruncated(node: Record<string, unknown>): boolean {
+	const environments = nodesOf(node.environments, "environments").length;
+	const services = nodesOf(node.services, "services").length;
+	return environments >= RAILWAY_PAGE_SIZE || services >= RAILWAY_PAGE_SIZE;
 }
 
 function parseEnvironment(node: Record<string, unknown>) {
@@ -446,6 +470,19 @@ function requireTrue(data: Record<string, unknown>, key: string): WriteOutcome {
 	return { applied: true };
 }
 
+/** Settles with `work`, or rejects with the signal's reason when the signal aborts first, so a deadline holds even for a call that ignores its signal. */
+function bounded<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		if (signal.aborted) {
+			reject(signal.reason);
+			return;
+		}
+		const abort = () => reject(signal.reason);
+		signal.addEventListener("abort", abort, { once: true });
+		work.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+	});
+}
+
 interface CostCache {
 	readonly at: number;
 	readonly report: CostReport;
@@ -455,12 +492,15 @@ export class RailwayClient {
 	private readonly config: RailwayConfig;
 	private readonly fetchImpl: RailwayFetch;
 	private readonly now: () => Date;
+	private readonly timeoutMs: number;
 	private cost: CostCache | null = null;
+	private costInFlight: Promise<CostReport> | null = null;
 
-	constructor(config: RailwayConfig, options: { readonly fetch?: RailwayFetch; readonly now?: () => Date } = {}) {
+	constructor(config: RailwayConfig, options: { readonly fetch?: RailwayFetch; readonly now?: () => Date; readonly timeoutMs?: number } = {}) {
 		this.config = config;
 		this.fetchImpl = options.fetch ?? fetch;
 		this.now = options.now ?? (() => new Date());
+		this.timeoutMs = options.timeoutMs ?? RAILWAY_REQUEST_TIMEOUT_MS;
 	}
 
 	/** Rejects RailwayRequestError on failure. */
@@ -469,14 +509,18 @@ export class RailwayClient {
 		const projectIds = this.config.projectIds;
 		if (projectIds.length === 0) {
 			const data = await this.send(token, PROJECTS_QUERY, {});
-			return { projects: nodesOf(data.projects, "projects").map(parseProject) };
+			const nodes = nodesOf(data.projects, "projects");
+			return { projects: nodes.map(parseProject), truncated: nodes.length >= RAILWAY_PAGE_SIZE || nodes.some(projectIsTruncated) };
 		}
 		const projects: RailwayResources["projects"][number][] = [];
+		let truncated = false;
 		for (const id of projectIds) {
 			const data = await this.send(token, PROJECT_QUERY, { id });
-			projects.push(parseProject(recordAt(data.project, "project")));
+			const node = recordAt(data.project, "project");
+			projects.push(parseProject(node));
+			truncated = truncated || projectIsTruncated(node);
 		}
-		return { projects };
+		return { projects, truncated };
 	}
 
 	/** Rejects RailwayRequestError on failure. */
@@ -499,10 +543,12 @@ export class RailwayClient {
 		};
 	}
 
-	/** Reads CPU_USAGE, MEMORY_USAGE_GB, CPU_LIMIT, MEMORY_LIMIT_GB for the window, then suggestScale. */
+	/** Reads CPU_USAGE, MEMORY_USAGE_GB, CPU_LIMIT, MEMORY_LIMIT_GB for the window, then suggestScale. Refuses before any request when a scale minimum is above its maximum. */
 	async suggestScale(ref: ServiceRef): Promise<ScaleSuggestion> {
 		const token = this.requireToken();
 		const { scale } = this.config;
+		const boundsError = scaleBoundsError(scale);
+		if (boundsError !== null) throw new RailwayRequestError("configuration", `${boundsError} No scale suggestion is made.`);
 		const end = this.now();
 		const start = new Date(end.getTime() - scale.windowSeconds * 1000);
 		const data = await this.send(token, METRICS_QUERY, {
@@ -521,13 +567,21 @@ export class RailwayClient {
 		});
 	}
 
-	/** Never rejects. Cached RAILWAY_COST_CACHE_MS in process. Errors become status "unavailable" with a detail. */
+	/** Never rejects. Cached RAILWAY_COST_CACHE_MS in process, and concurrent callers share one read. A failed read is `unavailable` and is not cached. */
 	async costReport(): Promise<CostReport> {
 		const at = this.now();
 		if (this.cost !== null && at.getTime() - this.cost.at < RAILWAY_COST_CACHE_MS) return this.cost.report;
-		const report = await this.readCostReport(at);
-		this.cost = { at: at.getTime(), report };
-		return report;
+		if (this.costInFlight === null) {
+			this.costInFlight = this.readCostReport(at)
+				.then((report) => {
+					if (report.status !== "unavailable") this.cost = { at: at.getTime(), report };
+					return report;
+				})
+				.finally(() => {
+					this.costInFlight = null;
+				});
+		}
+		return this.costInFlight;
 	}
 
 	/** Order: boundsRefusal, then writeRefusal, then one serviceInstanceLimitsUpdate call. Refusals make NO request. Rejects on transport/graphql/shape failure after the gate passes. */
@@ -566,11 +620,9 @@ export class RailwayClient {
 			return buildCostReport({ usage: [], prices, budgetUsd, configured: false, generatedAt });
 		}
 		try {
-			const usage: { measurement: string; estimatedValue: number }[] = [];
-			for (const projectId of projectIds) {
-				const data = await this.send(token, ESTIMATE_QUERY, { projectId });
-				usage.push(...parseEstimates(data.estimatedUsage));
-			}
+			// Projects are read concurrently: each request has its own deadline, so one slow project cannot stretch the whole read.
+			const replies = await Promise.all(projectIds.map((projectId) => this.send(token, ESTIMATE_QUERY, { projectId })));
+			const usage = replies.flatMap((data) => parseEstimates(data.estimatedUsage));
 			return buildCostReport({ usage, prices, budgetUsd, configured: true, generatedAt });
 		} catch (error) {
 			return {
@@ -584,15 +636,20 @@ export class RailwayClient {
 		}
 	}
 
-	/** One HTTP POST. Any throw from fetch or from reading its body becomes a transport error that carries no detail. */
+	/** One HTTP POST under RAILWAY_REQUEST_TIMEOUT_MS. The deadline bounds the request and its body read. Any throw, the deadline included, becomes a transport error that carries no detail. */
 	private async dispatch(token: string, query: string, variables: Record<string, unknown>): Promise<{ ok: boolean; status: number; text: string }> {
+		const signal = AbortSignal.timeout(this.timeoutMs);
 		try {
-			const response = await this.fetchImpl(RAILWAY_API_URL, {
-				method: "POST",
-				headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-				body: JSON.stringify({ query, variables }),
-			});
-			return { ok: response.ok, status: response.status, text: await response.text() };
+			const response = await bounded(
+				this.fetchImpl(RAILWAY_API_URL, {
+					method: "POST",
+					headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+					body: JSON.stringify({ query, variables }),
+					signal,
+				}),
+				signal,
+			);
+			return { ok: response.ok, status: response.status, text: await bounded(response.text(), signal) };
 		} catch {
 			throw new RailwayRequestError("transport", "Railway API request did not complete");
 		}
