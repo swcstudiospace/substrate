@@ -32,7 +32,7 @@ status: in review (draft PR). In-repo gates green. The forwarders, their ACL, th
 
 - Typecheck: `bunx tsc --noEmit` exit 0.
 - Targeted: `db-endpoints.test.ts`, `config.test.ts`, `event-sources.test.ts`, `flag-registry.test.ts` and `store-lock.test.ts` pass, 222 and 79 in the two runs.
-- Full suite: `bun test` 5983 pass, 2 skip (pre-existing), 0 fail, over 5985 tests in 223 files, on the tree merged with the current main.
+- Full suite: `bun test` 6014 pass, 2 skip (pre-existing), 0 fail, over 6016 tests in 224 files, on the tree merged with the current main (which includes phase 50).
 - Repo locks: `bun run check:phase-close` green (the event row and the vocabulary row match; the secret scan is clean).
 - Config reference: regenerated and checked.
 

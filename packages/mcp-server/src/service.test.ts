@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { formatMemo, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
-import { isReviewToken, loadConfig, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
+import { isReviewToken, loadConfig, loadEventBusSettings, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
 import { eventHash, InvalidEventError, normalizeEvent } from "./event.ts";
 import { GreptimeClient, INGEST_LAG_MS, IngestNotRecorded, MAX_QUERY_LIMIT, type EventQuery } from "./greptime.ts";
 import { REDACTED, redact } from "./redact.ts";
 import { leaseSnapshot } from "./index-store.ts";
 import { decideRelease, type ClaimAction } from "./lease.ts";
 import { EVENT_SOURCES } from "./event-sources.ts";
+import { createEventBus, MAX_HINT_BYTES, type EventBus, type EventBusClient, type EventHint } from "./event-bus.ts";
 import { HEALTH_PROBE_MS, Substrate, SkillProposalDenied, VERIFY_RESPONSE_MARGIN_MS, type EmitResult, type SkillProposalRequest } from "./service.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
@@ -696,6 +697,126 @@ describe("emit", () => {
 	});
 });
 
+describe("event bus wiring (phase 50)", () => {
+	const input: EventInput = { surface: "omp", kind: "shell", summary: "ran cargo test with SECRET-SUMMARY-TEXT", session_id: "sess-1", graph_id: "ut-1", payload: { tokens: 42 } };
+
+	/** A ledger stub that records each write into `order`, so a test can see the write come before the publish. */
+	function ledger(order: string[] = []) {
+		const written: SubstrateEvent[] = [];
+		return {
+			written,
+			greptime: {
+				ensureAppendMode: async () => true,
+				lastHash: async () => null,
+				insertEvent: async (event: SubstrateEvent) => {
+					written.push(event);
+					order.push("write");
+				},
+			},
+		};
+	}
+
+	/** A bus that records each hint it is handed and each publish into `order`; `reply` decides what a publish does. */
+	function fakeBus(options: { reply?: () => Promise<boolean>; order?: string[] } = {}) {
+		const hints: EventHint[] = [];
+		const bus: EventBus = {
+			publish: (hint) => {
+				hints.push(hint);
+				options.order?.push("publish");
+				return options.reply ? options.reply() : Promise.resolve(true);
+			},
+			subscribe: () => () => {},
+			stop: () => {},
+		};
+		return { bus, hints };
+	}
+
+	test("a stored emit publishes exactly one hint: the event's identity, with no summary and no payload", async () => {
+		const { greptime } = ledger();
+		const { bus, hints } = fakeBus();
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never, eventBus: () => bus });
+		const result = await substrate.emit(input);
+
+		expect(result.stored).toBe(true);
+		expect(hints).toEqual([
+			{ v: 1, id: result.event.id, kind: result.event.kind, surface: result.event.surface, graph_id: result.event.graph_id, ts: result.event.ts },
+		]);
+		expect(Object.keys(hints[0] ?? {}).sort()).toEqual(["graph_id", "id", "kind", "surface", "ts", "v"]);
+		expect(JSON.stringify(hints)).not.toContain("SECRET-SUMMARY-TEXT");
+	});
+
+	test("the hint is published after the ledger write, and an event that was not stored is not published", async () => {
+		const order: string[] = [];
+		const { greptime } = ledger(order);
+		const { bus } = fakeBus({ order });
+		await new Substrate(loadConfig({}), { index: null, greptime: greptime as never, eventBus: () => bus }).emit(input);
+		expect(order).toEqual(["write", "publish"]);
+
+		const unstored = fakeBus();
+		const result = await new Substrate(loadConfig({}), { index: null, greptime: null, eventBus: () => unstored.bus }).emit(input);
+		expect(result.stored).toBe(false);
+		expect(unstored.hints).toEqual([]);
+	});
+
+	test("a publish failure does not fail the emit", async () => {
+		const { written, greptime } = ledger();
+		const { bus, hints } = fakeBus({
+			reply: async () => {
+				throw new Error("dragonfly unreachable: connect ETIMEDOUT");
+			},
+		});
+		const result = await new Substrate(loadConfig({}), { index: null, greptime: greptime as never, eventBus: () => bus }).emit(input);
+		expect(result.stored).toBe(true);
+		expect(result.error).toBeUndefined();
+		expect(written).toHaveLength(1);
+		expect(hints).toHaveLength(1);
+	});
+
+	test("with the bus off there is no bus, so nothing subscribes or publishes, and the emit reply is unchanged", async () => {
+		const { written, greptime } = ledger();
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
+		expect(substrate.eventBus).toBeNull();
+		const result = await substrate.emit(input);
+
+		expect(result.stored).toBe(true);
+		expect(result.error).toBeUndefined();
+		expect(written).toHaveLength(1);
+	});
+
+	test("SUBSTRATE_EVENT_BUS takes on or off, and any other value refuses boot naming the variable", () => {
+		expect(loadConfig({}).eventBus).toEqual({ enabled: false, offReason: null });
+		expect(loadConfig({ SUBSTRATE_EVENT_BUS: "off" }).eventBus.enabled).toBe(false);
+		expect(() => loadConfig({ SUBSTRATE_EVENT_BUS: "yes" })).toThrow("SUBSTRATE_EVENT_BUS");
+	});
+
+	test("on needs an accepted cache endpoint; without one the bus is off, with the reason", () => {
+		expect(loadConfig({ SUBSTRATE_EVENT_BUS: "on" }).eventBus).toEqual({ enabled: false, offReason: "DRAGONFLY_URL is unset" });
+		expect(loadEventBusSettings({ SUBSTRATE_EVENT_BUS: "on" }, { dragonflyUrl: "accepted-endpoint", dragonflyRefused: null, cacheEnabled: true })).toEqual({ enabled: true, offReason: null });
+		const refused = loadEventBusSettings({ SUBSTRATE_EVENT_BUS: "on" }, { dragonflyUrl: undefined, dragonflyRefused: "plaintext, non-loopback", cacheEnabled: false });
+		expect(refused).toEqual({ enabled: false, offReason: "DRAGONFLY_URL refused by the endpoint policy: plaintext, non-loopback" });
+		expect(loadEventBusSettings({ SUBSTRATE_EVENT_BUS: "on" }, { dragonflyUrl: "accepted-endpoint", dragonflyRefused: null, cacheEnabled: false })).toEqual({ enabled: false, offReason: "SUBSTRATE_CACHE is 0" });
+	});
+
+	test("an oversize publish is counted in health().eventBus.oversize", async () => {
+		const { greptime } = ledger();
+		const bus = createEventBus({
+			enabled: true,
+			url: "fake-endpoint",
+			makeClient: (): EventBusClient => ({ publish: async () => 1, subscribe: async () => "OK", close: () => {} }),
+			log: () => {},
+			now: () => 0,
+			setTimer: () => () => {},
+		});
+		if (bus === null) throw new Error("expected a bus");
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never, eventBus: () => bus });
+		expect((await substrate.health()).eventBus).toEqual({ enabled: true, published: 0, failed: 0, oversize: 0, malformed: 0 });
+
+		const oversize: EventHint = { v: 1, id: "x".repeat(MAX_HINT_BYTES), kind: "note", surface: "omp", graph_id: null, ts: "2026-10-21T00:00:00.000Z" };
+		expect(await bus.publish(oversize)).toBe(false);
+		expect((await substrate.health()).eventBus).toEqual({ enabled: true, published: 0, failed: 0, oversize: 1, malformed: 0 });
+	});
+});
+
 describe("migrate", () => {
 	test("surfaces a reachable-but-misconfigured ledger as degraded", async () => {
 		const greptime = { migrate: async () => ({ warnings: ["agent_events is not in append_mode"] }) };
@@ -818,6 +939,7 @@ describe("append-mode enforcement", () => {
 				refreshes: 0,
 				cooldownUntil: null,
 			},
+			eventBus: { enabled: false },
 			planes: {
 				greptime: { ok: true, breaker: closed("greptime"), lastErrorAt: null },
 				index: { ok: null, breaker: closed("index"), lastErrorAt: null },

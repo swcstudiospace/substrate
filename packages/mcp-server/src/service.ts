@@ -6,6 +6,7 @@
  * get MCP. Same code underneath.
  */
 import { createHash, randomUUID } from "node:crypto";
+import { RedisClient } from "bun";
 import { decideClaim, type ClaimDecision } from "@substrate/audit";
 import { createRpc, formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type TransactionMemo } from "@substrate/ledger";
 import {
@@ -96,6 +97,7 @@ import {
 	type DriftGitTip,
 	type DriftReport,
 } from "./drift.ts";
+import { createEventBus, type EventBus, type EventBusClient, type EventBusStats, type EventHint } from "./event-bus.ts";
 import { checkIdempotencyKey, checkReplayTs, eventHash, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import {
@@ -1184,6 +1186,55 @@ export type DocsRefreshAccepted =
 	| { status: 200; body: DocsRefreshOutcome & { ok: true } }
 	| { status: 503; body: DocsRefreshOutcome & { ok: false } };
 
+/**
+ * One Bun `RedisClient` as the bus uses it (phase 50). It connects before its first command, because
+ * `enableOfflineQueue: false` rejects a command sent before connect (the cache's rule too). A failed connect
+ * rejects the command waiting on it, and the bus drops the client and makes another.
+ */
+function busClient(url: string, connectTimeoutMs: number): EventBusClient {
+	const redis = new RedisClient(url, {
+		connectionTimeout: connectTimeoutMs,
+		idleTimeout: 0,
+		autoReconnect: false,
+		maxRetries: 0,
+		enableOfflineQueue: false,
+	});
+	const connected = redis.connect();
+	// Handled here, so a client closed before any command leaves no unhandled rejection behind.
+	connected.catch(() => undefined);
+	return {
+		publish: async (channel, message) => {
+			await connected;
+			return redis.publish(channel, message);
+		},
+		subscribe: async (channel, onMessage) => {
+			await connected;
+			return redis.subscribe(channel, onMessage);
+		},
+		close: () => redis.close(),
+	};
+}
+
+/**
+ * The production bus (phase 50, D50-g): Bun's RedisClient on the cache endpoint, with the cache's connect
+ * budget. No client retries and no offline queue: the bus owns its reconnect backoff (D50-h). Off with a
+ * boot line when the endpoint is missing or refused.
+ */
+function productionEventBus(config: SubstrateConfig): EventBus | null {
+	if (config.eventBus.offReason !== null) process.stderr.write(`[substrate] event bus off: ${config.eventBus.offReason}\n`);
+	return createEventBus({
+		enabled: config.eventBus.enabled,
+		url: config.dragonflyUrl ?? "",
+		makeClient: (url) => busClient(url, config.cacheConnectTimeoutMs),
+		log: (line) => process.stderr.write(`[substrate] ${line}\n`),
+		now: Date.now,
+		setTimer: (handler, ms) => {
+			const timer = setTimeout(handler, ms);
+			return () => clearTimeout(timer);
+		},
+	});
+}
+
 export class Substrate {
 	readonly index: IndexStore | null;
 	readonly greptime: GreptimeClient | null;
@@ -1284,6 +1335,8 @@ export class Substrate {
 	 * leave when their chain settles; different sessions never wait on each other.
 	 */
 	private readonly emitChains = new Map<string, Promise<void>>();
+	/** Phase 50: the Dragonfly wake-up hints; null while `SUBSTRATE_EVENT_BUS` is off, or its endpoint is missing or refused. */
+	readonly eventBus: EventBus | null;
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
@@ -1300,6 +1353,8 @@ export class Substrate {
 			hindsightFetch?: FetchLike;
 			desktop?: DesktopDriver | null;
 			railway?: RailwayClient;
+			/** Tests inject the bus through this factory; production builds it from config. */
+			eventBus?: () => EventBus | null;
 		},
 		observer: SubstrateObserver = {},
 	) {
@@ -1365,6 +1420,7 @@ export class Substrate {
 				},
 				gate: this.planes.gate("cache"),
 			});
+		this.eventBus = stores?.eventBus !== undefined ? stores.eventBus() : productionEventBus(config);
 		// uplift-2 R1
 		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays, graphRead: config.requestPath.briefGraphRead };
 		this.narrowBumps = config.requestPath.cacheBumpScope === "narrow";
@@ -2024,7 +2080,20 @@ export class Substrate {
 			if (result.lookupFailed) this.observer.eventReplay?.({ result: "lookup_failed" });
 			else if (result.stored) this.observer.eventReplay?.({ result: "appended" });
 		}
+		if (result.stored) this.publishHint(result.event);
 		return result;
+	}
+
+	/**
+	 * Phase 50 (D50-b, D50-c): the wake-up hint for one stored event. It carries the event's identity and
+	 * never its text. Fire-and-forget: the emit's reply does not wait on Dragonfly, and a failed publish is
+	 * counted by the bus and never thrown into the emit.
+	 */
+	private publishHint(event: SubstrateEvent): void {
+		const bus = this.eventBus;
+		if (bus === null) return;
+		const hint: EventHint = { v: 1, id: event.id, kind: event.kind, surface: event.surface, graph_id: event.graph_id, ts: event.ts };
+		void bus.publish(hint).catch(() => false);
 	}
 
 	/**
@@ -2785,6 +2854,11 @@ export class Substrate {
 	stopPreload(): void {
 		this.preloader?.stop();
 		this.preloader = null;
+	}
+
+	/** Phase 50: stop the bus listeners and close its connections. Called from the shutdown path only. */
+	stopEventBus(): void {
+		this.eventBus?.stop();
 	}
 
 	/** Run one prefetch tick now (the interval's body): at most two due pairs, single-flight. Off: nothing. */
@@ -5935,10 +6009,19 @@ export class Substrate {
 			// In-memory counters only. Health does not ping Dragonfly and does not
 			// change its status code when the cache is down.
 			cache,
+			eventBus: this.eventBusHealth(),
 			planes,
 			capacity: { index: capacity, ledger: ledgerCapacity },
 			jobs: { ledger: ledgerJobs.ledger, ledgerReason: ledgerJobs.reason, ...(indexArchive !== null ? { index: indexArchive } : {}) },
 		};
+	}
+
+	/** `/healthz.eventBus`: the counters of the bus this process holds. A bus that keeps none (a test fake) reads as zero. */
+	private eventBusHealth(): EventBusHealth {
+		const bus = this.eventBus;
+		if (bus === null) return { enabled: false };
+		const stats: EventBusStats = bus.stats?.() ?? { published: 0, publishFailures: 0, oversizeDropped: 0, malformedIgnored: 0, subscriptionDrops: 0 };
+		return { enabled: true, published: stats.published, failed: stats.publishFailures, oversize: stats.oversizeDropped, malformed: stats.malformedIgnored };
 	}
 
 	/** The last index size report `SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S` keeps, and the measurement still running. */
@@ -6131,11 +6214,16 @@ export interface SubstrateHealth {
 	/** The write probe behind `eventsWritable` (uplift-2 R5); probe fields `null` until one has run. */
 	ledger: { writable: boolean } & LedgerProbe;
 	cache: CacheHealth;
+	/** Phase 50: the wake-up bus's counters, `{ enabled: false }` while it is off. */
+	eventBus: EventBusHealth;
 	planes: Record<PlaneName, PlaneHealth>;
 	capacity: { index: IndexCapacity | null; ledger: LedgerCapacity | null };
 	/** Scheduled-job health (uplift-3 N6): `ledger` is `null` with `ledgerReason` set when the ledger is unconfigured, unreachable or still being read. */
 	jobs: { ledger: LedgerJobsHealth | null; ledgerReason: string | null; index?: IndexArchiveHealth };
 }
+
+/** `/healthz.eventBus` (phase 50): the bus's counters since boot; `{ enabled: false }` while `SUBSTRATE_EVENT_BUS` is off. */
+export type EventBusHealth = { enabled: false } | { enabled: true; published: number; failed: number; oversize: number; malformed: number };
 
 /** `/healthz.jobs.index` (uplift-4 S2): present only when `SUBSTRATE_INDEX_ARCHIVE_DIR` is set. */
 export interface IndexArchiveHealth {

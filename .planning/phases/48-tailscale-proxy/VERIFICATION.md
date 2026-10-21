@@ -16,7 +16,7 @@ covered_files: ["packages/mcp-server/src/db-endpoints.ts", "packages/mcp-server/
 | Typecheck | `bunx tsc --noEmit` | exit 0 |
 | Config reference | `bun run config:reference -- --check` | up to date |
 | Targeted | classifier, config, event-sources, flag-registry, store-lock | 222 and 79 pass, 0 fail |
-| Full bun suite | `bun test` against `substrate_test_p48`, on the tree merged with main | 5983 pass, 2 skip, 0 fail (5985 tests, 223 files) |
+| Full bun suite | `bun test` against `substrate_test_p48`, on the tree merged with the current main (phase 50 included) | 6014 pass, 2 skip, 0 fail (6016 tests, 224 files) |
 | Repo locks | `bun run check:phase-close` | pass: 4 lock files green; EVENT_KINDS unchanged at 12; SURFACES unchanged at 27; the new db.endpoint row matches the vocabulary doc |
 
 ## Acceptance criteria

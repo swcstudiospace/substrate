@@ -441,6 +441,8 @@ export interface SubstrateConfig {
 	eventIdempotency: EventIdempotencyMode;
 	/** The unrecognised `SUBSTRATE_EVENT_IDEMPOTENCY` value, for the boot warning; null when the key parsed or was unset. */
 	eventIdempotencyRejected: string | null;
+	/** `SUBSTRATE_EVENT_BUS` (phase 50, D50-g): the Dragonfly wake-up hints. See `EventBusSettings`. */
+	eventBus: EventBusSettings;
 	// uplift-3 N2 — restart-durable SLO history and notifications
 	/**
 	 * Where the SLO checkpoint is written and restored from
@@ -826,6 +828,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		mentalModels: loadMentalModelConfig(env),
 		// U5-4a
 		...eventIdempotencyFromEnv(env.SUBSTRATE_EVENT_IDEMPOTENCY),
+		// Phase 50 (D50-g): the bus rides the cache endpoint, and is off with a reason when that endpoint is missing or refused.
+		eventBus: loadEventBusSettings(env, cache),
 	};
 }
 
@@ -1100,6 +1104,36 @@ export function loadCachePreloadSettings(env: Record<string, string | undefined>
 		top: cacheWholeNumberOr("SUBSTRATE_CACHE_PRELOAD_TOP", env.SUBSTRATE_CACHE_PRELOAD_TOP, DEFAULT_CACHE_PRELOAD_TOP, 1, 20),
 		intervalS: cacheWholeNumberOr("SUBSTRATE_CACHE_PRELOAD_S", env.SUBSTRATE_CACHE_PRELOAD_S, DEFAULT_CACHE_PRELOAD_S, 10, 3600),
 	};
+}
+
+/**
+ * `SUBSTRATE_EVENT_BUS` (phase 50, D50-g): whether the Dragonfly wake-up hints run. `enabled` is what the
+ * bus is built from. `offReason` names why an operator's `on` did not turn it on, and is logged once at boot.
+ */
+export interface EventBusSettings {
+	enabled: boolean;
+	offReason: string | null;
+}
+
+/**
+ * `SUBSTRATE_EVENT_BUS=on|off` (case- and space-insensitive; unset is off). Any other value refuses boot,
+ * naming the variable. The value is not echoed: it may be a mistyped URL with a credential in it.
+ */
+export function loadEventBusSettings(
+	env: Record<string, string | undefined>,
+	cache: { dragonflyUrl: string | undefined; dragonflyRefused: string | null; cacheEnabled: boolean },
+): EventBusSettings {
+	const rawMode = env.SUBSTRATE_EVENT_BUS?.trim().toLowerCase() ?? "";
+	if (rawMode !== "" && rawMode !== "on" && rawMode !== "off") {
+		throw new ConfigError("SUBSTRATE_EVENT_BUS is not on or off; set on or off, or unset it for off");
+	}
+	if (rawMode !== "on") return { enabled: false, offReason: null };
+	if (cache.dragonflyRefused !== null) {
+		return { enabled: false, offReason: `DRAGONFLY_URL refused by the endpoint policy: ${cache.dragonflyRefused}` };
+	}
+	if (cache.dragonflyUrl === undefined) return { enabled: false, offReason: "DRAGONFLY_URL is unset" };
+	if (!cache.cacheEnabled) return { enabled: false, offReason: "SUBSTRATE_CACHE is 0" };
+	return { enabled: true, offReason: null };
 }
 
 /** The three uplift-5 U5-3 request-path flags, parsed. */
