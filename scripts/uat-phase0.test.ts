@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	childProcessEnv,
 	classifyTarget,
 	countConversation,
 	expectBackfillCounts,
@@ -486,7 +487,15 @@ describe("consumer contract", () => {
 
 	test("the UAT refuses a write scenario on a production-looking target without an approval reference, before any request", async () => {
 		const store = startStoreRecorder();
-		const fake = startFakeSubstrate();
+		const realFetch = globalThis.fetch;
+		let outbound = 0;
+		globalThis.fetch = Object.assign(
+			(...args: Parameters<typeof fetch>) => {
+				outbound += 1;
+				return realFetch(...args);
+			},
+			{ preconnect: realFetch.preconnect },
+		);
 		try {
 			const attempt = withStoreEnv(store.url, () =>
 				runUat(
@@ -502,12 +511,19 @@ describe("consumer contract", () => {
 			);
 			await expect(attempt).rejects.toBeInstanceOf(UatRefused);
 			await expect(attempt).rejects.toThrow("--live");
-			expect(fake.state.requests).toBe(0);
+			expect(outbound).toBe(0);
 			expect(store.state.connections).toBe(0);
 		} finally {
-			fake.stop();
+			globalThis.fetch = realFetch;
 			store.stop();
 		}
+	});
+
+	test("a child process receives no store URL variables, even when the parent carries them", async () => {
+		const env = await withStoreEnv("http://127.0.0.1:9", async () => childProcessEnv({ SUBSTRATE_URL: "http://127.0.0.1:7410" }));
+		expect(env.SUBSTRATE_URL).toBe("http://127.0.0.1:7410");
+		expect(env.PATH).toBe(process.env.PATH);
+		for (const key of STORE_ENV_KEYS) expect(env).not.toHaveProperty(key);
 	});
 });
 

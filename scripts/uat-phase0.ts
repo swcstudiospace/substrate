@@ -646,6 +646,19 @@ function checkoutArgv(rel: string, ...args: string[]): string[] {
 	return [process.execPath, `${CHECKOUT_ROOT}/${rel}`, ...args];
 }
 
+/** Store URL variables no child inherits: the UAT reaches the substrate over HTTP only. The ledger name is composed, as in rehearsal.ts. */
+const STORE_ENV_KEYS = [`${"GREPTIME"}_URL`, "SUBSTRATE_PG_URL", "DRAGONFLY_URL"] as const;
+
+/** The child environment: the parent's variables with `env` on top; `undefined` clears one, and store URLs never pass. */
+export function childProcessEnv(env: Record<string, string | undefined>): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const [key, value] of Object.entries({ ...process.env, ...env })) {
+		if (value !== undefined) out[key] = value;
+	}
+	for (const key of STORE_ENV_KEYS) delete out[key];
+	return out;
+}
+
 export async function runChild(
 	argv: string[],
 	env: Record<string, string | undefined>,
@@ -654,12 +667,7 @@ export async function runChild(
 	timeoutMs = 30000,
 ): Promise<{ status: number; stdout: string; elapsedMs: number; error?: string }> {
 	const started = performance.now();
-	// An `undefined` entry clears an inherited variable (see scratchGitEnv):
-	// drop it rather than passing it to the spawn, which takes strings only.
-	const childEnv: Record<string, string> = {};
-	for (const [key, value] of Object.entries({ ...process.env, ...env })) {
-		if (value !== undefined) childEnv[key] = value;
-	}
+	const childEnv = childProcessEnv(env);
 	try {
 		const proc = Bun.spawn(argv, { env: childEnv, stdin: stdin === undefined ? "ignore" : "pipe", stdout: "pipe", stderr: "pipe", cwd });
 		if (stdin !== undefined && proc.stdin) {
@@ -719,9 +727,9 @@ async function scenario6(ctx: RunContext): Promise<ScenarioVerdict> {
 		}
 
 		const cursorBearer: string | null = ctx.surfaceBearers.cursor ?? null;
-		if (cursorBearer === null) return [...problems, "no cursor token resolved for scenario 6"];
 		const scratch = mkdtempSync(join(tmpdir(), "uat6-"));
-		const repoEnv = { SUBSTRATE_URL: ctx.base, SUBSTRATE_TOKEN: cursorBearer };
+		// No surface token means no bearer, never the operator's: the token and its file variable are cleared for children.
+		const repoEnv = { SUBSTRATE_URL: ctx.base, SUBSTRATE_TOKEN: cursorBearer ?? undefined, SUBSTRATE_TOKEN_FILE: undefined };
 		const { mkdirSync, writeFileSync } = await import("node:fs");
 		const hooksDir = join(scratch, "hooks");
 		mkdirSync(hooksDir, { recursive: true });
@@ -916,23 +924,19 @@ async function scenario8(ctx: RunContext): Promise<ScenarioVerdict> {
 		ctx.graphs.push(graph);
 
 		const cursorBearer: string | null = ctx.surfaceBearers.cursor ?? null;
-		if (cursorBearer === null) problems.push("no cursor token resolved for scenario 8");
-		else {
-			const emitted = await httpCall(ctx.base, cursorBearer, "/events", {
-				kind: "file.edit",
-				summary: "uat phase0 cross-surface edit",
-				surface: "cursor",
-				session_id: session,
-				graph_id: graph,
-				repo: ctx.repo,
-			});
-			const stored = (emitted.body as { stored?: unknown } | null)?.stored === true;
-			if (emitted.status !== 202 || !stored) problems.push(`file.edit emit status ${emitted.status ?? "unreachable"}, stored ${stored}`);
-			evidence.push(`file.edit emit: status ${emitted.status ?? "unreachable"}, stored ${stored}`);
-		}
+		const emitted = await httpCall(ctx.base, cursorBearer, "/events", {
+			kind: "file.edit",
+			summary: "uat phase0 cross-surface edit",
+			surface: "cursor",
+			session_id: session,
+			graph_id: graph,
+			repo: ctx.repo,
+		});
+		const stored = (emitted.body as { stored?: unknown } | null)?.stored === true;
+		if (emitted.status !== 202 || !stored) problems.push(`file.edit emit status ${emitted.status ?? "unreachable"}, stored ${stored}`);
+		evidence.push(`file.edit emit: status ${emitted.status ?? "unreachable"}, stored ${stored}`);
 
 		const hermesBearer: string | null = ctx.surfaceBearers.hermes ?? null;
-		if (hermesBearer === null) return [...problems, "no hermes token resolved for scenario 8"];
 		const brief = await httpCall(ctx.base, hermesBearer, "/brief", { repo: ctx.repo, graph_id: graph, surface: "hermes" });
 		if (brief.status !== 200 || typeof brief.body !== "string") return [...problems, `brief status ${brief.status ?? "unreachable"}`];
 		const briefProblems = expectCrossSurface(brief.body, ctx.repo, "claude-code");
