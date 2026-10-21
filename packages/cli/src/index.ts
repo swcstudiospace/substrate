@@ -447,6 +447,17 @@ async function cmdEvidence(args: Record<string, string | true>): Promise<number>
 		);
 		return 1;
 	}
+	// An hour devnet could not confirm fails closed (D41-5): the bundle is written with that hour
+	// marked `unverified`, and this command exits non-zero. A `pending` hour is not a failure.
+	const unverified = (bundle.anchors ?? []).filter((anchor) => anchor.status === "unverified");
+	if (unverified.length > 0) {
+		process.stderr.write(
+			`[substrate] ${unverified.length} hour${unverified.length === 1 ? "" : "s"} of ${graphId} could not be verified against devnet: ` +
+				`${unverified.map((anchor) => anchor.period_start).join(", ")}\n` +
+				"[substrate] the bundle was written, but it does not attest to those hours\n",
+		);
+		return 1;
+	}
 	if ((bundle.slo_summary?.breached ?? 0) > 0) {
 		process.stderr.write(`[substrate] ${bundle.slo_summary.breached} SLO(s) breached for ${graphId}\n`);
 		return 1;

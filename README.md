@@ -146,10 +146,11 @@ Two more planes, both reached only through `substrate-mcp` and neither of them i
   local append-only file. Separate from `agent_events` on purpose: an audit has to survive an
   outage of the store it audits, and `agent_events` is writable by the agents being audited.
 
-`substrate evidence --graph ut-… [--out evidence.html]` puts both chains' verdicts, the SLO
-results and the allowed/denied tally into one self-contained document. It is a stub and says
-so — Phase 6's Merkle anchor and Phase 2's Linear/Notion cross-check are named in its own
-`pending` list rather than left to read as nothing to report.
+`substrate evidence --graph ut-… [--out evidence.html]` puts both chains' verdicts, each hour's devnet
+anchor (with its transaction and explorer link), the graph's teachable moments, the SLO results and the
+allowed/denied tally into one self-contained document. It exits 1 when an hour devnet cannot verify. It is
+a stub and says so: Phase 2's Linear/Notion cross-check and the reconciliation of model spend are named in
+its own `pending` list rather than left to read as nothing to report.
 
 `emit` fails open and `claimNode` fails **closed**: a claim whose event never reached the
 ledger is withdrawn, because a lock the substrate cannot tell another agent about is worse

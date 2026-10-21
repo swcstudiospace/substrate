@@ -9,7 +9,7 @@
  * Every interpolated value goes through `escapeHtml`. Graph ids, denial reasons and
  * tool names are all agent-supplied text.
  */
-import type { ChainEvidence, EvidenceBundle } from "./report.ts";
+import type { AnchorState, ChainEvidence, EvidenceBundle } from "./report.ts";
 import { chainStateOf } from "./report.ts";
 import type { SloResult } from "@substrate/observability";
 
@@ -75,6 +75,20 @@ function chainRow(label: string, chain: ChainEvidence): string {
 		</tr>`;
 }
 
+/** An hour's state as a pill: anchored reads intact, pending unknown, unverified broken. */
+const ANCHOR_PILL: Record<AnchorState, string> = {
+	anchored: "pill--intact",
+	pending: "pill--unknown",
+	unverified: "pill--broken",
+};
+
+/** A transaction signature, linked to its devnet explorer page when the bundle names one. */
+function transactionCell(signature: string | undefined, explorerUrl: string | undefined): string {
+	if (signature === undefined) return '<span class="muted">none</span>';
+	const label = `<code class="tx">${escapeHtml(signature)}</code>`;
+	return explorerUrl === undefined ? label : `<a href="${escapeHtml(explorerUrl)}" rel="noopener noreferrer">${label}</a>`;
+}
+
 export function renderEvidenceHtml(bundle: EvidenceBundle): string {
 	const sloRows = bundle.slos
 		.map(
@@ -84,6 +98,34 @@ export function renderEvidenceHtml(bundle: EvidenceBundle): string {
 			<td class="num">${escapeHtml(formatObserved(slo))}</td>
 			<td class="num">${slo.samples}</td>
 			<td class="detail">${escapeHtml(slo.statement)}<br><span class="muted">${escapeHtml(slo.detail)}</span></td>
+		</tr>`,
+		)
+		.join("\n");
+
+	const anchorRows = bundle.anchors
+		.map(
+			(anchor) => `<tr>
+			<th scope="row">${escapeHtml(anchor.period_start)}</th>
+			<td><span class="pill ${ANCHOR_PILL[anchor.status]}">${escapeHtml(anchor.status)}</span></td>
+			<td class="num">${anchor.event_count}</td>
+			<td class="detail">${transactionCell(anchor.tx_sig, anchor.explorer_url)}</td>
+			<td class="detail">${escapeHtml(anchor.reason ?? "")}</td>
+		</tr>`,
+		)
+		.join("\n");
+
+	const teachableRows = bundle.teachables
+		.map(
+			(teachable) => `<tr>
+			<th scope="row"><code>${escapeHtml(teachable.event_id)}</code>${
+				teachable.session_id === undefined
+					? ""
+					: `<br><span class="muted">session <code>${escapeHtml(teachable.session_id)}</code></span>`
+			}</th>
+			<td>${escapeHtml(teachable.hour ?? "no ingest record")}</td>
+			<td><span class="pill ${teachable.anchored ? "pill--intact" : "pill--unknown"}">${teachable.anchored ? "anchored" : "not anchored"}</span></td>
+			<td><code class="tx">${escapeHtml(teachable.content_sha256)}</code></td>
+			<td class="detail">${transactionCell(teachable.tx_sig, teachable.explorer_url)}</td>
 		</tr>`,
 		)
 		.join("\n");
@@ -164,6 +206,8 @@ export function renderEvidenceHtml(bundle: EvidenceBundle): string {
 	.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); }
 	.num--flag { color: var(--bad); font-weight: 600; }
 	.detail { font-size: .86rem; }
+	a { color: var(--accent); }
+	.tx { word-break: break-all; }
 	.pill { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .78rem;
 		font-weight: 600; border: 1px solid currentColor; white-space: nowrap; }
 	.pill--ok, .pill--intact { color: var(--ok); }
@@ -236,6 +280,25 @@ export function renderEvidenceHtml(bundle: EvidenceBundle): string {
 			<thead><tr><th>Tool</th><th class="num">Allowed</th><th class="num">Denied</th></tr></thead>
 			<tbody>${toolRows || '<tr><td colspan="3" class="muted">No tool calls recorded for this graph.</td></tr>'}</tbody>
 		</table>
+	</section>
+
+	<h2>Anchors</h2>
+	<section>
+		<table>
+			<thead><tr><th>Hour</th><th>State</th><th class="num">Events</th><th>Transaction</th><th>Reason</th></tr></thead>
+			<tbody>${anchorRows || '<tr><td colspan="5" class="muted">No hour of this graph is listed.</td></tr>'}</tbody>
+		</table>
+		<p class="muted detail"><code>anchored</code>: the hour's devnet transaction reads back and its memo recomputes to
+			the hour's root. <code>pending</code>: not yet due. <code>unverified</code>: could not be checked, and fails closed.</p>
+	</section>
+
+	<h2>Teachable moments</h2>
+	<section>
+		<table>
+			<thead><tr><th>Event</th><th>Hour</th><th>State</th><th>Content digest</th><th>Transaction</th></tr></thead>
+			<tbody>${teachableRows || '<tr><td colspan="5" class="muted">No teachable moment is recorded for this graph.</td></tr>'}</tbody>
+		</table>
+		<p class="muted detail">A teachable is anchored when its hour is anchored: its event sits inside that hour's root.</p>
 	</section>
 
 	${

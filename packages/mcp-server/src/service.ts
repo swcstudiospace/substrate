@@ -596,7 +596,7 @@ export interface VerifyVerdict {
 	 */
 	missing: { count: number; ids: string[] };
 }
-/** Options for {@link Substrate.verifyGraph}: evidence passes `anchors: false`. */
+/** Options for {@link Substrate.verifyGraph}. The evidence bundle asks for the hour report; `anchors: false` is the chain-only read. */
 export interface VerifyOptions {
 	/** Skip the hour report and return the chain verdict only (default true). */
 	anchors?: boolean;
@@ -604,6 +604,16 @@ export interface VerifyOptions {
 	now?: number;
 	/** Injected devnet reader; production builds one from the solana config. */
 	rpc?: Rpc;
+}
+/** A teachable moment in a graph's ledger, as the evidence bundle lists it (E-D2). */
+export interface GraphTeachable {
+	event_id: string;
+	graph_id: string;
+	session_id?: string;
+	/** The observation digest the teachable event carries for its accepted entry. */
+	content_sha256: string;
+	/** ISO start of the hour of the event's ingest record; null when it has none, so no hour covers it. */
+	hour: string | null;
 }
 /**
  * How long after an hour closes it may still anchor before verify fails it.
@@ -4747,8 +4757,8 @@ export class Substrate {
 	 * D27-10) — is digested whole and checked once against its anchors row and
 	 * the devnet read-back (D28-15). `ok` is true only when the chain verifies,
 	 * every hour is `anchored` or `pending`, and no post-coverage event is
-	 * uncovered (D28-17). Pass `anchors: false` for the chain-only evidence
-	 * call: anchors in the bundle are out of scope (FEATURES E-D1).
+	 * uncovered (D28-17). Pass `anchors: false` for the chain-only read. The evidence bundle
+	 * takes the hour report from this same call, so its anchors are this verdict's hours.
 	 */
 	async verifyGraph(graphId: string, opts: VerifyOptions = {}): Promise<VerifyVerdict> {
 		const withAnchors = opts.anchors !== false;
@@ -4796,6 +4806,33 @@ export class Substrate {
 		};
 		if (!withAnchors) return emptyHours;
 		return this.hourReport(stored, rows, chain, now, opts.rpc, verifyStartedAt);
+	}
+
+	/**
+	 * The graph's teachable moments (E-D2), for the evidence bundle: each accepted and verified
+	 * teachable event the ledger holds for the graph, with the start of the hour its ingest record
+	 * falls in. That hour's anchor covers the event, so the hour's verdict is the event's verdict.
+	 * Read by the stored graph id, as {@link verifyGraph} reads it.
+	 */
+	async graphTeachables(graphId: string): Promise<GraphTeachable[]> {
+		if (!this.greptime) return [];
+		const stored = normalizeIdentifier(graphId) ?? graphId;
+		const rows = await this.greptime.readEvents("graph_id", stored);
+		const ingestedAt = new Map((await this.greptime.graphIngest(stored)).map((record) => [record.event_id, record.ingested_at]));
+		const teachables: GraphTeachable[] = [];
+		for (const row of rows) {
+			const event = rowToEvent(row);
+			if (event.payload.action !== "teachable") continue;
+			const at = ingestedAt.get(event.id);
+			teachables.push({
+				event_id: event.id,
+				graph_id: event.graph_id ?? stored,
+				...(event.session_id ? { session_id: event.session_id } : {}),
+				content_sha256: String(event.payload.content_sha256 ?? ""),
+				hour: at === undefined ? null : hourIso(at),
+			});
+		}
+		return teachables;
 	}
 
 	/**
