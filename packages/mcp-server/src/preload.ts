@@ -21,6 +21,8 @@ import { redact } from "./redact.ts";
 export const PRELOAD_WINDOW_MS = 3_600_000;
 /** Most repos held at once; the least recently seen is evicted past this. */
 export const PRELOAD_REPO_CAP = 256;
+/** Longest branch or graph id kept in a remembered shape; a longer request is not remembered, since a truncated key would never match a real request. */
+export const PRELOAD_FIELD_CAP = 256;
 /** Most request times kept per repo; a repo past it ranks by its newest times, so one busy repo cannot grow the map. */
 export const PRELOAD_EVENTS_PER_REPO = 4_096;
 
@@ -50,6 +52,7 @@ export class RepoAccess {
 	/** Count one brief request for `shape.repo` at `now` (epoch ms), and remember the request it named. */
 	record(now: number, shape: BriefShape): void {
 		const repo = shape.repo;
+		if (repo.length > PRELOAD_FIELD_CAP || (shape.branch?.length ?? 0) > PRELOAD_FIELD_CAP || (shape.graph_id?.length ?? 0) > PRELOAD_FIELD_CAP) return;
 		const known = this.repos.get(repo);
 		const times = known?.times ?? [];
 		if (known !== undefined) {

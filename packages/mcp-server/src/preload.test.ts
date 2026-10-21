@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ConfigError, loadCachePreloadSettings, loadConfig, type CachePreloadSettings } from "./config.ts";
-import { PRELOAD_REPO_CAP, PRELOAD_WINDOW_MS, RepoAccess, requireComplete, startPreloader, type BriefShape, type PreloadTimer, type PreloadTimers } from "./preload.ts";
+import { PRELOAD_FIELD_CAP, PRELOAD_REPO_CAP, PRELOAD_WINDOW_MS, RepoAccess, requireComplete, startPreloader, type BriefShape, type PreloadTimer, type PreloadTimers } from "./preload.ts";
 import type { Surface } from "./types.ts";
 
 const HOUR = PRELOAD_WINDOW_MS;
@@ -378,5 +378,15 @@ describe("SUBSTRATE_CACHE_PRELOAD settings", () => {
 		expect(loadConfig({ SUBSTRATE_CACHE_PRELOAD: "on", DRAGONFLY_URL: "redis://127.0.0.1:6379" }).cachePreload.enabled).toBe(true);
 		expect(loadConfig({ SUBSTRATE_CACHE_PRELOAD: "off" }).cachePreload.enabled).toBe(false);
 		expect(loadConfig({}).cachePreload.enabled).toBe(false);
+	});
+});
+
+describe("RepoAccess field bounds", () => {
+	test("a request whose branch exceeds the field cap is not remembered, so no truncated warm-up key is ever held", () => {
+		const access = new RepoAccess();
+		access.record(0, shapeOf("a", "cursor", { branch: "b".repeat(PRELOAD_FIELD_CAP + 1) }));
+		expect(access.size()).toBe(0);
+		access.record(1, shapeOf("a", "cursor", { branch: "main" }));
+		expect(access.topRepos(1, 2)).toEqual([shapeOf("a", "cursor", { branch: "main" })]);
 	});
 });
