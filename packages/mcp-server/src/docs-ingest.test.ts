@@ -11,12 +11,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
 import {
+	INGEST_CALL_MAX_BYTES,
 	INGEST_PAGE_MAX_BYTES,
+	batchIngestPages,
 	ingestDocs,
 	loadIngestRecords,
 	nodeIo,
+	preflightIngestPages,
 	saveIngestRecords,
 	scanIngestPages,
+	readSkillsCheckoutPages,
+	skillsCheckoutRoots,
 	stripRemoteImages,
 	type IngestDeps,
 	type IngestInput,
@@ -454,6 +459,97 @@ describe("scanIngestPages", () => {
 	});
 });
 
+describe("agent-skills checkout roots and scan", () => {
+	test("a folder whose name fails the skill-name rule is not a skill, even with SKILL.md and references/", async () => {
+		const root = mkdtempSync(join(tmpdir(), "substrate-skills-name-"));
+		try {
+			mkdirSync(join(root, "demo-skill", "references"), { recursive: true });
+			writeFileSync(join(root, "demo-skill", "SKILL.md"), "Demo skill body.\n");
+			writeFileSync(join(root, "demo-skill", "references", "api.md"), "The demo API reference.\n");
+			// Folders the library projector never takes as skills: their names fail SKILL_NAME_RE (upper case,
+			// an underscore, a leading hyphen), yet each holds a SKILL.md and a references tree.
+			for (const name of ["Bad_Name", "-leading", "UPPER"]) {
+				mkdirSync(join(root, name, "references"), { recursive: true });
+				writeFileSync(join(root, name, "SKILL.md"), "Not a valid skill name.\n");
+				writeFileSync(join(root, name, "references", "api.md"), "An unnamed reference.\n");
+			}
+			const roots = await skillsCheckoutRoots(root);
+			expect(roots).toEqual(["demo-skill/SKILL.md", "demo-skill/references/"]);
+			const pages = await readSkillsCheckoutPages(root, roots);
+			expect(pages.map((page) => page.path)).toEqual(["demo-skill/SKILL.md", "demo-skill/references/api.md"]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("a directory without SKILL.md contributes no roots, so its notes never become searchable", async () => {
+		const root = mkdtempSync(join(tmpdir(), "substrate-skills-roots-"));
+		try {
+			mkdirSync(join(root, "demo-skill", "references"), { recursive: true });
+			writeFileSync(join(root, "demo-skill", "SKILL.md"), "Demo skill body.\n");
+			writeFileSync(join(root, "demo-skill", "references", "api.md"), "The demo API reference.\n");
+			// Not skills: a directory with a references tree but no SKILL.md, a dot-directory, and a bare file.
+			mkdirSync(join(root, "notes", "references"), { recursive: true });
+			writeFileSync(join(root, "notes", "references", "api.md"), "Notes, not a skill.\n");
+			mkdirSync(join(root, ".hidden"));
+			writeFileSync(join(root, ".hidden", "SKILL.md"), "Hidden.\n");
+			writeFileSync(join(root, "README.md"), "The checkout readme.\n");
+			const roots = await skillsCheckoutRoots(root);
+			expect(roots).toEqual(["demo-skill/SKILL.md", "demo-skill/references/"]);
+			const pages = await readSkillsCheckoutPages(root, roots);
+			expect(pages.map((page) => page.path)).toEqual(["demo-skill/SKILL.md", "demo-skill/references/api.md"]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("a skill with no references directory yields its SKILL.md alone; the missing tree is not an error", async () => {
+		const root = mkdtempSync(join(tmpdir(), "substrate-skills-bare-"));
+		try {
+			mkdirSync(join(root, "demo-skill"));
+			writeFileSync(join(root, "demo-skill", "SKILL.md"), "Demo skill body.\n");
+			const pages = await readSkillsCheckoutPages(root, await skillsCheckoutRoots(root));
+			expect(pages.map((page) => page.path)).toEqual(["demo-skill/SKILL.md"]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("an unreadable references directory fails the skills scan; the skip scan keeps the rest", async () => {
+		const root = mkdtempSync(join(tmpdir(), "substrate-skills-denied-"));
+		try {
+			mkdirSync(join(root, "demo-skill", "references"), { recursive: true });
+			writeFileSync(join(root, "demo-skill", "SKILL.md"), "Demo skill body.\n");
+			writeFileSync(join(root, "demo-skill", "references", "api.md"), "The demo API reference.\n");
+			const io: ScanIo = {
+				...nodeIo,
+				readdir: (path, options) => (path.endsWith(join("demo-skill", "references")) ? Promise.reject(Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" })) : nodeIo.readdir(path, options)),
+			};
+			const roots = ["demo-skill/SKILL.md", "demo-skill/references/"];
+			await expect(readSkillsCheckoutPages(root, roots, io)).rejects.toThrow("EACCES");
+			const kept = await scanIngestPages(root, roots, io);
+			expect(kept.map((page) => page.path)).toEqual(["demo-skill/SKILL.md"]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("an unreadable SKILL.md check fails the roots listing instead of dropping the skill", async () => {
+		const root = mkdtempSync(join(tmpdir(), "substrate-skills-manifest-"));
+		try {
+			mkdirSync(join(root, "demo-skill"));
+			writeFileSync(join(root, "demo-skill", "SKILL.md"), "Demo skill body.\n");
+			const io: Pick<ScanIo, "readdir" | "lstat"> = {
+				readdir: nodeIo.readdir,
+				lstat: (path) => (path.endsWith("SKILL.md") ? Promise.reject(Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" })) : nodeIo.lstat(path)),
+			};
+			await expect(skillsCheckoutRoots(root, io)).rejects.toThrow("EACCES");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("docs_ingest expected_version (memory's contract)", () => {
 	// Each test builds its own harness: its own record map and fake, so no state is shared between them.
 	test("a stale expected_version is refused with nothing written: the stored record is byte-identical", async () => {
@@ -669,5 +765,56 @@ describe("docs_ingest atomic batch", () => {
 		const after = await waiter.ingest({ dataset: "agent-substrate", pages: [OTHER] });
 		if (!after.ok) throw new Error(`expected the lock to be free: ${after.reason}`);
 		expect(after.results[0]?.status).toBe("ingested");
+	});
+});
+
+describe("a refresh's ingest calls (split under the call limit)", () => {
+	/** Six pages of 900 KB each: 5.4 MB in total, every page under the 1 MB page limit. */
+	function wideSkills() {
+		return [1, 2, 3, 4, 5, 6].map((n) => ({
+			path: `docs/skill-${n}.md`,
+			source_url: `file:///checkout/docs/skill-${n}.md`,
+			body: `skill-${n} ${"y".repeat(900_000)}`,
+		}));
+	}
+
+	test("batchIngestPages keeps every call under the call limit, in page order, with each page in exactly one call", () => {
+		const pages = wideSkills();
+		const batches = batchIngestPages(pages);
+		expect(batches.length).toBeGreaterThan(1);
+		for (const batch of batches) {
+			const bytes = batch.reduce((sum, page) => sum + Buffer.byteLength(page.body, "utf8"), 0);
+			expect(bytes).toBeLessThanOrEqual(INGEST_CALL_MAX_BYTES);
+		}
+		expect(batches.flat().map((page) => page.path)).toEqual(pages.map((page) => page.path));
+	});
+
+	test("preflightIngestPages refuses a page's secret before any call uploads, so earlier pages are not stored", async () => {
+		const fake = new RagflowFake();
+		const events: EventInput[] = [];
+		const deps: IngestDeps = {
+			config: CONFIG,
+			emit: async (event: EventInput): Promise<unknown> => {
+				events.push(event);
+				return { stored: false };
+			},
+			surface: "omp",
+			seen: new Map(),
+			poll: { intervalMs: 0 },
+			fetchImpl: fake.fetch,
+		};
+		const leaked = { ...PAGE, path: "docs/leaked.md", source_url: "file:///checkout/docs/leaked.md", body: "paste sk-proj-abcdefghij1234567890 here" };
+		const reason = await preflightIngestPages(deps, { dataset: "agent-substrate", pages: [...wideSkills().slice(0, 2), leaked] });
+		expect(reason).toBe("secret-findings");
+		expect(fake.uploads).toHaveLength(0);
+		expect(events).toHaveLength(1);
+	});
+
+	test("preflightIngestPages passes a clean set and refuses an empty one", async () => {
+		const fake = new RagflowFake();
+		const deps: IngestDeps = { config: CONFIG, emit: async (): Promise<unknown> => ({ stored: false }), surface: "omp", seen: new Map(), poll: { intervalMs: 0 }, fetchImpl: fake.fetch };
+		expect(await preflightIngestPages(deps, { dataset: "agent-substrate", pages: wideSkills() })).toBeUndefined();
+		expect(await preflightIngestPages(deps, { dataset: "agent-substrate", pages: [] })).toBe("no-pages");
+		expect(fake.uploads).toHaveLength(0);
 	});
 });

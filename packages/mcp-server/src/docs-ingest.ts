@@ -56,6 +56,7 @@ import {
 	type RagflowConfig,
 } from "./planes/ragflow.ts";
 import { REDACTION_RULES, redact, redactSkillContent } from "./redact.ts";
+import { SKILL_NAME_RE } from "./skills/propose.ts";
 import type { EventInput, Surface } from "./types.ts";
 
 /** One page may not exceed 1 MB (D25-05, Phase 21 precedent). */
@@ -103,56 +104,90 @@ export const nodeIo: ScanIo = { lstat, stat, readdir, readFile };
  * result is sorted by path, so a refresh ingests in a stable order.
  */
 export async function scanIngestPages(baseDir: string, roots: readonly string[], io: ScanIo = nodeIo): Promise<IngestPage[]> {
+	return scanPages(baseDir, roots, io, "skip");
+}
+
+/**
+ * The pages of an agent-skills checkout under `roots`: {@link scanIngestPages}, except that a path
+ * which exists but cannot be listed, stat'ed or read fails the scan. A skill whose `references/` tree
+ * is unreadable then fails its refresh, instead of ingesting fewer pages under a version that looks
+ * fresh. A missing path is still just absent; the size and link rules are unchanged.
+ */
+export async function readSkillsCheckoutPages(baseDir: string, roots: readonly string[], io: ScanIo = nodeIo): Promise<IngestPage[]> {
+	return scanPages(baseDir, roots, io, "fail");
+}
+
+async function scanPages(baseDir: string, roots: readonly string[], io: ScanIo, unreadable: Unreadable): Promise<IngestPage[]> {
 	const pages: IngestPage[] = [];
 	for (const root of roots) {
 		const absolute = resolve(baseDir, root);
-		let info: Stats;
-		try {
-			info = await io.lstat(absolute);
-		} catch {
-			continue; // absent or unreadable root: skipped, not fatal
-		}
+		const info = await tolerant(() => io.lstat(absolute), unreadable);
+		if (info === undefined) continue; // absent or unreadable root: skipped, not fatal under "skip"
 		if (info.isSymbolicLink()) continue; // a root that is itself a link is never followed
-		if (root.endsWith("/")) await collectDirectory(absolute, root, pages, io);
-		else if (info.isFile()) await addFilePage(absolute, root, pages, io);
+		if (root.endsWith("/")) await collectDirectory(absolute, root, pages, io, unreadable);
+		else if (info.isFile()) await addFilePage(absolute, root, pages, io, unreadable);
 	}
 	pages.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 	return pages;
 }
 
-async function collectDirectory(dir: string, prefix: string, pages: IngestPage[], io: ScanIo): Promise<void> {
-	let entries: Dirent[];
-	try {
-		entries = await io.readdir(dir, { withFileTypes: true });
-	} catch {
-		return; // missing or unreadable: skipped, not fatal
-	}
+/**
+ * The roots of an agent-skills checkout (phase 42, D42-2). A directory `<name>/` at the checkout root
+ * is a skill only when its name passes `SKILL_NAME_RE` (the rule `libraryNames` applies) and it holds a
+ * regular `SKILL.md`; its roots are that file and `<name>/references/` (a tree): the layout `writeTree`
+ * writes and the library projector reads. A directory that fails either check contributes no roots, so
+ * its notes never become searchable. Links are not skills. The listing throws when the checkout cannot be
+ * read, and so does a `SKILL.md` check that fails for any reason but the file being absent; the caller
+ * fails that refresh.
+ */
+export async function skillsCheckoutRoots(checkout: string, io: Pick<ScanIo, "readdir" | "lstat"> = nodeIo): Promise<string[]> {
+	const entries = await io.readdir(checkout, { withFileTypes: true });
+	const roots: string[] = [];
 	for (const entry of entries) {
-		if (entry.isSymbolicLink()) continue;
-		const relative = `${prefix}${entry.name}`;
-		if (entry.isDirectory()) await collectDirectory(join(dir, entry.name), `${relative}/`, pages, io);
-		else if (entry.isFile()) await addFilePage(join(dir, entry.name), relative, pages, io);
+		if (!entry.isDirectory() || !SKILL_NAME_RE.test(entry.name)) continue;
+		const manifest = await tolerant(() => io.lstat(join(checkout, entry.name, "SKILL.md")), "fail");
+		if (manifest?.isFile() === true) roots.push(`${entry.name}/SKILL.md`, `${entry.name}/references/`);
+	}
+	return roots;
+}
+
+/** How a scan treats a path it cannot read: skip it (agent-substrate), or fail the scan (an agent-skills checkout). */
+type Unreadable = "skip" | "fail";
+
+/**
+ * One filesystem read. A missing path yields undefined under either policy; any other failure yields
+ * undefined under "skip" and rethrows under "fail".
+ */
+async function tolerant<T>(read: () => Promise<T>, unreadable: Unreadable): Promise<T | undefined> {
+	try {
+		return await read();
+	} catch (cause) {
+		const missing = cause instanceof Error && "code" in cause && cause.code === "ENOENT";
+		if (unreadable === "fail" && !missing) throw cause;
+		return undefined;
 	}
 }
 
-async function addFilePage(absolute: string, path: string, pages: IngestPage[], io: ScanIo): Promise<void> {
+async function collectDirectory(dir: string, prefix: string, pages: IngestPage[], io: ScanIo, unreadable: Unreadable): Promise<void> {
+	const entries = await tolerant(() => io.readdir(dir, { withFileTypes: true }), unreadable);
+	if (entries === undefined) return; // a missing directory is skipped; an unreadable one only under "skip"
+	for (const entry of entries) {
+		if (entry.isSymbolicLink()) continue;
+		const relative = `${prefix}${entry.name}`;
+		if (entry.isDirectory()) await collectDirectory(join(dir, entry.name), `${relative}/`, pages, io, unreadable);
+		else if (entry.isFile()) await addFilePage(join(dir, entry.name), relative, pages, io, unreadable);
+	}
+}
+
+async function addFilePage(absolute: string, path: string, pages: IngestPage[], io: ScanIo, unreadable: Unreadable): Promise<void> {
 	// The size cap applies to the stat, before anything is read: a file the
 	// ingest would refuse as page-too-large is never loaded just to be thrown
 	// away. It is skipped like every other page the sweep cannot take —
 	// quietly, and counted only by its absence from the result.
-	let size: number;
-	try {
-		size = (await io.stat(absolute)).size;
-	} catch {
-		return; // missing or unreadable: skipped, not fatal
-	}
-	if (size > INGEST_PAGE_MAX_BYTES) return;
-	let body: string;
-	try {
-		body = await io.readFile(absolute, "utf8");
-	} catch {
-		return;
-	}
+	const stats = await tolerant(() => io.stat(absolute), unreadable);
+	if (stats === undefined || stats.size > INGEST_PAGE_MAX_BYTES) return;
+	const body = await tolerant(() => io.readFile(absolute, "utf8"), unreadable);
+	if (body === undefined) return;
 	pages.push({ path, source_url: pathToFileURL(absolute).href, body });
 }
 
@@ -509,20 +544,13 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	let total = 0;
 	let strippedImages = 0;
 	for (const page of input.pages) {
-		if (!page.source_url) return refused(deps, sessionId, "no-source-url", { page: page.path });
-		if (!underRoot(page.path, roots)) return refused(deps, sessionId, "outside-roots", { page: page.path });
-		if (page.real_path !== undefined && !underRoot(page.real_path, roots)) {
-			return refused(deps, sessionId, "outside-roots", { page: page.path });
-		}
 		const stripped = stripRemoteImages(page.body);
 		strippedImages += stripped.stripped;
-		const size = Buffer.byteLength(stripped.body, "utf8");
-		if (size > INGEST_PAGE_MAX_BYTES) return refused(deps, sessionId, "page-too-large", { page: page.path });
-		total += size;
+		const refusal = pageRefusal(page, stripped.body, roots, input.commit);
+		if (refusal !== undefined) return refused(deps, sessionId, refusal.reason, refusal.extra);
+		total += Buffer.byteLength(stripped.body, "utf8");
 		if (total > INGEST_CALL_MAX_BYTES) return refused(deps, sessionId, "call-too-large", { page: page.path });
-		const rules = findingRules(`${stripped.body}\n${page.source_url}\n${input.commit ?? ""}\n${page.heading_path ?? ""}`);
-		if (rules.length > 0) return refused(deps, sessionId, "secret-findings", { rules, page: page.path });
-		prepared.push({ page, sourceUrl: page.source_url, body: stripped.body, sha: sha256(stripped.body) });
+		prepared.push({ page, sourceUrl: page.source_url ?? "", body: stripped.body, sha: sha256(stripped.body) });
 	}
 
 	// Taken before the first read of the record. No await sits between the gates and this call, so the lock
@@ -532,6 +560,75 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	);
 	if (waited === LOCK_WAIT_EXPIRED) return refused(deps, sessionId, "dataset-lock-timeout");
 	return waited;
+}
+
+/** The reason one page may not be uploaded, with the locator a refusal reports alongside it. */
+interface PageRefusal {
+	reason: string;
+	extra?: { rules?: string[]; page?: string };
+}
+
+/**
+ * The gates one page passes before anything is uploaded: its source URL, its roots, its size and its secret
+ * scan. `body` is the text an ingest call would upload, after its remote images are stripped. Shared by an
+ * ingest call and by {@link preflightIngestPages}, so both refuse the same pages for the same reason.
+ */
+function pageRefusal(page: IngestPage, body: string, roots: readonly string[], commit: string | undefined): PageRefusal | undefined {
+	if (!page.source_url) return { reason: "no-source-url", extra: { page: page.path } };
+	if (!underRoot(page.path, roots)) return { reason: "outside-roots", extra: { page: page.path } };
+	if (page.real_path !== undefined && !underRoot(page.real_path, roots)) return { reason: "outside-roots", extra: { page: page.path } };
+	if (Buffer.byteLength(body, "utf8") > INGEST_PAGE_MAX_BYTES) return { reason: "page-too-large", extra: { page: page.path } };
+	const rules = findingRules(`${body}\n${page.source_url}\n${commit ?? ""}\n${page.heading_path ?? ""}`);
+	if (rules.length > 0) return { reason: "secret-findings", extra: { rules, page: page.path } };
+	return undefined;
+}
+
+/**
+ * The gates of an ingest call, run over every page before the first call of a refresh writes. A refresh split
+ * into several calls runs this first, so a content refusal (an outside path, an oversize page, a secret) leaves
+ * the plane untouched, as it did when the whole refresh was one call. Returns the refusal reason, or undefined
+ * when every page passes; a refusal is emitted as an ingest call's refusal is. The per-call size is not checked
+ * here: {@link batchIngestPages} keeps each call under it, and each call checks it again.
+ */
+export async function preflightIngestPages(deps: IngestDeps, input: IngestInput): Promise<string | undefined> {
+	const sessionId = deps.sessionId ?? `docs-ingest:${randomUUID()}`;
+	const roots = deps.roots ?? DEFAULT_INGEST_ROOTS;
+	const refusal = input.pages.length === 0 ? { reason: "no-pages" } : firstPageRefusal(input, roots);
+	if (refusal === undefined) return undefined;
+	await refused(deps, sessionId, refusal.reason, refusal.extra);
+	return refusal.reason;
+}
+
+/** The first page of an ingest input the gates refuse, in input order. */
+function firstPageRefusal(input: IngestInput, roots: readonly string[]): PageRefusal | undefined {
+	for (const page of input.pages) {
+		const refusal = pageRefusal(page, stripRemoteImages(page.body).body, roots, input.commit);
+		if (refusal !== undefined) return refusal;
+	}
+	return undefined;
+}
+
+/**
+ * The pages split into consecutive calls, each within {@link INGEST_CALL_MAX_BYTES} as an ingest call measures
+ * it: the bytes after the remote-image strip. Order is kept, so the calls take the pages in the scan's sorted
+ * order. A single page over the limit gets a call of its own, where its own gates refuse it.
+ */
+export function batchIngestPages(pages: readonly IngestPage[]): IngestPage[][] {
+	const batches: IngestPage[][] = [];
+	let current: IngestPage[] = [];
+	let bytes = 0;
+	for (const page of pages) {
+		const size = Buffer.byteLength(stripRemoteImages(page.body).body, "utf8");
+		if (current.length > 0 && bytes + size > INGEST_CALL_MAX_BYTES) {
+			batches.push(current);
+			current = [];
+			bytes = 0;
+		}
+		current.push(page);
+		bytes += size;
+	}
+	if (current.length > 0) batches.push(current);
+	return batches;
 }
 
 /** The part of an ingest that runs under its dataset's lock: the dataset lookup, the version plan, then the writes. */

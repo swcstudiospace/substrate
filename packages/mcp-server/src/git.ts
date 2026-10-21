@@ -87,3 +87,14 @@ export function checkoutKnowsCommit(path: string, sha: string): boolean | null {
 	if (run.exitCode === 0) return true;
 	return run.exitCode === 1 || run.exitCode === 128 ? false : null;
 }
+
+/**
+ * The commit a checkout's HEAD names, as the full hash, or null when it cannot be read. A refresh
+ * that ingests a checkout compares this with the commit it was asked for: a checkout that moved on
+ * after the trigger was accepted holds different content under the requested name.
+ */
+export function checkoutHead(path: string): string | null {
+	if (!isReadableCheckout(path)) return null;
+	const sha = git(path, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
+	return sha !== null && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha) ? sha : null;
+}

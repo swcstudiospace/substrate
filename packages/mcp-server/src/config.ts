@@ -120,6 +120,14 @@ export interface SubstrateConfig {
 	 * ingest events already carry.
 	 */
 	docsStateFile: string | null;
+	/**
+	 * The local checkout of swcstudiospace/agent-skills (`SUBSTRATE_AGENT_SKILLS_ROOT`, D42-1): an
+	 * absolute path, or null. Set, the `agent-skills` merge-trigger ingests each skill's
+	 * `<name>/SKILL.md` and `<name>/references/` from it; unset, that trigger is a noop.
+	 */
+	agentSkillsRoot: string | null;
+	/** The relative `SUBSTRATE_AGENT_SKILLS_ROOT` value, refused and carried back for the boot warning; null otherwise. */
+	agentSkillsRootRejected: string | null;
 	/** bearer token → surface. Lets every event be attributed to a caller. */
 	tokens: Map<string, Surface>;
 	/**
@@ -685,6 +693,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		docsIngestRoots: ingestRoots.length > 0 ? ingestRoots : [...DEFAULT_INGEST_ROOTS],
 		vmGuest: (env.SUBSTRATE_VM_GUEST?.trim() ?? "") === "1",
 		docsStateFile: env.SUBSTRATE_DOCS_STATE_FILE?.trim() || null,
+		...agentSkillsRootFromEnv(env.SUBSTRATE_AGENT_SKILLS_ROOT),
 		tokens,
 		allowAnonymous: allowAnonymousFrom(env, tokens.size),
 		operatorTokens: new Set(
@@ -971,6 +980,18 @@ export function skillsGovernanceConfigWarnings(config: SubstrateConfig): string[
 		`SUBSTRATE_SKILLS_GOVERNANCE=${JSON.stringify(config.skillsGovernanceRejected)} is not off, report or enforce; ` +
 			"running as off, so skills_propose records no registry row and nothing is filtered",
 	];
+}
+
+/**
+ * `SUBSTRATE_AGENT_SKILLS_ROOT` (phase 42, D42-1): an absolute path to a local agent-skills
+ * checkout, trimmed; unset or blank is null. A relative value is null and carried back for the
+ * boot warning, so a checkout is never read relative to the working directory.
+ */
+function agentSkillsRootFromEnv(raw: string | undefined): Pick<SubstrateConfig, "agentSkillsRoot" | "agentSkillsRootRejected"> {
+	const trimmed = raw?.trim() ?? "";
+	if (trimmed === "") return { agentSkillsRoot: null, agentSkillsRootRejected: null };
+	if (!trimmed.startsWith("/")) return { agentSkillsRoot: null, agentSkillsRootRejected: trimmed };
+	return { agentSkillsRoot: trimmed, agentSkillsRootRejected: null };
 }
 
 /** uplift-2 R1: a finite number ≥ 0, floored (0 is "off"); anything else is the default. */
@@ -1312,6 +1333,13 @@ export function configWarnings(config: SubstrateConfig): string[] {
 	// Named by key, never by value: the warning goes to a log.
 	if (config.skills.problem) {
 		warnings.push(`skill proposals are refused until the skills library is fixed: ${config.skills.problem}`);
+	}
+	// Named by variable and value only, never a credential; before the early return, as the skills warning is.
+	if (config.agentSkillsRootRejected !== null) {
+		warnings.push(
+			`SUBSTRATE_AGENT_SKILLS_ROOT=${JSON.stringify(config.agentSkillsRootRejected)} is not an absolute path; ` +
+				"agent-skills is not refreshed from a checkout, and its merge-trigger is a noop",
+		);
 	}
 
 	// Named by variable, never by token: the warning goes to a log. Such a token still

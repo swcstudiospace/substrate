@@ -4,12 +4,16 @@
  * plus reason. Proved against the recording fake.
  */
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CircuitBreaker, gatedFetch, type DocsSearchSample, type PlaneGate } from "@substrate/observability";
 import { ReadThroughCache, type CacheRedis } from "./cache.ts";
 import { citationProvenanceCounts, searchDocs, searchReplyStorable, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type SearchReply } from "./docs-search.ts";
 import type { DatasetListSource } from "./docs-datasets.ts";
+import { nodeIo, readSkillsCheckoutPages, skillsCheckoutRoots, type ScanIo } from "./docs-ingest.ts";
 import { RagflowFake, type FakeChunk } from "./ragflow-fake.ts";
 import { ragflowOp } from "./planes/ragflow.ts";
 import type { EventInput } from "./types.ts";
@@ -532,5 +536,167 @@ describe("docs_search outcome metrics (uplift-3 N5)", () => {
 				{ ...citation, commit: "dataset-pin:agent-skills:unpinned" },
 			]),
 		).toEqual({ recorded: 1, unrecorded: 1, unpinned: 2 });
+	});
+});
+
+describe("docs_search after an agent-skills refresh (phase 42)", () => {
+	/** A checkout in the library layout: each `<name>/` holds its `SKILL.md` and a `references/` tree. */
+	function skillsCheckout(files: Record<string, string>): string {
+		const root = mkdtempSync(join(tmpdir(), "substrate-skills-"));
+		for (const [path, body] of Object.entries(files)) {
+			mkdirSync(dirname(join(root, path)), { recursive: true });
+			writeFileSync(join(root, path), body);
+		}
+		return root;
+	}
+
+	/**
+	 * The refresh the merge-trigger route runs for agent-skills: the trigger is noted, then the job runs and is awaited.
+	 * `io` is the file system the scan reads through; a test passes one that cannot read a path.
+	 */
+	function refresh(substrate: Substrate, checkout: string, commit: string, io: ScanIo = nodeIo) {
+		substrate.noteDocsTrigger("agent-skills");
+		return substrate.startDocsRefresh(
+			{
+				dataset: "agent-skills",
+				commit,
+				content_sha256: `sha-${commit}`,
+				roots: () => skillsCheckoutRoots(checkout),
+				pages: (roots) => readSkillsCheckoutPages(checkout, roots, io),
+			},
+			"omp",
+			{ wait: true },
+		);
+	}
+
+	test("docs_search answers from the new agent-skills version after the refresh", async () => {
+		const fake = new RagflowFake();
+		fake.serveUploadsAsChunks = true;
+		fake.parseDonePolls = 1;
+		const checkout = skillsCheckout({
+			"demo-skill/SKILL.md": "---\nname: demo-skill\n---\nDemo skill body.\n",
+			"demo-skill/references/api.md": "The demo API reference.\n",
+		});
+		try {
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			const outcome = await refresh(substrate, checkout, "skills-v2");
+			expect(outcome.status).toBe(200);
+			const reply = await substrate.searchDocs({ question: "demo API reference" }, "omp");
+			const cited = reply.chunks.filter((chunk) => chunk.source_url.endsWith("/demo-skill/references/api.md"));
+			expect(cited).toHaveLength(1);
+			expect(cited[0]).toMatchObject({ commit: "skills-v2", dataset_commit: "skills-v2" });
+			expect(cited[0]?.pin_age_ms).toBeUndefined();
+			expect(reply.chunks.some((chunk) => chunk.source_url.endsWith("/demo-skill/SKILL.md"))).toBe(true);
+		} finally {
+			rmSync(checkout, { recursive: true, force: true });
+		}
+	});
+
+	test("a checkout that cannot be read keeps the pinned version serving, with its age", async () => {
+		const fake = new RagflowFake();
+		fake.serveUploadsAsChunks = true;
+		fake.parseDonePolls = 1;
+		const checkout = skillsCheckout({ "demo-skill/SKILL.md": "Demo skill body.\n" });
+		try {
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			expect((await refresh(substrate, checkout, "skills-v1")).status).toBe(200);
+			rmSync(checkout, { recursive: true, force: true });
+			const failed = await refresh(substrate, checkout, "skills-v2");
+			expect(failed.status).toBe(503);
+			expect(failed.body).toMatchObject({ ok: false, reason: "checkout-unreadable" });
+			const reply = await substrate.searchDocs({ question: "demo skill" }, "omp");
+			const cited = reply.chunks.find((chunk) => chunk.source_url.endsWith("/demo-skill/SKILL.md"));
+			expect(cited).toMatchObject({ commit: "skills-v1", dataset_commit: "skills-v1" });
+			expect(typeof cited?.pin_age_ms).toBe("number");
+		} finally {
+			rmSync(checkout, { recursive: true, force: true });
+		}
+	});
+
+	test("an unreadable references directory fails the refresh: the pinned version keeps serving and no version is recorded", async () => {
+		const fake = new RagflowFake();
+		fake.serveUploadsAsChunks = true;
+		fake.parseDonePolls = 1;
+		const checkout = skillsCheckout({
+			"demo-skill/SKILL.md": "Demo skill body.\n",
+			"demo-skill/references/api.md": "The demo API reference.\n",
+		});
+		try {
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			expect((await refresh(substrate, checkout, "skills-v1")).status).toBe(200);
+			// The references tree exists but its listing is denied: the scan fails rather than yielding SKILL.md alone under a fresh version.
+			const unreadable: ScanIo = {
+				...nodeIo,
+				readdir: (path, options) => (path.endsWith(join("demo-skill", "references")) ? Promise.reject(Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" })) : nodeIo.readdir(path, options)),
+			};
+			const failed = await refresh(substrate, checkout, "skills-v2", unreadable);
+			expect(failed.status).toBe(503);
+			expect(failed.body).toMatchObject({ ok: false, reason: "checkout-unreadable" });
+			expect(await substrate.latestDocsVersion("agent-skills")).toMatchObject({ commit: "skills-v1" });
+			const reply = await substrate.searchDocs({ question: "demo API reference" }, "omp");
+			const cited = reply.chunks.find((chunk) => chunk.source_url.endsWith("/demo-skill/references/api.md"));
+			expect(cited).toMatchObject({ commit: "skills-v1", dataset_commit: "skills-v1" });
+		} finally {
+			rmSync(checkout, { recursive: true, force: true });
+		}
+	});
+
+	/**
+	 * Skills whose references outweigh one ingest call's 5 MB: `count` skills, each a small SKILL.md and a 900 KB
+	 * reference, so every page is under the 1 MB page limit. A reference's content starts with its skill's name.
+	 */
+	function wideSkills(count: number): Record<string, string> {
+		const files: Record<string, string> = {};
+		for (let n = 1; n <= count; n += 1) {
+			files[`skill-${n}/SKILL.md`] = `---\nname: skill-${n}\n---\nSkill ${n} body.\n`;
+			files[`skill-${n}/references/api.md`] = `skill-${n} reference ${"x".repeat(900_000)}\n`;
+		}
+		return files;
+	}
+
+	test("a checkout whose references exceed one call's 5 MB refreshes in several calls and records the version", async () => {
+		const fake = new RagflowFake();
+		fake.serveUploadsAsChunks = true;
+		fake.parseDonePolls = 1;
+		const checkout = skillsCheckout(wideSkills(6));
+		try {
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			const outcome = await refresh(substrate, checkout, "skills-wide");
+			expect(outcome.status).toBe(200);
+			expect(await substrate.latestDocsVersion("agent-skills")).toMatchObject({ commit: "skills-wide" });
+			// Twelve pages (a SKILL.md and a reference each) reached the plane, and together they outweigh one call's limit.
+			expect(fake.uploads).toHaveLength(12);
+			expect(fake.uploads.reduce((sum, upload) => sum + upload.content.length, 0)).toBeGreaterThan(5_000_000);
+		} finally {
+			rmSync(checkout, { recursive: true, force: true });
+		}
+	});
+
+	test("a refresh whose later call fails keeps the prior pin, and the earlier call's pages are reported as stored", async () => {
+		const fake = new RagflowFake();
+		fake.serveUploadsAsChunks = true;
+		fake.parseDonePolls = 1;
+		const prior = skillsCheckout({ "skill-1/SKILL.md": "Skill one body v1.\n" });
+		const wide = skillsCheckout(wideSkills(6));
+		try {
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			expect((await refresh(substrate, prior, "skills-v1")).status).toBe(200);
+			// The plane refuses the last skill's reference. It sits in the second call, so the first call has already stored its pages.
+			fake.failUploadWhen = (content) => content.startsWith("skill-6 reference");
+			const failed = await refresh(substrate, wide, "skills-v2");
+			expect(failed.status).toBe(503);
+			expect(failed.body).toMatchObject({ ok: false, stored: true });
+			expect(failed.body).not.toMatchObject({ reason: "call-too-large" });
+			// No version is recorded for the failed refresh: the pin keeps the prior version.
+			expect(await substrate.latestDocsVersion("agent-skills")).toMatchObject({ version: "v1", commit: "skills-v1" });
+			// The first call's page is searchable under its own commit while the dataset pin still names the prior one.
+			const reply = await substrate.searchDocs({ question: "skill one reference" }, "omp");
+			const stored = reply.chunks.find((chunk) => chunk.source_url.endsWith("/skill-1/references/api.md"));
+			expect(stored).toMatchObject({ commit: "skills-v2", dataset_commit: "skills-v1" });
+			expect(typeof stored?.pin_age_ms).toBe("number");
+		} finally {
+			rmSync(prior, { recursive: true, force: true });
+			rmSync(wide, { recursive: true, force: true });
+		}
 	});
 });

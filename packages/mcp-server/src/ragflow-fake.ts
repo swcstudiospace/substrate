@@ -152,6 +152,8 @@ export class RagflowFake {
 	failDeleteWith: number | null = null;
 	/** When set, every `meta_fields` update answers with this status instead. */
 	failMetaWith: number | null = null;
+	/** When set and it names a part's content, that upload answers 500 instead: a later ingest call can fail after an earlier one landed. */
+	failUploadWhen: ((content: string) => boolean) | null = null;
 	readonly datasets: FakeDataset[] = [
 		{ id: BERLIN_ID, name: "agent-substrate", embedding_model: "tei-bge-small", chunk_method: "naive" },
 		{ id: HAMM_ID, name: "programming-desk", embedding_model: "tei-bge-small", chunk_method: "naive" },
@@ -386,6 +388,7 @@ export class RagflowFake {
 		if (parts === null || parts.length === 0 || body === null || typeof body !== "object" || !("multipart" in body)) {
 			return failure(101, "No file part!", 400);
 		}
+		if (this.failUploadWhen !== null && parts.some((part) => this.failUploadWhen?.(part.text))) return failure(100, "injected upload failure", 500);
 		const created: Array<Record<string, unknown>> = [];
 		for (const part of parts) {
 			const documentId = `doc-upload-${this.nextDoc}`;

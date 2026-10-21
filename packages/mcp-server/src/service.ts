@@ -72,10 +72,13 @@ import {
 	type VersionStore,
 } from "./docs-datasets.ts";
 import {
+	batchIngestPages,
 	documentProvenance,
 	ingestDocs,
 	loadIngestRecords,
+	preflightIngestPages,
 	saveIngestRecords,
+	type IngestDeps,
 	type IngestOutcome,
 	type IngestPage,
 	type IngestRecord,
@@ -1001,14 +1004,30 @@ export interface DocsRefreshRequest {
 	dataset: string;
 	commit: string;
 	content_sha256: string;
-	/** The pages of the checkout, read when the job runs — not when it is accepted. */
-	pages: () => Promise<IngestPage[]>;
+	/**
+	 * The path prefixes this checkout's pages may come from, read when the job runs; the ingest guard
+	 * refuses any page outside them. Absent: the configured docs roots (the agent-substrate checkout).
+	 */
+	roots?: () => Promise<readonly string[]>;
+	/** The pages of the checkout under `roots`, read when the job runs — not when it is accepted. */
+	pages: (roots: readonly string[]) => Promise<IngestPage[]>;
+	/**
+	 * The commit the checkout's HEAD names, read when the job runs. Present, the job refuses unless it is
+	 * `commit` (`commit-mismatch`) before and after the pages are read, so a checkout that moved on
+	 * after the trigger was queued never records the requested commit over other content. `null` means
+	 * HEAD could not be read, which refuses the job too (`checkout-unreadable`). Absent: no check.
+	 */
+	head?: () => Promise<string | null>;
 }
 
-/** How one merge-trigger job ended, as `?wait=1` and the stderr line report it. */
+/**
+ * How one merge-trigger job ended, as `?wait=1` and the stderr line report it. `stored` on a failure: an earlier
+ * call of this refresh already wrote pages of the requested commit, so the plane is partly new while the pin
+ * still names the prior version.
+ */
 export type DocsRefreshOutcome =
 	| { ok: true; version: DatasetVersion; created: boolean; job: string }
-	| { ok: false; reason: string; job: string };
+	| { ok: false; reason: string; job: string; stored?: boolean };
 
 interface DocsRefreshJob {
 	id: string;
@@ -1083,6 +1102,8 @@ export class Substrate {
 	private readonly docsDatasetList = new DatasetListCache();
 	/** Skills-sync fast-forward evidence: flipped by the first `agent-skills` merge-trigger this process sees (D25-07). */
 	private readonly docsSkillsSync: SkillsSyncTracker = createSkillsSyncTracker();
+	/** Set while the last agent-skills refresh failed: its citations keep `pin_age_ms` on the pin that still serves (D42-5). */
+	private docsSkillsRefreshFailed = false;
 	/** The merge-trigger jobs: one chain per dataset (a trigger queues behind the running one), plus every job still pending by id. */
 	private readonly docsRefreshChains = new Map<string, Promise<void>>();
 	private readonly docsRefreshPending = new Map<string, DocsRefreshJob>();
@@ -4122,7 +4143,7 @@ export class Substrate {
 			: [...DEFAULT_SEARCH_DATASET_NAMES];
 		await this.hydrateDocsSeen();
 		const pins = pinsFromVersions(this.docsVersions);
-		const degradedDatasets = isSyncLive(this.docsSkillsSync) ? [] : ["agent-skills"];
+		const degradedDatasets = isSyncLive(this.docsSkillsSync) && !this.docsSkillsRefreshFailed ? [] : ["agent-skills"];
 		const load = (): Promise<SearchReply> => {
 			noteLoaded();
 			return searchDocs(
@@ -4215,27 +4236,13 @@ export class Substrate {
 	async ingestDocs(
 		input: { dataset?: unknown; commit?: unknown; pages?: unknown; session_id?: unknown },
 		callerSurface: Surface | null,
+		roots?: readonly string[],
 	): Promise<IngestOutcome> {
 		const sessionId = typeof input.session_id === "string" && input.session_id.length > 0 ? input.session_id : undefined;
 		const pages = Array.isArray(input.pages) ? input.pages : [];
 		await this.hydrateDocsSeen();
 		const outcome = await ingestDocs(
-			{
-				config: this.config.ragflow,
-				roots: this.config.docsIngestRoots,
-				vmGuest: this.config.vmGuest,
-				seen: this.docsIngestSeen,
-				locks: this.docsIngestFlight,
-				// A real parse takes seconds: thirty polls two seconds apart.
-				// The zero-delay rehearsal shape stays in the module tests.
-				poll: { maxPolls: 30, intervalMs: 2000 },
-				emit: (event) => this.emit(event),
-				surface: callerSurface,
-				...(sessionId !== undefined ? { sessionId } : {}),
-				fetchImpl: this.ragflowFetch,
-				datasets: this.docsDatasetList,
-				prune: this.config.docsPruneSuperseded,
-			},
+			this.docsIngestDeps(roots, callerSurface, sessionId),
 			{
 				dataset: typeof input.dataset === "string" ? input.dataset : "",
 				...(typeof input.commit === "string" ? { commit: input.commit } : {}),
@@ -4257,6 +4264,30 @@ export class Substrate {
 			await this.cache.bump(DOCS_GENERATION_KEY);
 		}
 		return outcome;
+	}
+
+	/**
+	 * The dependencies every docs ingest in this service runs with: the plane, the record stores, the roots the
+	 * guard checks pages against, and the caller's surface. A refresh's preflight and each of its calls share
+	 * these, so they refuse the same pages for the same reasons.
+	 */
+	private docsIngestDeps(roots: readonly string[] | undefined, surface: Surface | null, sessionId?: string): IngestDeps {
+		return {
+			config: this.config.ragflow,
+			roots: roots ?? this.config.docsIngestRoots,
+			vmGuest: this.config.vmGuest,
+			seen: this.docsIngestSeen,
+			locks: this.docsIngestFlight,
+			// A real parse takes seconds: thirty polls two seconds apart.
+			// The zero-delay rehearsal shape stays in the module tests.
+			poll: { maxPolls: 30, intervalMs: 2000 },
+			emit: (event) => this.emit(event),
+			surface,
+			...(sessionId !== undefined ? { sessionId } : {}),
+			fetchImpl: this.ragflowFetch,
+			datasets: this.docsDatasetList,
+			prune: this.config.docsPruneSuperseded,
+		};
 	}
 
 	// uplift-2 R6 — dataset versions and the merge-trigger, moved here from
@@ -4362,18 +4393,42 @@ export class Substrate {
 		};
 	}
 
+	/**
+	 * Why this job must not ingest the checkout as it stands, or `null` when HEAD is the requested commit.
+	 * Only a request that carries `head` is checked; the agent-skills refresh always does.
+	 */
+	private async checkoutRefusal(request: DocsRefreshRequest): Promise<string | null> {
+		if (request.head === undefined) return null;
+		const head = await request.head();
+		if (head === null) return "checkout-unreadable";
+		return head === request.commit ? null : "commit-mismatch";
+	}
+
 	/** One merge-trigger job: ensure, ingest, record; never throws. */
 	private async runDocsRefresh(job: string, request: DocsRefreshRequest, surface: Surface): Promise<DocsRefreshOutcome> {
 		const finish = (outcome: DocsRefreshOutcome): DocsRefreshOutcome => {
+			if (request.dataset === "agent-skills") this.docsSkillsRefreshFailed = !outcome.ok;
 			process.stderr.write(
 				`[substrate] docs merge-trigger ${job} ${request.dataset} ${request.commit.slice(0, 12)}: ${
-					outcome.ok ? `${outcome.version.version} recorded${outcome.created ? " (dataset created)" : ""}` : `failed — ${redact(outcome.reason)}`
+					outcome.ok ? `${outcome.version.version} recorded${outcome.created ? " (dataset created)" : ""}` : `failed — ${redact(outcome.reason)}${outcome.stored === true ? " (partial: an earlier call stored pages; the pin keeps the prior version)" : ""}`
 				}\n`,
 			);
 			return outcome;
 		};
 		try {
 			if (this.config.ragflow === null) return finish({ ok: false, reason: "ragflow-not-configured", job });
+			// The checkout's roots are read before any plane call: a checkout that cannot be read
+			// fails this job alone, and the pinned version keeps serving with its age (D42-5).
+			let roots: readonly string[];
+			try {
+				roots = request.roots ? await request.roots() : this.config.docsIngestRoots;
+			} catch {
+				return finish({ ok: false, reason: "checkout-unreadable", job });
+			}
+			// HEAD must be the requested commit before the plane is touched. A queued job reads the live
+			// checkout, which may have moved on since the trigger was accepted; it is checked again below.
+			const refusedBefore = await this.checkoutRefusal(request);
+			if (refusedBefore !== null) return finish({ ok: false, reason: refusedBefore, job });
 			// The guarded ingest reads the plane's dataset by name and refuses
 			// `unknown-dataset`, so on a configured plane without the dataset it
 			// must exist before that ingest runs: discover first, create only on
@@ -4382,10 +4437,31 @@ export class Substrate {
 			const ensured = await resolveDatasets({ config: this.config.ragflow, fetchImpl: this.ragflowFetch, datasets: this.docsDatasetList }, [request.dataset]);
 			if (!ensured.ok) return finish({ ok: false, reason: ensured.reason, job });
 			const created = ensured.datasets[0]?.created === true;
-			const ingested = await this.ingestDocs({ dataset: request.dataset, commit: request.commit, pages: await request.pages() }, surface);
-			if (!ingested.ok) return finish({ ok: false, reason: ingested.reason, job });
+			// A path that exists but cannot be read fails the job here, not as a smaller page set.
+			let pages: IngestPage[];
+			try {
+				pages = await request.pages(roots);
+			} catch {
+				return finish({ ok: false, reason: "checkout-unreadable", job });
+			}
+			// The pages came from the checkout as it was after the read: HEAD must still be the requested commit.
+			const refusedAfter = await this.checkoutRefusal(request);
+			if (refusedAfter !== null) return finish({ ok: false, reason: refusedAfter, job });
+			// Every page passes the ingest gates before the first call writes, so a content refusal (an outside path,
+			// an oversize page, a secret) leaves the plane as it was, as a single call did.
+			const gated = await preflightIngestPages(this.docsIngestDeps(roots, surface), { dataset: request.dataset, commit: request.commit, pages });
+			if (gated !== undefined) return finish({ ok: false, reason: gated, job });
+			// The pages go to the plane in calls that each fit one ingest call. Each call upserts its pages as it lands;
+			// the version is recorded only after the last call. A failure after an earlier call wrote is `stored`: the
+			// plane then holds some of this commit's pages while the pin still names the prior version.
+			let stored = false;
+			for (const batch of batchIngestPages(pages)) {
+				const ingested = await this.ingestDocs({ dataset: request.dataset, commit: request.commit, pages: batch }, surface, roots);
+				stored = stored || ingested.changed;
+				if (!ingested.ok) return finish({ ok: false, reason: ingested.reason, job, ...(stored ? { stored } : {}) });
+			}
 			const refreshed = await this.recordDocsVersion(request, surface);
-			if (!refreshed.ok) return finish({ ok: false, reason: refreshed.reason, job });
+			if (!refreshed.ok) return finish({ ok: false, reason: refreshed.reason, job, ...(stored ? { stored } : {}) });
 			return finish({ ok: true, version: refreshed.version, created: created || refreshed.created, job });
 		} catch (cause) {
 			return finish({ ok: false, reason: redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200), job });

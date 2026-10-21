@@ -52,9 +52,10 @@ import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
 import { parseBriefProfile } from "./brief-profile.ts";
 import { DATASET_TRIGGERS } from "./docs-datasets.ts";
 import { freshnessGauges } from "./docs-freshness.ts";
-import { scanIngestPages } from "./docs-ingest.ts";
+import { scanIngestPages, readSkillsCheckoutPages, skillsCheckoutRoots, type IngestPage } from "./docs-ingest.ts";
 import { formatDrift } from "./drift.ts";
 import { IdempotencyRefusal, InvalidEventError } from "./event.ts";
+import { checkoutHead } from "./git.ts";
 import { type CursorPosition, type GreptimeClient } from "./greptime.ts";
 import { InvalidHandoffError } from "./handoff.ts";
 import { attributedSurface, createMcpServer, surfaceClaimRefusal, type McpCaller } from "./mcp.ts";
@@ -298,13 +299,39 @@ const MERGE_TRIGGER_NEEDS_SURFACE = "docs merge-trigger needs an authenticated s
 const MERGE_TRIGGER_DATASET = "agent-substrate";
 
 /**
- * The dataset this deployment refreshes from its own checkout: the trigger
- * table's row whose sources (`config.docsIngestRoots`) live in the directory
- * the server runs from. The other rows name checkouts this server does not
- * hold, so their refresh is a truthful noop — a recorded version over
- * documents that were never ingested would only lie to search.
+ * A dataset's local checkout (phase 42): where its refresh reads pages, and how. `roots` is read when the
+ * job runs, so a checkout that cannot be read fails that job alone. `pages` reads the files under those
+ * roots; `head`, when present, reads the checkout's HEAD commit, which the job must match before it ingests.
  */
-const LOCALLY_INGESTED_DATASET = MERGE_TRIGGER_DATASET;
+interface LocalIngestSource {
+	roots: () => Promise<readonly string[]>;
+	pages: (roots: readonly string[]) => Promise<IngestPage[]>;
+	head?: () => Promise<string | null>;
+}
+
+/**
+ * The local checkout a dataset's refresh reads (D42-3), or undefined when this server holds none.
+ * `agent-substrate` reads the directory the server runs from with `config.docsIngestRoots`, as it always
+ * has. `agent-skills` reads the checkout named by `SUBSTRATE_AGENT_SKILLS_ROOT`, fail-closed on an
+ * unreadable skill and checked against the checkout's HEAD. Any other dataset gets a truthful noop: the
+ * other rows name checkouts this server does not hold, and a recorded version over documents that were
+ * never ingested would only lie to search.
+ */
+function localIngestSource(dataset: string, config: SubstrateConfig, agentSubstrateBaseDir: string): LocalIngestSource | undefined {
+	if (dataset === MERGE_TRIGGER_DATASET) {
+		const substrateRoots = config.docsIngestRoots;
+		return { roots: async () => substrateRoots, pages: (roots) => scanIngestPages(agentSubstrateBaseDir, roots) };
+	}
+	const skillsCheckout = config.agentSkillsRoot;
+	if (dataset === "agent-skills" && skillsCheckout !== null) {
+		return {
+			roots: () => skillsCheckoutRoots(skillsCheckout),
+			pages: (roots) => readSkillsCheckoutPages(skillsCheckout, roots),
+			head: async () => checkoutHead(skillsCheckout),
+		};
+	}
+	return undefined;
+}
 
 /** Why an anonymous stream is refused, even on a run that allows anonymous callers. */
 const STREAM_NEEDS_SURFACE = "events stream needs an authenticated surface; nothing was streamed";
@@ -1489,7 +1516,8 @@ export function createHttpServer(
 					sendJson(res, 200, { ok: true, version: newest, created: false, idempotent: true });
 					return;
 				}
-				if (dataset !== LOCALLY_INGESTED_DATASET) {
+				const source = localIngestSource(dataset, config, options.docsIngestBaseDir ?? process.cwd());
+				if (source === undefined) {
 					// This server holds no checkout of that dataset, so there is nothing it
 					// can truthfully ingest: a noop that says so, and no version recorded.
 					// The trigger itself is still evidence (skills-sync fast-forwarded).
@@ -1498,14 +1526,14 @@ export function createHttpServer(
 					return;
 				}
 				substrate.noteDocsTrigger(dataset);
-				const baseDir = options.docsIngestBaseDir ?? process.cwd();
-				// The service ensures the dataset, runs the guarded ingest of this
-				// checkout's roots and records the version, in that order, in the
+				// The service reads the checkout's roots and pages, ensures the dataset, runs
+				// the guarded ingest and records the version, in that order, in the
 				// background; the 202 is audited above like the 200 was. A plane
 				// refusal under `?wait=1` is an outage of the docs plane, not a
-				// permission decision about the caller: 503 with the reason.
+				// permission decision about the caller: 503 with the reason. A checkout that
+				// cannot be read fails the job the same way and the pinned version keeps serving.
 				const accepted = await substrate.startDocsRefresh(
-					{ ...fields, pages: () => scanIngestPages(baseDir, config.docsIngestRoots) },
+					{ ...fields, roots: source.roots, pages: source.pages, head: source.head },
 					surface,
 					{ wait: url.searchParams.get("wait") === "1" },
 				);
