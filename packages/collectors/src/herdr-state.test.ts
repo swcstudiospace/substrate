@@ -243,3 +243,46 @@ describe("state file", () => {
 		expect(ended.transitions[0]?.event.graph_id).toBe(GID);
 	});
 });
+
+describe("one session, one graph", () => {
+	const A = "ut-aaaa-00000001";
+	const B = "ut-bbbb-00000002";
+	const LATEST = "2026-10-09T00:00:10.000Z";
+	const inGraph = (graph: string | undefined) => () => ({ repo: "swcstudiospace/agent-substrate", branch: "main", graph_id: graph });
+
+	test("a pane that moves to another graph and back starts a new session at each move", () => {
+		const started = reconcile(emptyHerdrState(), [pane()], { now: NOW, attribute: inGraph(A) });
+		let state = commitReconcile(emptyHerdrState(), started, ["stored"]);
+		const moved = reconcile(state, [pane()], { now: LATER, attribute: inGraph(B) });
+		expect(moved.transitions.map((transition) => transition.event.kind)).toEqual(["session.end", "session.start"]);
+		expect(moved.transitions[0]?.event).toMatchObject({ graph_id: A, payload: { end_reason: "graph_changed" } });
+		expect(moved.transitions[1]?.event.graph_id).toBe(B);
+		expect(moved.transitions[1]?.event.session_id).not.toBe(started.transitions[0]?.event.session_id);
+		state = commitReconcile(state, moved, ["stored", "stored"]);
+		const back = reconcile(state, [pane()], { now: LATEST, attribute: inGraph(A) });
+		expect(back.transitions.map((transition) => transition.event.kind)).toEqual(["session.end", "session.start"]);
+		expect(back.transitions[0]?.event.graph_id).toBe(B);
+		expect(back.transitions[1]?.event.graph_id).toBe(A);
+	});
+
+	test("a session that began before graph attribution is closed at the first snapshot that names a graph", () => {
+		const old = seeded([pane()]);
+		const upgraded = reconcile(old, [pane()], { now: LATER, attribute: inGraph(A) });
+		expect(upgraded.transitions.map((transition) => transition.event.kind)).toEqual(["session.end", "session.start"]);
+		expect(upgraded.transitions[0]?.event.graph_id).toBeUndefined();
+		expect(upgraded.transitions[1]?.event.graph_id).toBe(A);
+		const closed = reconcile(commitReconcile(old, upgraded, ["stored", "stored"]), [], { now: LATEST, attribute });
+		expect(closed.transitions[0]?.event.graph_id).toBe(A);
+	});
+
+	test("a snapshot that reports no directory keeps the session and its graph", () => {
+		const started = reconcile(emptyHerdrState(), [pane()], { now: NOW, attribute: inGraph(A) });
+		const state = commitReconcile(emptyHerdrState(), started, ["stored"]);
+		const quiet = reconcile(state, [pane({ cwd: undefined, foreground_cwd: undefined, agent_status: "idle" })], {
+			now: LATER,
+			attribute: inGraph(A),
+		});
+		expect(quiet.transitions.map((transition) => transition.event.kind)).toEqual(["note"]);
+		expect(quiet.transitions[0]?.event.graph_id).toBe(A);
+	});
+});

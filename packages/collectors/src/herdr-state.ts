@@ -247,7 +247,7 @@ function startOf(identity: string, pane: HerdrPane, agent: string, surface: Surf
 	}, next);
 }
 
-function endOf(identity: string, prev: HerdrPaneRecord, reason: "pane_gone" | "agent_released"): PlannedTransition {
+function endOf(identity: string, prev: HerdrPaneRecord, reason: "pane_gone" | "agent_released" | "graph_changed"): PlannedTransition {
 	return planned(identity, {
 		rowId: "herdr.pane_exited",
 		surface: prev.surface,
@@ -326,6 +326,14 @@ export function reconcile(state: HerdrStateFile, panes: readonly HerdrPane[], op
 			transitions.push(startOf(identity, pane, agent, surface, now, options));
 			continue;
 		}
+		// One session never spans two graphs. A directory that names another graph, or none, ends this session and
+		// starts a new one. That also closes a session that began before graph attribution existed. A snapshot that
+		// reports no directory says nothing about the graph, so it keeps the session as it is.
+		if ((pane.cwd ?? pane.foreground_cwd) && attribute(pane, options).graph_id !== prev.graph_id) {
+			transitions.push(endOf(identity, prev, "graph_changed"));
+			transitions.push(startOf(identity, pane, agent, surface, now, options));
+			continue;
+		}
 		const raw = pane.agent_status ?? prev.raw_status;
 		if (raw === "unknown") {
 			if (prev.raw_status !== "unknown") silent.push({ identity, pane: { ...prev, raw_status: "unknown" } });
@@ -336,7 +344,6 @@ export function reconcile(state: HerdrStateFile, panes: readonly HerdrPane[], op
 			const attr = attribute(pane, options);
 			next.repo = attr.repo;
 			next.branch = attr.branch;
-			next.graph_id = attr.graph_id;
 			transitions.push(planned(identity, {
 				rowId: "herdr.status_changed",
 				surface,

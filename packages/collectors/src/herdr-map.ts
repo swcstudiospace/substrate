@@ -99,7 +99,7 @@ export interface HerdrTransition {
 	graph_id?: string;
 	status?: string;
 	previous_status?: string;
-	end_reason?: "pane_gone" | "agent_released";
+	end_reason?: "pane_gone" | "agent_released" | "graph_changed";
 	herdr_type: "pane.agent_detected" | "pane.agent_status_changed" | "pane.exited";
 }
 
