@@ -132,6 +132,7 @@ import { governMemoryWrite } from "./memory-write.ts";
 import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachable.ts";
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth, type HindsightConfig } from "./planes/hindsight.ts";
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
+import { RailwayClient } from "./railway.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
 import {
@@ -1071,6 +1072,8 @@ export class Substrate {
 	private readonly ragflowFetch: FetchLike;
 	/** Hindsight fetch, gated. Tests inject the fake underneath; production uses the global fetch. */
 	private readonly hindsightFetch: FetchLike;
+	/** Railway control-plane client (Phase 45, D45-a); tests inject a recording fetch through `stores.railway`. */
+	readonly railway: RailwayClient;
 	/** Background retains in flight, drained (bounded) on shutdown. */
 	private pendingRetains = 0;
 	private retainWaiters: Array<() => void> = [];
@@ -1152,6 +1155,7 @@ export class Substrate {
 			ragflowFetch?: FetchLike;
 			hindsightFetch?: FetchLike;
 			desktop?: DesktopDriver | null;
+			railway?: RailwayClient;
 		},
 		observer: SubstrateObserver = {},
 	) {
@@ -1205,6 +1209,7 @@ export class Substrate {
 				stateDir: config.skills.stateDir,
 			});
 		this.desktop = stores?.desktop ?? null;
+		this.railway = stores?.railway ?? new RailwayClient(config.railway);
 		this.dodGateTest = stores?.dodGate ?? {};
 		this.ragflowFetch = gatedFetch(this.planes.gate("ragflow"), stores?.ragflowFetch ?? fetch, ragflowOp);
 		this.hindsightFetch = gatedFetch(this.planes.gate("hindsight"), stores?.hindsightFetch ?? fetch, hindsightOp);

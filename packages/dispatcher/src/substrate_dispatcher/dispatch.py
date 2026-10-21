@@ -395,8 +395,14 @@ def tick(
                         f"{type(exc).__name__}: {exc}"
                     )
                     continue
+                prior_claims = frozenset(
+                    sessions.claim_comment_sessions(
+                        bodies, surface=candidate.surface,
+                        graph_id=found["graph_id"], node_id=found["node_id"],
+                    )
+                )
                 try:
-                    launched = launch_fn(candidate, found)
+                    launched = _launch_recorded(registry, launch_fn, candidate, found, prior_claims)
                 except InvalidIds as invalid:
                     # Ids never change for a registered node, so a retry could only fail again.
                     log(f"{candidate.identifier}: {tag('invalid-ids')} {invalid}; giving up on this issue")
@@ -426,13 +432,9 @@ def tick(
                         pid=launched.pid,
                         started_at=launched.started_at,
                         log_path=launched.log_path,
+                        repo=found["repo"],
                         launch_state=(found.get("node") or {}).get("state"),
-                        prior_claim_sessions=frozenset(
-                            sessions.claim_comment_sessions(
-                                bodies, surface=candidate.surface,
-                                graph_id=found["graph_id"], node_id=found["node_id"],
-                            )
-                        ),
+                        prior_claim_sessions=prior_claims,
                     )
                 )
                 emit_launched(
@@ -479,6 +481,33 @@ def validate_ids(candidate: Candidate, found: dict) -> None:
         raise InvalidIds(refused.reason) from None
     if not isinstance(repo, str) or not worktree.REPO_SLUG_RE.fullmatch(repo):
         raise InvalidIds(f"invalid repo slug {repo!r}")
+
+
+def _launch_recorded(
+    registry: sessions.SessionRegistry, launch_fn: LaunchFn, candidate: Candidate, found: dict,
+    prior_claims: frozenset[str],
+) -> Launched:
+    """Launch with a VM task's record on disk first, so a dispatcher that dies inside the launch
+    re-adopts the task on its next start. A launch that raises drops the record again."""
+    if candidate.surface != sessions.VM_SURFACE:
+        return launch_fn(candidate, found)
+    validate_ids(candidate, found)
+    registry.note_vm_launch(
+        issue_id=candidate.issue_id, identifier=candidate.identifier, graph_id=found["graph_id"],
+        node_id=found["node_id"], dispatch_label_id=candidate.dispatch_label_id,
+        repo=found["repo"], prior_claim_sessions=prior_claims,
+    )
+    try:
+        return launch_fn(candidate, found)
+    except WorktreeRefused:
+        # Refused before any host request: no task was opened, so the record goes.
+        registry.forget_vm_launch(candidate.issue_id)
+        raise
+    except HostRefused as refused:
+        # Only a refusal that proves no task was opened drops the record; anything the host may have accepted stays for readopt().
+        if not refused.may_be_open:
+            registry.forget_vm_launch(candidate.issue_id)
+        raise
 
 
 def make_launch_fn(

@@ -789,7 +789,7 @@ Plans:
 | 42. SKILL-CARD | v1.3.x | 0/0 | Not started | - |
 | 43. LANE-A | v1.3.x | 0/0 | Not started | - |
 | 44. UAT | v1.3.x | 0/0 | Not started | - |
-| 45. Railway Resource Orchestrator | v1.5 | 0/0 | Not started | - |
+| 45. Railway Resource Orchestrator | v1.5 | 1/1 | In review (draft PR) | - |
 | 46. RAGFlow Advanced Hybrid RAG with Hindsight Context | v1.5 | 0/0 | Not started | - |
 | 47. GreptimeDB + Dragonfly Predictive Analytics & Cache | v1.5 | 0/0 | Not started | - |
 | 48. TailscaleDB Secure Unified Proxy Layer | v1.5 | 0/0 | Not started | - |

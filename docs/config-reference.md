@@ -48,6 +48,8 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `NOTION_TASK_GRAPH_DS` | string | the repo's task-graph data source id | data source id | the built-in id | mcp-server/config.ts, host/sync.ts | yes |
 | `HERMES_LINEAR_URL` | string | http://127.0.0.1:8792 | URL | the connector's loopback address | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOD_GATE_TIMEOUT_MS` | number | 35000 | positive integer ms | 35000 ms | mcp-server/config.ts | yes |
+| `RAILWAY_API_TOKEN` | secret-ref | none | Railway API token, sent as a bearer token to the public API | every railway_* tool reports unconfigured and the writes refuse before any request. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_WRITES` | toggle | off | on | off: railway_scale and railway_deploy refuse with writes-disabled before any request; on still needs an operator and an approval reference. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
 
 ## Event ledger (GreptimeDB) and anchors
 
@@ -198,6 +200,18 @@ Which environment a name belongs in is part of the row: the server's shared env 
 
 | Name | Kind | Default | Allowed | Unset means | Read by | In `.env.example` |
 | --- | --- | --- | --- | --- | --- | --- |
+| `SUBSTRATE_RAILWAY_BUDGET_USD` | number | 50 | positive USD per month | 50: the owner's ceiling; a projected monthly total above it reads over-budget. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_PROJECT_IDS` | list | none | comma separated Railway project ids | no project is summed; the cost report has no usage to price. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_PRICE_CPU_USD` | number | none | positive USD per vCPU unit, cents kept | unpriced: a CPU line with usage and no price makes the cost status unpriced; no price is assumed. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_PRICE_MEMORY_GB_USD` | number | none | positive USD per GB of memory, cents kept | unpriced: a memory line with usage and no price makes the cost status unpriced; no price is assumed. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_PRICE_DISK_GB_USD` | number | none | positive USD per GB of disk, cents kept | unpriced: a disk line with usage and no price makes the cost status unpriced; no price is assumed. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_PRICE_NETWORK_TX_GB_USD` | number | none | positive USD per GB sent, cents kept | unpriced: a network line with usage and no price makes the cost status unpriced; no price is assumed. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_SCALE_MIN_VCPUS` | number | 0.25 | positive number of vCPUs | 0.25: the lower bound for a suggestion and for a gated write. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_SCALE_MAX_VCPUS` | number | 4 | positive number of vCPUs, at least the minimum | 4: the upper bound for a suggestion and for a gated write. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_SCALE_MIN_MEMORY_GB` | number | 0.25 | positive number of GB | 0.25: the lower bound for a suggestion and for a gated write. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_SCALE_MAX_MEMORY_GB` | number | 8 | positive number of GB, at least the minimum | 8: the upper bound for a suggestion and for a gated write. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_SCALE_HEADROOM` | number | 0.3 | number from 0 to 1 | 0.3: the fraction added above the p95 usage in a scale suggestion. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_SCALE_WINDOW_SECONDS` | number | 86400 | positive number of seconds | 86400: the window the scale suggestion reads usage over. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | string | none | OTLP/HTTP base URL | export is off. See `docs/observability.md` | observability/config.ts | yes |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | string | the generic endpoint | URL | the generic endpoint. See `docs/observability.md` | observability/config.ts | yes |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | string | the generic endpoint | URL | the generic endpoint. See `docs/observability.md` | observability/config.ts | yes |
