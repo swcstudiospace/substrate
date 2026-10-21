@@ -1,0 +1,35 @@
+---
+phase: 42-skill-card
+verified: 2026-10-21
+status: passed in-repo. The live fast-forward proof is not run (operator-gated)
+score: 2 of 2 criteria proven in-repo
+verified_on: gsd/v13x-42-skill-card, based on origin/main acb6767. Typecheck and full suite run on the tree before commit
+covered_files: ["packages/mcp-server/src/config.ts", "packages/mcp-server/src/config.test.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/server.test.ts", "packages/mcp-server/src/docs-ingest.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/docs-search.test.ts", ".env.example", "docs/config-reference.md", "docs/data-planes.md", "docs/docs-search-ingest.md"]
+---
+
+# 42-VERIFICATION: SKILL-CARD
+
+## Proven in-repo
+
+| Claim | Evidence |
+|---|---|
+| Typecheck is clean | `bunx tsc --noEmit` exit 0 |
+| Full suite passes | `bun test` against the verification Postgres: 5753 pass, 2 skip (`cache-conformance.test.ts:127`, `redact.test.ts:813`, both pre-existing), 0 fail. 5755 tests in 212 files, 139 s, no `ENOSPC`. The config-reference generator check runs in the same suite and passes |
+| Trigger ingests the agent-skills checkout and records a version | `server.test.ts`: root set |
+| Trigger is a truthful no-op when unset | `server.test.ts`: root unset, no uploads |
+| Unreadable checkout fails that refresh, pin keeps serving with its age | `server.test.ts` (`checkout-unreadable`); `docs-search.test.ts` (pinned version with its age) |
+| docs_search answers from the new version | `docs-search.test.ts`: fake RAGFlow, after the refresh |
+| Config parses the root | `config.test.ts`: unset, absolute, relative |
+| Existing approve and decline trail still holds | the existing `policy.test.ts` and `server.test.ts` cases cited in SUMMARY (unchanged) |
+
+## Success criteria
+
+| # | ROADMAP criterion | Verdict | Evidence |
+|---|---|---|---|
+| 1 | `skills_list` and an approve/decline audit trail (§5.1) | PASS by existing code and tests. No change in this phase | SUMMARY (criteria) |
+| 2 | Skills become searchable through `docs_search` after each `agent-skills` fast-forward re-ingest | PASS in-repo with a fake RAGFlow. The live fast-forward is not run | `docs-search.test.ts` |
+
+## Not proven
+
+- The live fast-forward on the host: the `substrate-skills-sync` unit is not installed, `SUBSTRATE_AGENT_SKILLS_ROOT` is not set, and the RAGFlow `agent-skills` dataset is not created (operator-gated).
+- The degraded pin-age behaviour under a real skills-sync failure. Only the fake-plane tests cover it.
