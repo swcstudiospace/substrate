@@ -736,12 +736,17 @@ describeLive("skill approvals: POST /skills/approve and MCP skills_approve", () 
 });
 
 // ── POST /docs/ingest and MCP docs_ingest ───────────────────────────────────────────────────────
-// No database. The stored content a refusal could change is the uploads the RAGFlow fake takes and the docs state file
-// (SUBSTRATE_DOCS_STATE_FILE), which an ingest writes only after it succeeds.
+// No database. The stored content a refusal could change is every upload with its metadata, every document on the RAGFlow
+// fake, and the docs state file (SUBSTRATE_DOCS_STATE_FILE), which an ingest writes only after it succeeds.
 
 /** The docs state file's text, or null while no ingest has written one. */
 function docsStateOf(file: string): string | null {
 	return existsSync(file) ? readFileSync(file, "utf8") : null;
+}
+
+/** What a docs write can change: every upload with its metadata, every document on the plane, and the state file. */
+function storedDocs(fake: RagflowFake, file: string) {
+	return { uploads: structuredClone(fake.uploads), documents: structuredClone(fake.documents), state: docsStateOf(file) };
 }
 
 describe("docs ingest: POST /docs/ingest and MCP docs_ingest", () => {
@@ -756,8 +761,10 @@ describe("docs ingest: POST /docs/ingest and MCP docs_ingest", () => {
 		...over,
 	});
 	const valid = { dataset: "agent-substrate", pages: [page()] };
+	/** The page `seeded()` stores first. Its source URL is in no refused batch, so a refused page would be a new upload. */
+	const seed = { dataset: "agent-substrate", pages: [page({ path: "docs/seed.md", source_url: `https://example.com/${MARKER}/seed`, body: `${MARKER} the stored seed page.` })] };
 	/**
-	 * Refused batches. None may reach an upload or change the state file. The third field says where the door refuses: `false` is the shape check
+	 * Refused batches. None may reach an upload, change a stored document, or change the state file. The third field says where the door refuses: `false` is the shape check
 	 * before the audit call (server.ts:1262-1296), so no record is written; `true` is a batch the shape check passes, which
 	 * reaches `auditedRest` (server.ts:1297) and is refused by the service after it.
 	 */
@@ -783,20 +790,22 @@ describe("docs ingest: POST /docs/ingest and MCP docs_ingest", () => {
 	}
 
 	/**
-	 * A harness with one valid page already stored. A refusal is then checked against existing uploads and an existing
-	 * state file, so a refusal that rewrites stored content fails as well as one that stores new content.
+	 * A harness with the seed page already stored. The seed shares no key with any refused batch, so a refused page that
+	 * reached the store would be a new upload and a new state record. Each refusal is then checked against all of
+	 * `storedDocs`, not a count.
 	 */
 	async function seeded(env: Record<string, string> = {}) {
 		const fake = new RagflowFake();
+		fake.parseDonePolls = 1;
 		const file = stateFile();
 		const http = await startHttp(
 			{ index: null, greptime: ledgerStub().greptime, ragflowFetch: fake.fetch },
 			{ ...env, SUBSTRATE_DOCS_STATE_FILE: file },
 		);
-		const stored = await http.send("/docs/ingest", valid);
+		const stored = await http.send("/docs/ingest", seed);
 		expect(stored.status).toBe(200);
 		expect(fake.uploads).toHaveLength(1);
-		return { fake, http, file, before: { uploads: fake.uploads.length, state: docsStateOf(file) } };
+		return { fake, http, file, before: storedDocs(fake, file) };
 	}
 
 	test("a valid control is stored, makes exactly one upload, writes the state file, and is audited once", async () => {
@@ -825,8 +834,7 @@ describe("docs ingest: POST /docs/ingest and MCP docs_ingest", () => {
 			const response = await http.send("/docs/ingest", body);
 
 			expect(response.status).toBe(400);
-			expect(fake.uploads).toHaveLength(before.uploads);
-			expect(docsStateOf(file)).toBe(before.state);
+			expect(storedDocs(fake, file)).toEqual(before);
 			expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachesGate ? reachedGate("docs_ingest", "rest") : []);
 		});
 	}
@@ -839,8 +847,7 @@ describe("docs ingest: POST /docs/ingest and MCP docs_ingest", () => {
 
 			expect(response.status).toBe(400);
 			expect(await response.json()).toEqual({ error: refusalReason(payload, "request body must be a JSON object") });
-			expect(fake.uploads).toHaveLength(before.uploads);
-			expect(docsStateOf(file)).toBe(before.state);
+			expect(storedDocs(fake, file)).toEqual(before);
 			expect(auditedFields(auditAfter(http.audit, mark))).toEqual([]);
 		});
 	}
@@ -852,8 +859,7 @@ describe("docs ingest: POST /docs/ingest and MCP docs_ingest", () => {
 			const mark = http.audit.seq;
 
 			expect(await refuses(client, "docs_ingest", body)).toBe(true);
-			expect(fake.uploads).toHaveLength(before.uploads);
-			expect(docsStateOf(file)).toBe(before.state);
+			expect(storedDocs(fake, file)).toEqual(before);
 			expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("docs_ingest", "mcp"));
 		});
 	}
