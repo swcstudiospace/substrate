@@ -79,8 +79,8 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 32: Lane A host core** - A host task works its node under the `claude-code` lease, survives a restart and keeps credentials on the host (completed 2026-10-11)
 - [x] **Phase 33: Lane A dispatch route and approvals** - `dispatch:claude-code` takes an issue to a gated Done through a Lane A VM, with human approval of permissions (completed 2026-10-11)
 - [ ] **Phase 34: Invalid-write round trip** - every client-input write surface refuses an invalid payload with zero rows persisted, proven in an isolated namespace.
-- [ ] **Phase 35: expected_version for skills and docs** - a stale skill or docs write is rejected with the memory contract's error; an absent field keeps today's behavior.
-- [ ] **Phase 36: Degraded-mode exactly-once replay** - a write carrying an idempotency key applies once across replays; the dependent client's queue is built or recorded as a decision.
+- [x] **Phase 35: expected_version for skills and docs** - a stale skill or docs write is rejected with the memory contract's error; an absent field keeps today's behavior.
+- [x] **Phase 36: Degraded-mode exactly-once replay** - a write carrying an idempotency key applies once across replays; the dependent client's queue is built or recorded as a decision.
 
 ### 🚧 v1.3.x Should-have hardening (Planned)
 
@@ -467,7 +467,7 @@ Plans:
 
   1. Memory, skill, and docs writes refuse an invalid payload with the surface's documented error status.
   2. Before-and-after checks of stored content (memory records, docs state, uploaded documents) prove nothing was persisted or mutated on a refusal (row count alone is insufficient because `decideSkill` can mutate without changing count, and docs perform uploads + disk writes). Row counts kept as an extra check. Proven in an isolated namespace per surface.
-**Plans**: 0/1 plans complete
+**Plans**: 1/1 plans complete; verification gaps_found on criterion 2 (content-level checks missing), see 34-VERIFICATION.md
 
 ### Phase 35: expected_version for skills and docs
 
@@ -480,7 +480,7 @@ Plans:
   1. A skill or docs write with a stale `expected_version` is rejected with the memory path's error, and the stored row is unchanged.
   2. A matching `expected_version` is accepted and the version increments.
   3. A write without the field behaves exactly as it does today.
-**Plans**: 0/1 plans complete
+**Plans**: 1/1 plans complete
 
 ### Phase 36: Degraded-mode exactly-once replay
 
@@ -490,11 +490,11 @@ Plans:
 **Requirements**: uplift-7 audit row "With the substrate unavailable, a dependent client finishes degraded; queued writes apply exactly once"
 **Success Criteria** (what must be TRUE):
 
-  1. A memory or skill write carrying an idempotency key applies once across replays and returns the original result.
+  1. A memory write carrying an idempotency key applies once across replays and returns the original result. A skill approve replay answers `exists` with the existing record and writes no second row or event. A skill propose replay answers `existing` with no second push or PR. Amended 2026-10-21 by the project owner's decision: skills have no idempotency key. A propose replay still emits one `skill.propose` audit event per call (service.ts:2772-2788).
   2. A write without a key behaves exactly as it does today.
   3. The 503 path is covered by a test.
   4. The dependent client's local queue is built for the identified client, or recorded as a decision request with a default.
-**Plans**: 0/1 plans complete
+**Plans**: 1/1 plans complete; verified 2026-10-21, see 36-VERIFICATION.md
 
 ### Phase 37: LANEB
 
@@ -778,9 +778,9 @@ Plans:
 | 31. Lane A runtime: spike, packaging and VM host | v1.3 | 3/3 | Complete    | 2026-10-11 |
 | 32. Lane A host core | v1.3 | 3/3 | Complete    | 2026-10-11 |
 | 33. Lane A dispatch route and approvals | v1.3 | 3/3 | Complete    | 2026-10-11 |
-| 34. Invalid-write round trip | v1.4 | 0/1 | Executing | - |
-| 35. expected_version for skills and docs | v1.4 | 0/1 | Executing | - |
-| 36. Degraded-mode exactly-once replay | v1.4 | 0/1 | Executing | - |
+| 34. Invalid-write round trip | v1.4 | 1/1 | Gaps found | - |
+| 35. expected_version for skills and docs | v1.4 | 1/1 | Complete | 2026-10-21 |
+| 36. Degraded-mode exactly-once replay | v1.4 | 1/1 | Complete | 2026-10-21 |
 | 37. LANEB | v1.3.x | 0/0 | Not started | - |
 | 38. MIRROR | v1.3.x | 0/0 | Not started | - |
 | 39. DISPATCH | v1.3.x | 0/0 | Not started | - |
