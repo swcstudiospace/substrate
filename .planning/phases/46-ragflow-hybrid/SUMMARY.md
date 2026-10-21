@@ -32,15 +32,23 @@ status: in review (draft PR). In-repo gates green. The live RAGFlow behaviour is
 
 - Typecheck: `bunx tsc --noEmit` exit 0.
 - Config reference: regenerated; `bun run config:reference -- --check` up to date.
-- Full suite: `bun test` 5839 pass, 2 skip (pre-existing), 0 fail, over 5841 tests in 217 files.
+- Full suite: `bun test` 5905 pass, 2 skip (pre-existing), 0 fail, over 5907 tests in 219 files (the merged tree with main, after the review round).
 - Repo locks: `bun run check:phase-close` green.
-- Targeted: `docs-search.test.ts` and `planes/ragflow.test.ts` 52 pass, including the seven context tests and the ledger-timeout test.
+- Targeted: `docs-search.test.ts`, `server.test.ts` and `planes/ragflow.test.ts` 135 pass, including the context tests, the ledger-timeout test, the anonymous and reason tests, the deadline test, the session-id normalization test, and the REST route tests.
 
 ## Not done and open items
 
 - **Live RAGFlow.** The deployed version is unattested (`ragflow.ts` comment). Whether the weight and the reranker id are accepted by the deployment is not proven.
 - **Pre-existing doc mismatch, not changed here (D46-i).** `docs-plane.md` describes `query` and `limit` arguments for `docs_search`, while the input schema uses `question`, `datasets`, `session_id` and `context`. Correcting it is a separate docs change.
 - **Hindsight relevance.** The context proves the plumbing and the caps, not that the recalled memories help the answer.
+
+## Review round (PR 98)
+
+- **Anonymous callers.** A null caller gets `memories: []` and a degraded reason, with no recall call. The docs context refuses every anonymous caller. `memory_recall` refuses only when no banks are configured, so this is stricter than it when banks are configured. That is a deliberate choice: anonymous docs answers do not carry personal memory.
+- **Missing sources are visible.** Any recall reason, including 'hindsight is not configured', is carried into `context.degraded`.
+- **One deadline.** A single timer, unref'd and cleared in `finally`, races the whole recall call against the search recall budget, so cache reads and writes count against it.
+- **Session id.** The ledger read uses the same normalization the writes use, so an id changed by redaction or the 512-character cap still finds its events.
+- **REST tests.** The REST route has tests for context true, false or absent, and for a string or null value, which return 400 without any recall or ledger call.
 
 ## Cleanup
 

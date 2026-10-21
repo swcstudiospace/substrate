@@ -215,6 +215,9 @@ import {
 	type SubstrateEvent,
 } from "./types.ts";
 
+/** The refusal `resolveRecallBanks` gives an anonymous caller with no bank of its own; the docs context's recall gives the same. */
+const ANONYMOUS_RECALL_REFUSAL = "no recall bank for surface unattributed: configure HINDSIGHT_BANKS";
+
 /**
  * Greptime gives back loosely typed rows; rebuild the exact shape that was hashed.
  * Exported for `ledger-archive.ts`, which writes this shape to the archive so
@@ -4123,7 +4126,7 @@ export class Substrate {
 		let loaded = false;
 		let reply: SearchReply | null = null;
 		try {
-			reply = await this.searchDocsUnmeasured(input, surface, () => {
+			reply = await this.searchDocsUnmeasured(input, surface, callerSurface, () => {
 				loaded = true;
 			});
 			this.noteServed("docs", surface, reply);
@@ -4144,6 +4147,7 @@ export class Substrate {
 	private async searchDocsUnmeasured(
 		input: { question?: unknown; datasets?: unknown; session_id?: unknown; context?: unknown },
 		surface: Surface,
+		callerSurface: Surface | null,
 		noteLoaded: () => void,
 	): Promise<SearchReply> {
 		const sessionId = typeof input.session_id === "string" && input.session_id.length > 0 ? input.session_id : undefined;
@@ -4190,7 +4194,7 @@ export class Substrate {
 		// The context is attached per call, after the chunks: a session's events
 		// belong to that session, so the cached answer never carries them.
 		if (input.context !== true) return chunks;
-		return { ...chunks, context: await this.docsContextOf(question, surface, sessionId) };
+		return { ...chunks, context: await this.docsContextOf(question, callerSurface, sessionId) };
 	}
 
 	/**
@@ -4199,8 +4203,8 @@ export class Substrate {
 	 * answer: a source that errors or runs out of time is dropped and named in
 	 * `degraded`.
 	 */
-	private async docsContextOf(question: string, surface: Surface, sessionId: string | undefined): Promise<DocsContext> {
-		const [recalled, ledger] = await Promise.all([this.recallForContext(question, surface), this.ledgerForContext(sessionId)]);
+	private async docsContextOf(question: string, caller: Surface | null, sessionId: string | undefined): Promise<DocsContext> {
+		const [recalled, ledger] = await Promise.all([this.recallForContext(question, caller), this.ledgerForContext(sessionId)]);
 		const reasons = [recalled.reason, ledger.reason].filter((reason): reason is string => reason !== undefined);
 		return {
 			memories: recalled.memories,
@@ -4210,16 +4214,28 @@ export class Substrate {
 		};
 	}
 
-	/** The recall leg: never rejects. A failure or a budget miss keeps the chunks and names its reason. */
-	private async recallForContext(question: string, surface: Surface): Promise<{ memories: DocsContextMemory[]; reason?: string }> {
+	/**
+	 * The recall leg: never rejects. A null caller reads no bank and gets the refusal `memory_recall` gives an anonymous
+	 * caller. Otherwise the whole recall, cache and fan-out included, runs under one `searchRecallBudgetMs` deadline. A
+	 * miss or a failure keeps the chunks and names its reason; a reason the recall reports, degraded or not, is carried too.
+	 */
+	private async recallForContext(question: string, caller: Surface | null): Promise<{ memories: DocsContextMemory[]; reason?: string }> {
+		if (caller === null) return { memories: [], reason: `recall: ${ANONYMOUS_RECALL_REFUSAL}` };
+		const budgetMs = this.config.hindsightBudgets.searchRecallBudgetMs;
+		const expired = Promise.withResolvers<never>();
+		const deadline = setTimeout(() => expired.reject(new Error(`recall deadline of ${budgetMs} ms exceeded`)), budgetMs);
+		deadline.unref();
 		try {
-			const reply = await this.recallUncounted({ query: question }, surface, this.config.hindsightBudgets.searchRecallBudgetMs);
+			const reply = await Promise.race([this.recallUncounted({ query: question }, caller, budgetMs), expired.promise]);
+			const reason = reply.reason ?? (reply.degraded ? "degraded" : undefined);
 			return {
 				memories: docsContextMemories(reply.results),
-				...(reply.degraded ? { reason: `recall: ${reply.reason ?? "degraded"}` } : {}),
+				...(reason !== undefined ? { reason: `recall: ${reason}` } : {}),
 			};
 		} catch (cause) {
 			return { memories: [], reason: `recall: ${redact(String(cause))}` };
+		} finally {
+			clearTimeout(deadline);
 		}
 	}
 
@@ -4228,7 +4244,9 @@ export class Substrate {
 		if (sessionId === undefined) return { events: [], reason: "no-session" };
 		if (this.greptime === null) return { events: [], reason: "ledger-not-configured" };
 		try {
-			const rows = await withDeadline(this.greptime.readEvents("session_id", sessionId), DOCS_CONTEXT_LEDGER_BUDGET_MS);
+			// The ledger keeps an identifier as `normalizeIdentifier` cleaned it, so the session is read under that form.
+			const stored = normalizeIdentifier(sessionId) ?? sessionId;
+			const rows = await withDeadline(this.greptime.readEvents("session_id", stored), DOCS_CONTEXT_LEDGER_BUDGET_MS);
 			return { events: docsContextEvents(rows) };
 		} catch (cause) {
 			return { events: [], reason: `ledger: ${redact(String(cause))}` };

@@ -15,8 +15,8 @@ covered_files: ["packages/mcp-server/src/planes/ragflow.ts", "packages/mcp-serve
 |---|---|---|
 | Typecheck | `bunx tsc --noEmit` | exit 0 |
 | Config reference | `bun run config:reference -- --check` | up to date |
-| Targeted | `bun test packages/mcp-server/src/docs-search.test.ts packages/mcp-server/src/planes/ragflow.test.ts` | 52 pass, 0 fail |
-| Full bun suite | `bun test` against `substrate_test_p46` | 5839 pass, 2 skip, 0 fail (5841 tests, 217 files) |
+| Targeted | `bun test` on `docs-search.test.ts`, `server.test.ts`, `planes/ragflow.test.ts` | 135 pass, 0 fail |
+| Full bun suite | `bun test` against `substrate_test_p46`, on the review-fixed tree | 5905 pass, 2 skip, 0 fail (5907 tests, 219 files) |
 | Repo locks | `bun run check:phase-close` | pass: 4 lock files green; EVENT_KINDS unchanged at 12; SURFACES unchanged at 27 |
 
 ## Acceptance criteria

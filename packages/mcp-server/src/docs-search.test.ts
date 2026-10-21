@@ -920,4 +920,90 @@ describe("docs_search context (D46-d, D46-e)", () => {
 			await server.close();
 		}
 	});
+
+	test("an anonymous caller reads no recall bank: memories are empty and the reason is the refusal memory_recall gives", async () => {
+		const fake = new RagflowFake();
+		const hindsight = recallable();
+		const { greptime } = ledgerStub(sessionRows(7));
+		const reply = await substrateWith({ fake, hindsight, greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
+			null,
+		);
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.context?.memories).toEqual([]);
+		expect(reply.context?.degraded).toBe("recall: no recall bank for surface unattributed: configure HINDSIGHT_BANKS");
+		expect(hindsight.recalls()).toEqual([]);
+		expect(reply.context?.events).toHaveLength(5);
+	});
+
+	test("a recall the plane does not serve names its reason, so a missing source is visible in the context", async () => {
+		delete process.env.HINDSIGHT_URL;
+		const fake = new RagflowFake();
+		const { greptime } = ledgerStub(sessionRows(7));
+		const reply = await substrateWith({ fake, hindsight: new HindsightFake(), greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
+			"cursor",
+		);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.context?.memories).toEqual([]);
+		expect(reply.context?.degraded).toBe("recall: hindsight is not configured");
+		expect(reply.context?.events).toHaveLength(5);
+	});
+
+	test("a search with no matches and no degradation carries no degraded key in the context", async () => {
+		const fake = new RagflowFake();
+		const hindsight = new HindsightFake();
+		hindsight.seed("sub-cursor", []);
+		const { greptime } = ledgerStub(sessionRows(7));
+		const reply = await substrateWith({ fake, hindsight, greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
+			"cursor",
+		);
+		expect(reply.context?.memories).toEqual([]);
+		expect(Object.hasOwn(reply.context ?? {}, "degraded")).toBe(false);
+		expect(reply.context?.events).toHaveLength(5);
+	});
+
+	test("one deadline bounds the whole recall: a recall that outlives the search budget answers empty and names the recall deadline", async () => {
+		const fake = new RagflowFake();
+		const hindsight = recallable();
+		hindsight.recallDeafMs["sub-cursor"] = 2000;
+		const { greptime } = ledgerStub(sessionRows(2));
+		const budgeted = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", HINDSIGHT_SEARCH_RECALL_BUDGET_MS: "200" }), {
+			index: null,
+			greptime,
+			ragflowFetch: fake.fetch,
+			hindsightFetch: hindsight.fetch,
+			cache: new ReadThroughCache({ redis: null, enabled: false, log: () => {} }),
+		});
+		const started = performance.now();
+		const reply = await budgeted.searchDocs({ question: "who reads RAGFlow?", session_id: "s-1", context: true }, "cursor");
+		const elapsed = performance.now() - started;
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.context?.memories).toEqual([]);
+		expect(reply.context?.degraded).toContain("recall deadline");
+		// The search budget is 200 ms; the 500 ms bound leaves room for scheduling.
+		expect(elapsed).toBeLessThan(200 + 500);
+	});
+
+	test("the ledger is read under the session id the events were written with, so a capped id still finds its rows", async () => {
+		const fake = new RagflowFake();
+		const stored = "s".repeat(512);
+		const rows = sessionRows(7).map((row) => ({ ...row, session_id: stored }));
+		const reads: string[] = [];
+		const { greptime } = ledgerStub([]);
+		Object.assign(greptime, {
+			readEvents: async (_column: string, value: string) => {
+				reads.push(value);
+				return value === stored ? rows : [];
+			},
+		});
+		const reply = await substrateWith({ fake, hindsight: recallable(), greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s".repeat(600), context: true },
+			"cursor",
+		);
+		expect(reads).toEqual([stored]);
+		expect(reply.context?.events).toHaveLength(5);
+	});
 });
