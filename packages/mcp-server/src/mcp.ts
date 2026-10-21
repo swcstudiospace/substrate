@@ -6,6 +6,7 @@
  * rejected at the client. The connector's forwarding tools already use
  * `memory_brief` / `events_emit`, so this stays consistent with them.
  */
+import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { BRIEF_PROFILES, BRIEF_STATES } from "@substrate/observability";
 import { z } from "zod";
@@ -15,6 +16,7 @@ import { DesktopRunInput } from "./desktop/actions.ts";
 import { DEFAULT_IDLE_SECONDS, formatDrift } from "./drift.ts";
 import { DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT } from "./greptime.ts";
 import { MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS } from "./lease.ts";
+import { approvalRefValid, RailwayRequestError, type ServiceRef, type WriteGate, type WriteOutcome, type WriteRefusal } from "./railway.ts";
 import { redact } from "./redact.ts";
 import {
 	CORRELATION_ID_PATTERN,
@@ -1188,6 +1190,176 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				return { ...json(failure.body), isError: true };
 			}
 		},
+	);
+
+	/** A Railway read: the client's own failures become a tool error carrying the kind and the redacted message only (D45-j). */
+	const railwayRead = async (run: () => Promise<unknown>) => {
+		try {
+			return json(await run());
+		} catch (cause) {
+			if (cause instanceof RailwayRequestError) return { ...json({ error: cause.kind, message: cause.message }), isError: true };
+			throw cause;
+		}
+	};
+
+	/**
+	 * A Railway write. The client checks the write gate before it sends anything (D45-c); this
+	 * records the outcome as one event (D45-f): a `note` when applied, a `warning` when refused or
+	 * failed. The event never carries the token or a request body, and a failed event write never
+	 * changes the answer.
+	 */
+	const railwayWrite = async (
+		action: "railway.scale" | "railway.deploy",
+		ref: ServiceRef,
+		approvalRef: string | undefined,
+		write: (gate: WriteGate) => Promise<WriteOutcome>,
+	) => {
+		const validRef = approvalRef !== undefined && approvalRefValid(approvalRef) ? approvalRef : null;
+		const gate: WriteGate = { isOperator, approvalRef: validRef };
+		const base = {
+			action,
+			runtime: "railway",
+			environment_id: ref.environmentId,
+			service_id: ref.serviceId,
+			...(validRef !== null ? { approval_ref: validRef } : {}),
+		};
+		const record = (
+			kind: "note" | "warning",
+			status: "applied" | "refused",
+			reason: string | null,
+			detail: { refusal?: WriteRefusal; failure?: string },
+		) =>
+			substrate
+				.emit({
+					surface: "substrate",
+					kind,
+					summary: reason === null ? `${status} ${action}` : `${status} ${action}: ${reason}`,
+					session_id: `${action.replace(".", "-")}:${randomUUID()}`,
+					payload: { ...base, status, ...detail },
+				})
+				.catch(() => undefined);
+		let outcome: WriteOutcome;
+		try {
+			outcome = await write(gate);
+		} catch (cause) {
+			if (!(cause instanceof RailwayRequestError)) throw cause;
+			await record("warning", "refused", cause.kind, { failure: cause.kind });
+			return { ...json({ applied: false, error: cause.kind, message: cause.message }), isError: true };
+		}
+		if (outcome.applied) {
+			await record("note", "applied", null, {});
+			return json(outcome);
+		}
+		await record("warning", "refused", outcome.refusal, { refusal: outcome.refusal });
+		return { ...json(outcome), isError: true };
+	};
+
+	server.registerTool(
+		"railway_list",
+		{
+			title: "List Railway projects, environments and services",
+			description:
+				"Read the Railway projects, environments and services the substrate can see, limited to SUBSTRATE_RAILWAY_PROJECT_IDS when " +
+				"that is set. A read: it changes nothing and needs no approval. The ids it returns are the ones the other railway_ tools take.",
+			inputSchema: {},
+			annotations: { readOnlyHint: true },
+		},
+		async () => railwayRead(() => substrate.railway.listResources()),
+	);
+
+	server.registerTool(
+		"railway_monitor",
+		{
+			title: "Monitor one Railway service",
+			description:
+				"The latest deployment of one Railway service, its status, its replica count and its region. A read: it changes nothing.",
+			inputSchema: {
+				environment_id: z.string().describe("The Railway environment id."),
+				service_id: z.string().describe("The Railway service id."),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async ({ environment_id, service_id }) =>
+			railwayRead(() => substrate.railway.monitor({ environmentId: environment_id, serviceId: service_id })),
+	);
+
+	server.registerTool(
+		"railway_scale_suggest",
+		{
+			title: "Suggest vCPU and memory limits for one Railway service",
+			description:
+				"Advisory only. Suggests vCPU and memory limits from the p95 of recent usage, with headroom, clamped to the configured " +
+				"bounds. It never applies a change: `railway_scale` is the write, and it needs the operator gate. With too few samples " +
+				"or no limit reading it returns insufficient-data and no suggestion.",
+			inputSchema: {
+				environment_id: z.string().describe("The Railway environment id."),
+				service_id: z.string().describe("The Railway service id."),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async ({ environment_id, service_id }) =>
+			railwayRead(() => substrate.railway.suggestScale({ environmentId: environment_id, serviceId: service_id })),
+	);
+
+	server.registerTool(
+		"railway_cost",
+		{
+			title: "Railway cost report",
+			description:
+				"Estimated Railway usage for the configured projects, priced with the operator's unit prices and compared with the monthly " +
+				"budget. A line with usage and no price makes the status unpriced; no price is ever assumed. Cached for 15 minutes. A read: " +
+				"it changes nothing.",
+			inputSchema: {},
+			annotations: { readOnlyHint: true },
+		},
+		async () => railwayRead(() => substrate.railway.costReport()),
+	);
+
+	server.registerTool(
+		"railway_scale",
+		{
+			title: "Set vCPU and memory limits on one Railway service",
+			description:
+				"Operator only. Sets the vCPU and memory limits of one service, within the configured scale bounds. Refused before any " +
+				"request to Railway unless SUBSTRATE_RAILWAY_WRITES is on, the caller is an operator, and approval_ref is given. " +
+				"Replica counts are not changed.",
+			inputSchema: {
+				environment_id: z.string().describe("The Railway environment id."),
+				service_id: z.string().describe("The Railway service id."),
+				vcpus: z.number().describe("The vCPU limit to set."),
+				memory_gb: z.number().describe("The memory limit to set, in GB."),
+				approval_ref: z.string().optional().describe("The operator's approval reference for this change: letters, digits and ._:/#-, up to 128 characters."),
+			},
+			annotations: { destructiveHint: true, openWorldHint: true },
+		},
+		async ({ environment_id, service_id, vcpus, memory_gb, approval_ref }) =>
+			railwayWrite("railway.scale", { environmentId: environment_id, serviceId: service_id }, approval_ref, (gate) =>
+				substrate.railway.setServiceLimits(
+					{ environmentId: environment_id, serviceId: service_id },
+					{ vCPUs: vcpus, memoryGB: memory_gb },
+					gate,
+				),
+			),
+	);
+
+	server.registerTool(
+		"railway_deploy",
+		{
+			title: "Redeploy one Railway service",
+			description:
+				"Operator only. Redeploys one service from its latest build. Refused before any request to Railway unless " +
+				"SUBSTRATE_RAILWAY_WRITES is on, the caller is an operator, and approval_ref is given.",
+			inputSchema: {
+				environment_id: z.string().describe("The Railway environment id."),
+				service_id: z.string().describe("The Railway service id."),
+				approval_ref: z.string().optional().describe("The operator's approval reference for this change: letters, digits and ._:/#-, up to 128 characters."),
+			},
+			annotations: { destructiveHint: true, openWorldHint: true },
+		},
+		async ({ environment_id, service_id, approval_ref }) =>
+			railwayWrite("railway.deploy", { environmentId: environment_id, serviceId: service_id }, approval_ref, (gate) =>
+				substrate.railway.redeployService({ environmentId: environment_id, serviceId: service_id }, gate),
+			),
 	);
 
 	server.registerTool(

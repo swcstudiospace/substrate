@@ -146,6 +146,17 @@ Admission budgets (uplift-3 N3) are the one key class that is not a cached answe
 
 See `.env.example`. `substrate-mcp` reads `GREPTIME_*`, `SUBSTRATE_PG_URL`, `DRAGONFLY_URL`, `SUBSTRATE_CACHE`, `HINDSIGHT_URL`/`HINDSIGHT_API_KEY` and `RAGFLOW_URL`/`RAGFLOW_API_KEY`. The desk gateway holds its own plane keys for its own paths. `AGENTMEMORY_URL` and `AGENTMEMORY_SECRET` are removed.
 
+## Railway control plane (Phase 45)
+
+Railway services are managed by the `railway_*` MCP tools. The control plane is the Railway public GraphQL API, not the forwarders (D45-a). Control calls go to the public API over HTTPS with a bearer token read from `RAILWAY_API_TOKEN` by name; the value is never logged, stored, put in an event or echoed in an error. The forwarders in [railway-tailscale.md](railway-tailscale.md) carry database and service traffic only, and their tailnet ACL does not name the Railway API, so the control path does not use them.
+
+- **Reads need no approval (D45-b).** `railway_list`, `railway_monitor`, `railway_scale_suggest` and `railway_cost` make no change. `railway_scale_suggest` returns an advisory recommendation from the p95 of recent CPU and memory usage, with headroom, clamped to the configured bounds. It never applies a change, and it reports `insufficient-data` rather than guess when there are fewer than 24 samples.
+- **Writes are refused by default (D45-c).** `railway_scale` (vCPU and memory limits) and `railway_deploy` (redeploy) act only when all three hold: `SUBSTRATE_RAILWAY_WRITES` is exactly `on`; the caller is an operator; and the call carries an `approval_ref` of letters, digits and `._:/#-`, at most 128 characters. Any failure refuses before any network request, with `writes-disabled`, `operator-required`, `approval-ref-missing`, `unconfigured` or `out-of-bounds`. Each write outcome is one event (`railway.scale` or `railway.deploy`): a `note` when applied, a `warning` when refused. Replica counts are not changed by this phase (D45-k).
+- **The cost report is estimated usage times operator prices (D45-d).** It sums `estimatedUsage` for CPU, memory, disk and network transmit over `SUBSTRATE_RAILWAY_PROJECT_IDS`, and multiplies each by its `SUBSTRATE_RAILWAY_PRICE_*_USD` unit price. A price is never assumed: a line with usage and no price makes the status `unpriced`, and its raw value still shows. The projected monthly total is compared with `SUBSTRATE_RAILWAY_BUDGET_USD`, which defaults to 50, the owner's ceiling. A total above it is `over-budget`. The period and unit of the usage estimate are confirmed on the first live read, before any price is set.
+- **The `/slo` cost row is report-only.** It is the `railwayCost` key, is never folded into `breached`, and is cached for 15 minutes. See [observability.md](observability.md).
+
+The live write proof and the first live cost read are operator-gated, and each is recorded with its approval reference. Nothing in the automated tests reaches Railway.
+
 ## Fail-open budget (unchanged)
 
 A substrate outage never blocks a prompt. `fetchBrief` returns `""` within 1.5 s. Every cache miss and every Dragonfly, Hindsight or RAGFlow error falls through to the next source or to an empty result with a logged reason. Writes to Greptime and Timescale are the only calls allowed to fail closed, and only for the caller that asked for durability.

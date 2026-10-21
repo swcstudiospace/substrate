@@ -465,6 +465,17 @@ directory's manifests, memoised for 60 s and bounded to the 1 s probe; with the
 variable unset the key and the row are absent. The archive itself:
 `docs/runbooks/index-archive.md`.
 
+### Railway cost report (Phase 45)
+
+`GET /slo` carries a `railwayCost` key on every 200 response. It is the Railway cost
+report from `railway_cost` (D45-d): estimated usage over `SUBSTRATE_RAILWAY_PROJECT_IDS`,
+priced with the operator's unit prices, against `SUBSTRATE_RAILWAY_BUDGET_USD`. The key is
+report-only: it is never folded into `breached`, so a cost overrun does not page or trip the
+storm-breaker. Its `status` is `ok`, `over-budget`, `unpriced`, `unavailable` or `unconfigured`
+(no token). A Railway error gives `unavailable` in the key and `/slo` still answers 200. The
+report is cached in process for 15 minutes, so a monitor's scrape frequency does not reach the
+Railway API.
+
 ### Hindsight outbox gauges, inventory and drift (uplift-4 S5)
 
 **Always on, no flag.** `substrate.hindsight.retain_outbox.size`, `.oldest_age_seconds` and
