@@ -1130,6 +1130,29 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 			payload: { action: "db.endpoint", runtime: "mcp-server", plane: "postgres", class: "proxy", policy: "enforce" },
 		}),
 	},
+	{
+		id: "planning.changed",
+		phase: 52,
+		kind: "note",
+		surface: { fixed: "substrate" },
+		carriesRepo: true,
+		periodic: false,
+		sample: () => ({
+			surface: "substrate",
+			kind: "note",
+			summary: "planning changed in swcstudiospace/agent-substrate: 0 added, 0 removed, 1 changed",
+			session_id: "planning-observer",
+			repo: "swcstudiospace/agent-substrate",
+			payload: {
+				kind: "planning.changed",
+				repo: "swcstudiospace/agent-substrate",
+				sessionId: "planning-observer",
+				added: [],
+				removed: [],
+				changed: [".planning/phases/52-planning-awareness-core/52-CONTEXT.md"],
+			},
+		}),
+	},
 ];
 
 export const SILENT_SOURCES: readonly SilentSource[] = [

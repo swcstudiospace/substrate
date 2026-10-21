@@ -242,6 +242,17 @@ The `fabric_status`, `fabric_optimize` and `fabric_compliance` MCP tools give on
 
 Limitation: the cache client has no ping, so a configured Dragonfly reads `unavailable` until a cache command has connected, and the fabric sends no command of its own to probe it.
 
+## Planning plane (phase 52)
+
+The `planning_status` and `planning_sessions` MCP tools read the planning checkout named by `SUBSTRATE_PLANNING_ROOT`. Both are read-only and fail-open in the audit.
+
+- **Disabled.** With no root both answer `{ "state": "disabled" }`, never an error. Invalid settings answer `misconfigured` and name the keys, never the values.
+- **Index.** `planning_status` reports counts, sha256 hashes, byte sizes and error records for the documents under `.planning/`. It never returns a file body or a frontmatter value. The walk is bounded by `SUBSTRATE_PLANNING_MAX_FILES` and `SUBSTRATE_PLANNING_MAX_BYTES`, and sets `truncated` when it stops early.
+- **Change.** A read compares the index with the one before it in the same process. A change writes one `planning.changed` note (surface `substrate`, no new kind). The first read after a restart is a baseline. The repo is the origin remote of the checkout's `.git/config`; without one, the change is reported as `repo-unknown` and not written.
+- **Presence.** Sessions heartbeat into one Dragonfly key each, with the server's own `TIME` as the clock. A key is kept for one day, so a session past `SUBSTRATE_PLANNING_PRESENCE_TTL_S` is listed as `stale`, not dropped. Enumeration is a bounded `SCAN` of at most 256 sessions; a larger set is marked `truncated`. When the server clock cannot be read, sessions are listed as `unknown`.
+- **Commands.** The presence client sends only `GET`, `SET ... EX`, `SCAN` and `TIME`. It is a separate module from the cache client, so the cache's command lock is unchanged.
+- **History.** Presence history is not yet written to TimescaleDB. That table is an operator-gated production step (see `.planning/phases/52-planning-awareness-core/PLAN.md`).
+
 ## Fail-open budget (unchanged)
 
 A substrate outage never blocks a prompt. `fetchBrief` returns `""` within 1.5 s. Every cache miss and every Dragonfly, Hindsight or RAGFlow error falls through to the next source or to an empty result with a logged reason. Writes to Greptime and Timescale are the only calls allowed to fail closed, and only for the caller that asked for durability.
