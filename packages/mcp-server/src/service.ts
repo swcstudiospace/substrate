@@ -55,6 +55,7 @@ import {
 	type ScriptOutcome,
 } from "./cache.ts";
 import { isReviewToken, type SubstrateConfig } from "./config.ts";
+import type { DbPlane } from "./db-endpoints.ts";
 import { DesktopBusy, type DesktopDriver, type DesktopLogEntry, type DesktopRunResult } from "./desktop/driver.ts";
 import {
 	DatasetListCache,
@@ -3636,6 +3637,39 @@ export class Substrate {
 				session_id: `mirror:${ctx.graphId}:${ctx.nodeId}`,
 				payload: { action: "mirror", target: success.target, op: success.op, status: "ok" },
 			}).catch(() => undefined);
+		}
+	}
+
+	/**
+	 * D48-d: one `db.endpoint` note per data plane that has a configured endpoint, written once at boot. The payload
+	 * names the plane, the access class and the policy, never the URL, the host or a credential. A plane with no
+	 * endpoint emits nothing. A refused write is logged and never blocks boot.
+	 */
+	async emitDbEndpoints(): Promise<void> {
+		const { policy, classes } = this.config.dbEndpoints;
+		const planes: readonly DbPlane[] = ["greptime", "postgres", "dragonfly"];
+		const configured: Record<DbPlane, boolean> = {
+			greptime: this.config.greptime !== null,
+			postgres: this.config.postgresUrl !== undefined,
+			// A refused Dragonfly URL is still a configured endpoint: the cache is off, and the boot record says why it is refused.
+			dragonfly: this.config.dragonflyUrl !== undefined || this.config.dragonflyRefused !== null,
+		};
+		for (const plane of planes) {
+			if (!configured[plane]) continue;
+			const endpointClass = classes[plane];
+			try {
+				const emitted = await this.emit({
+					surface: "substrate",
+					kind: "note",
+					summary: `db endpoint ${plane}: ${endpointClass} (policy ${policy})`,
+					session_id: `db-endpoint:${plane}`,
+					payload: { action: "db.endpoint", runtime: "mcp-server", plane, class: endpointClass, policy },
+				});
+				if (!emitted.stored) process.stderr.write(`[substrate] db endpoint event for ${plane} not recorded: ledger unavailable\n`);
+			} catch (cause) {
+				const reason = cause instanceof Error ? redact(cause.message).slice(0, 200) : "unknown error";
+				process.stderr.write(`[substrate] db endpoint event for ${plane} not recorded: ${reason}\n`);
+			}
 		}
 	}
 
