@@ -1,33 +1,39 @@
 ---
 phase: 37-laneb-graph-attribution
-verified: 2026-10-21T07:54Z
+verified: 2026-10-21T08:54Z
 status: passed
-score: 1 of 1 success criteria proven at the collector boundary. Live effect not proven: it needs a Lane B host with dispatcher worktrees, which is an operator action
-verified_on: gsd/v13x-37-laneb e0a685a (on origin/main e5891e9; the diff against main is the collectors change plus the planning records)
+score: 1 of 1 success criteria proven at the collector boundary. Live effect and an end-to-end run on a live server are not proven, and need an operator action
+verified_on: gsd/v13x-37-laneb 84e774d (code, after the PR #89 review fix), on origin/main e5891e9. This record is committed after 84e774d.
 covered_files: ["packages/collectors/src/worktree-graph.ts", "packages/collectors/src/worktree-graph.test.ts", "packages/collectors/src/herdr.ts", "packages/collectors/src/herdr.test.ts", "packages/collectors/src/herdr-map.ts", "packages/collectors/src/herdr-state.ts", "packages/collectors/src/herdr-state.test.ts", "packages/collectors/src/muse.ts", "packages/collectors/src/muse-etag.test.ts", "packages/mcp-server/src/brief.ts", "packages/mcp-server/src/server.ts"]
 ---
 
 # 37-VERIFICATION: LANEB, graph attribution from the worktree path
 
-Verified by the orchestrator on 2026-10-21. Requirement A-D1 (REQUIREMENTS.md:19). The change is collector-side only. The server contract it relies on already exists and was not modified.
+Verified by the orchestrator on 2026-10-21, after the PR #89 review. Requirement A-D1 (REQUIREMENTS.md:19). The change is collector-side only. The server contract it relies on already exists and was not modified.
 
 ## Proven in-repo
 
 | Claim | Evidence |
 |---|---|
-| Collectors suite passes | `bun test packages/collectors` on e0a685a: 291 pass, 0 fail, 0 skip, 20 files |
-| Full repository suite passes on a throwaway Postgres 16 (`substrate_test`) | `bun test` with `SUBSTRATE_TEST_PG_URL` set, on e0a685a: 5697 pass, 2 skip, 0 fail, 5699 tests across 208 files, 144 s, exit 0 |
-| The two skips are environment gates, not failures | `packages/mcp-server/src/cache-conformance.test.ts:127`: `test.skip` when `SUBSTRATE_CONFORMANCE_REDIS_URL` is unset. `packages/mcp-server/src/redact.test.ts:813`: the rehearsal round-trip describe, one test, skipped when `SUBSTRATE_REHEARSAL_NAME` is unset. Both gates pre-exist, and AGENTS.md names the rehearsal twin as skipped in this loop. This phase touches neither file's gate |
-| Every `describeLive` suite ran, not skipped | `SUBSTRATE_TEST_PG_URL` was set for the full run, so the live index suites ran. None of the 2 skips comes from them |
-| Types clean | `bunx tsc --noEmit` exit 0 on e0a685a |
-| The new tests can fail | Two throwaway mutations in the collector sources. A dropped event `graph_id` fails "a graph named at start stays on the pane record, so the session end after a restart still names it" (`herdr-state.test.ts`). An always-sent brief `graph_id` fails "names the graph when one is given, and sends no graph field otherwise" (`muse-etag.test.ts`). Both product files were restored byte-for-byte, confirmed with `cmp` |
-| Loopback smoke, changed paths | herdr: a pane in `/var/lib/substrate/worktrees/<graph_id>/packages/collectors` emits `session.start` with `graph_id`; a pane at `/home/ops/src/agent-substrate` emits `graph_id: null`. Muse: `fetchBrief` posted `{repo, branch, surface, graph_id}` with an id and `{repo, branch, surface}` without, to a real HTTP server on loopback, and both calls returned ok |
+| Collectors suite passes | `bun test packages/collectors` on 84e774d: 294 pass, 0 fail, 0 skip, 20 files |
+| Full repository suite passes on a throwaway Postgres 16 (`substrate_test`) | `bun test` with `SUBSTRATE_TEST_PG_URL` set, on 84e774d: 5700 pass, 2 skip, 0 fail, 5702 tests across 208 files, 127 s, exit 0 |
+| The two skips are the same environment gates as before | `packages/mcp-server/src/cache-conformance.test.ts:127` (`SUBSTRATE_CONFORMANCE_REDIS_URL` unset) and `packages/mcp-server/src/redact.test.ts:813` (the rehearsal round trip, one test, `SUBSTRATE_REHEARSAL_NAME` unset). The count stayed at 2 while the suite grew by 3 tests |
+| Types clean | `bunx tsc --noEmit` exit 0 on 84e774d |
+| A session never spans two graphs | Production attribution (`attributePane`) through `reconcile` over five snapshots, on 84e774d. Start in graph A; move to B; back to A; a status note with no directory keeps A; then a plain repo. Each session id carries one graph. Every change of graph ends the session with `end_reason: "graph_changed"`. The note keeps graph A |
+| The review findings were reproduced before the fix | The three "one session, one graph" tests failed on the pre-fix code (`herdr-state.test.ts`: 3 fail) and pass after it (16 pass in that file) |
+| Earlier checks, on e0a685a, before the review fix | Two throwaway mutations (a dropped event `graph_id`; an always-sent brief `graph_id`) each failed their named test, and both product files were restored byte-for-byte. A loopback smoke showed the herdr event and the Muse request carry `graph_id` only inside a graph worktree. These checks were not re-run on 84e774d |
+
+## Review on PR #89
+
+- P1, "Revisiting graphs breaks verification" (`herdr-state.ts`). Fixed: a graph change is a session boundary (`end_reason: "graph_changed"`), so no session spans two graphs.
+- P2, "Existing panes stay untagged" (`herdr-state.ts`). Fixed: a session recorded before attribution is closed at the first snapshot that names a graph, so its end and the next session are tagged.
+- Also found while reproducing P1: a snapshot with no directory overwrote the graph on a status note. Fixed: such a snapshot keeps the session.
 
 ## Success criteria
 
 | # | ROADMAP criterion | Verdict | Evidence |
 |---|---|---|---|
-| 1 | Lane B events reach the graph's brief and evidence without agents passing ids | PASS at the collector boundary. Live effect not run | Herdr events for a pane inside a graph worktree carry `graph_id` (`herdr.ts` `attributePane`, `herdr-state.ts`, `herdr-map.ts`). Muse's brief request names the graph when the repo root is inside one (`muse.ts` `fetchBrief`, `pass`). The server already stores `graph_id` on `/events` (`server.ts:1064-1066, 1273`) and keys `/brief` on it (`server.ts:1017-1018`; `brief.ts:224`). Those paths are unchanged, and the full-suite run above passes on this tree |
+| 1 | Lane B events reach the graph's brief and evidence without agents passing ids | PASS at the collector boundary. Live effect not run | Herdr events for a pane inside a graph worktree carry `graph_id`, and a session stays inside one graph (the smoke above). Muse's brief request names the graph when the repo root is inside one. The server stores `graph_id` on `/events` (`server.ts:1064-1066, 1273`) and keys `/brief` on it (`server.ts:1017-1018`; `brief.ts:224`). Those paths are unchanged, and the full-suite run passes on this tree |
 
 ## Not proven
 
