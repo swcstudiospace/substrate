@@ -75,11 +75,31 @@ interface World {
 	fake: HindsightFake;
 }
 
-function world(env: Record<string, string>, fake: HindsightFake): World {
+/** `onRecall` runs as a recall request leaves for Hindsight, so a test can act once a fan-out has started. */
+function world(env: Record<string, string>, fake: HindsightFake, onRecall?: () => void): World {
 	const redis = new FakeRedis();
 	const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
-	const substrate = new Substrate(loadConfig(env), { index: null, greptime: null, cache, hindsightFetch: fake.fetch });
+	const hindsightFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+		if (String(input).endsWith("/memories/recall")) onRecall?.();
+		return fake.fetch(input, init);
+	};
+	const substrate = new Substrate(loadConfig(env), { index: null, greptime: null, cache, hindsightFetch });
 	return { substrate, redis, cache, fake };
+}
+
+/**
+ * Every compose reports its decisions' subjects to the recall registry, and with no index it reports none. This makes each compose of
+ * one service carry `subject`, as a brief over a decision about it would. The registry is private to the service, so the reach is checked at runtime.
+ */
+function carryDecisionSubject(substrate: Substrate, subject: string): void {
+	const recall: unknown = Reflect.get(substrate, "recall");
+	if (!hasNoteSubjects(recall)) throw new Error("the service has no recall registry");
+	const noteSubjects = recall.noteSubjects.bind(recall);
+	recall.noteSubjects = (surface, repo, subjects) => noteSubjects(surface, repo, [...subjects, subject]);
+}
+
+function hasNoteSubjects(value: unknown): value is { noteSubjects(surface: string, repo: string, subjects: string[]): void } {
+	return typeof value === "object" && value !== null && "noteSubjects" in value && typeof value.noteSubjects === "function";
 }
 
 /** The bank of every recall request the fake received, in order. */
@@ -309,6 +329,29 @@ describe("brief recall fan-out (SUBSTRATE_BRIEF_RECALL=enforce)", () => {
 			expect(w.redis.keysOf("brief")).toHaveLength(1);
 		});
 	});
+
+	// Real timers on purpose: the cap is a real timer in brief.ts and the fake's deaf bank is real too. A fake clock would skip the path under test.
+	test("a waiter that joins a cut brief and composes again keeps its whole recall wait within the cap", async () => {
+		await withHindsight(async () => {
+			const fake = new HindsightFake();
+			seedBanks(fake);
+			fake.recallDeafMs["sub-omp"] = 3500;
+			const firstRecall = Promise.withResolvers<void>();
+			const w = world({ ...ENFORCE, SUBSTRATE_BRIEF_RECALL_BUDGET_MS: "5000" }, fake, () => firstRecall.resolve());
+			const owner = w.substrate.briefDetailed(REQUEST, undefined, REQUEST.surface);
+			// The owner's first query is built before its fan-out leaves. Its compose then carries a decision subject, so the waiter's
+			// reload asks a different, equally slow query and cannot join the owner's fan-out.
+			await firstRecall.promise;
+			carryDecisionSubject(w.substrate, "pnpm");
+			const arrived = performance.now();
+			await w.substrate.briefDetailed(REQUEST, undefined, REQUEST.surface);
+			const waited = performance.now() - arrived;
+			await owner;
+			// The waiter joined the owner's brief load, which was refused storage, so it composed again.
+			expect(w.cache.health().coalesced).toBe(1);
+			expect(waited).toBeLessThan(BRIEF_RECALL_CAP_MS + 500);
+		});
+	}, 15_000);
 
 	test("a configured one-hour TTL is the fan-out entry's life, not the 30-minute class cap", async () => {
 		await withHindsight(async () => {

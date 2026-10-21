@@ -133,6 +133,7 @@ import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
 import {
 	RecallPrefetcher,
+	BRIEF_RECALL_CAP_MS,
 	WANTED_MAX,
 	briefRecallBudgetMs,
 	buildRecallQuery,
@@ -1442,7 +1443,13 @@ export class Substrate {
 					(source) => {
 						lost.push(source);
 					},
-					{ ...this.briefOptions, ...recallOptions },
+					{
+						...this.briefOptions,
+						...recallOptions,
+						// The recall cap runs from this call's arrival, not from this compose: a compose that starts after a join (a waiter's own
+						// load) gets only what is left of it, so one call never waits on recall for longer than the cap in total.
+						...(recallOptions.recall === undefined ? {} : { recall: { ...recallOptions.recall, capMs: Math.max(0, started + BRIEF_RECALL_CAP_MS - performance.now()) } }),
+					},
 				);
 			// The last-good snapshot: the rendered text, its sections (so it can be served compact and
 			// as stale-while-revalidate), when it was composed and when it stops being true.

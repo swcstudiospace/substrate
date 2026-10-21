@@ -169,13 +169,15 @@ function swallow<T>(what: string, fallback: T): (cause: unknown) => T {
 
 /**
  * The recall read the brief awaits, bounded by `capMs`. At the cap a read still running is replaced by `partial()`, what it has completed,
- * so one slow part does not drop the parts that finished; a read that throws is no answer. The timer is cleared as soon as the read settles.
+ * so one slow part does not drop the parts that finished; a read that throws is no answer. A cap already spent takes `partial()` at once and
+ * starts no read. The timer is cleared as soon as the read settles.
  */
 function boundedRecall(
 	read: () => Promise<RecallSnapshot | null>,
 	partial: () => RecallSnapshot | null,
 	capMs: number,
 ): Promise<RecallSnapshot | null> {
+	if (capMs <= 0) return Promise.resolve().then(partial).catch(swallow("recall", null));
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const atCap = new Promise<RecallSnapshot | null>((resolve) => {
 		timer = setTimeout(() => resolve(Promise.resolve().then(partial).catch(swallow("recall", null))), capMs);
