@@ -29,12 +29,13 @@ import { createMcpServer } from "./mcp.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
 import { Substrate } from "./service.ts";
 import type { EventInput } from "./types.ts";
+import type { FetchLike } from "./planes/ragflow.ts";
 
 const CONFIG = { url: "http://ragflow.test", apiKey: "test-key" };
 
 function harness(
 	fake: RagflowFake,
-	over: Partial<Pick<IngestDeps, "surface" | "vmGuest" | "roots" | "config" | "seen" | "locks" | "poll">> = {},
+	over: Partial<Pick<IngestDeps, "surface" | "vmGuest" | "roots" | "config" | "seen" | "locks" | "poll" | "fetchImpl" | "datasetLockWaitMs">> = {},
 ) {
 	const events: EventInput[] = [];
 	const seen = new Map<string, IngestRecord>();
@@ -512,5 +513,128 @@ describe("docs_ingest expected_version (memory's contract)", () => {
 		if (!skipped.ok) throw new Error(`expected skip: ${skipped.reason}`);
 		expect(skipped.results[0]?.status).toBe("unchanged");
 		expect([...seen.values()][0]?.version).toBe(2);
+	});
+});
+
+describe("docs_ingest atomic batch", () => {
+	const OTHER = { ...PAGE, path: "docs/other.md", source_url: "https://example.com/agent-substrate/other" };
+	const SECOND = { ...PAGE, path: "docs/data-planes-2.md" };
+
+	test("a batch with one stale page is refused whole: the matching page is neither uploaded nor recorded", async () => {
+		const fake = new RagflowFake();
+		const { events, seen, ingest } = harness(fake);
+		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE, OTHER] });
+		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
+		const recordBefore = JSON.stringify([...seen.entries()]);
+		const uploadsBefore = fake.uploads.length;
+
+		const batch = await ingest({
+			dataset: "agent-substrate",
+			pages: [
+				{ ...PAGE, body: `${PAGE.body} Matching.`, expected_version: 1 },
+				{ ...OTHER, body: `${OTHER.body} Stale.`, expected_version: 7 },
+			],
+		});
+		if (batch.ok) throw new Error("expected a version.stale refusal");
+		expect(batch).toMatchObject({
+			refused: true,
+			reason: "version.stale",
+			page: OTHER.path,
+			current_version: 1,
+			conflict_with: first.results[1]?.document_id,
+			changed: false,
+		});
+		expect(fake.uploads).toHaveLength(uploadsBefore);
+		expect(JSON.stringify([...seen.entries()])).toBe(recordBefore);
+		expect(events.filter((event) => event.kind === "warning").at(-1)?.payload).toMatchObject({ reason: "version.stale" });
+	});
+
+	test("a batch whose pages all match is stored, each record advancing one version", async () => {
+		const fake = new RagflowFake();
+		const { seen, ingest } = harness(fake);
+		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE, OTHER] });
+		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
+		const replaced = await ingest({
+			dataset: "agent-substrate",
+			pages: [
+				{ ...PAGE, body: `${PAGE.body} Next.`, expected_version: 1 },
+				{ ...OTHER, body: `${OTHER.body} Next.`, expected_version: 1 },
+			],
+		});
+		if (!replaced.ok) throw new Error(`expected replace: ${replaced.reason}`);
+		expect(replaced.results.map((result) => result.status)).toEqual(["replaced", "replaced"]);
+		expect(replaced.changed).toBe(true);
+		expect(fake.uploads).toHaveLength(4);
+		expect([...seen.values()].map((record) => record.version)).toEqual([2, 2]);
+	});
+
+	test("a later page of one source URL is checked against the version an earlier page of the batch leaves", async () => {
+		const fake = new RagflowFake();
+		const { seen, ingest } = harness(fake);
+		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
+		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
+		const recordBefore = JSON.stringify([...seen.entries()]);
+		const uploadsBefore = fake.uploads.length;
+
+		// The first page would store version 2; the second, still expecting 1, must refuse the whole call.
+		const batch = await ingest({
+			dataset: "agent-substrate",
+			pages: [
+				{ ...PAGE, body: `${PAGE.body} One.`, expected_version: 1 },
+				{ ...SECOND, source_url: PAGE.source_url, body: `${PAGE.body} Two.`, expected_version: 1 },
+			],
+		});
+		expect(batch).toMatchObject({ ok: false, refused: true, reason: "version.stale", page: SECOND.path, current_version: 2, changed: false });
+		expect(fake.uploads).toHaveLength(uploadsBefore);
+		expect(JSON.stringify([...seen.entries()])).toBe(recordBefore);
+	});
+
+	test("a batch may chain expected versions on one source URL", async () => {
+		const fake = new RagflowFake();
+		const { seen, ingest } = harness(fake);
+		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
+		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
+		const chained = await ingest({
+			dataset: "agent-substrate",
+			pages: [
+				{ ...PAGE, body: `${PAGE.body} One.`, expected_version: 1 },
+				{ ...SECOND, source_url: PAGE.source_url, body: `${PAGE.body} Two.`, expected_version: 2 },
+			],
+		});
+		if (!chained.ok) throw new Error(`expected chained ingest: ${chained.reason}`);
+		expect(chained.results.map((result) => result.status)).toEqual(["replaced", "replaced"]);
+		expect(fake.uploads).toHaveLength(3);
+		expect([...seen.values()][0]?.version).toBe(3);
+	});
+
+	test("a call that cannot take its dataset's lock in time is refused with nothing written, and the lock frees afterwards", async () => {
+		const fake = new RagflowFake();
+		let openGate!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			openGate = resolve;
+		});
+		// The holder's requests wait on the gate, so its call keeps the dataset lock until the gate opens.
+		const heldFetch: FetchLike = async (input, init) => {
+			await gate;
+			return fake.fetch(input, init);
+		};
+		const holder = harness(fake, { fetchImpl: heldFetch });
+		const holding = holder.ingest({ dataset: "agent-substrate", pages: [PAGE] });
+
+		const waiter = harness(fake, { datasetLockWaitMs: 20 });
+		const waitedOut = await waiter.ingest({ dataset: "agent-substrate", pages: [OTHER] });
+		if (waitedOut.ok) throw new Error("expected the waiter to time out");
+		expect(waitedOut).toMatchObject({ reason: "dataset-lock-timeout", changed: false });
+		expect(fake.uploads).toHaveLength(0);
+		expect(waiter.seen.size).toBe(0);
+
+		openGate();
+		const held = await holding;
+		if (!held.ok) throw new Error(`expected the holder to store: ${held.reason}`);
+		expect(fake.uploads).toHaveLength(1);
+
+		const after = await waiter.ingest({ dataset: "agent-substrate", pages: [OTHER] });
+		if (!after.ok) throw new Error(`expected the lock to be free: ${after.reason}`);
+		expect(after.results[0]?.status).toBe("ingested");
 	});
 });

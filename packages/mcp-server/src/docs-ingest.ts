@@ -290,6 +290,8 @@ export interface IngestDeps {
 	datasets?: DatasetListSource;
 	/** Delete the superseded document after a replacement parses (`SUBSTRATE_DOCS_PRUNE_SUPERSEDED`); off keeps it. */
 	prune?: boolean;
+	/** How long a call waits behind another ingest of its dataset before refusing `dataset-lock-timeout`. Defaults to 180 s. */
+	datasetLockWaitMs?: number;
 	/** Where a failed prune is reported; stderr when omitted. */
 	log?: (line: string) => void;
 }
@@ -398,13 +400,63 @@ function recordKey(datasetId: string, sourceUrl: string): string {
 	return `${datasetId}::${sourceUrl}`;
 }
 
+/** How long a call waits behind another ingest of its dataset before it is refused `dataset-lock-timeout`. */
+const DATASET_INGEST_LOCK_WAIT_MS = 180_000;
+
+/** Returned by the lock when its wait ended before the dataset was free. */
+const LOCK_WAIT_EXPIRED = "lock-wait-expired" as const;
+
+/**
+ * Each dataset's ingest queue tail, for this process. A call queues behind the tail, runs once the call ahead
+ * of it settles, and settles its own slot when it ends, on every path.
+ */
+const datasetIngestQueues = new Map<string, Promise<void>>();
+
+/**
+ * Runs `work` once no other ingest of `dataset` is ahead of it. A call still waiting after `waitMs` gives up
+ * without running `work`, so it writes nothing. A call that gave up keeps its slot in the queue until the calls
+ * ahead of it settle, so later calls still wait for them.
+ */
+async function withDatasetIngestLock<T>(dataset: string, waitMs: number, work: () => Promise<T>): Promise<T | typeof LOCK_WAIT_EXPIRED> {
+	const ahead = datasetIngestQueues.get(dataset) ?? Promise.resolve();
+	let settleSlot: () => void = () => undefined;
+	const slot = new Promise<void>((resolve) => {
+		settleSlot = () => resolve();
+	});
+	const tail = ahead.then(() => slot);
+	datasetIngestQueues.set(dataset, tail);
+	// The entry is dropped only once the queue is idle, so a new call never skips a running one.
+	void tail.then(() => {
+		if (datasetIngestQueues.get(dataset) === tail) datasetIngestQueues.delete(dataset);
+	});
+	let cancelExpiry: () => void = () => undefined;
+	const expired = new Promise<typeof LOCK_WAIT_EXPIRED>((resolve) => {
+		const timer = setTimeout(() => resolve(LOCK_WAIT_EXPIRED), waitMs);
+		cancelExpiry = () => clearTimeout(timer);
+	});
+	const turn = await Promise.race([ahead.then(() => "held" as const), expired]);
+	cancelExpiry();
+	if (turn === LOCK_WAIT_EXPIRED) {
+		settleSlot();
+		return LOCK_WAIT_EXPIRED;
+	}
+	try {
+		return await work();
+	} finally {
+		settleSlot();
+	}
+}
+
+/** A page after the gates: its normalised body, hash, and source URL, ready for the dataset lock. */
+type PreparedPage = { page: IngestPage; sourceUrl: string; body: string; sha: string };
+
 /**
  * Memory's `expected_version` rule (`versionMismatch` in memory-write.ts), for one source URL's
  * record. Absent `expected` is today's behaviour. A missing record is version 0, so only an expected
  * 0 (or none) passes; a mismatch returns what a stale write should re-submit against.
  */
 function staleVersion(
-	prior: IngestRecord | undefined,
+	prior: { version: number; document_id?: string } | undefined,
 	expected: number | undefined,
 ): { remedy: string; current_version: number | null; conflict_with?: string; verified_persisted: false } | null {
 	if (expected === undefined) return null;
@@ -421,26 +473,24 @@ function staleVersion(
 	if (expected === prior.version) return null;
 	return {
 		remedy:
-			`The record for this source URL is version ${prior.version} (${prior.document_id}), not ${expected}. ` +
-			"Somebody changed it since — re-submit against the current version (current_version).",
+			`The record for this source URL is version ${prior.version} (${prior.document_id ?? "set by an earlier page of this call"}), not ${expected}. ` +
+			"Re-submit against the current version (current_version).",
 		current_version: prior.version,
 		verified_persisted: false,
-		conflict_with: prior.document_id,
+		...(prior.document_id !== undefined ? { conflict_with: prior.document_id } : {}),
 	};
 }
 
 export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<IngestOutcome> {
 	const sessionId = deps.sessionId ?? `docs-ingest:${randomUUID()}`;
 	const roots = deps.roots ?? DEFAULT_INGEST_ROOTS;
-	const seen = deps.seen ?? new Map<string, IngestRecord>();
-	const locks = deps.locks ?? new Map<string, { task: Promise<PageSettlement>; sha: string }>();
 	const config = deps.config;
 	if (deps.surface === null) return refused(deps, sessionId, "unauthenticated");
 	if (deps.vmGuest === true) return refused(deps, sessionId, "vm-guest");
 	if (config === null) return refused(deps, sessionId, "ragflow-not-configured");
 	if (input.pages.length === 0) return refused(deps, sessionId, "no-pages");
 
-	const prepared: Array<{ page: IngestPage; sourceUrl: string; body: string; sha: string }> = [];
+	const prepared: PreparedPage[] = [];
 	let total = 0;
 	let strippedImages = 0;
 	for (const page of input.pages) {
@@ -460,16 +510,43 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 		prepared.push({ page, sourceUrl: page.source_url, body: stripped.body, sha: sha256(stripped.body) });
 	}
 
+	// Taken before the first read of the record. No await sits between the gates and this call, so the lock
+	// is held by the time `ingestDocs` returns its promise.
+	const waited = await withDatasetIngestLock(input.dataset, deps.datasetLockWaitMs ?? DATASET_INGEST_LOCK_WAIT_MS, () =>
+		writeBatch(deps, config, input, prepared, { sessionId, strippedImages }),
+	);
+	if (waited === LOCK_WAIT_EXPIRED) return refused(deps, sessionId, "dataset-lock-timeout");
+	return waited;
+}
+
+/** The part of an ingest that runs under its dataset's lock: the dataset lookup, the version plan, then the writes. */
+async function writeBatch(
+	deps: IngestDeps,
+	config: RagflowConfig,
+	input: IngestInput,
+	prepared: PreparedPage[],
+	call: { sessionId: string; strippedImages: number },
+): Promise<IngestOutcome> {
+	const { sessionId, strippedImages } = call;
+	if (deps.surface === null) return refused(deps, sessionId, "unauthenticated");
+	const seen = deps.seen ?? new Map<string, IngestRecord>();
+	const locks = deps.locks ?? new Map<string, { task: Promise<PageSettlement>; sha: string }>();
 	const listed = await (deps.datasets ?? DIRECT_DATASET_LIST).list(config, deps.fetchImpl);
 	if (!listed.ok) return refused(deps, sessionId, listed.reason);
 	const dataset = listed.datasets.find((entry) => entry.name === input.dataset);
 	if (!dataset) return refused(deps, sessionId, "unknown-dataset");
 	const commit = input.commit ?? "unpinned";
-	// memory's `expected_version` contract, checked for every page before the first upload: a stale
-	// page leaves the whole call unwritten. Each check reads the record as it stands at that moment.
-	for (const { page, sourceUrl } of prepared) {
-		const stale = staleVersion(seen.get(recordKey(dataset.id, sourceUrl)), page.expected_version);
+	// memory's `expected_version` contract, planned for every page before the first upload. A page whose source
+	// URL an earlier page of this call also writes is checked against the version that page leaves, so a conflict
+	// anywhere refuses the whole call with nothing uploaded or recorded.
+	const planned = new Map<string, { version: number; sha: string }>();
+	for (const { page, sourceUrl, sha } of prepared) {
+		const key = recordKey(dataset.id, sourceUrl);
+		const current = planned.get(key) ?? seen.get(key);
+		const stale = staleVersion(current, page.expected_version);
 		if (stale) return refused(deps, sessionId, "version.stale", { page: page.path, ...stale });
+		if (current?.sha === sha) continue;
+		planned.set(key, { version: (current?.version ?? 0) + 1, sha });
 	}
 
 	const results: IngestPageResult[] = [];
@@ -478,13 +555,9 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	for (const { page, sourceUrl, body, sha } of prepared) {
 		const key = recordKey(dataset.id, sourceUrl);
 		for (;;) {
-			// The record as it stands when this page is written: an earlier page of this call on the
-			// same source URL, or a concurrent ingest, may have stored a newer version since the pre-check.
+			// The record as it stands when this page is written. The lock keeps this call the only writer of this
+			// dataset's records, so the version plan above still holds here and no refusal can follow an upload.
 			const prior = seen.get(key);
-			// Checked against that current record, never a snapshot, so a stale page cannot replace a
-			// newer version. Pages this call already stored are reported through `changed`.
-			const stale = staleVersion(prior, page.expected_version);
-			if (stale) return refused(deps, sessionId, "version.stale", { page: page.path, changed: changed(), ...stale });
 			if (prior && prior.sha === sha) {
 				results.push({ path: page.path, source_url: sourceUrl, status: "unchanged", document_id: prior.document_id, content_sha256: sha });
 				break;
