@@ -209,6 +209,8 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		// uplift-4 S5: the recall prefetch and Hindsight inventory timers are cleared now and
 		// their in-flight work is awaited inside the same bound as the flush below.
 		const recallStopped = substrate.stopRecall();
+		// Phase 47: the cache preloader's timer is cleared with them; a tick in flight finishes on its own.
+		substrate.stopPreload();
 		observability.stop();
 		server.close(async () => {
 			// In-flight background retains finish first (bounded), then the retain
