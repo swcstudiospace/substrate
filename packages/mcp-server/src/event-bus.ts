@@ -17,6 +17,8 @@ export const MAX_HINT_BYTES = 1024;
 /** Reconnect backoff: 1 s, doubling, capped at 30 s. A successful subscribe resets it (D50-h). */
 export const RECONNECT_MIN_MS = 1_000;
 export const RECONNECT_MAX_MS = 30_000;
+/** A publish that has not settled by then is a failure, and its publisher is dropped. */
+export const PUBLISH_DEADLINE_MS = 2_000;
 
 export interface EventHint {
 	v: 1;
@@ -38,9 +40,12 @@ export interface EventBus {
 	publish(hint: EventHint): Promise<boolean>;
 	subscribe(listener: (hint: EventHint) => void): () => void;
 	stop(): void;
+	/** The bus's counters. Production's bus always keeps them; a fake that keeps none leaves this out. */
+	stats?(): EventBusStats;
 }
 
 export interface EventBusStats {
+	published: number;
 	publishFailures: number;
 	oversizeDropped: number;
 	malformedIgnored: number;
@@ -100,7 +105,7 @@ interface ListenerEntry {
 
 class Bus implements MeasuredEventBus {
 	private readonly listeners = new Set<ListenerEntry>();
-	private readonly counts: EventBusStats = { publishFailures: 0, oversizeDropped: 0, malformedIgnored: 0, subscriptionDrops: 0 };
+	private readonly counts: EventBusStats = { published: 0, publishFailures: 0, oversizeDropped: 0, malformedIgnored: 0, subscriptionDrops: 0 };
 	private publisher: EventBusClient | null = null;
 	private subscriber: EventBusClient | null = null;
 	/** Bumped on every connect; a callback from an older connection is ignored. */
@@ -110,6 +115,10 @@ class Bus implements MeasuredEventBus {
 	private publishDownSince: number | null = null;
 	private subscribeDownSince: number | null = null;
 	private stopped = false;
+	/** True through a run of oversize publishes, so the run logs once. */
+	private oversizeRunning = false;
+	/** True through a run of malformed received messages, so the run logs once. */
+	private malformedRunning = false;
 
 	constructor(
 		private readonly url: string,
@@ -120,19 +129,28 @@ class Bus implements MeasuredEventBus {
 		if (this.stopped) return false;
 		// Built from the six named fields, so a caller's extra keys never reach the wire.
 		const message = JSON.stringify({ v: 1, id: hint.id, kind: hint.kind, surface: hint.surface, graph_id: hint.graph_id, ts: hint.ts });
-		if (encoder.encode(message).byteLength > MAX_HINT_BYTES) {
+		const bytes = encoder.encode(message).byteLength;
+		if (bytes > MAX_HINT_BYTES) {
 			this.counts.oversizeDropped += 1;
+			if (!this.oversizeRunning) {
+				this.oversizeRunning = true;
+				this.deps.log(`[substrate] event bus hint dropped: ${bytes} bytes exceeds the ${MAX_HINT_BYTES}-byte limit\n`);
+			}
 			return false;
 		}
+		let client: EventBusClient | null = null;
 		try {
-			this.publisher ??= this.deps.makeClient(this.url);
-			await this.publisher.publish(EVENT_BUS_CHANNEL, message);
+			client = this.publisher ?? this.deps.makeClient(this.url);
+			this.publisher = client;
+			await this.publishWithDeadline(client, message);
 		} catch (error) {
 			if (this.stopped) return false;
-			this.closePublisher();
+			this.dropPublisher(client);
 			this.publishFailed(error);
 			return false;
 		}
+		this.counts.published += 1;
+		this.oversizeRunning = false;
 		this.publishRecovered();
 		return true;
 	}
@@ -207,8 +225,13 @@ class Bus implements MeasuredEventBus {
 		const hint = parseHint(message);
 		if (hint === null) {
 			this.counts.malformedIgnored += 1;
+			if (!this.malformedRunning) {
+				this.malformedRunning = true;
+				this.deps.log("[substrate] event bus message ignored: not a wake-up hint\n");
+			}
 			return;
 		}
+		this.malformedRunning = false;
 		for (const entry of [...this.listeners]) {
 			try {
 				entry.listener(hint);
@@ -230,6 +253,24 @@ class Bus implements MeasuredEventBus {
 		const downMs = this.deps.now() - this.publishDownSince;
 		this.publishDownSince = null;
 		this.deps.log(`[substrate] event bus publish recovered after ${downMs} ms\n`);
+	}
+
+	/** One publish, rejected at `PUBLISH_DEADLINE_MS` if the client has not settled it, so commands cannot queue behind a silent connection. */
+	private async publishWithDeadline(client: EventBusClient, message: string): Promise<void> {
+		let cancel = (): void => {};
+		const deadline = new Promise<never>((_, reject) => {
+			cancel = this.deps.setTimer(() => reject(new Error(`publish did not settle within ${PUBLISH_DEADLINE_MS} ms`)), PUBLISH_DEADLINE_MS);
+		});
+		try {
+			await Promise.race([client.publish(EVENT_BUS_CHANNEL, message), deadline]);
+		} finally {
+			cancel();
+		}
+	}
+
+	/** Drops `failed` only while it is still the publisher. A client replaced since was closed at replacement, so the replacement stays open. */
+	private dropPublisher(failed: EventBusClient | null): void {
+		if (failed !== null && this.publisher === failed) this.closePublisher();
 	}
 
 	private closeSubscriber(): void {

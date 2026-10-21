@@ -16,7 +16,7 @@ covered_files: ["packages/mcp-server/src/event-bus.ts", "packages/mcp-server/src
 | Typecheck | `bunx tsc --noEmit` | exit 0 |
 | Config reference | `bun run config:reference -- --check` | up to date |
 | Targeted | event bus (18), config, service, server, flag-registry (332) | pass |
-| Full bun suite | `bun test` against `substrate_test_p50` | 5983 pass, 2 skip, 0 fail (5985 tests, 223 files) |
+| Full bun suite | `bun test` against `substrate_test_p50`, after the review fixes | 5987 pass, 2 skip, 0 fail (5989 tests, 223 files) |
 | Repo locks | `bun run check:phase-close` | pass: 4 lock files green; EVENT_KINDS unchanged at 12; SURFACES unchanged at 27 |
 
 ## Acceptance criterion

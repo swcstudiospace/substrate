@@ -96,7 +96,7 @@ import {
 	type DriftGitTip,
 	type DriftReport,
 } from "./drift.ts";
-import { createEventBus, type EventBus, type EventBusClient, type EventHint } from "./event-bus.ts";
+import { createEventBus, type EventBus, type EventBusClient, type EventBusStats, type EventHint } from "./event-bus.ts";
 import { checkIdempotencyKey, checkReplayTs, eventHash, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import {
@@ -5975,10 +5975,19 @@ export class Substrate {
 			// In-memory counters only. Health does not ping Dragonfly and does not
 			// change its status code when the cache is down.
 			cache,
+			eventBus: this.eventBusHealth(),
 			planes,
 			capacity: { index: capacity, ledger: ledgerCapacity },
 			jobs: { ledger: ledgerJobs.ledger, ledgerReason: ledgerJobs.reason, ...(indexArchive !== null ? { index: indexArchive } : {}) },
 		};
+	}
+
+	/** `/healthz.eventBus`: the counters of the bus this process holds. A bus that keeps none (a test fake) reads as zero. */
+	private eventBusHealth(): EventBusHealth {
+		const bus = this.eventBus;
+		if (bus === null) return { enabled: false };
+		const stats: EventBusStats = bus.stats?.() ?? { published: 0, publishFailures: 0, oversizeDropped: 0, malformedIgnored: 0, subscriptionDrops: 0 };
+		return { enabled: true, published: stats.published, failed: stats.publishFailures, oversize: stats.oversizeDropped, malformed: stats.malformedIgnored };
 	}
 
 	/** The last index size report `SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S` keeps, and the measurement still running. */
@@ -6171,11 +6180,16 @@ export interface SubstrateHealth {
 	/** The write probe behind `eventsWritable` (uplift-2 R5); probe fields `null` until one has run. */
 	ledger: { writable: boolean } & LedgerProbe;
 	cache: CacheHealth;
+	/** Phase 50: the wake-up bus's counters, `{ enabled: false }` while it is off. */
+	eventBus: EventBusHealth;
 	planes: Record<PlaneName, PlaneHealth>;
 	capacity: { index: IndexCapacity | null; ledger: LedgerCapacity | null };
 	/** Scheduled-job health (uplift-3 N6): `ledger` is `null` with `ledgerReason` set when the ledger is unconfigured, unreachable or still being read. */
 	jobs: { ledger: LedgerJobsHealth | null; ledgerReason: string | null; index?: IndexArchiveHealth };
 }
+
+/** `/healthz.eventBus` (phase 50): the bus's counters since boot; `{ enabled: false }` while `SUBSTRATE_EVENT_BUS` is off. */
+export type EventBusHealth = { enabled: false } | { enabled: true; published: number; failed: number; oversize: number; malformed: number };
 
 /** `/healthz.jobs.index` (uplift-4 S2): present only when `SUBSTRATE_INDEX_ARCHIVE_DIR` is set. */
 export interface IndexArchiveHealth {

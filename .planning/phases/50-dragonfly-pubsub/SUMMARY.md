@@ -30,8 +30,15 @@ status: in review (draft PR). In-repo gates green. A live Dragonfly subscription
 
 - Typecheck: `bunx tsc --noEmit` exit 0.
 - Targeted: the event bus tests (18), the config tests, and the service, server and flag-registry tests (332) pass.
-- Full suite: `bun test` 5983 pass, 2 skip (pre-existing), 0 fail, over 5985 tests in 223 files.
+- Full suite: `bun test` 5987 pass, 2 skip (pre-existing), 0 fail, over 5989 tests in 223 files, after the review fixes.
 - Repo locks: `bun run check:phase-close` green. Config reference: regenerated and checked.
+
+## Review round (PR 103)
+
+- **Publish deadline.** `PUBLISH_DEADLINE_MS` is 2000. A publish that does not settle in time counts as a failure and drops the client, so a stalled server cannot pile up commands. A test covers a never-settling publish.
+- **Publisher identity.** A failed publish clears and closes the publisher only while it is still the client that publish used, so an old failure cannot close a replacement. A test covers it.
+- **Counters visible.** `health().eventBus` reports enabled, published, failed, oversize and malformed. Oversize and malformed drops log once per run. The counters are optional on the bus interface, so injected test fakes type-check; production always has them.
+- **Busy-stream wake.** A test holds the first ledger read open, wakes twice, and checks that the second read starts without waiting for the poll interval.
 
 ## Limits (recorded, not hidden)
 

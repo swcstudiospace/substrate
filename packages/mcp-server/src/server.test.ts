@@ -1445,6 +1445,35 @@ describe("GET /events/stream", () => {
 		}
 	});
 
+	test("a hint that arrives during a ledger read makes the stream read again at once, not at the long poll", async () => {
+		const stub = streamLedger([]);
+		const hub = fakeHub();
+		const answer = stub.eventIdsAfter;
+		const gate = Promise.withResolvers<void>();
+		let started = 0;
+		stub.eventIdsAfter = async (cursor, limit) => {
+			started += 1;
+			if (started === 1) await gate.promise;
+			return answer(cursor, limit);
+		};
+		const { get, stop } = await serve(stub, { SUBSTRATE_TOKEN_OMP: "tok-omp" }, { eventBus: () => hub.bus }, { streamPollMs: 60_000, streamIdleMs: 60_000 });
+		try {
+			const controller = new AbortController();
+			const response = await get("/events/stream", { authorization: "Bearer tok-omp" }, controller.signal);
+			expect(response.status).toBe(200);
+			// The first hint starts a ledger read and holds it open; the second arrives while that read is in flight.
+			hub.wake("e1");
+			hub.wake("e2");
+			expect(started).toBe(1);
+			gate.resolve();
+			// The read finished empty, so only the remembered hint can start this second read: the poll is 60 s away.
+			await until(() => started === 2);
+			controller.abort();
+		} finally {
+			await stop();
+		}
+	});
+
 	test("the stream holds its subscription for the life of the response and releases it when the response closes", async () => {
 		const hub = fakeHub();
 		const { get, stop } = await serve(streamLedger([]), { SUBSTRATE_TOKEN_OMP: "tok-omp" }, { eventBus: () => hub.bus }, { streamPollMs: 60_000, streamIdleMs: 60_000 });

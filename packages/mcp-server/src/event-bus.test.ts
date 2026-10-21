@@ -4,7 +4,7 @@
  * that fall due, in order.
  */
 import { describe, expect, test } from "bun:test";
-import { EVENT_BUS_CHANNEL, MAX_HINT_BYTES, RECONNECT_MAX_MS, createEventBus, type EventBusClient, type EventHint } from "./event-bus.ts";
+import { EVENT_BUS_CHANNEL, MAX_HINT_BYTES, PUBLISH_DEADLINE_MS, RECONNECT_MAX_MS, createEventBus, type EventBusClient, type EventHint } from "./event-bus.ts";
 
 const ENDPOINT = "fake-endpoint";
 const HINT: EventHint = { v: 1, id: "evt-1", kind: "test.kind", surface: "test-surface", graph_id: null, ts: "2026-10-21T00:00:00.000Z" };
@@ -19,12 +19,20 @@ interface PendingSubscription {
 class FakeClient implements EventBusClient {
 	closed = false;
 	publishError: Error | null = null;
+	/** When set, publishes are held open until the test rejects them, or never. */
+	holdPublishes = false;
+	readonly heldPublishes: Array<{ reject: (error: Error) => void }> = [];
 	readonly published: Array<{ channel: string; message: string }> = [];
 	readonly subscriptions: PendingSubscription[] = [];
 
 	publish(channel: string, message: string): Promise<unknown> {
 		if (this.publishError !== null) return Promise.reject(this.publishError);
 		this.published.push({ channel, message });
+		if (this.holdPublishes) {
+			return new Promise<unknown>((_resolve, reject) => {
+				this.heldPublishes.push({ reject });
+			});
+		}
 		return Promise.resolve(1);
 	}
 
@@ -212,7 +220,7 @@ describe("publish", () => {
 	});
 
 	test("an oversize hint is dropped and counted, and nothing is sent", async () => {
-		const { bus, clients } = harness();
+		const { bus, clients, logs } = harness();
 		const base = JSON.stringify({ ...HINT, id: "" });
 		const exact = { ...HINT, id: "x".repeat(MAX_HINT_BYTES - base.length) };
 		const over = { ...HINT, id: "x".repeat(MAX_HINT_BYTES - base.length + 1) };
@@ -223,6 +231,78 @@ describe("publish", () => {
 		expect(clients[0]?.published).toHaveLength(1);
 		expect(bus.stats().oversizeDropped).toBe(1);
 		expect(bus.stats().publishFailures).toBe(0);
+		expect(await bus.publish(over)).toBe(false);
+		expect(logs.filter((line) => line.includes("hint dropped"))).toHaveLength(1);
+		expect(await bus.publish(exact)).toBe(true);
+		expect(await bus.publish(over)).toBe(false);
+		expect(logs.filter((line) => line.includes("hint dropped"))).toHaveLength(2);
+		expect(bus.stats()).toMatchObject({ published: 2, oversizeDropped: 3 });
+	});
+
+	test("a publish that never settles fails at its deadline, drops that client, and the next publish uses a new one", async () => {
+		const clock = new FakeClock();
+		const clients: FakeClient[] = [];
+		const bus = createEventBus({
+			enabled: true,
+			url: ENDPOINT,
+			makeClient: () => {
+				const client = new FakeClient();
+				client.holdPublishes = clients.length === 0;
+				clients.push(client);
+				return client;
+			},
+			log: () => {},
+			now: clock.now,
+			setTimer: clock.setTimer,
+		});
+		if (bus === null) throw new Error("expected a bus");
+
+		const stuck = bus.publish(HINT);
+		clock.advance(PUBLISH_DEADLINE_MS - 1);
+		expect(clients[0]?.closed).toBe(false);
+		clock.advance(1);
+		expect(await stuck).toBe(false);
+		expect(clients[0]?.closed).toBe(true);
+		expect(bus.stats().publishFailures).toBe(1);
+
+		expect(await bus.publish(HINT)).toBe(true);
+		expect(clients).toHaveLength(2);
+		expect(last(clients).published).toHaveLength(1);
+	});
+
+	test("a failure from a publisher that was already replaced leaves the replacement open", async () => {
+		const clients: FakeClient[] = [];
+		const bus = createEventBus({
+			enabled: true,
+			url: ENDPOINT,
+			makeClient: () => {
+				const client = new FakeClient();
+				client.holdPublishes = clients.length === 0;
+				clients.push(client);
+				return client;
+			},
+			log: () => {},
+			now: () => 0,
+			setTimer: () => () => {},
+		});
+		if (bus === null) throw new Error("expected a bus");
+
+		const first = bus.publish(HINT);
+		const second = bus.publish(HINT);
+		const old = last(clients);
+		old.heldPublishes[0]?.reject(new Error("connection reset"));
+		expect(await first).toBe(false);
+		expect(old.closed).toBe(true);
+
+		expect(await bus.publish(HINT)).toBe(true);
+		expect(clients).toHaveLength(2);
+		const replacement = last(clients);
+
+		old.heldPublishes[1]?.reject(new Error("connection reset"));
+		expect(await second).toBe(false);
+		expect(replacement.closed).toBe(false);
+		expect(await bus.publish(HINT)).toBe(true);
+		expect(clients).toHaveLength(2);
 	});
 });
 
@@ -266,7 +346,7 @@ describe("subscribe", () => {
 	});
 
 	test("malformed messages are ignored and counted, and a valid one after them still arrives", () => {
-		const { bus, clients } = harness();
+		const { bus, clients, logs } = harness();
 		const received: EventHint[] = [];
 		bus.subscribe((hint) => received.push(hint));
 		const onMessage = last(last(clients).subscriptions).onMessage;
@@ -284,9 +364,12 @@ describe("subscribe", () => {
 
 		expect(received).toEqual([]);
 		expect(bus.stats().malformedIgnored).toBe(malformed.length);
+		expect(logs.filter((line) => line.includes("not a wake-up hint"))).toHaveLength(1);
 
 		onMessage(JSON.stringify(HINT));
 		expect(received).toEqual([HINT]);
+		onMessage("{not json");
+		expect(logs.filter((line) => line.includes("not a wake-up hint"))).toHaveLength(2);
 	});
 
 	test("unsubscribing stops delivery, and the last unsubscribe does not close the client", () => {

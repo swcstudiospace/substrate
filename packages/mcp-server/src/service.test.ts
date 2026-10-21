@@ -7,7 +7,7 @@ import { REDACTED, redact } from "./redact.ts";
 import { leaseSnapshot } from "./index-store.ts";
 import { decideRelease, type ClaimAction } from "./lease.ts";
 import { EVENT_SOURCES } from "./event-sources.ts";
-import type { EventBus, EventHint } from "./event-bus.ts";
+import { createEventBus, MAX_HINT_BYTES, type EventBus, type EventBusClient, type EventHint } from "./event-bus.ts";
 import { HEALTH_PROBE_MS, Substrate, SkillProposalDenied, VERIFY_RESPONSE_MARGIN_MS, type SkillProposalRequest } from "./service.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
@@ -796,6 +796,25 @@ describe("event bus wiring (phase 50)", () => {
 		expect(refused).toEqual({ enabled: false, offReason: "DRAGONFLY_URL refused by the endpoint policy: plaintext, non-loopback" });
 		expect(loadEventBusSettings({ SUBSTRATE_EVENT_BUS: "on" }, { dragonflyUrl: "accepted-endpoint", dragonflyRefused: null, cacheEnabled: false })).toEqual({ enabled: false, offReason: "SUBSTRATE_CACHE is 0" });
 	});
+
+	test("an oversize publish is counted in health().eventBus.oversize", async () => {
+		const { greptime } = ledger();
+		const bus = createEventBus({
+			enabled: true,
+			url: "fake-endpoint",
+			makeClient: (): EventBusClient => ({ publish: async () => 1, subscribe: async () => "OK", close: () => {} }),
+			log: () => {},
+			now: () => 0,
+			setTimer: () => () => {},
+		});
+		if (bus === null) throw new Error("expected a bus");
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never, eventBus: () => bus });
+		expect((await substrate.health()).eventBus).toEqual({ enabled: true, published: 0, failed: 0, oversize: 0, malformed: 0 });
+
+		const oversize: EventHint = { v: 1, id: "x".repeat(MAX_HINT_BYTES), kind: "note", surface: "omp", graph_id: null, ts: "2026-10-21T00:00:00.000Z" };
+		expect(await bus.publish(oversize)).toBe(false);
+		expect((await substrate.health()).eventBus).toEqual({ enabled: true, published: 0, failed: 0, oversize: 1, malformed: 0 });
+	});
 });
 
 describe("migrate", () => {
@@ -920,6 +939,7 @@ describe("append-mode enforcement", () => {
 				refreshes: 0,
 				cooldownUntil: null,
 			},
+			eventBus: { enabled: false },
 			planes: {
 				greptime: { ok: true, breaker: closed("greptime"), lastErrorAt: null },
 				index: { ok: null, breaker: closed("index"), lastErrorAt: null },
