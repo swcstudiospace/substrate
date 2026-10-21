@@ -25,10 +25,12 @@
  * stepped by one `EVAL` through `script()`, always with a TTL, and a cache that
  * cannot answer admits every caller.
  *
- * `recall-snapshot` (uplift-4 S5) is generation-free too: the warm Hindsight recall
- * the brief appends in `SUBSTRATE_BRIEF_RECALL=enforce`, written only by the
- * prefetcher (`recall-snapshot.ts`) and read by the brief with a cache read and
- * nothing else. The entry lives twice `SUBSTRATE_BRIEF_RECALL_TTL_S` (fresh for the first, stale for the second); the 1800 s here is that for the 900 s default.
+ * `recall-snapshot` (uplift-4 S5) holds the warm Hindsight recall the brief appends in
+ * `SUBSTRATE_BRIEF_RECALL=enforce`. The prefetcher writes its own-bank entries without
+ * generations. The brief's cross-bank fan-out passes the memory and recall generations
+ * with each read, so a write or a retain landing refreshes the next brief at once. The
+ * entry lives twice `SUBSTRATE_BRIEF_RECALL_TTL_S` (fresh for the first, stale for the
+ * second); the 1800 s here is that for the 900 s default.
  */
 import { createHash } from "node:crypto";
 import { RedisClient } from "bun";

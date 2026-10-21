@@ -1012,6 +1012,22 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 			payload: { action: "alert", runtime: "alert", unit: "substrate-mcp.service", result: "watchdog" },
 		}),
 	},
+	{
+		id: "memory.mental_model.refresh",
+		phase: 40,
+		kind: "note",
+		surface: { fixed: "substrate" },
+		actions: ["memory.mental_model.refresh"],
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "note",
+			summary: "mental model refresh ok: sub-omp mm_a",
+			session_id: "mental-model:sub-omp:mm_a:2026-W43",
+			payload: { action: "memory.mental_model.refresh", bank: "sub-omp", mental_model_id: "mm_a", status: "ok" },
+		}),
+	},
 ];
 
 export const SILENT_SOURCES: readonly SilentSource[] = [
