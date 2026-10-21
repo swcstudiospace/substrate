@@ -1169,8 +1169,15 @@ export function createHttpServer(
 			}
 
 			if (req.method === "POST" && url.pathname === "/memory") {
-				const raw = await readBody(req);
-				const body = JSON.parse(raw) as Record<string, unknown>;
+				const parsed: unknown = JSON.parse(await readBody(req));
+				// Refused before the audit and the gate, as every other REST write route does. A
+				// `null` body used to write its audit record and then answer 500 on `body.writer`,
+				// and an array or scalar reached the gate and came back as a policy refusal.
+				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+					sendJson(res, 400, { error: "request body must be a JSON object" });
+					return;
+				}
+				const body = parsed as Record<string, unknown>;
 				rememberClaim(claim, body);
 				// Audited as `memory_write`, the name the MCP tool is audited under, so one
 				// action does not appear in the trail twice under two names. That tool is
