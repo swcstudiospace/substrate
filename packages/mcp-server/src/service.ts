@@ -92,7 +92,7 @@ import {
 	type DriftGitTip,
 	type DriftReport,
 } from "./drift.ts";
-import { checkIdempotencyKey, checkReplayTs, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
+import { checkIdempotencyKey, checkReplayTs, eventHash, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import {
 	GreptimeClient,
@@ -614,6 +614,8 @@ export interface GraphTeachable {
 	content_sha256: string;
 	/** ISO start of the hour of the event's ingest record; null when it has none, so no hour covers it. */
 	hour: string | null;
+	/** True when the event no longer hashes to its stored hash, so its content changed after it was written. */
+	tampered: boolean;
 }
 /**
  * How long after an hour closes it may still anchor before verify fails it.
@@ -4824,12 +4826,17 @@ export class Substrate {
 			const event = rowToEvent(row);
 			if (event.payload.action !== "teachable") continue;
 			const at = ingestedAt.get(event.id);
+			// The stored hash covers the whole event, payload included. A teachable whose content no
+			// longer hashes to it was changed after it was written: its hour's root vouches for the
+			// stored hash, not for the content the evidence reports.
+			const { hash, ...unhashed } = event;
 			teachables.push({
 				event_id: event.id,
 				graph_id: event.graph_id ?? stored,
 				...(event.session_id ? { session_id: event.session_id } : {}),
 				content_sha256: String(event.payload.content_sha256 ?? ""),
 				hour: at === undefined ? null : hourIso(at),
+				tampered: eventHash(unhashed) !== hash,
 			});
 		}
 		return teachables;

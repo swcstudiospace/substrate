@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { NO_POSITION, buildRecord } from "@substrate/audit";
 import { SubstrateInstruments, evaluateSlos } from "@substrate/observability";
 import { escapeHtml, renderEvidenceHtml } from "./html.ts";
-import { buildEvidence, type EvidenceInput } from "./report.ts";
+import { buildEvidence, type EvidenceBundle, type EvidenceInput } from "./report.ts";
 
 function input(overrides: Partial<EvidenceInput> = {}): EvidenceInput {
 	return {
@@ -289,5 +289,40 @@ describe("renderEvidenceHtml", () => {
 		expect(html).toContain('href="https://explorer.solana.com/tx/sig-anchored-1?cluster=devnet"');
 		expect(html).toContain("no ingest record");
 		expect(html).toContain('<span class="pill pill--unknown">not anchored</span>');
+	});
+
+	test("renders a tampered teachable as not anchored, with its reason", () => {
+		const html = renderEvidenceHtml(
+			buildEvidence(
+				input({
+					teachables: [
+						{
+							event_id: "evt_teach_3",
+							graph_id: "ut-abc123-deadbeef",
+							content_sha256: "d".repeat(64),
+							hour: "2026-09-01T10:00:00.000Z",
+							anchored: false,
+							reason: "tampered",
+						},
+					],
+				}),
+			),
+		);
+
+		expect(html).toContain('<span class="pill pill--unknown">not anchored</span>');
+		expect(html).toContain("tampered");
+	});
+
+	test("renders a bundle written before anchors and teachables existed, without throwing", () => {
+		// A `substrate.evidence/v0` bundle from before Phase 41 has neither array. Absent is not empty:
+		// the sections must say the data is unavailable, and the rest of the document must still render.
+		const { anchors: _anchors, teachables: _teachables, ...older } = buildEvidence(input());
+		const withEmptyLists = renderEvidenceHtml(buildEvidence(input()));
+		const html = renderEvidenceHtml(older as EvidenceBundle);
+
+		expect(html).toContain("<h2>Anchors</h2>");
+		expect(html).toContain("<h2>Teachable moments</h2>");
+		expect(html).toContain("pill--intact");
+		expect(html).not.toBe(withEmptyLists);
 	});
 });

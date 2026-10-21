@@ -9,9 +9,17 @@
  * Every interpolated value goes through `escapeHtml`. Graph ids, denial reasons and
  * tool names are all agent-supplied text.
  */
-import type { AnchorState, ChainEvidence, EvidenceBundle } from "./report.ts";
+import type { AnchorEvidence, AnchorState, ChainEvidence, EvidenceBundle, TeachableEvidence } from "./report.ts";
 import { chainStateOf } from "./report.ts";
 import type { SloResult } from "@substrate/observability";
+
+/**
+ * A table row for a section whose data this bundle does not carry. It is not the empty-list row:
+ * "none listed" is a fact about the graph, "unavailable" is a fact about the bundle.
+ */
+function unavailableRow(columns: number, what: string): string {
+	return `<tr><td colspan="${columns}" class="muted">${what} is unavailable from this server: this bundle does not carry it.</td></tr>`;
+}
 
 export function escapeHtml(value: unknown): string {
 	return String(value)
@@ -102,7 +110,12 @@ export function renderEvidenceHtml(bundle: EvidenceBundle): string {
 		)
 		.join("\n");
 
-	const anchorRows = bundle.anchors
+	// A bundle written before anchors and teachables existed carries neither array. Absent is not
+	// empty: an empty list is a fact about the graph, an absent one is a fact about the bundle.
+	const anchors: AnchorEvidence[] | undefined = bundle.anchors;
+	const teachables: TeachableEvidence[] | undefined = bundle.teachables;
+
+	const anchorRows = (anchors ?? [])
 		.map(
 			(anchor) => `<tr>
 			<th scope="row">${escapeHtml(anchor.period_start)}</th>
@@ -114,7 +127,7 @@ export function renderEvidenceHtml(bundle: EvidenceBundle): string {
 		)
 		.join("\n");
 
-	const teachableRows = bundle.teachables
+	const teachableRows = (teachables ?? [])
 		.map(
 			(teachable) => `<tr>
 			<th scope="row"><code>${escapeHtml(teachable.event_id)}</code>${
@@ -123,7 +136,9 @@ export function renderEvidenceHtml(bundle: EvidenceBundle): string {
 					: `<br><span class="muted">session <code>${escapeHtml(teachable.session_id)}</code></span>`
 			}</th>
 			<td>${escapeHtml(teachable.hour ?? "no ingest record")}</td>
-			<td><span class="pill ${teachable.anchored ? "pill--intact" : "pill--unknown"}">${teachable.anchored ? "anchored" : "not anchored"}</span></td>
+			<td><span class="pill ${teachable.anchored ? "pill--intact" : "pill--unknown"}">${teachable.anchored ? "anchored" : "not anchored"}</span>${
+				teachable.reason === undefined ? "" : `<br><span class="muted detail">${escapeHtml(teachable.reason)}</span>`
+			}</td>
 			<td><code class="tx">${escapeHtml(teachable.content_sha256)}</code></td>
 			<td class="detail">${transactionCell(teachable.tx_sig, teachable.explorer_url)}</td>
 		</tr>`,
@@ -286,7 +301,7 @@ export function renderEvidenceHtml(bundle: EvidenceBundle): string {
 	<section>
 		<table>
 			<thead><tr><th>Hour</th><th>State</th><th class="num">Events</th><th>Transaction</th><th>Reason</th></tr></thead>
-			<tbody>${anchorRows || '<tr><td colspan="5" class="muted">No hour of this graph is listed.</td></tr>'}</tbody>
+			<tbody>${anchorRows || (anchors === undefined ? unavailableRow(5, "Anchor data") : '<tr><td colspan="5" class="muted">No hour of this graph is listed.</td></tr>')}</tbody>
 		</table>
 		<p class="muted detail"><code>anchored</code>: the hour's devnet transaction reads back and its memo recomputes to
 			the hour's root. <code>pending</code>: not yet due. <code>unverified</code>: could not be checked, and fails closed.</p>
@@ -296,7 +311,7 @@ export function renderEvidenceHtml(bundle: EvidenceBundle): string {
 	<section>
 		<table>
 			<thead><tr><th>Event</th><th>Hour</th><th>State</th><th>Content digest</th><th>Transaction</th></tr></thead>
-			<tbody>${teachableRows || '<tr><td colspan="5" class="muted">No teachable moment is recorded for this graph.</td></tr>'}</tbody>
+			<tbody>${teachableRows || (teachables === undefined ? unavailableRow(5, "Teachable data") : '<tr><td colspan="5" class="muted">No teachable moment is recorded for this graph.</td></tr>')}</tbody>
 		</table>
 		<p class="muted detail">A teachable is anchored when its hour is anchored: its event sits inside that hour's root.</p>
 	</section>

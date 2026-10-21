@@ -7,7 +7,7 @@
  * then reads the bundle through the production `verifyGraph` with the fake read-back
  * injected. What is asserted is what a reader of the bundle sees.
  */
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test";
 import { formatMemo, hourEnd, merkleRootHex } from "@substrate/ledger";
 import { DEVNET_GENESIS_HASH } from "./anchor.ts";
 import { loadConfig } from "./config.ts";
@@ -15,7 +15,7 @@ import { buildGraphEvidence, createObservability } from "./observe.ts";
 import { FakeStore } from "./memory-write.test.ts";
 import { Substrate } from "./service.ts";
 import { ACCEPTED_TEACHABLE } from "./teachable.fixtures.ts";
-import type { MemorySearch, MemorySearchPage, SubstrateEvent } from "./types.ts";
+import type { MemorySearch, MemorySearchPage, MemoryWriteRequest, SubstrateEvent } from "./types.ts";
 
 const H = Date.UTC(2026, 8, 1, 10);
 const HOUR = 3_600_000;
@@ -26,6 +26,15 @@ const PUBKEY = "TestPubkey1111111111111111111111111111111";
 const SIG = "sig-scratch-41";
 const EXPLORER = `https://explorer.solana.com/tx/${SIG}?cluster=devnet`;
 const hourIso = (ms: number) => new Date(ms).toISOString();
+
+const HOURS = 5;
+/** What one devnet read-back costs on the virtual clock: `HOURS` of them outlast the CLI's old 1,500 ms wait. */
+const READ_MS = 350;
+const OLD_BUDGET_MS = 1_500;
+const CLOCK_START = Date.UTC(2026, 8, 1, 12);
+/** Late enough that every hour of the fixture is closed for the ingest lag. */
+const NOW_LATE = H + (HOURS + 1) * HOUR;
+const hourAt = (index: number) => H + index * HOUR;
 
 /** A `FakeStore` that also answers prefix searches, newest first. */
 class ScratchIndex extends FakeStore {
@@ -42,7 +51,7 @@ class ScratchIndex extends FakeStore {
 }
 
 interface StoredRow extends SubstrateEvent {
-	/** Fixed ingest clock: every appended event lands in hour H. */
+	/** The ingest clock: every appended event lands in the hour set for it. */
 	ingestedAt: number;
 }
 
@@ -64,26 +73,31 @@ interface ScratchLedger {
 		anchorForPeriod: (hour: number) => Promise<Record<string, unknown> | null>;
 	};
 	rows: Map<string, StoredRow>;
-	/** The memo the frozen anchor row carries, for the fake read-back. */
-	frozenMemo: () => string | null;
-	/** Freeze the anchor row the way the hourly job would have written it. */
-	anchorHour: () => void;
+	/** The memo the frozen anchor row for `hour` carries, for the fake read-back. Hour H by default. */
+	frozenMemo: (hour?: number) => string | null;
+	/** The memo of the frozen anchor row that carries this transaction signature. */
+	memoOf: (signature: string) => string | null;
+	/** Freeze the anchor row for `hour` the way the hourly job would have written it. Hour H by default. */
+	anchorHour: (hour?: number) => void;
+	/** Ingest every event from here on into this hour. */
+	ingestHour: (hour: number) => void;
 }
 
 /**
- * A scratch ledger: events keep their own timestamps (so chains verify), while ingest
- * records land on a fixed clock in hour H (so digests and the hour report are deterministic).
+ * A scratch ledger: events keep their own timestamps (so chains verify), while ingest records land in the
+ * hour set by `ingestHour` (hour H until it is changed), on a clock that advances per event.
  */
 function scratchLedger(): ScratchLedger {
 	const rows = new Map<string, StoredRow>();
 	const tips = new Map<string, string>();
 	const records: IngestRecord[] = [];
-	let anchored: Record<string, unknown> | null = null;
+	const anchored = new Map<number, Record<string, unknown>>();
 	let clock = 0;
+	let hourBase = H;
 
-	const leaves = () =>
+	const leaves = (hour: number) =>
 		records
-			.filter((record) => record.ingested_at >= H && record.ingested_at < H + HOUR)
+			.filter((record) => record.ingested_at >= hour && record.ingested_at < hour + HOUR)
 			.sort((a, b) => a.ingested_at - b.ingested_at)
 			.map((record) => ({ event_id: record.event_id, hash: rows.get(record.event_id)?.hash ?? "" }));
 
@@ -92,7 +106,7 @@ function scratchLedger(): ScratchLedger {
 		lastHash: async (sessionId: string) => tips.get(sessionId) ?? null,
 		insertEvent: async (event: SubstrateEvent) => {
 			clock += 1;
-			const ingestedAt = H + 1000 * clock;
+			const ingestedAt = hourBase + 1000 * clock;
 			rows.set(event.id, { ...event, ingestedAt });
 			if (event.session_id) tips.set(event.session_id, event.hash);
 			records.push({ event_id: event.id, event_ts: Date.parse(event.ts), ingested_at: ingestedAt });
@@ -106,36 +120,74 @@ function scratchLedger(): ScratchLedger {
 			return records.filter((record) => ids.has(record.event_id));
 		},
 		firstIngestMs: async () => H,
-		hourLeaves: async (hour: number) => (hour === H ? leaves() : []),
-		anchorForPeriod: async (hour: number) => (hour === H ? anchored : null),
+		hourLeaves: async (hour: number) => leaves(hour),
+		anchorForPeriod: async (hour: number) => anchored.get(hour) ?? null,
 	};
 
 	return {
 		greptime,
 		rows,
-		frozenMemo: () => (anchored ? String(anchored.memo) : null),
-		anchorHour: () => {
-			const batch = leaves();
+		frozenMemo: (hour = H) => {
+			const row = anchored.get(hour);
+			return row ? String(row.memo) : null;
+		},
+		memoOf: (signature: string) => {
+			for (const row of anchored.values()) {
+				if (row.tx_sig === signature) return String(row.memo);
+			}
+			return null;
+		},
+		anchorHour: (hour = H) => {
+			const batch = leaves(hour);
 			const root = merkleRootHex(batch.map((leaf) => leaf.hash));
-			anchored = {
-				period_start: hourIso(H),
-				period_end: hourIso(hourEnd(H)),
+			anchored.set(hour, {
+				period_start: hourIso(hour),
+				period_end: hourIso(hourEnd(hour)),
 				root,
 				event_count: batch.length,
-				memo: formatMemo({ periodStartMs: H, rootHex: root, count: batch.length }),
-				tx_sig: SIG,
+				memo: formatMemo({ periodStartMs: hour, rootHex: root, count: batch.length }),
+				// The first hour keeps `SIG`, which the single-hour tests assert.
+				tx_sig: hour === H ? SIG : `${SIG}-${(hour - H) / HOUR}`,
 				signer: PUBKEY,
 				cluster: "devnet",
 				slot: 42,
 				anchored_at: hourIso(NOW),
-			};
+			});
+		},
+		ingestHour: (hour: number) => {
+			hourBase = hour;
 		},
 	};
 }
 
-/** A fake devnet read-back: a genesis hash, and whatever `transactionMemo` answers. */
-function fakeRpc(transactionMemo: () => Promise<unknown>) {
+/** A fake devnet read-back: a genesis hash, and whatever `transactionMemo` answers for a signature. */
+function fakeRpc(transactionMemo: (signature: string) => Promise<unknown>) {
 	return { getGenesisHash: async () => DEVNET_GENESIS_HASH, transactionMemo };
+}
+
+/**
+ * The verify budget reads `Date.now()`. Each devnet read-back advances a virtual clock by `READ_MS` instead of
+ * waiting, so the budget's arithmetic runs for real without a wall-clock sleep.
+ */
+let elapsedMs = 0;
+const restorers: Array<() => void> = [];
+afterEach(() => {
+	for (const restore of restorers.splice(0)) restore();
+});
+
+/** Start the virtual clock at zero: from here `Date.now()` moves only when a read-back advances it. */
+function startVirtualClock(): void {
+	elapsedMs = 0;
+	const clock = spyOn(Date, "now").mockImplementation(() => CLOCK_START + elapsedMs);
+	restorers.push(() => clock.mockRestore());
+}
+
+/** A devnet read-back that costs `READ_MS` on the virtual clock, then answers with the memo that signature froze. */
+function timedRpc(ledger: ScratchLedger) {
+	return fakeRpc(async (signature) => {
+		elapsedMs += READ_MS;
+		return signedMemo(ledger.memoOf(signature));
+	});
 }
 
 /** The signed memo the anchored row describes, as devnet would return it. */
@@ -143,12 +195,15 @@ function signedMemo(memo: string | null) {
 	return { memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: 1_790_000_000 };
 }
 
-/** One scratch world: a ledger, a substrate over it, and an observability for the audit side. */
-async function scratchWorld() {
+/**
+ * One scratch world: a ledger, a substrate over it, and an observability for the audit side. `verifyTimeoutMs`
+ * is the whole-verify budget the substrate runs under; the default is the configured one.
+ */
+async function scratchWorld(verifyTimeoutMs?: number) {
 	const ledger = scratchLedger();
 	const base = loadConfig({});
 	const substrate = new Substrate(
-		{ ...base, solana: { ...base.solana, pubkey: PUBKEY } },
+		{ ...base, solana: { ...base.solana, pubkey: PUBKEY }, verifyTimeoutMs: verifyTimeoutMs ?? base.verifyTimeoutMs },
 		{ index: new ScratchIndex() as never, greptime: ledger.greptime as never },
 	);
 	const observed = createObservability(base);
@@ -162,15 +217,25 @@ afterAll(() => {
 	for (const close of closers) close();
 });
 
-/** Write the accepted teachable into the scratch ledger, for this graph and session. */
-async function writeTeachable(substrate: Substrate): Promise<void> {
+/** Write the accepted teachable into the scratch ledger, for this graph and session. `overrides` make a further one. */
+async function writeTeachable(substrate: Substrate, overrides: Partial<MemoryWriteRequest> = {}): Promise<void> {
 	const written = await substrate.writeMemory({
 		...ACCEPTED_TEACHABLE.request,
 		scope: `graph:${GRAPH}`,
 		graph_id: GRAPH,
 		session_id: SESSION,
+		...overrides,
 	});
 	expect(written.outcome).toBe("accepted");
+}
+
+/** `HOURS` closed hours, each holding one teachable and frozen by the hourly job. */
+async function writeAnchoredTeachables(ledger: ScratchLedger, substrate: Substrate): Promise<void> {
+	for (let index = 0; index < HOURS; index++) {
+		ledger.ingestHour(hourAt(index));
+		await writeTeachable(substrate, { subject: `teachable:budget-${index}`, text: `retry budget for hop ${index}` });
+		ledger.anchorHour(hourAt(index));
+	}
 }
 
 describe("evidence bundle anchors", () => {
@@ -247,6 +312,42 @@ describe("evidence bundle anchors", () => {
 		expect(bundle.anchors[0]?.status).toBe("unverified");
 		expect(bundle.anchors[0]?.reason).toContain("recomputed");
 	});
+
+	test("a bundle of more hours than the old 1,500 ms budget allowed anchors every hour", async () => {
+		const { ledger, substrate, observed } = await scratchWorld();
+		await writeAnchoredTeachables(ledger, substrate);
+
+		startVirtualClock();
+		const bundle = await buildGraphEvidence(observed, substrate, GRAPH, [], undefined, {
+			rpc: timedRpc(ledger) as never,
+			now: NOW_LATE,
+		});
+
+		// The read-backs alone cost more than the old wait, so a client that stopped at 1,500 ms saw no bundle.
+		expect(elapsedMs).toBeGreaterThan(OLD_BUDGET_MS);
+		expect(bundle.anchors).toHaveLength(HOURS);
+		expect(bundle.anchors.every((anchor) => anchor.status === "anchored")).toBe(true);
+		expect(bundle.teachables).toHaveLength(HOURS);
+		expect(bundle.teachables.every((teachable) => teachable.anchored)).toBe(true);
+	});
+
+	test("with the old 1,500 ms budget, the hour it cannot reach is unverified with a reason, and still listed", async () => {
+		const { ledger, substrate, observed } = await scratchWorld(OLD_BUDGET_MS);
+		await writeAnchoredTeachables(ledger, substrate);
+
+		startVirtualClock();
+		const bundle = await buildGraphEvidence(observed, substrate, GRAPH, [], undefined, {
+			rpc: timedRpc(ledger) as never,
+			now: NOW_LATE,
+		});
+
+		// Four read-backs fit inside the budget less its response margin; the fifth hour is past it.
+		expect(bundle.anchors).toHaveLength(HOURS);
+		expect(bundle.anchors[HOURS - 2]?.status).toBe("anchored");
+		expect(bundle.anchors[HOURS - 1]?.status).toBe("unverified");
+		expect(bundle.anchors[HOURS - 1]?.reason).toBeTruthy();
+		expect(bundle.teachables.find((teachable) => teachable.hour === hourIso(hourAt(HOURS - 1)))?.anchored).toBe(false);
+	});
 });
 
 describe("evidence bundle teachable moments", () => {
@@ -278,5 +379,29 @@ describe("evidence bundle teachable moments", () => {
 			explorer_url: EXPLORER,
 		});
 		expect(storedDigest).toMatch(/^[0-9a-f]{64}$/);
+	});
+
+	test("a teachable altered after its hour was anchored is not anchored, and an untouched teachable still is", async () => {
+		const { ledger, substrate, observed } = await scratchWorld();
+		await writeTeachable(substrate);
+		await writeTeachable(substrate, { subject: "teachable:second-budget", text: "the second hop gets a budget of two" });
+		ledger.anchorHour();
+
+		const [altered, untouched] = [...ledger.rows.values()].filter((row) => row.payload.action === "teachable");
+		if (!altered || !untouched) throw new Error("both teachable events should be written");
+		// The hour is anchored over stored hashes. This changes one event's content and leaves its stored hash alone.
+		ledger.rows.set(altered.id, { ...altered, payload: { ...altered.payload, content_sha256: "e".repeat(64) } });
+
+		const bundle = await buildGraphEvidence(observed, substrate, GRAPH, [], undefined, {
+			rpc: fakeRpc(async () => signedMemo(ledger.frozenMemo())) as never,
+			now: NOW,
+		});
+
+		expect(bundle.anchors[0]?.status).toBe("anchored");
+		expect(bundle.teachables.find((teachable) => teachable.event_id === altered.id)).toMatchObject({
+			anchored: false,
+			reason: "tampered",
+		});
+		expect(bundle.teachables.find((teachable) => teachable.event_id === untouched.id)).toMatchObject({ anchored: true });
 	});
 });

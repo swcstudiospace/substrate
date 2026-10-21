@@ -875,6 +875,9 @@ export async function buildGraphEvidence(
 	let verdict: VerifyVerdict | null = null;
 	let verifyFailure = "";
 	try {
+		// The hour loop is bounded by SUBSTRATE_VERIFY_TIMEOUT_MS (`verifyTimeoutMs`). An hour past that
+		// budget reads `unverified` with its reason, so the bundle still arrives; the CLI waits that budget
+		// plus a margin for this request (`cmdEvidence`).
 		verdict = await substrate.verifyGraph(graphId, { ...verify, anchors: true });
 	} catch (cause) {
 		verifyFailure = redact(String(cause));
@@ -1001,7 +1004,9 @@ function anchorEvidenceOf(hour: HourReport): AnchorEvidence {
 
 /**
  * A graph's teachables, each with the anchor of its hour (D41-4). A teachable is anchored when its
- * hour is: the hour's root holds the event. An event with no hour has no anchor.
+ * hour is, and its content still hashes to what the ledger stored: the hour's root holds the stored
+ * hash, so a teachable altered after its hour was anchored is not anchored, whatever the hour says.
+ * An event with no hour has no anchor.
  */
 function teachableEvidenceOf(teachables: GraphTeachable[], anchors: AnchorEvidence[]): TeachableEvidence[] {
 	const byHour = new Map(anchors.map((anchor) => [anchor.period_start, anchor]));
@@ -1013,7 +1018,8 @@ function teachableEvidenceOf(teachables: GraphTeachable[], anchors: AnchorEviden
 			...(teachable.session_id ? { session_id: teachable.session_id } : {}),
 			content_sha256: teachable.content_sha256,
 			hour: teachable.hour,
-			anchored: anchor?.status === "anchored",
+			anchored: !teachable.tampered && anchor?.status === "anchored",
+			...(teachable.tampered ? { reason: "tampered" } : {}),
 			...(anchor?.tx_sig && anchor.explorer_url ? { tx_sig: anchor.tx_sig, explorer_url: anchor.explorer_url } : {}),
 		};
 	});

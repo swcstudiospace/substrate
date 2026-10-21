@@ -88,6 +88,8 @@ export interface TeachableEvidence {
 	/** The transaction of `hour`, when that hour has one. */
 	tx_sig?: string;
 	explorer_url?: string;
+	/** Why the event is not anchored although its hour is, when known: `tampered` when its content no longer matches the ledger's hash. */
+	reason?: string;
 }
 
 export interface EvidenceInput {
