@@ -4700,7 +4700,8 @@ describe("boot endpoint notes (phase 48)", () => {
 		await bootSubstrate(loadConfig(ALL_PLANES), greptime).emitDbEndpoints();
 
 		expect(emitted).toHaveLength(3);
-		const serialized = JSON.stringify(emitted);
+		// Payloads only: ids and hashes are random and can contain the five-digit port text.
+		const serialized = JSON.stringify(emitted.map((event) => event.payload));
 		for (const secret of [
 			"greptime.test.invalid",
 			"pg.test.invalid",
