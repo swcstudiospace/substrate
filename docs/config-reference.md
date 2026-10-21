@@ -104,6 +104,10 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_INDEX_SCRATCH_URL` | secret-ref | none | scratch postgres URL | substrate index restore needs --scratch. See `docs/runbooks/index-archive.md` | mcp-server/index-run.ts | yes |
 | `SUBSTRATE_INDEX_TUNE` | mode | off | off \| apply (anything but apply is off) | off: no storage tune; anything but apply is off. See `docs/runbooks/index-archive.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_INDEX_VOLUME_BYTES` | number | none | bytes | no capacity runway row (the ceiling is unknown). See `docs/observability.md` | observability/config.ts | yes |
+| `SUBSTRATE_PLANNING_ROOT` | path | none | absolute checkout path | planning plane disabled: nothing under .planning/ is read and no default path exists | mcp-server/planning/config.ts | yes |
+| `SUBSTRATE_PLANNING_PRESENCE_TTL_S` | number | 90 | 1..86400 | 90 s: a session with no heartbeat for longer is stale | mcp-server/planning/config.ts | yes |
+| `SUBSTRATE_PLANNING_MAX_FILES` | number | 500 | 1..10000 | 500 documents per planning index; the rest are counted as truncated | mcp-server/planning/config.ts | yes |
+| `SUBSTRATE_PLANNING_MAX_BYTES` | number | 262144 | 1024..4194304 | 256 KiB per document; a larger document is an error record | mcp-server/planning/config.ts | yes |
 
 ## Cache (loopback redis)
 
