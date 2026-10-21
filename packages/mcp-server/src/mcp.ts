@@ -398,7 +398,9 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"keyset pair `(before, before_id)`, so ties at a page boundary are neither skipped nor repeated. `next` " +
 				"is `{ before, before_id }` whenever the page is full — pass both back for the next page — and null at " +
 				"the end. `query` may be left out when `subject_prefix` is given, to list every entry under a subject " +
-				"family. To page a plain query from the top, give `before` a time later than any entry.",
+				"family. To page a plain query from the top, give `before` a time later than any entry. " +
+				"With `graph_linked` the reply lists each returned graph's newest ledger events; with `causal` each entry " +
+				"carries the events that preceded it in its session, which is not proof of cause.",
 			inputSchema: {
 				query: z.string().optional().describe("full-text over bodies; required unless `subject_prefix` is given"),
 				scope: z.string().optional(),
@@ -432,6 +434,14 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					.min(1)
 					.optional()
 					.describe("cursor tie-break: with `before`, also entries created at it whose id sorts below this"),
+				graph_linked: z
+					.boolean()
+					.optional()
+					.describe("add `graph_links`: the newest ledger events of each returned entry's graph, with an untrusted notice"),
+				causal: z
+					.boolean()
+					.optional()
+					.describe("add `causal_chain` to each entry with a `source_event`: the events that preceded it in its session, not proof of cause"),
 			},
 			annotations: { readOnlyHint: true },
 		},
@@ -452,6 +462,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 						callerSurface ?? "unattributed",
 						request.include_expired,
 						request.repo,
+						{ graphLinked: request.graph_linked, causal: request.causal },
 					),
 				);
 			} catch (cause) {
