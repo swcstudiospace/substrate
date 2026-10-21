@@ -137,6 +137,10 @@ import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachab
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth, type HindsightConfig } from "./planes/hindsight.ts";
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
 import { RailwayClient } from "./railway.ts";
+import { nodePlanningFs } from "./planning/fs.ts";
+import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
+import { DragonflyPresenceStore } from "./planning/presence-dragonfly.ts";
+import { PlanningReader, type PlanningReaderDeps } from "./planning/read.ts";
 import type { FabricSources } from "./fabric/types.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
@@ -1236,6 +1240,12 @@ function productionEventBus(config: SubstrateConfig): EventBus | null {
 	});
 }
 
+/** The presence store (phase 52): Dragonfly on the cache endpoint, or null when that endpoint is unset or refused. Connects on first use. */
+function productionPresence(config: SubstrateConfig): DragonflyPresenceStore | null {
+	if (!config.dragonflyUrl || config.dragonflyRefused !== null) return null;
+	return new DragonflyPresenceStore(dragonflyPresenceBackend(config.dragonflyUrl, config.cacheConnectTimeoutMs));
+}
+
 export class Substrate {
 	readonly index: IndexStore | null;
 	readonly greptime: GreptimeClient | null;
@@ -1338,6 +1348,8 @@ export class Substrate {
 	private readonly emitChains = new Map<string, Promise<void>>();
 	/** Phase 50: the Dragonfly wake-up hints; null while `SUBSTRATE_EVENT_BUS` is off, or its endpoint is missing or refused. */
 	readonly eventBus: EventBus | null;
+	/** Phase 52: the planning reads behind `planning_status` and `planning_sessions`. Disabled unless `SUBSTRATE_PLANNING_ROOT` is set. */
+	readonly planning: PlanningReader;
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
@@ -1356,6 +1368,8 @@ export class Substrate {
 			railway?: RailwayClient;
 			/** Tests inject the bus through this factory; production builds it from config. */
 			eventBus?: () => EventBus | null;
+			/** Tests inject the planning filesystem, presence store and ledger write; production builds them from config. */
+			planning?: Partial<Omit<PlanningReaderDeps, "settings">>;
 		},
 		observer: SubstrateObserver = {},
 	) {
@@ -1422,6 +1436,14 @@ export class Substrate {
 				gate: this.planes.gate("cache"),
 			});
 		this.eventBus = stores?.eventBus !== undefined ? stores.eventBus() : productionEventBus(config);
+		// Phase 52 (SOTA-08): the planning reads. Presence rides the cache endpoint; with none, the sessions read says so.
+		const planningDeps = stores?.planning ?? {};
+		this.planning = new PlanningReader({
+			settings: config.planning,
+			fs: planningDeps.fs ?? nodePlanningFs(),
+			presence: planningDeps.presence !== undefined ? planningDeps.presence : productionPresence(config),
+			emit: planningDeps.emit ?? (async (event: EventInput) => (await this.emit(event)).stored),
+		});
 		// uplift-2 R1
 		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays, graphRead: config.requestPath.briefGraphRead };
 		this.narrowBumps = config.requestPath.cacheBumpScope === "narrow";
