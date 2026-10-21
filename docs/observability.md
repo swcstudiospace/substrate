@@ -357,9 +357,12 @@ contract check beside it.
 ### Predictive SLO rows
 
 `GET /slo` also carries a `forecast` key with one row per objective: `brief.p95`,
-`emit.success`, `lease.steal_rate` and `quarantine.rate`. Each row projects the
-objective's value over a horizon and reports whether that projection crosses the
-objective's target.
+`emit.success`, `lease.steal_rate` and `quarantine.rate`. Each row projects the value its
+history measures over a horizon and reports whether that projection crosses the
+objective's target. Each row carries a `basis`: `service` for a service-wide history
+(`emit.success`, `lease.steal_rate`, `quarantine.rate`), and `worst-surface` for
+`brief.p95`, whose history is the largest surface value in each bucket, not a
+service-wide figure.
 
 The source is the durable metrics history that `/slo/history` reads. The forecast
 therefore needs `SUBSTRATE_METRICS_HISTORY=on` and a ledger. With history off, every

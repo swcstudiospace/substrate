@@ -154,7 +154,7 @@ import {
 	type RecallLook,
 	type RecallSnapshot,
 } from "./recall-snapshot.ts";
-import { RepoAccess, startPreloader, type Preloader } from "./preload.ts";
+import { RepoAccess, requireComplete, startPreloader, type Preloader } from "./preload.ts";
 import {
 	createExecFileRunner,
 	createSkillProposer,
@@ -1450,19 +1450,18 @@ export class Substrate {
 	 */
 	async briefDetailed(request: BriefRequest, requestedProfile?: BriefProfile, bearerSurface?: string | null): Promise<BriefDetail> {
 		// Phase 47 (D47-d): one count per caller's brief request for the preloader. Off, nothing is counted.
-		if (this.config.cachePreload.enabled) {
-			const preloadRepo = normalizeIdentifier(request.repo);
-			if (preloadRepo !== null) this.repoAccess.record(preloadRepo, Date.now(), request.surface);
+		if (this.config.cachePreload.enabled && request.repo !== undefined && normalizeIdentifier(request.repo) !== null) {
+			this.repoAccess.record(Date.now(), { ...request, repo: request.repo });
 		}
-		return this.briefUncounted(request, requestedProfile, bearerSurface, true);
+		return this.briefUncounted(request, requestedProfile, bearerSurface, true, false);
 	}
 
 	/**
 	 * The brief compose behind `briefDetailed`, with no preload count. `observed` is true for a caller's request, and only
 	 * then is its latency and recall metric recorded; the preloader passes false, so its warm-ups are neither demand nor a
-	 * caller's wait. It reads and writes the brief cache exactly as a request does.
+	 * caller's wait. It reads and writes the brief cache as a request does; a `refresh` warm-up skips the fresh read, so it composes and stores over a live entry.
 	 */
-	private async briefUncounted(request: BriefRequest, requestedProfile: BriefProfile | undefined, bearerSurface: string | null | undefined, observed: boolean): Promise<BriefDetail> {
+	private async briefUncounted(request: BriefRequest, requestedProfile: BriefProfile | undefined, bearerSurface: string | null | undefined, observed: boolean, refresh: boolean): Promise<BriefDetail> {
 		const started = performance.now();
 		let ok = false;
 		try {
@@ -1542,6 +1541,7 @@ export class Substrate {
 			};
 			const encoded = await this.cache.getOrLoad({
 				klass: "brief",
+				refresh,
 				surface: request.surface,
 				// `shape` keeps this entry apart from the plain-text values older
 				// processes wrote under the same class, so neither reads the other's.
@@ -2613,8 +2613,11 @@ export class Substrate {
 		this.preloader = startPreloader({
 			settings: this.config.cachePreload,
 			access: this.repoAccess,
-			// The surface stands as its own bearer, as a request for it does, so the warmed keys are the keys a request reads.
-			compose: (repo, surface) => this.briefUncounted({ repo, surface }, undefined, surface, false),
+			// The request is repeated as last named, branch and graph_id too, so the warmed keys are the keys a request reads. Its surface stands as its own bearer, as a request for it does.
+			// The warm-up refreshes its entry, and a brief that did not compose completely throws, so the tick counts it.
+			compose: async (shape) => {
+				requireComplete(await this.briefUncounted(shape, undefined, shape.surface, false, true), shape);
+			},
 			now: () => Date.now(),
 			intervalMs: this.config.cachePreload.intervalS * 1000,
 		});

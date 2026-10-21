@@ -16,7 +16,7 @@ covered_files: ["packages/observability/src/forecast.ts", "packages/observabilit
 | Typecheck | `bunx tsc --noEmit` | exit 0 |
 | Config reference | `bun run config:reference -- --check` | up to date |
 | Targeted | forecast, preload, slo-history (11), brief-recall | pass |
-| Full bun suite | `bun test` against `substrate_test_p47` | 5911 pass, 2 skip, 0 fail (5913 tests, 221 files) |
+| Full bun suite | `bun test` against `substrate_test_p47`, on the review-fixed tree | 5916 pass, 2 skip, 0 fail (5918 tests, 221 files) |
 | Repo locks | `bun run check:phase-close` | pass: 4 lock files green; EVENT_KINDS unchanged at 12; SURFACES unchanged at 27 |
 
 ## Acceptance criteria

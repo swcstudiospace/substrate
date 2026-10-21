@@ -1,15 +1,20 @@
 import { describe, expect, test } from "bun:test";
-import { ConfigError, loadCachePreloadSettings, type CachePreloadSettings } from "./config.ts";
-import { PRELOAD_REPO_CAP, PRELOAD_WINDOW_MS, RepoAccess, startPreloader, type PreloadTimer, type PreloadTimers } from "./preload.ts";
+import { ConfigError, loadCachePreloadSettings, loadConfig, type CachePreloadSettings } from "./config.ts";
+import { PRELOAD_REPO_CAP, PRELOAD_WINDOW_MS, RepoAccess, requireComplete, startPreloader, type BriefShape, type PreloadTimer, type PreloadTimers } from "./preload.ts";
 import type { Surface } from "./types.ts";
 
 const HOUR = PRELOAD_WINDOW_MS;
 const INTERVAL_MS = 300_000;
 const ON: CachePreloadSettings = { enabled: true, top: 2, intervalS: 300 };
 
+/** The brief request a warm-up repeats for `repo`: no branch or graph_id unless given. */
+function shapeOf(repo: string, surface: Surface = "cursor", extra: { branch?: string; graph_id?: string } = {}): BriefShape {
+	return { repo, surface, ...extra };
+}
+
 /** Record `times` requests for `repo`, one per millisecond from `at`. */
 function recordMany(access: RepoAccess, repo: string, times: number, at: number, surface: Surface = "cursor"): void {
-	for (let i = 0; i < times; i += 1) access.record(repo, at + i, surface);
+	for (let i = 0; i < times; i += 1) access.record(at + i, shapeOf(repo, surface));
 }
 
 /** The repo names of a `topRepos` result, in its order. */
@@ -56,8 +61,8 @@ describe("RepoAccess", () => {
 		const access = new RepoAccess();
 		recordMany(access, "a", 3, 1);
 		recordMany(access, "b", 2, 4);
-		access.record("c", 6, "cursor");
-		access.record("d", 7, "cursor");
+		access.record(6, shapeOf("c"));
+		access.record(7, shapeOf("d"));
 		expect(repoNames(access.topRepos(2, 10))).toEqual(["a", "b"]);
 		// c and d tie on one request; the more recently requested one ranks first.
 		expect(repoNames(access.topRepos(3, 10))).toEqual(["a", "b", "d"]);
@@ -66,8 +71,8 @@ describe("RepoAccess", () => {
 
 	test("requests older than an hour drop out, and so does the repo once none is left", () => {
 		const access = new RepoAccess();
-		access.record("stale", 0, "cursor");
-		access.record("recent", HOUR - 1, "cursor");
+		access.record(0, shapeOf("stale"));
+		access.record(HOUR - 1, shapeOf("recent"));
 		expect(repoNames(access.topRepos(5, HOUR - 1))).toEqual(["recent", "stale"]);
 		// At exactly one hour the stale request is no longer inside the window.
 		expect(repoNames(access.topRepos(5, HOUR))).toEqual(["recent"]);
@@ -76,10 +81,10 @@ describe("RepoAccess", () => {
 
 	test("the cap evicts the least recently seen repo, not the least requested", () => {
 		const access = new RepoAccess();
-		for (let i = 0; i < PRELOAD_REPO_CAP; i += 1) access.record(`r${i}`, i + 1, "cursor");
+		for (let i = 0; i < PRELOAD_REPO_CAP; i += 1) access.record(i + 1, shapeOf(`r${i}`));
 		// r0 is seen again, so r1 becomes the least recently seen.
-		access.record("r0", 1_000, "cursor");
-		access.record("fresh", 1_001, "cursor");
+		access.record(1_000, shapeOf("r0"));
+		access.record(1_001, shapeOf("fresh"));
 		expect(access.size()).toBe(PRELOAD_REPO_CAP);
 		const kept = repoNames(access.topRepos(PRELOAD_REPO_CAP + 1, 1_001));
 		expect(kept).toContain("r0");
@@ -88,29 +93,26 @@ describe("RepoAccess", () => {
 		expect(kept.length).toBe(PRELOAD_REPO_CAP);
 	});
 
-	test("topRepos reports the surface last named for each repo", () => {
+	test("topRepos reports the brief request last named for each repo", () => {
 		const access = new RepoAccess();
-		access.record("a", 0, "cursor");
-		access.record("a", 1, "hermes");
-		access.record("b", 2, "claude-code");
-		expect(access.topRepos(2, 3)).toEqual([
-			{ repo: "a", surface: "hermes" },
-			{ repo: "b", surface: "claude-code" },
-		]);
+		access.record(0, shapeOf("a", "cursor"));
+		access.record(1, shapeOf("a", "hermes"));
+		access.record(2, shapeOf("b", "claude-code"));
+		expect(access.topRepos(2, 3)).toEqual([shapeOf("a", "hermes"), shapeOf("b", "claude-code")]);
 	});
 });
 
 describe("startPreloader", () => {
 	test("switch off starts no timer and never calls compose", () => {
 		const access = new RepoAccess();
-		access.record("a", 0, "cursor");
+		access.record(0, shapeOf("a"));
 		const timers = new FakeTimers();
 		const calls: string[] = [];
 		const preloader = startPreloader({
 			settings: { enabled: false, top: 3, intervalS: 300 },
 			access,
-			compose: async (repo) => {
-				calls.push(repo);
+			compose: async (shape) => {
+				calls.push(shape.repo);
 			},
 			now: () => 0,
 			intervalMs: INTERVAL_MS,
@@ -126,15 +128,15 @@ describe("startPreloader", () => {
 		const access = new RepoAccess();
 		recordMany(access, "a", 3, 0);
 		recordMany(access, "b", 2, 10);
-		access.record("c", 20, "cursor");
-		access.record("d", 21, "cursor");
+		access.record(20, shapeOf("c"));
+		access.record(21, shapeOf("d"));
 		const timers = new FakeTimers();
 		const calls: string[] = [];
 		startPreloader({
 			settings: ON,
 			access,
-			compose: async (repo) => {
-				calls.push(repo);
+			compose: async (shape) => {
+				calls.push(shape.repo);
 			},
 			now: () => 30,
 			intervalMs: INTERVAL_MS,
@@ -146,16 +148,16 @@ describe("startPreloader", () => {
 
 	test("a tick passes each repo with the surface last named for it", async () => {
 		const access = new RepoAccess();
-		access.record("a", 0, "cursor");
-		access.record("a", 1, "hermes");
-		access.record("b", 2, "claude-code");
+		access.record(0, shapeOf("a", "cursor"));
+		access.record(1, shapeOf("a", "hermes"));
+		access.record(2, shapeOf("b", "claude-code"));
 		const timers = new FakeTimers();
 		const calls: Array<[string, Surface]> = [];
 		startPreloader({
 			settings: ON,
 			access,
-			compose: async (repo, surface) => {
-				calls.push([repo, surface]);
+			compose: async (shape) => {
+				calls.push([shape.repo, shape.surface]);
 			},
 			now: () => 3,
 			intervalMs: INTERVAL_MS,
@@ -166,6 +168,26 @@ describe("startPreloader", () => {
 			["a", "hermes"],
 			["b", "claude-code"],
 		]);
+	});
+
+	test("a tick composes the request last named for a repo, its branch and graph_id included", async () => {
+		const access = new RepoAccess();
+		access.record(0, shapeOf("a", "cursor"));
+		access.record(1, shapeOf("a", "cursor", { branch: "feature/x", graph_id: "g-1" }));
+		const timers = new FakeTimers();
+		const calls: BriefShape[] = [];
+		startPreloader({
+			settings: ON,
+			access,
+			compose: async (shape) => {
+				calls.push(shape);
+			},
+			now: () => 2,
+			intervalMs: INTERVAL_MS,
+			timers,
+		});
+		await timers.fire();
+		expect(calls).toEqual([{ repo: "a", surface: "cursor", branch: "feature/x", graph_id: "g-1" }]);
 	});
 
 	test("one interval is owned, it is unref'd, and it runs at the configured period", () => {
@@ -185,7 +207,7 @@ describe("startPreloader", () => {
 
 	test("a compose failure is counted, logged once for the tick, and the next tick still runs", async () => {
 		const access = new RepoAccess();
-		access.record("a", 0, "cursor");
+		access.record(0, shapeOf("a"));
 		const timers = new FakeTimers();
 		const calls: string[] = [];
 		const warnings: string[] = [];
@@ -193,8 +215,8 @@ describe("startPreloader", () => {
 		const preloader = startPreloader({
 			settings: { ...ON, top: 1 },
 			access,
-			compose: async (repo) => {
-				calls.push(repo);
+			compose: async (shape) => {
+				calls.push(shape.repo);
 				if (failing) throw new Error("upstream unavailable");
 			},
 			now: () => 0,
@@ -214,10 +236,35 @@ describe("startPreloader", () => {
 		expect(warnings.length).toBe(1);
 	});
 
+	test("a warm-up that composes degraded is counted as a failure, and a complete one is not", async () => {
+		const access = new RepoAccess();
+		access.record(0, shapeOf("a"));
+		const timers = new FakeTimers();
+		const warnings: string[] = [];
+		const preloader = startPreloader({
+			settings: { ...ON, top: 1 },
+			access,
+			compose: async (shape) => {
+				requireComplete({ state: "degraded" }, shape);
+			},
+			now: () => 1,
+			intervalMs: INTERVAL_MS,
+			timers,
+			warn: (message) => {
+				warnings.push(message);
+			},
+		});
+		await timers.fire();
+		expect(preloader.failures()).toBe(1);
+		expect(warnings.length).toBe(1);
+		expect(warnings[0]).toContain("brief for a composed degraded");
+		expect(requireComplete({ state: "complete" }, shapeOf("a"))).toEqual({ state: "complete" });
+	});
+
 	test("several failures in one tick are counted and logged as one line", async () => {
 		const access = new RepoAccess();
-		access.record("a", 0, "cursor");
-		access.record("b", 1, "cursor");
+		access.record(0, shapeOf("a"));
+		access.record(1, shapeOf("b"));
 		const timers = new FakeTimers();
 		const warnings: string[] = [];
 		const preloader = startPreloader({
@@ -240,7 +287,7 @@ describe("startPreloader", () => {
 
 	test("a tick that is still running is not overlapped by the next one", async () => {
 		const access = new RepoAccess();
-		access.record("a", 0, "cursor");
+		access.record(0, shapeOf("a"));
 		const timers = new FakeTimers();
 		const calls: string[] = [];
 		let release: () => void = () => undefined;
@@ -250,8 +297,8 @@ describe("startPreloader", () => {
 		startPreloader({
 			settings: { ...ON, top: 1 },
 			access,
-			compose: async (repo) => {
-				calls.push(repo);
+			compose: async (shape) => {
+				calls.push(shape.repo);
 				await gate;
 			},
 			now: () => 0,
@@ -322,5 +369,14 @@ describe("SUBSTRATE_CACHE_PRELOAD settings", () => {
 	test("a mode that is not on or off is a ConfigError that names the variable", () => {
 		expect(() => loadCachePreloadSettings({ SUBSTRATE_CACHE_PRELOAD: "yes" })).toThrow(ConfigError);
 		expect(() => loadCachePreloadSettings({ SUBSTRATE_CACHE_PRELOAD: "yes" })).toThrow("SUBSTRATE_CACHE_PRELOAD=");
+	});
+
+	test("preload on with no cache is a ConfigError that names the switch and the cache; off with no cache loads", () => {
+		expect(() => loadConfig({ SUBSTRATE_CACHE_PRELOAD: "on" })).toThrow(ConfigError);
+		expect(() => loadConfig({ SUBSTRATE_CACHE_PRELOAD: "on" })).toThrow("SUBSTRATE_CACHE_PRELOAD=on needs the cache");
+		expect(() => loadConfig({ SUBSTRATE_CACHE_PRELOAD: "on", SUBSTRATE_CACHE: "0", DRAGONFLY_URL: "redis://127.0.0.1:6379" })).toThrow(ConfigError);
+		expect(loadConfig({ SUBSTRATE_CACHE_PRELOAD: "on", DRAGONFLY_URL: "redis://127.0.0.1:6379" }).cachePreload.enabled).toBe(true);
+		expect(loadConfig({ SUBSTRATE_CACHE_PRELOAD: "off" }).cachePreload.enabled).toBe(false);
+		expect(loadConfig({}).cachePreload.enabled).toBe(false);
 	});
 });

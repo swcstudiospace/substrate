@@ -678,6 +678,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		.split(",")
 		.map((root) => root.trim())
 		.filter((root) => root.length > 0);
+	const cache = cacheSettings(env);
+	const cachePreload = loadCachePreloadSettings(env);
+	if (cachePreload.enabled && !cache.cacheEnabled) {
+		throw new ConfigError("SUBSTRATE_CACHE_PRELOAD=on needs the cache, which is off: set DRAGONFLY_URL to an accepted URL and leave SUBSTRATE_CACHE unset or not 0, or set SUBSTRATE_CACHE_PRELOAD=off");
+	}
 	return {
 		...readHandoffKeys(env),
 		leaseTtlSeconds: normalizeTtlSeconds(Number.isFinite(leaseTtl) ? leaseTtl : undefined),
@@ -693,7 +698,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 				}
 			: null,
 		postgresUrl: env.SUBSTRATE_PG_URL?.trim() || undefined,
-		...cacheSettings(env),
+		...cache,
 		linearApiKey: env.LINEAR_API_KEY?.trim() || undefined,
 		notionApiKey: env.NOTION_API_KEY?.trim() || undefined,
 		notionTaskGraphDataSource: env.NOTION_TASK_GRAPH_DS?.trim() || "be3418f0-d2d8-411b-8677-fa8a95ee63be",
@@ -747,7 +752,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// uplift-4 S4
 		cacheSwr: cacheSwrOr(env.SUBSTRATE_CACHE_SWR),
 		cacheSwrWindowS: Math.min(300, positiveOr(env.SUBSTRATE_CACHE_SWR_WINDOW_S, 30)),
-		cachePreload: loadCachePreloadSettings(env),
+		cachePreload,
 		// uplift-5 U5-3
 		requestPath: loadRequestPathSettings(env),
 		// uplift-2 R5

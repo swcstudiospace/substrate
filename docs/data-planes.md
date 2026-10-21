@@ -137,16 +137,22 @@ Admission budgets (uplift-3 N3) are the one key class that is not a cached answe
 `SUBSTRATE_CACHE_PRELOAD` is `on` or `off`, default `off`. `SUBSTRATE_CACHE_PRELOAD_TOP`
 is an integer from 1 to 20, default 3. `SUBSTRATE_CACHE_PRELOAD_S` is an integer from
 10 to 3600, default 300. An out-of-range value, or any other switch value, refuses boot
-and names the variable.
+and names the variable. `on` with no cache (`DRAGONFLY_URL` unset or refused, or
+`SUBSTRATE_CACHE=0`) refuses boot too, and names `SUBSTRATE_CACHE_PRELOAD`: a warm-up
+with nowhere to store would only compose.
 
 With the switch on, the substrate counts brief requests per repo over a sliding hour,
-for at most 256 repos, and remembers the last surface seen for each repo. The least
+for at most 256 repos, and remembers the last brief request seen for each repo: its
+branch, graph_id and surface, the fields its cache key is built from. The least
 recently seen repos are evicted at the cap.
 
 Every interval the preload composes the brief for the top K repos (K is
-`SUBSTRATE_CACHE_PRELOAD_TOP`), each with its last surface, through the uncounted brief
-path, so its own warm-up never raises a repo's count. It writes through the existing
-brief cache: there is no new cache class and no new key scheme.
+`SUBSTRATE_CACHE_PRELOAD_TOP`), each as the last request named for it, through the
+uncounted brief path, so its own warm-up never raises a repo's count. A warm-up refreshes
+its entry: it composes and stores over a fresh entry, so the entry is replaced before it
+expires. A warm-up that composes degraded or as a snapshot is counted as a failure and
+stores nothing. It writes through the existing brief cache: there is no new cache class
+and no new key scheme.
 
 The surface stands as its own bearer during the warm-up, so the warmed keys are the keys
 a real request reads. The consequence is that the preload performs that surface's recall

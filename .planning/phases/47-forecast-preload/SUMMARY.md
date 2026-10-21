@@ -37,8 +37,17 @@ status: in review (draft PR). In-repo gates green. The live forecast accuracy an
 
 - Typecheck: `bunx tsc --noEmit` exit 0.
 - Targeted: `forecast.test.ts`, `preload.test.ts`, `slo-history.test.ts` (11 pass), and `brief-recall.test.ts` pass.
-- Full suite: `bun test` 5911 pass, 2 skip (pre-existing), 0 fail, over 5913 tests in 221 files.
+- Full suite: `bun test` 5916 pass, 2 skip (pre-existing), 0 fail, over 5918 tests in 221 files, on the review-fixed tree.
 - Repo locks: `bun run check:phase-close` green. Config reference: up to date.
+
+## Review round (PR 100)
+
+- **Request shape.** The warm-up composes with the last brief request per repo, its branch and graph_id included, so the warmed key is the key a matching real request reads.
+- **Refresh, not hit.** A warm-up always composes and stores, through a `refresh` option on `getOrLoad` that skips the fresh-hit read. This also skips stale-while-revalidate for that call, since otherwise a fresh entry in that window would still be served without a compose. The option is the only change to `cache.ts`, and it is tested.
+- **Cache required.** `SUBSTRATE_CACHE_PRELOAD=on` with no cache is a `ConfigError` at boot.
+- **Basis.** Each forecast row says `service` or `worst-surface`. `brief.p95` is the worst surface per bucket, and the row says so.
+- **Failed warm-ups count.** A warm-up that composes degraded is counted and logged as a failure.
+- **Doc links.** The three preload flag rows point at `docs/data-planes.md`.
 
 ## Not proven
 

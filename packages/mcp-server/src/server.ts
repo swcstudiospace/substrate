@@ -962,17 +962,19 @@ export function createHttpServer(
 				// Predictive rows (phase 47, D47-a to D47-c): one per catalogue objective, Holt smoothing over the history
 				// `/slo/history` reads, through the same answer and memo. Report-only: `breached` below never reads them.
 				// An objective no recorded series covers is insufficient-data, never a guessed value.
-				const forecastSources: Readonly<Record<string, { series: string | null; direction: ForecastDirection }>> = {
-					"brief.p95": { series: "brief.p95", direction: "maximum" },
-					"emit.success": { series: "emit.success", direction: "minimum" },
-					"lease.steal_rate": { series: null, direction: "maximum" },
-					"quarantine.rate": { series: null, direction: "maximum" },
+				// brief.p95 is the largest surface value per bucket (basis worst-surface); the other objectives are service-wide (basis service).
+				type ForecastSource = { series: string | null; direction: ForecastDirection; basis: ForecastRow["basis"] };
+				const forecastSources: Readonly<Record<string, ForecastSource>> = {
+					"brief.p95": { series: "brief.p95", direction: "maximum", basis: "worst-surface" },
+					"emit.success": { series: "emit.success", direction: "minimum", basis: "service" },
+					"lease.steal_rate": { series: null, direction: "maximum", basis: "service" },
+					"quarantine.rate": { series: null, direction: "maximum", basis: "service" },
 				};
 				const historyOn = config.metricsHistory.enabled && substrate.greptime !== null;
 				const forecast: ForecastRow[] = await Promise.all(
 					results.map(async (result) => {
-						if (!historyOn) return forecastHistoryOff(result.id, result.target);
-						const source: { series: string | null; direction: ForecastDirection } = forecastSources[result.id] ?? { series: null, direction: "maximum" };
+						const source: ForecastSource = forecastSources[result.id] ?? { series: null, direction: "maximum", basis: "service" };
+						if (!historyOn) return forecastHistoryOff(result.id, result.target, source.basis);
 						const answer =
 							source.series === null
 								? null
@@ -981,8 +983,8 @@ export function createHttpServer(
 										new URLSearchParams({ series: source.series, window: FORECAST_WINDOW, step: String(FORECAST_STEP_S) }),
 									).catch(() => null);
 						const read = bucketedValues(answer);
-						if (read === null) return forecastRow(result.id, result.target, source.direction, [], 1);
-						return forecastRow(result.id, result.target, source.direction, read.values, Math.round(FORECAST_HORIZON_MS / 1000 / read.stepS));
+						if (read === null) return forecastRow(result.id, result.target, source.direction, [], 1, source.basis);
+						return forecastRow(result.id, result.target, source.direction, read.values, Math.round(FORECAST_HORIZON_MS / 1000 / read.stepS), source.basis);
 					}),
 				);
 				// 200 either way. A breached objective is information, not a broken service,

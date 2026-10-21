@@ -22,15 +22,19 @@ export const FORECAST_STEP_S = 300;
 /** `maximum`: a breach is above the target (latency, a ceiling). `minimum`: below it (a floor). */
 export type ForecastDirection = "maximum" | "minimum";
 
+/** `service`: the history is service-wide. `worst-surface`: the history is the largest surface value per bucket. */
+export type ForecastBasis = "service" | "worst-surface";
+
 export type ForecastStatus = "predicted-breach" | "ok" | "insufficient-data" | "history-off";
 
-/** One objective's forecast; `predicted` is the value at the horizon, or `null` when none is made. */
+/** One objective's forecast; `predicted` is the value at the horizon, or `null` when none is made. `basis` says what the history measures. */
 export interface ForecastRow {
 	id: string;
 	status: ForecastStatus;
 	predicted: number | null;
 	target: number;
 	samples: number;
+	basis: ForecastBasis;
 }
 
 export interface HoltFit {
@@ -68,16 +72,24 @@ export function holtForecast(points: readonly number[], horizonSteps: number, al
  * {@link FORECAST_MIN_POINTS} finite points, or for a non-finite target or an
  * invalid horizon; otherwise `predicted-breach` when the horizon value crosses
  * the target in `direction` (strictly beyond it), and `ok` when it does not.
+ * `basis` is carried onto the row unchanged: it names what `points` measure.
  */
-export function forecastRow(id: string, target: number, direction: ForecastDirection, points: readonly number[], horizonSteps: number): ForecastRow {
+export function forecastRow(
+	id: string,
+	target: number,
+	direction: ForecastDirection,
+	points: readonly number[],
+	horizonSteps: number,
+	basis: ForecastBasis,
+): ForecastRow {
 	const samples = points.filter((value) => Number.isFinite(value)).length;
 	const fit = samples >= FORECAST_MIN_POINTS && Number.isFinite(target) ? holtForecast(points, horizonSteps, FORECAST_ALPHA, FORECAST_BETA) : null;
-	if (fit === null) return { id, status: "insufficient-data", predicted: null, target, samples };
+	if (fit === null) return { id, status: "insufficient-data", predicted: null, target, samples, basis };
 	const breach = direction === "maximum" ? fit.predicted > target : fit.predicted < target;
-	return { id, status: breach ? "predicted-breach" : "ok", predicted: fit.predicted, target, samples };
+	return { id, status: breach ? "predicted-breach" : "ok", predicted: fit.predicted, target, samples, basis };
 }
 
 /** The row for an objective while history is off: no value, no sample. */
-export function forecastHistoryOff(id: string, target: number): ForecastRow {
-	return { id, status: "history-off", predicted: null, target, samples: 0 };
+export function forecastHistoryOff(id: string, target: number, basis: ForecastBasis): ForecastRow {
+	return { id, status: "history-off", predicted: null, target, samples: 0, basis };
 }

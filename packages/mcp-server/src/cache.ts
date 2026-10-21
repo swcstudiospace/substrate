@@ -530,6 +530,8 @@ export class ReadThroughCache {
 		 */
 		deadlineMs?: number;
 		onDeadline?: () => T;
+		/** True skips the fresh-hit read, so the load always runs and its answer replaces the entry. Generations are still read and loads still coalesce; stale-while-revalidate is not served. */
+		refresh?: boolean;
 	}): Promise<T> {
 		const klass = request.klass;
 		if (!this.enabled || !this.redis) {
@@ -557,7 +559,7 @@ export class ReadThroughCache {
 		const key = cacheKey(klass, request.surface, generation, request.args);
 		let malformed = false;
 		try {
-			const raw = await this.attempt(() => redis.get(key));
+			const raw = request.refresh ? null : await this.attempt(() => redis.get(key));
 			if (raw !== null) {
 				const parsed = parseEnvelope<T>(raw, klass);
 				if (parsed.ok) {
@@ -577,26 +579,28 @@ export class ReadThroughCache {
 			return request.load();
 		}
 
+		// A refresh is answered by its own load, never by a last-good value.
+		const swr = request.refresh ? undefined : request.swr;
 		if (!malformed) this.count("miss", klass);
-		if (request.swr && this.swrMode === "enforce") {
-			const stale = await this.staleDecision(request.swr);
+		if (swr && this.swrMode === "enforce") {
+			const stale = await this.staleDecision(swr);
 			if (stale !== null) {
 				this.count("stale", klass);
 				try {
-					request.swr.served?.(stale.ageMs);
+					swr.served?.(stale.ageMs);
 				} catch {
 					// An advertisement hook must not fail the answer it describes.
 				}
-				this.startRefresh(klass, key, redis, request.swr);
+				this.startRefresh(klass, key, redis, swr);
 				return stale.value;
 			}
-		} else if (request.swr && this.swrMode === "shadow") {
+		} else if (swr && this.swrMode === "shadow") {
 			// Shadow takes the same decision beside the load, so it adds no serial
 			// round trip; the caller is served live exactly as under `off`.
 			// The probe only records a count, so it is started and never awaited: a slow
 			// snapshot read must not hold a finished answer, nor the flight slot. It cannot
 			// reject (`staleDecision` swallows its own failures); the catch is belt and braces.
-			void this.staleDecision(request.swr)
+			void this.staleDecision(swr)
 				.then((stale) => {
 					if (stale !== null) this.count("would_serve_stale", klass);
 				})
