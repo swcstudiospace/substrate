@@ -2,11 +2,11 @@
 gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
-status: Awaiting next milestone
-stopped_at: Milestone v1.3 completed and archived 2026-10-11; 43 gated live-tail proofs recorded in VALIDATION.md and phase runbooks
-last_updated: "2026-10-11T02:42:06.506Z"
-last_activity: 2026-10-11
-last_activity_desc: Milestone v1.3 completed and archived
+status: Programmed v1.3.x (phases 37-44) and v1.5 SOTA (phases 45-51); not started
+stopped_at: v1.3 closed 2026-10-21 with accepted debt (shipped 2026-10-11; 43 gated live-tail proofs in VALIDATION.md and phase runbooks); v1.3.x and v1.5 programmed
+last_updated: "2026-10-21"
+last_activity: 2026-10-21
+last_activity_desc: v1.3 closed with accepted debt; v1.3.x and v1.5 programmed (phases 37-51)
 state_head: 1a9f4fd365ede291c4e21be71b6ff236e0e49c67
 progress:
   total_phases: 18
