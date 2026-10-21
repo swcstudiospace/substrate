@@ -61,6 +61,7 @@ import {
 	type SubstrateConfig,
 } from "./config.ts";
 import { Admission, admitBatch, budgetBody, budgetRefusal, routeClass, type AdmissionVerdict } from "./admission.ts";
+import type { EventBus } from "./event-bus.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
 import { parseBriefProfile } from "./brief-profile.ts";
 import { DATASET_TRIGGERS } from "./docs-datasets.ts";
@@ -1235,7 +1236,7 @@ export function createHttpServer(
 						idleMs: options.streamIdleMs ?? STREAM_IDLE_MS,
 						batch: STREAM_BATCH,
 						maxBacklogBytes: options.streamMaxBacklogBytes ?? STREAM_MAX_BACKLOG_BYTES,
-					});
+					}, substrate.eventBus);
 				} catch (cause) {
 					// Setup failed before the stream opened, so an ordinary error response
 					// is still available — fail-open here means the caller learns the
@@ -1776,6 +1777,7 @@ async function openEventStream(
 	greptime: GreptimeClient,
 	cursorId: string,
 	bounds: { pollMs: number; idleMs: number; batch: number; maxBacklogBytes: number },
+	bus: EventBus | null,
 ): Promise<void> {
 	// The connection-life listeners go on before any await, because the setup
 	// reads below are the first async steps and a cursorless client can vanish
@@ -1784,6 +1786,7 @@ async function openEventStream(
 	// leave no timer behind.
 	let timer: ReturnType<typeof setInterval> | null = null;
 	let closed = false;
+	let unsubscribe: (() => void) | null = null;
 
 	const cleanup = (): void => {
 		if (closed) return;
@@ -1791,6 +1794,10 @@ async function openEventStream(
 		if (timer !== null) {
 			clearInterval(timer);
 			timer = null;
+		}
+		if (unsubscribe !== null) {
+			unsubscribe();
+			unsubscribe = null;
 		}
 	};
 	// Both ends of the connection's life — a normal end, a client that vanished,
@@ -1842,6 +1849,7 @@ async function openEventStream(
 	res.write("retry: 5000\n\n");
 
 	let polling = false;
+	let wakeAgain = false;
 	let lastActivity = Date.now();
 
 	const tick = (): void => {
@@ -1893,10 +1901,23 @@ async function openEventStream(
 				// stream: the cursor stays put, and the next poll retries it.
 			} finally {
 				polling = false;
+				if (wakeAgain) {
+					wakeAgain = false;
+					tick();
+				}
 			}
 		})();
 	};
 
+	// Phase 50: a hint reads the ledger now instead of at the next poll. It only wakes the loop; the ledger
+	// decides what is sent, so a lost or late hint costs latency and nothing else.
+	const wake = (): void => {
+		if (polling) wakeAgain = true;
+		else tick();
+	};
+
+	// The subscription lives as long as the response: cleanup releases it on close, error and idle close alike.
+	if (bus !== null) unsubscribe = bus.subscribe(() => wake());
 	// Unref'd, like every other timer this server holds: an open stream must not
 	// be the thing keeping a closing process alive.
 	timer = setInterval(tick, bounds.pollMs);

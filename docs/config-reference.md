@@ -118,6 +118,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_CACHE_PRELOAD` | toggle | off | on \| off | off: no preload timer, no compose, no request counting. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CACHE_PRELOAD_TOP` | number | 3 | 1..20 | 3 repos per tick. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CACHE_PRELOAD_S` | number | 300 | 10..3600 | 300 s. See `docs/data-planes.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_EVENT_BUS` | toggle | off | on \| off (case- and space-insensitive; anything else refuses boot naming the variable) | off: no pub/sub connection and /events/stream reads the ledger on its poll only; on without DRAGONFLY_URL, or with a refused URL, is off with a boot log line. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CACHE_BUMP_SCOPE` | mode | legacy | legacy \| narrow (case- and space-insensitive; anything else is legacy, named at boot) | legacy: a Hindsight retain or outbox replay bumps the memory generation (flushes every brief and search, twice per forwarded write) and a heartbeat flushes graph-scoped briefs. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 
 ## Brief and recall-in-the-brief

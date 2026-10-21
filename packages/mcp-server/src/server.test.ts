@@ -26,6 +26,7 @@ import {
 } from "./server.ts";
 import { Substrate } from "./service.ts";
 import type { MemoryEntry, SubstrateEvent, Surface } from "./types.ts";
+import type { EventBus, EventHint } from "./event-bus.ts";
 
 /** Shorthand for a health report; every field defaults to the unhealthy value. */
 function health(over: Partial<Parameters<typeof healthStatus>[0]> = {}) {
@@ -68,7 +69,7 @@ describe("healthStatus", () => {
 async function serve(
 	greptime: unknown,
 	env: Record<string, string | undefined> = {},
-	stores: { ragflowFetch?: FetchLike; hindsightFetch?: FetchLike } = {},
+	stores: { ragflowFetch?: FetchLike; hindsightFetch?: FetchLike; eventBus?: () => EventBus | null } = {},
 	options: HttpServerOptions = {},
 ) {
 	const config = loadConfig(env);
@@ -1397,6 +1398,77 @@ describe("GET /events/stream", () => {
 			const emit = await post("/events", { kind: "note", summary: "still working", session_id: "s" }, { authorization: "Bearer tok-omp" });
 			expect(emit.status).toBe(202);
 			controller.abort();
+		} finally {
+			await stop();
+		}
+	});
+
+	/** A bus stand-in: each open stream's subscription is one listener here, and a test wakes them with a hint. */
+	function fakeHub() {
+		const listeners = new Set<(hint: EventHint) => void>();
+		const bus: EventBus = {
+			publish: async () => true,
+			subscribe: (listener) => {
+				listeners.add(listener);
+				return () => {
+					listeners.delete(listener);
+				};
+			},
+			stop: () => {},
+		};
+		return {
+			bus,
+			listeners,
+			wake: (id: string) => {
+				const hint: EventHint = { v: 1, id, kind: "note", surface: "omp", graph_id: null, ts: new Date(BASE).toISOString() };
+				for (const listener of [...listeners]) listener(hint);
+			},
+		};
+	}
+
+	test("a hint wakes an idle stream, which reads the ledger and delivers the new event before its idle timeout", async () => {
+		const stub = streamLedger([]);
+		const hub = fakeHub();
+		const { get, stop } = await serve(stub, { SUBSTRATE_TOKEN_OMP: "tok-omp" }, { eventBus: () => hub.bus }, { streamPollMs: 60_000, streamIdleMs: 60_000 });
+		try {
+			const controller = new AbortController();
+			const response = await get("/events/stream", { authorization: "Bearer tok-omp" }, controller.signal);
+			expect(response.status).toBe(200);
+			expect(hub.listeners.size).toBe(1);
+			// The poll and the idle close are both 60 s away, so only the hint can deliver this inside the 5 s read.
+			stub.append({ id: "e1", ts: BASE, summary: "landed during a long idle wait" });
+			hub.wake("e1");
+			const got = frames(await streamText(response, controller, 1, 5_000));
+			expect(got.map((frame) => frame.id)).toEqual(["e1"]);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("the stream holds its subscription for the life of the response and releases it when the response closes", async () => {
+		const hub = fakeHub();
+		const { get, stop } = await serve(streamLedger([]), { SUBSTRATE_TOKEN_OMP: "tok-omp" }, { eventBus: () => hub.bus }, { streamPollMs: 60_000, streamIdleMs: 60_000 });
+		try {
+			const controller = new AbortController();
+			await get("/events/stream", { authorization: "Bearer tok-omp" }, controller.signal);
+			expect(hub.listeners.size).toBe(1);
+			controller.abort();
+			await until(() => hub.listeners.size === 0);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("with the bus off the stream delivers on its poll alone", async () => {
+		const stub = streamLedger([]);
+		const { get, stop } = await serve(stub, { SUBSTRATE_TOKEN_OMP: "tok-omp" }, { eventBus: () => null }, { streamPollMs: 10, streamIdleMs: 60_000 });
+		try {
+			const controller = new AbortController();
+			const response = await get("/events/stream", { authorization: "Bearer tok-omp" }, controller.signal);
+			expect(response.status).toBe(200);
+			stub.append({ id: "e1", ts: BASE, summary: "arrived with the bus off" });
+			const got = frames(await streamText(response, controller, 1, 2_000));
+			expect(got.map((frame) => frame.id)).toEqual(["e1"]);
 		} finally {
 			await stop();
 		}
