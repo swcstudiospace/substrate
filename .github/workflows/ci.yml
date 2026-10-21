@@ -110,8 +110,8 @@ jobs:
       - name: Install dependencies (lockfile must be current)
         run: bun install --frozen-lockfile --ignore-scripts
 
-      - name: Audit installed packages (fail on high or critical)
-        run: bun audit --audit-level=high
+      - name: Gate the audit (fail on an unlisted high or critical advisory)
+        run: bun scripts/audit-gate.ts
 
   boot-gate:
     name: Boot and prove (report-only)
