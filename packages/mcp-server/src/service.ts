@@ -122,7 +122,7 @@ import { createMirror, type EdgeOutcome, type EdgeRelation, type Mirror, type Mi
 import { runDodGate, type DodEvidence } from "./dod-gate.ts";
 import { nodeArtifact, type NodeArtifact } from "./node-artifact.ts";
 import { normalizeSubject } from "./memory-policy.ts";
-import { recallMemories, UNTRUSTED_MEMORY_NOTICE, type RecallReply } from "./memory-recall.ts";
+import { briefFanoutOf, fanOutBriefRecall, recallMemories, resolveRecallBanks, UNTRUSTED_MEMORY_NOTICE, type BankAnswer, type RecallReply } from "./memory-recall.ts";
 import { emitRetainWarning, forwardRetain, replayRetain, retainDocumentId, type RetainDeps, type RetainOutboxSink } from "./memory-retain.ts";
 import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
@@ -133,11 +133,19 @@ import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
 import {
 	RecallPrefetcher,
+	BRIEF_RECALL_CAP_MS,
+	WANTED_MAX,
+	briefRecallBudgetMs,
+	buildRecallQuery,
+	fanoutFresh,
+	fanoutSnapshot,
+	fanoutSnapshotArgs,
 	parseRecallSnapshot,
 	recallBriefResult,
 	recallKey,
 	RECALL_TITLE_PREFIX,
 	recallSnapshotArgs,
+	repoScope,
 	snapshotState,
 	type RecallLook,
 	type RecallSnapshot,
@@ -1416,7 +1424,11 @@ export class Substrate {
 			const recallActive = recallMode !== "off" && bearerSurface != null && bearerSurface === request.surface;
 			const recallRead: Promise<RecallRead> | null =
 				recallMode === "off" ? null : recallActive ? this.readRecall(request, recallRepo) : Promise.resolve<RecallRead>({ look: "disabled", snapshot: null });
-			const recallOptions = recallRead === null || !recallActive ? {} : this.recallBriefOptions(request, recallRepo, recallRead);
+			// Set when a compose's recall read is cut at its cap: that brief is served without the fan-out's late answer, so it is not stored.
+			let recallCut = false;
+			const recallOptions = recallRead === null || !recallActive ? {} : this.recallBriefOptions(request, recallRepo, () => {
+				recallCut = true;
+			});
 			const noteRecall = (served: readonly BriefSection[] | null, detail: BriefDetail): Promise<void> => this.noteBriefRecall(request, recallRead, served, detail);
 			// One compose, parameterised by where it reports its lease note and failed sources, so a
 			// background refresh never touches this call's `failed` (S4) and every caller gets the
@@ -1431,7 +1443,13 @@ export class Substrate {
 					(source) => {
 						lost.push(source);
 					},
-					{ ...this.briefOptions, ...recallOptions },
+					{
+						...this.briefOptions,
+						...recallOptions,
+						// The recall cap runs from this call's arrival, not from this compose: a compose that starts after a join (a waiter's own
+						// load) gets only what is left of it, so one call never waits on recall for longer than the cap in total.
+						...(recallOptions.recall === undefined ? {} : { recall: { ...recallOptions.recall, capMs: Math.max(0, started + BRIEF_RECALL_CAP_MS - performance.now()) } }),
+					},
 				);
 			// The last-good snapshot: the rendered text, its sections (so it can be served compact and
 			// as stale-while-revalidate), when it was composed and when it stops being true.
@@ -1477,12 +1495,16 @@ export class Substrate {
 				// expiry; `refreshAt` already ends an entry at the expiry it
 				// baked in), and every other write that moves it also moves
 				// `gen:graphs` (`bumpGraph`, the reaper), which stays listed.
-				generations:
-					request.graph_id && !this.narrowBumps
+				generations: [
+					...(request.graph_id && !this.narrowBumps
 						? [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY, graphGenerationKey(request.graph_id)]
-						: [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY],
+						: [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY]),
+					// Under `enforce` the text embeds the fan-out, which a retain moves under `narrow` by bumping `gen:recall` alone.
+					// Under `legacy` the retain bumps `gen:memory`, already listed, so the list is only extended here.
+					...(recallMode === "enforce" ? [RECALL_GENERATION_KEY] : []),
+				],
 				refreshAt: () => noted.at(-1) ?? null,
-				store: (value: string) => failed.length === 0 && decodeSections(value) !== null,
+				store: (value: string) => failed.length === 0 && !recallCut && decodeSections(value) !== null,
 				load: async () => {
 					loaded = true;
 					liveSections = await compose(noted, failed);
@@ -1516,7 +1538,7 @@ export class Substrate {
 										load: async () => encodeSections(await compose(refreshNoted, refreshFailed)),
 										refreshAt: () => refreshNoted.at(-1) ?? null,
 										// The same rule as the foreground write: a value `decodeSections` would reject is not stored, so the stale one is kept.
-										store: (value: string) => refreshFailed.length === 0 && decodeSections(value) !== null,
+										store: (value: string) => refreshFailed.length === 0 && !recallCut && decodeSections(value) !== null,
 										stored: async (value: string) => {
 											const fresh = decodeSections(value);
 											if (fresh !== null) await keep(renderFullBrief(fresh), fresh, refreshNoted.at(-1) ?? null);
@@ -1546,7 +1568,7 @@ export class Substrate {
 			const live = renderFullBrief(sections);
 			const profileSurface = bearerSurface ?? request.surface;
 			if (failed.length === 0) {
-				if (loaded) {
+				if (loaded && !recallCut) {
 					await keep(live, sections, noted.at(-1) ?? null);
 				}
 				const detail = this.servedBrief(live, sections, "complete", failed, null, requestedProfile, profileSurface, staleAgeS);
@@ -1597,11 +1619,17 @@ export class Substrate {
 		return hindsight === null ? null : bankForSurface(hindsight, surface);
 	}
 
-	private async readRecall(request: BriefRequest, repo: string | null): Promise<RecallRead> {
+	/** The Hindsight config a recall for this request may use, or null: no repo, no Hindsight, a VM guest, no cache, or a surface outside the list. */
+	private recallGate(request: BriefRequest, repo: string | null): HindsightConfig | null {
 		const hindsight = hindsightFromEnv();
-		if (repo === null || hindsight === null || this.config.vmGuest || !this.cache.health().enabled || !(SURFACES as readonly string[]).includes(request.surface)) {
-			return { look: "disabled", snapshot: null };
-		}
+		if (repo === null || hindsight === null || this.config.vmGuest || !this.cache.health().enabled || !(SURFACES as readonly string[]).includes(request.surface)) return null;
+		return hindsight;
+	}
+
+	/** The prefetched own-bank snapshot, read for the `look` the recall metric reports. The brief's section is `recallFanout`. */
+	private async readRecall(request: BriefRequest, repo: string | null): Promise<RecallRead> {
+		const hindsight = this.recallGate(request, repo);
+		if (repo === null || hindsight === null) return { look: "disabled", snapshot: null };
 		this.recall.want(request.surface, repo);
 		try {
 			const stored = await this.cache.peekQuiet<unknown>("recall-snapshot", request.surface, recallSnapshotArgs(repo, bankForSurface(hindsight, request.surface)));
@@ -1612,11 +1640,97 @@ export class Substrate {
 		}
 	}
 
-	/** The compose options recall adds: the subject sink in `shadow` and `enforce`, the snapshot read only in `enforce` (the shadow text is exactly today's). */
-	private recallBriefOptions(request: BriefRequest, repo: string | null, read: Promise<RecallRead>): Partial<BriefOptions> {
+	/** The Hindsight config and the banks a brief's fan-out reads, or null when there is nothing to read. */
+	private recallTarget(request: BriefRequest, repo: string): { hindsight: HindsightConfig; banks: string[] } | null {
+		const hindsight = this.recallGate(request, repo);
+		if (hindsight === null) return null;
+		const resolved = resolveRecallBanks(request.surface, hindsightBanksFromEnv(), hindsight.bankPrefix);
+		return "refused" in resolved ? null : { hindsight, banks: resolved.banks };
+	}
+
+	/**
+	 * The brief's recall read in `enforce`. The fan-out's answer is the `recall-snapshot` entry for the repo, the sorted banks and
+	 * the query, listed under the memory and recall generations: a memory write or a retain landing moves one of them, so the next
+	 * brief fans out again, and the TTL bounds only what no write touches. A held answer is served with no bank call while it is
+	 * within the TTL. Otherwise `memory_recall`'s fan-out runs once over the caller's own bank and the configured `sub-*` set. Its
+	 * budget ends inside the brief's cap, each bank's answer lands in `answers` as it settles, and the answer is stored only when at
+	 * least one bank answered; with none the read is `null` and the section is omitted.
+	 */
+	private async recallFanout(request: BriefRequest, repo: string | null, answers: Map<string, BankAnswer>): Promise<RecallSnapshot | null> {
+		if (repo === null) return null;
+		const target = this.recallTarget(request, repo);
+		if (target === null) return null;
+		const { hindsight, banks } = target;
+		const surface = request.surface;
+		const now = Date.now();
+		const ttlS = this.config.briefRecall.ttlS;
+		const subjects = this.recall.registry.forSurface(surface, now, WANTED_MAX).find((pair) => pair.repo === repo)?.subjects ?? [];
+		const query = buildRecallQuery(repo, subjects);
+		const args = fanoutSnapshotArgs(repo, banks, query);
+		const fanOut = async (): Promise<RecallSnapshot | null> => {
+			const fanout = await fanOutBriefRecall(
+				{ config: hindsight, banks, fetchImpl: this.hindsightFetch, budgetMs: briefRecallBudgetMs(this.config.briefRecall.budgetMs) },
+				query,
+				{ surface, repo },
+				{
+					// Another repo's copy of the same text must not reach the cross-bank dedupe, where it could hide this repo's own copy.
+					keep: (hit) => hit.metadata.scope === repoScope(repo),
+					onAnswer: (bankAnswer) => {
+						answers.set(bankAnswer.bank, bankAnswer);
+					},
+				},
+			);
+			if (fanout.answered.length === 0) return null;
+			return fanoutSnapshot(fanout.answered, fanout.hits, repo, bankForSurface(hindsight, surface), now);
+		};
+		let fetched = false;
+		// A hit returns the stored entry, which is validated below; a load runs the fan-out and stores its answer.
+		const stored = await this.cache.getOrLoad<RecallSnapshot | null>({
+			klass: "recall-snapshot",
+			surface,
+			args,
+			generations: [MEMORY_GENERATION_KEY, RECALL_GENERATION_KEY],
+			refreshAt: (loaded) => (loaded === null ? null : Date.parse(loaded.at) + ttlS * 1000),
+			store: (loaded) => loaded !== null,
+			load: async () => {
+				fetched = true;
+				return fanOut();
+			},
+		});
+		if (fetched) return stored;
+		// A held entry is served only while it is fresh. Redis drops it at the same instant, so this bites only when the TTL
+		// was lowered after the write; such an answer is fanned out live and not stored again.
+		const held = parseRecallSnapshot(stored);
+		if (held !== null && fanoutFresh(held, now, ttlS)) return held;
+		return fanOut();
+	}
+
+	/**
+	 * The brief's recall read at its cap: the snapshot of the banks whose answers have completed, stamped when the cap fires, or null
+	 * when none has. The fan-out keeps running past the cap, so its full answer still reaches the cache when it lands.
+	 */
+	private recallPartial(request: BriefRequest, repo: string | null, answers: ReadonlyMap<string, BankAnswer>): RecallSnapshot | null {
+		if (repo === null) return null;
+		const target = this.recallTarget(request, repo);
+		if (target === null) return null;
+		const completed = target.banks.flatMap((bank) => {
+			const answer = answers.get(bank);
+			return answer === undefined ? [] : [answer];
+		});
+		const fanout = briefFanoutOf(completed);
+		if (fanout.answered.length === 0) return null;
+		return fanoutSnapshot(fanout.answered, fanout.hits, repo, bankForSurface(target.hindsight, request.surface), Date.now());
+	}
+
+	/** The compose options recall adds: the subject sink in `shadow` and `enforce`, and the fan-out read only in `enforce` (the shadow text is exactly today's). `onCut` runs when the read is cut at the cap. */
+	private recallBriefOptions(request: BriefRequest, repo: string | null, onCut: () => void): Partial<BriefOptions> {
+		// The banks that have answered this brief's fan-out, filled as each one settles: the read at the cap takes whatever is here.
+		const answers = new Map<string, BankAnswer>();
 		return {
 			...(repo !== null ? { noteSubjects: (subjects: string[]) => this.recall.noteSubjects(request.surface, repo, subjects) } : {}),
-			...(this.config.briefRecall.mode === "enforce" ? { recall: { read: async () => (await read).snapshot, ttlS: this.config.briefRecall.ttlS } } : {}),
+			...(this.config.briefRecall.mode === "enforce"
+				? { recall: { read: () => this.recallFanout(request, repo, answers), partial: () => { onCut(); return this.recallPartial(request, repo, answers); }, ttlS: this.config.briefRecall.ttlS } }
+				: {}),
 		};
 	}
 

@@ -16,7 +16,7 @@ import type { GreptimeClient } from "./greptime.ts";
 import { quote } from "./greptime.ts";
 import { leaseSnapshot, type IndexStore } from "./index-store.ts";
 import { leaseState } from "./lease.ts";
-import { recallSection, snapshotState, type RecallSnapshot } from "./recall-snapshot.ts";
+import { BRIEF_RECALL_CAP_MS, recallSection, snapshotState, type RecallSnapshot } from "./recall-snapshot.ts";
 import type { GraphView, MemoryEntry, Surface } from "./types.ts";
 
 export interface BriefRequest {
@@ -43,11 +43,12 @@ export interface BriefOptions {
 	recentWindowDays?: number;
 	now?: () => number;
 	/**
-	 * uplift-4 S5: the recall snapshot as a cache read (`read` never reaches a plane), and
-	 * `ttlS`, the snapshot TTL its freshness is judged against. Absent unless
-	 * `SUBSTRATE_BRIEF_RECALL=enforce`: in `shadow` and `off` the text is exactly today's.
+	 * uplift-4 S5: the recall read (the cached fan-out answer, `read`), and `ttlS`, the snapshot TTL its freshness is judged against.
+	 * Absent unless `SUBSTRATE_BRIEF_RECALL=enforce`: in `shadow` and `off` the text is exactly today's. The read is not one of
+	 * the four reads and is not under the brief budget: the brief waits for it at most `capMs` (`BRIEF_RECALL_CAP_MS` unless a test injects one).
+	 * At that cap a read still running is replaced by `partial()`: the answer from the parts that have completed, or null.
 	 */
-	recall?: { read: () => Promise<RecallSnapshot | null>; ttlS: number };
+	recall?: { read: () => Promise<RecallSnapshot | null>; partial: () => RecallSnapshot | null; ttlS: number; capMs?: number };
 	/** Receives the subjects of the composed memory's decisions and warnings, so the prefetcher can build its query from them. */
 	noteSubjects?: (subjects: string[]) => void;
 	/**
@@ -167,6 +168,26 @@ function swallow<T>(what: string, fallback: T): (cause: unknown) => T {
 }
 
 /**
+ * The recall read the brief awaits, bounded by `capMs`. At the cap a read still running is replaced by `partial()`, what it has completed,
+ * so one slow part does not drop the parts that finished; a read that throws is no answer. A cap already spent takes `partial()` at once and
+ * starts no read. The timer is cleared as soon as the read settles.
+ */
+function boundedRecall(
+	read: () => Promise<RecallSnapshot | null>,
+	partial: () => RecallSnapshot | null,
+	capMs: number,
+): Promise<RecallSnapshot | null> {
+	if (capMs <= 0) return Promise.resolve().then(partial).catch(swallow("recall", null));
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const atCap = new Promise<RecallSnapshot | null>((resolve) => {
+		timer = setTimeout(() => resolve(Promise.resolve().then(partial).catch(swallow("recall", null))), capMs);
+		timer.unref?.();
+	});
+	const settled = Promise.resolve().then(read).catch(() => null);
+	return Promise.race([settled, atCap]).finally(() => clearTimeout(timer));
+}
+
+/**
  * One node's rank in the compact profile: held first, then free (a lapsed
  * lease), then open work, then done, then canceled.
  */
@@ -280,13 +301,9 @@ export async function composeBriefSections(
 	const othersRead = index && repo ? start("open graphs", () => index.openGraphs(repo, graphId ?? undefined), [] as GraphView[]) : null;
 	// Warnings and decisions worth carrying into this session.
 	const memoryRead = index ? start("memory", () => index.memoryForBrief(repo, graphId, undefined, { surface }), [] as MemoryEntry[]) : null;
-	// The recall snapshot rides the same start line as the reads above. It is not one of the four
-	// sources: a failed read is a missing section, never a degraded brief.
-	const recallRead: Promise<RecallSnapshot | null> | null = options.recall
-		? Promise.resolve()
-				.then(options.recall.read)
-				.catch(() => null)
-		: null;
+	// The recall read rides the same start line as the reads above. It is not one of the four
+	// sources, and it is not under the brief budget: it has its own cap, and a failed or late read is a missing section.
+	const recallRead: Promise<RecallSnapshot | null> | null = options.recall ? boundedRecall(options.recall.read, options.recall.partial, options.recall.capMs ?? BRIEF_RECALL_CAP_MS) : null;
 
 	const heading = [repo ?? "unknown repo", branch ? `@ ${branch}` : null, graphId ? `— ${graphId}` : null]
 		.filter(Boolean)

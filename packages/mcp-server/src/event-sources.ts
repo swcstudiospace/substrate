@@ -1012,6 +1012,39 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 			payload: { action: "alert", runtime: "alert", unit: "substrate-mcp.service", result: "watchdog" },
 		}),
 	},
+	{
+		id: "memory.mental_model.refresh",
+		phase: 40,
+		kind: "note",
+		surface: { fixed: "substrate" },
+		actions: ["memory.mental_model.refresh"],
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "note",
+			summary: "mental model refresh accepted: sub-omp/mm_a",
+			session_id: "mental-model:sub-omp:mm_a:2026-W43",
+			payload: { action: "memory.mental_model.refresh", bank: "sub-omp", mental_model_id: "mm_a", status: "ok" },
+		}),
+	},
+	{
+		// Phase 40: a model whose refresh failed in a pass. `ok` is the note above; the emitter writes one of the two per model.
+		id: "memory.mental_model.refresh.failed",
+		phase: 40,
+		kind: "warning",
+		surface: { fixed: "substrate" },
+		actions: ["memory.mental_model.refresh"],
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "warning",
+			summary: "mental model refresh failed (server): sub-omp/mm_b",
+			session_id: "mental-model:sub-omp:mm_b:2026-W43",
+			payload: { action: "memory.mental_model.refresh", bank: "sub-omp", mental_model_id: "mm_b", status: "failed", reason: "server" },
+		}),
+	},
 ];
 
 export const SILENT_SOURCES: readonly SilentSource[] = [

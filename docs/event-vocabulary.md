@@ -119,6 +119,8 @@ These apply to every source:
 | `lease.release.dod` | 23 | `note` | `lease-holder` | `released` | — | graph repo via placeOf | no |
 | `dod.refused` | 23 | `warning` | `lease-holder` | `dod` | — | — | no |
 | `dod.approved` | 38 | `note` | `lease-holder` | `dod` | — | graph repo via placeOf | no |
+| `memory.mental_model.refresh` | 40 | `note` | `substrate` | `memory.mental_model.refresh` | — | — | yes |
+| `memory.mental_model.refresh.failed` | 40 | `warning` | `substrate` | `memory.mental_model.refresh` | — | — | yes |
 | `dispatch.outcome` | 24 | `note` | `substrate` | `dispatch` | `dispatcher` | — | yes |
 | `dispatch.failed` | 24 | `warning` | `substrate` | `dispatch` | `dispatcher` | — | yes |
 | `lanea.session_start` | 32 | `session.start` | `claude-code` | — | `agentos` | — | no |

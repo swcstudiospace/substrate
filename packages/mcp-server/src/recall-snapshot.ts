@@ -1,17 +1,19 @@
 /**
  * Cross-session recall in the brief (uplift-4 S5, Build Plan BP-5.0).
  *
- * The brief never calls Hindsight: a live recall inside the compose is the
- * acc30a8 4 s anti-pattern `memory-recall.ts` names. Instead a bounded
- * prefetcher keeps a WARM SNAPSHOT per (surface, repo) in the generation-free
- * cache class `recall-snapshot`, and the brief reads it with a cache read and
- * nothing else. This module owns the three halves of that and imports no
- * plane client (the recall itself arrives as an injected function), so
- * `brief.ts`, `brief-profile.ts` and this file all stay free of
- * `planes/hindsight`; `memory-recall.test.ts` gates that.
+ * The brief's recall read is one bounded fan-out over the configured `sub-*`
+ * banks (`fanoutSnapshot`), answered from the cache class `recall-snapshot`
+ * under the memory and recall generations when a fresh answer is held, and waited for at most
+ * `BRIEF_RECALL_CAP_MS`, outside the brief budget. A bounded prefetcher also
+ * keeps a WARM SNAPSHOT of the surface's own bank per (surface, repo) in that
+ * class; the brief's section does not read it, only the recall metric does.
+ * This module owns the halves of that and imports no plane client (the recall
+ * itself arrives as an injected function), so `brief.ts`, `brief-profile.ts`
+ * and this file all stay free of `planes/hindsight`; `memory-recall.test.ts`
+ * gates that.
  *
- * - the SNAPSHOT value, how it is built from a recall (own bank only, scope
- *   post-filtered, redacted, at most three hits of at most 240 characters) and
+ * - the SNAPSHOT value, how it is built from a recall (the banks that answered,
+ *   scope post-filtered, redacted, at most three hits of at most 240 characters) and
  *   how it is judged fresh, stale or cold;
  * - the WANTED registry: the (surface, repo) pairs a brief has asked about,
  *   registered with no I/O, LRU-capped and expiring when nobody asks;
@@ -36,10 +38,18 @@ export const MIN_RECALL_INTERVAL_S = 30;
 const MAX_RECALL_INTERVAL_S = 3600;
 export const DEFAULT_RECALL_TTL_S = 900;
 const MIN_RECALL_TTL_S = 60;
-const MAX_RECALL_TTL_S = 86_400;
+export const MAX_RECALL_TTL_S = 86_400;
 export const DEFAULT_RECALL_BUDGET_MS = 1500;
 const MIN_RECALL_BUDGET_MS = 100;
 const MAX_RECALL_BUDGET_MS = 10_000;
+/** The brief's wait for its recall read in `enforce`: outside the brief budget, and never longer than this. Not an env knob. */
+export const BRIEF_RECALL_CAP_MS = 3000;
+/** The fan-out's own abort budget ends this far inside the brief's cap, so a bank still running at the budget is cut before the cap fires. Not an env knob. */
+export const BRIEF_RECALL_BANK_MARGIN_MS = 250;
+/** The shared abort budget of the brief's fan-out: the configured budget, never past the cap less the margin. */
+export function briefRecallBudgetMs(budgetMs: number, capMs = BRIEF_RECALL_CAP_MS): number {
+	return Math.min(budgetMs, capMs - BRIEF_RECALL_BANK_MARGIN_MS);
+}
 
 /** `SUBSTRATE_BRIEF_RECALL*` as the service reads them. */
 export interface RecallConfig {
@@ -137,19 +147,26 @@ export interface RecallLine {
 }
 
 /**
- * What the `recall-snapshot` cache class holds: the recalled lines, the bank
- * they came from and when they were fetched. The bank is always the
- * surface's own; it is here so the brief can say so.
+ * What the `recall-snapshot` cache class holds: the recalled lines and when they
+ * were fetched. `bank` is always the surface's own. A fan-out answer also names
+ * the banks that answered, in `banks`; a prefetched snapshot has none.
  */
 export interface RecallSnapshot {
 	bank: string;
+	/** The banks a fan-out answered, sorted. Absent on a prefetched snapshot. */
+	banks?: string[];
 	/** ISO instant of the fetch. */
 	at: string;
 	hits: RecallLine[];
 }
 
+const BANK_NAME = /^[A-Za-z0-9._:-]{1,64}$/;
+/** The most banks one fan-out snapshot names: the configured `sub-*` set, bounded. */
+const MAX_FANOUT_BANKS = 64;
+
 const SnapshotSchema = z.object({
-	bank: z.string().regex(/^[A-Za-z0-9._:-]{1,64}$/),
+	bank: z.string().regex(BANK_NAME),
+	banks: z.array(z.string().regex(BANK_NAME)).max(MAX_FANOUT_BANKS).optional(),
 	at: z.string().refine((value) => Number.isFinite(Date.parse(value))),
 	hits: z
 		.array(
@@ -248,7 +265,8 @@ export const RECALL_TITLE_PREFIX = "Recalled context (derived, untrusted descrip
  * Lowest compact priority: it is the first thing the compact profile drops.
  */
 export function recallSection(snapshot: RecallSnapshot, nowMs: number): BriefSection {
-	const title = `${RECALL_TITLE_PREFIX}; Hindsight bank ${snapshot.bank}, ${formatAge(nowMs - Date.parse(snapshot.at))} old):`;
+	const named = snapshot.banks !== undefined && snapshot.banks.length > 0 ? `${snapshot.banks.length === 1 ? "bank" : "banks"} ${snapshot.banks.join(", ")}` : `bank ${snapshot.bank}`;
+	const title = `${RECALL_TITLE_PREFIX}; Hindsight ${named}, ${formatAge(nowMs - Date.parse(snapshot.at))} old):`;
 	const items: BriefItem[] = snapshot.hits.map((hit) => {
 		const body = clip(foldLine(hit.text), MAX_RECALL_HIT_CHARS);
 		const tail = hit.type !== undefined ? ` (${hit.type})` : "";
@@ -279,21 +297,33 @@ export function buildRecallQuery(repo: string, subjects: readonly string[]): str
 	return clip(named.length > 0 ? `${head}: ${named.join("; ")}` : head, MAX_QUERY_CHARS);
 }
 
+/** The `metadata.scope` a retain writes for one repo: the scope a brief's fan-out keeps. */
+export function repoScope(repo: string): string {
+	return `repo:${repo}`;
+}
+
 /**
- * The lines a snapshot keeps from one recall. A hit stays only when it came
- * from `bank` (the surface's own: a hit naming any other bank is dropped, so
- * the isolation does not rest on the caller alone) and its retained scope is
- * exactly `repo:<repo>` (retains carry the scope in metadata, not in a tag,
- * so this is a post-filter). Text is folded, redacted, clipped to 240
- * characters and deduplicated; at most three survive, in recall order.
+ * The lines a snapshot keeps from one recall on `bank`, the surface's own. See `buildFanoutLines`.
  */
 export function buildRecallLines(hits: readonly RecallHitInput[], bank: string, repo: string): RecallLine[] {
-	const wanted = `repo:${repo}`;
+	return buildFanoutLines(hits, [bank], repo);
+}
+
+/**
+ * The lines a snapshot keeps from one recall. A hit stays only when it came
+ * from one of `banks` (the banks that answered: a hit naming any other bank is
+ * dropped, so the isolation does not rest on the caller alone) and its retained
+ * scope is exactly `repo:<repo>` (retains carry the scope in metadata, not in a
+ * tag, so this is a post-filter). Text is folded, redacted, clipped to 240
+ * characters and deduplicated; at most three survive, in recall order.
+ */
+export function buildFanoutLines(hits: readonly RecallHitInput[], banks: readonly string[], repo: string): RecallLine[] {
+	const wanted = repoScope(repo);
 	const lines: RecallLine[] = [];
 	const seen = new Set<string>();
 	for (const hit of hits) {
 		if (lines.length >= MAX_RECALL_HITS) break;
-		if (hit.bank !== bank || hit.scope !== wanted) continue;
+		if (!banks.includes(hit.bank) || hit.scope !== wanted) continue;
 		const text = clip(redact(foldLine(hit.text)), MAX_RECALL_HIT_CHARS);
 		if (text.length === 0 || seen.has(text)) continue;
 		seen.add(text);
@@ -301,6 +331,24 @@ export function buildRecallLines(hits: readonly RecallHitInput[], bank: string, 
 		lines.push(type !== undefined ? { text, type } : { text });
 	}
 	return lines;
+}
+
+/** The cache arguments of one fan-out answer: the sorted bank set and the query, so another set or another query is another entry. */
+export function fanoutSnapshotArgs(repo: string, banks: readonly string[], query: string): { repo: string; banks: string[]; query: string } {
+	return { repo, banks: [...banks].sort(), query };
+}
+
+/** The snapshot of one fan-out: the lines of the banks that answered, the banks named, stamped `nowMs`. `bank` is the surface's own. */
+export function fanoutSnapshot(answered: readonly string[], hits: readonly RecallHitInput[], repo: string, bank: string, nowMs: number): RecallSnapshot {
+	const banks = [...answered].sort();
+	return { bank, banks, at: new Date(nowMs).toISOString(), hits: buildFanoutLines(hits, banks, repo) };
+}
+
+/** A fan-out answer a brief may reuse without asking the banks: stamped no more than `ttlS` ago. Unlike a prefetched snapshot, an answer with no lines is still an answer. */
+export function fanoutFresh(snapshot: RecallSnapshot | null, nowMs: number, ttlS: number): boolean {
+	if (snapshot === null) return false;
+	const age = nowMs - Date.parse(snapshot.at);
+	return age >= -FUTURE_SKEW_MS && age <= ttlS * 1000;
 }
 
 // ── the wanted registry ──────────────────────────────────────────────────────

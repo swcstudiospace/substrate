@@ -196,7 +196,7 @@ async function get(
 	return { ok: true, value: { status: response.status, body: parsed.body } };
 }
 
-async function send(
+export async function send(
 	config: HindsightConfig,
 	method: string,
 	path: string,
