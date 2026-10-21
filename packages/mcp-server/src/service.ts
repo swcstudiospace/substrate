@@ -137,6 +137,7 @@ import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachab
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth, type HindsightConfig } from "./planes/hindsight.ts";
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
 import { RailwayClient } from "./railway.ts";
+import type { FabricSources } from "./fabric/types.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
 import {
@@ -6022,6 +6023,36 @@ export class Substrate {
 		if (bus === null) return { enabled: false };
 		const stats: EventBusStats = bus.stats?.() ?? { published: 0, publishFailures: 0, oversizeDropped: 0, malformedIgnored: 0, subscriptionDrops: 0 };
 		return { enabled: true, published: stats.published, failed: stats.publishFailures, oversize: stats.oversizeDropped, malformed: stats.malformedIgnored };
+	}
+
+	/**
+	 * The fabric's read-only view of this process (phase 51, SOTA-07). It reads through the existing health, the
+	 * Railway cost report and the retain outbox, adds no probe, and carries presence and endpoint classes only:
+	 * no URL, host or credential is in the view.
+	 */
+	fabricSources(): FabricSources {
+		const { dbEndpoints } = this.config;
+		return {
+			now: () => new Date().toISOString(),
+			health: () => this.health(),
+			railwayCost: () => this.railway.costReport(),
+			outbox: () => {
+				const stats = this.retainOutboxStats();
+				return { size: stats.size, oldestAt: stats.oldestAt };
+			},
+			config: {
+				endpointPolicy: dbEndpoints.policy,
+				endpointClasses: { ...dbEndpoints.classes },
+				configured: {
+					"timescaledb-index": this.index !== null,
+					greptime: this.config.greptime !== null,
+					dragonfly: this.config.dragonflyUrl !== undefined || this.config.dragonflyRefused !== null,
+					hindsight: hindsightFromEnv() !== null,
+					ragflow: this.config.ragflow !== null,
+				},
+				dragonflyRefused: this.config.dragonflyRefused !== null,
+			},
+		};
 	}
 
 	/** The last index size report `SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S` keeps, and the measurement still running. */
