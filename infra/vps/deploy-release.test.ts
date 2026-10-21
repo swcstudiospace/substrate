@@ -1,8 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// These tests run bash synchronously with spawnSync, so bun's 5 s default can fire on a loaded host with every assertion still true.
+setDefaultTimeout(30_000);
 
 const repoRoot = join(import.meta.dir, "../..");
 const script = join(repoRoot, "infra/vps/deploy-release.sh");
