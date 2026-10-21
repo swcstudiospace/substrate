@@ -942,6 +942,10 @@ export function createHttpServer(
 				const served = observability.evaluateServedTokens();
 				// The index archive age (uplift-4 S2): one row, present only when an archive directory is configured; report-only until its ceiling is set.
 				const indexArchive = await substrate.indexArchiveSlo();
+				// The Railway cost report (Phase 45, D45-d and D45-g): report-only, so it is never folded into `breached`. The
+				// client caches it for 15 minutes and reports a Railway failure as `unavailable`; the catch keeps a regression from
+				// taking `/slo` down.
+				const railwayCost = await substrate.railway.costReport().catch(() => null);
 				// 200 either way. A breached objective is information, not a broken service,
 				// and a monitor that read this as an outage would page on a slow hour.
 				//
@@ -964,6 +968,7 @@ export function createHttpServer(
 					capacity,
 					served,
 					...(indexArchive !== null ? { indexArchive: [indexArchive] } : {}),
+					railwayCost,
 					history: observability.history(),
 				});
 				return;

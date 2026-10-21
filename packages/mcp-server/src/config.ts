@@ -18,6 +18,7 @@ import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
 import { DEFAULT_RECALL_BUDGET_MS } from "./memory-recall.ts";
 import { NOTION_API_URL } from "./notion.ts";
 import { DEFAULT_RETRIEVAL_KNOBS, ragflowFromEnv, type RagflowConfig, type RetrievalKnobs } from "./planes/ragflow.ts";
+import { railwayFromEnv, type RailwayConfig } from "./railway.ts";
 import { hindsightBanksFromEnv } from "./planes/hindsight.ts";
 import { loadRecallConfig, type RecallConfig } from "./recall-snapshot.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
@@ -95,6 +96,15 @@ export interface SubstrateConfig {
 	 * docs_search degraded rather than broken.
 	 */
 	ragflow: RagflowConfig | null;
+	/**
+	 * The Railway control plane (Phase 45, D45-a).
+	 *
+	 * Control calls go to the Railway public API with `RAILWAY_API_TOKEN`,
+	 * never through the tailnet forwarders. Writes stay refused unless
+	 * `SUBSTRATE_RAILWAY_WRITES` is exactly `on` (D45-c). Always present;
+	 * an empty token makes every Railway tool refuse or report unconfigured.
+	 */
+	railway: RailwayConfig;
 	/**
 	 * Path prefixes a docs_ingest page may come from (D25-05).
 	 *
@@ -690,6 +700,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		linearApiUrl: (env.LINEAR_API_URL?.trim() || LINEAR_API_URL).replace(/\/+$/, ""),
 		notionApiUrl: (env.NOTION_API_URL?.trim() || NOTION_API_URL).replace(/\/+$/, ""),
 		ragflow: ragflowFromEnv(env),
+		railway: railwayFromEnv(env),
 		docsIngestRoots: ingestRoots.length > 0 ? ingestRoots : [...DEFAULT_INGEST_ROOTS],
 		vmGuest: (env.SUBSTRATE_VM_GUEST?.trim() ?? "") === "1",
 		docsStateFile: env.SUBSTRATE_DOCS_STATE_FILE?.trim() || null,
