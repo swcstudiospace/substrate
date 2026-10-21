@@ -131,15 +131,33 @@ def _vm_key(graph_id: str, node_id: str) -> str:
 
 
 def _valid_vm_record(record: object) -> bool:
-    """True for a record shaped as ``SessionRegistry._remember_vm_task`` writes it."""
+    """True for a record shaped as ``SessionRegistry`` writes it; the claim evidence is optional."""
     if not isinstance(record, dict):
         return False
     if not all(isinstance(record.get(field), str) for field in VM_RECORD_TEXT_FIELDS):
         return False
     if not isinstance(record.get("started_at"), (int, float)):
         return False
+    claimed_at = record.get("claimed_at")
+    if claimed_at is not None and not isinstance(claimed_at, (int, float)):
+        return False
+    claim_session = record.get("claim_session")
+    if claim_session is not None and not isinstance(claim_session, str):
+        return False
     prior = record.get("prior_claim_sessions", [])
     return isinstance(prior, list) and all(isinstance(sid, str) for sid in prior)
+
+
+def _vm_record(
+    *, issue_id: str, identifier: str, graph_id: str, node_id: str, dispatch_label_id: str,
+    repo: str, started_at: float, prior_claim_sessions: frozenset[str],
+) -> dict:
+    """The persisted VM task record: ids, the start time and prior claim session ids only."""
+    return {
+        "issue_id": issue_id, "identifier": identifier, "graph_id": graph_id, "node_id": node_id,
+        "surface": VM_SURFACE, "dispatch_label_id": dispatch_label_id, "started_at": started_at,
+        "repo": repo, "prior_claim_sessions": sorted(prior_claim_sessions),
+    }
 
 
 def _write_private_json(path: Path, payload: object) -> None:
@@ -275,7 +293,7 @@ class SessionRegistry:
     def add(self, session: Session) -> None:
         if session.issue_id in self._sessions:
             raise ValueError(f"issue {session.issue_id} already has a dispatched session")
-        if self.capacity_left() <= 0:
+        if self._held_slots(except_issue=session.issue_id) >= self.max_sessions:
             raise ValueError(f"at capacity ({self.max_sessions} sessions)")
         self._sessions[session.issue_id] = session
         if session.surface == VM_SURFACE:
@@ -283,17 +301,43 @@ class SessionRegistry:
 
     def _remember_vm_task(self, session: Session) -> None:
         """Record an opened VM task so a restarted dispatcher can re-adopt it: ids and times only."""
-        self._vm_tasks[_vm_key(session.graph_id, session.node_id)] = {
-            "issue_id": session.issue_id,
-            "identifier": session.identifier,
-            "graph_id": session.graph_id,
-            "node_id": session.node_id,
-            "surface": session.surface,
-            "dispatch_label_id": session.dispatch_label_id,
-            "started_at": session.started_at,
-            "repo": session.repo,
-            "prior_claim_sessions": sorted(session.prior_claim_sessions),
-        }
+        self._put_vm_record(_vm_record(
+            issue_id=session.issue_id, identifier=session.identifier, graph_id=session.graph_id,
+            node_id=session.node_id, dispatch_label_id=session.dispatch_label_id, repo=session.repo,
+            started_at=session.started_at, prior_claim_sessions=session.prior_claim_sessions,
+        ))
+
+    def note_vm_launch(
+        self, *, issue_id: str, identifier: str, graph_id: str, node_id: str,
+        dispatch_label_id: str, repo: str, prior_claim_sessions: frozenset[str],
+    ) -> None:
+        """Write a VM task's record before its launch call, so a dispatcher that dies inside the
+        launch re-adopts the task on its next start. ``started_at`` is provisional: add() replaces the
+        record with the launch's own start time."""
+        self._put_vm_record(_vm_record(
+            issue_id=issue_id, identifier=identifier, graph_id=graph_id, node_id=node_id,
+            dispatch_label_id=dispatch_label_id, repo=repo, started_at=time.time(),
+            prior_claim_sessions=prior_claim_sessions,
+        ))
+
+    def forget_vm_launch(self, issue_id: str) -> None:
+        """A launch that raised drops its pending record."""
+        self._forget_vm_task(issue_id)
+
+    def _put_vm_record(self, record: dict) -> None:
+        self._vm_tasks[_vm_key(record["graph_id"], record["node_id"])] = record
+        if self._vm_tasks_path is not None:
+            self._save_vm_tasks()
+
+    def _remember_claim(self, session: Session) -> None:
+        """Persist a VM task's landed-claim evidence so a restarted dispatcher keeps it."""
+        if session.surface != VM_SURFACE:
+            return
+        record = self._vm_tasks.get(_vm_key(session.graph_id, session.node_id))
+        if record is None:
+            return
+        record["claimed_at"] = session.claimed_at
+        record["claim_session"] = session.claim_session
         if self._vm_tasks_path is not None:
             self._save_vm_tasks()
 
@@ -325,8 +369,19 @@ class SessionRegistry:
             record["graph_id"] for record in self._vm_tasks.values()
         }
 
+    def _held_slots(self, *, except_issue: str | None = None) -> int:
+        """Slots held by live sessions and by pending VM tasks, one each.
+
+        A pending VM task has no session yet, but its host task may still be running, so it keeps
+        its slot until readopt() resolves it. ``except_issue`` leaves out one issue's own record: a
+        launch in progress has just written that record and must not count against itself.
+        """
+        pending = {record["issue_id"] for record in self._vm_tasks.values() if record["issue_id"] != except_issue}
+        return len(self._sessions) + len(pending - set(self._sessions))
+
     def capacity_left(self) -> int:
-        return self.max_sessions - len(self._sessions)
+        """Free slots for a new launch: a live session and a pending VM task each hold one."""
+        return max(0, self.max_sessions - self._held_slots())
 
     def readopt(self) -> None:
         """Re-adopt persisted VM tasks that have no live session (D43-A); call before each tick.
@@ -334,7 +389,7 @@ class SessionRegistry:
         substrate-host answers for each record: 404 drops it; a running or finished task becomes a
         session (a finished one is reaped like any other exit); an unreachable host keeps the record
         for a later call, and READOPT_UNREACHABLE_LIMIT failed attempts in a row drop it. Records
-        beyond capacity_left() stay recorded for a later call.
+        beyond the free session slots stay recorded for a later call.
         """
         if self._host is None:
             return
@@ -347,7 +402,7 @@ class SessionRegistry:
             issue_id, graph_id, node_id = record["issue_id"], record["graph_id"], record["node_id"]
             if key in live_keys or issue_id in self._sessions:
                 continue
-            if self.capacity_left() <= 0:
+            if len(self._sessions) >= self.max_sessions:
                 return
             try:
                 status = self._host.status(graph_id, node_id)
@@ -383,6 +438,8 @@ class SessionRegistry:
                 started_at=record["started_at"],
                 log_path=TASKS_DIR / f"{graph_id}--{node_id}.json",
                 repo=record["repo"],
+                claimed_at=record.get("claimed_at"),
+                claim_session=record.get("claim_session"),
                 prior_claim_sessions=frozenset(record.get("prior_claim_sessions", [])),
             )
             finished = " (finished while the dispatcher was down)" if status.get("exit_code") is not None else ""
@@ -484,6 +541,7 @@ class SessionRegistry:
         kind, claim_session = evidence
         session.claimed_at = now
         session.claim_session = claim_session
+        self._remember_claim(session)
         log(f"claim landed for {session.identifier} ({kind}, session {claim_session or 'unknown'})")
 
     def _remove_exited(self, session: Session, code: int, log: Log) -> None:

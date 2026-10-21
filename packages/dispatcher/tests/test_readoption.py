@@ -11,11 +11,12 @@ import stat
 from pathlib import Path
 
 import httpx
+import pytest
 
 from substrate_dispatcher.dispatch import make_launch_fn
-from substrate_dispatcher.host import HostClient, RemoteTask
+from substrate_dispatcher.host import HostClient, HostRefused, RemoteTask
 from substrate_dispatcher.sessions import SessionRegistry, landed_claim
-from test_dispatch import FOUND, GID, EventMcp, FakeLinear, FakeMcp, cand, env_file, run_tick  # noqa: F401 — env_file is a fixture
+from test_dispatch import FOUND, GID, EventMcp, FakeLinear, FakeMcp, RecordingLaunch, cand, env_file, run_tick  # noqa: F401 — env_file is a fixture
 
 
 def found_for(graph_id: str) -> dict:
@@ -62,6 +63,13 @@ class ReapMcp(EventMcp):
         return {"graph_id": graph_id, "nodes": [{"node_id": "n1", "state": "unstarted", "claimed_by": None}]}
 
 
+class ClaimMcp(ReapMcp):
+    """ReapMcp whose node shows this surface holding a claim under session S1."""
+
+    def graph_get(self, graph_id: str) -> dict:
+        return {"graph_id": graph_id, "nodes": [{"node_id": "n1", "state": "unstarted", "claimed_by": "claude-code", "claim_session": "S1"}]}
+
+
 def registry_for(state, world: HostWorld, lines: list[str], *, max_sessions: int = 2) -> SessionRegistry:
     return SessionRegistry(max_sessions=max_sessions, state_dir=state, log=lines.append, host=world.client())
 
@@ -77,6 +85,26 @@ def open_fn(world: HostWorld, lines: list[str]):
 
 def launch_vm(registry, world, linear, mcp, env_file, lines) -> None:
     run_tick(linear, mcp, env_file=env_file, registry=registry, launch_fn=open_fn(world, lines))
+
+
+class DispatcherKilled(BaseException):
+    """The dispatcher process dies inside a launch. A BaseException, so no handler in the tick sees it."""
+
+
+def open_then_die(world: HostWorld, lines: list[str]):
+    accept = world.client().launch
+
+    def open_task(**ids):
+        accept(**ids)  # substrate-host opens the task
+        raise DispatcherKilled()  # the process dies before the launch returns
+
+    return make_launch_fn(
+        log=lines.append,
+        checkout=lambda _slug: Path("/var/lib/substrate/worktrees"),
+        ensure=lambda _repo, graph_id, _branch: Path("/var/lib/substrate/worktrees") / graph_id,
+        open_task=open_task,
+    )
+
 
 
 def test_a_running_vm_task_survives_a_dispatcher_restart_and_is_readopted(tmp_path, env_file):
@@ -253,3 +281,95 @@ def test_a_give_up_removes_the_vm_task_record_so_a_restart_does_not_readopt_it(t
     first.reap(started + 900.0, mcp=mcp, linear=linear, log=lines.append)  # claim timeout: give up
     assert first.given_up == {"i-1"}
     assert registry_for(state, world, lines).active_issue_ids() == set()
+
+
+def test_a_record_written_before_a_launch_that_never_returned_is_readopted_on_the_next_start(
+    tmp_path, env_file
+):
+    state, world, lines = tmp_path / "state", HostWorld(), []
+    linear = FakeLinear([cand(identifier="SWC-9", surface="claude-code")])
+    first = registry_for(state, world, lines)
+    with pytest.raises(DispatcherKilled):
+        run_tick(
+            linear, ReapMcp(default=dict(FOUND)), env_file=env_file, registry=first,
+            launch_fn=open_then_die(world, lines),
+        )
+    assert world.posts == 1 and first.get("i-1") is None  # the host opened the task; no session was added
+
+    second = registry_for(state, world, lines)
+    assert second.active_issue_ids() == {"i-1"}
+    second.readopt()
+    got = second.get("i-1")
+    assert isinstance(got.proc, RemoteTask) and (got.graph_id, got.node_id) == (GID, "n1")
+
+
+def test_pending_vm_tasks_hold_their_slots_so_a_hermes_session_cannot_exceed_the_cap(tmp_path, env_file):
+    state, world, lines = tmp_path / "state", HostWorld(), []
+    issues = [("i-1", "SWC-1", "ut-readopt-b1"), ("i-2", "SWC-2", "ut-readopt-b2")]
+    linear = FakeLinear([cand(iid, ident, surface="claude-code") for iid, ident, _ in issues])
+    mcp = ReapMcp(answers={iid: found_for(gid) for iid, _, gid in issues})
+    run_tick(linear, mcp, env_file=env_file, registry=registry_for(state, world, lines), launch_fn=open_fn(world, lines))
+    assert world.posts == 2
+
+    world.down = True  # substrate-host is unreachable when the dispatcher restarts
+    second = registry_for(state, world, lines)
+    second.readopt()
+    assert second.active_issue_ids() == {"i-1", "i-2"} and second.capacity_left() == 0
+
+    hermes, launch_fn = FakeLinear([cand("i-3", "SWC-3")]), RecordingLaunch()
+    decisions, _, _, _ = run_tick(hermes, FakeMcp(), env_file=env_file, registry=second, launch_fn=launch_fn)
+    assert [d.action for d in decisions] == ["skip"] and decisions[0].reason == "at capacity"
+    assert launch_fn.calls == []
+
+    world.down = False  # the host recovers: both pending tasks are readopted, none was displaced
+    second.readopt()
+    assert second.get("i-1") is not None and second.get("i-2") is not None
+
+
+def test_a_restored_session_keeps_the_claim_evidence_it_recorded_before_the_restart(tmp_path, env_file):
+    state, world, lines = tmp_path / "state", HostWorld(), []
+    linear = FakeLinear([cand(identifier="SWC-9", surface="claude-code")])
+    first = registry_for(state, world, lines)
+    launch_vm(first, world, linear, ReapMcp(default=dict(FOUND)), env_file, lines)
+    original = first.get("i-1")
+    first.reap(original.started_at + 10.0, mcp=ClaimMcp(default=dict(FOUND)), linear=linear, log=lines.append)
+    assert original.claimed_at is not None
+
+    # The claim comment never posted, the turn ends while the dispatcher is down, and the node's claim
+    # is then released: the persisted claim evidence is the only evidence left.
+    world.tasks[(GID, "n1")] = 1
+    second = registry_for(state, world, lines)
+    second.readopt()
+    got = second.get("i-1")
+    assert got is not None and got.claimed_at == original.claimed_at
+
+    reap_mcp, reap_linear = ReapMcp(default=dict(FOUND)), FakeLinear()
+    second.reap(original.started_at + 20.0, mcp=reap_mcp, linear=reap_linear, log=lines.append)
+    assert second.get("i-1") is None and second.given_up == set()
+    assert reap_linear.named("comment") == [] and reap_mcp.events == []
+
+
+def test_a_host_refusal_removes_the_pending_record_so_no_task_is_adopted(tmp_path, env_file):
+    state, world, lines = tmp_path / "state", HostWorld(), []
+    linear = FakeLinear([cand(identifier="SWC-9", surface="claude-code")])
+    reg = registry_for(state, world, lines)
+
+    def refuse(candidate, found):
+        raise HostRefused("substrate-host refused the task", "host-refused", may_be_open=False)
+
+    run_tick(linear, ReapMcp(default=dict(FOUND)), env_file=env_file, registry=reg, launch_fn=refuse)
+    assert reg.active_issue_ids() == set()
+    assert registry_for(state, world, lines).active_issue_ids() == set()
+
+
+def test_a_host_unreachable_launch_keeps_its_pending_record_for_readoption(tmp_path, env_file):
+    state, world, lines = tmp_path / "state", HostWorld(), []
+    linear = FakeLinear([cand(identifier="SWC-9", surface="claude-code")])
+    reg = registry_for(state, world, lines)
+
+    def unreachable(candidate, found):
+        raise HostRefused("substrate-host is not reachable", "host-unreachable")
+
+    run_tick(linear, ReapMcp(default=dict(FOUND)), env_file=env_file, registry=reg, launch_fn=unreachable)
+    assert reg.active_issue_ids() == {"i-1"}
+    assert registry_for(state, world, lines).active_issue_ids() == {"i-1"}

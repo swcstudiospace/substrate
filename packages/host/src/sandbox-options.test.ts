@@ -223,13 +223,18 @@ describe("egressRules (U1)", () => {
 	});
 
 	test("an unlisted host gets no accept rule, and the source DROP is the last rule", () => {
-		const only = new Map([["registry.npmjs.org", ["104.16.1.1"]]]);
+		const only = new Map([
+			["registry.npmjs.org", ["104.16.1.1"]],
+			["example.com", ["93.184.216.34"]],
+		]);
 		const rules = egressRules("172.17.0.2", [{ host: "registry.npmjs.org", port: 443 }], only);
 		// Only the listed host's resolved address is ever an accept destination.
 		const destinations = rules.apply.flatMap((argv) =>
 			argv.includes("ACCEPT") && argv.includes("-d") ? [argv[argv.indexOf("-d") + 1]] : [],
 		);
 		expect(destinations).toEqual(["104.16.1.1"]);
+		// example.com resolves but is not in the allowlist, so its address rides no rule at all.
+		expect(rules.apply.flat()).not.toContain("93.184.216.34");
 		// No rule names any address beyond the container and that one destination.
 		const addresses = rules.apply.flat().filter((token) => /^\d+\.\d+\.\d+\.\d+$/.test(token));
 		expect(addresses.filter((token) => token !== "172.17.0.2" && token !== "104.16.1.1")).toEqual([]);

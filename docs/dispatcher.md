@@ -40,7 +40,7 @@ the tag is among the issue's last 50 comments.
 | `path-conflict` | worktree path taken by something untracked | next tick |
 | `git-failed` | git could not prepare the worktree | next tick |
 | `host-refused` | substrate-host refused the task | next tick |
-| `host-unreachable` | substrate-host not reachable | next tick, emits nothing |
+| `host-unreachable` | substrate-host not reachable | next tick after a connect failure; after an ambiguous reply, when `readopt()` resolves the kept record; emits nothing |
 | `exited-unclaimed` | hermes exited without claiming; label removed | no, gives up |
 | `claim-timeout` | no claim in 15 min; label removed | no, gives up |
 
@@ -78,8 +78,10 @@ and `scripts/dispatcher-driver.py` S11–S16, and end to end in
 landed-claim (`claimed_by`, state transition, or mirror comment) → success
 with `dispatch.outcome{launched}`; 400/409/502 → `host-refused` once-only
 comment (the host's text stays in the journal, never in the comment) and one
-`dispatch.failed`; unreachable/non-JSON/wrong-shape → `host-unreachable`
-comment with no event, retried on a later tick. The G4 restart flips live
+`dispatch.failed`; a connect failure → `host-unreachable` comment with no event, retried on a
+later tick; a reply the host may have acted on (a 5xx, a read failure after send, or a 2xx that
+cannot be read) → the same comment, but the task's record stays until `readopt()` resolves it, so
+the next tick does not post a second task. The G4 restart flips live
 behavior with no dispatcher code change.
 
 ### host-unreachable → live transition (Phase 31, no dispatcher code change)
