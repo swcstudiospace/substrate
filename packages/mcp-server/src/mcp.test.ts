@@ -663,7 +663,7 @@ describe("skills_propose", () => {
 		expect(tool?.annotations).toMatchObject({ destructiveHint: false, openWorldHint: true });
 		const properties = Object.keys((tool?.inputSchema as { properties?: Record<string, unknown> }).properties ?? {});
 		expect(properties.sort()).toEqual(
-			["allow_doc_examples", "dry_run", "files", "graph_id", "mode", "name", "rationale", "remove", "reopen", "session_id", "surface"].sort(),
+			["allow_doc_examples", "dry_run", "expected_version", "files", "graph_id", "mode", "name", "rationale", "remove", "reopen", "session_id", "surface"].sort(),
 		);
 	});
 

@@ -775,6 +775,49 @@ export class SkillProposalDenied extends Error {
 	}
 }
 
+/**
+ * A proposal that revises a skill version other than the latest recorded one (memory's `version.stale`).
+ * Refused before any git work, so it opens no pull request and writes no registry row. `remedy`,
+ * `current_version` and `conflict_with` (the pull request of the latest recorded version, or null) are the
+ * same fields a stale memory write answers with.
+ */
+export class SkillProposalStale extends Error {
+	constructor(
+		message: string,
+		readonly remedy: string,
+		readonly current_version: number | null,
+		readonly conflict_with: string | null,
+	) {
+		super(message);
+		this.name = "SkillProposalStale";
+	}
+}
+
+/**
+ * Memory's `versionMismatch` for a skill: `recorded` is the version now, or null when nothing is
+ * recorded (governance off, or no row for the name yet). Absent `expected` never reaches here.
+ */
+function skillVersionStale(name: string, recorded: { version: number; pr_url: string | null } | null, expected: number): SkillProposalStale | null {
+	if (!recorded) {
+		if (expected === 0) return null;
+		return new SkillProposalStale(
+			`skill ${name} has no recorded version ${expected}; nothing was proposed`,
+			`No version of ${name} is recorded here, so there is no version ${expected} to revise. ` +
+				"Re-submit without expected_version to propose the first one.",
+			null,
+			null,
+		);
+	}
+	if (expected === recorded.version) return null;
+	return new SkillProposalStale(
+		`skill ${name} is at version ${recorded.version}, not ${expected}; nothing was proposed`,
+		`The latest recorded version is ${recorded.version}${recorded.pr_url ? ` (${recorded.pr_url})` : ""}, not ${expected}. ` +
+			"Somebody proposed a change since — re-submit against the current version (current_version).",
+		recorded.version,
+		recorded.pr_url,
+	);
+}
+
 /** What a proposal names, as the route, the tool and the CLI hand it over. */
 export interface SkillProposalRequest {
 	name: string;
@@ -785,6 +828,11 @@ export interface SkillProposalRequest {
 	surface?: string;
 	session_id?: string;
 	graph_id?: string;
+	/**
+	 * Memory's `expected_version` contract: the skill version this proposal revises. A mismatch is
+	 * refused before any git work (`SkillProposalStale`, 409); absent keeps today's behaviour.
+	 */
+	expected_version?: number;
 	/** Validate, redact, clone and count the diff; push nothing, call no `gh`, emit nothing. */
 	dry_run?: boolean;
 	/** Operator-only. */
@@ -2679,6 +2727,23 @@ export class Substrate {
 			throw new ProposeFailed(`skill proposals are refused until the skills library is fixed: ${this.config.skills.problem}`);
 		}
 
+		// memory's `expected_version` contract, checked before any git work: a stale proposal opens no pull
+		// request and writes no registry row. With governance off, or no index, nothing is recorded, so only an
+		// expected 0 (or none) passes.
+		if (request.expected_version !== undefined) {
+			let recorded: { version: number; pr_url: string | null } | null = null;
+			if (this.config.skillsGovernance !== "off" && this.index !== null) {
+				try {
+					recorded = await this.index.skillVersion(this.config.skills.repo, request.name);
+				} catch (cause) {
+					const reason = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
+					throw new ProposeFailed(`could not read the skill's version; nothing was proposed: ${reason}`);
+				}
+			}
+			const stale = skillVersionStale(request.name, recorded, request.expected_version);
+			if (stale) throw stale;
+		}
+
 		const sessionId = normalizeIdentifier(request.session_id);
 		const graphId = normalizeIdentifier(request.graph_id);
 		const input: ProposeInput = {
@@ -3932,6 +3997,7 @@ export class Substrate {
 						...("source_url" in page && typeof page.source_url === "string" ? { source_url: page.source_url } : {}),
 						body: typeof page.body === "string" ? page.body : "",
 						...("heading_path" in page && typeof page.heading_path === "string" ? { heading_path: page.heading_path } : {}),
+						...("expected_version" in page && typeof page.expected_version === "number" && Number.isInteger(page.expected_version) && page.expected_version >= 0 ? { expected_version: page.expected_version } : {}),
 					})),
 				...(sessionId !== undefined ? { session_id: sessionId } : {}),
 			},
