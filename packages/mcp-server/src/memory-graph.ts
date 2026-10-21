@@ -11,7 +11,9 @@ export interface ReducedEvent {
 }
 
 const SUMMARY_LIMIT = 200;
-const LINKED_EVENTS = 5;
+export const LINKED_EVENTS = 5;
+/** The newest session events a causal chain is read from; a source older than these gets an empty chain. */
+export const CAUSAL_WINDOW = 200;
 
 function text(value: unknown): string {
 	if (typeof value === "string") return value;
@@ -23,13 +25,22 @@ function field(row: Record<string, unknown>, key: string): string {
 	return text(row?.[key]);
 }
 
+/** A ledger row's `ts` as ISO-8601: epoch milliseconds become a string, a string stays as it is, and anything missing or invalid becomes "". */
+function isoTs(row: Record<string, unknown>): string {
+	const raw = row?.ts;
+	if (typeof raw === "string") return raw;
+	if (typeof raw !== "number" && typeof raw !== "bigint") return "";
+	const date = new Date(Number(raw));
+	return Number.isFinite(date.getTime()) ? date.toISOString() : "";
+}
+
 function compareDesc(a: string, b: string): number {
 	if (a === b) return 0;
 	return a < b ? 1 : -1;
 }
 
 function newestFirst(a: Record<string, unknown>, b: Record<string, unknown>): number {
-	return compareDesc(field(a, "ts"), field(b, "ts")) || compareDesc(field(a, "id"), field(b, "id"));
+	return compareDesc(isoTs(a), isoTs(b)) || compareDesc(field(a, "id"), field(b, "id"));
 }
 
 /** Reduce one ledger row. Missing fields become empty strings, or null for node_id. The summary is redacted, then cut. */
@@ -37,7 +48,7 @@ export function reduceEvent(row: Record<string, unknown>): ReducedEvent {
 	const nodeId = field(row, "node_id");
 	return {
 		id: field(row, "id"),
-		ts: field(row, "ts"),
+		ts: isoTs(row),
 		kind: field(row, "kind"),
 		surface: field(row, "surface"),
 		node_id: nodeId.length > 0 ? nodeId : null,

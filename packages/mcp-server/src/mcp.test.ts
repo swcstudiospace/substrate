@@ -637,17 +637,22 @@ describe("memory_search", () => {
 	const sessionRows = Array.from({ length: 9 }, (_, i) => ledgerRow(`ev-${i + 1}`, i + 1, { session_id: "s-1", graph_id: "ut-1" }));
 	const NEWEST_FIVE = [{ id: "ev-9" }, { id: "ev-8" }, { id: "ev-7" }, { id: "ev-6" }, { id: "ev-5" }];
 
-	/** A ledger stub: `readEvents` filters by the column asked and logs each read; `hang` and `fail` model a stalled or broken plane. */
+	/** A ledger stub: `readRecentEvents` filters by the column asked, answers newest first cut to the limit, and logs each read and limit; `hang` and `fail` model a stalled or broken plane. */
 	function readLedger(rows: Array<Record<string, unknown>>, mode: "answer" | "hang" | "fail" = "answer") {
 		const reads: string[] = [];
+		const limits: number[] = [];
 		return {
 			reads,
+			limits,
 			greptime: {
-				readEvents: async (column: string, value: string) => {
+				readRecentEvents: async (column: string, value: string, limit: number) => {
 					reads.push(`${column}=${value}`);
+					limits.push(limit);
 					if (mode === "hang") return new Promise<never>(() => {});
 					if (mode === "fail") throw new Error("greptime unreachable: connect ETIMEDOUT");
-					return rows.filter((row) => row[column] === value);
+					const key = (row: Record<string, unknown>) => `${String(row.ts)}|${String(row.id)}`;
+					const newest = rows.filter((row) => row[column] === value).sort((a, b) => (key(a) < key(b) ? 1 : key(a) > key(b) ? -1 : 0));
+					return newest.slice(0, limit);
 				},
 			},
 		};
@@ -762,6 +767,54 @@ describe("memory_search", () => {
 		expect(reply.json()).toMatchObject({ entries: [{ id: "mem_a" }], degraded: true });
 		expect(String(reply.json().reason)).toContain("ledger: session reads failed");
 		expect(reply.text).not.toContain("causal_chain");
+	});
+
+	test("graph reads are capped at eight distinct graphs, each asking for five events, and the reply names the cap", async () => {
+		const { reads, limits, greptime } = readLedger(sessionRows);
+		const entries = Array.from({ length: 10 }, (_, i) => memoryAt(`mem_${i}`, { graph_id: `ut-${i + 1}` }));
+		const client = await connectIndex(entriesIndex(entries), "omp", greptime);
+
+		const reply = await call(client, "memory_search", { query: "lease", graph_linked: true });
+
+		expect(reads).toEqual(Array.from({ length: 8 }, (_, i) => `graph_id=ut-${i + 1}`));
+		expect(limits).toEqual(Array.from({ length: 8 }, () => 5));
+		expect(reply.json()).toMatchObject({ degraded: true, reason: expect.stringContaining("ledger: graph reads capped at 8 of 10") });
+		expect(reply.json().graph_links).toHaveLength(8);
+	});
+
+	test("session reads are capped at eight distinct sessions, and the reply names the cap", async () => {
+		const { reads, greptime } = readLedger(sessionRows);
+		const entries = Array.from({ length: 10 }, (_, i) => memoryAt(`mem_${i}`, { session_id: `s-${i + 1}`, source_event: "ev-8" }));
+		const client = await connectIndex(entriesIndex(entries), "omp", greptime);
+
+		const reply = await call(client, "memory_search", { query: "lease", causal: true });
+
+		expect(reads).toHaveLength(8);
+		expect(reply.json()).toMatchObject({ degraded: true, reason: expect.stringContaining("ledger: session reads capped at 8 of 10") });
+	});
+
+	test("causal reads the newest 200 session events, so an older source gets an empty chain and the notice says so", async () => {
+		const longSession = Array.from({ length: 205 }, (_, i) => ({
+			...ledgerRow(`ev-${i + 1}`, 1, { session_id: "s-long", graph_id: "ut-1" }),
+			ts: new Date(Date.UTC(2026, 9, 1) + i * 1000).toISOString(),
+		}));
+		const { limits, greptime } = readLedger(longSession);
+		const entries = [
+			memoryAt("mem_old", { session_id: "s-long", source_event: "ev-3" }),
+			memoryAt("mem_new", { session_id: "s-long", source_event: "ev-205" }),
+		];
+		const client = await connectIndex(entriesIndex(entries), "omp", greptime);
+
+		const reply = await call(client, "memory_search", { query: "lease", causal: true });
+
+		expect(limits).toEqual([200]);
+		expect(reply.json()).toMatchObject({
+			entries: [
+				{ id: "mem_old", causal_chain: [] },
+				{ id: "mem_new", causal_chain: [{ id: "ev-204" }, { id: "ev-203" }, { id: "ev-202" }, { id: "ev-201" }, { id: "ev-200" }] },
+			],
+		});
+		expect(reply.json().causal_notice).toEqual(expect.stringContaining("newest 200 events"));
 	});
 });
 

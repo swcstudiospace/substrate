@@ -31,7 +31,7 @@ status: in review (draft PR). In-repo gates green. Causality is the session orde
 - Typecheck: `bunx tsc --noEmit` exit 0.
 - Config reference: up to date (no config change in this phase).
 - Targeted: `memory-graph.test.ts` and `mcp.test.ts` 77 pass, including the six memory_search option cases.
-- Full suite: `bun test` 5917 pass, 2 skip (pre-existing), 0 fail, over 5919 tests in 220 files, on the tree merged with the current main.
+- Full suite: `bun test` 5924 pass, 2 skip (pre-existing), 0 fail, over 5926 tests in 220 files, on the review-fixed tree.
 - Repo locks: `bun run check:phase-close` green.
 
 ## Open items
@@ -40,6 +40,11 @@ status: in review (draft PR). In-repo gates green. Causality is the session orde
 - **Graph-linked Hindsight recall.** Hindsight has no graph field, so graph-linked recall over Hindsight documents is not attempted. Replace-upserts would rewrite existing documents if metadata changed.
 - **Causality is sequence, not cause.** The chain is the session's prior events. Recording a true cause would need a new event field, which needs an operator recreate of `agent_events` (no column is added here).
 
+## Review round (PR 101)
+
+- **Timestamps.** A numeric ledger `ts` becomes an ISO-8601 string, as `rowToEvent` converts it, so the linked events parse as dates. A string `ts` is kept, and a missing or invalid one is empty.
+- **Bounded reads.** Ledger reads use `readRecentEvents`: summary-only columns, newest first, a limit of 5 for graph links and 200 for causal rows. The distinct graphs and the distinct sessions read per search are each capped at 8; beyond the cap no read is made and the reason names the cap. The causal chain covers the newest 200 events of a session; an older source gets an empty chain, which the notice says.
+- **Limitation kept visible.** The 1000 ms budget is a race, not a cancellation: the abort signal does not reach the HTTP request, which runs to the client's 5 s timeout. The cap bounds this to 16 in-flight reads per search. Threading the signal through `sql` and `send` is a follow-up.
 ## Cleanup
 
 - The worktree `/root/pr-fix/v149-graph` stays until close-out, with the other phase worktrees, after the user approves cleanup.

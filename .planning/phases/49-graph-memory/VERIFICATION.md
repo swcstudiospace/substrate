@@ -16,7 +16,7 @@ covered_files: ["packages/mcp-server/src/memory-graph.ts", "packages/mcp-server/
 | Typecheck | `bunx tsc --noEmit` | exit 0 |
 | Config reference | `bun run config:reference -- --check` | up to date |
 | Targeted | `memory-graph.test.ts`, `mcp.test.ts` | 77 pass, 0 fail |
-| Full bun suite | `bun test` against `substrate_test_p49` | 5917 pass, 2 skip, 0 fail (5919 tests, 220 files) |
+| Full bun suite | `bun test` against `substrate_test_p49`, on the review-fixed tree | 5924 pass, 2 skip, 0 fail (5926 tests, 220 files) |
 | Repo locks | `bun run check:phase-close` | pass: 4 lock files green; EVENT_KINDS unchanged at 12; SURFACES unchanged at 27 |
 
 ## Acceptance criteria

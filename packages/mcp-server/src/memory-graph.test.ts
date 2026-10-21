@@ -19,6 +19,19 @@ describe("reduceEvent", () => {
 		expect(reduced.summary.length).toBe(200);
 		expect(reduced.summary).toBe("a".repeat(200));
 	});
+
+	test("turns an epoch-millisecond ts into the ISO-8601 string the ledger reads turn it into", () => {
+		const reduced = reduceEvent({ id: "e1", ts: 1790186361859, kind: "k", surface: "s", node_id: null, summary: "" });
+		expect(reduced.ts).toBe(new Date(1790186361859).toISOString());
+	});
+
+	test("keeps a string ts, and gives an empty ts for a missing or invalid one", () => {
+		const base = { id: "e1", kind: "k", surface: "s", node_id: null, summary: "" };
+		expect(reduceEvent({ ...base, ts: "2026-10-21T10:00:00.000Z" }).ts).toBe("2026-10-21T10:00:00.000Z");
+		expect(reduceEvent(base).ts).toBe("");
+		expect(reduceEvent({ ...base, ts: Number.NaN }).ts).toBe("");
+		expect(reduceEvent({ ...base, ts: 1e20 }).ts).toBe("");
+	});
 });
 
 describe("graphLinks", () => {
@@ -40,6 +53,13 @@ describe("graphLinks", () => {
 	test("keeps first-seen order of distinct graph ids", () => {
 		const links = graphLinks(["b", "a", "b", "c", "a"], new Map());
 		expect(links.map((link) => link.graph_id)).toEqual(["b", "a", "c"]);
+	});
+
+	test("orders epoch-millisecond timestamps newest first, and gives each its ISO-8601 ts", () => {
+		const numeric = [{ ...row("e1", 1), ts: 1_000 }, { ...row("e3", 3), ts: 3_000 }, { ...row("e2", 2), ts: 2_000 }];
+		const [link] = graphLinks(["g"], new Map([["g", numeric]]));
+		expect(link?.events.map((event) => event.id)).toEqual(["e3", "e2", "e1"]);
+		expect(link?.events[0]?.ts).toBe(new Date(3_000).toISOString());
 	});
 });
 
