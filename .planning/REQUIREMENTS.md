@@ -28,7 +28,7 @@ Source for all entries: `.planning/research/FEATURES.md` lines 197–222 and `.p
   - Item: Run `coord_drift_scan` on the worktree before launch. Area: C (dispatcher). Complexity: LOW. Notes: M2. Phase: 39. Source: FEATURES.md:206
 - [ ] **D-D1**: `data-planes.md:34`
   - Item: Cross-surface recall in the brief: a bounded, cached fan-out over the `sub-*` banks. Area: D (docs plane). Complexity: MEDIUM. Notes: `agentId:"*"` is an Agentmemory idiom, and Hindsight banks are isolated ([docs](https://docs.hindsight.vectorize.io/memory-banks/)). Phase: 40. Source: FEATURES.md:207
-  - DECISION PENDING. It conflicts with DOCS-04 (`.planning/milestones/v1.3-REQUIREMENTS.md:85`: "recall is a tool (or derived-marked `memory_search` results) and never runs inside the brief's 1.5 s budget") and with the anti-feature "recall inside the synchronous brief" (`.planning/research/SUMMARY.md:72`).
+  - Decision (2026-10-21): DOCS-04 is amended to allow recall inside the brief, as a bounded, cached fan-out (this item). The original DOCS-04 wording is in `.planning/milestones/v1.3-REQUIREMENTS.md:85`. The research anti-feature at `.planning/research/SUMMARY.md:72` still reads "recall inside the synchronous brief"; this decision accepts it for this bounded case only. Open for the phase 40 discuss step: whether the 1.5 s brief budget still applies.
 - [ ] **D-D3**: One memory plane (the §5.0 no-silo rule)
   - Item: Retire Claude Code's global `hindsight` stdio MCP and Hermes supermemory once the `sub-*` banks answer, with restore routes recorded first. Area: D (docs plane). Complexity: MEDIUM. Notes: P10. Phase: 40. Source: FEATURES.md:209
 - [ ] **D-D4**: Mental models replace stale detail (`data-planes.md:27,39`)
@@ -55,6 +55,7 @@ Source for all entries: `.planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota
 - [ ] **SOTA-01**: Railway Resource Orchestrator. Phase: 45. Source: .planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements):12–17
   - Acceptance: MCP tool lists Railway resources, basic scale suggestion, cost report in /slo.
   - Target files: packages/mcp-server/src (new railway.ts), docs/data-planes.md, config-reference.md
+  - Budget: $50 per month at test scale, confirmed 2026-10-21 (uplift-7/BLOCKING-UNKNOWNS.md item 8).
 - [ ] **SOTA-02**: RAGFlow Advanced Hybrid RAG with Hindsight Context. Phase: 46. Source: .planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements):19–24
   - Acceptance: docs_search returns context-augmented results; tests for hybrid.
   - Target files: packages/mcp-server/src/planes/ragflow.ts, planes/hindsight.ts, docs/docs-plane.md

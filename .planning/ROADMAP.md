@@ -87,7 +87,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [ ] **Phase 37: LANEB** - graph inference from worktree path
 - [ ] **Phase 38: MIRROR** - mirror graph edges into Linear relations and outcomes into evidence
 - [ ] **Phase 39: DISPATCH** - signed handoff packet and coord drift scan before launch
-- [ ] **Phase 40: DOCS-MEMORY** - memory plane consolidation (D-D1 DECISION PENDING)
+- [ ] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (decided 2026-10-21)
 - [ ] **Phase 41: ANCHOR** - anchor evidence and teachables
 - [ ] **Phase 42: SKILL-CARD** - skills_list audit trail and the F-D4 re-ingest item
 - [ ] **Phase 43: LANE-A** - sandbox egress allowlist and task re-adoption
@@ -95,7 +95,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 
 ### 🚧 v1.5 SOTA enhancements (Planned)
 
-- [ ] **Phase 45: Railway Resource Orchestrator** - PARKED until the Railway budget is confirmed (uplift-7/BLOCKING-UNKNOWNS.md item 8)
+- [ ] **Phase 45: Railway Resource Orchestrator** - budget ceiling $50 per month, confirmed 2026-10-21 (uplift-7/BLOCKING-UNKNOWNS.md item 8)
 - [ ] **Phase 46: RAGFlow Advanced Hybrid RAG with Hindsight Context** - hybrid search with reranking and Hindsight context
 - [ ] **Phase 47: GreptimeDB + Dragonfly Predictive Analytics & Cache** - SLO burn forecasting and pattern-based cache pre-warming
 - [ ] **Phase 48: TailscaleDB Secure Unified Proxy Layer** - zero-trust database access through one Tailscale proxy with RBAC, audit and pooling
@@ -550,7 +550,7 @@ Plans:
 
 **Goal**: The memory planes consolidate into one: cross-surface recall, retirement of the duplicate memory MCPs once the `sub-*` banks answer, and a weekly reflect per bank.
 
-**Decision pending**: D-D1 is DECISION PENDING. It conflicts with DOCS-04 (milestones/v1.3-REQUIREMENTS.md:85: recall is a tool or derived-marked `memory_search` results and never runs inside the brief's 1.5 s budget) and with the anti-feature "recall inside the synchronous brief" (research/SUMMARY.md:72).
+**Decision (2026-10-21)**: DOCS-04 is amended to allow recall inside the brief, as D-D1 describes (a bounded, cached fan-out over the `sub-*` banks). The original DOCS-04 wording stays in milestones/v1.3-REQUIREMENTS.md:85. Open for the phase 40 discuss step: whether the 1.5 s brief budget named in that wording still applies.
 
 **Depends on**: P10
 
@@ -560,7 +560,7 @@ Plans:
 
 **Success Criteria** (what must be TRUE):
 
-  1. DECISION PENDING (D-D1): cross-surface recall in the brief is a bounded, cached fan-out over the `sub-*` banks (`data-planes.md:34`).
+  1. D-D1 (decided 2026-10-21): cross-surface recall in the brief is a bounded, cached fan-out over the `sub-*` banks (`data-planes.md:34`).
   2. Claude Code's global `hindsight` stdio MCP and Hermes supermemory are retired once the `sub-*` banks answer, with restore routes recorded first.
   3. A weekly `reflect` per bank: mental models replace stale detail (`data-planes.md:27,39`).
 
@@ -637,7 +637,7 @@ Plans:
 
 **Goal**: Railway services are managed through MCP tools (list, scale, monitor, deploy) using the forwarders, with a basic scale suggestion and a cost report.
 
-**Status**: PARKED until the Railway budget is confirmed (uplift-7/BLOCKING-UNKNOWNS.md item 8: default $50 per month at test scale, not yet confirmed).
+**Status**: unparked 2026-10-21. Budget ceiling $50 per month at test scale, confirmed by the project owner (uplift-7/BLOCKING-UNKNOWNS.md item 8 default).
 
 **Depends on**: none (7-SOTA plan on branch feature/7-sota-enhancements)
 
