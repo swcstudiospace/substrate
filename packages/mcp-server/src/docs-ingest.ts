@@ -451,16 +451,20 @@ async function withDatasetIngestLock<T>(dataset: string, waitMs: number, work: (
 type PreparedPage = { page: IngestPage; sourceUrl: string; body: string; sha: string };
 
 /**
- * Memory's `expected_version` rule (`versionMismatch` in memory-write.ts), for one source URL's
- * record. Absent `expected` is today's behaviour. A missing record is version 0, so only an expected
- * 0 (or none) passes; a mismatch returns what a stale write should re-submit against.
+ * Memory's `expected_version` rule (`versionMismatch` in memory-write.ts), for one source URL. `planned` is the
+ * version an earlier page of this call leaves for that URL, when one does; `saved` is the record as it stood
+ * before this batch. Absent `expected` is today's behaviour. The check compares against `planned` when present,
+ * else `saved`; with neither, the record is version 0, so only an expected 0 (or none) passes. The reply's
+ * `current_version` and `conflict_with` always describe `saved`, the record a stale write collides with.
  */
 function staleVersion(
-	prior: { version: number; document_id?: string } | undefined,
+	planned: { version: number } | undefined,
+	saved: { version: number; document_id?: string } | undefined,
 	expected: number | undefined,
 ): { remedy: string; current_version: number | null; conflict_with?: string; verified_persisted: false } | null {
 	if (expected === undefined) return null;
-	if (!prior) {
+	const against = planned ?? saved;
+	if (!against) {
 		if (expected === 0) return null;
 		return {
 			remedy:
@@ -470,14 +474,25 @@ function staleVersion(
 			verified_persisted: false,
 		};
 	}
-	if (expected === prior.version) return null;
+	if (expected === against.version) return null;
+	const reply = {
+		current_version: saved?.version ?? null,
+		verified_persisted: false as const,
+		...(saved?.document_id !== undefined ? { conflict_with: saved.document_id } : {}),
+	};
+	if (planned) {
+		return {
+			remedy:
+				`An earlier page of this call writes this source URL and leaves it at version ${planned.version}, not ${expected}. ` +
+				"Re-submit with that version, or in a separate call.",
+			...reply,
+		};
+	}
 	return {
 		remedy:
-			`The record for this source URL is version ${prior.version} (${prior.document_id ?? "set by an earlier page of this call"}), not ${expected}. ` +
+			`The record for this source URL is version ${against.version} (${saved?.document_id ?? "no document id"}), not ${expected}. ` +
 			"Re-submit against the current version (current_version).",
-		current_version: prior.version,
-		verified_persisted: false,
-		...(prior.document_id !== undefined ? { conflict_with: prior.document_id } : {}),
+		...reply,
 	};
 }
 
@@ -543,7 +558,7 @@ async function writeBatch(
 	for (const { page, sourceUrl, sha } of prepared) {
 		const key = recordKey(dataset.id, sourceUrl);
 		const current = planned.get(key) ?? seen.get(key);
-		const stale = staleVersion(current, page.expected_version);
+		const stale = staleVersion(planned.get(key), seen.get(key), page.expected_version);
 		if (stale) return refused(deps, sessionId, "version.stale", { page: page.path, ...stale });
 		if (current?.sha === sha) continue;
 		planned.set(key, { version: (current?.version ?? 0) + 1, sha });

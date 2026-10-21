@@ -584,9 +584,42 @@ describe("docs_ingest atomic batch", () => {
 				{ ...SECOND, source_url: PAGE.source_url, body: `${PAGE.body} Two.`, expected_version: 1 },
 			],
 		});
-		expect(batch).toMatchObject({ ok: false, refused: true, reason: "version.stale", page: SECOND.path, current_version: 2, changed: false });
+		expect(batch).toMatchObject({ ok: false, refused: true, reason: "version.stale", page: SECOND.path, current_version: 1, changed: false });
 		expect(fake.uploads).toHaveLength(uploadsBefore);
 		expect(JSON.stringify([...seen.entries()])).toBe(recordBefore);
+	});
+
+	test("a repeated URL whose later page is stale against the batch reports the saved version and conflict_with, and stores nothing", async () => {
+		const fake = new RagflowFake();
+		const { events, seen, ingest } = harness(fake);
+		await ingest({ dataset: "agent-substrate", pages: [PAGE] });
+		const replaced = await ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, body: `${PAGE.body} Second.`, expected_version: 1 }] });
+		if (!replaced.ok) throw new Error(`expected replace: ${replaced.reason}`);
+		const savedDocumentId = [...seen.values()][0]?.document_id;
+		const recordBefore = JSON.stringify([...seen.entries()]);
+		const uploadsBefore = fake.uploads.length;
+
+		// The first page would store version 3, so the second page's expected 2 is stale against the batch. The saved record is version 2.
+		const batch = await ingest({
+			dataset: "agent-substrate",
+			pages: [
+				{ ...PAGE, body: `${PAGE.body} One.`, expected_version: 2 },
+				{ ...SECOND, source_url: PAGE.source_url, body: `${PAGE.body} Two.`, expected_version: 2 },
+			],
+		});
+		if (batch.ok) throw new Error("expected a version.stale refusal");
+		expect(batch).toMatchObject({
+			refused: true,
+			reason: "version.stale",
+			page: SECOND.path,
+			current_version: 2,
+			conflict_with: savedDocumentId,
+			verified_persisted: false,
+			changed: false,
+		});
+		expect(fake.uploads).toHaveLength(uploadsBefore);
+		expect(JSON.stringify([...seen.entries()])).toBe(recordBefore);
+		expect(events.filter((event) => event.kind === "warning").at(-1)?.payload).toMatchObject({ reason: "version.stale" });
 	});
 
 	test("a batch may chain expected versions on one source URL", async () => {
