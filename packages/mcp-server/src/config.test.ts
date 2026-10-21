@@ -426,3 +426,30 @@ describe("SUBSTRATE_AGENT_SKILLS_ROOT (phase 42, D42-1)", () => {
 		expect(configWarnings(config)).toEqual([expect.stringContaining('SUBSTRATE_AGENT_SKILLS_ROOT="agent-skills"')]);
 	});
 });
+
+describe("HINDSIGHT_MENTAL_MODELS", () => {
+	test("unset names no model and warns about nothing", () => {
+		expect(loadConfig({}).mentalModels).toEqual({ models: [], warnings: [] });
+	});
+
+	test("a valid entry is kept and an invalid entry is dropped, with the valid ones still applying", () => {
+		const config = loadConfig({
+			HINDSIGHT_BANKS: "sub-omp,sub-hermes",
+			HINDSIGHT_MENTAL_MODELS: "sub-omp=mm_a,mm_b;sub-hermes=bad id;sub-other=mm_x;sub-hermes=mm_c",
+		});
+		expect(config.mentalModels.models).toEqual([
+			{ bank: "sub-omp", id: "mm_a" },
+			{ bank: "sub-omp", id: "mm_b" },
+			{ bank: "sub-hermes", id: "mm_c" },
+		]);
+		// `sub-hermes=bad id` breaks the id rule; `sub-other` is not in HINDSIGHT_BANKS.
+		expect(config.mentalModels.warnings).toHaveLength(2);
+	});
+
+	test("at most 20 models, and a repeated model is dropped with a warning", () => {
+		const ids = Array.from({ length: 21 }, (_, index) => `mm_${index}`);
+		const config = loadConfig({ HINDSIGHT_BANKS: "sub-omp", HINDSIGHT_MENTAL_MODELS: `sub-omp=${ids.join(",")};sub-omp=mm_0` });
+		expect(config.mentalModels.models).toHaveLength(20);
+		expect(config.mentalModels.warnings).toHaveLength(2);
+	});
+});

@@ -18,6 +18,7 @@ import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
 import { DEFAULT_RECALL_BUDGET_MS } from "./memory-recall.ts";
 import { NOTION_API_URL } from "./notion.ts";
 import { DEFAULT_RETRIEVAL_KNOBS, ragflowFromEnv, type RagflowConfig, type RetrievalKnobs } from "./planes/ragflow.ts";
+import { hindsightBanksFromEnv } from "./planes/hindsight.ts";
 import { loadRecallConfig, type RecallConfig } from "./recall-snapshot.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
 import { EVENT_IDEMPOTENCY_MODES, MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type EventIdempotencyMode, type MemoryExpiryMode, type Surface } from "./types.ts";
@@ -475,6 +476,8 @@ export interface SubstrateConfig {
 	briefRecall: RecallConfig;
 	/** The read-only Hindsight inventory (`SUBSTRATE_HINDSIGHT_INVENTORY=on`, default off). Parsed by `hindsight-inventory.ts`. */
 	hindsightInventory: InventoryConfig;
+	/** `HINDSIGHT_MENTAL_MODELS`: the models the weekly refresh names (fail-open). Parsed by `loadMentalModelConfig` below. */
+	mentalModels: MentalModelSettings;
 }
 
 /** The knobs behind `SUBSTRATE_SLO_NOTIFY*` and `SUBSTRATE_SLO_WEBHOOK_URL` (uplift-3 N2). */
@@ -792,6 +795,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// uplift-4 S5
 		briefRecall: loadRecallConfig(env),
 		hindsightInventory: loadInventoryConfig(env),
+		// memory governance: the weekly mental-model refresh
+		mentalModels: loadMentalModelConfig(env),
 		// U5-4a
 		...eventIdempotencyFromEnv(env.SUBSTRATE_EVENT_IDEMPOTENCY),
 	};
@@ -1697,4 +1702,68 @@ export function hindsightConfigWarnings(config: SubstrateConfig): string[] {
 		warnings.push("HINDSIGHT_URL is set but HINDSIGHT_BANKS is empty, so recall reads the caller's own bank only; list the sub-* banks to fan out");
 	}
 	return warnings;
+}
+
+/** The most mental models the weekly refresh names, across every bank. */
+export const MAX_MENTAL_MODELS = 20;
+
+/** A mental model the weekly refresh names: the bank it lives in, and its id. */
+export interface MentalModelRef {
+	bank: string;
+	id: string;
+}
+
+/** `HINDSIGHT_MENTAL_MODELS` as the refresh reads it. Fail-open: a dropped entry is named in `warnings`, and the rest still apply. */
+export interface MentalModelSettings {
+	models: MentalModelRef[];
+	/** What the parse dropped, for the boot warning. Entries are named by position, never by value. */
+	warnings: string[];
+}
+
+const MENTAL_MODEL_ID = /^[A-Za-z0-9_-]{1,80}$/;
+
+/**
+ * Parse `HINDSIGHT_MENTAL_MODELS`: `<bank>=<id>[,<id>...]` entries separated by `;`.
+ * A bank must be one of `HINDSIGHT_BANKS`, and every id must match `MENTAL_MODEL_ID`.
+ * An entry that breaks either rule is dropped with a warning, and the valid entries
+ * still apply. A repeated model, and any model past `MAX_MENTAL_MODELS`, is dropped
+ * the same way. Unset names nothing. Never throws.
+ */
+export function loadMentalModelConfig(env: Record<string, string | undefined>): MentalModelSettings {
+	const models: MentalModelRef[] = [];
+	const warnings: string[] = [];
+	const raw = env.HINDSIGHT_MENTAL_MODELS?.trim() ?? "";
+	if (raw === "") return { models, warnings };
+	const banks = new Set(hindsightBanksFromEnv(env) ?? []);
+	const seen = new Set<string>();
+	for (const [index, segment] of raw.split(";").entries()) {
+		const entry = segment.trim();
+		if (entry === "") continue;
+		const at = `entry ${index + 1}`;
+		const eq = entry.indexOf("=");
+		const bank = eq < 0 ? "" : entry.slice(0, eq).trim();
+		const ids = eq < 0 ? [] : entry.slice(eq + 1).split(",").map((id) => id.trim());
+		if (bank === "" || ids.some((id) => !MENTAL_MODEL_ID.test(id))) {
+			warnings.push(`HINDSIGHT_MENTAL_MODELS ${at} is not <bank>=<id>[,<id>...] with ids of [A-Za-z0-9_-] up to 80 characters, so it is dropped`);
+			continue;
+		}
+		if (!banks.has(bank)) {
+			warnings.push(`HINDSIGHT_MENTAL_MODELS ${at} names a bank that is not in HINDSIGHT_BANKS, so it is dropped`);
+			continue;
+		}
+		for (const id of ids) {
+			const key = JSON.stringify([bank, id]);
+			if (seen.has(key)) {
+				warnings.push(`HINDSIGHT_MENTAL_MODELS ${at} repeats a model already named, so the repeat is dropped`);
+				continue;
+			}
+			if (models.length >= MAX_MENTAL_MODELS) {
+				warnings.push(`HINDSIGHT_MENTAL_MODELS ${at} names a model past the ${MAX_MENTAL_MODELS} allowed, so it is dropped`);
+				continue;
+			}
+			seen.add(key);
+			models.push({ bank, id });
+		}
+	}
+	return { models, warnings };
 }

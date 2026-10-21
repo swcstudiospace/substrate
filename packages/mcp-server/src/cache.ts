@@ -25,26 +25,32 @@
  * stepped by one `EVAL` through `script()`, always with a TTL, and a cache that
  * cannot answer admits every caller.
  *
- * `recall-snapshot` (uplift-4 S5) is generation-free too: the warm Hindsight recall
- * the brief appends in `SUBSTRATE_BRIEF_RECALL=enforce`, written only by the
- * prefetcher (`recall-snapshot.ts`) and read by the brief with a cache read and
- * nothing else. The entry lives twice `SUBSTRATE_BRIEF_RECALL_TTL_S` (fresh for the first, stale for the second); the 1800 s here is that for the 900 s default.
+ * `recall-snapshot` (uplift-4 S5) holds the warm Hindsight recall the brief appends in
+ * `SUBSTRATE_BRIEF_RECALL=enforce`. The prefetcher writes its own-bank entries without
+ * generations. The brief's cross-bank fan-out passes the memory and recall generations
+ * with each read, so a write or a retain landing refreshes the next brief at once. A prefetched entry lives twice
+ * `SUBSTRATE_BRIEF_RECALL_TTL_S` (fresh for the first half, stale for the second). A fan-out entry lives
+ * `SUBSTRATE_BRIEF_RECALL_TTL_S` itself, with no stale half, because its `refreshAt` is that TTL.
  */
 import { createHash } from "node:crypto";
 import { RedisClient } from "bun";
 import { callPlane, type PlaneGate } from "@substrate/observability";
 import type { SubstrateConfig } from "./config.ts";
 import { REDACTED, redact } from "./redact.ts";
+import { MAX_RECALL_TTL_S } from "./recall-snapshot.ts";
 
 export const CACHE_PREFIX = "substrate:v1";
 
-/** Seconds. Brief 5 min, memory search 10 min, graph view 1 min, last-good brief 1 h, docs search 5 min. */
+/**
+ * Seconds. Brief 5 min, memory search 10 min, graph view 1 min, last-good brief 1 h, docs search 5 min. The recall snapshot's
+ * class limit is the setting's maximum, so a fan-out entry lives the configured `SUBSTRATE_BRIEF_RECALL_TTL_S` (its `refreshAt`).
+ */
 export const CACHE_TTL = {
 	brief: 300,
 	"memory-search": 600,
 	"graph-view": 60,
 	"brief-snapshot": 3600,
-	"recall-snapshot": 1800,
+	"recall-snapshot": MAX_RECALL_TTL_S,
 	"docs-search": 300,
 } as const;
 

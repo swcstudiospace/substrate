@@ -728,6 +728,7 @@ export const FLAGS: readonly FlagSpec[] = [
 		},
 	},
 	{ name: "SUBSTRATE_HINDSIGHT_INVENTORY_INTERVAL_S", kind: "number", plane: "recall", default: "60", allowed: "30..3600", unset: "60 s", readBy: "mcp-server/hindsight-inventory.ts", documented: true, doc: "docs/data-planes.md" },
+	{ name: "HINDSIGHT_MENTAL_MODELS", kind: "list", plane: "recall", default: "none", allowed: "bank=id[,id...] entries separated by semicolon; bank must be in HINDSIGHT_BANKS; id matches A-Za-z0-9_- up to 80 characters; at most 20 models", unset: "no weekly refresh; no timer starts", readBy: "mcp-server/config.ts", documented: false, doc: "docs/memory-governance.md" },
 
 	// ── docs (RAGFlow) ────────────────────────────────────────────────────────
 	{ name: "RAGFLOW_URL", kind: "string", plane: "docs", default: "none", allowed: "RAGFlow base URL", unset: "docs_search answers degraded, docs_ingest refuses", readBy: "mcp-server/planes/ragflow.ts", documented: true, doc: "docs/docs-search-ingest.md" },
