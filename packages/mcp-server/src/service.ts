@@ -2660,7 +2660,7 @@ export class Substrate {
 				await this.bumpGraph(plan.graph_id);
 			}
 		})();
-		const tracker = (plan.nodes ?? []).some((node) => node.linear_issue_id !== undefined || node.linear_identifier !== undefined);
+		const tracker = (plan.nodes ?? []).some((node) => node.linear_issue_id != null || node.linear_identifier != null);
 		if (plan.edges !== undefined || tracker) await this.mirrorEdges(view);
 		return view;
 	}

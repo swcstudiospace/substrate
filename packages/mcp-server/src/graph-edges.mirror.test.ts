@@ -192,6 +192,22 @@ describe("graph edges at registration", () => {
 		expect(related).toHaveLength(1);
 	});
 
+	test("a null tracker field changes no link, so it relates nothing", async () => {
+		const view = viewOf(REFS, [{ from_node: "n2", to_node: "n1", kind: "requires" }]);
+		const related: unknown[] = [];
+		const mirror = {
+			relateEdges: async (edges: unknown[]) => {
+				related.push(edges);
+				return [];
+			},
+		} as unknown as Mirror;
+		const { substrate } = harness(view, mirror);
+
+		await substrate.registerGraph({ graph_id: GRAPH, nodes: [{ node_id: "n2", linear_identifier: null }] } as never);
+
+		expect(related).toEqual([]);
+	});
+
 	test("while a Linear relation is still being written, reads already show the registered graph", async () => {
 		const view = viewOf(REFS, [{ from_node: "n2", to_node: "n1", kind: "requires" }]);
 		let stored = { ...view, notion_task_page: "before" };
