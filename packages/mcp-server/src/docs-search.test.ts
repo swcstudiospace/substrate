@@ -640,4 +640,63 @@ describe("docs_search after an agent-skills refresh (phase 42)", () => {
 			rmSync(checkout, { recursive: true, force: true });
 		}
 	});
+
+	/**
+	 * Skills whose references outweigh one ingest call's 5 MB: `count` skills, each a small SKILL.md and a 900 KB
+	 * reference, so every page is under the 1 MB page limit. A reference's content starts with its skill's name.
+	 */
+	function wideSkills(count: number): Record<string, string> {
+		const files: Record<string, string> = {};
+		for (let n = 1; n <= count; n += 1) {
+			files[`skill-${n}/SKILL.md`] = `---\nname: skill-${n}\n---\nSkill ${n} body.\n`;
+			files[`skill-${n}/references/api.md`] = `skill-${n} reference ${"x".repeat(900_000)}\n`;
+		}
+		return files;
+	}
+
+	test("a checkout whose references exceed one call's 5 MB refreshes in several calls and records the version", async () => {
+		const fake = new RagflowFake();
+		fake.serveUploadsAsChunks = true;
+		fake.parseDonePolls = 1;
+		const checkout = skillsCheckout(wideSkills(6));
+		try {
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			const outcome = await refresh(substrate, checkout, "skills-wide");
+			expect(outcome.status).toBe(200);
+			expect(await substrate.latestDocsVersion("agent-skills")).toMatchObject({ commit: "skills-wide" });
+			// Twelve pages (a SKILL.md and a reference each) reached the plane, and together they outweigh one call's limit.
+			expect(fake.uploads).toHaveLength(12);
+			expect(fake.uploads.reduce((sum, upload) => sum + upload.content.length, 0)).toBeGreaterThan(5_000_000);
+		} finally {
+			rmSync(checkout, { recursive: true, force: true });
+		}
+	});
+
+	test("a refresh whose later call fails keeps the prior pin, and the earlier call's pages are reported as stored", async () => {
+		const fake = new RagflowFake();
+		fake.serveUploadsAsChunks = true;
+		fake.parseDonePolls = 1;
+		const prior = skillsCheckout({ "skill-1/SKILL.md": "Skill one body v1.\n" });
+		const wide = skillsCheckout(wideSkills(6));
+		try {
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			expect((await refresh(substrate, prior, "skills-v1")).status).toBe(200);
+			// The plane refuses the last skill's reference. It sits in the second call, so the first call has already stored its pages.
+			fake.failUploadWhen = (content) => content.startsWith("skill-6 reference");
+			const failed = await refresh(substrate, wide, "skills-v2");
+			expect(failed.status).toBe(503);
+			expect(failed.body).toMatchObject({ ok: false, stored: true });
+			expect(failed.body).not.toMatchObject({ reason: "call-too-large" });
+			// No version is recorded for the failed refresh: the pin keeps the prior version.
+			expect(await substrate.latestDocsVersion("agent-skills")).toMatchObject({ version: "v1", commit: "skills-v1" });
+			// The first call's page is searchable under its own commit while the dataset pin still names the prior one.
+			const reply = await substrate.searchDocs({ question: "skill one reference" }, "omp");
+			const stored = reply.chunks.find((chunk) => chunk.source_url.endsWith("/skill-1/references/api.md"));
+			expect(stored).toMatchObject({ commit: "skills-v2", dataset_commit: "skills-v1" });
+			expect(typeof stored?.pin_age_ms).toBe("number");
+		} finally {
+			rmSync(prior, { recursive: true, force: true });
+			rmSync(wide, { recursive: true, force: true });
+		}
+	});
 });

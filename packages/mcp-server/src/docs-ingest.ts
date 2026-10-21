@@ -544,20 +544,13 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	let total = 0;
 	let strippedImages = 0;
 	for (const page of input.pages) {
-		if (!page.source_url) return refused(deps, sessionId, "no-source-url", { page: page.path });
-		if (!underRoot(page.path, roots)) return refused(deps, sessionId, "outside-roots", { page: page.path });
-		if (page.real_path !== undefined && !underRoot(page.real_path, roots)) {
-			return refused(deps, sessionId, "outside-roots", { page: page.path });
-		}
 		const stripped = stripRemoteImages(page.body);
 		strippedImages += stripped.stripped;
-		const size = Buffer.byteLength(stripped.body, "utf8");
-		if (size > INGEST_PAGE_MAX_BYTES) return refused(deps, sessionId, "page-too-large", { page: page.path });
-		total += size;
+		const refusal = pageRefusal(page, stripped.body, roots, input.commit);
+		if (refusal !== undefined) return refused(deps, sessionId, refusal.reason, refusal.extra);
+		total += Buffer.byteLength(stripped.body, "utf8");
 		if (total > INGEST_CALL_MAX_BYTES) return refused(deps, sessionId, "call-too-large", { page: page.path });
-		const rules = findingRules(`${stripped.body}\n${page.source_url}\n${input.commit ?? ""}\n${page.heading_path ?? ""}`);
-		if (rules.length > 0) return refused(deps, sessionId, "secret-findings", { rules, page: page.path });
-		prepared.push({ page, sourceUrl: page.source_url, body: stripped.body, sha: sha256(stripped.body) });
+		prepared.push({ page, sourceUrl: page.source_url ?? "", body: stripped.body, sha: sha256(stripped.body) });
 	}
 
 	// Taken before the first read of the record. No await sits between the gates and this call, so the lock
@@ -567,6 +560,75 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	);
 	if (waited === LOCK_WAIT_EXPIRED) return refused(deps, sessionId, "dataset-lock-timeout");
 	return waited;
+}
+
+/** The reason one page may not be uploaded, with the locator a refusal reports alongside it. */
+interface PageRefusal {
+	reason: string;
+	extra?: { rules?: string[]; page?: string };
+}
+
+/**
+ * The gates one page passes before anything is uploaded: its source URL, its roots, its size and its secret
+ * scan. `body` is the text an ingest call would upload, after its remote images are stripped. Shared by an
+ * ingest call and by {@link preflightIngestPages}, so both refuse the same pages for the same reason.
+ */
+function pageRefusal(page: IngestPage, body: string, roots: readonly string[], commit: string | undefined): PageRefusal | undefined {
+	if (!page.source_url) return { reason: "no-source-url", extra: { page: page.path } };
+	if (!underRoot(page.path, roots)) return { reason: "outside-roots", extra: { page: page.path } };
+	if (page.real_path !== undefined && !underRoot(page.real_path, roots)) return { reason: "outside-roots", extra: { page: page.path } };
+	if (Buffer.byteLength(body, "utf8") > INGEST_PAGE_MAX_BYTES) return { reason: "page-too-large", extra: { page: page.path } };
+	const rules = findingRules(`${body}\n${page.source_url}\n${commit ?? ""}\n${page.heading_path ?? ""}`);
+	if (rules.length > 0) return { reason: "secret-findings", extra: { rules, page: page.path } };
+	return undefined;
+}
+
+/**
+ * The gates of an ingest call, run over every page before the first call of a refresh writes. A refresh split
+ * into several calls runs this first, so a content refusal (an outside path, an oversize page, a secret) leaves
+ * the plane untouched, as it did when the whole refresh was one call. Returns the refusal reason, or undefined
+ * when every page passes; a refusal is emitted as an ingest call's refusal is. The per-call size is not checked
+ * here: {@link batchIngestPages} keeps each call under it, and each call checks it again.
+ */
+export async function preflightIngestPages(deps: IngestDeps, input: IngestInput): Promise<string | undefined> {
+	const sessionId = deps.sessionId ?? `docs-ingest:${randomUUID()}`;
+	const roots = deps.roots ?? DEFAULT_INGEST_ROOTS;
+	const refusal = input.pages.length === 0 ? { reason: "no-pages" } : firstPageRefusal(input, roots);
+	if (refusal === undefined) return undefined;
+	await refused(deps, sessionId, refusal.reason, refusal.extra);
+	return refusal.reason;
+}
+
+/** The first page of an ingest input the gates refuse, in input order. */
+function firstPageRefusal(input: IngestInput, roots: readonly string[]): PageRefusal | undefined {
+	for (const page of input.pages) {
+		const refusal = pageRefusal(page, stripRemoteImages(page.body).body, roots, input.commit);
+		if (refusal !== undefined) return refusal;
+	}
+	return undefined;
+}
+
+/**
+ * The pages split into consecutive calls, each within {@link INGEST_CALL_MAX_BYTES} as an ingest call measures
+ * it: the bytes after the remote-image strip. Order is kept, so the calls take the pages in the scan's sorted
+ * order. A single page over the limit gets a call of its own, where its own gates refuse it.
+ */
+export function batchIngestPages(pages: readonly IngestPage[]): IngestPage[][] {
+	const batches: IngestPage[][] = [];
+	let current: IngestPage[] = [];
+	let bytes = 0;
+	for (const page of pages) {
+		const size = Buffer.byteLength(stripRemoteImages(page.body).body, "utf8");
+		if (current.length > 0 && bytes + size > INGEST_CALL_MAX_BYTES) {
+			batches.push(current);
+			current = [];
+			bytes = 0;
+		}
+		current.push(page);
+		bytes += size;
+	}
+	if (current.length > 0) batches.push(current);
+	return batches;
 }
 
 /** The part of an ingest that runs under its dataset's lock: the dataset lookup, the version plan, then the writes. */

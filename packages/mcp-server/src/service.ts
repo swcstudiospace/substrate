@@ -72,10 +72,13 @@ import {
 	type VersionStore,
 } from "./docs-datasets.ts";
 import {
+	batchIngestPages,
 	documentProvenance,
 	ingestDocs,
 	loadIngestRecords,
+	preflightIngestPages,
 	saveIngestRecords,
+	type IngestDeps,
 	type IngestOutcome,
 	type IngestPage,
 	type IngestRecord,
@@ -1005,10 +1008,14 @@ export interface DocsRefreshRequest {
 	head?: () => Promise<string | null>;
 }
 
-/** How one merge-trigger job ended, as `?wait=1` and the stderr line report it. */
+/**
+ * How one merge-trigger job ended, as `?wait=1` and the stderr line report it. `stored` on a failure: an earlier
+ * call of this refresh already wrote pages of the requested commit, so the plane is partly new while the pin
+ * still names the prior version.
+ */
 export type DocsRefreshOutcome =
 	| { ok: true; version: DatasetVersion; created: boolean; job: string }
-	| { ok: false; reason: string; job: string };
+	| { ok: false; reason: string; job: string; stored?: boolean };
 
 interface DocsRefreshJob {
 	id: string;
@@ -4223,22 +4230,7 @@ export class Substrate {
 		const pages = Array.isArray(input.pages) ? input.pages : [];
 		await this.hydrateDocsSeen();
 		const outcome = await ingestDocs(
-			{
-				config: this.config.ragflow,
-				roots: roots ?? this.config.docsIngestRoots,
-				vmGuest: this.config.vmGuest,
-				seen: this.docsIngestSeen,
-				locks: this.docsIngestFlight,
-				// A real parse takes seconds: thirty polls two seconds apart.
-				// The zero-delay rehearsal shape stays in the module tests.
-				poll: { maxPolls: 30, intervalMs: 2000 },
-				emit: (event) => this.emit(event),
-				surface: callerSurface,
-				...(sessionId !== undefined ? { sessionId } : {}),
-				fetchImpl: this.ragflowFetch,
-				datasets: this.docsDatasetList,
-				prune: this.config.docsPruneSuperseded,
-			},
+			this.docsIngestDeps(roots, callerSurface, sessionId),
 			{
 				dataset: typeof input.dataset === "string" ? input.dataset : "",
 				...(typeof input.commit === "string" ? { commit: input.commit } : {}),
@@ -4260,6 +4252,30 @@ export class Substrate {
 			await this.cache.bump(DOCS_GENERATION_KEY);
 		}
 		return outcome;
+	}
+
+	/**
+	 * The dependencies every docs ingest in this service runs with: the plane, the record stores, the roots the
+	 * guard checks pages against, and the caller's surface. A refresh's preflight and each of its calls share
+	 * these, so they refuse the same pages for the same reasons.
+	 */
+	private docsIngestDeps(roots: readonly string[] | undefined, surface: Surface | null, sessionId?: string): IngestDeps {
+		return {
+			config: this.config.ragflow,
+			roots: roots ?? this.config.docsIngestRoots,
+			vmGuest: this.config.vmGuest,
+			seen: this.docsIngestSeen,
+			locks: this.docsIngestFlight,
+			// A real parse takes seconds: thirty polls two seconds apart.
+			// The zero-delay rehearsal shape stays in the module tests.
+			poll: { maxPolls: 30, intervalMs: 2000 },
+			emit: (event) => this.emit(event),
+			surface,
+			...(sessionId !== undefined ? { sessionId } : {}),
+			fetchImpl: this.ragflowFetch,
+			datasets: this.docsDatasetList,
+			prune: this.config.docsPruneSuperseded,
+		};
 	}
 
 	// uplift-2 R6 — dataset versions and the merge-trigger, moved here from
@@ -4382,7 +4398,7 @@ export class Substrate {
 			if (request.dataset === "agent-skills") this.docsSkillsRefreshFailed = !outcome.ok;
 			process.stderr.write(
 				`[substrate] docs merge-trigger ${job} ${request.dataset} ${request.commit.slice(0, 12)}: ${
-					outcome.ok ? `${outcome.version.version} recorded${outcome.created ? " (dataset created)" : ""}` : `failed — ${redact(outcome.reason)}`
+					outcome.ok ? `${outcome.version.version} recorded${outcome.created ? " (dataset created)" : ""}` : `failed — ${redact(outcome.reason)}${outcome.stored === true ? " (partial: an earlier call stored pages; the pin keeps the prior version)" : ""}`
 				}\n`,
 			);
 			return outcome;
@@ -4419,10 +4435,21 @@ export class Substrate {
 			// The pages came from the checkout as it was after the read: HEAD must still be the requested commit.
 			const refusedAfter = await this.checkoutRefusal(request);
 			if (refusedAfter !== null) return finish({ ok: false, reason: refusedAfter, job });
-			const ingested = await this.ingestDocs({ dataset: request.dataset, commit: request.commit, pages }, surface, roots);
-			if (!ingested.ok) return finish({ ok: false, reason: ingested.reason, job });
+			// Every page passes the ingest gates before the first call writes, so a content refusal (an outside path,
+			// an oversize page, a secret) leaves the plane as it was, as a single call did.
+			const gated = await preflightIngestPages(this.docsIngestDeps(roots, surface), { dataset: request.dataset, commit: request.commit, pages });
+			if (gated !== undefined) return finish({ ok: false, reason: gated, job });
+			// The pages go to the plane in calls that each fit one ingest call. Each call upserts its pages as it lands;
+			// the version is recorded only after the last call. A failure after an earlier call wrote is `stored`: the
+			// plane then holds some of this commit's pages while the pin still names the prior version.
+			let stored = false;
+			for (const batch of batchIngestPages(pages)) {
+				const ingested = await this.ingestDocs({ dataset: request.dataset, commit: request.commit, pages: batch }, surface, roots);
+				stored = stored || ingested.changed;
+				if (!ingested.ok) return finish({ ok: false, reason: ingested.reason, job, ...(stored ? { stored } : {}) });
+			}
 			const refreshed = await this.recordDocsVersion(request, surface);
-			if (!refreshed.ok) return finish({ ok: false, reason: refreshed.reason, job });
+			if (!refreshed.ok) return finish({ ok: false, reason: refreshed.reason, job, ...(stored ? { stored } : {}) });
 			return finish({ ok: true, version: refreshed.version, created: created || refreshed.created, job });
 		} catch (cause) {
 			return finish({ ok: false, reason: redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200), job });

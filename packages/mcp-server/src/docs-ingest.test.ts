@@ -11,10 +11,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
 import {
+	INGEST_CALL_MAX_BYTES,
 	INGEST_PAGE_MAX_BYTES,
+	batchIngestPages,
 	ingestDocs,
 	loadIngestRecords,
 	nodeIo,
+	preflightIngestPages,
 	saveIngestRecords,
 	scanIngestPages,
 	readSkillsCheckoutPages,
@@ -762,5 +765,56 @@ describe("docs_ingest atomic batch", () => {
 		const after = await waiter.ingest({ dataset: "agent-substrate", pages: [OTHER] });
 		if (!after.ok) throw new Error(`expected the lock to be free: ${after.reason}`);
 		expect(after.results[0]?.status).toBe("ingested");
+	});
+});
+
+describe("a refresh's ingest calls (split under the call limit)", () => {
+	/** Six pages of 900 KB each: 5.4 MB in total, every page under the 1 MB page limit. */
+	function wideSkills() {
+		return [1, 2, 3, 4, 5, 6].map((n) => ({
+			path: `docs/skill-${n}.md`,
+			source_url: `file:///checkout/docs/skill-${n}.md`,
+			body: `skill-${n} ${"y".repeat(900_000)}`,
+		}));
+	}
+
+	test("batchIngestPages keeps every call under the call limit, in page order, with each page in exactly one call", () => {
+		const pages = wideSkills();
+		const batches = batchIngestPages(pages);
+		expect(batches.length).toBeGreaterThan(1);
+		for (const batch of batches) {
+			const bytes = batch.reduce((sum, page) => sum + Buffer.byteLength(page.body, "utf8"), 0);
+			expect(bytes).toBeLessThanOrEqual(INGEST_CALL_MAX_BYTES);
+		}
+		expect(batches.flat().map((page) => page.path)).toEqual(pages.map((page) => page.path));
+	});
+
+	test("preflightIngestPages refuses a page's secret before any call uploads, so earlier pages are not stored", async () => {
+		const fake = new RagflowFake();
+		const events: EventInput[] = [];
+		const deps: IngestDeps = {
+			config: CONFIG,
+			emit: async (event: EventInput): Promise<unknown> => {
+				events.push(event);
+				return { stored: false };
+			},
+			surface: "omp",
+			seen: new Map(),
+			poll: { intervalMs: 0 },
+			fetchImpl: fake.fetch,
+		};
+		const leaked = { ...PAGE, path: "docs/leaked.md", source_url: "file:///checkout/docs/leaked.md", body: "paste sk-proj-abcdefghij1234567890 here" };
+		const reason = await preflightIngestPages(deps, { dataset: "agent-substrate", pages: [...wideSkills().slice(0, 2), leaked] });
+		expect(reason).toBe("secret-findings");
+		expect(fake.uploads).toHaveLength(0);
+		expect(events).toHaveLength(1);
+	});
+
+	test("preflightIngestPages passes a clean set and refuses an empty one", async () => {
+		const fake = new RagflowFake();
+		const deps: IngestDeps = { config: CONFIG, emit: async (): Promise<unknown> => ({ stored: false }), surface: "omp", seen: new Map(), poll: { intervalMs: 0 }, fetchImpl: fake.fetch };
+		expect(await preflightIngestPages(deps, { dataset: "agent-substrate", pages: wideSkills() })).toBeUndefined();
+		expect(await preflightIngestPages(deps, { dataset: "agent-substrate", pages: [] })).toBe("no-pages");
+		expect(fake.uploads).toHaveLength(0);
 	});
 });
