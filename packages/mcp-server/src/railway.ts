@@ -143,7 +143,11 @@ export interface WriteLimits {
 	readonly vCPUs: number;
 	readonly memoryGB: number;
 }
-export type WriteOutcome = { readonly applied: true } | { readonly applied: false; readonly refusal: WriteRefusal };
+/** `unknown`: the write's one request failed in transport after it was sent, so Railway may already have applied it. Nothing retries it. */
+export type WriteOutcome =
+	| { readonly applied: true }
+	| { readonly applied: false; readonly refusal: WriteRefusal }
+	| { readonly applied: false; readonly outcome: "unknown" };
 
 /** Gate checks in this order: unconfigured (no token), writes-disabled, operator-required, approval-ref-missing. Null = pass. */
 export function writeRefusal(config: RailwayConfig, gate: WriteGate): WriteRefusal | null {
@@ -461,6 +465,16 @@ function graphqlFailures(parsed: unknown, token: string): string[] {
 	});
 }
 
+/** Reads one reply: GraphQL errors first, then the HTTP status, then the `data` object. Throws RailwayRequestError. */
+function dataOf(reply: { readonly ok: boolean; readonly status: number; readonly text: string }, token: string): Record<string, unknown> {
+	const parsed = parseJson(reply.text);
+	const failures = graphqlFailures(parsed, token);
+	if (failures.length > 0) throw new RailwayRequestError("graphql", `Railway API error: ${failures.join("; ")}`);
+	if (!reply.ok) throw new RailwayRequestError("transport", `Railway API returned HTTP ${reply.status}`);
+	if (!isRecord(parsed) || !isRecord(parsed.data)) throw shapeError("response");
+	return parsed.data;
+}
+
 function refused(refusal: WriteRefusal): WriteOutcome {
 	return { applied: false, refusal };
 }
@@ -584,17 +598,19 @@ export class RailwayClient {
 		return this.costInFlight;
 	}
 
-	/** Order: boundsRefusal, then writeRefusal, then one serviceInstanceLimitsUpdate call. Refusals make NO request. Rejects on transport/graphql/shape failure after the gate passes. */
+	/** Order: boundsRefusal, then writeRefusal, then one serviceInstanceLimitsUpdate call. Refusals make NO request. A transport failure after the gate passes is an unknown outcome; graphql and shape failures reject. */
 	async setServiceLimits(ref: ServiceRef, limits: WriteLimits, gate: WriteGate): Promise<WriteOutcome> {
 		const bounds = boundsRefusal(this.config.scale, limits);
 		if (bounds !== null) return refused(bounds);
 		const refusal = writeRefusal(this.config, gate);
 		if (refusal !== null) return refused(refusal);
 		const token = this.requireToken();
-		const data = await this.send(token, SET_LIMITS_MUTATION, {
-			input: { environmentId: ref.environmentId, serviceId: ref.serviceId, vCPUs: limits.vCPUs, memoryGB: limits.memoryGB },
-		});
-		return requireTrue(data, "serviceInstanceLimitsUpdate");
+		return this.sendWrite(
+			token,
+			SET_LIMITS_MUTATION,
+			{ input: { environmentId: ref.environmentId, serviceId: ref.serviceId, vCPUs: limits.vCPUs, memoryGB: limits.memoryGB } },
+			"serviceInstanceLimitsUpdate",
+		);
 	}
 
 	/** Order: writeRefusal, then one serviceInstanceRedeploy call. Refusals make NO request. */
@@ -602,8 +618,7 @@ export class RailwayClient {
 		const refusal = writeRefusal(this.config, gate);
 		if (refusal !== null) return refused(refusal);
 		const token = this.requireToken();
-		const data = await this.send(token, REDEPLOY_MUTATION, { environmentId: ref.environmentId, serviceId: ref.serviceId });
-		return requireTrue(data, "serviceInstanceRedeploy");
+		return this.sendWrite(token, REDEPLOY_MUTATION, { environmentId: ref.environmentId, serviceId: ref.serviceId }, "serviceInstanceRedeploy");
 	}
 
 	private requireToken(): string {
@@ -657,12 +672,13 @@ export class RailwayClient {
 
 	/** One GraphQL operation; returns its `data` object or throws a RailwayRequestError whose message holds no token, body or header. */
 	private async send(token: string, query: string, variables: Record<string, unknown>): Promise<Record<string, unknown>> {
-		const reply = await this.dispatch(token, query, variables);
-		const parsed = parseJson(reply.text);
-		const failures = graphqlFailures(parsed, token);
-		if (failures.length > 0) throw new RailwayRequestError("graphql", `Railway API error: ${failures.join("; ")}`);
-		if (!reply.ok) throw new RailwayRequestError("transport", `Railway API returned HTTP ${reply.status}`);
-		if (!isRecord(parsed) || !isRecord(parsed.data)) throw shapeError("response");
-		return parsed.data;
+		return dataOf(await this.dispatch(token, query, variables), token);
+	}
+
+	/** One write's operation. A transport failure, or a 5xx from the edge, after the request was sent settles as `unknown`, because Railway may already have applied it; every other failure rejects. */
+	private async sendWrite(token: string, query: string, variables: Record<string, unknown>, key: string): Promise<WriteOutcome> {
+		const reply = await this.dispatch(token, query, variables).catch(() => null);
+		if (reply === null || reply.status >= 500) return { applied: false, outcome: "unknown" };
+		return requireTrue(dataOf(reply, token), key);
 	}
 }

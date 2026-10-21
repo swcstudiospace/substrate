@@ -15,6 +15,7 @@ import { createObservability, toolLabel } from "./observe.ts";
 import { railwayFromEnv, RailwayClient, type RailwayFetch } from "./railway.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
+import type { EventInput } from "./types.ts";
 
 const TOKEN = "test-token-abc123";
 const REF = "UAT-2026.10/ref_1";
@@ -88,6 +89,31 @@ describe("railway write tools", () => {
 		expect(calls).toHaveLength(1);
 		const sent: { variables: { input: Record<string, unknown> } } = JSON.parse(calls[0]?.body ?? "{}");
 		expect(sent.variables.input).toEqual({ environmentId: "env-1", serviceId: "svc-1", vCPUs: 1, memoryGB: 1 });
+	});
+
+	test("a write whose request fails after it was sent is unknown, recorded as unknown, and not retried", async () => {
+		const sent: string[] = [];
+		const fetch: RailwayFetch = async (_input, init) => {
+			sent.push(init.body);
+			throw new Error("socket reset");
+		};
+		const substrate = substrateWith(WRITES_ON, fetch);
+		const emitted: EventInput[] = [];
+		const emit = substrate.emit.bind(substrate);
+		substrate.emit = async (input, options) => {
+			emitted.push(input);
+			return emit(input, options);
+		};
+		const client = await connectAs(substrate, OPERATOR);
+		const deploy = await call(client, "railway_deploy", { environment_id: "env-1", service_id: "svc-1", approval_ref: REF });
+		expect(deploy.isError).toBe(true);
+		expect(deploy.json()).toMatchObject({ applied: false, outcome: "unknown" });
+		expect(deploy.text).toContain("railway_list");
+		expect(deploy.text).toContain("railway_monitor");
+		expect(deploy.text).not.toContain(TOKEN);
+		expect(sent).toHaveLength(1);
+		expect(emitted).toHaveLength(1);
+		expect(emitted[0]).toMatchObject({ kind: "warning", payload: { action: "railway.deploy", status: "unknown" } });
 	});
 });
 

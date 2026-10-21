@@ -1204,9 +1204,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 
 	/**
 	 * A Railway write. The client checks the write gate before it sends anything (D45-c); this
-	 * records the outcome as one event (D45-f): a `note` when applied, a `warning` when refused or
-	 * failed. The event never carries the token or a request body, and a failed event write never
-	 * changes the answer.
+	 * records the outcome as one event (D45-f): a `note` when applied, a `warning` when refused, failed or unknown. The event
+	 * never carries the token or a request body, and a failed event write never changes the answer.
 	 */
 	const railwayWrite = async (
 		action: "railway.scale" | "railway.deploy",
@@ -1226,7 +1225,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		};
 		const record = (
 			kind: "note" | "warning",
-			status: "applied" | "refused",
+			status: "applied" | "refused" | "unknown",
 			reason: string | null,
 			detail: { refusal?: WriteRefusal; failure?: string; vcpus?: number; memory_gb?: number },
 		) =>
@@ -1250,6 +1249,13 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		if (outcome.applied) {
 			await record("note", "applied", null, limits ?? {});
 			return json(outcome);
+		}
+		if ("outcome" in outcome) {
+			await record("warning", "unknown", "transport", { failure: "transport" });
+			const message =
+				"Railway did not confirm this write, so it may or may not have been applied. Nothing was retried. " +
+				"Check status with railway_list or railway_monitor before retrying.";
+			return { ...json({ applied: false, outcome: "unknown", message }), isError: true };
 		}
 		await record("warning", "refused", outcome.refusal, { refusal: outcome.refusal });
 		return { ...json(outcome), isError: true };
