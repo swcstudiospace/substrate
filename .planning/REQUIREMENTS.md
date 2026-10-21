@@ -22,9 +22,9 @@ Source for all entries: `.planning/research/FEATURES.md` lines 197–222 and `.p
   - Item: Mirror graph edges (`requires` / `blocks` / `gated_by`) into Linear relations. Area: B (claim mirror). Complexity: MEDIUM. Notes: not stated. Phase: 38. Source: FEATURES.md:200
 - [x] **B-D3**: One artifact shows claim → Linear → Notion → DoD
   - Item: Put mirror outcomes in `substrate evidence` per node. Area: B (claim mirror). Complexity: LOW. Notes: M6. Phase: 38. Source: FEATURES.md:202
-- [ ] **C-D2**: The dispatched context can be replayed from the ledger (v0.3 §2)
+- [x] **C-D2**: The dispatched context can be replayed from the ledger (v0.3 §2)
   - Item: Dispatch as a signed handoff packet (goal from the issue, DoD lines, files). Area: C (dispatcher). Complexity: LOW-MEDIUM. Notes: M2. Phase: 39. Source: FEATURES.md:204. Decision (2026-10-21): the goal is the issue identifier and the DoD lines are fixed; issue prose stays out of the packet (DISP-07).
-- [ ] **C-D4**: A stale-brief warning before acting (v0.3 §2)
+- [x] **C-D4**: A stale-brief warning before acting (v0.3 §2)
   - Item: Run `coord_drift_scan` on the worktree before launch. Area: C (dispatcher). Complexity: LOW. Notes: M2. Phase: 39. Source: FEATURES.md:206
 - [ ] **D-D1**: `data-planes.md:34`
   - Item: Cross-surface recall in the brief: a bounded, cached fan-out over the `sub-*` banks. Area: D (docs plane). Complexity: MEDIUM. Notes: `agentId:"*"` is an Agentmemory idiom, and Hindsight banks are isolated ([docs](https://docs.hindsight.vectorize.io/memory-banks/)). Phase: 40. Source: FEATURES.md:207
@@ -92,11 +92,11 @@ Anti-features, from `.planning/research/SUMMARY.md` line 72:
 | A-D1 | 37 | Complete (PR #89) |
 | B-D1 | 38 | Complete (PR #90) |
 | B-D3 | 38 | Complete (PR #90) |
-| C-D2 | 39 | In review (draft PR) |
-| C-D4 | 39 | In review (draft PR) |
-| D-D1 | 40 | Pending |
-| D-D3 | 40 | Pending |
-| D-D4 | 40 | Pending |
+| C-D2 | 39 | Complete (PR #91); signing needs `SUBSTRATE_HANDOFF_KEY` |
+| C-D4 | 39 | Complete (PR #91) |
+| D-D1 | 40 | In review (draft PR); no live effect until `SUBSTRATE_BRIEF_RECALL` and `HINDSIGHT_BANKS` are set |
+| D-D3 | 40 | Blocked: restore drill and approval |
+| D-D4 | 40 | In review (draft PR); narrowed to config-named models, see the phase 40 SUMMARY |
 | E-D1 | 41 | Pending |
 | E-D2 | 41 | Pending |
 | F-D3 | 42 | Pending |
