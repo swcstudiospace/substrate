@@ -1371,17 +1371,20 @@ export function createHttpServer(
 				}
 				const datasets = "datasets" in parsed ? parsed.datasets : undefined;
 				const sessionId = "session_id" in parsed ? parsed.session_id : undefined;
+				const context = "context" in parsed ? parsed.context : undefined;
 				if (
 					(datasets !== undefined && !(Array.isArray(datasets) && datasets.every((name) => typeof name === "string"))) ||
-					(sessionId !== undefined && typeof sessionId !== "string")
+					(sessionId !== undefined && typeof sessionId !== "string") ||
+					(context !== undefined && typeof context !== "boolean")
 				) {
-					sendJson(res, 400, { error: "datasets must be a string array and session_id a string" });
+					sendJson(res, 400, { error: "datasets must be a string array, session_id a string and context a boolean" });
 					return;
 				}
 				const fields: Record<string, unknown> = {
 					question: parsed.question,
 					...(datasets !== undefined ? { datasets } : {}),
 					...(sessionId !== undefined ? { session_id: sessionId } : {}),
+					...(context !== undefined ? { context } : {}),
 				};
 				if (!(await auditedRest(res, observability, surface, "docs_search", fields))) return;
 				sendJson(res, 200, await substrate.searchDocs(fields, surface));

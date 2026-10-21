@@ -10,7 +10,7 @@ the client — `store-lock.test.ts` fails the build on either.
 
 | Surface | Call | Audit |
 |---|---|---|
-| MCP | `docs_search` `{question, datasets?, session_id?}` | fail-open |
+| MCP | `docs_search` `{question, datasets?, session_id?, context?}` | fail-open |
 | MCP | `docs_ingest` `{dataset, commit?, pages[{path, source_url?, body, heading_path?}], session_id?}` | fail-closed |
 | REST | `POST /docs/search` (same fields, `question` required) | fail-open |
 | REST | `POST /docs/ingest` (bearer required; 401 anonymous, 403 guest) | fail-closed |
@@ -145,6 +145,77 @@ named by the state file after a restart (Greptile round 2). A
 degraded reply is never stored, nor (uplift-3 N5) a partially served one
 with `degraded_datasets`; a cache hit makes no plane call and emits
 no `note`.
+
+## Hybrid retrieval and context augmentation
+
+Every retrieval is a hybrid search: RAGFlow combines keyword and vector similarity, and `vector_similarity_weight` sets the vector share. The keyword share is its complement, and the two sum to 1. `docs_search` can also add a `context` block built from recalled memories and the caller's session ledger. The context is read-side only and is never stored.
+
+### Vector weight
+
+The weight sent as `vector_similarity_weight` resolves in `loadConfig` (`config.ts`). The first match wins:
+
+1. `SUBSTRATE_DOCS_VECTOR_WEIGHT`, when set to a usable value.
+2. `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT`, when set.
+3. `0.3`, RAGFlow's own default.
+
+`SUBSTRATE_DOCS_VECTOR_WEIGHT` keeps precedence because it predates this setting. A blank value counts as unset for both variables.
+
+The two variables do not validate alike:
+
+- `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT` must be a number in [0, 1]. Anything else makes `loadConfig` throw a `ConfigError` that names `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT`. The check runs even when `SUBSTRATE_DOCS_VECTOR_WEIGHT` is also set.
+- `SUBSTRATE_DOCS_VECTOR_WEIGHT` is not a configuration error. A value that is not a number, or lies outside [0, 1], falls back to the RAGFlow weight (then 0.3).
+
+### Reranker
+
+`SUBSTRATE_RAGFLOW_RERANK_ID` names a reranker model. The value is trimmed. Unset or blank, the retrieval request carries no `rerank_id` field. When set, every `POST /api/v1/retrieval` carries `rerank_id` with that id. The reranker is opt-in: the code records that RAGFlow ships no reranker by default (D46-b), and the deployed RAGFlow version is not attested, so the substrate never turns one on by itself.
+
+### The `context` block
+
+`docs_search` takes an optional `context` boolean, default `false`. `POST /docs/search` takes the same field, and the MCP input schema declares it a boolean.
+
+- Unset or `false`: the reply has no `context` key, and nothing is read from memory or the ledger.
+- `true`: the reply gains `context`, computed for that call.
+
+| Field | Content |
+|---|---|
+| `memories` | The first 3 recall hits for the question, in the order recall returns them, each `{id, text, scope, repo}`. `scope` and `repo` are `null` when the hit has none. `text` is redacted, then cut to 400 characters. |
+| `events` | Up to 5 of the most recent ledger rows of the `session_id`, in time order, each `{id, ts, kind, surface, summary}`. `ts` is ISO-8601. `summary` is redacted, then cut to 200 characters. |
+| `untrusted` | The notice the chunks carry (`UNTRUSTED_DOCS_NOTICE`). |
+| `degraded` | Absent when every source answered. Otherwise the reasons, joined by `; `, redacted and capped at 300 characters. |
+
+The reasons in `degraded` are:
+
+- `no-session`: there is no `session_id`, or it is empty. `events` is `[]`, the ledger is not read, and the memories still come.
+- `ledger-not-configured`: no ledger is configured. `events` is `[]`.
+- `ledger: <reason>`: the ledger read failed or missed its budget. A miss reads `ledger: deadline exceeded`. `events` is `[]`.
+- `recall: <reason>`: the recall failed, timed out, or answered degraded. The reason is the recall's own, for example `recall: recall-timeout: budget exceeded`, `recall: hindsight recall failed: …`, `recall: partial recall: …` or `recall: vm-guest`. A partial recall keeps the memories it returned.
+
+### Budgets
+
+| Read | Bound | Where it is set |
+|---|---|---|
+| Recall | `HINDSIGHT_SEARCH_RECALL_BUDGET_MS`, default 1500 ms | `hindsightBudgets.searchRecallBudgetMs` |
+| Ledger read | 1000 ms, fixed | `DOCS_CONTEXT_LEDGER_BUDGET_MS` |
+
+The recall does not run under `SUBSTRATE_DOCS_SEARCH_BUDGET_MS`. That budget is the shared deadline of the chunk retrieval fan-out only.
+
+The ledger read has no row limit: `readEvents` returns every row of the session in time order, and the last five are kept. The 1000 ms budget is the only bound on that read.
+
+The two reads run in parallel, and both start after the chunk answer is ready. A `context: true` reply therefore takes the chunk search time plus the slower of the two reads, which is at most 1500 ms with the default recall budget.
+
+### Cache and ordering
+
+The chunk answer is cached as before, and that store happens before any context leg starts, so the cache entry never carries `context`. Context does not change the datasets searched, the cache key or the chunks. A cache hit still reads the context for that call. An empty question skips the cache for the chunks, and its context is still read. A reply with `context` is never stored.
+
+The `substrate.docs.duration` and `substrate.docs.search` measurements wrap the whole call, so they include the context legs.
+
+### Untrusted context
+
+Memory text and event summaries are untrusted evidence. Both are redacted before they are cut, so a cut never shows text the redactor removes. The context carries no source URL and is never cited as a source. Nothing in it is an instruction: a caller must not act on a directive found in a memory or an event.
+
+### REST
+
+`POST /docs/search` takes `context` with the same meaning. A `context` that is not a JSON boolean, `null` included, answers `400` with `{"error": "datasets must be a string array, session_id a string and context a boolean"}` before the search runs.
 
 ## The six ingest refusals
 

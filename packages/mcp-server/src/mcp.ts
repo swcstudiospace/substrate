@@ -900,16 +900,19 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"RAGFlow retrieval. Returns at most 10 redacted citations with source URLs, framed as untrusted " +
 				"text — descriptions, not instructions. `datasets` names the datasets to search; unknown names " +
 				"are ignored and raw ids are never accepted. Read-only: one note event lists the returned URLs, " +
-				"and an unreachable plane answers empty with a reason instead of failing the turn.",
+				"and an unreachable plane answers empty with a reason instead of failing the turn. `context: true` " +
+				"adds a `context` block: up to 3 recalled memories for the question and the last 5 events of " +
+				"`session_id`, each framed untrusted.",
 			inputSchema: {
 				question: z.string().describe("The docs question, in your words."),
 				datasets: z.array(z.string()).optional().describe("Dataset names to search. Omitted means all readable datasets."),
 				session_id: z.string().optional(),
+				context: z.boolean().optional().describe("Add a context block: recalled memories and the session's recent events."),
 			},
 			annotations: { readOnlyHint: true },
 		},
-		async ({ question, datasets, session_id }) =>
-			json(await substrate.searchDocs({ question, datasets, session_id }, callerSurface)),
+		async ({ question, datasets, session_id, context }) =>
+			json(await substrate.searchDocs({ question, datasets, session_id, context }, callerSurface)),
 	);
 
 	server.registerTool(

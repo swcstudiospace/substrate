@@ -85,7 +85,7 @@ import {
 	type PageSettlement,
 } from "./docs-ingest.ts";
 import { LagSettler, TRIGGER_RECORD_DEADLINE_MS, withDeadline, createFreshnessState, evaluateFreshness, type DatasetFreshness, type FreshnessState } from "./docs-freshness.ts";
-import { DEFAULT_SEARCH_DATASET_NAMES, citationProvenanceCounts, searchDocs, searchReplyStorable, type SearchReply } from "./docs-search.ts";
+import { DEFAULT_SEARCH_DATASET_NAMES, DOCS_CONTEXT_LEDGER_BUDGET_MS, UNTRUSTED_DOCS_NOTICE, citationProvenanceCounts, docsContextEvents, docsContextMemories, searchDocs, searchReplyStorable, type DocsContext, type DocsContextEvent, type DocsContextMemory, type SearchReply } from "./docs-search.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
 	analyzeDrift,
@@ -4103,9 +4103,14 @@ export class Substrate {
 	 * missing datasets in `degraded_datasets` and, like a degraded one, is
 	 * never stored. Every search is measured end to end — cache hit or
 	 * loaded, as the caller waited for it — through `observer.docsSearch`.
+	 *
+	 * `context: true` adds a `context` block (D46-d): up to three recalled memories for the question, under
+	 * `searchRecallBudgetMs`, and the last five ledger events of `session_id`, under a 1000 ms budget. A source
+	 * that fails or runs out of time is dropped and named in `context.degraded`. The block is attached after the
+	 * cached chunks and is never stored.
 	 */
 	async searchDocs(
-		input: { question?: unknown; datasets?: unknown; session_id?: unknown },
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown; context?: unknown },
 		callerSurface: Surface | null,
 	): Promise<SearchReply> {
 		const surface = callerSurface ?? "claude-code";
@@ -4132,7 +4137,7 @@ export class Substrate {
 	}
 
 	private async searchDocsUnmeasured(
-		input: { question?: unknown; datasets?: unknown; session_id?: unknown },
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown; context?: unknown },
 		surface: Surface,
 		noteLoaded: () => void,
 	): Promise<SearchReply> {
@@ -4165,17 +4170,64 @@ export class Substrate {
 				question,
 			);
 		};
+		const cached = (): Promise<SearchReply> =>
+			this.cache.getOrLoad<SearchReply>({
+				klass: "docs-search",
+				surface,
+				args: { question: question.trim().replace(/\s+/g, " ").toLowerCase(), datasets: [...names].sort(), pins, degraded: degradedDatasets },
+				generations: [DOCS_GENERATION_KEY],
+				load,
+				store: searchReplyStorable,
+			});
 		// An empty question and an unconfigured plane are answered (degraded)
 		// without touching the cache: there is nothing to key on.
-		if (question.trim().length === 0 || this.config.ragflow === null) return load();
-		return this.cache.getOrLoad<SearchReply>({
-			klass: "docs-search",
-			surface,
-			args: { question: question.trim().replace(/\s+/g, " ").toLowerCase(), datasets: [...names].sort(), pins, degraded: degradedDatasets },
-			generations: [DOCS_GENERATION_KEY],
-			load,
-			store: searchReplyStorable,
-		});
+		const chunks = question.trim().length === 0 || this.config.ragflow === null ? await load() : await cached();
+		// The context is attached per call, after the chunks: a session's events
+		// belong to that session, so the cached answer never carries them.
+		if (input.context !== true) return chunks;
+		return { ...chunks, context: await this.docsContextOf(question, surface, sessionId) };
+	}
+
+	/**
+	 * The `context` block of one docs answer (D46-d). The recall and the ledger
+	 * read run in parallel, each under its own budget, and neither can fail the
+	 * answer: a source that errors or runs out of time is dropped and named in
+	 * `degraded`.
+	 */
+	private async docsContextOf(question: string, surface: Surface, sessionId: string | undefined): Promise<DocsContext> {
+		const [recalled, ledger] = await Promise.all([this.recallForContext(question, surface), this.ledgerForContext(sessionId)]);
+		const reasons = [recalled.reason, ledger.reason].filter((reason): reason is string => reason !== undefined);
+		return {
+			memories: recalled.memories,
+			events: ledger.events,
+			...(reasons.length > 0 ? { degraded: redact(reasons.join("; ")).slice(0, 300) } : {}),
+			untrusted: UNTRUSTED_DOCS_NOTICE,
+		};
+	}
+
+	/** The recall leg: never rejects. A failure or a budget miss keeps the chunks and names its reason. */
+	private async recallForContext(question: string, surface: Surface): Promise<{ memories: DocsContextMemory[]; reason?: string }> {
+		try {
+			const reply = await this.recallUncounted({ query: question }, surface, this.config.hindsightBudgets.searchRecallBudgetMs);
+			return {
+				memories: docsContextMemories(reply.results),
+				...(reply.degraded ? { reason: `recall: ${reply.reason ?? "degraded"}` } : {}),
+			};
+		} catch (cause) {
+			return { memories: [], reason: `recall: ${redact(String(cause))}` };
+		}
+	}
+
+	/** The ledger leg: no session names `no-session`; otherwise the session's last events under `DOCS_CONTEXT_LEDGER_BUDGET_MS`. */
+	private async ledgerForContext(sessionId: string | undefined): Promise<{ events: DocsContextEvent[]; reason?: string }> {
+		if (sessionId === undefined) return { events: [], reason: "no-session" };
+		if (this.greptime === null) return { events: [], reason: "ledger-not-configured" };
+		try {
+			const rows = await withDeadline(this.greptime.readEvents("session_id", sessionId), DOCS_CONTEXT_LEDGER_BUDGET_MS);
+			return { events: docsContextEvents(rows) };
+		} catch (cause) {
+			return { events: [], reason: `ledger: ${redact(String(cause))}` };
+		}
 	}
 
 	/**
