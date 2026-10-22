@@ -43,8 +43,11 @@ export class FakeTree implements PlanningFs {
 	/** Most probes in flight at once. A sequential walk keeps this at one; the concurrency bound shows here. */
 	maxProbesInFlight = 0;
 	private probesInFlight = 0;
+	/** Every path probed, in order. */
+	readonly probed: string[] = [];
 
 	async probe(path: string): Promise<Probe> {
+		this.probed.push(path);
 		this.probesInFlight += 1;
 		this.maxProbesInFlight = Math.max(this.maxProbesInFlight, this.probesInFlight);
 		try {

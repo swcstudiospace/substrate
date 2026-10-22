@@ -268,10 +268,11 @@ async function collectMilestones(walk: Walk): Promise<void> {
 }
 
 /**
- * Phase children are resolved first, then emitted in path order. A child that becomes an error record sits at its own
- * path; one that is listed has its documents under that path and a slash. Sorting by those keys puts each record where
- * its path belongs, so a directory's error is never emitted after a later sibling's documents. Listing stays lazy, so
- * the cutoff still stops it.
+ * Phase children are taken in name order, a batch at a time, and emitted in path order. A child that becomes an error
+ * record sits at its own path; a listed directory's documents sit under its path and a slash. A resolved unit is emitted
+ * once its key sorts before the first child not yet resolved: that child's record can only sit at its own path or under
+ * it, so nothing still unresolved can come before the unit. Resolution therefore stops at the cutoff, and the output is
+ * still in path order.
  */
 async function collectPhases(walk: Walk): Promise<void> {
 	if (isFull(walk)) return;
@@ -282,20 +283,34 @@ async function collectPhases(walk: Walk): Promise<void> {
 		return;
 	}
 	if (listing.state === "absent") return;
-	// Resolution is the only fan-out, and it is bounded: a directory with many links never has more than PROBE_CONCURRENCY probes out.
-	const resolved = await mapBounded(listing.entries, PROBE_CONCURRENCY, (child) => resolvePhaseChild(walk, relDir, listing.real, child));
-	const units = resolved.filter((unit): unit is PhaseUnit => unit !== null);
-	units.sort((a, b) => compareText(a.key, b.key));
-	for (const unit of units) {
-		if (isFull(walk)) return;
-		if (unit.type === "error") {
-			add(walk, unit.entry);
-			continue;
+	const children = [...listing.entries].sort((a, b) => compareText(a.name, b.name));
+	let pending: PhaseUnit[] = [];
+	let next = 0;
+	while (next < children.length && !isFull(walk)) {
+		const batch = children.slice(next, next + PROBE_CONCURRENCY);
+		next += batch.length;
+		const resolved = await mapBounded(batch, PROBE_CONCURRENCY, (child) => resolvePhaseChild(walk, relDir, listing.real, child));
+		pending.push(...resolved.filter((unit): unit is PhaseUnit => unit !== null));
+		// The first child not yet resolved bounds every unit still to come. With none left, everything pending is ready.
+		const nextChild = children[next];
+		const frontier = nextChild === undefined ? undefined : `${relDir}/${nextChild.name}`;
+		const ready = pending.filter((unit) => frontier === undefined || compareText(unit.key, frontier) < 0).sort((a, b) => compareText(a.key, b.key));
+		pending = pending.filter((unit) => !ready.includes(unit));
+		for (const unit of ready) {
+			if (isFull(walk)) return;
+			await emitPhaseUnit(walk, unit);
 		}
-		const sub = await readEntries(walk, unit.relDir, unit.real);
-		if (sub.state === "error") add(walk, sub.entry);
-		else if (sub.state === "entries") collectDocuments(walk, unit.relDir, sub.real, sub.entries, "phase", PHASE_DIR.exec(unit.name)?.[1]);
 	}
+}
+
+async function emitPhaseUnit(walk: Walk, unit: PhaseUnit): Promise<void> {
+	if (unit.type === "error") {
+		add(walk, unit.entry);
+		return;
+	}
+	const sub = await readEntries(walk, unit.relDir, unit.real);
+	if (sub.state === "error") add(walk, sub.entry);
+	else if (sub.state === "entries") collectDocuments(walk, unit.relDir, sub.real, sub.entries, "phase", PHASE_DIR.exec(unit.name)?.[1]);
 }
 
 /** A directory-level error record. The directory's contents are unknown from here on, so its path is recorded as unlisted. */
