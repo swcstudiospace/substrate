@@ -502,6 +502,7 @@ export const FLAGS: readonly FlagSpec[] = [
 	{ name: "SUBSTRATE_PLANNING_MAX_FILES", kind: "number", plane: "index", default: "500", allowed: "1..10000", unset: "500 documents per planning index; the rest are counted as truncated", readBy: "mcp-server/planning/config.ts", documented: true },
 	{ name: "SUBSTRATE_PLANNING_MAX_BYTES", kind: "number", plane: "index", default: "262144", allowed: "1024..4194304", unset: "256 KiB per document; a larger document is an error record", readBy: "mcp-server/planning/config.ts", documented: true },
 	{ name: "SUBSTRATE_PLANNING_CHECKPOINT_DIR", kind: "path", plane: "index", default: "none", allowed: "absolute directory path", unset: "checkpoints stay in memory, and planning_status reports them as not durable", readBy: "mcp-server/planning/config.ts", documented: true },
+	{ name: "SUBSTRATE_PLANNING_SCAN_INTERVAL_MS", kind: "number", plane: "index", default: "15000", allowed: "1000..3600000", unset: "15000 ms between planning observer scans; a change is seen within one interval", readBy: "mcp-server/planning/config.ts", documented: true },
 
 	// ── cache ─────────────────────────────────────────────────────────────────
 	{ name: "DRAGONFLY_URL", kind: "string", plane: "cache", default: "none", allowed: "loopback redis URL", unset: "no cache; a non-loopback URL is refused with a boot warning", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },

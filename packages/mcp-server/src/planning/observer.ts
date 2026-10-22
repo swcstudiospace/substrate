@@ -1,7 +1,7 @@
 /**
  * The planning observer (phase 52, SOTA-08; phase 53, SOTA-09): the server-side writer of the planning plane.
  *
- * On a timer (`PLANNING_SCAN_INTERVAL_MS`, unref'd, started and stopped by the server entry) it scans the checkout's
+ * On a timer (`SUBSTRATE_PLANNING_SCAN_INTERVAL_MS`, unref'd, started and stopped by the server entry) it scans the checkout's
  * `.planning/` with the incremental index, so a scan reads and hashes only the documents that changed. It diffs the scan
  * against its baseline and publishes a complete change as one `planning.changed` event, through the ledger and the bus
  * (`observePlanningChange`). Nothing else writes on a read: the reads never do.
@@ -40,8 +40,23 @@ import { readClock, resolveSettings } from "./read.ts";
 /** The session id the ledger row carries for a change observed by this plane. */
 export const PLANNING_OBSERVER_SESSION = "planning-observer";
 
-/** How often the observer scans, in milliseconds. A fixed cadence, not configuration: a scan is incremental, so it is cheap. */
-export const PLANNING_SCAN_INTERVAL_MS = 15_000;
+/** The handle a scan timer returns. Opaque to the observer: it is only passed back to `clearInterval`. */
+export type PlanningTimerHandle = unknown;
+
+/** The timer the observer schedules its scans with. Production uses the global timers; a test injects one to see the cadence. */
+export interface PlanningTimers {
+	setInterval(run: () => void, ms: number): PlanningTimerHandle;
+	clearInterval(timer: PlanningTimerHandle): void;
+}
+
+const GLOBAL_TIMERS: PlanningTimers = {
+	setInterval: (run, ms) => {
+		const timer = setInterval(run, ms);
+		timer.unref();
+		return timer;
+	},
+	clearInterval: (timer) => clearInterval(timer as ReturnType<typeof setInterval>),
+};
 
 export type PlanningHeartbeat =
 	| { state: "written" }
@@ -66,6 +81,8 @@ export interface PlanningObserverDeps {
 	presence: DragonflyPresenceStore | null;
 	/** The ledger ingest (`Substrate.emit`). Resolves true when the event was stored. */
 	emit: (event: EventInput) => Promise<boolean>;
+	/** The scan timer. Omitted in production; a test injects one to see the cadence the observer schedules. */
+	timers?: PlanningTimers;
 }
 
 /** The phase and plan of one described document. `plan` is null when the document names none. */
@@ -89,24 +106,28 @@ export class PlanningObserver {
 	private touchedOverflow = false;
 	/** Conflicts announced and still open, by signature. A conflict leaves the set once it is no longer detected. Process-local. */
 	private openConflicts = new Set<string>();
-	private timer: ReturnType<typeof setInterval> | undefined;
+	private timer: PlanningTimerHandle | undefined;
 	/** Scans run one at a time, in arrival order, so two scans never publish the same change. */
 	private queue: Promise<unknown> = Promise.resolve();
 
-	constructor(private readonly deps: PlanningObserverDeps) {}
+	private readonly timers: PlanningTimers;
 
-	/** Start the scan timer, unref'd. Nothing starts while the plane is disabled or misconfigured. Returns whether it is running. */
-	start(intervalMs: number = PLANNING_SCAN_INTERVAL_MS): boolean {
+	constructor(private readonly deps: PlanningObserverDeps) {
+		this.timers = deps.timers ?? GLOBAL_TIMERS;
+	}
+
+	/** Start the scan timer at the configured cadence, unref'd. Nothing starts while the plane is disabled or misconfigured. Returns whether it is running. */
+	start(): boolean {
 		if (this.timer !== undefined) return true;
-		if (!resolveSettings(this.deps.settings).ready) return false;
-		this.timer = setInterval(() => void this.scan(), intervalMs);
-		this.timer.unref();
+		const resolved = resolveSettings(this.deps.settings);
+		if (!resolved.ready) return false;
+		this.timer = this.timers.setInterval(() => void this.scan(), resolved.limits.scanIntervalMs);
 		return true;
 	}
 
 	/** Clear the timer. A scan in flight finishes; no new scan starts from the timer. */
 	stop(): void {
-		clearInterval(this.timer);
+		this.timers.clearInterval(this.timer);
 		this.timer = undefined;
 	}
 
