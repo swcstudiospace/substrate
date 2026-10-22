@@ -31,8 +31,8 @@ export type PlanningChangePayload = {
 	added: string[];
 	removed: string[];
 	changed: string[];
-	/** How many paths of each list were not listed, because the list or the payload budget was full. */
-	truncated: Record<"added" | "removed" | "changed", number>;
+	/** How many paths of each list were not listed. Present only when at least one list was truncated. */
+	truncated?: Record<"added" | "removed" | "changed", number>;
 };
 
 export interface PlanningChangeInput {
@@ -67,14 +67,14 @@ export function planningChangeEvent(input: PlanningChangeInput): EventInput | nu
 
 	const lists: Record<ListName, string[]> = { added, removed, changed };
 	const kept: Record<ListName, string[]> = { added: [], removed: [], changed: [] };
-	const payloadWith = (truncated: Record<ListName, number>): PlanningChangePayload => ({
+	const payloadWith = (truncated: Record<ListName, number> | null): PlanningChangePayload => ({
 		kind: PLANNING_CHANGED,
 		repo: input.repo,
 		sessionId: input.sessionId,
 		added: kept.added,
 		removed: kept.removed,
 		changed: kept.changed,
-		truncated,
+		...(truncated === null ? {} : { truncated }),
 	});
 	// The check counts each list's full length as its truncation, which has as many digits as any real count: a bound.
 	const fullTruncation = { added: lists.added.length, removed: lists.removed.length, changed: lists.changed.length };
@@ -103,7 +103,7 @@ export function planningChangeEvent(input: PlanningChangeInput): EventInput | nu
 		summary: redact(summary),
 		repo: input.repo,
 		session_id: input.sessionId,
-		payload: redactValue(payloadWith(truncated)),
+		payload: redactValue(payloadWith(omitted > 0 ? truncated : null)),
 	};
 }
 
