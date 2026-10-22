@@ -112,6 +112,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_PLANNING_PRESENCE_TTL_S` | number | 90 | 1..86400 | 90 s: a session with no heartbeat for longer is stale | mcp-server/planning/config.ts | yes |
 | `SUBSTRATE_PLANNING_MAX_FILES` | number | 500 | 1..10000 | 500 documents per planning index; the rest are counted as truncated | mcp-server/planning/config.ts | yes |
 | `SUBSTRATE_PLANNING_MAX_BYTES` | number | 262144 | 1024..4194304 | 256 KiB per document; a larger document is an error record | mcp-server/planning/config.ts | yes |
+| `SUBSTRATE_PLANNING_CHECKPOINT_DIR` | path | none | absolute directory path | checkpoints stay in memory, and planning_status reports them as not durable | mcp-server/planning/config.ts | yes |
 
 ## Cache (loopback redis)
 

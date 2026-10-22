@@ -2,7 +2,7 @@
 phase: 53-steering-conflict-control
 requirements: [SOTA-09]
 verified: 2026-10-22
-status: gaps_found (criterion 1 PASS; criteria 2, 3, 4 FAIL; see VERIFICATION.md)
+status: corrective commits landed for criteria 2, 3 and 4; re-verification pending (criterion 1 PASS; findings in VERIFICATION.md)
 head: eedb64e4522ff9928c501873623026e73e9f0079
 branch: gsd/p53-complete-store
 merge_base_origin_main: 0df730ecd42e8a152fd73f1b6b5db04dc170b413
@@ -58,6 +58,63 @@ e2ea6ac fix(steering): register SUBSTRATE_PLANNING_STEERING flags (phase 53, SOT
 - **Plan-id keying narrower than the criterion.** `CONTEXT.md:32-34` (D53-g) keys conflicts on phase, with plan ids compared inside a phase. ROADMAP criterion 2 says "parsed phase or plan id". This is recorded as C2a in `VERIFICATION.md`.
 - **Migration table is not a hypertable.** `index-store.ts:601-636` creates a plain table. ROADMAP says "audited in TimescaleDB". Whether that needs a hypertable is an operator decision.
 - **Phase 52 and 51 commits are interleaved.** Merges of `gsd/p51-fabric-impl` and `gsd/p52-*` are in this branch's history. They were not verified here.
+
+## Corrective work (gaps C2, C3, C4)
+
+Branch `gsd/p53-complete-store`, starting at `2a06852`. Four commits, in order. The docs commit is the one that adds this section.
+
+| Gap | Criterion | Commit | Files |
+| --- | --- | --- | --- |
+| C2: plan id across phases; detector had no runtime caller (PLAN W5) | 2 | `9965506` | `presence.ts`, `report.ts` (new), `conflicts.ts`, `conflicts.test.ts`, `read.ts`, `read.test.ts` |
+| C3: a watcher gap makes the session view unknown until a full rescan | 3 | `174863f` | `report.ts`, `read.ts`, `read.test.ts` |
+| C4: completion checkpoints survive restart | 4 | `3500fcd` | `checkpoint-store.ts` (new), `checkpoint-store.test.ts` (new), `planning/config.ts`, `read.ts`, `read.test.ts`, `config.ts`, `service.ts` |
+| Decisions, registry row, `.env.example` line, config reference row, this section | all | docs commit | `CONTEXT.md`, `SUMMARY.md`, `docs/config-reference.md`, `flag-registry.ts`, `.env.example` |
+
+### Verifier claims, checked against the source before any change
+
+- C2a, plan id overlap across phases is not detected (`conflicts.ts:119`, `:142-148`): correct.
+- C2b, `detectConflicts` has no runtime caller: correct. Grep showed only `conflicts.ts`.
+- C3, no watcher or rescan concept: correct. Only per-scan unknown reasons existed.
+- C4, the checkpoint store is in memory only and no test restarts: correct. `InMemoryCompletionStore` was the only store.
+
+No verifier claim was wrong.
+
+### What each fix does
+
+- **C2 (criterion 2).** Each session's planning report rides in its presence record (PLAN W5), so every reader sees every session's index. `PlanningReader.sessions()` runs `detectConflicts` over the presence snapshot and announces each open conflict once through the ledger ingest. A phase key is two or more known, active sessions on one active phase. A plan key is one plan id held under two or more active phases. Nothing closes or edits a session's record.
+- **C3 (criterion 3).** A truncated or unlisted index opens a watcher gap in the reader. The report is then unknown (`scan-truncated` or `scan-unlisted`) until a complete scan clears the gap. A failed scan keeps an open gap. An unknown session takes no part in detection, and its conflict-sensitive gate refuses. A report older than the presence TTL is `scan-stale`. The state shows in each `planning_sessions` row as `planning`.
+- **C4 (criterion 4).** `DurableCompletionStore` keeps an append-only file, `completions.jsonl`, in `SUBSTRATE_PLANNING_CHECKPOINT_DIR`. The file is rewritten through a temporary file with fsync and rename. Reopening loads the stored keys, and recording a stored key is a no-op. A changed file hash is a new key, flagged on resume. With the variable unset, `planning_status` reports `durable: false`.
+
+### Decisions
+
+Recorded in `CONTEXT.md` as dated lines. D53-g itself is unchanged.
+
+- D53-g.1: amends D53-g to criterion 2: a shared plan id under different active phases is a conflict.
+- D53-j: a conflict event is `kind: "warning"` on the `substrate` surface.
+- D53-k: the feed is each session's planning report in its presence record. The staleness threshold is the presence TTL.
+- D53-l: a watcher gap is an incomplete observation; a failed scan keeps it open.
+- D53-m: the checkpoint store's file format, write order, and the unset behaviour.
+
+### Event kind for conflicts
+
+`warning`, on the `substrate` surface. The payload is `{ kind: "planning.conflict", key, phases, plans, sessionIds, ... }`. `EVENT_KINDS` is unchanged, as phase 17 requires.
+
+### Wiring status
+
+- W1, the TimescaleDB history table: unchanged from the earlier commits. It is not part of these gaps.
+- W2, the durable directive store behind `SteeringInbox`: not implemented. No criterion needs it. C4 concerns completion checkpoints, not steering directives. `SteeringInbox` still keeps records in memory (`steering.ts:171`). Out of scope for this correction.
+- W3 and W4: kept as they were.
+- W5, the feed to `detectConflicts`: implemented as D53-k. Per-session index scans reach the detector through presence records. The runtime caller is `PlanningReader.sessions()`.
+
+### Open items after this correction
+
+1. **No session writes an active phase.** The heartbeat writes `activePhase: null` (`read.ts`), and nothing else sets it. No conflict can arise in production until a writer exists. The runtime path is tested with presence records that carry an active phase. Choosing the source (the checkout's STATE.md, a branch convention, or an operator setting) is a design decision that this correction does not make.
+2. **Conflict-sensitive writes are not gated.** `gateConflictSensitiveWrite` refuses an unknown view and is tested. No write path in the repo calls it. The steering inbox targets other sessions but takes no planning view. Gating it needs an inbox dependency change, which I did not make.
+3. **No caller of the durable store.** No plan-step executor exists in this server, so nothing calls `recordCompletion` on `DurableCompletionStore`. `planning_status` reports `durable: true` when the directory is configured. That means configured, not opened: the service does not open the store at boot.
+4. **The unlisted-directory gap has no test.** The path exists (`scan-unlisted`). Reproducing an unreadable directory needs a non-root user.
+5. **No cross-process lock** on a checkpoint directory. One writer per directory is assumed (D53-m).
+6. **Criterion source.** `.planning/ROADMAP.md` has no phase 53 entry, and the phrase "parsed phase or plan id" does not appear in it. Criterion 2 is cited as VERIFICATION.md quotes it.
+7. **Gates not run**, per the assignment. The orchestrator should run the config reference check (`bun run config:reference -- --check`; the row was written by hand in the generator's format), `flag-registry.test.ts` (the new registry row and `.env.example` line), and the planning tests.
 
 ## New dependencies
 
