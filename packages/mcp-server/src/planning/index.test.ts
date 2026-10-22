@@ -187,6 +187,19 @@ describe("updatePlanningIndex: an incremental update equals a full rebuild", () 
 		expect(updated).toEqual(await fullOf(tree, lowered));
 		expect(updated.errors[".planning/phases/52-planning-awareness-core/CONTEXT.md"]).toMatchObject({ error: { code: "too-large" } });
 	});
+
+	test("an in-root link repointed at another file is read again by an incremental update, and equals a full rebuild", async () => {
+		const alias = `${P}/phases/50-dragonfly-pubsub/alias.md`;
+		const links: Record<string, string> = { [alias]: `${P}/STATE.md` };
+		const tree = new FakeTree(BASE, links);
+		const first = await fullOf(tree);
+		expect(first.documents[".planning/phases/50-dragonfly-pubsub/alias.md"]?.sha256).toBe(first.documents[".planning/STATE.md"]?.sha256);
+
+		links[alias] = `${P}/ROADMAP.md`;
+		const updated = await updatedFrom(tree, first);
+		expect(updated).toEqual(await fullOf(tree));
+		expect(updated.documents[".planning/phases/50-dragonfly-pubsub/alias.md"]?.sha256).toBe(updated.documents[".planning/ROADMAP.md"]?.sha256);
+	});
 });
 
 describe("buildPlanningIndex: one bad path never breaks the rest", () => {
