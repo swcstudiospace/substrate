@@ -78,12 +78,28 @@ export async function repoOf(fs: PlanningFs, root: string): Promise<RepoLookup> 
 	return repo === null ? { state: "unknown", reason: "origin-missing", transient: false } : { state: "known", repo };
 }
 
-/** Parses the `origin` URL of a git config into `owner/name`. Only the two trailing path segments are kept. */
+/**
+ * The `owner/name` of the `origin` remote in a git config, read by git's rules: a section name and a key name are
+ * case-insensitive, a header may be indented, whitespace around a name or `=` is ignored, and the subsection in quotes is
+ * case-sensitive. A header that is not `[remote "origin"]` ends the origin section, whatever its indentation. The last `url`
+ * in the origin section is the one git reads. A comment line, and a comment after a value, are not part of the value.
+ */
 export function repoFromGitConfig(text: string): string | null {
-	const section = /\[remote "origin"\]([\s\S]*?)(?=\n\[|$)/.exec(text);
-	const url = section ? /^\s*url\s*=\s*(.+?)\s*$/m.exec(section[1] ?? "") : null;
-	if (!url) return null;
-	const match = /[:/]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/.exec(unquoted(withoutComment(url[1] ?? "")));
+	let inOrigin = false;
+	let url: string | null = null;
+	for (const raw of text.split(/\r?\n/)) {
+		const line = raw.trim();
+		if (line === "" || line.startsWith("#") || line.startsWith(";")) continue;
+		const header = /^\[\s*([A-Za-z][A-Za-z0-9.-]*)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]/.exec(line);
+		if (header) {
+			inOrigin = (header[1] ?? "").toLowerCase() === "remote" && header[2] === "origin";
+			continue;
+		}
+		const entry = /^([A-Za-z][A-Za-z0-9-]*)\s*=\s*(.*)$/.exec(line);
+		if (inOrigin && entry !== null && (entry[1] ?? "").toLowerCase() === "url") url = unquoted(withoutComment(entry[2] ?? ""));
+	}
+	if (url === null) return null;
+	const match = /[:/]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/.exec(url);
 	return match ? `${match[1]}/${match[2]}` : null;
 }
 

@@ -1,12 +1,16 @@
 ---
 phase: 52-planning-awareness-core
 requirements: [SOTA-08]
-status: verified in-repo at c3d6e3e, all six success criteria PASS (SC6 cadence is `SUBSTRATE_PLANNING_SCAN_INTERVAL_MS`, default 15000 ms; see VERIFICATION.md)
+status: verified in-repo at 9e866eb after the review fixes, all six success criteria PASS (SC6 cadence is `SUBSTRATE_PLANNING_SCAN_INTERVAL_MS`, default 15000 ms; shutdown bound `SHUTDOWN_FLUSH_MS` is internal; see VERIFICATION.md)
 ---
 
 # 52-SUMMARY: planning index, session presence and change diffs
 
 ## What was executed
+
+Delta re-verification at 9e866eb (since 689e06f). Heads: WIRING `gsd/p52-wiring` at `9e866ebe26f7d04abb1b007e739f9d0f9d4acd1c`; CORE `gsd/p52-planning-core` at `e13593834c67155ff9b041827b88855c1b82440b`, whose tree equals `8a9b1bf` (tree `6bf463576b7b063226b337cdbe80c41837800b7d`). The core history holds a stray merge of wiring, so the core work was checked by tree. Gates were not run by the verifier; orchestrator-reported: core tsc clean, 120 pass, 0 fail; wiring tsc clean, 353 pass, 0 fail.
+Review-fix commits since 689e06f: CORE `8202976` (event payload stays within the ledger budget and says how many paths it left out), CORE `8a9b1bf` (fake tree gives each file its own fingerprint and resolved path; merged into WIRING by `6614b06`), WIRING `da3f7de` (a quiet checkout does not read as active, scans never overlap, failures reported once and recovery once), WIRING `25e8213` (an inline comment after the origin URL is not part of the repo), WIRING `097f41b` (shutdown waits for an in-flight planning scan inside `SHUTDOWN_FLUSH_MS`), WIRING `681149f` (docs: the status read walks the documents on every call; the observer's scan is not a read), WIRING merge `9e866eb` (phase 51 review fixes).
+
 
 Read-only re-verification after the fix-up pass. Heads confirmed with `git rev-parse HEAD`:
 

@@ -31,6 +31,7 @@ import {
 	swarmTokenWarnings,
 } from "./config.ts";
 import { briefProfileConfigWarnings } from "./brief-profile.ts";
+import { planningConfigWarnings } from "./planning/config.ts";
 import { hindsightInventoryConfigWarnings } from "./hindsight-inventory.ts";
 import { briefRecallConfigWarnings } from "./recall-snapshot.ts";
 import { bufferRunner, createDesktopDriver } from "./desktop/driver.ts";
@@ -88,6 +89,7 @@ for (const warning of [
 	...requestPathConfigWarnings(config),
 	...eventIdempotencyConfigWarnings(config),
 	...config.mentalModels.warnings,
+	...planningConfigWarnings(config.planning),
 ]) {
 	process.stderr.write(`[substrate] misconfigured — ${warning}\n`);
 }
