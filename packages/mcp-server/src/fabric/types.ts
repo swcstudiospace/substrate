@@ -1,9 +1,8 @@
 /**
  * The unified resource fabric (phase 51, SOTA-07): shared types.
  *
- * Every value a report can carry is a name, an enum, a count or a fixed phrase. No URL, host,
- * port, token or error text is typed into the fabric, so none can reach a status, a suggestion
- * or a compliance check.
+ * Every value a report can carry is a name, an enum, a count or a fixed phrase. No URL, host, port, token or error text
+ * is typed into the fabric, so none can reach a status, a suggestion or a compliance check.
  */
 import type { DbPlane, EndpointClass } from "../db-endpoints.ts";
 
@@ -105,11 +104,8 @@ export interface FabricFacts {
 	railway: { status: CostReading; projectedMonthlyUsd: number | null; budgetUsd: number | null };
 }
 
-/** The structural view of `Substrate.health()` that the fabric reads. */
+/** The synchronous part of the health reading: counters and breaker states that need no probe. */
 export interface FabricHealthView {
-	index: boolean;
-	greptime: boolean;
-	eventsWritable: boolean;
 	cache: {
 		enabled: boolean;
 		connected: boolean;
@@ -120,10 +116,19 @@ export interface FabricHealthView {
 		bypasses: number;
 	};
 	eventBus: { enabled: boolean };
-	planes: Record<
-		"greptime" | "index" | "cache" | "hindsight" | "ragflow",
-		{ ok: boolean | null; breaker: { state: "closed" | "open" | "half-open" } | null }
-	>;
+	breakers: Record<"greptime" | "index" | "cache" | "hindsight" | "ragflow", { readonly state: "closed" | "open" | "half-open" } | null>;
+}
+
+/**
+ * The probes behind the health reading. Each settles on its own, so the fabric can give a plane that does not answer in
+ * time its own unavailable reading while the other planes keep theirs.
+ */
+export interface FabricHealthParts {
+	/** `up` is the ping's answer; `eventsWritable` is the ledger's write verdict. */
+	greptime: Promise<{ readonly up: boolean; readonly eventsWritable: boolean }>;
+	index: Promise<boolean>;
+	hindsight: Promise<boolean | null>;
+	ragflow: Promise<boolean | null>;
 }
 
 /** The structural view of the Railway cost report that the fabric reads. */
@@ -144,7 +149,10 @@ export interface FabricConfigView {
 
 export interface FabricSources {
 	now(): string;
-	health(): Promise<FabricHealthView>;
+	/** The probes for this read. Calls in one window share them, and each settles on its own. */
+	health(): FabricHealthParts;
+	/** The synchronous counters and breaker states, read at the moment of the call. */
+	snapshot(): FabricHealthView;
 	railwayCost(): Promise<FabricCostView>;
 	outbox(): { size: number; oldestAt: string | null };
 	config: FabricConfigView;

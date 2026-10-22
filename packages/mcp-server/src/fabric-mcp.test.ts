@@ -208,3 +208,72 @@ describe("fabric health probes", () => {
 		expect(pingTimeouts).toHaveLength(1);
 	});
 });
+
+/** A Greptime fake whose ping and jobs reads are counted. The jobs read answers an empty coverage. */
+function greptimeWithJobs() {
+	const pingCalls: number[] = [];
+	const anchorCalls: number[] = [];
+	const greptime = {
+		ping: async () => {
+			pingCalls.push(1);
+			return true;
+		},
+		ensureAppendMode: async () => true,
+		probeDialect: async () => true,
+		quotingDialectKnown: true,
+		probeWritable: async () => ({ lastProbeAt: null, lastProbeOk: null, lastProbeError: null }),
+		capacity: async () => {
+			throw new Error("no size read in this test");
+		},
+		anchorCoverage: async () => {
+			anchorCalls.push(1);
+			return { lagHours: 2, uncoveredHours: [], more: false, newestAnchoredHour: null, lastArchiveWindow: null };
+		},
+	};
+	return { greptime, pingCalls, anchorCalls };
+}
+
+/** A substrate whose breakers open on the first failure and go half-open after one second: the smallest the config allows. */
+function substrateWithFastBreakers(index: unknown, greptime: unknown) {
+	const config = loadConfig({ [GREPTIME_URL_KEY]: "http://127.0.0.1:4000", SUBSTRATE_BREAKER_FAILURES: "1", SUBSTRATE_BREAKER_OPEN_MS: "1000" });
+	return new Substrate(config, { index: index as never, greptime: greptime as never });
+}
+
+/** Opens the Greptime breaker and waits until it is half-open. */
+async function halfOpenGreptime(substrate: Substrate): Promise<void> {
+	const breaker = substrate.planes.gate("greptime").breaker;
+	if (breaker === null) throw new Error("the Greptime breaker is off in this test");
+	breaker.onFailure("test: Greptime unreachable");
+	// Real time on purpose: the breaker reads the platform clock and `Substrate` takes no clock seam, so the open window can only
+	// elapse for real. The window is the config minimum of one second.
+	await Bun.sleep(1100);
+	if (breaker.state() !== "half-open") throw new Error("the Greptime breaker did not reach half-open");
+}
+
+describe("health jobs under a half-open Greptime breaker", () => {
+	test("with an expired jobs memo, Greptime is pinged once and the memoised jobs value answers", async () => {
+		const { index } = indexProbe();
+		const { greptime, pingCalls, anchorCalls } = greptimeWithJobs();
+		const substrate = substrateWithFastBreakers(index, greptime);
+		const past = Date.now() - 10 * 60_000;
+		await substrate.ledgerJobs(past);
+		await halfOpenGreptime(substrate);
+		const health = await substrate.health();
+		expect(pingCalls).toHaveLength(1);
+		expect(anchorCalls).toHaveLength(1);
+		expect(health.jobs.ledgerReason).toBeNull();
+		expect(health.jobs.ledger?.computedAt).toBe(new Date(past).toISOString());
+	});
+
+	test("with no jobs memo, Greptime is pinged once, no jobs read starts, and the jobs row reports unavailable for that call", async () => {
+		const { index } = indexProbe();
+		const { greptime, pingCalls, anchorCalls } = greptimeWithJobs();
+		const substrate = substrateWithFastBreakers(index, greptime);
+		await halfOpenGreptime(substrate);
+		const health = await substrate.health();
+		expect(pingCalls).toHaveLength(1);
+		expect(anchorCalls).toHaveLength(0);
+		expect(health.jobs.ledger).toBeNull();
+		expect(health.jobs.ledgerReason).toContain("half-open");
+	});
+});
