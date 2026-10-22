@@ -5937,19 +5937,20 @@ export class Substrate {
 		// A store that throws is down. `/healthz` has to answer that; a 500 would hide the outage from the monitor.
 		const probes = this.healthProbes(timeoutMs);
 		const indexStore = this.index;
-		const [greptimeReading, index, hindsightOk, ragflowOk, capacity] = await Promise.all([
+		const [greptimeReading, index, hindsightOk, ragflowOk, capacity, ledgerCapacity] = await Promise.all([
 			probes.greptime,
 			probes.index,
 			probes.hindsight,
 			probes.ragflow,
 			indexStore ? this.indexCapacityForHealth(indexStore) : Promise.resolve(null),
+			probes.ledgerCapacity,
 		]);
 		// The jobs and archive reads run after the probes, as on main: the Greptime ping has its verdict before the ledger's
 		// coverage read asks the same breaker for a call.
 		const ledgerJobs = await this.ledgerJobs();
 		const indexArchive = await this.indexArchiveHealth();
 		const greptime = greptimeReading.up;
-		const { appendOnly, quotingDialectKnown, probe, ledgerCapacity } = greptimeReading;
+		const { appendOnly, quotingDialectKnown, probe } = greptimeReading;
 		const cache = this.cache.health();
 		const breakers = this.planes.snapshots();
 		// uplift-3 N2: every size read that answered in time is one runway sample;
@@ -5999,8 +6000,13 @@ export class Substrate {
 		const greptimeClient = this.greptime;
 		const indexStore = this.index;
 		const hindsight = hindsightFromEnv();
+		const greptimeReading = greptimeClient ? this.greptimeProbe(greptimeClient, timeoutMs) : Promise.resolve(ABSENT_GREPTIME);
 		return {
-			greptime: greptimeClient ? this.greptimeProbe(greptimeClient, timeoutMs) : Promise.resolve(ABSENT_GREPTIME),
+			greptime: greptimeReading,
+			// The size read follows the ping, as on main, but nothing else waits for it: the fabric's Greptime row does not need it.
+			ledgerCapacity: greptimeClient
+				? greptimeReading.then((reading) => (reading.up ? bounded(() => greptimeClient.capacity(HEALTH_PROBE_MS), HEALTH_PROBE_MS) : null))
+				: Promise.resolve(null),
 			index: indexStore
 				? Promise.resolve()
 						.then(() => indexStore.ping(HEALTH_PROBE_MS))
@@ -6020,21 +6026,34 @@ export class Substrate {
 		// The ping is the gate: until it answers, nothing else is asked of Greptime.
 		const up = (await this.healthBound(timeoutMs, () => (timeoutMs === undefined ? client.ping() : client.ping(timeoutMs)))) === true;
 		if (!up) return ABSENT_GREPTIME;
-		// The append-mode, dialect, write-probe and size reads are independent of one another, so they run together and each keeps
-		// its own bound: the wait is the slowest single read, not the sum. Main ran them one after another; no read's value depends
-		// on another's, so the verdicts are the same. On the default path each read keeps the client's own timeout (only the size
-		// read has its own bound there, as on main); the write probe keeps the client's own write timeout, so a slow day does not
-		// read as a full disk.
-		const [appendOnly, quotingDialectKnown, probe, ledgerCapacity] = await Promise.all([
+		// The append-mode, dialect and write-probe reads are independent of one another, so they run together, each under its own
+		// bound. Main ran them one after another; no read's value depends on another's, so the verdicts are the same. On the default
+		// path each read keeps the client's own timeout, as on main. The size read is not here: the events write does not need it.
+		const [appendOnly, quotingDialectKnown, write] = await Promise.all([
 			this.healthBound(timeoutMs, () => client.ensureAppendMode()).then((answer) => answer ?? null),
 			this.healthBound(timeoutMs, async () => {
 				await client.probeDialect();
 				return client.quotingDialectKnown === true;
 			}).then((answer) => answer === true),
-			this.healthBound(timeoutMs, () => client.probeWritable(this.config.ledger.writeProbeS * 1000)),
-			bounded(() => client.capacity(HEALTH_PROBE_MS), HEALTH_PROBE_MS),
+			this.writeProbeReading(client, timeoutMs),
 		]);
-		return { up, appendOnly, quotingDialectKnown, probe, ledgerCapacity };
+		return { up, appendOnly, quotingDialectKnown, probe: write.probe, writeTimedOut: write.timedOut };
+	}
+
+	/**
+	 * The write probe and whether it timed out. A write still waiting at the bound is not a write that succeeded, so the fabric
+	 * reads it as unavailable; it is not the same as a probe that did not run. A probe that throws reads as it always has.
+	 * On the default path there is no bound, so the client's own write timeout applies, as on main.
+	 */
+	private async writeProbeReading(client: GreptimeClient, timeoutMs: number | undefined): Promise<WriteReading> {
+		const work = () => client.probeWritable(this.config.ledger.writeProbeS * 1000);
+		if (timeoutMs === undefined) {
+			const probe = await Promise.resolve().then(work).catch(() => null);
+			return { probe, timedOut: false };
+		}
+		const outcome = await outcomeWithin(work, timeoutMs);
+		if (outcome.kind === "answer") return { probe: outcome.value, timedOut: false };
+		return { probe: null, timedOut: outcome.kind === "timeout" };
 	}
 
 	/** Whether the ledger accepts writes: the ping's yes, the dialect and append-mode checks, and a write probe that has not failed. */
@@ -6088,7 +6107,7 @@ export class Substrate {
 			health: () => {
 				const probes = this.sharedHealthProbes(FABRIC_HEALTH_WINDOW_MS, { greptimeTimeoutMs: HEALTH_PROBE_MS });
 				return {
-					greptime: probes.greptime.then((probe) => ({ up: probe.up, eventsWritable: this.eventsWritableOf(probe) })),
+					greptime: probes.greptime.then((probe) => ({ up: probe.up, eventsWritable: this.eventsWritableOf(probe), writeTimedOut: probe.writeTimedOut })),
 					index: probes.index,
 					hindsight: probes.hindsight,
 					ragflow: probes.ragflow,
@@ -6260,25 +6279,51 @@ export class Substrate {
 	}
 }
 
-/** One Greptime probe's reading: the ping, and after a yes the dialect, append-mode, write-probe and size checks. */
+/** One Greptime probe's reading: the ping, and after a yes the dialect, append-mode and write-probe checks. */
 export interface GreptimeProbe {
 	readonly up: boolean;
 	readonly appendOnly: boolean | null;
 	readonly quotingDialectKnown: boolean;
 	readonly probe: LedgerProbe | null;
-	readonly ledgerCapacity: LedgerCapacity | null;
+	/** The write probe ran out its bound: the write is still waiting, which is neither a pass nor a failure. */
+	readonly writeTimedOut: boolean;
 }
 
 /** The probes `health()` and the fabric read. Each settles on its own, so none waits for another. */
 export interface HealthProbes {
 	readonly greptime: Promise<GreptimeProbe>;
+	/** The size read. Only `health()` waits for it: the fabric's Greptime row does not depend on it. */
+	readonly ledgerCapacity: Promise<LedgerCapacity | null>;
 	readonly index: Promise<boolean>;
 	readonly hindsight: Promise<boolean | null>;
 	readonly ragflow: Promise<boolean | null>;
 }
 
 /** The reading of a Greptime that did not answer its ping: nothing past the ping is read. */
-const ABSENT_GREPTIME: GreptimeProbe = { up: false, appendOnly: null, quotingDialectKnown: false, probe: null, ledgerCapacity: null };
+const ABSENT_GREPTIME: GreptimeProbe = { up: false, appendOnly: null, quotingDialectKnown: false, probe: null, writeTimedOut: false };
+
+/** The write probe's reading: the probe, and whether the bound expired before it answered. */
+interface WriteReading {
+	readonly probe: LedgerProbe | null;
+	readonly timedOut: boolean;
+}
+
+/** How a probe ended under a bound: its answer, a timeout, or a throw. A probe is never a null that could mean either. */
+type ProbeOutcome<T> = { readonly kind: "answer"; readonly value: T } | { readonly kind: "timeout" } | { readonly kind: "failed" };
+
+/** `work` under `ms`: its answer, `timeout` when it outlasts `ms`, `failed` when it throws. Never rejects. */
+function outcomeWithin<T>(work: () => Promise<T>, ms: number): Promise<ProbeOutcome<T>> {
+	const { promise: expired, resolve: expire } = Promise.withResolvers<ProbeOutcome<T>>();
+	const timer = setTimeout(() => expire({ kind: "timeout" }), ms);
+	timer.unref?.();
+	const answer = Promise.resolve()
+		.then(work)
+		.then<ProbeOutcome<T>, ProbeOutcome<T>>(
+			(value) => ({ kind: "answer", value }),
+			() => ({ kind: "failed" }),
+		);
+	return Promise.race([answer, expired]).finally(() => clearTimeout(timer));
+}
 
 /** How long one `anchorCoverage` read serves `/healthz.jobs.ledger` (uplift-3 N6). */
 export const LEDGER_JOBS_MEMO_MS = 60_000;

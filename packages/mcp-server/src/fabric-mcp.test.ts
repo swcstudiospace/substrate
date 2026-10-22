@@ -345,3 +345,57 @@ describe("the Greptime reads after the ping on the fabric path", () => {
 		expect(health.capacity.ledger).toEqual(LEDGER_SIZE);
 	});
 });
+
+/**
+ * Greptime fakes for the two stalls. Real time on purpose: the fabric's bound on the write probe is a platform timer, so a
+ * stand-in would not exercise it. The size read never answers in one fake, and the write probe never answers in the other.
+ */
+function greptimeWithStalledWrite() {
+	return {
+		ping: async () => true,
+		ensureAppendMode: async () => true,
+		probeDialect: async () => true,
+		quotingDialectKnown: true,
+		probeWritable: () => new Promise<never>(() => undefined),
+		capacity: async () => LEDGER_SIZE,
+		anchorCoverage: async () => {
+			throw new Error("no coverage read in this test");
+		},
+	};
+}
+
+function greptimeWithStalledSize() {
+	return {
+		ping: async () => true,
+		ensureAppendMode: async () => true,
+		probeDialect: async () => true,
+		quotingDialectKnown: true,
+		probeWritable: async () => ({ lastProbeAt: 1, lastProbeOk: true, lastProbeError: null }),
+		capacity: () => new Promise<never>(() => undefined),
+		anchorCoverage: async () => {
+			throw new Error("no coverage read in this test");
+		},
+	};
+}
+
+describe("the Greptime row on the fabric path", () => {
+	test("a write probe that never answers makes the events write not ok, and the compliance report does not PASS it", async () => {
+		const { index } = indexProbe();
+		const substrate = substrateWithProbes(index, greptimeWithStalledWrite());
+		const client = await connect(substrate);
+		const status = (await call(client, "fabric_status")).json() as { resources: Array<{ resource: string; state: string; source: string }> };
+		const greptime = status.resources.find((row) => row.resource === "greptime");
+		expect(greptime?.state).toBe("unavailable");
+		expect(greptime?.source).toBe("health().greptime: timeout");
+		const compliance = (await call(client, "fabric_compliance")).json() as { checks: Array<{ id: string; status: string }> };
+		expect(compliance.checks.find((check) => check.id === "resource-state.greptime")?.status).toBe("FAIL");
+	});
+
+	test("a size read that never answers does not hold the fabric's Greptime row", async () => {
+		const { index } = indexProbe();
+		const substrate = substrateWithProbes(index, greptimeWithStalledSize());
+		const client = await connect(substrate);
+		const status = (await call(client, "fabric_status")).json() as { resources: Array<{ resource: string; state: string }> };
+		expect(status.resources.find((row) => row.resource === "greptime")?.state).toBe("ok");
+	});
+});
