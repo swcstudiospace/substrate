@@ -106,12 +106,15 @@ describe("planningChangeEvent", () => {
 			diff: { complete: true, added: full("a"), removed: full("r"), changed: full("c") },
 		});
 		if (event === null) throw new Error("a changed diff must produce an event");
-		const payload = event.payload as { added: string[]; removed: string[]; changed: string[]; truncated: Record<string, number> };
+		const payload = event.payload as { added: string[]; removed: string[]; changed: string[]; truncated: { added: number; removed: number; changed: number } };
 		const bytes = new TextEncoder().encode(JSON.stringify(payload)).byteLength;
 		expect(bytes).toBeLessThanOrEqual(MAX_PAYLOAD_BYTES);
-		const truncated = payload.truncated.added + payload.truncated.removed + payload.truncated.changed;
-		expect(truncated).toBeGreaterThan(0);
-		expect(payload.added.length + payload.removed.length + payload.changed.length + truncated).toBe(MAX_EVENT_PATHS * 3);
+		const truncated = payload.truncated;
+		expect(truncated).toBeDefined();
+		if (!truncated) throw new Error("expected truncated counts");
+		const omitted = truncated.added + truncated.removed + truncated.changed;
+		expect(omitted).toBeGreaterThan(0);
+		expect(payload.added.length + payload.removed.length + payload.changed.length + omitted).toBe(MAX_EVENT_PATHS * 3);
 		expect(event.summary).toContain("paths not listed");
 		// The ledger keeps the paths it was given; it does not replace the payload with its `_dropped` marker.
 		expect(normalizeEvent(event, null).payload).not.toHaveProperty("_dropped");
