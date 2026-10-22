@@ -827,3 +827,32 @@ describe("graph_find and issue_get wiring", () => {
 	});
 });
 
+describe("docs_steering_session keeps what a transition omits", () => {
+	test("a state-only transition keeps the stored steering and planning hash; an explicit value replaces it", async () => {
+		const { client } = await connect(ledger().greptime);
+		const base = { session_id: "steer-carry-1", repo_id: "owner/name" };
+
+		const active = await call(client, "docs_steering_session", {
+			...base,
+			state: "ACTIVE",
+			steering: "stay on the planning slice",
+			planning_hash: "plan-a",
+		});
+		expect(active.isError).toBe(false);
+
+		const refreshed = await call(client, "docs_steering_session", { ...base, state: "CONTEXT_REFRESH" });
+		expect(refreshed.json()).toMatchObject({
+			state: "CONTEXT_REFRESH",
+			steering: "stay on the planning slice",
+			planning_hash: "plan-a",
+		});
+
+		const replaced = await call(client, "docs_steering_session", {
+			...base,
+			state: "PAUSED",
+			steering: "hold for review",
+		});
+		expect(replaced.json()).toMatchObject({ state: "PAUSED", steering: "hold for review", planning_hash: "plan-a" });
+	});
+});
+

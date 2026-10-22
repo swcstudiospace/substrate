@@ -1398,14 +1398,18 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			if (known !== undefined && previous !== null && previous !== known.state) {
 				return refusal(`previous_state ${previous} does not match the stored state ${known.state}`);
 			}
+			// A transition that omits steering or planning_hash keeps the stored values: a state-only
+			// pause or resume must not erase the context the next docs_search reads.
+			const carriedPlanningHash = planning_hash ?? known?.planning_hash;
+			const carriedSteering = steering ?? known?.steering;
 			const next = nextSteeringSession(
 				known ?? null,
 				{
 					session_id,
 					repo_id,
 					state,
-					...(planning_hash !== undefined ? { planning_hash } : {}),
-					...(steering !== undefined ? { steering } : {}),
+					...(carriedPlanningHash !== undefined ? { planning_hash: carriedPlanningHash } : {}),
+					...(carriedSteering !== undefined ? { steering: carriedSteering } : {}),
 				},
 				Date.now(),
 			);

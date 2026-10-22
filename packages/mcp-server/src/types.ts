@@ -1,11 +1,11 @@
 /** Shared shapes for the substrate. Mirrors Notion §5.2 and §5.3. */
 
 /**
- * The 30 Agent Swarm agents, A01..A30 in order, one surface each.
+ * The 15 Agent Swarm agents, A01..A15 in order, one surface each.
  *
  * Real surfaces rather than one shared `swarm` surface: memory RBAC is default-deny
  * per surface and a lease holder is (surface, session_id), so a shared surface would
- * make all 30 agents one memory writer and one lease holder. Server-side each has its
+ * make all 15 agents one memory writer and one lease holder. Server-side each has its
  * own `SUBSTRATE_TOKEN_<SURFACE>`; see `docs/swarm-correlation.md`.
  */
 export const SWARM_SURFACES = [

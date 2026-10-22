@@ -293,6 +293,32 @@ describe("docs_ingest review hardening", () => {
 		expect(fake.uploads).toHaveLength(0);
 	});
 
+	test("refuses a secret in graph strings on the LightRAG path before any upload", async () => {
+		const fake = new RagflowFake();
+		const events: EventInput[] = [];
+		const outcome = await ingestDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: { url: "http://lightrag.test" },
+				lightragDatasets: { list: async () => ({ ok: true, datasets: [{ id: "agent-substrate", name: "agent-substrate" }] }), invalidate: () => undefined },
+				lightragFetch: fake.fetch,
+				seen: new Map<string, IngestRecord>(),
+				poll: { intervalMs: 0 },
+				emit: async (event: EventInput): Promise<unknown> => {
+					events.push(event);
+					return { stored: false };
+				},
+				surface: "omp",
+			},
+			{ dataset: "agent-substrate", pages: [{ ...PAGE, graph: { phase: "docs", entities: ["sk-proj-abcdefghij1234567890"], relations: [] } }] },
+		);
+		if (outcome.ok) throw new Error("expected a refusal");
+		expect(outcome.reason).toMatch(/^secret-findings/);
+		expect(fake.uploads).toHaveLength(0);
+		expect(JSON.stringify(events)).not.toContain("sk-proj-");
+	});
+
 	test("keys records by dataset so a second dataset ingests and the first still skips", async () => {
 		const fake = new RagflowFake();
 		const { ingest } = harness(fake);

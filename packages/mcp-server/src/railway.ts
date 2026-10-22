@@ -379,8 +379,8 @@ export class RailwayResourceOrchestrator {
 
 
 	/**
-	 * Probe the LightRAG `/health` endpoint. Auth is `LIGHTRAG_API_KEY` as a
-	 * bearer; the key is sent, never logged or echoed back.
+	 * Probe the LightRAG `/health` endpoint. Auth is `LIGHTRAG_API_KEY`, sent as
+	 * `x-api-key` (the header LightRAG checks) and as a bearer; the key is never logged or echoed back.
 	 */
 	async health(timeoutMs = 4000): Promise<LightragHealth> {
 		if (!this.config) return { state: "unavailable", reason: "railway-not-configured" };
@@ -388,9 +388,8 @@ export class RailwayResourceOrchestrator {
 		if (!base) return { state: "unavailable", reason: "lightrag-not-configured" };
 		const url = `${base}${LIGHTRAG_HEALTH_PATH}`;
 		try {
-			const headers: Record<string, string> = {};
 			const apiKey = this.config.apiKey;
-			if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+			const headers: Record<string, string> = apiKey ? { "x-api-key": apiKey, authorization: `Bearer ${apiKey}` } : {};
 			const response = await this.fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs), headers });
 			if (!response.ok) return { state: "success", ok: false, url, reason: `lightrag ${response.status}` };
 			return { state: "success", ok: true, url };

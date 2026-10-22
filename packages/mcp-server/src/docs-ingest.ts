@@ -590,6 +590,25 @@ function recordKey(datasetId: string, sourceUrl: string): string {
 	return `${datasetId}::${sourceUrl}`;
 }
 
+/**
+ * The LightRAG plane's record key. LightRAG names its datasets by name, so its
+ * dataset id can equal a RAGFlow one; the prefix keeps a RAGFlow record from
+ * standing in for a LightRAG upload during a cutover.
+ */
+function lightragRecordKey(datasetId: string, sourceUrl: string): string {
+	return `lightrag::${recordKey(datasetId, sourceUrl)}`;
+}
+
+/** The planning-graph hint a page uploads with: its own, else the call-level one for its phase. */
+function hintFor(page: IngestPage, graphHints: readonly PlanningGraphHint[] | undefined): PlanningGraphHint | undefined {
+	return page.graph ?? (isPlanningPage(page.path) ? graphHints?.find((entry) => entry.phase === planningPhaseOf(page.path)) : undefined);
+}
+
+/** Every string a planning-graph hint uploads: the phase, entities, and each relation's endpoints and kind. */
+function graphStrings(hint: PlanningGraphHint): string[] {
+	return [hint.phase, ...hint.entities, ...hint.relations.flatMap((relation) => [relation.source, relation.target, relation.kind])];
+}
+
 /** One page that passed its gates: the sanitized body and the record key inputs. */
 type PreparedPage = { page: IngestPage; sourceUrl: string; body: string; sha: string };
 
@@ -603,7 +622,13 @@ type PageVerdict =
  * then the redactor scan of the body and the outgoing metadata. Pure: nothing
  * is uploaded or emitted here.
  */
-function checkIngestPage(page: IngestPage, roots: readonly string[], commit: string | undefined, total: number): PageVerdict {
+function checkIngestPage(
+	page: IngestPage,
+	roots: readonly string[],
+	commit: string | undefined,
+	total: number,
+	hint: PlanningGraphHint | undefined,
+): PageVerdict {
 	if (!page.source_url) return { ok: false, reason: "no-source-url" };
 	if (!underRoot(page.path, roots)) return { ok: false, reason: "outside-roots" };
 	if (page.real_path !== undefined && !underRoot(page.real_path, roots)) return { ok: false, reason: "outside-roots" };
@@ -611,7 +636,9 @@ function checkIngestPage(page: IngestPage, roots: readonly string[], commit: str
 	const size = Buffer.byteLength(stripped.body, "utf8");
 	if (size > INGEST_PAGE_MAX_BYTES) return { ok: false, reason: "page-too-large" };
 	if (total + size > INGEST_CALL_MAX_BYTES) return { ok: false, reason: "call-too-large" };
-	const rules = findingRules(`${stripped.body}\n${page.source_url}\n${commit ?? ""}\n${page.heading_path ?? ""}`);
+	// The graph strings upload as metadata, so they pass the same scan as the body.
+	const graph = hint === undefined ? "" : graphStrings(hint).join("\n");
+	const rules = findingRules(`${stripped.body}\n${page.source_url}\n${commit ?? ""}\n${page.heading_path ?? ""}\n${graph}`);
 	if (rules.length > 0) return { ok: false, reason: "secret-findings", rules };
 	return { ok: true, sourceUrl: page.source_url, body: stripped.body, size, stripped: stripped.stripped, sha: sha256(stripped.body) };
 }
@@ -639,7 +666,7 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	let total = 0;
 	let strippedImages = 0;
 	for (const page of input.pages) {
-		const verdict = checkIngestPage(page, roots, input.commit, total);
+		const verdict = checkIngestPage(page, roots, input.commit, total, backend === "lightrag" ? hintFor(page, input.graphHints) : undefined);
 		if (verdict.ok) {
 			total += verdict.size;
 			strippedImages += verdict.stripped;
@@ -1172,8 +1199,8 @@ async function ingestDocsLightrag(
 		});
 	};
 	for (const { page, sourceUrl, body, sha } of prepared) {
-		const hint = page.graph ?? (isPlanningPage(page.path) ? input.graphHints?.find((entry) => entry.phase === planningPhaseOf(page.path)) : undefined);
-		const key = recordKey(dataset.id, sourceUrl);
+		const hint = hintFor(page, input.graphHints);
+		const key = lightragRecordKey(dataset.id, sourceUrl);
 		for (;;) {
 			const prior = seen.get(key);
 			if (prior && prior.sha === sha) {

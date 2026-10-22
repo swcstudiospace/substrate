@@ -4114,10 +4114,14 @@ export class Substrate {
 			// The sweep goes in batches: one call past the 5 MB cap is refused whole. An empty
 			// sweep is still one call, so it is refused `no-pages` exactly as before.
 			const pages = await request.pages();
+			let failedPages = 0;
 			for (const batch of pages.length > 0 ? batchPagesForIngest(pages) : [pages]) {
 				const ingested = await this.ingestDocs({ dataset: request.dataset, commit: request.commit, pages: batch }, surface);
 				if (!ingested.ok) return finish({ ok: false, reason: ingested.reason, job });
+				failedPages += ingested.results.filter((result) => result.status === "failed").length;
 			}
+			// A page that failed leaves the version unrecorded, so a retry re-uploads only the pages still missing.
+			if (failedPages > 0) return finish({ ok: false, reason: `partial: ${failedPages} page(s) failed; retry the refresh`, job });
 			const refreshed = await this.recordDocsVersion(request, surface);
 			if (!refreshed.ok) return finish({ ok: false, reason: refreshed.reason, job });
 			return finish({ ok: true, version: refreshed.version, created: created || refreshed.created, job });

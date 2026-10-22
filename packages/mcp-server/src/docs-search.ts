@@ -709,10 +709,12 @@ export function attachGraphHints(chunks: SearchCitation[], graphHints: readonly 
 function withBackendProvenance(chunks: SearchCitation[], provenance: CitationGraphProvenance): void {
 	const relations = provenance.relations ?? 0;
 	if (provenance.entities.length === 0 && relations === 0) return;
+	// Backend entity names travel like page text: redacted before a reply carries them.
+	const entities = provenance.entities.map((entity) => redact(entity));
 	for (const citation of chunks) {
 		const hinted = citation.graph;
 		citation.graph = {
-			entities: [...new Set([...(hinted?.entities ?? []), ...provenance.entities])],
+			entities: [...new Set([...(hinted?.entities ?? []), ...entities])],
 			relations: (hinted?.relations ?? 0) + relations,
 		};
 	}

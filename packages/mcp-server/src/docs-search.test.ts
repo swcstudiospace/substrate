@@ -725,4 +725,26 @@ describe("search graph metadata (LightRAG path)", () => {
 		expect(hinted.graph).toEqual({ entities: 1, relations: 0 });
 		expect(hinted.chunks[0]?.graph).toEqual({ entities: ["Planning graph"] });
 	});
+
+	test("backend graph entity names are redacted before the reply serves them", async () => {
+		const reply = await searchDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: { url: "http://lightrag.test" },
+				datasetNames: ["agent-substrate"],
+				lightragDatasets: { list: async () => ({ ok: true, datasets: [{ id: "ds-1", name: "agent-substrate" }] }), invalidate: () => {} },
+				lightragRetrieve: async () => ({
+					ok: true,
+					chunks: [{ content: "The planner reads the key.", document_name: "plan.md", document_id: "doc-1", heading_path: "Plan", score: 0.9 }],
+					detail: { mode: "hybrid", counts: { entities: 1, relations: 0 }, provenance: { entities: ["key sk-proj-abcdefghij1234567890"], relations: 0 } },
+				}),
+				emit: async () => ({ stored: false }),
+				surface: "omp",
+			},
+			"which key does the planner use?",
+		);
+		expect(JSON.stringify(reply)).not.toContain("sk-proj-");
+		expect(reply.chunks[0]?.graph?.entities[0]).toContain("[REDACTED]");
+	});
 });

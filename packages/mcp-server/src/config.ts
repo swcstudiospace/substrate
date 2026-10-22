@@ -135,7 +135,7 @@ export function railwayFromEnv(env: Record<string, string | undefined> = process
 	const privateDomain = env.RAILWAY_PRIVATE_DOMAIN?.trim() || null;
 	const url = overrideUrl ?? base?.url ?? null;
 	if (!token && !projectId && !environmentId && !serviceId && !serviceName && !privateDomain && !url && !project) return null;
-	const apiKey = overrideKey ?? base?.apiKey ?? null;
+	const apiKey = overrideKey ?? (env.LIGHTRAG_API_KEY?.trim() || null);
 	return {
 		token,
 		projectId,
