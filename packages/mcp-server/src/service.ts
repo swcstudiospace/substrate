@@ -6025,13 +6025,13 @@ export class Substrate {
 				await client.probeDialect();
 				return client.quotingDialectKnown === true;
 			})) === true;
-		// Only a reachable ledger is probed: an unreachable one is already not writable, and a write that cannot
-		// connect would only charge the breaker twice. The client's own write timeout applies, not HEALTH_PROBE_MS,
-		// so a slow day does not read as a full disk. The `.then` wrapper is for a test fake without the method.
-		const probe = await Promise.resolve()
-			.then(() => client.probeWritable(this.config.ledger.writeProbeS * 1000))
-			.catch(() => null);
-		const ledgerCapacity = await bounded(() => client.capacity(HEALTH_PROBE_MS), HEALTH_PROBE_MS);
+		// The write probe and the size read are independent, and main runs them together, so they run together here. Each keeps
+		// its own bound, so the wait is the slower of the two rather than their sum. On the default path the write probe keeps the
+		// client's own write timeout (a slow day does not read as a full disk); on the fabric path it is bounded like every probe.
+		const [probe, ledgerCapacity] = await Promise.all([
+			this.healthBound(timeoutMs, () => client.probeWritable(this.config.ledger.writeProbeS * 1000)),
+			bounded(() => client.capacity(HEALTH_PROBE_MS), HEALTH_PROBE_MS),
+		]);
 		return { up, appendOnly, quotingDialectKnown, probe, ledgerCapacity };
 	}
 
