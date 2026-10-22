@@ -86,6 +86,20 @@ describe("lightragSearchDatasets", () => {
 	test("a dataset with no version yet stands as its own id", () => {
 		expect(lightragSearchDatasets(createVersionStore(), ["agent-substrate"])).toEqual({ ok: true, datasets: [{ id: "agent-substrate", name: "agent-substrate" }] });
 	});
+
+	test("the caller's name order does not change the list or its first dataset", () => {
+		const store = createVersionStore();
+		recordVersion(store, { dataset: "agent-skills", dataset_id: "uuid-skills", version: "v1", commit: "c1", content_sha256: "sha", ingested_at: "2026-10-22T00:00:00Z" });
+		const listed = lightragSearchDatasets(store, ["agent-substrate", "agent-skills"]);
+		expect(lightragSearchDatasets(store, ["agent-skills", "agent-substrate"])).toEqual(listed);
+		expect(listed).toEqual({
+			ok: true,
+			datasets: [
+				{ id: "uuid-skills", name: "agent-skills" },
+				{ id: "agent-substrate", name: "agent-substrate" },
+			],
+		});
+	});
 });
 
 describe("refreshDataset", () => {

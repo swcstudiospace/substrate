@@ -763,10 +763,10 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 	// Dataset resolution never touches RAGFlow: a search must not depend on its
 	// reachability. The service injects the list keyed by each dataset's newest
 	// stored version id, the key its pin is filed under; otherwise the wanted
-	// names stand as their own ids. LightRAG ignores scope on the wire, so the
-	// ids only key pins and the note payload.
+	// names stand as their own ids, sorted like the cache key. LightRAG ignores
+	// scope on the wire, so the ids only key pins and the note payload.
 	const listed: DatasetListOutcome =
-		deps.lightragDatasets !== undefined ? await deps.lightragDatasets.list() : { ok: true, datasets: wanted.map((name) => ({ id: name, name })) };
+		deps.lightragDatasets !== undefined ? await deps.lightragDatasets.list() : { ok: true, datasets: [...wanted].sort().map((name) => ({ id: name, name })) };
 	if (!listed.ok) return failed(deps, sessionId, listed.reason);
 	const readable = listed.datasets.filter((dataset) => wanted.includes(dataset.name));
 	const first = readable[0];
