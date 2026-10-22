@@ -83,8 +83,19 @@ export function repoFromGitConfig(text: string): string | null {
 	const section = /\[remote "origin"\]([\s\S]*?)(?=\n\[|$)/.exec(text);
 	const url = section ? /^\s*url\s*=\s*(.+?)\s*$/m.exec(section[1] ?? "") : null;
 	if (!url) return null;
-	const match = /[:/]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/.exec(unquoted(url[1] ?? ""));
+	const match = /[:/]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/.exec(unquoted(withoutComment(url[1] ?? "")));
 	return match ? `${match[1]}/${match[2]}` : null;
+}
+
+/** The value without a trailing comment. Git ends a value at a `#` or `;` that is outside double quotes. */
+function withoutComment(value: string): string {
+	let quoted = false;
+	for (let index = 0; index < value.length; index += 1) {
+		const char = value.charAt(index);
+		if (char === '"') quoted = !quoted;
+		else if (!quoted && (char === "#" || char === ";")) return value.slice(0, index).trim();
+	}
+	return value.trim();
 }
 
 /** A value with one matching pair of surrounding quotes removed. A value without them is returned as it is. */
