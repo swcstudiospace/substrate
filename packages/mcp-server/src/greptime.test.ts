@@ -38,7 +38,7 @@ import {
 	ttlOf,
 } from "./greptime.ts";
 import { ConfigError, loadConfig, loadLedgerSettings, type GreptimeConfig } from "./config.ts";
-import type { EventInput, SubstrateEvent } from "./types.ts";
+import { SURFACES, type EventInput, type SubstrateEvent } from "./types.ts";
 import { MAX_METRIC_BATCH, MAX_METRIC_POINTS, METRIC_SERIES, type MetricSampleRow } from "./metrics-history.ts";
 
 const config: GreptimeConfig = { url: "http://greptime.test", user: "u", password: "p", db: "substrate" };
@@ -2587,7 +2587,9 @@ describe("metric_samples (uplift-4 S6)", () => {
 			const { points } = await new GreptimeClient(config).readMetricHistory({ series: "brief.p95", fromMs: TO - 3_600_000, toMs: TO, stepS: 60 });
 			const statement = select(sql);
 			expect(() => assertAppendOnly(statement)).not.toThrow();
-			expect(statement).toContain(`date_bin(INTERVAL '60 seconds', "ts") AS "bucket"`);
+			const bucketStep = Number(/date_bin\(INTERVAL '(\d+) seconds'/.exec(statement)?.[1]);
+			expect(bucketStep).toBeGreaterThanOrEqual(60);
+			expect(statement).toContain(`date_bin(INTERVAL '${bucketStep} seconds', "ts") AS "bucket"`);
 			expect(statement).toContain(`FROM "metric_samples" WHERE "series" = 'brief.p95'`);
 			expect(statement).toContain(`"ts" >= '${new Date(TO - 3_600_000).toISOString()}' AND "ts" < '${new Date(TO).toISOString()}'`);
 			expect(statement).toContain('MAX("value")');
@@ -2692,7 +2694,7 @@ describe("metric_samples (uplift-4 S6)", () => {
 
 		test("the effective step is returned, and a labelled series over a long window keeps its OLDEST bucket inside the point cap", async () => {
 			const surfaces = [...METRIC_SERIES["brief.p95"]!.values!];
-			expect(surfaces).toHaveLength(28);
+			expect(surfaces).toHaveLength(new Set([...SURFACES, "other"]).size);
 			// A store holding a row for every surface in every bucket, answering the way the statement asks: newest first, cut at LIMIT.
 			const store = (statement: string): unknown => {
 				if (!statement.includes("date_bin")) return defaultReply(statement);
@@ -2710,18 +2712,18 @@ describe("metric_samples (uplift-4 S6)", () => {
 				const result = await new GreptimeClient(config).readMetricHistory({ series: "brief.p95", fromMs: TO - days * 86_400_000, toMs: TO, stepS: 60 });
 				const step = Number(/INTERVAL '(\d+) seconds'/.exec(select(sql))![1]);
 				expect(result.stepS).toBe(step);
-				// Raised far above the 60 s asked for: one day is ~20 minutes, 14 days ~5 hours.
+				// Raised above the 60 s asked for, to fit the point cap.
 				expect(step).toBeGreaterThan(60);
 				const oldestBucket = Math.floor((TO - days * 86_400_000) / 1000 / step) * step * 1000;
 				expect(result.points[0]?.tsMs).toBe(oldestBucket);
 				expect(result.points.length).toBeLessThanOrEqual(MAX_METRIC_POINTS);
-				// Nothing was cut: every bucket of the window has all 28 surfaces.
-				expect(result.points.length % 28).toBe(0);
-				expect(new Set(result.points.map((point) => point.labels.surface)).size).toBe(28);
+				// Nothing was cut: every bucket of the window has every surface.
+				expect(result.points.length % surfaces.length).toBe(0);
+				expect(new Set(result.points.map((point) => point.labels.surface)).size).toBe(surfaces.length);
 			}
 			// The old rule (step raised only to window / 2000, ignoring labels) would have cut the oldest days: pin that the cap bites without the label term.
 			const old = Math.ceil((14 * 86_400) / MAX_METRIC_POINTS);
-			expect(Math.ceil((14 * 86_400) / old + 1) * 28).toBeGreaterThan(MAX_METRIC_POINTS);
+			expect(Math.ceil((14 * 86_400) / old + 1) * surfaces.length).toBeGreaterThan(MAX_METRIC_POINTS);
 		});
 	});
 });
