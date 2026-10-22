@@ -312,6 +312,9 @@ export class SubstrateInstruments {
 
 	constructor(registry: MetricRegistry = new MetricRegistry()) {
 		this.registry = registry;
+		// The proxy-plane gauge reads 0 until `observe.ts` sets the configured count at boot. Set here, it is always in the snapshot, so
+		// the sampler's extended series are the ones the instruments hold, in every mode (uplift-5 S6).
+		this.setEndpointProxyPlanes(0);
 		const ms = { unit: "ms", bounds: LATENCY_BUCKETS_MS };
 
 		this.briefDuration = registry.histogram(METRIC.briefDuration, {
