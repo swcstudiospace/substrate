@@ -59,7 +59,7 @@ export interface PlanningErrorRow {
 }
 
 /** Why a change could not be attributed to a repo. Each reason is a typed result, never an exception out of the read. */
-export type RepoUnknownReason = "no-git-entry" | "git-file-malformed" | "git-dir-unreadable" | "config-unreadable" | "origin-missing";
+export type RepoUnknownReason = "no-git-entry" | "git-file-malformed" | "git-dir-unreadable" | "config-unreadable" | "config-missing" | "origin-missing";
 
 export type PlanningChangeNote =
 	| { state: "baseline" }
@@ -150,8 +150,8 @@ export class PlanningReader {
 		const heartbeat = await this.heartbeat(root, limits.presenceTtlS * 1000);
 		const built = await buildPlanningIndex(root, { fs: this.deps.fs, limits: { maxFiles: limits.maxFiles, maxBytes: limits.maxBytes } });
 		if (!built.ok) return { state: "unavailable", code: built.code };
-		const { records, truncated } = built.index;
-		const changes = await this.observe(root, seq, { records, truncated });
+		const { records, truncated, unlisted } = built.index;
+		const changes = await this.observe(root, seq, { records, truncated, unlisted });
 		return {
 			state: "ok",
 			limits,
@@ -241,15 +241,20 @@ export class PlanningReader {
 	 * Compares this index with the baseline. A scan older than the baseline is `superseded`, and the baseline is left alone.
 	 * A complete diff writes one `planning.changed` note when it differs. A partial diff (either side truncated) reports what
 	 * it can vouch for and writes nothing: removals are never inferred from a truncated side, so `removed` stays null.
+	 * A transition whose repo cannot be read for a transient reason is reported for this call and the baseline stays where it
+	 * was, so the next successful read sees the same transition and publishes it once.
 	 */
 	private async observe(root: string, seq: number, snapshot: PlanningSnapshot): Promise<PlanningChangeNote> {
 		const current = this.baseline;
 		if (current !== null && seq < current.seq) return { state: "superseded" };
-		this.baseline = { root, seq, snapshot };
-		if (current === null || current.root !== root) return { state: "baseline" };
+		if (current === null || current.root !== root) {
+			this.advance(root, seq, snapshot);
+			return { state: "baseline" };
+		}
 		const diff = diffPlanningIndex(current.snapshot, snapshot);
 		const removed = diff.removed;
 		if (removed === null) {
+			this.advance(root, seq, snapshot);
 			return {
 				state: "partial",
 				added: current.snapshot.truncated ? null : diff.added.length,
@@ -259,14 +264,27 @@ export class PlanningReader {
 			};
 		}
 		const counts = { added: diff.added.length, removed: removed.length, changed: diff.changed.length };
-		if (counts.added + counts.removed + counts.changed === 0) return { state: "unchanged" };
+		if (counts.added + counts.removed + counts.changed === 0) {
+			this.advance(root, seq, snapshot);
+			return { state: "unchanged" };
+		}
 		const repo = await repoOf(this.deps.fs, root);
+		if (repo.state === "unknown" && repo.transient) {
+			return { state: "changed", ...counts, ledger: "repo-unknown", repoReason: repo.reason };
+		}
+		this.advance(root, seq, snapshot);
 		if (repo.state === "unknown") return { state: "changed", ...counts, ledger: "repo-unknown", repoReason: repo.reason };
 		const outcome = await emitPlanningChange(
 			{ publish: this.deps.emit },
 			{ repo: repo.repo, sessionId: PLANNING_OBSERVER_SESSION, diff: { ...diff, removed } },
 		);
 		return { state: "changed", ...counts, ledger: outcome === "published" ? "emitted" : "not-stored" };
+	}
+
+	/** Moves the baseline to this scan, unless a later scan already holds it. The baseline never moves backwards. */
+	private advance(root: string, seq: number, snapshot: PlanningSnapshot): void {
+		if (this.baseline !== null && seq < this.baseline.seq) return;
+		this.baseline = { root, seq, snapshot };
 	}
 }
 
@@ -347,29 +365,31 @@ async function branchOf(fs: PlanningFs, gitDir: string): Promise<string> {
 	return ref === null ? "detached" : (ref[1] ?? "detached");
 }
 
-type RepoLookup = { state: "known"; repo: string } | { state: "unknown"; reason: RepoUnknownReason };
+type RepoLookup = { state: "known"; repo: string } | { state: "unknown"; reason: RepoUnknownReason; transient: boolean };
 
 /**
- * The `owner/name` of the `origin` remote, read from the common git directory's config. Every failure is a typed reason:
- * a denied or vanished config is `config-unreadable` for this call, and the document summary is unaffected.
+ * The `owner/name` of the `origin` remote, read from the common git directory's config. A definitive absence (no git entry,
+ * no config, no origin) is `transient: false`. A read that failed for any other reason (denied, I/O, or removed between the
+ * stat and the read) is `transient: true`: the caller must not advance the baseline on it, so the transition is published
+ * by the next successful read.
  */
 async function repoOf(fs: PlanningFs, root: string): Promise<RepoLookup> {
 	let layout: GitLayout;
 	try {
 		layout = await gitLayout(fs, root);
 	} catch {
-		return { state: "unknown", reason: "git-dir-unreadable" };
+		return { state: "unknown", reason: "git-dir-unreadable", transient: true };
 	}
-	if (!layout.ok) return { state: "unknown", reason: layout.reason };
+	if (!layout.ok) return { state: "unknown", reason: layout.reason, transient: false };
 	let config: string | null;
 	try {
 		config = await textOf(fs, join(layout.commonDir, "config"));
 	} catch {
-		return { state: "unknown", reason: "config-unreadable" };
+		return { state: "unknown", reason: "config-unreadable", transient: true };
 	}
-	if (config === null) return { state: "unknown", reason: "config-unreadable" };
+	if (config === null) return { state: "unknown", reason: "config-missing", transient: false };
 	const repo = repoFromGitConfig(config);
-	return repo === null ? { state: "unknown", reason: "origin-missing" } : { state: "known", repo };
+	return repo === null ? { state: "unknown", reason: "origin-missing", transient: false } : { state: "known", repo };
 }
 
 /** Parses the `origin` URL of a git config into `owner/name`. Only the two trailing path segments are kept. */
