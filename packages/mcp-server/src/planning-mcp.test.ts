@@ -79,8 +79,12 @@ describe("planning tools", () => {
 		for (const name of PLANNING_TOOLS) {
 			const reply = await call(client, name);
 			expect(reply.isError).toBe(false);
-			expect(reply.json()).toEqual({ state: "disabled", reason: "root-unset" });
+			expect(reply.json()["state"]).toBe("disabled");
+			expect(reply.json()["reason"]).toBe("root-unset");
 		}
+		const sessions = (await call(client, "planning_sessions")).json()["view"] as { state: string; text: string };
+		expect(sessions.state).toBe("DEGRADED");
+		expect(sessions.text.trim()).not.toBe("");
 	});
 
 	test("with a root, planning_status reports counts and hashes and never a file body", async () => {

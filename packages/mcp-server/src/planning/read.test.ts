@@ -410,7 +410,7 @@ describe("planning_sessions state", () => {
 	});
 
 	test("a disabled root has the DEGRADED state, not a blank one", async () => {
-		const view = await new PlanningReader({ settings: loadPlanningSettings({}), fs: nodePlanningFs(), presence: null, ...quietSinks() }).sessions();
+		const view = await new PlanningReader({ settings: loadPlanningSettings({}), fs: nodePlanningFs(), presence: null, emit: async () => true, ...quietSinks() }).sessions();
 		expect(view).toMatchObject({ state: "disabled", view: { state: "DEGRADED" } });
 		expectNonBlankState(view);
 	});
