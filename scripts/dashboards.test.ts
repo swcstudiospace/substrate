@@ -10,12 +10,14 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { FABRIC_RESOURCES } from "../packages/mcp-server/src/fabric/types.ts";
 import { ALL_METRIC_SERIES, METRIC_SERIES, parseHistoryStep, parseHistoryWindow } from "../packages/mcp-server/src/metrics-history.ts";
 import { DEFAULT_THRESHOLDS, docsSearchObjective, sloCatalogue, type SloTarget } from "../packages/observability/src/index.ts";
 import {
 	DATASOURCE_TYPE,
 	DATASOURCE_UID,
 	DEFAULT_OUT_DIR,
+	FABRIC_SERIES,
 	SLO_SERIES,
 	STEP_OPTIONS,
 	WINDOW_OPTIONS,
@@ -323,5 +325,23 @@ describe("the threshold lines are the catalogue's targets", () => {
 		const panel = degraded.panels.find((candidate) => candidate.title.includes("(emit.success)"))!;
 		expect(panel.type).toBe("text");
 		expect(panel.options!.content).toContain("99.50 %");
+	});
+});
+
+describe("the fabric panels (phase 51)", () => {
+	test("each fabric resource draws one panel of an existing series, and the gap draws none", () => {
+		const planes = parse(buildDashboards(), "substrate-data-planes.json");
+		expect(FABRIC_RESOURCES.filter((resource) => FABRIC_SERIES[resource] === null)).toEqual(["tailscale-proxy"]);
+		for (const resource of FABRIC_RESOURCES) {
+			const panels = planes.panels.filter((panel) => panel.title === `Fabric: ${resource}`);
+			if (FABRIC_SERIES[resource] === null) {
+				expect(panels).toEqual([]);
+				continue;
+			}
+			expect(panels).toHaveLength(1);
+			const series = seriesOf(panels[0]!);
+			expect(series).not.toBeNull();
+			expect(Object.hasOwn(ALL_METRIC_SERIES, series ?? "")).toBe(true);
+		}
 	});
 });
