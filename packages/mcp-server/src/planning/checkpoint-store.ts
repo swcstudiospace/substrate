@@ -9,7 +9,8 @@
  *
  * Opening the store loads every stored key. Recording a key already stored is a no-op. A file that does not parse, holds
  * a record whose key does not match its fields, or holds one key twice refuses the open: it is never repaired silently.
- * One process writes a directory at a time; the store takes no lock across processes.
+ * Every insert and list rereads the file first, so two opens of one directory in one process see each other's records and
+ * never overwrite them. The store takes no lock across processes.
  *
  * With the variable unset (or blank) the checkpoints stay in memory, and the view says they are not durable.
  */
@@ -43,7 +44,7 @@ export function completionStoreView(config: CheckpointDirectoryResult): Completi
 }
 
 export class DurableCompletionStore implements CompletionStore {
-	private readonly records: Map<string, CompletionRecord>;
+	private records: Map<string, CompletionRecord>;
 	private tail: Promise<unknown> = Promise.resolve();
 
 	private constructor(
@@ -62,6 +63,7 @@ export class DurableCompletionStore implements CompletionStore {
 
 	putIfAbsent(key: string, record: CompletionRecord): Promise<"inserted" | "exists"> {
 		return this.serial(async () => {
+			await this.reload();
 			if (this.records.has(key)) return "exists";
 			const valid = CompletionRecordSchema.parse(record);
 			if (valid.key !== key || completionKey(valid) !== key) throw new RangeError("completion key does not match its record");
@@ -73,7 +75,18 @@ export class DurableCompletionStore implements CompletionStore {
 	}
 
 	async list(phase: string): Promise<CompletionRecord[]> {
-		return [...this.records.values()].filter((record) => record.phase === phase).map((record) => ({ ...record }));
+		return this.serial(async () => {
+			await this.reload();
+			return [...this.records.values()].filter((record) => record.phase === phase).map((record) => ({ ...record }));
+		});
+	}
+
+	/**
+	 * Reads the file again, so a record another open of this directory wrote is seen before this one writes. Without it, an open
+	 * that loaded the file earlier would rewrite the file from its own stale map and drop the other open's records.
+	 */
+	private async reload(): Promise<void> {
+		this.records = parseRecords(await readCompletions(join(this.directory, COMPLETIONS_FILE)));
 	}
 
 	/** Runs one write at a time, in arrival order, so two inserts never race on the file. */

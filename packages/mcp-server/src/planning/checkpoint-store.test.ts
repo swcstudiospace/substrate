@@ -105,3 +105,18 @@ describe("the checkpoint directory setting", () => {
 		expect(completionStoreView(config)).toEqual({ durable: false, reason: "checkpoint-dir-invalid" });
 	});
 });
+
+describe("two opens of one directory do not overwrite each other (greptile P1)", () => {
+	test("a record written through one open survives an insert through a second open that loaded the file earlier", async () => {
+		const first = await DurableCompletionStore.open(checkpoints);
+		const second = await DurableCompletionStore.open(checkpoints);
+		const x = await recordCompletion(first, COMPLETION);
+		const y = await recordCompletion(second, { ...COMPLETION, step: "04-plan" });
+		expect(x.outcome).toBe("inserted");
+		expect(y.outcome).toBe("inserted");
+
+		const reopened = await DurableCompletionStore.open(checkpoints);
+		expect((await reopened.list("53")).map((record) => record.key).sort()).toEqual([x.key, y.key].sort());
+		expect((await second.list("53")).map((record) => record.key).sort()).toEqual([x.key, y.key].sort());
+	});
+});
