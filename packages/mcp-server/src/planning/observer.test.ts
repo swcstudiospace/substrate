@@ -799,6 +799,33 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		expect(conflictEventsOf(attempts)).toEqual([]);
 		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({ state: "ok", conflicts: [] });
 	});
+
+	test("a checkout whose repository was unreadable during its edit is heartbeated once it reads again, keeping the edit's time (greptile recovered-sessions thread)", async () => {
+		const tree = twoCheckouts();
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		const attempts: EventInput[] = [];
+		const a = announcingObserver(tree, presence, attempts, true, CHECKOUT_A);
+		const b = announcingObserver(tree, presence, attempts, true, CHECKOUT_B);
+		await a.scan();
+		await b.scan();
+
+		tree.denied.add(`${CHECKOUT_A}/.git/config`);
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a\n");
+		await a.scan();
+		expect(storedRecord(backend, tree, CHECKOUT_A)).toMatchObject({ repo: null, touched: [{ phase: "53", plan: null, observedAtMs: SERVER_NOW }] });
+
+		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b\n");
+		await b.scan();
+		expect(conflictEventsOf(attempts)).toEqual([]);
+
+		tree.denied.delete(`${CHECKOUT_A}/.git/config`);
+		backend.clockMs = SERVER_NOW + 1_000;
+		expect(await a.scan()).toMatchObject({ state: "observed", heartbeat: { state: "written" } });
+		expect(storedRecord(backend, tree, CHECKOUT_A)).toMatchObject({ repo: REPO, touched: [{ phase: "53", plan: null, observedAtMs: SERVER_NOW }] });
+		expect(conflictEventsOf(attempts)).toHaveLength(1);
+	});
 });
 
 describe("the observer under a change the ledger does not store, failure, load and shutdown", () => {

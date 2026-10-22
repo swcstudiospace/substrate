@@ -123,6 +123,8 @@ export class PlanningObserver {
 	private heldChange: string | null = null;
 	/** The report the last successful heartbeat wrote. A change of view (known, or the reason it is unknown) must reach the record. Null until one is written. */
 	private written: PlanningReport | null = null;
+	/** The repository the last successful heartbeat wrote; undefined until one is written. A different repository now is a change the record must carry. */
+	private writtenRepo: string | null | undefined = undefined;
 	/** Conflicts announced and still open, by signature. A conflict leaves the set once it is no longer detected. Process-local. */
 	private openConflicts = new Set<string>();
 	private timer: PlanningTimerHandle | undefined;
@@ -289,6 +291,8 @@ export class PlanningObserver {
 	private async heartbeat(root: string, due: boolean, ttlMs: number, repo: RepoLookup): Promise<PlanningHeartbeat> {
 		if (due) this.presencePending = true;
 		if (this.report !== null && this.written !== null && reportViewOf(this.report) !== reportViewOf(this.written)) this.presencePending = true;
+		const currentRepo = repo.state === "known" ? repo.repo : null;
+		if (this.writtenRepo !== undefined && this.writtenRepo !== currentRepo) this.presencePending = true;
 		if (!this.presencePending) return { state: "not-due" };
 		const presence = this.deps.presence;
 		if (presence === null) {
@@ -310,6 +314,7 @@ export class PlanningObserver {
 			await presence.touch(record, ttlMs);
 			this.presencePending = false;
 			this.written = this.report;
+			this.writtenRepo = currentRepo;
 			return { state: "written" };
 		} catch (cause: unknown) {
 			return { state: "failed", detail: errnoCode(cause) };
