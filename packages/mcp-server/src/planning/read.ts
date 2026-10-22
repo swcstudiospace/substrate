@@ -318,18 +318,19 @@ export class PlanningReader {
 		}
 		// The change's identity: a held change is recorded once, on first detection, and not again once it is stored.
 		const key = diff !== null && diff.removed !== null && outcome !== null ? changeKey({ added: diff.added, removed: diff.removed, changed: diff.changed }, snapshot) : null;
+		const incomplete = diff !== null && !diff.complete;
 		if (hold) {
 			// A change the ledger did not store holds the baseline, so the next read sends it again. Its transition is recorded once,
 			// on first detection: a failed ledger write does not hide the transition from the stdout sink.
 			if (outcome !== null && current !== null && key !== this.recordedHold) {
 				this.recordedHold = key;
-				this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: current.state, to: state, outcome }, this.deps.clock ?? hostClock));
+				this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: current.state, to: state, outcome, incomplete }, this.deps.clock ?? hostClock));
 			}
 			return note;
 		}
 		const recorded = key !== null && key === this.recordedHold;
 		if (outcome !== null && current !== null && !recorded) {
-			this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: current.state, to: state, outcome }, this.deps.clock ?? hostClock));
+			this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: current.state, to: state, outcome, incomplete }, this.deps.clock ?? hostClock));
 		}
 		this.advance(root, seq, baseline, state);
 		return note;
@@ -388,12 +389,13 @@ export class PlanningReader {
 /** The identity of a change: its paths and the hashes they now have. A held change detected again has the same identity. */
 function changeKey(diff: { added: string[]; removed: string[]; changed: string[] }, after: PlanningSnapshot): string {
 	const hashes = new Map(after.records.map((record) => [record.path, record.sha256] as const));
-	return JSON.stringify({ added: diff.added, removed: diff.removed, changed: diff.changed.map((path) => [path, hashes.get(path) ?? null]) });
+	const hashed = (paths: string[]): [string, string | null][] => paths.map((path) => [path, hashes.get(path) ?? null]);
+	return JSON.stringify({ added: hashed(diff.added), removed: diff.removed, changed: hashed(diff.changed) });
 }
 
-/** The transition outcome of an observation that published nothing: a partial diff that vouches for a change is refused; the rest record nothing. */
+/** The transition outcome of an observation that published nothing: an incomplete diff that vouches for a change is refused; the rest record nothing. */
 function unpublishedOutcome(previous: PlanningSnapshot | null, diff: PlanningDiff | null): TransitionOutcome | null {
-	if (diff === null || diff.removed !== null) return null;
+	if (diff === null || diff.complete) return null;
 	const added = previous?.truncated === true ? 0 : diff.added.length;
 	return added + diff.changed.length > 0 ? "refused" : null;
 }
@@ -423,6 +425,7 @@ function sessionViewOf(body: PlanningSessionsBody): SessionViewState {
 		case "ok": {
 			const disabledCapabilities = [
 				...(body.clock.state === "unavailable" ? ["server clock"] : []),
+				...(body.heartbeat.state === "failed" ? ["checkout heartbeat"] : []),
 				...(body.truncated ? ["sessions beyond the listing bound"] : []),
 			];
 			return deriveSessionState({ loaded: true, sessions: body.sessions.map((row) => row.status), disabledCapabilities });

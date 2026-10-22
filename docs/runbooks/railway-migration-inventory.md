@@ -72,7 +72,8 @@ Railway project and service names are as `docs/data-planes.md` gives them. The U
 
 **Permitted defaults (no follow-up).**
 
-- Loopback client defaults of the form `SUBSTRATE_URL` falling back to the loopback port 7410. These are in `packages/cli/src/index.ts`, `packages/collectors/src/emit.ts`, `muse.ts`, `cursor-stop.ts`, `packages/host/src/substrate.ts`, `packages/projector/omp/substrate-status.ts`, and in `scripts/` (`cache-stats.ts`, `chaos-smoke.ts`, `doctor-runtime.ts`, `substrate-alert.ts`, `grok-connector-smoke.ts`, `promote-advisor.ts`). `scripts/docs-golden.ts` refuses a non-loopback base. Each default yields to `SUBSTRATE_URL`.
+- Loopback client defaults of the form `SUBSTRATE_URL` falling back to the loopback port 7410. These are in `packages/cli/src/index.ts`, `packages/collectors/src/emit.ts`, `muse.ts`, `cursor-stop.ts`, `packages/projector/omp/substrate-status.ts`, and in `scripts/` (`cache-stats.ts`, `chaos-smoke.ts`, `doctor-runtime.ts`, `substrate-alert.ts`, `grok-connector-smoke.ts`, `promote-advisor.ts`). `scripts/docs-golden.ts` refuses a non-loopback base. Each default yields to `SUBSTRATE_URL`.
+- The host does not follow `SUBSTRATE_URL`. `packages/host/src/main.ts` builds its MCP base from `SUBSTRATE_MCP_URL`, which defaults to the loopback port 7410 under `/mcp`. That override is the one to set when the host moves.
 - `scripts/parity-check.ts` is VPS-only and does not follow `SUBSTRATE_URL`. Its health address is fixed in code: `HEALTHZ_URL` is `http://127.0.0.1:7410/healthz`, and it reads the owners of loopback port 7410 on the VPS unit.
 - Public API bases, fixed in code: Linear, Notion, the Anthropic API, and the public devnet Solana RPC (`SOLANA_RPC_URL` default). The public skills library remote is also a public default.
 - VM-internal paths under `/home/agentos` in `packages/host/src/options.ts`. They are inside the sandbox image, not on the host.

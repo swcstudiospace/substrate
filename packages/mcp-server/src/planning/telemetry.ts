@@ -39,6 +39,8 @@ export interface TransitionInput {
 	from: SessionState;
 	to: SessionState;
 	outcome: TransitionOutcome;
+	/** Set when the diff behind the transition was incomplete (a directory could not be listed); the record says so. */
+	incomplete?: boolean;
 }
 
 export interface TransitionRecord extends TransitionInput {
@@ -57,7 +59,9 @@ export function transitionRecord(input: TransitionInput, clock: TransitionClock)
 	if (!(TRANSITION_OUTCOMES as readonly string[]).includes(input.outcome)) throw new TypeError("transition outcome is not a known outcome");
 	const instant = clock();
 	if (!(instant instanceof Date) || Number.isNaN(instant.getTime())) throw new TypeError("transition clock did not return a valid date");
-	return { phaseId: input.phaseId, from: input.from, to: input.to, outcome: input.outcome, ts: instant.toISOString() };
+	const record: TransitionRecord = { phaseId: input.phaseId, from: input.from, to: input.to, outcome: input.outcome, ts: instant.toISOString() };
+	if (input.incomplete === true) record.incomplete = true;
+	return record;
 }
 
 /** Why a sink did not deliver: refused by the sink, or its emit threw. */
@@ -114,6 +118,8 @@ export interface TransitionLine {
 	to: SessionState;
 	outcome: TransitionOutcome;
 	ts: string;
+	/** Present, and true, when the diff behind the record was incomplete. */
+	incomplete?: true;
 }
 
 /** A stdout sink: one JSON line per record through the injected writer. */
@@ -129,6 +135,7 @@ export function stdoutMetricSink(write: (line: string) => void = (line) => proce
 				outcome: record.outcome,
 				ts: record.ts,
 			};
+			if (record.incomplete === true) line.incomplete = true;
 			try {
 				write(`${JSON.stringify(line)}\n`);
 			} catch (cause: unknown) {

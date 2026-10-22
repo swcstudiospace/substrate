@@ -810,3 +810,55 @@ describe("a stalled Dragonfly reply", () => {
 		expect(view.state === "unavailable" && view.detail).toContain("deadline (20 ms presence SCAN)");
 	});
 });
+
+describe("held, incomplete and failed-heartbeat states are reported", () => {
+	test("a file added and then edited while the ledger is down records one refused transition for each distinct change", async () => {
+		await seedPhase();
+		await write(".git/config", ORIGIN_CONFIG);
+		let accept = false;
+		const harness = reader(root, { emit: async () => accept });
+		await harness.reader.status();
+		await write(`${PHASE}/52-NOTES.md`, "first\n");
+		await harness.reader.status();
+		await harness.reader.settleTransitions();
+		await write(`${PHASE}/52-NOTES.md`, "second\n");
+		await harness.reader.status();
+		await harness.reader.settleTransitions();
+		expect(harness.transitions).toEqual([expect.objectContaining({ outcome: "refused" }), expect.objectContaining({ outcome: "refused" })]);
+	});
+
+	test("an unlistable directory with an edit in a readable directory records that edit as an incomplete refused transition", async () => {
+		await seedPhase();
+		await mkdir(join(root, ".planning/phases/53-locked"), { recursive: true });
+		await write(".planning/phases/53-locked/53-PLAN.md", `${BODY} locked\n`);
+		await write(".git/config", ORIGIN_CONFIG);
+		const real = nodePlanningFs();
+		const flaky: PlanningFs = {
+			...real,
+			readDir: async (path) => {
+				if (path.endsWith("53-locked")) throw new Error("EACCES: permission denied");
+				return real.readDir(path);
+			},
+		};
+		const metrics = recordingSink("greptime");
+		const planning = new PlanningReader({ settings: settingsFor(root), fs: flaky, presence: null, emit: async () => true, metrics: metrics.sink, fallback: recordingSink("stdout").sink, clock: CLOCK });
+		await planning.status();
+		await write(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		const view = await planning.status();
+		expect(view.state === "ok" && view.changes.state).toBe("partial");
+		await planning.settleTransitions();
+		expect(metrics.records).toEqual([expect.objectContaining({ outcome: "refused", incomplete: true })]);
+	});
+
+	test("a checkout whose presence write fails, with a working listing, reports DEGRADED", async () => {
+		await write(".git/HEAD", "ref: refs/heads/gsd/p54-complete\n");
+		class FailingWrites extends PresenceFake {
+			async setWithTtl(): Promise<void> {
+				throw new Error("SET refused");
+			}
+		}
+		const view = await sessionsReader(new DragonflyPresenceStore(new FailingWrites())).sessions();
+		expect(view).toMatchObject({ state: "ok", heartbeat: { state: "failed" }, view: { state: "DEGRADED" } });
+		expectNonBlankState(view);
+	});
+});
