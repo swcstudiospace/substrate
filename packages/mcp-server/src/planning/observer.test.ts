@@ -10,7 +10,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { EventInput } from "../types.ts";
 import { RecordingPresenceBackend } from "./backend.fixtures.ts";
-import { PLANNING_MAX_FILES_ENV, PLANNING_ROOT_ENV, loadPlanningSettings } from "./config.ts";
+import { PLANNING_MAX_FILES_ENV, PLANNING_ROOT_ENV, PLANNING_SCAN_INTERVAL_ENV, loadPlanningSettings } from "./config.ts";
 import { MAX_PENDING_TRANSITIONS, PLANNING_OBSERVER_SESSION, PLANNING_TRANSITION_PHASE, PlanningObserver } from "./observer.ts";
 import { DragonflyPresenceStore, PRESENCE_KEY_PREFIX } from "./presence-dragonfly.ts";
 import { PlanningReader } from "./read.ts";
@@ -502,11 +502,40 @@ describe("the planning heartbeat", () => {
 		expect(disabled.start()).toBe(false);
 
 		const { observer } = observerOver(new FakeTree({}));
-		expect(observer.start(60_000)).toBe(true);
-		expect(observer.start(60_000)).toBe(true);
+		expect(observer.start()).toBe(true);
+		expect(observer.start()).toBe(true);
 		observer.stop();
-		expect(observer.start(60_000)).toBe(true);
+		expect(observer.start()).toBe(true);
 		observer.stop();
+	});
+
+	test("the scan is scheduled at the configured cadence: 15000 ms when unset, the set value otherwise, and not while disabled", () => {
+		const scheduledWith = (env: Record<string, string>): number[] => {
+			const delays: number[] = [];
+			const handle = { id: "scan-timer" };
+			const observer = new PlanningObserver({
+				settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT, ...env }),
+				fs: new FakeTree({}),
+				presence: null,
+				emit: async () => true,
+				metrics: recordingSink("greptime").sink,
+				timers: {
+					setInterval: (_run, ms) => {
+						delays.push(ms);
+						return handle;
+					},
+					clearInterval: () => undefined,
+				},
+			});
+			expect(observer.start()).toBe(true);
+			observer.stop();
+			return delays;
+		};
+		expect(scheduledWith({})).toEqual([15_000]);
+		expect(scheduledWith({ [PLANNING_SCAN_INTERVAL_ENV]: "2500" })).toEqual([2_500]);
+
+		const disabled = new PlanningObserver({ settings: loadPlanningSettings({}), fs: new FakeTree({}), presence: null, emit: async () => true, metrics: recordingSink("greptime").sink });
+		expect(disabled.start()).toBe(false);
 	});
 });
 

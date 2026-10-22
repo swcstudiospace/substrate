@@ -1,7 +1,7 @@
 /**
  * The planning observer (phase 52, SOTA-08): the server-side writer of the planning plane.
  *
- * On a timer (`PLANNING_SCAN_INTERVAL_MS`, unref'd, started and stopped by the server entry) it scans the checkout's
+ * On a timer (`SUBSTRATE_PLANNING_SCAN_INTERVAL_MS`, unref'd, started and stopped by the server entry) it scans the checkout's
  * `.planning/` with the incremental index, so a scan reads and hashes only the documents that changed. It diffs the scan
  * against its baseline and publishes a complete change as one `planning.changed` event, through the ledger and the bus
  * (`observePlanningChange`). Nothing else writes: the reads never do.
@@ -36,8 +36,23 @@ export const PLANNING_OBSERVER_SESSION = "planning-observer";
 /** The phase id a planning transition is recorded under: the planning plane's view, which spans every phase document. */
 export const PLANNING_TRANSITION_PHASE = "planning";
 
-/** How often the observer scans, in milliseconds. A fixed cadence, not configuration: a scan is incremental, so it is cheap. */
-export const PLANNING_SCAN_INTERVAL_MS = 15_000;
+/** The handle a scan timer returns. Opaque to the observer: it is only passed back to `clearInterval`. */
+export type PlanningTimerHandle = unknown;
+
+/** The timer the observer schedules its scans with. Production uses the global timers; a test injects one to see the cadence. */
+export interface PlanningTimers {
+	setInterval(run: () => void, ms: number): PlanningTimerHandle;
+	clearInterval(timer: PlanningTimerHandle): void;
+}
+
+const GLOBAL_TIMERS: PlanningTimers = {
+	setInterval: (run, ms) => {
+		const timer = setInterval(run, ms);
+		timer.unref();
+		return timer;
+	},
+	clearInterval: (timer) => clearInterval(timer as ReturnType<typeof setInterval>),
+};
 
 /** Most transition deliveries in flight at once. Past it a record goes straight to the stdout fallback, so the set stays bounded. */
 export const MAX_PENDING_TRANSITIONS = 64;
@@ -71,6 +86,8 @@ export interface PlanningObserverDeps {
 	fallback?: MetricSink;
 	/** The record's clock. Default: the host clock, which stamps a record and classifies nothing. */
 	clock?: TransitionClock;
+	/** The scan timer. Omitted in production; a test injects one to see the cadence the observer schedules. */
+	timers?: PlanningTimers;
 }
 
 /** The baseline a diff is taken against: its root, its snapshot, and the session state the plane was in when that scan ran. */
@@ -89,24 +106,28 @@ export class PlanningObserver {
 	private recordedHold: string | null = null;
 	/** Scheduled transition deliveries not yet settled. */
 	private readonly pending = new Set<Promise<void>>();
-	private timer: ReturnType<typeof setInterval> | undefined;
+	private timer: PlanningTimerHandle | undefined;
 	/** Scans run one at a time, in arrival order, so two scans never publish the same change. */
 	private queue: Promise<unknown> = Promise.resolve();
 
-	constructor(private readonly deps: PlanningObserverDeps) {}
+	private readonly timers: PlanningTimers;
 
-	/** Start the scan timer, unref'd. Nothing starts while the plane is disabled or misconfigured. Returns whether it is running. */
-	start(intervalMs: number = PLANNING_SCAN_INTERVAL_MS): boolean {
+	constructor(private readonly deps: PlanningObserverDeps) {
+		this.timers = deps.timers ?? GLOBAL_TIMERS;
+	}
+
+	/** Start the scan timer at the configured cadence, unref'd. Nothing starts while the plane is disabled or misconfigured. Returns whether it is running. */
+	start(): boolean {
 		if (this.timer !== undefined) return true;
-		if (!resolveSettings(this.deps.settings).ready) return false;
-		this.timer = setInterval(() => void this.scan(), intervalMs);
-		this.timer.unref();
+		const resolved = resolveSettings(this.deps.settings);
+		if (!resolved.ready) return false;
+		this.timer = this.timers.setInterval(() => void this.scan(), resolved.limits.scanIntervalMs);
 		return true;
 	}
 
 	/** Clear the timer. A scan in flight finishes; no new scan starts from the timer. */
 	stop(): void {
-		clearInterval(this.timer);
+		this.timers.clearInterval(this.timer);
 		this.timer = undefined;
 	}
 

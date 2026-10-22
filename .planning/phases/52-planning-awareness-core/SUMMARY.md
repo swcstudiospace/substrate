@@ -1,27 +1,46 @@
 ---
 phase: 52-planning-awareness-core
 requirements: [SOTA-08]
-status: verified with gaps (see VERIFICATION.md: criteria 1, 3 and 4 FAIL)
+status: verified in-repo, all six success criteria PASS (SC6 carries one flagged judgement on the scan cadence; see VERIFICATION.md)
 ---
 
 # 52-SUMMARY: planning index, session presence and change diffs
 
 ## What was executed
 
-Read-only verification on `gsd/p52-wiring` at `3126296f7ac58544fc1f2409c96126af70ef5473`, in `/root/src/worktrees/as-p52-wiring`. No tests, typecheck, lint, install or gate was run. Work consisted of:
+Read-only re-verification after the fix-up pass. Heads confirmed with `git rev-parse HEAD`:
 
-- Reading CONTEXT.md, PLAN.md, every non-test module under `packages/mcp-server/src/planning/`, the planning entries in `packages/audit/src/policy.ts`, the planning rows in `docs/config-reference.md`, and the planning wiring in `mcp.ts`, `service.ts`, `config.ts`, `flag-registry.ts`, `event-sources.ts`.
-- Grep sweeps for delete and write verbs, clock reads, environment reads, absolute paths, and host, port and scheme literals.
-- Listing the planning test names for the criteria evidence.
-- Checking the branch diff against the merge-base for `package.json` and lock-file changes.
+- CORE: `gsd/p52-planning-core` at `178a77e5a141569888ba9b93eb70f8ea2c918828`.
+- WIRING: `gsd/p52-wiring` at `498c45ea880e2a030bcae4e285b7d5e815b5e1f7`. It merges CORE (`fdbcf66`), so the planning modules on WIRING match CORE in the index, diff and fs modules. `events.ts` differs by the wiring-side publish path (ledger write through the observer).
 
-No code was changed by this phase's verification. Verdicts and evidence are in VERIFICATION.md.
+Gates were not run by the verifier. Orchestrator-reported on these heads: tsc clean; core planning tests 118 pass, 0 fail; wiring planning, fabric, dashboards and metrics tests 345 pass, 0 fail.
+
+The verifier read the planning modules, the wiring service and MCP files, the test names and the docs, and grepped for writes, env reads, literal hosts, ports and paths, and dependency changes. No code was changed by this verification. Verdicts and file:line evidence are in VERIFICATION.md.
+
+## Fix-up commits (since the previous verification at 3126296)
+
+- CORE `d807e90`: index keyed by content hash (`contents[sha256]`, `documents[path]`), with `updatePlanningIndex` an incremental build equal to a full rebuild.
+- CORE `4b26952`: diff and event carry the sha256 per changed path as `{ path, before, after }`, never a body.
+- CORE `178a77e`: the fs test reads the keyed index through its record view. The seven fs test failures were a stale helper.
+- WIRING `913d30d`: `planning_status` and `planning_sessions` write nothing on read. New `checkout.ts`, `observer.ts` (`PlanningObserver`, the only presence writer and the only publisher), and `backend.fixtures.ts`.
+- WIRING `453751d`: fix-up decisions recorded in CONTEXT.md.
+- WIRING merges that absorb phase 51 fixes (`c39b3eb`, `92e82ce`, `a3f4e8e`, `498c45e`) and the CORE merge `fdbcf66`.
 
 ## Phase commits
 
-Merge-base with `origin/main`: `0df730ecd42e8a152fd73f1b6b5db04dc170b413`. The branch has 88 commits past it, 29 of them merges. The list below is `git log --oneline` filtered to subjects that name `phase 52`: 37 commits. The merges of `gsd/p52-planning-core`, and the phase 51, CI and muse merges, are not listed.
+Merge-base with `origin/main`: `0df730ecd42e8a152fd73f1b6b5db04dc170b413`. The range has 108 commits, 35 of them merges. The list below is `git log --oneline` filtered to subjects that name `phase 52`: 47 commits, newest first. The phase 51 and CI merges are not listed.
 
 ```
+498c45e merge(gsd/p51-fabric-impl): absorb the S6 gauge fix into phase 52 wiring
+a3f4e8e merge(gsd/p51-fabric-impl): absorb the phase 51 metrics fix into phase 52 wiring
+178a77e fix(planning): the fs test reads the keyed index through its record view (phase 52, SOTA-08)
+92e82ce merge(gsd/p51-fabric-impl): absorb the phase 51 test and dashboard fixes into phase 52 wiring
+c39b3eb merge(gsd/p51-fabric-impl): absorb phase 51 fixes into phase 52 wiring
+453751d docs(52): record fix-up decisions in CONTEXT (phase 52, SOTA-08)
+913d30d fix(planning): planning_status and planning_sessions write nothing on read (phase 52, SOTA-08)
+4b26952 fix(planning): planning-change diffs and events carry sha256 per path, never bodies (phase 52, SOTA-08)
+d807e90 fix(planning): the index is keyed by content hash with an incremental build equal to a full rebuild (phase 52, SOTA-08)
+1a9ce41 docs(52): verification and summary for planning awareness core (phase 52, SOTA-08)
 3126296 fix(planning): adopt observePlanningChange for the baseline and the publish (phase 52, SOTA-08)
 fc678b1 fix(planning): a failed publish holds the baseline so the change is re-sent (phase 52, SOTA-08)
 a680493 fix(planning): every scan becomes the next baseline; only complete diffs publish (phase 52, SOTA-08)
@@ -61,18 +80,22 @@ cfc5387 fix(planning): accept trailing whitespace after the opening frontmatter 
 afa4205 feat(planning): file-first planning index, presence and change diffs (phase 52, SOTA-08)
 ```
 
-The other commits in the range are phase 51 (fabric) and phase 48 work, and CI and muse commits, pulled in by merges.
+## Deviations from PLAN.md and CONTEXT.md
 
-## Deviations from PLAN.md
-
-1. W6, TimescaleDB history: not built. Only `InMemoryHistorySink` exists (`presence.ts:106`). PLAN marks it blocked on an operator-gated migration. CONTEXT D52-b is therefore unmet in production.
-2. W6, ledger write from a read: implemented (`read.ts:257-263`). PLAN requires the reviewer to accept or reject it before the phase closes. That decision is still open.
-3. Read path writes: PLAN W2 and W3 describe both tools as read-only. The code also writes a presence heartbeat on every call (`read.ts:152`, `read.ts:182`). This is not recorded as a decision in PLAN.
-4. CONTEXT D52-h says the adapter "cannot report stale". PLAN W5 chose the server TIME clock instead, and classification reports `stale` (`presence.ts:64-65`). The PLAN decision supersedes D52-h; it is recorded here.
-5. Success criteria 1 and 3 (index keyed by content hash with incremental equality; hashes on the change event) are not in PLAN tasks T2 or T6. They are unimplemented, as VERIFICATION.md records.
-6. PLAN's wiring section permits the edits to `mcp.ts`, `policy.ts`, `flag-registry.ts` and `config.ts`. Those are not deviations.
-7. `.planning/ROADMAP.md` on this branch and on `origin/main` has no phase 52 entry. The criteria were taken from the verification assignment.
+1. W6, TimescaleDB history: not built. Only `InMemoryHistorySink` exists (`planning/presence.ts:106`). PLAN marks it blocked on an operator-gated migration. CONTEXT D52-b is unmet in production.
+2. W6, ledger write from a read: superseded. The `planning.changed` note now comes from the observer's publish path, not from `planning_status` (CONTEXT, fix-up decision "Ledger note"). The reviewer decision that PLAN W6 asked for is not recorded as an acceptance; the fix-up moved the write out of the read, so the open question no longer applies to the read path.
+3. Presence semantics: the observer heartbeats a checkout only when it sees a complete change in it (`observer.ts`, fix-up decision "Presence source"). PLAN W5 and CONTEXT D52-h did not describe this. Under it, `active` means a planning document changed within the freshness window, not that the session is alive.
+4. Scan cadence: `PLANNING_SCAN_INTERVAL_MS = 15_000` is a fixed constant (`observer.ts:30`), not an environment setting. PLAN does not specify a cadence. CONTEXT records the decision. This is the SC6 judgement flagged in VERIFICATION.md.
+5. Criterion 1 and 3 requirements (content-hash index with incremental equality; per-path hashes on the event) were not in PLAN tasks T2 or T6. They were added by the fix-up pass and are now verified (VERIFICATION.md, rows 1 and 3).
+6. Key retention: Dragonfly `EX` removes a session key about 25 h after its last heartbeat (`presence-dragonfly.ts:33-35`). This is recorded as residual retention, not a code deletion (CONTEXT, SC2 residual).
+7. `.planning/ROADMAP.md` has no phase 52 entry on any branch checked; the criteria came from the verification assignment.
 
 ## New dependencies
 
-None. `git diff 0df730e HEAD` shows no change to any `package.json` or lock file. The presence client uses Bun's built-in `RedisClient` from the `bun` module (`presence-client.ts:11`). `zod` (`^4.6.5`, `packages/mcp-server/package.json:13`) predates this phase and is used by `presence.ts:12`.
+None. `git diff 0df730e HEAD` over every `package.json` and lock file shows no change. The presence client uses Bun's built-in `RedisClient` from the `bun` module. `zod` (`^4.6.5`, `packages/mcp-server/package.json`) predates this phase.
+
+## Open items
+
+- TimescaleDB `HistorySink` adapter and migration (operator-gated).
+- SC6 scan-cadence judgement at `observer.ts:30`: the orchestrator decides whether a fixed timing constant counts as configuration. If it does, SC6 is FAIL and the status becomes `gaps_found`.
+- Residual risks as listed in VERIFICATION.md (key retention, stat-fingerprint reuse window, absolute worktree path in heartbeats and `planning_sessions`, process-local baseline and index cache).
