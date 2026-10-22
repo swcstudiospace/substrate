@@ -58,12 +58,19 @@ export type PlanningReport = z.infer<typeof PlanningReportSchema>;
 export const TouchedPairSchema = z.object({ phase: REPORT_ID, plan: REPORT_ID.nullable(), observedAtMs: z.number().int().nonnegative() }).strict();
 export type TouchedPair = z.infer<typeof TouchedPairSchema>;
 
+/** A repository's identity, `owner/name`. Two checkouts take part in one conflict only when they name the same repository. */
+export const REPO_ID = z
+	.string()
+	.max(256)
+	.regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
+
 export const SessionRecordSchema = z.object({
 	sessionId: z.string().regex(SESSION_ID_RE),
 	worktree: z.string().min(1).max(1024),
 	branch: z.string().min(1).max(256),
 	lastHeartbeatMs: z.number().int().nonnegative(),
 	planning: PlanningReportSchema.optional(),
+	repo: REPO_ID.nullable().optional(),
 	touched: z.array(TouchedPairSchema).max(MAX_REPORT_ENTRIES).optional(),
 });
 

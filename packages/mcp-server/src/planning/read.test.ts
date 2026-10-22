@@ -189,6 +189,7 @@ describe("planning_sessions planning rows and conflicts (phase 53, SOTA-09)", ()
 			sessionId,
 			worktree: `/work/${sessionId}`,
 			branch: `gsd/${sessionId}`,
+			repo: "owner/name",
 			lastHeartbeatMs: backend.clockMs,
 			touched: touched.map(([phase, plan]) => ({ phase, plan, observedAtMs: backend.clockMs })),
 			planning: { status: "known", scannedAtMs: backend.clockMs, phases: [] },
@@ -219,6 +220,13 @@ describe("planning_sessions planning rows and conflicts (phase 53, SOTA-09)", ()
 		storeSession(backend, touching(backend, "beta", [["53", "53-01"]]));
 		expect(await readerOver(seededTree(), { presence: new DragonflyPresenceStore(backend) }).sessions()).toMatchObject({ state: "ok", conflicts: [] });
 		expect(backend.writes).toEqual([]);
+	});
+
+	test("sessions of two repositories that touch one phase number do not conflict on the read", async () => {
+		const backend = new RecordingPresenceBackend();
+		storeSession(backend, touching(backend, "alpha", [["53", "53-01"]]));
+		storeSession(backend, { ...touching(backend, "beta", [["53", "53-01"]]), repo: "owner/two" });
+		expect(await readerOver(seededTree(), { presence: new DragonflyPresenceStore(backend) }).sessions()).toMatchObject({ state: "ok", conflicts: [] });
 	});
 
 	test("a session in a watcher gap is unknown in its row and takes no part in conflict detection", async () => {

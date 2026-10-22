@@ -1,32 +1,34 @@
 /**
  * Conflict detection over presence snapshot records: a phase key and a plan key over the pairs each session touched inside the
- * TTL, one open event per key, nothing auto-resolved, and an unknown view that takes no part and blocks conflict-sensitive writes.
+ * TTL, within one repository, one open event per key, nothing auto-resolved, and an unknown view that takes no part and blocks
+ * conflict-sensitive writes.
  */
 import { describe, expect, test } from "bun:test";
-import {
-	conflictEvent,
-	detectConflicts,
-	gateConflictSensitiveWrite,
-	PLANNING_CONFLICT,
-	type ConflictInput,
-	type PlanningConflict,
-} from "./conflicts.ts";
+import { conflictEvent, detectConflicts, gateConflictSensitiveWrite, PLANNING_CONFLICT, type ConflictInput, type PlanningConflict } from "./conflicts.ts";
 import type { ClassifiedSession, PlanningReport, TouchedPair, UnknownViewReason } from "./presence.ts";
 
 const NOW = 1_000_000;
 const TTL = 30_000;
+const REPO = "owner/name";
 
 /** A touched pair observed at `observedAtMs`: a phase, and the plan it named, or null for a phase-level document. */
 function pair(phase: string, plan: string | null = null, observedAtMs = NOW): TouchedPair {
 	return { phase, plan, observedAtMs };
 }
 
-function session(sessionId: string, touched: TouchedPair[], planning: PlanningReport | undefined, status: "active" | "stale" = "active"): ClassifiedSession {
+function session(
+	sessionId: string,
+	touched: TouchedPair[],
+	planning: PlanningReport | undefined,
+	status: "active" | "stale" = "active",
+	repo: string | null = REPO,
+): ClassifiedSession {
 	return {
 		sessionId,
 		worktree: `/work/${sessionId}`,
 		branch: `gsd/${sessionId}`,
 		lastHeartbeatMs: NOW,
+		repo,
 		touched,
 		status,
 		ageMs: 0,
@@ -59,6 +61,7 @@ describe("detectConflicts: the phase key", () => {
 			{
 				kind: PLANNING_CONFLICT,
 				status: "open",
+				repo: REPO,
 				key: { by: "phase", phase: "53" },
 				phases: ["53"],
 				plans: ["53-01"],
@@ -69,7 +72,9 @@ describe("detectConflicts: the phase key", () => {
 	});
 
 	test("the same phase with no shared plan is one phase event with no plans named", () => {
-		const report = detectConflicts(input([session("alpha", [pair("53", "53-01")], known()), session("beta", [pair("53", "53-02")], known())]));
+		const report = detectConflicts(
+			input([session("alpha", [pair("53", "53-01")], known()), session("beta", [pair("53", "53-02")], known())]),
+		);
 		expect(report.conflicts).toEqual([expect.objectContaining({ key: { by: "phase", phase: "53" }, plans: [] })]);
 	});
 
@@ -119,6 +124,7 @@ describe("detectConflicts: the plan key", () => {
 			{
 				kind: PLANNING_CONFLICT,
 				status: "open",
+				repo: REPO,
 				key: { by: "plan", plan: "shared-plan" },
 				phases: ["53", "54"],
 				plans: ["shared-plan"],
@@ -149,11 +155,43 @@ describe("detectConflicts: the plan key", () => {
 	});
 });
 
+describe("detectConflicts: conflicts stay within one repository", () => {
+	test("two repositories that touch the same phase number do not conflict", () => {
+		const report = detectConflicts(
+			input([
+				session("alpha", [pair("53", "53-01")], known(), "active", "owner/one"),
+				session("beta", [pair("53", "53-01")], known(), "active", "owner/two"),
+			]),
+		);
+		expect(report.conflicts).toEqual([]);
+		expect(report.views).toHaveLength(2);
+	});
+
+	test("a session with no repository takes no part in detection", () => {
+		const report = detectConflicts(input([session("alpha", [pair("53")], known(), "active", null), session("beta", [pair("53")], known())]));
+		expect(report.conflicts).toEqual([]);
+		expect(report.views).toEqual([expect.objectContaining({ sessionId: "alpha", status: "known", repo: null }), expect.objectContaining({ sessionId: "beta" })]);
+	});
+
+	test("each repository's conflicts name that repository, and are sorted by it", () => {
+		const report = detectConflicts(
+			input([
+				session("alpha", [pair("53")], known(), "active", "owner/two"),
+				session("beta", [pair("53")], known(), "active", "owner/two"),
+				session("gamma", [pair("53")], known(), "active", "owner/one"),
+				session("delta", [pair("53")], known(), "active", "owner/one"),
+			]),
+		);
+		expect(report.conflicts.map((conflict) => [conflict.repo, conflict.sessionIds])).toEqual([
+			["owner/one", ["delta", "gamma"]],
+			["owner/two", ["alpha", "beta"]],
+		]);
+	});
+});
+
 describe("detectConflicts: touched pairs age out at the TTL", () => {
 	test("a pair older than the TTL does not count; a pair exactly the TTL old still does", () => {
-		const aged = detectConflicts(
-			input([session("alpha", [pair("53", null, NOW - TTL - 1)], known()), session("beta", [pair("53")], known())]),
-		);
+		const aged = detectConflicts(input([session("alpha", [pair("53", null, NOW - TTL - 1)], known()), session("beta", [pair("53")], known())]));
 		expect(aged.conflicts).toEqual([]);
 
 		const edge = detectConflicts(input([session("alpha", [pair("53", null, NOW - TTL)], known()), session("beta", [pair("53")], known())]));
@@ -220,6 +258,7 @@ describe("conflictEvent", () => {
 	const phaseConflict: PlanningConflict = {
 		kind: PLANNING_CONFLICT,
 		status: "open",
+		repo: REPO,
 		key: { by: "phase", phase: "53" },
 		phases: ["53"],
 		plans: ["53-01"],
@@ -228,19 +267,19 @@ describe("conflictEvent", () => {
 	};
 
 	test("names the phase and the shared plans, and is a warning on the substrate surface", () => {
-		const event = conflictEvent(phaseConflict, "owner/name");
-		expect(event).toMatchObject({ surface: "substrate", kind: "warning", repo: "owner/name" });
+		const event = conflictEvent(phaseConflict);
+		expect(event).toMatchObject({ surface: "substrate", kind: "warning", repo: REPO });
 		expect(event.summary).toContain("phase 53");
 		expect(event.payload).toMatchObject({ kind: PLANNING_CONFLICT, key: { by: "phase", phase: "53" }, plans: ["53-01"], sessionIds: ["alpha", "beta"] });
 	});
 
-	test("names no repo when the origin is unknown", () => {
-		expect(conflictEvent(phaseConflict, null)).not.toHaveProperty("repo");
+	test("names the repository the conflict is on", () => {
+		expect(conflictEvent({ ...phaseConflict, repo: "owner/two" })).toMatchObject({ repo: "owner/two" });
 	});
 
 	test("caps the id lists and keeps the full counts", () => {
 		const many = Array.from({ length: 40 }, (_, index) => `53-${String(index).padStart(2, "0")}`);
-		const event = conflictEvent({ ...phaseConflict, plans: many }, null);
+		const event = conflictEvent({ ...phaseConflict, plans: many });
 		expect(event.payload).toMatchObject({ planCount: 40, plans: many.slice(0, 32) });
 	});
 });

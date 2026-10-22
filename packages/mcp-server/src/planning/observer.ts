@@ -169,8 +169,9 @@ export class PlanningObserver {
 		const clock = this.deps.presence === null ? null : await readClock(this.deps.presence);
 		const nowMs = clock !== null && clock.ok ? clock.nowMs : null;
 		const gapMoved = nowMs !== null ? this.stampReport(built, nowMs) : false;
+		const repo = await repoOf(this.deps.fs, root);
 		if (!built.ok) {
-			await this.heartbeat(root, false, ttlMs);
+			await this.heartbeat(root, false, ttlMs, repo);
 			return { state: "unavailable", code: built.code };
 		}
 		this.index = { root, index: built.index };
@@ -187,7 +188,6 @@ export class PlanningObserver {
 		if (diff !== null && changed && nowMs !== null && !retry) this.touch(pairsOfChange(diff, nextPhasePlans, priorBaseline?.phasePlans), nowMs, ttlMs);
 		if (this.touchedOverflow && nowMs !== null) this.report = unknownReport(nowMs, "report-limit");
 
-		const repo = await repoOf(this.deps.fs, root);
 		// A baseline that holds (a failed publish) keeps its own phase and plan map, so a removal is still read from what was there.
 		const phasePlansFor = (snapshot: PlanningSnapshot): ReadonlyMap<string, PhasePlan> =>
 			snapshot === previous && priorBaseline !== null ? priorBaseline.phasePlans : nextPhasePlans;
@@ -215,7 +215,7 @@ export class PlanningObserver {
 			outcome = previous === null ? "baseline" : diff !== null && !diff.complete ? "incomplete" : "unchanged";
 		}
 		this.heldChange = holds ? signature : null;
-		const heartbeat = await this.heartbeat(root, changed || gapMoved, ttlMs);
+		const heartbeat = await this.heartbeat(root, changed || gapMoved, ttlMs, repo);
 		if (nowMs !== null) await this.announce(repo, nowMs, ttlMs);
 		return { state: "observed", outcome, heartbeat };
 	}
@@ -247,7 +247,7 @@ export class PlanningObserver {
 	}
 
 	/** Heartbeats this checkout when a change is pending, the scan's `due` says one is. The record's time is replaced by the server's clock, and the record carries the report and the touched pairs. */
-	private async heartbeat(root: string, due: boolean, ttlMs: number): Promise<PlanningHeartbeat> {
+	private async heartbeat(root: string, due: boolean, ttlMs: number, repo: RepoLookup): Promise<PlanningHeartbeat> {
 		if (due) this.presencePending = true;
 		if (this.report !== null && this.written !== null && reportViewOf(this.report) !== reportViewOf(this.written)) this.presencePending = true;
 		if (!this.presencePending) return { state: "not-due" };
@@ -261,6 +261,7 @@ export class PlanningObserver {
 				worktree: root,
 				branch: await branchOf(this.deps.fs, layout.gitDir),
 				lastHeartbeatMs: 0,
+				repo: repo.state === "known" ? repo.repo : null,
 				touched: this.touched,
 				...(this.report === null ? {} : { planning: this.report }),
 			};
@@ -286,6 +287,7 @@ export class PlanningObserver {
 		const repoName = repo.state === "known" ? repo.repo : null;
 		const next = new Set<string>();
 		for (const conflict of detected.conflicts) {
+			if (conflict.repo !== repoName) continue;
 			const signature = conflictSignature(conflict);
 			if (this.openConflicts.has(signature)) {
 				next.add(signature);
@@ -293,7 +295,7 @@ export class PlanningObserver {
 			}
 			let stored = false;
 			try {
-				stored = await this.deps.emit(conflictEvent(conflict, repoName));
+				stored = await this.deps.emit(conflictEvent(conflict));
 			} catch {
 				stored = false;
 			}

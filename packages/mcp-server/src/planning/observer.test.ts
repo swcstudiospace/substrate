@@ -300,9 +300,9 @@ function planningOf(view: PlanningSessionsView, sessionId: string) {
 }
 
 /** A checkout's git data (origin and branch) and its files, under its own root. */
-function checkoutOf(root: string, branch: string, files: Record<string, string>): Record<string, string> {
+function checkoutOf(root: string, branch: string, files: Record<string, string>, repo: string = REPO): Record<string, string> {
 	return {
-		[`${root}/.git/config`]: `[remote "origin"]\n\turl = git@github.com:${REPO}.git\n`,
+		[`${root}/.git/config`]: `[remote "origin"]\n\turl = git@github.com:${repo}.git\n`,
 		[`${root}/.git/HEAD`]: `ref: refs/heads/${branch}\n`,
 		...files,
 	};
@@ -741,5 +741,29 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b again\n");
 		await accepting.scan();
 		expect(conflictEventsOf(attempts)).toHaveLength(4);
+	});
+
+	test("two checkouts of unrelated repositories that touch the same phase number do not conflict (greptile repo thread)", async () => {
+		const tree = new FakeTree({
+			...checkoutOf(CHECKOUT_A, "gsd/p53-a", { [phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md")]: "# context\n" }, "owner/one"),
+			...checkoutOf(CHECKOUT_B, "gsd/p53-b", { [phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md")]: "# context\n" }, "owner/two"),
+		});
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		const attempts: EventInput[] = [];
+		const a = announcingObserver(tree, presence, attempts, true, CHECKOUT_A);
+		const b = announcingObserver(tree, presence, attempts, true, CHECKOUT_B);
+		await a.scan();
+		await b.scan();
+
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a\n");
+		await a.scan();
+		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b\n");
+		await b.scan();
+
+		expect(conflictEventsOf(attempts)).toEqual([]);
+		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({ state: "ok", conflicts: [] });
+		expect(storedRecord(backend, tree, CHECKOUT_B)).toMatchObject({ repo: "owner/two" });
 	});
 });
