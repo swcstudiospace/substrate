@@ -13,6 +13,7 @@ import type { EventInput } from "../types.ts";
 import { PLANNING_MAX_FILES_ENV, PLANNING_ROOT_ENV, loadPlanningSettings } from "./config.ts";
 import { nodePlanningFs } from "./fs.ts";
 import { DragonflyPresenceStore, PRESENCE_KEY_PREFIX, PRESENCE_MAX_SESSIONS, type PresenceBackend } from "./presence-dragonfly.ts";
+import { dragonflyPresenceBackend, type PresenceRedisClient } from "./presence-client.ts";
 import { PLANNING_OBSERVER_SESSION, PlanningReader, repoFromGitConfig } from "./read.ts";
 import type { SessionRecord } from "./presence.ts";
 
@@ -144,13 +145,13 @@ describe("planning_status", () => {
 		expect(JSON.stringify(event)).not.toContain(BODY);
 	});
 
-	test("a change in a checkout with no origin remote is reported as repo-unknown and emits nothing", async () => {
+	test("a change in a checkout with no git data is reported as repo-unknown and emits nothing", async () => {
 		await seedPhase();
 		const harness = reader(root);
 		await harness.reader.status();
 		await write(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
 		const view = await harness.reader.status();
-		expect(view.state === "ok" && view.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "repo-unknown" });
+		expect(view.state === "ok" && view.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "repo-unknown", repoReason: "no-git-entry" });
 		expect(harness.events).toEqual([]);
 	});
 
@@ -312,5 +313,151 @@ describe("planning_sessions", () => {
 	test("an absent root answers disabled, never an error", async () => {
 		const view = await new PlanningReader({ settings: loadPlanningSettings({}), fs: nodePlanningFs(), presence: null, emit: async () => true }).sessions();
 		expect(view).toEqual({ state: "disabled", reason: "root-unset" });
+	});
+});
+
+const ORIGIN_CONFIG = '[remote "origin"]\n\turl = git@github.com:swcstudiospace/agent-substrate.git\n';
+
+describe("the planning heartbeat", () => {
+	test("a session that reads the plane appears in planning_sessions afterwards", async () => {
+		await seedPhase();
+		await write(".git/HEAD", "ref: refs/heads/gsd/p52-wiring\n");
+		const presence = new DragonflyPresenceStore(new PresenceFake());
+		const plane = new PlanningReader({ settings: settingsFor(root), fs: nodePlanningFs(), presence, emit: async () => true });
+
+		expect(await plane.status()).toMatchObject({ state: "ok", heartbeat: { state: "written" } });
+		const stored = await presence.listWithin(10);
+		expect(stored.records.map((record) => [record.worktree, record.branch, record.activePhase])).toEqual([[root, "gsd/p52-wiring", null]]);
+
+		const sessions = await plane.sessions();
+		expect(sessions.state === "ok" && sessions.sessions).toEqual([
+			expect.objectContaining({ sessionId: expect.stringMatching(/^wt-[0-9a-f]{24}$/), worktree: root, status: "active", ageMs: 0 }),
+		]);
+	});
+
+	test("a checkout with no git entry records a failed heartbeat, and the read still returns its summary", async () => {
+		await seedPhase();
+		const presence = new DragonflyPresenceStore(new PresenceFake());
+		const plane = new PlanningReader({ settings: settingsFor(root), fs: nodePlanningFs(), presence, emit: async () => true });
+		expect(await plane.status()).toMatchObject({
+			state: "ok",
+			counts: { documents: 2, errors: 1 },
+			heartbeat: { state: "failed", detail: "no-git-entry" },
+		});
+		expect((await presence.listWithin(10)).records).toEqual([]);
+	});
+});
+
+describe("the planning baseline", () => {
+	test("a slow scan that finishes after a newer one does not move the baseline back", async () => {
+		await write(`${PHASE}/52-CONTEXT.md`, `${BODY} one\n`);
+		await write(".git/config", ORIGIN_CONFIG);
+		const real = nodePlanningFs();
+		const { promise: atGate, resolve: reached } = Promise.withResolvers<void>();
+		const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+		let gated = false;
+		// The first read of the document returns its old bytes, then waits: that scan hashes old content and finishes late.
+		const slowFirst = {
+			...real,
+			readFile: async (path: string) => {
+				const bytes = await real.readFile(path);
+				if (!gated && path.endsWith("52-CONTEXT.md")) {
+					gated = true;
+					reached();
+					await gate;
+				}
+				return bytes;
+			},
+		};
+		const plane = new PlanningReader({ settings: settingsFor(root), fs: slowFirst, presence: null, emit: async () => true });
+
+		const slow = plane.status();
+		await atGate;
+		await write(`${PHASE}/52-CONTEXT.md`, `${BODY} two\n`);
+		const fresh = await plane.status();
+		expect(fresh.state === "ok" && fresh.changes).toEqual({ state: "baseline" });
+
+		release();
+		const stale = await slow;
+		expect(stale.state === "ok" && stale.changes).toEqual({ state: "superseded" });
+
+		const after = await plane.status();
+		expect(after.state === "ok" && after.changes).toEqual({ state: "unchanged" });
+	});
+});
+
+describe("the origin of a checkout", () => {
+	test("a .git file names a git directory whose config holds the origin", async () => {
+		const gitDir = join(dir, "git-admin");
+		await mkdir(gitDir, { recursive: true });
+		await writeFile(join(gitDir, "config"), ORIGIN_CONFIG);
+		await writeFile(join(root, ".git"), `gitdir: ${gitDir}\n`);
+		await seedPhase();
+		const harness = reader(root);
+		await harness.reader.status();
+		await write(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		const view = await harness.reader.status();
+		expect(view.state === "ok" && view.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "emitted" });
+		expect(harness.events.map((event) => event.repo)).toEqual([REPO]);
+	});
+
+	test("a linked worktree's git directory reads the shared config from its commondir", async () => {
+		const common = join(dir, "common-git");
+		const worktreeAdmin = join(common, "worktrees", "wt");
+		await mkdir(worktreeAdmin, { recursive: true });
+		await writeFile(join(common, "config"), ORIGIN_CONFIG);
+		await writeFile(join(worktreeAdmin, "commondir"), "../..\n");
+		await writeFile(join(worktreeAdmin, "HEAD"), "ref: refs/heads/gsd/p52-wiring\n");
+		await writeFile(join(root, ".git"), `gitdir: ${worktreeAdmin}\n`);
+		await seedPhase();
+		const harness = reader(root);
+		await harness.reader.status();
+		await write(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		const view = await harness.reader.status();
+		expect(view.state === "ok" && view.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "emitted" });
+		expect(harness.events.map((event) => event.repo)).toEqual([REPO]);
+	});
+
+	test("an unreadable .git/config still returns the document summary, and the change names the reason", async () => {
+		await seedPhase();
+		await write(".git/config", ORIGIN_CONFIG);
+		const real = nodePlanningFs();
+		const denied = {
+			...real,
+			readFile: async (path: string) => {
+				if (path.endsWith(join(".git", "config"))) throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+				return real.readFile(path);
+			},
+		};
+		const events: EventInput[] = [];
+		const plane = new PlanningReader({
+			settings: settingsFor(root),
+			fs: denied,
+			presence: null,
+			emit: async (event) => {
+				events.push(event);
+				return true;
+			},
+		});
+		await plane.status();
+		await write(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		const view = await plane.status();
+		expect(view.state).toBe("ok");
+		if (view.state !== "ok") return;
+		expect(view.counts.documents).toBe(2);
+		expect(view.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "repo-unknown", repoReason: "config-unreadable" });
+		expect(events).toEqual([]);
+	});
+});
+
+describe("a stalled Dragonfly reply", () => {
+	test("planning_sessions returns its error within the command deadline", async () => {
+		const stalled: PresenceRedisClient = { connect: async () => {}, send: () => new Promise<never>(() => {}), close: () => {} };
+		const presence = new DragonflyPresenceStore(dragonflyPresenceBackend("redis://127.0.0.1:6379", 250, () => stalled, 20));
+		const started = performance.now();
+		const view = await sessionsReader(presence).sessions();
+		expect(performance.now() - started).toBeLessThan(1000);
+		expect(view).toMatchObject({ state: "unavailable", code: "presence-listing-failed" });
+		expect(view.state === "unavailable" && view.detail).toContain("deadline (20 ms presence SCAN)");
 	});
 });

@@ -65,8 +65,8 @@ describe("planningChangeEvent", () => {
 		});
 		if (!before.ok || !after.ok) throw new Error("index failed");
 		const diff = diffPlanningIndex(
-			{ records: before.index.records, truncated: before.index.truncated },
-			{ records: after.index.records, truncated: after.index.truncated },
+			{ records: before.index.records, truncated: before.index.truncated, unlisted: before.index.unlisted },
+			{ records: after.index.records, truncated: after.index.truncated, unlisted: after.index.unlisted },
 		);
 		expect(diff.changed).toEqual([".planning/STATE.md"]);
 

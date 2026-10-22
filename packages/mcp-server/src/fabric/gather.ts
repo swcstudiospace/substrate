@@ -2,9 +2,10 @@
  * The fabric's one I/O step (phase 51, SOTA-07): reads the sources and folds them into the facts the pure
  * builders take.
  *
- * Every source read runs under a deadline. A source that misses it, or throws, leaves its resources with no
- * answer, which reports as `unavailable` and names the reason in the row's fixed `source` phrase. The call
- * always returns the facts, so a slow source never stalls a status read, and nothing throws to the caller.
+ * Every source read runs under a deadline. `health()` bounds each of its own probes, so a slow plane answers
+ * `unavailable` for itself while the others keep their answers; the deadline here is a backstop for the whole call. A
+ * source that misses it, or throws, leaves its resources with no answer, which reports as `unavailable` and names the
+ * reason in the row's fixed `source` phrase. The call always returns the facts, and nothing throws to the caller.
  */
 import {
 	type BreakerReading,
@@ -18,6 +19,9 @@ import {
 
 /** The per-source deadline for each read the fabric makes, in ms. */
 export const FABRIC_SOURCE_DEADLINE_MS = 1500;
+
+/** How long one health computation is shared by the fabric's calls and `/healthz`, in ms (phase 51, D51-b). */
+export const FABRIC_HEALTH_WINDOW_MS = 2_000;
 
 type Read<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly reason: "deadline" | "failed" };
 

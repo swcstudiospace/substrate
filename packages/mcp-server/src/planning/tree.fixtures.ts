@@ -25,6 +25,8 @@ export class FakeTree implements PlanningFs {
 	largestReturned = 0;
 	/** Paths whose open throws EACCES. */
 	readonly denied = new Set<string>();
+	/** Directories whose listing throws EACCES. */
+	readonly deniedListings = new Set<string>();
 	/** Called with the path just before it is resolved for `openRead`, so a test can swap a link in between. */
 	beforeOpen: ((path: string) => void) | null = null;
 	private readonly files = new Map<string, Uint8Array>();
@@ -41,8 +43,11 @@ export class FakeTree implements PlanningFs {
 	/** Most probes in flight at once. A sequential walk keeps this at one; the concurrency bound shows here. */
 	maxProbesInFlight = 0;
 	private probesInFlight = 0;
+	/** Every path probed, in order. */
+	readonly probed: string[] = [];
 
 	async probe(path: string): Promise<Probe> {
+		this.probed.push(path);
 		this.probesInFlight += 1;
 		this.maxProbesInFlight = Math.max(this.maxProbesInFlight, this.probesInFlight);
 		try {
@@ -59,6 +64,7 @@ export class FakeTree implements PlanningFs {
 
 	async readDir(path: string): Promise<DirEntry[] | null> {
 		this.listed.push(path);
+		if (this.deniedListings.has(path)) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
 		const found = this.resolve(path);
 		if (found.state !== "resolved" || this.files.has(found.real)) return null;
 		const dir = found.real;

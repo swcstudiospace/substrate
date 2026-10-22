@@ -144,6 +144,7 @@ import { PlanningReader, type PlanningReaderDeps } from "./planning/read.ts";
 import type { SteeringWiring } from "./planning/steering-tools.ts";
 import { SteeringInbox, type SteeringHistorySink } from "./planning/steering.ts";
 import type { FabricSources } from "./fabric/types.ts";
+import { FABRIC_HEALTH_WINDOW_MS } from "./fabric/gather.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
 import {
@@ -5970,46 +5971,57 @@ export class Substrate {
 	 * minute, never more, and `null` with `jobs.ledgerReason` when it could not
 	 * be had. It does not touch the status code.
 	 */
-	async health(): Promise<SubstrateHealth> {
+	async health(options: { readonly greptimeTimeoutMs?: number } = {}): Promise<SubstrateHealth> {
+		// `options.greptimeTimeoutMs` bounds the Greptime probes for the fabric (phase 51). Unset, which is how `/healthz`
+		// calls it, each Greptime call is made exactly as on main: no argument, the client's own timeout, and no wait added.
+		const timeoutMs = options.greptimeTimeoutMs;
+		// The Greptime chain and the other planes start at once, so one slow Greptime does not hold the others back.
 		// A store that throws is down. `/healthz` has to answer that; a 500 would hide the outage from the monitor.
-		let greptime = false;
-		if (this.greptime) {
-			try {
-				greptime = await this.greptime.ping();
-			} catch {
-				greptime = false;
-			}
-		}
-		const appendOnly = greptime ? (await this.greptime?.ensureAppendMode().catch(() => null)) ?? null : null;
-		const quotingDialectKnown = greptime
-			? await this.greptime?.probeDialect().then(() => this.greptime?.quotingDialectKnown === true).catch(() => false) ?? false
-			: false;
+		const greptimeClient = this.greptime;
+		const greptimeUp: Promise<boolean> = greptimeClient
+			? this.healthBound(timeoutMs, () => (timeoutMs === undefined ? greptimeClient.ping() : greptimeClient.ping(timeoutMs))).then(
+					(up) => up === true,
+				)
+			: Promise.resolve(false);
+		// The append-mode, dialect, write-probe and size reads need the ping's answer, so they run only after a yes.
+		const greptimeChecks = greptimeUp.then(async (up) => {
+			if (!up || greptimeClient === null) return { appendOnly: null, quotingDialectKnown: false, probe: null, ledgerCapacity: null };
+			const appendOnly = (await this.healthBound(timeoutMs, () => greptimeClient.ensureAppendMode())) ?? null;
+			const quotingDialectKnown =
+				(await this.healthBound(timeoutMs, async () => {
+					await greptimeClient.probeDialect();
+					return greptimeClient.quotingDialectKnown === true;
+				})) === true;
+			// Only a reachable ledger is probed: an unreachable one is already not writable, and a write that cannot
+			// connect would only charge the breaker twice. The client's own write timeout applies, not HEALTH_PROBE_MS,
+			// so a slow day does not read as a full disk. The `.then` wrapper is for a test fake without the method.
+			const probe = await Promise.resolve()
+				.then(() => greptimeClient.probeWritable(this.config.ledger.writeProbeS * 1000))
+				.catch(() => null);
+			const ledgerCapacity = await bounded(() => greptimeClient.capacity(HEALTH_PROBE_MS), HEALTH_PROBE_MS);
+			return { appendOnly, quotingDialectKnown, probe, ledgerCapacity };
+		});
 		const hindsight = hindsightFromEnv();
-		const [index, capacity, hindsightOk, ragflowOk, probe, ledgerCapacity] = await Promise.all([
-			this.index
+		const indexStore = this.index;
+		const [greptime, checks, index, capacity, hindsightOk, ragflowOk, ledgerJobs, indexArchive] = await Promise.all([
+			greptimeUp,
+			greptimeChecks,
+			indexStore
 				? Promise.resolve()
-						.then(() => this.index!.ping(HEALTH_PROBE_MS))
+						.then(() => indexStore.ping(HEALTH_PROBE_MS))
 						.catch(() => false)
 				: Promise.resolve(false),
-			this.index ? this.indexCapacityForHealth(this.index) : Promise.resolve(null),
+			indexStore ? this.indexCapacityForHealth(indexStore) : Promise.resolve(null),
 			hindsight
 				? probeHealth(hindsight, this.hindsightFetch, HEALTH_PROBE_MS).then((probed) => probed.ok, () => false)
 				: Promise.resolve(null),
 			this.config.ragflow
 				? listDatasets(this.config.ragflow, this.ragflowFetch, HEALTH_PROBE_MS).then((listed) => listed.ok, () => false)
 				: Promise.resolve(null),
-			// Only a reachable ledger is probed: an unreachable one is already not
-			// writable, and a write that cannot connect would only charge the
-			// breaker twice. Keeps the client's own write timeout rather than
-			// HEALTH_PROBE_MS so a slow day does not read as a full disk. The
-			// `.then` wrapper is for a test fake without the method: `null`, never a throw.
-			greptime
-				? Promise.resolve()
-						.then(() => this.greptime!.probeWritable(this.config.ledger.writeProbeS * 1000))
-						.catch(() => null)
-				: Promise.resolve(null),
-			greptime ? bounded(() => this.greptime!.capacity(HEALTH_PROBE_MS), HEALTH_PROBE_MS) : Promise.resolve(null),
+			this.ledgerJobs(),
+			this.indexArchiveHealth(),
 		]);
+		const { appendOnly, quotingDialectKnown, probe, ledgerCapacity } = checks;
 		const cache = this.cache.health();
 		const breakers = this.planes.snapshots();
 		// uplift-3 N2: every size read that answered in time is one runway sample;
@@ -6035,8 +6047,6 @@ export class Substrate {
 		// A probe that has not run yet (or is off) neither proves nor disproves;
 		// only a failed one overrides the metadata.
 		const eventsWritable = metadataWritable && probe?.lastProbeOk !== false;
-		const ledgerJobs = await this.ledgerJobs();
-		const indexArchive = await this.indexArchiveHealth();
 		return {
 			index,
 			greptime,
@@ -6059,6 +6069,30 @@ export class Substrate {
 		};
 	}
 
+	/** The field behind `sharedHealth`: the last computation, when it started, and the Greptime bound it ran with. */
+	private healthShare: { at: number; greptimeTimeoutMs: number | undefined; promise: Promise<SubstrateHealth> } | null = null;
+
+	/**
+	 * One health computation for every caller that accepts an answer no older than `windowMs` and ran with the same
+	 * Greptime bound (phase 51). The fabric tools use it. `/healthz` calls `health()` directly, as on main. Concurrent
+	 * callers share one in-flight computation, and a window of 0 computes afresh.
+	 */
+	sharedHealth(windowMs: number, options: { readonly greptimeTimeoutMs?: number } = {}): Promise<SubstrateHealth> {
+		const now = Date.now();
+		const share = this.healthShare;
+		if (share !== null && share.greptimeTimeoutMs === options.greptimeTimeoutMs && now - share.at >= 0 && now - share.at < windowMs) {
+			return share.promise;
+		}
+		const promise = this.health(options);
+		this.healthShare = { at: now, greptimeTimeoutMs: options.greptimeTimeoutMs, promise };
+		return promise;
+	}
+
+	/** `work` under the fabric's bound when one is given. Without one it runs as `/healthz` always has: the client's own timeout, and a throw answers null. Never rejects. */
+	private healthBound<T>(ms: number | undefined, work: () => Promise<T>): Promise<T | null> {
+		return ms === undefined ? Promise.resolve().then(work).catch(() => null) : bounded(work, ms);
+	}
+
 	/** `/healthz.eventBus`: the counters of the bus this process holds. A bus that keeps none (a test fake) reads as zero. */
 	private eventBusHealth(): EventBusHealth {
 		const bus = this.eventBus;
@@ -6076,7 +6110,7 @@ export class Substrate {
 		const { dbEndpoints } = this.config;
 		return {
 			now: () => new Date().toISOString(),
-			health: () => this.health(),
+			health: () => this.sharedHealth(FABRIC_HEALTH_WINDOW_MS, { greptimeTimeoutMs: HEALTH_PROBE_MS }),
 			railwayCost: () => this.railway.costReport(),
 			outbox: () => {
 				const stats = this.retainOutboxStats();

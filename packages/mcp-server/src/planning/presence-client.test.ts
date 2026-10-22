@@ -141,4 +141,22 @@ describe("dragonflyPresenceBackend", () => {
 		expect([...commands].filter((command) => !(PRESENCE_COMMANDS as readonly string[]).includes(command))).toEqual([]);
 		expect(redis.sent.find((entry) => entry.command === "SET")?.args).toEqual(["k", "v", "EX", "60"]);
 	});
+
+	test("a reply that never arrives fails within the command deadline, closes its connection, and the next call reconnects", async () => {
+		const stalled = new ScriptedRedis(() => new Promise<never>(() => {}));
+		const healthy = new ScriptedRedis(() => "value");
+		const { make, made } = factory([stalled, healthy]);
+		const backend = dragonflyPresenceBackend("redis://127.0.0.1:6379", 1000, make, 20);
+		const started = performance.now();
+		const failure = await backend.get("k").then(
+			() => null,
+			(error: unknown) => error,
+		);
+		expect(performance.now() - started).toBeLessThan(1000);
+		expect(failure).toBeInstanceOf(PresenceBackendError);
+		expect(String(failure)).toContain("deadline (20 ms presence GET)");
+		expect(stalled.closed).toBe(true);
+		expect(await backend.get("k")).toBe("value");
+		expect(made).toHaveLength(2);
+	});
 });
