@@ -38,11 +38,23 @@ export class FakeTree implements PlanningFs {
 		}
 	}
 
+	/** Most probes in flight at once. A sequential walk keeps this at one; the concurrency bound shows here. */
+	maxProbesInFlight = 0;
+	private probesInFlight = 0;
+
 	async probe(path: string): Promise<Probe> {
-		const found = this.resolve(path);
-		if (found.state !== "resolved") return found;
-		const isFile = this.files.has(found.real);
-		return { state: "present", real: found.real, isFile, isDir: !isFile };
+		this.probesInFlight += 1;
+		this.maxProbesInFlight = Math.max(this.maxProbesInFlight, this.probesInFlight);
+		try {
+			// Yield once so that concurrent callers overlap, as they would on a real filesystem.
+			await Promise.resolve();
+			const found = this.resolve(path);
+			if (found.state !== "resolved") return found;
+			const isFile = this.files.has(found.real);
+			return { state: "present", real: found.real, isFile, isDir: !isFile };
+		} finally {
+			this.probesInFlight -= 1;
+		}
 	}
 
 	async readDir(path: string): Promise<DirEntry[] | null> {
