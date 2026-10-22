@@ -720,6 +720,8 @@ describe("held, incomplete and failed-heartbeat states are reported", () => {
 		expect(await observer.scan()).toEqual({ state: "observed", outcome: "repo-unknown", heartbeat: { state: "failed", detail: "no-git-entry" } });
 		expect(events).toEqual([]);
 		expect(backend.writes).toEqual([]);
+	});
+});
 
 describe("the observer under a change the ledger does not store, failure, load and shutdown", () => {
 	/** A filesystem whose directory reads wait for `gate`, so a scan can be held in flight. */
