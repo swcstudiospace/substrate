@@ -302,10 +302,17 @@ describe("the steering tools over MCP", () => {
 		const sink = new MemorySink();
 		const client = await connect(substrateWith(ENABLED, sink), { surface: "omp", isOperator: true });
 
+		// The schema has no author fields, so the SDK refuses the call before the handler runs. The refusal is checked by
+		// its flag and by what happened, not by the wording of the SDK's message.
 		for (const extra of [{ principal_id: "omp" }, { author_kind: "human" }]) {
-			expect((await call(client, "steering_queue", { ...QUEUE_ARGS, ...extra })).isError).toBe(true);
+			const result = await client.callTool({ name: "steering_queue", arguments: { ...QUEUE_ARGS, ...extra } });
+			expect(result.isError).toBe(true);
 		}
 		expect(sink.entries).toEqual([]);
+		expect(await call(client, "steering_list", { session_id: "sess-a" })).toMatchObject({
+			isError: false,
+			body: { status: "listed", directives: [] },
+		});
 	});
 
 	test("a write with no audit sink answers not-configured as an error, and a read answers it as a plain reply", async () => {
