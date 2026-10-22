@@ -79,7 +79,7 @@ describe("planningChangeEvent", () => {
 		const event = planningChangeEvent({
 			repo: REPO,
 			sessionId: SESSION,
-			diff: { added: [`.planning/phases/52-x/${token}.md`], removed: [], changed: [] },
+			diff: { complete: true, added: [`.planning/phases/52-x/${token}.md`], removed: [], changed: [] },
 		});
 		expect(JSON.stringify(event)).not.toContain(token);
 		expect(event?.summary).not.toContain(token);
