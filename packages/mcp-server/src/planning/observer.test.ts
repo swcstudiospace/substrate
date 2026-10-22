@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { EventInput } from "../types.ts";
 import { RecordingPresenceBackend } from "./backend.fixtures.ts";
-import { PLANNING_ROOT_ENV, loadPlanningSettings } from "./config.ts";
+import { PLANNING_ROOT_ENV, PLANNING_SCAN_INTERVAL_ENV, loadPlanningSettings } from "./config.ts";
 import { PLANNING_OBSERVER_SESSION, PlanningObserver } from "./observer.ts";
 import { DragonflyPresenceStore, PRESENCE_KEY_PREFIX } from "./presence-dragonfly.ts";
 import { FakeTree, TREE_ROOT } from "./tree.fixtures.ts";
@@ -189,20 +189,31 @@ describe("the observer's heartbeat", () => {
 		expect(storedSession(backend)).toMatchObject({ worktree: TREE_ROOT, branch: BRANCH, activePhase: null, lastHeartbeatMs: backend.clockMs });
 	});
 
-	test("the observer's timer is refused while the plane is disabled, and runs only between start and stop", () => {
-		const disabled = new PlanningObserver({
-			settings: loadPlanningSettings({}),
-			fs: new FakeTree({}),
-			presence: null,
-			emit: async () => true,
-		});
-		expect(disabled.start()).toBe(false);
+	test("the scan is scheduled at the configured cadence: 15000 ms when unset, the set value otherwise, and not while disabled", () => {
+		const scheduledWith = (env: Record<string, string>): number[] => {
+			const delays: number[] = [];
+			const handle = { id: "scan-timer" };
+			const observer = new PlanningObserver({
+				settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT, ...env }),
+				fs: new FakeTree({}),
+				presence: null,
+				emit: async () => true,
+				timers: {
+					setInterval: (_run, ms) => {
+						delays.push(ms);
+						return handle;
+					},
+					clearInterval: () => undefined,
+				},
+			});
+			expect(observer.start()).toBe(true);
+			observer.stop();
+			return delays;
+		};
+		expect(scheduledWith({})).toEqual([15_000]);
+		expect(scheduledWith({ [PLANNING_SCAN_INTERVAL_ENV]: "2500" })).toEqual([2_500]);
 
-		const { observer } = observerOver(new FakeTree({}));
-		expect(observer.start(60_000)).toBe(true);
-		expect(observer.start(60_000)).toBe(true);
-		observer.stop();
-		expect(observer.start(60_000)).toBe(true);
-		observer.stop();
+		const disabled = new PlanningObserver({ settings: loadPlanningSettings({}), fs: new FakeTree({}), presence: null, emit: async () => true });
+		expect(disabled.start()).toBe(false);
 	});
 });

@@ -98,7 +98,7 @@ export function resolveSettings(result: PlanningConfigResult): ResolvedSettings 
 	return {
 		ready: true,
 		root: settings.root,
-		limits: { presenceTtlS: settings.presenceTtlS, maxFiles: settings.maxFiles, maxBytes: settings.maxBytes },
+		limits: { presenceTtlS: settings.presenceTtlS, maxFiles: settings.maxFiles, maxBytes: settings.maxBytes, scanIntervalMs: settings.scanIntervalMs },
 	};
 }
 
