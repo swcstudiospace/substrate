@@ -20,8 +20,8 @@
  */
 import { join, resolve as resolvePath } from "node:path";
 import type { EventInput } from "../types.ts";
-import { diffPlanningIndex, type PlanningSnapshot } from "./diff.ts";
-import { emitPlanningChange } from "./events.ts";
+import { diffPlanningIndex, type PlanningDiff, type PlanningSnapshot } from "./diff.ts";
+import { observePlanningChange, type ObservedPlanning } from "./events.ts";
 import { type PlanningConfigError, type PlanningConfigResult, type PlanningLimits } from "./config.ts";
 import { buildPlanningIndex, isErrorRecord, type PlanningFileRecord, type PlanningFs, type PlanningIndexFailure, type PlanningKind, type PlanningRecord } from "./index.ts";
 import { DragonflyPresenceStore, PRESENCE_MAX_SESSIONS } from "./presence-dragonfly.ts";
@@ -249,45 +249,30 @@ export class PlanningReader {
 	private async observeOnce(root: string, seq: number, snapshot: PlanningSnapshot): Promise<PlanningChangeNote> {
 		const current = this.baseline;
 		if (current !== null && seq < current.seq) return { state: "superseded" };
-		if (current === null || current.root !== root) {
-			this.advance(root, seq, snapshot);
-			return { state: "baseline" };
-		}
-		const diff = diffPlanningIndex(current.snapshot, snapshot);
-		const removed = diff.removed;
-		if (removed === null) {
-			this.advance(root, seq, snapshot);
-			return {
-				state: "partial",
-				added: current.snapshot.truncated ? null : diff.added.length,
-				removed: null,
-				changed: diff.changed.length,
-				ledger: "not-written",
-			};
-		}
-		const counts = { added: diff.added.length, removed: removed.length, changed: diff.changed.length };
-		if (counts.added + counts.removed + counts.changed === 0) {
-			this.advance(root, seq, snapshot);
-			return { state: "unchanged" };
-		}
+		const previous = current !== null && current.root === root ? current.snapshot : null;
+		const diff = previous === null ? null : diffPlanningIndex(previous, snapshot);
 		const repo = await repoOf(this.deps.fs, root);
-		if (repo.state === "unknown" && repo.transient) {
+		if (repo.state === "known") {
+			// The baseline decision and the publish are core's: a failed publish holds the baseline, every other outcome advances it.
+			const observed = await observePlanningChange({
+				previous,
+				next: snapshot,
+				repo: repo.repo,
+				sessionId: PLANNING_OBSERVER_SESSION,
+				publisher: { publish: this.deps.emit },
+			});
+			if (observed.outcome !== "not-published") this.advance(root, seq, observed.baseline);
+			return noteFor(observed.outcome, previous, diff);
+		}
+		// Without a repo nothing can be published. A change is held for a transient failure and ends, as a repo-unknown note, for a
+		// definitive absence. Any other scan becomes the baseline, as before.
+		const counts = diff !== null && diff.removed !== null ? countsOf(diff) : null;
+		if (counts !== null && counts.added + counts.removed + counts.changed > 0) {
+			if (!repo.transient) this.advance(root, seq, snapshot);
 			return { state: "changed", ...counts, ledger: "repo-unknown", repoReason: repo.reason };
 		}
-		if (repo.state === "unknown") {
-			this.advance(root, seq, snapshot);
-			return { state: "changed", ...counts, ledger: "repo-unknown", repoReason: repo.reason };
-		}
-		const outcome = await emitPlanningChange(
-			{ publish: this.deps.emit },
-			{ repo: repo.repo, sessionId: PLANNING_OBSERVER_SESSION, diff: { ...diff, removed } },
-		);
-		if (outcome === "published") {
-			this.advance(root, seq, snapshot);
-			return { state: "changed", ...counts, ledger: "emitted" };
-		}
-		// Not stored: the baseline stays, so the next read finds the same change and sends it again.
-		return { state: "changed", ...counts, ledger: "not-stored" };
+		this.advance(root, seq, snapshot);
+		return noteFor(diff === null ? "baseline" : diff.removed === null ? "incomplete" : "unchanged", previous, diff);
 	}
 
 	/** Observations run one at a time, in arrival order, so two reads never publish the same change. */
@@ -305,6 +290,23 @@ export class PlanningReader {
 		if (this.baseline !== null && seq < this.baseline.seq) return;
 		this.baseline = { root, seq, snapshot };
 	}
+}
+
+/** The counts of a complete diff. A change is only ever counted on one: a partial diff has no removals to count. */
+function countsOf(diff: PlanningDiff): { added: number; removed: number; changed: number } {
+	if (diff.removed === null) throw new Error("counts are only taken from a complete diff");
+	return { added: diff.added.length, removed: diff.removed.length, changed: diff.changed.length };
+}
+
+/** The note for an observation outcome. `baseline` and `unchanged` carry no counts; `published` and `not-published` are changes. */
+function noteFor(outcome: ObservedPlanning["outcome"], previous: PlanningSnapshot | null, diff: PlanningDiff | null): PlanningChangeNote {
+	if (outcome === "baseline") return { state: "baseline" };
+	if (outcome === "unchanged") return { state: "unchanged" };
+	if (previous === null || diff === null) throw new Error("only a first scan has no previous baseline");
+	if (outcome === "incomplete") {
+		return { state: "partial", added: previous.truncated ? null : diff.added.length, removed: null, changed: diff.changed.length, ledger: "not-written" };
+	}
+	return { state: "changed", ...countsOf(diff), ledger: outcome === "published" ? "emitted" : "not-stored" };
 }
 
 function isFileRecord(record: PlanningRecord): record is PlanningFileRecord {
