@@ -24,7 +24,7 @@ function snapshot(): FabricHealthView {
 /** Every plane answers its healthy reading. */
 function healthyParts(): FabricHealthParts {
 	return {
-		greptime: Promise.resolve({ up: true, eventsWritable: true, writeTimedOut: false }),
+		greptime: Promise.resolve({ up: true, eventsWritable: true, writeTimedOut: false, writeUnread: false }),
 		index: Promise.resolve(true),
 		hindsight: Promise.resolve(true),
 		ragflow: Promise.resolve(true),
@@ -101,7 +101,7 @@ describe("gatherFabricFacts", () => {
 
 	test("a Greptime that never answers leaves the index and the other planes unaffected", async () => {
 		const facts = await gatherFabricFacts(
-			sources({ health: () => ({ ...healthyParts(), greptime: never<{ up: boolean; eventsWritable: boolean; writeTimedOut: boolean }>() }) }),
+			sources({ health: () => ({ ...healthyParts(), greptime: never<{ up: boolean; eventsWritable: boolean; writeTimedOut: boolean; writeUnread: boolean }>() }) }),
 			{ deadlineMs: 20 },
 		);
 		expect(rowOf(facts, "greptime")).toMatchObject({ state: "unavailable" });
@@ -130,7 +130,7 @@ describe("gatherFabricFacts", () => {
 describe("a stalled write on the Greptime row", () => {
 	test("a write probe still waiting at its bound makes the Greptime row unavailable with the timeout reason, never ok", async () => {
 		const facts = await gatherFabricFacts(
-			sources({ health: () => ({ ...healthyParts(), greptime: Promise.resolve({ up: true, eventsWritable: true, writeTimedOut: true }) }) }),
+			sources({ health: () => ({ ...healthyParts(), greptime: Promise.resolve({ up: true, eventsWritable: true, writeTimedOut: true, writeUnread: false }) }) }),
 		);
 		const row = rowOf(facts, "greptime");
 		expect(row.state).toBe("unavailable");

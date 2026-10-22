@@ -83,6 +83,7 @@ a panel shows stored history against the default line.
 | data-planes (extended) | Hindsight retain outbox size | `hindsight.outbox_size` | `substrate.hindsight.retain_outbox.size` | none |
 | data-planes (extended) | Hindsight retain outbox oldest age | `hindsight.outbox_oldest_age_s` | `substrate.hindsight.retain_outbox.oldest_age_seconds` | none |
 | data-planes (extended) | Index archive age | `index.archive_age_s` | `substrate.index.archive.age_seconds` | none |
+| data-planes (extended) | Data planes on a proxy | `endpoint.proxy_planes` | `substrate.endpoint.proxy_planes` | none |
 
 The units and the one label of each series (a line per `surface`, `plane`, `decision`,
 `outcome`, `result` or `mode`) come from the series' own spec in
@@ -112,6 +113,7 @@ the sampler writes and `/slo/history` serves.
 | `hindsight.outbox_size` | gauge | none | Parked retain forwards; the worst reading in a step |
 | `hindsight.outbox_oldest_age_s` | gauge | none | Age of the oldest parked forward; 0 when empty |
 | `index.archive_age_s` | gauge | none | Age of the newest complete index archive; no row until a first archive exists |
+| `endpoint.proxy_planes` | gauge | none | Data planes whose endpoint is a configured proxy, set at boot; a count, with no address |
 
 Admission needs no new series: `admission.decisions` already carries `limited` and
 `shadow_limited`. The ledger client can store and read an extended series whatever the
