@@ -63,6 +63,7 @@ import {
 	latestVersion,
 	noteSkillsSyncFastForward,
 	pinsFromVersions,
+	recordVersion,
 	recordTrigger,
 	TRIGGER_FIELD_MAX,
 	refreshDataset,
@@ -73,6 +74,12 @@ import {
 } from "./docs-datasets.ts";
 import {
 	documentProvenance,
+	batchPagesForIngest,
+	planningContentHash,
+	planningHintFromJson,
+	planningIngestTrigger,
+	planningPageSha,
+	scanIngestPages,
 	ingestDocs,
 	loadIngestRecords,
 	saveIngestRecords,
@@ -82,7 +89,7 @@ import {
 	type PageSettlement,
 } from "./docs-ingest.ts";
 import { LagSettler, TRIGGER_RECORD_DEADLINE_MS, withDeadline, createFreshnessState, evaluateFreshness, type DatasetFreshness, type FreshnessState } from "./docs-freshness.ts";
-import { DEFAULT_SEARCH_DATASET_NAMES, citationProvenanceCounts, searchDocs, searchReplyStorable, type SearchReply } from "./docs-search.ts";
+import { DEFAULT_SEARCH_DATASET_NAMES, citationProvenanceCounts, normalizeRepoId, scopedDatasetName, searchDocs, searchReplyStorable, type SearchReply } from "./docs-search.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
 	analyzeDrift,
@@ -92,7 +99,7 @@ import {
 	type DriftGitTip,
 	type DriftReport,
 } from "./drift.ts";
-import { checkIdempotencyKey, checkReplayTs, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
+import { checkIdempotencyKey, checkReplayTs, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, planningIngestTrigger as planningEventTrigger, verifyChain } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import {
 	GreptimeClient,
@@ -535,6 +542,9 @@ interface IdempotencyPlan {
  * pick by accident: sharing a turn with one would only make the two wait for each other.
  */
 const KEY_TURN_PREFIX = "\u0000idempotency:";
+
+/** The dataset planning pages are ingested into: the agent-substrate checkout's dataset (`docs/data-planes.md`). */
+const PLANNING_DATASET = "agent-substrate";
 
 /**
  * One closed UTC hour of the ledger, digested in ingest order for the hourly anchor.
@@ -1025,6 +1035,15 @@ export class Substrate {
 		emit: (event) => this.emit(event),
 		report: (line) => process.stderr.write(`[substrate] ${line}\n`),
 	});
+	/** The checkout whose `.planning/` tree the planning refresh reads: the process cwd unless a test injects one. */
+	private readonly planningBaseDir: string;
+	/** Per-path hash of the planning pages as the LightRAG plane last indexed them; null until the first pass. */
+	private planningHashes: Map<string, string> | null = null;
+	/** The planning pass in flight, if any: one at a time, and a request during it marks the next pass dirty. */
+	private planningPass: Promise<void> | null = null;
+	private planningDirty = false;
+	/** Stops the planning poll's interval; null while the poll is not running. */
+	private planningStop: (() => void) | null = null;
 	/** `graphId/nodeId` → tail of that node's gated-completion chain. */
 	private readonly completionChains = new Map<string, Promise<void>>();
 	// uplift-2 R1 — brief fast path. The options `composeBrief` runs under, read
@@ -1059,6 +1078,7 @@ export class Substrate {
 			cache?: ReadThroughCache;
 			ragflowFetch?: FetchLike;
 			hindsightFetch?: FetchLike;
+			planningBaseDir?: string;
 			desktop?: DesktopDriver | null;
 		},
 		observer: SubstrateObserver = {},
@@ -1127,6 +1147,7 @@ export class Substrate {
 		// uplift-2 R1
 		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays, graphRead: config.requestPath.briefGraphRead };
 		this.narrowBumps = config.requestPath.cacheBumpScope === "narrow";
+		this.planningBaseDir = stores?.planningBaseDir ?? process.cwd();
 		// uplift-2 R3: the outbox hydrates its file (if any) now, so entries parked
 		// before a restart are due again from the first drain tick. Every drop —
 		// bound, exhausted attempts, a memory-only queue at shutdown — ends with
@@ -1661,6 +1682,7 @@ export class Substrate {
 			if (result.lookupFailed) this.observer.eventReplay?.({ result: "lookup_failed" });
 			else if (result.stored) this.observer.eventReplay?.({ result: "appended" });
 		}
+		this.planningEvent(input);
 		return result;
 	}
 
@@ -3723,7 +3745,7 @@ export class Substrate {
 	 * datasets; unknown names are ignored and raw ids are never accepted.
 	 *
 	 * uplift-2 R6: the answer is cached under the `docs-search` class, keyed
-	 * by the normalised question, the dataset names and the current pins,
+	 * by the normalised question, the dataset names (under the repo scope when one is set), the current pins, the repo and the planning hash,
 	 * and invalidated by `gen:docs` (bumped by every ingest and every
 	 * recorded version); a degraded reply is never stored. Citations carry
 	 * their own document's commit; the dataset's newest recorded version
@@ -3739,7 +3761,7 @@ export class Substrate {
 	 * loaded, as the caller waited for it — through `observer.docsSearch`.
 	 */
 	async searchDocs(
-		input: { question?: unknown; datasets?: unknown; session_id?: unknown },
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown; repo_id?: unknown; planning_hash?: unknown },
 		callerSurface: Surface | null,
 	): Promise<SearchReply> {
 		const surface = callerSurface ?? "claude-code";
@@ -3766,7 +3788,7 @@ export class Substrate {
 	}
 
 	private async searchDocsUnmeasured(
-		input: { question?: unknown; datasets?: unknown; session_id?: unknown },
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown; repo_id?: unknown; planning_hash?: unknown },
 		surface: Surface,
 		noteLoaded: () => void,
 	): Promise<SearchReply> {
@@ -3775,6 +3797,8 @@ export class Substrate {
 		const names = Array.isArray(input.datasets)
 			? input.datasets.filter((name): name is string => typeof name === "string").filter((name) => DEFAULT_SEARCH_DATASET_NAMES.includes(name))
 			: [...DEFAULT_SEARCH_DATASET_NAMES];
+		const repoId = normalizeRepoId(typeof input.repo_id === "string" ? input.repo_id : null);
+		const planningHash = typeof input.planning_hash === "string" && input.planning_hash.trim().length > 0 ? input.planning_hash.trim() : null;
 		await this.hydrateDocsSeen();
 		const pins = pinsFromVersions(this.docsVersions);
 		const degradedDatasets = isSyncLive(this.docsSkillsSync) ? [] : ["agent-skills"];
@@ -3791,6 +3815,8 @@ export class Substrate {
 					emit: (event) => this.emit(event),
 					surface,
 					...(sessionId !== undefined ? { sessionId } : {}),
+					repoId,
+					planningHash,
 					fetchImpl: this.ragflowFetch,
 					datasets: this.docsDatasetList,
 					retrieval: this.config.docsRetrieval,
@@ -3801,13 +3827,14 @@ export class Substrate {
 				question,
 			);
 		};
-		// An empty question and an unconfigured plane are answered (degraded)
+		// An empty question and an unconfigured selected backend are answered (degraded)
 		// without touching the cache: there is nothing to key on.
-		if (question.trim().length === 0 || this.config.ragflow === null) return load();
+		const configured = this.config.docsBackend === "lightrag" ? this.config.lightrag !== null : this.config.ragflow !== null;
+		if (question.trim().length === 0 || !configured) return load();
 		return this.cache.getOrLoad<SearchReply>({
 			klass: "docs-search",
 			surface,
-			args: { question: question.trim().replace(/\s+/g, " ").toLowerCase(), datasets: [...names].sort(), pins, degraded: degradedDatasets },
+			args: { question: question.trim().replace(/\s+/g, " ").toLowerCase(), datasets: names.map((name) => scopedDatasetName(repoId, name)).sort(), pins, degraded: degradedDatasets, repo_id: repoId, planning_hash: planningHash },
 			generations: [DOCS_GENERATION_KEY],
 			load,
 			store: searchReplyStorable,
@@ -3879,6 +3906,8 @@ export class Substrate {
 		const outcome = await ingestDocs(
 			{
 				config: this.config.ragflow,
+				backend: this.config.docsBackend,
+				lightragConfig: this.config.lightrag,
 				roots: this.config.docsIngestRoots,
 				vmGuest: this.config.vmGuest,
 				seen: this.docsIngestSeen,
@@ -3898,13 +3927,17 @@ export class Substrate {
 				...(typeof input.commit === "string" ? { commit: input.commit } : {}),
 				pages: pages
 					.filter((page): page is Record<string, unknown> => page !== null && typeof page === "object" && !Array.isArray(page))
-					.map((page) => ({
-						path: typeof page.path === "string" ? page.path : "",
-						...("real_path" in page && typeof page.real_path === "string" ? { real_path: page.real_path } : {}),
-						...("source_url" in page && typeof page.source_url === "string" ? { source_url: page.source_url } : {}),
-						body: typeof page.body === "string" ? page.body : "",
-						...("heading_path" in page && typeof page.heading_path === "string" ? { heading_path: page.heading_path } : {}),
-					})),
+					.map((page) => {
+						const graph = planningHintFromJson(page.graph);
+						return {
+							path: typeof page.path === "string" ? page.path : "",
+							...("real_path" in page && typeof page.real_path === "string" ? { real_path: page.real_path } : {}),
+							...("source_url" in page && typeof page.source_url === "string" ? { source_url: page.source_url } : {}),
+							body: typeof page.body === "string" ? page.body : "",
+							...("heading_path" in page && typeof page.heading_path === "string" ? { heading_path: page.heading_path } : {}),
+							...(graph !== undefined ? { graph } : {}),
+						};
+					}),
 				...(sessionId !== undefined ? { session_id: sessionId } : {}),
 			},
 		);
@@ -3943,7 +3976,8 @@ export class Substrate {
 		fields: { dataset: string; commit: string; content_sha256: string },
 		surface: Surface,
 	): Promise<{ ok: true; version: DatasetVersion; created: boolean } | { ok: false; reason: string }> {
-		if (this.config.ragflow === null) return { ok: false, reason: "ragflow-not-configured" };
+		if (this.config.ragflow === null && this.config.docsBackend !== "lightrag") return { ok: false, reason: "ragflow-not-configured" };
+		if (this.config.ragflow === null) return this.recordLightragVersion(fields, surface);
 		await this.hydrateDocsSeen();
 		const refreshed = await refreshDataset(
 			{
@@ -3961,6 +3995,40 @@ export class Substrate {
 			await this.cache.bump(DOCS_GENERATION_KEY);
 		}
 		return refreshed;
+	}
+
+	/**
+	 * The version record of a LightRAG-only deployment: no RAGFlow list to resolve
+	 * against, so the dataset's id is its name, the id the LightRAG search and ingest
+	 * already use for it. Numbered, stored, noted and persisted as `refreshDataset`
+	 * does, and the docs generation is bumped the same way.
+	 */
+	private async recordLightragVersion(
+		fields: { dataset: string; commit: string; content_sha256: string },
+		surface: Surface,
+	): Promise<{ ok: true; version: DatasetVersion; created: boolean }> {
+		await this.hydrateDocsSeen();
+		const last = latestVersion(this.docsVersions, fields.dataset);
+		const generation = Number(/^v(\d+)$/.exec(last?.version ?? "")?.[1] ?? 0);
+		const version: DatasetVersion = {
+			dataset: fields.dataset,
+			dataset_id: fields.dataset,
+			version: `v${generation + 1}`,
+			commit: fields.commit,
+			content_sha256: fields.content_sha256,
+			ingested_at: new Date().toISOString(),
+		};
+		recordVersion(this.docsVersions, version);
+		await this.emit({
+			surface,
+			kind: "note",
+			summary: `docs dataset ${fields.dataset} refreshed to ${version.version}`,
+			session_id: `docs-refresh:${version.version}`,
+			payload: { action: "docs.ingest", backend: "lightrag", dataset_id: fields.dataset, version: version.version, commit: fields.commit, content_sha256: fields.content_sha256 },
+		});
+		await this.persistDocsSeen();
+		await this.cache.bump(DOCS_GENERATION_KEY);
+		return { ok: true, version, created: false };
 	}
 
 	/**
@@ -4029,22 +4097,129 @@ export class Substrate {
 			return outcome;
 		};
 		try {
-			if (this.config.ragflow === null) return finish({ ok: false, reason: "ragflow-not-configured", job });
-			// The guarded ingest reads the plane's dataset by name and refuses
-			// `unknown-dataset`, so on a configured plane without the dataset it
-			// must exist before that ingest runs: discover first, create only on
-			// a name-miss. Order stays honest — ensure, ingest, and only then
-			// record the version.
-			const ensured = await resolveDatasets({ config: this.config.ragflow, fetchImpl: this.ragflowFetch, datasets: this.docsDatasetList }, [request.dataset]);
-			if (!ensured.ok) return finish({ ok: false, reason: ensured.reason, job });
-			const created = ensured.datasets[0]?.created === true;
-			const ingested = await this.ingestDocs({ dataset: request.dataset, commit: request.commit, pages: await request.pages() }, surface);
-			if (!ingested.ok) return finish({ ok: false, reason: ingested.reason, job });
+			// LightRAG-only: no RAGFlow list to ensure against, so the ingest and the version record
+			// below go to the selected plane under the dataset's name.
+			if (this.config.ragflow === null && this.config.docsBackend !== "lightrag") {
+				return finish({ ok: false, reason: "ragflow-not-configured", job });
+			}
+			// With RAGFlow configured the dataset is discovered first and created only on a
+			// name-miss, so ids stay aligned with the list the search reads. Order stays honest:
+			// ensure, ingest, and only then record the version.
+			let created = false;
+			if (this.config.ragflow !== null) {
+				const ensured = await resolveDatasets({ config: this.config.ragflow, fetchImpl: this.ragflowFetch, datasets: this.docsDatasetList }, [request.dataset]);
+				if (!ensured.ok) return finish({ ok: false, reason: ensured.reason, job });
+				created = ensured.datasets[0]?.created === true;
+			}
+			// The sweep goes in batches: one call past the 5 MB cap is refused whole. An empty
+			// sweep is still one call, so it is refused `no-pages` exactly as before.
+			const pages = await request.pages();
+			for (const batch of pages.length > 0 ? batchPagesForIngest(pages) : [pages]) {
+				const ingested = await this.ingestDocs({ dataset: request.dataset, commit: request.commit, pages: batch }, surface);
+				if (!ingested.ok) return finish({ ok: false, reason: ingested.reason, job });
+			}
 			const refreshed = await this.recordDocsVersion(request, surface);
 			if (!refreshed.ok) return finish({ ok: false, reason: refreshed.reason, job });
 			return finish({ ok: true, version: refreshed.version, created: created || refreshed.created, job });
 		} catch (cause) {
 			return finish({ ok: false, reason: redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200), job });
+		}
+	}
+
+	// ── live steering: a planning change refreshes the docs plane (SPE-19390) ──────
+
+	/**
+	 * Start the planning poll (`SUBSTRATE_LIGHTRAG_POLL_MS`): a pass now and one every
+	 * interval, unref'd so it never holds the process open. Only the LightRAG plane is
+	 * refreshed. Idempotent.
+	 */
+	startPlanningPoll(): void {
+		if (this.planningStop !== null || !this.planningEnabled()) return;
+		const handle = setInterval(() => this.requestPlanningRefresh("planning-poll"), this.config.lightragPollMs);
+		handle.unref();
+		this.planningStop = () => clearInterval(handle);
+		this.requestPlanningRefresh("planning-poll");
+	}
+
+	/** Stop the planning poll. A pass in flight finishes; `planningRefreshIdle` waits for it. */
+	stopPlanningPoll(): void {
+		this.planningStop?.();
+		this.planningStop = null;
+	}
+
+	/** Resolves when no planning pass is in flight: the shutdown seam, never on a request path. */
+	async planningRefreshIdle(): Promise<void> {
+		await this.planningPass;
+	}
+
+	/** Whether planning changes refresh this process's docs plane: the LightRAG plane only. */
+	private planningEnabled(): boolean {
+		return this.config.docsBackend === "lightrag" && this.config.lightrag !== null;
+	}
+
+	/**
+	 * A stored event that names `.planning/` paths asks for a planning refresh. The docs
+	 * plane's own events are skipped: an ingest's note quotes the planning URLs it stored,
+	 * and those must not re-trigger the refresh it came from. Never throws.
+	 */
+	private planningEvent(input: EventInput): void {
+		if (!this.planningEnabled()) return;
+		const action = input.payload?.action;
+		if (typeof action === "string" && action.startsWith("docs.")) return;
+		if (planningEventTrigger(input).triggered) this.requestPlanningRefresh("planning-changed");
+	}
+
+	/**
+	 * One planning pass at a time: a request while a pass runs marks the next pass dirty,
+	 * so a burst of edits costs at most one more scan.
+	 */
+	private requestPlanningRefresh(reason: string): void {
+		if (this.planningPass !== null) {
+			this.planningDirty = true;
+			return;
+		}
+		this.planningPass = (async () => {
+			let next = reason;
+			do {
+				this.planningDirty = false;
+				await this.runPlanningRefresh(next);
+				next = "planning-dirty";
+			} while (this.planningDirty);
+			this.planningPass = null;
+		})();
+	}
+
+	/**
+	 * Scan the planning roots and index what changed since the last pass. Changed pages go
+	 * through the guarded ingest in batches; a page the plane refused stays pending for the
+	 * next pass. The `docs.planning` note carries the planning hash steering sessions compare
+	 * against. Never throws: a timer must not crash the process.
+	 */
+	private async runPlanningRefresh(reason: string): Promise<void> {
+		if (!this.planningEnabled()) return;
+		try {
+			await this.hydrateDocsSeen();
+			const roots = this.config.lightragPlanningRoots;
+			const pages = await scanIngestPages(this.planningBaseDir, roots);
+			const trigger = planningIngestTrigger(pages, this.planningHashes, roots);
+			if (!trigger.triggered) return;
+			const pending = new Set(trigger.paths);
+			const hashes = this.planningHashes ?? new Map<string, string>();
+			this.planningHashes = hashes;
+			for (const batch of batchPagesForIngest(pages.filter((page) => pending.has(page.path)))) {
+				const outcome = await this.ingestDocs({ dataset: PLANNING_DATASET, pages: batch }, "substrate");
+				if (!outcome.ok) break;
+				const failed = new Set(outcome.results.filter((result) => result.status === "failed").map((result) => result.path));
+				for (const page of batch) if (!failed.has(page.path)) hashes.set(page.path, planningPageSha(page));
+			}
+			await this.emit({
+				surface: "substrate",
+				kind: "note",
+				summary: `planning refresh (${reason}): ${trigger.paths.length} changed page(s) under .planning/`,
+				payload: { action: "docs.planning", reason, paths: trigger.paths, planning_hash: planningContentHash(pages) },
+			});
+		} catch (cause) {
+			process.stderr.write(`[substrate] planning refresh failed — ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
 		}
 	}
 

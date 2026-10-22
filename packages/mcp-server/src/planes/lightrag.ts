@@ -30,8 +30,8 @@
  * of the HTTP status.
  */
 import type { LightragConfig } from "../config.ts";
-import type { CitationGraphProvenance, SearchGraphStats } from "../types.ts";
-import type { RagflowChunk, RetrievalOutcome } from "./ragflow.ts";
+import type { CitationGraphProvenance, PlanningGraphRelation, SearchGraphStats } from "../types.ts";
+import type { RagflowChunk } from "./ragflow.ts";
 
 /** The LightRAG query modes; `hybrid` and `mix` are the graph modes. */
 export type LightragQueryMode = "naive" | "local" | "global" | "hybrid" | "mix";
@@ -278,20 +278,19 @@ function contextEntries(data: unknown, body: unknown): unknown[] {
  * Transport, auth (401/403) and shape failures come back as
  * `{ ok: false, reason }` — never a throw inside an agent's turn. An
  * empty question is a reason, not a network call.
+ * The success outcome carries the backend's graph `detail` beside the chunks.
  */
 export async function retrieveChunks(
 	config: LightragConfig,
 	request: LightragRetrievalRequest,
 	fetchImpl: FetchLike = fetch,
 	timeoutMs = 4000,
-): Promise<RetrievalOutcome> {
-	const outcome = await queryWithGraph(config, request.question, fetchImpl, {
+): Promise<LightragQueryOutcome> {
+	return queryWithGraph(config, request.question, fetchImpl, {
 		...(request.mode !== undefined ? { mode: request.mode } : {}),
 		...(request.topK ?? request.page_size !== undefined ? { topK: request.topK ?? request.page_size ?? MAX_LIGHTRAG_TOP_K } : {}),
 		timeoutMs,
 	});
-	if (!outcome.ok) return outcome;
-	return { ok: true, chunks: outcome.chunks };
 }
 
 /**
@@ -411,7 +410,7 @@ export async function retrieveForSearch(
 	datasetIds: readonly string[],
 	fetchImpl: FetchLike = fetch,
 	timeoutMs = 4000,
-): Promise<RetrievalOutcome> {
+): Promise<LightragQueryOutcome> {
 	void datasetIds;
 	return retrieveChunks(config, { question }, fetchImpl, timeoutMs);
 }
@@ -427,6 +426,12 @@ export interface LightragUploadMetadata {
 	 * empty means no graph bias — the upload shape is unchanged.
 	 */
 	graph_entities?: string[];
+	/**
+	 * Planning-graph relations for this page: the directed edges the scrape
+	 * extracted, indexed with the document. Absent or empty means no edge
+	 * bias — the upload shape is unchanged.
+	 */
+	graph_relations?: PlanningGraphRelation[];
 }
 
 export interface LightragUploadRequest {
@@ -474,11 +479,17 @@ export async function uploadDocument(
 	form.append("file", new Blob([request.content], { type: "text/markdown" }), request.name);
 	form.append("file_source", request.name);
 	form.append("source_url", request.metadata.source_url);
+	form.append("commit", request.metadata.commit);
+	form.append("heading_path", request.metadata.heading_path);
 	// Graph attribution rides along only when the scrape extracted it;
 	// the form and the text fallback carry the same list, so a plane that
 	// serves either route indexes the same vectors.
 	const graphEntities = request.metadata.graph_entities?.filter((entity) => entity.length > 0) ?? [];
 	if (graphEntities.length > 0) form.append("graph_entities", JSON.stringify(graphEntities));
+	const graphRelations = request.metadata.graph_relations?.filter(
+		(relation) => relation.source.length > 0 && relation.target.length > 0 && relation.kind.length > 0,
+	) ?? [];
+	if (graphRelations.length > 0) form.append("graph_relations", JSON.stringify(graphRelations));
 	const uploaded = await call(config, fetchImpl, "/documents/upload", { method: "POST", body: form, timeoutMs });
 	if (uploaded.ok) {
 		const documentId = uploadDocumentId(dataOf(uploaded.body));
@@ -496,6 +507,7 @@ export async function uploadDocument(
 			commit: request.metadata.commit,
 			heading_path: request.metadata.heading_path,
 			...(graphEntities.length > 0 ? { graph_entities: graphEntities } : {}),
+			...(graphRelations.length > 0 ? { graph_relations: graphRelations } : {}),
 		}),
 		timeoutMs,
 	});
@@ -526,6 +538,8 @@ export interface StorePlanningPageRequest {
 	headingPath?: string;
 	/** Graph entities the scrape extracted for this page. */
 	entities?: readonly string[];
+	/** Graph relations the scrape extracted for this page. */
+	relations?: readonly PlanningGraphRelation[];
 }
 
 export async function storePlanningPage(
@@ -544,6 +558,7 @@ export async function storePlanningPage(
 				commit: request.commit ?? "unpinned",
 				heading_path: request.headingPath ?? "",
 				...(request.entities !== undefined && request.entities.length > 0 ? { graph_entities: [...request.entities] } : {}),
+				...(request.relations !== undefined && request.relations.length > 0 ? { graph_relations: [...request.relations] } : {}),
 			},
 		},
 		fetchImpl,

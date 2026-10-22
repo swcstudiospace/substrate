@@ -245,7 +245,7 @@ export class RailwayResourceOrchestrator {
 			configured: true as const,
 			internalUrl,
 			project: this.config.lightragProject,
-			apiKeyPresent: (this.config.lightrag?.apiKey ?? "").length > 0,
+			apiKeyPresent: (this.config.apiKey ?? "").length > 0,
 		};
 		if (args.probe === true) {
 			const probed = await this.health(args.timeoutMs);
@@ -384,12 +384,13 @@ export class RailwayResourceOrchestrator {
 	 */
 	async health(timeoutMs = 4000): Promise<LightragHealth> {
 		if (!this.config) return { state: "unavailable", reason: "railway-not-configured" };
-		const reach = this.config?.lightrag ?? null;
-		if (!reach) return { state: "unavailable", reason: "lightrag-not-configured" };
-		const url = `${reach.url}/health`;
+		const base = this.lightragInternalUrl();
+		if (!base) return { state: "unavailable", reason: "lightrag-not-configured" };
+		const url = `${base}${LIGHTRAG_HEALTH_PATH}`;
 		try {
 			const headers: Record<string, string> = {};
-			if (reach.apiKey) headers.authorization = `Bearer ${reach.apiKey}`;
+			const apiKey = this.config.apiKey;
+			if (apiKey) headers.authorization = `Bearer ${apiKey}`;
 			const response = await this.fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs), headers });
 			if (!response.ok) return { state: "success", ok: false, url, reason: `lightrag ${response.status}` };
 			return { state: "success", ok: true, url };

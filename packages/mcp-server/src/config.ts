@@ -106,6 +106,8 @@ export interface RailwayConfig {
 	privateDomain: string | null;
 	/** Effective LightRAG reach after the `SUBSTRATE_LIGHTRAG_*` overrides. */
 	lightrag: LightragConfig | null;
+	/** Effective LightRAG API key (`SUBSTRATE_LIGHTRAG_API_KEY` over `LIGHTRAG_API_KEY`), kept even when no URL is configured: private-DNS deployments send it on the health probe. */
+	apiKey: string | null;
 	/** `SUBSTRATE_LIGHTRAG_PROJECT`: ingest/search scope; null means unscoped. */
 	lightragProject: string | null;
 }
@@ -133,8 +135,7 @@ export function railwayFromEnv(env: Record<string, string | undefined> = process
 	const privateDomain = env.RAILWAY_PRIVATE_DOMAIN?.trim() || null;
 	const url = overrideUrl ?? base?.url ?? null;
 	if (!token && !projectId && !environmentId && !serviceId && !serviceName && !privateDomain && !url && !project) return null;
-	const baseKey = base && "apiKey" in base ? base.apiKey : undefined;
-	const apiKey = overrideKey ?? baseKey;
+	const apiKey = overrideKey ?? base?.apiKey ?? null;
 	return {
 		token,
 		projectId,
@@ -143,6 +144,7 @@ export function railwayFromEnv(env: Record<string, string | undefined> = process
 		serviceName,
 		privateDomain,
 		lightrag: url ? (apiKey ? { url, apiKey } : { url }) : null,
+		apiKey,
 		lightragProject: project,
 	};
 }

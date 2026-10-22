@@ -572,6 +572,7 @@ describe("routes", () => {
 	test("POST /docs/merge-trigger dedupes the default dataset by content hash", async () => {
 		const { greptime, written } = ledger();
 		const fake = new RagflowFake();
+		fake.parseDonePolls = 1;
 		const restore = patchFetch(fake.fetch);
 		const docs = docsFixture({ "README.md": "The substrate is the only door.", "docs/data-planes.md": "Planes and their readers." });
 		const { post, stop } = await serve(

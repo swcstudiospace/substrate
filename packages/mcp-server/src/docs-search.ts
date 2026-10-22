@@ -48,13 +48,13 @@ import {
 	type RetrievalOutcome,
 } from "./planes/ragflow.ts";
 /**
- * LightRAG cutover, import-ready: the LightRAG retriever resolves to the
- * exact `RagflowChunk` / `RetrievalOutcome` contract above, so the backend
- * dispatch can swap it in without reshaping citations. Re-exported here so
+ * LightRAG cutover, import-ready: the LightRAG retriever resolves to a
+ * `LightragQueryOutcome` (the `RagflowChunk` list plus the graph detail), so the
+ * backend dispatch can swap it in without reshaping citations or dropping graph counts. Re-exported here so
  * the dispatch owner has one hub import; this module's RAGFlow path is
  * unchanged.
  */
-import { retrieveForSearch as retrieveForSearchLightrag } from "./planes/lightrag.ts";
+import { retrieveForSearch as retrieveForSearchLightrag, type LightragGraphDetail, type LightragQueryOutcome } from "./planes/lightrag.ts";
 export { retrieveForSearchLightrag };
 import { redact, redactValue } from "./redact.ts";
 import type { DocsBackend, LightragConfig } from "./config.ts";
@@ -86,8 +86,8 @@ export interface SearchCitation {
 	pin_age_ms?: number;
 	/**
 	 * Graph nodes backing this citation; present only on the LightRAG path,
-	 * when a planning-graph hint names the citation's heading. Absent on
-	 * RAGFlow citations, so existing readers are unaffected.
+	 * when the backend or a planning-graph hint attributes the citation. Absent
+	 * on RAGFlow citations, so existing readers are unaffected.
 	 */
 	graph?: CitationGraphProvenance;
 }
@@ -125,9 +125,9 @@ export interface SearchReply {
 	 */
 	degraded_datasets?: DegradedDataset[];
 	/**
-	 * Graph coverage behind the citations (LightRAG path). Present only
-	 * when the caller passed `graphHints`; absent on pure RAGFlow replies,
-	 * so existing readers are unaffected.
+	 * Graph coverage behind the citations (LightRAG path). Present when the
+	 * caller passed `graphHints` or the backend reported graph detail; absent
+	 * on pure RAGFlow replies, so existing readers are unaffected.
 	 */
 	graph?: SearchGraphStats;
 }
@@ -174,8 +174,9 @@ export function planningGraphCounts(hints: readonly PlanningGraphHint[]): Search
 }
 
 /**
- * A LightRAG retrieval with the RAGFlow outcome shape, so the reply below
- * is identical on either plane. Defaults to the plane client
+ * A LightRAG retrieval resolving to `LightragQueryOutcome`: the chunks plus
+ * the graph detail the reply's counts and citation provenance come from.
+ * Defaults to the plane client
  * (`retrieveForSearchLightrag`); tests inject a fake. `datasetIds` are
  * accepted-ignored on this plane (one knowledge base per server) — scope
  * is a no-op, never an error.
@@ -186,7 +187,7 @@ export type LightragRetriever = (
 	datasetIds: readonly string[],
 	fetchImpl?: FetchLike,
 	timeoutMs?: number,
-) => Promise<RetrievalOutcome>;
+) => Promise<LightragQueryOutcome>;
 
 /** Dataset list reader for the LightRAG plane; the service wiring owns it, like `datasets` for RAGFlow. */
 export interface LightragDatasetList {
@@ -700,6 +701,39 @@ export function attachGraphHints(chunks: SearchCitation[], graphHints: readonly 
 }
 
 /**
+ * Carry the LightRAG backend's graph attribution onto every citation the
+ * query served. A node a planning hint already put on a citation stays:
+ * entities are unioned and relation counts summed, so neither source is
+ * dropped. A query that attributed nothing leaves the citations untouched.
+ */
+function withBackendProvenance(chunks: SearchCitation[], provenance: CitationGraphProvenance): void {
+	const relations = provenance.relations ?? 0;
+	if (provenance.entities.length === 0 && relations === 0) return;
+	for (const citation of chunks) {
+		const hinted = citation.graph;
+		citation.graph = {
+			entities: [...new Set([...(hinted?.entities ?? []), ...provenance.entities])],
+			relations: (hinted?.relations ?? 0) + relations,
+		};
+	}
+}
+
+/**
+ * The reply-level graph on the LightRAG path: the caller's hint coverage
+ * merged with the backend's reported detail. Entities are the distinct names
+ * across both sources; relations add up, since the backend reports a count
+ * rather than relation identities, so overlap cannot be removed. Undefined
+ * when neither side reports graph data, so an unannotated reply keeps its
+ * shape.
+ */
+function mergedGraphCounts(hints: readonly PlanningGraphHint[] | undefined, detail: LightragGraphDetail): SearchGraphStats | undefined {
+	if (hints === undefined && detail.counts.entities === 0 && detail.counts.relations === 0) return undefined;
+	const hinted = hints ?? [];
+	const names = new Set([...hinted.flatMap((hint) => hint.entities), ...detail.provenance.entities]);
+	return { entities: names.size, relations: planningGraphCounts(hinted).relations + detail.counts.relations };
+}
+
+/**
  * Search via the LightRAG plane (cutover backend).
  *
  * One retrieval serves every resolved dataset: LightRAG hosts a single
@@ -707,8 +741,9 @@ export function attachGraphHints(chunks: SearchCitation[], graphHints: readonly 
  * an error) and every citation is attributed to the first readable
  * dataset. Everything else is the RAGFlow shape: redacted capped
  * citations, score sort, the ten-citation cap, pins via `provenanceOf`,
- * the single `note` event, and — when the caller passed `graphHints` —
- * the `graph` counts with per-citation graph nodes. The SPE-19388
+ * the single `note` event, and the `graph` counts: the backend's graph detail
+ * merged with the caller's `graphHints` (either alone is kept), with each
+ * citation's graph nodes from the backend provenance and any hint. The SPE-19388
  * raw-JSON merge stays on the RAGFlow path: here the plane already
  * answered. A failed retrieval or an unconfigured plane degrades exactly
  * like the RAGFlow path (`degraded: true` with a reason, never a throw).
@@ -742,16 +777,16 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 	const deadline = sharedDeadline(deps.budgetMs ?? 0, "docs budget");
 	// A client that throws synchronously is a failed search, not an
 	// exception out of the search.
-	const once = (): Promise<RetrievalOutcome> => {
+	const once = (): Promise<LightragQueryOutcome> => {
 		try {
 			return deadline.race(retrieve(lightrag, effectiveQuestion, readable.map((dataset) => dataset.id), fetchImpl));
 		} catch (cause) {
 			return Promise.reject(cause);
 		}
 	};
-	let outcome: PromiseSettledResult<RetrievalOutcome> = await once().then(
-		(value): PromiseSettledResult<RetrievalOutcome> => ({ status: "fulfilled", value }),
-		(reason): PromiseSettledResult<RetrievalOutcome> => ({ status: "rejected", reason }),
+	let outcome: PromiseSettledResult<LightragQueryOutcome> = await once().then(
+		(value): PromiseSettledResult<LightragQueryOutcome> => ({ status: "fulfilled", value }),
+		(reason): PromiseSettledResult<LightragQueryOutcome> => ({ status: "rejected", reason }),
 	);
 	deadline.clear();
 	// Half-open recovery, mirroring the RAGFlow fan-out: a refusal that
@@ -759,8 +794,8 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 	// breaker has since closed.
 	if (breakerState?.() === "closed" && outcome.status === "fulfilled" && !outcome.value.ok && outcome.value.reason === LIGHTRAG_CIRCUIT_OPEN) {
 		outcome = await once().then(
-			(value): PromiseSettledResult<RetrievalOutcome> => ({ status: "fulfilled", value }),
-			(reason): PromiseSettledResult<RetrievalOutcome> => ({ status: "rejected", reason }),
+			(value): PromiseSettledResult<LightragQueryOutcome> => ({ status: "fulfilled", value }),
+			(reason): PromiseSettledResult<LightragQueryOutcome> => ({ status: "rejected", reason }),
 		);
 	}
 	const nowMs = deps.nowMs ?? Date.now();
@@ -773,10 +808,13 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 		const reason = datasetReason(outcome.value.reason);
 		return failed(deps, sessionId, reason, [{ dataset: first.name, reason }]);
 	}
+	const { detail } = outcome.value;
 	const citations = outcome.value.chunks.map((chunk) => cite(chunk, first.name, deps.pins?.[first.id], pinAged, nowMs, deps.provenanceOf));
 	citations.sort((left, right) => right.score - left.score);
 	const chunks = citations.slice(0, 10);
-	const graph = attachGraphHints(chunks, deps.graphHints);
+	attachGraphHints(chunks, deps.graphHints);
+	withBackendProvenance(chunks, detail.provenance);
+	const graph = mergedGraphCounts(deps.graphHints, detail);
 	await deps.emit({
 		surface,
 		kind: "note",

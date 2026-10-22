@@ -301,6 +301,55 @@ export interface IngestPage {
 	graph?: PlanningGraphHint;
 }
 
+/**
+ * The pages of one sweep, split into ingest calls that each stay under
+ * {@link INGEST_CALL_MAX_BYTES}, in order. Sized on the raw bodies: the ingest
+ * measures the stripped bodies, which are never larger, so every batch passes
+ * the call cap. A page over the cap on its own still gets a batch of its own
+ * and is refused there, exactly as a single call would refuse it.
+ */
+export function batchPagesForIngest(pages: readonly IngestPage[], maxBytes: number = INGEST_CALL_MAX_BYTES): IngestPage[][] {
+	const batches: IngestPage[][] = [];
+	let current: IngestPage[] = [];
+	let bytes = 0;
+	for (const page of pages) {
+		const size = Buffer.byteLength(page.body, "utf8");
+		if (current.length > 0 && bytes + size > maxBytes) {
+			batches.push(current);
+			current = [];
+			bytes = 0;
+		}
+		current.push(page);
+		bytes += size;
+	}
+	if (current.length > 0) batches.push(current);
+	return batches;
+}
+
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+/**
+ * A planning-graph hint from untyped input (a posted page's `graph` member), or
+ * undefined when it is not the shape the scan produces. Nothing is coerced: the
+ * phase and entities must be strings, and every relation needs string
+ * `source`, `target` and `kind`.
+ */
+export function planningHintFromJson(value: unknown): PlanningGraphHint | undefined {
+	if (value === null || typeof value !== "object" || !("phase" in value) || typeof value.phase !== "string") return undefined;
+	if (!("entities" in value) || !isStringArray(value.entities)) return undefined;
+	if (!("relations" in value) || !Array.isArray(value.relations)) return undefined;
+	const relations: PlanningGraphRelation[] = [];
+	for (const entry of value.relations) {
+		if (entry === null || typeof entry !== "object") return undefined;
+		if (!("source" in entry) || !("target" in entry) || !("kind" in entry)) return undefined;
+		if (typeof entry.source !== "string" || typeof entry.target !== "string" || typeof entry.kind !== "string") return undefined;
+		relations.push({ source: entry.source, target: entry.target, kind: entry.kind });
+	}
+	return { phase: value.phase, entities: [...value.entities], relations };
+}
+
 export interface IngestInput {
 	dataset: string;
 	commit?: string;
@@ -488,15 +537,18 @@ export function normalizeIngestPath(path: string): string | null {
 	}
 	return parts.join("/");
 }
-function refused(
+
+/**
+ * The locator-only warning a refusal leaves in the ledger: the reason, the rules
+ * that fired and the page path, never the page text. Never throws.
+ */
+function warnRefusal(
 	deps: IngestDeps,
 	sessionId: string,
 	reason: string,
 	extra?: { rules?: string[]; page?: string; changed?: boolean },
-): Promise<IngestOutcome> {
-	const { changed = false, ...locator } = extra ?? {};
-	const outcome: IngestOutcome = { ok: false, refused: true, reason, ...locator, changed };
-	if (deps.surface === null) return Promise.resolve(outcome);
+): Promise<void> {
+	if (deps.surface === null) return Promise.resolve();
 	return deps
 		.emit({
 			surface: deps.surface,
@@ -512,9 +564,20 @@ function refused(
 			},
 		})
 		.then(
-			() => outcome,
-			() => outcome,
+			() => undefined,
+			() => undefined,
 		);
+}
+
+function refused(
+	deps: IngestDeps,
+	sessionId: string,
+	reason: string,
+	extra?: { rules?: string[]; page?: string; changed?: boolean },
+): Promise<IngestOutcome> {
+	const { changed = false, ...locator } = extra ?? {};
+	const outcome: IngestOutcome = { ok: false, refused: true, reason, ...locator, changed };
+	return warnRefusal(deps, sessionId, reason, extra).then(() => outcome);
 }
 
 function underRoot(path: string, roots: readonly string[]): boolean {
@@ -525,6 +588,32 @@ function underRoot(path: string, roots: readonly string[]): boolean {
 
 function recordKey(datasetId: string, sourceUrl: string): string {
 	return `${datasetId}::${sourceUrl}`;
+}
+
+/** One page that passed its gates: the sanitized body and the record key inputs. */
+type PreparedPage = { page: IngestPage; sourceUrl: string; body: string; sha: string };
+
+type PageVerdict =
+	| { ok: true; sourceUrl: string; body: string; size: number; stripped: number; sha: string }
+	| { ok: false; reason: string; rules?: string[] };
+
+/**
+ * One page's gates, in the order a refusal names them: source URL, roots (the
+ * posted path and the client-resolved real path), page and call size caps,
+ * then the redactor scan of the body and the outgoing metadata. Pure: nothing
+ * is uploaded or emitted here.
+ */
+function checkIngestPage(page: IngestPage, roots: readonly string[], commit: string | undefined, total: number): PageVerdict {
+	if (!page.source_url) return { ok: false, reason: "no-source-url" };
+	if (!underRoot(page.path, roots)) return { ok: false, reason: "outside-roots" };
+	if (page.real_path !== undefined && !underRoot(page.real_path, roots)) return { ok: false, reason: "outside-roots" };
+	const stripped = stripRemoteImages(page.body);
+	const size = Buffer.byteLength(stripped.body, "utf8");
+	if (size > INGEST_PAGE_MAX_BYTES) return { ok: false, reason: "page-too-large" };
+	if (total + size > INGEST_CALL_MAX_BYTES) return { ok: false, reason: "call-too-large" };
+	const rules = findingRules(`${stripped.body}\n${page.source_url}\n${commit ?? ""}\n${page.heading_path ?? ""}`);
+	if (rules.length > 0) return { ok: false, reason: "secret-findings", rules };
+	return { ok: true, sourceUrl: page.source_url, body: stripped.body, size, stripped: stripped.stripped, sha: sha256(stripped.body) };
 }
 
 export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<IngestOutcome> {
@@ -542,30 +631,37 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	const backend: DocsBackend = deps.backend ?? (deps.lightragConfig != null ? "lightrag" : "ragflow");
 	if (input.pages.length === 0) return refused(deps, sessionId, "no-pages");
 
-	const prepared: Array<{ page: IngestPage; sourceUrl: string; body: string; sha: string }> = [];
+	// The per-page gates run on both planes. RAGFlow refuses the whole call at
+	// the first page that fails; LightRAG records that page as `failed` and keeps
+	// the rest (per-file isolation), so one bad page never voids the valid ones.
+	const prepared: PreparedPage[] = [];
+	const rejected: IngestPageResult[] = [];
 	let total = 0;
 	let strippedImages = 0;
 	for (const page of input.pages) {
-		if (!page.source_url) return refused(deps, sessionId, "no-source-url", { page: page.path });
-		if (!underRoot(page.path, roots)) return refused(deps, sessionId, "outside-roots", { page: page.path });
-		if (page.real_path !== undefined && !underRoot(page.real_path, roots)) {
-			return refused(deps, sessionId, "outside-roots", { page: page.path });
+		const verdict = checkIngestPage(page, roots, input.commit, total);
+		if (verdict.ok) {
+			total += verdict.size;
+			strippedImages += verdict.stripped;
+			prepared.push({ page, sourceUrl: verdict.sourceUrl, body: verdict.body, sha: verdict.sha });
+			continue;
 		}
-		const stripped = stripRemoteImages(page.body);
-		strippedImages += stripped.stripped;
-		const size = Buffer.byteLength(stripped.body, "utf8");
-		if (size > INGEST_PAGE_MAX_BYTES) return refused(deps, sessionId, "page-too-large", { page: page.path });
-		total += size;
-		if (total > INGEST_CALL_MAX_BYTES) return refused(deps, sessionId, "call-too-large", { page: page.path });
-		const rules = findingRules(`${stripped.body}\n${page.source_url}\n${input.commit ?? ""}\n${page.heading_path ?? ""}`);
-		if (rules.length > 0) return refused(deps, sessionId, "secret-findings", { rules, page: page.path });
-		prepared.push({ page, sourceUrl: page.source_url, body: stripped.body, sha: sha256(stripped.body) });
+		const locator = { page: page.path, ...(verdict.rules !== undefined ? { rules: verdict.rules } : {}) };
+		if (backend !== "lightrag") return refused(deps, sessionId, verdict.reason, locator);
+		await warnRefusal(deps, sessionId, verdict.reason, locator);
+		rejected.push({
+			path: page.path,
+			source_url: page.source_url ?? "",
+			status: "failed",
+			document_id: "",
+			content_sha256: "",
+			error: redact(verdict.rules !== undefined ? `${verdict.reason}: ${verdict.rules.join(", ")}` : verdict.reason).slice(0, 200),
+		});
 	}
 
-	// Validation above is plane-independent, so the LightRAG path shares it;
-	// listing, upload and parse below are per-plane.
+	// Listing, upload and parse below are per-plane; the gates above are not.
 	if (backend === "lightrag") {
-		return ingestDocsLightrag(deps, input, sessionId, { roots, seen, locks, prepared, strippedImages });
+		return ingestDocsLightrag(deps, input, sessionId, { roots, seen, locks, prepared, rejected, strippedImages });
 	}
 	if (config === null) return refused(deps, sessionId, "ragflow-not-configured");
 	const listed = await (deps.datasets ?? DIRECT_DATASET_LIST).list(config, deps.fetchImpl);
@@ -1035,11 +1131,12 @@ async function ingestDocsLightrag(
 		roots: readonly string[];
 		seen: Map<string, IngestRecord>;
 		locks: Map<string, { task: Promise<PageSettlement>; sha: string }>;
-		prepared: Array<{ page: IngestPage; sourceUrl: string; body: string; sha: string }>;
+		prepared: PreparedPage[];
+		rejected: IngestPageResult[];
 		strippedImages: number;
 	},
 ): Promise<IngestOutcome> {
-	const { seen, locks, prepared, strippedImages } = shared;
+	const { seen, locks, prepared, rejected, strippedImages } = shared;
 	// The caller gates auth, but this branch is also entered from tests and
 	// future call sites: fail closed here too, which narrows `deps.surface`
 	// for the note event below.
@@ -1056,13 +1153,13 @@ async function ingestDocsLightrag(
 	const dataset = listed.datasets.find((entry) => entry.name === input.dataset);
 	if (!dataset) return refused(deps, sessionId, "unknown-dataset");
 	const commit = input.commit ?? "unpinned";
-	const results: IngestPageResult[] = [];
-	const changed = (): boolean => results.some((result) => result.status !== "unchanged");
+	const results: IngestPageResult[] = [...rejected];
+	const changed = (): boolean => results.some((result) => result.status === "ingested" || result.status === "replaced");
 	// Per-file isolation: a page the plane rejects is recorded as `failed`
 	// and the sweep continues, so one bad page never voids the pages that
 	// landed. The call reports `partial` when anything landed alongside
 	// failures, and refuses only when nothing did.
-	let failed = 0;
+	let failed = rejected.length;
 	const recordFailed = (pagePath: string, source: string, hash: string, reason: string): void => {
 		failed += 1;
 		results.push({
@@ -1107,6 +1204,7 @@ async function ingestDocsLightrag(
 										...(input.commit !== undefined ? { commit: input.commit } : {}),
 										...(page.heading_path !== undefined ? { headingPath: page.heading_path } : {}),
 										...(hint.entities.length > 0 ? { entities: [...hint.entities] } : {}),
+										...(hint.relations.length > 0 ? { relations: [...hint.relations] } : {}),
 									},
 									fetchImpl,
 								)
