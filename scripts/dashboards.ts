@@ -51,6 +51,7 @@ import {
 	ADMISSION_SLO,
 	CAPACITY_RUNWAY_ID,
 	DEFAULT_THRESHOLDS,
+	ENDPOINT_PROXY_PLANES_METRIC,
 	INDEX_ARCHIVE_AGE_METRIC,
 	METRIC,
 	OUTBOX_OLDEST_METRIC,
@@ -120,6 +121,7 @@ export const SERIES_SOURCES: Readonly<Record<string, string>> = {
 	"hindsight.outbox_size": OUTBOX_SIZE_METRIC,
 	"hindsight.outbox_oldest_age_s": OUTBOX_OLDEST_METRIC,
 	"index.archive_age_s": INDEX_ARCHIVE_AGE_METRIC,
+	"endpoint.proxy_planes": ENDPOINT_PROXY_PLANES_METRIC,
 };
 
 /**
@@ -133,7 +135,7 @@ export const FABRIC_SERIES: Readonly<Record<FabricResourceName, { series: string
 	greptime: { series: "plane.availability", note: "The greptime line is the ledger's call availability." },
 	ragflow: { series: "plane.p95", note: "The ragflow line is RAGFlow's call latency at p95." },
 	hindsight: { series: "hindsight.outbox_size", note: "Retain forwards parked for replay. Needs SUBSTRATE_METRICS_HISTORY_SERIES=extended." },
-	"tailscale-proxy": null,
+	"tailscale-proxy": { series: "endpoint.proxy_planes", note: "A count of the data planes on a configured proxy (SUBSTRATE_DB_PROXY_ALLOW), set at boot from the endpoint classes. Needs SUBSTRATE_METRICS_HISTORY_SERIES=extended." },
 };
 
 /** A history series unit as Grafana names it; a counting unit (`{decision}`, `{brief}`) is a plain number. */

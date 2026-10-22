@@ -17,7 +17,6 @@ import {
 	DATASOURCE_TYPE,
 	DATASOURCE_UID,
 	DEFAULT_OUT_DIR,
-	FABRIC_SERIES,
 	SLO_SERIES,
 	STEP_OPTIONS,
 	WINDOW_OPTIONS,
@@ -329,15 +328,13 @@ describe("the threshold lines are the catalogue's targets", () => {
 });
 
 describe("the fabric panels (phase 51)", () => {
-	test("each fabric resource draws one panel of an existing series, and the gap draws none", () => {
+	test("each of the six fabric resources draws exactly one panel, reading an allow-listed series", () => {
 		const planes = parse(buildDashboards(), "substrate-data-planes.json");
-		expect(FABRIC_RESOURCES.filter((resource) => FABRIC_SERIES[resource] === null)).toEqual(["tailscale-proxy"]);
+		const fabric = planes.panels.filter((panel) => panel.title.startsWith("Fabric: "));
+		expect(FABRIC_RESOURCES).toHaveLength(6);
+		expect(fabric).toHaveLength(FABRIC_RESOURCES.length);
 		for (const resource of FABRIC_RESOURCES) {
-			const panels = planes.panels.filter((panel) => panel.title === `Fabric: ${resource}`);
-			if (FABRIC_SERIES[resource] === null) {
-				expect(panels).toEqual([]);
-				continue;
-			}
+			const panels = fabric.filter((panel) => panel.title === `Fabric: ${resource}`);
 			expect(panels).toHaveLength(1);
 			const series = seriesOf(panels[0]!);
 			expect(series).not.toBeNull();
