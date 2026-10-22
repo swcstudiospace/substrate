@@ -4,7 +4,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { REDACTED } from "../redact.ts";
-import { STEERING_RETRY_STATE_MAX, SteeringInbox, type SteeringAuditEntry, type SteeringDirective } from "./steering.ts";
+import { SteeringInbox, type SteeringAuditEntry, type SteeringDirective } from "./steering.ts";
 import {
 	SteeringAuditConflictError,
 	SteeringAuditError,
@@ -12,6 +12,7 @@ import {
 	type SteeringAuditRow,
 	type SteeringAuditSql,
 	type SteeringAuditTransition,
+	type SteeringSavedRow,
 } from "./steering-store.ts";
 
 const HUMAN = "ops.lead";
@@ -19,33 +20,37 @@ const WORKER = "worker-a";
 const SECRET = "ghp_" + "c".repeat(36);
 
 /**
- * Honours `(directive_id, transition)` uniqueness and keeps the hash of each saved row. `failWith` makes every call reject.
- * `failInsert` rejects an insert before it commits. `loseReplyAfterCommit` commits the insert, then rejects its reply.
+ * Honours `(directive_id, transition)` uniqueness and keeps each saved row. `failWith` makes every call reject. `failInsert`
+ * rejects an insert before it commits. `loseReplyAfterCommit` commits the insert, then rejects its reply. `failReadBack`
+ * rejects the row read. `readBackDownAfterCommit` makes a lost reply also take the row read down, as a dropped connection would.
  */
 class FakeAuditSql implements SteeringAuditSql {
 	readonly rows: SteeringAuditRow[] = [];
 	failWith: unknown = null;
 	failInsert: unknown = null;
 	loseReplyAfterCommit = false;
-	/** Rejects the read-back only, so a committed row can be left unconfirmed. */
 	failReadBack: unknown = null;
-	private readonly hashes = new Map<string, string>();
+	readBackDownAfterCommit = false;
+	private readonly saved = new Map<string, SteeringSavedRow>();
 
 	async insertAbsent(row: SteeringAuditRow): Promise<boolean> {
 		if (this.failWith !== null) throw this.failWith;
 		if (this.failInsert !== null) throw this.failInsert;
 		const key = keyOf(row.directiveId, row.transition);
-		if (this.hashes.has(key)) return false;
-		this.hashes.set(key, row.payloadSha256);
+		if (this.saved.has(key)) return false;
+		this.saved.set(key, { payloadSha256: row.payloadSha256, recordedAt: row.recordedAt });
 		this.rows.push({ ...row });
-		if (this.loseReplyAfterCommit) throw Object.assign(new Error("reply lost after commit"), { code: "ECONNRESET" });
+		if (this.loseReplyAfterCommit) {
+			if (this.readBackDownAfterCommit) this.failReadBack = Object.assign(new Error("read-back reset"), { code: "ECONNRESET" });
+			throw Object.assign(new Error("reply lost after commit"), { code: "ECONNRESET" });
+		}
 		return true;
 	}
 
-	async payloadSha256Of(directiveId: string, transition: SteeringAuditTransition): Promise<string | null> {
+	async savedRow(directiveId: string, transition: SteeringAuditTransition): Promise<SteeringSavedRow | null> {
 		if (this.failReadBack !== null) throw this.failReadBack;
 		if (this.failWith !== null) throw this.failWith;
-		return this.hashes.get(keyOf(directiveId, transition)) ?? null;
+		return this.saved.get(keyOf(directiveId, transition)) ?? null;
 	}
 }
 
@@ -309,7 +314,7 @@ describe("SteeringAuditSink: a lost reply after a committed write", () => {
 	});
 });
 
-describe("SteeringAuditSink: a retry after a lost reply keeps the acknowledgement's content", () => {
+describe("SteeringInbox: the saved row, not memory, sets a retried transition's time", () => {
 	test("a retry after a lost reply uses the same time and hash, and resolves to acknowledged with no AUDIT_CONFLICT", async () => {
 		const sql = new FakeAuditSql();
 		let now = 1_000_000;
@@ -320,15 +325,16 @@ describe("SteeringAuditSink: a retry after a lost reply keeps the acknowledgemen
 		});
 		expect((await inbox.enqueue(directive())).ok).toBe(true);
 
-		// The first acknowledgement commits, loses its reply, and cannot confirm the row: both attempts fail.
+		// The acknowledgement commits, loses its reply, and cannot confirm the row: both attempts fail.
 		sql.loseReplyAfterCommit = true;
-		sql.failReadBack = Object.assign(new Error("read-back reset"), { code: "ECONNRESET" });
+		sql.readBackDownAfterCommit = true;
 		now = 2_000;
 		expect((await inbox.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "declined" })).ok).toBe(false);
 		expect(inbox.get("d-1")).toMatchObject({ state: "queued" });
 
 		// The retry happens later, on a clock that has moved on, and the database is healthy again.
 		sql.loseReplyAfterCommit = false;
+		sql.readBackDownAfterCommit = false;
 		sql.failReadBack = null;
 		now = 5_000;
 		const retried = await inbox.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "declined" });
@@ -339,10 +345,8 @@ describe("SteeringAuditSink: a retry after a lost reply keeps the acknowledgemen
 		expect(acknowledgedRows).toHaveLength(1);
 		expect(acknowledgedRows[0]?.recordedAt.getTime()).toBe(2_000);
 	});
-});
 
-describe("SteeringAuditSink: a queue retry after a lost reply keeps the queue's time", () => {
-	test("a queue retry after a failed attempt uses the same time and hash, and succeeds with no AUDIT_CONFLICT", async () => {
+	test("a queue retry after a lost reply uses the same time and hash, and succeeds with no AUDIT_CONFLICT", async () => {
 		const sql = new FakeAuditSql();
 		let now = 1_000_000;
 		const inbox = new SteeringInbox({
@@ -353,13 +357,14 @@ describe("SteeringAuditSink: a queue retry after a lost reply keeps the queue's 
 
 		// The queue row commits, loses its reply, and cannot be confirmed: both attempts fail.
 		sql.loseReplyAfterCommit = true;
-		sql.failReadBack = Object.assign(new Error("read-back reset"), { code: "ECONNRESET" });
+		sql.readBackDownAfterCommit = true;
 		now = 2_000;
 		expect(await inbox.enqueue(directive())).toMatchObject({ ok: false, error: { code: "audit-unavailable" } });
 		expect(inbox.get("d-1")).toBeNull();
 
 		// The retry happens later, on a moved clock, with the database healthy again.
 		sql.loseReplyAfterCommit = false;
+		sql.readBackDownAfterCommit = false;
 		sql.failReadBack = null;
 		now = 5_000;
 		const retried = await inbox.enqueue(directive());
@@ -370,10 +375,8 @@ describe("SteeringAuditSink: a queue retry after a lost reply keeps the queue's 
 		expect(queuedRows).toHaveLength(1);
 		expect(queuedRows[0]?.recordedAt.getTime()).toBe(2_000);
 	});
-});
 
-describe("SteeringInbox: retry state stays bounded while the sink is down", () => {
-	test("a sink that stays down through a thousand failed queues keeps the retry state under the cap, and a recovered sink accepts a retry with the same time", async () => {
+	test("filling the retry state past its old cap after an acknowledgement commits with a lost reply leaves the retry on the stored time", async () => {
 		const sql = new FakeAuditSql();
 		let now = 1_000_000;
 		const inbox = new SteeringInbox({
@@ -381,20 +384,33 @@ describe("SteeringInbox: retry state stays bounded while the sink is down", () =
 			clock: { nowMs: () => now },
 			policy: { allowlist: [HUMAN], ratePerMin: 10 },
 		});
-		sql.failWith = Object.assign(new Error("sink down"), { code: "ECONNRESET" });
+		expect((await inbox.enqueue(directive())).ok).toBe(true);
 
-		let lastFailedAtMs = now;
+		sql.loseReplyAfterCommit = true;
+		sql.readBackDownAfterCommit = true;
+		now = 2_000;
+		expect((await inbox.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "declined" })).ok).toBe(false);
+		expect(inbox.get("d-1")).toMatchObject({ state: "queued" });
+
+		// Other directives fail while the sink is down, far past any cap a memory cache could have held.
+		sql.failWith = Object.assign(new Error("sink down"), { code: "ECONNRESET" });
 		for (let i = 0; i < 1000; i++) {
 			now += 1;
-			lastFailedAtMs = now;
 			expect((await inbox.enqueue(directive({ id: `down-${i}` }))).ok).toBe(false);
 		}
-		expect(inbox.retryStateSize()).toBeLessThanOrEqual(STEERING_RETRY_STATE_MAX);
 
-		// The sink recovers. The most recent failure is still within the cap, so its retry keeps the time it first used.
+		// The database recovers. The retry reads the committed row, reuses its time, and so matches its hash.
 		sql.failWith = null;
-		now += 10_000;
-		expect((await inbox.enqueue(directive({ id: "down-999" }))).ok).toBe(true);
-		expect(inbox.get("down-999")).toMatchObject({ state: "queued", queuedAtMs: lastFailedAtMs });
+		sql.loseReplyAfterCommit = false;
+		sql.readBackDownAfterCommit = false;
+		sql.failReadBack = null;
+		now = 5_000;
+		const retried = await inbox.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "declined" });
+
+		expect(retried.ok).toBe(true);
+		expect(inbox.get("d-1")).toMatchObject({ state: "acknowledged", acknowledgedAtMs: 2_000 });
+		const acknowledgedRows = sql.rows.filter((row) => row.transition === "acknowledged");
+		expect(acknowledgedRows).toHaveLength(1);
+		expect(acknowledgedRows[0]?.recordedAt.getTime()).toBe(2_000);
 	});
 });

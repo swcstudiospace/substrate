@@ -59,6 +59,12 @@ export interface SteeringAuditRow {
 	recordedAt: Date;
 }
 
+/** A row as saved: the payload hash it was written with, and the transition time it carries. */
+export interface SteeringSavedRow {
+	payloadSha256: string;
+	recordedAt: Date;
+}
+
 /** The injected SQL port. The Bun-backed adapter is {@link bunSteeringAuditSql}; tests inject a fake. */
 export interface SteeringAuditSql {
 	/**
@@ -66,8 +72,8 @@ export interface SteeringAuditSql {
 	 * the row and `false` when the key was already present. Rejects with the driver's error.
 	 */
 	insertAbsent(row: SteeringAuditRow): Promise<boolean>;
-	/** The payload hash stored under `(directive_id, transition)`, or null when no row holds that key. */
-	payloadSha256Of(directiveId: string, transition: SteeringAuditTransition): Promise<string | null>;
+	/** The row saved under `(directive_id, transition)`, or null when no row holds that key. */
+	savedRow(directiveId: string, transition: SteeringAuditTransition): Promise<SteeringSavedRow | null>;
 }
 
 /** A driver failure. `code` is the driver's error code, or `UNKNOWN` when the cause carries none. */
@@ -108,6 +114,12 @@ export class SteeringAuditSink implements SteeringHistorySink {
 		if (!result.ok) throw result.error;
 	}
 
+	/** The time a transition was saved with, for a retry to reuse. Errors keep their driver code, for the inbox to report. */
+	async savedAtMs(event: "queued" | "acknowledged", directiveId: string): Promise<number | null> {
+		const saved = await this.sql.savedRow(directiveId, event);
+		return saved === null ? null : saved.recordedAt.getTime();
+	}
+
 	/** Writes one transition and reports the outcome as a value. A same-payload repeat is `inserted: false`. */
 	async record(entry: SteeringAuditEntry): Promise<SteeringAuditResult> {
 		let row: SteeringAuditRow;
@@ -118,8 +130,8 @@ export class SteeringAuditSink implements SteeringHistorySink {
 		}
 		try {
 			if (await this.sql.insertAbsent(row)) return { ok: true, value: { inserted: true } };
-			const stored = await this.sql.payloadSha256Of(row.directiveId, row.transition);
-			if (stored === row.payloadSha256) return { ok: true, value: { inserted: false } };
+			const stored = await this.sql.savedRow(row.directiveId, row.transition);
+			if (stored?.payloadSha256 === row.payloadSha256) return { ok: true, value: { inserted: false } };
 			return { ok: false, error: new SteeringAuditConflictError(row.directiveId, row.transition) };
 		} catch (cause) {
 			return this.recoverOrFail(row, cause);
@@ -133,7 +145,7 @@ export class SteeringAuditSink implements SteeringHistorySink {
 	 */
 	private async recoverOrFail(row: SteeringAuditRow, cause: unknown): Promise<SteeringAuditResult> {
 		try {
-			if ((await this.sql.payloadSha256Of(row.directiveId, row.transition)) === row.payloadSha256) {
+			if ((await this.sql.savedRow(row.directiveId, row.transition))?.payloadSha256 === row.payloadSha256) {
 				return { ok: true, value: { inserted: false } };
 			}
 		} catch {
@@ -162,12 +174,13 @@ export function bunSteeringAuditSql(sql: SQL): SteeringAuditSql {
 				returning id`;
 			return written.length === 1;
 		},
-		async payloadSha256Of(directiveId: string, transition: SteeringAuditTransition): Promise<string | null> {
+		async savedRow(directiveId: string, transition: SteeringAuditTransition): Promise<SteeringSavedRow | null> {
 			const rows = await sql`
-				select payload_sha256 from planning_steering_audit
+				select payload_sha256, recorded_at from planning_steering_audit
 				where directive_id = ${directiveId} and transition = ${transition}`;
-			const stored = rows[0]?.payload_sha256;
-			return typeof stored === "string" ? stored : null;
+			const saved = rows[0];
+			if (saved === undefined) return null;
+			return { payloadSha256: String(saved.payload_sha256), recordedAt: new Date(saved.recorded_at) };
 		},
 	};
 }

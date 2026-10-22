@@ -34,9 +34,6 @@ export const STEERING_BODY_MAX = 4_096;
 /** One attempt plus one retry for every audit write. */
 export const STEERING_AUDIT_ATTEMPTS = 2;
 
-/** The most retry times each retry map keeps. Past it the oldest is dropped, so a sink that stays down cannot grow memory. */
-export const STEERING_RETRY_STATE_MAX = 256;
-
 const RATE_WINDOW_MS = 60_000;
 const DIRECTIVE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const PRINCIPAL_RE = /^[A-Za-z0-9][A-Za-z0-9._@:-]{0,127}$/;
@@ -124,6 +121,11 @@ export type SteeringAuditEntry =
 /** The append-only history port (the `HistorySink` shape of phase 52, typed for steering entries). */
 export interface SteeringHistorySink {
 	append(entry: SteeringAuditEntry): Promise<void>;
+	/**
+	 * The time a transition was saved with, or null when none was. A retry reuses it, so the audit content is unchanged.
+	 * Optional: a sink with no durable store has none, and every attempt takes a fresh time. A rejection is an audit failure.
+	 */
+	savedAtMs?(event: "queued" | "acknowledged", directiveId: string): Promise<number | null>;
 }
 
 export interface SteeringClock {
@@ -170,10 +172,6 @@ export class SteeringInbox {
 	private readonly buckets = new Map<string, TokenBucket>();
 	/** The largest clock reading the limiter has seen. Buckets refill against it, so a clock that steps back never refills. */
 	private highestMs = Number.NEGATIVE_INFINITY;
-	/** The transition time of an acknowledgement whose audit has not yet succeeded. A retry reuses it, so its audit content is unchanged. */
-	private readonly pendingAcknowledgeAtMs = new Map<string, number>();
-	/** The audit time of a queue whose audit has not yet succeeded. A retry reuses it, so its audit content is unchanged. */
-	private readonly pendingQueueAtMs = new Map<string, number>();
 	private readonly allowlist: ReadonlySet<string>;
 	private readonly capacity: number;
 	private tail: Promise<unknown> = Promise.resolve();
@@ -221,11 +219,6 @@ export class SteeringInbox {
 		return records.sort((a, b) => compareDirectives(a.directive, b.directive));
 	}
 
-	/** How many retry times the inbox holds across both retry maps. Bounded by {@link STEERING_RETRY_STATE_MAX} per map. */
-	retryStateSize(): number {
-		return this.pendingQueueAtMs.size + this.pendingAcknowledgeAtMs.size;
-	}
-
 	private async doEnqueue(input: unknown): Promise<SteeringResult<SteeringRecord>> {
 		const parsed = SteeringDirectiveSchema.safeParse(input);
 		if (!parsed.success) return fail({ code: "invalid-directive", issues: issuePaths(parsed.error) });
@@ -235,17 +228,17 @@ export class SteeringInbox {
 		if (!this.allowlist.has(directive.author.principalId)) return fail({ code: "principal-not-allowed" });
 		if (this.records.has(directive.id)) return fail({ code: "duplicate-directive" });
 
-		const nowMs = this.pendingQueueAtMs.get(directive.id) ?? this.deps.clock.nowMs();
 		const bucket = this.refilled(directive.targetSessionId, this.limiterNowMs());
 		if (bucket.tokens < 1) {
 			const retryAfterMs = Math.ceil(((1 - bucket.tokens) * RATE_WINDOW_MS) / this.capacity);
 			return fail({ code: "rate-limited", retryAfterMs });
 		}
 
-		rememberRetryTime(this.pendingQueueAtMs, directive.id, nowMs);
+		const saved = await this.savedTransitionAtMs("queued", directive.id);
+		if (!saved.ok) return saved;
+		const nowMs = saved.value ?? this.deps.clock.nowMs();
 		const audited = await this.audit({ event: "queued", atMs: nowMs, directive });
 		if (!audited.ok) return audited;
-		this.pendingQueueAtMs.delete(directive.id);
 
 		this.buckets.set(directive.targetSessionId, { tokens: bucket.tokens - 1, updatedAtMs: bucket.updatedAtMs });
 		const record: SteeringRecord = { state: "queued", directive, queuedAtMs: nowMs };
@@ -269,8 +262,9 @@ export class SteeringInbox {
 			return fail({ code: "confirmation-required" });
 		}
 
-		const nowMs = this.pendingAcknowledgeAtMs.get(directive.id) ?? this.deps.clock.nowMs();
-		rememberRetryTime(this.pendingAcknowledgeAtMs, directive.id, nowMs);
+		const saved = await this.savedTransitionAtMs("acknowledged", directive.id);
+		if (!saved.ok) return saved;
+		const nowMs = saved.value ?? this.deps.clock.nowMs();
 		const audited = await this.audit({
 			event: "acknowledged",
 			atMs: nowMs,
@@ -280,7 +274,6 @@ export class SteeringInbox {
 			confirmed,
 		});
 		if (!audited.ok) return audited;
-		this.pendingAcknowledgeAtMs.delete(directive.id);
 
 		const record: SteeringRecord = {
 			state: "acknowledged",
@@ -292,6 +285,24 @@ export class SteeringInbox {
 		};
 		this.records.set(directive.id, record);
 		return { ok: true, value: structuredClone(record) };
+	}
+
+	/**
+	 * The time a transition was saved with, so a retry reuses it and its audit content is unchanged. A sink with no durable
+	 * store has none, and every attempt takes a fresh time. A failed read is an audit failure, never a guess.
+	 */
+	private async savedTransitionAtMs(event: "queued" | "acknowledged", directiveId: string): Promise<SteeringResult<number | null>> {
+		const history = this.deps.history;
+		if (history.savedAtMs === undefined) return { ok: true, value: null };
+		let lastErrorCode = "UNKNOWN";
+		for (let attempt = 0; attempt < STEERING_AUDIT_ATTEMPTS; attempt++) {
+			try {
+				return { ok: true, value: await history.savedAtMs(event, directiveId) };
+			} catch (cause) {
+				lastErrorCode = errnoCode(cause);
+			}
+		}
+		return fail({ code: "audit-unavailable", attempts: STEERING_AUDIT_ATTEMPTS, lastErrorCode });
 	}
 
 	/** Append with a bounded retry. Failure is returned with the last error code, never swallowed. */
@@ -436,20 +447,6 @@ function integerSetting(
 
 function fail<T>(error: SteeringError): SteeringResult<T> {
 	return { ok: false, error };
-}
-
-/**
- * Keeps the audit time of a write that has not yet succeeded, so a retry reuses it. Re-keying moves the entry to the newest
- * position, and the oldest entries are dropped past the cap. An entry dropped that way is simply not reused: its retry takes
- * a fresh time, which is safe whenever nothing was saved under the old one.
- */
-function rememberRetryTime(states: Map<string, number>, directiveId: string, atMs: number): void {
-	states.delete(directiveId);
-	states.set(directiveId, atMs);
-	for (const oldest of states.keys()) {
-		if (states.size <= STEERING_RETRY_STATE_MAX) break;
-		states.delete(oldest);
-	}
 }
 
 /** Field paths only. Issue messages can echo input values, and a body may hold a secret. */
