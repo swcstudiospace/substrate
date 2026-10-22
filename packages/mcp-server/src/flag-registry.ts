@@ -495,6 +495,7 @@ export const FLAGS: readonly FlagSpec[] = [
 			manual: "/healthz.capacity.index.graphNodes shows the HOT-update and dead-row ratios the tune is meant to move",
 		},
 	},
+	{ name: "SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE", kind: "toggle", plane: "index", default: "off", allowed: "on | off (1/0, true/false, yes/no; anything else is off)", unset: "off: migrate() creates no planning_steering_audit table, so steering audit writes fail closed until an operator turns it on", readBy: "mcp-server/planning/steering-store.ts", documented: true },
 	{ name: "SUBSTRATE_INDEX_VOLUME_BYTES", kind: "number", plane: "index", default: "none", allowed: "bytes", unset: "no capacity runway row (the ceiling is unknown)", readBy: "observability/config.ts", documented: true, doc: "docs/observability.md" },
 	{ name: "SUBSTRATE_PLANNING_ROOT", kind: "path", plane: "index", default: "none", allowed: "absolute checkout path", unset: "planning plane disabled: nothing under .planning/ is read and no default path exists", readBy: "mcp-server/planning/config.ts", documented: true },
 	{ name: "SUBSTRATE_PLANNING_PRESENCE_TTL_S", kind: "number", plane: "index", default: "90", allowed: "1..86400", unset: "90 s: a session with no heartbeat for longer is stale", readBy: "mcp-server/planning/config.ts", documented: true },

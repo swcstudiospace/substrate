@@ -364,6 +364,12 @@ describe("auditToolCalls", () => {
 		expect(normalizeRoute("/skills/approve/../../etc")).toBe("other");
 	});
 
+	test("each steering tool is a known tool and keeps its own name as its observe label", () => {
+		for (const name of ["steering_queue", "steering_acknowledge", "steering_list"]) {
+			expect({ name, label: toolLabel(name) }).toEqual({ name, label: name });
+		}
+	});
+
 	test("toolLabel keeps the tools that exist", () => {
 		expect(toolLabel("graph_claim")).toBe("graph_claim");
 		expect(toolLabel("desktop_run")).toBe("desktop_run");

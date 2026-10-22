@@ -1399,6 +1399,8 @@ export class Substrate {
 					? new IndexStore(config.postgresUrl, {
 							gate: this.planes.gate("index"),
 							tune: config.indexArchive.tune,
+							// Phase 53 (SOTA-09): the steering audit table is created only when its opt-in is on.
+							migrationOptIns: { "steering-audit": config.steeringAuditTable },
 							// uplift-3 N4: the mode is config, the count goes to the observer.
 							memoryExpiry: {
 								mode: config.memoryExpiry,

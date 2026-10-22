@@ -188,15 +188,17 @@ export class SteeringInbox {
 		return this.exclusive(() => this.doAcknowledge(input));
 	}
 
+	/** A copy of the stored record. Mutating it changes nothing in the inbox. */
 	get(directiveId: string): SteeringRecord | null {
-		return this.records.get(directiveId) ?? null;
+		const record = this.records.get(directiveId);
+		return record === undefined ? null : structuredClone(record);
 	}
 
 	/** Queued directives for one session, highest priority first, then oldest, then by id. */
 	pendingFor(sessionId: string): SteeringDirective[] {
 		const pending: SteeringDirective[] = [];
 		for (const record of this.records.values()) {
-			if (record.state === "queued" && record.directive.targetSessionId === sessionId) pending.push(record.directive);
+			if (record.state === "queued" && record.directive.targetSessionId === sessionId) pending.push(structuredClone(record.directive));
 		}
 		return pending.sort(compareDirectives);
 	}
@@ -205,7 +207,7 @@ export class SteeringInbox {
 	recordsFor(sessionId: string): SteeringRecord[] {
 		const records: SteeringRecord[] = [];
 		for (const record of this.records.values()) {
-			if (record.directive.targetSessionId === sessionId) records.push(record);
+			if (record.directive.targetSessionId === sessionId) records.push(structuredClone(record));
 		}
 		return records.sort((a, b) => compareDirectives(a.directive, b.directive));
 	}
@@ -232,7 +234,7 @@ export class SteeringInbox {
 		this.buckets.set(directive.targetSessionId, { tokens: bucket.tokens - 1, updatedAtMs: nowMs });
 		const record: SteeringRecord = { state: "queued", directive, queuedAtMs: nowMs };
 		this.records.set(directive.id, record);
-		return { ok: true, value: record };
+		return { ok: true, value: structuredClone(record) };
 	}
 
 	private async doAcknowledge(input: unknown): Promise<SteeringResult<SteeringRecord>> {
@@ -271,7 +273,7 @@ export class SteeringInbox {
 			confirmed,
 		};
 		this.records.set(directive.id, record);
-		return { ok: true, value: record };
+		return { ok: true, value: structuredClone(record) };
 	}
 
 	/** Append with a bounded retry. Failure is returned with the last error code, never swallowed. */
