@@ -89,7 +89,9 @@ const TOP_LEVEL: ReadonlyArray<readonly [string, PlanningKind]> = [
 ];
 
 const PHASE_DIR = /^(\d+(?:\.\d+)?)-/;
-const FENCE_OPEN = /^\ufeff?---[ \t]*\r?\n/;
+const FENCE_OPEN = /^\ufeff?---\r?\n/;
+/** Trailing spaces or tabs after the opening `---` are not part of the fence. The shared parser wants the newline right after it. */
+const OPENING_FENCE_TRAILING = /^(\ufeff?---)[ \t]+(?=\r?\n)/;
 const UTF8 = new TextDecoder("utf-8", { fatal: true });
 
 interface Walk {
@@ -152,8 +154,9 @@ export async function buildPlanningIndex(root: string, deps: PlanningIndexDeps):
 
 /** The frontmatter of a document: none, a parsed mapping, or malformed. Only `---` fenced blocks count. */
 export function readFrontmatter(text: string): Frontmatter {
-	if (!FENCE_OPEN.test(text)) return { state: "none" };
-	const data = parseFrontmatter(text);
+	const normalized = text.replace(OPENING_FENCE_TRAILING, "$1");
+	if (!FENCE_OPEN.test(normalized)) return { state: "none" };
+	const data = parseFrontmatter(normalized);
 	return data === null ? { state: "malformed" } : { state: "parsed", data };
 }
 

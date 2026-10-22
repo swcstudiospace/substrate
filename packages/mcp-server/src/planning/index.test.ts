@@ -210,4 +210,14 @@ describe("readFrontmatter", () => {
 		expect(readFrontmatter("---\nphase: 52\n---\n# x")).toEqual({ state: "parsed", data: { phase: 52 } });
 		expect(readFrontmatter("---\nphase: 52\n")).toEqual({ state: "malformed" });
 	});
+
+	test("trailing spaces or tabs after the opening fence are part of the fence, not the YAML", () => {
+		expect(readFrontmatter("---  \nphase: 52\n---\n# x")).toEqual({ state: "parsed", data: { phase: 52 } });
+		expect(readFrontmatter("---\t\nphase: 52\n---\n# x")).toEqual({ state: "parsed", data: { phase: 52 } });
+		expect(readFrontmatter("---  \r\nphase: 52\r\n---\r\n# x")).toEqual({ state: "parsed", data: { phase: 52 } });
+	});
+
+	test("trailing whitespace does not rescue an unclosed fence", () => {
+		expect(readFrontmatter("---  \nphase: 52\n")).toEqual({ state: "malformed" });
+	});
 });
