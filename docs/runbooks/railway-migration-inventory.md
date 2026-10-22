@@ -57,12 +57,13 @@ Railway project and service names are as `docs/data-planes.md` gives them. The U
 | Skills mirror, proposals, governance | Skills plane | `/var/lib/substrate/skills` (`mirror.git`, `propose/`, `approved.json`) | None | No: local disk | Mirror is rebuildable from the library repo; proposals are not |
 | AgentOS state | VM sandboxes and approvals | `/var/lib/substrate/agentos` (`sandboxes.json`, `approvals.json`) | None | No: local disk | Approval state is a record of decisions |
 | Sandbox worktrees | Dispatcher and sandbox checkouts | `/var/lib/substrate/worktrees` | None | No: local disk | Subject to the disk-pressure runbook |
+| Dispatcher state | Given-up issues, dispatcher lock, session logs | `/var/lib/substrate/dispatcher` (`given_up.json`, `dispatcher.lock`, `sessions/`); `SUBSTRATE_STATE_DIR` overrides the directory | None | No: local disk | Losing `given_up.json` lets abandoned issues be relaunched. A restart ends every dispatched session, by design |
 | SLO checkpoint and runtime state | Doctor, docs canary, SLO | `/var/lib/substrate/slo-checkpoint.json`, `doctor-last.json`, `docs-canary-last.json` | None | No: local disk | Dedupe records. Losing them re-announces drift once |
 | Docs ingest records and version pins | RAGFlow document ingest | `/var/lib/substrate/docs-ingest.json`, set by `SUBSTRATE_DOCS_STATE_FILE` (the unit sets it) | None | No: local disk | Losing it drops the version pins and the merge-trigger's idempotency. Unset keeps the records process-local |
 | Index archive | Off-box snapshot of the index | `/mnt/index-archive` (off-box mount) | None | No | Operator-chosen off-box mount. Archive commands refuse by name when unset |
 | Ledger archive | Off-box snapshot of the ledger | `/mnt/ledger-archive`, set by `SUBSTRATE_LEDGER_ARCHIVE_DIR` | None | No | Same refusal rule as the index archive |
 | Backups | Cutover and pre-sweep backups | Lane-B cutover backups under the operator's `/root/backups`. Pre-sweep index backup is a manual Railway volume snapshot | Volume snapshot (Railway) | Partly | Snapshot is taken by hand before a sweep apply |
-| Operator checkouts and worktrees | Development source trees | `/root/src/repos` and `/root/src/worktrees` | None | No | Not runtime state. Out of scope for migration |
+| Operator checkouts and worktrees | Source trees | `/root/src/repos` and `/root/src/worktrees` | None | No | `/root/src/worktrees` is development only. `/root/src/repos` is a runtime requirement: the dispatcher's `repo_checkout` maps each graph's repo to `/root/src/repos/<name>` on every dispatch and refuses it when that checkout or its origin is missing. Migration must provide these checkouts at the same path, with a matching origin, before the dispatcher moves |
 | Anchor signer key | Solana anchor signing | A key file under `/etc/substrate` (role only, not read) | None | No | A secret. It is never copied into the repo or a doc |
 
 ## 3. Environment-only configuration check
