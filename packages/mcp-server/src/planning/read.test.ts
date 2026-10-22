@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { EventInput } from "../types.ts";
 import { PLANNING_ROOT_ENV, loadPlanningSettings } from "./config.ts";
 import { nodePlanningFs } from "./fs.ts";
@@ -43,7 +43,9 @@ function sha256(text: string): string {
 }
 
 async function write(relative: string, text: string): Promise<void> {
-	await writeFile(join(root, relative), text);
+	const path = join(root, relative);
+	await mkdir(dirname(path), { recursive: true });
+	await writeFile(path, text);
 }
 
 /** Two good phase documents and one with an unclosed frontmatter fence. Each carries a body and a frontmatter secret. */
