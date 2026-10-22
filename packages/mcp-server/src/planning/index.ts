@@ -54,7 +54,7 @@ export interface PlanningIndex {
 	truncated: boolean;
 }
 
-export type PlanningIndexFailure = "root-unavailable" | "planning-dir-unavailable" | "planning-dir-outside-root";
+export type PlanningIndexFailure = "root-unavailable" | "planning-dir-unavailable" | "planning-dir-dangling" | "planning-dir-outside-root";
 
 export type PlanningIndexResult = { ok: true; index: PlanningIndex } | { ok: false; code: PlanningIndexFailure };
 
@@ -64,15 +64,30 @@ export interface DirEntry {
 	kind: "file" | "dir" | "broken" | "other";
 }
 
+/** What `openRead` found. `refused` means `accept` rejected the real path, and nothing was read. */
+export type OpenResult = { state: "absent" } | { state: "refused" } | { state: "opened"; real: string; isFile: boolean; bytes: Uint8Array };
+
+/** What `probe` found: no entry, a link whose target is missing, or an entry with its real location. */
+export type Probe = { state: "absent" } | { state: "dangling" } | { state: "present"; real: string; isFile: boolean; isDir: boolean };
+
 /** The filesystem and hash port. Missing paths answer null; any other failure throws. */
 export interface PlanningFs {
-	/** The canonical path, or null when nothing exists there. */
-	realpath(path: string): Promise<string | null>;
+	/**
+	 * What `path` is, following symlinks. `dangling` is a link whose target is missing, which is not the
+	 * same as no entry at all: the walk reports it, it never treats it as absent.
+	 */
+	probe(path: string): Promise<Probe>;
 	/** The entries of a directory, or null when it is absent or not a directory. */
 	readDir(path: string): Promise<DirEntry[] | null>;
-	/** Size and kind of the target, or null when absent. */
+	/** Size and kind of the target, or null when absent. Used by the .git/config reader, not by the index walk. */
 	statFile(path: string): Promise<{ isFile: boolean; size: number } | null>;
 	readFile(path: string): Promise<Uint8Array>;
+	/**
+	 * Open `path` and read through that one descriptor. `accept` receives the real path the descriptor
+	 * refers to, before any byte is read; a refusal reads nothing. At most `limit` bytes are returned,
+	 * so a file that grows after it was listed is still read no further than the cap.
+	 */
+	openRead(path: string, limit: number, accept: (real: string) => boolean): Promise<OpenResult>;
 	sha256(bytes: Uint8Array): string;
 }
 
@@ -82,21 +97,27 @@ export interface PlanningIndexDeps {
 }
 
 const TOP_LEVEL: ReadonlyArray<readonly [string, PlanningKind]> = [
+	["PROJECT.md", "project"],
 	["ROADMAP.md", "roadmap"],
 	["STATE.md", "state"],
-	["PROJECT.md", "project"],
 	["config.json", "config"],
 ];
 
 const PHASE_DIR = /^(\d+(?:\.\d+)?)-/;
-const FENCE_OPEN = /^\ufeff?---[ \t]*\r?\n/;
+const FENCE_OPEN = /^\ufeff?---\r?\n/;
+/** Trailing spaces or tabs after the opening `---` are not part of the fence. The shared parser wants the newline right after it. */
+const OPENING_FENCE_TRAILING = /^(\ufeff?---)[ \t]+(?=\r?\n)/;
 const UTF8 = new TextDecoder("utf-8", { fatal: true });
 
 interface Walk {
 	fs: PlanningFs;
 	realRoot: string;
-	planningAbs: string;
+	planningReal: string;
 	maxBytes: number;
+	/** Candidates collected so far, in path order. */
+	found: Entry[];
+	/** The most candidates collected: one past `maxFiles`. */
+	cap: number;
 }
 
 interface FileEntry {
@@ -118,7 +139,7 @@ type Entry = FileEntry | ErrorEntry;
 
 type Attempt<T> = { ok: true; value: T } | { ok: false; code: string };
 
-type Listing = { state: "absent" } | { state: "entries"; entries: DirEntry[] } | { state: "error"; entry: ErrorEntry };
+type Listing = { state: "absent" } | { state: "entries"; real: string; entries: DirEntry[] } | { state: "error"; entry: ErrorEntry };
 
 export type Frontmatter = { state: "none" } | { state: "parsed"; data: Record<string, unknown> } | { state: "malformed" };
 
@@ -128,32 +149,37 @@ export async function buildPlanningIndex(root: string, deps: PlanningIndexDeps):
 	assertLimit(limits.maxFiles, "maxFiles");
 	assertLimit(limits.maxBytes, "maxBytes");
 
-	const realRootAttempt = await attempt(() => fs.realpath(root));
-	const realRoot = realRootAttempt.ok ? realRootAttempt.value : null;
-	if (realRoot === null) return { ok: false, code: "root-unavailable" };
+	const rootProbe = await attempt(() => fs.probe(root));
+	const rootFound = rootProbe.ok ? rootProbe.value : null;
+	if (rootFound?.state !== "present" || !rootFound.isDir) return { ok: false, code: "root-unavailable" };
+	const realRoot = rootFound.real;
 
 	const planningAbs = join(root, PLANNING_DIR);
-	const realPlanningAttempt = await attempt(() => fs.realpath(planningAbs));
-	const realPlanning = realPlanningAttempt.ok ? realPlanningAttempt.value : null;
-	if (realPlanning === null) return { ok: false, code: "planning-dir-unavailable" };
-	if (!isInside(realPlanning, realRoot)) return { ok: false, code: "planning-dir-outside-root" };
+	const planningProbe = await attempt(() => fs.probe(planningAbs));
+	const planningFound = planningProbe.ok ? planningProbe.value : null;
+	if (planningFound?.state === "dangling") return { ok: false, code: "planning-dir-dangling" };
+	if (planningFound?.state !== "present" || !planningFound.isDir) return { ok: false, code: "planning-dir-unavailable" };
+	if (!isInside(planningFound.real, realRoot)) return { ok: false, code: "planning-dir-outside-root" };
 
-	const walk: Walk = { fs, realRoot, planningAbs, maxBytes: limits.maxBytes };
-	const found = [...(await collectTopLevel(walk)), ...(await collectMilestones(walk)), ...(await collectPhases(walk))];
-	found.sort((a, b) => compareText(a.path, b.path));
+	// One past the limit is collected and no more: seeing it proves the index is truncated, and nothing past it is listed.
+	const walk: Walk = { fs, realRoot, planningReal: planningFound.real, maxBytes: limits.maxBytes, found: [], cap: limits.maxFiles + 1 };
+	await collectTopLevel(walk);
+	await collectMilestones(walk);
+	await collectPhases(walk);
 
-	const kept = found.slice(0, limits.maxFiles);
+	const kept = walk.found.slice(0, limits.maxFiles);
 	const records: PlanningRecord[] = [];
 	for (const entry of kept) {
 		records.push(entry.type === "error" ? entry.record : await readDocument(walk, entry));
 	}
-	return { ok: true, index: { records, truncated: found.length > limits.maxFiles } };
+	return { ok: true, index: { records, truncated: walk.found.length > limits.maxFiles } };
 }
 
 /** The frontmatter of a document: none, a parsed mapping, or malformed. Only `---` fenced blocks count. */
 export function readFrontmatter(text: string): Frontmatter {
-	if (!FENCE_OPEN.test(text)) return { state: "none" };
-	const data = parseFrontmatter(text);
+	const normalized = text.replace(OPENING_FENCE_TRAILING, "$1");
+	if (!FENCE_OPEN.test(normalized)) return { state: "none" };
+	const data = parseFrontmatter(normalized);
 	return data === null ? { state: "malformed" } : { state: "parsed", data };
 }
 
@@ -171,100 +197,128 @@ async function attempt<T>(run: () => Promise<T>): Promise<Attempt<T>> {
 	}
 }
 
-async function collectTopLevel(walk: Walk): Promise<Entry[]> {
-	const out: Entry[] = [];
+/** Collectors stop once `cap` candidates are held. Walk order is path order, so the kept set is the first `maxFiles` by path. */
+function isFull(walk: Walk): boolean {
+	return walk.found.length >= walk.cap;
+}
+
+function add(walk: Walk, entry: Entry): void {
+	if (!isFull(walk)) walk.found.push(entry);
+}
+
+async function collectTopLevel(walk: Walk): Promise<void> {
 	for (const [name, kind] of TOP_LEVEL) {
+		if (isFull(walk)) return;
 		const path = `${PLANNING_DIR}/${name}`;
-		const stat = await attempt(() => walk.fs.statFile(join(walk.planningAbs, name)));
-		if (!stat.ok) out.push(errorEntry(path, "unreadable", `stat failed: ${stat.code}`, kind));
-		else if (stat.value === null) continue;
-		else if (!stat.value.isFile) out.push(errorEntry(path, "unreadable", "not a regular file", kind));
-		else out.push({ type: "file", path, abs: join(walk.planningAbs, name), kind });
+		const abs = join(walk.planningReal, name);
+		const probed = await attempt(() => walk.fs.probe(abs));
+		if (!probed.ok) {
+			add(walk, errorEntry(path, "unreadable", `probe failed: ${probed.code}`, kind));
+			continue;
+		}
+		const found = probed.value;
+		if (found.state === "absent") continue;
+		if (found.state === "dangling") {
+			add(walk, errorEntry(path, "unreadable", "dangling symlink", kind));
+			continue;
+		}
+		if (!found.isFile) add(walk, errorEntry(path, "unreadable", "not a regular file", kind));
+		else add(walk, { type: "file", path, abs, kind });
 	}
-	return out;
 }
 
-async function collectMilestones(walk: Walk): Promise<Entry[]> {
+async function collectMilestones(walk: Walk): Promise<void> {
+	if (isFull(walk)) return;
 	const relDir = `${PLANNING_DIR}/milestones`;
-	const listing = await listDir(walk, relDir, join(walk.planningAbs, "milestones"));
-	if (listing.state === "error") return [listing.entry];
-	if (listing.state === "absent") return [];
-	return documentEntries(relDir, join(walk.planningAbs, "milestones"), listing.entries, "milestone", undefined);
+	const listing = await listDir(walk, relDir, join(walk.planningReal, "milestones"));
+	if (listing.state === "error") add(walk, listing.entry);
+	else if (listing.state === "entries") collectDocuments(walk, relDir, listing.real, listing.entries, "milestone", undefined);
 }
 
-async function collectPhases(walk: Walk): Promise<Entry[]> {
+async function collectPhases(walk: Walk): Promise<void> {
+	if (isFull(walk)) return;
 	const relDir = `${PLANNING_DIR}/phases`;
-	const listing = await listDir(walk, relDir, join(walk.planningAbs, "phases"));
-	if (listing.state === "error") return [listing.entry];
-	if (listing.state === "absent") return [];
-	const out: Entry[] = [];
-	for (const dir of listing.entries) {
-		if (dir.kind !== "dir") continue;
-		const dirRel = `${relDir}/${dir.name}`;
-		const dirAbs = join(walk.planningAbs, "phases", dir.name);
-		const sub = await listDir(walk, dirRel, dirAbs);
-		if (sub.state === "error") out.push(sub.entry);
-		else if (sub.state === "entries") out.push(...documentEntries(dirRel, dirAbs, sub.entries, "phase", PHASE_DIR.exec(dir.name)?.[1]));
+	const listing = await listDir(walk, relDir, join(walk.planningReal, "phases"));
+	if (listing.state === "error") add(walk, listing.entry);
+	else if (listing.state === "entries") {
+		for (const dir of listing.entries) {
+			if (isFull(walk)) return;
+			const dirRel = `${relDir}/${dir.name}`;
+			if (dir.kind === "broken") {
+				add(walk, errorEntry(dirRel, "unreadable", "dangling symlink"));
+				continue;
+			}
+			if (dir.kind !== "dir") continue;
+			const sub = await listDir(walk, dirRel, join(listing.real, dir.name));
+			if (sub.state === "error") add(walk, sub.entry);
+			else if (sub.state === "entries") collectDocuments(walk, dirRel, sub.real, sub.entries, "phase", PHASE_DIR.exec(dir.name)?.[1]);
+		}
 	}
-	return out;
 }
 
-/** A directory's entries, after confirming its real location is inside the root. */
+/** A directory's entries in path order, after confirming it is a directory whose real location is inside the root. */
 async function listDir(walk: Walk, relDir: string, absDir: string): Promise<Listing> {
-	const real = await attempt(() => walk.fs.realpath(absDir));
-	if (!real.ok) return { state: "error", entry: errorEntry(relDir, "unreadable", `realpath failed: ${real.code}`) };
-	if (real.value === null) return { state: "absent" };
-	if (!isInside(real.value, walk.realRoot)) {
+	const probed = await attempt(() => walk.fs.probe(absDir));
+	if (!probed.ok) return { state: "error", entry: errorEntry(relDir, "unreadable", `probe failed: ${probed.code}`) };
+	const found = probed.value;
+	if (found.state === "absent") return { state: "absent" };
+	if (found.state === "dangling") return { state: "error", entry: errorEntry(relDir, "unreadable", "dangling symlink") };
+	if (!found.isDir) return { state: "error", entry: errorEntry(relDir, "unreadable", "not a directory") };
+	if (!isInside(found.real, walk.realRoot)) {
 		return { state: "error", entry: errorEntry(relDir, "outside-root", "directory resolves outside the planning root") };
 	}
-	const listed = await attempt(() => walk.fs.readDir(absDir));
+	const listed = await attempt(() => walk.fs.readDir(found.real));
 	if (!listed.ok) return { state: "error", entry: errorEntry(relDir, "unreadable", `read failed: ${listed.code}`) };
 	if (listed.value === null) return { state: "absent" };
-	return { state: "entries", entries: listed.value };
+	return { state: "entries", real: found.real, entries: inPathOrder(listed.value) };
 }
 
-function documentEntries(
+/** Directory entries in path order. A directory's children sort under its name followed by `/`, as their paths do. */
+function inPathOrder(entries: readonly DirEntry[]): DirEntry[] {
+	const key = (entry: DirEntry): string => (entry.kind === "dir" ? `${entry.name}/` : entry.name);
+	return [...entries].sort((a, b) => compareText(key(a), key(b)));
+}
+
+function collectDocuments(
+	walk: Walk,
 	relDir: string,
 	absDir: string,
 	entries: readonly DirEntry[],
 	kind: PlanningKind,
 	phase: string | undefined,
-): Entry[] {
-	const out: Entry[] = [];
+): void {
 	for (const entry of entries) {
+		if (isFull(walk)) return;
 		if (!entry.name.endsWith(".md")) continue;
 		const path = `${relDir}/${entry.name}`;
 		if (entry.kind === "file") {
 			const plan = entry.name.endsWith("PLAN.md") ? entry.name.slice(0, -3) : undefined;
-			out.push({ type: "file", path, abs: join(absDir, entry.name), kind, phase, plan });
+			add(walk, { type: "file", path, abs: join(absDir, entry.name), kind, phase, plan });
 		} else {
-			const detail = entry.kind === "broken" ? "dangling symlink" : "not a regular file";
-			out.push(errorEntry(path, "unreadable", detail, kind));
+			add(walk, errorEntry(path, "unreadable", entry.kind === "broken" ? "dangling symlink" : "not a regular file", kind));
 		}
 	}
-	return out;
 }
 
 async function readDocument(walk: Walk, entry: FileEntry): Promise<PlanningRecord> {
 	const fail = (code: PlanningRecordErrorCode, detail: string, sha256: string | null = null, bytes: number | null = null) =>
 		errorRecord(entry.path, code, detail, { kind: entry.kind, sha256, bytes });
 
-	const real = await attempt(() => walk.fs.realpath(entry.abs));
-	if (!real.ok) return fail("unreadable", `realpath failed: ${real.code}`);
-	if (real.value === null) return fail("unreadable", "file disappeared during the walk");
-	if (!isInside(real.value, walk.realRoot)) return fail("outside-root", "file resolves outside the planning root");
+	// One descriptor does the root check and the read. The real path is checked before any byte is read, and
+	// at most maxBytes + 1 bytes are read, so a file that grows after it was listed is cut off at the cap.
+	const opened = await attempt(() => walk.fs.openRead(entry.abs, walk.maxBytes + 1, (real) => isInside(real, walk.realRoot)));
+	if (!opened.ok) return fail("unreadable", `open failed: ${opened.code}`);
+	const found = opened.value;
+	if (found.state === "absent") return fail("unreadable", "file disappeared during the walk");
+	if (found.state === "refused") return fail("outside-root", "file resolves outside the planning root");
+	if (!found.isFile) return fail("unreadable", "not a regular file");
+	// Too large is reported without a byte count: the file was not read to its end.
+	if (found.bytes.byteLength > walk.maxBytes) return fail("too-large", `exceeds ${walk.maxBytes} bytes`);
 
-	const stat = await attempt(() => walk.fs.statFile(entry.abs));
-	if (!stat.ok) return fail("unreadable", `stat failed: ${stat.code}`);
-	if (stat.value === null || !stat.value.isFile) return fail("unreadable", "not a regular file");
-	if (stat.value.size > walk.maxBytes) return fail("too-large", `exceeds ${walk.maxBytes} bytes`, null, stat.value.size);
+	const sha256 = walk.fs.sha256(found.bytes);
+	const bytes = found.bytes.byteLength;
 
-	const read = await attempt(() => walk.fs.readFile(entry.abs));
-	if (!read.ok) return fail("unreadable", `read failed: ${read.code}`);
-	const sha256 = walk.fs.sha256(read.value);
-	const bytes = read.value.byteLength;
-
-	const text = decodeUtf8(read.value);
+	const text = decodeUtf8(found.bytes);
 	if (text === null) return fail("unreadable", "not valid UTF-8", sha256, bytes);
 	const frontmatter: Frontmatter = entry.path.endsWith(".md") ? readFrontmatter(text) : { state: "none" };
 	if (frontmatter.state === "malformed") {
