@@ -6116,8 +6116,9 @@ export class Substrate {
 						up: probe.up,
 						eventsWritable: this.eventsWritableOf(probe),
 						writeTimedOut: probe.writeTimedOut,
-						// No write verdict since boot: the probe has not run, so the ledger's write path is unknown.
-						writeUnread: probe.probe === null || probe.probe.lastProbeAt === null,
+						// With the write probe on, a probe that has recorded no verdict is an unknown write. With it off (interval 0) the
+						// verdict is metadata-only, so nothing is missing and the Greptime row is not unavailable for want of a write.
+						writeUnread: this.config.ledger.writeProbeS > 0 && (probe.probe === null || probe.probe.lastProbeAt === null),
 					})),
 					index: probes.index,
 					hindsight: probes.hindsight,

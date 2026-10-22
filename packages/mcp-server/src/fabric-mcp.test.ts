@@ -456,3 +456,25 @@ describe("fabric reads never write to Greptime", () => {
 		}
 	});
 });
+
+describe("the Greptime row with the write probe off", () => {
+	test("a healthy Greptime reads ok at SUBSTRATE_LEDGER_WRITE_PROBE_S=0, and the fabric still issues no write", async () => {
+		const wire = recordGreptimeWire();
+		try {
+			const env = { [GREPTIME_URL_KEY]: "http://greptime.test", SUBSTRATE_LEDGER_WRITE_PROBE_S: "0" };
+			const substrate = new Substrate(loadConfig(env), {
+				index: null,
+				greptime: new GreptimeClient({ url: "http://greptime.test", user: "u", password: "p", db: "substrate" }),
+			});
+			const client = await connect(substrate);
+			const status = (await call(client, "fabric_status")).json() as { resources: Array<{ resource: string; state: string }> };
+			expect(status.resources.find((row) => row.resource === "greptime")?.state).toBe("ok");
+			await call(client, "fabric_optimize");
+			await call(client, "fabric_compliance");
+			expect(wire.statements.length).toBeGreaterThan(0);
+			expect(wire.statements.filter((statement) => WRITE_STATEMENT.test(statement))).toEqual([]);
+		} finally {
+			wire.restore();
+		}
+	});
+});
