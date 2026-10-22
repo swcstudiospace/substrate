@@ -3,8 +3,8 @@
  *
  * The event uses an existing vocabulary entry: kind `note` on the `substrate` host-job surface.
  * `EVENT_KINDS` is frozen at twelve and gains nothing here. The payload is
- * `{ kind: "planning.changed", repo, sessionId, added, removed, changed }`. Its lists hold paths
- * only, never file text. Both the summary and the payload pass through the existing redactor.
+ * `{ kind: "planning.changed", repo, sessionId, added, removed, changed }`. Each list holds, per path, its sha256 before
+ * and after (`{ path, before, after }`), never file text. Both the summary and the payload pass through the existing redactor.
  *
  * The publish port wraps the existing event bus. The bus carries wake-up hints only (D50-b), so a
  * hint has no payload. The ledger write that stores the full event is a wiring step, not done here.
@@ -12,7 +12,7 @@
 import type { EventBus, EventHint } from "../event-bus.ts";
 import { redact, redactValue } from "../redact.ts";
 import type { EventInput } from "../types.ts";
-import { diffPlanningIndex, type PlanningDiff, type PlanningSnapshot } from "./diff.ts";
+import { diffPlanningIndex, type PathChange, type PlanningDiff, type PlanningSnapshot } from "./diff.ts";
 import { SESSION_ID_RE } from "./presence.ts";
 
 export const PLANNING_CHANGED = "planning.changed";
@@ -26,9 +26,9 @@ export type PlanningChangePayload = {
 	kind: "planning.changed";
 	repo: string;
 	sessionId: string;
-	added: string[];
-	removed: string[];
-	changed: string[];
+	added: PathChange[];
+	removed: PathChange[];
+	changed: PathChange[];
 };
 
 export interface PlanningChangeInput {

@@ -1,19 +1,27 @@
 /**
- * Planning-change events: the existing vocabulary, paths and never file text, redacted, capped,
+ * Planning-change events: the existing vocabulary, paths and hashes and never file text, redacted, capped,
  * published only as a hint over the injected bus.
  */
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import type { EventHint } from "../event-bus.ts";
 import { EVENT_KINDS } from "../types.ts";
 import { diffPlanningIndex, type PlanningDiff } from "./diff.ts";
 import { MAX_EVENT_PATHS, PLANNING_CHANGED, busPublisher, emitPlanningChange, observePlanningChange, planningChangeEvent, type PlanningPublisher } from "./events.ts";
-import { buildPlanningIndex } from "./index.ts";
+import { buildPlanningIndex, snapshotOf } from "./index.ts";
 import { FakeTree, TREE_ROOT } from "./tree.fixtures.ts";
 
 const REPO = "swcstudiospace/agent-substrate";
 const SESSION = "sess-p52-events";
 const BODY_MARKER = "BODY-MARKER-never-in-an-event";
-const DIFF: PlanningDiff = { complete: true, added: [".planning/phases/52-x/PLAN.md"], removed: [], changed: [".planning/STATE.md"] };
+const H = (tag: string) => tag.repeat(64).slice(0, 64);
+const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+const DIFF: PlanningDiff = {
+	complete: true,
+	added: [{ path: ".planning/phases/52-x/PLAN.md", before: null, after: H("a") }],
+	removed: [],
+	changed: [{ path: ".planning/STATE.md", before: H("b"), after: H("c") }],
+};
 
 function recordingPublisher(result = true): PlanningPublisher & { events: unknown[] } {
 	const events: unknown[] = [];
@@ -27,7 +35,7 @@ function recordingPublisher(result = true): PlanningPublisher & { events: unknow
 }
 
 describe("planningChangeEvent", () => {
-	test("uses an existing kind on the substrate surface and the planning payload shape", () => {
+	test("uses an existing kind on the substrate surface and the planning payload shape, with a hash per path", () => {
 		const event = planningChangeEvent({ repo: REPO, sessionId: SESSION, diff: DIFF });
 		expect(event).not.toBeNull();
 		const kinds: readonly string[] = EVENT_KINDS;
@@ -37,9 +45,9 @@ describe("planningChangeEvent", () => {
 			kind: PLANNING_CHANGED,
 			repo: REPO,
 			sessionId: SESSION,
-			added: [".planning/phases/52-x/PLAN.md"],
+			added: [{ path: ".planning/phases/52-x/PLAN.md", before: null, after: H("a") }],
 			removed: [],
-			changed: [".planning/STATE.md"],
+			changed: [{ path: ".planning/STATE.md", before: H("b"), after: H("c") }],
 		});
 		expect(PLANNING_CHANGED).toBe("planning.changed");
 	});
@@ -53,24 +61,34 @@ describe("planningChangeEvent", () => {
 		expect(() => planningChangeEvent({ repo: REPO, sessionId: "bad id", diff: DIFF })).toThrow(TypeError);
 	});
 
-	test("no file text reaches the event: a diff built from documents with a body marker carries only paths", async () => {
-		const files = {
-			[`${TREE_ROOT}/.planning/STATE.md`]: `# State\n${BODY_MARKER}\n`,
-			[`${TREE_ROOT}/.planning/ROADMAP.md`]: "# Roadmap\n",
-		};
-		const before = await buildPlanningIndex(TREE_ROOT, { fs: new FakeTree(files), limits: { maxFiles: 500, maxBytes: 262_144 } });
+	test("an edit, an add and a removal each carry the sha256 before and after, and no file text reaches the event", async () => {
+		const limits = { maxFiles: 500, maxBytes: 262_144 };
+		const before = await buildPlanningIndex(TREE_ROOT, {
+			fs: new FakeTree({
+				[`${TREE_ROOT}/.planning/STATE.md`]: `# State\n${BODY_MARKER}\n`,
+				[`${TREE_ROOT}/.planning/ROADMAP.md`]: "# Roadmap\n",
+			}),
+			limits,
+		});
 		const after = await buildPlanningIndex(TREE_ROOT, {
-			fs: new FakeTree({ ...files, [`${TREE_ROOT}/.planning/STATE.md`]: `# State\n${BODY_MARKER} changed\n` }),
-			limits: { maxFiles: 500, maxBytes: 262_144 },
+			fs: new FakeTree({
+				[`${TREE_ROOT}/.planning/STATE.md`]: `# State\n${BODY_MARKER} changed\n`,
+				[`${TREE_ROOT}/.planning/phases/52-x/NEW.md`]: "# new\n",
+			}),
+			limits,
 		});
 		if (!before.ok || !after.ok) throw new Error("index failed");
-		const diff = diffPlanningIndex(
-			{ records: before.index.records, truncated: before.index.truncated, unlisted: before.index.unlisted },
-			{ records: after.index.records, truncated: after.index.truncated, unlisted: after.index.unlisted },
-		);
-		expect(diff.changed).toEqual([".planning/STATE.md"]);
+		const diff = diffPlanningIndex(snapshotOf(before.index), snapshotOf(after.index));
 
 		const event = planningChangeEvent({ repo: REPO, sessionId: SESSION, diff });
+		expect(event?.payload).toEqual({
+			kind: PLANNING_CHANGED,
+			repo: REPO,
+			sessionId: SESSION,
+			added: [{ path: ".planning/phases/52-x/NEW.md", before: null, after: sha("# new\n") }],
+			removed: [{ path: ".planning/ROADMAP.md", before: sha("# Roadmap\n"), after: null }],
+			changed: [{ path: ".planning/STATE.md", before: sha(`# State\n${BODY_MARKER}\n`), after: sha(`# State\n${BODY_MARKER} changed\n`) }],
+		});
 		expect(JSON.stringify(event)).not.toContain(BODY_MARKER);
 	});
 
@@ -79,7 +97,7 @@ describe("planningChangeEvent", () => {
 		const event = planningChangeEvent({
 			repo: REPO,
 			sessionId: SESSION,
-			diff: { complete: true, added: [`.planning/phases/52-x/${token}.md`], removed: [], changed: [] },
+			diff: { complete: true, added: [{ path: `.planning/phases/52-x/${token}.md`, before: null, after: H("a") }], removed: [], changed: [] },
 		});
 		expect(JSON.stringify(event)).not.toContain(token);
 		expect(event?.summary).not.toContain(token);
@@ -87,9 +105,9 @@ describe("planningChangeEvent", () => {
 	});
 
 	test("a list longer than the cap is cut to the cap, and the summary says so with the full count", () => {
-		const added = Array.from({ length: MAX_EVENT_PATHS + 50 }, (_, index) => `.planning/phases/52-x/doc-${index}.md`);
+		const added = Array.from({ length: MAX_EVENT_PATHS + 50 }, (_, index) => ({ path: `.planning/phases/52-x/doc-${index}.md`, before: null, after: H("a") }));
 		const event = planningChangeEvent({ repo: REPO, sessionId: SESSION, diff: { complete: true, added, removed: [], changed: [] } });
-		const payload = event?.payload as { added: string[] } | undefined;
+		const payload = event?.payload as { added: unknown[] } | undefined;
 		expect(payload?.added).toHaveLength(MAX_EVENT_PATHS);
 		expect(event?.summary).toContain(`${MAX_EVENT_PATHS + 50} added`);
 		expect(event?.summary).toContain(`lists capped at ${MAX_EVENT_PATHS}`);
@@ -107,7 +125,7 @@ describe("emitPlanningChange and the bus publisher", () => {
 
 	test("a partial diff is 'incomplete': nothing is published, and the event builder refuses it", async () => {
 		const publisher = recordingPublisher(true);
-		const partialDiff: PlanningDiff = { complete: false, added: [], removed: null, changed: [".planning/STATE.md"] };
+		const partialDiff: PlanningDiff = { complete: false, added: [], removed: null, changed: [{ path: ".planning/STATE.md", before: H("a"), after: H("b") }] };
 		expect(await emitPlanningChange(publisher, { repo: REPO, sessionId: SESSION, diff: partialDiff })).toBe("incomplete");
 		expect(publisher.events).toEqual([]);
 		expect(() => planningChangeEvent({ repo: REPO, sessionId: SESSION, diff: partialDiff })).toThrow(TypeError);
@@ -155,12 +173,9 @@ describe("the publish guard and unlisted directories", () => {
 		const before = await buildPlanningIndex(TREE_ROOT, { fs: unreadable, limits });
 		const after = await buildPlanningIndex(TREE_ROOT, { fs: readable, limits });
 		if (!before.ok || !after.ok) throw new Error("index failed");
-		const diff = diffPlanningIndex(
-			{ records: before.index.records, truncated: before.index.truncated, unlisted: before.index.unlisted },
-			{ records: after.index.records, truncated: after.index.truncated, unlisted: after.index.unlisted },
-		);
+		const diff = diffPlanningIndex(snapshotOf(before.index), snapshotOf(after.index));
 		expect(diff.complete).toBe(false);
-		expect(diff.added).toEqual([".planning/phases/52-x/NEW.md", ".planning/phases/52-x/PLAN.md"]);
+		expect(diff.added.map((change) => change.path)).toEqual([".planning/phases/52-x/NEW.md", ".planning/phases/52-x/PLAN.md"]);
 		const publisher = recordingPublisher(true);
 		expect(await emitPlanningChange(publisher, { repo: REPO, sessionId: SESSION, diff })).toBe("incomplete");
 		expect(publisher.events).toEqual([]);
@@ -170,12 +185,9 @@ describe("the publish guard and unlisted directories", () => {
 		const before = await buildPlanningIndex(TREE_ROOT, { fs: new FakeTree({ [`${dir}/PLAN.md`]: "# plan\n" }), limits });
 		const after = await buildPlanningIndex(TREE_ROOT, { fs: new FakeTree({ [`${dir}/PLAN.md`]: "# plan, revised\n" }), limits });
 		if (!before.ok || !after.ok) throw new Error("index failed");
-		const diff = diffPlanningIndex(
-			{ records: before.index.records, truncated: before.index.truncated, unlisted: before.index.unlisted },
-			{ records: after.index.records, truncated: after.index.truncated, unlisted: after.index.unlisted },
-		);
+		const diff = diffPlanningIndex(snapshotOf(before.index), snapshotOf(after.index));
 		expect(diff.complete).toBe(true);
-		expect(diff.changed).toEqual([".planning/phases/52-x/PLAN.md"]);
+		expect(diff.changed).toEqual([{ path: ".planning/phases/52-x/PLAN.md", before: sha("# plan\n"), after: sha("# plan, revised\n") }]);
 		const publisher = recordingPublisher(true);
 		expect(await emitPlanningChange(publisher, { repo: REPO, sessionId: SESSION, diff })).toBe("published");
 		expect(publisher.events).toHaveLength(1);
@@ -188,7 +200,7 @@ describe("observing across an unreadable interval", () => {
 	const snap = async (fs: FakeTree) => {
 		const built = await buildPlanningIndex(TREE_ROOT, { fs, limits });
 		if (!built.ok) throw new Error("index failed");
-		return { records: built.index.records, truncated: built.index.truncated, unlisted: built.index.unlisted };
+		return snapshotOf(built.index);
 	};
 
 	test("an unlisted baseline recovers: the diff is incomplete, nothing is published, and the baseline advances", async () => {
