@@ -761,6 +761,7 @@ describe("the observer under a change the ledger does not store, failure, load a
 			fs: tree,
 			presence: null,
 			emit: async () => true,
+			metrics: recordingSink("greptime").sink,
 			timers: {
 				setInterval: (run: () => Promise<unknown>) => {
 					tick = run;
@@ -791,6 +792,7 @@ describe("the observer under a change the ledger does not store, failure, load a
 			fs: gatedFs(tree, gate),
 			presence: null,
 			emit: async () => true,
+			metrics: recordingSink("greptime").sink,
 			timers: {
 				setInterval: (run: () => Promise<unknown>) => {
 					tick = run;
@@ -820,6 +822,7 @@ describe("the observer under a change the ledger does not store, failure, load a
 			fs: gatedFs(tree, gate),
 			presence: null,
 			emit: async () => true,
+			metrics: recordingSink("greptime").sink,
 		});
 		let finished = false;
 		const scanning = observer.scan().then((scan) => {
