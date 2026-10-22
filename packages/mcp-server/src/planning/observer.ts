@@ -106,6 +106,8 @@ export class PlanningObserver {
 	private touchedOverflow = false;
 	/** The presence record has a change this process has not written yet: a complete change, a moved watcher gap, or a write that failed. Process-local. */
 	private presencePending = false;
+	/** The signature of the change whose publish is held. Its next sighting is a retry, and renews nothing. Null when no publish is held. Process-local. */
+	private heldChange: string | null = null;
 	/** The report the last successful heartbeat wrote. A change of view (known, or the reason it is unknown) must reach the record. Null until one is written. */
 	private written: PlanningReport | null = null;
 	/** Conflicts announced and still open, by signature. A conflict leaves the set once it is no longer detected. Process-local. */
@@ -165,7 +167,10 @@ export class PlanningObserver {
 		const previous = priorBaseline?.snapshot ?? null;
 		const diff = previous === null ? null : diffPlanningIndex(previous, next);
 		const changed = diff !== null && diff.complete && changesIn(diff) > 0;
-		if (diff !== null && changed && nowMs !== null) this.touch(pairsOfChange(diff, nextPhasePlans, priorBaseline?.phasePlans), nowMs, ttlMs);
+		// The same change seen again while its publish is held is a retry, not a new edit: it keeps the time it was first seen.
+		const signature = diff !== null && changed ? JSON.stringify([diff.added, diff.removed, diff.changed]) : null;
+		const retry = signature !== null && signature === this.heldChange;
+		if (diff !== null && changed && nowMs !== null && !retry) this.touch(pairsOfChange(diff, nextPhasePlans, priorBaseline?.phasePlans), nowMs, ttlMs);
 		if (this.touchedOverflow && nowMs !== null) this.report = unknownReport(nowMs, "report-limit");
 
 		const repo = await repoOf(this.deps.fs, root);
@@ -173,6 +178,7 @@ export class PlanningObserver {
 		const phasePlansFor = (snapshot: PlanningSnapshot): ReadonlyMap<string, PhasePlan> =>
 			snapshot === previous && priorBaseline !== null ? priorBaseline.phasePlans : nextPhasePlans;
 		let outcome: ObserverOutcome;
+		let holds = false;
 		if (repo.state === "known") {
 			const observed = await observePlanningChange({
 				previous,
@@ -183,15 +189,18 @@ export class PlanningObserver {
 			});
 			this.baseline = { root, snapshot: observed.baseline, phasePlans: phasePlansFor(observed.baseline) };
 			outcome = observed.outcome;
+			holds = observed.outcome === "not-published";
 		} else if (changed) {
 			// Without a repo nothing can be published. A complete change is reported once and ends here, unless the failure that
 			// hid the repo was transient: then the baseline holds, and the next scan sees the same change again.
+			holds = repo.transient;
 			if (!repo.transient) this.baseline = { root, snapshot: next, phasePlans: nextPhasePlans };
 			outcome = "repo-unknown";
 		} else {
 			this.baseline = { root, snapshot: next, phasePlans: nextPhasePlans };
 			outcome = previous === null ? "baseline" : diff !== null && !diff.complete ? "incomplete" : "unchanged";
 		}
+		this.heldChange = holds ? signature : null;
 		const heartbeat = await this.heartbeat(root, changed || gapMoved, ttlMs);
 		if (nowMs !== null) await this.announce(repo, nowMs, ttlMs);
 		return { state: "observed", outcome, heartbeat };

@@ -473,6 +473,31 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		const [recovered] = (await presence.listWithin(10)).records;
 		expect(recovered?.planning).toEqual({ status: "known", scannedAtMs: SERVER_NOW + 2_000, phases: [{ phase: "52", plans: ["52-01"] }] });
 	});
+
+	test("a publish held by the ledger is retried without renewing the touched time of the edit (greptile publish-retry thread)", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		let accept = false;
+		const observer = new PlanningObserver({
+			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+			fs: tree,
+			presence,
+			emit: async () => accept,
+		});
+		await observer.scan();
+
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited\n");
+		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "not-published" });
+		backend.clockMs = SERVER_NOW + 50_000;
+		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "not-published" });
+		expect(storedRecord(backend, tree, TREE_ROOT).touched).toEqual([{ phase: "52", plan: null, observedAtMs: SERVER_NOW }]);
+
+		accept = true;
+		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "published" });
+		expect(storedRecord(backend, tree, TREE_ROOT).touched).toEqual([{ phase: "52", plan: null, observedAtMs: SERVER_NOW }]);
+	});
 });
 
 describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => {
