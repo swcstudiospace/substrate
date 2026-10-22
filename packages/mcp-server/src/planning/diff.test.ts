@@ -107,11 +107,17 @@ describe("diffPlanningIndex with an unlisted directory", () => {
 		expect(diff.removed).toEqual([]);
 	});
 
-	test("a document under a directory the previous walk could not list is not reported as added", () => {
-		const previous = [{ path: ".planning/phases/52-x", sha256: null }];
-		const next = [{ path: ".planning/phases/52-x/PLAN.md", sha256: H("1") }];
-		const diff = diffPlanningIndex({ records: previous, truncated: false, unlisted: [".planning/phases/52-x"] }, whole(next));
-		expect(diff.added).toEqual([]);
+	test("unreadable on the previous scan, readable with a new document now: the new document appears in added exactly once", async () => {
+		const limits = { maxFiles: 500, maxBytes: 262_144 };
+		const dir = `${TREE_ROOT}/.planning/phases/52-x`;
+		const unreadable = new FakeTree({ [`${dir}/PLAN.md`]: "# plan\n" });
+		unreadable.deniedListings.add(dir);
+		const readable = new FakeTree({ [`${dir}/PLAN.md`]: "# plan\n", [`${dir}/NEW.md`]: "# new\n" });
+		const before = await buildPlanningIndex(TREE_ROOT, { fs: unreadable, limits });
+		const after = await buildPlanningIndex(TREE_ROOT, { fs: readable, limits });
+		if (!before.ok || !after.ok) throw new Error("index failed");
+		const diff = diffPlanningIndex(snapshotOf(before), snapshotOf(after));
+		expect(diff.added).toEqual([".planning/phases/52-x/NEW.md", ".planning/phases/52-x/PLAN.md"]);
 	});
 
 	test("a path that merely shares a prefix with an unlisted directory is still a removal", () => {
