@@ -58,6 +58,7 @@ Railway project and service names are as `docs/data-planes.md` gives them. The U
 | AgentOS state | VM sandboxes and approvals | `/var/lib/substrate/agentos` (`sandboxes.json`, `approvals.json`) | None | No: local disk | Approval state is a record of decisions |
 | Sandbox worktrees | Dispatcher and sandbox checkouts | `/var/lib/substrate/worktrees` | None | No: local disk | Subject to the disk-pressure runbook |
 | SLO checkpoint and runtime state | Doctor, docs canary, SLO | `/var/lib/substrate/slo-checkpoint.json`, `doctor-last.json`, `docs-canary-last.json` | None | No: local disk | Dedupe records. Losing them re-announces drift once |
+| Docs ingest records and version pins | RAGFlow document ingest | `/var/lib/substrate/docs-ingest.json`, set by `SUBSTRATE_DOCS_STATE_FILE` (the unit sets it) | None | No: local disk | Losing it drops the version pins and the merge-trigger's idempotency. Unset keeps the records process-local |
 | Index archive | Off-box snapshot of the index | `/mnt/index-archive` (off-box mount) | None | No | Operator-chosen off-box mount. Archive commands refuse by name when unset |
 | Ledger archive | Off-box snapshot of the ledger | `/mnt/ledger-archive`, set by `SUBSTRATE_LEDGER_ARCHIVE_DIR` | None | No | Same refusal rule as the index archive |
 | Backups | Cutover and pre-sweep backups | Lane-B cutover backups under the operator's `/root/backups`. Pre-sweep index backup is a manual Railway volume snapshot | Volume snapshot (Railway) | Partly | Snapshot is taken by hand before a sweep apply |
