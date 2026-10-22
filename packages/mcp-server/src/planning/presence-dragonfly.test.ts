@@ -101,7 +101,7 @@ describe("DragonflyPresenceStore listing", () => {
 		const key = `${PRESENCE_KEY_PREFIX}alive`;
 		backend.ghostKeys.push(key, key);
 		backend.gets.length = 0;
-		expect(await store.list()).toEqual([session("alive")]);
+		expect(await store.list()).toEqual([{ ...session("alive"), lastHeartbeatMs: backend.serverNow }]);
 		expect(backend.gets).toEqual([key]);
 	});
 
