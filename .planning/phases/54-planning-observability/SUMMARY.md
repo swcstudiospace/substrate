@@ -2,7 +2,7 @@
 phase: 54-planning-observability
 reconstructed: true
 branch: gsd/p54-complete
-head: b46fe827347bed003cdf4edfa492c4c1c6c04a04
+head: ecd00a86d11a6d5a16888c382687426ebd0e02c3
 pull_request: 111
 ---
 
@@ -20,7 +20,7 @@ pull_request: 111
 
 **Scan cadence.** `SUBSTRATE_PLANNING_SCAN_INTERVAL_MS` sets the scan interval (default 15000, bounds 1000 to 3600000; `planning/config.ts:16`, `config.ts:22`, `config.ts:30`). The observer's timer keeps `unref()` (`observer.ts:54`).
 
-**Shutdown.** `service.ts:2873-2876` (`stopPlanning`) clears the timer and awaits the in-flight scan; `index.ts:221` starts it and `index.ts:244-252` bounds it with `SHUTDOWN_FLUSH_MS`. `index.ts:232` waits for in-flight transition records within `SHUTDOWN_TRANSITION_MS` (`index.ts:202`).
+**Shutdown.** `service.ts:2873-2876` (`stopPlanning`) clears the timer and awaits the in-flight scan; `index.ts:223` starts it and `index.ts:241-255` bounds it with `SHUTDOWN_FLUSH_MS` (`index.ts:200`). `index.ts:234` waits for in-flight transition records within `SHUTDOWN_TRANSITION_MS` (`index.ts:204`).
 
 **Wiring.** `service.ts:1452-1461` builds `PlanningObserver` with the GreptimeDB sink only when metrics history is enabled and a Greptime client exists, and with the stdout sink otherwise.
 
@@ -47,4 +47,4 @@ No cutover, no DNS change, no production deploy, no change to a live Railway ser
 
 ## Verification status
 
-See `VERIFICATION.md` (status `passed`, delta re-verified at b46fe82). The gates have not been run by the verifier; the orchestrator runs them.
+See `VERIFICATION.md` (status `passed`, delta re-verified at ecd00a8). The gates have not been run by the verifier; the orchestrator runs them.
