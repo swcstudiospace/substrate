@@ -43,6 +43,7 @@ export function planningChangeEvent(input: PlanningChangeInput): EventInput | nu
 	if (!REPO_RE.test(input.repo)) throw new TypeError("planning repo must be owner/name");
 	if (!SESSION_ID_RE.test(input.sessionId)) throw new TypeError("planning sessionId is not a valid session id");
 	const { added, removed, changed } = input.diff;
+	if (!input.diff.complete || removed === null) throw new TypeError("a partial planning diff is not an event");
 	if (added.length + removed.length + changed.length === 0) return null;
 
 	const capped = [added, removed, changed].some((list) => list.length > MAX_EVENT_PATHS);
@@ -93,10 +94,11 @@ export function busPublisher(bus: Pick<EventBus, "publish">, deps: HintDeps): Pl
 	};
 }
 
-export type PlanningEmitOutcome = "unchanged" | "published" | "not-published";
+export type PlanningEmitOutcome = "unchanged" | "incomplete" | "published" | "not-published";
 
-/** Build the event for a diff and publish it. An unchanged diff publishes nothing. */
+/** Build the event for a diff and publish it. An unchanged diff publishes nothing; a partial one is never published, since its absences prove nothing. */
 export async function emitPlanningChange(publisher: PlanningPublisher, input: PlanningChangeInput): Promise<PlanningEmitOutcome> {
+	if (!input.diff.complete) return "incomplete";
 	const event = planningChangeEvent(input);
 	if (event === null) return "unchanged";
 	return (await publisher.publish(event)) ? "published" : "not-published";
