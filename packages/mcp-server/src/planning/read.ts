@@ -24,8 +24,8 @@
  */
 import { join, resolve as resolvePath } from "node:path";
 import type { EventInput } from "../types.ts";
-import { diffPlanningIndex, type PlanningSnapshot } from "./diff.ts";
-import { emitPlanningChange } from "./events.ts";
+import { diffPlanningIndex, type PlanningDiff, type PlanningSnapshot } from "./diff.ts";
+import { observePlanningChange, type ObservedPlanning } from "./events.ts";
 import { type PlanningConfigError, type PlanningConfigResult, type PlanningLimits } from "./config.ts";
 import { buildPlanningIndex, isErrorRecord, type PlanningFileRecord, type PlanningFs, type PlanningIndexFailure, type PlanningKind, type PlanningRecord } from "./index.ts";
 import { DragonflyPresenceStore, PRESENCE_MAX_SESSIONS } from "./presence-dragonfly.ts";
@@ -283,30 +283,59 @@ export class PlanningReader {
 	private async observeOnce(root: string, seq: number, snapshot: PlanningSnapshot, state: SessionState): Promise<PlanningChangeNote> {
 		const current = this.baseline;
 		if (current !== null && seq < current.seq) return { state: "superseded" };
-		if (current === null || current.root !== root) {
-			this.advance(root, seq, snapshot, state);
-			return { state: "baseline" };
+		const previous = current !== null && current.root === root ? current.snapshot : null;
+		const diff = previous === null ? null : diffPlanningIndex(previous, snapshot);
+		const repo = await repoOf(this.deps.fs, root);
+		let note: PlanningChangeNote;
+		let outcome: TransitionOutcome | null;
+		let hold = false;
+		let baseline = snapshot;
+		if (repo.state === "known") {
+			// The baseline decision and the publish are core's: a failed publish holds the baseline, every other outcome advances it.
+			const observed = await observePlanningChange({
+				previous,
+				next: snapshot,
+				repo: repo.repo,
+				sessionId: PLANNING_OBSERVER_SESSION,
+				publisher: { publish: this.deps.emit },
+			});
+			note = noteFor(observed.outcome, previous, diff);
+			hold = observed.outcome === "not-published";
+			outcome = observed.outcome === "published" ? "applied" : hold ? "refused" : unpublishedOutcome(previous, diff);
+			baseline = observed.baseline;
+		} else {
+			// Without a repo nothing can be published. A change is held for a transient failure and ends, as a repo-unknown note, for a
+			// definitive absence. Any other scan becomes the baseline.
+			const counts = diff !== null && diff.removed !== null ? countsOf(diff) : null;
+			if (counts !== null && counts.added + counts.removed + counts.changed > 0) {
+				if (repo.transient) return { state: "changed", ...counts, ledger: "repo-unknown", repoReason: repo.reason };
+				note = { state: "changed", ...counts, ledger: "repo-unknown", repoReason: repo.reason };
+				outcome = "refused";
+			} else {
+				note = noteFor(diff === null ? "baseline" : diff.removed === null ? "incomplete" : "unchanged", previous, diff);
+				outcome = unpublishedOutcome(previous, diff);
+			}
 		}
-		// A comparison that throws leaves the baseline where it was: the next read sees the change.
-		const { note, outcome, hold, key } = await this.compare(root, current.snapshot, snapshot);
+		// The change's identity: a held change is recorded once, on first detection, and not again once it is stored.
+		const key = diff !== null && diff.removed !== null && outcome !== null ? changeKey(diff, snapshot) : null;
 		if (hold) {
 			// A change the ledger did not store holds the baseline, so the next read sends it again. Its transition is recorded once,
 			// on first detection: a failed ledger write does not hide the transition from the stdout sink.
-			if (outcome !== null && key !== this.recordedHold) {
+			if (outcome !== null && current !== null && key !== this.recordedHold) {
 				this.recordedHold = key;
 				this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: current.state, to: state, outcome }, this.deps.clock ?? hostClock));
 			}
 			return note;
 		}
-		// A change recorded on first detection is not recorded again once it is stored.
 		const recorded = key !== null && key === this.recordedHold;
-		const record = outcome === null || recorded ? null : transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: current.state, to: state, outcome }, this.deps.clock ?? hostClock);
-		this.advance(root, seq, snapshot, state);
-		if (record !== null) this.schedule(record);
+		if (outcome !== null && current !== null && !recorded) {
+			this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: current.state, to: state, outcome }, this.deps.clock ?? hostClock));
+		}
+		this.advance(root, seq, baseline, state);
 		return note;
 	}
 
-	/** Moves the baseline to this scan, unless a later scan already holds it. The baseline never moves backwards. */
+	/** Moves the baseline to this scan, unless a later scan already holds it. The baseline never moves backwards. A new baseline forgets a held change. */
 	private advance(root: string, seq: number, snapshot: PlanningSnapshot, state: SessionState): void {
 		if (this.baseline !== null && seq < this.baseline.seq) return;
 		this.recordedHold = null;
@@ -354,37 +383,19 @@ export class PlanningReader {
 		return Promise.race([flushed, deadline.then((): "deadline" => "deadline")]);
 	}
 
-	/**
-	 * The change note for two indexes, the transition outcome when a change was detected (null when none was, or none can be
-	 * vouched for), and whether the baseline must hold: a transient repo read failure holds it, so the next read sees the change.
-	 */
-	private async compare(root: string, before: PlanningSnapshot, after: PlanningSnapshot): Promise<{ note: PlanningChangeNote; outcome: TransitionOutcome | null; hold: boolean; key: string | null }> {
-		const diff = diffPlanningIndex(before, after);
-		const removed = diff.removed;
-		if (removed === null) {
-			const added = before.truncated ? null : diff.added.length;
-			const changed = diff.changed.length;
-			const vouched = (added ?? 0) + changed > 0;
-			return { note: { state: "partial", added, removed: null, changed, ledger: "not-written" }, outcome: vouched ? "refused" : null, hold: false, key: null };
-		}
-		const counts = { added: diff.added.length, removed: removed.length, changed: diff.changed.length };
-		if (counts.added + counts.removed + counts.changed === 0) return { note: { state: "unchanged" }, outcome: null, hold: false, key: null };
-		const key = changeKey({ ...diff, removed }, after);
-		const repo = await repoOf(this.deps.fs, root);
-		if (repo.state === "unknown") {
-			const note: PlanningChangeNote = { state: "changed", ...counts, ledger: "repo-unknown", repoReason: repo.reason };
-			return repo.transient ? { note, outcome: null, hold: true, key: null } : { note, outcome: "refused", hold: false, key: null };
-		}
-		const stored = await emitPlanningChange({ publish: this.deps.emit }, { repo: repo.repo, sessionId: PLANNING_OBSERVER_SESSION, diff: { ...diff, removed } });
-		if (stored !== "published") return { note: { state: "changed", ...counts, ledger: "not-stored" }, outcome: "refused", hold: true, key };
-		return { note: { state: "changed", ...counts, ledger: "emitted" }, outcome: "applied", hold: false, key };
-	}
 }
 
 /** The identity of a change: its paths and the hashes they now have. A held change detected again has the same identity. */
 function changeKey(diff: { added: string[]; removed: string[]; changed: string[] }, after: PlanningSnapshot): string {
 	const hashes = new Map(after.records.map((record) => [record.path, record.sha256] as const));
 	return JSON.stringify({ added: diff.added, removed: diff.removed, changed: diff.changed.map((path) => [path, hashes.get(path) ?? null]) });
+}
+
+/** The transition outcome of an observation that published nothing: a partial diff that vouches for a change is refused; the rest record nothing. */
+function unpublishedOutcome(previous: PlanningSnapshot | null, diff: PlanningDiff | null): TransitionOutcome | null {
+	if (diff === null || diff.removed !== null) return null;
+	const added = previous?.truncated === true ? 0 : diff.added.length;
+	return added + diff.changed.length > 0 ? "refused" : null;
 }
 
 /** The host clock. It stamps a transition record and classifies nothing. */
@@ -417,6 +428,23 @@ function sessionViewOf(body: PlanningSessionsBody): SessionViewState {
 			return deriveSessionState({ loaded: true, sessions: body.sessions.map((row) => row.status), disabledCapabilities });
 		}
 	}
+}
+
+/** The counts of a complete diff. A change is only ever counted on one: a partial diff has no removals to count. */
+function countsOf(diff: PlanningDiff): { added: number; removed: number; changed: number } {
+	if (diff.removed === null) throw new Error("counts are only taken from a complete diff");
+	return { added: diff.added.length, removed: diff.removed.length, changed: diff.changed.length };
+}
+
+/** The note for an observation outcome. `baseline` and `unchanged` carry no counts; `published` and `not-published` are changes. */
+function noteFor(outcome: ObservedPlanning["outcome"], previous: PlanningSnapshot | null, diff: PlanningDiff | null): PlanningChangeNote {
+	if (outcome === "baseline") return { state: "baseline" };
+	if (outcome === "unchanged") return { state: "unchanged" };
+	if (previous === null || diff === null) throw new Error("only a first scan has no previous baseline");
+	if (outcome === "incomplete") {
+		return { state: "partial", added: previous.truncated ? null : diff.added.length, removed: null, changed: diff.changed.length, ledger: "not-written" };
+	}
+	return { state: "changed", ...countsOf(diff), ledger: outcome === "published" ? "emitted" : "not-stored" };
 }
 
 function isFileRecord(record: PlanningRecord): record is PlanningFileRecord {

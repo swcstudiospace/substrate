@@ -124,8 +124,8 @@ export interface FabricHealthView {
  * time its own unavailable reading while the other planes keep theirs.
  */
 export interface FabricHealthParts {
-	/** `up` is the ping's answer; `eventsWritable` is the ledger's write verdict. */
-	greptime: Promise<{ readonly up: boolean; readonly eventsWritable: boolean }>;
+	/** `up` is the ping's answer; `eventsWritable` is the ledger's write verdict; `writeTimedOut` is a write still waiting at its bound. */
+	greptime: Promise<{ readonly up: boolean; readonly eventsWritable: boolean; readonly writeTimedOut: boolean }>;
 	index: Promise<boolean>;
 	hindsight: Promise<boolean | null>;
 	ragflow: Promise<boolean | null>;
