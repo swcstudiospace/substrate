@@ -249,8 +249,8 @@ export class PlanningReader {
 
 	/**
 	 * Writes this checkout's heartbeat. The record's `lastHeartbeatMs` is replaced by the server's clock inside `touch`, so the
-	 * value given here is a placeholder. A missing or unreadable git layout is a definitive `failed` (`transient: false`); a
-	 * presence write that throws is a transient `failed` (`transient: true`), the only failure that degrades the session view.
+	 * value given here is a placeholder. A missing git entry or HEAD is a definitive `failed` (`transient: false`). Every other
+	 * failed read, and a presence write that throws, is a transient `failed` (`transient: true`), which degrades the session view.
 	 */
 	private async heartbeat(root: string, ttlMs: number): Promise<PlanningHeartbeat> {
 		const presence = this.deps.presence;
@@ -259,15 +259,18 @@ export class PlanningReader {
 		try {
 			const layout = await gitLayout(this.deps.fs, root);
 			if (!layout.ok) return { state: "failed", detail: layout.reason, transient: false };
+			const head = await textOf(this.deps.fs, join(layout.gitDir, "HEAD"));
+			if (head === null) return { state: "failed", detail: "head-absent", transient: false };
 			record = {
 				sessionId: planningSessionId(this.deps.fs, root),
 				worktree: root,
-				branch: await branchOf(this.deps.fs, layout.gitDir),
+				branch: branchFromHead(head),
 				activePhase: null,
 				lastHeartbeatMs: 0,
 			};
 		} catch (cause: unknown) {
-			return { state: "failed", detail: cause instanceof Error ? cause.message : String(cause), transient: false };
+			// A read that fails after the layout was seen (EACCES, EIO, a file removed between stat and read) is transient.
+			return { state: "failed", detail: cause instanceof Error ? cause.message : String(cause), transient: true };
 		}
 		try {
 			await presence.touch(record, ttlMs);
@@ -525,10 +528,8 @@ async function gitLayout(fs: PlanningFs, root: string): Promise<GitLayout> {
 	return { ok: true, gitDir, commonDir };
 }
 
-/** The branch a worktree's HEAD names, or `detached`. A HEAD that is absent throws. */
-async function branchOf(fs: PlanningFs, gitDir: string): Promise<string> {
-	const head = await textOf(fs, join(gitDir, "HEAD"));
-	if (head === null) throw new Error("HEAD is absent");
+/** The branch a worktree's HEAD names, or `detached`. */
+function branchFromHead(head: string): string {
 	const ref = /^ref:[ \t]*refs\/heads\/(.+?)[ \t]*$/m.exec(head);
 	return ref === null ? "detached" : (ref[1] ?? "detached");
 }

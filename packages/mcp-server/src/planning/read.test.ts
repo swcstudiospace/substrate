@@ -862,3 +862,26 @@ describe("held, incomplete and failed-heartbeat states are reported", () => {
 		expectNonBlankState(view);
 	});
 });
+
+describe("a checkout's git reads, when they fail", () => {
+	test("an unreadable .git/HEAD with a working listing reports DEGRADED", async () => {
+		await write(".git/HEAD", "ref: refs/heads/gsd/p54-complete\n");
+		const real = nodePlanningFs();
+		const headDenied: PlanningFs = {
+			...real,
+			readFile: async (path) => {
+				if (path.endsWith(join(".git", "HEAD"))) throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+				return real.readFile(path);
+			},
+		};
+		const view = await new PlanningReader({ settings: settingsFor(root), fs: headDenied, presence: new DragonflyPresenceStore(new PresenceFake()), emit: async () => true, ...quietSinks() }).sessions();
+		expect(view).toMatchObject({ state: "ok", heartbeat: { state: "failed", transient: true }, view: { state: "DEGRADED" } });
+		expectNonBlankState(view);
+	});
+
+	test("a missing git entry is a definitive absence: the view keeps its state and is not DEGRADED", async () => {
+		const view = await sessionsReader(new DragonflyPresenceStore(new PresenceFake())).sessions();
+		expect(view).toMatchObject({ state: "ok", heartbeat: { state: "failed", detail: "no-git-entry", transient: false }, view: { state: "EMPTY" } });
+		expectNonBlankState(view);
+	});
+});
