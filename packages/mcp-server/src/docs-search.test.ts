@@ -8,14 +8,13 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CircuitBreaker, gatedFetch, type DocsSearchSample, type PlaneGate } from "@substrate/observability";
 import { ReadThroughCache, type CacheRedis } from "./cache.ts";
-import { attachGraphHints, citationProvenanceCounts, planningGraphCounts, searchDocs, searchReplyStorable, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type SearchReply } from "./docs-search.ts";
+import { attachGraphHints, citationProvenanceCounts, planningGraphCounts, searchDocs, searchReplyStorable, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type SearchCitation, type SearchReply } from "./docs-search.ts";
 import type { DatasetListSource } from "./docs-datasets.ts";
 import { RagflowFake, type FakeChunk } from "./ragflow-fake.ts";
 import { ragflowOp } from "./planes/ragflow.ts";
-import { lightragFromEnv } from "./planes/lightrag.ts";
 import type { EventInput } from "./types.ts";
 import { selectRetrievalBackend } from "./types.ts";
-import { loadConfig, resolveDocsBackend } from "./config.ts";
+import { lightragFromEnv, loadConfig, resolveDocsBackend } from "./config.ts";
 import { createMcpServer } from "./mcp.ts";
 import { Substrate } from "./service.ts";
 import { goldenFake, searchGoldenOffline } from "./docs-golden.ts";
@@ -608,7 +607,7 @@ describe("search graph metadata (LightRAG path)", () => {
 
 	test("attachGraphHints names hinted headings and counts the coverage", () => {
 		expect(attachGraphHints([], undefined)).toBeUndefined();
-		const chunks = [
+		const chunks: SearchCitation[] = [
 			{ title: "a", source_url: "s", heading_path: "Access path", commit: "c", snippet: "s", score: 1, document_id: "d", chunk_id: "k" },
 			{ title: "b", source_url: "s", heading_path: "Elsewhere", commit: "c", snippet: "s", score: 0.5, document_id: "e", chunk_id: "j" },
 		];

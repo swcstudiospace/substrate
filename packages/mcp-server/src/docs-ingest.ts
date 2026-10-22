@@ -1068,6 +1068,10 @@ async function ingestDocsLightrag(
 	},
 ): Promise<IngestOutcome> {
 	const { seen, locks, prepared, strippedImages } = shared;
+	// The caller gates auth, but this branch is also entered from tests and
+	// future call sites: fail closed here too, which narrows `deps.surface`
+	// for the note event below.
+	if (deps.surface === null) return refused(deps, sessionId, "unauthenticated");
 	const lightrag = deps.lightragConfig;
 	if (lightrag == null) return refused(deps, sessionId, "lightrag-not-configured");
 	const fetchImpl = deps.lightragFetch ?? deps.fetchImpl;
@@ -1087,10 +1091,8 @@ async function ingestDocsLightrag(
 	// landed. The call reports `partial` when anything landed alongside
 	// failures, and refuses only when nothing did.
 	let failed = 0;
-	let firstFailure: { reason: string; page: string } | null = null;
 	const recordFailed = (pagePath: string, source: string, hash: string, reason: string): void => {
 		failed += 1;
-		if (firstFailure === null) firstFailure = { reason, page: pagePath };
 		results.push({
 			path: pagePath,
 			source_url: source,
@@ -1217,9 +1219,15 @@ async function ingestDocsLightrag(
 	// Fail-closed when nothing landed: a sweep of only failures is a
 	// refusal naming the first one, with no state change to persist. A
 	// sweep that landed anything reports the failures as `partial`
-	// instead — per-file isolation, never a voided batch.
-	if (results.length > 0 && failed >= results.length && firstFailure !== null) {
-		return refused(deps, sessionId, firstFailure.reason, { page: firstFailure.page, changed: false });
+	// instead — per-file isolation, never a voided batch. The first
+	// failure reads back out of `results`: a closure-captured let does
+	// not narrow at this point (it would read as never), so no separate
+	// variable is kept.
+	if (results.length > 0 && failed >= results.length) {
+		const first = results.find((result) => result.status === "failed");
+		if (first !== undefined) {
+			return refused(deps, sessionId, first.error ?? "lightrag ingest failed", { page: first.path, changed: false });
+		}
 	}
 	await deps.emit({
 		surface: deps.surface,

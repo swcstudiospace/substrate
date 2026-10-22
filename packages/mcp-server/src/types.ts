@@ -24,21 +24,6 @@ export const SWARM_SURFACES = [
 	"swarm-a13-obs",
 	"swarm-a14-maint",
 	"swarm-a15-doc",
-	"swarm-a16-cloud",
-	"swarm-a17-plat",
-	"swarm-a18-supply",
-	"swarm-a19-event",
-	"swarm-a20-finops",
-	"swarm-a21-k8s",
-	"swarm-a22-gitops",
-	"swarm-a23-mesh",
-	"swarm-a24-ksec",
-	"swarm-a25-resil",
-	"swarm-a26-sol",
-	"swarm-a27-audit",
-	"swarm-a28-chain",
-	"swarm-a29-dapp",
-	"swarm-a30-custody",
 ] as const;
 export type SwarmSurface = (typeof SWARM_SURFACES)[number];
 

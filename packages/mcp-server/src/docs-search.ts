@@ -749,7 +749,7 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 			return Promise.reject(cause);
 		}
 	};
-	let outcome = await once().then(
+	let outcome: PromiseSettledResult<RetrievalOutcome> = await once().then(
 		(value): PromiseSettledResult<RetrievalOutcome> => ({ status: "fulfilled", value }),
 		(reason): PromiseSettledResult<RetrievalOutcome> => ({ status: "rejected", reason }),
 	);
@@ -765,8 +765,12 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 	}
 	const nowMs = deps.nowMs ?? Date.now();
 	const pinAged = deps.degradedDatasets?.includes(first.name) ?? false;
-	if (outcome.status === "rejected" || !outcome.value.ok) {
-		const reason = datasetReason(outcome.status === "rejected" ? outcome.reason : outcome.value.reason);
+	if (outcome.status === "rejected") {
+		const reason = datasetReason(outcome.reason);
+		return failed(deps, sessionId, reason, [{ dataset: first.name, reason }]);
+	}
+	if (!outcome.value.ok) {
+		const reason = datasetReason(outcome.value.reason);
 		return failed(deps, sessionId, reason, [{ dataset: first.name, reason }]);
 	}
 	const citations = outcome.value.chunks.map((chunk) => cite(chunk, first.name, deps.pins?.[first.id], pinAged, nowMs, deps.provenanceOf));

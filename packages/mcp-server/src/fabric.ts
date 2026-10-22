@@ -10,8 +10,13 @@
  * Railway absence in the compliance report, which yields a partial-but-still-
  * compliant report: no Railway means no cost evidence, not a violation.
  */
-import type { LightragHostingState } from "./railway.ts";
-import { resolveLightragHostingState } from "./railway.ts";
+import type {
+	DocsBackend,
+	LightragHostingState,
+	RailwayComplianceCheck,
+	RailwayResourceOrchestrator,
+} from "./railway.ts";
+import { DEFAULT_DOCS_BACKEND, resolveLightragHostingState } from "./railway.ts";
 
 export type { DocsBackend, PlanningGraphHint, PlanningGraphRelation } from "./railway.ts";
 

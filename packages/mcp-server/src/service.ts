@@ -3782,6 +3782,7 @@ export class Substrate {
 			noteLoaded();
 			return searchDocs(
 				{
+					config: this.config.ragflow,
 					backend: this.config.docsBackend,
 					lightragConfig: this.config.lightrag,
 					datasetNames: names,
