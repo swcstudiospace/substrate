@@ -130,7 +130,7 @@ export interface EventIdempotency {
 const MAX_SUMMARY = 2000;
 const MAX_FIELD = 512;
 const MAX_PAYLOAD_STRING = 4000;
-const MAX_PAYLOAD_BYTES = 16_000;
+export const MAX_PAYLOAD_BYTES = 16_000;
 
 /**
  * Redact, then cap, then treat empty as absent.

@@ -62,8 +62,8 @@ export type PlanningIndexResult = { ok: true; index: PlanningIndex } | { ok: fal
 
 export interface DirEntry {
 	name: string;
-	/** `broken` is a symlink whose target cannot be stat'ed. Symlinks are otherwise followed. */
-	kind: "file" | "dir" | "broken" | "other";
+	/** `link` is a symbolic link, whatever it points at. A listing does not stat it: the walk probes a link only when it needs to know. */
+	kind: "file" | "dir" | "link" | "other";
 }
 
 /** What `openRead` found. `refused` means `accept` rejected the real path, and nothing was read. */
@@ -146,10 +146,10 @@ type Attempt<T> = { ok: true; value: T } | { ok: false; code: string };
 type Listing = { state: "absent" } | { state: "entries"; real: string; entries: DirEntry[] } | { state: "error"; entry: ErrorEntry };
 
 /** A phase child resolved to what it emits: its own error record, or a directory whose documents sort under its path. */
-type PhaseUnit = { type: "error"; key: string; entry: ErrorEntry } | { type: "group"; key: string; relDir: string; real: string; name: string };
+type PhaseUnit = { type: "error"; key: string; entry: ErrorEntry } | { type: "group"; key: string; relDir: string; real: string; name: string; entries: DirEntry[] };
 
 /** A directory resolved: absent, an error record for it, or its real location, which is inside the root. */
-type Resolved = { state: "absent" } | { state: "error"; entry: ErrorEntry } | { state: "dir"; real: string };
+type Resolved = { state: "absent" } | { state: "error"; entry: ErrorEntry } | { state: "dir"; real: string } | { state: "file" };
 
 export type Frontmatter = { state: "none" } | { state: "parsed"; data: Record<string, unknown> } | { state: "malformed" };
 
@@ -264,7 +264,7 @@ async function collectMilestones(walk: Walk): Promise<void> {
 	const relDir = `${PLANNING_DIR}/milestones`;
 	const listing = await listDir(walk, relDir, join(walk.planningReal, "milestones"));
 	if (listing.state === "error") add(walk, listing.entry);
-	else if (listing.state === "entries") collectDocuments(walk, relDir, listing.real, listing.entries, "milestone", undefined);
+	else if (listing.state === "entries") await collectDocuments(walk, relDir, listing.real, listing.entries, "milestone", undefined);
 }
 
 /**
@@ -308,9 +308,7 @@ async function emitPhaseUnit(walk: Walk, unit: PhaseUnit): Promise<void> {
 		add(walk, unit.entry);
 		return;
 	}
-	const sub = await readEntries(walk, unit.relDir, unit.real);
-	if (sub.state === "error") add(walk, sub.entry);
-	else if (sub.state === "entries") collectDocuments(walk, unit.relDir, sub.real, sub.entries, "phase", PHASE_DIR.exec(unit.name)?.[1]);
+	await collectDocuments(walk, unit.relDir, unit.real, unit.entries, "phase", PHASE_DIR.exec(unit.name)?.[1]);
 }
 
 /** A directory-level error record. The directory's contents are unknown from here on, so its path is recorded as unlisted. */
@@ -321,22 +319,26 @@ function dirError(walk: Walk, relDir: string, code: PlanningRecordErrorCode, det
 
 async function resolvePhaseChild(walk: Walk, relDir: string, realPhases: string, child: DirEntry): Promise<PhaseUnit | null> {
 	const dirRel = `${relDir}/${child.name}`;
-	if (child.kind === "broken") return { type: "error", key: dirRel, entry: dirError(walk, dirRel, "unreadable", "dangling symlink") };
-	if (child.kind !== "dir") return null;
+	// A file is not a phase directory. A directory or a link is probed, and the probe decides what it is.
+	if (child.kind !== "dir" && child.kind !== "link") return null;
 	const resolved = await resolveDir(walk, dirRel, join(realPhases, child.name));
-	if (resolved.state === "absent") return null;
+	if (resolved.state === "absent" || resolved.state === "file") return null;
 	if (resolved.state === "error") return { type: "error", key: dirRel, entry: resolved.entry };
-	return { type: "group", key: `${dirRel}/`, relDir: dirRel, real: resolved.real, name: child.name };
+	// Listed here, not when emitted: a listing that fails must sort at the directory's own path, which is only known now.
+	const sub = await readEntries(walk, dirRel, resolved.real);
+	if (sub.state === "absent") return null;
+	if (sub.state === "error") return { type: "error", key: dirRel, entry: sub.entry };
+	return { type: "group", key: `${dirRel}/`, relDir: dirRel, real: sub.real, name: child.name, entries: sub.entries };
 }
 
-/** A directory, resolved: absent, an error record for it, or its real location, which is inside the root. */
+/** A directory, resolved: absent, an error record for it, a non-directory, or its real location, which is inside the root. */
 async function resolveDir(walk: Walk, relDir: string, absDir: string): Promise<Resolved> {
 	const probed = await attempt(() => walk.fs.probe(absDir));
 	if (!probed.ok) return { state: "error", entry: dirError(walk, relDir, "unreadable", `probe failed: ${probed.code}`) };
 	const found = probed.value;
 	if (found.state === "absent") return { state: "absent" };
 	if (found.state === "dangling") return { state: "error", entry: dirError(walk, relDir, "unreadable", "dangling symlink") };
-	if (!found.isDir) return { state: "error", entry: dirError(walk, relDir, "unreadable", "not a directory") };
+	if (!found.isDir) return { state: "file" };
 	if (!isInside(found.real, walk.realRoot)) {
 		return { state: "error", entry: dirError(walk, relDir, "outside-root", "directory resolves outside the planning root") };
 	}
@@ -356,33 +358,52 @@ async function listDir(walk: Walk, relDir: string, absDir: string): Promise<List
 	const resolved = await resolveDir(walk, relDir, absDir);
 	if (resolved.state === "absent") return { state: "absent" };
 	if (resolved.state === "error") return { state: "error", entry: resolved.entry };
+	if (resolved.state === "file") return { state: "error", entry: dirError(walk, relDir, "unreadable", "not a directory") };
 	return readEntries(walk, relDir, resolved.real);
 }
 
-/** Directory entries in path order. A directory's children sort under its name followed by `/`, as their paths do. */
+/** Entries in path order. Every entry is a leaf of its listing (a directory in one is an error at its own path), so the name is the path. */
 function inPathOrder(entries: readonly DirEntry[]): DirEntry[] {
-	const key = (entry: DirEntry): string => (entry.kind === "dir" ? `${entry.name}/` : entry.name);
-	return [...entries].sort((a, b) => compareText(key(a), key(b)));
+	return [...entries].sort((a, b) => compareText(a.name, b.name));
 }
 
-function collectDocuments(
+/**
+ * The documents of one listing, in order. A link is probed here, as a candidate, so a listing stats nothing and the walk
+ * stops probing at the cutoff.
+ */
+async function collectDocuments(
 	walk: Walk,
 	relDir: string,
 	absDir: string,
 	entries: readonly DirEntry[],
 	kind: PlanningKind,
 	phase: string | undefined,
-): void {
+): Promise<void> {
 	for (const entry of entries) {
 		if (isFull(walk)) return;
 		if (!entry.name.endsWith(".md")) continue;
 		const path = `${relDir}/${entry.name}`;
+		const abs = join(absDir, entry.name);
+		const plan = entry.name.endsWith("PLAN.md") ? entry.name.slice(0, -3) : undefined;
+		const document: FileEntry = { type: "file", path, abs, kind, phase, plan };
 		if (entry.kind === "file") {
-			const plan = entry.name.endsWith("PLAN.md") ? entry.name.slice(0, -3) : undefined;
-			add(walk, { type: "file", path, abs: join(absDir, entry.name), kind, phase, plan });
-		} else {
-			add(walk, errorEntry(path, "unreadable", entry.kind === "broken" ? "dangling symlink" : "not a regular file", kind));
+			add(walk, document);
+			continue;
 		}
+		if (entry.kind !== "link") {
+			add(walk, errorEntry(path, "unreadable", "not a regular file", kind));
+			continue;
+		}
+		const probed = await attempt(() => walk.fs.probe(abs));
+		if (!probed.ok) {
+			add(walk, errorEntry(path, "unreadable", `probe failed: ${probed.code}`, kind));
+			continue;
+		}
+		const found = probed.value;
+		if (found.state === "absent") continue;
+		if (found.state === "dangling") add(walk, errorEntry(path, "unreadable", "dangling symlink", kind));
+		else if (!found.isFile) add(walk, errorEntry(path, "unreadable", "not a regular file", kind));
+		else add(walk, document);
 	}
 }
 

@@ -12,8 +12,7 @@
 import { createHash } from "node:crypto";
 import { constants, type Dirent } from "node:fs";
 import { type FileHandle, lstat, open, readFile, readdir, readlink, realpath, stat } from "node:fs/promises";
-import { join } from "node:path";
-import { PROBE_CONCURRENCY, errnoCode, mapBounded, type DirEntry, type OpenResult, type PlanningFs } from "./index.ts";
+import { errnoCode, type DirEntry, type OpenResult, type PlanningFs } from "./index.ts";
 
 const ABSENT: Record<string, true> = { ENOENT: true, ENOTDIR: true };
 const READ_CHUNK = 65_536;
@@ -39,7 +38,7 @@ export function nodePlanningFs(): PlanningFs {
 		async readDir(path) {
 			const listed = await absentAsNull(() => readdir(path, { withFileTypes: true }));
 			if (listed === null) return null;
-			return mapBounded(listed, PROBE_CONCURRENCY, async (dirent): Promise<DirEntry> => ({ name: dirent.name, kind: await kindOf(join(path, dirent.name), dirent) }));
+			return listed.map((dirent): DirEntry => ({ name: dirent.name, kind: kindOf(dirent) }));
 		},
 		async statFile(path) {
 			const found = await absentAsNull(() => stat(path));
@@ -90,16 +89,9 @@ async function readAtMost(handle: FileHandle, limit: number): Promise<Uint8Array
 	return out;
 }
 
-async function kindOf(path: string, dirent: Dirent): Promise<DirEntry["kind"]> {
+/** The kind of a listed entry, from the listing alone. A symlink is a `link`: the walk decides what it points at, when it needs to. */
+function kindOf(dirent: Dirent): DirEntry["kind"] {
 	if (dirent.isFile()) return "file";
 	if (dirent.isDirectory()) return "dir";
-	if (!dirent.isSymbolicLink()) return "other";
-	try {
-		const target = await stat(path);
-		if (target.isFile()) return "file";
-		return target.isDirectory() ? "dir" : "other";
-	} catch {
-		// A dangling or looping link: the index records it as an unreadable path.
-		return "broken";
-	}
+	return dirent.isSymbolicLink() ? "link" : "other";
 }

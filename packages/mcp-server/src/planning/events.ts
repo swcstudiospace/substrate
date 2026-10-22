@@ -3,13 +3,15 @@
  *
  * The event uses an existing vocabulary entry: kind `note` on the `substrate` host-job surface.
  * `EVENT_KINDS` is frozen at twelve and gains nothing here. The payload is
- * `{ kind: "planning.changed", repo, sessionId, added, removed, changed }`. Its lists hold paths
- * only, never file text. Both the summary and the payload pass through the existing redactor.
+ * `{ kind: "planning.changed", repo, sessionId, added, removed, changed, truncated }`. Its lists hold paths
+ * only, never file text, and are budgeted to the ledger's payload limit; `truncated` counts the paths left out per list.
+ * Both the summary and the payload pass through the existing redactor.
  *
  * The publish port wraps the existing event bus. The bus carries wake-up hints only (D50-b), so a
  * hint has no payload. The ledger write that stores the full event is a wiring step, not done here.
  */
 import type { EventBus, EventHint } from "../event-bus.ts";
+import { MAX_PAYLOAD_BYTES } from "../event.ts";
 import { redact, redactValue } from "../redact.ts";
 import type { EventInput } from "../types.ts";
 import type { PlanningDiff } from "./diff.ts";
@@ -29,6 +31,8 @@ export type PlanningChangePayload = {
 	added: string[];
 	removed: string[];
 	changed: string[];
+	/** How many paths of each list were not listed. Present only when at least one list was truncated. */
+	truncated?: Record<"added" | "removed" | "changed", number>;
 };
 
 export interface PlanningChangeInput {
@@ -38,7 +42,22 @@ export interface PlanningChangeInput {
 	diff: PlanningDiff;
 }
 
-/** The event for a diff, or null when nothing changed. Throws a TypeError on a malformed repo or session id. */
+/** Keep order when the payload is budgeted: each list in turn, path by path. */
+const LISTS = ["added", "removed", "changed"] as const;
+type ListName = (typeof LISTS)[number];
+
+/** Bytes of a value as the ledger stores it: UTF-8 JSON. */
+function jsonBytes(value: unknown): number {
+	return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
+
+/**
+ * The event for a diff, or null when nothing changed. Throws a TypeError on a malformed repo or session id.
+ *
+ * Paths are kept in order until the next one would push the payload past the ledger's payload limit (`MAX_PAYLOAD_BYTES`,
+ * measured after redaction) or a list reaches `MAX_EVENT_PATHS`. The rest are counted in `truncated`, per list, and the
+ * summary states them. The counts in the summary are always the full counts of the diff.
+ */
 export function planningChangeEvent(input: PlanningChangeInput): EventInput | null {
 	if (!REPO_RE.test(input.repo)) throw new TypeError("planning repo must be owner/name");
 	if (!SESSION_ID_RE.test(input.sessionId)) throw new TypeError("planning sessionId is not a valid session id");
@@ -46,24 +65,45 @@ export function planningChangeEvent(input: PlanningChangeInput): EventInput | nu
 	if (!input.diff.complete || removed === null) throw new TypeError("a partial planning diff is not an event");
 	if (added.length + removed.length + changed.length === 0) return null;
 
-	const capped = [added, removed, changed].some((list) => list.length > MAX_EVENT_PATHS);
-	const payload: PlanningChangePayload = {
+	const lists: Record<ListName, string[]> = { added, removed, changed };
+	const kept: Record<ListName, string[]> = { added: [], removed: [], changed: [] };
+	const payloadWith = (truncated: Record<ListName, number> | null): PlanningChangePayload => ({
 		kind: PLANNING_CHANGED,
 		repo: input.repo,
 		sessionId: input.sessionId,
-		added: added.slice(0, MAX_EVENT_PATHS),
-		removed: removed.slice(0, MAX_EVENT_PATHS),
-		changed: changed.slice(0, MAX_EVENT_PATHS),
+		added: kept.added,
+		removed: kept.removed,
+		changed: kept.changed,
+		...(truncated === null ? {} : { truncated }),
+	});
+	// The check counts each list's full length as its truncation, which has as many digits as any real count: a bound.
+	const fullTruncation = { added: lists.added.length, removed: lists.removed.length, changed: lists.changed.length };
+	let budgetSpent = false;
+	for (const name of LISTS) {
+		for (const path of lists[name]) {
+			if (!budgetSpent && kept[name].length < MAX_EVENT_PATHS) {
+				kept[name].push(path);
+				if (jsonBytes(redactValue(payloadWith(fullTruncation))) <= MAX_PAYLOAD_BYTES) continue;
+				kept[name].pop();
+				budgetSpent = true;
+			}
+		}
+	}
+	const truncated: Record<ListName, number> = {
+		added: lists.added.length - kept.added.length,
+		removed: lists.removed.length - kept.removed.length,
+		changed: lists.changed.length - kept.changed.length,
 	};
-	const cap = capped ? `; lists capped at ${MAX_EVENT_PATHS}` : "";
-	const summary = `planning changed in ${input.repo}: ${added.length} added, ${removed.length} removed, ${changed.length} changed${cap}`;
+	const omitted = truncated.added + truncated.removed + truncated.changed;
+	const note = omitted > 0 ? `; paths not listed: ${truncated.added} added, ${truncated.removed} removed, ${truncated.changed} changed` : "";
+	const summary = `planning changed in ${input.repo}: ${added.length} added, ${removed.length} removed, ${changed.length} changed${note}`;
 	return {
 		surface: "substrate",
 		kind: "note",
 		summary: redact(summary),
 		repo: input.repo,
 		session_id: input.sessionId,
-		payload: redactValue(payload),
+		payload: redactValue(payloadWith(omitted > 0 ? truncated : null)),
 	};
 }
 

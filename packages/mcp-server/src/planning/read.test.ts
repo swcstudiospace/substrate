@@ -219,6 +219,15 @@ describe("repoFromGitConfig", () => {
 		expect(repoFromGitConfig('[remote "origin"]\n\turl = ssh://git@host/swcstudiospace/agent-substrate.git/\n')).toBe(REPO);
 	});
 
+	test("quoted and unquoted origin URLs give the same repo identity", () => {
+		const unquotedUrl = '[remote "origin"]\n\turl = https://github.com/acme/repo.git\n';
+		const doubleQuoted = '[remote "origin"]\n\turl = "https://github.com/acme/repo.git"\n';
+		const singleQuoted = "[remote \"origin\"]\n\turl = 'git@github.com:acme/repo.git'\n";
+		expect(repoFromGitConfig(unquotedUrl)).toBe("acme/repo");
+		expect(repoFromGitConfig(doubleQuoted)).toBe("acme/repo");
+		expect(repoFromGitConfig(singleQuoted)).toBe("acme/repo");
+	});
+
 	test("only the origin remote counts, and a config with none gives null", () => {
 		const text = '[remote "upstream"]\n\turl = https://github.com/other/fork.git\n[remote "origin"]\n\turl = https://github.com/swcstudiospace/agent-substrate.git\n';
 		expect(repoFromGitConfig(text)).toBe(REPO);
