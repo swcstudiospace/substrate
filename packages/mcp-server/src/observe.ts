@@ -649,6 +649,11 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"railway_cost",
 	"railway_scale",
 	"railway_deploy",
+	"fabric_status",
+	"fabric_optimize",
+	"fabric_compliance",
+	"planning_status",
+	"planning_sessions",
 	// REST routes, as `server.ts` audits them. A route audited under a tool's own name
 	// (`/memory` as `memory_write`) is covered by that name above and not repeated.
 	"brief",

@@ -68,6 +68,14 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	"railway_monitor",
 	"railway_scale_suggest",
 	"railway_cost",
+	// Phase 51 (SOTA-07): fabric reads. A status, an optimisation list and a compliance report are inspection only.
+	"fabric_status",
+	"fabric_optimize",
+	"fabric_compliance",
+	// Phase 52 (SOTA-08): planning reads. An index or a presence listing is inspection only, and a failed read answers typed,
+	// so a planning outage must not refuse the turn. The one ledger note a read may write is fail-open for the same reason.
+	"planning_status",
+	"planning_sessions",
 	// The one write that is fail-open on purpose: an event costs a line in the trail,
 	// and refusing the turn over it would make a substrate outage an outage of the host.
 	"events_emit",

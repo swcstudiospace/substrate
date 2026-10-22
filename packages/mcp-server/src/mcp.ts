@@ -14,6 +14,10 @@ import { BRIEF_SOURCES } from "./brief.ts";
 import { parseBriefProfile } from "./brief-profile.ts";
 import { DesktopRunInput } from "./desktop/actions.ts";
 import { DEFAULT_IDLE_SECONDS, formatDrift } from "./drift.ts";
+import { buildFabricCompliance } from "./fabric/compliance.ts";
+import { gatherFabricFacts } from "./fabric/gather.ts";
+import { buildFabricSuggestions } from "./fabric/optimize.ts";
+import { buildFabricStatus } from "./fabric/status.ts";
 import { DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT } from "./greptime.ts";
 import { MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS } from "./lease.ts";
 import { approvalRefValid, RailwayRequestError, type ServiceRef, type WriteGate, type WriteOutcome, type WriteRefusal } from "./railway.ts";
@@ -1335,6 +1339,96 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			annotations: { readOnlyHint: true },
 		},
 		async () => railwayRead(() => substrate.railway.costReport()),
+	);
+
+	/**
+	 * One fabric read (phase 51, SOTA-07): the sources are read once, under the fabric's deadlines, and the pure builders
+	 * answer from that one gather. Reads only.
+	 */
+	const fabricRead = async () => {
+		const facts = await gatherFabricFacts(substrate.fabricSources());
+		return { facts, status: buildFabricStatus(facts) };
+	};
+
+	server.registerTool(
+		"fabric_status",
+		{
+			title: "Status of the six fabric resources",
+			description:
+				"One row per resource: Dragonfly, the TimescaleDB index, GreptimeDB, RAGFlow, Hindsight and the Tailscale proxy layer. " +
+				"Each row has its endpoint class (loopback, proxy, direct, unset or not-applicable), a state (ok, degraded, unavailable " +
+				"or unconfigured) and a fixed phrase naming its source. A resource that is not configured is unconfigured, never ok. " +
+				"A read: it changes nothing and needs no approval.",
+			inputSchema: {},
+			annotations: { readOnlyHint: true },
+		},
+		async () => json((await fabricRead()).status),
+	);
+
+	server.registerTool(
+		"fabric_optimize",
+		{
+			title: "Optimisation suggestions across the fabric",
+			description:
+				"Deterministic suggestions drawn from the status, the endpoint classes, the cache counters and the Railway cost report. " +
+				"Each names its resource, an action and the observed evidence, and none is emitted without evidence. Advisory only: " +
+				"it executes nothing and changes no configuration. A read: it changes nothing.",
+			inputSchema: {},
+			annotations: { readOnlyHint: true },
+		},
+		async () => {
+			const { facts, status } = await fabricRead();
+			return json({ checkedAt: status.checkedAt, suggestions: buildFabricSuggestions(status, facts) });
+		},
+	);
+
+	server.registerTool(
+		"fabric_compliance",
+		{
+			title: "Compliance report for the fabric",
+			description:
+				"Pass, fail or not-applicable checks: the data-plane endpoints are private, the endpoint policy is enforce, every fabric " +
+				"tool is fail-open in the audit, the report carries no secret-shaped value, and each resource is in state ok. A resource " +
+				"that is not configured is not applicable, never a pass. A read: it changes nothing.",
+			inputSchema: {},
+			annotations: { readOnlyHint: true },
+		},
+		async () => {
+			const { facts, status } = await fabricRead();
+			const suggestions = buildFabricSuggestions(status, facts);
+			return json(buildFabricCompliance({ facts, status, suggestions }));
+		},
+	);
+
+	/**
+	 * The planning reads (phase 52, SOTA-08). Both are typed: a plane with no root answers `disabled`, never an error.
+	 * Neither writes a file. `planning_status` writes one ledger note when the index differs from the last read here.
+	 */
+	server.registerTool(
+		"planning_status",
+		{
+			title: "Planning index for the configured checkout",
+			description:
+				"Counts, sha256 hashes and error records for the planning documents under the configured checkout's .planning/. " +
+				"Never a file body and never a frontmatter value. An unset root answers disabled. When the index differs from the last " +
+				"read in this process, one planning.changed note is written to the ledger. It changes no file.",
+			inputSchema: {},
+			annotations: { readOnlyHint: true },
+		},
+		async () => json(await substrate.planning.status()),
+	);
+
+	server.registerTool(
+		"planning_sessions",
+		{
+			title: "Planning presence for sessions",
+			description:
+				"The sessions heartbeating into the planning plane, each active, stale or unknown against the server's own clock. " +
+				"An unset root answers disabled; an unset cache endpoint answers unavailable. A read: it changes nothing.",
+			inputSchema: {},
+			annotations: { readOnlyHint: true },
+		},
+		async () => json(await substrate.planning.sessions()),
 	);
 
 	server.registerTool(

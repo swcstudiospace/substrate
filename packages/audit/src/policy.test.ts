@@ -52,6 +52,11 @@ describe("auditMode", () => {
 			"coord_handoff_list",
 			"coord_handoff_verify",
 			"coord_drift_scan",
+			"fabric_status",
+			"fabric_optimize",
+			"fabric_compliance",
+			"planning_status",
+			"planning_sessions",
 		]) {
 			expect(auditMode(tool)).toBe("fail-open");
 		}

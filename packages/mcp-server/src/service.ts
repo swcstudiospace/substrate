@@ -55,6 +55,7 @@ import {
 	type ScriptOutcome,
 } from "./cache.ts";
 import { isReviewToken, type SubstrateConfig } from "./config.ts";
+import type { DbPlane } from "./db-endpoints.ts";
 import { DesktopBusy, type DesktopDriver, type DesktopLogEntry, type DesktopRunResult } from "./desktop/driver.ts";
 import {
 	DatasetListCache,
@@ -136,6 +137,11 @@ import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachab
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth, type HindsightConfig } from "./planes/hindsight.ts";
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
 import { RailwayClient } from "./railway.ts";
+import { nodePlanningFs } from "./planning/fs.ts";
+import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
+import { DragonflyPresenceStore } from "./planning/presence-dragonfly.ts";
+import { PlanningReader, type PlanningReaderDeps } from "./planning/read.ts";
+import type { FabricSources } from "./fabric/types.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
 import {
@@ -1234,6 +1240,12 @@ function productionEventBus(config: SubstrateConfig): EventBus | null {
 	});
 }
 
+/** The presence store (phase 52): Dragonfly on the cache endpoint, or null when that endpoint is unset or refused. Connects on first use. */
+function productionPresence(config: SubstrateConfig): DragonflyPresenceStore | null {
+	if (!config.dragonflyUrl || config.dragonflyRefused !== null) return null;
+	return new DragonflyPresenceStore(dragonflyPresenceBackend(config.dragonflyUrl, config.cacheConnectTimeoutMs));
+}
+
 export class Substrate {
 	readonly index: IndexStore | null;
 	readonly greptime: GreptimeClient | null;
@@ -1336,6 +1348,8 @@ export class Substrate {
 	private readonly emitChains = new Map<string, Promise<void>>();
 	/** Phase 50: the Dragonfly wake-up hints; null while `SUBSTRATE_EVENT_BUS` is off, or its endpoint is missing or refused. */
 	readonly eventBus: EventBus | null;
+	/** Phase 52: the planning reads behind `planning_status` and `planning_sessions`. Disabled unless `SUBSTRATE_PLANNING_ROOT` is set. */
+	readonly planning: PlanningReader;
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
@@ -1354,6 +1368,8 @@ export class Substrate {
 			railway?: RailwayClient;
 			/** Tests inject the bus through this factory; production builds it from config. */
 			eventBus?: () => EventBus | null;
+			/** Tests inject the planning filesystem, presence store and ledger write; production builds them from config. */
+			planning?: Partial<Omit<PlanningReaderDeps, "settings">>;
 		},
 		observer: SubstrateObserver = {},
 	) {
@@ -1420,6 +1436,14 @@ export class Substrate {
 				gate: this.planes.gate("cache"),
 			});
 		this.eventBus = stores?.eventBus !== undefined ? stores.eventBus() : productionEventBus(config);
+		// Phase 52 (SOTA-08): the planning reads. Presence rides the cache endpoint; with none, the sessions read says so.
+		const planningDeps = stores?.planning ?? {};
+		this.planning = new PlanningReader({
+			settings: config.planning,
+			fs: planningDeps.fs ?? nodePlanningFs(),
+			presence: planningDeps.presence !== undefined ? planningDeps.presence : productionPresence(config),
+			emit: planningDeps.emit ?? (async (event: EventInput) => (await this.emit(event)).stored),
+		});
 		// uplift-2 R1
 		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays, graphRead: config.requestPath.briefGraphRead };
 		this.narrowBumps = config.requestPath.cacheBumpScope === "narrow";
@@ -3636,6 +3660,39 @@ export class Substrate {
 				session_id: `mirror:${ctx.graphId}:${ctx.nodeId}`,
 				payload: { action: "mirror", target: success.target, op: success.op, status: "ok" },
 			}).catch(() => undefined);
+		}
+	}
+
+	/**
+	 * D48-d: one `db.endpoint` note per data plane that has a configured endpoint, written once at boot. The payload
+	 * names the plane, the access class and the policy, never the URL, the host or a credential. A plane with no
+	 * endpoint emits nothing. A refused write is logged and never blocks boot.
+	 */
+	async emitDbEndpoints(): Promise<void> {
+		const { policy, classes } = this.config.dbEndpoints;
+		const planes: readonly DbPlane[] = ["greptime", "postgres", "dragonfly"];
+		const configured: Record<DbPlane, boolean> = {
+			greptime: this.config.greptime !== null,
+			postgres: this.config.postgresUrl !== undefined,
+			// A refused Dragonfly URL is still a configured endpoint: the cache is off, and the boot record says why it is refused.
+			dragonfly: this.config.dragonflyUrl !== undefined || this.config.dragonflyRefused !== null,
+		};
+		for (const plane of planes) {
+			if (!configured[plane]) continue;
+			const endpointClass = classes[plane];
+			try {
+				const emitted = await this.emit({
+					surface: "substrate",
+					kind: "note",
+					summary: `db endpoint ${plane}: ${endpointClass} (policy ${policy})`,
+					session_id: `db-endpoint:${plane}`,
+					payload: { action: "db.endpoint", runtime: "mcp-server", plane, class: endpointClass, policy },
+				});
+				if (!emitted.stored) process.stderr.write(`[substrate] db endpoint event for ${plane} not recorded: ledger unavailable\n`);
+			} catch (cause) {
+				const reason = cause instanceof Error ? redact(cause.message).slice(0, 200) : "unknown error";
+				process.stderr.write(`[substrate] db endpoint event for ${plane} not recorded: ${reason}\n`);
+			}
 		}
 	}
 
@@ -5988,6 +6045,36 @@ export class Substrate {
 		if (bus === null) return { enabled: false };
 		const stats: EventBusStats = bus.stats?.() ?? { published: 0, publishFailures: 0, oversizeDropped: 0, malformedIgnored: 0, subscriptionDrops: 0 };
 		return { enabled: true, published: stats.published, failed: stats.publishFailures, oversize: stats.oversizeDropped, malformed: stats.malformedIgnored };
+	}
+
+	/**
+	 * The fabric's read-only view of this process (phase 51, SOTA-07). It reads through the existing health, the
+	 * Railway cost report and the retain outbox, adds no probe, and carries presence and endpoint classes only:
+	 * no URL, host or credential is in the view.
+	 */
+	fabricSources(): FabricSources {
+		const { dbEndpoints } = this.config;
+		return {
+			now: () => new Date().toISOString(),
+			health: () => this.health(),
+			railwayCost: () => this.railway.costReport(),
+			outbox: () => {
+				const stats = this.retainOutboxStats();
+				return { size: stats.size, oldestAt: stats.oldestAt };
+			},
+			config: {
+				endpointPolicy: dbEndpoints.policy,
+				endpointClasses: { ...dbEndpoints.classes },
+				configured: {
+					"timescaledb-index": this.index !== null,
+					greptime: this.config.greptime !== null,
+					dragonfly: this.config.dragonflyUrl !== undefined || this.config.dragonflyRefused !== null,
+					hindsight: hindsightFromEnv() !== null,
+					ragflow: this.config.ragflow !== null,
+				},
+				dragonflyRefused: this.config.dragonflyRefused !== null,
+			},
+		};
 	}
 
 	/** The last index size report `SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S` keeps, and the measurement still running. */
