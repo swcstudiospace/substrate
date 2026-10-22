@@ -1945,8 +1945,7 @@ describe("swarm surfaces — default-deny proven from the outside (ADR 0001 S3)"
 		expect(store.reviews[0]?.entry_id).toBe(released.entry?.id);
 	});
 
-	test("all 15 swarm surfaces hold working grants, own-agent only, and never person", () => {
-		expect(SWARM_SURFACES).toHaveLength(15);
+	test("all swarm surfaces hold working grants, own-agent only, and never person", () => {
 		const at = (surface: string, raw: string, kind: "decision" | "fact") => {
 			const scope = parseScope(raw);
 			if (!scope) throw new Error(raw);

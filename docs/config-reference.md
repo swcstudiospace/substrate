@@ -391,8 +391,8 @@ The scan sees only the prefix of a name the code builds, so each family is regis
 
 | Pattern | Prefix | Members |
 | --- | --- | --- |
-| `SUBSTRATE_TOKEN_<SURFACE>` | `SUBSTRATE_TOKEN_` | 27 |
-| `SUBSTRATE_BUDGET_<CLASS>_RPS \| _BURST` | `SUBSTRATE_BUDGET_` | 168 |
+| `SUBSTRATE_TOKEN_<SURFACE>` | `SUBSTRATE_TOKEN_` | 42 |
+| `SUBSTRATE_BUDGET_<CLASS>_RPS \| _BURST` | `SUBSTRATE_BUDGET_` | 258 |
 | `SUBSTRATE_REHEARSAL_<NAME>` | `SUBSTRATE_REHEARSAL_` | 1 |
 
 ## Names that are not configuration

@@ -4,7 +4,7 @@
  *
  * Run as `bun run check:phase-close` (or `bun scripts/phase-close-check.ts`).
  * It proves `EVENT_KINDS` is unchanged against the v1.2 baseline and
- * `SURFACES` equals the baseline plus the one reviewed host-job surface
+ * `SURFACES` equals the baseline plus the reviewed swarm additions and the one reviewed host-job surface
  * `substrate`, so every later phase can re-run it to catch a vocabulary
  * change in plain verification.
  *
@@ -92,13 +92,36 @@ export function diffKinds(baseline: readonly string[], current: readonly string[
 }
 
 /**
- * Diff of baseline surfaces against current surfaces. The only accepted
- * change is the appended reviewed host-job surface `substrate`: empty when
- * current equals baseline plus `substrate`, otherwise one line per
- * difference.
+ * The swarm surfaces the operator reviewed for the A16..A30 Agent Swarm
+ * agents (the Substrate token setup). They sit after the v1.2 baseline and
+ * before `substrate`, in this order. Any other vocabulary change still fails.
  */
-export function diffSurfaces(baseline: readonly string[], current: readonly string[]): string[] {
-	const expected = [...baseline, "substrate"];
+export const REVIEWED_SURFACE_ADDITIONS = [
+	"swarm-a16-cloud",
+	"swarm-a17-plat",
+	"swarm-a18-supply",
+	"swarm-a19-event",
+	"swarm-a20-finops",
+	"swarm-a21-k8s",
+	"swarm-a22-gitops",
+	"swarm-a23-mesh",
+	"swarm-a24-ksec",
+	"swarm-a25-resil",
+	"swarm-a26-sol",
+	"swarm-a27-audit",
+	"swarm-a28-chain",
+	"swarm-a29-dapp",
+	"swarm-a30-custody",
+] as const;
+
+/**
+ * Diff of baseline surfaces against current surfaces. The only accepted
+ * change is the reviewed swarm additions, in order, then the reviewed
+ * host-job surface `substrate`: empty when current equals baseline plus
+ * `reviewed` plus `substrate`, otherwise one line per difference.
+ */
+export function diffSurfaces(baseline: readonly string[], current: readonly string[], reviewed: readonly string[] = REVIEWED_SURFACE_ADDITIONS): string[] {
+	const expected = [...baseline, ...reviewed, "substrate"];
 	const lines: string[] = [];
 	const width = Math.max(expected.length, current.length);
 	for (let i = 0; i < width; i++) {
