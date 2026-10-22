@@ -508,6 +508,48 @@ describe("a planning change whose publish fails", () => {
 	});
 });
 
+describe("a failed publish holds the baseline through the reader", () => {
+	test("two failed publishes hold the baseline, and the next read publishes the change exactly once", async () => {
+		await seedPhase();
+		await write(".git/config", ORIGIN_CONFIG);
+		const attempts: EventInput[] = [];
+		const stored: EventInput[] = [];
+		let failures = 2;
+		const plane = new PlanningReader({
+			settings: settingsFor(root),
+			fs: nodePlanningFs(),
+			presence: null,
+			emit: async (event) => {
+				attempts.push(event);
+				if (failures > 0) {
+					failures--;
+					return false;
+				}
+				stored.push(event);
+				return true;
+			},
+		});
+		await plane.status();
+
+		await write(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		const first = await plane.status();
+		expect(first.state === "ok" && first.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "not-stored" });
+
+		const second = await plane.status();
+		expect(second.state === "ok" && second.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "not-stored" });
+		expect(stored).toEqual([]);
+
+		const third = await plane.status();
+		expect(third.state === "ok" && third.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "emitted" });
+		expect(attempts).toHaveLength(3);
+		expect(stored).toHaveLength(1);
+
+		const after = await plane.status();
+		expect(after.state === "ok" && after.changes).toEqual({ state: "unchanged" });
+		expect(stored).toHaveLength(1);
+	});
+});
+
 describe("a stalled Dragonfly reply", () => {
 	test("planning_sessions returns its error within the command deadline", async () => {
 		const stalled: PresenceRedisClient = { connect: async () => {}, send: () => new Promise<never>(() => {}), close: () => {} };
