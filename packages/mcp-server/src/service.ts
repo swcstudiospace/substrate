@@ -6037,23 +6037,25 @@ export class Substrate {
 		};
 	}
 
-	/** The Greptime ping, and only after a yes the dialect, append-mode, write-probe and size reads. Never rejects. */
+	/** The Greptime ping, and only after a yes every other Greptime read. Never rejects. */
 	private async greptimeProbe(client: GreptimeClient, timeoutMs: number | undefined): Promise<GreptimeProbe> {
+		// The ping is the gate: until it answers, nothing else is asked of Greptime.
 		const up = (await this.healthBound(timeoutMs, () => (timeoutMs === undefined ? client.ping() : client.ping(timeoutMs)))) === true;
 		if (!up) return ABSENT_GREPTIME;
-		const appendOnly = (await this.healthBound(timeoutMs, () => client.ensureAppendMode())) ?? null;
-		const quotingDialectKnown =
-			(await this.healthBound(timeoutMs, async () => {
+		// The append-mode, dialect, write-probe and size reads are independent of one another, so they run together and each keeps
+		// its own bound: the wait is the slowest single read, not the sum. Main ran them one after another; no read's value depends
+		// on another's, so the verdicts are the same. On the default path each read keeps the client's own timeout (only the size
+		// read has its own bound there, as on main); the write probe keeps the client's own write timeout, so a slow day does not
+		// read as a full disk.
+		const [appendOnly, quotingDialectKnown, probe, ledgerCapacity] = await Promise.all([
+			this.healthBound(timeoutMs, () => client.ensureAppendMode()).then((answer) => answer ?? null),
+			this.healthBound(timeoutMs, async () => {
 				await client.probeDialect();
 				return client.quotingDialectKnown === true;
-			})) === true;
-		// Only a reachable ledger is probed: an unreachable one is already not writable, and a write that cannot
-		// connect would only charge the breaker twice. The client's own write timeout applies, not HEALTH_PROBE_MS,
-		// so a slow day does not read as a full disk. The `.then` wrapper is for a test fake without the method.
-		const probe = await Promise.resolve()
-			.then(() => client.probeWritable(this.config.ledger.writeProbeS * 1000))
-			.catch(() => null);
-		const ledgerCapacity = await bounded(() => client.capacity(HEALTH_PROBE_MS), HEALTH_PROBE_MS);
+			}).then((answer) => answer === true),
+			this.healthBound(timeoutMs, () => client.probeWritable(this.config.ledger.writeProbeS * 1000)),
+			bounded(() => client.capacity(HEALTH_PROBE_MS), HEALTH_PROBE_MS),
+		]);
 		return { up, appendOnly, quotingDialectKnown, probe, ledgerCapacity };
 	}
 
