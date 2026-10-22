@@ -317,7 +317,7 @@ export class PlanningReader {
 			}
 		}
 		// The change's identity: a held change is recorded once, on first detection, and not again once it is stored.
-		const key = diff !== null && diff.removed !== null && outcome !== null ? changeKey(diff, snapshot) : null;
+		const key = diff !== null && diff.removed !== null && outcome !== null ? changeKey({ added: diff.added, removed: diff.removed, changed: diff.changed }, snapshot) : null;
 		if (hold) {
 			// A change the ledger did not store holds the baseline, so the next read sends it again. Its transition is recorded once,
 			// on first detection: a failed ledger write does not hide the transition from the stdout sink.
