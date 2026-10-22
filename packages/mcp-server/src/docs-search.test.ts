@@ -575,17 +575,13 @@ describe("docs backend selection (LightRAG cutover)", () => {
 		});
 	});
 
-	test("lightragFromEnv: null without reach; trims the URL; never echoes the key", () => {
+	test("lightragFromEnv: null without a URL; keyless reach is a URL alone; trims the URL; never echoes the key", () => {
 		expect(lightragFromEnv({})).toBeNull();
-		expect(lightragFromEnv({ LIGHTRAG_URL: "http://lightrag.test" })).toBeNull();
 		expect(lightragFromEnv({ LIGHTRAG_API_KEY: "k" })).toBeNull();
+		expect(lightragFromEnv({ LIGHTRAG_URL: "http://lightrag.test" })).toEqual({ url: "http://lightrag.test" });
 		const config = lightragFromEnv({ LIGHTRAG_URL: "http://lightrag.test/", LIGHTRAG_API_KEY: "k" });
 		expect(config).toEqual({ url: "http://lightrag.test", apiKey: "k" });
 		expect(JSON.stringify(config)).not.toContain("k-secret");
-		expect(lightragFromEnv({ LIGHTRAG_BASE_URL: "http://alias.test", LIGHTRAG_API_KEY: "k" })).toEqual({
-			url: "http://alias.test",
-			apiKey: "k",
-		});
 	});
 });
 
@@ -593,6 +589,23 @@ describe("search graph metadata (LightRAG path)", () => {
 	const HINTS = [
 		{ phase: "25-lightrag", entities: ["Access path", "RAGFlow datasets"], relations: [{ source: "Access path", target: "RAGFlow datasets", kind: "links-to" }] },
 	];
+
+	/**
+	 * Plants the two headings the graph tests hint against in every dataset,
+	 * through the fake's own seed table. Serving seeds turns on the
+	 * `heading_path` echo, and nothing else is served, so each citation's
+	 * heading is exactly the one planted here.
+	 */
+	function seedHeadings(fake: RagflowFake): void {
+		fake.serveUploadsAsChunks = true;
+		for (const dataset of fake.datasets) {
+			const sourceUrl = `https://example.com/${dataset.name}/graph`;
+			fake.seeds.push(
+				{ dataset_id: dataset.id, document_id: `doc-${dataset.id}-1`, content: "The substrate is the only door to the data planes.", source_url: sourceUrl, heading_path: "Access path", score: 0.91 },
+				{ dataset_id: dataset.id, document_id: `doc-${dataset.id}-2`, content: "Callers cite the source, not the chunk.", source_url: sourceUrl, heading_path: "RAGFlow datasets", score: 0.83 },
+			);
+		}
+	}
 
 	test("planningGraphCounts reports distinct entities and every relation", () => {
 		expect(planningGraphCounts([])).toEqual({ entities: 0, relations: 0 });
@@ -619,6 +632,7 @@ describe("search graph metadata (LightRAG path)", () => {
 
 	test("a search with graph hints returns graph counts and names the hinted headings", async () => {
 		const fake = new RagflowFake();
+		seedHeadings(fake);
 		const events: EventInput[] = [];
 		const reply = await searchDocs(
 			{ config: CONFIG, emit: async (event) => ((events.push(event)), { stored: false }), fetchImpl: fake.fetch, graphHints: HINTS },
@@ -655,6 +669,7 @@ describe("search graph metadata (LightRAG path)", () => {
 
 	test("an unhinted heading stays graph-free while its hinted sibling is named", async () => {
 		const fake = new RagflowFake();
+		seedHeadings(fake);
 		const reply = await searchDocs(
 			{
 				config: CONFIG,

@@ -183,17 +183,18 @@ export function isPlanningPage(path: string): boolean {
 
 /**
  * The phase id a planning hint attributes: the phase directory for
- * `.planning/phases/<id>/…`, else the path under `.planning/` without the
- * `.md` suffix (`PROJECT.md` → `"PROJECT"`).
+ * `.planning/phases/<id>/…` or `.planning/<id>/…`, else the file's path under
+ * `.planning/` without the `.md` suffix (`PROJECT.md` → `"PROJECT"`).
  */
 export function planningPhaseOf(path: string): string {
 	const clean = normalizeIngestPath(path) ?? path;
-	const under = clean.startsWith(".planning/") ? clean.slice(".planning/".length) : clean;
-	if (under.startsWith("phases/")) {
-		const id = under.slice("phases/".length).split("/")[0];
-		if (id !== undefined && id.length > 0) return id;
-	}
-	return under.endsWith(".md") ? under.slice(0, -".md".length) : under;
+	if (!clean.startsWith(".planning/")) return clean.endsWith(".md") ? clean.slice(0, -".md".length) : clean;
+	const segments = clean.slice(".planning/".length).split("/");
+	const [first, second] = segments;
+	if (first === "phases" && segments.length > 2 && second !== undefined && second.length > 0) return second;
+	if (segments.length > 1 && first !== undefined && first.length > 0) return first;
+	const file = segments.join("/");
+	return file.endsWith(".md") ? file.slice(0, -".md".length) : file;
 }
 
 const ATX_HEADING = /^(#{1,6})\s+(.+?)\s*#*\s*$/;
@@ -204,14 +205,12 @@ const INLINE_LINK = /\[([^\]]*)\]\(([^)\s]+)(?:\s+[^)]*)?\)/g;
  * LightRAG insert: ATX headings become entities (parent→child headings become
  * `contains` relations), inline markdown links become `links-to` relations
  * from the enclosing heading (or the phase, when none precedes) to the raw
- * target, and the directory chain contributes trailing `parent-child`
- * relations (every ancestor directory parents what it holds, down to the
- * page). Targets stay verbatim — cross-folder (`../docs/x.md`), anchor
+ * target. Targets stay verbatim — cross-folder (`../docs/x.md`), anchor
  * (`#section`) and remote (`https://…`) alike — so the ingest roots gate,
  * not the scanner, decides what resolves. Code fences and a leading `---`
  * frontmatter block are skipped, never parsed; reference-style links and
  * bare autolinks are not extracted. Returns undefined for non-planning
- * paths; a heading-less planning page still yields its directory edges
+ * paths; a heading-less planning page still yields its link relations
  * (empty entity lists mean "no bias", never an absent hint).
  */
 export function extractPlanningGraphHint(path: string, body: string): PlanningGraphHint | undefined {
@@ -288,34 +287,7 @@ export function extractPlanningGraphHint(path: string, body: string): PlanningGr
 		}
 		relations.push({ source: enclosing ?? phase, target, kind: "links-to" });
 	}
-	// Directory hierarchy, always last so content relations keep document
-	// order: every ancestor directory is the `parent-child` parent of what
-	// it holds, down to the page itself. The LightRAG insert uses these to
-	// join sibling pages under their phase folder even when the prose
-	// names no headings or links at all.
-	for (const edge of directoryParentChildRelations(path)) relations.push(edge);
 	return { phase, entities, relations };
-}
-
-/**
- * The directory-hierarchy edges a repo-relative page path carries: every
- * ancestor directory is the `parent-child` parent of the segment it holds,
- * down to the page itself (`.planning/phases/03-x/PLAN.md` yields
- * `.planning` → `.planning/phases` → `.planning/phases/03-x` →
- * `.planning/phases/03-x/PLAN.md`). Unresolvable paths yield no edges,
- * never a throw — the scanner gates, this helper only describes.
- */
-export function directoryParentChildRelations(path: string): PlanningGraphRelation[] {
-	const clean = normalizeIngestPath(path);
-	if (clean === null) return [];
-	const segments = clean.split("/");
-	const relations: PlanningGraphRelation[] = [];
-	for (let depth = 1; depth < segments.length; depth += 1) {
-		const source = segments.slice(0, depth).join("/");
-		const target = segments.slice(0, depth + 1).join("/");
-		if (source.length > 0 && target.length > 0) relations.push({ source, target, kind: "parent-child" });
-	}
-	return relations;
 }
 
 export interface IngestPage {
