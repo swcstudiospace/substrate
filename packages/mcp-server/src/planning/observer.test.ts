@@ -9,6 +9,7 @@ import type { EventInput } from "../types.ts";
 import { RecordingPresenceBackend } from "./backend.fixtures.ts";
 import { PLANNING_MAX_FILES_ENV, PLANNING_PRESENCE_TTL_ENV, PLANNING_ROOT_ENV, loadPlanningSettings } from "./config.ts";
 import { planningSessionId } from "./checkout.ts";
+import { PLANNING_CONFLICT } from "./conflicts.ts";
 import type { SessionRecord } from "./presence.ts";
 import { PlanningReader, type PlanningSessionsView } from "./read.ts";
 import { PLANNING_OBSERVER_SESSION, PlanningObserver } from "./observer.ts";
@@ -241,6 +242,11 @@ function announcingObserver(tree: FakeTree, presence: DragonflyPresenceStore, at
 	});
 }
 
+/** The conflict events an observer attempted: the `planning.conflict` payloads. A publish (`planning.changed` note) is not a conflict. */
+function conflictEventsOf(events: readonly EventInput[]): EventInput[] {
+	return events.filter((event) => (event.payload as { kind?: unknown } | undefined)?.kind === PLANNING_CONFLICT);
+}
+
 function planningReaderOver(tree: FakeTree, presence: DragonflyPresenceStore, ttlS?: string): PlanningReader {
 	return new PlanningReader({
 		settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT, ...(ttlS === undefined ? {} : { [PLANNING_PRESENCE_TTL_ENV]: ttlS }) }),
@@ -347,14 +353,14 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		backend.clockMs = SERVER_NOW + 2_000;
 		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b\n");
 		await b.scan();
-		expect(attempts).toEqual([]);
+		expect(conflictEventsOf(attempts)).toEqual([]);
 		expect(planningOf(await planningReaderOver(tree, presence).sessions(), planningSessionId(tree, CHECKOUT_A))).toEqual({ state: "unknown", reason: "scan-unlisted" });
 
 		backend.clockMs = SERVER_NOW + 3_000;
 		tree.deniedListings.delete(`${CHECKOUT_A}/.planning/phases/${PHASE_54}`);
 		await a.scan();
-		expect(attempts).toHaveLength(1);
-		expect(attempts[0]?.payload).toMatchObject({ kind: "planning.conflict", key: { by: "phase", phase: "53" } });
+		expect(conflictEventsOf(attempts)).toHaveLength(1);
+		expect(conflictEventsOf(attempts)[0]?.payload).toMatchObject({ kind: "planning.conflict", key: { by: "phase", phase: "53" } });
 	});
 
 	test("two failed publishes hold the baseline, and the next scan publishes the change exactly once", async () => {
@@ -401,14 +407,14 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 
 		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a\n");
 		await a.scan();
-		expect(attempts).toEqual([]);
+		expect(conflictEventsOf(attempts)).toEqual([]);
 
 		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b\n");
 		await b.scan();
 		await b.scan();
 
 		const sessionIds = [planningSessionId(tree, CHECKOUT_A), planningSessionId(tree, CHECKOUT_B)].sort();
-		expect(attempts).toEqual([
+		expect(conflictEventsOf(attempts)).toEqual([
 			expect.objectContaining({
 				surface: "substrate",
 				kind: "warning",
@@ -437,7 +443,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_54, "54-CONTEXT.md"), "# context, b\n");
 		await b.scan();
 
-		expect(attempts).toEqual([]);
+		expect(conflictEventsOf(attempts)).toEqual([]);
 		expect(storedRecord(backend, tree, CHECKOUT_A).touched).toEqual([{ phase: "53", plan: null, observedAtMs: SERVER_NOW }]);
 		expect(storedRecord(backend, tree, CHECKOUT_B).touched).toEqual([{ phase: "54", plan: null, observedAtMs: SERVER_NOW }]);
 		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({ state: "ok", conflicts: [] });
@@ -463,7 +469,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b\n");
 		await b.scan();
 
-		expect(attempts).toEqual([]);
+		expect(conflictEventsOf(attempts)).toEqual([]);
 		expect(storedRecord(backend, tree, CHECKOUT_A).touched).toContainEqual({ phase: "53", plan: null, observedAtMs: SERVER_NOW });
 		expect(await planningReaderOver(tree, presence, TTL_60_S).sessions()).toMatchObject({ state: "ok", conflicts: [] });
 	});
@@ -487,7 +493,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		expect(await a.scan()).toMatchObject({ state: "observed", outcome: "incomplete", heartbeat: { state: "written" } });
 
 		expect(storedRecord(backend, tree, CHECKOUT_A)).toMatchObject({ touched, planning: { status: "unknown", reason: "scan-unlisted" } });
-		expect(attempts).toEqual([]);
+		expect(conflictEventsOf(attempts)).toEqual([]);
 	});
 
 	test("a conflict stays open, and nothing is closed or edited, when a side's later complete observation no longer touches the phase", async () => {
@@ -505,13 +511,13 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		await b.scan();
 		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a\n");
 		await a.scan();
-		expect(attempts).toHaveLength(1);
+		expect(conflictEventsOf(attempts)).toHaveLength(1);
 		const bRecord = backend.values.get(`${PRESENCE_KEY_PREFIX}${planningSessionId(tree, CHECKOUT_B)}`);
 
 		backend.clockMs = SERVER_NOW + 5_000;
 		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_54, "54-CONTEXT.md"), "# context, a again\n");
 		await a.scan();
-		expect(attempts).toHaveLength(1);
+		expect(conflictEventsOf(attempts)).toHaveLength(1);
 		expect(backend.values.get(`${PRESENCE_KEY_PREFIX}${planningSessionId(tree, CHECKOUT_B)}`)).toBe(bRecord);
 		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({
 			state: "ok",
@@ -538,7 +544,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_54, "54-PLAN.md"), "---\nplan: shared-plan\n---\nBODY, edited\n");
 		await b.scan();
 
-		expect(attempts).toEqual([
+		expect(conflictEventsOf(attempts)).toEqual([
 			expect.objectContaining({ payload: expect.objectContaining({ kind: "planning.conflict", key: { by: "plan", plan: "shared-plan" }, phases: ["53", "54"] }) }),
 		]);
 	});
@@ -555,7 +561,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		await a.scan();
 		await a.scan();
 
-		expect(attempts).toEqual([]);
+		expect(conflictEventsOf(attempts)).toEqual([]);
 		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({ state: "ok", conflicts: [] });
 	});
 
@@ -574,21 +580,21 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b\n");
 		await refusing.scan();
 		await refusing.scan();
-		expect(attempts).toHaveLength(2);
+		expect(conflictEventsOf(attempts)).toHaveLength(2);
 
 		const accepting = announcingObserver(tree, presence, attempts, true, CHECKOUT_B);
 		await accepting.scan();
 		await accepting.scan();
-		expect(attempts).toHaveLength(3);
+		expect(conflictEventsOf(attempts)).toHaveLength(3);
 
 		backend.clockMs = SERVER_NOW + 100_000;
 		await accepting.scan();
-		expect(attempts).toHaveLength(3);
+		expect(conflictEventsOf(attempts)).toHaveLength(3);
 
 		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a again\n");
 		await a.scan();
 		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b again\n");
 		await accepting.scan();
-		expect(attempts).toHaveLength(4);
+		expect(conflictEventsOf(attempts)).toHaveLength(4);
 	});
 });
