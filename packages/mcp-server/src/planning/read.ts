@@ -152,6 +152,9 @@ function resolve(result: PlanningConfigResult): Resolved {
 	};
 }
 
+/** Most transition deliveries in flight at once. Past it a record goes straight to the stdout fallback, so the set stays bounded. */
+export const MAX_PENDING_TRANSITIONS = 64;
+
 export class PlanningReader {
 	/** The baseline: the root, the scan that set it, its snapshot, and the state that read was in. It only moves forward. Process-local. */
 	private baseline: { root: string; seq: number; snapshot: PlanningSnapshot; state: SessionState } | null = null;
@@ -300,21 +303,33 @@ export class PlanningReader {
 
 	/**
 	 * Hands one `planning.transition` record to its sinks without waiting for them, so the reply never carries the metric write.
-	 * `emitTransition` never throws: a refused or thrown primary goes to the stdout fallback, and a fallback that fails is written to stderr.
+	 * The deliveries in flight are bounded by {@link MAX_PENDING_TRANSITIONS}: past the bound a record goes to the fallback alone,
+	 * so a stalled primary can neither grow the set nor lose a record. `emitTransition` never throws; a fallback that fails is
+	 * written to stderr.
 	 */
 	private schedule(record: TransitionRecord): void {
-		const delivery: Promise<void> = emitTransition(record, this.deps.metrics, this.deps.fallback ?? stdoutMetricSink()).then((delivered) => {
-			this.pending.delete(delivery);
+		const fallback = this.deps.fallback ?? stdoutMetricSink();
+		const tracked = this.pending.size < MAX_PENDING_TRANSITIONS;
+		const delivery: Promise<void> = emitTransition(record, tracked ? this.deps.metrics : fallback, fallback).then((delivered) => {
+			if (tracked) this.pending.delete(delivery);
 			if (delivered.status === "failed") {
 				process.stderr.write(`[substrate] planning transition not delivered: ${delivered.primary.sink} ${delivered.primary.reason}, ${delivered.fallback.sink} ${delivered.fallback.reason}\n`);
 			}
 		});
-		this.pending.add(delivery);
+		if (tracked) this.pending.add(delivery);
 	}
 
-	/** Resolves once every scheduled transition record has been delivered or handed to its fallback. A read never waits on it; tests and an orderly shutdown may. */
-	async settleTransitions(): Promise<void> {
-		while (this.pending.size > 0) await Promise.all([...this.pending]);
+	/**
+	 * Waits for the transition deliveries in flight, up to `deadline`: resolves `settled` when none is left, or `deadline` when the
+	 * bound came first. Never rejects. Shutdown passes its timer as the bound; a read never waits on this. Without a bound it waits
+	 * for every delivery.
+	 */
+	async settleTransitions(deadline: Promise<void> = Promise.withResolvers<void>().promise): Promise<"settled" | "deadline"> {
+		const flushed = (async (): Promise<"settled"> => {
+			while (this.pending.size > 0) await Promise.all([...this.pending]);
+			return "settled";
+		})();
+		return Promise.race([flushed, deadline.then((): "deadline" => "deadline")]);
 	}
 
 	/**

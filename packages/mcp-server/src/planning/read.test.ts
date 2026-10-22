@@ -15,7 +15,7 @@ import { nodePlanningFs } from "./fs.ts";
 import type { PlanningFs } from "./index.ts";
 import { DragonflyPresenceStore, PRESENCE_KEY_PREFIX, PRESENCE_MAX_SESSIONS, type PresenceBackend } from "./presence-dragonfly.ts";
 import { dragonflyPresenceBackend, type PresenceRedisClient } from "./presence-client.ts";
-import { PLANNING_OBSERVER_SESSION, PLANNING_TRANSITION_PHASE, PlanningReader, type PlanningSessionsView, repoFromGitConfig } from "./read.ts";
+import { MAX_PENDING_TRANSITIONS, PLANNING_OBSERVER_SESSION, PLANNING_TRANSITION_PHASE, PlanningReader, type PlanningSessionsView, repoFromGitConfig } from "./read.ts";
 import type { SessionRecord } from "./presence.ts";
 import { SESSION_STATES } from "./states.ts";
 import { stdoutMetricSink, type MetricSink, type SinkResult, type TransitionRecord } from "./telemetry.ts";
@@ -489,6 +489,66 @@ describe("planning.transition delivery", () => {
 		await planning.settleTransitions();
 		expect(after.state === "ok" && after.changes).toEqual({ state: "unchanged" });
 		expect(metrics.records).toEqual([expect.objectContaining({ phaseId: PLANNING_TRANSITION_PHASE, outcome: "applied" })]);
+	});
+
+	test("a delivery that completes before the shutdown bound finishes before shutdown resolves", async () => {
+		await seedPhase();
+		await write(".git/config", ORIGIN);
+		const delivered: TransitionRecord[] = [];
+		const release = Promise.withResolvers<void>();
+		const gated: MetricSink = {
+			name: "greptime",
+			emit: async (record) => {
+				await release.promise;
+				delivered.push(record);
+				return { ok: true };
+			},
+		};
+		const planning = new PlanningReader({ settings: settingsFor(root), fs: nodePlanningFs(), presence: null, emit: async () => true, metrics: gated, fallback: recordingSink("stdout").sink, clock: CLOCK });
+		await planning.status();
+		await write(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		await planning.status();
+		const bound = Promise.withResolvers<void>();
+		const shutdown = planning.settleTransitions(bound.promise);
+		release.resolve();
+		expect(await shutdown).toBe("settled");
+		expect(delivered).toHaveLength(1);
+	});
+
+	test("a delivery still pending when the shutdown bound passes does not hold shutdown past it", async () => {
+		await seedPhase();
+		await write(".git/config", ORIGIN);
+		const stalled: MetricSink = { name: "greptime", emit: () => Promise.withResolvers<SinkResult>().promise };
+		const planning = new PlanningReader({ settings: settingsFor(root), fs: nodePlanningFs(), presence: null, emit: async () => true, metrics: stalled, fallback: recordingSink("stdout").sink, clock: CLOCK });
+		await planning.status();
+		await write(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		await planning.status();
+		const bound = Promise.withResolvers<void>();
+		const shutdown = planning.settleTransitions(bound.promise);
+		bound.resolve();
+		expect(await shutdown).toBe("deadline");
+	});
+
+	test("past the bound a record goes to the fallback, and the primary never holds more deliveries than the bound", async () => {
+		await seedPhase();
+		await write(".git/config", ORIGIN);
+		const primaryCalls: TransitionRecord[] = [];
+		const stalled: MetricSink = {
+			name: "greptime",
+			emit: (record) => {
+				primaryCalls.push(record);
+				return Promise.withResolvers<SinkResult>().promise;
+			},
+		};
+		const fallback = recordingSink("stdout");
+		const planning = new PlanningReader({ settings: settingsFor(root), fs: nodePlanningFs(), presence: null, emit: async () => true, metrics: stalled, fallback: fallback.sink, clock: CLOCK });
+		await planning.status();
+		for (let i = 0; i <= MAX_PENDING_TRANSITIONS; i++) {
+			await write(`${PHASE}/52-CONTEXT.md`, `${BODY} edit ${i}\n`);
+			await planning.status();
+		}
+		expect(primaryCalls).toHaveLength(MAX_PENDING_TRANSITIONS);
+		expect(fallback.records).toHaveLength(1);
 	});
 });
 

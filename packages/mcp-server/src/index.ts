@@ -196,6 +196,8 @@ server.listen(config.port, config.host, () => {
 const SHUTDOWN_FLUSH_MS = 2000;
 /** How long in-flight background retains may take before shutdown stops waiting for them. */
 const SHUTDOWN_RETAIN_MS = 10_000;
+/** How long in-flight planning transition records may take before shutdown stops waiting for them. */
+const SHUTDOWN_TRANSITION_MS = 5000;
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
 	process.on(signal, () => {
@@ -222,6 +224,8 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 			// answered before its forward landed must not lose that forward
 			// silently on restart (the durable outbox keeps the rest).
 			await substrate.drainPendingRetains(SHUTDOWN_RETAIN_MS, { abandon: true });
+			// Planning transition records in flight are awaited within their own bound, after the retains and before the flush below.
+			await substrate.planning.settleTransitions(Bun.sleep(SHUTDOWN_TRANSITION_MS));
 			// The last export before shutdown, so the counters a restart resets are not
 			// simply lost — and *awaited*, within a bound. Firing it and exiting
 			// immediately lost it on an idle server, where the close callback runs at once
