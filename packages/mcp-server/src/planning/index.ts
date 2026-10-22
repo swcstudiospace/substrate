@@ -146,7 +146,7 @@ type Attempt<T> = { ok: true; value: T } | { ok: false; code: string };
 type Listing = { state: "absent" } | { state: "entries"; real: string; entries: DirEntry[] } | { state: "error"; entry: ErrorEntry };
 
 /** A phase child resolved to what it emits: its own error record, or a directory whose documents sort under its path. */
-type PhaseUnit = { type: "error"; key: string; entry: ErrorEntry } | { type: "group"; key: string; relDir: string; real: string; name: string };
+type PhaseUnit = { type: "error"; key: string; entry: ErrorEntry } | { type: "group"; key: string; relDir: string; real: string; name: string; entries: DirEntry[] };
 
 /** A directory resolved: absent, an error record for it, or its real location, which is inside the root. */
 type Resolved = { state: "absent" } | { state: "error"; entry: ErrorEntry } | { state: "dir"; real: string };
@@ -308,9 +308,7 @@ async function emitPhaseUnit(walk: Walk, unit: PhaseUnit): Promise<void> {
 		add(walk, unit.entry);
 		return;
 	}
-	const sub = await readEntries(walk, unit.relDir, unit.real);
-	if (sub.state === "error") add(walk, sub.entry);
-	else if (sub.state === "entries") collectDocuments(walk, unit.relDir, sub.real, sub.entries, "phase", PHASE_DIR.exec(unit.name)?.[1]);
+	collectDocuments(walk, unit.relDir, unit.real, unit.entries, "phase", PHASE_DIR.exec(unit.name)?.[1]);
 }
 
 /** A directory-level error record. The directory's contents are unknown from here on, so its path is recorded as unlisted. */
@@ -326,7 +324,11 @@ async function resolvePhaseChild(walk: Walk, relDir: string, realPhases: string,
 	const resolved = await resolveDir(walk, dirRel, join(realPhases, child.name));
 	if (resolved.state === "absent") return null;
 	if (resolved.state === "error") return { type: "error", key: dirRel, entry: resolved.entry };
-	return { type: "group", key: `${dirRel}/`, relDir: dirRel, real: resolved.real, name: child.name };
+	// Listed here, not when emitted: a listing that fails must sort at the directory's own path, which is only known now.
+	const sub = await readEntries(walk, dirRel, resolved.real);
+	if (sub.state === "absent") return null;
+	if (sub.state === "error") return { type: "error", key: dirRel, entry: sub.entry };
+	return { type: "group", key: `${dirRel}/`, relDir: dirRel, real: sub.real, name: child.name, entries: sub.entries };
 }
 
 /** A directory, resolved: absent, an error record for it, or its real location, which is inside the root. */

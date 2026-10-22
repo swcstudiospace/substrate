@@ -218,7 +218,7 @@ describe("buildPlanningIndex: bounds", () => {
 		expect(index.records.map((record) => record.path)).toEqual(ALL_PATHS.slice(0, 3));
 	});
 
-	test("collection stops once maxFiles + 1 candidates are held, so later phase directories are never listed", async () => {
+	test("collection stops once maxFiles + 1 candidates are held, so a later document is never read", async () => {
 		const tree = new FakeTree({
 			[`${P}/phases/01-a/one.md`]: "# one",
 			[`${P}/phases/01-a/two.md`]: "# two",
@@ -229,7 +229,7 @@ describe("buildPlanningIndex: bounds", () => {
 		if (!result.ok) throw new Error(result.code);
 		expect(result.index.truncated).toBe(true);
 		expect(result.index.records.map((record) => record.path)).toEqual([".planning/phases/01-a/one.md", ".planning/phases/01-a/two.md"]);
-		expect(tree.listed).not.toContain(`${P}/phases/03-c`);
+		expect(tree.reads).not.toContain(`${P}/phases/03-c/four.md`);
 		expect(tree.reads).not.toContain(`${P}/phases/02-b/three.md`);
 	});
 
@@ -300,6 +300,29 @@ describe("buildPlanningIndex: directory errors keep path order under a cutoff", 
 	});
 });
 
+describe("a failed listing sorts at its own path", () => {
+	const files = { [`${P}/phases/52-a/PLAN.md`]: "# a", [`${P}/phases/52-a-b/PLAN.md`]: "# ab" };
+	const failingListing = (): FakeTree => {
+		const tree = new FakeTree(files);
+		tree.deniedListings.add(`${P}/phases/52-a`);
+		return tree;
+	};
+
+	test("52-a fails to list: under maxFiles 1 its error stays first, ahead of the later sibling's document", async () => {
+		const cut = await buildPlanningIndex(TREE_ROOT, { fs: failingListing(), limits: { maxFiles: 1, maxBytes: 262_144 } });
+		if (!cut.ok) throw new Error(cut.code);
+		expect(cut.index.truncated).toBe(true);
+		expect(cut.index.records).toHaveLength(1);
+		expect(cut.index.records[0]).toMatchObject({ path: ".planning/phases/52-a", error: { code: "unreadable", detail: "read failed: EACCES" } });
+	});
+
+	test("with room for both, the error comes before the sibling's document", async () => {
+		const all = await buildPlanningIndex(TREE_ROOT, { fs: failingListing(), limits: { maxFiles: 500, maxBytes: 262_144 } });
+		if (!all.ok) throw new Error(all.code);
+		expect(all.index.records.map((record) => record.path)).toEqual([".planning/phases/52-a", ".planning/phases/52-a-b/PLAN.md"]);
+	});
+});
+
 describe("bounded fan-out", () => {
 	test("mapBounded never has more than the limit in flight, and returns results in input order", async () => {
 		let inFlight = 0;
@@ -330,7 +353,7 @@ describe("bounded fan-out", () => {
 		expect(tree.maxProbesInFlight).toBe(PROBE_CONCURRENCY);
 	});
 
-	test("with maxFiles 1 the walk lists only the phase directories the cutoff needs, observed through the fs", async () => {
+	test("with maxFiles 1 the walk lists at most one batch of phase directories, observed through the fs", async () => {
 		const files: Record<string, string> = {};
 		for (let n = 0; n < 12; n += 1) files[`${P}/phases/${String(n).padStart(2, "0")}-x/PLAN.md`] = "# p";
 		const tree = new FakeTree(files);
@@ -338,8 +361,8 @@ describe("bounded fan-out", () => {
 		if (!result.ok) throw new Error(result.code);
 		expect(result.index.truncated).toBe(true);
 		expect(result.index.records.map((record) => record.path)).toEqual([".planning/phases/00-x/PLAN.md"]);
-		// The phases listing, then the two directories that fill the cap (one past maxFiles). Nothing after them is listed.
-		expect(tree.listed.filter((path) => path.startsWith(`${P}/phases`))).toEqual([`${P}/phases`, `${P}/phases/00-x`, `${P}/phases/01-x`]);
+		// The phases listing, then one batch of PROBE_CONCURRENCY directories (listed during resolution). Nothing past the batch is listed.
+		expect(tree.listed.filter((path) => path.startsWith(`${P}/phases`))).toEqual([`${P}/phases`, `${P}/phases/00-x`, `${P}/phases/01-x`, `${P}/phases/02-x`, `${P}/phases/03-x`]);
 	});
 });
 
