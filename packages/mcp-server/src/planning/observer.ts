@@ -264,6 +264,10 @@ export class PlanningObserver {
 		const recorded = key !== null && key === this.recordedHold;
 		if (outcome !== null && current !== null && !recorded) {
 			this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: current.state, to: state, outcome, incomplete }, this.deps.clock ?? hostClock));
+		} else if (current !== null && this.recordedHold !== null && diff !== null && diff.complete && changesIn(diff) === 0) {
+			// A revert: the held change is undone, so the baseline matches the checkout again and nothing is published. It is recorded
+			// once, as refused, because the reverted change never reached the ledger.
+			this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: current.state, to: state, outcome: "refused" }, this.deps.clock ?? hostClock));
 		}
 		this.advance(root, change.snapshot, state);
 	}

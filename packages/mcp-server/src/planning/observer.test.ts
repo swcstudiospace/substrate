@@ -688,6 +688,25 @@ describe("held, incomplete and failed-heartbeat states are reported", () => {
 		expect(transitions).toEqual([expect.objectContaining({ outcome: "refused" }), expect.objectContaining({ outcome: "refused" })]);
 	});
 
+	test("a revert of a held change records its own transition, so an outage does not hide it", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		let accept = false;
+		const { observer, events, transitions } = observerOver(tree, { accept: () => accept });
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		expect(await observer.scan()).toMatchObject({ outcome: "not-published" });
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} context\n`);
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged" });
+		await observer.settleTransitions();
+		expect(transitions).toEqual([expect.objectContaining({ outcome: "refused" }), expect.objectContaining({ outcome: "refused" })]);
+
+		accept = true;
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged" });
+		await observer.settleTransitions();
+		expect(transitions).toHaveLength(2);
+		expect(events).toEqual([]);
+	});
+
 	test("an unlistable directory with an edit in a readable directory records that edit as an incomplete refused transition", async () => {
 		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
 		tree.setContent(`${TREE_ROOT}/.planning/phases/53-locked/53-PLAN.md`, `${BODY} locked\n`);
