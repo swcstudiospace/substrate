@@ -5955,53 +5955,23 @@ export class Substrate {
 		// `options.greptimeTimeoutMs` bounds the Greptime probes for the fabric (phase 51). Unset, which is how `/healthz`
 		// calls it, each Greptime call is made exactly as on main: no argument, the client's own timeout, and no wait added.
 		const timeoutMs = options.greptimeTimeoutMs;
-		// The Greptime chain and the other planes start at once, so one slow Greptime does not hold the others back.
+		// The probes start at once, so one slow Greptime does not hold the others back.
 		// A store that throws is down. `/healthz` has to answer that; a 500 would hide the outage from the monitor.
-		const greptimeClient = this.greptime;
-		const greptimeUp: Promise<boolean> = greptimeClient
-			? this.healthBound(timeoutMs, () => (timeoutMs === undefined ? greptimeClient.ping() : greptimeClient.ping(timeoutMs))).then(
-					(up) => up === true,
-				)
-			: Promise.resolve(false);
-		// The append-mode, dialect, write-probe and size reads need the ping's answer, so they run only after a yes.
-		const greptimeChecks = greptimeUp.then(async (up) => {
-			if (!up || greptimeClient === null) return { appendOnly: null, quotingDialectKnown: false, probe: null, ledgerCapacity: null };
-			const appendOnly = (await this.healthBound(timeoutMs, () => greptimeClient.ensureAppendMode())) ?? null;
-			const quotingDialectKnown =
-				(await this.healthBound(timeoutMs, async () => {
-					await greptimeClient.probeDialect();
-					return greptimeClient.quotingDialectKnown === true;
-				})) === true;
-			// Only a reachable ledger is probed: an unreachable one is already not writable, and a write that cannot
-			// connect would only charge the breaker twice. The client's own write timeout applies, not HEALTH_PROBE_MS,
-			// so a slow day does not read as a full disk. The `.then` wrapper is for a test fake without the method.
-			const probe = await Promise.resolve()
-				.then(() => greptimeClient.probeWritable(this.config.ledger.writeProbeS * 1000))
-				.catch(() => null);
-			const ledgerCapacity = await bounded(() => greptimeClient.capacity(HEALTH_PROBE_MS), HEALTH_PROBE_MS);
-			return { appendOnly, quotingDialectKnown, probe, ledgerCapacity };
-		});
-		const hindsight = hindsightFromEnv();
+		const probes = this.healthProbes(timeoutMs);
 		const indexStore = this.index;
-		const [greptime, checks, index, capacity, hindsightOk, ragflowOk, ledgerJobs, indexArchive] = await Promise.all([
-			greptimeUp,
-			greptimeChecks,
-			indexStore
-				? Promise.resolve()
-						.then(() => indexStore.ping(HEALTH_PROBE_MS))
-						.catch(() => false)
-				: Promise.resolve(false),
+		const [greptimeReading, index, hindsightOk, ragflowOk, capacity] = await Promise.all([
+			probes.greptime,
+			probes.index,
+			probes.hindsight,
+			probes.ragflow,
 			indexStore ? this.indexCapacityForHealth(indexStore) : Promise.resolve(null),
-			hindsight
-				? probeHealth(hindsight, this.hindsightFetch, HEALTH_PROBE_MS).then((probed) => probed.ok, () => false)
-				: Promise.resolve(null),
-			this.config.ragflow
-				? listDatasets(this.config.ragflow, this.ragflowFetch, HEALTH_PROBE_MS).then((listed) => listed.ok, () => false)
-				: Promise.resolve(null),
-			this.ledgerJobs(),
-			this.indexArchiveHealth(),
 		]);
-		const { appendOnly, quotingDialectKnown, probe, ledgerCapacity } = checks;
+		// The jobs and archive reads run after the probes, as on main: the Greptime ping has its verdict before the ledger's
+		// coverage read asks the same breaker for a call.
+		const ledgerJobs = await this.ledgerJobs();
+		const indexArchive = await this.indexArchiveHealth();
+		const greptime = greptimeReading.up;
+		const { appendOnly, quotingDialectKnown, probe, ledgerCapacity } = greptimeReading;
 		const cache = this.cache.health();
 		const breakers = this.planes.snapshots();
 		// uplift-3 N2: every size read that answered in time is one runway sample;
@@ -6023,10 +5993,7 @@ export class Substrate {
 		for (const plane of PLANES) {
 			planes[plane] = { ok: ok[plane], breaker: breakers[plane], lastErrorAt: breakers[plane]?.lastErrorAt ?? null };
 		}
-		const metadataWritable = greptime && quotingDialectKnown && (appendOnly === true || this.config.allowDeduplicatingLedger);
-		// A probe that has not run yet (or is off) neither proves nor disproves;
-		// only a failed one overrides the metadata.
-		const eventsWritable = metadataWritable && probe?.lastProbeOk !== false;
+		const eventsWritable = this.eventsWritableOf(greptimeReading);
 		return {
 			index,
 			greptime,
@@ -6049,23 +6016,71 @@ export class Substrate {
 		};
 	}
 
-	/** The field behind `sharedHealth`: the last computation, when it started, and the Greptime bound it ran with. */
-	private healthShare: { at: number; greptimeTimeoutMs: number | undefined; promise: Promise<SubstrateHealth> } | null = null;
+	/** The probes `health()` and the fabric read. Each starts now and settles on its own; none waits for another. */
+	private healthProbes(timeoutMs: number | undefined): HealthProbes {
+		const greptimeClient = this.greptime;
+		const indexStore = this.index;
+		const hindsight = hindsightFromEnv();
+		return {
+			greptime: greptimeClient ? this.greptimeProbe(greptimeClient, timeoutMs) : Promise.resolve(ABSENT_GREPTIME),
+			index: indexStore
+				? Promise.resolve()
+						.then(() => indexStore.ping(HEALTH_PROBE_MS))
+						.catch(() => false)
+				: Promise.resolve(false),
+			hindsight: hindsight
+				? probeHealth(hindsight, this.hindsightFetch, HEALTH_PROBE_MS).then((probed) => probed.ok, () => false)
+				: Promise.resolve(null),
+			ragflow: this.config.ragflow
+				? listDatasets(this.config.ragflow, this.ragflowFetch, HEALTH_PROBE_MS).then((listed) => listed.ok, () => false)
+				: Promise.resolve(null),
+		};
+	}
+
+	/** The Greptime ping, and only after a yes the dialect, append-mode, write-probe and size reads. Never rejects. */
+	private async greptimeProbe(client: GreptimeClient, timeoutMs: number | undefined): Promise<GreptimeProbe> {
+		const up = (await this.healthBound(timeoutMs, () => (timeoutMs === undefined ? client.ping() : client.ping(timeoutMs)))) === true;
+		if (!up) return ABSENT_GREPTIME;
+		const appendOnly = (await this.healthBound(timeoutMs, () => client.ensureAppendMode())) ?? null;
+		const quotingDialectKnown =
+			(await this.healthBound(timeoutMs, async () => {
+				await client.probeDialect();
+				return client.quotingDialectKnown === true;
+			})) === true;
+		// Only a reachable ledger is probed: an unreachable one is already not writable, and a write that cannot
+		// connect would only charge the breaker twice. The client's own write timeout applies, not HEALTH_PROBE_MS,
+		// so a slow day does not read as a full disk. The `.then` wrapper is for a test fake without the method.
+		const probe = await Promise.resolve()
+			.then(() => client.probeWritable(this.config.ledger.writeProbeS * 1000))
+			.catch(() => null);
+		const ledgerCapacity = await bounded(() => client.capacity(HEALTH_PROBE_MS), HEALTH_PROBE_MS);
+		return { up, appendOnly, quotingDialectKnown, probe, ledgerCapacity };
+	}
+
+	/** Whether the ledger accepts writes: the ping's yes, the dialect and append-mode checks, and a write probe that has not failed. */
+	private eventsWritableOf(reading: GreptimeProbe): boolean {
+		const metadataWritable = reading.up && reading.quotingDialectKnown && (reading.appendOnly === true || this.config.allowDeduplicatingLedger);
+		// A probe that has not run yet (or is off) neither proves nor disproves; only a failed one overrides the metadata.
+		return metadataWritable && reading.probe?.lastProbeOk !== false;
+	}
+
+	/** The field behind `sharedHealthProbes`: the probes, when they started, and the Greptime bound they ran with. */
+	private healthShare: { at: number; greptimeTimeoutMs: number | undefined; probes: HealthProbes } | null = null;
 
 	/**
-	 * One health computation for every caller that accepts an answer no older than `windowMs` and ran with the same
-	 * Greptime bound (phase 51). The fabric tools use it. `/healthz` calls `health()` directly, as on main. Concurrent
-	 * callers share one in-flight computation, and a window of 0 computes afresh.
+	 * The probes one window shares (phase 51). The fabric reads them through `fabricSources()`, so calls in one window issue
+	 * one probe per source, and concurrent callers share the same in-flight probes. The memo is keyed on the Greptime bound,
+	 * so a bounded probe never serves another caller. `/healthz` calls `health()`, which starts its own probes, as on main.
 	 */
-	sharedHealth(windowMs: number, options: { readonly greptimeTimeoutMs?: number } = {}): Promise<SubstrateHealth> {
+	sharedHealthProbes(windowMs: number, options: { readonly greptimeTimeoutMs?: number } = {}): HealthProbes {
 		const now = Date.now();
 		const share = this.healthShare;
 		if (share !== null && share.greptimeTimeoutMs === options.greptimeTimeoutMs && now - share.at >= 0 && now - share.at < windowMs) {
-			return share.promise;
+			return share.probes;
 		}
-		const promise = this.health(options);
-		this.healthShare = { at: now, greptimeTimeoutMs: options.greptimeTimeoutMs, promise };
-		return promise;
+		const probes = this.healthProbes(options.greptimeTimeoutMs);
+		this.healthShare = { at: now, greptimeTimeoutMs: options.greptimeTimeoutMs, probes };
+		return probes;
 	}
 
 	/** `work` under the fabric's bound when one is given. Without one it runs as `/healthz` always has: the client's own timeout, and a throw answers null. Never rejects. */
@@ -6090,7 +6105,20 @@ export class Substrate {
 		const { dbEndpoints } = this.config;
 		return {
 			now: () => new Date().toISOString(),
-			health: () => this.sharedHealth(FABRIC_HEALTH_WINDOW_MS, { greptimeTimeoutMs: HEALTH_PROBE_MS }),
+			health: () => {
+				const probes = this.sharedHealthProbes(FABRIC_HEALTH_WINDOW_MS, { greptimeTimeoutMs: HEALTH_PROBE_MS });
+				return {
+					greptime: probes.greptime.then((probe) => ({ up: probe.up, eventsWritable: this.eventsWritableOf(probe) })),
+					index: probes.index,
+					hindsight: probes.hindsight,
+					ragflow: probes.ragflow,
+				};
+			},
+			snapshot: () => ({
+				cache: this.cache.health(),
+				eventBus: { enabled: this.eventBusHealth().enabled },
+				breakers: this.planes.snapshots(),
+			}),
 			railwayCost: () => this.railway.costReport(),
 			outbox: () => {
 				const stats = this.retainOutboxStats();
@@ -6251,6 +6279,26 @@ export class Substrate {
 		return { ledger: memo.value, reason: memo.reason };
 	}
 }
+
+/** One Greptime probe's reading: the ping, and after a yes the dialect, append-mode, write-probe and size checks. */
+export interface GreptimeProbe {
+	readonly up: boolean;
+	readonly appendOnly: boolean | null;
+	readonly quotingDialectKnown: boolean;
+	readonly probe: LedgerProbe | null;
+	readonly ledgerCapacity: LedgerCapacity | null;
+}
+
+/** The probes `health()` and the fabric read. Each settles on its own, so none waits for another. */
+export interface HealthProbes {
+	readonly greptime: Promise<GreptimeProbe>;
+	readonly index: Promise<boolean>;
+	readonly hindsight: Promise<boolean | null>;
+	readonly ragflow: Promise<boolean | null>;
+}
+
+/** The reading of a Greptime that did not answer its ping: nothing past the ping is read. */
+const ABSENT_GREPTIME: GreptimeProbe = { up: false, appendOnly: null, quotingDialectKnown: false, probe: null, ledgerCapacity: null };
 
 /** How long one `anchorCoverage` read serves `/healthz.jobs.ledger` (uplift-3 N6). */
 export const LEDGER_JOBS_MEMO_MS = 60_000;
