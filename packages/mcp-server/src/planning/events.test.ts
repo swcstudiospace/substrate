@@ -213,4 +213,43 @@ describe("observing across an unreadable interval", () => {
 		expect(second.outcome).toBe("unchanged");
 		expect(publisher.events).toHaveLength(1);
 	});
+
+	test("a failed publish holds the baseline, and the next read publishes the same change exactly once", async () => {
+		const before = await snap(new FakeTree({ [`${dir}/PLAN.md`]: "# plan\n" }));
+		const revised = await snap(new FakeTree({ [`${dir}/PLAN.md`]: "# plan, revised\n" }));
+		const failing = recordingPublisher(false);
+		const failed = await observePlanningChange({ previous: before, next: revised, repo: REPO, sessionId: SESSION, publisher: failing });
+		expect(failed.outcome).toBe("not-published");
+		expect(failed.baseline).toBe(before);
+
+		const working = recordingPublisher(true);
+		const retried = await observePlanningChange({ previous: failed.baseline, next: revised, repo: REPO, sessionId: SESSION, publisher: working });
+		expect(retried.outcome).toBe("published");
+		expect(working.events).toHaveLength(1);
+		const again = await observePlanningChange({ previous: retried.baseline, next: revised, repo: REPO, sessionId: SESSION, publisher: working });
+		expect(again.outcome).toBe("unchanged");
+		expect(working.events).toHaveLength(1);
+	});
+
+	test("incomplete, unchanged, and published each advance the baseline", async () => {
+		const unreadable = new FakeTree({ [`${dir}/PLAN.md`]: "# plan\n" });
+		unreadable.deniedListings.add(dir);
+		const unlisted = await snap(unreadable);
+		const listed = await snap(new FakeTree({ [`${dir}/PLAN.md`]: "# plan\n" }));
+		const publisher = recordingPublisher(true);
+
+		const incomplete = await observePlanningChange({ previous: unlisted, next: listed, repo: REPO, sessionId: SESSION, publisher });
+		expect(incomplete.outcome).toBe("incomplete");
+		expect(incomplete.baseline).toBe(listed);
+
+		const unchanged = await observePlanningChange({ previous: listed, next: listed, repo: REPO, sessionId: SESSION, publisher });
+		expect(unchanged.outcome).toBe("unchanged");
+		expect(unchanged.baseline).toBe(listed);
+
+		const revised = await snap(new FakeTree({ [`${dir}/PLAN.md`]: "# plan, revised\n" }));
+		const published = await observePlanningChange({ previous: listed, next: revised, repo: REPO, sessionId: SESSION, publisher });
+		expect(published.outcome).toBe("published");
+		expect(published.baseline).toBe(revised);
+		expect(publisher.events).toHaveLength(1);
+	});
 });

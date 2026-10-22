@@ -106,7 +106,7 @@ export async function emitPlanningChange(publisher: PlanningPublisher, input: Pl
 
 export interface ObservedPlanning {
 	outcome: "baseline" | PlanningEmitOutcome;
-	/** What the next scan is compared with. It is always the scan just taken. */
+	/** What the next scan is compared with: this scan, except that a failed publish holds the previous baseline. See `observePlanningChange`. */
 	baseline: PlanningSnapshot;
 }
 
@@ -120,14 +120,17 @@ export interface ObservePlanningInput {
 
 /**
  * One observation: diff the scan against the previous baseline, publish the change only when the diff is complete, and
- * make the scan the next baseline. The scan always becomes the baseline, so an unreadable interval cannot stop later
- * notes: the first scan after it is compared with it, that diff is incomplete and publishes nothing, and it becomes the
- * baseline. The first scan ever is a baseline and emits nothing.
+ * choose the next baseline by outcome.
+ *
+ * The rule: a failed publish (`not-published`) holds the previous baseline, so the same change is diffed and sent again
+ * on the next read. Every other outcome advances the baseline to this scan: `baseline` (the first scan ever), `unchanged`,
+ * `incomplete` (nothing is published, and this is what ends an unreadable interval rather than repeating it forever) and
+ * `published`. The first scan ever emits nothing.
  */
 export async function observePlanningChange(input: ObservePlanningInput): Promise<ObservedPlanning> {
 	const { previous, next } = input;
 	if (previous === null) return { outcome: "baseline", baseline: next };
 	const diff = diffPlanningIndex(previous, next);
 	const outcome = await emitPlanningChange(input.publisher, { repo: input.repo, sessionId: input.sessionId, diff });
-	return { outcome, baseline: next };
+	return { outcome, baseline: outcome === "not-published" ? previous : next };
 }
