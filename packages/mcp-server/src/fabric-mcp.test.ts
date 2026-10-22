@@ -9,6 +9,7 @@ import { auditMode } from "@substrate/audit";
 import { toolClass } from "./admission.ts";
 import { loadConfig } from "./config.ts";
 import type { FabricSuggestion } from "./fabric/types.ts";
+import type { LedgerCapacity } from "./greptime.ts";
 import { createMcpServer, type McpCaller } from "./mcp.ts";
 import { railwayFromEnv, RailwayClient, type RailwayFetch } from "./railway.ts";
 import { HEALTH_PROBE_MS, Substrate } from "./service.ts";
@@ -17,6 +18,8 @@ const TOKEN = "fabric-token-abc123";
 const CALLER: McpCaller = { surface: "omp", isOperator: false };
 const FABRIC_TOOLS = ["fabric_status", "fabric_optimize", "fabric_compliance"] as const;
 const GREPTIME_URL_KEY = ["GREPTIME", "URL"].join("_");
+/** The size read the fake ledgers answer with. Each assertion compares against this object, so it proves the read came from the probe. */
+const LEDGER_SIZE: LedgerCapacity = { bytes: 1024, rows: 7, tables: [] };
 
 /** A recording fake: every request is kept, and `answer` gives the `data` for each query. */
 function recordingFetch(answer: (query: string) => unknown) {
@@ -279,7 +282,7 @@ function slowLedgerProbes() {
 		probeDialect: async () => true,
 		quotingDialectKnown: true,
 		probeWritable: () => after800ms({ lastProbeAt: 1, lastProbeOk: true, lastProbeError: null }),
-		capacity: () => after800ms({ marker: "size" }),
+		capacity: () => after800ms(LEDGER_SIZE),
 		anchorCoverage: async () => {
 			throw new Error("no coverage read in this test");
 		},
@@ -295,7 +298,7 @@ describe("the Greptime write probe and size read on the fabric path", () => {
 		expect(body.resources.find((row) => row.resource === "greptime")?.state).toBe("ok");
 		const health = await substrate.health({ greptimeTimeoutMs: HEALTH_PROBE_MS });
 		expect(health.ledger.lastProbeOk).toBe(true);
-		expect(health.capacity.ledger).toEqual({ marker: "size" });
+		expect(health.capacity.ledger).toEqual(LEDGER_SIZE);
 	});
 });
 
@@ -321,7 +324,7 @@ function threeSlowGreptimeReads() {
 			return dialectKnown;
 		},
 		probeWritable: () => after800ms({ lastProbeAt: 1, lastProbeOk: true, lastProbeError: null }),
-		capacity: async () => ({ marker: "size" }),
+		capacity: async () => LEDGER_SIZE,
 		anchorCoverage: async () => {
 			throw new Error("no coverage read in this test");
 		},
@@ -339,6 +342,6 @@ describe("the Greptime reads after the ping on the fabric path", () => {
 		expect(health.appendOnly).toBe(true);
 		expect(health.quotingDialectKnown).toBe(true);
 		expect(health.ledger.lastProbeOk).toBe(true);
-		expect(health.capacity.ledger).toEqual({ marker: "size" });
+		expect(health.capacity.ledger).toEqual(LEDGER_SIZE);
 	});
 });
