@@ -70,6 +70,15 @@ export function loadPlanningSettings(env: Readonly<Record<string, string | undef
 	return { ok: true, settings: { enabled: true, root, ...limits } };
 }
 
+/** The boot warnings for refused planning settings: each key and why, never the value. Empty when the settings are valid. */
+export function planningConfigWarnings(result: PlanningConfigResult): string[] {
+	if (result.ok) return [];
+	return result.errors.map((error) => {
+		const why = error.reason === "out-of-range" ? `out of range ${error.min}..${error.max}` : error.reason;
+		return `${error.key} is ${why}; the planning plane stays off until it is fixed`;
+	});
+}
+
 function integerSetting(
 	env: Readonly<Record<string, string | undefined>>,
 	key: string,
