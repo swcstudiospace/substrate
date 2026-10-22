@@ -352,6 +352,8 @@ export class PlanningObserver {
 			}
 			if (stored) next.add(signature);
 		}
+		// A truncated listing may omit sessions that hold an open conflict: those stay open rather than leave the set and be announced again.
+		if (listing.truncated) for (const signature of this.openConflicts) next.add(signature);
 		this.openConflicts = next;
 	}
 }

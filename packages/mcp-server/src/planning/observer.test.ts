@@ -826,6 +826,35 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		expect(storedRecord(backend, tree, CHECKOUT_A)).toMatchObject({ repo: REPO, touched: [{ phase: "53", plan: null, observedAtMs: SERVER_NOW }] });
 		expect(conflictEventsOf(attempts)).toHaveLength(1);
 	});
+
+	test("a truncated listing does not repeat the warning for a conflict that stays open (greptile partial-listing thread)", async () => {
+		const tree = twoCheckouts();
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		const attempts: EventInput[] = [];
+		const a = announcingObserver(tree, presence, attempts, true, CHECKOUT_A);
+		const b = announcingObserver(tree, presence, attempts, true, CHECKOUT_B);
+		await a.scan();
+		await b.scan();
+		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b\n");
+		await b.scan();
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a\n");
+		await a.scan();
+		expect(conflictEventsOf(attempts)).toHaveLength(1);
+
+		// 255 more sessions sort before the two conflicting ones and push the listing past its bound: one of them is not listed.
+		const filler = (n: number): string => `aa-${String(n).padStart(3, "0")}`;
+		for (let n = 0; n < 255; n += 1) {
+			backend.values.set(`${PRESENCE_KEY_PREFIX}${filler(n)}`, JSON.stringify({ sessionId: filler(n), worktree: `/work/${filler(n)}`, branch: "gsd/aa", lastHeartbeatMs: SERVER_NOW }));
+		}
+		await a.scan();
+		expect(conflictEventsOf(attempts)).toHaveLength(1);
+
+		for (let n = 0; n < 255; n += 1) backend.values.delete(`${PRESENCE_KEY_PREFIX}${filler(n)}`);
+		await a.scan();
+		expect(conflictEventsOf(attempts)).toHaveLength(1);
+	});
 });
 
 describe("the observer under a change the ledger does not store, failure, load and shutdown", () => {
