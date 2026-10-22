@@ -143,3 +143,41 @@ describe("emitPlanningChange and the bus publisher", () => {
 		expect(Object.keys(hints[0] ?? {}).sort()).toEqual(["graph_id", "id", "kind", "surface", "ts", "v"]);
 	});
 });
+
+describe("the publish guard and unlisted directories", () => {
+	const limits = { maxFiles: 500, maxBytes: 262_144 };
+	const dir = `${TREE_ROOT}/.planning/phases/52-x`;
+
+	test("unlisted on the previous side with a new document now gives an incomplete diff, and publishes nothing", async () => {
+		const unreadable = new FakeTree({ [`${dir}/PLAN.md`]: "# plan\n" });
+		unreadable.deniedListings.add(dir);
+		const readable = new FakeTree({ [`${dir}/PLAN.md`]: "# plan\n", [`${dir}/NEW.md`]: "# new\n" });
+		const before = await buildPlanningIndex(TREE_ROOT, { fs: unreadable, limits });
+		const after = await buildPlanningIndex(TREE_ROOT, { fs: readable, limits });
+		if (!before.ok || !after.ok) throw new Error("index failed");
+		const diff = diffPlanningIndex(
+			{ records: before.index.records, truncated: before.index.truncated, unlisted: before.index.unlisted },
+			{ records: after.index.records, truncated: after.index.truncated, unlisted: after.index.unlisted },
+		);
+		expect(diff.complete).toBe(false);
+		expect(diff.added).toEqual([".planning/phases/52-x/NEW.md", ".planning/phases/52-x/PLAN.md"]);
+		const publisher = recordingPublisher(true);
+		expect(await emitPlanningChange(publisher, { repo: REPO, sessionId: SESSION, diff })).toBe("incomplete");
+		expect(publisher.events).toEqual([]);
+	});
+
+	test("a fully listed diff stays complete and publishes", async () => {
+		const before = await buildPlanningIndex(TREE_ROOT, { fs: new FakeTree({ [`${dir}/PLAN.md`]: "# plan\n" }), limits });
+		const after = await buildPlanningIndex(TREE_ROOT, { fs: new FakeTree({ [`${dir}/PLAN.md`]: "# plan, revised\n" }), limits });
+		if (!before.ok || !after.ok) throw new Error("index failed");
+		const diff = diffPlanningIndex(
+			{ records: before.index.records, truncated: before.index.truncated, unlisted: before.index.unlisted },
+			{ records: after.index.records, truncated: after.index.truncated, unlisted: after.index.unlisted },
+		);
+		expect(diff.complete).toBe(true);
+		expect(diff.changed).toEqual([".planning/phases/52-x/PLAN.md"]);
+		const publisher = recordingPublisher(true);
+		expect(await emitPlanningChange(publisher, { repo: REPO, sessionId: SESSION, diff })).toBe("published");
+		expect(publisher.events).toHaveLength(1);
+	});
+});
