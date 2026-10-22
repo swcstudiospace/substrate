@@ -580,6 +580,8 @@ export const MIGRATION_STEPS: ReadonlyArray<{ version: number; name: string; sql
 	// The unique key makes a retried write a no-op. Rows are never updated or deleted by the application.
 	// OPERATORS: rehearse this step on a restored dump before applying it to production. It is additive
 	// and idempotent; it creates one new table and touches no existing row.
+	// Append-only is enforced by the application only: no update or delete path exists. A DB-level REVOKE or
+	// trigger is an operator decision and this step adds neither.
 	{
 		version: 33,
 		name: "planning_steering_audit",
@@ -589,6 +591,7 @@ export const MIGRATION_STEPS: ReadonlyArray<{ version: number; name: string; sql
 				directive_id      text not null,
 				transition        text not null check (transition in ('queued', 'acknowledged')),
 				outcome           text check (outcome in ('applied', 'declined')),
+				confirmed         boolean,
 				author_principal  text,
 				author_kind       text check (author_kind in ('human', 'agent')),
 				target_session_id text not null,
@@ -597,10 +600,10 @@ export const MIGRATION_STEPS: ReadonlyArray<{ version: number; name: string; sql
 				recorded_at       timestamptz not null,
 				constraint planning_steering_audit_directive_transition_key unique (directive_id, transition),
 				constraint planning_steering_audit_shape check (
-					(transition = 'queued' and outcome is null and author_principal is not null
-						and author_kind is not null and body_redacted is not null)
-					or (transition = 'acknowledged' and outcome is not null and author_principal is null
-						and author_kind is null and body_redacted is null)
+					(transition = 'queued' and outcome is null and confirmed is null
+						and author_principal is not null and author_kind is not null and body_redacted is not null)
+					or (transition = 'acknowledged' and outcome is not null and confirmed is not null
+						and author_principal is null and author_kind is null and body_redacted is null)
 				)
 			)`,
 	},

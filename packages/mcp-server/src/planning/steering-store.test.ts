@@ -50,8 +50,8 @@ function queuedEntry(overrides: Partial<SteeringDirective> = {}, atMs = 2_000): 
 	return { event: "queued", atMs, directive: directive(overrides) };
 }
 
-function acknowledgedEntry(outcome: "applied" | "declined" = "applied", atMs = 3_000): SteeringAuditEntry {
-	return { event: "acknowledged", atMs, directiveId: "d-1", targetSessionId: WORKER, outcome, confirmed: false };
+function acknowledgedEntry(outcome: "applied" | "declined" = "applied", confirmed = false): SteeringAuditEntry {
+	return { event: "acknowledged", atMs: 3_000, directiveId: "d-1", targetSessionId: WORKER, outcome, confirmed };
 }
 
 describe("SteeringAuditSink: idempotent appends", () => {
@@ -68,6 +68,7 @@ describe("SteeringAuditSink: idempotent appends", () => {
 			directiveId: "d-1",
 			transition: "queued",
 			outcome: null,
+			confirmed: null,
 			authorPrincipal: HUMAN,
 			authorKind: "human",
 			targetSessionId: WORKER,
@@ -178,6 +179,18 @@ describe("SteeringAuditSink: stored content", () => {
 		expect(hash).toMatch(/^[0-9a-f]{64}$/);
 		expect(repeated.rows[0]?.payloadSha256).toBe(hash);
 		expect(declined.rows[0]?.payloadSha256).not.toBe(hash);
+	});
+
+	test("a confirmed acknowledgement stores confirmed true, and a queued row stores null", async () => {
+		const sql = new FakeAuditSql();
+		const sink = new SteeringAuditSink(sql);
+
+		await sink.append(queuedEntry());
+		await sink.append(acknowledgedEntry("applied", true));
+
+		const [queued, acknowledged] = sql.rows;
+		expect(queued?.confirmed).toBeNull();
+		expect(acknowledged?.confirmed).toBe(true);
 	});
 
 	test("the sink reads no environment variables", async () => {

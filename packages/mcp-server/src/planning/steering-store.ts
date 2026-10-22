@@ -35,6 +35,8 @@ export interface SteeringAuditRow {
 	directiveId: string;
 	transition: SteeringAuditTransition;
 	outcome: SteeringOutcome | null;
+	/** The acknowledgement's confirm flag. Null on a queued row, a boolean on an acknowledged row. */
+	confirmed: boolean | null;
 	authorPrincipal: string | null;
 	authorKind: SteeringAuthorKind | null;
 	targetSessionId: string;
@@ -92,11 +94,11 @@ export function bunSteeringAuditSql(sql: SQL): SteeringAuditSql {
 		async insertAbsent(row: SteeringAuditRow): Promise<boolean> {
 			const written = await sql`
 				insert into planning_steering_audit (
-					directive_id, transition, outcome, author_principal, author_kind,
+					directive_id, transition, outcome, confirmed, author_principal, author_kind,
 					target_session_id, body_redacted, payload_sha256, recorded_at
 				)
 				values (
-					${row.directiveId}, ${row.transition}, ${row.outcome}, ${row.authorPrincipal}, ${row.authorKind},
+					${row.directiveId}, ${row.transition}, ${row.outcome}, ${row.confirmed}, ${row.authorPrincipal}, ${row.authorKind},
 					${row.targetSessionId}, ${row.bodyRedacted}, ${row.payloadSha256}, ${row.recordedAt}
 				)
 				on conflict (directive_id, transition) do nothing
@@ -113,6 +115,7 @@ function toAuditRow(entry: SteeringAuditEntry): SteeringAuditRow {
 			directiveId: directive.id,
 			transition: "queued" as const,
 			outcome: null,
+			confirmed: null,
 			authorPrincipal: directive.author.principalId,
 			authorKind: directive.author.kind,
 			targetSessionId: directive.targetSessionId,
@@ -125,6 +128,7 @@ function toAuditRow(entry: SteeringAuditEntry): SteeringAuditRow {
 		directiveId: entry.directiveId,
 		transition: "acknowledged" as const,
 		outcome: entry.outcome,
+		confirmed: entry.confirmed,
 		authorPrincipal: null,
 		authorKind: null,
 		targetSessionId: entry.targetSessionId,
@@ -141,7 +145,7 @@ function recordedAtOf(atMs: number): Date {
 
 /** SHA-256 over the canonical JSON of the stored fields. `recordedAt` enters as its ISO-8601 text. */
 function payloadSha256(fields: Omit<SteeringAuditRow, "payloadSha256">): string {
-	const stored: Record<string, string | null> = {
+	const stored: Record<string, string | boolean | null> = {
 		...fields,
 		recordedAt: fields.recordedAt.toISOString(),
 	};
@@ -149,8 +153,8 @@ function payloadSha256(fields: Omit<SteeringAuditRow, "payloadSha256">): string 
 }
 
 /** JSON with keys in code-unit order, so the same fields always produce the same bytes. */
-function canonicalJson(fields: Readonly<Record<string, string | null>>): string {
-	const sorted: Record<string, string | null> = {};
+function canonicalJson(fields: Readonly<Record<string, string | boolean | null>>): string {
+	const sorted: Record<string, string | boolean | null> = {};
 	for (const key of Object.keys(fields).sort()) sorted[key] = fields[key] ?? null;
 	return JSON.stringify(sorted);
 }
