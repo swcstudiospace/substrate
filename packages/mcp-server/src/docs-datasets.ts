@@ -66,6 +66,16 @@ export function latestVersion(store: VersionStore, dataset: string): DatasetVers
 	return versions[versions.length - 1];
 }
 
+/**
+ * The dataset list LightRAG search reads, with no RAGFlow round trip. Each
+ * wanted name carries the id its newest stored version recorded: the key
+ * `pinsFromVersions` files its pin under, so the pin resolves as the ingest
+ * wrote it. A name with no version yet stands as its own id.
+ */
+export function lightragSearchDatasets(store: VersionStore, names: readonly string[]): DatasetListOutcome {
+	return { ok: true, datasets: names.map((name) => ({ id: latestVersion(store, name)?.dataset_id ?? name, name })) };
+}
+
 /** The search pins for every dataset with a recorded version. */
 export function pinsFromVersions(store: VersionStore): Record<string, DatasetPin> {
 	const pins: Record<string, DatasetPin> = {};

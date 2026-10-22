@@ -747,4 +747,34 @@ describe("search graph metadata (LightRAG path)", () => {
 		expect(JSON.stringify(reply)).not.toContain("sk-proj-");
 		expect(reply.chunks[0]?.graph?.entities[0]).toContain("[REDACTED]");
 	});
+
+	test("LightRAG search never consults the RAGFlow dataset list", async () => {
+		let ragflowListings = 0;
+		const reply = await searchDocs(
+			{
+				config: { url: "http://ragflow.test", apiKey: "test-key" },
+				backend: "lightrag",
+				lightragConfig: { url: "http://lightrag.test" },
+				datasetNames: ["agent-substrate"],
+				datasets: {
+					list: async () => {
+						ragflowListings += 1;
+						return { ok: false, reason: "ragflow-unreachable" };
+					},
+					invalidate: () => undefined,
+				},
+				lightragRetrieve: async () => ({
+					ok: true,
+					chunks: [{ content: "The planner reads the plan.", document_name: "plan.md", document_id: "doc-1", heading_path: "Plan", score: 0.9 }],
+					detail: { mode: "hybrid", counts: { entities: 0, relations: 0 }, provenance: { entities: [], relations: 0 } },
+				}),
+				emit: async () => ({ stored: false }),
+				surface: "omp",
+			},
+			"where is the plan?",
+		);
+		expect(ragflowListings).toBe(0);
+		expect(reply.degraded ?? false).toBe(false);
+		expect(reply.chunks).toHaveLength(1);
+	});
 });

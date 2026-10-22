@@ -14,6 +14,7 @@ import {
 	degradedAgentSkillsServe,
 	isSyncLive,
 	latestVersion,
+	lightragSearchDatasets,
 	noteSkillsSyncFastForward,
 	pinsFromVersions,
 	recordTrigger,
@@ -69,6 +70,21 @@ describe("resolveDatasets", () => {
 		if (!resolved.ok) throw new Error(`expected resolve: ${resolved.reason}`);
 		expect(resolved.datasets).toEqual([{ name: "clippyos", id: null, created: false }]);
 		expect(fake.datasets.some((dataset) => dataset.name === "clippyos")).toBe(false);
+	});
+});
+
+describe("lightragSearchDatasets", () => {
+	test("keys each wanted dataset by the id its newest version recorded, the same key its pin uses", () => {
+		const store = createVersionStore();
+		const base = { dataset: "agent-substrate", content_sha256: "sha", commit: "c1", ingested_at: "2026-10-22T00:00:00Z" };
+		recordVersion(store, { ...base, dataset_id: "ragflow-uuid-old", version: "v1" });
+		recordVersion(store, { ...base, dataset_id: "ragflow-uuid", version: "v2" });
+		expect(lightragSearchDatasets(store, ["agent-substrate"])).toEqual({ ok: true, datasets: [{ id: "ragflow-uuid", name: "agent-substrate" }] });
+		expect(pinsFromVersions(store)["ragflow-uuid"]?.version).toBe("v2");
+	});
+
+	test("a dataset with no version yet stands as its own id", () => {
+		expect(lightragSearchDatasets(createVersionStore(), ["agent-substrate"])).toEqual({ ok: true, datasets: [{ id: "agent-substrate", name: "agent-substrate" }] });
 	});
 });
 

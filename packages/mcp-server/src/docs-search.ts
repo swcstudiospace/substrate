@@ -285,7 +285,7 @@ export interface SearchDeps {
 	lightragRetrieve?: LightragRetriever;
 	/** Fetch the LightRAG retrieval goes out on; `fetchImpl` when omitted. */
 	lightragFetch?: FetchLike;
-	/** The LightRAG dataset list reader; the RAGFlow list (via `config`) when omitted. */
+	/** The LightRAG dataset list reader; the wanted names stand as their own ids when omitted. */
 	lightragDatasets?: LightragDatasetList;
 	/**
 	 * The LightRAG breaker's state at search time; `breakerState` when
@@ -760,15 +760,13 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 	// degraded, the search is not).
 	if (breakerState?.() === "open") return failed(deps, sessionId, LIGHTRAG_CIRCUIT_OPEN);
 	const wanted = deps.datasetNames ?? DEFAULT_SEARCH_DATASET_NAMES;
-	// Dataset resolution, best effort: the dedicated LightRAG list, else the
-	// RAGFlow list (keeps existing pins and ids aligned), else the wanted
-	// names as their own ids. LightRAG ignores scope on the wire, so a
-	// synthesized list only costs pins, never retrieval.
-	let listed: DatasetListOutcome;
-	if (deps.lightragDatasets !== undefined) listed = await deps.lightragDatasets.list();
-	else if (deps.config !== null)
-		listed = await (deps.datasets ? deps.datasets.list(deps.config, deps.fetchImpl) : listDatasets(deps.config, deps.fetchImpl));
-	else listed = { ok: true, datasets: wanted.map((name) => ({ id: name, name })) };
+	// Dataset resolution never touches RAGFlow: a search must not depend on its
+	// reachability. The service injects the list keyed by each dataset's newest
+	// stored version id, the key its pin is filed under; otherwise the wanted
+	// names stand as their own ids. LightRAG ignores scope on the wire, so the
+	// ids only key pins and the note payload.
+	const listed: DatasetListOutcome =
+		deps.lightragDatasets !== undefined ? await deps.lightragDatasets.list() : { ok: true, datasets: wanted.map((name) => ({ id: name, name })) };
 	if (!listed.ok) return failed(deps, sessionId, listed.reason);
 	const readable = listed.datasets.filter((dataset) => wanted.includes(dataset.name));
 	const first = readable[0];
