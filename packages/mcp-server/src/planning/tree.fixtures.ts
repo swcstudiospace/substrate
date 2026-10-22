@@ -136,10 +136,9 @@ export class FakeTree implements PlanningFs {
 		return [...this.files.keys(), ...Object.keys(this.links)].some((key) => key.startsWith(prefix));
 	}
 
+	/** A listed entry's kind, from the listing alone: a symlink is `link` whatever it points at, as the adapter reports it. */
 	private kindOf(path: string): DirEntry["kind"] {
-		const found = this.resolve(path);
-		if (found.state === "dangling") return "broken";
-		if (found.state === "absent") return "other";
-		return this.files.has(found.real) ? "file" : "dir";
+		if (path in this.links) return "link";
+		return this.files.has(path) ? "file" : "dir";
 	}
 }

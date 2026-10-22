@@ -3,14 +3,15 @@
  * diff carries no file text and no frontmatter. A file that is unreadable has a null hash, and
  * moving between a hash and no hash counts as a change.
  *
- * Two kinds of gap make a path unknown rather than changed:
- * - A truncated index holds only the first documents by path, so a path missing from it proves
- *   nothing. When either side is truncated the diff is partial: `removed` is null (not reported),
- *   and `added` is withheld too when the previous side is truncated, because the previous index
- *   could simply not have reached that path.
- * - A directory the walk could not list (`unlisted`) leaves its documents unknown. A document under
- *   an unlisted directory is therefore never reported as removed in `next`, nor as added when
- *   `previous` could not list it. `changed` compares paths both sides hold, so it is always reported.
+ * A gap withholds a decision only on the side that decision depends on:
+ * - A truncated index holds only the first documents by path. When either side is truncated the
+ *   diff is partial: `removed` is null (not reported), and `added` is withheld when the previous
+ *   side is truncated, because the previous index could simply not have reached that path.
+ * - A removal says a document `next` no longer lists is gone. It is withheld while its directory is
+ *   unlisted in `next` (`next.unlisted`), because an unlisted directory says nothing about what is there.
+ * - An addition says a document `next` lists was not in `previous`. `next` lists it, so the addition does
+ *   not depend on `previous`'s listing: an unlisted `previous` directory does not withhold it.
+ * `changed` compares paths both sides hold, so it is always reported.
  */
 
 /** The fields the diff reads from a record. Every `PlanningRecord` satisfies it. */
@@ -38,7 +39,7 @@ export function diffPlanningIndex(previous: PlanningSnapshot, next: PlanningSnap
 	const before = new Map(previous.records.map((document) => [document.path, document.sha256] as const));
 	const after = new Map(next.records.map((document) => [document.path, document.sha256] as const));
 	const complete = !previous.truncated && !next.truncated;
-	const added = previous.truncated ? [] : [...after.keys()].filter((path) => !before.has(path) && !under(path, previous.unlisted));
+	const added = previous.truncated ? [] : [...after.keys()].filter((path) => !before.has(path));
 	const removed = complete ? [...before.keys()].filter((path) => !after.has(path) && !under(path, next.unlisted)) : null;
 	const changed = [...after.keys()].filter((path) => before.has(path) && before.get(path) !== after.get(path));
 	return {
