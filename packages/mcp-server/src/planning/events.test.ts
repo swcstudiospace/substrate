@@ -13,7 +13,7 @@ import { FakeTree, TREE_ROOT } from "./tree.fixtures.ts";
 const REPO = "swcstudiospace/agent-substrate";
 const SESSION = "sess-p52-events";
 const BODY_MARKER = "BODY-MARKER-never-in-an-event";
-const DIFF: PlanningDiff = { added: [".planning/phases/52-x/PLAN.md"], removed: [], changed: [".planning/STATE.md"] };
+const DIFF: PlanningDiff = { complete: true, added: [".planning/phases/52-x/PLAN.md"], removed: [], changed: [".planning/STATE.md"] };
 
 function recordingPublisher(result = true): PlanningPublisher & { events: unknown[] } {
 	const events: unknown[] = [];
@@ -45,7 +45,7 @@ describe("planningChangeEvent", () => {
 	});
 
 	test("an unchanged diff produces no event", () => {
-		expect(planningChangeEvent({ repo: REPO, sessionId: SESSION, diff: { added: [], removed: [], changed: [] } })).toBeNull();
+		expect(planningChangeEvent({ repo: REPO, sessionId: SESSION, diff: { complete: true, added: [], removed: [], changed: [] } })).toBeNull();
 	});
 
 	test("a malformed repo or session id is a TypeError, not an event", () => {
@@ -64,7 +64,10 @@ describe("planningChangeEvent", () => {
 			limits: { maxFiles: 500, maxBytes: 262_144 },
 		});
 		if (!before.ok || !after.ok) throw new Error("index failed");
-		const diff = diffPlanningIndex(before.index.records, after.index.records);
+		const diff = diffPlanningIndex(
+			{ records: before.index.records, truncated: before.index.truncated },
+			{ records: after.index.records, truncated: after.index.truncated },
+		);
 		expect(diff.changed).toEqual([".planning/STATE.md"]);
 
 		const event = planningChangeEvent({ repo: REPO, sessionId: SESSION, diff });
@@ -76,7 +79,7 @@ describe("planningChangeEvent", () => {
 		const event = planningChangeEvent({
 			repo: REPO,
 			sessionId: SESSION,
-			diff: { added: [`.planning/phases/52-x/${token}.md`], removed: [], changed: [] },
+			diff: { complete: true, added: [`.planning/phases/52-x/${token}.md`], removed: [], changed: [] },
 		});
 		expect(JSON.stringify(event)).not.toContain(token);
 		expect(event?.summary).not.toContain(token);
@@ -85,7 +88,7 @@ describe("planningChangeEvent", () => {
 
 	test("a list longer than the cap is cut to the cap, and the summary says so with the full count", () => {
 		const added = Array.from({ length: MAX_EVENT_PATHS + 50 }, (_, index) => `.planning/phases/52-x/doc-${index}.md`);
-		const event = planningChangeEvent({ repo: REPO, sessionId: SESSION, diff: { added, removed: [], changed: [] } });
+		const event = planningChangeEvent({ repo: REPO, sessionId: SESSION, diff: { complete: true, added, removed: [], changed: [] } });
 		const payload = event?.payload as { added: string[] } | undefined;
 		expect(payload?.added).toHaveLength(MAX_EVENT_PATHS);
 		expect(event?.summary).toContain(`${MAX_EVENT_PATHS + 50} added`);
@@ -96,10 +99,18 @@ describe("planningChangeEvent", () => {
 describe("emitPlanningChange and the bus publisher", () => {
 	test("an unchanged diff is 'unchanged' and never reaches the publisher", async () => {
 		const publisher = recordingPublisher();
-		expect(await emitPlanningChange(publisher, { repo: REPO, sessionId: SESSION, diff: { added: [], removed: [], changed: [] } })).toBe(
+		expect(await emitPlanningChange(publisher, { repo: REPO, sessionId: SESSION, diff: { complete: true, added: [], removed: [], changed: [] } })).toBe(
 			"unchanged",
 		);
 		expect(publisher.events).toEqual([]);
+	});
+
+	test("a partial diff is 'incomplete': nothing is published, and the event builder refuses it", async () => {
+		const publisher = recordingPublisher(true);
+		const partialDiff: PlanningDiff = { complete: false, added: [], removed: null, changed: [".planning/STATE.md"] };
+		expect(await emitPlanningChange(publisher, { repo: REPO, sessionId: SESSION, diff: partialDiff })).toBe("incomplete");
+		expect(publisher.events).toEqual([]);
+		expect(() => planningChangeEvent({ repo: REPO, sessionId: SESSION, diff: partialDiff })).toThrow(TypeError);
 	});
 
 	test("a changed diff is published once and reported as published", async () => {

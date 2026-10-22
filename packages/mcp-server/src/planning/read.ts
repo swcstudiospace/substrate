@@ -14,7 +14,7 @@
  */
 import { join } from "node:path";
 import type { EventInput } from "../types.ts";
-import { diffPlanningIndex, type IndexedDocument } from "./diff.ts";
+import { diffPlanningIndex, type PlanningSnapshot } from "./diff.ts";
 import { emitPlanningChange } from "./events.ts";
 import { type PlanningConfigError, type PlanningConfigResult, type PlanningLimits } from "./config.ts";
 import { buildPlanningIndex, isErrorRecord, type PlanningFileRecord, type PlanningFs, type PlanningIndexFailure, type PlanningKind, type PlanningRecord } from "./index.ts";
@@ -55,7 +55,9 @@ export interface PlanningErrorRow {
 export type PlanningChangeNote =
 	| { state: "baseline" }
 	| { state: "unchanged" }
-	| { state: "changed"; added: number; removed: number; changed: number; ledger: "emitted" | "not-stored" | "repo-unknown" };
+	| { state: "changed"; added: number; removed: number; changed: number; ledger: "emitted" | "not-stored" | "repo-unknown" }
+	/** A truncated side: removals are not reported (`removed` is null) and `added` is null when the previous side was truncated. Nothing is written. */
+	| { state: "partial"; added: number | null; removed: null; changed: number; ledger: "not-written" };
 
 export type PlanningStatusView =
 	| PlanningDisabled
@@ -117,7 +119,7 @@ function resolve(result: PlanningConfigResult): Resolved {
 
 export class PlanningReader {
 	/** The index the previous `status` read saw, and the root it was read from. Process-local. */
-	private previous: { root: string; documents: IndexedDocument[] } | null = null;
+	private previous: { root: string; snapshot: PlanningSnapshot } | null = null;
 
 	constructor(private readonly deps: PlanningReaderDeps) {}
 
@@ -128,7 +130,7 @@ export class PlanningReader {
 		const built = await buildPlanningIndex(root, { fs: this.deps.fs, limits: { maxFiles: limits.maxFiles, maxBytes: limits.maxBytes } });
 		if (!built.ok) return { state: "unavailable", code: built.code };
 		const { records, truncated } = built.index;
-		const changes = await this.observe(root, records);
+		const changes = await this.observe(root, { records, truncated });
 		return {
 			state: "ok",
 			limits,
@@ -187,18 +189,31 @@ export class PlanningReader {
 		}
 	}
 
-	/** Compares this index with the last one read here, and writes one `planning.changed` note when they differ. */
-	private async observe(root: string, records: PlanningRecord[]): Promise<PlanningChangeNote> {
-		const current: IndexedDocument[] = records.map((record) => ({ path: record.path, sha256: record.sha256 }));
+	/**
+	 * Compares this index with the last one read here. A complete diff writes one `planning.changed` note when it differs.
+	 * A partial diff (either side truncated) reports what it can vouch for and writes nothing: removals are never inferred
+	 * from a truncated side, so `removed` stays null rather than an empty list.
+	 */
+	private async observe(root: string, snapshot: PlanningSnapshot): Promise<PlanningChangeNote> {
 		const previous = this.previous;
-		this.previous = { root, documents: current };
+		this.previous = { root, snapshot };
 		if (previous === null || previous.root !== root) return { state: "baseline" };
-		const diff = diffPlanningIndex(previous.documents, current);
-		const counts = { added: diff.added.length, removed: diff.removed.length, changed: diff.changed.length };
+		const diff = diffPlanningIndex(previous.snapshot, snapshot);
+		const removed = diff.removed;
+		if (removed === null) {
+			return {
+				state: "partial",
+				added: previous.snapshot.truncated ? null : diff.added.length,
+				removed: null,
+				changed: diff.changed.length,
+				ledger: "not-written",
+			};
+		}
+		const counts = { added: diff.added.length, removed: removed.length, changed: diff.changed.length };
 		if (counts.added + counts.removed + counts.changed === 0) return { state: "unchanged" };
 		const repo = await repoOf(this.deps.fs, root);
 		if (repo === null) return { state: "changed", ...counts, ledger: "repo-unknown" };
-		const outcome = await emitPlanningChange({ publish: this.deps.emit }, { repo, sessionId: PLANNING_OBSERVER_SESSION, diff });
+		const outcome = await emitPlanningChange({ publish: this.deps.emit }, { repo, sessionId: PLANNING_OBSERVER_SESSION, diff: { ...diff, removed } });
 		return { state: "changed", ...counts, ledger: outcome === "published" ? "emitted" : "not-stored" };
 	}
 }

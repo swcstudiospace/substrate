@@ -112,7 +112,7 @@ describe("buildPlanningIndex: one bad path never breaks the rest", () => {
 		if (!index.ok) throw new Error(index.code);
 
 		const error = errorFor(index.index.records, ".planning/STATE.md");
-		expect(error).toMatchObject({ error: { code: "unreadable", detail: "read failed: EACCES" }, sha256: null });
+		expect(error).toMatchObject({ error: { code: "unreadable", detail: "open failed: EACCES" }, sha256: null });
 		const others = (records: PlanningRecord[]) => records.filter((record) => record.path !== ".planning/STATE.md");
 		expect(others(index.index.records)).toEqual(others(baseline));
 		expect(tree.reads).toContain(`${P}/STATE.md`);
@@ -135,7 +135,7 @@ describe("buildPlanningIndex: one bad path never breaks the rest", () => {
 });
 
 describe("buildPlanningIndex: refuses anything that resolves outside the root", () => {
-	test("a file symlink to a file outside the root is an error record, and its target is never read", async () => {
+	test("a file symlink to a file outside the root is an error record, and its bytes are never returned", async () => {
 		const leak = `${PHASE}/leak.md`;
 		const { index, tree } = await indexOf({ ...BASE, "/outside/secret.md": "OUTSIDE-SECRET-TEXT" }, { [leak]: "/outside/secret.md" });
 		expect(errorFor(index.records, ".planning/phases/52-planning-awareness-core/leak.md")).toMatchObject({
@@ -143,7 +143,22 @@ describe("buildPlanningIndex: refuses anything that resolves outside the root", 
 			sha256: null,
 		});
 		expect(JSON.stringify(index.records)).not.toContain("OUTSIDE-SECRET-TEXT");
-		expect(tree.reads).not.toContain(leak);
+		expect(tree.returnedFrom).not.toContain("/outside/secret.md");
+	});
+
+	test("a document swapped for an outside link after it was listed is refused, and no outside byte is returned", async () => {
+		const swapped = `${PHASE}/swap.md`;
+		const links: Record<string, string> = { [swapped]: `${P}/STATE.md` };
+		const tree = new FakeTree({ ...BASE, "/outside/secret.md": "OUTSIDE-SWAP-TEXT" }, links);
+		// Listed as an in-root alias; the link is repointed at the outside file before it is opened.
+		tree.beforeOpen = (path) => {
+			if (path === swapped) links[swapped] = "/outside/secret.md";
+		};
+		const result = await buildPlanningIndex(TREE_ROOT, { fs: tree, limits: { maxFiles: 500, maxBytes: 262_144 } });
+		if (!result.ok) throw new Error(result.code);
+		expect(errorFor(result.index.records, ".planning/phases/52-planning-awareness-core/swap.md")).toMatchObject({ error: { code: "outside-root" } });
+		expect(tree.returnedFrom).not.toContain("/outside/secret.md");
+		expect(JSON.stringify(result.index.records)).not.toContain("OUTSIDE-SWAP-TEXT");
 	});
 
 	test("a directory symlink that leaves the root is an error record for the directory, and nothing under it is listed", async () => {
@@ -170,21 +185,57 @@ describe("buildPlanningIndex: refuses anything that resolves outside the root", 
 });
 
 describe("buildPlanningIndex: bounds", () => {
-	test("a document over maxBytes is a too-large error record and is never read", async () => {
+	test("a document over maxBytes is a too-large error record, and no more than maxBytes + 1 bytes are ever read", async () => {
 		const big = `${P}/phases/50-dragonfly-pubsub/big.md`;
-		const { index, tree } = await indexOf({ ...BASE, [big]: "x".repeat(2_000) }, {}, { maxFiles: 500, maxBytes: 1_024 });
-		expect(errorFor(index.records, ".planning/phases/50-dragonfly-pubsub/big.md")).toMatchObject({
+		const tree = new FakeTree({ ...BASE, [big]: "x".repeat(10_000) });
+		const result = await buildPlanningIndex(TREE_ROOT, { fs: tree, limits: { maxFiles: 500, maxBytes: 1_024 } });
+		if (!result.ok) throw new Error(result.code);
+		// No byte count: the file was not read to its end, so its size is not known.
+		expect(errorFor(result.index.records, ".planning/phases/50-dragonfly-pubsub/big.md")).toMatchObject({
 			error: { code: "too-large" },
-			bytes: 2_000,
+			bytes: null,
 			sha256: null,
 		});
-		expect(tree.reads).not.toContain(big);
+		expect(tree.largestReturned).toBe(1_025);
+	});
+
+	test("a file that grows past the cap is cut off at the cap, whatever its size on the disk now", async () => {
+		const grows = `${PHASE}/CONTEXT.md`;
+		const tree = new FakeTree({ ...BASE, [grows]: "a".repeat(50) }, {});
+		// The file grows between being listed and being opened.
+		tree.beforeOpen = (path) => {
+			if (path === grows) tree.setContent(grows, "b".repeat(5_000));
+		};
+		const result = await buildPlanningIndex(TREE_ROOT, { fs: tree, limits: { maxFiles: 500, maxBytes: 1_024 } });
+		if (!result.ok) throw new Error(result.code);
+		expect(errorFor(result.index.records, ".planning/phases/52-planning-awareness-core/CONTEXT.md")).toMatchObject({ error: { code: "too-large" } });
+		expect(tree.largestReturned).toBe(1_025);
 	});
 
 	test("more documents than maxFiles keeps the first by path and sets truncated", async () => {
 		const { index } = await indexOf(BASE, {}, { maxFiles: 3, maxBytes: 262_144 });
 		expect(index.truncated).toBe(true);
 		expect(index.records.map((record) => record.path)).toEqual(ALL_PATHS.slice(0, 3));
+	});
+
+	test("collection stops once maxFiles + 1 candidates are held, so later phase directories are never listed", async () => {
+		const tree = new FakeTree({
+			[`${P}/phases/01-a/one.md`]: "# one",
+			[`${P}/phases/01-a/two.md`]: "# two",
+			[`${P}/phases/02-b/three.md`]: "# three",
+			[`${P}/phases/03-c/four.md`]: "# four",
+		});
+		const result = await buildPlanningIndex(TREE_ROOT, { fs: tree, limits: { maxFiles: 2, maxBytes: 262_144 } });
+		if (!result.ok) throw new Error(result.code);
+		expect(result.index.truncated).toBe(true);
+		expect(result.index.records.map((record) => record.path)).toEqual([".planning/phases/01-a/one.md", ".planning/phases/01-a/two.md"]);
+		expect(tree.listed).not.toContain(`${P}/phases/03-c`);
+		expect(tree.reads).not.toContain(`${P}/phases/02-b/three.md`);
+	});
+
+	test("records come out in path order, including where one directory name is a prefix of another", async () => {
+		const { index } = await indexOf({ [`${P}/phases/52-a/PLAN.md`]: "# a", [`${P}/phases/52-a-b/PLAN.md`]: "# ab" });
+		expect(index.records.map((record) => record.path)).toEqual([".planning/phases/52-a-b/PLAN.md", ".planning/phases/52-a/PLAN.md"]);
 	});
 
 	test("a non-positive limit is refused as a programming error", async () => {
@@ -204,10 +255,48 @@ describe("buildPlanningIndex: missing roots", () => {
 	});
 });
 
+describe("buildPlanningIndex: a dangling link is reported, never skipped", () => {
+	test("a dangling top-level document is an error record, and the rest of the index is intact", async () => {
+		const baseline = (await indexOf(BASE)).index.records;
+		const { index } = await indexOf(BASE, { [`${P}/ROADMAP.md`]: `${TREE_ROOT}/nowhere.md` });
+		expect(errorFor(index.records, ".planning/ROADMAP.md")).toMatchObject({
+			kind: "roadmap",
+			error: { code: "unreadable", detail: "dangling symlink" },
+		});
+		const others = (records: PlanningRecord[]) => records.filter((record) => record.path !== ".planning/ROADMAP.md");
+		expect(others(index.records)).toEqual(others(baseline));
+	});
+
+	test("a dangling phase directory is an error record for that directory", async () => {
+		const { index } = await indexOf(BASE, { [`${P}/phases/53-gone`]: `${TREE_ROOT}/nowhere` });
+		expect(errorFor(index.records, ".planning/phases/53-gone")).toMatchObject({ error: { code: "unreadable", detail: "dangling symlink" } });
+	});
+
+	test("a dangling .planning is a failure with its own code, never an empty index", async () => {
+		const { result } = await build({ [`${TREE_ROOT}/README.md`]: "x" }, { [P]: `${TREE_ROOT}/nowhere` });
+		expect(result).toEqual({ ok: false, code: "planning-dir-dangling" });
+	});
+
+	test("a milestones entry that is a plain file is an error record, not silently empty", async () => {
+		const { index } = await indexOf({ [`${TREE_ROOT}/README.md`]: "x", [`${P}/ROADMAP.md`]: "# r", [`${P}/milestones`]: "not a directory" });
+		expect(errorFor(index.records, ".planning/milestones")).toMatchObject({ error: { code: "unreadable", detail: "not a directory" } });
+	});
+});
+
 describe("readFrontmatter", () => {
 	test("no fence is none, a closed mapping is parsed, an open fence without a mapping is malformed", () => {
 		expect(readFrontmatter("# plain")).toEqual({ state: "none" });
 		expect(readFrontmatter("---\nphase: 52\n---\n# x")).toEqual({ state: "parsed", data: { phase: 52 } });
 		expect(readFrontmatter("---\nphase: 52\n")).toEqual({ state: "malformed" });
+	});
+
+	test("trailing spaces or tabs after the opening fence are part of the fence, not the YAML", () => {
+		expect(readFrontmatter("---  \nphase: 52\n---\n# x")).toEqual({ state: "parsed", data: { phase: 52 } });
+		expect(readFrontmatter("---\t\nphase: 52\n---\n# x")).toEqual({ state: "parsed", data: { phase: 52 } });
+		expect(readFrontmatter("---  \r\nphase: 52\r\n---\r\n# x")).toEqual({ state: "parsed", data: { phase: 52 } });
+	});
+
+	test("trailing whitespace does not rescue an unclosed fence", () => {
+		expect(readFrontmatter("---  \nphase: 52\n")).toEqual({ state: "malformed" });
 	});
 });
