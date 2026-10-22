@@ -10,6 +10,7 @@ import { RecordingPresenceBackend } from "./backend.fixtures.ts";
 import { PLANNING_ROOT_ENV, PLANNING_SCAN_INTERVAL_ENV, loadPlanningSettings } from "./config.ts";
 import { PLANNING_OBSERVER_SESSION, PlanningObserver } from "./observer.ts";
 import { DragonflyPresenceStore, PRESENCE_KEY_PREFIX } from "./presence-dragonfly.ts";
+import type { PlanningFs } from "./index.ts";
 import { FakeTree, TREE_ROOT } from "./tree.fixtures.ts";
 
 const PHASE = `${TREE_ROOT}/.planning/phases/52-planning-awareness-core`;
@@ -215,5 +216,116 @@ describe("the observer's heartbeat", () => {
 
 		const disabled = new PlanningObserver({ settings: loadPlanningSettings({}), fs: new FakeTree({}), presence: null, emit: async () => true });
 		expect(disabled.start()).toBe(false);
+	});
+});
+
+describe("the observer under a change the ledger does not store, failure, load and shutdown", () => {
+	/** A filesystem whose directory reads wait for `gate`, so a scan can be held in flight. */
+	function gatedFs(tree: FakeTree, gate: Promise<unknown>): PlanningFs {
+		return {
+			probe: (path) => tree.probe(path),
+			readDir: async (path) => {
+				await gate;
+				return tree.readDir(path);
+			},
+			statFile: (path) => tree.statFile(path),
+			readFile: (path) => tree.readFile(path),
+			openRead: (path, limit, accept, reuse) => tree.openRead(path, limit, accept, reuse),
+			sha256: (bytes) => tree.sha256(bytes),
+		};
+	}
+
+	test("a change the ledger does not store is heartbeated once, and the scans after it are quiet", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const backend = new RecordingPresenceBackend();
+		const { observer } = observerOver(tree, { presence: new DragonflyPresenceStore(backend), accept: () => false });
+		await observer.scan();
+
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited\n");
+		expect(await observer.scan()).toMatchObject({ outcome: "not-published", heartbeat: { state: "written" } });
+		expect(await observer.scan()).toMatchObject({ outcome: "not-published", heartbeat: { state: "not-due" } });
+		expect(await observer.scan()).toMatchObject({ heartbeat: { state: "not-due" } });
+		expect(backend.writes).toHaveLength(1);
+	});
+
+	test("a failing scan is reported by the timer once, and the recovery is reported once", async () => {
+		const lines: string[] = [];
+		let tick: () => Promise<unknown> = async () => undefined;
+		const tree = new FakeTree({});
+		const observer = new PlanningObserver({
+			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+			fs: tree,
+			presence: null,
+			emit: async () => true,
+			timers: {
+				setInterval: (run: () => Promise<unknown>) => {
+					tick = run;
+					return "timer";
+				},
+				clearInterval: () => undefined,
+			},
+			report: (line) => lines.push(line),
+		});
+		expect(observer.start()).toBe(true);
+
+		await tick();
+		await tick();
+		expect(lines).toEqual(["[substrate] planning observer: scan unavailable: root-unavailable"]);
+
+		tree.setContent(`${TREE_ROOT}/.planning/STATE.md`, "# state\n");
+		await tick();
+		expect(lines).toEqual(["[substrate] planning observer: scan unavailable: root-unavailable", "[substrate] planning observer: scans succeed again"]);
+		observer.stop();
+	});
+
+	test("a tick during a running scan shares that scan, and no second scan starts behind it", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+		let tick: () => Promise<unknown> = async () => undefined;
+		const observer = new PlanningObserver({
+			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+			fs: gatedFs(tree, gate),
+			presence: null,
+			emit: async () => true,
+			timers: {
+				setInterval: (run: () => Promise<unknown>) => {
+					tick = run;
+					return "timer";
+				},
+				clearInterval: () => undefined,
+			},
+			report: () => undefined,
+		});
+		observer.start();
+
+		const ticks = [tick(), tick(), tick()];
+		release();
+		await Promise.all(ticks);
+		expect(tree.probed.filter((path) => path === TREE_ROOT)).toHaveLength(1);
+
+		await tick();
+		expect(tree.probed.filter((path) => path === TREE_ROOT)).toHaveLength(2);
+		observer.stop();
+	});
+
+	test("idle resolves only after the scan in flight has finished, so shutdown does not cut it off", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+		const observer = new PlanningObserver({
+			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+			fs: gatedFs(tree, gate),
+			presence: null,
+			emit: async () => true,
+		});
+		let finished = false;
+		const scanning = observer.scan().then((scan) => {
+			finished = true;
+			return scan;
+		});
+		const waiting = observer.idle();
+		release();
+		await waiting;
+		expect(finished).toBe(true);
+		expect(await scanning).toMatchObject({ state: "observed", outcome: "baseline" });
 	});
 });
