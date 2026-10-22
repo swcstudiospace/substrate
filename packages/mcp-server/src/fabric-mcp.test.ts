@@ -129,7 +129,7 @@ describe("fabric tools", () => {
 
 /** A Greptime fake for the health probes: `answer` decides each ping, every ping's timeout is recorded. */
 function greptimeProbe(answer: (timeoutMs: number) => Promise<boolean>) {
-	const pingTimeouts: number[] = [];
+	const pingTimeouts: Array<number | undefined> = [];
 	const greptime = {
 		ping: (timeoutMs: number) => {
 			pingTimeouts.push(timeoutMs);

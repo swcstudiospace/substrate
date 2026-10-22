@@ -459,7 +459,7 @@ describe("planning.transition delivery", () => {
 		expect(view.state === "ok" && view.changes.state).toBe("changed");
 	});
 
-	test("a config read that throws is recorded as a refused transition, and the baseline still advances", async () => {
+	test("a config read that throws holds the transition, and the next readable read records it exactly once", async () => {
 		await seedPhase();
 		await write(".git/config", ORIGIN);
 		let configReadable = true;
@@ -479,10 +479,16 @@ describe("planning.transition delivery", () => {
 		const failed = await planning.status();
 		configReadable = true;
 		expect(failed.state === "ok" && failed.changes).toMatchObject({ state: "changed", changed: 1, ledger: "repo-unknown" });
+		await planning.settleTransitions();
+		expect(metrics.records).toEqual([]);
+
+		const recovered = await planning.status();
+		await planning.settleTransitions();
+		expect(recovered.state === "ok" && recovered.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "emitted" });
 		const after = await planning.status();
 		await planning.settleTransitions();
 		expect(after.state === "ok" && after.changes).toEqual({ state: "unchanged" });
-		expect(metrics.records).toEqual([expect.objectContaining({ phaseId: PLANNING_TRANSITION_PHASE, outcome: "refused" })]);
+		expect(metrics.records).toEqual([expect.objectContaining({ phaseId: PLANNING_TRANSITION_PHASE, outcome: "applied" })]);
 	});
 });
 
@@ -589,21 +595,22 @@ describe("the origin of a checkout", () => {
 		expect(harness.events.map((event) => event.repo)).toEqual([REPO]);
 	});
 
-	test("an unreadable .git/config still returns the document summary, and the change names the reason", async () => {
+	test("an unreadable .git/config still returns the document summary, and the transition is published once it is readable", async () => {
 		await seedPhase();
 		await write(".git/config", ORIGIN_CONFIG);
 		const real = nodePlanningFs();
-		const denied = {
+		let readable = true;
+		const flaky = {
 			...real,
 			readFile: async (path: string) => {
-				if (path.endsWith(join(".git", "config"))) throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+				if (!readable && path.endsWith(join(".git", "config"))) throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
 				return real.readFile(path);
 			},
 		};
 		const events: EventInput[] = [];
 		const plane = new PlanningReader({
 			settings: settingsFor(root),
-			fs: denied,
+			fs: flaky,
 			presence: null,
 			...quietSinks(),
 			emit: async (event) => {
@@ -612,13 +619,24 @@ describe("the origin of a checkout", () => {
 			},
 		});
 		await plane.status();
+
+		readable = false;
 		await write(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
-		const view = await plane.status();
-		expect(view.state).toBe("ok");
-		if (view.state !== "ok") return;
-		expect(view.counts.documents).toBe(2);
-		expect(view.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "repo-unknown", repoReason: "config-unreadable" });
+		const denied = await plane.status();
+		expect(denied.state).toBe("ok");
+		if (denied.state !== "ok") return;
+		expect(denied.counts.documents).toBe(2);
+		expect(denied.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "repo-unknown", repoReason: "config-unreadable" });
 		expect(events).toEqual([]);
+
+		readable = true;
+		const recovered = await plane.status();
+		expect(recovered.state === "ok" && recovered.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "emitted" });
+		expect(events.map((event) => event.repo)).toEqual([REPO]);
+
+		const after = await plane.status();
+		expect(after.state === "ok" && after.changes).toEqual({ state: "unchanged" });
+		expect(events).toHaveLength(1);
 	});
 });
 

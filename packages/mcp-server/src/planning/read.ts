@@ -68,7 +68,7 @@ export interface PlanningErrorRow {
 }
 
 /** Why a change could not be attributed to a repo. Each reason is a typed result, never an exception out of the read. */
-export type RepoUnknownReason = "no-git-entry" | "git-file-malformed" | "git-dir-unreadable" | "config-unreadable" | "origin-missing";
+export type RepoUnknownReason = "no-git-entry" | "git-file-malformed" | "git-dir-unreadable" | "config-unreadable" | "config-missing" | "origin-missing";
 
 export type PlanningChangeNote =
 	| { state: "baseline" }
@@ -272,8 +272,8 @@ export class PlanningReader {
 	 * it can vouch for and writes nothing: removals are never inferred from a truncated side, so `removed` stays null.
 	 *
 	 * A detected change also writes one `planning.transition` record, from the state the baseline was in to this read's. The
-	 * baseline advances only after that record is made: a comparison that throws leaves it where it was, so the next read
-	 * compares against the same baseline and sees the change then.
+	 * baseline advances only after that record is made: a comparison that throws leaves it where it was. A transient repo read
+	 * failure holds it too, so the next successful read publishes the change and its transition once.
 	 */
 	private observe(root: string, seq: number, snapshot: PlanningSnapshot, state: SessionState): Promise<PlanningChangeNote> {
 		const run = this.observing.then(async (): Promise<PlanningChangeNote> => {
@@ -283,7 +283,8 @@ export class PlanningReader {
 				this.baseline = { root, seq, snapshot, state };
 				return { state: "baseline" };
 			}
-			const { note, outcome } = await this.compare(root, current.snapshot, snapshot);
+			const { note, outcome, hold } = await this.compare(root, current.snapshot, snapshot);
+			if (hold) return note;
 			const record = outcome === null ? null : transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: current.state, to: state, outcome }, this.deps.clock ?? hostClock);
 			this.baseline = { root, seq, snapshot, state };
 			if (record !== null) this.schedule(record);
@@ -316,23 +317,29 @@ export class PlanningReader {
 		while (this.pending.size > 0) await Promise.all([...this.pending]);
 	}
 
-	/** The change note for two indexes, and the transition outcome when a change was detected: null when none was, or none can be vouched for. */
-	private async compare(root: string, before: PlanningSnapshot, after: PlanningSnapshot): Promise<{ note: PlanningChangeNote; outcome: TransitionOutcome | null }> {
+	/**
+	 * The change note for two indexes, the transition outcome when a change was detected (null when none was, or none can be
+	 * vouched for), and whether the baseline must hold: a transient repo read failure holds it, so the next read sees the change.
+	 */
+	private async compare(root: string, before: PlanningSnapshot, after: PlanningSnapshot): Promise<{ note: PlanningChangeNote; outcome: TransitionOutcome | null; hold: boolean }> {
 		const diff = diffPlanningIndex(before, after);
 		const removed = diff.removed;
 		if (removed === null) {
 			const added = before.truncated ? null : diff.added.length;
 			const changed = diff.changed.length;
 			const vouched = (added ?? 0) + changed > 0;
-			return { note: { state: "partial", added, removed: null, changed, ledger: "not-written" }, outcome: vouched ? "refused" : null };
+			return { note: { state: "partial", added, removed: null, changed, ledger: "not-written" }, outcome: vouched ? "refused" : null, hold: false };
 		}
 		const counts = { added: diff.added.length, removed: removed.length, changed: diff.changed.length };
-		if (counts.added + counts.removed + counts.changed === 0) return { note: { state: "unchanged" }, outcome: null };
+		if (counts.added + counts.removed + counts.changed === 0) return { note: { state: "unchanged" }, outcome: null, hold: false };
 		const repo = await repoOf(this.deps.fs, root);
-		if (repo.state === "unknown") return { note: { state: "changed", ...counts, ledger: "repo-unknown", repoReason: repo.reason }, outcome: "refused" };
+		if (repo.state === "unknown") {
+			const note: PlanningChangeNote = { state: "changed", ...counts, ledger: "repo-unknown", repoReason: repo.reason };
+			return repo.transient ? { note, outcome: null, hold: true } : { note, outcome: "refused", hold: false };
+		}
 		const stored = await emitPlanningChange({ publish: this.deps.emit }, { repo: repo.repo, sessionId: PLANNING_OBSERVER_SESSION, diff: { ...diff, removed } });
 		const ledger = stored === "published" ? "emitted" : "not-stored";
-		return { note: { state: "changed", ...counts, ledger }, outcome: ledger === "emitted" ? "applied" : "refused" };
+		return { note: { state: "changed", ...counts, ledger }, outcome: ledger === "emitted" ? "applied" : "refused", hold: false };
 	}
 }
 
@@ -445,29 +452,31 @@ async function branchOf(fs: PlanningFs, gitDir: string): Promise<string> {
 	return ref === null ? "detached" : (ref[1] ?? "detached");
 }
 
-type RepoLookup = { state: "known"; repo: string } | { state: "unknown"; reason: RepoUnknownReason };
+type RepoLookup = { state: "known"; repo: string } | { state: "unknown"; reason: RepoUnknownReason; transient: boolean };
 
 /**
- * The `owner/name` of the `origin` remote, read from the common git directory's config. Every failure is a typed reason:
- * a denied or vanished config is `config-unreadable` for this call, and the document summary is unaffected.
+ * The `owner/name` of the `origin` remote, read from the common git directory's config. A definitive absence (no git entry,
+ * no config, no origin) is `transient: false`. A read that failed for any other reason (denied, I/O, or removed between the
+ * stat and the read) is `transient: true`: the caller must not advance the baseline on it, so the transition is published
+ * by the next successful read.
  */
 async function repoOf(fs: PlanningFs, root: string): Promise<RepoLookup> {
 	let layout: GitLayout;
 	try {
 		layout = await gitLayout(fs, root);
 	} catch {
-		return { state: "unknown", reason: "git-dir-unreadable" };
+		return { state: "unknown", reason: "git-dir-unreadable", transient: true };
 	}
-	if (!layout.ok) return { state: "unknown", reason: layout.reason };
+	if (!layout.ok) return { state: "unknown", reason: layout.reason, transient: false };
 	let config: string | null;
 	try {
 		config = await textOf(fs, join(layout.commonDir, "config"));
 	} catch {
-		return { state: "unknown", reason: "config-unreadable" };
+		return { state: "unknown", reason: "config-unreadable", transient: true };
 	}
-	if (config === null) return { state: "unknown", reason: "config-unreadable" };
+	if (config === null) return { state: "unknown", reason: "config-missing", transient: false };
 	const repo = repoFromGitConfig(config);
-	return repo === null ? { state: "unknown", reason: "origin-missing" } : { state: "known", repo };
+	return repo === null ? { state: "unknown", reason: "origin-missing", transient: false } : { state: "known", repo };
 }
 
 /** Parses the `origin` URL of a git config into `owner/name`. Only the two trailing path segments are kept. */
