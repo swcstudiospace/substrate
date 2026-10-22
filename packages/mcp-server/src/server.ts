@@ -832,7 +832,7 @@ export function createHttpServer(
 				const nowMs = now();
 				const stale = ttl > 0 && healthMemo !== null && nowMs - healthMemo.at < ttl;
 				const compute = async (): Promise<HealthMemo> => {
-					const health = await substrate.health();
+					const health = await substrate.sharedHealth(ttl);
 					const hindsight = substrate.hindsightInventoryHealth();
 					const recall = substrate.recallHealth();
 					return {
