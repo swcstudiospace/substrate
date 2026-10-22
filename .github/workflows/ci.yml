@@ -4,15 +4,15 @@ name: CI
 # (docs/ci.md) and scripts/verify.test.ts fails if the two drift apart. CI adds the
 # Postgres-backed tests that skip on a machine without a database.
 #
-# Pull requests run on the organisation's VPS runner, the same way programming-desk's
-# gates do. CI_ENABLED is still the switch: while the repository variable is unset every job is
+# Verify and dependency-audit run on GitHub-hosted runners (ubuntu-latest). Only boot-gate still runs
+# on the organisation's VPS runner. CI_ENABLED is still the switch: while the repository variable is unset every job is
 # skipped, which GitHub reports as a skipped (not failed) check.
 # `gh variable set CI_ENABLED --body true` turns the gate on; `gh variable delete CI_ENABLED`
 # is the kill switch.
 #
-# Pull requests from forks never reach the runner: a fork's code would otherwise run on the VPS.
+# Pull requests from forks are skipped in every job: a fork's code would otherwise run on this repository's runners.
 #
-# The scratch Postgres is published on 127.0.0.1:54321 only. Port 5432 on that runner is already taken.
+# The scratch Postgres is published on 127.0.0.1:54321 only.
 #
 # The third job, `boot-gate`, is report-only and opt-in twice over: it needs CI_ENABLED and its own
 # repository variable BOOT_GATE, because it starts Docker containers on the shared runner.
@@ -35,7 +35,7 @@ jobs:
   verify:
     name: Typecheck, tests and repo locks
     if: vars.CI_ENABLED == 'true' && github.event_name != 'schedule' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
       postgres:
@@ -91,10 +91,10 @@ jobs:
 
   dependency-audit:
     name: Known-vulnerability audit
-    # Advisories appear without any change here, so this never gates a pull request. It runs
-    # on main, on demand and weekly; a red run is the signal to upgrade.
-    if: vars.CI_ENABLED == 'true' && github.event_name != 'pull_request'
-    runs-on: [self-hosted, Linux, X64]
+    # Runs on same-repo pull requests, pushes to main, on demand and weekly. It fails on an unlisted
+    # high or critical advisory until the package is upgraded or listed in .github/audit-accepted-risk.json.
+    if: vars.CI_ENABLED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Check out the repository
@@ -110,8 +110,8 @@ jobs:
       - name: Install dependencies (lockfile must be current)
         run: bun install --frozen-lockfile --ignore-scripts
 
-      - name: Audit installed packages (fail on high or critical)
-        run: bun audit --audit-level=high
+      - name: Gate the audit (fail on an unlisted high or critical advisory)
+        run: bun scripts/audit-gate.ts
 
   boot-gate:
     name: Boot and prove (report-only)
