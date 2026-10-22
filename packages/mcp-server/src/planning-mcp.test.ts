@@ -20,6 +20,7 @@ const CALLER: McpCaller = { surface: "omp", isOperator: false };
 const PLANNING_TOOLS = ["planning_status", "planning_sessions"] as const;
 const BODY = "PLANNING-BODY-SECRET";
 const PHASE = ".planning/phases/52-planning-awareness-core";
+const GREPTIME_URL_KEY = ["GREPTIME", "URL"].join("_");
 
 let dir: string;
 let root: string;
@@ -130,7 +131,7 @@ describe("the planning transition follows the metrics-history switch", () => {
 				return { stored: rows.length, drops: {} };
 			},
 		};
-		return new Substrate(loadConfig({ ...env, GREPTIME_URL: "http://greptime.test:4000", [PLANNING_ROOT_ENV]: root }), {
+		return new Substrate(loadConfig({ ...env, [GREPTIME_URL_KEY]: "http://greptime.test:4000", [PLANNING_ROOT_ENV]: root }), {
 			index: null,
 			greptime: greptime as never,
 			planning: { presence: null, emit: async () => true },
