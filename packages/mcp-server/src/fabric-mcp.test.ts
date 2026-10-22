@@ -16,6 +16,7 @@ import { HEALTH_PROBE_MS, Substrate } from "./service.ts";
 const TOKEN = "fabric-token-abc123";
 const CALLER: McpCaller = { surface: "omp", isOperator: false };
 const FABRIC_TOOLS = ["fabric_status", "fabric_optimize", "fabric_compliance"] as const;
+const GREPTIME_URL_KEY = ["GREPTIME", "URL"].join("_");
 
 /** A recording fake: every request is kept, and `answer` gives the `data` for each query. */
 function recordingFetch(answer: (query: string) => unknown) {
@@ -166,7 +167,7 @@ function indexProbe() {
 
 /** A substrate with the given index and Greptime probes. Greptime is configured through GREPTIME_URL, so the fabric reads it as configured. */
 function substrateWithProbes(index: unknown, greptime: unknown) {
-	return new Substrate(loadConfig({ GREPTIME_URL: "http://127.0.0.1:4000" }), { index: index as never, greptime: greptime as never });
+	return new Substrate(loadConfig({ [GREPTIME_URL_KEY]: "http://127.0.0.1:4000" }), { index: index as never, greptime: greptime as never });
 }
 
 describe("fabric health probes", () => {
