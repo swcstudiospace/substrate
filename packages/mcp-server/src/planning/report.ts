@@ -1,6 +1,6 @@
 /**
  * A session's planning report (phase 53, SOTA-09): the phases its checkout's index holds and the plan ids under each,
- * or the reason its view is unknown. Pure: a scan in, a report out. The reader writes the report into the session's
+ * or the reason its view is unknown. Pure: a scan in, a report out. The observer writes the report into the session's
  * presence record, which is how every other session sees it.
  *
  * - A plan's identity is the plan id its parsed content declares, so one plan under two filenames is one plan. A document
@@ -12,7 +12,7 @@
  *   identifier outside the presence schema (`report-limit`). A report is never cut short, because a cut report would
  *   claim absences it cannot prove.
  */
-import { isErrorRecord, type PlanningFileRecord, type PlanningIndexResult, type PlanningRecord } from "./index.ts";
+import { indexRecords, isErrorRecord, type PlanningFileRecord, type PlanningIndexResult, type PlanningRecord } from "./index.ts";
 import { MAX_REPORT_ENTRIES, type PhaseReport, type PlanningReport, type UnknownViewReason } from "./presence.ts";
 
 const REPORT_ID_MAX = 128;
@@ -32,7 +32,7 @@ export function observeScan(result: PlanningIndexResult, scannedAtMs: number, ga
 	const { index } = result;
 	const nextGap: WatcherGap | null = index.truncated ? "scan-truncated" : index.unlisted.length > 0 ? "scan-unlisted" : null;
 	if (nextGap !== null) return { report: unknownReport(scannedAtMs, nextGap), gap: nextGap };
-	return { report: completeReport(index.records, scannedAtMs), gap: null };
+	return { report: completeReport(indexRecords(index), scannedAtMs), gap: null };
 }
 
 export function unknownReport(scannedAtMs: number, reason: UnknownViewReason): PlanningReport {

@@ -140,8 +140,9 @@ import { RailwayClient } from "./railway.ts";
 import { nodePlanningFs } from "./planning/fs.ts";
 import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
 import { DragonflyPresenceStore } from "./planning/presence-dragonfly.ts";
-import { PlanningReader, type PlanningReaderDeps } from "./planning/read.ts";
-import { completionStoreView } from "./planning/checkpoint-store.ts";
+import { PlanningObserver, type PlanningObserverDeps } from "./planning/observer.ts";
+import { PlanningReader } from "./planning/read.ts";
+import { completionStoreView, type CompletionStoreView } from "./planning/checkpoint-store.ts";
 import type { SteeringWiring } from "./planning/steering-tools.ts";
 import { SteeringInbox, type SteeringHistorySink } from "./planning/steering.ts";
 import type { FabricSources } from "./fabric/types.ts";
@@ -1352,10 +1353,12 @@ export class Substrate {
 	private readonly emitChains = new Map<string, Promise<void>>();
 	/** Phase 50: the Dragonfly wake-up hints; null while `SUBSTRATE_EVENT_BUS` is off, or its endpoint is missing or refused. */
 	readonly eventBus: EventBus | null;
-	/** Phase 52: the planning reads behind `planning_status` and `planning_sessions`. Disabled unless `SUBSTRATE_PLANNING_ROOT` is set. */
+	/** Phase 52: the planning reads behind `planning_status` and `planning_sessions`. Read-only: they write nothing. Disabled unless `SUBSTRATE_PLANNING_ROOT` is set. */
 	readonly planning: PlanningReader;
 	/** Phase 53 (SOTA-09): the steering wiring. `inbox` is null unless steering is on and an audit sink is injected, so a write answers not-configured. */
 	readonly steering: SteeringWiring;
+	/** Phase 52: the planning observer, the plane's only writer: it publishes a checkout's change and heartbeats it. Started by `startPlanning`. */
+	readonly planningObserver: PlanningObserver;
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
@@ -1375,7 +1378,7 @@ export class Substrate {
 			/** Tests inject the bus through this factory; production builds it from config. */
 			eventBus?: () => EventBus | null;
 			/** Tests inject the planning filesystem, presence store and ledger write; production builds them from config. */
-			planning?: Partial<Omit<PlanningReaderDeps, "settings">>;
+			planning?: Partial<Omit<PlanningObserverDeps, "settings">> & { checkpoints?: CompletionStoreView };
 			/** Tests and wiring inject the steering audit sink. With none, the steering writes answer not-configured and record nothing. */
 			steering?: { history: SteeringHistorySink | null };
 		},
@@ -1446,14 +1449,16 @@ export class Substrate {
 				gate: this.planes.gate("cache"),
 			});
 		this.eventBus = stores?.eventBus !== undefined ? stores.eventBus() : productionEventBus(config);
-		// Phase 52 (SOTA-08): the planning reads. Presence rides the cache endpoint; with none, the sessions read says so.
+		// Phase 52 (SOTA-08): the planning reads and the observer share one filesystem and one presence store. Presence rides the cache endpoint; with none, the sessions read says so.
 		const planningDeps = stores?.planning ?? {};
-		this.planning = new PlanningReader({
+		const planningFs = planningDeps.fs ?? nodePlanningFs();
+		const planningPresence = planningDeps.presence !== undefined ? planningDeps.presence : productionPresence(config);
+		this.planning = new PlanningReader({ settings: config.planning, fs: planningFs, presence: planningPresence, checkpoints: planningDeps.checkpoints ?? completionStoreView(config.planningCheckpoint) });
+		this.planningObserver = new PlanningObserver({
 			settings: config.planning,
-			fs: planningDeps.fs ?? nodePlanningFs(),
-			presence: planningDeps.presence !== undefined ? planningDeps.presence : productionPresence(config),
+			fs: planningFs,
+			presence: planningPresence,
 			emit: planningDeps.emit ?? (async (event: EventInput) => (await this.emit(event)).stored),
-			checkpoints: planningDeps.checkpoints ?? completionStoreView(config.planningCheckpoint),
 		});
 		// Phase 53 (SOTA-09): the steering inbox. Built only while SUBSTRATE_PLANNING_STEERING is on and an audit sink is injected.
 		// Invalid settings keep the tools registered, so they answer `misconfigured` naming the keys, and the keys are logged once at boot.
@@ -2873,6 +2878,16 @@ export class Substrate {
 		} catch (cause) {
 			process.stderr.write(`[substrate] hindsight: outbox gauges unavailable — ${redact(String(cause)).slice(0, 200)}\n`);
 		}
+	}
+
+	/** Phase 52: start the planning observer's scan timer (unref'd). Off, with nothing started, while `SUBSTRATE_PLANNING_ROOT` is unset or misconfigured. */
+	startPlanning(): boolean {
+		return this.planningObserver.start();
+	}
+
+	/** Phase 52: clear the planning observer's timer. A scan in flight finishes; no new scan starts from the timer. */
+	stopPlanning(): void {
+		this.planningObserver.stop();
 	}
 
 	/** Start the recall prefetch, the Hindsight inventory and the cache preloader (phase 47). The first two are no-ops while their flags are off; each timer is unref'd. */
@@ -5985,7 +6000,7 @@ export class Substrate {
 		const timeoutMs = options.greptimeTimeoutMs;
 		// The probes start at once, so one slow Greptime does not hold the others back.
 		// A store that throws is down. `/healthz` has to answer that; a 500 would hide the outage from the monitor.
-		const probes = this.healthProbes(timeoutMs);
+		const probes = this.healthProbes(timeoutMs, true);
 		const indexStore = this.index;
 		const [greptimeReading, index, hindsightOk, ragflowOk, capacity, ledgerCapacity] = await Promise.all([
 			probes.greptime,
@@ -6045,12 +6060,15 @@ export class Substrate {
 		};
 	}
 
-	/** The probes `health()` and the fabric read. Each starts now and settles on its own; none waits for another. */
-	private healthProbes(timeoutMs: number | undefined): HealthProbes {
+	/**
+	 * The probes `health()` and the fabric read. Each starts now and settles on its own; none waits for another. `probeWrites`
+	 * is whether the Greptime write probe may write: `/healthz` may, on its cadence; the fabric may not, and reads the last verdict.
+	 */
+	private healthProbes(timeoutMs: number | undefined, probeWrites: boolean): HealthProbes {
 		const greptimeClient = this.greptime;
 		const indexStore = this.index;
 		const hindsight = hindsightFromEnv();
-		const greptimeReading = greptimeClient ? this.greptimeProbe(greptimeClient, timeoutMs) : Promise.resolve(ABSENT_GREPTIME);
+		const greptimeReading = greptimeClient ? this.greptimeProbe(greptimeClient, timeoutMs, probeWrites) : Promise.resolve(ABSENT_GREPTIME);
 		return {
 			greptime: greptimeReading,
 			// The size read follows the ping, as on main, but nothing else waits for it: the fabric's Greptime row does not need it.
@@ -6072,7 +6090,7 @@ export class Substrate {
 	}
 
 	/** The Greptime ping, and only after a yes every other Greptime read. Never rejects. */
-	private async greptimeProbe(client: GreptimeClient, timeoutMs: number | undefined): Promise<GreptimeProbe> {
+	private async greptimeProbe(client: GreptimeClient, timeoutMs: number | undefined, probeWrites: boolean): Promise<GreptimeProbe> {
 		// The ping is the gate: until it answers, nothing else is asked of Greptime.
 		const up = (await this.healthBound(timeoutMs, () => (timeoutMs === undefined ? client.ping() : client.ping(timeoutMs)))) === true;
 		if (!up) return ABSENT_GREPTIME;
@@ -6085,7 +6103,7 @@ export class Substrate {
 				await client.probeDialect();
 				return client.quotingDialectKnown === true;
 			}).then((answer) => answer === true),
-			this.writeProbeReading(client, timeoutMs),
+			this.writeProbeReading(client, timeoutMs, probeWrites),
 		]);
 		return { up, appendOnly, quotingDialectKnown, probe: write.probe, writeTimedOut: write.timedOut };
 	}
@@ -6095,8 +6113,9 @@ export class Substrate {
 	 * reads it as unavailable; it is not the same as a probe that did not run. A probe that throws reads as it always has.
 	 * On the default path there is no bound, so the client's own write timeout applies, as on main.
 	 */
-	private async writeProbeReading(client: GreptimeClient, timeoutMs: number | undefined): Promise<WriteReading> {
-		const work = () => client.probeWritable(this.config.ledger.writeProbeS * 1000);
+	private async writeProbeReading(client: GreptimeClient, timeoutMs: number | undefined, probeWrites: boolean): Promise<WriteReading> {
+		// Interval 0 writes nothing and returns the last verdict, so a read with `probeWrites` off never writes.
+		const work = () => client.probeWritable(probeWrites ? this.config.ledger.writeProbeS * 1000 : 0);
 		if (timeoutMs === undefined) {
 			const probe = await Promise.resolve().then(work).catch(() => null);
 			return { probe, timedOut: false };
@@ -6119,7 +6138,8 @@ export class Substrate {
 	/**
 	 * The probes one window shares (phase 51). The fabric reads them through `fabricSources()`, so calls in one window issue
 	 * one probe per source, and concurrent callers share the same in-flight probes. The memo is keyed on the Greptime bound,
-	 * so a bounded probe never serves another caller. `/healthz` calls `health()`, which starts its own probes, as on main.
+	 * so a bounded probe never serves another caller. `/healthz` calls `health()`, which starts its own probes, as on main. The fabric's
+	 * probes never write: their Greptime write verdict is the last one `/healthz` recorded.
 	 */
 	sharedHealthProbes(windowMs: number, options: { readonly greptimeTimeoutMs?: number } = {}): HealthProbes {
 		const now = Date.now();
@@ -6127,7 +6147,7 @@ export class Substrate {
 		if (share !== null && share.greptimeTimeoutMs === options.greptimeTimeoutMs && now - share.at >= 0 && now - share.at < windowMs) {
 			return share.probes;
 		}
-		const probes = this.healthProbes(options.greptimeTimeoutMs);
+		const probes = this.healthProbes(options.greptimeTimeoutMs, false);
 		this.healthShare = { at: now, greptimeTimeoutMs: options.greptimeTimeoutMs, probes };
 		return probes;
 	}
@@ -6157,7 +6177,13 @@ export class Substrate {
 			health: () => {
 				const probes = this.sharedHealthProbes(FABRIC_HEALTH_WINDOW_MS, { greptimeTimeoutMs: HEALTH_PROBE_MS });
 				return {
-					greptime: probes.greptime.then((probe) => ({ up: probe.up, eventsWritable: this.eventsWritableOf(probe), writeTimedOut: probe.writeTimedOut })),
+					greptime: probes.greptime.then((probe) => ({
+						up: probe.up,
+						eventsWritable: this.eventsWritableOf(probe),
+						writeTimedOut: probe.writeTimedOut,
+						// No write verdict since boot: the probe has not run, so the ledger's write path is unknown.
+						writeUnread: probe.probe === null || probe.probe.lastProbeAt === null,
+					})),
 					index: probes.index,
 					hindsight: probes.hindsight,
 					ragflow: probes.ragflow,

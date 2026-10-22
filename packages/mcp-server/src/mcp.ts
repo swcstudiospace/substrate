@@ -1403,7 +1403,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 
 	/**
 	 * The planning reads (phase 52, SOTA-08). Both are typed: a plane with no root answers `disabled`, never an error.
-	 * Neither writes a file. `planning_status` writes one ledger note when the index differs from the last read here.
+	 * Both are read-only and write nothing. Changes are published, and checkouts heartbeat, by the server's planning observer.
 	 */
 	server.registerTool(
 		"planning_status",
@@ -1411,8 +1411,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			title: "Planning index for the configured checkout",
 			description:
 				"Counts, sha256 hashes and error records for the planning documents under the configured checkout's .planning/. " +
-				"Never a file body and never a frontmatter value. An unset root answers disabled. When the index differs from the last " +
-				"read in this process, one planning.changed note is written to the ledger. It changes no file.",
+				"Never a file body and never a frontmatter value. An unset root answers disabled. A read: it writes nothing and changes " +
+				"no file, and it sends no heartbeat. Changes are published by the server's planning observer, not by this tool.",
 			inputSchema: {},
 			annotations: { readOnlyHint: true },
 		},
@@ -1425,7 +1425,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			title: "Planning presence for sessions",
 			description:
 				"The sessions heartbeating into the planning plane, each active, stale or unknown against the server's own clock. " +
-				"An unset root answers disabled; an unset cache endpoint answers unavailable. A read: it changes nothing.",
+				"An unset root answers disabled; an unset cache endpoint answers unavailable. A read: it writes nothing and sends no " +
+				"heartbeat. The server's planning observer heartbeats a checkout when it sees that checkout change a planning document.",
 			inputSchema: {},
 			annotations: { readOnlyHint: true },
 		},

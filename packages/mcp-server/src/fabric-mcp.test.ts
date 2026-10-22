@@ -9,7 +9,7 @@ import { auditMode } from "@substrate/audit";
 import { toolClass } from "./admission.ts";
 import { loadConfig } from "./config.ts";
 import type { FabricSuggestion } from "./fabric/types.ts";
-import type { LedgerCapacity } from "./greptime.ts";
+import { GreptimeClient, type LedgerCapacity } from "./greptime.ts";
 import { createMcpServer, type McpCaller } from "./mcp.ts";
 import { railwayFromEnv, RailwayClient, type RailwayFetch } from "./railway.ts";
 import { HEALTH_PROBE_MS, Substrate } from "./service.ts";
@@ -397,5 +397,62 @@ describe("the Greptime row on the fabric path", () => {
 		const client = await connect(substrate);
 		const status = (await call(client, "fabric_status")).json() as { resources: Array<{ resource: string; state: string }> };
 		expect(status.resources.find((row) => row.resource === "greptime")?.state).toBe("ok");
+	});
+});
+
+/** Statements that change the store. The fabric must issue none of them. */
+const WRITE_STATEMENT = /^\s*(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE)\b/i;
+
+/**
+ * Replaces `fetch` for the Greptime wire: every SQL statement is recorded, and the probe reads answer the way an append-only
+ * store does, so the client reaches its write probe. `restore` puts the real `fetch` back.
+ */
+function recordGreptimeWire() {
+	const statements: string[] = [];
+	const original = globalThis.fetch;
+	globalThis.fetch = (async (_url: string, init: RequestInit) => {
+		const statement = new URLSearchParams(String(init.body)).get("sql") ?? "";
+		statements.push(statement);
+		return new Response(JSON.stringify(greptimeAnswer(statement)), { status: 200, headers: { "content-type": "application/json" } });
+	}) as unknown as typeof fetch;
+	return {
+		statements,
+		restore: () => {
+			globalThis.fetch = original;
+		},
+	};
+}
+
+function greptimeAnswer(statement: string): unknown {
+	if (statement.includes("LENGTH")) return { output: [{ records: { schema: { column_schemas: [{ name: "n" }] }, rows: [[3]] } }] };
+	if (statement.includes("SHOW CREATE TABLE")) {
+		const schema = { column_schemas: [{ name: "Table" }, { name: "Create Table" }] };
+		return { output: [{ records: { schema, rows: [["t", "... WITH( append_mode = 'true' )"]] } }] };
+	}
+	return { output: [{ affectedrows: 1 }] };
+}
+
+describe("fabric reads never write to Greptime", () => {
+	test("fabric_status, fabric_optimize and fabric_compliance issue no write, on the first call or after", async () => {
+		const wire = recordGreptimeWire();
+		try {
+			const substrate = new Substrate(loadConfig({ [GREPTIME_URL_KEY]: "http://greptime.test" }), {
+				index: null,
+				greptime: new GreptimeClient({ url: "http://greptime.test", user: "u", password: "p", db: "substrate" }),
+			});
+			const client = await connect(substrate);
+			const first = (await call(client, "fabric_status")).json() as { resources: Array<{ resource: string; state: string }> };
+			// Nothing has probed the ledger since boot, so its write is unknown: unavailable, never ok.
+			expect(first.resources.find((row) => row.resource === "greptime")?.state).toBe("unavailable");
+			await call(client, "fabric_optimize");
+			await call(client, "fabric_compliance");
+			expect(wire.statements.length).toBeGreaterThan(0);
+			expect(wire.statements.filter((statement) => WRITE_STATEMENT.test(statement))).toEqual([]);
+			// `/healthz` still writes its probe row on its own cadence.
+			await substrate.health();
+			expect(wire.statements.filter((statement) => WRITE_STATEMENT.test(statement)).length).toBeGreaterThan(0);
+		} finally {
+			wire.restore();
+		}
 	});
 });

@@ -1149,7 +1149,13 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 				sessionId: "planning-observer",
 				added: [],
 				removed: [],
-				changed: [".planning/phases/52-planning-awareness-core/52-CONTEXT.md"],
+				changed: [
+					{
+						path: ".planning/phases/52-planning-awareness-core/52-CONTEXT.md",
+						before: "a".repeat(64),
+						after: "b".repeat(64),
+					},
+				],
 			},
 		}),
 	},
