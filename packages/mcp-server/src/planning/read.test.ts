@@ -471,6 +471,43 @@ describe("the origin of a checkout", () => {
 	});
 });
 
+describe("a planning change whose publish fails", () => {
+	test("is re-sent by the next read, and stored exactly once after the publish succeeds", async () => {
+		await seedPhase();
+		await write(".git/config", ORIGIN_CONFIG);
+		const attempts: EventInput[] = [];
+		const stored: EventInput[] = [];
+		let accept = false;
+		const plane = new PlanningReader({
+			settings: settingsFor(root),
+			fs: nodePlanningFs(),
+			presence: null,
+			emit: async (event) => {
+				attempts.push(event);
+				if (!accept) return false;
+				stored.push(event);
+				return true;
+			},
+		});
+		await plane.status();
+
+		await write(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		const failed = await plane.status();
+		expect(failed.state === "ok" && failed.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "not-stored" });
+		expect(stored).toEqual([]);
+
+		accept = true;
+		const retried = await plane.status();
+		expect(retried.state === "ok" && retried.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "emitted" });
+		expect(attempts).toHaveLength(2);
+		expect(stored).toHaveLength(1);
+
+		const after = await plane.status();
+		expect(after.state === "ok" && after.changes).toEqual({ state: "unchanged" });
+		expect(stored).toHaveLength(1);
+	});
+});
+
 describe("a stalled Dragonfly reply", () => {
 	test("planning_sessions returns its error within the command deadline", async () => {
 		const stalled: PresenceRedisClient = { connect: async () => {}, send: () => new Promise<never>(() => {}), close: () => {} };

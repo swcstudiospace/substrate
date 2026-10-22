@@ -9,6 +9,7 @@ import { auditMode } from "@substrate/audit";
 import { toolClass } from "./admission.ts";
 import { loadConfig } from "./config.ts";
 import type { FabricSuggestion } from "./fabric/types.ts";
+import type { LedgerCapacity } from "./greptime.ts";
 import { createMcpServer, type McpCaller } from "./mcp.ts";
 import { railwayFromEnv, RailwayClient, type RailwayFetch } from "./railway.ts";
 import { HEALTH_PROBE_MS, Substrate } from "./service.ts";
@@ -17,6 +18,8 @@ const TOKEN = "fabric-token-abc123";
 const CALLER: McpCaller = { surface: "omp", isOperator: false };
 const FABRIC_TOOLS = ["fabric_status", "fabric_optimize", "fabric_compliance"] as const;
 const GREPTIME_URL_KEY = ["GREPTIME", "URL"].join("_");
+/** The size read the fake ledgers answer with. Each assertion compares against this object, so it proves the read came from the probe. */
+const LEDGER_SIZE: LedgerCapacity = { bytes: 1024, rows: 7, tables: [] };
 
 /** A recording fake: every request is kept, and `answer` gives the `data` for each query. */
 function recordingFetch(answer: (query: string) => unknown) {
@@ -261,5 +264,84 @@ describe("/healthz jobs row under a half-open Greptime breaker", () => {
 		expect(anchorCalls).toHaveLength(1);
 		expect(health.jobs.ledgerReason).toBeNull();
 		expect(health.jobs.ledger?.anchorLagHours).toBe(2);
+	});
+});
+
+/**
+ * A Greptime fake whose write probe and size read each take 800 ms and answer their own results. Real time on purpose: the
+ * health bounds these probes race read the platform clock, so a stand-in timer would not exercise them.
+ */
+function slowLedgerProbes() {
+	const after800ms = <T>(value: T): Promise<T> =>
+		new Promise((resolve) => {
+			setTimeout(() => resolve(value), 800);
+		});
+	return {
+		ping: async () => true,
+		ensureAppendMode: async () => true,
+		probeDialect: async () => true,
+		quotingDialectKnown: true,
+		probeWritable: () => after800ms({ lastProbeAt: 1, lastProbeOk: true, lastProbeError: null }),
+		capacity: () => after800ms(LEDGER_SIZE),
+		anchorCoverage: async () => {
+			throw new Error("no coverage read in this test");
+		},
+	};
+}
+
+describe("the Greptime write probe and size read on the fabric path", () => {
+	test("two 800 ms probes resolve inside the fabric deadline, and each reports its own result", async () => {
+		const { index } = indexProbe();
+		const substrate = substrateWithProbes(index, slowLedgerProbes());
+		const client = await connect(substrate);
+		const body = (await call(client, "fabric_status")).json() as { resources: Array<{ resource: string; state: string }> };
+		expect(body.resources.find((row) => row.resource === "greptime")?.state).toBe("ok");
+		const health = await substrate.health({ greptimeTimeoutMs: HEALTH_PROBE_MS });
+		expect(health.ledger.lastProbeOk).toBe(true);
+		expect(health.capacity.ledger).toEqual(LEDGER_SIZE);
+	});
+});
+
+/**
+ * A Greptime fake whose append-mode, dialect and write-probe reads each take 800 ms, and whose size read answers at once.
+ * Each read answers its own value, so a test can see which read reported what. Real time on purpose: the health bounds these
+ * reads race read the platform clock, so a stand-in timer would not exercise them.
+ */
+function threeSlowGreptimeReads() {
+	const after800ms = <T>(value: T): Promise<T> =>
+		new Promise((resolve) => {
+			setTimeout(() => resolve(value), 800);
+		});
+	let dialectKnown = false;
+	return {
+		ping: async () => true,
+		ensureAppendMode: () => after800ms(true),
+		probeDialect: async () => {
+			await after800ms(undefined);
+			dialectKnown = true;
+		},
+		get quotingDialectKnown() {
+			return dialectKnown;
+		},
+		probeWritable: () => after800ms({ lastProbeAt: 1, lastProbeOk: true, lastProbeError: null }),
+		capacity: async () => LEDGER_SIZE,
+		anchorCoverage: async () => {
+			throw new Error("no coverage read in this test");
+		},
+	};
+}
+
+describe("the Greptime reads after the ping on the fabric path", () => {
+	test("three 800 ms reads resolve inside the fabric deadline, and each reports its own result", async () => {
+		const { index } = indexProbe();
+		const substrate = substrateWithProbes(index, threeSlowGreptimeReads());
+		const client = await connect(substrate);
+		const body = (await call(client, "fabric_status")).json() as { resources: Array<{ resource: string; state: string }> };
+		expect(body.resources.find((row) => row.resource === "greptime")?.state).toBe("ok");
+		const health = await substrate.health({ greptimeTimeoutMs: HEALTH_PROBE_MS });
+		expect(health.appendOnly).toBe(true);
+		expect(health.quotingDialectKnown).toBe(true);
+		expect(health.ledger.lastProbeOk).toBe(true);
+		expect(health.capacity.ledger).toEqual(LEDGER_SIZE);
 	});
 });

@@ -5,12 +5,10 @@
  * staleness is judged against that same server time. A caller's `lastHeartbeatMs` is therefore not
  * trusted; the stored value carries the server's reading.
  *
- * Expiry: a key is written with a fixed retention window, `SET ... EX retentionS` (one day by default).
- * The freshness window (`SUBSTRATE_PLANNING_PRESENCE_TTL_S`) is NOT the key expiry. A session whose
- * heartbeat is older than the freshness window is still held, so it is listed as `stale` and not
- * dropped. The server removes it only once the retention window has closed with no new heartbeat.
- * A freshness window longer than the retention is refused, because a session would vanish while it
- * still counted as active.
+ * Expiry: a key is written with `SET ... EX retentionS`, where the retention is the largest freshness window the settings
+ * allow plus a one-hour margin. The freshness window (`SUBSTRATE_PLANNING_PRESENCE_TTL_S`) is NOT the key expiry. A session
+ * whose heartbeat is older than the freshness window is still held, so it is listed as `stale` and not dropped. The server
+ * removes it only once the retention has closed with no new heartbeat. A freshness window that leaves no margin is refused.
  *
  * Bounds: enumeration is a bounded SCAN (see `presence-client.ts`). A listing reads at most `limit`
  * sessions. When more exist, `listWithin` says so with `truncated: true`, and `list` refuses instead
@@ -25,11 +23,16 @@
  * The commands go through `PresenceBackend`, a port of its own. The cache client in `cache.ts` is closed
  * to its current command set by `cache-conformance.test.ts`, so presence never reuses it.
  */
+import { PLANNING_BOUNDS } from "./config.ts";
 import { SessionRecordSchema, type PresenceStore, type SessionRecord } from "./presence.ts";
 
 export const PRESENCE_KEY_PREFIX = "substrate:v1:planning:presence:";
-/** Server-side key expiry, in seconds. Stale sessions stay readable for this long after their last heartbeat. */
-export const PRESENCE_RETENTION_S = 86_400;
+/** The largest freshness window the settings allow, in seconds. Taken from the same bounds `loadPlanningSettings` enforces. */
+export const PRESENCE_TTL_MAX_S = PLANNING_BOUNDS.presenceTtlS.max;
+/** How long a key outlives its freshness window, in seconds. A session that goes stale stays readable for this long. */
+export const PRESENCE_RETENTION_MARGIN_S = 3_600;
+/** Server-side key expiry, in seconds: the largest freshness window plus the margin. Stale sessions stay listed until it closes. */
+export const PRESENCE_RETENTION_S = PRESENCE_TTL_MAX_S + PRESENCE_RETENTION_MARGIN_S;
 /** The most sessions one listing reads. Beyond it the listing is marked truncated. */
 export const PRESENCE_MAX_SESSIONS = 256;
 
@@ -57,11 +60,14 @@ export class DragonflyPresenceStore implements PresenceStore {
 		if (!Number.isSafeInteger(retentionS) || retentionS < 1) throw new RangeError("retentionS must be a positive integer");
 	}
 
-	/** Records a heartbeat stamped with the server's time. `ttlMs` is the freshness window and must not exceed the retention. */
+	/**
+	 * Records a heartbeat stamped with the server's time. `ttlMs` is the freshness window. The key outlives it by the retention
+	 * margin, so a session at the largest window is still held when that window closes.
+	 */
 	async touch(record: SessionRecord, ttlMs: number): Promise<void> {
 		const valid = SessionRecordSchema.parse(record);
 		if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new RangeError("ttlMs must be a positive number");
-		if (ttlMs > this.retentionS * 1000) throw new RangeError("ttlMs must not exceed the presence retention");
+		if (ttlMs > (this.retentionS - PRESENCE_RETENTION_MARGIN_S) * 1000) throw new RangeError("ttlMs must leave the presence retention margin past it");
 		const stamped: SessionRecord = { ...valid, lastHeartbeatMs: await this.backend.serverTimeMs() };
 		await this.backend.setWithTtl(keyFor(valid.sessionId), JSON.stringify(stamped), this.retentionS);
 	}
