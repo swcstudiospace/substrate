@@ -2,7 +2,7 @@
 phase: 54-planning-observability
 reconstructed: true
 branch: gsd/p54-complete
-head: ecd00a86d11a6d5a16888c382687426ebd0e02c3
+head: f2a494930978ba54708fee5af3fb0c34daafac6f
 pull_request: 111
 ---
 
@@ -36,6 +36,7 @@ pull_request: 111
 - c3d6e3e (merged as ca9cf9f): scan cadence configuration and the timer seam.
 - 82e4233: the dashboard panel's source names the observer, with a behavioural test.
 - 46e7c7e, bc4dd3a, b46fe82: the phase 52 review merge (single-flight scan, timers, report and last-scan seams), a balance repair of the observer test file, and metrics dependencies for three review-side observer tests.
+- f2a4949 (review fix): a revert of a held change is recorded as its own refused transition, once, through the same bounded pending set. The clear of the hold in `advance` stops any repeat (`observer.ts:267-270`, `observer.ts:277`); the test is `observer.test.ts:691-708`.
 
 ## Test fixes in the phase
 
@@ -47,4 +48,4 @@ No cutover, no DNS change, no production deploy, no change to a live Railway ser
 
 ## Verification status
 
-See `VERIFICATION.md` (status `passed`, delta re-verified at ecd00a8). The gates have not been run by the verifier; the orchestrator runs them.
+See `VERIFICATION.md` (status `passed`, delta re-verified at f2a4949). The gates have not been run by the verifier; the orchestrator runs them.
