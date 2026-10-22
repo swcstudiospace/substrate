@@ -151,14 +151,14 @@ export async function buildPlanningIndex(root: string, deps: PlanningIndexDeps):
 
 	const rootProbe = await attempt(() => fs.probe(root));
 	const rootFound = rootProbe.ok ? rootProbe.value : null;
-	if (rootFound?.state !== "present" || !rootFound.isDir) return { ok: false, code: "root-unavailable" };
+	if (rootFound === null || rootFound.state !== "present" || !rootFound.isDir) return { ok: false, code: "root-unavailable" };
 	const realRoot = rootFound.real;
 
 	const planningAbs = join(root, PLANNING_DIR);
 	const planningProbe = await attempt(() => fs.probe(planningAbs));
 	const planningFound = planningProbe.ok ? planningProbe.value : null;
 	if (planningFound?.state === "dangling") return { ok: false, code: "planning-dir-dangling" };
-	if (planningFound?.state !== "present" || !planningFound.isDir) return { ok: false, code: "planning-dir-unavailable" };
+	if (planningFound === null || planningFound.state !== "present" || !planningFound.isDir) return { ok: false, code: "planning-dir-unavailable" };
 	if (!isInside(planningFound.real, realRoot)) return { ok: false, code: "planning-dir-outside-root" };
 
 	// One past the limit is collected and no more: seeing it proves the index is truncated, and nothing past it is listed.
