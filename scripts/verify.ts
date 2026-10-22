@@ -35,7 +35,7 @@ export const GATE_STEPS: readonly GateStep[] = [
 	{ id: "types", label: "Typecheck", argv: ["bunx", "tsc", "--noEmit"] },
 	{ id: "tests", label: "Test suite", argv: ["bun", "test"] },
 	{ id: "locks", label: "Repo locks", argv: ["bun", "run", "check:phase-close"] },
-	{ id: "audit", label: "Dependency audit", argv: ["bun", "audit", "--audit-level=high"], optIn: true },
+	{ id: "audit", label: "Dependency audit", argv: ["bun", "scripts/audit-gate.ts"], optIn: true },
 ];
 
 const STEP_IDS: readonly string[] = GATE_STEPS.map((step) => step.id);
