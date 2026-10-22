@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 import type { EventInput } from "../types.ts";
 import { PLANNING_MAX_FILES_ENV, PLANNING_ROOT_ENV, loadPlanningSettings } from "./config.ts";
 import { nodePlanningFs } from "./fs.ts";
+import type { PlanningFs } from "./index.ts";
 import { DragonflyPresenceStore, PRESENCE_KEY_PREFIX, PRESENCE_MAX_SESSIONS, type PresenceBackend } from "./presence-dragonfly.ts";
 import { PLANNING_OBSERVER_SESSION, PLANNING_TRANSITION_PHASE, PlanningReader, type PlanningSessionsView, repoFromGitConfig } from "./read.ts";
 import type { SessionRecord } from "./presence.ts";
@@ -441,3 +442,44 @@ function expectNonBlankState(view: PlanningSessionsView): void {
 	expect(SESSION_STATES).toContain(view.view.state);
 	expect(view.view.text.trim()).not.toBe("");
 }
+
+describe("planning.transition delivery", () => {
+	const ORIGIN = '[remote "origin"]\n\turl = git@github.com:swcstudiospace/agent-substrate.git\n';
+
+	test("a metric write that never resolves does not hold up the planning_status reply", async () => {
+		await seedPhase();
+		await write(".git/config", ORIGIN);
+		const stalled: MetricSink = { name: "greptime", emit: () => new Promise<SinkResult>(() => {}) };
+		const planning = new PlanningReader({ settings: settingsFor(root), fs: nodePlanningFs(), presence: null, emit: async () => true, metrics: stalled, fallback: recordingSink("stdout").sink, clock: CLOCK });
+		await planning.status();
+		await write(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		// The reply is awaited directly: a reply held up by the stalled write would never resolve, and the test would time out.
+		const view = await planning.status();
+		expect(view.state === "ok" && view.changes.state).toBe("changed");
+	});
+
+	test("a config read that throws leaves the change for the next read, which records it exactly once", async () => {
+		await seedPhase();
+		await write(".git/config", ORIGIN);
+		let configReadable = true;
+		const base = nodePlanningFs();
+		const flaky: PlanningFs = {
+			...base,
+			readFile: async (path) => {
+				if (!configReadable && path.endsWith(join(".git", "config"))) throw new Error("EIO");
+				return base.readFile(path);
+			},
+		};
+		const metrics = recordingSink("greptime");
+		const planning = new PlanningReader({ settings: settingsFor(root), fs: flaky, presence: null, emit: async () => true, metrics: metrics.sink, fallback: recordingSink("stdout").sink, clock: CLOCK });
+		await planning.status();
+		await write(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		configReadable = false;
+		await expect(planning.status()).rejects.toThrow("EIO");
+		configReadable = true;
+		const view = await planning.status();
+		await planning.settleTransitions();
+		expect(view.state === "ok" && view.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "emitted" });
+		expect(metrics.records).toEqual([expect.objectContaining({ phaseId: PLANNING_TRANSITION_PHASE, outcome: "applied" })]);
+	});
+});

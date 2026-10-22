@@ -120,3 +120,56 @@ describe("planning tools", () => {
 		expect(JSON.stringify(ledger)).not.toContain(BODY);
 	});
 });
+
+describe("the planning transition follows the metrics-history switch", () => {
+	/** A substrate whose ledger writer keeps each write it is asked for. The planning reader gets no sink, so the wiring under test chooses it. */
+	function substrateWithLedgerWriter(env: Record<string, string>, writes: unknown[][]) {
+		const greptime = {
+			recordMetricSamples: async (rows: unknown[]) => {
+				writes.push(rows);
+				return { stored: rows.length, drops: {} };
+			},
+		};
+		return new Substrate(loadConfig({ ...env, GREPTIME_URL: "http://greptime.test:4000", [PLANNING_ROOT_ENV]: root }), {
+			index: null,
+			greptime: greptime as never,
+			planning: { presence: null, emit: async () => true },
+		});
+	}
+
+	/** One detected change after a baseline read. Returns the stdout lines a transition wrote while it was delivered. */
+	async function oneDetectedChange(substrate: Substrate): Promise<string[]> {
+		await mkdir(join(root, ".git"), { recursive: true });
+		await writeFile(join(root, ".git", "config"), '[remote "origin"]\n\turl = git@github.com:swcstudiospace/agent-substrate.git\n');
+		await writeFile(join(root, PHASE, "52-CONTEXT.md"), `${BODY}\n`);
+		await substrate.planning.status();
+		const lines: string[] = [];
+		const original = process.stdout.write;
+		process.stdout.write = ((chunk: string | Uint8Array) => {
+			lines.push(String(chunk));
+			return true;
+		}) as typeof process.stdout.write;
+		try {
+			await writeFile(join(root, PHASE, "52-CONTEXT.md"), `${BODY} edited\n`);
+			await substrate.planning.status();
+			await substrate.planning.settleTransitions();
+		} finally {
+			process.stdout.write = original;
+		}
+		return lines.filter((line) => line.includes("planning.transition"));
+	}
+
+	test("with the switch unset, the transition is one stdout line and no ledger write", async () => {
+		const writes: unknown[][] = [];
+		const lines = await oneDetectedChange(substrateWithLedgerWriter({}, writes));
+		expect(writes).toEqual([]);
+		expect(lines.map((line) => JSON.parse(line))).toEqual([expect.objectContaining({ metric: "planning.transition", outcome: "applied" })]);
+	});
+
+	test("with the switch on, the transition is one ledger metric write and no stdout line", async () => {
+		const writes: unknown[][] = [];
+		const lines = await oneDetectedChange(substrateWithLedgerWriter({ SUBSTRATE_METRICS_HISTORY: "on" }, writes));
+		expect(writes).toEqual([[expect.objectContaining({ series: "planning.transition", labels: { outcome: "applied" }, value: 1 })]]);
+		expect(lines).toEqual([]);
+	});
+});

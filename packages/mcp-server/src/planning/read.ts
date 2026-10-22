@@ -23,7 +23,7 @@ import { buildPlanningIndex, isErrorRecord, type PlanningFileRecord, type Planni
 import { DragonflyPresenceStore, PRESENCE_MAX_SESSIONS } from "./presence-dragonfly.ts";
 import { classifySessions, type SessionStatus } from "./presence.ts";
 import { deriveSessionState, type SessionState, type SessionViewState } from "./states.ts";
-import { emitTransition, stdoutMetricSink, transitionRecord, type MetricSink, type TransitionClock, type TransitionOutcome } from "./telemetry.ts";
+import { emitTransition, stdoutMetricSink, transitionRecord, type MetricSink, type TransitionClock, type TransitionOutcome, type TransitionRecord } from "./telemetry.ts";
 
 /** The session id the ledger row carries for a change observed by this plane. */
 export const PLANNING_OBSERVER_SESSION = "planning-observer";
@@ -136,6 +136,8 @@ function resolve(result: PlanningConfigResult): Resolved {
 export class PlanningReader {
 	/** The index the previous `status` read saw, and the root it was read from. Process-local. */
 	private previous: { root: string; snapshot: PlanningSnapshot; state: SessionState } | null = null;
+	/** Scheduled transition deliveries not yet settled. */
+	private readonly pending = new Set<Promise<void>>();
 
 	constructor(private readonly deps: PlanningReaderDeps) {}
 
@@ -222,10 +224,15 @@ export class PlanningReader {
 	 */
 	private async observe(root: string, snapshot: PlanningSnapshot, state: SessionState): Promise<PlanningChangeNote> {
 		const previous = this.previous;
-		this.previous = { root, snapshot, state };
-		if (previous === null || previous.root !== root) return { state: "baseline" };
+		if (previous === null || previous.root !== root) {
+			this.previous = { root, snapshot, state };
+			return { state: "baseline" };
+		}
+		// A throw from the comparison (a config read, a ledger publish) leaves `previous` where it was: the next read compares with the same baseline and sees the change then.
 		const { note, outcome } = await this.compare(root, previous.snapshot, snapshot);
-		if (outcome !== null) await this.recordTransition(previous.state, state, outcome);
+		const record = outcome === null ? null : transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: previous.state, to: state, outcome }, this.deps.clock ?? hostClock);
+		this.previous = { root, snapshot, state };
+		if (record !== null) this.schedule(record);
 		return note;
 	}
 
@@ -248,13 +255,23 @@ export class PlanningReader {
 		return { note: { state: "changed", ...counts, ledger }, outcome: ledger === "emitted" ? "applied" : "refused" };
 	}
 
-	/** One `planning.transition` record. The primary sink gets it once; the stdout fallback is written only when the primary does not deliver. */
-	private async recordTransition(from: SessionState, to: SessionState, outcome: TransitionOutcome): Promise<void> {
-		const record = transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from, to, outcome }, this.deps.clock ?? hostClock);
-		const delivered = await emitTransition(record, this.deps.metrics, this.deps.fallback ?? stdoutMetricSink());
-		if (delivered.status === "failed") {
-			process.stderr.write(`[substrate] planning transition not delivered: ${delivered.primary.sink} ${delivered.primary.reason}, ${delivered.fallback.sink} ${delivered.fallback.reason}\n`);
-		}
+	/**
+	 * Hands one `planning.transition` record to its sinks without waiting for them, so the reply never carries the metric write.
+	 * `emitTransition` never throws: a refused or thrown primary goes to the stdout fallback, and a fallback that fails is written to stderr.
+	 */
+	private schedule(record: TransitionRecord): void {
+		const delivery: Promise<void> = emitTransition(record, this.deps.metrics, this.deps.fallback ?? stdoutMetricSink()).then((delivered) => {
+			this.pending.delete(delivery);
+			if (delivered.status === "failed") {
+				process.stderr.write(`[substrate] planning transition not delivered: ${delivered.primary.sink} ${delivered.primary.reason}, ${delivered.fallback.sink} ${delivered.fallback.reason}\n`);
+			}
+		});
+		this.pending.add(delivery);
+	}
+
+	/** Resolves once every scheduled transition record has been delivered or handed to its fallback. A read never waits on it; tests and an orderly shutdown may. */
+	async settleTransitions(): Promise<void> {
+		while (this.pending.size > 0) await Promise.all([...this.pending]);
 	}
 }
 
