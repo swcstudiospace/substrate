@@ -1308,7 +1308,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				question: z.string().describe("The docs question, in your words."),
 				datasets: z.array(z.string()).optional().describe("Dataset names to search. Omitted means all readable datasets."),
 				session_id: z.string().optional(),
-				repo_id: z.string().optional().describe("owner/name scoping this search to one repo; unscoped when omitted. A session_id's stored repo applies when omitted."),
+				repo_id: z.string().optional().describe("owner/name tagging this search's cache entry, steering and events. Retrieval reads the shared docs corpus, not a per-repo one. A session_id's stored repo applies when omitted."),
 				steering: z.string().optional().describe("Live steering for this session, appended to the retrieval question as described-but-untrusted text."),
 				planning_hash: z.string().optional().describe("The planning hash the steering session holds; echoed on the note event so a refresh can be told apart."),
 			},
@@ -1325,8 +1325,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				// Prompt augmentation (SPE-19390) at the tool boundary: the service
 				// cache keys on the raw question, so the steered text is what the plane
 				// ranks while the ledger keeps both. A live session fills what the call
-				// omits: its steering, repo scope and planning hash. Repo scope is
-				// validated here; an unscoped search serves the shared corpus.
+				// omits: its steering, repo tag and planning hash. The repo tag is validated
+				// here and keys the cache; retrieval always reads the shared corpus.
 				const live = session_id === undefined ? undefined : steeringSessions.get(steeringSessionKey(callerSurface, session_id));
 				const scoped = normalizeRepoId(repo_id ?? live?.repo_id ?? null);
 				const steered = augmentQuestionWithSteering(question, steering ?? live?.steering ?? null);
@@ -1363,13 +1363,13 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			description:
 				"Move a live steering session between ACTIVE, CONTEXT_REFRESH, PAUSED and RESUMED. " +
 				"A planning update triggers CONTEXT_REFRESH without blocking the session; steering text rides " +
-				"the next docs_search as described-but-untrusted prompt augmentation, scoped by repo_id. " +
+				"the next docs_search as described-but-untrusted prompt augmentation, tagged with repo_id. " +
 				"Every transition is recorded as one non-blocking note event carrying the repo scope and both " +
 				"states, so cross-session propagation is visible in the ledger. Illegal transitions are refused, " +
 				"never stored; a refused transition changes nothing.",
 			inputSchema: {
 				session_id: z.string().describe("This steering session's id; stable for its lifetime."),
-				repo_id: z.string().describe("owner/name scoping this session to one repo."),
+				repo_id: z.string().describe("owner/name tagging this session's steering, events and searches; retrieval is not repo-filtered."),
 				state: z.enum(STEERING_STATES).describe("ACTIVE | CONTEXT_REFRESH | PAUSED | RESUMED."),
 				steering: z.string().optional().describe("Directions the next retrieval should respect; capped and redacted in the ledger."),
 				planning_hash: z.string().optional().describe("The .planning hash this transition was computed against."),
