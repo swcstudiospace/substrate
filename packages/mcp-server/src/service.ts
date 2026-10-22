@@ -141,6 +141,8 @@ import { nodePlanningFs } from "./planning/fs.ts";
 import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
 import { DragonflyPresenceStore } from "./planning/presence-dragonfly.ts";
 import { PlanningReader, type PlanningReaderDeps } from "./planning/read.ts";
+import type { SteeringWiring } from "./planning/steering-tools.ts";
+import { SteeringInbox, type SteeringHistorySink } from "./planning/steering.ts";
 import type { FabricSources } from "./fabric/types.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
@@ -1350,6 +1352,8 @@ export class Substrate {
 	readonly eventBus: EventBus | null;
 	/** Phase 52: the planning reads behind `planning_status` and `planning_sessions`. Disabled unless `SUBSTRATE_PLANNING_ROOT` is set. */
 	readonly planning: PlanningReader;
+	/** Phase 53 (SOTA-09): the steering wiring. `inbox` is null unless steering is on and an audit sink is injected, so a write answers not-configured. */
+	readonly steering: SteeringWiring;
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
@@ -1370,6 +1374,8 @@ export class Substrate {
 			eventBus?: () => EventBus | null;
 			/** Tests inject the planning filesystem, presence store and ledger write; production builds them from config. */
 			planning?: Partial<Omit<PlanningReaderDeps, "settings">>;
+			/** Tests and wiring inject the steering audit sink. With none, the steering writes answer not-configured and record nothing. */
+			steering?: { history: SteeringHistorySink | null };
 		},
 		observer: SubstrateObserver = {},
 	) {
@@ -1444,6 +1450,18 @@ export class Substrate {
 			presence: planningDeps.presence !== undefined ? planningDeps.presence : productionPresence(config),
 			emit: planningDeps.emit ?? (async (event: EventInput) => (await this.emit(event)).stored),
 		});
+		// Phase 53 (SOTA-09): the steering inbox. Built only while SUBSTRATE_PLANNING_STEERING is on and an audit sink is injected.
+		const steeringSettings = config.steering.ok ? config.steering.settings : null;
+		const steeringHistory = stores?.steering?.history ?? null;
+		const steeringClock = { nowMs: () => Date.now() };
+		this.steering = {
+			enabled: steeringSettings?.enabled === true,
+			clock: steeringClock,
+			inbox:
+				steeringSettings !== null && steeringSettings.enabled && steeringHistory !== null
+					? new SteeringInbox({ history: steeringHistory, clock: steeringClock, policy: steeringSettings })
+					: null,
+		};
 		// uplift-2 R1
 		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays, graphRead: config.requestPath.briefGraphRead };
 		this.narrowBumps = config.requestPath.cacheBumpScope === "narrow";
