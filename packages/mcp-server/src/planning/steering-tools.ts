@@ -1,7 +1,7 @@
 /**
- * The steering MCP tools (phase 53, SOTA-09): queue a directive, acknowledge one, and list the queued directives for a
- * session. Each tool is a thin shell over the inbox in `steering.ts`, which owns the allowlist, the rate limit, audit before
- * effect, and the confirm rule for a conflicting directive.
+ * The steering MCP tools (phase 53, SOTA-09): queue a directive, acknowledge one, and list the directives for a session.
+ * Each tool is a thin shell over the inbox in `steering.ts`, which owns the allowlist, the rate limit, audit before effect,
+ * and the confirm rule for a conflicting directive.
  *
  * What this module adds:
  * - Authorship comes from the authenticated caller, never from an argument. A write needs an operator caller that has a
@@ -76,10 +76,10 @@ export const STEERING_ACKNOWLEDGE_INPUT = z
 	})
 	.strict();
 
-/** `steering_list`. The queued directives for one session. */
+/** `steering_list`. The directives for one session, queued or acknowledged. */
 export const STEERING_LIST_INPUT = z
 	.object({
-		session_id: z.string().regex(SESSION_ID_RE).describe("The planning session whose queued directives to list."),
+		session_id: z.string().regex(SESSION_ID_RE).describe("The planning session whose directives to list."),
 	})
 	.strict();
 
@@ -107,9 +107,17 @@ export interface ListedSteeringDirective {
 	plan_ref: { phase: string; plan: string } | null;
 	conflicts_with_active_plan: boolean;
 	created_at_ms: number;
+	state: "queued" | "acknowledged";
+	/** Null while queued. */
+	outcome: SteeringOutcome | null;
+	/** False while queued. */
+	confirmed: boolean;
+	queued_at_ms: number;
+	/** Null while queued. */
+	acknowledged_at_ms: number | null;
 }
 
-/** The queued directives for one session. A read: `not-configured` is not an error. */
+/** The directives for one session, queued or acknowledged. A read: `not-configured` is not an error. */
 export type SteeringListResult =
 	| { status: "listed"; target_session_id: string; directives: ListedSteeringDirective[] }
 	| { status: "not-configured" };
@@ -177,18 +185,32 @@ export async function acknowledgeSteering(
 	};
 }
 
-/** The queued directives for one session, highest priority first. A read: it writes nothing and records nothing. */
+/** The directives for one session, queued or acknowledged, highest priority first. A read: it writes nothing. */
 export function listSteering(wiring: SteeringWiring, input: SteeringListInput): SteeringListResult {
 	if (wiring.inbox === null) return { status: "not-configured" };
-	const directives = wiring.inbox.pendingFor(input.session_id).map((directive) => ({
-		id: directive.id,
-		author_principal_id: directive.author.principalId,
-		priority: directive.priority,
-		action: directive.action,
-		body: directive.body,
-		plan_ref: directive.planRef ?? null,
-		conflicts_with_active_plan: directive.conflictsWithActivePlan,
-		created_at_ms: directive.createdAtMs,
-	}));
+	const directives = wiring.inbox.recordsFor(input.session_id).map((record): ListedSteeringDirective => {
+		const { directive } = record;
+		const base = {
+			id: directive.id,
+			author_principal_id: directive.author.principalId,
+			priority: directive.priority,
+			action: directive.action,
+			body: directive.body,
+			plan_ref: directive.planRef ?? null,
+			conflicts_with_active_plan: directive.conflictsWithActivePlan,
+			created_at_ms: directive.createdAtMs,
+			queued_at_ms: record.queuedAtMs,
+		};
+		if (record.state === "acknowledged") {
+			return {
+				...base,
+				state: "acknowledged",
+				outcome: record.outcome,
+				confirmed: record.confirmed,
+				acknowledged_at_ms: record.acknowledgedAtMs,
+			};
+		}
+		return { ...base, state: "queued", outcome: null, confirmed: false, acknowledged_at_ms: null };
+	});
 	return { status: "listed", target_session_id: input.session_id, directives };
 }

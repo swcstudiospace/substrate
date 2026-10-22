@@ -200,14 +200,29 @@ describe("listSteering", () => {
 		expect(listSteering(wiring, { session_id: "sess-b" })).toMatchObject({ status: "listed", directives: [{ id: "dir-b1" }] });
 	});
 
-	test("an acknowledged directive leaves the list", async () => {
+	test("a queued-then-acknowledged directive is still listed, with state acknowledged and its outcome", async () => {
 		const sink = new MemorySink();
 		const wiring = wiringFor(sink);
 		await queueSteering(wiring, OPERATOR, queueInput({ id: "dir-a1" }));
 		await queueSteering(wiring, OPERATOR, queueInput({ id: "dir-a2" }));
-		await acknowledgeSteering(wiring, OPERATOR, { directive_id: "dir-a2", session_id: "sess-a", outcome: "applied" });
+		await acknowledgeSteering(wiring, OPERATOR, { directive_id: "dir-a2", session_id: "sess-a", outcome: "declined" });
 
-		expect(listSteering(wiring, { session_id: "sess-a" })).toMatchObject({ status: "listed", directives: [{ id: "dir-a1" }] });
+		expect(listSteering(wiring, { session_id: "sess-a" })).toMatchObject({
+			status: "listed",
+			directives: [
+				{ id: "dir-a1", state: "queued", outcome: null, confirmed: false, acknowledged_at_ms: null },
+				{ id: "dir-a2", state: "acknowledged", outcome: "declined", confirmed: false, acknowledged_at_ms: NOW },
+			],
+		});
+	});
+
+	test("an acknowledged directive from another session is not listed for this one", async () => {
+		const sink = new MemorySink();
+		const wiring = wiringFor(sink);
+		await queueSteering(wiring, OPERATOR, queueInput({ id: "dir-b1", target_session_id: "sess-b" }));
+		await acknowledgeSteering(wiring, OPERATOR, { directive_id: "dir-b1", session_id: "sess-b", outcome: "applied", confirm: true });
+
+		expect(listSteering(wiring, { session_id: "sess-a" })).toEqual({ status: "listed", target_session_id: "sess-a", directives: [] });
 	});
 });
 
