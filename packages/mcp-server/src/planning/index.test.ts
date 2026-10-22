@@ -283,6 +283,23 @@ describe("buildPlanningIndex: a dangling link is reported, never skipped", () =>
 	});
 });
 
+describe("buildPlanningIndex: directory errors keep path order under a cutoff", () => {
+	test("a phase link that leaves the root is emitted at its own path, before a later sibling's documents, so maxFiles 1 keeps it", async () => {
+		const files = { [`${P}/phases/52-a-b/PLAN.md`]: "# ab", "/outside/phase-a/PLAN.md": "OUTSIDE-PHASE" };
+		const links = { [`${P}/phases/52-a`]: "/outside/phase-a" };
+		const all = await buildPlanningIndex(TREE_ROOT, { fs: new FakeTree(files, links), limits: { maxFiles: 500, maxBytes: 262_144 } });
+		if (!all.ok) throw new Error(all.code);
+		expect(all.index.records.map((record) => record.path)).toEqual([".planning/phases/52-a", ".planning/phases/52-a-b/PLAN.md"]);
+
+		const cut = await buildPlanningIndex(TREE_ROOT, { fs: new FakeTree(files, links), limits: { maxFiles: 1, maxBytes: 262_144 } });
+		if (!cut.ok) throw new Error(cut.code);
+		expect(cut.index.truncated).toBe(true);
+		expect(cut.index.records).toHaveLength(1);
+		expect(cut.index.records[0]).toMatchObject({ path: ".planning/phases/52-a", error: { code: "outside-root" } });
+		expect(JSON.stringify(cut.index.records)).not.toContain("OUTSIDE-PHASE");
+	});
+});
+
 describe("readFrontmatter", () => {
 	test("no fence is none, a closed mapping is parsed, an open fence without a mapping is malformed", () => {
 		expect(readFrontmatter("# plain")).toEqual({ state: "none" });
