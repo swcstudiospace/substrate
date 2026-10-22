@@ -165,6 +165,8 @@ interface TokenBucket {
 export class SteeringInbox {
 	private readonly records = new Map<string, SteeringRecord>();
 	private readonly buckets = new Map<string, TokenBucket>();
+	/** The largest clock reading the limiter has seen. Buckets refill against it, so a clock that steps back never refills. */
+	private highestMs = Number.NEGATIVE_INFINITY;
 	private readonly allowlist: ReadonlySet<string>;
 	private readonly capacity: number;
 	private tail: Promise<unknown> = Promise.resolve();
@@ -222,7 +224,7 @@ export class SteeringInbox {
 		if (this.records.has(directive.id)) return fail({ code: "duplicate-directive" });
 
 		const nowMs = this.deps.clock.nowMs();
-		const bucket = this.refilled(directive.targetSessionId, nowMs);
+		const bucket = this.refilled(directive.targetSessionId, this.limiterNowMs());
 		if (bucket.tokens < 1) {
 			const retryAfterMs = Math.ceil(((1 - bucket.tokens) * RATE_WINDOW_MS) / this.capacity);
 			return fail({ code: "rate-limited", retryAfterMs });
@@ -231,7 +233,7 @@ export class SteeringInbox {
 		const audited = await this.audit({ event: "queued", atMs: nowMs, directive });
 		if (!audited.ok) return audited;
 
-		this.buckets.set(directive.targetSessionId, { tokens: bucket.tokens - 1, updatedAtMs: nowMs });
+		this.buckets.set(directive.targetSessionId, { tokens: bucket.tokens - 1, updatedAtMs: bucket.updatedAtMs });
 		const record: SteeringRecord = { state: "queued", directive, queuedAtMs: nowMs };
 		this.records.set(directive.id, record);
 		return { ok: true, value: structuredClone(record) };
@@ -297,6 +299,12 @@ export class SteeringInbox {
 		const elapsedMs = Math.max(0, nowMs - bucket.updatedAtMs);
 		const tokens = Math.min(this.capacity, bucket.tokens + (elapsedMs * this.capacity) / RATE_WINDOW_MS);
 		return { tokens, updatedAtMs: nowMs };
+	}
+
+	/** The time the limiter uses: the largest reading seen so far. A backwards step is ignored, so it refills nothing. */
+	private limiterNowMs(): number {
+		this.highestMs = Math.max(this.highestMs, this.deps.clock.nowMs());
+		return this.highestMs;
 	}
 
 	/**

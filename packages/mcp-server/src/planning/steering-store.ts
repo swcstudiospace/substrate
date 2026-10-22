@@ -110,15 +110,36 @@ export class SteeringAuditSink implements SteeringHistorySink {
 
 	/** Writes one transition and reports the outcome as a value. A same-payload repeat is `inserted: false`. */
 	async record(entry: SteeringAuditEntry): Promise<SteeringAuditResult> {
+		let row: SteeringAuditRow;
 		try {
-			const row = toAuditRow(entry);
+			row = toAuditRow(entry);
+		} catch (cause) {
+			return { ok: false, error: new SteeringAuditError(errnoCode(cause), cause) };
+		}
+		try {
 			if (await this.sql.insertAbsent(row)) return { ok: true, value: { inserted: true } };
 			const stored = await this.sql.payloadSha256Of(row.directiveId, row.transition);
 			if (stored === row.payloadSha256) return { ok: true, value: { inserted: false } };
 			return { ok: false, error: new SteeringAuditConflictError(row.directiveId, row.transition) };
 		} catch (cause) {
-			return { ok: false, error: new SteeringAuditError(errnoCode(cause), cause) };
+			return this.recoverOrFail(row, cause);
 		}
+	}
+
+	/**
+	 * A failed write may have committed with only its reply lost. The saved row decides: one carrying this payload means
+	 * the transition happened, so it is reported as recorded. No such row, or a read-back that also fails, is the original
+	 * failure, and the transition stays held for a retry.
+	 */
+	private async recoverOrFail(row: SteeringAuditRow, cause: unknown): Promise<SteeringAuditResult> {
+		try {
+			if ((await this.sql.payloadSha256Of(row.directiveId, row.transition)) === row.payloadSha256) {
+				return { ok: true, value: { inserted: false } };
+			}
+		} catch {
+			// Nothing is known to be saved, so the original write failure is the one reported below.
+		}
+		return { ok: false, error: new SteeringAuditError(errnoCode(cause), cause) };
 	}
 }
 

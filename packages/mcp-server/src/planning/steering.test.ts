@@ -382,3 +382,14 @@ describe("SteeringInbox: reads and writes return copies", () => {
 		expect(inbox.pendingFor(WORKER).map((item) => item.body)).toEqual([original]);
 	});
 });
+
+describe("SteeringInbox: a clock that moves backwards adds no tokens", () => {
+	test("a clock that moves backwards adds no tokens", async () => {
+		const { inbox, clock } = build({ ratePerMin: 2 });
+		expect((await inbox.enqueue(directive({ id: "d-1" }))).ok).toBe(true);
+		clock.advance(-30_000);
+		expect((await inbox.enqueue(directive({ id: "d-2" }))).ok).toBe(true);
+		clock.advance(30_000);
+		expect(await inbox.enqueue(directive({ id: "d-3" }))).toMatchObject({ ok: false, error: { code: "rate-limited" } });
+	});
+});

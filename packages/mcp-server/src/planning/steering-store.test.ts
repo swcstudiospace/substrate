@@ -18,18 +18,25 @@ const HUMAN = "ops.lead";
 const WORKER = "worker-a";
 const SECRET = "ghp_" + "c".repeat(36);
 
-/** Honours `(directive_id, transition)` uniqueness and keeps the hash of each saved row. `failWith` makes every call reject. */
+/**
+ * Honours `(directive_id, transition)` uniqueness and keeps the hash of each saved row. `failWith` makes every call reject.
+ * `failInsert` rejects an insert before it commits. `loseReplyAfterCommit` commits the insert, then rejects its reply.
+ */
 class FakeAuditSql implements SteeringAuditSql {
 	readonly rows: SteeringAuditRow[] = [];
 	failWith: unknown = null;
+	failInsert: unknown = null;
+	loseReplyAfterCommit = false;
 	private readonly hashes = new Map<string, string>();
 
 	async insertAbsent(row: SteeringAuditRow): Promise<boolean> {
 		if (this.failWith !== null) throw this.failWith;
+		if (this.failInsert !== null) throw this.failInsert;
 		const key = keyOf(row.directiveId, row.transition);
 		if (this.hashes.has(key)) return false;
 		this.hashes.set(key, row.payloadSha256);
 		this.rows.push({ ...row });
+		if (this.loseReplyAfterCommit) throw Object.assign(new Error("reply lost after commit"), { code: "ECONNRESET" });
 		return true;
 	}
 
@@ -257,5 +264,44 @@ describe("SteeringAuditSink: stored content", () => {
 		} finally {
 			if (descriptor !== undefined) Object.defineProperty(process, "env", descriptor);
 		}
+	});
+});
+
+describe("SteeringAuditSink: a lost reply after a committed write", () => {
+	const inboxOver = (sql: FakeAuditSql) =>
+		new SteeringInbox({
+			history: new SteeringAuditSink(sql),
+			clock: { nowMs: () => 1_000_000 },
+			policy: { allowlist: [HUMAN], ratePerMin: 10 },
+		});
+
+	test("a committed insert whose reply was lost resolves to acknowledged, not left queued", async () => {
+		const sql = new FakeAuditSql();
+		const inbox = inboxOver(sql);
+		expect((await inbox.enqueue(directive())).ok).toBe(true);
+		sql.loseReplyAfterCommit = true;
+
+		const result = await inbox.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "declined" });
+
+		expect(result.ok).toBe(true);
+		expect(inbox.get("d-1")).toMatchObject({ state: "acknowledged", outcome: "declined" });
+		expect(sql.rows.map((row) => row.transition)).toEqual(["queued", "acknowledged"]);
+	});
+
+	test("an absent row leaves the directive queued, and a later attempt acknowledges it", async () => {
+		const sql = new FakeAuditSql();
+		const inbox = inboxOver(sql);
+		expect((await inbox.enqueue(directive())).ok).toBe(true);
+		sql.failInsert = Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
+
+		expect(await inbox.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "declined" })).toEqual({
+			ok: false,
+			error: { code: "audit-unavailable", attempts: 2, lastErrorCode: "ECONNRESET" },
+		});
+		expect(inbox.get("d-1")).toMatchObject({ state: "queued" });
+
+		sql.failInsert = null;
+		expect((await inbox.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "declined" })).ok).toBe(true);
+		expect(inbox.get("d-1")).toMatchObject({ state: "acknowledged" });
 	});
 });
