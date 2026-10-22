@@ -1,0 +1,49 @@
+{
+  "accepted": [
+    {
+      "id": "GHSA-jfgx-wxx8-mp94",
+      "package": "@mariozechner/pi-coding-agent",
+      "version": "0.60.0",
+      "severity": "high",
+      "reason": "CVE-2026-54328: predictable temporary extension install paths allow local privilege escalation on shared Linux hosts. No patched version exists. Pulled in by @agentos-software/pi.",
+      "owner": "SomeRandmGuyy",
+      "review_by": "2027-01-19"
+    },
+    {
+      "id": "GHSA-c475-qrg2-pj4r",
+      "package": "basic-ftp",
+      "version": "5.3.1",
+      "severity": "high",
+      "reason": "Patched in 6.2.1, but no in-range fix exists. Reached only through the pi-ai and proxy-agent chain (get-uri).",
+      "owner": "SomeRandmGuyy",
+      "review_by": "2027-01-19"
+    },
+    {
+      "id": "GHSA-gpj5-g38j-94v9",
+      "package": "drizzle-orm",
+      "version": "0.44.7",
+      "severity": "high",
+      "reason": "Patched in 0.45.2. Reached through rivetkit 2.3.10, which agentos 0.2.21 pins.",
+      "owner": "SomeRandmGuyy",
+      "review_by": "2027-01-19"
+    },
+    {
+      "id": "GHSA-jmr9-qjv8-65gv",
+      "package": "extract-zip",
+      "version": "2.0.1",
+      "severity": "high",
+      "reason": "No patched version exists.",
+      "owner": "SomeRandmGuyy",
+      "review_by": "2027-01-19"
+    },
+    {
+      "id": "GHSA-7pqw-9j4j-h8q3",
+      "package": "extract-zip",
+      "version": "2.0.1",
+      "severity": "high",
+      "reason": "No patched version exists.",
+      "owner": "SomeRandmGuyy",
+      "review_by": "2027-01-19"
+    }
+  ]
+}
