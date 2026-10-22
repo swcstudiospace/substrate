@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildPlanningIndex, isErrorRecord, type PlanningRecord } from "./index.ts";
+import { buildPlanningIndex, indexRecords, isErrorRecord, type PlanningRecord } from "./index.ts";
 import { nodePlanningFs } from "./fs.ts";
 
 const OUTSIDE_TEXT = "OUTSIDE-REAL-SECRET";
@@ -44,7 +44,7 @@ afterAll(async () => {
 async function build() {
 	const result = await buildPlanningIndex(checkout, { fs: nodePlanningFs(), limits: LIMITS });
 	if (!result.ok) throw new Error(`index failed: ${result.code}`);
-	return result.index.records;
+	return indexRecords(result.index);
 }
 
 function find(records: PlanningRecord[], suffix: string): PlanningRecord | undefined {
@@ -67,8 +67,8 @@ describe("nodePlanningFs on a real checkout", () => {
 
 	test("a directory symlink that leaves the checkout is an outside-root record for that directory", async () => {
 		const records = await build();
-		expect(records.find((record) => record.path === ".planning/milestones")).toMatchObject({ error: { code: "outside-root" } });
-		expect(records.some((record) => record.path === ".planning/milestones/milestone.md")).toBe(false);
+		expect(records.find((record: PlanningRecord) => record.path === ".planning/milestones")).toMatchObject({ error: { code: "outside-root" } });
+		expect(records.some((record: PlanningRecord) => record.path === ".planning/milestones/milestone.md")).toBe(false);
 	});
 
 	test("a dangling symlink is an unreadable record, and the rest of the index is intact", async () => {
@@ -79,7 +79,7 @@ describe("nodePlanningFs on a real checkout", () => {
 
 	test("a phase directory that is itself a link outside the checkout is an outside-root record", async () => {
 		const records = await build();
-		expect(records.some((record) => record.path === ".planning/phases/escape" && isErrorRecord(record))).toBe(true);
+		expect(records.some((record: PlanningRecord) => record.path === ".planning/phases/escape" && isErrorRecord(record))).toBe(true);
 	});
 
 	test("a dangling top-level document link is an error record, never a silently missing document", async () => {
