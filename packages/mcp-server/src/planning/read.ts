@@ -139,6 +139,8 @@ export class PlanningReader {
 	private baseline: { root: string; seq: number; snapshot: PlanningSnapshot } | null = null;
 	/** Scans started so far. A scan takes the next number when it starts, so a later start has a larger number. */
 	private scans = 0;
+	/** The last queued observation. Each observation waits for it, so the baseline and the publish are never interleaved. */
+	private observing: Promise<unknown> = Promise.resolve();
 
 	constructor(private readonly deps: PlanningReaderDeps) {}
 
@@ -244,7 +246,7 @@ export class PlanningReader {
 	 * A transition whose repo cannot be read for a transient reason is reported for this call and the baseline stays where it
 	 * was, so the next successful read sees the same transition and publishes it once.
 	 */
-	private async observe(root: string, seq: number, snapshot: PlanningSnapshot): Promise<PlanningChangeNote> {
+	private async observeOnce(root: string, seq: number, snapshot: PlanningSnapshot): Promise<PlanningChangeNote> {
 		const current = this.baseline;
 		if (current !== null && seq < current.seq) return { state: "superseded" };
 		if (current === null || current.root !== root) {
@@ -272,13 +274,30 @@ export class PlanningReader {
 		if (repo.state === "unknown" && repo.transient) {
 			return { state: "changed", ...counts, ledger: "repo-unknown", repoReason: repo.reason };
 		}
-		this.advance(root, seq, snapshot);
-		if (repo.state === "unknown") return { state: "changed", ...counts, ledger: "repo-unknown", repoReason: repo.reason };
+		if (repo.state === "unknown") {
+			this.advance(root, seq, snapshot);
+			return { state: "changed", ...counts, ledger: "repo-unknown", repoReason: repo.reason };
+		}
 		const outcome = await emitPlanningChange(
 			{ publish: this.deps.emit },
 			{ repo: repo.repo, sessionId: PLANNING_OBSERVER_SESSION, diff: { ...diff, removed } },
 		);
-		return { state: "changed", ...counts, ledger: outcome === "published" ? "emitted" : "not-stored" };
+		if (outcome === "published") {
+			this.advance(root, seq, snapshot);
+			return { state: "changed", ...counts, ledger: "emitted" };
+		}
+		// Not stored: the baseline stays, so the next read finds the same change and sends it again.
+		return { state: "changed", ...counts, ledger: "not-stored" };
+	}
+
+	/** Observations run one at a time, in arrival order, so two reads never publish the same change. */
+	private observe(root: string, seq: number, snapshot: PlanningSnapshot): Promise<PlanningChangeNote> {
+		const run = this.observing.then(() => this.observeOnce(root, seq, snapshot));
+		this.observing = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		return run;
 	}
 
 	/** Moves the baseline to this scan, unless a later scan already holds it. The baseline never moves backwards. */
