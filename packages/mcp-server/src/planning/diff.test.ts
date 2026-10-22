@@ -1,13 +1,15 @@
 /**
- * The planning diff: add, change and remove by path and hash only. It never carries text, and a
- * truncated side never produces removals (or additions it cannot vouch for).
+ * The planning diff: add, change and remove by path and hash only. It never carries text. A truncated side
+ * never produces removals (or additions it cannot vouch for), and neither does a directory the walk could not list.
  */
 import { describe, expect, test } from "bun:test";
 import { diffPlanningIndex, type PlanningSnapshot } from "./diff.ts";
+import { buildPlanningIndex, type PlanningIndexResult } from "./index.ts";
+import { FakeTree, TREE_ROOT } from "./tree.fixtures.ts";
 
 const H = (tag: string) => tag.repeat(64).slice(0, 64);
-const whole = (records: PlanningSnapshot["records"]): PlanningSnapshot => ({ records, truncated: false });
-const partial = (records: PlanningSnapshot["records"]): PlanningSnapshot => ({ records, truncated: true });
+const whole = (records: PlanningSnapshot["records"]): PlanningSnapshot => ({ records, truncated: false, unlisted: [] });
+const partial = (records: PlanningSnapshot["records"]): PlanningSnapshot => ({ records, truncated: true, unlisted: [] });
 
 describe("diffPlanningIndex", () => {
 	test("reports added, removed and changed paths, each sorted, and nothing else", () => {
@@ -90,3 +92,59 @@ describe("diffPlanningIndex with a truncated side", () => {
 		expect(diffPlanningIndex(whole(previous), whole([])).removed).toEqual([".planning/old.md"]);
 	});
 });
+
+describe("diffPlanningIndex with an unlisted directory", () => {
+	test("a document under a directory the next walk could not list is not reported as removed", () => {
+		const previous = [
+			{ path: ".planning/phases/52-x/PLAN.md", sha256: H("1") },
+			{ path: ".planning/STATE.md", sha256: H("2") },
+		];
+		const next = [
+			{ path: ".planning/phases/52-x", sha256: null },
+			{ path: ".planning/STATE.md", sha256: H("2") },
+		];
+		const diff = diffPlanningIndex(whole(previous), { records: next, truncated: false, unlisted: [".planning/phases/52-x"] });
+		expect(diff.removed).toEqual([]);
+	});
+
+	test("a document under a directory the previous walk could not list is not reported as added", () => {
+		const previous = [{ path: ".planning/phases/52-x", sha256: null }];
+		const next = [{ path: ".planning/phases/52-x/PLAN.md", sha256: H("1") }];
+		const diff = diffPlanningIndex({ records: previous, truncated: false, unlisted: [".planning/phases/52-x"] }, whole(next));
+		expect(diff.added).toEqual([]);
+	});
+
+	test("a path that merely shares a prefix with an unlisted directory is still a removal", () => {
+		const previous = [{ path: ".planning/phases/52-xy/PLAN.md", sha256: H("1") }];
+		const diff = diffPlanningIndex(whole(previous), { records: [], truncated: false, unlisted: [".planning/phases/52-x"] });
+		expect(diff.removed).toEqual([".planning/phases/52-xy/PLAN.md"]);
+	});
+});
+
+describe("a failed directory read is unknown, never removed", () => {
+	const limits = { maxFiles: 500, maxBytes: 262_144 };
+	const P = `${TREE_ROOT}/.planning`;
+	const DOCS = {
+		[`${P}/STATE.md`]: "# state\n",
+		[`${P}/phases/52-x/PLAN.md`]: "# plan\n",
+		[`${P}/phases/52-x/CONTEXT.md`]: "# context\n",
+	};
+
+	test("an EACCES on a phase directory after a successful scan yields no removal records for its documents", async () => {
+		const scanned = await buildPlanningIndex(TREE_ROOT, { fs: new FakeTree(DOCS), limits });
+		const failing = new FakeTree(DOCS);
+		failing.deniedListings.add(`${P}/phases/52-x`);
+		const after = await buildPlanningIndex(TREE_ROOT, { fs: failing, limits });
+		if (!scanned.ok || !after.ok) throw new Error("index failed");
+
+		expect(after.index.unlisted).toEqual([".planning/phases/52-x"]);
+		const diff = diffPlanningIndex(snapshotOf(scanned), snapshotOf(after));
+		expect(diff.removed).toEqual([]);
+		expect(diff.removed).not.toContain(".planning/phases/52-x/PLAN.md");
+		expect(diff.removed).not.toContain(".planning/phases/52-x/CONTEXT.md");
+	});
+});
+
+function snapshotOf(result: Extract<PlanningIndexResult, { ok: true }>): PlanningSnapshot {
+	return { records: result.index.records, truncated: result.index.truncated, unlisted: result.index.unlisted };
+}

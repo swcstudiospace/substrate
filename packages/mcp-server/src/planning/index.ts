@@ -52,6 +52,8 @@ export interface PlanningIndex {
 	records: PlanningRecord[];
 	/** True when more documents existed than `maxFiles`; the kept ones are the first by path. */
 	truncated: boolean;
+	/** Directories the walk could not list (an error record names each). Their documents are unknown, so a diff must not read them as removed. Sorted. */
+	unlisted: string[];
 }
 
 export type PlanningIndexFailure = "root-unavailable" | "planning-dir-unavailable" | "planning-dir-dangling" | "planning-dir-outside-root";
@@ -118,6 +120,8 @@ interface Walk {
 	found: Entry[];
 	/** The most candidates collected: one past `maxFiles`. */
 	cap: number;
+	/** Directories whose contents could not be listed: the documents under them are unknown, never removed. */
+	unlisted: string[];
 }
 
 interface FileEntry {
@@ -168,7 +172,7 @@ export async function buildPlanningIndex(root: string, deps: PlanningIndexDeps):
 	if (!isInside(planningFound.real, realRoot)) return { ok: false, code: "planning-dir-outside-root" };
 
 	// One past the limit is collected and no more: seeing it proves the index is truncated, and nothing past it is listed.
-	const walk: Walk = { fs, realRoot, planningReal: planningFound.real, maxBytes: limits.maxBytes, found: [], cap: limits.maxFiles + 1 };
+	const walk: Walk = { fs, realRoot, planningReal: planningFound.real, maxBytes: limits.maxBytes, found: [], cap: limits.maxFiles + 1, unlisted: [] };
 	await collectTopLevel(walk);
 	await collectMilestones(walk);
 	await collectPhases(walk);
@@ -178,7 +182,7 @@ export async function buildPlanningIndex(root: string, deps: PlanningIndexDeps):
 	for (const entry of kept) {
 		records.push(entry.type === "error" ? entry.record : await readDocument(walk, entry));
 	}
-	return { ok: true, index: { records, truncated: walk.found.length > limits.maxFiles } };
+	return { ok: true, index: { records, truncated: walk.found.length > limits.maxFiles, unlisted: [...walk.unlisted].sort(compareText) } };
 }
 
 /** The frontmatter of a document: none, a parsed mapping, or malformed. Only `---` fenced blocks count. */
@@ -294,9 +298,15 @@ async function collectPhases(walk: Walk): Promise<void> {
 	}
 }
 
+/** A directory-level error record. The directory's contents are unknown from here on, so its path is recorded as unlisted. */
+function dirError(walk: Walk, relDir: string, code: PlanningRecordErrorCode, detail: string): ErrorEntry {
+	walk.unlisted.push(relDir);
+	return errorEntry(relDir, code, detail);
+}
+
 async function resolvePhaseChild(walk: Walk, relDir: string, realPhases: string, child: DirEntry): Promise<PhaseUnit | null> {
 	const dirRel = `${relDir}/${child.name}`;
-	if (child.kind === "broken") return { type: "error", key: dirRel, entry: errorEntry(dirRel, "unreadable", "dangling symlink") };
+	if (child.kind === "broken") return { type: "error", key: dirRel, entry: dirError(walk, dirRel, "unreadable", "dangling symlink") };
 	if (child.kind !== "dir") return null;
 	const resolved = await resolveDir(walk, dirRel, join(realPhases, child.name));
 	if (resolved.state === "absent") return null;
@@ -307,13 +317,13 @@ async function resolvePhaseChild(walk: Walk, relDir: string, realPhases: string,
 /** A directory, resolved: absent, an error record for it, or its real location, which is inside the root. */
 async function resolveDir(walk: Walk, relDir: string, absDir: string): Promise<Resolved> {
 	const probed = await attempt(() => walk.fs.probe(absDir));
-	if (!probed.ok) return { state: "error", entry: errorEntry(relDir, "unreadable", `probe failed: ${probed.code}`) };
+	if (!probed.ok) return { state: "error", entry: dirError(walk, relDir, "unreadable", `probe failed: ${probed.code}`) };
 	const found = probed.value;
 	if (found.state === "absent") return { state: "absent" };
-	if (found.state === "dangling") return { state: "error", entry: errorEntry(relDir, "unreadable", "dangling symlink") };
-	if (!found.isDir) return { state: "error", entry: errorEntry(relDir, "unreadable", "not a directory") };
+	if (found.state === "dangling") return { state: "error", entry: dirError(walk, relDir, "unreadable", "dangling symlink") };
+	if (!found.isDir) return { state: "error", entry: dirError(walk, relDir, "unreadable", "not a directory") };
 	if (!isInside(found.real, walk.realRoot)) {
-		return { state: "error", entry: errorEntry(relDir, "outside-root", "directory resolves outside the planning root") };
+		return { state: "error", entry: dirError(walk, relDir, "outside-root", "directory resolves outside the planning root") };
 	}
 	return { state: "dir", real: found.real };
 }
@@ -321,7 +331,7 @@ async function resolveDir(walk: Walk, relDir: string, absDir: string): Promise<R
 /** The entries of a resolved directory, in path order. */
 async function readEntries(walk: Walk, relDir: string, real: string): Promise<Listing> {
 	const listed = await attempt(() => walk.fs.readDir(real));
-	if (!listed.ok) return { state: "error", entry: errorEntry(relDir, "unreadable", `read failed: ${listed.code}`) };
+	if (!listed.ok) return { state: "error", entry: dirError(walk, relDir, "unreadable", `read failed: ${listed.code}`) };
 	if (listed.value === null) return { state: "absent" };
 	return { state: "entries", real, entries: inPathOrder(listed.value) };
 }
