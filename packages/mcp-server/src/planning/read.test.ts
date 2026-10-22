@@ -10,7 +10,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { EventInput } from "../types.ts";
-import { PLANNING_ROOT_ENV, loadPlanningSettings } from "./config.ts";
+import { PLANNING_MAX_FILES_ENV, PLANNING_ROOT_ENV, loadPlanningSettings } from "./config.ts";
 import { nodePlanningFs } from "./fs.ts";
 import { DragonflyPresenceStore, PRESENCE_KEY_PREFIX, PRESENCE_MAX_SESSIONS, type PresenceBackend } from "./presence-dragonfly.ts";
 import { PLANNING_OBSERVER_SESSION, PlanningReader, repoFromGitConfig } from "./read.ts";
@@ -162,6 +162,52 @@ describe("planning_status", () => {
 		await write(`${PHASE}/52-PLAN.md`, "changed\n");
 		const view = await harness.reader.status();
 		expect(view.state === "ok" && view.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "not-stored" });
+	});
+});
+
+describe("planning_status on a truncated index", () => {
+	/** A reader whose index keeps two documents of the three seeded, so the third (BAD.md, last by path) is past the cutoff. */
+	function truncatingReader(events: EventInput[]) {
+		return new PlanningReader({
+			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: root, [PLANNING_MAX_FILES_ENV]: "2" }),
+			fs: nodePlanningFs(),
+			presence: null,
+			emit: async (event) => {
+				events.push(event);
+				return true;
+			},
+		});
+	}
+
+	test("a change to a kept document is reported as partial, writes no ledger note, and reports no removal", async () => {
+		await seedPhase();
+		await write(".git/config", '[remote "origin"]\n\turl = git@github.com:swcstudiospace/agent-substrate.git\n');
+		const events: EventInput[] = [];
+		const reader = truncatingReader(events);
+
+		const baseline = await reader.status();
+		expect(baseline.state === "ok" && baseline.truncated).toBe(true);
+		expect(baseline.state === "ok" && baseline.changes).toEqual({ state: "baseline" });
+
+		await write(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		const partial = await reader.status();
+		expect(partial.state === "ok" && partial.changes).toEqual({ state: "partial", added: null, removed: null, changed: 1, ledger: "not-written" });
+		expect(events).toEqual([]);
+	});
+
+	test("a document past the cutoff that disappears is not reported as a removal", async () => {
+		await seedPhase();
+		await write(".git/config", '[remote "origin"]\n\turl = git@github.com:swcstudiospace/agent-substrate.git\n');
+		const events: EventInput[] = [];
+		const reader = truncatingReader(events);
+
+		await reader.status();
+		await rm(join(root, PHASE, "BAD.md"));
+		const after = await reader.status();
+		// The index is complete now, but the previous one was not: the diff is still partial, so nothing is removed or written.
+		expect(after.state === "ok" && after.truncated).toBe(false);
+		expect(after.state === "ok" && after.changes).toEqual({ state: "partial", added: null, removed: null, changed: 0, ledger: "not-written" });
+		expect(events).toEqual([]);
 	});
 });
 
