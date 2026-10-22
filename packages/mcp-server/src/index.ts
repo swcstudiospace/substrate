@@ -217,8 +217,8 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		const recallStopped = substrate.stopRecall();
 		// Phase 47: the cache preloader's timer is cleared with them; a tick in flight finishes on its own.
 		substrate.stopPreload();
-		// Phase 52: the planning observer's timer is cleared; a scan in flight finishes on its own.
-		substrate.stopPlanning();
+		// Phase 52: the planning observer's timer is cleared now; a scan in flight is awaited inside the bound below.
+		const planningStopped = substrate.stopPlanning();
 		// Phase 50: the wake-up hint connections close with the timers; no subscriber outlives the shutdown.
 		substrate.stopEventBus();
 		observability.stop();
@@ -246,6 +246,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 					mentalModelRefresh?.flush(),
 					watchdogStopped,
 					recallStopped,
+					planningStopped,
 				]),
 				Bun.sleep(SHUTDOWN_FLUSH_MS),
 			]);
