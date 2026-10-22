@@ -253,6 +253,16 @@ The `planning_status` and `planning_sessions` MCP tools read the planning checko
 - **Commands.** The presence client sends only `GET`, `SET ... EX`, `SCAN` and `TIME`. It is a separate module from the cache client, so the cache's command lock is unchanged.
 - **History.** Presence history is not yet written to TimescaleDB. That table is an operator-gated production step (see `.planning/phases/52-planning-awareness-core/PLAN.md`).
 
+## Steering inbox (phase 53)
+
+The `steering_queue`, `steering_acknowledge` and `steering_list` MCP tools carry directives from a principal to a planning session. They are registered only while `SUBSTRATE_PLANNING_STEERING` is on.
+
+- **Queue.** An author must have `kind: "human"` and a principal on `SUBSTRATE_PLANNING_STEERING_PRINCIPALS`. An agent-kind author, an unlisted principal and a session past `SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN` are refused with a typed error. A directive is audited before it is queued.
+- **Acknowledge.** The target session answers `applied` or `declined`. A directive that conflicts with the active plan needs `confirm: true` to be applied. The acknowledgement is audited before it takes effect.
+- **List.** `steering_list` returns the queued directives for one session. Acknowledged directives leave the list. It is a read and is fail-open in the audit.
+- **Sink.** Both writes are fail-closed. With no audit sink injected they answer `not-configured` and record nothing. No durable sink is wired in this change.
+- **Limitation.** The principal and author kind are arguments the caller supplies. Nothing on the transport binds them to a person yet.
+
 ## Fail-open budget (unchanged)
 
 A substrate outage never blocks a prompt. `fetchBrief` returns `""` within 1.5 s. Every cache miss and every Dragonfly, Hindsight or RAGFlow error falls through to the next source or to an empty result with a logged reason. Writes to Greptime and Timescale are the only calls allowed to fail closed, and only for the caller that asked for durability.

@@ -31,6 +31,10 @@ export const FAIL_CLOSED_TOOLS: ReadonlySet<string> = new Set([
 	// Phase 45 (D45-h): a Railway write changes a live project, so it is recorded before it runs.
 	"railway_scale",
 	"railway_deploy",
+	// Phase 53 (SOTA-09): a steering directive changes what a planning session does next, so it is recorded before it is queued
+	// or acknowledged. Each write also answers not-configured, and records nothing, while no audit sink is injected.
+	"steering_queue",
+	"steering_acknowledge",
 ]);
 
 /**

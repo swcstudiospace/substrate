@@ -198,10 +198,16 @@ export class SteeringInbox {
 		for (const record of this.records.values()) {
 			if (record.state === "queued" && record.directive.targetSessionId === sessionId) pending.push(record.directive);
 		}
-		return pending.sort(
-			(a, b) =>
-				PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] || a.createdAtMs - b.createdAtMs || compareText(a.id, b.id),
-		);
+		return pending.sort(compareDirectives);
+	}
+
+	/** Every directive for one session, queued or acknowledged, in the order `pendingFor` uses. A read: it changes nothing. */
+	recordsFor(sessionId: string): SteeringRecord[] {
+		const records: SteeringRecord[] = [];
+		for (const record of this.records.values()) {
+			if (record.directive.targetSessionId === sessionId) records.push(record);
+		}
+		return records.sort((a, b) => compareDirectives(a.directive, b.directive));
 	}
 
 	private async doEnqueue(input: unknown): Promise<SteeringResult<SteeringRecord>> {
@@ -402,4 +408,8 @@ function issuePaths(error: z.ZodError): string[] {
 
 function compareText(a: string, b: string): number {
 	return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function compareDirectives(a: SteeringDirective, b: SteeringDirective): number {
+	return PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] || a.createdAtMs - b.createdAtMs || compareText(a.id, b.id);
 }
