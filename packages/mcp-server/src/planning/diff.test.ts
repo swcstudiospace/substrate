@@ -118,6 +118,7 @@ describe("diffPlanningIndex with an unlisted directory", () => {
 		if (!before.ok || !after.ok) throw new Error("index failed");
 		const diff = diffPlanningIndex(snapshotOf(before), snapshotOf(after));
 		expect(diff.added).toEqual([".planning/phases/52-x/NEW.md", ".planning/phases/52-x/PLAN.md"]);
+		expect(diff.complete).toBe(false);
 	});
 
 	test("a path that merely shares a prefix with an unlisted directory is still a removal", () => {
