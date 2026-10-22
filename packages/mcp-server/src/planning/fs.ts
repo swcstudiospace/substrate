@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 import { constants, type Dirent } from "node:fs";
 import { type FileHandle, lstat, open, readFile, readdir, readlink, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { errnoCode, type DirEntry, type OpenResult, type PlanningFs } from "./index.ts";
+import { PROBE_CONCURRENCY, errnoCode, mapBounded, type DirEntry, type OpenResult, type PlanningFs } from "./index.ts";
 
 const ABSENT: Record<string, true> = { ENOENT: true, ENOTDIR: true };
 const READ_CHUNK = 65_536;
@@ -39,7 +39,7 @@ export function nodePlanningFs(): PlanningFs {
 		async readDir(path) {
 			const listed = await absentAsNull(() => readdir(path, { withFileTypes: true }));
 			if (listed === null) return null;
-			return Promise.all(listed.map(async (dirent): Promise<DirEntry> => ({ name: dirent.name, kind: await kindOf(join(path, dirent.name), dirent) })));
+			return mapBounded(listed, PROBE_CONCURRENCY, async (dirent): Promise<DirEntry> => ({ name: dirent.name, kind: await kindOf(join(path, dirent.name), dirent) }));
 		},
 		async statFile(path) {
 			const found = await absentAsNull(() => stat(path));

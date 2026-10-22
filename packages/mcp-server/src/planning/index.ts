@@ -141,6 +141,12 @@ type Attempt<T> = { ok: true; value: T } | { ok: false; code: string };
 
 type Listing = { state: "absent" } | { state: "entries"; real: string; entries: DirEntry[] } | { state: "error"; entry: ErrorEntry };
 
+/** A phase child resolved to what it emits: its own error record, or a directory whose documents sort under its path. */
+type PhaseUnit = { type: "error"; key: string; entry: ErrorEntry } | { type: "group"; key: string; relDir: string; real: string; name: string };
+
+/** A directory resolved: absent, an error record for it, or its real location, which is inside the root. */
+type Resolved = { state: "absent" } | { state: "error"; entry: ErrorEntry } | { state: "dir"; real: string };
+
 export type Frontmatter = { state: "none" } | { state: "parsed"; data: Record<string, unknown> } | { state: "malformed" };
 
 /** Build the index of `<root>/.planning`. The root must be absolute; the config layer guarantees it. */
@@ -197,6 +203,28 @@ async function attempt<T>(run: () => Promise<T>): Promise<Attempt<T>> {
 	}
 }
 
+/** Most stat or probe calls in flight at once, in the walk and in the directory reader. Small and fixed. */
+export const PROBE_CONCURRENCY = 4;
+
+/**
+ * `run` over `items` with at most `limit` calls in flight. Calls start in input order and the results come back in input
+ * order, whatever order the calls finish in, so the output does not depend on timing.
+ */
+export async function mapBounded<T, R>(items: readonly T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
+	assertLimit(limit, "limit");
+	const results = new Array<R>(items.length);
+	let next = 0;
+	const worker = async (): Promise<void> => {
+		while (next < items.length) {
+			const index = next;
+			next += 1;
+			results[index] = await run(items[index] as T);
+		}
+	};
+	await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+	return results;
+}
+
 /** Collectors stop once `cap` candidates are held. Walk order is path order, so the kept set is the first `maxFiles` by path. */
 function isFull(walk: Walk): boolean {
 	return walk.found.length >= walk.cap;
@@ -235,29 +263,49 @@ async function collectMilestones(walk: Walk): Promise<void> {
 	else if (listing.state === "entries") collectDocuments(walk, relDir, listing.real, listing.entries, "milestone", undefined);
 }
 
+/**
+ * Phase children are resolved first, then emitted in path order. A child that becomes an error record sits at its own
+ * path; one that is listed has its documents under that path and a slash. Sorting by those keys puts each record where
+ * its path belongs, so a directory's error is never emitted after a later sibling's documents. Listing stays lazy, so
+ * the cutoff still stops it.
+ */
 async function collectPhases(walk: Walk): Promise<void> {
 	if (isFull(walk)) return;
 	const relDir = `${PLANNING_DIR}/phases`;
 	const listing = await listDir(walk, relDir, join(walk.planningReal, "phases"));
-	if (listing.state === "error") add(walk, listing.entry);
-	else if (listing.state === "entries") {
-		for (const dir of listing.entries) {
-			if (isFull(walk)) return;
-			const dirRel = `${relDir}/${dir.name}`;
-			if (dir.kind === "broken") {
-				add(walk, errorEntry(dirRel, "unreadable", "dangling symlink"));
-				continue;
-			}
-			if (dir.kind !== "dir") continue;
-			const sub = await listDir(walk, dirRel, join(listing.real, dir.name));
-			if (sub.state === "error") add(walk, sub.entry);
-			else if (sub.state === "entries") collectDocuments(walk, dirRel, sub.real, sub.entries, "phase", PHASE_DIR.exec(dir.name)?.[1]);
+	if (listing.state === "error") {
+		add(walk, listing.entry);
+		return;
+	}
+	if (listing.state === "absent") return;
+	// Resolution is the only fan-out, and it is bounded: a directory with many links never has more than PROBE_CONCURRENCY probes out.
+	const resolved = await mapBounded(listing.entries, PROBE_CONCURRENCY, (child) => resolvePhaseChild(walk, relDir, listing.real, child));
+	const units = resolved.filter((unit): unit is PhaseUnit => unit !== null);
+	units.sort((a, b) => compareText(a.key, b.key));
+	for (const unit of units) {
+		if (isFull(walk)) return;
+		if (unit.type === "error") {
+			add(walk, unit.entry);
+			continue;
 		}
+		const sub = await readEntries(walk, unit.relDir, unit.real);
+		if (sub.state === "error") add(walk, sub.entry);
+		else if (sub.state === "entries") collectDocuments(walk, unit.relDir, sub.real, sub.entries, "phase", PHASE_DIR.exec(unit.name)?.[1]);
 	}
 }
 
-/** A directory's entries in path order, after confirming it is a directory whose real location is inside the root. */
-async function listDir(walk: Walk, relDir: string, absDir: string): Promise<Listing> {
+async function resolvePhaseChild(walk: Walk, relDir: string, realPhases: string, child: DirEntry): Promise<PhaseUnit | null> {
+	const dirRel = `${relDir}/${child.name}`;
+	if (child.kind === "broken") return { type: "error", key: dirRel, entry: errorEntry(dirRel, "unreadable", "dangling symlink") };
+	if (child.kind !== "dir") return null;
+	const resolved = await resolveDir(walk, dirRel, join(realPhases, child.name));
+	if (resolved.state === "absent") return null;
+	if (resolved.state === "error") return { type: "error", key: dirRel, entry: resolved.entry };
+	return { type: "group", key: `${dirRel}/`, relDir: dirRel, real: resolved.real, name: child.name };
+}
+
+/** A directory, resolved: absent, an error record for it, or its real location, which is inside the root. */
+async function resolveDir(walk: Walk, relDir: string, absDir: string): Promise<Resolved> {
 	const probed = await attempt(() => walk.fs.probe(absDir));
 	if (!probed.ok) return { state: "error", entry: errorEntry(relDir, "unreadable", `probe failed: ${probed.code}`) };
 	const found = probed.value;
@@ -267,10 +315,23 @@ async function listDir(walk: Walk, relDir: string, absDir: string): Promise<List
 	if (!isInside(found.real, walk.realRoot)) {
 		return { state: "error", entry: errorEntry(relDir, "outside-root", "directory resolves outside the planning root") };
 	}
-	const listed = await attempt(() => walk.fs.readDir(found.real));
+	return { state: "dir", real: found.real };
+}
+
+/** The entries of a resolved directory, in path order. */
+async function readEntries(walk: Walk, relDir: string, real: string): Promise<Listing> {
+	const listed = await attempt(() => walk.fs.readDir(real));
 	if (!listed.ok) return { state: "error", entry: errorEntry(relDir, "unreadable", `read failed: ${listed.code}`) };
 	if (listed.value === null) return { state: "absent" };
-	return { state: "entries", real: found.real, entries: inPathOrder(listed.value) };
+	return { state: "entries", real, entries: inPathOrder(listed.value) };
+}
+
+/** A directory's entries in path order, after confirming it is a directory whose real location is inside the root. */
+async function listDir(walk: Walk, relDir: string, absDir: string): Promise<Listing> {
+	const resolved = await resolveDir(walk, relDir, absDir);
+	if (resolved.state === "absent") return { state: "absent" };
+	if (resolved.state === "error") return { state: "error", entry: resolved.entry };
+	return readEntries(walk, relDir, resolved.real);
 }
 
 /** Directory entries in path order. A directory's children sort under its name followed by `/`, as their paths do. */
