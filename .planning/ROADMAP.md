@@ -87,7 +87,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 37: LANEB** - graph inference from worktree path (completed 2026-10-21 via PR #89, merge a1b7152)
 - [x] **Phase 38: MIRROR** - mirror graph edges into Linear relations and outcomes into evidence (completed 2026-10-21 via PR #90, merge 1d4e4aa)
 - [x] **Phase 39: DISPATCH** - signed handoff packet and coord drift scan before launch (completed 2026-10-21 via PR #91, merge acb6767)
-- [x] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (code complete on main via PR #92, merge 6b7c4f2; open follow-ups: retirement restore drill (D-D3) and D-D4 acceptance)
+- [ ] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (code complete on main via PR #92, merge 6b7c4f2; open follow-ups: retirement restore drill (D-D3) and D-D4 acceptance; verification partial)
 - [x] **Phase 41: ANCHOR** - anchor evidence and teachables (completed 2026-10-21 via PR #93, merge 3466c50; no residual)
 - [x] **Phase 42: SKILL-CARD** - skills_list audit trail and the F-D4 re-ingest item (completed 2026-10-21 via PR #94, merge 3e9a106)
 - [x] **Phase 43: LANE-A** - sandbox egress allowlist and task re-adoption (completed 2026-10-21 via PR #97, merge f2138e1)
@@ -98,7 +98,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 45: Railway Resource Orchestrator** - budget ceiling $50 per month, confirmed 2026-10-21 (uplift-7/BLOCKING-UNKNOWNS.md item 8) (completed 2026-10-21 via PR #96, merge 93acd8a)
 - [x] **Phase 46: RAGFlow Advanced Hybrid RAG with Hindsight Context** - hybrid search with reranking and Hindsight context (completed 2026-10-21 via PR #98, merge 4c2c48e)
 - [x] **Phase 47: GreptimeDB + Dragonfly Predictive Analytics & Cache** - SLO burn forecasting and pattern-based cache pre-warming (completed 2026-10-21 via PR #100, merge d8accda)
-- [ ] **Phase 48: TailscaleDB Secure Unified Proxy Layer** - zero-trust database access through one Tailscale proxy with RBAC, audit and pooling (In review (draft PR #102; CI audit gate blocked by PR #99))
+- [ ] **Phase 48: TailscaleDB Secure Unified Proxy Layer** - zero-trust database access through one Tailscale proxy with RBAC, audit and pooling (In review (draft PR #102; PR #99 merged 2026-10-21; CI audit gate to re-verify on PR #102))
 - [x] **Phase 49: Hindsight Graph Memory with Greptime Events** - graph-structured Hindsight memory with causal recall (completed 2026-10-21 via PR #101, merge 2495a14)
 - [x] **Phase 50: Dragonfly Pub/Sub for Real-time Events** - real-time event propagation and event-driven cache invalidation (completed 2026-10-21 via PR #103, merge bdda262)
 - [ ] **Phase 51: Enterprise Unified Resource Fabric** - one MCP interface across all six resources, depends on phases 45 and 48 (In progress: branch gsd/p51-fabric-impl, not yet on origin; PR held behind #102)
@@ -705,7 +705,7 @@ Plans:
   1. All DBs accessed via secure proxy.
   2. Audit events for access.
 
-**Plans**: 0 plans on main. Draft PR #102 is open (branch gsd/v15-48-proxy, head 4b660f1, docs-only fix); its known-vulnerability audit check is SKIPPED, gated by PR #99.
+**Plans**: 0 plans on main. Draft PR #102 is open (branch gsd/v15-48-proxy, head 4b660f1, docs-only fix). PR #99 merged 2026-10-21; CI audit gate to re-verify on PR #102.
 
 ### Phase 49: Hindsight Graph Memory with Greptime Events
 
@@ -845,7 +845,7 @@ Plans:
 | 37. LANEB | v1.3.x | 1/1 | Complete (PR #89) | 2026-10-21 |
 | 38. MIRROR | v1.3.x | 1/1 | Complete (PR #90) | 2026-10-21 |
 | 39. DISPATCH | v1.3.x | 1/1 | Complete (PR #91) | 2026-10-21 |
-| 40. DOCS-MEMORY | v1.3.x | 1/1 | Code complete on main (PR #92); open follow-ups: retirement restore drill (D-D3) and D-D4 acceptance | 2026-10-21 |
+| 40. DOCS-MEMORY | v1.3.x | 1/1 | Code complete on main (PR #92); open follow-ups: retirement restore drill (D-D3) and D-D4 acceptance | - |
 | 41. ANCHOR | v1.3.x | 1/1 | Complete (PR #93); no residual | 2026-10-21 |
 | 42. SKILL-CARD | v1.3.x | 1/1 | Complete (PR #94) | 2026-10-21 |
 | 43. LANE-A | v1.3.x | 1/1 | Complete (PR #97) | 2026-10-21 |
@@ -853,7 +853,7 @@ Plans:
 | 45. Railway Resource Orchestrator | v1.5 | 1/1 | Complete (PR #96) | 2026-10-21 |
 | 46. RAGFlow Advanced Hybrid RAG with Hindsight Context | v1.5 | 1/1 | Complete (PR #98) | 2026-10-21 |
 | 47. GreptimeDB + Dragonfly Predictive Analytics & Cache | v1.5 | 1/1 | Complete (PR #100) | 2026-10-21 |
-| 48. TailscaleDB Secure Unified Proxy Layer | v1.5 | 0/0 | In review (draft PR #102; CI audit gate blocked by PR #99) | - |
+| 48. TailscaleDB Secure Unified Proxy Layer | v1.5 | 0/0 | In review (draft PR #102; PR #99 merged 2026-10-21; CI audit gate to re-verify on PR #102) | - |
 | 49. Hindsight Graph Memory with Greptime Events | v1.5 | 1/1 | Complete (PR #101) | 2026-10-21 |
 | 50. Dragonfly Pub/Sub for Real-time Events | v1.5 | 1/1 | Complete (PR #103) | 2026-10-21 |
 | 51. Enterprise Unified Resource Fabric | v1.5 | 0/0 | In progress (branch gsd/p51-fabric-impl, not yet on origin; PR held behind #102) | - |
