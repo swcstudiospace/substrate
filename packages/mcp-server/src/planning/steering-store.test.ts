@@ -27,6 +27,8 @@ class FakeAuditSql implements SteeringAuditSql {
 	failWith: unknown = null;
 	failInsert: unknown = null;
 	loseReplyAfterCommit = false;
+	/** Rejects the read-back only, so a committed row can be left unconfirmed. */
+	failReadBack: unknown = null;
 	private readonly hashes = new Map<string, string>();
 
 	async insertAbsent(row: SteeringAuditRow): Promise<boolean> {
@@ -41,6 +43,7 @@ class FakeAuditSql implements SteeringAuditSql {
 	}
 
 	async payloadSha256Of(directiveId: string, transition: SteeringAuditTransition): Promise<string | null> {
+		if (this.failReadBack !== null) throw this.failReadBack;
 		if (this.failWith !== null) throw this.failWith;
 		return this.hashes.get(keyOf(directiveId, transition)) ?? null;
 	}
@@ -303,5 +306,37 @@ describe("SteeringAuditSink: a lost reply after a committed write", () => {
 		sql.failInsert = null;
 		expect((await inbox.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "declined" })).ok).toBe(true);
 		expect(inbox.get("d-1")).toMatchObject({ state: "acknowledged" });
+	});
+});
+
+describe("SteeringAuditSink: a retry after a lost reply keeps the acknowledgement's content", () => {
+	test("a retry after a lost reply uses the same time and hash, and resolves to acknowledged with no AUDIT_CONFLICT", async () => {
+		const sql = new FakeAuditSql();
+		let now = 1_000_000;
+		const inbox = new SteeringInbox({
+			history: new SteeringAuditSink(sql),
+			clock: { nowMs: () => now },
+			policy: { allowlist: [HUMAN], ratePerMin: 10 },
+		});
+		expect((await inbox.enqueue(directive())).ok).toBe(true);
+
+		// The first acknowledgement commits, loses its reply, and cannot confirm the row: both attempts fail.
+		sql.loseReplyAfterCommit = true;
+		sql.failReadBack = Object.assign(new Error("read-back reset"), { code: "ECONNRESET" });
+		now = 2_000;
+		expect((await inbox.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "declined" })).ok).toBe(false);
+		expect(inbox.get("d-1")).toMatchObject({ state: "queued" });
+
+		// The retry happens later, on a clock that has moved on, and the database is healthy again.
+		sql.loseReplyAfterCommit = false;
+		sql.failReadBack = null;
+		now = 5_000;
+		const retried = await inbox.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "declined" });
+
+		expect(retried.ok).toBe(true);
+		expect(inbox.get("d-1")).toMatchObject({ state: "acknowledged", acknowledgedAtMs: 2_000 });
+		const acknowledgedRows = sql.rows.filter((row) => row.transition === "acknowledged");
+		expect(acknowledgedRows).toHaveLength(1);
+		expect(acknowledgedRows[0]?.recordedAt.getTime()).toBe(2_000);
 	});
 });

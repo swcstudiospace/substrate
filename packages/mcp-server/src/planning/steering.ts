@@ -167,6 +167,8 @@ export class SteeringInbox {
 	private readonly buckets = new Map<string, TokenBucket>();
 	/** The largest clock reading the limiter has seen. Buckets refill against it, so a clock that steps back never refills. */
 	private highestMs = Number.NEGATIVE_INFINITY;
+	/** The transition time of an acknowledgement whose audit has not yet succeeded. A retry reuses it, so its audit content is unchanged. */
+	private readonly pendingAcknowledgeAtMs = new Map<string, number>();
 	private readonly allowlist: ReadonlySet<string>;
 	private readonly capacity: number;
 	private tail: Promise<unknown> = Promise.resolve();
@@ -255,7 +257,8 @@ export class SteeringInbox {
 			return fail({ code: "confirmation-required" });
 		}
 
-		const nowMs = this.deps.clock.nowMs();
+		const nowMs = this.pendingAcknowledgeAtMs.get(directive.id) ?? this.deps.clock.nowMs();
+		this.pendingAcknowledgeAtMs.set(directive.id, nowMs);
 		const audited = await this.audit({
 			event: "acknowledged",
 			atMs: nowMs,
@@ -265,6 +268,7 @@ export class SteeringInbox {
 			confirmed,
 		});
 		if (!audited.ok) return audited;
+		this.pendingAcknowledgeAtMs.delete(directive.id);
 
 		const record: SteeringRecord = {
 			state: "acknowledged",
