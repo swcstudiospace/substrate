@@ -1439,7 +1439,8 @@ export class Substrate {
 		this.eventBus = stores?.eventBus !== undefined ? stores.eventBus() : productionEventBus(config);
 		// Phase 52 (SOTA-08): the planning reads. Presence rides the cache endpoint; with none, the sessions read says so.
 		const planningDeps = stores?.planning ?? {};
-		// Phase 54 (SOTA-10): a planning transition goes to the metrics writer when the ledger is configured, else to stdout.
+		// Phase 54 (SOTA-10): a planning transition is a metric row only when the metrics-history switch is on (the ledger's
+		// writer then stores it). Otherwise it goes to stdout alone, so the documented off switch writes no metric_samples row.
 		const transitionWriter = this.greptime;
 		this.planning = new PlanningReader({
 			settings: config.planning,
@@ -1448,9 +1449,9 @@ export class Substrate {
 			emit: planningDeps.emit ?? (async (event: EventInput) => (await this.emit(event)).stored),
 			metrics:
 				planningDeps.metrics ??
-				(transitionWriter === null
-					? stdoutMetricSink()
-					: greptimeMetricSink((rows) => transitionWriter.recordMetricSamples(rows, config.metricsHistory.ttl))),
+				(config.metricsHistory.enabled && transitionWriter !== null
+					? greptimeMetricSink((rows) => transitionWriter.recordMetricSamples(rows, config.metricsHistory.ttl))
+					: stdoutMetricSink()),
 			fallback: planningDeps.fallback,
 			clock: planningDeps.clock,
 		});
