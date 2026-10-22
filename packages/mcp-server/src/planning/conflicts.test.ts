@@ -4,6 +4,7 @@
  * conflict-sensitive writes.
  */
 import { describe, expect, test } from "bun:test";
+import { MAX_PAYLOAD_BYTES } from "../event.ts";
 import { conflictEvent, detectConflicts, gateConflictSensitiveWrite, PLANNING_CONFLICT, type ConflictInput, type PlanningConflict } from "./conflicts.ts";
 import type { ClassifiedSession, PlanningReport, TouchedPair, UnknownViewReason } from "./presence.ts";
 
@@ -281,5 +282,12 @@ describe("conflictEvent", () => {
 		const many = Array.from({ length: 40 }, (_, index) => `53-${String(index).padStart(2, "0")}`);
 		const event = conflictEvent({ ...phaseConflict, plans: many });
 		expect(event.payload).toMatchObject({ planCount: 40, plans: many.slice(0, 32) });
+	});
+
+	test("a plan shared across many phases caps the phases, keeps their full count, and stays inside the ledger's payload limit", () => {
+		const phases = Array.from({ length: 140 }, (_, index) => `${String(index).padStart(3, "0")}-${"p".repeat(115)}`);
+		const event = conflictEvent({ ...phaseConflict, key: { by: "plan", plan: "shared-plan" }, plans: ["shared-plan"], phases });
+		expect(event.payload).toMatchObject({ phaseCount: 140, phases: phases.slice(0, 32) });
+		expect(Buffer.byteLength(JSON.stringify(event.payload))).toBeLessThanOrEqual(MAX_PAYLOAD_BYTES);
 	});
 });
