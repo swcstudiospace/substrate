@@ -106,6 +106,8 @@ export class PlanningObserver {
 	private touchedOverflow = false;
 	/** The presence record has a change this process has not written yet: a complete change, a moved watcher gap, or a write that failed. Process-local. */
 	private presencePending = false;
+	/** The report the last successful heartbeat wrote. A change of view (known, or the reason it is unknown) must reach the record. Null until one is written. */
+	private written: PlanningReport | null = null;
 	/** Conflicts announced and still open, by signature. A conflict leaves the set once it is no longer detected. Process-local. */
 	private openConflicts = new Set<string>();
 	private timer: PlanningTimerHandle | undefined;
@@ -151,7 +153,10 @@ export class PlanningObserver {
 		const clock = this.deps.presence === null ? null : await readClock(this.deps.presence);
 		const nowMs = clock !== null && clock.ok ? clock.nowMs : null;
 		const gapMoved = nowMs !== null ? this.stampReport(built, nowMs) : false;
-		if (!built.ok) return { state: "unavailable", code: built.code };
+		if (!built.ok) {
+			await this.heartbeat(root, false, ttlMs);
+			return { state: "unavailable", code: built.code };
+		}
 		this.index = { root, index: built.index };
 
 		const next = snapshotOf(built.index);
@@ -221,6 +226,7 @@ export class PlanningObserver {
 	/** Heartbeats this checkout when a change is pending, the scan's `due` says one is. The record's time is replaced by the server's clock, and the record carries the report and the touched pairs. */
 	private async heartbeat(root: string, due: boolean, ttlMs: number): Promise<PlanningHeartbeat> {
 		if (due) this.presencePending = true;
+		if (this.report !== null && this.written !== null && reportViewOf(this.report) !== reportViewOf(this.written)) this.presencePending = true;
 		if (!this.presencePending) return { state: "not-due" };
 		const presence = this.deps.presence;
 		if (presence === null) return { state: "presence-unset" };
@@ -237,6 +243,7 @@ export class PlanningObserver {
 			};
 			await presence.touch(record, ttlMs);
 			this.presencePending = false;
+			this.written = this.report;
 			return { state: "written" };
 		} catch (cause: unknown) {
 			return { state: "failed", detail: errnoCode(cause) };
@@ -271,6 +278,12 @@ export class PlanningObserver {
 		}
 		this.openConflicts = next;
 	}
+}
+
+/** What a reader of a report sees: known, or the reason it is unknown. A new scan time alone is not a change of view. */
+function reportViewOf(report: PlanningReport): string {
+	if (report.status === "known") return "known";
+	return `unknown:${report.reason}`;
 }
 
 /** The number of paths a complete diff changes. A removal is counted only when the diff vouches for removals. */

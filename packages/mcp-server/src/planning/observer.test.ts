@@ -445,6 +445,34 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		const [stored] = (await presence.listWithin(10)).records;
 		expect(stored?.planning).toEqual({ status: "unknown", scannedAtMs: SERVER_NOW, reason: "scan-truncated" });
 	});
+
+	test("a failed scan writes the unknown report, and the recovered complete scan writes the known one (greptile failed-scan thread)", async () => {
+		const tree = new FakeTree({ ...GIT, [PLAN]: "---\nplan: 52-01\n---\nBODY\n", [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		const { observer } = observerOver(tree, { presence });
+		await observer.scan();
+
+		tree.setContent(PLAN, "---\nplan: 52-01\n---\nBODY, edited\n");
+		await observer.scan();
+		const [known] = (await presence.listWithin(10)).records;
+		expect(known?.planning).toEqual({ status: "known", scannedAtMs: SERVER_NOW, phases: [{ phase: "52", plans: ["52-01"] }] });
+
+		tree.remove(PLAN);
+		tree.remove(`${PHASE}/52-CONTEXT.md`);
+		backend.clockMs = SERVER_NOW + 1_000;
+		expect(await observer.scan()).toMatchObject({ state: "unavailable", code: "planning-dir-unavailable" });
+		const [failed] = (await presence.listWithin(10)).records;
+		expect(failed?.planning).toEqual({ status: "unknown", scannedAtMs: SERVER_NOW + 1_000, reason: "scan-failed" });
+
+		tree.setContent(PLAN, "---\nplan: 52-01\n---\nBODY, edited\n");
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context\n");
+		backend.clockMs = SERVER_NOW + 2_000;
+		expect(await observer.scan()).toMatchObject({ state: "observed", heartbeat: { state: "written" } });
+		const [recovered] = (await presence.listWithin(10)).records;
+		expect(recovered?.planning).toEqual({ status: "known", scannedAtMs: SERVER_NOW + 2_000, phases: [{ phase: "52", plans: ["52-01"] }] });
+	});
 });
 
 describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => {
