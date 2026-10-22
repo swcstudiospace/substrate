@@ -3,7 +3,7 @@
  * the rest of the index intact, refusal of anything that resolves outside the root, and bounds.
  */
 import { describe, expect, test } from "bun:test";
-import { buildPlanningIndex, isErrorRecord, readFrontmatter, type PlanningIndex, type PlanningIndexResult, type PlanningRecord } from "./index.ts";
+import { PROBE_CONCURRENCY, buildPlanningIndex, isErrorRecord, mapBounded, readFrontmatter, type PlanningIndex, type PlanningIndexResult, type PlanningRecord } from "./index.ts";
 import { FakeTree, TREE_ROOT } from "./tree.fixtures.ts";
 
 const P = `${TREE_ROOT}/.planning`;
@@ -297,6 +297,49 @@ describe("buildPlanningIndex: directory errors keep path order under a cutoff", 
 		expect(cut.index.records).toHaveLength(1);
 		expect(cut.index.records[0]).toMatchObject({ path: ".planning/phases/52-a", error: { code: "outside-root" } });
 		expect(JSON.stringify(cut.index.records)).not.toContain("OUTSIDE-PHASE");
+	});
+});
+
+describe("bounded fan-out", () => {
+	test("mapBounded never has more than the limit in flight, and returns results in input order", async () => {
+		let inFlight = 0;
+		let most = 0;
+		const doubled = await mapBounded([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 3, async (value) => {
+			inFlight += 1;
+			most = Math.max(most, inFlight);
+			await Promise.resolve();
+			await Promise.resolve();
+			inFlight -= 1;
+			return value * 2;
+		});
+		expect(doubled).toEqual([2, 4, 6, 8, 10, 12, 14, 16, 18, 20]);
+		expect(most).toBe(3);
+	});
+
+	test("mapBounded refuses a non-positive limit", async () => {
+		await expect(mapBounded([1], 0, async (value) => value)).rejects.toThrow(RangeError);
+	});
+
+	test("phase children are resolved with at most PROBE_CONCURRENCY probes in flight, observed through the fs", async () => {
+		const files: Record<string, string> = {};
+		for (let n = 0; n < 12; n += 1) files[`${P}/phases/${String(n).padStart(2, "0")}-x/PLAN.md`] = "# p";
+		const tree = new FakeTree(files);
+		const result = await buildPlanningIndex(TREE_ROOT, { fs: tree, limits: { maxFiles: 500, maxBytes: 262_144 } });
+		if (!result.ok) throw new Error(result.code);
+		expect(result.index.records).toHaveLength(12);
+		expect(tree.maxProbesInFlight).toBe(PROBE_CONCURRENCY);
+	});
+
+	test("with maxFiles 1 the walk lists only the phase directories the cutoff needs, observed through the fs", async () => {
+		const files: Record<string, string> = {};
+		for (let n = 0; n < 12; n += 1) files[`${P}/phases/${String(n).padStart(2, "0")}-x/PLAN.md`] = "# p";
+		const tree = new FakeTree(files);
+		const result = await buildPlanningIndex(TREE_ROOT, { fs: tree, limits: { maxFiles: 1, maxBytes: 262_144 } });
+		if (!result.ok) throw new Error(result.code);
+		expect(result.index.truncated).toBe(true);
+		expect(result.index.records.map((record) => record.path)).toEqual([".planning/phases/00-x/PLAN.md"]);
+		// The phases listing, then the two directories that fill the cap (one past maxFiles). Nothing after them is listed.
+		expect(tree.listed.filter((path) => path.startsWith(`${P}/phases`))).toEqual([`${P}/phases`, `${P}/phases/00-x`, `${P}/phases/01-x`]);
 	});
 });
 

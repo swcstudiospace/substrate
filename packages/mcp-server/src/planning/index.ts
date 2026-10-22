@@ -203,6 +203,28 @@ async function attempt<T>(run: () => Promise<T>): Promise<Attempt<T>> {
 	}
 }
 
+/** Most stat or probe calls in flight at once, in the walk and in the directory reader. Small and fixed. */
+export const PROBE_CONCURRENCY = 4;
+
+/**
+ * `run` over `items` with at most `limit` calls in flight. Calls start in input order and the results come back in input
+ * order, whatever order the calls finish in, so the output does not depend on timing.
+ */
+export async function mapBounded<T, R>(items: readonly T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
+	assertLimit(limit, "limit");
+	const results = new Array<R>(items.length);
+	let next = 0;
+	const worker = async (): Promise<void> => {
+		while (next < items.length) {
+			const index = next;
+			next += 1;
+			results[index] = await run(items[index] as T);
+		}
+	};
+	await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+	return results;
+}
+
 /** Collectors stop once `cap` candidates are held. Walk order is path order, so the kept set is the first `maxFiles` by path. */
 function isFull(walk: Walk): boolean {
 	return walk.found.length >= walk.cap;
@@ -256,11 +278,9 @@ async function collectPhases(walk: Walk): Promise<void> {
 		return;
 	}
 	if (listing.state === "absent") return;
-	const units: PhaseUnit[] = [];
-	for (const child of listing.entries) {
-		const unit = await resolvePhaseChild(walk, relDir, listing.real, child);
-		if (unit !== null) units.push(unit);
-	}
+	// Resolution is the only fan-out, and it is bounded: a directory with many links never has more than PROBE_CONCURRENCY probes out.
+	const resolved = await mapBounded(listing.entries, PROBE_CONCURRENCY, (child) => resolvePhaseChild(walk, relDir, listing.real, child));
+	const units = resolved.filter((unit): unit is PhaseUnit => unit !== null);
 	units.sort((a, b) => compareText(a.key, b.key));
 	for (const unit of units) {
 		if (isFull(walk)) return;
