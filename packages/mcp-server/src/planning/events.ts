@@ -3,8 +3,8 @@
  *
  * The event uses an existing vocabulary entry: kind `note` on the `substrate` host-job surface.
  * `EVENT_KINDS` is frozen at twelve and gains nothing here. The payload is
- * `{ kind: "planning.changed", repo, sessionId, added, removed, changed, truncated }`. Its lists hold paths
- * only, never file text, and are budgeted to the ledger's payload limit; `truncated` counts the paths left out per list.
+ * `{ kind: "planning.changed", repo, sessionId, added, removed, changed, truncated }`. Each list holds, per path, its sha256 before
+ * and after (`{ path, before, after }`), never file text, and is budgeted to the ledger's payload limit; `truncated` counts the paths left out per list.
  * Both the summary and the payload pass through the existing redactor.
  *
  * The publish port wraps the existing event bus. The bus carries wake-up hints only (D50-b), so a
@@ -14,7 +14,7 @@ import type { EventBus, EventHint } from "../event-bus.ts";
 import { MAX_PAYLOAD_BYTES } from "../event.ts";
 import { redact, redactValue } from "../redact.ts";
 import type { EventInput } from "../types.ts";
-import { diffPlanningIndex, type PlanningDiff, type PlanningSnapshot } from "./diff.ts";
+import { diffPlanningIndex, type PathChange, type PlanningDiff, type PlanningSnapshot } from "./diff.ts";
 import { SESSION_ID_RE } from "./presence.ts";
 
 export const PLANNING_CHANGED = "planning.changed";
@@ -28,9 +28,9 @@ export type PlanningChangePayload = {
 	kind: "planning.changed";
 	repo: string;
 	sessionId: string;
-	added: string[];
-	removed: string[];
-	changed: string[];
+	added: PathChange[];
+	removed: PathChange[];
+	changed: PathChange[];
 	/** How many paths of each list were not listed. Present only when at least one list was truncated. */
 	truncated?: Record<"added" | "removed" | "changed", number>;
 };
@@ -65,8 +65,8 @@ export function planningChangeEvent(input: PlanningChangeInput): EventInput | nu
 	if (!input.diff.complete || removed === null) throw new TypeError("a partial planning diff is not an event");
 	if (added.length + removed.length + changed.length === 0) return null;
 
-	const lists: Record<ListName, string[]> = { added, removed, changed };
-	const kept: Record<ListName, string[]> = { added: [], removed: [], changed: [] };
+	const lists: Record<ListName, PathChange[]> = { added, removed, changed };
+	const kept: Record<ListName, PathChange[]> = { added: [], removed: [], changed: [] };
 	const payloadWith = (truncated: Record<ListName, number> | null): PlanningChangePayload => ({
 		kind: PLANNING_CHANGED,
 		repo: input.repo,
@@ -80,9 +80,9 @@ export function planningChangeEvent(input: PlanningChangeInput): EventInput | nu
 	const fullTruncation = { added: lists.added.length, removed: lists.removed.length, changed: lists.changed.length };
 	let budgetSpent = false;
 	for (const name of LISTS) {
-		for (const path of lists[name]) {
+		for (const change of lists[name]) {
 			if (!budgetSpent && kept[name].length < MAX_EVENT_PATHS) {
-				kept[name].push(path);
+				kept[name].push(change);
 				if (jsonBytes(redactValue(payloadWith(fullTruncation))) <= MAX_PAYLOAD_BYTES) continue;
 				kept[name].pop();
 				budgetSpent = true;

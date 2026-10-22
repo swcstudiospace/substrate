@@ -10,7 +10,7 @@
  * `/proc/self/fd` (Linux). Where it is missing the read fails, which the index records per path.
  */
 import { createHash } from "node:crypto";
-import { constants, type Dirent } from "node:fs";
+import { constants, type BigIntStats, type Dirent } from "node:fs";
 import { type FileHandle, lstat, open, readFile, readdir, readlink, realpath, stat } from "node:fs/promises";
 import { errnoCode, type DirEntry, type OpenResult, type PlanningFs } from "./index.ts";
 
@@ -54,19 +54,28 @@ export function nodePlanningFs(): PlanningFs {
  * Opens `path` and reads through that descriptor. `O_NONBLOCK` keeps a FIFO from blocking the open:
  * it then fails the regular-file check and is never read. The real path is what `/proc/self/fd`
  * names for the descriptor, so `accept` judges the file that is read, not the path that named it.
+ * The fingerprint is taken from the same descriptor before any byte is read, and `reuse` decides
+ * whether the bytes are needed at all.
  */
-async function openVerified(path: string, limit: number, accept: (real: string) => boolean): Promise<OpenResult> {
+async function openVerified(path: string, limit: number, accept: (real: string) => boolean, reuse: (signature: string) => boolean): Promise<OpenResult> {
 	const handle = await absentAsNull(() => open(path, constants.O_RDONLY | constants.O_NONBLOCK));
 	if (handle === null) return { state: "absent" };
 	try {
 		const real = await readlink(`/proc/self/fd/${handle.fd}`);
 		if (!accept(real)) return { state: "refused" };
-		const info = await handle.stat();
-		if (!info.isFile()) return { state: "opened", real, isFile: false, bytes: new Uint8Array(0) };
-		return { state: "opened", real, isFile: true, bytes: await readAtMost(handle, limit) };
+		const info = await handle.stat({ bigint: true });
+		const signature = signatureOf(info);
+		if (!info.isFile()) return { state: "opened", real, isFile: false, signature, bytes: null };
+		if (reuse(signature)) return { state: "opened", real, isFile: true, signature, bytes: null };
+		return { state: "opened", real, isFile: true, signature, bytes: await readAtMost(handle, limit) };
 	} finally {
 		await handle.close();
 	}
+}
+
+/** The stat fingerprint of a file: device, inode, size and both nanosecond timestamps. A change to any of them is a change. */
+function signatureOf(info: BigIntStats): string {
+	return `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
 }
 
 /** Up to `limit` bytes from the descriptor's current position. Never more, whatever the file's size now is. */

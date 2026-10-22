@@ -1,10 +1,11 @@
 /**
- * The planning diff: add, change and remove by path and hash only. It never carries text. A truncated side
- * never produces removals (or additions it cannot vouch for), and neither does a directory the walk could not list.
+ * The planning diff: add, change and remove by path and hash, each change carrying the hash before and after. It never
+ * carries text. A truncated side never produces removals (or additions it cannot vouch for), and neither does a
+ * directory the walk could not list.
  */
 import { describe, expect, test } from "bun:test";
 import { diffPlanningIndex, type PlanningSnapshot } from "./diff.ts";
-import { buildPlanningIndex, type PlanningIndexResult } from "./index.ts";
+import { buildPlanningIndex, snapshotOf } from "./index.ts";
 import { FakeTree, TREE_ROOT } from "./tree.fixtures.ts";
 
 const H = (tag: string) => tag.repeat(64).slice(0, 64);
@@ -12,7 +13,7 @@ const whole = (records: PlanningSnapshot["records"]): PlanningSnapshot => ({ rec
 const partial = (records: PlanningSnapshot["records"]): PlanningSnapshot => ({ records, truncated: true, unlisted: [] });
 
 describe("diffPlanningIndex", () => {
-	test("reports added, removed and changed paths, each sorted, and nothing else", () => {
+	test("reports added, removed and changed paths, each sorted, with the hash before and after", () => {
 		const previous = [
 			{ path: ".planning/STATE.md", sha256: H("a") },
 			{ path: ".planning/ROADMAP.md", sha256: H("b") },
@@ -27,9 +28,12 @@ describe("diffPlanningIndex", () => {
 		const diff = diffPlanningIndex(whole(previous), whole(next));
 		expect(diff).toEqual({
 			complete: true,
-			added: [".planning/new-a.md", ".planning/new-z.md"],
-			removed: [".planning/old.md"],
-			changed: [".planning/STATE.md"],
+			added: [
+				{ path: ".planning/new-a.md", before: null, after: H("f") },
+				{ path: ".planning/new-z.md", before: null, after: H("e") },
+			],
+			removed: [{ path: ".planning/old.md", before: H("c"), after: null }],
+			changed: [{ path: ".planning/STATE.md", before: H("a"), after: H("d") }],
 		});
 		expect(Object.keys(diff).sort()).toEqual(["added", "changed", "complete", "removed"]);
 	});
@@ -42,8 +46,8 @@ describe("diffPlanningIndex", () => {
 	test("a document that becomes unreadable (hash to null) is a change, and so is its recovery", () => {
 		const readable = [{ path: ".planning/STATE.md", sha256: H("1") }];
 		const unreadable = [{ path: ".planning/STATE.md", sha256: null }];
-		expect(diffPlanningIndex(whole(readable), whole(unreadable)).changed).toEqual([".planning/STATE.md"]);
-		expect(diffPlanningIndex(whole(unreadable), whole(readable)).changed).toEqual([".planning/STATE.md"]);
+		expect(diffPlanningIndex(whole(readable), whole(unreadable)).changed).toEqual([{ path: ".planning/STATE.md", before: H("1"), after: null }]);
+		expect(diffPlanningIndex(whole(unreadable), whole(readable)).changed).toEqual([{ path: ".planning/STATE.md", before: null, after: H("1") }]);
 		expect(diffPlanningIndex(whole(unreadable), whole(unreadable)).changed).toEqual([]);
 	});
 
@@ -78,18 +82,23 @@ describe("diffPlanningIndex with a truncated side", () => {
 			{ path: ".planning/ROADMAP.md", sha256: H("2") },
 		];
 		const diff = diffPlanningIndex(partial(previous), whole(next));
-		expect(diff).toEqual({ complete: false, added: [], removed: null, changed: [".planning/PROJECT.md"] });
+		expect(diff).toEqual({
+			complete: false,
+			added: [],
+			removed: null,
+			changed: [{ path: ".planning/PROJECT.md", before: H("1"), after: H("9") }],
+		});
 	});
 
 	test("paths both sides hold are still compared when either side is truncated", () => {
 		const previous = [{ path: ".planning/STATE.md", sha256: H("1") }];
 		const next = [{ path: ".planning/STATE.md", sha256: H("2") }];
-		expect(diffPlanningIndex(partial(previous), partial(next)).changed).toEqual([".planning/STATE.md"]);
+		expect(diffPlanningIndex(partial(previous), partial(next)).changed).toEqual([{ path: ".planning/STATE.md", before: H("1"), after: H("2") }]);
 	});
 
 	test("with both sides complete, a real removal is reported again", () => {
 		const previous = [{ path: ".planning/old.md", sha256: H("1") }];
-		expect(diffPlanningIndex(whole(previous), whole([])).removed).toEqual([".planning/old.md"]);
+		expect(diffPlanningIndex(whole(previous), whole([])).removed).toEqual([{ path: ".planning/old.md", before: H("1"), after: null }]);
 	});
 });
 
@@ -116,15 +125,15 @@ describe("diffPlanningIndex with an unlisted directory", () => {
 		const before = await buildPlanningIndex(TREE_ROOT, { fs: unreadable, limits });
 		const after = await buildPlanningIndex(TREE_ROOT, { fs: readable, limits });
 		if (!before.ok || !after.ok) throw new Error("index failed");
-		const diff = diffPlanningIndex(snapshotOf(before), snapshotOf(after));
-		expect(diff.added).toEqual([".planning/phases/52-x/NEW.md", ".planning/phases/52-x/PLAN.md"]);
+		const diff = diffPlanningIndex(snapshotOf(before.index), snapshotOf(after.index));
+		expect(diff.added.map((change) => change.path)).toEqual([".planning/phases/52-x/NEW.md", ".planning/phases/52-x/PLAN.md"]);
 		expect(diff.complete).toBe(false);
 	});
 
 	test("a path that merely shares a prefix with an unlisted directory is still a removal", () => {
 		const previous = [{ path: ".planning/phases/52-xy/PLAN.md", sha256: H("1") }];
 		const diff = diffPlanningIndex(whole(previous), { records: [], truncated: false, unlisted: [".planning/phases/52-x"] });
-		expect(diff.removed).toEqual([".planning/phases/52-xy/PLAN.md"]);
+		expect(diff.removed).toEqual([{ path: ".planning/phases/52-xy/PLAN.md", before: H("1"), after: null }]);
 	});
 });
 
@@ -145,13 +154,8 @@ describe("a failed directory read is unknown, never removed", () => {
 		if (!scanned.ok || !after.ok) throw new Error("index failed");
 
 		expect(after.index.unlisted).toEqual([".planning/phases/52-x"]);
-		const diff = diffPlanningIndex(snapshotOf(scanned), snapshotOf(after));
+		const diff = diffPlanningIndex(snapshotOf(scanned.index), snapshotOf(after.index));
 		expect(diff.removed).toEqual([]);
-		expect(diff.removed).not.toContain(".planning/phases/52-x/PLAN.md");
-		expect(diff.removed).not.toContain(".planning/phases/52-x/CONTEXT.md");
+		expect(diff.complete).toBe(false);
 	});
 });
-
-function snapshotOf(result: Extract<PlanningIndexResult, { ok: true }>): PlanningSnapshot {
-	return { records: result.index.records, truncated: result.index.truncated, unlisted: result.index.unlisted };
-}

@@ -1,20 +1,25 @@
 /**
  * The file-first planning index (phase 52, SOTA-08).
  *
- * Reads `.planning/` under a checkout and describes each planning document by path, hash and
- * size. A record carries metadata only: the text is hashed and its frontmatter parsed, then the
- * text is dropped. The walk is read-only.
+ * Reads `.planning/` under a checkout and keys each document's content by its sha256. The index holds metadata only: a
+ * content entry has the byte size and the parsed frontmatter, never the text. Identical bytes at any number of paths
+ * share one content entry, whose `paths` lists them. Each described document has a path entry that names its content by
+ * sha256, and each path that could not be described has an error entry.
  *
- * Refused, never read: any path whose real location is outside the checkout root, symlinks
- * included. Bounded: at most `maxFiles` documents are described (the rest set `truncated`), and
- * a document over `maxBytes` is an error record, not read. One bad file is an error record for
- * that path; the rest of the index is still built.
+ * `buildPlanningIndex` is the full rebuild. `updatePlanningIndex` takes the previous index of the same root and reuses a
+ * document's content while its stat fingerprint (`signature`) is unchanged, so an unchanged document is neither read nor
+ * hashed again. For the same tree the two results are equal.
  *
- * Every filesystem and hash call goes through the injected `PlanningFs`, so the tests run on a
- * fake tree. `nodePlanningFs()` in `fs.ts` is the production adapter.
+ * Refused, never read: any path whose real location is outside the checkout root, symlinks included. Bounded: at most
+ * `maxFiles` documents are described (the rest set `truncated`), and a document over `maxBytes` is an error record, not
+ * read. One bad file is an error record for that path; the rest of the index is still built.
+ *
+ * Every filesystem and hash call goes through the injected `PlanningFs`, so the tests run on a fake tree.
+ * `nodePlanningFs()` in `fs.ts` is the production adapter.
  */
 import { isAbsolute, join, relative, sep } from "node:path";
 import { parseFrontmatter } from "../skills/frontmatter.ts";
+import type { PlanningSnapshot } from "./diff.ts";
 
 export const PLANNING_DIR = ".planning";
 
@@ -22,6 +27,7 @@ export type PlanningKind = "roadmap" | "state" | "project" | "config" | "milesto
 
 export type PlanningRecordErrorCode = "outside-root" | "too-large" | "unreadable" | "malformed-frontmatter";
 
+/** A described document, as a record view shows it: its path facts and the size and frontmatter of its content. */
 export interface PlanningFileRecord {
 	path: string;
 	kind: PlanningKind;
@@ -47,9 +53,33 @@ export function isErrorRecord(record: PlanningRecord): record is PlanningErrorRe
 	return "error" in record;
 }
 
+/** The facts of one content, held under its sha256 in `PlanningIndex.contents`. */
+export interface PlanningContent {
+	bytes: number;
+	/** Parsed from the text when the text opens with a `---` fence. Absent otherwise. */
+	frontmatter?: Record<string, unknown>;
+	/** Every document path whose bytes hash to this key, sorted. */
+	paths: string[];
+}
+
+/** One described document, held under its path in `PlanningIndex.documents`. */
+export interface PlanningDocument {
+	kind: PlanningKind;
+	/** The key of the document's content in `PlanningIndex.contents`. */
+	sha256: string;
+	phase?: string;
+	plan?: string;
+	/** The stat fingerprint the content was read under. An incremental update reuses the content while it still matches. */
+	signature: string;
+}
+
 export interface PlanningIndex {
-	/** Sorted by path. Byte-identical across builds of the same files. */
-	records: PlanningRecord[];
+	/** Keyed by sha256, sorted by key. Identical bytes at any paths share one entry. */
+	contents: Record<string, PlanningContent>;
+	/** Keyed by path, sorted. Every document that was described. */
+	documents: Record<string, PlanningDocument>;
+	/** Keyed by path, sorted. Every path that could not be described. */
+	errors: Record<string, PlanningErrorRecord>;
 	/** True when more documents existed than `maxFiles`; the kept ones are the first by path. */
 	truncated: boolean;
 	/** Directories the walk could not list (an error record names each). Their documents are unknown, so a diff must not read them as removed. Sorted. */
@@ -66,8 +96,15 @@ export interface DirEntry {
 	kind: "file" | "dir" | "link" | "other";
 }
 
-/** What `openRead` found. `refused` means `accept` rejected the real path, and nothing was read. */
-export type OpenResult = { state: "absent" } | { state: "refused" } | { state: "opened"; real: string; isFile: boolean; bytes: Uint8Array };
+/**
+ * What `openRead` found. `refused` means `accept` rejected the real path, and nothing was read. `signature` is the stat
+ * fingerprint of the descriptor, taken before any byte is read. `bytes` is null when `reuse` accepted that signature, so
+ * the file was not read, and also for a file that is not regular.
+ */
+export type OpenResult =
+	| { state: "absent" }
+	| { state: "refused" }
+	| { state: "opened"; real: string; isFile: boolean; signature: string; bytes: Uint8Array | null };
 
 /** What `probe` found: no entry, a link whose target is missing, or an entry with its real location. */
 export type Probe = { state: "absent" } | { state: "dangling" } | { state: "present"; real: string; isFile: boolean; isDir: boolean };
@@ -85,11 +122,12 @@ export interface PlanningFs {
 	statFile(path: string): Promise<{ isFile: boolean; size: number } | null>;
 	readFile(path: string): Promise<Uint8Array>;
 	/**
-	 * Open `path` and read through that one descriptor. `accept` receives the real path the descriptor
-	 * refers to, before any byte is read; a refusal reads nothing. At most `limit` bytes are returned,
-	 * so a file that grows after it was listed is still read no further than the cap.
+	 * Open `path` and read through that one descriptor. `accept` receives the real path the descriptor refers to, before any
+	 * byte is read; a refusal reads nothing. The descriptor's stat fingerprint is taken next and passed to `reuse`: when
+	 * `reuse` returns true, no byte is read. Otherwise at most `limit` bytes are returned, so a file that grows after it was
+	 * listed is still read no further than the cap.
 	 */
-	openRead(path: string, limit: number, accept: (real: string) => boolean): Promise<OpenResult>;
+	openRead(path: string, limit: number, accept: (real: string) => boolean, reuse: (signature: string) => boolean): Promise<OpenResult>;
 	sha256(bytes: Uint8Array): string;
 }
 
@@ -116,6 +154,8 @@ interface Walk {
 	realRoot: string;
 	planningReal: string;
 	maxBytes: number;
+	/** The index an incremental update starts from, or null for a full rebuild. */
+	previous: PlanningIndex | null;
 	/** Candidates collected so far, in path order. */
 	found: Entry[];
 	/** The most candidates collected: one past `maxFiles`. */
@@ -151,10 +191,28 @@ type PhaseUnit = { type: "error"; key: string; entry: ErrorEntry } | { type: "gr
 /** A directory resolved: absent, an error record for it, or its real location, which is inside the root. */
 type Resolved = { state: "absent" } | { state: "error"; entry: ErrorEntry } | { state: "dir"; real: string } | { state: "file" };
 
+/** One document described: its path entry and its content, or the error record for its path. */
+type Described =
+	| { ok: true; document: PlanningDocument; sha256: string; bytes: number; frontmatter: Record<string, unknown> | undefined }
+	| { ok: false; record: PlanningErrorRecord };
+
 export type Frontmatter = { state: "none" } | { state: "parsed"; data: Record<string, unknown> } | { state: "malformed" };
 
-/** Build the index of `<root>/.planning`. The root must be absolute; the config layer guarantees it. */
+/** The full rebuild of `<root>/.planning`. The root must be absolute; the config layer guarantees it. */
 export async function buildPlanningIndex(root: string, deps: PlanningIndexDeps): Promise<PlanningIndexResult> {
+	return scanPlanning(root, deps, null);
+}
+
+/**
+ * The index of `<root>/.planning` as it stands now, starting from `previous`, the index of the same root. A document whose
+ * stat fingerprint is unchanged keeps its content and is neither read nor hashed again; every other document is read. The
+ * result equals `buildPlanningIndex` over the same tree.
+ */
+export async function updatePlanningIndex(root: string, deps: PlanningIndexDeps, previous: PlanningIndex): Promise<PlanningIndexResult> {
+	return scanPlanning(root, deps, previous);
+}
+
+async function scanPlanning(root: string, deps: PlanningIndexDeps, previous: PlanningIndex | null): Promise<PlanningIndexResult> {
 	const { fs, limits } = deps;
 	assertLimit(limits.maxFiles, "maxFiles");
 	assertLimit(limits.maxBytes, "maxBytes");
@@ -172,17 +230,76 @@ export async function buildPlanningIndex(root: string, deps: PlanningIndexDeps):
 	if (!isInside(planningFound.real, realRoot)) return { ok: false, code: "planning-dir-outside-root" };
 
 	// One past the limit is collected and no more: seeing it proves the index is truncated, and nothing past it is listed.
-	const walk: Walk = { fs, realRoot, planningReal: planningFound.real, maxBytes: limits.maxBytes, found: [], cap: limits.maxFiles + 1, unlisted: [] };
+	const walk: Walk = {
+		fs,
+		realRoot,
+		planningReal: planningFound.real,
+		maxBytes: limits.maxBytes,
+		previous,
+		found: [],
+		cap: limits.maxFiles + 1,
+		unlisted: [],
+	};
 	await collectTopLevel(walk);
 	await collectMilestones(walk);
 	await collectPhases(walk);
 
 	const kept = walk.found.slice(0, limits.maxFiles);
-	const records: PlanningRecord[] = [];
+	const contents = new Map<string, PlanningContent>();
+	const documents: Record<string, PlanningDocument> = {};
+	const errors: Record<string, PlanningErrorRecord> = {};
 	for (const entry of kept) {
-		records.push(entry.type === "error" ? entry.record : await readDocument(walk, entry));
+		if (entry.type === "error") {
+			errors[entry.path] = entry.record;
+			continue;
+		}
+		const described = await describeDocument(walk, entry);
+		if (!described.ok) {
+			errors[entry.path] = described.record;
+			continue;
+		}
+		documents[entry.path] = described.document;
+		const held = contents.get(described.sha256);
+		if (held === undefined) {
+			const content: PlanningContent = { bytes: described.bytes, paths: [entry.path] };
+			if (described.frontmatter !== undefined) content.frontmatter = described.frontmatter;
+			contents.set(described.sha256, content);
+		} else {
+			held.paths.push(entry.path);
+		}
 	}
-	return { ok: true, index: { records, truncated: walk.found.length > limits.maxFiles, unlisted: [...walk.unlisted].sort(compareText) } };
+	return {
+		ok: true,
+		index: {
+			contents: sortedRecord(contents),
+			documents,
+			errors,
+			truncated: walk.found.length > limits.maxFiles,
+			unlisted: [...walk.unlisted].sort(compareText),
+		},
+	};
+}
+
+/** The records of an index, sorted by path: every described document, then every error, merged in path order. */
+export function indexRecords(index: PlanningIndex): PlanningRecord[] {
+	const records: PlanningRecord[] = [];
+	for (const [path, document] of Object.entries(index.documents)) {
+		const content = index.contents[document.sha256];
+		if (content === undefined) throw new Error(`planning index holds no content for ${path}`);
+		const record: PlanningFileRecord = { path, kind: document.kind, sha256: document.sha256, bytes: content.bytes };
+		if (document.phase !== undefined) record.phase = document.phase;
+		if (document.plan !== undefined) record.plan = document.plan;
+		if (content.frontmatter !== undefined) record.frontmatter = content.frontmatter;
+		records.push(record);
+	}
+	records.push(...Object.values(index.errors));
+	return records.sort((a, b) => compareText(a.path, b.path));
+}
+
+/** The diff's view of an index: each record's path and hash (null for an error), with the truncation and unlisted directories. */
+export function snapshotOf(index: PlanningIndex): PlanningSnapshot {
+	const records = indexRecords(index).map((record) => ({ path: record.path, sha256: record.sha256 }));
+	return { records, truncated: index.truncated, unlisted: index.unlisted };
 }
 
 /** The frontmatter of a document: none, a parsed mapping, or malformed. Only `---` fenced blocks count. */
@@ -407,36 +524,64 @@ async function collectDocuments(
 	}
 }
 
-async function readDocument(walk: Walk, entry: FileEntry): Promise<PlanningRecord> {
-	const fail = (code: PlanningRecordErrorCode, detail: string, sha256: string | null = null, bytes: number | null = null) =>
-		errorRecord(entry.path, code, detail, { kind: entry.kind, sha256, bytes });
+/**
+ * The content a previous index holds for `path` under `signature`, when it may be reused under the current limits. A
+ * document over the current `maxBytes` is never reused, so the limit applies as it would in a full rebuild.
+ */
+function reusableContent(walk: Walk, path: string, signature: string): { sha256: string; bytes: number; frontmatter: Record<string, unknown> | undefined } | null {
+	const prior: PlanningDocument | undefined = walk.previous?.documents[path];
+	if (prior === undefined || prior.signature !== signature) return null;
+	const content: PlanningContent | undefined = walk.previous?.contents[prior.sha256];
+	if (content === undefined || content.bytes > walk.maxBytes) return null;
+	return { sha256: prior.sha256, bytes: content.bytes, frontmatter: content.frontmatter };
+}
 
-	// One descriptor does the root check and the read. The real path is checked before any byte is read, and
+async function describeDocument(walk: Walk, entry: FileEntry): Promise<Described> {
+	const fail = (code: PlanningRecordErrorCode, detail: string, sha256: string | null = null, bytes: number | null = null): Described => ({
+		ok: false,
+		record: errorRecord(entry.path, code, detail, { kind: entry.kind, sha256, bytes }),
+	});
+
+	// One descriptor does the root check, the fingerprint and the read. The real path is checked before any byte is read, and
 	// at most maxBytes + 1 bytes are read, so a file that grows after it was listed is cut off at the cap.
-	const opened = await attempt(() => walk.fs.openRead(entry.abs, walk.maxBytes + 1, (real) => isInside(real, walk.realRoot)));
+	const opened = await attempt(() =>
+		walk.fs.openRead(
+			entry.abs,
+			walk.maxBytes + 1,
+			(real) => isInside(real, walk.realRoot),
+			(signature) => reusableContent(walk, entry.path, signature) !== null,
+		),
+	);
 	if (!opened.ok) return fail("unreadable", `open failed: ${opened.code}`);
 	const found = opened.value;
 	if (found.state === "absent") return fail("unreadable", "file disappeared during the walk");
 	if (found.state === "refused") return fail("outside-root", "file resolves outside the planning root");
 	if (!found.isFile) return fail("unreadable", "not a regular file");
+	if (found.bytes === null) {
+		// The fingerprint matched the previous index, so the bytes were not read. The content is the previous one.
+		const reused = reusableContent(walk, entry.path, found.signature);
+		if (reused === null) return fail("unreadable", "unchanged document has no reusable content");
+		return describedOf(entry, found.signature, reused.sha256, reused.bytes, reused.frontmatter);
+	}
 	// Too large is reported without a byte count: the file was not read to its end.
 	if (found.bytes.byteLength > walk.maxBytes) return fail("too-large", `exceeds ${walk.maxBytes} bytes`);
 
 	const sha256 = walk.fs.sha256(found.bytes);
 	const bytes = found.bytes.byteLength;
-
 	const text = decodeUtf8(found.bytes);
 	if (text === null) return fail("unreadable", "not valid UTF-8", sha256, bytes);
-	const frontmatter: Frontmatter = entry.path.endsWith(".md") ? readFrontmatter(text) : { state: "none" };
+	const frontmatter = readFrontmatter(text);
 	if (frontmatter.state === "malformed") {
 		return fail("malformed-frontmatter", "frontmatter has no closing fence or is not a YAML mapping", sha256, bytes);
 	}
+	return describedOf(entry, found.signature, sha256, bytes, frontmatter.state === "parsed" ? frontmatter.data : undefined);
+}
 
-	const record: PlanningFileRecord = { path: entry.path, kind: entry.kind, sha256, bytes };
-	if (entry.phase !== undefined) record.phase = entry.phase;
-	if (entry.plan !== undefined) record.plan = entry.plan;
-	if (frontmatter.state === "parsed") record.frontmatter = frontmatter.data;
-	return record;
+function describedOf(entry: FileEntry, signature: string, sha256: string, bytes: number, frontmatter: Record<string, unknown> | undefined): Described {
+	const document: PlanningDocument = { kind: entry.kind, sha256, signature };
+	if (entry.phase !== undefined) document.phase = entry.phase;
+	if (entry.plan !== undefined) document.plan = entry.plan;
+	return { ok: true, document, sha256, bytes, frontmatter };
 }
 
 function errorEntry(path: string, code: PlanningRecordErrorCode, detail: string, kind?: PlanningKind): ErrorEntry {
@@ -467,6 +612,13 @@ function decodeUtf8(bytes: Uint8Array): string | null {
 		// Not UTF-8: the caller turns this into an `unreadable` record for the path.
 		return null;
 	}
+}
+
+/** A map as a record whose keys are in code-unit order. The order of the keys is part of the output. */
+function sortedRecord<T>(entries: Map<string, T>): Record<string, T> {
+	const out: Record<string, T> = {};
+	for (const [key, value] of [...entries].sort(([a], [b]) => compareText(a, b))) out[key] = value;
+	return out;
 }
 
 function assertLimit(value: number, name: string): void {
