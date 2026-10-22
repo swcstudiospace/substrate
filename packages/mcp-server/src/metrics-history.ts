@@ -34,7 +34,6 @@ import {
 	BRIEF_RECALL_RESULTS,
 	CACHE_METRIC_RESULTS,
 	DOCS_SEARCH_OUTCOMES,
-	ENDPOINT_PROXY_PLANES_METRIC,
 	INDEX_ARCHIVE_AGE_METRIC,
 	MEMORY_EXPIRED_MODES,
 	METRIC,
@@ -141,7 +140,6 @@ export const EXTENDED_METRIC_SERIES: Readonly<Record<string, SeriesSpec>> = {
 	"hindsight.outbox_size": { kind: "gauge", label: null, values: null, agg: "max", unit: "{entry}" },
 	"hindsight.outbox_oldest_age_s": { kind: "gauge", label: null, values: null, agg: "max", unit: "s" },
 	"index.archive_age_s": { kind: "gauge", label: null, values: null, agg: "max", unit: "s" },
-	"endpoint.proxy_planes": { kind: "gauge", label: null, values: null, agg: "max", unit: "{plane}" },
 };
 
 /** Core plus extended: what the ledger client can store and read, whatever the mode. Never what a caller may ask for; that is {@link metricSeriesFor}. */
@@ -385,7 +383,6 @@ const EXTENDED_GAUGE_SOURCES: ReadonlyArray<{ series: string; metric: string }> 
 	{ series: "hindsight.outbox_size", metric: OUTBOX_SIZE_METRIC },
 	{ series: "hindsight.outbox_oldest_age_s", metric: OUTBOX_OLDEST_METRIC },
 	{ series: "index.archive_age_s", metric: INDEX_ARCHIVE_AGE_METRIC },
-	{ series: "endpoint.proxy_planes", metric: ENDPOINT_PROXY_PLANES_METRIC },
 ];
 
 /** A gauge nobody set has no point (the archive age before a first archive), and a non-finite reading is not a number to store: both are skipped. */

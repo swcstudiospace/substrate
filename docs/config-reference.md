@@ -108,7 +108,6 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_PLANNING_PRESENCE_TTL_S` | number | 90 | 1..86400 | 90 s: a session with no heartbeat for longer is stale | mcp-server/planning/config.ts | yes |
 | `SUBSTRATE_PLANNING_MAX_FILES` | number | 500 | 1..10000 | 500 documents per planning index; the rest are counted as truncated | mcp-server/planning/config.ts | yes |
 | `SUBSTRATE_PLANNING_MAX_BYTES` | number | 262144 | 1024..4194304 | 256 KiB per document; a larger document is an error record | mcp-server/planning/config.ts | yes |
-| `SUBSTRATE_PLANNING_SCAN_INTERVAL_MS` | number | 15000 | 1000..3600000 | 15000 ms between planning observer scans; a change is seen within one interval | mcp-server/planning/config.ts | yes |
 
 ## Cache (loopback redis)
 
@@ -118,8 +117,6 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_CACHE` | toggle | on when DRAGONFLY_URL is set | 0 \| false \| no turns it off | on when the URL is set; anything else is unset. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CACHE_COMMAND_TIMEOUT_MS` | number | 250 | positive ms | 250 ms | mcp-server/config.ts | yes |
 | `SUBSTRATE_CACHE_CONNECT_TIMEOUT_MS` | number | 250 | positive ms | 250 ms | mcp-server/config.ts | yes |
-| `SUBSTRATE_DB_ENDPOINT_POLICY` | mode | warn | warn \| enforce (case- and space-insensitive; unset or blank is warn; anything else refuses boot) | warn: a direct GREPTIME_URL, SUBSTRATE_PG_URL or DRAGONFLY_URL is reported at boot and the service runs as before. See `docs/data-planes.md` | mcp-server/config.ts | yes |
-| `SUBSTRATE_DB_PROXY_ALLOW` | list | none | comma-separated host:port entries (host lowercased, port 1 to 65535) | no proxy entries: only loopback endpoints are non-direct. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CACHE_SWR` | mode | shadow | off \| shadow \| enforce | shadow: count would_serve_stale, serve the live brief exactly as before. See `docs/data-planes.md` | mcp-server/config.ts, cache.ts | yes |
 | `SUBSTRATE_CACHE_SWR_WINDOW_S` | number | 30 | 1..300 | 30 s. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CACHE_PRELOAD` | toggle | off | on \| off | off: no preload timer, no compose, no request counting. See `docs/data-planes.md` | mcp-server/config.ts | yes |

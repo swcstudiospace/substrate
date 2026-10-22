@@ -131,8 +131,6 @@ These apply to every source:
 | `railway.scale.refused` | 45 | `warning` | `substrate` | `railway.scale` | `railway` | — | no |
 | `railway.deploy.applied` | 45 | `note` | `substrate` | `railway.deploy` | `railway` | — | no |
 | `railway.deploy.refused` | 45 | `warning` | `substrate` | `railway.deploy` | `railway` | — | no |
-| `db.endpoint` | 48 | `note` | `substrate` | `db.endpoint` | `mcp-server` | — | no |
-| `planning.changed` | 52 | `note` | `substrate` | — | — | origin remote of the planning checkout | no |
 | `muse.brief_writer` | 19 | — | — | — | — | — | no |
 | `memory.retain` | 26 | — | — | — | — | — | no |
 | `memory.recall` | 26 | — | — | — | — | — | no |

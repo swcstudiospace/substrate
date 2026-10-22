@@ -661,14 +661,6 @@ export class SubstrateInstruments {
 		this.registry.gauge(OUTBOX_DURABLE_METRIC, { description: "1 when the retain outbox survives a restart, 0 when it is memory only", unit: "1" }).set(sample.durable ? 1 : 0);
 	}
 
-	/**
-	 * The count of data planes whose endpoint is a configured proxy (phase 51, SOTA-07). Set once at boot from the endpoint
-	 * classes: a number, with no URL, host, port or label in it.
-	 */
-	setEndpointProxyPlanes(count: number): void {
-		this.registry.gauge(ENDPOINT_PROXY_PLANES_METRIC, { description: "Data planes whose endpoint is a configured proxy", unit: "{plane}" }).set(count);
-	}
-
 	/** One brief's use of the recall snapshot (uplift-4 S5). `surface` is bounded by the caller; a result outside the closed set is dropped. */
 	recordBriefRecall(sample: { surface: string; result: BriefRecallResult }): void {
 		if (!(BRIEF_RECALL_RESULTS as readonly string[]).includes(sample.result)) return;
@@ -689,6 +681,3 @@ export const INDEX_ARCHIVE_AGE_METRIC = "substrate.index.archive.age_seconds";
 export const OUTBOX_SIZE_METRIC = "substrate.hindsight.retain_outbox.size";
 export const OUTBOX_OLDEST_METRIC = "substrate.hindsight.retain_outbox.oldest_age_seconds";
 export const OUTBOX_DURABLE_METRIC = "substrate.hindsight.retain_outbox.durable";
-
-/** The gauge `setEndpointProxyPlanes` sets (phase 51, SOTA-07). */
-export const ENDPOINT_PROXY_PLANES_METRIC = "substrate.endpoint.proxy_planes";

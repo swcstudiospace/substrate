@@ -36,8 +36,6 @@ Service names above are the expected defaults; confirm each against the project 
 4. Only then remove public exposure in Railway: the TimescaleDB TCP proxy and the GreptimeDB public domain. `hindsight-ui` keeps a Railway domain behind its access key only if browser access without the tailnet is wanted. This is an access change (Programming Desk G-6): record who approved it and when.
 5. Retire the pre-existing `railway-app` tailnet node if it was the old subnet router or an exit node, after step 2 succeeds.
 
-The forwarders are reached from the VPS only through entries in `SUBSTRATE_DB_PROXY_ALLOW`, one `host:port` per mapped port in the tables above; a URL whose host and port are not listed is a direct endpoint. Run with `SUBSTRATE_DB_ENDPOINT_POLICY=warn` first (the shadow step): any direct endpoint is reported at boot as a `db.endpoint` event. Setting `SUBSTRATE_DB_ENDPOINT_POLICY=enforce` is the enforce step, after which a configured direct endpoint refuses boot.
-
 ## Rollback
 
 Re-create the TCP proxy / domain in Railway (minutes, no data implication) and revert `substrate.env` from the backup taken in step 3. Forwarders can be deleted without touching the databases.

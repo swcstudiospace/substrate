@@ -926,7 +926,6 @@ describe("GET /slo/history over HTTP", () => {
 
 /** One interval of activity that touches every instrument an extended series reads. */
 function extendedActivity(instruments: SubstrateInstruments): void {
-	bootEndpoints(instruments);
 	for (let i = 0; i < 3; i++) instruments.recordCache({ result: "hit", mode: "on", cacheClass: "brief" });
 	for (let i = 0; i < 2; i++) instruments.recordCache({ result: "miss", mode: "on", cacheClass: "memory-search" });
 	instruments.recordCache({ result: "would_serve_stale", mode: "on", cacheClass: "brief" });
@@ -945,12 +944,6 @@ function extendedActivity(instruments: SubstrateInstruments): void {
 	instruments.recordMemoryExpired({ surface: "claude-code", kind: "decision", mode: "hidden" });
 	instruments.setHindsightOutbox({ size: 7, oldestAgeSeconds: 31.5, durable: true });
 	instruments.observeIndexArchiveAge(() => 1_000, () => 61_000);
-}
-
-/** The boot-time call `createObservability` makes (observe.ts), with the count the empty environment configures. */
-function bootEndpoints(instruments: SubstrateInstruments): void {
-	const classes = loadConfig({}).dbEndpoints.classes;
-	instruments.setEndpointProxyPlanes(Object.values(classes).filter((endpointClass) => endpointClass === "proxy").length);
 }
 
 /** Rows of one series as `{label: value}` (or the single value of an unlabelled one). */
@@ -1165,7 +1158,6 @@ describe("the extended series (uplift-5 S6)", () => {
 		expect(bound).toBeLessThan(MAX_METRIC_BATCH);
 
 		const instruments = new SubstrateInstruments();
-		bootEndpoints(instruments);
 		const collector = new SampleCollector("extended");
 		collector.prime(instruments.snapshot());
 		// Every surface (and one outside the list, which folds into `other`), plane, decision, outcome and result at once.

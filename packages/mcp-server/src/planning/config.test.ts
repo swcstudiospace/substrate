@@ -7,16 +7,14 @@ import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_FILES,
 	DEFAULT_PRESENCE_TTL_S,
-	DEFAULT_SCAN_INTERVAL_MS,
 	PLANNING_MAX_BYTES_ENV,
 	PLANNING_MAX_FILES_ENV,
 	PLANNING_PRESENCE_TTL_ENV,
-	PLANNING_SCAN_INTERVAL_ENV,
 	PLANNING_ROOT_ENV,
 	loadPlanningSettings,
 } from "./config.ts";
 
-const DEFAULTS = { presenceTtlS: 90, maxFiles: 500, maxBytes: 262_144, scanIntervalMs: DEFAULT_SCAN_INTERVAL_MS };
+const DEFAULTS = { presenceTtlS: 90, maxFiles: 500, maxBytes: 262_144 };
 
 describe("loadPlanningSettings: the plane is off unless a root is set", () => {
 	test("an empty environment is disabled, with the documented defaults and no root", () => {
@@ -53,8 +51,8 @@ describe("loadPlanningSettings: the plane is off unless a root is set", () => {
 
 describe("loadPlanningSettings: numeric settings", () => {
 	test("valid values are taken as given", () => {
-		const env = { [PLANNING_PRESENCE_TTL_ENV]: "120", [PLANNING_MAX_FILES_ENV]: "40", [PLANNING_MAX_BYTES_ENV]: "65536", [PLANNING_SCAN_INTERVAL_ENV]: "2500" };
-		expect(loadPlanningSettings(env)).toEqual({ ok: true, settings: { enabled: false, presenceTtlS: 120, maxFiles: 40, maxBytes: 65_536, scanIntervalMs: 2_500 } });
+		const env = { [PLANNING_PRESENCE_TTL_ENV]: "120", [PLANNING_MAX_FILES_ENV]: "40", [PLANNING_MAX_BYTES_ENV]: "65536" };
+		expect(loadPlanningSettings(env)).toEqual({ ok: true, settings: { enabled: false, presenceTtlS: 120, maxFiles: 40, maxBytes: 65_536 } });
 	});
 
 	test.each([

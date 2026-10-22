@@ -33,7 +33,7 @@ export interface ClassifiedSession extends SessionRecord {
 
 /** The presence port. `touch` records a heartbeat; `list` returns every record the backend still holds. */
 export interface PresenceStore {
-	/** `ttlMs` is the freshness window: the age past which a heartbeat is stale. The Dragonfly adapter keeps a record for a longer retention and reads the server's clock. */
+	/** `ttlMs` is the freshness window. A backend may enforce it itself (the Dragonfly adapter does). */
 	touch(record: SessionRecord, ttlMs: number): Promise<void>;
 	/** Every record held, stale or not, sorted by session id. Never filtered by age. */
 	list(): Promise<SessionRecord[]>;
@@ -46,7 +46,7 @@ export interface HistorySink {
 
 /**
  * The backend's own clock. Presence ages are read against it, never against the host clock.
- * The Dragonfly adapter reads it through the server's TIME command (`DragonflyPresenceStore.serverNowMs`).
+ * No implementation is provided here: the current Dragonfly client exposes no server time.
  */
 export interface PresenceClock {
 	serverNowMs(): number;

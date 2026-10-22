@@ -9,7 +9,6 @@ import { SOLANA_CLI_DEFAULT } from "@substrate/ledger";
 import { ADMISSION_CLASSES, loadBreakerSettings, type AdmissionClass, type BreakerSettings } from "@substrate/observability";
 import { loadBriefProfileConfig, type BriefProfileConfig } from "./brief-profile.ts";
 import { ADMISSION_MODES, type AdmissionMode, type AdmissionSettings, type BucketLimit } from "./admission.ts";
-import { classifyEndpoint, parseProxyAllow, type DbPlane, type EndpointClass, type ProxyAllow } from "./db-endpoints.ts";
 import { DEFAULT_INGEST_ROOTS } from "./docs-ingest.ts";
 import { loadInventoryConfig, type InventoryConfig } from "./hindsight-inventory.ts";
 import { normalizeTtlSeconds } from "./lease.ts";
@@ -22,7 +21,6 @@ import { DEFAULT_RETRIEVAL_KNOBS, ragflowFromEnv, type RagflowConfig, type Retri
 import { railwayFromEnv, type RailwayConfig } from "./railway.ts";
 import { hindsightBanksFromEnv } from "./planes/hindsight.ts";
 import { loadRecallConfig, type RecallConfig } from "./recall-snapshot.ts";
-import { loadPlanningSettings, type PlanningConfigResult } from "./planning/config.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
 import { EVENT_IDEMPOTENCY_MODES, MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type EventIdempotencyMode, type MemoryExpiryMode, type Surface } from "./types.ts";
 
@@ -64,14 +62,11 @@ export interface SubstrateConfig {
 	/**
 	 * Why the cache is off despite `DRAGONFLY_URL` being set (DOCS-06).
 	 *
-	 * A `redis://` or `rediss://` URL to a host that is neither loopback nor listed in
-	 * `SUBSTRATE_DB_PROXY_ALLOW` is refused fail-open: the cache stays off, answers come
-	 * back uncached, and the reason is logged at boot.
+	 * A plaintext non-loopback `redis://` URL is refused fail-open: the cache
+	 * stays off, answers come back uncached, and the reason is logged at boot.
 	 * Null when the cache was not refused.
 	 */
 	dragonflyRefused: string | null;
-	/** The endpoint policy, the allow list, and each configured plane's endpoint class (phase 48). */
-	dbEndpoints: DbEndpointSettings;
 	linearApiKey: string | undefined;
 	notionApiKey: string | undefined;
 	notionTaskGraphDataSource: string;
@@ -444,8 +439,6 @@ export interface SubstrateConfig {
 	eventIdempotencyRejected: string | null;
 	/** `SUBSTRATE_EVENT_BUS` (phase 50, D50-g): the Dragonfly wake-up hints. See `EventBusSettings`. */
 	eventBus: EventBusSettings;
-	/** `SUBSTRATE_PLANNING_*` (phase 52, SOTA-08): the planning root, presence window and read bounds. See `planning/config.ts`. */
-	planning: PlanningConfigResult;
 	// uplift-3 N2 — restart-durable SLO history and notifications
 	/**
 	 * Where the SLO checkpoint is written and restored from
@@ -676,7 +669,6 @@ function isKnownDesktopSurface(value: string): value is Surface {
 
 export function loadConfig(env: Record<string, string | undefined> = process.env, probes: ConfigProbes = {}): SubstrateConfig {
 	const greptimeUrl = env.GREPTIME_URL?.trim();
-	const dbEndpoints = loadDbEndpointSettings(env);
 	const leaseTtl = Number(env.SUBSTRATE_LEASE_TTL_SECONDS);
 	const tokens = tokenConfig(env);
 	const ragflowRetrieval = loadRagflowRetrievalSettings(env);
@@ -689,16 +681,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		.split(",")
 		.map((root) => root.trim())
 		.filter((root) => root.length > 0);
-	const cache = cacheSettings(env, dbEndpoints.allow);
-	const cachePreloadRequested = loadCachePreloadSettings(env);
-	if (cachePreloadRequested.enabled && !cache.cacheEnabled && cache.dragonflyRefused === null) {
+	const cache = cacheSettings(env);
+	const cachePreload = loadCachePreloadSettings(env);
+	if (cachePreload.enabled && !cache.cacheEnabled) {
 		throw new ConfigError("SUBSTRATE_CACHE_PRELOAD=on needs the cache, which is off: set DRAGONFLY_URL to an accepted URL and leave SUBSTRATE_CACHE unset or not 0, or set SUBSTRATE_CACHE_PRELOAD=off");
 	}
-	// A refused Dragonfly URL is fail-open in warn mode, and enforce already refused boot in loadDbEndpointSettings. The cache is off, so the preload is skipped, not refused.
-	if (cachePreloadRequested.enabled && !cache.cacheEnabled) {
-		process.stderr.write("[substrate] SUBSTRATE_CACHE_PRELOAD=on skipped: the cache endpoint is refused, so the cache is off\n");
-	}
-	const cachePreload = cache.cacheEnabled ? cachePreloadRequested : { ...cachePreloadRequested, enabled: false };
 	return {
 		...readHandoffKeys(env),
 		leaseTtlSeconds: normalizeTtlSeconds(Number.isFinite(leaseTtl) ? leaseTtl : undefined),
@@ -714,7 +701,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 				}
 			: null,
 		postgresUrl: env.SUBSTRATE_PG_URL?.trim() || undefined,
-		dbEndpoints,
 		...cache,
 		linearApiKey: env.LINEAR_API_KEY?.trim() || undefined,
 		notionApiKey: env.NOTION_API_KEY?.trim() || undefined,
@@ -838,8 +824,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		...eventIdempotencyFromEnv(env.SUBSTRATE_EVENT_IDEMPOTENCY),
 		// Phase 50 (D50-g): the bus rides the cache endpoint, and is off with a reason when that endpoint is missing or refused.
 		eventBus: loadEventBusSettings(env, cache),
-		// Phase 52 (SOTA-08): the planning plane's root and limits. Environment only; a bad value is a typed result.
-		planning: loadPlanningSettings(env),
 	};
 }
 
@@ -1264,79 +1248,15 @@ export function loadAdmissionSettings(env: Record<string, string | undefined>): 
 }
 
 /**
- * `SUBSTRATE_DB_ENDPOINT_POLICY` (phase 48, D48-b): `warn` or `enforce`, case- and space-insensitive.
- * Unset or blank is `warn`. Anything else is a ConfigError at boot: a typo must not change what a
- * deployment accepts.
- */
-export type DbEndpointPolicy = "warn" | "enforce";
-
-/**
- * The data-plane endpoint settings (phase 48). `classes` has an entry only for each plane whose URL
- * is configured. A class names the path to the plane, never the URL.
- */
-export interface DbEndpointSettings {
-	policy: DbEndpointPolicy;
-	allow: ProxyAllow;
-	classes: Partial<Record<DbPlane, EndpointClass>>;
-}
-
-/** The configured data-plane URLs, in the order the boot names them. */
-const DB_PLANE_URL_VARIABLES = [
-	["greptime", "GREPTIME_URL"],
-	["postgres", "SUBSTRATE_PG_URL"],
-	["dragonfly", "DRAGONFLY_URL"],
-] as const;
-
-/** The allow list when none is supplied: no proxy entries. */
-const NO_PROXY_ALLOW: ProxyAllow = new Set<string>();
-
-function dbEndpointPolicyFrom(raw: string | undefined): DbEndpointPolicy {
-	const value = raw?.trim().toLowerCase() ?? "";
-	if (value === "") return "warn";
-	if (value === "warn" || value === "enforce") return value;
-	throw new ConfigError("SUBSTRATE_DB_ENDPOINT_POLICY must be warn or enforce; unset it for warn");
-}
-
-function proxyAllowFrom(raw: string | undefined): ProxyAllow {
-	try {
-		return parseProxyAllow(raw);
-	} catch (error) {
-		throw new ConfigError(error instanceof Error ? error.message : "SUBSTRATE_DB_PROXY_ALLOW is malformed");
-	}
-}
-
-/**
- * The endpoint policy, the allow list and each configured plane's class. In `enforce`, a configured
- * `direct` endpoint is a ConfigError naming its variable and the policy, never its URL.
- */
-function loadDbEndpointSettings(env: Record<string, string | undefined>): DbEndpointSettings {
-	const policy = dbEndpointPolicyFrom(env.SUBSTRATE_DB_ENDPOINT_POLICY);
-	const allow = proxyAllowFrom(env.SUBSTRATE_DB_PROXY_ALLOW);
-	const classes: Partial<Record<DbPlane, EndpointClass>> = {};
-	for (const [plane, variable] of DB_PLANE_URL_VARIABLES) {
-		const url = env[variable]?.trim();
-		if (!url) continue;
-		const endpointClass = classifyEndpoint(plane, url, allow);
-		classes[plane] = endpointClass;
-		if (policy === "enforce" && endpointClass === "direct") {
-			throw new ConfigError(
-				`${variable} is a direct endpoint, which SUBSTRATE_DB_ENDPOINT_POLICY=enforce refuses; ` +
-					"point it at a loopback forwarder, or list its host:port in SUBSTRATE_DB_PROXY_ALLOW",
-			);
-		}
-	}
-	return { policy, allow, classes };
-}
-
-/**
- * Whether a Redis URL may enable the cache (DOCS-06, phase 48 D48-c).
+ * Whether a Redis URL may enable the cache (DOCS-06).
  *
- * A `redis://` or `rediss://` URL whose endpoint classifies as `direct` is refused. Loopback (the
- * local end of a forwarder) and a host and port listed in `allow` pass. A refusal is fail-open: the
- * cache stays off. An unparseable URL passes through to the existing fail-open runtime, which
- * reports it at connect time.
+ * A plaintext `redis://` URL whose host is not loopback is refused: a
+ * credential crossing any other network in the clear is the failure this
+ * exists to prevent. Loopback and `rediss://` stay allowed; anything else —
+ * including an unparseable URL, which the client reports at connect time —
+ * passes through to the existing fail-open runtime.
  */
-export function parseRedisUrl(raw: string | undefined, allow: ProxyAllow = NO_PROXY_ALLOW): { kind: "unset" } | { kind: "ok"; url: string } | { kind: "refused"; reason: string } {
+export function parseRedisUrl(raw: string | undefined): { kind: "unset" } | { kind: "ok"; url: string } | { kind: "refused"; reason: string } {
 	const trimmed = raw?.trim();
 	if (!trimmed) return { kind: "unset" };
 	let scheme = "";
@@ -1344,14 +1264,24 @@ export function parseRedisUrl(raw: string | undefined, allow: ProxyAllow = NO_PR
 	try {
 		const parsed = new URL(trimmed);
 		scheme = parsed.protocol.toLowerCase();
-		// The URL parser keeps IPv6 brackets on the hostname; strip them so the reason names the address.
+		// The URL parser keeps IPv6 brackets on the hostname; strip them so the
+		// loopback check sees the address.
 		host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
 	} catch {
 		return { kind: "ok", url: trimmed };
 	}
-	const redis = scheme === "redis:" || scheme === "rediss:";
-	if (redis && classifyEndpoint("dragonfly", trimmed, allow) === "direct") {
-		return { kind: "refused", reason: `refusing ${scheme}// to host ${host || "(empty)"}, which is neither loopback nor in SUBSTRATE_DB_PROXY_ALLOW` };
+	if (scheme === "redis:") {
+		// An actual loopback address, not a DNS name that starts with one:
+		// `127.cache.example.com` must not pass as `127.0.0.1` does.
+		const octets = host.split(".");
+		const loopbackV4 =
+			octets.length === 4 &&
+			octets[0] === "127" &&
+			octets.slice(1).every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
+		const loopback = host === "localhost" || host === "::1" || host === "0.0.0.0" || loopbackV4;
+		if (!loopback) {
+			return { kind: "refused", reason: `refusing plaintext redis:// to non-loopback host ${host || "(empty)"}` };
+		}
 	}
 	return { kind: "ok", url: trimmed };
 }
@@ -1361,12 +1291,12 @@ export function parseRedisUrl(raw: string | undefined, allow: ProxyAllow = NO_PR
  * including unset, leaves it on when `DRAGONFLY_URL` is set. A typo must not
  * silently disable a cache the operator configured.
  */
-function cacheSettings(env: Record<string, string | undefined>, allow: ProxyAllow): {
+function cacheSettings(env: Record<string, string | undefined>): {
 	dragonflyUrl: string | undefined;
 	cacheEnabled: boolean;
 	dragonflyRefused: string | null;
 } {
-	const parsed = parseRedisUrl(env.DRAGONFLY_URL, allow);
+	const parsed = parseRedisUrl(env.DRAGONFLY_URL);
 	const off = /^(0|false|no)$/i.test(env.SUBSTRATE_CACHE?.trim() ?? "");
 	if (parsed.kind === "refused") return { dragonflyUrl: undefined, cacheEnabled: false, dragonflyRefused: parsed.reason };
 	const dragonflyUrl = parsed.kind === "ok" ? parsed.url : undefined;

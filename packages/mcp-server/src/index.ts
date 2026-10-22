@@ -175,12 +175,8 @@ server.listen(config.port, config.host, () => {
 			`claims ${substrate.requireRecordedClaims ? "fail-closed" : "fail-open"})\n`,
 	);
 	if (watchdog.start()) process.stdout.write("[substrate] watchdog: armed, READY=1 first, then heartbeat gated on event-loop lag and loopback /livez\n");
-	// D48-d: one `db.endpoint` note per configured data plane, recorded once at boot. A refused write never blocks boot.
-	void substrate.emitDbEndpoints();
 	// uplift-4 S5: each timer starts only under its own flag (both default off) and is unref'd.
 	const background = substrate.startRecall();
-	// Phase 52: the planning observer's scan timer. Off while SUBSTRATE_PLANNING_ROOT is unset; unref'd.
-	substrate.startPlanning();
 	if (background.recall) process.stdout.write(`[substrate] brief recall: ${config.briefRecall.mode}, refresh every ${config.briefRecall.intervalS} s, snapshot ttl ${config.briefRecall.ttlS} s\n`);
 	if (background.inventory) process.stdout.write(`[substrate] hindsight inventory: on, every ${config.hindsightInventory.intervalS} s, read-only\n`);
 	// Memory governance: the weekly mental-model refresh, named by HINDSIGHT_MENTAL_MODELS. Unref'd; the first pass
@@ -215,8 +211,6 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		const recallStopped = substrate.stopRecall();
 		// Phase 47: the cache preloader's timer is cleared with them; a tick in flight finishes on its own.
 		substrate.stopPreload();
-		// Phase 52: the planning observer's timer is cleared now; a scan in flight is awaited inside the bound below.
-		const planningStopped = substrate.stopPlanning();
 		// Phase 50: the wake-up hint connections close with the timers; no subscriber outlives the shutdown.
 		substrate.stopEventBus();
 		observability.stop();
@@ -242,7 +236,6 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 					mentalModelRefresh?.flush(),
 					watchdogStopped,
 					recallStopped,
-					planningStopped,
 				]),
 				Bun.sleep(SHUTDOWN_FLUSH_MS),
 			]);

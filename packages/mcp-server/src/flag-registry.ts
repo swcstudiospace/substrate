@@ -497,15 +497,12 @@ export const FLAGS: readonly FlagSpec[] = [
 	{ name: "SUBSTRATE_PLANNING_PRESENCE_TTL_S", kind: "number", plane: "index", default: "90", allowed: "1..86400", unset: "90 s: a session with no heartbeat for longer is stale", readBy: "mcp-server/planning/config.ts", documented: true },
 	{ name: "SUBSTRATE_PLANNING_MAX_FILES", kind: "number", plane: "index", default: "500", allowed: "1..10000", unset: "500 documents per planning index; the rest are counted as truncated", readBy: "mcp-server/planning/config.ts", documented: true },
 	{ name: "SUBSTRATE_PLANNING_MAX_BYTES", kind: "number", plane: "index", default: "262144", allowed: "1024..4194304", unset: "256 KiB per document; a larger document is an error record", readBy: "mcp-server/planning/config.ts", documented: true },
-	{ name: "SUBSTRATE_PLANNING_SCAN_INTERVAL_MS", kind: "number", plane: "index", default: "15000", allowed: "1000..3600000", unset: "15000 ms between planning observer scans; a change is seen within one interval", readBy: "mcp-server/planning/config.ts", documented: true },
 
 	// ── cache ─────────────────────────────────────────────────────────────────
 	{ name: "DRAGONFLY_URL", kind: "string", plane: "cache", default: "none", allowed: "loopback redis URL", unset: "no cache; a non-loopback URL is refused with a boot warning", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },
 	{ name: "SUBSTRATE_CACHE", kind: "toggle", plane: "cache", default: "on when DRAGONFLY_URL is set", allowed: "0 | false | no turns it off", unset: "on when the URL is set; anything else is unset", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },
 	{ name: "SUBSTRATE_CACHE_COMMAND_TIMEOUT_MS", kind: "number", plane: "cache", default: "250", allowed: "positive ms", unset: "250 ms", readBy: "mcp-server/config.ts", documented: true },
 	{ name: "SUBSTRATE_CACHE_CONNECT_TIMEOUT_MS", kind: "number", plane: "cache", default: "250", allowed: "positive ms", unset: "250 ms", readBy: "mcp-server/config.ts", documented: true },
-	{ name: "SUBSTRATE_DB_ENDPOINT_POLICY", kind: "mode", plane: "cache", default: "warn", allowed: "warn | enforce (case- and space-insensitive; unset or blank is warn; anything else refuses boot)", unset: "warn: a direct GREPTIME_URL, SUBSTRATE_PG_URL or DRAGONFLY_URL is reported at boot and the service runs as before", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },
-	{ name: "SUBSTRATE_DB_PROXY_ALLOW", kind: "list", plane: "cache", default: "none", allowed: "comma-separated host:port entries (host lowercased, port 1 to 65535)", unset: "no proxy entries: only loopback endpoints are non-direct", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },
 	{
 		name: "SUBSTRATE_CACHE_SWR",
 		kind: "mode",
