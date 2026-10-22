@@ -3,6 +3,7 @@
  * published only as a hint over the injected bus.
  */
 import { describe, expect, test } from "bun:test";
+import { MAX_PAYLOAD_BYTES, normalizeEvent } from "../event.ts";
 import type { EventHint } from "../event-bus.ts";
 import { EVENT_KINDS } from "../types.ts";
 import { diffPlanningIndex, type PlanningDiff } from "./diff.ts";
@@ -86,13 +87,34 @@ describe("planningChangeEvent", () => {
 		expect(JSON.stringify(event?.payload)).toContain("[REDACTED]");
 	});
 
-	test("a list longer than the cap is cut to the cap, and the summary says so with the full count", () => {
+	test("a list longer than the cap is cut to the cap, and the payload and summary say how many were not listed", () => {
 		const added = Array.from({ length: MAX_EVENT_PATHS + 50 }, (_, index) => `.planning/phases/52-x/doc-${index}.md`);
 		const event = planningChangeEvent({ repo: REPO, sessionId: SESSION, diff: { complete: true, added, removed: [], changed: [] } });
-		const payload = event?.payload as { added: string[] } | undefined;
+		const payload = event?.payload as { added: string[]; truncated: Record<string, number> } | undefined;
 		expect(payload?.added).toHaveLength(MAX_EVENT_PATHS);
+		expect(payload?.truncated).toEqual({ added: 50, removed: 0, changed: 0 });
 		expect(event?.summary).toContain(`${MAX_EVENT_PATHS + 50} added`);
-		expect(event?.summary).toContain(`lists capped at ${MAX_EVENT_PATHS}`);
+		expect(event?.summary).toContain("paths not listed: 50 added, 0 removed, 0 changed");
+	});
+
+	test("a note at the maximum path counts of 80-byte paths stays under the ledger's payload limit and reports its truncation", () => {
+		const pathOf = (list: string, index: number) => `.planning/phases/52-x/${list}-${String(index).padStart(3, "0")}`.padEnd(80, "x");
+		const full = (list: string) => Array.from({ length: MAX_EVENT_PATHS }, (_, index) => pathOf(list, index));
+		const event = planningChangeEvent({
+			repo: REPO,
+			sessionId: SESSION,
+			diff: { complete: true, added: full("a"), removed: full("r"), changed: full("c") },
+		});
+		if (event === null) throw new Error("a changed diff must produce an event");
+		const payload = event.payload as { added: string[]; removed: string[]; changed: string[]; truncated: Record<string, number> };
+		const bytes = new TextEncoder().encode(JSON.stringify(payload)).byteLength;
+		expect(bytes).toBeLessThanOrEqual(MAX_PAYLOAD_BYTES);
+		const truncated = payload.truncated.added + payload.truncated.removed + payload.truncated.changed;
+		expect(truncated).toBeGreaterThan(0);
+		expect(payload.added.length + payload.removed.length + payload.changed.length + truncated).toBe(MAX_EVENT_PATHS * 3);
+		expect(event.summary).toContain("paths not listed");
+		// The ledger keeps the paths it was given; it does not replace the payload with its `_dropped` marker.
+		expect(normalizeEvent(event, null).payload).not.toHaveProperty("_dropped");
 	});
 });
 
