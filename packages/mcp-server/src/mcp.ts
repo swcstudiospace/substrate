@@ -20,7 +20,7 @@ import { buildFabricSuggestions } from "./fabric/optimize.ts";
 import { buildFabricStatus } from "./fabric/status.ts";
 import { DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT } from "./greptime.ts";
 import { MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS } from "./lease.ts";
-import { acknowledgeSteering, queueSteering, STEERING_ACKNOWLEDGE_INPUT, STEERING_LIST_INPUT, STEERING_QUEUE_INPUT, listSteering, steeringFailed, type SteeringWriteResult } from "./planning/steering-tools.ts";
+import { acknowledgeSteering, queueSteering, STEERING_ACKNOWLEDGE_INPUT, STEERING_LIST_INPUT, STEERING_QUEUE_INPUT, listSteering, steeringFailed, type SteeringCaller, type SteeringWriteResult } from "./planning/steering-tools.ts";
 import { approvalRefValid, RailwayRequestError, type ServiceRef, type WriteGate, type WriteOutcome, type WriteRefusal } from "./railway.ts";
 import { redact } from "./redact.ts";
 import {
@@ -1433,38 +1433,40 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 	);
 
 	/**
-	 * The steering tools (phase 53, SOTA-09). Registered only while SUBSTRATE_PLANNING_STEERING is on. Each write answers
-	 * not-configured, and records nothing, while no audit sink is injected. The rules live in `planning/steering.ts`.
+	 * The steering tools (phase 53, SOTA-09). Registered only while SUBSTRATE_PLANNING_STEERING is on. A write needs an operator
+	 * caller, and answers not-configured, and records nothing, while no audit sink is injected. The rules live in `planning/steering.ts`.
 	 */
 	if (substrate.steering.enabled) {
 		const steering = substrate.steering;
+		// Authorship is the transport's: the caller's surface and operator flag, never a tool argument.
+		const steeringCaller: SteeringCaller = { surface: callerSurface, isOperator };
 		const steeringReply = (result: SteeringWriteResult) => (steeringFailed(result) ? { ...json(result), isError: true } : json(result));
 		server.registerTool(
 			"steering_queue",
 			{
 				title: "Queue a steering directive for a planning session",
 				description:
-					"Queues one directive from a human principal to a planning session. The principal must be on " +
-					"SUBSTRATE_PLANNING_STEERING_PRINCIPALS, an agent author is refused, and each session has a rate limit. The directive is " +
-					"audited before it is queued. A refusal carries a typed error: principal-not-allowed, agent-author-refused, rate-limited, " +
-					"invalid-directive, duplicate-directive or audit-unavailable. Answers not-configured while no audit sink is injected.",
+					"Queues one directive to a planning session, as the calling operator. The principal is the caller's surface and must be on " +
+					"SUBSTRATE_PLANNING_STEERING_PRINCIPALS. Each session has a rate limit. The directive is audited before it is queued. " +
+					"A refusal carries a typed error: forbidden (operator-required or caller-identity-missing), principal-not-allowed, " +
+					"rate-limited, invalid-directive, duplicate-directive or audit-unavailable. Answers not-configured while no audit sink is injected.",
 				inputSchema: STEERING_QUEUE_INPUT,
 				annotations: { destructiveHint: false, idempotentHint: false },
 			},
-			async (args) => steeringReply(await queueSteering(steering, args)),
+			async (args) => steeringReply(await queueSteering(steering, steeringCaller, args)),
 		);
 		server.registerTool(
 			"steering_acknowledge",
 			{
 				title: "Acknowledge a steering directive",
 				description:
-					"The target session acknowledges a queued directive as applied or declined. Applying a directive that conflicts with the " +
-					"active plan needs confirm: true. The acknowledgement is audited before it takes effect. A refusal carries a typed error: " +
-					"not-found, wrong-session, already-acknowledged, confirmation-required or audit-unavailable.",
+					"The calling operator acknowledges a queued directive for the target session as applied or declined. Applying a directive " +
+					"that conflicts with the active plan needs confirm: true. The acknowledgement is audited before it takes effect. A refusal " +
+					"carries a typed error: forbidden, not-found, wrong-session, already-acknowledged, confirmation-required or audit-unavailable.",
 				inputSchema: STEERING_ACKNOWLEDGE_INPUT,
 				annotations: { destructiveHint: false, idempotentHint: false },
 			},
-			async (args) => steeringReply(await acknowledgeSteering(steering, args)),
+			async (args) => steeringReply(await acknowledgeSteering(steering, steeringCaller, args)),
 		);
 		server.registerTool(
 			"steering_list",
