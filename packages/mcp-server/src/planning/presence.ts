@@ -62,7 +62,6 @@ export const SessionRecordSchema = z.object({
 	sessionId: z.string().regex(SESSION_ID_RE),
 	worktree: z.string().min(1).max(1024),
 	branch: z.string().min(1).max(256),
-	activePhase: z.string().min(1).max(64).nullable(),
 	lastHeartbeatMs: z.number().int().nonnegative(),
 	planning: PlanningReportSchema.optional(),
 	touched: z.array(TouchedPairSchema).max(MAX_REPORT_ENTRIES).optional(),

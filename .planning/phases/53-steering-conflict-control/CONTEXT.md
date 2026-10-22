@@ -54,7 +54,7 @@ steps.
   would take the list past `MAX_REPORT_ENTRIES` is not cut: the report reads `report-limit` until a complete change fits.
   A complete change the server clock cannot date records nothing. A change that starts inside a watcher gap is not recorded,
   because the first complete diff after a gap is withheld, as the event is. The active phase is no longer a claim: D53-g and
-  D53-g.1 read "active phase" as the touched phases this decision defines. `activePhase` on the record is kept and stays null.
+  D53-g.1 read "active phase" as the touched phases this decision defines. The presence record has no active-phase field.
 
 ## Acceptance mapping
 

@@ -26,7 +26,6 @@ function session(sessionId: string, touched: TouchedPair[], planning: PlanningRe
 		sessionId,
 		worktree: `/work/${sessionId}`,
 		branch: `gsd/${sessionId}`,
-		activePhase: null,
 		lastHeartbeatMs: NOW,
 		touched,
 		status,

@@ -72,7 +72,6 @@ export interface PlanningSessionRow {
 	sessionId: string;
 	worktree: string;
 	branch: string;
-	activePhase: string | null;
 	lastHeartbeatMs: number;
 	ageMs: number | null;
 	status: SessionStatus | "unknown";
@@ -164,7 +163,6 @@ export class PlanningReader {
 						sessionId: record.sessionId,
 						worktree: record.worktree,
 						branch: record.branch,
-						activePhase: record.activePhase,
 						lastHeartbeatMs: record.lastHeartbeatMs,
 						ageMs: null,
 						status: "unknown",
@@ -184,7 +182,6 @@ export class PlanningReader {
 					sessionId: entry.sessionId,
 					worktree: entry.worktree,
 					branch: entry.branch,
-					activePhase: entry.activePhase,
 					lastHeartbeatMs: entry.lastHeartbeatMs,
 					ageMs: entry.ageMs,
 					status: entry.status,

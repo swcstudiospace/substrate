@@ -16,8 +16,8 @@ import {
 
 const TTL_MS = 90_000;
 
-function session(sessionId: string, lastHeartbeatMs: number, activePhase: string | null = "52"): SessionRecord {
-	return { sessionId, worktree: `/work/${sessionId}`, branch: `gsd/${sessionId}`, activePhase, lastHeartbeatMs };
+function session(sessionId: string, lastHeartbeatMs: number): SessionRecord {
+	return { sessionId, worktree: `/work/${sessionId}`, branch: `gsd/${sessionId}`, lastHeartbeatMs };
 }
 
 function manualClock(start: number): PresenceClock & { advance(ms: number): void } {
@@ -77,8 +77,8 @@ describe("InMemoryPresenceStore and presenceSnapshot", () => {
 	test("a second touch replaces the session's record instead of adding one", async () => {
 		const store = new InMemoryPresenceStore();
 		await store.touch(session("worker-a", 1), TTL_MS);
-		await store.touch(session("worker-a", 2, "53"), TTL_MS);
-		expect(await store.list()).toEqual([session("worker-a", 2, "53")]);
+		await store.touch(session("worker-a", 2), TTL_MS);
+		expect(await store.list()).toEqual([session("worker-a", 2)]);
 	});
 });
 
@@ -90,7 +90,7 @@ describe("HistorySink", () => {
 
 		await recordHeartbeat({ store, history }, session("worker-a", 0), TTL_MS);
 		await recordHeartbeat({ store, history }, session("worker-a", 30_000), TTL_MS);
-		await recordHeartbeat({ store, history }, session("worker-b", 40_000, null), TTL_MS);
+		await recordHeartbeat({ store, history }, session("worker-b", 40_000), TTL_MS);
 		const afterWrites = history.entries();
 		expect(afterWrites.map((entry) => entry.lastHeartbeatMs)).toEqual([0, 30_000, 40_000]);
 

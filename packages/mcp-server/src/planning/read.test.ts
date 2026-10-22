@@ -45,7 +45,7 @@ function storeSession(backend: RecordingPresenceBackend, record: SessionRecord):
 }
 
 function session(sessionId: string, lastHeartbeatMs: number): SessionRecord {
-	return { sessionId, worktree: `/work/${sessionId}`, branch: "gsd/p52-wiring", activePhase: null, lastHeartbeatMs };
+	return { sessionId, worktree: `/work/${sessionId}`, branch: "gsd/p52-wiring", lastHeartbeatMs };
 }
 
 describe("planning_status", () => {
@@ -189,7 +189,6 @@ describe("planning_sessions planning rows and conflicts (phase 53, SOTA-09)", ()
 			sessionId,
 			worktree: `/work/${sessionId}`,
 			branch: `gsd/${sessionId}`,
-			activePhase: null,
 			lastHeartbeatMs: backend.clockMs,
 			touched: touched.map(([phase, plan]) => ({ phase, plan, observedAtMs: backend.clockMs })),
 			planning: { status: "known", scannedAtMs: backend.clockMs, phases: [] },

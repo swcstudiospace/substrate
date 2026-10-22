@@ -189,7 +189,7 @@ describe("the observer's heartbeat", () => {
 
 		expect(backend.writes).toHaveLength(1);
 		expect(backend.writes[0]?.key.startsWith(PRESENCE_KEY_PREFIX)).toBe(true);
-		expect(storedSession(backend)).toMatchObject({ worktree: TREE_ROOT, branch: BRANCH, activePhase: null, lastHeartbeatMs: backend.clockMs });
+		expect(storedSession(backend)).toMatchObject({ worktree: TREE_ROOT, branch: BRANCH, lastHeartbeatMs: backend.clockMs });
 	});
 
 	test("the observer's timer is refused while the plane is disabled, and runs only between start and stop", () => {

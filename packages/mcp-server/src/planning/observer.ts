@@ -207,7 +207,6 @@ export class PlanningObserver {
 				sessionId: planningSessionId(this.deps.fs, root),
 				worktree: root,
 				branch: await branchOf(this.deps.fs, layout.gitDir),
-				activePhase: null,
 				lastHeartbeatMs: 0,
 				touched: this.touched,
 				...(this.report === null ? {} : { planning: this.report }),

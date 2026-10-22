@@ -74,7 +74,7 @@ describe("the key outlives the largest freshness window", () => {
 });
 
 function session(sessionId: string, lastHeartbeatMs = 1): SessionRecord {
-	return { sessionId, worktree: `/work/${sessionId}`, branch: `gsd/${sessionId}`, activePhase: "52", lastHeartbeatMs };
+	return { sessionId, worktree: `/work/${sessionId}`, branch: `gsd/${sessionId}`, lastHeartbeatMs };
 }
 
 describe("DragonflyPresenceStore.touch", () => {
