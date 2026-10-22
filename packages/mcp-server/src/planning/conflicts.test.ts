@@ -38,7 +38,7 @@ function phaseDoc(path: string, phase: string): PlanningFileRecord {
 }
 
 function scanOk(sessionId: string, scannedAtMs: number, records: PlanningRecord[], truncated = false): SessionScan {
-	return { sessionId, scannedAtMs, result: { ok: true, index: { records, truncated } } };
+	return { sessionId, scannedAtMs, result: { ok: true, index: { records, truncated, unlisted: [] } } };
 }
 
 function scanFailed(sessionId: string, scannedAtMs: number): SessionScan {
