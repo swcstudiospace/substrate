@@ -2858,9 +2858,10 @@ export class Substrate {
 		return this.planningObserver.start();
 	}
 
-	/** Phase 52: clear the planning observer's timer. A scan in flight finishes; no new scan starts from the timer. */
-	stopPlanning(): void {
+	/** Phase 52: clear the planning observer's timer, then resolve once a scan in flight has finished. The caller bounds the wait. */
+	async stopPlanning(): Promise<void> {
 		this.planningObserver.stop();
+		await this.planningObserver.idle();
 	}
 
 	/** Start the recall prefetch, the Hindsight inventory and the cache preloader (phase 47). The first two are no-ops while their flags are off; each timer is unref'd. */
