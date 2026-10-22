@@ -398,6 +398,20 @@ describe("phase probes stop at the cutoff", () => {
 	});
 });
 
+describe("symlinked documents are probed only as far as the cutoff", () => {
+	test("with maxFiles 2, twenty symlinked documents are probed no further than the cutoff needs", async () => {
+		const links: Record<string, string> = {};
+		for (let n = 0; n < 20; n += 1) links[`${P}/phases/52-x/doc-${String(n).padStart(2, "0")}.md`] = `${P}/STATE.md`;
+		const tree = new FakeTree({ [`${P}/STATE.md`]: "# state\n" }, links);
+		const result = await buildPlanningIndex(TREE_ROOT, { fs: tree, limits: { maxFiles: 2, maxBytes: 262_144 } });
+		if (!result.ok) throw new Error(result.code);
+		expect(result.index.truncated).toBe(true);
+		expect(result.index.records).toHaveLength(2);
+		// Each link is probed as a candidate, and collection stops at maxFiles + 1 candidates: three probes, not twenty.
+		expect(tree.probed.filter((path) => path.startsWith(`${P}/phases/52-x/doc-`)).length).toBeLessThanOrEqual(3);
+	});
+});
+
 describe("readFrontmatter", () => {
 	test("no fence is none, a closed mapping is parsed, an open fence without a mapping is malformed", () => {
 		expect(readFrontmatter("# plain")).toEqual({ state: "none" });
