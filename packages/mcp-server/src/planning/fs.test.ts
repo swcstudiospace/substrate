@@ -33,6 +33,8 @@ beforeAll(async () => {
 	await symlink(join(scratch, "nowhere.md"), join(phase, "dangling.md"));
 	await symlink(outside, join(planning, "phases", "escape"));
 	await symlink(outside, join(planning, "milestones"));
+	await symlink(join(scratch, "nowhere.md"), join(planning, "PROJECT.md"));
+	await symlink(join(scratch, "nowhere-phase"), join(planning, "phases", "53-gone"));
 });
 
 afterAll(async () => {
@@ -78,5 +80,13 @@ describe("nodePlanningFs on a real checkout", () => {
 	test("a phase directory that is itself a link outside the checkout is an outside-root record", async () => {
 		const records = await build();
 		expect(records.some((record) => record.path === ".planning/phases/escape" && isErrorRecord(record))).toBe(true);
+	});
+
+	test("a dangling top-level document link is an error record, never a silently missing document", async () => {
+		expect(find(await build(), "PROJECT.md")).toMatchObject({ kind: "project", error: { code: "unreadable", detail: "dangling symlink" } });
+	});
+
+	test("a dangling phase directory link is an error record for that directory", async () => {
+		expect(find(await build(), "53-gone")).toMatchObject({ error: { code: "unreadable", detail: "dangling symlink" } });
 	});
 });

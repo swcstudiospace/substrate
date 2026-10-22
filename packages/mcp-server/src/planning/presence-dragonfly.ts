@@ -45,7 +45,9 @@ export class DragonflyPresenceStore implements PresenceStore {
 	}
 
 	async list(): Promise<SessionRecord[]> {
-		const keys = (await this.backend.keysWithPrefix(PRESENCE_KEY_PREFIX)).filter((key) => key.startsWith(PRESENCE_KEY_PREFIX)).sort();
+		const enumerated = await this.backend.keysWithPrefix(PRESENCE_KEY_PREFIX);
+		// SCAN may name a key more than once across its pages: each key is read once.
+		const keys = [...new Set(enumerated)].filter((key) => key.startsWith(PRESENCE_KEY_PREFIX)).sort();
 		const records: SessionRecord[] = [];
 		for (const key of keys) {
 			const value = await this.backend.get(key);

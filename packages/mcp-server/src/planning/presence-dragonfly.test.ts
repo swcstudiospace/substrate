@@ -12,7 +12,11 @@ class FakeBackend implements PresenceBackend {
 	/** Extra keys the enumeration reports even though nothing is stored under them. */
 	readonly ghostKeys: string[] = [];
 
+	/** Every key read, in order: a duplicated enumeration must not read a key twice. */
+	readonly gets: string[] = [];
+
 	async get(key: string): Promise<string | null> {
+		this.gets.push(key);
 		return this.values.get(key) ?? null;
 	}
 
@@ -63,6 +67,17 @@ describe("DragonflyPresenceStore.list", () => {
 		await store.touch(session("zeta"), 90_000);
 		await store.touch(session("alpha"), 90_000);
 		expect(await store.list()).toEqual([session("alpha"), session("zeta")]);
+	});
+
+	test("a key SCAN names twice is read once and yields one record", async () => {
+		const backend = new FakeBackend();
+		const store = new DragonflyPresenceStore(backend);
+		await store.touch(session("alive"), 90_000);
+		const key = `${PRESENCE_KEY_PREFIX}alive`;
+		backend.ghostKeys.push(key, key);
+		backend.gets.length = 0;
+		expect(await store.list()).toEqual([session("alive")]);
+		expect(backend.gets).toEqual([key]);
 	});
 
 	test("a key that expired between the enumeration and its read is skipped, not reported", async () => {
