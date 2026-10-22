@@ -14,7 +14,7 @@
  *
  * The detector reads no clock and does no I/O. Callers pass `nowMs` and the scans they already hold.
  */
-import { isErrorRecord, type PlanningIndexResult, type PlanningRecord } from "./index.ts";
+import { isErrorRecord, type PlanningFileRecord, type PlanningIndexResult, type PlanningRecord } from "./index.ts";
 import type { ClassifiedSession } from "./presence.ts";
 
 export const PLANNING_CONFLICT = "planning.conflict";
@@ -117,9 +117,21 @@ function phaseClaims(records: readonly PlanningRecord[], activePhase: string | n
 	const plans = new Set<string>();
 	for (const record of records) {
 		if (isErrorRecord(record) || record.phase !== activePhase) continue;
-		if (record.plan !== undefined) plans.add(record.plan);
+		const identity = planIdentity(record);
+		if (identity !== undefined) plans.add(identity);
 	}
 	return [{ phase: activePhase, plans: [...plans].sort(compareText) }];
+}
+
+/**
+ * A plan's identity is the plan id its parsed content declares, so the same plan under two filenames is one plan. A document
+ * whose content declares none keeps its filename-derived id. A document that is neither a plan nor declares one has none.
+ */
+function planIdentity(record: PlanningFileRecord): string | undefined {
+	const declared = record.frontmatter?.plan;
+	if (typeof declared === "string" && declared.length > 0) return declared;
+	if (typeof declared === "number") return String(declared);
+	return record.plan;
 }
 
 function conflictsFrom(views: readonly SessionView[], detectedAtMs: number): PlanningConflict[] {

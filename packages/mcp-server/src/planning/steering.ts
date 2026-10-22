@@ -34,6 +34,9 @@ export const STEERING_BODY_MAX = 4_096;
 /** One attempt plus one retry for every audit write. */
 export const STEERING_AUDIT_ATTEMPTS = 2;
 
+/** The most retry times each retry map keeps. Past it the oldest is dropped, so a sink that stays down cannot grow memory. */
+export const STEERING_RETRY_STATE_MAX = 256;
+
 const RATE_WINDOW_MS = 60_000;
 const DIRECTIVE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const PRINCIPAL_RE = /^[A-Za-z0-9][A-Za-z0-9._@:-]{0,127}$/;
@@ -218,6 +221,11 @@ export class SteeringInbox {
 		return records.sort((a, b) => compareDirectives(a.directive, b.directive));
 	}
 
+	/** How many retry times the inbox holds across both retry maps. Bounded by {@link STEERING_RETRY_STATE_MAX} per map. */
+	retryStateSize(): number {
+		return this.pendingQueueAtMs.size + this.pendingAcknowledgeAtMs.size;
+	}
+
 	private async doEnqueue(input: unknown): Promise<SteeringResult<SteeringRecord>> {
 		const parsed = SteeringDirectiveSchema.safeParse(input);
 		if (!parsed.success) return fail({ code: "invalid-directive", issues: issuePaths(parsed.error) });
@@ -234,7 +242,7 @@ export class SteeringInbox {
 			return fail({ code: "rate-limited", retryAfterMs });
 		}
 
-		this.pendingQueueAtMs.set(directive.id, nowMs);
+		rememberRetryTime(this.pendingQueueAtMs, directive.id, nowMs);
 		const audited = await this.audit({ event: "queued", atMs: nowMs, directive });
 		if (!audited.ok) return audited;
 		this.pendingQueueAtMs.delete(directive.id);
@@ -262,7 +270,7 @@ export class SteeringInbox {
 		}
 
 		const nowMs = this.pendingAcknowledgeAtMs.get(directive.id) ?? this.deps.clock.nowMs();
-		this.pendingAcknowledgeAtMs.set(directive.id, nowMs);
+		rememberRetryTime(this.pendingAcknowledgeAtMs, directive.id, nowMs);
 		const audited = await this.audit({
 			event: "acknowledged",
 			atMs: nowMs,
@@ -428,6 +436,20 @@ function integerSetting(
 
 function fail<T>(error: SteeringError): SteeringResult<T> {
 	return { ok: false, error };
+}
+
+/**
+ * Keeps the audit time of a write that has not yet succeeded, so a retry reuses it. Re-keying moves the entry to the newest
+ * position, and the oldest entries are dropped past the cap. An entry dropped that way is simply not reused: its retry takes
+ * a fresh time, which is safe whenever nothing was saved under the old one.
+ */
+function rememberRetryTime(states: Map<string, number>, directiveId: string, atMs: number): void {
+	states.delete(directiveId);
+	states.set(directiveId, atMs);
+	for (const oldest of states.keys()) {
+		if (states.size <= STEERING_RETRY_STATE_MAX) break;
+		states.delete(oldest);
+	}
 }
 
 /** Field paths only. Issue messages can echo input values, and a body may hold a secret. */

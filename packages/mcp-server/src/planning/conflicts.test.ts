@@ -244,3 +244,26 @@ describe("planning view status and the conflict-sensitive write gate", () => {
 		expect(() => detectConflicts(input([], [], { nowMs: Number.NaN }))).toThrow(RangeError);
 	});
 });
+
+/** A plan document whose filename gives one id and whose parsed content declares another, as the index builds them. */
+function contentPlan(path: string, filePlan: string, frontmatter: Record<string, unknown>): PlanningFileRecord {
+	return { path, kind: "phase", sha256: HASH, bytes: 10, phase: "53", plan: filePlan, frontmatter };
+}
+
+describe("detectConflicts: a plan's identity is its parsed content", () => {
+	test("the same plan content under two filenames in one active phase reports the shared plan", () => {
+		const declares = { plan: "53-01" };
+		const report = detectConflicts(
+			input(
+				[session("worker-a"), session("worker-b")],
+				[
+					scanOk("worker-a", NOW, [contentPlan(".planning/phases/53-x/53-01-PLAN.md", "53-01-PLAN", declares)]),
+					scanOk("worker-b", NOW, [contentPlan("/other/.planning/phases/53-x/copy-PLAN.md", "copy-PLAN", declares)]),
+				],
+			),
+		);
+
+		expect(report.conflicts).toHaveLength(1);
+		expect(report.conflicts[0]).toMatchObject({ phase: "53", plans: ["53-01"], sessionIds: ["worker-a", "worker-b"] });
+	});
+});

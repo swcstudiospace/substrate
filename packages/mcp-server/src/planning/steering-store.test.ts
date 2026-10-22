@@ -4,7 +4,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { REDACTED } from "../redact.ts";
-import { SteeringInbox, type SteeringAuditEntry, type SteeringDirective } from "./steering.ts";
+import { STEERING_RETRY_STATE_MAX, SteeringInbox, type SteeringAuditEntry, type SteeringDirective } from "./steering.ts";
 import {
 	SteeringAuditConflictError,
 	SteeringAuditError,
@@ -369,5 +369,32 @@ describe("SteeringAuditSink: a queue retry after a lost reply keeps the queue's 
 		const queuedRows = sql.rows.filter((row) => row.transition === "queued");
 		expect(queuedRows).toHaveLength(1);
 		expect(queuedRows[0]?.recordedAt.getTime()).toBe(2_000);
+	});
+});
+
+describe("SteeringInbox: retry state stays bounded while the sink is down", () => {
+	test("a sink that stays down through a thousand failed queues keeps the retry state under the cap, and a recovered sink accepts a retry with the same time", async () => {
+		const sql = new FakeAuditSql();
+		let now = 1_000_000;
+		const inbox = new SteeringInbox({
+			history: new SteeringAuditSink(sql),
+			clock: { nowMs: () => now },
+			policy: { allowlist: [HUMAN], ratePerMin: 10 },
+		});
+		sql.failWith = Object.assign(new Error("sink down"), { code: "ECONNRESET" });
+
+		let lastFailedAtMs = now;
+		for (let i = 0; i < 1000; i++) {
+			now += 1;
+			lastFailedAtMs = now;
+			expect((await inbox.enqueue(directive({ id: `down-${i}` }))).ok).toBe(false);
+		}
+		expect(inbox.retryStateSize()).toBeLessThanOrEqual(STEERING_RETRY_STATE_MAX);
+
+		// The sink recovers. The most recent failure is still within the cap, so its retry keeps the time it first used.
+		sql.failWith = null;
+		now += 10_000;
+		expect((await inbox.enqueue(directive({ id: "down-999" }))).ok).toBe(true);
+		expect(inbox.get("down-999")).toMatchObject({ state: "queued", queuedAtMs: lastFailedAtMs });
 	});
 });
