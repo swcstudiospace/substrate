@@ -180,12 +180,21 @@ describe("fabric health probes", () => {
 		expect(stateOf("timescaledb-index")).toBe("ok");
 	});
 
-	test("the Greptime ping is asked to stop at the health deadline, so no probe outlives its wait", async () => {
+	test("the fabric's Greptime ping is asked to stop at the health deadline, so no probe outlives its wait", async () => {
 		const { index } = indexProbe();
 		const { greptime, pingTimeouts } = greptimeProbe(() => new Promise<boolean>(() => undefined));
 		const client = await connect(substrateWithProbes(index, greptime));
 		await call(client, "fabric_status");
 		expect(pingTimeouts).toEqual([HEALTH_PROBE_MS]);
+	});
+
+	test("/healthz's Greptime ping is not given the fabric bound: it keeps the client default, as on main", async () => {
+		const { index } = indexProbe();
+		const { greptime, pingTimeouts } = greptimeProbe(async () => true);
+		const substrate = substrateWithProbes(index, greptime);
+		await substrate.health();
+		expect(pingTimeouts).toEqual([undefined]);
+		expect(pingTimeouts).not.toContain(HEALTH_PROBE_MS);
 	});
 
 	test("two fabric tool calls in one window issue one probe per source", async () => {
