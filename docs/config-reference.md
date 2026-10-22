@@ -176,7 +176,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `RAILWAY_SERVICE_ID` | string | none | LightRAG service id, when pinned | unpinned: status reports the plan without an id | mcp-server/config.ts | yes |
 | `RAILWAY_SERVICE_NAME` | string | lightrag | LightRAG service name for private DNS | lightrag | mcp-server/config.ts | no |
 | `RAILWAY_PRIVATE_DOMAIN` | string | none | Railway-injected private domain | <service>.railway.internal applies | mcp-server/config.ts | no |
-| `SUBSTRATE_DOCS_INGEST_ROOTS` | list | docs/, README.md, .planning/PROJECT.md | comma separated path prefixes | the default roots. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_DOCS_INGEST_ROOTS` | list | docs/, README.md, .planning/ | comma separated path prefixes | the default roots. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_VM_GUEST` | toggle | off | 1 | docs_ingest is allowed; 1 refuses it before any network call. See `docs/docs-search-ingest.md` | mcp-server/config.ts, cli/index.ts | yes |
 | `SUBSTRATE_DOCS_STATE_FILE` | path | none | file path | ingest records and version pins stay process-local. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_PRUNE_SUPERSEDED` | toggle | off | 1 | off: every superseded document stays on the plane. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
