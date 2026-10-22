@@ -104,6 +104,8 @@ export class PlanningObserver {
 	private touched: TouchedPair[] = [];
 	/** True while the latest complete change did not fit in `touched`. The report stays unknown (`report-limit`) until a change fits. */
 	private touchedOverflow = false;
+	/** The presence record has a change this process has not written yet: a complete change, a moved watcher gap, or a write that failed. Process-local. */
+	private presencePending = false;
 	/** Conflicts announced and still open, by signature. A conflict leaves the set once it is no longer detected. Process-local. */
 	private openConflicts = new Set<string>();
 	private timer: PlanningTimerHandle | undefined;
@@ -216,9 +218,10 @@ export class PlanningObserver {
 		this.touched = this.touchedOverflow ? touchedWithin(this.touched, nowMs, ttlMs) : merged;
 	}
 
-	/** Heartbeats this checkout when `due`. The record's time is replaced by the server's clock, and the record carries the report and the touched pairs. */
+	/** Heartbeats this checkout when a change is pending, the scan's `due` says one is. The record's time is replaced by the server's clock, and the record carries the report and the touched pairs. */
 	private async heartbeat(root: string, due: boolean, ttlMs: number): Promise<PlanningHeartbeat> {
-		if (!due) return { state: "not-due" };
+		if (due) this.presencePending = true;
+		if (!this.presencePending) return { state: "not-due" };
 		const presence = this.deps.presence;
 		if (presence === null) return { state: "presence-unset" };
 		try {
@@ -233,6 +236,7 @@ export class PlanningObserver {
 				...(this.report === null ? {} : { planning: this.report }),
 			};
 			await presence.touch(record, ttlMs);
+			this.presencePending = false;
 			return { state: "written" };
 		} catch (cause: unknown) {
 			return { state: "failed", detail: errnoCode(cause) };

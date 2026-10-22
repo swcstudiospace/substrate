@@ -425,6 +425,26 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "unchanged" });
 		expect(events).toHaveLength(1);
 	});
+
+	test("a gap whose presence write fails is retried on the next identical scan (greptile gap-retry thread)", async () => {
+		const tree = new FakeTree({ ...GIT, [PLAN]: "---\nplan: 52-01\n---\nBODY\n", [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const write = backend.setWithTtl.bind(backend);
+		let down = true;
+		backend.setWithTtl = async (key, value, ttlSeconds) => {
+			if (down) throw new Error("presence unreachable");
+			await write(key, value, ttlSeconds);
+		};
+		const presence = new DragonflyPresenceStore(backend);
+		const observer = gapObserver(tree, presence, "1");
+		expect(await observer.scan()).toMatchObject({ state: "observed", heartbeat: { state: "failed" } });
+
+		down = false;
+		expect(await observer.scan()).toMatchObject({ state: "observed", heartbeat: { state: "written" } });
+		const [stored] = (await presence.listWithin(10)).records;
+		expect(stored?.planning).toEqual({ status: "unknown", scannedAtMs: SERVER_NOW, reason: "scan-truncated" });
+	});
 });
 
 describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => {
