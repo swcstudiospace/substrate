@@ -120,7 +120,7 @@ export const SERIES_SOURCES: Readonly<Record<string, string>> = {
 	"memory.expired": METRIC.memoryExpired,
 	"hindsight.outbox_size": OUTBOX_SIZE_METRIC,
 	"hindsight.outbox_oldest_age_s": OUTBOX_OLDEST_METRIC,
-	"planning.transition": "PlanningReader change path (planning/read.ts)",
+	"planning.transition": "PlanningObserver scan path (planning/observer.ts)",
 	"index.archive_age_s": INDEX_ARCHIVE_AGE_METRIC,
 	"endpoint.proxy_planes": ENDPOINT_PROXY_PLANES_METRIC,
 };

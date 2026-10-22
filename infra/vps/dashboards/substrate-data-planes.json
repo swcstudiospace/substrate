@@ -1180,7 +1180,7 @@
         "type": "yesoreyeram-infinity-datasource",
         "uid": "substrate-slo-history"
       },
-      "description": "One record per detected planning change: applied when the change reached the ledger, refused when it did not. Series `planning.transition` (counter, sum per step, {transition}), source `PlanningReader change path (planning/read.ts)`. One line per `outcome`.",
+      "description": "One record per detected planning change: applied when the change reached the ledger, refused when it did not. Series `planning.transition` (counter, sum per step, {transition}), source `PlanningObserver scan path (planning/observer.ts)`. One line per `outcome`.",
       "fieldConfig": {
         "defaults": {
           "color": {
