@@ -17,12 +17,12 @@ const NOW = 1_000_000;
 const MAX_AGE = 30_000;
 const HASH = "a".repeat(64);
 
-function session(sessionId: string, status: "active" | "stale" = "active"): ClassifiedSession {
+function session(sessionId: string, status: "active" | "stale" = "active", activePhase: string | null = "53"): ClassifiedSession {
 	return {
 		sessionId,
 		worktree: `/work/${sessionId}`,
 		branch: `gsd/${sessionId}`,
-		activePhase: "53",
+		activePhase,
 		lastHeartbeatMs: NOW,
 		status,
 		ageMs: 0,
@@ -90,7 +90,7 @@ describe("detectConflicts: keyed on parsed phase and plan ids", () => {
 	test("the same path with different parsed phases does not conflict: the key is the phase field, not the path", () => {
 		const report = detectConflicts(
 			input(
-				[session("worker-a"), session("worker-b")],
+				[session("worker-a"), session("worker-b", "active", "54")],
 				[
 					scanOk("worker-a", NOW, [phaseDoc("shared/STATE.md", "53")]),
 					scanOk("worker-b", NOW, [phaseDoc("shared/STATE.md", "54")]),
@@ -103,7 +103,7 @@ describe("detectConflicts: keyed on parsed phase and plan ids", () => {
 	test("different phases with different documents do not conflict", () => {
 		const report = detectConflicts(
 			input(
-				[session("worker-a"), session("worker-b")],
+				[session("worker-a", "active", "52"), session("worker-b", "active", "53")],
 				[scanOk("worker-a", NOW, [phaseDoc("a.md", "52")]), scanOk("worker-b", NOW, [phaseDoc("b.md", "53")])],
 			),
 		);
@@ -113,17 +113,33 @@ describe("detectConflicts: keyed on parsed phase and plan ids", () => {
 	test("conflicts are reported once per phase, sorted by phase", () => {
 		const report = detectConflicts(
 			input(
-				[session("w1"), session("w2"), session("w3")],
+				[session("w1", "active", "53"), session("w2", "active", "53"), session("w3", "active", "54"), session("w4", "active", "54")],
 				[
-					scanOk("w1", NOW, [phaseDoc("a", "54"), phaseDoc("b", "53")]),
-					scanOk("w2", NOW, [phaseDoc("c", "53"), phaseDoc("d", "54")]),
-					scanOk("w3", NOW, [phaseDoc("e", "53")]),
+					scanOk("w1", NOW, [phaseDoc("a", "53"), phaseDoc("b", "54")]),
+					scanOk("w2", NOW, [phaseDoc("c", "53")]),
+					scanOk("w3", NOW, [phaseDoc("d", "54")]),
+					scanOk("w4", NOW, [phaseDoc("e", "54")]),
 				],
 			),
 		);
 		expect(report.conflicts.map((conflict) => [conflict.phase, conflict.sessionIds])).toEqual([
-			["53", ["w1", "w2", "w3"]],
-			["54", ["w1", "w2"]],
+			["53", ["w1", "w2"]],
+			["54", ["w3", "w4"]],
+		]);
+	});
+
+	test("a session claims only its active phase: shared historical phases produce no conflict", () => {
+		const historical = [phaseDoc("old-52.md", "52"), phaseDoc("old-53.md", "53"), phaseDoc("old-54.md", "54")];
+		const report = detectConflicts(
+			input(
+				[session("worker-a", "active", "53"), session("worker-b", "active", "54")],
+				[scanOk("worker-a", NOW, historical), scanOk("worker-b", NOW, historical)],
+			),
+		);
+		expect(report.conflicts).toEqual([]);
+		expect(report.views).toEqual([
+			{ sessionId: "worker-a", status: "known", scannedAtMs: NOW, phases: [{ phase: "53", plans: [] }] },
+			{ sessionId: "worker-b", status: "known", scannedAtMs: NOW, phases: [{ phase: "54", plans: [] }] },
 		]);
 	});
 });

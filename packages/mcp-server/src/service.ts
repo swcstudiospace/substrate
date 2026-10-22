@@ -1454,12 +1454,18 @@ export class Substrate {
 			emit: planningDeps.emit ?? (async (event: EventInput) => (await this.emit(event)).stored),
 		});
 		// Phase 53 (SOTA-09): the steering inbox. Built only while SUBSTRATE_PLANNING_STEERING is on and an audit sink is injected.
+		// Invalid settings keep the tools registered, so they answer `misconfigured` naming the keys, and the keys are logged once at boot.
 		const steeringSettings = config.steering.ok ? config.steering.settings : null;
+		const steeringErrors = config.steering.ok ? [] : config.steering.errors;
+		if (steeringErrors.length > 0) {
+			process.stderr.write(`[substrate] steering settings invalid; steering tools answer misconfigured: ${steeringErrors.map((error) => error.key).join(", ")}\n`);
+		}
 		const steeringHistory = stores?.steering?.history ?? null;
 		const steeringClock = { nowMs: () => Date.now() };
 		this.steering = {
-			enabled: steeringSettings?.enabled === true,
+			enabled: config.steeringRegistered,
 			clock: steeringClock,
+			settingsErrors: steeringErrors,
 			inbox:
 				steeringSettings !== null && steeringSettings.enabled && steeringHistory !== null
 					? new SteeringInbox({ history: steeringHistory, clock: steeringClock, policy: steeringSettings })

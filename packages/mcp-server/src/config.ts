@@ -23,7 +23,7 @@ import { railwayFromEnv, type RailwayConfig } from "./railway.ts";
 import { hindsightBanksFromEnv } from "./planes/hindsight.ts";
 import { loadRecallConfig, type RecallConfig } from "./recall-snapshot.ts";
 import { loadPlanningSettings, type PlanningConfigResult } from "./planning/config.ts";
-import { loadSteeringSettings, type SteeringConfigResult } from "./planning/steering.ts";
+import { loadSteeringSettings, steeringToolsRegistered, type SteeringConfigResult } from "./planning/steering.ts";
 import { steeringAuditTableEnabled } from "./planning/steering-store.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
 import { EVENT_IDEMPOTENCY_MODES, MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type EventIdempotencyMode, type MemoryExpiryMode, type Surface } from "./types.ts";
@@ -452,6 +452,8 @@ export interface SubstrateConfig {
 	steering: SteeringConfigResult;
 	/** `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` (phase 53, SOTA-09): on lets `migrate()` create `planning_steering_audit`. Off by default. */
 	steeringAuditTable: boolean;
+	/** Whether the steering tools are registered: the switch is on, or it is malformed and so answered as `misconfigured`. Off registers none. */
+	steeringRegistered: boolean;
 	// uplift-3 N2 — restart-durable SLO history and notifications
 	/**
 	 * Where the SLO checkpoint is written and restored from
@@ -850,6 +852,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		steering: loadSteeringSettings(env),
 		// Phase 53 (SOTA-09): the audit table opt-in. Off creates nothing at boot; on creates it through the gated migration step.
 		steeringAuditTable: steeringAuditTableEnabled(env),
+		steeringRegistered: steeringToolsRegistered(env),
 	};
 }
 

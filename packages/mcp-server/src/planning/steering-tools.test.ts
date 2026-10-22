@@ -1,10 +1,11 @@
 /**
  * The steering tools (phase 53, SOTA-09), with an in-memory audit sink and a fake caller context. Covered: only an operator
  * caller may queue or acknowledge; a non-operator or agent caller is refused even when its surface is allowlisted; the
- * principal is the caller's surface and the author is human; the allowlist is a second check; a conflicting directive is
- * not applied without confirm; an unconfigured sink refuses every write and records nothing; steering_list returns only the
- * target session's directives. The last group drives the tools through a real MCP client: an argument that tries to name
- * an author is refused, and a write with no sink answers not-configured as an error while a read answers it as a plain reply.
+ * principal is the caller's surface and the author is human; the allowlist is a second check; the server assigns the
+ * directive id and refuses a caller-supplied one; a conflicting directive is not applied without confirm; an unconfigured
+ * sink refuses every write and records nothing; steering_list returns the target session's directives, queued and
+ * acknowledged; invalid settings answer misconfigured, naming the keys, and never vanish as an absent tool. The last group
+ * drives the tools through a real MCP client.
  */
 import { describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -24,6 +25,7 @@ import {
 
 const NOW = 1_800_000_000_000;
 const OPERATOR: SteeringCaller = { surface: "omp", isOperator: true };
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** An audit sink that keeps every entry in order, and can be made to fail. */
 class MemorySink implements SteeringHistorySink {
@@ -40,18 +42,29 @@ class MemorySink implements SteeringHistorySink {
 	}
 }
 
-function wiringFor(history: SteeringHistorySink | null, allowlist: readonly string[] = ["omp"]): SteeringWiring {
+/** Directive ids for one wiring, in the order they are queued: dir-1, dir-2, ... */
+function sequentialIds(): () => string {
+	let next = 0;
+	return () => `dir-${++next}`;
+}
+
+function wiringFor(
+	history: SteeringHistorySink | null,
+	allowlist: readonly string[] = ["omp"],
+	settingsErrors: SteeringWiring["settingsErrors"] = [],
+): SteeringWiring {
 	const clock = { nowMs: () => NOW };
 	return {
 		enabled: true,
 		clock,
+		settingsErrors,
+		newDirectiveId: sequentialIds(),
 		inbox: history === null ? null : new SteeringInbox({ history, clock, policy: { allowlist, ratePerMin: 10 } }),
 	};
 }
 
 function queueInput(overrides: Partial<SteeringQueueInput> = {}): SteeringQueueInput {
 	return {
-		id: "dir-1",
 		target_session_id: "sess-a",
 		action: "redirect",
 		priority: "normal",
@@ -102,7 +115,7 @@ describe("queueSteering", () => {
 		expect(sink.entries).toEqual([]);
 	});
 
-	test("the principal is the operator's surface and the author is human", async () => {
+	test("the principal is the operator's surface, the author is human, and the server assigns the id", async () => {
 		const sink = new MemorySink();
 
 		expect(await queueSteering(wiringFor(sink), OPERATOR, queueInput())).toEqual({
@@ -112,6 +125,23 @@ describe("queueSteering", () => {
 			queued_at_ms: NOW,
 		});
 		expect(sink.entries[0]).toMatchObject({ event: "queued", directive: { author: { principalId: "omp", kind: "human" } } });
+	});
+
+	test("with no injected id source, the server assigns a random UUID to every directive", async () => {
+		const sink = new MemorySink();
+		const clock = { nowMs: () => NOW };
+		const wiring: SteeringWiring = {
+			enabled: true,
+			clock,
+			settingsErrors: [],
+			inbox: new SteeringInbox({ history: sink, clock, policy: { allowlist: ["omp"], ratePerMin: 10 } }),
+		};
+
+		const first = await queueSteering(wiring, OPERATOR, queueInput());
+		const second = await queueSteering(wiring, OPERATOR, queueInput());
+
+		expect(first.status === "queued" && UUID_RE.test(first.directive_id)).toBe(true);
+		expect(second.status === "queued" && first.status === "queued" && second.directive_id !== first.directive_id).toBe(true);
 	});
 
 	test("audits the queue before the directive is listed, and holds the queue when the audit fails", async () => {
@@ -124,6 +154,15 @@ describe("queueSteering", () => {
 			error: { code: "audit-unavailable", attempts: 2 },
 		});
 		expect(listSteering(wiring, { session_id: "sess-a" })).toEqual({ status: "listed", target_session_id: "sess-a", directives: [] });
+	});
+
+	test("invalid settings answer misconfigured, naming the keys, and never reach the inbox or the sink", async () => {
+		const sink = new MemorySink();
+		const errors = [{ key: "SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN", reason: "not-integer" as const }];
+		const wiring = wiringFor(sink, ["omp"], errors);
+
+		expect(await queueSteering(wiring, OPERATOR, queueInput())).toEqual({ status: "misconfigured", errors });
+		expect(sink.entries).toEqual([]);
 	});
 });
 
@@ -142,17 +181,17 @@ describe("acknowledgeSteering", () => {
 	test("a conflicting directive is not applied without confirm, and is applied with it", async () => {
 		const sink = new MemorySink();
 		const wiring = wiringFor(sink);
-		await queueSteering(wiring, OPERATOR, queueInput({ id: "dir-2", conflicts_with_active_plan: true }));
+		await queueSteering(wiring, OPERATOR, queueInput({ conflicts_with_active_plan: true }));
 
-		expect(await acknowledgeSteering(wiring, OPERATOR, { directive_id: "dir-2", session_id: "sess-a", outcome: "applied" })).toEqual({
+		expect(await acknowledgeSteering(wiring, OPERATOR, { directive_id: "dir-1", session_id: "sess-a", outcome: "applied" })).toEqual({
 			status: "refused",
 			error: { code: "confirmation-required" },
 		});
 		expect(sink.events()).toEqual(["queued"]);
 
 		expect(
-			await acknowledgeSteering(wiring, OPERATOR, { directive_id: "dir-2", session_id: "sess-a", outcome: "applied", confirm: true }),
-		).toEqual({ status: "acknowledged", directive_id: "dir-2", outcome: "applied", confirmed: true });
+			await acknowledgeSteering(wiring, OPERATOR, { directive_id: "dir-1", session_id: "sess-a", outcome: "applied", confirm: true }),
+		).toEqual({ status: "acknowledged", directive_id: "dir-1", outcome: "applied", confirmed: true });
 		expect(sink.events()).toEqual(["queued", "acknowledged"]);
 	});
 
@@ -188,30 +227,30 @@ describe("listSteering", () => {
 	test("returns only the target session's directives, highest priority first", async () => {
 		const sink = new MemorySink();
 		const wiring = wiringFor(sink);
-		await queueSteering(wiring, OPERATOR, queueInput({ id: "dir-a1", target_session_id: "sess-a" }));
-		await queueSteering(wiring, OPERATOR, queueInput({ id: "dir-b1", target_session_id: "sess-b" }));
-		await queueSteering(wiring, OPERATOR, queueInput({ id: "dir-a2", target_session_id: "sess-a", priority: "high" }));
+		await queueSteering(wiring, OPERATOR, queueInput({ target_session_id: "sess-a" })); // dir-1
+		await queueSteering(wiring, OPERATOR, queueInput({ target_session_id: "sess-b" })); // dir-2
+		await queueSteering(wiring, OPERATOR, queueInput({ target_session_id: "sess-a", priority: "high" })); // dir-3
 
 		expect(listSteering(wiring, { session_id: "sess-a" })).toMatchObject({
 			status: "listed",
 			target_session_id: "sess-a",
-			directives: [{ id: "dir-a2", priority: "high" }, { id: "dir-a1" }],
+			directives: [{ id: "dir-3", priority: "high" }, { id: "dir-1" }],
 		});
-		expect(listSteering(wiring, { session_id: "sess-b" })).toMatchObject({ status: "listed", directives: [{ id: "dir-b1" }] });
+		expect(listSteering(wiring, { session_id: "sess-b" })).toMatchObject({ status: "listed", directives: [{ id: "dir-2" }] });
 	});
 
-	test("a queued-then-acknowledged directive is still listed, with state acknowledged and its outcome", async () => {
+	test("an acknowledged directive stays listed, with state acknowledged, its outcome and its confirm flag", async () => {
 		const sink = new MemorySink();
 		const wiring = wiringFor(sink);
-		await queueSteering(wiring, OPERATOR, queueInput({ id: "dir-a1" }));
-		await queueSteering(wiring, OPERATOR, queueInput({ id: "dir-a2" }));
-		await acknowledgeSteering(wiring, OPERATOR, { directive_id: "dir-a2", session_id: "sess-a", outcome: "declined" });
+		await queueSteering(wiring, OPERATOR, queueInput()); // dir-1
+		await queueSteering(wiring, OPERATOR, queueInput()); // dir-2
+		await acknowledgeSteering(wiring, OPERATOR, { directive_id: "dir-2", session_id: "sess-a", outcome: "declined" });
 
 		expect(listSteering(wiring, { session_id: "sess-a" })).toMatchObject({
 			status: "listed",
 			directives: [
-				{ id: "dir-a1", state: "queued", outcome: null, confirmed: false, acknowledged_at_ms: null },
-				{ id: "dir-a2", state: "acknowledged", outcome: "declined", confirmed: false, acknowledged_at_ms: NOW },
+				{ id: "dir-1", state: "queued", outcome: null, confirmed: false, acknowledged_at_ms: null },
+				{ id: "dir-2", state: "acknowledged", outcome: "declined", confirmed: false, acknowledged_at_ms: NOW },
 			],
 		});
 	});
@@ -219,10 +258,16 @@ describe("listSteering", () => {
 	test("an acknowledged directive from another session is not listed for this one", async () => {
 		const sink = new MemorySink();
 		const wiring = wiringFor(sink);
-		await queueSteering(wiring, OPERATOR, queueInput({ id: "dir-b1", target_session_id: "sess-b" }));
-		await acknowledgeSteering(wiring, OPERATOR, { directive_id: "dir-b1", session_id: "sess-b", outcome: "applied", confirm: true });
+		await queueSteering(wiring, OPERATOR, queueInput({ target_session_id: "sess-b" })); // dir-1
+		await acknowledgeSteering(wiring, OPERATOR, { directive_id: "dir-1", session_id: "sess-b", outcome: "applied", confirm: true });
 
 		expect(listSteering(wiring, { session_id: "sess-a" })).toEqual({ status: "listed", target_session_id: "sess-a", directives: [] });
+	});
+
+	test("invalid settings answer misconfigured, not a listing and not an absent tool", () => {
+		const errors = [{ key: "SUBSTRATE_PLANNING_STEERING", reason: "not-boolean" as const }];
+
+		expect(listSteering(wiringFor(new MemorySink(), ["omp"], errors), { session_id: "sess-a" })).toEqual({ status: "misconfigured", errors });
 	});
 });
 
@@ -254,7 +299,6 @@ describe("the steering tools over MCP", () => {
 	}
 
 	const QUEUE_ARGS = {
-		id: "dir-m1",
 		target_session_id: "sess-a",
 		action: "annotate",
 		priority: "normal",
@@ -272,18 +316,19 @@ describe("the steering tools over MCP", () => {
 		);
 	});
 
-	test("an operator's directive reaches the list through the MCP tools", async () => {
+	test("an operator's directive reaches the list through the MCP tools, under a server-assigned id", async () => {
 		const sink = new MemorySink();
 		const client = await connect(substrateWith(ENABLED, sink), { surface: "omp", isOperator: true });
 
-		expect(await call(client, "steering_queue", QUEUE_ARGS)).toMatchObject({
-			isError: false,
-			body: { status: "queued", directive_id: "dir-m1" },
-		});
+		const queued = await call(client, "steering_queue", QUEUE_ARGS);
+		expect(queued.isError).toBe(false);
+		expect(queued.body).toMatchObject({ status: "queued", target_session_id: "sess-a" });
+		const directiveId = String(queued.body.directive_id);
+		expect(directiveId).toMatch(UUID_RE);
 		expect(sink.events()).toEqual(["queued"]);
 		expect(await call(client, "steering_list", { session_id: "sess-a" })).toMatchObject({
 			isError: false,
-			body: { status: "listed", directives: [{ id: "dir-m1", author_principal_id: "omp" }] },
+			body: { status: "listed", directives: [{ id: directiveId, author_principal_id: "omp" }] },
 		});
 	});
 
@@ -298,13 +343,13 @@ describe("the steering tools over MCP", () => {
 		expect(sink.entries).toEqual([]);
 	});
 
-	test("an argument that tries to name the author is refused at the boundary and records nothing", async () => {
+	test("an argument that names the author or the directive id is refused at the boundary and records nothing", async () => {
 		const sink = new MemorySink();
 		const client = await connect(substrateWith(ENABLED, sink), { surface: "omp", isOperator: true });
 
-		// The schema has no author fields, so the SDK refuses the call before the handler runs. The refusal is checked by
-		// its flag and by what happened, not by the wording of the SDK's message.
-		for (const extra of [{ principal_id: "omp" }, { author_kind: "human" }]) {
+		// The schemas have no author or id fields, so the SDK refuses the call before the handler runs. The refusal is checked
+		// by its flag and by what happened, not by the wording of the SDK's message.
+		for (const extra of [{ principal_id: "omp" }, { author_kind: "human" }, { id: "caller-chosen" }]) {
 			const result = await client.callTool({ name: "steering_queue", arguments: { ...QUEUE_ARGS, ...extra } });
 			expect(result.isError).toBe(true);
 		}
@@ -323,5 +368,46 @@ describe("the steering tools over MCP", () => {
 			isError: false,
 			body: { status: "not-configured" },
 		});
+	});
+
+	test("invalid settings register the tools and steering_list answers an error naming the key, not an absent tool", async () => {
+		const sink = new MemorySink();
+		const client = await connect(substrateWith({ ...ENABLED, SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN: "ten" }, sink), {
+			surface: "omp",
+			isOperator: true,
+		});
+
+		expect((await client.listTools()).tools.map((tool) => tool.name)).toContain("steering_list");
+		expect(await call(client, "steering_list", { session_id: "sess-a" })).toEqual({
+			isError: true,
+			body: { status: "misconfigured", errors: [{ key: "SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN", reason: "not-integer" }] },
+		});
+		expect(await call(client, "steering_queue", QUEUE_ARGS)).toMatchObject({
+			isError: true,
+			body: { status: "misconfigured" },
+		});
+		expect(sink.entries).toEqual([]);
+	});
+
+	test("a malformed enable switch still registers the tools, answered as misconfigured", async () => {
+		const client = await connect(substrateWith({ SUBSTRATE_PLANNING_STEERING: "maybe" }, new MemorySink()), {
+			surface: "omp",
+			isOperator: true,
+		});
+
+		expect((await client.listTools()).tools.map((tool) => tool.name)).toContain("steering_list");
+		expect(await call(client, "steering_list", { session_id: "sess-a" })).toMatchObject({
+			isError: true,
+			body: { status: "misconfigured", errors: [{ key: "SUBSTRATE_PLANNING_STEERING", reason: "not-boolean" }] },
+		});
+	});
+
+	test("with the switch off, invalid settings register no tool at all", async () => {
+		const client = await connect(substrateWith({ SUBSTRATE_PLANNING_STEERING: "off", SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN: "ten" }, new MemorySink()), {
+			surface: "omp",
+			isOperator: true,
+		});
+
+		expect((await client.listTools()).tools.map((tool) => tool.name)).not.toContain("steering_list");
 	});
 });

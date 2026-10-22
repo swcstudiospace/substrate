@@ -342,6 +342,17 @@ export function loadSteeringSettings(env: Readonly<Record<string, string | undef
 	return { ok: true, settings: { enabled, allowlist, ratePerMin } };
 }
 
+/**
+ * Whether the steering tools are registered. They are when the switch is on, and also when it is malformed: a
+ * malformed switch is answered by `misconfigured` results, never hidden as an absent tool. An unset or off switch
+ * registers nothing, so the default install is unchanged.
+ */
+export function steeringToolsRegistered(env: Readonly<Record<string, string | undefined>>): boolean {
+	const raw = env[STEERING_ENABLED_ENV];
+	if (raw === undefined) return false;
+	return FALSE_WORDS[raw.trim().toLowerCase()] !== true;
+}
+
 function booleanSetting(
 	env: Readonly<Record<string, string | undefined>>,
 	key: string,

@@ -13,6 +13,7 @@
  * - The sink is never built here. The inbox arrives injected through `SteeringWiring`, so this module never touches the
  *   store, the filesystem or a clock of its own.
  */
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { SESSION_ID_RE } from "./presence.ts";
 import {
@@ -21,6 +22,7 @@ import {
 	STEERING_OUTCOMES,
 	STEERING_PRIORITIES,
 	type SteeringClock,
+	type SteeringConfigError,
 	type SteeringError,
 	type SteeringInbox,
 	type SteeringOutcome,
@@ -32,6 +34,10 @@ export interface SteeringWiring {
 	readonly enabled: boolean;
 	readonly inbox: SteeringInbox | null;
 	readonly clock: SteeringClock;
+	/** The settings the server could not load. Non-empty means every steering tool answers `misconfigured`, naming these keys. */
+	readonly settingsErrors: readonly SteeringConfigError[];
+	/** Mints a directive id. Absent, a random UUID is used: the caller never chooses the id. */
+	readonly newDirectiveId?: () => string;
 }
 
 /**
@@ -49,7 +55,6 @@ const PLAN_ID_MAX = 64;
 /** `steering_queue`. Field names are snake_case, like the other tools in `mcp.ts`. Unknown fields are refused. */
 export const STEERING_QUEUE_INPUT = z
 	.object({
-		id: z.string().min(1).max(DIRECTIVE_ID_MAX).describe("The directive id: letters, digits and . _ : -, starting with a letter or digit."),
 		target_session_id: z.string().regex(SESSION_ID_RE).describe("The planning session the directive is for."),
 		action: z.enum(STEERING_ACTIONS).describe("pause, redirect or annotate."),
 		priority: z.enum(STEERING_PRIORITIES).describe("low, normal or high."),
@@ -96,6 +101,7 @@ export type SteeringWriteResult =
 	| { status: "acknowledged"; directive_id: string; outcome: SteeringOutcome; confirmed: boolean }
 	| { status: "forbidden"; reason: SteeringForbiddenReason }
 	| { status: "refused"; error: SteeringError }
+	| { status: "misconfigured"; errors: SteeringConfigError[] }
 	| { status: "not-configured" };
 
 export interface ListedSteeringDirective {
@@ -120,11 +126,12 @@ export interface ListedSteeringDirective {
 /** The directives for one session, queued or acknowledged. A read: `not-configured` is not an error. */
 export type SteeringListResult =
 	| { status: "listed"; target_session_id: string; directives: ListedSteeringDirective[] }
+	| { status: "misconfigured"; errors: SteeringConfigError[] }
 	| { status: "not-configured" };
 
 /** Whether a write was not allowed, refused, or had no sink to write to. All three are error replies. */
 export function steeringFailed(result: SteeringWriteResult): boolean {
-	return result.status === "forbidden" || result.status === "refused" || result.status === "not-configured";
+	return result.status === "forbidden" || result.status === "refused" || result.status === "not-configured" || result.status === "misconfigured";
 }
 
 type Writer = { status: "allowed"; principalId: string } | { status: "forbidden"; reason: SteeringForbiddenReason };
@@ -136,13 +143,20 @@ function writerFor(caller: SteeringCaller): Writer {
 	return { status: "allowed", principalId: caller.surface };
 }
 
+/** The settings the server could not load, as a typed result. Every tool answers this before anything else. */
+function settingsFailure(wiring: SteeringWiring): { status: "misconfigured"; errors: SteeringConfigError[] } | null {
+	return wiring.settingsErrors.length === 0 ? null : { status: "misconfigured", errors: [...wiring.settingsErrors] };
+}
+
 /** Queue a directive as the calling operator. The inbox validates, checks the allowlist, rate-limits and audits. */
 export async function queueSteering(wiring: SteeringWiring, caller: SteeringCaller, input: SteeringQueueInput): Promise<SteeringWriteResult> {
+	const failure = settingsFailure(wiring);
+	if (failure !== null) return failure;
 	const writer = writerFor(caller);
 	if (writer.status === "forbidden") return writer;
 	if (wiring.inbox === null) return { status: "not-configured" };
 	const result = await wiring.inbox.enqueue({
-		id: input.id,
+		id: wiring.newDirectiveId?.() ?? randomUUID(),
 		author: { principalId: writer.principalId, kind: "human" },
 		createdAtMs: wiring.clock.nowMs(),
 		priority: input.priority,
@@ -167,6 +181,8 @@ export async function acknowledgeSteering(
 	caller: SteeringCaller,
 	input: SteeringAcknowledgeInput,
 ): Promise<SteeringWriteResult> {
+	const failure = settingsFailure(wiring);
+	if (failure !== null) return failure;
 	const writer = writerFor(caller);
 	if (writer.status === "forbidden") return writer;
 	if (wiring.inbox === null) return { status: "not-configured" };
@@ -187,6 +203,8 @@ export async function acknowledgeSteering(
 
 /** The directives for one session, queued or acknowledged, highest priority first. A read: it writes nothing. */
 export function listSteering(wiring: SteeringWiring, input: SteeringListInput): SteeringListResult {
+	const failure = settingsFailure(wiring);
+	if (failure !== null) return failure;
 	if (wiring.inbox === null) return { status: "not-configured" };
 	const directives = wiring.inbox.recordsFor(input.session_id).map((record): ListedSteeringDirective => {
 		const { directive } = record;

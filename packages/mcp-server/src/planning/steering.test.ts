@@ -359,3 +359,26 @@ describe("loadSteeringSettings", () => {
 		});
 	});
 });
+
+describe("SteeringInbox: reads and writes return copies", () => {
+	test("mutating a record returned by a write or a read does not change a later read", async () => {
+		const original = "Hold the 53-01 plan until the review lands.";
+		const { inbox } = build();
+		const written = await inbox.enqueue(directive());
+		if (!written.ok) throw new Error("the directive should queue");
+		written.value.directive.body = "tampered through the enqueue result";
+
+		const got = inbox.get("d-1");
+		if (got === null) throw new Error("the queued directive should be readable");
+		got.directive.body = "tampered through get";
+		const [pending] = inbox.pendingFor(WORKER);
+		if (pending === undefined) throw new Error("the directive should be pending");
+		pending.body = "tampered through pendingFor";
+		const [listed] = inbox.recordsFor(WORKER);
+		if (listed === undefined) throw new Error("the directive should be listed");
+		listed.directive.body = "tampered through recordsFor";
+
+		expect(inbox.get("d-1")).toMatchObject({ state: "queued", directive: { body: original } });
+		expect(inbox.pendingFor(WORKER).map((item) => item.body)).toEqual([original]);
+	});
+});

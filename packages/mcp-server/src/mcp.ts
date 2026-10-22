@@ -1447,9 +1447,11 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				title: "Queue a steering directive for a planning session",
 				description:
 					"Queues one directive to a planning session, as the calling operator. The principal is the caller's surface and must be on " +
-					"SUBSTRATE_PLANNING_STEERING_PRINCIPALS. Each session has a rate limit. The directive is audited before it is queued. " +
-					"A refusal carries a typed error: forbidden (operator-required or caller-identity-missing), principal-not-allowed, " +
-					"rate-limited, invalid-directive, duplicate-directive or audit-unavailable. Answers not-configured while no audit sink is injected.",
+					"SUBSTRATE_PLANNING_STEERING_PRINCIPALS. Each session has a rate limit. The server assigns the directive id, returned as " +
+					"directive_id; the caller cannot choose it. The directive is audited before it is queued. A refusal carries a typed error: " +
+					"forbidden (operator-required or caller-identity-missing), principal-not-allowed, rate-limited, invalid-directive or " +
+					"audit-unavailable (its code is the driver's, or AUDIT_CONFLICT when the audit row was saved with other content). Answers " +
+					"misconfigured, naming the settings keys, while the steering settings are invalid, and not-configured while no audit sink is injected.",
 				inputSchema: STEERING_QUEUE_INPUT,
 				annotations: { destructiveHint: false, idempotentHint: false },
 			},
@@ -1462,7 +1464,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				description:
 					"The calling operator acknowledges a queued directive for the target session as applied or declined. Applying a directive " +
 					"that conflicts with the active plan needs confirm: true. The acknowledgement is audited before it takes effect. A refusal " +
-					"carries a typed error: forbidden, not-found, wrong-session, already-acknowledged, confirmation-required or audit-unavailable.",
+					"carries a typed error: forbidden, not-found, wrong-session, already-acknowledged, confirmation-required or audit-unavailable. " +
+					"Answers misconfigured while the steering settings are invalid.",
 				inputSchema: STEERING_ACKNOWLEDGE_INPUT,
 				annotations: { destructiveHint: false, idempotentHint: false },
 			},
@@ -1473,11 +1476,16 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			{
 				title: "Queued steering directives for a session",
 				description:
-					"The directives queued for one planning session and not yet acknowledged, highest priority first. A read: it changes nothing.",
+					"The directives for one planning session, queued and acknowledged, highest priority first. Each carries its state; an acknowledged " +
+					"directive keeps its outcome and confirm flag. The author is the operator who queued it, never an argument. A read: it changes " +
+					"nothing. Answers misconfigured, naming the settings keys, while the steering settings are invalid.",
 				inputSchema: STEERING_LIST_INPUT,
 				annotations: { readOnlyHint: true },
 			},
-			async (args) => json(listSteering(steering, args)),
+			async (args) => {
+				const listed = listSteering(steering, args);
+				return listed.status === "misconfigured" ? { ...json(listed), isError: true } : json(listed);
+			},
 		);
 	}
 
