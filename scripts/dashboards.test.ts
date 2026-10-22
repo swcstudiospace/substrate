@@ -139,7 +139,24 @@ describe("the committed dashboards are what the generator renders", () => {
 
 		const coreOnly = buildDashboards({ series: METRIC_SERIES });
 		const planes = parse(coreOnly, PLANES);
-		expect(planes.panels.filter((panel) => panel.type === "row").map((panel) => panel.title)).toEqual(["Planes and docs"]);
+		// A row's panels are the panels after it, up to the next row. A drawn row holds at least one panel, and a row whose panels
+		// all read extended-only series is absent from the core-only render.
+		const rowGroups = (panels: Panel[]): Array<{ title: string; members: Panel[] }> => {
+			const groups: Array<{ title: string; members: Panel[] }> = [];
+			for (const panel of panels) {
+				if (panel.type === "row") groups.push({ title: panel.title, members: [] });
+				else groups.at(-1)?.members.push(panel);
+			}
+			return groups;
+		};
+		const extendedOnly = Object.keys(ALL_METRIC_SERIES).filter((series) => !Object.hasOwn(METRIC_SERIES, series));
+		const drawn = rowGroups(planes.panels);
+		for (const row of drawn) expect(row.members.length).toBeGreaterThan(0);
+		const extendedRows = rowGroups(parse(buildDashboards(), PLANES).panels).filter(
+			(row) => row.members.length > 0 && row.members.every((panel) => extendedOnly.includes(seriesOf(panel) ?? "")),
+		);
+		expect(extendedRows.length).toBeGreaterThan(0);
+		for (const row of extendedRows) expect(drawn.map((candidate) => candidate.title)).not.toContain(row.title);
 		for (const panel of planes.panels) {
 			const series = seriesOf(panel);
 			if (series !== null) expect(Object.hasOwn(METRIC_SERIES, series)).toBe(true);
