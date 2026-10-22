@@ -160,8 +160,8 @@ refuses to write a token value into the bundle.
 `repo` is the origin slug. `branch` is the git branch in the hook's working
 directory. The payload is `tool`, plus `outcome`, `duration_ms` and
 `tool_use_id` when the envelope has them, all through `redactValue`. The
-summary is `muse called <tool>`. Actor is `agent`. The timeout is 1.5
-seconds. A 4xx appends a refused line under `stateDir`. Stdout stays empty
+summary is `muse called <tool>`. Actor is `agent`. The budget is 1.5
+seconds in total: the stdin read, git and the POST share it. A 4xx appends a refused line under `stateDir`. Stdout stays empty
 and the process exits 0.
 
 The projector validates, installs or updates with user scope, then approves.

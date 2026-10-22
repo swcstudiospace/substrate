@@ -349,4 +349,49 @@ describe("generated muse hook", () => {
 		expect(Object.keys(line).sort()).toEqual(["collector", "error", "kind", "source", "status", "surface", "ts"]);
 		expect(line).toMatchObject({ collector: "muse", source: "muse.tool_call", kind: "tool.call", surface: "muse", status: 400 });
 	});
+
+	test("an open stdin cannot hold the turn: the hook exits 0 with empty stdout", async () => {
+		const dir = temp();
+		expect(run(dir, ["--bundle-only"], { url: "http://127.0.0.1:1" }).code).toBe(0);
+		const started = Date.now();
+		const proc = Bun.spawn(["bun", join(dir, "bundle", "hooks", "post-tool-use.ts")], {
+			cwd: dir,
+			env: { PATH: process.env.PATH ?? "", HOME: dir },
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+		// The hook budget is 1.5 s plus process start; a 5 s stdin wait would fail this.
+		expect(Date.now() - started).toBeLessThan(4000);
+		expect(code).toBe(0);
+		expect(stdout).toBe("");
+	}, 10000);
+
+	test("a collector that never answers cannot hold the turn past the budget", async () => {
+		const dir = temp();
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			fetch: () => new Promise<Response>(() => {}),
+		});
+		try {
+			expect(run(dir, ["--bundle-only"], { url: `http://127.0.0.1:${server.port}` }).code).toBe(0);
+			const started = Date.now();
+			const proc = Bun.spawn(["bun", join(dir, "bundle", "hooks", "post-tool-use.ts")], {
+				cwd: dir,
+				env: { PATH: process.env.PATH ?? "", HOME: dir },
+				stdin: new Blob([JSON.stringify({ tool_name: "Read" })]),
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			// The POST gets only the budget stdin left over, so a hung collector is abandoned in time.
+			expect(Date.now() - started).toBeLessThan(4000);
+			expect(code).toBe(0);
+			expect(stdout).toBe("");
+		} finally {
+			server.stop(true);
+		}
+	}, 10000);
 });
