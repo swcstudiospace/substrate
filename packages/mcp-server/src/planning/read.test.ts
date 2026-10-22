@@ -370,7 +370,7 @@ describe("planning.transition", () => {
 		expect(harness.transitions).toEqual([expect.objectContaining({ from: "DEGRADED", to: "SUCCESS", outcome: "applied" })]);
 	});
 
-	test("a change the ledger does not store is held, and its transition is recorded once it is stored", async () => {
+	test("a change the ledger does not store is held, and its transition is recorded once, on first detection", async () => {
 		await seedPhase();
 		await write(".git/config", ORIGIN);
 		let accept = false;
@@ -380,12 +380,13 @@ describe("planning.transition", () => {
 		const held = await harness.reader.status();
 		await harness.reader.settleTransitions();
 		expect(held.state === "ok" && held.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "not-stored" });
-		expect(harness.transitions).toEqual([]);
+		expect(harness.transitions).toEqual([expect.objectContaining({ outcome: "refused" })]);
 
 		accept = true;
-		await harness.reader.status();
+		const retried = await harness.reader.status();
 		await harness.reader.settleTransitions();
-		expect(harness.transitions).toEqual([expect.objectContaining({ outcome: "applied" })]);
+		expect(retried.state === "ok" && retried.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "emitted" });
+		expect(harness.transitions).toEqual([expect.objectContaining({ outcome: "refused" })]);
 	});
 
 	test("a failing primary sink falls back once, to stdout, and the primary is called once", async () => {
