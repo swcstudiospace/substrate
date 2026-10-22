@@ -21,7 +21,7 @@
 import type { EventInput } from "../types.ts";
 import { branchOf, gitLayout, planningSessionId, repoOf } from "./checkout.ts";
 import type { PlanningConfigResult } from "./config.ts";
-import { diffPlanningIndex, type PlanningDiff, type PlanningSnapshot } from "./diff.ts";
+import { diffPlanningIndex, type PathChange, type PlanningDiff, type PlanningSnapshot } from "./diff.ts";
 import { observePlanningChange } from "./events.ts";
 import { buildPlanningIndex, errnoCode, snapshotOf, updatePlanningIndex, type PlanningFs, type PlanningIndex, type PlanningIndexFailure } from "./index.ts";
 import type { DragonflyPresenceStore } from "./presence-dragonfly.ts";
@@ -253,10 +253,10 @@ function changesIn(diff: PlanningDiff): number {
 }
 
 /** The identity of a change: its paths and the hashes they now have. A held change detected again has the same identity. */
-function changeKey(diff: { added: string[]; removed: string[]; changed: string[] }, after: PlanningSnapshot): string {
+function changeKey(diff: { added: PathChange[]; removed: PathChange[]; changed: PathChange[] }, after: PlanningSnapshot): string {
 	const hashes = new Map(after.records.map((record) => [record.path, record.sha256] as const));
-	const hashed = (paths: string[]): [string, string | null][] => paths.map((path) => [path, hashes.get(path) ?? null]);
-	return JSON.stringify({ added: hashed(diff.added), removed: diff.removed, changed: hashed(diff.changed) });
+	const hashed = (changes: PathChange[]): [string, string | null][] => changes.map(({ path }) => [path, hashes.get(path) ?? null]);
+	return JSON.stringify({ added: hashed(diff.added), removed: diff.removed.map(({ path }) => path), changed: hashed(diff.changed) });
 }
 
 /** The transition outcome of a scan that published nothing: an incomplete diff that vouches for a change is refused; the rest record nothing. */
