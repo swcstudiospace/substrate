@@ -82,3 +82,16 @@ function integerSetting(
 	}
 	return value;
 }
+
+/** Where completion checkpoints are kept durably (phase 53, SOTA-09). Unset or blank keeps them in memory. See `checkpoint-store.ts`. */
+export const PLANNING_CHECKPOINT_DIR_ENV = "SUBSTRATE_PLANNING_CHECKPOINT_DIR";
+
+export type CheckpointDirectoryResult = { ok: true; directory: string | null } | { ok: false; errors: PlanningConfigError[] };
+
+/** Parse the checkpoint directory. Set but relative or containing a NUL is an error; the path is never echoed. */
+export function loadCheckpointDirectory(env: Readonly<Record<string, string | undefined>>): CheckpointDirectoryResult {
+	const directory = (env[PLANNING_CHECKPOINT_DIR_ENV] ?? "").trim();
+	if (directory.includes("\0")) return { ok: false, errors: [{ key: PLANNING_CHECKPOINT_DIR_ENV, reason: "invalid-characters" }] };
+	if (directory !== "" && !isAbsolute(directory)) return { ok: false, errors: [{ key: PLANNING_CHECKPOINT_DIR_ENV, reason: "not-absolute" }] };
+	return { ok: true, directory: directory === "" ? null : directory };
+}

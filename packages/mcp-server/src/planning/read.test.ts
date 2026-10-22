@@ -764,3 +764,10 @@ describe("the watcher gap on the read path (phase 53, SOTA-09)", () => {
 		expect(planningOf(view, (row) => row.worktree === root)).toEqual({ state: "unknown", reason: "scan-stale" });
 	});
 });
+
+describe("planning_status and checkpoint durability (phase 53, SOTA-09)", () => {
+	test("with no checkpoint directory configured, planning_status says the checkpoints are not durable", async () => {
+		await seedPhase();
+		expect(await reader(root).reader.status()).toMatchObject({ state: "ok", checkpoints: { durable: false, reason: "checkpoint-dir-unset" } });
+	});
+});

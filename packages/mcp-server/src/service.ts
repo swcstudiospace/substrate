@@ -141,6 +141,7 @@ import { nodePlanningFs } from "./planning/fs.ts";
 import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
 import { DragonflyPresenceStore } from "./planning/presence-dragonfly.ts";
 import { PlanningReader, type PlanningReaderDeps } from "./planning/read.ts";
+import { completionStoreView } from "./planning/checkpoint-store.ts";
 import type { SteeringWiring } from "./planning/steering-tools.ts";
 import { SteeringInbox, type SteeringHistorySink } from "./planning/steering.ts";
 import type { FabricSources } from "./fabric/types.ts";
@@ -1452,6 +1453,7 @@ export class Substrate {
 			fs: planningDeps.fs ?? nodePlanningFs(),
 			presence: planningDeps.presence !== undefined ? planningDeps.presence : productionPresence(config),
 			emit: planningDeps.emit ?? (async (event: EventInput) => (await this.emit(event)).stored),
+			checkpoints: planningDeps.checkpoints ?? completionStoreView(config.planningCheckpoint),
 		});
 		// Phase 53 (SOTA-09): the steering inbox. Built only while SUBSTRATE_PLANNING_STEERING is on and an audit sink is injected.
 		// Invalid settings keep the tools registered, so they answer `misconfigured` naming the keys, and the keys are logged once at boot.

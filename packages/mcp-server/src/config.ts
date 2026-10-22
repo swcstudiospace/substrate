@@ -22,7 +22,7 @@ import { DEFAULT_RETRIEVAL_KNOBS, ragflowFromEnv, type RagflowConfig, type Retri
 import { railwayFromEnv, type RailwayConfig } from "./railway.ts";
 import { hindsightBanksFromEnv } from "./planes/hindsight.ts";
 import { loadRecallConfig, type RecallConfig } from "./recall-snapshot.ts";
-import { loadPlanningSettings, type PlanningConfigResult } from "./planning/config.ts";
+import { loadCheckpointDirectory, loadPlanningSettings, type CheckpointDirectoryResult, type PlanningConfigResult } from "./planning/config.ts";
 import { loadSteeringSettings, steeringToolsRegistered, type SteeringConfigResult } from "./planning/steering.ts";
 import { steeringAuditTableEnabled } from "./planning/steering-store.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
@@ -448,6 +448,8 @@ export interface SubstrateConfig {
 	eventBus: EventBusSettings;
 	/** `SUBSTRATE_PLANNING_*` (phase 52, SOTA-08): the planning root, presence window and read bounds. See `planning/config.ts`. */
 	planning: PlanningConfigResult;
+	/** `SUBSTRATE_PLANNING_CHECKPOINT_DIR` (phase 53, SOTA-09): where completion checkpoints are kept durably. Unset keeps them in memory. See `planning/checkpoint-store.ts`. */
+	planningCheckpoint: CheckpointDirectoryResult;
 	/** `SUBSTRATE_PLANNING_STEERING*` (phase 53, SOTA-09): the steering switch, principal allowlist and rate. See `planning/steering.ts`. */
 	steering: SteeringConfigResult;
 	/** `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` (phase 53, SOTA-09): on lets `migrate()` create `planning_steering_audit`. Off by default. */
@@ -848,6 +850,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		eventBus: loadEventBusSettings(env, cache),
 		// Phase 52 (SOTA-08): the planning plane's root and limits. Environment only; a bad value is a typed result.
 		planning: loadPlanningSettings(env),
+		// Phase 53 (SOTA-09): the durable checkpoint directory. Unset keeps checkpoints in memory; a bad value is a typed result.
+		planningCheckpoint: loadCheckpointDirectory(env),
 		// Phase 53 (SOTA-09): the steering switch, allowlist and rate. Environment only; a bad value is a typed result.
 		steering: loadSteeringSettings(env),
 		// Phase 53 (SOTA-09): the audit table opt-in. Off creates nothing at boot; on creates it through the gated migration step.

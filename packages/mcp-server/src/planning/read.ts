@@ -29,6 +29,7 @@ import { classifySessions, type PlanningReport, type SessionRecord, type Session
 import { conflictEvent, conflictSignature, detectConflicts, sessionViewOf, type PlanningConflict, type SessionView } from "./conflicts.ts";
 import { observeScan, type WatcherGap } from "./report.ts";
 import type { PlanningIndexResult } from "./index.ts";
+import type { CompletionStoreView } from "./checkpoint-store.ts";
 
 /** The session id the ledger row carries for a change observed by this plane. */
 export const PLANNING_OBSERVER_SESSION = "planning-observer";
@@ -90,6 +91,8 @@ export type PlanningStatusView =
 			errors: PlanningErrorRow[];
 			changes: PlanningChangeNote;
 			heartbeat: PlanningHeartbeat;
+			/** Whether completion checkpoints survive a restart. Read from the configured directory; see `checkpoint-store.ts`. */
+			checkpoints: CompletionStoreView;
 	  };
 
 /** A session's planning view as a row shows it: the scan time when its report is known, or the reason it is not. */
@@ -128,6 +131,8 @@ export interface PlanningReaderDeps {
 	presence: DragonflyPresenceStore | null;
 	/** The ledger ingest (`Substrate.emit`). Resolves true when the event was stored. */
 	emit: (event: EventInput) => Promise<boolean>;
+	/** Whether completion checkpoints are durable, from `completionStoreView`. Unset means in memory: not durable. */
+	checkpoints?: CompletionStoreView;
 }
 
 type Resolved = { ready: true; root: string; limits: PlanningLimits } | { ready: false; view: PlanningDisabled | PlanningMisconfigured };
@@ -186,6 +191,7 @@ export class PlanningReader {
 			})),
 			changes,
 			heartbeat,
+			checkpoints: this.deps.checkpoints ?? { durable: false, reason: "checkpoint-dir-unset" },
 		};
 	}
 
