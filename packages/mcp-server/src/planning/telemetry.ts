@@ -8,8 +8,9 @@
  *   - `greptimeMetricSink` stores the record through the metrics writer the history sampler
  *     already uses (`GreptimeClient.recordMetricSamples`, injected as `TransitionRecordSamples`).
  *     That writer stores only series in its closed allow-list, with one label key per series.
- *     `planning.transition` is not in that list yet, so until it is added the writer refuses
- *     the row as `invalid` and the sink reports a refusal. The stdout fallback keeps the record.
+ *     `planning.transition` is in that allow-list (core tier, label `outcome`), so the writer stores
+ *     it. The wiring uses this sink only when the metrics-history switch is on; otherwise records go
+ *     to stdout alone. A row the writer refuses is a refusal, and the stdout fallback keeps the record.
  *   - `stdoutMetricSink` writes one JSON line per record. A record carries only the closed
  *     fields below, so the line holds no secrets.
  *
