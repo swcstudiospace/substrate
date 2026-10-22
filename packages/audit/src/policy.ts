@@ -80,6 +80,8 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	// so a planning outage must not refuse the turn. The one ledger note a read may write is fail-open for the same reason.
 	"planning_status",
 	"planning_sessions",
+	// Phase 53 (SOTA-09): the steering read. The directives for one session, queued or acknowledged, are inspection only.
+	"steering_list",
 	// The one write that is fail-open on purpose: an event costs a line in the trail,
 	// and refusing the turn over it would make a substrate outage an outage of the host.
 	"events_emit",
