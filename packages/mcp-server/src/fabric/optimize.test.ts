@@ -89,14 +89,36 @@ describe("buildFabricSuggestions", () => {
 		expect(found?.evidence).toBe("state unavailable; source: health().planes.ragflow");
 	});
 
-	test("the Hindsight backlog fires only when Hindsight is degraded and retains are parked", () => {
-		const degradedHindsight = { ...healthyServices(), hindsight: { ...healthyServices().hindsight, degraded: true } };
-		const backlog = healthyFacts({ services: degradedHindsight, outbox: { parked: 3, oldestAt: "2026-10-20T23:00:00.000Z" } });
-		const found = suggest(backlog).find((suggestion) => suggestion.id === "hindsight-outbox-backlog");
-		expect(found?.evidence).toBe("3 retain(s) parked, oldest parked at 2026-10-20T23:00:00.000Z");
+	test("an open Hindsight breaker with queued retains still yields the backlog, with its count and oldest age", () => {
+		const facts = healthyFacts({
+			services: { ...healthyServices(), hindsight: { ...healthyServices().hindsight, breaker: "open", answered: false } },
+			outbox: { parked: 3, oldestAt: "2026-10-20T23:00:00.000Z" },
+		});
+		expect(buildFabricStatus(facts).resources.find((row) => row.resource === "hindsight")?.state).toBe("unavailable");
+		const found = suggest(facts).find((suggestion) => suggestion.id === "hindsight-outbox-backlog");
+		expect(found).toMatchObject({ resource: "hindsight", severity: "attention" });
+		expect(found?.evidence).toBe("3 retain(s) queued in the outbox; oldest 3600 s old, parked since 2026-10-20T23:00:00.000Z");
+	});
 
-		expect(ids(healthyFacts({ services: degradedHindsight }))).not.toContain("hindsight-outbox-backlog");
-		expect(ids(healthyFacts({ outbox: { parked: 3, oldestAt: null } }))).not.toContain("hindsight-outbox-backlog");
+	test("the backlog is reported whatever the Hindsight breaker says, while retains are queued", () => {
+		for (const breaker of ["closed", "half-open", "open"] as const) {
+			const facts = withService("hindsight", { breaker, answered: breaker === "closed" });
+			expect({ breaker, found: ids({ ...facts, outbox: { parked: 1, oldestAt: null } }) }).toEqual({
+				breaker,
+				found: expect.arrayContaining(["hindsight-outbox-backlog"]),
+			});
+		}
+	});
+
+	test("the backlog is silent with nothing queued, and when Hindsight is not configured", () => {
+		expect(ids(healthyFacts({ outbox: { parked: 0, oldestAt: null } }))).not.toContain("hindsight-outbox-backlog");
+		const unconfigured = withService("hindsight", { configured: false, answered: null, breaker: "off" });
+		expect(ids({ ...unconfigured, outbox: { parked: 3, oldestAt: null } })).not.toContain("hindsight-outbox-backlog");
+	});
+
+	test("a queued backlog with no known oldest time says the age is unknown", () => {
+		const found = suggest(healthyFacts({ outbox: { parked: 2, oldestAt: null } })).find((suggestion) => suggestion.id === "hindsight-outbox-backlog");
+		expect(found?.evidence).toBe("2 retain(s) queued in the outbox; oldest age unknown");
 	});
 
 	test("the cache hit-ratio suggestion needs enough reads and a low ratio", () => {

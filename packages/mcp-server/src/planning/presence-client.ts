@@ -5,9 +5,12 @@
  *
  * The commands are GET, SET (with EX), SCAN and TIME, and nothing else. There is no KEYS, EVAL, PUBLISH or
  * any other path to a command. A SCAN walk is bounded by `SCAN_COUNT` per round, by `MAX_SCAN_ROUNDS`, and by
- * the caller's limit. A connection that fails a command is discarded, so the next call reconnects.
+ * the caller's limit. Every connect and command has a reply deadline (`COMMAND_TIMEOUT_MS` by default). A connection
+ * that fails or misses a deadline is discarded, so the next call reconnects.
  */
 import { RedisClient } from "bun";
+import { COMMAND_TIMEOUT_MS } from "../cache.ts";
+import { sharedDeadline } from "../deadline.ts";
 import { REDACTED, redact } from "../redact.ts";
 import type { PresenceBackend } from "./presence-dragonfly.ts";
 
@@ -54,7 +57,12 @@ const defaultClient: MakePresenceClient = (url, connectTimeoutMs) =>
  * A `PresenceBackend` over one connection, opened on first use. A command that fails closes that connection,
  * so the next call opens a fresh one; nothing retries a command on its own.
  */
-export function dragonflyPresenceBackend(url: string, connectTimeoutMs: number, makeClient: MakePresenceClient = defaultClient): PresenceBackend {
+export function dragonflyPresenceBackend(
+	url: string,
+	connectTimeoutMs: number,
+	makeClient: MakePresenceClient = defaultClient,
+	commandTimeoutMs: number = COMMAND_TIMEOUT_MS,
+): PresenceBackend {
 	let client: PresenceRedisClient | null = null;
 	let opening: Promise<PresenceRedisClient> | null = null;
 
@@ -62,7 +70,7 @@ export function dragonflyPresenceBackend(url: string, connectTimeoutMs: number, 
 		if (client !== null) return Promise.resolve(client);
 		if (opening !== null) return opening;
 		const next = makeClient(url, connectTimeoutMs);
-		opening = next.connect().then(
+		opening = bounded(next.connect(), connectTimeoutMs, "presence connect").then(
 			() => {
 				client = next;
 				opening = null;
@@ -80,7 +88,7 @@ export function dragonflyPresenceBackend(url: string, connectTimeoutMs: number, 
 	const run = async (command: PresenceCommand, args: string[]): Promise<unknown> => {
 		const redis = await open();
 		try {
-			return await redis.send(command, args);
+			return await bounded(redis.send(command, args), commandTimeoutMs, `presence ${command}`);
 		} catch (cause: unknown) {
 			if (client === redis) client = null;
 			closeQuietly(redis);
@@ -133,6 +141,19 @@ function parseScanReply(reply: unknown): { cursor: string; keys: string[] } {
 		throw new PresenceBackendError("SCAN", "reply holds a cursor or key that is not a string");
 	}
 	return { cursor, keys };
+}
+
+/**
+ * A reply bounded by the codebase's shared deadline (`deadline.ts`, the same pattern the brief and docs fan-outs use).
+ * A reply that misses the budget rejects with a `DeadlineError`; the caller then discards the connection.
+ */
+async function bounded<T>(read: Promise<T>, budgetMs: number, label: string): Promise<T> {
+	const deadline = sharedDeadline(budgetMs, label);
+	try {
+		return await deadline.race(read);
+	} finally {
+		deadline.clear();
+	}
 }
 
 function closeQuietly(redis: PresenceRedisClient): void {

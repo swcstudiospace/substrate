@@ -4,24 +4,32 @@
  * Both are typed. A plane with no root answers `disabled` and never an error; invalid settings answer `misconfigured`
  * with the keys, never the values; a failed index or presence read answers `unavailable` with a code.
  *
- * `planning_status` carries hashes and counts only: no file body and no frontmatter. Each read also compares the index
- * with the one the process read before. A change is written to the ledger as one `planning.changed` note through the
- * ingest path (`emit`), which also sends the bus hint. The first read of a process is a baseline and emits nothing.
- * The comparison is process-local, so a restart starts a new baseline.
+ * Each read writes a heartbeat for its checkout before it answers: the session is the worktree, keyed by a hash of its
+ * path, with the branch read from its HEAD. The heartbeat is stamped with the server's clock (`presence-dragonfly.ts`).
+ * A heartbeat that fails is reported in the view and does not fail the read. The MCP transport is stateless, so the
+ * checkout is the only stable identity a read has.
  *
- * Each detected change also writes one `planning.transition` record (phase 54) through `metrics`, with the stdout line as its fallback.
- * `planning_sessions` is classified against the server's clock (`presence-dragonfly.ts`). When that clock cannot be
- * read, sessions are listed as `unknown` and the reason is given. They are not guessed as active.
- * Every sessions answer also carries `view`: the session view's state (`states.ts`, one of six) and its line.
+ * `planning_status` carries hashes and counts only: no file body and no frontmatter. Each read also compares the index
+ * with the baseline the process holds. The baseline only moves forward: a scan that started before the current baseline
+ * was set reports `superseded` and changes nothing. A complete change is written to the ledger as one `planning.changed`
+ * note through the ingest path (`emit`), which also sends the bus hint. The first read of a process is a baseline and
+ * emits nothing. The comparison is process-local, so a restart starts a new baseline.
+ *
+ * Each detected change also writes one `planning.transition` record (phase 54) through `metrics`, with the stdout line as its
+ * fallback. The record is handed to its sinks without being awaited, so a slow metric write does not delay the read.
+ *
+ * `planning_sessions` is classified against the server's clock. When that clock cannot be read, sessions are listed as
+ * `unknown` and the reason is given. They are not guessed as active. Every sessions answer also carries `view`: the session
+ * view's state (`states.ts`, one of six) and its line.
  */
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import type { EventInput } from "../types.ts";
 import { diffPlanningIndex, type PlanningSnapshot } from "./diff.ts";
 import { emitPlanningChange } from "./events.ts";
 import { type PlanningConfigError, type PlanningConfigResult, type PlanningLimits } from "./config.ts";
 import { buildPlanningIndex, isErrorRecord, type PlanningFileRecord, type PlanningFs, type PlanningIndexFailure, type PlanningKind, type PlanningRecord } from "./index.ts";
 import { DragonflyPresenceStore, PRESENCE_MAX_SESSIONS } from "./presence-dragonfly.ts";
-import { classifySessions, type SessionStatus } from "./presence.ts";
+import { classifySessions, type SessionRecord, type SessionStatus } from "./presence.ts";
 import { deriveSessionState, type SessionState, type SessionViewState } from "./states.ts";
 import { emitTransition, stdoutMetricSink, transitionRecord, type MetricSink, type TransitionClock, type TransitionOutcome, type TransitionRecord } from "./telemetry.ts";
 
@@ -59,12 +67,21 @@ export interface PlanningErrorRow {
 	detail: string;
 }
 
+/** Why a change could not be attributed to a repo. Each reason is a typed result, never an exception out of the read. */
+export type RepoUnknownReason = "no-git-entry" | "git-file-malformed" | "git-dir-unreadable" | "config-unreadable" | "origin-missing";
+
 export type PlanningChangeNote =
 	| { state: "baseline" }
 	| { state: "unchanged" }
-	| { state: "changed"; added: number; removed: number; changed: number; ledger: "emitted" | "not-stored" | "repo-unknown" }
+	/** A scan that started before the current baseline was set. It changes nothing and writes nothing. */
+	| { state: "superseded" }
+	| { state: "changed"; added: number; removed: number; changed: number; ledger: "emitted" | "not-stored" }
+	| { state: "changed"; added: number; removed: number; changed: number; ledger: "repo-unknown"; repoReason: RepoUnknownReason }
 	/** A truncated side: removals are not reported (`removed` is null) and `added` is null when the previous side was truncated. Nothing is written. */
 	| { state: "partial"; added: number | null; removed: null; changed: number; ledger: "not-written" };
+
+/** The outcome of this read's heartbeat. */
+export type PlanningHeartbeat = { state: "written" } | { state: "presence-unset" } | { state: "failed"; detail: string };
 
 export type PlanningStatusView =
 	| PlanningDisabled
@@ -78,6 +95,7 @@ export type PlanningStatusView =
 			documents: PlanningHashRow[];
 			errors: PlanningErrorRow[];
 			changes: PlanningChangeNote;
+			heartbeat: PlanningHeartbeat;
 	  };
 
 export interface PlanningSessionRow {
@@ -100,6 +118,7 @@ export type PlanningSessionsBody =
 			clock: { state: "server" } | { state: "unavailable"; detail: string };
 			truncated: boolean;
 			sessions: PlanningSessionRow[];
+			heartbeat: PlanningHeartbeat;
 	  };
 
 /** Every sessions answer carries the session view's state and its line, whatever the body is. */
@@ -134,10 +153,14 @@ function resolve(result: PlanningConfigResult): Resolved {
 }
 
 export class PlanningReader {
-	/** The index the previous `status` read saw, and the root it was read from. Process-local. */
-	private previous: { root: string; snapshot: PlanningSnapshot; state: SessionState } | null = null;
+	/** The baseline: the root, the scan that set it, its snapshot, and the state that read was in. It only moves forward. Process-local. */
+	private baseline: { root: string; seq: number; snapshot: PlanningSnapshot; state: SessionState } | null = null;
+	/** Scans started so far. A scan takes the next number when it starts, so a later start has a larger number. */
+	private scans = 0;
 	/** Scheduled transition deliveries not yet settled. */
 	private readonly pending = new Set<Promise<void>>();
+	/** The comparisons in order: each waits for the one before it, so a baseline is never compared while it is advancing. */
+	private observing: Promise<void> = Promise.resolve();
 
 	constructor(private readonly deps: PlanningReaderDeps) {}
 
@@ -145,11 +168,13 @@ export class PlanningReader {
 		const resolved = resolve(this.deps.settings);
 		if (!resolved.ready) return resolved.view;
 		const { root, limits } = resolved;
+		const seq = ++this.scans;
+		const heartbeat = await this.heartbeat(root, limits.presenceTtlS * 1000);
 		const built = await buildPlanningIndex(root, { fs: this.deps.fs, limits: { maxFiles: limits.maxFiles, maxBytes: limits.maxBytes } });
 		if (!built.ok) return { state: "unavailable", code: built.code };
-		const { records, truncated } = built.index;
+		const { records, truncated, unlisted } = built.index;
 		const counts = countOf(records);
-		const changes = await this.observe(root, { records, truncated }, indexState({ documents: counts.documents, errors: counts.errors, truncated }));
+		const changes = await this.observe(root, seq, { records, truncated, unlisted }, indexState({ documents: counts.documents, errors: counts.errors, truncated }));
 		return {
 			state: "ok",
 			limits,
@@ -165,6 +190,7 @@ export class PlanningReader {
 				detail: record.error.detail,
 			})),
 			changes,
+			heartbeat,
 		};
 	}
 
@@ -180,6 +206,7 @@ export class PlanningReader {
 		const presence = this.deps.presence;
 		if (presence === null) return { state: "unavailable", code: "presence-backend-unset" };
 		const ttlMs = resolved.limits.presenceTtlS * 1000;
+		const heartbeat = await this.heartbeat(resolved.root, ttlMs);
 		try {
 			const listing = await presence.listWithin(PRESENCE_MAX_SESSIONS);
 			const clock = await readClock(presence);
@@ -208,6 +235,7 @@ export class PlanningReader {
 				clock: clock.ok ? { state: "server" } : { state: "unavailable", detail: clock.detail },
 				truncated: listing.truncated,
 				sessions,
+				heartbeat,
 			};
 		} catch (cause: unknown) {
 			return { state: "unavailable", code: "presence-listing-failed", detail: cause instanceof Error ? cause.message : String(cause) };
@@ -215,44 +243,58 @@ export class PlanningReader {
 	}
 
 	/**
-	 * Compares this index with the last one read here, and records the state this read is in. A complete diff writes one
-	 * `planning.changed` note when it differs. A partial diff (either side truncated) reports what it can vouch for and writes
-	 * nothing: removals are never inferred from a truncated side, so `removed` stays null rather than an empty list.
-	 *
-	 * A detected change also writes one `planning.transition` record, from the state of the previous read to this one. Nothing is
-	 * written when nothing is detected.
+	 * Writes this checkout's heartbeat. The record's `lastHeartbeatMs` is replaced by the server's clock inside `touch`, so the
+	 * value given here is a placeholder. Any failure is returned as a `failed` outcome, never thrown.
 	 */
-	private async observe(root: string, snapshot: PlanningSnapshot, state: SessionState): Promise<PlanningChangeNote> {
-		const previous = this.previous;
-		if (previous === null || previous.root !== root) {
-			this.previous = { root, snapshot, state };
-			return { state: "baseline" };
+	private async heartbeat(root: string, ttlMs: number): Promise<PlanningHeartbeat> {
+		const presence = this.deps.presence;
+		if (presence === null) return { state: "presence-unset" };
+		try {
+			const layout = await gitLayout(this.deps.fs, root);
+			if (!layout.ok) return { state: "failed", detail: layout.reason };
+			const record: SessionRecord = {
+				sessionId: planningSessionId(this.deps.fs, root),
+				worktree: root,
+				branch: await branchOf(this.deps.fs, layout.gitDir),
+				activePhase: null,
+				lastHeartbeatMs: 0,
+			};
+			await presence.touch(record, ttlMs);
+			return { state: "written" };
+		} catch (cause: unknown) {
+			return { state: "failed", detail: cause instanceof Error ? cause.message : String(cause) };
 		}
-		// A throw from the comparison (a config read, a ledger publish) leaves `previous` where it was: the next read compares with the same baseline and sees the change then.
-		const { note, outcome } = await this.compare(root, previous.snapshot, snapshot);
-		const record = outcome === null ? null : transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: previous.state, to: state, outcome }, this.deps.clock ?? hostClock);
-		this.previous = { root, snapshot, state };
-		if (record !== null) this.schedule(record);
-		return note;
 	}
 
-	/** The change note for two indexes, and the transition outcome when a change was detected: null when none was, or none can be vouched for. */
-	private async compare(root: string, before: PlanningSnapshot, after: PlanningSnapshot): Promise<{ note: PlanningChangeNote; outcome: TransitionOutcome | null }> {
-		const diff = diffPlanningIndex(before, after);
-		const removed = diff.removed;
-		if (removed === null) {
-			const added = before.truncated ? null : diff.added.length;
-			const changed = diff.changed.length;
-			const vouched = (added ?? 0) + changed > 0;
-			return { note: { state: "partial", added, removed: null, changed, ledger: "not-written" }, outcome: vouched ? "refused" : null };
-		}
-		const counts = { added: diff.added.length, removed: removed.length, changed: diff.changed.length };
-		if (counts.added + counts.removed + counts.changed === 0) return { note: { state: "unchanged" }, outcome: null };
-		const repo = await repoOf(this.deps.fs, root);
-		if (repo === null) return { note: { state: "changed", ...counts, ledger: "repo-unknown" }, outcome: "refused" };
-		const stored = await emitPlanningChange({ publish: this.deps.emit }, { repo, sessionId: PLANNING_OBSERVER_SESSION, diff: { ...diff, removed } });
-		const ledger = stored === "published" ? "emitted" : "not-stored";
-		return { note: { state: "changed", ...counts, ledger }, outcome: ledger === "emitted" ? "applied" : "refused" };
+	/**
+	 * Compares this index with the baseline. A scan older than the baseline is `superseded`, and the baseline is left alone.
+	 * A complete diff writes one `planning.changed` note when it differs. A partial diff (either side truncated) reports what
+	 * it can vouch for and writes nothing: removals are never inferred from a truncated side, so `removed` stays null.
+	 *
+	 * A detected change also writes one `planning.transition` record, from the state the baseline was in to this read's. The
+	 * baseline advances only after that record is made: a comparison that throws leaves it where it was, so the next read
+	 * compares against the same baseline and sees the change then.
+	 */
+	private observe(root: string, seq: number, snapshot: PlanningSnapshot, state: SessionState): Promise<PlanningChangeNote> {
+		const run = this.observing.then(async (): Promise<PlanningChangeNote> => {
+			const current = this.baseline;
+			if (current !== null && seq < current.seq) return { state: "superseded" };
+			if (current === null || current.root !== root) {
+				this.baseline = { root, seq, snapshot, state };
+				return { state: "baseline" };
+			}
+			const { note, outcome } = await this.compare(root, current.snapshot, snapshot);
+			const record = outcome === null ? null : transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: current.state, to: state, outcome }, this.deps.clock ?? hostClock);
+			this.baseline = { root, seq, snapshot, state };
+			if (record !== null) this.schedule(record);
+			return note;
+		});
+		// The next comparison waits for this one. A failure reaches the caller through `run`; the queue itself carries on.
+		this.observing = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		return run;
 	}
 
 	/**
@@ -272,6 +314,25 @@ export class PlanningReader {
 	/** Resolves once every scheduled transition record has been delivered or handed to its fallback. A read never waits on it; tests and an orderly shutdown may. */
 	async settleTransitions(): Promise<void> {
 		while (this.pending.size > 0) await Promise.all([...this.pending]);
+	}
+
+	/** The change note for two indexes, and the transition outcome when a change was detected: null when none was, or none can be vouched for. */
+	private async compare(root: string, before: PlanningSnapshot, after: PlanningSnapshot): Promise<{ note: PlanningChangeNote; outcome: TransitionOutcome | null }> {
+		const diff = diffPlanningIndex(before, after);
+		const removed = diff.removed;
+		if (removed === null) {
+			const added = before.truncated ? null : diff.added.length;
+			const changed = diff.changed.length;
+			const vouched = (added ?? 0) + changed > 0;
+			return { note: { state: "partial", added, removed: null, changed, ledger: "not-written" }, outcome: vouched ? "refused" : null };
+		}
+		const counts = { added: diff.added.length, removed: removed.length, changed: diff.changed.length };
+		if (counts.added + counts.removed + counts.changed === 0) return { note: { state: "unchanged" }, outcome: null };
+		const repo = await repoOf(this.deps.fs, root);
+		if (repo.state === "unknown") return { note: { state: "changed", ...counts, ledger: "repo-unknown", repoReason: repo.reason }, outcome: "refused" };
+		const stored = await emitPlanningChange({ publish: this.deps.emit }, { repo: repo.repo, sessionId: PLANNING_OBSERVER_SESSION, diff: { ...diff, removed } });
+		const ledger = stored === "published" ? "emitted" : "not-stored";
+		return { note: { state: "changed", ...counts, ledger }, outcome: ledger === "emitted" ? "applied" : "refused" };
 	}
 }
 
@@ -342,12 +403,71 @@ async function readClock(presence: DragonflyPresenceStore): Promise<{ ok: true; 
 	}
 }
 
-/** The `owner/name` of the `origin` remote in the checkout's `.git/config`, or null when it cannot be read from there. */
-async function repoOf(fs: PlanningFs, root: string): Promise<string | null> {
-	const path = join(root, ".git", "config");
+/** The session a checkout heartbeats as: stable for the path, and shaped to pass the session id rule. */
+function planningSessionId(fs: PlanningFs, root: string): string {
+	return `wt-${fs.sha256(new TextEncoder().encode(root)).slice(0, 24)}`;
+}
+
+/** The text of a file, or null when it is absent. Any other failure throws. */
+async function textOf(fs: PlanningFs, path: string): Promise<string | null> {
 	const found = await fs.statFile(path);
 	if (found === null || !found.isFile) return null;
-	return repoFromGitConfig(new TextDecoder().decode(await fs.readFile(path)));
+	return new TextDecoder().decode(await fs.readFile(path));
+}
+
+type GitLayout = { ok: true; gitDir: string; commonDir: string } | { ok: false; reason: RepoUnknownReason };
+
+/**
+ * Where a checkout's git data lives. A `.git` directory is the git directory. A `.git` file (a linked worktree) names one
+ * in its `gitdir:` line, relative to the checkout. That git directory's `commondir` file, when present, names the common
+ * directory that holds the shared `config`. I/O failures throw; a missing or malformed layout is a typed result.
+ */
+async function gitLayout(fs: PlanningFs, root: string): Promise<GitLayout> {
+	const dotGit = join(root, ".git");
+	const entry = await fs.statFile(dotGit);
+	if (entry === null) return { ok: false, reason: "no-git-entry" };
+	let gitDir = dotGit;
+	if (entry.isFile) {
+		const pointer = /^gitdir:[ \t]*(.+?)[ \t]*$/m.exec((await textOf(fs, dotGit)) ?? "");
+		if (pointer === null) return { ok: false, reason: "git-file-malformed" };
+		gitDir = resolvePath(root, pointer[1] ?? "");
+	}
+	const commondir = await textOf(fs, join(gitDir, "commondir"));
+	const commonDir = commondir === null ? gitDir : resolvePath(gitDir, commondir.trim());
+	return { ok: true, gitDir, commonDir };
+}
+
+/** The branch a worktree's HEAD names, or `detached`. A HEAD that is absent throws. */
+async function branchOf(fs: PlanningFs, gitDir: string): Promise<string> {
+	const head = await textOf(fs, join(gitDir, "HEAD"));
+	if (head === null) throw new Error("HEAD is absent");
+	const ref = /^ref:[ \t]*refs\/heads\/(.+?)[ \t]*$/m.exec(head);
+	return ref === null ? "detached" : (ref[1] ?? "detached");
+}
+
+type RepoLookup = { state: "known"; repo: string } | { state: "unknown"; reason: RepoUnknownReason };
+
+/**
+ * The `owner/name` of the `origin` remote, read from the common git directory's config. Every failure is a typed reason:
+ * a denied or vanished config is `config-unreadable` for this call, and the document summary is unaffected.
+ */
+async function repoOf(fs: PlanningFs, root: string): Promise<RepoLookup> {
+	let layout: GitLayout;
+	try {
+		layout = await gitLayout(fs, root);
+	} catch {
+		return { state: "unknown", reason: "git-dir-unreadable" };
+	}
+	if (!layout.ok) return { state: "unknown", reason: layout.reason };
+	let config: string | null;
+	try {
+		config = await textOf(fs, join(layout.commonDir, "config"));
+	} catch {
+		return { state: "unknown", reason: "config-unreadable" };
+	}
+	if (config === null) return { state: "unknown", reason: "config-unreadable" };
+	const repo = repoFromGitConfig(config);
+	return repo === null ? { state: "unknown", reason: "origin-missing" } : { state: "known", repo };
 }
 
 /** Parses the `origin` URL of a git config into `owner/name`. Only the two trailing path segments are kept. */
