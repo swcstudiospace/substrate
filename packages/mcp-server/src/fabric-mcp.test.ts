@@ -478,3 +478,22 @@ describe("the Greptime row with the write probe off", () => {
 		}
 	});
 });
+
+describe("the size read on the health path", () => {
+	test("the size read starts when the ping answers: a write probe that stalls does not hold it", async () => {
+		const { index } = indexProbe();
+		const started: number[] = [];
+		const greptime = {
+			...greptimeWithStalledWrite(),
+			capacity: async () => {
+				started.push(Date.now());
+				return LEDGER_SIZE;
+			},
+		};
+		const begun = Date.now();
+		const health = await substrateWithProbes(index, greptime).health({ greptimeTimeoutMs: HEALTH_PROBE_MS });
+		expect(health.capacity.ledger).toEqual(LEDGER_SIZE);
+		expect(started).toHaveLength(1);
+		expect(started[0]! - begun).toBeLessThan(HEALTH_PROBE_MS / 2);
+	});
+});
