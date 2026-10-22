@@ -2,33 +2,32 @@
  * The fabric's one I/O step (phase 51, SOTA-07): reads the sources and folds them into the facts the pure
  * builders take.
  *
- * Every source read runs under a deadline. `health()` bounds each of its own probes, so a slow plane answers
- * `unavailable` for itself while the others keep their answers; the deadline here is a backstop for the whole call. A
- * source that misses it, or throws, leaves its resources with no answer, which reports as `unavailable` and names the
- * reason in the row's fixed `source` phrase. The call always returns the facts, and nothing throws to the caller.
+ * Every plane is awaited under its own deadline. A plane that answers keeps its real state. A plane that misses the
+ * deadline, or throws, reads as `unavailable` for itself alone, and its row names the reason (`timeout` or `failed`)
+ * in the fixed `source` phrase. The synchronous counters and breaker states need no wait. The call always returns
+ * the facts, and nothing throws to the caller.
  */
 import {
 	type BreakerReading,
 	type FabricCostView,
 	type FabricFacts,
-	type FabricHealthView,
 	type FabricSources,
 	type ServiceName,
 	type ServiceReading,
 } from "./types.ts";
 
-/** The per-source deadline for each read the fabric makes, in ms. */
+/** The per-plane deadline for each read the fabric makes, in ms. */
 export const FABRIC_SOURCE_DEADLINE_MS = 1500;
 
-/** How long one health computation is shared by the fabric's calls and `/healthz`, in ms (phase 51, D51-b). */
+/** How long one health computation is shared by the fabric's calls, in ms (phase 51, D51-b). */
 export const FABRIC_HEALTH_WINDOW_MS = 2_000;
 
-type Read<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly reason: "deadline" | "failed" };
+type Read<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly reason: "timeout" | "failed" };
 
-/** `work`'s answer, or why there is none: it outlasted `ms`, or it threw. Never rejects. */
+/** `work`'s answer, or why there is none: it outlasted `ms` (timeout), or it threw (failed). Never rejects. */
 async function within<T>(work: () => Promise<T>, ms: number): Promise<Read<T>> {
 	const { promise: deadline, resolve: expire } = Promise.withResolvers<Read<T>>();
-	const timer = setTimeout(() => expire({ ok: false, reason: "deadline" }), ms);
+	const timer = setTimeout(() => expire({ ok: false, reason: "timeout" }), ms);
 	const answer = Promise.resolve()
 		.then(work)
 		.then<Read<T>, Read<T>>(
@@ -42,71 +41,76 @@ async function within<T>(work: () => Promise<T>, ms: number): Promise<Read<T>> {
 	}
 }
 
-/** The source phrase for a health-backed row: the path read, or why it was not read. */
-function healthSource(path: string, read: Read<FabricHealthView>): string {
-	if (read.ok) return `health().${path}`;
-	return read.reason === "deadline" ? "health(): no answer in time" : "health(): read failed";
+/** The source phrase for one plane: the path read, with the reason it was not read when it was not. */
+function sourceOf(path: string, read: Read<unknown>): string {
+	return read.ok ? `health().${path}` : `health().${path}: ${read.reason}`;
 }
 
-function breakerOf(snapshot: { readonly state: "closed" | "open" | "half-open" } | null | undefined): BreakerReading {
+function breakerOf(snapshot: { readonly state: "closed" | "open" | "half-open" } | null): BreakerReading {
 	return snapshot ? snapshot.state : "off";
 }
 
-/** Reads the sources, under the deadline, and returns the facts. Never throws. */
+/** Reads the sources, each plane under its own deadline, and returns the facts. Never throws. */
 export async function gatherFabricFacts(
 	sources: FabricSources,
 	options: { readonly deadlineMs?: number } = {},
 ): Promise<FabricFacts> {
 	const deadlineMs = options.deadlineMs ?? FABRIC_SOURCE_DEADLINE_MS;
 	const checkedAt = sources.now();
-	const [healthRead, costRead] = await Promise.all([
-		within(() => sources.health(), deadlineMs),
+	const parts = sources.health();
+	const [greptimeRead, indexRead, hindsightRead, ragflowRead, costRead] = await Promise.all([
+		within(() => parts.greptime, deadlineMs),
+		within(() => parts.index, deadlineMs),
+		within(() => parts.hindsight, deadlineMs),
+		within(() => parts.ragflow, deadlineMs),
 		within<FabricCostView>(() => sources.railwayCost(), deadlineMs),
 	]);
-	const health = healthRead.ok ? healthRead.value : null;
+	const snapshot = sources.snapshot();
 	const config = sources.config;
 	const outbox = sources.outbox();
+	const { cache, breakers } = snapshot;
+	const greptime = greptimeRead.ok ? greptimeRead.value : null;
 
 	const services: Record<ServiceName, ServiceReading> = {
 		dragonfly: {
 			configured: config.configured.dragonfly,
-			held: config.configured.dragonfly && (config.dragonflyRefused || (health !== null && !health.cache.enabled)),
-			answered: health === null ? null : health.cache.connected,
-			breaker: health === null ? "off" : breakerOf(health.planes.cache.breaker),
-			degraded: health !== null && health.cache.mode === "degraded",
-			source: healthSource("cache", healthRead),
+			held: config.configured.dragonfly && (config.dragonflyRefused || !cache.enabled),
+			answered: cache.connected,
+			breaker: breakerOf(breakers.cache),
+			degraded: cache.mode === "degraded",
+			source: "health().cache",
 		},
 		"timescaledb-index": {
 			configured: config.configured["timescaledb-index"],
 			held: false,
-			answered: health === null ? null : health.index,
-			breaker: health === null ? "off" : breakerOf(health.planes.index.breaker),
+			answered: indexRead.ok ? indexRead.value : null,
+			breaker: breakerOf(breakers.index),
 			degraded: false,
-			source: healthSource("index", healthRead),
+			source: sourceOf("index", indexRead),
 		},
 		greptime: {
 			configured: config.configured.greptime,
 			held: false,
-			answered: health === null ? null : health.greptime,
-			breaker: health === null ? "off" : breakerOf(health.planes.greptime.breaker),
-			degraded: health !== null && health.greptime && !health.eventsWritable,
-			source: healthSource("greptime", healthRead),
+			answered: greptime === null ? null : greptime.up,
+			breaker: breakerOf(breakers.greptime),
+			degraded: greptime !== null && greptime.up && !greptime.eventsWritable,
+			source: sourceOf("greptime", greptimeRead),
 		},
 		ragflow: {
 			configured: config.configured.ragflow,
 			held: false,
-			answered: health === null ? null : health.planes.ragflow.ok,
-			breaker: health === null ? "off" : breakerOf(health.planes.ragflow.breaker),
+			answered: ragflowRead.ok ? ragflowRead.value : null,
+			breaker: breakerOf(breakers.ragflow),
 			degraded: false,
-			source: healthSource("planes.ragflow", healthRead),
+			source: sourceOf("planes.ragflow", ragflowRead),
 		},
 		hindsight: {
 			configured: config.configured.hindsight,
 			held: false,
-			answered: health === null ? null : health.planes.hindsight.ok,
-			breaker: health === null ? "off" : breakerOf(health.planes.hindsight.breaker),
+			answered: hindsightRead.ok ? hindsightRead.value : null,
+			breaker: breakerOf(breakers.hindsight),
 			degraded: outbox.size > 0,
-			source: healthSource("planes.hindsight", healthRead),
+			source: sourceOf("planes.hindsight", hindsightRead),
 		},
 	};
 
@@ -114,24 +118,19 @@ export async function gatherFabricFacts(
 		? { status: costRead.value.status, projectedMonthlyUsd: costRead.value.projectedMonthlyUsd, budgetUsd: costRead.value.budgetUsd }
 		: { status: "unknown", projectedMonthlyUsd: null, budgetUsd: null };
 
-	const cache =
-		health === null
-			? null
-			: {
-					mode: health.cache.mode,
-					hits: health.cache.hits,
-					misses: health.cache.misses,
-					errors: health.cache.errors,
-					bypasses: health.cache.bypasses,
-				};
-
 	return {
 		checkedAt,
 		endpointPolicy: config.endpointPolicy,
 		endpoints: { ...config.endpointClasses },
 		services,
-		cache,
-		eventBusEnabled: health === null ? null : health.eventBus.enabled,
+		cache: {
+			mode: cache.mode,
+			hits: cache.hits,
+			misses: cache.misses,
+			errors: cache.errors,
+			bypasses: cache.bypasses,
+		},
+		eventBusEnabled: snapshot.eventBus.enabled,
 		outbox: { parked: outbox.size, oldestAt: outbox.oldestAt },
 		railway,
 	};

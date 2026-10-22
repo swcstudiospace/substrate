@@ -497,8 +497,14 @@ async function repoOf(fs: PlanningFs, root: string): Promise<RepoLookup> {
 /** Parses the `origin` URL of a git config into `owner/name`. Only the two trailing path segments are kept. */
 export function repoFromGitConfig(text: string): string | null {
 	const section = /\[remote "origin"\]([\s\S]*?)(?=\n\[|$)/.exec(text);
-	const url = section ? /^\s*url\s*=\s*(\S+)\s*$/m.exec(section[1] ?? "") : null;
+	const url = section ? /^\s*url\s*=\s*(.+?)\s*$/m.exec(section[1] ?? "") : null;
 	if (!url) return null;
-	const match = /[:/]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/.exec(url[1] ?? "");
+	const match = /[:/]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/.exec(unquoted(url[1] ?? ""));
 	return match ? `${match[1]}/${match[2]}` : null;
+}
+
+/** A value with one matching pair of surrounding quotes removed. A value without them is returned as it is. */
+function unquoted(value: string): string {
+	const pair = /^(["'])(.*)\1$/.exec(value);
+	return pair ? (pair[2] ?? "") : value;
 }
