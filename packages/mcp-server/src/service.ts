@@ -140,7 +140,8 @@ import { RailwayClient } from "./railway.ts";
 import { nodePlanningFs } from "./planning/fs.ts";
 import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
 import { DragonflyPresenceStore } from "./planning/presence-dragonfly.ts";
-import { PlanningReader, type PlanningReaderDeps } from "./planning/read.ts";
+import { PlanningObserver, type PlanningObserverDeps } from "./planning/observer.ts";
+import { PlanningReader } from "./planning/read.ts";
 import type { FabricSources } from "./fabric/types.ts";
 import { FABRIC_HEALTH_WINDOW_MS } from "./fabric/gather.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
@@ -1349,8 +1350,10 @@ export class Substrate {
 	private readonly emitChains = new Map<string, Promise<void>>();
 	/** Phase 50: the Dragonfly wake-up hints; null while `SUBSTRATE_EVENT_BUS` is off, or its endpoint is missing or refused. */
 	readonly eventBus: EventBus | null;
-	/** Phase 52: the planning reads behind `planning_status` and `planning_sessions`. Disabled unless `SUBSTRATE_PLANNING_ROOT` is set. */
+	/** Phase 52: the planning reads behind `planning_status` and `planning_sessions`. Read-only: they write nothing. Disabled unless `SUBSTRATE_PLANNING_ROOT` is set. */
 	readonly planning: PlanningReader;
+	/** Phase 52: the planning observer, the plane's only writer: it publishes a checkout's change and heartbeats it. Started by `startPlanning`. */
+	readonly planningObserver: PlanningObserver;
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
@@ -1370,7 +1373,7 @@ export class Substrate {
 			/** Tests inject the bus through this factory; production builds it from config. */
 			eventBus?: () => EventBus | null;
 			/** Tests inject the planning filesystem, presence store and ledger write; production builds them from config. */
-			planning?: Partial<Omit<PlanningReaderDeps, "settings">>;
+			planning?: Partial<Omit<PlanningObserverDeps, "settings">>;
 		},
 		observer: SubstrateObserver = {},
 	) {
@@ -1437,12 +1440,15 @@ export class Substrate {
 				gate: this.planes.gate("cache"),
 			});
 		this.eventBus = stores?.eventBus !== undefined ? stores.eventBus() : productionEventBus(config);
-		// Phase 52 (SOTA-08): the planning reads. Presence rides the cache endpoint; with none, the sessions read says so.
+		// Phase 52 (SOTA-08): the planning reads and the observer share one filesystem and one presence store. Presence rides the cache endpoint; with none, the sessions read says so.
 		const planningDeps = stores?.planning ?? {};
-		this.planning = new PlanningReader({
+		const planningFs = planningDeps.fs ?? nodePlanningFs();
+		const planningPresence = planningDeps.presence !== undefined ? planningDeps.presence : productionPresence(config);
+		this.planning = new PlanningReader({ settings: config.planning, fs: planningFs, presence: planningPresence });
+		this.planningObserver = new PlanningObserver({
 			settings: config.planning,
-			fs: planningDeps.fs ?? nodePlanningFs(),
-			presence: planningDeps.presence !== undefined ? planningDeps.presence : productionPresence(config),
+			fs: planningFs,
+			presence: planningPresence,
 			emit: planningDeps.emit ?? (async (event: EventInput) => (await this.emit(event)).stored),
 		});
 		// uplift-2 R1
@@ -2845,6 +2851,16 @@ export class Substrate {
 		} catch (cause) {
 			process.stderr.write(`[substrate] hindsight: outbox gauges unavailable — ${redact(String(cause)).slice(0, 200)}\n`);
 		}
+	}
+
+	/** Phase 52: start the planning observer's scan timer (unref'd). Off, with nothing started, while `SUBSTRATE_PLANNING_ROOT` is unset or misconfigured. */
+	startPlanning(): boolean {
+		return this.planningObserver.start();
+	}
+
+	/** Phase 52: clear the planning observer's timer. A scan in flight finishes; no new scan starts from the timer. */
+	stopPlanning(): void {
+		this.planningObserver.stop();
 	}
 
 	/** Start the recall prefetch, the Hindsight inventory and the cache preloader (phase 47). The first two are no-ops while their flags are off; each timer is unref'd. */

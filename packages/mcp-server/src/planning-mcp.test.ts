@@ -97,20 +97,23 @@ describe("planning tools", () => {
 		expect(view["errors"]).toEqual([expect.objectContaining({ path: `${PHASE}/BAD.md`, code: "malformed-frontmatter" })]);
 	});
 
-	test("a change between two status reads reaches the ledger once, as planning.changed", async () => {
+	test("status reads write nothing to the ledger: a change reaches it only through the planning observer's scan", async () => {
 		await writeFile(join(root, PHASE, "52-CONTEXT.md"), `${BODY}\n`);
 		await mkdir(join(root, ".git"), { recursive: true });
 		await writeFile(join(root, ".git", "config"), '[remote "origin"]\n\turl = git@github.com:swcstudiospace/agent-substrate.git\n');
 		const ledger: EventInput[] = [];
-		const client = await connect(substrateWith({ [PLANNING_ROOT_ENV]: root }, ledger));
+		const substrate = substrateWith({ [PLANNING_ROOT_ENV]: root }, ledger);
+		const client = await connect(substrate);
 
-		expect((await call(client, "planning_status")).json()["changes"]).toEqual({ state: "baseline" });
-		expect((await call(client, "planning_status")).json()["changes"]).toEqual({ state: "unchanged" });
+		expect((await call(client, "planning_status")).json()["state"]).toBe("ok");
+		expect(await substrate.planningObserver.scan()).toMatchObject({ state: "observed", outcome: "baseline" });
 		expect(ledger).toEqual([]);
 
 		await writeFile(join(root, PHASE, "52-CONTEXT.md"), `${BODY} edited\n`);
-		const changed = await call(client, "planning_status");
-		expect(changed.json()["changes"]).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "emitted" });
+		expect((await call(client, "planning_status")).json()["state"]).toBe("ok");
+		expect(ledger).toEqual([]);
+
+		expect(await substrate.planningObserver.scan()).toMatchObject({ state: "observed", outcome: "published" });
 		expect(ledger).toHaveLength(1);
 		expect(ledger[0]).toMatchObject({ surface: "substrate", kind: "note", repo: "swcstudiospace/agent-substrate", payload: { kind: "planning.changed" } });
 		expect(JSON.stringify(ledger)).not.toContain(BODY);
