@@ -18,6 +18,11 @@
  * taken is created again with a numbered suffix — which is why discovery by
  * name runs before every create.
  *
+ * Adapter note (LightRAG cutover): `lightrag.ts` sits parallel to this
+ * module and resolves to the exact shapes defined here — `RagflowChunk`
+ * and `RetrievalOutcome` are the shared drop-in contract, imported, never
+ * redefined. New plane logic belongs there; this module keeps the RAGFlow
+ * wire byte-identical unless a documented section says otherwise.
  * Every call goes out through the `fetchImpl` the caller injects; production
  * hands in a `gatedFetch` over the plane's circuit breaker (uplift-2 R2), and
  * `ragflowOp` is the bounded label that fetch records per route. An open

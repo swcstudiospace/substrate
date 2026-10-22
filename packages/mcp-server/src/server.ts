@@ -57,7 +57,19 @@ import { formatDrift } from "./drift.ts";
 import { IdempotencyRefusal, InvalidEventError } from "./event.ts";
 import { type CursorPosition, type GreptimeClient } from "./greptime.ts";
 import { InvalidHandoffError } from "./handoff.ts";
-import { attributedSurface, createMcpServer, type McpCaller } from "./mcp.ts";
+import {
+	attributedSurface,
+	augmentRagQuery,
+	createMcpServer,
+	getCachedRagResult,
+	hindsightRagFallback,
+	queryLightragRest,
+	ragGraphCounts,
+	ragMachine,
+	ragRetryDelay,
+	setCachedRagResult,
+	type McpCaller,
+} from "./mcp.ts";
 import {
 	auditRefusal,
 	auditToolCalls,
@@ -1237,7 +1249,26 @@ export function createHttpServer(
 					...(sessionId !== undefined ? { session_id: sessionId } : {}),
 				};
 				if (!(await auditedRest(res, observability, surface, "docs_search", fields))) return;
-				sendJson(res, 200, await substrate.searchDocs(fields, surface));
+				// SPE-19388: the REST search reports into the same process-wide
+				// RAG machine as the MCP tool. Replies are unchanged.
+				const searchBackend = config.docsBackend;
+				ragMachine.transition("STEERING", `docs_search:${searchBackend}`);
+				ragMachine.transition("CONTEXT_REFRESH", `docs_search:retrieve:${searchBackend}`);
+				try {
+					const reply = await substrate.searchDocs(fields, surface);
+					if (reply.degraded === true) {
+						ragMachine.recordFailure(config.ragMachine, `docs_search: ${reply.reason ?? "degraded"}`);
+					} else {
+						ragMachine.recordSuccess("docs_search:served");
+					}
+					sendJson(res, 200, reply);
+				} catch (cause) {
+					ragMachine.recordFailure(
+						config.ragMachine,
+						`docs_search threw: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}`,
+					);
+					throw cause;
+				}
 				return;
 			}
 
@@ -1287,12 +1318,162 @@ export function createHttpServer(
 					...(ingestSession !== undefined ? { session_id: ingestSession } : {}),
 				};
 				if (!(await auditedRest(res, observability, surface, "docs_ingest", ingestFields))) return;
-				const outcome = await substrate.ingestDocs(ingestFields, surface);
-				if (!outcome.ok) {
-					sendJson(res, outcome.reason === "vm-guest" ? 403 : 400, outcome);
+				// SPE-19388: the REST ingest reports into the same process-wide
+				// RAG machine as the MCP tool. Outcomes are unchanged.
+				ragMachine.transition("STEERING", `docs_ingest:${config.docsBackend}`);
+				ragMachine.transition("CONTEXT_REFRESH", `docs_ingest:upload:${config.docsBackend}`);
+				try {
+					const outcome = await substrate.ingestDocs(ingestFields, surface);
+					if (outcome.ok) {
+						ragMachine.recordSuccess("docs_ingest:served");
+					} else {
+						ragMachine.recordFailure(config.ragMachine, `docs_ingest: ${outcome.reason}`);
+					}
+					if (!outcome.ok) {
+						sendJson(res, outcome.reason === "vm-guest" ? 403 : 400, outcome);
+						return;
+					}
+					sendJson(res, 200, outcome);
+				} catch (cause) {
+					ragMachine.recordFailure(
+						config.ragMachine,
+						`docs_ingest threw: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}`,
+					);
+					throw cause;
+				}
+				return;
+			}
+			// SPE-19388 LightRAG query surface (SPE-19384 RAG replacement):
+			// REST/JSON over `POST /query`, same Hindsight fallback and
+			// idempotency as the `docs_lightrag_query` MCP tool. Read-only
+			// like `/docs/search`: anonymous callers reach the audit gate and
+			// an unreachable plane degrades rather than refusing the turn.
+			if (req.method === "POST" && url.pathname === "/docs/lightrag/query") {
+				const parsed: unknown = JSON.parse(await readBody(req));
+				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+					sendJson(res, 400, { error: "request body must be a JSON object" });
 					return;
 				}
-				sendJson(res, 200, outcome);
+				if (!("question" in parsed) || typeof parsed.question !== "string" || parsed.question.trim().length === 0) {
+					sendJson(res, 400, { error: "question is required" });
+					return;
+				}
+				const record = parsed as Record<string, unknown>;
+				const mode = "mode" in record ? record.mode : undefined;
+				const topK = "top_k" in record ? record.top_k : undefined;
+				const entities = "entities" in record ? record.entities : undefined;
+				const relations = "relations" in record ? record.relations : undefined;
+				const idempotencyKey = "idempotency_key" in record ? record.idempotency_key : undefined;
+				const shapeOk =
+					(mode === undefined || (typeof mode === "string" && ["naive", "local", "global", "hybrid", "mix"].includes(mode))) &&
+					(topK === undefined || typeof topK === "number") &&
+					(entities === undefined || (Array.isArray(entities) && entities.every((entry) => typeof entry === "string"))) &&
+					(relations === undefined ||
+						(Array.isArray(relations) &&
+							relations.every(
+								(relation) =>
+									relation !== null &&
+									typeof relation === "object" &&
+									!Array.isArray(relation) &&
+									typeof (relation as Record<string, unknown>).source === "string" &&
+									typeof (relation as Record<string, unknown>).target === "string" &&
+									typeof (relation as Record<string, unknown>).kind === "string",
+							))) &&
+					(idempotencyKey === undefined || typeof idempotencyKey === "string");
+				if (!shapeOk) {
+					sendJson(res, 400, { error: "mode/top_k/entities/relations/idempotency_key have the wrong shape" });
+					return;
+				}
+				const fields: Record<string, unknown> = {
+					question: record.question,
+					...(mode !== undefined ? { mode } : {}),
+					...(topK !== undefined ? { top_k: topK } : {}),
+					...(entities !== undefined ? { entities } : {}),
+					...(relations !== undefined ? { relations } : {}),
+					...(idempotencyKey !== undefined ? { idempotency_key: idempotencyKey } : {}),
+				};
+				if (!(await auditedRest(res, observability, surface, "docs_lightrag_query", fields))) return;
+				const entityList = Array.isArray(entities) ? (entities as string[]) : [];
+				const relationList = Array.isArray(relations)
+					? (relations as Array<{ source: string; target: string; kind: string }>)
+					: [];
+				const key =
+					typeof idempotencyKey === "string"
+						? idempotencyKey
+						: `lightrag:${JSON.stringify({ question: record.question, mode, topK, entities: entityList, relations: relationList }).slice(0, 500)}`;
+				const replayed = getCachedRagResult(key);
+				if (replayed !== undefined) {
+					process.stderr.write(
+						`${JSON.stringify({ source: "substrate", event: "rag-state", from: replayed.state.state, to: replayed.state.state, reason: "idempotent-replay", duplicate: true })}\n`,
+					);
+					sendJson(res, 200, replayed);
+					return;
+				}
+				if (!ragMachine.probeAllowed(config.ragMachine.halfOpenMs)) {
+					const held = await hindsightRagFallback(substrate, surface, record.question as string, entityList, relationList, "rag breaker open");
+					setCachedRagResult(key, held);
+					sendJson(res, 200, held);
+					return;
+				}
+				ragMachine.transition("STEERING", `lightrag_query:${config.docsBackend}`);
+				const lightrag = config.lightrag;
+				if (lightrag === null) {
+					ragMachine.transition("CONTEXT_REFRESH", "lightrag_query:unconfigured");
+					const degraded = await hindsightRagFallback(
+						substrate,
+						surface,
+						record.question as string,
+						entityList,
+						relationList,
+						"lightrag-not-configured",
+					);
+					setCachedRagResult(key, degraded);
+					sendJson(res, 200, degraded);
+					return;
+				}
+				const augmented = augmentRagQuery(record.question as string, entityList, relationList);
+				ragMachine.transition("CONTEXT_REFRESH", "lightrag_query:retrieve");
+				let lastReason = "lightrag unreachable";
+				for (let attempt = 0; attempt <= config.ragMachine.maxRetries; attempt += 1) {
+					if (attempt > 0) await ragRetryDelay(config.ragMachine.retryBaseMs, attempt);
+					const answered = await queryLightragRest(lightrag, {
+						question: augmented,
+						...(typeof mode === "string" ? { mode } : {}),
+						...(typeof topK === "number" ? { topK } : {}),
+					});
+					if (answered.ok) {
+						const state = ragMachine.recordSuccess("lightrag_query:served");
+						const result = {
+							backend: "lightrag" as const,
+							chunks: answered.chunks,
+							graph: ragGraphCounts(answered.chunks, entityList, relationList),
+							state,
+						};
+						setCachedRagResult(key, result);
+						sendJson(res, 200, result);
+						return;
+					}
+					lastReason = answered.reason;
+				}
+				ragMachine.recordFailure(config.ragMachine, `lightrag_query: ${lastReason}`);
+				const degraded = await hindsightRagFallback(
+					substrate,
+					surface,
+					record.question as string,
+					entityList,
+					relationList,
+					lastReason,
+				);
+				setCachedRagResult(key, degraded);
+				sendJson(res, 200, degraded);
+				return;
+			}
+
+			// SPE-19388: the RAG machine snapshot for pollers. Exempt like
+			// `/healthz`: it carries counters and a hash, no lesson content.
+			// Pollers detect change by comparing `stateHash`.
+			if (req.method === "GET" && url.pathname === "/rag/state") {
+				sendJson(res, 200, ragMachine.snapshot());
 				return;
 			}
 

@@ -8,14 +8,17 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CircuitBreaker, gatedFetch, type DocsSearchSample, type PlaneGate } from "@substrate/observability";
 import { ReadThroughCache, type CacheRedis } from "./cache.ts";
-import { citationProvenanceCounts, searchDocs, searchReplyStorable, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type SearchReply } from "./docs-search.ts";
+import { attachGraphHints, citationProvenanceCounts, planningGraphCounts, searchDocs, searchReplyStorable, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type SearchReply } from "./docs-search.ts";
 import type { DatasetListSource } from "./docs-datasets.ts";
 import { RagflowFake, type FakeChunk } from "./ragflow-fake.ts";
 import { ragflowOp } from "./planes/ragflow.ts";
+import { lightragFromEnv } from "./planes/lightrag.ts";
 import type { EventInput } from "./types.ts";
-import { loadConfig } from "./config.ts";
+import { selectRetrievalBackend } from "./types.ts";
+import { loadConfig, resolveDocsBackend } from "./config.ts";
 import { createMcpServer } from "./mcp.ts";
 import { Substrate } from "./service.ts";
+import { goldenFake, searchGoldenOffline } from "./docs-golden.ts";
 
 const CONFIG = { url: "http://ragflow.test", apiKey: "test-key" };
 
@@ -532,5 +535,180 @@ describe("docs_search outcome metrics (uplift-3 N5)", () => {
 				{ ...citation, commit: "dataset-pin:agent-skills:unpinned" },
 			]),
 		).toEqual({ recorded: 1, unrecorded: 1, unpinned: 2 });
+	});
+});
+
+describe("docs backend selection (LightRAG cutover)", () => {
+	test("selectRetrievalBackend: an explicit preference wins when available", () => {
+		expect(selectRetrievalBackend({ ragflow: true, lightrag: true }, "lightrag")).toBe("lightrag");
+		expect(selectRetrievalBackend({ ragflow: true, lightrag: true }, "ragflow")).toBe("ragflow");
+	});
+
+	test("selectRetrievalBackend: ragflow keeps today's default; lightrag is the fallback; null when bare", () => {
+		expect(selectRetrievalBackend({ ragflow: true, lightrag: false })).toBe("ragflow");
+		expect(selectRetrievalBackend({ ragflow: true, lightrag: true })).toBe("ragflow");
+		expect(selectRetrievalBackend({ ragflow: false, lightrag: true })).toBe("lightrag");
+		expect(selectRetrievalBackend({ ragflow: false, lightrag: false })).toBeNull();
+	});
+
+	test("selectRetrievalBackend: an unavailable preference falls back instead of stranding the search", () => {
+		expect(selectRetrievalBackend({ ragflow: true, lightrag: false }, "lightrag")).toBe("ragflow");
+		expect(selectRetrievalBackend({ ragflow: false, lightrag: true }, "ragflow")).toBe("lightrag");
+		expect(selectRetrievalBackend({ ragflow: false, lightrag: false }, "lightrag")).toBeNull();
+	});
+
+	test("resolveDocsBackend: LIGHTRAG_URL presence means lightrag, else ragflow", () => {
+		expect(resolveDocsBackend({})).toEqual({ backend: "ragflow", rejected: null });
+		expect(resolveDocsBackend({ LIGHTRAG_URL: "http://lightrag.test:8000" })).toEqual({ backend: "lightrag", rejected: null });
+		expect(resolveDocsBackend({ LIGHTRAG_URL: "   " })).toEqual({ backend: "ragflow", rejected: null });
+	});
+
+	test("resolveDocsBackend: an explicit SUBSTRATE_DOCS_BACKEND wins; a typo is rejected without switching", () => {
+		expect(resolveDocsBackend({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "ragflow" })).toEqual({
+			backend: "ragflow",
+			rejected: null,
+		});
+		expect(resolveDocsBackend({ SUBSTRATE_DOCS_BACKEND: "LightRAG" })).toEqual({ backend: "lightrag", rejected: null });
+		expect(resolveDocsBackend({ SUBSTRATE_DOCS_BACKEND: "lightragg" })).toEqual({ backend: "ragflow", rejected: "lightragg" });
+		expect(resolveDocsBackend({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "weaviate" })).toEqual({
+			backend: "lightrag",
+			rejected: "weaviate",
+		});
+	});
+
+	test("lightragFromEnv: null without reach; trims the URL; never echoes the key", () => {
+		expect(lightragFromEnv({})).toBeNull();
+		expect(lightragFromEnv({ LIGHTRAG_URL: "http://lightrag.test" })).toBeNull();
+		expect(lightragFromEnv({ LIGHTRAG_API_KEY: "k" })).toBeNull();
+		const config = lightragFromEnv({ LIGHTRAG_URL: "http://lightrag.test/", LIGHTRAG_API_KEY: "k" });
+		expect(config).toEqual({ url: "http://lightrag.test", apiKey: "k" });
+		expect(JSON.stringify(config)).not.toContain("k-secret");
+		expect(lightragFromEnv({ LIGHTRAG_BASE_URL: "http://alias.test", LIGHTRAG_API_KEY: "k" })).toEqual({
+			url: "http://alias.test",
+			apiKey: "k",
+		});
+	});
+});
+
+describe("search graph metadata (LightRAG path)", () => {
+	const HINTS = [
+		{ phase: "25-lightrag", entities: ["Access path", "RAGFlow datasets"], relations: [{ source: "Access path", target: "RAGFlow datasets", kind: "links-to" }] },
+	];
+
+	test("planningGraphCounts reports distinct entities and every relation", () => {
+		expect(planningGraphCounts([])).toEqual({ entities: 0, relations: 0 });
+		expect(planningGraphCounts(HINTS)).toEqual({ entities: 2, relations: 1 });
+		expect(
+			planningGraphCounts([
+				...HINTS,
+				{ phase: "25-other", entities: ["Access path", "Fresh entity"], relations: [] },
+			]),
+		).toEqual({ entities: 3, relations: 1 });
+	});
+
+	test("attachGraphHints names hinted headings and counts the coverage", () => {
+		expect(attachGraphHints([], undefined)).toBeUndefined();
+		const chunks = [
+			{ title: "a", source_url: "s", heading_path: "Access path", commit: "c", snippet: "s", score: 1, document_id: "d", chunk_id: "k" },
+			{ title: "b", source_url: "s", heading_path: "Elsewhere", commit: "c", snippet: "s", score: 0.5, document_id: "e", chunk_id: "j" },
+		];
+		const stats = attachGraphHints(chunks, HINTS);
+		expect(stats).toEqual({ entities: 2, relations: 1 });
+		expect(chunks[0]?.graph).toEqual({ entities: ["Access path"], relations: 1 });
+		expect(chunks[1]?.graph).toBeUndefined();
+	});
+
+	test("a search with graph hints returns graph counts and names the hinted headings", async () => {
+		const fake = new RagflowFake();
+		const events: EventInput[] = [];
+		const reply = await searchDocs(
+			{ config: CONFIG, emit: async (event) => ((events.push(event)), { stored: false }), fetchImpl: fake.fetch, graphHints: HINTS },
+			"who reads RAGFlow?",
+		);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.graph).toEqual({ entities: 2, relations: 1 });
+		// Both seed headings are hinted, so every citation carries graph
+		// metadata; the relation count rides the source heading only.
+		for (const citation of reply.chunks) {
+			expect(citation.graph?.entities).toEqual([citation.heading_path]);
+		}
+		const access = reply.chunks.filter((citation) => citation.heading_path === "Access path");
+		const datasets = reply.chunks.filter((citation) => citation.heading_path === "RAGFlow datasets");
+		expect(access.length).toBeGreaterThan(0);
+		expect(datasets.length).toBeGreaterThan(0);
+		expect(access.every((citation) => citation.graph?.relations === 1)).toBe(true);
+		expect(datasets.every((citation) => citation.graph?.relations === undefined)).toBe(true);
+		// The citations themselves are unchanged: still capped, still framed.
+		expect(reply.chunks.length).toBeLessThanOrEqual(10);
+		expect(reply.untrusted).toBe(UNTRUSTED_DOCS_NOTICE);
+		const notes = events.filter((event) => event.kind === "note");
+		expect(notes).toHaveLength(1);
+		expect(notes[0]?.payload).toMatchObject({ action: "docs.search", graph: { entities: 2, relations: 1 } });
+	});
+
+	test("a search without graph hints serves the pure RAGFlow reply: no graph, no citation graph", async () => {
+		const fake = new RagflowFake();
+		const reply = await searchDocs({ config: CONFIG, emit: async () => ({ stored: false }), fetchImpl: fake.fetch }, "who reads RAGFlow?");
+		expect(reply.graph).toBeUndefined();
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.chunks.every((citation) => citation.graph === undefined)).toBe(true);
+	});
+
+	test("an unhinted heading stays graph-free while its hinted sibling is named", async () => {
+		const fake = new RagflowFake();
+		const reply = await searchDocs(
+			{
+				config: CONFIG,
+				emit: async () => ({ stored: false }),
+				fetchImpl: fake.fetch,
+				graphHints: [{ phase: "25-lightrag", entities: ["Access path"], relations: [] }],
+			},
+			"who reads RAGFlow?",
+		);
+		expect(reply.graph).toEqual({ entities: 1, relations: 0 });
+		const access = reply.chunks.filter((citation) => citation.heading_path === "Access path");
+		const datasets = reply.chunks.filter((citation) => citation.heading_path === "RAGFlow datasets");
+		expect(access.length).toBeGreaterThan(0);
+		expect(datasets.length).toBeGreaterThan(0);
+		expect(access.every((citation) => citation.graph?.entities?.includes("Access path"))).toBe(true);
+		expect(datasets.every((citation) => citation.graph === undefined)).toBe(true);
+	});
+
+	test("golden: a .planning snippet survives the offline harness with graph metadata", async () => {
+		const corpus = {
+			documents: [
+				{
+					dataset: "agent-substrate",
+					slug: "planning-graph",
+					source_url: "https://example.com/agent-substrate/planning-graph",
+					document_id: "doc-planning-graph",
+					name: "planning-graph.md",
+					body: "# Planning graph\n\nThe lightrag backend serves planning relations.",
+				},
+			],
+		};
+		const offline = await searchGoldenOffline(corpus, { question: "lightrag backend planning relations", datasets: ["agent-substrate"] }, { commit: "golden" });
+		expect(offline.retrievedDatasetIds).toEqual(["ds-berlin-agent-substrate"]);
+		expect(offline.reply.chunks).toHaveLength(1);
+		expect(offline.reply.chunks[0]?.heading_path).toBe("Planning graph");
+		expect(offline.reply.untrusted).toBe(UNTRUSTED_DOCS_NOTICE);
+		expect(offline.reply.graph).toBeUndefined();
+		// Same corpus through the LightRAG-shaped call: the heading the hint
+		// names carries graph metadata, and the reply reports the coverage.
+		const fake = goldenFake(corpus);
+		const hinted = await searchDocs(
+			{
+				config: { url: "http://ragflow.test", apiKey: "golden" },
+				emit: async () => ({ stored: false }),
+				surface: "omp",
+				fetchImpl: fake.fetch,
+				provenanceOf: () => ({ source_url: "https://example.com/agent-substrate/planning-graph", commit: "golden" }),
+				graphHints: [{ phase: "golden", entities: ["Planning graph"], relations: [] }],
+			},
+			"lightrag backend planning relations",
+		);
+		expect(hinted.chunks).toHaveLength(1);
+		expect(hinted.graph).toEqual({ entities: 1, relations: 0 });
+		expect(hinted.chunks[0]?.graph).toEqual({ entities: ["Planning graph"] });
 	});
 });

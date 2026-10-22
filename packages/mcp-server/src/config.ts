@@ -32,12 +32,127 @@ function parseDodGateTimeoutMs(raw: string | undefined): number {
 	return Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : DEFAULT_DOD_GATE_TIMEOUT_MS;
 }
 
-export interface GreptimeConfig {
+/** The docs plane that serves `docs_search` / `docs_ingest`: RAGFlow or LightRAG. */
+export const DOCS_BACKENDS = ["ragflow", "lightrag"] as const;
+export type DocsBackend = (typeof DOCS_BACKENDS)[number];
+
+/**
+ * LightRAG reach. `LIGHTRAG_URL` names it; `LIGHTRAG_API_KEY` is sent when
+ * the deployment guards reads/writes. Null leaves the LightRAG path
+ * unconfigured (the RAGFlow path is unchanged).
+ */
+export interface LightragConfig {
 	url: string;
-	user: string | undefined;
-	password: string | undefined;
-	db: string;
+	apiKey?: string;
 }
+
+/**
+ * The substrate's LightRAG reach, or null when it has none.
+ *
+ * Reads `LIGHTRAG_URL` / `LIGHTRAG_API_KEY` only.
+ */
+export function lightragFromEnv(env: Record<string, string | undefined> = process.env): LightragConfig | null {
+	const url = env.LIGHTRAG_URL?.trim().replace(/\/+$/, "");
+	if (!url) return null;
+	const apiKey = env.LIGHTRAG_API_KEY?.trim();
+	return apiKey ? { url, apiKey } : { url };
+}
+
+/**
+ * Which docs plane serves this process.
+ *
+ * An explicit `SUBSTRATE_DOCS_BACKEND` (`lightrag` or `ragflow`,
+ * case-insensitive) wins; otherwise the configured reach decides — a
+ * `LIGHTRAG_URL` means lightrag, else ragflow. An unrecognised value keeps
+ * the reach-derived backend and is carried back as `rejected`, so a typo
+ * never switches the plane.
+ */
+export function resolveDocsBackend(env: Record<string, string | undefined> = process.env): { backend: DocsBackend; rejected: string | null } {
+	const fallback: DocsBackend = env.LIGHTRAG_URL?.trim() ? "lightrag" : "ragflow";
+	const raw = env.SUBSTRATE_DOCS_BACKEND?.trim();
+	if (!raw) return { backend: fallback, rejected: null };
+	const lower = raw.toLowerCase();
+	if (lower === "lightrag" || lower === "ragflow") return { backend: lower, rejected: null };
+	return { backend: fallback, rejected: raw };
+}
+
+/** Default ms between LightRAG planning polls (SPE-19385). */
+export const DEFAULT_LIGHTRAG_POLL_MS = 5_000;
+/** Default roots a LightRAG planning poll sweeps. */
+export const DEFAULT_LIGHTRAG_PLANNING_ROOTS: readonly string[] = [".planning/"];
+
+/**
+ * LightRAG hosting on Railway, in the same project that already runs RAGFlow.
+ *
+ * The shared plane null-condition is untouched: `lightragFromEnv` alone
+ * decides whether the retrieval plane is configured. This block only layers
+ * the hosting overrides the orchestrator needs — `SUBSTRATE_LIGHTRAG_URL` /
+ * `SUBSTRATE_LIGHTRAG_API_KEY` win over `LIGHTRAG_URL` / `LIGHTRAG_API_KEY`
+ * when set, and `SUBSTRATE_LIGHTRAG_PROJECT` scopes ingest/search the way a
+ * dataset name does for RAGFlow. Null when nothing hosting-related is set.
+ */
+export interface RailwayConfig {
+	/** `RAILWAY_TOKEN`: the Railway API token that manages the project. */
+	token: string | null;
+	/** `RAILWAY_PROJECT_ID`: the "Agent Substrate" project. */
+	projectId: string | null;
+	/** `RAILWAY_ENVIRONMENT_ID`: the target environment. */
+	environmentId: string | null;
+	/** `RAILWAY_SERVICE_ID`: the LightRAG service, when pinned. */
+	serviceId: string | null;
+	/** `RAILWAY_SERVICE_NAME`: the LightRAG service name for private DNS. */
+	serviceName: string | null;
+	/** `RAILWAY_PRIVATE_DOMAIN`: Railway-injected private domain, when present. */
+	privateDomain: string | null;
+	/** Effective LightRAG reach after the `SUBSTRATE_LIGHTRAG_*` overrides. */
+	lightrag: LightragConfig | null;
+	/** `SUBSTRATE_LIGHTRAG_PROJECT`: ingest/search scope; null means unscoped. */
+	lightragProject: string | null;
+}
+
+/**
+ * The substrate's Railway hosting reach, or null when it has none.
+ *
+ * Reads `RAILWAY_TOKEN` / `RAILWAY_PROJECT_ID` / `RAILWAY_ENVIRONMENT_ID` /
+ * `RAILWAY_SERVICE_ID` / `RAILWAY_SERVICE_NAME` / `RAILWAY_PRIVATE_DOMAIN`
+ * plus the `SUBSTRATE_LIGHTRAG_URL` / `SUBSTRATE_LIGHTRAG_API_KEY` /
+ * `SUBSTRATE_LIGHTRAG_PROJECT` hosting overrides. Never throws: blank means
+ * absent, and absent everything means null (the orchestrator reports
+ * `railway-not-configured`).
+ */
+export function railwayFromEnv(env: Record<string, string | undefined> = process.env): RailwayConfig | null {
+	const base = lightragFromEnv(env);
+	const overrideUrl = env.SUBSTRATE_LIGHTRAG_URL?.trim().replace(/\/+$/, "") || null;
+	const overrideKey = env.SUBSTRATE_LIGHTRAG_API_KEY?.trim() || null;
+	const project = env.SUBSTRATE_LIGHTRAG_PROJECT?.trim() || null;
+	const token = env.RAILWAY_TOKEN?.trim() || null;
+	const projectId = env.RAILWAY_PROJECT_ID?.trim() || null;
+	const environmentId = env.RAILWAY_ENVIRONMENT_ID?.trim() || null;
+	const serviceId = env.RAILWAY_SERVICE_ID?.trim() || null;
+	const serviceName = env.RAILWAY_SERVICE_NAME?.trim() || null;
+	const privateDomain = env.RAILWAY_PRIVATE_DOMAIN?.trim() || null;
+	const url = overrideUrl ?? base?.url ?? null;
+	if (!token && !projectId && !environmentId && !serviceId && !serviceName && !privateDomain && !url && !project) return null;
+	const baseKey = base && "apiKey" in base ? base.apiKey : undefined;
+	const apiKey = overrideKey ?? baseKey;
+	return {
+		token,
+		projectId,
+		environmentId,
+		serviceId,
+		serviceName,
+		privateDomain,
+		lightrag: url ? (apiKey ? { url, apiKey } : { url }) : null,
+		lightragProject: project,
+	};
+}
+
+ export interface GreptimeConfig {
+ 	url: string;
+ 	user: string | undefined;
+ 	password: string | undefined;
+ 	db: string;
+ }
 
 export interface SubstrateConfig {
 	host: string;
@@ -93,6 +208,49 @@ export interface SubstrateConfig {
 	 * docs_search degraded rather than broken.
 	 */
 	ragflow: RagflowConfig | null;
+	/**
+	 * Which docs plane serves `docs_search` / `docs_ingest` (LightRAG cutover).
+	 *
+	 * From `SUBSTRATE_DOCS_BACKEND` when set, else from reach: a `LIGHTRAG_URL`
+	 * means lightrag, otherwise ragflow (`resolveDocsBackend`).
+	 */
+	docsBackend: DocsBackend;
+	/**
+	 * The rejected `SUBSTRATE_DOCS_BACKEND` value, when one was set. A mode
+	 * name, never a credential, so the boot warning may quote it.
+	 */
+	docsBackendRejected: string | null;
+	/**
+	 * The LightRAG reach, or null when the plane is unconfigured.
+	 *
+	 * Read from `LIGHTRAG_URL` / `LIGHTRAG_API_KEY` only. Null leaves the
+	 * LightRAG path degraded rather than broken.
+	 */
+	lightrag: LightragConfig | null;
+	/**
+	 * Ms between LightRAG planning polls (SPE-19385).
+	 *
+	 * From `SUBSTRATE_LIGHTRAG_POLL_MS`, default 5000. The poller sleeps
+	 * this long between `pollPlanningRefresh` ticks; the module only
+	 * scans once per call, so this never changes tick cost.
+	 */
+	lightragPollMs: number;
+	/**
+	 * Roots a planning poll sweeps (SPE-19385).
+	 *
+	 * From `SUBSTRATE_LIGHTRAG_PLANNING_ROOTS` (comma-separated) or
+	 * `[".planning/"]` when unset. Narrowed from the ingest roots so a
+	 * planning poll never reads `docs/` or `README.md`.
+	 */
+	lightragPlanningRoots: readonly string[];
+	/**
+	 * The Railway hosting reach for LightRAG, or null when unconfigured.
+	 *
+	 * From `RAILWAY_*` plus the `SUBSTRATE_LIGHTRAG_*` hosting overrides
+	 * (`railwayFromEnv`). Null leaves the orchestrator reporting
+	 * `railway-not-configured`; the docs plane selection is unchanged.
+	 */
+	railway: RailwayConfig | null;
 	/**
 	 * Path prefixes a docs_ingest page may come from (D25-05).
 	 *
@@ -375,6 +533,15 @@ export interface SubstrateConfig {
 	 * still answer.
 	 */
 	docsSearchBudgetMs: number;
+	// SPE-19388 — RAG state machine tuning (additive; junk falls back silently)
+	/**
+	 * Retry/backoff and circuit-breaker bounds for the explicit RAG state
+	 * machine (`SUBSTRATE_RAG_MAX_RETRIES` default 2, `SUBSTRATE_RAG_RETRY_BASE_MS`
+	 * default 200, `SUBSTRATE_RAG_BREAKER_THRESHOLD` default 3 consecutive
+	 * failures, `SUBSTRATE_RAG_HALF_OPEN_MS` default 30000). Out-of-range or
+	 * unparsable values fall back to the defaults, like `docsSearchBudgetMs`.
+	 */
+	ragMachine: RagMachineSettings;
 	// uplift-3 N4 — memory lifetime
 	/**
 	 * What the index's serving reads do with an entry past its `ttl`
@@ -641,6 +808,36 @@ function isKnownDesktopSurface(value: string): value is Surface {
 	return (SURFACES as readonly string[]).includes(value);
 }
 
+/** Retry/backoff and breaker bounds for the explicit RAG state machine (SPE-19388). */
+export interface RagMachineSettings {
+	maxRetries: number;
+	retryBaseMs: number;
+	breakerThreshold: number;
+	halfOpenMs: number;
+}
+
+/** Defaults: two retries, 200 ms base backoff, trip after 3 failures, 30 s open. */
+export const DEFAULT_RAG_MACHINE_SETTINGS: RagMachineSettings = {
+	maxRetries: 2,
+	retryBaseMs: 200,
+	breakerThreshold: 3,
+	halfOpenMs: 30_000,
+};
+
+/**
+ * `SUBSTRATE_RAG_*` as the machine reads them. Never throws: junk falls
+ * back to the defaults, so a typo cannot disable retries or pin the
+ * breaker open.
+ */
+export function loadRagMachineSettings(env: Record<string, string | undefined> = process.env): RagMachineSettings {
+	return {
+		maxRetries: nonNegativeOr(env.SUBSTRATE_RAG_MAX_RETRIES, DEFAULT_RAG_MACHINE_SETTINGS.maxRetries),
+		retryBaseMs: positiveOr(env.SUBSTRATE_RAG_RETRY_BASE_MS, DEFAULT_RAG_MACHINE_SETTINGS.retryBaseMs),
+		breakerThreshold: positiveOr(env.SUBSTRATE_RAG_BREAKER_THRESHOLD, DEFAULT_RAG_MACHINE_SETTINGS.breakerThreshold),
+		halfOpenMs: nonNegativeOr(env.SUBSTRATE_RAG_HALF_OPEN_MS, DEFAULT_RAG_MACHINE_SETTINGS.halfOpenMs),
+	};
+}
+
 export function loadConfig(env: Record<string, string | undefined> = process.env, probes: ConfigProbes = {}): SubstrateConfig {
 	const greptimeUrl = env.GREPTIME_URL?.trim();
 	const leaseTtl = Number(env.SUBSTRATE_LEASE_TTL_SECONDS);
@@ -654,6 +851,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		.split(",")
 		.map((root) => root.trim())
 		.filter((root) => root.length > 0);
+	const lightragPlanningRoots = (env.SUBSTRATE_LIGHTRAG_PLANNING_ROOTS ?? "")
+		.split(",")
+		.map((root) => root.trim())
+		.filter((root) => root.length > 0);
+	const docsBackendPick = resolveDocsBackend(env);
 	return {
 		...readHandoffKeys(env),
 		leaseTtlSeconds: normalizeTtlSeconds(Number.isFinite(leaseTtl) ? leaseTtl : undefined),
@@ -678,6 +880,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		linearApiUrl: (env.LINEAR_API_URL?.trim() || LINEAR_API_URL).replace(/\/+$/, ""),
 		notionApiUrl: (env.NOTION_API_URL?.trim() || NOTION_API_URL).replace(/\/+$/, ""),
 		ragflow: ragflowFromEnv(env),
+		lightrag: lightragFromEnv(env),
+		docsBackend: docsBackendPick.backend,
+		docsBackendRejected: docsBackendPick.rejected,
+		railway: railwayFromEnv(env),
+		lightragPollMs: positiveOr(env.SUBSTRATE_LIGHTRAG_POLL_MS, DEFAULT_LIGHTRAG_POLL_MS),
+		lightragPlanningRoots: lightragPlanningRoots.length > 0 ? lightragPlanningRoots : [...DEFAULT_LIGHTRAG_PLANNING_ROOTS],
 		docsIngestRoots: ingestRoots.length > 0 ? ingestRoots : [...DEFAULT_INGEST_ROOTS],
 		vmGuest: (env.SUBSTRATE_VM_GUEST?.trim() ?? "") === "1",
 		docsStateFile: env.SUBSTRATE_DOCS_STATE_FILE?.trim() || null,
@@ -755,6 +963,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		admission: loadAdmissionSettings(env),
 		// uplift-3 N5
 		docsSearchBudgetMs: nonNegativeOr(env.SUBSTRATE_DOCS_SEARCH_BUDGET_MS, 4000),
+		// SPE-19388 — explicit RAG state machine bounds
+		ragMachine: loadRagMachineSettings(env),
 		// uplift-3 N4
 		...memoryExpiryFromEnv(env.SUBSTRATE_MEMORY_EXPIRY),
 		...hashVersionFromEnv(env.SUBSTRATE_HASH_VERSION),
@@ -1280,6 +1490,9 @@ export function configWarnings(config: SubstrateConfig): string[] {
 	// Named by key, never by value: the warning goes to a log.
 	if (config.skills.problem) {
 		warnings.push(`skill proposals are refused until the skills library is fixed: ${config.skills.problem}`);
+	}
+	if (config.docsBackendRejected !== null) {
+		warnings.push(`SUBSTRATE_DOCS_BACKEND "${config.docsBackendRejected}" is not a docs plane; docs serve ${config.docsBackend}`);
 	}
 	if (config.operatorTokens.size === 0) return warnings;
 

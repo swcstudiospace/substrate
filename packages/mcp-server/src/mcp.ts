@@ -16,6 +16,8 @@ import { DEFAULT_IDLE_SECONDS, formatDrift } from "./drift.ts";
 import { DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT } from "./greptime.ts";
 import { MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS } from "./lease.ts";
 import { redact } from "./redact.ts";
+import { augmentQuestionWithSteering, normalizeRepoId } from "./docs-search.ts";
+import { nextSteeringSession, STEERING_STATES, steeringSessionPayload, type SteeringSessionState } from "./event.ts";
 import {
 	CORRELATION_ID_PATTERN,
 	GRAPH_ID_PATTERN,
@@ -39,6 +41,17 @@ import {
 	type SwarmSurface,
 	TRUST_LEVELS,
 	type Surface,
+} from "./types.ts";
+import type { LightragConfig, RagMachineSettings } from "./config.ts";
+import {
+	canTransitionRagState,
+	ragStateHash,
+	type PlanningGraphRelation,
+	type RagLightragChunk,
+	type RagLightragResult,
+	type RagState,
+	type RagStateSnapshot,
+	type SearchGraphStats,
 } from "./types.ts";
 
 const surfaceSchema = z.enum(SURFACES);
@@ -161,6 +174,335 @@ export function swarmSessionRefusal(surface: SwarmSurface, sessionId: string, gr
 
 function refusal(message: string) {
 	return { ...json({ error: message }), isError: true };
+}
+
+/**
+ * Explicit RAG state machine (SPE-19388, SPE-19384). One process-wide
+ * singleton (`ragMachine`, shared with the REST routes in `server.ts`);
+ * per-request MCP servers only report transitions into it, so the breaker
+ * survives across turns. The machine never blocks serving: an illegal
+ * transition is logged and ignored, and every mutation carries a fresh
+ * `stateHash` so pollers detect change by hash comparison.
+ *
+ * Steering is prompt augmentation: the STEERING state carries entity hints
+ * into the LightRAG query. Updates are idempotent under an operation key:
+ * replaying a key returns the stored snapshot without re-transitioning.
+ */
+export class RagStateMachine {
+	private state: RagState = "IDLE";
+	private consecutiveFailures = 0;
+	private consecutiveSuccesses = 0;
+	private lastReason: string | undefined;
+	private updatedAt = new Date().toISOString();
+	private openedAt: number | null = null;
+	private readonly seen = new Map<string, RagStateSnapshot>();
+
+	snapshot(): RagStateSnapshot {
+		const snapshot: RagStateSnapshot = {
+			state: this.state,
+			updatedAt: this.updatedAt,
+			consecutiveFailures: this.consecutiveFailures,
+			consecutiveSuccesses: this.consecutiveSuccesses,
+			...(this.lastReason !== undefined ? { lastReason: this.lastReason } : {}),
+			stateHash: ragStateHash(this.state, this.consecutiveFailures, this.consecutiveSuccesses, this.lastReason),
+		};
+		return snapshot;
+	}
+
+	/** Test seam: forget everything, including idempotency keys. */
+	reset(): void {
+		this.state = "IDLE";
+		this.consecutiveFailures = 0;
+		this.consecutiveSuccesses = 0;
+		this.lastReason = undefined;
+		this.updatedAt = new Date().toISOString();
+		this.openedAt = null;
+		this.seen.clear();
+	}
+
+	private log(from: RagState, to: RagState, reason: string | undefined, duplicate: boolean): void {
+		process.stderr.write(
+			`${JSON.stringify({ source: "substrate", event: "rag-state", from, to, reason: reason ?? null, duplicate })}\n`,
+		);
+	}
+
+	private store(operationKey: string | undefined, snapshot: RagStateSnapshot): RagStateSnapshot {
+		if (operationKey === undefined) return snapshot;
+		if (this.seen.size >= 200) {
+			const oldest = this.seen.keys().next();
+			if (!oldest.done) this.seen.delete(oldest.value);
+		}
+		this.seen.set(operationKey, snapshot);
+		return snapshot;
+	}
+
+	transition(to: RagState, reason?: string, operationKey?: string): RagStateSnapshot {
+		if (operationKey !== undefined) {
+			const prior = this.seen.get(operationKey);
+			if (prior !== undefined) {
+				this.log(this.state, prior.state, reason, true);
+				return prior;
+			}
+		}
+		const from = this.state;
+		if (!canTransitionRagState(from, to)) {
+			this.log(from, to, reason ?? "illegal-transition-refused", false);
+			return this.store(operationKey, this.snapshot());
+		}
+		this.state = to;
+		if (reason !== undefined) this.lastReason = reason;
+		if (to === "ERROR") this.openedAt = Date.now();
+		if (to === "IDLE") this.openedAt = null;
+		this.updatedAt = new Date().toISOString();
+		this.log(from, to, reason, false);
+		return this.store(operationKey, this.snapshot());
+	}
+
+	recordSuccess(reason?: string): RagStateSnapshot {
+		this.consecutiveSuccesses += 1;
+		this.consecutiveFailures = 0;
+		if (this.state === "CONTEXT_REFRESH" || this.state === "DEGRADED") {
+			return this.transition("IDLE", reason ?? "served");
+		}
+		return this.snapshot();
+	}
+
+	recordFailure(settings: RagMachineSettings, reason: string): RagStateSnapshot {
+		this.consecutiveSuccesses = 0;
+		this.consecutiveFailures += 1;
+		if (this.state === "CONTEXT_REFRESH" || this.state === "STEERING") {
+			this.transition("DEGRADED", reason);
+		}
+		if (this.consecutiveFailures >= settings.breakerThreshold && this.state === "DEGRADED") {
+			this.transition("ERROR", `breaker open after ${this.consecutiveFailures} failures: ${reason}`);
+		}
+		return this.snapshot();
+	}
+
+	/**
+	 * Whether a fresh steer may leave `ERROR`: only after `halfOpenMs`
+	 * have passed since the breaker tripped (half-open probe). Non-positive
+	 * cooldowns always allow the probe.
+	 */
+	probeAllowed(halfOpenMs: number): boolean {
+		if (this.state !== "ERROR" || this.openedAt === null) return true;
+		if (halfOpenMs <= 0) return true;
+		return Date.now() - this.openedAt >= halfOpenMs;
+	}
+}
+
+/** Process-wide RAG machine, shared by the MCP tools and the REST routes. */
+export const ragMachine = new RagStateMachine();
+
+/** Test seam: reset the process-wide RAG machine. */
+export function resetRagMachine(): void {
+	ragMachine.reset();
+}
+
+/**
+ * Bounded idempotent result cache for LightRAG query replies: replaying an
+ * `idempotency_key` (or the same derived key) returns the stored result
+ * without another plane call or transition.
+ */
+const ragResultCache = new Map<string, RagLightragResult>();
+
+/** Test seam: forget cached LightRAG query results. */
+export function clearCachedRagResults(): void {
+	ragResultCache.clear();
+}
+
+export function getCachedRagResult(key: string): RagLightragResult | undefined {
+	return ragResultCache.get(key);
+}
+
+export function setCachedRagResult(key: string, result: RagLightragResult): void {
+	if (ragResultCache.size >= 200) {
+		const oldest = ragResultCache.keys().next();
+		if (!oldest.done) ragResultCache.delete(oldest.value);
+	}
+	ragResultCache.set(key, result);
+}
+
+/** Exponential backoff between LightRAG attempts: base * 2^attempt. */
+export async function ragRetryDelay(baseMs: number, attempt: number): Promise<void> {
+	if (baseMs <= 0 || attempt <= 0) return;
+	const { promise, resolve } = Promise.withResolvers<void>();
+	setTimeout(resolve, baseMs * 2 ** (attempt - 1));
+	await promise;
+}
+
+/** Clamp the requested top-k to the wire bound (D25-03: at most 10). */
+export const MAX_RAG_LIGHTRAG_TOP_K = 10;
+
+/** Snippets are redacted and capped before reply, like docs_search (D25-04). */
+export const RAG_SNIPPET_CAP = 1200;
+
+/**
+ * One LightRAG REST `/query` attempt over JSON (`{ query, mode, top_k,
+ * only_need_context: true }`). Transport, auth (401/403) and shape failures
+ * come back as `{ ok: false, reason }` — never a throw inside an agent's
+ * turn. The API key travels only in headers, never in a reason string.
+ */
+export async function queryLightragRest(
+	lightrag: LightragConfig,
+	input: { question: string; mode?: string; topK?: number },
+	fetchImpl: typeof fetch = fetch,
+	timeoutMs = 4000,
+): Promise<{ ok: true; chunks: RagLightragChunk[] } | { ok: false; reason: string }> {
+	const question = input.question.trim();
+	if (question.length === 0) return { ok: false, reason: "lightrag: empty query" };
+	const topK = Math.max(1, Math.min(input.topK ?? MAX_RAG_LIGHTRAG_TOP_K, MAX_RAG_LIGHTRAG_TOP_K));
+	let response: Response;
+	try {
+		response = await fetchImpl(`${lightrag.url}/query`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				...(lightrag.apiKey !== undefined ? { "x-api-key": lightrag.apiKey, authorization: `Bearer ${lightrag.apiKey}` } : {}),
+			},
+			body: JSON.stringify({
+				query: question,
+				...(input.mode !== undefined ? { mode: input.mode } : {}),
+				top_k: topK,
+				only_need_context: true,
+			}),
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+	} catch (cause) {
+		return { ok: false, reason: `lightrag unreachable: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}` };
+	}
+	if (response.status === 401 || response.status === 403) return { ok: false, reason: `lightrag ${response.status}` };
+	if (!response.ok) return { ok: false, reason: `lightrag ${response.status}` };
+	let body: unknown;
+	try {
+		body = await response.json();
+	} catch {
+		return { ok: false, reason: "lightrag: response was not JSON" };
+	}
+	const data: unknown =
+		body !== null && typeof body === "object" && "data" in body ? (body as Record<string, unknown>).data : body;
+	const entries: unknown[] = Array.isArray(data)
+		? data
+		: data !== null && typeof data === "object"
+			? ((): unknown[] => {
+					for (const key of ["contexts", "chunks", "documents", "results", "sources"]) {
+						const value = (data as Record<string, unknown>)[key];
+						if (Array.isArray(value)) return value;
+					}
+					return [];
+				})()
+			: [];
+	const chunks: RagLightragChunk[] = [];
+	for (const entry of entries) {
+		if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+		const record = entry as Record<string, unknown>;
+		const content = [record.content, record.text, record.snippet, record.excerpt].find(
+			(value) => typeof value === "string",
+		);
+		if (typeof content !== "string" || content.length === 0) continue;
+		const title = [record.document_name, record.title, record.file_path, record.file_source].find(
+			(value) => typeof value === "string",
+		);
+		const sourceUrl = [record.source_url, record.url, record.source, record.file_path].find(
+			(value) => typeof value === "string",
+		);
+		const score = [record.score, record.similarity, record.relevance_score].find(
+			(value) => typeof value === "number" && Number.isFinite(value),
+		);
+		chunks.push({
+			content: redact(content).slice(0, RAG_SNIPPET_CAP),
+			title: redact(typeof title === "string" ? title : "doc"),
+			sourceUrl: redact(typeof sourceUrl === "string" ? sourceUrl : "lightrag:unrecorded"),
+			score: typeof score === "number" ? score : 0,
+		});
+	}
+	if (chunks.length === 0) return { ok: false, reason: "lightrag: unexpected response shape" };
+	return { ok: true, chunks };
+}
+
+/**
+ * Prompt augmentation for the STEERING state (directory hierarchy default):
+ * hint entities ride in the query text, and relations whose endpoints are
+ * directory-rooted paths bias retrieval toward the plan's slice. Empty
+ * hints mean no bias.
+ */
+export function augmentRagQuery(
+	question: string,
+	entities: readonly string[],
+	relations: readonly PlanningGraphRelation[],
+): string {
+	const names = entities.map((entity) => entity.trim()).filter((entity) => entity.length > 0);
+	if (names.length === 0) return question;
+	const paths = relations
+		.map((relation) => relation.source.trim())
+		.filter((source) => source.includes("/"))
+		.slice(0, 10);
+	const bias = paths.length > 0 ? ` (planning paths: ${paths.join(", ")})` : "";
+	return `${question}\nRelated entities: ${names.slice(0, 50).join(", ")}${bias}`;
+}
+
+/**
+ * Graph coverage behind a LightRAG reply: the hint entities named in any
+ * chunk, and the hint relations whose endpoints both matched. 0 means none
+ * or unknown — never undefined, per `SearchGraphStats`.
+ */
+export function ragGraphCounts(
+	chunks: readonly RagLightragChunk[],
+	entities: readonly string[],
+	relations: readonly PlanningGraphRelation[],
+): SearchGraphStats {
+	const haystack = chunks.map((chunk) => `${chunk.title}\n${chunk.content}`.toLowerCase());
+	const matched = new Set<string>();
+	for (const entity of entities) {
+		const name = entity.trim().toLowerCase();
+		if (name.length > 0 && haystack.some((chunk) => chunk.includes(name))) matched.add(name);
+	}
+	const relationsMatched = relations.filter(
+		(relation) => matched.has(relation.source.trim().toLowerCase()) && matched.has(relation.target.trim().toLowerCase()),
+	).length;
+	return { entities: matched.size, relations: relationsMatched };
+}
+
+/**
+ * Graceful degradation to Hindsight recall (SPE-19384 fallback). Reads only
+ * through `substrate.recallMemories` — no Hindsight module changes — and
+ * maps redacted hits onto the LightRAG chunk shape. `degraded` is set only
+ * when Hindsight served nothing either.
+ */
+export async function hindsightRagFallback(
+	substrate: Substrate,
+	callerSurface: Surface | null,
+	question: string,
+	entities: readonly string[],
+	relations: readonly PlanningGraphRelation[],
+	cause: string,
+): Promise<RagLightragResult> {
+	let chunks: RagLightragChunk[] = [];
+	let reason = cause;
+	try {
+		const reply = await substrate.recallMemories({ query: question }, callerSurface);
+		chunks = reply.results.slice(0, 10).map((hit) => ({
+			content: hit.text.slice(0, RAG_SNIPPET_CAP),
+			title: hit.document_id ?? hit.id,
+			sourceUrl: `hindsight:${hit.bank}/${hit.document_id ?? hit.id}`,
+			score: hit.score ?? 0,
+		}));
+		if (chunks.length === 0) reason = `${cause}; ${reply.reason ?? "hindsight empty"}`;
+	} catch (fallbackCause) {
+		reason = `${cause}; hindsight threw: ${String(fallbackCause instanceof Error ? fallbackCause.message : fallbackCause).slice(0, 200)}`;
+	}
+	const state = chunks.length === 0
+		? ragMachine.transition("DEGRADED", reason)
+		: ragMachine.recordSuccess("lightrag_query:hindsight-fallback");
+	const result: RagLightragResult = {
+		backend: "lightrag",
+		chunks,
+		graph: ragGraphCounts(chunks, entities, relations),
+		state,
+		fallback: "hindsight",
+		...(chunks.length === 0 ? { degraded: true as const, reason } : {}),
+	};
+	return result;
 }
 
 /**
@@ -876,11 +1218,118 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				question: z.string().describe("The docs question, in your words."),
 				datasets: z.array(z.string()).optional().describe("Dataset names to search. Omitted means all readable datasets."),
 				session_id: z.string().optional(),
+				repo_id: z.string().optional().describe("owner/name scoping this search to one repo; unscoped when omitted."),
+				steering: z.string().optional().describe("Live steering for this session, appended to the retrieval question as described-but-untrusted text."),
+				planning_hash: z.string().optional().describe("The planning hash the steering session holds; echoed on the note event so a refresh can be told apart."),
 			},
 			annotations: { readOnlyHint: true },
 		},
-		async ({ question, datasets, session_id }) =>
-			json(await substrate.searchDocs({ question, datasets, session_id }, callerSurface)),
+		async ({ question, datasets, session_id, repo_id, steering, planning_hash }) => {
+			// SPE-19388: report the serving path into the explicit RAG state
+			// machine. The machine never changes the reply — an illegal
+			// transition is logged and ignored.
+			const machineSettings = substrate.config.ragMachine;
+			ragMachine.transition("STEERING", "docs_search");
+			ragMachine.transition("CONTEXT_REFRESH", "docs_search:retrieve");
+			try {
+				// Prompt augmentation (SPE-19390) at the tool boundary: the
+				// service cache keys on the raw question, so the steered text
+				// is what the plane ranks while the ledger keeps both. Repo
+				// scope is validated here — an unscoped search serves the
+				// shared corpus exactly as before.
+				const scoped = normalizeRepoId(repo_id ?? null);
+				const steered = augmentQuestionWithSteering(question, steering ?? null);
+				const reply =
+					scoped === null && steering == null && planning_hash == null
+						? await substrate.searchDocs({ question, datasets, session_id }, callerSurface)
+						: await substrate.searchDocs(
+								{
+									question: steered,
+									datasets,
+									session_id,
+									...(scoped !== null ? { session_id: session_id ?? `docs-search:${scoped}` } : {}),
+								},
+								callerSurface,
+							);
+				if (reply.degraded === true) {
+					ragMachine.recordFailure(machineSettings, `docs_search: ${reply.reason ?? "degraded"}`);
+				} else {
+					ragMachine.recordSuccess("docs_search:served");
+				}
+				return json(reply);
+			} catch (cause) {
+				ragMachine.recordFailure(
+					machineSettings,
+					`docs_search threw: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}`,
+				);
+				throw cause;
+			}
+		},
+	);
+
+	server.registerTool(
+		"docs_steering_session",
+		{
+			title: "Steer a live docs session",
+			description:
+				"Move a live steering session between ACTIVE, CONTEXT_REFRESH, PAUSED and RESUMED. " +
+				"A planning update triggers CONTEXT_REFRESH without blocking the session; steering text rides " +
+				"the next docs_search as described-but-untrusted prompt augmentation, scoped by repo_id. " +
+				"Every transition is recorded as one non-blocking note event carrying the repo scope and both " +
+				"states, so cross-session propagation is visible in the ledger. Illegal transitions are refused, " +
+				"never stored; a refused transition changes nothing.",
+			inputSchema: {
+				session_id: z.string().describe("This steering session's id; stable for its lifetime."),
+				repo_id: z.string().describe("owner/name scoping this session to one repo."),
+				state: z.enum(STEERING_STATES).describe("ACTIVE | CONTEXT_REFRESH | PAUSED | RESUMED."),
+				steering: z.string().optional().describe("Directions the next retrieval should respect; capped and redacted in the ledger."),
+				planning_hash: z.string().optional().describe("The .planning hash this transition was computed against."),
+				previous_state: z
+					.string()
+					.optional()
+					.describe("The state this session holds; omitted starts a new session. A mismatch refuses the transition."),
+			},
+		},
+		async ({ session_id, repo_id, state, steering, planning_hash, previous_state }) => {
+			const previous =
+				previous_state === undefined
+					? null
+					: (STEERING_STATES as readonly string[]).includes(previous_state)
+						? (previous_state as SteeringSessionState)
+						: null;
+			if (previous_state !== undefined && previous === null) return refusal(`unknown steering state: ${JSON.stringify(previous_state).slice(0, 80)}`);
+			const current =
+				previous === null
+					? null
+					: { session_id, repo_id, state: previous, updated_at: new Date().toISOString() };
+			const next = nextSteeringSession(
+				current,
+				{
+					session_id,
+					repo_id,
+					state,
+					...(planning_hash !== undefined ? { planning_hash } : {}),
+					...(steering !== undefined ? { steering } : {}),
+				},
+				Date.now(),
+			);
+			if (!next.ok) return refusal(next.reason);
+			const { event, stored, error, warning } = await substrate.emit({
+				surface: callerSurface ?? "claude-code",
+				kind: state === "PAUSED" ? "warning" : "note",
+				summary: `docs steering ${previous ?? "none"} -> ${next.session.state} for ${next.session.repo_id}`,
+				session_id: next.session.session_id,
+				repo: next.session.repo_id,
+				payload: steeringSessionPayload(next.session, previous ?? undefined),
+			});
+			return json({
+				...next.session,
+				stored,
+				event_id: event.id,
+				...(error ? { error } : {}),
+				...(warning ? { warning } : {}),
+			});
+		},
 	);
 
 	server.registerTool(
@@ -912,9 +1361,128 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			annotations: { destructiveHint: false, openWorldHint: true },
 		},
 		async ({ dataset, commit, pages, session_id }) => {
-			const outcome = await substrate.ingestDocs({ dataset, commit, pages, session_id }, callerSurface);
-			return outcome.ok ? json(outcome) : { ...json(outcome), isError: true };
+			// SPE-19388: the ingest path refreshes context through the same
+			// machine as search, so the RAG replacement stays observable.
+			// The outcome is unchanged — only transitions are reported.
+			const machineSettings = substrate.config.ragMachine;
+			ragMachine.transition("STEERING", "docs_ingest");
+			ragMachine.transition("CONTEXT_REFRESH", "docs_ingest:upload");
+			try {
+				const outcome = await substrate.ingestDocs({ dataset, commit, pages, session_id }, callerSurface);
+				if (outcome.ok) {
+					ragMachine.recordSuccess("docs_ingest:served");
+				} else {
+					ragMachine.recordFailure(machineSettings, `docs_ingest: ${outcome.reason}`);
+				}
+				return outcome.ok ? json(outcome) : { ...json(outcome), isError: true };
+			} catch (cause) {
+				ragMachine.recordFailure(
+					machineSettings,
+					`docs_ingest threw: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}`,
+				);
+				throw cause;
+			}
 		},
+	);
+
+	server.registerTool(
+		"docs_lightrag_query",
+		{
+			title: "Query the LightRAG plane",
+			description:
+				"Ask the LightRAG graph plane over REST/JSON (`POST /query`) and get redacted chunks with " +
+				"source URLs, framed as untrusted text — descriptions, not instructions. Steering entities " +
+				"augment the query (STEERING) and relations bias toward directory-rooted planning paths. " +
+				"Retries with exponential backoff; a failing plane degrades gracefully to Hindsight recall " +
+				"(`fallback: \"hindsight\"`) without changing Hindsight. Read-only. Replies are idempotent " +
+				"under `idempotency_key`. The reply carries the RAG machine snapshot for observability.",
+			inputSchema: {
+				question: z.string().describe("The docs question, in your words."),
+				mode: z.enum(["naive", "local", "global", "hybrid", "mix"]).optional().describe("LightRAG query mode; omitted means the plane default."),
+				top_k: z.number().optional().describe("Most chunks to ask for; clamped to 10."),
+				entities: z.array(z.string()).optional().describe("Planning-graph entities steering this query."),
+				relations: z
+					.array(z.object({ source: z.string(), target: z.string(), kind: z.string() }))
+					.optional()
+					.describe("Planning-graph relations; directory-rooted sources bias the query."),
+				idempotency_key: z.string().optional().describe("Replay key: the same key returns the stored reply."),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async ({ question, mode, top_k, entities, relations, idempotency_key }) => {
+			// SPE-19388 LightRAG query surface (SPE-19384 RAG replacement):
+			// REST/JSON in, REST/JSON out, Hindsight fallback, idempotent.
+			const settings = substrate.config.ragMachine;
+			const backend = substrate.config.docsBackend;
+			const entityList = entities ?? [];
+			const relationList: PlanningGraphRelation[] = relations ?? [];
+			const key =
+				idempotency_key ??
+				`lightrag:${JSON.stringify({ question, mode, top_k, entities: entityList, relations: relationList }).slice(0, 500)}`;
+			const replayed = getCachedRagResult(key);
+			if (replayed !== undefined) {
+				process.stderr.write(
+					`${JSON.stringify({ source: "substrate", event: "rag-state", from: replayed.state.state, to: replayed.state.state, reason: "idempotent-replay", duplicate: true })}\n`,
+				);
+				return json(replayed);
+			}
+			if (!ragMachine.probeAllowed(settings.halfOpenMs)) {
+				const degraded = await hindsightRagFallback(substrate, callerSurface, question, entityList, relationList, "rag breaker open");
+				setCachedRagResult(key, degraded);
+				return json(degraded);
+			}
+			ragMachine.transition("STEERING", `lightrag_query:${backend}`);
+			const lightrag = substrate.config.lightrag;
+			if (lightrag === null) {
+				ragMachine.transition("CONTEXT_REFRESH", "lightrag_query:unconfigured");
+				const degraded = await hindsightRagFallback(
+					substrate,
+					callerSurface,
+					question,
+					entityList,
+					relationList,
+					"lightrag-not-configured",
+				);
+				setCachedRagResult(key, degraded);
+				return json(degraded);
+			}
+			const augmented = augmentRagQuery(question, entityList, relationList);
+			ragMachine.transition("CONTEXT_REFRESH", "lightrag_query:retrieve");
+			let lastReason = "lightrag unreachable";
+			for (let attempt = 0; attempt <= settings.maxRetries; attempt += 1) {
+				if (attempt > 0) await ragRetryDelay(settings.retryBaseMs, attempt);
+				const answered = await queryLightragRest(lightrag, { question: augmented, ...(mode !== undefined ? { mode } : {}), ...(top_k !== undefined ? { topK: top_k } : {}) });
+				if (answered.ok) {
+					const state = ragMachine.recordSuccess("lightrag_query:served");
+					const result: RagLightragResult = {
+						backend: "lightrag",
+						chunks: answered.chunks,
+						graph: ragGraphCounts(answered.chunks, entityList, relationList),
+						state,
+					};
+					setCachedRagResult(key, result);
+					return json(result);
+				}
+				lastReason = answered.reason;
+			}
+			ragMachine.recordFailure(settings, `lightrag_query: ${lastReason}`);
+			const degraded = await hindsightRagFallback(substrate, callerSurface, question, entityList, relationList, lastReason);
+			setCachedRagResult(key, degraded);
+			return json(degraded);
+		},
+	);
+
+	server.registerTool(
+		"docs_rag_state",
+		{
+			title: "Read the RAG machine state",
+			description:
+				"Return the explicit RAG state machine snapshot (IDLE, STEERING, CONTEXT_REFRESH, DEGRADED, " +
+				"ERROR) with failure/success counters and a state hash for polling change detection. Read-only.",
+			inputSchema: {},
+			annotations: { readOnlyHint: true },
+		},
+		async () => json(ragMachine.snapshot()),
 	);
 
 	server.registerTool(

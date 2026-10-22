@@ -106,6 +106,21 @@ two cannot drift.
 | `swarm-a13-obs` | `swarm-a13-obs` | external note: v1.2 per-agent env files provisioned only when a workspace is installed | `not-installed` | not installed on this host |
 | `swarm-a14-maint` | `swarm-a14-maint` | external note: v1.2 per-agent env files provisioned only when a workspace is installed | `not-installed` | not installed on this host |
 | `swarm-a15-doc` | `swarm-a15-doc` | external note: v1.2 per-agent env files provisioned only when a workspace is installed | `not-installed` | not installed on this host |
+| `swarm-a16-cloud` | `swarm-a16-cloud` | external note: v1.2 per-agent env files provisioned only when a workspace is installed | `not-installed` | not installed on this host |
+| `swarm-a17-plat` | `swarm-a17-plat` | external note: v1.2 per-agent env files provisioned only when a workspace is installed | `not-installed` | not installed on this host |
+| `swarm-a18-supply` | `swarm-a18-supply` | external note: v1.2 per-agent env files provisioned only when a workspace is installed | `not-installed` | not installed on this host |
+| `swarm-a19-event` | `swarm-a19-event` | external note: v1.2 per-agent env files provisioned only when a workspace is installed | `not-installed` | not installed on this host |
+| `swarm-a20-finops` | `swarm-a20-finops` | external note: v1.2 per-agent env files provisioned only when a workspace is installed | `not-installed` | not installed on this host |
+| `swarm-a21-k8s` | `swarm-a21-k8s` | external note: v1.2 per-agent env files provisioned only when a workspace is installed | `not-installed` | not installed on this host |
+| `swarm-a22-gitops` | `swarm-a22-gitops` | external note: v1.2 per-agent env files provisioned only when a workspace is installed | `not-installed` | not installed on this host |
+| `swarm-a23-mesh` | `swarm-a23-mesh` | external note: v1.2 per-agent env files provisioned only when a workspace is installed | `not-installed` | not installed on this host |
+| `swarm-a24-ksec` | `swarm-a24-ksec` | external note: v1.2 per-agent env files provisioned only when a workspace is installed | `not-installed` | not installed on this host |
+| `swarm-a25-resil` | `swarm-a25-resil` | external note: v1.2 per-agent env files provisioned only when a workspace is installed | `not-installed` | not installed on this host |
+| `swarm-a26-sol` | `swarm-a26-sol` | external note: v1.2 per-agent env files provisioned only when a workspace is installed | `not-installed` | not installed on this host |
+| `swarm-a27-audit` | `swarm-a27-audit` | external note: v1.2 per-agent env files provisioned only when a workspace is installed | `not-installed` | not installed on this host |
+| `swarm-a28-chain` | `swarm-a28-chain` | external note: v1.2 per-agent env files provisioned only when a workspace is installed | `not-installed` | not installed on this host |
+| `swarm-a29-dapp` | `swarm-a29-dapp` | external note: v1.2 per-agent env files provisioned only when a workspace is installed | `not-installed` | not installed on this host |
+| `swarm-a30-custody` | `swarm-a30-custody` | external note: v1.2 per-agent env files provisioned only when a workspace is installed | `not-installed` | not installed on this host |
 | `omp-ultrathink` | `omp` | external note: not installed and out of scope for this phase | `not-installed` | not installed |
 | `hermes-prompt-uplift` | `hermes` | external note: not installed and out of scope for this phase | `not-installed` | not installed |
 | `hermes-eng-board` | `hermes` | external note: not wired and its own surface name is fixed in its own repo | `not-installed` | not wired |

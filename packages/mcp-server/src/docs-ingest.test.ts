@@ -12,10 +12,11 @@ import { join } from "node:path";
 import { loadConfig } from "./config.ts";
 import {
 	INGEST_PAGE_MAX_BYTES,
+	extractPlanningGraphHint,
 	ingestDocs,
-	loadIngestRecords,
+	isPlanningPage,
 	nodeIo,
-	saveIngestRecords,
+	planningPhaseOf,
 	scanIngestPages,
 	stripRemoteImages,
 	type IngestDeps,
@@ -450,5 +451,116 @@ describe("scanIngestPages", () => {
 			rmSync(root, { recursive: true, force: true });
 			rmSync(outside, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("planning scan graph hints (LightRAG path)", () => {
+	test("isPlanningPage admits only .planning markdown", () => {
+		expect(isPlanningPage(".planning/PROJECT.md")).toBe(true);
+		expect(isPlanningPage(".planning/phases/25-x/PLAN.md")).toBe(true);
+		expect(isPlanningPage("docs/data-planes.md")).toBe(false);
+		expect(isPlanningPage(".planning/diagram.png")).toBe(false);
+		expect(isPlanningPage(".planning/../docs/escape.md")).toBe(false);
+	});
+
+	test("planningPhaseOf names the phase directory, else the planning path", () => {
+		expect(planningPhaseOf(".planning/phases/25-x/PLAN.md")).toBe("25-x");
+		expect(planningPhaseOf(".planning/PROJECT.md")).toBe("PROJECT");
+		expect(planningPhaseOf("docs/data-planes.md")).toBe("docs/data-planes");
+	});
+
+	test("headings become entities with parent-child contains relations", () => {
+		const hint = extractPlanningGraphHint(".planning/phases/25-x/PLAN.md", "# Phase plan\n\n## Access path\n");
+		expect(hint?.phase).toBe("25-x");
+		expect(hint?.entities).toEqual(["Phase plan", "Access path"]);
+		expect(hint?.relations).toEqual([{ source: "Phase plan", target: "Access path", kind: "contains" }]);
+	});
+
+	test("markdown links become links-to from the enclosing heading, targets verbatim", () => {
+		const hint = extractPlanningGraphHint(
+			".planning/phases/25-x/PLAN.md",
+			"# Phase plan\n\nImplements the [retriever](../docs/data-planes.md) for the phase.\n\n## Access path\n",
+		);
+		expect(hint?.relations).toEqual([
+			{ source: "Phase plan", target: "Access path", kind: "contains" },
+			{ source: "Phase plan", target: "../docs/data-planes.md", kind: "links-to" },
+		]);
+	});
+
+	test("non-planning pages yield no hint; heading-less planning pages yield empty lists", () => {
+		expect(extractPlanningGraphHint("docs/data-planes.md", "# Heading\n")).toBeUndefined();
+		expect(extractPlanningGraphHint(".planning/note.md", "Just prose with a [link](target.md).\n")).toEqual({
+			phase: "note",
+			entities: [],
+			relations: [{ source: "note", target: "target.md", kind: "links-to" }],
+		});
+	});
+
+	test("fences and frontmatter contribute nothing; images and duplicate headings are skipped", () => {
+		const hint = extractPlanningGraphHint(
+			".planning/PROJECT.md",
+			"---\ntitle: sample\n---\n\n```\n# Not a heading\n```\n\n# Real\n\n![diagram](img.png)\n\n# Real\n",
+		);
+		expect(hint?.entities).toEqual(["Real"]);
+		expect(hint?.relations).toEqual([]);
+	});
+
+	test("scanIngestPages attaches graph hints to planning pages only", async () => {
+		const root = mkdtempSync(join(tmpdir(), "substrate-scan-graph-"));
+		try {
+			mkdirSync(join(root, ".planning", "phase-a"), { recursive: true });
+			mkdirSync(join(root, "docs"), { recursive: true });
+			writeFileSync(join(root, ".planning", "phase-a", "PLAN.md"), "# Phase A\n\nImplements the [retriever](../docs/data-planes.md).\n");
+			writeFileSync(join(root, "docs", "small.md"), "# Small\n");
+			const pages = await scanIngestPages(root, ["docs/", ".planning/"]);
+			expect(pages.map((page) => page.path).sort()).toEqual([".planning/phase-a/PLAN.md", "docs/small.md"]);
+			const planning = pages.find((page) => page.path === ".planning/phase-a/PLAN.md");
+			expect(planning?.graph).toEqual({
+				phase: "phase-a",
+				entities: ["Phase A"],
+				relations: [{ source: "Phase A", target: "../docs/data-planes.md", kind: "links-to" }],
+			});
+			const docs = pages.find((page) => page.path === "docs/small.md");
+			expect(docs).toBeDefined();
+			expect("graph" in (docs as object)).toBe(false);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("an oversize planning file is stat-checked, never read, and yields no hint", async () => {
+		const root = mkdtempSync(join(tmpdir(), "substrate-scan-graph-size-"));
+		try {
+			mkdirSync(join(root, ".planning"), { recursive: true });
+			writeFileSync(join(root, ".planning", "huge.md"), "x".repeat(INGEST_PAGE_MAX_BYTES + 1));
+			const reads: string[] = [];
+			const io: ScanIo = {
+				...nodeIo,
+				readFile: (path, options) => {
+					reads.push(String(path));
+					return nodeIo.readFile(path, options);
+				},
+			};
+			const pages = await scanIngestPages(root, [".planning/"], io);
+			expect(pages).toEqual([]);
+			expect(reads.some((path) => path.endsWith("huge.md"))).toBe(false);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("ingest accepts call-level graphHints on the RAGFlow path unchanged", async () => {
+		const fake = new RagflowFake();
+		const { ingest } = harness(fake);
+		const outcome = await ingest({
+			dataset: "agent-substrate",
+			commit: "abc123",
+			pages: [PAGE],
+			graphHints: [{ phase: "test", entities: ["substrate"], relations: [] }],
+		});
+		if (!outcome.ok) throw new Error(`expected ingest: ${outcome.reason}`);
+		expect(outcome.results).toHaveLength(1);
+		expect(outcome.results[0]?.status).toBe("ingested");
+		expect(fake.uploads).toHaveLength(1);
 	});
 });
