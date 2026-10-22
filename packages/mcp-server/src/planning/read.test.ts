@@ -183,14 +183,16 @@ describe("a stalled Dragonfly reply", () => {
 });
 
 describe("planning_sessions planning rows and conflicts (phase 53, SOTA-09)", () => {
-	function claimed(backend: RecordingPresenceBackend, sessionId: string, activePhase: string, phases: Array<[string, string[]]>): SessionRecord {
+	/** A session whose touched pairs are inside the freshness window, with its planning report known at the server's clock. */
+	function touching(backend: RecordingPresenceBackend, sessionId: string, touched: Array<[string, string | null]>): SessionRecord {
 		return {
 			sessionId,
 			worktree: `/work/${sessionId}`,
 			branch: `gsd/${sessionId}`,
-			activePhase,
+			activePhase: null,
 			lastHeartbeatMs: backend.clockMs,
-			planning: { status: "known", scannedAtMs: backend.clockMs, phases: phases.map(([phase, plans]) => ({ phase, plans })) },
+			touched: touched.map(([phase, plan]) => ({ phase, plan, observedAtMs: backend.clockMs })),
+			planning: { status: "known", scannedAtMs: backend.clockMs, phases: [] },
 		};
 	}
 
@@ -201,8 +203,8 @@ describe("planning_sessions planning rows and conflicts (phase 53, SOTA-09)", ()
 
 	test("two known sessions on one phase are one open conflict, and the read writes nothing", async () => {
 		const backend = new RecordingPresenceBackend();
-		storeSession(backend, claimed(backend, "alpha", "53", [["53", ["53-01"]]]));
-		storeSession(backend, claimed(backend, "beta", "53", [["53", ["53-01"]]]));
+		storeSession(backend, touching(backend, "alpha", [["53", "53-01"]]));
+		storeSession(backend, touching(backend, "beta", [["53", "53-01"]]));
 		const reader = readerOver(seededTree(), { presence: new DragonflyPresenceStore(backend) });
 		expect(await reader.sessions()).toMatchObject({
 			state: "ok",
@@ -211,10 +213,19 @@ describe("planning_sessions planning rows and conflicts (phase 53, SOTA-09)", ()
 		expect(backend.writes).toEqual([]);
 	});
 
+	test("a touched pair older than the freshness window no longer conflicts, and the read writes nothing", async () => {
+		const backend = new RecordingPresenceBackend();
+		const old = { ...touching(backend, "alpha", [["53", "53-01"]]), touched: [{ phase: "53", plan: "53-01", observedAtMs: backend.clockMs - 90_001 }] };
+		storeSession(backend, old);
+		storeSession(backend, touching(backend, "beta", [["53", "53-01"]]));
+		expect(await readerOver(seededTree(), { presence: new DragonflyPresenceStore(backend) }).sessions()).toMatchObject({ state: "ok", conflicts: [] });
+		expect(backend.writes).toEqual([]);
+	});
+
 	test("a session in a watcher gap is unknown in its row and takes no part in conflict detection", async () => {
 		const backend = new RecordingPresenceBackend();
-		storeSession(backend, { ...claimed(backend, "alpha", "52", [["52", []]]), planning: { status: "unknown", scannedAtMs: backend.clockMs, reason: "scan-truncated" } });
-		storeSession(backend, claimed(backend, "beta", "52", [["52", ["52-01"]]]));
+		storeSession(backend, { ...touching(backend, "alpha", [["52", null]]), planning: { status: "unknown", scannedAtMs: backend.clockMs, reason: "scan-truncated" } });
+		storeSession(backend, touching(backend, "beta", [["52", "52-01"]]));
 		const view = await readerOver(seededTree(), { presence: new DragonflyPresenceStore(backend) }).sessions();
 		expect(view).toMatchObject({ state: "ok", conflicts: [] });
 		expect(planningOf(view as PlanningSessionsView, "alpha")).toEqual({ state: "unknown", reason: "scan-truncated" });
@@ -222,7 +233,7 @@ describe("planning_sessions planning rows and conflicts (phase 53, SOTA-09)", ()
 
 	test("a report older than the freshness window is unknown as stale in its row", async () => {
 		const backend = new RecordingPresenceBackend();
-		storeSession(backend, claimed(backend, "alpha", "52", [["52", ["52-01"]]]));
+		storeSession(backend, touching(backend, "alpha", [["52", "52-01"]]));
 		backend.clockMs += 90_001;
 		const view = await readerOver(seededTree(), { presence: new DragonflyPresenceStore(backend) }).sessions();
 		expect(planningOf(view as PlanningSessionsView, "alpha")).toEqual({ state: "unknown", reason: "scan-stale" });

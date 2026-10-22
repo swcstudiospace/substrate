@@ -8,9 +8,15 @@
  *
  * Heartbeat: a checkout heartbeats when this observer sees a complete change in it, and when its watcher gap opens or
  * closes. The heartbeat carries the checkout's planning report (`report.ts`), which is how every other session sees its
- * plan ids. The session is that checkout (`wt-<hash of its path>`), and its branch is read from its HEAD. A scan that sees
- * no change writes no heartbeat, so a session is listed as `active` for the freshness window after it last changed a
- * planning document, and `stale` after.
+ * plan ids, and its touched pairs. The session is that checkout (`wt-<hash of its path>`), and its branch is read from its
+ * HEAD. A scan that sees no change writes no heartbeat, so a session is listed as `active` for the freshness window after it
+ * last changed a planning document, and `stale` after.
+ *
+ * Touched pairs: a complete change records the phase and plan of each document it added, changed or removed, dated by the
+ * server clock. A pair stays while it is inside the presence TTL, so a later complete change to other documents keeps it.
+ * An incomplete observation records nothing and drops nothing: the gap rule. A change that would take the list past
+ * `MAX_REPORT_ENTRIES` is not cut, since a cut list claims absences. The report says `report-limit` until a complete
+ * change fits again.
  *
  * Conflicts: after each scan that can read the server clock, the observer lists the presence snapshot, detects conflicts
  * (`conflicts.ts`) and announces each one that is not already open, once. A conflict that clears and returns is announced
@@ -25,10 +31,10 @@ import { conflictEvent, conflictSignature, detectConflicts } from "./conflicts.t
 import type { PlanningConfigResult } from "./config.ts";
 import { diffPlanningIndex, type PlanningDiff, type PlanningSnapshot } from "./diff.ts";
 import { observePlanningChange } from "./events.ts";
-import { buildPlanningIndex, errnoCode, snapshotOf, updatePlanningIndex, type PlanningFs, type PlanningIndex, type PlanningIndexFailure, type PlanningIndexResult } from "./index.ts";
+import { buildPlanningIndex, errnoCode, indexRecords, isErrorRecord, snapshotOf, updatePlanningIndex, type PlanningFs, type PlanningIndex, type PlanningIndexFailure, type PlanningIndexResult } from "./index.ts";
 import { DragonflyPresenceStore, PRESENCE_MAX_SESSIONS } from "./presence-dragonfly.ts";
-import { classifySessions, type PlanningReport, type SessionRecord } from "./presence.ts";
-import { observeScan, type WatcherGap } from "./report.ts";
+import { classifySessions, MAX_REPORT_ENTRIES, REPORT_ID_MAX, touchedWithin, type PlanningReport, type SessionRecord, type TouchedPair } from "./presence.ts";
+import { observeScan, planIdentity, unknownReport, type WatcherGap } from "./report.ts";
 import { readClock, resolveSettings } from "./read.ts";
 
 /** The session id the ledger row carries for a change observed by this plane. */
@@ -62,15 +68,25 @@ export interface PlanningObserverDeps {
 	emit: (event: EventInput) => Promise<boolean>;
 }
 
+/** The phase and plan of one described document. `plan` is null when the document names none. */
+type PhasePlan = Pick<TouchedPair, "phase" | "plan">;
+
 export class PlanningObserver {
 	/** The index of the latest scan, which the next scan updates. Holds whatever the last scan found, even when a publish failed. */
 	private index: { root: string; index: PlanningIndex } | null = null;
-	/** The baseline a diff is taken against. It moves forward, and holds when a publish fails. */
-	private baseline: { root: string; snapshot: PlanningSnapshot } | null = null;
+	/**
+	 * The baseline a diff is taken against: its snapshot, and the phase and plan of each of its documents by path. It moves
+	 * forward, and holds when a publish fails.
+	 */
+	private baseline: { root: string; snapshot: PlanningSnapshot; phasePlans: ReadonlyMap<string, PhasePlan> } | null = null;
 	/** This checkout's planning report from its latest scan, stamped by the server clock. It rides in the checkout's heartbeat. Null until one exists. */
 	private report: PlanningReport | null = null;
 	/** The watcher gap after the latest scan: a truncated or unlisted scan opens it, and a complete scan clears it. Process-local. */
 	private gap: WatcherGap | null = null;
+	/** This checkout's touched pairs inside the TTL, as its latest complete changes left them. Written on each heartbeat. Process-local. */
+	private touched: TouchedPair[] = [];
+	/** True while the latest complete change did not fit in `touched`. The report stays unknown (`report-limit`) until a change fits. */
+	private touchedOverflow = false;
 	/** Conflicts announced and still open, by signature. A conflict leaves the set once it is no longer detected. Process-local. */
 	private openConflicts = new Set<string>();
 	private timer: ReturnType<typeof setInterval> | undefined;
@@ -110,15 +126,24 @@ export class PlanningObserver {
 		const cached = this.index !== null && this.index.root === root ? this.index.index : null;
 		const built = cached === null ? await buildPlanningIndex(root, fsDeps) : await updatePlanningIndex(root, fsDeps, cached);
 		const clock = this.deps.presence === null ? null : await readClock(this.deps.presence);
-		const gapMoved = clock !== null && clock.ok ? this.stampReport(built, clock.nowMs) : false;
+		const nowMs = clock !== null && clock.ok ? clock.nowMs : null;
+		const gapMoved = nowMs !== null ? this.stampReport(built, nowMs) : false;
 		if (!built.ok) return { state: "unavailable", code: built.code };
 		this.index = { root, index: built.index };
 
 		const next = snapshotOf(built.index);
-		const previous = this.baseline !== null && this.baseline.root === root ? this.baseline.snapshot : null;
+		const nextPhasePlans = phasePlansOf(built.index);
+		const priorBaseline = this.baseline !== null && this.baseline.root === root ? this.baseline : null;
+		const previous = priorBaseline?.snapshot ?? null;
 		const diff = previous === null ? null : diffPlanningIndex(previous, next);
 		const changed = diff !== null && diff.complete && changesIn(diff) > 0;
+		if (diff !== null && changed && nowMs !== null) this.touch(pairsOfChange(diff, nextPhasePlans, priorBaseline?.phasePlans), nowMs, ttlMs);
+		if (this.touchedOverflow && nowMs !== null) this.report = unknownReport(nowMs, "report-limit");
+
 		const repo = await repoOf(this.deps.fs, root);
+		// A baseline that holds (a failed publish) keeps its own phase and plan map, so a removal is still read from what was there.
+		const phasePlansFor = (snapshot: PlanningSnapshot): ReadonlyMap<string, PhasePlan> =>
+			snapshot === previous && priorBaseline !== null ? priorBaseline.phasePlans : nextPhasePlans;
 		let outcome: ObserverOutcome;
 		if (repo.state === "known") {
 			const observed = await observePlanningChange({
@@ -128,19 +153,19 @@ export class PlanningObserver {
 				sessionId: PLANNING_OBSERVER_SESSION,
 				publisher: { publish: this.deps.emit },
 			});
-			this.baseline = { root, snapshot: observed.baseline };
+			this.baseline = { root, snapshot: observed.baseline, phasePlans: phasePlansFor(observed.baseline) };
 			outcome = observed.outcome;
 		} else if (changed) {
 			// Without a repo nothing can be published. A complete change is reported once and ends here, unless the failure that
 			// hid the repo was transient: then the baseline holds, and the next scan sees the same change again.
-			if (!repo.transient) this.baseline = { root, snapshot: next };
+			if (!repo.transient) this.baseline = { root, snapshot: next, phasePlans: nextPhasePlans };
 			outcome = "repo-unknown";
 		} else {
-			this.baseline = { root, snapshot: next };
+			this.baseline = { root, snapshot: next, phasePlans: nextPhasePlans };
 			outcome = previous === null ? "baseline" : diff !== null && !diff.complete ? "incomplete" : "unchanged";
 		}
 		const heartbeat = await this.heartbeat(root, changed || gapMoved, ttlMs);
-		if (clock !== null && clock.ok) await this.announce(repo, clock.nowMs, ttlMs);
+		if (nowMs !== null) await this.announce(repo, nowMs, ttlMs);
 		return { state: "observed", outcome, heartbeat };
 	}
 
@@ -156,7 +181,21 @@ export class PlanningObserver {
 		return moved;
 	}
 
-	/** Heartbeats this checkout when `due`. The record's time is replaced by the server's clock, and the record carries the report. */
+	/**
+	 * Folds one complete change into the touched pairs, dated by the server clock. A pair the change touches replaces its older
+	 * entry, and the others stay while they are inside the TTL. A list past `MAX_REPORT_ENTRIES` is not kept: the pairs stay as
+	 * they were, pruned, and the overflow flag holds the report unknown until a complete change fits.
+	 */
+	private touch(pairs: readonly PhasePlan[], nowMs: number, ttlMs: number): void {
+		const fresh = new Map<string, TouchedPair>();
+		for (const pair of pairs) fresh.set(touchKey(pair), { phase: pair.phase, plan: pair.plan, observedAtMs: nowMs });
+		const kept = touchedWithin(this.touched, nowMs, ttlMs).filter((pair) => !fresh.has(touchKey(pair)));
+		const merged = [...fresh.values(), ...kept];
+		this.touchedOverflow = merged.length > MAX_REPORT_ENTRIES;
+		this.touched = this.touchedOverflow ? touchedWithin(this.touched, nowMs, ttlMs) : merged;
+	}
+
+	/** Heartbeats this checkout when `due`. The record's time is replaced by the server's clock, and the record carries the report and the touched pairs. */
 	private async heartbeat(root: string, due: boolean, ttlMs: number): Promise<PlanningHeartbeat> {
 		if (!due) return { state: "not-due" };
 		const presence = this.deps.presence;
@@ -170,6 +209,7 @@ export class PlanningObserver {
 				branch: await branchOf(this.deps.fs, layout.gitDir),
 				activePhase: null,
 				lastHeartbeatMs: 0,
+				touched: this.touched,
 				...(this.report === null ? {} : { planning: this.report }),
 			};
 			await presence.touch(record, ttlMs);
@@ -188,7 +228,7 @@ export class PlanningObserver {
 		if (presence === null) return;
 		const listing = await presence.listWithin(PRESENCE_MAX_SESSIONS).catch(() => null);
 		if (listing === null) return;
-		const detected = detectConflicts({ sessions: classifySessions(listing.records, nowMs, ttlMs), nowMs, maxScanAgeMs: ttlMs });
+		const detected = detectConflicts({ sessions: classifySessions(listing.records, nowMs, ttlMs), nowMs, ttlMs });
 		const repoName = repo.state === "known" ? repo.repo : null;
 		const next = new Set<string>();
 		for (const conflict of detected.conflicts) {
@@ -212,6 +252,43 @@ export class PlanningObserver {
 /** The number of paths a complete diff changes. A removal is counted only when the diff vouches for removals. */
 function changesIn(diff: PlanningDiff): number {
 	return diff.added.length + (diff.removed?.length ?? 0) + diff.changed.length;
+}
+
+/**
+ * The phase and plan of each described document in an index, by path. An error record and a document with no phase have no
+ * entry. A pair whose id the presence schema cannot carry has none either: the report of such an index is unknown
+ * (`report-limit`), since `report.ts` checks the same ids.
+ */
+function phasePlansOf(index: PlanningIndex): ReadonlyMap<string, PhasePlan> {
+	const plans = new Map<string, PhasePlan>();
+	for (const record of indexRecords(index)) {
+		if (isErrorRecord(record) || record.phase === undefined || record.phase === "") continue;
+		const plan = planIdentity(record) ?? null;
+		if (record.phase.length > REPORT_ID_MAX || (plan !== null && plan.length > REPORT_ID_MAX)) continue;
+		plans.set(record.path, { phase: record.phase, plan });
+	}
+	return plans;
+}
+
+/**
+ * The phase and plan of each document a complete change added or changed (read from the new index) or removed (read from the
+ * baseline it left).
+ */
+function pairsOfChange(diff: PlanningDiff, next: ReadonlyMap<string, PhasePlan>, previous: ReadonlyMap<string, PhasePlan> | undefined): PhasePlan[] {
+	const pairs: PhasePlan[] = [];
+	for (const change of [...diff.added, ...diff.changed]) {
+		const pair = next.get(change.path);
+		if (pair !== undefined) pairs.push(pair);
+	}
+	for (const change of diff.removed ?? []) {
+		const pair = previous?.get(change.path);
+		if (pair !== undefined) pairs.push(pair);
+	}
+	return pairs;
+}
+
+function touchKey(pair: PhasePlan): string {
+	return JSON.stringify([pair.phase, pair.plan]);
 }
 
 /** A scan that threw. Only the error's code is kept: its message can carry host paths. */

@@ -30,7 +30,9 @@ export type UnknownViewReason = (typeof UNKNOWN_VIEW_REASONS)[number];
 /** Most entries (phases and plan ids together) one planning report carries. A larger index is reported as `report-limit`. */
 export const MAX_REPORT_ENTRIES = 512;
 
-const REPORT_ID = z.string().min(1).max(128);
+/** The longest phase or plan id a planning report or a touched pair carries. */
+export const REPORT_ID_MAX = 128;
+const REPORT_ID = z.string().min(1).max(REPORT_ID_MAX);
 
 export const PhaseReportSchema = z.object({ phase: REPORT_ID, plans: z.array(REPORT_ID).max(MAX_REPORT_ENTRIES) }).strict();
 export type PhaseReport = z.infer<typeof PhaseReportSchema>;
@@ -48,6 +50,14 @@ export const PlanningReportSchema = z.discriminatedUnion("status", [
 ]);
 export type PlanningReport = z.infer<typeof PlanningReportSchema>;
 
+/**
+ * A planning change this checkout made (phase 53, SOTA-09): the phase it touched and the plan it named, or null for a document
+ * that names none. `observedAtMs` is the server's time of the complete observation that saw it. A pair counts only while it is
+ * inside the presence TTL (`touchedWithin`).
+ */
+export const TouchedPairSchema = z.object({ phase: REPORT_ID, plan: REPORT_ID.nullable(), observedAtMs: z.number().int().nonnegative() }).strict();
+export type TouchedPair = z.infer<typeof TouchedPairSchema>;
+
 export const SessionRecordSchema = z.object({
 	sessionId: z.string().regex(SESSION_ID_RE),
 	worktree: z.string().min(1).max(1024),
@@ -55,6 +65,7 @@ export const SessionRecordSchema = z.object({
 	activePhase: z.string().min(1).max(64).nullable(),
 	lastHeartbeatMs: z.number().int().nonnegative(),
 	planning: PlanningReportSchema.optional(),
+	touched: z.array(TouchedPairSchema).max(MAX_REPORT_ENTRIES).optional(),
 });
 
 export type SessionRecord = z.infer<typeof SessionRecordSchema>;
@@ -100,6 +111,15 @@ export function classifySessions(records: readonly SessionRecord[], nowMs: numbe
 			return { ...record, ageMs, status: ageMs > ttlMs ? "stale" : "active" };
 		})
 		.sort((a, b) => compareText(a.sessionId, b.sessionId));
+}
+
+/**
+ * The touched pairs still inside the freshness window. A pair observed exactly `ttlMs` ago still counts, as a heartbeat exactly
+ * `ttlMs` old is still active. A pair ahead of `nowMs` (clock skew) counts. The input is not modified.
+ */
+export function touchedWithin(pairs: readonly TouchedPair[], nowMs: number, ttlMs: number): TouchedPair[] {
+	assertTtlMs(ttlMs);
+	return pairs.filter((pair) => nowMs - pair.observedAtMs <= ttlMs);
 }
 
 /** Every record the store holds, classified against the clock's own time. */

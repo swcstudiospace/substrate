@@ -174,7 +174,7 @@ export class PlanningReader {
 				};
 			}
 			const classified = classifySessions(listing.records, clock.nowMs, ttlMs);
-			const detected = detectConflicts({ sessions: classified, nowMs: clock.nowMs, maxScanAgeMs: ttlMs });
+			const detected = detectConflicts({ sessions: classified, nowMs: clock.nowMs, ttlMs });
 			return {
 				state: "ok",
 				presenceTtlS: resolved.limits.presenceTtlS,

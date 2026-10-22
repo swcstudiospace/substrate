@@ -1,6 +1,6 @@
 /**
- * Conflict detection over presence snapshot records: a phase key and a plan key, one open event per key, nothing auto-resolved,
- * and an unknown view that takes no part and blocks conflict-sensitive writes.
+ * Conflict detection over presence snapshot records: a phase key and a plan key over the pairs each session touched inside the
+ * TTL, one open event per key, nothing auto-resolved, and an unknown view that takes no part and blocks conflict-sensitive writes.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -11,27 +11,33 @@ import {
 	type ConflictInput,
 	type PlanningConflict,
 } from "./conflicts.ts";
-import type { ClassifiedSession, PlanningReport, UnknownViewReason } from "./presence.ts";
+import type { ClassifiedSession, PlanningReport, TouchedPair, UnknownViewReason } from "./presence.ts";
 
 const NOW = 1_000_000;
-const MAX_AGE = 30_000;
+const TTL = 30_000;
 
-function session(sessionId: string, activePhase: string | null, planning: PlanningReport | undefined, status: "active" | "stale" = "active"): ClassifiedSession {
+/** A touched pair observed at `observedAtMs`: a phase, and the plan it named, or null for a phase-level document. */
+function pair(phase: string, plan: string | null = null, observedAtMs = NOW): TouchedPair {
+	return { phase, plan, observedAtMs };
+}
+
+function session(sessionId: string, touched: TouchedPair[], planning: PlanningReport | undefined, status: "active" | "stale" = "active"): ClassifiedSession {
 	return {
 		sessionId,
 		worktree: `/work/${sessionId}`,
 		branch: `gsd/${sessionId}`,
-		activePhase,
+		activePhase: null,
 		lastHeartbeatMs: NOW,
+		touched,
 		status,
 		ageMs: 0,
 		...(planning === undefined ? {} : { planning }),
 	};
 }
 
-/** A known report over `phases`, each entry a phase and the plan ids its index holds under it. */
-function known(phases: Array<[string, string[]]>, scannedAtMs = NOW): PlanningReport {
-	return { status: "known", scannedAtMs, phases: phases.map(([phase, plans]) => ({ phase, plans })) };
+/** A known report. Detection reads only its age and its known status: the pairs carry the claims. */
+function known(scannedAtMs = NOW): PlanningReport {
+	return { status: "known", scannedAtMs, phases: [] };
 }
 
 function unknown(reason: UnknownViewReason, scannedAtMs = NOW): PlanningReport {
@@ -39,15 +45,15 @@ function unknown(reason: UnknownViewReason, scannedAtMs = NOW): PlanningReport {
 }
 
 function input(sessions: ClassifiedSession[], overrides: Partial<ConflictInput> = {}): ConflictInput {
-	return { sessions, nowMs: NOW, maxScanAgeMs: MAX_AGE, ...overrides };
+	return { sessions, nowMs: NOW, ttlMs: TTL, ...overrides };
 }
 
 describe("detectConflicts: the phase key", () => {
-	test("two sessions on the same active phase emit one open phase event naming the plans they share", () => {
+	test("two sessions that touched one phase emit one open phase event naming the plans they share", () => {
 		const report = detectConflicts(
 			input([
-				session("alpha", "53", known([["53", ["53-01", "53-02"]]])),
-				session("beta", "53", known([["53", ["53-01", "53-03"]]])),
+				session("alpha", [pair("53", "53-01"), pair("53", "53-02")], known()),
+				session("beta", [pair("53", "53-01"), pair("53", "53-03")], known()),
 			]),
 		);
 		expect(report.conflicts).toEqual([
@@ -64,21 +70,27 @@ describe("detectConflicts: the phase key", () => {
 	});
 
 	test("the same phase with no shared plan is one phase event with no plans named", () => {
-		const report = detectConflicts(
-			input([session("alpha", "53", known([["53", ["53-01"]]])), session("beta", "53", known([["53", ["53-02"]]]))]),
-		);
+		const report = detectConflicts(input([session("alpha", [pair("53", "53-01")], known()), session("beta", [pair("53", "53-02")], known())]));
 		expect(report.conflicts).toEqual([expect.objectContaining({ key: { by: "phase", phase: "53" }, plans: [] })]);
 	});
 
+	test("a phase-level change with no plan counts for the phase key and names no plan", () => {
+		const report = detectConflicts(input([session("alpha", [pair("53")], known()), session("beta", [pair("53", "53-01")], known())]));
+		expect(report.conflicts).toEqual([expect.objectContaining({ key: { by: "phase", phase: "53" }, plans: [], sessionIds: ["alpha", "beta"] })]);
+	});
+
 	test("a single session emits no conflict", () => {
-		const report = detectConflicts(input([session("alpha", "53", known([["53", ["53-01"]]]))]));
+		const report = detectConflicts(input([session("alpha", [pair("53", "53-01")], known())]));
 		expect(report.conflicts).toEqual([]);
 		expect(report.views).toEqual([expect.objectContaining({ sessionId: "alpha", status: "known" })]);
 	});
 
-	test("a session claims only its active phase: a phase its index merely contains is not a claim", () => {
+	test("a session claims only what it touched: a phase its report lists but it did not touch is not a claim", () => {
 		const report = detectConflicts(
-			input([session("alpha", "53", known([["52", ["52-01"]], ["53", []]])), session("beta", "52", known([["52", ["52-01"]]]))]),
+			input([
+				session("alpha", [pair("52", "52-01")], { status: "known", scannedAtMs: NOW, phases: [{ phase: "52", plans: ["52-01"] }, { phase: "53", plans: [] }] }),
+				session("beta", [pair("53", "53-01")], known()),
+			]),
 		);
 		expect(report.conflicts).toEqual([]);
 	});
@@ -86,10 +98,10 @@ describe("detectConflicts: the phase key", () => {
 	test("conflicts are sorted: phase keys by phase, before plan keys", () => {
 		const report = detectConflicts(
 			input([
-				session("a", "54", known([["54", []]])),
-				session("b", "54", known([["54", []]])),
-				session("c", "53", known([["53", []]])),
-				session("d", "53", known([["53", []]])),
+				session("a", [pair("54")], known()),
+				session("b", [pair("54")], known()),
+				session("c", [pair("53")], known()),
+				session("d", [pair("53")], known()),
 			]),
 		);
 		expect(report.conflicts.map((conflict) => conflict.key)).toEqual([
@@ -100,9 +112,9 @@ describe("detectConflicts: the phase key", () => {
 });
 
 describe("detectConflicts: the plan key", () => {
-	test("two sessions on different active phases that share a plan id emit one open plan event", () => {
+	test("two sessions that touched a shared plan id under different phases emit one open plan event", () => {
 		const report = detectConflicts(
-			input([session("alpha", "53", known([["53", ["shared-plan"]]])), session("beta", "54", known([["54", ["shared-plan"]]]))]),
+			input([session("alpha", [pair("53", "shared-plan")], known()), session("beta", [pair("54", "shared-plan")], known())]),
 		);
 		expect(report.conflicts).toEqual([
 			{
@@ -120,9 +132,9 @@ describe("detectConflicts: the plan key", () => {
 	test("a plan shared inside one phase is covered by that phase's event and gets no second event", () => {
 		const report = detectConflicts(
 			input([
-				session("alpha", "53", known([["53", ["53-01"]]])),
-				session("beta", "53", known([["53", ["53-01"]]])),
-				session("gamma", "54", known([["54", ["53-01"]]])),
+				session("alpha", [pair("53", "53-01")], known()),
+				session("beta", [pair("53", "53-01")], known()),
+				session("gamma", [pair("54", "53-01")], known()),
 			]),
 		);
 		expect(report.conflicts.map((conflict) => conflict.key)).toEqual([
@@ -133,16 +145,26 @@ describe("detectConflicts: the plan key", () => {
 	});
 
 	test("different phases with different plan ids do not conflict", () => {
-		const report = detectConflicts(
-			input([session("alpha", "53", known([["53", ["53-01"]]])), session("beta", "54", known([["54", ["54-01"]]]))]),
-		);
+		const report = detectConflicts(input([session("alpha", [pair("53", "53-01")], known()), session("beta", [pair("54", "54-01")], known())]));
 		expect(report.conflicts).toEqual([]);
+	});
+});
+
+describe("detectConflicts: touched pairs age out at the TTL", () => {
+	test("a pair older than the TTL does not count; a pair exactly the TTL old still does", () => {
+		const aged = detectConflicts(
+			input([session("alpha", [pair("53", null, NOW - TTL - 1)], known()), session("beta", [pair("53")], known())]),
+		);
+		expect(aged.conflicts).toEqual([]);
+
+		const edge = detectConflicts(input([session("alpha", [pair("53", null, NOW - TTL)], known()), session("beta", [pair("53")], known())]));
+		expect(edge.conflicts).toHaveLength(1);
 	});
 });
 
 describe("detectConflicts: unknown views take no part", () => {
 	test("a session without a report is unknown with no-scan and is excluded", () => {
-		const report = detectConflicts(input([session("alpha", "53", undefined), session("beta", "53", known([["53", []]]))]));
+		const report = detectConflicts(input([session("alpha", [pair("53")], undefined), session("beta", [pair("53")], known())]));
 		expect(report.views).toEqual([
 			{ sessionId: "alpha", status: "unknown", reason: "no-scan" },
 			expect.objectContaining({ sessionId: "beta", status: "known" }),
@@ -151,31 +173,29 @@ describe("detectConflicts: unknown views take no part", () => {
 	});
 
 	test("a truncated or otherwise unknown report is excluded from detection and reports its reason", () => {
-		const report = detectConflicts(
-			input([session("alpha", "53", unknown("scan-truncated")), session("beta", "53", known([["53", ["53-01"]]]))]),
-		);
+		const report = detectConflicts(input([session("alpha", [pair("53")], unknown("scan-truncated")), session("beta", [pair("53", "53-01")], known())]));
 		expect(report.views).toContainEqual({ sessionId: "alpha", status: "unknown", reason: "scan-truncated" });
 		expect(report.conflicts).toEqual([]);
 	});
 
 	test("a report older than the threshold is stale; exactly the threshold is still known", () => {
-		const stale = detectConflicts(input([session("alpha", "53", known([["53", []]], NOW - MAX_AGE - 1)), session("beta", "53", known([["53", []]]))]));
+		const stale = detectConflicts(input([session("alpha", [pair("53")], known(NOW - TTL - 1)), session("beta", [pair("53")], known())]));
 		expect(stale.views[0]).toEqual({ sessionId: "alpha", status: "unknown", reason: "scan-stale" });
 		expect(stale.conflicts).toEqual([]);
 
-		const edge = detectConflicts(input([session("alpha", "53", known([["53", []]], NOW - MAX_AGE)), session("beta", "53", known([["53", []]]))]));
+		const edge = detectConflicts(input([session("alpha", [pair("53")], known(NOW - TTL)), session("beta", [pair("53")], known())]));
 		expect(edge.views[0]).toMatchObject({ sessionId: "alpha", status: "known" });
 		expect(edge.conflicts).toHaveLength(1);
 	});
 
 	test("a stopped session takes no part in detection and gets no view", () => {
-		const report = detectConflicts(input([session("alpha", "53", known([["53", []]]), "stale"), session("beta", "53", known([["53", []]]))]));
+		const report = detectConflicts(input([session("alpha", [pair("53")], known(), "stale"), session("beta", [pair("53")], known())]));
 		expect(report.views.map((view) => view.sessionId)).toEqual(["beta"]);
 		expect(report.conflicts).toEqual([]);
 	});
 
 	test("the write gate refuses a conflict-sensitive write from an unknown view, and allows a known one", () => {
-		const report = detectConflicts(input([session("alpha", "53", unknown("scan-failed")), session("beta", "53", known([["53", []]]))]));
+		const report = detectConflicts(input([session("alpha", [pair("53")], unknown("scan-failed")), session("beta", [pair("53")], known())]));
 		expect(gateConflictSensitiveWrite(report.views, "alpha")).toEqual({ ok: false, code: "planning-view-unknown", reason: "scan-failed" });
 		expect(gateConflictSensitiveWrite(report.views, "beta")).toEqual({ ok: true });
 		expect(gateConflictSensitiveWrite(report.views, "gamma")).toEqual({
@@ -188,7 +208,7 @@ describe("detectConflicts: unknown views take no part", () => {
 
 describe("detectConflicts: nothing is auto-resolved", () => {
 	test("a conflict stays open across detections of the same state", () => {
-		const snapshot = input([session("alpha", "53", known([["53", ["53-01"]]])), session("beta", "53", known([["53", ["53-01"]]]))]);
+		const snapshot = input([session("alpha", [pair("53", "53-01")], known()), session("beta", [pair("53", "53-01")], known())]);
 		const first = detectConflicts(snapshot);
 		const second = detectConflicts(snapshot);
 		expect(second.conflicts).toEqual(first.conflicts);

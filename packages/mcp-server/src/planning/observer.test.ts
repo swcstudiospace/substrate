@@ -7,7 +7,8 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { EventInput } from "../types.ts";
 import { RecordingPresenceBackend } from "./backend.fixtures.ts";
-import { PLANNING_MAX_FILES_ENV, PLANNING_ROOT_ENV, loadPlanningSettings } from "./config.ts";
+import { PLANNING_MAX_FILES_ENV, PLANNING_PRESENCE_TTL_ENV, PLANNING_ROOT_ENV, loadPlanningSettings } from "./config.ts";
+import { planningSessionId } from "./checkout.ts";
 import type { SessionRecord } from "./presence.ts";
 import { PlanningReader, type PlanningSessionsView } from "./read.ts";
 import { PLANNING_OBSERVER_SESSION, PlanningObserver } from "./observer.ts";
@@ -211,6 +212,11 @@ describe("the observer's heartbeat", () => {
 
 const SERVER_NOW = 1_000_000;
 const PLAN = `${PHASE}/52-PLAN.md`;
+const CHECKOUT_A = "/checkout-a";
+const CHECKOUT_B = "/checkout-b";
+const PHASE_53 = "53-steering";
+const PHASE_54 = "54-review";
+const TTL_60_S = "60";
 
 /** An observer with a document cap, for the watcher-gap tests. Every write is stored. */
 function gapObserver(tree: FakeTree, presence: DragonflyPresenceStore, maxFiles: string): PlanningObserver {
@@ -222,10 +228,10 @@ function gapObserver(tree: FakeTree, presence: DragonflyPresenceStore, maxFiles:
 	});
 }
 
-/** An observer that records every attempted write and reports each one as stored or refused. */
-function announcingObserver(tree: FakeTree, presence: DragonflyPresenceStore, attempts: EventInput[], stored: boolean): PlanningObserver {
+/** An observer over one checkout that records every attempted conflict write and reports each one as stored or refused. */
+function announcingObserver(tree: FakeTree, presence: DragonflyPresenceStore, attempts: EventInput[], stored: boolean, root: string = TREE_ROOT, ttlS?: string): PlanningObserver {
 	return new PlanningObserver({
-		settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+		settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: root, ...(ttlS === undefined ? {} : { [PLANNING_PRESENCE_TTL_ENV]: ttlS }) }),
 		fs: tree,
 		presence,
 		emit: async (event) => {
@@ -235,25 +241,50 @@ function announcingObserver(tree: FakeTree, presence: DragonflyPresenceStore, at
 	});
 }
 
-function planningReaderOver(tree: FakeTree, presence: DragonflyPresenceStore): PlanningReader {
-	return new PlanningReader({ settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }), fs: tree, presence });
+function planningReaderOver(tree: FakeTree, presence: DragonflyPresenceStore, ttlS?: string): PlanningReader {
+	return new PlanningReader({
+		settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT, ...(ttlS === undefined ? {} : { [PLANNING_PRESENCE_TTL_ENV]: ttlS }) }),
+		fs: tree,
+		presence,
+	});
 }
 
-/** A session that claims `activePhase` and reports `phases`, with its planning report known at the server's clock. */
-function claimed(backend: RecordingPresenceBackend, sessionId: string, activePhase: string, phases: Array<[string, string[]]>): SessionRecord {
-	return {
-		sessionId,
-		worktree: `/work/${sessionId}`,
-		branch: `gsd/${sessionId}`,
-		activePhase,
-		lastHeartbeatMs: backend.clockMs,
-		planning: { status: "known", scannedAtMs: backend.clockMs, phases: phases.map(([phase, plans]) => ({ phase, plans })) },
-	};
+/** The record a checkout's last heartbeat stored under its session key. */
+function storedRecord(backend: RecordingPresenceBackend, tree: FakeTree, root: string): SessionRecord {
+	return JSON.parse(backend.values.get(`${PRESENCE_KEY_PREFIX}${planningSessionId(tree, root)}`) ?? "{}") as SessionRecord;
 }
 
 function planningOf(view: PlanningSessionsView, sessionId: string) {
 	if (view.state !== "ok") throw new Error(`planning_sessions is ${view.state}`);
 	return view.sessions.find((row) => row.sessionId === sessionId)?.planning;
+}
+
+/** A checkout's git data (origin and branch) and its files, under its own root. */
+function checkoutOf(root: string, branch: string, files: Record<string, string>): Record<string, string> {
+	return {
+		[`${root}/.git/config`]: `[remote "origin"]\n\turl = git@github.com:${REPO}.git\n`,
+		[`${root}/.git/HEAD`]: `ref: refs/heads/${branch}\n`,
+		...files,
+	};
+}
+
+/** A document in a checkout's phase directory. */
+function phaseDoc(root: string, phaseDir: string, name: string): string {
+	return `${root}/.planning/phases/${phaseDir}/${name}`;
+}
+
+/** Two checkouts on one tree, each with a context document in phase 53 and in phase 54. */
+function twoCheckouts(): FakeTree {
+	return new FakeTree({
+		...checkoutOf(CHECKOUT_A, "gsd/p53-a", {
+			[phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md")]: "# context\n",
+			[phaseDoc(CHECKOUT_A, PHASE_54, "54-CONTEXT.md")]: "# context\n",
+		}),
+		...checkoutOf(CHECKOUT_B, "gsd/p53-b", {
+			[phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md")]: "# context\n",
+			[phaseDoc(CHECKOUT_B, PHASE_54, "54-CONTEXT.md")]: "# context\n",
+		}),
+	});
 }
 
 describe("planning reports, watcher gaps and conflicts on the write path (phase 53, SOTA-09)", () => {
@@ -298,88 +329,32 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 	});
 
 	test("a session whose report is in a watcher gap takes no part in conflict detection until its report is complete again", async () => {
-		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const tree = twoCheckouts();
 		const backend = new RecordingPresenceBackend();
 		backend.clockMs = SERVER_NOW;
 		const presence = new DragonflyPresenceStore(backend);
-		await presence.touch({ ...claimed(backend, "alpha", "52", [["52", []]]), planning: { status: "unknown", scannedAtMs: SERVER_NOW, reason: "scan-truncated" } }, 90_000);
-		await presence.touch(claimed(backend, "beta", "52", [["52", ["52-01"]]]), 90_000);
-		const events: EventInput[] = [];
-		const observer = announcingObserver(tree, presence, events, true);
-		await observer.scan();
-		expect(events).toEqual([]);
-		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({ state: "ok", conflicts: [] });
-
-		await presence.touch(claimed(backend, "alpha", "52", [["52", ["52-01"]]]), 90_000);
-		await observer.scan();
-		expect(events).toHaveLength(1);
-		expect(events[0]?.payload).toMatchObject({ kind: "planning.conflict", key: { by: "phase", phase: "52" } });
-	});
-
-	test("two known sessions on one phase emit one open event, and a second scan with the same state emits nothing more", async () => {
-		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
-		const backend = new RecordingPresenceBackend();
-		backend.clockMs = SERVER_NOW;
-		const presence = new DragonflyPresenceStore(backend);
-		await presence.touch(claimed(backend, "alpha", "53", [["53", ["53-01"]]]), 90_000);
-		await presence.touch(claimed(backend, "beta", "53", [["53", ["53-01"]]]), 90_000);
-		const events: EventInput[] = [];
-		const observer = announcingObserver(tree, presence, events, true);
-		await observer.scan();
-		expect(events).toEqual([expect.objectContaining({ surface: "substrate", kind: "warning", payload: expect.objectContaining({ kind: "planning.conflict" }) })]);
-		await observer.scan();
-		expect(events).toHaveLength(1);
-	});
-
-	test("two known sessions on different phases that share a plan id emit one open plan event", async () => {
-		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
-		const backend = new RecordingPresenceBackend();
-		backend.clockMs = SERVER_NOW;
-		const presence = new DragonflyPresenceStore(backend);
-		await presence.touch(claimed(backend, "alpha", "53", [["53", ["shared-plan"]]]), 90_000);
-		await presence.touch(claimed(backend, "beta", "54", [["54", ["shared-plan"]]]), 90_000);
-		const events: EventInput[] = [];
-		await announcingObserver(tree, presence, events, true).scan();
-		expect(events).toHaveLength(1);
-		expect(events[0]?.payload).toMatchObject({ key: { by: "plan", plan: "shared-plan" } });
-	});
-
-	test("a single session emits no event", async () => {
-		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
-		const backend = new RecordingPresenceBackend();
-		backend.clockMs = SERVER_NOW;
-		const presence = new DragonflyPresenceStore(backend);
-		await presence.touch(claimed(backend, "alpha", "53", [["53", ["53-01"]]]), 90_000);
-		const events: EventInput[] = [];
-		await announcingObserver(tree, presence, events, true).scan();
-		expect(events).toEqual([]);
-	});
-
-	test("a conflict that clears and returns is announced again, and one the ledger did not store is retried on the next scan", async () => {
-		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
-		const backend = new RecordingPresenceBackend();
-		backend.clockMs = SERVER_NOW;
-		const presence = new DragonflyPresenceStore(backend);
-		await presence.touch(claimed(backend, "alpha", "53", [["53", []]]), 90_000);
-		await presence.touch(claimed(backend, "beta", "53", [["53", []]]), 90_000);
 		const attempts: EventInput[] = [];
-		const refusing = announcingObserver(tree, presence, attempts, false);
-		await refusing.scan();
-		await refusing.scan();
-		expect(attempts).toHaveLength(2);
+		const a = announcingObserver(tree, presence, attempts, true, CHECKOUT_A);
+		const b = announcingObserver(tree, presence, attempts, true, CHECKOUT_B);
+		await a.scan();
+		await b.scan();
 
-		const accepting = announcingObserver(tree, presence, attempts, true);
-		await accepting.scan();
-		await accepting.scan();
-		expect(attempts).toHaveLength(3);
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a\n");
+		await a.scan();
+		backend.clockMs = SERVER_NOW + 1_000;
+		tree.deniedListings.add(`${CHECKOUT_A}/.planning/phases/${PHASE_54}`);
+		await a.scan();
+		backend.clockMs = SERVER_NOW + 2_000;
+		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b\n");
+		await b.scan();
+		expect(attempts).toEqual([]);
+		expect(planningOf(await planningReaderOver(tree, presence).sessions(), planningSessionId(tree, CHECKOUT_A))).toEqual({ state: "unknown", reason: "scan-unlisted" });
 
-		await presence.touch(claimed(backend, "beta", "54", [["54", []]]), 90_000);
-		await accepting.scan();
-		expect(attempts).toHaveLength(3);
-
-		await presence.touch(claimed(backend, "beta", "53", [["53", []]]), 90_000);
-		await accepting.scan();
-		expect(attempts).toHaveLength(4);
+		backend.clockMs = SERVER_NOW + 3_000;
+		tree.deniedListings.delete(`${CHECKOUT_A}/.planning/phases/${PHASE_54}`);
+		await a.scan();
+		expect(attempts).toHaveLength(1);
+		expect(attempts[0]?.payload).toMatchObject({ kind: "planning.conflict", key: { by: "phase", phase: "53" } });
 	});
 
 	test("two failed publishes hold the baseline, and the next scan publishes the change exactly once", async () => {
@@ -409,5 +384,211 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		expect(events).toHaveLength(1);
 		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "unchanged" });
 		expect(events).toHaveLength(1);
+	});
+});
+
+describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => {
+	test("two checkouts whose complete observations change files of one phase produce one open conflict for that phase", async () => {
+		const tree = twoCheckouts();
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		const attempts: EventInput[] = [];
+		const a = announcingObserver(tree, presence, attempts, true, CHECKOUT_A);
+		const b = announcingObserver(tree, presence, attempts, true, CHECKOUT_B);
+		await a.scan();
+		await b.scan();
+
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a\n");
+		await a.scan();
+		expect(attempts).toEqual([]);
+
+		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b\n");
+		await b.scan();
+		await b.scan();
+
+		const sessionIds = [planningSessionId(tree, CHECKOUT_A), planningSessionId(tree, CHECKOUT_B)].sort();
+		expect(attempts).toEqual([
+			expect.objectContaining({
+				surface: "substrate",
+				kind: "warning",
+				payload: expect.objectContaining({ kind: "planning.conflict", key: { by: "phase", phase: "53" }, sessionIds }),
+			}),
+		]);
+		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({
+			state: "ok",
+			conflicts: [{ status: "open", key: { by: "phase", phase: "53" }, sessionIds }],
+		});
+	});
+
+	test("a checkout whose complete observation changed only other phases produces no conflict", async () => {
+		const tree = twoCheckouts();
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		const attempts: EventInput[] = [];
+		const a = announcingObserver(tree, presence, attempts, true, CHECKOUT_A);
+		const b = announcingObserver(tree, presence, attempts, true, CHECKOUT_B);
+		await a.scan();
+		await b.scan();
+
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a\n");
+		await a.scan();
+		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_54, "54-CONTEXT.md"), "# context, b\n");
+		await b.scan();
+
+		expect(attempts).toEqual([]);
+		expect(storedRecord(backend, tree, CHECKOUT_A).touched).toEqual([{ phase: "53", plan: null, observedAtMs: SERVER_NOW }]);
+		expect(storedRecord(backend, tree, CHECKOUT_B).touched).toEqual([{ phase: "54", plan: null, observedAtMs: SERVER_NOW }]);
+		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({ state: "ok", conflicts: [] });
+	});
+
+	test("a touched pair that falls outside the TTL no longer conflicts", async () => {
+		const tree = twoCheckouts();
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		const attempts: EventInput[] = [];
+		const a = announcingObserver(tree, presence, attempts, true, CHECKOUT_A, TTL_60_S);
+		const b = announcingObserver(tree, presence, attempts, true, CHECKOUT_B, TTL_60_S);
+		await a.scan();
+		await b.scan();
+
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a\n");
+		await a.scan();
+		backend.clockMs = SERVER_NOW + 45_000;
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_54, "54-CONTEXT.md"), "# context, a\n");
+		await a.scan();
+		backend.clockMs = SERVER_NOW + 70_000;
+		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b\n");
+		await b.scan();
+
+		expect(attempts).toEqual([]);
+		expect(storedRecord(backend, tree, CHECKOUT_A).touched).toContainEqual({ phase: "53", plan: null, observedAtMs: SERVER_NOW });
+		expect(await planningReaderOver(tree, presence, TTL_60_S).sessions()).toMatchObject({ state: "ok", conflicts: [] });
+	});
+
+	test("an incomplete observation neither adds nor removes touched pairs", async () => {
+		const tree = twoCheckouts();
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		const attempts: EventInput[] = [];
+		const a = announcingObserver(tree, presence, attempts, true, CHECKOUT_A);
+		await a.scan();
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a\n");
+		await a.scan();
+		const touched = storedRecord(backend, tree, CHECKOUT_A).touched;
+		expect(touched).toEqual([{ phase: "53", plan: null, observedAtMs: SERVER_NOW }]);
+
+		backend.clockMs = SERVER_NOW + 10_000;
+		tree.deniedListings.add(`${CHECKOUT_A}/.planning/phases/${PHASE_54}`);
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a again\n");
+		expect(await a.scan()).toMatchObject({ state: "observed", outcome: "incomplete", heartbeat: { state: "written" } });
+
+		expect(storedRecord(backend, tree, CHECKOUT_A)).toMatchObject({ touched, planning: { status: "unknown", reason: "scan-unlisted" } });
+		expect(attempts).toEqual([]);
+	});
+
+	test("a conflict stays open, and nothing is closed or edited, when a side's later complete observation no longer touches the phase", async () => {
+		const tree = twoCheckouts();
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		const attempts: EventInput[] = [];
+		const a = announcingObserver(tree, presence, attempts, true, CHECKOUT_A);
+		const b = announcingObserver(tree, presence, attempts, true, CHECKOUT_B);
+		await a.scan();
+		await b.scan();
+
+		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b\n");
+		await b.scan();
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a\n");
+		await a.scan();
+		expect(attempts).toHaveLength(1);
+		const bRecord = backend.values.get(`${PRESENCE_KEY_PREFIX}${planningSessionId(tree, CHECKOUT_B)}`);
+
+		backend.clockMs = SERVER_NOW + 5_000;
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_54, "54-CONTEXT.md"), "# context, a again\n");
+		await a.scan();
+		expect(attempts).toHaveLength(1);
+		expect(backend.values.get(`${PRESENCE_KEY_PREFIX}${planningSessionId(tree, CHECKOUT_B)}`)).toBe(bRecord);
+		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({
+			state: "ok",
+			conflicts: [{ status: "open", key: { by: "phase", phase: "53" } }],
+		});
+	});
+
+	test("two known sessions on different phases that share a plan id emit one open plan event", async () => {
+		const tree = new FakeTree({
+			...checkoutOf(CHECKOUT_A, "gsd/p53-a", { [phaseDoc(CHECKOUT_A, PHASE_53, "53-PLAN.md")]: "---\nplan: shared-plan\n---\nBODY\n" }),
+			...checkoutOf(CHECKOUT_B, "gsd/p53-b", { [phaseDoc(CHECKOUT_B, PHASE_54, "54-PLAN.md")]: "---\nplan: shared-plan\n---\nBODY\n" }),
+		});
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		const attempts: EventInput[] = [];
+		const a = announcingObserver(tree, presence, attempts, true, CHECKOUT_A);
+		const b = announcingObserver(tree, presence, attempts, true, CHECKOUT_B);
+		await a.scan();
+		await b.scan();
+
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-PLAN.md"), "---\nplan: shared-plan\n---\nBODY, edited\n");
+		await a.scan();
+		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_54, "54-PLAN.md"), "---\nplan: shared-plan\n---\nBODY, edited\n");
+		await b.scan();
+
+		expect(attempts).toEqual([
+			expect.objectContaining({ payload: expect.objectContaining({ kind: "planning.conflict", key: { by: "plan", plan: "shared-plan" }, phases: ["53", "54"] }) }),
+		]);
+	});
+
+	test("a single session emits no event", async () => {
+		const tree = twoCheckouts();
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		const attempts: EventInput[] = [];
+		const a = announcingObserver(tree, presence, attempts, true, CHECKOUT_A);
+		await a.scan();
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a\n");
+		await a.scan();
+		await a.scan();
+
+		expect(attempts).toEqual([]);
+		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({ state: "ok", conflicts: [] });
+	});
+
+	test("a conflict that clears and returns is announced again, and one the ledger did not store is retried on the next scan", async () => {
+		const tree = twoCheckouts();
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		const attempts: EventInput[] = [];
+		const a = announcingObserver(tree, presence, attempts, true, CHECKOUT_A);
+		await a.scan();
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a\n");
+		await a.scan();
+		const refusing = announcingObserver(tree, presence, attempts, false, CHECKOUT_B);
+		await refusing.scan();
+		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b\n");
+		await refusing.scan();
+		await refusing.scan();
+		expect(attempts).toHaveLength(2);
+
+		const accepting = announcingObserver(tree, presence, attempts, true, CHECKOUT_B);
+		await accepting.scan();
+		await accepting.scan();
+		expect(attempts).toHaveLength(3);
+
+		backend.clockMs = SERVER_NOW + 100_000;
+		await accepting.scan();
+		expect(attempts).toHaveLength(3);
+
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a again\n");
+		await a.scan();
+		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b again\n");
+		await accepting.scan();
+		expect(attempts).toHaveLength(4);
 	});
 });

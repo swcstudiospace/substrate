@@ -1,23 +1,23 @@
 /**
  * Planning conflicts (phase 53, SOTA-09): a pure detector over the sessions of a presence snapshot.
  *
- * - Each session carries its planning report in its presence record (`report.ts`). Keys are parsed phase and plan ids,
- *   never a file path.
- * - A session claims only its active phase (`activePhase` on its presence record). Phases that its checkout's index merely
- *   contains are history, not work, and never produce a claim.
- * - Phase key: two or more known, active sessions on one active phase. The event names that phase and the plan ids two or
- *   more of those sessions share.
- * - Plan key: two or more known, active sessions that share a plan id under different active phases. The event names the
- *   plan id and the phases. A plan shared inside one phase is covered by that phase's event and gets no second one.
+ * - Each session carries its planning report in its presence record (`report.ts`), which says whether its view is known.
+ * - Each session also carries its touched pairs (`presence.ts`): the phase and plan of each document its complete observations
+ *   changed. A pair counts only while it is inside the presence TTL. Keys are parsed phase and plan ids, never a file path.
+ * - A session claims exactly its touched pairs. A phase its checkout's index merely contains, and it did not touch, is not a claim.
+ * - Phase key: two or more known, active sessions that touched one phase. The event names that phase and the plan ids two or
+ *   more of those sessions touched under it.
+ * - Plan key: two or more known, active sessions that touched one plan id under different phases. The event names the plan id
+ *   and those phases. A plan shared inside one phase is covered by that phase's event and gets no second one.
  * - Nothing is auto-resolved. Each conflict is `status: "open"`; the detector reports it and stops.
- * - A session's view is unknown when its report is missing, older than `maxScanAgeMs`, or unknown. An unknown view takes no
- *   part in detection, and conflict-sensitive writes for that session are refused until a later complete scan.
+ * - A session's view is unknown when its report is missing, older than the TTL, or unknown. An unknown view takes no part in
+ *   detection, and conflict-sensitive writes for that session are refused until a later complete scan.
  *
- * The detector reads no clock and does no I/O. Callers pass `nowMs` and the presence snapshot they already hold.
+ * The detector reads no clock and does no I/O. Callers pass `nowMs`, the TTL and the presence snapshot they already hold.
  */
 import { redact, redactValue } from "../redact.ts";
 import type { EventInput } from "../types.ts";
-import type { ClassifiedSession, PlanningReport, UnknownViewReason } from "./presence.ts";
+import { touchedWithin, type ClassifiedSession, type PlanningReport, type TouchedPair, type UnknownViewReason } from "./presence.ts";
 
 export type { UnknownViewReason } from "./presence.ts";
 
@@ -29,15 +29,11 @@ export const PLANNING_CONFLICT_EVENT_KIND = "warning";
 /** Each id list in a conflict payload holds at most this many ids. The payload stays inside the ledger's payload limit. */
 export const MAX_CONFLICT_LIST = 32;
 
-export interface PhaseClaim {
-	phase: string;
-	/** Plan ids seen under this phase, sorted. Empty when the session only touches phase-level documents. */
-	plans: string[];
-}
-
 export type SessionView =
-	| { sessionId: string; status: "known"; scannedAtMs: number; claim: PhaseClaim | null }
+	| { sessionId: string; status: "known"; scannedAtMs: number; touched: TouchedPair[] }
 	| { sessionId: string; status: "unknown"; reason: UnknownViewReason };
+
+type KnownView = Extract<SessionView, { status: "known" }>;
 
 export type ConflictKey = { by: "phase"; phase: string } | { by: "plan"; plan: string };
 
@@ -45,7 +41,7 @@ export interface PlanningConflict {
 	kind: typeof PLANNING_CONFLICT;
 	status: "open";
 	key: ConflictKey;
-	/** The active phases of the conflicting sessions, sorted. Exactly one for a phase key. */
+	/** The phases of the conflicting sessions' touched pairs, sorted. Exactly one for a phase key. */
 	phases: string[];
 	/** Plan ids that two or more conflicting sessions share, sorted. A plan key has its own id here. May be empty for a phase key. */
 	plans: string[];
@@ -55,11 +51,14 @@ export interface PlanningConflict {
 }
 
 export interface ConflictInput {
-	/** A presence snapshot, each record carrying its planning report. Only sessions with `status: "active"` take part. */
+	/** A presence snapshot, each record carrying its planning report and touched pairs. Only sessions with `status: "active"` take part. */
 	sessions: readonly ClassifiedSession[];
 	nowMs: number;
-	/** A report older than this is unknown. A report exactly this old is still known. */
-	maxScanAgeMs: number;
+	/**
+	 * The presence TTL, in milliseconds. A report older than this is unknown, and a touched pair counts only while it is at most
+	 * this old. A report or pair exactly this old still counts.
+	 */
+	ttlMs: number;
 }
 
 export interface ConflictReport {
@@ -73,28 +72,28 @@ export type ConflictWriteGate =
 	| { ok: true }
 	| { ok: false; code: "planning-view-unknown"; reason: UnknownViewReason | "no-active-session" };
 
-interface Member {
-	sessionId: string;
-	phase: string;
-	plans: string[];
-}
-
 /** One session's view, judged against the clock. A session with no report is `no-scan`. */
-export function sessionViewOf(session: ClassifiedSession, nowMs: number, maxScanAgeMs: number): SessionView {
+export function sessionViewOf(session: ClassifiedSession, nowMs: number, ttlMs: number): SessionView {
 	const report: PlanningReport | undefined = session.planning;
 	if (report === undefined) return { sessionId: session.sessionId, status: "unknown", reason: "no-scan" };
-	if (nowMs - report.scannedAtMs > maxScanAgeMs) return { sessionId: session.sessionId, status: "unknown", reason: "scan-stale" };
+	if (nowMs - report.scannedAtMs > ttlMs) return { sessionId: session.sessionId, status: "unknown", reason: "scan-stale" };
 	if (report.status === "unknown") return { sessionId: session.sessionId, status: "unknown", reason: report.reason };
-	return { sessionId: session.sessionId, status: "known", scannedAtMs: report.scannedAtMs, claim: claimOf(report, session.activePhase) };
+	return {
+		sessionId: session.sessionId,
+		status: "known",
+		scannedAtMs: report.scannedAtMs,
+		touched: touchedWithin(session.touched ?? [], nowMs, ttlMs),
+	};
 }
 
 export function detectConflicts(input: ConflictInput): ConflictReport {
 	assertInput(input);
 	const active = input.sessions.filter((session) => session.status === "active");
 	const views = active
-		.map((session) => sessionViewOf(session, input.nowMs, input.maxScanAgeMs))
+		.map((session) => sessionViewOf(session, input.nowMs, input.ttlMs))
 		.sort((a, b) => compareText(a.sessionId, b.sessionId));
-	return { views, conflicts: conflictsFrom(views, input.nowMs) };
+	const known = views.filter((view): view is KnownView => view.status === "known");
+	return { views, conflicts: [...phaseConflictsOf(known, input.nowMs), ...planConflictsOf(known, input.nowMs)] };
 }
 
 /** Whether a conflict-sensitive write may proceed for this session, given the views from `detectConflicts`. */
@@ -134,70 +133,73 @@ export function conflictEvent(conflict: PlanningConflict, repo: string | null): 
 	};
 }
 
-/** A session claims its active phase, with the plan ids its report lists under that phase. */
-function claimOf(report: Extract<PlanningReport, { status: "known" }>, activePhase: string | null): PhaseClaim | null {
-	if (activePhase === null) return null;
-	const entry = report.phases.find((candidate) => candidate.phase === activePhase);
-	return { phase: activePhase, plans: entry === undefined ? [] : [...entry.plans].sort(compareText) };
-}
-
-function conflictsFrom(views: readonly SessionView[], detectedAtMs: number): PlanningConflict[] {
-	const members: Member[] = [];
-	for (const view of views) {
-		if (view.status === "known" && view.claim !== null) {
-			members.push({ sessionId: view.sessionId, phase: view.claim.phase, plans: view.claim.plans });
+/** Phase key: for each phase two or more sessions touched, the plan ids two or more of them touched under it. */
+function phaseConflictsOf(known: readonly KnownView[], detectedAtMs: number): PlanningConflict[] {
+	const byPhase = new Map<string, Map<string, Set<string>>>();
+	for (const view of known) {
+		for (const { phase, plan } of view.touched) {
+			const sessions = byPhase.get(phase) ?? new Map<string, Set<string>>();
+			const plans = sessions.get(view.sessionId) ?? new Set<string>();
+			if (plan !== null) plans.add(plan);
+			sessions.set(view.sessionId, plans);
+			byPhase.set(phase, sessions);
 		}
 	}
-
-	const byPhase = new Map<string, Member[]>();
-	for (const member of members) byPhase.set(member.phase, [...(byPhase.get(member.phase) ?? []), member]);
-	const phaseConflicts: PlanningConflict[] = [];
-	for (const [phase, group] of [...byPhase].sort(([a], [b]) => compareText(a, b))) {
-		if (group.length < 2) continue;
+	const conflicts: PlanningConflict[] = [];
+	for (const [phase, sessions] of [...byPhase].sort(([a], [b]) => compareText(a, b))) {
+		if (sessions.size < 2) continue;
 		const holders = new Map<string, number>();
-		for (const member of group) for (const plan of member.plans) holders.set(plan, (holders.get(plan) ?? 0) + 1);
-		phaseConflicts.push({
+		for (const plans of sessions.values()) for (const plan of plans) holders.set(plan, (holders.get(plan) ?? 0) + 1);
+		conflicts.push({
 			kind: PLANNING_CONFLICT,
 			status: "open",
 			key: { by: "phase", phase },
 			phases: [phase],
-			plans: [...holders].filter(([, count]) => count >= 2).map(([plan]) => plan).sort(compareText),
-			sessionIds: group.map((member) => member.sessionId).sort(compareText),
+			plans: [...holders]
+				.filter(([, count]) => count >= 2)
+				.map(([plan]) => plan)
+				.sort(compareText),
+			sessionIds: [...sessions.keys()].sort(compareText),
 			detectedAtMs,
 		});
 	}
+	return conflicts;
+}
 
-	const byPlan = new Map<string, Map<string, string>>();
-	for (const member of members) {
-		for (const plan of member.plans) {
-			const holders = byPlan.get(plan) ?? new Map<string, string>();
-			holders.set(member.sessionId, member.phase);
-			byPlan.set(plan, holders);
+/** Plan key: for each plan id two or more sessions touched under two or more phases, the phases and sessions that touched it. */
+function planConflictsOf(known: readonly KnownView[], detectedAtMs: number): PlanningConflict[] {
+	const byPlan = new Map<string, Map<string, Set<string>>>();
+	for (const view of known) {
+		for (const { phase, plan } of view.touched) {
+			if (plan === null) continue;
+			const sessions = byPlan.get(plan) ?? new Map<string, Set<string>>();
+			const phases = sessions.get(view.sessionId) ?? new Set<string>();
+			phases.add(phase);
+			sessions.set(view.sessionId, phases);
+			byPlan.set(plan, sessions);
 		}
 	}
-	const planConflicts: PlanningConflict[] = [];
-	for (const [plan, holders] of [...byPlan].sort(([a], [b]) => compareText(a, b))) {
-		const phases = new Set(holders.values());
-		if (holders.size < 2 || phases.size < 2) continue;
-		planConflicts.push({
+	const conflicts: PlanningConflict[] = [];
+	for (const [plan, sessions] of [...byPlan].sort(([a], [b]) => compareText(a, b))) {
+		const phases = new Set<string>();
+		for (const touched of sessions.values()) for (const phase of touched) phases.add(phase);
+		if (sessions.size < 2 || phases.size < 2) continue;
+		conflicts.push({
 			kind: PLANNING_CONFLICT,
 			status: "open",
 			key: { by: "plan", plan },
 			phases: [...phases].sort(compareText),
 			plans: [plan],
-			sessionIds: [...holders.keys()].sort(compareText),
+			sessionIds: [...sessions.keys()].sort(compareText),
 			detectedAtMs,
 		});
 	}
-
-	return [...phaseConflicts, ...planConflicts];
+	return conflicts;
 }
 
 function assertInput(input: ConflictInput): void {
 	if (!Number.isFinite(input.nowMs)) throw new RangeError("nowMs must be a finite number");
-	if (!Number.isFinite(input.maxScanAgeMs) || input.maxScanAgeMs <= 0) {
-		throw new RangeError("maxScanAgeMs must be a positive number");
-	}
+	if (!Number.isFinite(input.ttlMs) || input.ttlMs <= 0) throw new RangeError("ttlMs must be a positive number");
 }
 
 function compareText(a: string, b: string): number {

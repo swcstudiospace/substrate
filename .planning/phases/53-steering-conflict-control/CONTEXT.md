@@ -42,6 +42,19 @@ steps.
 - D53-k (2026-10-22). The detector reads the presence snapshot (PLAN W5). Each session's planning report rides in its presence record as the optional `planning` field: `known`, with the phases its index holds and the plan ids under each, or `unknown`, with a reason. A checkout writes its report on each `planning_status` read. `planning_sessions` judges each report against the server clock. A report older than the presence TTL is `scan-stale` (D53-h). A record with no report is `no-scan`.
 - D53-l (2026-10-22). A watcher gap is an incomplete observation: a truncated index, or one with unlisted directories. It makes the report unknown (`scan-truncated` or `scan-unlisted`) and is held by the reader. A complete scan clears it. A failed scan keeps an open gap, since it proves nothing either way. The phase 52 observer already publishes nothing from a partial scan.
 - D53-m (2026-10-22). Checkpoints are durable when `SUBSTRATE_PLANNING_CHECKPOINT_DIR` names an absolute directory. The store is one append-only file, `completions.jsonl`, with one JSON record per line. Each insert rewrites the file through a temporary file in the same directory: write, fsync, rename, then fsync the directory. Opening loads every key and refuses a corrupt file or a repeated key. One process writes a directory at a time; no cross-process lock is taken. Unset means in memory, and `planning_status` reports `durable: false` with `checkpoint-dir-unset`.
+- D53-n (2026-10-22). Sessions carry their touched phases and plans, so conflicts occur in production. Each presence record
+  carries `touched`, a list of `{phase, plan, observedAtMs}`. `plan` is null for a document that names none. The observer
+  derives it from each complete observation: for each document the scan added or changed, the phase and plan are read from
+  that scan's index; for each document it removed, they are read from the baseline the removal left. Each pair is dated by
+  the server clock and kept in the checkout's process-local state, and written on each heartbeat. A complete change to a
+  document the checkout already touched re-dates its pair. A pair stays while `now - observedAtMs <= TTL`, where the TTL is
+  the presence freshness window (`SUBSTRATE_PLANNING_PRESENCE_TTL_S`). A later complete change to other documents keeps it.
+  Detection counts a session's pairs only while they are inside the TTL, so an older pair does not conflict even while its
+  record is still held. An incomplete observation adds nothing and removes nothing (the gap rule). A complete change that
+  would take the list past `MAX_REPORT_ENTRIES` is not cut: the report reads `report-limit` until a complete change fits.
+  A complete change the server clock cannot date records nothing. A change that starts inside a watcher gap is not recorded,
+  because the first complete diff after a gap is withheld, as the event is. The active phase is no longer a claim: D53-g and
+  D53-g.1 read "active phase" as the touched phases this decision defines. `activePhase` on the record is kept and stays null.
 
 ## Acceptance mapping
 
