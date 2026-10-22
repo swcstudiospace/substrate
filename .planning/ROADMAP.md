@@ -82,12 +82,12 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 35: expected_version for skills and docs** - a stale skill or docs write is rejected with the memory contract's error; an absent field keeps today's behavior.
 - [x] **Phase 36: Degraded-mode exactly-once replay** - a write carrying an idempotency key applies once across replays; the dependent client's queue is built or recorded as a decision.
 
-### 🚧 v1.3.x Should-have hardening (Phases 37-44 complete on main)
+### 🚧 v1.3.x Should-have hardening (Phases 37-44 code complete on main; phase 40 open follow-ups)
 
 - [x] **Phase 37: LANEB** - graph inference from worktree path (completed 2026-10-21 via PR #89, merge a1b7152)
 - [x] **Phase 38: MIRROR** - mirror graph edges into Linear relations and outcomes into evidence (completed 2026-10-21 via PR #90, merge 1d4e4aa)
 - [x] **Phase 39: DISPATCH** - signed handoff packet and coord drift scan before launch (completed 2026-10-21 via PR #91, merge acb6767)
-- [x] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (completed 2026-10-21 via PR #92, merge 6b7c4f2; no residual)
+- [x] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (code complete on main via PR #92, merge 6b7c4f2; open follow-ups: retirement restore drill (D-D3) and D-D4 acceptance)
 - [x] **Phase 41: ANCHOR** - anchor evidence and teachables (completed 2026-10-21 via PR #93, merge 3466c50; no residual)
 - [x] **Phase 42: SKILL-CARD** - skills_list audit trail and the F-D4 re-ingest item (completed 2026-10-21 via PR #94, merge 3e9a106)
 - [x] **Phase 43: LANE-A** - sandbox egress allowlist and task re-adoption (completed 2026-10-21 via PR #97, merge f2138e1)
@@ -567,7 +567,7 @@ Plans:
   2. Claude Code's global `hindsight` stdio MCP and Hermes supermemory are retired once the `sub-*` banks answer, with restore routes recorded first.
   3. A weekly `reflect` per bank: mental models replace stale detail (`data-planes.md:27,39`).
 
-**Plans**: 1/1 plans complete (PLAN.md); verification record phases/40-docs-memory/VERIFICATION.md; merged in PR #92 (6b7c4f2); no residual.
+**Plans**: 1/1 plans complete (PLAN.md); verification record `.planning/phases/40-docs-memory/VERIFICATION.md` on origin/main (status partial: criterion 2 not met). Code complete on main (PR #92); open follow-ups: retirement restore drill (D-D3) and D-D4 acceptance.
 
 ### Phase 41: ANCHOR
 
@@ -845,7 +845,7 @@ Plans:
 | 37. LANEB | v1.3.x | 1/1 | Complete (PR #89) | 2026-10-21 |
 | 38. MIRROR | v1.3.x | 1/1 | Complete (PR #90) | 2026-10-21 |
 | 39. DISPATCH | v1.3.x | 1/1 | Complete (PR #91) | 2026-10-21 |
-| 40. DOCS-MEMORY | v1.3.x | 1/1 | Complete (PR #92); no residual | 2026-10-21 |
+| 40. DOCS-MEMORY | v1.3.x | 1/1 | Code complete on main (PR #92); open follow-ups: retirement restore drill (D-D3) and D-D4 acceptance | 2026-10-21 |
 | 41. ANCHOR | v1.3.x | 1/1 | Complete (PR #93); no residual | 2026-10-21 |
 | 42. SKILL-CARD | v1.3.x | 1/1 | Complete (PR #94) | 2026-10-21 |
 | 43. LANE-A | v1.3.x | 1/1 | Complete (PR #97) | 2026-10-21 |

@@ -2,7 +2,7 @@
 gsd_state_version: "1.0"
 milestone: v1.5
 milestone_name: SOTA (phases 45-54)
-status: "v1.5 in progress: phases 45, 46, 47, 49, 50 complete on main; 48 in review (draft PR #102); 51 in progress; 52-54 defined, not started. v1.3.x phases 37-44 complete on main; phases 40 and 41 have no residual"
+status: "v1.5 in progress: phases 45, 46, 47, 49, 50 complete on main; 48 in review (draft PR #102); 51 in progress; 52-54 defined, not started. v1.3.x phases 37-39 and 41-44 complete on main; phase 40 code complete on main with open follow-ups (retirement restore drill D-D3, D-D4 acceptance); phase 41 has no residual"
 stopped_at: "phase 48 in review as draft PR #102, blocked by PR #99 (known-vulnerability audit gate)"
 last_updated: "2026-10-22"
 last_activity: 2026-10-22
@@ -23,7 +23,7 @@ current_phase_name: tailscaledb-proxy-layer
 ## Current
 
 - **v1.3 closed 2026-10-21 with accepted debt.** v1.2 shipped 2026-10-08 (archived in `.planning/milestones/v1.2-*`).
-- **v1.3.x phases 37-44 complete on main**; phases 40 and 41 complete with no residual.
+- **v1.3.x phases 37-39 and 41-44 complete on main; phase 40 code complete on main** (open follow-ups: retirement restore drill (D-D3) and D-D4 acceptance); phase 41 complete with no residual.
 - **v1.5 SOTA phases 45-47 and 49-50 complete on main.**
 - **Phase 48 in review on draft PR #102** (CI audit gate blocked by PR #99).
 - **Phase 51 in progress on branch `gsd/p51-fabric-impl`** (not yet on origin).
@@ -166,7 +166,7 @@ Last activity: 2026-10-22 — roadmap and state reconciled with merged PRs #89-#
 
 - Merged to main 2026-10-21 (UTC; mergedAt and merge SHAs read with `gh pr view`): #89 (37, a1b7152), #90 (38, 1d4e4aa), #91 (39, acb6767), #92 (40, 6b7c4f2), #93 (41, 3466c50), #94 (42, 3e9a106), #95 (44, 92ef7c2), #96 (45, 93acd8a), #97 (43, f2138e1), #98 (46, 4c2c48e), #100 (47, d8accda), #101 (49, 2495a14), #103 (50, bdda262 = origin/main).
 - Open: #102 draft (48, branch gsd/v15-48-proxy, head 4b660f1, docs-only fix); its known-vulnerability audit check is SKIPPED, not passed; #99 (non-draft, chore/known-vuln-accepted-risk) owns that gate.
-- Phases 40 and 41: complete on main via #92 and #93 with no residual; origin/main bdda262 already contains both phases (orchestrator's merge-file analysis).
+- Phase 40: code complete on main via #92; open follow-ups: retirement restore drill (D-D3) and D-D4 acceptance (`.planning/phases/40-docs-memory/VERIFICATION.md` on origin/main, status partial). Phase 41: complete on main via #93 with no residual.
 - Phase 51: no PR; origin holds gsd/v15-51-fabric at 87c2bdc (plan commit only); gsd/p51-fabric-impl is not on origin yet.
 - Phases 52-54 defined in ROADMAP.md (SOTA-08 to SOTA-10), not started; phases 48 and 51-54 have no plans on main.
 - Docs-only change: no gate or test was run for this reconciliation.
