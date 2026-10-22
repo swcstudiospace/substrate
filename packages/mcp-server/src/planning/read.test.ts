@@ -14,7 +14,7 @@ import { PLANNING_MAX_FILES_ENV, PLANNING_ROOT_ENV, loadPlanningSettings } from 
 import { nodePlanningFs } from "./fs.ts";
 import { DragonflyPresenceStore, PRESENCE_KEY_PREFIX, PRESENCE_MAX_SESSIONS, type PresenceBackend } from "./presence-dragonfly.ts";
 import { dragonflyPresenceBackend, type PresenceRedisClient } from "./presence-client.ts";
-import { PLANNING_OBSERVER_SESSION, PlanningReader, repoFromGitConfig } from "./read.ts";
+import { PLANNING_OBSERVER_SESSION, PlanningReader, repoFromGitConfig, type PlanningSessionsView } from "./read.ts";
 import type { SessionRecord } from "./presence.ts";
 
 const BODY = "BODY-SECRET-TEXT";
@@ -660,5 +660,107 @@ describe("planning reports and conflicts on the read path (phase 53, SOTA-09)", 
 		await presence.touch(claimed("beta", "53", [["53", []]]), 90_000);
 		await accepting.sessions();
 		expect(events).toHaveLength(4);
+	});
+});
+
+describe("the watcher gap on the read path (phase 53, SOTA-09)", () => {
+	const SERVER_NOW = 1_000_000;
+	type SessionsView = PlanningSessionsView;
+
+	function claimed(sessionId: string, activePhase: string, phases: Array<[string, string[]]>): SessionRecord {
+		return {
+			sessionId,
+			worktree: `/work/${sessionId}`,
+			branch: `gsd/${sessionId}`,
+			activePhase,
+			lastHeartbeatMs: 0,
+			planning: { status: "known", scannedAtMs: SERVER_NOW, phases: phases.map(([phase, plans]) => ({ phase, plans })) },
+		};
+	}
+
+	/** A reader whose index keeps `maxFiles` documents. Two are seeded, so `"1"` truncates and `"500"` does not. */
+	function gapReader(presence: DragonflyPresenceStore, maxFiles: string) {
+		return new PlanningReader({
+			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: root, [PLANNING_MAX_FILES_ENV]: maxFiles }),
+			fs: nodePlanningFs(),
+			presence,
+			emit: async () => true,
+		});
+	}
+
+	async function seedCleanPhase(): Promise<void> {
+		await write(`${PHASE}/52-PLAN.md`, `---\nplan: 52-01\n---\n${BODY}\n`);
+		await write(`${PHASE}/52-CONTEXT.md`, `${BODY} context\n`);
+		await write(".git/HEAD", "ref: refs/heads/gsd/p52-wiring\n");
+	}
+
+	function planningOf(view: SessionsView, matches: (row: { sessionId: string; worktree: string }) => boolean) {
+		if (view.state !== "ok") throw new Error(`planning_sessions is ${view.state}`);
+		return view.sessions.find(matches)?.planning;
+	}
+
+	test("a truncated scan yields an unknown view for this checkout, in its heartbeat and in planning_sessions", async () => {
+		await seedCleanPhase();
+		const presence = new DragonflyPresenceStore(new PresenceFake());
+		const reader = gapReader(presence, "1");
+		expect(await reader.status()).toMatchObject({ state: "ok", truncated: true });
+		const [stored] = (await presence.listWithin(10)).records;
+		expect(stored?.planning).toEqual({ status: "unknown", scannedAtMs: SERVER_NOW, reason: "scan-truncated" });
+		const view = await reader.sessions();
+		expect(planningOf(view, (row) => row.worktree === root)).toEqual({ state: "unknown", reason: "scan-truncated" });
+	});
+
+	test("a session in a watcher gap takes no part in conflict detection until a complete scan clears it", async () => {
+		const presence = new DragonflyPresenceStore(new PresenceFake());
+		await presence.touch(
+			{ ...claimed("alpha", "52", [["52", []]]), planning: { status: "unknown", scannedAtMs: SERVER_NOW, reason: "scan-truncated" } },
+			90_000,
+		);
+		await presence.touch(claimed("beta", "52", [["52", ["52-01"]]]), 90_000);
+		const events: EventInput[] = [];
+		const reader = new PlanningReader({
+			settings: settingsFor(root),
+			fs: nodePlanningFs(),
+			presence,
+			emit: async (event: EventInput) => {
+				events.push(event);
+				return true;
+			},
+		});
+
+		const gapped = await reader.sessions();
+		expect(gapped).toMatchObject({ state: "ok", conflicts: [] });
+		expect(planningOf(gapped, (row) => row.sessionId === "alpha")).toEqual({ state: "unknown", reason: "scan-truncated" });
+		expect(events).toEqual([]);
+
+		await presence.touch(claimed("alpha", "52", [["52", ["52-01"]]]), 90_000);
+		expect(await reader.sessions()).toMatchObject({ state: "ok", conflicts: [{ key: { by: "phase", phase: "52" } }] });
+		expect(events).toHaveLength(1);
+	});
+
+	test("a later complete full rescan returns the checkout to known", async () => {
+		await seedCleanPhase();
+		const presence = new DragonflyPresenceStore(new PresenceFake());
+		const reader = gapReader(presence, "1");
+		expect(await reader.status()).toMatchObject({ state: "ok", truncated: true });
+
+		await rm(join(root, PHASE, "52-CONTEXT.md"));
+		expect(await reader.status()).toMatchObject({ state: "ok", truncated: false });
+		const [stored] = (await presence.listWithin(10)).records;
+		expect(stored?.planning).toEqual({ status: "known", scannedAtMs: SERVER_NOW, phases: [{ phase: "52", plans: ["52-01"] }] });
+		const view = await reader.sessions();
+		expect(planningOf(view, (row) => row.worktree === root)).toEqual({ state: "known", scannedAtMs: SERVER_NOW });
+	});
+
+	test("a report older than the freshness window is unknown as stale, even though its scan was complete", async () => {
+		await seedCleanPhase();
+		const backend = new PresenceFake();
+		const presence = new DragonflyPresenceStore(backend);
+		const reader = gapReader(presence, "500");
+		expect(await reader.status()).toMatchObject({ state: "ok", truncated: false });
+
+		backend.serverNow += 90_001;
+		const view = await reader.sessions();
+		expect(planningOf(view, (row) => row.worktree === root)).toEqual({ state: "unknown", reason: "scan-stale" });
 	});
 });

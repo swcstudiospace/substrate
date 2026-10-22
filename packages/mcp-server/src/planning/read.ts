@@ -27,7 +27,7 @@ import { buildPlanningIndex, isErrorRecord, type PlanningFileRecord, type Planni
 import { DragonflyPresenceStore, PRESENCE_MAX_SESSIONS } from "./presence-dragonfly.ts";
 import { classifySessions, type PlanningReport, type SessionRecord, type SessionStatus, type UnknownViewReason } from "./presence.ts";
 import { conflictEvent, conflictSignature, detectConflicts, sessionViewOf, type PlanningConflict, type SessionView } from "./conflicts.ts";
-import { reportFromScan } from "./report.ts";
+import { observeScan, type WatcherGap } from "./report.ts";
 import type { PlanningIndexResult } from "./index.ts";
 
 /** The session id the ledger row carries for a change observed by this plane. */
@@ -154,6 +154,8 @@ export class PlanningReader {
 	private report: PlanningReport | null = null;
 	/** Conflicts announced and still open, by signature. A conflict leaves the set once it is no longer detected. Process-local. */
 	private openConflicts = new Set<string>();
+	/** The watcher gap: an incomplete observation that holds until a complete scan clears it. Process-local. */
+	private gap: WatcherGap | null = null;
 
 	constructor(private readonly deps: PlanningReaderDeps) {}
 
@@ -268,12 +270,18 @@ export class PlanningReader {
 		}
 	}
 
-	/** Records this checkout's report from its latest scan. The server clock stamps it; without a clock the last report stands. */
+	/**
+	 * Records this checkout's report from its latest scan, and moves the watcher gap. A truncated or unlisted scan opens the gap,
+	 * and a complete scan clears it. The server clock stamps the report; without a clock the last report and gap stand.
+	 */
 	private async stampReport(built: PlanningIndexResult): Promise<void> {
 		const presence = this.deps.presence;
 		if (presence === null) return;
 		const clock = await readClock(presence);
-		if (clock.ok) this.report = reportFromScan(built, clock.nowMs);
+		if (!clock.ok) return;
+		const observed = observeScan(built, clock.nowMs, this.gap);
+		this.report = observed.report;
+		this.gap = observed.gap;
 	}
 
 	/**

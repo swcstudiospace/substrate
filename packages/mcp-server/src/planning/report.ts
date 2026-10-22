@@ -5,19 +5,42 @@
  *
  * - A plan's identity is the plan id its parsed content declares, so one plan under two filenames is one plan. A document
  *   that declares none keeps its filename-derived id.
- * - A truncated index, a failed scan, or an index with unreadable records is unknown. Its phases are not trusted.
- * - A report that would exceed `MAX_REPORT_ENTRIES`, or holds an identifier outside the presence schema, is unknown as
- *   `report-limit`. It is never cut short, because a cut report would claim absences it cannot prove.
+ * - A watcher gap is an incomplete observation: a truncated index, or one with unlisted directories. The phase 52 observer
+ *   reports such a scan as partial and publishes nothing from it. Here the gap marks the report unknown. Only a complete
+ *   scan clears it. A failed scan proves nothing either way, so it keeps the gap it had.
+ * - An index with unreadable records is unknown, and so is a report that would exceed `MAX_REPORT_ENTRIES` or hold an
+ *   identifier outside the presence schema (`report-limit`). A report is never cut short, because a cut report would
+ *   claim absences it cannot prove.
  */
-import { isErrorRecord, type PlanningFileRecord, type PlanningIndexResult } from "./index.ts";
+import { isErrorRecord, type PlanningFileRecord, type PlanningIndexResult, type PlanningRecord } from "./index.ts";
 import { MAX_REPORT_ENTRIES, type PhaseReport, type PlanningReport, type UnknownViewReason } from "./presence.ts";
 
 const REPORT_ID_MAX = 128;
 
-export function reportFromScan(result: PlanningIndexResult, scannedAtMs: number): PlanningReport {
-	if (!result.ok) return unknownReport(scannedAtMs, "scan-failed");
-	const { records, truncated } = result.index;
-	if (truncated) return unknownReport(scannedAtMs, "scan-truncated");
+/** The reasons an incomplete observation opens a gap. */
+export type WatcherGap = "scan-truncated" | "scan-unlisted";
+
+export interface ObservedScan {
+	report: PlanningReport;
+	/** The gap after this scan: a new one, the one held, or null once a complete scan has cleared it. */
+	gap: WatcherGap | null;
+}
+
+/** The report and the gap after one scan. A gap, whether new or held, makes the report unknown. */
+export function observeScan(result: PlanningIndexResult, scannedAtMs: number, gap: WatcherGap | null): ObservedScan {
+	if (!result.ok) return { report: unknownReport(scannedAtMs, "scan-failed"), gap };
+	const { index } = result;
+	const nextGap: WatcherGap | null = index.truncated ? "scan-truncated" : index.unlisted.length > 0 ? "scan-unlisted" : null;
+	if (nextGap !== null) return { report: unknownReport(scannedAtMs, nextGap), gap: nextGap };
+	return { report: completeReport(index.records, scannedAtMs), gap: null };
+}
+
+export function unknownReport(scannedAtMs: number, reason: UnknownViewReason): PlanningReport {
+	return { status: "unknown", scannedAtMs, reason };
+}
+
+/** The report of a complete index, with no gap open. */
+function completeReport(records: readonly PlanningRecord[], scannedAtMs: number): PlanningReport {
 	if (records.some(isErrorRecord)) return unknownReport(scannedAtMs, "scan-has-errors");
 
 	const plansByPhase = new Map<string, Set<string>>();
@@ -41,10 +64,6 @@ export function reportFromScan(result: PlanningIndexResult, scannedAtMs: number)
 		.sort(([a], [b]) => compareText(a, b))
 		.map(([phase, plans]) => ({ phase, plans: [...plans].sort(compareText) }));
 	return { status: "known", scannedAtMs, phases };
-}
-
-export function unknownReport(scannedAtMs: number, reason: UnknownViewReason): PlanningReport {
-	return { status: "unknown", scannedAtMs, reason };
 }
 
 /**
