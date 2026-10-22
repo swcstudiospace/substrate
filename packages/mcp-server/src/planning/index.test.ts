@@ -343,6 +343,38 @@ describe("bounded fan-out", () => {
 	});
 });
 
+describe("phase probes stop at the cutoff", () => {
+	test("with maxFiles 1, phase children stop being probed once the cutoff is reached", async () => {
+		const files: Record<string, string> = {};
+		for (let n = 0; n < 12; n += 1) files[`${P}/phases/${String(n).padStart(2, "0")}-x/PLAN.md`] = "# p";
+		const tree = new FakeTree(files);
+		const result = await buildPlanningIndex(TREE_ROOT, { fs: tree, limits: { maxFiles: 1, maxBytes: 262_144 } });
+		if (!result.ok) throw new Error(result.code);
+		expect(result.index.records.map((record) => record.path)).toEqual([".planning/phases/00-x/PLAN.md"]);
+		// One batch of PROBE_CONCURRENCY children is resolved; the first batch already fills the cap, so no later child is probed.
+		const childProbes = tree.probed.filter((path) => path.startsWith(`${P}/phases/`));
+		expect(childProbes.length).toBeLessThanOrEqual(PROBE_CONCURRENCY);
+		expect(childProbes.length).toBeLessThan(12);
+	});
+
+	test("the batch that does not fill the cap is followed by the next batch, still in path order", async () => {
+		const files: Record<string, string> = {};
+		for (let n = 0; n < 12; n += 1) files[`${P}/phases/${String(n).padStart(2, "0")}-x/PLAN.md`] = "# p";
+		const tree = new FakeTree(files);
+		const result = await buildPlanningIndex(TREE_ROOT, { fs: tree, limits: { maxFiles: 6, maxBytes: 262_144 } });
+		if (!result.ok) throw new Error(result.code);
+		expect(result.index.records.map((record) => record.path)).toEqual([
+			".planning/phases/00-x/PLAN.md",
+			".planning/phases/01-x/PLAN.md",
+			".planning/phases/02-x/PLAN.md",
+			".planning/phases/03-x/PLAN.md",
+			".planning/phases/04-x/PLAN.md",
+			".planning/phases/05-x/PLAN.md",
+		]);
+		expect(tree.probed.filter((path) => path.startsWith(`${P}/phases/`)).length).toBeLessThan(12);
+	});
+});
+
 describe("readFrontmatter", () => {
 	test("no fence is none, a closed mapping is parsed, an open fence without a mapping is malformed", () => {
 		expect(readFrontmatter("# plain")).toEqual({ state: "none" });
