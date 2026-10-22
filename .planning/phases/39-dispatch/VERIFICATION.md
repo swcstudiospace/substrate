@@ -1,11 +1,13 @@
 ---
 phase: 39-dispatch
 verified: 2026-10-21
-status: passed
+status: human_needed
 score: 2 of 2 success criteria proven in the repository for the design decided in CONTEXT. Signing in production and a live drift run need an operator
 verified_on: gsd/v13x-39-dispatch on origin/main 1d4e4aa. No file under packages or docs changed since 3aea2d0, the commit the full suite covered.
 covered_files: ["packages/dispatcher/src/substrate_dispatcher/handoff.py", "packages/dispatcher/src/substrate_dispatcher/dispatch.py", "packages/dispatcher/src/substrate_dispatcher/__main__.py", "packages/dispatcher/tests/test_handoff.py", "packages/mcp-server/src/handoff.ts", "packages/mcp-server/src/handoff.test.ts"]
 ---
+
+> Status detail, kept verbatim from the original frontmatter: passed. The score line records that signing in production and a live drift run need an operator. Set to human_needed for that reason
 
 # 39-VERIFICATION: DISPATCH
 

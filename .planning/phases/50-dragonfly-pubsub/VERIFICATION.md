@@ -1,11 +1,13 @@
 ---
 phase: 50-dragonfly-pubsub
 verified: 2026-10-21
-status: passed in-repo. A live Dragonfly subscription and a measured wake-up latency are operator-gated and were not run
+status: gaps_found
 score: 1 of 1 acceptance criterion proven in-repo (real-time notifications via Dragonfly, with tests); the goal's invalidation claim is recorded as not implemented
 verified_on: gsd/v15-50-pubsub on its final tree, based on origin/main 2495a14
 covered_files: ["packages/mcp-server/src/event-bus.ts", "packages/mcp-server/src/event-bus.test.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/server.test.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/config.test.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/index.ts", ".env.example", "docs/data-planes.md", "docs/config-reference.md"]
 ---
+
+> Status detail, kept verbatim from the original frontmatter: passed in-repo. A live Dragonfly subscription and a measured wake-up latency are operator-gated and were not run. Set to gaps_found because the goal's invalidation claim is recorded as not implemented
 
 # 50-VERIFICATION: Dragonfly pub/sub for real-time event notifications
 

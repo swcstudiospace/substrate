@@ -1,11 +1,13 @@
 ---
 phase: 37-laneb-graph-attribution
 verified: 2026-10-21T09:07Z
-status: passed
+status: human_needed
 score: 1 of 1 success criteria proven at the collector boundary. Live effect and an end-to-end run on a live server are not proven, and need an operator action
 verified_on: gsd/v13x-37-laneb 2bf4cb7 (code, after the third PR #89 review fix), on origin/main e5891e9. This record is committed after 2bf4cb7.
 covered_files: ["packages/collectors/src/worktree-graph.ts", "packages/collectors/src/worktree-graph.test.ts", "packages/collectors/src/herdr.ts", "packages/collectors/src/herdr.test.ts", "packages/collectors/src/herdr-map.ts", "packages/collectors/src/herdr-state.ts", "packages/collectors/src/herdr-state.test.ts", "packages/collectors/src/muse.ts", "packages/collectors/src/muse-etag.test.ts", "packages/mcp-server/src/brief.ts", "packages/mcp-server/src/server.ts"]
 ---
+
+> Status detail, kept verbatim from the original frontmatter: passed. The score line records that the live effect and an end-to-end live run are not proven and need an operator action. Set to human_needed for that reason
 
 # 37-VERIFICATION: LANEB, graph attribution from the worktree path
 

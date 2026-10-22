@@ -1,12 +1,13 @@
 ---
 phase: 40-docs-memory
 verified: 2026-10-21
-status: partial. Criterion 1 proven in-repo, no live effect yet. Criterion 2 blocked on a restore drill and approval. Criterion 3 not met as written
+status: gaps_found
 score: 1 of 3 criteria met as written; 2 open
 verified_on: gsd/v13x-40-docs-memory, two commits on origin/main acb6767 (PR #91). Full suite and typecheck run on the tree after the doc and comment edits, before the records were committed
 covered_files: ["packages/mcp-server/src/memory-recall.ts", "packages/mcp-server/src/recall-snapshot.ts", "packages/mcp-server/src/brief.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/cache.ts", "packages/mcp-server/src/brief-recall.test.ts", "packages/mcp-server/src/brief-recall-fanout.test.ts", "packages/mcp-server/src/mental-model-refresh.ts", "packages/mcp-server/src/mental-model-refresh.test.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/config.test.ts", "packages/mcp-server/src/planes/hindsight.ts", "packages/mcp-server/src/index.ts", "packages/mcp-server/src/event-sources.ts", "packages/mcp-server/src/flag-registry.ts", "docs/data-planes.md", "docs/memory-governance.md", "docs/config-reference.md", "docs/event-vocabulary.md", "docs/runbooks/memory-mcp-retirement.md"]
 ---
 
+> Status detail, kept verbatim from the original frontmatter: partial. Criterion 1 proven in-repo, no live effect yet. Criterion 2 blocked on a restore drill and approval. Criterion 3 not met as written. The closed-set value is gaps_found because criterion 3 is a gap as written; criterion 2 stays operator-gated.
 # 40-VERIFICATION: DOCS-MEMORY
 
 ## Proven in-repo

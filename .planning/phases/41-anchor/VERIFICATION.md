@@ -1,11 +1,13 @@
 ---
 phase: 41-anchor
 verified: 2026-10-21
-status: passed in-repo. The live devnet proof is not run (operator-gated)
+status: human_needed
 score: 2 of 2 criteria proven in-repo with fake-RPC tests
 verified_on: gsd/v13x-41-anchor at f96b448 (review fixes), on origin/main acb6767. Typecheck and full suite run on that tree
 covered_files: ["packages/evidence/src/explorer.ts", "packages/evidence/src/explorer.test.ts", "packages/evidence/src/report.ts", "packages/evidence/src/index.ts", "packages/evidence/src/html.ts", "packages/evidence/src/html.test.ts", "packages/evidence/src/report.test.ts", "packages/mcp-server/src/observe.ts", "packages/mcp-server/src/observe.test.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/evidence-anchor.test.ts", "packages/cli/src/index.ts", "packages/cli/src/evidence.test.ts", "docs/greptime-ledger.md", "README.md"]
 ---
+
+> Status detail, kept verbatim from the original frontmatter: passed in-repo. The live devnet proof is not run (operator-gated)
 
 # 41-VERIFICATION: ANCHOR
 
