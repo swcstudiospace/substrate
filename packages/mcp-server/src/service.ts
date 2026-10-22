@@ -6015,20 +6015,22 @@ export class Substrate {
 		};
 	}
 
-	/** The Greptime ping, and only after a yes the dialect, append-mode, write-probe and size reads. Never rejects. */
+	/** The Greptime ping, and only after a yes every other Greptime read. Never rejects. */
 	private async greptimeProbe(client: GreptimeClient, timeoutMs: number | undefined): Promise<GreptimeProbe> {
+		// The ping is the gate: until it answers, nothing else is asked of Greptime.
 		const up = (await this.healthBound(timeoutMs, () => (timeoutMs === undefined ? client.ping() : client.ping(timeoutMs)))) === true;
 		if (!up) return ABSENT_GREPTIME;
-		const appendOnly = (await this.healthBound(timeoutMs, () => client.ensureAppendMode())) ?? null;
-		const quotingDialectKnown =
-			(await this.healthBound(timeoutMs, async () => {
+		// The append-mode, dialect, write-probe and size reads are independent of one another, so they run together and each keeps
+		// its own bound: the wait is the slowest single read, not the sum. Main ran them one after another; no read's value depends
+		// on another's, so the verdicts are the same. On the default path each read keeps the client's own timeout (only the size
+		// read has its own bound there, as on main); the write probe keeps the client's own write timeout, so a slow day does not
+		// read as a full disk.
+		const [appendOnly, quotingDialectKnown, probe, ledgerCapacity] = await Promise.all([
+			this.healthBound(timeoutMs, () => client.ensureAppendMode()).then((answer) => answer ?? null),
+			this.healthBound(timeoutMs, async () => {
 				await client.probeDialect();
 				return client.quotingDialectKnown === true;
-			})) === true;
-		// The write probe and the size read are independent, and main runs them together, so they run together here. Each keeps
-		// its own bound, so the wait is the slower of the two rather than their sum. On the default path the write probe keeps the
-		// client's own write timeout (a slow day does not read as a full disk); on the fabric path it is bounded like every probe.
-		const [probe, ledgerCapacity] = await Promise.all([
+			}).then((answer) => answer === true),
 			this.healthBound(timeoutMs, () => client.probeWritable(this.config.ledger.writeProbeS * 1000)),
 			bounded(() => client.capacity(HEALTH_PROBE_MS), HEALTH_PROBE_MS),
 		]);

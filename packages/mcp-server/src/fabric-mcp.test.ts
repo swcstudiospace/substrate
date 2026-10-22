@@ -298,3 +298,47 @@ describe("the Greptime write probe and size read on the fabric path", () => {
 		expect(health.capacity.ledger).toEqual({ marker: "size" });
 	});
 });
+
+/**
+ * A Greptime fake whose append-mode, dialect and write-probe reads each take 800 ms, and whose size read answers at once.
+ * Each read answers its own value, so a test can see which read reported what. Real time on purpose: the health bounds these
+ * reads race read the platform clock, so a stand-in timer would not exercise them.
+ */
+function threeSlowGreptimeReads() {
+	const after800ms = <T>(value: T): Promise<T> =>
+		new Promise((resolve) => {
+			setTimeout(() => resolve(value), 800);
+		});
+	let dialectKnown = false;
+	return {
+		ping: async () => true,
+		ensureAppendMode: () => after800ms(true),
+		probeDialect: async () => {
+			await after800ms(undefined);
+			dialectKnown = true;
+		},
+		get quotingDialectKnown() {
+			return dialectKnown;
+		},
+		probeWritable: () => after800ms({ lastProbeAt: 1, lastProbeOk: true, lastProbeError: null }),
+		capacity: async () => ({ marker: "size" }),
+		anchorCoverage: async () => {
+			throw new Error("no coverage read in this test");
+		},
+	};
+}
+
+describe("the Greptime reads after the ping on the fabric path", () => {
+	test("three 800 ms reads resolve inside the fabric deadline, and each reports its own result", async () => {
+		const { index } = indexProbe();
+		const substrate = substrateWithProbes(index, threeSlowGreptimeReads());
+		const client = await connect(substrate);
+		const body = (await call(client, "fabric_status")).json() as { resources: Array<{ resource: string; state: string }> };
+		expect(body.resources.find((row) => row.resource === "greptime")?.state).toBe("ok");
+		const health = await substrate.health({ greptimeTimeoutMs: HEALTH_PROBE_MS });
+		expect(health.appendOnly).toBe(true);
+		expect(health.quotingDialectKnown).toBe(true);
+		expect(health.ledger.lastProbeOk).toBe(true);
+		expect(health.capacity.ledger).toEqual({ marker: "size" });
+	});
+});
