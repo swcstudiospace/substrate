@@ -14,6 +14,7 @@ import {
 	PLANNING_SCAN_INTERVAL_ENV,
 	PLANNING_ROOT_ENV,
 	loadPlanningSettings,
+	planningConfigWarnings,
 } from "./config.ts";
 
 const DEFAULTS = { presenceTtlS: 90, maxFiles: 500, maxBytes: 262_144, scanIntervalMs: DEFAULT_SCAN_INTERVAL_MS };
@@ -48,6 +49,15 @@ describe("loadPlanningSettings: the plane is off unless a root is set", () => {
 			ok: false,
 			errors: [{ key: PLANNING_ROOT_ENV, reason: "invalid-characters" }],
 		});
+	});
+
+	test("a malformed scan interval is a boot warning that names its key and never its value, and a valid environment has none", () => {
+		const refused = loadPlanningSettings({ [PLANNING_ROOT_ENV]: "/srv/checkout", [PLANNING_SCAN_INTERVAL_ENV]: "abc" });
+		const warnings = planningConfigWarnings(refused);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain(PLANNING_SCAN_INTERVAL_ENV);
+		expect(warnings.join("\n")).not.toContain("abc");
+		expect(planningConfigWarnings(loadPlanningSettings({ [PLANNING_ROOT_ENV]: "/srv/checkout" }))).toEqual([]);
 	});
 });
 
