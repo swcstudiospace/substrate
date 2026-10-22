@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import type { EventHint } from "../event-bus.ts";
 import { EVENT_KINDS } from "../types.ts";
 import { diffPlanningIndex, type PlanningDiff } from "./diff.ts";
-import { MAX_EVENT_PATHS, PLANNING_CHANGED, busPublisher, emitPlanningChange, planningChangeEvent, type PlanningPublisher } from "./events.ts";
+import { MAX_EVENT_PATHS, PLANNING_CHANGED, busPublisher, emitPlanningChange, observePlanningChange, planningChangeEvent, type PlanningPublisher } from "./events.ts";
 import { buildPlanningIndex } from "./index.ts";
 import { FakeTree, TREE_ROOT } from "./tree.fixtures.ts";
 
@@ -178,6 +178,39 @@ describe("the publish guard and unlisted directories", () => {
 		expect(diff.changed).toEqual([".planning/phases/52-x/PLAN.md"]);
 		const publisher = recordingPublisher(true);
 		expect(await emitPlanningChange(publisher, { repo: REPO, sessionId: SESSION, diff })).toBe("published");
+		expect(publisher.events).toHaveLength(1);
+	});
+});
+
+describe("observing across an unreadable interval", () => {
+	const limits = { maxFiles: 500, maxBytes: 262_144 };
+	const dir = `${TREE_ROOT}/.planning/phases/52-x`;
+	const snap = async (fs: FakeTree) => {
+		const built = await buildPlanningIndex(TREE_ROOT, { fs, limits });
+		if (!built.ok) throw new Error("index failed");
+		return { records: built.index.records, truncated: built.index.truncated, unlisted: built.index.unlisted };
+	};
+
+	test("an unlisted baseline recovers: the diff is incomplete, nothing is published, and the baseline advances", async () => {
+		const unreadable = new FakeTree({ [`${dir}/PLAN.md`]: "# plan\n" });
+		unreadable.deniedListings.add(dir);
+		const baseline = await snap(unreadable);
+		const recovered = await snap(new FakeTree({ [`${dir}/PLAN.md`]: "# plan\n", [`${dir}/NEW.md`]: "# new\n" }));
+		const publisher = recordingPublisher(true);
+		const observed = await observePlanningChange({ previous: baseline, next: recovered, repo: REPO, sessionId: SESSION, publisher });
+		expect(observed.outcome).toBe("incomplete");
+		expect(publisher.events).toEqual([]);
+		expect(observed.baseline).toEqual(recovered);
+	});
+
+	test("after recovery, a real change is published exactly once", async () => {
+		const recovered = await snap(new FakeTree({ [`${dir}/PLAN.md`]: "# plan\n", [`${dir}/NEW.md`]: "# new\n" }));
+		const revised = await snap(new FakeTree({ [`${dir}/PLAN.md`]: "# plan, revised\n", [`${dir}/NEW.md`]: "# new\n" }));
+		const publisher = recordingPublisher(true);
+		const first = await observePlanningChange({ previous: recovered, next: revised, repo: REPO, sessionId: SESSION, publisher });
+		expect(first.outcome).toBe("published");
+		const second = await observePlanningChange({ previous: first.baseline, next: revised, repo: REPO, sessionId: SESSION, publisher });
+		expect(second.outcome).toBe("unchanged");
 		expect(publisher.events).toHaveLength(1);
 	});
 });

@@ -12,7 +12,7 @@
 import type { EventBus, EventHint } from "../event-bus.ts";
 import { redact, redactValue } from "../redact.ts";
 import type { EventInput } from "../types.ts";
-import type { PlanningDiff } from "./diff.ts";
+import { diffPlanningIndex, type PlanningDiff, type PlanningSnapshot } from "./diff.ts";
 import { SESSION_ID_RE } from "./presence.ts";
 
 export const PLANNING_CHANGED = "planning.changed";
@@ -102,4 +102,32 @@ export async function emitPlanningChange(publisher: PlanningPublisher, input: Pl
 	const event = planningChangeEvent(input);
 	if (event === null) return "unchanged";
 	return (await publisher.publish(event)) ? "published" : "not-published";
+}
+
+export interface ObservedPlanning {
+	outcome: "baseline" | PlanningEmitOutcome;
+	/** What the next scan is compared with. It is always the scan just taken. */
+	baseline: PlanningSnapshot;
+}
+
+export interface ObservePlanningInput {
+	previous: PlanningSnapshot | null;
+	next: PlanningSnapshot;
+	repo: string;
+	sessionId: string;
+	publisher: PlanningPublisher;
+}
+
+/**
+ * One observation: diff the scan against the previous baseline, publish the change only when the diff is complete, and
+ * make the scan the next baseline. The scan always becomes the baseline, so an unreadable interval cannot stop later
+ * notes: the first scan after it is compared with it, that diff is incomplete and publishes nothing, and it becomes the
+ * baseline. The first scan ever is a baseline and emits nothing.
+ */
+export async function observePlanningChange(input: ObservePlanningInput): Promise<ObservedPlanning> {
+	const { previous, next } = input;
+	if (previous === null) return { outcome: "baseline", baseline: next };
+	const diff = diffPlanningIndex(previous, next);
+	const outcome = await emitPlanningChange(input.publisher, { repo: input.repo, sessionId: input.sessionId, diff });
+	return { outcome, baseline: next };
 }
