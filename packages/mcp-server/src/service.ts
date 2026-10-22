@@ -5933,22 +5933,21 @@ export class Substrate {
 		// `options.greptimeTimeoutMs` bounds the Greptime probes for the fabric (phase 51). Unset, which is how `/healthz`
 		// calls it, each Greptime call is made exactly as on main: no argument, the client's own timeout, and no wait added.
 		const timeoutMs = options.greptimeTimeoutMs;
-		// A half-open Greptime breaker allows one call, and the ping takes it. The jobs read therefore waits for the ping's
-		// verdict: while the breaker is half-open, the jobs row answers from the memo, or as unavailable for this call.
-		const greptimeHalfOpen = this.greptime !== null && this.planes.gate("greptime").breaker?.state() === "half-open";
 		// The probes start at once, so one slow Greptime does not hold the others back.
 		// A store that throws is down. `/healthz` has to answer that; a 500 would hide the outage from the monitor.
 		const probes = this.healthProbes(timeoutMs);
 		const indexStore = this.index;
-		const [greptimeReading, index, hindsightOk, ragflowOk, capacity, ledgerJobs, indexArchive] = await Promise.all([
+		const [greptimeReading, index, hindsightOk, ragflowOk, capacity] = await Promise.all([
 			probes.greptime,
 			probes.index,
 			probes.hindsight,
 			probes.ragflow,
 			indexStore ? this.indexCapacityForHealth(indexStore) : Promise.resolve(null),
-			greptimeHalfOpen ? this.deferredLedgerJobs() : this.ledgerJobs(),
-			this.indexArchiveHealth(),
 		]);
+		// The jobs and archive reads run after the probes, as on main: the Greptime ping has its verdict before the ledger's
+		// coverage read asks the same breaker for a call.
+		const ledgerJobs = await this.ledgerJobs();
+		const indexArchive = await this.indexArchiveHealth();
 		const greptime = greptimeReading.up;
 		const { appendOnly, quotingDialectKnown, probe, ledgerCapacity } = greptimeReading;
 		const cache = this.cache.health();
@@ -6041,16 +6040,6 @@ export class Substrate {
 		const metadataWritable = reading.up && reading.quotingDialectKnown && (reading.appendOnly === true || this.config.allowDeduplicatingLedger);
 		// A probe that has not run yet (or is off) neither proves nor disproves; only a failed one overrides the metadata.
 		return metadataWritable && reading.probe?.lastProbeOk !== false;
-	}
-
-	/**
-	 * The jobs row while the Greptime breaker is half-open: the memoised value when there is one, else unavailable for this
-	 * call. It never starts a Greptime read, so the breaker's one allowed call stays with the ping.
-	 */
-	private deferredLedgerJobs(): LedgerJobs {
-		const memo = this.ledgerJobsMemo;
-		if (memo === null) return { ledger: null, reason: "Greptime breaker is half-open; the ledger jobs read waits for its probe" };
-		return { ledger: memo.value, reason: memo.reason };
 	}
 
 	/** The field behind `sharedHealthProbes`: the probes, when they started, and the Greptime bound they ran with. */

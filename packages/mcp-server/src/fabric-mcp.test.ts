@@ -250,30 +250,16 @@ async function halfOpenGreptime(substrate: Substrate): Promise<void> {
 	if (breaker.state() !== "half-open") throw new Error("the Greptime breaker did not reach half-open");
 }
 
-describe("health jobs under a half-open Greptime breaker", () => {
-	test("with an expired jobs memo, Greptime is pinged once and the memoised jobs value answers", async () => {
+describe("/healthz jobs row under a half-open Greptime breaker", () => {
+	test("the jobs row is unchanged: the ping's verdict comes first, then the jobs read runs, as on main", async () => {
 		const { index } = indexProbe();
 		const { greptime, pingCalls, anchorCalls } = greptimeWithJobs();
 		const substrate = substrateWithFastBreakers(index, greptime);
-		const past = Date.now() - 10 * 60_000;
-		await substrate.ledgerJobs(past);
 		await halfOpenGreptime(substrate);
 		const health = await substrate.health();
 		expect(pingCalls).toHaveLength(1);
 		expect(anchorCalls).toHaveLength(1);
 		expect(health.jobs.ledgerReason).toBeNull();
-		expect(health.jobs.ledger?.computedAt).toBe(new Date(past).toISOString());
-	});
-
-	test("with no jobs memo, Greptime is pinged once, no jobs read starts, and the jobs row reports unavailable for that call", async () => {
-		const { index } = indexProbe();
-		const { greptime, pingCalls, anchorCalls } = greptimeWithJobs();
-		const substrate = substrateWithFastBreakers(index, greptime);
-		await halfOpenGreptime(substrate);
-		const health = await substrate.health();
-		expect(pingCalls).toHaveLength(1);
-		expect(anchorCalls).toHaveLength(0);
-		expect(health.jobs.ledger).toBeNull();
-		expect(health.jobs.ledgerReason).toContain("half-open");
+		expect(health.jobs.ledger?.anchorLagHours).toBe(2);
 	});
 });
