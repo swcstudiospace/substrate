@@ -218,6 +218,26 @@ describe("buildPlanningIndex: bounds", () => {
 		expect(index.records.map((record) => record.path)).toEqual(ALL_PATHS.slice(0, 3));
 	});
 
+	test("collection stops once maxFiles + 1 candidates are held, so later phase directories are never listed", async () => {
+		const tree = new FakeTree({
+			[`${P}/phases/01-a/one.md`]: "# one",
+			[`${P}/phases/01-a/two.md`]: "# two",
+			[`${P}/phases/02-b/three.md`]: "# three",
+			[`${P}/phases/03-c/four.md`]: "# four",
+		});
+		const result = await buildPlanningIndex(TREE_ROOT, { fs: tree, limits: { maxFiles: 2, maxBytes: 262_144 } });
+		if (!result.ok) throw new Error(result.code);
+		expect(result.index.truncated).toBe(true);
+		expect(result.index.records.map((record) => record.path)).toEqual([".planning/phases/01-a/one.md", ".planning/phases/01-a/two.md"]);
+		expect(tree.listed).not.toContain(`${P}/phases/03-c`);
+		expect(tree.reads).not.toContain(`${P}/phases/02-b/three.md`);
+	});
+
+	test("records come out in path order, including where one directory name is a prefix of another", async () => {
+		const { index } = await indexOf({ [`${P}/phases/52-a/PLAN.md`]: "# a", [`${P}/phases/52-a-b/PLAN.md`]: "# ab" });
+		expect(index.records.map((record) => record.path)).toEqual([".planning/phases/52-a-b/PLAN.md", ".planning/phases/52-a/PLAN.md"]);
+	});
+
 	test("a non-positive limit is refused as a programming error", async () => {
 		await expect(build(BASE, {}, { maxFiles: 0, maxBytes: 1 })).rejects.toThrow(RangeError);
 	});
