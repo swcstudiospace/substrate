@@ -9,8 +9,10 @@
  * ingest path (`emit`), which also sends the bus hint. The first read of a process is a baseline and emits nothing.
  * The comparison is process-local, so a restart starts a new baseline.
  *
+ * Each detected change also writes one `planning.transition` record (phase 54) through `metrics`, with the stdout line as its fallback.
  * `planning_sessions` is classified against the server's clock (`presence-dragonfly.ts`). When that clock cannot be
  * read, sessions are listed as `unknown` and the reason is given. They are not guessed as active.
+ * Every sessions answer also carries `view`: the session view's state (`states.ts`, one of six) and its line.
  */
 import { join } from "node:path";
 import type { EventInput } from "../types.ts";
@@ -20,9 +22,14 @@ import { type PlanningConfigError, type PlanningConfigResult, type PlanningLimit
 import { buildPlanningIndex, isErrorRecord, type PlanningFileRecord, type PlanningFs, type PlanningIndexFailure, type PlanningKind, type PlanningRecord } from "./index.ts";
 import { DragonflyPresenceStore, PRESENCE_MAX_SESSIONS } from "./presence-dragonfly.ts";
 import { classifySessions, type SessionStatus } from "./presence.ts";
+import { deriveSessionState, type SessionState, type SessionViewState } from "./states.ts";
+import { emitTransition, stdoutMetricSink, transitionRecord, type MetricSink, type TransitionClock, type TransitionOutcome } from "./telemetry.ts";
 
 /** The session id the ledger row carries for a change observed by this plane. */
 export const PLANNING_OBSERVER_SESSION = "planning-observer";
+
+/** The phase id a planning transition is recorded under: the planning plane's view, which spans every phase document. */
+export const PLANNING_TRANSITION_PHASE = "planning";
 
 export interface PlanningDisabled {
 	state: "disabled";
@@ -83,7 +90,7 @@ export interface PlanningSessionRow {
 	status: SessionStatus | "unknown";
 }
 
-export type PlanningSessionsView =
+export type PlanningSessionsBody =
 	| PlanningDisabled
 	| PlanningMisconfigured
 	| { state: "unavailable"; code: "presence-backend-unset" | "presence-listing-failed"; detail?: string }
@@ -95,6 +102,9 @@ export type PlanningSessionsView =
 			sessions: PlanningSessionRow[];
 	  };
 
+/** Every sessions answer carries the session view's state and its line, whatever the body is. */
+export type PlanningSessionsView = PlanningSessionsBody & { view: SessionViewState };
+
 export interface PlanningReaderDeps {
 	settings: PlanningConfigResult;
 	fs: PlanningFs;
@@ -102,6 +112,12 @@ export interface PlanningReaderDeps {
 	presence: DragonflyPresenceStore | null;
 	/** The ledger ingest (`Substrate.emit`). Resolves true when the event was stored. */
 	emit: (event: EventInput) => Promise<boolean>;
+	/** The primary sink for `planning.transition` records: the metrics writer when the ledger is configured, else stdout. */
+	metrics: MetricSink;
+	/** Written once when `metrics` does not deliver. Default: one JSON line on stdout. */
+	fallback?: MetricSink;
+	/** The record's clock. Default: the host clock, which stamps a record and classifies nothing. */
+	clock?: TransitionClock;
 }
 
 type Resolved = { ready: true; root: string; limits: PlanningLimits } | { ready: false; view: PlanningDisabled | PlanningMisconfigured };
@@ -119,7 +135,7 @@ function resolve(result: PlanningConfigResult): Resolved {
 
 export class PlanningReader {
 	/** The index the previous `status` read saw, and the root it was read from. Process-local. */
-	private previous: { root: string; snapshot: PlanningSnapshot } | null = null;
+	private previous: { root: string; snapshot: PlanningSnapshot; state: SessionState } | null = null;
 
 	constructor(private readonly deps: PlanningReaderDeps) {}
 
@@ -130,12 +146,13 @@ export class PlanningReader {
 		const built = await buildPlanningIndex(root, { fs: this.deps.fs, limits: { maxFiles: limits.maxFiles, maxBytes: limits.maxBytes } });
 		if (!built.ok) return { state: "unavailable", code: built.code };
 		const { records, truncated } = built.index;
-		const changes = await this.observe(root, { records, truncated });
+		const counts = countOf(records);
+		const changes = await this.observe(root, { records, truncated }, indexState({ documents: counts.documents, errors: counts.errors, truncated }));
 		return {
 			state: "ok",
 			limits,
 			truncated,
-			counts: countOf(records),
+			counts,
 			documents: records.filter(isFileRecord).map(hashRow),
 			errors: records.filter(isErrorRecord).map((record) => ({
 				path: record.path,
@@ -149,7 +166,13 @@ export class PlanningReader {
 		};
 	}
 
+	/** The sessions body, with the session view's state beside it: every answer carries one state from the closed set. */
 	async sessions(): Promise<PlanningSessionsView> {
+		const body = await this.sessionsBody();
+		return { ...body, view: sessionViewOf(body) };
+	}
+
+	private async sessionsBody(): Promise<PlanningSessionsBody> {
 		const resolved = resolve(this.deps.settings);
 		if (!resolved.ready) return resolved.view;
 		const presence = this.deps.presence;
@@ -190,31 +213,80 @@ export class PlanningReader {
 	}
 
 	/**
-	 * Compares this index with the last one read here. A complete diff writes one `planning.changed` note when it differs.
-	 * A partial diff (either side truncated) reports what it can vouch for and writes nothing: removals are never inferred
-	 * from a truncated side, so `removed` stays null rather than an empty list.
+	 * Compares this index with the last one read here, and records the state this read is in. A complete diff writes one
+	 * `planning.changed` note when it differs. A partial diff (either side truncated) reports what it can vouch for and writes
+	 * nothing: removals are never inferred from a truncated side, so `removed` stays null rather than an empty list.
+	 *
+	 * A detected change also writes one `planning.transition` record, from the state of the previous read to this one. Nothing is
+	 * written when nothing is detected.
 	 */
-	private async observe(root: string, snapshot: PlanningSnapshot): Promise<PlanningChangeNote> {
+	private async observe(root: string, snapshot: PlanningSnapshot, state: SessionState): Promise<PlanningChangeNote> {
 		const previous = this.previous;
-		this.previous = { root, snapshot };
+		this.previous = { root, snapshot, state };
 		if (previous === null || previous.root !== root) return { state: "baseline" };
-		const diff = diffPlanningIndex(previous.snapshot, snapshot);
+		const { note, outcome } = await this.compare(root, previous.snapshot, snapshot);
+		if (outcome !== null) await this.recordTransition(previous.state, state, outcome);
+		return note;
+	}
+
+	/** The change note for two indexes, and the transition outcome when a change was detected: null when none was, or none can be vouched for. */
+	private async compare(root: string, before: PlanningSnapshot, after: PlanningSnapshot): Promise<{ note: PlanningChangeNote; outcome: TransitionOutcome | null }> {
+		const diff = diffPlanningIndex(before, after);
 		const removed = diff.removed;
 		if (removed === null) {
-			return {
-				state: "partial",
-				added: previous.snapshot.truncated ? null : diff.added.length,
-				removed: null,
-				changed: diff.changed.length,
-				ledger: "not-written",
-			};
+			const added = before.truncated ? null : diff.added.length;
+			const changed = diff.changed.length;
+			const vouched = (added ?? 0) + changed > 0;
+			return { note: { state: "partial", added, removed: null, changed, ledger: "not-written" }, outcome: vouched ? "refused" : null };
 		}
 		const counts = { added: diff.added.length, removed: removed.length, changed: diff.changed.length };
-		if (counts.added + counts.removed + counts.changed === 0) return { state: "unchanged" };
+		if (counts.added + counts.removed + counts.changed === 0) return { note: { state: "unchanged" }, outcome: null };
 		const repo = await repoOf(this.deps.fs, root);
-		if (repo === null) return { state: "changed", ...counts, ledger: "repo-unknown" };
-		const outcome = await emitPlanningChange({ publish: this.deps.emit }, { repo, sessionId: PLANNING_OBSERVER_SESSION, diff: { ...diff, removed } });
-		return { state: "changed", ...counts, ledger: outcome === "published" ? "emitted" : "not-stored" };
+		if (repo === null) return { note: { state: "changed", ...counts, ledger: "repo-unknown" }, outcome: "refused" };
+		const stored = await emitPlanningChange({ publish: this.deps.emit }, { repo, sessionId: PLANNING_OBSERVER_SESSION, diff: { ...diff, removed } });
+		const ledger = stored === "published" ? "emitted" : "not-stored";
+		return { note: { state: "changed", ...counts, ledger }, outcome: ledger === "emitted" ? "applied" : "refused" };
+	}
+
+	/** One `planning.transition` record. The primary sink gets it once; the stdout fallback is written only when the primary does not deliver. */
+	private async recordTransition(from: SessionState, to: SessionState, outcome: TransitionOutcome): Promise<void> {
+		const record = transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from, to, outcome }, this.deps.clock ?? hostClock);
+		const delivered = await emitTransition(record, this.deps.metrics, this.deps.fallback ?? stdoutMetricSink());
+		if (delivered.status === "failed") {
+			process.stderr.write(`[substrate] planning transition not delivered: ${delivered.primary.sink} ${delivered.primary.reason}, ${delivered.fallback.sink} ${delivered.fallback.reason}\n`);
+		}
+	}
+}
+
+/** The host clock. It stamps a transition record and classifies nothing. */
+const hostClock: TransitionClock = () => new Date();
+
+/**
+ * The state of a planning index for its transition record: DEGRADED when the view is partial (truncated, or a document could
+ * not be read), EMPTY with no document, SUCCESS otherwise. An unavailable read is ERROR, but it records no state.
+ */
+function indexState(input: { documents: number; errors: number; truncated: boolean }): SessionState {
+	if (input.truncated || input.errors > 0) return "DEGRADED";
+	return input.documents === 0 ? "EMPTY" : "SUCCESS";
+}
+
+/** The session view's state and line, from what the body knows. Each non-ok body names what is off, or the failure it had. */
+function sessionViewOf(body: PlanningSessionsBody): SessionViewState {
+	switch (body.state) {
+		case "disabled":
+			return deriveSessionState({ loaded: true, sessions: [], disabledCapabilities: ["planning"] });
+		case "misconfigured":
+			return deriveSessionState({ loaded: true, sessions: [], disabledCapabilities: [], error: `invalid planning settings: ${body.errors.map((error) => error.key).join(", ")}` });
+		case "unavailable":
+			if (body.code === "presence-backend-unset") return deriveSessionState({ loaded: true, sessions: [], disabledCapabilities: ["presence"] });
+			return deriveSessionState({ loaded: true, sessions: [], disabledCapabilities: [], error: body.code });
+		case "ok": {
+			const disabledCapabilities = [
+				...(body.clock.state === "unavailable" ? ["server clock"] : []),
+				...(body.truncated ? ["sessions beyond the listing bound"] : []),
+			];
+			return deriveSessionState({ loaded: true, sessions: body.sessions.map((row) => row.status), disabledCapabilities });
+		}
 	}
 }
 

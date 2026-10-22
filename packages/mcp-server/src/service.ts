@@ -141,6 +141,7 @@ import { nodePlanningFs } from "./planning/fs.ts";
 import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
 import { DragonflyPresenceStore } from "./planning/presence-dragonfly.ts";
 import { PlanningReader, type PlanningReaderDeps } from "./planning/read.ts";
+import { greptimeMetricSink, stdoutMetricSink } from "./planning/telemetry.ts";
 import type { FabricSources } from "./fabric/types.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
@@ -1438,11 +1439,20 @@ export class Substrate {
 		this.eventBus = stores?.eventBus !== undefined ? stores.eventBus() : productionEventBus(config);
 		// Phase 52 (SOTA-08): the planning reads. Presence rides the cache endpoint; with none, the sessions read says so.
 		const planningDeps = stores?.planning ?? {};
+		// Phase 54 (SOTA-10): a planning transition goes to the metrics writer when the ledger is configured, else to stdout.
+		const transitionWriter = this.greptime;
 		this.planning = new PlanningReader({
 			settings: config.planning,
 			fs: planningDeps.fs ?? nodePlanningFs(),
 			presence: planningDeps.presence !== undefined ? planningDeps.presence : productionPresence(config),
 			emit: planningDeps.emit ?? (async (event: EventInput) => (await this.emit(event)).stored),
+			metrics:
+				planningDeps.metrics ??
+				(transitionWriter === null
+					? stdoutMetricSink()
+					: greptimeMetricSink((rows) => transitionWriter.recordMetricSamples(rows, config.metricsHistory.ttl))),
+			fallback: planningDeps.fallback,
+			clock: planningDeps.clock,
 		});
 		// uplift-2 R1
 		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays, graphRead: config.requestPath.briefGraphRead };

@@ -13,8 +13,10 @@ import type { EventInput } from "../types.ts";
 import { PLANNING_MAX_FILES_ENV, PLANNING_ROOT_ENV, loadPlanningSettings } from "./config.ts";
 import { nodePlanningFs } from "./fs.ts";
 import { DragonflyPresenceStore, PRESENCE_KEY_PREFIX, PRESENCE_MAX_SESSIONS, type PresenceBackend } from "./presence-dragonfly.ts";
-import { PLANNING_OBSERVER_SESSION, PlanningReader, repoFromGitConfig } from "./read.ts";
+import { PLANNING_OBSERVER_SESSION, PLANNING_TRANSITION_PHASE, PlanningReader, type PlanningSessionsView, repoFromGitConfig } from "./read.ts";
 import type { SessionRecord } from "./presence.ts";
+import { SESSION_STATES } from "./states.ts";
+import { stdoutMetricSink, type MetricSink, type SinkResult, type TransitionRecord } from "./telemetry.ts";
 
 const BODY = "BODY-SECRET-TEXT";
 const FRONTMATTER_SECRET = "FM-SECRET-VALUE";
@@ -68,13 +70,20 @@ function emitRecorder(result = true) {
 
 function reader(path: string, options: { presence?: DragonflyPresenceStore | null; emit?: (event: EventInput) => Promise<boolean> } = {}) {
 	const recorder = emitRecorder();
+	const metrics = recordingSink("greptime");
+	const fallback = recordingSink("stdout");
 	return {
 		events: recorder.events,
+		transitions: metrics.records,
+		fallbacks: fallback.records,
 		reader: new PlanningReader({
 			settings: settingsFor(path),
 			fs: nodePlanningFs(),
 			presence: options.presence === undefined ? null : options.presence,
 			emit: options.emit ?? recorder.emit,
+			metrics: metrics.sink,
+			fallback: fallback.sink,
+			clock: CLOCK,
 		}),
 	};
 }
@@ -98,7 +107,7 @@ describe("planning_status", () => {
 	});
 
 	test("an absent root answers disabled, never an error", async () => {
-		const view = await new PlanningReader({ settings: loadPlanningSettings({}), fs: nodePlanningFs(), presence: null, emit: async () => true }).status();
+		const view = await new PlanningReader({ settings: loadPlanningSettings({}), fs: nodePlanningFs(), presence: null, emit: async () => true, ...quietSinks() }).status();
 		expect(view).toEqual({ state: "disabled", reason: "root-unset" });
 	});
 
@@ -108,6 +117,7 @@ describe("planning_status", () => {
 			fs: nodePlanningFs(),
 			presence: null,
 			emit: async () => true,
+			...quietSinks(),
 		}).status();
 		expect(view).toEqual({ state: "misconfigured", errors: [{ key: PLANNING_ROOT_ENV, reason: "not-absolute" }] });
 	});
@@ -172,6 +182,7 @@ describe("planning_status on a truncated index", () => {
 			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: root, [PLANNING_MAX_FILES_ENV]: "2" }),
 			fs: nodePlanningFs(),
 			presence: null,
+			...quietSinks(),
 			emit: async (event) => {
 				events.push(event);
 				return true;
@@ -256,7 +267,7 @@ function session(sessionId: string): SessionRecord {
 }
 
 function sessionsReader(presence: DragonflyPresenceStore | null, path = root) {
-	return new PlanningReader({ settings: settingsFor(path), fs: nodePlanningFs(), presence, emit: async () => true });
+	return new PlanningReader({ settings: settingsFor(path), fs: nodePlanningFs(), presence, emit: async () => true, ...quietSinks() });
 }
 
 describe("planning_sessions", () => {
@@ -268,6 +279,7 @@ describe("planning_sessions", () => {
 		await store.touch(session("fresh"), 90_000);
 		const view = await sessionsReader(store).sessions();
 		expect(view).toMatchObject({ state: "ok", presenceTtlS: 90, clock: { state: "server" }, truncated: false });
+		expect(view).toMatchObject({ view: { state: "STALE" } });
 		if (view.state !== "ok") return;
 		expect(view.sessions.map((row) => [row.sessionId, row.status, row.ageMs])).toEqual([
 			["drifted", "stale", 120_000],
@@ -282,6 +294,7 @@ describe("planning_sessions", () => {
 		backend.clockFails = true;
 		const view = await sessionsReader(store).sessions();
 		expect(view.state === "ok" && view.clock.state).toBe("unavailable");
+		expect(view).toMatchObject({ view: { state: "DEGRADED" } });
 		if (view.state !== "ok") return;
 		expect(view.clock.state === "unavailable" && view.clock.detail).toBe("TIME refused");
 		expect(view.sessions).toEqual([expect.objectContaining({ sessionId: "alpha", status: "unknown", ageMs: null })]);
@@ -306,11 +319,125 @@ describe("planning_sessions", () => {
 	});
 
 	test("no Dragonfly endpoint answers unavailable with presence-backend-unset", async () => {
-		expect(await sessionsReader(null).sessions()).toEqual({ state: "unavailable", code: "presence-backend-unset" });
+		expect(await sessionsReader(null).sessions()).toMatchObject({ state: "unavailable", code: "presence-backend-unset", view: { state: "DEGRADED" } });
 	});
 
 	test("an absent root answers disabled, never an error", async () => {
-		const view = await new PlanningReader({ settings: loadPlanningSettings({}), fs: nodePlanningFs(), presence: null, emit: async () => true }).sessions();
-		expect(view).toEqual({ state: "disabled", reason: "root-unset" });
+		const view = await new PlanningReader({ settings: loadPlanningSettings({}), fs: nodePlanningFs(), presence: null, emit: async () => true, ...quietSinks() }).sessions();
+		expect(view).toMatchObject({ state: "disabled", reason: "root-unset", view: { state: "DEGRADED" } });
+		expectNonBlankState(view);
 	});
 });
+
+describe("planning.transition", () => {
+	const ORIGIN = '[remote "origin"]\n\turl = git@github.com:swcstudiospace/agent-substrate.git\n';
+
+	test("a detected change writes one transition record, and an unchanged read writes none", async () => {
+		await seedPhase();
+		await write(".git/config", ORIGIN);
+		const harness = reader(root);
+		await harness.reader.status();
+		await harness.reader.status();
+		expect(harness.transitions).toEqual([]);
+
+		await write(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		await harness.reader.status();
+		expect(harness.transitions).toEqual([
+			{ phaseId: PLANNING_TRANSITION_PHASE, from: "DEGRADED", to: "DEGRADED", outcome: "applied", ts: "2026-10-22T12:00:00.000Z" },
+		]);
+		expect(harness.fallbacks).toEqual([]);
+	});
+
+	test("a change that clears the view's degradation records the move from DEGRADED to SUCCESS", async () => {
+		await seedPhase();
+		await write(".git/config", ORIGIN);
+		const harness = reader(root);
+		await harness.reader.status();
+		await rm(join(root, PHASE, "BAD.md"));
+		const view = await harness.reader.status();
+		expect(view.state === "ok" && view.counts.errors).toBe(0);
+		expect(harness.transitions).toEqual([expect.objectContaining({ from: "DEGRADED", to: "SUCCESS", outcome: "applied" })]);
+	});
+
+	test("a change the ledger does not store is recorded as refused", async () => {
+		await seedPhase();
+		await write(".git/config", ORIGIN);
+		const harness = reader(root, { emit: async () => false });
+		await harness.reader.status();
+		await write(`${PHASE}/52-PLAN.md`, "changed\n");
+		await harness.reader.status();
+		expect(harness.transitions).toEqual([expect.objectContaining({ outcome: "refused" })]);
+	});
+
+	test("a failing primary sink falls back once, to stdout, and the primary is called once", async () => {
+		await seedPhase();
+		await write(".git/config", ORIGIN);
+		const primary = recordingSink("greptime", { ok: false, reason: "refused", detail: "rows dropped: invalid=1" });
+		const lines: string[] = [];
+		const planning = new PlanningReader({
+			settings: settingsFor(root),
+			fs: nodePlanningFs(),
+			presence: null,
+			emit: async () => true,
+			metrics: primary.sink,
+			fallback: stdoutMetricSink((line) => lines.push(line)),
+			clock: CLOCK,
+		});
+		await planning.status();
+		await write(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		await planning.status();
+		expect(primary.records).toHaveLength(1);
+		expect(lines).toHaveLength(1);
+		expect(JSON.parse(lines[0]!)).toEqual({ metric: "planning.transition", phaseId: "planning", from: "DEGRADED", to: "DEGRADED", outcome: "applied", ts: "2026-10-22T12:00:00.000Z" });
+	});
+});
+
+describe("planning_sessions state", () => {
+	test("an empty root has the EMPTY state", async () => {
+		const view = await sessionsReader(new DragonflyPresenceStore(new PresenceFake())).sessions();
+		expect(view).toMatchObject({ state: "ok", sessions: [], view: { state: "EMPTY" } });
+		expectNonBlankState(view);
+	});
+
+	test("a root with a stale session has the STALE state", async () => {
+		const backend = new PresenceFake();
+		const store = new DragonflyPresenceStore(backend);
+		await store.touch(session("drifted"), 90_000);
+		backend.serverNow += 120_000;
+		const view = await sessionsReader(store).sessions();
+		expect(view).toMatchObject({ state: "ok", view: { state: "STALE" } });
+		expectNonBlankState(view);
+	});
+
+	test("a disabled root has the DEGRADED state, not a blank one", async () => {
+		const view = await new PlanningReader({ settings: loadPlanningSettings({}), fs: nodePlanningFs(), presence: null, ...quietSinks() }).sessions();
+		expect(view).toMatchObject({ state: "disabled", view: { state: "DEGRADED" } });
+		expectNonBlankState(view);
+	});
+});
+
+const CLOCK = (): Date => new Date("2026-10-22T12:00:00.000Z");
+
+/** A sink that keeps each record it is given and answers `result`. */
+function recordingSink(name: string, result: SinkResult = { ok: true }) {
+	const records: TransitionRecord[] = [];
+	const sink: MetricSink = {
+		name,
+		emit: async (record) => {
+			records.push(record);
+			return result;
+		},
+	};
+	return { sink, records };
+}
+
+/** Sinks for the reads that do not look at a transition. Nothing reaches stdout. */
+function quietSinks() {
+	return { metrics: recordingSink("greptime").sink, fallback: recordingSink("stdout").sink, clock: CLOCK };
+}
+
+/** Every session view names one of the six states, with a line that is never blank. */
+function expectNonBlankState(view: PlanningSessionsView): void {
+	expect(SESSION_STATES).toContain(view.view.state);
+	expect(view.view.text.trim()).not.toBe("");
+}
