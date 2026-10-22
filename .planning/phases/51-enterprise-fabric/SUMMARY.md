@@ -1,7 +1,7 @@
 ---
 phase: 51-enterprise-fabric
 requirements: [SOTA-07]
-status: implemented on gsd/p51-fabric-impl; verification passed at b0feacc (see VERIFICATION.md)
+status: implemented on gsd/p51-fabric-impl; verification passed at 91d74c7 (delta re-verification, see VERIFICATION.md)
 ---
 
 # 51-SUMMARY: Enterprise unified resource fabric
@@ -12,6 +12,7 @@ Verification ran twice on branch `gsd/p51-fabric-impl`, read-only, with no tests
 
 - First pass at head `645c2fe`: status `gaps_found`. Criterion 1 failed on its read-only sub-check (the fabric read issued a Greptime write probe). Criterion 2 passed. The goal-level dashboard check failed.
 - Re-verification at head `b0feacc`: status `passed`. Both criteria pass with file:line evidence. The goal-level dashboard check passes, with a caveat on the extended-series panels (VERIFICATION.md, Residual risks).
+- Delta re-verification at head `91d74c7`, after the Greptile review fixes `b5123ad` and `91d74c7`: status `passed`. Criteria 1 and 2 and the goal pass. Recorded in the "Review-fix round" section below.
 - The orchestrator reports `tsc` clean and 396 pass, 0 fail across the fabric, dashboards, metrics and observability tests. Those numbers are not re-run here.
 
 ## Phase commits (`git log --oneline 96d23ef..HEAD`)
@@ -65,3 +66,18 @@ Resolved since the first pass: docs (PLAN required a section in `docs/observabil
 ## Dependencies added
 
 None. `git diff 96d23ef..HEAD -- '*package.json' bun.lock bun.lockb` is empty.
+
+## Review-fix round (delta at 91d74c7)
+
+Two commits from the Greptile review, after `9f8a1d5`:
+
+```
+91d74c7 fix(healthz): the size read starts when the ping answers, not after the write probe (phase 51, SOTA-07)
+b5123ad fix(fabric): a healthy Greptime is not unavailable with the write probe off (phase 51, SOTA-07)
+```
+
+- `b5123ad`: `writeUnread` is gated on `writeProbeS > 0` (`service.ts:6126`). With the write probe off, a healthy Greptime reads ok, and the fabric still issues no write. Test: `fabric-mcp.test.ts:461`.
+- `91d74c7`: the size read is chained to the ping only (`service.ts:6013-6014`, `greptimePing` at `service.ts:6031`), so a stalled write probe does not hold it. The ping is one shared gate; the write-probe reads run from `greptimeReads` (`service.ts:6036`). Test: `fabric-mcp.test.ts:483`.
+- Goal and S6 are unchanged: six `Fabric:` panels in the JSON, six `FABRIC_SERIES` entries (`scripts/dashboards.ts:132-139`), and the boot gauge call at `observe.ts:300` from `index.ts:63`.
+
+Deviations remaining from PLAN.md are the ones listed above (tool name, six-resource composition, state and compliance enums, suggestion shape, test layout, `service.ts` scope, D51-b read probes, sequencing). The Greptime row caveat in Open items is now limited to `SUBSTRATE_LEDGER_WRITE_PROBE_S > 0`.
