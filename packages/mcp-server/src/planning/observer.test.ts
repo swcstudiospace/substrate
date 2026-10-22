@@ -498,6 +498,44 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "published" });
 		expect(storedRecord(backend, tree, TREE_ROOT).touched).toEqual([{ phase: "52", plan: null, observedAtMs: SERVER_NOW }]);
 	});
+
+	test("a timer tick that finds a scan still running starts no second scan (greptile slow-reads thread)", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const { promise: blocked, resolve: release } = Promise.withResolvers<void>();
+		let tick: (() => void) | undefined;
+		const observer = new PlanningObserver({
+			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+			fs: tree,
+			presence: null,
+			emit: async () => {
+				await blocked;
+				return true;
+			},
+			timers: {
+				setInterval: (run) => {
+					tick = run;
+					return "timer";
+				},
+				clearInterval: () => undefined,
+			},
+		});
+		expect(observer.start()).toBe(true);
+		await observer.scan();
+
+		const scans: Promise<unknown>[] = [];
+		const scanNow = observer.scan.bind(observer);
+		observer.scan = () => {
+			const run = scanNow();
+			scans.push(run);
+			return run;
+		};
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited\n");
+		tick?.();
+		tick?.();
+		release();
+		await Promise.all(scans);
+		expect(scans).toHaveLength(1);
+	});
 });
 
 describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => {

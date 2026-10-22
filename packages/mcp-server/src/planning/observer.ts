@@ -115,6 +115,8 @@ export class PlanningObserver {
 	private timer: PlanningTimerHandle | undefined;
 	/** Scans run one at a time, in arrival order, so two scans never publish the same change. */
 	private queue: Promise<unknown> = Promise.resolve();
+	/** Scans queued or running. A timer tick that finds one starts none. Process-local. */
+	private queued = 0;
 
 	private readonly timers: PlanningTimers;
 
@@ -127,7 +129,7 @@ export class PlanningObserver {
 		if (this.timer !== undefined) return true;
 		const resolved = resolveSettings(this.deps.settings);
 		if (!resolved.ready) return false;
-		this.timer = this.timers.setInterval(() => void this.scan(), resolved.limits.scanIntervalMs);
+		this.timer = this.timers.setInterval(() => this.tick(), resolved.limits.scanIntervalMs);
 		return true;
 	}
 
@@ -137,9 +139,21 @@ export class PlanningObserver {
 		this.timer = undefined;
 	}
 
+	/**
+	 * A timer tick. A tick that finds a scan still queued or running starts none: a slow listing then delays the next scan
+	 * instead of piling scans up behind it.
+	 */
+	private tick(): void {
+		if (this.queued > 0) return;
+		void this.scan();
+	}
+
 	/** One scan, queued behind any scan in flight. Never rejects: a failure is a `failed` result. */
 	scan(): Promise<ObserverScan> {
-		const run = this.queue.then(() => this.scanOnce().catch(failedScan));
+		this.queued += 1;
+		const run = this.queue.then(() => this.scanOnce().catch(failedScan)).finally(() => {
+			this.queued -= 1;
+		});
 		this.queue = run;
 		return run;
 	}
