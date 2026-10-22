@@ -1,11 +1,13 @@
 ---
 phase: 48-tailscale-proxy
 verified: 2026-10-21
-status: passed in-repo. The forwarders and the live cutover are operator-gated and were not run
+status: human_needed
 score: 2 of 2 acceptance criteria proven in-repo (all DB endpoints classified and enforceable; boot audit events for access)
 verified_on: gsd/v15-48-proxy on its final tree, based on origin/main 4c2c48e
 covered_files: ["packages/mcp-server/src/db-endpoints.ts", "packages/mcp-server/src/db-endpoints.test.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/config.test.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/event-sources.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/index.ts", ".env.example", "docs/event-vocabulary.md", "docs/data-planes.md", "docs/railway-tailscale.md", "docs/config-reference.md"]
 ---
+
+> Status detail, kept verbatim from the original frontmatter: passed in-repo. The forwarders and the live cutover are operator-gated and were not run
 
 # 48-VERIFICATION: Secure proxy layer for the data planes
 
