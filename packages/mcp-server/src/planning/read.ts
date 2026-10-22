@@ -162,8 +162,8 @@ export class PlanningReader {
 	private scans = 0;
 	/** Scheduled transition deliveries not yet settled. */
 	private readonly pending = new Set<Promise<void>>();
-	/** The comparisons in order: each waits for the one before it, so a baseline is never compared while it is advancing. */
-	private observing: Promise<void> = Promise.resolve();
+	/** The last queued observation. Each observation waits for it, so the baseline and the publish are never interleaved. */
+	private observing: Promise<unknown> = Promise.resolve();
 
 	constructor(private readonly deps: PlanningReaderDeps) {}
 
@@ -278,22 +278,31 @@ export class PlanningReader {
 	 * baseline advances only after that record is made: a comparison that throws leaves it where it was. A transient repo read
 	 * failure holds it too, so the next successful read publishes the change and its transition once.
 	 */
+	private async observeOnce(root: string, seq: number, snapshot: PlanningSnapshot, state: SessionState): Promise<PlanningChangeNote> {
+		const current = this.baseline;
+		if (current !== null && seq < current.seq) return { state: "superseded" };
+		if (current === null || current.root !== root) {
+			this.advance(root, seq, snapshot, state);
+			return { state: "baseline" };
+		}
+		// A comparison that throws, holds or does not publish leaves the baseline where it was: the next read sees the change.
+		const { note, outcome, hold } = await this.compare(root, current.snapshot, snapshot);
+		if (hold) return note;
+		const record = outcome === null ? null : transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: current.state, to: state, outcome }, this.deps.clock ?? hostClock);
+		this.advance(root, seq, snapshot, state);
+		if (record !== null) this.schedule(record);
+		return note;
+	}
+
+	/** Moves the baseline to this scan, unless a later scan already holds it. The baseline never moves backwards. */
+	private advance(root: string, seq: number, snapshot: PlanningSnapshot, state: SessionState): void {
+		if (this.baseline !== null && seq < this.baseline.seq) return;
+		this.baseline = { root, seq, snapshot, state };
+	}
+
+	/** Observations run one at a time, in arrival order, so two reads never publish the same change. */
 	private observe(root: string, seq: number, snapshot: PlanningSnapshot, state: SessionState): Promise<PlanningChangeNote> {
-		const run = this.observing.then(async (): Promise<PlanningChangeNote> => {
-			const current = this.baseline;
-			if (current !== null && seq < current.seq) return { state: "superseded" };
-			if (current === null || current.root !== root) {
-				this.baseline = { root, seq, snapshot, state };
-				return { state: "baseline" };
-			}
-			const { note, outcome, hold } = await this.compare(root, current.snapshot, snapshot);
-			if (hold) return note;
-			const record = outcome === null ? null : transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: current.state, to: state, outcome }, this.deps.clock ?? hostClock);
-			this.baseline = { root, seq, snapshot, state };
-			if (record !== null) this.schedule(record);
-			return note;
-		});
-		// The next comparison waits for this one. A failure reaches the caller through `run`; the queue itself carries on.
+		const run = this.observing.then(() => this.observeOnce(root, seq, snapshot, state));
 		this.observing = run.then(
 			() => undefined,
 			() => undefined,
@@ -353,8 +362,8 @@ export class PlanningReader {
 			return repo.transient ? { note, outcome: null, hold: true } : { note, outcome: "refused", hold: false };
 		}
 		const stored = await emitPlanningChange({ publish: this.deps.emit }, { repo: repo.repo, sessionId: PLANNING_OBSERVER_SESSION, diff: { ...diff, removed } });
-		const ledger = stored === "published" ? "emitted" : "not-stored";
-		return { note: { state: "changed", ...counts, ledger }, outcome: ledger === "emitted" ? "applied" : "refused", hold: false };
+		if (stored !== "published") return { note: { state: "changed", ...counts, ledger: "not-stored" }, outcome: null, hold: true };
+		return { note: { state: "changed", ...counts, ledger: "emitted" }, outcome: "applied", hold: false };
 	}
 }
 

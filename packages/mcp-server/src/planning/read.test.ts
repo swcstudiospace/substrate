@@ -370,14 +370,22 @@ describe("planning.transition", () => {
 		expect(harness.transitions).toEqual([expect.objectContaining({ from: "DEGRADED", to: "SUCCESS", outcome: "applied" })]);
 	});
 
-	test("a change the ledger does not store is recorded as refused", async () => {
+	test("a change the ledger does not store is held, and its transition is recorded once it is stored", async () => {
 		await seedPhase();
 		await write(".git/config", ORIGIN);
-		const harness = reader(root, { emit: async () => false });
+		let accept = false;
+		const harness = reader(root, { emit: async () => accept });
 		await harness.reader.status();
 		await write(`${PHASE}/52-PLAN.md`, "changed\n");
+		const held = await harness.reader.status();
+		await harness.reader.settleTransitions();
+		expect(held.state === "ok" && held.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "not-stored" });
+		expect(harness.transitions).toEqual([]);
+
+		accept = true;
 		await harness.reader.status();
-		expect(harness.transitions).toEqual([expect.objectContaining({ outcome: "refused" })]);
+		await harness.reader.settleTransitions();
+		expect(harness.transitions).toEqual([expect.objectContaining({ outcome: "applied" })]);
 	});
 
 	test("a failing primary sink falls back once, to stdout, and the primary is called once", async () => {
@@ -706,6 +714,44 @@ describe("the origin of a checkout", () => {
 		const after = await plane.status();
 		expect(after.state === "ok" && after.changes).toEqual({ state: "unchanged" });
 		expect(events).toHaveLength(1);
+	});
+});
+
+describe("a planning change whose publish fails", () => {
+	test("is re-sent by the next read, and stored exactly once after the publish succeeds", async () => {
+		await seedPhase();
+		await write(".git/config", ORIGIN_CONFIG);
+		const attempts: EventInput[] = [];
+		const stored: EventInput[] = [];
+		let accept = false;
+		const plane = new PlanningReader({
+			settings: settingsFor(root),
+			fs: nodePlanningFs(),
+			presence: null,
+			...quietSinks(),
+			emit: async (event) => {
+				attempts.push(event);
+				if (!accept) return false;
+				stored.push(event);
+				return true;
+			},
+		});
+		await plane.status();
+
+		await write(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		const failed = await plane.status();
+		expect(failed.state === "ok" && failed.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "not-stored" });
+		expect(stored).toEqual([]);
+
+		accept = true;
+		const retried = await plane.status();
+		expect(retried.state === "ok" && retried.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "emitted" });
+		expect(attempts).toHaveLength(2);
+		expect(stored).toHaveLength(1);
+
+		const after = await plane.status();
+		expect(after.state === "ok" && after.changes).toEqual({ state: "unchanged" });
+		expect(stored).toHaveLength(1);
 	});
 });
 
