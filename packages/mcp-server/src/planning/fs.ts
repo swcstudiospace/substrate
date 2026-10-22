@@ -11,7 +11,7 @@
  */
 import { createHash } from "node:crypto";
 import { constants, type Dirent } from "node:fs";
-import { type FileHandle, open, readFile, readdir, readlink, realpath, stat } from "node:fs/promises";
+import { type FileHandle, lstat, open, readFile, readdir, readlink, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { errnoCode, type DirEntry, type OpenResult, type PlanningFs } from "./index.ts";
 
@@ -27,7 +27,15 @@ function absentAsNull<T>(run: () => Promise<T>): Promise<T | null> {
 
 export function nodePlanningFs(): PlanningFs {
 	return {
-		realpath: (path) => absentAsNull(() => realpath(path)),
+		async probe(path) {
+			const real = await absentAsNull(() => realpath(path));
+			if (real === null) {
+				// No target to follow: a link whose target is missing is dangling; no entry at all is absent.
+				return (await absentAsNull(() => lstat(path))) === null ? { state: "absent" } : { state: "dangling" };
+			}
+			const target = await stat(real);
+			return { state: "present", real, isFile: target.isFile(), isDir: target.isDirectory() };
+		},
 		async readDir(path) {
 			const listed = await absentAsNull(() => readdir(path, { withFileTypes: true }));
 			if (listed === null) return null;

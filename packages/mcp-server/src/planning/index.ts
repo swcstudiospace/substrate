@@ -54,7 +54,7 @@ export interface PlanningIndex {
 	truncated: boolean;
 }
 
-export type PlanningIndexFailure = "root-unavailable" | "planning-dir-unavailable" | "planning-dir-outside-root";
+export type PlanningIndexFailure = "root-unavailable" | "planning-dir-unavailable" | "planning-dir-dangling" | "planning-dir-outside-root";
 
 export type PlanningIndexResult = { ok: true; index: PlanningIndex } | { ok: false; code: PlanningIndexFailure };
 
@@ -67,10 +67,16 @@ export interface DirEntry {
 /** What `openRead` found. `refused` means `accept` rejected the real path, and nothing was read. */
 export type OpenResult = { state: "absent" } | { state: "refused" } | { state: "opened"; real: string; isFile: boolean; bytes: Uint8Array };
 
+/** What `probe` found: no entry, a link whose target is missing, or an entry with its real location. */
+export type Probe = { state: "absent" } | { state: "dangling" } | { state: "present"; real: string; isFile: boolean; isDir: boolean };
+
 /** The filesystem and hash port. Missing paths answer null; any other failure throws. */
 export interface PlanningFs {
-	/** The canonical path, or null when nothing exists there. */
-	realpath(path: string): Promise<string | null>;
+	/**
+	 * What `path` is, following symlinks. `dangling` is a link whose target is missing, which is not the
+	 * same as no entry at all: the walk reports it, it never treats it as absent.
+	 */
+	probe(path: string): Promise<Probe>;
 	/** The entries of a directory, or null when it is absent or not a directory. */
 	readDir(path: string): Promise<DirEntry[] | null>;
 	/** Size and kind of the target, or null when absent. Used by the .git/config reader, not by the index walk. */
@@ -106,7 +112,7 @@ const UTF8 = new TextDecoder("utf-8", { fatal: true });
 interface Walk {
 	fs: PlanningFs;
 	realRoot: string;
-	planningAbs: string;
+	planningReal: string;
 	maxBytes: number;
 }
 
@@ -129,7 +135,7 @@ type Entry = FileEntry | ErrorEntry;
 
 type Attempt<T> = { ok: true; value: T } | { ok: false; code: string };
 
-type Listing = { state: "absent" } | { state: "entries"; entries: DirEntry[] } | { state: "error"; entry: ErrorEntry };
+type Listing = { state: "absent" } | { state: "entries"; real: string; entries: DirEntry[] } | { state: "error"; entry: ErrorEntry };
 
 export type Frontmatter = { state: "none" } | { state: "parsed"; data: Record<string, unknown> } | { state: "malformed" };
 
@@ -139,17 +145,19 @@ export async function buildPlanningIndex(root: string, deps: PlanningIndexDeps):
 	assertLimit(limits.maxFiles, "maxFiles");
 	assertLimit(limits.maxBytes, "maxBytes");
 
-	const realRootAttempt = await attempt(() => fs.realpath(root));
-	const realRoot = realRootAttempt.ok ? realRootAttempt.value : null;
-	if (realRoot === null) return { ok: false, code: "root-unavailable" };
+	const rootProbe = await attempt(() => fs.probe(root));
+	const rootFound = rootProbe.ok ? rootProbe.value : null;
+	if (rootFound?.state !== "present" || !rootFound.isDir) return { ok: false, code: "root-unavailable" };
+	const realRoot = rootFound.real;
 
 	const planningAbs = join(root, PLANNING_DIR);
-	const realPlanningAttempt = await attempt(() => fs.realpath(planningAbs));
-	const realPlanning = realPlanningAttempt.ok ? realPlanningAttempt.value : null;
-	if (realPlanning === null) return { ok: false, code: "planning-dir-unavailable" };
-	if (!isInside(realPlanning, realRoot)) return { ok: false, code: "planning-dir-outside-root" };
+	const planningProbe = await attempt(() => fs.probe(planningAbs));
+	const planningFound = planningProbe.ok ? planningProbe.value : null;
+	if (planningFound?.state === "dangling") return { ok: false, code: "planning-dir-dangling" };
+	if (planningFound?.state !== "present" || !planningFound.isDir) return { ok: false, code: "planning-dir-unavailable" };
+	if (!isInside(planningFound.real, realRoot)) return { ok: false, code: "planning-dir-outside-root" };
 
-	const walk: Walk = { fs, realRoot, planningAbs, maxBytes: limits.maxBytes };
+	const walk: Walk = { fs, realRoot, planningReal: planningFound.real, maxBytes: limits.maxBytes };
 	const found = [...(await collectTopLevel(walk)), ...(await collectMilestones(walk)), ...(await collectPhases(walk))];
 	found.sort((a, b) => compareText(a.path, b.path));
 
@@ -187,52 +195,67 @@ async function collectTopLevel(walk: Walk): Promise<Entry[]> {
 	const out: Entry[] = [];
 	for (const [name, kind] of TOP_LEVEL) {
 		const path = `${PLANNING_DIR}/${name}`;
-		const stat = await attempt(() => walk.fs.statFile(join(walk.planningAbs, name)));
-		if (!stat.ok) out.push(errorEntry(path, "unreadable", `stat failed: ${stat.code}`, kind));
-		else if (stat.value === null) continue;
-		else if (!stat.value.isFile) out.push(errorEntry(path, "unreadable", "not a regular file", kind));
-		else out.push({ type: "file", path, abs: join(walk.planningAbs, name), kind });
+		const abs = join(walk.planningReal, name);
+		const probed = await attempt(() => walk.fs.probe(abs));
+		if (!probed.ok) {
+			out.push(errorEntry(path, "unreadable", `probe failed: ${probed.code}`, kind));
+			continue;
+		}
+		const found = probed.value;
+		if (found.state === "absent") continue;
+		if (found.state === "dangling") {
+			out.push(errorEntry(path, "unreadable", "dangling symlink", kind));
+			continue;
+		}
+		if (!found.isFile) out.push(errorEntry(path, "unreadable", "not a regular file", kind));
+		else out.push({ type: "file", path, abs, kind });
 	}
 	return out;
 }
 
 async function collectMilestones(walk: Walk): Promise<Entry[]> {
 	const relDir = `${PLANNING_DIR}/milestones`;
-	const listing = await listDir(walk, relDir, join(walk.planningAbs, "milestones"));
+	const listing = await listDir(walk, relDir, join(walk.planningReal, "milestones"));
 	if (listing.state === "error") return [listing.entry];
 	if (listing.state === "absent") return [];
-	return documentEntries(relDir, join(walk.planningAbs, "milestones"), listing.entries, "milestone", undefined);
+	return documentEntries(relDir, listing.real, listing.entries, "milestone", undefined);
 }
 
 async function collectPhases(walk: Walk): Promise<Entry[]> {
 	const relDir = `${PLANNING_DIR}/phases`;
-	const listing = await listDir(walk, relDir, join(walk.planningAbs, "phases"));
+	const listing = await listDir(walk, relDir, join(walk.planningReal, "phases"));
 	if (listing.state === "error") return [listing.entry];
 	if (listing.state === "absent") return [];
 	const out: Entry[] = [];
 	for (const dir of listing.entries) {
-		if (dir.kind !== "dir") continue;
 		const dirRel = `${relDir}/${dir.name}`;
-		const dirAbs = join(walk.planningAbs, "phases", dir.name);
-		const sub = await listDir(walk, dirRel, dirAbs);
+		if (dir.kind === "broken") {
+			out.push(errorEntry(dirRel, "unreadable", "dangling symlink"));
+			continue;
+		}
+		if (dir.kind !== "dir") continue;
+		const sub = await listDir(walk, dirRel, join(listing.real, dir.name));
 		if (sub.state === "error") out.push(sub.entry);
-		else if (sub.state === "entries") out.push(...documentEntries(dirRel, dirAbs, sub.entries, "phase", PHASE_DIR.exec(dir.name)?.[1]));
+		else if (sub.state === "entries") out.push(...documentEntries(dirRel, sub.real, sub.entries, "phase", PHASE_DIR.exec(dir.name)?.[1]));
 	}
 	return out;
 }
 
-/** A directory's entries, after confirming its real location is inside the root. */
+/** A directory's entries, after confirming it is a directory whose real location is inside the root. */
 async function listDir(walk: Walk, relDir: string, absDir: string): Promise<Listing> {
-	const real = await attempt(() => walk.fs.realpath(absDir));
-	if (!real.ok) return { state: "error", entry: errorEntry(relDir, "unreadable", `realpath failed: ${real.code}`) };
-	if (real.value === null) return { state: "absent" };
-	if (!isInside(real.value, walk.realRoot)) {
+	const probed = await attempt(() => walk.fs.probe(absDir));
+	if (!probed.ok) return { state: "error", entry: errorEntry(relDir, "unreadable", `probe failed: ${probed.code}`) };
+	const found = probed.value;
+	if (found.state === "absent") return { state: "absent" };
+	if (found.state === "dangling") return { state: "error", entry: errorEntry(relDir, "unreadable", "dangling symlink") };
+	if (!found.isDir) return { state: "error", entry: errorEntry(relDir, "unreadable", "not a directory") };
+	if (!isInside(found.real, walk.realRoot)) {
 		return { state: "error", entry: errorEntry(relDir, "outside-root", "directory resolves outside the planning root") };
 	}
-	const listed = await attempt(() => walk.fs.readDir(absDir));
+	const listed = await attempt(() => walk.fs.readDir(found.real));
 	if (!listed.ok) return { state: "error", entry: errorEntry(relDir, "unreadable", `read failed: ${listed.code}`) };
 	if (listed.value === null) return { state: "absent" };
-	return { state: "entries", entries: listed.value };
+	return { state: "entries", real: found.real, entries: listed.value };
 }
 
 function documentEntries(

@@ -8,7 +8,7 @@
  * the largest read the index asked for.
  */
 import { createHash } from "node:crypto";
-import type { DirEntry, OpenResult, PlanningFs } from "./index.ts";
+import type { DirEntry, OpenResult, PlanningFs, Probe } from "./index.ts";
 
 export const TREE_ROOT = "/repo";
 
@@ -38,9 +38,11 @@ export class FakeTree implements PlanningFs {
 		}
 	}
 
-	async realpath(path: string): Promise<string | null> {
+	async probe(path: string): Promise<Probe> {
 		const found = this.resolve(path);
-		return found.state === "resolved" ? found.real : null;
+		if (found.state !== "resolved") return found;
+		const isFile = this.files.has(found.real);
+		return { state: "present", real: found.real, isFile, isDir: !isFile };
 	}
 
 	async readDir(path: string): Promise<DirEntry[] | null> {

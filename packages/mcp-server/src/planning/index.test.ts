@@ -235,6 +235,34 @@ describe("buildPlanningIndex: missing roots", () => {
 	});
 });
 
+describe("buildPlanningIndex: a dangling link is reported, never skipped", () => {
+	test("a dangling top-level document is an error record, and the rest of the index is intact", async () => {
+		const baseline = (await indexOf(BASE)).index.records;
+		const { index } = await indexOf(BASE, { [`${P}/ROADMAP.md`]: `${TREE_ROOT}/nowhere.md` });
+		expect(errorFor(index.records, ".planning/ROADMAP.md")).toMatchObject({
+			kind: "roadmap",
+			error: { code: "unreadable", detail: "dangling symlink" },
+		});
+		const others = (records: PlanningRecord[]) => records.filter((record) => record.path !== ".planning/ROADMAP.md");
+		expect(others(index.records)).toEqual(others(baseline));
+	});
+
+	test("a dangling phase directory is an error record for that directory", async () => {
+		const { index } = await indexOf(BASE, { [`${P}/phases/53-gone`]: `${TREE_ROOT}/nowhere` });
+		expect(errorFor(index.records, ".planning/phases/53-gone")).toMatchObject({ error: { code: "unreadable", detail: "dangling symlink" } });
+	});
+
+	test("a dangling .planning is a failure with its own code, never an empty index", async () => {
+		const { result } = await build({ [`${TREE_ROOT}/README.md`]: "x" }, { [P]: `${TREE_ROOT}/nowhere` });
+		expect(result).toEqual({ ok: false, code: "planning-dir-dangling" });
+	});
+
+	test("a milestones entry that is a plain file is an error record, not silently empty", async () => {
+		const { index } = await indexOf({ [`${TREE_ROOT}/README.md`]: "x", [`${P}/ROADMAP.md`]: "# r", [`${P}/milestones`]: "not a directory" });
+		expect(errorFor(index.records, ".planning/milestones")).toMatchObject({ error: { code: "unreadable", detail: "not a directory" } });
+	});
+});
+
 describe("readFrontmatter", () => {
 	test("no fence is none, a closed mapping is parsed, an open fence without a mapping is malformed", () => {
 		expect(readFrontmatter("# plain")).toEqual({ state: "none" });
