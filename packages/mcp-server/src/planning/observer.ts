@@ -251,7 +251,7 @@ export class PlanningObserver {
 		this.heldChange = holds ? signature : null;
 		const sinceChange = sinceLastScan !== null && sinceLastScan.complete && changesIn(sinceLastScan) > 0;
 		const heartbeat = await this.heartbeat(root, fresh || sinceChange || gapMoved, ttlMs, repo);
-		if (nowMs !== null) await this.announce(repo, nowMs, ttlMs);
+		await this.announce(repo, ttlMs);
 		return { state: "observed", outcome, heartbeat };
 	}
 
@@ -321,12 +321,15 @@ export class PlanningObserver {
 	 * leaves the open set, so its return is announced again. A conflict the ledger did not store stays out of the set, so the next
 	 * scan tries again.
 	 */
-	private async announce(repo: RepoLookup, nowMs: number, ttlMs: number): Promise<void> {
+	private async announce(repo: RepoLookup, ttlMs: number): Promise<void> {
 		const presence = this.deps.presence;
 		if (presence === null) return;
 		const listing = await presence.listWithin(PRESENCE_MAX_SESSIONS).catch(() => null);
 		if (listing === null) return;
-		const detected = detectConflicts({ sessions: classifySessions(listing.records, nowMs, ttlMs), nowMs, ttlMs });
+		// The clock is read after the listing, which takes time: a peer that passed its freshness window while the scan ran is expired.
+		const clock = await readClock(presence);
+		if (!clock.ok) return;
+		const detected = detectConflicts({ sessions: classifySessions(listing.records, clock.nowMs, ttlMs), nowMs: clock.nowMs, ttlMs });
 		const repoName = repo.state === "known" ? repo.repo : null;
 		const next = new Set<string>();
 		for (const conflict of detected.conflicts) {

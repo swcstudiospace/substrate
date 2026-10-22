@@ -767,6 +767,38 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({ state: "ok", conflicts: [] });
 		expect(storedRecord(backend, tree, CHECKOUT_B)).toMatchObject({ repo: "owner/two" });
 	});
+
+	test("a peer that expires while the scan runs is not warned about (greptile expired-edits thread)", async () => {
+		const tree = twoCheckouts();
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		const attempts: EventInput[] = [];
+		let expireDuringScan = false;
+		const a = new PlanningObserver({
+			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: CHECKOUT_A }),
+			fs: tree,
+			presence,
+			emit: async (event) => {
+				attempts.push(event);
+				// The publish takes longer than the freshness window: B's edit has expired by the time the scan judges peers.
+				if (expireDuringScan) backend.clockMs += 91_000;
+				return true;
+			},
+		});
+		const b = announcingObserver(tree, presence, attempts, true, CHECKOUT_B);
+		await a.scan();
+		await b.scan();
+
+		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b\n");
+		await b.scan();
+		expireDuringScan = true;
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a\n");
+		await a.scan();
+
+		expect(conflictEventsOf(attempts)).toEqual([]);
+		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({ state: "ok", conflicts: [] });
+	});
 });
 
 describe("the observer under a change the ledger does not store, failure, load and shutdown", () => {
