@@ -5935,7 +5935,7 @@ export class Substrate {
 		const timeoutMs = options.greptimeTimeoutMs;
 		// The probes start at once, so one slow Greptime does not hold the others back.
 		// A store that throws is down. `/healthz` has to answer that; a 500 would hide the outage from the monitor.
-		const probes = this.healthProbes(timeoutMs);
+		const probes = this.healthProbes(timeoutMs, true);
 		const indexStore = this.index;
 		const [greptimeReading, index, hindsightOk, ragflowOk, capacity, ledgerCapacity] = await Promise.all([
 			probes.greptime,
@@ -5995,12 +5995,15 @@ export class Substrate {
 		};
 	}
 
-	/** The probes `health()` and the fabric read. Each starts now and settles on its own; none waits for another. */
-	private healthProbes(timeoutMs: number | undefined): HealthProbes {
+	/**
+	 * The probes `health()` and the fabric read. Each starts now and settles on its own; none waits for another. `probeWrites`
+	 * is whether the Greptime write probe may write: `/healthz` may, on its cadence; the fabric may not, and reads the last verdict.
+	 */
+	private healthProbes(timeoutMs: number | undefined, probeWrites: boolean): HealthProbes {
 		const greptimeClient = this.greptime;
 		const indexStore = this.index;
 		const hindsight = hindsightFromEnv();
-		const greptimeReading = greptimeClient ? this.greptimeProbe(greptimeClient, timeoutMs) : Promise.resolve(ABSENT_GREPTIME);
+		const greptimeReading = greptimeClient ? this.greptimeProbe(greptimeClient, timeoutMs, probeWrites) : Promise.resolve(ABSENT_GREPTIME);
 		return {
 			greptime: greptimeReading,
 			// The size read follows the ping, as on main, but nothing else waits for it: the fabric's Greptime row does not need it.
@@ -6022,7 +6025,7 @@ export class Substrate {
 	}
 
 	/** The Greptime ping, and only after a yes every other Greptime read. Never rejects. */
-	private async greptimeProbe(client: GreptimeClient, timeoutMs: number | undefined): Promise<GreptimeProbe> {
+	private async greptimeProbe(client: GreptimeClient, timeoutMs: number | undefined, probeWrites: boolean): Promise<GreptimeProbe> {
 		// The ping is the gate: until it answers, nothing else is asked of Greptime.
 		const up = (await this.healthBound(timeoutMs, () => (timeoutMs === undefined ? client.ping() : client.ping(timeoutMs)))) === true;
 		if (!up) return ABSENT_GREPTIME;
@@ -6035,7 +6038,7 @@ export class Substrate {
 				await client.probeDialect();
 				return client.quotingDialectKnown === true;
 			}).then((answer) => answer === true),
-			this.writeProbeReading(client, timeoutMs),
+			this.writeProbeReading(client, timeoutMs, probeWrites),
 		]);
 		return { up, appendOnly, quotingDialectKnown, probe: write.probe, writeTimedOut: write.timedOut };
 	}
@@ -6045,8 +6048,9 @@ export class Substrate {
 	 * reads it as unavailable; it is not the same as a probe that did not run. A probe that throws reads as it always has.
 	 * On the default path there is no bound, so the client's own write timeout applies, as on main.
 	 */
-	private async writeProbeReading(client: GreptimeClient, timeoutMs: number | undefined): Promise<WriteReading> {
-		const work = () => client.probeWritable(this.config.ledger.writeProbeS * 1000);
+	private async writeProbeReading(client: GreptimeClient, timeoutMs: number | undefined, probeWrites: boolean): Promise<WriteReading> {
+		// Interval 0 writes nothing and returns the last verdict, so a read with `probeWrites` off never writes.
+		const work = () => client.probeWritable(probeWrites ? this.config.ledger.writeProbeS * 1000 : 0);
 		if (timeoutMs === undefined) {
 			const probe = await Promise.resolve().then(work).catch(() => null);
 			return { probe, timedOut: false };
@@ -6069,7 +6073,8 @@ export class Substrate {
 	/**
 	 * The probes one window shares (phase 51). The fabric reads them through `fabricSources()`, so calls in one window issue
 	 * one probe per source, and concurrent callers share the same in-flight probes. The memo is keyed on the Greptime bound,
-	 * so a bounded probe never serves another caller. `/healthz` calls `health()`, which starts its own probes, as on main.
+	 * so a bounded probe never serves another caller. `/healthz` calls `health()`, which starts its own probes, as on main. The fabric's
+	 * probes never write: their Greptime write verdict is the last one `/healthz` recorded.
 	 */
 	sharedHealthProbes(windowMs: number, options: { readonly greptimeTimeoutMs?: number } = {}): HealthProbes {
 		const now = Date.now();
@@ -6077,7 +6082,7 @@ export class Substrate {
 		if (share !== null && share.greptimeTimeoutMs === options.greptimeTimeoutMs && now - share.at >= 0 && now - share.at < windowMs) {
 			return share.probes;
 		}
-		const probes = this.healthProbes(options.greptimeTimeoutMs);
+		const probes = this.healthProbes(options.greptimeTimeoutMs, false);
 		this.healthShare = { at: now, greptimeTimeoutMs: options.greptimeTimeoutMs, probes };
 		return probes;
 	}
@@ -6107,7 +6112,13 @@ export class Substrate {
 			health: () => {
 				const probes = this.sharedHealthProbes(FABRIC_HEALTH_WINDOW_MS, { greptimeTimeoutMs: HEALTH_PROBE_MS });
 				return {
-					greptime: probes.greptime.then((probe) => ({ up: probe.up, eventsWritable: this.eventsWritableOf(probe), writeTimedOut: probe.writeTimedOut })),
+					greptime: probes.greptime.then((probe) => ({
+						up: probe.up,
+						eventsWritable: this.eventsWritableOf(probe),
+						writeTimedOut: probe.writeTimedOut,
+						// No write verdict since boot: the probe has not run, so the ledger's write path is unknown.
+						writeUnread: probe.probe === null || probe.probe.lastProbeAt === null,
+					})),
 					index: probes.index,
 					hindsight: probes.hindsight,
 					ragflow: probes.ragflow,
