@@ -31,4 +31,11 @@ describe("repoFromGitConfig", () => {
 		expect(repoFromGitConfig('[remote "origin"]\n\turl = "git@github.com:acme/repo.git" # quoted, then a comment\n')).toBe("acme/repo");
 		expect(repoFromGitConfig('[remote "origin"]\n\turl = "https://github.com/acme/re#po.git"\n')).toBeNull();
 	});
+
+	test("section and key names are case-insensitive, whitespace around names is ignored, and an indented header ends the origin section", () => {
+		expect(repoFromGitConfig('[Remote "origin"]\n\tURL = https://github.com/acme/repo.git\n')).toBe("acme/repo");
+		expect(repoFromGitConfig('  [remote "origin"]\n    url   =   git@github.com:acme/repo.git\n')).toBe("acme/repo");
+		expect(repoFromGitConfig('[remote "Origin"]\n\turl = https://github.com/acme/repo.git\n')).toBeNull();
+		expect(repoFromGitConfig('[remote "origin"]\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n  [remote "upstream"]\n\turl = https://github.com/other/upstream.git\n')).toBeNull();
+	});
 });
