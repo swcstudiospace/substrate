@@ -81,7 +81,7 @@ export type PlanningChangeNote =
 	| { state: "partial"; added: number | null; removed: null; changed: number; ledger: "not-written" };
 
 /** The outcome of this read's heartbeat. */
-export type PlanningHeartbeat = { state: "written" } | { state: "presence-unset" } | { state: "failed"; detail: string };
+export type PlanningHeartbeat = { state: "written" } | { state: "presence-unset" } | { state: "failed"; detail: string; transient: boolean };
 
 export type PlanningStatusView =
 	| PlanningDisabled
@@ -249,25 +249,31 @@ export class PlanningReader {
 
 	/**
 	 * Writes this checkout's heartbeat. The record's `lastHeartbeatMs` is replaced by the server's clock inside `touch`, so the
-	 * value given here is a placeholder. Any failure is returned as a `failed` outcome, never thrown.
+	 * value given here is a placeholder. A missing or unreadable git layout is a definitive `failed` (`transient: false`); a
+	 * presence write that throws is a transient `failed` (`transient: true`), the only failure that degrades the session view.
 	 */
 	private async heartbeat(root: string, ttlMs: number): Promise<PlanningHeartbeat> {
 		const presence = this.deps.presence;
 		if (presence === null) return { state: "presence-unset" };
+		let record: SessionRecord;
 		try {
 			const layout = await gitLayout(this.deps.fs, root);
-			if (!layout.ok) return { state: "failed", detail: layout.reason };
-			const record: SessionRecord = {
+			if (!layout.ok) return { state: "failed", detail: layout.reason, transient: false };
+			record = {
 				sessionId: planningSessionId(this.deps.fs, root),
 				worktree: root,
 				branch: await branchOf(this.deps.fs, layout.gitDir),
 				activePhase: null,
 				lastHeartbeatMs: 0,
 			};
+		} catch (cause: unknown) {
+			return { state: "failed", detail: cause instanceof Error ? cause.message : String(cause), transient: false };
+		}
+		try {
 			await presence.touch(record, ttlMs);
 			return { state: "written" };
 		} catch (cause: unknown) {
-			return { state: "failed", detail: cause instanceof Error ? cause.message : String(cause) };
+			return { state: "failed", detail: cause instanceof Error ? cause.message : String(cause), transient: true };
 		}
 	}
 
@@ -425,7 +431,7 @@ function sessionViewOf(body: PlanningSessionsBody): SessionViewState {
 		case "ok": {
 			const disabledCapabilities = [
 				...(body.clock.state === "unavailable" ? ["server clock"] : []),
-				...(body.heartbeat.state === "failed" ? ["checkout heartbeat"] : []),
+				...(body.heartbeat.state === "failed" && body.heartbeat.transient ? ["checkout heartbeat"] : []),
 				...(body.truncated ? ["sessions beyond the listing bound"] : []),
 			];
 			return deriveSessionState({ loaded: true, sessions: body.sessions.map((row) => row.status), disabledCapabilities });
