@@ -68,13 +68,20 @@ export function buildFabricSuggestions(status: FabricStatus, facts: FabricFacts)
 		});
 	}
 
-	const hindsight = rows.get("hindsight");
-	if (hindsight?.state === "degraded" && facts.outbox.parked > 0) {
+	// Queued retains are reported whatever the Hindsight breaker says. An open breaker is usually why they wait, so it
+	// must not hide them; the row's state is not consulted here.
+	if (facts.services.hindsight.configured && facts.outbox.parked > 0) {
+		const oldest = facts.outbox.oldestAt;
+		const delta = oldest === null ? Number.NaN : Date.parse(facts.checkedAt) - Date.parse(oldest);
+		const ageSeconds = Number.isFinite(delta) ? Math.max(0, Math.floor(delta / 1000)) : null;
 		found.push({
 			id: "hindsight-outbox-backlog",
 			resource: "hindsight",
-			action: "Hindsight is not accepting retains, so they wait in the outbox. Check its endpoint and breaker; parked retains drain once it answers.",
-			evidence: `${facts.outbox.parked} retain(s) parked, oldest parked at ${facts.outbox.oldestAt ?? "an unknown time"}`,
+			action: "Retains are queued in the outbox. They drain once Hindsight answers; check its endpoint and breaker if they stay queued.",
+			evidence:
+				oldest === null || ageSeconds === null
+					? `${facts.outbox.parked} retain(s) queued in the outbox; oldest age unknown`
+					: `${facts.outbox.parked} retain(s) queued in the outbox; oldest ${ageSeconds} s old, parked since ${oldest}`,
 			severity: "attention",
 		});
 	}
