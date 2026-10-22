@@ -169,6 +169,8 @@ export class SteeringInbox {
 	private highestMs = Number.NEGATIVE_INFINITY;
 	/** The transition time of an acknowledgement whose audit has not yet succeeded. A retry reuses it, so its audit content is unchanged. */
 	private readonly pendingAcknowledgeAtMs = new Map<string, number>();
+	/** The audit time of a queue whose audit has not yet succeeded. A retry reuses it, so its audit content is unchanged. */
+	private readonly pendingQueueAtMs = new Map<string, number>();
 	private readonly allowlist: ReadonlySet<string>;
 	private readonly capacity: number;
 	private tail: Promise<unknown> = Promise.resolve();
@@ -225,15 +227,17 @@ export class SteeringInbox {
 		if (!this.allowlist.has(directive.author.principalId)) return fail({ code: "principal-not-allowed" });
 		if (this.records.has(directive.id)) return fail({ code: "duplicate-directive" });
 
-		const nowMs = this.deps.clock.nowMs();
+		const nowMs = this.pendingQueueAtMs.get(directive.id) ?? this.deps.clock.nowMs();
 		const bucket = this.refilled(directive.targetSessionId, this.limiterNowMs());
 		if (bucket.tokens < 1) {
 			const retryAfterMs = Math.ceil(((1 - bucket.tokens) * RATE_WINDOW_MS) / this.capacity);
 			return fail({ code: "rate-limited", retryAfterMs });
 		}
 
+		this.pendingQueueAtMs.set(directive.id, nowMs);
 		const audited = await this.audit({ event: "queued", atMs: nowMs, directive });
 		if (!audited.ok) return audited;
+		this.pendingQueueAtMs.delete(directive.id);
 
 		this.buckets.set(directive.targetSessionId, { tokens: bucket.tokens - 1, updatedAtMs: bucket.updatedAtMs });
 		const record: SteeringRecord = { state: "queued", directive, queuedAtMs: nowMs };

@@ -340,3 +340,34 @@ describe("SteeringAuditSink: a retry after a lost reply keeps the acknowledgemen
 		expect(acknowledgedRows[0]?.recordedAt.getTime()).toBe(2_000);
 	});
 });
+
+describe("SteeringAuditSink: a queue retry after a lost reply keeps the queue's time", () => {
+	test("a queue retry after a failed attempt uses the same time and hash, and succeeds with no AUDIT_CONFLICT", async () => {
+		const sql = new FakeAuditSql();
+		let now = 1_000_000;
+		const inbox = new SteeringInbox({
+			history: new SteeringAuditSink(sql),
+			clock: { nowMs: () => now },
+			policy: { allowlist: [HUMAN], ratePerMin: 10 },
+		});
+
+		// The queue row commits, loses its reply, and cannot be confirmed: both attempts fail.
+		sql.loseReplyAfterCommit = true;
+		sql.failReadBack = Object.assign(new Error("read-back reset"), { code: "ECONNRESET" });
+		now = 2_000;
+		expect(await inbox.enqueue(directive())).toMatchObject({ ok: false, error: { code: "audit-unavailable" } });
+		expect(inbox.get("d-1")).toBeNull();
+
+		// The retry happens later, on a moved clock, with the database healthy again.
+		sql.loseReplyAfterCommit = false;
+		sql.failReadBack = null;
+		now = 5_000;
+		const retried = await inbox.enqueue(directive());
+
+		expect(retried.ok).toBe(true);
+		expect(inbox.get("d-1")).toMatchObject({ state: "queued", queuedAtMs: 2_000 });
+		const queuedRows = sql.rows.filter((row) => row.transition === "queued");
+		expect(queuedRows).toHaveLength(1);
+		expect(queuedRows[0]?.recordedAt.getTime()).toBe(2_000);
+	});
+});
