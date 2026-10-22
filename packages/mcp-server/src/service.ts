@@ -2885,9 +2885,10 @@ export class Substrate {
 		return this.planningObserver.start();
 	}
 
-	/** Phase 52: clear the planning observer's timer. A scan in flight finishes; no new scan starts from the timer. */
-	stopPlanning(): void {
+	/** Phase 52: clear the planning observer's timer, then resolve once a scan in flight has finished. The caller bounds the wait. */
+	async stopPlanning(): Promise<void> {
 		this.planningObserver.stop();
+		await this.planningObserver.idle();
 	}
 
 	/** Start the recall prefetch, the Hindsight inventory and the cache preloader (phase 47). The first two are no-ops while their flags are off; each timer is unref'd. */
@@ -6068,12 +6069,15 @@ export class Substrate {
 		const greptimeClient = this.greptime;
 		const indexStore = this.index;
 		const hindsight = hindsightFromEnv();
-		const greptimeReading = greptimeClient ? this.greptimeProbe(greptimeClient, timeoutMs, probeWrites) : Promise.resolve(ABSENT_GREPTIME);
+		const greptimeUp = greptimeClient ? this.greptimePing(greptimeClient, timeoutMs) : Promise.resolve(false);
+		const greptimeReading = greptimeClient
+			? greptimeUp.then((up) => (up ? this.greptimeReads(greptimeClient, timeoutMs, probeWrites) : ABSENT_GREPTIME))
+			: Promise.resolve(ABSENT_GREPTIME);
 		return {
 			greptime: greptimeReading,
-			// The size read follows the ping, as on main, but nothing else waits for it: the fabric's Greptime row does not need it.
+			// The size read starts when the ping answers, beside the write probe and not after it. The fabric's Greptime row does not need it.
 			ledgerCapacity: greptimeClient
-				? greptimeReading.then((reading) => (reading.up ? bounded(() => greptimeClient.capacity(HEALTH_PROBE_MS), HEALTH_PROBE_MS) : null))
+				? greptimeUp.then((up) => (up ? bounded(() => greptimeClient.capacity(HEALTH_PROBE_MS), HEALTH_PROBE_MS) : null))
 				: Promise.resolve(null),
 			index: indexStore
 				? Promise.resolve()
@@ -6089,11 +6093,13 @@ export class Substrate {
 		};
 	}
 
-	/** The Greptime ping, and only after a yes every other Greptime read. Never rejects. */
-	private async greptimeProbe(client: GreptimeClient, timeoutMs: number | undefined, probeWrites: boolean): Promise<GreptimeProbe> {
-		// The ping is the gate: until it answers, nothing else is asked of Greptime.
-		const up = (await this.healthBound(timeoutMs, () => (timeoutMs === undefined ? client.ping() : client.ping(timeoutMs)))) === true;
-		if (!up) return ABSENT_GREPTIME;
+	/** The Greptime ping: the gate for every other Greptime read. Never rejects. */
+	private async greptimePing(client: GreptimeClient, timeoutMs: number | undefined): Promise<boolean> {
+		return (await this.healthBound(timeoutMs, () => (timeoutMs === undefined ? client.ping() : client.ping(timeoutMs)))) === true;
+	}
+
+	/** The reads after a yes ping: append-mode, dialect and the write probe. Never rejects. */
+	private async greptimeReads(client: GreptimeClient, timeoutMs: number | undefined, probeWrites: boolean): Promise<GreptimeProbe> {
 		// The append-mode, dialect and write-probe reads are independent of one another, so they run together, each under its own
 		// bound. Main ran them one after another; no read's value depends on another's, so the verdicts are the same. On the default
 		// path each read keeps the client's own timeout, as on main. The size read is not here: the events write does not need it.
@@ -6105,7 +6111,7 @@ export class Substrate {
 			}).then((answer) => answer === true),
 			this.writeProbeReading(client, timeoutMs, probeWrites),
 		]);
-		return { up, appendOnly, quotingDialectKnown, probe: write.probe, writeTimedOut: write.timedOut };
+		return { up: true, appendOnly, quotingDialectKnown, probe: write.probe, writeTimedOut: write.timedOut };
 	}
 
 	/**
@@ -6181,8 +6187,9 @@ export class Substrate {
 						up: probe.up,
 						eventsWritable: this.eventsWritableOf(probe),
 						writeTimedOut: probe.writeTimedOut,
-						// No write verdict since boot: the probe has not run, so the ledger's write path is unknown.
-						writeUnread: probe.probe === null || probe.probe.lastProbeAt === null,
+						// With the write probe on, a probe that has recorded no verdict is an unknown write. With it off (interval 0) the
+						// verdict is metadata-only, so nothing is missing and the Greptime row is not unavailable for want of a write.
+						writeUnread: this.config.ledger.writeProbeS > 0 && (probe.probe === null || probe.probe.lastProbeAt === null),
 					})),
 					index: probes.index,
 					hindsight: probes.hindsight,

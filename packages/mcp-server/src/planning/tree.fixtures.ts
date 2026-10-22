@@ -40,6 +40,8 @@ export class FakeTree implements PlanningFs {
 	) {
 		for (const [path, content] of Object.entries(files)) {
 			this.files.set(path, typeof content === "string" ? new TextEncoder().encode(content) : content);
+			this.clock += 1;
+			this.versions.set(path, this.clock);
 		}
 	}
 
@@ -102,7 +104,7 @@ export class FakeTree implements PlanningFs {
 		const found = this.resolve(path);
 		if (found.state !== "resolved") return { state: "absent" };
 		if (!accept(found.real)) return { state: "refused" };
-		const signature = this.files.has(found.real) ? `file:${this.versions.get(found.real) ?? 0}` : `dir:${found.real}`;
+		const signature = this.files.has(found.real) ? `file:${found.real}@${this.versions.get(found.real) ?? 0}` : `dir:${found.real}`;
 		const content = this.files.get(found.real);
 		if (content === undefined) return { state: "opened", real: found.real, isFile: false, signature, bytes: null };
 		if (reuse(signature)) return { state: "opened", real: found.real, isFile: true, signature, bytes: null };

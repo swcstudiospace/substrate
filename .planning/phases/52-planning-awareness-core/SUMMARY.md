@@ -1,7 +1,7 @@
 ---
 phase: 52-planning-awareness-core
 requirements: [SOTA-08]
-status: verified in-repo, all six success criteria PASS (SC6 carries one flagged judgement on the scan cadence; see VERIFICATION.md)
+status: verified in-repo at c3d6e3e, all six success criteria PASS (SC6 cadence is `SUBSTRATE_PLANNING_SCAN_INTERVAL_MS`, default 15000 ms; see VERIFICATION.md)
 ---
 
 # 52-SUMMARY: planning index, session presence and change diffs
@@ -85,7 +85,7 @@ afa4205 feat(planning): file-first planning index, presence and change diffs (ph
 1. W6, TimescaleDB history: not built. Only `InMemoryHistorySink` exists (`planning/presence.ts:106`). PLAN marks it blocked on an operator-gated migration. CONTEXT D52-b is unmet in production.
 2. W6, ledger write from a read: superseded. The `planning.changed` note now comes from the observer's publish path, not from `planning_status` (CONTEXT, fix-up decision "Ledger note"). The reviewer decision that PLAN W6 asked for is not recorded as an acceptance; the fix-up moved the write out of the read, so the open question no longer applies to the read path.
 3. Presence semantics: the observer heartbeats a checkout only when it sees a complete change in it (`observer.ts`, fix-up decision "Presence source"). PLAN W5 and CONTEXT D52-h did not describe this. Under it, `active` means a planning document changed within the freshness window, not that the session is alive.
-4. Scan cadence: `PLANNING_SCAN_INTERVAL_MS = 15_000` is a fixed constant (`observer.ts:30`), not an environment setting. PLAN does not specify a cadence. CONTEXT records the decision. This is the SC6 judgement flagged in VERIFICATION.md.
+4. Scan cadence: environment configuration, `SUBSTRATE_PLANNING_SCAN_INTERVAL_MS` (default 15000, bounds 1000..3600000; `planning/config.ts:16,22,30,61`), read by the observer through the injected timer seam (`observer.ts:94`). PLAN does not specify a cadence. The SC6 judgement from the earlier verification is closed.
 5. Criterion 1 and 3 requirements (content-hash index with incremental equality; per-path hashes on the event) were not in PLAN tasks T2 or T6. They were added by the fix-up pass and are now verified (VERIFICATION.md, rows 1 and 3).
 6. Key retention: Dragonfly `EX` removes a session key about 25 h after its last heartbeat (`presence-dragonfly.ts:33-35`). This is recorded as residual retention, not a code deletion (CONTEXT, SC2 residual).
 7. `.planning/ROADMAP.md` has no phase 52 entry on any branch checked; the criteria came from the verification assignment.
@@ -97,5 +97,5 @@ None. `git diff 0df730e HEAD` over every `package.json` and lock file shows no c
 ## Open items
 
 - TimescaleDB `HistorySink` adapter and migration (operator-gated).
-- SC6 scan-cadence judgement at `observer.ts:30`: the orchestrator decides whether a fixed timing constant counts as configuration. If it does, SC6 is FAIL and the status becomes `gaps_found`.
+- None blocking. The SC6 cadence is now configured (item 4).
 - Residual risks as listed in VERIFICATION.md (key retention, stat-fingerprint reuse window, absolute worktree path in heartbeats and `planning_sessions`, process-local baseline and index cache).

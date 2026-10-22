@@ -6,21 +6,25 @@
  * against its baseline and publishes a complete change as one `planning.changed` event, through the ledger and the bus
  * (`observePlanningChange`). Nothing else writes on a read: the reads never do.
  *
- * Heartbeat: a checkout heartbeats when this observer sees a complete change in it, and when its watcher gap opens or
- * closes. The heartbeat carries the checkout's planning report (`report.ts`), which is how every other session sees its
- * plan ids, and its touched pairs. The session is that checkout (`wt-<hash of its path>`), and its branch is read from its
- * HEAD. A scan that sees no change writes no heartbeat, so a session is listed as `active` for the freshness window after it
- * last changed a planning document, and `stale` after.
+ * Heartbeat: a checkout heartbeats in a scan that sees a complete change: a change the baseline has not published yet, or a
+ * change since the scan before. It also heartbeats when its watcher gap moves, when its report's view changes, and when a
+ * previous write failed. A change the ledger does not store is heartbeated once, in the scan that saw it; the scans after it
+ * are quiet, so the session goes `stale` after the freshness window. The session is that checkout (`wt-<hash of its path>`),
+ * and its branch is read from its HEAD. The heartbeat carries the checkout's planning report (`report.ts`), which is how
+ * every other session sees its plan ids, its touched pairs and its repository.
  *
  * Touched pairs: a complete change records the phase and plan of each document it added, changed or removed, dated by the
  * server clock. A pair stays while it is inside the presence TTL, so a later complete change to other documents keeps it.
- * An incomplete observation records nothing and drops nothing: the gap rule. A change that would take the list past
- * `MAX_REPORT_ENTRIES` is not cut, since a cut list claims absences. The report says `report-limit` until a complete
- * change fits again.
+ * A change that is still held by a failed publish keeps the time it was first seen, so a retry never renews it. An incomplete
+ * observation records nothing and drops nothing: the gap rule. A change that would take the list past `MAX_REPORT_ENTRIES` is
+ * not cut, since a cut list claims absences. The report says `report-limit` until a complete change fits again.
  *
  * Conflicts: after each scan that can read the server clock, the observer lists the presence snapshot, detects conflicts
- * (`conflicts.ts`) and announces each one that is not already open, once. A conflict that clears and returns is announced
- * again. A conflict the ledger did not store is retried on the next scan.
+ * within one repository (`conflicts.ts`) and announces each one of its own repository that is not already open, once. A
+ * conflict that clears and returns is announced again. A conflict the ledger did not store is retried on the next scan.
+ *
+ * Scans never overlap: a tick that arrives during a scan shares that scan rather than starting another. A failure is reported
+ * on stderr when it appears or changes, and once more when the scans succeed again. Shutdown waits for a scan in flight.
  *
  * The baseline is process-local. The first scan is a baseline and publishes nothing. A failed publish holds the baseline,
  * so the same change is published on the next scan. The index cache is separate: it always holds the latest scan.
@@ -43,9 +47,9 @@ export const PLANNING_OBSERVER_SESSION = "planning-observer";
 /** The handle a scan timer returns. Opaque to the observer: it is only passed back to `clearInterval`. */
 export type PlanningTimerHandle = unknown;
 
-/** The timer the observer schedules its scans with. Production uses the global timers; a test injects one to see the cadence. */
+/** The timers the observer schedules its scans with. Production uses the global timers; a test injects its own. */
 export interface PlanningTimers {
-	setInterval(run: () => void, ms: number): PlanningTimerHandle;
+	setInterval(run: () => Promise<unknown>, ms: number): PlanningTimerHandle;
 	clearInterval(timer: PlanningTimerHandle): void;
 }
 
@@ -58,9 +62,14 @@ const GLOBAL_TIMERS: PlanningTimers = {
 	clearInterval: (timer) => clearInterval(timer as ReturnType<typeof setInterval>),
 };
 
+/** Where a failure is reported in production: stderr, as the server's other background notes are. */
+const STDERR_REPORT = (line: string): void => {
+	process.stderr.write(`${line}\n`);
+};
+
 export type PlanningHeartbeat =
 	| { state: "written" }
-	/** The scan saw no complete change in this checkout and its watcher gap did not move, so there is nothing to heartbeat. */
+	/** The scan saw no complete change in this checkout since the scan before, and nothing else is pending, so there is nothing to heartbeat. */
 	| { state: "not-due" }
 	| { state: "presence-unset" }
 	| { state: "failed"; detail: string };
@@ -83,6 +92,8 @@ export interface PlanningObserverDeps {
 	emit: (event: EventInput) => Promise<boolean>;
 	/** The scan timer. Omitted in production; a test injects one to see the cadence the observer schedules. */
 	timers?: PlanningTimers;
+	/** Where a failure is reported. Omitted in production, where it goes to stderr; a test injects one to read the lines. */
+	report?: (line: string) => void;
 }
 
 /** The phase and plan of one described document. `plan` is null when the document names none. */
@@ -91,6 +102,8 @@ type PhasePlan = Pick<TouchedPair, "phase" | "plan">;
 export class PlanningObserver {
 	/** The index of the latest scan, which the next scan updates. Holds whatever the last scan found, even when a publish failed. */
 	private index: { root: string; index: PlanningIndex } | null = null;
+	/** The latest scan's snapshot. A heartbeat reports the change since it, so it moves with every scan. */
+	private lastScan: { root: string; snapshot: PlanningSnapshot } | null = null;
 	/**
 	 * The baseline a diff is taken against: its snapshot, and the phase and plan of each of its documents by path. It moves
 	 * forward, and holds when a publish fails.
@@ -104,7 +117,7 @@ export class PlanningObserver {
 	private touched: TouchedPair[] = [];
 	/** True while the latest complete change did not fit in `touched`. The report stays unknown (`report-limit`) until a change fits. */
 	private touchedOverflow = false;
-	/** The presence record has a change this process has not written yet: a complete change, a moved watcher gap, or a write that failed. Process-local. */
+	/** The presence record has a change this process has not written yet: a change, a moved watcher gap, or a write that failed. Process-local. */
 	private presencePending = false;
 	/** The signature of the change whose publish is held. Its next sighting is a retry, and renews nothing. Null when no publish is held. Process-local. */
 	private heldChange: string | null = null;
@@ -113,15 +126,16 @@ export class PlanningObserver {
 	/** Conflicts announced and still open, by signature. A conflict leaves the set once it is no longer detected. Process-local. */
 	private openConflicts = new Set<string>();
 	private timer: PlanningTimerHandle | undefined;
-	/** Scans run one at a time, in arrival order, so two scans never publish the same change. */
-	private queue: Promise<unknown> = Promise.resolve();
-	/** Scans queued or running. A timer tick that finds one starts none. Process-local. */
-	private queued = 0;
-
+	/** The scan in flight, or null. A scan asked for while one runs shares it. */
+	private running: Promise<ObserverScan> | null = null;
+	/** The problem last reported, or null while the scans are healthy. A report fires only when the problem changes. */
+	private problem: string | null = null;
 	private readonly timers: PlanningTimers;
+	private readonly reporter: (line: string) => void;
 
 	constructor(private readonly deps: PlanningObserverDeps) {
 		this.timers = deps.timers ?? GLOBAL_TIMERS;
+		this.reporter = deps.report ?? STDERR_REPORT;
 	}
 
 	/** Start the scan timer at the configured cadence, unref'd. Nothing starts while the plane is disabled or misconfigured. Returns whether it is running. */
@@ -133,29 +147,45 @@ export class PlanningObserver {
 		return true;
 	}
 
-	/** Clear the timer. A scan in flight finishes; no new scan starts from the timer. */
+	/** Clear the timer. A scan in flight finishes; `idle` waits for it. No new scan starts from the timer. */
 	stop(): void {
 		this.timers.clearInterval(this.timer);
 		this.timer = undefined;
 	}
 
-	/**
-	 * A timer tick. A tick that finds a scan still queued or running starts none: a slow listing then delays the next scan
-	 * instead of piling scans up behind it.
-	 */
-	private tick(): void {
-		if (this.queued > 0) return;
-		void this.scan();
+	/** Resolves once no scan is in flight. The shutdown path waits on it, inside its own bound. Never rejects. */
+	idle(): Promise<void> {
+		return this.running === null ? Promise.resolve() : this.running.then(() => undefined);
 	}
 
-	/** One scan, queued behind any scan in flight. Never rejects: a failure is a `failed` result. */
+	/** One scan. A call made while a scan is in flight shares that scan: no second scan starts behind it. Never rejects. */
 	scan(): Promise<ObserverScan> {
-		this.queued += 1;
-		const run = this.queue.then(() => this.scanOnce().catch(failedScan)).finally(() => {
-			this.queued -= 1;
-		});
-		this.queue = run;
+		return this.running ?? this.startScan();
+	}
+
+	private startScan(): Promise<ObserverScan> {
+		const run = this.scanOnce()
+			.catch(failedScan)
+			.finally(() => {
+				this.running = null;
+			});
+		this.running = run;
 		return run;
+	}
+
+	/** One timer tick: a scan (shared with one already in flight), then the report for its outcome. */
+	private async tick(): Promise<void> {
+		this.note(await this.scan());
+	}
+
+	/** Reports a problem when it appears or changes, and the recovery when the scans are healthy again. Silent while nothing changes. */
+	private note(scan: ObserverScan): void {
+		const problem = problemOf(scan);
+		if (problem === this.problem) return;
+		const before = this.problem;
+		this.problem = problem;
+		if (problem !== null) this.reporter(`[substrate] planning observer: ${problem}`);
+		else if (before !== null) this.reporter("[substrate] planning observer: scans succeed again");
 	}
 
 	private async scanOnce(): Promise<ObserverScan> {
@@ -177,6 +207,9 @@ export class PlanningObserver {
 		this.index = { root, index: built.index };
 
 		const next = snapshotOf(built.index);
+		// The change since the scan before: a heartbeat reports it, so a change is heartbeated once, in the scan that sees it.
+		const sinceLastScan = this.lastScan !== null && this.lastScan.root === root ? diffPlanningIndex(this.lastScan.snapshot, next) : null;
+		this.lastScan = { root, snapshot: next };
 		const nextPhasePlans = phasePlansOf(built.index);
 		const priorBaseline = this.baseline !== null && this.baseline.root === root ? this.baseline : null;
 		const previous = priorBaseline?.snapshot ?? null;
@@ -185,7 +218,8 @@ export class PlanningObserver {
 		// The same change seen again while its publish is held is a retry, not a new edit: it keeps the time it was first seen.
 		const signature = diff !== null && changed ? JSON.stringify([diff.added, diff.removed, diff.changed]) : null;
 		const retry = signature !== null && signature === this.heldChange;
-		if (diff !== null && changed && nowMs !== null && !retry) this.touch(pairsOfChange(diff, nextPhasePlans, priorBaseline?.phasePlans), nowMs, ttlMs);
+		const fresh = diff !== null && changed && !retry;
+		if (diff !== null && fresh && nowMs !== null) this.touch(pairsOfChange(diff, nextPhasePlans, priorBaseline?.phasePlans), nowMs, ttlMs);
 		if (this.touchedOverflow && nowMs !== null) this.report = unknownReport(nowMs, "report-limit");
 
 		// A baseline that holds (a failed publish) keeps its own phase and plan map, so a removal is still read from what was there.
@@ -215,7 +249,8 @@ export class PlanningObserver {
 			outcome = previous === null ? "baseline" : diff !== null && !diff.complete ? "incomplete" : "unchanged";
 		}
 		this.heldChange = holds ? signature : null;
-		const heartbeat = await this.heartbeat(root, changed || gapMoved, ttlMs, repo);
+		const sinceChange = sinceLastScan !== null && sinceLastScan.complete && changesIn(sinceLastScan) > 0;
+		const heartbeat = await this.heartbeat(root, fresh || sinceChange || gapMoved, ttlMs, repo);
 		if (nowMs !== null) await this.announce(repo, nowMs, ttlMs);
 		return { state: "observed", outcome, heartbeat };
 	}
@@ -246,13 +281,20 @@ export class PlanningObserver {
 		this.touched = this.touchedOverflow ? touchedWithin(this.touched, nowMs, ttlMs) : merged;
 	}
 
-	/** Heartbeats this checkout when a change is pending, the scan's `due` says one is. The record's time is replaced by the server's clock, and the record carries the report and the touched pairs. */
+	/**
+	 * Heartbeats this checkout when `due`, or when a write is still pending. The record's time is replaced by the server's clock,
+	 * and the record carries the repository, the report and the touched pairs. A failed write stays pending, so the next scan
+	 * writes again.
+	 */
 	private async heartbeat(root: string, due: boolean, ttlMs: number, repo: RepoLookup): Promise<PlanningHeartbeat> {
 		if (due) this.presencePending = true;
 		if (this.report !== null && this.written !== null && reportViewOf(this.report) !== reportViewOf(this.written)) this.presencePending = true;
 		if (!this.presencePending) return { state: "not-due" };
 		const presence = this.deps.presence;
-		if (presence === null) return { state: "presence-unset" };
+		if (presence === null) {
+			this.presencePending = false;
+			return { state: "presence-unset" };
+		}
 		try {
 			const layout = await gitLayout(this.deps.fs, root);
 			if (!layout.ok) return { state: "failed", detail: layout.reason };
@@ -275,8 +317,9 @@ export class PlanningObserver {
 	}
 
 	/**
-	 * Announces each conflict that is not already open, once. A conflict that is no longer detected leaves the open set, so its
-	 * return is announced again. A conflict the ledger did not store stays out of the set, so the next scan tries again.
+	 * Announces each conflict of this checkout's repository that is not already open, once. A conflict that is no longer detected
+	 * leaves the open set, so its return is announced again. A conflict the ledger did not store stays out of the set, so the next
+	 * scan tries again.
 	 */
 	private async announce(repo: RepoLookup, nowMs: number, ttlMs: number): Promise<void> {
 		const presence = this.deps.presence;
@@ -356,4 +399,15 @@ function touchKey(pair: PhasePlan): string {
 /** A scan that threw. Only the error's code is kept: its message can carry host paths. */
 function failedScan(cause: unknown): ObserverScan {
 	return { state: "failed", detail: errnoCode(cause) };
+}
+
+/** What is wrong with a scan, in words, or null when nothing is. Codes and outcomes only: never a path or a message. */
+function problemOf(scan: ObserverScan): string | null {
+	if (scan.state === "disabled") return null;
+	if (scan.state === "unavailable") return `scan unavailable: ${scan.code}`;
+	if (scan.state === "failed") return `scan failed: ${scan.detail}`;
+	if (scan.heartbeat.state === "failed") return `heartbeat failed: ${scan.heartbeat.detail}`;
+	if (scan.outcome === "not-published") return "a change was not stored by the ledger, and is retried on the next scan";
+	if (scan.outcome === "repo-unknown") return "a change could not be attributed to a repo, so nothing was published";
+	return null;
 }

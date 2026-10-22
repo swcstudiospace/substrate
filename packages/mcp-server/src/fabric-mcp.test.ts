@@ -456,3 +456,44 @@ describe("fabric reads never write to Greptime", () => {
 		}
 	});
 });
+
+describe("the Greptime row with the write probe off", () => {
+	test("a healthy Greptime reads ok at SUBSTRATE_LEDGER_WRITE_PROBE_S=0, and the fabric still issues no write", async () => {
+		const wire = recordGreptimeWire();
+		try {
+			const env = { [GREPTIME_URL_KEY]: "http://greptime.test", SUBSTRATE_LEDGER_WRITE_PROBE_S: "0" };
+			const substrate = new Substrate(loadConfig(env), {
+				index: null,
+				greptime: new GreptimeClient({ url: "http://greptime.test", user: "u", password: "p", db: "substrate" }),
+			});
+			const client = await connect(substrate);
+			const status = (await call(client, "fabric_status")).json() as { resources: Array<{ resource: string; state: string }> };
+			expect(status.resources.find((row) => row.resource === "greptime")?.state).toBe("ok");
+			await call(client, "fabric_optimize");
+			await call(client, "fabric_compliance");
+			expect(wire.statements.length).toBeGreaterThan(0);
+			expect(wire.statements.filter((statement) => WRITE_STATEMENT.test(statement))).toEqual([]);
+		} finally {
+			wire.restore();
+		}
+	});
+});
+
+describe("the size read on the health path", () => {
+	test("the size read starts when the ping answers: a write probe that stalls does not hold it", async () => {
+		const { index } = indexProbe();
+		const started: number[] = [];
+		const greptime = {
+			...greptimeWithStalledWrite(),
+			capacity: async () => {
+				started.push(Date.now());
+				return LEDGER_SIZE;
+			},
+		};
+		const begun = Date.now();
+		const health = await substrateWithProbes(index, greptime).health({ greptimeTimeoutMs: HEALTH_PROBE_MS });
+		expect(health.capacity.ledger).toEqual(LEDGER_SIZE);
+		expect(started).toHaveLength(1);
+		expect(started[0]! - begun).toBeLessThan(HEALTH_PROBE_MS / 2);
+	});
+});

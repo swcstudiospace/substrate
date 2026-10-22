@@ -24,4 +24,11 @@ describe("repoFromGitConfig", () => {
 		);
 		expect(repoFromGitConfig("[core]\n\tbare = false\n")).toBeNull();
 	});
+
+	test("an inline comment after the origin URL is not part of it, and a # inside quotes is", () => {
+		expect(repoFromGitConfig('[remote "origin"]\n\turl = https://github.com/acme/repo.git # primary remote\n')).toBe("acme/repo");
+		expect(repoFromGitConfig('[remote "origin"]\n\turl = git@github.com:acme/repo.git ; mirror of the primary\n')).toBe("acme/repo");
+		expect(repoFromGitConfig('[remote "origin"]\n\turl = "git@github.com:acme/repo.git" # quoted, then a comment\n')).toBe("acme/repo");
+		expect(repoFromGitConfig('[remote "origin"]\n\turl = "https://github.com/acme/re#po.git"\n')).toBeNull();
+	});
 });
