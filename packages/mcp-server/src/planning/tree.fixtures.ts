@@ -30,6 +30,9 @@ export class FakeTree implements PlanningFs {
 	/** Called with the path just before it is resolved for `openRead`, so a test can swap a link in between. */
 	beforeOpen: ((path: string) => void) | null = null;
 	private readonly files = new Map<string, Uint8Array>();
+	/** The version of each file, set on every write. A file's signature is its version, so a changed file never matches the signature it was read under. */
+	private readonly versions = new Map<string, number>();
+	private clock = 0;
 
 	constructor(
 		files: Record<string, string | Uint8Array>,
@@ -92,24 +95,34 @@ export class FakeTree implements PlanningFs {
 		return content;
 	}
 
-	async openRead(path: string, limit: number, accept: (real: string) => boolean): Promise<OpenResult> {
+	async openRead(path: string, limit: number, accept: (real: string) => boolean, reuse: (signature: string) => boolean): Promise<OpenResult> {
 		this.reads.push(path);
 		this.beforeOpen?.(path);
 		if (this.denied.has(path)) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
 		const found = this.resolve(path);
 		if (found.state !== "resolved") return { state: "absent" };
 		if (!accept(found.real)) return { state: "refused" };
+		const signature = this.files.has(found.real) ? `file:${this.versions.get(found.real) ?? 0}` : `dir:${found.real}`;
 		const content = this.files.get(found.real);
-		if (content === undefined) return { state: "opened", real: found.real, isFile: false, bytes: new Uint8Array(0) };
+		if (content === undefined) return { state: "opened", real: found.real, isFile: false, signature, bytes: null };
+		if (reuse(signature)) return { state: "opened", real: found.real, isFile: true, signature, bytes: null };
 		const bytes = content.slice(0, limit);
 		this.largestReturned = Math.max(this.largestReturned, bytes.byteLength);
 		this.returnedFrom.push(found.real);
-		return { state: "opened", real: found.real, isFile: true, bytes };
+		return { state: "opened", real: found.real, isFile: true, signature, bytes };
 	}
 
-	/** Replace a file's bytes, as a file that changed on disk would. */
+	/** Replace a file's bytes, as a file that changed on disk would. Every write gets a new version, so its signature changes. */
 	setContent(path: string, content: string): void {
 		this.files.set(path, new TextEncoder().encode(content));
+		this.clock += 1;
+		this.versions.set(path, this.clock);
+	}
+
+	/** Remove a file, as a deletion on disk would. */
+	remove(path: string): void {
+		this.files.delete(path);
+		this.versions.delete(path);
 	}
 
 	sha256(bytes: Uint8Array): string {
