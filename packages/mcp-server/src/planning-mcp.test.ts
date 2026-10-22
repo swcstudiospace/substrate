@@ -102,20 +102,23 @@ describe("planning tools", () => {
 		expect(view["errors"]).toEqual([expect.objectContaining({ path: `${PHASE}/BAD.md`, code: "malformed-frontmatter" })]);
 	});
 
-	test("a change between two status reads reaches the ledger once, as planning.changed", async () => {
+	test("status reads write nothing to the ledger: a change reaches it only through the planning observer's scan", async () => {
 		await writeFile(join(root, PHASE, "52-CONTEXT.md"), `${BODY}\n`);
 		await mkdir(join(root, ".git"), { recursive: true });
 		await writeFile(join(root, ".git", "config"), '[remote "origin"]\n\turl = git@github.com:swcstudiospace/agent-substrate.git\n');
 		const ledger: EventInput[] = [];
-		const client = await connect(substrateWith({ [PLANNING_ROOT_ENV]: root }, ledger));
+		const substrate = substrateWith({ [PLANNING_ROOT_ENV]: root }, ledger);
+		const client = await connect(substrate);
 
-		expect((await call(client, "planning_status")).json()["changes"]).toEqual({ state: "baseline" });
-		expect((await call(client, "planning_status")).json()["changes"]).toEqual({ state: "unchanged" });
+		expect((await call(client, "planning_status")).json()["state"]).toBe("ok");
+		expect(await substrate.planningObserver.scan()).toMatchObject({ state: "observed", outcome: "baseline" });
 		expect(ledger).toEqual([]);
 
 		await writeFile(join(root, PHASE, "52-CONTEXT.md"), `${BODY} edited\n`);
-		const changed = await call(client, "planning_status");
-		expect(changed.json()["changes"]).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "emitted" });
+		expect((await call(client, "planning_status")).json()["state"]).toBe("ok");
+		expect(ledger).toEqual([]);
+
+		expect(await substrate.planningObserver.scan()).toMatchObject({ state: "observed", outcome: "published" });
 		expect(ledger).toHaveLength(1);
 		expect(ledger[0]).toMatchObject({ surface: "substrate", kind: "note", repo: "swcstudiospace/agent-substrate", payload: { kind: "planning.changed" } });
 		expect(JSON.stringify(ledger)).not.toContain(BODY);
@@ -143,7 +146,7 @@ describe("the planning transition follows the metrics-history switch", () => {
 		await mkdir(join(root, ".git"), { recursive: true });
 		await writeFile(join(root, ".git", "config"), '[remote "origin"]\n\turl = git@github.com:swcstudiospace/agent-substrate.git\n');
 		await writeFile(join(root, PHASE, "52-CONTEXT.md"), `${BODY}\n`);
-		await substrate.planning.status();
+		await substrate.planningObserver.scan();
 		const lines: string[] = [];
 		const original = process.stdout.write;
 		process.stdout.write = ((chunk: string | Uint8Array) => {
@@ -152,8 +155,8 @@ describe("the planning transition follows the metrics-history switch", () => {
 		}) as typeof process.stdout.write;
 		try {
 			await writeFile(join(root, PHASE, "52-CONTEXT.md"), `${BODY} edited\n`);
-			await substrate.planning.status();
-			await substrate.planning.settleTransitions();
+			await substrate.planningObserver.scan();
+			await substrate.planningObserver.settleTransitions();
 		} finally {
 			process.stdout.write = original;
 		}
@@ -210,14 +213,14 @@ describe("a held change's transition reaches stdout once, whatever the ledger do
 	test("with no ledger configured, a held change writes one transition line, and a later read of it writes no second", async () => {
 		await withOrigin();
 		const substrate = substrateWithoutLedger();
-		await substrate.planning.status();
+		await substrate.planningObserver.scan();
 		const records = await transitionLines(async () => {
 			await writeFile(join(root, PHASE, "52-CONTEXT.md"), `${BODY} edited\n`);
-			const held = await substrate.planning.status();
-			expect(held.state === "ok" && held.changes).toEqual({ state: "changed", added: 0, removed: 0, changed: 1, ledger: "not-stored" });
-			await substrate.planning.settleTransitions();
-			await substrate.planning.status();
-			await substrate.planning.settleTransitions();
+			const held = await substrate.planningObserver.scan();
+			expect(held).toMatchObject({ state: "observed", outcome: "not-published" });
+			await substrate.planningObserver.settleTransitions();
+			await substrate.planningObserver.scan();
+			await substrate.planningObserver.settleTransitions();
 		});
 		expect(records).toEqual([expect.objectContaining({ metric: "planning.transition", outcome: "refused" })]);
 	});
@@ -225,13 +228,13 @@ describe("a held change's transition reaches stdout once, whatever the ledger do
 	test("with a failed ledger write, a held change writes one transition line, and a later read of it writes no second", async () => {
 		await withOrigin();
 		const substrate = substrateWithoutLedger(async () => false);
-		await substrate.planning.status();
+		await substrate.planningObserver.scan();
 		const records = await transitionLines(async () => {
 			await writeFile(join(root, PHASE, "52-CONTEXT.md"), `${BODY} edited\n`);
-			await substrate.planning.status();
-			await substrate.planning.settleTransitions();
-			await substrate.planning.status();
-			await substrate.planning.settleTransitions();
+			await substrate.planningObserver.scan();
+			await substrate.planningObserver.settleTransitions();
+			await substrate.planningObserver.scan();
+			await substrate.planningObserver.settleTransitions();
 		});
 		expect(records).toEqual([expect.objectContaining({ metric: "planning.transition", outcome: "refused" })]);
 	});

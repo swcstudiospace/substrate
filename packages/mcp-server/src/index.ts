@@ -179,6 +179,8 @@ server.listen(config.port, config.host, () => {
 	void substrate.emitDbEndpoints();
 	// uplift-4 S5: each timer starts only under its own flag (both default off) and is unref'd.
 	const background = substrate.startRecall();
+	// Phase 52: the planning observer's scan timer. Off while SUBSTRATE_PLANNING_ROOT is unset; unref'd.
+	substrate.startPlanning();
 	if (background.recall) process.stdout.write(`[substrate] brief recall: ${config.briefRecall.mode}, refresh every ${config.briefRecall.intervalS} s, snapshot ttl ${config.briefRecall.ttlS} s\n`);
 	if (background.inventory) process.stdout.write(`[substrate] hindsight inventory: on, every ${config.hindsightInventory.intervalS} s, read-only\n`);
 	// Memory governance: the weekly mental-model refresh, named by HINDSIGHT_MENTAL_MODELS. Unref'd; the first pass
@@ -215,6 +217,8 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		const recallStopped = substrate.stopRecall();
 		// Phase 47: the cache preloader's timer is cleared with them; a tick in flight finishes on its own.
 		substrate.stopPreload();
+		// Phase 52: the planning observer's timer is cleared; a scan in flight finishes on its own.
+		substrate.stopPlanning();
 		// Phase 50: the wake-up hint connections close with the timers; no subscriber outlives the shutdown.
 		substrate.stopEventBus();
 		observability.stop();
@@ -225,7 +229,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 			// silently on restart (the durable outbox keeps the rest).
 			await substrate.drainPendingRetains(SHUTDOWN_RETAIN_MS, { abandon: true });
 			// Planning transition records in flight are awaited within their own bound, after the retains and before the flush below.
-			await substrate.planning.settleTransitions(Bun.sleep(SHUTDOWN_TRANSITION_MS));
+			await substrate.planningObserver.settleTransitions(Bun.sleep(SHUTDOWN_TRANSITION_MS));
 			// The last export before shutdown, so the counters a restart resets are not
 			// simply lost — and *awaited*, within a bound. Firing it and exiting
 			// immediately lost it on an idle server, where the close callback runs at once

@@ -10,6 +10,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { FABRIC_RESOURCES } from "../packages/mcp-server/src/fabric/types.ts";
 import { ALL_METRIC_SERIES, METRIC_SERIES, parseHistoryStep, parseHistoryWindow } from "../packages/mcp-server/src/metrics-history.ts";
 import { DEFAULT_THRESHOLDS, docsSearchObjective, sloCatalogue, type SloTarget } from "../packages/observability/src/index.ts";
 import {
@@ -323,5 +324,21 @@ describe("the threshold lines are the catalogue's targets", () => {
 		const panel = degraded.panels.find((candidate) => candidate.title.includes("(emit.success)"))!;
 		expect(panel.type).toBe("text");
 		expect(panel.options!.content).toContain("99.50 %");
+	});
+});
+
+describe("the fabric panels (phase 51)", () => {
+	test("each of the six fabric resources draws exactly one panel, reading an allow-listed series", () => {
+		const planes = parse(buildDashboards(), "substrate-data-planes.json");
+		const fabric = planes.panels.filter((panel) => panel.title.startsWith("Fabric: "));
+		expect(FABRIC_RESOURCES).toHaveLength(6);
+		expect(fabric).toHaveLength(FABRIC_RESOURCES.length);
+		for (const resource of FABRIC_RESOURCES) {
+			const panels = fabric.filter((panel) => panel.title === `Fabric: ${resource}`);
+			expect(panels).toHaveLength(1);
+			const series = seriesOf(panels[0]!);
+			expect(series).not.toBeNull();
+			expect(Object.hasOwn(ALL_METRIC_SERIES, series ?? "")).toBe(true);
+		}
 	});
 });
