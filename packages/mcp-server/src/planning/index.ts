@@ -64,15 +64,24 @@ export interface DirEntry {
 	kind: "file" | "dir" | "broken" | "other";
 }
 
+/** What `openRead` found. `refused` means `accept` rejected the real path, and nothing was read. */
+export type OpenResult = { state: "absent" } | { state: "refused" } | { state: "opened"; real: string; isFile: boolean; bytes: Uint8Array };
+
 /** The filesystem and hash port. Missing paths answer null; any other failure throws. */
 export interface PlanningFs {
 	/** The canonical path, or null when nothing exists there. */
 	realpath(path: string): Promise<string | null>;
 	/** The entries of a directory, or null when it is absent or not a directory. */
 	readDir(path: string): Promise<DirEntry[] | null>;
-	/** Size and kind of the target, or null when absent. */
+	/** Size and kind of the target, or null when absent. Used by the .git/config reader, not by the index walk. */
 	statFile(path: string): Promise<{ isFile: boolean; size: number } | null>;
 	readFile(path: string): Promise<Uint8Array>;
+	/**
+	 * Open `path` and read through that one descriptor. `accept` receives the real path the descriptor
+	 * refers to, before any byte is read; a refusal reads nothing. At most `limit` bytes are returned,
+	 * so a file that grows after it was listed is still read no further than the cap.
+	 */
+	openRead(path: string, limit: number, accept: (real: string) => boolean): Promise<OpenResult>;
 	sha256(bytes: Uint8Array): string;
 }
 
@@ -252,22 +261,21 @@ async function readDocument(walk: Walk, entry: FileEntry): Promise<PlanningRecor
 	const fail = (code: PlanningRecordErrorCode, detail: string, sha256: string | null = null, bytes: number | null = null) =>
 		errorRecord(entry.path, code, detail, { kind: entry.kind, sha256, bytes });
 
-	const real = await attempt(() => walk.fs.realpath(entry.abs));
-	if (!real.ok) return fail("unreadable", `realpath failed: ${real.code}`);
-	if (real.value === null) return fail("unreadable", "file disappeared during the walk");
-	if (!isInside(real.value, walk.realRoot)) return fail("outside-root", "file resolves outside the planning root");
+	// One descriptor does the root check and the read. The real path is checked before any byte is read, and
+	// at most maxBytes + 1 bytes are read, so a file that grows after it was listed is cut off at the cap.
+	const opened = await attempt(() => walk.fs.openRead(entry.abs, walk.maxBytes + 1, (real) => isInside(real, walk.realRoot)));
+	if (!opened.ok) return fail("unreadable", `open failed: ${opened.code}`);
+	const found = opened.value;
+	if (found.state === "absent") return fail("unreadable", "file disappeared during the walk");
+	if (found.state === "refused") return fail("outside-root", "file resolves outside the planning root");
+	if (!found.isFile) return fail("unreadable", "not a regular file");
+	// Too large is reported without a byte count: the file was not read to its end.
+	if (found.bytes.byteLength > walk.maxBytes) return fail("too-large", `exceeds ${walk.maxBytes} bytes`);
 
-	const stat = await attempt(() => walk.fs.statFile(entry.abs));
-	if (!stat.ok) return fail("unreadable", `stat failed: ${stat.code}`);
-	if (stat.value === null || !stat.value.isFile) return fail("unreadable", "not a regular file");
-	if (stat.value.size > walk.maxBytes) return fail("too-large", `exceeds ${walk.maxBytes} bytes`, null, stat.value.size);
+	const sha256 = walk.fs.sha256(found.bytes);
+	const bytes = found.bytes.byteLength;
 
-	const read = await attempt(() => walk.fs.readFile(entry.abs));
-	if (!read.ok) return fail("unreadable", `read failed: ${read.code}`);
-	const sha256 = walk.fs.sha256(read.value);
-	const bytes = read.value.byteLength;
-
-	const text = decodeUtf8(read.value);
+	const text = decodeUtf8(found.bytes);
 	if (text === null) return fail("unreadable", "not valid UTF-8", sha256, bytes);
 	const frontmatter: Frontmatter = entry.path.endsWith(".md") ? readFrontmatter(text) : { state: "none" };
 	if (frontmatter.state === "malformed") {

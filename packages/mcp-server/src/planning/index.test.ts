@@ -112,7 +112,7 @@ describe("buildPlanningIndex: one bad path never breaks the rest", () => {
 		if (!index.ok) throw new Error(index.code);
 
 		const error = errorFor(index.index.records, ".planning/STATE.md");
-		expect(error).toMatchObject({ error: { code: "unreadable", detail: "read failed: EACCES" }, sha256: null });
+		expect(error).toMatchObject({ error: { code: "unreadable", detail: "open failed: EACCES" }, sha256: null });
 		const others = (records: PlanningRecord[]) => records.filter((record) => record.path !== ".planning/STATE.md");
 		expect(others(index.index.records)).toEqual(others(baseline));
 		expect(tree.reads).toContain(`${P}/STATE.md`);
@@ -135,7 +135,7 @@ describe("buildPlanningIndex: one bad path never breaks the rest", () => {
 });
 
 describe("buildPlanningIndex: refuses anything that resolves outside the root", () => {
-	test("a file symlink to a file outside the root is an error record, and its target is never read", async () => {
+	test("a file symlink to a file outside the root is an error record, and its bytes are never returned", async () => {
 		const leak = `${PHASE}/leak.md`;
 		const { index, tree } = await indexOf({ ...BASE, "/outside/secret.md": "OUTSIDE-SECRET-TEXT" }, { [leak]: "/outside/secret.md" });
 		expect(errorFor(index.records, ".planning/phases/52-planning-awareness-core/leak.md")).toMatchObject({
@@ -143,7 +143,22 @@ describe("buildPlanningIndex: refuses anything that resolves outside the root", 
 			sha256: null,
 		});
 		expect(JSON.stringify(index.records)).not.toContain("OUTSIDE-SECRET-TEXT");
-		expect(tree.reads).not.toContain(leak);
+		expect(tree.returnedFrom).not.toContain("/outside/secret.md");
+	});
+
+	test("a document swapped for an outside link after it was listed is refused, and no outside byte is returned", async () => {
+		const swapped = `${PHASE}/swap.md`;
+		const links: Record<string, string> = { [swapped]: `${P}/STATE.md` };
+		const tree = new FakeTree({ ...BASE, "/outside/secret.md": "OUTSIDE-SWAP-TEXT" }, links);
+		// Listed as an in-root alias; the link is repointed at the outside file before it is opened.
+		tree.beforeOpen = (path) => {
+			if (path === swapped) links[swapped] = "/outside/secret.md";
+		};
+		const result = await buildPlanningIndex(TREE_ROOT, { fs: tree, limits: { maxFiles: 500, maxBytes: 262_144 } });
+		if (!result.ok) throw new Error(result.code);
+		expect(errorFor(result.index.records, ".planning/phases/52-planning-awareness-core/swap.md")).toMatchObject({ error: { code: "outside-root" } });
+		expect(tree.returnedFrom).not.toContain("/outside/secret.md");
+		expect(JSON.stringify(result.index.records)).not.toContain("OUTSIDE-SWAP-TEXT");
 	});
 
 	test("a directory symlink that leaves the root is an error record for the directory, and nothing under it is listed", async () => {
@@ -170,15 +185,31 @@ describe("buildPlanningIndex: refuses anything that resolves outside the root", 
 });
 
 describe("buildPlanningIndex: bounds", () => {
-	test("a document over maxBytes is a too-large error record and is never read", async () => {
+	test("a document over maxBytes is a too-large error record, and no more than maxBytes + 1 bytes are ever read", async () => {
 		const big = `${P}/phases/50-dragonfly-pubsub/big.md`;
-		const { index, tree } = await indexOf({ ...BASE, [big]: "x".repeat(2_000) }, {}, { maxFiles: 500, maxBytes: 1_024 });
-		expect(errorFor(index.records, ".planning/phases/50-dragonfly-pubsub/big.md")).toMatchObject({
+		const tree = new FakeTree({ ...BASE, [big]: "x".repeat(10_000) });
+		const result = await buildPlanningIndex(TREE_ROOT, { fs: tree, limits: { maxFiles: 500, maxBytes: 1_024 } });
+		if (!result.ok) throw new Error(result.code);
+		// No byte count: the file was not read to its end, so its size is not known.
+		expect(errorFor(result.index.records, ".planning/phases/50-dragonfly-pubsub/big.md")).toMatchObject({
 			error: { code: "too-large" },
-			bytes: 2_000,
+			bytes: null,
 			sha256: null,
 		});
-		expect(tree.reads).not.toContain(big);
+		expect(tree.largestReturned).toBe(1_025);
+	});
+
+	test("a file that grows past the cap is cut off at the cap, whatever its size on the disk now", async () => {
+		const grows = `${PHASE}/CONTEXT.md`;
+		const tree = new FakeTree({ ...BASE, [grows]: "a".repeat(50) }, {});
+		// The file grows between being listed and being opened.
+		tree.beforeOpen = (path) => {
+			if (path === grows) tree.setContent(grows, "b".repeat(5_000));
+		};
+		const result = await buildPlanningIndex(TREE_ROOT, { fs: tree, limits: { maxFiles: 500, maxBytes: 1_024 } });
+		if (!result.ok) throw new Error(result.code);
+		expect(errorFor(result.index.records, ".planning/phases/52-planning-awareness-core/CONTEXT.md")).toMatchObject({ error: { code: "too-large" } });
+		expect(tree.largestReturned).toBe(1_025);
 	});
 
 	test("more documents than maxFiles keeps the first by path and sets truncated", async () => {
