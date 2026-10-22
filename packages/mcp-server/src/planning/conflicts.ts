@@ -1,32 +1,33 @@
 /**
- * Planning conflicts (phase 53, SOTA-09): a pure detector over active sessions and their planning indexes.
+ * Planning conflicts (phase 53, SOTA-09): a pure detector over the sessions of a presence snapshot.
  *
- * - Keys are the parsed phase and plan ids on index records (`phase`, `plan`), never a file path.
- * - A session claims only its active phase (`activePhase` on its presence record). Phases that its checkout's index
- *   merely contains are history, not work, and never produce a claim.
- * - Two or more known, active sessions on the same active phase produce one conflict event for that phase. The
- *   event lists the plan ids that two or more of those sessions share. A plan id is only meaningful inside
- *   its phase, so the phase is the unit of the event.
- * - Nothing is auto-resolved. Each event is `status: "open"`; the detector reports it and stops.
- * - A session's view is `unknown` when its scan is missing, failed, truncated, holds unreadable records, or is
- *   older than `maxScanAgeMs`. An unknown view cannot be trusted for conflicts, so it is excluded from
- *   detection and conflict-sensitive writes for that session are refused until a later full scan completes.
+ * - Each session carries its planning report in its presence record (`report.ts`). Keys are parsed phase and plan ids,
+ *   never a file path.
+ * - A session claims only its active phase (`activePhase` on its presence record). Phases that its checkout's index merely
+ *   contains are history, not work, and never produce a claim.
+ * - Phase key: two or more known, active sessions on one active phase. The event names that phase and the plan ids two or
+ *   more of those sessions share.
+ * - Plan key: two or more known, active sessions that share a plan id under different active phases. The event names the
+ *   plan id and the phases. A plan shared inside one phase is covered by that phase's event and gets no second one.
+ * - Nothing is auto-resolved. Each conflict is `status: "open"`; the detector reports it and stops.
+ * - A session's view is unknown when its report is missing, older than `maxScanAgeMs`, or unknown. An unknown view takes no
+ *   part in detection, and conflict-sensitive writes for that session are refused until a later complete scan.
  *
- * The detector reads no clock and does no I/O. Callers pass `nowMs` and the scans they already hold.
+ * The detector reads no clock and does no I/O. Callers pass `nowMs` and the presence snapshot they already hold.
  */
-import { isErrorRecord, type PlanningFileRecord, type PlanningIndexResult, type PlanningRecord } from "./index.ts";
-import type { ClassifiedSession } from "./presence.ts";
+import { redact, redactValue } from "../redact.ts";
+import type { EventInput } from "../types.ts";
+import type { ClassifiedSession, PlanningReport, UnknownViewReason } from "./presence.ts";
+
+export type { UnknownViewReason } from "./presence.ts";
 
 export const PLANNING_CONFLICT = "planning.conflict";
 
-/** One session's planning index, with the time it was taken. `result.ok === false` is a failed scan. */
-export interface SessionScan {
-	sessionId: string;
-	scannedAtMs: number;
-	result: PlanningIndexResult;
-}
+/** The event's kind in the frozen `EVENT_KINDS` vocabulary (phase 17). A conflict is a warning on the `substrate` surface. */
+export const PLANNING_CONFLICT_EVENT_KIND = "warning";
 
-export type UnknownViewReason = "no-scan" | "scan-failed" | "scan-truncated" | "scan-has-errors" | "scan-stale";
+/** Each id list in a conflict payload holds at most this many ids. The payload stays inside the ledger's payload limit. */
+export const MAX_CONFLICT_LIST = 32;
 
 export interface PhaseClaim {
 	phase: string;
@@ -35,14 +36,18 @@ export interface PhaseClaim {
 }
 
 export type SessionView =
-	| { sessionId: string; status: "known"; scannedAtMs: number; phases: PhaseClaim[] }
+	| { sessionId: string; status: "known"; scannedAtMs: number; claim: PhaseClaim | null }
 	| { sessionId: string; status: "unknown"; reason: UnknownViewReason };
+
+export type ConflictKey = { by: "phase"; phase: string } | { by: "plan"; plan: string };
 
 export interface PlanningConflict {
 	kind: typeof PLANNING_CONFLICT;
 	status: "open";
-	phase: string;
-	/** Plan ids that two or more of the conflicting sessions share, sorted. May be empty. */
+	key: ConflictKey;
+	/** The active phases of the conflicting sessions, sorted. Exactly one for a phase key. */
+	phases: string[];
+	/** Plan ids that two or more conflicting sessions share, sorted. A plan key has its own id here. May be empty for a phase key. */
 	plans: string[];
 	/** The conflicting sessions, sorted. Always two or more. */
 	sessionIds: string[];
@@ -50,18 +55,17 @@ export interface PlanningConflict {
 }
 
 export interface ConflictInput {
-	/** A presence snapshot. Only sessions with `status: "active"` take part. */
+	/** A presence snapshot, each record carrying its planning report. Only sessions with `status: "active"` take part. */
 	sessions: readonly ClassifiedSession[];
-	scans: readonly SessionScan[];
 	nowMs: number;
-	/** A scan older than this is `unknown`. A scan exactly this old is still known. */
+	/** A report older than this is unknown. A report exactly this old is still known. */
 	maxScanAgeMs: number;
 }
 
 export interface ConflictReport {
 	/** One view per active session, sorted by session id. */
 	views: SessionView[];
-	/** Sorted by phase. Empty when nothing conflicts. */
+	/** Phase conflicts first, sorted by phase, then plan conflicts sorted by plan id. Empty when nothing conflicts. */
 	conflicts: PlanningConflict[];
 }
 
@@ -69,19 +73,27 @@ export type ConflictWriteGate =
 	| { ok: true }
 	| { ok: false; code: "planning-view-unknown"; reason: UnknownViewReason | "no-active-session" };
 
-interface PhaseGroup {
-	sessionIds: Set<string>;
-	plans: Map<string, Set<string>>;
+interface Member {
+	sessionId: string;
+	phase: string;
+	plans: string[];
+}
+
+/** One session's view, judged against the clock. A session with no report is `no-scan`. */
+export function sessionViewOf(session: ClassifiedSession, nowMs: number, maxScanAgeMs: number): SessionView {
+	const report: PlanningReport | undefined = session.planning;
+	if (report === undefined) return { sessionId: session.sessionId, status: "unknown", reason: "no-scan" };
+	if (nowMs - report.scannedAtMs > maxScanAgeMs) return { sessionId: session.sessionId, status: "unknown", reason: "scan-stale" };
+	if (report.status === "unknown") return { sessionId: session.sessionId, status: "unknown", reason: report.reason };
+	return { sessionId: session.sessionId, status: "known", scannedAtMs: report.scannedAtMs, claim: claimOf(report, session.activePhase) };
 }
 
 export function detectConflicts(input: ConflictInput): ConflictReport {
 	assertInput(input);
-	const latest = latestScanBySession(input.scans);
-	const activeSessions = new Map<string, ClassifiedSession>();
-	for (const session of input.sessions) if (session.status === "active") activeSessions.set(session.sessionId, session);
-	const views = [...activeSessions.keys()]
-		.sort(compareText)
-		.map((sessionId) => viewFor(sessionId, latest.get(sessionId), activeSessions.get(sessionId)?.activePhase ?? null, input));
+	const active = input.sessions.filter((session) => session.status === "active");
+	const views = active
+		.map((session) => sessionViewOf(session, input.nowMs, input.maxScanAgeMs))
+		.sort((a, b) => compareText(a.sessionId, b.sessionId));
 	return { views, conflicts: conflictsFrom(views, input.nowMs) };
 }
 
@@ -93,87 +105,92 @@ export function gateConflictSensitiveWrite(views: readonly SessionView[], sessio
 	return { ok: true };
 }
 
-function viewFor(sessionId: string, scan: SessionScan | undefined, activePhase: string | null, input: ConflictInput): SessionView {
-	if (scan === undefined) return unknown(sessionId, "no-scan");
-	if (input.nowMs - scan.scannedAtMs > input.maxScanAgeMs) return unknown(sessionId, "scan-stale");
-	if (!scan.result.ok) return unknown(sessionId, "scan-failed");
-	if (scan.result.index.truncated) return unknown(sessionId, "scan-truncated");
-	if (scan.result.index.records.some(isErrorRecord)) return unknown(sessionId, "scan-has-errors");
+/** Identifies one open conflict across reads: the same key, phases, plans and sessions. A change to any of them is a new conflict. */
+export function conflictSignature(conflict: PlanningConflict): string {
+	return JSON.stringify([conflict.key, conflict.phases, conflict.plans, conflict.sessionIds]);
+}
+
+/** The ledger event for one conflict. The repo is named only when the checkout's origin is known. Both summary and payload are redacted. */
+export function conflictEvent(conflict: PlanningConflict, repo: string | null): EventInput {
+	const label = conflict.key.by === "phase" ? `phase ${conflict.key.phase}` : `plan ${conflict.key.plan}`;
+	const summary = `planning conflict on ${label}: ${conflict.sessionIds.length} sessions`;
+	const payload = {
+		kind: PLANNING_CONFLICT,
+		status: conflict.status,
+		key: conflict.key,
+		phases: conflict.phases,
+		plans: conflict.plans.slice(0, MAX_CONFLICT_LIST),
+		planCount: conflict.plans.length,
+		sessionIds: conflict.sessionIds.slice(0, MAX_CONFLICT_LIST),
+		sessionCount: conflict.sessionIds.length,
+		detectedAtMs: conflict.detectedAtMs,
+	};
 	return {
-		sessionId,
-		status: "known",
-		scannedAtMs: scan.scannedAtMs,
-		phases: phaseClaims(scan.result.index.records, activePhase),
+		surface: "substrate",
+		kind: PLANNING_CONFLICT_EVENT_KIND,
+		summary: redact(summary),
+		...(repo === null ? {} : { repo }),
+		payload: redactValue(payload),
 	};
 }
 
-function unknown(sessionId: string, reason: UnknownViewReason): SessionView {
-	return { sessionId, status: "unknown", reason };
-}
-
-/** A session claims only its active phase. Historical phases in its checkout's index are not work it is doing. */
-function phaseClaims(records: readonly PlanningRecord[], activePhase: string | null): PhaseClaim[] {
-	if (activePhase === null) return [];
-	const plans = new Set<string>();
-	for (const record of records) {
-		if (isErrorRecord(record) || record.phase !== activePhase) continue;
-		const identity = planIdentity(record);
-		if (identity !== undefined) plans.add(identity);
-	}
-	return [{ phase: activePhase, plans: [...plans].sort(compareText) }];
-}
-
-/**
- * A plan's identity is the plan id its parsed content declares, so the same plan under two filenames is one plan. A document
- * whose content declares none keeps its filename-derived id. A document that is neither a plan nor declares one has none.
- */
-function planIdentity(record: PlanningFileRecord): string | undefined {
-	const declared = record.frontmatter?.plan;
-	if (typeof declared === "string" && declared.length > 0) return declared;
-	if (typeof declared === "number") return String(declared);
-	return record.plan;
+/** A session claims its active phase, with the plan ids its report lists under that phase. */
+function claimOf(report: Extract<PlanningReport, { status: "known" }>, activePhase: string | null): PhaseClaim | null {
+	if (activePhase === null) return null;
+	const entry = report.phases.find((candidate) => candidate.phase === activePhase);
+	return { phase: activePhase, plans: entry === undefined ? [] : [...entry.plans].sort(compareText) };
 }
 
 function conflictsFrom(views: readonly SessionView[], detectedAtMs: number): PlanningConflict[] {
-	const groups = new Map<string, PhaseGroup>();
+	const members: Member[] = [];
 	for (const view of views) {
-		if (view.status !== "known") continue;
-		for (const claim of view.phases) {
-			const group = groups.get(claim.phase) ?? { sessionIds: new Set<string>(), plans: new Map<string, Set<string>>() };
-			group.sessionIds.add(view.sessionId);
-			for (const plan of claim.plans) {
-				const holders = group.plans.get(plan) ?? new Set<string>();
-				holders.add(view.sessionId);
-				group.plans.set(plan, holders);
-			}
-			groups.set(claim.phase, group);
+		if (view.status === "known" && view.claim !== null) {
+			members.push({ sessionId: view.sessionId, phase: view.claim.phase, plans: view.claim.plans });
 		}
 	}
 
-	return [...groups]
-		.filter(([, group]) => group.sessionIds.size >= 2)
-		.sort(([a], [b]) => compareText(a, b))
-		.map(([phase, group]): PlanningConflict => ({
+	const byPhase = new Map<string, Member[]>();
+	for (const member of members) byPhase.set(member.phase, [...(byPhase.get(member.phase) ?? []), member]);
+	const phaseConflicts: PlanningConflict[] = [];
+	for (const [phase, group] of [...byPhase].sort(([a], [b]) => compareText(a, b))) {
+		if (group.length < 2) continue;
+		const holders = new Map<string, number>();
+		for (const member of group) for (const plan of member.plans) holders.set(plan, (holders.get(plan) ?? 0) + 1);
+		phaseConflicts.push({
 			kind: PLANNING_CONFLICT,
 			status: "open",
-			phase,
-			plans: [...group.plans]
-				.filter(([, holders]) => holders.size >= 2)
-				.map(([plan]) => plan)
-				.sort(compareText),
-			sessionIds: [...group.sessionIds].sort(compareText),
+			key: { by: "phase", phase },
+			phases: [phase],
+			plans: [...holders].filter(([, count]) => count >= 2).map(([plan]) => plan).sort(compareText),
+			sessionIds: group.map((member) => member.sessionId).sort(compareText),
 			detectedAtMs,
-		}));
-}
-
-/** The most recent scan per session. A later failed scan overrides an earlier good one. */
-function latestScanBySession(scans: readonly SessionScan[]): Map<string, SessionScan> {
-	const latest = new Map<string, SessionScan>();
-	for (const scan of scans) {
-		const current = latest.get(scan.sessionId);
-		if (current === undefined || scan.scannedAtMs >= current.scannedAtMs) latest.set(scan.sessionId, scan);
+		});
 	}
-	return latest;
+
+	const byPlan = new Map<string, Map<string, string>>();
+	for (const member of members) {
+		for (const plan of member.plans) {
+			const holders = byPlan.get(plan) ?? new Map<string, string>();
+			holders.set(member.sessionId, member.phase);
+			byPlan.set(plan, holders);
+		}
+	}
+	const planConflicts: PlanningConflict[] = [];
+	for (const [plan, holders] of [...byPlan].sort(([a], [b]) => compareText(a, b))) {
+		const phases = new Set(holders.values());
+		if (holders.size < 2 || phases.size < 2) continue;
+		planConflicts.push({
+			kind: PLANNING_CONFLICT,
+			status: "open",
+			key: { by: "plan", plan },
+			phases: [...phases].sort(compareText),
+			plans: [plan],
+			sessionIds: [...holders.keys()].sort(compareText),
+			detectedAtMs,
+		});
+	}
+
+	return [...phaseConflicts, ...planConflicts];
 }
 
 function assertInput(input: ConflictInput): void {

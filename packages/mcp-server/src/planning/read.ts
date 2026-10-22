@@ -25,7 +25,10 @@ import { observePlanningChange, type ObservedPlanning } from "./events.ts";
 import { type PlanningConfigError, type PlanningConfigResult, type PlanningLimits } from "./config.ts";
 import { buildPlanningIndex, isErrorRecord, type PlanningFileRecord, type PlanningFs, type PlanningIndexFailure, type PlanningKind, type PlanningRecord } from "./index.ts";
 import { DragonflyPresenceStore, PRESENCE_MAX_SESSIONS } from "./presence-dragonfly.ts";
-import { classifySessions, type SessionRecord, type SessionStatus } from "./presence.ts";
+import { classifySessions, type PlanningReport, type SessionRecord, type SessionStatus, type UnknownViewReason } from "./presence.ts";
+import { conflictEvent, conflictSignature, detectConflicts, sessionViewOf, type PlanningConflict, type SessionView } from "./conflicts.ts";
+import { reportFromScan } from "./report.ts";
+import type { PlanningIndexResult } from "./index.ts";
 
 /** The session id the ledger row carries for a change observed by this plane. */
 export const PLANNING_OBSERVER_SESSION = "planning-observer";
@@ -89,6 +92,9 @@ export type PlanningStatusView =
 			heartbeat: PlanningHeartbeat;
 	  };
 
+/** A session's planning view as a row shows it: the scan time when its report is known, or the reason it is not. */
+export type PlanningRowState = { state: "known"; scannedAtMs: number } | { state: "unknown"; reason: UnknownViewReason };
+
 export interface PlanningSessionRow {
 	sessionId: string;
 	worktree: string;
@@ -97,6 +103,8 @@ export interface PlanningSessionRow {
 	lastHeartbeatMs: number;
 	ageMs: number | null;
 	status: SessionStatus | "unknown";
+	/** The session's planning view: its scan time when known, or why it is unknown. */
+	planning: PlanningRowState;
 }
 
 export type PlanningSessionsView =
@@ -110,6 +118,7 @@ export type PlanningSessionsView =
 			truncated: boolean;
 			sessions: PlanningSessionRow[];
 			heartbeat: PlanningHeartbeat;
+			conflicts: PlanningConflict[];
 	  };
 
 export interface PlanningReaderDeps {
@@ -141,6 +150,10 @@ export class PlanningReader {
 	private scans = 0;
 	/** The last queued observation. Each observation waits for it, so the baseline and the publish are never interleaved. */
 	private observing: Promise<unknown> = Promise.resolve();
+	/** This checkout's planning report, from its latest scan, stamped by the server clock. It rides in every heartbeat. Null until one exists. */
+	private report: PlanningReport | null = null;
+	/** Conflicts announced and still open, by signature. A conflict leaves the set once it is no longer detected. Process-local. */
+	private openConflicts = new Set<string>();
 
 	constructor(private readonly deps: PlanningReaderDeps) {}
 
@@ -149,11 +162,12 @@ export class PlanningReader {
 		if (!resolved.ready) return resolved.view;
 		const { root, limits } = resolved;
 		const seq = ++this.scans;
-		const heartbeat = await this.heartbeat(root, limits.presenceTtlS * 1000);
 		const built = await buildPlanningIndex(root, { fs: this.deps.fs, limits: { maxFiles: limits.maxFiles, maxBytes: limits.maxBytes } });
+		await this.stampReport(built);
+		const heartbeat = await this.heartbeat(root, limits.presenceTtlS * 1000);
 		if (!built.ok) return { state: "unavailable", code: built.code };
 		const { records, truncated, unlisted } = built.index;
-		const changes = await this.observe(root, seq, { records, truncated, unlisted });
+		const changes = await this.queued(() => this.observeOnce(root, seq, { records, truncated, unlisted }));
 		return {
 			state: "ok",
 			limits,
@@ -183,17 +197,13 @@ export class PlanningReader {
 		try {
 			const listing = await presence.listWithin(PRESENCE_MAX_SESSIONS);
 			const clock = await readClock(presence);
-			const sessions: PlanningSessionRow[] = clock.ok
-				? classifySessions(listing.records, clock.nowMs, ttlMs).map((entry) => ({
-						sessionId: entry.sessionId,
-						worktree: entry.worktree,
-						branch: entry.branch,
-						activePhase: entry.activePhase,
-						lastHeartbeatMs: entry.lastHeartbeatMs,
-						ageMs: entry.ageMs,
-						status: entry.status,
-					}))
-				: listing.records.map((record) => ({
+			if (!clock.ok) {
+				return {
+					state: "ok",
+					presenceTtlS: resolved.limits.presenceTtlS,
+					clock: { state: "unavailable", detail: clock.detail },
+					truncated: listing.truncated,
+					sessions: listing.records.map((record): PlanningSessionRow => ({
 						sessionId: record.sessionId,
 						worktree: record.worktree,
 						branch: record.branch,
@@ -201,13 +211,31 @@ export class PlanningReader {
 						lastHeartbeatMs: record.lastHeartbeatMs,
 						ageMs: null,
 						status: "unknown",
-					}));
+						planning: { state: "unknown", reason: "clock-unavailable" },
+					})),
+					conflicts: [],
+					heartbeat,
+				};
+			}
+			const classified = classifySessions(listing.records, clock.nowMs, ttlMs);
+			const detected = detectConflicts({ sessions: classified, nowMs: clock.nowMs, maxScanAgeMs: ttlMs });
+			await this.announce(resolved.root, detected.conflicts);
 			return {
 				state: "ok",
 				presenceTtlS: resolved.limits.presenceTtlS,
-				clock: clock.ok ? { state: "server" } : { state: "unavailable", detail: clock.detail },
+				clock: { state: "server" },
 				truncated: listing.truncated,
-				sessions,
+				sessions: classified.map((entry): PlanningSessionRow => ({
+					sessionId: entry.sessionId,
+					worktree: entry.worktree,
+					branch: entry.branch,
+					activePhase: entry.activePhase,
+					lastHeartbeatMs: entry.lastHeartbeatMs,
+					ageMs: entry.ageMs,
+					status: entry.status,
+					planning: planningRowOf(sessionViewOf(entry, clock.nowMs, ttlMs)),
+				})),
+				conflicts: detected.conflicts,
 				heartbeat,
 			};
 		} catch (cause: unknown) {
@@ -231,12 +259,48 @@ export class PlanningReader {
 				branch: await branchOf(this.deps.fs, layout.gitDir),
 				activePhase: null,
 				lastHeartbeatMs: 0,
+				...(this.report === null ? {} : { planning: this.report }),
 			};
 			await presence.touch(record, ttlMs);
 			return { state: "written" };
 		} catch (cause: unknown) {
 			return { state: "failed", detail: cause instanceof Error ? cause.message : String(cause) };
 		}
+	}
+
+	/** Records this checkout's report from its latest scan. The server clock stamps it; without a clock the last report stands. */
+	private async stampReport(built: PlanningIndexResult): Promise<void> {
+		const presence = this.deps.presence;
+		if (presence === null) return;
+		const clock = await readClock(presence);
+		if (clock.ok) this.report = reportFromScan(built, clock.nowMs);
+	}
+
+	/**
+	 * Announces each conflict that is not already open, once. A conflict that is no longer detected leaves the open set, so its
+	 * return is announced again. A conflict the ledger did not store stays out of the set, so the next read tries again.
+	 */
+	private announce(root: string, conflicts: readonly PlanningConflict[]): Promise<void> {
+		return this.queued(async () => {
+			const repo = await repoOf(this.deps.fs, root);
+			const repoName = repo.state === "known" ? repo.repo : null;
+			const next = new Set<string>();
+			for (const conflict of conflicts) {
+				const signature = conflictSignature(conflict);
+				if (this.openConflicts.has(signature)) {
+					next.add(signature);
+					continue;
+				}
+				let stored = false;
+				try {
+					stored = await this.deps.emit(conflictEvent(conflict, repoName));
+				} catch {
+					stored = false;
+				}
+				if (stored) next.add(signature);
+			}
+			this.openConflicts = next;
+		});
 	}
 
 	/**
@@ -275,9 +339,9 @@ export class PlanningReader {
 		return noteFor(diff === null ? "baseline" : diff.removed === null ? "incomplete" : "unchanged", previous, diff);
 	}
 
-	/** Observations run one at a time, in arrival order, so two reads never publish the same change. */
-	private observe(root: string, seq: number, snapshot: PlanningSnapshot): Promise<PlanningChangeNote> {
-		const run = this.observing.then(() => this.observeOnce(root, seq, snapshot));
+	/** Observations and conflict announcements run one at a time, in arrival order, so no two reads publish the same thing. */
+	private queued<T>(task: () => Promise<T>): Promise<T> {
+		const run = this.observing.then(task);
 		this.observing = run.then(
 			() => undefined,
 			() => undefined,
@@ -290,6 +354,11 @@ export class PlanningReader {
 		if (this.baseline !== null && seq < this.baseline.seq) return;
 		this.baseline = { root, seq, snapshot };
 	}
+}
+
+/** A session's view as its row shows it: the scan time when known, or the reason it is not. */
+function planningRowOf(view: SessionView): PlanningRowState {
+	return view.status === "known" ? { state: "known", scannedAtMs: view.scannedAtMs } : { state: "unknown", reason: view.reason };
 }
 
 /** The counts of a complete diff. A change is only ever counted on one: a partial diff has no removals to count. */

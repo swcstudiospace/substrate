@@ -561,3 +561,104 @@ describe("a stalled Dragonfly reply", () => {
 		expect(view.state === "unavailable" && view.detail).toContain("deadline (20 ms presence SCAN)");
 	});
 });
+
+describe("planning reports and conflicts on the read path (phase 53, SOTA-09)", () => {
+	const SERVER_NOW = 1_000_000;
+
+	function claimed(sessionId: string, activePhase: string, phases: Array<[string, string[]]>): SessionRecord {
+		return {
+			sessionId,
+			worktree: `/work/${sessionId}`,
+			branch: `gsd/${sessionId}`,
+			activePhase,
+			lastHeartbeatMs: 0,
+			planning: { status: "known", scannedAtMs: SERVER_NOW, phases: phases.map(([phase, plans]) => ({ phase, plans })) },
+		};
+	}
+
+	function plane(presence: DragonflyPresenceStore, events: EventInput[], emitStores = true) {
+		return new PlanningReader({
+			settings: settingsFor(root),
+			fs: nodePlanningFs(),
+			presence,
+			emit: async (event: EventInput) => {
+				events.push(event);
+				return emitStores;
+			},
+		});
+	}
+
+	test("a read stamps this checkout's report into its heartbeat, and another reader sees its plan ids", async () => {
+		await write(`${PHASE}/52-PLAN.md`, `---\nplan: 52-01\n---\n${BODY}\n`);
+		await write(".git/HEAD", "ref: refs/heads/gsd/p52-wiring\n");
+		const presence = new DragonflyPresenceStore(new PresenceFake());
+		expect(await plane(presence, []).status()).toMatchObject({ state: "ok", heartbeat: { state: "written" } });
+		const [record] = (await presence.listWithin(10)).records;
+		expect(record?.planning).toEqual({ status: "known", scannedAtMs: SERVER_NOW, phases: [{ phase: "52", plans: ["52-01"] }] });
+	});
+
+	test("two known sessions on one phase emit one open event, and a second read with the same state emits nothing more", async () => {
+		const backend = new PresenceFake();
+		const presence = new DragonflyPresenceStore(backend);
+		await presence.touch(claimed("alpha", "53", [["53", ["53-01"]]]), 90_000);
+		await presence.touch(claimed("beta", "53", [["53", ["53-01"]]]), 90_000);
+		const events: EventInput[] = [];
+		const reader = plane(presence, events);
+
+		const first = await reader.sessions();
+		expect(first).toMatchObject({
+			state: "ok",
+			conflicts: [{ key: { by: "phase", phase: "53" }, plans: ["53-01"], sessionIds: ["alpha", "beta"], status: "open" }],
+		});
+		expect(events).toEqual([
+			expect.objectContaining({ surface: "substrate", kind: "warning", payload: expect.objectContaining({ kind: "planning.conflict" }) }),
+		]);
+
+		await reader.sessions();
+		expect(events).toHaveLength(1);
+	});
+
+	test("two known sessions on different phases that share a plan id emit one open plan event", async () => {
+		const presence = new DragonflyPresenceStore(new PresenceFake());
+		await presence.touch(claimed("alpha", "53", [["53", ["shared-plan"]]]), 90_000);
+		await presence.touch(claimed("beta", "54", [["54", ["shared-plan"]]]), 90_000);
+		const events: EventInput[] = [];
+		const view = await plane(presence, events).sessions();
+		expect(view).toMatchObject({ state: "ok", conflicts: [{ key: { by: "plan", plan: "shared-plan" }, phases: ["53", "54"] }] });
+		expect(events).toHaveLength(1);
+		expect(events[0]?.payload).toMatchObject({ key: { by: "plan", plan: "shared-plan" } });
+	});
+
+	test("a single session emits no event", async () => {
+		const presence = new DragonflyPresenceStore(new PresenceFake());
+		await presence.touch(claimed("alpha", "53", [["53", ["53-01"]]]), 90_000);
+		const events: EventInput[] = [];
+		expect(await plane(presence, events).sessions()).toMatchObject({ state: "ok", conflicts: [] });
+		expect(events).toEqual([]);
+	});
+
+	test("a conflict that clears and returns is announced again, and one the ledger did not store is retried on the next read", async () => {
+		const backend = new PresenceFake();
+		const presence = new DragonflyPresenceStore(backend);
+		await presence.touch(claimed("alpha", "53", [["53", []]]), 90_000);
+		await presence.touch(claimed("beta", "53", [["53", []]]), 90_000);
+		const events: EventInput[] = [];
+		const refusing = plane(presence, events, false);
+		await refusing.sessions();
+		await refusing.sessions();
+		expect(events).toHaveLength(2);
+
+		const accepting = plane(presence, events, true);
+		await accepting.sessions();
+		await accepting.sessions();
+		expect(events).toHaveLength(3);
+
+		await presence.touch(claimed("beta", "54", [["54", []]]), 90_000);
+		await accepting.sessions();
+		expect(events).toHaveLength(3);
+
+		await presence.touch(claimed("beta", "53", [["53", []]]), 90_000);
+		await accepting.sessions();
+		expect(events).toHaveLength(4);
+	});
+});

@@ -1,23 +1,22 @@
 /**
- * Conflict detection: keyed on parsed phase and plan ids, one event per conflicting phase, nothing
- * auto-resolved, and an unknown view blocks conflict-sensitive writes until a full scan completes.
+ * Conflict detection over presence snapshot records: a phase key and a plan key, one open event per key, nothing auto-resolved,
+ * and an unknown view that takes no part and blocks conflict-sensitive writes.
  */
 import { describe, expect, test } from "bun:test";
 import {
+	conflictEvent,
 	detectConflicts,
 	gateConflictSensitiveWrite,
 	PLANNING_CONFLICT,
 	type ConflictInput,
-	type SessionScan,
+	type PlanningConflict,
 } from "./conflicts.ts";
-import type { PlanningErrorRecord, PlanningFileRecord, PlanningRecord } from "./index.ts";
-import type { ClassifiedSession } from "./presence.ts";
+import type { ClassifiedSession, PlanningReport, UnknownViewReason } from "./presence.ts";
 
 const NOW = 1_000_000;
 const MAX_AGE = 30_000;
-const HASH = "a".repeat(64);
 
-function session(sessionId: string, status: "active" | "stale" = "active", activePhase: string | null = "53"): ClassifiedSession {
+function session(sessionId: string, activePhase: string | null, planning: PlanningReport | undefined, status: "active" | "stale" = "active"): ClassifiedSession {
 	return {
 		sessionId,
 		worktree: `/work/${sessionId}`,
@@ -26,244 +25,203 @@ function session(sessionId: string, status: "active" | "stale" = "active", activ
 		lastHeartbeatMs: NOW,
 		status,
 		ageMs: 0,
+		...(planning === undefined ? {} : { planning }),
 	};
 }
 
-function planDoc(path: string, phase: string, plan: string): PlanningFileRecord {
-	return { path, kind: "phase", sha256: HASH, bytes: 10, phase, plan };
+/** A known report over `phases`, each entry a phase and the plan ids its index holds under it. */
+function known(phases: Array<[string, string[]]>, scannedAtMs = NOW): PlanningReport {
+	return { status: "known", scannedAtMs, phases: phases.map(([phase, plans]) => ({ phase, plans })) };
 }
 
-function phaseDoc(path: string, phase: string): PlanningFileRecord {
-	return { path, kind: "phase", sha256: HASH, bytes: 10, phase };
+function unknown(reason: UnknownViewReason, scannedAtMs = NOW): PlanningReport {
+	return { status: "unknown", scannedAtMs, reason };
 }
 
-function scanOk(sessionId: string, scannedAtMs: number, records: PlanningRecord[], truncated = false): SessionScan {
-	return { sessionId, scannedAtMs, result: { ok: true, index: { records, truncated, unlisted: [] } } };
+function input(sessions: ClassifiedSession[], overrides: Partial<ConflictInput> = {}): ConflictInput {
+	return { sessions, nowMs: NOW, maxScanAgeMs: MAX_AGE, ...overrides };
 }
 
-function scanFailed(sessionId: string, scannedAtMs: number): SessionScan {
-	return { sessionId, scannedAtMs, result: { ok: false, code: "planning-dir-unavailable" } };
-}
-
-function input(sessions: ClassifiedSession[], scans: SessionScan[], overrides: Partial<ConflictInput> = {}): ConflictInput {
-	return { sessions, scans, nowMs: NOW, maxScanAgeMs: MAX_AGE, ...overrides };
-}
-
-describe("detectConflicts: keyed on parsed phase and plan ids", () => {
-	test("two sessions on the same phase and plan produce one conflict event carrying both ids", () => {
+describe("detectConflicts: the phase key", () => {
+	test("two sessions on the same active phase emit one open phase event naming the plans they share", () => {
 		const report = detectConflicts(
-			input(
-				[session("worker-a"), session("worker-b")],
-				[
-					scanOk("worker-a", NOW, [planDoc(".planning/phases/53-x/53-01-PLAN.md", "53", "53-01-PLAN")]),
-					scanOk("worker-b", NOW, [planDoc("/other/.planning/phases/53-x/53-01-PLAN.md", "53", "53-01-PLAN")]),
-				],
-			),
+			input([
+				session("alpha", "53", known([["53", ["53-01", "53-02"]]])),
+				session("beta", "53", known([["53", ["53-01", "53-03"]]])),
+			]),
 		);
-
 		expect(report.conflicts).toEqual([
 			{
 				kind: PLANNING_CONFLICT,
 				status: "open",
-				phase: "53",
-				plans: ["53-01-PLAN"],
-				sessionIds: ["worker-a", "worker-b"],
+				key: { by: "phase", phase: "53" },
+				phases: ["53"],
+				plans: ["53-01"],
+				sessionIds: ["alpha", "beta"],
 				detectedAtMs: NOW,
 			},
 		]);
 	});
 
-	test("the same phase with different plans is one phase conflict with no shared plan", () => {
+	test("the same phase with no shared plan is one phase event with no plans named", () => {
 		const report = detectConflicts(
-			input(
-				[session("worker-a"), session("worker-b")],
-				[
-					scanOk("worker-a", NOW, [planDoc("p/53-01-PLAN.md", "53", "53-01-PLAN")]),
-					scanOk("worker-b", NOW, [planDoc("p/53-02-PLAN.md", "53", "53-02-PLAN")]),
-				],
-			),
+			input([session("alpha", "53", known([["53", ["53-01"]]])), session("beta", "53", known([["53", ["53-02"]]]))]),
 		);
-		expect(report.conflicts).toHaveLength(1);
-		expect(report.conflicts[0]).toMatchObject({ phase: "53", plans: [], sessionIds: ["worker-a", "worker-b"] });
+		expect(report.conflicts).toEqual([expect.objectContaining({ key: { by: "phase", phase: "53" }, plans: [] })]);
 	});
 
-	test("the same path with different parsed phases does not conflict: the key is the phase field, not the path", () => {
+	test("a single session emits no conflict", () => {
+		const report = detectConflicts(input([session("alpha", "53", known([["53", ["53-01"]]]))]));
+		expect(report.conflicts).toEqual([]);
+		expect(report.views).toEqual([expect.objectContaining({ sessionId: "alpha", status: "known" })]);
+	});
+
+	test("a session claims only its active phase: a phase its index merely contains is not a claim", () => {
 		const report = detectConflicts(
-			input(
-				[session("worker-a"), session("worker-b", "active", "54")],
-				[
-					scanOk("worker-a", NOW, [phaseDoc("shared/STATE.md", "53")]),
-					scanOk("worker-b", NOW, [phaseDoc("shared/STATE.md", "54")]),
-				],
-			),
+			input([session("alpha", "53", known([["52", ["52-01"]], ["53", []]])), session("beta", "52", known([["52", ["52-01"]]]))]),
 		);
 		expect(report.conflicts).toEqual([]);
 	});
 
-	test("different phases with different documents do not conflict", () => {
+	test("conflicts are sorted: phase keys by phase, before plan keys", () => {
 		const report = detectConflicts(
-			input(
-				[session("worker-a", "active", "52"), session("worker-b", "active", "53")],
-				[scanOk("worker-a", NOW, [phaseDoc("a.md", "52")]), scanOk("worker-b", NOW, [phaseDoc("b.md", "53")])],
-			),
+			input([
+				session("a", "54", known([["54", []]])),
+				session("b", "54", known([["54", []]])),
+				session("c", "53", known([["53", []]])),
+				session("d", "53", known([["53", []]])),
+			]),
 		);
-		expect(report.conflicts).toEqual([]);
-	});
-
-	test("conflicts are reported once per phase, sorted by phase", () => {
-		const report = detectConflicts(
-			input(
-				[session("w1", "active", "53"), session("w2", "active", "53"), session("w3", "active", "54"), session("w4", "active", "54")],
-				[
-					scanOk("w1", NOW, [phaseDoc("a", "53"), phaseDoc("b", "54")]),
-					scanOk("w2", NOW, [phaseDoc("c", "53")]),
-					scanOk("w3", NOW, [phaseDoc("d", "54")]),
-					scanOk("w4", NOW, [phaseDoc("e", "54")]),
-				],
-			),
-		);
-		expect(report.conflicts.map((conflict) => [conflict.phase, conflict.sessionIds])).toEqual([
-			["53", ["w1", "w2"]],
-			["54", ["w3", "w4"]],
-		]);
-	});
-
-	test("a session claims only its active phase: shared historical phases produce no conflict", () => {
-		const historical = [phaseDoc("old-52.md", "52"), phaseDoc("old-53.md", "53"), phaseDoc("old-54.md", "54")];
-		const report = detectConflicts(
-			input(
-				[session("worker-a", "active", "53"), session("worker-b", "active", "54")],
-				[scanOk("worker-a", NOW, historical), scanOk("worker-b", NOW, historical)],
-			),
-		);
-		expect(report.conflicts).toEqual([]);
-		expect(report.views).toEqual([
-			{ sessionId: "worker-a", status: "known", scannedAtMs: NOW, phases: [{ phase: "53", plans: [] }] },
-			{ sessionId: "worker-b", status: "known", scannedAtMs: NOW, phases: [{ phase: "54", plans: [] }] },
+		expect(report.conflicts.map((conflict) => conflict.key)).toEqual([
+			{ by: "phase", phase: "53" },
+			{ by: "phase", phase: "54" },
 		]);
 	});
 });
 
-describe("detectConflicts: nothing is auto-resolved", () => {
-	test("a conflict stays open across detections, and both sessions stay active and known", () => {
-		const sessions = [session("worker-a"), session("worker-b")];
-		const scans = [scanOk("worker-a", NOW, [phaseDoc("a", "53")]), scanOk("worker-b", NOW, [phaseDoc("b", "53")])];
-
-		const first = detectConflicts(input(sessions, scans));
-		const second = detectConflicts(input(sessions, scans));
-
-		expect(second).toEqual(first);
-		expect(first.conflicts).toHaveLength(1);
-		expect(first.conflicts[0]?.status).toBe("open");
-		expect(first.views.map((view) => view.status)).toEqual(["known", "known"]);
+describe("detectConflicts: the plan key", () => {
+	test("two sessions on different active phases that share a plan id emit one open plan event", () => {
+		const report = detectConflicts(
+			input([session("alpha", "53", known([["53", ["shared-plan"]]])), session("beta", "54", known([["54", ["shared-plan"]]]))]),
+		);
+		expect(report.conflicts).toEqual([
+			{
+				kind: PLANNING_CONFLICT,
+				status: "open",
+				key: { by: "plan", plan: "shared-plan" },
+				phases: ["53", "54"],
+				plans: ["shared-plan"],
+				sessionIds: ["alpha", "beta"],
+				detectedAtMs: NOW,
+			},
+		]);
 	});
 
-	test("stale sessions take no part in detection and get no view", () => {
+	test("a plan shared inside one phase is covered by that phase's event and gets no second event", () => {
 		const report = detectConflicts(
-			input(
-				[session("worker-a"), session("worker-b", "stale")],
-				[scanOk("worker-a", NOW, [phaseDoc("a", "53")]), scanOk("worker-b", NOW, [phaseDoc("b", "53")])],
-			),
+			input([
+				session("alpha", "53", known([["53", ["53-01"]]])),
+				session("beta", "53", known([["53", ["53-01"]]])),
+				session("gamma", "54", known([["54", ["53-01"]]])),
+			]),
+		);
+		expect(report.conflicts.map((conflict) => conflict.key)).toEqual([
+			{ by: "phase", phase: "53" },
+			{ by: "plan", plan: "53-01" },
+		]);
+		expect(report.conflicts[1]).toMatchObject({ phases: ["53", "54"], sessionIds: ["alpha", "beta", "gamma"] });
+	});
+
+	test("different phases with different plan ids do not conflict", () => {
+		const report = detectConflicts(
+			input([session("alpha", "53", known([["53", ["53-01"]]])), session("beta", "54", known([["54", ["54-01"]]]))]),
 		);
 		expect(report.conflicts).toEqual([]);
-		expect(report.views.map((view) => view.sessionId)).toEqual(["worker-a"]);
 	});
 });
 
-describe("planning view status and the conflict-sensitive write gate", () => {
-	test("a failed scan is unknown and blocks writes until a full scan completes", () => {
-		const sessions = [session("worker-a")];
-		const failed = detectConflicts(input(sessions, [scanFailed("worker-a", NOW)]));
-		expect(failed.views).toEqual([{ sessionId: "worker-a", status: "unknown", reason: "scan-failed" }]);
-		expect(gateConflictSensitiveWrite(failed.views, "worker-a")).toEqual({
-			ok: false,
-			code: "planning-view-unknown",
-			reason: "scan-failed",
-		});
-
-		const repaired = detectConflicts(
-			input(sessions, [scanFailed("worker-a", NOW - 10), scanOk("worker-a", NOW, [phaseDoc("a", "53")])]),
-		);
-		expect(repaired.views[0]?.status).toBe("known");
-		expect(gateConflictSensitiveWrite(repaired.views, "worker-a")).toEqual({ ok: true });
-	});
-
-	test("a later failed scan overrides an earlier good one", () => {
-		const report = detectConflicts(
-			input([session("worker-a")], [scanOk("worker-a", NOW - 10, [phaseDoc("a", "53")]), scanFailed("worker-a", NOW)]),
-		);
-		expect(report.views[0]).toMatchObject({ status: "unknown", reason: "scan-failed" });
-	});
-
-	test("a truncated scan is unknown", () => {
-		const report = detectConflicts(input([session("worker-a")], [scanOk("worker-a", NOW, [phaseDoc("a", "53")], true)]));
-		expect(report.views[0]).toMatchObject({ status: "unknown", reason: "scan-truncated" });
-	});
-
-	test("a scan holding an unreadable record is unknown, because that record cannot be keyed", () => {
-		const unreadable: PlanningErrorRecord = {
-			path: ".planning/phases/53-x/53-02-PLAN.md",
-			sha256: null,
-			bytes: null,
-			error: { code: "too-large", detail: "exceeds 262144 bytes" },
-		};
-		const report = detectConflicts(input([session("worker-a")], [scanOk("worker-a", NOW, [unreadable])]));
-		expect(report.views[0]).toMatchObject({ status: "unknown", reason: "scan-has-errors" });
-	});
-
-	test("a scan older than the threshold is unknown; one exactly at the threshold is still known", () => {
-		const old = detectConflicts(input([session("worker-a")], [scanOk("worker-a", NOW - MAX_AGE - 1, [phaseDoc("a", "53")])]));
-		expect(old.views[0]).toMatchObject({ status: "unknown", reason: "scan-stale" });
-
-		const edge = detectConflicts(input([session("worker-a")], [scanOk("worker-a", NOW - MAX_AGE, [phaseDoc("a", "53")])]));
-		expect(edge.views[0]?.status).toBe("known");
-	});
-
-	test("a session with no scan is unknown and cannot be a conflict party", () => {
-		const report = detectConflicts(
-			input([session("worker-a"), session("worker-b")], [scanOk("worker-b", NOW, [phaseDoc("b", "53")])]),
-		);
+describe("detectConflicts: unknown views take no part", () => {
+	test("a session without a report is unknown with no-scan and is excluded", () => {
+		const report = detectConflicts(input([session("alpha", "53", undefined), session("beta", "53", known([["53", []]]))]));
 		expect(report.views).toEqual([
-			{ sessionId: "worker-a", status: "unknown", reason: "no-scan" },
-			{ sessionId: "worker-b", status: "known", scannedAtMs: NOW, phases: [{ phase: "53", plans: [] }] },
+			{ sessionId: "alpha", status: "unknown", reason: "no-scan" },
+			expect.objectContaining({ sessionId: "beta", status: "known" }),
 		]);
 		expect(report.conflicts).toEqual([]);
 	});
 
-	test("a session that is not active has no view, and its writes are refused as not active", () => {
-		const report = detectConflicts(input([session("worker-a", "stale")], []));
-		expect(gateConflictSensitiveWrite(report.views, "worker-a")).toEqual({
+	test("a truncated or otherwise unknown report is excluded from detection and reports its reason", () => {
+		const report = detectConflicts(
+			input([session("alpha", "53", unknown("scan-truncated")), session("beta", "53", known([["53", ["53-01"]]]))]),
+		);
+		expect(report.views).toContainEqual({ sessionId: "alpha", status: "unknown", reason: "scan-truncated" });
+		expect(report.conflicts).toEqual([]);
+	});
+
+	test("a report older than the threshold is stale; exactly the threshold is still known", () => {
+		const stale = detectConflicts(input([session("alpha", "53", known([["53", []]], NOW - MAX_AGE - 1)), session("beta", "53", known([["53", []]]))]));
+		expect(stale.views[0]).toEqual({ sessionId: "alpha", status: "unknown", reason: "scan-stale" });
+		expect(stale.conflicts).toEqual([]);
+
+		const edge = detectConflicts(input([session("alpha", "53", known([["53", []]], NOW - MAX_AGE)), session("beta", "53", known([["53", []]]))]));
+		expect(edge.views[0]).toMatchObject({ sessionId: "alpha", status: "known" });
+		expect(edge.conflicts).toHaveLength(1);
+	});
+
+	test("a stopped session takes no part in detection and gets no view", () => {
+		const report = detectConflicts(input([session("alpha", "53", known([["53", []]]), "stale"), session("beta", "53", known([["53", []]]))]));
+		expect(report.views.map((view) => view.sessionId)).toEqual(["beta"]);
+		expect(report.conflicts).toEqual([]);
+	});
+
+	test("the write gate refuses a conflict-sensitive write from an unknown view, and allows a known one", () => {
+		const report = detectConflicts(input([session("alpha", "53", unknown("scan-failed")), session("beta", "53", known([["53", []]]))]));
+		expect(gateConflictSensitiveWrite(report.views, "alpha")).toEqual({ ok: false, code: "planning-view-unknown", reason: "scan-failed" });
+		expect(gateConflictSensitiveWrite(report.views, "beta")).toEqual({ ok: true });
+		expect(gateConflictSensitiveWrite(report.views, "gamma")).toEqual({
 			ok: false,
 			code: "planning-view-unknown",
 			reason: "no-active-session",
 		});
 	});
+});
 
-	test("invalid detection bounds are rejected", () => {
-		expect(() => detectConflicts(input([], [], { maxScanAgeMs: 0 }))).toThrow(RangeError);
-		expect(() => detectConflicts(input([], [], { nowMs: Number.NaN }))).toThrow(RangeError);
+describe("detectConflicts: nothing is auto-resolved", () => {
+	test("a conflict stays open across detections of the same state", () => {
+		const snapshot = input([session("alpha", "53", known([["53", ["53-01"]]])), session("beta", "53", known([["53", ["53-01"]]]))]);
+		const first = detectConflicts(snapshot);
+		const second = detectConflicts(snapshot);
+		expect(second.conflicts).toEqual(first.conflicts);
+		expect(second.conflicts.every((conflict) => conflict.status === "open")).toBe(true);
+		expect(second.views.every((view) => view.status === "known")).toBe(true);
 	});
 });
 
-/** A plan document whose filename gives one id and whose parsed content declares another, as the index builds them. */
-function contentPlan(path: string, filePlan: string, frontmatter: Record<string, unknown>): PlanningFileRecord {
-	return { path, kind: "phase", sha256: HASH, bytes: 10, phase: "53", plan: filePlan, frontmatter };
-}
+describe("conflictEvent", () => {
+	const phaseConflict: PlanningConflict = {
+		kind: PLANNING_CONFLICT,
+		status: "open",
+		key: { by: "phase", phase: "53" },
+		phases: ["53"],
+		plans: ["53-01"],
+		sessionIds: ["alpha", "beta"],
+		detectedAtMs: NOW,
+	};
 
-describe("detectConflicts: a plan's identity is its parsed content", () => {
-	test("the same plan content under two filenames in one active phase reports the shared plan", () => {
-		const declares = { plan: "53-01" };
-		const report = detectConflicts(
-			input(
-				[session("worker-a"), session("worker-b")],
-				[
-					scanOk("worker-a", NOW, [contentPlan(".planning/phases/53-x/53-01-PLAN.md", "53-01-PLAN", declares)]),
-					scanOk("worker-b", NOW, [contentPlan("/other/.planning/phases/53-x/copy-PLAN.md", "copy-PLAN", declares)]),
-				],
-			),
-		);
+	test("names the phase and the shared plans, and is a warning on the substrate surface", () => {
+		const event = conflictEvent(phaseConflict, "owner/name");
+		expect(event).toMatchObject({ surface: "substrate", kind: "warning", repo: "owner/name" });
+		expect(event.summary).toContain("phase 53");
+		expect(event.payload).toMatchObject({ kind: PLANNING_CONFLICT, key: { by: "phase", phase: "53" }, plans: ["53-01"], sessionIds: ["alpha", "beta"] });
+	});
 
-		expect(report.conflicts).toHaveLength(1);
-		expect(report.conflicts[0]).toMatchObject({ phase: "53", plans: ["53-01"], sessionIds: ["worker-a", "worker-b"] });
+	test("names no repo when the origin is unknown", () => {
+		expect(conflictEvent(phaseConflict, null)).not.toHaveProperty("repo");
+	});
+
+	test("caps the id lists and keeps the full counts", () => {
+		const many = Array.from({ length: 40 }, (_, index) => `53-${String(index).padStart(2, "0")}`);
+		const event = conflictEvent({ ...phaseConflict, plans: many }, null);
+		expect(event.payload).toMatchObject({ planCount: 40, plans: many.slice(0, 32) });
 	});
 });
