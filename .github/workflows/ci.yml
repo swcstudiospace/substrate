@@ -4,18 +4,22 @@ name: CI
 # (docs/ci.md) and scripts/verify.test.ts fails if the two drift apart. CI adds the
 # Postgres-backed tests that skip on a machine without a database.
 #
-# Pull requests run on the organisation's VPS runner, the same way programming-desk's
-# gates do. CI_ENABLED is still the switch: while the repository variable is unset every job is
+# Every job runs on the Omega CI runner pool ([self-hosted, linux, x64, omega-ci],
+# swcstudiospace/Omega-Prime docs/ci-runners.md), never on GitHub-hosted runners. CI_ENABLED is still the switch: while the repository variable is unset every job is
 # skipped, which GitHub reports as a skipped (not failed) check.
 # `gh variable set CI_ENABLED --body true` turns the gate on; `gh variable delete CI_ENABLED`
 # is the kill switch.
 #
-# Pull requests from forks never reach the runner: a fork's code would otherwise run on the VPS.
+# Pull requests from forks never reach the runner: a fork's code would otherwise run on the shared pool.
 #
-# The scratch Postgres is published on 127.0.0.1:54321 only. Port 5432 on that runner is already taken.
+# The pool has no Docker, so the scratch Postgres 16 is not a service container: the local
+# `scratch-postgres` action starts a throwaway cluster from the runner image's PostgreSQL 16 binaries
+# (initdb, pg_ctl) in RUNNER_TEMP, on 127.0.0.1 and a port picked free per job, so parallel jobs on one
+# runner host never clash. It exports SUBSTRATE_TEST_PG_URL.
 #
 # The third job, `boot-gate`, is report-only and opt-in twice over: it needs CI_ENABLED and its own
-# repository variable BOOT_GATE, because it starts Docker containers on the shared runner.
+# repository variable BOOT_GATE. Its rehearsal harness still starts Docker containers, which the pool
+# does not have, so keep BOOT_GATE unset until the harness has a native-process store backend.
 on:
   pull_request:
   push:
@@ -35,26 +39,8 @@ jobs:
   verify:
     name: Typecheck, tests and repo locks
     if: vars.CI_ENABLED == 'true' && github.event_name != 'schedule' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 20
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: ci-scratch-only
-          POSTGRES_DB: substrate_test
-        ports:
-          - 127.0.0.1:54321:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d substrate_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-    env:
-      # A throwaway database that lives for this job. It un-skips the live index tests
-      # (leases, memory, search, graph bindings).
-      SUBSTRATE_TEST_PG_URL: postgres://postgres:ci-scratch-only@127.0.0.1:54321/substrate_test
     steps:
       - name: Check out the repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -63,6 +49,11 @@ jobs:
           # it needs history, not a one-commit clone.
           fetch-depth: 0
           persist-credentials: false
+
+      # A throwaway database that lives for this job. It exports SUBSTRATE_TEST_PG_URL, which
+      # un-skips the live index tests (leases, memory, search, graph bindings).
+      - name: Start a scratch Postgres 16
+        uses: ./.github/actions/scratch-postgres
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
@@ -89,12 +80,18 @@ jobs:
       - name: Repo locks (event vocabulary, store lock, audit policy)
         run: bun run check:phase-close
 
+      - name: Stop the scratch Postgres
+        if: always()
+        uses: ./.github/actions/scratch-postgres
+        with:
+          mode: stop
+
   dependency-audit:
     name: Known-vulnerability audit
     # Advisories appear without any change here, so this never gates a pull request. It runs
     # on main, on demand and weekly; a red run is the signal to upgrade.
     if: vars.CI_ENABLED == 'true' && github.event_name != 'pull_request'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 10
     steps:
       - name: Check out the repository
@@ -116,13 +113,15 @@ jobs:
   boot-gate:
     name: Boot and prove (report-only)
     # Boots this commit against scratch Postgres and GreptimeDB containers on the runner's Docker
+    # (not on the Omega CI pool yet: it has no Docker, so leave BOOT_GATE unset until the harness
+    # gains a native-process backend)
     # (the rehearsal harness), proves it over HTTP, freezes the scratch ledger for a real outage,
     # and removes everything. `continue-on-error` keeps it advisory: a red run is a report, never a
     # block. It starts containers, so it is off until `gh variable set BOOT_GATE --body true`, and it
     # does not run on the weekly schedule. No `services:` block: the harness owns its own stores.
     if: vars.CI_ENABLED == 'true' && vars.BOOT_GATE == 'true' && github.event_name != 'schedule' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     continue-on-error: true
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 15
     steps:
       - name: Check out the repository
