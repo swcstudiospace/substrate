@@ -13,6 +13,7 @@
  * failing open; this does not.
  */
 import { normalizeIdentifier } from "./event.ts";
+import { redact } from "./redact.ts";
 import { TERMINAL_GRAPH_STATUSES } from "./index-sweep.ts";
 import {
 	MEMORY_KINDS,
@@ -81,10 +82,12 @@ function isKnownSurface(value: string): boolean {
 	return (SURFACES as readonly string[]).includes(value);
 }
 
-/** Trim, cap and lowercase-fold a subject into the identity a conflict resolves on. */
+/** Redact, then cap and lowercase-fold, a subject into the identity a conflict resolves on. */
 export function normalizeSubject(subject: unknown): string | null {
 	if (typeof subject !== "string") return null;
-	const cleaned = normalizeIdentifier(subject.trim().slice(0, MAX_SUBJECT));
+	// Redact before capping, for the reason `normalizeIdentifier` does: a cap first can cut a
+	// token so its own pattern no longer matches, and the fragment is what would be stored.
+	const cleaned = redact(subject.trim()).slice(0, MAX_SUBJECT);
 	return cleaned ? cleaned.toLowerCase() : null;
 }
 
@@ -409,14 +412,25 @@ export function memoryExpiry(
 	return NOT_EXPIRED;
 }
 
+/** Who a memory read is for: its surface, and the repo it works in (null when it names none). */
+export interface MemoryCaller {
+	surface: string;
+	repo: string | null;
+}
+
 /**
- * Whether a caller on `surface` may see a row kept at `scope`. Only an `agent:` scope is restricted: it is
- * its own surface's alone, and every other scope is shared. A missing scope is shared, as it always was.
+ * Whether `caller` may see a row kept at `scope` and retained for `repo`.
+ *
+ * Only an `agent:` scope is restricted, and it is restricted twice: to its own surface, and to the repo it was
+ * written for. A caller that names no repo sees no agent row, and a row with no repo (legacy, or a write that
+ * named none) is seen by no caller. Every other scope is shared, and so is a missing scope, as it always was.
  * The index query and the derived-hit merge both apply this rule, so they cannot disagree.
  */
-export function visibleToSurface(scope: string | undefined, surface: string): boolean {
+export function visibleToCaller(scope: string | undefined, repo: string | null | undefined, caller: MemoryCaller): boolean {
 	if (scope === undefined) return true;
 	const normalized = scope.trim().toLowerCase();
 	if (!normalized.startsWith("agent:")) return true;
-	return normalized === `agent:${surface.trim().toLowerCase()}`;
+	if (normalized !== `agent:${caller.surface.trim().toLowerCase()}`) return false;
+	const callerRepo = normalizeIdentifier(caller.repo);
+	return callerRepo !== null && normalizeIdentifier(repo) === callerRepo;
 }

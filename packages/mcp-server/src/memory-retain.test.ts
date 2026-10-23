@@ -88,6 +88,22 @@ describe("forwardRetain", () => {
 		expect(emitted).toEqual([]);
 	});
 
+	test("an agent-scope memory carries its repo in the retain metadata, and one with no repo carries none", async () => {
+		const { fake, deps } = setup();
+		const request = { ...sourced(), scope: "agent:cursor", kind: "fact" as const, text: "x", writer: "cursor" };
+		const named = await forwardRetain(deps, request, accepted({ entry: entry({ scope: "agent:cursor", repo: "acme/app" }) }));
+		const unnamed = await forwardRetain(
+			deps,
+			request,
+			accepted({ entry: entry({ id: "mem_2", scope: "agent:cursor", repo: undefined }), idempotency_key: "mwd_key2" }),
+		);
+		expect(named.forwarded).toBe(true);
+		expect(unnamed.forwarded).toBe(true);
+		const [withRepo, withoutRepo] = fake.retains.map((retained) => retained.item.metadata);
+		expect(withRepo).toMatchObject({ scope: "agent:cursor", repo: "acme/app" });
+		expect(withoutRepo).not.toHaveProperty("repo");
+	});
+
 	test("a retry under the same key replaces instead of duplicating", async () => {
 		const { fake, deps } = setup();
 		const request = { ...sourced(), scope: "repo:acme/app", kind: "fact" as const, text: "x", writer: "cursor" };

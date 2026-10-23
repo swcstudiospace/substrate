@@ -4,7 +4,7 @@
  * Installed as a symlink: ~/.omp/agent/extensions/substrate-status.ts → this file, the same way
  * substrate-skills.ts is installed. Omp's loader auto-discovers that directory and accepts symlinks.
  *
- * What it reports is the server's own counters, not Omp's tool calls. Omp has no substrate MCP server
+ * What it shows is the server's own counters, not Omp's tool calls. Omp has no substrate MCP server
  * (mcp.json has no substrate entry), so tool calls made inside Omp are not counted here. The substrate
  * attributes traffic to surface "omp" itself; this extension reads GET /metrics and GET /healthz and
  * turns consecutive polls into deltas.
@@ -14,11 +14,10 @@
  * - Coverage: the known clients are the token file names in SUBSTRATE_TOKENS_DIR, with omp always included.
  *   A known client with no counters is NOT_INSTRUMENTED. One with counters is OBSERVED when it changed in the
  *   window, else NO_ACTIVITY_IN_WINDOW. A counted surface outside the list is UNREGISTERED_CLIENT: shown, not dropped.
- * - Ultrathink bar: after each render, publishes `busStatus` on the `substrate:status` event-bus channel
- *   (consumed by the Ultrathink bar), and republishes when `substrate:status-request` arrives.
- * - /substrate: detail is served through its notifications only — one fresh probe (or the poll already in
- *   flight), then the usage definition, coverage, omp counters, planes, cache and ledger. On error the
- *   counters are labelled last known, and the line says to run /substrate again.
+ * - /substrate: one fresh probe (or the poll already in flight), then the usage definition, coverage, omp counters,
+ *   planes, cache and ledger. On error the counters are labelled last known, and the line says to run /substrate again.
+ * - Ultrathink bar: after each poll, publishes `busStatus` on the `substrate:status` event-bus channel,
+ *   and republishes when `substrate:status-request` arrives. This is the only status surface: the extension sets no footer and no widget. See the docs.
  *
  * Auth: both polls send the omp bearer whenever one resolves. /metrics may require it once the server has tokens
  * configured. An unauthenticated loopback GET answered 200 when checked on 2026-10-15, so it is not assumed.
@@ -398,8 +397,8 @@ export async function probe(deps: ProbeDeps = {}): Promise<ProbeResult> {
 }
 
 /**
- * Fold one good snapshot into the state. Deltas are omp's difference from the previous good poll.
- * A changed startedAt means the server restarted: this poll becomes the new baseline and its delta is zero.
+ * Fold one good snapshot into the state, and mark each surface whose counters rose since the previous good poll.
+ * A changed startedAt means the server restarted: this poll becomes the new baseline and marks nothing.
  */
 export function applySnapshot(state: State, snapshot: Snapshot, at: number): void {
 	const prev = state.last;
@@ -654,14 +653,9 @@ function guard(task: () => Promise<void>): void {
 
 export default function (pi: OmpPi): void {
 	let state = createState();
-	let lastCtx: OmpContext | undefined;
 	let timer: ReturnType<typeof setInterval> | undefined;
 	const reloadKnown = (): void => {
 		state.known = knownClients(process.env, readTokenNames);
-	};
-
-	const render = (_ctx: OmpContext): void => {
-		publish();
 	};
 
 	const publish = (): void => {
@@ -673,12 +667,11 @@ export default function (pi: OmpPi): void {
 		pi.events?.on(SUBSTRATE_STATUS_REQUEST, () => publish());
 	} catch {}
 
-	const poll = async (ctx: OmpContext, force: boolean): Promise<void> => {
-		lastCtx = ctx;
+	const poll = async (force: boolean): Promise<void> => {
 		if (!force && !shouldPoll(Date.now(), state.lastPollAt, POLL_MS)) return;
 		reloadKnown();
 		await refresh(state);
-		render(ctx);
+		publish();
 	};
 
 	pi.on("session_start", (_event, ctx) =>
@@ -686,16 +679,12 @@ export default function (pi: OmpPi): void {
 			const id = sessionIdOf(ctx);
 			if (id !== state.sessionId) state = createState(id);
 			clearInterval(timer);
-			timer = setInterval(() => {
-				const current = lastCtx;
-				if (current) guard(() => poll(current, false));
-			}, POLL_MS);
+			timer = setInterval(() => guard(() => poll(false)), POLL_MS);
 			timer.unref();
-			await poll(ctx, true);
+			await poll(true);
 		}),
 	);
-
-	pi.on("agent_end", (_event, ctx) => guard(() => poll(ctx, false)));
+	pi.on("agent_end", () => guard(() => poll(false)));
 
 	pi.on("session_shutdown", () => {
 		clearInterval(timer);
@@ -705,11 +694,10 @@ export default function (pi: OmpPi): void {
 	pi.registerCommand("substrate", {
 		description: "Show Agent Substrate usage and server state",
 		handler: async (_args, ctx) => {
-			lastCtx = ctx;
 			try {
 				reloadKnown();
 				await settleWithin(refresh(state), SUBSTRATE_WAIT_MS);
-				render(ctx);
+				publish();
 				ctx.ui.notify(formatSummary(state, Date.now()).join("\n"), state.lastProbe?.ok ? "info" : "warning");
 			} catch {
 				ctx.ui.notify("substrate: status unavailable", "error");

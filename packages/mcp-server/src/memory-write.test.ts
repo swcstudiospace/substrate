@@ -486,6 +486,46 @@ describe("denied — default-deny RBAC", () => {
 		expect(digest.outcome).toBe("accepted");
 	});
 
+	test("a lesson whose subject carries a secret is parked even when the body is empty", async () => {
+		// The subject is judged on its own, so the lesson checks must not refuse the write first.
+		const token = `ghp_${"a".repeat(40)}`;
+		const parked = await write({ subject: `lesson:v1.3/session/${token}`, text: "" });
+		expect(parked.outcome).toBe("quarantined");
+		expect(parked.quarantine_reason).toBe("secret");
+		expect(store.entries()).toEqual([]);
+		expect(store.quarantined).toHaveLength(1);
+		expect(store.quarantined[0]?.subject).not.toContain(token);
+		expect(JSON.stringify(parked)).not.toContain(token);
+	});
+
+	test("an empty lesson with an ordinary subject is still refused as lesson.empty", async () => {
+		const headerOnly = await write({
+			subject: "lesson:v1.3/session/lease-epochs",
+			text: "[lessonbank]\nmilestone: v1.3\nphase: session\n\n",
+			source_event: "session:sess-empty",
+		});
+		expect(headerOnly.outcome).toBe("denied");
+		expect(headerOnly.reason).toBe("lesson.empty");
+		const bare = await write({ subject: "lesson:v1.3/session/lease-epochs", text: "" });
+		expect(bare.reason).toBe("text.empty");
+		expect(store.entries()).toEqual([]);
+		expect(store.quarantined).toEqual([]);
+	});
+
+	test("a reviewed lesson subject that is only a placeholder still runs the lesson checks", async () => {
+		const placeholder = await write({
+			subject: "lesson:v1.3/session/tbd",
+			text: "[lessonbank]\nmilestone: v1.3\nphase: session\n\n",
+			kind: "fact",
+			source_event: "session:sess-tbd",
+			review_token: REVIEW_TOKEN,
+		});
+		expect(placeholder.outcome).toBe("denied");
+		expect(placeholder.reason).toBe("lesson.empty");
+		expect(store.entries()).toEqual([]);
+		expect(store.quarantined).toEqual([]);
+	});
+
 	test("a later source on the same body replays the stored row", async () => {
 		const first = await write({ text: "hermes finished n2 with the lease held", idempotency_key: "k-source" });
 		expect(first.outcome).toBe("accepted");
@@ -564,6 +604,43 @@ describe("quarantined", () => {
 		// see what was attempted, never so the substrate keeps the credential.
 		expect(store.quarantined[0]?.text).toContain(REDACTED);
 		expect(store.quarantined[0]?.text).not.toContain("ghp_");
+	});
+
+	test("a subject carrying an email is parked, as a body carrying one would be", async () => {
+		const result = await write({ subject: "jane@corp.com" });
+		expect(result.outcome).toBe("quarantined");
+		expect(result.quarantine_reason).toBe("pii");
+		expect(store.entries()).toEqual([]);
+		expect(store.quarantined[0]?.subject).toBe("jane@corp.com");
+	});
+
+	test("a subject carrying a credential is parked with the credential redacted, not cut", async () => {
+		// The token starts before the 200th character and runs past it.
+		const token = `ghp_${"a".repeat(40)}`;
+		const result = await write({ subject: `${"x".repeat(185)} ${token}` });
+		expect(result.outcome).toBe("quarantined");
+		expect(result.quarantine_reason).toBe("secret");
+		expect(store.quarantined[0]?.subject).toBe(`${"x".repeat(185)} [redacted]`);
+	});
+
+	test("a secret subject is parked even when the body is empty", async () => {
+		const result = await write({ subject: "password: hunter2", text: "" });
+		expect(result.outcome).toBe("quarantined");
+		expect(result.quarantine_reason).toBe("secret");
+		expect(store.entries()).toEqual([]);
+		expect(store.quarantined).toHaveLength(1);
+		expect(store.quarantined[0]?.subject).not.toContain("hunter2");
+	});
+
+	test("a reviewed PII body does not release a secret subject", async () => {
+		const result = await write({
+			text: "escalate to ove.govender@spectrumweb.test.net",
+			subject: "password: hunter2",
+			review_token: REVIEW_TOKEN,
+		});
+		expect(result.outcome).toBe("quarantined");
+		expect(result.quarantine_reason).toBe("secret");
+		expect(store.entries()).toEqual([]);
 	});
 
 	test("a reviewer's token does not release a secret", async () => {
@@ -1412,6 +1489,74 @@ describe("exactly-once", () => {
 		expect(store.entries()).toHaveLength(1);
 	});
 
+	test("an explicit key spent by one writer is not reused against another writer", async () => {
+		const first = await write({ writer: "hermes", text: "hermes finished n2", idempotency_key: "k-shared" });
+		expect(first.outcome).toBe("accepted");
+
+		// The second writer's write is its own: it is not refused as a reuse of the first writer's key,
+		// and it does not come back carrying the first writer's entry.
+		const other = await write({ writer: "omp", text: "omp finished n4", idempotency_key: "k-shared" });
+		expect(other.reason).not.toBe("idempotency.reused");
+		expect(other.outcome).toBe("accepted");
+		expect(other.verified_persisted).toBe(true);
+		expect(other.entry?.writer).toBe("omp");
+		expect(other.entry?.id).not.toBe(first.entry?.id);
+		expect(store.entries()).toHaveLength(2);
+	});
+
+	test("each writer still replays its own explicit key", async () => {
+		const first = await write({ writer: "hermes", text: "hermes finished n2", idempotency_key: "k-shared" });
+		const other = await write({ writer: "omp", text: "omp finished n4", idempotency_key: "k-shared" });
+
+		const again = await write({ writer: "hermes", text: "hermes finished n2", idempotency_key: "k-shared" });
+		expect(again.outcome).toBe("accepted");
+		expect(again.deduplicated).toBe(true);
+		expect(again.entry?.id).toBe(first.entry?.id);
+
+		const otherAgain = await write({ writer: "omp", text: "omp finished n4", idempotency_key: "k-shared" });
+		expect(otherAgain.deduplicated).toBe(true);
+		expect(otherAgain.entry?.id).toBe(other.entry?.id);
+		expect(store.entries()).toHaveLength(2);
+	});
+
+	test("a writer whose explicit key another writer spent replays its own write on a retry a day later", async () => {
+		const first = await write({ writer: "hermes", text: "hermes finished n2", idempotency_key: "k-shared" });
+		expect(first.outcome).toBe("accepted");
+		const other = await write({ writer: "omp", text: "omp finished n4", idempotency_key: "k-shared" });
+		expect(other.entry?.writer).toBe("omp");
+		expect(store.entries()).toHaveLength(2);
+
+		store.clock += DERIVED_KEY_WINDOW_MS + 1;
+		const again = await write({ writer: "omp", text: "omp finished n4", idempotency_key: "k-shared" });
+
+		expect(again.outcome).toBe("accepted");
+		expect(again.deduplicated).toBe(true);
+		expect(again.entry?.id).toBe(other.entry?.id);
+		expect(store.entries()).toHaveLength(2);
+	});
+
+	test("a same-writer explicit retry a day later inserts no second row, when another writer spent the key first", async () => {
+		await write({ writer: "omp", text: "omp finished n4", idempotency_key: "k-shared" });
+		const first = await write({ writer: "hermes", text: "hermes finished n2", idempotency_key: "k-shared" });
+		expect(first.outcome).toBe("accepted");
+		expect(store.entries()).toHaveLength(2);
+
+		store.clock += DERIVED_KEY_WINDOW_MS + 1;
+		const retry = await write({ writer: "hermes", text: "hermes finished n2", idempotency_key: "k-shared" });
+
+		expect(retry.outcome).toBe("accepted");
+		expect(retry.deduplicated).toBe(true);
+		expect(retry.entry?.id).toBe(first.entry?.id);
+		expect(store.entries()).toHaveLength(2);
+	});
+
+	test("a key reused with different content by its own writer is still refused", async () => {
+		await write({ writer: "hermes", text: "hermes finished n2", idempotency_key: "k-shared" });
+		const changed = await write({ writer: "hermes", text: "hermes changed n2", idempotency_key: "k-shared" });
+		expect(changed.reason).toBe("idempotency.reused");
+		expect(store.entries()).toHaveLength(1);
+	});
+
 	test("a retry with no key dedupes on the content", async () => {
 		const first = await write();
 		const retry = await write();
@@ -1572,6 +1717,22 @@ describe("the text cap", () => {
 		expect(store.entries()[0]?.text).toBe(long.slice(0, 4000));
 		expect(store.entries()[0]?.text.length).toBe(4000);
 		expect(result).toMatchObject({ truncated: true, limit: 4000 });
+	});
+
+	test("a secret that straddles the cap is redacted before the cut", async () => {
+		// The token starts before the 4000th character and runs past it. Cutting first
+		// would leave its prefix in the stored text, and the pattern would no longer match it.
+		const token = `ghp_${"a".repeat(36)}`;
+		const result = await write({ text: `${"x".repeat(3990)} ${token}` });
+
+		expect(result.outcome).toBe("quarantined");
+		expect(result.quarantine_reason).toBe("secret");
+		expect(result).toMatchObject({ truncated: true, limit: 4000 });
+		const stored = store.quarantined[0]?.text ?? "";
+		expect(stored).toContain("[REDACTED");
+		expect(stored).not.toContain("ghp_");
+		expect(stored).not.toContain(token.slice(0, 8));
+		expect(stored.length).toBe(4000);
 	});
 
 	test("a text of 100 characters is accepted with no truncated field", async () => {
@@ -1784,8 +1945,7 @@ describe("swarm surfaces — default-deny proven from the outside (ADR 0001 S3)"
 		expect(store.reviews[0]?.entry_id).toBe(released.entry?.id);
 	});
 
-	test("all 15 swarm surfaces hold working grants, own-agent only, and never person", () => {
-		expect(SWARM_SURFACES).toHaveLength(15);
+	test("all swarm surfaces hold working grants, own-agent only, and never person", () => {
 		const at = (surface: string, raw: string, kind: "decision" | "fact") => {
 			const scope = parseScope(raw);
 			if (!scope) throw new Error(raw);

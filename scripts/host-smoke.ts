@@ -9,8 +9,9 @@
  * refusal case and the loopback API bind. No rivet runtime, no daemon, no
  * substrate writes — the gated tail stays operator-run.
  */
-import { randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { randomBytes, randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApiServer } from "../packages/host/src/api.ts";
@@ -213,11 +214,29 @@ export function workedVm(actor: WorkedActor): VmHandle {
 	};
 }
 
+/**
+ * A real `git worktree add` checkout under `dir`: the production `.git` shape, a gitdir pointer file into the
+ * main repo's `.git/worktrees/<gid>`. The host is pointed at `worktreesRoot` through its worktreeRoot seam.
+ */
+function addWorktree(dir: string, gid: string, branch: string): { worktreesRoot: string; worktree: string; gitDir: string } {
+	const main = join(dir, "main");
+	const worktreesRoot = join(dir, "worktrees");
+	const worktree = join(worktreesRoot, gid);
+	mkdirSync(main);
+	mkdirSync(worktreesRoot);
+	const git = (args: string[]) => execFileSync("git", args, { cwd: main, stdio: "ignore" });
+	git(["-c", "init.defaultBranch=main", "init", "-q"]);
+	git(["-c", "user.name=smoke", "-c", "user.email=smoke@substrate.local", "commit", "-q", "--allow-empty", "-m", "init"]);
+	git(["worktree", "add", "-q", "-b", branch, worktree]);
+	return { worktreesRoot, worktree, gitDir: realpathSync(join(main, ".git", "worktrees", gid)) };
+}
+
 /** Fake git/gh runner for the worked node: probes answer clean, every argv is recorded. */
 export function workedRunner(gid: string, repo: string, branch: string, argvLog: string[][]): Runner {
 	return async (argv) => {
 		argvLog.push([...argv]);
-		const key = argv[0] === "git" && argv[1] === "-C" ? argv.slice(3).join(" ") : argv.join(" ");
+		// Host git argv: the guard (-C, --git-dir, --work-tree, hooks and fsmonitor off) precedes the subcommand.
+		const key = argv[0] === "git" ? argv.slice(argv.indexOf("core.fsmonitor=false") + 1).join(" ") : argv.join(" ");
 		if (key === "rev-parse --abbrev-ref HEAD") return { code: 0, stdout: `${branch}\n`, stderr: "" };
 		if (key === "remote get-url origin") return { code: 0, stdout: `https://github.com/${repo}.git\n`, stderr: "" };
 		if (key === "diff --name-only origin/main...HEAD") return { code: 0, stdout: "packages/host/src/tasks.ts\n", stderr: "" };
@@ -277,6 +296,7 @@ export async function runWorkedNode(): Promise<SmokeResult[]> {
 	const prUrl = `https://github.com/${repo}/pull/99`;
 	const dir = mkdtempSync(join(tmpdir(), "smoke-worked-"));
 	try {
+		const setup = addWorktree(dir, gid, branch);
 		const store = new TaskStore(join(dir, "tasks"));
 		const leases = new LeaseStore(join(dir, "leases"));
 		const calls: WorkedCalls = { heartbeats: [], completes: [], releases: [] };
@@ -335,6 +355,7 @@ export async function runWorkedNode(): Promise<SmokeResult[]> {
 			store,
 			substrate: { graphGet: (id: string) => substrate.graphGet(id) },
 			run: workedRunner(gid, repo, branch, argvLog),
+			worktreeRoot: setup.worktreesRoot,
 			log: (line: string) => logs.push(line),
 		};
 		const committed = await commit({ ...hostCtx, message: "worked node" });
@@ -344,7 +365,7 @@ export async function runWorkedNode(): Promise<SmokeResult[]> {
 		const flat = argvLog.map((argv) => argv.join(" "));
 		results.push(check("worked commit", "committed" in committed && committed.committed === true, "host-side add (scratch excluded) + commit"));
 		results.push(
-			check("worked push", "pushed" in pushed && pushed.pushed === branch && flat.includes(`git -C ${worktreeFor(gid)} push origin ${branch}`), `fixed target origin ${branch}`),
+			check("worked push", "pushed" in pushed && pushed.pushed === branch && flat.includes(`git -C ${setup.worktree} --git-dir=${setup.gitDir} --work-tree=${setup.worktree} -c core.hooksPath=/dev/null -c core.fsmonitor=false push origin ${branch}`), `fixed target origin ${branch}`),
 		);
 		const ghCalls = flat.filter((cmd) => cmd.startsWith("gh pr create"));
 		results.push(
@@ -534,7 +555,8 @@ export async function runSmoke(): Promise<SmokeResult[]> {
 		check("disk gate refuses", refused !== null && refused.includes(`floor ${DISK_FLOOR_BYTES}`), refused ?? "gate allowed (BAD)"),
 	);
 
-	const api = createApiServer(service, { engineReady: () => true });
+	const apiToken = randomUUID();
+	const api = createApiServer(service, { engineReady: () => true, token: apiToken });
 	const bound = await new Promise<{ address: string; port: number }>((resolve, reject) => {
 		api.on("error", reject);
 		api.listen(0, "127.0.0.1", () => {
@@ -546,7 +568,7 @@ export async function runSmoke(): Promise<SmokeResult[]> {
 	results.push(check("api loopback", bound.address === "127.0.0.1", `bound ${bound.address}:${bound.port}`));
 	const reply = await fetch(`http://127.0.0.1:${bound.port}/tasks`, {
 		method: "POST",
-		headers: { "content-type": "application/json" },
+		headers: { authorization: `Bearer ${apiToken}`, "content-type": "application/json" },
 		body: JSON.stringify({ bogus: true }),
 	});
 	results.push(check("api refuses bad body", reply.status === 400, `POST /tasks → ${reply.status}`));

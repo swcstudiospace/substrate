@@ -6,7 +6,7 @@
 // module only checks that the body is the shape the engine expects.
 
 import { redact } from "../redact.ts";
-import { SkillProposalDenied, type SkillProposalRequest } from "../service.ts";
+import { SkillProposalDenied, SkillProposalStale, type SkillProposalRequest } from "../service.ts";
 import { SURFACES } from "../types.ts";
 import { ProposeFailed, ProposeRefused } from "./propose.ts";
 
@@ -46,6 +46,9 @@ export function proposalBodyProblem(body: unknown): string | null {
 	) {
 		return "allow_doc_examples must be an array of pem or jwt";
 	}
+	if (b.expected_version !== undefined && (typeof b.expected_version !== "number" || !Number.isInteger(b.expected_version) || b.expected_version < 0)) {
+		return "expected_version must be a non-negative integer";
+	}
 	return null;
 }
 
@@ -63,13 +66,25 @@ export function toProposalRequest(body: Record<string, unknown>): SkillProposalR
 		...(body.mode !== undefined ? { mode: body.mode as "overlay" | "replace" } : {}),
 		...(body.reopen !== undefined ? { reopen: body.reopen as boolean } : {}),
 		...(body.allow_doc_examples !== undefined ? { allow_doc_examples: body.allow_doc_examples as Array<"pem" | "jwt"> } : {}),
+		...(body.expected_version !== undefined ? { expected_version: body.expected_version as number } : {}),
 	};
 }
 
 /** What a failed proposal answers with: the route's status and JSON body, and the tool's refusal payload. */
 export interface ProposalFailure {
-	status: 400 | 401 | 403 | 502;
-	body: { error: string; findings?: Array<{ file: string; line: number; rule: string }> };
+	status: 400 | 401 | 403 | 409 | 502;
+	body: {
+		refused?: true;
+		error: string;
+		findings?: Array<{ file: string; line: number; rule: string }>;
+		/** On a 409 `version.stale`: memory's conflict fields, so a caller reads one shape for both. */
+		outcome?: "conflict";
+		reason?: "version.stale";
+		remedy?: string;
+		current_version?: number | null;
+		verified_persisted?: false;
+		conflict_with?: string;
+	};
 }
 
 /**
@@ -78,10 +93,24 @@ export interface ProposalFailure {
  * never a value; a failed git or gh step is redacted and capped.
  */
 export function proposalFailure(cause: unknown): ProposalFailure | null {
-	if (cause instanceof SkillProposalDenied) return { status: cause.status, body: { error: cause.message } };
+	if (cause instanceof SkillProposalDenied) return { status: cause.status, body: { error: cause.message, refused: true } };
+	if (cause instanceof SkillProposalStale) {
+		return {
+			status: 409,
+			body: {
+				error: cause.message,
+				outcome: "conflict",
+				reason: "version.stale",
+				remedy: cause.remedy,
+				current_version: cause.current_version,
+				verified_persisted: false,
+				...(cause.conflict_with !== null ? { conflict_with: cause.conflict_with } : {}),
+			},
+		};
+	}
 	if (cause instanceof ProposeRefused) {
 		const findings = cause.findings?.map(({ file, line, rule }) => ({ file, line, rule }));
-		return { status: 400, body: { error: cause.message, ...(findings ? { findings } : {}) } };
+		return { status: 400, body: { error: cause.message, refused: true, ...(findings ? { findings } : {}) } };
 	}
 	if (cause instanceof ProposeFailed) {
 		return { status: 502, body: { error: redact(cause.message).slice(0, FAILURE_MESSAGE_MAX) } };

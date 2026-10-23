@@ -40,7 +40,6 @@ describe("buildEvidence", () => {
 
 		expect(bundle.stub).toBe(true);
 		expect(bundle.schema).toBe("substrate.evidence/v0");
-		expect(bundle.pending.join(" ")).toContain("Merkle anchor");
 		expect(bundle.pending.join(" ")).toContain("Phase 2");
 	});
 

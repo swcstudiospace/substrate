@@ -383,31 +383,47 @@ describe("memory_brief profiles (uplift-4 S1)", () => {
 });
 
 describe("the profile follows the bearer's surface, not the surface claimed in the request (uplift-4 S1)", () => {
-	test("REST: a grok-bot bearer claiming another surface in the body is still served compact", async () => {
+	test("REST: a grok-bot bearer claiming another surface in the body is refused, and its own request is served compact", async () => {
 		const token = randomUUID();
 		const { base } = await rig(COMPLETE_INDEX, { env: { SUBSTRATE_BRIEF_PROFILE: "enforce", SUBSTRATE_TOKEN_GROK_BOT: token } });
+		// A tokened caller's brief is its own surface's: a body naming another is 403, never served under that name.
 		const claimed = await fetch(`${base}/brief`, {
 			method: "POST",
 			body: JSON.stringify({ ...ARGS, surface: "cursor" }),
 			headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
 		});
-		expect(claimed.status).toBe(200);
-		expect(claimed.headers.get("x-substrate-brief-profile")).toBe("compact");
-		expect((await claimed.text()).split("\n")[0]).toBe("[brief: complete]");
+		expect(claimed.status).toBe(403);
+		const refusal = (await claimed.json()) as { error: string };
+		expect(refusal.error).toBe("this token is grok-bot and cannot act as cursor");
+		// With no claim in the body, the bearer's surface is the one served, compact under enforce.
+		const own = await fetch(`${base}/brief`, {
+			method: "POST",
+			body: JSON.stringify(ARGS),
+			headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+		});
+		expect(own.status).toBe(200);
+		expect(own.headers.get("x-substrate-brief-profile")).toBe("compact");
+		expect((await own.text()).split("\n")[0]).toBe("[brief: complete]");
 		// An explicit full still wins for that bearer.
 		const full = await fetch(`${base}/brief`, {
 			method: "POST",
-			body: JSON.stringify({ ...ARGS, surface: "cursor", profile: "full" }),
+			body: JSON.stringify({ ...ARGS, profile: "full" }),
 			headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
 		});
 		expect(full.headers.get("x-substrate-brief-profile")).toBe("full");
 	});
 
-	test("MCP: a grok-bot caller passing another surface argument is still served compact", async () => {
+	test("MCP: a grok-bot caller passing another surface argument is refused, and its own request is served compact", async () => {
 		const { client } = await rig(COMPLETE_INDEX, ENFORCE);
+		// A tokened caller's brief is its own surface's: a `surface` argument naming another is a tool error, not a brief.
 		const claimed = await brief(client, { ...ARGS, surface: "cursor" });
-		expect(claimed.structured.surface).toBe("cursor");
-		expect(claimed.structured.profile).toBe("compact");
-		expect(claimed.text.split("\n")[0]).toBe("[brief: complete]");
+		expect(claimed.isError).toBe(true);
+		const refusal = JSON.parse(claimed.text) as { error: string };
+		expect(refusal.error).toBe("this token is grok-bot and cannot act as cursor");
+		expect(claimed.structured).toBeUndefined();
+		const own = await brief(client, ARGS);
+		expect(own.structured.surface).toBe("grok-bot");
+		expect(own.structured.profile).toBe("compact");
+		expect(own.text.split("\n")[0]).toBe("[brief: complete]");
 	});
 });

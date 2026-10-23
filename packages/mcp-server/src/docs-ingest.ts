@@ -15,6 +15,9 @@
  * Uploads are idempotent by content hash, keyed by dataset plus source URL,
  * with per-page in-flight locks so concurrent retries share one upload.
  * Every upload carries `{source_url, commit, heading_path}` metadata (U-03).
+ * Each record carries a `version` (1 on first ingest, +1 per replacement). A page may name the
+ * `expected_version` it replaces; a mismatch refuses the call as `version.stale` (memory's
+ * contract, answered 409). A mismatch found before the first upload writes nothing; one a concurrent ingest causes mid-call refuses the remaining pages, and `changed` reports what already landed. Absent, the page ingests as before.
  * A replacement reports the superseded document id; with
  * `SUBSTRATE_DOCS_PRUNE_SUPERSEDED=1` (uplift-2 R6) the superseded document
  * is deleted through the documented delete call once the replacement has
@@ -62,6 +65,7 @@ import {
 	type RagflowConfig,
 } from "./planes/ragflow.ts";
 import { REDACTION_RULES, redact, redactSkillContent } from "./redact.ts";
+import { SKILL_NAME_RE } from "./skills/propose.ts";
 import type { EventInput, PlanningGraphHint, PlanningGraphRelation, Surface } from "./types.ts";
 
 /** One page may not exceed 1 MB (D25-05, Phase 21 precedent). */
@@ -113,56 +117,90 @@ export const nodeIo: ScanIo = { lstat, stat, readdir, readFile };
  * result is sorted by path, so a refresh ingests in a stable order.
  */
 export async function scanIngestPages(baseDir: string, roots: readonly string[], io: ScanIo = nodeIo): Promise<IngestPage[]> {
+	return scanPages(baseDir, roots, io, "skip");
+}
+
+/**
+ * The pages of an agent-skills checkout under `roots`: {@link scanIngestPages}, except that a path
+ * which exists but cannot be listed, stat'ed or read fails the scan. A skill whose `references/` tree
+ * is unreadable then fails its refresh, instead of ingesting fewer pages under a version that looks
+ * fresh. A missing path is still just absent; the size and link rules are unchanged.
+ */
+export async function readSkillsCheckoutPages(baseDir: string, roots: readonly string[], io: ScanIo = nodeIo): Promise<IngestPage[]> {
+	return scanPages(baseDir, roots, io, "fail");
+}
+
+async function scanPages(baseDir: string, roots: readonly string[], io: ScanIo, unreadable: Unreadable): Promise<IngestPage[]> {
 	const pages: IngestPage[] = [];
 	for (const root of roots) {
 		const absolute = resolve(baseDir, root);
-		let info: Stats;
-		try {
-			info = await io.lstat(absolute);
-		} catch {
-			continue; // absent or unreadable root: skipped, not fatal
-		}
+		const info = await tolerant(() => io.lstat(absolute), unreadable);
+		if (info === undefined) continue; // absent or unreadable root: skipped, not fatal under "skip"
 		if (info.isSymbolicLink()) continue; // a root that is itself a link is never followed
-		if (root.endsWith("/")) await collectDirectory(absolute, root, pages, io);
-		else if (info.isFile()) await addFilePage(absolute, root, pages, io);
+		if (root.endsWith("/")) await collectDirectory(absolute, root, pages, io, unreadable);
+		else if (info.isFile()) await addFilePage(absolute, root, pages, io, unreadable);
 	}
 	pages.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 	return pages;
 }
 
-async function collectDirectory(dir: string, prefix: string, pages: IngestPage[], io: ScanIo): Promise<void> {
-	let entries: Dirent[];
-	try {
-		entries = await io.readdir(dir, { withFileTypes: true });
-	} catch {
-		return; // missing or unreadable: skipped, not fatal
-	}
+/**
+ * The roots of an agent-skills checkout (phase 42, D42-2). A directory `<name>/` at the checkout root
+ * is a skill only when its name passes `SKILL_NAME_RE` (the rule `libraryNames` applies) and it holds a
+ * regular `SKILL.md`; its roots are that file and `<name>/references/` (a tree): the layout `writeTree`
+ * writes and the library projector reads. A directory that fails either check contributes no roots, so
+ * its notes never become searchable. Links are not skills. The listing throws when the checkout cannot be
+ * read, and so does a `SKILL.md` check that fails for any reason but the file being absent; the caller
+ * fails that refresh.
+ */
+export async function skillsCheckoutRoots(checkout: string, io: Pick<ScanIo, "readdir" | "lstat"> = nodeIo): Promise<string[]> {
+	const entries = await io.readdir(checkout, { withFileTypes: true });
+	const roots: string[] = [];
 	for (const entry of entries) {
-		if (entry.isSymbolicLink()) continue;
-		const relative = `${prefix}${entry.name}`;
-		if (entry.isDirectory()) await collectDirectory(join(dir, entry.name), `${relative}/`, pages, io);
-		else if (entry.isFile()) await addFilePage(join(dir, entry.name), relative, pages, io);
+		if (!entry.isDirectory() || !SKILL_NAME_RE.test(entry.name)) continue;
+		const manifest = await tolerant(() => io.lstat(join(checkout, entry.name, "SKILL.md")), "fail");
+		if (manifest?.isFile() === true) roots.push(`${entry.name}/SKILL.md`, `${entry.name}/references/`);
+	}
+	return roots;
+}
+
+/** How a scan treats a path it cannot read: skip it (agent-substrate), or fail the scan (an agent-skills checkout). */
+type Unreadable = "skip" | "fail";
+
+/**
+ * One filesystem read. A missing path yields undefined under either policy; any other failure yields
+ * undefined under "skip" and rethrows under "fail".
+ */
+async function tolerant<T>(read: () => Promise<T>, unreadable: Unreadable): Promise<T | undefined> {
+	try {
+		return await read();
+	} catch (cause) {
+		const missing = cause instanceof Error && "code" in cause && cause.code === "ENOENT";
+		if (unreadable === "fail" && !missing) throw cause;
+		return undefined;
 	}
 }
 
-async function addFilePage(absolute: string, path: string, pages: IngestPage[], io: ScanIo): Promise<void> {
+async function collectDirectory(dir: string, prefix: string, pages: IngestPage[], io: ScanIo, unreadable: Unreadable): Promise<void> {
+	const entries = await tolerant(() => io.readdir(dir, { withFileTypes: true }), unreadable);
+	if (entries === undefined) return; // a missing directory is skipped; an unreadable one only under "skip"
+	for (const entry of entries) {
+		if (entry.isSymbolicLink()) continue;
+		const relative = `${prefix}${entry.name}`;
+		if (entry.isDirectory()) await collectDirectory(join(dir, entry.name), `${relative}/`, pages, io, unreadable);
+		else if (entry.isFile()) await addFilePage(join(dir, entry.name), relative, pages, io, unreadable);
+	}
+}
+
+async function addFilePage(absolute: string, path: string, pages: IngestPage[], io: ScanIo, unreadable: Unreadable): Promise<void> {
 	// The size cap applies to the stat, before anything is read: a file the
 	// ingest would refuse as page-too-large is never loaded just to be thrown
 	// away. It is skipped like every other page the sweep cannot take —
 	// quietly, and counted only by its absence from the result.
-	let size: number;
-	try {
-		size = (await io.stat(absolute)).size;
-	} catch {
-		return; // missing or unreadable: skipped, not fatal
-	}
-	if (size > INGEST_PAGE_MAX_BYTES) return;
-	let body: string;
-	try {
-		body = await io.readFile(absolute, "utf8");
-	} catch {
-		return;
-	}
+	const stats = await tolerant(() => io.stat(absolute), unreadable);
+	if (stats === undefined || stats.size > INGEST_PAGE_MAX_BYTES) return;
+	const body = await tolerant(() => io.readFile(absolute, "utf8"), unreadable);
+	if (body === undefined) return;
 	const graph = extractPlanningGraphHint(path, body);
 	pages.push({
 		path,
@@ -299,6 +337,12 @@ export interface IngestPage {
 	heading_path?: string;
 	/** Planning-graph hint the scan extracted; set for `.planning/**.md` pages only. */
 	graph?: PlanningGraphHint;
+	/**
+	 * The version of this source URL's record the caller believes it is replacing (memory's
+	 * `expected_version` contract). Absent keeps today's behaviour; a mismatch refuses the call with
+	 * `version.stale` before anything is uploaded.
+	 */
+	expected_version?: number;
 }
 
 /**
@@ -396,7 +440,22 @@ export type PageSettlement =
  */
 export type IngestOutcome =
 	| { ok: true; results: IngestPageResult[]; stripped_images: number; changed: boolean; partial?: boolean }
-	| { ok: false; refused: true; reason: string; rules?: string[]; page?: string; changed: boolean };
+	| {
+			ok: false;
+			refused: true;
+			reason: string;
+			rules?: string[];
+			page?: string;
+			changed: boolean;
+			/** On `version.stale`: what to re-submit against (memory's remedy). */
+			remedy?: string;
+			/** The record's version now; null when nothing is recorded for the source URL. */
+			current_version?: number | null;
+			/** The document id of the record a stale write collided with. */
+			conflict_with?: string;
+			/** On `version.stale`: `false`, since the refused page was not stored. */
+			verified_persisted?: false;
+	  };
 
 /** A document this record's source URL once published, still on the plane unless pruned. */
 export interface SupersededDocument {
@@ -421,6 +480,8 @@ export interface IngestRecord {
 	document_id: string;
 	commit?: string;
 	superseded?: SupersededDocument[];
+	/** Monotonic per record: 1 on first ingest, +1 on each replacement. A legacy record loads as 1. */
+	version: number;
 }
 
 /** What a citation needs to know about a document id: its source URL and the commit it was uploaded under, if any. */
@@ -469,6 +530,8 @@ export interface IngestDeps {
 	datasets?: DatasetListSource;
 	/** Delete the superseded document after a replacement parses (`SUBSTRATE_DOCS_PRUNE_SUPERSEDED`); off keeps it. */
 	prune?: boolean;
+	/** How long a call waits behind another ingest of its dataset before refusing `dataset-lock-timeout`. Defaults to 180 s. */
+	datasetLockWaitMs?: number;
 	/** Where a failed prune is reported; stderr when omitted. */
 	log?: (line: string) => void;
 }
@@ -546,7 +609,7 @@ function warnRefusal(
 	deps: IngestDeps,
 	sessionId: string,
 	reason: string,
-	extra?: { rules?: string[]; page?: string; changed?: boolean },
+	extra?: { rules?: string[]; page?: string; changed?: boolean; remedy?: string; current_version?: number | null; conflict_with?: string; verified_persisted?: false },
 ): Promise<void> {
 	if (deps.surface === null) return Promise.resolve();
 	return deps
@@ -573,7 +636,7 @@ function refused(
 	deps: IngestDeps,
 	sessionId: string,
 	reason: string,
-	extra?: { rules?: string[]; page?: string; changed?: boolean },
+	extra?: { rules?: string[]; page?: string; changed?: boolean; remedy?: string; current_version?: number | null; conflict_with?: string; verified_persisted?: false },
 ): Promise<IngestOutcome> {
 	const { changed = false, ...locator } = extra ?? {};
 	const outcome: IngestOutcome = { ok: false, refused: true, reason, ...locator, changed };
@@ -643,11 +706,110 @@ function checkIngestPage(
 	return { ok: true, sourceUrl: page.source_url, body: stripped.body, size, stripped: stripped.stripped, sha: sha256(stripped.body) };
 }
 
+/** How long a call waits behind another ingest of its dataset before it is refused `dataset-lock-timeout`. */
+const DATASET_INGEST_LOCK_WAIT_MS = 180_000;
+
+/** Returned by the lock when its wait ended before the dataset was free. */
+const LOCK_WAIT_EXPIRED = "lock-wait-expired" as const;
+
+/**
+ * Each dataset's ingest queue tail, for this process. A call queues behind the tail, runs once the call ahead
+ * of it settles, and settles its own slot when it ends, on every path.
+ */
+const datasetIngestQueues = new Map<string, Promise<void>>();
+
+/**
+ * Runs `work` once no other ingest of `dataset` is ahead of it. A call still waiting after `waitMs` gives up
+ * without running `work`, so it writes nothing. A call that gave up keeps its slot in the queue until the calls
+ * ahead of it settle, so later calls still wait for them.
+ */
+async function withDatasetIngestLock<T>(dataset: string, waitMs: number, work: () => Promise<T>): Promise<T | typeof LOCK_WAIT_EXPIRED> {
+	const ahead = datasetIngestQueues.get(dataset) ?? Promise.resolve();
+	let settleSlot: () => void = () => undefined;
+	const slot = new Promise<void>((resolve) => {
+		settleSlot = () => resolve();
+	});
+	const tail = ahead.then(() => slot);
+	datasetIngestQueues.set(dataset, tail);
+	// The entry is dropped only once the queue is idle, so a new call never skips a running one.
+	void tail.then(() => {
+		if (datasetIngestQueues.get(dataset) === tail) datasetIngestQueues.delete(dataset);
+	});
+	let cancelExpiry: () => void = () => undefined;
+	const expired = new Promise<typeof LOCK_WAIT_EXPIRED>((resolve) => {
+		const timer = setTimeout(() => resolve(LOCK_WAIT_EXPIRED), waitMs);
+		cancelExpiry = () => clearTimeout(timer);
+	});
+	const turn = await Promise.race([ahead.then(() => "held" as const), expired]);
+	cancelExpiry();
+	if (turn === LOCK_WAIT_EXPIRED) {
+		settleSlot();
+		return LOCK_WAIT_EXPIRED;
+	}
+	try {
+		return await work();
+	} finally {
+		settleSlot();
+	}
+}
+
+/** The refusal `staleVersion` reports: the version expected against the one on record. */
+interface VersionConflict {
+	remedy: string;
+	current_version: number | null;
+	conflict_with?: string;
+	verified_persisted: false;
+}
+
+/**
+ * Memory's `expected_version` rule (`versionMismatch` in memory-write.ts), for one source URL. `planned` is the
+ * version an earlier page of this call leaves for that URL, when one does; `saved` is the record as it stood
+ * before this batch. Absent `expected` is today's behaviour. The check compares against `planned` when present,
+ * else `saved`; with neither, the record is version 0, so only an expected 0 (or none) passes. The reply's
+ * `current_version` and `conflict_with` always describe `saved`, the record a stale write collides with.
+ */
+function staleVersion(
+	planned: { version: number } | undefined,
+	saved: { version: number; document_id?: string } | undefined,
+	expected: number | undefined,
+): VersionConflict | null {
+	if (expected === undefined) return null;
+	const against = planned ?? saved;
+	if (!against) {
+		if (expected === 0) return null;
+		return {
+			remedy:
+				`No document is recorded for this source URL, so there is no version ${expected} to replace. ` +
+				"Re-submit without expected_version to record the first one.",
+			current_version: null,
+			verified_persisted: false,
+		};
+	}
+	if (expected === against.version) return null;
+	const reply = {
+		current_version: saved?.version ?? null,
+		verified_persisted: false as const,
+		...(saved?.document_id !== undefined ? { conflict_with: saved.document_id } : {}),
+	};
+	if (planned) {
+		return {
+			remedy:
+				`An earlier page of this call writes this source URL and leaves it at version ${planned.version}, not ${expected}. ` +
+				"Re-submit with that version, or in a separate call.",
+			...reply,
+		};
+	}
+	return {
+		remedy:
+			`The record for this source URL is version ${against.version} (${saved?.document_id ?? "no document id"}), not ${expected}. ` +
+			"Re-submit against the current version (current_version).",
+		...reply,
+	};
+}
+
 export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<IngestOutcome> {
 	const sessionId = deps.sessionId ?? `docs-ingest:${randomUUID()}`;
 	const roots = deps.roots ?? DEFAULT_INGEST_ROOTS;
-	const seen = deps.seen ?? new Map<string, IngestRecord>();
-	const locks = deps.locks ?? new Map<string, { task: Promise<PageSettlement>; sha: string }>();
 	const config = deps.config;
 	if (deps.surface === null) return refused(deps, sessionId, "unauthenticated");
 	if (deps.vmGuest === true) return refused(deps, sessionId, "vm-guest");
@@ -686,16 +848,125 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 		});
 	}
 
-	// Listing, upload and parse below are per-plane; the gates above are not.
+	// Both planes write one dataset's records under that dataset's lock; the records are read only once it is held.
+	const seen = deps.seen ?? new Map<string, IngestRecord>();
+	const locks = deps.locks ?? new Map<string, { task: Promise<PageSettlement>; sha: string }>();
 	if (backend === "lightrag") {
-		return ingestDocsLightrag(deps, input, sessionId, { roots, seen, locks, prepared, rejected, strippedImages });
+		return underDatasetLock(deps, input.dataset, sessionId, () =>
+			ingestDocsLightrag(deps, input, sessionId, { roots, seen, locks, prepared, rejected, strippedImages }),
+		);
 	}
 	if (config === null) return refused(deps, sessionId, "ragflow-not-configured");
+	return underDatasetLock(deps, input.dataset, sessionId, () => writeBatch(deps, config, input, prepared, { sessionId, strippedImages, seen, locks }));
+}
+
+/**
+ * Runs one ingest's plane work under its dataset's lock. A call still waiting when the lock's wait ends is
+ * refused `dataset-lock-timeout` and writes nothing.
+ */
+async function underDatasetLock(deps: IngestDeps, dataset: string, sessionId: string, work: () => Promise<IngestOutcome>): Promise<IngestOutcome> {
+	const waited = await withDatasetIngestLock(dataset, deps.datasetLockWaitMs ?? DATASET_INGEST_LOCK_WAIT_MS, work);
+	if (waited === LOCK_WAIT_EXPIRED) return refused(deps, sessionId, "dataset-lock-timeout");
+	return waited;
+}
+
+/** The reason one page may not be uploaded, with the locator a refusal reports alongside it. */
+interface PageRefusal {
+	reason: string;
+	extra?: { rules?: string[]; page?: string };
+}
+
+/**
+ * The gates of an ingest call, run over every page before the first call of a refresh writes. A refresh split
+ * into several calls runs this first, so a content refusal (an outside path, an oversize page, a secret) leaves
+ * the plane untouched, as it did when the whole refresh was one call. Each page passes the gate its ingest call
+ * applies on the same plane, planning-graph strings included. Returns the refusal reason, or undefined when every
+ * page passes; a refusal is emitted as an ingest call's refusal is. The per-call size is not checked here:
+ * {@link batchIngestPages} keeps each call under it, and each call checks it again.
+ */
+export async function preflightIngestPages(deps: IngestDeps, input: IngestInput): Promise<string | undefined> {
+	const sessionId = deps.sessionId ?? `docs-ingest:${randomUUID()}`;
+	const roots = deps.roots ?? DEFAULT_INGEST_ROOTS;
+	const backend: DocsBackend = deps.backend ?? (deps.lightragConfig != null ? "lightrag" : "ragflow");
+	const refusal = input.pages.length === 0 ? { reason: "no-pages" } : firstPageRefusal(input, roots, backend);
+	if (refusal === undefined) return undefined;
+	await refused(deps, sessionId, refusal.reason, refusal.extra);
+	return refusal.reason;
+}
+
+/** The first page of an ingest input the gates refuse, in input order. The per-call total is zero: see {@link preflightIngestPages}. */
+function firstPageRefusal(input: IngestInput, roots: readonly string[], backend: DocsBackend): PageRefusal | undefined {
+	for (const page of input.pages) {
+		const verdict = checkIngestPage(page, roots, input.commit, 0, backend === "lightrag" ? hintFor(page, input.graphHints) : undefined);
+		if (!verdict.ok) return { reason: verdict.reason, extra: { page: page.path, ...(verdict.rules !== undefined ? { rules: verdict.rules } : {}) } };
+	}
+	return undefined;
+}
+
+/**
+ * The pages split into consecutive calls, each within {@link INGEST_CALL_MAX_BYTES} as an ingest call measures
+ * it: the bytes after the remote-image strip. Order is kept, so the calls take the pages in the scan's sorted
+ * order. A single page over the limit gets a call of its own, where its own gates refuse it.
+ */
+export function batchIngestPages(pages: readonly IngestPage[]): IngestPage[][] {
+	const batches: IngestPage[][] = [];
+	let current: IngestPage[] = [];
+	let bytes = 0;
+	for (const page of pages) {
+		const size = Buffer.byteLength(stripRemoteImages(page.body).body, "utf8");
+		if (current.length > 0 && bytes + size > INGEST_CALL_MAX_BYTES) {
+			batches.push(current);
+			current = [];
+			bytes = 0;
+		}
+		current.push(page);
+		bytes += size;
+	}
+	if (current.length > 0) batches.push(current);
+	return batches;
+}
+
+/**
+ * Memory's `expected_version` rule, planned for every page of a call before its first write. A page whose source
+ * URL an earlier page of the call also writes is checked against the version that page leaves. Returns the first
+ * conflict, if any; the caller refuses the whole call with nothing uploaded or recorded. Both planes share it.
+ */
+function firstVersionConflict(
+	prepared: readonly PreparedPage[],
+	keyOf: (sourceUrl: string) => string,
+	seen: ReadonlyMap<string, IngestRecord>,
+): { page: string; stale: VersionConflict } | undefined {
+	const planned = new Map<string, { version: number; sha: string }>();
+	for (const { page, sourceUrl, sha } of prepared) {
+		const key = keyOf(sourceUrl);
+		const current = planned.get(key) ?? seen.get(key);
+		const stale = staleVersion(planned.get(key), seen.get(key), page.expected_version);
+		if (stale) return { page: page.path, stale };
+		if (current?.sha === sha) continue;
+		planned.set(key, { version: (current?.version ?? 0) + 1, sha });
+	}
+	return undefined;
+}
+
+/** The part of an ingest that runs under its dataset's lock: the dataset lookup, the version plan, then the writes. */
+async function writeBatch(
+	deps: IngestDeps,
+	config: RagflowConfig,
+	input: IngestInput,
+	prepared: PreparedPage[],
+	call: { sessionId: string; strippedImages: number; seen: Map<string, IngestRecord>; locks: Map<string, { task: Promise<PageSettlement>; sha: string }> },
+): Promise<IngestOutcome> {
+	const { sessionId, strippedImages, seen, locks } = call;
+	if (deps.surface === null) return refused(deps, sessionId, "unauthenticated");
 	const listed = await (deps.datasets ?? DIRECT_DATASET_LIST).list(config, deps.fetchImpl);
 	if (!listed.ok) return refused(deps, sessionId, listed.reason);
 	const dataset = listed.datasets.find((entry) => entry.name === input.dataset);
 	if (!dataset) return refused(deps, sessionId, "unknown-dataset");
 	const commit = input.commit ?? "unpinned";
+	// memory's `expected_version` contract, planned for every page before the first upload: a conflict refuses the
+	// whole call with nothing uploaded or recorded.
+	const conflict = firstVersionConflict(prepared, (sourceUrl) => recordKey(dataset.id, sourceUrl), seen);
+	if (conflict) return refused(deps, sessionId, "version.stale", { page: conflict.page, ...conflict.stale });
 
 	const results: IngestPageResult[] = [];
 	// True once any page of this call stored a document (and so a record).
@@ -703,6 +974,8 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	for (const { page, sourceUrl, body, sha } of prepared) {
 		const key = recordKey(dataset.id, sourceUrl);
 		for (;;) {
+			// The record as it stands when this page is written. The lock keeps this call the only writer of this
+			// dataset's records, so the version plan above still holds here and no refusal can follow an upload.
 			const prior = seen.get(key);
 			if (prior && prior.sha === sha) {
 				results.push({ path: page.path, source_url: sourceUrl, status: "unchanged", document_id: prior.document_id, content_sha256: sha });
@@ -777,6 +1050,7 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 						dataset_id: dataset.id,
 						source_url: sourceUrl,
 						document_id: uploaded.document_id,
+						version: replacedPrior ? replacedPrior.version + 1 : 1,
 						...(input.commit !== undefined ? { commit: input.commit } : {}),
 						...(lineage.length > 0 ? { superseded: lineage } : {}),
 					});
@@ -816,6 +1090,7 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	});
 	return { ok: true, results, stripped_images: strippedImages, changed: changed() };
 }
+
 /**
  * Ingest records on disk, so a restarted server does not re-upload pages it
  * already stored (Greptile P1), and — since version 2 (uplift-2 R6) — the
@@ -888,6 +1163,8 @@ export async function loadIngestRecords(
 			document_id: record.document_id,
 			...("commit" in record && typeof record.commit === "string" ? { commit: record.commit } : {}),
 			...(superseded.length > 0 ? { superseded } : {}),
+			// A record written before versions existed was ingested once: version 1.
+			version: "version" in record && typeof record.version === "number" && Number.isInteger(record.version) && record.version >= 1 ? record.version : 1,
 		});
 	}
 	const versions = "versions" in parsed ? versionsFromJson(parsed.versions) : createVersionStore();
@@ -1198,6 +1475,9 @@ async function ingestDocsLightrag(
 			error: redact(reason).slice(0, 200),
 		});
 	};
+	// memory's `expected_version` contract on the LightRAG plane, planned before the first write as on RAGFlow.
+	const conflict = firstVersionConflict(prepared, (sourceUrl) => lightragRecordKey(dataset.id, sourceUrl), seen);
+	if (conflict) return refused(deps, sessionId, "version.stale", { page: conflict.page, ...conflict.stale });
 	for (const { page, sourceUrl, body, sha } of prepared) {
 		const hint = hintFor(page, input.graphHints);
 		const key = lightragRecordKey(dataset.id, sourceUrl);
@@ -1287,6 +1567,7 @@ async function ingestDocsLightrag(
 						dataset_id: dataset.id,
 						source_url: sourceUrl,
 						document_id: uploaded.document_id,
+						version: replacedPrior ? replacedPrior.version + 1 : 1,
 						...(input.commit !== undefined ? { commit: input.commit } : {}),
 						...(lineage.length > 0 ? { superseded: lineage } : {}),
 					});

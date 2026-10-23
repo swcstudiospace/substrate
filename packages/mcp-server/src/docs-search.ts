@@ -104,6 +104,36 @@ export interface DegradedDataset {
 	reason: string;
 }
 
+/** One recalled memory in a `context` block; its text is untrusted and cut to 400 characters. */
+export interface DocsContextMemory {
+	id: string;
+	text: string;
+	scope: string | null;
+	repo: string | null;
+}
+
+/** One ledger event of the caller's session in a `context` block; its summary is cut to 200 characters. */
+export interface DocsContextEvent {
+	id: string;
+	ts: string;
+	kind: string;
+	surface: string;
+	summary: string;
+}
+
+/**
+ * The `context` block of a reply asked for with `context: true`. `degraded`
+ * names each source that gave nothing, joined by `; `, and is absent when
+ * every source answered. Its text is untrusted and framed by the same notice
+ * as the chunks.
+ */
+export interface DocsContext {
+	memories: DocsContextMemory[];
+	events: DocsContextEvent[];
+	degraded?: string;
+	untrusted: string;
+}
+
 export interface SearchReply {
 	chunks: SearchCitation[];
 	untrusted: string;
@@ -130,6 +160,12 @@ export interface SearchReply {
 	 * on pure RAGFlow replies, so existing readers are unaffected.
 	 */
 	graph?: SearchGraphStats;
+	/**
+	 * Present only when the caller asked for context (`context: true`): the
+	 * question's recalled memories and the session's recent ledger events.
+	 * Per call, so the answer cache never holds it.
+	 */
+	context?: DocsContext;
 }
 
 /**
@@ -152,8 +188,10 @@ export function citationProvenanceCounts(citations: readonly SearchCitation[]): 
  * Whether a reply may be stored by the answer cache: only a reply every
  * resolved dataset answered. R6's rule ("a degraded reply is never stored")
  * extended to the partial case, for the reason `degraded_datasets` states.
+ * A reply carrying `context` is per call: its events belong to one session, so it is never stored.
  */
 export function searchReplyStorable(reply: SearchReply): boolean {
+	if (Object.hasOwn(reply, "context")) return false;
 	return reply.degraded !== true && (reply.degraded_datasets === undefined || reply.degraded_datasets.length === 0);
 }
 
@@ -193,6 +231,35 @@ export type LightragRetriever = (
 export interface LightragDatasetList {
 	list(): Promise<DatasetListOutcome>;
 	invalidate(): void;
+}
+
+/** Limits of a `context` block; the budgets are enforced where the sources are read. */
+export const DOCS_CONTEXT_MEMORY_LIMIT = 3;
+export const DOCS_CONTEXT_EVENT_LIMIT = 5;
+export const DOCS_CONTEXT_MEMORY_CHARS = 400;
+export const DOCS_CONTEXT_SUMMARY_CHARS = 200;
+/** The ledger read's own budget, ms. The recall runs under `searchRecallBudgetMs`. */
+export const DOCS_CONTEXT_LEDGER_BUDGET_MS = 1000;
+
+/** The best few recalled memories, text redacted and cut for a `context` block. */
+export function docsContextMemories(hits: readonly { id: string; text: string; scope?: string; repo?: string }[]): DocsContextMemory[] {
+	return hits.slice(0, DOCS_CONTEXT_MEMORY_LIMIT).map((hit) => ({
+		id: hit.id,
+		text: redact(hit.text).slice(0, DOCS_CONTEXT_MEMORY_CHARS),
+		scope: hit.scope ?? null,
+		repo: hit.repo ?? null,
+	}));
+}
+
+/** The most recent ledger rows for a `context` block. Rows arrive in time order, so the last ones are the most recent. */
+export function docsContextEvents(rows: readonly Record<string, unknown>[]): DocsContextEvent[] {
+	return rows.slice(-DOCS_CONTEXT_EVENT_LIMIT).map((row) => ({
+		id: String(row.id),
+		ts: new Date(Number(row.ts)).toISOString(),
+		kind: String(row.kind),
+		surface: String(row.surface),
+		summary: redact(String(row.summary ?? "")).slice(0, DOCS_CONTEXT_SUMMARY_CHARS),
+	}));
 }
 
 /** A dataset version pinned at ingest time, for the commit fallback (D25-04). */

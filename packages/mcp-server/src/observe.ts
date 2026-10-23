@@ -62,14 +62,14 @@ import {
 	type Span,
 	type SpanContext,
 } from "@substrate/observability";
-import { buildEvidence, renderEvidenceHtml, type EvidenceBundle } from "@substrate/evidence";
+import { buildEvidence, devnetExplorerTxUrl, renderEvidenceHtml, type AnchorEvidence, type AnchorState, type ChainEvidence, type EvidenceBundle, type TeachableEvidence } from "@substrate/evidence";
 import { readFileSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import type { SubstrateConfig } from "./config.ts";
 import { registerMetricsHistoryMetrics } from "./metrics-history.ts";
 import { redact } from "./redact.ts";
-import type { Substrate, SubstrateObserver } from "./service.ts";
+import type { GraphTeachable, HourReport, Substrate, SubstrateObserver, VerifyOptions, VerifyVerdict } from "./service.ts";
 import type { Surface } from "./types.ts";
 
 /** Kept in step with `packages/mcp-server/package.json`. Reported as `service.version`. */
@@ -643,6 +643,12 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"docs_search",
 	"docs_ingest",
 	"desktop_run",
+	"railway_list",
+	"railway_monitor",
+	"railway_scale_suggest",
+	"railway_cost",
+	"railway_scale",
+	"railway_deploy",
 	// REST routes, as `server.ts` audits them. A route audited under a tool's own name
 	// (`/memory` as `memory_write`) is covered by that name above and not repeated.
 	"brief",
@@ -867,30 +873,32 @@ export async function buildGraphEvidence(
 	notes: string[] = [],
 	/** How many of the graph's records to list. Lowered by tests that exercise the bound. */
 	maxRecords: number = MAX_EVIDENCE_RECORDS,
+	/** The devnet reader and clock the hour check uses (D41-6). Tests inject a fake RPC; production leaves both unset. */
+	verify: Pick<VerifyOptions, "rpc" | "now"> = {},
 ): Promise<EvidenceBundle> {
-	const appChain = await substrate
-		// Anchors stay out of the bundle (FEATURES E-D1): the evidence chain is
-		// the per-session hash check, whatever devnet says about the hour.
-		.verifyGraph(graphId, { anchors: false })
-		.then((verdict) => ({
-			// `state`, not just `ok`. A null `ok` used to mean both "there is no ledger to
-			// check" and "the ledger would not answer", and those are opposite facts about
-			// an evidence document: one is a deployment that has no app chain, the other is
-			// a chain that exists and could not be verified. `substrate evidence` has to
-			// exit non-zero on the second and not on the first, so the bundle has to say
-			// which — see `chainState` and `cmdEvidence`.
-			state: verdict.reason === "greptime not configured" ? ("not-configured" as const) : chainState(verdict.ok),
-			ok: verdict.reason === "greptime not configured" ? null : verdict.ok,
-			records: verdict.events,
-			...(verdict.brokenAt ? { brokenAt: verdict.brokenAt } : {}),
-			...(verdict.reason ? { reason: verdict.reason } : {}),
-		}))
-		.catch((cause: unknown) => ({
-			state: "unverifiable" as const,
-			ok: null,
-			records: 0,
-			reason: redact(String(cause)),
-		}));
+	// One verify, with the hour report (D41-1): the chain verdict and the anchors come from one read.
+	// A verify that throws leaves the chain unverifiable and the anchors unread, rather than failing the bundle.
+	let verdict: VerifyVerdict | null = null;
+	let verifyFailure = "";
+	try {
+		// The hour loop is bounded by SUBSTRATE_VERIFY_TIMEOUT_MS (`verifyTimeoutMs`). An hour past that
+		// budget reads `unverified` with its reason, so the bundle still arrives; the CLI waits that budget
+		// plus a margin for this request (`cmdEvidence`).
+		verdict = await substrate.verifyGraph(graphId, { ...verify, anchors: true });
+	} catch (cause) {
+		verifyFailure = redact(String(cause));
+	}
+	const appChain: ChainEvidence = verdict
+		? appChainOf(verdict)
+		: { state: "unverifiable", ok: null, records: 0, reason: verifyFailure };
+	const anchors: AnchorEvidence[] = verdict ? verdict.hours.map(anchorEvidenceOf) : [];
+	const teachableNotes: string[] = [];
+	let teachables: TeachableEvidence[] = [];
+	try {
+		teachables = teachableEvidenceOf(await substrate.graphTeachables(graphId), anchors);
+	} catch (cause) {
+		teachableNotes.push(`The teachable moments of this graph could not be read: ${redact(String(cause))}`);
+	}
 
 	const {
 		verdict: chain,
@@ -912,6 +920,8 @@ export async function buildGraphEvidence(
 		service: observability.resource,
 		slos: observability.evaluate(),
 		appChain,
+		anchors,
+		teachables,
 		audit: {
 			chain,
 			durable: observability.audit.durable,
@@ -957,8 +967,67 @@ export async function buildGraphEvidence(
 								"hash was committed, so the decisions this bundle lists are not the decisions that were made.",
 					]
 				: []),
+			...(verdict === null
+				? ["The hour anchors of this graph were not read: its chain verification did not complete, so no hour is listed."]
+				: []),
+			...teachableNotes,
 			...notes,
 		],
+	});
+}
+
+/** The app-events chain, from the chain verdict alone: the hour report is not part of it. */
+function appChainOf(verdict: VerifyVerdict): ChainEvidence {
+	// `greptime not configured` is a deployment with no ledger, not a ledger that would not answer.
+	const notConfigured = verdict.chain.reason === "greptime not configured";
+	return {
+		state: notConfigured ? "not-configured" : chainState(verdict.chain.ok),
+		ok: notConfigured ? null : verdict.chain.ok,
+		records: verdict.events,
+		...(verdict.chain.brokenAt ? { brokenAt: verdict.chain.brokenAt } : {}),
+		...(verdict.chain.reason ? { reason: verdict.chain.reason } : {}),
+	};
+}
+
+/**
+ * One hour of the verify report, as a bundle anchor (D41-1, D41-5). Only `anchored` and `pending`
+ * pass. Every other status fails verify (`unanchored`, `mismatch`, `unverified`), so it reads as
+ * `unverified` here, with its reason.
+ */
+function anchorEvidenceOf(hour: HourReport): AnchorEvidence {
+	const status: AnchorState = hour.status === "anchored" || hour.status === "pending" ? hour.status : "unverified";
+	return {
+		period_start: hour.period_start,
+		period_end: hour.period_end,
+		status,
+		event_count: hour.event_count,
+		root: hour.root,
+		...(hour.tx_sig ? { tx_sig: hour.tx_sig, explorer_url: devnetExplorerTxUrl(hour.tx_sig) } : {}),
+		...(hour.slot === undefined ? {} : { slot: hour.slot }),
+		...(hour.reason ? { reason: hour.reason } : {}),
+	};
+}
+
+/**
+ * A graph's teachables, each with the anchor of its hour (D41-4). A teachable is anchored when its
+ * hour is, and its content still hashes to what the ledger stored: the hour's root holds the stored
+ * hash, so a teachable altered after its hour was anchored is not anchored, whatever the hour says.
+ * An event with no hour has no anchor.
+ */
+function teachableEvidenceOf(teachables: GraphTeachable[], anchors: AnchorEvidence[]): TeachableEvidence[] {
+	const byHour = new Map(anchors.map((anchor) => [anchor.period_start, anchor]));
+	return teachables.map((teachable) => {
+		const anchor = teachable.hour === null ? undefined : byHour.get(teachable.hour);
+		return {
+			event_id: teachable.event_id,
+			graph_id: teachable.graph_id,
+			...(teachable.session_id ? { session_id: teachable.session_id } : {}),
+			content_sha256: teachable.content_sha256,
+			hour: teachable.hour,
+			anchored: !teachable.tampered && anchor?.status === "anchored",
+			...(teachable.tampered ? { reason: "tampered" } : {}),
+			...(anchor?.tx_sig && anchor.explorer_url ? { tx_sig: anchor.tx_sig, explorer_url: anchor.explorer_url } : {}),
+		};
 	});
 }
 

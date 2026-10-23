@@ -231,6 +231,13 @@ describe("conflict identity", () => {
 		expect(normalizeSubject(undefined)).toBeNull();
 		expect(normalizeSubject("x".repeat(500))?.length).toBe(200);
 	});
+
+	test("redacts before it caps, so a token across the cap is never stored as a fragment", () => {
+		// The token starts before the 200th character and runs past it. Capping first would keep
+		// `ghp_` and some of its letters, which no credential pattern would then recognise.
+		const token = `ghp_${"a".repeat(40)}`;
+		expect(normalizeSubject(`${"x".repeat(185)} ${token}`)).toBe(`${"x".repeat(185)} [redacted]`);
+	});
 });
 
 describe("trust decay", () => {

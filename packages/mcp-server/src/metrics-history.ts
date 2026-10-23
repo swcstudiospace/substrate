@@ -819,3 +819,27 @@ export async function metricHistoryAnswer(deps: MetricHistoryDeps, params: URLSe
 	};
 	return deps.memo === undefined ? load() : deps.memo.answer(`${series}|${windowS}|${requestedStepS ?? ""}`, load);
 }
+
+/**
+ * The values of one `/slo/history` answer, one per time bucket in time order: the
+ * largest across the bucket's label values, so a labelled latency series reads as
+ * its worst surface. `null` when there is no 200 answer to read.
+ */
+export function bucketedValues(answer: MetricHistoryAnswer | null): { stepS: number; values: number[] } | null {
+	if (answer === null || answer.status !== 200) return null;
+	const { stepS, points } = answer.body;
+	if (typeof stepS !== "number" || !Array.isArray(points)) return null;
+	const rows: unknown[] = points;
+	const worst = new Map<number, number>();
+	for (const row of rows) {
+		if (typeof row !== "object" || row === null || !("ts" in row) || !("value" in row)) continue;
+		const { ts, value } = row;
+		if (typeof ts !== "string" || typeof value !== "number") continue;
+		const tsMs = Date.parse(ts);
+		if (!Number.isFinite(tsMs)) continue;
+		const previous = worst.get(tsMs);
+		if (previous === undefined || value > previous) worst.set(tsMs, value);
+	}
+	const values = [...worst.entries()].sort((a, b) => a[0] - b[0]).map(([, value]) => value);
+	return { stepS, values };
+}

@@ -1,21 +1,21 @@
 ---
 gsd_state_version: "1.0"
-milestone: v1.3
-milestone_name: Build plan completion
-status: Awaiting next milestone
-stopped_at: Milestone v1.3 completed and archived 2026-10-11; 43 gated live-tail proofs recorded in VALIDATION.md and phase runbooks
-last_updated: "2026-10-11T02:42:06.506Z"
-last_activity: 2026-10-11
-last_activity_desc: Milestone v1.3 completed and archived
+milestone: v1.3.x
+milestone_name: Should-have hardening (Planned)
+status: "v1.3.x phases 37-39 merged (PR #89 a1b7152, PR #90 1d4e4aa, PR #91 acb6767). Phase 40 (DOCS-MEMORY) in review as a draft PR: D-D1 in-repo, D-D3 blocked on a restore drill and approval, D-D4 narrowed and awaiting the user's acceptance. Phases 41-44 not started"
+stopped_at: phase 40 in review (draft PR); awaiting gates and the user's merge decision
+last_updated: "2026-10-21"
+last_activity: 2026-10-21
+last_activity_desc: phase 40 (DOCS-MEMORY) draft PR; phase 39 merged as PR #91
 state_head: 1a9f4fd365ede291c4e21be71b6ff236e0e49c67
 progress:
-  total_phases: 18
-  completed_phases: 18
-  total_plans: 76
-  completed_plans: 76
-  percent: 100
-current_phase: 33
-current_phase_name: lane-a-dispatch-route-and-approvals
+  total_phases: 8
+  completed_phases: 2
+  total_plans: 3
+  completed_plans: 2
+  percent: 25
+current_phase: 40
+current_phase_name: docs-memory
 ---
 
 # State

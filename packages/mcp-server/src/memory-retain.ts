@@ -213,6 +213,7 @@ async function forwardEntry(deps: RetainDeps, config: HindsightConfig, target: R
 		created: entry.created,
 	};
 	if (typeof entry.subject === "string" && entry.subject.length > 0) metadata.subject = entry.subject;
+	if (entry.repo) metadata.repo = entry.repo;
 	const texts = [entry.text, context, ...Object.values(metadata)];
 	const rules = [...new Set(texts.flatMap((text) => findingRules(text)))];
 	if (rules.length > 0) {

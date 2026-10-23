@@ -101,6 +101,6 @@ any tracked file, comments included.
 0600 separates OS accounts, not processes of one account. The swarm runner starts every agent as the same user, so each
 agent could read its siblings' env files and authenticate as them, and possession of a token is the identity: nothing
 server-side can tell the difference. What S1's identity work buys is real and bounded. A caller cannot **name** another
-surface over its own token, and accidental misattribution and shared-holder lease renewal stop. The 15 swarm identities
+surface over its own token, and accidental misattribution and shared-holder lease renewal stop. The 30 swarm identities
 are attributable, not unforgeable, among agents sharing an account. Making them a security boundary needs a separate OS
 principal per agent, or a broker that hands each process only its own short-lived credential; neither is part of S4.

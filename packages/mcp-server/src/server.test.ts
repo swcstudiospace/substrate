@@ -1,15 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { validateAgentCard } from "./agent-card.ts";
 import { loadConfig } from "./config.ts";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { request as httpRequest } from "node:http";
 import { scanIngestPages } from "./docs-ingest.ts";
 import type { EventQuery } from "./greptime.ts";
-import { memoryToolWriter } from "./mcp.ts";
+import { memoryToolWriter, surfaceClaimRefusal } from "./mcp.ts";
 import { createObservability } from "./observe.ts";
 import type { FetchLike } from "./planes/ragflow.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
+import { HindsightFake } from "./hindsight-fake.ts";
 import {
 	STREAM_BATCH,
 	createHttpServer,
@@ -23,6 +26,7 @@ import {
 } from "./server.ts";
 import { Substrate } from "./service.ts";
 import type { MemoryEntry, SubstrateEvent, Surface } from "./types.ts";
+import type { EventBus, EventHint } from "./event-bus.ts";
 
 /** Shorthand for a health report; every field defaults to the unhealthy value. */
 function health(over: Partial<Parameters<typeof healthStatus>[0]> = {}) {
@@ -65,7 +69,7 @@ describe("healthStatus", () => {
 async function serve(
 	greptime: unknown,
 	env: Record<string, string | undefined> = {},
-	stores: { ragflowFetch?: FetchLike } = {},
+	stores: { ragflowFetch?: FetchLike; hindsightFetch?: FetchLike; eventBus?: () => EventBus | null } = {},
 	options: HttpServerOptions = {},
 ) {
 	const config = loadConfig(env);
@@ -82,6 +86,7 @@ async function serve(
 	const address = server.address();
 	const port = typeof address === "object" && address ? address.port : 0;
 	return {
+		port,
 		post: (path: string, body: unknown, headers: Record<string, string> = {}) =>
 			fetch(`http://127.0.0.1:${port}${path}`, {
 				method: "POST",
@@ -97,6 +102,25 @@ async function serve(
 			return closed.promise;
 		},
 	};
+}
+
+/**
+ * One request sent with exactly the headers given. `fetch` sets or drops `host` and `origin` itself, and these tests are
+ * about what the caller sent. Resolves with the status alone. `agent: false` keeps the socket out of the pool, so
+ * `server.close` is not left waiting on it.
+ */
+function rawRequest(port: number, options: { path: string; method?: string; headers?: Record<string, string> }): Promise<number> {
+	const { promise, resolve, reject } = Promise.withResolvers<number>();
+	const request = httpRequest(
+		{ host: "127.0.0.1", port, method: options.method ?? "GET", path: options.path, headers: options.headers, agent: false },
+		(response) => {
+			response.resume();
+			resolve(response.statusCode ?? 0);
+		},
+	);
+	request.on("error", reject);
+	request.end();
+	return promise;
 }
 
 /**
@@ -278,6 +302,109 @@ describe("routes", () => {
 		}
 	});
 
+	/** The ledger stub plus the session read the docs context makes: each read is recorded and answers with no rows. */
+	function sessionLedger() {
+		const base = ledger();
+		const reads: Array<[string, string]> = [];
+		return {
+			reads,
+			greptime: {
+				...base.greptime,
+				readEvents: async (column: string, value: string) => {
+					reads.push([column, value]);
+					return [];
+				},
+			},
+		};
+	}
+
+	/** A Hindsight fake with one memory in the omp bank, so a recall that reaches it is answered. */
+	function ompBank(): HindsightFake {
+		const hindsight = new HindsightFake();
+		hindsight.seed("sub-omp", [{ id: "m1", text: "quote every version", document_id: "mwd_1", tags: ["omp"], metadata: {}, score: 0.9 }]);
+		return hindsight;
+	}
+
+	/** Recall reads the process environment at call time, so the Hindsight variables are set around the requests made inside `run`. */
+	async function withHindsightEnv<T>(banks: string, run: () => Promise<T>): Promise<T> {
+		const names = ["HINDSIGHT_URL", "HINDSIGHT_API_KEY", "HINDSIGHT_BANKS"] as const;
+		const saved = names.map((name) => [name, process.env[name]] as const);
+		process.env.HINDSIGHT_URL = "http://fake";
+		process.env.HINDSIGHT_API_KEY = "test-bearer";
+		process.env.HINDSIGHT_BANKS = banks;
+		try {
+			return await run();
+		} finally {
+			for (const [name, value] of saved) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
+	}
+
+	const OMP_ENV = { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" };
+	const OMP_AUTH = { authorization: "Bearer tok-omp" };
+
+	test("POST /docs/search with context true reaches the service and answers a context block", async () => {
+		const fake = new RagflowFake();
+		const hindsight = ompBank();
+		const { reads, greptime } = sessionLedger();
+		const { post, stop } = await serve(greptime, OMP_ENV, { ragflowFetch: fake.fetch, hindsightFetch: hindsight.fetch });
+		try {
+			const response = await withHindsightEnv("sub-omp", () =>
+				post("/docs/search", { question: "who reads RAGFlow?", session_id: "s-1", context: true }, OMP_AUTH),
+			);
+			const body = (await response.json()) as Record<string, unknown>;
+			expect(response.status).toBe(200);
+			expect(Object.hasOwn(body, "context")).toBe(true);
+			expect(hindsight.recalls()).toHaveLength(1);
+			expect(reads).toEqual([["session_id", "s-1"]]);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/search with context false or absent answers without a context key and reads neither source", async () => {
+		const fake = new RagflowFake();
+		const hindsight = ompBank();
+		const { reads, greptime } = sessionLedger();
+		const { post, stop } = await serve(greptime, OMP_ENV, { ragflowFetch: fake.fetch, hindsightFetch: hindsight.fetch });
+		try {
+			await withHindsightEnv("sub-omp", async () => {
+				for (const extra of [{ context: false }, {}]) {
+					const response = await post("/docs/search", { question: "who reads RAGFlow?", session_id: "s-1", ...extra }, OMP_AUTH);
+					const body = (await response.json()) as Record<string, unknown>;
+					expect(response.status).toBe(200);
+					expect(Object.hasOwn(body, "context")).toBe(false);
+				}
+			});
+			expect(hindsight.recalls()).toEqual([]);
+			expect(reads).toEqual([]);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/search refuses a string or null context with a 400, before recall or the ledger", async () => {
+		const fake = new RagflowFake();
+		const hindsight = ompBank();
+		const { reads, greptime } = sessionLedger();
+		const { post, stop } = await serve(greptime, OMP_ENV, { ragflowFetch: fake.fetch, hindsightFetch: hindsight.fetch });
+		try {
+			await withHindsightEnv("sub-omp", async () => {
+				for (const context of ["true", null]) {
+					const response = await post("/docs/search", { question: "who reads RAGFlow?", session_id: "s-1", context }, OMP_AUTH);
+					expect(response.status).toBe(400);
+					expect(String(((await response.json()) as Record<string, unknown>).error)).toContain("context a boolean");
+				}
+			});
+			expect(hindsight.recalls()).toEqual([]);
+			expect(reads).toEqual([]);
+		} finally {
+			await stop();
+		}
+	});
+
 	test("POST /docs/ingest stores a page against the fake", async () => {
 		const { greptime } = ledger();
 		const fake = new RagflowFake();
@@ -388,6 +515,22 @@ describe("routes", () => {
 			mkdirSync(dirname(join(root, path)), { recursive: true });
 			writeFileSync(join(root, path), body);
 		}
+		return root;
+	}
+
+	/** Run git in a checkout with a fixed identity and no signing; returns trimmed stdout. */
+	function git(root: string, ...args: string[]): string {
+		return execFileSync("git", ["-C", root, "-c", "user.name=substrate", "-c", "user.email=substrate@example.test", "-c", "commit.gpgsign=false", ...args], {
+			encoding: "utf8",
+		}).trim();
+	}
+
+	/** A checkout that is a git repository holding `files` in one commit: the HEAD an agent-skills trigger names. */
+	function gitCheckout(files: Record<string, string>): string {
+		const root = docsFixture(files);
+		git(root, "init", "-q");
+		git(root, "add", "-A");
+		git(root, "commit", "-q", "-m", "skills");
 		return root;
 	}
 
@@ -538,7 +681,65 @@ describe("routes", () => {
 		}
 	});
 
-	test("POST /docs/merge-trigger answers a dataset it holds no checkout of with a truthful noop", async () => {
+	test("POST /docs/merge-trigger ingests the agent-skills checkout when SUBSTRATE_AGENT_SKILLS_ROOT names one, then records the version", async () => {
+		const { greptime, written } = ledger();
+		const fake = new RagflowFake();
+		fake.parseDonePolls = 1;
+		const restore = patchFetch(fake.fetch);
+		// The library layout: each skill is a `<name>/` directory holding SKILL.md and a references/ tree. A
+		// directory with no SKILL.md is not a skill, so its file never reaches the plane.
+		const checkout = gitCheckout({
+			"demo-skill/SKILL.md": "---\nname: demo-skill\n---\nDemo skill body.\n",
+			"demo-skill/references/api.md": "The demo API reference.\n",
+			"notes/scratch.md": "Not a skill.\n",
+		});
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_AGENT_SKILLS_ROOT: checkout });
+		try {
+			const head = git(checkout, "rev-parse", "HEAD");
+			const response = await post("/docs/merge-trigger?wait=1", { dataset: "agent-skills", commit: head, content_sha256: "sha-skills" }, { authorization: "Bearer tok-omp" });
+			const body = (await response.json()) as { ok: boolean; version?: { version: string; commit: string; dataset_id: string } };
+			expect(response.status).toBe(200);
+			expect(body.ok).toBe(true);
+			expect(body.version).toMatchObject({ version: "v1", commit: head, dataset_id: "ds-leipzig-agent-skills" });
+			// Exactly the skill's SKILL.md and its reference reach the plane, each cited by its own file.
+			const sources = uploadsFor(fake, "ds-leipzig-agent-skills").map((upload) => upload.metadata.source_url ?? "");
+			expect(sources).toHaveLength(2);
+			expect(sources.some((url) => url.endsWith("/demo-skill/SKILL.md"))).toBe(true);
+			expect(sources.some((url) => url.endsWith("/demo-skill/references/api.md"))).toBe(true);
+			expect(refreshEvents(written)).toHaveLength(1);
+		} finally {
+			restore();
+			await stop();
+			rmSync(checkout, { recursive: true, force: true });
+		}
+	});
+
+	test("POST /docs/merge-trigger for agent-skills refuses a checkout that moved past the requested commit: commit-mismatch, nothing recorded", async () => {
+		const { greptime, written } = ledger();
+		const fake = new RagflowFake();
+		fake.parseDonePolls = 1;
+		const restore = patchFetch(fake.fetch);
+		const checkout = gitCheckout({ "demo-skill/SKILL.md": "---\nname: demo-skill\n---\nDemo skill body.\n" });
+		const requested = git(checkout, "rev-parse", "HEAD");
+		// The trigger names `requested`, then the checkout advances: the job must not ingest the newer content under that name.
+		writeFileSync(join(checkout, "demo-skill", "SKILL.md"), "---\nname: demo-skill\n---\nRevised skill body.\n");
+		git(checkout, "commit", "-q", "-am", "revise skill");
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_AGENT_SKILLS_ROOT: checkout });
+		try {
+			const response = await post("/docs/merge-trigger?wait=1", { dataset: "agent-skills", commit: requested, content_sha256: "sha-moved" }, { authorization: "Bearer tok-omp" });
+			const body = (await response.json()) as { ok: boolean; reason?: string };
+			expect(response.status).toBe(503);
+			expect(body).toMatchObject({ ok: false, reason: "commit-mismatch" });
+			expect(fake.uploads).toHaveLength(0);
+			expect(refreshEvents(written)).toHaveLength(0);
+		} finally {
+			restore();
+			await stop();
+			rmSync(checkout, { recursive: true, force: true });
+		}
+	});
+
+	test("POST /docs/merge-trigger for agent-skills is a truthful noop when SUBSTRATE_AGENT_SKILLS_ROOT is unset", async () => {
 		const { greptime, written } = ledger();
 		const fake = new RagflowFake();
 		const restore = patchFetch(fake.fetch);
@@ -550,9 +751,9 @@ describe("routes", () => {
 			{ docsIngestBaseDir: docs },
 		);
 		try {
-			// agent-skills is a known trigger row, but this server holds no checkout
-			// of it: a recorded version over documents that were never ingested
-			// would only lie to search, so the noop says what happened instead.
+			// agent-skills is a known trigger row, but with no checkout named this server holds none of it: a
+			// recorded version over documents that were never ingested would only lie to search, so the noop
+			// says what happened instead.
 			const response = await post("/docs/merge-trigger", { dataset: "agent-skills", commit: "c-ff", content_sha256: "sha-ff" }, { authorization: "Bearer tok-omp" });
 			const body = (await response.json()) as { ok: boolean; dataset: string; noop?: boolean; reason?: string };
 			expect(response.status).toBe(200);
@@ -566,6 +767,27 @@ describe("routes", () => {
 			restore();
 			await stop();
 			rmSync(docs, { recursive: true, force: true });
+		}
+	});
+
+	test("POST /docs/merge-trigger for agent-skills fails with checkout-unreadable when the named checkout is gone", async () => {
+		const { greptime, written } = ledger();
+		const fake = new RagflowFake();
+		const restore = patchFetch(fake.fetch);
+		// The named checkout does not exist, so its roots cannot be listed: the job fails before any plane call.
+		const gone = docsFixture({ "demo-skill/SKILL.md": "Demo skill body.\n" });
+		rmSync(gone, { recursive: true, force: true });
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_AGENT_SKILLS_ROOT: gone });
+		try {
+			const response = await post("/docs/merge-trigger?wait=1", { dataset: "agent-skills", commit: "c-gone", content_sha256: "sha-gone" }, { authorization: "Bearer tok-omp" });
+			const body = (await response.json()) as { ok: boolean; reason?: string };
+			expect(response.status).toBe(503);
+			expect(body).toMatchObject({ ok: false, reason: "checkout-unreadable" });
+			expect(fake.uploads).toHaveLength(0);
+			expect(refreshEvents(written)).toHaveLength(0);
+		} finally {
+			restore();
+			await stop();
 		}
 	});
 
@@ -1181,6 +1403,106 @@ describe("GET /events/stream", () => {
 			await stop();
 		}
 	});
+
+	/** A bus stand-in: each open stream's subscription is one listener here, and a test wakes them with a hint. */
+	function fakeHub() {
+		const listeners = new Set<(hint: EventHint) => void>();
+		const bus: EventBus = {
+			publish: async () => true,
+			subscribe: (listener) => {
+				listeners.add(listener);
+				return () => {
+					listeners.delete(listener);
+				};
+			},
+			stop: () => {},
+		};
+		return {
+			bus,
+			listeners,
+			wake: (id: string) => {
+				const hint: EventHint = { v: 1, id, kind: "note", surface: "omp", graph_id: null, ts: new Date(BASE).toISOString() };
+				for (const listener of [...listeners]) listener(hint);
+			},
+		};
+	}
+
+	test("a hint wakes an idle stream, which reads the ledger and delivers the new event before its idle timeout", async () => {
+		const stub = streamLedger([]);
+		const hub = fakeHub();
+		const { get, stop } = await serve(stub, { SUBSTRATE_TOKEN_OMP: "tok-omp" }, { eventBus: () => hub.bus }, { streamPollMs: 60_000, streamIdleMs: 60_000 });
+		try {
+			const controller = new AbortController();
+			const response = await get("/events/stream", { authorization: "Bearer tok-omp" }, controller.signal);
+			expect(response.status).toBe(200);
+			expect(hub.listeners.size).toBe(1);
+			// The poll and the idle close are both 60 s away, so only the hint can deliver this inside the 5 s read.
+			stub.append({ id: "e1", ts: BASE, summary: "landed during a long idle wait" });
+			hub.wake("e1");
+			const got = frames(await streamText(response, controller, 1, 5_000));
+			expect(got.map((frame) => frame.id)).toEqual(["e1"]);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a hint that arrives during a ledger read makes the stream read again at once, not at the long poll", async () => {
+		const stub = streamLedger([]);
+		const hub = fakeHub();
+		const answer = stub.eventIdsAfter;
+		const gate = Promise.withResolvers<void>();
+		let started = 0;
+		stub.eventIdsAfter = async (cursor, limit) => {
+			started += 1;
+			if (started === 1) await gate.promise;
+			return answer(cursor, limit);
+		};
+		const { get, stop } = await serve(stub, { SUBSTRATE_TOKEN_OMP: "tok-omp" }, { eventBus: () => hub.bus }, { streamPollMs: 60_000, streamIdleMs: 60_000 });
+		try {
+			const controller = new AbortController();
+			const response = await get("/events/stream", { authorization: "Bearer tok-omp" }, controller.signal);
+			expect(response.status).toBe(200);
+			// The first hint starts a ledger read and holds it open; the second arrives while that read is in flight.
+			hub.wake("e1");
+			hub.wake("e2");
+			expect(started).toBe(1);
+			gate.resolve();
+			// The read finished empty, so only the remembered hint can start this second read: the poll is 60 s away.
+			await until(() => started === 2);
+			controller.abort();
+		} finally {
+			await stop();
+		}
+	});
+
+	test("the stream holds its subscription for the life of the response and releases it when the response closes", async () => {
+		const hub = fakeHub();
+		const { get, stop } = await serve(streamLedger([]), { SUBSTRATE_TOKEN_OMP: "tok-omp" }, { eventBus: () => hub.bus }, { streamPollMs: 60_000, streamIdleMs: 60_000 });
+		try {
+			const controller = new AbortController();
+			await get("/events/stream", { authorization: "Bearer tok-omp" }, controller.signal);
+			expect(hub.listeners.size).toBe(1);
+			controller.abort();
+			await until(() => hub.listeners.size === 0);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("with the bus off the stream delivers on its poll alone", async () => {
+		const stub = streamLedger([]);
+		const { get, stop } = await serve(stub, { SUBSTRATE_TOKEN_OMP: "tok-omp" }, { eventBus: () => null }, { streamPollMs: 10, streamIdleMs: 60_000 });
+		try {
+			const controller = new AbortController();
+			const response = await get("/events/stream", { authorization: "Bearer tok-omp" }, controller.signal);
+			expect(response.status).toBe(200);
+			stub.append({ id: "e1", ts: BASE, summary: "arrived with the bus off" });
+			const got = frames(await streamText(response, controller, 1, 2_000));
+			expect(got.map((frame) => frame.id)).toEqual(["e1"]);
+		} finally {
+			await stop();
+		}
+	});
 });
 
 describe("agent card route", () => {
@@ -1221,6 +1543,7 @@ describe("agent card route", () => {
 		const address = server.address();
 		const port = typeof address === "object" && address ? address.port : 0;
 		return {
+			port,
 			get: (path: string, headers: Record<string, string> = {}) =>
 				fetch(`http://127.0.0.1:${port}${path}`, { headers }),
 			post: (path: string, headers: Record<string, string> = {}) =>
@@ -1307,6 +1630,124 @@ describe("agent card route", () => {
 		} finally {
 			await stop();
 		}
+	});
+
+	test("a tokened caller asks only for its own surface's card: another is 403, its own is 200", async () => {
+		const { get, stop } = await serveCard([teachable("mem_7", "cursor")], { SUBSTRATE_TOKEN_CURSOR: "tok-cursor" });
+		try {
+			const bearer = { authorization: "Bearer tok-cursor" };
+			expect((await get("/.well-known/agent-card.json?surface=swarm-a05-be", bearer)).status).toBe(403);
+			expect((await get("/.well-known/agent-card.json?surface=cursor", bearer)).status).toBe(200);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a hostile Origin is refused even with a valid bearer, and a loopback Origin is not", async () => {
+		const { port, stop } = await serveCard([teachable("mem_7", "cursor")], { SUBSTRATE_TOKEN_CURSOR: "tok-cursor" });
+		try {
+			const path = "/.well-known/agent-card.json?surface=cursor";
+			const authorization = "Bearer tok-cursor";
+			expect(await rawRequest(port, { path, headers: { authorization, origin: "https://evil.example" } })).toBe(403);
+			expect(await rawRequest(port, { path, headers: { authorization, origin: "http://localhost:5173" } })).toBe(200);
+		} finally {
+			await stop();
+		}
+	});
+});
+
+describe("HTTP edge", () => {
+	const bearer = { authorization: "Bearer tok-omp" };
+
+	test("a POST from a hostile Origin is 403 even with a valid bearer", async () => {
+		const { port, stop } = await serve(null, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		try {
+			const status = await rawRequest(port, {
+				method: "POST",
+				path: "/events/query",
+				headers: { ...bearer, "content-type": "application/json", origin: "https://evil.example" },
+			});
+			expect(status).toBe(403);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a Host that is neither loopback on the bound port nor the public origin is 421", async () => {
+		const { port, stop } = await serve(null, { SUBSTRATE_PUBLIC_ORIGIN: "https://substrate.example.test" });
+		try {
+			expect(await rawRequest(port, { path: "/livez", headers: { host: "evil.example" } })).toBe(421);
+			expect(await rawRequest(port, { path: "/livez", headers: { host: "127.0.0.1:1" } })).toBe(421);
+			expect(await rawRequest(port, { path: "/livez", headers: { host: `localhost:${port}` } })).toBe(200);
+			expect(await rawRequest(port, { path: "/livez", headers: { host: "substrate.example.test" } })).toBe(200);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a malformed Host is a 400, and the next request is still answered", async () => {
+		const { port, stop } = await serve(null);
+		try {
+			expect(await rawRequest(port, { path: "/livez", headers: { host: "bad host" } })).toBe(400);
+			expect(await rawRequest(port, { path: "/livez", headers: { host: `127.0.0.1:${port}` } })).toBe(200);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a POST whose body is not application/json is 415, and an unauthenticated one is still 401", async () => {
+		const { post, stop } = await serve(null, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		try {
+			expect((await post("/events/query", {}, { ...bearer, "content-type": "text/plain" })).status).toBe(415);
+			expect((await post("/memory/recall", {}, { ...bearer, "content-type": "text/plain" })).status).toBe(415);
+			expect((await post("/events/query", {}, { "content-type": "text/plain" })).status).toBe(401);
+			expect((await post("/events/query", {}, { ...bearer, "content-type": "application/json; charset=utf-8" })).status).not.toBe(415);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("/mcp refuses a declared body over the cap before reading it", async () => {
+		const { port, stop } = await serve(null, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		try {
+			// No body is sent. A server that read first would wait for one; this one answers at once. The cap is 6 000 000 bytes.
+			const status = await rawRequest(port, {
+				method: "POST",
+				path: "/mcp",
+				headers: { ...bearer, "content-type": "application/json", "content-length": "6000001" },
+			});
+			expect(status).toBe(413);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a tokened caller's /brief body cannot name another surface", async () => {
+		const { post, stop } = await serve(null, { SUBSTRATE_TOKEN_CURSOR: "tok-cursor" });
+		try {
+			const response = await post("/brief", { repo: "owner/name", surface: "swarm-a05-be" }, { authorization: "Bearer tok-cursor" });
+			expect(response.status).toBe(403);
+			expect(String(((await response.json()) as Record<string, unknown>).error)).toContain("swarm-a05-be");
+		} finally {
+			await stop();
+		}
+	});
+});
+
+describe("surfaceClaimRefusal", () => {
+	test("a tokened caller's own surface, or no claim at all, stands", () => {
+		expect(surfaceClaimRefusal("cursor", "cursor")).toBeNull();
+		expect(surfaceClaimRefusal("cursor", undefined)).toBeNull();
+		expect(surfaceClaimRefusal("cursor", null)).toBeNull();
+	});
+
+	test("another surface is refused, and a value that is not a surface is named as unrecognised", () => {
+		expect(surfaceClaimRefusal("cursor", "swarm-a05-be")).toBe("this token is cursor and cannot act as swarm-a05-be");
+		expect(surfaceClaimRefusal("cursor", { surface: "hermes" })).toBe("this token is cursor and cannot act as an unrecognised surface");
+	});
+
+	test("an untokened caller's claim is not refused here", () => {
+		expect(surfaceClaimRefusal(null, "swarm-a05-be")).toBeNull();
 	});
 });
 

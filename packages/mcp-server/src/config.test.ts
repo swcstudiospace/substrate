@@ -15,9 +15,11 @@
  */
 import { describe, expect, test } from "bun:test";
 import { SOLANA_CLI_DEFAULT } from "@substrate/ledger";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+	ConfigError,
 	DEFAULT_SKILLS_GH,
 	DEFAULT_SKILLS_REMOTE_URL,
 	DEFAULT_SKILLS_REPO,
@@ -25,10 +27,19 @@ import {
 	configWarnings,
 	isOperator,
 	loadConfig,
+	loadLedgerSettings,
 	parseRedisUrl,
-	railwayFromEnv,
+	railwayHostingFromEnv,
 	surfaceForToken,
 } from "./config.ts";
+
+// Generated for each run, so no token-shaped literal sits in the repository.
+const HERMES_TOKEN = `hermes-${randomUUID()}`;
+const GROK_TOKEN = `grok-bot-${randomUUID()}`;
+const CURSOR_TOKEN = `cursor-${randomUUID()}`;
+const OPERATOR_TOKEN = `operator-${randomUUID()}`;
+const SWARM_A05_TOKEN = `swarm-a05-${randomUUID()}`;
+const HOST_JOB_TOKEN = `host-job-${randomUUID()}`;
 
 describe("SUBSTRATE_ALLOW_ANONYMOUS", () => {
 	test("unset with a token keeps today's rule: untokened callers are refused", () => {
@@ -119,32 +130,32 @@ describe("a substrate token is never an operator", () => {
 
 	test("boot names the substrate surface, without printing its token", () => {
 		const config = loadConfig({
-			SUBSTRATE_TOKEN_CURSOR: "tok-operator",
-			SUBSTRATE_TOKEN_SUBSTRATE: "tok-substrate",
-			SUBSTRATE_OPERATOR_TOKENS: "tok-operator,tok-substrate",
+			SUBSTRATE_TOKEN_CURSOR: OPERATOR_TOKEN,
+			SUBSTRATE_TOKEN_SUBSTRATE: HOST_JOB_TOKEN,
+			SUBSTRATE_OPERATOR_TOKENS: `${OPERATOR_TOKEN},${HOST_JOB_TOKEN}`,
 		});
 		const warnings = configWarnings(config);
 
 		expect(warnings).toHaveLength(1);
 		expect(warnings[0]).toContain("substrate");
-		expect(warnings[0]).not.toContain("tok-substrate");
+		expect(warnings[0]).not.toContain(HOST_JOB_TOKEN);
 	});
 
 	test("a listed swarm token and a listed substrate token warn side by side", () => {
 		const config = loadConfig({
-			SUBSTRATE_TOKEN_CURSOR: "tok-operator",
-			SUBSTRATE_TOKEN_SWARM_A05_BE: "tok-a05",
-			SUBSTRATE_TOKEN_SUBSTRATE: "tok-substrate",
-			SUBSTRATE_OPERATOR_TOKENS: "tok-operator,tok-a05,tok-substrate",
+			SUBSTRATE_TOKEN_CURSOR: OPERATOR_TOKEN,
+			SUBSTRATE_TOKEN_SWARM_A05_BE: SWARM_A05_TOKEN,
+			SUBSTRATE_TOKEN_SUBSTRATE: HOST_JOB_TOKEN,
+			SUBSTRATE_OPERATOR_TOKENS: `${OPERATOR_TOKEN},${SWARM_A05_TOKEN},${HOST_JOB_TOKEN}`,
 		});
 
-		expect(isOperator(config, "Bearer tok-a05")).toBe(false);
-		expect(isOperator(config, "Bearer tok-substrate")).toBe(false);
+		expect(isOperator(config, `Bearer ${SWARM_A05_TOKEN}`)).toBe(false);
+		expect(isOperator(config, `Bearer ${HOST_JOB_TOKEN}`)).toBe(false);
 		const warnings = configWarnings(config);
 		expect(warnings).toHaveLength(2);
 		expect(warnings.join("\n")).toContain("swarm-a05-be");
 		expect(warnings.join("\n")).toContain("substrate");
-		expect(warnings.join("\n")).not.toContain("tok-substrate");
+		expect(warnings.join("\n")).not.toContain(HOST_JOB_TOKEN);
 	});
 });
 
@@ -216,8 +227,8 @@ describe("SUBSTRATE_SKILLS_*", () => {
 
 	test("a valid library warns nothing on its own", () => {
 		const config = loadConfig({
-			SUBSTRATE_TOKEN_CURSOR: "tok-operator",
-			SUBSTRATE_OPERATOR_TOKENS: "tok-operator",
+			SUBSTRATE_TOKEN_CURSOR: OPERATOR_TOKEN,
+			SUBSTRATE_OPERATOR_TOKENS: OPERATOR_TOKEN,
 		});
 
 		expect(configWarnings(config)).toEqual([]);
@@ -328,20 +339,136 @@ describe("parseRedisUrl refuses plaintext non-loopback redis (DOCS-06)", () => {
 	});
 });
 
-describe("railwayFromEnv: the LightRAG key without a public URL", () => {
+describe("railwayHostingFromEnv: the LightRAG key without a public URL", () => {
 	test("a private-DNS deployment keeps LIGHTRAG_API_KEY for the health probe, with no public URL", () => {
-		const railway = railwayFromEnv({ RAILWAY_PROJECT_ID: "proj", LIGHTRAG_API_KEY: " key-1 " });
+		const railway = railwayHostingFromEnv({ RAILWAY_PROJECT_ID: "proj", LIGHTRAG_API_KEY: " key-1 " });
 		expect(railway?.apiKey).toBe("key-1");
 		expect(railway?.lightrag).toBeNull();
 	});
 
 	test("SUBSTRATE_LIGHTRAG_API_KEY still wins over LIGHTRAG_API_KEY", () => {
-		const railway = railwayFromEnv({ RAILWAY_PROJECT_ID: "proj", LIGHTRAG_API_KEY: "plain", SUBSTRATE_LIGHTRAG_API_KEY: "override" });
+		const railway = railwayHostingFromEnv({ RAILWAY_PROJECT_ID: "proj", LIGHTRAG_API_KEY: "plain", SUBSTRATE_LIGHTRAG_API_KEY: "override" });
 		expect(railway?.apiKey).toBe("override");
 	});
 
 	test("a blank LIGHTRAG_API_KEY is no key", () => {
-		const railway = railwayFromEnv({ RAILWAY_PROJECT_ID: "proj", LIGHTRAG_API_KEY: "   " });
+		const railway = railwayHostingFromEnv({ RAILWAY_PROJECT_ID: "proj", LIGHTRAG_API_KEY: "   " });
 		expect(railway?.apiKey).toBeNull();
+	});
+});
+
+describe("a surface token's length and comparison", () => {
+	test("a short surface token still authenticates, and boot names only its variable", () => {
+		const config = loadConfig({ SUBSTRATE_TOKEN_GROK_BOT: "tok-grok" });
+
+		expect(surfaceForToken(config, "Bearer tok-grok")).toBe("grok-bot");
+		const warnings = configWarnings(config);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("SUBSTRATE_TOKEN_GROK_BOT");
+		expect(warnings[0]).not.toContain("tok-grok");
+	});
+
+	test("the floor is 16 characters: 15 is reported, 16 is not", () => {
+		expect(configWarnings(loadConfig({ SUBSTRATE_TOKEN_GROK_BOT: "f".repeat(15) }))).toHaveLength(1);
+		expect(configWarnings(loadConfig({ SUBSTRATE_TOKEN_GROK_BOT: "f".repeat(16) }))).toEqual([]);
+	});
+
+	test("a short surface token is reported even when operator tokens are configured", () => {
+		const config = loadConfig({ SUBSTRATE_TOKEN_CURSOR: "tok-operator", SUBSTRATE_OPERATOR_TOKENS: "tok-operator" });
+
+		const warnings = configWarnings(config);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("SUBSTRATE_TOKEN_CURSOR");
+		expect(isOperator(config, "Bearer tok-operator")).toBe(true);
+	});
+
+	test("every configured token authenticates to its own surface, and a near miss does not", () => {
+		const config = loadConfig({
+			SUBSTRATE_TOKEN_GROK_BOT: GROK_TOKEN,
+			SUBSTRATE_TOKEN_HERMES: HERMES_TOKEN,
+			SUBSTRATE_TOKEN_CURSOR: CURSOR_TOKEN,
+		});
+
+		expect(surfaceForToken(config, `Bearer ${GROK_TOKEN}`)).toBe("grok-bot");
+		expect(surfaceForToken(config, `Bearer ${HERMES_TOKEN}`)).toBe("hermes");
+		expect(surfaceForToken(config, `Bearer ${CURSOR_TOKEN}`)).toBe("cursor");
+		for (const near of [GROK_TOKEN.slice(0, -1), `${GROK_TOKEN}0`, GROK_TOKEN.replace("grok", "GROK"), `${CURSOR_TOKEN}x`]) {
+			expect(surfaceForToken(config, `Bearer ${near}`)).toBeNull();
+		}
+	});
+
+	test("operator authority follows the same exact match", () => {
+		const config = loadConfig({
+			SUBSTRATE_TOKEN_CURSOR: CURSOR_TOKEN,
+			SUBSTRATE_TOKEN_HERMES: HERMES_TOKEN,
+			SUBSTRATE_OPERATOR_TOKENS: CURSOR_TOKEN,
+		});
+
+		expect(isOperator(config, `Bearer ${CURSOR_TOKEN}`)).toBe(true);
+		expect(isOperator(config, `Bearer ${CURSOR_TOKEN.slice(0, -1)}`)).toBe(false);
+		expect(isOperator(config, `Bearer ${HERMES_TOKEN}`)).toBe(false);
+	});
+});
+
+describe("SUBSTRATE_LEDGER_TTL floor", () => {
+	test("a total of zero is refused, with the reason", () => {
+		for (const ttl of ["0d", "0h", "0m", "0h 0m", "00d"]) {
+			expect(() => loadConfig({ SUBSTRATE_LEDGER_TTL: ttl })).toThrow(ConfigError);
+			expect(() => loadLedgerSettings({ SUBSTRATE_LEDGER_TTL: ttl })).toThrow("totals zero");
+		}
+	});
+
+	test("a span that totals at least one unit is kept as written", () => {
+		for (const ttl of ["180d", "1h", "1h 30m", "0d 1h"]) {
+			expect(loadLedgerSettings({ SUBSTRATE_LEDGER_TTL: ttl }).ttl).toBe(ttl);
+		}
+		expect(loadLedgerSettings({}).ttl).toBeNull();
+	});
+});
+
+describe("SUBSTRATE_AGENT_SKILLS_ROOT (phase 42, D42-1)", () => {
+	test("unset names no checkout and warns nothing", () => {
+		const config = loadConfig({});
+		expect(config.agentSkillsRoot).toBeNull();
+		expect(configWarnings(config)).toEqual([]);
+	});
+
+	test("an absolute path is the checkout, trimmed, and warns nothing", () => {
+		const config = loadConfig({ SUBSTRATE_AGENT_SKILLS_ROOT: " /srv/agent-skills " });
+		expect(config.agentSkillsRoot).toBe("/srv/agent-skills");
+		expect(configWarnings(config)).toEqual([]);
+	});
+
+	test("a relative path is treated as unset and named at boot", () => {
+		const config = loadConfig({ SUBSTRATE_AGENT_SKILLS_ROOT: "agent-skills" });
+		expect(config.agentSkillsRoot).toBeNull();
+		expect(configWarnings(config)).toEqual([expect.stringContaining('SUBSTRATE_AGENT_SKILLS_ROOT="agent-skills"')]);
+	});
+});
+
+describe("HINDSIGHT_MENTAL_MODELS", () => {
+	test("unset names no model and warns about nothing", () => {
+		expect(loadConfig({}).mentalModels).toEqual({ models: [], warnings: [] });
+	});
+
+	test("a valid entry is kept and an invalid entry is dropped, with the valid ones still applying", () => {
+		const config = loadConfig({
+			HINDSIGHT_BANKS: "sub-omp,sub-hermes",
+			HINDSIGHT_MENTAL_MODELS: "sub-omp=mm_a,mm_b;sub-hermes=bad id;sub-other=mm_x;sub-hermes=mm_c",
+		});
+		expect(config.mentalModels.models).toEqual([
+			{ bank: "sub-omp", id: "mm_a" },
+			{ bank: "sub-omp", id: "mm_b" },
+			{ bank: "sub-hermes", id: "mm_c" },
+		]);
+		// `sub-hermes=bad id` breaks the id rule; `sub-other` is not in HINDSIGHT_BANKS.
+		expect(config.mentalModels.warnings).toHaveLength(2);
+	});
+
+	test("at most 20 models, and a repeated model is dropped with a warning", () => {
+		const ids = Array.from({ length: 21 }, (_, index) => `mm_${index}`);
+		const config = loadConfig({ HINDSIGHT_BANKS: "sub-omp", HINDSIGHT_MENTAL_MODELS: `sub-omp=${ids.join(",")};sub-omp=mm_0` });
+		expect(config.mentalModels.models).toHaveLength(20);
+		expect(config.mentalModels.warnings).toHaveLength(2);
 	});
 });

@@ -5,8 +5,8 @@ backfill fixture at `scripts/uat/fixtures/notion-rows.json`.
 
 One command runs any subset of the eight deferred scenarios of
 `.planning/milestones/v1.0-phases/00-brief/0-UAT.md` against any
-`SUBSTRATE_URL`, with the bearer resolved like the CLI (`SUBSTRATE_TOKEN`,
-then the token-file variable, then the tokens dir). The script stays outside
+`SUBSTRATE_URL`, with the operator's bearer resolved like the CLI (`SUBSTRATE_TOKEN`,
+then the token-file variable, then the tokens dir); a scenario that names another surface sends that surface's own token. The script stays outside
 the store lock: no store keys, no store clients. Every write is run-tagged
 (`uat-<tag>` in graph, session and repo fields), and reports hold ids,
 counts, statuses, booleans and elapsed times only — never a token, never a
@@ -93,7 +93,7 @@ times only.
 
 The script reads only `SUBSTRATE_URL` (and the bearer inputs) from the
 environment — the same six-key `consumer.env` the rehearsal harness
-writes. It never reads `stores.env` and never takes a store URL.
+writes. It never reads `stores.env` and never takes a store URL. A scenario naming a non-operator surface sends that surface's own token from `SUBSTRATE_TOKENS_DIR` (or `SUBSTRATE_REHEARSAL_TOKENS_DIR` in a harness run, else the CLI default directory), and `SUBSTRATE_TOKEN` is the operator's bearer only.
 
 ## Exits
 

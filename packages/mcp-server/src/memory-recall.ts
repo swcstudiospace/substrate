@@ -1,5 +1,5 @@
 /**
- * `memory_recall`: Hindsight recall as an explicit tool; the brief only ever reads a warm cache snapshot of it.
+ * `memory_recall`: Hindsight recall as an explicit tool; the brief's recall read is this same fan-out, cached.
  *
  * DOCS-04's read half (D26-03, D26-05): a bounded fan-out over the configured
  * explicit `sub-*` bank list — the caller's bank first, then the rest — under
@@ -9,13 +9,11 @@
  * D26-08); reads emit nothing (D26-07).
  *
  * The negative gates live with the tests: an unlisted surface never falls
- * back to a shared bank, and the brief never calls the plane. Since uplift-4
- * S5 the brief may carry a `Recalled context` section, but it reads it ONLY
- * from the `recall-snapshot` cache class (a cache read an injected function
- * performs); the prefetcher in `recall-snapshot.ts` is what fills it, off
- * the request path. `brief.ts`, `brief-profile.ts` and `recall-snapshot.ts`
- * never import `planes/hindsight` (the acc30a8 4 s in-brief recall
- * anti-pattern).
+ * back to a shared bank. The brief's `Recalled context` section (enforce) is
+ * `fanOutBriefRecall`, this fan-out again, read through the `recall-snapshot`
+ * cache class and waited for at most the brief's own cap (`BRIEF_RECALL_CAP_MS`).
+ * `brief.ts`, `brief-profile.ts` and `recall-snapshot.ts` never import
+ * `planes/hindsight`; the service hands them the fan-out as an injected function.
  */
 import {
 	MAX_RECALL_PER_BANK,
@@ -26,7 +24,7 @@ import {
 } from "./planes/hindsight.ts";
 import { redactValue } from "./redact.ts";
 import { SURFACES } from "./types.ts";
-import { visibleToSurface } from "./memory-policy.ts";
+import { visibleToCaller, type MemoryCaller } from "./memory-policy.ts";
 
 /** The known surfaces as plain strings, for bank-set membership checks. */
 const KNOWN_SURFACES: readonly string[] = SURFACES;
@@ -44,6 +42,8 @@ export interface DerivedMemoryHit {
 	type?: string;
 	/** The scope the memory was retained for — a locator the merge filters on. */
 	scope?: string;
+	/** The repo the memory was retained for, when the retain carried one. Agent-scope hits are read only in it. */
+	repo?: string;
 	tags: string[];
 	score?: number;
 }
@@ -95,6 +95,7 @@ export function resolveRecallBanks(
 function derive(bank: string, hit: RecallHit): DerivedMemoryHit {
 	const tags = [...hit.tags];
 	const scope = typeof hit.metadata.scope === "string" ? hit.metadata.scope : undefined;
+	const repo = typeof hit.metadata.repo === "string" ? hit.metadata.repo : undefined;
 	return {
 		bank,
 		id: hit.id,
@@ -103,6 +104,7 @@ function derive(bank: string, hit: RecallHit): DerivedMemoryHit {
 		...(hit.document_id !== undefined ? { document_id: hit.document_id } : {}),
 		...(hit.type !== undefined ? { type: hit.type } : {}),
 		...(scope !== undefined ? { scope } : {}),
+		...(repo !== undefined ? { repo } : {}),
 		tags,
 		...(hit.score !== undefined ? { score: hit.score } : {}),
 	};
@@ -136,10 +138,88 @@ export function dedupeHits<T extends { bank: string; hit: RecallHit }>(scored: T
 	return keep(withinBank, ({ hit }) => hit.text);
 }
 
+/** One bank's answer in a fan-out: the hits it gave, or the failure that kept them out. */
+export interface BankAnswer {
+	bank: string;
+	hits: RecallHit[];
+	failure?: { reason: string; timedOut: boolean };
+}
+
+/** Options a fan-out adds to the caller's visibility. Both are optional. */
+export interface FanOutOptions {
+	/** Keeps a hit only when true. A dropped hit never counts against its bank's cap, and cannot hide a copy of the same text on another bank. */
+	keep?: (hit: RecallHit) => boolean;
+	/** Called once per bank as its answer settles, so a caller that stops waiting still holds the banks that answered. */
+	onAnswer?: (answer: BankAnswer) => void;
+}
+
+/**
+ * `query` on every bank in `banks` at once, under one shared abort budget, so a
+ * slow bank is cut at `budgetMs` while the others still answer. A hit this
+ * caller may not see is dropped inside its bank, before the bank's cap counts it.
+ * A bank that fails or misses the budget answers with `failure`; nothing throws.
+ */
+export async function recallAcrossBanks(
+	config: HindsightConfig,
+	banks: readonly string[],
+	query: string,
+	caller: MemoryCaller,
+	fetchImpl: FetchLike,
+	budgetMs: number,
+	options: FanOutOptions = {},
+): Promise<BankAnswer[]> {
+	// A predicate, not a post-filter: recallBank stops at MAX_RECALL_PER_BANK, so a hit this caller may not see must go before that cap counts it.
+	const keep = (hit: RecallHit): boolean =>
+		visibleToCaller(
+			typeof hit.metadata.scope === "string" ? hit.metadata.scope : undefined,
+			typeof hit.metadata.repo === "string" ? hit.metadata.repo : undefined,
+			caller,
+		) && (options.keep === undefined || options.keep(hit));
+	const controller = new AbortController();
+	const budget = setTimeout(() => controller.abort(), budgetMs);
+	const ask = async (bank: string): Promise<BankAnswer> => {
+		const recalled = await recallBank(config, bank, { query, signal: controller.signal, keep }, fetchImpl);
+		if (!recalled.ok) {
+			// The shared budget is the only abort source on this leg, so a
+			// timeout here is the budget firing (uplift-2 R3): named as such,
+			// so `memory_search` can tell "Hindsight was slow" from "down".
+			if (recalled.error.kind === "timeout") return { bank, hits: [], failure: { reason: "budget exceeded", timedOut: true } };
+			return { bank, hits: [], failure: { reason: recalled.error.message, timedOut: false } };
+		}
+		return { bank, hits: recalled.value };
+	};
+	let settled: PromiseSettledResult<BankAnswer>[];
+	try {
+		settled = await Promise.allSettled(
+			banks.map(async (bank): Promise<BankAnswer> => {
+				const answer = await ask(bank);
+				options.onAnswer?.(answer);
+				return answer;
+			}),
+		);
+	} finally {
+		clearTimeout(budget);
+	}
+	return banks.map((bank, index) => {
+		const outcome = settled[index];
+		if (outcome === undefined || outcome.status === "rejected") return { bank, hits: [], failure: { reason: "unreachable", timedOut: false } };
+		return outcome.value;
+	});
+}
+
+/** The answering banks' hits in one list: a memory once, the best score first, derived as `memory_recall` shows them. */
+function rankedHits(answers: readonly BankAnswer[]): DerivedMemoryHit[] {
+	const scored = answers.flatMap((answer) => (answer.failure === undefined ? answer.hits.map((hit) => ({ bank: answer.bank, hit })) : []));
+	const best = dedupeHits(scored);
+	best.sort((left, right) => (right.hit.score ?? 0) - (left.hit.score ?? 0));
+	return best.map(({ bank, hit }) => derive(bank, hit));
+}
+
 export async function recallMemories(
 	deps: RecallDeps,
 	query: string,
 	callerSurface: string | null,
+	callerRepo: string | null = null,
 ): Promise<RecallReply> {
 	if (!query) return { results: [], degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: "memory_recall needs a query" };
 	if (deps.vmGuest === true) {
@@ -156,48 +236,16 @@ export async function recallMemories(
 	}
 	const config = deps.config;
 	const fetchImpl = deps.fetchImpl ?? fetch;
-	const controller = new AbortController();
-	const budget = setTimeout(() => controller.abort(), deps.budgetMs ?? DEFAULT_RECALL_BUDGET_MS);
-	let settled: PromiseSettledResult<{ bank: string; hits: RecallHit[]; reason?: string; timedOut?: boolean }>[];
-	try {
-		settled = await Promise.allSettled(
-			resolved.banks.map(async (bank) => {
-				const recalled = await recallBank(config, bank, { query, signal: controller.signal }, fetchImpl);
-				if (!recalled.ok) {
-					// The shared budget is the only abort source on this leg, so a
-					// timeout here is the budget firing (uplift-2 R3): named as such,
-					// so `memory_search` can tell "Hindsight was slow" from "down".
-					if (recalled.error.kind === "timeout") return { bank, hits: [], reason: "budget exceeded", timedOut: true };
-					return { bank, hits: [], reason: recalled.error.message };
-				}
-				return { bank, hits: recalled.value };
-			}),
-		);
-	} finally {
-		clearTimeout(budget);
-	}
+	const caller: MemoryCaller = { surface: callerSurface ?? "unattributed", repo: callerRepo };
+	const answers = await recallAcrossBanks(config, resolved.banks, query, caller, fetchImpl, deps.budgetMs ?? DEFAULT_RECALL_BUDGET_MS);
 	const failures: string[] = [];
 	let timedOut = false;
-	const scored: Array<{ bank: string; hit: RecallHit }> = [];
-	for (const [index, bank] of resolved.banks.entries()) {
-		const outcome = settled[index];
-		if (outcome === undefined || outcome.status === "rejected") {
-			failures.push(`${bank}: unreachable`);
-			continue;
-		}
-		if (outcome.value.reason !== undefined) {
-			failures.push(`${bank}: ${outcome.value.reason}`);
-			if (outcome.value.timedOut === true) timedOut = true;
-			continue;
-		}
-		const visible = outcome.value.hits.filter((raw) =>
-			visibleToSurface(typeof raw.metadata.scope === "string" ? raw.metadata.scope : undefined, callerSurface ?? "unattributed"),
-		);
-		for (const hit of visible.slice(0, MAX_RECALL_PER_BANK)) scored.push({ bank, hit });
+	for (const answer of answers) {
+		if (answer.failure === undefined) continue;
+		failures.push(`${answer.bank}: ${answer.failure.reason}`);
+		if (answer.failure.timedOut) timedOut = true;
 	}
-	const results = dedupeHits(scored)
-		.sort((left, right) => (right.hit.score ?? 0) - (left.hit.score ?? 0))
-		.map(({ bank, hit }) => derive(bank, hit));
+	const results = rankedHits(answers);
 	if (failures.length > 0) {
 		// A budget miss leads with its own marker whichever banks answered; the
 		// rest keep the outage / partial wording the callers already read.
@@ -205,4 +253,35 @@ export async function recallMemories(
 		return { results, degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: `${prefix}: ${failures.join("; ").slice(0, 300)}` };
 	}
 	return { results, degraded: false, notice: UNTRUSTED_MEMORY_NOTICE };
+}
+
+/** What the brief's recall read takes from one fan-out: the banks that answered and their hits. */
+export interface BriefFanout {
+	/** The banks that answered, in the order they were asked. */
+	answered: string[];
+	/** The answering banks' hits, best first, derived as `memory_recall` derives them. */
+	hits: DerivedMemoryHit[];
+}
+
+/**
+ * The brief's recall read: the fan-out `memory_recall` runs (`recallAcrossBanks`)
+ * over `banks`, the caller's own bank first, under the caller's visibility. A
+ * bank that fails is left out. This does not bound the wait; the brief does, and
+ * `options.onAnswer` lets the brief keep the banks that answered by then.
+ */
+export async function fanOutBriefRecall(
+	deps: { config: HindsightConfig; banks: readonly string[]; fetchImpl?: FetchLike; budgetMs: number },
+	query: string,
+	caller: MemoryCaller,
+	options: FanOutOptions = {},
+): Promise<BriefFanout> {
+	return briefFanoutOf(await recallAcrossBanks(deps.config, deps.banks, query, caller, deps.fetchImpl ?? fetch, deps.budgetMs, options));
+}
+
+/** The brief's view of bank answers, in the order given: the banks that answered, and their hits, best first. */
+export function briefFanoutOf(answers: readonly BankAnswer[]): BriefFanout {
+	return {
+		answered: answers.filter((answer) => answer.failure === undefined).map((answer) => answer.bank),
+		hits: rankedHits(answers),
+	};
 }

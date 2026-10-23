@@ -30,6 +30,9 @@ import type { SubstrateEvent } from "./types.ts";
 const ROOT = join(import.meta.dir, "..", "..", "..");
 const CLI = join(ROOT, "packages", "cli", "src", "index.ts");
 
+/** The header every fixture that posts a JSON string must send: fetch sends a string body as text/plain. */
+const JSON_HEADERS = { "content-type": "application/json" };
+
 interface Harness {
 	base: string;
 	observability: Observability;
@@ -215,7 +218,7 @@ describe("GET /slo lists the per-plane objectives", () => {
 describe("GET /metrics", () => {
 	test("serves the snapshot the SLOs are computed from, with no collector configured", async () => {
 		const harness = await start();
-		await fetch(`${harness.base}/brief`, { method: "POST", body: "{}" });
+		await fetch(`${harness.base}/brief`, { method: "POST", headers: JSON_HEADERS, body: "{}" });
 
 		const body = (await (await fetch(`${harness.base}/metrics`)).json()) as {
 			startedAt: string;
@@ -274,6 +277,7 @@ describe("POST /evidence", () => {
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
 		const response = await fetch(`${harness.base}/evidence`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ graph_id: "ut-abc123-deadbeef" }),
 		});
 		const bundle = (await response.json()) as { schema: string; stub: boolean; graph_id: string; audit: { total: number } };
@@ -288,6 +292,7 @@ describe("POST /evidence", () => {
 		const harness = await start();
 		const response = await fetch(`${harness.base}/evidence`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ graph_id: "ut-1", format: "html" }),
 		});
 		const html = await response.text();
@@ -299,9 +304,70 @@ describe("POST /evidence", () => {
 
 	test("requires a graph id", async () => {
 		const harness = await start();
-		const response = await fetch(`${harness.base}/evidence`, { method: "POST", body: JSON.stringify({}) });
+		const response = await fetch(`${harness.base}/evidence`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({}) });
 
 		expect(response.status).toBe(400);
+	});
+
+	test("a node_id adds that node's artifact, read from the whole ledger, to the JSON reply", async () => {
+		const row = (id: number, nodeId: string, payload: Record<string, unknown>) => ({
+			id: `evt_${id}`,
+			ts: 1_700_000_000_000 + id,
+			surface: "substrate",
+			session_id: "sess-1",
+			graph_id: "ut-1",
+			node_id: nodeId,
+			linear_identifier: null,
+			step: null,
+			repo: null,
+			branch: null,
+			actor: "agent",
+			kind: "note",
+			summary: `event ${id}`,
+			payload: JSON.stringify(payload),
+			hash: `h${id}`,
+			prev: null,
+		});
+		const harness = await start(
+			{},
+			{
+				greptime: {
+					readEvents: async () => [
+						row(1, "n1", { action: "mirror", target: "linear", op: "claim", status: "ok" }),
+						row(2, "n2", { action: "mirror", target: "linear", op: "claim", status: "ok" }),
+						row(3, "n1", { action: "dod", status: "approved", already_done: false }),
+					],
+				},
+			},
+		);
+
+		const response = await fetch(`${harness.base}/evidence`, {
+			method: "POST",
+			headers: JSON_HEADERS,
+			body: JSON.stringify({ graph_id: "ut-1", node_id: "n1" }),
+		});
+		const body = (await response.json()) as { node: { node_id: string; linear: unknown[]; dod: unknown[] } };
+
+		expect(response.status).toBe(200);
+		expect(body.node.node_id).toBe("n1");
+		expect(body.node.linear).toEqual([{ ts: new Date(1_700_000_000_001).toISOString(), op: "claim", status: "ok", reason: null, blocker_node: null, edge_kind: null }]);
+		expect(body.node.dod).toEqual([{ ts: new Date(1_700_000_000_003).toISOString(), status: "approved", reason: null }]);
+	});
+
+	test("an unreadable ledger is node.error on the node_id reply, never an empty artifact", async () => {
+		const harness = await start(
+			{},
+			{ greptime: { readEvents: () => Promise.reject(new Error("greptime unreachable: connect ETIMEDOUT")) } },
+		);
+
+		const response = await fetch(`${harness.base}/evidence`, {
+			method: "POST",
+			headers: JSON_HEADERS,
+			body: JSON.stringify({ graph_id: "ut-1", node_id: "n1" }),
+		});
+		const body = (await response.json()) as { node: unknown };
+
+		expect(body.node).toEqual({ error: expect.stringContaining("unreachable") });
 	});
 });
 
@@ -362,6 +428,7 @@ describe("REST is audited on the same chain as MCP", () => {
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
 		await fetch(`${harness.base}/events`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ surface: "omp", kind: "shell", summary: "ran cargo test", graph_id: "ut-7" }),
 		});
 
@@ -387,6 +454,7 @@ describe("REST is audited on the same chain as MCP", () => {
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
 		await fetch(`${harness.base}/memory`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ scope: "graph:ut-7", kind: "fact", subject: "s", body: "b", graph_id: "ut-7" }),
 		});
 
@@ -398,6 +466,7 @@ describe("REST is audited on the same chain as MCP", () => {
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
 		await fetch(`${harness.base}/handoff`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ surface: "omp", to: "muse", goal: "finish the migration", graph_id: "ut-7" }),
 		});
 
@@ -407,8 +476,8 @@ describe("REST is audited on the same chain as MCP", () => {
 
 	test("/events/query and /drift leave a record too", async () => {
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
-		await fetch(`${harness.base}/events/query`, { method: "POST", body: JSON.stringify({ graph_id: "ut-7" }) });
-		await fetch(`${harness.base}/drift`, { method: "POST", body: JSON.stringify({ repo: "agent-substrate" }) });
+		await fetch(`${harness.base}/events/query`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ graph_id: "ut-7" }) });
+		await fetch(`${harness.base}/drift`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ repo: "agent-substrate" }) });
 
 		expect(harness.observability.audit.recent().map((record) => record.tool)).toEqual(["events_query", "drift"]);
 	});
@@ -419,6 +488,7 @@ describe("REST is audited on the same chain as MCP", () => {
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: unwritablePath() });
 		const response = await fetch(`${harness.base}/memory`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ scope: "graph:ut-7", kind: "fact", subject: "s", body: "b" }),
 		});
 		const body = (await response.json()) as { error: string };
@@ -433,6 +503,7 @@ describe("REST is audited on the same chain as MCP", () => {
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: unwritablePath() });
 		const response = await fetch(`${harness.base}/handoff`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ surface: "omp", to: "muse", goal: "finish the migration" }),
 		});
 
@@ -450,7 +521,7 @@ describe("REST is audited on the same chain as MCP", () => {
 			["/events/query", { graph_id: "ut-7" }],
 			["/drift", { repo: "agent-substrate" }],
 		] as Array<[string, unknown]>) {
-			const response = await fetch(`${harness.base}${route}`, { method: "POST", body: JSON.stringify(body) });
+			const response = await fetch(`${harness.base}${route}`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body) });
 			// The route ran. `/events/query` answers 503 of its own when the ledger does not
 			// reply, which this harness has none of — so what is asserted is that the *audit*
 			// did not refuse it, which is what the body would say.
@@ -585,6 +656,7 @@ describe("substrate evidence", () => {
 		for (let i = 0; i < 60; i++) {
 			await fetch(`${harness.base}/events`, {
 				method: "POST",
+				headers: JSON_HEADERS,
 				body: JSON.stringify({ surface: "omp", kind: "shell", summary: `run ${i}`, graph_id: "ut-1" }),
 			});
 		}
@@ -603,6 +675,7 @@ describe("substrate evidence", () => {
 		for (let i = 0; i < 60; i++) {
 			await fetch(`${harness.base}/events`, {
 				method: "POST",
+				headers: JSON_HEADERS,
 				body: JSON.stringify({ surface: "omp", kind: "shell", summary: `run ${i}`, graph_id: "ut-2" }),
 			});
 		}
@@ -626,6 +699,7 @@ describe("GET /healthz reports a lost audit trail", () => {
 		const first = await start({ SUBSTRATE_AUDIT_PATH: path });
 		await fetch(`${first.base}/events`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ surface: "omp", kind: "shell", summary: "ran it", graph_id: "ut-1" }),
 		});
 		first.close();
@@ -666,7 +740,7 @@ describe("an unexpected fault in the audit path respects the tool's mode", () =>
 		// Denying unconditionally made a fault in the audit path able to refuse `/brief`,
 		// which is fail-open precisely so the substrate cannot fail an agent's turn.
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
-		const response = await fetch(`${harness.base}/brief`, { method: "POST", body: deeplyNested() });
+		const response = await fetch(`${harness.base}/brief`, { method: "POST", headers: JSON_HEADERS, body: deeplyNested() });
 
 		expect(response.status).toBe(200);
 		expect(await response.text()).not.toContain("audit chain");
@@ -678,7 +752,7 @@ describe("an unexpected fault in the audit path respects the tool's mode", () =>
 
 	test("a fail-closed route is refused, because there the unrecorded write is worse", async () => {
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
-		const response = await fetch(`${harness.base}/memory`, { method: "POST", body: deeplyNested() });
+		const response = await fetch(`${harness.base}/memory`, { method: "POST", headers: JSON_HEADERS, body: deeplyNested() });
 
 		expect(response.status).toBe(503);
 		expect(((await response.json()) as { error: string }).error).toContain("memory_write");
@@ -689,7 +763,7 @@ describe("an unexpected fault in the audit path respects the tool's mode", () =>
 		// `allowed` made this metric disagree with what the caller was answered, which is the
 		// one thing it exists to show.
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
-		await fetch(`${harness.base}/memory`, { method: "POST", body: deeplyNested() });
+		await fetch(`${harness.base}/memory`, { method: "POST", headers: JSON_HEADERS, body: deeplyNested() });
 
 		const appends = findCounter(harness.observability.snapshot(), METRIC.auditAppends)!;
 		expect(sumCounter(appends, { decision: "denied", outcome: "lost" })).toBe(1);
@@ -698,7 +772,7 @@ describe("an unexpected fault in the audit path respects the tool's mode", () =>
 
 	test("a fail-open route's fault is counted as an allowed record that was lost", async () => {
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
-		await fetch(`${harness.base}/brief`, { method: "POST", body: deeplyNested() });
+		await fetch(`${harness.base}/brief`, { method: "POST", headers: JSON_HEADERS, body: deeplyNested() });
 
 		const appends = findCounter(harness.observability.snapshot(), METRIC.auditAppends)!;
 		expect(sumCounter(appends, { decision: "allowed", outcome: "lost" })).toBe(1);
@@ -739,11 +813,12 @@ describe("POST /evidence tallies every record for the graph", () => {
 		for (let i = 0; i < 3; i++) {
 			await fetch(`${harness.base}/events`, {
 				method: "POST",
+				headers: JSON_HEADERS,
 				body: JSON.stringify({ surface: "omp", kind: "shell", summary: `run ${i}`, graph_id: "ut-9" }),
 			});
 		}
 
-		const response = await fetch(`${harness.base}/evidence`, { method: "POST", body: JSON.stringify({ graph_id: "ut-9" }) });
+		const response = await fetch(`${harness.base}/evidence`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ graph_id: "ut-9" }) });
 		const bundle = (await response.json()) as { audit: { total: number; records: unknown[] } };
 		// Three `/events` plus this request's own `evidence` record, all naming ut-9.
 		expect(bundle.audit.total).toBe(4);
@@ -776,11 +851,12 @@ describe("the anonymous bridge", () => {
 
 		const tokened = await fetch(`${harness.base}/events`, {
 			method: "POST",
-			headers: { authorization: "Bearer tok-grok" },
+			headers: { ...JSON_HEADERS, authorization: "Bearer tok-grok" },
 			body: JSON.stringify({ kind: "note", summary: "from the gateway" }),
 		});
 		const untokened = await fetch(`${harness.base}/events`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ kind: "note", summary: "from a collector", surface: "hermes" }),
 		});
 
@@ -794,6 +870,7 @@ describe("the anonymous bridge", () => {
 		const harness = await start({ SUBSTRATE_TOKEN_GROK_BOT: "tok-grok" });
 		const response = await fetch(`${harness.base}/events`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ kind: "note", summary: "no token" }),
 		});
 
@@ -804,7 +881,7 @@ describe("the anonymous bridge", () => {
 		const harness = await start(BRIDGE);
 		const response = await fetch(`${harness.base}/memory`, {
 			method: "POST",
-			headers: { authorization: "Bearer tok-grok" },
+			headers: { ...JSON_HEADERS, authorization: "Bearer tok-grok" },
 			body: JSON.stringify({
 				scope: "agent:grok-bot",
 				kind: "fact",
@@ -862,6 +939,7 @@ describe("the anonymous bridge", () => {
 		const harness = await start(BRIDGE);
 		const response = await fetch(`${harness.base}/memory`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({
 				scope: "agent:grok-bot",
 				kind: "fact",
@@ -880,6 +958,7 @@ describe("the anonymous bridge", () => {
 		const harness = await start({ ...BRIDGE, SUBSTRATE_HANDOFF_KEY: "k" });
 		const response = await fetch(`${harness.base}/handoff`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ to: "muse", goal: "finish the migration" }),
 		});
 		const body = (await response.json()) as { error?: string; packet?: { from: { surface: string } } };
@@ -894,6 +973,7 @@ describe("the anonymous bridge", () => {
 		const harness = await start({ ...BRIDGE, SUBSTRATE_HANDOFF_KEY: "k" });
 		const response = await fetch(`${harness.base}/handoff`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ to: "muse", goal: "finish the migration", surface: "grok-bot" }),
 		});
 		const body = (await response.json()) as { error?: string; packet?: { from: { surface: string } } };
@@ -908,6 +988,7 @@ describe("the anonymous bridge", () => {
 		const harness = await start(BRIDGE, { greptime });
 		const response = await fetch(`${harness.base}/events`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ kind: "note", summary: "impersonating", surface: "grok-bot" }),
 		});
 
@@ -928,6 +1009,7 @@ describe("the anonymous bridge", () => {
 
 		await fetch(`${harness.base}/events`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ kind: "note", summary: "payload-secret-marker", surface: "hermes" }),
 		});
 		expect(lines).toEqual([]);
@@ -995,14 +1077,17 @@ describe("the anonymous bridge", () => {
 
 		await fetch(`${harness.base}/events`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ kind: "brief.delivered", summary: "payload-secret-marker", surface: "muse" }),
 		});
 		await fetch(`${harness.base}/events`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ kind: "note", summary: "payload-secret-marker", surface: "docs-scraper" }),
 		});
 		await fetch(`${harness.base}/events`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ kind: "note", summary: "payload-secret-marker", surface: "grok-bot" }),
 		});
 		expect(lines).toEqual([]);
@@ -1029,7 +1114,7 @@ describe("the anonymous bridge", () => {
 			anonymousIntervalMs: 60 * 60 * 1000,
 		});
 		const post = (surface: string) =>
-			fetch(`${harness.base}/events`, { method: "POST", body: JSON.stringify({ kind: "note", summary: "x", surface }) });
+			fetch(`${harness.base}/events`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ kind: "note", summary: "x", surface }) });
 		const name = (i: number) => `made-up-${String(i).padStart(2, "0")}`;
 
 		for (let i = 1; i <= 52; i++) await post(name(i));
@@ -1068,6 +1153,7 @@ describe("the anonymous bridge", () => {
 
 		await fetch(`${harness.base}/events`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ kind: "note", summary: "payload-secret-marker", surface: "hermes" }),
 		});
 		expect(lines).toEqual([]);
@@ -1146,7 +1232,7 @@ describe("the anonymous bridge", () => {
 		const harness = await start({ ...BRIDGE, SUBSTRATE_OPERATOR_TOKENS: "tok-nowhere" });
 		const response = await fetch(`${harness.base}/events`, {
 			method: "POST",
-			headers: { authorization: "Bearer tok-nowhere" },
+			headers: { ...JSON_HEADERS, authorization: "Bearer tok-nowhere" },
 			body: JSON.stringify({ kind: "note", summary: "unnamed operator" }),
 		});
 
@@ -1170,6 +1256,7 @@ describe("refused /events posts are counted by reason", () => {
 		const closed = await start({ SUBSTRATE_TOKEN_GROK_BOT: "tok-grok" });
 		await fetch(`${closed.base}/events`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ kind: "note", summary: "missing bearer" }),
 		});
 		expect(await refused(closed, "auth", "tok-grok")).toBe(1);
@@ -1177,14 +1264,17 @@ describe("refused /events posts are counted by reason", () => {
 		const harness = await start(BRIDGE);
 		await fetch(`${harness.base}/events`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ kind: "not-a-kind", summary: "bad", surface: "hermes" }),
 		});
 		await fetch(`${harness.base}/events`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ kind: "note", summary: "impersonating", surface: "grok-bot" }),
 		});
 		await fetch(`${harness.base}/events`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ kind: "note", summary: "bad id", surface: "hermes", graph_id: 1 }),
 		});
 
@@ -1194,9 +1284,10 @@ describe("refused /events posts are counted by reason", () => {
 
 		await fetch(`${harness.base}/events`, {
 			method: "POST",
+			headers: JSON_HEADERS,
 			body: JSON.stringify({ kind: "graph_id", summary: "bad field", surface: "hermes" }),
 		});
-		await fetch(`${harness.base}/events`, { method: "POST", body: "42" });
+		await fetch(`${harness.base}/events`, { method: "POST", headers: JSON_HEADERS, body: "42" });
 		await fetch(`${closed.base}/events`);
 
 		expect(await refused(harness, "validation")).toBe(3);
@@ -1217,6 +1308,7 @@ describe("a 500 does not echo the cause", () => {
 		try {
 			const response = await fetch(`${harness.base}/brief`, {
 				method: "POST",
+				headers: JSON_HEADERS,
 				body: "x".repeat(1_000_001),
 			});
 			const body = (await response.json()) as { error: string; correlation_id?: string };
@@ -1240,7 +1332,7 @@ describe("POST /memory", () => {
 		const index = new Proxy({}, { get: (_target, name) => { touched.push(String(name)); return async () => undefined; } });
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() }, { index });
 		touched.length = 0;
-		const response = await fetch(`${harness.base}/memory`, { method: "POST", body: "x".repeat(1_000_001) });
+		const response = await fetch(`${harness.base}/memory`, { method: "POST", headers: JSON_HEADERS, body: "x".repeat(1_000_001) });
 
 		expect(response.status).toBe(413);
 		expect(await response.json()).toEqual({ error: "request body too large" });
@@ -1286,7 +1378,7 @@ describe("POST /skills/propose", () => {
 	async function propose(harness: Harness, token: string | null, payload: unknown = body) {
 		const response = await fetch(`${harness.base}/skills/propose`, {
 			method: "POST",
-			headers: token === null ? {} : { authorization: `Bearer ${token}` },
+			headers: { ...JSON_HEADERS, ...(token === null ? {} : { authorization: `Bearer ${token}` }) },
 			body: typeof payload === "string" ? payload : JSON.stringify(payload),
 		});
 		return { status: response.status, json: (await response.json()) as Record<string, unknown> };
@@ -1394,7 +1486,7 @@ describe("POST /skills/propose", () => {
 		const reply = await propose(harness, "tok-agent");
 
 		expect(reply.status).toBe(400);
-		expect(reply.json).toEqual({ error: refusal.message, findings: [{ file: "SKILL.md", line: 4, rule: "github" }] });
+		expect(reply.json).toEqual({ error: refusal.message, findings: [{ file: "SKILL.md", line: 4, rule: "github" }], refused: true });
 	});
 
 	test("a failed git or gh step is 502, redacted and at most 400 characters", async () => {
@@ -1517,6 +1609,7 @@ describe("desktop_run at the HTTP gate", () => {
 				desktop: createDesktopDriver({
 					run: async (argv: readonly string[]) => {
 						calls.push([...argv]);
+						if (argv.includes("context")) return { code: 0, stdout: Buffer.from("unix:///var/run/docker.sock\n"), stderr: "" };
 						if (argv.includes("getdisplaygeometry")) return { code: 0, stdout: Buffer.from("1280 800\n"), stderr: "" };
 						if (argv.includes("getwindowname")) return { code: 0, stdout: Buffer.from("stub-window\n"), stderr: "" };
 						if (argv.includes("xwd")) return { code: 0, stdout: shot, stderr: "" };

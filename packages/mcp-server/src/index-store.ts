@@ -566,6 +566,16 @@ export const MIGRATION_STEPS: ReadonlyArray<{ version: number; name: string; sql
 			create unique index if not exists memory_reviews_pending_idx on memory_reviews (entry_hash)
 			where state = 'pending'`,
 	},
+	// The index behind the agent-scope read rule, which matches `repo` on every `agent:` row. The column is
+	// migration 11's and legacy rows keep NULL, so they match no caller. Nothing is backfilled.
+	{ version: 31, name: "memory_entries_repo_idx", sql: `create index if not exists memory_entries_repo_idx on memory_entries (repo)` },
+	// The skill's version, monotonic per (repo, name): the proposal that created the row took max + 1
+	// (`upsertProposedSkill`). Legacy rows read as 0 — "recorded before versions existed".
+	{
+		version: 32,
+		name: "skills_registry_version",
+		sql: `alter table skills_registry add column if not exists version integer not null default 0`,
+	},
 ];
 
 export class IndexStore implements MemoryStore {
@@ -1821,6 +1831,7 @@ export class IndexStore implements MemoryStore {
 	 * is left as it is, except that a row an approval created before the proposal was recorded
 	 * (no content hash) learns it. State is never touched here, so a retry after a decision cannot
 	 * move a decided row back to `proposed`.
+	 * A row it creates takes the name's next version (see `skillVersion`), under the decision lock.
 	 */
 	async upsertProposedSkill(input: {
 		repo: string;
@@ -1831,17 +1842,37 @@ export class IndexStore implements MemoryStore {
 		content_sha256: string;
 		proposed_by: string;
 	}): Promise<void> {
-		await this.plane("skills.propose", async () => {
-			await this.sql`
-				insert into skills_registry (repo, name, pr_number, content_sha256, state, proposed_by, pr_url, branch)
-				values (${input.repo}, ${input.name}, ${input.pr_number}, ${input.content_sha256}, 'proposed',
-				        ${input.proposed_by}, ${input.pr_url}, ${input.branch})
-				on conflict (repo, name, pr_number) do update
-				set content_sha256 = excluded.content_sha256,
-				    proposed_by = coalesce(skills_registry.proposed_by, excluded.proposed_by),
-				    branch = coalesce(skills_registry.branch, excluded.branch),
-				    updated = now()
-				where skills_registry.content_sha256 = ''`;
+		await this.plane("skills.propose", async () =>
+			this.sql.begin(async (tx: SQL) => {
+				// Serialised with decisions on the same (repo, name), so the version a new row takes is the true next one.
+				await tx`select pg_advisory_xact_lock(hashtextextended(${skillDecisionLockKey(input.repo, input.name)}::text, 0))`;
+				await tx`
+					insert into skills_registry (repo, name, pr_number, content_sha256, state, proposed_by, pr_url, branch, version)
+					values (${input.repo}, ${input.name}, ${input.pr_number}, ${input.content_sha256}, 'proposed',
+					        ${input.proposed_by}, ${input.pr_url}, ${input.branch},
+					        (select coalesce(max(version), 0) + 1 from skills_registry where repo = ${input.repo} and name = ${input.name}))
+					on conflict (repo, name, pr_number) do update
+					set content_sha256 = excluded.content_sha256,
+					    proposed_by = coalesce(skills_registry.proposed_by, excluded.proposed_by),
+					    branch = coalesce(skills_registry.branch, excluded.branch),
+					    updated = now()
+					where skills_registry.content_sha256 = ''`;
+			}),
+		);
+	}
+
+	/**
+	 * The version a proposal of `name` would revise: the highest version recorded for it, in any state,
+	 * so a pending proposal counts. Null when no row exists (nothing recorded, e.g. governance off).
+	 */
+	async skillVersion(repo: string, name: string): Promise<{ version: number; pr_url: string | null } | null> {
+		return this.plane("skills.version", async () => {
+			const rows = (await this.sql`
+				select version, pr_url from skills_registry
+				where repo = ${repo} and name = ${name}
+				order by version desc, pr_number desc limit 1`) as Array<Record<string, unknown>>;
+			const row = rows[0];
+			return row ? { version: Number(row.version), pr_url: row.pr_url === null || row.pr_url === undefined ? null : String(row.pr_url) } : null;
 		});
 	}
 
@@ -1909,9 +1940,10 @@ export class IndexStore implements MemoryStore {
 					const inserted = (await tx`
 						insert into skills_registry (
 							repo, name, pr_number, content_sha256, state, proposed_by, pr_url, branch, merge_sha,
-							decided_by, decided_at, reason)
+							decided_by, decided_at, reason, version)
 						values (${input.repo}, ${input.name}, ${input.pr_number}, '', ${verdict.to}, ${input.proposed_by},
-						        ${input.pr_url}, ${input.branch}, ${input.merge_sha}, ${input.decided_by}, now(), ${input.reason})
+						        ${input.pr_url}, ${input.branch}, ${input.merge_sha}, ${input.decided_by}, now(), ${input.reason},
+						        (select coalesce(max(version), 0) + 1 from skills_registry where repo = ${input.repo} and name = ${input.name}))
 						on conflict (repo, name, pr_number) do nothing
 						returning *`) as Array<Record<string, unknown>>;
 					// A concurrent decision created the row between the select and the insert: judge it on the next pass.
@@ -2010,10 +2042,12 @@ export class IndexStore implements MemoryStore {
 			: beforeId === null
 				? this.sql`and created < ${before}::timestamptz`
 				: this.sql`and (created, id) < (${before}::timestamptz, ${beforeId}::text)`;
-		// `agent:` rows belong to one surface. A caller with a surface sees only its own, the same rule
-		// the brief applies (global, repo and graph only). An internal read with no `read` is unfiltered,
-		// as the write gate's own lookups have always been.
+		// `agent:` rows belong to one surface and to the repo they were written for. A caller sees its own
+		// surface's rows in its own repo; a caller that names no repo sees none. `visibleToCaller` applies the
+		// same rule to derived hits. An internal read with no `read` is unfiltered, as the write gate's own
+		// lookups have always been.
 		const agentScope = read === undefined ? null : `agent:${(normalizeIdentifier(read.surface) ?? "unattributed").toLowerCase()}`;
+		const agentRepo = read === undefined ? null : normalizeIdentifier(read.repo);
 		return this.plane("memory.search", async () => {
 			const rows = (await this.sql`
 				select *, to_char(created at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_created
@@ -2025,7 +2059,7 @@ export class IndexStore implements MemoryStore {
 				  ${prefix === null ? this.sql`` : this.sql`and left(subject, char_length(${prefix}::text)) = ${prefix}::text`}
 				  ${search.writer == null ? this.sql`` : this.sql`and writer = ${search.writer}`}
 				  ${search.kind == null ? this.sql`` : this.sql`and kind = ${search.kind}`}
-				  ${agentScope === null ? this.sql`` : this.sql`and (lower(scope) not like 'agent:%' or lower(scope) = ${agentScope})`}
+				  ${agentScope === null ? this.sql`` : agentRepo === null ? this.sql`and lower(scope) not like 'agent:%'` : this.sql`and (lower(scope) not like 'agent:%' or (lower(scope) = ${agentScope} and repo = ${agentRepo}))`}
 				  ${cursor}
 				order by created desc, id desc
 				limit ${limit}`) as Array<Record<string, unknown>>;
@@ -2543,6 +2577,7 @@ function toSkillRow(row: Record<string, unknown>): SkillRegistryRow {
 		decided_by: text(row.decided_by),
 		decided_at: time(row.decided_at),
 		reason: text(row.reason),
+		version: Number(row.version),
 		created: timestamp(row.created),
 		updated: timestamp(row.updated),
 	};

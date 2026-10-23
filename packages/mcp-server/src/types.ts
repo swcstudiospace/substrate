@@ -1,11 +1,11 @@
 /** Shared shapes for the substrate. Mirrors Notion §5.2 and §5.3. */
 
 /**
- * The 15 Agent Swarm agents, A01..A15 in order, one surface each.
+ * The 30 Agent Swarm agents, A01..A30 in order, one surface each.
  *
  * Real surfaces rather than one shared `swarm` surface: memory RBAC is default-deny
  * per surface and a lease holder is (surface, session_id), so a shared surface would
- * make all 15 agents one memory writer and one lease holder. Server-side each has its
+ * make all 30 agents one memory writer and one lease holder. Server-side each has its
  * own `SUBSTRATE_TOKEN_<SURFACE>`; see `docs/swarm-correlation.md`.
  */
 export const SWARM_SURFACES = [
@@ -24,6 +24,21 @@ export const SWARM_SURFACES = [
 	"swarm-a13-obs",
 	"swarm-a14-maint",
 	"swarm-a15-doc",
+	"swarm-a16-cloud",
+	"swarm-a17-plat",
+	"swarm-a18-supply",
+	"swarm-a19-event",
+	"swarm-a20-finops",
+	"swarm-a21-k8s",
+	"swarm-a22-gitops",
+	"swarm-a23-mesh",
+	"swarm-a24-ksec",
+	"swarm-a25-resil",
+	"swarm-a26-sol",
+	"swarm-a27-audit",
+	"swarm-a28-chain",
+	"swarm-a29-dapp",
+	"swarm-a30-custody",
 ] as const;
 export type SwarmSurface = (typeof SWARM_SURFACES)[number];
 
@@ -272,6 +287,11 @@ export interface MemoryReadOptions {
 	includeExpired?: boolean;
 	/** The caller, for the `substrate.memory.expired` series; `unattributed` when absent. */
 	surface?: string;
+	/**
+	 * The repo the caller works in. An `agent:` row is read only in the repo it was written for, so a read that
+	 * names none sees no agent row. Normalised with `normalizeIdentifier`, as the write stores it.
+	 */
+	repo?: string;
 }
 
 /** One parked write, as a reviewer's queue lists it. */

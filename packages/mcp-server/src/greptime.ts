@@ -106,11 +106,15 @@ export const INGEST_LAG_MS = 300_000;
 export const INGEST_BUDGET_MS = 1_000;
 
 /**
- * Rows one idempotency lookup reads. More than one because `LIKE` reads `_` as a wildcard, so
- * lookalike keys in the same cell and millisecond can precede the real row; still a hard bound,
- * and well above the handful of rows one (surface, repo, graph_id, kind, ts) cell holds.
+ * Rows one page of the idempotency lookup reads: the cell's rows at one exact `ts`, in `id` order,
+ * matched against the key in code. The lookup pages through the cell, so this is a page size and
+ * not a cap on the rows a cell may hold; see {@link IDEMPOTENCY_LOOKUP_MAX_PAGES}.
  */
 export const IDEMPOTENCY_LOOKUP_LIMIT = 5;
+/** Full pages one lookup reads before it gives up as inconclusive. */
+export const IDEMPOTENCY_LOOKUP_MAX_PAGES = 20;
+/** The ids keyset paging can carry safely: the substrate's `evt_<hex>` and anything shaped like it. */
+const IDEMPOTENCY_ID = /^[A-Za-z0-9_-]{1,200}$/;
 
 /** Columns of `agent_events`, in the order every statement uses them. */
 export const EVENT_COLUMNS = [
@@ -165,6 +169,8 @@ export type QueryableColumn = (typeof QUERYABLE_COLUMNS)[number];
  */
 export const MAX_QUERY_LIMIT = 500;
 export const DEFAULT_QUERY_LIMIT = 50;
+/** Rows one `readRecentEvents` read may return at most. */
+export const MAX_RECENT_EVENTS = 200;
 
 /** A ledger read. Values are expected already normalised — see `Substrate.queryEvents`. */
 export interface EventQuery {
@@ -1209,29 +1215,34 @@ export class GreptimeClient {
 	}
 
 	/**
-	 * The stored event a replay duplicates, if any (U5-4a). One bounded read, run only for a
-	 * replay-marked request (`accept`) or a keyed one (`enforce`), and by `Substrate.append`
-	 * INSIDE the per-session emit gate so two concurrent same-key requests cannot both miss.
+	 * The stored event a replay duplicates, if any (U5-4a). Run only for a replay-marked request
+	 * (`accept`) or a keyed one (`enforce`), and by `Substrate.append` INSIDE the per-session emit
+	 * gate so two concurrent same-key requests cannot both miss.
 	 *
 	 * The cell is the table's primary-key prefix (`surface`, `repo`, `graph_id`, `kind`) plus the
 	 * exact normalised `ts` the client fixed at its first attempt. A NULL `repo` or `graph_id` is
-	 * `IS NULL`: `= NULL` matches nothing. `LIMIT` {@link IDEMPOTENCY_LOOKUP_LIMIT}, a small bound.
+	 * `IS NULL`: `= NULL` matches nothing.
 	 *
-	 * The key is matched against the end of the stored payload text. `normalizeEvent` appends `_ik`
-	 * as the payload's last key, so the stored text ends `"_ik":"<key>"}`; anchoring there means a
-	 * caller who buried a nested `_ik` in their own payload cannot masquerade as the original. `LIKE`
-	 * reads `_` as a wildcard, so a lookalike row in the same cell and millisecond can match the
-	 * pattern too and come back first; that is why the read takes a few rows rather than one, and
-	 * why each is checked here against the exact suffix. A row that only over-matches is skipped,
-	 * never taken as a hit that would swallow a new event. If the read comes back FULL
-	 * ({@link IDEMPOTENCY_LOOKUP_LIMIT} rows) and none carries the exact suffix, the real row may be
-	 * hiding past the limit, so the answer is inconclusive and this throws like any lookup error
-	 * rather than reporting a miss that would append a duplicate. A short read without an exact
-	 * match is a genuine miss.
+	 * The cell is read a page at a time, {@link IDEMPOTENCY_LOOKUP_LIMIT} rows per statement, in
+	 * `"id"` order. Every page after the first is keyset-paged: it asks only for ids after the last
+	 * one the previous page returned, never OFFSET.
+	 *
+	 * The key is matched in code, never in SQL. `normalizeEvent` appends `_ik` as the payload's last
+	 * key, so the stored text ends `"_ik":"<key>"}`; each returned payload is checked for that exact
+	 * suffix, and anchoring there means a caller who buried a nested `_ik` in their own payload cannot
+	 * masquerade as the original. A `LIKE` pattern is not used: `_` in a key is a wildcard in that
+	 * dialect, so a lookalike key would match, and an `ESCAPE` clause is unverified here. A row without
+	 * the exact suffix is skipped, never taken as a hit that would swallow a new event.
+	 *
+	 * A short page without an exact match is a genuine miss. A full page without one means the cell may
+	 * hold more rows, so the next page is read. If {@link IDEMPOTENCY_LOOKUP_MAX_PAGES} full pages pass
+	 * without an exact match, the real row may still be past the bound, so the answer is inconclusive and
+	 * this throws like any lookup error rather than reporting a miss that would append a duplicate. A page
+	 * whose last id is not a plain identifier cannot be keyset-paged safely, so it throws the same way.
 	 *
 	 * It does not catch what it did not look for: only the same cell and `ts`. That is the contract,
-	 * not an accident. Whether the exact-`ts` + key-prefix predicate is cheap on the production
-	 * image has not been measured; the operator step is an `EXPLAIN` of this statement.
+	 * not an accident. Whether the exact-`ts` cell read is cheap on the production image has not been
+	 * measured; the operator step is an `EXPLAIN` of this statement.
 	 *
 	 * Throws on any ledger error, an open breaker included, and on a hit that is not a well-formed
 	 * row: the caller answers 503 and writes nothing, because a lookup that errors must never be
@@ -1251,24 +1262,35 @@ export class GreptimeClient {
 		const equals = (column: "surface" | "repo" | "graph_id" | "kind", value: string | null): string =>
 			value === null ? `"${column}" IS NULL` : `"${column}" = ${this.q(value)}`;
 		const suffix = `"${IDEMPOTENCY_PAYLOAD_KEY}":"${key}"}`;
-		const rows = await this.sql(
-			`SELECT "id", "hash", "payload" FROM "agent_events" WHERE ${equals("surface", cell.surface)} AND ${equals("repo", cell.repo)} ` +
-				`AND ${equals("graph_id", cell.graph_id)} AND ${equals("kind", cell.kind)} AND "ts" = ${this.q(cell.ts)} ` +
-				`AND "payload" LIKE ${this.q(`%${suffix}`)} LIMIT ${IDEMPOTENCY_LOOKUP_LIMIT}`,
-		);
-		let found: { id: string; hash: string } | null = null;
-		for (const row of rows) {
-			if (typeof row.id !== "string" || typeof row.hash !== "string") {
-				throw new GreptimeError("idempotency lookup returned a row without a string id and hash");
-			}
-			if (found === null && typeof row.payload === "string" && row.payload.endsWith(suffix)) found = { id: row.id, hash: row.hash };
-		}
-		if (found === null && rows.length >= IDEMPOTENCY_LOOKUP_LIMIT) {
-			throw new GreptimeError(
-				`idempotency lookup inconclusive: ${rows.length} rows matched the key pattern and none ends with the exact key`,
+		const cellWhere =
+			`${equals("surface", cell.surface)} AND ${equals("repo", cell.repo)} AND ${equals("graph_id", cell.graph_id)} ` +
+			`AND ${equals("kind", cell.kind)} AND "ts" = ${this.q(cell.ts)}`;
+		let after: string | null = null;
+		for (let page = 0; page < IDEMPOTENCY_LOOKUP_MAX_PAGES; page++) {
+			const rows = await this.sql(
+				`SELECT "id", "hash", "payload" FROM "agent_events" WHERE ${cellWhere}` +
+					(after === null ? "" : ` AND "id" > ${this.q(after)}`) +
+					` ORDER BY "id" ASC LIMIT ${IDEMPOTENCY_LOOKUP_LIMIT}`,
 			);
+			let found: { id: string; hash: string } | null = null;
+			for (const row of rows) {
+				if (typeof row.id !== "string" || typeof row.hash !== "string") {
+					throw new GreptimeError("idempotency lookup returned a row without a string id and hash");
+				}
+				if (found === null && typeof row.payload === "string" && row.payload.endsWith(suffix)) found = { id: row.id, hash: row.hash };
+			}
+			if (found !== null) return found;
+			// A short page is the whole rest of the cell: no exact match there is a genuine miss.
+			if (rows.length < IDEMPOTENCY_LOOKUP_LIMIT) return null;
+			const last = rows[rows.length - 1]!.id;
+			if (typeof last !== "string" || !IDEMPOTENCY_ID.test(last)) {
+				throw new GreptimeError("idempotency lookup refused a row id it cannot page past safely");
+			}
+			after = last;
 		}
-		return found;
+		throw new GreptimeError(
+			`idempotency lookup inconclusive: ${IDEMPOTENCY_LOOKUP_MAX_PAGES * IDEMPOTENCY_LOOKUP_LIMIT} rows of the cell matched none with the exact key`,
+		);
 	}
 
 	/**
@@ -1491,6 +1513,20 @@ export class GreptimeClient {
 		return this.sql(
 			`SELECT ${EVENT_COLUMN_LIST} FROM "agent_events" WHERE "${column}" = ${this.q(value)}
 			 ORDER BY "ts", "id"`,
+		);
+	}
+
+	/**
+	 * The newest rows of one session or graph, summary columns only, newest first: the bounded read behind
+	 * `memory_search`'s graph links and causal chains. `limit` is clamped to 1..{@link MAX_RECENT_EVENTS} here, so no
+	 * caller can read a whole history through it. `payload` and the hash columns are left out on purpose.
+	 */
+	async readRecentEvents(column: "session_id" | "graph_id", value: string, limit: number): Promise<Array<Record<string, unknown>>> {
+		const whole = Number.isNaN(limit) ? 1 : Math.trunc(limit);
+		const rows = Math.min(MAX_RECENT_EVENTS, Math.max(1, whole));
+		return this.sql(
+			`SELECT "id", "ts", "kind", "surface", "node_id", "summary" FROM "agent_events" WHERE "${column}" = ${this.q(value)}
+			 ORDER BY "ts" DESC, "id" DESC LIMIT ${rows}`,
 		);
 	}
 

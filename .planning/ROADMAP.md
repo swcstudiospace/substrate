@@ -5,7 +5,10 @@
 - ⚠️ **v1.0 build plan (phases 0-6 + 0.5)** — closed 2026-10-01 with known gaps. Archive: [milestones/v1.0-ROADMAP.md](milestones/v1.0-ROADMAP.md) · audit: [milestones/v1.0-MILESTONE-AUDIT.md](milestones/v1.0-MILESTONE-AUDIT.md)
 - ✅ **v1.1 Swarm correlation, governed memory and orchestrate integrations** — Phases 7-10 with inserted 8.1, shipped 2026-10-07 (ADR 0001 S1 and S3). Archive: [milestones/v1.1-ROADMAP.md](milestones/v1.1-ROADMAP.md)
 - ✅ **v1.2 Swarm leases, workspace install and lessons bank** — Phases 11-15, shipped 2026-10-08 (ADR 0001 S2, S4, SPE-5830). Archive: [milestones/v1.2-ROADMAP.md](milestones/v1.2-ROADMAP.md) · audit: [milestones/v1.2-MILESTONE-AUDIT.md](milestones/v1.2-MILESTONE-AUDIT.md)
-- 🚧 **v1.3 Build plan completion** — Phases 16–33, in progress. Tracking: [SPE-8292](https://linear.app/swcstudio/issue/SPE-8292/n7-final-ordered-execution-plan-in-waves)
+- ⚠️ **v1.3 Build plan completion** — Phases 16–33; shipped 2026-10-11, closed 2026-10-21 with accepted debt (8 audit rows and 43 operator-gated live proofs). Closeout: [milestones/v1.3-CLOSEOUT.md](milestones/v1.3-CLOSEOUT.md) · tracking: [SPE-8292](https://linear.app/swcstudio/issue/SPE-8292/n7-final-ordered-execution-plan-in-waves)
+- 🚧 **v1.4 Substrate contract hardening** — Phases 34-36: the three uplift-7 substrate gaps (invalid writes, expected_version for skills and docs, degraded-mode exactly-once). Source: [.planning/uplift-7/MILESTONE-AUDIT.md](uplift-7/MILESTONE-AUDIT.md) rows 23-25.
+- 🚧 **v1.3.x Should-have hardening** — Phases 37-44, scheduled from research/SUMMARY.md:68 (should-have, after validation).
+- 🚧 **v1.5 SOTA enhancements** — Phases 45-51, from the 7-SOTA plan on branch feature/7-sota-enhancements (PR #83 closed; PR #85 does not carry these).
 
 ## Phases
 
@@ -51,7 +54,7 @@ Phase details: [milestones/v1.2-ROADMAP.md](milestones/v1.2-ROADMAP.md) · requi
 
 </details>
 
-### 🚧 v1.3 Build plan completion (In Progress)
+### ⚠️ v1.3 Build plan completion (closed with accepted debt, 2026-10-21)
 
 **Milestone Goal:** Land on `main` everything the Notion build plan still lacks, each part ending in a proof run for real: Linear-driven dispatch with mirrored claims, the docs and memory planes, the hourly Solana devnet anchor, the skills library with propose-only miners and Agent Cards, `desktop_run`, the Lane A host, and the deferred Phase 0 UAT.
 
@@ -75,6 +78,30 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 31: Lane A runtime: spike, packaging and VM host** - `substrate-host` runs from `main` with one agentos VM per Graph ID, inside the host's disk and port limits (completed 2026-10-11)
 - [x] **Phase 32: Lane A host core** - A host task works its node under the `claude-code` lease, survives a restart and keeps credentials on the host (completed 2026-10-11)
 - [x] **Phase 33: Lane A dispatch route and approvals** - `dispatch:claude-code` takes an issue to a gated Done through a Lane A VM, with human approval of permissions (completed 2026-10-11)
+- [x] **Phase 34: Invalid-write round trip** - every client-input write surface refuses an invalid payload with zero rows persisted, proven in an isolated namespace.
+- [x] **Phase 35: expected_version for skills and docs** - a stale skill or docs write is rejected with the memory contract's error; an absent field keeps today's behavior.
+- [x] **Phase 36: Degraded-mode exactly-once replay** - a write carrying an idempotency key applies once across replays; the dependent client's queue is built or recorded as a decision.
+
+### 🚧 v1.3.x Should-have hardening (Planned)
+
+- [x] **Phase 37: LANEB** - graph inference from worktree path
+- [x] **Phase 38: MIRROR** - mirror graph edges into Linear relations and outcomes into evidence
+- [x] **Phase 39: DISPATCH** - signed handoff packet and coord drift scan before launch
+- [ ] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (decided 2026-10-21)
+- [ ] **Phase 41: ANCHOR** - anchor evidence and teachables
+- [ ] **Phase 42: SKILL-CARD** - skills_list audit trail and the F-D4 re-ingest item
+- [ ] **Phase 43: LANE-A** - sandbox egress allowlist and task re-adoption
+- [ ] **Phase 44: UAT** - repeatable UAT script against any SUBSTRATE_URL
+
+### 🚧 v1.5 SOTA enhancements (Planned)
+
+- [ ] **Phase 45: Railway Resource Orchestrator** - budget ceiling $50 per month, confirmed 2026-10-21 (uplift-7/BLOCKING-UNKNOWNS.md item 8)
+- [ ] **Phase 46: RAGFlow Advanced Hybrid RAG with Hindsight Context** - hybrid search with reranking and Hindsight context
+- [ ] **Phase 47: GreptimeDB + Dragonfly Predictive Analytics & Cache** - SLO burn forecasting and pattern-based cache pre-warming
+- [ ] **Phase 48: TailscaleDB Secure Unified Proxy Layer** - zero-trust database access through one Tailscale proxy with RBAC, audit and pooling
+- [ ] **Phase 49: Hindsight Graph Memory with Greptime Events** - graph-structured Hindsight memory with causal recall
+- [ ] **Phase 50: Dragonfly Pub/Sub for Real-time Events** - real-time event propagation and event-driven cache invalidation
+- [ ] **Phase 51: Enterprise Unified Resource Fabric** - one MCP interface across all six resources, depends on phases 45 and 48
 
 ## Phase Details
 
@@ -430,6 +457,305 @@ Plans:
 - [x] 33-02-PLAN.md — Approval timeout plus single-use button rehearsal with fake transport (LANEA-06)
 - [x] 33-03-PLAN.md — Fake label-to-Done chain plus docs plus G1-G5 gated tail (LANEA-08)
 
+### Phase 34: Invalid-write round trip
+
+**Goal**: Every client-input write surface refuses an invalid payload, and nothing is persisted when it does.
+**Depends on**: none (uplift-7 gap, base `main` at `05d8f45`)
+**Repos**: agent-substrate (`packages/mcp-server`)
+**Requirements**: uplift-7 audit row "Invalid writes are rejected, with nothing partially persisted"
+**Success Criteria** (what must be TRUE):
+
+  1. Memory, skill, and docs writes refuse an invalid payload with the surface's documented error status.
+  2. Before-and-after checks of stored content (memory records, docs state, uploaded documents) prove nothing was persisted or mutated on a refusal (row count alone is insufficient because `decideSkill` can mutate without changing count, and docs perform uploads + disk writes). Row counts kept as an extra check. Proven in an isolated namespace per surface.
+**Plans**: 1/1 plans complete; verified 2026-10-21, all criteria PASS, see 34-VERIFICATION.md
+
+### Phase 35: expected_version for skills and docs
+
+**Goal**: Skill and docs writes enforce the same optimistic-concurrency contract memory decisions already use.
+**Depends on**: none (uplift-7 gap, base `main` at `05d8f45`)
+**Repos**: agent-substrate (`packages/mcp-server`)
+**Requirements**: uplift-7 audit row "A stale concurrent update is rejected or resolved under the documented policy"
+**Success Criteria** (what must be TRUE):
+
+  1. A skill or docs write with a stale `expected_version` is rejected with the memory path's error, and the stored row is unchanged.
+  2. A matching `expected_version` is accepted and the version increments.
+  3. A write without the field behaves exactly as it does today.
+**Plans**: 1/1 plans complete
+
+### Phase 36: Degraded-mode exactly-once replay
+
+**Goal**: With the substrate unavailable, a dependent client finishes degraded, and queued writes apply exactly once when it recovers.
+**Depends on**: none (uplift-7 gap, base `main` at `05d8f45`)
+**Repos**: agent-substrate (`packages/mcp-server`, and the dependent client if identified)
+**Requirements**: uplift-7 audit row "With the substrate unavailable, a dependent client finishes degraded; queued writes apply exactly once"
+**Success Criteria** (what must be TRUE):
+
+  1. A memory write carrying an idempotency key applies once across replays and returns the original result. A skill approve replay answers `exists` with the existing record and writes no second row or event. A skill propose replay answers `existing` with no second push or PR. Amended 2026-10-21 by the project owner's decision: skills have no idempotency key. A propose replay still emits one `skill.propose` audit event per call (service.ts:2772-2788).
+  2. A write without a key behaves exactly as it does today.
+  3. The 503 path is covered by a test.
+  4. The dependent client's local queue is built for the identified client, or recorded as a decision request with a default.
+**Plans**: 1/1 plans complete; verified 2026-10-21, see 36-VERIFICATION.md
+
+### Phase 37: LANEB
+
+**Goal**: Lane B events for a worktree reach that graph's brief and evidence without agents passing ids.
+
+**Depends on**: C-T3
+
+**Repos**: agent-substrate
+
+**Requirements**: [A-D1]
+
+**Success Criteria** (what must be TRUE):
+
+  1. Lane B events reach the graph's brief and evidence without agents passing ids.
+
+**Plans**: 1/1 plans complete (PLAN.md); verified in phases/37-laneb-graph-attribution/VERIFICATION.md, merged in PR #89 (a1b7152)
+
+### Phase 38: MIRROR
+
+**Goal**: Graph edges mirror into Linear relations, and mirror outcomes land in each node's evidence.
+
+**Depends on**: M6
+
+**Repos**: agent-substrate
+
+**Requirements**: [B-D1, B-D3]
+
+**Success Criteria** (what must be TRUE):
+
+  1. Graph edges (`requires` / `blocks` / `gated_by`) mirror into Linear relations, closing `coordination.md:321` "Not done".
+  2. One artifact per node shows claim → Linear → Notion → DoD.
+
+**Plans**: 1 plan (PLAN.md); verified in phases/38-mirror/VERIFICATION.md; merged in PR #90 (1d4e4aa)
+
+### Phase 39: DISPATCH
+
+**Goal**: Dispatch is a signed handoff packet, and the worktree is drift-scanned before any session launches.
+
+**Depends on**: M2
+
+**Repos**: agent-substrate
+
+**Requirements**: [C-D2, C-D4]
+
+**Success Criteria** (what must be TRUE):
+
+  1. Dispatch is a signed handoff packet (goal from the issue, DoD lines, files), and the dispatched context can be replayed from the ledger.
+  2. `coord_drift_scan` runs on the worktree before launch, giving a stale-brief warning before acting (v0.3 §2).
+
+**Plans**: 1 plan (PLAN.md, verification and records); verified in phases/39-dispatch/VERIFICATION.md; draft PR open. The C-D2 goal is the issue identifier (DISP-07, decided 2026-10-21)
+
+### Phase 40: DOCS-MEMORY
+
+**Goal**: The memory planes consolidate into one: cross-surface recall, retirement of the duplicate memory MCPs once the `sub-*` banks answer, and a weekly reflect per bank.
+
+**Decision (2026-10-21)**: DOCS-04 is amended to allow recall inside the brief, as D-D1 describes (a bounded, cached fan-out over the `sub-*` banks). The original DOCS-04 wording stays in milestones/v1.3-REQUIREMENTS.md:85. Open for the phase 40 discuss step: whether the 1.5 s brief budget named in that wording still applies.
+
+**Depends on**: P10
+
+**Repos**: agent-substrate
+
+**Requirements**: [D-D1, D-D3, D-D4]
+
+**Success Criteria** (what must be TRUE):
+
+  1. D-D1 (decided 2026-10-21): cross-surface recall in the brief is a bounded, cached fan-out over the `sub-*` banks (`data-planes.md:34`).
+  2. Claude Code's global `hindsight` stdio MCP and Hermes supermemory are retired once the `sub-*` banks answer, with restore routes recorded first.
+  3. A weekly `reflect` per bank: mental models replace stale detail (`data-planes.md:27,39`).
+
+**Plans**: 0 plans (created by gsd-plan-phase)
+
+### Phase 41: ANCHOR
+
+**Goal**: Hourly anchors appear in the evidence bundle, and teachable moments are anchored.
+
+**Depends on**: M6; F-D2 and E-T4
+
+**Repos**: agent-substrate
+
+**Requirements**: [E-D1, E-D2]
+
+**Success Criteria** (what must be TRUE):
+
+  1. Anchors appear in the evidence bundle: a tx signature and an explorer link per hour, so PR and incident evidence can be checked outside the system (v0.3 6.x).
+  2. Teachable moments are anchored with graph id plus an observation digest, a user addition carried in the brief's area E.
+
+**Plans**: 0 plans (created by gsd-plan-phase)
+
+### Phase 42: SKILL-CARD
+
+**Goal**: Skills gain a list tool with an approve/decline audit trail, and the `agent-skills` dataset re-ingests after each fast-forward.
+
+**Depends on**: D-T3
+
+**Repos**: agent-substrate
+
+**Requirements**: [F-D3, F-D4]
+
+**Success Criteria** (what must be TRUE):
+
+  1. `skills_list` and an approve/decline audit trail (§5.1; v0.3 "4.x Skill approve audit").
+  2. Skills become searchable through `docs_search` after each `agent-skills` fast-forward re-ingest.
+
+**Plans**: 0 plans (created by gsd-plan-phase)
+
+### Phase 43: LANE-A
+
+**Goal**: The Lane A sandbox runs under an enforced egress allowlist, and running tasks are re-adopted after a dispatcher restart.
+
+**Depends on**: none stated
+
+**Repos**: agent-substrate
+
+**Requirements**: [H-D1, H-D3]
+
+**Success Criteria** (what must be TRUE):
+
+  1. An enforced egress allowlist for the sandbox container (September N3 found it could reach example.com).
+  2. Running tasks are re-adopted after a dispatcher restart, so no orphaned VMs remain (N4).
+
+**Plans**: 0 plans (created by gsd-plan-phase)
+
+### Phase 44: UAT
+
+**Goal**: The Phase 0 UAT runs as a repeatable script against any `SUBSTRATE_URL`.
+
+**Depends on**: none stated
+
+**Repos**: agent-substrate
+
+**Requirements**: [I-D1]
+
+**Success Criteria** (what must be TRUE):
+
+  1. The UAT runs as a repeatable script against any `SUBSTRATE_URL`, a regression check for every later phase (I-D1).
+
+**Plans**: 0 plans (created by gsd-plan-phase)
+
+### Phase 45: Railway Resource Orchestrator
+
+**Goal**: Railway services are managed through MCP tools (list, scale, monitor, deploy) using the forwarders, with a basic scale suggestion and a cost report.
+
+**Status**: unparked 2026-10-21. Budget ceiling $50 per month at test scale, confirmed by the project owner (uplift-7/BLOCKING-UNKNOWNS.md item 8 default).
+
+**Depends on**: none (7-SOTA plan on branch feature/7-sota-enhancements)
+
+**Repos**: agent-substrate (target files: packages/mcp-server/src (new railway.ts), docs/data-planes.md, config-reference.md)
+
+**Requirements**: [SOTA-01]
+
+**Success Criteria** (what must be TRUE):
+
+  1. MCP tool lists Railway resources.
+  2. Basic scale suggestion.
+  3. Cost report in /slo.
+
+**Plans**: 0 plans (created by gsd-plan-phase)
+
+### Phase 46: RAGFlow Advanced Hybrid RAG with Hindsight Context
+
+**Goal**: Docs answers use hybrid search with reranking, augmented by Hindsight and Greptime event context.
+
+**Depends on**: none (7-SOTA plan on branch feature/7-sota-enhancements)
+
+**Repos**: agent-substrate (target files: packages/mcp-server/src/planes/ragflow.ts, planes/hindsight.ts, docs/docs-plane.md)
+
+**Requirements**: [SOTA-02]
+
+**Success Criteria** (what must be TRUE):
+
+  1. docs_search returns context-augmented results.
+  2. Tests for hybrid.
+
+**Plans**: 0 plans (created by gsd-plan-phase)
+
+### Phase 47: GreptimeDB + Dragonfly Predictive Analytics & Cache
+
+**Goal**: Time-series forecasting predicts SLO burn, and the Dragonfly cache pre-warms from observed patterns.
+
+**Depends on**: none (7-SOTA plan on branch feature/7-sota-enhancements)
+
+**Repos**: agent-substrate (target files: packages/mcp-server/src/cache.ts, greptime code, observability, data-planes.md)
+
+**Requirements**: [SOTA-03]
+
+**Success Criteria** (what must be TRUE):
+
+  1. /slo has predictive rows.
+  2. Cache preloads based on patterns.
+
+**Plans**: 0 plans (created by gsd-plan-phase)
+
+### Phase 48: TailscaleDB Secure Unified Proxy Layer
+
+**Goal**: Greptime, Dragonfly and Timescale are reached through one secure Tailscale proxy layer with RBAC, audit and pooling.
+
+**Depends on**: none (7-SOTA plan on branch feature/7-sota-enhancements)
+
+**Repos**: agent-substrate (target files: docs/railway-tailscale.md, data-planes.md, config for DBs)
+
+**Requirements**: [SOTA-04]
+
+**Success Criteria** (what must be TRUE):
+
+  1. All DBs accessed via secure proxy.
+  2. Audit events for access.
+
+**Plans**: 0 plans (created by gsd-plan-phase)
+
+### Phase 49: Hindsight Graph Memory with Greptime Events
+
+**Goal**: Hindsight memory is graph-structured and built from Greptime events, with causal recall.
+
+**Depends on**: none (7-SOTA plan on branch feature/7-sota-enhancements)
+
+**Repos**: agent-substrate (target files: packages/mcp-server/src/planes/hindsight.ts, memory code, greptime)
+
+**Requirements**: [SOTA-05]
+
+**Success Criteria** (what must be TRUE):
+
+  1. memory_search returns graph-linked results.
+  2. Recall uses causal.
+
+**Plans**: 0 plans (created by gsd-plan-phase)
+
+### Phase 50: Dragonfly Pub/Sub for Real-time Events
+
+**Goal**: Dragonfly pub/sub propagates Greptime events to the planes in real time, with event-driven cache invalidation.
+
+**Depends on**: none (7-SOTA plan on branch feature/7-sota-enhancements)
+
+**Repos**: agent-substrate (target files: packages/mcp-server/src/cache.ts, event emit code)
+
+**Requirements**: [SOTA-06]
+
+**Success Criteria** (what must be TRUE):
+
+  1. Real-time notifications for events via Dragonfly.
+  2. Tests.
+
+**Plans**: 0 plans (created by gsd-plan-phase)
+
+### Phase 51: Enterprise Unified Resource Fabric
+
+**Goal**: One MCP interface and set of dashboards covers all six resources on Railway and Tailscale, with cross-resource optimization and compliance reporting.
+
+**Depends on**: Phases 45 and 48 (inferred from the Railway and Tailscale scope of the 7-SOTA plan, item 7; the plan states no dependency)
+
+**Repos**: agent-substrate (target files: packages/mcp-server/src (new fabric/), observability, docs, config-reference)
+
+**Requirements**: [SOTA-07]
+
+**Success Criteria** (what must be TRUE):
+
+  1. New MCP tools for fabric status and optimization suggestions.
+  2. Compliance report.
+
+**Plans**: 0 plans (created by gsd-plan-phase)
+
+
 ## Progress
 
 | Phase | Milestone | Plans Complete | Status | Completed |
@@ -452,3 +778,21 @@ Plans:
 | 31. Lane A runtime: spike, packaging and VM host | v1.3 | 3/3 | Complete    | 2026-10-11 |
 | 32. Lane A host core | v1.3 | 3/3 | Complete    | 2026-10-11 |
 | 33. Lane A dispatch route and approvals | v1.3 | 3/3 | Complete    | 2026-10-11 |
+| 34. Invalid-write round trip | v1.4 | 1/1 | Complete | 2026-10-21 |
+| 35. expected_version for skills and docs | v1.4 | 1/1 | Complete | 2026-10-21 |
+| 36. Degraded-mode exactly-once replay | v1.4 | 1/1 | Complete | 2026-10-21 |
+| 37. LANEB | v1.3.x | 1/1 | Complete | 2026-10-21 |
+| 38. MIRROR | v1.3.x | 1/1 | Complete | 2026-10-21 |
+| 39. DISPATCH | v1.3.x | 1/1 | Complete (PR #91) | 2026-10-21 |
+| 40. DOCS-MEMORY | v1.3.x | 0/0 | In review (draft PR) | - |
+| 41. ANCHOR | v1.3.x | 0/0 | Not started | - |
+| 42. SKILL-CARD | v1.3.x | 0/0 | Not started | - |
+| 43. LANE-A | v1.3.x | 1/1 | Complete (PR #97) | 2026-10-21 |
+| 44. UAT | v1.3.x | 1/1 | Complete (PR #95) | 2026-10-21 |
+| 45. Railway Resource Orchestrator | v1.5 | 1/1 | Complete (PR #96) | 2026-10-21 |
+| 46. RAGFlow Advanced Hybrid RAG with Hindsight Context | v1.5 | 1/1 | In review (draft PR #98) | - |
+| 47. GreptimeDB + Dragonfly Predictive Analytics & Cache | v1.5 | 0/0 | Not started | - |
+| 48. TailscaleDB Secure Unified Proxy Layer | v1.5 | 0/0 | Not started | - |
+| 49. Hindsight Graph Memory with Greptime Events | v1.5 | 0/0 | Not started | - |
+| 50. Dragonfly Pub/Sub for Real-time Events | v1.5 | 0/0 | Not started | - |
+| 51. Enterprise Unified Resource Fabric | v1.5 | 0/0 | Not started | - |

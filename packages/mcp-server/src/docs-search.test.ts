@@ -3,14 +3,20 @@
  * with untrusted framing and a URL-listing note event; errors yield empty
  * plus reason. Proved against the recording fake.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CircuitBreaker, gatedFetch, type DocsSearchSample, type PlaneGate } from "@substrate/observability";
 import { ReadThroughCache, type CacheRedis } from "./cache.ts";
 import { attachGraphHints, citationProvenanceCounts, planningGraphCounts, searchDocs, searchReplyStorable, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type SearchCitation, type SearchReply } from "./docs-search.ts";
 import type { DatasetListSource } from "./docs-datasets.ts";
+import { nodeIo, readSkillsCheckoutPages, skillsCheckoutRoots, type ScanIo } from "./docs-ingest.ts";
 import { RagflowFake, type FakeChunk } from "./ragflow-fake.ts";
+import type { GreptimeClient } from "./greptime.ts";
+import { HindsightFake } from "./hindsight-fake.ts";
 import { ragflowOp } from "./planes/ragflow.ts";
 import type { EventInput } from "./types.ts";
 import { selectRetrievalBackend } from "./types.ts";
@@ -776,5 +782,472 @@ describe("search graph metadata (LightRAG path)", () => {
 		expect(ragflowListings).toBe(0);
 		expect(reply.degraded ?? false).toBe(false);
 		expect(reply.chunks).toHaveLength(1);
+	});
+});
+
+describe("docs_search after an agent-skills refresh (phase 42)", () => {
+	/** A checkout in the library layout: each `<name>/` holds its `SKILL.md` and a `references/` tree. */
+	function skillsCheckout(files: Record<string, string>): string {
+		const root = mkdtempSync(join(tmpdir(), "substrate-skills-"));
+		for (const [path, body] of Object.entries(files)) {
+			mkdirSync(dirname(join(root, path)), { recursive: true });
+			writeFileSync(join(root, path), body);
+		}
+		return root;
+	}
+
+	/**
+	 * The refresh the merge-trigger route runs for agent-skills: the trigger is noted, then the job runs and is awaited.
+	 * `io` is the file system the scan reads through; a test passes one that cannot read a path.
+	 */
+	function refresh(substrate: Substrate, checkout: string, commit: string, io: ScanIo = nodeIo) {
+		substrate.noteDocsTrigger("agent-skills");
+		return substrate.startDocsRefresh(
+			{
+				dataset: "agent-skills",
+				commit,
+				content_sha256: `sha-${commit}`,
+				roots: () => skillsCheckoutRoots(checkout),
+				pages: (roots) => readSkillsCheckoutPages(checkout, roots, io),
+			},
+			"omp",
+			{ wait: true },
+		);
+	}
+
+	test("docs_search answers from the new agent-skills version after the refresh", async () => {
+		const fake = new RagflowFake();
+		fake.serveUploadsAsChunks = true;
+		fake.parseDonePolls = 1;
+		const checkout = skillsCheckout({
+			"demo-skill/SKILL.md": "---\nname: demo-skill\n---\nDemo skill body.\n",
+			"demo-skill/references/api.md": "The demo API reference.\n",
+		});
+		try {
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			const outcome = await refresh(substrate, checkout, "skills-v2");
+			expect(outcome.status).toBe(200);
+			const reply = await substrate.searchDocs({ question: "demo API reference" }, "omp");
+			const cited = reply.chunks.filter((chunk) => chunk.source_url.endsWith("/demo-skill/references/api.md"));
+			expect(cited).toHaveLength(1);
+			expect(cited[0]).toMatchObject({ commit: "skills-v2", dataset_commit: "skills-v2" });
+			expect(cited[0]?.pin_age_ms).toBeUndefined();
+			expect(reply.chunks.some((chunk) => chunk.source_url.endsWith("/demo-skill/SKILL.md"))).toBe(true);
+		} finally {
+			rmSync(checkout, { recursive: true, force: true });
+		}
+	});
+
+	test("a checkout that cannot be read keeps the pinned version serving, with its age", async () => {
+		const fake = new RagflowFake();
+		fake.serveUploadsAsChunks = true;
+		fake.parseDonePolls = 1;
+		const checkout = skillsCheckout({ "demo-skill/SKILL.md": "Demo skill body.\n" });
+		try {
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			expect((await refresh(substrate, checkout, "skills-v1")).status).toBe(200);
+			rmSync(checkout, { recursive: true, force: true });
+			const failed = await refresh(substrate, checkout, "skills-v2");
+			expect(failed.status).toBe(503);
+			expect(failed.body).toMatchObject({ ok: false, reason: "checkout-unreadable" });
+			const reply = await substrate.searchDocs({ question: "demo skill" }, "omp");
+			const cited = reply.chunks.find((chunk) => chunk.source_url.endsWith("/demo-skill/SKILL.md"));
+			expect(cited).toMatchObject({ commit: "skills-v1", dataset_commit: "skills-v1" });
+			expect(typeof cited?.pin_age_ms).toBe("number");
+		} finally {
+			rmSync(checkout, { recursive: true, force: true });
+		}
+	});
+
+	test("an unreadable references directory fails the refresh: the pinned version keeps serving and no version is recorded", async () => {
+		const fake = new RagflowFake();
+		fake.serveUploadsAsChunks = true;
+		fake.parseDonePolls = 1;
+		const checkout = skillsCheckout({
+			"demo-skill/SKILL.md": "Demo skill body.\n",
+			"demo-skill/references/api.md": "The demo API reference.\n",
+		});
+		try {
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			expect((await refresh(substrate, checkout, "skills-v1")).status).toBe(200);
+			// The references tree exists but its listing is denied: the scan fails rather than yielding SKILL.md alone under a fresh version.
+			const unreadable: ScanIo = {
+				...nodeIo,
+				readdir: (path, options) => (path.endsWith(join("demo-skill", "references")) ? Promise.reject(Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" })) : nodeIo.readdir(path, options)),
+			};
+			const failed = await refresh(substrate, checkout, "skills-v2", unreadable);
+			expect(failed.status).toBe(503);
+			expect(failed.body).toMatchObject({ ok: false, reason: "checkout-unreadable" });
+			expect(await substrate.latestDocsVersion("agent-skills")).toMatchObject({ commit: "skills-v1" });
+			const reply = await substrate.searchDocs({ question: "demo API reference" }, "omp");
+			const cited = reply.chunks.find((chunk) => chunk.source_url.endsWith("/demo-skill/references/api.md"));
+			expect(cited).toMatchObject({ commit: "skills-v1", dataset_commit: "skills-v1" });
+		} finally {
+			rmSync(checkout, { recursive: true, force: true });
+		}
+	});
+
+	/**
+	 * Skills whose references outweigh one ingest call's 5 MB: `count` skills, each a small SKILL.md and a 900 KB
+	 * reference, so every page is under the 1 MB page limit. A reference's content starts with its skill's name.
+	 */
+	function wideSkills(count: number): Record<string, string> {
+		const files: Record<string, string> = {};
+		for (let n = 1; n <= count; n += 1) {
+			files[`skill-${n}/SKILL.md`] = `---\nname: skill-${n}\n---\nSkill ${n} body.\n`;
+			files[`skill-${n}/references/api.md`] = `skill-${n} reference ${"x".repeat(900_000)}\n`;
+		}
+		return files;
+	}
+
+	test("a checkout whose references exceed one call's 5 MB refreshes in several calls and records the version", async () => {
+		const fake = new RagflowFake();
+		fake.serveUploadsAsChunks = true;
+		fake.parseDonePolls = 1;
+		const checkout = skillsCheckout(wideSkills(6));
+		try {
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			const outcome = await refresh(substrate, checkout, "skills-wide");
+			expect(outcome.status).toBe(200);
+			expect(await substrate.latestDocsVersion("agent-skills")).toMatchObject({ commit: "skills-wide" });
+			// Twelve pages (a SKILL.md and a reference each) reached the plane, and together they outweigh one call's limit.
+			expect(fake.uploads).toHaveLength(12);
+			expect(fake.uploads.reduce((sum, upload) => sum + upload.content.length, 0)).toBeGreaterThan(5_000_000);
+		} finally {
+			rmSync(checkout, { recursive: true, force: true });
+		}
+	});
+
+	test("a refresh whose later call fails keeps the prior pin, and the earlier call's pages are reported as stored", async () => {
+		const fake = new RagflowFake();
+		fake.serveUploadsAsChunks = true;
+		fake.parseDonePolls = 1;
+		const prior = skillsCheckout({ "skill-1/SKILL.md": "Skill one body v1.\n" });
+		const wide = skillsCheckout(wideSkills(6));
+		try {
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			expect((await refresh(substrate, prior, "skills-v1")).status).toBe(200);
+			// The plane refuses the last skill's reference. It sits in the second call, so the first call has already stored its pages.
+			fake.failUploadWhen = (content) => content.startsWith("skill-6 reference");
+			const failed = await refresh(substrate, wide, "skills-v2");
+			expect(failed.status).toBe(503);
+			expect(failed.body).toMatchObject({ ok: false, stored: true });
+			expect(failed.body).not.toMatchObject({ reason: "call-too-large" });
+			// No version is recorded for the failed refresh: the pin keeps the prior version.
+			expect(await substrate.latestDocsVersion("agent-skills")).toMatchObject({ version: "v1", commit: "skills-v1" });
+			// The first call's page is searchable under its own commit while the dataset pin still names the prior one.
+			const reply = await substrate.searchDocs({ question: "skill one reference" }, "omp");
+			const stored = reply.chunks.find((chunk) => chunk.source_url.endsWith("/skill-1/references/api.md"));
+			expect(stored).toMatchObject({ commit: "skills-v2", dataset_commit: "skills-v1" });
+			expect(typeof stored?.pin_age_ms).toBe("number");
+		} finally {
+			rmSync(prior, { recursive: true, force: true });
+			rmSync(wide, { recursive: true, force: true });
+		}
+	});
+});
+
+/** Point the Hindsight reads at the fake: recall reads the environment at call time. */
+function hindsightEnv(banks: string): () => void {
+	const names = ["HINDSIGHT_URL", "HINDSIGHT_API_KEY", "HINDSIGHT_BANKS"];
+	const saved = new Map(names.map((name) => [name, process.env[name]]));
+	process.env.HINDSIGHT_URL = "http://fake";
+	process.env.HINDSIGHT_API_KEY = "test-bearer";
+	process.env.HINDSIGHT_BANKS = banks;
+	return () => {
+		for (const [name, value] of saved) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+	};
+}
+
+/**
+ * A ledger seam answering the reads a docs search reaches, recording the
+ * session reads. A `failure` makes every read reject with that message.
+ */
+function ledgerStub(rows: Array<Record<string, unknown>>, failure?: string): { greptime: GreptimeClient; reads: Array<[string, string]> } {
+	const reads: Array<[string, string]> = [];
+	const stub = {
+		ensureAppendMode: async () => true,
+		lastHash: async (): Promise<string | null> => null,
+		insertEvent: async () => {},
+		readEvents: async (column: "session_id" | "graph_id", value: string) => {
+			reads.push([column, value]);
+			if (failure !== undefined) throw new Error(failure);
+			return rows;
+		},
+	};
+	// The seam takes the full client; these tests reach only the four methods the stub implements.
+	const greptime: GreptimeClient = stub as never;
+	return { greptime, reads };
+}
+
+/** Seven rows in time order, one second apart, all in session `s-1`. */
+function sessionRows(count: number): Array<Record<string, unknown>> {
+	return Array.from({ length: count }, (_, index) => ({
+		id: `evt-${index}`,
+		ts: 1_700_000_000_000 + index * 1000,
+		kind: "note",
+		surface: "cursor",
+		summary: `event ${index}`,
+		session_id: "s-1",
+	}));
+}
+
+describe("docs_search context (D46-d, D46-e)", () => {
+	const config = loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" });
+	let restoreEnv: () => void = () => {};
+	beforeEach(() => {
+		restoreEnv = hindsightEnv("sub-cursor");
+	});
+	afterEach(() => {
+		restoreEnv();
+	});
+
+	/** Four memories in the caller's bank; by score the best three are m2, m4 and m3. */
+	function recallable(): HindsightFake {
+		const hindsight = new HindsightFake();
+		hindsight.seed("sub-cursor", [
+			{ id: "m1", text: "fence the lease", document_id: "mwd_1", tags: ["cursor"], metadata: {}, score: 0.4 },
+			{ id: "m2", text: "quote every version", document_id: "mwd_2", tags: ["cursor"], metadata: {}, score: 0.9 },
+			{ id: "m3", text: "rotate the bearer", document_id: "mwd_3", tags: ["cursor"], metadata: {}, score: 0.7 },
+			{ id: "m4", text: "drain the outbox", document_id: "mwd_4", tags: ["cursor"], metadata: {}, score: 0.8 },
+		]);
+		return hindsight;
+	}
+
+	function substrateWith(options: { fake: RagflowFake; hindsight: HindsightFake; greptime: GreptimeClient; cache?: ReadThroughCache }): Substrate {
+		const cache = options.cache ?? new ReadThroughCache({ redis: null, enabled: false, log: () => {} });
+		return new Substrate(config, {
+			index: null,
+			greptime: options.greptime,
+			ragflowFetch: options.fake.fetch,
+			hindsightFetch: options.hindsight.fetch,
+			cache,
+		});
+	}
+
+	test("without the flag the reply has no context key, and neither recall nor the ledger is read", async () => {
+		const fake = new RagflowFake();
+		const hindsight = recallable();
+		const { greptime, reads } = ledgerStub(sessionRows(7));
+		const reply = await substrateWith({ fake, hindsight, greptime }).searchDocs({ question: "who reads RAGFlow?", session_id: "s-1" }, "cursor");
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(Object.hasOwn(reply, "context")).toBe(false);
+		expect(hindsight.recalls()).toEqual([]);
+		expect(reads).toEqual([]);
+	});
+
+	test("with the flag, memories come from recall and events from the session's last five ledger rows", async () => {
+		const fake = new RagflowFake();
+		const { greptime, reads } = ledgerStub(sessionRows(7));
+		const reply = await substrateWith({ fake, hindsight: recallable(), greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
+			"cursor",
+		);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.context?.untrusted).toBe(UNTRUSTED_DOCS_NOTICE);
+		expect(reply.context?.degraded).toBeUndefined();
+		expect(reply.context?.memories.map((memory) => memory.id)).toEqual(["m2", "m4", "m3"]);
+		expect(reply.context?.memories[0]).toEqual({ id: "m2", text: "quote every version", scope: null, repo: null });
+		expect(reply.context?.events.map((event) => event.id)).toEqual(["evt-2", "evt-3", "evt-4", "evt-5", "evt-6"]);
+		expect(reply.context?.events[0]).toEqual({
+			id: "evt-2",
+			ts: new Date(1_700_000_002_000).toISOString(),
+			kind: "note",
+			surface: "cursor",
+			summary: "event 2",
+		});
+		expect(reads).toEqual([["session_id", "s-1"]]);
+	});
+
+	test("no session: events are empty, degraded is no-session, and the memories still come", async () => {
+		const fake = new RagflowFake();
+		const { greptime, reads } = ledgerStub(sessionRows(7));
+		const reply = await substrateWith({ fake, hindsight: recallable(), greptime }).searchDocs({ question: "who reads RAGFlow?", context: true }, "cursor");
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.context?.events).toEqual([]);
+		expect(reply.context?.degraded).toBe("no-session");
+		expect(reply.context?.memories).toHaveLength(3);
+		expect(reads).toEqual([]);
+	});
+
+	test("a recall failure keeps the chunks and names the recall as degraded", async () => {
+		const fake = new RagflowFake();
+		const hindsight = recallable();
+		hindsight.failRecallWith = 503;
+		const { greptime } = ledgerStub(sessionRows(2));
+		const reply = await substrateWith({ fake, hindsight, greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
+			"cursor",
+		);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.context?.memories).toEqual([]);
+		expect(reply.context?.degraded).toStartWith("recall: hindsight recall failed");
+		expect(reply.context?.events).toHaveLength(2);
+	});
+
+	test("a ledger failure keeps the chunks and the memories, and names the ledger", async () => {
+		const fake = new RagflowFake();
+		const { greptime, reads } = ledgerStub([], "greptime unreachable");
+		const reply = await substrateWith({ fake, hindsight: recallable(), greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
+			"cursor",
+		);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.context?.memories).toHaveLength(3);
+		expect(reply.context?.events).toEqual([]);
+		expect(reply.context?.degraded).toStartWith("ledger: ");
+		expect(reads).toEqual([["session_id", "s-1"]]);
+	});
+
+	test("a ledger read that never answers does not hold the reply: chunks come back, events are empty, and the reply returns within the ledger budget", async () => {
+		const fake = new RagflowFake();
+		const { greptime } = ledgerStub([]);
+		Object.assign(greptime, { readEvents: () => new Promise<never>(() => {}) });
+		const started = performance.now();
+		const reply = await substrateWith({ fake, hindsight: recallable(), greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
+			"cursor",
+		);
+		const elapsed = performance.now() - started;
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.context?.events).toEqual([]);
+		expect(reply.context?.degraded).toContain("ledger");
+		// The ledger budget is 1000 ms (DOCS_CONTEXT_LEDGER_BUDGET_MS); the 3000 ms bound leaves room for scheduling.
+		expect(elapsed).toBeLessThan(3000);
+	});
+
+	test("a context reply is never stored: the cache keeps the chunk answer, and no stored value carries context", async () => {
+		const fake = new RagflowFake();
+		const redis = new FakeRedis();
+		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
+		const { greptime } = ledgerStub(sessionRows(7));
+		const substrate = substrateWith({ fake, hindsight: recallable(), greptime, cache });
+		const request = { question: "who reads RAGFlow?", session_id: "s-1", context: true };
+		const first = await substrate.searchDocs(request, "cursor");
+		expect(first.context?.memories).toHaveLength(3);
+		expect(searchReplyStorable(first)).toBe(false);
+		const stored = [...redis.values].filter(([key]) => key.startsWith("substrate:v1:docs-search:"));
+		expect(stored).toHaveLength(1);
+		const envelope: { v?: Record<string, unknown> } = JSON.parse(stored[0]?.[1] ?? "{}");
+		expect(envelope.v).toBeDefined();
+		expect(Object.hasOwn(envelope.v ?? {}, "context")).toBe(false);
+		const second = await substrate.searchDocs(request, "cursor");
+		expect(second.chunks).toEqual(first.chunks);
+		expect(second.context?.events).toHaveLength(5);
+	});
+
+	test("docs_search over MCP passes context through to the service", async () => {
+		const fake = new RagflowFake();
+		const { greptime } = ledgerStub(sessionRows(7));
+		const substrate = substrateWith({ fake, hindsight: recallable(), greptime });
+		const server = createMcpServer(substrate, "cursor");
+		const client = new Client({ name: "substrate-test", version: "0.0.0" });
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+		try {
+			const result = await client.callTool({
+				name: "docs_search",
+				arguments: { question: "who reads RAGFlow?", session_id: "s-1", context: true },
+			});
+			const content = result.content as Array<{ type: string; text?: string }>;
+			const reply: { context?: { memories: unknown[]; events: unknown[] } } = JSON.parse(content[0]?.text ?? "{}");
+			expect(reply.context?.memories).toHaveLength(3);
+			expect(reply.context?.events).toHaveLength(5);
+		} finally {
+			await client.close();
+			await server.close();
+		}
+	});
+
+	test("an anonymous caller reads no recall bank: memories are empty and the reason is the refusal memory_recall gives", async () => {
+		const fake = new RagflowFake();
+		const hindsight = recallable();
+		const { greptime } = ledgerStub(sessionRows(7));
+		const reply = await substrateWith({ fake, hindsight, greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
+			null,
+		);
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.context?.memories).toEqual([]);
+		expect(reply.context?.degraded).toBe("recall: no recall bank for surface unattributed: configure HINDSIGHT_BANKS");
+		expect(hindsight.recalls()).toEqual([]);
+		expect(reply.context?.events).toHaveLength(5);
+	});
+
+	test("a recall the plane does not serve names its reason, so a missing source is visible in the context", async () => {
+		delete process.env.HINDSIGHT_URL;
+		const fake = new RagflowFake();
+		const { greptime } = ledgerStub(sessionRows(7));
+		const reply = await substrateWith({ fake, hindsight: new HindsightFake(), greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
+			"cursor",
+		);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.context?.memories).toEqual([]);
+		expect(reply.context?.degraded).toBe("recall: hindsight is not configured");
+		expect(reply.context?.events).toHaveLength(5);
+	});
+
+	test("a search with no matches and no degradation carries no degraded key in the context", async () => {
+		const fake = new RagflowFake();
+		const hindsight = new HindsightFake();
+		hindsight.seed("sub-cursor", []);
+		const { greptime } = ledgerStub(sessionRows(7));
+		const reply = await substrateWith({ fake, hindsight, greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
+			"cursor",
+		);
+		expect(reply.context?.memories).toEqual([]);
+		expect(Object.hasOwn(reply.context ?? {}, "degraded")).toBe(false);
+		expect(reply.context?.events).toHaveLength(5);
+	});
+
+	test("one deadline bounds the whole recall: a recall that outlives the search budget answers empty and names the recall deadline", async () => {
+		const fake = new RagflowFake();
+		const hindsight = recallable();
+		hindsight.recallDeafMs["sub-cursor"] = 2000;
+		const { greptime } = ledgerStub(sessionRows(2));
+		const budgeted = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", HINDSIGHT_SEARCH_RECALL_BUDGET_MS: "200" }), {
+			index: null,
+			greptime,
+			ragflowFetch: fake.fetch,
+			hindsightFetch: hindsight.fetch,
+			cache: new ReadThroughCache({ redis: null, enabled: false, log: () => {} }),
+		});
+		const started = performance.now();
+		const reply = await budgeted.searchDocs({ question: "who reads RAGFlow?", session_id: "s-1", context: true }, "cursor");
+		const elapsed = performance.now() - started;
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.context?.memories).toEqual([]);
+		expect(reply.context?.degraded).toContain("recall deadline");
+		// The outer deadline is the 200 ms budget plus its 500 ms margin; the further 500 ms leaves room for scheduling.
+		expect(elapsed).toBeLessThan(200 + 500 + 500);
+	});
+
+	test("the ledger is read under the session id the events were written with, so a capped id still finds its rows", async () => {
+		const fake = new RagflowFake();
+		const stored = "s".repeat(512);
+		const rows = sessionRows(7).map((row) => ({ ...row, session_id: stored }));
+		const reads: string[] = [];
+		const { greptime } = ledgerStub([]);
+		Object.assign(greptime, {
+			readEvents: async (_column: string, value: string) => {
+				reads.push(value);
+				return value === stored ? rows : [];
+			},
+		});
+		const reply = await substrateWith({ fake, hindsight: recallable(), greptime }).searchDocs(
+			{ question: "who reads RAGFlow?", session_id: "s".repeat(600), context: true },
+			"cursor",
+		);
+		expect(reads).toEqual([stored]);
+		expect(reply.context?.events).toHaveLength(5);
 	});
 });

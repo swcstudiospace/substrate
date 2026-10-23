@@ -3,12 +3,13 @@
  * work done under that key.
  *
  * A **stub**, and marked as one in the bundle itself. What is real today: both hash
- * chains verified, the SLO verdicts with their sample counts, and the MCP audit's
- * allowed/denied tally. What is not: the Solana anchor and its signature, which
- * Phase 6 adds, and the per-node Linear/Notion cross-check, which Phase 2 does.
- * `pending` names them in the bundle rather than leaving a reader to assume the
- * absence means "nothing to report" — an evidence document that overstates itself
- * is worse than one that is honestly partial.
+ * chains verified, the hourly devnet anchor of each hour the graph's events sit in
+ * (`anchors`), the teachable moments that sit in those hours (`teachables`), the SLO
+ * verdicts with their sample counts, and the MCP audit's allowed/denied tally. What is
+ * not: the per-node Linear/Notion cross-check, which Phase 2 does, and model spend
+ * reconciled against the provider's billing. `pending` names them in the bundle rather
+ * than leaving a reader to assume the absence means "nothing to report" — an evidence
+ * document that overstates itself is worse than one that is honestly partial.
  */
 import type { AuditRecord, AuditStats, ChainVerdict } from "@substrate/audit";
 import { auditStats } from "@substrate/audit";
@@ -45,6 +46,50 @@ export function chainStateOf(chain: Pick<ChainEvidence, "ok" | "state">): ChainS
 	if (chain.ok === true) return "verified";
 	if (chain.ok === false) return "broken";
 	return "unverifiable";
+}
+
+/**
+ * One hour's anchor, as the bundle states it (D41-1, D41-5).
+ *
+ * `anchored`: the hour's devnet transaction reads back and its memo recomputes to the hour.
+ * `pending`: not anchored yet, and still inside the window in which it may be.
+ * `unverified`: anything else. An hour that cannot be checked fails closed, and `reason`
+ * says why. `tx_sig`, `slot` and `explorer_url` are absent for an hour with no anchor.
+ */
+export type AnchorState = "anchored" | "pending" | "unverified";
+
+export interface AnchorEvidence {
+	period_start: string;
+	period_end: string;
+	status: AnchorState;
+	event_count: number;
+	root: string | null;
+	tx_sig?: string;
+	slot?: number;
+	/** The Solana devnet transaction page for `tx_sig`. */
+	explorer_url?: string;
+	reason?: string;
+}
+
+/**
+ * One teachable moment (E-D2, D41-4): an accepted and verified teachable, identified by its
+ * ledger event and by the digest of the observation it recorded.
+ */
+export interface TeachableEvidence {
+	event_id: string;
+	graph_id: string;
+	session_id?: string;
+	/** The observation digest: the sha256 the teachable event carries for its accepted entry. */
+	content_sha256: string;
+	/** The start of the hour the event is anchored under; null when it has no ingest record. */
+	hour: string | null;
+	/** Whether `hour` is `anchored`, which puts the event inside an anchored root. */
+	anchored: boolean;
+	/** The transaction of `hour`, when that hour has one. */
+	tx_sig?: string;
+	explorer_url?: string;
+	/** Why the event is not anchored although its hour is, when known: `tampered` when its content no longer matches the ledger's hash. */
+	reason?: string;
 }
 
 export interface EvidenceInput {
@@ -108,6 +153,10 @@ export interface EvidenceInput {
 		attribution?: AuditAttribution;
 	};
 	metrics?: MetricSnapshot[];
+	/** One entry per hour of the graph's verify report (D41-1). Absent is none. */
+	anchors?: AnchorEvidence[];
+	/** The graph's teachable moments, each with its hour and that hour's anchor (D41-4). */
+	teachables?: TeachableEvidence[];
 	notes?: string[];
 }
 
@@ -131,13 +180,14 @@ export interface EvidenceBundle {
 	slo_summary: { ok: number; breached: number; insufficient: number; unmeasurable: number };
 	audit: AuditStats & { records: AuditRecord[]; attribution: AuditAttribution };
 	usage: EvidenceUsage | null;
+	anchors: AnchorEvidence[];
+	teachables: TeachableEvidence[];
 	pending: string[];
 	notes: string[];
 }
 
 /** What this bundle cannot yet attest to, and which phase closes each gap. */
 const PENDING = [
-	"Solana devnet Merkle anchor and signature over the hour containing these events (Phase 6)",
 	"per-node cross-check against the Linear issue and Notion page states (Phase 2)",
 	"model spend reconciled against the provider's own billing, rather than as collectors reported it",
 ];
@@ -206,6 +256,8 @@ export function buildEvidence(input: EvidenceInput): EvidenceBundle {
 		},
 		// Keyed by the stored form, which is what `graph_id` is — see its doc comment.
 		usage: usageForGraph(input.metrics, input.graph_id),
+		anchors: input.anchors ?? [],
+		teachables: input.teachables ?? [],
 		pending: PENDING,
 		notes: [
 			...(input.audit.durable

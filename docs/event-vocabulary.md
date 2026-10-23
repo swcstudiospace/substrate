@@ -12,8 +12,10 @@ implement against that table and add no kind and no surface (FOUND-02).
 
 These apply to every source:
 
-- **Closed vocabulary, both enums.** No kind is added; the only surface added
-  is `substrate` (host jobs, operator decision 2026-10-08). `normalizeEvent`
+- **Closed vocabulary, both enums.** No kind is added; the only surfaces added since v1.2
+  are `substrate` (host jobs, operator decision 2026-10-08) and the 15 reviewed swarm
+  surfaces `swarm-a16-cloud` … `swarm-a30-custody` (`REVIEWED_SURFACE_ADDITIONS` in
+  `scripts/phase-close-check.ts`). `normalizeEvent`
   keeps refusing anything else. A source with no fitting surface is not
   emitted under a wrong one: it is dropped and counted by its emitter.
 - **Host jobs emit as `substrate`.** The hourly anchor, the skills sync, the
@@ -113,14 +115,24 @@ These apply to every source:
 | `alert` | 33 | `warning` | `substrate` | `alert` | `alert` | — | yes |
 | `teachable.accepted` | 29 | `note` | `memory-writer` | `teachable` | — | — | no |
 | `mirror.failed` | 23 | `warning` | `lease-holder` | `mirror` | — | — | no |
+| `mirror.ok` | 38 | `note` | `lease-holder` | `mirror` | — | — | no |
+| `mirror.relation.ok` | 38 | `note` | `substrate` | `mirror` | — | — | no |
+| `mirror.relation.failed` | 38 | `warning` | `substrate` | `mirror` | — | — | no |
 | `lease.release.dod` | 23 | `note` | `lease-holder` | `released` | — | graph repo via placeOf | no |
 | `dod.refused` | 23 | `warning` | `lease-holder` | `dod` | — | — | no |
+| `dod.approved` | 38 | `note` | `lease-holder` | `dod` | — | graph repo via placeOf | no |
+| `memory.mental_model.refresh` | 40 | `note` | `substrate` | `memory.mental_model.refresh` | — | — | yes |
+| `memory.mental_model.refresh.failed` | 40 | `warning` | `substrate` | `memory.mental_model.refresh` | — | — | yes |
 | `dispatch.outcome` | 24 | `note` | `substrate` | `dispatch` | `dispatcher` | — | yes |
 | `dispatch.failed` | 24 | `warning` | `substrate` | `dispatch` | `dispatcher` | — | yes |
 | `lanea.session_start` | 32 | `session.start` | `claude-code` | — | `agentos` | — | no |
 | `lanea.session_end` | 32 | `session.end` | `claude-code` | — | `agentos` | — | no |
  | `lanea.approval` | 33 | `note` | `claude-code` | `approval` | `agentos` | — | no |
  | `lanea.approval.denied` | 33 | `warning` | `claude-code` | `approval` | `agentos` | — | no |
+| `railway.scale.applied` | 45 | `note` | `substrate` | `railway.scale` | `railway` | — | no |
+| `railway.scale.refused` | 45 | `warning` | `substrate` | `railway.scale` | `railway` | — | no |
+| `railway.deploy.applied` | 45 | `note` | `substrate` | `railway.deploy` | `railway` | — | no |
+| `railway.deploy.refused` | 45 | `warning` | `substrate` | `railway.deploy` | `railway` | — | no |
 | `muse.brief_writer` | 19 | — | — | — | — | — | no |
 | `memory.retain` | 26 | — | — | — | — | — | no |
 | `memory.recall` | 26 | — | — | — | — | — | no |
@@ -129,7 +141,10 @@ These apply to every source:
 | `issue_get` | 23 | — | — | — | — | — | no |
 | `graph_find` | 23 | — | — | — | — | — | no |
 | `skills.sync` | 22 | — | — | — | — | — | no |
-| `mirror` | 23 | — | — | — | — | — | no |
+| `railway.list` | 45 | — | — | — | — | — | no |
+| `railway.monitor` | 45 | — | — | — | — | — | no |
+| `railway.scale_suggest` | 45 | — | — | — | — | — | no |
+| `railway.cost` | 45 | — | — | — | — | — | no |
 
 <!-- event-sources:end -->
 
@@ -152,17 +167,27 @@ carrying `decision`, `name` when it was a valid one, and `rule` from a closed li
 free text. A decision that changed nothing (`exists`) emits nothing. See
 [skills-propose.md](skills-propose.md#approving-a-skill).
 
+The Railway write rows (Phase 45, D45-f) are `railway.scale` and `railway.deploy`, both
+from the fixed `substrate` surface with `runtime` `railway`. An applied write is a `note`;
+a write the gate refused, or that failed at Railway, is a `warning`. Their payloads carry
+`action`, `runtime`, `status`, `environment_id`, `service_id`, the refusal code when there
+is one, and the approval reference when one was valid. They never carry the token or a
+request body. The four Railway reads emit nothing (D45-b).
+
 ## Silent sources
 
 These deliberately emit nothing. A successful retain and every recall emit
 nothing (reads do not emit, like `memory_search`); Agent Cards and `verify`
 are reads; `issue_get` and `graph_find` are reads. A successful skills sync
 emits nothing — only a refusal is a warning — and the synced tree is its
-trail; a successful mirror emits nothing — only a failure is a warning — and
-the Linear comment is its trail. The Muse brief writer is
+trail. The Muse brief writer is
 deliberately not an event: a `note` with `repo` per refresh would enter that
 repo's brief, change it, and re-trigger itself — the written `BRIEF.md` and
 the writer's local counters are its trail.
+
+The Railway reads (`railway_list`, `railway_monitor`, `railway_scale_suggest`, `railway_cost`)
+emit nothing: an advisory scale suggestion is never applied, and the cost report is read,
+not recorded.
 
 ## herdr agent to surface
 

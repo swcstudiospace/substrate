@@ -38,7 +38,20 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { auditMode } from "@substrate/audit";
-import { classifyEventRefusal, evaluateAdmissionSlo, evaluateDocsFreshnessSlo, loadBurnThresholds, type EventRefusalReason } from "@substrate/observability";
+import {
+	classifyEventRefusal,
+	evaluateAdmissionSlo,
+	evaluateDocsFreshnessSlo,
+	type EventRefusalReason,
+	FORECAST_HORIZON_MS,
+	FORECAST_STEP_S,
+	FORECAST_WINDOW,
+	type ForecastDirection,
+	forecastHistoryOff,
+	type ForecastRow,
+	forecastRow,
+	loadBurnThresholds,
+} from "@substrate/observability";
 import {
 	anonymousBridge,
 	isOperator,
@@ -48,13 +61,15 @@ import {
 	type SubstrateConfig,
 } from "./config.ts";
 import { Admission, admitBatch, budgetBody, budgetRefusal, routeClass, type AdmissionVerdict } from "./admission.ts";
+import type { EventBus } from "./event-bus.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
 import { parseBriefProfile } from "./brief-profile.ts";
 import { DATASET_TRIGGERS } from "./docs-datasets.ts";
 import { freshnessGauges } from "./docs-freshness.ts";
-import { scanIngestPages } from "./docs-ingest.ts";
+import { scanIngestPages, readSkillsCheckoutPages, skillsCheckoutRoots, type IngestPage } from "./docs-ingest.ts";
 import { formatDrift } from "./drift.ts";
 import { IdempotencyRefusal, InvalidEventError } from "./event.ts";
+import { checkoutHead } from "./git.ts";
 import { type CursorPosition, type GreptimeClient } from "./greptime.ts";
 import { InvalidHandoffError } from "./handoff.ts";
 import {
@@ -69,6 +84,7 @@ import {
 	ragMachine,
 	ragRetryDelay,
 	setCachedRagResult,
+	surfaceClaimRefusal,
 	type McpCaller,
 	withLightragNotice,
 } from "./mcp.ts";
@@ -82,7 +98,7 @@ import {
 	toolCallsIn,
 	type Observability,
 } from "./observe.ts";
-import { MetricHistoryMemo, metricHistoryAnswer } from "./metrics-history.ts";
+import { MetricHistoryMemo, bucketedValues, metricHistoryAnswer } from "./metrics-history.ts";
 import { redact } from "./redact.ts";
 import type { Substrate } from "./service.ts";
 import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
@@ -258,6 +274,32 @@ const MAX_BODY_BYTES = 1_000_000;
  */
 const DOCS_MAX_BODY_BYTES = 6_000_000;
 
+/** How long a request may take to arrive: its headers, then the whole request. Bounds a slow client, not a response. */
+const HEADERS_TIMEOUT_MS = 30_000;
+const REQUEST_TIMEOUT_MS = 120_000;
+
+/** Hostnames a loopback caller uses. The bound port is checked beside them. */
+const LOOPBACK_HOSTNAMES: Record<string, true> = { "127.0.0.1": true, localhost: true, "[::1]": true };
+
+/** POST routes whose body is parsed as JSON. Any other media type is refused with 415. */
+const JSON_BODY_ROUTES: Record<string, true> = {
+	"/evidence": true,
+	"/brief": true,
+	"/events": true,
+	"/events/query": true,
+	"/memory": true,
+	"/memory/recall": true,
+	"/handoff": true,
+	"/drift": true,
+	"/verify": true,
+	"/docs/search": true,
+	"/docs/ingest": true,
+	"/docs/merge-trigger": true,
+	"/skills/propose": true,
+	"/skills/approve": true,
+	"/mcp": true,
+};
+
 /**
  * A body over the route's cap. Final for that body: the routes named in the
  * request handler's catch answer it 413. Every other route still answers it
@@ -286,13 +328,39 @@ const MERGE_TRIGGER_NEEDS_SURFACE = "docs merge-trigger needs an authenticated s
 const MERGE_TRIGGER_DATASET = "agent-substrate";
 
 /**
- * The dataset this deployment refreshes from its own checkout: the trigger
- * table's row whose sources (`config.docsIngestRoots`) live in the directory
- * the server runs from. The other rows name checkouts this server does not
- * hold, so their refresh is a truthful noop — a recorded version over
- * documents that were never ingested would only lie to search.
+ * A dataset's local checkout (phase 42): where its refresh reads pages, and how. `roots` is read when the
+ * job runs, so a checkout that cannot be read fails that job alone. `pages` reads the files under those
+ * roots; `head`, when present, reads the checkout's HEAD commit, which the job must match before it ingests.
  */
-const LOCALLY_INGESTED_DATASET = MERGE_TRIGGER_DATASET;
+interface LocalIngestSource {
+	roots: () => Promise<readonly string[]>;
+	pages: (roots: readonly string[]) => Promise<IngestPage[]>;
+	head?: () => Promise<string | null>;
+}
+
+/**
+ * The local checkout a dataset's refresh reads (D42-3), or undefined when this server holds none.
+ * `agent-substrate` reads the directory the server runs from with `config.docsIngestRoots`, as it always
+ * has. `agent-skills` reads the checkout named by `SUBSTRATE_AGENT_SKILLS_ROOT`, fail-closed on an
+ * unreadable skill and checked against the checkout's HEAD. Any other dataset gets a truthful noop: the
+ * other rows name checkouts this server does not hold, and a recorded version over documents that were
+ * never ingested would only lie to search.
+ */
+function localIngestSource(dataset: string, config: SubstrateConfig, agentSubstrateBaseDir: string): LocalIngestSource | undefined {
+	if (dataset === MERGE_TRIGGER_DATASET) {
+		const substrateRoots = config.docsIngestRoots;
+		return { roots: async () => substrateRoots, pages: (roots) => scanIngestPages(agentSubstrateBaseDir, roots) };
+	}
+	const skillsCheckout = config.agentSkillsRoot;
+	if (dataset === "agent-skills" && skillsCheckout !== null) {
+		return {
+			roots: () => skillsCheckoutRoots(skillsCheckout),
+			pages: (roots) => readSkillsCheckoutPages(skillsCheckout, roots),
+			head: async () => checkoutHead(skillsCheckout),
+		};
+	}
+	return undefined;
+}
 
 /** Why an anonymous stream is refused, even on a run that allows anonymous callers. */
 const STREAM_NEEDS_SURFACE = "events stream needs an authenticated surface; nothing was streamed";
@@ -365,6 +433,37 @@ export function isLoopbackRemote(remoteAddress: string | undefined): boolean {
 	if (address === "::1") return true;
 	const octets = address.split(".");
 	return octets.length === 4 && octets[0] === "127" && octets.slice(1).every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
+}
+
+/** The configured public origin as a URL, or null when it does not parse. */
+function parsePublicOrigin(value: string): URL | null {
+	try {
+		return new URL(value);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Whether a Host header names this listener: loopback on the bound port, or the public origin's host.
+ * Throws on a malformed authority, which the caller answers 400.
+ */
+function hostAllowed(hostHeader: string, boundPort: number, publicOrigin: URL | null): boolean {
+	const authority = new URL(`http://${hostHeader}`);
+	if (publicOrigin !== null && authority.host === publicOrigin.host) return true;
+	return LOOPBACK_HOSTNAMES[authority.hostname] === true && Number(authority.port || "80") === boundPort;
+}
+
+/** Whether an Origin names the public origin or a loopback origin. `null`, junk and other hosts are refused. */
+function originAllowed(origin: string, publicOrigin: URL | null): boolean {
+	let parsed: URL;
+	try {
+		parsed = new URL(origin);
+	} catch {
+		return false;
+	}
+	if (publicOrigin !== null && parsed.origin === publicOrigin.origin) return true;
+	return (parsed.protocol === "http:" || parsed.protocol === "https:") && LOOPBACK_HOSTNAMES[parsed.hostname] === true;
 }
 
 /**
@@ -596,8 +695,33 @@ export function createHttpServer(
 		now,
 		record: (verdict) => observability.observer.admission?.(verdict),
 	});
+	// The configured public origin, parsed once. When it does not parse, only loopback is answered.
+	const publicOrigin = parsePublicOrigin(config.publicOrigin);
 	const server = createServer(async (req, res) => {
-		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
+		// A malformed Host or request target is the caller's error: a 400, not a throw out of this async listener,
+		// which used to take the process down. A Host that is neither loopback on the bound port nor the public
+		// origin's host is a 421 (DNS rebinding); an Origin that is neither is a 403.
+		let url: URL;
+		let hostOk: boolean;
+		try {
+			const host = req.headers.host;
+			if (host === undefined) throw new TypeError("the Host header is required");
+			const address = server.address();
+			hostOk = hostAllowed(host, typeof address === "object" && address !== null ? address.port : 0, publicOrigin);
+			url = new URL(req.url ?? "/", `http://${host}`);
+		} catch {
+			sendJson(res, 400, { error: "malformed Host header or request target" });
+			return;
+		}
+		if (!hostOk) {
+			sendJson(res, 421, { error: "Host does not name this substrate" });
+			return;
+		}
+		const origin = req.headers.origin;
+		if (origin !== undefined && !originAllowed(origin, publicOrigin)) {
+			sendJson(res, 403, { error: "Origin is not allowed" });
+			return;
+		}
 		const authorization = req.headers.authorization ?? null;
 		const surface: Surface | null = surfaceForToken(config, authorization);
 		// What the transport establishes about the caller, before any request body is
@@ -690,6 +814,13 @@ export function createHttpServer(
 		) {
 			if (req.method === "POST" && url.pathname === "/events") eventRefusal = "auth";
 			sendJson(res, 401, { error: "unknown or missing bearer token" });
+			return;
+		}
+		// Every POST that parses a JSON body answers 415 to any other media type. This runs after the bearer, so a
+		// caller with none still gets its 401, and before admission, so a refused request spends no budget.
+		const jsonBody = /^application\/json\s*(;|$)/i.test((req.headers["content-type"] ?? "").trim());
+		if (req.method === "POST" && JSON_BODY_ROUTES[url.pathname] === true && !jsonBody) {
+			sendJson(res, 415, { error: "request body must be application/json" });
 			return;
 		}
 
@@ -840,6 +971,38 @@ export function createHttpServer(
 				const served = observability.evaluateServedTokens();
 				// The index archive age (uplift-4 S2): one row, present only when an archive directory is configured; report-only until its ceiling is set.
 				const indexArchive = await substrate.indexArchiveSlo();
+				// The Railway cost report (Phase 45, D45-d and D45-g): report-only, so it is never folded into `breached`. The
+				// client caches it for 15 minutes and reports a Railway failure as `unavailable`; the catch keeps a regression from
+				// taking `/slo` down.
+				const railwayCost = await substrate.railway.costReport().catch(() => null);
+				// Predictive rows (phase 47, D47-a to D47-c): one per catalogue objective, Holt smoothing over the history
+				// `/slo/history` reads, through the same answer and memo. Report-only: `breached` below never reads them.
+				// An objective no recorded series covers is insufficient-data, never a guessed value.
+				// brief.p95 is the largest surface value per bucket (basis worst-surface); the other objectives are service-wide (basis service).
+				type ForecastSource = { series: string | null; direction: ForecastDirection; basis: ForecastRow["basis"] };
+				const forecastSources: Readonly<Record<string, ForecastSource>> = {
+					"brief.p95": { series: "brief.p95", direction: "maximum", basis: "worst-surface" },
+					"emit.success": { series: "emit.success", direction: "minimum", basis: "service" },
+					"lease.steal_rate": { series: null, direction: "maximum", basis: "service" },
+					"quarantine.rate": { series: null, direction: "maximum", basis: "service" },
+				};
+				const historyOn = config.metricsHistory.enabled && substrate.greptime !== null;
+				const forecast: ForecastRow[] = await Promise.all(
+					results.map(async (result) => {
+						const source: ForecastSource = forecastSources[result.id] ?? { series: null, direction: "maximum", basis: "service" };
+						if (!historyOn) return forecastHistoryOff(result.id, result.target, source.basis);
+						const answer =
+							source.series === null
+								? null
+								: await metricHistoryAnswer(
+										{ settings: config.metricsHistory, greptime: substrate.greptime, now, memo: historyMemo },
+										new URLSearchParams({ series: source.series, window: FORECAST_WINDOW, step: String(FORECAST_STEP_S) }),
+									).catch(() => null);
+						const read = bucketedValues(answer);
+						if (read === null) return forecastRow(result.id, result.target, source.direction, [], 1, source.basis);
+						return forecastRow(result.id, result.target, source.direction, read.values, Math.round(FORECAST_HORIZON_MS / 1000 / read.stepS), source.basis);
+					}),
+				);
 				// 200 either way. A breached objective is information, not a broken service,
 				// and a monitor that read this as an outage would page on a slow hour.
 				//
@@ -862,6 +1025,8 @@ export function createHttpServer(
 					capacity,
 					served,
 					...(indexArchive !== null ? { indexArchive: [indexArchive] } : {}),
+					railwayCost,
+					forecast,
 					history: observability.history(),
 				});
 				return;
@@ -881,22 +1046,28 @@ export function createHttpServer(
 			// surfaces; the ?surface= parameter demultiplexes, and its absence
 			// is a 400, never a silent default.
 			if (req.method === "GET" && url.pathname === "/.well-known/agent-card.json") {
-				const surface = url.searchParams.get("surface");
-				if (!surface) {
+				const cardSurface = url.searchParams.get("surface");
+				if (!cardSurface) {
 					sendJson(res, 400, { error: "surface query parameter is required" });
 					return;
 				}
-				if (!isKnownCardSurface(surface)) {
-					sendJson(res, 400, { error: `unknown surface ${JSON.stringify(surface.slice(0, 80))}` });
+				if (!isKnownCardSurface(cardSurface)) {
+					sendJson(res, 400, { error: `unknown surface ${JSON.stringify(cardSurface.slice(0, 80))}` });
 					return;
 				}
-				sendJson(res, 200, buildAgentCard(surface, await substrate.teachablesForSurface(surface)));
+				// A tokened caller's card is its own surface's: another surface's is refused, not described.
+				const cardRefusal = surfaceClaimRefusal(surface, cardSurface);
+				if (cardRefusal !== null) {
+					sendJson(res, 403, { error: cardRefusal });
+					return;
+				}
+				sendJson(res, 200, buildAgentCard(cardSurface, await substrate.teachablesForSurface(cardSurface)));
 				return;
 			}
 
 			if (req.method === "POST" && url.pathname === "/evidence") {
 				const raw = await readBody(req);
-				const body = raw ? (JSON.parse(raw) as { graph_id?: unknown; format?: unknown }) : {};
+				const body = raw ? (JSON.parse(raw) as { graph_id?: unknown; format?: unknown; node_id?: unknown }) : {};
 				rememberClaim(claim, body);
 				if (typeof body.graph_id !== "string" || body.graph_id.length === 0) {
 					sendJson(res, 400, { error: "graph_id is required" });
@@ -908,6 +1079,11 @@ export function createHttpServer(
 					send(res, 200, renderEvidenceHtml(bundle), "text/html; charset=utf-8");
 					return;
 				}
+				if (typeof body.node_id === "string" && body.node_id.length > 0) {
+					const node = await substrate.nodeArtifactOf(body.graph_id, body.node_id);
+					sendJson(res, 200, { ...bundle, node: "error" in node ? { error: node.error } : node.artifact });
+					return;
+				}
 				sendJson(res, 200, bundle);
 				return;
 			}
@@ -916,6 +1092,12 @@ export function createHttpServer(
 				const raw = await readBody(req);
 				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
 				rememberClaim(claim, body);
+				// A tokened caller's brief is its own surface's: a body naming another is refused, not served as theirs.
+				const briefRefusal = surfaceClaimRefusal(surface, body.surface);
+				if (briefRefusal !== null) {
+					sendJson(res, 403, { error: briefRefusal });
+					return;
+				}
 				if (!(await auditedRest(res, observability, surface, "brief", body))) return;
 				// uplift-4 S1: an unknown profile is the caller's mistake, refused here
 				// and never coerced to one the caller did not ask for.
@@ -1069,7 +1251,7 @@ export function createHttpServer(
 						idleMs: options.streamIdleMs ?? STREAM_IDLE_MS,
 						batch: STREAM_BATCH,
 						maxBacklogBytes: options.streamMaxBacklogBytes ?? STREAM_MAX_BACKLOG_BYTES,
-					});
+					}, substrate.eventBus);
 				} catch (cause) {
 					// Setup failed before the stream opened, so an ordinary error response
 					// is still available — fail-open here means the caller learns the
@@ -1082,8 +1264,15 @@ export function createHttpServer(
 			}
 
 			if (req.method === "POST" && url.pathname === "/memory") {
-				const raw = await readBody(req);
-				const body = JSON.parse(raw) as Record<string, unknown>;
+				const parsed: unknown = JSON.parse(await readBody(req));
+				// Refused before the audit and the gate, as every other REST write route does. A
+				// `null` body used to write its audit record and then answer 500 on `body.writer`,
+				// and an array or scalar reached the gate and came back as a policy refusal.
+				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+					sendJson(res, 400, { error: "request body must be a JSON object" });
+					return;
+				}
+				const body = parsed as Record<string, unknown>;
 				rememberClaim(claim, body);
 				// Audited as `memory_write`, the name the MCP tool is audited under, so one
 				// action does not appear in the trail twice under two names. That tool is
@@ -1112,9 +1301,10 @@ export function createHttpServer(
 				sendJson(res, 400, { error: "query is required" });
 				return;
 			}
+			const repo = "repo" in parsed && typeof parsed.repo === "string" ? parsed.repo : undefined;
 			const fields: Record<string, unknown> = { query: parsed.query };
-			if (!(await auditedRest(res, observability, surface, "memory_recall", fields))) return;
-			sendJson(res, 200, await substrate.recallMemories(fields, surface));
+			if (!(await auditedRest(res, observability, surface, "memory_recall", repo === undefined ? fields : { ...fields, repo }))) return;
+			sendJson(res, 200, await substrate.recallMemories(fields, surface, repo));
 			return;
 		}
 
@@ -1123,6 +1313,12 @@ export function createHttpServer(
 			if (req.method === "POST" && url.pathname === "/handoff") {
 				const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
 				rememberClaim(claim, body);
+				// A tokened caller hands off as its own surface. A body naming another is refused, never re-attributed.
+				const handoffRefusal = surfaceClaimRefusal(surface, body.surface);
+				if (handoffRefusal !== null) {
+					sendJson(res, 403, { error: handoffRefusal });
+					return;
+				}
 				// `coord_handoff`, as MCP audits it, and fail-closed for the same reason: a
 				// handoff transfers work and a lease to another agent, and one nobody recorded
 				// is a transfer that cannot be reconstructed afterwards.
@@ -1238,17 +1434,20 @@ export function createHttpServer(
 				}
 				const datasets = "datasets" in parsed ? parsed.datasets : undefined;
 				const sessionId = "session_id" in parsed ? parsed.session_id : undefined;
+				const context = "context" in parsed ? parsed.context : undefined;
 				if (
 					(datasets !== undefined && !(Array.isArray(datasets) && datasets.every((name) => typeof name === "string"))) ||
-					(sessionId !== undefined && typeof sessionId !== "string")
+					(sessionId !== undefined && typeof sessionId !== "string") ||
+					(context !== undefined && typeof context !== "boolean")
 				) {
-					sendJson(res, 400, { error: "datasets must be a string array and session_id a string" });
+					sendJson(res, 400, { error: "datasets must be a string array, session_id a string and context a boolean" });
 					return;
 				}
 				const fields: Record<string, unknown> = {
 					question: parsed.question,
 					...(datasets !== undefined ? { datasets } : {}),
 					...(sessionId !== undefined ? { session_id: sessionId } : {}),
+					...(context !== undefined ? { context } : {}),
 				};
 				if (!(await auditedRest(res, observability, surface, "docs_search", fields))) return;
 				// SPE-19388: the REST search reports into the same process-wide
@@ -1307,10 +1506,11 @@ export function createHttpServer(
 							typeof page.body === "string" &&
 							(!("source_url" in page) || typeof page.source_url === "string") &&
 							(!("real_path" in page) || typeof page.real_path === "string") &&
-							(!("heading_path" in page) || typeof page.heading_path === "string"),
-					);
+							(!("heading_path" in page) || typeof page.heading_path === "string") &&
+							(!("expected_version" in page) || (typeof page.expected_version === "number" && Number.isInteger(page.expected_version) && page.expected_version >= 0)),
+				);
 				if (!pagesValid || (commit !== undefined && typeof commit !== "string") || (ingestSession !== undefined && typeof ingestSession !== "string")) {
-					sendJson(res, 400, { error: "pages must carry string path and body; commit and session_id must be strings" });
+					sendJson(res, 400, { error: "pages must carry string path and body, and expected_version a non-negative integer; commit and session_id must be strings" });
 					return;
 				}
 				const ingestFields: Record<string, unknown> = {
@@ -1332,7 +1532,7 @@ export function createHttpServer(
 						ragMachine.recordFailure(config.ragMachine, `docs_ingest: ${outcome.reason}`);
 					}
 					if (!outcome.ok) {
-						sendJson(res, outcome.reason === "vm-guest" ? 403 : 400, outcome);
+						sendJson(res, outcome.reason === "vm-guest" ? 403 : outcome.reason === "version.stale" ? 409 : 400, outcome);
 						return;
 					}
 					sendJson(res, 200, outcome);
@@ -1558,7 +1758,8 @@ export function createHttpServer(
 					sendJson(res, 200, { ok: true, version: newest, created: false, idempotent: true });
 					return;
 				}
-				if (dataset !== LOCALLY_INGESTED_DATASET) {
+				const source = localIngestSource(dataset, config, options.docsIngestBaseDir ?? process.cwd());
+				if (source === undefined) {
 					// This server holds no checkout of that dataset, so there is nothing it
 					// can truthfully ingest: a noop that says so, and no version recorded.
 					// The trigger itself is still evidence (skills-sync fast-forwarded).
@@ -1567,14 +1768,14 @@ export function createHttpServer(
 					return;
 				}
 				substrate.noteDocsTrigger(dataset);
-				const baseDir = options.docsIngestBaseDir ?? process.cwd();
-				// The service ensures the dataset, runs the guarded ingest of this
-				// checkout's roots and records the version, in that order, in the
+				// The service reads the checkout's roots and pages, ensures the dataset, runs
+				// the guarded ingest and records the version, in that order, in the
 				// background; the 202 is audited above like the 200 was. A plane
 				// refusal under `?wait=1` is an outage of the docs plane, not a
-				// permission decision about the caller: 503 with the reason.
+				// permission decision about the caller: 503 with the reason. A checkout that
+				// cannot be read fails the job the same way and the pinned version keeps serving.
 				const accepted = await substrate.startDocsRefresh(
-					{ ...fields, pages: () => scanIngestPages(baseDir, config.docsIngestRoots) },
+					{ ...fields, roots: source.roots, pages: source.pages, head: source.head },
 					surface,
 					{ wait: url.searchParams.get("wait") === "1" },
 				);
@@ -1689,6 +1890,10 @@ export function createHttpServer(
 			if (!res.headersSent) sendJson(res, 500, { error: "internal error", correlation_id: correlationId });
 		}
 	});
+	// These bound how long a request may take to arrive, not how long a response may run. There is no connection
+	// cap: `/events/stream` holds its connection open by design.
+	server.headersTimeout = HEADERS_TIMEOUT_MS;
+	server.requestTimeout = REQUEST_TIMEOUT_MS;
 	const close = server.close.bind(server);
 	server.close = ((callback?: (err?: Error) => void) => {
 		anonymousLog.stop();
@@ -1763,6 +1968,7 @@ async function openEventStream(
 	greptime: GreptimeClient,
 	cursorId: string,
 	bounds: { pollMs: number; idleMs: number; batch: number; maxBacklogBytes: number },
+	bus: EventBus | null,
 ): Promise<void> {
 	// The connection-life listeners go on before any await, because the setup
 	// reads below are the first async steps and a cursorless client can vanish
@@ -1771,6 +1977,7 @@ async function openEventStream(
 	// leave no timer behind.
 	let timer: ReturnType<typeof setInterval> | null = null;
 	let closed = false;
+	let unsubscribe: (() => void) | null = null;
 
 	const cleanup = (): void => {
 		if (closed) return;
@@ -1778,6 +1985,10 @@ async function openEventStream(
 		if (timer !== null) {
 			clearInterval(timer);
 			timer = null;
+		}
+		if (unsubscribe !== null) {
+			unsubscribe();
+			unsubscribe = null;
 		}
 	};
 	// Both ends of the connection's life — a normal end, a client that vanished,
@@ -1829,6 +2040,7 @@ async function openEventStream(
 	res.write("retry: 5000\n\n");
 
 	let polling = false;
+	let wakeAgain = false;
 	let lastActivity = Date.now();
 
 	const tick = (): void => {
@@ -1880,10 +2092,23 @@ async function openEventStream(
 				// stream: the cursor stays put, and the next poll retries it.
 			} finally {
 				polling = false;
+				if (wakeAgain) {
+					wakeAgain = false;
+					tick();
+				}
 			}
 		})();
 	};
 
+	// Phase 50: a hint reads the ledger now instead of at the next poll. It only wakes the loop; the ledger
+	// decides what is sent, so a lost or late hint costs latency and nothing else.
+	const wake = (): void => {
+		if (polling) wakeAgain = true;
+		else tick();
+	};
+
+	// The subscription lives as long as the response: cleanup releases it on close, error and idle close alike.
+	if (bus !== null) unsubscribe = bus.subscribe(() => wake());
 	// Unref'd, like every other timer this server holds: an open stream must not
 	// be the thing keeping a closing process alive.
 	timer = setInterval(tick, bounds.pollMs);
@@ -1913,6 +2138,13 @@ async function handleMcp(
 	if (req.method !== "POST") {
 		// Stateless mode has no server-initiated stream to attach to.
 		res.writeHead(405, { allow: "POST" }).end();
+		return;
+	}
+	// Refused on the declared size before a byte of the body is read. `readBody`'s cap still holds for a body
+	// that declares less than it sends.
+	const declared = Number(req.headers["content-length"] ?? 0);
+	if (declared > DOCS_MAX_BODY_BYTES) {
+		send(res, 413, JSON.stringify({ error: `request body is over ${DOCS_MAX_BODY_BYTES} bytes` }), "application/json", { connection: "close" });
 		return;
 	}
 	const raw = await readBody(req, DOCS_MAX_BODY_BYTES);

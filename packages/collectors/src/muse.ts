@@ -28,6 +28,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSyn
 import { isAbsolute, join } from "node:path";
 import { redact } from "../../mcp-server/src/redact.ts";
 import { branchFor, repoSlug } from "./git-context.ts";
+import { graphIdForWorktree } from "./worktree-graph.ts";
 
 /** Briefs move slowly. `--watch` sleeps this long between passes. */
 export const POLL_MS = 300_000;
@@ -190,13 +191,14 @@ export type FetchedBrief =
  * A good brief is 2xx with a non-empty body, or a 304 when `etag` was sent and
  * still matches. Anything else is a failed fetch. A 304 without a tag sent is
  * a server fault and counts as `http_304`.
+ * A `graphId` names the graph whose worktree the repo is, so the brief is that graph's.
  */
-export async function fetchBrief(slug: string, branch: string | undefined, etag: string | null = null): Promise<FetchedBrief> {
+export async function fetchBrief(slug: string, branch: string | undefined, etag: string | null = null, graphId: string | null = null): Promise<FetchedBrief> {
 	try {
 		const response = await fetch(`${substrateUrl()}/brief`, {
 			method: "POST",
 			headers: { "content-type": "application/json", ...bearer(), ...(etag ? { "if-none-match": etag } : {}) },
-			body: JSON.stringify({ repo: slug, branch: branch ?? null, surface: "muse" }),
+			body: JSON.stringify({ repo: slug, branch: branch ?? null, surface: "muse", ...(graphId ? { graph_id: graphId } : {}) }),
 			signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
 		});
 		if (response.status === 304 && etag) return { ok: true, unchanged: true, etag };
@@ -400,7 +402,7 @@ export async function pass(repos: string[], state: MuseState, now: string = new 
 		const record = state.repos[repo] ?? {};
 		const briefPath = briefPathFor(repo);
 		const known = record.etag && briefPath && existsSync(briefPath) ? record.etag : null;
-		const fetched = await fetchBrief(slug, branchFor(repo), known);
+		const fetched = await fetchBrief(slug, branchFor(repo), known, graphIdForWorktree(repo));
 		if (!fetched.ok) {
 			noteFailure(state, repo, fetched.reason, now);
 			ensurePointer(repo, state.counters);

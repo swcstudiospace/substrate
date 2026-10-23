@@ -296,6 +296,15 @@ function derivedKey(entryHash: string, sourceEvent: string | null, reviewed: boo
 }
 
 /**
+ * The key an explicit key spent by another writer falls back to. It names the writer and the caller's
+ * key together, so the same writer's retry computes the same key and replays it. It is claimed explicit,
+ * so it never expires: a derived key's day-long window would let a retry a day later write the row again.
+ */
+function writerKey(writer: string, explicitKey: string): string {
+	return `mwk_${sha256Hex(canonicalJson({ writer, key: explicitKey }))}`;
+}
+
+/**
  * The hash `verified_persisted` compares, and the identity a parked review is
  * released by. Over the *governed* content only: the same claim re-submitted with
  * a reviewer's token has to hash the same, or approval-by-resubmit could never
@@ -390,6 +399,27 @@ async function idempotencyKey(
 	return sameContent && sameAsk ? other : currentKey;
 }
 
+/**
+ * Whether an explicit key's record was spent by a different writer.
+ *
+ * The store keys a claim on the raw key, so every writer that sends one shares one row. A record whose
+ * request hash is this request's belongs to this writer, because that hash folds the writer in. Otherwise
+ * the entry the record names says who wrote it. A record that names no readable entry is not treated as
+ * another writer's: it stays with the replay path, which answers a different ask with `idempotency.reused`.
+ */
+async function heldByAnotherWriter(
+	store: MemoryStore,
+	existing: WriteRecord,
+	writer: string,
+	asked: string,
+	priorAsked: string,
+): Promise<boolean> {
+	if (existing.request_hash !== null && digestMatches(existing.request_hash, asked, priorAsked)) return false;
+	if (existing.entry_id === null) return false;
+	const spent = await store.readEntry(existing.entry_id);
+	return spent !== null && spent.writer !== writer;
+}
+
 async function parkedContent(
 	find: ((entryHash: string) => Promise<string | null>) | undefined,
 	current: string,
@@ -469,15 +499,22 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 	const ttl: MemoryTtl = request.ttl ?? "permanent";
 
 	const raw = typeof request.text === "string" ? request.text.trim() : "";
-	if (!raw) {
+	const subjectInput = typeof request.subject === "string" ? request.subject : null;
+	// The subject is judged on its own, so a body that is empty can still be parked for what the subject
+	// carries. Every other empty entry is refused: it tells the next agent nothing.
+	const subjectFinding = subjectInput === null ? null : classify(subjectInput, kind);
+	const reviewed = deps.isReviewToken(request.review_token);
+	// A subject finding parks the write unless review clears it; only then do the lesson checks apply.
+	const subjectParks = subjectFinding !== null && !(subjectFinding.reviewable && reviewed);
+	if (!raw && !subjectFinding) {
 		return refuse("denied", "text.empty", "text is required — an empty memory entry tells the next agent nothing.");
 	}
 	// Judge the text that would be stored. A body that is only a secret redacts
 	// to a label, and that label is not a lesson.
 	const judged = redact(raw);
-	const subjectInput = typeof request.subject === "string" ? request.subject : null;
+	// A subject finding that parks the write makes the lesson checks yield to it.
 	const lessonIssue = lessonWriteIssue(judged, subjectInput);
-	if (lessonIssue) {
+	if (lessonIssue && !subjectParks) {
 		return refuse("denied", "lesson.empty", `${lessonIssue}. An empty lesson is not stored.`);
 	}
 
@@ -499,7 +536,6 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 		);
 	}
 
-	const reviewed = deps.isReviewToken(request.review_token);
 	// Redact before capping, for the reason `normalizeEvent` does: truncating first
 	// can cut a token in half so its own pattern no longer matches.
 	const redacted = redact(raw);
@@ -507,7 +543,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 	cut.truncated = redacted.length > MAX_MEMORY_TEXT;
 	// The cap can cut a valid body down to a header. Judge the text that will be stored.
 	const storedIssue = lessonWriteIssue(text, subjectInput);
-	if (storedIssue) {
+	if (storedIssue && !subjectParks) {
 		return refuse("denied", "lesson.empty", `${storedIssue}. An empty lesson is not stored.`);
 	}
 	const subject = normalizeSubject(request.subject);
@@ -518,7 +554,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 	if (isLessonWrite(judged, subjectInput) && !sourceEvent && sessionId) {
 		sourceEvent = normalizeIdentifier(`session:${sessionId}`);
 	}
-	if (isLessonWrite(judged, subjectInput) && !sourceEvent) {
+	if (isLessonWrite(judged, subjectInput) && !sourceEvent && !subjectParks) {
 		return refuse(
 			"denied",
 			"lesson.unsourced",
@@ -619,8 +655,11 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 	};
 
 	// ── 3. quarantine ──────────────────────────────────────────────────────────
-	const classification = classify(raw, kind);
-	if (classification && !(classification.reviewable && reviewed)) {
+	// The subject is stored and it is what a conflict resolves on, so it is judged by the same rule as the body,
+	// and on its own: a body a reviewer may release (PII) must not hide a subject that is not releasable.
+	const bodyFinding = raw ? classify(raw, kind) : null;
+	const classification = [bodyFinding, subjectFinding].find((found) => found && !(found.reviewable && reviewed)) ?? null;
+	if (classification) {
 		const minted = candidateKey(request.idempotency_key, entryHash, sourceEvent, reviewed);
 		const key = await idempotencyKey(store, minted.key, minted.explicit, entryHash, asked, priorEntry, priorAsked, sourceEvent, reviewed);
 		const parkedAlready = await parkedContent(store.findQuarantineByHash?.bind(store), entryHash, priorEntry);
@@ -655,10 +694,15 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 		};
 	}
 
+	// An empty body gets here only when a reviewed subject cleared quarantine. Nothing empty is stored.
+	if (!raw) {
+		return refuse("denied", "text.empty", "text is required — an empty memory entry tells the next agent nothing.");
+	}
+
 	// ── 4. exactly-once ────────────────────────────────────────────────────────
 	const minted = candidateKey(request.idempotency_key, entryHash, sourceEvent, reviewed);
-	const explicitKey = minted.explicit ? minted.key : null;
-	const key = await idempotencyKey(store, minted.key, minted.explicit, entryHash, asked, priorEntry, priorAsked, sourceEvent, reviewed);
+	const explicit = minted.explicit;
+	let key = await idempotencyKey(store, minted.key, minted.explicit, entryHash, asked, priorEntry, priorAsked, sourceEvent, reviewed);
 	// Minted before the claim, so the claim can reserve it. An attempt that inserts its
 	// row and then dies is otherwise indistinguishable from one that never got that far,
 	// and its successor has to guess — which means either duplicating the row or losing
@@ -668,15 +712,26 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 	// reservation rather than replacing it with this one, so the pointer to a row that
 	// may already exist is never overwritten before it has been resolved. See `rowId`.
 	const entryId = newId("mem");
-	const claim = await store.claimWrite({
-		key,
-		explicit: explicitKey !== null,
-		entryHash,
-		requestHash: asked,
-		entryId,
-		alsoEntryHash: priorEntry,
-		alsoRequestHash: priorAsked,
-	});
+	const claimWith = (claimKey: string, keyExplicit: boolean) =>
+		store.claimWrite({
+			key: claimKey,
+			explicit: keyExplicit,
+			entryHash,
+			requestHash: asked,
+			entryId,
+			alsoEntryHash: priorEntry,
+			alsoRequestHash: priorAsked,
+		});
+	let claim = await claimWith(key, explicit);
+	// An explicit key is one row for every writer that sends it. A key another writer spent is not
+	// this writer's to replay or be refused by, so this write goes under the key that names this writer
+	// and the caller's key together. The same writer retrying the same key computes the same key and
+	// replays it. It is claimed explicit, so it never expires: a derived key's day-long window would let
+	// a retry a day later write the row a second time. The explicit key itself is left exactly as it was.
+	if (!claim.claimed && explicit && (await heldByAnotherWriter(store, claim.existing, writer, asked, priorAsked))) {
+		key = writerKey(writer, minted.key);
+		claim = await claimWith(key, true);
+	}
 	if (!claim.claimed) {
 		const replayed = await replay(store, key, claim.existing, grant.name, entryHash, asked, priorEntry, priorAsked, {
 			sourceEvent,

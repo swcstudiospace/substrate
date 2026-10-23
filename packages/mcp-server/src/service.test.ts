@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { formatMemo, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
-import { isReviewToken, loadConfig, type GreptimeConfig } from "./config.ts";
+import { isReviewToken, loadConfig, loadEventBusSettings, type GreptimeConfig } from "./config.ts";
 import { eventHash, InvalidEventError, normalizeEvent } from "./event.ts";
 import { GreptimeClient, INGEST_LAG_MS, IngestNotRecorded, MAX_QUERY_LIMIT, type EventQuery } from "./greptime.ts";
 import { REDACTED, redact } from "./redact.ts";
 import { leaseSnapshot } from "./index-store.ts";
 import { decideRelease, type ClaimAction } from "./lease.ts";
 import { EVENT_SOURCES } from "./event-sources.ts";
+import { createEventBus, MAX_HINT_BYTES, type EventBus, type EventBusClient, type EventHint } from "./event-bus.ts";
 import { HEALTH_PROBE_MS, Substrate, SkillProposalDenied, VERIFY_RESPONSE_MARGIN_MS, type SkillProposalRequest } from "./service.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
@@ -677,17 +678,142 @@ describe("emit", () => {
 		expect(written[0]?.prev).toBeNull();
 	});
 
-	test("an unreadable previous hash starts a new chain rather than failing the append", async () => {
+	test("an unreadable previous hash refuses the write rather than starting a second chain", async () => {
+		// A null prev written beside a stored tip is a fork: `verify` finds it later and nothing stops it now.
+		const written: SubstrateEvent[] = [];
 		const greptime = {
 			ensureAppendMode: async () => true,
 			lastHash: async () => {
 				throw new Error("greptime unreachable");
 			},
-			insertEvent: async () => undefined,
+			insertEvent: async (event: SubstrateEvent) => {
+				written.push(event);
+			},
 		};
 		const result = await substrateWith(greptime).emit(input);
+		expect(result.stored).toBe(false);
+		expect(result.error).toContain("chain tip unreadable");
+		expect(written).toEqual([]);
+	});
+});
+
+describe("event bus wiring (phase 50)", () => {
+	const input: EventInput = { surface: "omp", kind: "shell", summary: "ran cargo test with SECRET-SUMMARY-TEXT", session_id: "sess-1", graph_id: "ut-1", payload: { tokens: 42 } };
+
+	/** A ledger stub that records each write into `order`, so a test can see the write come before the publish. */
+	function ledger(order: string[] = []) {
+		const written: SubstrateEvent[] = [];
+		return {
+			written,
+			greptime: {
+				ensureAppendMode: async () => true,
+				lastHash: async () => null,
+				insertEvent: async (event: SubstrateEvent) => {
+					written.push(event);
+					order.push("write");
+				},
+			},
+		};
+	}
+
+	/** A bus that records each hint it is handed and each publish into `order`; `reply` decides what a publish does. */
+	function fakeBus(options: { reply?: () => Promise<boolean>; order?: string[] } = {}) {
+		const hints: EventHint[] = [];
+		const bus: EventBus = {
+			publish: (hint) => {
+				hints.push(hint);
+				options.order?.push("publish");
+				return options.reply ? options.reply() : Promise.resolve(true);
+			},
+			subscribe: () => () => {},
+			stop: () => {},
+		};
+		return { bus, hints };
+	}
+
+	test("a stored emit publishes exactly one hint: the event's identity, with no summary and no payload", async () => {
+		const { greptime } = ledger();
+		const { bus, hints } = fakeBus();
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never, eventBus: () => bus });
+		const result = await substrate.emit(input);
+
 		expect(result.stored).toBe(true);
-		expect(result.event.prev).toBeNull();
+		expect(hints).toEqual([
+			{ v: 1, id: result.event.id, kind: result.event.kind, surface: result.event.surface, graph_id: result.event.graph_id, ts: result.event.ts },
+		]);
+		expect(Object.keys(hints[0] ?? {}).sort()).toEqual(["graph_id", "id", "kind", "surface", "ts", "v"]);
+		expect(JSON.stringify(hints)).not.toContain("SECRET-SUMMARY-TEXT");
+	});
+
+	test("the hint is published after the ledger write, and an event that was not stored is not published", async () => {
+		const order: string[] = [];
+		const { greptime } = ledger(order);
+		const { bus } = fakeBus({ order });
+		await new Substrate(loadConfig({}), { index: null, greptime: greptime as never, eventBus: () => bus }).emit(input);
+		expect(order).toEqual(["write", "publish"]);
+
+		const unstored = fakeBus();
+		const result = await new Substrate(loadConfig({}), { index: null, greptime: null, eventBus: () => unstored.bus }).emit(input);
+		expect(result.stored).toBe(false);
+		expect(unstored.hints).toEqual([]);
+	});
+
+	test("a publish failure does not fail the emit", async () => {
+		const { written, greptime } = ledger();
+		const { bus, hints } = fakeBus({
+			reply: async () => {
+				throw new Error("dragonfly unreachable: connect ETIMEDOUT");
+			},
+		});
+		const result = await new Substrate(loadConfig({}), { index: null, greptime: greptime as never, eventBus: () => bus }).emit(input);
+		expect(result.stored).toBe(true);
+		expect(result.error).toBeUndefined();
+		expect(written).toHaveLength(1);
+		expect(hints).toHaveLength(1);
+	});
+
+	test("with the bus off there is no bus, so nothing subscribes or publishes, and the emit reply is unchanged", async () => {
+		const { written, greptime } = ledger();
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
+		expect(substrate.eventBus).toBeNull();
+		const result = await substrate.emit(input);
+
+		expect(result.stored).toBe(true);
+		expect(result.error).toBeUndefined();
+		expect(written).toHaveLength(1);
+	});
+
+	test("SUBSTRATE_EVENT_BUS takes on or off, and any other value refuses boot naming the variable", () => {
+		expect(loadConfig({}).eventBus).toEqual({ enabled: false, offReason: null });
+		expect(loadConfig({ SUBSTRATE_EVENT_BUS: "off" }).eventBus.enabled).toBe(false);
+		expect(() => loadConfig({ SUBSTRATE_EVENT_BUS: "yes" })).toThrow("SUBSTRATE_EVENT_BUS");
+	});
+
+	test("on needs an accepted cache endpoint; without one the bus is off, with the reason", () => {
+		expect(loadConfig({ SUBSTRATE_EVENT_BUS: "on" }).eventBus).toEqual({ enabled: false, offReason: "DRAGONFLY_URL is unset" });
+		expect(loadEventBusSettings({ SUBSTRATE_EVENT_BUS: "on" }, { dragonflyUrl: "accepted-endpoint", dragonflyRefused: null, cacheEnabled: true })).toEqual({ enabled: true, offReason: null });
+		const refused = loadEventBusSettings({ SUBSTRATE_EVENT_BUS: "on" }, { dragonflyUrl: undefined, dragonflyRefused: "plaintext, non-loopback", cacheEnabled: false });
+		expect(refused).toEqual({ enabled: false, offReason: "DRAGONFLY_URL refused by the endpoint policy: plaintext, non-loopback" });
+		expect(loadEventBusSettings({ SUBSTRATE_EVENT_BUS: "on" }, { dragonflyUrl: "accepted-endpoint", dragonflyRefused: null, cacheEnabled: false })).toEqual({ enabled: false, offReason: "SUBSTRATE_CACHE is 0" });
+	});
+
+	test("an oversize publish is counted in health().eventBus.oversize", async () => {
+		const { greptime } = ledger();
+		const bus = createEventBus({
+			enabled: true,
+			url: "fake-endpoint",
+			makeClient: (): EventBusClient => ({ publish: async () => 1, subscribe: async () => "OK", close: () => {} }),
+			log: () => {},
+			now: () => 0,
+			setTimer: () => () => {},
+		});
+		if (bus === null) throw new Error("expected a bus");
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never, eventBus: () => bus });
+		expect((await substrate.health()).eventBus).toEqual({ enabled: true, published: 0, failed: 0, oversize: 0, malformed: 0 });
+
+		const oversize: EventHint = { v: 1, id: "x".repeat(MAX_HINT_BYTES), kind: "note", surface: "omp", graph_id: null, ts: "2026-10-21T00:00:00.000Z" };
+		expect(await bus.publish(oversize)).toBe(false);
+		expect((await substrate.health()).eventBus).toEqual({ enabled: true, published: 0, failed: 0, oversize: 1, malformed: 0 });
 	});
 });
 
@@ -813,6 +939,7 @@ describe("append-mode enforcement", () => {
 				refreshes: 0,
 				cooldownUntil: null,
 			},
+			eventBus: { enabled: false },
 			planes: {
 				greptime: { ok: true, breaker: closed("greptime"), lastErrorAt: null },
 				index: { ok: null, breaker: closed("index"), lastErrorAt: null },
@@ -1296,7 +1423,8 @@ describe("handoff", () => {
 		// The handoff event chains from the same tip, so the packet and the event it
 		// arrived in agree about where the sender's trail had reached.
 		expect(written[0]?.prev).toBe("tip-hash");
-		expect(result.event.prev).toBe("tip-hash");
+		expect(result.event).not.toBeNull();
+		expect(result.event?.prev).toBe("tip-hash");
 	});
 
 	test("a caller cannot pin the anchor: a hash nothing checked would be signed and believed", async () => {
@@ -1309,6 +1437,40 @@ describe("handoff", () => {
 		const result = await substrate.handoff({ ...input, prev_event_hash: "d".repeat(64) } as never);
 
 		expect(result.packet.prev_event_hash).toBe("tip-hash");
+	});
+
+	test("an unreadable tip refuses the handoff: nothing signed, written or released", async () => {
+		// A packet signed with no predecessor, while the event's own read could still chain onto a real
+		// tip, is a receiver's false anchor. Nothing is signed, written or released instead.
+		const written: SubstrateEvent[] = [];
+		const released: string[] = [];
+		const greptime = {
+			ensureAppendMode: async () => true,
+			lastHash: async () => {
+				throw new Error("greptime unreachable");
+			},
+			insertEvent: async (event: SubstrateEvent) => {
+				written.push(event);
+			},
+		};
+		const index = {
+			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
+			releaseNode: async (_g: string, nodeId: string) => {
+				released.push(nodeId);
+				return { released: true };
+			},
+		};
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never });
+
+		const result = await substrate.handoff({ ...input, handover_lease_id: "lse_a", release_lease: true });
+
+		expect(result.stored).toBe(false);
+		expect(result.signed).toBe(false);
+		expect(result.packet.signature).toBeNull();
+		expect(result.event).toBeNull();
+		expect(result.error).toContain("chain tip unreadable");
+		expect(written).toEqual([]);
+		expect(released).toEqual([]);
 	});
 
 	test("the lease is released only once the packet is durable", async () => {
@@ -2687,7 +2849,7 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 	}
 
 	const mirrorWarnings = (emitted: SubstrateEvent[]) =>
-		emitted.filter((e) => e.payload["action"] === "mirror");
+		emitted.filter((e) => e.kind === "warning" && e.payload["action"] === "mirror");
 
 	test("a granted claim mirrors once with holder, session, epoch and refs", async () => {
 		const mirror = fakeMirror();
@@ -2697,7 +2859,7 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 
 		expect(result.claimed).toBe(true);
 		expect(mirror.calls).toHaveLength(1);
-		expect(mirror.calls[0]).toEqual({
+		expect(mirror.calls[0]).toMatchObject({
 			op: "claim",
 			ctx: {
 				graphId: "ut-1",
@@ -2709,6 +2871,31 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 				notionPage: null,
 			},
 		});
+	});
+
+	test("a claim that lands on each tracker leaves one mirror note per target, on the node", async () => {
+		const mirror = fakeMirror();
+		mirror.mirror.claim = async (ctx) => {
+			const reporting = ctx as MirrorCall["ctx"] & { report?: (success: { target: "linear" | "notion"; op: string }) => void };
+			reporting.report?.({ target: "linear", op: "claim" });
+			reporting.report?.({ target: "notion", op: "claim" });
+			return [];
+		};
+		const { stores, substrate } = claimedSubstrate({ action: "granted" }, mirror);
+
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+		expect(result.claimed).toBe(true);
+		const notes = stores.emitted.filter((e) => e.kind === "note" && e.payload["action"] === "mirror");
+		expect(notes.map((e) => [e.payload["target"], e.payload["op"], e.payload["status"]])).toEqual([
+			["linear", "claim", "ok"],
+			["notion", "claim", "ok"],
+		]);
+		expect(notes.map((e) => [e.graph_id, e.node_id])).toEqual([
+			["ut-1", "n4"],
+			["ut-1", "n4"],
+		]);
+		expect(notes.every((e) => e.session_id !== "sess-1" && e.session_id?.includes("ut-1"))).toBe(true);
 	});
 
 	test("a stolen claim mirrors as steal with the evicted holder", async () => {
@@ -2952,7 +3139,7 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 		await substrate.reapExpiredLeases("swcstudiospace/x");
 
 		expect(mirror.calls).toHaveLength(1);
-		expect(mirror.calls[0]).toEqual({
+		expect(mirror.calls[0]).toMatchObject({
 			op: "expire",
 			ctx: {
 				graphId: "ut-1",
@@ -3160,7 +3347,7 @@ describe("completeNode DoD gate (D23-14, D23-15)", () => {
 		};
 	}
 
-	const dodWarnings = (emitted: SubstrateEvent[]) => emitted.filter((e) => e.payload["action"] === "dod");
+	const dodWarnings = (emitted: SubstrateEvent[]) => emitted.filter((e) => e.kind === "warning" && e.payload["action"] === "dod");
 
 	test("a node with no Linear reference completes on main's path with zero mirror calls", async () => {
 		const world = gateWorld({ linearIssueId: null, linearIdentifier: null, notionPage: null });
@@ -3242,9 +3429,34 @@ describe("completeNode DoD gate (D23-14, D23-15)", () => {
 			review_pass: true,
 		});
 		expect(world.mirrorCalls.map((c) => c.op)).toEqual(["review", "done"]);
-		const releaseNote = world.emitted.find((e) => e.kind === "note");
+		const releaseNote = world.emitted.find((e) => e.payload["dod"] !== undefined);
 		expect(releaseNote?.payload["dod"]).toEqual({ tests_pass: true, review_pass: true, summary_chars: summary.length });
 		expect(JSON.stringify(world.emitted)).not.toContain(summary);
+	});
+
+	test("an approval leaves one approved dod note on the node, and no summary text", async () => {
+		const world = gateWorld();
+		const summary = "unit and review evidence recorded";
+
+		const result = await world.substrate.completeNode(
+			"ut-1",
+			"n2",
+			{ lease_id: "lse_live", dod: { summary, tests_pass: true, review_pass: true } },
+			"hermes",
+		);
+
+		expect(result.completed).toBe(true);
+		const approved = world.emitted.filter((e) => e.payload["action"] === "dod" && e.payload["status"] === "approved");
+		expect(approved).toHaveLength(1);
+		expect(approved[0]).toMatchObject({
+			kind: "note",
+			graph_id: "ut-1",
+			node_id: "n2",
+			payload: { action: "dod", status: "approved", already_done: false },
+		});
+		expect(approved[0]?.session_id).toContain("ut-1");
+		expect(approved[0]?.session_id).not.toBe("sess-a");
+		expect(JSON.stringify(approved)).not.toContain(summary);
 	});
 
 	test("an issue already Done in Linear skips review and the connector", async () => {
@@ -4092,7 +4304,7 @@ describe("verifyGraph hour report", () => {
 		expect(verdict.reason).toContain(extra.id);
 	});
 
-	test("anchors off stays chain-only for evidence", async () => {
+	test("anchors off returns the chain verdict only", async () => {
 		const world = sessionRows();
 		const substrate = substrateWith({ readEvents: async () => world.rows });
 		const verdict = await substrate.verifyGraph("ut-1", { anchors: false });

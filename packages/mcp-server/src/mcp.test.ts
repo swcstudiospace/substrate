@@ -450,8 +450,8 @@ describe("memory_search", () => {
 		};
 	}
 
-	async function connectIndex(index: unknown, caller: Surface | { surface: Surface; isOperator: boolean } = "omp") {
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null });
+	async function connectIndex(index: unknown, caller: Surface | { surface: Surface; isOperator: boolean } = "omp", greptime: unknown = null) {
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
 		const server = createMcpServer(substrate, caller);
 		const client = new Client({ name: "substrate-test", version: "0.0.0" });
 		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -619,6 +619,203 @@ describe("memory_search", () => {
 
 		expect(stub.paged).toEqual([]);
 	});
+
+	/** A ledger row as `readEvents` returns it; `second` orders the rows and forms the id's place in them. */
+	function ledgerRow(id: string, second: number, over: Record<string, unknown>): Record<string, unknown> {
+		return {
+			id,
+			ts: `2026-10-01T00:00:${String(second).padStart(2, "0")}.000Z`,
+			kind: "note",
+			surface: "omp",
+			node_id: "n1",
+			summary: `summary ${id}`,
+			...over,
+		};
+	}
+
+	/** Nine events of one session in one graph, `ev-1` the oldest. */
+	const sessionRows = Array.from({ length: 9 }, (_, i) => ledgerRow(`ev-${i + 1}`, i + 1, { session_id: "s-1", graph_id: "ut-1" }));
+	const NEWEST_FIVE = [{ id: "ev-9" }, { id: "ev-8" }, { id: "ev-7" }, { id: "ev-6" }, { id: "ev-5" }];
+
+	/** A ledger stub: `readRecentEvents` filters by the column asked, answers newest first cut to the limit, and logs each read and limit; `hang` and `fail` model a stalled or broken plane. */
+	function readLedger(rows: Array<Record<string, unknown>>, mode: "answer" | "hang" | "fail" = "answer") {
+		const reads: string[] = [];
+		const limits: number[] = [];
+		return {
+			reads,
+			limits,
+			greptime: {
+				readRecentEvents: async (column: string, value: string, limit: number) => {
+					reads.push(`${column}=${value}`);
+					limits.push(limit);
+					if (mode === "hang") return new Promise<never>(() => {});
+					if (mode === "fail") throw new Error("greptime unreachable: connect ETIMEDOUT");
+					const key = (row: Record<string, unknown>) => `${String(row.ts)}|${String(row.id)}`;
+					const newest = rows.filter((row) => row[column] === value).sort((a, b) => (key(a) < key(b) ? 1 : key(a) > key(b) ? -1 : 0));
+					return newest.slice(0, limit);
+				},
+			},
+		};
+	}
+
+	/** An index that answers every search, plain or paged, with the given entries. */
+	function entriesIndex(entries: Array<Record<string, unknown>>) {
+		return {
+			searchMemory: async () => entries,
+			searchMemoryPage: async () => ({ entries, next: null }),
+		};
+	}
+
+	function memoryAt(id: string, over: Record<string, unknown>): Record<string, unknown> {
+		return { id, scope: "repo:acme/widgets", kind: "fact", text: "x", created: "2026-10-01T00:00:00.000Z", ...over };
+	}
+
+	test("with neither option the reply has no ledger keys, and the ledger is not read", async () => {
+		const { reads, greptime } = readLedger(sessionRows);
+		const entries = [memoryAt("mem_a", { graph_id: "ut-1", session_id: "s-1", source_event: "ev-8" })];
+		const client = await connectIndex(entriesIndex(entries), "omp", greptime);
+
+		const plain = await call(client, "memory_search", { query: "lease" });
+		const explicit = await call(client, "memory_search", { query: "lease", graph_linked: false, causal: false });
+
+		expect(plain.isError).toBe(false);
+		for (const key of ["graph_links", "graph_links_notice", "causal_notice"]) {
+			expect(plain.json()).not.toHaveProperty(key);
+		}
+		expect(plain.text).not.toContain("causal_chain");
+		expect(explicit.text).toBe(plain.text);
+		expect(reads).toEqual([]);
+	});
+
+	test("graph_linked gives each returned graph its newest ledger events, reads each graph once, and an empty list for a graph with none", async () => {
+		const { reads, greptime } = readLedger(sessionRows);
+		const entries = [memoryAt("mem_a", { graph_id: "ut-1" }), memoryAt("mem_b", { graph_id: "ut-2" }), memoryAt("mem_c", { graph_id: "ut-1" })];
+		const client = await connectIndex(entriesIndex(entries), "omp", greptime);
+
+		const reply = await call(client, "memory_search", { query: "lease", graph_linked: true });
+
+		expect(reply.isError).toBe(false);
+		expect(reply.json()).toMatchObject({
+			entries: [{ id: "mem_a" }, { id: "mem_b" }, { id: "mem_c" }],
+			graph_links: [
+				{ graph_id: "ut-1", events: NEWEST_FIVE },
+				{ graph_id: "ut-2", events: [] },
+			],
+		});
+		expect(reply.json().graph_links_notice).toEqual(expect.stringContaining("untrusted"));
+		expect(reply.text).not.toContain("causal_chain");
+		expect(reads).toEqual(["graph_id=ut-1", "graph_id=ut-2"]);
+	});
+
+	test("causal gives an entry with a source event the events that preceded it in its session, nearest first, and an empty chain otherwise", async () => {
+		const { reads, greptime } = readLedger(sessionRows);
+		const entries = [
+			memoryAt("mem_causal", { session_id: "s-1", source_event: "ev-8" }),
+			memoryAt("mem_none", { session_id: "s-1" }),
+			memoryAt("mem_missing", { session_id: "s-1", source_event: "ev-99" }),
+		];
+		const client = await connectIndex(entriesIndex(entries), "omp", greptime);
+
+		const reply = await call(client, "memory_search", { query: "lease", causal: true });
+
+		expect(reply.isError).toBe(false);
+		expect(reply.json()).toMatchObject({
+			entries: [
+				{ id: "mem_causal", causal_chain: [{ id: "ev-7" }, { id: "ev-6" }, { id: "ev-5" }, { id: "ev-4" }, { id: "ev-3" }] },
+				{ id: "mem_none", causal_chain: [] },
+				{ id: "mem_missing", causal_chain: [] },
+			],
+		});
+		expect(reply.json().causal_notice).toEqual(expect.stringContaining("not proof of cause"));
+		expect(reads).toEqual(["session_id=s-1"]);
+	});
+
+	test("the paged listing takes the same options", async () => {
+		const { reads, greptime } = readLedger(sessionRows);
+		const client = await connectIndex(entriesIndex([memoryAt("mem_a", { graph_id: "ut-1" })]), "omp", greptime);
+
+		const reply = await call(client, "memory_search", { subject_prefix: "lesson:", graph_linked: true });
+
+		expect(reply.isError).toBe(false);
+		expect(reply.json()).toMatchObject({ entries: [{ id: "mem_a" }], next: null, graph_links: [{ graph_id: "ut-1", events: NEWEST_FIVE }] });
+		expect(reads).toEqual(["graph_id=ut-1"]);
+	});
+
+	test("a hanging ledger read is released at its budget with a reason, and the search still answers", async () => {
+		const { greptime } = readLedger(sessionRows, "hang");
+		const client = await connectIndex(entriesIndex([memoryAt("mem_a", { graph_id: "ut-1" })]), "omp", greptime);
+
+		const started = Date.now();
+		const reply = await call(client, "memory_search", { query: "lease", graph_linked: true });
+		const elapsed = Date.now() - started;
+
+		expect(elapsed).toBeLessThan(2500);
+		expect(reply.json()).toMatchObject({
+			entries: [{ id: "mem_a" }],
+			degraded: true,
+			reason: expect.stringContaining("ledger: graph reads timed out"),
+			graph_links: [],
+		});
+	});
+
+	test("a failed ledger read drops only its part of the reply and names the failure", async () => {
+		const { greptime } = readLedger(sessionRows, "fail");
+		const client = await connectIndex(entriesIndex([memoryAt("mem_a", { session_id: "s-1", source_event: "ev-8" })]), "omp", greptime);
+
+		const reply = await call(client, "memory_search", { query: "lease", causal: true });
+
+		expect(reply.json()).toMatchObject({ entries: [{ id: "mem_a" }], degraded: true });
+		expect(String(reply.json().reason)).toContain("ledger: session reads failed");
+		expect(reply.text).not.toContain("causal_chain");
+	});
+
+	test("graph reads are capped at eight distinct graphs, each asking for five events, and the reply names the cap", async () => {
+		const { reads, limits, greptime } = readLedger(sessionRows);
+		const entries = Array.from({ length: 10 }, (_, i) => memoryAt(`mem_${i}`, { graph_id: `ut-${i + 1}` }));
+		const client = await connectIndex(entriesIndex(entries), "omp", greptime);
+
+		const reply = await call(client, "memory_search", { query: "lease", graph_linked: true });
+
+		expect(reads).toEqual(Array.from({ length: 8 }, (_, i) => `graph_id=ut-${i + 1}`));
+		expect(limits).toEqual(Array.from({ length: 8 }, () => 5));
+		expect(reply.json()).toMatchObject({ degraded: true, reason: expect.stringContaining("ledger: graph reads capped at 8 of 10") });
+		expect(reply.json().graph_links).toHaveLength(8);
+	});
+
+	test("session reads are capped at eight distinct sessions, and the reply names the cap", async () => {
+		const { reads, greptime } = readLedger(sessionRows);
+		const entries = Array.from({ length: 10 }, (_, i) => memoryAt(`mem_${i}`, { session_id: `s-${i + 1}`, source_event: "ev-8" }));
+		const client = await connectIndex(entriesIndex(entries), "omp", greptime);
+
+		const reply = await call(client, "memory_search", { query: "lease", causal: true });
+
+		expect(reads).toHaveLength(8);
+		expect(reply.json()).toMatchObject({ degraded: true, reason: expect.stringContaining("ledger: session reads capped at 8 of 10") });
+	});
+
+	test("causal reads the newest 200 session events, so an older source gets an empty chain and the notice says so", async () => {
+		const longSession = Array.from({ length: 205 }, (_, i) => ({
+			...ledgerRow(`ev-${i + 1}`, 1, { session_id: "s-long", graph_id: "ut-1" }),
+			ts: new Date(Date.UTC(2026, 9, 1) + i * 1000).toISOString(),
+		}));
+		const { limits, greptime } = readLedger(longSession);
+		const entries = [
+			memoryAt("mem_old", { session_id: "s-long", source_event: "ev-3" }),
+			memoryAt("mem_new", { session_id: "s-long", source_event: "ev-205" }),
+		];
+		const client = await connectIndex(entriesIndex(entries), "omp", greptime);
+
+		const reply = await call(client, "memory_search", { query: "lease", causal: true });
+
+		expect(limits).toEqual([200]);
+		expect(reply.json()).toMatchObject({
+			entries: [
+				{ id: "mem_old", causal_chain: [] },
+				{ id: "mem_new", causal_chain: [{ id: "ev-204" }, { id: "ev-203" }, { id: "ev-202" }, { id: "ev-201" }, { id: "ev-200" }] },
+			],
+		});
+		expect(reply.json().causal_notice).toEqual(expect.stringContaining("newest 200 events"));
+	});
 });
 
 describe("skills_propose", () => {
@@ -663,7 +860,7 @@ describe("skills_propose", () => {
 		expect(tool?.annotations).toMatchObject({ destructiveHint: false, openWorldHint: true });
 		const properties = Object.keys((tool?.inputSchema as { properties?: Record<string, unknown> }).properties ?? {});
 		expect(properties.sort()).toEqual(
-			["allow_doc_examples", "dry_run", "files", "graph_id", "mode", "name", "rationale", "remove", "reopen", "session_id", "surface"].sort(),
+			["allow_doc_examples", "dry_run", "expected_version", "files", "graph_id", "mode", "name", "rationale", "remove", "reopen", "session_id", "surface"].sort(),
 		);
 	});
 
@@ -722,7 +919,7 @@ describe("skills_propose", () => {
 		const reply = await call(client, "skills_propose", args);
 
 		expect(reply.isError).toBe(true);
-		expect(reply.json()).toEqual({ error: refusal.message, findings: [{ file: "SKILL.md", line: 4, rule: "github" }] });
+		expect(reply.json()).toEqual({ error: refusal.message, findings: [{ file: "SKILL.md", line: 4, rule: "github" }], refused: true });
 	});
 
 	test("a failed git or gh step is an error with the redacted, capped reason", async () => {

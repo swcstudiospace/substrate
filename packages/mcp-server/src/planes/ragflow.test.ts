@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { BreakerOpenError, CircuitBreaker, gatedFetch, type PlaneSample } from "@substrate/observability";
 import { listDatasets, ragflowFromEnv, ragflowOp, retrieveChunks } from "./ragflow.ts";
+import { ConfigError, loadConfig } from "../config.ts";
 import { RagflowFake } from "../ragflow-fake.ts";
 const CONFIG = { url: "http://ragflow.test", apiKey: "test-key" };
 
@@ -161,6 +162,62 @@ describe("retrieveChunks", () => {
 			body: JSON.stringify({ question: "q", page: 1, page_size: 4 }),
 		});
 		expect(response.status).toBe(400);
+	});
+});
+
+describe("the RAGFlow retrieval settings (D46-a, D46-b)", () => {
+	const RAGFLOW_ENV = { RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "test-key" };
+	const DATASET = ["ds-berlin-agent-substrate"];
+
+	/** The body of the one retrieval the fake received. */
+	function sentBody(fake: RagflowFake): object {
+		const body = fake.retrievals()[0];
+		if (body === null || typeof body !== "object") throw new Error("fake did not record the retrieval body");
+		return body;
+	}
+
+	test("a configured weight and reranker reach the wire body", async () => {
+		const fake = new RagflowFake();
+		const config = loadConfig({ ...RAGFLOW_ENV, SUBSTRATE_RAGFLOW_VECTOR_WEIGHT: "0.7", SUBSTRATE_RAGFLOW_RERANK_ID: "bge-test" });
+		const outcome = await retrieveChunks(CONFIG, { question: "q", dataset_ids: DATASET, retrieval: config.docsRetrieval }, fake.fetch);
+		if (!outcome.ok) throw new Error(`expected chunks: ${outcome.reason}`);
+		expect(sentBody(fake)).toMatchObject({ vector_similarity_weight: 0.7, rerank_id: "bge-test" });
+	});
+
+	test("with no settings the body carries RAGFlow's 0.3 and no rerank_id, with or without knobs passed", async () => {
+		const fake = new RagflowFake();
+		const config = loadConfig({});
+		await retrieveChunks(CONFIG, { question: "q", dataset_ids: DATASET, retrieval: config.docsRetrieval }, fake.fetch);
+		expect(sentBody(fake)).toMatchObject({ vector_similarity_weight: 0.3 });
+		expect(Object.keys(sentBody(fake))).not.toContain("rerank_id");
+
+		const bare = new RagflowFake();
+		await retrieveChunks(CONFIG, { question: "q", dataset_ids: DATASET }, bare.fetch);
+		expect(sentBody(bare)).toMatchObject({ vector_similarity_weight: 0.3 });
+		expect(Object.keys(sentBody(bare))).not.toContain("rerank_id");
+	});
+
+	test("an out-of-range weight is refused by config loading, naming the variable, before any request", async () => {
+		const fake = new RagflowFake();
+		let thrown: unknown = null;
+		try {
+			const config = loadConfig({ ...RAGFLOW_ENV, SUBSTRATE_RAGFLOW_VECTOR_WEIGHT: "1.5" });
+			await retrieveChunks(CONFIG, { question: "q", dataset_ids: DATASET, retrieval: config.docsRetrieval }, fake.fetch);
+		} catch (error) {
+			thrown = error;
+		}
+		if (!(thrown instanceof ConfigError)) throw new Error("expected a ConfigError");
+		expect(thrown.message).toContain("SUBSTRATE_RAGFLOW_VECTOR_WEIGHT");
+		expect(fake.requests).toHaveLength(0);
+	});
+
+	test("the docs weight overrides the RAGFlow weight; a blank reranker is none; junk weights are refused", () => {
+		expect(loadConfig({ SUBSTRATE_RAGFLOW_VECTOR_WEIGHT: "0.7", SUBSTRATE_DOCS_VECTOR_WEIGHT: "0.5" }).docsRetrieval.vectorSimilarityWeight).toBe(0.5);
+		expect(loadConfig({ SUBSTRATE_RAGFLOW_VECTOR_WEIGHT: "0.7" }).docsRetrieval.vectorSimilarityWeight).toBe(0.7);
+		expect(loadConfig({ SUBSTRATE_RAGFLOW_RERANK_ID: "  " }).docsRetrieval).not.toHaveProperty("rerankId");
+		for (const bad of ["x", "-0.1", "1.0001"]) {
+			expect(() => loadConfig({ SUBSTRATE_RAGFLOW_VECTOR_WEIGHT: bad })).toThrow("SUBSTRATE_RAGFLOW_VECTOR_WEIGHT");
+		}
 	});
 });
 

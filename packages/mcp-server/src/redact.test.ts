@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import * as redactModule from "./redact.ts";
 import {
 	REDACTED,
+	REDACTED_PEM,
 	REDACTION_RULES,
 	SKILL_EXCLUSIONS,
 	SKILL_HIGH_CONFIDENCE_RULES,
@@ -191,6 +192,177 @@ describe("over-redaction guards", () => {
 	});
 })
 
+describe("redaction coverage gaps", () => {
+	test("provider token shapes that leaked before are redacted and their surroundings kept", () => {
+		const probes = [
+			"sk_live_" + "a".repeat(24),
+			"rk_live_" + "a".repeat(24),
+			"xoxp-" + "1".repeat(12),
+			"xapp-1-" + "A".repeat(12),
+			"ASIA" + "ABCDEFGHIJKLMNOP",
+			"sk-svcacct-" + "a".repeat(20),
+			"sk-admin-" + "a".repeat(20),
+			"hf_" + "a".repeat(20),
+			"ya29." + "a".repeat(20),
+			"SG." + "a".repeat(22) + "." + "b".repeat(43),
+			"shpat_" + "a".repeat(20),
+			"sbp_" + "a".repeat(20),
+			"glsoat-" + "a".repeat(20),
+			"SK" + "0".repeat(32),
+		];
+		for (const probe of probes) expect(redact(`ship ${probe} now`)).toBe(`ship ${REDACTED} now`);
+	});
+
+	test("credential keys with a closing quote or a lowercase name lose the value and keep the JSON shape", () => {
+		expect(redact('{"password": "hunter2"}')).toBe(`{"password": ${REDACTED}}`);
+		expect(redact("client_secret=abc123")).toBe(`client_secret=${REDACTED}`);
+		expect(redact('{"client_secret": "abc123"}')).toBe(`{"client_secret": ${REDACTED}}`);
+		expect(redact('{"api_key": "abcdefghijklmnopqrstuvwx"}')).toBe(`{"api_key": "${REDACTED}"}`);
+	});
+
+	test("Basic and Token authorization credentials are redacted, not only the scheme word", () => {
+		expect(redact("Authorization: Basic dXNlcjpwYXNz")).toBe(`Authorization: ${REDACTED}`);
+		expect(redact("Authorization: Token abc123def456")).toBe(`Authorization: ${REDACTED}`);
+	});
+
+	test("a PGP block and a PEM block with no END line are redacted, text outside them kept", () => {
+		expect(redact("-----BEGIN PGP PRIVATE KEY BLOCK-----")).toBe(REDACTED_PEM);
+		const pgp = "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOY\n-----END PGP PRIVATE KEY BLOCK-----";
+		expect(redact(`before ${pgp} after`)).toBe(`before ${REDACTED_PEM} after`);
+		expect(redact("keep this\n-----BEGIN RSA PRIVATE KEY-----\nMIIEow")).toBe(`keep this\n${REDACTED_PEM}`);
+	});
+
+	test("a password containing @ is redacted up to the last @ before the host", () => {
+		expect(redact("https://u:p@ss@host")).toBe(`https://u:${REDACTED}@host`);
+		expect(redact("https://u:p@ss@host/path")).toBe(`https://u:${REDACTED}@host/path`);
+	});
+});
+
+describe("a quoted credential value with spaces loses every word", () => {
+	const SPACED = "correct horse battery";
+	const lostEvery = (out: string) => {
+		expect(out).toContain(REDACTED);
+		for (const word of SPACED.split(" ")) expect(out).not.toContain(word);
+	};
+	test("the event path drops a JSON value and a quoted assignment whole", () => {
+		expect(redact(`{"password": "${SPACED}"}`)).toBe(`{"password": ${REDACTED}}`);
+		expect(redact(`{"client_secret": "${SPACED}"}`)).toBe(`{"client_secret": ${REDACTED}}`);
+		expect(redact(`DB_PASS="${SPACED}"`)).toBe(`DB_PASS=${REDACTED}`);
+		expect(redact(`DB_PASS='${SPACED}'`)).toBe(`DB_PASS=${REDACTED}`);
+	});
+	test("the skill path drops a JSON value and quoted assignments whole", () => {
+		for (const line of [
+			`{"client_secret": "${SPACED}"}`,
+			`LINEAR_API_KEY="${SPACED}"`,
+			`DB_PASS='${SPACED}'`,
+			`DAYTONA_API_KEY="${SPACED}"`,
+			`X-VAULT-TOKEN: "${SPACED}"`,
+			`Authorization: "${SPACED}"`,
+		]) {
+			lostEvery(redactSkillContent(line).text);
+		}
+	});
+	test("an unquoted value still ends at its first space", () => {
+		expect(redact("DB_PASS=abc def")).toBe(`DB_PASS=${REDACTED} def`);
+		expect(redactSkillContent("DB_PASS=abc def").text).toBe(`DB_PASS=${REDACTED} def`);
+	});
+	test("an escaped-quote JSON string loses every word on both paths", () => {
+		for (const line of [String.raw`{\"password\": \"${SPACED}\"}`, String.raw`\"password\": \"${SPACED}\"`]) {
+			lostEvery(redact(line));
+			lostEvery(redactSkillContent(line).text);
+		}
+		expect(redact(String.raw`{\"password\": \"${SPACED}\"}`)).toBe(String.raw`{\"password\": ${REDACTED}}`);
+		expect(redact(String.raw`\"password\": \"${SPACED}\"`)).toBe(String.raw`\"password\": ${REDACTED}`);
+	});
+	test("an escaped-quote bare assignment loses every word, double or single quoted", () => {
+		for (const line of [
+			String.raw`password=\"${SPACED}\"`,
+			String.raw`password=\'${SPACED}\'`,
+			String.raw`DB_PASS=\"${SPACED}\"`,
+			String.raw`DB_PASS=\'${SPACED}\'`,
+		]) {
+			lostEvery(redact(line));
+			lostEvery(redactSkillContent(line).text);
+		}
+		expect(redact(String.raw`password=\"${SPACED}\"`)).toBe(`password=${REDACTED}`);
+		expect(redact(String.raw`password=\'${SPACED}\'`)).toBe(`password=${REDACTED}`);
+	});
+	test("an escaped value ends at its own closing escaped quote", () => {
+		const out = redact(String.raw`password=\"x\", other: \"y\"`);
+		expect(out).toContain(`password=${REDACTED}`);
+		expect(out).toContain(String.raw`other: \"y\"`);
+		expect(out).not.toContain(String.raw`\"x\"`);
+	});
+	test("an escaped value takes the non-space text attached after its closing quote", () => {
+		const line = String.raw`DB_PASS=\"first\"tail`;
+		for (const out of [redact(line), redactSkillContent(line).text]) {
+			expect(out).toBe(`DB_PASS=${REDACTED}`);
+			expect(out).not.toContain("first");
+			expect(out).not.toContain("tail");
+		}
+	});
+	test("a credential value stops at a shell operator, so the command after it survives", () => {
+		for (const line of [`DB_PASS="first"tail`, `DB_PASS='first'tail`, String.raw`DB_PASS=\"first\"tail`]) {
+			for (const out of [redact(line), redactSkillContent(line).text]) {
+				expect(out).toBe(`DB_PASS=${REDACTED}`);
+				expect(out).not.toContain("first");
+				expect(out).not.toContain("tail");
+			}
+		}
+		for (const line of [`export DB_PASS="first"&&printf ready`, String.raw`export DB_PASS=\"first\"&&printf ready`]) {
+			for (const out of [redact(line), redactSkillContent(line).text]) {
+				expect(out).toContain("&&printf ready");
+				expect(out).not.toContain("first");
+			}
+		}
+		expect(redact(`export DB_PASS="first"&&printf ready`)).toBe(`export DB_PASS=${REDACTED}&&printf ready`);
+		expect(redact(String.raw`export DB_PASS=\"first\"&&printf ready`)).toBe(`export DB_PASS=${REDACTED}&&printf ready`);
+		expect(redactSkillContent(String.raw`export DB_PASS=\"first\"&&printf ready`).text).toBe(`export DB_PASS=${REDACTED}&&printf ready`);
+	});
+	test("a placeholder value followed by a shell operator is kept on the skill path and still redacted on the event path", () => {
+		expect(redact(`export DB_PASS="example"&&printf ready`)).toBe(`export DB_PASS=${REDACTED}&&printf ready`);
+		expect(redactSkillContent(`export DB_PASS="example"&&printf ready`).text).toBe(`export DB_PASS="example"&&printf ready`);
+		expect(redact(`export DB_PASS="example"; printf ready`)).toBe(`export DB_PASS=${REDACTED}; printf ready`);
+		expect(redactSkillContent(`export DB_PASS="example"; printf ready`).text).toBe(`export DB_PASS="example"; printf ready`);
+		// The escaped form is a placeholder too: the skill path unescapes it before the placeholder check.
+		expect(redact(String.raw`export DB_PASS=\"example\"&&printf ready`)).toBe(`export DB_PASS=${REDACTED}&&printf ready`);
+		expect(redactSkillContent(String.raw`export DB_PASS=\"example\"&&printf ready`).text).toBe(String.raw`export DB_PASS=\"example\"&&printf ready`);
+	});
+	test("an escaped env reference inside JSON is kept on the skill path", () => {
+		const line = String.raw`curl -d "{\"password\": \"$DB_PASS\"}"`;
+		expect(redactSkillContent(line).text).toBe(line);
+	});
+	test("an escaped env reference with attached text is still redacted on the skill path", () => {
+		const line = String.raw`DB_PASS=\"$DB_PASS\"tail`;
+		expect(redactSkillContent(line).text).toBe(`DB_PASS=${REDACTED}`);
+	});
+	test("plain quoted values keep the same placeholder shape", () => {
+		expect(redact(`{"password": "${SPACED}"}`)).toBe(`{"password": ${REDACTED}}`);
+		expect(redact(`password="${SPACED}"`)).toBe(`password=${REDACTED}`);
+		for (const line of [`{"password": "${SPACED}"}`, `password="${SPACED}"`]) {
+			lostEvery(redact(line));
+			lostEvery(redactSkillContent(line).text);
+		}
+	});
+	test("a backslash continuation after a quoted env reference survives on the skill path", () => {
+		const line = 'PGPASSWORD="$DB_PASS"\\\n  psql app';
+		expect(redactSkillContent(line).text).toBe(line);
+	});
+	test("a quoted value with attached text loses that text on both paths, plain or escaped", () => {
+		for (const line of [`DB_PASS="first"tail`, String.raw`DB_PASS=\"first\"tail`]) {
+			for (const out of [redact(line), redactSkillContent(line).text]) {
+				expect(out).toBe(`DB_PASS=${REDACTED}`);
+				expect(out).not.toContain("first");
+				expect(out).not.toContain("tail");
+			}
+		}
+	});
+	test("a placeholder followed by a shell operator keeps the operator on both paths", () => {
+		expect(redact(`export DB_PASS="example"&&printf ready`)).toBe(`export DB_PASS=${REDACTED}&&printf ready`);
+		expect(redactSkillContent(`export DB_PASS="example"&&printf ready`).text).toBe(`export DB_PASS="example"&&printf ready`);
+	});
+});
+
 // ── One planted secret per named rule (D-04 merge, D18-04) ────────────────────
 // Deterministic runtime fixtures: the source never holds a literal token shape.
 // Rule names come from REDACTION_RULES, so tsc fails when a rule lacks a fixture.
@@ -250,6 +422,15 @@ const FIXTURES: Record<RedactionRuleName, readonly RuleFixture[]> = {
 	// The key prefix is a literal like the other provider prefixes above; the
 	// tail is deterministic runtime output, never a real credential.
 	ragflow: [{ text: "ragflow-" + rnd(ALNUM, 40), secret: "ragflow-" + rnd(ALNUM, 40) }],
+	// Provider shapes added with the SOTA pass; the skill pass shares each name.
+	stripe: [{ text: "sk_live_" + rnd(ALNUM, 24), secret: "sk_live_" + rnd(ALNUM, 24) }],
+	huggingface: [{ text: "hf_" + rnd(ALNUM, 34), secret: "hf_" + rnd(ALNUM, 34) }],
+	"google-oauth": [{ text: "ya29." + rnd(ALNUM, 40), secret: "ya29." + rnd(ALNUM, 40) }],
+	sendgrid: [{ text: "SG." + rnd(ALNUM, 22) + "." + rnd(ALNUM, 43), secret: "SG." + rnd(ALNUM, 22) + "." + rnd(ALNUM, 43) }],
+	shopify: [{ text: "shpat_" + rnd(HEX, 32), secret: "shpat_" + rnd(HEX, 32) }],
+	supabase: [{ text: "sbp_" + rnd(HEX, 40), secret: "sbp_" + rnd(HEX, 40) }],
+	glitch: [{ text: "glsoat-" + rnd(ALNUM, 32), secret: "glsoat-" + rnd(ALNUM, 32) }],
+	twilio: [{ text: "SK" + rnd(HEX, 32), secret: "SK" + rnd(HEX, 32) }],
 	// Two fixtures: one pk- body and one rk- body, each digit-bearing per D18-21.
 	"pk-rk": [
 		{ text: "pk-" + pkBody, secret: "pk-" + pkBody },
@@ -279,7 +460,7 @@ describe("one fixture per named rule", () => {
 	test("every rule carries a unique stable name", () => {
 		const names = REDACTION_RULES.map((entry) => entry.name);
 		expect(new Set(names).size).toBe(names.length);
-		expect(names.length).toBe(31);
+		expect(names.length).toBe(39);
 	});
 
 	test("every rule name has at least one fixture", () => {
@@ -410,6 +591,14 @@ describe("redactSkillContent redacts real values", () => {
 			findings: [],
 		});
 	});
+	test("a quoted password redacts its whole value, not just the first word", () => {
+		expect(redactSkillContent('{"password": "correct horse battery"}')).toEqual({
+			text: `{"password": ${REDACTED}}`,
+			redactions: [{ line: 1, rule: "password" }],
+			findings: [],
+		});
+		expect(redactSkillContent("password: 'two words here'").text).toBe(`password: ${REDACTED}`);
+	});
 	test("redacting already-redacted text changes nothing more", () => {
 		const once = redactSkillContent(`LINEAR_API_KEY=${rnd(ALNUM, 16)}\nAuthorization: Bearer ` + "z".repeat(40));
 		expect(redactSkillContent(once.text)).toEqual({ text: once.text, redactions: [], findings: [] });
@@ -449,6 +638,14 @@ describe("redactSkillContent rejects high-confidence secrets", () => {
 			digitalocean: "dop_v1_" + rnd(HEX, 64),
 			"openai-proj": "sk-proj-" + rnd(ALNUM, 40),
 			ragflow: "ragflow-" + rnd(ALNUM, 40),
+			stripe: "sk_live_" + rnd(ALNUM, 24),
+			huggingface: "hf_" + rnd(ALNUM, 34),
+			"google-oauth": "ya29." + rnd(ALNUM, 40),
+			sendgrid: "SG." + rnd(ALNUM, 22) + "." + rnd(ALNUM, 43),
+			shopify: "shpat_" + rnd(HEX, 32),
+			supabase: "sbp_" + rnd(HEX, 40),
+			glitch: "glsoat-" + rnd(ALNUM, 32),
+			twilio: "SK" + rnd(HEX, 32),
 		};
 		for (const rule of SKILL_HIGH_CONFIDENCE_RULES) {
 			const sample = samples[rule];

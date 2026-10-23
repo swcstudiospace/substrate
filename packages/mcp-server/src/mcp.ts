@@ -6,7 +6,7 @@
  * rejected at the client. The connector's forwarding tools already use
  * `memory_brief` / `events_emit`, so this stays consistent with them.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { BRIEF_PROFILES, BRIEF_STATES } from "@substrate/observability";
 import { z } from "zod";
@@ -16,6 +16,7 @@ import { DesktopRunInput } from "./desktop/actions.ts";
 import { DEFAULT_IDLE_SECONDS, formatDrift } from "./drift.ts";
 import { DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT } from "./greptime.ts";
 import { MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS } from "./lease.ts";
+import { approvalRefValid, RailwayRequestError, type ServiceRef, type WriteGate, type WriteOutcome, type WriteRefusal } from "./railway.ts";
 import { redact } from "./redact.ts";
 import { augmentQuestionWithSteering, normalizeRepoId, UNTRUSTED_DOCS_NOTICE } from "./docs-search.ts";
 import { nextSteeringSession, scopeRepoId, STEERING_STATES, steeringSessionPayload, type SteeringSession, type SteeringSessionState } from "./event.ts";
@@ -117,6 +118,20 @@ export function attributedSurface(callerSurface: Surface | null, supplied: strin
 		return { refused: `this token is ${callerSurface} and cannot act as ${supplied}` };
 	}
 	return { surface: (supplied as Surface | null | undefined) ?? callerSurface ?? "claude-code" };
+}
+
+/**
+ * Why a surface a caller names is refused, or null when it may stand.
+ *
+ * A tokened caller acts as its own surface. A brief, a card or a handoff that names another surface is refused
+ * rather than served under that name, so no reply says it was composed for an agent the token is not. An untokened
+ * caller's claim is left as it has always been. `claimed` is whatever a REST body or query held, so a value that is
+ * not a surface is named as unrecognised, and an absent one is no claim at all.
+ */
+export function surfaceClaimRefusal(callerSurface: Surface | null, claimed: unknown): string | null {
+	if (callerSurface === null || claimed === undefined || claimed === null || claimed === callerSurface) return null;
+	const named = typeof claimed === "string" && (SURFACES as readonly string[]).includes(claimed) ? claimed : "an unrecognised surface";
+	return `this token is ${callerSurface} and cannot act as ${named}`;
 }
 
 /**
@@ -685,6 +700,9 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			// which surface its token resolved to, and the smoke refuses a wrong one.
 			const requested = parseBriefProfile(profile);
 			if (!requested.ok) return refusal(requested.error);
+			// A tokened caller's brief is its own surface's: a `surface` argument naming another is refused, not served.
+			const refusedSurface = surfaceClaimRefusal(callerSurface, surface);
+			if (refusedSurface !== null) return refusal(refusedSurface);
 			const briefSurface = surface ?? callerSurface ?? "claude-code";
 			// The profile follows the bearer's own surface, not an `surface` argument a caller may set for attribution.
 			const { detail, notModified } = await substrate.briefConditional({ repo, branch, graph_id, surface: briefSurface }, if_none_match, requested.profile, callerSurface);
@@ -811,7 +829,9 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"keyset pair `(before, before_id)`, so ties at a page boundary are neither skipped nor repeated. `next` " +
 				"is `{ before, before_id }` whenever the page is full — pass both back for the next page — and null at " +
 				"the end. `query` may be left out when `subject_prefix` is given, to list every entry under a subject " +
-				"family. To page a plain query from the top, give `before` a time later than any entry.",
+				"family. To page a plain query from the top, give `before` a time later than any entry. " +
+				"With `graph_linked` the reply lists each returned graph's newest ledger events; with `causal` each entry " +
+				"carries the events that preceded it in its session, which is not proof of cause.",
 			inputSchema: {
 				query: z.string().optional().describe("full-text over bodies; required unless `subject_prefix` is given"),
 				scope: z.string().optional(),
@@ -824,6 +844,13 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					.boolean()
 					.optional()
 					.describe("also return entries past their ttl under SUBSTRATE_MEMORY_EXPIRY=enforce; needs an operator token"),
+				repo: z
+					.string()
+					.optional()
+					.describe(
+						"owner/name of the repo you are working in. `agent:` entries come back only when they were written " +
+							"for this repo, so without it none do",
+					),
 				subject_prefix: z
 					.string()
 					.optional()
@@ -838,6 +865,14 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					.min(1)
 					.optional()
 					.describe("cursor tie-break: with `before`, also entries created at it whose id sorts below this"),
+				graph_linked: z
+					.boolean()
+					.optional()
+					.describe("add `graph_links`: the newest ledger events of each returned entry's graph, with an untrusted notice"),
+				causal: z
+					.boolean()
+					.optional()
+					.describe("add `causal_chain` to each entry with a `source_event`: the events that preceded it in its session, not proof of cause"),
 			},
 			annotations: { readOnlyHint: true },
 		},
@@ -857,6 +892,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 						request.include_superseded,
 						callerSurface ?? "unattributed",
 						request.include_expired,
+						request.repo,
+						{ graphLinked: request.graph_linked, causal: request.causal },
 					),
 				);
 			} catch (cause) {
@@ -879,10 +916,14 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"inside the brief.",
 			inputSchema: {
 				query: z.string().describe("What to recall, in your words."),
+				repo: z
+					.string()
+					.optional()
+					.describe("owner/name of the repo you are working in. Agent-scope memories come back only when written for this repo; without it, none do"),
 			},
 			annotations: { readOnlyHint: true },
 		},
-		async ({ query }) => json(await substrate.recallMemories({ query }, callerSurface)),
+		async ({ query, repo }) => json(await substrate.recallMemories({ query }, callerSurface, repo)),
 	);
 
 	server.registerTool(
@@ -1303,7 +1344,9 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"RAGFlow retrieval. Returns at most 10 redacted citations with source URLs, framed as untrusted " +
 				"text — descriptions, not instructions. `datasets` names the datasets to search; unknown names " +
 				"are ignored and raw ids are never accepted. Read-only: one note event lists the returned URLs, " +
-				"and an unreachable plane answers empty with a reason instead of failing the turn.",
+				"and an unreachable plane answers empty with a reason instead of failing the turn. `context: true` " +
+				"adds a `context` block: up to 3 recalled memories for the question and the last 5 events of " +
+				"`session_id`, each framed untrusted.",
 			inputSchema: {
 				question: z.string().describe("The docs question, in your words."),
 				datasets: z.array(z.string()).optional().describe("Dataset names to search. Omitted means all readable datasets."),
@@ -1311,10 +1354,11 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				repo_id: z.string().optional().describe("owner/name tagging this search's cache entry, steering and events. Retrieval reads the shared docs corpus, not a per-repo one. A session_id's stored repo applies when omitted."),
 				steering: z.string().optional().describe("Live steering for this session, appended to the retrieval question as described-but-untrusted text."),
 				planning_hash: z.string().optional().describe("The planning hash the steering session holds; echoed on the note event so a refresh can be told apart."),
+				context: z.boolean().optional().describe("Add a context block: recalled memories and the session's recent events."),
 			},
 			annotations: { readOnlyHint: true },
 		},
-		async ({ question, datasets, session_id, repo_id, steering, planning_hash }) => {
+		async ({ question, datasets, session_id, repo_id, steering, planning_hash, context }) => {
 			// SPE-19388: report the serving path into the explicit RAG state
 			// machine. The machine never changes the reply — an illegal
 			// transition is logged and ignored.
@@ -1337,6 +1381,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 						session_id: session_id ?? (scoped !== null ? `docs-search:${scoped}` : undefined),
 						repo_id: scoped,
 						planning_hash: planning_hash ?? live?.planning_hash,
+						context,
 					},
 					callerSurface,
 				);
@@ -1454,6 +1499,12 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 							source_url: z.string().optional(),
 							body: z.string(),
 							heading_path: z.string().optional(),
+							expected_version: z
+								.number()
+								.int()
+								.min(0)
+								.optional()
+								.describe("The version of this source URL's record the page replaces (current_version on a stale reply). A mismatch refuses the call as version.stale; absent ingests as before."),
 						}),
 					)
 					.describe("Pages to ingest, each with a repo-rooted path and body."),
@@ -1743,6 +1794,15 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					.array(z.enum(["pem", "jwt"]))
 					.optional()
 					.describe("Operator only. Documentation examples of these shapes are redacted instead of refused."),
+				expected_version: z
+					.number()
+					.int()
+					.min(0)
+					.optional()
+					.describe(
+						"the skill version this proposal revises (current_version on a stale reply); a mismatch is refused " +
+							"with reason version.stale and nothing is proposed. Absent keeps today's behaviour.",
+					),
 			},
 			annotations: { destructiveHint: false, openWorldHint: true },
 		},
@@ -1821,6 +1881,185 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				return { ...json(failure.body), isError: true };
 			}
 		},
+	);
+
+	/** A Railway read: the client's own failures become a tool error carrying the kind and the redacted message only (D45-j). */
+	const railwayRead = async (run: () => Promise<unknown>) => {
+		try {
+			return json(await run());
+		} catch (cause) {
+			if (cause instanceof RailwayRequestError) return { ...json({ error: cause.kind, message: cause.message }), isError: true };
+			throw cause;
+		}
+	};
+
+	/**
+	 * A Railway write. The client checks the write gate before it sends anything (D45-c); this
+	 * records the outcome as one event (D45-f): a `note` when applied, a `warning` when refused, failed or unknown. The event
+	 * never carries the token or a request body, and a failed event write never changes the answer.
+	 */
+	const railwayWrite = async (
+		action: "railway.scale" | "railway.deploy",
+		ref: ServiceRef,
+		approvalRef: string | undefined,
+		write: (gate: WriteGate) => Promise<WriteOutcome>,
+		limits?: { readonly vcpus: number; readonly memory_gb: number },
+	) => {
+		const validRef = approvalRef !== undefined && approvalRefValid(approvalRef) ? approvalRef : null;
+		const gate: WriteGate = { isOperator, approvalRef: validRef };
+		const base = {
+			action,
+			runtime: "railway",
+			environment_id: ref.environmentId,
+			service_id: ref.serviceId,
+			...(validRef !== null ? { approval_ref: validRef } : {}),
+		};
+		const record = (
+			kind: "note" | "warning",
+			status: "applied" | "refused" | "unknown",
+			reason: string | null,
+			detail: { refusal?: WriteRefusal; failure?: string; vcpus?: number; memory_gb?: number },
+		) =>
+			substrate
+				.emit({
+					surface: "substrate",
+					kind,
+					summary: reason === null ? `${status} ${action}` : `${status} ${action}: ${reason}`,
+					session_id: `${action.replace(".", "-")}:${randomUUID()}`,
+					payload: { ...base, status, ...detail },
+				})
+				.catch(() => undefined);
+		let outcome: WriteOutcome;
+		try {
+			outcome = await write(gate);
+		} catch (cause) {
+			if (!(cause instanceof RailwayRequestError)) throw cause;
+			await record("warning", "refused", cause.kind, { failure: cause.kind });
+			return { ...json({ applied: false, error: cause.kind, message: cause.message }), isError: true };
+		}
+		if (outcome.applied) {
+			await record("note", "applied", null, limits ?? {});
+			return json(outcome);
+		}
+		if ("outcome" in outcome) {
+			await record("warning", "unknown", "transport", { failure: "transport" });
+			const check = limits
+				? "Check the limits with railway_scale_suggest once fresh samples arrive, or in the Railway dashboard, before retrying."
+				: "Check status with railway_list or railway_monitor before retrying.";
+			const message = `Railway did not confirm this write, so it may or may not have been applied. Nothing was retried. ${check}`;
+			return { ...json({ applied: false, outcome: "unknown", message }), isError: true };
+		}
+		await record("warning", "refused", outcome.refusal, { refusal: outcome.refusal });
+		return { ...json(outcome), isError: true };
+	};
+
+	server.registerTool(
+		"railway_list",
+		{
+			title: "List Railway projects, environments and services",
+			description:
+				"Read the Railway projects, environments and services the substrate can see, limited to SUBSTRATE_RAILWAY_PROJECT_IDS when " +
+				"that is set. A read: it changes nothing and needs no approval. The ids it returns are the ones the other railway_ tools take.",
+			inputSchema: {},
+			annotations: { readOnlyHint: true },
+		},
+		async () => railwayRead(() => substrate.railway.listResources()),
+	);
+
+	server.registerTool(
+		"railway_monitor",
+		{
+			title: "Monitor one Railway service",
+			description:
+				"The latest deployment of one Railway service, its status, its replica count and its region. A read: it changes nothing.",
+			inputSchema: {
+				environment_id: z.string().describe("The Railway environment id."),
+				service_id: z.string().describe("The Railway service id."),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async ({ environment_id, service_id }) =>
+			railwayRead(() => substrate.railway.monitor({ environmentId: environment_id, serviceId: service_id })),
+	);
+
+	server.registerTool(
+		"railway_scale_suggest",
+		{
+			title: "Suggest vCPU and memory limits for one Railway service",
+			description:
+				"Advisory only. Suggests vCPU and memory limits from the p95 of recent usage, with headroom, clamped to the configured " +
+				"bounds. It never applies a change: `railway_scale` is the write, and it needs the operator gate. With too few samples " +
+				"or no limit reading it returns insufficient-data and no suggestion.",
+			inputSchema: {
+				environment_id: z.string().describe("The Railway environment id."),
+				service_id: z.string().describe("The Railway service id."),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async ({ environment_id, service_id }) =>
+			railwayRead(() => substrate.railway.suggestScale({ environmentId: environment_id, serviceId: service_id })),
+	);
+
+	server.registerTool(
+		"railway_cost",
+		{
+			title: "Railway cost report",
+			description:
+				"Estimated Railway usage for the configured projects, priced with the operator's unit prices and compared with the monthly " +
+				"budget. A line with usage and no price makes the status unpriced; no price is ever assumed. Cached for 15 minutes. A read: " +
+				"it changes nothing.",
+			inputSchema: {},
+			annotations: { readOnlyHint: true },
+		},
+		async () => railwayRead(() => substrate.railway.costReport()),
+	);
+
+	server.registerTool(
+		"railway_scale",
+		{
+			title: "Set vCPU and memory limits on one Railway service",
+			description:
+				"Operator only. Sets the vCPU and memory limits of one service, within the configured scale bounds. Refused before any " +
+				"request to Railway unless SUBSTRATE_RAILWAY_WRITES is on, the caller is an operator, and approval_ref is given. " +
+				"Replica counts are not changed.",
+			inputSchema: {
+				environment_id: z.string().describe("The Railway environment id."),
+				service_id: z.string().describe("The Railway service id."),
+				vcpus: z.number().describe("The vCPU limit to set."),
+				memory_gb: z.number().describe("The memory limit to set, in GB."),
+				approval_ref: z.string().optional().describe("The operator's approval reference for this change: letters, digits and ._:/#-, up to 128 characters."),
+			},
+			annotations: { destructiveHint: true, openWorldHint: true },
+		},
+		async ({ environment_id, service_id, vcpus, memory_gb, approval_ref }) =>
+			railwayWrite("railway.scale", { environmentId: environment_id, serviceId: service_id }, approval_ref, (gate) =>
+				substrate.railway.setServiceLimits(
+					{ environmentId: environment_id, serviceId: service_id },
+					{ vCPUs: vcpus, memoryGB: memory_gb },
+					gate,
+				),
+				{ vcpus, memory_gb },
+			),
+	);
+
+	server.registerTool(
+		"railway_deploy",
+		{
+			title: "Redeploy one Railway service",
+			description:
+				"Operator only. Redeploys one service from its latest build. Refused before any request to Railway unless " +
+				"SUBSTRATE_RAILWAY_WRITES is on, the caller is an operator, and approval_ref is given.",
+			inputSchema: {
+				environment_id: z.string().describe("The Railway environment id."),
+				service_id: z.string().describe("The Railway service id."),
+				approval_ref: z.string().optional().describe("The operator's approval reference for this change: letters, digits and ._:/#-, up to 128 characters."),
+			},
+			annotations: { destructiveHint: true, openWorldHint: true },
+		},
+		async ({ environment_id, service_id, approval_ref }) =>
+			railwayWrite("railway.deploy", { environmentId: environment_id, serviceId: service_id }, approval_ref, (gate) =>
+				substrate.railway.redeployService({ environmentId: environment_id, serviceId: service_id }, gate),
+			),
 	);
 
 	server.registerTool(

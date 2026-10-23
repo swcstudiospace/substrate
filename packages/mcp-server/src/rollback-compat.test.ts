@@ -81,6 +81,11 @@ const OLD_DOCS_RECORD = ["sha", "dataset_id", "source_url", "document_id", "comm
 const OLD_DOCS_VERSION = ["dataset", "dataset_id", "version", "commit", "content_sha256", "ingested_at"];
 /** What uplift-4 S7 added at the top level, both optional (`docs-ingest.ts:546-552`). The only additions allowed. */
 const NEW_DOCS_TOP_OPTIONAL = ["triggers", "lag"];
+/**
+ * What the expected_version change added to each record: `version`. The old reader rebuilds a record from the known
+ * keys only, so it ignores this one; a rollback loses the version (it re-reads as 1), not the record.
+ */
+const NEW_DOCS_RECORD_KEYS = ["version"];
 
 /**
  * Everything the 9231f43 `loadIngestRecords` needs from a state file, frozen.
@@ -159,8 +164,15 @@ function docsStateInputs(withFreshness: boolean): { file: string; seen: Map<stri
 		document_id: "doc_1",
 		commit: "c".repeat(40),
 		superseded: [{ document_id: "doc_0", commit: "b".repeat(40) }, { document_id: "doc_older" }],
+		version: 3,
 	});
-	seen.set("agent-substrate README.md", { sha: "d".repeat(64), dataset_id: "ds_agent_substrate", source_url: "agent-substrate://README.md", document_id: "doc_2" });
+	seen.set("agent-substrate README.md", {
+		sha: "d".repeat(64),
+		dataset_id: "ds_agent_substrate",
+		source_url: "agent-substrate://README.md",
+		document_id: "doc_2",
+		version: 1,
+	});
 	const versions = createVersionStore();
 	recordVersion(versions, { dataset: "agent-substrate", dataset_id: "ds_agent_substrate", version: "v1", commit: "b".repeat(40), content_sha256: "e".repeat(64), ingested_at: "2026-10-13T08:00:00.000Z" });
 	recordVersion(versions, { dataset: "agent-skills", dataset_id: "ds_agent_skills", version: "v1", commit: "c".repeat(40), content_sha256: "f".repeat(64), ingested_at: "2026-10-13T09:00:00.000Z" });
@@ -180,12 +192,14 @@ async function writeRealDocsState(withFreshness: boolean): Promise<{ file: strin
 }
 
 describe("docs state file (docs-ingest.json): the current writer against the 9231f43 reader", () => {
-	test("the real output, with uplift-4 triggers and lag set, meets every old requirement and only adds `triggers` and `lag`", async () => {
+	test("the real output, with uplift-4 triggers and lag set, meets every old requirement and only adds `triggers`, `lag` and the record `version`", async () => {
 		const { parsed } = await writeRealDocsState(true);
 		expect(oldDocsStateViolations(parsed)).toEqual([]);
 		// The additions are exactly the two optional members: anything else is a new key the old release has never seen.
 		expect(extraKeys(parsed, OLD_DOCS_TOP).sort()).toEqual([...NEW_DOCS_TOP_OPTIONAL].sort());
-		for (const record of Object.values(parsed.records as Record<string, Record<string, unknown>>)) expect(extraKeys(record, OLD_DOCS_RECORD)).toEqual([]);
+		for (const record of Object.values(parsed.records as Record<string, Record<string, unknown>>)) {
+			expect(extraKeys(record, OLD_DOCS_RECORD).sort()).toEqual([...NEW_DOCS_RECORD_KEYS].sort());
+		}
 		for (const rows of Object.values(parsed.versions as Record<string, Array<Record<string, unknown>>>)) {
 			for (const row of rows) expect(Object.keys(row).sort()).toEqual([...OLD_DOCS_VERSION].sort());
 		}
@@ -240,6 +254,8 @@ describe("docs state file (docs-ingest.json): the current writer against the 923
 			document_id: "doc_0001",
 			commit: "9231f4396be5e38ef00db1313c6fae79ea2aace1",
 			superseded: [{ document_id: "doc_0000", commit: "490e007000000000000000000000000000000000" }, { document_id: "doc_old_no_commit" }],
+			// A record written before versions existed loads as version 1: it was ingested once.
+			version: 1,
 		});
 		expect(loaded.versions.get("agent-substrate")?.map((row) => row.version)).toEqual(["v1", "v2"]);
 		expect(loaded.versions.get("agent-skills")?.[0]?.commit).toBe("354310c000000000000000000000000000000000");

@@ -14,6 +14,7 @@
  * (EX_CONFIG) rather than silently re-attributing a token.
  */
 import { existsSync, statSync } from "node:fs";
+import { gatedFetch } from "@substrate/observability";
 import {
 	ConfigError,
 	configWarnings,
@@ -40,6 +41,8 @@ import { SloNotifier } from "./slo-notify.ts";
 import { DROPPED_METRIC, MetricsHistorySampler } from "./metrics-history.ts";
 import { DocsLagTimer } from "./docs-lag-timer.ts";
 import { createWatchdog, livezUrlFor } from "./watchdog.ts";
+import { MentalModelRefresh } from "./mental-model-refresh.ts";
+import { hindsightFromEnv, hindsightOp } from "./planes/hindsight.ts";
 
 let config;
 try {
@@ -85,6 +88,7 @@ for (const warning of [
 	...hindsightInventoryConfigWarnings(config),
 	...requestPathConfigWarnings(config),
 	...eventIdempotencyConfigWarnings(config),
+	...config.mentalModels.warnings,
 ]) {
 	process.stderr.write(`[substrate] misconfigured — ${warning}\n`);
 }
@@ -152,6 +156,10 @@ const server = createHttpServer(substrate, config, observability);
 // where READY=1 goes out, once the server listens.
 const { watchdog } = createWatchdog(process.env, livezUrlFor(config.host, config.port), (line) => process.stderr.write(line));
 
+// Memory governance: the weekly mental-model refresh is built inside the listen callback, after startRecall.
+// Until then it is null, so a signal that arrives first has nothing to stop.
+let mentalModelRefresh: MentalModelRefresh | null = null;
+
 server.listen(config.port, config.host, () => {
 	const stores = [migration.index ? "index" : null, migration.greptime ? "greptime" : null]
 		.filter(Boolean)
@@ -172,6 +180,15 @@ server.listen(config.port, config.host, () => {
 	const background = substrate.startRecall();
 	if (background.recall) process.stdout.write(`[substrate] brief recall: ${config.briefRecall.mode}, refresh every ${config.briefRecall.intervalS} s, snapshot ttl ${config.briefRecall.ttlS} s\n`);
 	if (background.inventory) process.stdout.write(`[substrate] hindsight inventory: on, every ${config.hindsightInventory.intervalS} s, read-only\n`);
+	// Memory governance: the weekly mental-model refresh, named by HINDSIGHT_MENTAL_MODELS. Unref'd; the first pass
+	// is seven days after start. No model named means no timer.
+	mentalModelRefresh = new MentalModelRefresh({
+		models: config.mentalModels.models,
+		hindsight: () => (config.vmGuest ? null : hindsightFromEnv()),
+		fetchImpl: gatedFetch(substrate.planes.gate("hindsight"), fetch, hindsightOp),
+		emit: (event) => substrate.emit(event),
+	});
+	if (mentalModelRefresh.start()) process.stdout.write(`[substrate] mental-model refresh: ${config.mentalModels.models.length} model(s), every 7 days\n`);
 });
 
 /** How long the final OTLP export may take before shutdown stops waiting for it. */
@@ -186,12 +203,18 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		// Before the flush below: no new lag pass starts once shutdown began.
 		docsLagTimer.stop();
 		substrate.stopPlanningPoll();
+		// The weekly refresh timer is cleared with the others; a pass in flight is awaited in the bound below.
+		mentalModelRefresh?.stop();
 		// Cancelled first and awaited with the flush below: no ping after shutdown began,
 		// and a stuck systemd-notify child is killed rather than outliving the process.
 		const watchdogStopped = watchdog.stop();
 		// uplift-4 S5: the recall prefetch and Hindsight inventory timers are cleared now and
 		// their in-flight work is awaited inside the same bound as the flush below.
 		const recallStopped = substrate.stopRecall();
+		// Phase 47: the cache preloader's timer is cleared with them; a tick in flight finishes on its own.
+		substrate.stopPreload();
+		// Phase 50: the wake-up hint connections close with the timers; no subscriber outlives the shutdown.
+		substrate.stopEventBus();
 		observability.stop();
 		server.close(async () => {
 			// In-flight background retains finish first (bounded), then the retain
@@ -213,6 +236,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 					metricsHistory.flush(),
 					docsLagTimer.flush(),
 					substrate.planningRefreshIdle(),
+					mentalModelRefresh?.flush(),
 					watchdogStopped,
 					recallStopped,
 				]),

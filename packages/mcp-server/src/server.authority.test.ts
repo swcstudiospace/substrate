@@ -276,9 +276,10 @@ describe("the handoff sender is the token's surface", () => {
 		expect(result.packet.prev_event_hash).toBe("tip-hash");
 	});
 
-	test("over REST, a body naming another agent does not become the sender", async () => {
+	test("over REST, a body naming another agent is refused: 403, and no packet is signed", async () => {
 		// The forgery this closes: an agent with its own token names a peer as the
 		// sender and walks away with a packet that verifies under that identity.
+		// A tokened caller that names another surface is refused, never re-attributed.
 		const response = await fetch(`${base}/handoff`, {
 			method: "POST",
 			headers: { "content-type": "application/json", authorization: "Bearer tok-hermes" },
@@ -290,10 +291,12 @@ describe("the handoff sender is the token's surface", () => {
 				session_id: "sess-hermes",
 			}),
 		});
-		const result = (await response.json()) as { packet: { from: { surface: string } }; signed: boolean };
+		const result = (await response.json()) as { error: string; packet?: unknown; signed?: boolean };
 
-		expect(result.packet.from.surface).toBe("hermes");
-		expect(result.signed).toBe(true);
+		expect(response.status).toBe(403);
+		expect(result.error).toBe("this token is hermes and cannot act as grok-bot");
+		expect(result.packet).toBeUndefined();
+		expect(result.signed).toBeUndefined();
 	});
 
 	test("an unknown token reaches neither door", async () => {
@@ -305,17 +308,28 @@ describe("the handoff sender is the token's surface", () => {
 		expect(response.status).toBe(401);
 	});
 
-	test("an operator credential signs as its own surface, not as the body's", async () => {
+	test("an operator credential signs as its own surface, and naming another is refused", async () => {
 		// The regression an earlier fix introduced: letting an operator token past the
 		// auth gate with no surface meant `/handoff` fell through to the body, so an
 		// operator credential could sign a packet as any agent it named. Operator
 		// authority is now an attribute of a surface token, so there is no such caller.
-		const response = await fetch(`${base}/handoff`, {
+		const named = await fetch(`${base}/handoff`, {
 			method: "POST",
 			headers: { "content-type": "application/json", authorization: "Bearer tok-operator" },
 			body: JSON.stringify({ to: "omp", goal: "take over n2", graph_id: "ut-1", surface: "grok-bot" }),
 		});
-		const result = (await response.json()) as { packet: { from: { surface: string } } };
+		const refused = (await named.json()) as { error: string; packet?: unknown };
+
+		expect(named.status).toBe(403);
+		expect(refused.error).toBe("this token is cursor and cannot act as grok-bot");
+		expect(refused.packet).toBeUndefined();
+
+		const own = await fetch(`${base}/handoff`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: "Bearer tok-operator" },
+			body: JSON.stringify({ to: "omp", goal: "take over n2", graph_id: "ut-1" }),
+		});
+		const result = (await own.json()) as { packet: { from: { surface: string } } };
 
 		expect(result.packet.from.surface).toBe("cursor");
 	});

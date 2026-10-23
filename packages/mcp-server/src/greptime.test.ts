@@ -25,18 +25,20 @@ import {
 	GreptimeError,
 	GreptimeUnavailable,
 	HEALTH_TABLE,
+	IDEMPOTENCY_LOOKUP_LIMIT,
 	INGEST_LAG_MS,
 	INGEST_BUDGET_MS,
 	INGEST_RETRY_LOOKBACK_MS,
 	IngestNotRecorded,
 	MAX_QUERY_LIMIT,
+	MAX_RECENT_EVENTS,
 	queryLimit,
 	quote,
 	sqlOp,
 	ttlOf,
 } from "./greptime.ts";
 import { ConfigError, loadConfig, loadLedgerSettings, type GreptimeConfig } from "./config.ts";
-import type { EventInput } from "./types.ts";
+import { SURFACES, type EventInput, type SubstrateEvent } from "./types.ts";
 import { MAX_METRIC_BATCH, MAX_METRIC_POINTS, METRIC_SERIES, type MetricSampleRow } from "./metrics-history.ts";
 
 const config: GreptimeConfig = { url: "http://greptime.test", user: "u", password: "p", db: "substrate" };
@@ -641,6 +643,75 @@ describe("reads", () => {
 	});
 });
 
+describe("findByIdempotencyKey", () => {
+	const cell: Pick<SubstrateEvent, "surface" | "repo" | "graph_id" | "kind" | "ts"> = {
+		surface: "omp",
+		repo: "acme/widgets",
+		graph_id: "ut-1",
+		kind: "shell",
+		ts: "2026-10-20T10:00:00.000Z",
+	};
+
+	/** A stored row as `normalizeEvent` leaves it: `_ik` is the payload's last key. */
+	const row = (key: string, id: string): unknown[] => [id, `hash-${id}`, `{"a":1,"_ik":"${key}"}`];
+
+	/** Answer the dialect probe, then return `rows` for every other read, as a read of the cell at this `ts` would. */
+	function cellRows(rows: unknown[][]) {
+		return stubFetch((statement) => (statement.includes("LENGTH") ? records(["n"], [[3]]) : records(["id", "hash", "payload"], rows)));
+	}
+
+	test("returns the row whose payload ends with the exact key, reading the cell at its exact ts", async () => {
+		const { sql } = cellRows([row("sess_key-1", "e1")]);
+		expect(await new GreptimeClient(config).findByIdempotencyKey(cell, "sess_key-1")).toEqual({ id: "e1", hash: "hash-e1" });
+		const lookup = sql.find((statement) => statement.includes('FROM "agent_events"')) ?? "";
+		expect(lookup).toContain(`"ts" = '${cell.ts}'`);
+		expect(lookup).toContain(`LIMIT ${IDEMPOTENCY_LOOKUP_LIMIT}`);
+	});
+
+	test("an underscore in the key is not a wildcard: a stored key that differs only there is a miss", async () => {
+		cellRows([row("sess-key-1", "e1")]);
+		expect(await new GreptimeClient(config).findByIdempotencyKey(cell, "sess_key_1")).toBeNull();
+	});
+
+	test("a lookalike row ahead of the real one does not hide it", async () => {
+		cellRows([row("sess-key-1", "lookalike"), row("sess_key_1", "real")]);
+		expect(await new GreptimeClient(config).findByIdempotencyKey(cell, "sess_key_1")).toEqual({ id: "real", hash: "hash-real" });
+	});
+
+	test("an exact match behind five non-matching rows is found on a later page", async () => {
+		const rows = [1, 2, 3, 4, 5, 6].map((index) => row(index === 6 ? "sess_key_1" : `other-key-${index}`, `e${index}`));
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes("LENGTH")) return records(["n"], [[3]]);
+			// Served as Greptime would: ids past the keyset bound, in id order, capped at the statement's LIMIT.
+			const after = /"id" > '([^']*)'/.exec(statement)?.[1];
+			const limit = Number(/LIMIT (\d+)$/.exec(statement)?.[1]);
+			return records(
+				["id", "hash", "payload"],
+				rows.filter((candidate) => after === undefined || String(candidate[0]) > after).slice(0, limit),
+			);
+		});
+		expect(await new GreptimeClient(config).findByIdempotencyKey(cell, "sess_key_1")).toEqual({ id: "e6", hash: "hash-e6" });
+		expect(sql.filter((statement) => statement.includes('FROM "agent_events"'))).toHaveLength(2);
+	});
+
+	test("a full read with no exact key is inconclusive, never a miss that would append a duplicate", async () => {
+		const rows = Array.from({ length: IDEMPOTENCY_LOOKUP_LIMIT }, (_, index) => row(`other-key-${index}`, `e${index}`));
+		cellRows(rows);
+		await expect(new GreptimeClient(config).findByIdempotencyKey(cell, "sess_key_1")).rejects.toThrow("inconclusive");
+	});
+
+	test("a short read with no exact key is a genuine miss", async () => {
+		cellRows([row("other-key-1", "e1")]);
+		expect(await new GreptimeClient(config).findByIdempotencyKey(cell, "sess_key_1")).toBeNull();
+	});
+
+	test("a malformed key is refused before anything is read", async () => {
+		const { sql } = cellRows([]);
+		await expect(new GreptimeClient(config).findByIdempotencyKey(cell, "bad key!")).rejects.toThrow("malformed");
+		expect(sql).toEqual([]);
+	});
+});
+
 describe("chainTip", () => {
 	test("is the hash nothing else claims as its prev", () => {
 		expect(
@@ -697,6 +768,23 @@ describe("chainTip", () => {
 		await new GreptimeClient(config).readEvents("graph_id", "ut-1");
 		for (const column of EVENT_COLUMNS) expect(sql[0]).toContain(`"${column}"`);
 		expect(sql[0]).toContain('ORDER BY "ts"');
+	});
+
+	test("readRecentEvents reads only the summary columns, newest first, under a clamped limit", async () => {
+		const { sql } = stubFetch(() => records(["id"], []));
+		const client = new GreptimeClient(config);
+		await client.readRecentEvents("session_id", "s-1", 5);
+		await client.readRecentEvents("graph_id", "ut-1", 1_000);
+		await client.readRecentEvents("graph_id", "ut-1", 0);
+		const [first, capped, floored] = sql;
+		for (const column of ["id", "ts", "kind", "surface", "node_id", "summary"]) expect(first).toContain(`"${column}"`);
+		expect(first).not.toContain('"payload"');
+		expect(first).not.toContain('"hash"');
+		expect(first).toContain(`WHERE "session_id" = 's-1'`);
+		expect(first).toContain('ORDER BY "ts" DESC, "id" DESC');
+		expect(first).toMatch(/LIMIT 5$/);
+		expect(capped).toMatch(new RegExp(`LIMIT ${MAX_RECENT_EVENTS}$`));
+		expect(floored).toMatch(/LIMIT 1$/);
 	});
 
 	test("ping reports reachability without throwing", async () => {
@@ -2499,7 +2587,9 @@ describe("metric_samples (uplift-4 S6)", () => {
 			const { points } = await new GreptimeClient(config).readMetricHistory({ series: "brief.p95", fromMs: TO - 3_600_000, toMs: TO, stepS: 60 });
 			const statement = select(sql);
 			expect(() => assertAppendOnly(statement)).not.toThrow();
-			expect(statement).toContain(`date_bin(INTERVAL '60 seconds', "ts") AS "bucket"`);
+			const bucketStep = Number(/date_bin\(INTERVAL '(\d+) seconds'/.exec(statement)?.[1]);
+			expect(bucketStep).toBeGreaterThanOrEqual(60);
+			expect(statement).toContain(`date_bin(INTERVAL '${bucketStep} seconds', "ts") AS "bucket"`);
 			expect(statement).toContain(`FROM "metric_samples" WHERE "series" = 'brief.p95'`);
 			expect(statement).toContain(`"ts" >= '${new Date(TO - 3_600_000).toISOString()}' AND "ts" < '${new Date(TO).toISOString()}'`);
 			expect(statement).toContain('MAX("value")');
@@ -2604,7 +2694,7 @@ describe("metric_samples (uplift-4 S6)", () => {
 
 		test("the effective step is returned, and a labelled series over a long window keeps its OLDEST bucket inside the point cap", async () => {
 			const surfaces = [...METRIC_SERIES["brief.p95"]!.values!];
-			expect(surfaces).toHaveLength(28);
+			expect(surfaces).toHaveLength(new Set([...SURFACES, "other"]).size);
 			// A store holding a row for every surface in every bucket, answering the way the statement asks: newest first, cut at LIMIT.
 			const store = (statement: string): unknown => {
 				if (!statement.includes("date_bin")) return defaultReply(statement);
@@ -2622,18 +2712,18 @@ describe("metric_samples (uplift-4 S6)", () => {
 				const result = await new GreptimeClient(config).readMetricHistory({ series: "brief.p95", fromMs: TO - days * 86_400_000, toMs: TO, stepS: 60 });
 				const step = Number(/INTERVAL '(\d+) seconds'/.exec(select(sql))![1]);
 				expect(result.stepS).toBe(step);
-				// Raised far above the 60 s asked for: one day is ~20 minutes, 14 days ~5 hours.
+				// Raised above the 60 s asked for, to fit the point cap.
 				expect(step).toBeGreaterThan(60);
 				const oldestBucket = Math.floor((TO - days * 86_400_000) / 1000 / step) * step * 1000;
 				expect(result.points[0]?.tsMs).toBe(oldestBucket);
 				expect(result.points.length).toBeLessThanOrEqual(MAX_METRIC_POINTS);
-				// Nothing was cut: every bucket of the window has all 28 surfaces.
-				expect(result.points.length % 28).toBe(0);
-				expect(new Set(result.points.map((point) => point.labels.surface)).size).toBe(28);
+				// Nothing was cut: every bucket of the window has every surface.
+				expect(result.points.length % surfaces.length).toBe(0);
+				expect(new Set(result.points.map((point) => point.labels.surface)).size).toBe(surfaces.length);
 			}
 			// The old rule (step raised only to window / 2000, ignoring labels) would have cut the oldest days: pin that the cap bites without the label term.
 			const old = Math.ceil((14 * 86_400) / MAX_METRIC_POINTS);
-			expect(Math.ceil((14 * 86_400) / old + 1) * 28).toBeGreaterThan(MAX_METRIC_POINTS);
+			expect(Math.ceil((14 * 86_400) / old + 1) * surfaces.length).toBeGreaterThan(MAX_METRIC_POINTS);
 		});
 	});
 });

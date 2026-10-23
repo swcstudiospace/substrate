@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Mirror, transitionComment, type MirrorContext, type MirrorOp } from "./mirror.ts";
+import { Mirror, transitionComment, type MirrorContext, type MirrorOp, type MirrorSuccess } from "./mirror.ts";
 import { LinearClient } from "./linear.ts";
 import { NotionClient } from "./notion.ts";
 
@@ -517,5 +517,55 @@ describe("lease-id hygiene (D23-04)", () => {
 		].join("\n");
 		expect(LEASE_ID).toContain("lease-");
 		expect(wire).not.toContain(LEASE_ID);
+	});
+});
+
+describe("success reports (phase 38, B-D3)", () => {
+	test("a claim that lands on both trackers reports each target once, Linear first", async () => {
+		const { mirror } = harness();
+		const successes: MirrorSuccess[] = [];
+		expect(await mirror.claim(ctx({ report: (success) => successes.push(success) }))).toEqual([]);
+		expect(successes).toEqual([
+			{ target: "linear", op: "claim" },
+			{ target: "notion", op: "claim" },
+		]);
+	});
+
+	test("a Linear failure is not reported ok, and Notion still reports its own write", async () => {
+		const fix: IssueFixture = { labels: [], comments: [], knownLabels: [] };
+		const linear = fakeLinear(fix, { down: true });
+		const notion = fakeNotion();
+		const mirror = new Mirror({ linear: linear.client, notion: notion.client });
+		const successes: MirrorSuccess[] = [];
+		const failures = await mirror.claim(ctx({ report: (success) => successes.push(success) }));
+		expect(failures).toEqual([{ target: "linear", op: "claim", reason: expect.any(String) }]);
+		expect(successes).toEqual([{ target: "notion", op: "claim" }]);
+	});
+
+	test("no Notion page reports Linear alone, and a claim without a Linear ref reports Notion alone", async () => {
+		const { mirror } = harness();
+		const linearOnly: MirrorSuccess[] = [];
+		expect(await mirror.claim(ctx({ notionPage: null, report: (success) => linearOnly.push(success) }))).toEqual([]);
+		expect(linearOnly).toEqual([{ target: "linear", op: "claim" }]);
+		const notionOnly: MirrorSuccess[] = [];
+		expect(await mirror.claim(ctx({ linearRef: null, report: (success) => notionOnly.push(success) }))).toEqual([]);
+		expect(notionOnly).toEqual([{ target: "notion", op: "claim" }]);
+	});
+
+	test("a swarm claim reports its one Linear comment and writes no Notion row", async () => {
+		const { linear, notion, mirror } = harness();
+		const successes: MirrorSuccess[] = [];
+		expect(await mirror.claim(ctx({ holder: "swarm-a01-orch", report: (success) => successes.push(success) }))).toEqual([]);
+		expect(successes).toEqual([{ target: "linear", op: "claim" }]);
+		expect(commentsOf(linear.mutations)).toHaveLength(1);
+		expect(notion.mutations).toHaveLength(0);
+	});
+
+	test("a done step writes Notion only, and reports that one write", async () => {
+		const { linear, mirror } = harness();
+		const successes: MirrorSuccess[] = [];
+		expect(await mirror.done(ctx({ report: (success) => successes.push(success) }))).toEqual([]);
+		expect(successes).toEqual([{ target: "notion", op: "done" }]);
+		expect(linear.mutations).toHaveLength(0);
 	});
 });

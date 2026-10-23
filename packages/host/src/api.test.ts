@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import type { Server } from "node:http";
 import { type ApiService, createApiServer } from "./api.ts";
 import { WORKTREES_ROOT } from "./sandbox-options.ts";
@@ -6,6 +7,7 @@ import type { OpenResult, TaskStatus } from "./tasks.ts";
 
 const GID = "ut-a-12345678";
 const NID = "n1";
+const TOKEN = randomUUID();
 
 function statusFor(graphId: string, nodeId: string, extra: Record<string, unknown> = {}): TaskStatus {
 	return {
@@ -78,7 +80,7 @@ let base: string;
 const fake = fakeService();
 
 beforeAll(async () => {
-	server = createApiServer(fake.service, { engineReady: () => true });
+	server = createApiServer(fake.service, { engineReady: () => true, token: TOKEN });
 	const { promise, resolve } = Promise.withResolvers<void>();
 	server.listen(0, "127.0.0.1", () => resolve());
 	await promise;
@@ -91,8 +93,15 @@ afterAll(() => {
 	server.close();
 });
 
-const post = (path: string, body?: string) =>
-	fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body });
+const post = (path: string, body?: string, headers: Record<string, string> = {}) =>
+	fetch(`${base}${path}`, {
+		method: "POST",
+		headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json", ...headers },
+		body,
+	});
+
+const get = (path: string, headers: Record<string, string> = {}) =>
+	fetch(`${base}${path}`, { headers: { authorization: `Bearer ${TOKEN}`, ...headers } });
 
 describe("substrate-host API", () => {
 	test("GET /healthz reports engine and api", async () => {
@@ -126,26 +135,26 @@ describe("substrate-host API", () => {
 	});
 
 	test("GET /tasks/<gid>/<nid> returns the status, 404 for an unknown task", async () => {
-		const found = await fetch(`${base}/tasks/${GID}/${NID}`);
+		const found = await get(`/tasks/${GID}/${NID}`);
 		expect(found.status).toBe(200);
 		const status = (await found.json()) as TaskStatus;
 		expect(status.node_id).toBe(NID);
 		expect(status.state).toBe("running");
 		expect((status as TaskStatus & { resumes?: number }).resumes).toBe(2);
-		const missing = await fetch(`${base}/tasks/${GID}/n9`);
+		const missing = await get(`/tasks/${GID}/n9`);
 		expect(missing.status).toBe(404);
 	});
 
 	test("path segments failing the id patterns are 400 before the service is asked", async () => {
 		const before = fake.calls.length;
-		expect((await fetch(`${base}/tasks/..%2Fx/n1`)).status).toBe(400);
-		expect((await fetch(`${base}/tasks/${GID}/n%201`)).status).toBe(400);
+		expect((await get("/tasks/..%2Fx/n1")).status).toBe(400);
+		expect((await get(`/tasks/${GID}/n%201`)).status).toBe(400);
 		expect((await post(`/tasks/${GID}/${"n".repeat(33)}/kill`)).status).toBe(400);
 		expect(fake.calls.length).toBe(before);
 	});
 
 	test("GET /tasks lists every task", async () => {
-		const res = await fetch(`${base}/tasks`);
+		const res = await get("/tasks");
 		expect(res.status).toBe(200);
 		expect(((await res.json()) as TaskStatus[]).map((t) => t.node_id)).toEqual([NID]);
 	});
@@ -159,7 +168,57 @@ describe("substrate-host API", () => {
 	});
 
 	test("unknown routes are 404", async () => {
-		expect((await fetch(`${base}/nope`)).status).toBe(404);
+		expect((await get("/nope")).status).toBe(404);
 		expect((await post(`/tasks/${GID}/${NID}/pause`)).status).toBe(404);
+	});
+
+	test("every route but GET /healthz needs the bearer token: missing, wrong, or unschemed is 401 and reaches nothing", async () => {
+		const before = fake.calls.length;
+		const bare = await fetch(`${base}/tasks`);
+		expect(bare.status).toBe(401);
+		expect(await bare.json()).toEqual({ error: "unauthorized" });
+		expect((await get("/tasks", { authorization: "Bearer not-the-token" })).status).toBe(401);
+		expect((await get("/tasks", { authorization: TOKEN })).status).toBe(401);
+		const openBare = await fetch(`${base}/tasks`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ graph_id: GID, node_id: "n2", worktree: `${WORKTREES_ROOT}/${GID}` }),
+		});
+		expect(openBare.status).toBe(401);
+		const killBare = await fetch(`${base}/tasks/${GID}/${NID}/kill`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+		});
+		expect(killBare.status).toBe(401);
+		expect(fake.calls.length).toBe(before);
+		expect((await get("/tasks")).status).toBe(200);
+	});
+
+	test("a POST that is not application/json is 415 and never reaches the service", async () => {
+		const before = fake.calls.length;
+		const res = await post("/tasks", "{}", { "content-type": "text/plain" });
+		expect(res.status).toBe(415);
+		expect(await res.json()).toEqual({ error: "POST requires content-type application/json" });
+		expect((await post(`/tasks/${GID}/${NID}/kill`, undefined, { "content-type": "text/plain" })).status).toBe(415);
+		expect(fake.calls.length).toBe(before);
+	});
+
+	test("a Host naming this listener on loopback is accepted; any other name or port is 421 before a route runs", async () => {
+		const before = fake.calls.length;
+		const port = new URL(base).port;
+		expect((await get("/tasks", { host: `localhost:${port}` })).status).toBe(200);
+		expect((await get("/tasks", { host: `[::1]:${port}` })).status).toBe(200);
+		expect((await get("/tasks", { host: "evil.example" })).status).toBe(421);
+		expect((await get("/tasks", { host: "127.0.0.1:1" })).status).toBe(421);
+		expect((await post(`/tasks/${GID}/${NID}/kill`, undefined, { host: "evil.example" })).status).toBe(421);
+		expect(fake.calls.length).toBe(before);
+	});
+
+	test("a malformed Host is 400, and the listener still serves the next request", async () => {
+		const bad = await get("/tasks", { host: "a b" });
+		expect(bad.status).toBe(400);
+		expect(await bad.json()).toEqual({ error: "malformed Host header or request URL" });
+		const next = await get(`/tasks/${GID}/${NID}`);
+		expect(next.status).toBe(200);
 	});
 });

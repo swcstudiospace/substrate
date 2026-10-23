@@ -71,6 +71,8 @@ function graphView(status: string, leaseExpiresAt: string | null = null) {
 const request = { surface: "cursor" as const, repo: "acme/app", graph_id: "ut-1" };
 /** The brief's cache arguments, as `briefDetailed` builds them under the default expiry mode. */
 const SNAPSHOT_ARGS = { repo: "acme/app", branch: null, graph_id: "ut-1" };
+/** Every POST that carries a body names its media type: `POST /brief` answers 415 to anything else. */
+const JSON_HEADERS = { "content-type": "application/json" };
 
 interface Rig {
 	substrate: Substrate;
@@ -192,13 +194,13 @@ describe("enforce advertises a stale brief (uplift-4 S4)", () => {
 		const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 		const body = JSON.stringify(request);
 
-		const ok = await fetch(`${base}/brief`, { method: "POST", body });
+		const ok = await fetch(`${base}/brief`, { method: "POST", headers: JSON_HEADERS, body });
 		expect(ok.status).toBe(200);
 		expect(ok.headers.get("x-substrate-brief")).toBe("complete");
 		expect(ok.headers.get("x-substrate-brief-age")).toBe("7");
 		expect(await ok.text()).toBe(fresh.text);
 
-		const unchanged = await fetch(`${base}/brief`, { method: "POST", body, headers: { "if-none-match": fresh.etag } });
+		const unchanged = await fetch(`${base}/brief`, { method: "POST", body, headers: { ...JSON_HEADERS, "if-none-match": fresh.etag } });
 		expect(unchanged.status).toBe(304);
 		expect(unchanged.headers.get("x-substrate-brief-age")).toBe("7");
 	});
@@ -213,7 +215,7 @@ describe("enforce advertises a stale brief (uplift-4 S4)", () => {
 		server.listen(0, "127.0.0.1", listening.resolve);
 		await listening.promise;
 		servers.push(server);
-		const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/brief`, { method: "POST", body: JSON.stringify(request) });
+		const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/brief`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(request) });
 		expect(response.status).toBe(200);
 		expect(response.headers.get("x-substrate-brief-age")).toBeNull();
 	});

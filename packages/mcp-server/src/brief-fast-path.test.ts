@@ -470,12 +470,13 @@ describe("over HTTP", () => {
 	}
 
 	const briefBody = JSON.stringify({ surface: "cursor", repo: "acme/app", graph_id: "ut-1" });
+	const BRIEF_HEADERS = { "content-type": "application/json" };
 
 	test("POST /brief carries ETag, X-Substrate-Brief and Cache-Control, and answers 304 to a matching If-None-Match", async () => {
 		const harness = await start({}, {
 			index: { getGraph: async () => graphView("ut-1"), openGraphs: async () => [], memoryForBrief: async () => [] },
 		});
-		const first = await fetch(`${harness.base}/brief`, { method: "POST", body: briefBody });
+		const first = await fetch(`${harness.base}/brief`, { method: "POST", body: briefBody, headers: BRIEF_HEADERS });
 		expect(first.status).toBe(200);
 		const etag = first.headers.get("etag");
 		expect(etag).toMatch(/^W\/"[0-9a-f]{32}"$/);
@@ -486,17 +487,17 @@ describe("over HTTP", () => {
 		const text = await first.text();
 		expect(text).toContain("active");
 
-		const unchanged = await fetch(`${harness.base}/brief`, { method: "POST", body: briefBody, headers: { "if-none-match": etag as string } });
+		const unchanged = await fetch(`${harness.base}/brief`, { method: "POST", body: briefBody, headers: { ...BRIEF_HEADERS, "if-none-match": etag as string } });
 		expect(unchanged.status).toBe(304);
 		expect(await unchanged.text()).toBe("");
 		expect(unchanged.headers.get("etag")).toBe(etag);
 		expect(unchanged.headers.get("x-substrate-brief")).toBe("complete");
 
 		// Weak comparison: the strong form of the same opaque tag matches too.
-		const strong = await fetch(`${harness.base}/brief`, { method: "POST", body: briefBody, headers: { "if-none-match": (etag as string).replace(/^W\//, "") } });
+		const strong = await fetch(`${harness.base}/brief`, { method: "POST", body: briefBody, headers: { ...BRIEF_HEADERS, "if-none-match": (etag as string).replace(/^W\//, "") } });
 		expect(strong.status).toBe(304);
 
-		const other = await fetch(`${harness.base}/brief`, { method: "POST", body: briefBody, headers: { "if-none-match": 'W/"00000000000000000000000000000000"' } });
+		const other = await fetch(`${harness.base}/brief`, { method: "POST", body: briefBody, headers: { ...BRIEF_HEADERS, "if-none-match": 'W/"00000000000000000000000000000000"' } });
 		expect(other.status).toBe(200);
 		expect(await other.text()).toBe(text);
 	});
@@ -509,7 +510,7 @@ describe("over HTTP", () => {
 				memoryForBrief: () => Promise.reject(new Error("postgres is down")),
 			},
 		});
-		const response = await fetch(`${harness.base}/brief`, { method: "POST", body: briefBody });
+		const response = await fetch(`${harness.base}/brief`, { method: "POST", body: briefBody, headers: BRIEF_HEADERS });
 		expect(response.status).toBe(200);
 		expect(response.headers.get("x-substrate-brief")).toBe("degraded");
 		expect(response.headers.get("x-substrate-brief-failed")).toBe("graph,memory");

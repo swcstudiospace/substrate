@@ -1,9 +1,14 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	checkScratch,
 	commit,
 	COMMIT_MESSAGE_MAX,
 	commitArgv,
+	execFileRunner,
+	type GitSite,
 	gitPush,
 	originMatches,
 	PR_BODY_MAX,
@@ -21,8 +26,38 @@ import { MemoryTaskStore, type TaskRecord } from "./tasks.ts";
 const GID = "ut-a-12345678";
 const NID = "n1";
 const WT = `/var/lib/substrate/worktrees/${GID}`;
+const GD = `/var/lib/substrate/repo/.git/worktrees/${GID}`;
 const BRANCH = `substrate/${GID}`;
 const REPO = "swcstudiospace/agent-substrate";
+const SITE: GitSite = { worktree: WT, gitDir: GD };
+
+/** The argv every host git call starts with: the site pinned by path, hooks and fsmonitor off. */
+function guard(site: GitSite): string[] {
+	return ["git", "-C", site.worktree, `--git-dir=${site.gitDir}`, `--work-tree=${site.worktree}`, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
+}
+const GUARD_LEN = guard(SITE).length;
+
+type Fixture = { root: string; worktree: string; gitDir: string };
+const made: string[] = [];
+afterAll(() => {
+	for (const dir of made) rmSync(dir, { recursive: true, force: true });
+});
+
+/** A host-shaped worktree under a temp root: `<root>/<gid>/.git` is a gitdir file into a real `.git/worktrees/` directory. */
+function fixture(): Fixture {
+	const root = mkdtempSync(join(tmpdir(), "substrate-hostfns-"));
+	made.push(root);
+	const worktree = join(root, GID);
+	const gitDir = join(root, "repo", ".git", "worktrees", GID);
+	mkdirSync(worktree);
+	mkdirSync(gitDir, { recursive: true });
+	writeFileSync(join(worktree, ".git"), `gitdir: ${gitDir}\n`);
+	writeFileSync(join(gitDir, "gitdir"), `${join(worktree, ".git")}\n`);
+	return { root, worktree, gitDir: realpathSync(gitDir) };
+}
+
+const FIXTURE = fixture();
+const FIXTURE_SITE: GitSite = { worktree: FIXTURE.worktree, gitDir: FIXTURE.gitDir };
 
 function record(overrides: Partial<TaskRecord> = {}): TaskRecord {
 	return {
@@ -54,12 +89,12 @@ function record(overrides: Partial<TaskRecord> = {}): TaskRecord {
 
 const GRAPH: GraphView = { graph_id: GID, repo: REPO, branch: "main", nodes: [] };
 
-/** A fake runner keyed by the argv after `git -C <worktree>` (or the full argv for gh). Every call is recorded. */
+/** A fake runner keyed by the argv after the git guard (or the full argv for gh). Every call is recorded. */
 function fakeRunner(replies: Record<string, Partial<RunResult>>): { run: Runner; calls: string[][] } {
 	const calls: string[][] = [];
 	const run: Runner = async (argv) => {
 		calls.push([...argv]);
-		const key = argv[0] === "git" && argv[1] === "-C" ? argv.slice(3).join(" ") : argv.join(" ");
+		const key = argv[0] === "git" ? argv.slice(GUARD_LEN).join(" ") : argv.join(" ");
 		const reply = replies[key];
 		if (!reply) return { code: 1, stdout: "", stderr: `unexpected command: ${key}` };
 		return { code: reply.code ?? 0, stdout: reply.stdout ?? "", stderr: reply.stderr ?? "" };
@@ -74,23 +109,41 @@ const CLEAN_REPLIES = {
 	[`push origin ${BRANCH}`]: { stdout: "", stderr: "To github.com:x\n * [new branch]" },
 };
 
-function ctx(replies: Record<string, Partial<RunResult>>, storeRecord: TaskRecord | null = record(), graph: GraphView | null = GRAPH) {
+function ctx(
+	replies: Record<string, Partial<RunResult>>,
+	storeRecord: TaskRecord | null = record(),
+	graph: GraphView | null = GRAPH,
+	worktreeRoot: string = FIXTURE.root,
+) {
 	const store = new MemoryTaskStore();
 	if (storeRecord) store.save(storeRecord);
 	const runner = fakeRunner(replies);
 	return {
 		store,
 		calls: runner.calls,
-		ctx: { graphId: GID, nodeId: NID, store, substrate: { graphGet: async () => graph }, run: runner.run },
+		ctx: { graphId: GID, nodeId: NID, store, substrate: { graphGet: async () => graph }, run: runner.run, worktreeRoot },
 	};
 }
 
 describe("argv builders (T-03-07-01)", () => {
-	test("pushArgv is exactly git -C <worktree> push origin substrate/<gid>: no --force, no colon refspec, only origin", () => {
-		expect(pushArgv(GID)).toEqual(["git", "-C", WT, "push", "origin", BRANCH]);
-		expect(pushArgv(GID).some((a) => a.includes("--force") || a === "-f")).toBe(false);
-		expect(pushArgv(GID).some((a) => a.includes(":"))).toBe(false);
-		expect(() => pushArgv("../etc")).toThrow(/graph id/);
+	test("pushArgv is exactly git -C <worktree> --git-dir --work-tree with hooks and fsmonitor off, then push origin substrate/<gid>: no --force, no colon refspec", () => {
+		expect(pushArgv(SITE, GID)).toEqual([
+			"git",
+			"-C",
+			WT,
+			`--git-dir=${GD}`,
+			`--work-tree=${WT}`,
+			"-c",
+			"core.hooksPath=/dev/null",
+			"-c",
+			"core.fsmonitor=false",
+			"push",
+			"origin",
+			BRANCH,
+		]);
+		expect(pushArgv(SITE, GID).some((a) => a.includes("--force") || a === "-f")).toBe(false);
+		expect(pushArgv(SITE, GID).some((a) => a.includes(":"))).toBe(false);
+		expect(() => pushArgv(SITE, "../etc")).toThrow(/graph id/);
 	});
 
 	test("prCreateArgv is gh pr create --repo --head substrate/<gid> --base --title --body; refuses long title/body and a bad repo slug", () => {
@@ -108,12 +161,10 @@ describe("argv builders (T-03-07-01)", () => {
 	});
 
 	test("commitArgv is two argvs: add -A with the .substrate-* exclude pathspec, then commit -m with a fixed identity; long messages refused", () => {
-		const [add, commitArgs] = commitArgv(GID, "03-07 smoke");
-		expect(add).toEqual(["git", "-C", WT, "add", "-A", "--", ".", ":(exclude,glob)**/.substrate-*"]);
+		const [add, commitArgs] = commitArgv(SITE, "03-07 smoke");
+		expect(add).toEqual([...guard(SITE), "add", "-A", "--", ".", ":(exclude,glob)**/.substrate-*"]);
 		expect(commitArgs).toEqual([
-			"git",
-			"-C",
-			WT,
+			...guard(SITE),
 			"-c",
 			"user.name=substrate claude-code",
 			"-c",
@@ -122,9 +173,9 @@ describe("argv builders (T-03-07-01)", () => {
 			"-m",
 			"03-07 smoke",
 		]);
-		expect(() => commitArgv(GID, "x".repeat(COMMIT_MESSAGE_MAX + 1))).toThrow(/message/);
-		expect(() => commitArgv(GID, "   ")).toThrow(/message/);
-		expect(() => commitArgv(GID, "-m evil")).toThrow(/message/);
+		expect(() => commitArgv(SITE, "x".repeat(COMMIT_MESSAGE_MAX + 1))).toThrow(/message/);
+		expect(() => commitArgv(SITE, "   ")).toThrow(/message/);
+		expect(() => commitArgv(SITE, "-m evil")).toThrow(/message/);
 		expect(COMMIT_MESSAGE_MAX).toBe(2_000);
 	});
 });
@@ -138,15 +189,15 @@ describe("scratch guard (T-03-07-07)", () => {
 
 	test("checkScratch runs git diff --name-only origin/<base>...HEAD and refuses naming the scratch files; a failed diff refuses too", async () => {
 		const dirty = fakeRunner({ "diff --name-only origin/main...HEAD": { stdout: "x.ts\n.substrate-hook-input.json\n" } });
-		const refused = await checkScratch({ graphId: GID, base: "main", run: dirty.run });
+		const refused = await checkScratch({ graphId: GID, base: "main", run: dirty.run, worktreeRoot: FIXTURE.root });
 		expect(refused).toEqual({ ok: false, reason: "branch contains substrate scratch files: .substrate-hook-input.json", paths: [".substrate-hook-input.json"] });
-		expect(dirty.calls).toEqual([["git", "-C", WT, "diff", "--name-only", "origin/main...HEAD"]]);
+		expect(dirty.calls).toEqual([[...guard(FIXTURE_SITE), "diff", "--name-only", "origin/main...HEAD"]]);
 
 		const clean = fakeRunner({ "diff --name-only origin/main...HEAD": { stdout: "x.ts\n" } });
-		expect(await checkScratch({ graphId: GID, base: "main", run: clean.run })).toEqual({ ok: true });
+		expect(await checkScratch({ graphId: GID, base: "main", run: clean.run, worktreeRoot: FIXTURE.root })).toEqual({ ok: true });
 
 		const broken = fakeRunner({ "diff --name-only origin/main...HEAD": { code: 128, stderr: "fatal: bad revision" } });
-		const failed = await checkScratch({ graphId: GID, base: "main", run: broken.run });
+		const failed = await checkScratch({ graphId: GID, base: "main", run: broken.run, worktreeRoot: FIXTURE.root });
 		expect(failed.ok).toBe(false);
 		if (!failed.ok) expect(failed.reason).toContain("bad revision");
 	});
@@ -164,10 +215,24 @@ describe("gitPush executor (T-03-07-01)", () => {
 		const c = ctx(CLEAN_REPLIES);
 		const result = await gitPush(c.ctx);
 		expect(result).toEqual({ pushed: BRANCH, output: "To github.com:x\n * [new branch]" });
-		expect(c.calls.at(-1)).toEqual(["git", "-C", WT, "push", "origin", BRANCH]);
-		// The origin check uses the dispatcher's rule (case-insensitive, .git ignored, path or scp suffix).
+		expect(c.calls.at(-1)).toEqual([...guard(FIXTURE_SITE), "push", "origin", BRANCH]);
+		// The origin check is exact: this owner/repo on github.com, https or scp form, optional .git.
 		expect(originMatches("git@github.com:SWCstudiospace/agent-substrate.git", REPO)).toBe(true);
 		expect(originMatches("https://github.com/other/agent-substrate.git", REPO)).toBe(false);
+	});
+
+	test("origin must be exactly the repo: a foreign host or a longer path ending in the slug is refused", async () => {
+		expect(originMatches("https://github.com/swcstudiospace/agent-substrate", REPO)).toBe(true);
+		expect(originMatches("https://github.com/SWCstudiospace/Agent-Substrate.git", REPO)).toBe(true);
+		expect(originMatches("https://evil.example/swcstudiospace/agent-substrate.git", REPO)).toBe(false);
+		expect(originMatches("https://github.com/evil/swcstudiospace/agent-substrate.git", REPO)).toBe(false);
+		expect(originMatches("http://github.com/swcstudiospace/agent-substrate.git", REPO)).toBe(false);
+		expect(originMatches("ssh://git@github.com/swcstudiospace/agent-substrate.git", REPO)).toBe(false);
+		expect(originMatches("https://github.com/swcstudiospace/agent-substrate/extra", REPO)).toBe(false);
+
+		const c = ctx({ ...CLEAN_REPLIES, "remote get-url origin": { stdout: "https://evil.example/swcstudiospace/agent-substrate.git\n" } });
+		expect(await gitPush(c.ctx)).toEqual({ error: `origin does not name ${REPO}` });
+		expect(c.calls.some((argv) => argv.includes("push"))).toBe(false);
 	});
 
 	test("refuses when HEAD is not substrate/<gid>", async () => {
@@ -192,10 +257,123 @@ describe("gitPush executor (T-03-07-01)", () => {
 		expect(noGraph.calls).toEqual([]);
 	});
 
+	test("a base branch git refuses is a refusal, not a throw, and runs no git call", async () => {
+		const c = ctx(CLEAN_REPLIES, record(), { ...GRAPH, branch: "main.lock" });
+		expect(await gitPush(c.ctx)).toEqual({ error: `graph ${GID} names no valid base branch` });
+		expect(c.calls).toEqual([]);
+
+		const scratch = fakeRunner({});
+		expect(await checkScratch({ graphId: GID, base: "main.lock", run: scratch.run, worktreeRoot: FIXTURE.root })).toEqual({
+			ok: false,
+			reason: 'invalid base branch "main.lock"',
+			paths: [],
+		});
+		expect(scratch.calls).toEqual([]);
+	});
+
 	test("a failed push returns its exit code and a capped output tail, never throws", async () => {
 		const c = ctx({ ...CLEAN_REPLIES, [`push origin ${BRANCH}`]: { code: 1, stderr: "! [rejected] non-fast-forward" } });
 		const result = await gitPush(c.ctx);
 		expect(result).toEqual({ error: "git push exited 1: ! [rejected] non-fast-forward" });
+	});
+});
+
+describe("worktree .git trust boundary: the guest can rewrite .git through the mount", () => {
+	/** Points the worktree's `.git` file at `target`. */
+	function pointAt(f: Fixture, target: string): void {
+		rmSync(join(f.worktree, ".git"));
+		writeFileSync(join(f.worktree, ".git"), `gitdir: ${target}\n`);
+	}
+
+	const refusals: Array<[string, (f: Fixture) => void]> = [
+		["a missing .git", (f) => rmSync(join(f.worktree, ".git"))],
+		[
+			"a .git directory",
+			(f) => {
+				rmSync(join(f.worktree, ".git"));
+				mkdirSync(join(f.worktree, ".git"));
+			},
+		],
+		[
+			"a .git symlink to a valid gitdir file",
+			(f) => {
+				const pointer = join(f.root, "pointer");
+				writeFileSync(pointer, `gitdir: ${f.gitDir}\n`);
+				rmSync(join(f.worktree, ".git"));
+				symlinkSync(pointer, join(f.worktree, ".git"));
+			},
+		],
+		[
+			"a gitdir outside any .git/worktrees/ directory",
+			(f) => {
+				const elsewhere = join(f.root, "elsewhere");
+				mkdirSync(elsewhere);
+				pointAt(f, elsewhere);
+			},
+		],
+		["a gitdir that escapes .git/worktrees/ by traversal", (f) => pointAt(f, `${f.gitDir}/../../..`)],
+		[
+			"a gitdir inside the worktree",
+			(f) => {
+				const inner = join(f.worktree, "evil", ".git", "worktrees", "x");
+				mkdirSync(inner, { recursive: true });
+				pointAt(f, inner);
+			},
+		],
+		[
+			"a gitdir that does not exist",
+			(f) => pointAt(f, join(f.root, "missing", ".git", "worktrees", GID)),
+		],
+		["a relative gitdir", (f) => pointAt(f, `../repo/.git/worktrees/${GID}`)],
+		[
+			"a gitdir that names a file",
+			(f) => {
+				const file = join(f.root, "repo", ".git", "worktrees", "file");
+				writeFileSync(file, "");
+				pointAt(f, file);
+			},
+		],
+		[
+			"a gitdir with no back-pointer",
+			(f) => rmSync(join(f.gitDir, "gitdir")),
+		],
+		[
+			"a gitdir registered to another graph's worktree",
+			(f) => {
+				const other = join(f.root, `${GID}-other`);
+				const otherGitDir = join(f.root, "repo", ".git", "worktrees", `${GID}-other`);
+				mkdirSync(other);
+				mkdirSync(otherGitDir, { recursive: true });
+				writeFileSync(join(otherGitDir, "gitdir"), `${join(other, ".git")}\n`);
+				pointAt(f, otherGitDir);
+			},
+		],
+	];
+
+	for (const [name, plant] of refusals) {
+		test(`gitPush refuses ${name} and runs no git call`, async () => {
+			const f = fixture();
+			plant(f);
+			const c = ctx(CLEAN_REPLIES, record(), GRAPH, f.root);
+			expect(await gitPush(c.ctx)).toEqual({ error: expect.stringMatching(/^worktree \.git /) });
+			expect(c.calls).toEqual([]);
+		});
+	}
+
+	test("commit refuses a worktree whose .git is a directory, before any git call", async () => {
+		const f = fixture();
+		rmSync(join(f.worktree, ".git"));
+		mkdirSync(join(f.worktree, ".git"));
+		const c = ctx({}, record(), GRAPH, f.root);
+		expect(await commit({ ...c.ctx, message: "m" })).toEqual({ error: "worktree .git is not a regular file" });
+		expect(c.calls).toEqual([]);
+	});
+});
+
+describe("host git runner environment", () => {
+	test("the production runner passes the system-config and prompt guards in the environment", async () => {
+		const result = await execFileRunner(["sh", "-c", 'printf "%s|%s" "$GIT_CONFIG_NOSYSTEM" "$GIT_TERMINAL_PROMPT"']);
+		expect(result).toEqual({ code: 0, stdout: "1|0", stderr: "" });
 	});
 });
 
@@ -246,7 +424,7 @@ describe("commit executor (c:hostfn_commit)", () => {
 			"rev-parse HEAD": { stdout: "1234567890abcdef1234567890abcdef12345678\n" },
 		});
 		expect(await commit({ ...c.ctx, message: "03-07 smoke" })).toEqual({ committed: true, sha: "1234567890abcdef1234567890abcdef12345678" });
-		expect(c.calls.map((argv) => argv.slice(3).join(" "))).toEqual([
+		expect(c.calls.map((argv) => argv.slice(GUARD_LEN).join(" "))).toEqual([
 			"add -A -- . :(exclude,glob)**/.substrate-*",
 			"-c user.name=substrate claude-code -c user.email=claude-code@substrate.local commit -m 03-07 smoke",
 			"rev-parse HEAD",
@@ -276,7 +454,7 @@ describe("host git plumbing carries no credential value (32-03, D32-07)", () => 
 		const outputs: string[] = [];
 		const run: Runner = async (argv) => {
 			calls.push([...argv]);
-			const key = argv[0] === "git" && argv[1] === "-C" ? argv.slice(3).join(" ") : argv.join(" ");
+			const key = argv[0] === "git" ? argv.slice(GUARD_LEN).join(" ") : argv.join(" ");
 			let reply: RunResult;
 			if (key.startsWith("gh pr create")) {
 				reply = { code: 0, stdout: `https://github.com/${REPO}/pull/99\n`, stderr: "" };
@@ -296,7 +474,7 @@ describe("host git plumbing carries no credential value (32-03, D32-07)", () => 
 			outputs.push(`${reply.stdout}${reply.stderr}`);
 			return reply;
 		};
-		const base = { graphId: GID, nodeId: NID, store, substrate: { graphGet: async () => GRAPH }, run };
+		const base = { graphId: GID, nodeId: NID, store, substrate: { graphGet: async () => GRAPH }, run, worktreeRoot: FIXTURE.root };
 		expect(await commit({ ...base, message: "worked node" })).toEqual({ committed: true, sha: "1234567890abcdef1234567890abcdef12345678" });
 		const pushed = await gitPush(base);
 		expect(pushed).toEqual({ pushed: BRANCH, output: "" });
@@ -307,7 +485,7 @@ describe("host git plumbing carries no credential value (32-03, D32-07)", () => 
 		});
 		// Fixed targets: the worktree, the branch, origin, the graph's repo and base.
 		const flat = calls.map((argv) => argv.join(" "));
-		expect(flat).toContain(`git -C ${WT} push origin ${BRANCH}`);
+		expect(flat).toContain(`${guard(FIXTURE_SITE).join(" ")} push origin ${BRANCH}`);
 		expect(flat.some((cmd) => cmd.includes(`--repo ${REPO}`) && cmd.includes("--base main") && cmd.includes(`--head ${BRANCH}`))).toBe(true);
 		expect(flat.some((cmd) => cmd.includes(":(exclude,glob)**/.substrate-*"))).toBe(true);
 		// No credential value anywhere in the plumbing.

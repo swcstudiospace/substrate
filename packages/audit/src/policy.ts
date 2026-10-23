@@ -29,6 +29,9 @@ export const FAIL_CLOSED_TOOLS: ReadonlySet<string> = new Set([
 	"docs_ingest", // Phase 25: writes a shared dataset every agent reads.
 	"docs_steering_session", // SPE-19388: moves a live session's steering state and writes a ledger note.
 	"desktop_run", // Phase 30: acts on a desktop (DESK-03).
+	// Phase 45 (D45-h): a Railway write changes a live project, so it is recorded before it runs.
+	"railway_scale",
+	"railway_deploy",
 ]);
 
 /**
@@ -61,6 +64,11 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	"coord_handoff_list",
 	"coord_drift_scan",
 	"skills_list", // uplift-5 S5a: a read of the skills registry, like `memory_search`.
+	// Phase 45 (D45-h): Railway reads. Inspection only; a read must not stop on an unwritable audit file.
+	"railway_list",
+	"railway_monitor",
+	"railway_scale_suggest",
+	"railway_cost",
 	// The one write that is fail-open on purpose: an event costs a line in the trail,
 	// and refusing the turn over it would make a substrate outage an outage of the host.
 	"events_emit",

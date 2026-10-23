@@ -85,7 +85,8 @@ function ledger() {
 }
 
 const ENFORCE = { SUBSTRATE_BUDGETS: "enforce", SUBSTRATE_TOKEN_CURSOR: "tok-cursor", SUBSTRATE_TOKEN_GROK_BOT: "tok-grok" };
-const CURSOR = { authorization: "Bearer tok-cursor" };
+const JSON_BODY = { "content-type": "application/json" };
+const CURSOR = { ...JSON_BODY, authorization: "Bearer tok-cursor" };
 const MCP_HEADERS = { "content-type": "application/json", accept: "application/json, text/event-stream" };
 
 function toolCall(id: number, name: string, args: unknown = {}) {
@@ -95,13 +96,13 @@ function toolCall(id: number, name: string, args: unknown = {}) {
 describe("precedence", () => {
 	test("a missing or unknown bearer is 401 before any bucket is consulted, even an empty one", async () => {
 		const harness = await start({ ...ENFORCE, SUBSTRATE_BUDGET_READ_RPS: "1", SUBSTRATE_BUDGET_READ_BURST: "1" });
-		const untokened = await fetch(`${harness.base}/brief`, { method: "POST", body: "{}" });
+		const untokened = await fetch(`${harness.base}/brief`, { method: "POST", headers: JSON_BODY, body: "{}" });
 		expect(untokened.status).toBe(401);
 		expect(harness.redis.calls).toEqual([]);
 
 		expect((await fetch(`${harness.base}/brief`, { method: "POST", headers: CURSOR, body: "{}" })).status).toBe(200);
 		expect((await fetch(`${harness.base}/brief`, { method: "POST", headers: CURSOR, body: "{}" })).status).toBe(429);
-		const unknown = await fetch(`${harness.base}/brief`, { method: "POST", headers: { authorization: "Bearer tok-nobody" }, body: "{}" });
+		const unknown = await fetch(`${harness.base}/brief`, { method: "POST", headers: { ...JSON_BODY, authorization: "Bearer tok-nobody" }, body: "{}" });
 		expect(unknown.status).toBe(401);
 		expect(harness.redis.calls).toHaveLength(2);
 	});
@@ -146,7 +147,7 @@ describe("enforce", () => {
 			{ greptime },
 		);
 		const post = (headers: Record<string, string>, surface: string) =>
-			fetch(`${harness.base}/events`, { method: "POST", headers, body: JSON.stringify({ kind: "note", summary: "anon", surface }) });
+			fetch(`${harness.base}/events`, { method: "POST", headers: { ...JSON_BODY, ...headers }, body: JSON.stringify({ kind: "note", summary: "anon", surface }) });
 
 		expect((await post({}, "hermes")).status).toBe(202);
 		expect((await post({}, "omp")).status).toBe(429);
@@ -159,7 +160,7 @@ describe("enforce", () => {
 
 	test("a per-surface override applies to that surface alone", async () => {
 		const harness = await start({ ...ENFORCE, SUBSTRATE_BUDGET_GROK_BOT_READ_RPS: "1", SUBSTRATE_BUDGET_GROK_BOT_READ_BURST: "1" });
-		const brief = (token: string) => fetch(`${harness.base}/brief`, { method: "POST", headers: { authorization: `Bearer ${token}` }, body: "{}" });
+		const brief = (token: string) => fetch(`${harness.base}/brief`, { method: "POST", headers: { ...JSON_BODY, authorization: `Bearer ${token}` }, body: "{}" });
 		expect((await brief("tok-grok")).status).toBe(200);
 		expect((await brief("tok-grok")).status).toBe(429);
 		expect((await brief("tok-cursor")).status).toBe(200);

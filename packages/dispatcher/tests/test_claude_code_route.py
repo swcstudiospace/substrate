@@ -190,14 +190,8 @@ def test_claude_code_refusal_comments_once_with_host_text_in_journal_only(tmp_pa
     assert set(MARKERS) == EXPECTED_MARKERS  # D33-02: zero marker additions or text changes
 
 
-@pytest.mark.parametrize("mode", ["down", "non-json", "wrong-shape"])
-def test_claude_code_unreachable_replies_retry_with_comment_but_no_event(tmp_path, env_file, mode):
-    if mode == "down":
-        world = FakeHostWorld(fail=httpx.ConnectError("refused"))
-    elif mode == "non-json":
-        world = FakeHostWorld(status=200, payload=b"not json{")
-    else:
-        world = FakeHostWorld(status=200, payload=["a", "list"])
+def test_claude_code_connect_failure_retries_next_tick_with_comment_but_no_event(tmp_path, env_file):
+    world = FakeHostWorld(fail=httpx.ConnectError("refused"))
     mcp = ClaimMcp(default=dict(FOUND))
     linear = FakeLinear([cand(identifier="SWC-9", surface="claude-code")])
     registry = SessionRegistry()
@@ -206,7 +200,36 @@ def test_claude_code_unreachable_replies_retry_with_comment_but_no_event(tmp_pat
     posted = linear.named("comment")
     assert len(posted) == 1 and "[host-unreachable]" in posted[0][2]
     assert mcp.events == []  # silent: no dispatch.failed for the retryable marker
-    assert registry.given_up == set() and world.requests == 2
+    assert registry.given_up == set() and registry.active_issue_ids() == set() and world.requests == 2
+
+
+def test_claude_code_auth_rejection_drops_the_record_so_no_task_is_adopted(tmp_path, env_file):
+    state_dir = tmp_path / "state"
+    world = FakeHostWorld(status=401, payload={"error": "bearer rejected"})
+    mcp = ClaimMcp(default=dict(FOUND))
+    linear = FakeLinear([cand(identifier="SWC-9", surface="claude-code")])
+    registry = SessionRegistry(state_dir=state_dir)
+    launch_via_tick(world, mcp, linear, env_file, registry, tmp_path)
+    assert registry.active_issue_ids() == set() and registry.given_up == set()
+    assert SessionRegistry(state_dir=state_dir).active_issue_ids() == set()
+    posted = linear.named("comment")
+    assert len(posted) == 1 and "[host-unreachable]" in posted[0][2]
+    assert mcp.events == []
+
+
+@pytest.mark.parametrize("body", [b"not json{", ["a", "list"]])
+def test_claude_code_accepted_but_unreadable_reply_keeps_its_record_and_is_not_reposted(tmp_path, env_file, body):
+    world = FakeHostWorld(status=200, payload=body)
+    mcp = ClaimMcp(default=dict(FOUND))
+    linear = FakeLinear([cand(identifier="SWC-9", surface="claude-code")])
+    registry = SessionRegistry()
+    launch_via_tick(world, mcp, linear, env_file, registry, tmp_path)
+    launch_via_tick(world, mcp, linear, env_file, registry, tmp_path)
+    posted = linear.named("comment")
+    assert len(posted) == 1 and "[host-unreachable]" in posted[0][2]
+    assert mcp.events == []  # silent: no dispatch.failed for the retryable marker
+    # The host answered 200, so it may have opened the task: the record holds the slot and the second tick does not post again.
+    assert registry.given_up == set() and registry.active_issue_ids() == {"i-1"} and world.requests == 1
 
 
 def test_claude_code_exited_unclaimed_gives_up_removes_label_and_never_relaunches(tmp_path, env_file):
