@@ -668,8 +668,8 @@ Plans:
   1. docs_search answers from LightRAG with hybrid search and Hindsight context, with tests.
   2. The RAGFlow dataset is archived, with a verified checksum, before any deletion.
   3. LightRAG is deployed to Agent Substrate production and passes a timed health probe.
-  4. The migration job and parity comparator pass PARITY_GATE before any ingestion.
-  5. Cutover is a logged, reversible switch with a delta pass; RAGFlow code and service are removed only after cutover and the RAG-dependent phases pass, and storage deletion needs its own approval.
+  4. The migration job and parity comparator pass PARITY_GATE before any ingestion. PARITY_GATE checks, in order: every migrated record keeps its dataset, source URL and version (zero mismatches allowed); a fixed sample of queries, listed in the phase 46 PLAN, returns citations from the same source documents at the match rate the PLAN sets before the run.
+  5. Cutover is a logged, reversible switch with a delta pass. RAGFlow code and service are removed only after cutover and after the RAG-dependent phases pass. The RAG-dependent phases are 25 and 42, phase 46 itself, and any other phase whose VERIFICATION names a live RAGFlow call; the phase 46 PLAN confirms that list before cutover. Storage deletion needs its own approval.
   6. Every live step (deploy, ingestion, cutover, storage deletion) runs only after the operator approves it for that run.
 
 **Plans**: 0 plans (re-scoped 2026-10-23; the earlier 1/1 verification in phases/46-ragflow-hybrid/VERIFICATION.md covered the RAGFlow path and no longer applies)

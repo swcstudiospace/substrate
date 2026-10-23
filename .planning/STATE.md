@@ -2,8 +2,8 @@
 gsd_state_version: "1.0"
 milestone: v1.3.x
 milestone_name: Should-have hardening (Planned)
-status: "v1.3.x phases 37-39 merged (PR #89, PR #90, PR #91). Phase 40 (DOCS-MEMORY) code on main via PR #92; D-D3 deferred until the restore drill and approval. Phase 41 (ANCHOR) code on main via PR #116. Phase 42 (SKILL-CARD) code on main via PR #94. Phases 43 (PR #97) and 44 (PR #95) complete. Verification is human_needed for phases 40-43 and passed for 44; milestone completion waits on the user's acceptance of the open operator gates."
-stopped_at: phases 40-44 closed out in planning; operator-gated verification and milestone acceptance are open
+status: "v1.3.x phases 37-39 merged (PR #89, PR #90, PR #91). Phase 40 (DOCS-MEMORY) code on main via PR #92. Phase 41 (ANCHOR) code on main via PR #116. Phase 42 (SKILL-CARD) code on main via PR #94. Phases 43 (PR #97) and 44 (PR #95) complete. Verification is human_needed for phases 40-43 and passed for 44. On 2026-10-23 the operator accepted the open operator gates as debt for phases 40-43, 45 and 47-50; milestone audit and close are next."
+stopped_at: accepted debt recorded 2026-10-23; milestone audit and close not yet run
 last_updated: "2026-10-23"
 last_activity: 2026-10-23
 last_activity_desc: phase 41 code merged as PR #116; planning closeout for phases 40-44
@@ -179,7 +179,7 @@ Last activity: 2026-10-23 — PR #119 merged; PR #121 (ROADMAP progress follow-u
 
 ## Accepted debt (operator decision, 2026-10-23)
 
-The operator accepted the operator-gated verification of phases 40-43 and 45-50 as debt to close v1.3.x and v1.5. Phases 44 and 51 passed in repo.
+The operator accepted the operator-gated verification of phases 40-43, 45, and 47-50 as debt to close v1.3.x and v1.5. Phases 44 and 51 passed in repo. Phase 46 is re-scoped to LightRAG and is not accepted as debt.
 
 | Phase | Verification | Open operator gate |
 |-------|--------------|--------------------|
