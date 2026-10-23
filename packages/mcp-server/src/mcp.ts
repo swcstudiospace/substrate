@@ -277,7 +277,21 @@ export class RagStateMachine {
 		return this.store(operationKey, this.snapshot());
 	}
 
+	/**
+	 * An ingest or a search steers and refreshes context through the machine. It does not while the breaker is open:
+	 * ERROR is left only by the half-open probe (`admitQuery`), so the cooldown and the probe alone decide when the
+	 * plane is tried again.
+	 */
+	enterRefresh(steerReason: string, refreshReason: string): void {
+		if (this.state === "ERROR") return;
+		this.transition("STEERING", steerReason);
+		this.transition("CONTEXT_REFRESH", refreshReason);
+	}
+
 	recordSuccess(reason?: string): RagStateSnapshot {
+		// While the breaker is open only the half-open probe reports: a call that never probed the plane must not reset
+		// the failure count the probe's own failure is judged by.
+		if (this.state === "ERROR") return this.snapshot();
 		this.consecutiveSuccesses += 1;
 		this.consecutiveFailures = 0;
 		if (this.state === "CONTEXT_REFRESH" || this.state === "DEGRADED") {
@@ -287,6 +301,8 @@ export class RagStateMachine {
 	}
 
 	recordFailure(settings: RagMachineSettings, reason: string): RagStateSnapshot {
+		// Same as recordSuccess: while the breaker is open, only the half-open probe reports.
+		if (this.state === "ERROR") return this.snapshot();
 		this.consecutiveSuccesses = 0;
 		this.consecutiveFailures += 1;
 		if (this.state === "CONTEXT_REFRESH" || this.state === "STEERING") {
@@ -1410,8 +1426,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			// machine. The machine never changes the reply — an illegal
 			// transition is logged and ignored.
 			const machineSettings = substrate.config.ragMachine;
-			ragMachine.transition("STEERING", "docs_search");
-			ragMachine.transition("CONTEXT_REFRESH", "docs_search:retrieve");
+			ragMachine.enterRefresh("docs_search", "docs_search:retrieve");
 			try {
 				// Prompt augmentation (SPE-19390) at the tool boundary: the service
 				// cache keys on the raw question, so the steered text is what the plane
@@ -1568,8 +1583,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			// machine as search, so the RAG replacement stays observable.
 			// The outcome is unchanged — only transitions are reported.
 			const machineSettings = substrate.config.ragMachine;
-			ragMachine.transition("STEERING", "docs_ingest");
-			ragMachine.transition("CONTEXT_REFRESH", "docs_ingest:upload");
+			ragMachine.enterRefresh("docs_ingest", "docs_ingest:upload");
 			try {
 				const outcome = await substrate.ingestDocs({ dataset, commit, pages, session_id }, callerSurface);
 				if (outcome.ok) {

@@ -1038,6 +1038,47 @@ describe("routes", () => {
 				await stop();
 			}
 		});
+
+		test("a REST docs ingest, refused or served, does not move an open breaker: the next query inside the cooldown is refused without a backend call", async () => {
+			let queries = 0;
+			globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+				const url = new URL(input instanceof Request ? input.url : String(input));
+				if (url.origin !== "http://lightrag.test") return realFetch(input, init);
+				if (url.pathname === "/query") {
+					queries += 1;
+					return new Response("upstream down", { status: 500 });
+				}
+				if (init?.method === "POST" && url.pathname === "/documents/upload") return Response.json({ status: "success", data: { track_id: "trk-1" } });
+				if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+				if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+				return Response.json({ detail: "no route" }, { status: 404 });
+			}) as unknown as typeof fetch;
+			const { greptime } = ledger();
+			// A 60 s cooldown: it cannot elapse during the test, so ERROR holds until the assertions say otherwise.
+			const { post, get, stop } = await serve(greptime, { ...LIGHTRAG_ENV, SUBSTRATE_RAG_HALF_OPEN_MS: "60000" });
+			try {
+				for (const question of ["trip one", "trip two", "trip three"]) {
+					const degraded = (await (await post("/docs/lightrag/query", { question }, auth)).json()) as Record<string, unknown>;
+					expect(degraded.fallback).toBe("hindsight");
+				}
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+				const queriesWhenOpen = queries;
+
+				const refused = await post("/docs/ingest", { dataset: "agent-substrate", pages: [{ path: "docs/data-planes.md", source_url: "https://example.com/agent-substrate/data-planes", body: "A page.", expected_version: 1 }] }, auth);
+				expect(refused.status).toBe(409);
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+
+				const served = await post("/docs/ingest", { dataset: "agent-substrate", pages: [{ path: "docs/data-planes.md", source_url: "https://example.com/agent-substrate/data-planes", body: "The substrate is the only door to the data planes." }] }, auth);
+				expect(served.status).toBe(200);
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+
+				const inside = (await (await post("/docs/lightrag/query", { question: "asked inside the cooldown" }, auth)).json()) as Record<string, unknown>;
+				expect(inside.fallback).toBe("hindsight");
+				expect(queries).toBe(queriesWhenOpen);
+			} finally {
+				await stop();
+			}
+		});
 	});
 });
 

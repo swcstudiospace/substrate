@@ -1104,6 +1104,7 @@ const PAGE_FOR_INGEST = {
 };
 const LIGHTRAG_QUERY_ENV = { LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_RAG_MAX_RETRIES: "0", SUBSTRATE_RAG_HALF_OPEN_MS: "0" };
 const LIGHTRAG_INGEST_ENV = { LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_RAG_HALF_OPEN_MS: "60000" };
+const LIGHTRAG_BREAKER_ENV = { LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_RAG_MAX_RETRIES: "0", SUBSTRATE_RAG_HALF_OPEN_MS: "60000" };
 
 describe("docs_ingest refusals do not count against the RAG breaker", () => {
 	const realFetch = globalThis.fetch;
@@ -1168,6 +1169,42 @@ describe("docs_ingest refusals do not count against the RAG breaker", () => {
 		const state = (await call(client, "docs_rag_state")).json();
 		expect(state.state).not.toBe("ERROR");
 		expect(state.consecutiveFailures).toBe(0);
+	});
+
+	test("a docs_ingest call, refused or served, does not move an open breaker: the next query inside the cooldown is refused without a backend call", async () => {
+		let queries = 0;
+		globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			const url = new URL(String(input));
+			if (url.pathname === "/query") {
+				queries += 1;
+				return new Response("upstream down", { status: 500 });
+			}
+			if (init?.method === "POST" && url.pathname === "/documents/upload") return Response.json({ status: "success", data: { track_id: "trk-1" } });
+			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+			if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+			return Response.json({ detail: "no route" }, { status: 404 });
+		}) as unknown as typeof fetch;
+		const { client } = await connect(ledger().greptime, "omp", LIGHTRAG_BREAKER_ENV);
+		for (const question of ["trip one", "trip two", "trip three"]) {
+			expect((await call(client, "docs_lightrag_query", { question })).json().fallback).toBe("hindsight");
+		}
+		expect((await call(client, "docs_rag_state")).json().state).toBe("ERROR");
+		const queriesWhenOpen = queries;
+
+		const refused = await call(client, "docs_ingest", {
+			dataset: "agent-substrate",
+			pages: [{ path: "secrets/keys.md", source_url: "https://example.com/agent-substrate/keys", body: "Keys." }],
+		});
+		expect(refused.isError).toBe(true);
+		expect((await call(client, "docs_rag_state")).json().state).toBe("ERROR");
+
+		const served = await call(client, "docs_ingest", { dataset: "agent-substrate", pages: [PAGE_FOR_INGEST] });
+		expect(served.isError).toBe(false);
+		expect((await call(client, "docs_rag_state")).json().state).toBe("ERROR");
+
+		const inside = await call(client, "docs_lightrag_query", { question: "asked inside the cooldown" });
+		expect(inside.json().fallback).toBe("hindsight");
+		expect(queries).toBe(queriesWhenOpen);
 	});
 
 	test("the refusals that never reach a plane are gate refusals, and a plane error is not", () => {

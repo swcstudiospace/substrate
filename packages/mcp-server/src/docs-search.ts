@@ -33,7 +33,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { BreakerState, CitationProvenance } from "@substrate/observability";
-import { DeadlineError, sharedDeadline } from "./deadline.ts";
+import { DeadlineError, type SharedDeadline, sharedDeadline } from "./deadline.ts";
 import { repoScopePrefix } from "./event.ts";
 import type { DatasetListSource } from "./docs-datasets.ts";
 import type { DerivedMemoryHit } from "./memory-recall.ts";
@@ -858,6 +858,18 @@ function retryableLightragFailure(outcome: PromiseSettledResult<LightragQueryOut
 	return !outcome.value.ok && outcome.value.reason !== LIGHTRAG_CIRCUIT_OPEN;
 }
 
+/**
+ * One retry's backoff, raced against the search's shared deadline. False when the budget ended the wait first, so
+ * the retry is not made: no attempt starts once the budget has run out. `ragRetryDelay` never rejects, so the race
+ * can only reject with the deadline's own `DeadlineError`.
+ */
+function backoffWithinDeadline(deadline: SharedDeadline, baseMs: number, retry: number): Promise<boolean> {
+	return deadline.race(ragRetryDelay(baseMs, retry)).then(
+		() => true,
+		() => false,
+	);
+}
+
 /** Hindsight recall for a failed LightRAG plane; a missing or throwing reader is no hits. */
 async function hindsightRecall(deps: SearchDeps, question: string): Promise<readonly DerivedMemoryHit[]> {
 	if (deps.lightragHindsight === undefined) return [];
@@ -961,11 +973,11 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 		}
 		return settled;
 	};
-	// The plane's retries, on docs_lightrag_query's backoff. One shared budget covers
-	// every attempt, so the deadline is cleared once the retries are done.
+	// The plane's retries, on docs_lightrag_query's backoff. One shared budget covers every attempt and every wait:
+	// a wait the budget ends stops the retries, and the last failure is the one answered.
 	let outcome = await attempt();
 	for (let retry = 1; retry <= policy.maxRetries && retryableLightragFailure(outcome); retry += 1) {
-		await ragRetryDelay(policy.retryBaseMs, retry);
+		if (!(await backoffWithinDeadline(deadline, policy.retryBaseMs, retry))) break;
 		outcome = await attempt();
 	}
 	deadline.clear();

@@ -823,6 +823,31 @@ describe("LightRAG search retries and the Hindsight fallback", () => {
 		expect(events.map((event) => event.summary)).toEqual(["docs search failed: lightrag 503"]);
 	});
 
+	test("a LightRAG retry's backoff runs under the search budget: an expired budget ends the retries after the one attempt made, not after the full backoff", async () => {
+		let attempts = 0;
+		const started = performance.now();
+		const reply = await searchDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: LIGHTRAG,
+				datasetNames: ["agent-substrate"],
+				lightragRetry: { maxRetries: 2, retryBaseMs: 5000 },
+				budgetMs: 50,
+				lightragRetrieve: async () => {
+					attempts += 1;
+					return { ok: false, reason: "lightrag 503" };
+				},
+				emit: async () => ({ stored: false }),
+				surface: "omp",
+			},
+			"where is the plan?",
+		);
+		expect(performance.now() - started).toBeLessThan(2_000);
+		expect(attempts).toBe(1);
+		expect(reply).toMatchObject({ degraded: true, reason: "lightrag 503" });
+	}, 20_000);
+
 	test("a LightRAG search that fails and Hindsight answers nothing, throws, or is not wired is the degraded reply with the LightRAG reason", async () => {
 		let attempts = 0;
 		const search = (lightragHindsight?: (question: string) => Promise<readonly DerivedMemoryHit[]>): Promise<SearchReply> =>

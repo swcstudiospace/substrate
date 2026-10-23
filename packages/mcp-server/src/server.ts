@@ -1454,8 +1454,7 @@ export function createHttpServer(
 				// SPE-19388: the REST search reports into the same process-wide
 				// RAG machine as the MCP tool. Replies are unchanged.
 				const searchBackend = config.docsBackend;
-				ragMachine.transition("STEERING", `docs_search:${searchBackend}`);
-				ragMachine.transition("CONTEXT_REFRESH", `docs_search:retrieve:${searchBackend}`);
+				ragMachine.enterRefresh(`docs_search:${searchBackend}`, `docs_search:retrieve:${searchBackend}`);
 				try {
 					const reply = await substrate.searchDocs(fields, surface);
 					if (reply.degraded === true) {
@@ -1523,8 +1522,7 @@ export function createHttpServer(
 				if (!(await auditedRest(res, observability, surface, "docs_ingest", ingestFields))) return;
 				// SPE-19388: the REST ingest reports into the same process-wide
 				// RAG machine as the MCP tool. Outcomes are unchanged.
-				ragMachine.transition("STEERING", `docs_ingest:${config.docsBackend}`);
-				ragMachine.transition("CONTEXT_REFRESH", `docs_ingest:upload:${config.docsBackend}`);
+				ragMachine.enterRefresh(`docs_ingest:${config.docsBackend}`, `docs_ingest:upload:${config.docsBackend}`);
 				try {
 					const outcome = await substrate.ingestDocs(ingestFields, surface);
 					if (outcome.ok) {
