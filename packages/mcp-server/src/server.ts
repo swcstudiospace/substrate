@@ -83,7 +83,6 @@ import {
 	queryLightragRest,
 	ragGraphCounts,
 	ragMachine,
-	ragRetryDelay,
 	setCachedRagResult,
 	surfaceClaimRefusal,
 	type McpCaller,
@@ -106,6 +105,7 @@ import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./skill
 import { approvalBodyProblem, approvalFailure, toApprovalRequest } from "./skills/registry.ts";
 import { EVENT_KINDS, SURFACES, type Surface } from "./types.ts";
 import { isLocalPeer, livezBody, LoopLagMonitor } from "./watchdog.ts";
+import { ragRetryDelay } from "./rag-retry.ts";
 
 /** One hour. Anonymous callers are logged once per window, not once per request. */
 const ANONYMOUS_LOG_INTERVAL_MS = 60 * 60 * 1000;

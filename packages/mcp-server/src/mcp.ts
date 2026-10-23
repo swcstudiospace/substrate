@@ -16,6 +16,7 @@ import { DesktopRunInput } from "./desktop/actions.ts";
 import { DEFAULT_IDLE_SECONDS, formatDrift } from "./drift.ts";
 import { DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT } from "./greptime.ts";
 import { MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS } from "./lease.ts";
+import { ragRetryDelay } from "./rag-retry.ts";
 import { approvalRefValid, RailwayRequestError, type ServiceRef, type WriteGate, type WriteOutcome, type WriteRefusal } from "./railway.ts";
 import { redact } from "./redact.ts";
 import { augmentQuestionWithSteering, normalizeRepoId, UNTRUSTED_DOCS_NOTICE } from "./docs-search.ts";
@@ -465,14 +466,6 @@ function rememberSteeringSession(key: string, session: SteeringSession): void {
 	steeringSessions.set(key, session);
 }
 
-
-/** Exponential backoff between LightRAG attempts: base * 2^attempt. */
-export async function ragRetryDelay(baseMs: number, attempt: number): Promise<void> {
-	if (baseMs <= 0 || attempt <= 0) return;
-	const { promise, resolve } = Promise.withResolvers<void>();
-	setTimeout(resolve, baseMs * 2 ** (attempt - 1));
-	await promise;
-}
 
 /** Clamp the requested top-k to the wire bound (D25-03: at most 10). */
 export const MAX_RAG_LIGHTRAG_TOP_K = 10;

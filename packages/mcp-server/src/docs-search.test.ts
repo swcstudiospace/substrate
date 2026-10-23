@@ -17,6 +17,7 @@ import { nodeIo, readSkillsCheckoutPages, skillsCheckoutRoots, type ScanIo } fro
 import { RagflowFake, type FakeChunk } from "./ragflow-fake.ts";
 import type { GreptimeClient } from "./greptime.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
+import type { DerivedMemoryHit } from "./memory-recall.ts";
 import { ragflowOp, type FetchLike } from "./planes/ragflow.ts";
 import type { EventInput } from "./types.ts";
 import { selectRetrievalBackend } from "./types.ts";
@@ -741,6 +742,155 @@ describe("LightRAG search and the RAGFlow plane", () => {
 		if (!outcome.ok) throw new Error(outcome.reason);
 		expect(outcome.results.map((result) => result.status)).toEqual(["ingested"]);
 		expect(uploads).toHaveLength(1);
+	});
+});
+
+describe("LightRAG search retries and the Hindsight fallback", () => {
+	const LIGHTRAG = { url: "http://lightrag.test" };
+	/** Two retries on a 1 ms base: the backoff runs, and the tests stay quick. */
+	const RETRY = { maxRetries: 2, retryBaseMs: 1 };
+	const RECALLED: DerivedMemoryHit[] = [
+		{ bank: "sub-cursor", id: "mem-1", text: "The plan lives in PLAN.md.", derived: true, document_id: "mwd_1", tags: [], score: 0.8 },
+	];
+	const NO_GRAPH = { mode: "hybrid" as const, counts: { entities: 0, relations: 0 }, provenance: { entities: [], relations: 0 } };
+
+	test("a LightRAG retrieval that fails once is retried, and the retry's chunks are served, not degraded", async () => {
+		let attempts = 0;
+		const reply = await searchDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: LIGHTRAG,
+				datasetNames: ["agent-substrate"],
+				lightragRetry: RETRY,
+				lightragRetrieve: async () => {
+					attempts += 1;
+					if (attempts === 1) return { ok: false, reason: "lightrag 503" };
+					return {
+						ok: true,
+						chunks: [{ content: "The planner reads the plan.", document_name: "plan.md", document_id: "doc-1", heading_path: "Plan", score: 0.9 }],
+						detail: NO_GRAPH,
+					};
+				},
+				emit: async () => ({ stored: false }),
+				surface: "omp",
+			},
+			"where is the plan?",
+		);
+		expect(attempts).toBe(2);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.fallback).toBeUndefined();
+		expect(reply.backend).toBe("lightrag");
+		expect(reply.chunks.map((citation) => citation.snippet)).toEqual(["The planner reads the plan."]);
+	});
+
+	test("a LightRAG search that fails every attempt is answered from Hindsight: degraded, fallback hindsight, the LightRAG failure as the reason", async () => {
+		let attempts = 0;
+		const asked: string[] = [];
+		const events: EventInput[] = [];
+		const reply = await searchDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: LIGHTRAG,
+				datasetNames: ["agent-substrate"],
+				lightragRetry: RETRY,
+				lightragRetrieve: async () => {
+					attempts += 1;
+					return { ok: false, reason: "lightrag 503" };
+				},
+				lightragHindsight: async (question) => {
+					asked.push(question);
+					return RECALLED;
+				},
+				emit: async (event) => {
+					events.push(event);
+					return { stored: false };
+				},
+				surface: "omp",
+			},
+			"where is the plan?",
+		);
+		expect(attempts).toBe(RETRY.maxRetries + 1);
+		expect(asked).toEqual(["where is the plan?"]);
+		expect(reply).toMatchObject({ degraded: true, backend: "hindsight", fallback: "hindsight", reason: "lightrag 503" });
+		expect(reply.chunks).toHaveLength(1);
+		expect(reply.chunks[0]).toMatchObject({
+			source_url: "hindsight:sub-cursor/mwd_1",
+			snippet: "The plan lives in PLAN.md.",
+			commit: "dataset-pin:hindsight:unrecorded",
+		});
+		expect(events.map((event) => event.summary)).toEqual(["docs search failed: lightrag 503"]);
+	});
+
+	test("a LightRAG search that fails and Hindsight answers nothing, throws, or is not wired is the degraded reply with the LightRAG reason", async () => {
+		let attempts = 0;
+		const search = (lightragHindsight?: (question: string) => Promise<readonly DerivedMemoryHit[]>): Promise<SearchReply> =>
+			searchDocs(
+				{
+					config: null,
+					backend: "lightrag",
+					lightragConfig: LIGHTRAG,
+					datasetNames: ["agent-substrate"],
+					lightragRetry: RETRY,
+					lightragRetrieve: async () => {
+						attempts += 1;
+						return { ok: false, reason: "lightrag 503" };
+					},
+					...(lightragHindsight !== undefined ? { lightragHindsight } : {}),
+					emit: async () => ({ stored: false }),
+					surface: "omp",
+				},
+				"where is the plan?",
+			);
+		const degraded: SearchReply = {
+			chunks: [],
+			untrusted: UNTRUSTED_DOCS_NOTICE,
+			degraded: true,
+			reason: "lightrag 503",
+			degraded_datasets: [{ dataset: "agent-substrate", reason: "lightrag 503" }],
+		};
+		expect(await search(async () => [])).toEqual(degraded);
+		expect(
+			await search(async () => {
+				throw new Error("hindsight down");
+			}),
+		).toEqual(degraded);
+		expect(await search()).toEqual(degraded);
+		expect(attempts).toBe(3 * (RETRY.maxRetries + 1));
+	});
+
+	test("Substrate.searchDocs answers from Hindsight once the LightRAG plane has failed its retries", async () => {
+		const restore = hindsightEnv("sub-cursor");
+		try {
+			const hindsight = new HindsightFake();
+			hindsight.seed("sub-cursor", [{ id: "m1", text: "the plan lives in PLAN.md", document_id: "mwd_1", tags: ["cursor"], metadata: {}, score: 0.9 }]);
+			let queries = 0;
+			const lightragDown: FetchLike = async (input, init) => {
+				const url = new URL(String(input));
+				if (init?.method !== "POST" || url.pathname !== "/query") return Response.json({ detail: "no route" }, { status: 404 });
+				queries += 1;
+				return new Response("unavailable", { status: 503 });
+			};
+			const substrate = new Substrate(
+				loadConfig({
+					RAGFLOW_URL: "http://ragflow.test",
+					RAGFLOW_API_KEY: "k",
+					LIGHTRAG_URL: "http://lightrag.test",
+					SUBSTRATE_DOCS_BACKEND: "lightrag",
+					SUBSTRATE_RAG_RETRY_BASE_MS: "1",
+				}),
+				{ index: null, greptime: null, lightragFetch: lightragDown, hindsightFetch: hindsight.fetch },
+			);
+			const reply = await substrate.searchDocs({ question: "where is the plan?" }, "cursor");
+			expect(reply).toMatchObject({ degraded: true, backend: "hindsight", fallback: "hindsight" });
+			expect(reply.reason).toMatch(/^lightrag/);
+			expect(reply.chunks.map((citation) => citation.source_url)).toEqual(["hindsight:sub-cursor/mwd_1"]);
+			expect(queries).toBeGreaterThan(1);
+			expect(hindsight.recalls()).toHaveLength(1);
+		} finally {
+			restore();
+		}
 	});
 });
 

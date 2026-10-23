@@ -11,7 +11,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { loadConfig } from "./config.ts";
 import type { EventQuery } from "./greptime.ts";
-import { createMcpServer, resetRagMachine } from "./mcp.ts";
+import { createMcpServer, ingestRefusalIsGate, resetRagMachine } from "./mcp.ts";
 import { Substrate } from "./service.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
 import type { SubstrateEvent, Surface } from "./types.ts";
@@ -1151,6 +1151,31 @@ describe("docs_ingest refusals do not count against the RAG breaker", () => {
 			expect(failed.isError).toBe(true);
 		}
 		expect((await call(client, "docs_rag_state")).json().state).toBe("ERROR");
+	});
+
+	test("a refusal for a dataset with no RAGFlow configured never reaches a plane, so the machine stays out of ERROR", async () => {
+		const { client } = await connect(ledger().greptime, "omp", {});
+
+		for (const n of [1, 2, 3, 4]) {
+			const refused = await call(client, "docs_ingest", {
+				dataset: "agent-substrate",
+				pages: [{ ...PAGE_FOR_INGEST, source_url: `https://example.com/agent-substrate/unconfigured-${n}` }],
+			});
+			expect(refused.isError).toBe(true);
+			expect(refused.json()).toMatchObject({ ok: false, reason: "ragflow-not-configured" });
+		}
+
+		const state = (await call(client, "docs_rag_state")).json();
+		expect(state.state).not.toBe("ERROR");
+		expect(state.consecutiveFailures).toBe(0);
+	});
+
+	test("the refusals that never reach a plane are gate refusals, and a plane error is not", () => {
+		for (const reason of ["dataset-lock-timeout", "lightrag-not-configured", "ragflow-not-configured", "version.stale"]) {
+			expect(ingestRefusalIsGate(reason)).toBe(true);
+		}
+		expect(ingestRefusalIsGate("ragflow 500")).toBe(false);
+		expect(ingestRefusalIsGate("parse-timeout")).toBe(false);
 	});
 });
 

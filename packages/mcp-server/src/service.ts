@@ -65,6 +65,7 @@ import {
 	lightragSearchDatasets,
 	noteSkillsSyncFastForward,
 	pinsFromVersions,
+	pinsByName,
 	recordVersion,
 	recordTrigger,
 	TRIGGER_FIELD_MAX,
@@ -4458,7 +4459,7 @@ export class Substrate {
 		const repoId = normalizeRepoId(typeof input.repo_id === "string" ? input.repo_id : null);
 		const planningHash = typeof input.planning_hash === "string" && input.planning_hash.trim().length > 0 ? input.planning_hash.trim() : null;
 		await this.hydrateDocsSeen();
-		const pins = pinsFromVersions(this.docsVersions);
+		const pins = this.config.docsBackend === "lightrag" ? pinsByName(this.docsVersions, names) : pinsFromVersions(this.docsVersions);
 		const degradedDatasets = isSyncLive(this.docsSkillsSync) && !this.docsSkillsRefreshFailed ? [] : ["agent-skills"];
 		const load = (): Promise<SearchReply> => {
 			noteLoaded();
@@ -4467,7 +4468,7 @@ export class Substrate {
 					config: this.config.ragflow,
 					backend: this.config.docsBackend,
 					lightragConfig: this.config.lightrag,
-					lightragDatasets: { list: async () => lightragSearchDatasets(this.docsVersions, names), invalidate: () => undefined },
+					lightragDatasets: { list: async () => lightragSearchDatasets(names), invalidate: () => undefined },
 					datasetNames: names,
 					pins,
 					degradedDatasets,
@@ -4484,6 +4485,8 @@ export class Substrate {
 					budgetMs: this.config.docsSearchBudgetMs,
 					breakerState: () => this.planes.gate("ragflow").breaker?.state() ?? "closed",
 					lightragBreakerState: () => this.planes.gate("lightrag").breaker?.state() ?? "closed",
+					lightragRetry: this.config.ragMachine,
+					lightragHindsight: async (query) => (await this.recallMemories({ query }, callerSurface)).results,
 				},
 				question,
 			);
@@ -4660,7 +4663,7 @@ export class Substrate {
 	 * The dependencies every docs ingest in this service runs with: the plane, the record stores, the roots the
 	 * guard checks pages against, and the caller's surface. A refresh's preflight and each of its calls share
 	 * these, so they refuse the same pages for the same reasons.
-	 * `dataset` is the one LightRAG dataset the ingest resolves, read from the version store, so a LightRAG
+	 * `dataset` is the one LightRAG dataset the ingest resolves, identified by its name, so a LightRAG
 	 * ingest never lists datasets through the RAGFlow gate (its breaker and outages do not refuse uploads).
 	 */
 	private docsIngestDeps(dataset: string, roots: readonly string[] | undefined, surface: Surface | null, sessionId?: string): IngestDeps {
@@ -4680,7 +4683,7 @@ export class Substrate {
 			...(sessionId !== undefined ? { sessionId } : {}),
 			fetchImpl: this.ragflowFetch,
 			lightragFetch: this.lightragFetch,
-			lightragDatasets: { list: async () => lightragSearchDatasets(this.docsVersions, [dataset]), invalidate: () => undefined },
+			lightragDatasets: { list: async () => lightragSearchDatasets([dataset]), invalidate: () => undefined },
 			datasets: this.docsDatasetList,
 			prune: this.config.docsPruneSuperseded,
 		};

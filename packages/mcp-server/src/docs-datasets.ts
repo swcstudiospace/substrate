@@ -67,23 +67,39 @@ export function latestVersion(store: VersionStore, dataset: string): DatasetVers
 }
 
 /**
- * The dataset list LightRAG search reads, with no RAGFlow round trip. Each
- * wanted name carries the id its newest stored version recorded: the key
- * `pinsFromVersions` files its pin under, so the pin resolves as the ingest
- * wrote it. A name with no version yet stands as its own id. Sorted by name:
- * search attributes every citation to the first dataset and keys its cache on
- * the sorted set, so the first must not depend on the caller's order.
+ * The dataset list LightRAG reads, with no RAGFlow round trip. LightRAG names its datasets, so each wanted name is
+ * its own id, whatever version a RAGFlow refresh recorded for it: a LightRAG record keyed by RAGFlow's id could not
+ * be found again by the LightRAG plane. Sorted by name: search attributes every citation to the first dataset and
+ * keys its cache on the sorted set, so the first must not depend on the caller's order.
  */
-export function lightragSearchDatasets(store: VersionStore, names: readonly string[]): DatasetListOutcome {
-	return { ok: true, datasets: [...names].sort().map((name) => ({ id: latestVersion(store, name)?.dataset_id ?? name, name })) };
+export function lightragSearchDatasets(names: readonly string[]): DatasetListOutcome {
+	return { ok: true, datasets: [...names].sort().map((name) => ({ id: name, name })) };
 }
 
-/** The search pins for every dataset with a recorded version. */
+/** The search pin a recorded version files under. */
+function pinOf(version: DatasetVersion): DatasetPin {
+	return { dataset: version.dataset, dataset_id: version.dataset_id, version: version.version, commit: version.commit, ingested_at: version.ingested_at };
+}
+
+/** The search pins for every dataset with a recorded version, keyed by the dataset id its version recorded. */
 export function pinsFromVersions(store: VersionStore): Record<string, DatasetPin> {
 	const pins: Record<string, DatasetPin> = {};
 	for (const versions of store.values()) {
 		const latest = versions[versions.length - 1];
-		if (latest) pins[latest.dataset_id] = { dataset: latest.dataset, dataset_id: latest.dataset_id, version: latest.version, commit: latest.commit, ingested_at: latest.ingested_at };
+		if (latest) pins[latest.dataset_id] = pinOf(latest);
+	}
+	return pins;
+}
+
+/**
+ * The search pins the LightRAG path reads, filed under each wanted name: the id `lightragSearchDatasets` gives the
+ * dataset. A name with no recorded version has no pin.
+ */
+export function pinsByName(store: VersionStore, names: readonly string[]): Record<string, DatasetPin> {
+	const pins: Record<string, DatasetPin> = {};
+	for (const name of names) {
+		const latest = latestVersion(store, name);
+		if (latest) pins[name] = pinOf(latest);
 	}
 	return pins;
 }

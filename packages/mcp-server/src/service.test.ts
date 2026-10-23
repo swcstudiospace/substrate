@@ -1191,6 +1191,40 @@ describe("append-mode enforcement", () => {
 		expect(uploads).toHaveLength(1);
 	});
 
+	test("a RAGFlow refresh does not move a LightRAG dataset's records to RAGFlow's id: an unchanged page stays unchanged", async () => {
+		// The refresh records RAGFlow's id on the dataset's version. The LightRAG ingest keys its records by the dataset's
+		// name, so the next ingest of the same page finds the record and uploads nothing.
+		const ragflow = new RagflowFake();
+		const uploads: string[] = [];
+		const substrate = new Substrate(
+			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }),
+			{
+				index: null,
+				greptime: null,
+				ragflowFetch: ragflow.fetch,
+				lightragFetch: async (input, init) => {
+					const url = new URL(String(input));
+					if (init?.method === "POST" && url.pathname === "/documents/upload") {
+						uploads.push(await ((init.body as FormData).get("file") as Blob).text());
+						return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
+					}
+					if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+					if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+					return Response.json({ detail: "no route" }, { status: 404 });
+				},
+			},
+		);
+		const page = { path: "docs/a.md", source_url: "https://example.com/a", body: "# A\n\nHello." };
+		const first = await substrate.ingestDocs({ dataset: "agent-substrate", commit: "abc123", pages: [page] }, "omp", ["docs/"]);
+		expect(first.ok).toBe(true);
+		const recorded = await substrate.recordDocsVersion({ dataset: "agent-substrate", commit: "abc123", content_sha256: "sha-abc123" }, "omp");
+		expect(recorded.ok).toBe(true);
+
+		const again = await substrate.ingestDocs({ dataset: "agent-substrate", commit: "abc123", pages: [page] }, "omp", ["docs/"]);
+		expect(again).toMatchObject({ ok: true, results: [expect.objectContaining({ status: "unchanged" })] });
+		expect(uploads).toHaveLength(1);
+	});
+
 	test("an unknown quoting dialect is not a writable ledger either", async () => {
 		// It refuses only events carrying a backslash, but a trail with holes in it is
 		// not writable, and calling it so would hide the failure this reports.

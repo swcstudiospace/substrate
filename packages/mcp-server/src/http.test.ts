@@ -124,12 +124,13 @@ describe("GET /healthz", () => {
 		};
 		expect(response.status).toBe(200);
 		expect(body.index).toBe(true);
-		expect(Object.keys(body.planes).sort()).toEqual(["cache", "greptime", "hindsight", "index", "ragflow"]);
+		expect(Object.keys(body.planes).sort()).toEqual(["cache", "greptime", "hindsight", "index", "lightrag", "ragflow"]);
 		expect(body.planes.index).toEqual({ ok: true, breaker: { plane: "index", state: "closed", failures: 0, openedAt: null, lastErrorAt: null, lastError: null }, lastErrorAt: null });
 		// Unconfigured planes are `null`, not failures — the status code is 200 above.
 		expect(body.planes.greptime?.ok).toBeNull();
 		expect(body.planes.hindsight?.ok).toBeNull();
 		expect(body.planes.ragflow?.ok).toBeNull();
+		expect(body.planes.lightrag?.ok).toBeNull();
 		expect(body.capacity).toEqual({ index: capacity, ledger: null });
 
 		const off = await start({ SUBSTRATE_BREAKER: "0" }, { index: { ping: async () => true, capacity: () => Promise.withResolvers<never>().promise } });
@@ -183,6 +184,7 @@ describe("GET /slo lists the per-plane objectives", () => {
 			"plane.cache.availability",
 			"plane.hindsight.availability",
 			"plane.ragflow.availability",
+			"plane.lightrag.availability",
 		]);
 		expect(body.planes.find((entry) => entry.plane === "index")?.status).toBe("insufficient-data");
 		expect(body.planes.find((entry) => entry.plane === "greptime")?.status).toBe("unconfigured");

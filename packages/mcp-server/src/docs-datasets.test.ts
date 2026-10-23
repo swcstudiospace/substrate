@@ -17,6 +17,7 @@ import {
 	lightragSearchDatasets,
 	noteSkillsSyncFastForward,
 	pinsFromVersions,
+	pinsByName,
 	recordTrigger,
 	recordVersion,
 	refreshDataset,
@@ -74,30 +75,39 @@ describe("resolveDatasets", () => {
 });
 
 describe("lightragSearchDatasets", () => {
-	test("keys each wanted dataset by the id its newest version recorded, the same key its pin uses", () => {
+	test("a LightRAG dataset is identified by its name, whatever id a RAGFlow refresh recorded for it", () => {
 		const store = createVersionStore();
 		const base = { dataset: "agent-substrate", content_sha256: "sha", commit: "c1", ingested_at: "2026-10-22T00:00:00Z" };
 		recordVersion(store, { ...base, dataset_id: "ragflow-uuid-old", version: "v1" });
 		recordVersion(store, { ...base, dataset_id: "ragflow-uuid", version: "v2" });
-		expect(lightragSearchDatasets(store, ["agent-substrate"])).toEqual({ ok: true, datasets: [{ id: "ragflow-uuid", name: "agent-substrate" }] });
-		expect(pinsFromVersions(store)["ragflow-uuid"]?.version).toBe("v2");
+		expect(lightragSearchDatasets(["agent-substrate"])).toEqual({ ok: true, datasets: [{ id: "agent-substrate", name: "agent-substrate" }] });
 	});
 
 	test("a dataset with no version yet stands as its own id", () => {
-		expect(lightragSearchDatasets(createVersionStore(), ["agent-substrate"])).toEqual({ ok: true, datasets: [{ id: "agent-substrate", name: "agent-substrate" }] });
+		expect(lightragSearchDatasets(["agent-substrate"])).toEqual({ ok: true, datasets: [{ id: "agent-substrate", name: "agent-substrate" }] });
 	});
 
 	test("the caller's name order does not change the list or its first dataset", () => {
 		const store = createVersionStore();
 		recordVersion(store, { dataset: "agent-skills", dataset_id: "uuid-skills", version: "v1", commit: "c1", content_sha256: "sha", ingested_at: "2026-10-22T00:00:00Z" });
-		const listed = lightragSearchDatasets(store, ["agent-substrate", "agent-skills"]);
-		expect(lightragSearchDatasets(store, ["agent-skills", "agent-substrate"])).toEqual(listed);
+		const listed = lightragSearchDatasets(["agent-substrate", "agent-skills"]);
+		expect(lightragSearchDatasets(["agent-skills", "agent-substrate"])).toEqual(listed);
 		expect(listed).toEqual({
 			ok: true,
 			datasets: [
-				{ id: "uuid-skills", name: "agent-skills" },
+				{ id: "agent-skills", name: "agent-skills" },
 				{ id: "agent-substrate", name: "agent-substrate" },
 			],
+		});
+	});
+
+	test("the LightRAG pin is filed under the dataset's name, from that name's newest version", () => {
+		const store = createVersionStore();
+		const base = { dataset: "agent-substrate", content_sha256: "sha", commit: "c1", ingested_at: "2026-10-22T00:00:00Z" };
+		recordVersion(store, { ...base, dataset_id: "ragflow-uuid-old", version: "v1" });
+		recordVersion(store, { ...base, dataset_id: "ragflow-uuid", version: "v2" });
+		expect(pinsByName(store, ["agent-substrate", "agent-missing"])).toEqual({
+			"agent-substrate": { dataset: "agent-substrate", dataset_id: "ragflow-uuid", version: "v2", commit: "c1", ingested_at: "2026-10-22T00:00:00Z" },
 		});
 	});
 });

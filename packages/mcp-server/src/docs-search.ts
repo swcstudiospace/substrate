@@ -33,9 +33,11 @@
  */
 import { randomUUID } from "node:crypto";
 import type { BreakerState, CitationProvenance } from "@substrate/observability";
-import { sharedDeadline } from "./deadline.ts";
+import { DeadlineError, sharedDeadline } from "./deadline.ts";
 import { repoScopePrefix } from "./event.ts";
 import type { DatasetListSource } from "./docs-datasets.ts";
+import type { DerivedMemoryHit } from "./memory-recall.ts";
+import { ragRetryDelay } from "./rag-retry.ts";
 import {
 	listDatasets,
 	retrieveChunks,
@@ -57,7 +59,7 @@ import {
 import { retrieveForSearch as retrieveForSearchLightrag, type LightragGraphDetail, type LightragQueryOutcome } from "./planes/lightrag.ts";
 export { retrieveForSearchLightrag };
 import { redact, redactValue } from "./redact.ts";
-import type { DocsBackend, LightragConfig } from "./config.ts";
+import { DEFAULT_RAG_MACHINE_SETTINGS, type DocsBackend, type LightragConfig, type RagMachineSettings } from "./config.ts";
 import type { DocumentProvenance } from "./docs-ingest.ts";
 import type { CitationGraphProvenance, EventInput, PlanningGraphHint, SearchGraphStats, Surface } from "./types.ts";
 /** Framing every docs_search reply carries: chunks are untrusted text. */
@@ -137,15 +139,20 @@ export interface DocsContext {
 export interface SearchReply {
 	chunks: SearchCitation[];
 	untrusted: string;
-	/** Set only when nothing could be served: every dataset failed, or the search never reached the plane. */
+	/**
+	 * Set when nothing came from the plane: every dataset failed, or the search never reached it. A Hindsight
+	 * fallback reply is degraded too, since its citations are not the plane's, so it is never stored.
+	 */
 	degraded?: true;
 	reason?: string;
 	/**
 	 * The plane that answered. Present only on the LightRAG path, so
-	 * RAGFlow replies are byte-identical to before; its presence says
-	 * which breaker and retriever served the citations.
+	 * RAGFlow replies are byte-identical to before. `hindsight` when the
+	 * LightRAG plane failed and Hindsight recall answered in its place.
 	 */
-	backend?: DocsBackend;
+	backend?: DocsBackend | "hindsight";
+	/** Set when Hindsight recall answered in place of a failed LightRAG plane; `reason` names the failure. */
+	fallback?: "hindsight";
 	/**
 	 * Datasets that failed or timed out while others answered (uplift-3 N5).
 	 * Present and non-empty only on a partially served reply; such a reply is
@@ -359,6 +366,16 @@ export interface SearchDeps {
 	 * breaker is ever consulted, so the two planes degrade independently.
 	 */
 	lightragBreakerState?: () => BreakerState;
+	/**
+	 * The LightRAG retry policy: `docs_lightrag_query`'s own (`SUBSTRATE_RAG_MAX_RETRIES`,
+	 * `SUBSTRATE_RAG_RETRY_BASE_MS`). The configured defaults when omitted. Only consulted on the LightRAG path.
+	 */
+	lightragRetry?: Pick<RagMachineSettings, "maxRetries" | "retryBaseMs">;
+	/**
+	 * Hindsight recall for a failed LightRAG plane, the fallback `docs_lightrag_query` makes. The service reads
+	 * it through its own recall. Absent means no fallback. Never throws out of the search: a throw is no hits.
+	 */
+	lightragHindsight?: (question: string) => Promise<readonly DerivedMemoryHit[]>;
 }
 
 function failed(deps: SearchDeps, sessionId: string, reason: string, degradedDatasets?: DegradedDataset[]): Promise<SearchReply> {
@@ -537,6 +554,25 @@ export function lightRagCite(hit: LightRagHit, datasetName: string, index: numbe
 }
 
 /**
+ * A Hindsight recall hit as a fallback citation: redacted and capped, its source the bank and document it was
+ * retained under, so it never reads as a LightRAG source. A memory records no commit, so its commit is the
+ * `unrecorded` marker.
+ */
+export function hindsightCite(hit: DerivedMemoryHit, index: number): SearchCitation {
+	const document = hit.document_id ?? hit.id;
+	return {
+		title: redact(document),
+		source_url: redact(`hindsight:${hit.bank}/${document}`),
+		heading_path: "",
+		commit: "dataset-pin:hindsight:unrecorded",
+		snippet: redactValue(hit.text).slice(0, SNIPPET_CAP),
+		score: hit.score ?? 0,
+		document_id: hit.document_id ?? "",
+		chunk_id: `hindsight:${index}`,
+	};
+}
+
+/**
  * The local circuit breaker one search consults before paying for the
  * plane (SPE-19390). Closed calls pass; `failureThreshold` consecutive
  * failures open it for `resetTimeoutMs`, during which calls refuse fast
@@ -569,15 +605,19 @@ export class DocsSearchBreaker {
 }
 
 /**
- * The Hindsight fallback reply (SPE-19390): what a search serves when the
- * plane answered nothing and the banks did. Framed derived-untrusted like
- * every other fallback, degraded only when there is nothing to serve, so a
- * fallback hit still reads as an answer with a `reason` saying where it
- * came from.
+ * The Hindsight fallback reply (SPE-19390): what a LightRAG search serves when the plane failed and the banks
+ * answered. Framed derived-untrusted like every other fallback. It is `degraded`, since the answer is not the
+ * plane's and so is never stored, and `reason` names the plane failure it stands in for.
  */
 export function hindsightFallbackReply(chunks: SearchCitation[], reason: string): SearchReply {
-	if (chunks.length === 0) return { chunks, untrusted: UNTRUSTED_DOCS_NOTICE, degraded: true, reason };
-	return { chunks, untrusted: `${UNTRUSTED_DOCS_NOTICE} Served from Hindsight fallback: ${reason}.` };
+	return {
+		chunks,
+		untrusted: `${UNTRUSTED_DOCS_NOTICE} Served from Hindsight fallback: ${reason}.`,
+		degraded: true,
+		reason,
+		backend: "hindsight",
+		fallback: "hindsight",
+	};
 }
 
 /**
@@ -801,6 +841,65 @@ function mergedGraphCounts(hints: readonly PlanningGraphHint[] | undefined, deta
 	return { entities: names.size, relations: planningGraphCounts(hinted).relations + detail.counts.relations };
 }
 
+/** A read's outcome as `Promise.allSettled` reports it, for one awaited read. */
+function settle<T>(read: Promise<T>): Promise<PromiseSettledResult<T>> {
+	return read.then(
+		(value): PromiseSettledResult<T> => ({ status: "fulfilled", value }),
+		(reason: unknown): PromiseSettledResult<T> => ({ status: "rejected", reason }),
+	);
+}
+
+/**
+ * Whether a failed LightRAG attempt is worth another. A breaker refusal is not: the breaker decides when the
+ * plane is tried again, and a retry would be refused the same way. Nor is a spent budget: no time is left to try in.
+ */
+function retryableLightragFailure(outcome: PromiseSettledResult<LightragQueryOutcome>): boolean {
+	if (outcome.status === "rejected") return !(outcome.reason instanceof DeadlineError);
+	return !outcome.value.ok && outcome.value.reason !== LIGHTRAG_CIRCUIT_OPEN;
+}
+
+/** Hindsight recall for a failed LightRAG plane; a missing or throwing reader is no hits. */
+async function hindsightRecall(deps: SearchDeps, question: string): Promise<readonly DerivedMemoryHit[]> {
+	if (deps.lightragHindsight === undefined) return [];
+	try {
+		return await deps.lightragHindsight(question);
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * A LightRAG plane failure after its retries, or a breaker refusal: Hindsight recall answers in its place when
+ * it can. With no hit the plain degraded reply stands, its reason the LightRAG failure as before.
+ */
+async function lightragFallback(
+	deps: SearchDeps,
+	sessionId: string,
+	question: string,
+	reason: string,
+	degradedDatasets?: DegradedDataset[],
+): Promise<SearchReply> {
+	const recalled = await hindsightRecall(deps, question);
+	if (recalled.length === 0) return failed(deps, sessionId, reason, degradedDatasets);
+	const reply = hindsightFallbackReply(
+		recalled.slice(0, 10).map((hit, index) => hindsightCite(hit, index)),
+		reason,
+	);
+	await deps.emit({
+		surface: deps.surface ?? "claude-code",
+		kind: "warning",
+		summary: `docs search failed: ${reason}`,
+		session_id: sessionId,
+		payload: {
+			action: "docs.search",
+			reason,
+			...(degradedDatasets !== undefined ? { degraded_datasets: degradedDatasets } : {}),
+			fallback: "hindsight",
+		},
+	}).catch(() => undefined);
+	return reply;
+}
+
 /**
  * Search via the LightRAG plane (cutover backend).
  *
@@ -813,8 +912,10 @@ function mergedGraphCounts(hints: readonly PlanningGraphHint[] | undefined, deta
  * merged with the caller's `graphHints` (either alone is kept), with each
  * citation's graph nodes from the backend provenance and any hint. The SPE-19388
  * raw-JSON merge stays on the RAGFlow path: here the plane already
- * answered. A failed retrieval or an unconfigured plane degrades exactly
- * like the RAGFlow path (`degraded: true` with a reason, never a throw).
+ * answered. A failed retrieval is retried on the LightRAG backoff (`lightragRetry`). Once the retries are spent,
+ * Hindsight recall answers in its place when it can (`lightragFallback`); otherwise the reply degrades exactly like
+ * the RAGFlow path (`degraded: true` with a reason, never a throw). A refused search (breaker open) falls back the
+ * same way, and an unconfigured plane degrades as before.
  */
 async function searchDocsLightrag(deps: SearchDeps, question: string, surface: Surface, sessionId: string): Promise<SearchReply> {
 	const lightrag = deps.lightragConfig;
@@ -823,13 +924,13 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 	// Only the LightRAG plane's own breaker is consulted: the RAGFlow state never
 	// stands in for it, so a RAGFlow outage cannot refuse a LightRAG search.
 	const breakerState = deps.lightragBreakerState;
-	if (breakerState?.() === "open") return failed(deps, sessionId, LIGHTRAG_CIRCUIT_OPEN);
+	if (breakerState?.() === "open") return lightragFallback(deps, sessionId, question, LIGHTRAG_CIRCUIT_OPEN);
 	const wanted = deps.datasetNames ?? DEFAULT_SEARCH_DATASET_NAMES;
 	// Dataset resolution never touches RAGFlow: a search must not depend on its
-	// reachability. The service injects the list keyed by each dataset's newest
-	// stored version id, the key its pin is filed under; otherwise the wanted
-	// names stand as their own ids, sorted like the cache key. LightRAG ignores
-	// scope on the wire, so the ids only key pins and the note payload.
+	// reachability. The service injects the list (`lightragSearchDatasets`), keyed
+	// by dataset name: the key its pin is filed under (`pinsByName`). Otherwise the
+	// wanted names stand as their own ids, sorted like the cache key. LightRAG
+	// ignores scope on the wire, so the ids only key pins and the note payload.
 	const listed: DatasetListOutcome =
 		deps.lightragDatasets !== undefined ? await deps.lightragDatasets.list() : { ok: true, datasets: [...wanted].sort().map((name) => ({ id: name, name })) };
 	if (!listed.ok) return failed(deps, sessionId, listed.reason);
@@ -840,6 +941,7 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 	const repoId = normalizeRepoId(deps.repoId ?? null);
 	const fetchImpl = deps.lightragFetch ?? deps.fetchImpl;
 	const deadline = sharedDeadline(deps.budgetMs ?? 0, "docs budget");
+	const policy = deps.lightragRetry ?? DEFAULT_RAG_MACHINE_SETTINGS;
 	// A client that throws synchronously is a failed search, not an
 	// exception out of the search.
 	const once = (): Promise<LightragQueryOutcome> => {
@@ -849,29 +951,33 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 			return Promise.reject(cause);
 		}
 	};
-	let outcome: PromiseSettledResult<LightragQueryOutcome> = await once().then(
-		(value): PromiseSettledResult<LightragQueryOutcome> => ({ status: "fulfilled", value }),
-		(reason): PromiseSettledResult<LightragQueryOutcome> => ({ status: "rejected", reason }),
-	);
-	deadline.clear();
-	// Half-open recovery, mirroring the RAGFlow fan-out: a refusal that
-	// landed while another probe held the slot is retried once when the
+	// One attempt. Half-open recovery, mirroring the RAGFlow fan-out: a refusal
+	// that landed while another probe held the slot is retried once when the
 	// breaker has since closed.
-	if (breakerState?.() === "closed" && outcome.status === "fulfilled" && !outcome.value.ok && outcome.value.reason === LIGHTRAG_CIRCUIT_OPEN) {
-		outcome = await once().then(
-			(value): PromiseSettledResult<LightragQueryOutcome> => ({ status: "fulfilled", value }),
-			(reason): PromiseSettledResult<LightragQueryOutcome> => ({ status: "rejected", reason }),
-		);
+	const attempt = async (): Promise<PromiseSettledResult<LightragQueryOutcome>> => {
+		let settled = await settle(once());
+		if (breakerState?.() === "closed" && settled.status === "fulfilled" && !settled.value.ok && settled.value.reason === LIGHTRAG_CIRCUIT_OPEN) {
+			settled = await settle(once());
+		}
+		return settled;
+	};
+	// The plane's retries, on docs_lightrag_query's backoff. One shared budget covers
+	// every attempt, so the deadline is cleared once the retries are done.
+	let outcome = await attempt();
+	for (let retry = 1; retry <= policy.maxRetries && retryableLightragFailure(outcome); retry += 1) {
+		await ragRetryDelay(policy.retryBaseMs, retry);
+		outcome = await attempt();
 	}
+	deadline.clear();
 	const nowMs = deps.nowMs ?? Date.now();
 	const pinAged = deps.degradedDatasets?.includes(first.name) ?? false;
 	if (outcome.status === "rejected") {
 		const reason = datasetReason(outcome.reason);
-		return failed(deps, sessionId, reason, [{ dataset: first.name, reason }]);
+		return lightragFallback(deps, sessionId, question, reason, [{ dataset: first.name, reason }]);
 	}
 	if (!outcome.value.ok) {
 		const reason = datasetReason(outcome.value.reason);
-		return failed(deps, sessionId, reason, [{ dataset: first.name, reason }]);
+		return lightragFallback(deps, sessionId, question, reason, [{ dataset: first.name, reason }]);
 	}
 	const { detail } = outcome.value;
 	const citations = outcome.value.chunks.map((chunk) => cite(chunk, first.name, deps.pins?.[first.id], pinAged, nowMs, deps.provenanceOf));
