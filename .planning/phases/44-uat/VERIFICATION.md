@@ -1,11 +1,13 @@
 ---
 phase: 44-uat
 verified: 2026-10-21
-status: passed in-repo. Regression loop green on a scratch twin of origin/main 3e9a106. CI wiring is an operator decision, not done
+status: passed
 score: 1 of 1 criterion proven in-repo (I-D1)
 verified_on: gsd/v13x-44-uat on its final tree, against origin/main 3e9a106 for the regression
 covered_files: ["scripts/uat-phase0.ts", "scripts/uat-phase0.test.ts", "scripts/cache-stats.test.ts", "infra/vps/deploy-release.test.ts", "docs/uat.md"]
 ---
+
+> Status detail, kept verbatim from the original frontmatter: passed in-repo. Regression loop green on a scratch twin of origin/main 3e9a106. CI wiring is an operator decision, not done
 
 # 44-VERIFICATION: UAT
 

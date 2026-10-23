@@ -688,7 +688,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		.filter((root) => root.length > 0);
 	const cache = cacheSettings(env, dbEndpoints.allow);
 	const cachePreloadRequested = loadCachePreloadSettings(env);
-	if (cachePreloadRequested.enabled && !cache.cacheEnabled && cache.dragonflyRefused === null) {
+	if (cachePreloadRequested.enabled && !cache.cacheEnabled && (cache.cacheOff || cache.dragonflyRefused === null)) {
 		throw new ConfigError("SUBSTRATE_CACHE_PRELOAD=on needs the cache, which is off: set DRAGONFLY_URL to an accepted URL and leave SUBSTRATE_CACHE unset or not 0, or set SUBSTRATE_CACHE_PRELOAD=off");
 	}
 	// A refused Dragonfly URL is fail-open in warn mode, and enforce already refused boot in loadDbEndpointSettings. The cache is off, so the preload is skipped, not refused.
@@ -1360,12 +1360,14 @@ function cacheSettings(env: Record<string, string | undefined>, allow: ProxyAllo
 	dragonflyUrl: string | undefined;
 	cacheEnabled: boolean;
 	dragonflyRefused: string | null;
+	/** `SUBSTRATE_CACHE=0`, which holds even when the Dragonfly URL is refused. */
+	cacheOff: boolean;
 } {
 	const parsed = parseRedisUrl(env.DRAGONFLY_URL, allow);
 	const off = /^(0|false|no)$/i.test(env.SUBSTRATE_CACHE?.trim() ?? "");
-	if (parsed.kind === "refused") return { dragonflyUrl: undefined, cacheEnabled: false, dragonflyRefused: parsed.reason };
+	if (parsed.kind === "refused") return { dragonflyUrl: undefined, cacheEnabled: false, dragonflyRefused: parsed.reason, cacheOff: off };
 	const dragonflyUrl = parsed.kind === "ok" ? parsed.url : undefined;
-	return { dragonflyUrl, cacheEnabled: dragonflyUrl !== undefined && !off, dragonflyRefused: null };
+	return { dragonflyUrl, cacheEnabled: dragonflyUrl !== undefined && !off, dragonflyRefused: null, cacheOff: off };
 }
 
 /**

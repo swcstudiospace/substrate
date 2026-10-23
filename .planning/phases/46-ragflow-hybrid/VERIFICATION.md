@@ -1,11 +1,13 @@
 ---
 phase: 46-ragflow-hybrid
 verified: 2026-10-21
-status: passed in-repo. Live RAGFlow behaviour is unattested and was not run
+status: human_needed
 score: 2 of 2 acceptance criteria proven in-repo (context-augmented docs_search; tests for hybrid)
 verified_on: gsd/v13x-46-rag on its final tree, based on origin/main 92ef7c2
 covered_files: ["packages/mcp-server/src/planes/ragflow.ts", "packages/mcp-server/src/planes/ragflow.test.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/docs-search.ts", "packages/mcp-server/src/docs-search.test.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/server.ts", ".env.example", "docs/docs-search-ingest.md", "docs/docs-plane.md", "docs/config-reference.md"]
 ---
+
+> Status detail, kept verbatim from the original frontmatter: passed in-repo. Live RAGFlow behaviour is unattested and was not run
 
 # 46-VERIFICATION: RAGFlow hybrid retrieval with Hindsight and Greptime context
 

@@ -40,11 +40,11 @@ Nothing in the suite needs GreptimeDB; the real-store proofs are the rehearsal s
 
 | Job | Runner | When | Steps |
 |---|---|---|---|
-| `verify` ("Typecheck, tests and repo locks") | `ubuntu-latest` | same-repo pull request, push to `main`, on demand (never on the schedule) | the four steps above, with a Postgres 16 service container and a full-history checkout (`check:phase-close` diffs against a baseline commit) |
-| `dependency-audit` ("Known-vulnerability audit") | `ubuntu-latest` | same-repo pull request, push to `main`, Mondays 03:17 UTC, on demand | `bun install --frozen-lockfile --ignore-scripts`, `bun scripts/audit-gate.ts` |
+| `verify` ("Typecheck, tests and repo locks") | `[self-hosted, Linux, X64]` | same-repo pull request, push to `main`, on demand (never on the schedule) | the four steps above, with a Postgres 16 service container and a full-history checkout (`check:phase-close` diffs against a baseline commit) |
+| `dependency-audit` ("Known-vulnerability audit") | `[self-hosted, Linux, X64]` | push to `main`, Mondays 03:17 UTC, on demand (never on a pull request) | `bun install --frozen-lockfile --ignore-scripts`, `bun scripts/audit-gate.ts` |
 | `boot-gate` ("Boot and prove (report-only)") | `[self-hosted, Linux, X64]` | same-repo pull request, push to `main`, on demand (never on the schedule); only when `BOOT_GATE` is `true` | `bun install --frozen-lockfile`, `bun run gate:boot` |
 
-Fork pull requests run none of these jobs: each job's `if:` skips a pull request whose head repository is not this repository, because a fork's code would otherwise run on this repository's runners. Same-repo pull requests do run the audit, so a new high or critical advisory fails `dependency-audit` until the package is upgraded or listed under the accepted risks below. The weekly scheduled run re-checks the lockfile for advisories published between changes; a red scheduled run is the signal to upgrade.
+Fork pull requests run none of these jobs: each job's `if:` skips a pull request whose head repository is not this repository, because a fork's code would otherwise run on this repository's runners. The dependency audit runs on pushes to `main`, weekly and on demand, not on pull requests, so a new high or critical advisory fails it until the package is upgraded or listed under the accepted risks below. The weekly scheduled run re-checks the lockfile for advisories published between changes; a red scheduled run is the signal to upgrade.
 
 ### Accepted risk and the audit gate
 

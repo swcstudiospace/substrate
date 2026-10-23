@@ -625,7 +625,7 @@ the client never sends one for this table, and never `DROP`s it.
 
 | Series | Kind | Label | Value |
 | --- | --- | --- | --- |
-| `brief.p50`, `brief.p95` | histogram | `surface` (the 27 surfaces, else `other`) | ms, of the interval's briefs |
+| `brief.p50`, `brief.p95` | histogram | `surface` (the 42 surfaces, else `other`) | ms, of the interval's briefs |
 | `emit.success` | ratio | — | stored / (stored + dropped) |
 | `emit.p95` | histogram | — | ms |
 | `plane.availability` | ratio | `plane` | ok / every outcome |

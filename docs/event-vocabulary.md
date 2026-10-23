@@ -12,8 +12,10 @@ implement against that table and add no kind and no surface (FOUND-02).
 
 These apply to every source:
 
-- **Closed vocabulary, both enums.** No kind is added; the only surface added
-  is `substrate` (host jobs, operator decision 2026-10-08). `normalizeEvent`
+- **Closed vocabulary, both enums.** No kind is added; the only surfaces added since v1.2
+  are `substrate` (host jobs, operator decision 2026-10-08) and the 15 reviewed swarm
+  surfaces `swarm-a16-cloud` … `swarm-a30-custody` (`REVIEWED_SURFACE_ADDITIONS` in
+  `scripts/phase-close-check.ts`). `normalizeEvent`
   keeps refusing anything else. A source with no fitting surface is not
   emitted under a wrong one: it is dropped and counted by its emitter.
 - **Host jobs emit as `substrate`.** The hourly anchor, the skills sync, the

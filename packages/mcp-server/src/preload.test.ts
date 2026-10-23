@@ -388,6 +388,10 @@ describe("SUBSTRATE_CACHE_PRELOAD settings", () => {
 		expect(warned.cachePreload.enabled).toBe(false);
 		expect(() => loadConfig({ ...refusedEnv, SUBSTRATE_DB_ENDPOINT_POLICY: "enforce" })).toThrow(ConfigError);
 	});
+
+	test("preload on with the cache explicitly off refuses boot, even when the Dragonfly URL is refused", () => {
+		expect(() => loadConfig({ SUBSTRATE_CACHE_PRELOAD: "on", SUBSTRATE_CACHE: "0", DRAGONFLY_URL: "redis://cache.test.invalid:6379/0" })).toThrow("SUBSTRATE_CACHE_PRELOAD=on needs the cache");
+	});
 });
 
 describe("RepoAccess field bounds", () => {
