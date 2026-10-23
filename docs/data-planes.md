@@ -236,6 +236,18 @@ Railway services are managed by the `railway_*` MCP tools. The control plane is 
 
 The live write proof and the first live cost read are operator-gated, and each is recorded with its approval reference. Nothing in the automated tests reaches Railway.
 
+## Unified resource fabric (Phase 51)
+
+The `fabric_status`, `fabric_optimize` and `fabric_compliance` MCP tools give one read-only view of six resources: Dragonfly, the TimescaleDB index, GreptimeDB, RAGFlow, Hindsight and the Tailscale proxy layer. They read the existing health, the Railway cost report and the Hindsight retain outbox, and add no probe.
+
+- **Endpoint class.** The Tailscale dimension is the phase-48 class of each data-plane endpoint: `loopback`, `proxy` or `direct`. It is derived from `SUBSTRATE_DB_PROXY_ALLOW` and the data-plane URL variables (`GREPTIME_URL`, `SUBSTRATE_PG_URL`, `DRAGONFLY_URL`), and never printed. There is no separate Tailscale probe.
+- **State.** Each row is `ok`, `degraded`, `unavailable` or `unconfigured`. A resource nothing configures is `unconfigured`, never `ok`. A configured resource that gives no answer within 1.5 seconds is `unavailable`, and its row names the reason.
+- **Suggestions.** `fabric_optimize` lists deterministic suggestions, each with the evidence it fired on. It executes nothing and changes no configuration. Per-service scaling stays with `railway_scale_suggest`.
+- **Compliance.** `fabric_compliance` reports PASS, FAIL or NOT_APPLICABLE per check. The endpoint checks read `SUBSTRATE_DB_ENDPOINT_POLICY`. An unconfigured resource is NOT_APPLICABLE, never PASS.
+- **Environment.** The fabric adds no environment variable. It reads only names documented elsewhere in this file: `SUBSTRATE_DB_ENDPOINT_POLICY`, `SUBSTRATE_DB_PROXY_ALLOW`, `SUBSTRATE_CACHE`, `SUBSTRATE_EVENT_BUS` and the `SUBSTRATE_RAILWAY_*` budget and price names.
+
+Limitation: the cache client has no ping, so a configured Dragonfly reads `unavailable` until a cache command has connected, and the fabric sends no command of its own to probe it.
+
 ## Fail-open budget (unchanged)
 
 A substrate outage never blocks a prompt. `fetchBrief` returns `""` within 1.5 s. Every cache miss and every Dragonfly, Hindsight or RAGFlow error falls through to the next source or to an empty result with a logged reason. Writes to Greptime and Timescale are the only calls allowed to fail closed, and only for the caller that asked for durability.

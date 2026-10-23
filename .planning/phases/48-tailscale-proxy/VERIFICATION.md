@@ -8,7 +8,6 @@ covered_files: ["packages/mcp-server/src/db-endpoints.ts", "packages/mcp-server/
 ---
 
 > Status detail, kept verbatim from the original frontmatter: passed in-repo. The forwarders and the live cutover are operator-gated and were not run
-
 # 48-VERIFICATION: Secure proxy layer for the data planes
 
 ## Gates on the final tree

@@ -68,6 +68,10 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	"railway_monitor",
 	"railway_scale_suggest",
 	"railway_cost",
+	// Phase 51 (SOTA-07): fabric reads. A status, an optimisation list and a compliance report are inspection only.
+	"fabric_status",
+	"fabric_optimize",
+	"fabric_compliance",
 	// The one write that is fail-open on purpose: an event costs a line in the trail,
 	// and refusing the turn over it would make a substrate outage an outage of the host.
 	"events_emit",
