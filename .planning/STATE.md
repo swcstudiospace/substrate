@@ -2,11 +2,11 @@
 gsd_state_version: "1.0"
 milestone: v1.3.x
 milestone_name: Should-have hardening (Planned)
-status: "v1.3.x phases 37-39 merged (PR #89 a1b7152, PR #90 1d4e4aa, PR #91 acb6767). Phase 40 (DOCS-MEMORY) in review as a draft PR: D-D1 in-repo, D-D3 blocked on a restore drill and approval, D-D4 narrowed and awaiting the user's acceptance. Phases 41-44 not started"
-stopped_at: phase 40 in review (draft PR); awaiting gates and the user's merge decision
-last_updated: "2026-10-21"
-last_activity: 2026-10-21
-last_activity_desc: phase 40 (DOCS-MEMORY) draft PR; phase 39 merged as PR #91
+status: "v1.3.x phases 37-39 merged (PR #89, PR #90, PR #91). Phase 40 (DOCS-MEMORY) code on main via PR #92; D-D3 deferred until the restore drill and approval. Phase 41 (ANCHOR) code on main via PR #116. Phase 42 (SKILL-CARD) code on main via PR #94. Phases 43 (PR #97) and 44 (PR #95) complete. Verification is human_needed for phases 40-43 and passed for 44; milestone completion waits on the user's acceptance of the open operator gates."
+stopped_at: phases 40-44 closed out in planning; operator-gated verification and milestone acceptance are open
+last_updated: "2026-10-23"
+last_activity: 2026-10-23
+last_activity_desc: phase 41 code merged as PR #116; planning closeout for phases 40-44
 state_head: 1a9f4fd365ede291c4e21be71b6ff236e0e49c67
 progress:
   total_phases: 8
@@ -19,6 +19,13 @@ current_phase_name: docs-memory
 ---
 
 # State
+
+## Recovery record (2026-10-23)
+
+- Swarm stash `stash@{0}` (commit `d517931`, "other-session: swarm-a16..30 surfaces, swarm token lines, runbooks, swarm-correlation, identity clients") was inspected. Its five files are `.env.example`, `docs/runbooks/production-identity.md`, `docs/swarm-correlation.md`, `infra/identity/clients.json`, and `packages/mcp-server/src/types.ts`. Patch identity: `git stash show -p stash@{0} | sha256sum` begins `f671ea5f0488f06e`.
+- Verified: every added line of those five files is on `main` (`702ed32`, PR #113). The stash is redundant. It is kept, not dropped, until the operator approves dropping it.
+- Verified: `main` carries the swarm test pins (`swarm-a30`) in `authority.test.ts` and `vocabulary-lock.test.ts`.
+- Not verified, open: `memory-write.test.ts` and `server.test.ts` lost another session's uncommitted edits to an earlier checkout cleanup. Their pre-revert text cannot be recovered from git, so the other session's owner must confirm what those edits were.
 
 ## Current
 

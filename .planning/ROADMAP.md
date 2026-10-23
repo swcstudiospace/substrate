@@ -87,11 +87,11 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 37: LANEB** - graph inference from worktree path
 - [x] **Phase 38: MIRROR** - mirror graph edges into Linear relations and outcomes into evidence
 - [x] **Phase 39: DISPATCH** - signed handoff packet and coord drift scan before launch
-- [ ] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (decided 2026-10-21)
-- [ ] **Phase 41: ANCHOR** - anchor evidence and teachables
-- [ ] **Phase 42: SKILL-CARD** - skills_list audit trail and the F-D4 re-ingest item
-- [ ] **Phase 43: LANE-A** - sandbox egress allowlist and task re-adoption
-- [ ] **Phase 44: UAT** - repeatable UAT script against any SUBSTRATE_URL
+- [ ] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (decided 2026-10-21). Code on main (PR #92); verification human_needed: D-D3 waits for the restore drill and approval.
+- [ ] **Phase 41: ANCHOR** - anchor evidence and teachables. Code on main (PR #116); verification human_needed: the devnet proof is operator-gated.
+- [ ] **Phase 42: SKILL-CARD** - skills_list audit trail and the F-D4 re-ingest item. Code on main (PR #94); verification human_needed.
+- [ ] **Phase 43: LANE-A** - sandbox egress allowlist and task re-adoption. Complete (PR #97); verification human_needed.
+- [x] **Phase 44: UAT** - repeatable UAT script against any SUBSTRATE_URL. Complete (PR #95); verification passed.
 
 ### 🚧 v1.5 SOTA enhancements (Planned)
 
@@ -784,9 +784,9 @@ Plans:
 | 37. LANEB | v1.3.x | 1/1 | Complete | 2026-10-21 |
 | 38. MIRROR | v1.3.x | 1/1 | Complete | 2026-10-21 |
 | 39. DISPATCH | v1.3.x | 1/1 | Complete (PR #91) | 2026-10-21 |
-| 40. DOCS-MEMORY | v1.3.x | 0/0 | In review (draft PR) | - |
-| 41. ANCHOR | v1.3.x | 0/0 | Not started | - |
-| 42. SKILL-CARD | v1.3.x | 0/0 | Not started | - |
+| 40. DOCS-MEMORY | v1.3.x | 0/0 | Code on main (PR #92); human_needed (D-D3 deferred) | - |
+| 41. ANCHOR | v1.3.x | 0/0 | Code on main (PR #116); human_needed (devnet proof operator-gated) | - |
+| 42. SKILL-CARD | v1.3.x | 0/0 | Code on main (PR #94); human_needed | - |
 | 43. LANE-A | v1.3.x | 1/1 | Complete (PR #97) | 2026-10-21 |
 | 44. UAT | v1.3.x | 1/1 | Complete (PR #95) | 2026-10-21 |
 | 45. Railway Resource Orchestrator | v1.5 | 1/1 | Complete (PR #96) | 2026-10-21 |
