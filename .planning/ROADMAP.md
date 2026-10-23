@@ -101,7 +101,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [ ] **Phase 48: TailscaleDB Secure Unified Proxy Layer** - zero-trust database access through one Tailscale proxy with RBAC, audit and pooling
 - [ ] **Phase 49: Hindsight Graph Memory with Greptime Events** - graph-structured Hindsight memory with causal recall
 - [ ] **Phase 50: Dragonfly Pub/Sub for Real-time Events** - real-time event propagation and event-driven cache invalidation
-- [ ] **Phase 51: Enterprise Unified Resource Fabric** - one MCP interface across all six resources, depends on phases 45 and 48
+- [x] **Phase 51: Enterprise Unified Resource Fabric** - one MCP interface across all six resources, depends on phases 45 and 48
 
 ## Phase Details
 
@@ -651,7 +651,7 @@ Plans:
   2. Basic scale suggestion.
   3. Cost report in /slo.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/45-railway/VERIFICATION.md; live Railway proof operator-gated
 
 ### Phase 46: RAGFlow Advanced Hybrid RAG with Hindsight Context
 
@@ -668,7 +668,7 @@ Plans:
   1. docs_search returns context-augmented results.
   2. Tests for hybrid.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/46-ragflow-hybrid/VERIFICATION.md; live RAGFlow proof operator-gated
 
 ### Phase 47: GreptimeDB + Dragonfly Predictive Analytics & Cache
 
@@ -685,7 +685,7 @@ Plans:
   1. /slo has predictive rows.
   2. Cache preloads based on patterns.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/47-forecast-preload/VERIFICATION.md; live proof operator-gated
 
 ### Phase 48: TailscaleDB Secure Unified Proxy Layer
 
@@ -702,7 +702,7 @@ Plans:
   1. All DBs accessed via secure proxy.
   2. Audit events for access.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/48-tailscale-proxy/VERIFICATION.md; merged in PR #102; live cutover operator-gated
 
 ### Phase 49: Hindsight Graph Memory with Greptime Events
 
@@ -719,7 +719,7 @@ Plans:
   1. memory_search returns graph-linked results.
   2. Recall uses causal.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/49-graph-memory/VERIFICATION.md; live proof operator-gated
 
 ### Phase 50: Dragonfly Pub/Sub for Real-time Events
 
@@ -736,7 +736,7 @@ Plans:
   1. Real-time notifications for events via Dragonfly.
   2. Tests.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/50-dragonfly-pubsub/VERIFICATION.md; live subscription operator-gated
 
 ### Phase 51: Enterprise Unified Resource Fabric
 
@@ -753,7 +753,7 @@ Plans:
   1. New MCP tools for fabric status and optimization suggestions.
   2. Compliance report.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; verified 2026-10-22 in phases/51-enterprise-fabric/VERIFICATION.md; merged in PR #108
 
 
 ## Progress
@@ -789,10 +789,10 @@ Plans:
 | 42. SKILL-CARD | v1.3.x | 0/0 | Code on main (PR #94); human_needed | - |
 | 43. LANE-A | v1.3.x | 1/1 | Complete (PR #97) | 2026-10-21 |
 | 44. UAT | v1.3.x | 1/1 | Complete (PR #95) | 2026-10-21 |
-| 45. Railway Resource Orchestrator | v1.5 | 1/1 | Complete (PR #96) | 2026-10-21 |
-| 46. RAGFlow Advanced Hybrid RAG with Hindsight Context | v1.5 | 1/1 | In review (draft PR #98) | - |
-| 47. GreptimeDB + Dragonfly Predictive Analytics & Cache | v1.5 | 0/0 | Not started | - |
-| 48. TailscaleDB Secure Unified Proxy Layer | v1.5 | 0/0 | Not started | - |
-| 49. Hindsight Graph Memory with Greptime Events | v1.5 | 0/0 | Not started | - |
-| 50. Dragonfly Pub/Sub for Real-time Events | v1.5 | 0/0 | Not started | - |
-| 51. Enterprise Unified Resource Fabric | v1.5 | 0/0 | Not started | - |
+| 45. Railway Resource Orchestrator | v1.5 | 1/1 | Code on main (PR #96); human_needed (live Railway proof operator-gated) | - |
+| 46. RAGFlow Advanced Hybrid RAG with Hindsight Context | v1.5 | 1/1 | Code on main (PR #98); human_needed (live RAGFlow proof operator-gated) | - |
+| 47. GreptimeDB + Dragonfly Predictive Analytics & Cache | v1.5 | 1/1 | Code on main (PR #100); human_needed (live forecast and warm-up proof operator-gated) | - |
+| 48. TailscaleDB Secure Unified Proxy Layer | v1.5 | 1/1 | Code on main (PR #102); human_needed (live cutover operator-gated) | - |
+| 49. Hindsight Graph Memory with Greptime Events | v1.5 | 1/1 | Code on main (PR #101); human_needed (live ledger proof operator-gated) | - |
+| 50. Dragonfly Pub/Sub for Real-time Events | v1.5 | 1/1 | Code on main (PR #103); human_needed (live subscription proof operator-gated) | - |
+| 51. Enterprise Unified Resource Fabric | v1.5 | 1/1 | Complete (PR #108) | 2026-10-22 |
