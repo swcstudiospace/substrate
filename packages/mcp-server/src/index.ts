@@ -66,6 +66,7 @@ const substrate = new Substrate(
 	{ desktop: createDesktopDriver({ run: bufferRunner, dir: config.desktopDir }) },
 	observability.observer,
 );
+substrate.startPlanningPoll();
 
 for (const problem of await observability.start()) {
 	process.stderr.write(`[substrate] degraded — ${problem}\n`);
@@ -203,6 +204,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		metricsHistory.stop();
 		// Before the flush below: no new lag pass starts once shutdown began.
 		docsLagTimer.stop();
+		substrate.stopPlanningPoll();
 		// The weekly refresh timer is cleared with the others; a pass in flight is awaited in the bound below.
 		mentalModelRefresh?.stop();
 		// Cancelled first and awaited with the flush below: no ping after shutdown began,
@@ -235,6 +237,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 					observability.flush(),
 					metricsHistory.flush(),
 					docsLagTimer.flush(),
+					substrate.planningRefreshIdle(),
 					mentalModelRefresh?.flush(),
 					watchdogStopped,
 					recallStopped,

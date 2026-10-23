@@ -171,7 +171,21 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `RAGFLOW_URL` | string | none | RAGFlow base URL | docs_search answers degraded, docs_ingest refuses. See `docs/docs-search-ingest.md` | mcp-server/planes/ragflow.ts | yes |
 | `RAGFLOW_API_KEY` | secret-ref | none | API key | the plane is unconfigured. See `docs/docs-search-ingest.md` | mcp-server/planes/ragflow.ts | yes |
 | `RAGFLOW_DATASET_ID` | string | none | dataset id | nothing: no code reads it today (docs_ingest names the dataset after the repo) (UNREAD: no code reads it today). See `docs/docs-search-ingest.md` | none | yes |
-| `SUBSTRATE_DOCS_INGEST_ROOTS` | list | docs/, README.md, .planning/PROJECT.md | comma separated path prefixes | the default roots. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `LIGHTRAG_URL` | string | none | LightRAG base URL | the LightRAG path is unconfigured. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `LIGHTRAG_API_KEY` | secret-ref | none | API key, sent as a bearer on the LightRAG health probe | LightRAG is reached unauthenticated. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_LIGHTRAG_URL` | string | none | LightRAG base URL override for the Railway hosting layer | LIGHTRAG_URL applies. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_LIGHTRAG_API_KEY` | secret-ref | none | API key override for the Railway hosting layer | LIGHTRAG_API_KEY applies. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_LIGHTRAG_PROJECT` | string | none | Railway project label, report-only: it names the project in Railway plans and status and never scopes ingest or search | no project label. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_LIGHTRAG_POLL_MS` | number | 5000 | positive integer ms | 5000 ms | mcp-server/config.ts | yes |
+| `SUBSTRATE_LIGHTRAG_PLANNING_ROOTS` | list | .planning/ | comma separated path prefixes | .planning/ | mcp-server/config.ts | yes |
+| `SUBSTRATE_DOCS_BACKEND` | string | reach-derived | lightrag \| ragflow | LIGHTRAG_URL presence decides: set means lightrag, else ragflow. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `RAILWAY_TOKEN` | secret-ref | none | Railway API token managing the project | Railway mutations stay stubbed; reads still report the plan | mcp-server/config.ts | yes |
+| `RAILWAY_PROJECT_ID` | string | none | Railway project id hosting LightRAG | unpinned: the plan carries a null project | mcp-server/config.ts | yes |
+| `RAILWAY_ENVIRONMENT_ID` | string | none | Railway environment id | unpinned: the plan carries a null environment | mcp-server/config.ts | yes |
+| `RAILWAY_SERVICE_ID` | string | none | LightRAG service id, when pinned | unpinned: status reports the plan without an id | mcp-server/config.ts | yes |
+| `RAILWAY_SERVICE_NAME` | string | lightrag | LightRAG service name for private DNS | lightrag | mcp-server/config.ts | no |
+| `RAILWAY_PRIVATE_DOMAIN` | string | none | Railway-injected private domain | <service>.railway.internal applies | mcp-server/config.ts | no |
+| `SUBSTRATE_DOCS_INGEST_ROOTS` | list | docs/, README.md, .planning/ | comma separated path prefixes | the default roots. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_AGENT_SKILLS_ROOT` | path | none | absolute path to an agent-skills checkout | the merge-trigger for agent-skills is a noop: no checkout, no version recorded. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_VM_GUEST` | toggle | off | 1 | docs_ingest is allowed; 1 refuses it before any network call. See `docs/docs-search-ingest.md` | mcp-server/config.ts, cli/index.ts | yes |
 | `SUBSTRATE_DOCS_STATE_FILE` | path | none | file path | ingest records and version pins stay process-local. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
@@ -182,6 +196,10 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT` | number | 0.3 | [0, 1] | 0.3. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_RAGFLOW_RERANK_ID` | string | none | reranker model id | no reranker: no rerank_id is sent. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_SEARCH_BUDGET_MS` | number | 4000 | 0 = no shared deadline | 4000 ms. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_RAG_MAX_RETRIES` | number | 2 | non-negative integer | 2 | mcp-server/config.ts | yes |
+| `SUBSTRATE_RAG_RETRY_BASE_MS` | number | 200 | positive integer ms | 200 ms | mcp-server/config.ts | yes |
+| `SUBSTRATE_RAG_BREAKER_THRESHOLD` | number | 3 | positive integer | 3 consecutive failures | mcp-server/config.ts | yes |
+| `SUBSTRATE_RAG_HALF_OPEN_MS` | number | 30000 | non-negative integer ms | 30000 ms | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_FRESHNESS_MAX_AGE_H` | number | 168 | 0..8760 (0 reports without judging) | 168 hours. See `docs/observability.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_TRIGGER_LAG_MIN` | number | 15 | 0..10080 (0 stops recording) | 15 minutes. See `docs/observability.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_LAG_CHECK_S` | number | 60 | 15..3600 | 60 s. See `docs/observability.md` | mcp-server/config.ts | yes |

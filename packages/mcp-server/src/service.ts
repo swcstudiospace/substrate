@@ -63,8 +63,12 @@ import {
 	createVersionStore,
 	isSyncLive,
 	latestVersion,
+	latestVersionFor,
+	lightragSearchDatasets,
 	noteSkillsSyncFastForward,
 	pinsFromVersions,
+	pinsByName,
+	recordVersion,
 	recordTrigger,
 	TRIGGER_FIELD_MAX,
 	refreshDataset,
@@ -76,6 +80,12 @@ import {
 import {
 	batchIngestPages,
 	documentProvenance,
+	batchPagesForIngest,
+	planningContentHash,
+	planningHintFromJson,
+	planningIngestTrigger,
+	planningPageSha,
+	scanIngestPages,
 	ingestDocs,
 	loadIngestRecords,
 	preflightIngestPages,
@@ -87,7 +97,7 @@ import {
 	type PageSettlement,
 } from "./docs-ingest.ts";
 import { LagSettler, TRIGGER_RECORD_DEADLINE_MS, withDeadline, createFreshnessState, evaluateFreshness, type DatasetFreshness, type FreshnessState } from "./docs-freshness.ts";
-import { DEFAULT_SEARCH_DATASET_NAMES, DOCS_CONTEXT_LEDGER_BUDGET_MS, UNTRUSTED_DOCS_NOTICE, citationProvenanceCounts, docsContextEvents, docsContextMemories, searchDocs, searchReplyStorable, type DocsContext, type DocsContextEvent, type DocsContextMemory, type SearchReply } from "./docs-search.ts";
+import { DEFAULT_SEARCH_DATASET_NAMES, DOCS_CONTEXT_LEDGER_BUDGET_MS, UNTRUSTED_DOCS_NOTICE, citationProvenanceCounts, docsContextEvents, docsContextMemories, normalizeRepoId, scopedDatasetName, searchDocs, searchReplyStorable, type DocsContext, type DocsContextEvent, type DocsContextMemory, type SearchReply } from "./docs-search.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
 	analyzeDrift,
@@ -98,7 +108,7 @@ import {
 	type DriftReport,
 } from "./drift.ts";
 import { createEventBus, type EventBus, type EventBusClient, type EventBusStats, type EventHint } from "./event-bus.ts";
-import { checkIdempotencyKey, checkReplayTs, eventHash, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
+import { checkIdempotencyKey, checkReplayTs, eventHash, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, planningIngestTrigger as planningEventTrigger, verifyChain } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import {
 	GreptimeClient,
@@ -136,6 +146,7 @@ import { governMemoryWrite } from "./memory-write.ts";
 import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachable.ts";
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth, type HindsightConfig } from "./planes/hindsight.ts";
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
+import { lightragOp } from "./planes/lightrag.ts";
 import { RailwayClient } from "./railway.ts";
 import type { FabricSources } from "./fabric/types.ts";
 import { FABRIC_HEALTH_WINDOW_MS } from "./fabric/gather.ts";
@@ -560,6 +571,9 @@ interface IdempotencyPlan {
  * pick by accident: sharing a turn with one would only make the two wait for each other.
  */
 const KEY_TURN_PREFIX = "\u0000idempotency:";
+
+/** The dataset planning pages are ingested into: the agent-substrate checkout's dataset (`docs/data-planes.md`). */
+const PLANNING_DATASET = "agent-substrate";
 
 /**
  * One closed UTC hour of the ledger, digested in ingest order for the hourly anchor.
@@ -1269,6 +1283,8 @@ export class Substrate {
 	private readonly ragflowFetch: FetchLike;
 	/** Hindsight fetch, gated. Tests inject the fake underneath; production uses the global fetch. */
 	private readonly hindsightFetch: FetchLike;
+	/** LightRAG fetch, gated on the LightRAG plane's own breaker: a RAGFlow outage never refuses a LightRAG call. Tests inject the fake underneath; production uses the global fetch. */
+	private readonly lightragFetch: FetchLike;
 	/** Railway control-plane client (Phase 45, D45-a); tests inject a recording fetch through `stores.railway`. */
 	readonly railway: RailwayClient;
 	/** Background retains in flight, drained (bounded) on shutdown. */
@@ -1317,6 +1333,15 @@ export class Substrate {
 		emit: (event) => this.emit(event),
 		report: (line) => process.stderr.write(`[substrate] ${line}\n`),
 	});
+	/** The checkout whose `.planning/` tree the planning refresh reads: the process cwd unless a test injects one. */
+	private readonly planningBaseDir: string;
+	/** Per-path hash of the planning pages as the LightRAG plane last indexed them; null until the first pass. */
+	private planningHashes: Map<string, string> | null = null;
+	/** The planning pass in flight, if any: one at a time, and a request during it marks the next pass dirty. */
+	private planningPass: Promise<void> | null = null;
+	private planningDirty = false;
+	/** Stops the planning poll's interval; null while the poll is not running. */
+	private planningStop: (() => void) | null = null;
 	/** `graphId/nodeId` → tail of that node's gated-completion chain. */
 	private readonly completionChains = new Map<string, Promise<void>>();
 	// uplift-2 R1 — brief fast path. The options `composeBrief` runs under, read
@@ -1353,6 +1378,8 @@ export class Substrate {
 			cache?: ReadThroughCache;
 			ragflowFetch?: FetchLike;
 			hindsightFetch?: FetchLike;
+			lightragFetch?: FetchLike;
+			planningBaseDir?: string;
 			desktop?: DesktopDriver | null;
 			railway?: RailwayClient;
 			/** Tests inject the bus through this factory; production builds it from config. */
@@ -1414,6 +1441,7 @@ export class Substrate {
 		this.dodGateTest = stores?.dodGate ?? {};
 		this.ragflowFetch = gatedFetch(this.planes.gate("ragflow"), stores?.ragflowFetch ?? fetch, ragflowOp);
 		this.hindsightFetch = gatedFetch(this.planes.gate("hindsight"), stores?.hindsightFetch ?? fetch, hindsightOp);
+		this.lightragFetch = gatedFetch(this.planes.gate("lightrag"), stores?.lightragFetch ?? fetch, lightragOp);
 		this.cache =
 			stores?.cache ??
 			createReadThroughCache(config, {
@@ -1426,6 +1454,7 @@ export class Substrate {
 		// uplift-2 R1
 		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays, graphRead: config.requestPath.briefGraphRead };
 		this.narrowBumps = config.requestPath.cacheBumpScope === "narrow";
+		this.planningBaseDir = stores?.planningBaseDir ?? process.cwd();
 		// uplift-2 R3: the outbox hydrates its file (if any) now, so entries parked
 		// before a restart are due again from the first drain tick. Every drop —
 		// bound, exhausted attempts, a memory-only queue at shutdown — ends with
@@ -2082,6 +2111,7 @@ export class Substrate {
 			if (result.lookupFailed) this.observer.eventReplay?.({ result: "lookup_failed" });
 			else if (result.stored) this.observer.eventReplay?.({ result: "appended" });
 		}
+		this.planningEvent(input);
 		if (result.stored) this.publishHint(result.event);
 		return result;
 	}
@@ -4405,7 +4435,7 @@ export class Substrate {
 	 * datasets; unknown names are ignored and raw ids are never accepted.
 	 *
 	 * uplift-2 R6: the answer is cached under the `docs-search` class, keyed
-	 * by the normalised question, the dataset names and the current pins,
+	 * by the normalised question, the dataset names (under the repo scope when one is set), the current pins, the repo and the planning hash,
 	 * and invalidated by `gen:docs` (bumped by every ingest and every
 	 * recorded version); a degraded reply is never stored. Citations carry
 	 * their own document's commit; the dataset's newest recorded version
@@ -4426,7 +4456,7 @@ export class Substrate {
 	 * cached chunks and is never stored.
 	 */
 	async searchDocs(
-		input: { question?: unknown; datasets?: unknown; session_id?: unknown; context?: unknown },
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown; repo_id?: unknown; planning_hash?: unknown; context?: unknown; probe?: unknown; cooling?: unknown },
 		callerSurface: Surface | null,
 	): Promise<SearchReply> {
 		const surface = callerSurface ?? "claude-code";
@@ -4453,7 +4483,7 @@ export class Substrate {
 	}
 
 	private async searchDocsUnmeasured(
-		input: { question?: unknown; datasets?: unknown; session_id?: unknown; context?: unknown },
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown; repo_id?: unknown; planning_hash?: unknown; context?: unknown; probe?: unknown; cooling?: unknown },
 		surface: Surface,
 		callerSurface: Surface | null,
 		noteLoaded: () => void,
@@ -4463,26 +4493,38 @@ export class Substrate {
 		const names = Array.isArray(input.datasets)
 			? input.datasets.filter((name): name is string => typeof name === "string").filter((name) => DEFAULT_SEARCH_DATASET_NAMES.includes(name))
 			: [...DEFAULT_SEARCH_DATASET_NAMES];
+		const repoId = normalizeRepoId(typeof input.repo_id === "string" ? input.repo_id : null);
+		const planningHash = typeof input.planning_hash === "string" && input.planning_hash.trim().length > 0 ? input.planning_hash.trim() : null;
 		await this.hydrateDocsSeen();
-		const pins = pinsFromVersions(this.docsVersions);
+		const pins = this.config.docsBackend === "lightrag" ? pinsByName(this.docsVersions, names, this.config.docsBackend) : pinsFromVersions(this.docsVersions, this.config.docsBackend);
 		const degradedDatasets = isSyncLive(this.docsSkillsSync) && !this.docsSkillsRefreshFailed ? [] : ["agent-skills"];
 		const load = (): Promise<SearchReply> => {
 			noteLoaded();
 			return searchDocs(
 				{
 					config: this.config.ragflow,
+					backend: this.config.docsBackend,
+					lightragConfig: this.config.lightrag,
+					lightragDatasets: { list: async () => lightragSearchDatasets(names), invalidate: () => undefined },
 					datasetNames: names,
 					pins,
 					degradedDatasets,
 					emit: (event) => this.emit(event),
 					surface,
 					...(sessionId !== undefined ? { sessionId } : {}),
+					repoId,
+					planningHash,
 					fetchImpl: this.ragflowFetch,
+					lightragFetch: this.lightragFetch,
 					datasets: this.docsDatasetList,
 					retrieval: this.config.docsRetrieval,
 					provenanceOf: (documentId) => documentProvenance(this.docsIngestSeen, documentId),
 					budgetMs: this.config.docsSearchBudgetMs,
 					breakerState: () => this.planes.gate("ragflow").breaker?.state() ?? "closed",
+					lightragBreakerState: () => this.planes.gate("lightrag").breaker?.state() ?? "closed",
+					lightragRetry: this.config.ragMachine,
+					lightragCooling: input.cooling === true,
+					lightragHindsight: async (query) => (await this.recallMemories({ query }, callerSurface)).results,
 				},
 				question,
 			);
@@ -4491,14 +4533,18 @@ export class Substrate {
 			this.cache.getOrLoad<SearchReply>({
 				klass: "docs-search",
 				surface,
-				args: { question: question.trim().replace(/\s+/g, " ").toLowerCase(), datasets: [...names].sort(), pins, degraded: degradedDatasets },
+				args: { question: question.trim().replace(/\s+/g, " ").toLowerCase(), backend: this.config.docsBackend, datasets: names.map((name) => scopedDatasetName(repoId, name)).sort(), pins, degraded: degradedDatasets, repo_id: repoId, planning_hash: planningHash },
 				generations: [DOCS_GENERATION_KEY],
 				load,
 				store: searchReplyStorable,
 			});
-		// An empty question and an unconfigured plane are answered (degraded)
-		// without touching the cache: there is nothing to key on.
-		const chunks = question.trim().length === 0 || this.config.ragflow === null ? await load() : await cached();
+		// An empty question and an unconfigured selected backend are answered (degraded)
+		// without touching the cache: there is nothing to key on. A half-open probe also skips it: the probe must
+		// reach the plane, or a cached reply would clear ERROR without the plane answering. A refused search (`cooling`)
+		// keeps the cache: a reply cached for its question is served, and a miss runs `load`, which answers from
+		// Hindsight on the cooling path, so LightRAG is not asked.
+		const configured = this.config.docsBackend === "lightrag" ? this.config.lightrag !== null : this.config.ragflow !== null;
+		const chunks = question.trim().length === 0 || !configured || input.probe === true ? await load() : await cached();
 		// The context is attached per call, after the chunks: a session's events
 		// belong to that session, so the cached answer never carries them.
 		if (input.context !== true) return chunks;
@@ -4626,20 +4672,24 @@ export class Substrate {
 		const pages = Array.isArray(input.pages) ? input.pages : [];
 		await this.hydrateDocsSeen();
 		const outcome = await ingestDocs(
-			this.docsIngestDeps(roots, callerSurface, sessionId),
+			this.docsIngestDeps(typeof input.dataset === "string" ? input.dataset : "", roots, callerSurface, sessionId),
 			{
 				dataset: typeof input.dataset === "string" ? input.dataset : "",
 				...(typeof input.commit === "string" ? { commit: input.commit } : {}),
 				pages: pages
 					.filter((page): page is Record<string, unknown> => page !== null && typeof page === "object" && !Array.isArray(page))
-					.map((page) => ({
-						path: typeof page.path === "string" ? page.path : "",
-						...("real_path" in page && typeof page.real_path === "string" ? { real_path: page.real_path } : {}),
-						...("source_url" in page && typeof page.source_url === "string" ? { source_url: page.source_url } : {}),
-						body: typeof page.body === "string" ? page.body : "",
-						...("heading_path" in page && typeof page.heading_path === "string" ? { heading_path: page.heading_path } : {}),
-						...("expected_version" in page && typeof page.expected_version === "number" && Number.isInteger(page.expected_version) && page.expected_version >= 0 ? { expected_version: page.expected_version } : {}),
-					})),
+					.map((page) => {
+						const graph = planningHintFromJson(page.graph);
+						return {
+							path: typeof page.path === "string" ? page.path : "",
+							...("real_path" in page && typeof page.real_path === "string" ? { real_path: page.real_path } : {}),
+							...("source_url" in page && typeof page.source_url === "string" ? { source_url: page.source_url } : {}),
+							body: typeof page.body === "string" ? page.body : "",
+							...("heading_path" in page && typeof page.heading_path === "string" ? { heading_path: page.heading_path } : {}),
+							...("expected_version" in page && typeof page.expected_version === "number" && Number.isInteger(page.expected_version) && page.expected_version >= 0 ? { expected_version: page.expected_version } : {}),
+							...(graph !== undefined ? { graph } : {}),
+						};
+					}),
 				...(sessionId !== undefined ? { session_id: sessionId } : {}),
 			},
 		);
@@ -4654,10 +4704,14 @@ export class Substrate {
 	 * The dependencies every docs ingest in this service runs with: the plane, the record stores, the roots the
 	 * guard checks pages against, and the caller's surface. A refresh's preflight and each of its calls share
 	 * these, so they refuse the same pages for the same reasons.
+	 * `dataset` is the one LightRAG dataset the ingest resolves, identified by its name, so a LightRAG
+	 * ingest never lists datasets through the RAGFlow gate (its breaker and outages do not refuse uploads).
 	 */
-	private docsIngestDeps(roots: readonly string[] | undefined, surface: Surface | null, sessionId?: string): IngestDeps {
+	private docsIngestDeps(dataset: string, roots: readonly string[] | undefined, surface: Surface | null, sessionId?: string): IngestDeps {
 		return {
 			config: this.config.ragflow,
+			backend: this.config.docsBackend,
+			lightragConfig: this.config.lightrag,
 			roots: roots ?? this.config.docsIngestRoots,
 			vmGuest: this.config.vmGuest,
 			seen: this.docsIngestSeen,
@@ -4669,6 +4723,8 @@ export class Substrate {
 			surface,
 			...(sessionId !== undefined ? { sessionId } : {}),
 			fetchImpl: this.ragflowFetch,
+			lightragFetch: this.lightragFetch,
+			lightragDatasets: { list: async () => lightragSearchDatasets([dataset]), invalidate: () => undefined },
 			datasets: this.docsDatasetList,
 			prune: this.config.docsPruneSuperseded,
 		};
@@ -4677,10 +4733,10 @@ export class Substrate {
 	// uplift-2 R6 — dataset versions and the merge-trigger, moved here from
 	// the HTTP server so they share the state file and the gated fetch.
 
-	/** The newest recorded version of a dataset, after hydration; the merge-trigger's idempotency key. */
+	/** The newest version the selected backend recorded for a dataset, after hydration: the merge-trigger's idempotency key. A version another backend recorded completes nothing here. */
 	async latestDocsVersion(dataset: string): Promise<DatasetVersion | undefined> {
 		await this.hydrateDocsSeen();
-		return latestVersion(this.docsVersions, dataset);
+		return latestVersionFor(this.docsVersions, dataset, this.config.docsBackend);
 	}
 
 	/**
@@ -4697,11 +4753,13 @@ export class Substrate {
 	 * and bump the docs generation. The version store is the service's, so
 	 * the pin reaches the next search and the next trigger's idempotency
 	 * check, restart or not.
+	 * The selected backend decides the record: LightRAG names its own dataset, RAGFlow resolves it by name.
 	 */
 	async recordDocsVersion(
 		fields: { dataset: string; commit: string; content_sha256: string },
 		surface: Surface,
 	): Promise<{ ok: true; version: DatasetVersion; created: boolean } | { ok: false; reason: string }> {
+		if (this.config.docsBackend === "lightrag") return this.recordLightragVersion(fields, surface);
 		if (this.config.ragflow === null) return { ok: false, reason: "ragflow-not-configured" };
 		await this.hydrateDocsSeen();
 		const refreshed = await refreshDataset(
@@ -4720,6 +4778,40 @@ export class Substrate {
 			await this.cache.bump(DOCS_GENERATION_KEY);
 		}
 		return refreshed;
+	}
+
+	/**
+	 * The version record of a LightRAG deployment, RAGFlow configured or not. LightRAG names its datasets, so the dataset's id
+	 * is its name, the id the LightRAG search and ingest already use for it. Stamped `backend: "lightrag"`, numbered, stored,
+	 * noted and persisted as `refreshDataset` does, and the docs generation is bumped the same way.
+	 */
+	private async recordLightragVersion(
+		fields: { dataset: string; commit: string; content_sha256: string },
+		surface: Surface,
+	): Promise<{ ok: true; version: DatasetVersion; created: boolean }> {
+		await this.hydrateDocsSeen();
+		const last = latestVersion(this.docsVersions, fields.dataset);
+		const generation = Number(/^v(\d+)$/.exec(last?.version ?? "")?.[1] ?? 0);
+		const version: DatasetVersion = {
+			dataset: fields.dataset,
+			dataset_id: fields.dataset,
+			version: `v${generation + 1}`,
+			commit: fields.commit,
+			content_sha256: fields.content_sha256,
+			ingested_at: new Date().toISOString(),
+			backend: "lightrag",
+		};
+		recordVersion(this.docsVersions, version);
+		await this.emit({
+			surface,
+			kind: "note",
+			summary: `docs dataset ${fields.dataset} refreshed to ${version.version}`,
+			session_id: `docs-refresh:${version.version}`,
+			payload: { action: "docs.ingest", backend: "lightrag", dataset_id: fields.dataset, version: version.version, commit: fields.commit, content_sha256: fields.content_sha256 },
+		});
+		await this.persistDocsSeen();
+		await this.cache.bump(DOCS_GENERATION_KEY);
+		return { ok: true, version, created: false };
 	}
 
 	/**
@@ -4800,7 +4892,11 @@ export class Substrate {
 			return outcome;
 		};
 		try {
-			if (this.config.ragflow === null) return finish({ ok: false, reason: "ragflow-not-configured", job });
+			// LightRAG-only: no RAGFlow list to ensure against, so the ingest and the version record
+			// below go to the selected plane under the dataset's name.
+			if (this.config.ragflow === null && this.config.docsBackend !== "lightrag") {
+				return finish({ ok: false, reason: "ragflow-not-configured", job });
+			}
 			// The checkout's roots are read before any plane call: a checkout that cannot be read
 			// fails this job alone, and the pinned version keeps serving with its age (D42-5).
 			let roots: readonly string[];
@@ -4813,14 +4909,16 @@ export class Substrate {
 			// checkout, which may have moved on since the trigger was accepted; it is checked again below.
 			const refusedBefore = await this.checkoutRefusal(request);
 			if (refusedBefore !== null) return finish({ ok: false, reason: refusedBefore, job });
-			// The guarded ingest reads the plane's dataset by name and refuses
-			// `unknown-dataset`, so on a configured plane without the dataset it
-			// must exist before that ingest runs: discover first, create only on
-			// a name-miss. Order stays honest — ensure, ingest, and only then
-			// record the version.
-			const ensured = await resolveDatasets({ config: this.config.ragflow, fetchImpl: this.ragflowFetch, datasets: this.docsDatasetList }, [request.dataset]);
-			if (!ensured.ok) return finish({ ok: false, reason: ensured.reason, job });
-			const created = ensured.datasets[0]?.created === true;
+			// With RAGFlow configured the dataset is discovered first and created only on a
+			// name-miss, so ids stay aligned with the list the search reads. Order stays honest:
+			// ensure, ingest, and only then record the version. A LightRAG-only plane has no RAGFlow
+			// list to ensure against.
+			let created = false;
+			if (this.config.docsBackend === "ragflow" && this.config.ragflow !== null) {
+				const ensured = await resolveDatasets({ config: this.config.ragflow, fetchImpl: this.ragflowFetch, datasets: this.docsDatasetList }, [request.dataset]);
+				if (!ensured.ok) return finish({ ok: false, reason: ensured.reason, job });
+				created = ensured.datasets[0]?.created === true;
+			}
 			// A path that exists but cannot be read fails the job here, not as a smaller page set.
 			let pages: IngestPage[];
 			try {
@@ -4833,22 +4931,124 @@ export class Substrate {
 			if (refusedAfter !== null) return finish({ ok: false, reason: refusedAfter, job });
 			// Every page passes the ingest gates before the first call writes, so a content refusal (an outside path,
 			// an oversize page, a secret) leaves the plane as it was, as a single call did.
-			const gated = await preflightIngestPages(this.docsIngestDeps(roots, surface), { dataset: request.dataset, commit: request.commit, pages });
+			const gated = await preflightIngestPages(this.docsIngestDeps(request.dataset, roots, surface), { dataset: request.dataset, commit: request.commit, pages });
 			if (gated !== undefined) return finish({ ok: false, reason: gated, job });
 			// The pages go to the plane in calls that each fit one ingest call. Each call upserts its pages as it lands;
 			// the version is recorded only after the last call. A failure after an earlier call wrote is `stored`: the
 			// plane then holds some of this commit's pages while the pin still names the prior version.
 			let stored = false;
+			// LightRAG isolates each file: a page that failed is counted here, not refused in the call.
+			let failedPages = 0;
 			for (const batch of batchIngestPages(pages)) {
 				const ingested = await this.ingestDocs({ dataset: request.dataset, commit: request.commit, pages: batch }, surface, roots);
 				stored = stored || ingested.changed;
 				if (!ingested.ok) return finish({ ok: false, reason: ingested.reason, job, ...(stored ? { stored } : {}) });
+				failedPages += ingested.results.filter((result) => result.status === "failed").length;
 			}
+			// A page that failed leaves the version unrecorded, so a retry re-uploads only the pages still missing.
+			if (failedPages > 0) return finish({ ok: false, reason: `partial: ${failedPages} page(s) failed; retry the refresh`, job, ...(stored ? { stored } : {}) });
 			const refreshed = await this.recordDocsVersion(request, surface);
 			if (!refreshed.ok) return finish({ ok: false, reason: refreshed.reason, job, ...(stored ? { stored } : {}) });
 			return finish({ ok: true, version: refreshed.version, created: created || refreshed.created, job });
 		} catch (cause) {
 			return finish({ ok: false, reason: redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200), job });
+		}
+	}
+
+	// ── live steering: a planning change refreshes the docs plane (SPE-19390) ──────
+
+	/**
+	 * Start the planning poll (`SUBSTRATE_LIGHTRAG_POLL_MS`): a pass now and one every
+	 * interval, unref'd so it never holds the process open. Only the LightRAG plane is
+	 * refreshed. Idempotent.
+	 */
+	startPlanningPoll(): void {
+		if (this.planningStop !== null || !this.planningEnabled()) return;
+		const handle = setInterval(() => this.requestPlanningRefresh("planning-poll"), this.config.lightragPollMs);
+		handle.unref();
+		this.planningStop = () => clearInterval(handle);
+		this.requestPlanningRefresh("planning-poll");
+	}
+
+	/** Stop the planning poll. A pass in flight finishes; `planningRefreshIdle` waits for it. */
+	stopPlanningPoll(): void {
+		this.planningStop?.();
+		this.planningStop = null;
+	}
+
+	/** Resolves when no planning pass is in flight: the shutdown seam, never on a request path. */
+	async planningRefreshIdle(): Promise<void> {
+		await this.planningPass;
+	}
+
+	/** Whether planning changes refresh this process's docs plane: the LightRAG plane only. */
+	private planningEnabled(): boolean {
+		return this.config.docsBackend === "lightrag" && this.config.lightrag !== null;
+	}
+
+	/**
+	 * A stored event that names `.planning/` paths asks for a planning refresh. The docs
+	 * plane's own events are skipped: an ingest's note quotes the planning URLs it stored,
+	 * and those must not re-trigger the refresh it came from. Never throws.
+	 */
+	private planningEvent(input: EventInput): void {
+		if (!this.planningEnabled()) return;
+		const action = input.payload?.action;
+		if (typeof action === "string" && action.startsWith("docs.")) return;
+		if (planningEventTrigger(input).triggered) this.requestPlanningRefresh("planning-changed");
+	}
+
+	/**
+	 * One planning pass at a time: a request while a pass runs marks the next pass dirty,
+	 * so a burst of edits costs at most one more scan.
+	 */
+	private requestPlanningRefresh(reason: string): void {
+		if (this.planningPass !== null) {
+			this.planningDirty = true;
+			return;
+		}
+		this.planningPass = (async () => {
+			let next = reason;
+			do {
+				this.planningDirty = false;
+				await this.runPlanningRefresh(next);
+				next = "planning-dirty";
+			} while (this.planningDirty);
+			this.planningPass = null;
+		})();
+	}
+
+	/**
+	 * Scan the planning roots and index what changed since the last pass. Changed pages go
+	 * through the guarded ingest in batches; a page the plane refused stays pending for the
+	 * next pass. The `docs.planning` note carries the planning hash steering sessions compare
+	 * against. Never throws: a timer must not crash the process.
+	 */
+	private async runPlanningRefresh(reason: string): Promise<void> {
+		if (!this.planningEnabled()) return;
+		try {
+			await this.hydrateDocsSeen();
+			const roots = this.config.lightragPlanningRoots;
+			const pages = await scanIngestPages(this.planningBaseDir, roots);
+			const trigger = planningIngestTrigger(pages, this.planningHashes, roots);
+			if (!trigger.triggered) return;
+			const pending = new Set(trigger.paths);
+			const hashes = this.planningHashes ?? new Map<string, string>();
+			this.planningHashes = hashes;
+			for (const batch of batchPagesForIngest(pages.filter((page) => pending.has(page.path)))) {
+				const outcome = await this.ingestDocs({ dataset: PLANNING_DATASET, pages: batch }, "substrate");
+				if (!outcome.ok) break;
+				const failed = new Set(outcome.results.filter((result) => result.status === "failed").map((result) => result.path));
+				for (const page of batch) if (!failed.has(page.path)) hashes.set(page.path, planningPageSha(page));
+			}
+			await this.emit({
+				surface: "substrate",
+				kind: "note",
+				summary: `planning refresh (${reason}): ${trigger.paths.length} changed page(s) under .planning/`,
+				payload: { action: "docs.planning", reason, paths: trigger.paths, planning_hash: planningContentHash(pages) },
+			});
+		} catch (cause) {
+			process.stderr.write(`[substrate] planning refresh failed — ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
 		}
 	}
 
@@ -5879,6 +6079,7 @@ export class Substrate {
 			cache: this.cache.health().enabled,
 			hindsight: hindsightFromEnv() !== null,
 			ragflow: this.config.ragflow !== null,
+			lightrag: this.config.lightrag !== null,
 		};
 	}
 
@@ -5967,6 +6168,8 @@ export class Substrate {
 			cache: !cache.enabled ? null : cache.connected ? true : cache.mode === "degraded" || cache.cooldownUntil !== null ? false : null,
 			hindsight: hindsightOk,
 			ragflow: ragflowOk,
+			// Not probed by health: no LightRAG health call exists, so the breaker alone says whether calls are refused.
+			lightrag: null,
 		};
 		const planes = {} as SubstrateHealth["planes"];
 		for (const plane of PLANES) {

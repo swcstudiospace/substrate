@@ -11,17 +11,20 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CircuitBreaker, gatedFetch, type DocsSearchSample, type PlaneGate } from "@substrate/observability";
 import { ReadThroughCache, type CacheRedis } from "./cache.ts";
-import { citationProvenanceCounts, searchDocs, searchReplyStorable, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type SearchReply } from "./docs-search.ts";
+import { attachGraphHints, citationProvenanceCounts, planningGraphCounts, searchDocs, searchReplyStorable, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type SearchCitation, type SearchReply } from "./docs-search.ts";
 import type { DatasetListSource } from "./docs-datasets.ts";
 import { nodeIo, readSkillsCheckoutPages, skillsCheckoutRoots, type ScanIo } from "./docs-ingest.ts";
 import { RagflowFake, type FakeChunk } from "./ragflow-fake.ts";
 import type { GreptimeClient } from "./greptime.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
-import { ragflowOp } from "./planes/ragflow.ts";
+import type { DerivedMemoryHit } from "./memory-recall.ts";
+import { ragflowOp, type FetchLike } from "./planes/ragflow.ts";
 import type { EventInput } from "./types.ts";
-import { loadConfig } from "./config.ts";
+import { selectRetrievalBackend } from "./types.ts";
+import { lightragFromEnv, loadConfig, resolveDocsBackend } from "./config.ts";
 import { createMcpServer } from "./mcp.ts";
 import { Substrate } from "./service.ts";
+import { goldenFake, searchGoldenOffline } from "./docs-golden.ts";
 
 const CONFIG = { url: "http://ragflow.test", apiKey: "test-key" };
 
@@ -538,6 +541,599 @@ describe("docs_search outcome metrics (uplift-3 N5)", () => {
 				{ ...citation, commit: "dataset-pin:agent-skills:unpinned" },
 			]),
 		).toEqual({ recorded: 1, unrecorded: 1, unpinned: 2 });
+	});
+});
+
+describe("docs backend selection (LightRAG cutover)", () => {
+	test("selectRetrievalBackend: an explicit preference wins when available", () => {
+		expect(selectRetrievalBackend({ ragflow: true, lightrag: true }, "lightrag")).toBe("lightrag");
+		expect(selectRetrievalBackend({ ragflow: true, lightrag: true }, "ragflow")).toBe("ragflow");
+	});
+
+	test("selectRetrievalBackend: ragflow keeps today's default; lightrag is the fallback; null when bare", () => {
+		expect(selectRetrievalBackend({ ragflow: true, lightrag: false })).toBe("ragflow");
+		expect(selectRetrievalBackend({ ragflow: true, lightrag: true })).toBe("ragflow");
+		expect(selectRetrievalBackend({ ragflow: false, lightrag: true })).toBe("lightrag");
+		expect(selectRetrievalBackend({ ragflow: false, lightrag: false })).toBeNull();
+	});
+
+	test("selectRetrievalBackend: an unavailable preference falls back instead of stranding the search", () => {
+		expect(selectRetrievalBackend({ ragflow: true, lightrag: false }, "lightrag")).toBe("ragflow");
+		expect(selectRetrievalBackend({ ragflow: false, lightrag: true }, "ragflow")).toBe("lightrag");
+		expect(selectRetrievalBackend({ ragflow: false, lightrag: false }, "lightrag")).toBeNull();
+	});
+
+	test("resolveDocsBackend: LIGHTRAG_URL presence means lightrag, else ragflow", () => {
+		expect(resolveDocsBackend({})).toEqual({ backend: "ragflow", rejected: null });
+		expect(resolveDocsBackend({ LIGHTRAG_URL: "http://lightrag.test:8000" })).toEqual({ backend: "lightrag", rejected: null });
+		expect(resolveDocsBackend({ LIGHTRAG_URL: "   " })).toEqual({ backend: "ragflow", rejected: null });
+	});
+
+	test("resolveDocsBackend: an explicit SUBSTRATE_DOCS_BACKEND wins; a typo is rejected without switching", () => {
+		expect(resolveDocsBackend({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "ragflow" })).toEqual({
+			backend: "ragflow",
+			rejected: null,
+		});
+		expect(resolveDocsBackend({ SUBSTRATE_DOCS_BACKEND: "LightRAG" })).toEqual({ backend: "lightrag", rejected: null });
+		expect(resolveDocsBackend({ SUBSTRATE_DOCS_BACKEND: "lightragg" })).toEqual({ backend: "ragflow", rejected: "lightragg" });
+		expect(resolveDocsBackend({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "weaviate" })).toEqual({
+			backend: "lightrag",
+			rejected: "weaviate",
+		});
+	});
+
+	test("lightragFromEnv: null without a URL; keyless reach is a URL alone; trims the URL; never echoes the key", () => {
+		expect(lightragFromEnv({})).toBeNull();
+		expect(lightragFromEnv({ LIGHTRAG_API_KEY: "k" })).toBeNull();
+		expect(lightragFromEnv({ LIGHTRAG_URL: "http://lightrag.test" })).toEqual({ url: "http://lightrag.test" });
+		const config = lightragFromEnv({ LIGHTRAG_URL: "http://lightrag.test/", LIGHTRAG_API_KEY: "k" });
+		expect(config).toEqual({ url: "http://lightrag.test", apiKey: "k" });
+		expect(JSON.stringify(config)).not.toContain("k-secret");
+	});
+});
+
+describe("LightRAG search and the RAGFlow plane", () => {
+	/** A LightRAG `/query` stand-in: answers one chunk with `chunk` and records the raw body of every query it gets. */
+	function lightragServing(chunk: string) {
+		const queries: string[] = [];
+		const fetch: FetchLike = async (input, init) => {
+			const url = new URL(String(input));
+			if (init?.method !== "POST" || url.pathname !== "/query") return Response.json({ detail: "no route" }, { status: 404 });
+			queries.push(String(init.body));
+			return Response.json({ status: "success", data: { chunks: [{ content: chunk, document_name: "plan.md", document_id: "doc-lightrag", heading_path: "Plan", score: 0.9 }] } });
+		};
+		return { fetch, queries };
+	}
+
+	test("a LightRAG search still retrieves while the RAGFlow breaker is open", async () => {
+		const ragflow = new CircuitBreaker("ragflow", { enabled: true, failureThreshold: 1, openMs: 60_000 });
+		ragflow.onFailure("ragflow 503");
+		expect(ragflow.state()).toBe("open");
+		let retrievals = 0;
+		const reply = await searchDocs(
+			{
+				config: { url: "http://ragflow.test", apiKey: "test-key" },
+				backend: "lightrag",
+				lightragConfig: { url: "http://lightrag.test" },
+				datasetNames: ["agent-substrate"],
+				breakerState: () => ragflow.state(),
+				lightragRetrieve: async () => {
+					retrievals += 1;
+					return {
+						ok: true,
+						chunks: [{ content: "The planner reads the plan.", document_name: "plan.md", document_id: "doc-1", heading_path: "Plan", score: 0.9 }],
+						detail: { mode: "hybrid", counts: { entities: 0, relations: 0 }, provenance: { entities: [], relations: 0 } },
+					};
+				},
+				emit: async () => ({ stored: false }),
+				surface: "omp",
+			},
+			"where is the plan?",
+		);
+		expect(retrievals).toBe(1);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.chunks).toHaveLength(1);
+	});
+
+	test("Substrate.searchDocs on the LightRAG backend answers while the RAGFlow breaker is open, and RAGFlow is never called", async () => {
+		const lightrag = lightragServing("Served by LightRAG.");
+		let ragflowCalls = 0;
+		const substrate = new Substrate(
+			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }),
+			{
+				index: null,
+				greptime: null,
+				lightragFetch: lightrag.fetch,
+				ragflowFetch: async () => {
+					ragflowCalls += 1;
+					throw new Error("ragflow down");
+				},
+			},
+		);
+		const ragflow = substrate.planes.gate("ragflow").breaker;
+		for (let failures = 0; failures < substrate.config.breaker.failureThreshold; failures += 1) ragflow?.onFailure("ragflow 503");
+		expect(ragflow?.state()).toBe("open");
+		const reply = await substrate.searchDocs({ question: "where is the plan?" }, "omp");
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.backend).toBe("lightrag");
+		expect(reply.chunks.map((citation) => citation.snippet)).toEqual(["Served by LightRAG."]);
+		expect(lightrag.queries).toHaveLength(1);
+		expect(ragflowCalls).toBe(0);
+	});
+
+	test("Substrate.searchDocs: a RAGFlow answer in a shared cache is not served to the LightRAG backend", async () => {
+		const fake = new RagflowFake();
+		const lightrag = lightragServing("Served by LightRAG.");
+		const redis = new FakeRedis();
+		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
+		const ragflowSide = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch, cache });
+		const before = await ragflowSide.searchDocs({ question: "where is the plan?" }, "omp");
+		expect(before.backend).toBeUndefined();
+		expect(before.chunks.length).toBeGreaterThan(0);
+		const lightragSide = new Substrate(
+			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }),
+			{ index: null, greptime: null, lightragFetch: lightrag.fetch, cache },
+		);
+		const after = await lightragSide.searchDocs({ question: "where is the plan?" }, "omp");
+		expect(after.backend).toBe("lightrag");
+		expect(after.chunks.map((citation) => citation.snippet)).toEqual(["Served by LightRAG."]);
+		expect(lightrag.queries).toHaveLength(1);
+	});
+
+	test("with the LightRAG breaker open, a LightRAG search is refused as lightrag circuit open and the LightRAG fake gets no call", async () => {
+		const lightrag = lightragServing("Served by LightRAG.");
+		const breaker = new CircuitBreaker("lightrag", { enabled: true, failureThreshold: 1, openMs: 60_000 });
+		breaker.onFailure("lightrag unreachable");
+		expect(breaker.state()).toBe("open");
+		const reply = await searchDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: { url: "http://lightrag.test" },
+				datasetNames: ["agent-substrate"],
+				lightragFetch: lightrag.fetch,
+				lightragBreakerState: () => breaker.state(),
+				emit: async () => ({ stored: false }),
+				surface: "omp",
+			},
+			"where is the plan?",
+		);
+		expect(reply.degraded).toBe(true);
+		expect(reply.reason).toBe("lightrag circuit open");
+		expect(reply.chunks).toHaveLength(0);
+		expect(lightrag.queries).toHaveLength(0);
+	});
+
+	test("Substrate.searchDocs on the LightRAG backend is refused as lightrag circuit open while the LightRAG breaker is open, and LightRAG gets no call", async () => {
+		const lightrag = lightragServing("Served by LightRAG.");
+		const substrate = new Substrate(
+			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }),
+			{ index: null, greptime: null, lightragFetch: lightrag.fetch },
+		);
+		const lightragBreaker = substrate.planes.gate("lightrag").breaker;
+		for (let failures = 0; failures < substrate.config.breaker.failureThreshold; failures += 1) lightragBreaker?.onFailure("lightrag unreachable");
+		expect(lightragBreaker?.state()).toBe("open");
+		const reply = await substrate.searchDocs({ question: "where is the plan?" }, "omp");
+		expect(reply.degraded).toBe(true);
+		expect(reply.reason).toBe("lightrag circuit open");
+		expect(lightrag.queries).toHaveLength(0);
+	});
+
+	test("a LightRAG search the RAG machine refuses never reaches the LightRAG plane: Hindsight answers, or the degraded reply does", async () => {
+		const lightrag = lightragServing("Served by LightRAG.");
+		let recalled: DerivedMemoryHit[] = [{ bank: "sub-cursor", id: "mem-1", text: "The plan lives in PLAN.md.", derived: true, document_id: "mwd_1", tags: [], score: 0.8 }];
+		const deps = {
+			config: null,
+			backend: "lightrag" as const,
+			lightragConfig: { url: "http://lightrag.test" },
+			datasetNames: ["agent-substrate"],
+			lightragFetch: lightrag.fetch,
+			lightragCooling: true,
+			lightragHindsight: async () => recalled,
+			emit: async () => ({ stored: false }),
+			surface: "omp" as const,
+		};
+		const served = await searchDocs(deps, "where is the plan?");
+		expect(served).toMatchObject({ backend: "hindsight", fallback: "hindsight", degraded: true, reason: "rag breaker open" });
+		expect(served.chunks).toHaveLength(1);
+		recalled = [];
+		const degraded = await searchDocs(deps, "where is the plan?");
+		expect(degraded).toMatchObject({ degraded: true, reason: "rag breaker open" });
+		expect(degraded.backend).toBeUndefined();
+		expect(lightrag.queries).toHaveLength(0);
+	});
+
+	test("docs ingest on the LightRAG backend still uploads while the RAGFlow breaker is open, because LightRAG calls never go through the RAGFlow gate", async () => {
+		const uploads: string[] = [];
+		const lightragIngest: FetchLike = async (input, init) => {
+			const url = new URL(String(input));
+			if (init?.method === "POST" && url.pathname === "/documents/upload") {
+				uploads.push(await ((init.body as FormData).get("file") as Blob).text());
+				return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
+			}
+			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+			if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+			return Response.json({ detail: "no route" }, { status: 404 });
+		};
+		const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }), { index: null, greptime: null, lightragFetch: lightragIngest });
+		const ragflow = substrate.planes.gate("ragflow").breaker;
+		for (let failures = 0; failures < substrate.config.breaker.failureThreshold; failures += 1) ragflow?.onFailure("ragflow 503");
+		expect(ragflow?.state()).toBe("open");
+		const outcome = await substrate.ingestDocs(
+			{ dataset: "agent-substrate", commit: "c1", pages: [{ path: "docs/plan.md", body: "# Plan\n\nThe planner reads the plan.", source_url: "https://example.com/plan" }] },
+			"omp",
+		);
+		if (!outcome.ok) throw new Error(outcome.reason);
+		expect(outcome.results.map((result) => result.status)).toEqual(["ingested"]);
+		expect(uploads).toHaveLength(1);
+	});
+});
+
+describe("LightRAG search retries and the Hindsight fallback", () => {
+	const LIGHTRAG = { url: "http://lightrag.test" };
+	/** Two retries on a 1 ms base: the backoff runs, and the tests stay quick. */
+	const RETRY = { maxRetries: 2, retryBaseMs: 1 };
+	const RECALLED: DerivedMemoryHit[] = [
+		{ bank: "sub-cursor", id: "mem-1", text: "The plan lives in PLAN.md.", derived: true, document_id: "mwd_1", tags: [], score: 0.8 },
+	];
+	const NO_GRAPH = { mode: "hybrid" as const, counts: { entities: 0, relations: 0 }, provenance: { entities: [], relations: 0 } };
+
+	test("a LightRAG retrieval that fails once is retried, and the retry's chunks are served, not degraded", async () => {
+		let attempts = 0;
+		const reply = await searchDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: LIGHTRAG,
+				datasetNames: ["agent-substrate"],
+				lightragRetry: RETRY,
+				lightragRetrieve: async () => {
+					attempts += 1;
+					if (attempts === 1) return { ok: false, reason: "lightrag 503" };
+					return {
+						ok: true,
+						chunks: [{ content: "The planner reads the plan.", document_name: "plan.md", document_id: "doc-1", heading_path: "Plan", score: 0.9 }],
+						detail: NO_GRAPH,
+					};
+				},
+				emit: async () => ({ stored: false }),
+				surface: "omp",
+			},
+			"where is the plan?",
+		);
+		expect(attempts).toBe(2);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.fallback).toBeUndefined();
+		expect(reply.backend).toBe("lightrag");
+		expect(reply.chunks.map((citation) => citation.snippet)).toEqual(["The planner reads the plan."]);
+	});
+
+	test("a LightRAG search that fails every attempt is answered from Hindsight: degraded, fallback hindsight, the LightRAG failure as the reason", async () => {
+		let attempts = 0;
+		const asked: string[] = [];
+		const events: EventInput[] = [];
+		const reply = await searchDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: LIGHTRAG,
+				datasetNames: ["agent-substrate"],
+				lightragRetry: RETRY,
+				lightragRetrieve: async () => {
+					attempts += 1;
+					return { ok: false, reason: "lightrag 503" };
+				},
+				lightragHindsight: async (question) => {
+					asked.push(question);
+					return RECALLED;
+				},
+				emit: async (event) => {
+					events.push(event);
+					return { stored: false };
+				},
+				surface: "omp",
+			},
+			"where is the plan?",
+		);
+		expect(attempts).toBe(RETRY.maxRetries + 1);
+		expect(asked).toEqual(["where is the plan?"]);
+		expect(reply).toMatchObject({ degraded: true, backend: "hindsight", fallback: "hindsight", reason: "lightrag 503" });
+		expect(reply.chunks).toHaveLength(1);
+		expect(reply.chunks[0]).toMatchObject({
+			source_url: "hindsight:sub-cursor/mwd_1",
+			snippet: "The plan lives in PLAN.md.",
+			commit: "dataset-pin:hindsight:unrecorded",
+		});
+		expect(events.map((event) => event.summary)).toEqual(["docs search failed: lightrag 503"]);
+	});
+
+	test("a LightRAG retry's backoff runs under the search budget: an expired budget ends the retries after the one attempt made, not after the full backoff", async () => {
+		let attempts = 0;
+		const started = performance.now();
+		const reply = await searchDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: LIGHTRAG,
+				datasetNames: ["agent-substrate"],
+				lightragRetry: { maxRetries: 2, retryBaseMs: 5000 },
+				budgetMs: 50,
+				lightragRetrieve: async () => {
+					attempts += 1;
+					return { ok: false, reason: "lightrag 503" };
+				},
+				emit: async () => ({ stored: false }),
+				surface: "omp",
+			},
+			"where is the plan?",
+		);
+		expect(performance.now() - started).toBeLessThan(2_000);
+		expect(attempts).toBe(1);
+		expect(reply).toMatchObject({ degraded: true, reason: "lightrag 503" });
+	}, 20_000);
+
+	test("a LightRAG search that fails and Hindsight answers nothing, throws, or is not wired is the degraded reply with the LightRAG reason", async () => {
+		let attempts = 0;
+		const search = (lightragHindsight?: (question: string) => Promise<readonly DerivedMemoryHit[]>): Promise<SearchReply> =>
+			searchDocs(
+				{
+					config: null,
+					backend: "lightrag",
+					lightragConfig: LIGHTRAG,
+					datasetNames: ["agent-substrate"],
+					lightragRetry: RETRY,
+					lightragRetrieve: async () => {
+						attempts += 1;
+						return { ok: false, reason: "lightrag 503" };
+					},
+					...(lightragHindsight !== undefined ? { lightragHindsight } : {}),
+					emit: async () => ({ stored: false }),
+					surface: "omp",
+				},
+				"where is the plan?",
+			);
+		const degraded: SearchReply = {
+			chunks: [],
+			untrusted: UNTRUSTED_DOCS_NOTICE,
+			degraded: true,
+			reason: "lightrag 503",
+			degraded_datasets: [{ dataset: "agent-substrate", reason: "lightrag 503" }],
+		};
+		expect(await search(async () => [])).toEqual(degraded);
+		expect(
+			await search(async () => {
+				throw new Error("hindsight down");
+			}),
+		).toEqual(degraded);
+		expect(await search()).toEqual(degraded);
+		expect(attempts).toBe(3 * (RETRY.maxRetries + 1));
+	});
+
+	test("Substrate.searchDocs answers from Hindsight once the LightRAG plane has failed its retries", async () => {
+		const restore = hindsightEnv("sub-cursor");
+		try {
+			const hindsight = new HindsightFake();
+			hindsight.seed("sub-cursor", [{ id: "m1", text: "the plan lives in PLAN.md", document_id: "mwd_1", tags: ["cursor"], metadata: {}, score: 0.9 }]);
+			let queries = 0;
+			const lightragDown: FetchLike = async (input, init) => {
+				const url = new URL(String(input));
+				if (init?.method !== "POST" || url.pathname !== "/query") return Response.json({ detail: "no route" }, { status: 404 });
+				queries += 1;
+				return new Response("unavailable", { status: 503 });
+			};
+			const substrate = new Substrate(
+				loadConfig({
+					RAGFLOW_URL: "http://ragflow.test",
+					RAGFLOW_API_KEY: "k",
+					LIGHTRAG_URL: "http://lightrag.test",
+					SUBSTRATE_DOCS_BACKEND: "lightrag",
+					SUBSTRATE_RAG_RETRY_BASE_MS: "1",
+				}),
+				{ index: null, greptime: null, lightragFetch: lightragDown, hindsightFetch: hindsight.fetch },
+			);
+			const reply = await substrate.searchDocs({ question: "where is the plan?" }, "cursor");
+			expect(reply).toMatchObject({ degraded: true, backend: "hindsight", fallback: "hindsight" });
+			expect(reply.reason).toMatch(/^lightrag/);
+			expect(reply.chunks.map((citation) => citation.source_url)).toEqual(["hindsight:sub-cursor/mwd_1"]);
+			expect(queries).toBeGreaterThan(1);
+			expect(hindsight.recalls()).toHaveLength(1);
+		} finally {
+			restore();
+		}
+	});
+});
+
+describe("search graph metadata (LightRAG path)", () => {
+	const HINTS = [
+		{ phase: "25-lightrag", entities: ["Access path", "RAGFlow datasets"], relations: [{ source: "Access path", target: "RAGFlow datasets", kind: "links-to" }] },
+	];
+
+	/**
+	 * Plants the two headings the graph tests hint against in every dataset,
+	 * through the fake's own seed table. Serving seeds turns on the
+	 * `heading_path` echo, and nothing else is served, so each citation's
+	 * heading is exactly the one planted here.
+	 */
+	function seedHeadings(fake: RagflowFake): void {
+		fake.serveUploadsAsChunks = true;
+		for (const dataset of fake.datasets) {
+			const sourceUrl = `https://example.com/${dataset.name}/graph`;
+			fake.seeds.push(
+				{ dataset_id: dataset.id, document_id: `doc-${dataset.id}-1`, content: "The substrate is the only door to the data planes.", source_url: sourceUrl, heading_path: "Access path", score: 0.91 },
+				{ dataset_id: dataset.id, document_id: `doc-${dataset.id}-2`, content: "Callers cite the source, not the chunk.", source_url: sourceUrl, heading_path: "RAGFlow datasets", score: 0.83 },
+			);
+		}
+	}
+
+	test("planningGraphCounts reports distinct entities and every relation", () => {
+		expect(planningGraphCounts([])).toEqual({ entities: 0, relations: 0 });
+		expect(planningGraphCounts(HINTS)).toEqual({ entities: 2, relations: 1 });
+		expect(
+			planningGraphCounts([
+				...HINTS,
+				{ phase: "25-other", entities: ["Access path", "Fresh entity"], relations: [] },
+			]),
+		).toEqual({ entities: 3, relations: 1 });
+	});
+
+	test("attachGraphHints names hinted headings and counts the coverage", () => {
+		expect(attachGraphHints([], undefined)).toBeUndefined();
+		const chunks: SearchCitation[] = [
+			{ title: "a", source_url: "s", heading_path: "Access path", commit: "c", snippet: "s", score: 1, document_id: "d", chunk_id: "k" },
+			{ title: "b", source_url: "s", heading_path: "Elsewhere", commit: "c", snippet: "s", score: 0.5, document_id: "e", chunk_id: "j" },
+		];
+		const stats = attachGraphHints(chunks, HINTS);
+		expect(stats).toEqual({ entities: 2, relations: 1 });
+		expect(chunks[0]?.graph).toEqual({ entities: ["Access path"], relations: 1 });
+		expect(chunks[1]?.graph).toBeUndefined();
+	});
+
+	test("a search with graph hints returns graph counts and names the hinted headings", async () => {
+		const fake = new RagflowFake();
+		seedHeadings(fake);
+		const events: EventInput[] = [];
+		const reply = await searchDocs(
+			{ config: CONFIG, emit: async (event) => ((events.push(event)), { stored: false }), fetchImpl: fake.fetch, graphHints: HINTS },
+			"who reads RAGFlow?",
+		);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.graph).toEqual({ entities: 2, relations: 1 });
+		// Both seed headings are hinted, so every citation carries graph
+		// metadata; the relation count rides the source heading only.
+		for (const citation of reply.chunks) {
+			expect(citation.graph?.entities).toEqual([citation.heading_path]);
+		}
+		const access = reply.chunks.filter((citation) => citation.heading_path === "Access path");
+		const datasets = reply.chunks.filter((citation) => citation.heading_path === "RAGFlow datasets");
+		expect(access.length).toBeGreaterThan(0);
+		expect(datasets.length).toBeGreaterThan(0);
+		expect(access.every((citation) => citation.graph?.relations === 1)).toBe(true);
+		expect(datasets.every((citation) => citation.graph?.relations === undefined)).toBe(true);
+		// The citations themselves are unchanged: still capped, still framed.
+		expect(reply.chunks.length).toBeLessThanOrEqual(10);
+		expect(reply.untrusted).toBe(UNTRUSTED_DOCS_NOTICE);
+		const notes = events.filter((event) => event.kind === "note");
+		expect(notes).toHaveLength(1);
+		expect(notes[0]?.payload).toMatchObject({ action: "docs.search", graph: { entities: 2, relations: 1 } });
+	});
+
+	test("a search without graph hints serves the pure RAGFlow reply: no graph, no citation graph", async () => {
+		const fake = new RagflowFake();
+		const reply = await searchDocs({ config: CONFIG, emit: async () => ({ stored: false }), fetchImpl: fake.fetch }, "who reads RAGFlow?");
+		expect(reply.graph).toBeUndefined();
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.chunks.every((citation) => citation.graph === undefined)).toBe(true);
+	});
+
+	test("an unhinted heading stays graph-free while its hinted sibling is named", async () => {
+		const fake = new RagflowFake();
+		seedHeadings(fake);
+		const reply = await searchDocs(
+			{
+				config: CONFIG,
+				emit: async () => ({ stored: false }),
+				fetchImpl: fake.fetch,
+				graphHints: [{ phase: "25-lightrag", entities: ["Access path"], relations: [] }],
+			},
+			"who reads RAGFlow?",
+		);
+		expect(reply.graph).toEqual({ entities: 1, relations: 0 });
+		const access = reply.chunks.filter((citation) => citation.heading_path === "Access path");
+		const datasets = reply.chunks.filter((citation) => citation.heading_path === "RAGFlow datasets");
+		expect(access.length).toBeGreaterThan(0);
+		expect(datasets.length).toBeGreaterThan(0);
+		expect(access.every((citation) => citation.graph?.entities?.includes("Access path"))).toBe(true);
+		expect(datasets.every((citation) => citation.graph === undefined)).toBe(true);
+	});
+
+	test("golden: a .planning snippet survives the offline harness with graph metadata", async () => {
+		const corpus = {
+			documents: [
+				{
+					dataset: "agent-substrate",
+					slug: "planning-graph",
+					source_url: "https://example.com/agent-substrate/planning-graph",
+					document_id: "doc-planning-graph",
+					name: "planning-graph.md",
+					body: "# Planning graph\n\nThe lightrag backend serves planning relations.",
+				},
+			],
+		};
+		const offline = await searchGoldenOffline(corpus, { question: "lightrag backend planning relations", datasets: ["agent-substrate"] }, { commit: "golden" });
+		expect(offline.retrievedDatasetIds).toEqual(["ds-berlin-agent-substrate"]);
+		expect(offline.reply.chunks).toHaveLength(1);
+		expect(offline.reply.chunks[0]?.heading_path).toBe("Planning graph");
+		expect(offline.reply.untrusted).toBe(UNTRUSTED_DOCS_NOTICE);
+		expect(offline.reply.graph).toBeUndefined();
+		// Same corpus through the LightRAG-shaped call: the heading the hint
+		// names carries graph metadata, and the reply reports the coverage.
+		const fake = goldenFake(corpus);
+		const hinted = await searchDocs(
+			{
+				config: { url: "http://ragflow.test", apiKey: "golden" },
+				emit: async () => ({ stored: false }),
+				surface: "omp",
+				fetchImpl: fake.fetch,
+				provenanceOf: () => ({ source_url: "https://example.com/agent-substrate/planning-graph", commit: "golden" }),
+				graphHints: [{ phase: "golden", entities: ["Planning graph"], relations: [] }],
+			},
+			"lightrag backend planning relations",
+		);
+		expect(hinted.chunks).toHaveLength(1);
+		expect(hinted.graph).toEqual({ entities: 1, relations: 0 });
+		expect(hinted.chunks[0]?.graph).toEqual({ entities: ["Planning graph"] });
+	});
+
+	test("backend graph entity names are redacted before the reply serves them", async () => {
+		const reply = await searchDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: { url: "http://lightrag.test" },
+				datasetNames: ["agent-substrate"],
+				lightragDatasets: { list: async () => ({ ok: true, datasets: [{ id: "ds-1", name: "agent-substrate" }] }), invalidate: () => {} },
+				lightragRetrieve: async () => ({
+					ok: true,
+					chunks: [{ content: "The planner reads the key.", document_name: "plan.md", document_id: "doc-1", heading_path: "Plan", score: 0.9 }],
+					detail: { mode: "hybrid", counts: { entities: 1, relations: 0 }, provenance: { entities: ["key sk-proj-abcdefghij1234567890"], relations: 0 } },
+				}),
+				emit: async () => ({ stored: false }),
+				surface: "omp",
+			},
+			"which key does the planner use?",
+		);
+		expect(JSON.stringify(reply)).not.toContain("sk-proj-");
+		expect(reply.chunks[0]?.graph?.entities[0]).toContain("[REDACTED]");
+	});
+
+	test("LightRAG search never consults the RAGFlow dataset list", async () => {
+		let ragflowListings = 0;
+		const reply = await searchDocs(
+			{
+				config: { url: "http://ragflow.test", apiKey: "test-key" },
+				backend: "lightrag",
+				lightragConfig: { url: "http://lightrag.test" },
+				datasetNames: ["agent-substrate"],
+				datasets: {
+					list: async () => {
+						ragflowListings += 1;
+						return { ok: false, reason: "ragflow-unreachable" };
+					},
+					invalidate: () => undefined,
+				},
+				lightragRetrieve: async () => ({
+					ok: true,
+					chunks: [{ content: "The planner reads the plan.", document_name: "plan.md", document_id: "doc-1", heading_path: "Plan", score: 0.9 }],
+					detail: { mode: "hybrid", counts: { entities: 0, relations: 0 }, provenance: { entities: [], relations: 0 } },
+				}),
+				emit: async () => ({ stored: false }),
+				surface: "omp",
+			},
+			"where is the plan?",
+		);
+		expect(ragflowListings).toBe(0);
+		expect(reply.degraded ?? false).toBe(false);
+		expect(reply.chunks).toHaveLength(1);
 	});
 });
 

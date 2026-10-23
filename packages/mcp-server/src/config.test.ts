@@ -29,6 +29,7 @@ import {
 	loadConfig,
 	loadLedgerSettings,
 	parseRedisUrl,
+	railwayHostingFromEnv,
 	surfaceForToken,
 } from "./config.ts";
 
@@ -335,6 +336,24 @@ describe("parseRedisUrl refuses plaintext non-loopback redis (DOCS-06)", () => {
 		expect(loopback.cacheEnabled).toBe(true);
 		expect(loopback.dragonflyUrl).toBe("redis://127.0.0.1:6379");
 		expect(loopback.dragonflyRefused).toBeNull();
+	});
+});
+
+describe("railwayHostingFromEnv: the LightRAG key without a public URL", () => {
+	test("a private-DNS deployment keeps LIGHTRAG_API_KEY for the health probe, with no public URL", () => {
+		const railway = railwayHostingFromEnv({ RAILWAY_PROJECT_ID: "proj", LIGHTRAG_API_KEY: " key-1 " });
+		expect(railway?.apiKey).toBe("key-1");
+		expect(railway?.lightrag).toBeNull();
+	});
+
+	test("SUBSTRATE_LIGHTRAG_API_KEY still wins over LIGHTRAG_API_KEY", () => {
+		const railway = railwayHostingFromEnv({ RAILWAY_PROJECT_ID: "proj", LIGHTRAG_API_KEY: "plain", SUBSTRATE_LIGHTRAG_API_KEY: "override" });
+		expect(railway?.apiKey).toBe("override");
+	});
+
+	test("a blank LIGHTRAG_API_KEY is no key", () => {
+		const railway = railwayHostingFromEnv({ RAILWAY_PROJECT_ID: "proj", LIGHTRAG_API_KEY: "   " });
+		expect(railway?.apiKey).toBeNull();
 	});
 });
 
