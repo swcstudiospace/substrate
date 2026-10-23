@@ -1600,22 +1600,15 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			// The outcome is unchanged — only transitions are reported.
 			const machineSettings = substrate.config.ragMachine;
 			ragMachine.enterRefresh("docs_ingest", "docs_ingest:upload");
-			try {
-				const outcome = await substrate.ingestDocs({ dataset, commit, pages, session_id }, callerSurface);
-				if (outcome.ok) {
-					ragMachine.recordSuccess("docs_ingest:served");
-				} else if (!ingestRefusalIsGate(outcome.reason)) {
-					// A refused request never reached the plane, so it says nothing about the plane's health.
-					ragMachine.recordFailure(machineSettings, `docs_ingest: ${outcome.reason}`);
-				}
-				return outcome.ok ? json(outcome) : { ...json(outcome), isError: true };
-			} catch (cause) {
-				ragMachine.recordFailure(
-					machineSettings,
-					`docs_ingest threw: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}`,
-				);
-				throw cause;
+			const outcome = await substrate.ingestDocs({ dataset, commit, pages, session_id }, callerSurface);
+			if (outcome.ok) {
+				ragMachine.recordSuccess("docs_ingest:served");
+			} else if (!ingestRefusalIsGate(outcome.reason)) {
+				// A refused request never reached the plane, so it says nothing about the plane's health. A request that
+				// throws is a bad request, not a plane outcome, so it is not counted either.
+				ragMachine.recordFailure(machineSettings, `docs_ingest: ${outcome.reason}`);
 			}
+			return outcome.ok ? json(outcome) : { ...json(outcome), isError: true };
 		},
 	);
 

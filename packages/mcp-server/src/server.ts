@@ -1538,26 +1538,19 @@ export function createHttpServer(
 				// SPE-19388: the REST ingest reports into the same process-wide
 				// RAG machine as the MCP tool. Outcomes are unchanged.
 				ragMachine.enterRefresh(`docs_ingest:${config.docsBackend}`, `docs_ingest:upload:${config.docsBackend}`);
-				try {
-					const outcome = await substrate.ingestDocs(ingestFields, surface);
-					if (outcome.ok) {
-						ragMachine.recordSuccess("docs_ingest:served");
-					} else if (!ingestRefusalIsGate(outcome.reason)) {
-						// A refused request never reached the plane, so it says nothing about the plane's health.
-						ragMachine.recordFailure(config.ragMachine, `docs_ingest: ${outcome.reason}`);
-					}
-					if (!outcome.ok) {
-						sendJson(res, outcome.reason === "vm-guest" ? 403 : outcome.reason === "version.stale" ? 409 : 400, outcome);
-						return;
-					}
-					sendJson(res, 200, outcome);
-				} catch (cause) {
-					ragMachine.recordFailure(
-						config.ragMachine,
-						`docs_ingest threw: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}`,
-					);
-					throw cause;
+				const outcome = await substrate.ingestDocs(ingestFields, surface);
+				if (outcome.ok) {
+					ragMachine.recordSuccess("docs_ingest:served");
+				} else if (!ingestRefusalIsGate(outcome.reason)) {
+					// A refused request never reached the plane, so it says nothing about the plane's health. A request that
+					// throws is a bad request, not a plane outcome, so it is not counted either.
+					ragMachine.recordFailure(config.ragMachine, `docs_ingest: ${outcome.reason}`);
 				}
+				if (!outcome.ok) {
+					sendJson(res, outcome.reason === "vm-guest" ? 403 : outcome.reason === "version.stale" ? 409 : 400, outcome);
+					return;
+				}
+				sendJson(res, 200, outcome);
 				return;
 			}
 			// SPE-19388 LightRAG query surface (SPE-19384 RAG replacement):
