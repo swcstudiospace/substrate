@@ -789,10 +789,10 @@ Plans:
 | 42. SKILL-CARD | v1.3.x | 0/0 | Code on main (PR #94); human_needed | - |
 | 43. LANE-A | v1.3.x | 1/1 | Complete (PR #97) | 2026-10-21 |
 | 44. UAT | v1.3.x | 1/1 | Complete (PR #95) | 2026-10-21 |
-| 45. Railway Resource Orchestrator | v1.5 | 1/1 | Complete (PR #96) | 2026-10-21 |
-| 46. RAGFlow Advanced Hybrid RAG with Hindsight Context | v1.5 | 1/1 | In review (draft PR #98) | - |
-| 47. GreptimeDB + Dragonfly Predictive Analytics & Cache | v1.5 | 0/0 | Not started | - |
-| 48. TailscaleDB Secure Unified Proxy Layer | v1.5 | 0/0 | Not started | - |
-| 49. Hindsight Graph Memory with Greptime Events | v1.5 | 0/0 | Not started | - |
-| 50. Dragonfly Pub/Sub for Real-time Events | v1.5 | 0/0 | Not started | - |
-| 51. Enterprise Unified Resource Fabric | v1.5 | 0/0 | Not started | - |
+| 45. Railway Resource Orchestrator | v1.5 | 1/1 | Code on main (PR #96); human_needed (live Railway proof operator-gated) | - |
+| 46. RAGFlow Advanced Hybrid RAG with Hindsight Context | v1.5 | 1/1 | Code on main (PR #98); human_needed (live RAGFlow proof operator-gated) | - |
+| 47. GreptimeDB + Dragonfly Predictive Analytics & Cache | v1.5 | 1/1 | Code on main (PR #100); human_needed (live forecast and warm-up proof operator-gated) | - |
+| 48. TailscaleDB Secure Unified Proxy Layer | v1.5 | 1/1 | Code on main (PR #102); human_needed (live cutover operator-gated) | - |
+| 49. Hindsight Graph Memory with Greptime Events | v1.5 | 1/1 | Code on main (PR #101); human_needed (live ledger proof operator-gated) | - |
+| 50. Dragonfly Pub/Sub for Real-time Events | v1.5 | 1/1 | Code on main (PR #103); human_needed (live subscription proof operator-gated) | - |
+| 51. Enterprise Unified Resource Fabric | v1.5 | 1/1 | Complete (PR #108) | 2026-10-22 |
