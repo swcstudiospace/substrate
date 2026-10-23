@@ -113,6 +113,8 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_CACHE` | toggle | on when DRAGONFLY_URL is set | 0 \| false \| no turns it off | on when the URL is set; anything else is unset. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CACHE_COMMAND_TIMEOUT_MS` | number | 250 | positive ms | 250 ms | mcp-server/config.ts | yes |
 | `SUBSTRATE_CACHE_CONNECT_TIMEOUT_MS` | number | 250 | positive ms | 250 ms | mcp-server/config.ts | yes |
+| `SUBSTRATE_DB_ENDPOINT_POLICY` | mode | warn | warn \| enforce (case- and space-insensitive; unset or blank is warn; anything else refuses boot) | warn: a direct GREPTIME_URL, SUBSTRATE_PG_URL or DRAGONFLY_URL is reported at boot and the service runs as before. See `docs/data-planes.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_DB_PROXY_ALLOW` | list | none | comma-separated host:port entries (host lowercased, port 1 to 65535) | no proxy entries: only loopback endpoints are non-direct. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CACHE_SWR` | mode | shadow | off \| shadow \| enforce | shadow: count would_serve_stale, serve the live brief exactly as before. See `docs/data-planes.md` | mcp-server/config.ts, cache.ts | yes |
 | `SUBSTRATE_CACHE_SWR_WINDOW_S` | number | 30 | 1..300 | 30 s. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CACHE_PRELOAD` | toggle | off | on \| off | off: no preload timer, no compose, no request counting. See `docs/data-planes.md` | mcp-server/config.ts | yes |

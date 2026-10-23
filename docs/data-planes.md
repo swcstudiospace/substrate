@@ -105,6 +105,31 @@ The cache covers `POST /brief`, `memory_brief`, `memory_search`, `memory_recall`
 
 Concurrent identical misses share one load (uplift-4 S4): the in-process in-flight map is keyed by the final cache key (so a caller that reads a newer generation has a different key and never joins an older flight), holds at most 256 entries (beyond that requests load independently), and an entry is deleted the moment its promise settles, however it settles. A caller that joins a flight whose owner produced a degraded answer (the brief's `store` refused it) loads for itself, because "degraded" belongs to the owner's call. A flight older than 15 s is not joined. A caller that passes its own budget (`deadlineMs`) and a degraded answer (`onDeadline`) to `getOrLoad` keeps that deadline while it waits on another caller's load: when its own timer wins it answers its degraded reply without starting a load and without cancelling the shared one, so a short-budget search never waits out a long-budget recall. This is always on and changes no answer, only the number of duplicate loads. `SUBSTRATE_CACHE_SWR=off|shadow|enforce` (default `shadow`) and `SUBSTRATE_CACHE_SWR_WINDOW_S` (default 30, max 300) add stale-while-revalidate for **the brief only**: a brief miss (a generation moved) that finds a `brief-snapshot` last-good younger than the window is answered with that text in `enforce`, while one background refresh per key (at most 16 at once) composes a fresh brief, stores it and moves the last-good. The snapshot records the lease or reverify deadline its text embeds (`until`, epoch ms, or `null` for none); a last-good past its `until`, one with an unreadable `until`, and one written by a release that did not record it at all (no `until`: its deadline is unknown) are never served stale. A degraded refresh is never stored and never becomes the last-good; a refresh that outlives its 15 s backstop deadline writes nothing when it finally settles and keeps its slot and its key until it does, so neither the 16-refresh cap nor one-refresh-per-key loosens. `shadow` takes the same decision beside the live load (no extra serial round trip), counts it as `would_serve_stale` and serves the live brief exactly as `off` does; the probe is started and never awaited, so a slow snapshot read cannot hold a finished brief or the flight slot, and it is silent, so a failing probe read neither counts an error nor marks the cache degraded. A stale brief keeps `state: complete` and is advertised additively: `POST /brief` adds `X-Substrate-Brief-Age: <seconds>` (on the 304 too) and the MCP `memory_brief` `structuredContent` adds `age_s` (also on `not_modified`); both are absent unless the brief was served stale. Read-your-writes therefore holds only in `off` and `shadow`: in `enforce` a brief read right after a write can be up to the window old until the refresh lands. `memory_search`, `memory_recall`, `graph_get` and `docs_search` are single-flight only: they have no generation-free last-good, and serving a pre-write memory or docs answer is not a trade this uplift makes. `substrate.cache.operations` carries `class` (`brief`, `memory-search`, `graph-view`, `brief-snapshot`, `docs-search`, `budget`, `gen`) and `result` (`hit|miss|coalesced|stale|refresh|would_serve_stale|bypass|error`) beside the existing `mode`. `bun scripts/cache-stats.ts` is the operator-run census of key classes, value bytes and the `maxmemory` they justify (bounded `SCAN`, `TYPE` and `STRLEN` only, every command raced against a 250 ms wall budget, no value read, loopback URLs only unless `--allow-remote`), with the running service's hit, stale and coalesced ratios read from its loopback `/healthz` (which needs the bearer: `SUBSTRATE_TOKEN` or `SUBSTRATE_TOKEN_FILE`, sent only as a header; a 401/403 is named in the output, not a silent gap).
 
+### Endpoint policy
+
+Each data-plane endpoint is classed before `substrate-mcp` connects to it. There are three classes:
+
+- **loopback**: `localhost`, `127.x.y.z`, `::1` or `[::1]`.
+- **proxy**: a host and port listed in `SUBSTRATE_DB_PROXY_ALLOW`.
+- **direct**: anything else, including any URL that does not parse.
+
+The scheme does not decide the class. When a URL names no port, the scheme's default port is used for the match: `http` 80, `https` 443, `postgres` and `postgresql` 5432, `redis` and `rediss` 6379. Host spellings are canonicalised before the match, so `127.1` is loopback. The address `0.0.0.0` is not loopback.
+
+`SUBSTRATE_DB_PROXY_ALLOW` is a comma-separated list of `host:port` entries, for example a tailnet proxy listening on a chosen port (`proxy-host:5432`). Entries are trimmed, a host is lowercased, and the port must be 1 to 65535. A malformed entry refuses boot, naming the variable and the entry's position, never its text. Blank means no entries.
+
+`SUBSTRATE_DB_ENDPOINT_POLICY` is `warn` (default) or `enforce`. Any other value refuses boot, naming the variable.
+
+- `warn`: nothing is refused. A direct endpoint is reported at boot as a `db.endpoint` audit event.
+- `enforce`: a configured direct endpoint refuses boot with a message naming the variable (`GREPTIME_URL`, `SUBSTRATE_PG_URL` or `DRAGONFLY_URL`) and the policy, never the URL.
+
+DragonflyDB: a `redis` or `rediss` URL is accepted only when its class is loopback or proxy. Any other class is refused and the cache is off (fail-open), as before. The refusal of `rediss` to a non-loopback host is new.
+
+Boot audit: one `db.endpoint` event (kind `note`, surface `substrate`, runtime `mcp-server`) is emitted per configured plane, once at listen, with a payload of `action`, `runtime`, `plane`, `class` and `policy`. It carries no URL, host or credential, and it never blocks boot.
+
+Per-call access is metered by the existing plane duration and error metrics, not by per-call audit events, to avoid flooding the ledger.
+
+Not done here and operator-gated: the Tailscale forwarders, their ACL, the allow list values, the cutover, and the live proof. RBAC and connection pooling are deferred.
+
 ### Request-path flags (uplift-5 U5-3)
 
 Three flags, each defaulting to what the code did before them. An unrecognised value keeps the default and is named on stderr at boot (`misconfigured — …`); nothing here deletes data or changes a key shape under the default.
@@ -137,9 +162,15 @@ Admission budgets (uplift-3 N3) are the one key class that is not a cached answe
 `SUBSTRATE_CACHE_PRELOAD` is `on` or `off`, default `off`. `SUBSTRATE_CACHE_PRELOAD_TOP`
 is an integer from 1 to 20, default 3. `SUBSTRATE_CACHE_PRELOAD_S` is an integer from
 10 to 3600, default 300. An out-of-range value, or any other switch value, refuses boot
-and names the variable. `on` with no cache (`DRAGONFLY_URL` unset or refused, or
-`SUBSTRATE_CACHE=0`) refuses boot too, and names `SUBSTRATE_CACHE_PRELOAD`: a warm-up
+and names the variable. `on` with no cache because `DRAGONFLY_URL` is unset or
+`SUBSTRATE_CACHE=0` refuses boot too, and names `SUBSTRATE_CACHE_PRELOAD`: a warm-up
 with nowhere to store would only compose.
+
+A `DRAGONFLY_URL` refused by the endpoint policy is a different case. Under `warn` the refusal
+is fail-open, as for the cache: the server boots uncached with the preload off, and stderr logs
+`SUBSTRATE_CACHE_PRELOAD=on skipped: the cache endpoint is refused, so the cache is off`. Under
+`enforce` the refused endpoint refuses boot first (see Endpoint policy), so the preload's own
+check is never reached.
 
 With the switch on, the substrate counts brief requests per repo over a sliding hour,
 for at most 256 repos, and remembers the last brief request seen for each repo: its
@@ -179,6 +210,8 @@ A dropped subscription reconnects with a backoff of 1 second, doubling to a maxi
 Cache invalidation is not driven by hints. Generation counters remain the only invalidation authority, shared through Dragonfly. Dragonfly holds no authoritative state; the pub/sub channel carries only wake-up hints.
 
 ## Target after the private-forwarder cutover
+
+The DragonflyDB URL must name a loopback host or a proxy listed in `SUBSTRATE_DB_PROXY_ALLOW`. Under `SUBSTRATE_DB_ENDPOINT_POLICY=enforce`, a direct host is refused at boot; under `warn` it is reported as a `db.endpoint` event (see Endpoint policy). The forwarder placeholder below is therefore valid only once its `host:port` is listed in the allow list.
 
 | Store | Reader | Env var | Reach |
 |---|---|---|---|
