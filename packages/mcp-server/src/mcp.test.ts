@@ -1328,4 +1328,96 @@ describe("a docs_search is the RAG breaker's half-open probe", () => {
 		expect(planeCalls).toBeGreaterThan(before);
 		expect((await call(client, "docs_rag_state")).json().state).toBe("IDLE");
 	});
+
+	test("a docs_search inside the cooldown does not ask LightRAG: it answers degraded and the plane sees no request", async () => {
+		let planeCalls = 0;
+		globalThis.fetch = (async () => {
+			planeCalls += 1;
+			return new Response("upstream down", { status: 500 });
+		}) as unknown as typeof fetch;
+		// A 60 s cooldown: it cannot elapse during the test, so ERROR holds until the assertions say otherwise.
+		const { client } = await connect(ledger().greptime, "omp", LIGHTRAG_BREAKER_ENV);
+		for (const question of ["trip one", "trip two", "trip three"]) {
+			expect((await call(client, "docs_lightrag_query", { question })).json().fallback).toBe("hindsight");
+		}
+		expect((await call(client, "docs_rag_state")).json().state).toBe("ERROR");
+		const tripped = planeCalls;
+
+		const inside = (await call(client, "docs_search", { question: "asked inside the cooldown" })).json();
+		expect(inside).toMatchObject({ degraded: true, reason: "rag breaker open" });
+		expect(planeCalls).toBe(tripped);
+		expect((await call(client, "docs_rag_state")).json().state).toBe("ERROR");
+	});
+
+	test("a docs_search inside the cooldown is answered from the cache for its question, and the plane is not asked", async () => {
+		let planeHealthy = true;
+		let planeCalls = 0;
+		globalThis.fetch = (async () => {
+			planeCalls += 1;
+			return planeHealthy ? lightragAnswer() : new Response("upstream down", { status: 500 });
+		}) as unknown as typeof fetch;
+		const { client } = await connect(ledger().greptime, "omp", LIGHTRAG_BREAKER_ENV, { cache: new ReadThroughCache({ redis: new MemoryRedis(), enabled: true, log: () => {} }) });
+		// Populates the cache with a healthy, non-degraded reply for the question the refused search repeats.
+		expect((await call(client, "docs_search", { question: "the cached question" })).json().degraded).toBeUndefined();
+
+		planeHealthy = false;
+		for (const question of ["search one", "search two", "search three"]) {
+			expect((await call(client, "docs_search", { question })).json().degraded).toBe(true);
+		}
+		expect((await call(client, "docs_rag_state")).json().state).toBe("ERROR");
+
+		const before = planeCalls;
+		const answered = (await call(client, "docs_search", { question: "the cached question" })).json();
+		expect(answered.degraded).toBeUndefined();
+		expect(answered.chunks).toHaveLength(1);
+		expect(planeCalls).toBe(before);
+	});
+
+});
+
+describe("a half-open probe is settled only by its own report", () => {
+	const realFetch = globalThis.fetch;
+	beforeEach(() => resetRagMachine());
+	afterEach(() => {
+		globalThis.fetch = realFetch;
+		resetRagMachine();
+	});
+
+	test("a successful ingest during the probe keeps the failure count, and a probe that then fails re-trips the breaker", async () => {
+		const probeReply = Promise.withResolvers<Response>();
+		const probeReached = Promise.withResolvers<void>();
+		let queries = 0;
+		globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			const url = new URL(String(input));
+			if (url.pathname === "/query") {
+				queries += 1;
+				if (queries === 4) {
+					probeReached.resolve();
+					return probeReply.promise;
+				}
+				return new Response("upstream down", { status: 500 });
+			}
+			if (init?.method === "POST" && url.pathname === "/documents/upload") return Response.json({ status: "success", data: { track_id: "trk-1" } });
+			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+			if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+			return Response.json({ detail: "no route" }, { status: 404 });
+		}) as unknown as typeof fetch;
+		// A zero cooldown has already elapsed, so the query after ERROR is the probe; no timer is needed.
+		const { client } = await connect(ledger().greptime, "omp", LIGHTRAG_QUERY_ENV);
+		for (const question of ["trip one", "trip two", "trip three"]) {
+			expect((await call(client, "docs_lightrag_query", { question })).json().fallback).toBe("hindsight");
+		}
+		expect((await call(client, "docs_rag_state")).json().state).toBe("ERROR");
+
+		const probe = call(client, "docs_lightrag_query", { question: "the probe" });
+		await probeReached.promise;
+
+		const ingested = await call(client, "docs_ingest", { dataset: "agent-substrate", pages: [PAGE_FOR_INGEST] });
+		expect(ingested.isError).toBe(false);
+		expect((await call(client, "docs_rag_state")).json()).toMatchObject({ state: "CONTEXT_REFRESH", consecutiveFailures: 3 });
+
+		probeReply.resolve(new Response("upstream down", { status: 500 }));
+		expect((await probe).json().fallback).toBe("hindsight");
+		expect((await call(client, "docs_rag_state")).json()).toMatchObject({ state: "ERROR", consecutiveFailures: 4 });
+	});
 });

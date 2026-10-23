@@ -1192,8 +1192,8 @@ describe("append-mode enforcement", () => {
 	});
 
 	test("a RAGFlow refresh does not move a LightRAG dataset's records to RAGFlow's id: an unchanged page stays unchanged", async () => {
-		// The refresh records RAGFlow's id on the dataset's version. The LightRAG ingest keys its records by the dataset's
-		// name, so the next ingest of the same page finds the record and uploads nothing.
+		// Under the lightrag backend the refresh records the dataset's name as its id (recordLightragVersion). The LightRAG
+		// ingest keys its records by that same name, so the next ingest of the same page finds the record and uploads nothing.
 		const ragflow = new RagflowFake();
 		const uploads: string[] = [];
 		const substrate = new Substrate(
@@ -1222,6 +1222,41 @@ describe("append-mode enforcement", () => {
 
 		const again = await substrate.ingestDocs({ dataset: "agent-substrate", commit: "abc123", pages: [page] }, "omp", ["docs/"]);
 		expect(again).toMatchObject({ ok: true, results: [expect.objectContaining({ status: "unchanged" })] });
+		expect(uploads).toHaveLength(1);
+	});
+
+	test("a LightRAG refresh does not resolve datasets through RAGFlow: an unreachable RAGFlow does not block it, and it records a LightRAG version", async () => {
+		let ragflowCalls = 0;
+		const uploads: string[] = [];
+		const substrate = new Substrate(
+			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }),
+			{
+				index: null,
+				greptime: null,
+				ragflowFetch: async () => {
+					ragflowCalls += 1;
+					throw new Error("connect ECONNREFUSED");
+				},
+				lightragFetch: async (input, init) => {
+					const url = new URL(String(input));
+					if (init?.method === "POST" && url.pathname === "/documents/upload") {
+						uploads.push(await ((init.body as FormData).get("file") as Blob).text());
+						return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
+					}
+					if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+					if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+					return Response.json({ detail: "no route" }, { status: 404 });
+				},
+			},
+		);
+		const page = { path: "docs/a.md", source_url: "https://example.com/a", body: "# A\n\nHello." };
+		const outcome = await substrate.startDocsRefresh(
+			{ dataset: "agent-substrate", commit: "abc123", content_sha256: "sha-abc123", roots: async () => ["docs/"], pages: async () => [page] },
+			"omp",
+			{ wait: true },
+		);
+		expect(ragflowCalls).toBe(0);
+		expect(outcome).toMatchObject({ status: 200, body: { ok: true, version: { version: "v1", backend: "lightrag", dataset_id: "agent-substrate" } } });
 		expect(uploads).toHaveLength(1);
 	});
 

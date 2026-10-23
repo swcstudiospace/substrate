@@ -288,10 +288,18 @@ export class RagStateMachine {
 		this.transition("CONTEXT_REFRESH", refreshReason);
 	}
 
-	recordSuccess(reason?: string): RagStateSnapshot {
-		// While the breaker is open only the half-open probe reports: a call that never probed the plane must not reset
-		// the failure count the probe's own failure is judged by.
-		if (this.state === "ERROR") return this.snapshot();
+	/**
+	 * Whether a report may move the machine. An open breaker takes no report but the probe's, and while the half-open
+	 * probe is in flight only the probe's own report may: an ingest or search that overlaps it must not reset the
+	 * failure count the probe's own failure is judged by. Probe ownership is tracked apart from the displayed state.
+	 */
+	private reportable(report: RagReport | undefined): boolean {
+		if (this.state === "ERROR") return false;
+		return !this.probing || report?.probe === true;
+	}
+
+	recordSuccess(reason?: string, report?: RagReport): RagStateSnapshot {
+		if (!this.reportable(report)) return this.snapshot();
 		this.consecutiveSuccesses += 1;
 		this.consecutiveFailures = 0;
 		if (this.state === "CONTEXT_REFRESH" || this.state === "DEGRADED") {
@@ -300,9 +308,8 @@ export class RagStateMachine {
 		return this.snapshot();
 	}
 
-	recordFailure(settings: RagMachineSettings, reason: string): RagStateSnapshot {
-		// Same as recordSuccess: while the breaker is open, only the half-open probe reports.
-		if (this.state === "ERROR") return this.snapshot();
+	recordFailure(settings: RagMachineSettings, reason: string, report?: RagReport): RagStateSnapshot {
+		if (!this.reportable(report)) return this.snapshot();
 		this.consecutiveSuccesses = 0;
 		this.consecutiveFailures += 1;
 		if (this.state === "CONTEXT_REFRESH" || this.state === "STEERING") {
@@ -346,6 +353,14 @@ export class RagStateMachine {
 	settleProbe(): void {
 		this.probing = false;
 	}
+}
+
+/**
+ * Where a RAG outcome came from. The half-open probe reports its own attempt with `probe: true`: while the probe is in
+ * flight, that report alone settles recovery.
+ */
+export interface RagReport {
+	probe?: boolean;
 }
 
 /** Process-wide RAG machine, shared by the MCP tools and the REST routes. */
@@ -1427,6 +1442,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			// transition is logged and ignored.
 			const machineSettings = substrate.config.ragMachine;
 			const admission = ragMachine.admitQuery(machineSettings.halfOpenMs);
+			const report = { probe: admission === "probe" };
 			try {
 				// Admission as docs_lightrag_query: after the cooldown one search is the half-open probe and leaves ERROR
 				// through STEERING and CONTEXT_REFRESH. A refused search runs but reports nothing, so it cannot clear ERROR
@@ -1455,14 +1471,15 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 						planning_hash: planning_hash ?? live?.planning_hash,
 						context,
 						probe: admission === "probe",
+						cooling: admission === "refuse",
 					},
 					callerSurface,
 				);
 				if (admission !== "refuse") {
 					if (reply.degraded === true) {
-						ragMachine.recordFailure(machineSettings, `docs_search: ${reply.reason ?? "degraded"}`);
+						ragMachine.recordFailure(machineSettings, `docs_search: ${reply.reason ?? "degraded"}`, report);
 					} else {
-						ragMachine.recordSuccess("docs_search:served");
+						ragMachine.recordSuccess("docs_search:served", report);
 					}
 				}
 				return json(reply);
@@ -1471,6 +1488,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					ragMachine.recordFailure(
 						machineSettings,
 						`docs_search threw: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}`,
+						report,
 					);
 				}
 				throw cause;
@@ -1667,6 +1685,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				setCachedRagResult(key, degraded);
 				return lightragReply(degraded);
 			}
+			const report = { probe: admission === "probe" };
 			// A probe's attempt ends here, whatever it found: until then no other query reaches the plane.
 			try {
 				ragMachine.transition("STEERING", `lightrag_query:${backend}`);
@@ -1691,7 +1710,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					if (attempt > 0) await ragRetryDelay(settings.retryBaseMs, attempt);
 					const answered = await queryLightragRest(lightrag, { question: augmented, ...(mode !== undefined ? { mode } : {}), ...(top_k !== undefined ? { topK: top_k } : {}) });
 					if (answered.ok) {
-						const state = ragMachine.recordSuccess("lightrag_query:served");
+						const state = ragMachine.recordSuccess("lightrag_query:served", report);
 						const result: RagLightragResult = {
 							backend: "lightrag",
 							chunks: answered.chunks,
@@ -1703,7 +1722,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					}
 					lastReason = answered.reason;
 				}
-				ragMachine.recordFailure(settings, `lightrag_query: ${lastReason}`);
+				ragMachine.recordFailure(settings, `lightrag_query: ${lastReason}`, report);
 				const degraded = await hindsightRagFallback(substrate, callerSurface, question, entityList, relationList, lastReason);
 				setCachedRagResult(key, degraded);
 				return lightragReply(degraded);

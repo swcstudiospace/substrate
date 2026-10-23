@@ -719,6 +719,30 @@ describe("LightRAG search and the RAGFlow plane", () => {
 		expect(lightrag.queries).toHaveLength(0);
 	});
 
+	test("a LightRAG search the RAG machine refuses never reaches the LightRAG plane: Hindsight answers, or the degraded reply does", async () => {
+		const lightrag = lightragServing("Served by LightRAG.");
+		let recalled: DerivedMemoryHit[] = [{ bank: "sub-cursor", id: "mem-1", text: "The plan lives in PLAN.md.", derived: true, document_id: "mwd_1", tags: [], score: 0.8 }];
+		const deps = {
+			config: null,
+			backend: "lightrag" as const,
+			lightragConfig: { url: "http://lightrag.test" },
+			datasetNames: ["agent-substrate"],
+			lightragFetch: lightrag.fetch,
+			lightragCooling: true,
+			lightragHindsight: async () => recalled,
+			emit: async () => ({ stored: false }),
+			surface: "omp" as const,
+		};
+		const served = await searchDocs(deps, "where is the plan?");
+		expect(served).toMatchObject({ backend: "hindsight", fallback: "hindsight", degraded: true, reason: "rag breaker open" });
+		expect(served.chunks).toHaveLength(1);
+		recalled = [];
+		const degraded = await searchDocs(deps, "where is the plan?");
+		expect(degraded).toMatchObject({ degraded: true, reason: "rag breaker open" });
+		expect(degraded.backend).toBeUndefined();
+		expect(lightrag.queries).toHaveLength(0);
+	});
+
 	test("docs ingest on the LightRAG backend still uploads while the RAGFlow breaker is open, because LightRAG calls never go through the RAGFlow gate", async () => {
 		const uploads: string[] = [];
 		const lightragIngest: FetchLike = async (input, init) => {

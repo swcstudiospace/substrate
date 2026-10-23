@@ -1455,6 +1455,7 @@ export function createHttpServer(
 				// RAG machine as the MCP tool. Replies are unchanged.
 				const searchBackend = config.docsBackend;
 				const admission = ragMachine.admitQuery(config.ragMachine.halfOpenMs);
+				const report = { probe: admission === "probe" };
 				try {
 					// Admission as docs_lightrag_query: after the cooldown one search is the half-open probe and leaves ERROR
 					// through STEERING and CONTEXT_REFRESH. A refused search runs but reports nothing, so it cannot clear ERROR
@@ -1465,12 +1466,12 @@ export function createHttpServer(
 					} else if (admission === "serve") {
 						ragMachine.enterRefresh(`docs_search:${searchBackend}`, `docs_search:retrieve:${searchBackend}`);
 					}
-					const reply = await substrate.searchDocs({ ...fields, probe: admission === "probe" }, surface);
+					const reply = await substrate.searchDocs({ ...fields, probe: admission === "probe", cooling: admission === "refuse" }, surface);
 					if (admission !== "refuse") {
 						if (reply.degraded === true) {
-							ragMachine.recordFailure(config.ragMachine, `docs_search: ${reply.reason ?? "degraded"}`);
+							ragMachine.recordFailure(config.ragMachine, `docs_search: ${reply.reason ?? "degraded"}`, report);
 						} else {
-							ragMachine.recordSuccess("docs_search:served");
+							ragMachine.recordSuccess("docs_search:served", report);
 						}
 					}
 					sendJson(res, 200, reply);
@@ -1479,6 +1480,7 @@ export function createHttpServer(
 						ragMachine.recordFailure(
 							config.ragMachine,
 							`docs_search threw: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}`,
+							report,
 						);
 					}
 					throw cause;
@@ -1633,6 +1635,7 @@ export function createHttpServer(
 					sendJson(res, 200, withLightragNotice(held));
 					return;
 				}
+				const report = { probe: admission === "probe" };
 				// A probe's attempt ends here, whatever it found: until then no other query reaches the plane.
 				try {
 					ragMachine.transition("STEERING", `lightrag_query:${config.docsBackend}`);
@@ -1662,7 +1665,7 @@ export function createHttpServer(
 							...(typeof topK === "number" ? { topK } : {}),
 						});
 						if (answered.ok) {
-							const state = ragMachine.recordSuccess("lightrag_query:served");
+							const state = ragMachine.recordSuccess("lightrag_query:served", report);
 							const result = {
 								backend: "lightrag" as const,
 								chunks: answered.chunks,
@@ -1675,7 +1678,7 @@ export function createHttpServer(
 						}
 						lastReason = answered.reason;
 					}
-					ragMachine.recordFailure(config.ragMachine, `lightrag_query: ${lastReason}`);
+					ragMachine.recordFailure(config.ragMachine, `lightrag_query: ${lastReason}`, report);
 					const degraded = await hindsightRagFallback(
 						substrate,
 						surface,
@@ -1761,7 +1764,8 @@ export function createHttpServer(
 				// is decided under — a merge-trigger nobody recorded is an unrecorded
 				// publication, same as an ingest nobody recorded.
 				if (!(await auditedRest(res, observability, surface, "docs_ingest", fields))) return;
-				if (config.ragflow === null) {
+				// The selected plane decides: a LightRAG deployment with RAGFlow unset still refreshes.
+				if (config.docsBackend === "lightrag" ? config.lightrag === null : config.ragflow === null) {
 					// The null-block idiom: no docs plane is configured, so the trigger
 					// asks for nothing that exists — answered quietly, no plane call made.
 					sendJson(res, 200, { ok: true, dataset, noop: true, reason: "docs-plane-unconfigured" });

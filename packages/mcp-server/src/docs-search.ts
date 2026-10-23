@@ -376,6 +376,11 @@ export interface SearchDeps {
 	 * it through its own recall. Absent means no fallback. Never throws out of the search: a throw is no hits.
 	 */
 	lightragHindsight?: (question: string) => Promise<readonly DerivedMemoryHit[]>;
+	/**
+	 * The RAG machine refused the plane: its breaker is cooling, or a half-open probe holds it. LightRAG is not asked;
+	 * the search answers from Hindsight, or degraded, as it does for an open breaker. The RAGFlow path ignores it.
+	 */
+	lightragCooling?: boolean;
 }
 
 function failed(deps: SearchDeps, sessionId: string, reason: string, degradedDatasets?: DegradedDataset[]): Promise<SearchReply> {
@@ -781,6 +786,9 @@ export async function searchDocs(deps: SearchDeps, question: string): Promise<Se
 /** The reason the LightRAG plane client gives a call its open breaker refused (`planes/lightrag.ts`). */
 const LIGHTRAG_CIRCUIT_OPEN = "lightrag circuit open";
 
+/** The reason a refused RAG machine admission names: the breaker is cooling or a half-open probe holds the plane. */
+const RAG_BREAKER_OPEN = "rag breaker open";
+
 /**
  * Planning-graph hints riding along without changing the citations' shape:
  * the reply-level counts plus, on any citation whose heading a hint names,
@@ -933,6 +941,8 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 	const lightrag = deps.lightragConfig;
 	const retrieve = deps.lightragRetrieve ?? retrieveForSearchLightrag;
 	if (lightrag == null) return failed(deps, sessionId, "lightrag-not-configured");
+	// The RAG machine refused the plane (see `lightragCooling`): the search answers without asking LightRAG.
+	if (deps.lightragCooling === true) return lightragFallback(deps, sessionId, question, RAG_BREAKER_OPEN);
 	// Only the LightRAG plane's own breaker is consulted: the RAGFlow state never
 	// stands in for it, so a RAGFlow outage cannot refuse a LightRAG search.
 	const breakerState = deps.lightragBreakerState;

@@ -63,6 +63,7 @@ import {
 	createVersionStore,
 	isSyncLive,
 	latestVersion,
+	latestVersionFor,
 	lightragSearchDatasets,
 	noteSkillsSyncFastForward,
 	pinsFromVersions,
@@ -4453,7 +4454,7 @@ export class Substrate {
 	 * cached chunks and is never stored.
 	 */
 	async searchDocs(
-		input: { question?: unknown; datasets?: unknown; session_id?: unknown; repo_id?: unknown; planning_hash?: unknown; context?: unknown; probe?: unknown },
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown; repo_id?: unknown; planning_hash?: unknown; context?: unknown; probe?: unknown; cooling?: unknown },
 		callerSurface: Surface | null,
 	): Promise<SearchReply> {
 		const surface = callerSurface ?? "claude-code";
@@ -4480,7 +4481,7 @@ export class Substrate {
 	}
 
 	private async searchDocsUnmeasured(
-		input: { question?: unknown; datasets?: unknown; session_id?: unknown; repo_id?: unknown; planning_hash?: unknown; context?: unknown; probe?: unknown },
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown; repo_id?: unknown; planning_hash?: unknown; context?: unknown; probe?: unknown; cooling?: unknown },
 		surface: Surface,
 		callerSurface: Surface | null,
 		noteLoaded: () => void,
@@ -4493,7 +4494,7 @@ export class Substrate {
 		const repoId = normalizeRepoId(typeof input.repo_id === "string" ? input.repo_id : null);
 		const planningHash = typeof input.planning_hash === "string" && input.planning_hash.trim().length > 0 ? input.planning_hash.trim() : null;
 		await this.hydrateDocsSeen();
-		const pins = this.config.docsBackend === "lightrag" ? pinsByName(this.docsVersions, names) : pinsFromVersions(this.docsVersions);
+		const pins = this.config.docsBackend === "lightrag" ? pinsByName(this.docsVersions, names, this.config.docsBackend) : pinsFromVersions(this.docsVersions, this.config.docsBackend);
 		const degradedDatasets = isSyncLive(this.docsSkillsSync) && !this.docsSkillsRefreshFailed ? [] : ["agent-skills"];
 		const load = (): Promise<SearchReply> => {
 			noteLoaded();
@@ -4520,6 +4521,7 @@ export class Substrate {
 					breakerState: () => this.planes.gate("ragflow").breaker?.state() ?? "closed",
 					lightragBreakerState: () => this.planes.gate("lightrag").breaker?.state() ?? "closed",
 					lightragRetry: this.config.ragMachine,
+					lightragCooling: input.cooling === true,
 					lightragHindsight: async (query) => (await this.recallMemories({ query }, callerSurface)).results,
 				},
 				question,
@@ -4536,7 +4538,9 @@ export class Substrate {
 			});
 		// An empty question and an unconfigured selected backend are answered (degraded)
 		// without touching the cache: there is nothing to key on. A half-open probe also skips it: the probe must
-		// reach the plane, or a cached reply would clear ERROR without the plane answering.
+		// reach the plane, or a cached reply would clear ERROR without the plane answering. A refused search (`cooling`)
+		// keeps the cache: a reply cached for its question is served, and a miss runs `load`, which answers from
+		// Hindsight on the cooling path, so LightRAG is not asked.
 		const configured = this.config.docsBackend === "lightrag" ? this.config.lightrag !== null : this.config.ragflow !== null;
 		const chunks = question.trim().length === 0 || !configured || input.probe === true ? await load() : await cached();
 		// The context is attached per call, after the chunks: a session's events
@@ -4727,10 +4731,10 @@ export class Substrate {
 	// uplift-2 R6 — dataset versions and the merge-trigger, moved here from
 	// the HTTP server so they share the state file and the gated fetch.
 
-	/** The newest recorded version of a dataset, after hydration; the merge-trigger's idempotency key. */
+	/** The newest version the selected backend recorded for a dataset, after hydration: the merge-trigger's idempotency key. A version another backend recorded completes nothing here. */
 	async latestDocsVersion(dataset: string): Promise<DatasetVersion | undefined> {
 		await this.hydrateDocsSeen();
-		return latestVersion(this.docsVersions, dataset);
+		return latestVersionFor(this.docsVersions, dataset, this.config.docsBackend);
 	}
 
 	/**
@@ -4747,13 +4751,14 @@ export class Substrate {
 	 * and bump the docs generation. The version store is the service's, so
 	 * the pin reaches the next search and the next trigger's idempotency
 	 * check, restart or not.
+	 * The selected backend decides the record: LightRAG names its own dataset, RAGFlow resolves it by name.
 	 */
 	async recordDocsVersion(
 		fields: { dataset: string; commit: string; content_sha256: string },
 		surface: Surface,
 	): Promise<{ ok: true; version: DatasetVersion; created: boolean } | { ok: false; reason: string }> {
-		if (this.config.ragflow === null && this.config.docsBackend !== "lightrag") return { ok: false, reason: "ragflow-not-configured" };
-		if (this.config.ragflow === null) return this.recordLightragVersion(fields, surface);
+		if (this.config.docsBackend === "lightrag") return this.recordLightragVersion(fields, surface);
+		if (this.config.ragflow === null) return { ok: false, reason: "ragflow-not-configured" };
 		await this.hydrateDocsSeen();
 		const refreshed = await refreshDataset(
 			{
@@ -4774,10 +4779,9 @@ export class Substrate {
 	}
 
 	/**
-	 * The version record of a LightRAG-only deployment: no RAGFlow list to resolve
-	 * against, so the dataset's id is its name, the id the LightRAG search and ingest
-	 * already use for it. Numbered, stored, noted and persisted as `refreshDataset`
-	 * does, and the docs generation is bumped the same way.
+	 * The version record of a LightRAG deployment, RAGFlow configured or not. LightRAG names its datasets, so the dataset's id
+	 * is its name, the id the LightRAG search and ingest already use for it. Stamped `backend: "lightrag"`, numbered, stored,
+	 * noted and persisted as `refreshDataset` does, and the docs generation is bumped the same way.
 	 */
 	private async recordLightragVersion(
 		fields: { dataset: string; commit: string; content_sha256: string },
@@ -4793,6 +4797,7 @@ export class Substrate {
 			commit: fields.commit,
 			content_sha256: fields.content_sha256,
 			ingested_at: new Date().toISOString(),
+			backend: "lightrag",
 		};
 		recordVersion(this.docsVersions, version);
 		await this.emit({
@@ -4907,7 +4912,7 @@ export class Substrate {
 			// ensure, ingest, and only then record the version. A LightRAG-only plane has no RAGFlow
 			// list to ensure against.
 			let created = false;
-			if (this.config.ragflow !== null) {
+			if (this.config.docsBackend === "ragflow" && this.config.ragflow !== null) {
 				const ensured = await resolveDatasets({ config: this.config.ragflow, fetchImpl: this.ragflowFetch, datasets: this.docsDatasetList }, [request.dataset]);
 				if (!ensured.ok) return finish({ ok: false, reason: ensured.reason, job });
 				created = ensured.datasets[0]?.created === true;
