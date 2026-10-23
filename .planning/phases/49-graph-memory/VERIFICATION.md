@@ -1,11 +1,13 @@
 ---
 phase: 49-graph-memory
 verified: 2026-10-21
-status: passed in-repo. Causality is recorded as session order; the live ledger is not exercised
+status: human_needed
 score: 2 of 2 acceptance criteria proven in-repo (graph-linked results; causal recall)
 verified_on: gsd/v15-49-graph-memory on the tree merged with origin/main 4c2c48e
 covered_files: ["packages/mcp-server/src/memory-graph.ts", "packages/mcp-server/src/memory-graph.test.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/mcp.test.ts", "packages/mcp-server/src/service.ts", "docs/memory-governance.md"]
 ---
+
+> Status detail, kept verbatim from the original frontmatter: passed in-repo. Causality is recorded as session order; the live ledger is not exercised
 
 # 49-VERIFICATION: Graph-linked memory and causal recall from Greptime events
 

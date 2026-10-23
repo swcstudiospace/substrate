@@ -176,6 +176,8 @@ server.listen(config.port, config.host, () => {
 			`claims ${substrate.requireRecordedClaims ? "fail-closed" : "fail-open"})\n`,
 	);
 	if (watchdog.start()) process.stdout.write("[substrate] watchdog: armed, READY=1 first, then heartbeat gated on event-loop lag and loopback /livez\n");
+	// D48-d: one `db.endpoint` note per configured data plane, recorded once at boot. A refused write never blocks boot.
+	void substrate.emitDbEndpoints();
 	// uplift-4 S5: each timer starts only under its own flag (both default off) and is unref'd.
 	const background = substrate.startRecall();
 	if (background.recall) process.stdout.write(`[substrate] brief recall: ${config.briefRecall.mode}, refresh every ${config.briefRecall.intervalS} s, snapshot ttl ${config.briefRecall.ttlS} s\n`);
