@@ -1,19 +1,19 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.3.x
-milestone_name: Should-have hardening (Planned)
-status: "v1.3.x phases 37-39 merged (PR #89 a1b7152, PR #90 1d4e4aa, PR #91 acb6767). Phase 40 (DOCS-MEMORY) in review as a draft PR: D-D1 in-repo, D-D3 blocked on a restore drill and approval, D-D4 narrowed and awaiting the user's acceptance. Phases 41-44 not started"
-stopped_at: phase 40 in review (draft PR); awaiting gates and the user's merge decision
-last_updated: "2026-10-21"
-last_activity: 2026-10-21
-last_activity_desc: phase 40 (DOCS-MEMORY) draft PR; phase 39 merged as PR #91
+milestone_name: Should-have hardening (In progress)
+status: "v1.3.x phases 37-39 and 41-44 complete in-repo; phase 40 open on criterion 2 (operator restore drill). v1.5 phases 45-51 complete in-repo. Operator-gated live proofs pending; milestone close held for owner acceptance"
+stopped_at: "phases 48 and 51 merged; operator-gated live proofs pending; milestone close held for owner acceptance"
+last_updated: "2026-10-23"
+last_activity: 2026-10-23
+last_activity_desc: "ROADMAP and STATE reconciled to the verified statuses; phases 48 (PR #102) and 51 (PR #108) merged"
 state_head: 1a9f4fd365ede291c4e21be71b6ff236e0e49c67
 progress:
   total_phases: 8
-  completed_phases: 2
-  total_plans: 3
-  completed_plans: 2
-  percent: 25
+  completed_phases: 7
+  total_plans: 8
+  completed_plans: 7
+  percent: 88
 current_phase: 40
 current_phase_name: docs-memory
 ---
@@ -169,7 +169,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Operator Next Steps
 
-- Run the operator-gated live proofs listed in each phase's VERIFICATION.md (phases 37-39, 41-43, 45-50).
+- Run the operator-gated live proofs listed in each phase's VERIFICATION.md (phases 37-39, 41-43, 45-51). Phase 51's list includes an unrun check of its three tools against a deployed server.
 - Phase 40: the operator restore drill and approval for criterion 2.
 - Milestones v1.3.x and v1.5 stay open until the owner accepts them.
 
