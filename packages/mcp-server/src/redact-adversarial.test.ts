@@ -347,12 +347,12 @@ describe("the skill scan is not quadratic in the number of matches", () => {
 	});
 
 	test("many matches on one line are counted without rereading the line", () => {
-		const half = "PASSWORD=value ".repeat(64_000);
+		const eighth = "PASSWORD=value ".repeat(16_000);
 		const text = "PASSWORD=value ".repeat(128_000);
 		expect(text.includes("\n")).toBe(false);
-		// Compared as a ratio of best-of-three runs, so runner load cannot decide it. A rescan per match roughly quadruples a doubled input; linear counting roughly doubles it.
+		// Compared as a ratio over an eightfold input, best-of-three each, so runner load cannot decide it. Linear counting multiplies the work by about eight (7 to 12 measured under load); a rescan per match multiplies it by about sixty-four (74 to 78 measured). The threshold sits between them.
 		const best = (input: string) => Math.min(...[0, 1, 2].map(() => { Bun.gc(true); return took(() => redactSkillContent(input)); }));
-		expect(best(text) / best(half)).toBeLessThan(3);
+		expect(best(text) / best(eighth)).toBeLessThan(30);
 		const result = redactSkillContent(text);
 		expect(result.redactions).toHaveLength(128_000);
 		expect(result.redactions[0]).toEqual({ line: 1, rule: "password" });
