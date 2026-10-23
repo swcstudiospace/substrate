@@ -82,26 +82,26 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 35: expected_version for skills and docs** - a stale skill or docs write is rejected with the memory contract's error; an absent field keeps today's behavior.
 - [x] **Phase 36: Degraded-mode exactly-once replay** - a write carrying an idempotency key applies once across replays; the dependent client's queue is built or recorded as a decision.
 
-### 🚧 v1.3.x Should-have hardening (Planned)
+### 🚧 v1.3.x Should-have hardening (In progress)
 
 - [x] **Phase 37: LANEB** - graph inference from worktree path
 - [x] **Phase 38: MIRROR** - mirror graph edges into Linear relations and outcomes into evidence
 - [x] **Phase 39: DISPATCH** - signed handoff packet and coord drift scan before launch
 - [ ] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (decided 2026-10-21)
-- [ ] **Phase 41: ANCHOR** - anchor evidence and teachables
-- [ ] **Phase 42: SKILL-CARD** - skills_list audit trail and the F-D4 re-ingest item
-- [ ] **Phase 43: LANE-A** - sandbox egress allowlist and task re-adoption
-- [ ] **Phase 44: UAT** - repeatable UAT script against any SUBSTRATE_URL
+- [x] **Phase 41: ANCHOR** - anchor evidence and teachables
+- [x] **Phase 42: SKILL-CARD** - skills_list audit trail and the F-D4 re-ingest item
+- [x] **Phase 43: LANE-A** - sandbox egress allowlist and task re-adoption
+- [x] **Phase 44: UAT** - repeatable UAT script against any SUBSTRATE_URL
 
-### 🚧 v1.5 SOTA enhancements (Planned)
+### 🚧 v1.5 SOTA enhancements (In progress)
 
-- [ ] **Phase 45: Railway Resource Orchestrator** - budget ceiling $50 per month, confirmed 2026-10-21 (uplift-7/BLOCKING-UNKNOWNS.md item 8)
-- [ ] **Phase 46: RAGFlow Advanced Hybrid RAG with Hindsight Context** - hybrid search with reranking and Hindsight context
-- [ ] **Phase 47: GreptimeDB + Dragonfly Predictive Analytics & Cache** - SLO burn forecasting and pattern-based cache pre-warming
-- [ ] **Phase 48: TailscaleDB Secure Unified Proxy Layer** - zero-trust database access through one Tailscale proxy with RBAC, audit and pooling
-- [ ] **Phase 49: Hindsight Graph Memory with Greptime Events** - graph-structured Hindsight memory with causal recall
-- [ ] **Phase 50: Dragonfly Pub/Sub for Real-time Events** - real-time event propagation and event-driven cache invalidation
-- [ ] **Phase 51: Enterprise Unified Resource Fabric** - one MCP interface across all six resources, depends on phases 45 and 48
+- [x] **Phase 45: Railway Resource Orchestrator** - budget ceiling $50 per month, confirmed 2026-10-21 (uplift-7/BLOCKING-UNKNOWNS.md item 8)
+- [x] **Phase 46: RAGFlow Advanced Hybrid RAG with Hindsight Context** - hybrid search with reranking and Hindsight context
+- [x] **Phase 47: GreptimeDB + Dragonfly Predictive Analytics & Cache** - SLO burn forecasting and pattern-based cache pre-warming
+- [x] **Phase 48: TailscaleDB Secure Unified Proxy Layer** - zero-trust database access through one Tailscale proxy with RBAC, audit and pooling
+- [x] **Phase 49: Hindsight Graph Memory with Greptime Events** - graph-structured Hindsight memory with causal recall
+- [x] **Phase 50: Dragonfly Pub/Sub for Real-time Events** - real-time event propagation and event-driven cache invalidation
+- [x] **Phase 51: Enterprise Unified Resource Fabric** - one MCP interface across all six resources, depends on phases 45 and 48
 
 ## Phase Details
 
@@ -564,7 +564,7 @@ Plans:
   2. Claude Code's global `hindsight` stdio MCP and Hermes supermemory are retired once the `sub-*` banks answer, with restore routes recorded first.
   3. A weekly `reflect` per bank: mental models replace stale detail (`data-planes.md:27,39`).
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete (PLAN.md, SUMMARY.md); verified 2026-10-21 in phases/40-docs-memory/VERIFICATION.md; criterion 2 open, blocked on the operator restore drill
 
 ### Phase 41: ANCHOR
 
@@ -581,7 +581,7 @@ Plans:
   1. Anchors appear in the evidence bundle: a tx signature and an explorer link per hour, so PR and incident evidence can be checked outside the system (v0.3 6.x).
   2. Teachable moments are anchored with graph id plus an observation digest, a user addition carried in the brief's area E.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/41-anchor/VERIFICATION.md; live devnet proof operator-gated
 
 ### Phase 42: SKILL-CARD
 
@@ -598,7 +598,7 @@ Plans:
   1. `skills_list` and an approve/decline audit trail (§5.1; v0.3 "4.x Skill approve audit").
   2. Skills become searchable through `docs_search` after each `agent-skills` fast-forward re-ingest.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/42-skill-card/VERIFICATION.md; live fast-forward proof operator-gated
 
 ### Phase 43: LANE-A
 
@@ -615,7 +615,7 @@ Plans:
   1. An enforced egress allowlist for the sandbox container (September N3 found it could reach example.com).
   2. Running tasks are re-adopted after a dispatcher restart, so no orphaned VMs remain (N4).
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/43-lane-a/VERIFICATION.md; live proofs operator-gated
 
 ### Phase 44: UAT
 
@@ -631,7 +631,7 @@ Plans:
 
   1. The UAT runs as a repeatable script against any `SUBSTRATE_URL`, a regression check for every later phase (I-D1).
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/44-uat/VERIFICATION.md (passed)
 
 ### Phase 45: Railway Resource Orchestrator
 
@@ -651,7 +651,7 @@ Plans:
   2. Basic scale suggestion.
   3. Cost report in /slo.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/45-railway/VERIFICATION.md; live Railway proof operator-gated
 
 ### Phase 46: RAGFlow Advanced Hybrid RAG with Hindsight Context
 
@@ -668,7 +668,7 @@ Plans:
   1. docs_search returns context-augmented results.
   2. Tests for hybrid.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/46-ragflow-hybrid/VERIFICATION.md; live RAGFlow proof operator-gated
 
 ### Phase 47: GreptimeDB + Dragonfly Predictive Analytics & Cache
 
@@ -685,7 +685,7 @@ Plans:
   1. /slo has predictive rows.
   2. Cache preloads based on patterns.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/47-forecast-preload/VERIFICATION.md; live proof operator-gated
 
 ### Phase 48: TailscaleDB Secure Unified Proxy Layer
 
@@ -702,7 +702,7 @@ Plans:
   1. All DBs accessed via secure proxy.
   2. Audit events for access.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/48-tailscale-proxy/VERIFICATION.md; merged in PR #102; live cutover operator-gated
 
 ### Phase 49: Hindsight Graph Memory with Greptime Events
 
@@ -719,7 +719,7 @@ Plans:
   1. memory_search returns graph-linked results.
   2. Recall uses causal.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/49-graph-memory/VERIFICATION.md; live proof operator-gated
 
 ### Phase 50: Dragonfly Pub/Sub for Real-time Events
 
@@ -736,7 +736,7 @@ Plans:
   1. Real-time notifications for events via Dragonfly.
   2. Tests.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/50-dragonfly-pubsub/VERIFICATION.md; live subscription operator-gated
 
 ### Phase 51: Enterprise Unified Resource Fabric
 
@@ -753,7 +753,7 @@ Plans:
   1. New MCP tools for fabric status and optimization suggestions.
   2. Compliance report.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; verified 2026-10-22 in phases/51-enterprise-fabric/VERIFICATION.md; merged in PR #108
 
 
 ## Progress
@@ -784,15 +784,15 @@ Plans:
 | 37. LANEB | v1.3.x | 1/1 | Complete | 2026-10-21 |
 | 38. MIRROR | v1.3.x | 1/1 | Complete | 2026-10-21 |
 | 39. DISPATCH | v1.3.x | 1/1 | Complete (PR #91) | 2026-10-21 |
-| 40. DOCS-MEMORY | v1.3.x | 0/0 | In review (draft PR) | - |
-| 41. ANCHOR | v1.3.x | 0/0 | Not started | - |
-| 42. SKILL-CARD | v1.3.x | 0/0 | Not started | - |
+| 40. DOCS-MEMORY | v1.3.x | 1/1 | In progress: criterion 2 open (operator restore drill) | - |
+| 41. ANCHOR | v1.3.x | 1/1 | Complete (live devnet proof operator-gated) | 2026-10-21 |
+| 42. SKILL-CARD | v1.3.x | 1/1 | Complete (live fast-forward proof operator-gated) | 2026-10-21 |
 | 43. LANE-A | v1.3.x | 1/1 | Complete (PR #97) | 2026-10-21 |
 | 44. UAT | v1.3.x | 1/1 | Complete (PR #95) | 2026-10-21 |
 | 45. Railway Resource Orchestrator | v1.5 | 1/1 | Complete (PR #96) | 2026-10-21 |
-| 46. RAGFlow Advanced Hybrid RAG with Hindsight Context | v1.5 | 1/1 | In review (draft PR #98) | - |
-| 47. GreptimeDB + Dragonfly Predictive Analytics & Cache | v1.5 | 0/0 | Not started | - |
-| 48. TailscaleDB Secure Unified Proxy Layer | v1.5 | 0/0 | Not started | - |
-| 49. Hindsight Graph Memory with Greptime Events | v1.5 | 0/0 | Not started | - |
-| 50. Dragonfly Pub/Sub for Real-time Events | v1.5 | 0/0 | Not started | - |
-| 51. Enterprise Unified Resource Fabric | v1.5 | 0/0 | Not started | - |
+| 46. RAGFlow Advanced Hybrid RAG with Hindsight Context | v1.5 | 1/1 | Complete (live RAGFlow proof operator-gated) | 2026-10-21 |
+| 47. GreptimeDB + Dragonfly Predictive Analytics & Cache | v1.5 | 1/1 | Complete (live proof operator-gated) | 2026-10-21 |
+| 48. TailscaleDB Secure Unified Proxy Layer | v1.5 | 1/1 | Complete (PR #102; live cutover operator-gated) | 2026-10-21 |
+| 49. Hindsight Graph Memory with Greptime Events | v1.5 | 1/1 | Complete (live proof operator-gated) | 2026-10-21 |
+| 50. Dragonfly Pub/Sub for Real-time Events | v1.5 | 1/1 | Complete (live subscription operator-gated) | 2026-10-21 |
+| 51. Enterprise Unified Resource Fabric | v1.5 | 1/1 | Complete (PR #108) | 2026-10-22 |

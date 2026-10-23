@@ -154,10 +154,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: Milestone v1.3 complete
+Phase: v1.3.x and v1.5 phases complete in-repo; phase 40 open on criterion 2
 Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-10-11 — Milestone v1.3 completed and archived
+Status: Operator-gated live proofs pending; milestone close held for owner acceptance
+Last activity: 2026-10-23 — phases 48 (PR #102) and 51 (PR #108) merged to main; ROADMAP and STATE reconciled to verified statuses
 
 ## Deferred Items
 
@@ -169,12 +169,14 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- Run the operator-gated live proofs listed in each phase's VERIFICATION.md (phases 37-39, 41-43, 45-50).
+- Phase 40: the operator restore drill and approval for criterion 2.
+- Milestones v1.3.x and v1.5 stay open until the owner accepts them.
 
 ## Session Continuity
 
-Last session: 2026-10-08T21:29:12Z
-Stopped at: Phase 18 complete, ready to plan Phase 19
+Last session: 2026-10-23T06:10:12Z
+Stopped at: phases 48 and 51 merged; operator-gated proofs pending
 Resume file: None
 
 ## Performance Metrics
