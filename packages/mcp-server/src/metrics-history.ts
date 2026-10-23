@@ -34,6 +34,7 @@ import {
 	BRIEF_RECALL_RESULTS,
 	CACHE_METRIC_RESULTS,
 	DOCS_SEARCH_OUTCOMES,
+	ENDPOINT_PROXY_PLANES_METRIC,
 	INDEX_ARCHIVE_AGE_METRIC,
 	MEMORY_EXPIRED_MODES,
 	METRIC,
@@ -140,6 +141,7 @@ export const EXTENDED_METRIC_SERIES: Readonly<Record<string, SeriesSpec>> = {
 	"hindsight.outbox_size": { kind: "gauge", label: null, values: null, agg: "max", unit: "{entry}" },
 	"hindsight.outbox_oldest_age_s": { kind: "gauge", label: null, values: null, agg: "max", unit: "s" },
 	"index.archive_age_s": { kind: "gauge", label: null, values: null, agg: "max", unit: "s" },
+	"endpoint.proxy_planes": { kind: "gauge", label: null, values: null, agg: "max", unit: "{plane}" },
 };
 
 /** Core plus extended: what the ledger client can store and read, whatever the mode. Never what a caller may ask for; that is {@link metricSeriesFor}. */
@@ -383,6 +385,7 @@ const EXTENDED_GAUGE_SOURCES: ReadonlyArray<{ series: string; metric: string }> 
 	{ series: "hindsight.outbox_size", metric: OUTBOX_SIZE_METRIC },
 	{ series: "hindsight.outbox_oldest_age_s", metric: OUTBOX_OLDEST_METRIC },
 	{ series: "index.archive_age_s", metric: INDEX_ARCHIVE_AGE_METRIC },
+	{ series: "endpoint.proxy_planes", metric: ENDPOINT_PROXY_PLANES_METRIC },
 ];
 
 /** A gauge nobody set has no point (the archive age before a first archive), and a non-finite reading is not a number to store: both are skipped. */
@@ -818,4 +821,28 @@ export async function metricHistoryAnswer(deps: MetricHistoryDeps, params: URLSe
 		};
 	};
 	return deps.memo === undefined ? load() : deps.memo.answer(`${series}|${windowS}|${requestedStepS ?? ""}`, load);
+}
+
+/**
+ * The values of one `/slo/history` answer, one per time bucket in time order: the
+ * largest across the bucket's label values, so a labelled latency series reads as
+ * its worst surface. `null` when there is no 200 answer to read.
+ */
+export function bucketedValues(answer: MetricHistoryAnswer | null): { stepS: number; values: number[] } | null {
+	if (answer === null || answer.status !== 200) return null;
+	const { stepS, points } = answer.body;
+	if (typeof stepS !== "number" || !Array.isArray(points)) return null;
+	const rows: unknown[] = points;
+	const worst = new Map<number, number>();
+	for (const row of rows) {
+		if (typeof row !== "object" || row === null || !("ts" in row) || !("value" in row)) continue;
+		const { ts, value } = row;
+		if (typeof ts !== "string" || typeof value !== "number") continue;
+		const tsMs = Date.parse(ts);
+		if (!Number.isFinite(tsMs)) continue;
+		const previous = worst.get(tsMs);
+		if (previous === undefined || value > previous) worst.set(tsMs, value);
+	}
+	const values = [...worst.entries()].sort((a, b) => a[0] - b[0]).map(([, value]) => value);
+	return { stepS, values };
 }

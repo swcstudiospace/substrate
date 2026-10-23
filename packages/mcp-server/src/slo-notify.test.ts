@@ -48,6 +48,7 @@ function breakers(index: BreakerSnapshot["state"] | null = "closed"): Record<Pla
 		cache: closed("cache"),
 		hindsight: null,
 		ragflow: null,
+		lightrag: null,
 	};
 }
 

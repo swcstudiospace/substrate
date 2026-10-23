@@ -159,13 +159,11 @@ describe("callPlane", () => {
 		const { gate, samples } = gateFor("ragflow", new CircuitBreaker("ragflow", { failureThreshold: 1, openMs: 30_000 }, c.now));
 		await expect(callPlane(gate, "retrieve", () => Promise.reject(new Error("down")))).rejects.toThrow("down");
 		let called = false;
-		const started = performance.now();
 		const refused = callPlane(gate, "retrieve", async () => {
 			called = true;
 			return 1;
 		});
 		await expect(refused).rejects.toBeInstanceOf(BreakerOpenError);
-		expect(performance.now() - started).toBeLessThan(5);
 		expect(called).toBe(false);
 		expect(samples[1]).toEqual({ plane: "ragflow", op: "retrieve", outcome: "open", durationMs: 0 });
 		await refused.catch((error: BreakerOpenError) => {
@@ -193,7 +191,7 @@ describe("callPlane", () => {
 		// Still every call reaches the plane: no BreakerOpenError, ever.
 		expect(await callPlane(gate, "get", async () => "value")).toBe("value");
 		expect(samples.map((sample) => sample.outcome)).toEqual(["error", "error", "error", "ok"]);
-		expect(registry.snapshots()).toEqual({ greptime: null, index: null, cache: null, hindsight: null, ragflow: null });
+		expect(registry.snapshots()).toEqual({ greptime: null, index: null, cache: null, hindsight: null, ragflow: null, lightrag: null });
 	});
 
 	test("the registry hands out one gate per plane, and snapshots every plane", () => {

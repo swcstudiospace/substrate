@@ -122,6 +122,17 @@ describe("ReadThroughCache", () => {
 		expect(cache.health()).toMatchObject({ mode: "on", connected: true, hits: 1, misses: 1, bypasses: 0, errors: 0 });
 	});
 
+	test("a refresh runs the loader over a fresh entry and replaces what is stored", async () => {
+		const redis = new FakeRedis();
+		const cache = cacheOf(redis);
+		let value = "before";
+		expect(await cache.getOrLoad({ ...read, load: async () => [value] })).toEqual(["before"]);
+		value = "after";
+		expect(await cache.getOrLoad({ ...read, load: async () => [value], refresh: true })).toEqual(["after"]);
+		expect(await cache.getOrLoad({ ...read, load: async () => ["never"] })).toEqual(["after"]);
+		expect(redis.sets).toBe(2);
+	});
+
 	test("each class is stored with its own TTL", async () => {
 		const redis = new FakeRedis();
 		const cache = cacheOf(redis);

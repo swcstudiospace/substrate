@@ -9,6 +9,7 @@ import { SOLANA_CLI_DEFAULT } from "@substrate/ledger";
 import { ADMISSION_CLASSES, loadBreakerSettings, type AdmissionClass, type BreakerSettings } from "@substrate/observability";
 import { loadBriefProfileConfig, type BriefProfileConfig } from "./brief-profile.ts";
 import { ADMISSION_MODES, type AdmissionMode, type AdmissionSettings, type BucketLimit } from "./admission.ts";
+import { classifyEndpoint, parseProxyAllow, type DbPlane, type EndpointClass, type ProxyAllow } from "./db-endpoints.ts";
 import { DEFAULT_INGEST_ROOTS } from "./docs-ingest.ts";
 import { loadInventoryConfig, type InventoryConfig } from "./hindsight-inventory.ts";
 import { normalizeTtlSeconds } from "./lease.ts";
@@ -18,6 +19,8 @@ import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
 import { DEFAULT_RECALL_BUDGET_MS } from "./memory-recall.ts";
 import { NOTION_API_URL } from "./notion.ts";
 import { DEFAULT_RETRIEVAL_KNOBS, ragflowFromEnv, type RagflowConfig, type RetrievalKnobs } from "./planes/ragflow.ts";
+import { railwayFromEnv, type RailwayConfig } from "./railway.ts";
+import { hindsightBanksFromEnv } from "./planes/hindsight.ts";
 import { loadRecallConfig, type RecallConfig } from "./recall-snapshot.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
 import { EVENT_IDEMPOTENCY_MODES, MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type EventIdempotencyMode, type MemoryExpiryMode, type Surface } from "./types.ts";
@@ -33,12 +36,129 @@ function parseDodGateTimeoutMs(raw: string | undefined): number {
 	return Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : DEFAULT_DOD_GATE_TIMEOUT_MS;
 }
 
-export interface GreptimeConfig {
+/** The docs plane that serves `docs_search` / `docs_ingest`: RAGFlow or LightRAG. */
+export const DOCS_BACKENDS = ["ragflow", "lightrag"] as const;
+export type DocsBackend = (typeof DOCS_BACKENDS)[number];
+
+/**
+ * LightRAG reach. `LIGHTRAG_URL` names it; `LIGHTRAG_API_KEY` is sent when
+ * the deployment guards reads/writes. Null leaves the LightRAG path
+ * unconfigured (the RAGFlow path is unchanged).
+ */
+export interface LightragConfig {
 	url: string;
-	user: string | undefined;
-	password: string | undefined;
-	db: string;
+	apiKey?: string;
 }
+
+/**
+ * The substrate's LightRAG reach, or null when it has none.
+ *
+ * Reads `LIGHTRAG_URL` / `LIGHTRAG_API_KEY` only.
+ */
+export function lightragFromEnv(env: Record<string, string | undefined> = process.env): LightragConfig | null {
+	const url = env.LIGHTRAG_URL?.trim().replace(/\/+$/, "");
+	if (!url) return null;
+	const apiKey = env.LIGHTRAG_API_KEY?.trim();
+	return apiKey ? { url, apiKey } : { url };
+}
+
+/**
+ * Which docs plane serves this process.
+ *
+ * An explicit `SUBSTRATE_DOCS_BACKEND` (`lightrag` or `ragflow`,
+ * case-insensitive) wins; otherwise the configured reach decides — a
+ * `LIGHTRAG_URL` means lightrag, else ragflow. An unrecognised value keeps
+ * the reach-derived backend and is carried back as `rejected`, so a typo
+ * never switches the plane.
+ */
+export function resolveDocsBackend(env: Record<string, string | undefined> = process.env): { backend: DocsBackend; rejected: string | null } {
+	const fallback: DocsBackend = env.LIGHTRAG_URL?.trim() ? "lightrag" : "ragflow";
+	const raw = env.SUBSTRATE_DOCS_BACKEND?.trim();
+	if (!raw) return { backend: fallback, rejected: null };
+	const lower = raw.toLowerCase();
+	if (lower === "lightrag" || lower === "ragflow") return { backend: lower, rejected: null };
+	return { backend: fallback, rejected: raw };
+}
+
+/** Default ms between LightRAG planning polls (SPE-19385). */
+export const DEFAULT_LIGHTRAG_POLL_MS = 5_000;
+/** Default roots a LightRAG planning poll sweeps. */
+export const DEFAULT_LIGHTRAG_PLANNING_ROOTS: readonly string[] = [".planning/"];
+
+/**
+ * LightRAG hosting on Railway, in the same project that already runs RAGFlow.
+ *
+ * The shared plane null-condition is untouched: `lightragFromEnv` alone
+ * decides whether the retrieval plane is configured. This block only layers
+ * the hosting overrides the orchestrator needs — `SUBSTRATE_LIGHTRAG_URL` /
+ * `SUBSTRATE_LIGHTRAG_API_KEY` win over `LIGHTRAG_URL` / `LIGHTRAG_API_KEY`
+ * when set, and `SUBSTRATE_LIGHTRAG_PROJECT` scopes ingest/search the way a
+ * dataset name does for RAGFlow. Null when nothing hosting-related is set.
+ */
+export interface RailwayHostingConfig {
+	/** `RAILWAY_TOKEN`: the Railway API token that manages the project. */
+	token: string | null;
+	/** `RAILWAY_PROJECT_ID`: the "Agent Substrate" project. */
+	projectId: string | null;
+	/** `RAILWAY_ENVIRONMENT_ID`: the target environment. */
+	environmentId: string | null;
+	/** `RAILWAY_SERVICE_ID`: the LightRAG service, when pinned. */
+	serviceId: string | null;
+	/** `RAILWAY_SERVICE_NAME`: the LightRAG service name for private DNS. */
+	serviceName: string | null;
+	/** `RAILWAY_PRIVATE_DOMAIN`: Railway-injected private domain, when present. */
+	privateDomain: string | null;
+	/** Effective LightRAG reach after the `SUBSTRATE_LIGHTRAG_*` overrides. */
+	lightrag: LightragConfig | null;
+	/** Effective LightRAG API key (`SUBSTRATE_LIGHTRAG_API_KEY` over `LIGHTRAG_API_KEY`), kept even when no URL is configured: private-DNS deployments send it on the health probe. */
+	apiKey: string | null;
+	/** `SUBSTRATE_LIGHTRAG_PROJECT`: ingest/search scope; null means unscoped. */
+	lightragProject: string | null;
+}
+
+/**
+ * The substrate's Railway hosting reach, or null when it has none.
+ *
+ * Reads `RAILWAY_TOKEN` / `RAILWAY_PROJECT_ID` / `RAILWAY_ENVIRONMENT_ID` /
+ * `RAILWAY_SERVICE_ID` / `RAILWAY_SERVICE_NAME` / `RAILWAY_PRIVATE_DOMAIN`
+ * plus the `SUBSTRATE_LIGHTRAG_URL` / `SUBSTRATE_LIGHTRAG_API_KEY` /
+ * `SUBSTRATE_LIGHTRAG_PROJECT` hosting overrides. Never throws: blank means
+ * absent, and absent everything means null (the orchestrator reports
+ * `railway-not-configured`).
+ */
+export function railwayHostingFromEnv(env: Record<string, string | undefined> = process.env): RailwayHostingConfig | null {
+	const base = lightragFromEnv(env);
+	const overrideUrl = env.SUBSTRATE_LIGHTRAG_URL?.trim().replace(/\/+$/, "") || null;
+	const overrideKey = env.SUBSTRATE_LIGHTRAG_API_KEY?.trim() || null;
+	const project = env.SUBSTRATE_LIGHTRAG_PROJECT?.trim() || null;
+	const token = env.RAILWAY_TOKEN?.trim() || null;
+	const projectId = env.RAILWAY_PROJECT_ID?.trim() || null;
+	const environmentId = env.RAILWAY_ENVIRONMENT_ID?.trim() || null;
+	const serviceId = env.RAILWAY_SERVICE_ID?.trim() || null;
+	const serviceName = env.RAILWAY_SERVICE_NAME?.trim() || null;
+	const privateDomain = env.RAILWAY_PRIVATE_DOMAIN?.trim() || null;
+	const url = overrideUrl ?? base?.url ?? null;
+	if (!token && !projectId && !environmentId && !serviceId && !serviceName && !privateDomain && !url && !project) return null;
+	const apiKey = overrideKey ?? (env.LIGHTRAG_API_KEY?.trim() || null);
+	return {
+		token,
+		projectId,
+		environmentId,
+		serviceId,
+		serviceName,
+		privateDomain,
+		lightrag: url ? (apiKey ? { url, apiKey } : { url }) : null,
+		apiKey,
+		lightragProject: project,
+	};
+}
+
+ export interface GreptimeConfig {
+ 	url: string;
+ 	user: string | undefined;
+ 	password: string | undefined;
+ 	db: string;
+ }
 
 export interface SubstrateConfig {
 	host: string;
@@ -60,11 +180,14 @@ export interface SubstrateConfig {
 	/**
 	 * Why the cache is off despite `DRAGONFLY_URL` being set (DOCS-06).
 	 *
-	 * A plaintext non-loopback `redis://` URL is refused fail-open: the cache
-	 * stays off, answers come back uncached, and the reason is logged at boot.
+	 * A `redis://` or `rediss://` URL to a host that is neither loopback nor listed in
+	 * `SUBSTRATE_DB_PROXY_ALLOW` is refused fail-open: the cache stays off, answers come
+	 * back uncached, and the reason is logged at boot.
 	 * Null when the cache was not refused.
 	 */
 	dragonflyRefused: string | null;
+	/** The endpoint policy, the allow list, and each configured plane's endpoint class (phase 48). */
+	dbEndpoints: DbEndpointSettings;
 	linearApiKey: string | undefined;
 	notionApiKey: string | undefined;
 	notionTaskGraphDataSource: string;
@@ -95,6 +218,58 @@ export interface SubstrateConfig {
 	 */
 	ragflow: RagflowConfig | null;
 	/**
+	 * Which docs plane serves `docs_search` / `docs_ingest` (LightRAG cutover).
+	 *
+	 * From `SUBSTRATE_DOCS_BACKEND` when set, else from reach: a `LIGHTRAG_URL`
+	 * means lightrag, otherwise ragflow (`resolveDocsBackend`).
+	 */
+	docsBackend: DocsBackend;
+	/**
+	 * The rejected `SUBSTRATE_DOCS_BACKEND` value, when one was set. A mode
+	 * name, never a credential, so the boot warning may quote it.
+	 */
+	docsBackendRejected: string | null;
+	/**
+	 * The LightRAG reach, or null when the plane is unconfigured.
+	 *
+	 * Read from `LIGHTRAG_URL` / `LIGHTRAG_API_KEY` only. Null leaves the
+	 * LightRAG path degraded rather than broken.
+	 */
+	lightrag: LightragConfig | null;
+	/**
+	 * Ms between LightRAG planning polls (SPE-19385).
+	 *
+	 * From `SUBSTRATE_LIGHTRAG_POLL_MS`, default 5000. The poller sleeps
+	 * this long between `pollPlanningRefresh` ticks; the module only
+	 * scans once per call, so this never changes tick cost.
+	 */
+	lightragPollMs: number;
+	/**
+	 * Roots a planning poll sweeps (SPE-19385).
+	 *
+	 * From `SUBSTRATE_LIGHTRAG_PLANNING_ROOTS` (comma-separated) or
+	 * `[".planning/"]` when unset. Narrowed from the ingest roots so a
+	 * planning poll never reads `docs/` or `README.md`.
+	 */
+	lightragPlanningRoots: readonly string[];
+	/**
+	 * The Railway hosting reach for LightRAG, or null when unconfigured.
+	 *
+	 * From `RAILWAY_*` plus the `SUBSTRATE_LIGHTRAG_*` hosting overrides
+	 * (`railwayHostingFromEnv`). Null leaves the orchestrator reporting
+	 * `railway-not-configured`; the docs plane selection is unchanged.
+	 */
+	railwayHosting: RailwayHostingConfig | null;
+	/**
+	 * The Railway control plane (Phase 45, D45-a).
+	 *
+	 * Control calls go to the Railway public API with `RAILWAY_API_TOKEN`,
+	 * never through the tailnet forwarders. Writes stay refused unless
+	 * `SUBSTRATE_RAILWAY_WRITES` is exactly `on` (D45-c). Always present;
+	 * an empty token makes every Railway tool refuse or report unconfigured.
+	 */
+	railway: RailwayConfig;
+	/**
 	 * Path prefixes a docs_ingest page may come from (D25-05).
 	 *
 	 * From `SUBSTRATE_DOCS_INGEST_ROOTS` (comma-separated) or the dataset
@@ -119,6 +294,14 @@ export interface SubstrateConfig {
 	 * ingest events already carry.
 	 */
 	docsStateFile: string | null;
+	/**
+	 * The local checkout of swcstudiospace/agent-skills (`SUBSTRATE_AGENT_SKILLS_ROOT`, D42-1): an
+	 * absolute path, or null. Set, the `agent-skills` merge-trigger ingests each skill's
+	 * `<name>/SKILL.md` and `<name>/references/` from it; unset, that trigger is a noop.
+	 */
+	agentSkillsRoot: string | null;
+	/** The relative `SUBSTRATE_AGENT_SKILLS_ROOT` value, refused and carried back for the boot warning; null otherwise. */
+	agentSkillsRootRejected: string | null;
 	/** bearer token → surface. Lets every event be attributed to a caller. */
 	tokens: Map<string, Surface>;
 	/**
@@ -308,6 +491,8 @@ export interface SubstrateConfig {
 	cacheSwr: "off" | "shadow" | "enforce";
 	/** How old a last-good brief may be and still be served stale, s (`SUBSTRATE_CACHE_SWR_WINDOW_S`, default 30, max 300). */
 	cacheSwrWindowS: number;
+	/** Pattern-based cache preload (phase 47): `SUBSTRATE_CACHE_PRELOAD` (on | off, default off), `_TOP` (1..20, default 3) and `_S` (10..3600, default 300). See `preload.ts`. */
+	cachePreload: CachePreloadSettings;
 	// uplift-5 U5-3
 	/**
 	 * Request-path flags, each defaulting to today's behaviour: `SUBSTRATE_BRIEF_GRAPH_READ=full|lite`,
@@ -357,7 +542,7 @@ export interface SubstrateConfig {
 	 * The three documented retrieval knobs sent on every `docs_search`
 	 * retrieval, from `SUBSTRATE_DOCS_SIMILARITY_THRESHOLD` (0.2),
 	 * `SUBSTRATE_DOCS_VECTOR_WEIGHT` (0.3) and `SUBSTRATE_DOCS_TOP_K` (1024).
-	 * The defaults are RAGFlow's own; junk or out-of-range values fall back.
+	 * The weight is `SUBSTRATE_DOCS_VECTOR_WEIGHT` when set, else `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT`; junk or out-of-range docs values fall back to that. `rerankId` comes only from `SUBSTRATE_RAGFLOW_RERANK_ID`.
 	 */
 	docsRetrieval: RetrievalKnobs;
 	// uplift-3 N3 — admission budgets
@@ -376,6 +561,15 @@ export interface SubstrateConfig {
 	 * still answer.
 	 */
 	docsSearchBudgetMs: number;
+	// SPE-19388 — RAG state machine tuning (additive; junk falls back silently)
+	/**
+	 * Retry/backoff and circuit-breaker bounds for the explicit RAG state
+	 * machine (`SUBSTRATE_RAG_MAX_RETRIES` default 2, `SUBSTRATE_RAG_RETRY_BASE_MS`
+	 * default 200, `SUBSTRATE_RAG_BREAKER_THRESHOLD` default 3 consecutive
+	 * failures, `SUBSTRATE_RAG_HALF_OPEN_MS` default 30000). Out-of-range or
+	 * unparsable values fall back to the defaults, like `docsSearchBudgetMs`.
+	 */
+	ragMachine: RagMachineSettings;
 	// uplift-3 N4 — memory lifetime
 	/**
 	 * What the index's serving reads do with an entry past its `ttl`
@@ -416,6 +610,8 @@ export interface SubstrateConfig {
 	eventIdempotency: EventIdempotencyMode;
 	/** The unrecognised `SUBSTRATE_EVENT_IDEMPOTENCY` value, for the boot warning; null when the key parsed or was unset. */
 	eventIdempotencyRejected: string | null;
+	/** `SUBSTRATE_EVENT_BUS` (phase 50, D50-g): the Dragonfly wake-up hints. See `EventBusSettings`. */
+	eventBus: EventBusSettings;
 	// uplift-3 N2 — restart-durable SLO history and notifications
 	/**
 	 * Where the SLO checkpoint is written and restored from
@@ -467,6 +663,8 @@ export interface SubstrateConfig {
 	briefRecall: RecallConfig;
 	/** The read-only Hindsight inventory (`SUBSTRATE_HINDSIGHT_INVENTORY=on`, default off). Parsed by `hindsight-inventory.ts`. */
 	hindsightInventory: InventoryConfig;
+	/** `HINDSIGHT_MENTAL_MODELS`: the models the weekly refresh names (fail-open). Parsed by `loadMentalModelConfig` below. */
+	mentalModels: MentalModelSettings;
 }
 
 /** The knobs behind `SUBSTRATE_SLO_NOTIFY*` and `SUBSTRATE_SLO_WEBHOOK_URL` (uplift-3 N2). */
@@ -642,10 +840,42 @@ function isKnownDesktopSurface(value: string): value is Surface {
 	return (SURFACES as readonly string[]).includes(value);
 }
 
+/** Retry/backoff and breaker bounds for the explicit RAG state machine (SPE-19388). */
+export interface RagMachineSettings {
+	maxRetries: number;
+	retryBaseMs: number;
+	breakerThreshold: number;
+	halfOpenMs: number;
+}
+
+/** Defaults: two retries, 200 ms base backoff, trip after 3 failures, 30 s open. */
+export const DEFAULT_RAG_MACHINE_SETTINGS: RagMachineSettings = {
+	maxRetries: 2,
+	retryBaseMs: 200,
+	breakerThreshold: 3,
+	halfOpenMs: 30_000,
+};
+
+/**
+ * `SUBSTRATE_RAG_*` as the machine reads them. Never throws: junk falls
+ * back to the defaults, so a typo cannot disable retries or pin the
+ * breaker open.
+ */
+export function loadRagMachineSettings(env: Record<string, string | undefined> = process.env): RagMachineSettings {
+	return {
+		maxRetries: nonNegativeOr(env.SUBSTRATE_RAG_MAX_RETRIES, DEFAULT_RAG_MACHINE_SETTINGS.maxRetries),
+		retryBaseMs: positiveOr(env.SUBSTRATE_RAG_RETRY_BASE_MS, DEFAULT_RAG_MACHINE_SETTINGS.retryBaseMs),
+		breakerThreshold: positiveOr(env.SUBSTRATE_RAG_BREAKER_THRESHOLD, DEFAULT_RAG_MACHINE_SETTINGS.breakerThreshold),
+		halfOpenMs: nonNegativeOr(env.SUBSTRATE_RAG_HALF_OPEN_MS, DEFAULT_RAG_MACHINE_SETTINGS.halfOpenMs),
+	};
+}
+
 export function loadConfig(env: Record<string, string | undefined> = process.env, probes: ConfigProbes = {}): SubstrateConfig {
 	const greptimeUrl = env.GREPTIME_URL?.trim();
+	const dbEndpoints = loadDbEndpointSettings(env);
 	const leaseTtl = Number(env.SUBSTRATE_LEASE_TTL_SECONDS);
 	const tokens = tokenConfig(env);
+	const ragflowRetrieval = loadRagflowRetrievalSettings(env);
 	const desktopNames = (env.SUBSTRATE_DESKTOP_SURFACES ?? "")
 		.split(",")
 		.map((name) => name.trim())
@@ -655,6 +885,21 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		.split(",")
 		.map((root) => root.trim())
 		.filter((root) => root.length > 0);
+	const lightragPlanningRoots = (env.SUBSTRATE_LIGHTRAG_PLANNING_ROOTS ?? "")
+		.split(",")
+		.map((root) => root.trim())
+		.filter((root) => root.length > 0);
+	const docsBackendPick = resolveDocsBackend(env);
+	const cache = cacheSettings(env, dbEndpoints.allow);
+	const cachePreloadRequested = loadCachePreloadSettings(env);
+	if (cachePreloadRequested.enabled && !cache.cacheEnabled && (cache.cacheOff || cache.dragonflyRefused === null)) {
+		throw new ConfigError("SUBSTRATE_CACHE_PRELOAD=on needs the cache, which is off: set DRAGONFLY_URL to an accepted URL and leave SUBSTRATE_CACHE unset or not 0, or set SUBSTRATE_CACHE_PRELOAD=off");
+	}
+	// A refused Dragonfly URL is fail-open in warn mode, and enforce already refused boot in loadDbEndpointSettings. The cache is off, so the preload is skipped, not refused.
+	if (cachePreloadRequested.enabled && !cache.cacheEnabled) {
+		process.stderr.write("[substrate] SUBSTRATE_CACHE_PRELOAD=on skipped: the cache endpoint is refused, so the cache is off\n");
+	}
+	const cachePreload = cache.cacheEnabled ? cachePreloadRequested : { ...cachePreloadRequested, enabled: false };
 	return {
 		...readHandoffKeys(env),
 		leaseTtlSeconds: normalizeTtlSeconds(Number.isFinite(leaseTtl) ? leaseTtl : undefined),
@@ -670,7 +915,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 				}
 			: null,
 		postgresUrl: env.SUBSTRATE_PG_URL?.trim() || undefined,
-		...cacheSettings(env),
+		dbEndpoints,
+		...cache,
 		linearApiKey: env.LINEAR_API_KEY?.trim() || undefined,
 		notionApiKey: env.NOTION_API_KEY?.trim() || undefined,
 		notionTaskGraphDataSource: env.NOTION_TASK_GRAPH_DS?.trim() || "be3418f0-d2d8-411b-8677-fa8a95ee63be",
@@ -679,9 +925,17 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		linearApiUrl: (env.LINEAR_API_URL?.trim() || LINEAR_API_URL).replace(/\/+$/, ""),
 		notionApiUrl: (env.NOTION_API_URL?.trim() || NOTION_API_URL).replace(/\/+$/, ""),
 		ragflow: ragflowFromEnv(env),
+		lightrag: lightragFromEnv(env),
+		docsBackend: docsBackendPick.backend,
+		docsBackendRejected: docsBackendPick.rejected,
+		railwayHosting: railwayHostingFromEnv(env),
+		lightragPollMs: positiveOr(env.SUBSTRATE_LIGHTRAG_POLL_MS, DEFAULT_LIGHTRAG_POLL_MS),
+		lightragPlanningRoots: lightragPlanningRoots.length > 0 ? lightragPlanningRoots : [...DEFAULT_LIGHTRAG_PLANNING_ROOTS],
+		railway: railwayFromEnv(env),
 		docsIngestRoots: ingestRoots.length > 0 ? ingestRoots : [...DEFAULT_INGEST_ROOTS],
 		vmGuest: (env.SUBSTRATE_VM_GUEST?.trim() ?? "") === "1",
 		docsStateFile: env.SUBSTRATE_DOCS_STATE_FILE?.trim() || null,
+		...agentSkillsRootFromEnv(env.SUBSTRATE_AGENT_SKILLS_ROOT),
 		tokens,
 		allowAnonymous: allowAnonymousFrom(env, tokens.size),
 		operatorTokens: new Set(
@@ -722,6 +976,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// uplift-4 S4
 		cacheSwr: cacheSwrOr(env.SUBSTRATE_CACHE_SWR),
 		cacheSwrWindowS: Math.min(300, positiveOr(env.SUBSTRATE_CACHE_SWR_WINDOW_S, 30)),
+		cachePreload,
 		// uplift-5 U5-3
 		requestPath: loadRequestPathSettings(env),
 		// uplift-2 R5
@@ -749,13 +1004,16 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		docsPruneSuperseded: (env.SUBSTRATE_DOCS_PRUNE_SUPERSEDED?.trim() ?? "") === "1",
 		docsRetrieval: {
 			similarityThreshold: unitIntervalOr(env.SUBSTRATE_DOCS_SIMILARITY_THRESHOLD, DEFAULT_RETRIEVAL_KNOBS.similarityThreshold),
-			vectorSimilarityWeight: unitIntervalOr(env.SUBSTRATE_DOCS_VECTOR_WEIGHT, DEFAULT_RETRIEVAL_KNOBS.vectorSimilarityWeight),
+			vectorSimilarityWeight: unitIntervalOr(env.SUBSTRATE_DOCS_VECTOR_WEIGHT, ragflowRetrieval.vectorSimilarityWeight),
 			topK: positiveOr(env.SUBSTRATE_DOCS_TOP_K, DEFAULT_RETRIEVAL_KNOBS.topK),
+			...(ragflowRetrieval.rerankId !== undefined ? { rerankId: ragflowRetrieval.rerankId } : {}),
 		},
 		// uplift-3 N3
 		admission: loadAdmissionSettings(env),
 		// uplift-3 N5
 		docsSearchBudgetMs: nonNegativeOr(env.SUBSTRATE_DOCS_SEARCH_BUDGET_MS, 4000),
+		// SPE-19388 — explicit RAG state machine bounds
+		ragMachine: loadRagMachineSettings(env),
 		// uplift-3 N4
 		...memoryExpiryFromEnv(env.SUBSTRATE_MEMORY_EXPIRY),
 		...hashVersionFromEnv(env.SUBSTRATE_HASH_VERSION),
@@ -783,8 +1041,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// uplift-4 S5
 		briefRecall: loadRecallConfig(env),
 		hindsightInventory: loadInventoryConfig(env),
+		// memory governance: the weekly mental-model refresh
+		mentalModels: loadMentalModelConfig(env),
 		// U5-4a
 		...eventIdempotencyFromEnv(env.SUBSTRATE_EVENT_IDEMPOTENCY),
+		// Phase 50 (D50-g): the bus rides the cache endpoint, and is off with a reason when that endpoint is missing or refused.
+		eventBus: loadEventBusSettings(env, cache),
 	};
 }
 
@@ -968,6 +1230,18 @@ export function skillsGovernanceConfigWarnings(config: SubstrateConfig): string[
 	];
 }
 
+/**
+ * `SUBSTRATE_AGENT_SKILLS_ROOT` (phase 42, D42-1): an absolute path to a local agent-skills
+ * checkout, trimmed; unset or blank is null. A relative value is null and carried back for the
+ * boot warning, so a checkout is never read relative to the working directory.
+ */
+function agentSkillsRootFromEnv(raw: string | undefined): Pick<SubstrateConfig, "agentSkillsRoot" | "agentSkillsRootRejected"> {
+	const trimmed = raw?.trim() ?? "";
+	if (trimmed === "") return { agentSkillsRoot: null, agentSkillsRootRejected: null };
+	if (!trimmed.startsWith("/")) return { agentSkillsRoot: null, agentSkillsRootRejected: trimmed };
+	return { agentSkillsRoot: trimmed, agentSkillsRootRejected: null };
+}
+
 /** uplift-2 R1: a finite number ≥ 0, floored (0 is "off"); anything else is the default. */
 function nonNegativeOr(raw: string | undefined, fallback: number): number {
 	const value = Number(raw?.trim());
@@ -986,10 +1260,97 @@ function unitIntervalOr(raw: string | undefined, fallback: number): number {
 	return raw !== undefined && raw.trim() !== "" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : fallback;
 }
 
+/**
+ * The RAGFlow retrieval settings (D46-a, D46-b). `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT`
+ * is a number in [0, 1], default 0.3 (RAGFlow's own). `SUBSTRATE_RAGFLOW_RERANK_ID`
+ * names a reranker; unset or blank, no `rerankId` is returned and no `rerank_id`
+ * goes on the wire. A non-numeric or out-of-range weight refuses to start.
+ */
+function loadRagflowRetrievalSettings(env: Record<string, string | undefined>): Pick<RetrievalKnobs, "vectorSimilarityWeight" | "rerankId"> {
+	const rawWeight = env.SUBSTRATE_RAGFLOW_VECTOR_WEIGHT?.trim() ?? "";
+	const weight = rawWeight === "" ? DEFAULT_RETRIEVAL_KNOBS.vectorSimilarityWeight : Number(rawWeight);
+	if (!Number.isFinite(weight) || weight < 0 || weight > 1) {
+		throw new ConfigError("SUBSTRATE_RAGFLOW_VECTOR_WEIGHT must be a number in [0, 1]; unset it for RAGFlow's default 0.3");
+	}
+	const rerankId = env.SUBSTRATE_RAGFLOW_RERANK_ID?.trim() ?? "";
+	return { vectorSimilarityWeight: weight, ...(rerankId !== "" ? { rerankId } : {}) };
+}
+
 /** uplift-4 S4: `off`, `shadow` or `enforce` (case-insensitive); anything else, unset included, is `shadow`, which only reports. */
 function cacheSwrOr(raw: string | undefined): "off" | "shadow" | "enforce" {
 	const value = raw?.trim().toLowerCase();
 	return value === "off" || value === "enforce" ? value : "shadow";
+}
+
+/** `SUBSTRATE_CACHE_PRELOAD*` (phase 47, D47-d): the pattern-based cache preload. Off unless `SUBSTRATE_CACHE_PRELOAD=on`. */
+export interface CachePreloadSettings {
+	enabled: boolean;
+	/** Repos composed per tick (`SUBSTRATE_CACHE_PRELOAD_TOP`, default 3). */
+	top: number;
+	/** Seconds between ticks (`SUBSTRATE_CACHE_PRELOAD_S`, default 300). */
+	intervalS: number;
+}
+
+export const DEFAULT_CACHE_PRELOAD_TOP = 3;
+export const DEFAULT_CACHE_PRELOAD_S = 300;
+
+/** A whole number in `[min, max]`, or `fallback` when unset. Anything else is a ConfigError naming the variable, so boot refuses it. */
+function cacheWholeNumberOr(name: string, raw: string | undefined, fallback: number, min: number, max: number): number {
+	const trimmed = raw?.trim() ?? "";
+	if (trimmed === "") return fallback;
+	const value = Number(trimmed);
+	if (!/^\d+$/.test(trimmed) || value < min || value > max) {
+		throw new ConfigError(`${name}=${JSON.stringify(trimmed)} is not a whole number from ${min} to ${max}; set one in that range or unset it for ${fallback}`);
+	}
+	return value;
+}
+
+/**
+ * `SUBSTRATE_CACHE_PRELOAD*` as the preloader reads them. A mode that is not
+ * on or off, and a number outside its range, refuse boot with a ConfigError
+ * that names the variable: a typo must not leave the preload silently off or
+ * on a different cadence.
+ */
+export function loadCachePreloadSettings(env: Record<string, string | undefined> = process.env): CachePreloadSettings {
+	const rawMode = env.SUBSTRATE_CACHE_PRELOAD?.trim().toLowerCase() ?? "";
+	if (rawMode !== "" && rawMode !== "on" && rawMode !== "off") {
+		throw new ConfigError(`SUBSTRATE_CACHE_PRELOAD=${JSON.stringify(rawMode)} is not on or off; set on or off, or unset it for off`);
+	}
+	return {
+		enabled: rawMode === "on",
+		top: cacheWholeNumberOr("SUBSTRATE_CACHE_PRELOAD_TOP", env.SUBSTRATE_CACHE_PRELOAD_TOP, DEFAULT_CACHE_PRELOAD_TOP, 1, 20),
+		intervalS: cacheWholeNumberOr("SUBSTRATE_CACHE_PRELOAD_S", env.SUBSTRATE_CACHE_PRELOAD_S, DEFAULT_CACHE_PRELOAD_S, 10, 3600),
+	};
+}
+
+/**
+ * `SUBSTRATE_EVENT_BUS` (phase 50, D50-g): whether the Dragonfly wake-up hints run. `enabled` is what the
+ * bus is built from. `offReason` names why an operator's `on` did not turn it on, and is logged once at boot.
+ */
+export interface EventBusSettings {
+	enabled: boolean;
+	offReason: string | null;
+}
+
+/**
+ * `SUBSTRATE_EVENT_BUS=on|off` (case- and space-insensitive; unset is off). Any other value refuses boot,
+ * naming the variable. The value is not echoed: it may be a mistyped URL with a credential in it.
+ */
+export function loadEventBusSettings(
+	env: Record<string, string | undefined>,
+	cache: { dragonflyUrl: string | undefined; dragonflyRefused: string | null; cacheEnabled: boolean },
+): EventBusSettings {
+	const rawMode = env.SUBSTRATE_EVENT_BUS?.trim().toLowerCase() ?? "";
+	if (rawMode !== "" && rawMode !== "on" && rawMode !== "off") {
+		throw new ConfigError("SUBSTRATE_EVENT_BUS is not on or off; set on or off, or unset it for off");
+	}
+	if (rawMode !== "on") return { enabled: false, offReason: null };
+	if (cache.dragonflyRefused !== null) {
+		return { enabled: false, offReason: `DRAGONFLY_URL refused by the endpoint policy: ${cache.dragonflyRefused}` };
+	}
+	if (cache.dragonflyUrl === undefined) return { enabled: false, offReason: "DRAGONFLY_URL is unset" };
+	if (!cache.cacheEnabled) return { enabled: false, offReason: "SUBSTRATE_CACHE is 0" };
+	return { enabled: true, offReason: null };
 }
 
 /** The three uplift-5 U5-3 request-path flags, parsed. */
@@ -1110,15 +1471,79 @@ export function loadAdmissionSettings(env: Record<string, string | undefined>): 
 }
 
 /**
- * Whether a Redis URL may enable the cache (DOCS-06).
- *
- * A plaintext `redis://` URL whose host is not loopback is refused: a
- * credential crossing any other network in the clear is the failure this
- * exists to prevent. Loopback and `rediss://` stay allowed; anything else —
- * including an unparseable URL, which the client reports at connect time —
- * passes through to the existing fail-open runtime.
+ * `SUBSTRATE_DB_ENDPOINT_POLICY` (phase 48, D48-b): `warn` or `enforce`, case- and space-insensitive.
+ * Unset or blank is `warn`. Anything else is a ConfigError at boot: a typo must not change what a
+ * deployment accepts.
  */
-export function parseRedisUrl(raw: string | undefined): { kind: "unset" } | { kind: "ok"; url: string } | { kind: "refused"; reason: string } {
+export type DbEndpointPolicy = "warn" | "enforce";
+
+/**
+ * The data-plane endpoint settings (phase 48). `classes` has an entry only for each plane whose URL
+ * is configured. A class names the path to the plane, never the URL.
+ */
+export interface DbEndpointSettings {
+	policy: DbEndpointPolicy;
+	allow: ProxyAllow;
+	classes: Partial<Record<DbPlane, EndpointClass>>;
+}
+
+/** The configured data-plane URLs, in the order the boot names them. */
+const DB_PLANE_URL_VARIABLES = [
+	["greptime", "GREPTIME_URL"],
+	["postgres", "SUBSTRATE_PG_URL"],
+	["dragonfly", "DRAGONFLY_URL"],
+] as const;
+
+/** The allow list when none is supplied: no proxy entries. */
+const NO_PROXY_ALLOW: ProxyAllow = new Set<string>();
+
+function dbEndpointPolicyFrom(raw: string | undefined): DbEndpointPolicy {
+	const value = raw?.trim().toLowerCase() ?? "";
+	if (value === "") return "warn";
+	if (value === "warn" || value === "enforce") return value;
+	throw new ConfigError("SUBSTRATE_DB_ENDPOINT_POLICY must be warn or enforce; unset it for warn");
+}
+
+function proxyAllowFrom(raw: string | undefined): ProxyAllow {
+	try {
+		return parseProxyAllow(raw);
+	} catch (error) {
+		throw new ConfigError(error instanceof Error ? error.message : "SUBSTRATE_DB_PROXY_ALLOW is malformed");
+	}
+}
+
+/**
+ * The endpoint policy, the allow list and each configured plane's class. In `enforce`, a configured
+ * `direct` endpoint is a ConfigError naming its variable and the policy, never its URL.
+ */
+function loadDbEndpointSettings(env: Record<string, string | undefined>): DbEndpointSettings {
+	const policy = dbEndpointPolicyFrom(env.SUBSTRATE_DB_ENDPOINT_POLICY);
+	const allow = proxyAllowFrom(env.SUBSTRATE_DB_PROXY_ALLOW);
+	const classes: Partial<Record<DbPlane, EndpointClass>> = {};
+	for (const [plane, variable] of DB_PLANE_URL_VARIABLES) {
+		const url = env[variable]?.trim();
+		if (!url) continue;
+		const endpointClass = classifyEndpoint(plane, url, allow);
+		classes[plane] = endpointClass;
+		if (policy === "enforce" && endpointClass === "direct") {
+			throw new ConfigError(
+				`${variable} is a direct endpoint, which SUBSTRATE_DB_ENDPOINT_POLICY=enforce refuses; ` +
+					"point it at a loopback forwarder, or list its host:port in SUBSTRATE_DB_PROXY_ALLOW",
+			);
+		}
+	}
+	return { policy, allow, classes };
+}
+
+/**
+ * Whether a Redis URL may enable the cache (DOCS-06, phase 48 D48-c).
+ *
+ * A `redis://` or `rediss://` URL whose endpoint classifies as `direct` is refused. Loopback (the
+ * local end of a forwarder) and a host and port listed in `allow` pass. A refusal is fail-open: the
+ * cache stays off. An unparseable URL passes through to the existing fail-open runtime, which
+ * reports it at connect time.
+ */
+export function parseRedisUrl(raw: string | undefined, allow: ProxyAllow = NO_PROXY_ALLOW): { kind: "unset" } | { kind: "ok"; url: string } | { kind: "refused"; reason: string } {
 	const trimmed = raw?.trim();
 	if (!trimmed) return { kind: "unset" };
 	let scheme = "";
@@ -1126,24 +1551,14 @@ export function parseRedisUrl(raw: string | undefined): { kind: "unset" } | { ki
 	try {
 		const parsed = new URL(trimmed);
 		scheme = parsed.protocol.toLowerCase();
-		// The URL parser keeps IPv6 brackets on the hostname; strip them so the
-		// loopback check sees the address.
+		// The URL parser keeps IPv6 brackets on the hostname; strip them so the reason names the address.
 		host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
 	} catch {
 		return { kind: "ok", url: trimmed };
 	}
-	if (scheme === "redis:") {
-		// An actual loopback address, not a DNS name that starts with one:
-		// `127.cache.example.com` must not pass as `127.0.0.1` does.
-		const octets = host.split(".");
-		const loopbackV4 =
-			octets.length === 4 &&
-			octets[0] === "127" &&
-			octets.slice(1).every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
-		const loopback = host === "localhost" || host === "::1" || host === "0.0.0.0" || loopbackV4;
-		if (!loopback) {
-			return { kind: "refused", reason: `refusing plaintext redis:// to non-loopback host ${host || "(empty)"}` };
-		}
+	const redis = scheme === "redis:" || scheme === "rediss:";
+	if (redis && classifyEndpoint("dragonfly", trimmed, allow) === "direct") {
+		return { kind: "refused", reason: `refusing ${scheme}// to host ${host || "(empty)"}, which is neither loopback nor in SUBSTRATE_DB_PROXY_ALLOW` };
 	}
 	return { kind: "ok", url: trimmed };
 }
@@ -1153,16 +1568,18 @@ export function parseRedisUrl(raw: string | undefined): { kind: "unset" } | { ki
  * including unset, leaves it on when `DRAGONFLY_URL` is set. A typo must not
  * silently disable a cache the operator configured.
  */
-function cacheSettings(env: Record<string, string | undefined>): {
+function cacheSettings(env: Record<string, string | undefined>, allow: ProxyAllow): {
 	dragonflyUrl: string | undefined;
 	cacheEnabled: boolean;
 	dragonflyRefused: string | null;
+	/** `SUBSTRATE_CACHE=0`, which holds even when the Dragonfly URL is refused. */
+	cacheOff: boolean;
 } {
-	const parsed = parseRedisUrl(env.DRAGONFLY_URL);
+	const parsed = parseRedisUrl(env.DRAGONFLY_URL, allow);
 	const off = /^(0|false|no)$/i.test(env.SUBSTRATE_CACHE?.trim() ?? "");
-	if (parsed.kind === "refused") return { dragonflyUrl: undefined, cacheEnabled: false, dragonflyRefused: parsed.reason };
+	if (parsed.kind === "refused") return { dragonflyUrl: undefined, cacheEnabled: false, dragonflyRefused: parsed.reason, cacheOff: off };
 	const dragonflyUrl = parsed.kind === "ok" ? parsed.url : undefined;
-	return { dragonflyUrl, cacheEnabled: dragonflyUrl !== undefined && !off, dragonflyRefused: null };
+	return { dragonflyUrl, cacheEnabled: dragonflyUrl !== undefined && !off, dragonflyRefused: null, cacheOff: off };
 }
 
 /**
@@ -1307,6 +1724,16 @@ export function configWarnings(config: SubstrateConfig): string[] {
 	// Named by key, never by value: the warning goes to a log.
 	if (config.skills.problem) {
 		warnings.push(`skill proposals are refused until the skills library is fixed: ${config.skills.problem}`);
+	}
+	if (config.docsBackendRejected !== null) {
+		warnings.push(`SUBSTRATE_DOCS_BACKEND "${config.docsBackendRejected}" is not a docs plane; docs serve ${config.docsBackend}`);
+	}
+	// Named by variable and value only, never a credential; before the early return, as the skills warning is.
+	if (config.agentSkillsRootRejected !== null) {
+		warnings.push(
+			`SUBSTRATE_AGENT_SKILLS_ROOT=${JSON.stringify(config.agentSkillsRootRejected)} is not an absolute path; ` +
+				"agent-skills is not refreshed from a checkout, and its merge-trigger is a noop",
+		);
 	}
 
 	// Named by variable, never by token: the warning goes to a log. Such a token still
@@ -1669,4 +2096,68 @@ export function hindsightConfigWarnings(config: SubstrateConfig): string[] {
 		warnings.push("HINDSIGHT_URL is set but HINDSIGHT_BANKS is empty, so recall reads the caller's own bank only; list the sub-* banks to fan out");
 	}
 	return warnings;
+}
+
+/** The most mental models the weekly refresh names, across every bank. */
+export const MAX_MENTAL_MODELS = 20;
+
+/** A mental model the weekly refresh names: the bank it lives in, and its id. */
+export interface MentalModelRef {
+	bank: string;
+	id: string;
+}
+
+/** `HINDSIGHT_MENTAL_MODELS` as the refresh reads it. Fail-open: a dropped entry is named in `warnings`, and the rest still apply. */
+export interface MentalModelSettings {
+	models: MentalModelRef[];
+	/** What the parse dropped, for the boot warning. Entries are named by position, never by value. */
+	warnings: string[];
+}
+
+const MENTAL_MODEL_ID = /^[A-Za-z0-9_-]{1,80}$/;
+
+/**
+ * Parse `HINDSIGHT_MENTAL_MODELS`: `<bank>=<id>[,<id>...]` entries separated by `;`.
+ * A bank must be one of `HINDSIGHT_BANKS`, and every id must match `MENTAL_MODEL_ID`.
+ * An entry that breaks either rule is dropped with a warning, and the valid entries
+ * still apply. A repeated model, and any model past `MAX_MENTAL_MODELS`, is dropped
+ * the same way. Unset names nothing. Never throws.
+ */
+export function loadMentalModelConfig(env: Record<string, string | undefined>): MentalModelSettings {
+	const models: MentalModelRef[] = [];
+	const warnings: string[] = [];
+	const raw = env.HINDSIGHT_MENTAL_MODELS?.trim() ?? "";
+	if (raw === "") return { models, warnings };
+	const banks = new Set(hindsightBanksFromEnv(env) ?? []);
+	const seen = new Set<string>();
+	for (const [index, segment] of raw.split(";").entries()) {
+		const entry = segment.trim();
+		if (entry === "") continue;
+		const at = `entry ${index + 1}`;
+		const eq = entry.indexOf("=");
+		const bank = eq < 0 ? "" : entry.slice(0, eq).trim();
+		const ids = eq < 0 ? [] : entry.slice(eq + 1).split(",").map((id) => id.trim());
+		if (bank === "" || ids.some((id) => !MENTAL_MODEL_ID.test(id))) {
+			warnings.push(`HINDSIGHT_MENTAL_MODELS ${at} is not <bank>=<id>[,<id>...] with ids of [A-Za-z0-9_-] up to 80 characters, so it is dropped`);
+			continue;
+		}
+		if (!banks.has(bank)) {
+			warnings.push(`HINDSIGHT_MENTAL_MODELS ${at} names a bank that is not in HINDSIGHT_BANKS, so it is dropped`);
+			continue;
+		}
+		for (const id of ids) {
+			const key = JSON.stringify([bank, id]);
+			if (seen.has(key)) {
+				warnings.push(`HINDSIGHT_MENTAL_MODELS ${at} repeats a model already named, so the repeat is dropped`);
+				continue;
+			}
+			if (models.length >= MAX_MENTAL_MODELS) {
+				warnings.push(`HINDSIGHT_MENTAL_MODELS ${at} names a model past the ${MAX_MENTAL_MODELS} allowed, so it is dropped`);
+				continue;
+			}
+			seen.add(key);
+			models.push({ bank, id });
+		}
+	}
+	return { models, warnings };
 }

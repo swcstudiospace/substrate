@@ -10,13 +10,13 @@
  * live proof stays operator-gated (Phase 25 G1–G4).
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CACHE_TTL, DOCS_GENERATION_KEY, ReadThroughCache, type CacheRedis } from "./cache.ts";
 import { loadConfig } from "./config.ts";
 import { DATASET_LIST_TTL_MS, DatasetListCache, createVersionStore, recordVersion, resolveDatasets, versionsFromJson, versionsToJson } from "./docs-datasets.ts";
-import { ingestDocs, loadIngestRecords, saveIngestRecords, type IngestDeps, type IngestRecord } from "./docs-ingest.ts";
+import { ingestDocs, loadIngestRecords, saveIngestRecords, readSkillsCheckoutPages, skillsCheckoutRoots, type IngestDeps, type IngestRecord } from "./docs-ingest.ts";
 import { searchDocs } from "./docs-search.ts";
 import { createObservability } from "./observe.ts";
 import {
@@ -234,7 +234,7 @@ describe("durable versions and real pins", () => {
 			expect(v1.records.size).toBe(1);
 			expect(v1.versions.size).toBe(0);
 			const versions = createVersionStore();
-			recordVersion(versions, { dataset: "agent-substrate", dataset_id: "ds-1", version: "v1", commit: "c1", content_sha256: "s", ingested_at: "2026-10-13T00:00:00.000Z" });
+			recordVersion(versions, { dataset: "agent-substrate", dataset_id: "ds-1", version: "v1", commit: "c1", content_sha256: "s", ingested_at: "2026-10-13T00:00:00.000Z", backend: "ragflow" });
 			await saveIngestRecords(file, v1.records, versions);
 			const written = JSON.parse(readFileSync(file, "utf8")) as { version: number; versions: unknown };
 			expect(written.version).toBe(2);
@@ -804,6 +804,59 @@ describe("the asynchronous merge-trigger", () => {
 		} finally {
 			await stop();
 			rmSync(docs, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("an agent-skills refresh ingests the checkout at the commit it was asked for", () => {
+	test("a queued refresh whose checkout moved on records no version and reports commit-mismatch", async () => {
+		const fake = new RagflowFake();
+		fake.parseDonePolls = 1;
+		const checkout = mkdtempSync(join(tmpdir(), "substrate-skills-queued-"));
+		try {
+			mkdirSync(join(checkout, "demo-skill"));
+			writeFileSync(join(checkout, "demo-skill", "SKILL.md"), "Demo skill body.\n");
+			// The first job parks at its parse poll, after its HEAD checks and its upload. The second trigger queues behind it.
+			const reached = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const parked: FetchLike = async (input, init) => {
+				const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+				if ((init?.method ?? "GET") === "GET" && /\/documents\?/.test(url)) {
+					reached.resolve();
+					await release.promise;
+				}
+				return fake.fetch(input, init);
+			};
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: parked });
+			// The checkout's HEAD, read when each job runs: the live value the queued job must not outrun.
+			let live = "c0";
+			const refreshOf = (commit: string) => ({
+				dataset: "agent-skills",
+				commit,
+				content_sha256: `sha-${commit}`,
+				roots: () => skillsCheckoutRoots(checkout),
+				pages: (roots: readonly string[]) => readSkillsCheckoutPages(checkout, roots),
+				head: async () => live,
+			});
+			await substrate.startDocsRefresh(refreshOf("c0"), "omp");
+			await reached.promise;
+			const queued = substrate.startDocsRefresh(refreshOf("c1"), "omp", { wait: true });
+			// The checkout advances past the commit the queued trigger named, before that trigger's job runs.
+			live = "c2";
+			release.resolve();
+			const outcome = await queued;
+			expect(outcome.status).toBe(503);
+			expect(outcome.body).toMatchObject({ ok: false, reason: "commit-mismatch" });
+			// The first job's content is the only content on the plane, and the newest version is still its own.
+			expect(await substrate.latestDocsVersion("agent-skills")).toMatchObject({ version: "v1", commit: "c0" });
+			expect(fake.uploads.length).toBeGreaterThan(0);
+			expect(fake.uploads.every((upload) => upload.metadata.commit === "c0")).toBe(true);
+			// A trigger whose commit is the checkout's HEAD still ingests and records, so the refusal above is the commit check.
+			const matching = await substrate.startDocsRefresh(refreshOf("c2"), "omp", { wait: true });
+			expect(matching.status).toBe(200);
+			expect(await substrate.latestDocsVersion("agent-skills")).toMatchObject({ version: "v2", commit: "c2" });
+		} finally {
+			rmSync(checkout, { recursive: true, force: true });
 		}
 	});
 });

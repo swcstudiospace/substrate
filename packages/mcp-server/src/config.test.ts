@@ -29,6 +29,7 @@ import {
 	loadConfig,
 	loadLedgerSettings,
 	parseRedisUrl,
+	railwayHostingFromEnv,
 	surfaceForToken,
 } from "./config.ts";
 
@@ -314,14 +315,14 @@ describe("parseRedisUrl refuses plaintext non-loopback redis (DOCS-06)", () => {
 			"redis://localhost:6379",
 			"redis://[::1]:6379",
 			"redis://:secret@127.0.0.1:6379/0",
-			"rediss://cache.example.com:6380/0",
+			"rediss://localhost:6380/0",
 		]) {
 			expect(parseRedisUrl(url)).toEqual({ kind: "ok", url });
 		}
 		expect(parseRedisUrl(undefined)).toEqual({ kind: "unset" });
 		// A DNS name that starts with 127. is not a loopback address.
 		expect(parseRedisUrl("redis://127.cache.example.com:6379").kind).toBe("refused");
-		expect(parseRedisUrl("redis://127.1:6379").kind).toBe("refused");
+		expect(parseRedisUrl("rediss://cache.example.com:6380/0").kind).toBe("refused");
 	});
 
 	test("plaintext redis to a non-loopback host is refused fail-open", () => {
@@ -335,6 +336,117 @@ describe("parseRedisUrl refuses plaintext non-loopback redis (DOCS-06)", () => {
 		expect(loopback.cacheEnabled).toBe(true);
 		expect(loopback.dragonflyUrl).toBe("redis://127.0.0.1:6379");
 		expect(loopback.dragonflyRefused).toBeNull();
+	});
+});
+
+describe("railwayHostingFromEnv: the LightRAG key without a public URL", () => {
+	test("a private-DNS deployment keeps LIGHTRAG_API_KEY for the health probe, with no public URL", () => {
+		const railway = railwayHostingFromEnv({ RAILWAY_PROJECT_ID: "proj", LIGHTRAG_API_KEY: " key-1 " });
+		expect(railway?.apiKey).toBe("key-1");
+		expect(railway?.lightrag).toBeNull();
+	});
+
+	test("SUBSTRATE_LIGHTRAG_API_KEY still wins over LIGHTRAG_API_KEY", () => {
+		const railway = railwayHostingFromEnv({ RAILWAY_PROJECT_ID: "proj", LIGHTRAG_API_KEY: "plain", SUBSTRATE_LIGHTRAG_API_KEY: "override" });
+		expect(railway?.apiKey).toBe("override");
+	});
+
+	test("a blank LIGHTRAG_API_KEY is no key", () => {
+		const railway = railwayHostingFromEnv({ RAILWAY_PROJECT_ID: "proj", LIGHTRAG_API_KEY: "   " });
+		expect(railway?.apiKey).toBeNull();
+	});
+});
+
+describe("data-plane endpoint policy (phase 48)", () => {
+	const GREPTIME_HOST = "greptime.test.invalid";
+	const GREPTIME_URL_KEY = ["GREPTIME", "URL"].join("_");
+	const DIRECT_GREPTIME = `http://${GREPTIME_HOST}:4000`;
+
+	/** The boot refusal's message, or "" when loadConfig accepts the environment. */
+	function bootRefusal(env: Record<string, string | undefined>): string {
+		try {
+			loadConfig(env);
+		} catch (error) {
+			if (error instanceof ConfigError) return error.message;
+			throw error;
+		}
+		return "";
+	}
+
+	test("with nothing set the endpoint settings are warn, with no classes and an empty allow list", () => {
+		const config = loadConfig({});
+		expect(config.dbEndpoints.policy).toBe("warn");
+		expect(config.dbEndpoints.allow.size).toBe(0);
+		expect(config.dbEndpoints.classes).toEqual({});
+	});
+
+	test("warn is the default: a direct Greptime URL loads and is reported as direct", () => {
+		for (const env of [{ [GREPTIME_URL_KEY]: DIRECT_GREPTIME }, { SUBSTRATE_DB_ENDPOINT_POLICY: "warn", [GREPTIME_URL_KEY]: DIRECT_GREPTIME }]) {
+			const config = loadConfig(env);
+			expect(config.dbEndpoints.policy).toBe("warn");
+			expect(config.dbEndpoints.classes).toEqual({ greptime: "direct" });
+			expect(config.greptime?.url).toBe(DIRECT_GREPTIME);
+		}
+	});
+
+	test("enforce refuses a direct Greptime URL, naming the variable and the policy but never the URL", () => {
+		const message = bootRefusal({ SUBSTRATE_DB_ENDPOINT_POLICY: "enforce", [GREPTIME_URL_KEY]: DIRECT_GREPTIME });
+		expect(message).toContain(GREPTIME_URL_KEY);
+		expect(message).toContain("SUBSTRATE_DB_ENDPOINT_POLICY");
+		expect(message).not.toContain(GREPTIME_HOST);
+		expect(message).not.toContain("4000");
+	});
+
+	test("enforce names the variable of each direct plane", () => {
+		expect(bootRefusal({ SUBSTRATE_DB_ENDPOINT_POLICY: "enforce", SUBSTRATE_PG_URL: "postgres://user:pass@pg.test.invalid:5432/substrate" })).toContain("SUBSTRATE_PG_URL");
+		expect(bootRefusal({ SUBSTRATE_DB_ENDPOINT_POLICY: "enforce", DRAGONFLY_URL: "redis://cache.test.invalid:6379/0" })).toContain("DRAGONFLY_URL");
+	});
+
+	test("enforce accepts a loopback endpoint and an allowlisted proxy endpoint", () => {
+		const loopback = loadConfig({
+			SUBSTRATE_DB_ENDPOINT_POLICY: "enforce",
+			[GREPTIME_URL_KEY]: "http://127.0.0.1:4000",
+			SUBSTRATE_PG_URL: "postgres://user:pass@localhost:5432/substrate",
+			DRAGONFLY_URL: "redis://127.0.0.1:6379/0",
+		});
+		expect(loopback.dbEndpoints.classes).toEqual({ greptime: "loopback", postgres: "loopback", dragonfly: "loopback" });
+		const proxied = loadConfig({ SUBSTRATE_DB_ENDPOINT_POLICY: "enforce", SUBSTRATE_DB_PROXY_ALLOW: `${GREPTIME_HOST}:4000`, [GREPTIME_URL_KEY]: DIRECT_GREPTIME });
+		expect(proxied.dbEndpoints.classes).toEqual({ greptime: "proxy" });
+		expect(proxied.dbEndpoints.allow.has(`${GREPTIME_HOST}:4000`)).toBe(true);
+	});
+
+	test("a Dragonfly URL on an allowlisted host enables the cache; the same host on another port stays refused", () => {
+		const enforceEnv = { SUBSTRATE_DB_ENDPOINT_POLICY: "enforce", SUBSTRATE_DB_PROXY_ALLOW: "cache.test.invalid:6379" };
+		const plain = loadConfig({ ...enforceEnv, DRAGONFLY_URL: "redis://cache.test.invalid:6379/0" });
+		expect(plain.cacheEnabled).toBe(true);
+		expect(plain.dragonflyUrl).toBe("redis://cache.test.invalid:6379/0");
+		expect(plain.dragonflyRefused).toBeNull();
+		expect(plain.dbEndpoints.classes.dragonfly).toBe("proxy");
+		const tls = loadConfig({ ...enforceEnv, DRAGONFLY_URL: "rediss://cache.test.invalid:6379/0" });
+		expect(tls.cacheEnabled).toBe(true);
+		// Warn mode: the other port is reported and the cache stays off, fail-open.
+		const otherPort = loadConfig({ SUBSTRATE_DB_PROXY_ALLOW: "cache.test.invalid:6379", DRAGONFLY_URL: "redis://cache.test.invalid:6380/0" });
+		expect(otherPort.cacheEnabled).toBe(false);
+		expect(otherPort.dragonflyUrl).toBeUndefined();
+		expect(otherPort.dragonflyRefused).toContain("cache.test.invalid");
+		expect(otherPort.dbEndpoints.classes.dragonfly).toBe("direct");
+	});
+
+	test("parseRedisUrl accepts an allowlisted host and port and refuses the same host on another port", () => {
+		const allow = new Set(["cache.test.invalid:6379"]);
+		expect(parseRedisUrl("redis://cache.test.invalid:6379/0", allow)).toEqual({ kind: "ok", url: "redis://cache.test.invalid:6379/0" });
+		expect(parseRedisUrl("rediss://cache.test.invalid:6380/0", allow).kind).toBe("refused");
+	});
+
+	test("an unknown policy value is refused, naming the variable", () => {
+		expect(() => loadConfig({ SUBSTRATE_DB_ENDPOINT_POLICY: "audit" })).toThrow(ConfigError);
+		expect(bootRefusal({ SUBSTRATE_DB_ENDPOINT_POLICY: "audit" })).toContain("SUBSTRATE_DB_ENDPOINT_POLICY");
+	});
+
+	test("a malformed SUBSTRATE_DB_PROXY_ALLOW is refused, naming the variable and never the entry", () => {
+		const message = bootRefusal({ SUBSTRATE_DB_PROXY_ALLOW: "cache.test.invalid" });
+		expect(message).toContain("SUBSTRATE_DB_PROXY_ALLOW");
+		expect(message).not.toContain("cache.test.invalid");
 	});
 });
 
@@ -404,5 +516,52 @@ describe("SUBSTRATE_LEDGER_TTL floor", () => {
 			expect(loadLedgerSettings({ SUBSTRATE_LEDGER_TTL: ttl }).ttl).toBe(ttl);
 		}
 		expect(loadLedgerSettings({}).ttl).toBeNull();
+	});
+});
+
+describe("SUBSTRATE_AGENT_SKILLS_ROOT (phase 42, D42-1)", () => {
+	test("unset names no checkout and warns nothing", () => {
+		const config = loadConfig({});
+		expect(config.agentSkillsRoot).toBeNull();
+		expect(configWarnings(config)).toEqual([]);
+	});
+
+	test("an absolute path is the checkout, trimmed, and warns nothing", () => {
+		const config = loadConfig({ SUBSTRATE_AGENT_SKILLS_ROOT: " /srv/agent-skills " });
+		expect(config.agentSkillsRoot).toBe("/srv/agent-skills");
+		expect(configWarnings(config)).toEqual([]);
+	});
+
+	test("a relative path is treated as unset and named at boot", () => {
+		const config = loadConfig({ SUBSTRATE_AGENT_SKILLS_ROOT: "agent-skills" });
+		expect(config.agentSkillsRoot).toBeNull();
+		expect(configWarnings(config)).toEqual([expect.stringContaining('SUBSTRATE_AGENT_SKILLS_ROOT="agent-skills"')]);
+	});
+});
+
+describe("HINDSIGHT_MENTAL_MODELS", () => {
+	test("unset names no model and warns about nothing", () => {
+		expect(loadConfig({}).mentalModels).toEqual({ models: [], warnings: [] });
+	});
+
+	test("a valid entry is kept and an invalid entry is dropped, with the valid ones still applying", () => {
+		const config = loadConfig({
+			HINDSIGHT_BANKS: "sub-omp,sub-hermes",
+			HINDSIGHT_MENTAL_MODELS: "sub-omp=mm_a,mm_b;sub-hermes=bad id;sub-other=mm_x;sub-hermes=mm_c",
+		});
+		expect(config.mentalModels.models).toEqual([
+			{ bank: "sub-omp", id: "mm_a" },
+			{ bank: "sub-omp", id: "mm_b" },
+			{ bank: "sub-hermes", id: "mm_c" },
+		]);
+		// `sub-hermes=bad id` breaks the id rule; `sub-other` is not in HINDSIGHT_BANKS.
+		expect(config.mentalModels.warnings).toHaveLength(2);
+	});
+
+	test("at most 20 models, and a repeated model is dropped with a warning", () => {
+		const ids = Array.from({ length: 21 }, (_, index) => `mm_${index}`);
+		const config = loadConfig({ HINDSIGHT_BANKS: "sub-omp", HINDSIGHT_MENTAL_MODELS: `sub-omp=${ids.join(",")};sub-omp=mm_0` });
+		expect(config.mentalModels.models).toHaveLength(20);
+		expect(config.mentalModels.warnings).toHaveLength(2);
 	});
 });

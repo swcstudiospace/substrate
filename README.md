@@ -173,8 +173,8 @@ chain records the call fail-closed the same way. Details in
 
 ## Agent Swarm runs on this through substrate-mcp
 
-[`swcstudiospace/agent-swarm`](https://github.com/swcstudiospace/agent-swarm) is a 15-agent
-SDLC mesh — A01 `ORCH` through A15 `DOC`, single-writer artifact ownership, fail-closed
+[`swcstudiospace/agent-swarm`](https://github.com/swcstudiospace/agent-swarm) is a 30-agent
+SDLC mesh — A01 `ORCH` through A30 `CUSTODY`, single-writer artifact ownership, fail-closed
 quality/review/security gates. It is a mesh of **roles**; the substrate is the **platform** it
 will run on. Under the accepted architecture the swarm keeps its roster, its DAG and its gates;
 the substrate is the source of record for events, governed memory, leases and handoffs, and the
@@ -186,7 +186,7 @@ signed handoffs and governed memory. A cloud agent still does not call `substrat
 and does not receive `SUBSTRATE_TOKEN`. The Cursor host that plans a prompt and passes the Graph
 ID is the remaining gap; it reaches this server through the same HTTP MCP entry, with the token
 named and never written. The integration is phased across S1–S5 (SPE-5052 … SPE-5056). S1 closes
-one gap in this repo first: for the 15 `swarm-*` surfaces the token now names the caller —
+one gap in this repo first: for the 30 `swarm-*` surfaces the token now names the caller —
 `events_emit`, `graph_claim` and `POST /events` refuse (REST 403, MCP tool error) a `surface`
 that differs from the token's. Every other surface keeps the old behaviour, where a
 caller-supplied `surface` wins over the token's, because a collector legitimately emits for the

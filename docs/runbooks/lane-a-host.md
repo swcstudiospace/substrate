@@ -109,6 +109,21 @@ Logs report presence only (`lease persisted â€¦: yes`, `heartbeat ok/refused`) â
 4. A task whose route and heartbeat both fail is marked failed on its own; the others still resume. Stale approvals move to `stale_approvals`.
 5. A second boot without new work sends zero new prompts (no replay).
 
+## Restarts
+
+### Host restart
+
+On boot, `substrate-host` reconciles sandboxes before it serves (U2). A host-labeled sandbox whose state entry maps to a still-claimed task is re-attached, and its record stays in flight for the resume pass above. Every other host-labeled sandbox is an orphan and is removed; a sandbox that vanished while the host was down has its standing DOCKER-USER egress rules deleted from its state entry first. Unlabeled containers are foreign and never touched. An enumeration failure is one warning and the host still serves.
+
+### Dispatcher restart
+
+Dispatched Hermes sessions end with `substrate-dispatcher.service`, by design: the unit keeps the default `KillMode=control-group`, so a stop or restart ends every session in its cgroup. VM tasks (`dispatch:claude-code`) run on substrate-host outside that cgroup and keep running. The dispatcher re-adopts its persisted VM-task records from `vm_tasks.json` under its state directory on the next start.
+
+### After a restart
+
+- Host: `journalctl -u substrate-host` shows `[substrate-host] sandboxes re-attached N, orphans removed N, foreign untouched N`. Re-attached counts sandboxes kept for claimed tasks, orphans removed counts host-labeled sandboxes deleted, foreign untouched counts unlabeled containers left alone.
+- Dispatcher: `journalctl -u substrate-dispatcher` shows `[substrate-dispatcher] <identifier>: re-adopted VM task <graph_id>/<node_id>` for each re-adopted task (`readopt` in `sessions.py`), with ` (finished while the dispatcher was down)` appended when the task had already exited.
+
 ## Approvals (LANEA-06, D33-04..D33-06)
 
 Every session `permission_request` is recorded with a deadline and posted to

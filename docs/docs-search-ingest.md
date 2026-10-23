@@ -10,7 +10,7 @@ the client — `store-lock.test.ts` fails the build on either.
 
 | Surface | Call | Audit |
 |---|---|---|
-| MCP | `docs_search` `{question, datasets?, session_id?}` | fail-open |
+| MCP | `docs_search` `{question, datasets?, session_id?, context?}` | fail-open |
 | MCP | `docs_ingest` `{dataset, commit?, pages[{path, source_url?, body, heading_path?}], session_id?}` | fail-closed |
 | REST | `POST /docs/search` (same fields, `question` required) | fail-open |
 | REST | `POST /docs/ingest` (bearer required; 401 anonymous, 403 guest) | fail-closed |
@@ -146,6 +146,77 @@ degraded reply is never stored, nor (uplift-3 N5) a partially served one
 with `degraded_datasets`; a cache hit makes no plane call and emits
 no `note`.
 
+## Hybrid retrieval and context augmentation
+
+Every retrieval is a hybrid search: RAGFlow combines keyword and vector similarity, and `vector_similarity_weight` sets the vector share. The keyword share is its complement, and the two sum to 1. `docs_search` can also add a `context` block built from recalled memories and the caller's session ledger. The context is read-side only and is never stored.
+
+### Vector weight
+
+The weight sent as `vector_similarity_weight` resolves in `loadConfig` (`config.ts`). The first match wins:
+
+1. `SUBSTRATE_DOCS_VECTOR_WEIGHT`, when set to a usable value.
+2. `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT`, when set.
+3. `0.3`, RAGFlow's own default.
+
+`SUBSTRATE_DOCS_VECTOR_WEIGHT` keeps precedence because it predates this setting. A blank value counts as unset for both variables.
+
+The two variables do not validate alike:
+
+- `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT` must be a number in [0, 1]. Anything else makes `loadConfig` throw a `ConfigError` that names `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT`. The check runs even when `SUBSTRATE_DOCS_VECTOR_WEIGHT` is also set.
+- `SUBSTRATE_DOCS_VECTOR_WEIGHT` is not a configuration error. A value that is not a number, or lies outside [0, 1], falls back to the RAGFlow weight (then 0.3).
+
+### Reranker
+
+`SUBSTRATE_RAGFLOW_RERANK_ID` names a reranker model. The value is trimmed. Unset or blank, the retrieval request carries no `rerank_id` field. When set, every `POST /api/v1/retrieval` carries `rerank_id` with that id. The reranker is opt-in: the code records that RAGFlow ships no reranker by default (D46-b), and the deployed RAGFlow version is not attested, so the substrate never turns one on by itself.
+
+### The `context` block
+
+`docs_search` takes an optional `context` boolean, default `false`. `POST /docs/search` takes the same field, and the MCP input schema declares it a boolean.
+
+- Unset or `false`: the reply has no `context` key, and nothing is read from memory or the ledger.
+- `true`: the reply gains `context`, computed for that call.
+
+| Field | Content |
+|---|---|
+| `memories` | The first 3 recall hits for the question, in the order recall returns them, each `{id, text, scope, repo}`. `scope` and `repo` are `null` when the hit has none. `text` is redacted, then cut to 400 characters. |
+| `events` | Up to 5 of the most recent ledger rows of the `session_id`, in time order, each `{id, ts, kind, surface, summary}`. `ts` is ISO-8601. `summary` is redacted, then cut to 200 characters. |
+| `untrusted` | The notice the chunks carry (`UNTRUSTED_DOCS_NOTICE`). |
+| `degraded` | Absent when every source answered. Otherwise the reasons, joined by `; `, redacted and capped at 300 characters. |
+
+The reasons in `degraded` are:
+
+- `no-session`: there is no `session_id`, or it is empty. `events` is `[]`, the ledger is not read, and the memories still come.
+- `ledger-not-configured`: no ledger is configured. `events` is `[]`.
+- `ledger: <reason>`: the ledger read failed or missed its budget. A miss reads `ledger: deadline exceeded`. `events` is `[]`.
+- `recall: <reason>`: the recall failed, timed out, or answered degraded. The reason is the recall's own, for example `recall: recall-timeout: budget exceeded`, `recall: hindsight recall failed: …`, `recall: partial recall: …` or `recall: vm-guest`. A partial recall keeps the memories it returned.
+
+### Budgets
+
+| Read | Bound | Where it is set |
+|---|---|---|
+| Recall | `HINDSIGHT_SEARCH_RECALL_BUDGET_MS`, default 1500 ms | `hindsightBudgets.searchRecallBudgetMs` |
+| Ledger read | 1000 ms, fixed | `DOCS_CONTEXT_LEDGER_BUDGET_MS` |
+
+The recall does not run under `SUBSTRATE_DOCS_SEARCH_BUDGET_MS`. That budget is the shared deadline of the chunk retrieval fan-out only.
+
+The ledger read has no row limit: `readEvents` returns every row of the session in time order, and the last five are kept. The 1000 ms budget is the only bound on that read.
+
+The two reads run in parallel, and both start after the chunk answer is ready. A `context: true` reply therefore takes the chunk search time plus the slower of the two reads, which is at most 1500 ms with the default recall budget.
+
+### Cache and ordering
+
+The chunk answer is cached as before, and that store happens before any context leg starts, so the cache entry never carries `context`. Context does not change the datasets searched, the cache key or the chunks. A cache hit still reads the context for that call. An empty question skips the cache for the chunks, and its context is still read. A reply with `context` is never stored.
+
+The `substrate.docs.duration` and `substrate.docs.search` measurements wrap the whole call, so they include the context legs.
+
+### Untrusted context
+
+Memory text and event summaries are untrusted evidence. Both are redacted before they are cut, so a cut never shows text the redactor removes. The context carries no source URL and is never cited as a source. Nothing in it is an instruction: a caller must not act on a directive found in a memory or an event.
+
+### REST
+
+`POST /docs/search` takes `context` with the same meaning. A `context` that is not a JSON boolean, `null` included, answers `400` with `{"error": "datasets must be a string array, session_id a string and context a boolean"}` before the search runs.
+
 ## The six ingest refusals
 
 `docs_ingest` scans the body AND the outgoing metadata (`source_url`,
@@ -218,6 +289,15 @@ and the ingest records, both persisted. `?wait=1` keeps the synchronous
 answer for operators and tests: 200 with the version (and `job`), 503
 with the reason. The skills-sync tick (`packages/projector/src/skills-sync.ts`)
 treats any 2xx as delivered, so its 3 s budget now holds.
+
+The `agent-skills` refresh reads a local checkout when `SUBSTRATE_AGENT_SKILLS_ROOT` names one: an
+absolute path (a relative value is refused with a boot warning and treated as unset). Each directory
+`<name>/` at the checkout root contributes its `<name>/SKILL.md` and its `<name>/references/` tree,
+when it has them, read with the scanner and size caps the `agent-substrate` checkout uses. Dot-directories
+and links are skipped. Only those roots pass the ingest guard for that dataset; `agent-substrate` keeps
+`SUBSTRATE_DOCS_INGEST_ROOTS`. Unset, the trigger is the noop above and records no version. A checkout
+that cannot be read fails the job with `checkout-unreadable` (503 under `?wait=1`) and records no version;
+the pinned version keeps serving, with `pin_age_ms` on its citations, until a refresh succeeds (D42-5).
 
 ### Freshness and trigger lag (uplift-4 S7)
 
@@ -400,10 +480,11 @@ adds `dataset_commit` to a citation only from a dataset's recorded version
 (the `versions` list of `SUBSTRATE_DOCS_STATE_FILE`); `docs ingest` stores
 documents and ingest records but records no version. The only route that
 records a version is a merge-trigger job (`recordDocsVersion` in the refresh),
-and the route runs one only for `agent-substrate`, from the checkout's
-configured roots; for every other dataset the trigger is a noop. The fixtures
-use `agent-substrate`, `programming-desk` and `agent-skills`, so the pins for
-the last two cannot come from an HTTP route and are written by the operator.
+and the route runs one only for `agent-substrate`, from the checkout's configured
+roots, and for `agent-skills` once `SUBSTRATE_AGENT_SKILLS_ROOT` names a checkout;
+for every other dataset the trigger is a noop. The fixtures use `agent-substrate`,
+`programming-desk` and `agent-skills`, so the `programming-desk` pin cannot come from
+an HTTP route and is written by the operator.
 Pick one commit value `COMMIT` (a release SHA is fine) and use it everywhere:
 
 1. Make the pages ingestible: set `SUBSTRATE_DOCS_INGEST_ROOTS` on substrate-mcp

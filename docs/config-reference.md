@@ -48,6 +48,8 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `NOTION_TASK_GRAPH_DS` | string | the repo's task-graph data source id | data source id | the built-in id | mcp-server/config.ts, host/sync.ts | yes |
 | `HERMES_LINEAR_URL` | string | http://127.0.0.1:8792 | URL | the connector's loopback address | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOD_GATE_TIMEOUT_MS` | number | 35000 | positive integer ms | 35000 ms | mcp-server/config.ts | yes |
+| `RAILWAY_API_TOKEN` | secret-ref | none | Railway API token, sent as a bearer token to the public API | every railway_* tool reports unconfigured and the writes refuse before any request. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_WRITES` | toggle | off | on | off: railway_scale and railway_deploy refuse with writes-disabled before any request; on still needs an operator and an approval reference. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
 
 ## Event ledger (GreptimeDB) and anchors
 
@@ -111,8 +113,14 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_CACHE` | toggle | on when DRAGONFLY_URL is set | 0 \| false \| no turns it off | on when the URL is set; anything else is unset. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CACHE_COMMAND_TIMEOUT_MS` | number | 250 | positive ms | 250 ms | mcp-server/config.ts | yes |
 | `SUBSTRATE_CACHE_CONNECT_TIMEOUT_MS` | number | 250 | positive ms | 250 ms | mcp-server/config.ts | yes |
+| `SUBSTRATE_DB_ENDPOINT_POLICY` | mode | warn | warn \| enforce (case- and space-insensitive; unset or blank is warn; anything else refuses boot) | warn: a direct GREPTIME_URL, SUBSTRATE_PG_URL or DRAGONFLY_URL is reported at boot and the service runs as before. See `docs/data-planes.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_DB_PROXY_ALLOW` | list | none | comma-separated host:port entries (host lowercased, port 1 to 65535) | no proxy entries: only loopback endpoints are non-direct. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CACHE_SWR` | mode | shadow | off \| shadow \| enforce | shadow: count would_serve_stale, serve the live brief exactly as before. See `docs/data-planes.md` | mcp-server/config.ts, cache.ts | yes |
 | `SUBSTRATE_CACHE_SWR_WINDOW_S` | number | 30 | 1..300 | 30 s. See `docs/data-planes.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_CACHE_PRELOAD` | toggle | off | on \| off | off: no preload timer, no compose, no request counting. See `docs/data-planes.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_CACHE_PRELOAD_TOP` | number | 3 | 1..20 | 3 repos per tick. See `docs/data-planes.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_CACHE_PRELOAD_S` | number | 300 | 10..3600 | 300 s. See `docs/data-planes.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_EVENT_BUS` | toggle | off | on \| off (case- and space-insensitive; anything else refuses boot naming the variable) | off: no pub/sub connection and /events/stream reads the ledger on its poll only; on without DRAGONFLY_URL, or with a refused URL, is off with a boot log line. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CACHE_BUMP_SCOPE` | mode | legacy | legacy \| narrow (case- and space-insensitive; anything else is legacy, named at boot) | legacy: a Hindsight retain or outbox replay bumps the memory generation (flushes every brief and search, twice per forwarded write) and a heartbeat flushes graph-scoped briefs. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 
 ## Brief and recall-in-the-brief
@@ -154,6 +162,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_RETAIN_DRAIN_MS` | number | 30000 | positive integer ms | 30000 ms. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_HINDSIGHT_INVENTORY` | toggle | off | on \| off | off: no probes, no gauges, no /healthz hindsight block; anything else is off with a boot warning. See `docs/data-planes.md` | mcp-server/hindsight-inventory.ts | yes |
 | `SUBSTRATE_HINDSIGHT_INVENTORY_INTERVAL_S` | number | 60 | 30..3600 | 60 s. See `docs/data-planes.md` | mcp-server/hindsight-inventory.ts | yes |
+| `HINDSIGHT_MENTAL_MODELS` | list | none | bank=id[,id...] entries separated by semicolon; bank must be in HINDSIGHT_BANKS; id matches A-Za-z0-9_- up to 80 characters; at most 20 models | no weekly refresh; no timer starts. See `docs/memory-governance.md` | mcp-server/config.ts | no |
 
 ## Documents plane (RAGFlow)
 
@@ -162,14 +171,35 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `RAGFLOW_URL` | string | none | RAGFlow base URL | docs_search answers degraded, docs_ingest refuses. See `docs/docs-search-ingest.md` | mcp-server/planes/ragflow.ts | yes |
 | `RAGFLOW_API_KEY` | secret-ref | none | API key | the plane is unconfigured. See `docs/docs-search-ingest.md` | mcp-server/planes/ragflow.ts | yes |
 | `RAGFLOW_DATASET_ID` | string | none | dataset id | nothing: no code reads it today (docs_ingest names the dataset after the repo) (UNREAD: no code reads it today). See `docs/docs-search-ingest.md` | none | yes |
-| `SUBSTRATE_DOCS_INGEST_ROOTS` | list | docs/, README.md, .planning/PROJECT.md | comma separated path prefixes | the default roots. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `LIGHTRAG_URL` | string | none | LightRAG base URL | the LightRAG path is unconfigured. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `LIGHTRAG_API_KEY` | secret-ref | none | API key, sent as a bearer on the LightRAG health probe | LightRAG is reached unauthenticated. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_LIGHTRAG_URL` | string | none | LightRAG base URL override for the Railway hosting layer | LIGHTRAG_URL applies. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_LIGHTRAG_API_KEY` | secret-ref | none | API key override for the Railway hosting layer | LIGHTRAG_API_KEY applies. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_LIGHTRAG_PROJECT` | string | none | Railway project label, report-only: it names the project in Railway plans and status and never scopes ingest or search | no project label. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_LIGHTRAG_POLL_MS` | number | 5000 | positive integer ms | 5000 ms | mcp-server/config.ts | yes |
+| `SUBSTRATE_LIGHTRAG_PLANNING_ROOTS` | list | .planning/ | comma separated path prefixes | .planning/ | mcp-server/config.ts | yes |
+| `SUBSTRATE_DOCS_BACKEND` | string | reach-derived | lightrag \| ragflow | LIGHTRAG_URL presence decides: set means lightrag, else ragflow. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `RAILWAY_TOKEN` | secret-ref | none | Railway API token managing the project | Railway mutations stay stubbed; reads still report the plan | mcp-server/config.ts | yes |
+| `RAILWAY_PROJECT_ID` | string | none | Railway project id hosting LightRAG | unpinned: the plan carries a null project | mcp-server/config.ts | yes |
+| `RAILWAY_ENVIRONMENT_ID` | string | none | Railway environment id | unpinned: the plan carries a null environment | mcp-server/config.ts | yes |
+| `RAILWAY_SERVICE_ID` | string | none | LightRAG service id, when pinned | unpinned: status reports the plan without an id | mcp-server/config.ts | yes |
+| `RAILWAY_SERVICE_NAME` | string | lightrag | LightRAG service name for private DNS | lightrag | mcp-server/config.ts | no |
+| `RAILWAY_PRIVATE_DOMAIN` | string | none | Railway-injected private domain | <service>.railway.internal applies | mcp-server/config.ts | no |
+| `SUBSTRATE_DOCS_INGEST_ROOTS` | list | docs/, README.md, .planning/ | comma separated path prefixes | the default roots. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_AGENT_SKILLS_ROOT` | path | none | absolute path to an agent-skills checkout | the merge-trigger for agent-skills is a noop: no checkout, no version recorded. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_VM_GUEST` | toggle | off | 1 | docs_ingest is allowed; 1 refuses it before any network call. See `docs/docs-search-ingest.md` | mcp-server/config.ts, cli/index.ts | yes |
 | `SUBSTRATE_DOCS_STATE_FILE` | path | none | file path | ingest records and version pins stay process-local. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_PRUNE_SUPERSEDED` | toggle | off | 1 | off: every superseded document stays on the plane. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_SIMILARITY_THRESHOLD` | number | 0.2 | [0, 1] | 0.2. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_VECTOR_WEIGHT` | number | 0.3 | [0, 1] | 0.3. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_TOP_K` | number | 1024 | positive integer | 1024. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT` | number | 0.3 | [0, 1] | 0.3. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_RAGFLOW_RERANK_ID` | string | none | reranker model id | no reranker: no rerank_id is sent. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_SEARCH_BUDGET_MS` | number | 4000 | 0 = no shared deadline | 4000 ms. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_RAG_MAX_RETRIES` | number | 2 | non-negative integer | 2 | mcp-server/config.ts | yes |
+| `SUBSTRATE_RAG_RETRY_BASE_MS` | number | 200 | positive integer ms | 200 ms | mcp-server/config.ts | yes |
+| `SUBSTRATE_RAG_BREAKER_THRESHOLD` | number | 3 | positive integer | 3 consecutive failures | mcp-server/config.ts | yes |
+| `SUBSTRATE_RAG_HALF_OPEN_MS` | number | 30000 | non-negative integer ms | 30000 ms | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_FRESHNESS_MAX_AGE_H` | number | 168 | 0..8760 (0 reports without judging) | 168 hours. See `docs/observability.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_TRIGGER_LAG_MIN` | number | 15 | 0..10080 (0 stops recording) | 15 minutes. See `docs/observability.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_LAG_CHECK_S` | number | 60 | 15..3600 | 60 s. See `docs/observability.md` | mcp-server/config.ts | yes |
@@ -194,6 +224,18 @@ Which environment a name belongs in is part of the row: the server's shared env 
 
 | Name | Kind | Default | Allowed | Unset means | Read by | In `.env.example` |
 | --- | --- | --- | --- | --- | --- | --- |
+| `SUBSTRATE_RAILWAY_BUDGET_USD` | number | 50 | positive USD per month | 50: the owner's ceiling; a projected monthly total above it reads over-budget. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_PROJECT_IDS` | list | none | comma separated Railway project ids | no project is summed; the cost report has no usage to price. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_PRICE_CPU_USD` | number | none | positive USD per vCPU unit, cents kept | unpriced: a CPU line with usage and no price makes the cost status unpriced; no price is assumed. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_PRICE_MEMORY_GB_USD` | number | none | positive USD per GB of memory, cents kept | unpriced: a memory line with usage and no price makes the cost status unpriced; no price is assumed. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_PRICE_DISK_GB_USD` | number | none | positive USD per GB of disk, cents kept | unpriced: a disk line with usage and no price makes the cost status unpriced; no price is assumed. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_PRICE_NETWORK_TX_GB_USD` | number | none | positive USD per GB sent, cents kept | unpriced: a network line with usage and no price makes the cost status unpriced; no price is assumed. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_SCALE_MIN_VCPUS` | number | 0.25 | positive number of vCPUs | 0.25: the lower bound for a suggestion and for a gated write. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_SCALE_MAX_VCPUS` | number | 4 | positive number of vCPUs, at least the minimum | 4: the upper bound for a suggestion and for a gated write. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_SCALE_MIN_MEMORY_GB` | number | 0.25 | positive number of GB | 0.25: the lower bound for a suggestion and for a gated write. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_SCALE_MAX_MEMORY_GB` | number | 8 | positive number of GB, at least the minimum | 8: the upper bound for a suggestion and for a gated write. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_SCALE_HEADROOM` | number | 0.3 | number from 0 to 1 | 0.3: the fraction added above the p95 usage in a scale suggestion. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
+| `SUBSTRATE_RAILWAY_SCALE_WINDOW_SECONDS` | number | 86400 | positive number of seconds | 86400: the window the scale suggestion reads usage over. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | string | none | OTLP/HTTP base URL | export is off. See `docs/observability.md` | observability/config.ts | yes |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | string | the generic endpoint | URL | the generic endpoint. See `docs/observability.md` | observability/config.ts | yes |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | string | the generic endpoint | URL | the generic endpoint. See `docs/observability.md` | observability/config.ts | yes |
@@ -369,8 +411,8 @@ The scan sees only the prefix of a name the code builds, so each family is regis
 
 | Pattern | Prefix | Members |
 | --- | --- | --- |
-| `SUBSTRATE_TOKEN_<SURFACE>` | `SUBSTRATE_TOKEN_` | 27 |
-| `SUBSTRATE_BUDGET_<CLASS>_RPS \| _BURST` | `SUBSTRATE_BUDGET_` | 168 |
+| `SUBSTRATE_TOKEN_<SURFACE>` | `SUBSTRATE_TOKEN_` | 42 |
+| `SUBSTRATE_BUDGET_<CLASS>_RPS \| _BURST` | `SUBSTRATE_BUDGET_` | 258 |
 | `SUBSTRATE_REHEARSAL_<NAME>` | `SUBSTRATE_REHEARSAL_` | 1 |
 
 ## Names that are not configuration

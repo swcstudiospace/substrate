@@ -1,16 +1,18 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { validateAgentCard } from "./agent-card.ts";
 import { loadConfig } from "./config.ts";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { request as httpRequest } from "node:http";
 import { scanIngestPages } from "./docs-ingest.ts";
 import type { EventQuery } from "./greptime.ts";
-import { memoryToolWriter, surfaceClaimRefusal } from "./mcp.ts";
+import { memoryToolWriter, resetRagMachine, surfaceClaimRefusal } from "./mcp.ts";
 import { createObservability } from "./observe.ts";
 import type { FetchLike } from "./planes/ragflow.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
+import { HindsightFake } from "./hindsight-fake.ts";
 import {
 	STREAM_BATCH,
 	createHttpServer,
@@ -24,6 +26,7 @@ import {
 } from "./server.ts";
 import { Substrate } from "./service.ts";
 import type { MemoryEntry, SubstrateEvent, Surface } from "./types.ts";
+import type { EventBus, EventHint } from "./event-bus.ts";
 
 /** Shorthand for a health report; every field defaults to the unhealthy value. */
 function health(over: Partial<Parameters<typeof healthStatus>[0]> = {}) {
@@ -66,7 +69,7 @@ describe("healthStatus", () => {
 async function serve(
 	greptime: unknown,
 	env: Record<string, string | undefined> = {},
-	stores: { ragflowFetch?: FetchLike } = {},
+	stores: { ragflowFetch?: FetchLike; hindsightFetch?: FetchLike; eventBus?: () => EventBus | null } = {},
 	options: HttpServerOptions = {},
 ) {
 	const config = loadConfig(env);
@@ -299,6 +302,109 @@ describe("routes", () => {
 		}
 	});
 
+	/** The ledger stub plus the session read the docs context makes: each read is recorded and answers with no rows. */
+	function sessionLedger() {
+		const base = ledger();
+		const reads: Array<[string, string]> = [];
+		return {
+			reads,
+			greptime: {
+				...base.greptime,
+				readEvents: async (column: string, value: string) => {
+					reads.push([column, value]);
+					return [];
+				},
+			},
+		};
+	}
+
+	/** A Hindsight fake with one memory in the omp bank, so a recall that reaches it is answered. */
+	function ompBank(): HindsightFake {
+		const hindsight = new HindsightFake();
+		hindsight.seed("sub-omp", [{ id: "m1", text: "quote every version", document_id: "mwd_1", tags: ["omp"], metadata: {}, score: 0.9 }]);
+		return hindsight;
+	}
+
+	/** Recall reads the process environment at call time, so the Hindsight variables are set around the requests made inside `run`. */
+	async function withHindsightEnv<T>(banks: string, run: () => Promise<T>): Promise<T> {
+		const names = ["HINDSIGHT_URL", "HINDSIGHT_API_KEY", "HINDSIGHT_BANKS"] as const;
+		const saved = names.map((name) => [name, process.env[name]] as const);
+		process.env.HINDSIGHT_URL = "http://fake";
+		process.env.HINDSIGHT_API_KEY = "test-bearer";
+		process.env.HINDSIGHT_BANKS = banks;
+		try {
+			return await run();
+		} finally {
+			for (const [name, value] of saved) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
+	}
+
+	const OMP_ENV = { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" };
+	const OMP_AUTH = { authorization: "Bearer tok-omp" };
+
+	test("POST /docs/search with context true reaches the service and answers a context block", async () => {
+		const fake = new RagflowFake();
+		const hindsight = ompBank();
+		const { reads, greptime } = sessionLedger();
+		const { post, stop } = await serve(greptime, OMP_ENV, { ragflowFetch: fake.fetch, hindsightFetch: hindsight.fetch });
+		try {
+			const response = await withHindsightEnv("sub-omp", () =>
+				post("/docs/search", { question: "who reads RAGFlow?", session_id: "s-1", context: true }, OMP_AUTH),
+			);
+			const body = (await response.json()) as Record<string, unknown>;
+			expect(response.status).toBe(200);
+			expect(Object.hasOwn(body, "context")).toBe(true);
+			expect(hindsight.recalls()).toHaveLength(1);
+			expect(reads).toEqual([["session_id", "s-1"]]);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/search with context false or absent answers without a context key and reads neither source", async () => {
+		const fake = new RagflowFake();
+		const hindsight = ompBank();
+		const { reads, greptime } = sessionLedger();
+		const { post, stop } = await serve(greptime, OMP_ENV, { ragflowFetch: fake.fetch, hindsightFetch: hindsight.fetch });
+		try {
+			await withHindsightEnv("sub-omp", async () => {
+				for (const extra of [{ context: false }, {}]) {
+					const response = await post("/docs/search", { question: "who reads RAGFlow?", session_id: "s-1", ...extra }, OMP_AUTH);
+					const body = (await response.json()) as Record<string, unknown>;
+					expect(response.status).toBe(200);
+					expect(Object.hasOwn(body, "context")).toBe(false);
+				}
+			});
+			expect(hindsight.recalls()).toEqual([]);
+			expect(reads).toEqual([]);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/search refuses a string or null context with a 400, before recall or the ledger", async () => {
+		const fake = new RagflowFake();
+		const hindsight = ompBank();
+		const { reads, greptime } = sessionLedger();
+		const { post, stop } = await serve(greptime, OMP_ENV, { ragflowFetch: fake.fetch, hindsightFetch: hindsight.fetch });
+		try {
+			await withHindsightEnv("sub-omp", async () => {
+				for (const context of ["true", null]) {
+					const response = await post("/docs/search", { question: "who reads RAGFlow?", session_id: "s-1", context }, OMP_AUTH);
+					expect(response.status).toBe(400);
+					expect(String(((await response.json()) as Record<string, unknown>).error)).toContain("context a boolean");
+				}
+			});
+			expect(hindsight.recalls()).toEqual([]);
+			expect(reads).toEqual([]);
+		} finally {
+			await stop();
+		}
+	});
+
 	test("POST /docs/ingest stores a page against the fake", async () => {
 		const { greptime } = ledger();
 		const fake = new RagflowFake();
@@ -409,6 +515,22 @@ describe("routes", () => {
 			mkdirSync(dirname(join(root, path)), { recursive: true });
 			writeFileSync(join(root, path), body);
 		}
+		return root;
+	}
+
+	/** Run git in a checkout with a fixed identity and no signing; returns trimmed stdout. */
+	function git(root: string, ...args: string[]): string {
+		return execFileSync("git", ["-C", root, "-c", "user.name=substrate", "-c", "user.email=substrate@example.test", "-c", "commit.gpgsign=false", ...args], {
+			encoding: "utf8",
+		}).trim();
+	}
+
+	/** A checkout that is a git repository holding `files` in one commit: the HEAD an agent-skills trigger names. */
+	function gitCheckout(files: Record<string, string>): string {
+		const root = docsFixture(files);
+		git(root, "init", "-q");
+		git(root, "add", "-A");
+		git(root, "commit", "-q", "-m", "skills");
 		return root;
 	}
 
@@ -559,7 +681,65 @@ describe("routes", () => {
 		}
 	});
 
-	test("POST /docs/merge-trigger answers a dataset it holds no checkout of with a truthful noop", async () => {
+	test("POST /docs/merge-trigger ingests the agent-skills checkout when SUBSTRATE_AGENT_SKILLS_ROOT names one, then records the version", async () => {
+		const { greptime, written } = ledger();
+		const fake = new RagflowFake();
+		fake.parseDonePolls = 1;
+		const restore = patchFetch(fake.fetch);
+		// The library layout: each skill is a `<name>/` directory holding SKILL.md and a references/ tree. A
+		// directory with no SKILL.md is not a skill, so its file never reaches the plane.
+		const checkout = gitCheckout({
+			"demo-skill/SKILL.md": "---\nname: demo-skill\n---\nDemo skill body.\n",
+			"demo-skill/references/api.md": "The demo API reference.\n",
+			"notes/scratch.md": "Not a skill.\n",
+		});
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_AGENT_SKILLS_ROOT: checkout });
+		try {
+			const head = git(checkout, "rev-parse", "HEAD");
+			const response = await post("/docs/merge-trigger?wait=1", { dataset: "agent-skills", commit: head, content_sha256: "sha-skills" }, { authorization: "Bearer tok-omp" });
+			const body = (await response.json()) as { ok: boolean; version?: { version: string; commit: string; dataset_id: string } };
+			expect(response.status).toBe(200);
+			expect(body.ok).toBe(true);
+			expect(body.version).toMatchObject({ version: "v1", commit: head, dataset_id: "ds-leipzig-agent-skills" });
+			// Exactly the skill's SKILL.md and its reference reach the plane, each cited by its own file.
+			const sources = uploadsFor(fake, "ds-leipzig-agent-skills").map((upload) => upload.metadata.source_url ?? "");
+			expect(sources).toHaveLength(2);
+			expect(sources.some((url) => url.endsWith("/demo-skill/SKILL.md"))).toBe(true);
+			expect(sources.some((url) => url.endsWith("/demo-skill/references/api.md"))).toBe(true);
+			expect(refreshEvents(written)).toHaveLength(1);
+		} finally {
+			restore();
+			await stop();
+			rmSync(checkout, { recursive: true, force: true });
+		}
+	});
+
+	test("POST /docs/merge-trigger for agent-skills refuses a checkout that moved past the requested commit: commit-mismatch, nothing recorded", async () => {
+		const { greptime, written } = ledger();
+		const fake = new RagflowFake();
+		fake.parseDonePolls = 1;
+		const restore = patchFetch(fake.fetch);
+		const checkout = gitCheckout({ "demo-skill/SKILL.md": "---\nname: demo-skill\n---\nDemo skill body.\n" });
+		const requested = git(checkout, "rev-parse", "HEAD");
+		// The trigger names `requested`, then the checkout advances: the job must not ingest the newer content under that name.
+		writeFileSync(join(checkout, "demo-skill", "SKILL.md"), "---\nname: demo-skill\n---\nRevised skill body.\n");
+		git(checkout, "commit", "-q", "-am", "revise skill");
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_AGENT_SKILLS_ROOT: checkout });
+		try {
+			const response = await post("/docs/merge-trigger?wait=1", { dataset: "agent-skills", commit: requested, content_sha256: "sha-moved" }, { authorization: "Bearer tok-omp" });
+			const body = (await response.json()) as { ok: boolean; reason?: string };
+			expect(response.status).toBe(503);
+			expect(body).toMatchObject({ ok: false, reason: "commit-mismatch" });
+			expect(fake.uploads).toHaveLength(0);
+			expect(refreshEvents(written)).toHaveLength(0);
+		} finally {
+			restore();
+			await stop();
+			rmSync(checkout, { recursive: true, force: true });
+		}
+	});
+
+	test("POST /docs/merge-trigger for agent-skills is a truthful noop when SUBSTRATE_AGENT_SKILLS_ROOT is unset", async () => {
 		const { greptime, written } = ledger();
 		const fake = new RagflowFake();
 		const restore = patchFetch(fake.fetch);
@@ -571,9 +751,9 @@ describe("routes", () => {
 			{ docsIngestBaseDir: docs },
 		);
 		try {
-			// agent-skills is a known trigger row, but this server holds no checkout
-			// of it: a recorded version over documents that were never ingested
-			// would only lie to search, so the noop says what happened instead.
+			// agent-skills is a known trigger row, but with no checkout named this server holds none of it: a
+			// recorded version over documents that were never ingested would only lie to search, so the noop
+			// says what happened instead.
 			const response = await post("/docs/merge-trigger", { dataset: "agent-skills", commit: "c-ff", content_sha256: "sha-ff" }, { authorization: "Bearer tok-omp" });
 			const body = (await response.json()) as { ok: boolean; dataset: string; noop?: boolean; reason?: string };
 			expect(response.status).toBe(200);
@@ -590,9 +770,31 @@ describe("routes", () => {
 		}
 	});
 
+	test("POST /docs/merge-trigger for agent-skills fails with checkout-unreadable when the named checkout is gone", async () => {
+		const { greptime, written } = ledger();
+		const fake = new RagflowFake();
+		const restore = patchFetch(fake.fetch);
+		// The named checkout does not exist, so its roots cannot be listed: the job fails before any plane call.
+		const gone = docsFixture({ "demo-skill/SKILL.md": "Demo skill body.\n" });
+		rmSync(gone, { recursive: true, force: true });
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_AGENT_SKILLS_ROOT: gone });
+		try {
+			const response = await post("/docs/merge-trigger?wait=1", { dataset: "agent-skills", commit: "c-gone", content_sha256: "sha-gone" }, { authorization: "Bearer tok-omp" });
+			const body = (await response.json()) as { ok: boolean; reason?: string };
+			expect(response.status).toBe(503);
+			expect(body).toMatchObject({ ok: false, reason: "checkout-unreadable" });
+			expect(fake.uploads).toHaveLength(0);
+			expect(refreshEvents(written)).toHaveLength(0);
+		} finally {
+			restore();
+			await stop();
+		}
+	});
+
 	test("POST /docs/merge-trigger dedupes the default dataset by content hash", async () => {
 		const { greptime, written } = ledger();
 		const fake = new RagflowFake();
+		fake.parseDonePolls = 1;
 		const restore = patchFetch(fake.fetch);
 		const docs = docsFixture({ "README.md": "The substrate is the only door.", "docs/data-planes.md": "Planes and their readers." });
 		const { post, stop } = await serve(
@@ -650,6 +852,44 @@ describe("routes", () => {
 			expect(ingestEvents(written)).toHaveLength(0);
 		} finally {
 			await stop();
+		}
+	});
+
+	test("POST /docs/merge-trigger refreshes a LightRAG-only deployment: the selected plane decides, RAGFlow is not required", async () => {
+		const { greptime, written } = ledger();
+		const realFetch = globalThis.fetch;
+		const uploads: string[] = [];
+		globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			const url = new URL(input instanceof Request ? input.url : String(input));
+			if (url.origin !== "http://lightrag.test") return realFetch(input, init);
+			if (init?.method === "POST" && url.pathname === "/documents/upload") {
+				uploads.push(await ((init.body as FormData).get("file") as Blob).text());
+				return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
+			}
+			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+			if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+			return Response.json({ detail: "no route" }, { status: 404 });
+		}) as typeof fetch;
+		const docs = docsFixture({ "README.md": "The substrate is the only door." });
+		const { post, stop } = await serve(
+			greptime,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" },
+			{},
+			{ docsIngestBaseDir: docs },
+		);
+		try {
+			const response = await post("/docs/merge-trigger?wait=1", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
+			const body = (await response.json()) as { ok: boolean; noop?: boolean; reason?: string; version?: { version: string; backend: string } };
+			expect(response.status).toBe(200);
+			expect(body.noop).toBeUndefined();
+			expect(body.reason).toBeUndefined();
+			expect(body.version).toMatchObject({ version: "v1", backend: "lightrag" });
+			expect(uploads.length).toBeGreaterThan(0);
+			expect(refreshEvents(written)).toHaveLength(1);
+		} finally {
+			globalThis.fetch = realFetch;
+			await stop();
+			rmSync(docs, { recursive: true, force: true });
 		}
 	});
 
@@ -741,6 +981,236 @@ describe("routes", () => {
 			await stop();
 			rmSync(docs, { recursive: true, force: true });
 		}
+	});
+
+	describe("the REST RAG breaker counts only plane failures", () => {
+		const realFetch = globalThis.fetch;
+		const auth = { authorization: "Bearer tok-omp" };
+		const LIGHTRAG_ENV = {
+			SUBSTRATE_TOKEN_OMP: "tok-omp",
+			LIGHTRAG_URL: "http://lightrag.test",
+			SUBSTRATE_RAG_MAX_RETRIES: "0",
+			SUBSTRATE_RAG_HALF_OPEN_MS: "0",
+		};
+		const LIGHTRAG_ANSWER = { data: [{ content: "A LightRAG chunk.", document_name: "docs/planning.md", source_url: "https://example.com/planning" }] };
+		/** Answers LightRAG calls only; the test's own REST requests go to the real fetch. */
+		const stubLightrag = (answer: () => Promise<Response>) =>
+			(async (input: string | URL | Request, init?: RequestInit) => {
+				const url = input instanceof Request ? input.url : String(input);
+				return url.startsWith("http://lightrag.test") ? answer() : realFetch(input, init);
+			}) as unknown as typeof fetch;
+		beforeEach(() => resetRagMachine());
+		afterEach(() => {
+			globalThis.fetch = realFetch;
+			resetRagMachine();
+		});
+
+		test("several version.stale refusals over REST leave the RAG machine out of ERROR, and the next query is served", async () => {
+			let planeCalls = 0;
+			globalThis.fetch = stubLightrag(async () => {
+				planeCalls += 1;
+				return Response.json(LIGHTRAG_ANSWER);
+			});
+			const { greptime } = ledger();
+			const { post, get, stop } = await serve(greptime, { ...LIGHTRAG_ENV, SUBSTRATE_RAG_HALF_OPEN_MS: "60000" });
+			try {
+				const stale = { path: "docs/data-planes.md", source_url: "https://example.com/agent-substrate/data-planes", body: "A page.", expected_version: 1 };
+				for (let n = 0; n < 2; n += 1) {
+					const refused = await post("/docs/ingest", { dataset: "agent-substrate", pages: [stale] }, auth);
+					expect(refused.status).toBe(409);
+					expect(await refused.text()).toContain("version.stale");
+				}
+				const outside = { path: "secrets/keys.md", source_url: "https://example.com/agent-substrate/keys", body: "Keys." };
+				const refusedOutside = await post("/docs/ingest", { dataset: "agent-substrate", pages: [outside] }, auth);
+				expect(refusedOutside.status).toBe(400);
+				expect(await refusedOutside.text()).toContain("outside-roots");
+
+				const before = (await (await get("/rag/state", auth)).json()) as Record<string, unknown>;
+				expect(before).toMatchObject({ consecutiveFailures: 0 });
+				expect(before.state).not.toBe("ERROR");
+
+				const served = (await (await post("/docs/lightrag/query", { question: "asked after the refusals" }, auth)).json()) as Record<string, unknown>;
+				expect(served).toMatchObject({ backend: "lightrag", chunks: [expect.objectContaining({ content: "A LightRAG chunk." })] });
+				expect(served.fallback).toBeUndefined();
+				expect(planeCalls).toBe(1);
+			} finally {
+				await stop();
+			}
+		});
+
+		test("two concurrent REST LightRAG queries after the cooldown produce one backend attempt", async () => {
+			let attempts = 0;
+			const probeReply = Promise.withResolvers<Response>();
+			const probeReached = Promise.withResolvers<void>();
+			globalThis.fetch = stubLightrag(async () => {
+				attempts += 1;
+				if (attempts <= 3) return new Response("upstream down", { status: 500 });
+				if (attempts === 4) {
+					probeReached.resolve();
+					return probeReply.promise;
+				}
+				return new Response("upstream down", { status: 500 });
+			});
+			const { greptime } = ledger();
+			// A zero cooldown has already elapsed, so the query after ERROR is the probe; no timer is needed.
+			const { post, get, stop } = await serve(greptime, LIGHTRAG_ENV);
+			try {
+				for (const question of ["drive one", "drive two", "drive three"]) {
+					const degraded = (await (await post("/docs/lightrag/query", { question }, auth)).json()) as Record<string, unknown>;
+					expect(degraded.fallback).toBe("hindsight");
+				}
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+
+				const probe = post("/docs/lightrag/query", { question: "the probe" }, auth);
+				await probeReached.promise;
+				const burst = (await (await post("/docs/lightrag/query", { question: "the burst" }, auth)).json()) as Record<string, unknown>;
+				expect(burst.fallback).toBe("hindsight");
+				expect(attempts).toBe(4);
+
+				probeReply.resolve(Response.json(LIGHTRAG_ANSWER));
+				const probed = (await (await probe).json()) as Record<string, unknown>;
+				expect(probed).toMatchObject({ backend: "lightrag" });
+				expect(probed.fallback).toBeUndefined();
+				expect(attempts).toBe(4);
+			} finally {
+				await stop();
+			}
+		});
+
+		test("a REST docs ingest, refused or served, does not move an open breaker: the next query inside the cooldown is refused without a backend call", async () => {
+			let queries = 0;
+			globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+				const url = new URL(input instanceof Request ? input.url : String(input));
+				if (url.origin !== "http://lightrag.test") return realFetch(input, init);
+				if (url.pathname === "/query") {
+					queries += 1;
+					return new Response("upstream down", { status: 500 });
+				}
+				if (init?.method === "POST" && url.pathname === "/documents/upload") return Response.json({ status: "success", data: { track_id: "trk-1" } });
+				if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+				if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+				return Response.json({ detail: "no route" }, { status: 404 });
+			}) as unknown as typeof fetch;
+			const { greptime } = ledger();
+			// A 60 s cooldown: it cannot elapse during the test, so ERROR holds until the assertions say otherwise.
+			const { post, get, stop } = await serve(greptime, { ...LIGHTRAG_ENV, SUBSTRATE_RAG_HALF_OPEN_MS: "60000" });
+			try {
+				for (const question of ["trip one", "trip two", "trip three"]) {
+					const degraded = (await (await post("/docs/lightrag/query", { question }, auth)).json()) as Record<string, unknown>;
+					expect(degraded.fallback).toBe("hindsight");
+				}
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+				const queriesWhenOpen = queries;
+
+				const refused = await post("/docs/ingest", { dataset: "agent-substrate", pages: [{ path: "docs/data-planes.md", source_url: "https://example.com/agent-substrate/data-planes", body: "A page.", expected_version: 1 }] }, auth);
+				expect(refused.status).toBe(409);
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+
+				const served = await post("/docs/ingest", { dataset: "agent-substrate", pages: [{ path: "docs/data-planes.md", source_url: "https://example.com/agent-substrate/data-planes", body: "The substrate is the only door to the data planes." }] }, auth);
+				expect(served.status).toBe(200);
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+
+				const inside = (await (await post("/docs/lightrag/query", { question: "asked inside the cooldown" }, auth)).json()) as Record<string, unknown>;
+				expect(inside.fallback).toBe("hindsight");
+				expect(queries).toBe(queriesWhenOpen);
+			} finally {
+				await stop();
+			}
+		});
+
+		test("after the cooldown, one successful REST docs search moves the RAG machine out of ERROR", async () => {
+			let planeHealthy = false;
+			globalThis.fetch = stubLightrag(async () => (planeHealthy ? Response.json(LIGHTRAG_ANSWER) : new Response("upstream down", { status: 500 })));
+			const { greptime } = ledger();
+			// A zero cooldown has already elapsed, so the search after ERROR is the probe; no timer is needed.
+			const { post, get, stop } = await serve(greptime, LIGHTRAG_ENV);
+			try {
+				for (const question of ["search one", "search two", "search three"]) {
+					const degraded = (await (await post("/docs/search", { question }, auth)).json()) as Record<string, unknown>;
+					expect(degraded.degraded).toBe(true);
+				}
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+
+				planeHealthy = true;
+				const probed = (await (await post("/docs/search", { question: "the probe" }, auth)).json()) as Record<string, unknown>;
+				expect(probed.degraded).toBeUndefined();
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "IDLE" });
+			} finally {
+				await stop();
+			}
+		});
+
+		test("a REST docs search inside the cooldown does not ask LightRAG: it answers degraded and the plane sees no request", async () => {
+			let planeCalls = 0;
+			globalThis.fetch = stubLightrag(async () => {
+				planeCalls += 1;
+				return new Response("upstream down", { status: 500 });
+			});
+			const { greptime } = ledger();
+			// A 60 s cooldown: it cannot elapse during the test, so ERROR holds until the assertions say otherwise.
+			const { post, get, stop } = await serve(greptime, { ...LIGHTRAG_ENV, SUBSTRATE_RAG_HALF_OPEN_MS: "60000" });
+			try {
+				for (const question of ["trip one", "trip two", "trip three"]) {
+					const tripped = (await (await post("/docs/lightrag/query", { question }, auth)).json()) as Record<string, unknown>;
+					expect(tripped.fallback).toBe("hindsight");
+				}
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+				const before = planeCalls;
+
+				const inside = (await (await post("/docs/search", { question: "asked inside the cooldown" }, auth)).json()) as Record<string, unknown>;
+				expect(inside).toMatchObject({ degraded: true, reason: "rag breaker open" });
+				expect(planeCalls).toBe(before);
+			} finally {
+				await stop();
+			}
+		});
+
+		test("a REST docs ingest during a probe keeps the failure count, and a probe that then fails re-trips the breaker", async () => {
+			const probeReply = Promise.withResolvers<Response>();
+			const probeReached = Promise.withResolvers<void>();
+			let queries = 0;
+			globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+				const url = new URL(input instanceof Request ? input.url : String(input));
+				if (url.origin !== "http://lightrag.test") return realFetch(input, init);
+				if (url.pathname === "/query") {
+					queries += 1;
+					if (queries === 4) {
+						probeReached.resolve();
+						return probeReply.promise;
+					}
+					return new Response("upstream down", { status: 500 });
+				}
+				if (init?.method === "POST" && url.pathname === "/documents/upload") return Response.json({ status: "success", data: { track_id: "trk-1" } });
+				if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+				if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+				return Response.json({ detail: "no route" }, { status: 404 });
+			}) as unknown as typeof fetch;
+			const { greptime } = ledger();
+			// A zero cooldown has already elapsed, so the query after ERROR is the probe; no timer is needed.
+			const { post, get, stop } = await serve(greptime, LIGHTRAG_ENV);
+			try {
+				for (const question of ["trip one", "trip two", "trip three"]) {
+					const tripped = (await (await post("/docs/lightrag/query", { question }, auth)).json()) as Record<string, unknown>;
+					expect(tripped.fallback).toBe("hindsight");
+				}
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+
+				const probe = post("/docs/lightrag/query", { question: "the probe" }, auth);
+				await probeReached.promise;
+
+				const ingested = await post("/docs/ingest", { dataset: "agent-substrate", pages: [{ path: "docs/data-planes.md", source_url: "https://example.com/agent-substrate/data-planes", body: "The substrate is the only door to the data planes." }] }, auth);
+				expect(ingested.status).toBe(200);
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "CONTEXT_REFRESH", consecutiveFailures: 3 });
+
+				probeReply.resolve(new Response("upstream down", { status: 500 }));
+				expect(((await (await probe).json()) as Record<string, unknown>).fallback).toBe("hindsight");
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR", consecutiveFailures: 4 });
+			} finally {
+				// A failed assertion above leaves the probe held; release it so `stop()` does not wait on it.
+				probeReply.resolve(new Response("upstream down", { status: 500 }));
+				await stop();
+			}
+		});
 	});
 });
 
@@ -1197,6 +1667,106 @@ describe("GET /events/stream", () => {
 			const emit = await post("/events", { kind: "note", summary: "still working", session_id: "s" }, { authorization: "Bearer tok-omp" });
 			expect(emit.status).toBe(202);
 			controller.abort();
+		} finally {
+			await stop();
+		}
+	});
+
+	/** A bus stand-in: each open stream's subscription is one listener here, and a test wakes them with a hint. */
+	function fakeHub() {
+		const listeners = new Set<(hint: EventHint) => void>();
+		const bus: EventBus = {
+			publish: async () => true,
+			subscribe: (listener) => {
+				listeners.add(listener);
+				return () => {
+					listeners.delete(listener);
+				};
+			},
+			stop: () => {},
+		};
+		return {
+			bus,
+			listeners,
+			wake: (id: string) => {
+				const hint: EventHint = { v: 1, id, kind: "note", surface: "omp", graph_id: null, ts: new Date(BASE).toISOString() };
+				for (const listener of [...listeners]) listener(hint);
+			},
+		};
+	}
+
+	test("a hint wakes an idle stream, which reads the ledger and delivers the new event before its idle timeout", async () => {
+		const stub = streamLedger([]);
+		const hub = fakeHub();
+		const { get, stop } = await serve(stub, { SUBSTRATE_TOKEN_OMP: "tok-omp" }, { eventBus: () => hub.bus }, { streamPollMs: 60_000, streamIdleMs: 60_000 });
+		try {
+			const controller = new AbortController();
+			const response = await get("/events/stream", { authorization: "Bearer tok-omp" }, controller.signal);
+			expect(response.status).toBe(200);
+			expect(hub.listeners.size).toBe(1);
+			// The poll and the idle close are both 60 s away, so only the hint can deliver this inside the 5 s read.
+			stub.append({ id: "e1", ts: BASE, summary: "landed during a long idle wait" });
+			hub.wake("e1");
+			const got = frames(await streamText(response, controller, 1, 5_000));
+			expect(got.map((frame) => frame.id)).toEqual(["e1"]);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a hint that arrives during a ledger read makes the stream read again at once, not at the long poll", async () => {
+		const stub = streamLedger([]);
+		const hub = fakeHub();
+		const answer = stub.eventIdsAfter;
+		const gate = Promise.withResolvers<void>();
+		let started = 0;
+		stub.eventIdsAfter = async (cursor, limit) => {
+			started += 1;
+			if (started === 1) await gate.promise;
+			return answer(cursor, limit);
+		};
+		const { get, stop } = await serve(stub, { SUBSTRATE_TOKEN_OMP: "tok-omp" }, { eventBus: () => hub.bus }, { streamPollMs: 60_000, streamIdleMs: 60_000 });
+		try {
+			const controller = new AbortController();
+			const response = await get("/events/stream", { authorization: "Bearer tok-omp" }, controller.signal);
+			expect(response.status).toBe(200);
+			// The first hint starts a ledger read and holds it open; the second arrives while that read is in flight.
+			hub.wake("e1");
+			hub.wake("e2");
+			expect(started).toBe(1);
+			gate.resolve();
+			// The read finished empty, so only the remembered hint can start this second read: the poll is 60 s away.
+			await until(() => started === 2);
+			controller.abort();
+		} finally {
+			await stop();
+		}
+	});
+
+	test("the stream holds its subscription for the life of the response and releases it when the response closes", async () => {
+		const hub = fakeHub();
+		const { get, stop } = await serve(streamLedger([]), { SUBSTRATE_TOKEN_OMP: "tok-omp" }, { eventBus: () => hub.bus }, { streamPollMs: 60_000, streamIdleMs: 60_000 });
+		try {
+			const controller = new AbortController();
+			await get("/events/stream", { authorization: "Bearer tok-omp" }, controller.signal);
+			expect(hub.listeners.size).toBe(1);
+			controller.abort();
+			await until(() => hub.listeners.size === 0);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("with the bus off the stream delivers on its poll alone", async () => {
+		const stub = streamLedger([]);
+		const { get, stop } = await serve(stub, { SUBSTRATE_TOKEN_OMP: "tok-omp" }, { eventBus: () => null }, { streamPollMs: 10, streamIdleMs: 60_000 });
+		try {
+			const controller = new AbortController();
+			const response = await get("/events/stream", { authorization: "Bearer tok-omp" }, controller.signal);
+			expect(response.status).toBe(200);
+			stub.append({ id: "e1", ts: BASE, summary: "arrived with the bus off" });
+			const got = frames(await streamText(response, controller, 1, 2_000));
+			expect(got.map((frame) => frame.id)).toEqual(["e1"]);
 		} finally {
 			await stop();
 		}

@@ -78,6 +78,8 @@ export class HindsightFake {
 	emptyDelete = false;
 	/** Per-bank recall latency, for the shared-budget slow-bank proof. */
 	recallDelayMs: Record<string, number> = {};
+	/** Per-bank recall latency that ignores the caller's abort: only the caller giving up (the brief's cap) leaves that bank out. */
+	recallDeafMs: Record<string, number> = {};
 	/** Retain latency, for the shutdown-drain proof. */
 	retainDelayMs = 0;
 	/** Every retained item, in order, with its bank. */
@@ -206,6 +208,8 @@ export class HindsightFake {
 		const name = decodeURIComponent(bank);
 		const delay = this.recallDelayMs[name] ?? 0;
 		if (delay > 0) await sleep(delay, signal);
+		const deaf = this.recallDeafMs[name] ?? 0;
+		if (deaf > 0) await sleep(deaf, null);
 		const found = this.banks.get(name);
 		if (!found) return json({ detail: "bank not found" }, 404);
 		if (body === null || typeof body !== "object" || !("query" in body) || typeof body.query !== "string" || body.query.length === 0) {

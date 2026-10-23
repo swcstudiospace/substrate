@@ -134,6 +134,13 @@ export class RagflowFake {
 	 */
 	serveUploadsAsChunks = false;
 	/**
+	 * Opt-in, default off. When set, a scripted `answer` reply also echoes each
+	 * chunk's `heading_path`, as the seeded stand-in does. The golden harness
+	 * sets it so its citations carry headings; unset, the answer path keeps the
+	 * contract shape with no metadata echo.
+	 */
+	echoHeadings = false;
+	/**
 	 * Synthetic chunks planted by the rehearsal stand-in. Served after
 	 * uploads when `serveUploadsAsChunks` is set, and never counted as
 	 * uploads. Empty unless a fixture control pushes into it.
@@ -152,6 +159,8 @@ export class RagflowFake {
 	failDeleteWith: number | null = null;
 	/** When set, every `meta_fields` update answers with this status instead. */
 	failMetaWith: number | null = null;
+	/** When set and it names a part's content, that upload answers 500 instead: a later ingest call can fail after an earlier one landed. */
+	failUploadWhen: ((content: string) => boolean) | null = null;
 	readonly datasets: FakeDataset[] = [
 		{ id: BERLIN_ID, name: "agent-substrate", embedding_model: "tei-bge-small", chunk_method: "naive" },
 		{ id: HAMM_ID, name: "programming-desk", embedding_model: "tei-bge-small", chunk_method: "naive" },
@@ -320,7 +329,7 @@ export class RagflowFake {
 							term_similarity: chunk.score ?? 0,
 							vector_similarity: chunk.score ?? 0,
 							...(echoMeta && chunk.source_url ? { source_url: chunk.source_url } : {}),
-							...(echoMeta && chunk.heading_path ? { heading_path: chunk.heading_path } : {}),
+							...((echoMeta || this.echoHeadings) && chunk.heading_path ? { heading_path: chunk.heading_path } : {}),
 						});
 					}
 				}
@@ -386,6 +395,7 @@ export class RagflowFake {
 		if (parts === null || parts.length === 0 || body === null || typeof body !== "object" || !("multipart" in body)) {
 			return failure(101, "No file part!", 400);
 		}
+		if (this.failUploadWhen !== null && parts.some((part) => this.failUploadWhen?.(part.text))) return failure(100, "injected upload failure", 500);
 		const created: Array<Record<string, unknown>> = [];
 		for (const part of parts) {
 			const documentId = `doc-upload-${this.nextDoc}`;

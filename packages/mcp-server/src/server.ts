@@ -38,7 +38,20 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { auditMode } from "@substrate/audit";
-import { classifyEventRefusal, evaluateAdmissionSlo, evaluateDocsFreshnessSlo, loadBurnThresholds, type EventRefusalReason } from "@substrate/observability";
+import {
+	classifyEventRefusal,
+	evaluateAdmissionSlo,
+	evaluateDocsFreshnessSlo,
+	type EventRefusalReason,
+	FORECAST_HORIZON_MS,
+	FORECAST_STEP_S,
+	FORECAST_WINDOW,
+	type ForecastDirection,
+	forecastHistoryOff,
+	type ForecastRow,
+	forecastRow,
+	loadBurnThresholds,
+} from "@substrate/observability";
 import {
 	anonymousBridge,
 	isOperator,
@@ -48,16 +61,33 @@ import {
 	type SubstrateConfig,
 } from "./config.ts";
 import { Admission, admitBatch, budgetBody, budgetRefusal, routeClass, type AdmissionVerdict } from "./admission.ts";
+import type { EventBus } from "./event-bus.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
 import { parseBriefProfile } from "./brief-profile.ts";
 import { DATASET_TRIGGERS } from "./docs-datasets.ts";
 import { freshnessGauges } from "./docs-freshness.ts";
-import { scanIngestPages } from "./docs-ingest.ts";
+import { scanIngestPages, readSkillsCheckoutPages, skillsCheckoutRoots, type IngestPage } from "./docs-ingest.ts";
 import { formatDrift } from "./drift.ts";
 import { IdempotencyRefusal, InvalidEventError } from "./event.ts";
+import { checkoutHead } from "./git.ts";
 import { type CursorPosition, type GreptimeClient } from "./greptime.ts";
 import { InvalidHandoffError } from "./handoff.ts";
-import { attributedSurface, createMcpServer, surfaceClaimRefusal, type McpCaller } from "./mcp.ts";
+import {
+	attributedSurface,
+	augmentRagQuery,
+	createMcpServer,
+	getCachedRagResult,
+	hindsightRagFallback,
+	ingestRefusalIsGate,
+	lightragReplayKey,
+	queryLightragRest,
+	ragGraphCounts,
+	ragMachine,
+	setCachedRagResult,
+	surfaceClaimRefusal,
+	type McpCaller,
+	withLightragNotice,
+} from "./mcp.ts";
 import {
 	auditRefusal,
 	auditToolCalls,
@@ -68,13 +98,14 @@ import {
 	toolCallsIn,
 	type Observability,
 } from "./observe.ts";
-import { MetricHistoryMemo, metricHistoryAnswer } from "./metrics-history.ts";
+import { MetricHistoryMemo, bucketedValues, metricHistoryAnswer } from "./metrics-history.ts";
 import { redact } from "./redact.ts";
 import type { Substrate } from "./service.ts";
 import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
 import { approvalBodyProblem, approvalFailure, toApprovalRequest } from "./skills/registry.ts";
 import { EVENT_KINDS, SURFACES, type Surface } from "./types.ts";
 import { isLocalPeer, livezBody, LoopLagMonitor } from "./watchdog.ts";
+import { ragRetryDelay } from "./rag-retry.ts";
 
 /** One hour. Anonymous callers are logged once per window, not once per request. */
 const ANONYMOUS_LOG_INTERVAL_MS = 60 * 60 * 1000;
@@ -298,13 +329,39 @@ const MERGE_TRIGGER_NEEDS_SURFACE = "docs merge-trigger needs an authenticated s
 const MERGE_TRIGGER_DATASET = "agent-substrate";
 
 /**
- * The dataset this deployment refreshes from its own checkout: the trigger
- * table's row whose sources (`config.docsIngestRoots`) live in the directory
- * the server runs from. The other rows name checkouts this server does not
- * hold, so their refresh is a truthful noop — a recorded version over
- * documents that were never ingested would only lie to search.
+ * A dataset's local checkout (phase 42): where its refresh reads pages, and how. `roots` is read when the
+ * job runs, so a checkout that cannot be read fails that job alone. `pages` reads the files under those
+ * roots; `head`, when present, reads the checkout's HEAD commit, which the job must match before it ingests.
  */
-const LOCALLY_INGESTED_DATASET = MERGE_TRIGGER_DATASET;
+interface LocalIngestSource {
+	roots: () => Promise<readonly string[]>;
+	pages: (roots: readonly string[]) => Promise<IngestPage[]>;
+	head?: () => Promise<string | null>;
+}
+
+/**
+ * The local checkout a dataset's refresh reads (D42-3), or undefined when this server holds none.
+ * `agent-substrate` reads the directory the server runs from with `config.docsIngestRoots`, as it always
+ * has. `agent-skills` reads the checkout named by `SUBSTRATE_AGENT_SKILLS_ROOT`, fail-closed on an
+ * unreadable skill and checked against the checkout's HEAD. Any other dataset gets a truthful noop: the
+ * other rows name checkouts this server does not hold, and a recorded version over documents that were
+ * never ingested would only lie to search.
+ */
+function localIngestSource(dataset: string, config: SubstrateConfig, agentSubstrateBaseDir: string): LocalIngestSource | undefined {
+	if (dataset === MERGE_TRIGGER_DATASET) {
+		const substrateRoots = config.docsIngestRoots;
+		return { roots: async () => substrateRoots, pages: (roots) => scanIngestPages(agentSubstrateBaseDir, roots) };
+	}
+	const skillsCheckout = config.agentSkillsRoot;
+	if (dataset === "agent-skills" && skillsCheckout !== null) {
+		return {
+			roots: () => skillsCheckoutRoots(skillsCheckout),
+			pages: (roots) => readSkillsCheckoutPages(skillsCheckout, roots),
+			head: async () => checkoutHead(skillsCheckout),
+		};
+	}
+	return undefined;
+}
 
 /** Why an anonymous stream is refused, even on a run that allows anonymous callers. */
 const STREAM_NEEDS_SURFACE = "events stream needs an authenticated surface; nothing was streamed";
@@ -915,6 +972,38 @@ export function createHttpServer(
 				const served = observability.evaluateServedTokens();
 				// The index archive age (uplift-4 S2): one row, present only when an archive directory is configured; report-only until its ceiling is set.
 				const indexArchive = await substrate.indexArchiveSlo();
+				// The Railway cost report (Phase 45, D45-d and D45-g): report-only, so it is never folded into `breached`. The
+				// client caches it for 15 minutes and reports a Railway failure as `unavailable`; the catch keeps a regression from
+				// taking `/slo` down.
+				const railwayCost = await substrate.railway.costReport().catch(() => null);
+				// Predictive rows (phase 47, D47-a to D47-c): one per catalogue objective, Holt smoothing over the history
+				// `/slo/history` reads, through the same answer and memo. Report-only: `breached` below never reads them.
+				// An objective no recorded series covers is insufficient-data, never a guessed value.
+				// brief.p95 is the largest surface value per bucket (basis worst-surface); the other objectives are service-wide (basis service).
+				type ForecastSource = { series: string | null; direction: ForecastDirection; basis: ForecastRow["basis"] };
+				const forecastSources: Readonly<Record<string, ForecastSource>> = {
+					"brief.p95": { series: "brief.p95", direction: "maximum", basis: "worst-surface" },
+					"emit.success": { series: "emit.success", direction: "minimum", basis: "service" },
+					"lease.steal_rate": { series: null, direction: "maximum", basis: "service" },
+					"quarantine.rate": { series: null, direction: "maximum", basis: "service" },
+				};
+				const historyOn = config.metricsHistory.enabled && substrate.greptime !== null;
+				const forecast: ForecastRow[] = await Promise.all(
+					results.map(async (result) => {
+						const source: ForecastSource = forecastSources[result.id] ?? { series: null, direction: "maximum", basis: "service" };
+						if (!historyOn) return forecastHistoryOff(result.id, result.target, source.basis);
+						const answer =
+							source.series === null
+								? null
+								: await metricHistoryAnswer(
+										{ settings: config.metricsHistory, greptime: substrate.greptime, now, memo: historyMemo },
+										new URLSearchParams({ series: source.series, window: FORECAST_WINDOW, step: String(FORECAST_STEP_S) }),
+									).catch(() => null);
+						const read = bucketedValues(answer);
+						if (read === null) return forecastRow(result.id, result.target, source.direction, [], 1, source.basis);
+						return forecastRow(result.id, result.target, source.direction, read.values, Math.round(FORECAST_HORIZON_MS / 1000 / read.stepS), source.basis);
+					}),
+				);
 				// 200 either way. A breached objective is information, not a broken service,
 				// and a monitor that read this as an outage would page on a slow hour.
 				//
@@ -937,6 +1026,8 @@ export function createHttpServer(
 					capacity,
 					served,
 					...(indexArchive !== null ? { indexArchive: [indexArchive] } : {}),
+					railwayCost,
+					forecast,
 					history: observability.history(),
 				});
 				return;
@@ -1161,7 +1252,7 @@ export function createHttpServer(
 						idleMs: options.streamIdleMs ?? STREAM_IDLE_MS,
 						batch: STREAM_BATCH,
 						maxBacklogBytes: options.streamMaxBacklogBytes ?? STREAM_MAX_BACKLOG_BYTES,
-					});
+					}, substrate.eventBus);
 				} catch (cause) {
 					// Setup failed before the stream opened, so an ordinary error response
 					// is still available — fail-open here means the caller learns the
@@ -1344,20 +1435,58 @@ export function createHttpServer(
 				}
 				const datasets = "datasets" in parsed ? parsed.datasets : undefined;
 				const sessionId = "session_id" in parsed ? parsed.session_id : undefined;
+				const context = "context" in parsed ? parsed.context : undefined;
 				if (
 					(datasets !== undefined && !(Array.isArray(datasets) && datasets.every((name) => typeof name === "string"))) ||
-					(sessionId !== undefined && typeof sessionId !== "string")
+					(sessionId !== undefined && typeof sessionId !== "string") ||
+					(context !== undefined && typeof context !== "boolean")
 				) {
-					sendJson(res, 400, { error: "datasets must be a string array and session_id a string" });
+					sendJson(res, 400, { error: "datasets must be a string array, session_id a string and context a boolean" });
 					return;
 				}
 				const fields: Record<string, unknown> = {
 					question: parsed.question,
 					...(datasets !== undefined ? { datasets } : {}),
 					...(sessionId !== undefined ? { session_id: sessionId } : {}),
+					...(context !== undefined ? { context } : {}),
 				};
 				if (!(await auditedRest(res, observability, surface, "docs_search", fields))) return;
-				sendJson(res, 200, await substrate.searchDocs(fields, surface));
+				// SPE-19388: the REST search reports into the same process-wide
+				// RAG machine as the MCP tool. Replies are unchanged.
+				const searchBackend = config.docsBackend;
+				const admission = ragMachine.admitQuery(config.ragMachine.halfOpenMs);
+				const report = { probe: admission === "probe" };
+				try {
+					// Admission as docs_lightrag_query: after the cooldown one search is the half-open probe and leaves ERROR
+					// through STEERING and CONTEXT_REFRESH. A refused search runs but reports nothing, so it cannot clear ERROR
+					// or disturb a probe in flight.
+					if (admission === "probe") {
+						ragMachine.transition("STEERING", `docs_search:${searchBackend}`);
+						ragMachine.transition("CONTEXT_REFRESH", `docs_search:retrieve:${searchBackend}`);
+					} else if (admission === "serve") {
+						ragMachine.enterRefresh(`docs_search:${searchBackend}`, `docs_search:retrieve:${searchBackend}`);
+					}
+					const reply = await substrate.searchDocs({ ...fields, probe: admission === "probe", cooling: admission === "refuse" }, surface);
+					if (admission !== "refuse") {
+						if (reply.degraded === true) {
+							ragMachine.recordFailure(config.ragMachine, `docs_search: ${reply.reason ?? "degraded"}`, report);
+						} else {
+							ragMachine.recordSuccess("docs_search:served", report);
+						}
+					}
+					sendJson(res, 200, reply);
+				} catch (cause) {
+					if (admission !== "refuse") {
+						ragMachine.recordFailure(
+							config.ragMachine,
+							`docs_search threw: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}`,
+							report,
+						);
+					}
+					throw cause;
+				} finally {
+					if (admission === "probe") ragMachine.settleProbe();
+				}
 				return;
 			}
 
@@ -1408,12 +1537,169 @@ export function createHttpServer(
 					...(ingestSession !== undefined ? { session_id: ingestSession } : {}),
 				};
 				if (!(await auditedRest(res, observability, surface, "docs_ingest", ingestFields))) return;
+				// SPE-19388: the REST ingest reports into the same process-wide
+				// RAG machine as the MCP tool. Outcomes are unchanged.
+				ragMachine.enterRefresh(`docs_ingest:${config.docsBackend}`, `docs_ingest:upload:${config.docsBackend}`);
 				const outcome = await substrate.ingestDocs(ingestFields, surface);
+				if (outcome.ok) {
+					ragMachine.recordSuccess("docs_ingest:served");
+				} else if (!ingestRefusalIsGate(outcome.reason)) {
+					// A refused request never reached the plane, so it says nothing about the plane's health. A request that
+					// throws is a bad request, not a plane outcome, so it is not counted either.
+					ragMachine.recordFailure(config.ragMachine, `docs_ingest: ${outcome.reason}`);
+				}
 				if (!outcome.ok) {
 					sendJson(res, outcome.reason === "vm-guest" ? 403 : outcome.reason === "version.stale" ? 409 : 400, outcome);
 					return;
 				}
 				sendJson(res, 200, outcome);
+				return;
+			}
+			// SPE-19388 LightRAG query surface (SPE-19384 RAG replacement):
+			// REST/JSON over `POST /query`, same Hindsight fallback and
+			// idempotency as the `docs_lightrag_query` MCP tool. Read-only
+			// like `/docs/search`: anonymous callers reach the audit gate and
+			// an unreachable plane degrades rather than refusing the turn.
+			if (req.method === "POST" && url.pathname === "/docs/lightrag/query") {
+				const parsed: unknown = JSON.parse(await readBody(req));
+				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+					sendJson(res, 400, { error: "request body must be a JSON object" });
+					return;
+				}
+				if (!("question" in parsed) || typeof parsed.question !== "string" || parsed.question.trim().length === 0) {
+					sendJson(res, 400, { error: "question is required" });
+					return;
+				}
+				const record = parsed as Record<string, unknown>;
+				const mode = "mode" in record ? record.mode : undefined;
+				const topK = "top_k" in record ? record.top_k : undefined;
+				const entities = "entities" in record ? record.entities : undefined;
+				const relations = "relations" in record ? record.relations : undefined;
+				const idempotencyKey = "idempotency_key" in record ? record.idempotency_key : undefined;
+				const shapeOk =
+					(mode === undefined || (typeof mode === "string" && ["naive", "local", "global", "hybrid", "mix"].includes(mode))) &&
+					(topK === undefined || typeof topK === "number") &&
+					(entities === undefined || (Array.isArray(entities) && entities.every((entry) => typeof entry === "string"))) &&
+					(relations === undefined ||
+						(Array.isArray(relations) &&
+							relations.every(
+								(relation) =>
+									relation !== null &&
+									typeof relation === "object" &&
+									!Array.isArray(relation) &&
+									typeof (relation as Record<string, unknown>).source === "string" &&
+									typeof (relation as Record<string, unknown>).target === "string" &&
+									typeof (relation as Record<string, unknown>).kind === "string",
+							))) &&
+					(idempotencyKey === undefined || typeof idempotencyKey === "string");
+				if (!shapeOk) {
+					sendJson(res, 400, { error: "mode/top_k/entities/relations/idempotency_key have the wrong shape" });
+					return;
+				}
+				const fields: Record<string, unknown> = {
+					question: record.question,
+					...(mode !== undefined ? { mode } : {}),
+					...(topK !== undefined ? { top_k: topK } : {}),
+					...(entities !== undefined ? { entities } : {}),
+					...(relations !== undefined ? { relations } : {}),
+					...(idempotencyKey !== undefined ? { idempotency_key: idempotencyKey } : {}),
+				};
+				if (!(await auditedRest(res, observability, surface, "docs_lightrag_query", fields))) return;
+				const entityList = Array.isArray(entities) ? (entities as string[]) : [];
+				const relationList = Array.isArray(relations)
+					? (relations as Array<{ source: string; target: string; kind: string }>)
+					: [];
+				const key = lightragReplayKey(
+					surface,
+					{
+						question: record.question as string,
+						...(typeof mode === "string" ? { mode } : {}),
+						...(typeof topK === "number" ? { topK } : {}),
+						entities: entityList,
+						relations: relationList,
+					},
+					typeof idempotencyKey === "string" ? idempotencyKey : undefined,
+				);
+				const replayed = getCachedRagResult(key);
+				if (replayed !== undefined) {
+					process.stderr.write(
+						`${JSON.stringify({ source: "substrate", event: "rag-state", from: replayed.state.state, to: replayed.state.state, reason: "idempotent-replay", duplicate: true })}\n`,
+					);
+					sendJson(res, 200, withLightragNotice(replayed));
+					return;
+				}
+				const admission = ragMachine.admitQuery(config.ragMachine.halfOpenMs);
+				if (admission === "refuse") {
+					const held = await hindsightRagFallback(substrate, surface, record.question as string, entityList, relationList, "rag breaker open");
+					setCachedRagResult(key, held);
+					sendJson(res, 200, withLightragNotice(held));
+					return;
+				}
+				const report = { probe: admission === "probe" };
+				// A probe's attempt ends here, whatever it found: until then no other query reaches the plane.
+				try {
+					ragMachine.transition("STEERING", `lightrag_query:${config.docsBackend}`);
+					const lightrag = config.lightrag;
+					if (lightrag === null) {
+						ragMachine.transition("CONTEXT_REFRESH", "lightrag_query:unconfigured");
+						const degraded = await hindsightRagFallback(
+							substrate,
+							surface,
+							record.question as string,
+							entityList,
+							relationList,
+							"lightrag-not-configured",
+						);
+						setCachedRagResult(key, degraded);
+						sendJson(res, 200, withLightragNotice(degraded));
+						return;
+					}
+					const augmented = augmentRagQuery(record.question as string, entityList, relationList);
+					ragMachine.transition("CONTEXT_REFRESH", "lightrag_query:retrieve");
+					let lastReason = "lightrag unreachable";
+					for (let attempt = 0; attempt <= config.ragMachine.maxRetries; attempt += 1) {
+						if (attempt > 0) await ragRetryDelay(config.ragMachine.retryBaseMs, attempt);
+						const answered = await queryLightragRest(lightrag, {
+							question: augmented,
+							...(typeof mode === "string" ? { mode } : {}),
+							...(typeof topK === "number" ? { topK } : {}),
+						});
+						if (answered.ok) {
+							const state = ragMachine.recordSuccess("lightrag_query:served", report);
+							const result = {
+								backend: "lightrag" as const,
+								chunks: answered.chunks,
+								graph: ragGraphCounts(answered.chunks, entityList, relationList),
+								state,
+							};
+							setCachedRagResult(key, result);
+							sendJson(res, 200, withLightragNotice(result));
+							return;
+						}
+						lastReason = answered.reason;
+					}
+					ragMachine.recordFailure(config.ragMachine, `lightrag_query: ${lastReason}`, report);
+					const degraded = await hindsightRagFallback(
+						substrate,
+						surface,
+						record.question as string,
+						entityList,
+						relationList,
+						lastReason,
+					);
+					setCachedRagResult(key, degraded);
+					sendJson(res, 200, withLightragNotice(degraded));
+				} finally {
+					if (admission === "probe") ragMachine.settleProbe();
+				}
+				return;
+			}
+
+			// SPE-19388: the RAG machine snapshot for pollers. Exempt like
+			// `/healthz`: it carries counters and a hash, no lesson content.
+			// Pollers detect change by comparing `stateHash`.
+			if (req.method === "GET" && url.pathname === "/rag/state") {
+				sendJson(res, 200, ragMachine.snapshot());
 				return;
 			}
 
@@ -1478,7 +1764,8 @@ export function createHttpServer(
 				// is decided under — a merge-trigger nobody recorded is an unrecorded
 				// publication, same as an ingest nobody recorded.
 				if (!(await auditedRest(res, observability, surface, "docs_ingest", fields))) return;
-				if (config.ragflow === null) {
+				// The selected plane decides: a LightRAG deployment with RAGFlow unset still refreshes.
+				if (config.docsBackend === "lightrag" ? config.lightrag === null : config.ragflow === null) {
 					// The null-block idiom: no docs plane is configured, so the trigger
 					// asks for nothing that exists — answered quietly, no plane call made.
 					sendJson(res, 200, { ok: true, dataset, noop: true, reason: "docs-plane-unconfigured" });
@@ -1489,7 +1776,8 @@ export function createHttpServer(
 					sendJson(res, 200, { ok: true, version: newest, created: false, idempotent: true });
 					return;
 				}
-				if (dataset !== LOCALLY_INGESTED_DATASET) {
+				const source = localIngestSource(dataset, config, options.docsIngestBaseDir ?? process.cwd());
+				if (source === undefined) {
 					// This server holds no checkout of that dataset, so there is nothing it
 					// can truthfully ingest: a noop that says so, and no version recorded.
 					// The trigger itself is still evidence (skills-sync fast-forwarded).
@@ -1498,14 +1786,14 @@ export function createHttpServer(
 					return;
 				}
 				substrate.noteDocsTrigger(dataset);
-				const baseDir = options.docsIngestBaseDir ?? process.cwd();
-				// The service ensures the dataset, runs the guarded ingest of this
-				// checkout's roots and records the version, in that order, in the
+				// The service reads the checkout's roots and pages, ensures the dataset, runs
+				// the guarded ingest and records the version, in that order, in the
 				// background; the 202 is audited above like the 200 was. A plane
 				// refusal under `?wait=1` is an outage of the docs plane, not a
-				// permission decision about the caller: 503 with the reason.
+				// permission decision about the caller: 503 with the reason. A checkout that
+				// cannot be read fails the job the same way and the pinned version keeps serving.
 				const accepted = await substrate.startDocsRefresh(
-					{ ...fields, pages: () => scanIngestPages(baseDir, config.docsIngestRoots) },
+					{ ...fields, roots: source.roots, pages: source.pages, head: source.head },
 					surface,
 					{ wait: url.searchParams.get("wait") === "1" },
 				);
@@ -1698,6 +1986,7 @@ async function openEventStream(
 	greptime: GreptimeClient,
 	cursorId: string,
 	bounds: { pollMs: number; idleMs: number; batch: number; maxBacklogBytes: number },
+	bus: EventBus | null,
 ): Promise<void> {
 	// The connection-life listeners go on before any await, because the setup
 	// reads below are the first async steps and a cursorless client can vanish
@@ -1706,6 +1995,7 @@ async function openEventStream(
 	// leave no timer behind.
 	let timer: ReturnType<typeof setInterval> | null = null;
 	let closed = false;
+	let unsubscribe: (() => void) | null = null;
 
 	const cleanup = (): void => {
 		if (closed) return;
@@ -1713,6 +2003,10 @@ async function openEventStream(
 		if (timer !== null) {
 			clearInterval(timer);
 			timer = null;
+		}
+		if (unsubscribe !== null) {
+			unsubscribe();
+			unsubscribe = null;
 		}
 	};
 	// Both ends of the connection's life — a normal end, a client that vanished,
@@ -1764,6 +2058,7 @@ async function openEventStream(
 	res.write("retry: 5000\n\n");
 
 	let polling = false;
+	let wakeAgain = false;
 	let lastActivity = Date.now();
 
 	const tick = (): void => {
@@ -1815,10 +2110,23 @@ async function openEventStream(
 				// stream: the cursor stays put, and the next poll retries it.
 			} finally {
 				polling = false;
+				if (wakeAgain) {
+					wakeAgain = false;
+					tick();
+				}
 			}
 		})();
 	};
 
+	// Phase 50: a hint reads the ledger now instead of at the next poll. It only wakes the loop; the ledger
+	// decides what is sent, so a lost or late hint costs latency and nothing else.
+	const wake = (): void => {
+		if (polling) wakeAgain = true;
+		else tick();
+	};
+
+	// The subscription lives as long as the response: cleanup releases it on close, error and idle close alike.
+	if (bus !== null) unsubscribe = bus.subscribe(() => wake());
 	// Unref'd, like every other timer this server holds: an open stream must not
 	// be the thing keeping a closing process alive.
 	timer = setInterval(tick, bounds.pollMs);

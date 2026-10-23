@@ -86,7 +86,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 
 - [x] **Phase 37: LANEB** - graph inference from worktree path
 - [x] **Phase 38: MIRROR** - mirror graph edges into Linear relations and outcomes into evidence
-- [ ] **Phase 39: DISPATCH** - signed handoff packet and coord drift scan before launch
+- [x] **Phase 39: DISPATCH** - signed handoff packet and coord drift scan before launch
 - [ ] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (decided 2026-10-21)
 - [ ] **Phase 41: ANCHOR** - anchor evidence and teachables
 - [ ] **Phase 42: SKILL-CARD** - skills_list audit trail and the F-D4 re-ingest item
@@ -783,14 +783,14 @@ Plans:
 | 36. Degraded-mode exactly-once replay | v1.4 | 1/1 | Complete | 2026-10-21 |
 | 37. LANEB | v1.3.x | 1/1 | Complete | 2026-10-21 |
 | 38. MIRROR | v1.3.x | 1/1 | Complete | 2026-10-21 |
-| 39. DISPATCH | v1.3.x | 1/1 | In review (draft PR) | - |
-| 40. DOCS-MEMORY | v1.3.x | 0/0 | Not started | - |
+| 39. DISPATCH | v1.3.x | 1/1 | Complete (PR #91) | 2026-10-21 |
+| 40. DOCS-MEMORY | v1.3.x | 0/0 | In review (draft PR) | - |
 | 41. ANCHOR | v1.3.x | 0/0 | Not started | - |
 | 42. SKILL-CARD | v1.3.x | 0/0 | Not started | - |
-| 43. LANE-A | v1.3.x | 0/0 | Not started | - |
-| 44. UAT | v1.3.x | 0/0 | Not started | - |
-| 45. Railway Resource Orchestrator | v1.5 | 0/0 | Not started | - |
-| 46. RAGFlow Advanced Hybrid RAG with Hindsight Context | v1.5 | 0/0 | Not started | - |
+| 43. LANE-A | v1.3.x | 1/1 | Complete (PR #97) | 2026-10-21 |
+| 44. UAT | v1.3.x | 1/1 | Complete (PR #95) | 2026-10-21 |
+| 45. Railway Resource Orchestrator | v1.5 | 1/1 | Complete (PR #96) | 2026-10-21 |
+| 46. RAGFlow Advanced Hybrid RAG with Hindsight Context | v1.5 | 1/1 | In review (draft PR #98) | - |
 | 47. GreptimeDB + Dragonfly Predictive Analytics & Cache | v1.5 | 0/0 | Not started | - |
 | 48. TailscaleDB Secure Unified Proxy Layer | v1.5 | 0/0 | Not started | - |
 | 49. Hindsight Graph Memory with Greptime Events | v1.5 | 0/0 | Not started | - |

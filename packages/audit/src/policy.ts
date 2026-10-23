@@ -27,7 +27,11 @@ export const FAIL_CLOSED_TOOLS: ReadonlySet<string> = new Set([
 	"skills_propose", // Phase 21: opens a PR other agents receive after merge.
 	"skills_approve", // uplift-5 S5a: records which merged skill an operator approved, declined or retired.
 	"docs_ingest", // Phase 25: writes a shared dataset every agent reads.
+	"docs_steering_session", // SPE-19388: moves a live session's steering state and writes a ledger note.
 	"desktop_run", // Phase 30: acts on a desktop (DESK-03).
+	// Phase 45 (D45-h): a Railway write changes a live project, so it is recorded before it runs.
+	"railway_scale",
+	"railway_deploy",
 ]);
 
 /**
@@ -60,6 +64,15 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	"coord_handoff_list",
 	"coord_drift_scan",
 	"skills_list", // uplift-5 S5a: a read of the skills registry, like `memory_search`.
+	// Phase 45 (D45-h): Railway reads. Inspection only; a read must not stop on an unwritable audit file.
+	"railway_list",
+	"railway_monitor",
+	"railway_scale_suggest",
+	"railway_cost",
+	// Phase 51 (SOTA-07): fabric reads. A status, an optimisation list and a compliance report are inspection only.
+	"fabric_status",
+	"fabric_optimize",
+	"fabric_compliance",
 	// The one write that is fail-open on purpose: an event costs a line in the trail,
 	// and refusing the turn over it would make a substrate outage an outage of the host.
 	"events_emit",
@@ -78,6 +91,9 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	"graph_find", // Phase 23: a read of the index.
 	"memory_recall", // Phase 26: a read like `memory_search`.
 	"agent_card", // Phase 29: the Agent Card REST route is a read.
+	// SPE-19388: RAG plane reads, served as an MCP tool and a REST route under one name.
+	"docs_lightrag_query", // A read of the LightRAG plane, like `docs_search`.
+	"docs_rag_state", // A read of the in-process RAG state machine, like `docs_search`.
 ]);
 
 /**

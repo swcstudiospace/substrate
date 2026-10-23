@@ -21,6 +21,7 @@
  */
 import { createDataset, listDatasets, type DatasetListOutcome, type FetchLike, type RagflowConfig } from "./planes/ragflow.ts";
 import type { DatasetPin } from "./docs-search.ts";
+import type { DocsBackend } from "./config.ts";
 import type { EventInput, Surface } from "./types.ts";
 
 /** Every dataset this phase knows, with its refresh trigger. */
@@ -44,6 +45,8 @@ export interface DatasetVersion {
 	commit: string;
 	content_sha256: string;
 	ingested_at: string;
+	/** The backend whose index this version describes: a version completes a replay only under that backend. */
+	backend: DocsBackend;
 }
 
 /** Per-dataset version lists, newest last. */
@@ -66,12 +69,56 @@ export function latestVersion(store: VersionStore, dataset: string): DatasetVers
 	return versions[versions.length - 1];
 }
 
-/** The search pins for every dataset with a recorded version. */
-export function pinsFromVersions(store: VersionStore): Record<string, DatasetPin> {
+/**
+ * The newest version `backend` recorded for a dataset. A version completes a replay only under the backend that
+ * indexed it: a RAGFlow record says nothing about what LightRAG holds, so a LightRAG replay finds none and uploads.
+ */
+export function latestVersionFor(store: VersionStore, dataset: string, backend: DocsBackend): DatasetVersion | undefined {
+	const versions = store.get(dataset) ?? [];
+	for (let i = versions.length - 1; i >= 0; i -= 1) {
+		const version = versions[i];
+		if (version?.backend === backend) return version;
+	}
+	return undefined;
+}
+
+/**
+ * The dataset list LightRAG reads, with no RAGFlow round trip. LightRAG names its datasets, so each wanted name is
+ * its own id, whatever version a RAGFlow refresh recorded for it: a LightRAG record keyed by RAGFlow's id could not
+ * be found again by the LightRAG plane. Sorted by name: search attributes every citation to the first dataset and
+ * keys its cache on the sorted set, so the first must not depend on the caller's order.
+ */
+export function lightragSearchDatasets(names: readonly string[]): DatasetListOutcome {
+	return { ok: true, datasets: [...names].sort().map((name) => ({ id: name, name })) };
+}
+
+/** The search pin a recorded version files under. */
+function pinOf(version: DatasetVersion): DatasetPin {
+	return { dataset: version.dataset, dataset_id: version.dataset_id, version: version.version, commit: version.commit, ingested_at: version.ingested_at };
+}
+
+/**
+ * The search pins for every dataset that has a version `backend` recorded, keyed by the dataset id that version
+ * recorded. A pin from another backend's version would name a dataset the searched plane does not hold.
+ */
+export function pinsFromVersions(store: VersionStore, backend: DocsBackend): Record<string, DatasetPin> {
 	const pins: Record<string, DatasetPin> = {};
-	for (const versions of store.values()) {
-		const latest = versions[versions.length - 1];
-		if (latest) pins[latest.dataset_id] = { dataset: latest.dataset, dataset_id: latest.dataset_id, version: latest.version, commit: latest.commit, ingested_at: latest.ingested_at };
+	for (const dataset of store.keys()) {
+		const latest = latestVersionFor(store, dataset, backend);
+		if (latest) pins[latest.dataset_id] = pinOf(latest);
+	}
+	return pins;
+}
+
+/**
+ * The search pins the LightRAG path reads, filed under each wanted name: the id `lightragSearchDatasets` gives the
+ * dataset. A name with no version `backend` recorded has no pin.
+ */
+export function pinsByName(store: VersionStore, names: readonly string[], backend: DocsBackend): Record<string, DatasetPin> {
+	const pins: Record<string, DatasetPin> = {};
+	for (const name of names) {
+		const latest = latestVersionFor(store, name, backend);
+		if (latest) pins[name] = pinOf(latest);
 	}
 	return pins;
 }
@@ -94,13 +141,16 @@ export function versionsFromJson(value: unknown): VersionStore {
 		for (const row of rows) {
 			if (row === null || typeof row !== "object") continue;
 			const candidate = row as Record<string, unknown>;
+			// A row a state file wrote before the backend was recorded is a RAGFlow version: only the RAGFlow path recorded versions then.
+			const backend: DocsBackend | null = candidate.backend === undefined ? "ragflow" : candidate.backend === "ragflow" || candidate.backend === "lightrag" ? candidate.backend : null;
 			if (
 				typeof candidate.dataset !== "string" ||
 				typeof candidate.dataset_id !== "string" ||
 				typeof candidate.version !== "string" ||
 				typeof candidate.commit !== "string" ||
 				typeof candidate.content_sha256 !== "string" ||
-				typeof candidate.ingested_at !== "string"
+				typeof candidate.ingested_at !== "string" ||
+				backend === null
 			) {
 				continue;
 			}
@@ -111,6 +161,7 @@ export function versionsFromJson(value: unknown): VersionStore {
 				commit: candidate.commit,
 				content_sha256: candidate.content_sha256,
 				ingested_at: candidate.ingested_at,
+				backend,
 			});
 		}
 		if (kept.length > 0) store.set(dataset, kept.slice(-DATASET_VERSION_RETENTION));
@@ -356,6 +407,7 @@ export async function refreshDataset(
 		commit: input.commit,
 		content_sha256: input.content_sha256,
 		ingested_at: new Date(deps.nowMs ?? Date.now()).toISOString(),
+		backend: "ragflow",
 	};
 	recordVersion(deps.versions, version);
 	await deps.emit({

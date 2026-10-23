@@ -25,26 +25,32 @@
  * stepped by one `EVAL` through `script()`, always with a TTL, and a cache that
  * cannot answer admits every caller.
  *
- * `recall-snapshot` (uplift-4 S5) is generation-free too: the warm Hindsight recall
- * the brief appends in `SUBSTRATE_BRIEF_RECALL=enforce`, written only by the
- * prefetcher (`recall-snapshot.ts`) and read by the brief with a cache read and
- * nothing else. The entry lives twice `SUBSTRATE_BRIEF_RECALL_TTL_S` (fresh for the first, stale for the second); the 1800 s here is that for the 900 s default.
+ * `recall-snapshot` (uplift-4 S5) holds the warm Hindsight recall the brief appends in
+ * `SUBSTRATE_BRIEF_RECALL=enforce`. The prefetcher writes its own-bank entries without
+ * generations. The brief's cross-bank fan-out passes the memory and recall generations
+ * with each read, so a write or a retain landing refreshes the next brief at once. A prefetched entry lives twice
+ * `SUBSTRATE_BRIEF_RECALL_TTL_S` (fresh for the first half, stale for the second). A fan-out entry lives
+ * `SUBSTRATE_BRIEF_RECALL_TTL_S` itself, with no stale half, because its `refreshAt` is that TTL.
  */
 import { createHash } from "node:crypto";
 import { RedisClient } from "bun";
 import { callPlane, type PlaneGate } from "@substrate/observability";
 import type { SubstrateConfig } from "./config.ts";
 import { REDACTED, redact } from "./redact.ts";
+import { MAX_RECALL_TTL_S } from "./recall-snapshot.ts";
 
 export const CACHE_PREFIX = "substrate:v1";
 
-/** Seconds. Brief 5 min, memory search 10 min, graph view 1 min, last-good brief 1 h, docs search 5 min. */
+/**
+ * Seconds. Brief 5 min, memory search 10 min, graph view 1 min, last-good brief 1 h, docs search 5 min. The recall snapshot's
+ * class limit is the setting's maximum, so a fan-out entry lives the configured `SUBSTRATE_BRIEF_RECALL_TTL_S` (its `refreshAt`).
+ */
 export const CACHE_TTL = {
 	brief: 300,
 	"memory-search": 600,
 	"graph-view": 60,
 	"brief-snapshot": 3600,
-	"recall-snapshot": 1800,
+	"recall-snapshot": MAX_RECALL_TTL_S,
 	"docs-search": 300,
 } as const;
 
@@ -524,6 +530,8 @@ export class ReadThroughCache {
 		 */
 		deadlineMs?: number;
 		onDeadline?: () => T;
+		/** True skips the fresh-hit read, so the load always runs and its answer replaces the entry. Generations are still read and loads still coalesce; stale-while-revalidate is not served. */
+		refresh?: boolean;
 	}): Promise<T> {
 		const klass = request.klass;
 		if (!this.enabled || !this.redis) {
@@ -551,7 +559,7 @@ export class ReadThroughCache {
 		const key = cacheKey(klass, request.surface, generation, request.args);
 		let malformed = false;
 		try {
-			const raw = await this.attempt(() => redis.get(key));
+			const raw = request.refresh ? null : await this.attempt(() => redis.get(key));
 			if (raw !== null) {
 				const parsed = parseEnvelope<T>(raw, klass);
 				if (parsed.ok) {
@@ -571,26 +579,28 @@ export class ReadThroughCache {
 			return request.load();
 		}
 
+		// A refresh is answered by its own load, never by a last-good value.
+		const swr = request.refresh ? undefined : request.swr;
 		if (!malformed) this.count("miss", klass);
-		if (request.swr && this.swrMode === "enforce") {
-			const stale = await this.staleDecision(request.swr);
+		if (swr && this.swrMode === "enforce") {
+			const stale = await this.staleDecision(swr);
 			if (stale !== null) {
 				this.count("stale", klass);
 				try {
-					request.swr.served?.(stale.ageMs);
+					swr.served?.(stale.ageMs);
 				} catch {
 					// An advertisement hook must not fail the answer it describes.
 				}
-				this.startRefresh(klass, key, redis, request.swr);
+				this.startRefresh(klass, key, redis, swr);
 				return stale.value;
 			}
-		} else if (request.swr && this.swrMode === "shadow") {
+		} else if (swr && this.swrMode === "shadow") {
 			// Shadow takes the same decision beside the load, so it adds no serial
 			// round trip; the caller is served live exactly as under `off`.
 			// The probe only records a count, so it is started and never awaited: a slow
 			// snapshot read must not hold a finished answer, nor the flight slot. It cannot
 			// reject (`staleDecision` swallows its own failures); the catch is belt and braces.
-			void this.staleDecision(request.swr)
+			void this.staleDecision(swr)
 				.then((stale) => {
 					if (stale !== null) this.count("would_serve_stale", klass);
 				})

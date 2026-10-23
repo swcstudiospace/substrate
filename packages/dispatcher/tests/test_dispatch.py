@@ -276,7 +276,7 @@ def test_claude_code_is_dispatchable_and_launches_with_capacity(env_file):
 
 def test_host_refused_becomes_one_once_only_comment_without_a_session_or_give_up(env_file):
     linear, mcp = FakeLinear([cand(surface="claude-code")]), FakeMcp()
-    refusing = RecordingLaunch(raises=HostRefused("HTTP 409: node n1 already claimed by hermes", "host-refused"))
+    refusing = RecordingLaunch(raises=HostRefused("HTTP 409: node n1 already claimed by hermes", "host-refused", may_be_open=False))
     _, lines, registry, _ = run_tick(linear, mcp, env_file=env_file, launch_fn=refusing)
     decisions, _, _, _ = run_tick(linear, mcp, env_file=env_file, registry=registry, launch_fn=refusing)
     posted = linear.named("comment")
@@ -289,7 +289,7 @@ def test_host_refused_becomes_one_once_only_comment_without_a_session_or_give_up
 
 def test_host_unreachable_marker_is_retried_next_tick(env_file):
     linear, mcp = FakeLinear([cand(surface="claude-code")]), FakeMcp()
-    down = RecordingLaunch(raises=HostRefused("POST /tasks failed: ConnectError", "host-unreachable"))
+    down = RecordingLaunch(raises=HostRefused("POST /tasks failed: ConnectError", "host-unreachable", may_be_open=False))
     _, _, registry, _ = run_tick(linear, mcp, env_file=env_file, launch_fn=down)
     run_tick(linear, mcp, env_file=env_file, registry=registry, launch_fn=down)
     posted = linear.named("comment")

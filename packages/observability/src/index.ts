@@ -126,6 +126,7 @@ export {
 	type RecallPrefetchResult,
 	BRIEF_RECALL_MODES,
 	BRIEF_RECALL_RESULTS,
+	ENDPOINT_PROXY_PLANES_METRIC,
 	OUTBOX_DURABLE_METRIC,
 	OUTBOX_OLDEST_METRIC,
 	OUTBOX_SIZE_METRIC,
@@ -249,3 +250,19 @@ export {
 } from "./checkpoint.ts";
 
 export { type ObservabilityConfig, loadObservabilityConfig, parseKeyValueList } from "./config.ts";
+
+export {
+	type ForecastDirection,
+	type ForecastRow,
+	type ForecastStatus,
+	type HoltFit,
+	FORECAST_ALPHA,
+	FORECAST_BETA,
+	FORECAST_HORIZON_MS,
+	FORECAST_MIN_POINTS,
+	FORECAST_STEP_S,
+	FORECAST_WINDOW,
+	forecastHistoryOff,
+	forecastRow,
+	holtForecast,
+} from "./forecast.ts";
