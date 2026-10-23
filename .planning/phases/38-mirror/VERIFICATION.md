@@ -1,11 +1,13 @@
 ---
 phase: 38-mirror
 verified: 2026-10-21
-status: passed
+status: human_needed
 score: 2 of 2 success criteria proven in the repository. Live Linear and Notion writes and a live server run are not proven, and need operator approval
 verified_on: gsd/v13x-38-mirror 3aea2d0 (code, after the PR #90 review fixes). This record is committed after 3aea2d0.
 covered_files: ["packages/mcp-server/src/node-artifact.ts", "packages/mcp-server/src/node-artifact.test.ts", "packages/mcp-server/src/node-artifact.read.test.ts", "packages/mcp-server/src/mirror.ts", "packages/mcp-server/src/mirror.test.ts", "packages/mcp-server/src/mirror-edges.test.ts", "packages/mcp-server/src/linear.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/graph-edges.mirror.test.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/http.test.ts", "packages/mcp-server/src/event-sources.ts", "docs/event-vocabulary.md", "docs/coordination.md"]
 ---
+
+> Status detail, kept verbatim from the original frontmatter: passed. The score line records that live Linear and Notion writes and a live server run are not proven and need operator approval. Set to human_needed for that reason
 
 # 38-VERIFICATION: MIRROR, graph edges into Linear, outcomes into node evidence
 
