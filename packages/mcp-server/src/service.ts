@@ -4419,7 +4419,7 @@ export class Substrate {
 	 * cached chunks and is never stored.
 	 */
 	async searchDocs(
-		input: { question?: unknown; datasets?: unknown; session_id?: unknown; repo_id?: unknown; planning_hash?: unknown; context?: unknown },
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown; repo_id?: unknown; planning_hash?: unknown; context?: unknown; probe?: unknown },
 		callerSurface: Surface | null,
 	): Promise<SearchReply> {
 		const surface = callerSurface ?? "claude-code";
@@ -4446,7 +4446,7 @@ export class Substrate {
 	}
 
 	private async searchDocsUnmeasured(
-		input: { question?: unknown; datasets?: unknown; session_id?: unknown; repo_id?: unknown; planning_hash?: unknown; context?: unknown },
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown; repo_id?: unknown; planning_hash?: unknown; context?: unknown; probe?: unknown },
 		surface: Surface,
 		callerSurface: Surface | null,
 		noteLoaded: () => void,
@@ -4501,9 +4501,10 @@ export class Substrate {
 				store: searchReplyStorable,
 			});
 		// An empty question and an unconfigured selected backend are answered (degraded)
-		// without touching the cache: there is nothing to key on.
+		// without touching the cache: there is nothing to key on. A half-open probe also skips it: the probe must
+		// reach the plane, or a cached reply would clear ERROR without the plane answering.
 		const configured = this.config.docsBackend === "lightrag" ? this.config.lightrag !== null : this.config.ragflow !== null;
-		const chunks = question.trim().length === 0 || !configured ? await load() : await cached();
+		const chunks = question.trim().length === 0 || !configured || input.probe === true ? await load() : await cached();
 		// The context is attached per call, after the chunks: a session's events
 		// belong to that session, so the cached answer never carries them.
 		if (input.context !== true) return chunks;

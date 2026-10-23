@@ -9,6 +9,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { ReadThroughCache, type CacheRedis } from "./cache.ts";
 import { loadConfig } from "./config.ts";
 import type { EventQuery } from "./greptime.ts";
 import { createMcpServer, ingestRefusalIsGate, resetRagMachine } from "./mcp.ts";
@@ -43,8 +44,8 @@ function ledger(rows: Array<Record<string, unknown>> = []) {
 }
 
 /** A connected client and the substrate behind it. Closed by the test runner's teardown. */
-async function connect(greptime: unknown, surface: Surface | null = "omp", env: Record<string, string> = {}) {
-	const substrate = new Substrate(loadConfig(env), { index: null, greptime: greptime as never });
+async function connect(greptime: unknown, surface: Surface | null = "omp", env: Record<string, string> = {}, deps: { cache?: ReadThroughCache } = {}) {
+	const substrate = new Substrate(loadConfig(env), { index: null, greptime: greptime as never, ...deps });
 	const server = createMcpServer(substrate, surface);
 	const client = new Client({ name: "substrate-test", version: "0.0.0" });
 	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -1256,6 +1257,75 @@ describe("the RAG breaker admits one half-open probe", () => {
 		expect(probed).toMatchObject({ backend: "lightrag" });
 		expect(probed.fallback).toBeUndefined();
 		expect(attempts).toBe(4);
+		expect((await call(client, "docs_rag_state")).json().state).toBe("IDLE");
+	});
+});
+
+describe("a docs_search is the RAG breaker's half-open probe", () => {
+	const realFetch = globalThis.fetch;
+	beforeEach(() => resetRagMachine());
+	afterEach(() => {
+		globalThis.fetch = realFetch;
+		resetRagMachine();
+	});
+
+	test("after the cooldown, one successful docs_search moves the machine out of ERROR", async () => {
+		let planeHealthy = false;
+		globalThis.fetch = (async () => (planeHealthy ? lightragAnswer() : new Response("upstream down", { status: 500 }))) as unknown as typeof fetch;
+
+		// A zero cooldown has already elapsed, so the search after ERROR is the probe; no timer is needed.
+		const { client } = await connect(ledger().greptime, "omp", LIGHTRAG_QUERY_ENV);
+		for (const question of ["search one", "search two", "search three"]) {
+			expect((await call(client, "docs_search", { question })).json().degraded).toBe(true);
+		}
+		expect((await call(client, "docs_rag_state")).json().state).toBe("ERROR");
+
+		planeHealthy = true;
+		const probed = (await call(client, "docs_search", { question: "the probe" })).json();
+		expect(probed.degraded).toBeUndefined();
+		expect((await call(client, "docs_rag_state")).json().state).toBe("IDLE");
+	});
+
+	/** An in-memory redis for the answer cache: without one the cache is off and every search loads. */
+	class MemoryRedis implements CacheRedis {
+		readonly values = new Map<string, string>();
+		async get(key: string): Promise<string | null> {
+			return this.values.get(key) ?? null;
+		}
+		async set(key: string, value: string): Promise<void> {
+			this.values.set(key, value);
+		}
+		async incr(key: string): Promise<number> {
+			const next = Number(this.values.get(key) ?? "0") + 1;
+			this.values.set(key, String(next));
+			return next;
+		}
+	}
+
+	test("a cached answer cannot clear ERROR: the probe reaches the plane even for a repeated question", async () => {
+		let planeHealthy = true;
+		let planeCalls = 0;
+		globalThis.fetch = (async () => {
+			planeCalls += 1;
+			return planeHealthy ? lightragAnswer() : new Response("upstream down", { status: 500 });
+		}) as unknown as typeof fetch;
+
+		// A zero cooldown has already elapsed, so the search after ERROR is the probe; no timer is needed.
+		const { client } = await connect(ledger().greptime, "omp", LIGHTRAG_QUERY_ENV, { cache: new ReadThroughCache({ redis: new MemoryRedis(), enabled: true, log: () => {} }) });
+		// Populates the cache with a healthy, non-degraded reply for the question the probe repeats.
+		expect((await call(client, "docs_search", { question: "the cached question" })).json().degraded).toBeUndefined();
+
+		planeHealthy = false;
+		for (const question of ["search one", "search two", "search three"]) {
+			expect((await call(client, "docs_search", { question })).json().degraded).toBe(true);
+		}
+		expect((await call(client, "docs_rag_state")).json().state).toBe("ERROR");
+
+		planeHealthy = true;
+		const before = planeCalls;
+		const probed = (await call(client, "docs_search", { question: "the cached question" })).json();
+		expect(probed.degraded).toBeUndefined();
+		expect(planeCalls).toBeGreaterThan(before);
 		expect((await call(client, "docs_rag_state")).json().state).toBe("IDLE");
 	});
 });

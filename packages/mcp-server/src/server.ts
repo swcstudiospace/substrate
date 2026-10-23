@@ -1454,21 +1454,36 @@ export function createHttpServer(
 				// SPE-19388: the REST search reports into the same process-wide
 				// RAG machine as the MCP tool. Replies are unchanged.
 				const searchBackend = config.docsBackend;
-				ragMachine.enterRefresh(`docs_search:${searchBackend}`, `docs_search:retrieve:${searchBackend}`);
+				const admission = ragMachine.admitQuery(config.ragMachine.halfOpenMs);
 				try {
-					const reply = await substrate.searchDocs(fields, surface);
-					if (reply.degraded === true) {
-						ragMachine.recordFailure(config.ragMachine, `docs_search: ${reply.reason ?? "degraded"}`);
-					} else {
-						ragMachine.recordSuccess("docs_search:served");
+					// Admission as docs_lightrag_query: after the cooldown one search is the half-open probe and leaves ERROR
+					// through STEERING and CONTEXT_REFRESH. A refused search runs but reports nothing, so it cannot clear ERROR
+					// or disturb a probe in flight.
+					if (admission === "probe") {
+						ragMachine.transition("STEERING", `docs_search:${searchBackend}`);
+						ragMachine.transition("CONTEXT_REFRESH", `docs_search:retrieve:${searchBackend}`);
+					} else if (admission === "serve") {
+						ragMachine.enterRefresh(`docs_search:${searchBackend}`, `docs_search:retrieve:${searchBackend}`);
+					}
+					const reply = await substrate.searchDocs({ ...fields, probe: admission === "probe" }, surface);
+					if (admission !== "refuse") {
+						if (reply.degraded === true) {
+							ragMachine.recordFailure(config.ragMachine, `docs_search: ${reply.reason ?? "degraded"}`);
+						} else {
+							ragMachine.recordSuccess("docs_search:served");
+						}
 					}
 					sendJson(res, 200, reply);
 				} catch (cause) {
-					ragMachine.recordFailure(
-						config.ragMachine,
-						`docs_search threw: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}`,
-					);
+					if (admission !== "refuse") {
+						ragMachine.recordFailure(
+							config.ragMachine,
+							`docs_search threw: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}`,
+						);
+					}
 					throw cause;
+				} finally {
+					if (admission === "probe") ragMachine.settleProbe();
 				}
 				return;
 			}

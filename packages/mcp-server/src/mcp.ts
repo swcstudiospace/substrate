@@ -1426,8 +1426,17 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			// machine. The machine never changes the reply — an illegal
 			// transition is logged and ignored.
 			const machineSettings = substrate.config.ragMachine;
-			ragMachine.enterRefresh("docs_search", "docs_search:retrieve");
+			const admission = ragMachine.admitQuery(machineSettings.halfOpenMs);
 			try {
+				// Admission as docs_lightrag_query: after the cooldown one search is the half-open probe and leaves ERROR
+				// through STEERING and CONTEXT_REFRESH. A refused search runs but reports nothing, so it cannot clear ERROR
+				// or disturb a probe in flight.
+				if (admission === "probe") {
+					ragMachine.transition("STEERING", "docs_search:probe");
+					ragMachine.transition("CONTEXT_REFRESH", "docs_search:retrieve");
+				} else if (admission === "serve") {
+					ragMachine.enterRefresh("docs_search", "docs_search:retrieve");
+				}
 				// Prompt augmentation (SPE-19390) at the tool boundary: the service
 				// cache keys on the raw question, so the steered text is what the plane
 				// ranks while the ledger keeps both. A live session fills what the call
@@ -1445,21 +1454,28 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 						repo_id: scoped,
 						planning_hash: planning_hash ?? live?.planning_hash,
 						context,
+						probe: admission === "probe",
 					},
 					callerSurface,
 				);
-				if (reply.degraded === true) {
-					ragMachine.recordFailure(machineSettings, `docs_search: ${reply.reason ?? "degraded"}`);
-				} else {
-					ragMachine.recordSuccess("docs_search:served");
+				if (admission !== "refuse") {
+					if (reply.degraded === true) {
+						ragMachine.recordFailure(machineSettings, `docs_search: ${reply.reason ?? "degraded"}`);
+					} else {
+						ragMachine.recordSuccess("docs_search:served");
+					}
 				}
 				return json(reply);
 			} catch (cause) {
-				ragMachine.recordFailure(
-					machineSettings,
-					`docs_search threw: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}`,
-				);
+				if (admission !== "refuse") {
+					ragMachine.recordFailure(
+						machineSettings,
+						`docs_search threw: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}`,
+					);
+				}
 				throw cause;
+			} finally {
+				if (admission === "probe") ragMachine.settleProbe();
 			}
 		},
 	);

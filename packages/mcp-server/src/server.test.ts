@@ -1079,6 +1079,28 @@ describe("routes", () => {
 				await stop();
 			}
 		});
+
+		test("after the cooldown, one successful REST docs search moves the RAG machine out of ERROR", async () => {
+			let planeHealthy = false;
+			globalThis.fetch = stubLightrag(async () => (planeHealthy ? Response.json(LIGHTRAG_ANSWER) : new Response("upstream down", { status: 500 })));
+			const { greptime } = ledger();
+			// A zero cooldown has already elapsed, so the search after ERROR is the probe; no timer is needed.
+			const { post, get, stop } = await serve(greptime, LIGHTRAG_ENV);
+			try {
+				for (const question of ["search one", "search two", "search three"]) {
+					const degraded = (await (await post("/docs/search", { question }, auth)).json()) as Record<string, unknown>;
+					expect(degraded.degraded).toBe(true);
+				}
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+
+				planeHealthy = true;
+				const probed = (await (await post("/docs/search", { question: "the probe" }, auth)).json()) as Record<string, unknown>;
+				expect(probed.degraded).toBeUndefined();
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "IDLE" });
+			} finally {
+				await stop();
+			}
+		});
 	});
 });
 
