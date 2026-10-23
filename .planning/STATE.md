@@ -161,14 +161,43 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: Milestone v1.3 complete
+Phase: 40 (accepted debt; the consistency check is the next action)
 Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-10-11 — Milestone v1.3 completed and archived
+Status: v1.3.x and v1.5 open. Preflight recorded 2026-10-23; no phase executed by this run yet.
+Last activity: 2026-10-23 — PR #119 merged; PR #121 (ROADMAP progress follow-up) shipped through ultrathink-ship; migration placed inside phase 46 by operator decision.
+
+## Preflight record (2026-10-23, graph ut-mvlknrx6-2849044e)
+
+- Order: every open milestone in ROADMAP order, one at a time. v1.3.x (phases 40-44), then v1.5 (phases 45-51; phases 52-54 once draft #105 lands on main).
+- Commands: discuss = smart_discuss inline (gsd-discuss-phase only in interactive mode); plan = gsd-plan-phase; execute = gsd-execute-phase; verify = NONE (discovered gates and PLAN evidence); milestone audit = gsd-audit-milestone; complete = gsd-complete-milestone (version argument); cleanup = gsd-cleanup (removal list not yet confirmed visible).
+- Gates, non-interactive: tests `bun test` (900 s); type-check `bunx tsc --noEmit` (300 s); repo locks `bun run check:phase-close` (900 s); composite `bun run verify` (900 s). Lint ABSENT until the Biome report-only gate lands. Build ABSENT. Live-service scripts (gate:boot, smoke:*) are never run autonomously.
+- Gate status at preflight: no CREDENTIAL_LIKE rows; baseline clean (no uncommitted or staged user work); remote steps off by operator choice (local only: no push, tag or release).
+- TODO inventory: 0 real TODO or FIXME markers repo-wide; debt items and dispositions are in .planning/todo-inventory.md.
+- Unknowns and defaults: loop owner = flat per-phase Skill calls, with STATE and ROADMAP re-read before each write; commit scope = explicit paths only; fix attempts = three per failing gate; cleanup runs only from a visible, enumerated list; a test runner exists for every criterion that needs one; UI checks apply only where a phase touches UI.
+- Failure-mode checks: one Skill call per turn; STATE and ROADMAP hash-compared before each write; a CREDENTIAL_LIKE finding halts the run; each phase writes its SUMMARY (per-criterion evidence) before ROADMAP, then STATE; gate records carry command, exit status and tree fingerprint.
+- Wave plan: the serial lane owns STATE.md and ROADMAP.md writes. Phases never run in parallel; file-disjoint units inside one phase may.
+
+## Accepted debt (operator decision, 2026-10-23)
+
+The operator accepted the operator-gated verification of phases 40-43 and 45-50 as debt to close v1.3.x and v1.5. Phases 44 and 51 passed in repo.
+
+| Phase | Verification | Open operator gate |
+|-------|--------------|--------------------|
+| 40 DOCS-MEMORY | human_needed | D-D3 restore drill and owner approval |
+| 41 ANCHOR | human_needed | live devnet proof |
+| 42 SKILL-CARD | human_needed | live host fast-forward |
+| 43 LANE-A | human_needed | live egress and restart proof |
+| 45 Railway | human_needed | live Railway reads and writes |
+| 47 forecast and preload | human_needed | live Dragonfly warm-up |
+| 48 Tailscale proxy | human_needed | forwarders, ACL and cutover |
+| 49 graph memory | human_needed | live ledger rows |
+| 50 Dragonfly pub/sub | human_needed | live subscription and wake-up latency |
+
+Phase 46 is re-scoped to LightRAG by operator decision and is not accepted as debt. The RAGFlow to LightRAG migration runs inside it.
 
 ## Deferred Items
 
-Items acknowledged and deferred at milestone close, most recent first:
+Items acknowledged and deferred, most recent first:
 
 | Category | Item | Status | Deferred At | Milestone |
 |----------|------|--------|-------------|-----------|
@@ -176,7 +205,10 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- Phase 40 onward: run the consistency check first, then the next incomplete phase under the accepted-debt record above.
+- Phase 46: discuss, plan, execute and verify the LightRAG query path and the migration waves.
+- Phases 52-54: merge main into drafts #104 and #109-#111 once #105 lands on main (no force push), then run each phase.
+- Milestone close (v1.3.x, then v1.5): gsd-audit-milestone, then gsd-complete-milestone, only after the operator confirms the audit output.
 
 ## Session Continuity
 
