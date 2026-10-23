@@ -255,7 +255,7 @@
         "type": "yesoreyeram-infinity-datasource",
         "uid": "substrate-slo-history"
       },
-      "description": "Per data plane (greptime, index, cache, hindsight, ragflow); a refused call (breaker open) carries no duration and is not in it. Series `plane.p95` (histogram, max per step, ms), source `substrate.plane.duration`. One line per `plane`.",
+      "description": "Per data plane (greptime, index, cache, hindsight, ragflow, lightrag); a refused call (breaker open) carries no duration and is not in it. Series `plane.p95` (histogram, max per step, ms), source `substrate.plane.duration`. One line per `plane`.",
       "fieldConfig": {
         "defaults": {
           "color": {
