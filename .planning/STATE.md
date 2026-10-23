@@ -20,6 +20,13 @@ current_phase_name: docs-memory
 
 # State
 
+## Recovery record (2026-10-23)
+
+- Swarm stash `stash@{0}` (commit `d517931`, "other-session: swarm-a16..30 surfaces, swarm token lines, runbooks, swarm-correlation, identity clients") was inspected. Its five files are `.env.example`, `docs/runbooks/production-identity.md`, `docs/swarm-correlation.md`, `infra/identity/clients.json`, and `packages/mcp-server/src/types.ts`. Patch identity: `git stash show -p stash@{0} | sha256sum` begins `f671ea5f0488f06e`.
+- Verified: every added line of those five files is on `main` (`702ed32`, PR #113). The stash is redundant. It is kept, not dropped, until the operator approves dropping it.
+- Verified: `main` carries the swarm test pins (`swarm-a30`) in `authority.test.ts` and `vocabulary-lock.test.ts`.
+- Not verified, open: `memory-write.test.ts` and `server.test.ts` lost another session's uncommitted edits to an earlier checkout cleanup. Their pre-revert text cannot be recovered from git, so the other session's owner must confirm what those edits were.
+
 ## Current
 
 **v1.3 Build plan completion is planned:** 18 phases (16–33), 68 requirements, roadmap approved by the operator on 2026-10-08. Research: `.planning/research/` (SUMMARY.md first). Primary port source: branch `docs/data-planes-tailscale` (`acc30a8`), ported onto `main`'s v1.2 lease model.
