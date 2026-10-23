@@ -143,6 +143,7 @@ import { governMemoryWrite } from "./memory-write.ts";
 import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachable.ts";
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth, type HindsightConfig } from "./planes/hindsight.ts";
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
+import { lightragOp } from "./planes/lightrag.ts";
 import { RailwayClient } from "./railway.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
@@ -1277,6 +1278,8 @@ export class Substrate {
 	private readonly ragflowFetch: FetchLike;
 	/** Hindsight fetch, gated. Tests inject the fake underneath; production uses the global fetch. */
 	private readonly hindsightFetch: FetchLike;
+	/** LightRAG fetch, gated on the LightRAG plane's own breaker: a RAGFlow outage never refuses a LightRAG call. Tests inject the fake underneath; production uses the global fetch. */
+	private readonly lightragFetch: FetchLike;
 	/** Railway control-plane client (Phase 45, D45-a); tests inject a recording fetch through `stores.railway`. */
 	readonly railway: RailwayClient;
 	/** Background retains in flight, drained (bounded) on shutdown. */
@@ -1370,6 +1373,7 @@ export class Substrate {
 			cache?: ReadThroughCache;
 			ragflowFetch?: FetchLike;
 			hindsightFetch?: FetchLike;
+			lightragFetch?: FetchLike;
 			planningBaseDir?: string;
 			desktop?: DesktopDriver | null;
 			railway?: RailwayClient;
@@ -1432,6 +1436,7 @@ export class Substrate {
 		this.dodGateTest = stores?.dodGate ?? {};
 		this.ragflowFetch = gatedFetch(this.planes.gate("ragflow"), stores?.ragflowFetch ?? fetch, ragflowOp);
 		this.hindsightFetch = gatedFetch(this.planes.gate("hindsight"), stores?.hindsightFetch ?? fetch, hindsightOp);
+		this.lightragFetch = gatedFetch(this.planes.gate("lightrag"), stores?.lightragFetch ?? fetch, lightragOp);
 		this.cache =
 			stores?.cache ??
 			createReadThroughCache(config, {
@@ -4472,11 +4477,13 @@ export class Substrate {
 					repoId,
 					planningHash,
 					fetchImpl: this.ragflowFetch,
+					lightragFetch: this.lightragFetch,
 					datasets: this.docsDatasetList,
 					retrieval: this.config.docsRetrieval,
 					provenanceOf: (documentId) => documentProvenance(this.docsIngestSeen, documentId),
 					budgetMs: this.config.docsSearchBudgetMs,
 					breakerState: () => this.planes.gate("ragflow").breaker?.state() ?? "closed",
+					lightragBreakerState: () => this.planes.gate("lightrag").breaker?.state() ?? "closed",
 				},
 				question,
 			);
@@ -4485,7 +4492,7 @@ export class Substrate {
 			this.cache.getOrLoad<SearchReply>({
 				klass: "docs-search",
 				surface,
-				args: { question: question.trim().replace(/\s+/g, " ").toLowerCase(), datasets: names.map((name) => scopedDatasetName(repoId, name)).sort(), pins, degraded: degradedDatasets, repo_id: repoId, planning_hash: planningHash },
+				args: { question: question.trim().replace(/\s+/g, " ").toLowerCase(), backend: this.config.docsBackend, datasets: names.map((name) => scopedDatasetName(repoId, name)).sort(), pins, degraded: degradedDatasets, repo_id: repoId, planning_hash: planningHash },
 				generations: [DOCS_GENERATION_KEY],
 				load,
 				store: searchReplyStorable,
@@ -4621,7 +4628,7 @@ export class Substrate {
 		const pages = Array.isArray(input.pages) ? input.pages : [];
 		await this.hydrateDocsSeen();
 		const outcome = await ingestDocs(
-			this.docsIngestDeps(roots, callerSurface, sessionId),
+			this.docsIngestDeps(typeof input.dataset === "string" ? input.dataset : "", roots, callerSurface, sessionId),
 			{
 				dataset: typeof input.dataset === "string" ? input.dataset : "",
 				...(typeof input.commit === "string" ? { commit: input.commit } : {}),
@@ -4653,8 +4660,10 @@ export class Substrate {
 	 * The dependencies every docs ingest in this service runs with: the plane, the record stores, the roots the
 	 * guard checks pages against, and the caller's surface. A refresh's preflight and each of its calls share
 	 * these, so they refuse the same pages for the same reasons.
+	 * `dataset` is the one LightRAG dataset the ingest resolves, read from the version store, so a LightRAG
+	 * ingest never lists datasets through the RAGFlow gate (its breaker and outages do not refuse uploads).
 	 */
-	private docsIngestDeps(roots: readonly string[] | undefined, surface: Surface | null, sessionId?: string): IngestDeps {
+	private docsIngestDeps(dataset: string, roots: readonly string[] | undefined, surface: Surface | null, sessionId?: string): IngestDeps {
 		return {
 			config: this.config.ragflow,
 			backend: this.config.docsBackend,
@@ -4670,6 +4679,8 @@ export class Substrate {
 			surface,
 			...(sessionId !== undefined ? { sessionId } : {}),
 			fetchImpl: this.ragflowFetch,
+			lightragFetch: this.lightragFetch,
+			lightragDatasets: { list: async () => lightragSearchDatasets(this.docsVersions, [dataset]), invalidate: () => undefined },
 			datasets: this.docsDatasetList,
 			prune: this.config.docsPruneSuperseded,
 		};
@@ -4875,7 +4886,7 @@ export class Substrate {
 			if (refusedAfter !== null) return finish({ ok: false, reason: refusedAfter, job });
 			// Every page passes the ingest gates before the first call writes, so a content refusal (an outside path,
 			// an oversize page, a secret) leaves the plane as it was, as a single call did.
-			const gated = await preflightIngestPages(this.docsIngestDeps(roots, surface), { dataset: request.dataset, commit: request.commit, pages });
+			const gated = await preflightIngestPages(this.docsIngestDeps(request.dataset, roots, surface), { dataset: request.dataset, commit: request.commit, pages });
 			if (gated !== undefined) return finish({ ok: false, reason: gated, job });
 			// The pages go to the plane in calls that each fit one ingest call. Each call upserts its pages as it lands;
 			// the version is recorded only after the last call. A failure after an earlier call wrote is `stored`: the
@@ -6023,6 +6034,7 @@ export class Substrate {
 			cache: this.cache.health().enabled,
 			hindsight: hindsightFromEnv() !== null,
 			ragflow: this.config.ragflow !== null,
+			lightrag: this.config.lightrag !== null,
 		};
 	}
 
@@ -6129,6 +6141,8 @@ export class Substrate {
 			cache: !cache.enabled ? null : cache.connected ? true : cache.mode === "degraded" || cache.cooldownUntil !== null ? false : null,
 			hindsight: hindsightOk,
 			ragflow: ragflowOk,
+			// Not probed by health: no LightRAG health call exists, so the breaker alone says whether calls are refused.
+			lightrag: null,
 		};
 		const planes = {} as SubstrateHealth["planes"];
 		for (const plane of PLANES) {

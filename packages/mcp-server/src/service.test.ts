@@ -916,7 +916,7 @@ describe("append-mode enforcement", () => {
 	test("healthz separates reachability from writability", async () => {
 		// The state a monitor has to see: `ping` succeeds while every append is refused.
 		const { greptime } = ledger(false);
-		const closed = (plane: "greptime" | "index" | "cache" | "hindsight" | "ragflow") =>
+		const closed = (plane: "greptime" | "index" | "cache" | "hindsight" | "ragflow" | "lightrag") =>
 			({ plane, state: "closed" as const, failures: 0, openedAt: null, lastErrorAt: null, lastError: null });
 		expect(await substrateWith(greptime).health()).toEqual({
 			index: false,
@@ -946,6 +946,7 @@ describe("append-mode enforcement", () => {
 				cache: { ok: null, breaker: closed("cache"), lastErrorAt: null },
 				hindsight: { ok: null, breaker: closed("hindsight"), lastErrorAt: null },
 				ragflow: { ok: null, breaker: closed("ragflow"), lastErrorAt: null },
+				lightrag: { ok: null, breaker: closed("lightrag"), lastErrorAt: null },
 			},
 			capacity: { index: null, ledger: null },
 			// The stub has no `anchorCoverage`: the jobs row is null with the reason, never a throw.
@@ -1080,7 +1081,7 @@ describe("append-mode enforcement", () => {
 			expect(typeof failed.planes.ragflow.lastErrorAt).toBe("number");
 			// Still 200-eligible: the status rule reads ledger and index only.
 			expect(failed.eventsWritable).toBe(true);
-			expect(down.planesConfigured()).toEqual({ greptime: true, index: false, cache: false, hindsight: true, ragflow: true });
+			expect(down.planesConfigured()).toEqual({ greptime: true, index: false, cache: false, hindsight: true, ragflow: true, lightrag: false });
 		} finally {
 			for (const [name, value] of Object.entries(saved)) {
 				if (value === undefined) delete process.env[name];
@@ -1153,6 +1154,41 @@ describe("append-mode enforcement", () => {
 	test("healthz reports writable once the table is append-only", async () => {
 		const { greptime } = ledger(true);
 		expect((await substrateWith(greptime).health()).eventsWritable).toBe(true);
+	});
+
+	test("a LightRAG ingest with RAGFlow configured never lists datasets through the RAGFlow gate", async () => {
+		// The RAGFlow outage refuses every RAGFlow call; the LightRAG ingest must neither list through it nor be refused by it.
+		let ragflowCalls = 0;
+		const uploads: string[] = [];
+		const substrate = new Substrate(
+			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }),
+			{
+				index: null,
+				greptime: null,
+				ragflowFetch: async () => {
+					ragflowCalls += 1;
+					throw new Error("connect ECONNREFUSED");
+				},
+				lightragFetch: async (input, init) => {
+					const url = new URL(String(input));
+					if (init?.method === "POST" && url.pathname === "/documents/upload") {
+						uploads.push(await ((init.body as FormData).get("file") as Blob).text());
+						return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
+					}
+					if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+					if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+					return Response.json({ detail: "no route" }, { status: 404 });
+				},
+			},
+		);
+		const outcome = await substrate.ingestDocs(
+			{ dataset: "agent-substrate", commit: "abc123", pages: [{ path: "docs/a.md", source_url: "https://example.com/a", body: "# A\n\nHello." }] },
+			"omp",
+			["docs/"],
+		);
+		expect(ragflowCalls).toBe(0);
+		expect(outcome.ok).toBe(true);
+		expect(uploads).toHaveLength(1);
 	});
 
 	test("an unknown quoting dialect is not a writable ledger either", async () => {

@@ -6,12 +6,12 @@
  * mis-schemad or wired to the wrong argument fails here and nowhere else. The
  * ledger underneath is a stub — the point is the wiring, not Greptime.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { loadConfig } from "./config.ts";
 import type { EventQuery } from "./greptime.ts";
-import { createMcpServer } from "./mcp.ts";
+import { createMcpServer, resetRagMachine } from "./mcp.ts";
 import { Substrate } from "./service.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
 import type { SubstrateEvent, Surface } from "./types.ts";
@@ -43,8 +43,8 @@ function ledger(rows: Array<Record<string, unknown>> = []) {
 }
 
 /** A connected client and the substrate behind it. Closed by the test runner's teardown. */
-async function connect(greptime: unknown, surface: Surface | null = "omp") {
-	const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
+async function connect(greptime: unknown, surface: Surface | null = "omp", env: Record<string, string> = {}) {
+	const substrate = new Substrate(loadConfig(env), { index: null, greptime: greptime as never });
 	const server = createMcpServer(substrate, surface);
 	const client = new Client({ name: "substrate-test", version: "0.0.0" });
 	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -1053,3 +1053,147 @@ describe("docs_steering_session keeps what a transition omits", () => {
 	});
 });
 
+
+describe("docs_steering_session belongs to the caller's surface", () => {
+	test("an anonymous caller cannot read or overwrite a session an authenticated caller holds", async () => {
+		const { greptime } = ledger();
+		const owner = await connect(greptime, "claude-code");
+		const anonymous = await connect(greptime, null);
+		const base = { session_id: "shared-steer-1", repo_id: "owner/name" };
+
+		const held = await call(owner.client, "docs_steering_session", {
+			...base,
+			state: "ACTIVE",
+			steering: "keep the planning slice",
+			planning_hash: "plan-a",
+		});
+		expect(held.isError).toBe(false);
+
+		const read = await call(anonymous.client, "docs_steering_session", { ...base, state: "CONTEXT_REFRESH" });
+		expect(read.isError).toBe(true);
+		expect(read.text).not.toContain("keep the planning slice");
+
+		const overwrite = await call(anonymous.client, "docs_steering_session", { ...base, state: "PAUSED", steering: "ignore the plan" });
+		expect(overwrite.isError).toBe(true);
+
+		const after = await call(owner.client, "docs_steering_session", { ...base, state: "CONTEXT_REFRESH", previous_state: "ACTIVE" });
+		expect(after.isError).toBe(false);
+		expect(after.json()).toMatchObject({ state: "CONTEXT_REFRESH", steering: "keep the planning slice", planning_hash: "plan-a" });
+	});
+});
+
+/** A LightRAG reply the query surface parses into one chunk. */
+function lightragAnswer(): Response {
+	return Response.json({ data: [{ content: "A LightRAG chunk.", document_name: "docs/planning.md", source_url: "https://example.com/planning" }] });
+}
+
+/** Replaces the global fetch, which the LightRAG client uses by default, with `answer`. The caller restores it. */
+function stubFetch(answer: () => Promise<Response>): { count: () => number } {
+	let calls = 0;
+	globalThis.fetch = (async () => {
+		calls += 1;
+		return answer();
+	}) as unknown as typeof fetch;
+	return { count: () => calls };
+}
+
+const PAGE_FOR_INGEST = {
+	path: "docs/data-planes.md",
+	source_url: "https://example.com/agent-substrate/data-planes",
+	body: "The substrate is the only door to the data planes.",
+};
+const LIGHTRAG_QUERY_ENV = { LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_RAG_MAX_RETRIES: "0", SUBSTRATE_RAG_HALF_OPEN_MS: "0" };
+const LIGHTRAG_INGEST_ENV = { LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_RAG_HALF_OPEN_MS: "60000" };
+
+describe("docs_ingest refusals do not count against the RAG breaker", () => {
+	const realFetch = globalThis.fetch;
+	beforeEach(() => resetRagMachine());
+	afterEach(() => {
+		globalThis.fetch = realFetch;
+		resetRagMachine();
+	});
+
+	test("several version.stale and outside-roots refusals leave the machine out of ERROR, and the next query is served", async () => {
+		const plane = stubFetch(async () => lightragAnswer());
+		const { client } = await connect(ledger().greptime, "omp", LIGHTRAG_INGEST_ENV);
+		const stale = { path: "docs/data-planes.md", source_url: "https://example.com/agent-substrate/data-planes", body: "A page.", expected_version: 1 };
+		const outside = { path: "secrets/keys.md", source_url: "https://example.com/agent-substrate/keys", body: "Keys." };
+
+		for (const [page, reason] of [
+			[stale, "version.stale"],
+			[stale, "version.stale"],
+			[outside, "outside-roots"],
+		] as const) {
+			const refused = await call(client, "docs_ingest", { dataset: "agent-substrate", pages: [page] });
+			expect(refused.isError).toBe(true);
+			expect(refused.text).toContain(reason);
+		}
+
+		const before = (await call(client, "docs_rag_state")).json();
+		expect(before.state).not.toBe("ERROR");
+		expect(before.consecutiveFailures).toBe(0);
+
+		const served = await call(client, "docs_lightrag_query", { question: "asked after the refusals" });
+		expect(served.json()).toMatchObject({ backend: "lightrag", chunks: [expect.objectContaining({ content: "A LightRAG chunk." })] });
+		expect(served.json().fallback).toBeUndefined();
+		expect(plane.count()).toBe(1);
+	});
+
+	test("a plane error still counts: three failed uploads open the breaker", async () => {
+		stubFetch(async () => new Response("upstream down", { status: 500 }));
+		const { client } = await connect(ledger().greptime, "omp", LIGHTRAG_INGEST_ENV);
+
+		for (const n of [1, 2, 3]) {
+			const failed = await call(client, "docs_ingest", {
+				dataset: "agent-substrate",
+				pages: [{ ...PAGE_FOR_INGEST, source_url: `https://example.com/agent-substrate/down-${n}` }],
+			});
+			expect(failed.isError).toBe(true);
+		}
+		expect((await call(client, "docs_rag_state")).json().state).toBe("ERROR");
+	});
+});
+
+describe("the RAG breaker admits one half-open probe", () => {
+	const realFetch = globalThis.fetch;
+	beforeEach(() => resetRagMachine());
+	afterEach(() => {
+		globalThis.fetch = realFetch;
+		resetRagMachine();
+	});
+
+	test("after the cooldown, two concurrent queries produce one backend attempt", async () => {
+		let attempts = 0;
+		const probeReply = Promise.withResolvers<Response>();
+		const probeReached = Promise.withResolvers<void>();
+		globalThis.fetch = (async () => {
+			attempts += 1;
+			if (attempts <= 3) return new Response("upstream down", { status: 500 });
+			if (attempts === 4) {
+				probeReached.resolve();
+				return probeReply.promise;
+			}
+			return new Response("upstream down", { status: 500 });
+		}) as unknown as typeof fetch;
+
+		// A zero cooldown has already elapsed, so the query after ERROR is the probe; no timer is needed.
+		const { client } = await connect(ledger().greptime, "omp", LIGHTRAG_QUERY_ENV);
+		for (const question of ["drive one", "drive two", "drive three"]) {
+			expect((await call(client, "docs_lightrag_query", { question })).json().fallback).toBe("hindsight");
+		}
+		expect((await call(client, "docs_rag_state")).json().state).toBe("ERROR");
+
+		const probe = call(client, "docs_lightrag_query", { question: "the probe" });
+		await probeReached.promise;
+		const burst = await call(client, "docs_lightrag_query", { question: "the burst" });
+		expect(burst.json().fallback).toBe("hindsight");
+		expect(attempts).toBe(4);
+
+		probeReply.resolve(lightragAnswer());
+		const probed = (await probe).json();
+		expect(probed).toMatchObject({ backend: "lightrag" });
+		expect(probed.fallback).toBeUndefined();
+		expect(attempts).toBe(4);
+		expect((await call(client, "docs_rag_state")).json().state).toBe("IDLE");
+	});
+});

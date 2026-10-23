@@ -78,6 +78,7 @@ import {
 	createMcpServer,
 	getCachedRagResult,
 	hindsightRagFallback,
+	ingestRefusalIsGate,
 	lightragReplayKey,
 	queryLightragRest,
 	ragGraphCounts,
@@ -1528,7 +1529,8 @@ export function createHttpServer(
 					const outcome = await substrate.ingestDocs(ingestFields, surface);
 					if (outcome.ok) {
 						ragMachine.recordSuccess("docs_ingest:served");
-					} else {
+					} else if (!ingestRefusalIsGate(outcome.reason)) {
+						// A refused request never reached the plane, so it says nothing about the plane's health.
 						ragMachine.recordFailure(config.ragMachine, `docs_ingest: ${outcome.reason}`);
 					}
 					if (!outcome.ok) {
@@ -1618,63 +1620,69 @@ export function createHttpServer(
 					sendJson(res, 200, withLightragNotice(replayed));
 					return;
 				}
-				if (!ragMachine.probeAllowed(config.ragMachine.halfOpenMs)) {
+				const admission = ragMachine.admitQuery(config.ragMachine.halfOpenMs);
+				if (admission === "refuse") {
 					const held = await hindsightRagFallback(substrate, surface, record.question as string, entityList, relationList, "rag breaker open");
 					setCachedRagResult(key, held);
 					sendJson(res, 200, withLightragNotice(held));
 					return;
 				}
-				ragMachine.transition("STEERING", `lightrag_query:${config.docsBackend}`);
-				const lightrag = config.lightrag;
-				if (lightrag === null) {
-					ragMachine.transition("CONTEXT_REFRESH", "lightrag_query:unconfigured");
+				// A probe's attempt ends here, whatever it found: until then no other query reaches the plane.
+				try {
+					ragMachine.transition("STEERING", `lightrag_query:${config.docsBackend}`);
+					const lightrag = config.lightrag;
+					if (lightrag === null) {
+						ragMachine.transition("CONTEXT_REFRESH", "lightrag_query:unconfigured");
+						const degraded = await hindsightRagFallback(
+							substrate,
+							surface,
+							record.question as string,
+							entityList,
+							relationList,
+							"lightrag-not-configured",
+						);
+						setCachedRagResult(key, degraded);
+						sendJson(res, 200, withLightragNotice(degraded));
+						return;
+					}
+					const augmented = augmentRagQuery(record.question as string, entityList, relationList);
+					ragMachine.transition("CONTEXT_REFRESH", "lightrag_query:retrieve");
+					let lastReason = "lightrag unreachable";
+					for (let attempt = 0; attempt <= config.ragMachine.maxRetries; attempt += 1) {
+						if (attempt > 0) await ragRetryDelay(config.ragMachine.retryBaseMs, attempt);
+						const answered = await queryLightragRest(lightrag, {
+							question: augmented,
+							...(typeof mode === "string" ? { mode } : {}),
+							...(typeof topK === "number" ? { topK } : {}),
+						});
+						if (answered.ok) {
+							const state = ragMachine.recordSuccess("lightrag_query:served");
+							const result = {
+								backend: "lightrag" as const,
+								chunks: answered.chunks,
+								graph: ragGraphCounts(answered.chunks, entityList, relationList),
+								state,
+							};
+							setCachedRagResult(key, result);
+							sendJson(res, 200, withLightragNotice(result));
+							return;
+						}
+						lastReason = answered.reason;
+					}
+					ragMachine.recordFailure(config.ragMachine, `lightrag_query: ${lastReason}`);
 					const degraded = await hindsightRagFallback(
 						substrate,
 						surface,
 						record.question as string,
 						entityList,
 						relationList,
-						"lightrag-not-configured",
+						lastReason,
 					);
 					setCachedRagResult(key, degraded);
 					sendJson(res, 200, withLightragNotice(degraded));
-					return;
+				} finally {
+					if (admission === "probe") ragMachine.settleProbe();
 				}
-				const augmented = augmentRagQuery(record.question as string, entityList, relationList);
-				ragMachine.transition("CONTEXT_REFRESH", "lightrag_query:retrieve");
-				let lastReason = "lightrag unreachable";
-				for (let attempt = 0; attempt <= config.ragMachine.maxRetries; attempt += 1) {
-					if (attempt > 0) await ragRetryDelay(config.ragMachine.retryBaseMs, attempt);
-					const answered = await queryLightragRest(lightrag, {
-						question: augmented,
-						...(typeof mode === "string" ? { mode } : {}),
-						...(typeof topK === "number" ? { topK } : {}),
-					});
-					if (answered.ok) {
-						const state = ragMachine.recordSuccess("lightrag_query:served");
-						const result = {
-							backend: "lightrag" as const,
-							chunks: answered.chunks,
-							graph: ragGraphCounts(answered.chunks, entityList, relationList),
-							state,
-						};
-						setCachedRagResult(key, result);
-						sendJson(res, 200, withLightragNotice(result));
-						return;
-					}
-					lastReason = answered.reason;
-				}
-				ragMachine.recordFailure(config.ragMachine, `lightrag_query: ${lastReason}`);
-				const degraded = await hindsightRagFallback(
-					substrate,
-					surface,
-					record.question as string,
-					entityList,
-					relationList,
-					lastReason,
-				);
-				setCachedRagResult(key, degraded);
-				sendJson(res, 200, withLightragNotice(degraded));
 				return;
 			}
 

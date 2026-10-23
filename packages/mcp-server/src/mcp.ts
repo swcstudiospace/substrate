@@ -211,6 +211,7 @@ export class RagStateMachine {
 	private lastReason: string | undefined;
 	private updatedAt = new Date().toISOString();
 	private openedAt: number | null = null;
+	private probing = false;
 	private readonly seen = new Map<string, RagStateSnapshot>();
 
 	snapshot(): RagStateSnapshot {
@@ -233,6 +234,7 @@ export class RagStateMachine {
 		this.lastReason = undefined;
 		this.updatedAt = new Date().toISOString();
 		this.openedAt = null;
+		this.probing = false;
 		this.seen.clear();
 	}
 
@@ -295,24 +297,74 @@ export class RagStateMachine {
 		return this.snapshot();
 	}
 
+	/** Whether the breaker is open and still cooling: `ERROR`, and `halfOpenMs` has not passed since it tripped. */
+	private cooling(halfOpenMs: number): boolean {
+		if (this.state !== "ERROR" || this.openedAt === null) return false;
+		if (halfOpenMs <= 0) return false;
+		return Date.now() - this.openedAt < halfOpenMs;
+	}
+
 	/**
-	 * Whether a fresh steer may leave `ERROR`: only after `halfOpenMs`
-	 * have passed since the breaker tripped (half-open probe). Non-positive
-	 * cooldowns always allow the probe.
+	 * Whether a LightRAG query may reach the plane now: the breaker is not cooling and no half-open probe is in
+	 * flight. It reserves nothing; `admitQuery` does.
 	 */
 	probeAllowed(halfOpenMs: number): boolean {
-		if (this.state !== "ERROR" || this.openedAt === null) return true;
-		if (halfOpenMs <= 0) return true;
-		return Date.now() - this.openedAt >= halfOpenMs;
+		return !this.probing && !this.cooling(halfOpenMs);
+	}
+
+	/**
+	 * Admit one LightRAG query. `serve`: the plane may be asked. `probe`: the breaker tripped and has cooled, and this
+	 * query is its single half-open probe; the caller must `settleProbe` when its attempt ends, whatever it found.
+	 * `refuse`: the breaker is cooling or a probe is in flight, so the plane must not be asked. Only one probe is ever
+	 * admitted, so a burst after the cooldown sends one request to a failing plane, not one per query.
+	 */
+	admitQuery(halfOpenMs: number): "serve" | "probe" | "refuse" {
+		if (!this.probeAllowed(halfOpenMs)) return "refuse";
+		if (this.state !== "ERROR") return "serve";
+		this.probing = true;
+		return "probe";
+	}
+
+	/** The half-open probe's attempt has ended; the next query is judged on the state the attempt left. */
+	settleProbe(): void {
+		this.probing = false;
 	}
 }
 
 /** Process-wide RAG machine, shared by the MCP tools and the REST routes. */
 export const ragMachine = new RagStateMachine();
 
-/** Test seam: reset the process-wide RAG machine. */
+/** Test seam: reset the process-wide RAG machine and its cached answers, so no test is served another's answer. */
 export function resetRagMachine(): void {
 	ragMachine.reset();
+	ragResultCache.clear();
+}
+
+/**
+ * The ingest refusals the gate names before any plane is asked: the request or the dataset is wrong, not the plane.
+ * They never count toward the RAG breaker, so a run of bad requests cannot take a healthy plane out of service.
+ * Every other refusal is a plane error (a listing, upload or parse that failed), and those do count.
+ */
+const INGEST_GATE_REFUSALS: Record<string, true> = {
+	unauthenticated: true,
+	"vm-guest": true,
+	"no-pages": true,
+	"no-source-url": true,
+	"outside-roots": true,
+	"page-too-large": true,
+	"call-too-large": true,
+	"secret-findings": true,
+	"unknown-dataset": true,
+	"version.stale": true,
+	"dataset-lock-timeout": true,
+	"lightrag-not-configured": true,
+	"ragflow-not-configured": true,
+};
+
+/** Whether an ingest refusal is a gate refusal. A LightRAG secret finding carries its rule names after a colon. */
+export function ingestRefusalIsGate(reason: string): boolean {
+	const head = reason.startsWith("secret-findings:") ? "secret-findings" : reason;
+	return Object.hasOwn(INGEST_GATE_REFUSALS, head);
 }
 
 /**
@@ -397,9 +449,11 @@ function lightragReply(result: RagLightragResult) {
  */
 const STEERING_SESSION_CAP = 1000;
 const steeringSessions = new Map<string, SteeringSession>();
+/** Why a steering write from an anonymous caller is refused: it has no surface to hold a session under. */
+const STEERING_NEEDS_SURFACE = "docs_steering_session needs an authenticated surface; nothing was changed";
 
-function steeringSessionKey(callerSurface: Surface | null, sessionId: string): string {
-	return `${callerSurface ?? "claude-code"}:${sessionId}`;
+function steeringSessionKey(callerSurface: Surface, sessionId: string): string {
+	return `${callerSurface}:${sessionId}`;
 }
 
 function rememberSteeringSession(key: string, session: SteeringSession): void {
@@ -1371,7 +1425,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				// ranks while the ledger keeps both. A live session fills what the call
 				// omits: its steering, repo tag and planning hash. The repo tag is validated
 				// here and keys the cache; retrieval always reads the shared corpus.
-				const live = session_id === undefined ? undefined : steeringSessions.get(steeringSessionKey(callerSurface, session_id));
+				// An anonymous caller holds no steering session of its own, so it reads none.
+				const live = session_id === undefined || callerSurface === null ? undefined : steeringSessions.get(steeringSessionKey(callerSurface, session_id));
 				const scoped = normalizeRepoId(repo_id ?? live?.repo_id ?? null);
 				const steered = augmentQuestionWithSteering(question, steering ?? live?.steering ?? null);
 				const reply = await substrate.searchDocs(
@@ -1425,6 +1480,9 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			},
 		},
 		async ({ session_id, repo_id, state, steering, planning_hash, previous_state }) => {
+			// Steering sessions are keyed by the caller's own surface. An anonymous caller holds none, so it may not
+			// read or write one; it is refused, as `docs_ingest` refuses an anonymous write.
+			if (callerSurface === null) return refusal(STEERING_NEEDS_SURFACE);
 			const previous =
 				previous_state === undefined
 					? null
@@ -1461,7 +1519,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			if (!next.ok) return refusal(next.reason);
 			rememberSteeringSession(key, next.session);
 			const { event, stored, error, warning } = await substrate.emit({
-				surface: callerSurface ?? "claude-code",
+				surface: callerSurface,
 				kind: state === "PAUSED" ? "warning" : "note",
 				summary: `docs steering ${next.previous ?? "none"} -> ${next.session.state} for ${next.session.repo_id}`,
 				session_id: next.session.session_id,
@@ -1523,7 +1581,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				const outcome = await substrate.ingestDocs({ dataset, commit, pages, session_id }, callerSurface);
 				if (outcome.ok) {
 					ragMachine.recordSuccess("docs_ingest:served");
-				} else {
+				} else if (!ingestRefusalIsGate(outcome.reason)) {
+					// A refused request never reached the plane, so it says nothing about the plane's health.
 					ragMachine.recordFailure(machineSettings, `docs_ingest: ${outcome.reason}`);
 				}
 				return outcome.ok ? json(outcome) : { ...json(outcome), isError: true };
@@ -1586,49 +1645,55 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				);
 				return lightragReply(replayed);
 			}
-			if (!ragMachine.probeAllowed(settings.halfOpenMs)) {
+			const admission = ragMachine.admitQuery(settings.halfOpenMs);
+			if (admission === "refuse") {
 				const degraded = await hindsightRagFallback(substrate, callerSurface, question, entityList, relationList, "rag breaker open");
 				setCachedRagResult(key, degraded);
 				return lightragReply(degraded);
 			}
-			ragMachine.transition("STEERING", `lightrag_query:${backend}`);
-			const lightrag = substrate.config.lightrag;
-			if (lightrag === null) {
-				ragMachine.transition("CONTEXT_REFRESH", "lightrag_query:unconfigured");
-				const degraded = await hindsightRagFallback(
-					substrate,
-					callerSurface,
-					question,
-					entityList,
-					relationList,
-					"lightrag-not-configured",
-				);
+			// A probe's attempt ends here, whatever it found: until then no other query reaches the plane.
+			try {
+				ragMachine.transition("STEERING", `lightrag_query:${backend}`);
+				const lightrag = substrate.config.lightrag;
+				if (lightrag === null) {
+					ragMachine.transition("CONTEXT_REFRESH", "lightrag_query:unconfigured");
+					const degraded = await hindsightRagFallback(
+						substrate,
+						callerSurface,
+						question,
+						entityList,
+						relationList,
+						"lightrag-not-configured",
+					);
+					setCachedRagResult(key, degraded);
+					return lightragReply(degraded);
+				}
+				const augmented = augmentRagQuery(question, entityList, relationList);
+				ragMachine.transition("CONTEXT_REFRESH", "lightrag_query:retrieve");
+				let lastReason = "lightrag unreachable";
+				for (let attempt = 0; attempt <= settings.maxRetries; attempt += 1) {
+					if (attempt > 0) await ragRetryDelay(settings.retryBaseMs, attempt);
+					const answered = await queryLightragRest(lightrag, { question: augmented, ...(mode !== undefined ? { mode } : {}), ...(top_k !== undefined ? { topK: top_k } : {}) });
+					if (answered.ok) {
+						const state = ragMachine.recordSuccess("lightrag_query:served");
+						const result: RagLightragResult = {
+							backend: "lightrag",
+							chunks: answered.chunks,
+							graph: ragGraphCounts(answered.chunks, entityList, relationList),
+							state,
+						};
+						setCachedRagResult(key, result);
+						return lightragReply(result);
+					}
+					lastReason = answered.reason;
+				}
+				ragMachine.recordFailure(settings, `lightrag_query: ${lastReason}`);
+				const degraded = await hindsightRagFallback(substrate, callerSurface, question, entityList, relationList, lastReason);
 				setCachedRagResult(key, degraded);
 				return lightragReply(degraded);
+			} finally {
+				if (admission === "probe") ragMachine.settleProbe();
 			}
-			const augmented = augmentRagQuery(question, entityList, relationList);
-			ragMachine.transition("CONTEXT_REFRESH", "lightrag_query:retrieve");
-			let lastReason = "lightrag unreachable";
-			for (let attempt = 0; attempt <= settings.maxRetries; attempt += 1) {
-				if (attempt > 0) await ragRetryDelay(settings.retryBaseMs, attempt);
-				const answered = await queryLightragRest(lightrag, { question: augmented, ...(mode !== undefined ? { mode } : {}), ...(top_k !== undefined ? { topK: top_k } : {}) });
-				if (answered.ok) {
-					const state = ragMachine.recordSuccess("lightrag_query:served");
-					const result: RagLightragResult = {
-						backend: "lightrag",
-						chunks: answered.chunks,
-						graph: ragGraphCounts(answered.chunks, entityList, relationList),
-						state,
-					};
-					setCachedRagResult(key, result);
-					return lightragReply(result);
-				}
-				lastReason = answered.reason;
-			}
-			ragMachine.recordFailure(settings, `lightrag_query: ${lastReason}`);
-			const degraded = await hindsightRagFallback(substrate, callerSurface, question, entityList, relationList, lastReason);
-			setCachedRagResult(key, degraded);
-			return lightragReply(degraded);
 		},
 	);
 

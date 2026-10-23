@@ -413,6 +413,7 @@ export interface IngestPageResult {
 	/** `failed` is LightRAG-path only: per-file isolation records the page instead of refusing the call. */
 	status: "ingested" | "replaced" | "unchanged" | "failed";
 	document_id: string;
+	/** The hash the record keeps: the sanitized body, plus a LightRAG planning page's graph (see `changeSha`). */
 	content_sha256: string;
 	/** The prior document this upload supersedes; deleted when the prune is on, else left for the operator. */
 	superseded_document_id?: string;
@@ -672,6 +673,17 @@ function graphStrings(hint: PlanningGraphHint): string[] {
 	return [hint.phase, ...hint.entities, ...hint.relations.flatMap((relation) => [relation.source, relation.target, relation.kind])];
 }
 
+/**
+ * The hash a page's record keeps, and the next call compares against. The sanitized body alone, except that a
+ * page with a planning-graph hint folds in the entities and relations its LightRAG insert uploads, so a graph
+ * correction with unchanged markdown is a change. RAGFlow never passes a hint, so its hash stays the body's.
+ */
+function changeSha(body: string, hint: PlanningGraphHint | undefined): string {
+	if (hint === undefined) return sha256(body);
+	const relations = hint.relations.map((relation) => [relation.source, relation.target, relation.kind]);
+	return sha256(JSON.stringify({ body, entities: hint.entities, relations }));
+}
+
 /** One page that passed its gates: the sanitized body and the record key inputs. */
 type PreparedPage = { page: IngestPage; sourceUrl: string; body: string; sha: string };
 
@@ -703,7 +715,7 @@ function checkIngestPage(
 	const graph = hint === undefined ? "" : graphStrings(hint).join("\n");
 	const rules = findingRules(`${stripped.body}\n${page.source_url}\n${commit ?? ""}\n${page.heading_path ?? ""}\n${graph}`);
 	if (rules.length > 0) return { ok: false, reason: "secret-findings", rules };
-	return { ok: true, sourceUrl: page.source_url, body: stripped.body, size, stripped: stripped.stripped, sha: sha256(stripped.body) };
+	return { ok: true, sourceUrl: page.source_url, body: stripped.body, size, stripped: stripped.stripped, sha: changeSha(stripped.body, hint) };
 }
 
 /** How long a call waits behind another ingest of its dataset before it is refused `dataset-lock-timeout`. */
@@ -1464,8 +1476,12 @@ async function ingestDocsLightrag(
 	// landed. The call reports `partial` when anything landed alongside
 	// failures, and refuses only when nothing did.
 	let failed = rejected.length;
-	const recordFailed = (pagePath: string, source: string, hash: string, reason: string): void => {
+	// Keys with a write that failed in this call. The version plan assumed every planned write landed, so a later
+	// page of such a key is recorded failed and not written: writing it would store a version the plan never reached.
+	const failedKeys = new Set<string>();
+	const recordFailed = (key: string, pagePath: string, source: string, hash: string, reason: string): void => {
 		failed += 1;
+		failedKeys.add(key);
 		results.push({
 			path: pagePath,
 			source_url: source,
@@ -1481,6 +1497,10 @@ async function ingestDocsLightrag(
 	for (const { page, sourceUrl, body, sha } of prepared) {
 		const hint = hintFor(page, input.graphHints);
 		const key = lightragRecordKey(dataset.id, sourceUrl);
+		if (failedKeys.has(key)) {
+			recordFailed(key, page.path, sourceUrl, sha, "an earlier page of this source URL failed in this call, so this page was not written");
+			continue;
+		}
 		for (;;) {
 			const prior = seen.get(key);
 			if (prior && prior.sha === sha) {
@@ -1491,7 +1511,7 @@ async function ingestDocsLightrag(
 			if (running && running.sha === sha) {
 				const settled = await running.task;
 				if (!settled.ok) {
-					recordFailed(page.path, sourceUrl, sha, settled.reason);
+					recordFailed(key, page.path, sourceUrl, sha, settled.reason);
 					break;
 				}
 				results.push(settled.result);
@@ -1581,7 +1601,7 @@ async function ingestDocsLightrag(
 					if (locks.get(key)?.task === task) locks.delete(key);
 				}
 				if (!settled.ok) {
-					recordFailed(page.path, sourceUrl, sha, settled.reason);
+					recordFailed(key, page.path, sourceUrl, sha, settled.reason);
 					break;
 				}
 				results.push(settled.result);
@@ -1589,7 +1609,7 @@ async function ingestDocsLightrag(
 			}
 			const settled = await running.task;
 			if (!settled.ok) {
-				recordFailed(page.path, sourceUrl, sha, settled.reason);
+				recordFailed(key, page.path, sourceUrl, sha, settled.reason);
 				break;
 			}
 		}

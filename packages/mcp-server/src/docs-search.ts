@@ -355,9 +355,8 @@ export interface SearchDeps {
 	/** The LightRAG dataset list reader; the wanted names stand as their own ids when omitted. */
 	lightragDatasets?: LightragDatasetList;
 	/**
-	 * The LightRAG breaker's state at search time; `breakerState` when
-	 * omitted. Only the serving plane's breaker is ever consulted, so the
-	 * two planes degrade independently (per-backend circuit breaker).
+	 * The LightRAG breaker's state at search time. Only the LightRAG plane's own
+	 * breaker is ever consulted, so the two planes degrade independently.
 	 */
 	lightragBreakerState?: () => BreakerState;
 }
@@ -821,10 +820,9 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 	const lightrag = deps.lightragConfig;
 	const retrieve = deps.lightragRetrieve ?? retrieveForSearchLightrag;
 	if (lightrag == null) return failed(deps, sessionId, "lightrag-not-configured");
-	const breakerState = deps.lightragBreakerState ?? deps.breakerState;
-	// Only the serving plane's breaker is ever consulted: while no LightRAG
-	// gate exists the RAGFlow state stands in (per-backend independence is
-	// degraded, the search is not).
+	// Only the LightRAG plane's own breaker is consulted: the RAGFlow state never
+	// stands in for it, so a RAGFlow outage cannot refuse a LightRAG search.
+	const breakerState = deps.lightragBreakerState;
 	if (breakerState?.() === "open") return failed(deps, sessionId, LIGHTRAG_CIRCUIT_OPEN);
 	const wanted = deps.datasetNames ?? DEFAULT_SEARCH_DATASET_NAMES;
 	// Dataset resolution never touches RAGFlow: a search must not depend on its

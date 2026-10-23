@@ -3,8 +3,8 @@
  * call goes through (uplift-2 R2, Build Plan A-5 "circuit breakers + degraded
  * mode").
  *
- * The substrate reaches five planes — the Greptime ledger, the Postgres index,
- * the loopback cache, Hindsight and RAGFlow — and four of them sit behind a
+ * The substrate reaches six planes — the Greptime ledger, the Postgres index,
+ * the loopback cache, Hindsight, RAGFlow and LightRAG — and four of them sit behind a
  * public edge with 200–1000 ms round trips. Without a breaker, a plane that
  * stops answering costs every caller its full timeout (4–5 s), including the
  * hook with a 1.5 s budget. With one, the first `failureThreshold` failures
@@ -24,7 +24,7 @@
  * is exactly today's behaviour plus the metrics.
  */
 
-export const PLANES = ["greptime", "index", "cache", "hindsight", "ragflow"] as const;
+export const PLANES = ["greptime", "index", "cache", "hindsight", "ragflow", "lightrag"] as const;
 export type PlaneName = (typeof PLANES)[number];
 
 export type BreakerState = "closed" | "open" | "half-open";

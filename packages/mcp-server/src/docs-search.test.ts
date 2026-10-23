@@ -17,7 +17,7 @@ import { nodeIo, readSkillsCheckoutPages, skillsCheckoutRoots, type ScanIo } fro
 import { RagflowFake, type FakeChunk } from "./ragflow-fake.ts";
 import type { GreptimeClient } from "./greptime.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
-import { ragflowOp } from "./planes/ragflow.ts";
+import { ragflowOp, type FetchLike } from "./planes/ragflow.ts";
 import type { EventInput } from "./types.ts";
 import { selectRetrievalBackend } from "./types.ts";
 import { lightragFromEnv, loadConfig, resolveDocsBackend } from "./config.ts";
@@ -588,6 +588,159 @@ describe("docs backend selection (LightRAG cutover)", () => {
 		const config = lightragFromEnv({ LIGHTRAG_URL: "http://lightrag.test/", LIGHTRAG_API_KEY: "k" });
 		expect(config).toEqual({ url: "http://lightrag.test", apiKey: "k" });
 		expect(JSON.stringify(config)).not.toContain("k-secret");
+	});
+});
+
+describe("LightRAG search and the RAGFlow plane", () => {
+	/** A LightRAG `/query` stand-in: answers one chunk with `chunk` and records the raw body of every query it gets. */
+	function lightragServing(chunk: string) {
+		const queries: string[] = [];
+		const fetch: FetchLike = async (input, init) => {
+			const url = new URL(String(input));
+			if (init?.method !== "POST" || url.pathname !== "/query") return Response.json({ detail: "no route" }, { status: 404 });
+			queries.push(String(init.body));
+			return Response.json({ status: "success", data: { chunks: [{ content: chunk, document_name: "plan.md", document_id: "doc-lightrag", heading_path: "Plan", score: 0.9 }] } });
+		};
+		return { fetch, queries };
+	}
+
+	test("a LightRAG search still retrieves while the RAGFlow breaker is open", async () => {
+		const ragflow = new CircuitBreaker("ragflow", { enabled: true, failureThreshold: 1, openMs: 60_000 });
+		ragflow.onFailure("ragflow 503");
+		expect(ragflow.state()).toBe("open");
+		let retrievals = 0;
+		const reply = await searchDocs(
+			{
+				config: { url: "http://ragflow.test", apiKey: "test-key" },
+				backend: "lightrag",
+				lightragConfig: { url: "http://lightrag.test" },
+				datasetNames: ["agent-substrate"],
+				breakerState: () => ragflow.state(),
+				lightragRetrieve: async () => {
+					retrievals += 1;
+					return {
+						ok: true,
+						chunks: [{ content: "The planner reads the plan.", document_name: "plan.md", document_id: "doc-1", heading_path: "Plan", score: 0.9 }],
+						detail: { mode: "hybrid", counts: { entities: 0, relations: 0 }, provenance: { entities: [], relations: 0 } },
+					};
+				},
+				emit: async () => ({ stored: false }),
+				surface: "omp",
+			},
+			"where is the plan?",
+		);
+		expect(retrievals).toBe(1);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.chunks).toHaveLength(1);
+	});
+
+	test("Substrate.searchDocs on the LightRAG backend answers while the RAGFlow breaker is open, and RAGFlow is never called", async () => {
+		const lightrag = lightragServing("Served by LightRAG.");
+		let ragflowCalls = 0;
+		const substrate = new Substrate(
+			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }),
+			{
+				index: null,
+				greptime: null,
+				lightragFetch: lightrag.fetch,
+				ragflowFetch: async () => {
+					ragflowCalls += 1;
+					throw new Error("ragflow down");
+				},
+			},
+		);
+		const ragflow = substrate.planes.gate("ragflow").breaker;
+		for (let failures = 0; failures < substrate.config.breaker.failureThreshold; failures += 1) ragflow?.onFailure("ragflow 503");
+		expect(ragflow?.state()).toBe("open");
+		const reply = await substrate.searchDocs({ question: "where is the plan?" }, "omp");
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.backend).toBe("lightrag");
+		expect(reply.chunks.map((citation) => citation.snippet)).toEqual(["Served by LightRAG."]);
+		expect(lightrag.queries).toHaveLength(1);
+		expect(ragflowCalls).toBe(0);
+	});
+
+	test("Substrate.searchDocs: a RAGFlow answer in a shared cache is not served to the LightRAG backend", async () => {
+		const fake = new RagflowFake();
+		const lightrag = lightragServing("Served by LightRAG.");
+		const redis = new FakeRedis();
+		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
+		const ragflowSide = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch, cache });
+		const before = await ragflowSide.searchDocs({ question: "where is the plan?" }, "omp");
+		expect(before.backend).toBeUndefined();
+		expect(before.chunks.length).toBeGreaterThan(0);
+		const lightragSide = new Substrate(
+			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }),
+			{ index: null, greptime: null, lightragFetch: lightrag.fetch, cache },
+		);
+		const after = await lightragSide.searchDocs({ question: "where is the plan?" }, "omp");
+		expect(after.backend).toBe("lightrag");
+		expect(after.chunks.map((citation) => citation.snippet)).toEqual(["Served by LightRAG."]);
+		expect(lightrag.queries).toHaveLength(1);
+	});
+
+	test("with the LightRAG breaker open, a LightRAG search is refused as lightrag circuit open and the LightRAG fake gets no call", async () => {
+		const lightrag = lightragServing("Served by LightRAG.");
+		const breaker = new CircuitBreaker("lightrag", { enabled: true, failureThreshold: 1, openMs: 60_000 });
+		breaker.onFailure("lightrag unreachable");
+		expect(breaker.state()).toBe("open");
+		const reply = await searchDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: { url: "http://lightrag.test" },
+				datasetNames: ["agent-substrate"],
+				lightragFetch: lightrag.fetch,
+				lightragBreakerState: () => breaker.state(),
+				emit: async () => ({ stored: false }),
+				surface: "omp",
+			},
+			"where is the plan?",
+		);
+		expect(reply.degraded).toBe(true);
+		expect(reply.reason).toBe("lightrag circuit open");
+		expect(reply.chunks).toHaveLength(0);
+		expect(lightrag.queries).toHaveLength(0);
+	});
+
+	test("Substrate.searchDocs on the LightRAG backend is refused as lightrag circuit open while the LightRAG breaker is open, and LightRAG gets no call", async () => {
+		const lightrag = lightragServing("Served by LightRAG.");
+		const substrate = new Substrate(
+			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }),
+			{ index: null, greptime: null, lightragFetch: lightrag.fetch },
+		);
+		const lightragBreaker = substrate.planes.gate("lightrag").breaker;
+		for (let failures = 0; failures < substrate.config.breaker.failureThreshold; failures += 1) lightragBreaker?.onFailure("lightrag unreachable");
+		expect(lightragBreaker?.state()).toBe("open");
+		const reply = await substrate.searchDocs({ question: "where is the plan?" }, "omp");
+		expect(reply.degraded).toBe(true);
+		expect(reply.reason).toBe("lightrag circuit open");
+		expect(lightrag.queries).toHaveLength(0);
+	});
+
+	test("docs ingest on the LightRAG backend still uploads while the RAGFlow breaker is open, because LightRAG calls never go through the RAGFlow gate", async () => {
+		const uploads: string[] = [];
+		const lightragIngest: FetchLike = async (input, init) => {
+			const url = new URL(String(input));
+			if (init?.method === "POST" && url.pathname === "/documents/upload") {
+				uploads.push(await ((init.body as FormData).get("file") as Blob).text());
+				return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
+			}
+			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+			if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+			return Response.json({ detail: "no route" }, { status: 404 });
+		};
+		const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }), { index: null, greptime: null, lightragFetch: lightragIngest });
+		const ragflow = substrate.planes.gate("ragflow").breaker;
+		for (let failures = 0; failures < substrate.config.breaker.failureThreshold; failures += 1) ragflow?.onFailure("ragflow 503");
+		expect(ragflow?.state()).toBe("open");
+		const outcome = await substrate.ingestDocs(
+			{ dataset: "agent-substrate", commit: "c1", pages: [{ path: "docs/plan.md", body: "# Plan\n\nThe planner reads the plan.", source_url: "https://example.com/plan" }] },
+			"omp",
+		);
+		if (!outcome.ok) throw new Error(outcome.reason);
+		expect(outcome.results.map((result) => result.status)).toEqual(["ingested"]);
+		expect(uploads).toHaveLength(1);
 	});
 });
 
