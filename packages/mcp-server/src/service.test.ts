@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { formatMemo, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
-import { isReviewToken, loadConfig, loadEventBusSettings, type GreptimeConfig } from "./config.ts";
+import { isReviewToken, loadConfig, loadEventBusSettings, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
 import { eventHash, InvalidEventError, normalizeEvent } from "./event.ts";
 import { GreptimeClient, INGEST_LAG_MS, IngestNotRecorded, MAX_QUERY_LIMIT, type EventQuery } from "./greptime.ts";
 import { REDACTED, redact } from "./redact.ts";
@@ -8,7 +8,7 @@ import { leaseSnapshot } from "./index-store.ts";
 import { decideRelease, type ClaimAction } from "./lease.ts";
 import { EVENT_SOURCES } from "./event-sources.ts";
 import { createEventBus, MAX_HINT_BYTES, type EventBus, type EventBusClient, type EventHint } from "./event-bus.ts";
-import { HEALTH_PROBE_MS, Substrate, SkillProposalDenied, VERIFY_RESPONSE_MARGIN_MS, type SkillProposalRequest } from "./service.ts";
+import { HEALTH_PROBE_MS, Substrate, SkillProposalDenied, VERIFY_RESPONSE_MARGIN_MS, type EmitResult, type SkillProposalRequest } from "./service.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
@@ -916,7 +916,7 @@ describe("append-mode enforcement", () => {
 	test("healthz separates reachability from writability", async () => {
 		// The state a monitor has to see: `ping` succeeds while every append is refused.
 		const { greptime } = ledger(false);
-		const closed = (plane: "greptime" | "index" | "cache" | "hindsight" | "ragflow") =>
+		const closed = (plane: "greptime" | "index" | "cache" | "hindsight" | "ragflow" | "lightrag") =>
 			({ plane, state: "closed" as const, failures: 0, openedAt: null, lastErrorAt: null, lastError: null });
 		expect(await substrateWith(greptime).health()).toEqual({
 			index: false,
@@ -946,6 +946,7 @@ describe("append-mode enforcement", () => {
 				cache: { ok: null, breaker: closed("cache"), lastErrorAt: null },
 				hindsight: { ok: null, breaker: closed("hindsight"), lastErrorAt: null },
 				ragflow: { ok: null, breaker: closed("ragflow"), lastErrorAt: null },
+				lightrag: { ok: null, breaker: closed("lightrag"), lastErrorAt: null },
 			},
 			capacity: { index: null, ledger: null },
 			// The stub has no `anchorCoverage`: the jobs row is null with the reason, never a throw.
@@ -1080,7 +1081,7 @@ describe("append-mode enforcement", () => {
 			expect(typeof failed.planes.ragflow.lastErrorAt).toBe("number");
 			// Still 200-eligible: the status rule reads ledger and index only.
 			expect(failed.eventsWritable).toBe(true);
-			expect(down.planesConfigured()).toEqual({ greptime: true, index: false, cache: false, hindsight: true, ragflow: true });
+			expect(down.planesConfigured()).toEqual({ greptime: true, index: false, cache: false, hindsight: true, ragflow: true, lightrag: false });
 		} finally {
 			for (const [name, value] of Object.entries(saved)) {
 				if (value === undefined) delete process.env[name];
@@ -1153,6 +1154,110 @@ describe("append-mode enforcement", () => {
 	test("healthz reports writable once the table is append-only", async () => {
 		const { greptime } = ledger(true);
 		expect((await substrateWith(greptime).health()).eventsWritable).toBe(true);
+	});
+
+	test("a LightRAG ingest with RAGFlow configured never lists datasets through the RAGFlow gate", async () => {
+		// The RAGFlow outage refuses every RAGFlow call; the LightRAG ingest must neither list through it nor be refused by it.
+		let ragflowCalls = 0;
+		const uploads: string[] = [];
+		const substrate = new Substrate(
+			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }),
+			{
+				index: null,
+				greptime: null,
+				ragflowFetch: async () => {
+					ragflowCalls += 1;
+					throw new Error("connect ECONNREFUSED");
+				},
+				lightragFetch: async (input, init) => {
+					const url = new URL(String(input));
+					if (init?.method === "POST" && url.pathname === "/documents/upload") {
+						uploads.push(await ((init.body as FormData).get("file") as Blob).text());
+						return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
+					}
+					if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+					if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+					return Response.json({ detail: "no route" }, { status: 404 });
+				},
+			},
+		);
+		const outcome = await substrate.ingestDocs(
+			{ dataset: "agent-substrate", commit: "abc123", pages: [{ path: "docs/a.md", source_url: "https://example.com/a", body: "# A\n\nHello." }] },
+			"omp",
+			["docs/"],
+		);
+		expect(ragflowCalls).toBe(0);
+		expect(outcome.ok).toBe(true);
+		expect(uploads).toHaveLength(1);
+	});
+
+	test("a RAGFlow refresh does not move a LightRAG dataset's records to RAGFlow's id: an unchanged page stays unchanged", async () => {
+		// Under the lightrag backend the refresh records the dataset's name as its id (recordLightragVersion). The LightRAG
+		// ingest keys its records by that same name, so the next ingest of the same page finds the record and uploads nothing.
+		const ragflow = new RagflowFake();
+		const uploads: string[] = [];
+		const substrate = new Substrate(
+			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }),
+			{
+				index: null,
+				greptime: null,
+				ragflowFetch: ragflow.fetch,
+				lightragFetch: async (input, init) => {
+					const url = new URL(String(input));
+					if (init?.method === "POST" && url.pathname === "/documents/upload") {
+						uploads.push(await ((init.body as FormData).get("file") as Blob).text());
+						return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
+					}
+					if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+					if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+					return Response.json({ detail: "no route" }, { status: 404 });
+				},
+			},
+		);
+		const page = { path: "docs/a.md", source_url: "https://example.com/a", body: "# A\n\nHello." };
+		const first = await substrate.ingestDocs({ dataset: "agent-substrate", commit: "abc123", pages: [page] }, "omp", ["docs/"]);
+		expect(first.ok).toBe(true);
+		const recorded = await substrate.recordDocsVersion({ dataset: "agent-substrate", commit: "abc123", content_sha256: "sha-abc123" }, "omp");
+		expect(recorded.ok).toBe(true);
+
+		const again = await substrate.ingestDocs({ dataset: "agent-substrate", commit: "abc123", pages: [page] }, "omp", ["docs/"]);
+		expect(again).toMatchObject({ ok: true, results: [expect.objectContaining({ status: "unchanged" })] });
+		expect(uploads).toHaveLength(1);
+	});
+
+	test("a LightRAG refresh does not resolve datasets through RAGFlow: an unreachable RAGFlow does not block it, and it records a LightRAG version", async () => {
+		let ragflowCalls = 0;
+		const uploads: string[] = [];
+		const substrate = new Substrate(
+			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }),
+			{
+				index: null,
+				greptime: null,
+				ragflowFetch: async () => {
+					ragflowCalls += 1;
+					throw new Error("connect ECONNREFUSED");
+				},
+				lightragFetch: async (input, init) => {
+					const url = new URL(String(input));
+					if (init?.method === "POST" && url.pathname === "/documents/upload") {
+						uploads.push(await ((init.body as FormData).get("file") as Blob).text());
+						return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
+					}
+					if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+					if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+					return Response.json({ detail: "no route" }, { status: 404 });
+				},
+			},
+		);
+		const page = { path: "docs/a.md", source_url: "https://example.com/a", body: "# A\n\nHello." };
+		const outcome = await substrate.startDocsRefresh(
+			{ dataset: "agent-substrate", commit: "abc123", content_sha256: "sha-abc123", roots: async () => ["docs/"], pages: async () => [page] },
+			"omp",
+			{ wait: true },
+		);
+		expect(ragflowCalls).toBe(0);
+		expect(outcome).toMatchObject({ status: 200, body: { ok: true, version: { version: "v1", backend: "lightrag", dataset_id: "agent-substrate" } } });
+		expect(uploads).toHaveLength(1);
 	});
 
 	test("an unknown quoting dialect is not a writable ledger either", async () => {
@@ -4758,5 +4863,108 @@ describe("verifyGraph hour report", () => {
 		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "unverified" });
 		expect(verdict.hours[0]?.reason).toContain("timed out before this hour was checked");
 		expect(verdict.ok).toBe(false);
+	});
+});
+
+/**
+ * The boot's `db.endpoint` notes (phase 48, D48-d). The payload names the plane, the class and the policy; it never
+ * carries the URL, the host or a credential, and a failed write never rejects the boot.
+ */
+describe("boot endpoint notes (phase 48)", () => {
+	const GREPTIME_URL_KEY = ["GREPTIME", "URL"].join("_");
+	const GREPTIME_PASSWORD_KEY = ["GREPTIME", "PASSWORD"].join("_");
+	// Neutral hosts and ports, with credentials that cannot be mistaken for real ones. The ports are five digits so a
+	// hex event hash cannot contain them by chance.
+	const DIRECT_GREPTIME = "http://greptime.test.invalid:14317";
+	const DIRECT_PG = "postgres://substrate-test-user:substrate-test-password@pg.test.invalid:15432/substrate";
+	const REFUSED_DRAGONFLY = "redis://:cache-test-password@cache.test.invalid:16390/0";
+	const ALL_PLANES = {
+		SUBSTRATE_DB_ENDPOINT_POLICY: "warn",
+		[GREPTIME_URL_KEY]: DIRECT_GREPTIME,
+		[GREPTIME_PASSWORD_KEY]: "greptime-test-password",
+		SUBSTRATE_PG_URL: DIRECT_PG,
+		DRAGONFLY_URL: REFUSED_DRAGONFLY,
+	};
+
+	/** A Substrate whose ledger is the given stub. stubStores implements only the client methods emit reaches. */
+	function bootSubstrate(config: SubstrateConfig, greptime: unknown): Substrate {
+		// stubStores implements only the GreptimeClient methods emit reaches, so the stub is passed as the client by this cast.
+		const ledger = greptime as never;
+		return new Substrate(config, { index: null, greptime: ledger });
+	}
+
+	test("emits one greptime note for a configured direct plane and none for the unset planes", async () => {
+		const { emitted, greptime } = stubStores(null);
+		const substrate = bootSubstrate(loadConfig({ SUBSTRATE_DB_ENDPOINT_POLICY: "warn", [GREPTIME_URL_KEY]: DIRECT_GREPTIME }), greptime);
+
+		await substrate.emitDbEndpoints();
+
+		expect(emitted).toHaveLength(1);
+		expect(emitted[0]?.kind).toBe("note");
+		expect(emitted[0]?.payload).toEqual({ action: "db.endpoint", runtime: "mcp-server", plane: "greptime", class: "direct", policy: "warn" });
+	});
+
+	test("with no endpoints set, emits nothing", async () => {
+		const { emitted, greptime } = stubStores(null);
+		await bootSubstrate(loadConfig({}), greptime).emitDbEndpoints();
+		expect(emitted).toEqual([]);
+	});
+
+	test("a refused Dragonfly URL still counts as configured, reported as direct", async () => {
+		const config = loadConfig({ SUBSTRATE_DB_ENDPOINT_POLICY: "warn", DRAGONFLY_URL: REFUSED_DRAGONFLY });
+		// The premise: the URL is refused, so the cache is off and the plane is only reported.
+		expect(config.dragonflyUrl).toBeUndefined();
+		expect(config.dragonflyRefused).not.toBeNull();
+		const { emitted, greptime } = stubStores(null);
+
+		await bootSubstrate(config, greptime).emitDbEndpoints();
+
+		expect(emitted.map((event) => event.payload)).toEqual([{ action: "db.endpoint", runtime: "mcp-server", plane: "dragonfly", class: "direct", policy: "warn" }]);
+	});
+
+	test("no emitted event carries the host, the port or a credential from a configured URL", async () => {
+		const { emitted, greptime } = stubStores(null);
+		await bootSubstrate(loadConfig(ALL_PLANES), greptime).emitDbEndpoints();
+
+		expect(emitted).toHaveLength(3);
+		// Payloads only: ids and hashes are random and can contain the five-digit port text.
+		const serialized = JSON.stringify(emitted.map((event) => event.payload));
+		for (const secret of [
+			"greptime.test.invalid",
+			"pg.test.invalid",
+			"cache.test.invalid",
+			"14317",
+			"15432",
+			"16390",
+			"substrate-test-user",
+			"substrate-test-password",
+			"cache-test-password",
+			"greptime-test-password",
+		]) {
+			expect(serialized).not.toContain(secret);
+		}
+	});
+
+	test("a failed write does not reject: the call resolves and emits once per configured plane", async () => {
+		// Two failure shapes: emit rejects, and emit answers stored false. The second is the real answer of a Substrate
+		// with no ledger, so it is not hand-built.
+		const ledgerless = new Substrate(loadConfig({}), { index: null, greptime: null });
+		const failures: Array<(input: EventInput) => Promise<EmitResult>> = [
+			async () => {
+				throw new Error("ledger unreachable");
+			},
+			(input) => ledgerless.emit(input),
+		];
+		for (const failure of failures) {
+			const substrate = new Substrate(loadConfig(ALL_PLANES), { index: null, greptime: null });
+			let calls = 0;
+			substrate.emit = async (input) => {
+				calls += 1;
+				return failure(input);
+			};
+
+			await expect(substrate.emitDbEndpoints()).resolves.toBeUndefined();
+			expect(calls).toBe(3);
+		}
 	});
 });

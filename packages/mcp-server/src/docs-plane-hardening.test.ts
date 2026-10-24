@@ -234,7 +234,7 @@ describe("durable versions and real pins", () => {
 			expect(v1.records.size).toBe(1);
 			expect(v1.versions.size).toBe(0);
 			const versions = createVersionStore();
-			recordVersion(versions, { dataset: "agent-substrate", dataset_id: "ds-1", version: "v1", commit: "c1", content_sha256: "s", ingested_at: "2026-10-13T00:00:00.000Z" });
+			recordVersion(versions, { dataset: "agent-substrate", dataset_id: "ds-1", version: "v1", commit: "c1", content_sha256: "s", ingested_at: "2026-10-13T00:00:00.000Z", backend: "ragflow" });
 			await saveIngestRecords(file, v1.records, versions);
 			const written = JSON.parse(readFileSync(file, "utf8")) as { version: number; versions: unknown };
 			expect(written.version).toBe(2);

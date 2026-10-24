@@ -66,6 +66,7 @@ const substrate = new Substrate(
 	{ desktop: createDesktopDriver({ run: bufferRunner, dir: config.desktopDir }) },
 	observability.observer,
 );
+substrate.startPlanningPoll();
 
 for (const problem of await observability.start()) {
 	process.stderr.write(`[substrate] degraded — ${problem}\n`);
@@ -175,6 +176,8 @@ server.listen(config.port, config.host, () => {
 			`claims ${substrate.requireRecordedClaims ? "fail-closed" : "fail-open"})\n`,
 	);
 	if (watchdog.start()) process.stdout.write("[substrate] watchdog: armed, READY=1 first, then heartbeat gated on event-loop lag and loopback /livez\n");
+	// D48-d: one `db.endpoint` note per configured data plane, recorded once at boot. A refused write never blocks boot.
+	void substrate.emitDbEndpoints();
 	// uplift-4 S5: each timer starts only under its own flag (both default off) and is unref'd.
 	const background = substrate.startRecall();
 	if (background.recall) process.stdout.write(`[substrate] brief recall: ${config.briefRecall.mode}, refresh every ${config.briefRecall.intervalS} s, snapshot ttl ${config.briefRecall.ttlS} s\n`);
@@ -201,6 +204,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		metricsHistory.stop();
 		// Before the flush below: no new lag pass starts once shutdown began.
 		docsLagTimer.stop();
+		substrate.stopPlanningPoll();
 		// The weekly refresh timer is cleared with the others; a pass in flight is awaited in the bound below.
 		mentalModelRefresh?.stop();
 		// Cancelled first and awaited with the flush below: no ping after shutdown began,
@@ -233,6 +237,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 					observability.flush(),
 					metricsHistory.flush(),
 					docsLagTimer.flush(),
+					substrate.planningRefreshIdle(),
 					mentalModelRefresh?.flush(),
 					watchdogStopped,
 					recallStopped,

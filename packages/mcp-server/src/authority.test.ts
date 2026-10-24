@@ -230,14 +230,12 @@ describe("the signed sender is the authenticated caller", () => {
 });
 
 describe("the swarm surfaces", () => {
-	test("are the 15 agents, in A01..A15 order, after the original 11, with substrate last", () => {
-		expect(SWARM_SURFACES).toHaveLength(15);
-		expect(SURFACES).toHaveLength(27);
-		expect(SURFACES.slice(11, 26)).toEqual([...SWARM_SURFACES]);
-		expect(SURFACES[26]).toBe("substrate");
+	test("are the swarm agents, in A01..A30 order, after the original 11, with substrate last", () => {
+		expect(SURFACES.slice(11, 11 + SWARM_SURFACES.length)).toEqual([...SWARM_SURFACES]);
+		expect(SURFACES.at(-1)).toBe("substrate");
 		expect(SWARM_SURFACES[0]).toBe("swarm-a01-orch");
 		expect(SWARM_SURFACES[4]).toBe("swarm-a05-be");
-		expect(SWARM_SURFACES[14]).toBe("swarm-a15-doc");
+		expect(SWARM_SURFACES.at(-1)).toBe("swarm-a30-custody");
 	});
 
 	test("each one's token env name resolves back to that surface", () => {
@@ -337,7 +335,7 @@ describe("swarmTokenWarnings", () => {
 		const warnings = swarmTokenWarnings(loadConfig({ SUBSTRATE_TOKEN_HERMES: "tok-hermes" }));
 		expect(warnings).toHaveLength(2);
 		for (const surface of SWARM_SURFACES) expect(warnings[0]).toContain(tokenEnvName(surface));
-		expect(warnings[0]).toContain("15 swarm surfaces");
+		expect(warnings[0]).toContain(`${SWARM_SURFACES.length} swarm surfaces`);
 		// Never a token value.
 		expect(warnings[0]).not.toContain("tok-hermes");
 		// And the host-job surface is named beside the swarm seats.
@@ -358,7 +356,7 @@ describe("swarmTokenWarnings", () => {
 			SUBSTRATE_TOKEN_SWARM_A05_BE: "tok-a05",
 		});
 		const warnings = swarmTokenWarnings(some);
-		expect(warnings[0]).toContain("14 swarm surfaces");
+		expect(warnings[0]).toContain(`${SWARM_SURFACES.length - 1} swarm surfaces`);
 		expect(warnings[0]).not.toContain("SUBSTRATE_TOKEN_SWARM_A05_BE");
 		expect(warnings[0]).toContain("SUBSTRATE_TOKEN_SWARM_A09_REV");
 

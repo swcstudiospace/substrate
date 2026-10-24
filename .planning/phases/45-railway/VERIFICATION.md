@@ -1,11 +1,13 @@
 ---
 phase: 45-railway
 verified: 2026-10-21
-status: passed in-repo. Live Railway proof not run (operator-gated)
+status: human_needed
 score: 3 of 3 ROADMAP criteria proven in-repo with a fake Railway endpoint
 verified_on: gsd/v15-45-railway at its pre-commit tree, based on origin/main 3e9a106
 covered_files: ["packages/mcp-server/src/railway.ts", "packages/mcp-server/src/railway.test.ts", "packages/mcp-server/src/railway-mcp.test.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/observe.ts", "packages/mcp-server/src/admission.ts", "packages/mcp-server/src/event-sources.ts", "packages/audit/src/policy.ts", ".env.example", "docs/config-reference.md", "docs/data-planes.md", "docs/observability.md", "docs/event-vocabulary.md"]
 ---
+
+> Status detail, kept verbatim from the original frontmatter: passed in-repo. Live Railway proof not run (operator-gated)
 
 # 45-VERIFICATION: Railway resource orchestrator
 

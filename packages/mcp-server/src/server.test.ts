@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { validateAgentCard } from "./agent-card.ts";
 import { loadConfig } from "./config.ts";
 import { execFileSync } from "node:child_process";
@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { request as httpRequest } from "node:http";
 import { scanIngestPages } from "./docs-ingest.ts";
 import type { EventQuery } from "./greptime.ts";
-import { memoryToolWriter, surfaceClaimRefusal } from "./mcp.ts";
+import { memoryToolWriter, resetRagMachine, surfaceClaimRefusal } from "./mcp.ts";
 import { createObservability } from "./observe.ts";
 import type { FetchLike } from "./planes/ragflow.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
@@ -794,6 +794,7 @@ describe("routes", () => {
 	test("POST /docs/merge-trigger dedupes the default dataset by content hash", async () => {
 		const { greptime, written } = ledger();
 		const fake = new RagflowFake();
+		fake.parseDonePolls = 1;
 		const restore = patchFetch(fake.fetch);
 		const docs = docsFixture({ "README.md": "The substrate is the only door.", "docs/data-planes.md": "Planes and their readers." });
 		const { post, stop } = await serve(
@@ -851,6 +852,44 @@ describe("routes", () => {
 			expect(ingestEvents(written)).toHaveLength(0);
 		} finally {
 			await stop();
+		}
+	});
+
+	test("POST /docs/merge-trigger refreshes a LightRAG-only deployment: the selected plane decides, RAGFlow is not required", async () => {
+		const { greptime, written } = ledger();
+		const realFetch = globalThis.fetch;
+		const uploads: string[] = [];
+		globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			const url = new URL(input instanceof Request ? input.url : String(input));
+			if (url.origin !== "http://lightrag.test") return realFetch(input, init);
+			if (init?.method === "POST" && url.pathname === "/documents/upload") {
+				uploads.push(await ((init.body as FormData).get("file") as Blob).text());
+				return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
+			}
+			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+			if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+			return Response.json({ detail: "no route" }, { status: 404 });
+		}) as typeof fetch;
+		const docs = docsFixture({ "README.md": "The substrate is the only door." });
+		const { post, stop } = await serve(
+			greptime,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" },
+			{},
+			{ docsIngestBaseDir: docs },
+		);
+		try {
+			const response = await post("/docs/merge-trigger?wait=1", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
+			const body = (await response.json()) as { ok: boolean; noop?: boolean; reason?: string; version?: { version: string; backend: string } };
+			expect(response.status).toBe(200);
+			expect(body.noop).toBeUndefined();
+			expect(body.reason).toBeUndefined();
+			expect(body.version).toMatchObject({ version: "v1", backend: "lightrag" });
+			expect(uploads.length).toBeGreaterThan(0);
+			expect(refreshEvents(written)).toHaveLength(1);
+		} finally {
+			globalThis.fetch = realFetch;
+			await stop();
+			rmSync(docs, { recursive: true, force: true });
 		}
 	});
 
@@ -942,6 +981,236 @@ describe("routes", () => {
 			await stop();
 			rmSync(docs, { recursive: true, force: true });
 		}
+	});
+
+	describe("the REST RAG breaker counts only plane failures", () => {
+		const realFetch = globalThis.fetch;
+		const auth = { authorization: "Bearer tok-omp" };
+		const LIGHTRAG_ENV = {
+			SUBSTRATE_TOKEN_OMP: "tok-omp",
+			LIGHTRAG_URL: "http://lightrag.test",
+			SUBSTRATE_RAG_MAX_RETRIES: "0",
+			SUBSTRATE_RAG_HALF_OPEN_MS: "0",
+		};
+		const LIGHTRAG_ANSWER = { data: [{ content: "A LightRAG chunk.", document_name: "docs/planning.md", source_url: "https://example.com/planning" }] };
+		/** Answers LightRAG calls only; the test's own REST requests go to the real fetch. */
+		const stubLightrag = (answer: () => Promise<Response>) =>
+			(async (input: string | URL | Request, init?: RequestInit) => {
+				const url = input instanceof Request ? input.url : String(input);
+				return url.startsWith("http://lightrag.test") ? answer() : realFetch(input, init);
+			}) as unknown as typeof fetch;
+		beforeEach(() => resetRagMachine());
+		afterEach(() => {
+			globalThis.fetch = realFetch;
+			resetRagMachine();
+		});
+
+		test("several version.stale refusals over REST leave the RAG machine out of ERROR, and the next query is served", async () => {
+			let planeCalls = 0;
+			globalThis.fetch = stubLightrag(async () => {
+				planeCalls += 1;
+				return Response.json(LIGHTRAG_ANSWER);
+			});
+			const { greptime } = ledger();
+			const { post, get, stop } = await serve(greptime, { ...LIGHTRAG_ENV, SUBSTRATE_RAG_HALF_OPEN_MS: "60000" });
+			try {
+				const stale = { path: "docs/data-planes.md", source_url: "https://example.com/agent-substrate/data-planes", body: "A page.", expected_version: 1 };
+				for (let n = 0; n < 2; n += 1) {
+					const refused = await post("/docs/ingest", { dataset: "agent-substrate", pages: [stale] }, auth);
+					expect(refused.status).toBe(409);
+					expect(await refused.text()).toContain("version.stale");
+				}
+				const outside = { path: "secrets/keys.md", source_url: "https://example.com/agent-substrate/keys", body: "Keys." };
+				const refusedOutside = await post("/docs/ingest", { dataset: "agent-substrate", pages: [outside] }, auth);
+				expect(refusedOutside.status).toBe(400);
+				expect(await refusedOutside.text()).toContain("outside-roots");
+
+				const before = (await (await get("/rag/state", auth)).json()) as Record<string, unknown>;
+				expect(before).toMatchObject({ consecutiveFailures: 0 });
+				expect(before.state).not.toBe("ERROR");
+
+				const served = (await (await post("/docs/lightrag/query", { question: "asked after the refusals" }, auth)).json()) as Record<string, unknown>;
+				expect(served).toMatchObject({ backend: "lightrag", chunks: [expect.objectContaining({ content: "A LightRAG chunk." })] });
+				expect(served.fallback).toBeUndefined();
+				expect(planeCalls).toBe(1);
+			} finally {
+				await stop();
+			}
+		});
+
+		test("two concurrent REST LightRAG queries after the cooldown produce one backend attempt", async () => {
+			let attempts = 0;
+			const probeReply = Promise.withResolvers<Response>();
+			const probeReached = Promise.withResolvers<void>();
+			globalThis.fetch = stubLightrag(async () => {
+				attempts += 1;
+				if (attempts <= 3) return new Response("upstream down", { status: 500 });
+				if (attempts === 4) {
+					probeReached.resolve();
+					return probeReply.promise;
+				}
+				return new Response("upstream down", { status: 500 });
+			});
+			const { greptime } = ledger();
+			// A zero cooldown has already elapsed, so the query after ERROR is the probe; no timer is needed.
+			const { post, get, stop } = await serve(greptime, LIGHTRAG_ENV);
+			try {
+				for (const question of ["drive one", "drive two", "drive three"]) {
+					const degraded = (await (await post("/docs/lightrag/query", { question }, auth)).json()) as Record<string, unknown>;
+					expect(degraded.fallback).toBe("hindsight");
+				}
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+
+				const probe = post("/docs/lightrag/query", { question: "the probe" }, auth);
+				await probeReached.promise;
+				const burst = (await (await post("/docs/lightrag/query", { question: "the burst" }, auth)).json()) as Record<string, unknown>;
+				expect(burst.fallback).toBe("hindsight");
+				expect(attempts).toBe(4);
+
+				probeReply.resolve(Response.json(LIGHTRAG_ANSWER));
+				const probed = (await (await probe).json()) as Record<string, unknown>;
+				expect(probed).toMatchObject({ backend: "lightrag" });
+				expect(probed.fallback).toBeUndefined();
+				expect(attempts).toBe(4);
+			} finally {
+				await stop();
+			}
+		});
+
+		test("a REST docs ingest, refused or served, does not move an open breaker: the next query inside the cooldown is refused without a backend call", async () => {
+			let queries = 0;
+			globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+				const url = new URL(input instanceof Request ? input.url : String(input));
+				if (url.origin !== "http://lightrag.test") return realFetch(input, init);
+				if (url.pathname === "/query") {
+					queries += 1;
+					return new Response("upstream down", { status: 500 });
+				}
+				if (init?.method === "POST" && url.pathname === "/documents/upload") return Response.json({ status: "success", data: { track_id: "trk-1" } });
+				if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+				if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+				return Response.json({ detail: "no route" }, { status: 404 });
+			}) as unknown as typeof fetch;
+			const { greptime } = ledger();
+			// A 60 s cooldown: it cannot elapse during the test, so ERROR holds until the assertions say otherwise.
+			const { post, get, stop } = await serve(greptime, { ...LIGHTRAG_ENV, SUBSTRATE_RAG_HALF_OPEN_MS: "60000" });
+			try {
+				for (const question of ["trip one", "trip two", "trip three"]) {
+					const degraded = (await (await post("/docs/lightrag/query", { question }, auth)).json()) as Record<string, unknown>;
+					expect(degraded.fallback).toBe("hindsight");
+				}
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+				const queriesWhenOpen = queries;
+
+				const refused = await post("/docs/ingest", { dataset: "agent-substrate", pages: [{ path: "docs/data-planes.md", source_url: "https://example.com/agent-substrate/data-planes", body: "A page.", expected_version: 1 }] }, auth);
+				expect(refused.status).toBe(409);
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+
+				const served = await post("/docs/ingest", { dataset: "agent-substrate", pages: [{ path: "docs/data-planes.md", source_url: "https://example.com/agent-substrate/data-planes", body: "The substrate is the only door to the data planes." }] }, auth);
+				expect(served.status).toBe(200);
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+
+				const inside = (await (await post("/docs/lightrag/query", { question: "asked inside the cooldown" }, auth)).json()) as Record<string, unknown>;
+				expect(inside.fallback).toBe("hindsight");
+				expect(queries).toBe(queriesWhenOpen);
+			} finally {
+				await stop();
+			}
+		});
+
+		test("after the cooldown, one successful REST docs search moves the RAG machine out of ERROR", async () => {
+			let planeHealthy = false;
+			globalThis.fetch = stubLightrag(async () => (planeHealthy ? Response.json(LIGHTRAG_ANSWER) : new Response("upstream down", { status: 500 })));
+			const { greptime } = ledger();
+			// A zero cooldown has already elapsed, so the search after ERROR is the probe; no timer is needed.
+			const { post, get, stop } = await serve(greptime, LIGHTRAG_ENV);
+			try {
+				for (const question of ["search one", "search two", "search three"]) {
+					const degraded = (await (await post("/docs/search", { question }, auth)).json()) as Record<string, unknown>;
+					expect(degraded.degraded).toBe(true);
+				}
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+
+				planeHealthy = true;
+				const probed = (await (await post("/docs/search", { question: "the probe" }, auth)).json()) as Record<string, unknown>;
+				expect(probed.degraded).toBeUndefined();
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "IDLE" });
+			} finally {
+				await stop();
+			}
+		});
+
+		test("a REST docs search inside the cooldown does not ask LightRAG: it answers degraded and the plane sees no request", async () => {
+			let planeCalls = 0;
+			globalThis.fetch = stubLightrag(async () => {
+				planeCalls += 1;
+				return new Response("upstream down", { status: 500 });
+			});
+			const { greptime } = ledger();
+			// A 60 s cooldown: it cannot elapse during the test, so ERROR holds until the assertions say otherwise.
+			const { post, get, stop } = await serve(greptime, { ...LIGHTRAG_ENV, SUBSTRATE_RAG_HALF_OPEN_MS: "60000" });
+			try {
+				for (const question of ["trip one", "trip two", "trip three"]) {
+					const tripped = (await (await post("/docs/lightrag/query", { question }, auth)).json()) as Record<string, unknown>;
+					expect(tripped.fallback).toBe("hindsight");
+				}
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+				const before = planeCalls;
+
+				const inside = (await (await post("/docs/search", { question: "asked inside the cooldown" }, auth)).json()) as Record<string, unknown>;
+				expect(inside).toMatchObject({ degraded: true, reason: "rag breaker open" });
+				expect(planeCalls).toBe(before);
+			} finally {
+				await stop();
+			}
+		});
+
+		test("a REST docs ingest during a probe keeps the failure count, and a probe that then fails re-trips the breaker", async () => {
+			const probeReply = Promise.withResolvers<Response>();
+			const probeReached = Promise.withResolvers<void>();
+			let queries = 0;
+			globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+				const url = new URL(input instanceof Request ? input.url : String(input));
+				if (url.origin !== "http://lightrag.test") return realFetch(input, init);
+				if (url.pathname === "/query") {
+					queries += 1;
+					if (queries === 4) {
+						probeReached.resolve();
+						return probeReply.promise;
+					}
+					return new Response("upstream down", { status: 500 });
+				}
+				if (init?.method === "POST" && url.pathname === "/documents/upload") return Response.json({ status: "success", data: { track_id: "trk-1" } });
+				if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+				if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+				return Response.json({ detail: "no route" }, { status: 404 });
+			}) as unknown as typeof fetch;
+			const { greptime } = ledger();
+			// A zero cooldown has already elapsed, so the query after ERROR is the probe; no timer is needed.
+			const { post, get, stop } = await serve(greptime, LIGHTRAG_ENV);
+			try {
+				for (const question of ["trip one", "trip two", "trip three"]) {
+					const tripped = (await (await post("/docs/lightrag/query", { question }, auth)).json()) as Record<string, unknown>;
+					expect(tripped.fallback).toBe("hindsight");
+				}
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+
+				const probe = post("/docs/lightrag/query", { question: "the probe" }, auth);
+				await probeReached.promise;
+
+				const ingested = await post("/docs/ingest", { dataset: "agent-substrate", pages: [{ path: "docs/data-planes.md", source_url: "https://example.com/agent-substrate/data-planes", body: "The substrate is the only door to the data planes." }] }, auth);
+				expect(ingested.status).toBe(200);
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "CONTEXT_REFRESH", consecutiveFailures: 3 });
+
+				probeReply.resolve(new Response("upstream down", { status: 500 }));
+				expect(((await (await probe).json()) as Record<string, unknown>).fallback).toBe("hindsight");
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR", consecutiveFailures: 4 });
+			} finally {
+				// A failed assertion above leaves the probe held; release it so `stop()` does not wait on it.
+				probeReply.resolve(new Response("upstream down", { status: 500 }));
+				await stop();
+			}
+		});
 	});
 });
 

@@ -134,6 +134,13 @@ export class RagflowFake {
 	 */
 	serveUploadsAsChunks = false;
 	/**
+	 * Opt-in, default off. When set, a scripted `answer` reply also echoes each
+	 * chunk's `heading_path`, as the seeded stand-in does. The golden harness
+	 * sets it so its citations carry headings; unset, the answer path keeps the
+	 * contract shape with no metadata echo.
+	 */
+	echoHeadings = false;
+	/**
 	 * Synthetic chunks planted by the rehearsal stand-in. Served after
 	 * uploads when `serveUploadsAsChunks` is set, and never counted as
 	 * uploads. Empty unless a fixture control pushes into it.
@@ -322,7 +329,7 @@ export class RagflowFake {
 							term_similarity: chunk.score ?? 0,
 							vector_similarity: chunk.score ?? 0,
 							...(echoMeta && chunk.source_url ? { source_url: chunk.source_url } : {}),
-							...(echoMeta && chunk.heading_path ? { heading_path: chunk.heading_path } : {}),
+							...((echoMeta || this.echoHeadings) && chunk.heading_path ? { heading_path: chunk.heading_path } : {}),
 						});
 					}
 				}

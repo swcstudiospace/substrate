@@ -1,11 +1,13 @@
 ---
 phase: 42-skill-card
 verified: 2026-10-21
-status: passed in-repo. The live fast-forward proof is not run (operator-gated)
+status: human_needed
 score: 2 of 2 criteria proven in-repo
 verified_on: gsd/v13x-42-skill-card as a merge of origin/main 3466c50 (phase 41 merged) into 786d1ef, which holds the batching commit. Typecheck and full suite run on that merged tree (merge commit 02261d7)
 covered_files: ["packages/mcp-server/src/config.ts", "packages/mcp-server/src/config.test.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/server.test.ts", "packages/mcp-server/src/docs-ingest.ts", "packages/mcp-server/src/docs-ingest.test.ts", "packages/mcp-server/src/git.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/docs-search.test.ts", "packages/mcp-server/src/docs-plane-hardening.test.ts", ".env.example", "docs/config-reference.md", "docs/data-planes.md", "docs/docs-search-ingest.md"]
 ---
+
+> Status detail, kept verbatim from the original frontmatter: passed in-repo. The live fast-forward proof is not run (operator-gated)
 
 # 42-VERIFICATION: SKILL-CARD
 

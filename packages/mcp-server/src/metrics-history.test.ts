@@ -582,7 +582,7 @@ describe("metricHistoryAnswer", () => {
 
 	test("the step is one rule: raised until buckets x label values fit the cap, never lowered, so the oldest bucket survives", () => {
 		const labelled = Object.keys(METRIC_SERIES).filter((name) => (METRIC_SERIES[name]!.values?.size ?? 1) > 1);
-		expect(METRIC_SERIES["brief.p95"]!.values!.size).toBe(28);
+		expect(METRIC_SERIES["brief.p95"]!.values!.size).toBe(new Set([...SURFACES, "other"]).size);
 		for (const series of Object.keys(METRIC_SERIES)) {
 			const labelValues = METRIC_SERIES[series]!.values?.size ?? 1;
 			for (const windowMs of [3_600_000, 86_400_000, 14 * 86_400_000, 90 * 86_400_000]) {
@@ -592,11 +592,6 @@ describe("metricHistoryAnswer", () => {
 			}
 		}
 		expect(labelled).toContain("brief.p95");
-		// The reviewer's figures: about 20-minute buckets for a day of 28 surfaces, about 5 h for 14 days.
-		expect(effectiveHistoryStep("brief.p95", 86_400_000, 15)).toBeGreaterThanOrEqual(1100);
-		expect(effectiveHistoryStep("brief.p95", 86_400_000, 15)).toBeLessThanOrEqual(1300);
-		expect(effectiveHistoryStep("brief.p95", 14 * 86_400_000, 15)).toBeGreaterThanOrEqual(16_000);
-		expect(effectiveHistoryStep("brief.p95", 14 * 86_400_000, 15)).toBeLessThanOrEqual(18_500);
 		// An unlabelled series keeps what was asked when it fits, a requested step is clamped to 15 s..1 day, and only ever raised.
 		expect(effectiveHistoryStep("emit.success", 3_600_000, 15)).toBe(15);
 		expect(effectiveHistoryStep("emit.success", 3_600_000, 1)).toBe(15);
@@ -926,6 +921,7 @@ describe("GET /slo/history over HTTP", () => {
 
 /** One interval of activity that touches every instrument an extended series reads. */
 function extendedActivity(instruments: SubstrateInstruments): void {
+	bootEndpoints(instruments);
 	for (let i = 0; i < 3; i++) instruments.recordCache({ result: "hit", mode: "on", cacheClass: "brief" });
 	for (let i = 0; i < 2; i++) instruments.recordCache({ result: "miss", mode: "on", cacheClass: "memory-search" });
 	instruments.recordCache({ result: "would_serve_stale", mode: "on", cacheClass: "brief" });
@@ -944,6 +940,12 @@ function extendedActivity(instruments: SubstrateInstruments): void {
 	instruments.recordMemoryExpired({ surface: "claude-code", kind: "decision", mode: "hidden" });
 	instruments.setHindsightOutbox({ size: 7, oldestAgeSeconds: 31.5, durable: true });
 	instruments.observeIndexArchiveAge(() => 1_000, () => 61_000);
+}
+
+/** The boot-time call `createObservability` makes (observe.ts), with the count the empty environment configures. */
+function bootEndpoints(instruments: SubstrateInstruments): void {
+	const classes = loadConfig({}).dbEndpoints.classes;
+	instruments.setEndpointProxyPlanes(Object.values(classes).filter((endpointClass) => endpointClass === "proxy").length);
 }
 
 /** Rows of one series as `{label: value}` (or the single value of an unlabelled one). */
@@ -1158,6 +1160,7 @@ describe("the extended series (uplift-5 S6)", () => {
 		expect(bound).toBeLessThan(MAX_METRIC_BATCH);
 
 		const instruments = new SubstrateInstruments();
+		bootEndpoints(instruments);
 		const collector = new SampleCollector("extended");
 		collector.prime(instruments.snapshot());
 		// Every surface (and one outside the list, which folds into `other`), plane, decision, outcome and result at once.

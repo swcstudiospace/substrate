@@ -10,6 +10,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { FABRIC_RESOURCES } from "../packages/mcp-server/src/fabric/types.ts";
 import { ALL_METRIC_SERIES, METRIC_SERIES, parseHistoryStep, parseHistoryWindow } from "../packages/mcp-server/src/metrics-history.ts";
 import { DEFAULT_THRESHOLDS, docsSearchObjective, sloCatalogue, type SloTarget } from "../packages/observability/src/index.ts";
 import {
@@ -138,7 +139,24 @@ describe("the committed dashboards are what the generator renders", () => {
 
 		const coreOnly = buildDashboards({ series: METRIC_SERIES });
 		const planes = parse(coreOnly, PLANES);
-		expect(planes.panels.filter((panel) => panel.type === "row").map((panel) => panel.title)).toEqual(["Planes and docs"]);
+		// A row's panels are the panels after it, up to the next row. A drawn row holds at least one panel, and a row whose panels
+		// all read extended-only series is absent from the core-only render.
+		const rowGroups = (panels: Panel[]): Array<{ title: string; members: Panel[] }> => {
+			const groups: Array<{ title: string; members: Panel[] }> = [];
+			for (const panel of panels) {
+				if (panel.type === "row") groups.push({ title: panel.title, members: [] });
+				else groups.at(-1)?.members.push(panel);
+			}
+			return groups;
+		};
+		const extendedOnly = Object.keys(ALL_METRIC_SERIES).filter((series) => !Object.hasOwn(METRIC_SERIES, series));
+		const drawn = rowGroups(planes.panels);
+		for (const row of drawn) expect(row.members.length).toBeGreaterThan(0);
+		const extendedRows = rowGroups(parse(buildDashboards(), PLANES).panels).filter(
+			(row) => row.members.length > 0 && row.members.every((panel) => extendedOnly.includes(seriesOf(panel) ?? "")),
+		);
+		expect(extendedRows.length).toBeGreaterThan(0);
+		for (const row of extendedRows) expect(drawn.map((candidate) => candidate.title)).not.toContain(row.title);
 		for (const panel of planes.panels) {
 			const series = seriesOf(panel);
 			if (series !== null) expect(Object.hasOwn(METRIC_SERIES, series)).toBe(true);
@@ -323,5 +341,21 @@ describe("the threshold lines are the catalogue's targets", () => {
 		const panel = degraded.panels.find((candidate) => candidate.title.includes("(emit.success)"))!;
 		expect(panel.type).toBe("text");
 		expect(panel.options!.content).toContain("99.50 %");
+	});
+});
+
+describe("the fabric panels (phase 51)", () => {
+	test("each of the six fabric resources draws exactly one panel, reading an allow-listed series", () => {
+		const planes = parse(buildDashboards(), "substrate-data-planes.json");
+		const fabric = planes.panels.filter((panel) => panel.title.startsWith("Fabric: "));
+		expect(FABRIC_RESOURCES).toHaveLength(6);
+		expect(fabric).toHaveLength(FABRIC_RESOURCES.length);
+		for (const resource of FABRIC_RESOURCES) {
+			const panels = fabric.filter((panel) => panel.title === `Fabric: ${resource}`);
+			expect(panels).toHaveLength(1);
+			const series = seriesOf(panels[0]!);
+			expect(series).not.toBeNull();
+			expect(Object.hasOwn(ALL_METRIC_SERIES, series ?? "")).toBe(true);
+		}
 	});
 });

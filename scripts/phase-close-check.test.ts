@@ -9,7 +9,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BASELINE, diffKinds, diffSurfaces, LOCK_TESTS, missingFiles, parseEventKinds, parseSurfaces } from "./phase-close-check.ts";
+import { BASELINE, diffKinds, diffSurfaces, LOCK_TESTS, missingFiles, parseEventKinds, parseSurfaces, REVIEWED_SURFACE_ADDITIONS } from "./phase-close-check.ts";
 
 const FIXTURE = `export const SWARM_SURFACES = [
 	"swarm-a01-orch",
@@ -95,20 +95,35 @@ describe("diffKinds", () => {
 
 describe("diffSurfaces", () => {
 	test("empty when current equals baseline plus substrate", () => {
-		expect(diffSurfaces(["claude-code", "cursor"], ["claude-code", "cursor", "substrate"])).toEqual([]);
+		expect(diffSurfaces(["claude-code", "cursor"], ["claude-code", "cursor", "substrate"], [])).toEqual([]);
 	});
 
 	test("removing substrate is a surfaces diff", () => {
 		// The host-job surface must stay: without it later phases cannot emit it.
-		const lines = diffSurfaces(["claude-code"], ["claude-code"]);
+		const lines = diffSurfaces(["claude-code"], ["claude-code"], []);
 		expect(lines.length).toBeGreaterThan(0);
 		expect(lines.join("\n")).toContain("surfaces[1]");
 	});
 
 	test("any other added surface is a surfaces diff", () => {
-		const lines = diffSurfaces(["claude-code"], ["claude-code", "substrate", "extra"]);
+		const lines = diffSurfaces(["claude-code"], ["claude-code", "substrate", "extra"], []);
 		expect(lines.length).toBeGreaterThan(0);
 		expect(lines.join("\n")).toContain("surfaces[2]");
+	});
+
+	test("the reviewed swarm additions, in order and before substrate, are accepted by default", () => {
+		expect(diffSurfaces(["claude-code"], ["claude-code", ...REVIEWED_SURFACE_ADDITIONS, "substrate"])).toEqual([]);
+	});
+
+	test("a reviewed addition left out is a surfaces diff at its own index", () => {
+		const lines = diffSurfaces(["claude-code"], ["claude-code", ...REVIEWED_SURFACE_ADDITIONS.slice(1), "substrate"]);
+		expect(lines.length).toBeGreaterThan(0);
+		expect(lines.join("\n")).toContain("surfaces[1]");
+	});
+
+	test("an unreviewed surface beside the reviewed additions is a surfaces diff", () => {
+		const lines = diffSurfaces(["claude-code"], ["claude-code", ...REVIEWED_SURFACE_ADDITIONS, "swarm-a31-extra", "substrate"]);
+		expect(lines.join("\n")).toContain("surfaces[16]");
 	});
 });
 
