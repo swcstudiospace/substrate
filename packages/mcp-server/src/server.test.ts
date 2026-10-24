@@ -2044,6 +2044,31 @@ describe("memoryWriteStatus", () => {
 		expect(memoryWriteStatus(result("denied", { reason: "store.unavailable", verified_persisted: false }))).toBe(503);
 		expect(memoryWriteStatus(result("denied", { reason: "store.write-failed", verified_persisted: false }))).toBe(503);
 	});
+
+	test("an index outage through writeMemory is answered 503 at the status boundary", async () => {
+		// The whole path, not only the mapping: a throwing claim is what the service turns into
+		// `store.write-failed`, and that reason must reach the caller as 503.
+		const failing = { claimWrite: async () => { throw new Error("connect ETIMEDOUT"); } };
+		const substrate = new Substrate(loadConfig({}), { index: failing as never, greptime: null });
+		const entry = { scope: "graph:ut-1", kind: "fact" as const, text: "hermes finished n2", writer: "hermes", idempotency_key: "k-503" };
+
+		const result = await substrate.writeMemory(entry);
+
+		expect(result.outcome).toBe("denied");
+		expect(result.reason).toBe("store.write-failed");
+		expect(memoryWriteStatus(result)).toBe(503);
+	});
+
+	test("no index at all is answered 503, and the keyed retry is not spent", async () => {
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: null });
+		const entry = { scope: "graph:ut-1", kind: "fact" as const, text: "hermes finished n2", writer: "hermes", idempotency_key: "k-503-none" };
+
+		const result = await substrate.writeMemory(entry);
+
+		expect(result.reason).toBe("store.unavailable");
+		expect(memoryWriteStatus(result)).toBe(503);
+		expect(result.idempotency_key).toBe("");
+	});
 });
 
 describe("memoryWriter", () => {

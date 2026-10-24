@@ -2013,3 +2013,54 @@ describe("SUBSTRATE_HASH_VERSION", () => {
 	});
 });
 
+describe("exactly-once across a degraded substrate (uplift-7 gap 3)", () => {
+	test("the same explicit key replayed twice writes one row and returns the original entry", async () => {
+		const first = await write({ idempotency_key: "k-replay-twice" });
+		const second = await write({ idempotency_key: "k-replay-twice" });
+
+		expect(first.outcome).toBe("accepted");
+		expect(first.deduplicated).toBeUndefined();
+		expect(second.outcome).toBe("accepted");
+		expect(second.deduplicated).toBe(true);
+		expect(second.idempotency_key).toBe(first.idempotency_key);
+		expect(second.entry?.id).toBe(first.entry?.id);
+		expect(second.entry?.text).toBe(first.entry?.text);
+		expect(second.entry?.scope).toBe(first.entry?.scope);
+		expect(second.entry?.kind).toBe(first.entry?.kind);
+		expect(store.entries()).toHaveLength(1);
+	});
+
+	test("a keyless write of new text writes each time, and a keyless identical retry still dedupes as today", async () => {
+		const first = await write({ text: "hermes finished n3" });
+		const second = await write({ text: "hermes finished n4" });
+		const retry = await write({ text: "hermes finished n4" });
+
+		expect(first.outcome).toBe("accepted");
+		expect(second.outcome).toBe("accepted");
+		expect(second.deduplicated).toBeUndefined();
+		expect(second.entry?.id).not.toBe(first.entry?.id);
+		expect(retry.deduplicated).toBe(true);
+		expect(retry.entry?.id).toBe(second.entry?.id);
+		expect(store.entries()).toHaveLength(2);
+	});
+
+	test("an outage after the row commits, then a replay of the same key, writes exactly one row", async () => {
+		// The insert commits and the connection drops before the caller hears back. The
+		// caller saw a failure (503 on the wire); its replay after recovery must not add
+		// a second row, and must return the row that already landed.
+		store.failAfterInsert = "postgres: connection reset";
+		await expect(write({ idempotency_key: "k-outage-landed" })).rejects.toThrow("connection reset");
+		expect(store.entries()).toHaveLength(1);
+		const landed = store.entries()[0]?.id;
+
+		store.failAfterInsert = null;
+		store.clock += IN_FLIGHT_TIMEOUT_MS;
+		const replay = await write({ idempotency_key: "k-outage-landed" });
+
+		expect(replay.outcome).toBe("accepted");
+		expect(replay.verified_persisted).toBe(true);
+		expect(replay.entry?.id).toBe(landed);
+		expect(store.entries()).toHaveLength(1);
+	});
+});
+
