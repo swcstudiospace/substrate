@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { validateAgentCard } from "./agent-card.ts";
-import { loadConfig } from "./config.ts";
+import { loadConfig, tokenEnvName } from "./config.ts";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -25,7 +25,7 @@ import {
 	type HttpServerOptions,
 } from "./server.ts";
 import { Substrate } from "./service.ts";
-import type { MemoryEntry, SubstrateEvent, Surface } from "./types.ts";
+import { SWARM_SURFACES, type MemoryEntry, type SubstrateEvent, type Surface } from "./types.ts";
 import type { EventBus, EventHint } from "./event-bus.ts";
 
 /** Shorthand for a health report; every field defaults to the unhealthy value. */
@@ -1942,6 +1942,31 @@ describe("agent card route", () => {
 		}
 	});
 
+	test("each swarm surface from A16 to A30 reads its own card, and no other caller does", async () => {
+		// The card boundary for the later swarm agents: a surface's own token reads its card, while a
+		// neighbouring swarm token and the cursor token are refused, for every surface in the range.
+		const later = SWARM_SURFACES.slice(15);
+		const env: Record<string, string> = { SUBSTRATE_TOKEN_CURSOR: "tok-cursor" };
+		for (const surface of later) env[tokenEnvName(surface)] = `tok-${surface}`;
+		const { get, stop } = await serveCard(
+			later.map((surface) => teachable(`mem-${surface}`, surface)),
+			env,
+		);
+		try {
+			for (const [index, surface] of later.entries()) {
+				const neighbour = later[(index + 1) % later.length] as string;
+				const path = `/.well-known/agent-card.json?surface=${surface}`;
+				const own = await get(path, { authorization: `Bearer tok-${surface}` });
+				expect(own.status).toBe(200);
+				expect(validateAgentCard((await own.json()) as Record<string, unknown>)).toEqual([]);
+				expect((await get(path, { authorization: `Bearer tok-${neighbour}` })).status).toBe(403);
+				expect((await get(path, { authorization: "Bearer tok-cursor" })).status).toBe(403);
+			}
+		} finally {
+			await stop();
+		}
+	});
+
 	test("a hostile Origin is refused even with a valid bearer, and a loopback Origin is not", async () => {
 		const { port, stop } = await serveCard([teachable("mem_7", "cursor")], { SUBSTRATE_TOKEN_CURSOR: "tok-cursor" });
 		try {
@@ -2047,6 +2072,17 @@ describe("surfaceClaimRefusal", () => {
 
 	test("an untokened caller's claim is not refused here", () => {
 		expect(surfaceClaimRefusal(null, "swarm-a05-be")).toBeNull();
+	});
+
+	test("a swarm surface from A16 to A30 claims only its own name; a neighbour's or the cursor's claim is refused by name", () => {
+		const later = SWARM_SURFACES.slice(15);
+		for (const [index, surface] of later.entries()) {
+			const neighbour = later[(index + 1) % later.length] as string;
+			expect(surfaceClaimRefusal(surface, surface)).toBeNull();
+			expect(surfaceClaimRefusal(surface, undefined)).toBeNull();
+			expect(surfaceClaimRefusal(surface, neighbour)).toBe(`this token is ${surface} and cannot act as ${neighbour}`);
+			expect(surfaceClaimRefusal("cursor", surface)).toBe(`this token is cursor and cannot act as ${surface}`);
+		}
 	});
 });
 
