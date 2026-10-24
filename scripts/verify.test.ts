@@ -270,10 +270,8 @@ describe("the gate matches the CI workflow", () => {
 		expect(runLines(between("dependency-audit", "boot-gate"))).toEqual(["bun install --frozen-lockfile --ignore-scripts", audit.argv.join(" ")]);
 	});
 
-	test("the boot-gate job is last, report-only, opt-in on its own variable, and runs only the install and `bun run gate:boot`", () => {
-		const jobNames = [...workflow.slice(workflow.indexOf("\njobs:\n")).matchAll(/^ {2}([a-z][a-z-]*):$/gm)].map((match) => match[1] as string);
-		expect(jobNames).toEqual(["verify", "dependency-audit", "boot-gate"]);
-		const job = between("boot-gate");
+	test("the boot-gate job is report-only, opt-in on its own variable, and runs only the install and `bun run gate:boot`", () => {
+		const job = between("boot-gate", "lint-report");
 		// The harness refuses a checkout without node_modules, so the install is a prerequisite, not part of the gate.
 		expect(runLines(job)).toEqual(["bun install --frozen-lockfile", "bun run gate:boot"]);
 		expect(job).toMatch(/^ {4}continue-on-error: true$/m);
@@ -285,9 +283,17 @@ describe("the gate matches the CI workflow", () => {
 		expect(between("dependency-audit", "boot-gate")).not.toContain("continue-on-error");
 	});
 
+	test("the lint job is report-only and runs only the install and the Biome lint", () => {
+		const job = between("lint-report");
+		expect(runLines(job)).toEqual(["bun install --frozen-lockfile", "bunx biome lint --reporter=summary ."]);
+		expect(job).toMatch(/^ {4}continue-on-error: true$/m);
+		expect(job).not.toMatch(/^ {4}services:/m);
+	});
+
 	test("every job stays behind the CI_ENABLED switch", () => {
 		const ifLines = [...workflow.matchAll(/^ {4}if: (.+)$/gm)].map((match) => match[1] as string);
-		expect(ifLines).toHaveLength(3);
+		const jobCount = [...workflow.slice(workflow.indexOf("\njobs:\n")).matchAll(/^ {2}[a-z][a-z-]*:$/gm)].length;
+		expect(ifLines).toHaveLength(jobCount);
 		for (const line of ifLines) expect(line).toContain("vars.CI_ENABLED == 'true'");
 	});
 
