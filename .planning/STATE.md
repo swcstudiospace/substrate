@@ -214,6 +214,7 @@ Items acknowledged and deferred, most recent first:
 - Decision 7: out-of-path branches quality/biome-report-only, test/swarm-pins-a16-a30 and the ad9e4de merge on gsd/p52-planning-core: keep or delete.
 - Decision 8, answered by search 2026-10-24: phase 25's artifacts are archived at .planning/milestones/v1.3-phases/25-docs-search-and-ingest-ragflow/ (25-CONTEXT, 25-RESEARCH, 25-VALIDATION, 25-VERIFICATION, plans and summaries). Its 25-VERIFICATION has not been read; phase 46 criterion 5 needs that read before cutover.
 - Decision 9: confirm the D-07 conflict (phase 20 scenario 6) and the explicit-any method for D-18.
+- Draft merge check, 2026-10-24 (read-only, git merge-tree --write-tree against main aa2ed6a): PR #104 (gsd/p52-planning-core, ad9e4de) merges cleanly into main. PR #109 (gsd/p52-wiring, d62d649) conflicts in .github/workflows/ci.yml, docs/ci.md, docs/data-planes.md, docs/event-vocabulary.md, packages/audit/src/policy.ts, packages/audit/src/policy.test.ts and .planning/phases/48-tailscale-proxy/VERIFICATION.md. PR #110 (5a8f96a) and PR #111 (eb64f59) conflict in the same set and need rebasing after #109 lands.
 
 ## Consistency check (2026-10-24)
 
