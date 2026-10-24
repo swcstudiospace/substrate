@@ -6,9 +6,9 @@
 - ✅ **v1.1 Swarm correlation, governed memory and orchestrate integrations** — Phases 7-10 with inserted 8.1, shipped 2026-10-07 (ADR 0001 S1 and S3). Archive: [milestones/v1.1-ROADMAP.md](milestones/v1.1-ROADMAP.md)
 - ✅ **v1.2 Swarm leases, workspace install and lessons bank** — Phases 11-15, shipped 2026-10-08 (ADR 0001 S2, S4, SPE-5830). Archive: [milestones/v1.2-ROADMAP.md](milestones/v1.2-ROADMAP.md) · audit: [milestones/v1.2-MILESTONE-AUDIT.md](milestones/v1.2-MILESTONE-AUDIT.md)
 - ⚠️ **v1.3 Build plan completion** — Phases 16–33; shipped 2026-10-11, closed 2026-10-21 with accepted debt (8 audit rows and 43 operator-gated live proofs). Closeout: [milestones/v1.3-CLOSEOUT.md](milestones/v1.3-CLOSEOUT.md) · tracking: [SPE-8292](https://linear.app/swcstudio/issue/SPE-8292/n7-final-ordered-execution-plan-in-waves)
-- 🚧 **v1.4 Substrate contract hardening** — Phases 34-36: the three uplift-7 substrate gaps (invalid writes, expected_version for skills and docs, degraded-mode exactly-once). Source: [.planning/uplift-7/MILESTONE-AUDIT.md](uplift-7/MILESTONE-AUDIT.md) rows 23-25.
-- 🚧 **v1.3.x Should-have hardening** — Phases 37-44, scheduled from research/SUMMARY.md:68 (should-have, after validation).
-- 🚧 **v1.5 SOTA enhancements** — Phases 45-54: 45-51 from the 7-SOTA plan on branch feature/7-sota-enhancements (PR #83 closed; PR #85 does not carry these); 52-54 defined here from draft PR #105.
+- ✅ **v1.4 Substrate contract hardening** — Phases 34-36, completed 2026-10-24 (local, not published). Archive: [milestones/v1.4-ROADMAP.md](milestones/v1.4-ROADMAP.md) · audit: [milestones/v1.4-MILESTONE-AUDIT.md](milestones/v1.4-MILESTONE-AUDIT.md). Source: [.planning/uplift-7/MILESTONE-AUDIT.md](uplift-7/MILESTONE-AUDIT.md) rows 23-25.
+- 🚧 **v1.3.x Should-have hardening** — Phases 37-44, open: 44 passed; 37-43 verified in repo with live proofs pending; 40-43 accepted debt (2026-10-23); 37-39 await an operator waiver. Audit: [v1.3.x-MILESTONE-AUDIT.md](v1.3.x-MILESTONE-AUDIT.md).
+- 🚧 **v1.5 SOTA enhancements** — Phases 45-54, open. Phase 46 partial: criterion 1 in repo; criteria 2-6 need per-run operator approval. Phases 52-54 in review as draft PRs #104, #109, #110, #111 (not on main). 45 and 47-50 accepted debt (2026-10-23); 51 complete (PR #108).
 
 ## Phases
 
@@ -678,7 +678,7 @@ Plans:
   5. Cutover is a logged, reversible switch with a delta pass. RAGFlow code and service are removed only after cutover, after criteria 1 to 4 pass, and after every other RAG-dependent phase passes. The RAG-dependent phases are 25 and 42, plus any other phase whose VERIFICATION names a live RAGFlow call (the phase 46 PLAN confirms that list before cutover). Storage deletion needs its own approval.
   6. Every live step (deploy, ingestion, cutover, storage deletion) runs only after the operator approves it for that run.
 
-**Plans**: 0 plans (re-scoped 2026-10-23; the earlier 1/1 verification in phases/46-ragflow-hybrid/VERIFICATION.md covered the RAGFlow path and no longer applies)
+**Plans**: 1 plan (PLAN.md, created 2026-10-24 in phases/46-lightrag-hybrid/). Status partial: criterion 1 in repo (tests and docs committed); criterion 4 comparator deferred; criteria 2, 3, 5 and 6 are live steps that need per-run operator approval.
 
 ### Phase 47: GreptimeDB + Dragonfly Predictive Analytics & Cache
 
@@ -865,7 +865,7 @@ Plans:
 | 43. LANE-A | v1.3.x | 1/1 | Complete (PR #97); live egress and restart proof open (accepted debt 2026-10-23) | 2026-10-21 |
 | 44. UAT | v1.3.x | 1/1 | Complete (PR #95) | 2026-10-21 |
 | 45. Railway Resource Orchestrator | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live Railway proof open | 2026-10-23 |
-| 46. LightRAG hybrid RAG and the RAGFlow migration | v1.5 | 0/0 | Re-scoped 2026-10-23 by operator decision; not started | - |
+| 46. LightRAG hybrid RAG and the RAGFlow migration | v1.5 | 0/1 | Partial: criterion 1 in repo; criteria 2-6 blocked on per-run operator approval (live) | - |
 | 47. GreptimeDB + Dragonfly Predictive Analytics & Cache | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live warm-up proof open | 2026-10-23 |
 | 48. TailscaleDB Secure Unified Proxy Layer | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live forwarders and cutover open | 2026-10-23 |
 | 49. Hindsight Graph Memory with Greptime Events | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live ledger proof open | 2026-10-23 |

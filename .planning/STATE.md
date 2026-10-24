@@ -1,13 +1,13 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.3.x
-milestone_name: Should-have hardening (Planned)
-status: "v1.3.x phases 37-39 merged (PR #89, PR #90, PR #91). Phase 40 (DOCS-MEMORY) code on main via PR #92. Phase 41 (ANCHOR) code on main via PR #116. Phase 42 (SKILL-CARD) code on main via PR #94. Phases 43 (PR #97) and 44 (PR #95) complete. Verification is human_needed for phases 40-43 and passed for 44. On 2026-10-23 the operator accepted the open operator gates as debt for phases 40-43, 45 and 47-50; milestone audit and close are next."
-stopped_at: run 2026-10-24: fixes committed, v1.3.x and v1.4 audits written; complete and phase 46 wait for operator decisions
-last_updated: "2026-10-24"
+milestone_name: Should-have hardening
+status: "v1.4 complete and archived 2026-10-24 (local, not published). v1.3.x open: phases 37-44 verified in repo, live proofs pending, phases 37-39 need an operator waiver. v1.5 open: phase 46 partial (criterion 1 in repo), phases 52-54 in review as draft PRs."
+stopped_at: "run 2026-10-24 (graph ut-mvm0p0jr-874c2ace): v1.4 complete; phase 46 partial; v1.3.x blocked on the 37-39 waiver; awaiting operator decisions"
+last_updated: "2026-10-24T06:47:20.607Z"
 last_activity: 2026-10-24
-last_activity_desc: autonomous run 2026-10-24 (graph ut-mvlvvvbt-57c57d9e): phase reconciliation, baseline gates, deferral table, v1.4 grouping
-state_head: 1a9f4fd365ede291c4e21be71b6ff236e0e49c67
+last_activity_desc: Milestone v1.4 completed and archived
+state_head: c1868cfa2d55618577b6bddc864b2f8ec89c6df8
 progress:
   total_phases: 8
   completed_phases: 1
@@ -161,10 +161,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: 40 (accepted debt; the consistency check is recorded 2026-10-24, and the milestone audit is next)
+Phase: v1.3.x phases 37-44 open; phase 46 partial in v1.5
 Plan: —
-Status: v1.3.x and v1.5 open. Preflight recorded 2026-10-23; no phase executed by this run yet.
-Last activity: 2026-10-23 — PR #119 merged; PR #121 (ROADMAP progress follow-up) shipped through ultrathink-ship; migration placed inside phase 46 by operator decision.
+Status: v1.3.x blocked on an operator waiver for the live criteria of phases 37-39; v1.5 open (phase 46 partial; phases 52-54 in review)
+Last activity: 2026-10-24 — Milestone v1.4 completed and archived
 
 ## Preflight record (2026-10-23, graph ut-mvlknrx6-2849044e)
 
@@ -205,10 +205,15 @@ Items acknowledged and deferred, most recent first:
 
 ## Operator Next Steps
 
-- Decide the 2026-10-24 run pause batch (see Run record): confirm the v1.4 and v1.3.x audits before complete; accept or verify phases 37-39; Phase 46 discuss answers Q1-Q4; PR #123 (close or merge); the gate policy for planning PRs; and the out-of-path branches.
-- Phase 46 live steps (archive, deploy, ingestion, cutover, storage deletion) each need approval for that run.
-- Phases 52-54: merge drafts #104 and #109-#111 in order through the ship path once PR #123 is resolved (no force push).
-- Milestones v1.4 and v1.3.x close after the operator confirms each audit. Milestone v1.5 closes only after phase 46 and phases 52-54 are complete.
+- Decision 1: waive or verify the live criteria of phases 37-39. Only the operator can waive; v1.3.x cannot complete without it.
+- Decision 2: approve or defer each phase 46 live step (T5 archive, T6 deploy and health probe, T7 migration and parity gate, T8 cutover and RAGFlow removal), one approval per run.
+- Decision 3: PR #123 stays held. When the run branch ships, choose to close #123 or merge it; the run branch already contains its two commits.
+- Decision 4: merge order for drafts #104 and #109-#111. #109 is based on the stale gsd/p51-fabric-impl; #110 and #111 stack on gsd/p52-wiring.
+- Decision 5: approve shipping the dependency audit fix (fix/audit-advisories-upgrade, 6106504, local only) as its own PR.
+- Decision 6: approve pushing and opening PRs through the ship path. The Ship step is not run: the run is not finished.
+- Decision 7: out-of-path branches quality/biome-report-only, test/swarm-pins-a16-a30 and the ad9e4de merge on gsd/p52-planning-core: keep or delete.
+- Decision 8: phase 25 has no artifact folder in this worktree, but phase 46 criterion 5 names it. Confirm where its evidence lives.
+- Decision 9: confirm the D-07 conflict (phase 20 scenario 6) and the explicit-any method for D-18.
 
 ## Consistency check (2026-10-24)
 
@@ -365,3 +370,17 @@ Fifth standalone post-close series — proposal: [uplift-5/PROPOSAL.md](uplift-5
 PR A's defaults: `SUBSTRATE_DEPLOY_PREFLIGHT=report` (prints a table, never changes a deploy), `SUBSTRATE_DEPLOY_GATE=off`, `SUBSTRATE_EXPOSURE_MAX` unset (the doctor only reports exposure), `SUBSTRATE_METRICS_HISTORY_SERIES=core`; the sandbox drop-ins ship as `.example` files and nothing installs them; the `boot-gate` CI job needs both `vars.CI_ENABLED` and `vars.BOOT_GATE`. The one runtime-visible change in PR A is the `SUBSTRATE_METRICS_HISTORY_SERIES` parser (default core, byte-identical); everything else is scripts, infra examples, tests and docs.
 
 PR B's defaults: `SUBSTRATE_BRIEF_GRAPH_READ=full`, `SUBSTRATE_CACHE_BUMP_SCOPE=legacy`, `SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S=0`, `SUBSTRATE_EVENT_IDEMPOTENCY=off`, `SUBSTRATE_EVENT_SPOOL=off`, `SUBSTRATE_SKILLS_GOVERNANCE=off`. Default-on and additive: concurrent `/healthz` probes share one computation; `/healthz` carries an `idempotency` field; `refused-emits.jsonl` rotates to one `.1` file at 1 MiB; the skills projector resolves its bearer the way its fetch does (surface token first, first entry of a list); `skills_registry` is created at boot; `skills_approve` and `skills_list` exist (operator-only and approved-only by default). Handoff and operator steps: [uplift-5/HANDOFF.md](uplift-5/HANDOFF.md). Nothing was deployed.
+
+## Run 2 record (2026-10-24, graph ut-mvm0p0jr-874c2ace)
+
+- Kickoff: track complete ran once (exit 0). The Notion Task is set to Implementing; 7 node rows and 55 step rows exist in Notion. Linear is partial because of the free-issue limit (the same blocker as before), so it fails open. The session is marked kicked off. The seven node lines are in the todo list with their Notion URLs; the 55 step rows stay in Notion.
+- Clarifications, non-blocking defaults stated: q1 shipping is local commits only; q2 is criteria plus at most three hotspots per phase, touched modules only; q3 is in-repo TODO sources only.
+- Ground truth: branch gsd/autonomous-run-2026-10-24 in /root/src/worktrees/as-gsd-autonomous, clean at the start. The primary checkout is on planning/consistency-check-2026-10-24 (PR #123) and this run did not commit there. Gates: bun test, bunx tsc --noEmit, bun run check:phase-close, the composite bun run verify, and the opt-in bun scripts/audit-gate.ts. Lint and build are absent. Skill() is not a tool in this environment, so discuss, plan and phase artifacts were produced directly from the workflow steps; this is a recorded fallback.
+- Phase state, artifacts win: v1.4 complete and archived (phases 34-36). v1.3.x: phase 44 passed, 37-43 human_needed, 40-43 accepted debt, 37-39 need a waiver. v1.5: 45 and 47-50 accepted debt, 46 partial, 51 complete, 52-54 in review.
+- Decisions, auto-selected under the rubric: D-N4-1 continue past the active milestone in ROADMAP order behind an entry gate (review: yes). D-N4-2 local commits only; remote steps are HARD_STOP actions, with a conflict entry against "finish shipping everything". D-N4-3 stay on gsd/autonomous-run-2026-10-24; no branch created. D-N4-4 one commit per completed unit using the branch's prefix convention. D-N4-5 at most three hotspots per phase, touched code only; no production code was touched, so none was selected (review: yes). D-N4-6 no new dependencies. D-N4-7 codebase-idiomatic reading of Best-in-Class. Phase 46 decisions D46-1 to D46-5 are in .planning/phases/46-lightrag-hybrid/CONTEXT.md; D46-3 and D46-5 are flagged for review.
+- HARD_STOP actions, none performed: phase 46 live steps T5 to T8; any push, PR, merge, tag or deploy; PR #123 stays held; waiving the live criteria of 37-39 (operator only).
+- Gates on the final tree: bun run verify with a throwaway postgres:16 container (this host has Docker but not the Postgres binaries CI uses): exit 0; install passed; typecheck passed; tests 6222 pass, 2 skip, 0 fail; locks passed. Dependency audit: exit 1 with the same three pre-existing advisories (body-parser, undici, zod); nothing new. Secret scan, count-only, four pattern classes, over git diff 36580a6..HEAD: 0 hits. Markers added outside .planning: 0.
+- Test-count reconciliation: the no-Postgres run at 76f2707 reported 6073 pass and 177 skip. Adding the 4 new tests gives 6254 in skip mode against 6224 in Postgres mode. The 30 difference is unnamed skipped placeholders and one sentinel test that exist only when SUBSTRATE_TEST_PG_URL is unset. Named tests match across modes in the three files checked.
+- Recorded, not resolved: phase 25 has no artifact folder in this worktree; STATE's raw marker count of 25 against a live count of 28; explicit any 34 by the register method and 37 by the earlier method; the D-07 conflict; phase 40 debt dated 2026-10-23 at ROADMAP line 93 against a scope acceptance dated 2026-10-22 at line 571; VERIFICATION citation drift in phases 34 and 35.
+- Tool incidents: subagent edits given relative paths landed in the primary checkout several times. Each was moved into the worktree, or removed after its diff was confirmed, and the primary now shows zero changed entries. Future subagent tasks must use absolute worktree paths.
+- Milestone completion: gsd-tools milestone complete v1.4 --confirm exited 0 and archived the ROADMAP, REQUIREMENTS and audit copies and phases 34-36 to milestones/v1.4-*. The tool preserved this run's STATE values over derived ones.
