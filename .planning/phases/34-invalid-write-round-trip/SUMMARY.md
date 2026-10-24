@@ -75,3 +75,22 @@ PR #72's oversize tests are not duplicated: no body here is near the size cap.
 Also noticed, not changed: a multi-page docs ingest can upload page 1 and then fail on
 page 2 at parse time. That is a plane failure after valid input, not a validation gap, so
 it is out of scope here.
+
+## Addendum: audit-found changes (2026-10-24)
+
+Commit `76f2707` (`fix(mcp-server): refuse a LightRAG docs batch with an invalid page before any write`) was made after this phase's verification. It closes criterion 34.1 on the LightRAG plane. The read-verified claim under "Partial persistence" that docs ingest refuses every page before the first upload held for RAGFlow only. Before this commit, LightRAG recorded an invalid page as `failed` and uploaded the rest.
+
+**Behavior change.** A LightRAG docs ingest batch with one invalid page now returns the same refusal as RAGFlow and persists nothing: no LightRAG request, and the state file is unchanged. An upstream write failure still reports per page.
+
+## Files changed
+- `packages/mcp-server/src/docs-ingest.ts`: `ingestDocs` runs the per-page gates on both planes before the first write (comment at line 843). The LightRAG `rejected` list is removed, and `failed` in `ingestDocsLightrag` counts only upstream write failures.
+- `packages/mcp-server/src/invalid-write-roundtrip.test.ts`: LightRAG case added (`lightragRecorder` at line 868; test at line 879).
+
+## Tests added
+- `invalid-write-roundtrip.test.ts:879`: a LightRAG batch with an invalid second page is refused, with no LightRAG request and an unchanged state file. Not run in this addendum.
+
+## Schema
+None. No migration in this commit.
+
+## Rollback
+Revert `76f2707`. The LightRAG batch then goes back to per-page `failed` with the valid pages kept. No data or schema change to undo.
