@@ -202,7 +202,9 @@ function world(
 		return { code: reply.code ?? 0, stdout: reply.stdout ?? "", stderr: reply.stderr ?? "" };
 	};
 	const proposer: SkillProposer = {
-		propose: async (input) => {
+		propose: async (input, opts) => {
+			// The real proposer runs the staleness hook before any git work: a refusal here opens nothing.
+			await opts.beforeWork?.();
 			proposals.push(input);
 			return (
 				options.propose ?? {

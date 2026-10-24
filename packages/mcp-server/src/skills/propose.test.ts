@@ -514,6 +514,31 @@ describe("proposeSkill ledger idempotence", () => {
 		expect(f.steps()).toEqual(["gh pr view"]);
 	});
 
+	test("a versioned retry of an OPEN proposal is existing: the ledger replay answers before beforeWork runs", async () => {
+		writeLedger({ ts: "t", content_sha256: sha(), name: NAME, surface: "claude-code", branch: "b1", state: "opened", pr_url: PR_URL, pr_number: 7 });
+		const f = fake();
+		const beforeWork = async (): Promise<void> => {
+			throw new Error("beforeWork must not run for a recorded proposal");
+		};
+		const result = await proposeSkill(input(), options(f.run, { beforeWork }));
+		expect(result).toMatchObject({ status: "existing", pr_url: PR_URL, pr_number: 7, content_sha256: sha() });
+		expect(f.steps()).toEqual(["gh pr view"]);
+	});
+
+	test("a proposal beforeWork refuses opens nothing: no fetch, clone, push or create, and no ledger line, dry run or not", async () => {
+		for (const dryRun of [false, true]) {
+			const f = fake();
+			const refusal = new Error("stale");
+			const beforeWork = async (): Promise<void> => {
+				throw refusal;
+			};
+			const error = await proposeSkill(input(), options(f.run, { dryRun, beforeWork })).catch((e: unknown) => e);
+			expect(error).toBe(refusal);
+			expect(f.steps()).toEqual([]);
+			expect(ledgerLines()).toEqual([]);
+		}
+	});
+
 	test("a pre-tag line for another name does not decide this proposal", async () => {
 		const v = validateProposal(input(), { maxBytes: ROUTE_MAX_BYTES, mode: "overlay" });
 		writeLedger({ ts: "t", content_sha256: legacyContentSha256(v.mode, v.files, v.remove), name: "other-skill", surface: "claude-code", branch: "b1", state: "opened", pr_url: PR_URL, pr_number: 7 });

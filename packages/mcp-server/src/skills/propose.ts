@@ -93,6 +93,8 @@ export interface ProposeOptions {
 	library?: SkillsLibrary;
 	/** Test seam: how long a live lock is waited for. */
 	lockWaitMs?: number;
+	/** Runs after the ledger replay and before any mirror, clone or push work. A throw refuses the proposal with nothing written. Runs for a dry run too. */
+	beforeWork?: () => Promise<void>;
 	run: Runner;
 }
 
@@ -929,7 +931,7 @@ function countNameStatus(stdout: string): { diff_added: number; diff_changed: nu
 }
 
 /**
- * validate → mirror check → per-content lock → ledger → mirror lock, fetch, unlock → shared
+ * validate → mirror check → per-content lock → ledger → beforeWork → mirror lock, fetch, unlock → shared
  * clone, set-url, checkout → writeTree → add → diff → commit → origin check → push → ledger
  * pushed → gh pr create → ledger opened. The clone is removed and the locks released in finally.
  */
@@ -965,6 +967,7 @@ export async function proposeSkill(input: ProposeInput, opts: ProposeOptions): P
 			const known = await fromLedger(run, v, input, opts, paths.ledger);
 			if (known) return known;
 		}
+		if (opts.beforeWork) await opts.beforeWork();
 
 		const releaseMirror = await acquireLock(paths.mirrorLock, "mirror", waitMs);
 		try {

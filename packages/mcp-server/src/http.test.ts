@@ -1364,11 +1364,15 @@ describe("POST /skills/propose", () => {
 		redactions: [],
 	};
 
-	/** A proposer that records its calls and answers (or throws) what the test says. */
+	/**
+	 * A proposer that records its calls and answers (or throws) what the test says. It runs `beforeWork` first,
+	 * as the real proposer does after its ledger replay, so a version refusal stops it before any call is recorded.
+	 */
 	function proposer(answer: ProposeResult | Error = opened) {
 		const calls: Array<{ input: Parameters<SkillProposer["propose"]>[0]; opts: Omit<ProposeOptions, "run"> }> = [];
 		const seam: SkillProposer = {
 			propose: async (input, opts) => {
+				await opts.beforeWork?.();
 				calls.push({ input, opts });
 				if (answer instanceof Error) throw answer;
 				return answer;
@@ -1415,6 +1419,26 @@ describe("POST /skills/propose", () => {
 		expect(reply.json).toEqual(opened as never);
 		expect(calls[0]?.input).toMatchObject({ name: "demo-skill", surface: "claude-code", rationale: "worth keeping" });
 		expect(calls[0]?.opts).toMatchObject({ maxBytes: 1_000_000, mode: "overlay", dryRun: false, reopen: false });
+	});
+
+	test("a stale expected_version is a 409 conflict, and nothing is proposed", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start(TOKENS, { skills: seam });
+		// No index is wired, so no version of the skill is on record: expecting version 1 is stale.
+		const stale = await propose(harness, "tok-agent", { ...body, expected_version: 1 });
+		expect(stale.status).toBe(409);
+		expect(stale.json).toMatchObject({
+			outcome: "conflict",
+			reason: "version.stale",
+			verified_persisted: false,
+			current_version: null,
+		});
+		expect(calls).toEqual([]);
+
+		// Expecting none on record is the one version that passes, so the 409 above is the check, not the route.
+		const first = await propose(harness, "tok-agent", { ...body, expected_version: 0 });
+		expect(first.status).toBe(200);
+		expect(calls).toHaveLength(1);
 	});
 
 	test.each(["existing", "unchanged", "declined", "dry_run"] as const)("a %s result is a 200 with the same body", async (status) => {
