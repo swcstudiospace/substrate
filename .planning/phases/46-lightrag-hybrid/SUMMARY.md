@@ -53,7 +53,7 @@ Phase 46 is partial. Criterion 1 is complete in the repository. Criteria 2, 3, 5
 - T4 comparator: deferred. Unblock: fixture-level design and a live dataset check in a later run.
 - T5 to T8 live steps: HARD_STOP. Unblock: operator approval for each run.
 - T3 sample content: unblock by reading each sample document and confirming its query before the live gate.
-- Phase 25 artifacts: missing from this worktree, though criterion 5 names phase 25. Unblock: locate or restore its CONTEXT, PLAN, SUMMARY and VERIFICATION.
+- Phase 25 artifacts: archived at .planning/milestones/v1.3-phases/25-docs-search-and-ingest-ragflow/ (located 2026-10-24). Criterion 5 names phase 25 as RAG-dependent, and its 25-VERIFICATION has not been read in this run. Unblock: read it and confirm whether it names a live RAGFlow call before cutover.
 
 ## Residual risks
 
