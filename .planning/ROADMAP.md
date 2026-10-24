@@ -8,7 +8,7 @@
 - ⚠️ **v1.3 Build plan completion** — Phases 16–33; shipped 2026-10-11, closed 2026-10-21 with accepted debt (8 audit rows and 43 operator-gated live proofs). Closeout: [milestones/v1.3-CLOSEOUT.md](milestones/v1.3-CLOSEOUT.md) · tracking: [SPE-8292](https://linear.app/swcstudio/issue/SPE-8292/n7-final-ordered-execution-plan-in-waves)
 - 🚧 **v1.4 Substrate contract hardening** — Phases 34-36: the three uplift-7 substrate gaps (invalid writes, expected_version for skills and docs, degraded-mode exactly-once). Source: [.planning/uplift-7/MILESTONE-AUDIT.md](uplift-7/MILESTONE-AUDIT.md) rows 23-25.
 - 🚧 **v1.3.x Should-have hardening** — Phases 37-44, scheduled from research/SUMMARY.md:68 (should-have, after validation).
-- 🚧 **v1.5 SOTA enhancements** — Phases 45-51, from the 7-SOTA plan on branch feature/7-sota-enhancements (PR #83 closed; PR #85 does not carry these).
+- 🚧 **v1.5 SOTA enhancements** — Phases 45-54: 45-51 from the 7-SOTA plan on branch feature/7-sota-enhancements (PR #83 closed; PR #85 does not carry these); 52-54 defined here from draft PR #105.
 
 ## Phases
 
