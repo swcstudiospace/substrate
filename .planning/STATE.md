@@ -3,17 +3,17 @@ gsd_state_version: "1.0"
 milestone: v1.3.x
 milestone_name: Should-have hardening (Planned)
 status: "v1.3.x phases 37-39 merged (PR #89, PR #90, PR #91). Phase 40 (DOCS-MEMORY) code on main via PR #92. Phase 41 (ANCHOR) code on main via PR #116. Phase 42 (SKILL-CARD) code on main via PR #94. Phases 43 (PR #97) and 44 (PR #95) complete. Verification is human_needed for phases 40-43 and passed for 44. On 2026-10-23 the operator accepted the open operator gates as debt for phases 40-43, 45 and 47-50; milestone audit and close are next."
-stopped_at: accepted debt recorded 2026-10-23; consistency check recorded 2026-10-24; milestone audit and close not yet run
+stopped_at: run 2026-10-24: inventory, baseline gates and TODO dispositions recorded; milestone audits await operator confirmation
 last_updated: "2026-10-24"
 last_activity: 2026-10-24
-last_activity_desc: consistency check of the accepted-debt phases recorded (PR #123)
+last_activity_desc: autonomous run 2026-10-24 (graph ut-mvlvvvbt-57c57d9e): phase reconciliation, baseline gates, deferral table, v1.4 grouping
 state_head: 1a9f4fd365ede291c4e21be71b6ff236e0e49c67
 progress:
   total_phases: 8
-  completed_phases: 2
-  total_plans: 3
-  completed_plans: 2
-  percent: 25
+  completed_phases: 1
+  total_plans: 8
+  completed_plans: 8
+  percent: 13
 current_phase: 40
 current_phase_name: docs-memory
 ---
@@ -205,10 +205,10 @@ Items acknowledged and deferred, most recent first:
 
 ## Operator Next Steps
 
-- Consistency check recorded 2026-10-24 (below). Next: phase 46 and phases 52-54, then the milestone audits.
-- Phase 46: discuss, plan, execute and verify the LightRAG query path and the migration waves.
-- Phases 52-54: merge main into drafts #104 and #109-#111 once #105 lands on main (no force push), then run each phase.
-- Milestone close (v1.3.x, then v1.5): gsd-audit-milestone, then gsd-complete-milestone, only after the operator confirms the audit output.
+- Decide the 2026-10-24 run pause batch (see Run record): confirm the v1.4 and v1.3.x audits before complete; accept or verify phases 37-39; Phase 46 discuss answers Q1-Q4; PR #123 (close or merge); the gate policy for planning PRs; and the out-of-path branches.
+- Phase 46 live steps (archive, deploy, ingestion, cutover, storage deletion) each need approval for that run.
+- Phases 52-54: merge drafts #104 and #109-#111 in order through the ship path once PR #123 is resolved (no force push).
+- Milestones v1.4 and v1.3.x close after the operator confirms each audit. Milestone v1.5 closes only after phase 46 and phases 52-54 are complete.
 
 ## Consistency check (2026-10-24)
 
@@ -218,6 +218,37 @@ Read-only check of the nine accepted-debt phases (40, 41, 42, 43, 45, 47, 48, 49
 - Phase 40: criterion 1 proven in repo; criterion 2 not met (restore drill, operator-gated, accepted as debt); criterion 3 not met as written and narrowed by the owner on 2026-10-22. ROADMAP now states the narrowed scope.
 - Fixed in this change: ROADMAP plan counts for phases 40-44 (0 plans to 1/1), the phase 40 goal and criterion 3 wording, and the progress row counts for phases 40-42.
 - Left unchanged: stale status lines in phase CONTEXT.md and PLAN.md frontmatter (workflow artifacts). They do not change any verdict.
+
+## Deferred Verification
+
+| Phase | State | Resume |
+|-------|-------|--------|
+| 37 | verification_deferred_human | /gsd:verify-work 37 |
+| 38 | verification_deferred_human | /gsd:verify-work 38 |
+| 39 | verification_deferred_human | /gsd:verify-work 39 |
+| 40 | verification_deferred_human | /gsd:verify-work 40 |
+| 41 | verification_deferred_human | /gsd:verify-work 41 |
+| 42 | verification_deferred_human | /gsd:verify-work 42 |
+| 43 | verification_deferred_human | /gsd:verify-work 43 |
+| 45 | verification_deferred_human | /gsd:verify-work 45 |
+| 47 | verification_deferred_human | /gsd:verify-work 47 |
+| 48 | verification_deferred_human | /gsd:verify-work 48 |
+| 49 | verification_deferred_human | /gsd:verify-work 49 |
+| 50 | verification_deferred_human | /gsd:verify-work 50 |
+
+Phases 40-43, 45 and 47-50 are accepted debt (operator decision, 2026-10-23). Phases 37-39 are human_needed and not covered by that decision; they wait on the operator's decision. Phase 46 is open work (re-scoped), not deferred.
+
+## Run record (2026-10-24, graph ut-mvlvvvbt-57c57d9e)
+
+- Kickoff: `track complete` is partial. Linear is blocked by the workspace free-issue limit; Notion rows exist. The Notion Task reads back Status Implementing, and the session is marked kicked-off.
+- Run branch `gsd/autonomous-run-2026-10-24` at 36580a6 (worktree `as-gsd-autonomous`). The PR #123 branch is untouched.
+- Baseline gates, run before any change. `bun run verify`: PASS (install; `bunx tsc --noEmit`; `bun test` 6061 pass, 177 skip, 0 fail; 177 skip because SUBSTRATE_TEST_PG_URL is unset; `bun run check:phase-close` pass; 182 s, under the 10-minute cap). `bun scripts/audit-gate.ts`: FAIL, pre-existing: three unlisted high advisories (body-parser 2.3.0 GHSA-27r3-jxmh-p828; undici 7.30.0 GHSA-xjj6-f33q-929c; zod 4.6.5 GHSA-mrhx-c7xc-m3w5). The fix is local commit 6106504 on `fix/audit-advisories-upgrade`, not pushed; its full suite passes 6061 / 0.
+- gsd-tools findings, recorded and not worked around: (1) `query init.manager` returns 0 phases for v1.3.x while `init.milestone-op` reports 8, so phase discovery was reconciled from artifacts. (2) `milestone complete v1.4 --dry-run` reported "no phases found" because phases 34-36 sat under the v1.3 heading; fixed by the v1.4 heading above, which adds no phase. (3) The audit workflow globs `*-SUMMARY.md`, but this repo's phases use `SUMMARY.md`, so its summary pass matches nothing; recorded as an audit caveat. (4) `init.milestone-op` reports completed_phases 0; the STATE frontmatter counts (2 completed, 3 plans) disagreed with the artifacts and are corrected above.
+- Phase reconciliation, artifacts win: every phase 34-51 has CONTEXT, PLAN, SUMMARY and VERIFICATION. VERIFICATION status: passed for 34, 35, 36, 44 and 51; human_needed for 37-43, 45, 46 and 47-50. Phases 52-54 exist only on draft branches (#104, #109, #110, #111), not on main.
+- Phase 46 (re-scoped): criterion 1 is largely in code. `planes/lightrag.ts`, `lightrag.test.ts`, the config LightRAG wiring, and the `docs-search.ts` LightRAG dispatch with Hindsight as a failure fallback are all present. Gaps for criterion 1: context is not attached to LightRAG success answers (`service.ts:4550` gate; decision Q3); "hybrid" is a LightRAG mode, not the RAGFlow weight (Q1); `docs/docs-plane.md` still describes RAGFlow only. Criteria 2-6 are live steps, each needing per-run approval. The RAG-hybrid CONTEXT.md and PLAN.md are superseded and are not reused. The decision brief Q1-Q4 awaits discuss answers.
+- TODO_BACKLOG (n3): the raw marker pass finds 25 hits and no real open items. Five are placeholder strings in packages; 20 are planning prose. Register items from `todo-inventory.md`, with dispositions: D-01 DEFERRED (operator-gated live handoff proof). D-02 MAPPED to phase 46. D-03 DEFERRED (human-only). D-04 DEFERRED (orphan). D-05 DEFERRED (orphan). D-06 NEEDS_DECISION: direction answered 2026-10-24 as governed fact entries; implementation scope still open. D-07 DEFERRED (operator-gated): the phase 20 scratch UAT passes scenarios 1, 3, 4, 6, 7 and 8; scenarios 2 and 5 were never run because they are production-gated. D-08 DEFERRED (accepted debt with v1.3). D-09 and D-10 (IN-01, IN-02) DEFERRED (orphan). D-11, D-12 and D-13 (IN-04, IN-05, IN-06) DEFERRED, fold when touched: no open branch or draft touches `scripts/parity-check.ts`, `rehearsal.ts` or `docs-smoke.ts`. D-14 and D-15 MAPPED to phase 46 (D-15 closes when RAGFlow is removed). D-16 DEFERRED until measured: phase-close ran in 3.2 s in this run. D-17 DEFERRED to the touched-code rule: 29 findings in 24 files, not enabled repo-wide. D-18 FOLD when touched: explicit `any` is 37 (19 in tests, 18 outside); the register's 34 is stale. D-19 NEEDS_DECISION to ship: Biome is on `quality/biome-report-only` (a9dba82, pushed), unshipped. D-20 DEFERRED: README.md:91 documents `bun run check`, which no script defines; no README change is in this run's file set. D-21 NEEDS_DECISION to ship: swarm pins are on `test/swarm-pins-a16-a30` (04772af, pushed), unshipped. D-22 CONFIRMED (no change). D-23 CONFIRMED: 11 stashes kept.
+- Scout items from phase CONTEXT and PLAN "Out of scope" lists (phases 37-44) DEFERRED to each phase's operator gate, the same gates as the Deferred Verification table.
+- Quality candidates, not started: `packages/dispatcher/tests` and `packages/miner/tests` hold Python tests that no gate runs, while `package.json` defines `test:py`; `docs/ci.md` says none exist on main. Also: explicit `any` 37; 29 unused-local/parameter findings; the Biome gate and the audit upgrade await shipping.
 
 ## Session Continuity
 
