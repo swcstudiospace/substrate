@@ -325,3 +325,196 @@ export function verifyChain(events: SubstrateEvent[]): { ok: true } | { ok: fals
 	}
 	return { ok: true };
 }
+
+/**
+ * Live steering sessions (SPE-19390): planning updates propagate to open
+ * sessions without blocking them. A session lives in one of four states;
+ * the transition table keeps a stale writer from resurrecting a paused
+ * session or skipping the refresh a planning change requires. States ride
+ * on existing event kinds (`note`/`warning`) as payload — never a new
+ * kind — so the hash chain and every existing reader are untouched.
+ */
+export type SteeringSessionState = "ACTIVE" | "CONTEXT_REFRESH" | "PAUSED" | "RESUMED";
+
+/** The closed set of steering states an MCP or REST caller may name. */
+export const STEERING_STATES: readonly SteeringSessionState[] = ["ACTIVE", "CONTEXT_REFRESH", "PAUSED", "RESUMED"];
+
+/** A live steering session: which repo it steers, where it stands, and what changed. */
+export interface SteeringSession {
+	session_id: string;
+	repo_id: string;
+	state: SteeringSessionState;
+	planning_hash?: string;
+	steering?: string;
+	updated_at: string;
+}
+
+/** Whether `next` may follow `current`. Unknown states never transition. */
+export function steeringStateTransition(current: SteeringSessionState, next: SteeringSessionState): boolean {
+	if (current === next) return true;
+	switch (current) {
+		case "ACTIVE":
+			return next === "CONTEXT_REFRESH" || next === "PAUSED";
+		case "CONTEXT_REFRESH":
+			return next === "ACTIVE" || next === "PAUSED";
+		case "PAUSED":
+			return next === "RESUMED";
+		case "RESUMED":
+			return next === "ACTIVE" || next === "PAUSED";
+		default:
+			return false;
+	}
+}
+
+/**
+ * A `owner/name` slug namespaced for multi-repo steering. Lowercased and
+ * trimmed; anything else scopes to the empty (unscoped) repo rather than
+ * throwing, so a bad caller degrades instead of failing the turn.
+ */
+export function scopeRepoId(repo: string | null | undefined): string {
+	if (typeof repo !== "string") return "";
+	const scoped = repo.trim().toLowerCase();
+	return /^[a-z0-9._-]+\/[a-z0-9._-]+$/.test(scoped) ? scoped : "";
+}
+
+/** The `repo:`-prefixed scope one dataset or session is served under. */
+export function repoScopePrefix(repoId: string): string {
+	const scoped = scopeRepoId(repoId);
+	return scoped === "" ? "" : `repo:${scoped}:`;
+}
+
+/**
+ * The non-blocking context payload a steering transition carries on its
+ * event: the action, the repo scope, both states and — on a planning
+ * trigger — the old and new planning hashes. Emitting it never throws;
+ * callers that cannot read it ignore unknown payload keys as before.
+ */
+export function steeringSessionPayload(session: SteeringSession, previous?: SteeringSessionState): Record<string, unknown> {
+	return {
+		action: "docs.steering",
+		repo_id: session.repo_id,
+		session_id: session.session_id,
+		state: session.state,
+		...(previous !== undefined ? { previous_state: previous } : {}),
+		...(session.planning_hash !== undefined ? { planning_hash: session.planning_hash } : {}),
+		...(session.steering !== undefined ? { steering: session.steering.slice(0, 2000) } : {}),
+		non_blocking: true,
+	};
+}
+
+/**
+ * Build the next session record for a transition, or the reason it is
+ * refused. Pure: the caller stores the session and emits the payload.
+ */
+export function nextSteeringSession(
+	current: SteeringSession | null,
+	input: { session_id: string; repo_id: string; state: SteeringSessionState; planning_hash?: string; steering?: string },
+	nowMs: number = Date.now(),
+): { ok: true; session: SteeringSession; previous?: SteeringSessionState } | { ok: false; reason: string } {
+	const repoId = scopeRepoId(input.repo_id);
+	if (repoId === "") return { ok: false, reason: "repo_id must be owner/name" };
+	if (input.session_id.trim().length === 0) return { ok: false, reason: "session_id is required" };
+	if (current !== null && current.session_id !== input.session_id) return { ok: false, reason: "session_id mismatch" };
+	const previous = current?.state;
+	if (previous !== undefined && !steeringStateTransition(previous, input.state)) {
+		return { ok: false, reason: `steering transition ${previous} -> ${input.state} refused` };
+	}
+	return {
+		ok: true,
+		session: {
+			session_id: input.session_id,
+			repo_id: repoId,
+			state: input.state,
+			...(input.planning_hash !== undefined ? { planning_hash: input.planning_hash } : {}),
+			...(input.steering !== undefined ? { steering: input.steering } : {}),
+			updated_at: new Date(nowMs).toISOString(),
+		},
+		...(previous !== undefined ? { previous } : {}),
+	};
+}
+
+/**
+ * Live steering for the docs plane: a planning change re-ingests the
+ * planning roots, nothing else.
+ *
+ * There is no `planning.updated` event kind — `EVENT_KINDS` is closed, and
+ * the steering sessions above already ride `note`/`warning` payloads for
+ * the same reason. Instead the trigger reads the paths an event already
+ * carries: file edits name them, commits list them, notes quote them. Only
+ * `.planning/` paths trigger, and the trigger names only the planning
+ * roots, so a mixed change never re-ingests the full corpus ("planning
+ * only update").
+ *
+ * Pure: the service maps a triggered result to a targeted `ingestDocs`
+ * call over `roots` with pages swept from `paths`. The `log` writes the
+ * one observable line per trigger, so the refresh is visible in the log
+ * — or in a test — without running the ingest.
+ */
+export const PLANNING_INGEST_ROOTS: readonly string[] = [".planning/"];
+
+/** What a planning change asks the docs plane to re-ingest. */
+export interface PlanningIngestTrigger {
+	triggered: boolean;
+	roots: readonly string[];
+	paths: string[];
+	reason: string;
+}
+
+/** Payload keys that name changed paths on the existing event kinds. */
+const PLANNING_PATH_KEYS: Record<string, true> = { path: true, real_path: true, paths: true, files: true, file: true };
+
+/** A repo-relative `.planning/` path, or null for anything else. */
+function cleanPlanningPath(value: string): string | null {
+	const trimmed = value.trim().replace(/^\/+/, "").replace(/^\.\/+/, "");
+	if (trimmed.startsWith(".planning/")) return trimmed;
+	// Absolute checkouts end in the repo path; only the suffix matters.
+	const at = trimmed.indexOf("/.planning/");
+	if (at === -1) return null;
+	return trimmed.slice(at + 1);
+}
+
+function collectPlanningPaths(payload: Record<string, unknown>, into: string[]): void {
+	const seen = new Set<string>();
+	const take = (value: unknown): void => {
+		if (typeof value === "string") {
+			const clean = cleanPlanningPath(value);
+			if (clean !== null && !seen.has(clean)) {
+				seen.add(clean);
+				into.push(clean);
+			}
+		} else if (Array.isArray(value)) {
+			for (const entry of value) take(entry);
+		}
+	};
+	for (const [key, value] of Object.entries(payload)) {
+		if (PLANNING_PATH_KEYS[key] === true) take(value);
+		else if (typeof value === "string" && value.includes(".planning/")) take(value);
+		else if (Array.isArray(value)) {
+			for (const entry of value) if (typeof entry === "string" && entry.includes(".planning/")) take(entry);
+		}
+	}
+}
+
+/** The `.planning/` paths an event's payload names, deduplicated in order. */
+export function planningPathsOf(input: Pick<EventInput, "payload">): string[] {
+	const paths: string[] = [];
+	if (input.payload !== undefined) collectPlanningPaths(input.payload, paths);
+	return paths;
+}
+
+/** Whether an event names any planning path — the `planning.updated` signal, without a new kind. */
+export function isPlanningUpdate(input: Pick<EventInput, "payload">): boolean {
+	return planningPathsOf(input).length > 0;
+}
+
+/** The targeted re-ingest a planning change asks for; logs the one observable line when triggered. */
+export function planningIngestTrigger(
+	input: Pick<EventInput, "kind" | "summary" | "payload">,
+	log: (line: string) => void = (line) => process.stderr.write(line),
+): PlanningIngestTrigger {
+	const paths = planningPathsOf(input);
+	if (paths.length === 0) return { triggered: false, roots: [], paths: [], reason: "no-planning-paths" };
+	const reason = `planning-paths:${paths.length}`;
+	log(`[substrate] planning update (${input.kind}): re-ingesting ${paths.length} page(s) under .planning/\n`);
+	return { triggered: true, roots: PLANNING_INGEST_ROOTS, paths, reason };
+}

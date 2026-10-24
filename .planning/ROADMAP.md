@@ -8,7 +8,7 @@
 - ⚠️ **v1.3 Build plan completion** — Phases 16–33; shipped 2026-10-11, closed 2026-10-21 with accepted debt (8 audit rows and 43 operator-gated live proofs). Closeout: [milestones/v1.3-CLOSEOUT.md](milestones/v1.3-CLOSEOUT.md) · tracking: [SPE-8292](https://linear.app/swcstudio/issue/SPE-8292/n7-final-ordered-execution-plan-in-waves)
 - 🚧 **v1.4 Substrate contract hardening** — Phases 34-36: the three uplift-7 substrate gaps (invalid writes, expected_version for skills and docs, degraded-mode exactly-once). Source: [.planning/uplift-7/MILESTONE-AUDIT.md](uplift-7/MILESTONE-AUDIT.md) rows 23-25.
 - 🚧 **v1.3.x Should-have hardening** — Phases 37-44, scheduled from research/SUMMARY.md:68 (should-have, after validation).
-- 🚧 **v1.5 SOTA (phases 45-54)** — Phases 45-54, SOTA-01 to SOTA-10, from the 7-SOTA plan on branch feature/7-sota-enhancements (PR #83 closed; PR #85 does not carry these).
+- 🚧 **v1.5 SOTA enhancements** — Phases 45-51, from the 7-SOTA plan on branch feature/7-sota-enhancements (PR #83 closed; PR #85 does not carry these).
 
 ## Phases
 
@@ -82,26 +82,26 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 35: expected_version for skills and docs** - a stale skill or docs write is rejected with the memory contract's error; an absent field keeps today's behavior.
 - [x] **Phase 36: Degraded-mode exactly-once replay** - a write carrying an idempotency key applies once across replays; the dependent client's queue is built or recorded as a decision.
 
-### 🚧 v1.3.x Should-have hardening (Phases 37-44 code complete on main; phase 40 open follow-ups)
+### 🚧 v1.3.x Should-have hardening (Planned)
 
-- [x] **Phase 37: LANEB** - graph inference from worktree path (completed 2026-10-21 via PR #89, merge a1b7152)
-- [x] **Phase 38: MIRROR** - mirror graph edges into Linear relations and outcomes into evidence (completed 2026-10-21 via PR #90, merge 1d4e4aa)
-- [x] **Phase 39: DISPATCH** - signed handoff packet and coord drift scan before launch (completed 2026-10-21 via PR #91, merge acb6767)
-- [ ] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (code complete on main via PR #92, merge 6b7c4f2; open follow-ups: retirement restore drill (D-D3) and D-D4 acceptance; verification partial)
-- [x] **Phase 41: ANCHOR** - anchor evidence and teachables (completed 2026-10-21 via PR #93, merge 3466c50; no residual)
-- [x] **Phase 42: SKILL-CARD** - skills_list audit trail and the F-D4 re-ingest item (completed 2026-10-21 via PR #94, merge 3e9a106)
-- [x] **Phase 43: LANE-A** - sandbox egress allowlist and task re-adoption (completed 2026-10-21 via PR #97, merge f2138e1)
-- [x] **Phase 44: UAT** - repeatable UAT script against any SUBSTRATE_URL (completed 2026-10-21 via PR #95, merge 92ef7c2)
+- [x] **Phase 37: LANEB** - graph inference from worktree path
+- [x] **Phase 38: MIRROR** - mirror graph edges into Linear relations and outcomes into evidence
+- [x] **Phase 39: DISPATCH** - signed handoff packet and coord drift scan before launch
+- [x] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (decided 2026-10-21). Code on main (PR #92). Accepted as debt by the operator on 2026-10-23; live restore drill and approval open (D-D3).
+- [x] **Phase 41: ANCHOR** - anchor evidence and teachables. Code on main (PR #116). Accepted as debt by the operator on 2026-10-23; live devnet proof open.
+- [x] **Phase 42: SKILL-CARD** - skills_list audit trail and the F-D4 re-ingest item. Code on main (PR #94). Accepted as debt by the operator on 2026-10-23; live host fast-forward open.
+- [x] **Phase 43: LANE-A** - sandbox egress allowlist and task re-adoption. Complete (PR #97). Accepted as debt by the operator on 2026-10-23; live egress and restart proof open.
+- [x] **Phase 44: UAT** - repeatable UAT script against any SUBSTRATE_URL. Complete (PR #95); verification passed.
 
-### 🚧 v1.5 SOTA (phases 45-54) (5 of 10 complete on main; 5 in review)
+### 🚧 v1.5 SOTA enhancements (Planned)
 
-- [x] **Phase 45: Railway Resource Orchestrator** - budget ceiling $50 per month, confirmed 2026-10-21 (uplift-7/BLOCKING-UNKNOWNS.md item 8) (completed 2026-10-21 via PR #96, merge 93acd8a)
-- [x] **Phase 46: RAGFlow Advanced Hybrid RAG with Hindsight Context** - hybrid search with reranking and Hindsight context (completed 2026-10-21 via PR #98, merge 4c2c48e)
-- [x] **Phase 47: GreptimeDB + Dragonfly Predictive Analytics & Cache** - SLO burn forecasting and pattern-based cache pre-warming (completed 2026-10-21 via PR #100, merge d8accda)
-- [ ] **Phase 48: TailscaleDB Secure Unified Proxy Layer** - zero-trust database access through one Tailscale proxy with RBAC, audit and pooling (In review: draft PR #102)
-- [x] **Phase 49: Hindsight Graph Memory with Greptime Events** - graph-structured Hindsight memory with causal recall (completed 2026-10-21 via PR #101, merge 2495a14)
-- [x] **Phase 50: Dragonfly Pub/Sub for Real-time Events** - real-time event propagation and event-driven cache invalidation (completed 2026-10-21 via PR #103, merge bdda262)
-- [ ] **Phase 51: Enterprise Unified Resource Fabric** - one MCP interface across all six resources, depends on phases 45 and 48 (In review: draft PR #108)
+- [x] **Phase 45: Railway Resource Orchestrator** - budget ceiling $50 per month, confirmed 2026-10-21 (uplift-7/BLOCKING-UNKNOWNS.md item 8). Accepted as debt on 2026-10-23; live Railway proof open.
+- [ ] **Phase 46: LightRAG hybrid RAG with Hindsight context and the RAGFlow migration** - re-scoped 2026-10-23 by operator decision; the migration waves run inside this phase and are not accepted as debt.
+- [x] **Phase 47: GreptimeDB + Dragonfly Predictive Analytics & Cache** - SLO burn forecasting and pattern-based cache pre-warming. Accepted as debt on 2026-10-23; live warm-up proof open.
+- [x] **Phase 48: TailscaleDB Secure Unified Proxy Layer** - zero-trust database access through one Tailscale proxy with RBAC, audit and pooling. Accepted as debt on 2026-10-23; live forwarders and cutover open.
+- [x] **Phase 49: Hindsight Graph Memory with Greptime Events** - graph-structured Hindsight memory with causal recall. Accepted as debt on 2026-10-23; live ledger proof open.
+- [x] **Phase 50: Dragonfly Pub/Sub for Real-time Events** - real-time event propagation and event-driven cache invalidation. Accepted as debt on 2026-10-23; live subscription and wake-up latency open.
+- [x] **Phase 51: Enterprise Unified Resource Fabric** - one MCP interface across all six resources, depends on phases 45 and 48
 - [ ] **Phase 52: GSD-Core planning index and cross-session awareness core** - file-first index, session presence and read-only planning tools (In review: draft PR #104 core, PR #109 wiring)
 - [ ] **Phase 53: Steering, conflict control and checkpoint/resume** - audited steering inbox, conflict events and resumable checkpoints (In review: draft PR #110)
 - [ ] **Phase 54: Planning observability and migration inventory** - phase-transition metrics, session STATES and the Railway migration inventory (In review: draft PR #111)
@@ -567,7 +567,7 @@ Plans:
   2. Claude Code's global `hindsight` stdio MCP and Hermes supermemory are retired once the `sub-*` banks answer, with restore routes recorded first.
   3. A weekly `reflect` per bank: mental models replace stale detail (`data-planes.md:27,39`).
 
-**Plans**: 1/1 plans complete (PLAN.md); verification record `.planning/phases/40-docs-memory/VERIFICATION.md` on origin/main (status partial: criterion 2 not met). Code complete on main (PR #92); open follow-ups: retirement restore drill (D-D3) and D-D4 acceptance.
+**Plans**: 0 plans (created by gsd-plan-phase)
 
 ### Phase 41: ANCHOR
 
@@ -584,7 +584,7 @@ Plans:
   1. Anchors appear in the evidence bundle: a tx signature and an explorer link per hour, so PR and incident evidence can be checked outside the system (v0.3 6.x).
   2. Teachable moments are anchored with graph id plus an observation digest, a user addition carried in the brief's area E.
 
-**Plans**: 1/1 plans complete (PLAN.md); verification record phases/41-anchor/VERIFICATION.md; merged in PR #93 (3466c50); no residual.
+**Plans**: 0 plans (created by gsd-plan-phase)
 
 ### Phase 42: SKILL-CARD
 
@@ -601,7 +601,7 @@ Plans:
   1. `skills_list` and an approve/decline audit trail (§5.1; v0.3 "4.x Skill approve audit").
   2. Skills become searchable through `docs_search` after each `agent-skills` fast-forward re-ingest.
 
-**Plans**: 1/1 plans complete (PLAN.md); verification record phases/42-skill-card/VERIFICATION.md; merged in PR #94 (3e9a106)
+**Plans**: 0 plans (created by gsd-plan-phase)
 
 ### Phase 43: LANE-A
 
@@ -618,7 +618,7 @@ Plans:
   1. An enforced egress allowlist for the sandbox container (September N3 found it could reach example.com).
   2. Running tasks are re-adopted after a dispatcher restart, so no orphaned VMs remain (N4).
 
-**Plans**: 1/1 plans complete (PLAN.md); verification record phases/43-lane-a/VERIFICATION.md; merged in PR #97 (f2138e1)
+**Plans**: 0 plans (created by gsd-plan-phase)
 
 ### Phase 44: UAT
 
@@ -634,7 +634,7 @@ Plans:
 
   1. The UAT runs as a repeatable script against any `SUBSTRATE_URL`, a regression check for every later phase (I-D1).
 
-**Plans**: 1/1 plans complete (PLAN.md); verification record phases/44-uat/VERIFICATION.md; merged in PR #95 (92ef7c2)
+**Plans**: 0 plans (created by gsd-plan-phase)
 
 ### Phase 45: Railway Resource Orchestrator
 
@@ -654,24 +654,28 @@ Plans:
   2. Basic scale suggestion.
   3. Cost report in /slo.
 
-**Plans**: 1/1 plans complete (PLAN.md); verification record phases/45-railway/VERIFICATION.md; merged in PR #96 (93acd8a)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/45-railway/VERIFICATION.md; live Railway proof operator-gated
 
-### Phase 46: RAGFlow Advanced Hybrid RAG with Hindsight Context
+### Phase 46: LightRAG hybrid RAG with Hindsight context and the RAGFlow migration
 
-**Goal**: Docs answers use hybrid search with reranking, augmented by Hindsight and Greptime event context.
+**Goal**: Docs answers come from LightRAG with hybrid search and Hindsight context. The RAGFlow to LightRAG migration runs inside this phase: archive, LightRAG deploy, migration job, parity gate, cutover, then RAGFlow removal after the RAG-dependent phases pass. Each live step needs the operator's approval for that run.
 
 **Depends on**: none (7-SOTA plan on branch feature/7-sota-enhancements)
 
-**Repos**: agent-substrate (target files: packages/mcp-server/src/planes/ragflow.ts, planes/hindsight.ts, docs/docs-plane.md)
+**Repos**: agent-substrate (target files: packages/mcp-server/src/planes/lightrag.ts, planes/ragflow.ts (removed in the migration), planes/hindsight.ts, docs/docs-plane.md)
 
 **Requirements**: [SOTA-02]
 
 **Success Criteria** (what must be TRUE):
 
-  1. docs_search returns context-augmented results.
-  2. Tests for hybrid.
+  1. docs_search answers from LightRAG with hybrid search and Hindsight context, with tests.
+  2. The RAGFlow dataset is archived, with a verified checksum, before any deletion.
+  3. LightRAG is deployed to Agent Substrate production and passes a timed health probe.
+  4. The migration job and parity comparator pass PARITY_GATE before any ingestion. PARITY_GATE checks, in order: every migrated record keeps its dataset, source URL and version (zero mismatches allowed); a fixed sample of queries, listed in the phase 46 PLAN, returns citations from the same source documents at the match rate the PLAN sets before the run.
+  5. Cutover is a logged, reversible switch with a delta pass. RAGFlow code and service are removed only after cutover, after criteria 1 to 4 pass, and after every other RAG-dependent phase passes. The RAG-dependent phases are 25 and 42, plus any other phase whose VERIFICATION names a live RAGFlow call (the phase 46 PLAN confirms that list before cutover). Storage deletion needs its own approval.
+  6. Every live step (deploy, ingestion, cutover, storage deletion) runs only after the operator approves it for that run.
 
-**Plans**: 1/1 plans complete (PLAN.md); verification record phases/46-ragflow-hybrid/VERIFICATION.md; merged in PR #98 (4c2c48e)
+**Plans**: 0 plans (re-scoped 2026-10-23; the earlier 1/1 verification in phases/46-ragflow-hybrid/VERIFICATION.md covered the RAGFlow path and no longer applies)
 
 ### Phase 47: GreptimeDB + Dragonfly Predictive Analytics & Cache
 
@@ -688,13 +692,11 @@ Plans:
   1. /slo has predictive rows.
   2. Cache preloads based on patterns.
 
-**Plans**: 1/1 plans complete (PLAN.md); verification record phases/47-forecast-preload/VERIFICATION.md; merged in PR #100 (d8accda)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/47-forecast-preload/VERIFICATION.md; live proof operator-gated
 
 ### Phase 48: TailscaleDB Secure Unified Proxy Layer
 
 **Goal**: Greptime, Dragonfly and Timescale are reached through one secure Tailscale proxy layer with RBAC, audit and pooling.
-
-**Status**: In review as draft PR #102 (base main, head gsd/v15-48-proxy). Not on main.
 
 **Depends on**: none (7-SOTA plan on branch feature/7-sota-enhancements)
 
@@ -707,7 +709,7 @@ Plans:
   1. All DBs accessed via secure proxy.
   2. Audit events for access.
 
-**Plans**: 0 plans on main. Draft PR #102 (branch gsd/v15-48-proxy, head 7ae3b9b): hosted CI success (run 39715198795), including the known-vulnerability audit. Greptile threads may still be open until a docs fix is reviewed; they are not resolved. PR #99 merged 2026-10-21.
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/48-tailscale-proxy/VERIFICATION.md; merged in PR #102; live cutover operator-gated
 
 ### Phase 49: Hindsight Graph Memory with Greptime Events
 
@@ -724,7 +726,7 @@ Plans:
   1. memory_search returns graph-linked results.
   2. Recall uses causal.
 
-**Plans**: 1/1 plans complete (PLAN.md); verification record phases/49-graph-memory/VERIFICATION.md; merged in PR #101 (2495a14)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/49-graph-memory/VERIFICATION.md; live proof operator-gated
 
 ### Phase 50: Dragonfly Pub/Sub for Real-time Events
 
@@ -741,13 +743,11 @@ Plans:
   1. Real-time notifications for events via Dragonfly.
   2. Tests.
 
-**Plans**: 1/1 plans complete (PLAN.md); verification record phases/50-dragonfly-pubsub/VERIFICATION.md; merged in PR #103 (bdda262)
+**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/50-dragonfly-pubsub/VERIFICATION.md; live subscription operator-gated
 
 ### Phase 51: Enterprise Unified Resource Fabric
 
 **Goal**: One MCP interface and set of dashboards covers all six resources on Railway and Tailscale, with cross-resource optimization and compliance reporting.
-
-**Status**: In review as draft PR #108 (base gsd/v15-48-proxy, head gsd/p51-fabric-impl). Not on main.
 
 **Depends on**: Phases 45 and 48 (inferred from the Railway and Tailscale scope of the 7-SOTA plan, item 7; the plan states no dependency)
 
@@ -760,7 +760,8 @@ Plans:
   1. New MCP tools for fabric status and optimization suggestions.
   2. Compliance report.
 
-**Plans**: 0 plans on main (created by gsd-plan-phase). Plan commit 87c2bdc sits on origin branch gsd/v15-51-fabric; implementation is on origin (branch gsd/p51-fabric-impl) as draft PR #108, not on main.
+**Plans**: 1/1 plans complete; verified 2026-10-22 in phases/51-enterprise-fabric/VERIFICATION.md; merged in PR #108
+
 
 ### Phase 52: GSD-Core planning index and cross-session awareness core
 
@@ -852,21 +853,21 @@ Plans:
 | 34. Invalid-write round trip | v1.4 | 1/1 | Complete | 2026-10-21 |
 | 35. expected_version for skills and docs | v1.4 | 1/1 | Complete | 2026-10-21 |
 | 36. Degraded-mode exactly-once replay | v1.4 | 1/1 | Complete | 2026-10-21 |
-| 37. LANEB | v1.3.x | 1/1 | Complete (PR #89) | 2026-10-21 |
-| 38. MIRROR | v1.3.x | 1/1 | Complete (PR #90) | 2026-10-21 |
+| 37. LANEB | v1.3.x | 1/1 | Complete | 2026-10-21 |
+| 38. MIRROR | v1.3.x | 1/1 | Complete | 2026-10-21 |
 | 39. DISPATCH | v1.3.x | 1/1 | Complete (PR #91) | 2026-10-21 |
-| 40. DOCS-MEMORY | v1.3.x | 1/1 | Code complete on main (PR #92); open follow-ups: retirement restore drill (D-D3) and D-D4 acceptance | - |
-| 41. ANCHOR | v1.3.x | 1/1 | Complete (PR #93); no residual | 2026-10-21 |
-| 42. SKILL-CARD | v1.3.x | 1/1 | Complete (PR #94) | 2026-10-21 |
-| 43. LANE-A | v1.3.x | 1/1 | Complete (PR #97) | 2026-10-21 |
+| 40. DOCS-MEMORY | v1.3.x | 0/0 | Complete (accepted debt 2026-10-23); live restore drill open | 2026-10-23 |
+| 41. ANCHOR | v1.3.x | 0/0 | Complete (accepted debt 2026-10-23); live devnet proof open | 2026-10-23 |
+| 42. SKILL-CARD | v1.3.x | 0/0 | Complete (accepted debt 2026-10-23); live host proof open | 2026-10-23 |
+| 43. LANE-A | v1.3.x | 1/1 | Complete (PR #97); live egress and restart proof open (accepted debt 2026-10-23) | 2026-10-21 |
 | 44. UAT | v1.3.x | 1/1 | Complete (PR #95) | 2026-10-21 |
-| 45. Railway Resource Orchestrator | v1.5 | 1/1 | Complete (PR #96) | 2026-10-21 |
-| 46. RAGFlow Advanced Hybrid RAG with Hindsight Context | v1.5 | 1/1 | Complete (PR #98) | 2026-10-21 |
-| 47. GreptimeDB + Dragonfly Predictive Analytics & Cache | v1.5 | 1/1 | Complete (PR #100) | 2026-10-21 |
-| 48. TailscaleDB Secure Unified Proxy Layer | v1.5 | 0/0 | In review (draft PR #102) | - |
-| 49. Hindsight Graph Memory with Greptime Events | v1.5 | 1/1 | Complete (PR #101) | 2026-10-21 |
-| 50. Dragonfly Pub/Sub for Real-time Events | v1.5 | 1/1 | Complete (PR #103) | 2026-10-21 |
-| 51. Enterprise Unified Resource Fabric | v1.5 | 0/0 | In review (draft PR #108) | - |
+| 45. Railway Resource Orchestrator | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live Railway proof open | 2026-10-23 |
+| 46. LightRAG hybrid RAG and the RAGFlow migration | v1.5 | 0/0 | Re-scoped 2026-10-23 by operator decision; not started | - |
+| 47. GreptimeDB + Dragonfly Predictive Analytics & Cache | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live warm-up proof open | 2026-10-23 |
+| 48. TailscaleDB Secure Unified Proxy Layer | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live forwarders and cutover open | 2026-10-23 |
+| 49. Hindsight Graph Memory with Greptime Events | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live ledger proof open | 2026-10-23 |
+| 50. Dragonfly Pub/Sub for Real-time Events | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live subscription proof open | 2026-10-23 |
+| 51. Enterprise Unified Resource Fabric | v1.5 | 1/1 | Complete (PR #108) | 2026-10-22 |
 | 52. GSD-Core planning index and cross-session awareness core | v1.5 | 0/0 | In review (draft PR #104 core, PR #109 wiring) | - |
 | 53. Steering, conflict control and checkpoint/resume | v1.5 | 0/0 | In review (draft PR #110) | - |
 | 54. Planning observability and migration inventory | v1.5 | 0/0 | In review (draft PR #111) | - |

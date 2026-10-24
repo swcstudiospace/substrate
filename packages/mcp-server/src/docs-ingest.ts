@@ -46,6 +46,15 @@ import {
 	type VersionStore,
 } from "./docs-datasets.ts";
 import { createFreshnessState, freshnessStateFromJson, freshnessStateToJson, type FreshnessState, type LagMarker } from "./docs-freshness.ts";
+import type { DocsBackend, LightragConfig } from "./config.ts";
+import type { LightragDatasetList } from "./docs-search.ts";
+import {
+	deleteDocuments as deleteLightragDocuments,
+	parseDocuments as parseLightragDocuments,
+	pollParseStatus as pollLightragParseStatus,
+	storePlanningPage,
+	uploadDocument as uploadLightragDocument,
+} from "./planes/lightrag.ts";
 import {
 	deleteDocuments,
 	documentName,
@@ -57,7 +66,7 @@ import {
 } from "./planes/ragflow.ts";
 import { REDACTION_RULES, redact, redactSkillContent } from "./redact.ts";
 import { SKILL_NAME_RE } from "./skills/propose.ts";
-import type { EventInput, Surface } from "./types.ts";
+import type { EventInput, PlanningGraphHint, PlanningGraphRelation, Surface } from "./types.ts";
 
 /** One page may not exceed 1 MB (D25-05, Phase 21 precedent). */
 export const INGEST_PAGE_MAX_BYTES = 1_000_000;
@@ -67,9 +76,10 @@ export const INGEST_CALL_MAX_BYTES = 5_000_000;
 /**
  * Where ingestable pages live, as path prefixes. Mirrors the
  * `agent-substrate` dataset sources in `docs/data-planes.md`
- * (`README.md`, `docs/`, `.planning/PROJECT.md`).
+ * (`README.md`, `docs/`, `.planning/` — the whole planning tree, so phase
+ * plans ride the same refresh as the project brief).
  */
-export const DEFAULT_INGEST_ROOTS: readonly string[] = ["docs/", "README.md", ".planning/PROJECT.md"];
+export const DEFAULT_INGEST_ROOTS: readonly string[] = ["docs/", "README.md", ".planning/"];
 
 /**
  * The file-system calls the sweep makes, injectable so a test can prove the
@@ -100,7 +110,10 @@ export const nodeIo: ScanIo = { lstat, stat, readdir, readFile };
  * not have is not an outage of the docs plane. A sweep that finds nothing
  * comes back empty, and the guarded ingest refuses `no-pages` on it. Every
  * page carries a `file://` source URL derived from its resolved path, so the
- * content-hash idempotency keys stay stable across restarts of the server. The
+ * content-hash idempotency keys stay stable across restarts of the server. A
+ * `.planning/**.md` page additionally carries its planning-graph hint
+ * (`graph`: heading entities plus section/link relations), extracted
+ * post-read so the stat cap still applies before any byte is loaded. The
  * result is sorted by path, so a refresh ingests in a stable order.
  */
 export async function scanIngestPages(baseDir: string, roots: readonly string[], io: ScanIo = nodeIo): Promise<IngestPage[]> {
@@ -188,7 +201,131 @@ async function addFilePage(absolute: string, path: string, pages: IngestPage[], 
 	if (stats === undefined || stats.size > INGEST_PAGE_MAX_BYTES) return;
 	const body = await tolerant(() => io.readFile(absolute, "utf8"), unreadable);
 	if (body === undefined) return;
-	pages.push({ path, source_url: pathToFileURL(absolute).href, body });
+	const graph = extractPlanningGraphHint(path, body);
+	pages.push({
+		path,
+		source_url: pathToFileURL(absolute).href,
+		body,
+		...(graph !== undefined ? { graph } : {}),
+	});
+}
+
+/**
+ * Whether a repo-relative page path is a planning page: anything under
+ * `.planning/` ending in `.md`. Non-planning pages never carry a graph hint.
+ */
+export function isPlanningPage(path: string): boolean {
+	const clean = normalizeIngestPath(path);
+	return clean !== null && clean.startsWith(".planning/") && clean.endsWith(".md");
+}
+
+/**
+ * The phase id a planning hint attributes: the phase directory for
+ * `.planning/phases/<id>/…` or `.planning/<id>/…`, else the file's path under
+ * `.planning/` without the `.md` suffix (`PROJECT.md` → `"PROJECT"`).
+ */
+export function planningPhaseOf(path: string): string {
+	const clean = normalizeIngestPath(path) ?? path;
+	if (!clean.startsWith(".planning/")) return clean.endsWith(".md") ? clean.slice(0, -".md".length) : clean;
+	const segments = clean.slice(".planning/".length).split("/");
+	const [first, second] = segments;
+	if (first === "phases" && segments.length > 2 && second !== undefined && second.length > 0) return second;
+	if (segments.length > 1 && first !== undefined && first.length > 0) return first;
+	const file = segments.join("/");
+	return file.endsWith(".md") ? file.slice(0, -".md".length) : file;
+}
+
+const ATX_HEADING = /^(#{1,6})\s+(.+?)\s*#*\s*$/;
+const INLINE_LINK = /\[([^\]]*)\]\(([^)\s]+)(?:\s+[^)]*)?\)/g;
+
+/**
+ * Extract the planning-graph hint a `.planning` markdown page carries for the
+ * LightRAG insert: ATX headings become entities (parent→child headings become
+ * `contains` relations), inline markdown links become `links-to` relations
+ * from the enclosing heading (or the phase, when none precedes) to the raw
+ * target. Targets stay verbatim — cross-folder (`../docs/x.md`), anchor
+ * (`#section`) and remote (`https://…`) alike — so the ingest roots gate,
+ * not the scanner, decides what resolves. Code fences and a leading `---`
+ * frontmatter block are skipped, never parsed; reference-style links and
+ * bare autolinks are not extracted. Returns undefined for non-planning
+ * paths; a heading-less planning page still yields its link relations
+ * (empty entity lists mean "no bias", never an absent hint).
+ */
+export function extractPlanningGraphHint(path: string, body: string): PlanningGraphHint | undefined {
+	if (!isPlanningPage(path)) return undefined;
+	const phase = planningPhaseOf(path);
+	const entities: string[] = [];
+	const seen = new Set<string>();
+	const relations: PlanningGraphHint["relations"] = [];
+	const stack: Array<{ level: number; text: string }> = [];
+	// Prose lines: a leading `---` frontmatter block and fenced code never
+	// reach extraction — headings and links inside them are content samples,
+	// not plan structure.
+	const rawLines = body.split("\n");
+	// A leading `---` block is frontmatter only when a closing `---`/`...`
+	// line follows; otherwise it is content (e.g. a horizontal rule) and
+	// nothing is skipped.
+	let start = 0;
+	if ((rawLines[0]?.trim() ?? "") === "---") {
+		const close = rawLines.findIndex((line, index) => index > 0 && (line.trim() === "---" || line.trim() === "..."));
+		if (close > 0) start = close + 1;
+	}
+	const prose: string[] = [];
+	let fence: string | null = null;
+	for (const line of rawLines.slice(start)) {
+		const trimmed = line.trim();
+		if (fence !== null) {
+			if (trimmed.startsWith(fence)) fence = null;
+			continue;
+		}
+		if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+			fence = trimmed.startsWith("```") ? "```" : "~~~";
+			continue;
+		}
+		prose.push(line);
+	}
+	const scan = prose.join("\n");
+	// Headings in document order: entities, plus parent→child `contains`
+	// relations. Exact-duplicate headings count once (railway's
+	// `planningNodeCount` counts distinct nodes the same way).
+	const headingAt: Array<{ offset: number; text: string }> = [];
+	{
+		let offset = 0;
+		for (const line of prose) {
+			const heading = ATX_HEADING.exec(line.trim());
+			const text = (heading?.[2] ?? "").trim();
+			if (heading && text.length > 0) {
+				if (!seen.has(text)) {
+					seen.add(text);
+					entities.push(text);
+				}
+				const level = heading[1]?.length ?? 1;
+				while (stack.length > 0 && (stack[stack.length - 1]?.level ?? 0) >= level) stack.pop();
+				const parent = stack.length > 0 ? stack[stack.length - 1]?.text : undefined;
+				if (parent !== undefined) relations.push({ source: parent, target: text, kind: "contains" });
+				stack.push({ level, text });
+				headingAt.push({ offset, text });
+			}
+			offset += line.length + 1;
+		}
+	}
+	// Inline markdown links in document order: `links-to` from the enclosing
+	// heading (or the phase, when none precedes) to the verbatim target.
+	// Images never match — the `[` must not follow `!` — and neither do
+	// reference-style links or bare autolinks.
+	for (const match of scan.matchAll(INLINE_LINK)) {
+		const at = match.index ?? 0;
+		if (at > 0 && scan[at - 1] === "!") continue;
+		const target = (match[2] ?? "").trim();
+		if (target.length === 0) continue;
+		let enclosing: string | null = null;
+		for (const entry of headingAt) {
+			if (entry.offset <= at) enclosing = entry.text;
+			else break;
+		}
+		relations.push({ source: enclosing ?? phase, target, kind: "links-to" });
+	}
+	return { phase, entities, relations };
 }
 
 export interface IngestPage {
@@ -198,6 +335,8 @@ export interface IngestPage {
 	source_url?: string;
 	body: string;
 	heading_path?: string;
+	/** Planning-graph hint the scan extracted; set for `.planning/**.md` pages only. */
+	graph?: PlanningGraphHint;
 	/**
 	 * The version of this source URL's record the caller believes it is replacing (memory's
 	 * `expected_version` contract). Absent keeps today's behaviour; a mismatch refuses the call with
@@ -206,18 +345,75 @@ export interface IngestPage {
 	expected_version?: number;
 }
 
+/**
+ * The pages of one sweep, split into ingest calls that each stay under
+ * {@link INGEST_CALL_MAX_BYTES}, in order. Sized on the raw bodies: the ingest
+ * measures the stripped bodies, which are never larger, so every batch passes
+ * the call cap. A page over the cap on its own still gets a batch of its own
+ * and is refused there, exactly as a single call would refuse it.
+ */
+export function batchPagesForIngest(pages: readonly IngestPage[], maxBytes: number = INGEST_CALL_MAX_BYTES): IngestPage[][] {
+	const batches: IngestPage[][] = [];
+	let current: IngestPage[] = [];
+	let bytes = 0;
+	for (const page of pages) {
+		const size = Buffer.byteLength(page.body, "utf8");
+		if (current.length > 0 && bytes + size > maxBytes) {
+			batches.push(current);
+			current = [];
+			bytes = 0;
+		}
+		current.push(page);
+		bytes += size;
+	}
+	if (current.length > 0) batches.push(current);
+	return batches;
+}
+
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+/**
+ * A planning-graph hint from untyped input (a posted page's `graph` member), or
+ * undefined when it is not the shape the scan produces. Nothing is coerced: the
+ * phase and entities must be strings, and every relation needs string
+ * `source`, `target` and `kind`.
+ */
+export function planningHintFromJson(value: unknown): PlanningGraphHint | undefined {
+	if (value === null || typeof value !== "object" || !("phase" in value) || typeof value.phase !== "string") return undefined;
+	if (!("entities" in value) || !isStringArray(value.entities)) return undefined;
+	if (!("relations" in value) || !Array.isArray(value.relations)) return undefined;
+	const relations: PlanningGraphRelation[] = [];
+	for (const entry of value.relations) {
+		if (entry === null || typeof entry !== "object") return undefined;
+		if (!("source" in entry) || !("target" in entry) || !("kind" in entry)) return undefined;
+		if (typeof entry.source !== "string" || typeof entry.target !== "string" || typeof entry.kind !== "string") return undefined;
+		relations.push({ source: entry.source, target: entry.target, kind: entry.kind });
+	}
+	return { phase: value.phase, entities: [...value.entities], relations };
+}
+
 export interface IngestInput {
 	dataset: string;
 	commit?: string;
 	pages: IngestPage[];
 	session_id?: string;
+	/**
+	 * Call-level planning-graph hints (LightRAG path): a planning page the
+	 * scan did not hint (posted, not swept) still indexes its entities when
+	 * a hint names the page's phase. `IngestPage.graph` wins per page.
+	 */
+	graphHints?: PlanningGraphHint[];
 }
 
 export interface IngestPageResult {
 	path: string;
 	source_url: string;
-	status: "ingested" | "replaced" | "unchanged";
+	/** `failed` is LightRAG-path only: per-file isolation records the page instead of refusing the call. */
+	status: "ingested" | "replaced" | "unchanged" | "failed";
 	document_id: string;
+	/** The hash the record keeps: the sanitized body, plus a LightRAG planning page's graph (see `changeSha`). */
 	content_sha256: string;
 	/** The prior document this upload supersedes; deleted when the prune is on, else left for the operator. */
 	superseded_document_id?: string;
@@ -225,6 +421,8 @@ export interface IngestPageResult {
 	pruned_document_id?: string;
 	/** Why the prune did not delete the superseded document: `failed: <reason>` (uplift-2 R6). */
 	prune?: string;
+	/** Why this page failed (`failed` status only), bounded and redacted. */
+	error?: string;
 }
 
 /** One page's upload, shared with concurrent retries for the same key. */
@@ -242,7 +440,7 @@ export type PageSettlement =
  * uploaded) says `changed: false`.
  */
 export type IngestOutcome =
-	| { ok: true; results: IngestPageResult[]; stripped_images: number; changed: boolean }
+	| { ok: true; results: IngestPageResult[]; stripped_images: number; changed: boolean; partial?: boolean }
 	| {
 			ok: false;
 			refused: true;
@@ -309,6 +507,14 @@ export function documentProvenance(seen: ReadonlyMap<string, IngestRecord>, docu
 
 export interface IngestDeps {
 	config: RagflowConfig | null;
+	/** Which plane stores this ingest; the reach rule when unset (`lightragConfig` present means lightrag). */
+	backend?: DocsBackend;
+	/** LightRAG reach; presence selects the LightRAG path when `backend` is unset. */
+	lightragConfig?: LightragConfig | null;
+	/** The LightRAG dataset list reader; the RAGFlow list (via `config`) when omitted. */
+	lightragDatasets?: LightragDatasetList;
+	/** Fetch the LightRAG calls go out on; `fetchImpl` when omitted. */
+	lightragFetch?: FetchLike;
 	roots?: readonly string[];
 	vmGuest?: boolean;
 	/** Records keyed `${dataset_id}::${source_url}`; held by the service, optionally persisted. */
@@ -330,7 +536,6 @@ export interface IngestDeps {
 	/** Where a failed prune is reported; stderr when omitted. */
 	log?: (line: string) => void;
 }
-
 const REMOTE_IMG_TAG = /<img\b[^>]*\bsrc\s*=\s*["']https?:[^>]*>/gi;
 const REMOTE_MD_IMAGE = /!\[[^\]]*\]\(\s*https?:[^)]+\)/g;
 
@@ -396,15 +601,18 @@ export function normalizeIngestPath(path: string): string | null {
 	}
 	return parts.join("/");
 }
-function refused(
+
+/**
+ * The locator-only warning a refusal leaves in the ledger: the reason, the rules
+ * that fired and the page path, never the page text. Never throws.
+ */
+function warnRefusal(
 	deps: IngestDeps,
 	sessionId: string,
 	reason: string,
 	extra?: { rules?: string[]; page?: string; changed?: boolean; remedy?: string; current_version?: number | null; conflict_with?: string; verified_persisted?: false },
-): Promise<IngestOutcome> {
-	const { changed = false, ...locator } = extra ?? {};
-	const outcome: IngestOutcome = { ok: false, refused: true, reason, ...locator, changed };
-	if (deps.surface === null) return Promise.resolve(outcome);
+): Promise<void> {
+	if (deps.surface === null) return Promise.resolve();
 	return deps
 		.emit({
 			surface: deps.surface,
@@ -420,9 +628,20 @@ function refused(
 			},
 		})
 		.then(
-			() => outcome,
-			() => outcome,
+			() => undefined,
+			() => undefined,
 		);
+}
+
+function refused(
+	deps: IngestDeps,
+	sessionId: string,
+	reason: string,
+	extra?: { rules?: string[]; page?: string; changed?: boolean; remedy?: string; current_version?: number | null; conflict_with?: string; verified_persisted?: false },
+): Promise<IngestOutcome> {
+	const { changed = false, ...locator } = extra ?? {};
+	const outcome: IngestOutcome = { ok: false, refused: true, reason, ...locator, changed };
+	return warnRefusal(deps, sessionId, reason, extra).then(() => outcome);
 }
 
 function underRoot(path: string, roots: readonly string[]): boolean {
@@ -433,6 +652,70 @@ function underRoot(path: string, roots: readonly string[]): boolean {
 
 function recordKey(datasetId: string, sourceUrl: string): string {
 	return `${datasetId}::${sourceUrl}`;
+}
+
+/**
+ * The LightRAG plane's record key. LightRAG names its datasets by name, so its
+ * dataset id can equal a RAGFlow one; the prefix keeps a RAGFlow record from
+ * standing in for a LightRAG upload during a cutover.
+ */
+function lightragRecordKey(datasetId: string, sourceUrl: string): string {
+	return `lightrag::${recordKey(datasetId, sourceUrl)}`;
+}
+
+/** The planning-graph hint a page uploads with: its own, else the call-level one for its phase. */
+function hintFor(page: IngestPage, graphHints: readonly PlanningGraphHint[] | undefined): PlanningGraphHint | undefined {
+	return page.graph ?? (isPlanningPage(page.path) ? graphHints?.find((entry) => entry.phase === planningPhaseOf(page.path)) : undefined);
+}
+
+/** Every string a planning-graph hint uploads: the phase, entities, and each relation's endpoints and kind. */
+function graphStrings(hint: PlanningGraphHint): string[] {
+	return [hint.phase, ...hint.entities, ...hint.relations.flatMap((relation) => [relation.source, relation.target, relation.kind])];
+}
+
+/**
+ * The hash a page's record keeps, and the next call compares against. The sanitized body alone, except that a
+ * page with a planning-graph hint folds in the entities and relations its LightRAG insert uploads, so a graph
+ * correction with unchanged markdown is a change. RAGFlow never passes a hint, so its hash stays the body's.
+ */
+function changeSha(body: string, hint: PlanningGraphHint | undefined): string {
+	if (hint === undefined) return sha256(body);
+	const relations = hint.relations.map((relation) => [relation.source, relation.target, relation.kind]);
+	return sha256(JSON.stringify({ body, entities: hint.entities, relations }));
+}
+
+/** One page that passed its gates: the sanitized body and the record key inputs. */
+type PreparedPage = { page: IngestPage; sourceUrl: string; body: string; sha: string };
+
+type PageVerdict =
+	| { ok: true; sourceUrl: string; body: string; size: number; stripped: number; sha: string }
+	| { ok: false; reason: string; rules?: string[] };
+
+/**
+ * One page's gates, in the order a refusal names them: source URL, roots (the
+ * posted path and the client-resolved real path), page and call size caps,
+ * then the redactor scan of the body and the outgoing metadata. Pure: nothing
+ * is uploaded or emitted here.
+ */
+function checkIngestPage(
+	page: IngestPage,
+	roots: readonly string[],
+	commit: string | undefined,
+	total: number,
+	hint: PlanningGraphHint | undefined,
+): PageVerdict {
+	if (!page.source_url) return { ok: false, reason: "no-source-url" };
+	if (!underRoot(page.path, roots)) return { ok: false, reason: "outside-roots" };
+	if (page.real_path !== undefined && !underRoot(page.real_path, roots)) return { ok: false, reason: "outside-roots" };
+	const stripped = stripRemoteImages(page.body);
+	const size = Buffer.byteLength(stripped.body, "utf8");
+	if (size > INGEST_PAGE_MAX_BYTES) return { ok: false, reason: "page-too-large" };
+	if (total + size > INGEST_CALL_MAX_BYTES) return { ok: false, reason: "call-too-large" };
+	// The graph strings upload as metadata, so they pass the same scan as the body.
+	const graph = hint === undefined ? "" : graphStrings(hint).join("\n");
+	const rules = findingRules(`${stripped.body}\n${page.source_url}\n${commit ?? ""}\n${page.heading_path ?? ""}\n${graph}`);
+	if (rules.length > 0) return { ok: false, reason: "secret-findings", rules };
+	return { ok: true, sourceUrl: page.source_url, body: stripped.body, size, stripped: stripped.stripped, sha: changeSha(stripped.body, hint) };
 }
 
 /** How long a call waits behind another ingest of its dataset before it is refused `dataset-lock-timeout`. */
@@ -482,8 +765,13 @@ async function withDatasetIngestLock<T>(dataset: string, waitMs: number, work: (
 	}
 }
 
-/** A page after the gates: its normalised body, hash, and source URL, ready for the dataset lock. */
-type PreparedPage = { page: IngestPage; sourceUrl: string; body: string; sha: string };
+/** The refusal `staleVersion` reports: the version expected against the one on record. */
+interface VersionConflict {
+	remedy: string;
+	current_version: number | null;
+	conflict_with?: string;
+	verified_persisted: false;
+}
 
 /**
  * Memory's `expected_version` rule (`versionMismatch` in memory-write.ts), for one source URL. `planned` is the
@@ -496,7 +784,7 @@ function staleVersion(
 	planned: { version: number } | undefined,
 	saved: { version: number; document_id?: string } | undefined,
 	expected: number | undefined,
-): { remedy: string; current_version: number | null; conflict_with?: string; verified_persisted: false } | null {
+): VersionConflict | null {
 	if (expected === undefined) return null;
 	const against = planned ?? saved;
 	if (!against) {
@@ -537,27 +825,59 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	const config = deps.config;
 	if (deps.surface === null) return refused(deps, sessionId, "unauthenticated");
 	if (deps.vmGuest === true) return refused(deps, sessionId, "vm-guest");
-	if (config === null) return refused(deps, sessionId, "ragflow-not-configured");
+	// Backend selection up front: explicit `backend` wins, else `lightragConfig`
+	// presence means lightrag (the `resolveDocsBackend` rule). The RAGFlow
+	// reach check waits until after the LightRAG branch below, so an explicit
+	// LightRAG backend never trips on a missing RAGFlow reach.
+	const backend: DocsBackend = deps.backend ?? (deps.lightragConfig != null ? "lightrag" : "ragflow");
 	if (input.pages.length === 0) return refused(deps, sessionId, "no-pages");
 
+	// The per-page gates run on both planes. RAGFlow refuses the whole call at
+	// the first page that fails; LightRAG records that page as `failed` and keeps
+	// the rest (per-file isolation), so one bad page never voids the valid ones.
 	const prepared: PreparedPage[] = [];
+	const rejected: IngestPageResult[] = [];
 	let total = 0;
 	let strippedImages = 0;
 	for (const page of input.pages) {
-		const stripped = stripRemoteImages(page.body);
-		strippedImages += stripped.stripped;
-		const refusal = pageRefusal(page, stripped.body, roots, input.commit);
-		if (refusal !== undefined) return refused(deps, sessionId, refusal.reason, refusal.extra);
-		total += Buffer.byteLength(stripped.body, "utf8");
-		if (total > INGEST_CALL_MAX_BYTES) return refused(deps, sessionId, "call-too-large", { page: page.path });
-		prepared.push({ page, sourceUrl: page.source_url ?? "", body: stripped.body, sha: sha256(stripped.body) });
+		const verdict = checkIngestPage(page, roots, input.commit, total, backend === "lightrag" ? hintFor(page, input.graphHints) : undefined);
+		if (verdict.ok) {
+			total += verdict.size;
+			strippedImages += verdict.stripped;
+			prepared.push({ page, sourceUrl: verdict.sourceUrl, body: verdict.body, sha: verdict.sha });
+			continue;
+		}
+		const locator = { page: page.path, ...(verdict.rules !== undefined ? { rules: verdict.rules } : {}) };
+		if (backend !== "lightrag") return refused(deps, sessionId, verdict.reason, locator);
+		await warnRefusal(deps, sessionId, verdict.reason, locator);
+		rejected.push({
+			path: page.path,
+			source_url: page.source_url ?? "",
+			status: "failed",
+			document_id: "",
+			content_sha256: "",
+			error: redact(verdict.rules !== undefined ? `${verdict.reason}: ${verdict.rules.join(", ")}` : verdict.reason).slice(0, 200),
+		});
 	}
 
-	// Taken before the first read of the record. No await sits between the gates and this call, so the lock
-	// is held by the time `ingestDocs` returns its promise.
-	const waited = await withDatasetIngestLock(input.dataset, deps.datasetLockWaitMs ?? DATASET_INGEST_LOCK_WAIT_MS, () =>
-		writeBatch(deps, config, input, prepared, { sessionId, strippedImages }),
-	);
+	// Both planes write one dataset's records under that dataset's lock; the records are read only once it is held.
+	const seen = deps.seen ?? new Map<string, IngestRecord>();
+	const locks = deps.locks ?? new Map<string, { task: Promise<PageSettlement>; sha: string }>();
+	if (backend === "lightrag") {
+		return underDatasetLock(deps, input.dataset, sessionId, () =>
+			ingestDocsLightrag(deps, input, sessionId, { roots, seen, locks, prepared, rejected, strippedImages }),
+		);
+	}
+	if (config === null) return refused(deps, sessionId, "ragflow-not-configured");
+	return underDatasetLock(deps, input.dataset, sessionId, () => writeBatch(deps, config, input, prepared, { sessionId, strippedImages, seen, locks }));
+}
+
+/**
+ * Runs one ingest's plane work under its dataset's lock. A call still waiting when the lock's wait ends is
+ * refused `dataset-lock-timeout` and writes nothing.
+ */
+async function underDatasetLock(deps: IngestDeps, dataset: string, sessionId: string, work: () => Promise<IngestOutcome>): Promise<IngestOutcome> {
+	const waited = await withDatasetIngestLock(dataset, deps.datasetLockWaitMs ?? DATASET_INGEST_LOCK_WAIT_MS, work);
 	if (waited === LOCK_WAIT_EXPIRED) return refused(deps, sessionId, "dataset-lock-timeout");
 	return waited;
 }
@@ -569,41 +889,28 @@ interface PageRefusal {
 }
 
 /**
- * The gates one page passes before anything is uploaded: its source URL, its roots, its size and its secret
- * scan. `body` is the text an ingest call would upload, after its remote images are stripped. Shared by an
- * ingest call and by {@link preflightIngestPages}, so both refuse the same pages for the same reason.
- */
-function pageRefusal(page: IngestPage, body: string, roots: readonly string[], commit: string | undefined): PageRefusal | undefined {
-	if (!page.source_url) return { reason: "no-source-url", extra: { page: page.path } };
-	if (!underRoot(page.path, roots)) return { reason: "outside-roots", extra: { page: page.path } };
-	if (page.real_path !== undefined && !underRoot(page.real_path, roots)) return { reason: "outside-roots", extra: { page: page.path } };
-	if (Buffer.byteLength(body, "utf8") > INGEST_PAGE_MAX_BYTES) return { reason: "page-too-large", extra: { page: page.path } };
-	const rules = findingRules(`${body}\n${page.source_url}\n${commit ?? ""}\n${page.heading_path ?? ""}`);
-	if (rules.length > 0) return { reason: "secret-findings", extra: { rules, page: page.path } };
-	return undefined;
-}
-
-/**
  * The gates of an ingest call, run over every page before the first call of a refresh writes. A refresh split
  * into several calls runs this first, so a content refusal (an outside path, an oversize page, a secret) leaves
- * the plane untouched, as it did when the whole refresh was one call. Returns the refusal reason, or undefined
- * when every page passes; a refusal is emitted as an ingest call's refusal is. The per-call size is not checked
- * here: {@link batchIngestPages} keeps each call under it, and each call checks it again.
+ * the plane untouched, as it did when the whole refresh was one call. Each page passes the gate its ingest call
+ * applies on the same plane, planning-graph strings included. Returns the refusal reason, or undefined when every
+ * page passes; a refusal is emitted as an ingest call's refusal is. The per-call size is not checked here:
+ * {@link batchIngestPages} keeps each call under it, and each call checks it again.
  */
 export async function preflightIngestPages(deps: IngestDeps, input: IngestInput): Promise<string | undefined> {
 	const sessionId = deps.sessionId ?? `docs-ingest:${randomUUID()}`;
 	const roots = deps.roots ?? DEFAULT_INGEST_ROOTS;
-	const refusal = input.pages.length === 0 ? { reason: "no-pages" } : firstPageRefusal(input, roots);
+	const backend: DocsBackend = deps.backend ?? (deps.lightragConfig != null ? "lightrag" : "ragflow");
+	const refusal = input.pages.length === 0 ? { reason: "no-pages" } : firstPageRefusal(input, roots, backend);
 	if (refusal === undefined) return undefined;
 	await refused(deps, sessionId, refusal.reason, refusal.extra);
 	return refusal.reason;
 }
 
-/** The first page of an ingest input the gates refuse, in input order. */
-function firstPageRefusal(input: IngestInput, roots: readonly string[]): PageRefusal | undefined {
+/** The first page of an ingest input the gates refuse, in input order. The per-call total is zero: see {@link preflightIngestPages}. */
+function firstPageRefusal(input: IngestInput, roots: readonly string[], backend: DocsBackend): PageRefusal | undefined {
 	for (const page of input.pages) {
-		const refusal = pageRefusal(page, stripRemoteImages(page.body).body, roots, input.commit);
-		if (refusal !== undefined) return refusal;
+		const verdict = checkIngestPage(page, roots, input.commit, 0, backend === "lightrag" ? hintFor(page, input.graphHints) : undefined);
+		if (!verdict.ok) return { reason: verdict.reason, extra: { page: page.path, ...(verdict.rules !== undefined ? { rules: verdict.rules } : {}) } };
 	}
 	return undefined;
 }
@@ -631,35 +938,47 @@ export function batchIngestPages(pages: readonly IngestPage[]): IngestPage[][] {
 	return batches;
 }
 
+/**
+ * Memory's `expected_version` rule, planned for every page of a call before its first write. A page whose source
+ * URL an earlier page of the call also writes is checked against the version that page leaves. Returns the first
+ * conflict, if any; the caller refuses the whole call with nothing uploaded or recorded. Both planes share it.
+ */
+function firstVersionConflict(
+	prepared: readonly PreparedPage[],
+	keyOf: (sourceUrl: string) => string,
+	seen: ReadonlyMap<string, IngestRecord>,
+): { page: string; stale: VersionConflict } | undefined {
+	const planned = new Map<string, { version: number; sha: string }>();
+	for (const { page, sourceUrl, sha } of prepared) {
+		const key = keyOf(sourceUrl);
+		const current = planned.get(key) ?? seen.get(key);
+		const stale = staleVersion(planned.get(key), seen.get(key), page.expected_version);
+		if (stale) return { page: page.path, stale };
+		if (current?.sha === sha) continue;
+		planned.set(key, { version: (current?.version ?? 0) + 1, sha });
+	}
+	return undefined;
+}
+
 /** The part of an ingest that runs under its dataset's lock: the dataset lookup, the version plan, then the writes. */
 async function writeBatch(
 	deps: IngestDeps,
 	config: RagflowConfig,
 	input: IngestInput,
 	prepared: PreparedPage[],
-	call: { sessionId: string; strippedImages: number },
+	call: { sessionId: string; strippedImages: number; seen: Map<string, IngestRecord>; locks: Map<string, { task: Promise<PageSettlement>; sha: string }> },
 ): Promise<IngestOutcome> {
-	const { sessionId, strippedImages } = call;
+	const { sessionId, strippedImages, seen, locks } = call;
 	if (deps.surface === null) return refused(deps, sessionId, "unauthenticated");
-	const seen = deps.seen ?? new Map<string, IngestRecord>();
-	const locks = deps.locks ?? new Map<string, { task: Promise<PageSettlement>; sha: string }>();
 	const listed = await (deps.datasets ?? DIRECT_DATASET_LIST).list(config, deps.fetchImpl);
 	if (!listed.ok) return refused(deps, sessionId, listed.reason);
 	const dataset = listed.datasets.find((entry) => entry.name === input.dataset);
 	if (!dataset) return refused(deps, sessionId, "unknown-dataset");
 	const commit = input.commit ?? "unpinned";
-	// memory's `expected_version` contract, planned for every page before the first upload. A page whose source
-	// URL an earlier page of this call also writes is checked against the version that page leaves, so a conflict
-	// anywhere refuses the whole call with nothing uploaded or recorded.
-	const planned = new Map<string, { version: number; sha: string }>();
-	for (const { page, sourceUrl, sha } of prepared) {
-		const key = recordKey(dataset.id, sourceUrl);
-		const current = planned.get(key) ?? seen.get(key);
-		const stale = staleVersion(planned.get(key), seen.get(key), page.expected_version);
-		if (stale) return refused(deps, sessionId, "version.stale", { page: page.path, ...stale });
-		if (current?.sha === sha) continue;
-		planned.set(key, { version: (current?.version ?? 0) + 1, sha });
-	}
+	// memory's `expected_version` contract, planned for every page before the first upload: a conflict refuses the
+	// whole call with nothing uploaded or recorded.
+	const conflict = firstVersionConflict(prepared, (sourceUrl) => recordKey(dataset.id, sourceUrl), seen);
+	if (conflict) return refused(deps, sessionId, "version.stale", { page: conflict.page, ...conflict.stale });
 
 	const results: IngestPageResult[] = [];
 	// True once any page of this call stored a document (and so a record).
@@ -783,6 +1102,7 @@ async function writeBatch(
 	});
 	return { ok: true, results, stripped_images: strippedImages, changed: changed() };
 }
+
 /**
  * Ingest records on disk, so a restarted server does not re-upload pages it
  * already stored (Greptile P1), and — since version 2 (uplift-2 R6) — the
@@ -879,4 +1199,452 @@ export async function saveIngestRecords(
 	const tmp = `${file}.${process.pid}.tmp`;
 	await writeFile(tmp, `${JSON.stringify(state)}\n`, "utf8");
 	await rename(tmp, file);
+}
+
+/**
+ * Live steering propagation (SPE-19390): `.planning/` polling.
+ *
+ * A planning update must trigger a docs refresh without blocking the
+ * session that made it. The poller re-scans the ingest roots, hashes the
+ * result and compares it with the last served hash: equal means quiet,
+ * different means the planner changed something a steering session still
+ * describes from memory. The hash, not the pages, is the cross-call state,
+ * so a restarted poller resumes from one stored string.
+ */
+export interface PlanningPollConfig {
+	/** Ms between polls; the caller sleeps, this module only scans once per call. */
+	intervalMs?: number;
+	/** Upper bound on pages hashed per tick; extra pages are ignored, never fetched. */
+	maxPages?: number;
+}
+
+export const PLANNING_POLL_DEFAULTS: Required<PlanningPollConfig> = { intervalMs: 5000, maxPages: 200 };
+
+/**
+ * The stable hash of one poll tick: the sorted `path + sha` pairs, so
+ * reorderings do not read as changes and one edited page does. Capped to
+ * `maxPages` paths so a runaway checkout cannot grow the digest input.
+ */
+export function planningContentHash(pages: readonly IngestPage[], maxPages: number = PLANNING_POLL_DEFAULTS.maxPages): string {
+	const pairs = pages
+		.map((page) => `${page.path}\n${sha256(page.body)}`)
+		.sort()
+		.slice(0, Math.max(1, maxPages));
+	return sha256(pairs.join("\n"));
+}
+
+/** Compare one tick against the last served hash. */
+export function planningPollTick(
+	previousHash: string | null,
+	pages: readonly IngestPage[],
+	config: PlanningPollConfig = {},
+): { hash: string; changed: boolean } {
+	const hash = planningContentHash(pages, config.maxPages ?? PLANNING_POLL_DEFAULTS.maxPages);
+	return { hash, changed: previousHash === null ? pages.length > 0 : previousHash !== hash };
+}
+
+/**
+ * One non-blocking poll tick: scan the roots and report whether the
+ * planning content moved. A scan failure is not a change — the next tick
+ * retries — and the previous hash is returned so the caller keeps serving it.
+ */
+export async function pollPlanningRefresh(
+	baseDir: string,
+	roots: readonly string[],
+	previousHash: string | null,
+	config: PlanningPollConfig = {},
+	io: ScanIo = nodeIo,
+): Promise<{ hash: string; changed: boolean; pages: IngestPage[]; error?: string }> {
+	let pages: IngestPage[];
+	try {
+		pages = await scanIngestPages(baseDir, roots, io);
+	} catch (cause) {
+		const reason = cause instanceof Error ? cause.message : String(cause);
+		return { hash: previousHash ?? "", changed: false, pages: [], error: redact(reason).slice(0, 200) };
+	}
+	const { hash, changed } = planningPollTick(previousHash, pages, config);
+	return { hash, changed, pages };
+}
+
+/**
+ * Roots a planning scrape sweeps. The whole `.planning/` tree — phase
+ * plans ride the same refresh as the project brief — narrowed from the
+ * ingest roots so a planning poll never reads `docs/` or `README.md`.
+ */
+export const PLANNING_SCAN_ROOTS: readonly string[] = [".planning/"];
+
+/**
+ * The LightRAG planning-scrape lifecycle, in order: a sweep starts
+ * `IDLE`, moves through `SCANNING` (roots read) → `PROCESSING` (per-file
+ * sanitize + hash) → `INDEXING` (vector uploads) and settles on
+ * `SUCCESS` (everything indexed), `PARTIAL` (some files indexed, some
+ * failed — per-file isolation, never a whole-sweep refusal) or `ERROR`
+ * (nothing could be read or indexed). Terminal states are `SUCCESS`,
+ * `PARTIAL` and `ERROR` — the poller only re-serves on those.
+ */
+export const PLANNING_SCRAPE_STATES = ["IDLE", "SCANNING", "PROCESSING", "INDEXING", "SUCCESS", "PARTIAL", "ERROR"] as const;
+export type PlanningScrapeState = (typeof PLANNING_SCRAPE_STATES)[number];
+
+/**
+ * Sanitize one planning page for the vector insert: remote images are
+ * stripped (local image paths stay for the gates) and surrounding
+ * whitespace is trimmed so trailing-newline churn does not read as a
+ * content change. Pure — the gate refusals in `ingestDocs` still apply
+ * to the sanitized body before anything uploads.
+ */
+export function sanitizePlanningBody(body: string): { body: string; stripped: number } {
+	const stripped = stripRemoteImages(body);
+	return { body: stripped.body.trim(), stripped: stripped.stripped };
+}
+
+/**
+ * The per-page content hash the incremental update keys on: the sha of
+ * the sanitized body, so the trigger and the ingest skip agree on what
+ * "unchanged" means.
+ */
+export function planningPageSha(page: Pick<IngestPage, "body">): string {
+	return sha256(sanitizePlanningBody(page.body).body);
+}
+
+/** One path's last indexed hash, for the incremental update. */
+export function hashPlanningPages(pages: readonly IngestPage[]): Map<string, string> {
+	const hashes = new Map<string, string>();
+	for (const page of pages) hashes.set(page.path, planningPageSha(page));
+	return hashes;
+}
+
+/**
+ * Polling-plus-hash trigger: compare one scan against the last indexed
+ * per-page hashes. `previous === null` is the first poll (everything not
+ * yet indexed triggers); otherwise only new or changed paths trigger, so
+ * an unchanged poll indexes nothing. Pure — the caller owns the sleep
+ * between polls and persists the returned `hash`.
+ */
+export interface PlanningIngestTrigger {
+	triggered: boolean;
+	/** The roots this decision covers (`PLANNING_SCAN_ROOTS` unless overridden). */
+	roots: readonly string[];
+	/** New or changed paths, sorted, empty when nothing moved. */
+	paths: string[];
+	/** `planning-initial`, `planning-changed:<n>` or `planning-unchanged`. */
+	reason: string;
+	/** The tick hash the next poll compares against. */
+	hash: string;
+}
+
+export function planningIngestTrigger(
+	pages: readonly IngestPage[],
+	previous: ReadonlyMap<string, string> | null,
+	roots: readonly string[] = PLANNING_SCAN_ROOTS,
+): PlanningIngestTrigger {
+	const hash = planningContentHash(pages);
+	if (previous === null) {
+		const paths = pages.map((page) => page.path).sort();
+		return { triggered: paths.length > 0, roots, paths, reason: "planning-initial", hash };
+	}
+	const paths = pages.filter((page) => previous.get(page.path) !== planningPageSha(page)).map((page) => page.path).sort();
+	if (paths.length === 0) return { triggered: false, roots, paths, reason: "planning-unchanged", hash };
+	return { triggered: true, roots, paths, reason: `planning-changed:${paths.length}`, hash };
+}
+
+/**
+ * Settle one scrape from its counts: nothing attempted is `SUCCESS`
+ * (an unchanged incremental tick is not a failure), no failures is
+ * `SUCCESS`, some failures is `PARTIAL`, total failure is `ERROR`.
+ */
+export function planningScrapeStateForOutcome(total: number, failed: number): PlanningScrapeState {
+	if (total === 0 || failed === 0) return "SUCCESS";
+	if (failed < total) return "PARTIAL";
+	return "ERROR";
+}
+
+/** One file the `PROCESSING` step could not sanitize: isolated, never fatal. */
+export interface PlanningScrapeError {
+	path: string;
+	error: string;
+}
+
+/** The settled result of a planning scrape: terminal state, pages and per-file errors. */
+export interface PlanningScrapeResult {
+	state: PlanningScrapeState;
+	pages: IngestPage[];
+	/** Sanitized bodies by path, for the `INDEXING` step; pages that failed are absent. */
+	sanitized: Map<string, string>;
+	errors: PlanningScrapeError[];
+	hash: string;
+	changed: boolean;
+}
+
+/**
+ * Scrape the planning roots through `SCANNING` → `PROCESSING`, reporting
+ * each transition via `onState` (the initial `IDLE` is reported too, so a
+ * poller can log the full lifecycle). Per-file isolation: a page that
+ * cannot be sanitized is recorded in `errors` and excluded from
+ * `sanitized`, while the rest of the sweep still settles `SUCCESS` (no
+ * errors) or `PARTIAL`. A scan that throws settles `ERROR` with no pages.
+ * Never throws: the poller calls this on a timer and must not crash on it.
+ */
+export async function scrapePlanningPages(
+	baseDir: string,
+	roots: readonly string[] = PLANNING_SCAN_ROOTS,
+	previousHash: string | null = null,
+	opts: { io?: ScanIo; maxPages?: number; onState?: (state: PlanningScrapeState) => void } = {},
+): Promise<PlanningScrapeResult> {
+	const io = opts.io ?? nodeIo;
+	const report = (state: PlanningScrapeState): void => {
+		try {
+			opts.onState?.(state);
+		} catch {
+			// A logging callback must never fail the scrape.
+		}
+	};
+	report("IDLE");
+	report("SCANNING");
+	let pages: IngestPage[];
+	try {
+		pages = await scanIngestPages(baseDir, roots, io);
+	} catch (cause) {
+		const reason = cause instanceof Error ? cause.message : String(cause);
+		report("ERROR");
+		return { state: "ERROR", pages: [], sanitized: new Map(), errors: [], hash: previousHash ?? "", changed: false };
+	}
+	report("PROCESSING");
+	const sanitized = new Map<string, string>();
+	const errors: PlanningScrapeError[] = [];
+	for (const page of pages) {
+		try {
+			sanitized.set(page.path, sanitizePlanningBody(page.body).body);
+		} catch (cause) {
+			const reason = cause instanceof Error ? cause.message : String(cause);
+			errors.push({ path: page.path, error: redact(reason).slice(0, 200) });
+		}
+	}
+	const { hash, changed } = planningPollTick(previousHash, pages, { maxPages: opts.maxPages });
+	const state = errors.length === 0 ? "SUCCESS" : pages.length - errors.length > 0 ? "PARTIAL" : "ERROR";
+	report(state);
+	return { state, pages, sanitized, errors, hash, changed };
+}
+
+/**
+ * Ingest via the LightRAG plane (cutover backend).
+ *
+ * Shares the RAGFlow path's validation (roots, size caps, redactor scan),
+ * hash idempotency, in-flight locks, records and outcome shape; only the
+ * plane calls differ. Dataset resolution is best effort — the dedicated
+ * LightRAG list, else the RAGFlow list (keeps existing records aligned),
+ * else the requested dataset as its own id — because LightRAG hosts one
+ * knowledge base per server. Pages with a planning-graph hint (`graph`,
+ * or an `graphHints` entry naming the page's phase) store through
+ * `storePlanningPage` so the insert indexes their entities; other pages
+ * upload as plain documents. The prune honors `deps.prune` through the
+ * plane's document delete, exactly as on RAGFlow.
+ */
+async function ingestDocsLightrag(
+	deps: IngestDeps,
+	input: IngestInput,
+	sessionId: string,
+	shared: {
+		roots: readonly string[];
+		seen: Map<string, IngestRecord>;
+		locks: Map<string, { task: Promise<PageSettlement>; sha: string }>;
+		prepared: PreparedPage[];
+		rejected: IngestPageResult[];
+		strippedImages: number;
+	},
+): Promise<IngestOutcome> {
+	const { seen, locks, prepared, rejected, strippedImages } = shared;
+	// The caller gates auth, but this branch is also entered from tests and
+	// future call sites: fail closed here too, which narrows `deps.surface`
+	// for the note event below.
+	if (deps.surface === null) return refused(deps, sessionId, "unauthenticated");
+	const lightrag = deps.lightragConfig;
+	if (lightrag == null) return refused(deps, sessionId, "lightrag-not-configured");
+	const fetchImpl = deps.lightragFetch ?? deps.fetchImpl;
+	let listed: { ok: true; datasets: Array<{ id: string; name: string }> } | { ok: false; reason: string };
+	if (deps.lightragDatasets !== undefined) listed = await deps.lightragDatasets.list();
+	else if (deps.config !== null)
+		listed = await (deps.datasets ?? DIRECT_DATASET_LIST).list(deps.config, deps.fetchImpl);
+	else listed = { ok: true, datasets: [{ id: input.dataset, name: input.dataset }] };
+	if (!listed.ok) return refused(deps, sessionId, listed.reason);
+	const dataset = listed.datasets.find((entry) => entry.name === input.dataset);
+	if (!dataset) return refused(deps, sessionId, "unknown-dataset");
+	const commit = input.commit ?? "unpinned";
+	const results: IngestPageResult[] = [...rejected];
+	const changed = (): boolean => results.some((result) => result.status === "ingested" || result.status === "replaced");
+	// Per-file isolation: a page the plane rejects is recorded as `failed`
+	// and the sweep continues, so one bad page never voids the pages that
+	// landed. The call reports `partial` when anything landed alongside
+	// failures, and refuses only when nothing did.
+	let failed = rejected.length;
+	// Keys with a write that failed in this call. The version plan assumed every planned write landed, so a later
+	// page of such a key is recorded failed and not written: writing it would store a version the plan never reached.
+	const failedKeys = new Set<string>();
+	const recordFailed = (key: string, pagePath: string, source: string, hash: string, reason: string): void => {
+		failed += 1;
+		failedKeys.add(key);
+		results.push({
+			path: pagePath,
+			source_url: source,
+			status: "failed",
+			document_id: "",
+			content_sha256: hash,
+			error: redact(reason).slice(0, 200),
+		});
+	};
+	// memory's `expected_version` contract on the LightRAG plane, planned before the first write as on RAGFlow.
+	const conflict = firstVersionConflict(prepared, (sourceUrl) => lightragRecordKey(dataset.id, sourceUrl), seen);
+	if (conflict) return refused(deps, sessionId, "version.stale", { page: conflict.page, ...conflict.stale });
+	for (const { page, sourceUrl, body, sha } of prepared) {
+		const hint = hintFor(page, input.graphHints);
+		const key = lightragRecordKey(dataset.id, sourceUrl);
+		if (failedKeys.has(key)) {
+			recordFailed(key, page.path, sourceUrl, sha, "an earlier page of this source URL failed in this call, so this page was not written");
+			continue;
+		}
+		for (;;) {
+			const prior = seen.get(key);
+			if (prior && prior.sha === sha) {
+				results.push({ path: page.path, source_url: sourceUrl, status: "unchanged", document_id: prior.document_id, content_sha256: sha });
+				break;
+			}
+			const running = locks.get(key);
+			if (running && running.sha === sha) {
+				const settled = await running.task;
+				if (!settled.ok) {
+					recordFailed(key, page.path, sourceUrl, sha, settled.reason);
+					break;
+				}
+				results.push(settled.result);
+				break;
+			}
+			if (!running) {
+				const replacedPrior = prior;
+				const task: Promise<PageSettlement> = (async (): Promise<PageSettlement> => {
+					const uploaded =
+						hint !== undefined
+							? await storePlanningPage(
+									lightrag,
+									{
+										path: page.path,
+										sourceUrl,
+										body,
+										...(input.commit !== undefined ? { commit: input.commit } : {}),
+										...(page.heading_path !== undefined ? { headingPath: page.heading_path } : {}),
+										...(hint.entities.length > 0 ? { entities: [...hint.entities] } : {}),
+										...(hint.relations.length > 0 ? { relations: [...hint.relations] } : {}),
+									},
+									fetchImpl,
+								)
+							: await uploadLightragDocument(
+									lightrag,
+									{
+										// Same path-flattening as the RAGFlow plane, so both
+										// planes address the same logical document.
+										name: documentName(page.path),
+										content: body,
+										metadata: { source_url: sourceUrl, commit, heading_path: page.heading_path ?? "" },
+									},
+									fetchImpl,
+								);
+					if (!uploaded.ok) return { ok: false, reason: uploaded.reason };
+					const started = await parseLightragDocuments(lightrag, dataset.id, [uploaded.document_id], fetchImpl);
+					if (!started.ok) return { ok: false, reason: started.reason };
+					const parsed = await pollLightragParseStatus(lightrag, { dataset_id: dataset.id, document_id: uploaded.document_id }, fetchImpl, {
+						maxPolls: deps.poll?.maxPolls,
+						intervalMs: deps.poll?.intervalMs,
+					});
+					if (!parsed.ok) return { ok: false, reason: parsed.reason };
+					let prune: { pruned_document_id: string } | { prune: string } | null = null;
+					if (replacedPrior && deps.prune === true && replacedPrior.document_id !== uploaded.document_id) {
+						const deleted = await deleteLightragDocuments(lightrag, dataset.id, [replacedPrior.document_id], fetchImpl);
+						if (deleted.ok) prune = { pruned_document_id: replacedPrior.document_id };
+						else {
+							prune = { prune: `failed: ${deleted.reason}` };
+							(deps.log ?? ((line: string) => process.stderr.write(line)))(
+								`[substrate] docs ingest: superseded document ${replacedPrior.document_id} in ${dataset.name} not pruned — ${redact(deleted.reason)}\n`,
+							);
+						}
+					}
+					const result: IngestPageResult = {
+						path: page.path,
+						source_url: sourceUrl,
+						status: replacedPrior ? "replaced" : "ingested",
+						document_id: uploaded.document_id,
+						content_sha256: sha,
+						...(replacedPrior ? { superseded_document_id: replacedPrior.document_id } : {}),
+						...(prune ?? {}),
+					};
+					const lineage: SupersededDocument[] = [
+						...(replacedPrior?.superseded ?? []),
+						...(replacedPrior && prune !== null && "pruned_document_id" in prune
+							? []
+							: replacedPrior
+								? [{ document_id: replacedPrior.document_id, ...(replacedPrior.commit !== undefined ? { commit: replacedPrior.commit } : {}) }]
+								: []),
+					].slice(-DATASET_VERSION_RETENTION);
+					seen.set(key, {
+						sha,
+						dataset_id: dataset.id,
+						source_url: sourceUrl,
+						document_id: uploaded.document_id,
+						version: replacedPrior ? replacedPrior.version + 1 : 1,
+						...(input.commit !== undefined ? { commit: input.commit } : {}),
+						...(lineage.length > 0 ? { superseded: lineage } : {}),
+					});
+					return { ok: true, result };
+				})();
+				locks.set(key, { task, sha });
+				let settled: PageSettlement;
+				try {
+					settled = await task;
+				} finally {
+					if (locks.get(key)?.task === task) locks.delete(key);
+				}
+				if (!settled.ok) {
+					recordFailed(key, page.path, sourceUrl, sha, settled.reason);
+					break;
+				}
+				results.push(settled.result);
+				break;
+			}
+			const settled = await running.task;
+			if (!settled.ok) {
+				recordFailed(key, page.path, sourceUrl, sha, settled.reason);
+				break;
+			}
+		}
+	}
+	// Fail-closed when nothing landed: a sweep of only failures is a
+	// refusal naming the first one, with no state change to persist. A
+	// sweep that landed anything reports the failures as `partial`
+	// instead — per-file isolation, never a voided batch. The first
+	// failure reads back out of `results`: a closure-captured let does
+	// not narrow at this point (it would read as never), so no separate
+	// variable is kept.
+	if (results.length > 0 && failed >= results.length) {
+		const first = results.find((result) => result.status === "failed");
+		if (first !== undefined) {
+			return refused(deps, sessionId, first.error ?? "lightrag ingest failed", { page: first.path, changed: false });
+		}
+	}
+	await deps.emit({
+		surface: deps.surface,
+		kind: "note",
+		summary: `docs ingest ${results.every((result) => result.status === "unchanged") ? "skipped" : "stored"} ${results.length} page(s) into ${dataset.name}${failed > 0 ? ` (${failed} failed)` : ""}`,
+		session_id: sessionId,
+		payload: {
+			action: "docs.ingest",
+			backend: "lightrag",
+			dataset_id: dataset.id,
+			source_urls: results.map((result) => result.source_url),
+			superseded_document_ids: results.flatMap((result) => (result.superseded_document_id ? [result.superseded_document_id] : [])),
+			pruned_document_ids: results.flatMap((result) => (result.pruned_document_id ? [result.pruned_document_id] : [])),
+			stripped_images: strippedImages,
+			scrape_state: planningScrapeStateForOutcome(results.length, failed),
+			...(failed > 0
+				? { partial: true, failed_pages: results.filter((result) => result.status === "failed").map((result) => result.path) }
+				: {}),
+		},
+	});
+	return { ok: true, results, stripped_images: strippedImages, changed: changed(), ...(failed > 0 ? { partial: true } : {}) };
 }

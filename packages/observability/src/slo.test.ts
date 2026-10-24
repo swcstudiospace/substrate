@@ -616,6 +616,7 @@ describe("the per-plane availability objectives (uplift-2 R2)", () => {
 			"plane.cache.availability",
 			"plane.hindsight.availability",
 			"plane.ragflow.availability",
+			"plane.lightrag.availability",
 		]);
 		expect(plane(results, "plane.index.availability")).toMatchObject({ status: "unconfigured", observed: null, samples: 0, unit: "ratio", target: 0.99 });
 		expect(plane(results, "plane.index.availability").detail).toContain("not configured");

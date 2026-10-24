@@ -1,0 +1,63 @@
+name: Scratch Postgres 16
+description: >
+  Start (or stop) a throwaway PostgreSQL 16 cluster as the job user, from the binaries in the
+  Omega CI runner image (initdb and pg_ctl on PATH). It replaces the old `postgres:16` service
+  container: the pool has no Docker. The cluster lives in RUNNER_TEMP, listens on 127.0.0.1 only,
+  on a port the kernel picks free at start, so parallel jobs on one runner host never clash.
+  `start` exports SUBSTRATE_TEST_PG_URL; `stop` shuts the cluster down and is safe to run when
+  start never got that far.
+
+inputs:
+  mode:
+    description: "`start` or `stop`."
+    required: false
+    default: start
+  database:
+    description: Database to create after start.
+    required: false
+    default: substrate_test
+
+runs:
+  using: composite
+  steps:
+    - name: Scratch Postgres (${{ inputs.mode }})
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        DATABASE: ${{ inputs.database }}
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/scratch-pg"
+        case "$MODE" in
+          start)
+            for tool in initdb pg_ctl pg_isready createdb; do
+              if ! command -v "$tool" >/dev/null; then
+                echo "::error::$tool is not on PATH; the Omega CI runner image ships PostgreSQL 16 in /usr/lib/postgresql/16/bin" >&2
+                exit 1
+              fi
+            done
+            rm -rf "$dir"
+            mkdir -p "$dir"
+            # Bind port 0 and read back what the kernel picked: a free loopback port for this job.
+            port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+            initdb -D "$dir/data" -U postgres --auth=trust --encoding=UTF8 --no-locale >"$dir/initdb.log"
+            pg_ctl -D "$dir/data" -l "$dir/postgres.log" -w -t 60 \
+              -o "-k $dir -p $port -c listen_addresses=127.0.0.1 -c fsync=off" start
+            pg_isready -h 127.0.0.1 -p "$port" -U postgres -t 30
+            createdb -h 127.0.0.1 -p "$port" -U postgres "$DATABASE"
+            # Trust auth on loopback: the password in the URL is accepted and never checked.
+            echo "SUBSTRATE_TEST_PG_URL=postgres://postgres:ci-scratch-only@127.0.0.1:${port}/${DATABASE}" >> "$GITHUB_ENV"
+            echo "Scratch Postgres $(postgres --version | awk '{print $3}') on 127.0.0.1:${port}, database ${DATABASE}"
+            ;;
+          stop)
+            if [ -f "$dir/data/postmaster.pid" ]; then
+              pg_ctl -D "$dir/data" -m fast -w -t 60 stop
+            else
+              echo "No scratch Postgres to stop."
+            fi
+            ;;
+          *)
+            echo "::error::mode must be start or stop, not $MODE" >&2
+            exit 1
+            ;;
+        esac

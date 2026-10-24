@@ -153,6 +153,7 @@ export function lexicalChunk(document: GoldenDocument, question: string): FakeCh
  */
 export function goldenFake(corpus: GoldenCorpus): RagflowFake {
 	const fake = new RagflowFake();
+	fake.echoHeadings = true;
 	fake.answer = (datasetId, question) => {
 		const dataset = fake.datasets.find((entry) => entry.id === datasetId);
 		if (dataset === undefined) return [];

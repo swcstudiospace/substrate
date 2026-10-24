@@ -347,15 +347,18 @@ describe("the skill scan is not quadratic in the number of matches", () => {
 	});
 
 	test("many matches on one line are counted without rereading the line", () => {
+		const lines = Array.from({ length: 16 }, () => "PASSWORD=value ".repeat(8_000)).join("\n");
 		const text = "PASSWORD=value ".repeat(128_000);
 		expect(text.includes("\n")).toBe(false);
-		let result: ReturnType<typeof redactSkillContent> | undefined;
-		expect(took(() => (result = redactSkillContent(text)))).toBeLessThan(1000);
-		expect(result?.redactions).toHaveLength(128_000);
-		expect(result?.redactions[0]).toEqual({ line: 1, rule: "password" });
-		expect(result?.redactions[127_999]).toEqual({ line: 1, rule: "password" });
-		expect(result?.text).not.toContain("=value");
-	});
+		// A control with the same bytes and the same 128k matches, split across sixteen lines. Memory and GC cost is the same for both, so only work that rescans within a line separates them: about 1 for linear counting (0.5 to 1.4 measured), about 16 for a rescan per match.
+		const best = (input: string) => Math.min(...[0, 1, 2].map(() => { Bun.gc(true); return took(() => redactSkillContent(input)); }));
+		expect(best(text) / best(lines)).toBeLessThan(4);
+		const result = redactSkillContent(text);
+		expect(result.redactions).toHaveLength(128_000);
+		expect(result.redactions[0]).toEqual({ line: 1, rule: "password" });
+		expect(result.redactions[127_999]).toEqual({ line: 1, rule: "password" });
+		expect(result.text).not.toContain("=value");
+	}, 60_000);
 });
 
 describe("scanSkillFiles keeps every file", () => {
