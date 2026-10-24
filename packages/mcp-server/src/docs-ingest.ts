@@ -17,7 +17,10 @@
  * Every upload carries `{source_url, commit, heading_path}` metadata (U-03).
  * Each record carries a `version` (1 on first ingest, +1 per replacement). A page may name the
  * `expected_version` it replaces; a mismatch refuses the call as `version.stale` (memory's
- * contract, answered 409). A mismatch found before the first upload writes nothing; one a concurrent ingest causes mid-call refuses the remaining pages, and `changed` reports what already landed. Absent, the page ingests as before.
+ * contract, answered 409) with `outcome: "conflict"`. Every page's expected version is checked against the
+ * version plan of the whole call before its first upload, so a mismatch refuses the call and writes nothing.
+ * That check runs under the dataset's in-process ingest lock, so no other ingest of the dataset in this process
+ * changes the records between the check and the writes. Absent, the page ingests as before.
  * A replacement reports the superseded document id; with
  * `SUBSTRATE_DOCS_PRUNE_SUPERSEDED=1` (uplift-2 R6) the superseded document
  * is deleted through the documented delete call once the replacement has
@@ -456,6 +459,8 @@ export type IngestOutcome =
 			conflict_with?: string;
 			/** On `version.stale`: `false`, since the refused page was not stored. */
 			verified_persisted?: false;
+			/** On `version.stale`: `"conflict"`, memory's outcome for a stale write. */
+			outcome?: "conflict";
 	  };
 
 /** A document this record's source URL once published, still on the plane unless pruned. */
@@ -610,7 +615,7 @@ function warnRefusal(
 	deps: IngestDeps,
 	sessionId: string,
 	reason: string,
-	extra?: { rules?: string[]; page?: string; changed?: boolean; remedy?: string; current_version?: number | null; conflict_with?: string; verified_persisted?: false },
+	extra?: { rules?: string[]; page?: string; changed?: boolean; remedy?: string; current_version?: number | null; conflict_with?: string; verified_persisted?: false; outcome?: "conflict" },
 ): Promise<void> {
 	if (deps.surface === null) return Promise.resolve();
 	return deps
@@ -637,7 +642,7 @@ function refused(
 	deps: IngestDeps,
 	sessionId: string,
 	reason: string,
-	extra?: { rules?: string[]; page?: string; changed?: boolean; remedy?: string; current_version?: number | null; conflict_with?: string; verified_persisted?: false },
+	extra?: { rules?: string[]; page?: string; changed?: boolean; remedy?: string; current_version?: number | null; conflict_with?: string; verified_persisted?: false; outcome?: "conflict" },
 ): Promise<IngestOutcome> {
 	const { changed = false, ...locator } = extra ?? {};
 	const outcome: IngestOutcome = { ok: false, refused: true, reason, ...locator, changed };
@@ -768,6 +773,7 @@ async function withDatasetIngestLock<T>(dataset: string, waitMs: number, work: (
 /** The refusal `staleVersion` reports: the version expected against the one on record. */
 interface VersionConflict {
 	remedy: string;
+	outcome: "conflict";
 	current_version: number | null;
 	conflict_with?: string;
 	verified_persisted: false;
@@ -790,6 +796,7 @@ function staleVersion(
 	if (!against) {
 		if (expected === 0) return null;
 		return {
+			outcome: "conflict",
 			remedy:
 				`No document is recorded for this source URL, so there is no version ${expected} to replace. ` +
 				"Re-submit without expected_version to record the first one.",
@@ -799,6 +806,7 @@ function staleVersion(
 	}
 	if (expected === against.version) return null;
 	const reply = {
+		outcome: "conflict" as const,
 		current_version: saved?.version ?? null,
 		verified_persisted: false as const,
 		...(saved?.document_id !== undefined ? { conflict_with: saved.document_id } : {}),

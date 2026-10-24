@@ -1649,6 +1649,36 @@ describe("exactly-once", () => {
 		expect(retry.deduplicated).toBe(true);
 		expect(store.entries()).toHaveLength(1);
 	});
+
+	test("a keyed replay after a newer version is in force returns the original entry and writes no row", async () => {
+		// The replay is decided before the version gate. A retry of a write that already landed
+		// is not refused as stale because a later write has since superseded it, and it is not
+		// written again.
+		const decision = { scope: "repo:a/b", kind: "decision" as const, subject: "runtime", idempotency_key: "k1" };
+		const first = await write({ ...decision, text: "the runtime is herdr" });
+		const newer = await write({
+			scope: "repo:a/b",
+			kind: "decision",
+			subject: "runtime",
+			text: "the runtime is Orca",
+			expected_version: 1,
+		});
+		expect(first.outcome).toBe("accepted");
+		expect(newer.outcome).toBe("accepted");
+		expect(newer.entry?.version).toBe(2);
+		expect(store.entries()).toHaveLength(2);
+
+		const replay = await write({ ...decision, text: "the runtime is herdr" });
+		expect(replay.outcome).toBe("accepted");
+		expect(replay.reason).toBe("idempotent.replay");
+		expect(replay.deduplicated).toBe(true);
+		expect(replay.verified_persisted).toBe(true);
+		expect(replay.entry?.id).toBe(first.entry?.id);
+		expect(replay.entry?.version).toBe(1);
+		expect(store.entries()).toHaveLength(2);
+		expect(store.standing()).toHaveLength(1);
+		expect(store.standing()[0]?.id).toBe(newer.entry?.id);
+	});
 });
 
 describe("verified_persisted", () => {

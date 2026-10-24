@@ -492,6 +492,37 @@ describe("routes", () => {
 		}
 	});
 
+	test("POST /docs/ingest refuses a stale expected_version with a 409 conflict, and uploads nothing", async () => {
+		const { greptime } = ledger();
+		const fake = new RagflowFake();
+		const { post, stop } = await serve(
+			greptime,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{ ragflowFetch: fake.fetch },
+		);
+		try {
+			// Nothing is on record for this source URL, so expecting version 1 is stale.
+			const response = await post(
+				"/docs/ingest",
+				{
+					dataset: "agent-substrate",
+					pages: [{ path: "docs/data-planes.md", source_url: "https://example.com/planes", body: "A page.", expected_version: 1 }],
+				},
+				{ authorization: "Bearer tok-omp" },
+			);
+			expect(response.status).toBe(409);
+			expect(await response.json()).toMatchObject({
+				refused: true,
+				reason: "version.stale",
+				outcome: "conflict",
+				verified_persisted: false,
+			});
+			expect(fake.uploads).toHaveLength(0);
+		} finally {
+			await stop();
+		}
+	});
+
 	/** Route only the fake plane host through `impl`; the loopback listener keeps the real fetch. */
 	function patchFetch(impl: FetchLike): () => void {
 		const original = globalThis.fetch;
