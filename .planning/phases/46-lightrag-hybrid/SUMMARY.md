@@ -50,10 +50,11 @@ Phase 46 is partial. Criterion 1 is complete in the repository. Criteria 2, 3, 5
 
 ## Deferred and blocked, with unblock steps
 
-- T4 comparator: deferred. Unblock: fixture-level design and a live dataset check in a later run.
+- T4 comparator: BLOCKED (reclassified from deferred on 2026-10-24). Unblock: the operator approves T5; a read-only RAGFlow export is then captured and the comparator is tested against it.
 - T5 to T8 live steps: HARD_STOP. Unblock: operator approval for each run.
-- T3 sample content: unblock by reading each sample document and confirming its query before the live gate.
-- Phase 25 artifacts: archived at .planning/milestones/v1.3-phases/25-docs-search-and-ingest-ragflow/ (located 2026-10-24). Criterion 5 names phase 25 as RAG-dependent, and its 25-VERIFICATION has not been read in this run. Unblock: read it and confirm whether it names a live RAGFlow call before cutover.
+- T3 sample content: checked 2026-10-24. 9 of 10 pairings confirmed; Q8 fails, because docs/skills-propose.md has no expected-version concept. Unblock: the operator approves the Q8 amendment recorded in PLAN T3; the check is then re-run and its result recorded.
+- Phase 25 artifacts: archived at .planning/milestones/v1.3-phases/25-docs-search-and-ingest-ragflow/ (located 2026-10-24). 25-VERIFICATION read 2026-10-24: the live G1 to G4 RAGFlow gates are operator-gated and never run.
+- Criterion 5 RAG-dependent candidates, from the VERIFICATION content read 2026-10-24, to be confirmed in the PLAN before cutover: 25 (live G1 to G4 gates, 25-VERIFICATION line 73); 40 (live RAGFlow health and TCP probe, 40-VERIFICATION lines 29-30); 42 (live fast-forward and agent-skills dataset not run, 42-VERIFICATION lines 36, 40, 83); 51 (live RAGFlow GET probes, 51-VERIFICATION line 61). Not counted: 18 (test pins), 20 (config fields), 34 (states it reads no live RAGFlow).
 
 ## Residual risks
 

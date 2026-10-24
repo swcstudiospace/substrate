@@ -69,14 +69,19 @@ The sample: ten fixed queries. Each expected source document is a file in this r
 
 Limit of this check: the glob confirmed each path exists. The query-to-file pairing was chosen from file names and has not been confirmed by reading each file's content. Before T7 runs, each pairing must be confirmed against the file content. That confirmation is part of T3's acceptance.
 
+Content check, 2026-10-24 (read-only; each sample document was read at its opening and searched for the fact its query asks about):
+- CONFIRMED, 9 of 10: Q1 docs-plane.md:90 (default query mode `hybrid`); Q2 docs-search-ingest.md, "The six ingest refusals"; Q3 memory-governance.md:594-618 (Hindsight holds a derived copy, forwarded on accept); Q4 greptime-ledger.md:32 (reads through `events_query`) and "The store lock" (storage); Q5 event-vocabulary.md (closed vocabulary, both enums); Q6 redaction.md (publication paths and the 39-rule table); Q7 dispatcher.md (Linear label to Hermes session in a per-Graph-ID worktree); Q9 railway-tailscale.md (forwarder per project); Q10 mcp-audit.md (one hash-chained record per call, allowed or denied).
+- FAILED, Q8: docs/skills-propose.md has no expected-version concept (no "version" or "expected" in the file, case-insensitive). expected_version is enforced on skill approval and docs ingest (phase 35 tests) and on memory decisions (memory-governance.md:200-239), never on the propose flow.
+- Result: T3 acceptance is NOT met. Proposed amendment, awaiting operator approval because the sample is fixed before any run: Q8 becomes "What does the skills propose flow check before it opens a pull request?", with expected source docs/skills-propose.md (sections "What is checked, and in what order" and "Duplicates"). Not applied; the sample above is unchanged.
+
 - Files: this PLAN (no separate sample file is created).
 - Verification: glob of `docs/*.md` (done), plus the content confirmation above before T7.
 - Commit boundary: part of the PLAN commit.
 - Rollback: revert the PLAN commit. The sample has no runtime effect.
 
-### T4 — Parity comparator (DEFERRED in this run)
+### T4 — Parity comparator (BLOCKED)
 
-- Status: not executed in this run.
+- Status: BLOCKED. Reclassified from DEFERRED on 2026-10-24, because only the user can defer a task. Unblock: the operator approves T5, and a read-only export of the RAGFlow dataset is captured.
 - Reason: the comparator must be checked against the live RAGFlow dataset. A fixture-level design is out of this run's budget, and a fixture design would not prove PARITY_GATE against the real dataset anyway.
 - Unblock step: (1) T5 archive completes with a verified checksum (operator approval); (2) a read-only export of the RAGFlow dataset's document list (dataset, source URL, version) is captured for the comparator; (3) the comparator is written against that export and tested against the export; (4) the comparator is then reviewed before T7.
 - Files when unblocked: to be set in a follow-up PLAN, not this one.
