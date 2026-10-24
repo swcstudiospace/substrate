@@ -22,7 +22,7 @@ bun run verify --list
 
 A passing step prints one line (with the pass/skip/fail counts for the suite). A failing step prints the last 60 lines of its output and the run stops, exit code 1. Exit code 2 means bad usage.
 
-`scripts/verify.test.ts` reads `.github/workflows/ci.yml` and fails when the workflow runs different commands from `bun run verify`, when a job loses its `CI_ENABLED` switch, or when the report-only `boot-gate` job stops being last, report-only or limited to `bun install --frozen-lockfile` and `bun run gate:boot`, so the workflow cannot drift apart silently.
+`scripts/verify.test.ts` reads `.github/workflows/ci.yml` and fails when the workflow runs different commands from `bun run verify`, when a job loses its `CI_ENABLED` switch, when the report-only `boot-gate` job stops being report-only or limited to `bun install --frozen-lockfile` and `bun run gate:boot`, or when the report-only `lint-report` job stops being report-only or limited to the install and `bunx biome lint`, so the workflow cannot drift apart silently.
 
 ### The database-backed tests
 
@@ -43,8 +43,11 @@ Nothing in the suite needs GreptimeDB; the real-store proofs are the rehearsal s
 | `verify` ("Typecheck, tests and repo locks") | `[self-hosted, linux, x64, omega-ci]` | same-repo pull request, push to `main`, on demand (never on the schedule) | the four steps above, with a scratch Postgres 16 (the local `scratch-postgres` action) and a full-history checkout (`check:phase-close` diffs against a baseline commit) |
 | `dependency-audit` ("Known-vulnerability audit") | `[self-hosted, linux, x64, omega-ci]` | push to `main`, Mondays 03:17 UTC, on demand (never on a pull request) | `bun install --frozen-lockfile --ignore-scripts`, `bun scripts/audit-gate.ts` |
 | `boot-gate` ("Boot and prove (report-only)") | `[self-hosted, linux, x64, omega-ci]` | same-repo pull request, push to `main`, on demand (never on the schedule); only when `BOOT_GATE` is `true` | `bun install --frozen-lockfile`, `bun run gate:boot` |
+| `lint-report` ("Lint (Biome, report-only)") | `[self-hosted, linux, x64, omega-ci]` | same-repo pull request, push to `main`, on demand (never on the schedule) | `bun install --frozen-lockfile`, `bunx biome lint --reporter=summary .` (`continue-on-error`: findings never block) |
 
 Fork pull requests run none of these jobs: each job's `if:` skips a pull request whose head repository is not this repository, because a fork's code would otherwise run on the shared runner pool.
+
+Lint is report-only. `bun run lint` runs `biome lint` (Biome 2.6.2 with the recommended rules; the formatter is off, so nothing is reformatted). The `lint-report` job runs the same command with `continue-on-error`, so its findings are advisory. Making it blocking is a separate decision, taken after the findings are triaged.
 
 Every job runs on the Omega CI runner pool (`[self-hosted, linux, x64, omega-ci]`, [swcstudiospace/Omega-Prime `docs/ci-runners.md`](https://github.com/swcstudiospace/Omega-Prime/blob/main/docs/ci-runners.md)), never on GitHub-hosted runners. Jobs run as an unprivileged user with no Docker and no `sudo`, so there are no service containers. The `verify` job's scratch database comes from [`.github/actions/scratch-postgres`](../.github/actions/scratch-postgres/action.yml): it runs `initdb` and `pg_ctl` from the image's PostgreSQL 16 into `$RUNNER_TEMP`, listening on 127.0.0.1 and a port the kernel reports free for that job (parallel jobs on one runner host never clash), with trust authentication on loopback. It creates `substrate_test` and exports `SUBSTRATE_TEST_PG_URL`. An `if: always()` step of the same action stops the cluster. Both are `uses:` steps, so the job's `run:` lines stay exactly the gate's four commands. The dependency audit runs on pushes to `main`, weekly and on demand, not on pull requests, so a new high or critical advisory fails it until the package is upgraded or listed under the accepted risks below. The weekly scheduled run re-checks the lockfile for advisories published between changes; a red scheduled run is the signal to upgrade.
 
