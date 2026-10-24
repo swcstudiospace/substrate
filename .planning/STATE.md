@@ -3,7 +3,7 @@ gsd_state_version: "1.0"
 milestone: v1.3.x
 milestone_name: Should-have hardening (Planned)
 status: "v1.3.x phases 37-39 merged (PR #89, PR #90, PR #91). Phase 40 (DOCS-MEMORY) code on main via PR #92. Phase 41 (ANCHOR) code on main via PR #116. Phase 42 (SKILL-CARD) code on main via PR #94. Phases 43 (PR #97) and 44 (PR #95) complete. Verification is human_needed for phases 40-43 and passed for 44. On 2026-10-23 the operator accepted the open operator gates as debt for phases 40-43, 45 and 47-50; milestone audit and close are next."
-stopped_at: run 2026-10-24: inventory, baseline gates and TODO dispositions recorded; milestone audits await operator confirmation
+stopped_at: run 2026-10-24: fixes committed, v1.3.x and v1.4 audits written; complete and phase 46 wait for operator decisions
 last_updated: "2026-10-24"
 last_activity: 2026-10-24
 last_activity_desc: autonomous run 2026-10-24 (graph ut-mvlvvvbt-57c57d9e): phase reconciliation, baseline gates, deferral table, v1.4 grouping
@@ -249,6 +249,13 @@ Phases 40-43, 45 and 47-50 are accepted debt (operator decision, 2026-10-23). Ph
 - TODO_BACKLOG (n3): the raw marker pass finds 25 hits and no real open items. Five are placeholder strings in packages; 20 are planning prose. Register items from `todo-inventory.md`, with dispositions: D-01 DEFERRED (operator-gated live handoff proof). D-02 MAPPED to phase 46. D-03 DEFERRED (human-only). D-04 DEFERRED (orphan). D-05 DEFERRED (orphan). D-06 NEEDS_DECISION: direction answered 2026-10-24 as governed fact entries; implementation scope still open. D-07 DEFERRED (operator-gated): the phase 20 scratch UAT passes scenarios 1, 3, 4, 6, 7 and 8; scenarios 2 and 5 were never run because they are production-gated. D-08 DEFERRED (accepted debt with v1.3). D-09 and D-10 (IN-01, IN-02) DEFERRED (orphan). D-11, D-12 and D-13 (IN-04, IN-05, IN-06) DEFERRED, fold when touched: no open branch or draft touches `scripts/parity-check.ts`, `rehearsal.ts` or `docs-smoke.ts`. D-14 and D-15 MAPPED to phase 46 (D-15 closes when RAGFlow is removed). D-16 DEFERRED until measured: phase-close ran in 3.2 s in this run. D-17 DEFERRED to the touched-code rule: 29 findings in 24 files, not enabled repo-wide. D-18 FOLD when touched: explicit `any` is 37 (19 in tests, 18 outside); the register's 34 is stale. D-19 NEEDS_DECISION to ship: Biome is on `quality/biome-report-only` (a9dba82, pushed), unshipped. D-20 DEFERRED: README.md:91 documents `bun run check`, which no script defines; no README change is in this run's file set. D-21 NEEDS_DECISION to ship: swarm pins are on `test/swarm-pins-a16-a30` (04772af, pushed), unshipped. D-22 CONFIRMED (no change). D-23 CONFIRMED: 11 stashes kept.
 - Scout items from phase CONTEXT and PLAN "Out of scope" lists (phases 37-44) DEFERRED to each phase's operator gate, the same gates as the Deferred Verification table.
 - Quality candidates, not started: `packages/dispatcher/tests` and `packages/miner/tests` hold Python tests that no gate runs, while `package.json` defines `test:py`; `docs/ci.md` says none exist on main. Also: explicit `any` 37; 29 unused-local/parameter findings; the Biome gate and the audit upgrade await shipping.
+
+## Run update (2026-10-24, after the integration fixes)
+
+- Integration checks (read-only) found a v1.4 blocker: an identical versioned skill replay returned 409 (F1). They also found the phase 36 tests missing from HEAD, LightRAG persisting the valid siblings of an invalid page (criterion 34.1), and docs and skills contract warnings. Fixed on the run branch: `c74fa07` (skills replay through a beforeWork hook), `5b5f68f` (phase 36 tests restored from stash@{6}), `7cf8d44` (docs outcome conflict, HTTP 409 and keyed-replay tests), `76f2707` (LightRAG whole-batch refusal).
+- Composite gate `bun run verify` on the run tree: exit 0. Tests 6073 pass, 177 skip, 0 fail (baseline 6061 / 177 / 0). The skips are the Postgres suites, which CI runs; this host's scratch Postgres was unreachable.
+- Audits written: `v1.3.x-MILESTONE-AUDIT.md` gaps_found (`89b8eb5`); `v1.4-MILESTONE-AUDIT.md` tech_debt (committed with this update). Neither milestone is archived; `complete --confirm` waits for the operator.
+- Incident: agent edits for the fixes first landed in the primary checkout, on PR #123's branch `planning/consistency-check-2026-10-24`, uncommitted. The patch was saved, applied to the run worktree, and the primary was restored to clean. PR #123's branch is unchanged.
 
 ## Session Continuity
 
