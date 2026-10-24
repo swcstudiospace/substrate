@@ -8,7 +8,7 @@
 - ⚠️ **v1.3 Build plan completion** — Phases 16–33; shipped 2026-10-11, closed 2026-10-21 with accepted debt (8 audit rows and 43 operator-gated live proofs). Closeout: [milestones/v1.3-CLOSEOUT.md](milestones/v1.3-CLOSEOUT.md) · tracking: [SPE-8292](https://linear.app/swcstudio/issue/SPE-8292/n7-final-ordered-execution-plan-in-waves)
 - 🚧 **v1.4 Substrate contract hardening** — Phases 34-36: the three uplift-7 substrate gaps (invalid writes, expected_version for skills and docs, degraded-mode exactly-once). Source: [.planning/uplift-7/MILESTONE-AUDIT.md](uplift-7/MILESTONE-AUDIT.md) rows 23-25.
 - 🚧 **v1.3.x Should-have hardening** — Phases 37-44, scheduled from research/SUMMARY.md:68 (should-have, after validation).
-- 🚧 **v1.5 SOTA enhancements** — Phases 45-51, from the 7-SOTA plan on branch feature/7-sota-enhancements (PR #83 closed; PR #85 does not carry these).
+- 🚧 **v1.5 SOTA enhancements** — Phases 45-54: 45-51 from the 7-SOTA plan on branch feature/7-sota-enhancements (PR #83 closed; PR #85 does not carry these); 52-54 defined here from draft PR #105.
 
 ## Phases
 
@@ -102,6 +102,9 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 49: Hindsight Graph Memory with Greptime Events** - graph-structured Hindsight memory with causal recall. Accepted as debt on 2026-10-23; live ledger proof open.
 - [x] **Phase 50: Dragonfly Pub/Sub for Real-time Events** - real-time event propagation and event-driven cache invalidation. Accepted as debt on 2026-10-23; live subscription and wake-up latency open.
 - [x] **Phase 51: Enterprise Unified Resource Fabric** - one MCP interface across all six resources, depends on phases 45 and 48
+- [ ] **Phase 52: GSD-Core planning index and cross-session awareness core** - file-first index, session presence and read-only planning tools (In review: draft PR #104 core, PR #109 wiring)
+- [ ] **Phase 53: Steering, conflict control and checkpoint/resume** - audited steering inbox, conflict events and resumable checkpoints (In review: draft PR #110)
+- [ ] **Phase 54: Planning observability and migration inventory** - phase-transition metrics, session STATES and the Railway migration inventory (In review: draft PR #111)
 
 ## Phase Details
 
@@ -760,6 +763,71 @@ Plans:
 **Plans**: 1/1 plans complete; verified 2026-10-22 in phases/51-enterprise-fabric/VERIFICATION.md; merged in PR #108
 
 
+### Phase 52: GSD-Core planning index and cross-session awareness core
+
+**Goal**: Agents see other sessions' `.planning` state through the substrate, read-only and file-first: no session writes into another session's `.planning`, and every backing service is optional with a file-only fallback.
+
+**Status**: In review as draft PR #104 (core, base main; merge by SQUASH only, because the branch history contains a reverted muse merge) and draft PR #109 (wiring, base gsd/p51-fabric-impl, head gsd/p52-wiring). Not on main.
+
+**Depends on**: Phase 50 (existing event bus and pub/sub hints), Phase 17 (frozen event vocabulary; no new event kinds)
+
+**Repos**: agent-substrate (target files: packages/mcp-server/src (new planning/ modules), packages/audit/src/policy.ts, docs, config-reference)
+
+**Requirements**: [SOTA-08]
+
+**Success Criteria** (what must be TRUE):
+
+  1. A deterministic index of `.planning` artifacts keyed by content hash, where a full rebuild equals the incremental result.
+  2. Session presence uses a server-time TTL; a stale session is derived at read time and never deleted.
+  3. Planning-change diffs publish on the existing event bus carrying paths and hashes, never bodies.
+  4. Read-only MCP tools `planning_status` and `planning_sessions` exist, each with an entry in `packages/audit/src/policy.ts`.
+  5. File-only mode works with every backing service disabled.
+  6. All configuration is environment-only, with documented defaults and no hardcoded hosts, ports or paths.
+
+**Plans**: 0 plans on main (created by gsd-plan-phase)
+
+### Phase 53: Steering, conflict control and checkpoint/resume
+
+**Goal**: Human-authorized steering directives are queued, acknowledged and audited in TimescaleDB before any file change; conflicts between sessions on the same parsed phase or plan id emit events and never auto-resolve; checkpoints at plan-step boundaries resume without duplicate completion.
+
+**Status**: In review as draft PR #110 (base gsd/p52-wiring, head gsd/p53-complete-store). Migration 33 is NOT applied. Live delivery into sessions is NOT built.
+
+**Depends on**: Phase 52 (session index and presence), Phase 20 (per-client identity for attributing directives)
+
+**Repos**: agent-substrate (target files: packages/mcp-server/src (planning steering and checkpoint modules), TimescaleDB index schema, config-reference)
+
+**Requirements**: [SOTA-09]
+
+**Success Criteria** (what must be TRUE):
+
+  1. A directive is queued, then acknowledged, then audited; when the audit write cannot be made, the directive is held and no file changes.
+  2. Two sessions touching the same parsed phase or plan id emit a conflict event, and neither side resolves it automatically.
+  3. A watcher gap marks the session view unknown until a full rescan.
+  4. Kill-and-restart at a plan-step boundary yields exactly one completion record, keyed by phase id, plan step and file hash.
+
+**Plans**: 0 plans on main (created by gsd-plan-phase)
+
+### Phase 54: Planning observability and migration inventory
+
+**Goal**: Every phase transition is observable, and host-bound dependencies are inventoried for a future Railway move, with no cutover, DNS change or production deploy in scope.
+
+**Status**: In review as draft PR #111 (base gsd/p52-wiring, head gsd/p54-complete). The Greptime rehearsal of `planning.transition` has NOT run.
+
+**Depends on**: Phase 52 (transition source), Phase 53 (steering and checkpoint states)
+
+**Repos**: agent-substrate (target files: packages/observability, docs, config-reference)
+
+**Requirements**: [SOTA-10]
+
+**Success Criteria** (what must be TRUE):
+
+  1. Each phase transition emits a GreptimeDB metric, with a stdout fallback when GreptimeDB is disabled or unreachable.
+  2. The session view reports exactly one of the STATES: LOADING, EMPTY, STALE, DEGRADED, ERROR, SUCCESS.
+  3. A documented inventory separates disk state from Railway-hosted state and lists host-bound paths and units.
+
+**Plans**: 0 plans on main (created by gsd-plan-phase)
+
+
 ## Progress
 
 | Phase | Milestone | Plans Complete | Status | Completed |
@@ -800,3 +868,6 @@ Plans:
 | 49. Hindsight Graph Memory with Greptime Events | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live ledger proof open | 2026-10-23 |
 | 50. Dragonfly Pub/Sub for Real-time Events | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live subscription proof open | 2026-10-23 |
 | 51. Enterprise Unified Resource Fabric | v1.5 | 1/1 | Complete (PR #108) | 2026-10-22 |
+| 52. GSD-Core planning index and cross-session awareness core | v1.5 | 0/0 | In review (draft PR #104 core, PR #109 wiring) | - |
+| 53. Steering, conflict control and checkpoint/resume | v1.5 | 0/0 | In review (draft PR #110) | - |
+| 54. Planning observability and migration inventory | v1.5 | 0/0 | In review (draft PR #111) | - |

@@ -75,6 +75,16 @@ Source for all entries: `.planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota
   - Acceptance: New MCP tools for fabric status, optimization suggestions; compliance report.
   - Target files: packages/mcp-server/src (new fabric/), observability, docs, config-reference
 
+- [ ] **SOTA-08**: GSD-Core planning index and cross-session awareness core. Phase: 52. Source: .planning/ROADMAP.md Phase 52 (defined 2026-10-22; not in .planning/7-SOTA-ENHANCEMENTS.md, which lists items 1–7 only)
+  - Acceptance: deterministic content-hash index of `.planning` artifacts where a full rebuild equals the incremental result; session presence with server-time TTL, stale derived at read time and never deleted; planning-change diffs on the existing event bus carrying paths and hashes, never bodies; read-only MCP tools `planning_status` and `planning_sessions`, each with an entry in `packages/audit/src/policy.ts`; file-only mode works with every backing service disabled; environment-only configuration.
+  - Target files: packages/mcp-server/src (new planning/ modules), packages/audit/src/policy.ts, docs, config-reference
+- [ ] **SOTA-09**: Steering, conflict control and checkpoint/resume. Phase: 53. Source: .planning/ROADMAP.md Phase 53 (defined 2026-10-22; not in .planning/7-SOTA-ENHANCEMENTS.md, which lists items 1–7 only)
+  - Acceptance: steering directives queued, then acknowledged, then audited in TimescaleDB before any file change, and held with no file change when the audit cannot be written; conflicts between sessions on the same parsed phase or plan id emit events and never auto-resolve; a watcher gap marks the session view unknown until a full rescan; kill-and-restart at a plan-step boundary yields exactly one completion record keyed by phase id, plan step and file hash.
+  - Target files: packages/mcp-server/src (planning steering and checkpoint modules), TimescaleDB index schema, config-reference
+- [ ] **SOTA-10**: Planning observability and migration inventory. Phase: 54. Source: .planning/ROADMAP.md Phase 54 (defined 2026-10-22; not in .planning/7-SOTA-ENHANCEMENTS.md, which lists items 1–7 only)
+  - Acceptance: each phase transition emits a GreptimeDB metric with a stdout fallback when GreptimeDB is disabled or unreachable; the session view reports exactly one of LOADING, EMPTY, STALE, DEGRADED, ERROR, SUCCESS; a documented inventory separates disk state from Railway-hosted state and lists host-bound paths and units; no cutover, DNS change or production deploy in scope.
+  - Target files: packages/observability, docs, config-reference
+
 ## Out of scope and deferred
 
 Defer (v2+), from `.planning/research/SUMMARY.md` line 70:
@@ -111,6 +121,9 @@ Anti-features, from `.planning/research/SUMMARY.md` line 72:
 | SOTA-05 | 49 | Pending |
 | SOTA-06 | 50 | Pending |
 | SOTA-07 | 51 | Pending |
+| SOTA-08 | 52 | Pending |
+| SOTA-09 | 53 | Pending |
+| SOTA-10 | 54 | Pending |
 
 ---
 *Requirements defined: 2026-10-21*
