@@ -87,7 +87,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 37: LANEB** - graph inference from worktree path
 - [x] **Phase 38: MIRROR** - mirror graph edges into Linear relations and outcomes into evidence
 - [x] **Phase 39: DISPATCH** - signed handoff packet and coord drift scan before launch
-- [x] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (decided 2026-10-21). Code on main (PR #92). Accepted as debt by the operator on 2026-10-23; live restore drill and approval open (D-D3).
+- [x] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (decided 2026-10-21). Code on main (PR #92). Accepted as debt by the operator on 2026-10-23; live restore drill and approval open (D-D3). Criterion 3 is the narrower scope the owner accepted on 2026-10-22.
 - [x] **Phase 41: ANCHOR** - anchor evidence and teachables. Code on main (PR #116). Accepted as debt by the operator on 2026-10-23; live devnet proof open.
 - [x] **Phase 42: SKILL-CARD** - skills_list audit trail and the F-D4 re-ingest item. Code on main (PR #94). Accepted as debt by the operator on 2026-10-23; live host fast-forward open.
 - [x] **Phase 43: LANE-A** - sandbox egress allowlist and task re-adoption. Complete (PR #97). Accepted as debt by the operator on 2026-10-23; live egress and restart proof open.
@@ -551,7 +551,7 @@ Plans:
 
 ### Phase 40: DOCS-MEMORY
 
-**Goal**: The memory planes consolidate into one: cross-surface recall, retirement of the duplicate memory MCPs once the `sub-*` banks answer, and a weekly reflect per bank.
+**Goal**: The memory planes consolidate into one: cross-surface recall, retirement of the duplicate memory MCPs once the `sub-*` banks answer, and a weekly refresh of the config-named mental models.
 
 **Decision (2026-10-21)**: DOCS-04 is amended to allow recall inside the brief, as D-D1 describes (a bounded, cached fan-out over the `sub-*` banks). The original DOCS-04 wording stays in milestones/v1.3-REQUIREMENTS.md:85. Open for the phase 40 discuss step: whether the 1.5 s brief budget named in that wording still applies.
 
@@ -565,9 +565,9 @@ Plans:
 
   1. D-D1 (decided 2026-10-21): cross-surface recall in the brief is a bounded, cached fan-out over the `sub-*` banks (`data-planes.md:34`).
   2. Claude Code's global `hindsight` stdio MCP and Hermes supermemory are retired once the `sub-*` banks answer, with restore routes recorded first.
-  3. A weekly `reflect` per bank: mental models replace stale detail (`data-planes.md:27,39`).
+  3. A weekly refresh of the config-named mental models through the refresh endpoint, without `reflect`: mental models replace stale detail (`data-planes.md:27,39`). The owner accepted this narrower scope on 2026-10-22 (see phases/40-docs-memory/VERIFICATION.md frontmatter), which supersedes the original weekly `reflect` wording.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; see phases/40-docs-memory/VERIFICATION.md (human_needed; restore drill operator-gated)
 
 ### Phase 41: ANCHOR
 
@@ -584,7 +584,7 @@ Plans:
   1. Anchors appear in the evidence bundle: a tx signature and an explorer link per hour, so PR and incident evidence can be checked outside the system (v0.3 6.x).
   2. Teachable moments are anchored with graph id plus an observation digest, a user addition carried in the brief's area E.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; see phases/41-anchor/VERIFICATION.md (human_needed; devnet proof operator-gated)
 
 ### Phase 42: SKILL-CARD
 
@@ -601,7 +601,7 @@ Plans:
   1. `skills_list` and an approve/decline audit trail (§5.1; v0.3 "4.x Skill approve audit").
   2. Skills become searchable through `docs_search` after each `agent-skills` fast-forward re-ingest.
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; see phases/42-skill-card/VERIFICATION.md (human_needed; live fast-forward operator-gated)
 
 ### Phase 43: LANE-A
 
@@ -618,7 +618,7 @@ Plans:
   1. An enforced egress allowlist for the sandbox container (September N3 found it could reach example.com).
   2. Running tasks are re-adopted after a dispatcher restart, so no orphaned VMs remain (N4).
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; see phases/43-lane-a/VERIFICATION.md (human_needed; live egress and restart operator-gated)
 
 ### Phase 44: UAT
 
@@ -634,7 +634,7 @@ Plans:
 
   1. The UAT runs as a repeatable script against any `SUBSTRATE_URL`, a regression check for every later phase (I-D1).
 
-**Plans**: 0 plans (created by gsd-plan-phase)
+**Plans**: 1/1 plans complete; see phases/44-uat/VERIFICATION.md (passed)
 
 ### Phase 45: Railway Resource Orchestrator
 
@@ -856,9 +856,9 @@ Plans:
 | 37. LANEB | v1.3.x | 1/1 | Complete | 2026-10-21 |
 | 38. MIRROR | v1.3.x | 1/1 | Complete | 2026-10-21 |
 | 39. DISPATCH | v1.3.x | 1/1 | Complete (PR #91) | 2026-10-21 |
-| 40. DOCS-MEMORY | v1.3.x | 0/0 | Complete (accepted debt 2026-10-23); live restore drill open | 2026-10-23 |
-| 41. ANCHOR | v1.3.x | 0/0 | Complete (accepted debt 2026-10-23); live devnet proof open | 2026-10-23 |
-| 42. SKILL-CARD | v1.3.x | 0/0 | Complete (accepted debt 2026-10-23); live host proof open | 2026-10-23 |
+| 40. DOCS-MEMORY | v1.3.x | 1/1 | Complete (accepted debt 2026-10-23); live restore drill open | 2026-10-23 |
+| 41. ANCHOR | v1.3.x | 1/1 | Complete (accepted debt 2026-10-23); live devnet proof open | 2026-10-23 |
+| 42. SKILL-CARD | v1.3.x | 1/1 | Complete (accepted debt 2026-10-23); live host proof open | 2026-10-23 |
 | 43. LANE-A | v1.3.x | 1/1 | Complete (PR #97); live egress and restart proof open (accepted debt 2026-10-23) | 2026-10-21 |
 | 44. UAT | v1.3.x | 1/1 | Complete (PR #95) | 2026-10-21 |
 | 45. Railway Resource Orchestrator | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live Railway proof open | 2026-10-23 |

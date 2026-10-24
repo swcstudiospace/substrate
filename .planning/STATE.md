@@ -205,10 +205,19 @@ Items acknowledged and deferred, most recent first:
 
 ## Operator Next Steps
 
-- Phase 40 onward: run the consistency check first, then the next incomplete phase under the accepted-debt record above.
+- Consistency check recorded 2026-10-24 (below). Next: phase 46 and phases 52-54, then the milestone audits.
 - Phase 46: discuss, plan, execute and verify the LightRAG query path and the migration waves.
 - Phases 52-54: merge main into drafts #104 and #109-#111 once #105 lands on main (no force push), then run each phase.
 - Milestone close (v1.3.x, then v1.5): gsd-audit-milestone, then gsd-complete-milestone, only after the operator confirms the audit output.
+
+## Consistency check (2026-10-24)
+
+Read-only check of the nine accepted-debt phases (40, 41, 42, 43, 45, 47, 48, 49, 50) against their ROADMAP success criteria, the criteria tables in phases/NN VERIFICATION.md, and SUMMARY.md. Rule used: each criterion's classification and locator in VERIFICATION.md is its per-criterion evidence record, and SUMMARY.md gives the narrative evidence. Strict per-criterion rows inside SUMMARY.md are not a gate, because these phases shipped before this run and do not carry them.
+
+- Consistent: 41, 42, 43, 45, 47, 48, 49, 50. Every criterion is classified in VERIFICATION.md and none failed. The open items are operator-gated live proofs, recorded in VERIFICATION.md.
+- Phase 40: criterion 1 proven in repo; criterion 2 not met (restore drill, operator-gated, accepted as debt); criterion 3 not met as written and narrowed by the owner on 2026-10-22. ROADMAP now states the narrowed scope.
+- Fixed in this change: ROADMAP plan counts for phases 40-44 (0 plans to 1/1), the phase 40 goal and criterion 3 wording, and the progress row counts for phases 40-42.
+- Left unchanged: stale status lines in phase CONTEXT.md and PLAN.md frontmatter (workflow artifacts). They do not change any verdict.
 
 ## Session Continuity
 
