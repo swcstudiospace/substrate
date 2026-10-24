@@ -840,11 +840,10 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	const backend: DocsBackend = deps.backend ?? (deps.lightragConfig != null ? "lightrag" : "ragflow");
 	if (input.pages.length === 0) return refused(deps, sessionId, "no-pages");
 
-	// The per-page gates run on both planes. RAGFlow refuses the whole call at
-	// the first page that fails; LightRAG records that page as `failed` and keeps
-	// the rest (per-file isolation), so one bad page never voids the valid ones.
+	// The per-page gates run on both planes before the first write, and an invalid page refuses the whole call on
+	// both: nothing is uploaded or recorded, and the refusal names the first failing page. A write that fails
+	// upstream is the only per-page `failed` (see `ingestDocsLightrag`).
 	const prepared: PreparedPage[] = [];
-	const rejected: IngestPageResult[] = [];
 	let total = 0;
 	let strippedImages = 0;
 	for (const page of input.pages) {
@@ -856,25 +855,14 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 			continue;
 		}
 		const locator = { page: page.path, ...(verdict.rules !== undefined ? { rules: verdict.rules } : {}) };
-		if (backend !== "lightrag") return refused(deps, sessionId, verdict.reason, locator);
-		await warnRefusal(deps, sessionId, verdict.reason, locator);
-		rejected.push({
-			path: page.path,
-			source_url: page.source_url ?? "",
-			status: "failed",
-			document_id: "",
-			content_sha256: "",
-			error: redact(verdict.rules !== undefined ? `${verdict.reason}: ${verdict.rules.join(", ")}` : verdict.reason).slice(0, 200),
-		});
+		return refused(deps, sessionId, verdict.reason, locator);
 	}
 
 	// Both planes write one dataset's records under that dataset's lock; the records are read only once it is held.
 	const seen = deps.seen ?? new Map<string, IngestRecord>();
 	const locks = deps.locks ?? new Map<string, { task: Promise<PageSettlement>; sha: string }>();
 	if (backend === "lightrag") {
-		return underDatasetLock(deps, input.dataset, sessionId, () =>
-			ingestDocsLightrag(deps, input, sessionId, { roots, seen, locks, prepared, rejected, strippedImages }),
-		);
+		return underDatasetLock(deps, input.dataset, sessionId, () => ingestDocsLightrag(deps, input, sessionId, { roots, seen, locks, prepared, strippedImages }));
 	}
 	if (config === null) return refused(deps, sessionId, "ragflow-not-configured");
 	return underDatasetLock(deps, input.dataset, sessionId, () => writeBatch(deps, config, input, prepared, { sessionId, strippedImages, seen, locks }));
@@ -1456,11 +1444,10 @@ async function ingestDocsLightrag(
 		seen: Map<string, IngestRecord>;
 		locks: Map<string, { task: Promise<PageSettlement>; sha: string }>;
 		prepared: PreparedPage[];
-		rejected: IngestPageResult[];
 		strippedImages: number;
 	},
 ): Promise<IngestOutcome> {
-	const { seen, locks, prepared, rejected, strippedImages } = shared;
+	const { seen, locks, prepared, strippedImages } = shared;
 	// The caller gates auth, but this branch is also entered from tests and
 	// future call sites: fail closed here too, which narrows `deps.surface`
 	// for the note event below.
@@ -1477,13 +1464,12 @@ async function ingestDocsLightrag(
 	const dataset = listed.datasets.find((entry) => entry.name === input.dataset);
 	if (!dataset) return refused(deps, sessionId, "unknown-dataset");
 	const commit = input.commit ?? "unpinned";
-	const results: IngestPageResult[] = [...rejected];
+	const results: IngestPageResult[] = [];
 	const changed = (): boolean => results.some((result) => result.status === "ingested" || result.status === "replaced");
-	// Per-file isolation: a page the plane rejects is recorded as `failed`
-	// and the sweep continues, so one bad page never voids the pages that
-	// landed. The call reports `partial` when anything landed alongside
-	// failures, and refuses only when nothing did.
-	let failed = rejected.length;
+	// Per-file isolation: a page whose upstream write fails is recorded as `failed` and the sweep continues, so one
+	// failed write never voids the pages that landed. Invalid pages never reach here (see `ingestDocs`). The call
+	// reports `partial` when anything landed alongside failures, and refuses only when nothing did.
+	let failed = 0;
 	// Keys with a write that failed in this call. The version plan assumed every planned write landed, so a later
 	// page of such a key is recorded failed and not written: writing it would store a version the plan never reached.
 	const failedKeys = new Set<string>();
