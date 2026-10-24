@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 milestone: v1.3.x
 milestone_name: Should-have hardening (Planned)
 status: "v1.3.x phases 37-39 merged (PR #89, PR #90, PR #91). Phase 40 (DOCS-MEMORY) code on main via PR #92. Phase 41 (ANCHOR) code on main via PR #116. Phase 42 (SKILL-CARD) code on main via PR #94. Phases 43 (PR #97) and 44 (PR #95) complete. Verification is human_needed for phases 40-43 and passed for 44. On 2026-10-23 the operator accepted the open operator gates as debt for phases 40-43, 45 and 47-50; milestone audit and close are next."
-stopped_at: accepted debt recorded 2026-10-23; milestone audit and close not yet run
-last_updated: "2026-10-23"
-last_activity: 2026-10-23
-last_activity_desc: phase 41 code merged as PR #116; planning closeout for phases 40-44
+stopped_at: accepted debt recorded 2026-10-23; consistency check recorded 2026-10-24; milestone audit and close not yet run
+last_updated: "2026-10-24"
+last_activity: 2026-10-24
+last_activity_desc: consistency check of the accepted-debt phases recorded (PR #123)
 state_head: 1a9f4fd365ede291c4e21be71b6ff236e0e49c67
 progress:
   total_phases: 8
@@ -161,7 +161,7 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: 40 (accepted debt; the consistency check is the next action)
+Phase: 40 (accepted debt; the consistency check is recorded 2026-10-24, and the milestone audit is next)
 Plan: —
 Status: v1.3.x and v1.5 open. Preflight recorded 2026-10-23; no phase executed by this run yet.
 Last activity: 2026-10-23 — PR #119 merged; PR #121 (ROADMAP progress follow-up) shipped through ultrathink-ship; migration placed inside phase 46 by operator decision.
