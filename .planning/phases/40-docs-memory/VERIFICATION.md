@@ -46,3 +46,23 @@ covered_files: ["packages/mcp-server/src/memory-recall.ts", "packages/mcp-server
 | 1 | D-D1: cross-surface recall in the brief is a bounded, cached fan-out over the `sub-*` banks | PASS in-repo. No live effect: recall is off and `HINDSIGHT_BANKS` is empty on the server | the fan-out tests above; the live settings table |
 | 2 | Claude Code's `hindsight` MCP and Hermes supermemory retired once the `sub-*` banks answer, restore routes recorded first | NOT MET. Restore routes are recorded in `docs/runbooks/memory-mcp-retirement.md`. The drill and approval are pending. Not every `sub-*` bank answers: `sub-grok-bot` is absent from the VPS bank list, and Hermes supermemory has no configured integration here | runbook; the Hindsight bank check |
 | 3 | A weekly `reflect` per bank: mental models replace stale detail | NOT MET as written. Shipped: a weekly refresh of config-named models through the refresh endpoint. `reflect` is not used because it persists nothing. Accepting the narrower scope is the user's call | `mental-model-refresh.test.ts`; SUMMARY deviations |
+
+## Requirement coverage re-verification (2026-10-24)
+
+Scope: D-D4 (`.planning/REQUIREMENTS.md:34`). Checked against worktree HEAD bdcc798. Tests were not run in this task; the orchestrator runs them. Every path and line below was read before it was cited.
+
+### D-D4: mental models replace stale detail
+
+- ROADMAP criterion 3 (`.planning/ROADMAP.md:571`), quoted: "A weekly refresh of the config-named mental models through the refresh endpoint, without `reflect`: mental models replace stale detail (`data-planes.md:27,39`). The owner accepted this narrower scope on 2026-10-22 (see phases/40-docs-memory/VERIFICATION.md frontmatter), which supersedes the original weekly `reflect` wording."
+- Scope record: the owner accepted the narrower scope on 2026-10-22, as the frontmatter above records. ROADMAP criterion 3 at `:571` states the narrowed wording. `.planning/ROADMAP.md:93` gives 2026-10-23 for an "accepted as debt" entry. That entry is a separate phase-level acceptance; the two dates are not reconciled here. [INFERENCE] the 2026-10-23 entry is not the criterion-3 scope decision.
+- Implementing code:
+  - `packages/mcp-server/src/config.ts:2126` `loadMentalModelConfig`, which parses `HINDSIGHT_MENTAL_MODELS`.
+  - `packages/mcp-server/src/mental-model-refresh.ts:23` `REFRESH_INTERVAL_MS`, seven days.
+  - `packages/mcp-server/src/mental-model-refresh.ts:82-91` `start` and `stop`, the timer with no pass at boot.
+  - `packages/mcp-server/src/mental-model-refresh.ts:129` the POST to `.../mental-models/<id>/refresh`. The refresh endpoint is used; `reflect` is not.
+  - `packages/mcp-server/src/index.ts:187-193` builds the refresh from the config-named models and starts it; no timer is set when no model is named.
+- Tests:
+  - `packages/mcp-server/src/config.test.ts:542` describe "HINDSIGHT_MENTAL_MODELS"; `:543` "unset names no model and warns about nothing"; `:547` "a valid entry is kept and an invalid entry is dropped, with the valid ones still applying"; `:561` "at most 20 models, and a repeated model is dropped with a warning"
+  - `packages/mcp-server/src/mental-model-refresh.test.ts:101` describe "the weekly mental-model refresh"; `:110` "models named: the timer is seven days out, and no pass runs at boot"; `:128` "each named model is refreshed once per run, with the confirmed POST"; `:141` "a failing model does not stop the others, and each outcome gets one ledger note"; `:210` "the plane is unconfigured: each model is recorded failed as unconfigured, with no call"
+- Evidence status: in-repo proven for the narrowed scope in criterion 3. Code and tests were both found. The criterion as originally written (a weekly `reflect` per bank) is not met, and the phase VERIFICATION records that.
+- Live proof remaining: `PENDING_VALIDATION`. Operator check, on the VPS: confirm `HINDSIGHT_MENTAL_MODELS` names the intended bank and model pairs (read the variable's name and count only, never print the plane key). After the first scheduled pass, seven days after start, confirm the ledger shows one note per named model with an accepted or failed outcome. No refresh against Hindsight has been run here.
