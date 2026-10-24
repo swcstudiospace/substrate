@@ -87,20 +87,20 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 37: LANEB** - graph inference from worktree path
 - [x] **Phase 38: MIRROR** - mirror graph edges into Linear relations and outcomes into evidence
 - [x] **Phase 39: DISPATCH** - signed handoff packet and coord drift scan before launch
-- [ ] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (decided 2026-10-21). Code on main (PR #92); verification human_needed: D-D3 waits for the restore drill and approval.
-- [ ] **Phase 41: ANCHOR** - anchor evidence and teachables. Code on main (PR #116); verification human_needed: the devnet proof is operator-gated.
-- [ ] **Phase 42: SKILL-CARD** - skills_list audit trail and the F-D4 re-ingest item. Code on main (PR #94); verification human_needed.
-- [ ] **Phase 43: LANE-A** - sandbox egress allowlist and task re-adoption. Complete (PR #97); verification human_needed.
+- [x] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (decided 2026-10-21). Code on main (PR #92). Accepted as debt by the operator on 2026-10-23; live restore drill and approval open (D-D3).
+- [x] **Phase 41: ANCHOR** - anchor evidence and teachables. Code on main (PR #116). Accepted as debt by the operator on 2026-10-23; live devnet proof open.
+- [x] **Phase 42: SKILL-CARD** - skills_list audit trail and the F-D4 re-ingest item. Code on main (PR #94). Accepted as debt by the operator on 2026-10-23; live host fast-forward open.
+- [x] **Phase 43: LANE-A** - sandbox egress allowlist and task re-adoption. Complete (PR #97). Accepted as debt by the operator on 2026-10-23; live egress and restart proof open.
 - [x] **Phase 44: UAT** - repeatable UAT script against any SUBSTRATE_URL. Complete (PR #95); verification passed.
 
 ### 🚧 v1.5 SOTA enhancements (Planned)
 
-- [ ] **Phase 45: Railway Resource Orchestrator** - budget ceiling $50 per month, confirmed 2026-10-21 (uplift-7/BLOCKING-UNKNOWNS.md item 8)
-- [ ] **Phase 46: RAGFlow Advanced Hybrid RAG with Hindsight Context** - hybrid search with reranking and Hindsight context
-- [ ] **Phase 47: GreptimeDB + Dragonfly Predictive Analytics & Cache** - SLO burn forecasting and pattern-based cache pre-warming
-- [ ] **Phase 48: TailscaleDB Secure Unified Proxy Layer** - zero-trust database access through one Tailscale proxy with RBAC, audit and pooling
-- [ ] **Phase 49: Hindsight Graph Memory with Greptime Events** - graph-structured Hindsight memory with causal recall
-- [ ] **Phase 50: Dragonfly Pub/Sub for Real-time Events** - real-time event propagation and event-driven cache invalidation
+- [x] **Phase 45: Railway Resource Orchestrator** - budget ceiling $50 per month, confirmed 2026-10-21 (uplift-7/BLOCKING-UNKNOWNS.md item 8). Accepted as debt on 2026-10-23; live Railway proof open.
+- [ ] **Phase 46: LightRAG hybrid RAG with Hindsight context and the RAGFlow migration** - re-scoped 2026-10-23 by operator decision; the migration waves run inside this phase and are not accepted as debt.
+- [x] **Phase 47: GreptimeDB + Dragonfly Predictive Analytics & Cache** - SLO burn forecasting and pattern-based cache pre-warming. Accepted as debt on 2026-10-23; live warm-up proof open.
+- [x] **Phase 48: TailscaleDB Secure Unified Proxy Layer** - zero-trust database access through one Tailscale proxy with RBAC, audit and pooling. Accepted as debt on 2026-10-23; live forwarders and cutover open.
+- [x] **Phase 49: Hindsight Graph Memory with Greptime Events** - graph-structured Hindsight memory with causal recall. Accepted as debt on 2026-10-23; live ledger proof open.
+- [x] **Phase 50: Dragonfly Pub/Sub for Real-time Events** - real-time event propagation and event-driven cache invalidation. Accepted as debt on 2026-10-23; live subscription and wake-up latency open.
 - [x] **Phase 51: Enterprise Unified Resource Fabric** - one MCP interface across all six resources, depends on phases 45 and 48
 
 ## Phase Details
@@ -653,22 +653,26 @@ Plans:
 
 **Plans**: 1/1 plans complete; verified 2026-10-21 in phases/45-railway/VERIFICATION.md; live Railway proof operator-gated
 
-### Phase 46: RAGFlow Advanced Hybrid RAG with Hindsight Context
+### Phase 46: LightRAG hybrid RAG with Hindsight context and the RAGFlow migration
 
-**Goal**: Docs answers use hybrid search with reranking, augmented by Hindsight and Greptime event context.
+**Goal**: Docs answers come from LightRAG with hybrid search and Hindsight context. The RAGFlow to LightRAG migration runs inside this phase: archive, LightRAG deploy, migration job, parity gate, cutover, then RAGFlow removal after the RAG-dependent phases pass. Each live step needs the operator's approval for that run.
 
 **Depends on**: none (7-SOTA plan on branch feature/7-sota-enhancements)
 
-**Repos**: agent-substrate (target files: packages/mcp-server/src/planes/ragflow.ts, planes/hindsight.ts, docs/docs-plane.md)
+**Repos**: agent-substrate (target files: packages/mcp-server/src/planes/lightrag.ts, planes/ragflow.ts (removed in the migration), planes/hindsight.ts, docs/docs-plane.md)
 
 **Requirements**: [SOTA-02]
 
 **Success Criteria** (what must be TRUE):
 
-  1. docs_search returns context-augmented results.
-  2. Tests for hybrid.
+  1. docs_search answers from LightRAG with hybrid search and Hindsight context, with tests.
+  2. The RAGFlow dataset is archived, with a verified checksum, before any deletion.
+  3. LightRAG is deployed to Agent Substrate production and passes a timed health probe.
+  4. The migration job and parity comparator pass PARITY_GATE before any ingestion. PARITY_GATE checks, in order: every migrated record keeps its dataset, source URL and version (zero mismatches allowed); a fixed sample of queries, listed in the phase 46 PLAN, returns citations from the same source documents at the match rate the PLAN sets before the run.
+  5. Cutover is a logged, reversible switch with a delta pass. RAGFlow code and service are removed only after cutover, after criteria 1 to 4 pass, and after every other RAG-dependent phase passes. The RAG-dependent phases are 25 and 42, plus any other phase whose VERIFICATION names a live RAGFlow call (the phase 46 PLAN confirms that list before cutover). Storage deletion needs its own approval.
+  6. Every live step (deploy, ingestion, cutover, storage deletion) runs only after the operator approves it for that run.
 
-**Plans**: 1/1 plans complete; verified 2026-10-21 in phases/46-ragflow-hybrid/VERIFICATION.md; live RAGFlow proof operator-gated
+**Plans**: 0 plans (re-scoped 2026-10-23; the earlier 1/1 verification in phases/46-ragflow-hybrid/VERIFICATION.md covered the RAGFlow path and no longer applies)
 
 ### Phase 47: GreptimeDB + Dragonfly Predictive Analytics & Cache
 
@@ -784,15 +788,15 @@ Plans:
 | 37. LANEB | v1.3.x | 1/1 | Complete | 2026-10-21 |
 | 38. MIRROR | v1.3.x | 1/1 | Complete | 2026-10-21 |
 | 39. DISPATCH | v1.3.x | 1/1 | Complete (PR #91) | 2026-10-21 |
-| 40. DOCS-MEMORY | v1.3.x | 0/0 | Code on main (PR #92); human_needed (D-D3 deferred) | - |
-| 41. ANCHOR | v1.3.x | 0/0 | Code on main (PR #116); human_needed (devnet proof operator-gated) | - |
-| 42. SKILL-CARD | v1.3.x | 0/0 | Code on main (PR #94); human_needed | - |
-| 43. LANE-A | v1.3.x | 1/1 | Complete (PR #97) | 2026-10-21 |
+| 40. DOCS-MEMORY | v1.3.x | 0/0 | Complete (accepted debt 2026-10-23); live restore drill open | 2026-10-23 |
+| 41. ANCHOR | v1.3.x | 0/0 | Complete (accepted debt 2026-10-23); live devnet proof open | 2026-10-23 |
+| 42. SKILL-CARD | v1.3.x | 0/0 | Complete (accepted debt 2026-10-23); live host proof open | 2026-10-23 |
+| 43. LANE-A | v1.3.x | 1/1 | Complete (PR #97); live egress and restart proof open (accepted debt 2026-10-23) | 2026-10-21 |
 | 44. UAT | v1.3.x | 1/1 | Complete (PR #95) | 2026-10-21 |
-| 45. Railway Resource Orchestrator | v1.5 | 1/1 | Code on main (PR #96); human_needed (live Railway proof operator-gated) | - |
-| 46. RAGFlow Advanced Hybrid RAG with Hindsight Context | v1.5 | 1/1 | Code on main (PR #98); human_needed (live RAGFlow proof operator-gated) | - |
-| 47. GreptimeDB + Dragonfly Predictive Analytics & Cache | v1.5 | 1/1 | Code on main (PR #100); human_needed (live forecast and warm-up proof operator-gated) | - |
-| 48. TailscaleDB Secure Unified Proxy Layer | v1.5 | 1/1 | Code on main (PR #102); human_needed (live cutover operator-gated) | - |
-| 49. Hindsight Graph Memory with Greptime Events | v1.5 | 1/1 | Code on main (PR #101); human_needed (live ledger proof operator-gated) | - |
-| 50. Dragonfly Pub/Sub for Real-time Events | v1.5 | 1/1 | Code on main (PR #103); human_needed (live subscription proof operator-gated) | - |
+| 45. Railway Resource Orchestrator | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live Railway proof open | 2026-10-23 |
+| 46. LightRAG hybrid RAG and the RAGFlow migration | v1.5 | 0/0 | Re-scoped 2026-10-23 by operator decision; not started | - |
+| 47. GreptimeDB + Dragonfly Predictive Analytics & Cache | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live warm-up proof open | 2026-10-23 |
+| 48. TailscaleDB Secure Unified Proxy Layer | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live forwarders and cutover open | 2026-10-23 |
+| 49. Hindsight Graph Memory with Greptime Events | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live ledger proof open | 2026-10-23 |
+| 50. Dragonfly Pub/Sub for Real-time Events | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live subscription proof open | 2026-10-23 |
 | 51. Enterprise Unified Resource Fabric | v1.5 | 1/1 | Complete (PR #108) | 2026-10-22 |
