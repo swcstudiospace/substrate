@@ -72,6 +72,8 @@ export const SessionRecordSchema = z.object({
 	planning: PlanningReportSchema.optional(),
 	repo: REPO_ID.nullable().optional(),
 	touched: z.array(TouchedPairSchema).max(MAX_REPORT_ENTRIES).optional(),
+	// Older readers require this field and reject a record without it, so writers keep emitting null. This reader accepts an absent field, null, or a phase string.
+	activePhase: z.string().min(1).max(64).nullable().optional(),
 });
 
 export type SessionRecord = z.infer<typeof SessionRecordSchema>;

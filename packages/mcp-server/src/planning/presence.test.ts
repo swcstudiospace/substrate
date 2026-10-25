@@ -123,4 +123,16 @@ describe("SessionRecordSchema", () => {
 		expect(SessionRecordSchema.safeParse(session("-leading-dash", 1)).success).toBe(false);
 		expect(SessionRecordSchema.safeParse({ ...session("worker-a", 1), lastHeartbeatMs: -1 }).success).toBe(false);
 	});
+
+	test("reads activePhase as null, absent, or a phase string, and returns a present value unchanged", () => {
+		const withNull = SessionRecordSchema.safeParse({ ...session("worker-a", 1), activePhase: null });
+		const absent = SessionRecordSchema.safeParse(session("worker-a", 1));
+		const withPhase = SessionRecordSchema.safeParse({ ...session("worker-a", 1), activePhase: "52" });
+		expect(withNull.success).toBe(true);
+		expect(absent.success).toBe(true);
+		expect(withPhase.success).toBe(true);
+		expect(withNull.success && withNull.data.activePhase).toBeNull();
+		expect(absent.success && "activePhase" in absent.data).toBe(false);
+		expect(withPhase.success && withPhase.data.activePhase).toBe("52");
+	});
 });

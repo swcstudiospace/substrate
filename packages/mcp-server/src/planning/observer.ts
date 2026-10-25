@@ -8,7 +8,7 @@
  *
  * Heartbeat: a checkout heartbeats in a scan that sees a complete change: a change the baseline has not published yet, or a
  * change since the scan before. It also heartbeats when its watcher gap moves, when its report's view changes, and when a
- * previous write failed. A change the ledger does not store is heartbeated once, in the scan that saw it; the scans after it
+ * previous write failed, until the write lands or its observation leaves the freshness window. A change the ledger does not store is heartbeated once, in the scan that saw it; the scans after it
  * are quiet, so the session goes `stale` after the freshness window. The session is that checkout (`wt-<hash of its path>`),
  * and its branch is read from its HEAD. The heartbeat carries the checkout's planning report (`report.ts`), which is how
  * every other session sees its plan ids, its touched pairs and its repository.
@@ -17,7 +17,8 @@
  * server clock. A pair stays while it is inside the presence TTL, so a later complete change to other documents keeps it.
  * A change that is still held by a failed publish keeps the time it was first seen, so a retry never renews it. An incomplete
  * observation records nothing and drops nothing: the gap rule. A change that would take the list past `MAX_REPORT_ENTRIES` is
- * not cut, since a cut list claims absences. The report says `report-limit` until a complete change fits again.
+ * not cut, since a cut list claims absences. The report stays `report-limit` until the claims that did not fit have left the
+ * freshness window, which the overflowing change's observation time dates.
  *
  * Conflicts: after each scan that can read the server clock, the observer lists the presence snapshot, detects conflicts
  * within one repository (`conflicts.ts`) and announces each one of its own repository that is not already open, once. A
@@ -115,10 +116,14 @@ export class PlanningObserver {
 	private gap: WatcherGap | null = null;
 	/** This checkout's touched pairs inside the TTL, as its latest complete changes left them. Written on each heartbeat. Process-local. */
 	private touched: TouchedPair[] = [];
-	/** True while the latest complete change did not fit in `touched`. The report stays unknown (`report-limit`) until a change fits. */
+	/** True while the claims a complete change could not keep in `touched` are inside the freshness window. The report stays unknown (`report-limit`) until they have left it. */
 	private touchedOverflow = false;
+	/** When the change that overflowed `touched` was observed, by the server clock; null when none has. The overflow holds while that time is inside the TTL. Process-local. */
+	private overflowAtMs: number | null = null;
 	/** The presence record has a change this process has not written yet: a change, a moved watcher gap, or a write that failed. Process-local. */
 	private presencePending = false;
+	/** When the observation that armed the pending write was made by the server clock; null when that time is not known. A dated write whose observation leaves the freshness window is dropped. Process-local. */
+	private pendingSinceMs: number | null = null;
 	/** The entries of the change whose publish is held, by path, each as its JSON. An entry the held publish already carries is a retry and renews nothing; any other entry is a new edit. Empty when no publish is held. Process-local. */
 	private held: ReadonlyMap<string, string> = new Map();
 	/** The report the last successful heartbeat wrote: undefined until one is written, null when it wrote none. A change of view (known, unknown, or none) must reach the record. */
@@ -203,7 +208,7 @@ export class PlanningObserver {
 		const gapMoved = nowMs !== null ? this.stampReport(built, nowMs) : this.withdrawReport();
 		const repo = await repoOf(this.deps.fs, root);
 		if (!built.ok) {
-			await this.heartbeat(root, false, ttlMs, repo);
+			await this.heartbeat(root, false, ttlMs, repo, nowMs);
 			return { state: "unavailable", code: built.code };
 		}
 		this.index = { root, index: built.index };
@@ -221,6 +226,11 @@ export class PlanningObserver {
 		const unheld = diff !== null && changed ? unheldOf(diff, this.held) : null;
 		const fresh = unheld !== null && changesIn(unheld) > 0;
 		if (unheld !== null && fresh && nowMs !== null) this.touch(pairsOfChange(unheld, nextPhasePlans, priorBaseline?.phasePlans), nowMs, ttlMs);
+		// The overflow holds while the claims it could not keep are inside the freshness window of the change that overflowed.
+		if (nowMs !== null) {
+			this.touchedOverflow = this.overflowAtMs !== null && nowMs - this.overflowAtMs <= ttlMs;
+			if (!this.touchedOverflow) this.overflowAtMs = null;
+		}
 		if (this.touchedOverflow && nowMs !== null) this.report = unknownReport(nowMs, "report-limit");
 
 		// A baseline that holds (a failed publish) keeps its own phase and plan map, so a removal is still read from what was there.
@@ -251,7 +261,7 @@ export class PlanningObserver {
 		}
 		this.held = holds && diff !== null ? entriesOf(diff) : new Map();
 		const sinceChange = sinceLastScan !== null && sinceLastScan.complete && changesIn(sinceLastScan) > 0;
-		const heartbeat = await this.heartbeat(root, fresh || sinceChange || gapMoved, ttlMs, repo);
+		const heartbeat = await this.heartbeat(root, fresh || sinceChange || gapMoved, ttlMs, repo, nowMs);
 		await this.announce(repo, ttlMs);
 		return { state: "observed", outcome, heartbeat };
 	}
@@ -282,32 +292,57 @@ export class PlanningObserver {
 	/**
 	 * Folds one complete change into the touched pairs, dated by the server clock. A pair the change touches replaces its older
 	 * entry, and the others stay while they are inside the TTL. A list past `MAX_REPORT_ENTRIES` is not kept: the pairs stay as
-	 * they were, pruned, and the overflow flag holds the report unknown until a complete change fits.
+	 * they were, pruned, and the overflow holds the report unknown until the claims that did not fit have left the freshness
+	 * window, dated by the overflowing change.
 	 */
 	private touch(pairs: readonly PhasePlan[], nowMs: number, ttlMs: number): void {
 		const fresh = new Map<string, TouchedPair>();
 		for (const pair of pairs) fresh.set(touchKey(pair), { phase: pair.phase, plan: pair.plan, observedAtMs: nowMs });
 		const kept = touchedWithin(this.touched, nowMs, ttlMs).filter((pair) => !fresh.has(touchKey(pair)));
 		const merged = [...fresh.values(), ...kept];
-		this.touchedOverflow = merged.length > MAX_REPORT_ENTRIES;
-		this.touched = this.touchedOverflow ? touchedWithin(this.touched, nowMs, ttlMs) : merged;
+		if (merged.length > MAX_REPORT_ENTRIES) {
+			this.overflowAtMs = nowMs;
+			this.touched = touchedWithin(this.touched, nowMs, ttlMs);
+		} else {
+			this.touched = merged;
+		}
 	}
 
 	/**
 	 * Heartbeats this checkout when `due`, or when a write is still pending. The record's time is replaced by the server's clock,
 	 * and the record carries the repository, the report and the touched pairs. A failed write stays pending, so the next scan
-	 * writes again.
+	 * writes again. A pending write dated by its observation is dropped once that observation leaves the freshness window.
 	 */
-	private async heartbeat(root: string, due: boolean, ttlMs: number, repo: RepoLookup): Promise<PlanningHeartbeat> {
-		if (due) this.presencePending = true;
-		if (this.written !== undefined && reportViewOf(this.report) !== reportViewOf(this.written)) this.presencePending = true;
+	private async heartbeat(root: string, due: boolean, ttlMs: number, repo: RepoLookup, nowMs: number | null): Promise<PlanningHeartbeat> {
 		const currentRepo = repo.state === "known" ? repo.repo : null;
-		if (this.writtenRepo !== undefined && this.writtenRepo !== currentRepo) this.presencePending = true;
+		const viewChanged = this.written !== undefined && reportViewOf(this.report) !== reportViewOf(this.written);
+		const repoChanged = this.writtenRepo !== undefined && this.writtenRepo !== currentRepo;
+		if (due) {
+			this.presencePending = true;
+			if (nowMs !== null) this.pendingSinceMs = nowMs;
+		} else if (!this.presencePending && (viewChanged || repoChanged)) {
+			// A view or repo change arms the write only when it first arms, so re-arming on every scan cannot keep a dead write alive.
+			this.presencePending = true;
+			if (nowMs !== null) this.pendingSinceMs = nowMs;
+		}
 		if (!this.presencePending) return { state: "not-due" };
 		const presence = this.deps.presence;
 		if (presence === null) {
 			this.presencePending = false;
 			return { state: "presence-unset" };
+		}
+		if (this.pendingSinceMs !== null) {
+			// A dated write is checked against the clock. While the clock is unreadable its window cannot be checked, so it is held.
+			if (nowMs === null) return { state: "failed", detail: "clock-unavailable" };
+			if (nowMs - this.pendingSinceMs > ttlMs) {
+				// The observation that armed this write has left the window. Writing now would show the checkout active on a quiet
+				// observation. The view and repo are acknowledged, so the next scan does not re-arm them.
+				this.presencePending = false;
+				this.pendingSinceMs = null;
+				this.written = this.report;
+				this.writtenRepo = currentRepo;
+				return { state: "not-due" };
+			}
 		}
 		try {
 			const layout = await gitLayout(this.deps.fs, root);
@@ -316,6 +351,7 @@ export class PlanningObserver {
 				sessionId: planningSessionId(this.deps.fs, root),
 				worktree: root,
 				branch: await branchOf(this.deps.fs, layout.gitDir),
+				activePhase: null,
 				lastHeartbeatMs: 0,
 				repo: repo.state === "known" ? repo.repo : null,
 				touched: this.touched,
@@ -323,6 +359,7 @@ export class PlanningObserver {
 			};
 			await presence.touch(record, ttlMs);
 			this.presencePending = false;
+			this.pendingSinceMs = null;
 			this.written = this.report;
 			this.writtenRepo = currentRepo;
 			return { state: "written" };

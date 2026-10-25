@@ -103,8 +103,9 @@ export const SLICE_NAME = "substrate.slice";
  * Where `index.ts` takes its `*ConfigWarnings` from. Every export of these
  * modules whose name matches `WARNING_EXPORT` is run, so a warning function a
  * later change adds to one of them is covered without editing this list.
+ * `planning/config.ts` takes the planning settings, which index.ts reads from the loaded config, so it is given `loaded.planning`.
  */
-export const WARNING_MODULES: readonly string[] = ["config.ts", "brief-profile.ts", "recall-snapshot.ts", "hindsight-inventory.ts"];
+export const WARNING_MODULES: readonly string[] = ["config.ts", "brief-profile.ts", "recall-snapshot.ts", "hindsight-inventory.ts", "planning/config.ts"];
 export const WARNING_EXPORT = /^(configWarnings|swarmTokenWarnings)$|ConfigWarnings$/;
 
 // ── env parsing ──────────────────────────────────────────────────────────────
@@ -435,7 +436,8 @@ async function configFindings(releaseDir: string): Promise<{ findings: Finding[]
 			if (!WARNING_EXPORT.test(exported) || !isFn(fn)) continue;
 			sources += 1;
 			try {
-				const messages = fn(loaded);
+				// index.ts passes config.planning to planningConfigWarnings, not the whole config.
+				const messages = fn(module === "planning/config.ts" ? fieldOf(loaded, "planning") : loaded);
 				for (const message of Array.isArray(messages) ? messages : []) {
 					fired += 1;
 					findings.push(finding("config", exported, "warn", String(message)));

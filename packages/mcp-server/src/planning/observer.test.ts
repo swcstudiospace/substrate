@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { EventInput } from "../types.ts";
 import { RecordingPresenceBackend } from "./backend.fixtures.ts";
-import { PLANNING_MAX_FILES_ENV, PLANNING_PRESENCE_TTL_ENV, PLANNING_ROOT_ENV, PLANNING_SCAN_INTERVAL_ENV, loadPlanningSettings } from "./config.ts";
+import { DEFAULT_PRESENCE_TTL_S, PLANNING_MAX_FILES_ENV, PLANNING_PRESENCE_TTL_ENV, PLANNING_ROOT_ENV, PLANNING_SCAN_INTERVAL_ENV, loadPlanningSettings } from "./config.ts";
 import { planningSessionId } from "./checkout.ts";
 import { PLANNING_CONFLICT } from "./conflicts.ts";
 import type { SessionRecord } from "./presence.ts";
@@ -51,6 +51,16 @@ function observerOver(
 function storedSession(backend: RecordingPresenceBackend): Record<string, unknown> {
 	const key = backend.writes[0]?.key ?? "";
 	return JSON.parse(backend.values.get(key) ?? "{}") as Record<string, unknown>;
+}
+
+/** A recording backend whose writes are refused while `refusesWrites` is set. The reads and the clock keep working, so a write can fail at a known server time. */
+class RefusingWritesBackend extends RecordingPresenceBackend {
+	refusesWrites = false;
+
+	override async setWithTtl(key: string, value: string, ttlSeconds: number): Promise<void> {
+		if (this.refusesWrites) throw new Error("SET refused");
+		return super.setWithTtl(key, value, ttlSeconds);
+	}
 }
 
 describe("the observer's scans", () => {
@@ -211,6 +221,96 @@ describe("the observer's heartbeat", () => {
 
 		expect(await observer.scan()).toMatchObject({ outcome: "unchanged", heartbeat: { state: "not-due" } });
 		expect(backend.writes).toHaveLength(1);
+	});
+
+	test("an owed heartbeat recovered within the freshness window of its observation still writes", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const backend = new RefusingWritesBackend();
+		const { observer } = observerOver(tree, { presence: new DragonflyPresenceStore(backend) });
+		await observer.scan();
+
+		const observedAtMs = backend.clockMs;
+		const ttlMs = DEFAULT_PRESENCE_TTL_S * 1000;
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited\n");
+		backend.refusesWrites = true;
+		expect(await observer.scan()).toMatchObject({ outcome: "published", heartbeat: { state: "failed" } });
+
+		backend.clockMs = observedAtMs + ttlMs - 1;
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged", heartbeat: { state: "failed" } });
+
+		backend.clockMs = observedAtMs + ttlMs;
+		backend.refusesWrites = false;
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged", heartbeat: { state: "written" } });
+		expect(backend.writes).toHaveLength(1);
+		expect(storedSession(backend)).toMatchObject({ lastHeartbeatMs: observedAtMs + ttlMs });
+	});
+
+	test("an owed heartbeat recovered after the freshness window of its observation writes nothing", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const backend = new RefusingWritesBackend();
+		const { observer } = observerOver(tree, { presence: new DragonflyPresenceStore(backend) });
+		await observer.scan();
+
+		const observedAtMs = backend.clockMs;
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, first edit\n");
+		expect(await observer.scan()).toMatchObject({ outcome: "published", heartbeat: { state: "written" } });
+		expect(backend.writes).toHaveLength(1);
+
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, second edit\n");
+		backend.refusesWrites = true;
+		expect(await observer.scan()).toMatchObject({ outcome: "published", heartbeat: { state: "failed" } });
+
+		backend.clockMs = observedAtMs + DEFAULT_PRESENCE_TTL_S * 1000 + 1;
+		backend.refusesWrites = false;
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged", heartbeat: { state: "not-due" } });
+		expect(backend.writes).toHaveLength(1);
+		expect(storedSession(backend)).toMatchObject({ lastHeartbeatMs: observedAtMs });
+	});
+
+	test("a touched list past its cap holds the report unknown until the claims it could not keep have left the freshness window", async () => {
+		const planOf = (i: number): string => `52-${String(i).padStart(3, "0")}`;
+		const planFile = (i: number): string => `${PHASE}/${planOf(i)}-PLAN.md`;
+		const planBody = (i: number, body: string): string => `---\nplan: ${planOf(i)}\n---\n${body}\n`;
+		const range = (from: number, to: number): number[] => Array.from({ length: to - from }, (_, k) => from + k);
+		const ttlMs = DEFAULT_PRESENCE_TTL_S * 1000;
+		const tree = new FakeTree({ ...GIT, ...Object.fromEntries(range(0, 500).map((i) => [planFile(i), planBody(i, "v0")])) });
+		const backend = new RecordingPresenceBackend();
+		const { observer } = observerOver(tree, { presence: new DragonflyPresenceStore(backend) });
+		backend.clockMs = SERVER_NOW;
+		await observer.scan();
+
+		// The 500 documents change at once: 500 touched pairs, which fit under the cap. The index holds 500 documents, the cap.
+		for (const i of range(0, 500)) tree.setContent(planFile(i), planBody(i, "v1"));
+		expect(await observer.scan()).toMatchObject({ outcome: "published", heartbeat: { state: "written" } });
+
+		// Twenty documents are replaced by twenty new plans: 40 pairs join the 480 kept ones, 520 in all, past the cap.
+		backend.clockMs = SERVER_NOW + 1_000;
+		for (const i of range(0, 20)) tree.remove(planFile(i));
+		for (const i of range(500, 520)) tree.setContent(planFile(i), planBody(i, "v0"));
+		expect(await observer.scan()).toMatchObject({ outcome: "published", heartbeat: { state: "written" } });
+		expect(storedRecord(backend, tree, TREE_ROOT).planning).toEqual({ status: "unknown", scannedAtMs: SERVER_NOW + 1_000, reason: "report-limit" });
+
+		// Inside the window of that change, a small edit to a document that was not replaced: the claims that did not fit still hold the report.
+		backend.clockMs = SERVER_NOW + 2_000;
+		tree.setContent(planFile(100), planBody(100, "v2"));
+		expect(await observer.scan()).toMatchObject({ outcome: "published", heartbeat: { state: "written" } });
+		expect(storedRecord(backend, tree, TREE_ROOT).planning).toEqual({ status: "unknown", scannedAtMs: SERVER_NOW + 2_000, reason: "report-limit" });
+
+		// One millisecond past the window of the overflowing change, an unchanged scan reads the report known again.
+		backend.clockMs = SERVER_NOW + 1_000 + ttlMs + 1;
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged", heartbeat: { state: "written" } });
+		expect(storedRecord(backend, tree, TREE_ROOT).planning).toMatchObject({ status: "known", scannedAtMs: SERVER_NOW + 1_000 + ttlMs + 1 });
+	});
+
+	test("a written heartbeat carries activePhase null, which older readers require", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const backend = new RecordingPresenceBackend();
+		const { observer } = observerOver(tree, { presence: new DragonflyPresenceStore(backend) });
+		await observer.scan();
+
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited\n");
+		expect(await observer.scan()).toMatchObject({ heartbeat: { state: "written" } });
+		expect(storedSession(backend)).toMatchObject({ activePhase: null });
 	});
 
 	test("the scan is scheduled at the configured cadence: 15000 ms when unset, the set value otherwise, and not while disabled", () => {
