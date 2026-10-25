@@ -2,11 +2,11 @@
 gsd_state_version: "1.0"
 milestone: v1.3.x
 milestone_name: Should-have hardening (Planned)
-status: "v1.3.x phases 37-39 merged (PR #89, PR #90, PR #91). Phase 40 (DOCS-MEMORY) code on main via PR #92. Phase 41 (ANCHOR) code on main via PR #116. Phase 42 (SKILL-CARD) code on main via PR #94. Phases 43 (PR #97) and 44 (PR #95) complete. Verification is human_needed for phases 40-43 and passed for 44. On 2026-10-23 the operator accepted the open operator gates as debt for phases 40-43, 45 and 47-50; milestone audit and close are next."
-stopped_at: accepted debt recorded 2026-10-23; milestone audit and close not yet run
-last_updated: "2026-10-23"
-last_activity: 2026-10-23
-last_activity_desc: phase 41 code merged as PR #116; planning closeout for phases 40-44
+status: "v1.3.x phases 37-39 merged (PR #89, PR #90, PR #91). Phase 40 (DOCS-MEMORY) code on main via PR #92. Phase 41 (ANCHOR) code on main via PR #116. Phase 42 (SKILL-CARD) code on main via PR #94. Phases 43 (PR #97) and 44 (PR #95) complete. Verification is human_needed for phases 40-43 and passed for 44. On 2026-10-23 the operator accepted the open operator gates as debt for phases 40-43, 45 and 47-50; next: phase 46 and phases 52-54, then milestone audit and close."
+stopped_at: accepted debt recorded 2026-10-23; consistency check recorded 2026-10-24; milestone audit and close not yet run
+last_updated: "2026-10-24"
+last_activity: 2026-10-24
+last_activity_desc: consistency check of the accepted-debt phases recorded (PR #123)
 state_head: 1a9f4fd365ede291c4e21be71b6ff236e0e49c67
 progress:
   total_phases: 8
@@ -161,7 +161,7 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: 40 (accepted debt; the consistency check is the next action)
+Phase: 40 (accepted debt; the consistency check is recorded 2026-10-24; next: phase 46 and phases 52-54, then the milestone audits)
 Plan: —
 Status: v1.3.x and v1.5 open. Preflight recorded 2026-10-23; no phase executed by this run yet.
 Last activity: 2026-10-23 — PR #119 merged; PR #121 (ROADMAP progress follow-up) shipped through ultrathink-ship; migration placed inside phase 46 by operator decision.
@@ -205,10 +205,19 @@ Items acknowledged and deferred, most recent first:
 
 ## Operator Next Steps
 
-- Phase 40 onward: run the consistency check first, then the next incomplete phase under the accepted-debt record above.
+- Consistency check recorded 2026-10-24 (below). Next: phase 46 and phases 52-54, then the milestone audits.
 - Phase 46: discuss, plan, execute and verify the LightRAG query path and the migration waves.
 - Phases 52-54: merge main into drafts #104 and #109-#111 once #105 lands on main (no force push), then run each phase.
 - Milestone close (v1.3.x, then v1.5): gsd-audit-milestone, then gsd-complete-milestone, only after the operator confirms the audit output.
+
+## Consistency check (2026-10-24)
+
+Read-only check of the nine accepted-debt phases (40, 41, 42, 43, 45, 47, 48, 49, 50) against their ROADMAP success criteria, the criteria tables in phases/NN VERIFICATION.md, and SUMMARY.md. Rule used: each criterion's classification and locator in VERIFICATION.md is its per-criterion evidence record, and SUMMARY.md gives the narrative evidence. Strict per-criterion rows inside SUMMARY.md are not a gate, because these phases shipped before this run and do not carry them.
+
+- Consistent: 41, 42, 43, 45, 47, 48, 49, 50. Every criterion is classified in VERIFICATION.md and none failed. The open items are operator-gated live proofs, recorded in VERIFICATION.md.
+- Phase 40: criterion 1 proven in repo; criterion 2 not met (restore drill, operator-gated, accepted as debt); criterion 3 not met as written and narrowed by the owner on 2026-10-22. ROADMAP now states the narrowed scope.
+- Fixed in this change: ROADMAP plan counts for phases 40-44 (0 plans to 1/1), the phase 40 goal and criterion 3 wording, and the progress row counts for phases 40-42.
+- Left unchanged: stale status lines in phase CONTEXT.md and PLAN.md frontmatter (workflow artifacts). They do not change any verdict.
 
 ## Session Continuity
 
