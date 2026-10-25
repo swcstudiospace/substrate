@@ -680,6 +680,8 @@ Plans:
 
 **Plans**: 1 plan (PLAN.md, created 2026-10-24 in phases/46-lightrag-hybrid/). Status partial: criterion 1 in repo (tests and docs committed); criterion 4 comparator deferred; criteria 2, 3, 5 and 6 are live steps that need per-run operator approval.
 
+**Operator re-scope, 2026-10-25 (reconciliation note, no criterion text changed):** RAGFlow was checked by the operator and is empty: no datasets, and an empty knowledgebase folder. The operator authorized removing RAGFlow and its associated resources. The `ragflow` Railway service was deleted on 2026-10-25; its volumes were not attached and none were detached. LightRAG is the only docs plane. It indexes three sources, and each is re-indexed when it changes: .planning markdown, repository docs, and complete scraped documentation sites. Storage deletion (the `elasticsearch`, `mysql`, `storage` and `redis` services, which may be shared) still needs its own approval, as criterion 5 requires. The live-step approvals in criteria 2 to 6 are unchanged.
+
 ### Phase 47: GreptimeDB + Dragonfly Predictive Analytics & Cache
 
 **Goal**: Time-series forecasting predicts SLO burn, and the Dragonfly cache pre-warms from observed patterns.

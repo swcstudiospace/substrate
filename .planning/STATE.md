@@ -436,3 +436,17 @@ PR B's defaults: `SUBSTRATE_BRIEF_GRAPH_READ=full`, `SUBSTRATE_CACHE_BUMP_SCOPE=
 - T5 (archive with checksum): BLOCKED on access (P2). RAGFLOW_API_KEY, RAGFLOW_URL and RAGFLOW_DATASET_ID are not set in this shell. Names only were checked; no value was read or printed. Unblock: the operator provides them in the environment, never in a file.
 - Bootstrap (Wave 1) now runs with Q3 yes: RUN_START is written by this record; the capability registry is the repo checks listed in run 3 (verify, check:phase-close, test, test:py, audit:verify, parity:check).
 - Next action: with access, run T5 and record its checksum; otherwise run the 37 to 39 proofs that the host allows, and list those that cannot run for the waiver.
+
+## Run 5 record (2026-10-25, operator re-scope)
+
+- Operator decisions: RAGFlow is empty (operator check, not verified here: no RAGFlow API access). Remove RAGFlow and its associated resources. LightRAG is the docs plane for .planning markdown, repository docs and scraped documentation sites, kept current on change. The product suite is in scope: LightRAG, Hindsight, Dragonfly, TimescaleDB and GreptimeDB. The long-term goal is live steering across sessions and repositories for multi-hour and multi-day GSD sessions.
+- Done this run: the `ragflow` Railway service was deleted (no detached volumes). ROADMAP phase 46 has a reconciliation note; no criterion text was changed.
+- Measured footprint: 92 files outside .planning mention RAGFlow (1084 matches); 50 are under packages/mcp-server. LightRAG already has a plane (packages/mcp-server/src/planes/lightrag.ts) and its tests, but no LightRAG service is deployed on Railway, and LIGHTRAG_URL is not configured.
+- Work sequence (file-disjoint waves; each wave is verified before the next):
+  - W1 Inventory and contract: decide the LightRAG-only config contract (remove RAGFLOW_* keys, make resolveDocsBackend return lightrag, keep the LIGHTRAG_* keys). Shared-contract first, because every other unit consumes it.
+  - W2 Core removal, serial after W1: planes/ragflow.ts and its test; docs-search.ts, docs-ingest.ts, docs-datasets.ts and their tests; service.ts and mcp.ts wiring; config.ts and flag-registry.ts.
+  - W3 Peripheral, parallel after W2: fabric.ts, observability breaker and slo, admission.ts, railway.ts, rag-retry.ts, the scripts (docs-golden, docs-smoke, chaos-planes, dashboards, release-gate), the packages (cli, projector, audit policy), .env.example, and the docs.
+  - W4 Gates: bunx tsc --noEmit, bun test, bun run check:phase-close, and bun run verify, with the result recorded.
+  - W5 Product-suite wiring: sync .planning markdown and repository docs into LightRAG on change; scrape documentation sites; Hindsight context on answers; Dragonfly cache with invalidation on the doc-change event; Timescale for per-document sync state; Greptime for ingest events.
+- Blocked, needs the operator: (1) LightRAG needs an LLM and an embedding provider with its key. Choosing a paid provider is a decision only you can make. (2) The list of documentation sites to scrape, with confirmation that each may be scraped. (3) Approval to deploy LightRAG to production (PLAN T6 is a HARD_STOP). (4) Approval to delete the elasticsearch, mysql, storage and redis services and their volumes after confirming nothing else uses them. (5) Approval for the ragflow-oauth-service and ragflow-oauth-integration services, which I haven't checked for other callers.
+- Next action: W1, the config contract. It needs no decision from you.
