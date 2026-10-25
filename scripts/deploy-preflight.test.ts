@@ -262,6 +262,20 @@ describe("config check", () => {
 		expect(warning.reason).toContain("SUBSTRATE_PLANNING_PRESENCE_TTL_S");
 	});
 
+	test("a release from before the planning plane, with no planning/config.ts, is not reported as broken for planning", async () => {
+		const r = rig();
+		// An older release: a config.ts that does not import the planning plane, and no planning/config.ts. Built in scratch, never in the repo.
+		const release = join(r.dir, "release");
+		const src = join(release, "packages/mcp-server/src");
+		mkdirSync(src, { recursive: true });
+		writeFileSync(join(src, "config.ts"), "export function loadConfig(): Record<string, unknown> {\n\treturn {};\n}\n");
+		for (const module of ["brief-profile.ts", "recall-snapshot.ts", "hindsight-inventory.ts"]) writeFileSync(join(src, module), "export {};\n");
+		const result = await findings({ ...r.options(), releaseDir: release });
+		expect(result.findings.some((item) => item.name === "planning/config.ts")).toBe(false);
+		expect(result.findings.some((item) => item.level === "error" && item.name.includes("planning"))).toBe(false);
+		expect(result.findings.filter((item) => item.check === "config" && item.level === "error")).toEqual([]);
+	});
+
 	test("every warning function index.ts calls is one the preflight runs", () => {
 		const indexText = readFileSync(join(repoRoot, "packages/mcp-server/src/index.ts"), "utf8");
 		const called = [...new Set([...indexText.matchAll(/\.\.\.(\w+Warnings)\(/g)].map((match) => match[1] ?? ""))];

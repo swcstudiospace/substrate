@@ -105,11 +105,14 @@ export class PlanningObserver {
 	private index: { root: string; index: PlanningIndex } | null = null;
 	/** The latest scan's snapshot. A heartbeat reports the change since it, so it moves with every scan. */
 	private lastScan: { root: string; snapshot: PlanningSnapshot } | null = null;
+	/** The publish baseline: what the ledger has been told. It holds when a publish fails, so the change is retried. */
+	private baseline: { root: string; snapshot: PlanningSnapshot } | null = null;
 	/**
-	 * The baseline a diff is taken against: its snapshot, and the phase and plan of each of its documents by path. It moves
-	 * forward, and holds when a publish fails.
+	 * The last complete snapshot whose change was claimed: a touched pair is taken against it. It moves on a claim and on a
+	 * complete scan with no change. It holds on an incomplete scan and while the clock is unreadable, so a change observed then
+	 * is claimed on a readable scan. A retry of a held publish finds no new change, so it never renews a touched time. Process-local.
 	 */
-	private baseline: { root: string; snapshot: PlanningSnapshot; phasePlans: ReadonlyMap<string, PhasePlan> } | null = null;
+	private touchBase: { root: string; snapshot: PlanningSnapshot; phasePlans: ReadonlyMap<string, PhasePlan> } | null = null;
 	/** This checkout's planning report from its latest scan, stamped by the server clock. It rides in the checkout's heartbeat. Null until one exists. */
 	private report: PlanningReport | null = null;
 	/** The watcher gap after the latest scan: a truncated or unlisted scan opens it, and a complete scan clears it. Process-local. */
@@ -120,12 +123,12 @@ export class PlanningObserver {
 	private touchedOverflow = false;
 	/** When the change that overflowed `touched` was observed, by the server clock; null when none has. The overflow holds while that time is inside the TTL. Process-local. */
 	private overflowAtMs: number | null = null;
-	/** The presence record has a change this process has not written yet: a change, a moved watcher gap, or a write that failed. Process-local. */
+	/** The presence record has a change this process has not written yet: a change, a moved watcher gap, a changed view, or a write that failed. Process-local. */
 	private presencePending = false;
-	/** When the observation that armed the pending write was made by the server clock; null when that time is not known. A dated write whose observation leaves the freshness window is dropped. Process-local. */
+	/** When the observation that armed the pending write was made, by the server clock. Null when that clock was unreadable (`pendingUndated`) or nothing is pending. Process-local. */
 	private pendingSinceMs: number | null = null;
-	/** The entries of the change whose publish is held, by path, each as its JSON. An entry the held publish already carries is a retry and renews nothing; any other entry is a new edit. Empty when no publish is held. Process-local. */
-	private held: ReadonlyMap<string, string> = new Map();
+	/** True when the pending write was armed in a scan whose clock was unreadable: its observation has no time, so it is dropped unwritten once retained. Process-local. */
+	private pendingUndated = false;
 	/** The report the last successful heartbeat wrote: undefined until one is written, null when it wrote none. A change of view (known, unknown, or none) must reach the record. */
 	private written: PlanningReport | null | undefined = undefined;
 	/** The repository the last successful heartbeat wrote; undefined until one is written. A different repository now is a change the record must carry. */
@@ -217,15 +220,7 @@ export class PlanningObserver {
 		// The change since the scan before: a heartbeat reports it, so a change is heartbeated once, in the scan that sees it.
 		const sinceLastScan = this.lastScan !== null && this.lastScan.root === root ? diffPlanningIndex(this.lastScan.snapshot, next) : null;
 		this.lastScan = { root, snapshot: next };
-		const nextPhasePlans = phasePlansOf(built.index);
-		const priorBaseline = this.baseline !== null && this.baseline.root === root ? this.baseline : null;
-		const previous = priorBaseline?.snapshot ?? null;
-		const diff = previous === null ? null : diffPlanningIndex(previous, next);
-		const changed = diff !== null && diff.complete && changesIn(diff) > 0;
-		// An entry the held publish already carries is a retry, not a new edit: it keeps the time it was first seen. Only the new entries renew.
-		const unheld = diff !== null && changed ? unheldOf(diff, this.held) : null;
-		const fresh = unheld !== null && changesIn(unheld) > 0;
-		if (unheld !== null && fresh && nowMs !== null) this.touch(pairsOfChange(unheld, nextPhasePlans, priorBaseline?.phasePlans), nowMs, ttlMs);
+		this.claimTouches(root, next, phasePlansOf(built.index), nowMs, ttlMs);
 		// The overflow holds while the claims it could not keep are inside the freshness window of the change that overflowed.
 		if (nowMs !== null) {
 			this.touchedOverflow = this.overflowAtMs !== null && nowMs - this.overflowAtMs <= ttlMs;
@@ -233,11 +228,10 @@ export class PlanningObserver {
 		}
 		if (this.touchedOverflow && nowMs !== null) this.report = unknownReport(nowMs, "report-limit");
 
-		// A baseline that holds (a failed publish) keeps its own phase and plan map, so a removal is still read from what was there.
-		const phasePlansFor = (snapshot: PlanningSnapshot): ReadonlyMap<string, PhasePlan> =>
-			snapshot === previous && priorBaseline !== null ? priorBaseline.phasePlans : nextPhasePlans;
+		const previous = this.baseline !== null && this.baseline.root === root ? this.baseline.snapshot : null;
+		const diff = previous === null ? null : diffPlanningIndex(previous, next);
+		const changed = diff !== null && diff.complete && changesIn(diff) > 0;
 		let outcome: ObserverOutcome;
-		let holds = false;
 		if (repo.state === "known") {
 			const observed = await observePlanningChange({
 				previous,
@@ -246,22 +240,19 @@ export class PlanningObserver {
 				sessionId: PLANNING_OBSERVER_SESSION,
 				publisher: { publish: this.deps.emit },
 			});
-			this.baseline = { root, snapshot: observed.baseline, phasePlans: phasePlansFor(observed.baseline) };
+			this.baseline = { root, snapshot: observed.baseline };
 			outcome = observed.outcome;
-			holds = observed.outcome === "not-published";
 		} else if (changed) {
 			// Without a repo nothing can be published. A complete change is reported once and ends here, unless the failure that
 			// hid the repo was transient: then the baseline holds, and the next scan sees the same change again.
-			holds = repo.transient;
-			if (!repo.transient) this.baseline = { root, snapshot: next, phasePlans: nextPhasePlans };
+			if (!repo.transient) this.baseline = { root, snapshot: next };
 			outcome = "repo-unknown";
 		} else {
-			this.baseline = { root, snapshot: next, phasePlans: nextPhasePlans };
+			this.baseline = { root, snapshot: next };
 			outcome = previous === null ? "baseline" : diff !== null && !diff.complete ? "incomplete" : "unchanged";
 		}
-		this.held = holds && diff !== null ? entriesOf(diff) : new Map();
 		const sinceChange = sinceLastScan !== null && sinceLastScan.complete && changesIn(sinceLastScan) > 0;
-		const heartbeat = await this.heartbeat(root, fresh || sinceChange || gapMoved, ttlMs, repo, nowMs);
+		const heartbeat = await this.heartbeat(root, sinceChange || gapMoved, ttlMs, repo, nowMs);
 		await this.announce(repo, ttlMs);
 		return { state: "observed", outcome, heartbeat };
 	}
@@ -290,6 +281,28 @@ export class PlanningObserver {
 	}
 
 	/**
+	 * Claims the change since the last claimed snapshot (`touchBase`): its pairs are folded into the touched list, dated by the
+	 * server clock. A complete change is claimed on a readable scan only. While the clock is unreadable `touchBase` holds, so the
+	 * change is claimed on the first readable scan. An incomplete observation claims nothing and holds `touchBase`. The first
+	 * complete scan of a root sets it, and a complete scan with no change moves it, so only a new change is ever claimed.
+	 */
+	private claimTouches(root: string, next: PlanningSnapshot, nextPhasePlans: ReadonlyMap<string, PhasePlan>, nowMs: number | null, ttlMs: number): void {
+		const base = this.touchBase !== null && this.touchBase.root === root ? this.touchBase : null;
+		if (base === null) {
+			// Only a complete snapshot may be a touch baseline: an incomplete one would make every later diff incomplete, and never move.
+			if (!next.truncated && next.unlisted.length === 0) this.touchBase = { root, snapshot: next, phasePlans: nextPhasePlans };
+			return;
+		}
+		const diff = diffPlanningIndex(base.snapshot, next);
+		if (!diff.complete) return;
+		if (changesIn(diff) > 0) {
+			if (nowMs === null) return;
+			this.touch(pairsOfChange(diff, nextPhasePlans, base.phasePlans), nowMs, ttlMs);
+		}
+		this.touchBase = { root, snapshot: next, phasePlans: nextPhasePlans };
+	}
+
+	/**
 	 * Folds one complete change into the touched pairs, dated by the server clock. A pair the change touches replaces its older
 	 * entry, and the others stay while they are inside the TTL. A list past `MAX_REPORT_ENTRIES` is not kept: the pairs stay as
 	 * they were, pruned, and the overflow holds the report unknown until the claims that did not fit have left the freshness
@@ -310,40 +323,62 @@ export class PlanningObserver {
 
 	/**
 	 * Heartbeats this checkout when `due`, or when a write is still pending. The record's time is replaced by the server's clock,
-	 * and the record carries the repository, the report and the touched pairs. A failed write stays pending, so the next scan
-	 * writes again. A pending write dated by its observation is dropped once that observation leaves the freshness window.
+	 * and the record carries the repository, the report and the touched pairs. The pending write follows these rules:
+	 * R1: a write armed this scan (a due observation, or a view or repo change that newly arms it) is attempted at once. Its
+	 *     observation time is `nowMs`, which may be null: a null time makes the write undated.
+	 * R2: a retained write (pending from an earlier scan) is held while `nowMs` is null: the result is failed with `clock-unavailable`.
+	 * R3: a retained undated write is dropped unwritten, so it is never written as active.
+	 * R4: a retained write older than the freshness window (`nowMs - pendingSinceMs > ttlMs`) is dropped unwritten. Exactly `ttlMs` is still written.
+	 * R5: a successful write clears the debt. A failed write keeps it, with its observation time.
 	 */
 	private async heartbeat(root: string, due: boolean, ttlMs: number, repo: RepoLookup, nowMs: number | null): Promise<PlanningHeartbeat> {
 		const currentRepo = repo.state === "known" ? repo.repo : null;
 		const viewChanged = this.written !== undefined && reportViewOf(this.report) !== reportViewOf(this.written);
 		const repoChanged = this.writtenRepo !== undefined && this.writtenRepo !== currentRepo;
-		if (due) {
+		// A view or repo change arms the write only when it first arms, so re-arming on every scan cannot keep a dead write alive.
+		const armed = due || (!this.presencePending && (viewChanged || repoChanged));
+		if (armed) {
 			this.presencePending = true;
-			if (nowMs !== null) this.pendingSinceMs = nowMs;
-		} else if (!this.presencePending && (viewChanged || repoChanged)) {
-			// A view or repo change arms the write only when it first arms, so re-arming on every scan cannot keep a dead write alive.
-			this.presencePending = true;
-			if (nowMs !== null) this.pendingSinceMs = nowMs;
+			this.pendingSinceMs = nowMs;
+			this.pendingUndated = nowMs === null;
+		} else if (!this.presencePending) {
+			return { state: "not-due" };
 		}
-		if (!this.presencePending) return { state: "not-due" };
 		const presence = this.deps.presence;
 		if (presence === null) {
-			this.presencePending = false;
+			this.clearPending();
 			return { state: "presence-unset" };
 		}
-		if (this.pendingSinceMs !== null) {
-			// A dated write is checked against the clock. While the clock is unreadable its window cannot be checked, so it is held.
+		if (!armed) {
+			// A retained write is aged against this scan's clock. While the clock is unreadable its age cannot be checked, so it is held.
 			if (nowMs === null) return { state: "failed", detail: "clock-unavailable" };
-			if (nowMs - this.pendingSinceMs > ttlMs) {
-				// The observation that armed this write has left the window. Writing now would show the checkout active on a quiet
+			if (this.pendingUndated || (this.pendingSinceMs !== null && nowMs - this.pendingSinceMs > ttlMs)) {
+				// The observation has no time, or has left the window: writing now would show the checkout active on a quiet
 				// observation. The view and repo are acknowledged, so the next scan does not re-arm them.
-				this.presencePending = false;
-				this.pendingSinceMs = null;
+				this.clearPending();
 				this.written = this.report;
 				this.writtenRepo = currentRepo;
 				return { state: "not-due" };
 			}
 		}
+		const result = await this.touchCheckout(root, presence, currentRepo, ttlMs);
+		if (result.state === "written") {
+			this.clearPending();
+			this.written = this.report;
+			this.writtenRepo = currentRepo;
+		}
+		return result;
+	}
+
+	/** Clears the pending write: it was written, or it is dropped unwritten. */
+	private clearPending(): void {
+		this.presencePending = false;
+		this.pendingSinceMs = null;
+		this.pendingUndated = false;
+	}
+
+	/** Writes the checkout's session record. The result is written, or failed with an error code: never a message, which can carry host paths. */
+	private async touchCheckout(root: string, presence: DragonflyPresenceStore, currentRepo: string | null, ttlMs: number): Promise<PlanningHeartbeat> {
 		try {
 			const layout = await gitLayout(this.deps.fs, root);
 			if (!layout.ok) return { state: "failed", detail: layout.reason };
@@ -353,15 +388,11 @@ export class PlanningObserver {
 				branch: await branchOf(this.deps.fs, layout.gitDir),
 				activePhase: null,
 				lastHeartbeatMs: 0,
-				repo: repo.state === "known" ? repo.repo : null,
+				repo: currentRepo,
 				touched: this.touched,
 				...(this.report === null ? {} : { planning: this.report }),
 			};
 			await presence.touch(record, ttlMs);
-			this.presencePending = false;
-			this.pendingSinceMs = null;
-			this.written = this.report;
-			this.writtenRepo = currentRepo;
 			return { state: "written" };
 		} catch (cause: unknown) {
 			return { state: "failed", detail: errnoCode(cause) };
@@ -417,23 +448,6 @@ function changesIn(diff: PlanningDiff): number {
 	return diff.added.length + (diff.removed?.length ?? 0) + diff.changed.length;
 }
 
-/** The entries a diff carries, by path, each as its JSON: what a held publish is compared against. */
-function entriesOf(diff: PlanningDiff): Map<string, string> {
-	const entries = new Map<string, string>();
-	for (const change of [...diff.added, ...diff.changed, ...(diff.removed ?? [])]) entries.set(change.path, JSON.stringify(change));
-	return entries;
-}
-
-/** The part of a diff that a held publish does not already carry: its entries not held, with the same completeness. */
-function unheldOf(diff: PlanningDiff, held: ReadonlyMap<string, string>): PlanningDiff {
-	return {
-		complete: diff.complete,
-		added: diff.added.filter((change) => held.get(change.path) !== JSON.stringify(change)),
-		removed: diff.removed === null ? null : diff.removed.filter((change) => held.get(change.path) !== JSON.stringify(change)),
-		changed: diff.changed.filter((change) => held.get(change.path) !== JSON.stringify(change)),
-	};
-}
-
 /**
  * The phase and plan of each described document in an index, by path. An error record and a document with no phase have no
  * entry. A pair whose id the presence schema cannot carry has none either: the report of such an index is unknown
@@ -452,16 +466,16 @@ function phasePlansOf(index: PlanningIndex): ReadonlyMap<string, PhasePlan> {
 
 /**
  * The phase and plan of each document a complete change added or changed (read from the new index) or removed (read from the
- * baseline it left).
+ * touch baseline it left).
  */
-function pairsOfChange(diff: PlanningDiff, next: ReadonlyMap<string, PhasePlan>, previous: ReadonlyMap<string, PhasePlan> | undefined): PhasePlan[] {
+function pairsOfChange(diff: PlanningDiff, next: ReadonlyMap<string, PhasePlan>, previous: ReadonlyMap<string, PhasePlan>): PhasePlan[] {
 	const pairs: PhasePlan[] = [];
 	for (const change of [...diff.added, ...diff.changed]) {
 		const pair = next.get(change.path);
 		if (pair !== undefined) pairs.push(pair);
 	}
 	for (const change of diff.removed ?? []) {
-		const pair = previous?.get(change.path);
+		const pair = previous.get(change.path);
 		if (pair !== undefined) pairs.push(pair);
 	}
 	return pairs;

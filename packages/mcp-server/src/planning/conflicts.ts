@@ -121,7 +121,7 @@ export function gateConflictSensitiveWrite(views: readonly SessionView[], sessio
 
 /** Identifies one open conflict across reads: the same repository, key, phases, plans and sessions. A change to any of them is a new conflict. */
 export function conflictSignature(conflict: PlanningConflict): string {
-	return JSON.stringify([conflict.repo, conflict.key, conflict.phases, conflict.plans, conflict.sessionIds]);
+	return JSON.stringify([repoKey(conflict.repo), conflict.key, conflict.phases, conflict.plans, conflict.sessionIds]);
 }
 
 /** The ledger event for one conflict, on the repository the conflict names. Both summary and payload are redacted. */

@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { MAX_PAYLOAD_BYTES } from "../event.ts";
-import { conflictEvent, detectConflicts, gateConflictSensitiveWrite, PLANNING_CONFLICT, type ConflictInput, type PlanningConflict } from "./conflicts.ts";
+import { conflictEvent, conflictSignature, detectConflicts, gateConflictSensitiveWrite, PLANNING_CONFLICT, type ConflictInput, type PlanningConflict } from "./conflicts.ts";
 import type { ClassifiedSession, PlanningReport, TouchedPair, UnknownViewReason } from "./presence.ts";
 
 const NOW = 1_000_000;
@@ -139,6 +139,23 @@ describe("detectConflicts: repository identity", () => {
 		expect(report.conflicts).toEqual([
 			expect.objectContaining({ repo: "Owner/Name", key: { by: "plan", plan: "shared-plan" }, phases: ["53", "54"], sessionIds: ["alpha", "beta"] }),
 		]);
+	});
+});
+
+describe("conflictSignature: repository identity", () => {
+	const conflict: PlanningConflict = {
+		kind: PLANNING_CONFLICT,
+		status: "open",
+		repo: "SomeOrg/Repo",
+		key: { by: "phase", phase: "53" },
+		phases: ["53"],
+		plans: ["53-01"],
+		sessionIds: ["alpha", "beta"],
+		detectedAtMs: NOW,
+	};
+
+	test("repository names that differ only in letter case have the same signature", () => {
+		expect(conflictSignature({ ...conflict, repo: "someorg/repo" })).toBe(conflictSignature(conflict));
 	});
 });
 
