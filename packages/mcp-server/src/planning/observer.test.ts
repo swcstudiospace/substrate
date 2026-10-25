@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { EventInput } from "../types.ts";
 import { RecordingPresenceBackend } from "./backend.fixtures.ts";
-import { PLANNING_ROOT_ENV, PLANNING_SCAN_INTERVAL_ENV, loadPlanningSettings } from "./config.ts";
+import { DEFAULT_PRESENCE_TTL_S, PLANNING_ROOT_ENV, PLANNING_SCAN_INTERVAL_ENV, loadPlanningSettings } from "./config.ts";
 import { PLANNING_OBSERVER_SESSION, PlanningObserver } from "./observer.ts";
 import { DragonflyPresenceStore, PRESENCE_KEY_PREFIX } from "./presence-dragonfly.ts";
 import type { PlanningFs } from "./index.ts";
@@ -47,6 +47,16 @@ function observerOver(
 function storedSession(backend: RecordingPresenceBackend): Record<string, unknown> {
 	const key = backend.writes[0]?.key ?? "";
 	return JSON.parse(backend.values.get(key) ?? "{}") as Record<string, unknown>;
+}
+
+/** A recording backend whose writes are refused while `refusesWrites` is set. The reads and the clock keep working, so a write can fail at a known server time. */
+class RefusingWritesBackend extends RecordingPresenceBackend {
+	refusesWrites = false;
+
+	override async setWithTtl(key: string, value: string, ttlSeconds: number): Promise<void> {
+		if (this.refusesWrites) throw new Error("SET refused");
+		return super.setWithTtl(key, value, ttlSeconds);
+	}
 }
 
 describe("the observer's scans", () => {
@@ -207,6 +217,50 @@ describe("the observer's heartbeat", () => {
 
 		expect(await observer.scan()).toMatchObject({ outcome: "unchanged", heartbeat: { state: "not-due" } });
 		expect(backend.writes).toHaveLength(1);
+	});
+
+	test("an owed heartbeat recovered within the freshness window of its observation still writes", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const backend = new RefusingWritesBackend();
+		const { observer } = observerOver(tree, { presence: new DragonflyPresenceStore(backend) });
+		await observer.scan();
+
+		const observedAtMs = backend.clockMs;
+		const ttlMs = DEFAULT_PRESENCE_TTL_S * 1000;
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited\n");
+		backend.refusesWrites = true;
+		expect(await observer.scan()).toMatchObject({ outcome: "published", heartbeat: { state: "failed" } });
+
+		backend.clockMs = observedAtMs + ttlMs - 1;
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged", heartbeat: { state: "failed" } });
+
+		backend.clockMs = observedAtMs + ttlMs;
+		backend.refusesWrites = false;
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged", heartbeat: { state: "written" } });
+		expect(backend.writes).toHaveLength(1);
+		expect(storedSession(backend)).toMatchObject({ lastHeartbeatMs: observedAtMs + ttlMs });
+	});
+
+	test("an owed heartbeat recovered after the freshness window of its observation writes nothing", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const backend = new RefusingWritesBackend();
+		const { observer } = observerOver(tree, { presence: new DragonflyPresenceStore(backend) });
+		await observer.scan();
+
+		const observedAtMs = backend.clockMs;
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, first edit\n");
+		expect(await observer.scan()).toMatchObject({ outcome: "published", heartbeat: { state: "written" } });
+		expect(backend.writes).toHaveLength(1);
+
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, second edit\n");
+		backend.refusesWrites = true;
+		expect(await observer.scan()).toMatchObject({ outcome: "published", heartbeat: { state: "failed" } });
+
+		backend.clockMs = observedAtMs + DEFAULT_PRESENCE_TTL_S * 1000 + 1;
+		backend.refusesWrites = false;
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged", heartbeat: { state: "not-due" } });
+		expect(backend.writes).toHaveLength(1);
+		expect(storedSession(backend)).toMatchObject({ lastHeartbeatMs: observedAtMs });
 	});
 
 	test("the scan is scheduled at the configured cadence: 15000 ms when unset, the set value otherwise, and not while disabled", () => {

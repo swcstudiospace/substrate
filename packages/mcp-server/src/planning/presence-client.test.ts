@@ -178,4 +178,27 @@ describe("dragonflyPresenceBackend cancellation", () => {
 		expect(await backend.get("substrate:v1:planning:presence:c")).toBe("value");
 		expect(redis.sent).toHaveLength(2);
 	});
+
+	test("a read abandoned while the connect is in flight is not sent, and the connection stays open", async () => {
+		const gate = Promise.withResolvers<void>();
+		class GatedRedis extends ScriptedRedis {
+			override async connect(): Promise<void> {
+				await gate.promise;
+			}
+		}
+		const redis = new GatedRedis(() => "value");
+		const backend = dragonflyPresenceBackend("redis://127.0.0.1:6379", 1000, factory([redis]).make);
+		const controller = new AbortController();
+		const pending = backend.get("substrate:v1:planning:presence:a", controller.signal).then(
+			() => null,
+			(cause: unknown) => cause,
+		);
+		controller.abort();
+		gate.resolve();
+		const failure = await pending;
+		expect(failure).toBeInstanceOf(Error);
+		expect((failure as Error).name).toBe("AbortError");
+		expect(redis.sent).toEqual([]);
+		expect(redis.closed).toBe(false);
+	});
 });

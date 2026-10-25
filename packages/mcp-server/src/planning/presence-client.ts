@@ -89,6 +89,9 @@ export function dragonflyPresenceBackend(
 		// An abandoned listing sends nothing more. No command was sent, so the connection is not at fault and stays open.
 		signal?.throwIfAborted();
 		const redis = await open();
+		// The connect can outlast the listing budget. An abandoned read must send nothing even when the connection is
+		// now open, and the connection stays open: no command was sent, so it is not at fault.
+		signal?.throwIfAborted();
 		try {
 			return await bounded(redis.send(command, args), commandTimeoutMs, `presence ${command}`);
 		} catch (cause: unknown) {
