@@ -116,6 +116,32 @@ describe("detectConflicts: the phase key", () => {
 	});
 });
 
+describe("detectConflicts: repository identity", () => {
+	test("repository names that differ only in letter case are one repository, so their shared phase conflict is found", () => {
+		const report = detectConflicts(
+			input([
+				session("alpha", [pair("53", "53-01")], known(), "active", "SomeOrg/Repo"),
+				session("beta", [pair("53", "53-01")], known(), "active", "someorg/repo"),
+			]),
+		);
+		expect(report.conflicts).toEqual([
+			expect.objectContaining({ repo: "SomeOrg/Repo", key: { by: "phase", phase: "53" }, plans: ["53-01"], sessionIds: ["alpha", "beta"] }),
+		]);
+	});
+
+	test("repository names that differ only in letter case are one repository, so their shared plan conflict is found", () => {
+		const report = detectConflicts(
+			input([
+				session("alpha", [pair("53", "shared-plan")], known(), "active", "Owner/Name"),
+				session("beta", [pair("54", "shared-plan")], known(), "active", "owner/NAME"),
+			]),
+		);
+		expect(report.conflicts).toEqual([
+			expect.objectContaining({ repo: "Owner/Name", key: { by: "plan", plan: "shared-plan" }, phases: ["53", "54"], sessionIds: ["alpha", "beta"] }),
+		]);
+	});
+});
+
 describe("detectConflicts: the plan key", () => {
 	test("two sessions that touched a shared plan id under different phases emit one open plan event", () => {
 		const report = detectConflicts(

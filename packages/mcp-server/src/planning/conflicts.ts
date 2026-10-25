@@ -97,14 +97,17 @@ export function detectConflicts(input: ConflictInput): ConflictReport {
 	const views = active
 		.map((session) => sessionViewOf(session, input.nowMs, input.ttlMs))
 		.sort((a, b) => compareText(a.sessionId, b.sessionId));
-	const byRepo = new Map<string, KnownView[]>();
+	const byRepo = new Map<string, { repo: string; members: KnownView[] }>();
 	for (const view of views) {
 		if (view.status !== "known" || view.repo === null) continue;
-		byRepo.set(view.repo, [...(byRepo.get(view.repo) ?? []), view]);
+		const key = repoKey(view.repo);
+		const group = byRepo.get(key) ?? { repo: view.repo, members: [] };
+		group.members.push(view);
+		byRepo.set(key, group);
 	}
 	const conflicts = [...byRepo]
 		.sort(([a], [b]) => compareText(a, b))
-		.flatMap(([repo, group]) => [...phaseConflictsOf(group, repo, input.nowMs), ...planConflictsOf(group, repo, input.nowMs)]);
+		.flatMap(([, { repo, members }]) => [...phaseConflictsOf(members, repo, input.nowMs), ...planConflictsOf(members, repo, input.nowMs)]);
 	return { views, conflicts };
 }
 
@@ -219,4 +222,12 @@ function assertInput(input: ConflictInput): void {
 
 function compareText(a: string, b: string): number {
 	return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * The identity two repository names share. GitHub owner and repo names are case-insensitive, so `SomeOrg/Repo` and
+ * `someorg/repo` are one repository. A group is keyed by this; its conflicts name the spelling of its first session by id.
+ */
+export function repoKey(repo: string): string {
+	return repo.toLowerCase();
 }

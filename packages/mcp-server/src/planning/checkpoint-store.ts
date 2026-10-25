@@ -16,11 +16,17 @@
  */
 import { randomBytes } from "node:crypto";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { CompletionRecordSchema, completionKey, type CompletionRecord, type CompletionStore } from "./checkpoint.ts";
 import type { CheckpointDirectoryResult } from "./config.ts";
 
 export const COMPLETIONS_FILE = "completions.jsonl";
+
+/**
+ * The write order of each directory, shared by every open of it in this process. Two opens reread and rewrite one file,
+ * so their inserts must run one at a time across instances, not only within one instance.
+ */
+const directoryQueues = new Map<string, Promise<unknown>>();
 
 export type CheckpointStoreErrorCode = "corrupt-record" | "write-failed";
 
@@ -45,7 +51,6 @@ export function completionStoreView(config: CheckpointDirectoryResult): Completi
 
 export class DurableCompletionStore implements CompletionStore {
 	private records: Map<string, CompletionRecord>;
-	private tail: Promise<unknown> = Promise.resolve();
 
 	private constructor(
 		private readonly directory: string,
@@ -89,13 +94,18 @@ export class DurableCompletionStore implements CompletionStore {
 		this.records = parseRecords(await readCompletions(join(this.directory, COMPLETIONS_FILE)));
 	}
 
-	/** Runs one write at a time, in arrival order, so two inserts never race on the file. */
+	/**
+	 * Runs one write at a time, in arrival order, so two inserts never race on the file. The queue belongs to the directory,
+	 * not the open: two opens of one directory reread and rewrite the same file, so their inserts must not interleave.
+	 */
 	private serial<T>(task: () => Promise<T>): Promise<T> {
-		const run = this.tail.then(task);
-		this.tail = run.then(
+		const key = resolve(this.directory);
+		const run = (directoryQueues.get(key) ?? Promise.resolve()).then(task);
+		const settled = run.then(
 			() => undefined,
 			() => undefined,
 		);
+		directoryQueues.set(key, settled);
 		return run;
 	}
 

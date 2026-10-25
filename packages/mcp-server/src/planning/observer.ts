@@ -31,7 +31,7 @@
  */
 import type { EventInput } from "../types.ts";
 import { branchOf, gitLayout, planningSessionId, repoOf, type RepoLookup } from "./checkout.ts";
-import { conflictEvent, conflictSignature, detectConflicts } from "./conflicts.ts";
+import { conflictEvent, conflictSignature, detectConflicts, repoKey } from "./conflicts.ts";
 import type { PlanningConfigResult } from "./config.ts";
 import { diffPlanningIndex, type PlanningDiff, type PlanningSnapshot } from "./diff.ts";
 import { observePlanningChange } from "./events.ts";
@@ -119,10 +119,10 @@ export class PlanningObserver {
 	private touchedOverflow = false;
 	/** The presence record has a change this process has not written yet: a change, a moved watcher gap, or a write that failed. Process-local. */
 	private presencePending = false;
-	/** The signature of the change whose publish is held. Its next sighting is a retry, and renews nothing. Null when no publish is held. Process-local. */
-	private heldChange: string | null = null;
-	/** The report the last successful heartbeat wrote. A change of view (known, or the reason it is unknown) must reach the record. Null until one is written. */
-	private written: PlanningReport | null = null;
+	/** The entries of the change whose publish is held, by path, each as its JSON. An entry the held publish already carries is a retry and renews nothing; any other entry is a new edit. Empty when no publish is held. Process-local. */
+	private held: ReadonlyMap<string, string> = new Map();
+	/** The report the last successful heartbeat wrote: undefined until one is written, null when it wrote none. A change of view (known, unknown, or none) must reach the record. */
+	private written: PlanningReport | null | undefined = undefined;
 	/** The repository the last successful heartbeat wrote; undefined until one is written. A different repository now is a change the record must carry. */
 	private writtenRepo: string | null | undefined = undefined;
 	/** Conflicts announced and still open, by signature. A conflict leaves the set once it is no longer detected. Process-local. */
@@ -200,7 +200,7 @@ export class PlanningObserver {
 		const built = cached === null ? await buildPlanningIndex(root, fsDeps) : await updatePlanningIndex(root, fsDeps, cached);
 		const clock = this.deps.presence === null ? null : await readClock(this.deps.presence);
 		const nowMs = clock !== null && clock.ok ? clock.nowMs : null;
-		const gapMoved = nowMs !== null ? this.stampReport(built, nowMs) : false;
+		const gapMoved = nowMs !== null ? this.stampReport(built, nowMs) : this.withdrawReport();
 		const repo = await repoOf(this.deps.fs, root);
 		if (!built.ok) {
 			await this.heartbeat(root, false, ttlMs, repo);
@@ -217,11 +217,10 @@ export class PlanningObserver {
 		const previous = priorBaseline?.snapshot ?? null;
 		const diff = previous === null ? null : diffPlanningIndex(previous, next);
 		const changed = diff !== null && diff.complete && changesIn(diff) > 0;
-		// The same change seen again while its publish is held is a retry, not a new edit: it keeps the time it was first seen.
-		const signature = diff !== null && changed ? JSON.stringify([diff.added, diff.removed, diff.changed]) : null;
-		const retry = signature !== null && signature === this.heldChange;
-		const fresh = diff !== null && changed && !retry;
-		if (diff !== null && fresh && nowMs !== null) this.touch(pairsOfChange(diff, nextPhasePlans, priorBaseline?.phasePlans), nowMs, ttlMs);
+		// An entry the held publish already carries is a retry, not a new edit: it keeps the time it was first seen. Only the new entries renew.
+		const unheld = diff !== null && changed ? unheldOf(diff, this.held) : null;
+		const fresh = unheld !== null && changesIn(unheld) > 0;
+		if (unheld !== null && fresh && nowMs !== null) this.touch(pairsOfChange(unheld, nextPhasePlans, priorBaseline?.phasePlans), nowMs, ttlMs);
 		if (this.touchedOverflow && nowMs !== null) this.report = unknownReport(nowMs, "report-limit");
 
 		// A baseline that holds (a failed publish) keeps its own phase and plan map, so a removal is still read from what was there.
@@ -250,7 +249,7 @@ export class PlanningObserver {
 			this.baseline = { root, snapshot: next, phasePlans: nextPhasePlans };
 			outcome = previous === null ? "baseline" : diff !== null && !diff.complete ? "incomplete" : "unchanged";
 		}
-		this.heldChange = holds ? signature : null;
+		this.held = holds && diff !== null ? entriesOf(diff) : new Map();
 		const sinceChange = sinceLastScan !== null && sinceLastScan.complete && changesIn(sinceLastScan) > 0;
 		const heartbeat = await this.heartbeat(root, fresh || sinceChange || gapMoved, ttlMs, repo);
 		await this.announce(repo, ttlMs);
@@ -267,6 +266,17 @@ export class PlanningObserver {
 		this.report = observed.report;
 		this.gap = observed.gap;
 		return moved;
+	}
+
+	/**
+	 * Withdraws this checkout's report when the server clock cannot stamp a scan. The held report was stamped by an earlier clock
+	 * reading, so keeping it would let a later write present that old view as current. Without a report the session reads as
+	 * `no-scan`, which is unknown. Returns whether a report was held: its withdrawal is a change the record must carry.
+	 */
+	private withdrawReport(): boolean {
+		const held = this.report !== null;
+		this.report = null;
+		return held;
 	}
 
 	/**
@@ -290,7 +300,7 @@ export class PlanningObserver {
 	 */
 	private async heartbeat(root: string, due: boolean, ttlMs: number, repo: RepoLookup): Promise<PlanningHeartbeat> {
 		if (due) this.presencePending = true;
-		if (this.report !== null && this.written !== null && reportViewOf(this.report) !== reportViewOf(this.written)) this.presencePending = true;
+		if (this.written !== undefined && reportViewOf(this.report) !== reportViewOf(this.written)) this.presencePending = true;
 		const currentRepo = repo.state === "known" ? repo.repo : null;
 		if (this.writtenRepo !== undefined && this.writtenRepo !== currentRepo) this.presencePending = true;
 		if (!this.presencePending) return { state: "not-due" };
@@ -338,7 +348,7 @@ export class PlanningObserver {
 		const repoName = repo.state === "known" ? repo.repo : null;
 		const next = new Set<string>();
 		for (const conflict of detected.conflicts) {
-			if (conflict.repo !== repoName) continue;
+			if (repoName === null || repoKey(conflict.repo) !== repoKey(repoName)) continue;
 			const signature = conflictSignature(conflict);
 			if (this.openConflicts.has(signature)) {
 				next.add(signature);
@@ -358,8 +368,9 @@ export class PlanningObserver {
 	}
 }
 
-/** What a reader of a report sees: known, or the reason it is unknown. A new scan time alone is not a change of view. */
-function reportViewOf(report: PlanningReport): string {
+/** What a reader of a report sees: known, the reason it is unknown, or none. A new scan time alone is not a change of view. */
+function reportViewOf(report: PlanningReport | null): string {
+	if (report === null) return "none";
 	if (report.status === "known") return "known";
 	return `unknown:${report.reason}`;
 }
@@ -367,6 +378,23 @@ function reportViewOf(report: PlanningReport): string {
 /** The number of paths a complete diff changes. A removal is counted only when the diff vouches for removals. */
 function changesIn(diff: PlanningDiff): number {
 	return diff.added.length + (diff.removed?.length ?? 0) + diff.changed.length;
+}
+
+/** The entries a diff carries, by path, each as its JSON: what a held publish is compared against. */
+function entriesOf(diff: PlanningDiff): Map<string, string> {
+	const entries = new Map<string, string>();
+	for (const change of [...diff.added, ...diff.changed, ...(diff.removed ?? [])]) entries.set(change.path, JSON.stringify(change));
+	return entries;
+}
+
+/** The part of a diff that a held publish does not already carry: its entries not held, with the same completeness. */
+function unheldOf(diff: PlanningDiff, held: ReadonlyMap<string, string>): PlanningDiff {
+	return {
+		complete: diff.complete,
+		added: diff.added.filter((change) => held.get(change.path) !== JSON.stringify(change)),
+		removed: diff.removed === null ? null : diff.removed.filter((change) => held.get(change.path) !== JSON.stringify(change)),
+		changed: diff.changed.filter((change) => held.get(change.path) !== JSON.stringify(change)),
+	};
 }
 
 /**

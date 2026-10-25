@@ -519,6 +519,101 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		expect(storedRecord(backend, tree, TREE_ROOT).touched).toEqual([{ phase: "52", plan: null, observedAtMs: SERVER_NOW }]);
 	});
 
+	test("a scan whose clock read fails withdraws its report, so the write that follows carries no stale known view, and the next clock reading restores it (greptile stale-report thread)", async () => {
+		const tree = new FakeTree({ ...GIT, [PLAN]: "---\nplan: 52-01\n---\nBODY\n", [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		const { observer } = observerOver(tree, { presence });
+		await observer.scan();
+
+		tree.setContent(PLAN, "---\nplan: 52-01\n---\nBODY, edited\n");
+		await observer.scan();
+		expect(storedRecord(backend, tree, TREE_ROOT).planning).toEqual({ status: "known", scannedAtMs: SERVER_NOW, phases: [{ phase: "52", plans: ["52-01"] }] });
+
+		// The scan's own clock read fails once; the heartbeat's read after it succeeds.
+		const serverTime = backend.serverTimeMs.bind(backend);
+		let scanClockFails = true;
+		backend.serverTimeMs = async () => {
+			if (scanClockFails) {
+				scanClockFails = false;
+				throw new Error("TIME is unavailable");
+			}
+			return serverTime();
+		};
+		backend.clockMs = SERVER_NOW + 1_000;
+		tree.setContent(PLAN, "---\nplan: 52-01\n---\nBODY, edited again\n");
+		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "published", heartbeat: { state: "written" } });
+		expect(storedRecord(backend, tree, TREE_ROOT).planning).toBeUndefined();
+
+		backend.clockMs = SERVER_NOW + 2_000;
+		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "unchanged", heartbeat: { state: "written" } });
+		expect(storedRecord(backend, tree, TREE_ROOT).planning).toEqual({ status: "known", scannedAtMs: SERVER_NOW + 2_000, phases: [{ phase: "52", plans: ["52-01"] }] });
+	});
+
+	test("a new edit while a publish is held renews only its own touched pair, and the held pair keeps its first time (greptile publish-retry thread)", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n", [phaseDoc(TREE_ROOT, PHASE_53, "53-CONTEXT.md")]: "# context\n" });
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		let accept = false;
+		const observer = new PlanningObserver({
+			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+			fs: tree,
+			presence,
+			emit: async () => accept,
+		});
+		await observer.scan();
+
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited\n");
+		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "not-published" });
+		backend.clockMs = SERVER_NOW + 50_000;
+		tree.setContent(phaseDoc(TREE_ROOT, PHASE_53, "53-CONTEXT.md"), "# context, edited\n");
+		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "not-published" });
+
+		const firstTimes = [
+			{ phase: "52", plan: null, observedAtMs: SERVER_NOW },
+			{ phase: "53", plan: null, observedAtMs: SERVER_NOW + 50_000 },
+		];
+		expect(storedRecord(backend, tree, TREE_ROOT).touched).toHaveLength(2);
+		expect(storedRecord(backend, tree, TREE_ROOT).touched).toEqual(expect.arrayContaining(firstTimes));
+
+		accept = true;
+		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "published" });
+		expect(storedRecord(backend, tree, TREE_ROOT).touched).toHaveLength(2);
+		expect(storedRecord(backend, tree, TREE_ROOT).touched).toEqual(expect.arrayContaining(firstTimes));
+	});
+
+	test("two checkouts whose origins differ only in letter case share one conflict, and each announces it (greptile case thread)", async () => {
+		const tree = new FakeTree({
+			...checkoutOf(CHECKOUT_A, "gsd/p53-a", { [phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md")]: "# context\n" }, "SomeOrg/Repo"),
+			...checkoutOf(CHECKOUT_B, "gsd/p53-b", { [phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md")]: "# context\n" }, "someorg/repo"),
+		});
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		const attempts: EventInput[] = [];
+		const a = announcingObserver(tree, presence, attempts, true, CHECKOUT_A);
+		const b = announcingObserver(tree, presence, attempts, true, CHECKOUT_B);
+		await a.scan();
+		await b.scan();
+
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a\n");
+		await a.scan();
+		expect(conflictEventsOf(attempts)).toHaveLength(0);
+
+		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b\n");
+		await b.scan();
+		expect(conflictEventsOf(attempts)).toHaveLength(1);
+
+		await a.scan();
+		expect(conflictEventsOf(attempts)).toHaveLength(2);
+		expect(conflictEventsOf(attempts)).toEqual([
+			expect.objectContaining({ payload: expect.objectContaining({ kind: "planning.conflict", key: { by: "phase", phase: "53" } }) }),
+			expect.objectContaining({ payload: expect.objectContaining({ kind: "planning.conflict", key: { by: "phase", phase: "53" } }) }),
+		]);
+	});
+
 	test("a timer tick that finds a scan still running starts no second scan (greptile slow-reads thread)", async () => {
 		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
 		const { promise: blocked, resolve: release } = Promise.withResolvers<void>();
