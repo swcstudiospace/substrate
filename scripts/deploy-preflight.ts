@@ -424,6 +424,8 @@ async function configFindings(releaseDir: string): Promise<{ findings: Finding[]
 	let sources = 0;
 	let fired = 0;
 	for (const module of WARNING_MODULES) {
+		// A release from before the planning plane has no planning/config.ts and so no planning warnings to run; it must not be reported as broken.
+		if (module === "planning/config.ts" && !existsSync(join(releaseDir, "packages/mcp-server/src", module))) continue;
 		let namespace: Namespace;
 		try {
 			namespace = module === "config.ts" ? config : await importFrom(releaseDir, `packages/mcp-server/src/${module}`);
