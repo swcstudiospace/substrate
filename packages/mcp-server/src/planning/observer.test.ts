@@ -561,16 +561,16 @@ describe("the planning heartbeat", () => {
 
 	test("a failed heartbeat is owed: the next scan retries it with nothing else changed, and it stops once written", async () => {
 		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
-		const backend = new RecordingPresenceBackend();
+		const backend = new RefusingWritesBackend();
 		const { observer } = observerOver(tree, { presence: new DragonflyPresenceStore(backend) });
 		await observer.scan();
 
 		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited\n");
-		backend.clockFails = true;
+		backend.refusesWrites = true; // the clock reads, so the observation is dated: only the write fails
 		expect(await observer.scan()).toMatchObject({ outcome: "published", heartbeat: { state: "failed" } });
 		expect(backend.writes).toEqual([]);
 
-		backend.clockFails = false;
+		backend.refusesWrites = false;
 		expect(await observer.scan()).toMatchObject({ outcome: "unchanged", heartbeat: { state: "written" } });
 		expect(backend.writes).toHaveLength(1);
 
@@ -620,6 +620,28 @@ describe("the planning heartbeat", () => {
 		expect(await observer.scan()).toMatchObject({ outcome: "unchanged", heartbeat: { state: "not-due" } });
 		expect(backend.writes).toHaveLength(1);
 		expect(storedSession(backend)).toMatchObject({ lastHeartbeatMs: observedAtMs });
+	});
+
+	test("a change observed while the clock is unreadable is never written as active, even after the clock recovers", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const backend = new RecordingPresenceBackend();
+		const { observer } = observerOver(tree, { presence: new DragonflyPresenceStore(backend) });
+		await observer.scan();
+
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, first edit\n");
+		expect(await observer.scan()).toMatchObject({ outcome: "published", heartbeat: { state: "written" } });
+		const stored = storedSession(backend);
+
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, second edit\n");
+		backend.clockFails = true;
+		expect(await observer.scan()).toMatchObject({ outcome: "published", heartbeat: { state: "failed" } });
+		expect(backend.writes).toHaveLength(1);
+
+		backend.clockFails = false;
+		backend.clockMs += 1_000;
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged", heartbeat: { state: "not-due" } });
+		expect(backend.writes).toHaveLength(1);
+		expect(storedSession(backend)).toEqual(stored);
 	});
 
 	test("the scan is scheduled at the configured cadence: 15000 ms when unset, the set value otherwise, and not while disabled", () => {
