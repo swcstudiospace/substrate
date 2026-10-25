@@ -160,3 +160,22 @@ describe("dragonflyPresenceBackend", () => {
 		expect(made).toHaveLength(2);
 	});
 });
+
+describe("dragonflyPresenceBackend cancellation", () => {
+	test("a read given an aborted signal is not sent and leaves the connection open", async () => {
+		const redis = new ScriptedRedis(() => "value");
+		const backend = dragonflyPresenceBackend("redis://127.0.0.1:6379", 1000, factory([redis]).make);
+		expect(await backend.get("substrate:v1:planning:presence:a")).toBe("value");
+		const abandoned = new AbortController();
+		abandoned.abort();
+		const failure = await backend.get("substrate:v1:planning:presence:b", abandoned.signal).then(
+			() => null,
+			(cause: unknown) => cause,
+		);
+		expect(failure).not.toBeNull();
+		expect(redis.sent).toEqual([{ command: "GET", args: ["substrate:v1:planning:presence:a"] }]);
+		expect(redis.closed).toBe(false);
+		expect(await backend.get("substrate:v1:planning:presence:c")).toBe("value");
+		expect(redis.sent).toHaveLength(2);
+	});
+});

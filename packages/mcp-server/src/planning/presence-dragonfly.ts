@@ -23,6 +23,7 @@
  * The commands go through `PresenceBackend`, a port of its own. The cache client in `cache.ts` is closed
  * to its current command set by `cache-conformance.test.ts`, so presence never reuses it.
  */
+import { sharedDeadline } from "../deadline.ts";
 import { PLANNING_BOUNDS } from "./config.ts";
 import { SessionRecordSchema, type PresenceStore, type SessionRecord } from "./presence.ts";
 
@@ -35,13 +36,16 @@ export const PRESENCE_RETENTION_MARGIN_S = 3_600;
 export const PRESENCE_RETENTION_S = PRESENCE_TTL_MAX_S + PRESENCE_RETENTION_MARGIN_S;
 /** The most sessions one listing reads. Beyond it the listing is marked truncated. */
 export const PRESENCE_MAX_SESSIONS = 256;
+/** The most time one listing may take, in milliseconds. Each command has its own reply deadline; this bounds the listing as a whole. */
+export const PRESENCE_LISTING_BUDGET_MS = 5_000;
 
+/** Each call takes an optional `signal`: an aborted signal stops the call before any command is sent. */
 export interface PresenceBackend {
-	get(key: string): Promise<string | null>;
+	get(key: string, signal?: AbortSignal): Promise<string | null>;
 	/** `SET key value EX ttlSeconds`. */
 	setWithTtl(key: string, value: string, ttlSeconds: number): Promise<void>;
 	/** Up to `limit` keys under `prefix`. `truncated` is true when the walk stopped at `limit` or before the keyspace was covered. */
-	scanPrefix(prefix: string, limit: number): Promise<{ keys: string[]; truncated: boolean }>;
+	scanPrefix(prefix: string, limit: number, signal?: AbortSignal): Promise<{ keys: string[]; truncated: boolean }>;
 	/** The server's clock, in milliseconds since the epoch. */
 	serverTimeMs(): Promise<number>;
 }
@@ -79,15 +83,34 @@ export class DragonflyPresenceStore implements PresenceStore {
 		return listing.records;
 	}
 
-	/** Up to `limit` held records, sorted by session id, with the truncation flag. Stale records are included. */
-	async listWithin(limit: number): Promise<PresenceListing> {
+	/**
+	 * Up to `limit` held records, sorted by session id, with the truncation flag. Stale records are included. The whole listing
+	 * must finish within `budgetMs`: a listing that misses it rejects with a `DeadlineError`, and no command is sent after that.
+	 * A non-positive budget is no deadline; each command still has its own.
+	 */
+	async listWithin(limit: number, budgetMs: number = PRESENCE_LISTING_BUDGET_MS): Promise<PresenceListing> {
 		if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError("limit must be a positive integer");
-		const scanned = await this.backend.scanPrefix(PRESENCE_KEY_PREFIX, limit);
+		const abandon = new AbortController();
+		const deadline = sharedDeadline(budgetMs, "presence listing");
+		try {
+			return await deadline.race(this.collect(limit, abandon.signal));
+		} catch (cause: unknown) {
+			abandon.abort();
+			throw cause;
+		} finally {
+			deadline.clear();
+		}
+	}
+
+	private async collect(limit: number, signal: AbortSignal): Promise<PresenceListing> {
+		signal.throwIfAborted();
+		const scanned = await this.backend.scanPrefix(PRESENCE_KEY_PREFIX, limit, signal);
 		const keys = [...new Set(scanned.keys.filter((key) => key.startsWith(PRESENCE_KEY_PREFIX)))].sort();
 		const kept = keys.slice(0, limit);
 		const records: SessionRecord[] = [];
 		for (const key of kept) {
-			const value = await this.backend.get(key);
+			signal.throwIfAborted();
+			const value = await this.backend.get(key, signal);
 			if (value === null) continue;
 			records.push(parseStored(key, value));
 		}

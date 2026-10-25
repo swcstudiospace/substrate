@@ -194,6 +194,25 @@ describe("the observer's heartbeat", () => {
 		expect(storedSession(backend)).toMatchObject({ worktree: TREE_ROOT, branch: BRANCH, lastHeartbeatMs: backend.clockMs });
 	});
 
+	test("a failed heartbeat is owed: the next scan retries it with nothing else changed, and it stops once written", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const backend = new RecordingPresenceBackend();
+		const { observer } = observerOver(tree, { presence: new DragonflyPresenceStore(backend) });
+		await observer.scan();
+
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited\n");
+		backend.clockFails = true;
+		expect(await observer.scan()).toMatchObject({ outcome: "published", heartbeat: { state: "failed" } });
+		expect(backend.writes).toEqual([]);
+
+		backend.clockFails = false;
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged", heartbeat: { state: "written" } });
+		expect(backend.writes).toHaveLength(1);
+
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged", heartbeat: { state: "not-due" } });
+		expect(backend.writes).toHaveLength(1);
+	});
+
 	test("the scan is scheduled at the configured cadence: 15000 ms when unset, the set value otherwise, and not while disabled", () => {
 		const scheduledWith = (env: Record<string, string>): number[] => {
 			const delays: number[] = [];
