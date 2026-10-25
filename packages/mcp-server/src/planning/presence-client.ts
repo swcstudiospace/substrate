@@ -85,7 +85,9 @@ export function dragonflyPresenceBackend(
 		return opening;
 	};
 
-	const run = async (command: PresenceCommand, args: string[]): Promise<unknown> => {
+	const run = async (command: PresenceCommand, args: string[], signal?: AbortSignal): Promise<unknown> => {
+		// An abandoned listing sends nothing more. No command was sent, so the connection is not at fault and stays open.
+		signal?.throwIfAborted();
 		const redis = await open();
 		try {
 			return await bounded(redis.send(command, args), commandTimeoutMs, `presence ${command}`);
@@ -97,21 +99,21 @@ export function dragonflyPresenceBackend(
 	};
 
 	return {
-		async get(key) {
-			const reply = await run("GET", [key]);
+		async get(key, signal) {
+			const reply = await run("GET", [key], signal);
 			if (reply === null || typeof reply === "string") return reply;
 			throw new PresenceBackendError("GET", "reply is neither a string nor null");
 		},
 		async setWithTtl(key, value, ttlSeconds) {
 			await run("SET", [key, value, "EX", String(ttlSeconds)]);
 		},
-		async scanPrefix(prefix, limit) {
+		async scanPrefix(prefix, limit, signal) {
 			// Glob metacharacters are escaped, so the pattern matches the prefix and nothing wider.
 			const pattern = `${prefix.replace(/[*?[\]\\]/g, "\\$&")}*`;
 			const found = new Set<string>();
 			let cursor = "0";
 			for (let round = 0; round < MAX_SCAN_ROUNDS; round++) {
-				const reply = parseScanReply(await run("SCAN", [cursor, "MATCH", pattern, "COUNT", String(SCAN_COUNT)]));
+			const reply = parseScanReply(await run("SCAN", [cursor, "MATCH", pattern, "COUNT", String(SCAN_COUNT)], signal));
 				for (const key of reply.keys) {
 					found.add(key);
 					if (found.size > limit) return { keys: [...found].slice(0, limit), truncated: true };

@@ -9,6 +9,7 @@
  * Heartbeat: a checkout heartbeats only in a scan that sees a complete change in it since the scan before. The session is that
  * checkout (`wt-<hash of its path>`), and its branch is read from its HEAD. A change the ledger does not store is heartbeated
  * once, in the scan that saw it; the scans after it are quiet, so the session goes `stale` after the freshness window.
+ * A failed heartbeat is owed: the scans after it retry it, unchanged, until it reads written.
  *
  * Scans never overlap: a tick that arrives during a scan shares that scan rather than starting another. A failure is reported
  * on stderr when it appears or changes, and once more when the scans succeed again. Shutdown waits for a scan in flight.
@@ -88,6 +89,8 @@ export class PlanningObserver {
 	private lastScan: { root: string; snapshot: PlanningSnapshot } | null = null;
 	/** The publish baseline: what the ledger has been told. It holds when a publish fails, so the change is retried. */
 	private baseline: { root: string; snapshot: PlanningSnapshot } | null = null;
+	/** The heartbeat a failed write still owes: the change it was for. Retried on later scans until it reads written. */
+	private pendingHeartbeat: { root: string; change: PlanningDiff } | null = null;
 	private timer: PlanningTimerHandle | undefined;
 	/** The scan in flight, or null. A scan asked for while one runs shares it. */
 	private running: Promise<ObserverScan> | null = null;
@@ -192,11 +195,31 @@ export class PlanningObserver {
 		return { state: "observed", outcome, heartbeat: await this.heartbeat(root, sinceLastScan, ttlMs) };
 	}
 
-	/** Heartbeats this checkout when the change since the last scan is complete and non-empty. The record's time is replaced by the server's clock. */
-	private async heartbeat(root: string, change: PlanningDiff | null, ttlMs: number): Promise<PlanningHeartbeat> {
-		if (change === null || !change.complete || changesIn(change) === 0) return { state: "not-due" };
+	/** Heartbeats this checkout when the change since the last scan is complete and non-empty, or when a failed heartbeat is still owed. The record's time is replaced by the server's clock. */
+	private async heartbeat(root: string, sinceLastScan: PlanningDiff | null, ttlMs: number): Promise<PlanningHeartbeat> {
+		const change = this.owedHeartbeat(root, sinceLastScan);
+		if (change === null) return { state: "not-due" };
 		const presence = this.deps.presence;
 		if (presence === null) return { state: "presence-unset" };
+		const result = await this.touchCheckout(root, presence, ttlMs);
+		// A failed write stays owed: the next scan retries it, even when nothing else changed. Written clears the debt.
+		this.pendingHeartbeat = result.state === "written" ? null : { root, change };
+		return result;
+	}
+
+	/** The change a heartbeat is owed for: this scan's change when it is heartbeat-worthy, else the heartbeat a failed write still owes. */
+	private owedHeartbeat(root: string, sinceLastScan: PlanningDiff | null): PlanningDiff | null {
+		if (sinceLastScan !== null && sinceLastScan.complete && changesIn(sinceLastScan) > 0) return sinceLastScan;
+		if (this.pendingHeartbeat === null) return null;
+		if (this.pendingHeartbeat.root !== root) {
+			this.pendingHeartbeat = null;
+			return null;
+		}
+		return this.pendingHeartbeat.change;
+	}
+
+	/** Writes the checkout's session record. The result is written, or failed with an error code: never a message, which can carry host paths. */
+	private async touchCheckout(root: string, presence: DragonflyPresenceStore, ttlMs: number): Promise<PlanningHeartbeat> {
 		try {
 			const layout = await gitLayout(this.deps.fs, root);
 			if (!layout.ok) return { state: "failed", detail: layout.reason };
