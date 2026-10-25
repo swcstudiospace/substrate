@@ -5,6 +5,7 @@
  * the listing by name.
  */
 import { describe, expect, test } from "bun:test";
+import { DeadlineError } from "../deadline.ts";
 import { DragonflyPresenceStore, PRESENCE_KEY_PREFIX, PRESENCE_MAX_SESSIONS, PRESENCE_RETENTION_S, PRESENCE_TTL_MAX_S, type PresenceBackend } from "./presence-dragonfly.ts";
 import { classifySessions, type SessionRecord } from "./presence.ts";
 
@@ -192,5 +193,54 @@ describe("DragonflyPresenceStore listing", () => {
 
 	test("a limit that is not a positive integer is refused", async () => {
 		await expect(new DragonflyPresenceStore(new FakeBackend()).listWithin(0)).rejects.toThrow(RangeError);
+	});
+});
+
+/** Scans the given keys and holds its first `get` until `releaseStalled` is called. Every backend call is logged in order. */
+class StallingBackend implements PresenceBackend {
+	readonly calls: string[] = [];
+	private readonly gate = Promise.withResolvers<void>();
+	private stalled = false;
+
+	constructor(private readonly keys: string[]) {}
+
+	async get(key: string): Promise<string | null> {
+		this.calls.push(`get ${key}`);
+		if (!this.stalled) {
+			this.stalled = true;
+			await this.gate.promise;
+		}
+		return null;
+	}
+
+	async setWithTtl(): Promise<void> {
+		throw new Error("the listing never writes");
+	}
+
+	async scanPrefix(prefix: string): Promise<{ keys: string[]; truncated: boolean }> {
+		this.calls.push("scan");
+		return { keys: this.keys.filter((key) => key.startsWith(prefix)), truncated: false };
+	}
+
+	async serverTimeMs(): Promise<number> {
+		return 0;
+	}
+
+	releaseStalled(): void {
+		this.gate.resolve();
+	}
+}
+
+describe("DragonflyPresenceStore listing budget", () => {
+	test("a listing that misses its budget rejects with a DeadlineError and starts no further read", async () => {
+		const backend = new StallingBackend([`${PRESENCE_KEY_PREFIX}a`, `${PRESENCE_KEY_PREFIX}b`, `${PRESENCE_KEY_PREFIX}c`]);
+		await expect(new DragonflyPresenceStore(backend).listWithin(PRESENCE_MAX_SESSIONS, 50)).rejects.toBeInstanceOf(DeadlineError);
+		const callsAtRejection = backend.calls.length;
+		backend.releaseStalled();
+		// A macrotask runs only after every pending microtask, so the abandoned listing has settled by the time it resolves.
+		const flushed = Promise.withResolvers<void>();
+		setImmediate(flushed.resolve);
+		await flushed.promise;
+		expect(backend.calls).toHaveLength(callsAtRejection);
 	});
 });

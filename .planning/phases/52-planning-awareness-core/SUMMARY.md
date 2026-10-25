@@ -1,10 +1,12 @@
 ---
 phase: 52-planning-awareness-core
 requirements: [SOTA-08]
-status: verified in-repo at 9e866eb after the review fixes, all six success criteria PASS (SC6 cadence is `SUBSTRATE_PLANNING_SCAN_INTERVAL_MS`, default 15000 ms; shutdown bound `SHUTDOWN_FLUSH_MS` is internal; see VERIFICATION.md)
+status: verified in-repo at 0189469 after the Git parser and settings fixes, all six success criteria PASS (SC6 cadence is `SUBSTRATE_PLANNING_SCAN_INTERVAL_MS`, default 15000 ms; shutdown bound `SHUTDOWN_FLUSH_MS` is internal; see VERIFICATION.md)
 ---
 
 # 52-SUMMARY: planning index, session presence and change diffs
+
+Delta re-verification at 0189469 (since 9e866eb). Wiring `gsd/p52-wiring` at `01894695c5b20cbb5952aad5a6c3038a30637ed8`; core `gsd/p52-planning-core` at `e13593834c67155ff9b041827b88855c1b82440b`, tree `8a9b1bf` (tree `6bf463576b7b063226b337cdbe80c41837800b7d`). Changes: `0f7647c` (`repoFromGitConfig` follows git's rules: case-insensitive section and key names, whitespace around names ignored, an indented header ends the origin section; test `checkout.test.ts:35`); `76c1fcb` (a malformed `SUBSTRATE_PLANNING_SCAN_INTERVAL_MS` is a boot warning naming its key and never its value; test `config.test.ts:54`; printed at `index.ts:92`); `0189469` (merge of phase 51 doc fixes, no code). Orchestrator-reported: core tsc clean, 120 pass, 0 fail; wiring tsc clean, 355 pass, 0 fail.
 
 ## What was executed
 

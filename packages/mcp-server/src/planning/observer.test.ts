@@ -510,6 +510,25 @@ describe("the planning heartbeat", () => {
 		observer.stop();
 	});
 
+	test("a failed heartbeat is owed: the next scan retries it with nothing else changed, and it stops once written", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const backend = new RecordingPresenceBackend();
+		const { observer } = observerOver(tree, { presence: new DragonflyPresenceStore(backend) });
+		await observer.scan();
+
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited\n");
+		backend.clockFails = true;
+		expect(await observer.scan()).toMatchObject({ outcome: "published", heartbeat: { state: "failed" } });
+		expect(backend.writes).toEqual([]);
+
+		backend.clockFails = false;
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged", heartbeat: { state: "written" } });
+		expect(backend.writes).toHaveLength(1);
+
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged", heartbeat: { state: "not-due" } });
+		expect(backend.writes).toHaveLength(1);
+	});
+
 	test("the scan is scheduled at the configured cadence: 15000 ms when unset, the set value otherwise, and not while disabled", () => {
 		const scheduledWith = (env: Record<string, string>): number[] => {
 			const delays: number[] = [];
@@ -705,6 +724,22 @@ describe("held, incomplete and failed-heartbeat states are reported", () => {
 		await observer.settleTransitions();
 		expect(transitions).toHaveLength(2);
 		expect(events).toEqual([]);
+	});
+
+	test("a revert to an empty plane records the move from the state the previous scan saw, not the publish baseline's", async () => {
+		const tree = new FakeTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN, [`${TREE_ROOT}/.planning/README.txt`]: "not a document\n" });
+		let accept = false;
+		const { observer, transitions } = observerOver(tree, { accept: () => accept });
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} context\n`);
+		expect(await observer.scan()).toMatchObject({ outcome: "not-published" });
+		tree.remove(`${PHASE}/52-CONTEXT.md`);
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged" });
+		await observer.settleTransitions();
+		expect(transitions).toEqual([
+			expect.objectContaining({ from: "EMPTY", to: "SUCCESS", outcome: "refused" }),
+			expect.objectContaining({ from: "SUCCESS", to: "EMPTY", outcome: "refused" }),
+		]);
 	});
 
 	test("an unlistable directory with an edit in a readable directory records that edit as an incomplete refused transition", async () => {
