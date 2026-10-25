@@ -170,14 +170,18 @@ export class PlanningObserver {
 	}
 
 	/**
-	 * Waits for the transition deliveries in flight, up to `deadline`: resolves `settled` when none is left, or `deadline` when the
-	 * bound came first. Never rejects. Shutdown passes its timer as the bound; a scan never waits on this. Without a bound it waits
-	 * for every delivery.
+	 * Waits for the scan in flight, then for the transition deliveries in flight, up to `deadline`: resolves `settled` when neither is
+	 * left, or `deadline` when the bound came first. Never rejects. Shutdown passes its timer as the bound. A scan running when this is
+	 * called cannot schedule a transition after the settle returns, because the settle waits for that scan first. A scan never waits
+	 * on this. Without a bound it waits for everything.
 	 */
 	async settleTransitions(deadline: Promise<void> = Promise.withResolvers<void>().promise): Promise<"settled" | "deadline"> {
 		const flushed = (async (): Promise<"settled"> => {
-			while (this.pending.size > 0) await Promise.all([...this.pending]);
-			return "settled";
+			for (;;) {
+				if (this.running !== null) await this.running;
+				if (this.pending.size === 0) return "settled";
+				await Promise.all([...this.pending]);
+			}
 		})();
 		return Promise.race([flushed, deadline.then((): "deadline" => "deadline")]);
 	}

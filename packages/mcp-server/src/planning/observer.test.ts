@@ -432,6 +432,45 @@ describe("planning.transition delivery", () => {
 		expect(primaryCalls).toHaveLength(MAX_PENDING_TRANSITIONS);
 		expect(fallback.records).toHaveLength(1);
 	}, 60_000);
+
+	test("a shutdown settle waits for the scan in flight: it reports the deadline while that scan is held, and delivers its transition once it ends", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const metrics = recordingSink("greptime");
+		const { promise: atPublish, resolve: reachedPublish } = Promise.withResolvers<void>();
+		const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+		let holdPublish = false;
+		const observer = new PlanningObserver({
+			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+			fs: tree,
+			presence: null,
+			emit: async () => {
+				if (holdPublish) {
+					reachedPublish();
+					await gate;
+				}
+				return true;
+			},
+			metrics: metrics.sink,
+			fallback: recordingSink("stdout").sink,
+			clock: CLOCK,
+		});
+		await observer.scan();
+
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited\n");
+		holdPublish = true;
+		const scanning = observer.scan();
+		await atPublish;
+		const { promise: deadline, resolve: expire } = Promise.withResolvers<void>();
+		const settling = observer.settleTransitions(deadline);
+		expire();
+		expect(await settling).toBe("deadline");
+		expect(metrics.records).toEqual([]);
+
+		release();
+		await scanning;
+		expect(await observer.settleTransitions()).toBe("settled");
+		expect(metrics.records).toEqual([expect.objectContaining({ outcome: "applied" })]);
+	});
 });
 
 describe("the planning heartbeat", () => {
