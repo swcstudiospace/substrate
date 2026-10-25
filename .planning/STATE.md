@@ -450,3 +450,10 @@ PR B's defaults: `SUBSTRATE_BRIEF_GRAPH_READ=full`, `SUBSTRATE_CACHE_BUMP_SCOPE=
   - W5 Product-suite wiring: sync .planning markdown and repository docs into LightRAG on change; scrape documentation sites; Hindsight context on answers; Dragonfly cache with invalidation on the doc-change event; Timescale for per-document sync state; Greptime for ingest events.
 - Blocked, needs the operator: (1) LightRAG needs an LLM and an embedding provider with its key. Choosing a paid provider is a decision only you can make. (2) The list of documentation sites to scrape, with confirmation that each may be scraped. (3) Approval to deploy LightRAG to production (PLAN T6 is a HARD_STOP). (4) Approval to delete the elasticsearch, mysql, storage and redis services and their volumes after confirming nothing else uses them. (5) Approval for the ragflow-oauth-service and ragflow-oauth-integration services, which I haven't checked for other callers.
 - Next action: W1, the config contract. It needs no decision from you.
+
+## Run 5 record, continued (2026-10-25, operator answers)
+
+- Operator decisions: keep ragflow-oauth-service and ragflow-oauth-integration (they supply the coding-plan inference path). Delete elasticsearch, mysql, storage and redis, with their volumes. Deploy LightRAG to production, after the provider and key are set.
+- Done: the services elasticsearch, mysql, storage and redis were deleted. Their volumes elasticsearch-volume, mysql-volume, storage-volume and redis-volume were deleted with their data. The operator approved this; the callers were not verified, because variable values are redacted to this integration.
+- Still open: LightRAG deploy (PLAN T6, HARD_STOP). Blocked on the provider name and the key in LightRAG's Railway environment. The provider was never named; the key was not provided and was not read.
+- Next action: when the provider name and the key are in place, deploy LightRAG and run the W1 to W4 gates.
