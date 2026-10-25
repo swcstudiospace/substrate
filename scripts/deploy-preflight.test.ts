@@ -5,6 +5,7 @@ import { join } from "node:path";
 import * as briefProfile from "../packages/mcp-server/src/brief-profile.ts";
 import * as config from "../packages/mcp-server/src/config.ts";
 import * as hindsightInventory from "../packages/mcp-server/src/hindsight-inventory.ts";
+import * as planningConfig from "../packages/mcp-server/src/planning/config.ts";
 import * as recallSnapshot from "../packages/mcp-server/src/recall-snapshot.ts";
 import {
 	MAX_ENV_BYTES,
@@ -252,12 +253,21 @@ describe("config check", () => {
 		expect(warning.reason).toContain("not-absolute");
 	});
 
+	test("a refused planning setting in a unit's Environment= is a warning from the release's own check", async () => {
+		const r = rig();
+		writeFileSync(join(r.units, "substrate-mcp.service"), "[Service]\nEnvironment=SUBSTRATE_PLANNING_PRESENCE_TTL_S=soon\n");
+		const result = await findings(r.options());
+		const warning = named(result.findings, "planningConfigWarnings");
+		expect(warning.level).toBe("warn");
+		expect(warning.reason).toContain("SUBSTRATE_PLANNING_PRESENCE_TTL_S");
+	});
+
 	test("every warning function index.ts calls is one the preflight runs", () => {
 		const indexText = readFileSync(join(repoRoot, "packages/mcp-server/src/index.ts"), "utf8");
 		const called = [...new Set([...indexText.matchAll(/\.\.\.(\w+Warnings)\(/g)].map((match) => match[1] ?? ""))];
 		expect(called.length).toBeGreaterThan(5);
 		const exported = new Set<string>();
-		for (const module of [config, briefProfile, recallSnapshot, hindsightInventory]) {
+		for (const module of [config, briefProfile, recallSnapshot, hindsightInventory, planningConfig]) {
 			for (const [key, value] of Object.entries(module)) if (typeof value === "function") exported.add(key);
 		}
 		for (const name of called) {

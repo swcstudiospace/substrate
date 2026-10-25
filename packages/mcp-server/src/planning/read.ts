@@ -226,7 +226,7 @@ function countOf(records: PlanningRecord[]): { documents: number; errors: number
 }
 
 /** The server's clock, or the reason it could not be read. Never a host-clock guess. */
-async function readClock(presence: DragonflyPresenceStore): Promise<{ ok: true; nowMs: number } | { ok: false; detail: string }> {
+export async function readClock(presence: DragonflyPresenceStore): Promise<{ ok: true; nowMs: number } | { ok: false; detail: string }> {
 	try {
 		return { ok: true, nowMs: await presence.serverNowMs() };
 	} catch (cause: unknown) {

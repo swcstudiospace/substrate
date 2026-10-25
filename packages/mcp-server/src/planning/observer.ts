@@ -30,7 +30,7 @@ import { observePlanningChange } from "./events.ts";
 import { buildPlanningIndex, errnoCode, snapshotOf, updatePlanningIndex, type PlanningFs, type PlanningIndex, type PlanningIndexFailure } from "./index.ts";
 import type { DragonflyPresenceStore } from "./presence-dragonfly.ts";
 import type { SessionRecord } from "./presence.ts";
-import { resolveSettings } from "./read.ts";
+import { readClock, resolveSettings } from "./read.ts";
 import type { SessionState } from "./states.ts";
 import { emitTransition, stdoutMetricSink, transitionRecord, type MetricSink, type TransitionClock, type TransitionOutcome, type TransitionRecord } from "./telemetry.ts";
 
@@ -82,6 +82,9 @@ export type ObserverScan =
 	| { state: "failed"; detail: string }
 	| { state: "observed"; outcome: ObserverOutcome; heartbeat: PlanningHeartbeat };
 
+/** A heartbeat a failed write still owes. `observedAtMs` is the server's time of the observation, or null when the clock was unreadable then. */
+type OwedHeartbeat = { root: string; change: PlanningDiff; observedAtMs: number | null };
+
 export interface PlanningObserverDeps {
 	settings: PlanningConfigResult;
 	fs: PlanningFs;
@@ -119,8 +122,8 @@ export class PlanningObserver {
 	private recordedHold: string | null = null;
 	/** Scheduled transition deliveries not yet settled. */
 	private readonly pending = new Set<Promise<void>>();
-	/** The heartbeat a failed write still owes: the change it was for. Retried on later scans until it reads written. */
-	private pendingHeartbeat: { root: string; change: PlanningDiff } | null = null;
+	/** The heartbeat a failed write still owes: the change it was for, and when it was observed. Retried on later scans until it reads written, or until its observation leaves the freshness window. */
+	private pendingHeartbeat: OwedHeartbeat | null = null;
 	private timer: PlanningTimerHandle | undefined;
 	/** The scan in flight, or null. A scan asked for while one runs shares it. */
 	private running: Promise<ObserverScan> | null = null;
@@ -224,6 +227,9 @@ export class PlanningObserver {
 		const diff = previous === null ? null : diffPlanningIndex(previous, next);
 		const ttlMs = limits.presenceTtlS * 1000;
 		const repo = await repoOf(this.deps.fs, root);
+		// The server's clock, read once per scan: the time a heartbeat's observation is stamped with, and the time an owed one is aged against.
+		const clock = this.deps.presence === null ? null : await readClock(this.deps.presence);
+		const nowMs = clock !== null && clock.ok ? clock.nowMs : null;
 		if (repo.state === "known") {
 			const observed = await observePlanningChange({
 				previous,
@@ -236,17 +242,17 @@ export class PlanningObserver {
 			const held = observed.outcome === "not-published";
 			const outcome = observed.outcome === "published" ? "applied" : held ? "refused" : unpublishedOutcome(previous, diff);
 			this.settle(root, current, state, { snapshot: observed.baseline, next, diff, outcome, held, observedBefore });
-			return { state: "observed", outcome: observed.outcome, heartbeat: await this.heartbeat(root, sinceLastScan, ttlMs) };
+			return { state: "observed", outcome: observed.outcome, heartbeat: await this.heartbeat(root, sinceLastScan, ttlMs, nowMs) };
 		}
 		// Without a repo nothing can be published. A complete change is reported once and ends here, unless the failure that
 		// hid the repo was transient: then the baseline holds, and the next scan sees the same change again.
 		if (diff !== null && diff.complete && changesIn(diff) > 0) {
 			if (!repo.transient) this.settle(root, current, state, { snapshot: next, next, diff, outcome: "refused", held: false, observedBefore });
-			return { state: "observed", outcome: "repo-unknown", heartbeat: await this.heartbeat(root, sinceLastScan, ttlMs) };
+			return { state: "observed", outcome: "repo-unknown", heartbeat: await this.heartbeat(root, sinceLastScan, ttlMs, nowMs) };
 		}
 		this.settle(root, current, state, { snapshot: next, next, diff, outcome: unpublishedOutcome(previous, diff), held: false, observedBefore });
 		const outcome: ObserverOutcome = previous === null ? "baseline" : diff !== null && !diff.complete ? "incomplete" : "unchanged";
-		return { state: "observed", outcome, heartbeat: await this.heartbeat(root, sinceLastScan, ttlMs) };
+		return { state: "observed", outcome, heartbeat: await this.heartbeat(root, sinceLastScan, ttlMs, nowMs) };
 	}
 
 	/**
@@ -306,26 +312,37 @@ export class PlanningObserver {
 	}
 
 	/** Heartbeats this checkout when the change since the last scan is complete and non-empty, or when a failed heartbeat is still owed. The record's time is replaced by the server's clock. */
-	private async heartbeat(root: string, sinceLastScan: PlanningDiff | null, ttlMs: number): Promise<PlanningHeartbeat> {
-		const change = this.owedHeartbeat(root, sinceLastScan);
-		if (change === null) return { state: "not-due" };
+	private async heartbeat(root: string, sinceLastScan: PlanningDiff | null, ttlMs: number, nowMs: number | null): Promise<PlanningHeartbeat> {
+		const owed = this.owedHeartbeat(root, sinceLastScan, nowMs);
+		if (owed === null) return { state: "not-due" };
+		if (owed.observedAtMs !== null) {
+			// An owed change is written only inside the freshness window of its observation. Past the window it is dropped
+			// unwritten: a write would stamp the checkout as active on an observation that no longer reflects it. While the clock
+			// is unreadable the window cannot be checked, so the change is kept and nothing is written.
+			if (nowMs === null) return { state: "failed", detail: "clock-unavailable" };
+			if (nowMs - owed.observedAtMs > ttlMs) {
+				this.pendingHeartbeat = null;
+				return { state: "not-due" };
+			}
+		}
 		const presence = this.deps.presence;
 		if (presence === null) return { state: "presence-unset" };
 		const result = await this.touchCheckout(root, presence, ttlMs);
 		// A failed write stays owed: the next scan retries it, even when nothing else changed. Written clears the debt.
-		this.pendingHeartbeat = result.state === "written" ? null : { root, change };
+		this.pendingHeartbeat = result.state === "written" ? null : owed;
 		return result;
 	}
 
-	/** The change a heartbeat is owed for: this scan's change when it is heartbeat-worthy, else the heartbeat a failed write still owes. */
-	private owedHeartbeat(root: string, sinceLastScan: PlanningDiff | null): PlanningDiff | null {
-		if (sinceLastScan !== null && sinceLastScan.complete && changesIn(sinceLastScan) > 0) return sinceLastScan;
+	/** The heartbeat a scan is owed: this scan's change when it is heartbeat-worthy, stamped with this scan's clock, else the one a failed write still owes. */
+	private owedHeartbeat(root: string, sinceLastScan: PlanningDiff | null, nowMs: number | null): OwedHeartbeat | null {
+		// A change observed while the clock was unreadable has no observation time (null). Its age cannot be known, so it never expires.
+		if (sinceLastScan !== null && sinceLastScan.complete && changesIn(sinceLastScan) > 0) return { root, change: sinceLastScan, observedAtMs: nowMs };
 		if (this.pendingHeartbeat === null) return null;
 		if (this.pendingHeartbeat.root !== root) {
 			this.pendingHeartbeat = null;
 			return null;
 		}
-		return this.pendingHeartbeat.change;
+		return this.pendingHeartbeat;
 	}
 
 	/** Writes the checkout's session record. The result is written, or failed with an error code: never a message, which can carry host paths. */
