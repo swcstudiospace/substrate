@@ -87,9 +87,9 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 
 ### 🚧 v1.3.x Should-have hardening (Planned)
 
-- [ ] **Phase 37: LANEB** - graph inference from worktree path (reopened 2026-10-24: its live criteria need an operator waiver)
-- [ ] **Phase 38: MIRROR** - mirror graph edges into Linear relations and outcomes into evidence (reopened 2026-10-24: its live criteria need an operator waiver)
-- [ ] **Phase 39: DISPATCH** - signed handoff packet and coord drift scan before launch (reopened 2026-10-24: its live criteria need an operator waiver)
+- [x] **Phase 37: LANEB** - graph inference from worktree path. Code in repo. Accepted as debt by the operator on 2026-10-25 (waiver); live criteria open.
+- [x] **Phase 38: MIRROR** - mirror graph edges into Linear relations and outcomes into evidence. Code in repo. Accepted as debt by the operator on 2026-10-25 (waiver); live criteria open.
+- [x] **Phase 39: DISPATCH** - signed handoff packet and coord drift scan before launch. Code in repo. Accepted as debt by the operator on 2026-10-25 (waiver); live criteria open.
 - [x] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (decided 2026-10-21). Code on main (PR #92). Accepted as debt by the operator on 2026-10-23; live restore drill and approval open (D-D3). Criterion 3 is the narrower scope the owner accepted on 2026-10-22.
 - [x] **Phase 41: ANCHOR** - anchor evidence and teachables. Code on main (PR #116). Accepted as debt by the operator on 2026-10-23; live devnet proof open.
 - [x] **Phase 42: SKILL-CARD** - skills_list audit trail and the F-D4 re-ingest item. Code on main (PR #94). Accepted as debt by the operator on 2026-10-23; live host fast-forward open.
@@ -858,9 +858,9 @@ Plans:
 | 34. Invalid-write round trip | v1.4 | 1/1 | Complete | 2026-10-21 |
 | 35. expected_version for skills and docs | v1.4 | 1/1 | Complete | 2026-10-21 |
 | 36. Degraded-mode exactly-once replay | v1.4 | 1/1 | Complete | 2026-10-21 |
-| 37. LANEB | v1.3.x | 1/1 | Blocked: awaiting operator waiver (live criteria) | - |
-| 38. MIRROR | v1.3.x | 1/1 | Blocked: awaiting operator waiver (live criteria) | - |
-| 39. DISPATCH | v1.3.x | 1/1 | Blocked: awaiting operator waiver (live criteria); PR #91 | - |
+| 37. LANEB | v1.3.x | 1/1 | Complete (accepted debt 2026-10-25); live criteria open | 2026-10-25 |
+| 38. MIRROR | v1.3.x | 1/1 | Complete (accepted debt 2026-10-25); live criteria open | 2026-10-25 |
+| 39. DISPATCH | v1.3.x | 1/1 | Complete (accepted debt 2026-10-25); live criteria open; PR #91 | 2026-10-25 |
 | 40. DOCS-MEMORY | v1.3.x | 1/1 | Complete (accepted debt 2026-10-23); live restore drill open | 2026-10-23 |
 | 41. ANCHOR | v1.3.x | 1/1 | Complete (accepted debt 2026-10-23); live devnet proof open | 2026-10-23 |
 | 42. SKILL-CARD | v1.3.x | 1/1 | Complete (accepted debt 2026-10-23); live host proof open | 2026-10-23 |
