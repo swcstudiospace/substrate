@@ -429,3 +429,10 @@ PR B's defaults: `SUBSTRATE_BRIEF_GRAPH_READ=full`, `SUBSTRATE_CACHE_BUMP_SCOPE=
 
 - Ship decision (operator, 2026-10-25): Hold, no PR. Assess re-run on both branches: done false, gap "GSD roadmap incomplete: 0/8 phases". The run branch (gsd/autonomous-run-2026-10-24, 24 commits) and the planning branch (planning/consistency-check-2026-10-24, 2 commits) both fail the gate. PR #123 stays held (OPEN, APPROVED, CLEAN). Nothing pushed, reviewed or merged.
 - Choices recorded for when ship proceeds: branch = the run branch; merge = stop at 5/5, no merge. That needs ship.autoMerge off in the ship config first. The ship config is a user decision and was not changed.
+
+## Run 4 record (2026-10-25, operator answers, Q3 YES)
+
+- Operator answers: Q3 yes (run chooses where the packet approves, and every choice is recorded). Approved: T5 archive only, subject to RAGFlow access. Q8 amendment in PLAN T3 applied. Linear: Notion-only tracking. Phases 37 to 39: run the proofs that can run, then waive the rest, recorded as the operator's waiver.
+- T5 (archive with checksum): BLOCKED on access (P2). RAGFLOW_API_KEY, RAGFLOW_URL and RAGFLOW_DATASET_ID are not set in this shell. Names only were checked; no value was read or printed. Unblock: the operator provides them in the environment, never in a file.
+- Bootstrap (Wave 1) now runs with Q3 yes: RUN_START is written by this record; the capability registry is the repo checks listed in run 3 (verify, check:phase-close, test, test:py, audit:verify, parity:check).
+- Next action: with access, run T5 and record its checksum; otherwise run the 37 to 39 proofs that the host allows, and list those that cannot run for the waiver.
