@@ -281,10 +281,10 @@ export class PlanningObserver {
 	}
 
 	/**
-	 * Claims the change since the last claimed snapshot (`touchBase`): its pairs are folded into the touched list, dated by the
-	 * server clock. A complete change is claimed on a readable scan only. While the clock is unreadable `touchBase` holds, so the
-	 * change is claimed on the first readable scan. An incomplete observation claims nothing and holds `touchBase`. The first
-	 * complete scan of a root sets it, and a complete scan with no change moves it, so only a new change is ever claimed.
+	 * Claims the change since the last complete snapshot (`touchBase`): its pairs are folded into the touched list, dated by the
+	 * server clock. A complete change observed while the clock is unreadable is not claimed, since its time is unknown, and
+	 * `touchBase` still advances past it, so recovery never presents it as active. An incomplete observation claims nothing and
+	 * holds `touchBase`. The first complete scan of a root sets it, and a complete scan with no change moves it.
 	 */
 	private claimTouches(root: string, next: PlanningSnapshot, nextPhasePlans: ReadonlyMap<string, PhasePlan>, nowMs: number | null, ttlMs: number): void {
 		const base = this.touchBase !== null && this.touchBase.root === root ? this.touchBase : null;
@@ -295,10 +295,8 @@ export class PlanningObserver {
 		}
 		const diff = diffPlanningIndex(base.snapshot, next);
 		if (!diff.complete) return;
-		if (changesIn(diff) > 0) {
-			if (nowMs === null) return;
-			this.touch(pairsOfChange(diff, nextPhasePlans, base.phasePlans), nowMs, ttlMs);
-		}
+		// An undated change is not claimed: its time is unknown, so claiming it at recovery would show a stale edit as active.
+		if (changesIn(diff) > 0 && nowMs !== null) this.touch(pairsOfChange(diff, nextPhasePlans, base.phasePlans), nowMs, ttlMs);
 		this.touchBase = { root, snapshot: next, phasePlans: nextPhasePlans };
 	}
 

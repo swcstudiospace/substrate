@@ -335,6 +335,31 @@ describe("the observer's heartbeat", () => {
 		expect(storedSession(backend)).toEqual(stored);
 	});
 
+	test("a change observed while the clock is unreadable is not claimed when the clock recovers, so a later write does not report it as fresh", async () => {
+		const PHASE_53_CONTEXT = `${TREE_ROOT}/.planning/phases/53-steering/53-CONTEXT.md`;
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n", [PHASE_53_CONTEXT]: "# steering\n" });
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const { observer } = observerOver(tree, { presence: new DragonflyPresenceStore(backend) });
+		await observer.scan();
+
+		// Scan A: an edit to phase 52 while the clock is unreadable is not claimed.
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited while unreadable\n");
+		backend.clockFails = true;
+		expect(await observer.scan()).toMatchObject({ outcome: "published", heartbeat: { state: "failed" } });
+
+		// The clock recovers past the freshness window: a claim made now would be fresh. Scan B sees no further change.
+		backend.clockFails = false;
+		backend.clockMs = SERVER_NOW + DEFAULT_PRESENCE_TTL_S * 1000 + 1;
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged" });
+
+		// Scan C: an unrelated edit to phase 53 at a readable clock. Only phase 53 may be touched.
+		const recoveredAtMs = backend.clockMs;
+		tree.setContent(PHASE_53_CONTEXT, "# steering, edited\n");
+		expect(await observer.scan()).toMatchObject({ outcome: "published", heartbeat: { state: "written" } });
+		expect(storedRecord(backend, tree, TREE_ROOT).touched).toEqual([{ phase: "53", plan: null, observedAtMs: recoveredAtMs }]);
+	});
+
 	test("the scan is scheduled at the configured cadence: 15000 ms when unset, the set value otherwise, and not while disabled", () => {
 		const scheduledWith = (env: Record<string, string>): number[] => {
 			const delays: number[] = [];
