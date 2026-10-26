@@ -242,7 +242,7 @@ Read-only check of the nine accepted-debt phases (40, 41, 42, 43, 45, 47, 48, 49
 | 49 | verification_deferred_human | /gsd:verify-work 49 |
 | 50 | verification_deferred_human | /gsd:verify-work 50 |
 
-Phases 40-43, 45 and 47-50 are accepted debt (operator decision, 2026-10-23). Phases 37-39 are human_needed and not covered by that decision; they wait on the operator's decision. Phase 46 is open work (re-scoped), not deferred.
+Phases 40-43, 45 and 47-50 are accepted debt (operator decision, 2026-10-23). Phases 37-39 are closed by the operator's live-criteria waiver recorded in 585ef28 (2026-10-25); their rows stay here only as the record of what was waived. Phase 46 is open work (re-scoped), not deferred.
 
 ## Run record (2026-10-24, graph ut-mvlvvvbt-57c57d9e)
 
@@ -536,3 +536,15 @@ PR B's defaults: `SUBSTRATE_BRIEF_GRAPH_READ=full`, `SUBSTRATE_CACHE_BUMP_SCOPE=
   - Local main was stale. `origin/main` is 754c51a (PR 125 squash). The run branch is 35 ahead and 4 behind it, with merge-base aa2ed6a.
 - PREFLIGHT discrepancies, recorded: explicit `any` is 34 by rg (D-18) and 37 in the STATE line (STATE:251); raw TODO marker hits are 28 by rg against 25 in the STATE line (STATE:255); the phase 52 to 54 VERIFICATION `verified_on` SHAs are older than the current draft heads b7d6768, 48c52ca and 441883b.
 - Wave order (planner n7): wave 0 reconcile (this record); wave 1 quality units (audit advisories, pins, README, then Biome and the Python gate after the audit because they share bun.lock and verify.test.ts); wave 2 phase 46 D-14 after the pins (shared server.test.ts); wave 3 PR 110 designs A and B and PR 111 designs C and D, each in its own worktree; wave 4 phase 52 to 54 verification on final heads; wave 5 milestone audit refresh; wave 6 full gates and the held closeout.
+
+## Run 7 closeout: audit, held steps and what is left (2026-10-26)
+
+- Kickoff for the new graph ut-mvoyixof-a2d90b1b, on session 01a16494: `track complete` partial, with the Notion rows already present; Linear is blocked by the free-issue limit and fails open. The Notion Task 405bc1a0c7ae8154a75ae90f7bfea451 is Implementing, and the session is marked kicked off. The earlier graph ut-mvocrh76-02f3c9a9 is superseded by it.
+- Clarifications from the new uplift, answered from the decisions already recorded: q1 (blocking) all remaining milestones in ROADMAP order, matching the Run 7 override; q2 quality reach is changed lines; q3 unmapped TODOs are recorded, not fixed; q4 credential and live steps wait for the operator. The uplift is planned in degraded mode, so its node outputs are treated as unverified and the repository is the evidence.
+- Phase 53 SC2 holds under one announcer rule (2c50263): the smallest session of a conflict alone announces it. Known limit: no announcement when that session has no running observer. Phase 54 design C (failed heartbeats shown as DEGRADED) is recorded as a limit, not implemented, because the reader cannot see a failed write.
+- Verification records for phases 52, 53 and 54 are refreshed on their PR branches at b7d6768, 2c50263 and 5548c62 (docs commits pushed after each head's gate).
+- v1.3.x audit refreshed in `.planning/v1.3.x-MILESTONE-AUDIT.md` (status tech_debt; supersedes 89b8eb5). No blocking finding. The complete step is HELD for the operator: it archives the milestone, and the repository cannot undo that. Cleanup waits for the same confirmation.
+- v1.5 is not closable. Phase 46 is human_needed (VERIFICATION.md): criterion 1 passes in the repository; criteria 2 and 3 need approval; criterion 4 is not met (T4 blocked on T5); criterion 5 is a HARD_STOP. Phases 52 to 54 are draft PRs on hold for merge. The run ends PARTIAL for v1.5, which holds no later milestone.
+- Ship is not triggered: the uplift runs the ship step only when the run is finished, and this run is PARTIAL.
+- Gates on the run branch after the closeout: `bun run verify` and `bun scripts/audit-gate.ts`, recorded in the audit section 4.
+- Removals this run: temporary logs and counts under /tmp created by this run (`/tmp/gate-*.log`, `/tmp/pc-*.log`, `/tmp/noUnused-count.txt`). Temporary worktrees were removed after each fail-before check. No phase artifact, branch, worktree, stash or user change was removed.
