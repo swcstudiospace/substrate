@@ -30,7 +30,9 @@ These apply to every source:
   `skill.decline`, `skill.retire`, `skill.approve.refused`, `docs.ingest`,
   `docs.search`, `teachable`, `anchor`, `mirror`, `dispatch`, `approval`,
   `skills.sync`, `dod`, `doctor`, `slo.transition`, `docs.freshness`, `docs.canary`,
-  `index.archive`, `alert`, `session.checkpoint`, `session.rollback`, `session.rollback.refused`.
+  `index.archive`, `alert`, and the v1.6 actions `session.checkpoint`, `session.rollback`,
+  `session.rollback.refused`, `memory.forget`, `memory.capsule.export`,
+  `memory.capsule.redact`, `anchor.signer.rotate`, `anchor.reanchor`.
 - **`payload.runtime` names a non-agent producer** acting for an agent or for
   the host (`herdr`, `agentos`, `anchor`, `dispatcher`, `skills-sync`,
   `doctor` — the runtime doctor, uplift-3 N1, one `warning` per drift class
@@ -190,8 +192,12 @@ kinds only. Each is emitted from the caller's own surface (the authenticated cal
 body-supplied) with `session_id` set to the session it concerns, so it chains into that
 session. None carries `repo` (a per-turn checkpoint would crowd a repo's brief) or a
 `runtime`. The contract is encoded and validated in
-`packages/mcp-server/src/session-events.ts`; nothing is wired to the service, an MCP tool
-or an HTTP route by this change.
+`packages/mcp-server/src/session-events.ts`. The tools `session_checkpoint`,
+`session_rollback_plan` and `session_rollback_commit` (registered in `mcp.ts`, admitted in
+`admission.ts`, listed in `packages/audit/src/policy.ts`) build and emit them, and the
+`substrate session` CLI reaches them over the MCP endpoint (`/mcp`); see the tools paragraph below.
+`checkpoint_verify` and `memory_verify` are read-only tools that resolve a checkpoint or a
+memory entry to its hourly root and emit nothing.
 
 - `session.checkpoint` (`note`, `payload.action: "session.checkpoint"`): `ckpt_id`
   (`ckpt_` + 26 characters of `0-9a-z`), `seq` (integer >= 1, per session), `trigger`
@@ -246,8 +252,16 @@ repeated refusal is a new fact.
 Phase 57 defines the ledger note for forgetting memory, using an existing kind only. One
 `note` per forget call (`payload.action: "memory.forget"`), emitted from the caller's own
 surface with the target session's `session_id`; it carries no `repo` and no `runtime`. The
-contract is encoded and validated in `packages/mcp-server/src/memory-forget.ts`; nothing is
-wired to the service or an MCP tool by this change.
+contract is encoded and validated in `packages/mcp-server/src/memory-forget.ts`. It is wired
+to the service as `memoryForget` in `service.ts`, an internal method with no MCP tool or HTTP
+route of its own: `session_rollback_commit` calls it for the entries a rollback forgets. The
+Phase 60 and Phase 59 notes `memory.capsule.export`, `memory.capsule.redact`,
+`anchor.signer.rotate` and `anchor.reanchor` are caller-surface notes with their own builders
+(`capsule.ts`, `signer-set.ts`, `reanchor-plan.ts`). `substrate capsule` posts the two capsule
+notes through the CLI event path (`packages/cli/src/capsule.ts`); an operator posts the signer
+rotation with `events_emit` (`docs/runbooks/anchor-signer-rotation.md`). Nothing in the verifier
+reads `anchor.reanchor` yet (`docs/runbooks/devnet-reset-and-reanchor.md`), and no code emits it
+automatically. The server emits none of them by itself.
 
 - Payload: `forget_id` (`fg_` + 26 lowercase hex, derived from the sorted entry ids, the
   reason and the rollback or checkpoint id, so a retried call reuses it), `reason`

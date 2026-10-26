@@ -38,7 +38,7 @@ A checkpoint lists what it skipped (`skipped <path> (<reason>)`), so a missing f
 ## The commands
 
 ```
-substrate session checkpoint  [--session ID] [--surface S] [--trigger T] [--transcript-ref JSON] [--plan-phase P] [--plan-step S] [--json]
+substrate session checkpoint  [--session ID] [--surface S] [--trigger T] [--transcript-ref JSON | --omp-session FILE] [--plan-phase P] [--plan-step S] [--json]
 substrate session checkpoints [--session ID] [--surface S] [--offline] [--json]
 substrate session rollback <ckpt|seq|previous> [--session ID] [--surface S] [--dry-run] [--force] [--offline] [--json]
 substrate session recover [--json]
@@ -124,7 +124,7 @@ The port never edits a transcript. It either **forks** (omp) or leaves a **marke
 
 | Surface | What a checkpoint must carry | Outcome of a rollback |
 | --- | --- | --- |
-| `omp` | `--transcript-ref` from `ompTranscriptRef`: the session file's name or id, the entry id, and a digest of the path up to it | `moved-leaf`: a **new** session file holding only the root-to-checkpoint path is written next to the original (exclusive create, mode 0600, never overwriting); the original is not touched. The output names the new file and the line to run. `stale`: the original no longer matches the checkpoint (a prefix digest mismatch, or the entry is gone, for example after a compaction): **no file is written**. `unsupported`: the original is not in this directory's omp bucket, two files match, the ref has no entry id or digest, the bucket is not the default one, or the file cannot be read or written |
+| `omp` | `--omp-session FILE` (below), or a `--transcript-ref` built by `ompTranscriptRef`: the session file's name or id, the entry id, and a digest of the path up to it | `moved-leaf`: a **new** session file holding only the root-to-checkpoint path is written next to the original (exclusive create, mode 0600, never overwriting); the original is not touched. The output names the new file and the line to run. `stale`: the original no longer matches the checkpoint (a prefix digest mismatch, or the entry is gone, for example after a compaction): **no file is written**. `unsupported`: the original is not in this directory's omp bucket, two files match, the ref has no entry id or digest, the bucket is not the default one, or the file cannot be read or written |
 | any other surface (`claude-code`, `cursor`, `grok-build`, ...) | a `--transcript-ref` for that surface | `marker-only`: no transcript is touched; the ledger note is the marker |
 | any surface, checkpoint taken with no transcript pointer | nothing | `unsupported`: the files are still restored |
 
@@ -135,7 +135,9 @@ The outcome is recorded in the `session.rollback` note (`moved-leaf`, `marker-on
 - Run the rollback from the directory omp was started in.
 - The fork gets a new session id, a header whose `parentSession` names the original file, and a title slot copied from the original.
 - **Resuming a forked file is UNVERIFIED for the installed omp version.** The line printed (`omp --resume <new session id>`) uses omp's documented resume-by-id flag; nothing here proves omp resumes a file it did not write. If it does not, the forked file is still an ordinary, valid session JSONL the original omp tooling can open, and the original is intact.
-- Producing the omp transcript ref is a library call (`ompTranscriptRef` in `packages/cli/src/session/omp-fork.ts`); no `substrate` command prints one, and a hook or extension that takes checkpoints must call it and pass the result with `--transcript-ref`. That wiring is **not built here**.
+- **`substrate session checkpoint --omp-session FILE` produces the omp transcript ref** (`ompTranscriptRef` in `packages/cli/src/session/omp-fork.ts`; the flag is handled in `packages/cli/src/session/command.ts`). `FILE` is the omp session JSONL of the session being checkpointed, 1 to 4096 characters. The command reads it (a regular file, at most 32 MiB), parses it as an omp version 3 session, and records a reference to its **last physical entry**, which is how omp defines the leaf on load. That can be a metadata entry (a usage or title record) rather than a chat message; a caller that means a specific message builds the ref with `ompTranscriptRef` and passes `--transcript-ref` instead. The reference holds the file's **base name** as `session_locator` (never the path), the entry id, its parent entry id, `turn_no` (the number of user messages on the path from the root to that entry), and a digest of that path. It holds no message content.
+- **A file that cannot be used still gives a checkpoint, without a reference.** If `FILE` cannot be read (a missing file, not a regular file, a permission error: reason `unreadable`), is over 32 MiB (`too-large`), or does not parse as an omp session (the other `OmpForkError` codes, for example `header-invalid`, `malformed-line`, `chain-broken`, `unsupported-version`), the checkpoint is created exactly as if the flag had not been given, and the command says so: the text output starts with `transcript reference NOT recorded (--omp-session: <reason>); the checkpoint was made without one`, and `--json` adds `transcript_ref_skipped: {source: "omp-session", reason}`. Only the reason code is printed, never the path or the file's content. Exit status is still 0. Such a checkpoint rolls back with transcript outcome `unsupported` (the files are still restored).
+- `--omp-session` and `--transcript-ref` are mutually exclusive: passing both is a usage error (exit 2) before any work. A hook or extension that takes checkpoints automatically must still call the command with the flag; that hook is **not built here**.
 - The fork copies the original's entries byte for byte, so it carries whatever those entries hold. Treat the new file like the original.
 
 ## Drift, `--force`, and what blocks a rollback
@@ -199,6 +201,6 @@ A snapshot tree can hold untracked files and gitignored `.planning/` notes. **Ne
 
 - Whether the installed omp resumes a forked session file (above).
 - Which hooks or integrations take `turn`, `plan-step` or `steering` checkpoints automatically at this release.
-- Who supplies the omp transcript ref: the library exists; no shipped hook calling it was verified.
+- Who takes omp checkpoints automatically: `--omp-session` exists, but no shipped hook calling it was verified.
 - The omp bucket name for a working directory outside the home directory and the temp root follows the rule in `omp://session.md` (`--<encoded absolute path>--`) but was not checked against a real directory.
 - Rollback was not rehearsed against the live server or the live ledger by the work that wrote this runbook.
