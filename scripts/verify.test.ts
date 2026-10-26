@@ -37,20 +37,20 @@ const ids = (argv: string[]): string[] => {
 };
 
 describe("parseArgs", () => {
-	test("defaults select the four gate steps and leave the audit out", () => {
+	test("defaults select the five gate steps and leave the audit out", () => {
 		expect(options([])).toEqual({ audit: false, only: null, skip: [], keepGoing: false, list: false, help: false });
-		expect(ids([])).toEqual(["install", "types", "tests", "locks"]);
+		expect(ids([])).toEqual(["install", "types", "tests", "python", "locks"]);
 	});
 
 	test("--audit appends the audit; --only names exactly the steps asked for, in gate order", () => {
-		expect(ids(["--audit"])).toEqual(["install", "types", "tests", "locks", "audit"]);
+		expect(ids(["--audit"])).toEqual(["install", "types", "tests", "python", "locks", "audit"]);
 		expect(ids(["--only", "locks,types"])).toEqual(["types", "locks"]);
 		expect(ids(["--only=audit"])).toEqual(["audit"]);
 	});
 
 	test("--skip removes steps, repeats accumulate, and --only plus --skip compose", () => {
-		expect(ids(["--skip", "install"])).toEqual(["types", "tests", "locks"]);
-		expect(ids(["--skip=install", "--skip", "tests"])).toEqual(["types", "locks"]);
+		expect(ids(["--skip", "install"])).toEqual(["types", "tests", "python", "locks"]);
+		expect(ids(["--skip=install", "--skip", "tests"])).toEqual(["types", "python", "locks"]);
 		expect(ids(["--only", "types,tests", "--skip", "tests"])).toEqual(["types"]);
 	});
 
@@ -182,14 +182,14 @@ describe("main", () => {
 		expect(empty.written).toContain("no steps selected");
 	});
 
-	test("an all-pass run runs the four gate steps in order, reports the suite counts and exits 0", async () => {
+	test("an all-pass run runs the five gate steps in order, reports the suite counts and exits 0", async () => {
 		const { ran, run } = fakeRun();
 		const { result, written } = await quietly(() => main([], { run, env: { SUBSTRATE_TEST_PG_URL: "postgres://scratch" } }));
 
 		expect(result).toBe(0);
-		expect(ran).toEqual(["install", "types", "tests", "locks"]);
+		expect(ran).toEqual(["install", "types", "tests", "python", "locks"]);
 		expect(written).toContain("ok   Test suite (0.0s): 12 pass, 3 skip, 0 fail");
-		expect(written).toContain("[verify] pass: install, types, tests, locks");
+		expect(written).toContain("[verify] pass: install, types, tests, python, locks");
 		expect(written).not.toContain("FAIL");
 		expect(written).not.toContain("note");
 	});
@@ -212,7 +212,7 @@ describe("main", () => {
 		const { result, written } = await quietly(() => main(["--keep-going"], { run }));
 
 		expect(result).toBe(1);
-		expect(ran).toEqual(["install", "types", "tests", "locks"]);
+		expect(ran).toEqual(["install", "types", "tests", "python", "locks"]);
 		expect(written).toContain("[verify] FAIL: Typecheck, Repo locks");
 	});
 
@@ -227,11 +227,11 @@ describe("main", () => {
 	test("--audit adds the audit step and --skip leaves one out", async () => {
 		const audited = fakeRun();
 		await quietly(() => main(["--audit"], { run: audited.run }));
-		expect(audited.ran).toEqual(["install", "types", "tests", "locks", "audit"]);
+		expect(audited.ran).toEqual(["install", "types", "tests", "python", "locks", "audit"]);
 
 		const skipped = fakeRun();
 		await quietly(() => main(["--skip", "install,tests"], { run: skipped.run }));
-		expect(skipped.ran).toEqual(["types", "locks"]);
+		expect(skipped.ran).toEqual(["types", "python", "locks"]);
 	});
 
 	test("skipped live tests are noted unless a scratch database is configured (blank counts as unset)", async () => {

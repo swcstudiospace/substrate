@@ -77,6 +77,14 @@ jobs:
       - name: Tests
         run: bun test
 
+      - name: Set up uv (pinned)
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.4"
+
+      - name: Python suites (miner, dispatcher)
+        run: uv run --no-project --with httpx==0.28.1 --with pytest==9.1.1 python -m pytest packages/miner/tests packages/dispatcher/tests
+
       - name: Repo locks (event vocabulary, store lock, audit policy)
         run: bun run check:phase-close
 

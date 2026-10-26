@@ -1,19 +1,20 @@
 # Verification gate and CI
 
-The gate is four checks, run in this order. `bun run verify` runs them locally; `.github/workflows/ci.yml` runs the same commands on GitHub.
+The gate is five checks, run in this order. `bun run verify` runs them locally; `.github/workflows/ci.yml` runs the same commands on GitHub.
 
 | Step | Command | What it proves |
 |---|---|---|
 | `install` | `bun install --frozen-lockfile` | `bun.lock` matches every `package.json` |
 | `types` | `bunx tsc --noEmit` | the whole workspace typechecks |
 | `tests` | `bun test` | the full suite passes |
+| `python` | `uv run --no-project --with httpx==0.28.1 --with pytest==9.1.1 python -m pytest packages/miner/tests packages/dispatcher/tests` | the miner and dispatcher Python suites pass, in an ephemeral environment pinned to the versions they were verified with |
 | `locks` | `bun run check:phase-close` | the event vocabulary, store lock, audit policy and redaction locks hold |
 | `audit` (opt-in) | `bun scripts/audit-gate.ts` | no high or critical advisory in the lockfile, except the accepted risks below; needs the network |
 
 ## Run it locally
 
 ```sh
-bun run verify              # install, types, tests, locks
+bun run verify              # install, types, tests, python, locks
 bun run verify --audit      # plus the dependency audit
 bun run verify --only types,locks
 bun run verify --keep-going # do not stop at the first failure
@@ -40,7 +41,7 @@ Nothing in the suite needs GreptimeDB; the real-store proofs are the rehearsal s
 
 | Job | Runner | When | Steps |
 |---|---|---|---|
-| `verify` ("Typecheck, tests and repo locks") | `[self-hosted, linux, x64, omega-ci]` | same-repo pull request, push to `main`, on demand (never on the schedule) | the four steps above, with a scratch Postgres 16 (the local `scratch-postgres` action) and a full-history checkout (`check:phase-close` diffs against a baseline commit) |
+| `verify` ("Typecheck, tests and repo locks") | `[self-hosted, linux, x64, omega-ci]` | same-repo pull request, push to `main`, on demand (never on the schedule) | the five steps above, with a scratch Postgres 16 (the local `scratch-postgres` action) and a full-history checkout (`check:phase-close` diffs against a baseline commit) |
 | `dependency-audit` ("Known-vulnerability audit") | `[self-hosted, linux, x64, omega-ci]` | push to `main`, Mondays 03:17 UTC, on demand (never on a pull request) | `bun install --frozen-lockfile --ignore-scripts`, `bun scripts/audit-gate.ts` |
 | `boot-gate` ("Boot and prove (report-only)") | `[self-hosted, linux, x64, omega-ci]` | same-repo pull request, push to `main`, on demand (never on the schedule); only when `BOOT_GATE` is `true` | `bun install --frozen-lockfile`, `bun run gate:boot` |
 | `lint-report` ("Lint (Biome, report-only)") | `[self-hosted, linux, x64, omega-ci]` | same-repo pull request, push to `main`, on demand (never on the schedule) | `bun install --frozen-lockfile`, `bunx biome lint --reporter=summary .` (`continue-on-error`: findings never block) |
@@ -105,4 +106,4 @@ gh variable delete CI_ENABLED --repo swcstudiospace/agent-substrate            #
 - Keep `permissions: contents: read` and `persist-credentials: false`. No secrets belong in this file; the database password is a scratch value for a container that lives for one job.
 - Change a gate command in `scripts/verify.ts` and in the workflow together; the drift test names whichever one you forgot.
 - The job and step names are stable on purpose: they are what a branch-protection rule would require.
-- No Python tests exist on `main` yet. When the dispatcher and miner land (milestone v1.3), add a `setup-python` step pinned by commit SHA and a pytest step to `verify`, and mirror it in `scripts/verify.ts`.
+- The Python suites in `packages/miner/tests` and `packages/dispatcher/tests` run in the `python` step of `verify` and in the `verify` job. Their dependencies come from `uv run --no-project` with exact pins; keep those pins in sync with the packages' declared `httpx>=0.27` and `pytest>=8.0`.
