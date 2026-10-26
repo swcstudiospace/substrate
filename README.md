@@ -88,7 +88,7 @@ bun install
 cp .env.example /etc/substrate/substrate.env   # then fill it in; chmod 0600
 bun run mcp                                    # substrate-mcp on :7410
 bun test
-bun run check                                  # tsc --noEmit
+bunx tsc --noEmit                              # typecheck, the gate's types step
 ```
 
 Against a live Greptime, `bun run smoke:greptime` proves the ledger end to end — append_mode,
