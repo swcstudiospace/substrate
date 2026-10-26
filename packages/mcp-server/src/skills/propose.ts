@@ -76,6 +76,11 @@ export interface ProposeInput {
 	graph_id?: string;
 }
 
+/** The refusal a beforeWork hook may hand back. It applies only if the library no longer holds the content: the git diff finds a change, before any commit or push. */
+export interface ProposeGate {
+	unlessUnchanged: Error;
+}
+
 export interface ProposeOptions {
 	maxBytes: number;
 	/** Operator-only: pem/jwt documentation examples become redactions instead of refusals. */
@@ -93,8 +98,8 @@ export interface ProposeOptions {
 	library?: SkillsLibrary;
 	/** Test seam: how long a live lock is waited for. */
 	lockWaitMs?: number;
-	/** Runs after the ledger replay and before any mirror, clone or push work. It is handed the PR of the merged proposal the ledger holds for this content, or null. A throw refuses the proposal with nothing written. Runs for a dry run too. */
-	beforeWork?: (mergedPrUrl: string | null) => Promise<void>;
+	/** Runs after the ledger replay and before any mirror, clone or push work. It is handed the PR of the merged proposal the ledger holds for this content, or null. A throw refuses the proposal with nothing written; a returned gate refuses it only when the library no longer holds the content. Runs for a dry run too. */
+	beforeWork?: (mergedPrUrl: string | null) => Promise<ProposeGate | null>;
 	run: Runner;
 }
 
@@ -972,7 +977,7 @@ export async function proposeSkill(input: ProposeInput, opts: ProposeOptions): P
 			const known = await fromLedger(run, v, input, opts, paths.ledger, replay);
 			if (known) return known;
 		}
-		if (opts.beforeWork) await opts.beforeWork(replay.mergedPrUrl);
+		const gate = opts.beforeWork ? await opts.beforeWork(replay.mergedPrUrl) : null;
 
 		const releaseMirror = await acquireLock(paths.mirrorLock, "mirror", waitMs);
 		try {
@@ -1007,6 +1012,8 @@ export async function proposeSkill(input: ProposeInput, opts: ProposeOptions): P
 		const diff = await run(diffQuietArgv(clone));
 		if (diff.code === 0) return { status: "unchanged", ...base };
 		if (diff.code !== 1) throw new ProposeFailed(`git diff exited ${String(diff.code)}: ${tail(diff)}`);
+		// A merged retry the library no longer confirms is refused here: no commit, branch push or PR.
+		if (gate) throw gate.unlessUnchanged;
 
 		await must(run, "git commit", commitArgv(clone, commitMessage(v)));
 		const origin = await must(run, "git remote get-url", originUrlArgv(clone));

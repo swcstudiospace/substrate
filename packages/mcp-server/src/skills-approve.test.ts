@@ -753,6 +753,14 @@ describe("skills_propose expected_version (memory's contract)", () => {
 		expect(w.proposals).toHaveLength(2);
 	});
 
+	test("a versioned retry is still refused when the registry names a different PR than the merged one", async () => {
+		const w = world({ SUBSTRATE_SKILLS_GOVERNANCE: "report" }, { merged: PR_URL(99) });
+		await w.substrate.proposeSkill(request, asAgent);
+		const failure = await error(w.substrate.proposeSkill({ ...request, expected_version: 0 }, asAgent));
+		expect(failure).toBeInstanceOf(SkillProposalStale);
+		expect(w.proposals).toHaveLength(1);
+	});
+
 	test("a matching expected_version is accepted, and the new proposal takes the next version", async () => {
 		const propose: ProposeResult = { status: "opened", pr_url: PR_URL(12), pr_number: 12, branch: BRANCH, content_sha256: HASH, redactions: [] };
 		const w = world({ SUBSTRATE_SKILLS_GOVERNANCE: "report" }, { propose });
