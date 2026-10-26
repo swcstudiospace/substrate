@@ -3,15 +3,21 @@ phase: 53-steering-conflict-control
 verified: 2026-10-22
 status: passed
 score: 4 of 4 success criteria pass in-repo. Residuals and operator-gated steps are listed separately and do not change the verdicts
-verified_on: gsd/p53-complete-store at ca4f659 (delta re-verification after the final review fixes; prior verification at d25b5b4, docs f45ff07)
+verified_on: gsd/p53-complete-store at 2c50263 (re-verified 2026-10-26; prior verification at ca4f659, docs f45ff07, d25b5b4)
 covered_files: ["packages/mcp-server/src/planning/steering.ts", "packages/mcp-server/src/planning/steering.test.ts", "packages/mcp-server/src/planning/steering-store.ts", "packages/mcp-server/src/planning/steering-tools.ts", "packages/mcp-server/src/planning/conflicts.ts", "packages/mcp-server/src/planning/conflicts.test.ts", "packages/mcp-server/src/planning/checkout.ts", "packages/mcp-server/src/planning/report.ts", "packages/mcp-server/src/planning/presence.ts", "packages/mcp-server/src/planning/observer.ts", "packages/mcp-server/src/planning/observer.test.ts", "packages/mcp-server/src/planning/read.ts", "packages/mcp-server/src/planning/read.test.ts", "packages/mcp-server/src/planning/checkpoint.ts", "packages/mcp-server/src/planning/checkpoint-store.ts", "packages/mcp-server/src/planning/checkpoint-store.test.ts", "packages/mcp-server/src/index-store.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/flag-registry.ts", ".planning/phases/53-steering-conflict-control/CONTEXT.md", ".planning/phases/53-steering-conflict-control/PLAN.md"]
 ---
 
 # 53-VERIFICATION: Steering, conflict control and checkpoint/resume
 
+## Re-verification (2026-10-26)
+
+- Head: gsd/p53-complete-store at 2c50263. `bun run verify` green at that head: 6294 pass, 0 fail. The 177 Postgres-only tests are skipped locally and run in CI.
+- Since ca4f659: the touch baseline and the undated-pending rule (48c52ca, e36a08f), the conflict signature keyed by repository case (e36a08f), and the announcer (2c50263).
+- SC2 under one rule: the smallest session of a conflict alone announces it. Each conflict therefore opens one planning.conflict per shared key, while every session runs an observer. Known limit: if that session has no running observer, no observer announces the conflict. This is accepted and recorded in the commit message and the PR body. The rule needs no change to the presence adapter and does not depend on the ledger's idempotency keys.
+
 ## Gates
 
-Not run by the verifier; orchestrator gates pending. The orchestrator reports tsc clean and 494 pass, 0 fail, on `ca4f659`.
+The orchestrator's gate on ca4f659 was tsc clean and 494 pass, 0 fail. That head is superseded by the re-verification above.
 
 ## Acceptance criteria
 
