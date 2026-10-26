@@ -70,3 +70,11 @@ None. No criterion is passed on manual evidence.
 - `5e3c694` test: cover LightRAG success-path context and the hybrid default
 - `2a29aed` docs: describe the LightRAG hybrid plane, its context and its fallback
 - `c30456a` docs(gsd): phase 46 discuss and plan; supersede the RAG-hybrid artifacts
+
+## Run 7 update (2026-10-26, planner graph ut-mvocrh76-02f3c9a9)
+
+- D-14 closed on degraded semantics in `2c82176`. A chunked Hindsight fallback to a failed LightRAG query is now `degraded` with its reason, which matches `docs-search.ts:143-146` and `docs-plane.md:105-106`. An unconfigured LightRAG plane is now answered from Hindsight on `docs_search`, as `docs_lightrag_query` already did. No machine call or breaker logic changed. Fail-before: five new or changed tests fail on `0570e77`; the replay pin passes before and after.
+- Presentation differences that are not degraded semantics stay open. They are listed in `2c82176` and in VERIFICATION.md.
+- Criteria are unchanged. 1 passes in repository. 2 and 3 are human_needed. 4 and 5 are not met. 6 is the standing rule. See VERIFICATION.md.
+- Commands and outcomes this run: `bun run verify` exit 0 with 6086 pass and 0 fail after the Python gate and after D-14; `bun scripts/audit-gate.ts` exit 0 with 0 unlisted high or critical; `bun run check:phase-close` exit 0 in three runs at 2.2 to 2.3 s; the Python suites pass with 321 tests.
+- The earlier stale line "the decision brief Q1-Q4 awaits discuss answers" is superseded: decisions D46-1 to D46-5 are recorded in CONTEXT.md, and criterion 1 is in the repository.
