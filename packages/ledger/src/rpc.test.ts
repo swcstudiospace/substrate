@@ -115,8 +115,8 @@ describe("addressMemos and balance", () => {
 
 describe("getGenesisHash", () => {
 	test("calls getGenesisHash with no params and returns the hash", async () => {
-		const { rpc, requests } = fakeRpc([{ result: "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC" }]);
-		expect(await rpc.getGenesisHash()).toBe("EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC");
+		const { rpc, requests } = fakeRpc([{ result: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG" }]);
+		expect(await rpc.getGenesisHash()).toBe("EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG");
 		expect(requests[0]).toMatchObject({ method: "getGenesisHash", params: [] });
 	});
 

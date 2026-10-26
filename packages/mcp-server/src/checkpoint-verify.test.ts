@@ -32,7 +32,7 @@ import type { SubstrateEvent } from "./types.ts";
  */
 
 const H = Date.UTC(2026, 9, 20, 10);
-const GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC";
+const GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
 const OTHER_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
 // Real 32-byte public keys (the three memo program ids), so base58 validation is exercised for real.
 const SIGNER_A = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo";
