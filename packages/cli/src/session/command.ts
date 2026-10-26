@@ -18,6 +18,8 @@
  * worktree becomes `<worktree>` and the home directory `~`).
  */
 import { homedir } from "node:os";
+import { basename } from "node:path";
+import { open } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { redact, redactKnown } from "../../../mcp-server/src/redact.ts";
 import {
@@ -47,6 +49,7 @@ import {
 	listLocalCheckpoints,
 } from "./checkpoint.ts";
 import { CKPT_ID_PATTERN, type FetchLike, type RollbackServerClient, createRollbackServerClient, isUnreachable } from "./client.ts";
+import { OMP_SESSION_MAX_BYTES, OmpForkError, ompTranscriptRef } from "./omp-fork.ts";
 import { PendingJournalError, listPending, replayPending, resolvePendingDir } from "./pending.ts";
 import { type RollbackResult, type TranscriptPort, RollbackInputError, rollback } from "./rollback.ts";
 
@@ -57,13 +60,14 @@ export const EXIT_REFUSED = 3;
 export const EXIT_LEDGER_PENDING = 4;
 
 export const SESSION_USAGE =
-	"usage: substrate session checkpoint [--session ID] [--surface S] [--trigger T] [--transcript-ref JSON] [--plan-phase P] [--plan-step S] [--json]\n" +
+	"usage: substrate session checkpoint [--session ID] [--surface S] [--trigger T] [--transcript-ref JSON | --omp-session FILE] [--plan-phase P] [--plan-step S] [--json]\n" +
 	"       substrate session checkpoints [--session ID] [--surface S] [--offline] [--json]\n" +
 	"       substrate session rollback <ckpt|seq|previous> [--session ID] [--surface S] [--dry-run] [--force] [--offline] [--json]\n" +
 	"       substrate session recover [--json]\n" +
 	"       substrate session sync [--json]\n" +
 	`triggers: ${CHECKPOINT_TRIGGERS.join(", ")}\n` +
-	"exit: 0 done, 1 failed, 2 usage, 3 refused (drift, anchor mismatch, unknown or foreign target), 4 files restored but the ledger commit is pending\n";
+	"exit: 0 done, 1 failed, 2 usage, 3 refused (drift, anchor mismatch, unknown or foreign target), 4 files restored but the ledger commit is pending\n" +
+	"--omp-session FILE records where in that omp session file the checkpoint was taken (entry id, turn number, prefix digest; never content or the path). A file that cannot be read or parsed does not fail the checkpoint: it is made without a transcript reference and the output says why.\n";
 
 /** A plan can take the server longer than a hook's emit budget (it counts what a rollback would forget). */
 export const ROLLBACK_MIN_TIMEOUT_MS = 10_000;
@@ -89,6 +93,11 @@ export interface SessionDeps {
 	signalFor?: (timeoutMs: number) => AbortSignal;
 	/** Replaces the home directory scrubbed from output (default: the OS home directory). */
 	home?: string;
+	/**
+	 * Reads a session file for `--omp-session`, throwing when it is unreadable or longer than `maxBytes`.
+	 * Default: a regular file read through a bounded buffer. A test seam, like `run` and `fetch`.
+	 */
+	readFile?: (path: string, maxBytes: number) => Promise<string>;
 	/** Test seams. */
 	pendingDir?: string;
 	policy?: SnapshotPolicy;
@@ -102,9 +111,9 @@ export interface SessionDeps {
 type Sub = "checkpoint" | "checkpoints" | "rollback" | "recover" | "sync";
 
 const SUBCOMMANDS: readonly Sub[] = ["checkpoint", "checkpoints", "rollback", "recover", "sync"];
-const VALUE_FLAGS: readonly string[] = ["session", "surface", "trigger", "transcript-ref", "plan-phase", "plan-step"];
+const VALUE_FLAGS: readonly string[] = ["session", "surface", "trigger", "transcript-ref", "omp-session", "plan-phase", "plan-step"];
 const ALLOWED: Record<Sub, readonly string[]> = {
-	checkpoint: ["json", "session", "surface", "trigger", "transcript-ref", "plan-phase", "plan-step"],
+	checkpoint: ["json", "session", "surface", "trigger", "transcript-ref", "omp-session", "plan-phase", "plan-step"],
 	checkpoints: ["json", "session", "surface", "offline"],
 	rollback: ["json", "session", "surface", "dry-run", "force", "offline"],
 	recover: ["json"],
@@ -319,12 +328,21 @@ async function commandCheckpoint(
 	if (!(CHECKPOINT_TRIGGERS as readonly string[]).includes(trigger)) return usage(`--trigger must be one of ${CHECKPOINT_TRIGGERS.join(", ")}`);
 	let transcriptRef: TranscriptRef | undefined;
 	const rawRef = flagValue(parsed, "transcript-ref");
+	const ompFile = flagValue(parsed, "omp-session");
+	if (rawRef !== undefined && ompFile !== undefined) return usage("--transcript-ref and --omp-session are mutually exclusive: pass one");
+	if (ompFile !== undefined && (ompFile.length === 0 || ompFile.length > 4096)) return usage("--omp-session must be a file path of 1 to 4096 characters");
 	if (rawRef !== undefined) {
 		try {
 			transcriptRef = parseTranscriptRef(JSON.parse(rawRef));
 		} catch (cause) {
 			return usage(`--transcript-ref is not a valid transcript pointer: ${cause instanceof Error ? cause.message : "invalid JSON"}`);
 		}
+	}
+	let transcriptSkipped: string | undefined;
+	if (ompFile !== undefined) {
+		const read = await ompTranscriptRefFromFile(ompFile, deps.readFile ?? readBounded);
+		if ("ref" in read) transcriptRef = read.ref;
+		else transcriptSkipped = read.reason;
 	}
 	const phase = flagValue(parsed, "plan-phase");
 	const step = flagValue(parsed, "plan-step");
@@ -356,17 +374,65 @@ async function commandCheckpoint(
 			checkpoint: checkpointView(result.checkpoint),
 			file_count: result.file_count,
 			skipped: result.skipped,
+			...(transcriptSkipped === undefined ? {} : { transcript_ref_skipped: { source: "omp-session", reason: transcriptSkipped } }),
 			ledger: result.server,
 		});
 		return EXIT_DONE;
 	}
 	const c = result.checkpoint;
+	if (transcriptSkipped !== undefined) out.line(`transcript reference NOT recorded (--omp-session: ${transcriptSkipped}); the checkpoint was made without one`);
 	out.line(`${result.created ? "created" : "found"} checkpoint ${c.ckpt_id} (seq ${c.seq}, ${c.trigger}) for session ${sessionId}`);
 	out.line(`  tree ${c.tree}; ${result.file_count} file(s)${result.skipped.length > 0 ? `; ${result.skipped.length} skipped` : ""}`);
 	for (const skipped of result.skipped.slice(0, MAX_SKIPPED_SHOWN)) out.line(`  skipped ${skipped.path} (${skipped.reason})`);
 	if (result.skipped.length > MAX_SKIPPED_SHOWN) out.line(`  ... and ${result.skipped.length - MAX_SKIPPED_SHOWN} more skipped`);
 	out.line(`  ${ledgerLine(result.server)}`);
 	return EXIT_DONE;
+}
+
+/**
+ * The checkpoint's omp transcript reference for `--omp-session`. Never throws: a file that cannot be read or
+ * parsed is a typed reason (`unreadable`, or an `OmpForkError` code such as `too-large`), never its content, so
+ * the checkpoint itself still succeeds. The session locator is the file's basename, never the path.
+ */
+async function ompTranscriptRefFromFile(
+	file: string,
+	readFile: (path: string, maxBytes: number) => Promise<string>,
+): Promise<{ ref: TranscriptRef } | { reason: string }> {
+	let sessionFileText: string;
+	try {
+		sessionFileText = await readFile(file, OMP_SESSION_MAX_BYTES);
+	} catch (cause) {
+		// The system error text names the path, so only a code is kept.
+		return { reason: cause instanceof OmpForkError ? cause.code : "unreadable" };
+	}
+	try {
+		return { ref: ompTranscriptRef({ sessionFileText, sessionLocator: basename(file), maxBytes: OMP_SESSION_MAX_BYTES }) };
+	} catch (cause) {
+		// Only `OmpForkError` carries a code with no session content; anything else is an unknown fault.
+		return { reason: cause instanceof OmpForkError ? cause.code : "invalid-argument" };
+	}
+}
+
+/** Read a regular file as UTF-8, refusing one longer than `maxBytes` without buffering more than `maxBytes + 1`. */
+async function readBounded(path: string, maxBytes: number): Promise<string> {
+	const handle = await open(path, "r");
+	try {
+		const stats = await handle.stat();
+		if (!stats.isFile()) throw new Error("not a regular file");
+		if (stats.size > maxBytes) throw new OmpForkError("too-large", `session file exceeds the ${maxBytes} byte cap`);
+		const buffer = Buffer.allocUnsafe(Math.min(stats.size, maxBytes) + 1);
+		let filled = 0;
+		while (filled < buffer.length) {
+			const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, filled);
+			if (bytesRead === 0) break;
+			filled += bytesRead;
+		}
+		// The file grew while it was read.
+		if (filled > maxBytes) throw new OmpForkError("too-large", `session file exceeds the ${maxBytes} byte cap`);
+		return buffer.toString("utf8", 0, filled);
+	} finally {
+		await handle.close();
+	}
 }
 
 function checkpointView(c: LocalCheckpoint): Record<string, unknown> {

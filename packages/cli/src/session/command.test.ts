@@ -3,7 +3,7 @@
  * server on the wire format, plus one real process to prove `index.ts` dispatches it.
  */
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, truncateSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FetchLike } from "./client.ts";
 import { SimulatedCrash } from "../../../worktree-snapshot/src/index.ts";
@@ -21,6 +21,7 @@ import {
 	parseSessionArgs,
 	runSession,
 } from "./command.ts";
+import { OMP_SESSION_MAX_BYTES } from "./omp-fork.ts";
 import { type FetchLog, FakeServer, FakeTranscript, fetchFor, seededRandomBytes } from "./testkit.ts";
 
 afterAll(cleanupTemp);
@@ -100,6 +101,11 @@ describe("the grammar is refused before any work", () => {
 		["a transcript ref that is not JSON", ["checkpoint", "--session", "s", "--transcript-ref", "{oops"]],
 		["a transcript ref that is a path", ["checkpoint", "--session", "s", "--transcript-ref", '{"surface":"claude-code","session_locator":"/home/x/a.jsonl","turn_no":1}']],
 		["a transcript ref with no entry or turn", ["checkpoint", "--session", "s", "--transcript-ref", '{"surface":"claude-code","session_locator":"abc"}']],
+		["--omp-session with no value", ["checkpoint", "--session", "s", "--omp-session"]],
+		["--omp-session given twice", ["checkpoint", "--session", "s", "--omp-session", "a.jsonl", "--omp-session", "b.jsonl"]],
+		["--omp-session together with --transcript-ref", ["checkpoint", "--session", "s", "--omp-session", "a.jsonl", "--transcript-ref", '{"surface":"claude-code","session_locator":"abc","turn_no":7}']],
+		["--omp-session on another subcommand", ["checkpoints", "--omp-session", "a.jsonl"]],
+		["an empty --omp-session", ["checkpoint", "--session", "s", "--omp-session", ""]],
 	];
 	for (const [name, argv] of refused) {
 		test(`${name}: usage on stderr, exit 2, no server call, no checkpoint`, async () => {
@@ -170,6 +176,110 @@ describe("session checkpoint", () => {
 		const [held] = [...r.server.checkpoints.values()];
 		expect(held?.transcript_ref).toEqual({ surface: "claude-code", session_locator: "abc", turn_no: 7 });
 		expect(held?.plan_ref).toEqual({ phase: "61", step: "b" });
+	});
+
+	describe("--omp-session", () => {
+		const CONTENT_CANARY = "CANARY-PROMPT-TEXT";
+		const OMP_FILE =
+			[
+				{ type: "session", version: 3, id: "01900000-0000-7000-8000-00000000aaaa", timestamp: "2026-10-20T08:00:00.000Z", cwd: "/synthetic/project" },
+				{ type: "message", id: "a1a1a1a1", parentId: null, timestamp: "t", message: { role: "user", content: [{ type: "text", text: CONTENT_CANARY }] } },
+				{ type: "message", id: "a2a2a2a2", parentId: "a1a1a1a1", timestamp: "t", message: { role: "assistant", content: [{ type: "text", text: "answer" }] } },
+				{ type: "message", id: "a3a3a3a3", parentId: "a2a2a2a2", timestamp: "t", message: { role: "user", content: [{ type: "text", text: "again" }] } },
+			]
+				.map((line) => JSON.stringify(line))
+				.join("\n") + "\n";
+		const FILE_PATH = "/home/someone/secret-dir/synthetic.jsonl";
+
+		test("records the leaf of the omp session as the transcript pointer: the basename as locator, never the path or content", async () => {
+			const asked: Array<[string, number]> = [];
+			const r = rig({
+				readFile: async (path, maxBytes) => {
+					asked.push([path, maxBytes]);
+					return OMP_FILE;
+				},
+			});
+			expect(await session(r, "checkpoint", "--session", SESSION, "--omp-session", FILE_PATH, "--json")).toBe(EXIT_DONE);
+			expect(asked).toEqual([[FILE_PATH, OMP_SESSION_MAX_BYTES]]);
+			const [held] = [...r.server.checkpoints.values()];
+			expect(held?.transcript_ref).toMatchObject({ surface: "omp", session_locator: "synthetic.jsonl", entry_id: "a3a3a3a3", turn_no: 2, parent_entry_id: "a2a2a2a2" });
+			expect(held?.transcript_ref?.prefix_sha256).toMatch(/^[0-9a-f]{64}$/);
+			const body = json(r);
+			expect(body.transcript_ref_skipped).toBeUndefined();
+			expect(body.checkpoint).toMatchObject({ transcript_ref: { session_locator: "synthetic.jsonl" } });
+			const everything = text(r.out) + text(r.err) + JSON.stringify([...r.server.checkpoints.values()]);
+			expect(everything).not.toContain("secret-dir");
+			expect(everything).not.toContain(CONTENT_CANARY);
+		});
+
+		test("a file that cannot be read does not fail the checkpoint: it is made without a pointer and the output says why, without the path", async () => {
+			const r = rig({
+				readFile: async (path) => {
+					throw new Error(`ENOENT: no such file or directory, open '${path}'`);
+				},
+			});
+			expect(await session(r, "checkpoint", "--session", SESSION, "--omp-session", FILE_PATH)).toBe(EXIT_DONE);
+			expect(text(r.out)).toContain("transcript reference NOT recorded (--omp-session: unreadable)");
+			expect(text(r.out)).toContain("created checkpoint");
+			expect(text(r.out) + text(r.err)).not.toContain("secret-dir");
+			const [held] = [...r.server.checkpoints.values()];
+			expect(held).toBeDefined();
+			expect(held?.transcript_ref).toBeUndefined();
+		});
+
+		test("a file that does not parse is a typed reason in JSON and never echoes its content", async () => {
+			const r = rig({ readFile: async () => `not json ${CONTENT_CANARY}\n` });
+			expect(await session(r, "checkpoint", "--session", SESSION, "--omp-session", FILE_PATH, "--json")).toBe(EXIT_DONE);
+			const body = json(r);
+			expect(body).toMatchObject({ ok: true, created: true, transcript_ref_skipped: { source: "omp-session", reason: "header-invalid" } });
+			expect(body.checkpoint).not.toHaveProperty("transcript_ref");
+			expect(text(r.out) + text(r.err)).not.toContain(CONTENT_CANARY);
+			expect([...r.server.checkpoints.values()][0]?.transcript_ref).toBeUndefined();
+		});
+
+		test("an unsupported omp session version is reported by its code", async () => {
+			const old = OMP_FILE.replace('"version":3', '"version":2');
+			const r = rig({ readFile: async () => old });
+			expect(await session(r, "checkpoint", "--session", SESSION, "--omp-session", FILE_PATH)).toBe(EXIT_DONE);
+			expect(text(r.out)).toContain("--omp-session: unsupported-version");
+		});
+
+		test("--omp-session together with --transcript-ref is a usage error before any read or checkpoint", async () => {
+			let reads = 0;
+			const r = rig({
+				fetch: neverCalled,
+				readFile: async () => {
+					reads++;
+					return OMP_FILE;
+				},
+			});
+			const ref = '{"surface":"claude-code","session_locator":"abc","turn_no":7}';
+			expect(await session(r, "checkpoint", "--session", SESSION, "--omp-session", FILE_PATH, "--transcript-ref", ref)).toBe(EXIT_USAGE);
+			expect(text(r.err)).toContain("mutually exclusive");
+			expect(reads).toBe(0);
+			expect((await listLocalCheckpoints({ worktree: r.dir })).checkpoints).toEqual([]);
+		});
+
+		test("the default reader reads a real file, and refuses a directory and a file over the cap as typed reasons", async () => {
+			const dir = tempDir();
+			const good = join(dir, "real-session.jsonl");
+			writeFileSync(good, OMP_FILE);
+			const r = rig();
+			expect(await session(r, "checkpoint", "--session", SESSION, "--omp-session", good)).toBe(EXIT_DONE);
+			expect([...r.server.checkpoints.values()][0]?.transcript_ref).toMatchObject({ surface: "omp", session_locator: "real-session.jsonl", entry_id: "a3a3a3a3" });
+
+			const big = join(dir, "big.jsonl");
+			writeFileSync(big, "");
+			truncateSync(big, OMP_SESSION_MAX_BYTES + 1);
+			const b = rig();
+			expect(await session(b, "checkpoint", "--session", SESSION, "--omp-session", big)).toBe(EXIT_DONE);
+			expect(text(b.out)).toContain("--omp-session: too-large");
+			expect([...b.server.checkpoints.values()][0]?.transcript_ref).toBeUndefined();
+
+			const d = rig();
+			expect(await session(d, "checkpoint", "--session", SESSION, "--omp-session", dir)).toBe(EXIT_DONE);
+			expect(text(d.out)).toContain("--omp-session: unreadable");
+		});
 	});
 
 	test("the session comes from --session, else from the one session this worktree knows, else the command asks", async () => {
