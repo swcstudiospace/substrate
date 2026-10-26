@@ -3,11 +3,17 @@ phase: 54-planning-observability
 verified: 2026-10-22
 status: passed
 score: 3 of 3 criteria PASS in-repo
-verified_on: gsd/p54-complete at f2a494930978ba54708fee5af3fb0c34daafac6f (delta re-verification after the revert-transition fix f2a4949; prior verifications at e4257c3, ec67976, 7f13909, 063e78f, ca9cf9f, b46fe82 and ecd00a8; base gsd/p52-wiring 3126296f7ac58544fc1f2409c96126af70ef5473)
+verified_on: gsd/p54-complete at 5548c62 (re-verified 2026-10-26; prior verifications at f2a4949, e4257c3, ec67976, 7f13909, 063e78f, ca9cf9f, b46fe82 and ecd00a8; base gsd/p52-wiring 3126296f7ac58544fc1f2409c96126af70ef5473)
 covered_files: ["packages/mcp-server/src/planning/observer.ts", "packages/mcp-server/src/planning/observer.test.ts", "packages/mcp-server/src/planning/states.ts", "packages/mcp-server/src/planning/telemetry.ts", "packages/mcp-server/src/planning/read.ts", "packages/mcp-server/src/planning/checkout.ts", "packages/mcp-server/src/metrics-history.ts", "packages/mcp-server/src/greptime.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/index.ts", "docs/runbooks/railway-migration-inventory.md", "infra/vps/substrate.slice", "infra/vps/journald-substrate.conf", "infra/vps/deploy-release.sh"]
 ---
 
 # 54-VERIFICATION: Planning observability and migration inventory (SOTA-10)
+
+## Re-verification (2026-10-26)
+
+- Head: gsd/p54-complete at 5548c62. `bun run verify` green at that head: 6212 pass, 0 fail. The 177 Postgres-only tests are skipped locally and run in CI.
+- Since f2a4949: a held change records its move from the state the previous scan saw, not the publish baseline's state (5548c62). Its regression test fails on 441883b and passes now.
+- Open limit, not a criterion change: failed heartbeats are not shown as DEGRADED in planning_sessions. A failed write cannot be read by the reader, and no reader-visible state carries it. The reader-visible states are STALE and ERROR, so a session whose write failed shows STALE once its heartbeat leaves the freshness window. Recorded here, not implemented.
 
 ## Gates
 
