@@ -147,7 +147,7 @@ function parseCommit(value: unknown): PendingCommit {
 		commit,
 		"commit",
 		["target_ckpt_id", "plan_digest", "from_ckpt_id", "pre_restore_tree", "pre_restore_ckpt_id", "files", "transcript"],
-		["local_only"],
+		["local_only", "until_ms"],
 	);
 	const ckpt = (key: string): string => {
 		const id = text(commit[key], `commit.${key}`, 64);
@@ -162,6 +162,7 @@ function parseCommit(value: unknown): PendingCommit {
 	if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(tree)) fail("commit.pre_restore_tree is not a git object id");
 	const digest = commit.plan_digest === null ? null : text(commit.plan_digest, "commit.plan_digest", 256);
 	if (commit.local_only !== undefined && typeof commit.local_only !== "boolean") fail("commit.local_only must be a boolean");
+	const untilMs = commit.until_ms === undefined ? undefined : count(commit.until_ms, "commit.until_ms");
 	return {
 		target_ckpt_id: ckpt("target_ckpt_id"),
 		plan_digest: digest,
@@ -171,6 +172,7 @@ function parseCommit(value: unknown): PendingCommit {
 		files: { added: count(files.added, "commit.files.added"), modified: count(files.modified, "commit.files.modified"), deleted: count(files.deleted, "commit.files.deleted") },
 		transcript: transcript as PendingCommit["transcript"],
 		...(commit.local_only === undefined ? {} : { local_only: commit.local_only }),
+		...(untilMs === undefined ? {} : { until_ms: untilMs }),
 	};
 }
 
@@ -379,7 +381,13 @@ export async function replayPending(params: ReplayParams): Promise<ReplayOutcome
 			else failure = result.error;
 		} else {
 			const plan = (): Promise<PlanRollbackResult> =>
-				client.planRollback({ session_id: item.session_id, target_ckpt_id: item.commit.target_ckpt_id, rollback_id: item.id });
+				client.planRollback({
+					session_id: item.session_id,
+					target_ckpt_id: item.commit.target_ckpt_id,
+					rollback_id: item.id,
+					// The bound the rollback began with: a late sync plans (and commits) the same memory the first attempt would have.
+					...(item.commit.until_ms === undefined ? {} : { until_ms: item.commit.until_ms }),
+				});
 			let digest = item.commit.plan_digest;
 			if (digest === null) {
 				const planned = await plan();

@@ -164,6 +164,26 @@ describe("memoryEntriesCreatedAfter against a fake connection", () => {
 		});
 	});
 
+	test("an upper bound adds an inclusive whole-millisecond predicate before the order, and the limit stays last", async () => {
+		const { index, statements } = store();
+		await index.memoryEntriesCreatedAfter("sess-1", "2026-10-20T12:00:00.000Z", null, 5, "2026-10-20T13:00:00.789123Z");
+		expect(statements).toEqual([
+			{
+				text: `${SELECT} ${TAIL}2::timestamptz and date_trunc('milliseconds', created) <= $3::timestamptz order by created asc, id asc limit $4`,
+				params: ["sess-1", "2026-10-20T12:00:00.000Z", "2026-10-20T13:00:00.789Z", 6],
+			},
+		]);
+		await index.memoryEntriesCreatedAfter("sess-1", "2026-10-20T12:00:00.000Z", "g-9", 5, "2026-10-20T12:00:00.000Z");
+		expect(statements[1]?.params).toEqual(["sess-1", "g-9", "2026-10-20T12:00:00.000Z", "2026-10-20T12:00:00.000Z", 6]);
+	});
+
+	test("refuses an unparseable upper bound and one before the lower bound, before any SQL", async () => {
+		const { index, statements } = store();
+		await expect(index.memoryEntriesCreatedAfter("sess-1", "2026-10-20T12:00:00.000Z", null, 5, "later")).rejects.toThrow(/not an instant/);
+		await expect(index.memoryEntriesCreatedAfter("sess-1", "2026-10-20T12:00:00.000Z", null, 5, "2026-10-20T11:59:59.999Z")).rejects.toThrow(/upper bound is before/);
+		expect(statements).toEqual([]);
+	});
+
 	test("one row over the limit means truncated, and the extra row is not returned", async () => {
 		const { index } = store((statement) => {
 			const limit = Number(statement.params.at(-1)) - 1;
@@ -325,6 +345,15 @@ describeLive("forget against a live index", () => {
 		const page = await index.memoryEntriesCreatedAfter(SESSION, at(0), null, 2);
 		expect(page.truncated).toBe(true);
 		expect(page.entries.map((entry) => entry.id)).toEqual([id("after-1"), id("old-30d")]);
+	});
+
+	test("an upper bound is inclusive in whole milliseconds: the new timeline's rows are not selected", async () => {
+		const upTo1s = await index.memoryEntriesCreatedAfter(SESSION, at(0), null, 100, at(1000));
+		expect(upTo1s.entries.map((entry) => entry.id)).toEqual([id("after-1"), id("old-30d")]);
+		expect((await index.memoryEntriesCreatedAfter(SESSION, at(0), null, 100, at(0))).entries).toEqual([]);
+		expect((await index.memoryEntriesCreatedAfter(SESSION, at(0), null, 100, at(2000))).entries.map((entry) => entry.id)).toEqual(
+			["after-1", "old-30d", "after-2", "after-3"].map(id),
+		);
 	});
 
 	test("the mark changes only rows with no superseded_by, keeps every row, and a second call changes nothing", async () => {

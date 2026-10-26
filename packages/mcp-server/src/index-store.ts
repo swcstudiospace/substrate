@@ -1732,12 +1732,17 @@ export class IndexStore implements MemoryStore {
 	 * precision of an event `ts`), so a tie keeps the entry: one written in the same millisecond as the rollback point
 	 * is not selected. `session` and `graphId` go through `normalizeIdentifier`, the form the gate stores them in.
 	 * There is no index on `session_id`; the scan is bounded by the session's own rows being few, and the limit.
+	 *
+	 * `untilIso`, when not null, is an INCLUSIVE upper bound (whole milliseconds): an entry created after it belongs to
+	 * the timeline the session began once the rollback started, so a rollback delivered late never reaches it. Null
+	 * means no upper bound. It must not be before `afterIso`.
 	 */
 	async memoryEntriesCreatedAfter(
 		session: string,
 		afterIso: string,
 		graphId: string | null = null,
 		limit = 1000,
+		untilIso: string | null = null,
 	): Promise<{ entries: MemoryEntry[]; truncated: boolean }> {
 		const sessionId = normalizeIdentifier(session);
 		if (sessionId === null) throw new Error("memoryEntriesCreatedAfter: session is required");
@@ -1749,6 +1754,13 @@ export class IndexStore implements MemoryStore {
 			throw new Error(`memoryEntriesCreatedAfter: limit must be an integer from 1 to ${MAX_ROLLBACK_SELECT_LIMIT}`);
 		}
 		const after = new Date(afterMs).toISOString();
+		let until: string | null = null;
+		if (untilIso !== null) {
+			const untilMs = Date.parse(untilIso);
+			if (Number.isNaN(untilMs)) throw new Error(`memoryEntriesCreatedAfter: "${untilIso.slice(0, 40)}" is not an instant`);
+			if (untilMs < afterMs) throw new Error("memoryEntriesCreatedAfter: the upper bound is before the lower bound");
+			until = new Date(untilMs).toISOString();
+		}
 		return this.plane("memory.forget.select", async () => {
 			const rows = (await this.sql`
 				select * from memory_entries
@@ -1756,6 +1768,7 @@ export class IndexStore implements MemoryStore {
 				  ${graph === null ? this.sql`` : this.sql`and graph_id = ${graph}`}
 				  and superseded_by is null
 				  and date_trunc('milliseconds', created) > ${after}::timestamptz
+				  ${until === null ? this.sql`` : this.sql`and date_trunc('milliseconds', created) <= ${until}::timestamptz`}
 				order by created asc, id asc
 				limit ${limit + 1}`) as Array<Record<string, unknown>>;
 			return { entries: rows.slice(0, limit).map((row) => toMemoryEntry(row)), truncated: rows.length > limit };

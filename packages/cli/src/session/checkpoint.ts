@@ -55,6 +55,8 @@ export interface LocalCheckpoint {
 	plan_ref?: PlanRef;
 	file_count?: number;
 	skipped_count?: number;
+	/** Epoch milliseconds when the snapshot was pinned, from the injected clock. Absent on a checkpoint pinned before the field existed. */
+	taken_at_ms?: number;
 }
 
 /** A pinned ref under `refs/substrate/checkpoints/` that is not a usable checkpoint (no or corrupt metadata). */
@@ -124,6 +126,7 @@ function readLocal(entry: PinnedCheckpoint): LocalCheckpoint | string {
 	}
 	if (typeof meta.file_count === "number" && Number.isSafeInteger(meta.file_count) && meta.file_count >= 0) out.file_count = meta.file_count;
 	if (typeof meta.skipped_count === "number" && Number.isSafeInteger(meta.skipped_count) && meta.skipped_count >= 0) out.skipped_count = meta.skipped_count;
+	if (typeof meta.taken_at_ms === "number" && Number.isSafeInteger(meta.taken_at_ms) && meta.taken_at_ms >= 0) out.taken_at_ms = meta.taken_at_ms;
 	return out;
 }
 
@@ -214,6 +217,8 @@ export async function createCheckpoint(params: CreateCheckpointParams): Promise<
 	const seq = params.seq ?? highest + 1;
 
 	const snap = await snapshot({ worktree: params.worktree, policy: params.policy, now: params.now, run });
+	// When the files were pinned: a checkpoint the server hears of hours later cuts memory at THIS instant, not at its record time.
+	const takenAtMs = params.now().getTime();
 	const ckptId = newCheckpointId(params.randomBytes);
 	const record: CheckpointRecord = {
 		ckpt_id: ckptId,
@@ -229,6 +234,7 @@ export async function createCheckpoint(params: CreateCheckpointParams): Promise<
 		...(transcriptRef === undefined ? {} : { transcript_ref: transcriptRef }),
 		...(params.planRef === undefined ? {} : { plan_ref: params.planRef }),
 		...(last === undefined ? {} : { prev_ckpt_id: last.ckpt_id }),
+		taken_at_ms: takenAtMs,
 	};
 	try {
 		// The same validation the ledger event goes through, before anything is pinned.
@@ -250,6 +256,7 @@ export async function createCheckpoint(params: CreateCheckpointParams): Promise<
 			plan_ref: params.planRef,
 			file_count: record.file_count,
 			skipped_count: record.skipped_count,
+			taken_at_ms: takenAtMs,
 		},
 		now: params.now,
 		run,
@@ -268,6 +275,7 @@ export async function createCheckpoint(params: CreateCheckpointParams): Promise<
 		...(params.planRef === undefined ? {} : { plan_ref: params.planRef }),
 		file_count: record.file_count,
 		skipped_count: record.skipped_count,
+		taken_at_ms: takenAtMs,
 	};
 	const server = await offerToServer(params, run, record);
 	return { checkpoint, created: true, server, skipped: snap.skipped, file_count: record.file_count };
@@ -275,6 +283,8 @@ export async function createCheckpoint(params: CreateCheckpointParams): Promise<
 
 async function offerExisting(params: CreateCheckpointParams, run: Runner, found: LocalCheckpoint): Promise<CheckpointResult> {
 	const snap = await readPinnedSnapshot({ worktree: params.worktree, ref: found.ref, now: params.now, run });
+	const pinnedMs = found.taken_at_ms ?? Date.parse(found.createdAt);
+	const takenAt = Number.isSafeInteger(pinnedMs) && pinnedMs > 0 ? pinnedMs : undefined;
 	const record: CheckpointRecord = {
 		ckpt_id: found.ckpt_id,
 		seq: found.seq,
@@ -286,6 +296,8 @@ async function offerExisting(params: CreateCheckpointParams, run: Runner, found:
 		...(found.transcript_ref === undefined ? {} : { transcript_ref: found.transcript_ref }),
 		...(found.plan_ref === undefined ? {} : { plan_ref: found.plan_ref }),
 		...(found.prev_ckpt_id === undefined ? {} : { prev_ckpt_id: found.prev_ckpt_id }),
+		// A checkpoint pinned before the field existed has only its commit time (whole seconds, never later than the pin); an epoch commit time means unknown and is left out.
+		...(takenAt === undefined ? {} : { taken_at_ms: takenAt }),
 	};
 	const server = await offerToServer(params, run, record);
 	return { checkpoint: found, created: false, server, skipped: [], file_count: record.file_count };

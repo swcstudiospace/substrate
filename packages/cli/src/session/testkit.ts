@@ -48,6 +48,10 @@ export class FakeServer implements RollbackServerClient {
 	/** Set to fail commits (not plans) as an unreachable server would. */
 	downForCommits = false;
 	readonly calls: string[] = [];
+	/** Every plan request, in order, as the client sent it. */
+	readonly planRequests: PlanRollbackRequest[] = [];
+	/** The code a plan for an unknown checkpoint answers with: the real server says `not-found`, an older fake said `target-not-found`. */
+	notFoundCode = "target-not-found";
 	readonly checkpoints = new Map<string, RecordCheckpointRequest & { event_id: string }>();
 	readonly commits = new Map<string, CommitRollbackRequest & { event_id: string }>();
 	readonly refusals: CommitRollbackRequest[] = [];
@@ -94,11 +98,12 @@ export class FakeServer implements RollbackServerClient {
 
 	async planRollback(request: PlanRollbackRequest): Promise<PlanRollbackResult> {
 		this.calls.push(`plan:${request.target_ckpt_id}`);
+		this.planRequests.push({ ...request });
 		if (this.down) return failure("network", "connection refused", true);
 		if (this.unauthorized) return failure("unauthorized", "HTTP 401", false);
 		const target = this.checkpoints.get(request.target_ckpt_id);
 		if (target === undefined || target.session_id !== request.session_id) {
-			return failure("target-not-found", "no such checkpoint for this session", false);
+			return failure(this.notFoundCode, "no such checkpoint for this session", false);
 		}
 		const plan: RollbackPlan = {
 			rollback_id: request.rollback_id ?? `rb_${"0".repeat(26)}`,

@@ -106,11 +106,28 @@ describe("writePending and listPending", () => {
 			{ ...rollbackItem(1, "d"), id: "rb_short" },
 			{ ...rollbackItem(1, "d"), commit: { ...rollbackItem(1, "d").commit, transcript: "rewrote" } },
 			{ ...rollbackItem(1, "d"), commit: { ...rollbackItem(1, "d").commit, pre_restore_tree: "xyz" } },
+			{ ...rollbackItem(1, "d"), commit: { ...rollbackItem(1, "d").commit, until_ms: -1 } },
+			{ ...rollbackItem(1, "d"), commit: { ...rollbackItem(1, "d").commit, until_ms: "yesterday" } },
+			{ ...checkpointItem(1), record: { ...checkpointItem(1).record, taken_at_ms: -3 } },
 		];
 		for (const item of bad) {
 			expect(() => writePending(dir, item as PendingItem)).toThrow(PendingJournalError);
 		}
 		expect(existsSync(dir) ? readdirSync(dir) : []).toEqual([]);
+	});
+
+	test("until_ms of a commit and taken_at_ms of a checkpoint survive the journal, and an item without them stays valid", () => {
+		const dir = dirOf();
+		const bounded = rollbackItem(1, null, { commit: { ...rollbackItem(1, null).commit, until_ms: 1_788_000_000_123 } });
+		const taken = checkpointItem(1, { record: { ...checkpointItem(1).record, taken_at_ms: 1_788_000_000_000 } });
+		writePending(dir, bounded);
+		writePending(dir, taken);
+		writePending(dir, rollbackItem(2, "d"));
+		const { items, corrupt } = listPending(dir);
+		expect(corrupt).toEqual([]);
+		expect(items.find((item) => item.id === bounded.id)).toEqual(bounded);
+		expect(items.find((item) => item.id === taken.id)).toEqual(taken);
+		expect(items.find((item) => item.id === rbId(2))).toEqual(rollbackItem(2, "d"));
 	});
 
 	test("checkpoints list before rollbacks, in seq order, whatever the write order", () => {
@@ -233,6 +250,20 @@ describe("replayPending", () => {
 		const second = await replayPending({ dir, clientFor: () => fake });
 		expect(second).toMatchObject({ delivered: [], failed: [], skipped: 0, remaining: 0 });
 		expect(fake.calls.length).toBe(before);
+	});
+
+	test("a commit queued without a plan is planned again with the bound it was queued with, and committed with it", async () => {
+		const fake = server();
+		fake.checkpoints.set(ckptId(1), { ...checkpointItem(1).record, session_id: SESSION, event_id: "evt_seed" });
+		const dir = dirWith(rollbackItem(1, null, { commit: { ...rollbackItem(1, null).commit, until_ms: 1_788_000_000_123 } }));
+		await replayPending({ dir, clientFor: () => fake });
+		expect(fake.planRequests).toEqual([{ session_id: SESSION, target_ckpt_id: ckptId(1), rollback_id: rbId(1), until_ms: 1_788_000_000_123 }]);
+		expect(fake.commits.get(rbId(1))).toMatchObject({ until_ms: 1_788_000_000_123 });
+		// A commit queued before the field existed plans without one.
+		const old = server();
+		old.checkpoints.set(ckptId(1), { ...checkpointItem(1).record, session_id: SESSION, event_id: "evt_seed" });
+		await replayPending({ dir: dirWith(rollbackItem(2, null)), clientFor: () => old });
+		expect(old.planRequests).toEqual([{ session_id: SESSION, target_ckpt_id: ckptId(1), rollback_id: rbId(2) }]);
 	});
 
 	test("a replay that crashed after the server acknowledged is harmless: the item is sent again and held once", async () => {

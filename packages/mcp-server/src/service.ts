@@ -147,7 +147,7 @@ import { governMemoryWrite } from "./memory-write.ts";
 import { forgetEntries, selectForRollback, type ForgetReport, type ForgetRequest, type RollbackSelectRequest, type RollbackSelection } from "./memory-forget.ts";
 import { ForgetUnavailableError, forgetDocumentId, planeDeleteFor } from "./memory-forget-plane.ts";
 import { verifyMemoryRecord, MemoryVerifyError, type MemoryVerifyResult } from "./memory-verify.ts";
-import { anchorEvidenceFor, verifyCheckpointRef, type AnchorVerifyPorts, type CheckpointVerifyToolResult } from "./anchor-verify-deps.ts";
+import { anchorEvidenceFor, verifyCheckpointRef, type AnchorVerifyPorts, type CheckpointVerifyToolResult, type SignerSetSummary } from "./anchor-verify-deps.ts";
 import { CheckpointVerifyError } from "./checkpoint-verify.ts";
 import {
 	DEFAULT_ANCHOR_TIMEOUT_MS,
@@ -3123,8 +3123,10 @@ export class Substrate {
 	 * An internal method (no tool): the rollback path calls it. A plane failure never undoes the index mark, it is reported
 	 * as pending and a re-run of the same request retries only that deletion. The plane delete is chained behind any live
 	 * or replayed retain of the same document, so a forward still in flight cannot land after the delete and bring it back.
-	 * When a mark may have changed a row, the recall and memory generations move, so a cached search, brief or recall
-	 * never serves a forgotten entry. Throws `ForgetUnavailableError` without an index and `ForgetError` for a bad request.
+	 * When a mark may have changed a row, or a plane delete newly removed a document (a re-run that only completes a pending
+	 * deletion changes no row but removes a document a cached recall may still carry), the recall and memory generations
+	 * move, so a cached search, brief or recall never serves a forgotten entry. A pure no-op moves nothing. Throws
+	 * `ForgetUnavailableError` without an index and `ForgetError` for a bad request.
 	 */
 	async memoryForget(request: ForgetRequest, caller: ForgetCaller): Promise<ForgetReport> {
 		const index = this.index;
@@ -3139,7 +3141,7 @@ export class Substrate {
 		// A mark that throws may still have committed (the statement is one, but the reply can be lost), so it counts as touched.
 		let touched = false;
 		try {
-			return await forgetEntries(
+			const report = await forgetEntries(
 				{
 					readEntry: (id) => index.readEntry(id),
 					markForgotten: async (ids, marker) => {
@@ -3176,6 +3178,8 @@ export class Substrate {
 				},
 				request,
 			);
+			if (report.plane.deleted > 0) touched = true;
+			return report;
 		} finally {
 			// `bump` never throws: a failed bump marks the generation stale, which the cache reads as a bypass until a bump lands.
 			if (touched) await Promise.all([this.cache.bump(RECALL_GENERATION_KEY), this.cache.bump(MEMORY_GENERATION_KEY)]);
@@ -3190,7 +3194,10 @@ export class Substrate {
 	async selectMemoryForRollback(request: RollbackSelectRequest): Promise<RollbackSelection> {
 		const index = this.index;
 		if (index === null) throw new ForgetUnavailableError();
-		return selectForRollback({ entriesCreatedAfter: (sessionId, afterIso, graphId, limit) => index.memoryEntriesCreatedAfter(sessionId, afterIso, graphId, limit) }, request);
+		return selectForRollback(
+			{ entriesCreatedAfter: (sessionId, afterIso, graphId, limit, untilIso) => index.memoryEntriesCreatedAfter(sessionId, afterIso, graphId, limit, untilIso) },
+			request,
+		);
 	}
 
 	/** The ledger and devnet reads anchor verification goes through. Built per call; the RPC client is built on first use, so an unconfigured Solana never constructs one. */
@@ -3203,7 +3210,12 @@ export class Substrate {
 				rpc ??= this.rpcOverride ?? createRpc({ url: this.config.solana.rpcUrl, timeoutMs: VERIFY_RPC_TIMEOUT_MS, attempts: VERIFY_RPC_ATTEMPTS, backoffMs: VERIFY_RPC_BACKOFF_MS });
 				return rpc;
 			},
-			solana: { pubkey: this.config.solana.pubkey, problem: this.config.solana.problem },
+			solana: {
+				pubkey: this.config.solana.pubkey,
+				problem: this.config.solana.problem,
+				signerSet: this.config.solana.signerSet,
+				signerSetProblem: this.config.solana.signerSetProblem,
+			},
 			operatorSurfaces: operatorSurfaces(this.config),
 			nowMs: () => Date.now(),
 		};
@@ -3243,12 +3255,13 @@ export class Substrate {
 	 * and an entry past its lifetime under `enforce` (operators excepted) answer as absent, so this tool never reveals what a search
 	 * would not. Throws `MemoryVerifyError` for a bad or unreadable id. `verified` does not prove the source event concerns this entry.
 	 */
-	async memoryVerify(id: string, caller: { surface: string | null; repo?: string; isOperator: boolean }): Promise<MemoryVerifyResult> {
+	async memoryVerify(id: string, caller: { surface: string | null; repo?: string; isOperator: boolean }): Promise<MemoryVerifyResult & { signer_set?: SignerSetSummary }> {
 		const index = this.index;
 		if (index === null) throw new MemoryVerifyError("not_found", "no memory index is configured (SUBSTRATE_PG_URL), so no entry can be read");
 		const reader = { surface: caller.surface ?? "unattributed", repo: normalizeIdentifier(caller.repo) };
 		const ports = this.anchorVerifyPorts();
-		return verifyMemoryRecord(
+		let signers: SignerSetSummary | undefined;
+		const result = await verifyMemoryRecord(
 			{
 				getEntry: async (entryId) => {
 					const entry = await index.readEntry(entryId);
@@ -3259,11 +3272,16 @@ export class Substrate {
 					}
 					return entry;
 				},
-				anchorEvidence: (eventId) => anchorEvidenceFor(ports, eventId),
+				anchorEvidence: (eventId) =>
+					anchorEvidenceFor(ports, eventId, (summary) => {
+						signers = summary;
+					}),
 				anchorTimeoutMs: MEMORY_VERIFY_ANCHOR_TIMEOUT_MS,
 			},
 			id,
 		);
+		// What the anchor check judged against: an ignored rotation note or a truncated read is visible here, not only in the reasons.
+		return signers === undefined ? result : { ...result, signer_set: signers };
 	}
 
 	/**
@@ -3320,9 +3338,10 @@ export class Substrate {
 			},
 			emit: (input) => this.emit(input),
 			verifyAnchor: (eventId, sessionId, surface) => verifyCheckpointRef(this.anchorVerifyPorts(), eventId, { sessionId, surface }),
-			selectEntries: (sessionId, afterIso) => this.selectRollbackEntries(sessionId, afterIso),
+			selectEntries: (sessionId, afterIso, untilIso) => this.selectRollbackEntries(sessionId, afterIso, untilIso),
 			forget: (request, caller) => this.memoryForget(request, caller),
 			anchorTimeoutMs: DEFAULT_ANCHOR_TIMEOUT_MS,
+			nowMs: () => Date.now(),
 		};
 	}
 
@@ -3330,19 +3349,19 @@ export class Substrate {
 	 * The entries a rollback to `afterIso` would forget, with their writers (`selectMemoryForRollback` returns ids only).
 	 * No index means no memory entries exist, so there is nothing to forget: an empty selection, not an error.
 	 */
-	private async selectRollbackEntries(sessionId: string, afterIso: string): Promise<EntrySelection> {
+	private async selectRollbackEntries(sessionId: string, afterIso: string, untilIso: string | null): Promise<EntrySelection> {
 		const index = this.index;
 		if (index === null) return { entries: [], truncated: false };
 		let found: ReadonlyArray<Pick<MemoryEntry, "id" | "writer">> = [];
 		const selection = await selectForRollback(
 			{
-				entriesCreatedAfter: async (session, after, graphId, limit) => {
-					const result = await index.memoryEntriesCreatedAfter(session, after, graphId, limit);
+				entriesCreatedAfter: async (session, after, graphId, limit, until) => {
+					const result = await index.memoryEntriesCreatedAfter(session, after, graphId, limit, until);
 					found = result.entries;
 					return result;
 				},
 			},
-			{ session_id: sessionId, after: afterIso, limit: ROLLBACK_SELECTION_LIMIT },
+			{ session_id: sessionId, after: afterIso, limit: ROLLBACK_SELECTION_LIMIT, ...(untilIso !== null ? { until: untilIso } : {}) },
 		);
 		const writers = new Map<string, string>(found.map((entry): [string, string] => [entry.id, String(entry.writer)]));
 		return { entries: selection.entry_ids.map((id) => ({ id, writer: writers.get(id) ?? "" })), truncated: selection.truncated };

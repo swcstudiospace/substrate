@@ -473,6 +473,28 @@ describe("Substrate.memoryForget: cache generations", () => {
 		});
 	});
 
+	test("a re-run that only completes a pending plane delete moves both generations, and a run that deleted nothing new does not", async () => {
+		await inWorld({}, async (w) => {
+			const written = await writeOne(w, "fence every handoff of the node lease", "handoff-rule");
+			w.plane.deleteAnswer = status(503);
+			await w.substrate.memoryForget(forgetRequest([written.entry.id]), CALLER);
+			const afterMark = w.redis.bumps();
+
+			// The plane recovers: no row changes, but the document a cached recall may still carry is deleted now.
+			w.plane.deleteAnswer = null;
+			const completing = await w.substrate.memoryForget(forgetRequest([written.entry.id]), CALLER);
+			expect(completing.plane.deleted).toBe(1);
+			expect(w.store.markCalls).toHaveLength(1);
+			const afterDelete = w.redis.bumps();
+			expect(afterDelete).toEqual({ memory: afterMark.memory + 1, recall: afterMark.recall + 1 });
+
+			// A third run finds the document absent: a pure no-op, nothing moves.
+			const noop = await w.substrate.memoryForget(forgetRequest([written.entry.id]), CALLER);
+			expect(noop.plane).toEqual({ deleted: 0, absent: 1, pending: 0, skipped: 0 });
+			expect(w.redis.bumps()).toEqual(afterDelete);
+		});
+	});
+
 	test("an id that names no entry changes nothing and moves no generation", async () => {
 		await inWorld({}, async (w) => {
 			const before = w.redis.bumps();

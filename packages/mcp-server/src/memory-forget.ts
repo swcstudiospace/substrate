@@ -626,24 +626,32 @@ export async function forgetEntries(deps: ForgetDeps, request: ForgetRequest): P
 
 export interface RollbackSelectDeps {
 	/**
-	 * Entries of `sessionId` (and, when given, `graphId`) created strictly after `afterIso` that are not superseded,
-	 * ordered by created then id, at most `limit`, with `truncated` true when more matched. `IndexStore.memoryEntriesCreatedAfter`.
+	 * Entries of `sessionId` (and, when given, `graphId`) created strictly after `afterIso` (and, when `untilIso` is
+	 * not null, at or before it) that are not superseded, ordered by created then id, at most `limit`, with `truncated`
+	 * true when more matched. `IndexStore.memoryEntriesCreatedAfter`.
 	 */
 	entriesCreatedAfter(
 		sessionId: string,
 		afterIso: string,
 		graphId: string | null,
 		limit: number,
+		untilIso: string | null,
 	): Promise<{ entries: ReadonlyArray<Pick<MemoryEntry, "id">>; truncated: boolean }>;
 }
 
 export interface RollbackSelectRequest {
 	session_id: string;
-	/** The rollback point: an ISO instant (the checkpoint's event `ts`). */
+	/** The rollback point: an ISO instant (the checkpoint's cut: the earlier of its event `ts` and the time it was taken). */
 	after: string;
 	graph_id?: string;
 	/** Default {@link DEFAULT_ROLLBACK_SELECT_LIMIT}, at most {@link MAX_ROLLBACK_SELECT_LIMIT}. */
 	limit?: number;
+	/**
+	 * The newest instant the selection reaches (inclusive, ISO): memory the session wrote AFTER the rollback began
+	 * belongs to the new timeline and is never selected. Absent means no upper bound (everything up to now). It must
+	 * not be before `after`.
+	 */
+	until?: string;
 }
 
 export interface RollbackSelection {
@@ -657,19 +665,29 @@ export interface RollbackSelection {
 
 /**
  * The entries a rollback to `after` should forget: written in the session (and graph) STRICTLY after the instant and
- * not already superseded. The comparison is in whole milliseconds, the precision of an event `ts`, so an entry created
- * in the same millisecond as the rollback point is KEPT: a tie keeps the entry. Entries already superseded or already
- * forgotten are never selected, which is what makes "select, forget, select again" terminate.
+ * not already superseded, and, with `until`, at or before that instant. The comparison is in whole milliseconds, the
+ * precision of an event `ts`, so an entry created in the same millisecond as the rollback point is KEPT: a tie keeps
+ * the entry. Entries already superseded or already forgotten are never selected, which is what makes "select, forget,
+ * select again" terminate.
  */
 export async function selectForRollback(deps: RollbackSelectDeps, request: RollbackSelectRequest): Promise<RollbackSelection> {
 	const rec = asRecord(request, "request");
-	assertKeys(rec, "", ["session_id", "after"], ["graph_id", "limit"]);
+	assertKeys(rec, "", ["session_id", "after"], ["graph_id", "limit", "until"]);
 	const sessionId = sessionIdField(rec["session_id"], "session_id");
 	const afterRaw = parseString(rec["after"], "after", 1, 64);
 	if (!ISO_INSTANT.test(afterRaw) || Number.isNaN(Date.parse(afterRaw))) {
 		throw new ForgetError("format", "after", "must be an ISO 8601 instant such as 2026-10-26T12:00:00.000Z");
 	}
 	const after = new Date(Date.parse(afterRaw)).toISOString();
+	let until: string | null = null;
+	if (rec["until"] !== undefined) {
+		const untilRaw = parseString(rec["until"], "until", 1, 64);
+		if (!ISO_INSTANT.test(untilRaw) || Number.isNaN(Date.parse(untilRaw))) {
+			throw new ForgetError("format", "until", "must be an ISO 8601 instant such as 2026-10-26T12:00:00.000Z");
+		}
+		until = new Date(Date.parse(untilRaw)).toISOString();
+		if (Date.parse(until) < Date.parse(after)) throw new ForgetError("range", "until", "must not be before after");
+	}
 	const graphId = rec["graph_id"] === undefined ? null : sessionIdField(rec["graph_id"], "graph_id");
 	let limit = DEFAULT_ROLLBACK_SELECT_LIMIT;
 	if (rec["limit"] !== undefined) {
@@ -678,7 +696,7 @@ export async function selectForRollback(deps: RollbackSelectDeps, request: Rollb
 		if (value < 1 || value > MAX_ROLLBACK_SELECT_LIMIT) throw new ForgetError("range", "limit", `must be between 1 and ${MAX_ROLLBACK_SELECT_LIMIT}`);
 		limit = value;
 	}
-	const found = await deps.entriesCreatedAfter(sessionId, after, graphId, limit);
+	const found = await deps.entriesCreatedAfter(sessionId, after, graphId, limit, until);
 	// A store that returned more than asked (a bug on its side) is trimmed here and reported as truncated.
 	const ids = [...new Set(found.entries.map((entry) => entry.id))];
 	return { entry_ids: ids.slice(0, limit), truncated: found.truncated || ids.length > limit, after };

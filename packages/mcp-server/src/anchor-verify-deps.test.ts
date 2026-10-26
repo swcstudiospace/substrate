@@ -355,6 +355,115 @@ describe("the signer set: the configured key plus operator rotations", () => {
 	});
 });
 
+describe("SUBSTRATE_ANCHOR_SIGNER_SET is the bootstrap when set", () => {
+	const OLD_THEN_NEW = [
+		{ pubkey: SIGNER_A, valid_from_ms: 0, valid_until_ms: BLOCK_TIME_MS + HOUR_MS, label: "old" },
+		{ pubkey: SIGNER_B, valid_from_ms: BLOCK_TIME_MS + HOUR_MS, valid_until_ms: null, label: "new" },
+	];
+	const withSet = (w: World, signerSet: AnchorVerifyPorts["solana"]["signerSet"], pubkey: string | null): void => {
+		w.ports.solana = { pubkey, problem: null, signerSet, signerSetProblem: null };
+		w.ports.operatorSurfaces = new Set();
+	};
+
+	test("rotating the job's key does not make the old key's anchors a mismatch while the old key stays in the set", async () => {
+		// The job now signs with B and SOLANA_ANCHOR_PUBKEY names B; the anchor under test was signed by A before the rotation.
+		const without = world(event({ id: "evt_v16_note" }), { pubkey: SIGNER_B });
+		without.ports.operatorSurfaces = new Set();
+		const lost = await verifyEventRef(without.ports, "evt_v16_note");
+		expect(lost.status).toBe("mismatch");
+		expect(lost.reasons.join(" ")).toContain("not in the signer set");
+
+		const kept = world(event({ id: "evt_v16_note" }), { pubkey: SIGNER_B });
+		withSet(kept, OLD_THEN_NEW, SIGNER_B);
+		const result = await verifyEventRef(kept.ports, "evt_v16_note");
+		expect(result.status).toBe("anchored");
+		expect(result.signer_set).toEqual({ source: "env", entries: 2, rotation_notes_applied: 0, rotation_issues: [], read_gap: null });
+	});
+
+	test("a window that ended before the anchor's block time still rejects that signer", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		withSet(w, [{ pubkey: SIGNER_A, valid_from_ms: 0, valid_until_ms: BLOCK_TIME_MS }, { pubkey: SIGNER_B, valid_from_ms: BLOCK_TIME_MS, valid_until_ms: null }], SIGNER_B);
+		const result = await verifyEventRef(w.ports, "evt_v16_note");
+		expect(result.status).toBe("mismatch");
+		expect(result.reasons.join(" ")).toContain("outside its valid window");
+	});
+
+	test("unset keeps today's behaviour exactly: the public key alone, valid from the epoch, summarised as `pubkey`", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		w.ports.operatorSurfaces = new Set();
+		const result = await verifyEventRef(w.ports, "evt_v16_note");
+		expect(result.status).toBe("anchored");
+		expect(result.signer_set).toEqual({ source: "pubkey", entries: 1, rotation_notes_applied: 0, rotation_issues: [], read_gap: null });
+	});
+
+	test("a configured set stands without SOLANA_ANCHOR_PUBKEY: the key is only the bootstrap when there is no set", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		withSet(w, [{ pubkey: SIGNER_A, valid_from_ms: 0, valid_until_ms: null }], null);
+		expect(anchorVerifyBlocker(w.ports)).toBeNull();
+		expect((await verifyEventRef(w.ports, "evt_v16_note")).status).toBe("anchored");
+	});
+
+	test("a malformed set is unverified with a fixed reason that carries no part of the config problem, and nothing is read", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		const problem = "SUBSTRATE_ANCHOR_SIGNER_SET is not a valid signer set: format at [0].pubkey";
+		w.ports.solana = { pubkey: SIGNER_A, problem: null, signerSet: null, signerSetProblem: problem };
+		const byEvent = await verifyEventRef(w.ports, "evt_v16_note");
+		const byCkpt = await verifyCheckpointRef(w.ports, CKPT, { sessionId: "sess-v16" });
+		for (const result of [byEvent, byCkpt]) {
+			expect(result.status).toBe("unverified");
+			expect(result.reasons).toEqual(["Solana is not usable: SUBSTRATE_ANCHOR_SIGNER_SET is malformed (the server's boot warnings say why)"]);
+			expect(result.signer_set).toBeUndefined();
+		}
+		// Never a silently empty set: the bootstrap key is not used instead either.
+		expect(w.rpcBuilt()).toBe(0);
+		expect(Object.values(w.ledger.calls).reduce((a, b) => a + b, 0)).toBe(0);
+		expect(await anchorEvidenceFor(w.ports, "evt_v16_note")).toMatchObject({ status: "unverified", proof_ref: null });
+	});
+
+	test("a rotation note the set cannot apply is listed with its rule, and one it can apply is counted", async () => {
+		const draft = buildSignerRotateEvent({ old_pubkey: SIGNER_B, new_pubkey: SIGNER_A, effective_from_ms: H, reason: "the old key is not in the set" });
+		const ignored = event({ id: "evt_v16_ignored", surface: OPERATOR as SubstrateEvent["surface"], kind: draft.kind, summary: draft.summary, payload: { ...draft.payload }, ts: new Date(H + HOUR_MS).toISOString(), session_id: null });
+		const added = buildSignerRotateEvent({ new_pubkey: SIGNER_B, effective_from_ms: H, reason: "add the second key" });
+		const applied = event({ id: "evt_v16_applied", surface: OPERATOR as SubstrateEvent["surface"], kind: added.kind, summary: added.summary, payload: { ...added.payload }, ts: new Date(H + HOUR_MS).toISOString(), session_id: null });
+
+		const w = world(event({ id: "evt_v16_note" }), { signer: SIGNER_B });
+		w.ports.solana = { pubkey: SIGNER_A, problem: null, signerSet: [{ pubkey: SIGNER_A, valid_from_ms: 0, valid_until_ms: null }], signerSetProblem: null };
+		w.ledger.events.push(ignored, applied);
+		const result = await verifyEventRef(w.ports, "evt_v16_note");
+
+		expect(result.status).toBe("anchored");
+		expect(result.signer_set).toEqual({
+			source: "env",
+			entries: 2,
+			rotation_notes_applied: 1,
+			rotation_issues: [{ event_id: "evt_v16_ignored", reason: "old-key-not-valid" }],
+			read_gap: null,
+		});
+	});
+
+	test("a rotation read that hit its 500-note window says so in the summary, and a failed one says why", async () => {
+		const full = world(event({ id: "evt_v16_note" }));
+		for (let i = 0; i < LOOKUP_ROW_LIMIT; i++) {
+			full.ledger.events.push(event({ id: `evt_v16_filler_${i}`, surface: OPERATOR as SubstrateEvent["surface"], session_id: null, ts: new Date(H + HOUR_MS + i).toISOString() }));
+		}
+		const truncated = await verifyEventRef(full.ports, "evt_v16_note");
+		expect(truncated).toMatchObject({ status: "anchored", signer_set_complete: false });
+		expect(truncated.signer_set?.read_gap).toContain(`${LOOKUP_ROW_LIMIT}-note limit`);
+
+		const failed = world(event({ id: "evt_v16_note" }));
+		failed.ledger.failQuery = "greptime unreachable";
+		expect((await verifyEventRef(failed.ports, "evt_v16_note")).signer_set?.read_gap).toContain("could not be read");
+	});
+
+	test("the memory reader's observer receives the same summary", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		withSet(w, [{ pubkey: SIGNER_A, valid_from_ms: 0, valid_until_ms: null }], SIGNER_B);
+		const seen: unknown[] = [];
+		await anchorEvidenceFor(w.ports, "evt_v16_note", (summary) => seen.push(summary));
+		expect(seen).toEqual([{ source: "env", entries: 1, rotation_notes_applied: 0, rotation_issues: [], read_gap: null }]);
+	});
+});
+
 describe("the memory reader's view", () => {
 	test("anchored carries the transaction signature as its proof reference", async () => {
 		const w = world(event({ id: "evt_v16_note" }));

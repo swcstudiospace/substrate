@@ -140,6 +140,8 @@ export class FakeIndex {
 	markFailsAfter: number | null = null;
 	readonly marks: Array<{ ids: string[]; marker: string }> = [];
 	selectLimits: number[] = [];
+	/** The bounds each selection was asked with, in order: `[afterIso, untilIso]`. */
+	selectBounds: Array<[string, string | null]> = [];
 
 	async readEntry(id: string): Promise<MemoryEntry | null> {
 		const found = this.entries.find((candidate) => candidate.id === id);
@@ -161,12 +163,14 @@ export class FakeIndex {
 		return changed;
 	}
 
-	async memoryEntriesCreatedAfter(session: string, afterIso: string, _graph: string | null, limit: number): Promise<{ entries: MemoryEntry[]; truncated: boolean }> {
+	async memoryEntriesCreatedAfter(session: string, afterIso: string, _graph: string | null, limit: number, untilIso: string | null = null): Promise<{ entries: MemoryEntry[]; truncated: boolean }> {
 		this.selectLimits.push(limit);
+		this.selectBounds.push([afterIso, untilIso]);
 		if (this.failSelect !== null) throw new Error(this.failSelect);
 		const after = Date.parse(afterIso);
+		const until = untilIso === null ? Infinity : Date.parse(untilIso);
 		const found = this.entries
-			.filter((candidate) => candidate.session_id === session && candidate.superseded_by === undefined && Date.parse(candidate.created) > after)
+			.filter((candidate) => candidate.session_id === session && candidate.superseded_by === undefined && Date.parse(candidate.created) > after && Date.parse(candidate.created) <= until)
 			.sort((a, b) => Date.parse(a.created) - Date.parse(b.created) || (a.id < b.id ? -1 : 1));
 		return { entries: found.slice(0, limit).map((candidate) => ({ ...candidate })), truncated: found.length > limit };
 	}

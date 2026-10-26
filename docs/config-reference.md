@@ -72,6 +72,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SOLANA_RPC_URL` | string | https://api.devnet.solana.com | URL | public devnet | mcp-server/config.ts | yes |
 | `SOLANA_ANCHOR_KEYPAIR` | path | none | keypair file path | the hourly anchor job is not configured | mcp-server/config.ts | yes |
 | `SOLANA_ANCHOR_PUBKEY` | string | none | public key | anchors are not verified against a key | mcp-server/config.ts | yes |
+| `SUBSTRATE_ANCHOR_SIGNER_SET` | string | none | JSON array of up to 16 signer entries {pubkey, valid_from_ms, valid_until_ms or null, label} | the verifier's signer set starts from SOLANA_ANCHOR_PUBKEY alone (valid from the epoch, no end); a malformed value makes checkpoint_verify and memory_verify answer unverified, never an empty set. See `docs/runbooks/anchor-signer-rotation.md` | mcp-server/config.ts | yes |
 | `SOLANA_CLI` | path | the solana CLI install path | binary | the built-in path | mcp-server/config.ts | yes |
 | `SUBSTRATE_VERIFY_TIMEOUT_MS` | number | 30000 | positive ms | 30000 ms | mcp-server/config.ts | yes |
 | `SUBSTRATE_EVENT_IDEMPOTENCY` | mode | off | off \| accept \| enforce (case- and space-insensitive; anything else is off with a boot warning) | off: POST /events ignores idempotency_key and the x-substrate-replay header; nothing is stored and responses are unchanged. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |

@@ -85,6 +85,32 @@ describe("requests", () => {
 		expect(seen.map((entry) => entry.body.params.name)).toEqual(["session_rollback_plan", "session_rollback_commit"]);
 	});
 
+	test("taken_at_ms and until_ms travel as arguments of their tools", async () => {
+		const { api, seen } = client((entry) => {
+			const tool = entry.body.params.name;
+			if (tool === "session_checkpoint") return rpc({ ok: true, ckpt_id: CKPT, event_id: "evt_1", stored: true });
+			return tool === "session_rollback_plan" ? rpc({ ok: true, plan: PLAN }) : rpc({ ok: true, event_id: "evt_9" });
+		});
+		await api.recordCheckpoint({ ...RECORD, taken_at_ms: 1_788_000_000_000 });
+		await api.planRollback({ session_id: "sess-1", target_ckpt_id: CKPT, until_ms: 1_788_000_000_500 });
+		await api.commitRollback({
+			session_id: "sess-1",
+			rollback_id: PLAN.rollback_id,
+			target_ckpt_id: CKPT,
+			plan_digest: "digest-1",
+			outcome: "committed",
+			from_ckpt_id: CKPT,
+			pre_restore_tree: TREE,
+			pre_restore_ckpt_id: CKPT,
+			files: { added: 0, modified: 0, deleted: 0 },
+			transcript: "marker-only",
+			until_ms: 1_788_000_000_500,
+		});
+		expect(seen[0]?.body.params.arguments["taken_at_ms"]).toBe(1_788_000_000_000);
+		expect(seen[1]?.body.params.arguments["until_ms"]).toBe(1_788_000_000_500);
+		expect(seen[2]?.body.params.arguments["until_ms"]).toBe(1_788_000_000_500);
+	});
+
 	test("a reply sent as one SSE data line parses like plain JSON", async () => {
 		const payload = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: JSON.stringify({ ok: true, ckpt_id: CKPT, event_id: "evt_2", stored: true }) }] } });
 		const { api } = client(() => new Response(`event: message\ndata: ${payload}\n\n`, { status: 200 }));
@@ -206,6 +232,14 @@ describe("failures never throw", () => {
 		expect(await failureOf(() => rpc({ ok: false, error: { code: "not a code!", message: "x" } }))).toMatchObject({ code: "server-rejected" });
 		expect(await failureOf(() => rpc({ ok: false }))).toMatchObject({ code: "server-rejected" });
 		expect(await failureOf(() => rpc({ nothing: true }))).toMatchObject({ code: "bad-response" });
+	});
+
+	test("the server's not-found for an unknown or foreign checkpoint reaches the caller as that code", async () => {
+		expect(await failureOf(() => rpc({ ok: false, error: { code: "not-found", message: "no checkpoint was recorded" } }))).toEqual({
+			code: "not-found",
+			message: "no checkpoint was recorded",
+			retryable: false,
+		});
 	});
 
 	test("ledger-down counts as unreachable so a rollback can fall back to local refs", async () => {

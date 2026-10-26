@@ -73,7 +73,7 @@ describe("contextual recall config: typos keep the default and are named", () =>
 		for (const typo of ["yes", "true", "1", "onn", "enabled"]) {
 			const config = loadConfig({ SUBSTRATE_DOCS_TANDEM: typo });
 			expect(config.contextualRecall.tandem.enabled).toBe(false);
-			expect(config.contextualRecall.problems).toEqual([`SUBSTRATE_DOCS_TANDEM="${typo}" is neither off nor on; running as off`]);
+			expect(config.contextualRecall.problems).toEqual(["SUBSTRATE_DOCS_TANDEM is neither off nor on; running as off"]);
 		}
 	});
 
@@ -81,7 +81,7 @@ describe("contextual recall config: typos keep the default and are named", () =>
 		for (const typo of ["graphs", "repo", "on", "all"]) {
 			const config = loadConfig({ SUBSTRATE_BRIEF_RECALL_SCOPE: typo });
 			expect(config.contextualRecall.recallScope).toBe("off");
-			expect(config.contextualRecall.problems).toEqual([`SUBSTRATE_BRIEF_RECALL_SCOPE="${typo}" is neither off nor graph; running as off`]);
+			expect(config.contextualRecall.problems).toEqual(["SUBSTRATE_BRIEF_RECALL_SCOPE is neither off nor graph; running as off"]);
 		}
 	});
 
@@ -90,8 +90,8 @@ describe("contextual recall config: typos keep the default and are named", () =>
 			const config = loadConfig({ SUBSTRATE_DOCS_TANDEM_LIMIT: bad, SUBSTRATE_DOCS_TANDEM_BUDGET_MS: bad });
 			expect(config.contextualRecall.tandem).toEqual({ enabled: false, hindsight_limit: 5, budget_ms: 1500 });
 			expect(config.contextualRecall.problems).toEqual([
-				`SUBSTRATE_DOCS_TANDEM_LIMIT=${JSON.stringify(bad)} is not a whole number; using 5`,
-				`SUBSTRATE_DOCS_TANDEM_BUDGET_MS=${JSON.stringify(bad)} is not a whole number; using 1500`,
+				"SUBSTRATE_DOCS_TANDEM_LIMIT is not a whole number; using 5",
+				"SUBSTRATE_DOCS_TANDEM_BUDGET_MS is not a whole number; using 1500",
 			]);
 		}
 	});
@@ -103,7 +103,7 @@ describe("contextual recall config: typos keep the default and are named", () =>
 			SUBSTRATE_DOCS_TANDEM_BUDGET_MS: "soon",
 			SUBSTRATE_BRIEF_RECALL_SCOPE: "nowhere",
 		});
-		expect(config.contextualRecall.problems.map((problem) => problem.split("=")[0])).toEqual([
+		expect(config.contextualRecall.problems.map((problem) => problem.split(" ")[0])).toEqual([
 			"SUBSTRATE_DOCS_TANDEM",
 			"SUBSTRATE_BRIEF_RECALL_SCOPE",
 			"SUBSTRATE_DOCS_TANDEM_LIMIT",
@@ -114,23 +114,42 @@ describe("contextual recall config: typos keep the default and are named", () =>
 	});
 });
 
+describe("contextual recall config: a warning never echoes the value it refused", () => {
+	test("a pasted secret in any of the four flags names the variable and the problem, never the value", () => {
+		const canary = "sk-CANARY-do-not-print-0123456789";
+		const config = loadConfig({
+			SUBSTRATE_DOCS_TANDEM: canary,
+			SUBSTRATE_DOCS_TANDEM_LIMIT: canary,
+			SUBSTRATE_DOCS_TANDEM_BUDGET_MS: canary,
+			SUBSTRATE_BRIEF_RECALL_SCOPE: canary,
+		});
+		const warnings = contextualRecallConfigWarnings(config);
+		expect(warnings).toHaveLength(4);
+		expect(JSON.stringify(warnings)).not.toContain("CANARY");
+		// Out-of-range numbers are not echoed either; the bound taken is named.
+		const tooBig = contextualRecallConfigWarnings(loadConfig({ SUBSTRATE_DOCS_TANDEM_LIMIT: "123456789", SUBSTRATE_DOCS_TANDEM_BUDGET_MS: "987654321" }));
+		expect(JSON.stringify(tooBig)).not.toMatch(/123456789|987654321/);
+		expect(tooBig).toHaveLength(2);
+	});
+});
+
 describe("contextual recall config: out-of-range numbers are capped and named", () => {
 	test("the limit is capped to 1..10", () => {
 		const low = loadConfig({ SUBSTRATE_DOCS_TANDEM_LIMIT: "0" });
 		expect(low.contextualRecall.tandem.hindsight_limit).toBe(1);
-		expect(low.contextualRecall.problems).toEqual(['SUBSTRATE_DOCS_TANDEM_LIMIT="0" is outside 1..10; using 1']);
+		expect(low.contextualRecall.problems).toEqual(["SUBSTRATE_DOCS_TANDEM_LIMIT is outside 1..10; using 1"]);
 		const high = loadConfig({ SUBSTRATE_DOCS_TANDEM_LIMIT: "99" });
 		expect(high.contextualRecall.tandem.hindsight_limit).toBe(10);
-		expect(high.contextualRecall.problems).toEqual(['SUBSTRATE_DOCS_TANDEM_LIMIT="99" is outside 1..10; using 10']);
+		expect(high.contextualRecall.problems).toEqual(["SUBSTRATE_DOCS_TANDEM_LIMIT is outside 1..10; using 10"]);
 	});
 
 	test("the budget is capped to 50..10000 ms", () => {
 		const low = loadConfig({ SUBSTRATE_DOCS_TANDEM_BUDGET_MS: "10" });
 		expect(low.contextualRecall.tandem.budget_ms).toBe(50);
-		expect(low.contextualRecall.problems).toEqual(['SUBSTRATE_DOCS_TANDEM_BUDGET_MS="10" is outside 50..10000; using 50']);
+		expect(low.contextualRecall.problems).toEqual(["SUBSTRATE_DOCS_TANDEM_BUDGET_MS is outside 50..10000; using 50"]);
 		const high = loadConfig({ SUBSTRATE_DOCS_TANDEM_BUDGET_MS: "99999" });
 		expect(high.contextualRecall.tandem.budget_ms).toBe(10_000);
-		expect(high.contextualRecall.problems).toEqual(['SUBSTRATE_DOCS_TANDEM_BUDGET_MS="99999" is outside 50..10000; using 10000']);
+		expect(high.contextualRecall.problems).toEqual(["SUBSTRATE_DOCS_TANDEM_BUDGET_MS is outside 50..10000; using 10000"]);
 	});
 
 	test("a capped value does not change the other flags", () => {

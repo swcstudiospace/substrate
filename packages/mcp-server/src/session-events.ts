@@ -106,6 +106,12 @@ export interface CheckpointPayload {
 	chain_head?: { event_id: string; hash: string };
 	plan_ref?: { phase?: string; step?: string };
 	prev_ckpt_id?: string;
+	/**
+	 * When the snapshot was pinned on the client, in epoch milliseconds. A checkpoint recorded late (offline, synced
+	 * hours afterwards) is cut in time at this instant, not at its ledger record time. The server honours it only
+	 * within its window around the record time and says so when it does not (`session-rollback.ts`).
+	 */
+	taken_at_ms?: number;
 }
 
 export interface RollbackPayload {
@@ -349,7 +355,7 @@ export function parseCheckpointPayload(value: unknown): CheckpointPayload {
 		rec,
 		"",
 		["action", "ckpt_id", "seq", "trigger", "git_tree", "manifest_sha256", "file_count", "skipped_count"],
-		["git_base_commit", "branch", "transcript_ref", "chain_head", "plan_ref", "prev_ckpt_id"],
+		["git_base_commit", "branch", "transcript_ref", "chain_head", "plan_ref", "prev_ckpt_id", "taken_at_ms"],
 	);
 	expectAction(rec, SESSION_CHECKPOINT_ACTION);
 	const ckpt_id = ckptIdField(rec["ckpt_id"], "ckpt_id");
@@ -368,6 +374,7 @@ export function parseCheckpointPayload(value: unknown): CheckpointPayload {
 		...optional(rec, "chain_head", "", parseChainHead),
 		...optional(rec, "plan_ref", "", parsePlanRef),
 		...optional(rec, "prev_ckpt_id", "", ckptIdField),
+		...optional(rec, "taken_at_ms", "", (v, p) => parseInteger(v, p, 0)),
 	};
 	if (out.prev_ckpt_id === ckpt_id) {
 		throw new SessionEventError("format", "prev_ckpt_id", "must differ from ckpt_id");

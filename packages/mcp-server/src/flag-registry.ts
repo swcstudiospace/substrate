@@ -349,6 +349,7 @@ export const FLAGS: readonly FlagSpec[] = [
 	{ name: "SOLANA_RPC_URL", kind: "string", plane: "ledger", default: "https://api.devnet.solana.com", allowed: "URL", unset: "public devnet", readBy: "mcp-server/config.ts", documented: true },
 	{ name: "SOLANA_ANCHOR_KEYPAIR", kind: "path", plane: "ledger", default: "none", allowed: "keypair file path", unset: "the hourly anchor job is not configured", readBy: "mcp-server/config.ts", documented: true },
 	{ name: "SOLANA_ANCHOR_PUBKEY", kind: "string", plane: "ledger", default: "none", allowed: "public key", unset: "anchors are not verified against a key", readBy: "mcp-server/config.ts", documented: true },
+	{ name: "SUBSTRATE_ANCHOR_SIGNER_SET", kind: "string", plane: "ledger", default: "none", allowed: "JSON array of up to 16 signer entries {pubkey, valid_from_ms, valid_until_ms or null, label}", unset: "the verifier's signer set starts from SOLANA_ANCHOR_PUBKEY alone (valid from the epoch, no end); a malformed value makes checkpoint_verify and memory_verify answer unverified, never an empty set", readBy: "mcp-server/config.ts", documented: true, doc: "docs/runbooks/anchor-signer-rotation.md" },
 	{ name: "SOLANA_CLI", kind: "path", plane: "ledger", default: "the solana CLI install path", allowed: "binary", unset: "the built-in path", readBy: "mcp-server/config.ts", documented: true },
 	{ name: "SUBSTRATE_VERIFY_TIMEOUT_MS", kind: "number", plane: "ledger", default: "30000", allowed: "positive ms", unset: "30000 ms", readBy: "mcp-server/config.ts", documented: true },
 	{

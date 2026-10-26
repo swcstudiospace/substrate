@@ -377,11 +377,15 @@ export async function rollback(params: RollbackParams): Promise<RollbackResult> 
 	}
 
 	// 3. The server's plan, or the local-only fallback.
+	// The instant this rollback began: memory the session writes after it belongs to the NEW timeline. Every plan,
+	// re-plan and commit of this rollback (and the pending journal's, for a late sync) carries the same bound, so a
+	// commit delivered hours later forgets what the old timeline wrote and nothing the new one did.
+	const untilMs = params.now().getTime();
 	if (params.offline) {
 		out.mode = "local-only";
 		out.local_only_reason = "offline";
 	} else {
-		const planned = await client.planRollback({ session_id: sessionId, target_ckpt_id: target.ckpt_id, rollback_id: rollbackId });
+		const planned = await client.planRollback({ session_id: sessionId, target_ckpt_id: target.ckpt_id, rollback_id: rollbackId, until_ms: untilMs });
 		if (planned.ok) {
 			plan = planned.value.plan;
 		} else if (isUnreachable(planned.error)) {
@@ -389,6 +393,9 @@ export async function rollback(params: RollbackParams): Promise<RollbackResult> 
 			out.local_only_reason = "server-unreachable";
 			client = offlineClient();
 			warnings.push(`the server could not be reached (${planned.error.code}); rolling back from the local checkpoint, which is unanchored`);
+		} else if (planned.error.code === "not-found") {
+			// The server answers an unknown or another surface's checkpoint as `not-found`; it is the same refusal as a missing local one.
+			return refuse("target-not-found", planned.error.message);
 		} else if (planned.error.code === "unauthorized") {
 			return refuse("not-authorized", `${planned.error.message} (use --offline to roll back from the local checkpoint without the server)`);
 		} else if ((ROLLBACK_REFUSAL_REASONS as readonly string[]).includes(planned.error.code)) {
@@ -528,6 +535,7 @@ export async function rollback(params: RollbackParams): Promise<RollbackResult> 
 		files,
 		transcript: transcript.outcome,
 		...(plan === null ? { local_only: true } : {}),
+		until_ms: untilMs,
 	};
 	let digest: string | null = plan?.plan_digest ?? null;
 	let lastError: { code: string; message: string } | null = null;
@@ -556,7 +564,7 @@ export async function rollback(params: RollbackParams): Promise<RollbackResult> 
 				lastError = { code: "stale-plan", message: "the plan changed again after one re-plan" };
 				break;
 			}
-			const replanned = await client.planRollback({ session_id: sessionId, target_ckpt_id: target.ckpt_id, rollback_id: rollbackId });
+			const replanned = await client.planRollback({ session_id: sessionId, target_ckpt_id: target.ckpt_id, rollback_id: rollbackId, until_ms: untilMs });
 			if (!replanned.ok) {
 				lastError = replanned.error;
 				break;

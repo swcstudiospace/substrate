@@ -75,6 +75,8 @@ export type PlanRollbackRequest = {
 	session_id: string;
 	target_ckpt_id: string;
 	rollback_id?: string;
+	/** Epoch ms bounding the memory the plan reaches: what the session wrote after it belongs to the new timeline. Absent means now. */
+	until_ms?: number;
 };
 
 export type CommittedRollbackFields = {
@@ -84,6 +86,8 @@ export type CommittedRollbackFields = {
 	files: { added: number; modified: number; deleted: number };
 	transcript: RollbackTranscriptOutcome;
 	local_only?: boolean;
+	/** The same bound the plan was made with, so a late commit selects the same memory. */
+	until_ms?: number;
 };
 
 export type CommitRollbackRequest = { session_id: string; rollback_id: string; target_ckpt_id: string; plan_digest?: string } & (

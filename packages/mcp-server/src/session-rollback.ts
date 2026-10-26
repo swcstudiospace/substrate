@@ -84,6 +84,10 @@ export const MAX_FORGET_BATCHES = 100;
 export const MAX_PLANE_RETRY_GROUPS = 20;
 /** How long a plan waits for the anchor check before answering without it. */
 export const DEFAULT_ANCHOR_TIMEOUT_MS = 4_000;
+/** How far before its record time a checkpoint's `taken_at_ms` may lie and still be honoured (a checkpoint taken offline and synced late). */
+export const MAX_TAKEN_AT_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+/** How far a client instant may lie after the server's reference instant (the checkpoint's record time, or the server clock for `until_ms`): clock skew, not a future. */
+export const MAX_CLIENT_CLOCK_SKEW_MS = 30_000;
 
 const MAX_SESSION_ID_CHARS = 512;
 const MAX_MESSAGE_CHARS = 400;
@@ -132,12 +136,14 @@ export interface SessionRollbackDeps {
 	emit(input: EventInput): Promise<EmitOutcome>;
 	/** The anchor verdict of one checkpoint event. May throw or be slow: a plan answers without it. */
 	verifyAnchor(eventId: string, sessionId: string, surface: Surface): Promise<{ status: string; reasons: readonly string[] }>;
-	/** Entries of the session created strictly after `afterIso` and still in force (no index: none). Throws when the index cannot be read. */
-	selectEntries(sessionId: string, afterIso: string): Promise<EntrySelection>;
+	/** Entries of the session created strictly after `afterIso`, and at or before `untilIso` when it is not null, still in force (no index: none). Throws when the index cannot be read. */
+	selectEntries(sessionId: string, afterIso: string, untilIso: string | null): Promise<EntrySelection>;
 	/** `Substrate.memoryForget`. */
 	forget(request: ForgetRequest, caller: { surface: Surface; session_id: string }): Promise<ForgetReport>;
 	/** Bound on the anchor check; 0 or less means unbounded. */
 	anchorTimeoutMs: number;
+	/** The server clock in epoch milliseconds; injected so the bounds on client instants are deterministic in tests. */
+	nowMs(): number;
 }
 
 /** Who is calling: the authenticated surface, and whether the token is an operator's. */
@@ -173,7 +179,7 @@ export interface CheckpointOk {
 	event_id: string;
 	/** False when the checkpoint was already recorded (a replay): `event_id` is the existing one. */
 	stored: boolean;
-	/** A seq or `prev_ckpt_id` that disagrees with the session's newest recorded checkpoint, or a collision handled by not trusting the idempotency key. Never a failure. */
+	/** A seq or `prev_ckpt_id` that disagrees with the session's newest recorded checkpoint, a `taken_at_ms` that is not believed (see {@link checkpointCut}), or a collision handled by not trusting the idempotency key. Never a failure. */
 	warnings?: string[];
 }
 export type CheckpointResult = CheckpointOk | RollbackFailure;
@@ -274,6 +280,46 @@ function countField(value: unknown, name: string): number {
 	return value;
 }
 
+/**
+ * The instant a checkpoint cuts memory at, given the time it was recorded. A checkpoint taken offline and recorded
+ * hours later carries `taken_at_ms` (the client's pin time): the cut is the EARLIER of the two, so memory written
+ * between taking and recording is not silently kept. A `taken_at_ms` more than {@link MAX_TAKEN_AT_AGE_MS} before the
+ * record time, or more than {@link MAX_CLIENT_CLOCK_SKEW_MS} after it, is not believed (a wrong clock could otherwise
+ * forget a session's whole history, or keep everything): it is ignored, the record time stands, and `ignored` says why.
+ */
+export function checkpointCut(recordMs: number, takenAtMs: number | undefined): { cutMs: number; ignored: string | null } {
+	if (takenAtMs === undefined) return { cutMs: recordMs, ignored: null };
+	if (takenAtMs < recordMs - MAX_TAKEN_AT_AGE_MS) {
+		return { cutMs: recordMs, ignored: "taken_at_ms is more than 30 days before the record time, so the record time is the memory cut" };
+	}
+	if (takenAtMs > recordMs + MAX_CLIENT_CLOCK_SKEW_MS) {
+		return { cutMs: recordMs, ignored: "taken_at_ms is more than 30 seconds after the record time, so the record time is the memory cut" };
+	}
+	return { cutMs: Math.min(recordMs, takenAtMs), ignored: null };
+}
+
+/** `until_ms` as sent: absent, or a non-negative safe integer (epoch milliseconds). Range rules need the checkpoint, see {@link untilBound}. */
+function untilMsField(value: unknown): number | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) refuse("invalid-request", "until_ms must be a non-negative integer (epoch milliseconds)");
+	return value;
+}
+
+/**
+ * The upper bound of the memory a rollback reaches, from the request's `until_ms`: not more than {@link MAX_CLIENT_CLOCK_SKEW_MS}
+ * ahead of the server clock and not before the checkpoint's cut. Absent means no bound (everything up to now).
+ *
+ * The bound is not a field of the plan digest: it acts through the entry-id set, which the digest covers, so a commit
+ * with another bound than its plan selects other ids (or the same ones, and then the same outcome) and answers
+ * `stale-plan` when the ids differ.
+ */
+function untilBound(untilMs: number | undefined, cutMs: number, nowMs: number): string | null {
+	if (untilMs === undefined) return null;
+	if (untilMs > nowMs + MAX_CLIENT_CLOCK_SKEW_MS) refuse("invalid-request", "until_ms is more than 30 seconds in the future");
+	if (untilMs < cutMs) refuse("invalid-request", "until_ms is before the checkpoint's memory cut, so the rollback would reach no memory at all");
+	return new Date(untilMs).toISOString();
+}
+
 function ownedBy(event: SubstrateEvent, caller: RollbackCaller): boolean {
 	return caller.isOperator || event.surface === caller.surface;
 }
@@ -359,7 +405,8 @@ function resolveTarget(notes: SessionNotes, ckptId: string, caller: RollbackCall
  * when the head cannot be read it is left out. A checkpoint id already recorded in the session answers `stored: false`
  * with the existing event and writes nothing, whatever `SUBSTRATE_EVENT_IDEMPOTENCY` is. A seq or `prev_ckpt_id` that
  * contradicts the session's newest recorded checkpoint is a warning in the result, not a failure: a client may record
- * offline and late.
+ * offline and late. Its `taken_at_ms`, when plausible, is what later cuts memory (the earlier of it and the record time);
+ * an implausible one is kept in the note, ignored by the cut, and named in a warning.
  */
 export async function sessionCheckpoint(deps: SessionRollbackDeps, input: unknown, caller: RollbackCaller): Promise<CheckpointResult> {
 	try {
@@ -385,7 +432,8 @@ export async function sessionCheckpoint(deps: SessionRollbackDeps, input: unknow
 			return { ok: true, ckpt_id: payload.ckpt_id, event_id: same.event.id, stored: false };
 		}
 
-		const warnings: string[] = [];
+		const takenAt = checkpointCut(deps.nowMs(), payload.taken_at_ms);
+		const warnings: string[] = takenAt.ignored === null ? [] : [takenAt.ignored];
 		const mine = known.filter((record) => ownedBy(record.event, caller));
 		let newest: CheckpointRecord | undefined;
 		for (const record of mine) if (newest === undefined || record.payload.seq > newest.payload.seq) newest = record;
@@ -510,6 +558,8 @@ interface PlanContext {
 	target: CheckpointRecord;
 	visible: readonly CheckpointRecord[];
 	notes: SessionNotes;
+	/** The rollback's upper bound (inclusive): memory written after it belongs to the new timeline. Null: none. */
+	untilIso: string | null;
 }
 
 interface BuiltPlan {
@@ -522,7 +572,8 @@ interface BuiltPlan {
 async function selectEntries(deps: SessionRollbackDeps, ctx: PlanContext, caller: RollbackCaller): Promise<{ ids: string[]; truncated: boolean }> {
 	let selection: EntrySelection;
 	try {
-		selection = await deps.selectEntries(ctx.sessionId, ctx.target.event.ts);
+		const cutMs = checkpointCut(Date.parse(ctx.target.event.ts), ctx.target.payload.taken_at_ms).cutMs;
+		selection = await deps.selectEntries(ctx.sessionId, new Date(cutMs).toISOString(), ctx.untilIso);
 	} catch (cause) {
 		return refuse("unavailable", `the memory index could not be read, so the rollback's memory part cannot be planned: ${describe(cause)}`, RETRYABLE);
 	}
@@ -580,14 +631,16 @@ function newestSeqRecord(records: readonly CheckpointRecord[]): CheckpointRecord
  */
 export async function sessionRollbackPlan(deps: SessionRollbackDeps, input: unknown, caller: RollbackCaller): Promise<PlanResult> {
 	try {
-		const rec = strictObject(input, ["session_id", "target_ckpt_id", "rollback_id"], "the request");
+		const rec = strictObject(input, ["session_id", "target_ckpt_id", "rollback_id", "until_ms"], "the request");
 		const sessionId = sessionIdField(rec["session_id"]);
 		const targetCkptId = ckptIdField(rec["target_ckpt_id"], "target_ckpt_id");
 		const given = rec["rollback_id"] === undefined ? null : rollbackIdField(rec["rollback_id"], "rollback_id");
 		const notes = await readNotes(deps, sessionId);
 		const { target, visible } = resolveTarget(notes, targetCkptId, caller);
 		const rollbackId = given ?? deriveRollbackId(sessionId, targetCkptId, newestSeqRecord(visible)?.payload.ckpt_id ?? null);
-		const built = await buildPlan(deps, { sessionId, rollbackId, target, visible, notes }, caller, true);
+		const cutMs = checkpointCut(Date.parse(target.event.ts), target.payload.taken_at_ms).cutMs;
+		const untilIso = untilBound(untilMsField(rec["until_ms"]), cutMs, deps.nowMs());
+		const built = await buildPlan(deps, { sessionId, rollbackId, target, visible, notes, untilIso }, caller, true);
 		return { ok: true, plan: built.plan };
 	} catch (cause) {
 		if (cause instanceof Refusal) return cause.failure;
@@ -611,6 +664,7 @@ type CommittedRequest = {
 	files: { added: number; modified: number; deleted: number };
 	transcript: RollbackTranscriptOutcome;
 	local_only: boolean;
+	until_ms?: number;
 };
 
 type RefusedRequest = {
@@ -623,7 +677,7 @@ type RefusedRequest = {
 };
 
 const COMMON_KEYS = ["session_id", "rollback_id", "target_ckpt_id", "plan_digest", "outcome"] as const;
-const COMMITTED_KEYS = [...COMMON_KEYS, "from_ckpt_id", "pre_restore_tree", "pre_restore_ckpt_id", "files", "transcript", "local_only"] as const;
+const COMMITTED_KEYS = [...COMMON_KEYS, "from_ckpt_id", "pre_restore_tree", "pre_restore_ckpt_id", "files", "transcript", "local_only", "until_ms"] as const;
 const REFUSED_KEYS = [...COMMON_KEYS, "reason", "detail"] as const;
 
 function parseCommit(input: unknown): CommittedRequest | RefusedRequest {
@@ -656,6 +710,7 @@ function parseCommit(input: unknown): CommittedRequest | RefusedRequest {
 		refuse("invalid-request", `transcript is required and must be one of: ${ROLLBACK_TRANSCRIPT_OUTCOMES.join(", ")}`);
 	}
 	if (rec["local_only"] !== undefined && typeof rec["local_only"] !== "boolean") refuse("invalid-request", "local_only must be a boolean");
+	const untilMs = untilMsField(rec["until_ms"]);
 	return {
 		outcome: "committed",
 		session_id,
@@ -668,6 +723,7 @@ function parseCommit(input: unknown): CommittedRequest | RefusedRequest {
 		files: { added: countField(files["added"], "files.added"), modified: countField(files["modified"], "files.modified"), deleted: countField(files["deleted"], "files.deleted") },
 		transcript: transcript as RollbackTranscriptOutcome,
 		local_only: rec["local_only"] === true,
+		...(untilMs !== undefined ? { until_ms: untilMs } : {}),
 	};
 }
 
@@ -895,7 +951,9 @@ async function commitCommitted(deps: SessionRollbackDeps, request: CommittedRequ
 		return failure("invalid-request", "plan_digest is required for a committed rollback: call session_rollback_plan first and present its plan_digest");
 	}
 
-	const ctx: PlanContext = { sessionId, rollbackId: request.rollback_id, target, visible, notes };
+	const cutMs = checkpointCut(Date.parse(target.event.ts), target.payload.taken_at_ms).cutMs;
+	const untilIso = untilBound(request.until_ms, cutMs, deps.nowMs());
+	const ctx: PlanContext = { sessionId, rollbackId: request.rollback_id, target, visible, notes, untilIso };
 	const planned = await buildPlan(deps, ctx, caller, false);
 	if (planned.plan.plan_digest !== request.plan_digest) {
 		return failure("stale-plan", "the plan changed since it was computed (the target, or the memory the rollback would forget); nothing was changed: call session_rollback_plan again");

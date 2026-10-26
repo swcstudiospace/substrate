@@ -69,7 +69,8 @@ describe("checkpoint, mutate, rollback, against the real server", () => {
 			writeScenarioA(dir);
 			const pendingDir = join(tempDir(), "pending");
 			const randomBytes = seededRandomBytes(11);
-			const base = { worktree: dir, sessionId: SESSION, surface: "claude-code", client: server.client, now: FIXED_NOW, randomBytes, pendingDir, policy: SCENARIO_POLICY };
+			// The checkpoints are taken on the real clock the server's ledger also runs on, so `taken_at_ms` is honoured and the cut is the checkpoint's own moment.
+			const base = { worktree: dir, sessionId: SESSION, surface: "claude-code", client: server.client, now: () => new Date(), randomBytes, pendingDir, policy: SCENARIO_POLICY };
 
 			// A checkpoint of state A, recorded by the server.
 			const c1 = await createCheckpoint({ ...base, trigger: "manual" });
@@ -79,12 +80,16 @@ describe("checkpoint, mutate, rollback, against the real server", () => {
 
 			// Memory around it: before, after (two), after by another surface, after in another session.
 			const at = (ms: number): string => new Date(ms).toISOString();
+			// Written shortly after the checkpoint, all before the rollback starts: `until_ms` (the instant the rollback began) bounds what it forgets,
+			// and the server refuses a bound more than 30 seconds ahead of its own clock.
 			w.index.entries.push(
 				entry({ id: "mem_before", created: at(t - 60_000) }),
-				entry({ id: "mem_after_1", created: at(t + 60_000) }),
-				entry({ id: "mem_after_2", created: at(t + 61_000) }),
-				entry({ id: "mem_hermes", created: at(t + 62_000), writer: "hermes" }),
-				entry({ id: "mem_elsewhere", created: at(t + 63_000), session_id: "another-session" }),
+				entry({ id: "mem_after_1", created: at(t + 1_000) }),
+				entry({ id: "mem_after_2", created: at(t + 2_000) }),
+				entry({ id: "mem_hermes", created: at(t + 3_000), writer: "hermes" }),
+				entry({ id: "mem_elsewhere", created: at(t + 4_000), session_id: "another-session" }),
+				// Written AFTER the rollback began: the new timeline, never forgotten by this rollback or by one that is delivered late.
+				entry({ id: "mem_new_timeline", created: at(t + 20_000) }),
 			);
 			seedDocuments(w.plane, w.index.entries);
 
@@ -94,7 +99,8 @@ describe("checkpoint, mutate, rollback, against the real server", () => {
 			expect(c2.server).toMatchObject({ status: "recorded", stored: true });
 			const toolsBefore = server.tools.length;
 
-			const first = await rollback({ ...base, target: c1.checkpoint.ckpt_id, dryRun: false, force: false, offline: false, transcript: new FakeTranscript() });
+			const rolling = { ...base, now: () => new Date(t + 10_000) };
+			const first = await rollback({ ...rolling, target: c1.checkpoint.ckpt_id, dryRun: false, force: false, offline: false, transcript: new FakeTranscript() });
 
 			// The contract held end to end: one plan, the pre-restore checkpoint, one commit, and no stale-plan round.
 			expect(first.status).toBe("committed");
@@ -141,22 +147,23 @@ describe("checkpoint, mutate, rollback, against the real server", () => {
 
 			// The memory: what was written after the checkpoint, by this surface, in this session, is out of force.
 			expect(w.index.forgotten().sort()).toEqual(["mem_after_1", "mem_after_2"]);
-			for (const kept of ["mem_before", "mem_hermes", "mem_elsewhere"]) expect((await w.index.readEntry(kept))?.superseded_by).toBeUndefined();
+			for (const kept of ["mem_before", "mem_hermes", "mem_elsewhere", "mem_new_timeline"]) expect((await w.index.readEntry(kept))?.superseded_by).toBeUndefined();
 			// The rows stay for audit: a forgotten entry is still readable by id, only marked.
 			expect((await w.index.readEntry("mem_after_1"))?.superseded_by).toMatch(/^forgotten:fg_[0-9a-f]{26}$/);
 			// And its plane document is deleted, the others are not.
 			const deletes = w.plane.requests.filter((request) => request.method === "DELETE").map((request) => request.path.split("/").pop());
 			expect(deletes.sort()).toEqual(["idem-mem_after_1", "idem-mem_after_2"]);
-			expect((w.plane.banks.get(bankOf("claude-code"))?.memories ?? []).map((memory) => memory.document_id)).toEqual(["idem-mem_before", "idem-mem_elsewhere"]);
+			// mem_new_timeline was written AFTER the rollback (the new timeline): it is kept, which is what the until bound is for.
+			expect((w.plane.banks.get(bankOf("claude-code"))?.memories ?? []).map((memory) => memory.document_id)).toEqual(["idem-mem_before", "idem-mem_elsewhere", "idem-mem_new_timeline"]);
 			expect((w.plane.banks.get(bankOf("hermes"))?.memories ?? []).map((memory) => memory.document_id)).toEqual(["idem-mem_hermes"]);
 			// Recall after the rollback: nothing is left in force after the rollback point for this surface and session.
 			expect((await w.substrate.sessionRollbackPlan({ session_id: SESSION, target_ckpt_id: c1.checkpoint.ckpt_id }, { surface: "claude-code", isOperator: false })).ok).toBe(true);
-			expect((await w.index.memoryEntriesCreatedAfter(SESSION, at(t), null, 100)).entries.map((candidate) => candidate.id)).toEqual(["mem_hermes"]);
+			expect((await w.index.memoryEntriesCreatedAfter(SESSION, at(t), null, 100)).entries.map((candidate) => candidate.id)).toEqual(["mem_hermes", "mem_new_timeline"]);
 
 			// A second rollback run to the same checkpoint: not drift, no files to change, nothing left to forget.
 			const marks = w.index.marks.length;
 			const planeRequests = w.plane.requests.length;
-			const second = await rollback({ ...base, target: c1.checkpoint.ckpt_id, dryRun: false, force: false, offline: false, transcript: new FakeTranscript() });
+			const second = await rollback({ ...rolling, target: c1.checkpoint.ckpt_id, dryRun: false, force: false, offline: false, transcript: new FakeTranscript() });
 
 			expect(second.status).toBe("committed");
 			expect(second.rollback_id).not.toBe(first.rollback_id);
@@ -196,8 +203,10 @@ describe("checkpoint, mutate, rollback, against the real server", () => {
 
 		const result = await rollback({ ...base, target: c1.checkpoint.ckpt_id, dryRun: false, force: false, offline: false, transcript: new FakeTranscript() });
 
-		expect(result.status).toBe("failed");
-		expect(result.failure?.code).toBe("not-found");
+		// The server's `not-found` is the CLI's target-not-found refusal: nothing is restored and the refusal is recorded.
+		expect(result.status).toBe("refused");
+		expect(result.refusal?.reason).toBe("target-not-found");
+		expect(sessionEvents(w.ledger.events, "session.rollback.refused")).toHaveLength(1);
 		expect((await snapshot({ worktree: dir, policy: SCENARIO_POLICY, now: FIXED_NOW })).tree).toBe(before);
 		expect(sessionEvents(w.ledger.events, "session.rollback")).toHaveLength(0);
 	});

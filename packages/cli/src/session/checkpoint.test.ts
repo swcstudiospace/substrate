@@ -98,6 +98,40 @@ describe("createCheckpoint", () => {
 		expect(result.checkpoint.skipped_count).toBe(1);
 	});
 
+	test("sends the time the snapshot was pinned, from the injected clock, and keeps it in the pinned metadata", async () => {
+		const { dir, pendingDir, server, randomBytes } = setup();
+		const pinned = new Date("2026-03-04T05:06:07.891Z");
+		const result = await createCheckpoint({ worktree: dir, sessionId: SESSION, trigger: "turn", surface: "claude-code", client: server, now: () => pinned, randomBytes, pendingDir });
+		expect(server.checkpoints.get(result.checkpoint.ckpt_id)?.taken_at_ms).toBe(pinned.getTime());
+		expect(result.checkpoint.taken_at_ms).toBe(pinned.getTime());
+		// Read back from the ref alone: the commit time has only whole seconds, the metadata has the millisecond.
+		const local = await listLocalCheckpoints({ worktree: dir });
+		expect(local.checkpoints[0]?.taken_at_ms).toBe(pinned.getTime());
+	});
+
+	test("a checkpoint journaled while the server was down still reaches it with the time it was taken, hours later", async () => {
+		const { dir, pendingDir, server, randomBytes } = setup();
+		const pinned = new Date("2026-03-04T05:06:07.891Z");
+		server.down = true;
+		const result = await createCheckpoint({ worktree: dir, sessionId: SESSION, trigger: "turn", surface: "cursor", client: server, now: () => pinned, randomBytes, pendingDir });
+		const queued = listPending(pendingDir).items[0];
+		expect(queued?.kind === "checkpoint" && queued.record.taken_at_ms).toBe(pinned.getTime());
+
+		server.down = false;
+		await replayPending({ dir: pendingDir, clientFor: () => server });
+		expect(server.checkpoints.get(result.checkpoint.ckpt_id)?.taken_at_ms).toBe(pinned.getTime());
+	});
+
+	test("offering an existing checkpoint again sends its original pin time, not the time of the offer", async () => {
+		const { dir, pendingDir, server, randomBytes } = setup();
+		const pinned = new Date("2026-03-04T05:06:07.891Z");
+		const first = await createCheckpoint({ worktree: dir, sessionId: SESSION, trigger: "turn", surface: "claude-code", client: new FakeServer(), now: () => pinned, randomBytes, pendingDir });
+		const later = new Date("2026-03-05T00:00:00.000Z");
+		const again = await createCheckpoint({ worktree: dir, sessionId: SESSION, trigger: "turn", surface: "claude-code", client: server, now: () => later, randomBytes, pendingDir, seq: 1 });
+		expect(again.created).toBe(false);
+		expect(server.checkpoints.get(first.checkpoint.ckpt_id)?.taken_at_ms).toBe(pinned.getTime());
+	});
+
 	test("the server being down is not a checkpoint failure: the checkpoint stands and is journaled, and sync delivers it exactly once", async () => {
 		const { dir, pendingDir, server, randomBytes } = setup();
 		server.down = true;

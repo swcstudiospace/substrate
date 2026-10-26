@@ -944,7 +944,9 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"a devnet reset, an hour too large to rebuild; never a verdict of tampering) and `mismatch` (a read that succeeded disagrees with the " +
 				"ledger). The evidence carries hashes, the proof path, public keys and a transaction signature only, never event contents. " +
 				"A `ckpt_id` is searched for in the newest 500 notes of `session_id` when given, else of your own surface in the last seven days; " +
-				"an older or foreign checkpoint needs its `event_id`. Read-only: no transaction is ever sent.",
+				"an older or foreign checkpoint needs its `event_id`. The reply carries `signer_set` ({source: env|pubkey, entries, rotation_notes_applied, " +
+				"rotation_issues, read_gap}): which bootstrap judged the signer, and any rotation note that was ignored or a read that was truncated. " +
+				"Read-only: no transaction is ever sent.",
 			inputSchema: {
 				ckpt_id: z.string().regex(/^ckpt_[0-9a-z]{26}$/).optional().describe("the checkpoint id, ckpt_ plus 26 characters of 0-9 a-z"),
 				event_id: z.string().min(1).max(128).optional().describe("the ledger event id of the checkpoint"),
@@ -972,7 +974,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"`hash-mismatch`, `pending`, `unanchored`, `unverified` or `anchor-mismatch`, with the reasons in order. `verified` means the hash is " +
 				"intact AND the cited source event is anchored; it does NOT prove that event concerns this entry. A forgotten entry reports that it " +
 				"was forgotten. An entry you cannot read (another surface's `agent:` scope, or past its lifetime under enforcement) answers as if absent. " +
-				"The reply carries hashes and a transaction signature, never the entry's text. Read-only.",
+				"The reply carries hashes and a transaction signature, never the entry's text, plus `signer_set` (as in checkpoint_verify) when an anchor check ran. Read-only.",
 			inputSchema: {
 				id: z.string().min(1).max(200).describe("the memory entry id"),
 				repo: z.string().optional().describe("owner/name of the repo you are working in; `agent:` entries are readable only for it, as in memory_search"),
@@ -1011,7 +1013,9 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"its seq, trigger, git tree, manifest digest and counts, and optionally a transcript pointer and a plan reference. The server attaches " +
 				"the ledger chain position (`chain_head`) itself. Required: `session_id`, `ckpt_id`, `seq`, `trigger` (turn, plan-step, steering, " +
 				"manual, pre-restore, baseline), `git_tree`, `manifest_sha256`, `file_count`, `skipped_count`; optional: `git_base_commit`, `branch`, " +
-				"`transcript_ref`, `plan_ref`, `prev_ckpt_id`. Idempotent by `ckpt_id`: a repeat answers `stored: false` with the existing `event_id`. " +
+				"`transcript_ref`, `plan_ref`, `prev_ckpt_id`, `taken_at_ms` (epoch ms when the snapshot was pinned: a checkpoint recorded late cuts memory at " +
+				"the earlier of that and its record time; honoured from 30 days before to 30 seconds after the record time, else ignored with a warning). " +
+				"Idempotent by `ckpt_id`: a repeat answers `stored: false` with the existing `event_id`. " +
 				"A seq or `prev_ckpt_id` that disagrees with your newest recorded checkpoint is a warning in the reply, never a failure (a client may record " +
 				"late). Carries ids, digests and counts only, never file, transcript or memory content. The server never touches a worktree and never " +
 				"reads a transcript. Answers `{ok:true, ckpt_id, event_id, stored}` or `{ok:false, error:{code, message}}`.",
@@ -1029,6 +1033,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				transcript_ref: z.record(z.string(), z.unknown()).optional().describe("an opaque pointer into the surface's transcript, never a path"),
 				plan_ref: z.record(z.string(), z.unknown()).optional().describe("{phase?, step?}"),
 				prev_ckpt_id: z.string().optional(),
+				taken_at_ms: z.number().optional().describe("epoch milliseconds when the snapshot was pinned; non-negative integer"),
 				chain_head: z.record(z.string(), z.unknown()).optional().describe("ignored: the server attaches the ledger chain position itself"),
 			},
 			annotations: { destructiveHint: false, idempotentHint: true },
@@ -1056,6 +1061,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				session_id: z.string().optional(),
 				target_ckpt_id: z.string().optional().describe("the checkpoint to go back to, ckpt_ plus 26 characters of 0-9 a-z"),
 				rollback_id: z.string().optional().describe("rb_ plus 26 characters of 0-9 a-z; derived from the session, the target and the newest checkpoint when absent"),
+				until_ms: z.number().optional().describe("epoch ms: memory written after it belongs to the session's new timeline and is never selected; not more than 30 seconds ahead, not before the checkpoint's cut; absent means now"),
 			},
 			annotations: { readOnlyHint: true },
 		},
@@ -1076,7 +1082,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"transcript-stale, invalid-request, and an optional short `detail`) appends one `session.rollback.refused` warning. " +
 				"`outcome: \"committed\"` requires the `plan_digest` from `session_rollback_plan` plus `from_ckpt_id`, `pre_restore_tree`, " +
 				"`pre_restore_ckpt_id`, `files` ({added, modified, deleted}) and `transcript` (moved-leaf, marker-only, unsupported, stale); " +
-				"`local_only` marks a commit made without a server plan. The plan is recomputed: a digest that no longer matches answers `stale-plan` " +
+				"`local_only` marks a commit made without a server plan. `until_ms` (epoch ms) bounds the memory forgotten to what was written at or before it: " +
+				"send the bound the plan used, so a commit delivered late does not forget the session's new timeline. The plan is recomputed: a digest that no longer matches answers `stale-plan` " +
 				"and changes nothing. Otherwise the memory entries YOUR surface wrote in the session after the checkpoint are taken out of force (never " +
 				"deleted: recall, search and the brief stop serving them, the rows and the ledger stay for audit), their Hindsight documents are deleted, " +
 				"and one `session.rollback` note is appended with the real totals. Idempotent by `rollback_id`: a repeat answers the earlier result " +
@@ -1096,6 +1103,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				files: z.record(z.string(), z.unknown()).optional().describe("committed: {added, modified, deleted} counts"),
 				transcript: z.string().optional().describe("committed: moved-leaf, marker-only, unsupported or stale"),
 				local_only: z.boolean().optional(),
+				until_ms: z.number().optional().describe("committed: the same bound the plan was made with"),
 			},
 			annotations: { destructiveHint: true, idempotentHint: true },
 		},

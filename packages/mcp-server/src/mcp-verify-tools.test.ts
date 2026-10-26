@@ -327,6 +327,28 @@ describe("checkpoint_verify: the hour's leaves are read at most maxLeaves + 1", 
 		expect(sliceCalls).toEqual([[0, DEFAULT_MAX_LEAVES + 1]]);
 		// The proof was never attempted over a partial hour.
 		expect(reply.json().evidence).toMatchObject({ leaf_index: null, proof: null, computed_root: null });
+		// The answer says which signer set it judged against, so an ignored rotation note or a truncated read is not silent.
+		expect(reply.json().signer_set).toEqual({ source: "pubkey", entries: 1, rotation_notes_applied: 0, rotation_issues: [], read_gap: null });
+	});
+});
+
+describe("SUBSTRATE_ANCHOR_SIGNER_SET reaches both tools", () => {
+	test("a malformed value answers unverified with the fixed reason on both, and no part of it is echoed or read", async () => {
+		const secret = "CANARY-signer-set-value";
+		const entry = memoryEntry();
+		const w = await connect({ env: { ...ANCHOR_ENV, SUBSTRATE_ANCHOR_SIGNER_SET: `not json ${secret}` }, entries: [entry] });
+
+		const checkpoint = await call(w.client, "checkpoint_verify", { ckpt_id: CKPT });
+		expect(checkpoint.json()).toMatchObject({ status: "unverified", ref: CKPT });
+		expect(checkpoint.json().reasons).toEqual(["Solana is not usable: SUBSTRATE_ANCHOR_SIGNER_SET is malformed (the server's boot warnings say why)"]);
+		expect(checkpoint.text).not.toContain(secret);
+
+		const memory = await call(w.client, "memory_verify", { id: entry.id });
+		expect(memory.json()).toMatchObject({ status: "unverified", anchor: { status: "unverified", proof_ref: null } });
+		expect((memory.json().reasons as string[]).join(" ")).toContain("SUBSTRATE_ANCHOR_SIGNER_SET is malformed");
+		expect(memory.text).not.toContain(secret);
+		expect(w.ledger.total()).toBe(0);
+		expect(w.rpcTouched).toEqual([]);
 	});
 });
 

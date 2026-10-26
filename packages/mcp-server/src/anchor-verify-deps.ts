@@ -14,11 +14,16 @@
  * - `fetchAnchorTransaction`: `Rpc.transactionMemo`, asked at `finalized` and then at `confirmed` (an anchor lands at
  *   `confirmed` first), with the RPC's block time converted from seconds to milliseconds.
  * - `getGenesisHash`: the RPC's.
- * - `signerSet`: the bootstrap set (the configured anchor public key, valid from the epoch with no end) folded with the
- *   `anchor.signer.rotate` events an OPERATOR surface wrote (`signerSetFromRotationEvents`; the ledger accepts events from
- *   any authenticated caller, so an event from a non-operator surface is ignored). The rotation read is the newest 500
- *   notes of each operator surface; when a surface returns a full page, or the read fails, the set may be incomplete, and
- *   a `mismatch` that rests on the signer alone is reported as `unverified` with that reason instead.
+ * - `signerSet`: the bootstrap set, folded with the `anchor.signer.rotate` events an OPERATOR surface wrote
+ *   (`signerSetFromRotationEvents`; the ledger accepts events from any authenticated caller, so an event from a non-operator
+ *   surface is ignored). The bootstrap is `SUBSTRATE_ANCHOR_SIGNER_SET` when it is set (it REPLACES the next form: keep the old
+ *   key in it with its `valid_until_ms` and rotating the job key by `SOLANA_ANCHOR_PUBKEY` leaves every old anchor verifiable),
+ *   else the configured anchor public key alone, valid from the epoch with no end. A malformed `SUBSTRATE_ANCHOR_SIGNER_SET`
+ *   answers `unverified` with a fixed reason, never an empty set. The rotation read is the newest 500 notes of each operator
+ *   surface; when a surface returns a full page, or the read fails, the set may be incomplete, and a `mismatch` that rests on the
+ *   signer alone is reported as `unverified` with that reason instead. Every result of a verification that started carries a
+ *   small `signer_set` summary (source, size, rotation notes applied, rotation notes ignored and why, the read gap), so an
+ *   ignored rotation note is not silent.
  * - `expectedGenesis`: devnet's (`DEVNET_GENESIS_HASH`).
  *
  * Solana unconfigured (no anchor public key, or a refused RPC URL) or no ledger: the answer is `unverified` with the reason,
@@ -71,7 +76,14 @@ export interface AnchorVerifyPorts {
 	/** The devnet RPC. Built lazily so an unconfigured or refused setup never constructs one. */
 	rpc: () => Rpc;
 	/** `config.solana.pubkey` and `config.solana.problem`. */
-	solana: { pubkey: string | null; problem: string | null };
+	solana: {
+		pubkey: string | null;
+		problem: string | null;
+		/** `config.solana.signerSet`: the parsed `SUBSTRATE_ANCHOR_SIGNER_SET`, or null/absent when it is unset. */
+		signerSet?: SignerSet | null;
+		/** `config.solana.signerSetProblem`: set when `SUBSTRATE_ANCHOR_SIGNER_SET` is malformed. The value is never carried. */
+		signerSetProblem?: string | null;
+	};
 	/** Surfaces whose rotation events count (`operatorSurfaces(config)`). */
 	operatorSurfaces: ReadonlySet<string>;
 	/** Epoch milliseconds. */
@@ -91,13 +103,30 @@ export interface UnverifiedResult {
 	reasons: string[];
 }
 
-export type CheckpointVerifyToolResult = (CheckpointVerifyResult | UnverifiedResult) & { signer_set_complete?: false };
-export type EventAnchorToolResult = (EventAnchorResult | UnverifiedResult) & { signer_set_complete?: false };
+/** Rotation notes the summary names when they were ignored; the rest are counted by the size of the set alone. */
+export const MAX_REPORTED_ROTATION_ISSUES = 10;
+
+/** What a verification says about the signer set it judged against. Small by construction; public keys and ids only. */
+export interface SignerSetSummary {
+	/** `env`: `SUBSTRATE_ANCHOR_SIGNER_SET` was the bootstrap. `pubkey`: `SOLANA_ANCHOR_PUBKEY` alone was. */
+	source: "env" | "pubkey";
+	/** Entries in the effective set (bootstrap plus applied rotations). */
+	entries: number;
+	rotation_notes_applied: number;
+	/** Rotation notes that were ignored, with the rule that ignored them (at most {@link MAX_REPORTED_ROTATION_ISSUES}). */
+	rotation_issues: Array<{ event_id: string; reason: string }>;
+	/** Why the rotation read may be incomplete (a full 500-note page, or a failed read), or null. */
+	read_gap: string | null;
+}
+
+export type CheckpointVerifyToolResult = (CheckpointVerifyResult | UnverifiedResult) & { signer_set_complete?: false; signer_set?: SignerSetSummary };
+export type EventAnchorToolResult = (EventAnchorResult | UnverifiedResult) & { signer_set_complete?: false; signer_set?: SignerSetSummary };
 
 interface Prepared {
 	deps: CheckpointVerifyDeps;
 	/** Why the signer set may be incomplete, or null. */
 	gap: string | null;
+	summary: SignerSetSummary;
 }
 
 function describe(cause: unknown): string {
@@ -110,7 +139,10 @@ export function anchorVerifyBlocker(ports: Pick<AnchorVerifyPorts, "ledger" | "s
 	// The config problem is written for the operator's boot log: the guard names the refused host there. A tool reply goes to any
 	// caller and a private RPC host must not reach one, so the reply carries a fixed reason and the detail stays in the boot warnings.
 	if (ports.solana.problem !== null) return "Solana is not usable: SOLANA_RPC_URL refused by the devnet-only guard (the server's boot warnings say why)";
-	if (ports.solana.pubkey === null) return "Solana is not configured (SOLANA_ANCHOR_PUBKEY is unset), so no anchor can be checked against devnet";
+	// Fixed text, like the refused RPC URL: a tool reply goes to any caller and the malformed value never leaves the config.
+	if ((ports.solana.signerSetProblem ?? null) !== null) return "Solana is not usable: SUBSTRATE_ANCHOR_SIGNER_SET is malformed (the server's boot warnings say why)";
+	// A configured signer set replaces the public key as the bootstrap, so the key is only required when there is no set.
+	if (ports.solana.pubkey === null && (ports.solana.signerSet ?? null) === null) return "Solana is not configured (SOLANA_ANCHOR_PUBKEY is unset), so no anchor can be checked against devnet";
 	return null;
 }
 
@@ -150,11 +182,14 @@ async function findCheckpoint(ports: AnchorVerifyPorts, ledger: AnchorLedger, ck
 	return null;
 }
 
-/** The signer set and why it may be incomplete. Never throws: a failed rotation read leaves the bootstrap set and a gap. */
-async function readSignerSet(ports: AnchorVerifyPorts, ledger: AnchorLedger, pubkey: string): Promise<{ set: SignerSet; gap: string | null }> {
-	const bootstrap = parseSignerSet([{ pubkey, valid_from_ms: 0, valid_until_ms: null }]);
+/** The signer set, why it may be incomplete, and the summary a result carries. Never throws for a failed read: a failed rotation read leaves the bootstrap set and a gap. */
+async function readSignerSet(ports: AnchorVerifyPorts, ledger: AnchorLedger): Promise<{ set: SignerSet; gap: string | null; summary: SignerSetSummary }> {
+	const configured = ports.solana.signerSet ?? null;
+	// Throws when the configured anchor key is not a public key: `prepare` answers that as an unverified reason.
+	const bootstrap = configured !== null ? parseSignerSet(configured) : parseSignerSet([{ pubkey: ports.solana.pubkey as string, valid_from_ms: 0, valid_until_ms: null }]);
+	const source = configured !== null ? "env" : "pubkey";
 	const surfaces = [...ports.operatorSurfaces].sort().slice(0, MAX_OPERATOR_SURFACES);
-	if (surfaces.length === 0) return { set: bootstrap, gap: null };
+	if (surfaces.length === 0) return { set: bootstrap, gap: null, summary: { source, entries: bootstrap.length, rotation_notes_applied: 0, rotation_issues: [], read_gap: null } };
 	const events: RotationEventInput[] = [];
 	let gap: string | null = null;
 	for (const surface of surfaces) {
@@ -178,7 +213,14 @@ async function readSignerSet(ports: AnchorVerifyPorts, ledger: AnchorLedger, pub
 		// Rotation events are honoured only from an operator surface: the ledger takes events from any authenticated caller.
 		authorize: (event) => event.surface !== undefined && ports.operatorSurfaces.has(event.surface),
 	});
-	return { set: derived.set, gap };
+	const summary: SignerSetSummary = {
+		source,
+		entries: derived.set.length,
+		rotation_notes_applied: derived.applied.length,
+		rotation_issues: derived.issues.slice(0, MAX_REPORTED_ROTATION_ISSUES).map(({ event_id, reason }) => ({ event_id, reason })),
+		read_gap: gap,
+	};
+	return { set: derived.set, gap, summary };
 }
 
 /** Level a transaction was found at, asked highest first. A node that does not know the signature at any level answers null. */
@@ -204,10 +246,9 @@ async function prepare(ports: AnchorVerifyPorts, lookup: CheckpointLookup): Prom
 	const blocker = anchorVerifyBlocker(ports);
 	if (blocker !== null) return blocker;
 	const ledger = ports.ledger as AnchorLedger;
-	const pubkey = ports.solana.pubkey as string;
-	let signers: { set: SignerSet; gap: string | null };
+	let signers: { set: SignerSet; gap: string | null; summary: SignerSetSummary };
 	try {
-		signers = await readSignerSet(ports, ledger, pubkey);
+		signers = await readSignerSet(ports, ledger);
 	} catch (cause) {
 		// The configured key is not a valid public key, or the rotation fold refused: nothing can be checked against a signer set.
 		return `the signer set could not be built: ${describe(cause)}`;
@@ -222,7 +263,7 @@ async function prepare(ports: AnchorVerifyPorts, lookup: CheckpointLookup): Prom
 		nowMs: ports.nowMs(),
 		config: { expectedGenesis: DEVNET_GENESIS_HASH, anchorLagMs: DEFAULT_ANCHOR_LAG_MS, maxLeaves: DEFAULT_MAX_LEAVES },
 	};
-	return { deps, gap: signers.gap };
+	return { deps, gap: signers.gap, summary: signers.summary };
 }
 
 /**
@@ -234,10 +275,12 @@ async function prepare(ports: AnchorVerifyPorts, lookup: CheckpointLookup): Prom
 async function settleSignerGap<R extends { status: string; evidence: CheckpointEvidence; reasons: string[] }>(
 	result: R,
 	gap: string | null,
+	summary: SignerSetSummary,
 	again: (extraSigner: string) => Promise<string>,
-): Promise<R & { signer_set_complete?: false }> {
-	if (gap === null) return result;
-	const flagged = { ...result, signer_set_complete: false as const };
+): Promise<R & { signer_set_complete?: false; signer_set: SignerSetSummary }> {
+	const reported = { ...result, signer_set: summary };
+	if (gap === null) return reported;
+	const flagged = { ...reported, signer_set_complete: false as const };
 	const signer = result.evidence.signer;
 	if (result.status !== "mismatch" || signer === null) return flagged;
 	if ((await again(signer)) !== "anchored") return flagged;
@@ -257,7 +300,7 @@ export async function verifyCheckpointRef(ports: AnchorVerifyPorts, ref: string,
 	const prepared = await prepare(ports, lookup);
 	if (typeof prepared === "string") return { status: "unverified", ref, reasons: [prepared] };
 	const result = await verifyCheckpoint(prepared.deps, ref);
-	return settleSignerGap(result, prepared.gap, async (signer) => (await verifyCheckpoint(withSigner(prepared.deps, signer), ref)).status);
+	return settleSignerGap(result, prepared.gap, prepared.summary, async (signer) => (await verifyCheckpoint(withSigner(prepared.deps, signer), ref)).status);
 }
 
 /** Verify that one ledger event, by event id, sits in an anchored root. Same errors and statuses as `verifyCheckpointRef`. */
@@ -265,7 +308,7 @@ export async function verifyEventRef(ports: AnchorVerifyPorts, eventId: string):
 	const prepared = await prepare(ports, {});
 	if (typeof prepared === "string") return { status: "unverified", ref: eventId, reasons: [prepared] };
 	const result = await verifyEventAnchor(prepared.deps, eventId);
-	return settleSignerGap(result, prepared.gap, async (signer) => (await verifyEventAnchor(withSigner(prepared.deps, signer), eventId)).status);
+	return settleSignerGap(result, prepared.gap, prepared.summary, async (signer) => (await verifyEventAnchor(withSigner(prepared.deps, signer), eventId)).status);
 }
 
 /**
@@ -276,9 +319,12 @@ export async function verifyEventRef(ports: AnchorVerifyPorts, eventId: string):
 export async function anchorEvidenceFor(
 	ports: AnchorVerifyPorts,
 	eventId: string,
+	/** Told the signer set summary of the verification, when one ran (the memory verifier attaches it to its own result). */
+	observe?: (summary: SignerSetSummary) => void,
 ): Promise<{ status: "anchored" | "pending" | "unanchored" | "unverified" | "mismatch"; proof_ref: string | null; detail?: string }> {
 	try {
 		const result = await verifyEventRef(ports, eventId);
+		if (result.signer_set !== undefined) observe?.(result.signer_set);
 		const detail = result.reasons[0];
 		const proof = "evidence" in result ? result.evidence.signature : null;
 		return { status: result.status, proof_ref: result.status === "anchored" ? proof : null, ...(detail !== undefined ? { detail } : {}) };

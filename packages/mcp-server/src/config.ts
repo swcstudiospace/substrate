@@ -5,7 +5,7 @@
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
 import { createHash, timingSafeEqual } from "node:crypto";
-import { assertDevnetRpcUrl, SOLANA_CLI_DEFAULT } from "@substrate/ledger";
+import { assertDevnetRpcUrl, parseSignerSet, SignerSetError, SOLANA_CLI_DEFAULT, type SignerSet } from "@substrate/ledger";
 import { ADMISSION_CLASSES, loadBreakerSettings, type AdmissionClass, type BreakerSettings } from "@substrate/observability";
 import { loadBriefProfileConfig, type BriefProfileConfig } from "./brief-profile.ts";
 import { ADMISSION_MODES, type AdmissionMode, type AdmissionSettings, type BucketLimit } from "./admission.ts";
@@ -460,8 +460,21 @@ export interface SubstrateConfig {
 	 * (`assertDevnetRpcUrl`: not http(s), userinfo, a fragment, or a mainnet/testnet
 	 * host). It never crashes boot; `configWarnings` reports it, and the anchor job
 	 * and the verify read-back refuse to touch the network while it is set.
+	 *
+	 * `signerSet` is the parsed `SUBSTRATE_ANCHOR_SIGNER_SET` (null when unset): the verifier's bootstrap signer set,
+	 * which REPLACES `[pubkey]` so a rotated job key does not drop the keys that signed earlier anchors. A malformed
+	 * value is `signerSetProblem` (a rule and a field path, NEVER the value) with `signerSet` null; verification then
+	 * answers `unverified` with a fixed reason instead of judging against a missing or empty set.
 	 */
-	solana: { rpcUrl: string; keypairPath: string | null; pubkey: string | null; cli: string; problem: string | null };
+	solana: {
+		rpcUrl: string;
+		keypairPath: string | null;
+		pubkey: string | null;
+		cli: string;
+		problem: string | null;
+		signerSet: SignerSet | null;
+		signerSetProblem: string | null;
+	};
 	/**
 	 * Whole-verify devnet budget in milliseconds (D28-18).
 	 *
@@ -746,13 +759,36 @@ function readSolana(env: Record<string, string | undefined>): SubstrateConfig["s
 	} catch (cause) {
 		problem = `SOLANA_RPC_URL refused: ${cause instanceof Error ? cause.message : String(cause)}`;
 	}
+	const { signerSet, signerSetProblem } = readAnchorSignerSet(env.SUBSTRATE_ANCHOR_SIGNER_SET);
 	return {
 		rpcUrl,
 		keypairPath: env.SOLANA_ANCHOR_KEYPAIR?.trim() || null,
 		pubkey: env.SOLANA_ANCHOR_PUBKEY?.trim() || null,
 		cli: env.SOLANA_CLI?.trim() || SOLANA_CLI_DEFAULT,
 		problem,
+		signerSet,
+		signerSetProblem,
 	};
+}
+
+/**
+ * `SUBSTRATE_ANCHOR_SIGNER_SET`: unset or blank is no set (the verifier's bootstrap stays `[SOLANA_ANCHOR_PUBKEY]`). A value
+ * that `parseSignerSet` refuses, and an empty array, is a problem naming the rule and the field path, never the value: an
+ * env value can be a pasted secret, and a path that would be an unknown key's own text is left out. The set is then null,
+ * never silently empty.
+ */
+function readAnchorSignerSet(raw: string | undefined): { signerSet: SignerSet | null; signerSetProblem: string | null } {
+	const text = raw?.trim() ?? "";
+	if (text === "") return { signerSet: null, signerSetProblem: null };
+	try {
+		const set = parseSignerSet(text);
+		if (set.length === 0) return { signerSet: null, signerSetProblem: "SUBSTRATE_ANCHOR_SIGNER_SET is not a valid signer set: it names no signer" };
+		return { signerSet: set, signerSetProblem: null };
+	} catch (cause) {
+		if (!(cause instanceof SignerSetError)) return { signerSet: null, signerSetProblem: "SUBSTRATE_ANCHOR_SIGNER_SET could not be read as a signer set" };
+		const where = cause.rule === "unknown_key" || cause.path === "" ? "" : ` at ${cause.path}`;
+		return { signerSet: null, signerSetProblem: `SUBSTRATE_ANCHOR_SIGNER_SET is not a valid signer set: ${cause.rule}${where}` };
+	}
 }
 /** "swarm-a05-be" → "SUBSTRATE_TOKEN_SWARM_A05_BE": the inverse of the suffix mapping in `tokenConfig`. */
 export function tokenEnvName(surface: Surface): string {
@@ -1453,7 +1489,9 @@ export interface ContextualRecallSettings {
 /**
  * v1.6 phase 57c: an unset or empty flag is the default silently. A value outside the vocabulary keeps the
  * default and is named in `problems`, so a typo never switches a policy on. A number that is not a whole
- * number keeps the default; one outside its range is capped to the nearest bound; both are named.
+ * number keeps the default; one outside its range is capped to the nearest bound; both are named. A problem
+ * names the variable, the kind of problem and the value taken, NEVER the value read: an env value can be a
+ * pasted secret, and the boot log is shared.
  */
 function loadContextualRecallSettings(env: Record<string, string | undefined>): ContextualRecallSettings {
 	const problems: string[] = [];
@@ -1462,20 +1500,20 @@ function loadContextualRecallSettings(env: Record<string, string | undefined>): 
 		if (trimmed === "") return fallback;
 		const value = trimmed.toLowerCase();
 		if ((allowed as readonly string[]).includes(value)) return value as T;
-		problems.push(`${name}=${JSON.stringify(trimmed)} is neither ${allowed[0]} nor ${allowed[1]}; running as ${fallback}`);
+		problems.push(`${name} is neither ${allowed[0]} nor ${allowed[1]}; running as ${fallback}`);
 		return fallback;
 	};
 	const whole = (name: string, raw: string | undefined, fallback: number, min: number, max: number): number => {
 		const trimmed = raw?.trim() ?? "";
 		if (trimmed === "") return fallback;
 		if (!/^\d+$/.test(trimmed)) {
-			problems.push(`${name}=${JSON.stringify(trimmed)} is not a whole number; using ${fallback}`);
+			problems.push(`${name} is not a whole number; using ${fallback}`);
 			return fallback;
 		}
 		const value = Number(trimmed);
 		if (value >= min && value <= max) return value;
 		const capped = Math.min(max, Math.max(min, value));
-		problems.push(`${name}=${JSON.stringify(trimmed)} is outside ${min}..${max}; using ${capped}`);
+		problems.push(`${name} is outside ${min}..${max}; using ${capped}`);
 		return capped;
 	};
 	const mode = choice("SUBSTRATE_DOCS_TANDEM", env.SUBSTRATE_DOCS_TANDEM, ["off", "on"], "off");
@@ -1491,7 +1529,7 @@ function loadContextualRecallSettings(env: Record<string, string | undefined>): 
 	};
 }
 
-/** The v1.6 recall flags that were refused or capped, for the boot log. Values are mode names and numbers, never credentials. */
+/** The v1.6 recall flags that were refused or capped, for the boot log. Names, problem kinds and the value taken; never the raw value read. */
 export function contextualRecallConfigWarnings(config: SubstrateConfig): string[] {
 	return [...config.contextualRecall.problems];
 }
@@ -1831,6 +1869,10 @@ export function configWarnings(config: SubstrateConfig): string[] {
 	// Before the early return too: a refused RPC URL stops anchoring and verify on every deployment.
 	if (config.solana.problem) {
 		warnings.push(`anchoring and the verify read-back are refused until SOLANA_RPC_URL is fixed: ${config.solana.problem}`);
+	}
+	// Named by variable, rule and field path only: the value never reaches the log.
+	if (config.solana.signerSetProblem !== null) {
+		warnings.push(`checkpoint_verify and memory_verify answer unverified until SUBSTRATE_ANCHOR_SIGNER_SET is fixed: ${config.solana.signerSetProblem}`);
 	}
 	if (config.docsBackendRejected !== null) {
 		warnings.push(`SUBSTRATE_DOCS_BACKEND "${config.docsBackendRejected}" is not a docs plane; docs serve ${config.docsBackend}`);

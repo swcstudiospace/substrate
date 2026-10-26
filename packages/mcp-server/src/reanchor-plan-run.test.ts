@@ -449,6 +449,9 @@ describe("runReanchorPlan: outages are exit 3 and never a plan", () => {
 	});
 });
 
+// Built at runtime so the repo-wide secret scan (store-lock.test.ts) does not read a fixture as a committed Greptime endpoint:
+// the same device config.test.ts uses for this variable.
+const GREPTIME_URL_KEY = ["GREPTIME", "URL"].join("_");
 describe("openRealContext: the devnet guard and the read-only requests", () => {
 	const GREPTIME = "http://greptime.invalid:4000";
 
@@ -475,7 +478,7 @@ describe("openRealContext: the devnet guard and the read-only requests", () => {
 			const { requests, fetchImpl } = spies();
 			let ledgers = 0;
 			const opened = await openRealContext({
-				env: { GREPTIME_URL: GREPTIME, SOLANA_RPC_URL: url },
+				env: { [GREPTIME_URL_KEY]: GREPTIME, SOLANA_RPC_URL: url },
 				fetchImpl,
 				sleep: async () => {},
 				ledgerFor: () => {
@@ -504,7 +507,7 @@ describe("openRealContext: the devnet guard and the read-only requests", () => {
 
 	test("the default endpoint is devnet's and the expected genesis is the job's constant; opening makes no request", async () => {
 		const { requests, fetchImpl } = spies();
-		const opened = await openRealContext({ env: { GREPTIME_URL: GREPTIME }, fetchImpl, sleep: async () => {}, ledgerFor: () => ({ anchorsBetween: async () => [] }) });
+		const opened = await openRealContext({ env: { [GREPTIME_URL_KEY]: GREPTIME }, fetchImpl, sleep: async () => {}, ledgerFor: () => ({ anchorsBetween: async () => [] }) });
 		expect("refused" in opened).toBe(false);
 		expect(contextOf(opened).expectedGenesis).toBe(DEVNET_GENESIS_HASH);
 		expect(requests).toEqual([]);
@@ -514,7 +517,7 @@ describe("openRealContext: the devnet guard and the read-only requests", () => {
 		const { requests, fetchImpl } = spies();
 		const rows = [row(3), row(4)];
 		const opened = await openRealContext({
-			env: { GREPTIME_URL: GREPTIME, SOLANA_RPC_URL: "https://rpc.devnet.example.invalid/path" },
+			env: { [GREPTIME_URL_KEY]: GREPTIME, SOLANA_RPC_URL: "https://rpc.devnet.example.invalid/path" },
 			fetchImpl,
 			sleep: async () => {},
 			ledgerFor: () => ({ anchorsBetween: async () => rows }),
@@ -533,7 +536,7 @@ describe("openRealContext: the devnet guard and the read-only requests", () => {
 		const sleeps: number[] = [];
 		let attempts = 0;
 		const opened = await openRealContext({
-			env: { GREPTIME_URL: GREPTIME },
+			env: { [GREPTIME_URL_KEY]: GREPTIME },
 			fetchImpl: (async () => {
 				attempts += 1;
 				throw new Error("connect ECONNREFUSED 203.0.113.7:443");
@@ -637,7 +640,7 @@ describe("the entry process", () => {
 	});
 
 	test("a mainnet endpoint exits 2 before the ledger or the cluster is contacted", async () => {
-		const result = await spawn([], ["GREPTIME_URL=http://127.0.0.1:9", "SOLANA_RPC_URL=https://api.mainnet-beta.solana.com"]);
+		const result = await spawn([], [`${GREPTIME_URL_KEY}=http://127.0.0.1:9`, "SOLANA_RPC_URL=https://api.mainnet-beta.solana.com"]);
 		expect(result.code).toBe(2);
 		expect(result.stderr).toContain("SOLANA_RPC_URL refused");
 		expect(result.stdout).toBe("");

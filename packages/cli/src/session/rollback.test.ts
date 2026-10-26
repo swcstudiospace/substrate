@@ -409,6 +409,47 @@ describe("the server is not there", () => {
 		expect(w.server.deliveries.commit).toBe(1);
 	});
 
+	test("the instant the rollback began bounds every plan and the commit, and a commit queued offline keeps it for the sync", async () => {
+		const w = world();
+		const { c1 } = await twoStates(w);
+		const began = FIXED_NOW().getTime();
+		const online = await roll(w, c1.checkpoint.ckpt_id);
+		expect(online.status).toBe("committed");
+		expect(w.server.planRequests.at(-1)).toMatchObject({ target_ckpt_id: c1.checkpoint.ckpt_id, until_ms: began });
+		expect(w.server.commits.get(online.rollback_id ?? "")).toMatchObject({ outcome: "committed", until_ms: began });
+
+		// A rollback that could not reach the server at plan time: the bound is in the pending commit, and the sync's plan and commit use it.
+		const offline = world();
+		const states = await twoStates(offline);
+		offline.server.down = true;
+		const queuedRun = await roll(offline, states.c1.checkpoint.ckpt_id);
+		expect(queuedRun.status).toBe("commit-pending");
+		const queued = listPending(offline.pendingDir).items.find((item) => item.kind === "rollback");
+		expect(queued?.kind === "rollback" && queued.commit.until_ms).toBe(began);
+		offline.server.down = false;
+		offline.server.planRequests.length = 0;
+		const synced = await replayPending({ dir: offline.pendingDir, clientFor: () => offline.server });
+		expect(synced.failed).toEqual([]);
+		expect(offline.server.planRequests).toEqual([expect.objectContaining({ rollback_id: queuedRun.rollback_id, until_ms: began })]);
+		expect(offline.server.commits.get(queuedRun.rollback_id ?? "")).toMatchObject({ until_ms: began, local_only: true });
+	});
+
+	test("the server's not-found answer for a target it does not hold is the target-not-found refusal, like a missing local checkpoint", async () => {
+		const w = world();
+		const { c1 } = await twoStates(w);
+		w.server.checkpoints.clear();
+		w.server.notFoundCode = "not-found";
+		const treeBefore = await treeOf(w);
+
+		const result = await roll(w, c1.checkpoint.ckpt_id);
+
+		expect(result).toMatchObject({ status: "refused", refusal: { reason: "target-not-found" } });
+		expect(w.server.refusals.map((refusal) => refusal.outcome === "refused" && refusal.reason)).toEqual(["target-not-found"]);
+		// Nothing was restored: the refusal came before any file was touched.
+		expect(await treeOf(w)).toBe(treeBefore);
+		expect(listPending(w.pendingDir).items.filter((item) => item.kind === "rollback")).toEqual([]);
+	});
+
 	test("an unauthorized plan is a refusal, not a silent local rollback; --offline is the way around it", async () => {
 		const w = world();
 		const { c1 } = await twoStates(w);

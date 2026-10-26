@@ -12,6 +12,9 @@ import type { GreptimeClient } from "./greptime.ts";
 import { FORGET_ACTION } from "./memory-forget.ts";
 import { Substrate } from "./service.ts";
 import {
+	MAX_CLIENT_CLOCK_SKEW_MS,
+	MAX_TAKEN_AT_AGE_MS,
+	checkpointCut,
 	deriveRollbackId,
 	rollbackPlanDigest,
 	sessionRollbackPlan,
@@ -181,6 +184,24 @@ describe("session_checkpoint", () => {
 		expect(plain(clean)["warnings"]).toBeUndefined();
 	});
 
+	test("an implausible taken_at_ms is recorded, ignored, and named in a warning; a plausible one carries none", async () => {
+		const w = world();
+		const tooOld = await w.substrate.sessionCheckpoint(checkpointRequest(1, { taken_at_ms: Date.now() - 31 * 24 * 3_600_000 }), ME);
+		expect(tooOld).toMatchObject({ ok: true, stored: true });
+		expect((plain(tooOld)["warnings"] as string[]).join(" ")).toContain("taken_at_ms is more than 30 days before the record time");
+		const future = await w.substrate.sessionCheckpoint(checkpointRequest(2, { taken_at_ms: Date.now() + 300_000 }), ME);
+		expect((plain(future)["warnings"] as string[]).join(" ")).toContain("taken_at_ms is more than 30 seconds after the record time");
+		const fine = await w.substrate.sessionCheckpoint(checkpointRequest(3, { taken_at_ms: Date.now() - 3_600_000 }), ME);
+		expect(plain(fine)["warnings"]).toBeUndefined();
+		// The field is part of the stored payload either way; only the cut ignores a bad one.
+		expect(w.ledger.byAction("session.checkpoint").map((event) => typeof event.payload["taken_at_ms"])).toEqual(["number", "number", "number"]);
+		const ignoredPlan = await plan(w, 1);
+		const target = w.ledger.byAction("session.checkpoint")[0] as SubstrateEvent;
+		expect(w.index.selectBounds.at(-1)).toEqual([at(Date.parse(target.ts)), null]);
+		expect(ignoredPlan.target.ckpt_id).toBe(ckptId(1));
+		expect((await w.substrate.sessionCheckpoint(checkpointRequest(4, { taken_at_ms: -5 }), ME)).ok).toBe(false);
+	});
+
 	test("a checkpoint id recorded by another surface in the session is a conflict, and nothing is written", async () => {
 		const w = world();
 		await record(w, 1, OTHER);
@@ -309,6 +330,37 @@ describe("session_rollback_plan", () => {
 		// An entry created in the very millisecond of the checkpoint is kept: a tie keeps the entry.
 		w.index.entries.push(entry({ id: "mem_tie", created: at(target.ts) }));
 		expect((await plan(w, 1)).memory.would_forget).toBe(2);
+	});
+
+	test("a checkpoint that carries taken_at_ms cuts memory at the earlier of that time and its record time", async () => {
+		const w = world();
+		const taken = Date.now() - 3_600_000;
+		const late = await record(w, 1, ME, { taken_at_ms: taken });
+		w.index.entries.push(
+			entry({ id: "mem_before_taken", created: at(taken - 1_800_000) }),
+			entry({ id: "mem_between", created: at(taken + 1_800_000) }),
+			entry({ id: "mem_after_record", created: at(late.ts + 60_000) }),
+		);
+
+		const p = await plan(w, 1);
+
+		expect(p.memory.sample_ids).toEqual(["mem_between", "mem_after_record"]);
+		expect(w.index.selectBounds[0]).toEqual([at(taken), null]);
+		// The same checkpoint without the field cuts at its record time, and keeps what was written in between.
+		const onTime = await record(w, 2);
+		w.index.entries.push(entry({ id: "mem_after_second", created: at(onTime.ts + 60_000) }));
+		expect((await plan(w, 2)).memory.sample_ids).toEqual(["mem_after_record", "mem_after_second"]);
+	});
+
+	test("checkpointCut honours taken_at_ms from 30 days before to 30 seconds after the record time, and takes the earlier instant", () => {
+		const record = 1_800_000_000_000;
+		expect(checkpointCut(record, undefined)).toEqual({ cutMs: record, ignored: null });
+		expect(checkpointCut(record, record - 5_000)).toEqual({ cutMs: record - 5_000, ignored: null });
+		expect(checkpointCut(record, record - MAX_TAKEN_AT_AGE_MS)).toEqual({ cutMs: record - MAX_TAKEN_AT_AGE_MS, ignored: null });
+		expect(checkpointCut(record, record - MAX_TAKEN_AT_AGE_MS - 1)).toEqual({ cutMs: record, ignored: expect.stringContaining("more than 30 days before") });
+		// Slightly ahead of the record time is clock skew: honoured, but the record time is still the earlier instant.
+		expect(checkpointCut(record, record + MAX_CLIENT_CLOCK_SKEW_MS)).toEqual({ cutMs: record, ignored: null });
+		expect(checkpointCut(record, record + MAX_CLIENT_CLOCK_SKEW_MS + 1)).toEqual({ cutMs: record, ignored: expect.stringContaining("more than 30 seconds after") });
 	});
 
 	test("shows at most twenty sample ids but counts every entry", async () => {
@@ -531,6 +583,72 @@ describe("session_rollback_commit: committed", () => {
 		const again = await plan(w, 1, ME, p.rollback_id);
 		expect((await w.substrate.sessionRollbackCommit(commitInput(again), ME)).ok).toBe(true);
 		expect(w.index.forgotten()).toHaveLength(3);
+	});
+
+	test("a rollback delivered late forgets only what the old timeline wrote: until_ms bounds the selection, and a commit with another bound than its plan is stale", async () => {
+		const w = world();
+		const target = await record(w, 1);
+		w.index.entries.push(
+			entry({ id: "mem_old_1", created: at(target.ts + 1_000) }),
+			entry({ id: "mem_old_2", created: at(target.ts + 2_000) }),
+			entry({ id: "mem_new_timeline", created: at(target.ts + 3_000) }),
+		);
+		const bounded = planOf(await w.substrate.sessionRollbackPlan({ session_id: SESSION, target_ckpt_id: ckptId(1), until_ms: target.ts + 2_000 }, ME));
+		expect(bounded.memory.sample_ids).toEqual(["mem_old_1", "mem_old_2"]);
+		// The digest covers the entry ids, so the bound reaches it through them.
+		const unbounded = await plan(w, 1);
+		expect(unbounded.memory.sample_ids).toEqual(["mem_old_1", "mem_old_2", "mem_new_timeline"]);
+		expect(unbounded.plan_digest).not.toBe(bounded.plan_digest);
+
+		// The commit drops the bound its plan had: it would forget the new timeline too, so it is stale.
+		const stale = await w.substrate.sessionRollbackCommit(commitInput(bounded), ME);
+		expect(errorOf(stale).code).toBe("stale-plan");
+		expect(w.index.marks).toHaveLength(0);
+
+		const result = await w.substrate.sessionRollbackCommit(commitInput(bounded, { until_ms: target.ts + 2_000 }), ME);
+		expect(result).toMatchObject({ ok: true, memory: { superseded_entries: 2 } });
+		expect(w.index.forgotten().sort()).toEqual(["mem_old_1", "mem_old_2"]);
+		expect((await w.index.readEntry("mem_new_timeline"))?.superseded_by).toBeUndefined();
+		expect(w.index.selectBounds.every(([, until]) => until === null || until === at(target.ts + 2_000))).toBe(true);
+	});
+
+	test("a bad until_ms is refused before anything is forgotten, on a commit as on a plan, and a refusal takes none", async () => {
+		const w = world();
+		const target = await record(w, 1);
+		seedMemory(w, target.ts);
+		const p = await plan(w, 1);
+		const bad: Array<[unknown, string]> = [
+			[Date.now() + 120_000, "more than 30 seconds in the future"],
+			[target.ts - 1, "before the checkpoint's memory cut"],
+			[1.5, "non-negative integer"],
+			[-1, "non-negative integer"],
+			["soon", "non-negative integer"],
+		];
+		for (const [value, fragment] of bad) {
+			const planned = errorOf(await w.substrate.sessionRollbackPlan({ session_id: SESSION, target_ckpt_id: ckptId(1), until_ms: value }, ME));
+			expect(planned.code).toBe("invalid-request");
+			expect(planned.message).toContain(fragment);
+			const committed = errorOf(await w.substrate.sessionRollbackCommit(commitInput(p, { until_ms: value }), ME));
+			expect(committed.code).toBe("invalid-request");
+			expect(committed.message).toContain(fragment);
+		}
+		expect(w.index.marks).toHaveLength(0);
+		expect(w.ledger.byAction("session.rollback")).toHaveLength(0);
+		const refused = await w.substrate.sessionRollbackCommit({ session_id: SESSION, rollback_id: p.rollback_id, target_ckpt_id: p.target.ckpt_id, outcome: "refused", reason: "drift-detected", until_ms: target.ts + 1_000 }, ME);
+		expect(errorOf(refused).message).toContain("unknown key");
+	});
+
+	test("a checkpoint recorded late forgets the memory written between taking and recording it", async () => {
+		const w = world();
+		const taken = Date.now() - 3_600_000;
+		await record(w, 1, ME, { taken_at_ms: taken });
+		w.index.entries.push(entry({ id: "mem_between", created: at(taken + 1_800_000) }), entry({ id: "mem_before_taken", created: at(taken - 1_800_000) }));
+		const p = await plan(w, 1);
+		expect(p.memory.sample_ids).toEqual(["mem_between"]);
+
+		const result = await w.substrate.sessionRollbackCommit(commitInput(p), ME);
+		expect(result).toMatchObject({ ok: true, memory: { superseded_entries: 1 } });
+		expect(w.index.forgotten()).toEqual(["mem_between"]);
 	});
 
 	test("a committed rollback without a digest, with a malformed digest or with bad fields is refused before anything is forgotten", async () => {
