@@ -44,6 +44,12 @@ export interface DerivedMemoryHit {
 	scope?: string;
 	/** The repo the memory was retained for, when the retain carried one. Agent-scope hits are read only in it. */
 	repo?: string;
+	/** The graph the memory was retained under; absent when the retain carried none. */
+	graph_id?: string;
+	/** The session that wrote the memory; absent when the retain carried none. */
+	session_id?: string;
+	/** The graph node the memory was retained under; absent when the retain carried none. */
+	node_id?: string;
 	tags: string[];
 	score?: number;
 }
@@ -96,6 +102,9 @@ function derive(bank: string, hit: RecallHit): DerivedMemoryHit {
 	const tags = [...hit.tags];
 	const scope = typeof hit.metadata.scope === "string" ? hit.metadata.scope : undefined;
 	const repo = typeof hit.metadata.repo === "string" ? hit.metadata.repo : undefined;
+	const graphId = typeof hit.metadata.graph_id === "string" ? hit.metadata.graph_id : undefined;
+	const sessionId = typeof hit.metadata.session_id === "string" ? hit.metadata.session_id : undefined;
+	const nodeId = typeof hit.metadata.node_id === "string" ? hit.metadata.node_id : undefined;
 	return {
 		bank,
 		id: hit.id,
@@ -105,6 +114,9 @@ function derive(bank: string, hit: RecallHit): DerivedMemoryHit {
 		...(hit.type !== undefined ? { type: hit.type } : {}),
 		...(scope !== undefined ? { scope } : {}),
 		...(repo !== undefined ? { repo } : {}),
+		...(graphId !== undefined ? { graph_id: graphId } : {}),
+		...(sessionId !== undefined ? { session_id: sessionId } : {}),
+		...(nodeId !== undefined ? { node_id: nodeId } : {}),
 		tags,
 		...(hit.score !== undefined ? { score: hit.score } : {}),
 	};
