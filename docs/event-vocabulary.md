@@ -30,7 +30,7 @@ These apply to every source:
   `skill.decline`, `skill.retire`, `skill.approve.refused`, `docs.ingest`,
   `docs.search`, `teachable`, `anchor`, `mirror`, `dispatch`, `approval`,
   `skills.sync`, `dod`, `doctor`, `slo.transition`, `docs.freshness`, `docs.canary`,
-  `index.archive`, `alert`.
+  `index.archive`, `alert`, `session.checkpoint`, `session.rollback`, `session.rollback.refused`.
 - **`payload.runtime` names a non-agent producer** acting for an agent or for
   the host (`herdr`, `agentos`, `anchor`, `dispatcher`, `skills-sync`,
   `doctor` — the runtime doctor, uplift-3 N1, one `warning` per drift class
@@ -134,6 +134,9 @@ These apply to every source:
 | `railway.deploy.applied` | 45 | `note` | `substrate` | `railway.deploy` | `railway` | — | no |
 | `railway.deploy.refused` | 45 | `warning` | `substrate` | `railway.deploy` | `railway` | — | no |
 | `db.endpoint` | 48 | `note` | `substrate` | `db.endpoint` | `mcp-server` | — | no |
+| `session.checkpoint` | 55 | `note` | `caller` | `session.checkpoint` | — | — | no |
+| `session.rollback` | 55 | `note` | `caller` | `session.rollback` | — | — | no |
+| `session.rollback.refused` | 55 | `warning` | `caller` | `session.rollback.refused` | — | — | no |
 | `muse.brief_writer` | 19 | — | — | — | — | — | no |
 | `memory.retain` | 26 | — | — | — | — | — | no |
 | `memory.recall` | 26 | — | — | — | — | — | no |
@@ -174,6 +177,59 @@ a write the gate refused, or that failed at Railway, is a `warning`. Their paylo
 `action`, `runtime`, `status`, `environment_id`, `service_id`, the refusal code when there
 is one, and the approval reference when one was valid. They never carry the token or a
 request body. The four Railway reads emit nothing (D45-b).
+
+## Session checkpoint and rollback events
+
+Phase 55 defines the ledger events for session checkpoints and rollbacks, using existing
+kinds only. Each is emitted from the caller's own surface (the authenticated caller, never
+body-supplied) with `session_id` set to the session it concerns, so it chains into that
+session. None carries `repo` (a per-turn checkpoint would crowd a repo's brief) or a
+`runtime`. The contract is encoded and validated in
+`packages/mcp-server/src/session-events.ts`; nothing is wired to the service, an MCP tool
+or an HTTP route by this change.
+
+- `session.checkpoint` (`note`, `payload.action: "session.checkpoint"`): `ckpt_id`
+  (`ckpt_` + 26 characters of `0-9a-z`), `seq` (integer >= 1, per session), `trigger`
+  (`turn`, `plan-step`, `steering`, `manual`, `pre-restore`, `baseline`), `git_tree` (40 or
+  64 lowercase hex), optional `git_base_commit` (same), optional `branch` (<= 200),
+  `manifest_sha256` (64 hex), `file_count`, `skipped_count` (integers >= 0), optional
+  `transcript_ref`, optional `chain_head {event_id, hash}`, optional `plan_ref {phase?,
+  step?}` (each <= 64) and optional `prev_ckpt_id`.
+- `transcript_ref`: `surface` (a `SURFACES` member), `session_locator` (1..128, an opaque
+  id such as a session uuid or conversation id, never a path: no `/`, `\`, `~` or space),
+  optional `entry_id` (1..64), optional `turn_no` (integer >= 0), optional
+  `parent_entry_id` (1..64), optional `prefix_sha256` (64 hex). At least one of `entry_id`
+  and `turn_no` is required.
+- `session.rollback` (`note`, `payload.action: "session.rollback"`): `rollback_id` (`rb_` +
+  26 characters), `from_ckpt_id`, `to_ckpt_id`, `target_event_id`, `target_hash` (64 hex),
+  `pre_restore_tree` (git hex), `pre_restore_ckpt_id`, `files_added`, `files_modified`,
+  `files_deleted` (integers >= 0), `memory {superseded_entries, forgotten_documents}` and
+  `transcript` (`moved-leaf`, `marker-only`, `unsupported`, `stale`).
+- `session.rollback.refused` (`warning`, `payload.action: "session.rollback.refused"`):
+  `reason` (`not-authorized`, `session-busy`, `target-not-found`, `chain-unverified`,
+  `hash-mismatch`, `drift-detected`, `ledger-down`, `blob-missing`, `transcript-stale`,
+  `invalid-request`), optional `to_ckpt_id`, optional `detail` (<= 300; the ledger redacts it).
+
+**No content.** These payloads carry ids, counts and digests only: never file, diff, patch,
+transcript or memory content. The validators reject any key that looks like content (`body`,
+`content`, `text`, `bytes`, `diff`, `patch`, file contents), any unknown key, and any payload
+over the ledger's 16000-byte cap.
+
+**Rollback is an event, not a mutation.** A rollback is a NEW `session.rollback` event that
+points at an earlier one through `target_event_id` and `target_hash`; the append-only ledger
+is never rewritten or deleted from. A refused rollback is a `session.rollback.refused`
+warning.
+
+**Anchoring.** The events ride the existing hourly Merkle root to Solana devnet with no
+ledger, memo or anchors change (roots only, never event contents). Anchoring lags the hour
+close by about an hour plus the 5 minute ingest lag, and `substrate verify` reports the hour
+`pending` for up to 3 hours.
+
+**Idempotent replay.** A checkpoint is sent with `idempotency_key` `ckpt:<session token>:<seq>`
+and a rollback with `rb:<session token>:<rollback_id>`, plus the original `ts` on a replay. The
+ledger only honours the key under `SUBSTRATE_EVENT_IDEMPOTENCY=accept` or `enforce`; the default
+`off` ignores it, so a retried event would append a duplicate. A refusal carries no key: a
+repeated refusal is a new fact.
 
 ## Silent sources
 

@@ -229,6 +229,8 @@ export interface IndexStoreOptions {
 	memoryExpiry?: MemoryExpirySettings;
 	/** `SUBSTRATE_INDEX_TUNE=apply` (uplift-4 S2): apply the lease-table storage tune once at the end of `migrate()`. Absent is `off`. */
 	tune?: "off" | "apply";
+	/** Test seam: a client to use instead of `new SQL(connectionString, …)`, so `migrate()` can run against a recording fake. Production never sets it. */
+	sql?: SQL;
 }
 
 /** What `/healthz` reports about the database's size, from `capacity()`. */
@@ -302,11 +304,30 @@ export interface GraphBindResult {
 export type LinearNodeMatch = GraphNode & { repo: string | null; branch: string | null; graph_status: string | null };
 
 /**
+ * One boot DDL step. `down` and `phase` are the expand-then-contract convention:
+ * `down` is operator-run documentation only (the statements that undo what `sql`
+ * created) and is NEVER executed at boot; `phase` says whether the step expands
+ * the schema (additive, safe under the previous release) or contracts it (removes
+ * what a release ago stopped using). Every step from {@link FIRST_REVERSIBLE_VERSION}
+ * on declares both; `index-store.migrate-contract.test.ts` enforces it.
+ */
+export interface MigrationStep {
+	version: number;
+	name: string;
+	sql: string;
+	down?: string;
+	phase?: "expand" | "contract";
+}
+
+/** The first version that must declare `down` and `phase`. Steps 1..32 predate the convention and are frozen as they are. */
+export const FIRST_REVERSIBLE_VERSION = 33;
+
+/**
  * Boot DDL in application order. Versions are contiguous and never renumbered:
  * a database stamps a version only after that statement commits. `tuneGraphNodes`
  * is not a step — it stays opt-in inside `migrate` and is not ledgered.
  */
-export const MIGRATION_STEPS: ReadonlyArray<{ version: number; name: string; sql: string }> = [
+export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 	{
 		version: 1,
 		name: "graph_index",
@@ -588,7 +609,7 @@ export class IndexStore implements MemoryStore {
 
 	constructor(connectionString: string, options: IndexStoreOptions = {}) {
 		this.poolSettings = { ...indexPoolSettingsFromEnv(), ...options.pool, applicationName: INDEX_APPLICATION_NAME };
-		this.sql = new SQL(connectionString, indexSqlOptions(this.poolSettings));
+		this.sql = options.sql ?? new SQL(connectionString, indexSqlOptions(this.poolSettings));
 		this.gate = options.gate ?? null;
 		this.expiry = options.memoryExpiry ?? { mode: "report" };
 		this.tune = options.tune ?? "off";

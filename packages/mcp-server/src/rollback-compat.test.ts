@@ -35,6 +35,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, describe, expect, test } from "bun:test";
 import { DOCS_STATE_KNOWN_VERSION, run as runPreflight } from "../../../scripts/deploy-preflight.ts";
+import { isAdditiveStatement, normalizedStatements } from "../../../scripts/migration-digests.ts";
 import { decodeSections } from "./brief-profile.ts";
 import { ReadThroughCache, type CacheRedis } from "./cache.ts";
 import { loadConfig } from "./config.ts";
@@ -43,6 +44,7 @@ import { createVersionStore, recordTrigger, recordVersion, type VersionStore } f
 import { loadIngestRecords, saveIngestRecords, type IngestRecord } from "./docs-ingest.ts";
 import { RetainOutbox, type RetainOutboxEntry } from "./retain-outbox.ts";
 import { Substrate } from "./service.ts";
+import { MIGRATION_STEPS, type MigrationStep } from "./index-store.ts";
 
 const FIXTURES = join(import.meta.dir, "../../../fixtures/rollback-9231f43");
 
@@ -607,5 +609,90 @@ describe("deploy preflight (scripts/deploy-preflight.ts) reads what the real wri
 		expect(pick("retain-outbox.jsonl")).toMatchObject({ level: "ok", reason: "2 entries" });
 		expect(findings.filter((item) => item.level === "error")).toEqual([]);
 		expect(code).toBe(0);
+	});
+});
+
+// ── the index (Postgres) schema: steps added since the reference release ─────
+
+/**
+ * `9231f43` has no `MIGRATION_STEPS` and no `schema_migrations` ledger: `git show 9231f43:packages/mcp-server/src/index-store.ts`
+ * contains neither, because its `IndexStore.migrate()` ran the DDL inline and unledgered (the ledger and the step list
+ * arrived in `feb597f`). So there is no "step count at the reference release"; what can be proved is which of today's
+ * steps create an object the 9231f43 source does not have. `git grep skills_registry 9231f43 -- packages` is empty (steps
+ * 17 and 18 create the table and its index, step 32 adds a column to it), and `memory_entries_repo_idx` (step 31) is absent
+ * from the 9231f43 index-store.ts. Every other step's table, column or index is in that file's inline DDL (checked by
+ * searching the file for each created name).
+ *
+ * Those are the steps below. Numbering is not release order (steps 19-30 were extracted from inline DDL that 9231f43
+ * already had), so the pin is this explicit set plus a rule: any step numbered above `LAST_STEP_AT_PIN`, the highest
+ * version when this pin was written, was added after the reference too.
+ */
+const STEPS_ADDED_SINCE_REFERENCE: Readonly<Record<number, string>> = {
+	17: "skills_registry",
+	18: "skills_registry_state_idx",
+	31: "memory_entries_repo_idx",
+	32: "skills_registry_version",
+};
+/** The highest `MIGRATION_STEPS` version when the pin above was written (commit 9aec7a1). */
+const LAST_STEP_AT_PIN = 32;
+
+/** The steps an older release has never seen: the pinned set, and every step numbered above the pin. */
+function stepsSinceReference(steps: ReadonlyArray<MigrationStep>): MigrationStep[] {
+	return steps.filter((step) => STEPS_ADDED_SINCE_REFERENCE[step.version] !== undefined || step.version > LAST_STEP_AT_PIN);
+}
+
+/** Statements of `step` that an older release does not survive: anything but create table / create index / add column, all `if not exists`. */
+function nonAdditiveStatements(step: Pick<MigrationStep, "sql">): string[] {
+	return normalizedStatements(step.sql).filter((statement) => !isAdditiveStatement(statement));
+}
+
+/** Steps whose name is not written in backticks in `runbook`. */
+function stepsMissingFromRunbook(steps: ReadonlyArray<Pick<MigrationStep, "version" | "name">>, runbook: string): number[] {
+	return steps.filter((step) => !runbook.includes(`\`${step.name}\``)).map((step) => step.version);
+}
+
+describe("index (Postgres) migration steps added since the 9231f43 reference release", () => {
+	const runbook = readFileSync(join(import.meta.dir, "../../../docs/runbooks/rollback-compat.md"), "utf8");
+
+	test("the pinned steps are still the steps with those versions and names", () => {
+		for (const [version, name] of Object.entries(STEPS_ADDED_SINCE_REFERENCE)) {
+			expect(MIGRATION_STEPS.find((step) => step.version === Number(version))?.name).toBe(name);
+		}
+	});
+
+	test("every step added since is additive: create table / create index / add column, all if not exists (a NOT NULL column has a default)", () => {
+		for (const step of stepsSinceReference(MIGRATION_STEPS)) {
+			expect({ step: step.version, name: step.name, notAdditive: nonAdditiveStatements(step) }).toEqual({ step: step.version, name: step.name, notAdditive: [] });
+		}
+	});
+
+	test("every step added since is named in docs/runbooks/rollback-compat.md", () => {
+		const missing = stepsMissingFromRunbook(stepsSinceReference(MIGRATION_STEPS), runbook);
+		expect({ unmentionedSteps: missing }).toEqual({ unmentionedSteps: [] });
+	});
+
+	test("the additive rule fires: a drop, a rename, a type change, an unguarded create and a NOT NULL column without a default are each caught", () => {
+		const bad = [
+			"drop table if exists a",
+			"alter table a rename to b",
+			"alter table a alter column c type text",
+			"create table a (id int)",
+			"create index a_idx on a (id)",
+			"alter table a add column b int",
+			"alter table a add column if not exists b int not null",
+			"delete from a",
+		];
+		for (const sql of bad) expect({ sql, notAdditive: nonAdditiveStatements({ sql }) }).toEqual({ sql, notAdditive: [sql] });
+		expect(nonAdditiveStatements({ sql: "create table if not exists a (id int); create unique index if not exists a_idx on a (id); alter table a add column if not exists b int not null default 0" })).toEqual([]);
+	});
+
+	test("the runbook rule fires: a step the runbook does not name is reported by version", () => {
+		expect(stepsMissingFromRunbook([{ version: 99, name: "no_such_step_anywhere" }, { version: 17, name: "skills_registry" }], runbook)).toEqual([99]);
+	});
+
+	test("a step numbered above the pin is held to both rules", () => {
+		const future: MigrationStep = { version: LAST_STEP_AT_PIN + 1, name: "future_step", sql: "drop table if exists a" };
+		expect(stepsSinceReference([...MIGRATION_STEPS, future]).map((step) => step.version)).toContain(LAST_STEP_AT_PIN + 1);
+		expect(nonAdditiveStatements(future)).toEqual(["drop table if exists a"]);
 	});
 });
