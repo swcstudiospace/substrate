@@ -13,7 +13,7 @@ The gate is five checks, run in this order. `bun run verify` runs them locally; 
 
 ## Run it locally
 
-Prerequisites: Bun 1.4.0 and `uv` on `PATH`. The `python` step runs `uv run`, and CI installs `uv` with `astral-sh/setup-uv`, so a local run needs it too.
+Prerequisites: Bun 1.4.0 and `uv` on `PATH`. The `python` step runs `uv run`. CI installs the pinned `uv` release and checks its SHA-256 before use, so a local run needs `uv` installed too.
 
 ```sh
 bun run verify              # install, types, tests, python, locks

@@ -77,13 +77,8 @@ jobs:
       - name: Tests
         run: bun test
 
-      - name: Set up uv (pinned)
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
-        env:
-          # The Omega runner's tool cache (/opt/hostedtoolcache) is not writable by this job, so setup-uv fails with EACCES.
-          RUNNER_TOOL_CACHE: ${{ runner.temp }}/tool-cache
-        with:
-          version: "0.13.4"
+      - name: Install uv (pinned release, checksum-verified)
+        uses: ./.github/actions/install-uv
 
       - name: Python suites (miner, dispatcher)
         run: uv run --no-project --with httpx==0.28.1 --with pytest==9.1.1 python -m pytest packages/miner/tests packages/dispatcher/tests
