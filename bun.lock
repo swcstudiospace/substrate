@@ -72,6 +72,10 @@
       "name": "@substrate/projector",
       "version": "0.1.0",
     },
+    "packages/worktree-snapshot": {
+      "name": "@substrate/worktree-snapshot",
+      "version": "0.1.0",
+    },
   },
   "packages": {
     "@agentclientprotocol/sdk": ["@agentclientprotocol/sdk@0.16.1", "", { "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" } }, "sha512-1ad+Sc/0sCtZGHthxxvgEUo5Wsbw16I+aF+YwdiLnPwkZG8KAGUEAPK6LM6Pf69lCyJPt1Aomk1d+8oE3C4ZEw=="],
@@ -491,6 +495,8 @@
     "@substrate/observability": ["@substrate/observability@workspace:packages/observability"],
 
     "@substrate/projector": ["@substrate/projector@workspace:packages/projector"],
+
+    "@substrate/worktree-snapshot": ["@substrate/worktree-snapshot@workspace:packages/worktree-snapshot"],
 
     "@tanstack/react-store": ["@tanstack/react-store@0.7.7", "", { "dependencies": { "@tanstack/store": "0.7.7", "use-sync-external-store": "^1.5.0" }, "peerDependencies": { "react": "^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0", "react-dom": "^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-qqT0ufegFRDGSof9D/VqaZgjNgp4tRPHZIJq2+QIHkMUtHjaJ0lYrrXjeIUJvjnTbgPfSD1XgOMEt0lmANn6Zg=="],
 
