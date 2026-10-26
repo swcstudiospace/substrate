@@ -204,7 +204,7 @@ The datasets are retrieved **concurrently** on the RAGFlow plane (one retrieval 
 
 `docs_search` takes an optional `context` boolean, default `false`, on both planes. `POST /docs/search` takes the same field, and the MCP input schema declares it a boolean.
 
-- Unset or `false`: the reply has no `context` key, and nothing is read from memory or the ledger. The gate is `service.ts:4554`, applied after the chunk answer on either backend.
+- Unset or `false`: the reply has no `context` key, and no memory or ledger read is made for context. The gate is `service.ts:4554`, applied after the chunk answer on either backend. The chunk answer is separate: when the LightRAG backend is unconfigured, `docs_search` answers chunks from Hindsight recall, with or without `context`.
 - `true`: the reply gains `context`, computed for that call. A successful LightRAG answer carries it beside its citations.
 
 | Field | Content |
@@ -228,7 +228,7 @@ The reasons in `degraded` are:
 | Recall | `HINDSIGHT_SEARCH_RECALL_BUDGET_MS`, default 1500 ms; hard deadline at that budget plus 500 ms | `DEFAULT_SEARCH_RECALL_BUDGET_MS` (`config.ts:2066`), `hindsightBudgets.searchRecallBudgetMs` (`config.ts:989`), `CONTEXT_RECALL_MARGIN_MS` (`service.ts:239`, `:4583`) |
 | Ledger read | 1000 ms, fixed | `DOCS_CONTEXT_LEDGER_BUDGET_MS` (`docs-search.ts:249`, used at `service.ts:4608`) |
 
-The recall does not run under `SUBSTRATE_DOCS_SEARCH_BUDGET_MS`. That budget is the shared deadline of the RAGFlow chunk fan-out only.
+The recall does not run under `SUBSTRATE_DOCS_SEARCH_BUDGET_MS`. That budget is the shared deadline of the chunk search on either plane: the RAGFlow dataset fan-out, and the LightRAG query (`docs-search.ts:965`).
 
 The ledger read has no row limit: `readEvents` returns every row of the session in time order, and the last five are kept. The 1000 ms budget is the only bound on that read.
 

@@ -188,7 +188,7 @@ interface World {
 
 function world(
 	env: Record<string, string | undefined> = {},
-	options: { propose?: ProposeResult; ledgerFails?: boolean; noIndex?: boolean; config?: (config: SubstrateConfig) => void } = {},
+	options: { propose?: ProposeResult; ledgerFails?: boolean; noIndex?: boolean; config?: (config: SubstrateConfig) => void; merged?: string } = {},
 ): World {
 	const registry = new FakeRegistry();
 	const events: SubstrateEvent[] = [];
@@ -203,8 +203,8 @@ function world(
 	};
 	const proposer: SkillProposer = {
 		propose: async (input, opts) => {
-			// The real proposer runs the staleness hook before any git work: a refusal here opens nothing.
-			await opts.beforeWork?.();
+			// The real proposer runs the staleness hook before any git work and hands it the merged PR the ledger holds for this content (null when none): a refusal here opens nothing.
+			await opts.beforeWork?.(options.merged ?? null);
 			proposals.push(input);
 			return (
 				options.propose ?? {
@@ -742,6 +742,15 @@ describe("skills_propose expected_version (memory's contract)", () => {
 		expect(JSON.stringify(w.registry.rows)).toBe(rowsBefore);
 		expect(w.registry.calls.filter((call) => call === "upsert")).toHaveLength(1);
 		expect(w.events).toHaveLength(eventsBefore);
+	});
+
+	test("a versioned retry of the merged proposal the registry still records is not refused as stale", async () => {
+		const w = world({ SUBSTRATE_SKILLS_GOVERNANCE: "report" }, { merged: PR_URL(12) });
+		await w.substrate.proposeSkill(request, asAgent);
+		// The first write recorded version 1 at PR 12. Its response was lost, the owner merged PR 12, and the client
+		// retries with the version it was told. The registry still records PR 12, so this retry is the write that succeeded.
+		await w.substrate.proposeSkill({ ...request, expected_version: 0 }, asAgent);
+		expect(w.proposals).toHaveLength(2);
 	});
 
 	test("a matching expected_version is accepted, and the new proposal takes the next version", async () => {

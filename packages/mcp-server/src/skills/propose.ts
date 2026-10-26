@@ -93,8 +93,8 @@ export interface ProposeOptions {
 	library?: SkillsLibrary;
 	/** Test seam: how long a live lock is waited for. */
 	lockWaitMs?: number;
-	/** Runs after the ledger replay and before any mirror, clone or push work. A throw refuses the proposal with nothing written. Runs for a dry run too. */
-	beforeWork?: () => Promise<void>;
+	/** Runs after the ledger replay and before any mirror, clone or push work. It is handed the PR of the merged proposal the ledger holds for this content, or null. A throw refuses the proposal with nothing written. Runs for a dry run too. */
+	beforeWork?: (mergedPrUrl: string | null) => Promise<void>;
 	run: Runner;
 }
 
@@ -812,7 +812,7 @@ async function openPr(
 /**
  * What the ledger already knows about this content: an OPEN PR is `existing`, an owner-CLOSED
  * one `declined` (unless reopen), a pushed branch without a PR gets its PR (never a second push).
- * null means: run the git path (no record, a MERGED PR, or reopen).
+ * null means: run the git path (no record, a MERGED PR, or reopen). A MERGED match is recorded in replay.mergedPrUrl for beforeWork.
  */
 async function fromLedger(
 	run: Runner,
@@ -820,6 +820,7 @@ async function fromLedger(
 	input: ProposeInput,
 	opts: ProposeOptions,
 	ledger: string,
+	replay: { mergedPrUrl: string | null },
 ): Promise<ProposeResult | null> {
 	const library = opts.library ?? DEFAULT_LIBRARY;
 	let knownLines = ledgerMatches(ledger, v.content_sha256);
@@ -863,6 +864,7 @@ async function fromLedger(
 			}
 			return { status: "declined", ...base, ...pr };
 		}
+		if (state === "MERGED") replay.mergedPrUrl = known.pr_url;
 		if (state !== "CLOSED" && state !== "MERGED") throw new ProposeFailed(`gh pr view reported state ${JSON.stringify(String(state)).slice(0, 40)}`);
 		return null;
 	}
@@ -908,6 +910,8 @@ async function fromLedger(
 		return { status: "declined", ...base, pr_url: closed.url, pr_number: closed.number };
 	}
 	// Merged, or a closed PR the operator asked to reopen: the git path, not a second PR on the old branch.
+	const merged = rows.find((row) => row.state === "MERGED");
+	if (merged) replay.mergedPrUrl = merged.url;
 	if (rows.length > 0) return null;
 	return openPr(run, v, input, known.branch, ledger, library);
 }
@@ -963,11 +967,12 @@ export async function proposeSkill(input: ProposeInput, opts: ProposeOptions): P
 	const releaseContent = opts.dryRun ? null : await acquireLock(join(paths.contentLocks, v.content_sha256), "proposal", waitMs);
 	let clone: string | null = null;
 	try {
+		const replay: { mergedPrUrl: string | null } = { mergedPrUrl: null };
 		if (!opts.dryRun) {
-			const known = await fromLedger(run, v, input, opts, paths.ledger);
+			const known = await fromLedger(run, v, input, opts, paths.ledger, replay);
 			if (known) return known;
 		}
-		if (opts.beforeWork) await opts.beforeWork();
+		if (opts.beforeWork) await opts.beforeWork(replay.mergedPrUrl);
 
 		const releaseMirror = await acquireLock(paths.mirrorLock, "mirror", waitMs);
 		try {

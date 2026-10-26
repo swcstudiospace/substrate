@@ -3222,7 +3222,7 @@ export class Substrate {
 		// versioned retry still answers from the ledger. With governance off, or no index, nothing is recorded, so
 		// only an expected 0 (or none) passes.
 		const expected = request.expected_version;
-		const beforeWork = async (): Promise<void> => {
+		const beforeWork = async (mergedPrUrl: string | null): Promise<void> => {
 			if (expected === undefined) return;
 			let recorded: { version: number; pr_url: string | null } | null = null;
 			if (this.config.skillsGovernance !== "off" && this.index !== null) {
@@ -3234,7 +3234,9 @@ export class Substrate {
 				}
 			}
 			const stale = skillVersionStale(request.name, recorded, expected);
-			if (stale) throw stale;
+			// An identical retry of the merged proposal that the registry still records is the write that already
+			// succeeded: the git path confirms it (unchanged). A registry that has moved on to another proposal still refuses it.
+			if (stale && !(mergedPrUrl !== null && recorded?.pr_url === mergedPrUrl)) throw stale;
 		};
 
 		const sessionId = normalizeIdentifier(request.session_id);

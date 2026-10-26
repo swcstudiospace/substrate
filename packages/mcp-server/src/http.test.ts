@@ -1372,7 +1372,7 @@ describe("POST /skills/propose", () => {
 		const calls: Array<{ input: Parameters<SkillProposer["propose"]>[0]; opts: Omit<ProposeOptions, "run"> }> = [];
 		const seam: SkillProposer = {
 			propose: async (input, opts) => {
-				await opts.beforeWork?.();
+				await opts.beforeWork?.(null);
 				calls.push({ input, opts });
 				if (answer instanceof Error) throw answer;
 				return answer;

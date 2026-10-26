@@ -582,6 +582,17 @@ describe("proposeSkill ledger idempotence", () => {
 		expect(f.steps()).not.toContain("push");
 	});
 
+	test("a MERGED record hands its PR to beforeWork, so a versioned retry is checked against the merged proposal", async () => {
+		writeLedger({ ts: "t", content_sha256: sha(), name: NAME, surface: "claude-code", branch: "b1", state: "opened", pr_url: PR_URL, pr_number: 7 });
+		const f = fake({
+			replies: { "gh pr view": { stdout: JSON.stringify({ state: "MERGED", url: PR_URL, number: 7 }) }, "diff-quiet": { code: 0 } },
+		});
+		const handed: Array<string | null> = [];
+		const result = await proposeSkill(input(), options(f.run, { beforeWork: async (merged) => { handed.push(merged); } }));
+		expect(handed).toEqual([PR_URL]);
+		expect(result.status).toBe("unchanged");
+	});
+
 	test("a pushed branch with no recorded PR is re-found with gh pr list --head", async () => {
 		writeLedger({ ts: "t", content_sha256: sha(), name: NAME, surface: "claude-code", branch: "skill/claude-code/b1", state: "pushed" });
 		const f = fake({ replies: { "gh pr list": { stdout: JSON.stringify([{ url: PR_URL, number: 7, state: "OPEN" }]) } } });
