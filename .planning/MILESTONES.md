@@ -1,5 +1,16 @@
 # Milestones
 
+## v1.4 Substrate contract hardening (Completed locally: 2026-10-24, not published)
+
+**Phases completed:** 3 phases, 3 plans, 0 tasks
+
+**Key accomplishments:**
+- Invalid writes refused with nothing persisted, including LightRAG docs batches (76f2707); live Postgres suites pass (75 tests) on a throwaway postgres:16
+- expected_version enforced for skills and docs with the memory contract's 409 body (c74fa07, 7cf8d44)
+- Degraded-mode exactly-once replay: identical versioned skill proposals answer from the ledger (c74fa07); keyed replay after a newer version tested (7cf8d44); lost tests restored (5b5f68f)
+
+---
+
 ## v1.3 v1.3 (Shipped: 2026-10-11)
 
 **Phases completed:** 18 phases, 76 plans, 101 tasks

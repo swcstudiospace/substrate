@@ -6,9 +6,9 @@
 - ✅ **v1.1 Swarm correlation, governed memory and orchestrate integrations** — Phases 7-10 with inserted 8.1, shipped 2026-10-07 (ADR 0001 S1 and S3). Archive: [milestones/v1.1-ROADMAP.md](milestones/v1.1-ROADMAP.md)
 - ✅ **v1.2 Swarm leases, workspace install and lessons bank** — Phases 11-15, shipped 2026-10-08 (ADR 0001 S2, S4, SPE-5830). Archive: [milestones/v1.2-ROADMAP.md](milestones/v1.2-ROADMAP.md) · audit: [milestones/v1.2-MILESTONE-AUDIT.md](milestones/v1.2-MILESTONE-AUDIT.md)
 - ⚠️ **v1.3 Build plan completion** — Phases 16–33; shipped 2026-10-11, closed 2026-10-21 with accepted debt (8 audit rows and 43 operator-gated live proofs). Closeout: [milestones/v1.3-CLOSEOUT.md](milestones/v1.3-CLOSEOUT.md) · tracking: [SPE-8292](https://linear.app/swcstudio/issue/SPE-8292/n7-final-ordered-execution-plan-in-waves)
-- 🚧 **v1.4 Substrate contract hardening** — Phases 34-36: the three uplift-7 substrate gaps (invalid writes, expected_version for skills and docs, degraded-mode exactly-once). Source: [.planning/uplift-7/MILESTONE-AUDIT.md](uplift-7/MILESTONE-AUDIT.md) rows 23-25.
-- 🚧 **v1.3.x Should-have hardening** — Phases 37-44, scheduled from research/SUMMARY.md:68 (should-have, after validation).
-- 🚧 **v1.5 SOTA enhancements** — Phases 45-54: 45-51 from the 7-SOTA plan on branch feature/7-sota-enhancements (PR #83 closed; PR #85 does not carry these); 52-54 defined here from draft PR #105.
+- ✅ **v1.4 Substrate contract hardening** — Phases 34-36, completed 2026-10-24 (local, not published). Archive: [milestones/v1.4-ROADMAP.md](milestones/v1.4-ROADMAP.md) · audit: [milestones/v1.4-MILESTONE-AUDIT.md](milestones/v1.4-MILESTONE-AUDIT.md). Source: [.planning/uplift-7/MILESTONE-AUDIT.md](uplift-7/MILESTONE-AUDIT.md) rows 23-25.
+- 🚧 **v1.3.x Should-have hardening** — Phases 37-44, open: 44 passed; 37-43 verified in repo with live proofs pending; 40-43 accepted debt (2026-10-23); 37-39 await an operator waiver. Audit: [v1.3.x-MILESTONE-AUDIT.md](v1.3.x-MILESTONE-AUDIT.md).
+- 🚧 **v1.5 SOTA enhancements** — Phases 45-54, open. Phase 46 partial: criterion 1 in repo; criteria 2-6 need per-run operator approval. Phases 52-54 in review as draft PRs #104, #109, #110, #111 (not on main). 45 and 47-50 accepted debt (2026-10-23); 51 complete (PR #108).
 
 ## Phases
 
@@ -78,15 +78,18 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 31: Lane A runtime: spike, packaging and VM host** - `substrate-host` runs from `main` with one agentos VM per Graph ID, inside the host's disk and port limits (completed 2026-10-11)
 - [x] **Phase 32: Lane A host core** - A host task works its node under the `claude-code` lease, survives a restart and keeps credentials on the host (completed 2026-10-11)
 - [x] **Phase 33: Lane A dispatch route and approvals** - `dispatch:claude-code` takes an issue to a gated Done through a Lane A VM, with human approval of permissions (completed 2026-10-11)
+
+### 🚧 v1.4 Substrate contract hardening (Planned)
+
 - [x] **Phase 34: Invalid-write round trip** - every client-input write surface refuses an invalid payload with zero rows persisted, proven in an isolated namespace.
 - [x] **Phase 35: expected_version for skills and docs** - a stale skill or docs write is rejected with the memory contract's error; an absent field keeps today's behavior.
 - [x] **Phase 36: Degraded-mode exactly-once replay** - a write carrying an idempotency key applies once across replays; the dependent client's queue is built or recorded as a decision.
 
 ### 🚧 v1.3.x Should-have hardening (Planned)
 
-- [x] **Phase 37: LANEB** - graph inference from worktree path
-- [x] **Phase 38: MIRROR** - mirror graph edges into Linear relations and outcomes into evidence
-- [x] **Phase 39: DISPATCH** - signed handoff packet and coord drift scan before launch
+- [x] **Phase 37: LANEB** - graph inference from worktree path. Code in repo. Accepted as debt by the operator on 2026-10-25 (waiver); live criteria open.
+- [x] **Phase 38: MIRROR** - mirror graph edges into Linear relations and outcomes into evidence. Code in repo. Accepted as debt by the operator on 2026-10-25 (waiver); live criteria open.
+- [x] **Phase 39: DISPATCH** - signed handoff packet and coord drift scan before launch. Code in repo. Accepted as debt by the operator on 2026-10-25 (waiver); live criteria open.
 - [x] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (decided 2026-10-21). Code on main (PR #92). Accepted as debt by the operator on 2026-10-23; live restore drill and approval open (D-D3). Criterion 3 is the narrower scope the owner accepted on 2026-10-22.
 - [x] **Phase 41: ANCHOR** - anchor evidence and teachables. Code on main (PR #116). Accepted as debt by the operator on 2026-10-23; live devnet proof open.
 - [x] **Phase 42: SKILL-CARD** - skills_list audit trail and the F-D4 re-ingest item. Code on main (PR #94). Accepted as debt by the operator on 2026-10-23; live host fast-forward open.
@@ -675,7 +678,9 @@ Plans:
   5. Cutover is a logged, reversible switch with a delta pass. RAGFlow code and service are removed only after cutover, after criteria 1 to 4 pass, and after every other RAG-dependent phase passes. The RAG-dependent phases are 25 and 42, plus any other phase whose VERIFICATION names a live RAGFlow call (the phase 46 PLAN confirms that list before cutover). Storage deletion needs its own approval.
   6. Every live step (deploy, ingestion, cutover, storage deletion) runs only after the operator approves it for that run.
 
-**Plans**: 0 plans (re-scoped 2026-10-23; the earlier 1/1 verification in phases/46-ragflow-hybrid/VERIFICATION.md covered the RAGFlow path and no longer applies)
+**Plans**: 1 plan (PLAN.md, created 2026-10-24 in phases/46-lightrag-hybrid/). Status partial: criterion 1 in repo (tests and docs committed); criterion 4 comparator deferred; criteria 2, 3, 5 and 6 are live steps that need per-run operator approval.
+
+**Operator re-scope, 2026-10-25 (reconciliation note, no criterion text changed):** RAGFlow was checked by the operator and is empty: no datasets, and an empty knowledgebase folder. The operator authorized removing RAGFlow and its associated resources. The `ragflow` Railway service was deleted on 2026-10-25; its volumes were not attached and none were detached. LightRAG is the only docs plane. It indexes three sources, and each is re-indexed when it changes: .planning markdown, repository docs, and complete scraped documentation sites. Storage deletion (the `elasticsearch`, `mysql`, `storage` and `redis` services, which may be shared) still needs its own approval, as criterion 5 requires. The live-step approvals in criteria 2 to 6 are unchanged.
 
 ### Phase 47: GreptimeDB + Dragonfly Predictive Analytics & Cache
 
@@ -853,16 +858,16 @@ Plans:
 | 34. Invalid-write round trip | v1.4 | 1/1 | Complete | 2026-10-21 |
 | 35. expected_version for skills and docs | v1.4 | 1/1 | Complete | 2026-10-21 |
 | 36. Degraded-mode exactly-once replay | v1.4 | 1/1 | Complete | 2026-10-21 |
-| 37. LANEB | v1.3.x | 1/1 | Complete | 2026-10-21 |
-| 38. MIRROR | v1.3.x | 1/1 | Complete | 2026-10-21 |
-| 39. DISPATCH | v1.3.x | 1/1 | Complete (PR #91) | 2026-10-21 |
+| 37. LANEB | v1.3.x | 1/1 | Complete (accepted debt 2026-10-25); live criteria open | 2026-10-25 |
+| 38. MIRROR | v1.3.x | 1/1 | Complete (accepted debt 2026-10-25); live criteria open | 2026-10-25 |
+| 39. DISPATCH | v1.3.x | 1/1 | Complete (accepted debt 2026-10-25); live criteria open; PR #91 | 2026-10-25 |
 | 40. DOCS-MEMORY | v1.3.x | 1/1 | Complete (accepted debt 2026-10-23); live restore drill open | 2026-10-23 |
 | 41. ANCHOR | v1.3.x | 1/1 | Complete (accepted debt 2026-10-23); live devnet proof open | 2026-10-23 |
 | 42. SKILL-CARD | v1.3.x | 1/1 | Complete (accepted debt 2026-10-23); live host proof open | 2026-10-23 |
 | 43. LANE-A | v1.3.x | 1/1 | Complete (PR #97); live egress and restart proof open (accepted debt 2026-10-23) | 2026-10-21 |
 | 44. UAT | v1.3.x | 1/1 | Complete (PR #95) | 2026-10-21 |
 | 45. Railway Resource Orchestrator | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live Railway proof open | 2026-10-23 |
-| 46. LightRAG hybrid RAG and the RAGFlow migration | v1.5 | 0/0 | Re-scoped 2026-10-23 by operator decision; not started | - |
+| 46. LightRAG hybrid RAG and the RAGFlow migration | v1.5 | 0/1 | Partial: criterion 1 in repo; criteria 2-6 blocked on per-run operator approval (live) | - |
 | 47. GreptimeDB + Dragonfly Predictive Analytics & Cache | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live warm-up proof open | 2026-10-23 |
 | 48. TailscaleDB Secure Unified Proxy Layer | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live forwarders and cutover open | 2026-10-23 |
 | 49. Hindsight Graph Memory with Greptime Events | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live ledger proof open | 2026-10-23 |

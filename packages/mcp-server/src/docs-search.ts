@@ -889,7 +889,7 @@ async function hindsightRecall(deps: SearchDeps, question: string): Promise<read
 }
 
 /**
- * A LightRAG plane failure after its retries, or a breaker refusal: Hindsight recall answers in its place when
+ * A LightRAG plane failure after its retries, a breaker refusal, or an unconfigured plane: Hindsight recall answers in its place when
  * it can. With no hit the plain degraded reply stands, its reason the LightRAG failure as before.
  */
 async function lightragFallback(
@@ -935,12 +935,12 @@ async function lightragFallback(
  * answered. A failed retrieval is retried on the LightRAG backoff (`lightragRetry`). Once the retries are spent,
  * Hindsight recall answers in its place when it can (`lightragFallback`); otherwise the reply degrades exactly like
  * the RAGFlow path (`degraded: true` with a reason, never a throw). A refused search (breaker open) falls back the
- * same way, and an unconfigured plane degrades as before.
+ * same way. An unconfigured plane is answered likewise: Hindsight recall when it finds something, else the degraded reply.
  */
 async function searchDocsLightrag(deps: SearchDeps, question: string, surface: Surface, sessionId: string): Promise<SearchReply> {
 	const lightrag = deps.lightragConfig;
 	const retrieve = deps.lightragRetrieve ?? retrieveForSearchLightrag;
-	if (lightrag == null) return failed(deps, sessionId, "lightrag-not-configured");
+	if (lightrag == null) return lightragFallback(deps, sessionId, question, "lightrag-not-configured");
 	// The RAG machine refused the plane (see `lightragCooling`): the search answers without asking LightRAG.
 	if (deps.lightragCooling === true) return lightragFallback(deps, sessionId, question, RAG_BREAKER_OPEN);
 	// Only the LightRAG plane's own breaker is consulted: the RAGFlow state never

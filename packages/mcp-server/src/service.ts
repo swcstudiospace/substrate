@@ -3218,9 +3218,12 @@ export class Substrate {
 		}
 
 		// memory's `expected_version` contract, checked before any git work: a stale proposal opens no pull
-		// request and writes no registry row. With governance off, or no index, nothing is recorded, so only an
-		// expected 0 (or none) passes.
-		if (request.expected_version !== undefined) {
+		// request and writes no registry row. It runs inside proposeSkill after the ledger replay, so an identical
+		// versioned retry still answers from the ledger. With governance off, or no index, nothing is recorded, so
+		// only an expected 0 (or none) passes.
+		const expected = request.expected_version;
+		const beforeWork = async (mergedPrUrl: string | null): Promise<{ unlessUnchanged: Error } | null> => {
+			if (expected === undefined) return null;
 			let recorded: { version: number; pr_url: string | null } | null = null;
 			if (this.config.skillsGovernance !== "off" && this.index !== null) {
 				try {
@@ -3230,9 +3233,14 @@ export class Substrate {
 					throw new ProposeFailed(`could not read the skill's version; nothing was proposed: ${reason}`);
 				}
 			}
-			const stale = skillVersionStale(request.name, recorded, request.expected_version);
-			if (stale) throw stale;
-		}
+			const stale = skillVersionStale(request.name, recorded, expected);
+			if (!stale) return null;
+			// An identical retry of the merged proposal the registry still records is the write that already succeeded.
+			// The git path confirms it: unchanged while main holds the content, and refused as stale before any commit or
+			// push once main has moved on.
+			if (mergedPrUrl !== null && recorded?.pr_url === mergedPrUrl) return { unlessUnchanged: stale };
+			throw stale;
+		};
 
 		const sessionId = normalizeIdentifier(request.session_id);
 		const graphId = normalizeIdentifier(request.graph_id);
@@ -3258,6 +3266,7 @@ export class Substrate {
 				dryRun,
 				reopen: request.reopen === true,
 				allowDocExamples: new Set(request.allow_doc_examples ?? []),
+				...(expected !== undefined ? { beforeWork } : {}),
 			});
 			if (!dryRun) await this.recordProposedSkill(request, result, surface);
 			if (!dryRun) {

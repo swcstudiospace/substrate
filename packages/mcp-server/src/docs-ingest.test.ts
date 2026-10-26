@@ -606,6 +606,19 @@ describe("docs_ingest expected_version (memory's contract)", () => {
 		expect(warnings.at(-1)?.payload).toMatchObject({ action: "docs.ingest", status: "refused", reason: "version.stale" });
 	});
 
+	test("a stale docs write is refused with outcome conflict and uploads nothing", async () => {
+		const fake = new RagflowFake();
+		const { ingest } = harness(fake);
+		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
+		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
+		const uploadsBefore = fake.uploads.length;
+
+		const stale = await ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, body: `${PAGE.body} Stale.`, expected_version: 7 }] });
+		if (stale.ok) throw new Error("expected a version.stale refusal");
+		expect(stale).toMatchObject({ refused: true, reason: "version.stale", outcome: "conflict" });
+		expect(fake.uploads).toHaveLength(uploadsBefore);
+	});
+
 	test("a matching expected_version is accepted and the record version increments", async () => {
 		const fake = new RagflowFake();
 		const { seen, ingest } = harness(fake);

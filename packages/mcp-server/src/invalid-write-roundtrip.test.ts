@@ -863,4 +863,41 @@ describe("docs ingest: POST /docs/ingest and MCP docs_ingest", () => {
 			expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("docs_ingest", "mcp"));
 		});
 	}
+
+	/** A LightRAG stand-in that records every request it gets. A refused batch makes none, so the record stays empty. */
+	function lightragRecorder() {
+		const requests: string[] = [];
+		return {
+			requests,
+			fetch: async (input: string | URL | Request, init?: RequestInit) => {
+				requests.push(`${init?.method ?? "GET"} ${new URL(String(input)).pathname}`);
+				return Response.json({ detail: "no route" }, { status: 404 });
+			},
+		};
+	}
+
+	test("POST /docs/ingest on the LightRAG plane refuses a batch with an invalid page as RAGFlow does, with no LightRAG request and an unchanged state file", async () => {
+		const batch = { dataset: "agent-substrate", pages: [page({ path: "docs/first.md" }), without(page({ path: "docs/second.md" }), "source_url")] };
+		const ragflow = new RagflowFake();
+		const ragflowHttp = await startHttp({ index: null, greptime: ledgerStub().greptime, ragflowFetch: ragflow.fetch }, { SUBSTRATE_DOCS_STATE_FILE: stateFile() });
+		const expected = await ragflowHttp.send("/docs/ingest", batch);
+
+		const lightrag = lightragRecorder();
+		const file = stateFile();
+		const http = await startHttp(
+			{ index: null, greptime: ledgerStub().greptime, lightragFetch: lightrag.fetch },
+			{ SUBSTRATE_DOCS_BACKEND: "lightrag", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_STATE_FILE: file },
+		);
+		const mark = http.audit.seq;
+		const response = await http.send("/docs/ingest", batch);
+
+		expect(expected.status).toBe(400);
+		expect(response.status).toBe(expected.status);
+		const refusal = await response.json();
+		expect(refusal).toMatchObject({ ok: false, refused: true });
+		expect(refusal).toEqual(await expected.json());
+		expect(lightrag.requests).toEqual([]);
+		expect(docsStateOf(file)).toBeNull();
+		expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("docs_ingest", "rest"));
+	});
 });

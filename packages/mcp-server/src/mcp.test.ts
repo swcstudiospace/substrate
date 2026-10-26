@@ -14,6 +14,7 @@ import { loadConfig } from "./config.ts";
 import type { EventQuery } from "./greptime.ts";
 import { createMcpServer, ingestRefusalIsGate, resetRagMachine } from "./mcp.ts";
 import { Substrate } from "./service.ts";
+import { HindsightFake } from "./hindsight-fake.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
 import type { SubstrateEvent, Surface } from "./types.ts";
 
@@ -1419,5 +1420,42 @@ describe("a half-open probe is settled only by its own report", () => {
 		probeReply.resolve(new Response("upstream down", { status: 500 }));
 		expect((await probe).json().fallback).toBe("hindsight");
 		expect((await call(client, "docs_rag_state")).json()).toMatchObject({ state: "ERROR", consecutiveFailures: 4 });
+	});
+});
+
+describe("docs_lightrag_query serves a Hindsight answer as degraded", () => {
+	const realFetch = globalThis.fetch;
+	beforeEach(() => resetRagMachine());
+	afterEach(() => {
+		globalThis.fetch = realFetch;
+		resetRagMachine();
+	});
+
+	test("a chunked Hindsight answer to a failed LightRAG query is degraded and names the LightRAG failure", async () => {
+		globalThis.fetch = (async () => new Response("upstream down", { status: 500 })) as unknown as typeof fetch;
+		const hindsight = new HindsightFake();
+		hindsight.seed("sub-omp", [{ id: "m1", text: "the plan lives in PLAN.md", document_id: "mwd_1", tags: ["omp"], metadata: {}, score: 0.9 }]);
+		const substrate = new Substrate(
+			loadConfig({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_RAG_MAX_RETRIES: "0", SUBSTRATE_RAG_HALF_OPEN_MS: "0" }),
+			{ index: null, greptime: ledger().greptime as never, hindsightFetch: hindsight.fetch },
+		);
+		const server = createMcpServer(substrate, "omp");
+		const client = new Client({ name: "substrate-test", version: "0.0.0" });
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+		const names = ["HINDSIGHT_URL", "HINDSIGHT_API_KEY", "HINDSIGHT_BANKS"] as const;
+		const saved = names.map((name) => [name, process.env[name]] as const);
+		process.env.HINDSIGHT_URL = "http://fake";
+		process.env.HINDSIGHT_API_KEY = "test-bearer";
+		process.env.HINDSIGHT_BANKS = "sub-omp";
+		try {
+			const reply = await call(client, "docs_lightrag_query", { question: "where is the plan?" });
+			expect(reply.json()).toMatchObject({ degraded: true, fallback: "hindsight", reason: "lightrag 500" });
+		} finally {
+			for (const [name, value] of saved) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
 	});
 });

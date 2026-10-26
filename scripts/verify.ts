@@ -19,7 +19,7 @@
  */
 import { join } from "node:path";
 
-export type StepId = "install" | "types" | "tests" | "locks" | "audit";
+export type StepId = "install" | "types" | "tests" | "python" | "locks" | "audit";
 
 export interface GateStep {
 	readonly id: StepId;
@@ -34,6 +34,11 @@ export const GATE_STEPS: readonly GateStep[] = [
 	{ id: "install", label: "Frozen-lockfile install", argv: ["bun", "install", "--frozen-lockfile"] },
 	{ id: "types", label: "Typecheck", argv: ["bunx", "tsc", "--noEmit"] },
 	{ id: "tests", label: "Test suite", argv: ["bun", "test"] },
+	{
+		id: "python",
+		label: "Python suites (miner, dispatcher)",
+		argv: ["uv", "run", "--no-project", "--with", "httpx==0.28.1", "--with", "pytest==9.1.1", "python", "-m", "pytest", "packages/miner/tests", "packages/dispatcher/tests"],
+	},
 	{ id: "locks", label: "Repo locks", argv: ["bun", "run", "check:phase-close"] },
 	{ id: "audit", label: "Dependency audit", argv: ["bun", "scripts/audit-gate.ts"], optIn: true },
 ];

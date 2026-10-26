@@ -1,0 +1,18 @@
+name: Install uv (pinned release)
+description: >-
+  Installs the pinned uv release into RUNNER_TEMP and checks its SHA-256 before use. The Omega
+  self-hosted runners' tool cache (/opt/hostedtoolcache) is not writable by the job, so
+  astral-sh/setup-uv cannot be used.
+runs:
+  using: composite
+  steps:
+    - name: Download, verify and install uv
+      shell: bash
+      run: |
+        set -euo pipefail
+        url="https://github.com/astral-sh/uv/releases/download/0.13.4/uv-x86_64-unknown-linux-gnu.tar.gz"
+        curl -fsSL -o "$RUNNER_TEMP/uv.tar.gz" "$url"
+        echo "2b428396f12572d4429cf210ca234dd599a33b3af0958a4d5ed569d63e3f344f  $RUNNER_TEMP/uv.tar.gz" | sha256sum -c -
+        tar xz -C "$RUNNER_TEMP" --strip-components=1 -f "$RUNNER_TEMP/uv.tar.gz"
+        echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+        "$RUNNER_TEMP/uv" --version

@@ -17,7 +17,10 @@
  * Every upload carries `{source_url, commit, heading_path}` metadata (U-03).
  * Each record carries a `version` (1 on first ingest, +1 per replacement). A page may name the
  * `expected_version` it replaces; a mismatch refuses the call as `version.stale` (memory's
- * contract, answered 409). A mismatch found before the first upload writes nothing; one a concurrent ingest causes mid-call refuses the remaining pages, and `changed` reports what already landed. Absent, the page ingests as before.
+ * contract, answered 409) with `outcome: "conflict"`. Every page's expected version is checked against the
+ * version plan of the whole call before its first upload, so a mismatch refuses the call and writes nothing.
+ * That check runs under the dataset's in-process ingest lock, so no other ingest of the dataset in this process
+ * changes the records between the check and the writes. Absent, the page ingests as before.
  * A replacement reports the superseded document id; with
  * `SUBSTRATE_DOCS_PRUNE_SUPERSEDED=1` (uplift-2 R6) the superseded document
  * is deleted through the documented delete call once the replacement has
@@ -456,6 +459,8 @@ export type IngestOutcome =
 			conflict_with?: string;
 			/** On `version.stale`: `false`, since the refused page was not stored. */
 			verified_persisted?: false;
+			/** On `version.stale`: `"conflict"`, memory's outcome for a stale write. */
+			outcome?: "conflict";
 	  };
 
 /** A document this record's source URL once published, still on the plane unless pruned. */
@@ -610,7 +615,7 @@ function warnRefusal(
 	deps: IngestDeps,
 	sessionId: string,
 	reason: string,
-	extra?: { rules?: string[]; page?: string; changed?: boolean; remedy?: string; current_version?: number | null; conflict_with?: string; verified_persisted?: false },
+	extra?: { rules?: string[]; page?: string; changed?: boolean; remedy?: string; current_version?: number | null; conflict_with?: string; verified_persisted?: false; outcome?: "conflict" },
 ): Promise<void> {
 	if (deps.surface === null) return Promise.resolve();
 	return deps
@@ -637,7 +642,7 @@ function refused(
 	deps: IngestDeps,
 	sessionId: string,
 	reason: string,
-	extra?: { rules?: string[]; page?: string; changed?: boolean; remedy?: string; current_version?: number | null; conflict_with?: string; verified_persisted?: false },
+	extra?: { rules?: string[]; page?: string; changed?: boolean; remedy?: string; current_version?: number | null; conflict_with?: string; verified_persisted?: false; outcome?: "conflict" },
 ): Promise<IngestOutcome> {
 	const { changed = false, ...locator } = extra ?? {};
 	const outcome: IngestOutcome = { ok: false, refused: true, reason, ...locator, changed };
@@ -768,6 +773,7 @@ async function withDatasetIngestLock<T>(dataset: string, waitMs: number, work: (
 /** The refusal `staleVersion` reports: the version expected against the one on record. */
 interface VersionConflict {
 	remedy: string;
+	outcome: "conflict";
 	current_version: number | null;
 	conflict_with?: string;
 	verified_persisted: false;
@@ -790,6 +796,7 @@ function staleVersion(
 	if (!against) {
 		if (expected === 0) return null;
 		return {
+			outcome: "conflict",
 			remedy:
 				`No document is recorded for this source URL, so there is no version ${expected} to replace. ` +
 				"Re-submit without expected_version to record the first one.",
@@ -799,6 +806,7 @@ function staleVersion(
 	}
 	if (expected === against.version) return null;
 	const reply = {
+		outcome: "conflict" as const,
 		current_version: saved?.version ?? null,
 		verified_persisted: false as const,
 		...(saved?.document_id !== undefined ? { conflict_with: saved.document_id } : {}),
@@ -832,11 +840,10 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	const backend: DocsBackend = deps.backend ?? (deps.lightragConfig != null ? "lightrag" : "ragflow");
 	if (input.pages.length === 0) return refused(deps, sessionId, "no-pages");
 
-	// The per-page gates run on both planes. RAGFlow refuses the whole call at
-	// the first page that fails; LightRAG records that page as `failed` and keeps
-	// the rest (per-file isolation), so one bad page never voids the valid ones.
+	// The per-page gates run on both planes before the first write, and an invalid page refuses the whole call on
+	// both: nothing is uploaded or recorded, and the refusal names the first failing page. A write that fails
+	// upstream is the only per-page `failed` (see `ingestDocsLightrag`).
 	const prepared: PreparedPage[] = [];
-	const rejected: IngestPageResult[] = [];
 	let total = 0;
 	let strippedImages = 0;
 	for (const page of input.pages) {
@@ -848,25 +855,14 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 			continue;
 		}
 		const locator = { page: page.path, ...(verdict.rules !== undefined ? { rules: verdict.rules } : {}) };
-		if (backend !== "lightrag") return refused(deps, sessionId, verdict.reason, locator);
-		await warnRefusal(deps, sessionId, verdict.reason, locator);
-		rejected.push({
-			path: page.path,
-			source_url: page.source_url ?? "",
-			status: "failed",
-			document_id: "",
-			content_sha256: "",
-			error: redact(verdict.rules !== undefined ? `${verdict.reason}: ${verdict.rules.join(", ")}` : verdict.reason).slice(0, 200),
-		});
+		return refused(deps, sessionId, verdict.reason, locator);
 	}
 
 	// Both planes write one dataset's records under that dataset's lock; the records are read only once it is held.
 	const seen = deps.seen ?? new Map<string, IngestRecord>();
 	const locks = deps.locks ?? new Map<string, { task: Promise<PageSettlement>; sha: string }>();
 	if (backend === "lightrag") {
-		return underDatasetLock(deps, input.dataset, sessionId, () =>
-			ingestDocsLightrag(deps, input, sessionId, { roots, seen, locks, prepared, rejected, strippedImages }),
-		);
+		return underDatasetLock(deps, input.dataset, sessionId, () => ingestDocsLightrag(deps, input, sessionId, { roots, seen, locks, prepared, strippedImages }));
 	}
 	if (config === null) return refused(deps, sessionId, "ragflow-not-configured");
 	return underDatasetLock(deps, input.dataset, sessionId, () => writeBatch(deps, config, input, prepared, { sessionId, strippedImages, seen, locks }));
@@ -1448,11 +1444,10 @@ async function ingestDocsLightrag(
 		seen: Map<string, IngestRecord>;
 		locks: Map<string, { task: Promise<PageSettlement>; sha: string }>;
 		prepared: PreparedPage[];
-		rejected: IngestPageResult[];
 		strippedImages: number;
 	},
 ): Promise<IngestOutcome> {
-	const { seen, locks, prepared, rejected, strippedImages } = shared;
+	const { seen, locks, prepared, strippedImages } = shared;
 	// The caller gates auth, but this branch is also entered from tests and
 	// future call sites: fail closed here too, which narrows `deps.surface`
 	// for the note event below.
@@ -1469,13 +1464,12 @@ async function ingestDocsLightrag(
 	const dataset = listed.datasets.find((entry) => entry.name === input.dataset);
 	if (!dataset) return refused(deps, sessionId, "unknown-dataset");
 	const commit = input.commit ?? "unpinned";
-	const results: IngestPageResult[] = [...rejected];
+	const results: IngestPageResult[] = [];
 	const changed = (): boolean => results.some((result) => result.status === "ingested" || result.status === "replaced");
-	// Per-file isolation: a page the plane rejects is recorded as `failed`
-	// and the sweep continues, so one bad page never voids the pages that
-	// landed. The call reports `partial` when anything landed alongside
-	// failures, and refuses only when nothing did.
-	let failed = rejected.length;
+	// Per-file isolation: a page whose upstream write fails is recorded as `failed` and the sweep continues, so one
+	// failed write never voids the pages that landed. Invalid pages never reach here (see `ingestDocs`). The call
+	// reports `partial` when anything landed alongside failures, and refuses only when nothing did.
+	let failed = 0;
 	// Keys with a write that failed in this call. The version plan assumed every planned write landed, so a later
 	// page of such a key is recorded failed and not written: writing it would store a version the plan never reached.
 	const failedKeys = new Set<string>();

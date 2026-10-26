@@ -649,8 +649,8 @@ export function ragGraphCounts(
 /**
  * Graceful degradation to Hindsight recall (SPE-19384 fallback). Reads only
  * through `substrate.recallMemories` — no Hindsight module changes — and
- * maps redacted hits onto the LightRAG chunk shape. `degraded` is set only
- * when Hindsight served nothing either.
+ * maps redacted hits onto the LightRAG chunk shape. Every reply it serves is `degraded`, and `reason` names
+ * the LightRAG failure it stands in for, as the docs_search fallback does.
  */
 export async function hindsightRagFallback(
 	substrate: Substrate,
@@ -687,7 +687,8 @@ export async function hindsightRagFallback(
 		graph: ragGraphCounts(chunks, entities, relations),
 		state,
 		fallback: "hindsight",
-		...(chunks.length === 0 ? { degraded: true as const, reason } : {}),
+		degraded: true as const,
+		reason,
 	};
 	return result;
 }

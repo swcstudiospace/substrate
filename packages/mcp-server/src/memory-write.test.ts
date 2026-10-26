@@ -1649,6 +1649,36 @@ describe("exactly-once", () => {
 		expect(retry.deduplicated).toBe(true);
 		expect(store.entries()).toHaveLength(1);
 	});
+
+	test("a keyed replay after a newer version is in force returns the original entry and writes no row", async () => {
+		// The replay is decided before the version gate. A retry of a write that already landed
+		// is not refused as stale because a later write has since superseded it, and it is not
+		// written again.
+		const decision = { scope: "repo:a/b", kind: "decision" as const, subject: "runtime", idempotency_key: "k1" };
+		const first = await write({ ...decision, text: "the runtime is herdr" });
+		const newer = await write({
+			scope: "repo:a/b",
+			kind: "decision",
+			subject: "runtime",
+			text: "the runtime is Orca",
+			expected_version: 1,
+		});
+		expect(first.outcome).toBe("accepted");
+		expect(newer.outcome).toBe("accepted");
+		expect(newer.entry?.version).toBe(2);
+		expect(store.entries()).toHaveLength(2);
+
+		const replay = await write({ ...decision, text: "the runtime is herdr" });
+		expect(replay.outcome).toBe("accepted");
+		expect(replay.reason).toBe("idempotent.replay");
+		expect(replay.deduplicated).toBe(true);
+		expect(replay.verified_persisted).toBe(true);
+		expect(replay.entry?.id).toBe(first.entry?.id);
+		expect(replay.entry?.version).toBe(1);
+		expect(store.entries()).toHaveLength(2);
+		expect(store.standing()).toHaveLength(1);
+		expect(store.standing()[0]?.id).toBe(newer.entry?.id);
+	});
 });
 
 describe("verified_persisted", () => {
@@ -2010,6 +2040,57 @@ describe("SUBSTRATE_HASH_VERSION", () => {
 		const reviewAgain = await write(proposal, "v2");
 		expect(reviewAgain.review_id).toBe(review.review_id);
 		expect(store.reviews).toHaveLength(1);
+	});
+});
+
+describe("exactly-once across a degraded substrate (uplift-7 gap 3)", () => {
+	test("the same explicit key replayed twice writes one row and returns the original entry", async () => {
+		const first = await write({ idempotency_key: "k-replay-twice" });
+		const second = await write({ idempotency_key: "k-replay-twice" });
+
+		expect(first.outcome).toBe("accepted");
+		expect(first.deduplicated).toBeUndefined();
+		expect(second.outcome).toBe("accepted");
+		expect(second.deduplicated).toBe(true);
+		expect(second.idempotency_key).toBe(first.idempotency_key);
+		expect(second.entry?.id).toBe(first.entry?.id);
+		expect(second.entry?.text).toBe(first.entry?.text);
+		expect(second.entry?.scope).toBe(first.entry?.scope);
+		expect(second.entry?.kind).toBe(first.entry?.kind);
+		expect(store.entries()).toHaveLength(1);
+	});
+
+	test("a keyless write of new text writes each time, and a keyless identical retry still dedupes as today", async () => {
+		const first = await write({ text: "hermes finished n3" });
+		const second = await write({ text: "hermes finished n4" });
+		const retry = await write({ text: "hermes finished n4" });
+
+		expect(first.outcome).toBe("accepted");
+		expect(second.outcome).toBe("accepted");
+		expect(second.deduplicated).toBeUndefined();
+		expect(second.entry?.id).not.toBe(first.entry?.id);
+		expect(retry.deduplicated).toBe(true);
+		expect(retry.entry?.id).toBe(second.entry?.id);
+		expect(store.entries()).toHaveLength(2);
+	});
+
+	test("an outage after the row commits, then a replay of the same key, writes exactly one row", async () => {
+		// The insert commits and the connection drops before the caller hears back. The
+		// caller saw a failure (503 on the wire); its replay after recovery must not add
+		// a second row, and must return the row that already landed.
+		store.failAfterInsert = "postgres: connection reset";
+		await expect(write({ idempotency_key: "k-outage-landed" })).rejects.toThrow("connection reset");
+		expect(store.entries()).toHaveLength(1);
+		const landed = store.entries()[0]?.id;
+
+		store.failAfterInsert = null;
+		store.clock += IN_FLIGHT_TIMEOUT_MS;
+		const replay = await write({ idempotency_key: "k-outage-landed" });
+
+		expect(replay.outcome).toBe("accepted");
+		expect(replay.verified_persisted).toBe(true);
+		expect(replay.entry?.id).toBe(landed);
+		expect(store.entries()).toHaveLength(1);
 	});
 });
 
