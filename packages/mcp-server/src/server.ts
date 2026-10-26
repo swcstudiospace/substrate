@@ -80,7 +80,6 @@ import {
 	hindsightRagFallback,
 	ingestRefusalIsGate,
 	lightragReplayKey,
-	queryLightragRest,
 	ragGraphCounts,
 	ragMachine,
 	setCachedRagResult,
@@ -88,6 +87,7 @@ import {
 	type McpCaller,
 	withLightragNotice,
 } from "./mcp.ts";
+import { isLightragQueryMode, LIGHTRAG_CIRCUIT_OPEN } from "./planes/lightrag.ts";
 import {
 	auditRefusal,
 	auditToolCalls,
@@ -1659,9 +1659,9 @@ export function createHttpServer(
 					let lastReason = "lightrag unreachable";
 					for (let attempt = 0; attempt <= config.ragMachine.maxRetries; attempt += 1) {
 						if (attempt > 0) await ragRetryDelay(config.ragMachine.retryBaseMs, attempt);
-						const answered = await queryLightragRest(lightrag, {
+						const answered = await substrate.lightragQuery(lightrag, {
 							question: augmented,
-							...(typeof mode === "string" ? { mode } : {}),
+							...(isLightragQueryMode(mode) ? { mode } : {}),
 							...(typeof topK === "number" ? { topK } : {}),
 						});
 						if (answered.ok) {
@@ -1677,6 +1677,8 @@ export function createHttpServer(
 							return;
 						}
 						lastReason = answered.reason;
+						// An open plane breaker refused the call without reaching LightRAG: another attempt would be refused too, so it is not retried.
+						if (answered.reason === LIGHTRAG_CIRCUIT_OPEN) break;
 					}
 					ragMachine.recordFailure(config.ragMachine, `lightrag_query: ${lastReason}`, report);
 					const degraded = await hindsightRagFallback(

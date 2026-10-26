@@ -55,6 +55,7 @@ import {
 	deleteDocuments as deleteLightragDocuments,
 	parseDocuments as parseLightragDocuments,
 	pollParseStatus as pollLightragParseStatus,
+	resolveDocumentIds as resolveLightragDocumentIds,
 	storePlanningPage,
 	uploadDocument as uploadLightragDocument,
 } from "./planes/lightrag.ts";
@@ -1541,21 +1542,35 @@ async function ingestDocsLightrag(
 									fetchImpl,
 								);
 					if (!uploaded.ok) return { ok: false, reason: uploaded.reason };
-					const started = await parseLightragDocuments(lightrag, dataset.id, [uploaded.document_id], fetchImpl);
+					// LightRAG's upload answers a track id, not a document id. The scan and the pipeline poll are server-global (the ids
+					// they take are ignored on this plane), so no document id is passed; the real id is read from track_status once the
+					// pipeline is idle, and only that id is stored, cited and deleted.
+					const started = await parseLightragDocuments(lightrag, dataset.id, [], fetchImpl);
 					if (!started.ok) return { ok: false, reason: started.reason };
-					const parsed = await pollLightragParseStatus(lightrag, { dataset_id: dataset.id, document_id: uploaded.document_id }, fetchImpl, {
-						maxPolls: deps.poll?.maxPolls,
-						intervalMs: deps.poll?.intervalMs,
-					});
+					const pollOptions = { maxPolls: deps.poll?.maxPolls, intervalMs: deps.poll?.intervalMs };
+					const parsed = await pollLightragParseStatus(lightrag, { dataset_id: dataset.id, document_id: uploaded.track_id }, fetchImpl, pollOptions);
 					if (!parsed.ok) return { ok: false, reason: parsed.reason };
+					const tracked = await resolveLightragDocumentIds(lightrag, uploaded.track_id, fetchImpl, pollOptions);
+					if (!tracked.ok) return { ok: false, reason: tracked.reason };
+					const failedDocument = tracked.documents.find((document) => document.status?.toLowerCase() === "failed");
+					if (failedDocument !== undefined) {
+						return { ok: false, reason: `lightrag: document failed to process${failedDocument.error_msg ? `: ${failedDocument.error_msg}` : ""}` };
+					}
+					const [documentId] = tracked.ids;
+					if (documentId === undefined || tracked.ids.length !== 1) {
+						return { ok: false, reason: `lightrag: track_status listed ${tracked.ids.length} documents for one page` };
+					}
 					let prune: { pruned_document_id: string } | { prune: string } | null = null;
-					if (replacedPrior && deps.prune === true && replacedPrior.document_id !== uploaded.document_id) {
+					if (replacedPrior && deps.prune === true && replacedPrior.document_id !== documentId) {
 						const deleted = await deleteLightragDocuments(lightrag, dataset.id, [replacedPrior.document_id], fetchImpl);
-						if (deleted.ok) prune = { pruned_document_id: replacedPrior.document_id };
+						// The delete runs in the background and holds the pipeline busy until it finishes: wait for idle before the next page writes.
+						const confirmed = deleted.ok ? await pollLightragParseStatus(lightrag, { dataset_id: dataset.id, document_id: replacedPrior.document_id }, fetchImpl, pollOptions) : deleted;
+						if (confirmed.ok) prune = { pruned_document_id: replacedPrior.document_id };
 						else {
-							prune = { prune: `failed: ${deleted.reason}` };
+							const reason = deleted.ok ? `delete started but completion not confirmed: ${confirmed.reason}` : confirmed.reason;
+							prune = { prune: `failed: ${reason}` };
 							(deps.log ?? ((line: string) => process.stderr.write(line)))(
-								`[substrate] docs ingest: superseded document ${replacedPrior.document_id} in ${dataset.name} not pruned — ${redact(deleted.reason)}\n`,
+								`[substrate] docs ingest: superseded document ${replacedPrior.document_id} in ${dataset.name} not pruned — ${redact(reason)}\n`,
 							);
 						}
 					}
@@ -1563,7 +1578,7 @@ async function ingestDocsLightrag(
 						path: page.path,
 						source_url: sourceUrl,
 						status: replacedPrior ? "replaced" : "ingested",
-						document_id: uploaded.document_id,
+						document_id: documentId,
 						content_sha256: sha,
 						...(replacedPrior ? { superseded_document_id: replacedPrior.document_id } : {}),
 						...(prune ?? {}),
@@ -1580,7 +1595,7 @@ async function ingestDocsLightrag(
 						sha,
 						dataset_id: dataset.id,
 						source_url: sourceUrl,
-						document_id: uploaded.document_id,
+						document_id: documentId,
 						version: replacedPrior ? replacedPrior.version + 1 : 1,
 						...(input.commit !== undefined ? { commit: input.commit } : {}),
 						...(lineage.length > 0 ? { superseded: lineage } : {}),

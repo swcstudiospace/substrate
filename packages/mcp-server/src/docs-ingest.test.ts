@@ -1002,30 +1002,59 @@ describe("planning scan graph hints (LightRAG path)", () => {
 });
 
 /**
+ * `GET /documents/track_status/{track_id}` as LightRAG v1.5.7 answers it: the real document id, which is NOT the
+ * track id the upload returned (`trk-N` tracks to `doc-N`).
+ */
+function trackStatusBody(pathname: string) {
+	const trackId = decodeURIComponent(pathname.split("/").pop() ?? "");
+	return {
+		track_id: trackId,
+		documents: [{ id: trackId.replace("trk-", "doc-"), status: "processed", file_path: "docs__a.md" }],
+		total_count: 1,
+		status_summary: { processed: 1 },
+	};
+}
+
+/**
  * A LightRAG stand-in for the ingest path. The upload route records each file it accepts (its content, source URL
- * and the graph the form carries) and answers 500 for any content `failUploadWhen` names. Scan and parse status
- * answer at once.
+ * and the graph the form carries), answers 500 for any content `failUploadWhen` names and HTTP 409 for any content
+ * `conflictUploadWhen` names. Scan and parse status answer at once; `track_status` answers the real document id;
+ * every DELETE is recorded (`deletes`) and a per-document delete answers `deletion_started`.
  */
 class LightragFake {
 	readonly uploads: Array<{ content: string; source_url: string; graph: string }> = [];
+	readonly deletes: Array<{ path: string; body: unknown }> = [];
 	failUploadWhen: ((content: string) => boolean) | null = null;
+	conflictUploadWhen: ((content: string) => boolean) | null = null;
+	trackStatusFails = false;
 	readonly fetch: FetchLike = async (input, init) => {
 		const url = new URL(String(input));
+		if (init?.method === "DELETE") {
+			this.deletes.push({ path: url.pathname, body: typeof init.body === "string" ? JSON.parse(init.body) : init.body });
+			return url.pathname === "/documents/delete_document"
+				? Response.json({ status: "deletion_started", message: "started", doc_id: "x" })
+				: Response.json({ detail: "clear-all must never be reached" }, { status: 500 });
+		}
 		if (init?.method === "POST" && url.pathname === "/documents/upload") {
 			const form = init.body as FormData;
 			const content = await (form.get("file") as Blob).text();
 			if (this.failUploadWhen?.(content) === true) return Response.json({ detail: "upload refused" }, { status: 500 });
+			if (this.conflictUploadWhen?.(content) === true) return Response.json({ detail: "Document storage already contains the file" }, { status: 409 });
 			const id = `trk-${this.uploads.length + 1}`;
 			this.uploads.push({ content, source_url: String(form.get("source_url")), graph: String(form.get("graph_entities") ?? "") });
 			return Response.json({ status: "success", data: { track_id: id } });
 		}
 		if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
-		if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+		if (url.pathname === "/documents/pipeline_status") return Response.json({ busy: false });
+		if (url.pathname.startsWith("/documents/track_status/")) {
+			if (this.trackStatusFails) return Response.json({ detail: "track store down" }, { status: 503 });
+			return Response.json(trackStatusBody(url.pathname));
+		}
 		return Response.json({ detail: "no route" }, { status: 404 });
 	};
 }
 
-function lightragHarness(fake: LightragFake) {
+function lightragHarness(fake: LightragFake, options: { prune?: boolean } = {}) {
 	const seen = new Map<string, IngestRecord>();
 	const deps: IngestDeps = {
 		config: null,
@@ -1035,6 +1064,7 @@ function lightragHarness(fake: LightragFake) {
 		lightragFetch: fake.fetch,
 		seen,
 		poll: { intervalMs: 0 },
+		...(options.prune === true ? { prune: true } : {}),
 		emit: async (): Promise<unknown> => ({ stored: false }),
 		surface: "omp",
 	};
@@ -1088,5 +1118,45 @@ describe("docs_ingest on the LightRAG plane: failed writes and graph corrections
 		if (!repeat.ok) throw new Error(`expected ingest: ${repeat.reason}`);
 		expect(repeat.results[0]?.status).toBe("unchanged");
 		expect(fake.uploads).toHaveLength(2);
+	});
+
+	test("the stored document id is the real id from track_status, never the upload's track id", async () => {
+		const fake = new LightragFake();
+		const { seen, ingest } = lightragHarness(fake);
+		const outcome = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
+		if (!outcome.ok) throw new Error(`expected ingest: ${outcome.reason}`);
+		expect(outcome.results[0]).toMatchObject({ status: "ingested", document_id: "doc-1" });
+		expect([...seen.values()].map((record) => record.document_id)).toEqual(["doc-1"]);
+	});
+
+	test("a same-name 409 on upload is the typed conflict outcome, not a stored document", async () => {
+		const fake = new LightragFake();
+		fake.conflictUploadWhen = () => true;
+		const { seen, ingest } = lightragHarness(fake);
+		const outcome = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
+		if (outcome.ok) throw new Error("expected a refusal: the only page conflicted");
+		expect(outcome.reason).toBe("lightrag 409 same-name conflict");
+		expect(seen.size).toBe(0);
+	});
+
+	test("a track_status failure fails the page: no document id is invented from the track id", async () => {
+		const fake = new LightragFake();
+		fake.trackStatusFails = true;
+		const { seen, ingest } = lightragHarness(fake);
+		const outcome = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
+		if (outcome.ok) throw new Error("expected a refusal: the document id could not be resolved");
+		expect(outcome.reason).toBe("lightrag 503");
+		expect(seen.size).toBe(0);
+	});
+
+	test("a prune deletes the superseded REAL document id through the per-document route, never the clear-all route", async () => {
+		const fake = new LightragFake();
+		const { ingest } = lightragHarness(fake, { prune: true });
+		const first = await ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, body: "First version." }] });
+		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
+		const second = await ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, body: "Second version." }] });
+		if (!second.ok) throw new Error(`expected ingest: ${second.reason}`);
+		expect(second.results[0]).toMatchObject({ status: "replaced", document_id: "doc-2", pruned_document_id: "doc-1" });
+		expect(fake.deletes).toEqual([{ path: "/documents/delete_document", body: { doc_ids: ["doc-1"], delete_file: false, delete_llm_cache: false } }]);
 	});
 });

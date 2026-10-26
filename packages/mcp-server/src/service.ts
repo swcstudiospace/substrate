@@ -54,7 +54,7 @@ import {
 	type ReadThroughCache,
 	type ScriptOutcome,
 } from "./cache.ts";
-import { isReviewToken, type SubstrateConfig } from "./config.ts";
+import { isReviewToken, type LightragConfig, type SubstrateConfig } from "./config.ts";
 import type { DbPlane } from "./db-endpoints.ts";
 import { DesktopBusy, type DesktopDriver, type DesktopLogEntry, type DesktopRunResult } from "./desktop/driver.ts";
 import {
@@ -146,7 +146,7 @@ import { governMemoryWrite } from "./memory-write.ts";
 import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachable.ts";
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth, type HindsightConfig } from "./planes/hindsight.ts";
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
-import { lightragOp } from "./planes/lightrag.ts";
+import { lightragOp, probeLightrag, queryForTool, type LightragQueryMode, type LightragToolOutcome } from "./planes/lightrag.ts";
 import { RailwayClient } from "./railway.ts";
 import type { FabricSources } from "./fabric/types.ts";
 import { FABRIC_HEALTH_WINDOW_MS } from "./fabric/gather.ts";
@@ -6093,6 +6093,15 @@ export class Substrate {
 	}
 
 	/**
+	 * The `docs_lightrag_query` tool's and `POST /docs/lightrag/query`'s one door to LightRAG: the plane client over this
+	 * process's gated fetch, so the plane's circuit breaker sees every call and the mode, top-k clamp and timeout are the
+	 * same as `docs_search`'s. Never throws; a refusal or failure is the reason.
+	 */
+	lightragQuery(lightrag: LightragConfig, input: { question: string; mode?: LightragQueryMode; topK?: number }): Promise<LightragToolOutcome> {
+		return queryForTool(lightrag, input, this.lightragFetch);
+	}
+
+	/**
 	 * The admission bucket's round trip (uplift-3 N3): one script on the cache
 	 * plane, through its gate, timeout and cooldown. The cache stays private;
 	 * this is the one door `server.ts` has to it, and it never throws.
@@ -6147,13 +6156,19 @@ export class Substrate {
 		// A store that throws is down. `/healthz` has to answer that; a 500 would hide the outage from the monitor.
 		const probes = this.healthProbes(timeoutMs, true);
 		const indexStore = this.index;
-		const [greptimeReading, index, hindsightOk, ragflowOk, capacity, ledgerCapacity] = await Promise.all([
+		const [greptimeReading, index, hindsightOk, ragflowOk, capacity, ledgerCapacity, lightragOk] = await Promise.all([
 			probes.greptime,
 			probes.index,
 			probes.hindsight,
 			probes.ragflow,
 			indexStore ? this.indexCapacityForHealth(indexStore) : Promise.resolve(null),
 			probes.ledgerCapacity,
+			// `GET /health` on the LightRAG plane, only when configured, bounded like the other planes' probes and fail-open: a
+			// probe that throws reads as down, and `null` stays "not configured". Not part of `HealthProbes`, so the fabric's
+			// shared probes add no LightRAG call.
+			this.config.lightrag
+				? probeLightrag(this.config.lightrag, this.lightragFetch, HEALTH_PROBE_MS).then((probed) => probed.ok, () => false)
+				: Promise.resolve(null),
 		]);
 		// The jobs and archive reads run after the probes, as on main: the Greptime ping has its verdict before the ledger's
 		// coverage read asks the same breaker for a call.
@@ -6177,8 +6192,7 @@ export class Substrate {
 			cache: !cache.enabled ? null : cache.connected ? true : cache.mode === "degraded" || cache.cooldownUntil !== null ? false : null,
 			hindsight: hindsightOk,
 			ragflow: ragflowOk,
-			// Not probed by health: no LightRAG health call exists, so the breaker alone says whether calls are refused.
-			lightrag: null,
+			lightrag: lightragOk,
 		};
 		const planes = {} as SubstrateHealth["planes"];
 		for (const plane of PLANES) {

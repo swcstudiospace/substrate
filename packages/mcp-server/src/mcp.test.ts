@@ -45,7 +45,12 @@ function ledger(rows: Array<Record<string, unknown>> = []) {
 }
 
 /** A connected client and the substrate behind it. Closed by the test runner's teardown. */
-async function connect(greptime: unknown, surface: Surface | null = "omp", env: Record<string, string> = {}, deps: { cache?: ReadThroughCache } = {}) {
+async function connect(
+	greptime: unknown,
+	surface: Surface | null = "omp",
+	env: Record<string, string> = {},
+	deps: { cache?: ReadThroughCache; lightragFetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response> } = {},
+) {
 	const substrate = new Substrate(loadConfig(env), { index: null, greptime: greptime as never, ...deps });
 	const server = createMcpServer(substrate, surface);
 	const client = new Client({ name: "substrate-test", version: "0.0.0" });
@@ -1184,6 +1189,7 @@ describe("docs_ingest refusals do not count against the RAG breaker", () => {
 			if (init?.method === "POST" && url.pathname === "/documents/upload") return Response.json({ status: "success", data: { track_id: "trk-1" } });
 			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
 			if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+			if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
 			return Response.json({ detail: "no route" }, { status: 404 });
 		}) as unknown as typeof fetch;
 		const { client } = await connect(ledger().greptime, "omp", LIGHTRAG_BREAKER_ENV);
@@ -1401,6 +1407,7 @@ describe("a half-open probe is settled only by its own report", () => {
 			if (init?.method === "POST" && url.pathname === "/documents/upload") return Response.json({ status: "success", data: { track_id: "trk-1" } });
 			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
 			if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+			if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
 			return Response.json({ detail: "no route" }, { status: 404 });
 		}) as unknown as typeof fetch;
 		// A zero cooldown has already elapsed, so the query after ERROR is the probe; no timer is needed.
@@ -1457,5 +1464,61 @@ describe("docs_lightrag_query serves a Hindsight answer as degraded", () => {
 				else process.env[name] = value;
 			}
 		}
+	});
+});
+
+describe("docs_lightrag_query runs through the LightRAG plane client and its breaker", () => {
+	beforeEach(() => resetRagMachine());
+	afterEach(() => resetRagMachine());
+
+	const BREAKER_TEST_ENV = {
+		LIGHTRAG_URL: "http://lightrag.test",
+		SUBSTRATE_RAG_MAX_RETRIES: "0",
+		// The RAG machine would hold queries off after three failures; a higher threshold lets the plane breaker (five) trip first.
+		SUBSTRATE_RAG_BREAKER_THRESHOLD: "50",
+		SUBSTRATE_RAG_HALF_OPEN_MS: "0",
+	};
+
+	test("a failing server opens the lightrag breaker through the tool path, and an open breaker is neither called nor retried", async () => {
+		const seen: Array<{ path: string; body: unknown; headers: Headers }> = [];
+		const lightragFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			seen.push({ path: new URL(String(input)).pathname, body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined, headers: new Headers(init?.headers) });
+			return new Response("upstream down", { status: 500 });
+		};
+		const { client, substrate } = await connect(ledger().greptime, "omp", { ...BREAKER_TEST_ENV, LIGHTRAG_API_KEY: "lr-tool-key" }, { lightragFetch });
+		expect(substrate.planes.gate("lightrag").breaker?.state()).toBe("closed");
+		for (const n of [1, 2, 3, 4, 5]) {
+			const reply = await call(client, "docs_lightrag_query", { question: `failing question ${n}` });
+			expect(reply.json()).toMatchObject({ fallback: "hindsight", reason: expect.stringContaining("lightrag 500") });
+		}
+		expect(seen).toHaveLength(5);
+		expect(substrate.planes.gate("lightrag").breaker?.state()).toBe("open");
+
+		const refused = await call(client, "docs_lightrag_query", { question: "asked while the breaker is open" });
+		expect(refused.json()).toMatchObject({ fallback: "hindsight", reason: expect.stringContaining("lightrag circuit open") });
+		// The open breaker refused the call before the server saw it.
+		expect(seen).toHaveLength(5);
+
+		// The tool goes through the plane client: its request body, mode default and auth header.
+		expect(seen[0]?.path).toBe("/query");
+		expect(seen[0]?.body).toEqual({ query: "failing question 1", mode: "hybrid", top_k: 10, only_need_context: true });
+		expect(seen[0]?.headers.get("x-api-key")).toBe("lr-tool-key");
+		expect(seen[0]?.headers.get("authorization")).toBeNull();
+	});
+
+	test("a leading /mix prefix and an explicit mode reach the server as the plane client resolves them", async () => {
+		const bodies: unknown[] = [];
+		const lightragFetch = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			bodies.push(typeof init?.body === "string" ? JSON.parse(init.body) : undefined);
+			return Response.json({ response: "context", llm_generated: false });
+		};
+		const { client } = await connect(ledger().greptime, "omp", BREAKER_TEST_ENV, { lightragFetch });
+		const prefixed = await call(client, "docs_lightrag_query", { question: "/mix how do the planes relate?" });
+		expect(prefixed.json()).toMatchObject({ backend: "lightrag" });
+		await call(client, "docs_lightrag_query", { question: "an explicit mode question", mode: "local", top_k: 3 });
+		expect(bodies).toEqual([
+			{ query: "how do the planes relate?", mode: "mix", top_k: 10, only_need_context: true },
+			{ query: "an explicit mode question", mode: "local", top_k: 3, only_need_context: true },
+		]);
 	});
 });
