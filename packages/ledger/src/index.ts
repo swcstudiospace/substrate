@@ -13,6 +13,16 @@ export {
 } from "./merkle.ts";
 
 export {
+	domainDigestHex,
+	type MerkleProofHex,
+	merkleAuditPath,
+	merkleProofHex,
+	verifyAuditPath,
+	verifyMerkleProofAgainstCommitment,
+	verifyMerkleProofHex,
+} from "./merkle-proof.ts";
+
+export {
 	formatMemo,
 	type Memo,
 	MEMO_PREFIX,
@@ -33,12 +43,14 @@ export {
 
 export {
 	type AddressMemo,
+	assertDevnetRpcUrl,
 	bs58decode,
 	type Commitment,
 	createRpc,
 	type Rpc,
 	RpcError,
 	type RpcOptions,
+	RpcUrlError,
 	type TransactionMemo,
 } from "./rpc.ts";
 

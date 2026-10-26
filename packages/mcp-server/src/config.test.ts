@@ -288,6 +288,7 @@ describe("SOLANA_* anchor config", () => {
 			keypairPath: null,
 			pubkey: null,
 			cli: SOLANA_CLI_DEFAULT,
+			problem: null,
 		});
 	});
 
@@ -303,7 +304,30 @@ describe("SOLANA_* anchor config", () => {
 			keypairPath: "/etc/substrate/anchor-keypair.json",
 			pubkey: "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
 			cli: "/usr/local/bin/solana",
+			problem: null,
 		});
+	});
+
+	test("a local test-validator URL is accepted", () => {
+		expect(loadConfig({ SOLANA_RPC_URL: "http://localhost:8899" }).solana.problem).toBeNull();
+	});
+
+	test("a refused SOLANA_RPC_URL sets problem, keeps the value, never throws, and is warned about", () => {
+		for (const url of [
+			"https://api.mainnet-beta.solana.com",
+			"https://API.TESTNET.SOLANA.COM",
+			"https://user:s3cret@api.devnet.solana.com",
+			"https://api.devnet.solana.com/#frag",
+			"ftp://api.devnet.solana.com",
+		]) {
+			const config = loadConfig({ SOLANA_RPC_URL: url });
+			expect(config.solana.rpcUrl).toBe(url);
+			expect(config.solana.problem).toContain("SOLANA_RPC_URL refused");
+			expect(config.solana.problem).not.toContain("s3cret");
+			const warnings = configWarnings(config).join("\n");
+			expect(warnings).toContain("SOLANA_RPC_URL");
+			expect(warnings).not.toContain("s3cret");
+		}
 	});
 });
 
