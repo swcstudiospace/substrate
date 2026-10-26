@@ -221,7 +221,7 @@ export class PlanningObserver {
 		const state = indexState(built.index);
 		// The change since the scan before: what a heartbeat reports. It moves with every scan, so a change is heartbeated once.
 		const sinceLastScan = this.lastScan !== null && this.lastScan.root === root ? diffPlanningIndex(this.lastScan.snapshot, next) : null;
-		// The state the scan before saw. A revert records its move from there: the publish baseline's state lags while a change is held.
+		// The state the scan before saw. A revert and a held change record their move from there: the publish baseline's state lags while a change is held.
 		const observedBefore = this.lastScan !== null && this.lastScan.root === root ? this.lastScan.state : null;
 		this.lastScan = { root, snapshot: next, state };
 		// The publish baseline, as the ledger was last told. It holds when a publish fails, so the same change is published again.
@@ -274,7 +274,7 @@ export class PlanningObserver {
 		if (change.held) {
 			if (outcome !== null && current !== null && key !== this.recordedHold) {
 				this.recordedHold = key;
-				this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: current.state, to: state, outcome, incomplete }, this.deps.clock ?? hostClock));
+				this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: change.observedBefore ?? current.state, to: state, outcome, incomplete }, this.deps.clock ?? hostClock));
 			}
 			if (current !== null) this.baseline = { root, snapshot: change.snapshot, state: current.state };
 			return;

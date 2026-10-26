@@ -857,6 +857,21 @@ describe("held, incomplete and failed-heartbeat states are reported", () => {
 		]);
 	});
 
+	test("a second held change records the move from the state the previous scan saw, not the publish baseline's", async () => {
+		const tree = new FakeTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN, [`${TREE_ROOT}/.planning/README.txt`]: "not a document\n" });
+		const { observer, transitions } = observerOver(tree, { accept: () => false });
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} context\n`);
+		expect(await observer.scan()).toMatchObject({ outcome: "not-published" });
+		tree.setContent(`${PHASE}/BAD.md`, `---\nphase: [unclosed\n${BODY} bad\n`);
+		expect(await observer.scan()).toMatchObject({ outcome: "not-published" });
+		await observer.settleTransitions();
+		expect(transitions).toEqual([
+			expect.objectContaining({ from: "EMPTY", to: "SUCCESS", outcome: "refused" }),
+			expect.objectContaining({ from: "SUCCESS", to: "DEGRADED", outcome: "refused" }),
+		]);
+	});
+
 	test("an unlistable directory with an edit in a readable directory records that edit as an incomplete refused transition", async () => {
 		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
 		tree.setContent(`${TREE_ROOT}/.planning/phases/53-locked/53-PLAN.md`, `${BODY} locked\n`);
