@@ -118,6 +118,11 @@ for (const problem of migration.errors) {
 	process.stderr.write(`[substrate] degraded — ${problem}\n`);
 }
 
+// Phase 58 (live steering): restore the durable inbox before the server answers, then start its expiry timer (unref'd).
+// Off, with nothing read, unless SUBSTRATE_PLANNING_STEERING and the audit table opt-in are both on; a failed read is
+// reported and the inbox starts empty, so it never refuses boot.
+await substrate.startSteering();
+
 // uplift-4 S6: the durable metrics history, only under SUBSTRATE_METRICS_HISTORY=on.
 // Samples the registry into `metric_samples` through the ledger client; fail-open,
 // a failed write is a counted drop. Needs the ledger, so without one it stays off.
@@ -219,6 +224,8 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		substrate.stopPreload();
 		// Phase 52: the planning observer's timer is cleared now; a scan in flight is awaited inside the bound below.
 		const planningStopped = substrate.stopPlanning();
+		// Phase 58: the steering expiry timer is cleared with them; a pass in flight is awaited inside the same bound.
+		const steeringStopped = substrate.stopSteering();
 		// Phase 50: the wake-up hint connections close with the timers; no subscriber outlives the shutdown.
 		substrate.stopEventBus();
 		observability.stop();
@@ -245,6 +252,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 					watchdogStopped,
 					recallStopped,
 					planningStopped,
+					steeringStopped,
 				]),
 				Bun.sleep(SHUTDOWN_FLUSH_MS),
 			]);

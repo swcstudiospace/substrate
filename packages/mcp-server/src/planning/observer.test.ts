@@ -5,15 +5,26 @@
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { EventInput } from "../types.ts";
 import { RecordingPresenceBackend } from "./backend.fixtures.ts";
+import { BaselineStoreError, FileBaselineStore, type BaselineLoad, type BaselineStore, type StoredBaseline } from "./baseline-store.ts";
 import { DEFAULT_PRESENCE_TTL_S, PLANNING_MAX_FILES_ENV, PLANNING_PRESENCE_TTL_ENV, PLANNING_ROOT_ENV, PLANNING_SCAN_INTERVAL_ENV, loadPlanningSettings } from "./config.ts";
 import { planningSessionId } from "./checkout.ts";
 import { PLANNING_CONFLICT } from "./conflicts.ts";
-import type { SessionRecord } from "./presence.ts";
+import { classifySessions, type SessionRecord } from "./presence.ts";
 import { PlanningReader, type PlanningSessionsView } from "./read.ts";
-import { PLANNING_OBSERVER_SESSION, PlanningObserver } from "./observer.ts";
-import { DragonflyPresenceStore, PRESENCE_KEY_PREFIX } from "./presence-dragonfly.ts";
+import {
+	DEFAULT_LIVENESS_INTERVAL_MS,
+	PLANNING_LIVENESS_INTERVAL_ENV,
+	PLANNING_OBSERVER_SESSION,
+	PlanningObserver,
+	loadLivenessSettings,
+	type PlanningObserverDeps,
+} from "./observer.ts";
+import { DragonflyPresenceStore, PRESENCE_KEY_PREFIX, presenceRetentionS } from "./presence-dragonfly.ts";
 import type { PlanningFs } from "./index.ts";
 import { FakeTree, TREE_ROOT } from "./tree.fixtures.ts";
 
@@ -1354,4 +1365,464 @@ describe("the observer under a change the ledger does not store, failure, load a
 		expect(finished).toBe(true);
 		expect(await scanning).toMatchObject({ state: "observed", outcome: "baseline" });
 	});
+});
+
+const PLAN_PATH = ".planning/phases/52-planning-awareness-core/52-PLAN.md";
+const HOUR_MS = 3_600_000;
+
+/** An observer over `tree` that stores what it publishes in `events`. `extra` overrides any dependency, `env` any planning setting. */
+function liveObserver(tree: FakeTree, events: EventInput[], extra: Partial<PlanningObserverDeps> = {}, env: Record<string, string> = {}): PlanningObserver {
+	return new PlanningObserver({
+		settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT, ...env }),
+		fs: tree,
+		presence: null,
+		emit: async (event) => {
+			events.push(event);
+			return true;
+		},
+		...extra,
+	});
+}
+
+/** A baseline store in memory. A test sets how it answers a load, whether its saves fail, and whether they wait on a gate. */
+class MemoryBaselines implements BaselineStore {
+	readonly files = new Map<string, StoredBaseline>();
+	loads: BaselineLoad | "throws" | null = null;
+	failSaves = false;
+	gate: Promise<void> | null = null;
+	attempts = 0;
+	saves = 0;
+
+	async load(key: string): Promise<BaselineLoad> {
+		if (this.loads === "throws") throw new BaselineStoreError("invalid-key", null);
+		if (this.loads !== null) return this.loads;
+		const held = this.files.get(key);
+		return held === undefined ? { state: "none" } : { state: "loaded", baseline: held };
+	}
+
+	async save(key: string, baseline: StoredBaseline): Promise<void> {
+		this.attempts += 1;
+		if (this.gate !== null) await this.gate;
+		if (this.failSaves) throw new BaselineStoreError("write-failed", "EIO");
+		this.files.set(key, baseline);
+		this.saves += 1;
+	}
+}
+
+/** How much an observer holds on to: every object, array element, map and set entry it reaches, outside its dependencies. */
+function retainedNodes(observer: PlanningObserver): number {
+	const seen = new Set<object>();
+	const walk = (value: unknown): number => {
+		if (typeof value !== "object" || value === null || seen.has(value)) return 0;
+		seen.add(value);
+		let nodes = 1;
+		if (value instanceof Map) for (const [key, entry] of value) nodes += 1 + walk(key) + walk(entry);
+		else if (value instanceof Set) for (const entry of value) nodes += 1 + walk(entry);
+		else for (const entry of Object.values(value)) nodes += walk(entry);
+		return nodes;
+	};
+	const own = observer as unknown as Record<string, unknown>;
+	return Object.keys(own)
+		.filter((name) => !["deps", "timers", "reporter", "clock"].includes(name))
+		.reduce((total, name) => total + walk(own[name]), 0);
+}
+
+describe("the liveness heartbeat: a session is alive, not only changing", () => {
+	test("30 simulated hours of scans with no planning change: the session stays active while it heartbeats, and goes stale when the heartbeats stop", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const backend = new RecordingPresenceBackend();
+		const presence = new DragonflyPresenceStore(backend);
+		const events: EventInput[] = [];
+		const observer = liveObserver(tree, events, { presence, liveness: { intervalMs: 0 } });
+		const startMs = backend.clockMs;
+		const ttlMs = DEFAULT_PRESENCE_TTL_S * 1000;
+		const now = async () => classifySessions(await presence.list(), backend.clockMs, ttlMs)[0];
+
+		expect(await observer.scan()).toEqual({ state: "observed", outcome: "baseline", heartbeat: { state: "not-due" }, liveness: { state: "written" } });
+		for (let minute = 1; minute <= 30 * 60; minute++) {
+			backend.clockMs += 60_000;
+			expect(await observer.scan()).toMatchObject({ outcome: "unchanged", heartbeat: { state: "not-due" }, liveness: { state: "written" } });
+			if (minute % 300 === 0) expect((await now())?.status).toBe("active");
+		}
+		// 30 hours with no planning change: alive, and idle for exactly that long. The change time is the first write's.
+		expect(await now()).toMatchObject({ sessionId: planningSessionId(tree, TREE_ROOT), status: "active", lastHeartbeatMs: startMs, ageMs: 0, idleForMs: 30 * HOUR_MS });
+		expect(events).toEqual([]);
+		// Every write renewed the key by the lifetime derived from the freshness window.
+		expect([...new Set(backend.writes.map((write) => write.ttlSeconds))]).toEqual([presenceRetentionS(ttlMs)]);
+
+		// The heartbeats stop. A sign of life exactly the TTL old is still active; one millisecond more is stale, and still listed.
+		backend.clockMs += ttlMs;
+		expect((await now())?.status).toBe("active");
+		backend.clockMs += 1;
+		expect(await now()).toMatchObject({ status: "stale", ageMs: ttlMs + 1, idleForMs: 30 * HOUR_MS + ttlMs + 1 });
+	}, 120_000);
+
+	test("a liveness write keeps the change time, and the next change heartbeat moves it and needs no liveness field", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const backend = new RecordingPresenceBackend();
+		const observer = liveObserver(tree, [], { presence: new DragonflyPresenceStore(backend), liveness: { intervalMs: 0 } });
+		const startMs = backend.clockMs;
+		await observer.scan();
+
+		backend.clockMs += HOUR_MS;
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged", liveness: { state: "written" } });
+		expect(storedSession(backend)).toMatchObject({ lastHeartbeatMs: startMs, livenessMs: startMs + HOUR_MS });
+
+		backend.clockMs += 15_000;
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited\n");
+		expect(await observer.scan()).toMatchObject({ outcome: "published", heartbeat: { state: "written" }, liveness: { state: "covered" } });
+		const stored = storedSession(backend);
+		expect(stored.lastHeartbeatMs).toBe(startMs + HOUR_MS + 15_000);
+		expect("livenessMs" in stored).toBe(false);
+		expect(backend.writes).toHaveLength(3);
+	});
+
+	test("without the liveness setting a quiet scan writes nothing, as before", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const backend = new RecordingPresenceBackend();
+		const observer = liveObserver(tree, [], { presence: new DragonflyPresenceStore(backend) });
+		await observer.scan();
+		expect(await observer.scan()).toEqual({ state: "observed", outcome: "unchanged", heartbeat: { state: "not-due" } });
+		expect(backend.writes).toEqual([]);
+	});
+
+	test("the interval spaces the writes, and never exceeds a third of the freshness window", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const backend = new RecordingPresenceBackend();
+		// A one-hour interval is capped at a third of the 90 s window: 30 s.
+		const observer = liveObserver(tree, [], { presence: new DragonflyPresenceStore(backend), liveness: { intervalMs: HOUR_MS } });
+		expect(await observer.scan()).toMatchObject({ liveness: { state: "written" } });
+		backend.clockMs += 29_999;
+		expect(await observer.scan()).toMatchObject({ liveness: { state: "not-due" } });
+		backend.clockMs += 1;
+		expect(await observer.scan()).toMatchObject({ liveness: { state: "written" } });
+		expect(backend.writes).toHaveLength(2);
+
+		// A ten-minute interval inside a one-hour window is kept as it is.
+		const slowBackend = new RecordingPresenceBackend();
+		const slow = liveObserver(tree, [], { presence: new DragonflyPresenceStore(slowBackend), liveness: { intervalMs: 600_000 } }, { [PLANNING_PRESENCE_TTL_ENV]: "3600" });
+		await slow.scan();
+		slowBackend.clockMs += 599_999;
+		expect(await slow.scan()).toMatchObject({ liveness: { state: "not-due" } });
+		slowBackend.clockMs += 1;
+		expect(await slow.scan()).toMatchObject({ liveness: { state: "written" } });
+	});
+
+	test("a failed liveness write is reported once and tried again on the next scan, and recovery is reported", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const backend = new RefusingWritesBackend();
+		const lines: string[] = [];
+		let tick: () => Promise<unknown> = async () => undefined;
+		const observer = liveObserver(tree, [], {
+			presence: new DragonflyPresenceStore(backend),
+			liveness: { intervalMs: 0 },
+			report: (line) => lines.push(line),
+			timers: {
+				setInterval: (run) => {
+					tick = run;
+					return "scan-timer";
+				},
+				clearInterval: () => undefined,
+			},
+		});
+		expect(observer.start()).toBe(true);
+		backend.refusesWrites = true;
+		await tick();
+		await tick();
+		expect(lines).toEqual(["[substrate] planning observer: liveness heartbeat failed: UNKNOWN"]);
+		expect(backend.writes).toEqual([]);
+
+		backend.refusesWrites = false;
+		backend.clockMs += 1_000;
+		await tick();
+		expect(lines).toEqual(["[substrate] planning observer: liveness heartbeat failed: UNKNOWN", "[substrate] planning observer: scans succeed again"]);
+		expect(storedSession(backend)).toMatchObject({ livenessMs: backend.clockMs });
+		observer.stop();
+	});
+
+	test("a checkout that cannot be read is not proven alive: no liveness write", async () => {
+		const backend = new RecordingPresenceBackend();
+		const observer = liveObserver(new FakeTree({}), [], { presence: new DragonflyPresenceStore(backend), liveness: { intervalMs: 0 } });
+		expect(await observer.scan()).toEqual({ state: "unavailable", code: "root-unavailable" });
+		expect(backend.writes).toEqual([]);
+	});
+
+	test("with no cache endpoint there is nothing to write, and the scan says so", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const observer = liveObserver(tree, [], { liveness: { intervalMs: 0 } });
+		expect(await observer.scan()).toMatchObject({ outcome: "baseline", liveness: { state: "presence-unset" } });
+	});
+
+	test("the liveness setting is an integer from 0 to an hour, defaults to every scan, and is never echoed", () => {
+		expect(loadLivenessSettings({})).toEqual({ ok: true, settings: { intervalMs: DEFAULT_LIVENESS_INTERVAL_MS } });
+		expect(DEFAULT_LIVENESS_INTERVAL_MS).toBe(0);
+		expect(loadLivenessSettings({ [PLANNING_LIVENESS_INTERVAL_ENV]: "15000" })).toEqual({ ok: true, settings: { intervalMs: 15_000 } });
+		expect(loadLivenessSettings({ [PLANNING_LIVENESS_INTERVAL_ENV]: "3600000" })).toEqual({ ok: true, settings: { intervalMs: 3_600_000 } });
+		for (const bad of ["abc", "-1", "1.5", "", " 5"]) {
+			expect(loadLivenessSettings({ [PLANNING_LIVENESS_INTERVAL_ENV]: bad })).toEqual({ ok: false, errors: [{ key: PLANNING_LIVENESS_INTERVAL_ENV, reason: "not-integer" }] });
+		}
+		expect(loadLivenessSettings({ [PLANNING_LIVENESS_INTERVAL_ENV]: "3600001" })).toEqual({
+			ok: false,
+			errors: [{ key: PLANNING_LIVENESS_INTERVAL_ENV, reason: "out-of-range", min: 0, max: 3_600_000 }],
+		});
+	});
+});
+
+describe("the observer's durable baseline: a restart publishes what changed while it was down", () => {
+	const KEY = planningSessionId(new FakeTree({}), TREE_ROOT);
+
+	test("a restarted observer with a stored baseline publishes exactly the changes made while it was down, once", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "planning-baseline-"));
+		try {
+			const store = new FileBaselineStore(join(dir, "baselines"));
+			const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n", [`${PHASE}/52-PLAN.md`]: "# plan\n" });
+			const events: EventInput[] = [];
+			const first = liveObserver(tree, events, { baselines: store, baselineSaveIntervalMs: 0 });
+			expect(await first.scan()).toMatchObject({ outcome: "baseline" });
+			await first.idle();
+			expect(events).toEqual([]);
+
+			// The first observer is gone. The tree changes while no observer runs.
+			tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited\n");
+			tree.remove(`${PHASE}/52-PLAN.md`);
+			tree.setContent(`${PHASE}/52-02-PLAN.md`, "# plan two\n");
+			const second = liveObserver(tree, events, { baselines: store, baselineSaveIntervalMs: 0 });
+			expect(await second.scan()).toMatchObject({ outcome: "published" });
+			expect(events).toHaveLength(1);
+			expect(events[0]?.payload).toMatchObject({
+				kind: "planning.changed",
+				added: [{ path: ".planning/phases/52-planning-awareness-core/52-02-PLAN.md", before: null, after: sha256("# plan two\n") }],
+				removed: [{ path: PLAN_PATH, before: sha256("# plan\n"), after: null }],
+				changed: [{ path: CONTEXT, before: sha256("# context\n"), after: sha256("# context, edited\n") }],
+			});
+			expect(JSON.stringify(events)).not.toContain("context, edited");
+			await second.idle();
+
+			// A third start finds the baseline the second one saved: nothing is published twice.
+			const third = liveObserver(tree, events, { baselines: store, baselineSaveIntervalMs: 0 });
+			expect(await third.scan()).toMatchObject({ outcome: "unchanged" });
+			expect(events).toHaveLength(1);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("with no stored baseline the first scan is a baseline and publishes nothing, and it saves one", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const store = new MemoryBaselines();
+		const events: EventInput[] = [];
+		const observer = liveObserver(tree, events, { baselines: store });
+		expect(await observer.scan()).toEqual({ state: "observed", outcome: "baseline", heartbeat: { state: "not-due" } });
+		expect(events).toEqual([]);
+		await observer.idle();
+		expect(store.files.get(KEY)).toMatchObject({ root: TREE_ROOT, snapshot: { truncated: false, unlisted: [], records: [{ path: CONTEXT, sha256: sha256("# context\n") }] } });
+	});
+
+	test("a stored baseline that matches the tree publishes nothing", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const store = new MemoryBaselines();
+		const events: EventInput[] = [];
+		const first = liveObserver(tree, events, { baselines: store });
+		await first.scan();
+		await first.idle();
+		const restarted = liveObserver(tree, events, { baselines: store });
+		expect(await restarted.scan()).toEqual({ state: "observed", outcome: "unchanged", heartbeat: { state: "not-due" } });
+		expect(events).toEqual([]);
+	});
+
+	test("a restored change the ledger does not store is held, and published on a later scan", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const store = new MemoryBaselines();
+		const first = liveObserver(tree, [], { baselines: store });
+		await first.scan();
+		await first.idle();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited\n");
+
+		let accept = false;
+		const events: EventInput[] = [];
+		const restarted = liveObserver(tree, events, {
+			baselines: store,
+			emit: async (event) => {
+				if (accept) events.push(event);
+				return accept;
+			},
+		});
+		expect(await restarted.scan()).toMatchObject({ outcome: "not-published" });
+		accept = true;
+		expect(await restarted.scan()).toMatchObject({ outcome: "published" });
+		expect(events).toHaveLength(1);
+		expect(events[0]?.payload).toMatchObject({ changed: [{ path: CONTEXT, before: sha256("# context\n"), after: sha256("# context, edited\n") }] });
+	});
+
+	test("a stored baseline with a gap publishes nothing: an incomplete diff proves no absence", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const store = new MemoryBaselines();
+		store.files.set(KEY, { root: TREE_ROOT, snapshot: { records: [], truncated: true, unlisted: [] } });
+		const events: EventInput[] = [];
+		expect(await liveObserver(tree, events, { baselines: store }).scan()).toMatchObject({ outcome: "incomplete" });
+		expect(events).toEqual([]);
+	});
+
+	test("an unusable stored baseline is reported and treated as none; a store that throws likewise; another root's is ignored", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const events: EventInput[] = [];
+
+		const corrupt = new MemoryBaselines();
+		corrupt.loads = { state: "unusable", reason: "bad-shape", detail: null };
+		const corruptLines: string[] = [];
+		expect(await liveObserver(tree, events, { baselines: corrupt, report: (line) => corruptLines.push(line) }).scan()).toMatchObject({ outcome: "baseline" });
+		expect(corruptLines).toEqual(["[substrate] planning observer: stored baseline unusable (bad-shape); scanning as a first run"]);
+
+		const throwing = new MemoryBaselines();
+		throwing.loads = "throws";
+		const throwingLines: string[] = [];
+		expect(await liveObserver(tree, events, { baselines: throwing, report: (line) => throwingLines.push(line) }).scan()).toMatchObject({ outcome: "baseline" });
+		expect(throwingLines).toEqual(["[substrate] planning observer: stored baseline not read: invalid-key; scanning as a first run"]);
+
+		const foreign = new MemoryBaselines();
+		foreign.files.set(KEY, { root: "/elsewhere", snapshot: { records: [], truncated: false, unlisted: [] } });
+		const foreignLines: string[] = [];
+		expect(await liveObserver(tree, events, { baselines: foreign, report: (line) => foreignLines.push(line) }).scan()).toMatchObject({ outcome: "baseline" });
+		expect(foreignLines).toEqual(["[substrate] planning observer: stored baseline names another checkout root; scanning as a first run"]);
+		expect(events).toEqual([]);
+	});
+
+	test("saves are throttled by the injected clock, and a quiet tree saves nothing more", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const store = new MemoryBaselines();
+		let nowMs = 1_000_000;
+		const observer = liveObserver(tree, [], { baselines: store, now: () => nowMs, baselineSaveIntervalMs: 5_000 });
+		await observer.scan();
+		await observer.idle();
+		expect(store.attempts).toBe(1);
+
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited\n");
+		await observer.scan();
+		await observer.idle();
+		expect(store.attempts).toBe(1);
+		nowMs += 4_999;
+		await observer.scan();
+		await observer.idle();
+		expect(store.attempts).toBe(1);
+		nowMs += 1;
+		await observer.scan();
+		await observer.idle();
+		expect(store.attempts).toBe(2);
+		expect(store.files.get(KEY)?.snapshot.records).toEqual([{ path: CONTEXT, sha256: sha256("# context, edited\n") }]);
+
+		nowMs += 60_000;
+		await observer.scan();
+		await observer.idle();
+		expect(store.attempts).toBe(2);
+	});
+
+	test("flushBaseline saves a dirty baseline at once, whatever the throttle", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const store = new MemoryBaselines();
+		const observer = liveObserver(tree, [], { baselines: store, now: () => 1_000_000, baselineSaveIntervalMs: 60_000 });
+		await observer.scan();
+		await observer.idle();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited\n");
+		await observer.scan();
+		await observer.idle();
+		expect(store.attempts).toBe(1);
+
+		await observer.flushBaseline();
+		expect(store.attempts).toBe(2);
+		expect(store.files.get(KEY)?.snapshot.records).toEqual([{ path: CONTEXT, sha256: sha256("# context, edited\n") }]);
+		await observer.flushBaseline();
+		expect(store.attempts).toBe(2);
+	});
+
+	test("a slow save never holds a scan, and no second save starts behind it", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const store = new MemoryBaselines();
+		const gate = Promise.withResolvers<void>();
+		store.gate = gate.promise;
+		const observer = liveObserver(tree, [], { baselines: store, baselineSaveIntervalMs: 0 });
+		expect(await observer.scan()).toMatchObject({ outcome: "baseline" });
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited\n");
+		expect(await observer.scan()).toMatchObject({ outcome: "published" });
+		expect(store.attempts).toBe(1);
+		expect(store.saves).toBe(0);
+
+		gate.resolve();
+		await observer.idle();
+		expect(store.saves).toBe(1);
+		// The save in flight held the baseline of the first scan; the change since is saved on the next scan.
+		await observer.scan();
+		await observer.idle();
+		expect(store.files.get(KEY)?.snapshot.records).toEqual([{ path: CONTEXT, sha256: sha256("# context, edited\n") }]);
+	});
+
+	test("a failed save is reported once, retried after the interval, and the recovery is reported", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const store = new MemoryBaselines();
+		store.failSaves = true;
+		const lines: string[] = [];
+		let nowMs = 1_000_000;
+		const observer = liveObserver(tree, [], { baselines: store, now: () => nowMs, baselineSaveIntervalMs: 5_000, report: (line) => lines.push(line) });
+
+		await observer.scan();
+		await observer.idle();
+		expect(store.attempts).toBe(1);
+		expect(lines).toEqual(["[substrate] planning observer: baseline save failed: write-failed: EIO; it is retried"]);
+
+		nowMs += 1_000;
+		await observer.scan();
+		await observer.idle();
+		expect(store.attempts).toBe(1);
+
+		nowMs += 4_000;
+		await observer.scan();
+		await observer.idle();
+		expect(store.attempts).toBe(2);
+		expect(lines).toHaveLength(1);
+
+		store.failSaves = false;
+		nowMs += 5_000;
+		await observer.scan();
+		await observer.idle();
+		expect(store.attempts).toBe(3);
+		expect(store.files.has(KEY)).toBe(true);
+		expect(lines).toEqual(["[substrate] planning observer: baseline save failed: write-failed: EIO; it is retried", "[substrate] planning observer: baseline saves succeed again"]);
+	});
+
+	test("a bad baseline file is replaced by the first save after it is reported", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const store = new MemoryBaselines();
+		store.loads = { state: "unusable", reason: "not-json", detail: null };
+		const observer = liveObserver(tree, [], { baselines: store, report: () => undefined });
+		await observer.scan();
+		await observer.idle();
+		expect(store.saves).toBe(1);
+		expect(store.files.get(KEY)?.root).toBe(TREE_ROOT);
+	});
+
+	test("10,000 simulated scans retain no growing history: what the observer holds is the same after 1,000 scans and after 10,000", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n", [`${PHASE}/52-PLAN.md`]: "# plan\n" });
+		const backend = new RecordingPresenceBackend();
+		const store = new MemoryBaselines();
+		const observer = liveObserver(tree, [], {
+			presence: new DragonflyPresenceStore(backend),
+			liveness: { intervalMs: 0 },
+			baselines: store,
+			baselineSaveIntervalMs: 0,
+		});
+		let early = 0;
+		// 10,025 scans, so the last one falls 25 scans after a change, as the early measurement does.
+		for (let scan = 1; scan <= 10_025; scan++) {
+			backend.clockMs += 15_000;
+			// A change every 50 scans (12.5 minutes), so touched pairs and saves keep happening and expiring.
+			if (scan % 50 === 0) tree.setContent(`${PHASE}/52-CONTEXT.md`, scan % 100 === 0 ? "# context\n" : "# context, edited\n");
+			await observer.scan();
+			if (scan === 1_025) early = retainedNodes(observer);
+		}
+		await observer.idle();
+		const late = retainedNodes(observer);
+		expect(early).toBeGreaterThan(0);
+		// Both counts are taken 25 scans after a change. A little slack covers a pair that is inside the window in one and not the other; a history would add thousands.
+		expect(Math.abs(late - early)).toBeLessThanOrEqual(16);
+		expect(store.attempts).toBeLessThan(400);
+	}, 180_000);
 });

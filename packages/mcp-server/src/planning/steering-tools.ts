@@ -21,6 +21,7 @@ import {
 	STEERING_BODY_MAX,
 	STEERING_OUTCOMES,
 	STEERING_PRIORITIES,
+	type SteeringAckReason,
 	type SteeringClock,
 	type SteeringConfigError,
 	type SteeringError,
@@ -121,6 +122,8 @@ export interface ListedSteeringDirective {
 	queued_at_ms: number;
 	/** Null while queued. */
 	acknowledged_at_ms: number | null;
+	/** Why a system closed the directive (`timeout`), or null while queued and for a human acknowledgement. */
+	reason: SteeringAckReason | null;
 }
 
 /** The directives for one session, queued or acknowledged. A read: `not-configured` is not an error. */
@@ -226,9 +229,10 @@ export function listSteering(wiring: SteeringWiring, input: SteeringListInput): 
 				outcome: record.outcome,
 				confirmed: record.confirmed,
 				acknowledged_at_ms: record.acknowledgedAtMs,
+				reason: record.reason ?? null,
 			};
 		}
-		return { ...base, state: "queued", outcome: null, confirmed: false, acknowledged_at_ms: null };
+		return { ...base, state: "queued", outcome: null, confirmed: false, acknowledged_at_ms: null, reason: null };
 	});
 	return { status: "listed", target_session_id: input.session_id, directives };
 }

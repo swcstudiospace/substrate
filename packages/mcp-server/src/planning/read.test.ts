@@ -60,6 +60,39 @@ describe("planning_status", () => {
 		expect(text).not.toContain(FRONTMATTER_SECRET);
 	});
 
+	test("the GSD-Core position is carried from the same scan, with its secrets redacted and no body text", async () => {
+		const token = "ghp_Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2";
+		const state = `---\nmilestone: v1.6\nstatus: executing\nstopped_at: "pushed with ${token}"\ncurrent_phase: 58\n---\n# State\n\n${BODY} prose\n\n## Current Position\n\nPhase: 58\nPlan: 58-01-PLAN\n`;
+		const roadmap = `### Phase 58: Live steering\n\n| Phase | Milestone | Plans Complete | Status | Completed |\n|---|---|---|---|---|\n| 58. Live steering | v1.6 | 0/1 | In progress | - |\n`;
+		const tree = new FakeTree({ [`${P}/STATE.md`]: state, [`${P}/ROADMAP.md`]: roadmap, [`${P}/phases/58-live-steering/58-01-PLAN.md`]: "# plan\n" });
+		const view = await readerOver(tree).status();
+		if (view.state !== "ok") throw new Error(`expected ok, got ${view.state}`);
+		expect(view.position).toEqual({
+			errors: [],
+			ok: true,
+			position: {
+				milestone: "v1.6",
+				milestone_name: null,
+				phase: { name: "Live steering", number: "58", slug: "live-steering" },
+				plan: "58-01-PLAN",
+				progress: { phases_done: 0, phases_total: 1 },
+				status: "executing",
+				step: "pushed with [REDACTED]",
+			},
+		});
+		const text = JSON.stringify(view);
+		expect(text).not.toContain("Z9y8X7w6V5u4T3s2R1q0");
+		expect(text).not.toContain(BODY);
+	});
+
+	test("without STATE.md and ROADMAP.md the position says so in typed errors and every field is null", async () => {
+		const view = await readerOver(seededTree()).status();
+		if (view.state !== "ok") throw new Error(`expected ok, got ${view.state}`);
+		expect(view.position?.ok).toBe(false);
+		expect(view.position?.errors.map((error) => `${error.where}:${error.code}`)).toEqual(["ROADMAP.md:missing", "STATE.md:missing"]);
+		expect(view.position?.position.phase).toBeNull();
+	});
+
 	test("an unset root answers disabled, never an error", async () => {
 		expect(await readerOver(seededTree(), { root: null }).status()).toEqual({ state: "disabled", reason: "root-unset" });
 	});
@@ -96,6 +129,22 @@ describe("planning_sessions", () => {
 		expect(view.sessions.map((row) => [row.sessionId, row.status, row.ageMs])).toEqual([
 			["wt-fresh", "active", 10_000],
 			["wt-old", "stale", 200_000],
+		]);
+	});
+
+	test("a session idle for hours but alive reads active and reports how long it has been idle", async () => {
+		const backend = new RecordingPresenceBackend();
+		const now = backend.clockMs;
+		const hour = 3_600_000;
+		// Its last planning change was 5 hours ago; its observer wrote a liveness record 20 seconds ago.
+		storeSession(backend, { ...session("wt-quiet", now - 5 * hour), livenessMs: now - 20_000 });
+		// No liveness record at all: its change heartbeat is its only sign of life, so it is stale.
+		storeSession(backend, session("wt-silent", now - 5 * hour));
+		const view = await readerOver(seededTree(), { presence: new DragonflyPresenceStore(backend) }).sessions();
+		if (view.state !== "ok") throw new Error(`expected ok, got ${view.state}`);
+		expect(view.sessions.map((row) => [row.sessionId, row.status, row.ageMs, row.idleForMs])).toEqual([
+			["wt-quiet", "active", 20_000, 5 * hour],
+			["wt-silent", "stale", 5 * hour, 5 * hour],
 		]);
 	});
 

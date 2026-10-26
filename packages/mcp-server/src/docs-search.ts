@@ -46,6 +46,7 @@ import {
 	type RetrievalKnobs,
 	type RetrievalOutcome,
 } from "./planes/ragflow.ts";
+import type { SteeringNotice } from "./planning/steering-delivery.ts";
 import { redact, redactValue } from "./redact.ts";
 import type { EventInput, Surface } from "./types.ts";
 
@@ -137,6 +138,11 @@ export interface SearchReply {
 	 * Per call, so the answer cache never holds it.
 	 */
 	context?: DocsContext;
+	/**
+	 * Present only while the calling session (the `session_id` of the call) has queued steering directives: a count and
+	 * at most three entries read from the steering inbox. Per call, so the answer cache never holds it.
+	 */
+	steering?: SteeringNotice;
 }
 
 /**
@@ -159,10 +165,11 @@ export function citationProvenanceCounts(citations: readonly SearchCitation[]): 
  * Whether a reply may be stored by the answer cache: only a reply every
  * resolved dataset answered. R6's rule ("a degraded reply is never stored")
  * extended to the partial case, for the reason `degraded_datasets` states.
- * A reply carrying `context` is per call: its events belong to one session, so it is never stored.
+ * A reply carrying `context` is per call: its events belong to one session, so it is never stored. The same holds for a
+ * reply carrying `steering`: the queued directives belong to one session and change as they are acknowledged.
  */
 export function searchReplyStorable(reply: SearchReply): boolean {
-	if (Object.hasOwn(reply, "context")) return false;
+	if (Object.hasOwn(reply, "context") || Object.hasOwn(reply, "steering")) return false;
 	return reply.degraded !== true && (reply.degraded_datasets === undefined || reply.degraded_datasets.length === 0);
 }
 
