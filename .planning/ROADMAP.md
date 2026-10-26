@@ -9,6 +9,7 @@
 - ✅ **v1.4 Substrate contract hardening** — Phases 34-36, completed 2026-10-24 (local, not published). Archive: [milestones/v1.4-ROADMAP.md](milestones/v1.4-ROADMAP.md) · audit: [milestones/v1.4-MILESTONE-AUDIT.md](milestones/v1.4-MILESTONE-AUDIT.md). Source: [.planning/uplift-7/MILESTONE-AUDIT.md](uplift-7/MILESTONE-AUDIT.md) rows 23-25.
 - 🚧 **v1.3.x Should-have hardening** — Phases 37-44, open: 44 passed; 37-43 verified in repo with live proofs pending; 40-43 accepted debt (2026-10-23); 37-39 await an operator waiver. Audit: [v1.3.x-MILESTONE-AUDIT.md](v1.3.x-MILESTONE-AUDIT.md).
 - 🚧 **v1.5 SOTA enhancements** — Phases 45-54, open. Phase 46 partial: criterion 1 in repo; criteria 2-6 need per-run operator approval. Phases 52-54 in review as draft PRs #104, #109, #110, #111 (not on main). 45 and 47-50 accepted debt (2026-10-23); 51 complete (PR #108).
+- 🚧 **v1.6 Contextual Memory, Live Steering and Eternal Rollback** — Phases 55-62, planned 2026-10-26 (Ultrathink graph ut-mvp59le0-8815e6d1). Phases 58 and 61 depend on the unmerged draft PRs #104 and #109-#111. Live steps (a LightRAG deploy, anchor funding and the anchor timer, production migrations) stay operator-gated. Discovery record: [phases/55-migration-safety/CONTEXT.md](phases/55-migration-safety/CONTEXT.md).
 
 ## Phases
 
@@ -108,6 +109,17 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [ ] **Phase 52: GSD-Core planning index and cross-session awareness core** - file-first index, session presence and read-only planning tools (In review: draft PR #104 core, PR #109 wiring)
 - [ ] **Phase 53: Steering, conflict control and checkpoint/resume** - audited steering inbox, conflict events and resumable checkpoints (In review: draft PR #110)
 - [ ] **Phase 54: Planning observability and migration inventory** - phase-transition metrics, session STATES and the Railway migration inventory (In review: draft PR #111)
+
+### 🚧 v1.6 Contextual Memory, Live Steering and Eternal Rollback (Planned)
+
+- [ ] **Phase 55: Migration safety, session event vocabulary and the v1.6 baseline** - contract-tested index migrations, the checkpoint and rollback ledger vocabulary, and the milestone discovery record.
+- [ ] **Phase 56: LightRAG client contract alignment and storage topology** - the client matches upstream v1.5.x and can never emit a clear-all; the hosting topology is decided. No deploy.
+- [ ] **Phase 57: Tandem memory, LightRAG with Hindsight, with provenance and forget** - shared join keys, merged cited answers, a forget primitive and a cross-store consistency verifier.
+- [ ] **Phase 58: Live session steering for multi-day GSD-Core sessions** - durable and delivered directives, multi-day liveness, a GSD position model (depends on the draft PRs of phases 52-54).
+- [ ] **Phase 59: Eternal logging, verifiable checkpoint and rollback events on Solana devnet** - Merkle inclusion proofs against the anchored hourly root, signer rotation, devnet reset detection. Roots only.
+- [ ] **Phase 60: Eternal Memory Knowledge Nexus** - verifiable, versioned memory records and deterministic capsules, informed by Anda and KIP concepts.
+- [ ] **Phase 61: Session rollback to an exact chat moment with file revert** - journaled, verified restore through a CLI, memory supersession and an append-only rollback event (depends on phases 55, 57-59 and the draft PRs).
+- [ ] **Phase 62: Soak, runbooks and v1.6 close** - a simulated multi-day run, runbooks and ADRs, and the milestone audit.
 
 ## Phase Details
 
@@ -832,6 +844,183 @@ Plans:
 
 **Plans**: 0 plans on main (created by gsd-plan-phase)
 
+### Phase 55: Migration safety, session event vocabulary and the v1.6 baseline
+
+**Goal**: The substrate evolves its TimescaleDB index and its ledger vocabulary only through contract-tested, documented steps, and the milestone's verified facts, corrected assumptions and quality findings are on record.
+
+**Status**: Planned 2026-10-26. Discovery recorded in `phases/55-migration-safety/CONTEXT.md`.
+
+**Depends on**: Phase 17 (frozen event vocabulary), Phase 26 (index store)
+
+**Repos**: agent-substrate (target files: packages/mcp-server/src/index-store.ts and its tests, event-sources.ts, session-events.ts, rollback-compat.test.ts, docs/event-vocabulary.md, docs/runbooks)
+
+**Requirements**: [SOTA-11]
+
+**Success Criteria** (what must be TRUE):
+
+  1. An offline contract test fails any migration step that is not idempotent, that drops, renames or retypes an object, or whose text changed after it was applied (frozen digests for the applied steps).
+  2. A fake-connection harness proves the advisory lock is taken before any DDL, one transaction per step, rollback with no ledger row, zero DDL on a re-run, and resume from a partial ledger.
+  3. A rollback-compat test fails when a step added after the reference release is not additive or is not listed in the rollback-compat runbook.
+  4. `session.checkpoint`, `session.rollback` and `session.rollback.refused` exist as `note` and `warning` events with validated payload builders, and `bun run check:phase-close` passes with EVENT_KINDS at 12 and SURFACES at 42.
+  5. An operator rehearsal runbook for index migrations exists, and every production step in it is marked operator-run.
+
+**Plans**: 0 plans on main (created by gsd-plan-phase)
+
+### Phase 56: LightRAG client contract alignment and storage topology
+
+**Goal**: The substrate talks to LightRAG v1.5.x correctly and safely before any deploy: the client matches the upstream API, can never emit a clear-all, is contract-tested against a route table, and the hosting topology is decided and written down. Deploy, ingest and cutover stay in Phase 46 (T5-T8).
+
+**Status**: Planned 2026-10-26. No LightRAG service exists in either Railway project; the RAGFlow service was deleted on 2026-10-25.
+
+**Depends on**: Phase 46 (client and docs plane; criterion 1 in repo)
+
+**Repos**: agent-substrate (target files: packages/mcp-server/src/planes/lightrag.ts and tests, mcp.ts, server.ts, service.ts, docs/runbooks, docs/data-planes.md, docs/docs-plane.md)
+
+**Requirements**: [SOTA-12]
+
+**Success Criteria** (what must be TRUE):
+
+  1. The client never sends `DELETE /documents` (clear-all upstream). Documents are removed only through `DELETE /documents/delete_document` with real document ids, and a denylist test proves the clear-all route is unreachable.
+  2. Pipeline completion is read from the upstream `busy` flag; a fenced workspace (`recovery_required`) and an unknown shape each give an explicit reason, never a silent timeout.
+  3. The API key is sent as `X-API-Key` only and never appears in a reason or a log.
+  4. An upload's `track_id` resolves to document ids through `track_status`; an HTTP 409 same-name conflict is a typed outcome.
+  5. One LightRAG `/query` client remains, behind the breaker and the gated fetch, and a health probe fills `planes.lightrag.ok`.
+  6. A route fixture derived from upstream v1.5.7 source, with its provenance stated, and a contract test fail when the client's routes or required request fields drift; the operator step that diffs the fixture against the live `/openapi.json` is documented.
+  7. The storage topology decision (a dedicated Postgres with pgvector, `PGTableGraphStorage`, workspace isolation, a pinned image, Dragonfly kept cache-only) and the upgrade and re-index design are written down; no live action is taken.
+
+**Plans**: 0 plans on main (created by gsd-plan-phase)
+
+### Phase 57: Tandem memory, LightRAG with Hindsight, with provenance and forget
+
+**Goal**: Hindsight and LightRAG answer together with shared provenance and join keys, memory written after a point in a session can be superseded or forgotten without hard-deleting the ledger, and the consistency of the stores can be verified.
+
+**Status**: Planned 2026-10-26.
+
+**Depends on**: Phase 56, Phase 49 (graph memory), Phase 26 (Hindsight recall)
+
+**Repos**: agent-substrate (target files: packages/mcp-server/src/memory-retain.ts, memory-recall.ts, a new memory-forget.ts and tandem-recall.ts, docs-search.ts, service.ts, a consistency verifier)
+
+**Requirements**: [SOTA-13]
+
+**Success Criteria** (what must be TRUE):
+
+  1. Retain metadata carries `graph_id`, `session_id` and `node_id` when known; recall hits expose them; document ids are unchanged.
+  2. A docs answer with LightRAG up carries LightRAG chunks and Hindsight citations, deduplicated and with provenance; with LightRAG down the existing degraded fallback is unchanged.
+  3. A forget primitive removes plane documents for entries superseded by rollback or expiry, by entry id, emits one ledger note per call, and a replayed parked retain for it answers gone; the index keeps the superseded row.
+  4. A consistency verifier compares the TimescaleDB memory index, the Hindsight documents and the ledger events, reports drift as JSON with a non-zero exit code, and repairs nothing without an explicit flag.
+  5. The brief's recall injection can be scoped to the claimed node's graph, off by default, within its own budget.
+
+**Plans**: 0 plans on main (created by gsd-plan-phase)
+
+### Phase 58: Live session steering for multi-day GSD-Core sessions
+
+**Goal**: Steering directives are durable, are delivered to the target session and are tied to GSD-Core's position, and sessions that run for days stay alive: liveness is decoupled from planning changes and state survives restarts.
+
+**Status**: Planned 2026-10-26. It stacks on the unmerged draft PRs #104, #109, #110 and #111 and cannot land before they merge (merge is on operator Hold).
+
+**Depends on**: Phase 52, Phase 53, Phase 54 (draft PRs), Phase 57
+
+**Repos**: agent-substrate (target files: packages/mcp-server/src/planning/*, mcp.ts, event.ts, the TimescaleDB index schema (new opt-in step), config-reference)
+
+**Requirements**: [SOTA-14]
+
+**Success Criteria** (what must be TRUE):
+
+  1. Queued and acknowledged directives survive a restart through a durable store (an opt-in TimescaleDB step), and an unacknowledged directive expires to a `declined:timeout` audit row.
+  2. A queued directive reaches the target session within one scan interval through the existing hint channel and the next `docs_search` or brief; the two steering mechanisms (`docs_steering_session` and the inbox) share one state model.
+  3. A session quiet for more than 25 hours stays `active` while it heartbeats, and a restart publishes the changes made while the observer was down.
+  4. `.planning/STATE.md` and `ROADMAP.md` are parsed into a position (milestone, phase, plan, step) exposed through `planning_status`.
+  5. DragonflyDB carries only wake-up hints and ephemeral presence; the durable authority is TimescaleDB and the ledger.
+
+**Plans**: 0 plans on main (created by gsd-plan-phase)
+
+### Phase 59: Eternal logging, verifiable checkpoint and rollback events on Solana devnet
+
+**Goal**: Every checkpoint and rollback is a ledger event that is provably inside an hourly root anchored on Solana devnet, verifiable without trusting the substrate; devnet resets and signer changes are detected and recoverable. Roots only, devnet only.
+
+**Status**: Planned 2026-10-26. The live steps (funding the anchor key, installing the timer, the first send) remain operator-gated (Phase 41, accepted debt).
+
+**Depends on**: Phase 55 (vocabulary), Phase 41 (anchor job)
+
+**Repos**: agent-substrate (target files: packages/ledger/src, packages/mcp-server/src/anchor.ts, service.ts (verify), config.ts, packages/evidence, docs/runbooks)
+
+**Requirements**: [SOTA-15]
+
+**Success Criteria** (what must be TRUE):
+
+  1. A Merkle inclusion proof for one event hash verifies against the hourly root for every tree size and index, and any tampering fails.
+  2. A checkpoint verification command resolves a checkpoint event to its hour root, its proof, its `anchors` row and its devnet transaction, and reports exactly one of anchored, pending, unanchored, unverified or mismatch.
+  3. A devnet RPC URL that names mainnet or testnet is refused at configuration load and at RPC construction, in addition to the genesis-hash gate.
+  4. A signer set with validity windows lets the verifier accept anchors signed by a rotated key and reject any other, and a rotation is itself a ledger event.
+  5. A devnet reset (a changed genesis hash or missing finalized signatures) is classified apart from tampering, a re-anchor procedure with a dry-run exists, and the chain is documented as evidence and not as storage.
+  6. No transaction is sent by this phase's code outside operator-run steps; the runbook for those steps exists.
+
+**Plans**: 0 plans on main (created by gsd-plan-phase)
+
+### Phase 60: Eternal Memory Knowledge Nexus
+
+**Goal**: Memory records are durable, versioned, carry provenance and are verifiable against the anchored ledger; deterministic capsules can be exported and content-addressed, informed by the concepts of Anda and KIP without adopting their chain or code.
+
+**Status**: Planned 2026-10-26.
+
+**Depends on**: Phase 57, Phase 59
+
+**Repos**: agent-substrate (target files: packages/mcp-server/src (memory verification and capsule modules), a blob store interface, docs/adr)
+
+**Requirements**: [SOTA-16]
+
+**Success Criteria** (what must be TRUE):
+
+  1. Each governed memory record exposes a stable id, a version, its supersession chain, its provenance and a content hash; a verify call recomputes the hash and proves the write event is inside an anchored root.
+  2. A deterministic capsule export (records plus a manifest and a root digest) round-trips, and its digest is recorded as a ledger event; the blob store interface has a local content-addressed store and an S3-compatible adapter tested against a fake (live use of the `ledger-archive` bucket is operator-gated).
+  3. Redaction removes a capsule's content and keeps its hash and a tombstone; the limits that on-chain immutability imposes are documented.
+  4. A decision record maps each Anda and KIP concept to adopt, adapt or reject and notes the upstream licenses; no code is copied.
+
+**Plans**: 0 plans on main (created by gsd-plan-phase)
+
+### Phase 61: Session rollback to an exact chat moment with file revert
+
+**Goal**: A session can be rolled back to a checkpoint: files are restored exactly, the chat position is recorded, memory written after the checkpoint stops influencing recall, and the rollback is an append-only event. The revert runs as a CLI under the session's own authority; the substrate server stays read-only on worktrees.
+
+**Status**: Planned 2026-10-26. It stacks on the unmerged draft PRs of phases 52-54.
+
+**Depends on**: Phase 55, Phase 57, Phase 58, Phase 59, the worktree snapshot library
+
+**Repos**: agent-substrate (target files: packages/worktree-snapshot, packages/cli, packages/collectors (transcript references), packages/mcp-server/src (checkpoint and rollback planning), TimescaleDB index schema (new opt-in step), docs/runbooks)
+
+**Requirements**: [SOTA-17]
+
+**Success Criteria** (what must be TRUE):
+
+  1. Snapshot, mutate and restore yields tree-hash equality including added, deleted, renamed, mode-changed, symlinked and untracked files; a restore that fails or is interrupted ends at the pre-rollback state or the target state after recovery, never partial, and a retry succeeds.
+  2. A dry-run lists the exact changes; drift made outside the session is detected and refused without an explicit force; a safety snapshot is always taken first.
+  3. Checkpoints are created at defined boundaries (turn, plan step, steering event, manual) and carry an opaque transcript reference, the git tree, the manifest digest and the ledger chain head.
+  4. A rollback appends `session.rollback`; entries and Hindsight documents written after the checkpoint are superseded or forgotten, recall after the rollback excludes them, and the rolled-back history stays retrievable for audit.
+  5. Transcripts are handled per surface: omp moves its session leaf; other surfaces get a marker event; no transcript is rewritten.
+  6. With the chain unreachable, a rollback still works from local checkpoints and reports them as unanchored.
+
+**Plans**: 0 plans on main (created by gsd-plan-phase)
+
+### Phase 62: Soak, runbooks and v1.6 close
+
+**Goal**: The milestone is proven for sessions that run for days and is documented for operation.
+
+**Status**: Planned 2026-10-26. Completing and archiving the milestone is an operator decision.
+
+**Depends on**: Phases 55-61
+
+**Repos**: agent-substrate (target files: soak tests, docs/runbooks, docs/adr, .planning)
+
+**Requirements**: [SOTA-18]
+
+**Success Criteria** (what must be TRUE):
+
+  1. A simulated multi-day run with injected clocks shows bounded memory and handle counts and a clean resume after a restart and after a store failover.
+  2. Runbooks exist for migration rehearsal, LightRAG hosting, a chain outage and a devnet reset, rollback, and signer key rotation, and decision records exist for store roles, rollback semantics and memo-only anchoring.
+  3. STATE.md and ROADMAP.md reflect every phase, and the milestone audit is written.
+
+**Plans**: 0 plans on main (created by gsd-plan-phase)
+
 
 ## Progress
 
@@ -876,3 +1065,11 @@ Plans:
 | 52. GSD-Core planning index and cross-session awareness core | v1.5 | 0/0 | In review (draft PR #104 core, PR #109 wiring) | - |
 | 53. Steering, conflict control and checkpoint/resume | v1.5 | 0/0 | In review (draft PR #110) | - |
 | 54. Planning observability and migration inventory | v1.5 | 0/0 | In review (draft PR #111) | - |
+| 55. Migration safety, session event vocabulary and the v1.6 baseline | v1.6 | 0/0 | Planned 2026-10-26 | - |
+| 56. LightRAG client contract alignment and storage topology | v1.6 | 0/0 | Planned 2026-10-26 | - |
+| 57. Tandem memory, LightRAG with Hindsight, with provenance and forget | v1.6 | 0/0 | Planned 2026-10-26 | - |
+| 58. Live session steering for multi-day GSD-Core sessions | v1.6 | 0/0 | Planned 2026-10-26; waits for the phase 52-54 draft PRs | - |
+| 59. Eternal logging, verifiable checkpoint and rollback events on Solana devnet | v1.6 | 0/0 | Planned 2026-10-26; live anchoring is operator-gated | - |
+| 60. Eternal Memory Knowledge Nexus | v1.6 | 0/0 | Planned 2026-10-26 | - |
+| 61. Session rollback to an exact chat moment with file revert | v1.6 | 0/0 | Planned 2026-10-26; waits for the phase 52-54 draft PRs | - |
+| 62. Soak, runbooks and v1.6 close | v1.6 | 0/0 | Planned 2026-10-26 | - |
