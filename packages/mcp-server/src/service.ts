@@ -2884,6 +2884,7 @@ export class Substrate {
 		if (left > 0 && this.retainOutbox.size() > 0) {
 			await Promise.race([this.drainRetainOutbox(), Bun.sleep(left)]);
 		}
+		if (options.abandon === true) this.stopRetainDrain();
 		if (options.abandon === true && !this.retainOutbox.durable) this.retainOutbox.abandonAll();
 		await this.awaitTrackedRetains(Math.max(0, deadline - Date.now()));
 	}
@@ -3045,6 +3046,17 @@ export class Substrate {
 			void this.drainRetainOutbox();
 		}, this.config.retainOutbox.drainMs);
 		this.retainDrainTimer.unref();
+	}
+
+	/**
+	 * Stop the periodic outbox drain. The timer is unref'd, so a process never waits on it, but a Substrate rebuilt in the
+	 * same process (an embedded host, a restart test) would otherwise leak one live interval per boot. Shutdown calls it
+	 * through `drainPendingRetains({ abandon: true })`; the durable outbox keeps its entries for the next boot either way.
+	 */
+	private stopRetainDrain(): void {
+		if (this.retainDrainTimer === null) return;
+		clearInterval(this.retainDrainTimer);
+		this.retainDrainTimer = null;
 	}
 
 	/**
