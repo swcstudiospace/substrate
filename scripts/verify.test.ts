@@ -286,6 +286,7 @@ describe("the gate matches the CI workflow", () => {
 	test("the lint job is report-only and runs only the install and the Biome lint", () => {
 		const job = between("lint-report");
 		expect(runLines(job)).toEqual(["bun install --frozen-lockfile", "bunx biome lint --reporter=summary ."]);
+		expect(job).toMatch(/^ {8}continue-on-error: true\n {8}run: bunx biome lint --reporter=summary \.$/m);
 		expect(job).not.toMatch(/^ {4}services:/m);
 	});
 
