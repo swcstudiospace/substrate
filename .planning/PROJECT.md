@@ -84,15 +84,22 @@ brief does not call either API on every prompt.
 
 Revised 2026-09-30 — policy in `docs/data-planes.md`, network in `docs/railway-tailscale.md`.
 
-- **Railway project "Ultrathink"** — **TimescaleDB (index and coordination)**: `graph_index`,
-  `graph_nodes`, `graph_steps`, memory index, and the Programming Desk tables (`desk_intake`
-  queue, `desk_claims`, `desk_idempotency`, `desk_receipts`, `seat_roster`, `tool_pack_state`,
-  hypertables). **GreptimeDB (events)**: append-only `agent_events` with a `hash`/`prev` chain.
+- **Railway project "Ultrathink"** — **TimescaleDB (index and coordination)**: plain Postgres
+  tables with no hypertables, continuous aggregates or Timescale policies (0 hypertables
+  measured 2026-10-13, `docs/data-planes.md`): `graph_index`, `graph_nodes`, `graph_steps`, the
+  memory index (`memory_entries` and the governance tables). The Programming Desk tables
+  (`desk_intake`, `desk_claims`, `desk_idempotency`, `desk_receipts`, `seat_roster`,
+  `tool_pack_state`) are **not in this repository**; earlier revisions of this line called some
+  of them hypertables, which this repository cannot support. **GreptimeDB (events)**: the
+  append-only authoritative event ledger, `agent_events` with a `hash`/`prev` chain
+  (`docs/adr/0004-store-roles.md`).
   **DragonflyDB (cache only)**: brief, search and recall caches, rate counters; falls through on
   outage (owner decision 2026-09-26 stands).
 - **Railway project "Agent Substrate"** — **Hindsight (memory)**: banks `sub-<surface>` and
   `pd-<seat>`; replaces Agentmemory (Phase 7) and the local Claude Code `hindsight` stdio server.
-  **RAGFlow (docs)**: behind `docs_search`; datasets per repo (Phase 5 docs half re-opened).
+  **RAGFlow (docs)**: was behind `docs_search`; **the RAGFlow service was deleted on 2026-10-25**
+  and no LightRAG service exists yet, so the docs plane is planned, not live
+  (`docs/runbooks/lightrag-storage-topology.md`; the deploy is operator-gated, phase 46).
 - All five are reached from the VPS over a Tailscale Forwarder deployed inside each project; no
   public TCP proxy or public database domain after cutover.
 - **Langfuse** keeps LLM traces; Greptime holds the substrate's own log. No duplication.

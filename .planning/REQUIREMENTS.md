@@ -109,7 +109,7 @@ Source for all entries: the operator request of 2026-10-26 as planned by the Ult
   - Target files: packages/mcp-server/src (memory verification and capsule modules), docs/adr
 - [ ] **SOTA-17**: Session rollback to an exact chat moment with file revert. Phase: 61. Source: .planning/ROADMAP.md Phase 61 (defined 2026-10-26)
   - Acceptance: tree-hash equality after snapshot, mutate and restore, with recovery after an interruption and never a partial end state; a dry-run, drift refusal and an always-taken safety snapshot; checkpoints at defined boundaries carrying an opaque transcript reference, git tree, manifest digest and chain head; an append-only rollback event with memory supersession and recall exclusion; per-surface transcript handling without rewriting any transcript; rollback from local checkpoints when the chain is unreachable.
-  - Target files: packages/worktree-snapshot, packages/cli, packages/collectors, packages/mcp-server/src, TimescaleDB index schema (opt-in step), docs/runbooks
+  - Target files: packages/worktree-snapshot, packages/cli, packages/collectors, packages/mcp-server/src, docs/runbooks (a TimescaleDB opt-in schema step was listed here and was NOT built: checkpoints are ledger notes plus local pinned git refs)
 - [ ] **SOTA-18**: Soak, runbooks and v1.6 close. Phase: 62. Source: .planning/ROADMAP.md Phase 62 (defined 2026-10-26)
   - Acceptance: a simulated multi-day run with bounded memory and handles and clean resume; runbooks for migration rehearsal, LightRAG hosting, chain outage and devnet reset, rollback and key rotation; decision records for store roles, rollback semantics and memo-only anchoring; STATE and ROADMAP reflect every phase and the milestone audit is written.
   - Target files: soak tests, docs/runbooks, docs/adr, .planning
@@ -153,14 +153,14 @@ Anti-features, from `.planning/research/SUMMARY.md` line 72:
 | SOTA-08 | 52 | Pending |
 | SOTA-09 | 53 | Pending |
 | SOTA-10 | 54 | Pending |
-| SOTA-11 | 55 | Pending |
-| SOTA-12 | 56 | Pending |
-| SOTA-13 | 57 | Pending |
-| SOTA-14 | 58 | Pending |
-| SOTA-15 | 59 | Pending |
-| SOTA-16 | 60 | Pending |
-| SOTA-17 | 61 | Pending |
-| SOTA-18 | 62 | Pending |
+| SOTA-11 | 55 | Met in repo, not merged (gsd/v16-int e8dbe52): `index-store.migrate-contract.test.ts`, `index-store.migrate-harness.test.ts`, `rollback-compat.test.ts`, `session-events.test.ts`, `docs/runbooks/index-migration-rehearsal.md`; production rehearsal operator-run. `phases/55-migration-safety/VERIFICATION.md` |
+| SOTA-12 | 56 | Met in repo, not merged (a573641): `planes/lightrag.test.ts` (clear-all denylist), `planes/lightrag.contract.test.ts` against `planes/__fixtures__/lightrag-v1.5.7-routes.json`; derived from upstream source, not a live server; deploy operator-gated. `phases/56-lightrag-contract/VERIFICATION.md` |
+| SOTA-13 | 57 | Met in repo with fakes, not merged (77d18bc, 084eb69, a26841d, 2aaa19a): `memory-forget.test.ts`, `service-forget.test.ts`, `tandem-recall.test.ts`, `service-tandem-scope.test.ts`, `consistency-verify.test.ts`; the forget has no automatic expiry or operator trigger; Hindsight document-list route unverified. `phases/57-tandem-memory/VERIFICATION.md` |
+| SOTA-14 | 58 | Partial, not merged (gsd/v16-58-live-steering 7edfd79, on the draft PR #110 stack): `planning/steering-durable.test.ts`, `steering-wiring.test.ts`, `planning/position.test.ts`; criterion 2's shared state model is not built. `phases/58-live-steering/VERIFICATION.md` |
+| SOTA-15 | 59 | Partial, not merged (7b37ea6, 084eb69, a26841d, 2aaa19a, 824ceda): `ledger/src/merkle-proof.test.ts`, `checkpoint-verify.test.ts`, `signer-set.test.ts`, `devnet-reset.test.ts`, `reanchor-plan.test.ts`; the re-anchor send is not built; no live devnet proof (operator-gated). `phases/59-eternal-logging/VERIFICATION.md` |
+| SOTA-16 | 60 | Met in repo with fakes, not merged (084eb69, a26841d, 979b5e2): `memory-record.test.ts`, `memory-verify.test.ts`, `capsule.test.ts`, `blob-store.test.ts`, `blob-store-s3.test.ts`, `cli/src/capsule.test.ts`, ADRs 0002 and 0003; bucket use operator-gated. `phases/60-eternal-nexus/VERIFICATION.md` |
+| SOTA-17 | 61 | Partial, not merged (ff51cc7, a26841d, 99ec7e3, 824ceda, 979b5e2): `worktree-snapshot/src/*.test.ts`, `cli/src/session/rollback.test.ts`, `session-rollback.test.ts`, `session-rollback-e2e.test.ts`; automatic checkpoint triggers are not wired; no live rehearsal. `phases/61-session-rollback/VERIFICATION.md` |
+| SOTA-18 | 62 | Written: `mcp-server/src/soak-multiday.test.ts` and `cli/src/session/soak.test.ts` (uncommitted when written), six runbooks, ADRs 0004-0007, `v1.6-MILESTONE-AUDIT.md`; milestone completion is an operator decision. `phases/62-soak-and-close/VERIFICATION.md` |
 
 ---
 *Requirements defined: 2026-10-21*
