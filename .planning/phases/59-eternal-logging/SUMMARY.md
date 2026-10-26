@@ -2,7 +2,7 @@
 phase: 59-eternal-logging
 milestone: v1.6
 requirements: [SOTA-15]
-status: implemented on gsd/v16-int (7b37ea6, 084eb69, a26841d, 2aaa19a, 824ceda, plus an uncommitted constant fix); partial; not merged; no live devnet proof
+status: implemented on gsd/v16-int (7b37ea6, 084eb69, a26841d, 2aaa19a, 824ceda, plus ccbfff2, the constant fix); partial; not merged; no live devnet proof
 ---
 
 # 59-SUMMARY: Eternal logging, verifiable checkpoint and rollback events on Solana devnet
@@ -28,7 +28,7 @@ status: implemented on gsd/v16-int (7b37ea6, 084eb69, a26841d, 2aaa19a, 824ceda,
 
 ## Findings
 
-- **Defect found and fixed (uncommitted when this was written): the devnet genesis hash constant was wrong since phase 28.** `DEVNET_GENESIS_HASH` in `packages/mcp-server/src/anchor.ts` held `...xqaEyCydFLPYGEC`; a live read-only `getGenesisHash` on 2026-10-26 returned `EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG`. The anchor job's genesis gate would have refused real devnet, and `checkpoint_verify` would have misreported it. It was never caught because the live proof (phase 41) was never run. The constant is corrected in the working tree and in 12 test fixtures (the orchestrator commits it). ADR 0006 records it ("The genesis hash finding").
+- **Defect found and fixed (ccbfff2): the devnet genesis hash constant was wrong since phase 28.** `DEVNET_GENESIS_HASH` in `packages/mcp-server/src/anchor.ts` held `...xqaEyCydFLPYGEC`; a live read-only `getGenesisHash` on 2026-10-26 returned `EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG`. The anchor job's genesis gate would have refused real devnet, and `checkpoint_verify` would have misreported it. It was never caught because the live proof (phase 41) was never run. The constant is corrected, with 12 test fixtures, in ccbfff2. ADR 0006 records it ("The genesis hash finding").
 - **Defect fixed (824ceda):** the verifier's only bootstrap signer was the anchor job's own key (`SOLANA_ANCHOR_PUBKEY`), so rotating the job key would have turned every old anchor into a mismatch.
 - **Defect fixed (a26841d, 824ceda):** a refused Solana URL reached MCP callers with its host; the reason is now fixed text and the detail stays in boot warnings.
 - Residual: the multi-process and live behaviours are unverified; no devnet transaction was ever sent from this milestone.

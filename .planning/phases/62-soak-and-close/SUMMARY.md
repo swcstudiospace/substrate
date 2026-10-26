@@ -2,7 +2,7 @@
 phase: 62-soak-and-close
 milestone: v1.6
 requirements: [SOTA-18]
-status: written on gsd/v16-int (working tree; the soak tests, ADRs 0004 to 0007 and docs/ussr-integration.md were uncommitted when this was written and are committed by the orchestrator); milestone not completed
+status: written on gsd/v16-int (soak tests 8752578; ADRs 0004 to 0007 and docs/ussr-integration.md a8346f7); milestone not completed
 ---
 
 # 62-SUMMARY: Soak, runbooks and v1.6 close
@@ -28,7 +28,7 @@ status: written on gsd/v16-int (working tree; the soak tests, ADRs 0004 to 0007 
 
 ## Findings
 
-- Fixed in this phase's working tree (uncommitted when written): the retain-drain interval was never cleared, leaking one timer per in-process restart (`service.ts`, `stopRetainDrain`). That the soak is what exposed it is not recorded here (UNVERIFIED); the soak's handle tracker is the test that would catch a leaked timer again (`"a queue that never drains, a cap that is one too low and a leaked timer are all reported"`).
+- Fixed in 901c58f: the retain-drain interval was never cleared, leaking one timer per in-process restart (`service.ts`, `stopRetainDrain`). That the soak is what exposed it is not recorded here (UNVERIFIED); the soak's handle tracker is the test that would catch a leaked timer again (`"a queue that never drains, a cap that is one too low and a leaked timer are all reported"`).
 - Process disclosures are in the audit section 7.
 
 ## What remains

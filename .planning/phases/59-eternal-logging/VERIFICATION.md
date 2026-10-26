@@ -3,14 +3,14 @@ phase: 59-eternal-logging
 verified: 2026-10-26
 status: gaps_found
 score: 5 of 6 success criteria MET offline, 1 PARTIAL (criterion 5); no live devnet proof exists (OPERATOR-GATED)
-verified_on: gsd/v16-int at 979b5e2 plus the uncommitted devnet genesis constant correction (phase commits 7b37ea6, 084eb69, a26841d, 2aaa19a, 824ceda)
+verified_on: gsd/v16-int at 8752578 (includes the genesis constant correction ccbfff2; phase commits 7b37ea6, 084eb69, a26841d, 2aaa19a, 824ceda)
 ---
 
 # 59-VERIFICATION: Eternal logging, verifiable checkpoint and rollback events on Solana devnet
 
 ## Gates
 
-Not run by the author of this record. Orchestrator figures for `gsd/v16-int` at 979b5e2: 7480 pass, 2 skip, 0 fail; audit gate 0 unlisted; `check:phase-close` pass; config-reference check pass. The genesis constant correction and its fixtures were uncommitted at that count. Every statement below is offline: no Solana transaction was sent by this milestone.
+Not run by the author of this record. Orchestrator figures for `gsd/v16-int` at 8752578: 7505 pass, 2 skip, 0 fail; audit gate 0 unlisted high or critical; `check:phase-close` pass; config-reference check pass. The genesis constant correction and its fixtures are committed in ccbfff2. Every statement below is offline: no Solana transaction was sent by this milestone.
 
 ## Success criteria
 
@@ -25,7 +25,7 @@ Not run by the author of this record. Orchestrator figures for `gsd/v16-int` at 
 
 ## Defect found by this verification
 
-- The devnet genesis hash constant was wrong since phase 28. Current repository value `EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG` (`packages/mcp-server/src/anchor.ts:54`, uncommitted at the time of writing) matches the live read-only `getGenesisHash` result the orchestrator took on 2026-10-26. The old value `...xqaEyCydFLPYGEC` would have made the anchor job refuse real devnet and `checkpoint_verify` misreport it. This verifier did not call the network; the live reading is the orchestrator's.
+- The devnet genesis hash constant was wrong since phase 28. Current repository value `EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG` (`packages/mcp-server/src/anchor.ts:54`, corrected in ccbfff2) matches the live read-only `getGenesisHash` result the orchestrator took on 2026-10-26. The old value `...xqaEyCydFLPYGEC` would have made the anchor job refuse real devnet and `checkpoint_verify` misreport it. This verifier did not call the network; the live reading is the orchestrator's.
 
 ## Residual risks
 

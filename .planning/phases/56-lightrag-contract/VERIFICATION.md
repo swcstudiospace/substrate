@@ -3,14 +3,14 @@ phase: 56-lightrag-contract
 verified: 2026-10-26
 status: passed
 score: 7 of 7 success criteria MET in the repository against the upstream v1.5.7 source; the live contract check is operator-gated
-verified_on: gsd/v16-int at 979b5e2 (phase commit a573641)
+verified_on: gsd/v16-int at 8752578 (phase commit a573641)
 ---
 
 # 56-VERIFICATION: LightRAG client contract alignment and storage topology
 
 ## Gates
 
-Not run by the author of this record. Orchestrator figures for `gsd/v16-int` at 979b5e2: 7480 pass, 2 skip, 0 fail; audit gate 0 unlisted; `check:phase-close` pass; config-reference check pass. Evidence below was read from files and test names.
+Not run by the author of this record. Orchestrator figures for `gsd/v16-int` at 8752578: 7505 pass, 2 skip, 0 fail; audit gate 0 unlisted high or critical; `check:phase-close` pass; config-reference check pass. Evidence below was read from files and test names.
 
 ## Success criteria
 

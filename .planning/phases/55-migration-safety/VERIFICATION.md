@@ -3,14 +3,14 @@ phase: 55-migration-safety
 verified: 2026-10-26
 status: passed
 score: 5 of 5 success criteria MET in the repository; none needs a live system
-verified_on: gsd/v16-int at 979b5e2 (phase commits f71cc1b, e8dbe52)
+verified_on: gsd/v16-int at 8752578 (phase commits f71cc1b, e8dbe52)
 ---
 
 # 55-VERIFICATION: Migration safety, session event vocabulary and the v1.6 baseline
 
 ## Gates
 
-Not run by the author of this record. The orchestrator's gate numbers, run against a throwaway Postgres 16 so the live-database tests ran: `gsd/v16-int` at 979b5e2 had 7480 pass, 2 skip, 0 fail; the audit gate 0 unlisted; `bun run check:phase-close` pass; the config-reference check pass. The two skips are existing tests unrelated to this milestone. Evidence below was read from the files and test names; nothing was re-run.
+Not run by the author of this record. The orchestrator's gate numbers, run against a throwaway Postgres 16 so the live-database tests ran: `gsd/v16-int` at 8752578 had 7505 pass, 2 skip, 0 fail; the audit gate 0 unlisted high or critical; `bun run check:phase-close` pass; the config-reference check pass. The two skips are existing tests unrelated to this milestone. Evidence below was read from the files and test names; nothing was re-run.
 
 ## Success criteria
 

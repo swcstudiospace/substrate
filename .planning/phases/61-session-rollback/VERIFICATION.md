@@ -3,14 +3,14 @@ phase: 61-session-rollback
 verified: 2026-10-26
 status: gaps_found
 score: 5 of 6 success criteria MET in the repository, 1 PARTIAL (criterion 3); no live rehearsal
-verified_on: gsd/v16-int at 979b5e2 plus the uncommitted --omp-session flag (phase commits ff51cc7, a26841d, 99ec7e3, 824ceda, 979b5e2)
+verified_on: gsd/v16-int at 8752578 (includes the --omp-session flag, 3d95e3e; phase commits ff51cc7, a26841d, 99ec7e3, 824ceda, 979b5e2)
 ---
 
 # 61-VERIFICATION: Session rollback to an exact chat moment with file revert
 
 ## Gates
 
-Not run by the author of this record. Orchestrator figures for `gsd/v16-int` at 979b5e2: 7480 pass, 2 skip, 0 fail; audit gate 0 unlisted; `check:phase-close` pass; config-reference check pass. The `--omp-session` flag and its tests were uncommitted at that count. Evidence below was read from files and test names.
+Not run by the author of this record. Orchestrator figures for `gsd/v16-int` at 8752578: 7505 pass, 2 skip, 0 fail; audit gate 0 unlisted high or critical; `check:phase-close` pass; config-reference check pass. The `--omp-session` flag and its tests are committed in 3d95e3e. Evidence below was read from files and test names.
 
 ## Success criteria
 

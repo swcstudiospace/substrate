@@ -3,14 +3,14 @@ phase: 57-tandem-memory
 verified: 2026-10-26
 status: passed
 score: 5 of 5 success criteria MET in the repository with fakes; two live-only items unverified (listed under Residual risks)
-verified_on: gsd/v16-int at 979b5e2 (phase commits 77d18bc, 084eb69, a26841d, 2aaa19a, 824ceda, 979b5e2)
+verified_on: gsd/v16-int at 8752578 (phase commits 77d18bc, 084eb69, a26841d, 2aaa19a, 824ceda, 979b5e2)
 ---
 
 # 57-VERIFICATION: Tandem memory, LightRAG with Hindsight, with provenance and forget
 
 ## Gates
 
-Not run by the author of this record. Orchestrator figures for `gsd/v16-int` at 979b5e2: 7480 pass, 2 skip, 0 fail; audit gate 0 unlisted; `check:phase-close` pass; config-reference check pass. Evidence below was read from files and test names.
+Not run by the author of this record. Orchestrator figures for `gsd/v16-int` at 8752578: 7505 pass, 2 skip, 0 fail; audit gate 0 unlisted high or critical; `check:phase-close` pass; config-reference check pass. Evidence below was read from files and test names.
 
 ## Success criteria
 

@@ -938,7 +938,7 @@ Plans:
 
 **Goal**: Every checkpoint and rollback is a ledger event that is provably inside an hourly root anchored on Solana devnet, verifiable without trusting the substrate; devnet resets and signer changes are detected and recoverable. Roots only, devnet only.
 
-**Status**: Implemented 2026-10-26 on `gsd/v16-int` (7b37ea6 proofs and URL guard, 084eb69 verification library, a26841d tools, 2aaa19a re-anchor planner and runbooks, 824ceda signer-set env); not merged. Criteria 1, 2, 3, 4 and 6 met offline; criterion 5 is partial (classification and a read-only re-anchor dry-run exist, the re-anchor send does not). No transaction was sent and no live devnet proof was run (operator-gated, phase 41). The devnet genesis hash constant, wrong since phase 28, was corrected in the working tree (uncommitted at the time of writing).
+**Status**: Implemented 2026-10-26 on `gsd/v16-int` (7b37ea6 proofs and URL guard, 084eb69 verification library, a26841d tools, 2aaa19a re-anchor planner and runbooks, 824ceda signer-set env); not merged. Criteria 1, 2, 3, 4 and 6 met offline; criterion 5 is partial (classification and a read-only re-anchor dry-run exist, the re-anchor send does not). No transaction was sent and no live devnet proof was run (operator-gated, phase 41). The devnet genesis hash constant, wrong since phase 28, was corrected in ccbfff2.
 
 **Depends on**: Phase 55 (vocabulary), Phase 41 (anchor job)
 
@@ -1005,7 +1005,7 @@ Plans:
 
 **Goal**: The milestone is proven for sessions that run for days and is documented for operation.
 
-**Status**: Written 2026-10-26: the multi-day soak tests, the runbooks, ADRs 0004-0007 and `v1.6-MILESTONE-AUDIT.md`. The soak tests, the ADRs and `docs/ussr-integration.md` were uncommitted when this was written and are committed by the orchestrator. Completing and archiving the milestone is an operator decision and was not done.
+**Status**: Written 2026-10-26: the multi-day soak tests, the runbooks, ADRs 0004-0007 and `v1.6-MILESTONE-AUDIT.md`. The soak tests (8752578), the ADRs 0004-0007 and `docs/ussr-integration.md` (a8346f7) and the planning records (a37a805) are committed on `gsd/v16-int`. Completing and archiving the milestone is an operator decision and was not done.
 
 **Depends on**: Phases 55-61
 

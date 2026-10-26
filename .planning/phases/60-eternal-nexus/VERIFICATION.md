@@ -3,14 +3,14 @@ phase: 60-eternal-nexus
 verified: 2026-10-26
 status: passed
 score: 4 of 4 success criteria MET in the repository with fakes; live bucket use is OPERATOR-GATED
-verified_on: gsd/v16-int at 979b5e2 (phase commits 084eb69, a26841d, 979b5e2)
+verified_on: gsd/v16-int at 8752578 (phase commits 084eb69, a26841d, 979b5e2)
 ---
 
 # 60-VERIFICATION: Eternal Memory Knowledge Nexus
 
 ## Gates
 
-Not run by the author of this record. Orchestrator figures for `gsd/v16-int` at 979b5e2: 7480 pass, 2 skip, 0 fail; audit gate 0 unlisted; `check:phase-close` pass; config-reference check pass. Evidence below was read from files and test names.
+Not run by the author of this record. Orchestrator figures for `gsd/v16-int` at 8752578: 7505 pass, 2 skip, 0 fail; audit gate 0 unlisted high or critical; `check:phase-close` pass; config-reference check pass. Evidence below was read from files and test names.
 
 ## Success criteria
 

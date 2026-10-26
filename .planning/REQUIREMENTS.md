@@ -160,7 +160,7 @@ Anti-features, from `.planning/research/SUMMARY.md` line 72:
 | SOTA-15 | 59 | Partial, not merged (7b37ea6, 084eb69, a26841d, 2aaa19a, 824ceda): `ledger/src/merkle-proof.test.ts`, `checkpoint-verify.test.ts`, `signer-set.test.ts`, `devnet-reset.test.ts`, `reanchor-plan.test.ts`; the re-anchor send is not built; no live devnet proof (operator-gated). `phases/59-eternal-logging/VERIFICATION.md` |
 | SOTA-16 | 60 | Met in repo with fakes, not merged (084eb69, a26841d, 979b5e2): `memory-record.test.ts`, `memory-verify.test.ts`, `capsule.test.ts`, `blob-store.test.ts`, `blob-store-s3.test.ts`, `cli/src/capsule.test.ts`, ADRs 0002 and 0003; bucket use operator-gated. `phases/60-eternal-nexus/VERIFICATION.md` |
 | SOTA-17 | 61 | Partial, not merged (ff51cc7, a26841d, 99ec7e3, 824ceda, 979b5e2): `worktree-snapshot/src/*.test.ts`, `cli/src/session/rollback.test.ts`, `session-rollback.test.ts`, `session-rollback-e2e.test.ts`; automatic checkpoint triggers are not wired; no live rehearsal. `phases/61-session-rollback/VERIFICATION.md` |
-| SOTA-18 | 62 | Written: `mcp-server/src/soak-multiday.test.ts` and `cli/src/session/soak.test.ts` (uncommitted when written), six runbooks, ADRs 0004-0007, `v1.6-MILESTONE-AUDIT.md`; milestone completion is an operator decision. `phases/62-soak-and-close/VERIFICATION.md` |
+| SOTA-18 | 62 | Written: `mcp-server/src/soak-multiday.test.ts` and `cli/src/session/soak.test.ts` (committed in 8752578), six runbooks, ADRs 0004-0007, `v1.6-MILESTONE-AUDIT.md`; milestone completion is an operator decision. `phases/62-soak-and-close/VERIFICATION.md` |
 
 ---
 *Requirements defined: 2026-10-21*

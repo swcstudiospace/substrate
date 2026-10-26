@@ -2,7 +2,7 @@
 phase: 61-session-rollback
 milestone: v1.6
 requirements: [SOTA-17]
-status: implemented on gsd/v16-int (ff51cc7, a26841d, 99ec7e3, 824ceda, 979b5e2, plus the uncommitted --omp-session flag); partial; not merged; no live rehearsal
+status: implemented on gsd/v16-int (ff51cc7, a26841d, 99ec7e3, 824ceda, 979b5e2, plus 3d95e3e, the --omp-session flag); partial; not merged; no live rehearsal
 ---
 
 # 61-SUMMARY: Session rollback to an exact chat moment with file revert
@@ -12,7 +12,7 @@ status: implemented on gsd/v16-int (ff51cc7, a26841d, 99ec7e3, 824ceda, 979b5e2,
 - **61a, `packages/worktree-snapshot` (ff51cc7, 24 files).** Exact file-state snapshots (tracked, modified, untracked, executable bits, symlinks, `.planning/` allowlisted; credential-shaped files, `.git`, build directories and files over 50 MiB excluded and listed as skipped), a restore plan and a journaled, per-file atomic `restore` with `recoverRestore`, a worktree lock, path safety (no escape and no write through a symlink), and `pinSnapshot` / `listPinned` as parentless commits under `refs/substrate/checkpoints/`.
 - **Server tools (a26841d, `session-rollback.ts`, `memory-forget-plane.ts`).** `session_checkpoint` appends a `session.checkpoint` note as the caller's surface and attaches the ledger chain head itself; `session_rollback_plan` (read) answers the target, later checkpoints, the anchor verdict (never blocking) and a `plan_digest`; `session_rollback_commit` records a refused rollback or commits one the client carried out, forgetting memory in bounded idempotent batches and appending one `session.rollback` note with real counts. Admission and the audit policy list them (`admission.ts`, `packages/audit/src/policy.ts`). The server never touches a worktree and never reads a transcript.
 - **CLI (99ec7e3, 979b5e2).** `substrate session checkpoint | checkpoints | rollback | recover | sync` (`packages/cli/src/session`), a pending journal with replay (`sync`), exit codes 0 to 4, an omp fork adapter (`omp-fork.ts`) and a transcript port (`transcript-port.ts`), transcript references for cursor and grok (`packages/collectors/src/transcript-ref.ts`). The rollback order: recover, resolve the target from local refs, plan (a dry run stops here), refuse on drift or an anchor `mismatch` unless `--force`, take a pre-restore checkpoint and a safety ref, restore, then commit to the server.
-- **`--omp-session FILE` (uncommitted when written).** `substrate session checkpoint --omp-session FILE` reads an omp session JSONL (at most 32 MiB) and records a transcript reference to its last physical entry (entry id, parent id, user-turn count, prefix digest, base name only); an unreadable or unparseable file still gives a checkpoint, without a reference, and says why. Documented in `docs/runbooks/session-rollback.md`.
+- **`--omp-session FILE` (3d95e3e).** `substrate session checkpoint --omp-session FILE` reads an omp session JSONL (at most 32 MiB) and records a transcript reference to its last physical entry (entry id, parent id, user-turn count, prefix digest, base name only); an unreadable or unparseable file still gives a checkpoint, without a reference, and says why. Documented in `docs/runbooks/session-rollback.md`.
 - **Runbook** `docs/runbooks/session-rollback.md`, **ADR 0005** (rollback semantics) and **ADR 0007** (checkpoint triggers and sibling hook proposals).
 
 ## Key decisions
