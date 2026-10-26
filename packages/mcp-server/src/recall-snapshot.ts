@@ -129,6 +129,11 @@ export function briefRecallConfigWarnings(config: { briefRecall: RecallConfig; c
 /** What a snapshot holds and what a brief shows: three hits of two hundred and forty characters, at most. */
 export const MAX_RECALL_HITS = 3;
 export const MAX_RECALL_HIT_CHARS = 240;
+/** A graph-scoped read's own entry budget, separate from `MAX_RECALL_HITS` (the own-bank lines): the most graph lines a snapshot holds and a brief shows. */
+export const GRAPH_RECALL_MAX_HITS = 3;
+const MAX_GRAPH_ID_CHARS = 80;
+/** The graph id as a brief prints it. */
+const MAX_GRAPH_LABEL_CHARS = 40;
 /** The query carries at most this many decision/warning subjects, each this long. */
 export const MAX_QUERY_SUBJECTS = 3;
 export const MAX_SUBJECT_CHARS = 80;
@@ -158,24 +163,25 @@ export interface RecallSnapshot {
 	/** ISO instant of the fetch. */
 	at: string;
 	hits: RecallLine[];
+	/** Graph scope only: the lines of the claimed node's graph, kept apart from the own-bank `hits` and their budget. Absent under scope `off`. */
+	graph?: { graph_id: string; hits: RecallLine[] };
 }
 
 const BANK_NAME = /^[A-Za-z0-9._:-]{1,64}$/;
 /** The most banks one fan-out snapshot names: the configured `sub-*` set, bounded. */
 const MAX_FANOUT_BANKS = 64;
 
+const LineSchema = z.object({
+	text: z.string().min(1).max(MAX_RECALL_HIT_CHARS * 2),
+	type: z.string().regex(/^[A-Za-z][A-Za-z_-]{0,15}$/).optional(),
+});
+
 const SnapshotSchema = z.object({
 	bank: z.string().regex(BANK_NAME),
 	banks: z.array(z.string().regex(BANK_NAME)).max(MAX_FANOUT_BANKS).optional(),
 	at: z.string().refine((value) => Number.isFinite(Date.parse(value))),
-	hits: z
-		.array(
-			z.object({
-				text: z.string().min(1).max(MAX_RECALL_HIT_CHARS * 2),
-				type: z.string().regex(/^[A-Za-z][A-Za-z_-]{0,15}$/).optional(),
-			}),
-		)
-		.max(MAX_RECALL_HITS),
+	hits: z.array(LineSchema).max(MAX_RECALL_HITS),
+	graph: z.object({ graph_id: z.string().min(1).max(MAX_GRAPH_ID_CHARS), hits: z.array(LineSchema).max(GRAPH_RECALL_MAX_HITS) }).optional(),
 });
 
 /** A snapshot from an untrusted value (a cache entry), or null when it is not what the prefetcher wrote. */
@@ -213,7 +219,7 @@ export type SnapshotState = "fresh" | "stale" | "cold";
  * prefetcher has not kept it fresh, so a brief omits it and counts `stale`.
  */
 export function snapshotState(snapshot: RecallSnapshot | null, nowMs: number, ttlS: number): SnapshotState {
-	if (snapshot === null || snapshot.hits.length === 0) return "cold";
+	if (snapshot === null || (snapshot.hits.length === 0 && (snapshot.graph?.hits.length ?? 0) === 0)) return "cold";
 	const age = nowMs - Date.parse(snapshot.at);
 	if (age < -FUTURE_SKEW_MS) return "cold";
 	if (age <= ttlS * 1000) return "fresh";
@@ -272,6 +278,15 @@ export function recallSection(snapshot: RecallSnapshot, nowMs: number): BriefSec
 		const tail = hit.type !== undefined ? ` (${hit.type})` : "";
 		return { text: `- ${body}${tail}`, clip: [2, 2 + body.length] };
 	});
+	// Graph scope: the claimed graph's lines follow the own-bank ones, each saying which graph it came from.
+	if (snapshot.graph !== undefined) {
+		const prefix = `- [graph ${clip(redact(foldLine(snapshot.graph.graph_id)), MAX_GRAPH_LABEL_CHARS)}] `;
+		for (const hit of snapshot.graph.hits) {
+			const body = clip(foldLine(hit.text), MAX_RECALL_HIT_CHARS);
+			const tail = hit.type !== undefined ? ` (${hit.type})` : "";
+			items.push({ text: `${prefix}${body}${tail}`, clip: [prefix.length, prefix.length + body.length] });
+		}
+	}
 	return { id: "recall", lines: ["", title, ...items.map((item) => item.text)], title, items };
 }
 
@@ -284,6 +299,8 @@ export interface RecallHitInput {
 	/** `metadata.scope` as the retain wrote it: `global`, `repo:<owner/name>`, `graph:<id>`… */
 	scope?: string;
 	type?: string;
+	/** The graph the memory was retained under (`DerivedMemoryHit.graph_id`); what a graph-scoped read filters on. */
+	graph_id?: string;
 }
 
 /**
@@ -331,6 +348,77 @@ export function buildFanoutLines(hits: readonly RecallHitInput[], banks: readonl
 		lines.push(type !== undefined ? { text, type } : { text });
 	}
 	return lines;
+}
+
+// ── graph scope (phase 57c) ──────────────────────────────────────────────────
+
+/** What a snapshot read is scoped to: `off` (the default) is today's behaviour, `graph` adds the claimed node's graph. */
+export type RecallScope = "off" | "graph";
+export const RECALL_SCOPES: readonly RecallScope[] = ["off", "graph"];
+
+/** A scope from an untrusted value (an env string); anything but `graph` is `off`, the safe default. */
+export function parseRecallScope(raw: string | undefined | null): RecallScope {
+	return raw?.trim().toLowerCase() === "graph" ? "graph" : "off";
+}
+
+/**
+ * The recall scope's part of a cache key a brief's text depends on. Empty under `off`, which keeps every
+ * existing key exactly what it was; `graph` gets its own, so a graph-scoped brief is never served as an unscoped one.
+ */
+export function recallScopeKey(scope: RecallScope): { recallScope?: "graph" } {
+	return scope === "graph" ? { recallScope: "graph" } : {};
+}
+
+/**
+ * The lines a graph-scoped read keeps: only hits whose `graph_id` is exactly `graphId`, under their own entry
+ * budget (at most `GRAPH_RECALL_MAX_HITS`, whatever the caller asks) that the own-bank lines never spend. Text is
+ * folded, redacted, clipped and deduplicated like `buildFanoutLines`; a line equal to one in `exclude` (the
+ * own-bank lines already shown) is not repeated. With `banks`, a hit naming another bank is dropped, so the
+ * isolation does not rest on the caller alone. A blank graph id or a budget of zero keeps nothing.
+ */
+export function scopeRecall(
+	hits: readonly RecallHitInput[],
+	graphId: string,
+	budget: number = GRAPH_RECALL_MAX_HITS,
+	options: { banks?: readonly string[]; exclude?: readonly string[] } = {},
+): RecallLine[] {
+	const wanted = graphId.trim();
+	const max = Number.isFinite(budget) ? Math.min(GRAPH_RECALL_MAX_HITS, Math.max(0, Math.trunc(budget))) : 0;
+	if (wanted === "" || max === 0) return [];
+	const seen = new Set<string>(options.exclude ?? []);
+	const lines: RecallLine[] = [];
+	for (const hit of hits) {
+		if (lines.length >= max) break;
+		if (hit.graph_id !== wanted) continue;
+		if (options.banks !== undefined && !options.banks.includes(hit.bank)) continue;
+		const text = clip(redact(foldLine(hit.text)), MAX_RECALL_HIT_CHARS);
+		if (text.length === 0 || seen.has(text)) continue;
+		seen.add(text);
+		const type = hit.type !== undefined && /^[A-Za-z][A-Za-z_-]{0,15}$/.test(hit.type) ? hit.type : undefined;
+		lines.push(type !== undefined ? { text, type } : { text });
+	}
+	return lines;
+}
+
+/**
+ * The snapshot a brief reads under `scope`. `off`, no claimed graph, or no graph line to add: the snapshot itself,
+ * untouched (the same object), so the unscoped path is what it was. `graph`: the snapshot plus the claimed graph's
+ * lines (`scopeRecall`, excluding the own-bank lines), which `recallSection` prints after the own-bank ones.
+ */
+export function withGraphScope(
+	scope: RecallScope,
+	snapshot: RecallSnapshot,
+	hits: readonly RecallHitInput[],
+	graphId: string | null,
+	budget: number = GRAPH_RECALL_MAX_HITS,
+): RecallSnapshot {
+	if (scope !== "graph" || graphId === null) return snapshot;
+	const lines = scopeRecall(hits, graphId, budget, {
+		...(snapshot.banks !== undefined ? { banks: snapshot.banks } : {}),
+		exclude: snapshot.hits.map((hit) => hit.text),
+	});
+	if (lines.length === 0) return snapshot;
+	return { ...snapshot, graph: { graph_id: graphId.trim().slice(0, MAX_GRAPH_ID_CHARS), hits: lines } };
 }
 
 /** The cache arguments of one fan-out answer: the sorted bank set and the query, so another set or another query is another entry. */

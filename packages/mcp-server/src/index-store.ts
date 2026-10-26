@@ -67,6 +67,7 @@ import {
 	type ReleaseDecision,
 } from "./lease.ts";
 import { redact } from "./redact.ts";
+import { isForgetMarker, MAX_FORGET_ENTRIES, MAX_ROLLBACK_SELECT_LIMIT } from "./memory-forget.ts";
 import { transition, type SkillDecision, type SkillDecisionResult, type SkillRegistryRow, type SkillState } from "./skills/registry.ts";
 
 /**
@@ -1695,6 +1696,89 @@ export class IndexStore implements MemoryStore {
 		>;
 		const row = rows[0];
 		return row ? toMemoryEntry(row) : null;
+	}
+
+	/**
+	 * Take entries out of force WITHOUT deleting them (v1.6 phase 57, the forget primitive). One statement sets
+	 * `superseded_by` to a forget marker (`forgotten:<forget_id>`, see `memory-forget.ts`) on every named row that
+	 * has none, so the brief, `memory_search` (without `include_superseded`), the standing-entry lookup, the sweeper's
+	 * lifetime classes and the retain replay all stop seeing the row at once, while the row stays for audit and for a
+	 * `include_superseded` read. Returns the ids this call changed: a row that is already superseded or forgotten is
+	 * never overwritten (its real superseder is kept) and a missing id is simply absent, so a second call changes
+	 * nothing. The marker is validated here too: nothing but a well-formed one is ever written into the column.
+	 */
+	async markMemoryForgotten(ids: readonly string[], marker: string): Promise<string[]> {
+		if (!isForgetMarker(marker)) throw new Error(`markMemoryForgotten: "${marker.slice(0, 80)}" is not a forget marker (forgotten:fg_ + 26 hex)`);
+		const distinct = [...new Set(ids)];
+		if (distinct.length === 0) return [];
+		if (distinct.length > MAX_FORGET_ENTRIES) {
+			throw new Error(`markMemoryForgotten: ${distinct.length} ids exceeds the ${MAX_FORGET_ENTRIES}-id bound; forget in batches`);
+		}
+		return this.plane("memory.forget", async () => {
+			const rows = (await this.sql`
+				update memory_entries set superseded_by = ${marker}
+				where id in ${this.sql(distinct)} and superseded_by is null
+				returning id`) as Array<Record<string, unknown>>;
+			return rows.map((row) => String(row.id));
+		});
+	}
+
+	/**
+	 * The entries of a session (and, when given, one graph) created STRICTLY AFTER an instant that no write has
+	 * superseded or forgotten: what a rollback to that instant should forget. Ordered by `created` then `id`, at
+	 * most `limit` of them, with `truncated` true when more matched.
+	 *
+	 * The instant and `created` are compared in whole milliseconds (`created` is truncated to the millisecond, the
+	 * precision of an event `ts`), so a tie keeps the entry: one written in the same millisecond as the rollback point
+	 * is not selected. `session` and `graphId` go through `normalizeIdentifier`, the form the gate stores them in.
+	 * There is no index on `session_id`; the scan is bounded by the session's own rows being few, and the limit.
+	 */
+	async memoryEntriesCreatedAfter(
+		session: string,
+		afterIso: string,
+		graphId: string | null = null,
+		limit = 1000,
+	): Promise<{ entries: MemoryEntry[]; truncated: boolean }> {
+		const sessionId = normalizeIdentifier(session);
+		if (sessionId === null) throw new Error("memoryEntriesCreatedAfter: session is required");
+		const graph = graphId === null ? null : normalizeIdentifier(graphId);
+		if (graphId !== null && graph === null) throw new Error("memoryEntriesCreatedAfter: graphId is empty after normalisation");
+		const afterMs = Date.parse(afterIso);
+		if (Number.isNaN(afterMs)) throw new Error(`memoryEntriesCreatedAfter: "${afterIso.slice(0, 40)}" is not an instant`);
+		if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_ROLLBACK_SELECT_LIMIT) {
+			throw new Error(`memoryEntriesCreatedAfter: limit must be an integer from 1 to ${MAX_ROLLBACK_SELECT_LIMIT}`);
+		}
+		const after = new Date(afterMs).toISOString();
+		return this.plane("memory.forget.select", async () => {
+			const rows = (await this.sql`
+				select * from memory_entries
+				where session_id = ${sessionId}
+				  ${graph === null ? this.sql`` : this.sql`and graph_id = ${graph}`}
+				  and superseded_by is null
+				  and date_trunc('milliseconds', created) > ${after}::timestamptz
+				order by created asc, id asc
+				limit ${limit + 1}`) as Array<Record<string, unknown>>;
+			return { entries: rows.slice(0, limit).map((row) => toMemoryEntry(row)), truncated: rows.length > limit };
+		});
+	}
+
+	/**
+	 * True when ANOTHER entry in force shares this entry's plane document. A subject-addressed entry's document id is
+	 * derived from (scope, kind, subject) (`retainDocumentId`), so every live entry with that triple writes to one
+	 * document; deleting it for a forgotten entry would remove memory that is still in force. A subject-less entry has
+	 * a document of its own and is never shared. The `documentShared` dependency of `forgetEntries`.
+	 */
+	async memoryDocumentShared(entry: Pick<MemoryEntry, "id" | "scope" | "kind" | "subject">): Promise<boolean> {
+		const subject = entry.subject;
+		if (subject === undefined || subject.length === 0) return false;
+		return this.plane("memory.forget.shared", async () => {
+			const rows = (await this.sql`
+				select 1 as shared from memory_entries
+				where scope = ${entry.scope} and kind = ${entry.kind} and subject = ${subject}
+				  and id <> ${entry.id} and superseded_by is null
+				limit 1`) as Array<Record<string, unknown>>;
+			return rows.length > 0;
+		});
 	}
 
 	/**

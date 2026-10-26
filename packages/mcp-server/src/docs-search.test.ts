@@ -1717,3 +1717,215 @@ describe("docs_search context on the LightRAG backend (Q2, Q3)", () => {
 		expect(JSON.parse(lightrag.queries[0] ?? "{}")).toMatchObject({ query: "where is the plan?", mode: "hybrid" });
 	});
 });
+
+describe("docs_search tandem recall (phase 57c)", () => {
+	const NO_GRAPH = { mode: "hybrid" as const, counts: { entities: 0, relations: 0 }, provenance: { entities: [], relations: 0 } };
+	const LIGHTRAG_CHUNKS = [
+		{ content: "The planner reads the plan.", document_name: "plan.md", document_id: "doc-1", source_url: "https://example.com/plan", score: 0.9 },
+		{ content: "Briefs are cached per graph.", document_name: "brief.md", document_id: "doc-2", source_url: "https://example.com/brief", score: 0.5 },
+	];
+	const memoryHit = (n: number, extra: Partial<DerivedMemoryHit> = {}): DerivedMemoryHit => ({
+		bank: "sub-cursor",
+		id: `mem-${n}`,
+		text: `Remembered fact ${n}.`,
+		derived: true,
+		document_id: `mwd_${n}`,
+		tags: [],
+		score: 0.9 - n / 10,
+		...extra,
+	});
+	const ON = { enabled: true, hindsight_limit: 5, budget_ms: 1500 };
+
+	function harness(over: {
+		recall?: (question: string) => Promise<readonly DerivedMemoryHit[]>;
+		tandem?: { enabled: boolean; hindsight_limit: number; budget_ms: number };
+		chunks?: typeof LIGHTRAG_CHUNKS;
+		failLightrag?: boolean;
+	}) {
+		const events: EventInput[] = [];
+		const asked: string[] = [];
+		const recall = over.recall;
+		const run = (): Promise<SearchReply> =>
+			searchDocs(
+				{
+					config: null,
+					backend: "lightrag",
+					lightragConfig: { url: "http://lightrag.test" },
+					datasetNames: ["agent-substrate"],
+					lightragRetry: { maxRetries: 0, retryBaseMs: 1 },
+					lightragRetrieve: async () =>
+						over.failLightrag === true ? { ok: false, reason: "lightrag 503" } : { ok: true, chunks: over.chunks ?? LIGHTRAG_CHUNKS, detail: NO_GRAPH },
+					...(recall !== undefined
+						? {
+								lightragHindsight: (question: string) => {
+									asked.push(question);
+									return recall(question);
+								},
+							}
+						: {}),
+					...(over.tandem !== undefined ? { tandem: over.tandem } : {}),
+					emit: async (event: EventInput) => {
+						events.push(event);
+						return { stored: false };
+					},
+					surface: "omp",
+				},
+				"where is the plan?",
+			);
+		return { run, events, asked };
+	}
+
+	test("LightRAG up and tandem on: Hindsight is asked too and merged with provenance, not degraded, never storable", async () => {
+		const { run, events, asked } = harness({
+			tandem: ON,
+			recall: async () => [memoryHit(1, { graph_id: "g-1", session_id: "s-1", node_id: "n-1" }), memoryHit(2)],
+		});
+		const reply = await run();
+		expect(asked).toEqual(["where is the plan?"]);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.fallback).toBeUndefined();
+		expect(reply.backend).toBe("lightrag");
+		expect(reply.tandem).toEqual({ lightrag: 2, hindsight: 2, deduplicated: 0, leg: "ok" });
+		// Fused order: the two rank-1 items tie (hindsight first), then the two rank-2 items.
+		expect(reply.chunks.map((citation) => citation.source_url)).toEqual([
+			"hindsight:sub-cursor/mwd_1",
+			"https://example.com/plan",
+			"hindsight:sub-cursor/mwd_2",
+			"https://example.com/brief",
+		]);
+		const [first, second] = reply.chunks;
+		expect(first).toMatchObject({
+			origin: "hindsight",
+			derived: true,
+			snippet: "Remembered fact 1.",
+			provenance: { bank: "sub-cursor", document_id: "mwd_1", graph_id: "g-1", session_id: "s-1", node_id: "n-1" },
+		});
+		expect(second).toMatchObject({ origin: "lightrag", snippet: "The planner reads the plan.", document_id: "doc-1", provenance: { bank: "lightrag", document_id: "doc-1" } });
+		expect(Object.hasOwn(second as object, "derived")).toBe(false);
+		// A memory can be forgotten at any moment: a tandem reply is never stored or replayed.
+		expect(searchReplyStorable(reply)).toBe(false);
+		const note = events.find((event) => event.kind === "note");
+		expect(note?.payload).toMatchObject({ action: "docs.search", backend: "lightrag", count: 4, tandem: { lightrag: 2, hindsight: 2, deduplicated: 0, leg: "ok" } });
+		expect(events.filter((event) => event.kind === "warning")).toEqual([]);
+	});
+
+	test("a memory that repeats a chunk is deduplicated and counted in the note", async () => {
+		const { run } = harness({ tandem: ON, recall: async () => [memoryHit(1, { text: "the planner   reads the PLAN." }), memoryHit(2)] });
+		const reply = await run();
+		expect(reply.tandem).toEqual({ lightrag: 2, hindsight: 1, deduplicated: 1, leg: "ok" });
+		expect(reply.chunks).toHaveLength(3);
+	});
+
+	test("the Hindsight limit bounds the memories merged", async () => {
+		const { run } = harness({ tandem: { ...ON, hindsight_limit: 2 }, recall: async () => [1, 2, 3, 4].map((n) => memoryHit(n)) });
+		const reply = await run();
+		expect(reply.tandem?.hindsight).toBe(2);
+	});
+
+	test("the merged list is capped at ten and keeps at least two memories", async () => {
+		const many = Array.from({ length: 12 }, (_, i) => ({ content: `lightrag chunk ${i}`, document_name: `d${i}`, document_id: `doc-${i}`, source_url: `https://example.com/${i}`, score: 1 - i / 100 }));
+		const { run } = harness({ tandem: ON, chunks: many as typeof LIGHTRAG_CHUNKS, recall: async () => [memoryHit(1), memoryHit(2), memoryHit(3)] });
+		const reply = await run();
+		expect(reply.chunks).toHaveLength(10);
+		expect(reply.chunks.filter((citation) => citation.origin === "hindsight").length).toBeGreaterThanOrEqual(2);
+		expect(reply.chunks.filter((citation) => citation.origin === "lightrag").length).toBeGreaterThanOrEqual(2);
+	});
+
+	test("tandem off, or absent: Hindsight is not asked, and the reply is the LightRAG reply, storable, with no tandem key", async () => {
+		const baseline = await harness({ recall: async () => [memoryHit(1)] }).run();
+		for (const tandem of [undefined, { ...ON, enabled: false }]) {
+			const { run, asked } = harness({ ...(tandem !== undefined ? { tandem } : {}), recall: async () => [memoryHit(1)] });
+			const reply = await run();
+			expect(asked).toEqual([]);
+			expect(Object.hasOwn(reply, "tandem")).toBe(false);
+			expect(reply).toEqual(baseline);
+			expect(reply.chunks.every((citation) => !Object.hasOwn(citation, "origin"))).toBe(true);
+			expect(searchReplyStorable(reply)).toBe(true);
+		}
+		expect(baseline.chunks.map((citation) => citation.snippet)).toEqual(["The planner reads the plan.", "Briefs are cached per graph."]);
+	});
+
+	test("tandem on but no Hindsight reader wired: the plain LightRAG reply, no tandem key", async () => {
+		const reply = await harness({ tandem: ON }).run();
+		expect(Object.hasOwn(reply, "tandem")).toBe(false);
+		expect(reply.chunks).toHaveLength(2);
+		expect(searchReplyStorable(reply)).toBe(true);
+	});
+
+	test("a Hindsight failure is fail-open: the LightRAG chunks are served, not degraded, and the reply is still never storable", async () => {
+		for (const recall of [
+			async (): Promise<readonly DerivedMemoryHit[]> => {
+				throw new Error("hindsight down");
+			},
+			(): Promise<readonly DerivedMemoryHit[]> => {
+				throw new Error("sync throw");
+			},
+		]) {
+			const { run, events } = harness({ tandem: ON, recall });
+			const reply = await run();
+			expect(reply.degraded).toBeUndefined();
+			expect(reply.fallback).toBeUndefined();
+			expect(reply.backend).toBe("lightrag");
+			expect(reply.chunks.map((citation) => citation.snippet)).toEqual(["The planner reads the plan.", "Briefs are cached per graph."]);
+			expect(reply.tandem).toEqual({ lightrag: 2, hindsight: 0, deduplicated: 0, leg: "failed" });
+			expect(searchReplyStorable(reply)).toBe(false);
+			expect(events.filter((event) => event.kind === "warning")).toEqual([]);
+		}
+	});
+
+	test("a Hindsight leg that outlives its own budget is left out; the search does not wait for it", async () => {
+		const { run } = harness({ tandem: { ...ON, budget_ms: 10 }, recall: () => new Promise<never>(() => {}) });
+		const started = performance.now();
+		const reply = await run();
+		expect(performance.now() - started).toBeLessThan(2_000);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.tandem).toEqual({ lightrag: 2, hindsight: 0, deduplicated: 0, leg: "timeout" });
+		expect(reply.chunks).toHaveLength(2);
+		expect(searchReplyStorable(reply)).toBe(false);
+	});
+
+	test("a breaker refusal or an empty recall (no hits) is an empty leg, not a failure of the reply", async () => {
+		const reply = await harness({ tandem: ON, recall: async () => [] }).run();
+		expect(reply.tandem).toEqual({ lightrag: 2, hindsight: 0, deduplicated: 0, leg: "empty" });
+		expect(reply.degraded).toBeUndefined();
+		expect(searchReplyStorable(reply)).toBe(false);
+	});
+
+	test("Hindsight is asked while LightRAG is still retrieving: LightRAG cannot answer until Hindsight has been called", async () => {
+		const hindsightAsked = Promise.withResolvers<void>();
+		const reply = await searchDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: { url: "http://lightrag.test" },
+				datasetNames: ["agent-substrate"],
+				lightragRetry: { maxRetries: 0, retryBaseMs: 1 },
+				lightragRetrieve: async () => {
+					// A sequential search would never call Hindsight until this returns: the test would time out.
+					await hindsightAsked.promise;
+					return { ok: true, chunks: LIGHTRAG_CHUNKS, detail: NO_GRAPH };
+				},
+				lightragHindsight: async () => {
+					hindsightAsked.resolve();
+					return [memoryHit(1)];
+				},
+				tandem: ON,
+				emit: async () => ({ stored: false }),
+				surface: "omp",
+			},
+			"where is the plan?",
+		);
+		expect(reply.tandem).toEqual({ lightrag: 2, hindsight: 1, deduplicated: 0, leg: "ok" });
+	});
+
+	test("LightRAG down with tandem on: the existing Hindsight fallback answers exactly as before, with no tandem note", async () => {
+		const recall = async (): Promise<readonly DerivedMemoryHit[]> => [memoryHit(1)];
+		const off = await harness({ failLightrag: true, recall }).run();
+		const on = await harness({ failLightrag: true, recall, tandem: ON }).run();
+		expect(on).toEqual(off);
+		expect(on).toMatchObject({ degraded: true, backend: "hindsight", fallback: "hindsight", reason: "lightrag 503" });
+		expect(Object.hasOwn(on, "tandem")).toBe(false);
+		expect(on.chunks.map((citation) => citation.source_url)).toEqual(["hindsight:sub-cursor/mwd_1"]);
+		expect(searchReplyStorable(on)).toBe(false);
+	});
+});
