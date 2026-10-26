@@ -20,6 +20,8 @@
  *   substrate index archive|verify-archive|restore   the verified logical export of the Postgres
  *       index and its restore-to-scratch proof (docs/runbooks/index-archive.md)
  *   substrate spool status|flush             the collector event spool (docs/collectors.md, "Event spool")
+ *   substrate session checkpoint|checkpoints|rollback|recover|sync   session checkpoints and rollback
+ *       (exit 0 done, 1 failed, 2 usage, 3 refused, 4 files restored but the ledger commit is pending)
  *
  * With `SUBSTRATE_EVENT_SPOOL=on`, `emit` parks an event that failed for a retryable reason
  * (network error, timeout, 5xx) in the spool and returns at once — it never replays; `spool flush`
@@ -49,6 +51,8 @@ import { runSkills, skillsTimeout } from "./skills.ts";
 import { runLedger } from "./ledger.ts";
 import { runSpool } from "./spool.ts";
 import { spoolConfig } from "../../collectors/src/spool.ts";
+import { runSession } from "./session/command.ts";
+import { unsupportedTranscriptPort } from "./session/rollback.ts";
 import { INDEX_ARCHIVE_SUBCOMMANDS, INDEX_ARCHIVE_USAGE, runIndexArchive } from "./index-archive.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -595,6 +599,20 @@ switch (command) {
 				err: (text) => process.stderr.write(text),
 			}),
 		);
+	case "session":
+		process.exit(
+			await runSession(rest, {
+				worktree: git(["rev-parse", "--show-toplevel"]) || process.cwd(),
+				url: base(),
+				tokenFor: (surface) => resolveBearer(surface, process.env) ?? undefined,
+				timeoutMs: timeout(),
+				now: () => new Date(),
+				randomBytes: (length) => crypto.getRandomValues(new Uint8Array(length)),
+				transcript: unsupportedTranscriptPort,
+				out: (text) => process.stdout.write(text),
+				err: (text) => process.stderr.write(text),
+			}),
+		);
 	default:
 		process.stdout.write(
 			"substrate brief [--repo R] [--branch B] [--graph G] [--surface S] [--write]\n" +
@@ -614,6 +632,7 @@ switch (command) {
 				"substrate index sweep [--apply] [--json]   (--apply also needs SUBSTRATE_INDEX_SWEEP=apply)\n" +
 				"substrate index archive [--out DIR] [--page-size N] | verify-archive <dir> | restore --scratch URL <dir>\n" +
 				"substrate ledger coverage [--json] | archive [--until D] [--out DIR] [--page-size N] | verify-archive <dir> [--day D]\n" +
+				"substrate session checkpoint | checkpoints | rollback <ckpt|seq|previous> | recover | sync   (substrate session for the flags)\n" +
 				"substrate spool status [--json] | flush [--json] [--budget-ms N]   (the event spool needs SUBSTRATE_EVENT_SPOOL=on)\n",
 		);
 		process.exit(command ? 2 : 0);

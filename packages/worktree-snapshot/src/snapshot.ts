@@ -1,4 +1,4 @@
-import { refFor, pinTree, readPinnedSnapshotIn } from "./pin.ts";
+import { encodeMetadata, listPinnedIn, type PinnedCheckpoint, refFor, pinTree, readPinnedSnapshotIn } from "./pin.ts";
 import { validateTarget } from "./plan.ts";
 import { resolvePolicy } from "./policy.ts";
 import { openRepo, type Runner } from "./runner.ts";
@@ -17,7 +17,19 @@ export async function snapshot(params: SnapshotParams): Promise<Snapshot> {
 	return buildSnapshot(ctx, resolvePolicy(params.policy));
 }
 
-export type PinParams = { worktree: string; snapshot: Snapshot; id: string; now?: Clock; run?: Runner };
+export type PinParams = {
+	worktree: string;
+	snapshot: Snapshot;
+	id: string;
+	/**
+	 * Optional metadata stored as a trailer in the pinned commit message, so it survives with the ref.
+	 * A JSON object of at most 4 KiB of canonical JSON (sorted keys). Written when the pin is created;
+	 * an idempotent re-pin of the same id and tree keeps the original.
+	 */
+	metadata?: Record<string, unknown>;
+	now?: Clock;
+	run?: Runner;
+};
 
 /**
  * Make a snapshot durable under `refs/substrate/checkpoints/<id>` (see pin.ts for the warning about
@@ -27,7 +39,19 @@ export async function pinSnapshot(params: PinParams): Promise<PinResult> {
 	const ctx = await openRepo(params);
 	const tree = await validateTarget(ctx, params.snapshot);
 	refFor("checkpoints", params.id);
-	return pinTree(ctx, "checkpoints", params.id, tree);
+	const metadata = params.metadata === undefined ? undefined : encodeMetadata(params.metadata);
+	return pinTree(ctx, "checkpoints", params.id, tree, metadata);
+}
+
+export type ListPinnedParams = { worktree: string; now?: Clock; run?: Runner };
+
+/**
+ * The pinned checkpoints of a worktree (`refs/substrate/checkpoints/*`) with their id, commit, tree
+ * and parsed metadata. A corrupt metadata trailer is reported on its entry, never thrown. These refs
+ * are the local checkpoint registry: they work with no server.
+ */
+export async function listPinned(params: ListPinnedParams): Promise<PinnedCheckpoint[]> {
+	return listPinnedIn(await openRepo(params));
 }
 
 export type ReadPinnedParams = { worktree: string; ref: string; now?: Clock; run?: Runner };

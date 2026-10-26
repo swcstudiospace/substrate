@@ -35,7 +35,11 @@ export {
 export { type RecoverParams, type RestoreParams, recoverRestore, restore } from "./restore.ts";
 export type { GitOptions, RepoContext, RunOptions, RunResult, Runner } from "./runner.ts";
 export { spawnRunner } from "./runner.ts";
+export type { PinnedCheckpoint } from "./pin.ts";
+export { MAX_METADATA_BYTES, METADATA_TRAILER } from "./pin.ts";
 export {
+	type ListPinnedParams,
+	listPinned,
 	type PinParams,
 	pinSnapshot,
 	type ReadPinnedParams,
