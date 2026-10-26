@@ -143,6 +143,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_BRIEF_RECALL_INTERVAL_S` | number | 120 | 30..3600 | 120 s. See `docs/data-planes.md` | mcp-server/recall-snapshot.ts | yes |
 | `SUBSTRATE_BRIEF_RECALL_TTL_S` | number | 900 | 60..86400 | 900 s. See `docs/data-planes.md` | mcp-server/recall-snapshot.ts | yes |
 | `SUBSTRATE_BRIEF_RECALL_BUDGET_MS` | number | 1500 | 100..10000 | 1500 ms. See `docs/data-planes.md` | mcp-server/recall-snapshot.ts | yes |
+| `SUBSTRATE_BRIEF_RECALL_SCOPE` | mode | off | off \| graph (case- and space-insensitive; anything else is off, named at boot) | off: the brief's recall lines are the surface's own banks only; graph adds up to three lines about the claimed node's graph and gives such a brief its own cache key. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 
 ## Recall plane (Hindsight)
 
@@ -196,6 +197,9 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT` | number | 0.3 | [0, 1] | 0.3. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_RAGFLOW_RERANK_ID` | string | none | reranker model id | no reranker: no rerank_id is sent. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_SEARCH_BUDGET_MS` | number | 4000 | 0 = no shared deadline | 4000 ms. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_DOCS_TANDEM` | toggle | off | off \| on (case- and space-insensitive; anything else is off, named at boot) | off: a docs search answers from its own plane only, as before; on adds the caller's Hindsight memory to a LightRAG answer as derived, never-cached items. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_DOCS_TANDEM_LIMIT` | number | 5 | 1..10 whole number (outside it is capped, not a number is 5, both named at boot) | 5 Hindsight hits asked for and merged. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_DOCS_TANDEM_BUDGET_MS` | number | 1500 | 50..10000 whole milliseconds (outside it is capped, not a number is 1500, both named at boot) | 1500 ms for the Hindsight leg; it never extends the search past it. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_RAG_MAX_RETRIES` | number | 2 | non-negative integer | 2 | mcp-server/config.ts | yes |
 | `SUBSTRATE_RAG_RETRY_BASE_MS` | number | 200 | positive integer ms | 200 ms | mcp-server/config.ts | yes |
 | `SUBSTRATE_RAG_BREAKER_THRESHOLD` | number | 3 | positive integer | 3 consecutive failures | mcp-server/config.ts | yes |

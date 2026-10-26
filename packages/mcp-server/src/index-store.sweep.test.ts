@@ -96,6 +96,8 @@ describeLive("index sweep against a live index", () => {
 			["e-v1-old", "global", "permanent", id("e-v2"), null, "h-e-v1", 91],
 			["e-v2", "global", "permanent", null, null, "h-e-v2", 91],
 			["e-v1-young", "global", "permanent", id("e-v2"), null, "h-e-v1y", 89],
+			// A forgotten entry (`memory-forget.ts` marker) older than the window: kept for audit, never swept.
+			["e-forgotten-old", "global", "permanent", "forgotten:fg_0123456789abcdef0123456789", null, "h-e-forgotten", 91],
 			["e-ttl30-old", "global", "30d", null, null, "h-e-ttl30", 31],
 			["e-ttlgraph-old", `graph:${id("g-terminal-old")}`, "graph", null, id("g-terminal-old"), "h-e-ttlgraph", 91],
 			["e-landed", "global", "permanent", null, null, `h-${RUN}-landed`, 1],
@@ -334,6 +336,7 @@ describeLive("index sweep against a live index", () => {
 		expect(await count("memory_entries", "id", "e-v1-old")).toBe(0);
 		expect(await count("memory_entries", "id", "e-v2")).toBe(1);
 		expect(await count("memory_entries", "id", "e-v1-young")).toBe(1);
+		expect(await count("memory_entries", "id", "e-forgotten-old")).toBe(1);
 		expect(await count("memory_entries", "id", "e-ttl30-old")).toBe(1);
 		expect(await count("memory_entries", "id", "e-ttlgraph-old")).toBe(1);
 		expect(classes["entries-ttl-30d"]?.deleted).toBe(0);

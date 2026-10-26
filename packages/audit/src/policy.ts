@@ -32,6 +32,9 @@ export const FAIL_CLOSED_TOOLS: ReadonlySet<string> = new Set([
 	// Phase 45 (D45-h): a Railway write changes a live project, so it is recorded before it runs.
 	"railway_scale",
 	"railway_deploy",
+	// v1.6 (phase 61): a rollback commit takes memory other agents read out of force and deletes its plane documents (nearest: `memory_write`),
+	// so an unrecorded one is refused; the client keeps it in its pending journal and delivers it later.
+	"session_rollback_commit",
 ]);
 
 /**
@@ -94,6 +97,13 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	// SPE-19388: RAG plane reads, served as an MCP tool and a REST route under one name.
 	"docs_lightrag_query", // A read of the LightRAG plane, like `docs_search`.
 	"docs_rag_state", // A read of the in-process RAG state machine, like `docs_search`.
+	// v1.6 (phases 59 and 60): anchor verification reads. They read the ledger and devnet and write nothing, like `events_verify`.
+	"checkpoint_verify",
+	"memory_verify",
+	// v1.6 (phase 61): session rollback. The plan is a read. A checkpoint is one ledger note, the nearest write to `events_emit`:
+	// the client journals an unrecorded checkpoint and re-offers it, so an unwritable audit file must not fail the agent's turn over it.
+	"session_rollback_plan",
+	"session_checkpoint",
 ]);
 
 /**

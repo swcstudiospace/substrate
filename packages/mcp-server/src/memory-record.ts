@@ -14,12 +14,11 @@
  * - `supersessionChain`: the walk over `supersedes` / `superseded_by`, cycle-safe and bounded, which stops
  *   at a forgotten marker.
  *
- * The content hash is the gate's `entry_hash` and nothing else. `contentHash` in `memory-write.ts` is not
- * exported, so `entryHashFor` below rebuilds the same preimage from the same primitives (`canonicalJson`,
- * `sha256Hex`); `memory-record.test.ts` pins the constants it must share with the gate against the gate's
- * source so the two cannot drift silently.
+ * The content hash is the gate's `entry_hash` and nothing else. `entryHashFor` below calls the gate's own
+ * `contentHash` (exported from `memory-write.ts`) with the gate's v1 and v2 preimages, so the two cannot drift;
+ * `memory-record.test.ts` still pins the call shapes against the gate's source.
  */
-import { canonicalJson, sha256Hex } from "./event.ts";
+import { contentHash, HASH_TENANT, HASH_VERSION_MARKER } from "./memory-write.ts";
 import type { Actor, MemoryEntry, MemoryKind, Trust } from "./types.ts";
 
 /**
@@ -30,10 +29,6 @@ export const FORGOTTEN_PREFIX = "forgotten:";
 
 /** Most hops the chain walk takes in either direction. A real chain is a handful of versions. */
 export const MAX_CHAIN_HOPS = 256;
-
-/** The gate's v2 preimage constants (`HASH_TENANT` and `HASH_VERSION_MARKER` in `memory-write.ts`). */
-const HASH_TENANT = "swc";
-const HASH_VERSION_MARKER = 2;
 
 export type NexusState = "current" | "superseded" | "forgotten";
 
@@ -110,8 +105,8 @@ function nullable(value: string | undefined | null): string | null {
 export function entryHashFor(content: NexusContent, writer: string): { v1: string; v2: string } {
 	const base = { scope: content.scope, kind: content.kind, subject: content.subject, text: content.text, writer };
 	return {
-		v1: sha256Hex(canonicalJson(base)),
-		v2: sha256Hex(canonicalJson({ ...base, hv: HASH_VERSION_MARKER, tenant: HASH_TENANT })),
+		v1: contentHash(base),
+		v2: contentHash({ ...base, hv: HASH_VERSION_MARKER, tenant: HASH_TENANT }),
 	};
 }
 

@@ -24,6 +24,7 @@ import {
 	sweepPolicyFromEnv,
 	type SweepStatement,
 } from "./index-sweep.ts";
+import { FORGET_MARKER_PREFIX } from "./memory-forget.ts";
 
 /** 2026-10-13T12:00Z — the cutoffs below are this minus whole days. */
 const NOW = Date.UTC(2026, 9, 13, 12);
@@ -281,6 +282,16 @@ describe("the classes", () => {
 
 		// Every picked graph live: nothing is issued at all.
 		expect(batch.then!([{ graph_id: "ut-b" }], [{ graph_id: "ut-b", live: true }])).toEqual([]);
+	});
+
+	test("entries-superseded never names a forgotten row: its count and its delete both exclude the forget marker", () => {
+		const cls = by["entries-superseded"]!;
+		// The forget unit's marker is `forgotten:fg_...`; the predicate is built from the module's own prefix.
+		const exclusion = `left(superseded_by, ${FORGET_MARKER_PREFIX.length}) <> '${FORGET_MARKER_PREFIX}'`;
+		expect(cls.count(cutoff).text).toContain(exclusion);
+		expect(cls.deleteBatch!(cutoff, 10).pick.text).toContain(exclusion);
+		// The exclusion narrows the predicate; it does not replace the not-null rule.
+		expect(cls.count(cutoff).text).toContain("superseded_by is not null and created < $1::timestamptz");
 	});
 
 	test("memory entries: superseded versions are deletable; ttl classes only count rows the reads still return", () => {

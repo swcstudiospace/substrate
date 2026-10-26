@@ -21,7 +21,8 @@ import { NOTION_API_URL } from "./notion.ts";
 import { DEFAULT_RETRIEVAL_KNOBS, ragflowFromEnv, type RagflowConfig, type RetrievalKnobs } from "./planes/ragflow.ts";
 import { railwayFromEnv, type RailwayConfig } from "./railway.ts";
 import { hindsightBanksFromEnv } from "./planes/hindsight.ts";
-import { loadRecallConfig, type RecallConfig } from "./recall-snapshot.ts";
+import { loadRecallConfig, parseRecallScope, type RecallConfig, type RecallScope } from "./recall-snapshot.ts";
+import { DEFAULT_TANDEM_OPTIONS, parseTandemOptions, type TandemOptions } from "./tandem-recall.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
 import { EVENT_IDEMPOTENCY_MODES, MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type EventIdempotencyMode, type MemoryExpiryMode, type Surface } from "./types.ts";
 
@@ -505,6 +506,13 @@ export interface SubstrateConfig {
 	 * `problems` are the boot warnings for a value that was refused or capped (`requestPathConfigWarnings`).
 	 */
 	requestPath: RequestPathSettings;
+	// v1.6 phase 57c
+	/**
+	 * The off-by-default recall flags: `SUBSTRATE_DOCS_TANDEM=off|on` with `SUBSTRATE_DOCS_TANDEM_LIMIT` (1..10, default 5)
+	 * and `SUBSTRATE_DOCS_TANDEM_BUDGET_MS` (50..10000, default 1500), and `SUBSTRATE_BRIEF_RECALL_SCOPE=off|graph`.
+	 * `problems` are the boot warnings for a value that was refused or capped (`contextualRecallConfigWarnings`).
+	 */
+	contextualRecall: ContextualRecallSettings;
 	// uplift-2 R5
 	/**
 	 * Ledger chain cache, chain-tip lookback, write-probe cadence and opt-in TTL,
@@ -1002,6 +1010,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		cachePreload,
 		// uplift-5 U5-3
 		requestPath: loadRequestPathSettings(env),
+		// v1.6 phase 57c
+		contextualRecall: loadContextualRecallSettings(env),
 		// uplift-2 R5
 		ledger: loadLedgerSettings(env),
 		// uplift-4 S2
@@ -1431,6 +1441,61 @@ export function requestPathConfigWarnings(config: SubstrateConfig): string[] {
 	return [...config.requestPath.problems];
 }
 
+/** v1.6 phase 57c: the two off-by-default recall flags, parsed. */
+export interface ContextualRecallSettings {
+	/** `SUBSTRATE_DOCS_TANDEM` (`off` | `on`), `_LIMIT` (1..10, default 5) and `_BUDGET_MS` (50..10000, default 1500): LightRAG and Hindsight in one docs answer. */
+	tandem: TandemOptions;
+	/** `SUBSTRATE_BRIEF_RECALL_SCOPE` (`off` | `graph`): the brief's recall also shows the claimed node's graph. */
+	recallScope: RecallScope;
+	problems: string[];
+}
+
+/**
+ * v1.6 phase 57c: an unset or empty flag is the default silently. A value outside the vocabulary keeps the
+ * default and is named in `problems`, so a typo never switches a policy on. A number that is not a whole
+ * number keeps the default; one outside its range is capped to the nearest bound; both are named.
+ */
+function loadContextualRecallSettings(env: Record<string, string | undefined>): ContextualRecallSettings {
+	const problems: string[] = [];
+	const choice = <T extends string>(name: string, raw: string | undefined, allowed: readonly [T, T], fallback: T): T => {
+		const trimmed = raw?.trim() ?? "";
+		if (trimmed === "") return fallback;
+		const value = trimmed.toLowerCase();
+		if ((allowed as readonly string[]).includes(value)) return value as T;
+		problems.push(`${name}=${JSON.stringify(trimmed)} is neither ${allowed[0]} nor ${allowed[1]}; running as ${fallback}`);
+		return fallback;
+	};
+	const whole = (name: string, raw: string | undefined, fallback: number, min: number, max: number): number => {
+		const trimmed = raw?.trim() ?? "";
+		if (trimmed === "") return fallback;
+		if (!/^\d+$/.test(trimmed)) {
+			problems.push(`${name}=${JSON.stringify(trimmed)} is not a whole number; using ${fallback}`);
+			return fallback;
+		}
+		const value = Number(trimmed);
+		if (value >= min && value <= max) return value;
+		const capped = Math.min(max, Math.max(min, value));
+		problems.push(`${name}=${JSON.stringify(trimmed)} is outside ${min}..${max}; using ${capped}`);
+		return capped;
+	};
+	const mode = choice("SUBSTRATE_DOCS_TANDEM", env.SUBSTRATE_DOCS_TANDEM, ["off", "on"], "off");
+	const scope = choice("SUBSTRATE_BRIEF_RECALL_SCOPE", env.SUBSTRATE_BRIEF_RECALL_SCOPE, ["off", "graph"], "off");
+	return {
+		tandem: parseTandemOptions({
+			enabled: mode,
+			hindsight_limit: whole("SUBSTRATE_DOCS_TANDEM_LIMIT", env.SUBSTRATE_DOCS_TANDEM_LIMIT, DEFAULT_TANDEM_OPTIONS.hindsight_limit, 1, 10),
+			budget_ms: whole("SUBSTRATE_DOCS_TANDEM_BUDGET_MS", env.SUBSTRATE_DOCS_TANDEM_BUDGET_MS, DEFAULT_TANDEM_OPTIONS.budget_ms, 50, 10_000),
+		}),
+		recallScope: parseRecallScope(scope),
+		problems,
+	};
+}
+
+/** The v1.6 recall flags that were refused or capped, for the boot log. Values are mode names and numbers, never credentials. */
+export function contextualRecallConfigWarnings(config: SubstrateConfig): string[] {
+	return [...config.contextualRecall.problems];
+}
+
 /** uplift-3 N3: a finite rate > 0, fractions kept (0.5 rps is one call per 2 s); anything else is the default. */
 function positiveRateOr(raw: string | undefined, fallback: number): number {
 	const value = Number(raw?.trim());
@@ -1696,6 +1761,21 @@ export function isOperator(config: SubstrateConfig, authorization: string | null
 	// `isSwarmSurface(undefined)` is false, which is how that bearer used to pass.
 	if (named === undefined) return config.tokens.size === 0;
 	return !isSwarmSurface(named) && named !== "substrate";
+}
+
+/**
+ * The surfaces an operator token authenticates as, by the same rule as {@link isOperator}: a swarm surface and the
+ * `substrate` host-job surface are never operators, listed or not. Empty on a bare local run (no surface tokens), where
+ * `isOperator` calls the machine's owner the operator but a ledger event carries no proof of who wrote it: a reader that
+ * must trust an operator's event (a signer rotation) fails closed there.
+ */
+export function operatorSurfaces(config: SubstrateConfig): Set<Surface> {
+	const surfaces = new Set<Surface>();
+	for (const token of config.operatorTokens) {
+		const named = config.tokens.get(token);
+		if (named !== undefined && !isSwarmSurface(named) && named !== "substrate") surfaces.add(named);
+	}
+	return surfaces;
 }
 
 /**

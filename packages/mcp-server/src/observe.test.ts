@@ -371,6 +371,11 @@ describe("auditToolCalls", () => {
 		expect(toolLabel("issue_get")).toBe("issue_get");
 		expect(toolLabel("docs_search")).toBe("docs_search");
 		expect(toolLabel("docs_ingest")).toBe("docs_ingest");
+		expect(toolLabel("checkpoint_verify")).toBe("checkpoint_verify");
+		expect(toolLabel("memory_verify")).toBe("memory_verify");
+		expect(toolLabel("session_checkpoint")).toBe("session_checkpoint");
+		expect(toolLabel("session_rollback_plan")).toBe("session_rollback_plan");
+		expect(toolLabel("session_rollback_commit")).toBe("session_rollback_commit");
 		expect(toolLabel("events")).toBe("events");
 		expect(toolLabel("../../etc/passwd")).toBe("unrecognized");
 	});

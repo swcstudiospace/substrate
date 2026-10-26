@@ -536,6 +536,12 @@ Those events are pre-coverage and `legacy` in the hour report.
 signed by that key from any other ledger would make production alarm on that
 hour forever, so the rehearsal harness never carries `SOLANA_*` names.
 
+### Verifying a checkpoint (v1.6 phase 59)
+
+`checkpoint_verify {ckpt_id | event_id, session_id?}` (MCP, read-only, audit fail-open) resolves a `session.checkpoint` to its hour, its Merkle inclusion proof, the anchors row and the devnet transaction, and answers with one status: `anchored` (the proof verifies against a root a known signer wrote on devnet, and the memo's count is the proof's tree size), `pending` (the hour is not closed, or its anchor may still land, about three hours), `unanchored` (the hour closed long ago and no anchors row exists), `unverified` (the chain or ledger could not settle it: no `SOLANA_ANCHOR_PUBKEY`, a refused or unreachable RPC, a devnet reset, an hour above 50 000 events; never a verdict of tampering) and `mismatch` (a read that succeeded disagrees with the ledger, or the event no longer hashes to its stored hash). With Solana or the ledger unconfigured the answer is `unverified` with the reason, and no network call is made. Nothing sends a transaction.
+
+The signer set is the configured anchor key plus the `anchor.signer.rotate` notes an operator surface wrote (read from the newest 500 notes of each operator surface); when that read may be incomplete a mismatch that only the signer set explains is reported `unverified` with `signer_set_complete: false`. A `ckpt_id` is found in the newest 500 notes of `session_id`, else of the caller's surface in the last seven days (the ledger has no read by payload); an older or foreign checkpoint needs its `event_id`. The evidence is hashes, the proof path, public keys and the transaction signature only, never event contents.
+
 ## Reading the ledger
 
 `events_query` is the read counterpart of `events_emit`, and the reason a desk seat

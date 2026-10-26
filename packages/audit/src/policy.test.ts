@@ -55,6 +55,9 @@ describe("auditMode", () => {
 			"fabric_status",
 			"fabric_optimize",
 			"fabric_compliance",
+			"checkpoint_verify",
+			"memory_verify",
+			"session_rollback_plan",
 		]) {
 			expect(auditMode(tool)).toBe("fail-open");
 		}
@@ -87,6 +90,13 @@ describe("auditMode", () => {
 		for (const tool of ["graph_heartbeat", "graph_bind", "coord_handoff", "coord_reap_leases"]) {
 			expect(FAIL_CLOSED_TOOLS.has(tool)).toBe(true);
 		}
+		// A checkpoint is one ledger note, like events_emit, the one write that is fail-open on purpose.
+		expect(auditMode("session_checkpoint")).toBe("fail-open");
+		expect(FAIL_CLOSED_TOOLS.has("session_checkpoint")).toBe(false);
+		// A rollback commit takes memory out of force for every agent that reads it and deletes its plane documents.
+		expect(FAIL_CLOSED_TOOLS.has("session_rollback_commit")).toBe(true);
+		expect(FAIL_OPEN_TOOLS.has("session_rollback_commit")).toBe(false);
+		expect(auditMode("session_rollback_commit")).toBe("fail-closed");
 	});
 
 	test("the v1.3 planned tools are explicitly in their decided set", () => {

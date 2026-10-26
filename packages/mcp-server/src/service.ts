@@ -54,7 +54,7 @@ import {
 	type ReadThroughCache,
 	type ScriptOutcome,
 } from "./cache.ts";
-import { isReviewToken, type LightragConfig, type SubstrateConfig } from "./config.ts";
+import { isReviewToken, operatorSurfaces, type LightragConfig, type SubstrateConfig } from "./config.ts";
 import type { DbPlane } from "./db-endpoints.ts";
 import { DesktopBusy, type DesktopDriver, type DesktopLogEntry, type DesktopRunResult } from "./desktop/driver.ts";
 import {
@@ -114,6 +114,7 @@ import {
 	GreptimeClient,
 	INGEST_LAG_MS,
 	IngestNotRecorded,
+	MAX_QUERY_LIMIT,
 	queryLimit,
 	type EventQuery,
 	type LedgerCapacity,
@@ -138,11 +139,30 @@ import { createMirror, type EdgeOutcome, type EdgeRelation, type Mirror, type Mi
 import { runDodGate, type DodEvidence } from "./dod-gate.ts";
 import { nodeArtifact, type NodeArtifact } from "./node-artifact.ts";
 import { CAUSAL_WINDOW, LINKED_EVENTS, causalChain, graphLinks, type ReducedEvent } from "./memory-graph.ts";
-import { normalizeSubject } from "./memory-policy.ts";
+import { memoryExpiry, normalizeSubject, visibleToCaller } from "./memory-policy.ts";
 import { briefFanoutOf, fanOutBriefRecall, recallMemories, resolveRecallBanks, UNTRUSTED_MEMORY_NOTICE, type BankAnswer, type RecallReply } from "./memory-recall.ts";
 import { emitRetainWarning, forwardRetain, replayRetain, retainDocumentId, type RetainDeps, type RetainOutboxSink } from "./memory-retain.ts";
 import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
+import { forgetEntries, selectForRollback, type ForgetReport, type ForgetRequest, type RollbackSelectRequest, type RollbackSelection } from "./memory-forget.ts";
+import { ForgetUnavailableError, forgetDocumentId, planeDeleteFor } from "./memory-forget-plane.ts";
+import { verifyMemoryRecord, MemoryVerifyError, type MemoryVerifyResult } from "./memory-verify.ts";
+import { anchorEvidenceFor, verifyCheckpointRef, type AnchorVerifyPorts, type CheckpointVerifyToolResult } from "./anchor-verify-deps.ts";
+import { CheckpointVerifyError } from "./checkpoint-verify.ts";
+import {
+	DEFAULT_ANCHOR_TIMEOUT_MS,
+	ROLLBACK_SELECTION_LIMIT,
+	sessionCheckpoint,
+	sessionRollbackCommit,
+	sessionRollbackPlan,
+	type CheckpointResult,
+	type CommitResult,
+	type EntrySelection,
+	type PlanResult,
+	type RollbackCaller,
+	type SessionNotes,
+	type SessionRollbackDeps,
+} from "./session-rollback.ts";
 import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachable.ts";
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth, type HindsightConfig } from "./planes/hindsight.ts";
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
@@ -160,14 +180,17 @@ import {
 	buildRecallQuery,
 	fanoutFresh,
 	fanoutSnapshot,
+	GRAPH_RECALL_MAX_HITS,
 	fanoutSnapshotArgs,
 	parseRecallSnapshot,
 	recallBriefResult,
 	recallKey,
+	recallScopeKey,
 	RECALL_TITLE_PREFIX,
 	recallSnapshotArgs,
 	repoScope,
 	snapshotState,
+	withGraphScope,
 	type RecallLook,
 	type RecallSnapshot,
 } from "./recall-snapshot.ts";
@@ -560,6 +583,12 @@ export interface EmitOptions {
 	replay?: boolean;
 }
 
+/** Who is forgetting: the authenticated surface (the ledger note's own `surface`) and, when it has one, its session. */
+export interface ForgetCaller {
+	surface: Surface;
+	session_id?: string;
+}
+
 /** What `SUBSTRATE_EVENT_IDEMPOTENCY` makes of one request: its validated key (null: none) and whether it takes the ledger lookup. */
 interface IdempotencyPlan {
 	key: string | null;
@@ -666,6 +695,12 @@ export const VERIFY_PENDING_MS = 3 * HOUR_MS;
 export const VERIFY_RPC_TIMEOUT_MS = 5_000;
 export const VERIFY_RPC_ATTEMPTS = 2;
 export const VERIFY_RPC_BACKOFF_MS = 200;
+/** What `memory_verify` waits for the anchor lookup: it reads the hour's leaves, then the chain, so it gets more than a single read. */
+export const MEMORY_VERIFY_ANCHOR_TIMEOUT_MS = 15_000;
+/** Pages of 500 notes one rollback tool reads to find a session's checkpoints (4,000 notes), so a chatty session cannot make a tool read without end. */
+export const ROLLBACK_NOTE_PAGES = 8;
+/** Rows per page of that read (the ledger's own per-read cap). */
+export const ROLLBACK_NOTE_PAGE_ROWS = MAX_QUERY_LIMIT;
 /**
  * Cap on the time reserved for the `/verify` response after the last hour
  * check (D28-18). The CLI waits out the whole-verify budget, so every hour
@@ -1349,6 +1384,8 @@ export class Substrate {
 	private readonly briefOptions: { budgetMs: number; recentWindowDays: number; graphRead: "full" | "lite" };
 	// uplift-5 U5-3 — `SUBSTRATE_CACHE_BUMP_SCOPE=narrow`: a retain bumps the recall generation, a brief drops the heartbeat-bumped graph key.
 	private readonly narrowBumps: boolean;
+	/** The devnet RPC a test injected for `checkpoint_verify` and `memory_verify`; null builds one from config on first use. */
+	private readonly rpcOverride: Rpc | null;
 	// uplift-4 S5 — recall in the brief and the Hindsight inventory
 	/** The wanted registry, the prefetch timer and the post-retain refresh; inert unless `SUBSTRATE_BRIEF_RECALL` is `shadow` or `enforce`. */
 	private readonly recall: RecallPrefetcher;
@@ -1384,6 +1421,8 @@ export class Substrate {
 			railway?: RailwayClient;
 			/** Tests inject the bus through this factory; production builds it from config. */
 			eventBus?: () => EventBus | null;
+			/** Tests inject the devnet RPC the verification tools read through; production builds one from `SOLANA_RPC_URL`. */
+			rpc?: Rpc;
 		},
 		observer: SubstrateObserver = {},
 	) {
@@ -1454,6 +1493,7 @@ export class Substrate {
 		// uplift-2 R1
 		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays, graphRead: config.requestPath.briefGraphRead };
 		this.narrowBumps = config.requestPath.cacheBumpScope === "narrow";
+		this.rpcOverride = stores?.rpc ?? null;
 		this.planningBaseDir = stores?.planningBaseDir ?? process.cwd();
 		// uplift-2 R3: the outbox hydrates its file (if any) now, so entries parked
 		// before a restart are due again from the first drain tick. Every drop —
@@ -1506,6 +1546,7 @@ export class Substrate {
 						text: hit.text,
 						...(hit.scope !== undefined ? { scope: hit.scope } : {}),
 						...(hit.type !== undefined ? { type: hit.type } : {}),
+						...(hit.graph_id !== undefined ? { graph_id: hit.graph_id } : {}),
 					})),
 				};
 			},
@@ -1764,6 +1805,8 @@ export class Substrate {
 				// The recall mode changes the rendered text, so it is in every key the text lives under
 				// (answer, last-good snapshot): a shadow entry is never served as enforce, nor the reverse.
 				...recallKey(recallActive ? recallMode : "off", recallActive ? this.recallBankOf(request.surface) : null),
+				// Only an enforcing, active recall shows the scope's lines, so only that brief gets the scope's key part.
+				...recallScopeKey(recallActive && recallMode === "enforce" ? this.config.contextualRecall.recallScope : "off"),
 			};
 			const encoded = await this.cache.getOrLoad({
 				klass: "brief",
@@ -1904,6 +1947,15 @@ export class Substrate {
 		return hindsight === null ? null : bankForSurface(hindsight, surface);
 	}
 
+	/**
+	 * The graph a graph-scoped brief recall reads (`SUBSTRATE_BRIEF_RECALL_SCOPE=graph`): the graph the brief asks about,
+	 * in the form the ledger and index store it. Null under `off` (the default) and when the request names none, which is
+	 * what leaves the recall exactly as it was.
+	 */
+	private recallGraphId(request: BriefRequest): string | null {
+		return this.config.contextualRecall.recallScope === "graph" ? normalizeIdentifier(request.graph_id) : null;
+	}
+
 	/** The Hindsight config a recall for this request may use, or null: no repo, no Hindsight, a VM guest, no cache, or a surface outside the list. */
 	private recallGate(request: BriefRequest, repo: string | null): HindsightConfig | null {
 		const hindsight = hindsightFromEnv();
@@ -1951,7 +2003,10 @@ export class Substrate {
 		const ttlS = this.config.briefRecall.ttlS;
 		const subjects = this.recall.registry.forSurface(surface, now, WANTED_MAX).find((pair) => pair.repo === repo)?.subjects ?? [];
 		const query = buildRecallQuery(repo, subjects);
-		const args = fanoutSnapshotArgs(repo, banks, query);
+		const scope = this.config.contextualRecall.recallScope;
+		const graphId = this.recallGraphId(request);
+		// Under `graph` the answer holds the claimed graph's lines, so another graph (or none) must never be served this entry; under `off` the key is the key it was.
+		const args = { ...fanoutSnapshotArgs(repo, banks, query), ...(scope === "graph" && graphId !== null ? { graph: graphId } : {}) };
 		const fanOut = async (): Promise<RecallSnapshot | null> => {
 			const fanout = await fanOutBriefRecall(
 				{ config: hindsight, banks, fetchImpl: this.hindsightFetch, budgetMs: briefRecallBudgetMs(this.config.briefRecall.budgetMs) },
@@ -1959,14 +2014,14 @@ export class Substrate {
 				{ surface, repo },
 				{
 					// Another repo's copy of the same text must not reach the cross-bank dedupe, where it could hide this repo's own copy.
-					keep: (hit) => hit.metadata.scope === repoScope(repo),
+					keep: (hit) => hit.metadata.scope === repoScope(repo) || (graphId !== null && hit.metadata.graph_id === graphId),
 					onAnswer: (bankAnswer) => {
 						answers.set(bankAnswer.bank, bankAnswer);
 					},
 				},
 			);
 			if (fanout.answered.length === 0) return null;
-			return fanoutSnapshot(fanout.answered, fanout.hits, repo, bankForSurface(hindsight, surface), now);
+			return withGraphScope(scope, fanoutSnapshot(fanout.answered, fanout.hits, repo, bankForSurface(hindsight, surface), now), fanout.hits, graphId, GRAPH_RECALL_MAX_HITS);
 		};
 		let fetched = false;
 		// A hit returns the stored entry, which is validated below; a load runs the fan-out and stores its answer.
@@ -2002,9 +2057,16 @@ export class Substrate {
 			const answer = answers.get(bank);
 			return answer === undefined ? [] : [answer];
 		});
+		const scope = this.config.contextualRecall.recallScope;
 		const fanout = briefFanoutOf(completed);
 		if (fanout.answered.length === 0) return null;
-		return fanoutSnapshot(fanout.answered, fanout.hits, repo, bankForSurface(target.hindsight, request.surface), Date.now());
+		return withGraphScope(
+			scope,
+			fanoutSnapshot(fanout.answered, fanout.hits, repo, bankForSurface(target.hindsight, request.surface), Date.now()),
+			fanout.hits,
+			this.recallGraphId(request),
+			GRAPH_RECALL_MAX_HITS,
+		);
 	}
 
 	/** The compose options recall adds: the subject sink in `shadow` and `enforce`, and the fan-out read only in `enforce` (the shadow text is exactly today's). `onCut` runs when the read is cut at the cap. */
@@ -3051,6 +3113,265 @@ export class Substrate {
 			if (outcome.queued === true) return { transient: outcome.reason ?? "retain-network" };
 			return "permanent";
 		});
+	}
+
+	/**
+	 * Forget memory entries (v1.6 phase 57): mark them out of force in the index (recall, the brief and search stop
+	 * serving them at once), delete their Hindsight documents, and emit ONE `note` with `payload.action: "memory.forget"`
+	 * as the caller's surface. The rows and the ledger stay for audit; see `memory-forget.ts` for the contract.
+	 *
+	 * An internal method (no tool): the rollback path calls it. A plane failure never undoes the index mark, it is reported
+	 * as pending and a re-run of the same request retries only that deletion. The plane delete is chained behind any live
+	 * or replayed retain of the same document, so a forward still in flight cannot land after the delete and bring it back.
+	 * When a mark may have changed a row, the recall and memory generations move, so a cached search, brief or recall
+	 * never serves a forgotten entry. Throws `ForgetUnavailableError` without an index and `ForgetError` for a bad request.
+	 */
+	async memoryForget(request: ForgetRequest, caller: ForgetCaller): Promise<ForgetReport> {
+		const index = this.index;
+		if (index === null) throw new ForgetUnavailableError();
+		const hindsight = hindsightFromEnv();
+		const deletePlane = planeDeleteFor({
+			config: hindsight,
+			vmGuest: this.config.vmGuest,
+			fetchImpl: this.hindsightFetch,
+			timeoutMs: this.config.hindsightBudgets.retainTimeoutMs,
+		});
+		// A mark that throws may still have committed (the statement is one, but the reply can be lost), so it counts as touched.
+		let touched = false;
+		try {
+			return await forgetEntries(
+				{
+					readEntry: (id) => index.readEntry(id),
+					markForgotten: async (ids, marker) => {
+						try {
+							const changed = await index.markMemoryForgotten(ids, marker);
+							if (changed.length > 0) touched = true;
+							return changed;
+						} catch (cause) {
+							touched = true;
+							throw cause;
+						}
+					},
+					documentShared: (entry) => index.memoryDocumentShared(entry),
+					deletePlaneDocument: (entry) => {
+						const documentId = hindsight === null ? null : forgetDocumentId(entry);
+						if (hindsight === null || documentId === null) return deletePlane(entry);
+						return this.chainRetain(`${hindsight.url} ${bankForSurface(hindsight, entry.writer)} ${documentId}`, () => deletePlane(entry));
+					},
+					emit: async (payload, summary, meta) => {
+						const sessionId = caller.session_id ?? payload.session_id;
+						const emitted = await this.emit({
+							surface: caller.surface,
+							kind: "note",
+							summary,
+							actor: payload.actor,
+							...(sessionId !== undefined ? { session_id: sessionId } : {}),
+							payload: { ...payload },
+							idempotency_key: meta.idempotency_key,
+						});
+						// `emit` reports a ledger that is down as `stored: false` instead of throwing; `forgetEntries` reads a throw as "not emitted".
+						if (!emitted.stored) throw new Error(emitted.error ?? "the event ledger did not store the note");
+					},
+					now: () => Date.now(),
+				},
+				request,
+			);
+		} finally {
+			// `bump` never throws: a failed bump marks the generation stale, which the cache reads as a bypass until a bump lands.
+			if (touched) await Promise.all([this.cache.bump(RECALL_GENERATION_KEY), this.cache.bump(MEMORY_GENERATION_KEY)]);
+		}
+	}
+
+	/**
+	 * The entries a rollback to `request.after` should forget: written in the session (and graph) strictly after the
+	 * instant and still in force, over `IndexStore.memoryEntriesCreatedAfter`. Read-only. Feed the ids to `memoryForget`
+	 * in batches of `MAX_FORGET_ENTRIES`, then ask again while `truncated` is true.
+	 */
+	async selectMemoryForRollback(request: RollbackSelectRequest): Promise<RollbackSelection> {
+		const index = this.index;
+		if (index === null) throw new ForgetUnavailableError();
+		return selectForRollback({ entriesCreatedAfter: (sessionId, afterIso, graphId, limit) => index.memoryEntriesCreatedAfter(sessionId, afterIso, graphId, limit) }, request);
+	}
+
+	/** The ledger and devnet reads anchor verification goes through. Built per call; the RPC client is built on first use, so an unconfigured Solana never constructs one. */
+	private anchorVerifyPorts(): AnchorVerifyPorts {
+		let rpc: Rpc | null = null;
+		return {
+			ledger: this.greptime,
+			rowToEvent,
+			rpc: () => {
+				rpc ??= this.rpcOverride ?? createRpc({ url: this.config.solana.rpcUrl, timeoutMs: VERIFY_RPC_TIMEOUT_MS, attempts: VERIFY_RPC_ATTEMPTS, backoffMs: VERIFY_RPC_BACKOFF_MS });
+				return rpc;
+			},
+			solana: { pubkey: this.config.solana.pubkey, problem: this.config.solana.problem },
+			operatorSurfaces: operatorSurfaces(this.config),
+			nowMs: () => Date.now(),
+		};
+	}
+
+	/**
+	 * `checkpoint_verify` (v1.6 phase 59): is this `session.checkpoint` inside an hourly root written to devnet? Exactly one of
+	 * `ckpt_id` and `event_id`. A checkpoint id is searched in the newest 500 notes of the named session, else of the caller's
+	 * own surface in the last seven days (the ledger has no read by payload). Throws `CheckpointVerifyError` for a bad or unknown
+	 * ref; Solana or the ledger being unconfigured is a status (`unverified`), decided before any read. Sends no transaction.
+	 */
+	async checkpointVerify(input: { ckpt_id?: string; event_id?: string; session_id?: string }, caller: { surface: Surface | null }): Promise<CheckpointVerifyToolResult> {
+		const { ckpt_id: ckptId, event_id: eventId } = input;
+		if ((ckptId === undefined) === (eventId === undefined)) {
+			throw new CheckpointVerifyError("invalid-ref", "pass exactly one of ckpt_id or event_id");
+		}
+		const ref = (ckptId ?? eventId) as string;
+		try {
+			return await verifyCheckpointRef(this.anchorVerifyPorts(), ref, {
+				...(input.session_id !== undefined ? { sessionId: input.session_id } : {}),
+				...(caller.surface !== null ? { surface: caller.surface } : {}),
+			});
+		} catch (cause) {
+			if (cause instanceof CheckpointVerifyError && cause.code === "not-found" && ckptId !== undefined) {
+				throw new CheckpointVerifyError(
+					"not-found",
+					`${cause.message}; a checkpoint id is searched in the newest 500 notes of the session named by session_id, else of your own surface in the last 7 days: pass session_id or the checkpoint's event_id`,
+				);
+			}
+			throw cause;
+		}
+	}
+
+	/**
+	 * `memory_verify` (v1.6 phase 60): does the entry still hash to its stored `entry_hash`, and is the ledger event its write rested
+	 * on inside an anchored root? The entry is read the way `memory_search` reads it for this caller: another surface's `agent:` scope
+	 * and an entry past its lifetime under `enforce` (operators excepted) answer as absent, so this tool never reveals what a search
+	 * would not. Throws `MemoryVerifyError` for a bad or unreadable id. `verified` does not prove the source event concerns this entry.
+	 */
+	async memoryVerify(id: string, caller: { surface: string | null; repo?: string; isOperator: boolean }): Promise<MemoryVerifyResult> {
+		const index = this.index;
+		if (index === null) throw new MemoryVerifyError("not_found", "no memory index is configured (SUBSTRATE_PG_URL), so no entry can be read");
+		const reader = { surface: caller.surface ?? "unattributed", repo: normalizeIdentifier(caller.repo) };
+		const ports = this.anchorVerifyPorts();
+		return verifyMemoryRecord(
+			{
+				getEntry: async (entryId) => {
+					const entry = await index.readEntry(entryId);
+					if (entry === null || !visibleToCaller(entry.scope, entry.repo, reader)) return null;
+					if (this.config.memoryExpiry === "enforce" && !caller.isOperator) {
+						const graph = entry.ttl === "graph" ? await index.graphLifetime(entry) : null;
+						if (memoryExpiry(entry, graph).expired) return null;
+					}
+					return entry;
+				},
+				anchorEvidence: (eventId) => anchorEvidenceFor(ports, eventId),
+				anchorTimeoutMs: MEMORY_VERIFY_ANCHOR_TIMEOUT_MS,
+			},
+			id,
+		);
+	}
+
+	/**
+	 * The session's `note` events, newest first, payloads included: the part of a session the rollback tools read. Paged
+	 * backwards by `ts` (inclusive bound, so rows sharing the oldest `ts` are read again and de-duplicated by id) for at
+	 * most {@link ROLLBACK_NOTE_PAGES} pages; `complete` is false when the pages ran out before the session's start.
+	 * Throws when the ledger is not configured or cannot be read.
+	 */
+	private async readSessionNotes(sessionId: string): Promise<SessionNotes> {
+		const ledger = this.greptime;
+		if (ledger === null) throw new Error("GREPTIME_URL is not set");
+		const session = normalizeIdentifier(sessionId);
+		if (session === null) throw new Error("the session id is empty after normalisation");
+		const seen = new Map<string, SubstrateEvent>();
+		let until: string | undefined;
+		for (let page = 0; page < ROLLBACK_NOTE_PAGES; page++) {
+			const rows = await ledger.queryEvents({
+				match: { kind: "note", session_id: session },
+				...(until !== undefined ? { until } : {}),
+				limit: ROLLBACK_NOTE_PAGE_ROWS,
+				order: "desc",
+				includePayload: true,
+			});
+			let fresh = 0;
+			let oldest: string | undefined;
+			for (const row of rows) {
+				const event = rowToEvent(row);
+				oldest = event.ts;
+				if (seen.has(event.id)) continue;
+				seen.set(event.id, event);
+				fresh++;
+			}
+			if (rows.length < ROLLBACK_NOTE_PAGE_ROWS) return { events: [...seen.values()], complete: true };
+			// A full page of rows already seen means more than a page share one `ts`: no bound can move past them.
+			if (fresh === 0 || oldest === undefined) return { events: [...seen.values()], complete: false };
+			until = oldest;
+		}
+		return { events: [...seen.values()], complete: false };
+	}
+
+	/** The ports the rollback tools run on. Built per call; nothing is held between calls. */
+	private sessionRollbackDeps(): SessionRollbackDeps {
+		return {
+			readSessionNotes: (sessionId) => this.readSessionNotes(sessionId),
+			chainHead: async (sessionId) => {
+				const ledger = this.greptime;
+				const session = normalizeIdentifier(sessionId);
+				if (ledger === null || session === null) return null;
+				const rows = await ledger.queryEvents({ match: { session_id: session }, limit: 1, order: "desc" });
+				const head = rows[0];
+				if (head === undefined) return null;
+				const event = rowToEvent(head);
+				return { event_id: event.id, hash: event.hash };
+			},
+			emit: (input) => this.emit(input),
+			verifyAnchor: (eventId, sessionId, surface) => verifyCheckpointRef(this.anchorVerifyPorts(), eventId, { sessionId, surface }),
+			selectEntries: (sessionId, afterIso) => this.selectRollbackEntries(sessionId, afterIso),
+			forget: (request, caller) => this.memoryForget(request, caller),
+			anchorTimeoutMs: DEFAULT_ANCHOR_TIMEOUT_MS,
+		};
+	}
+
+	/**
+	 * The entries a rollback to `afterIso` would forget, with their writers (`selectMemoryForRollback` returns ids only).
+	 * No index means no memory entries exist, so there is nothing to forget: an empty selection, not an error.
+	 */
+	private async selectRollbackEntries(sessionId: string, afterIso: string): Promise<EntrySelection> {
+		const index = this.index;
+		if (index === null) return { entries: [], truncated: false };
+		let found: ReadonlyArray<Pick<MemoryEntry, "id" | "writer">> = [];
+		const selection = await selectForRollback(
+			{
+				entriesCreatedAfter: async (session, after, graphId, limit) => {
+					const result = await index.memoryEntriesCreatedAfter(session, after, graphId, limit);
+					found = result.entries;
+					return result;
+				},
+			},
+			{ session_id: sessionId, after: afterIso, limit: ROLLBACK_SELECTION_LIMIT },
+		);
+		const writers = new Map<string, string>(found.map((entry): [string, string] => [entry.id, String(entry.writer)]));
+		return { entries: selection.entry_ids.map((id) => ({ id, writer: writers.get(id) ?? "" })), truncated: selection.truncated };
+	}
+
+	/**
+	 * `session_checkpoint` (v1.6 phase 61): record one `session.checkpoint` note as the caller's surface, with the ledger
+	 * chain position attached from the ledger. Never throws for a bad request or a ledger outage: both are `{ ok: false }`
+	 * answers. The server touches no worktree and reads no transcript.
+	 */
+	async sessionCheckpoint(input: unknown, caller: RollbackCaller): Promise<CheckpointResult> {
+		return sessionCheckpoint(this.sessionRollbackDeps(), input, caller);
+	}
+
+	/**
+	 * `session_rollback_plan` (v1.6 phase 61, read only): the target checkpoint, the later ones, the anchor verdict (fail
+	 * open), the memory a rollback would forget, and the digest a commit must present.
+	 */
+	async sessionRollbackPlan(input: unknown, caller: RollbackCaller): Promise<PlanResult> {
+		return sessionRollbackPlan(this.sessionRollbackDeps(), input, caller);
+	}
+
+	/**
+	 * `session_rollback_commit` (v1.6 phase 61): record a refused rollback, or commit one the client carried out: re-check
+	 * the plan digest, forget the memory written after the target (reason `rollback`), and append one `session.rollback`
+	 * note. Idempotent by rollback id.
+	 */
+	async sessionRollbackCommit(input: unknown, caller: RollbackCaller): Promise<CommitResult> {
+		return sessionRollbackCommit(this.sessionRollbackDeps(), input, caller);
 	}
 
 	/**
@@ -4534,6 +4855,7 @@ export class Substrate {
 					lightragRetry: this.config.ragMachine,
 					lightragCooling: input.cooling === true,
 					lightragHindsight: async (query) => (await this.recallMemories({ query }, callerSurface)).results,
+					tandem: this.config.contextualRecall.tandem,
 				},
 				question,
 			);
@@ -4542,7 +4864,17 @@ export class Substrate {
 			this.cache.getOrLoad<SearchReply>({
 				klass: "docs-search",
 				surface,
-				args: { question: question.trim().replace(/\s+/g, " ").toLowerCase(), backend: this.config.docsBackend, datasets: names.map((name) => scopedDatasetName(repoId, name)).sort(), pins, degraded: degradedDatasets, repo_id: repoId, planning_hash: planningHash },
+				// The tandem key part only exists while tandem is on: a flag flip never answers from a plain reply stored before it, and the off key is the key it was.
+				args: {
+					question: question.trim().replace(/\s+/g, " ").toLowerCase(),
+					backend: this.config.docsBackend,
+					datasets: names.map((name) => scopedDatasetName(repoId, name)).sort(),
+					pins,
+					degraded: degradedDatasets,
+					repo_id: repoId,
+					planning_hash: planningHash,
+					...(this.config.contextualRecall.tandem.enabled ? { tandem: true } : {}),
+				},
 				generations: [DOCS_GENERATION_KEY],
 				load,
 				store: searchReplyStorable,
