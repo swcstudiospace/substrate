@@ -110,6 +110,14 @@ falls back to Hindsight recall (`lightragFallback`, `docs-search.ts:895-921`):
 - A degraded reply is never cached (`docs-search.ts:144`).
 - If recall finds nothing, the plain degraded reply stands with the LightRAG
   reason.
+- An unconfigured LightRAG plane (`lightrag-not-configured`) takes the same
+  path: Hindsight recall answers when it finds something, else the degraded
+  reply.
+- `docs_lightrag_query` and `POST /docs/lightrag/query` set `degraded: true`
+  and `reason` on a reply served from Hindsight, and `fallback: "hindsight"`
+  on every reply served after a failed, refused or unconfigured query. With no
+  Hindsight chunk, `reason` also records that recall was empty. Their replies
+  keep `backend: "lightrag"`, `graph` and the RAG machine `state`.
 
 A failed LightRAG query does not retry against RAGFlow. RAGFlow serves only
 when it is the selected plane.

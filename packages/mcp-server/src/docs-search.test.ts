@@ -941,6 +941,23 @@ describe("LightRAG search retries and the Hindsight fallback", () => {
 			restore();
 		}
 	});
+
+	test("an unconfigured LightRAG plane is answered from Hindsight when recall finds something, else degraded with its reason", async () => {
+		const deps = {
+			config: null,
+			backend: "lightrag" as const,
+			lightragConfig: null,
+			datasetNames: ["agent-substrate"],
+			emit: async () => ({ stored: false }),
+			surface: "omp" as const,
+		};
+		const served = await searchDocs({ ...deps, lightragHindsight: async () => RECALLED }, "where is the plan?");
+		expect(served).toMatchObject({ degraded: true, backend: "hindsight", fallback: "hindsight", reason: "lightrag-not-configured" });
+		expect(served.chunks.map((citation) => citation.source_url)).toEqual(["hindsight:sub-cursor/mwd_1"]);
+		expect(searchReplyStorable(served)).toBe(false);
+		const nothing = await searchDocs({ ...deps, lightragHindsight: async () => [] }, "where is the plan?");
+		expect(nothing).toEqual({ chunks: [], untrusted: UNTRUSTED_DOCS_NOTICE, degraded: true, reason: "lightrag-not-configured" });
+	});
 });
 
 describe("search graph metadata (LightRAG path)", () => {

@@ -1242,6 +1242,115 @@ describe("routes", () => {
 				await stop();
 			}
 		});
+
+		function recallableOmp(): HindsightFake {
+			const hindsight = new HindsightFake();
+			hindsight.seed("sub-omp", [{ id: "m1", text: "the plan lives in PLAN.md", document_id: "mwd_1", tags: ["omp"], metadata: {}, score: 0.9 }]);
+			return hindsight;
+		}
+
+		/** Recall reads the Hindsight variables at call time, so they are set only around the requests made inside `run`. */
+		async function withHindsightEnv<T>(run: () => Promise<T>): Promise<T> {
+			const names = ["HINDSIGHT_URL", "HINDSIGHT_API_KEY", "HINDSIGHT_BANKS"] as const;
+			const saved = names.map((name) => [name, process.env[name]] as const);
+			process.env.HINDSIGHT_URL = "http://fake";
+			process.env.HINDSIGHT_API_KEY = "test-bearer";
+			process.env.HINDSIGHT_BANKS = "sub-omp";
+			try {
+				return await run();
+			} finally {
+				for (const [name, value] of saved) {
+					if (value === undefined) delete process.env[name];
+					else process.env[name] = value;
+				}
+			}
+		}
+
+		async function jsonOf(response: Promise<Response>): Promise<Record<string, unknown>> {
+			return (await (await response).json()) as Record<string, unknown>;
+		}
+
+		test("a LightRAG failure answered from Hindsight is degraded on both search routes, with the LightRAG failure as the reason", async () => {
+			globalThis.fetch = stubLightrag(async () => new Response("upstream down", { status: 500 }));
+			const hindsight = recallableOmp();
+			const { greptime } = ledger();
+			const { post, stop } = await serve(greptime, LIGHTRAG_ENV, { hindsightFetch: hindsight.fetch });
+			try {
+				const search = await withHindsightEnv(() => jsonOf(post("/docs/search", { question: "where is the plan?" }, auth)));
+				resetRagMachine();
+				const lightrag = await withHindsightEnv(() => jsonOf(post("/docs/lightrag/query", { question: "where is the plan?" }, auth)));
+				expect(search).toMatchObject({ degraded: true, fallback: "hindsight", reason: "lightrag 500" });
+				expect(lightrag).toMatchObject({ degraded: true, fallback: "hindsight", reason: "lightrag 500" });
+				expect(hindsight.recalls()).toHaveLength(2);
+			} finally {
+				await stop();
+			}
+		});
+
+		test("with the RAG breaker open, a Hindsight answer is degraded on both routes and LightRAG is not asked", async () => {
+			let planeCalls = 0;
+			globalThis.fetch = stubLightrag(async () => {
+				planeCalls += 1;
+				return new Response("upstream down", { status: 500 });
+			});
+			const hindsight = recallableOmp();
+			const { greptime } = ledger();
+			// A 60 s cooldown: it cannot elapse during the test, so ERROR holds until the assertions say otherwise.
+			const { post, get, stop } = await serve(greptime, { ...LIGHTRAG_ENV, SUBSTRATE_RAG_HALF_OPEN_MS: "60000" }, { hindsightFetch: hindsight.fetch });
+			try {
+				await withHindsightEnv(async () => {
+					for (const question of ["trip one", "trip two", "trip three"]) await post("/docs/lightrag/query", { question }, auth);
+				});
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+				const before = planeCalls;
+				const lightrag = await withHindsightEnv(() => jsonOf(post("/docs/lightrag/query", { question: "asked inside the cooldown" }, auth)));
+				const search = await withHindsightEnv(() => jsonOf(post("/docs/search", { question: "asked inside the cooldown" }, auth)));
+				expect(planeCalls).toBe(before);
+				expect(lightrag).toMatchObject({ degraded: true, fallback: "hindsight", reason: "rag breaker open" });
+				expect(search).toMatchObject({ degraded: true, fallback: "hindsight", reason: "rag breaker open" });
+			} finally {
+				await stop();
+			}
+		});
+
+		test("an unconfigured LightRAG plane is answered from Hindsight on both search routes", async () => {
+			const hindsight = recallableOmp();
+			const { greptime } = ledger();
+			// The backend is named but no LIGHTRAG_URL is set, so the plane is not configured.
+			const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", SUBSTRATE_DOCS_BACKEND: "lightrag" }, { hindsightFetch: hindsight.fetch });
+			try {
+				const search = await withHindsightEnv(() => jsonOf(post("/docs/search", { question: "where is the plan?" }, auth)));
+				resetRagMachine();
+				const lightrag = await withHindsightEnv(() => jsonOf(post("/docs/lightrag/query", { question: "where is the plan?" }, auth)));
+				expect(search).toMatchObject({ degraded: true, fallback: "hindsight", reason: "lightrag-not-configured" });
+				expect(lightrag).toMatchObject({ degraded: true, fallback: "hindsight", reason: "lightrag-not-configured" });
+			} finally {
+				await stop();
+			}
+		});
+
+		test("a degraded LightRAG reply is never replayed: its idempotency key asks the plane again, and a served answer replays", async () => {
+			let planeCalls = 0;
+			let healthy = false;
+			globalThis.fetch = stubLightrag(async () => {
+				planeCalls += 1;
+				return healthy ? Response.json(LIGHTRAG_ANSWER) : new Response("upstream down", { status: 500 });
+			});
+			const { greptime } = ledger();
+			const { post, stop } = await serve(greptime, LIGHTRAG_ENV);
+			try {
+				const request = { question: "replay me", idempotency_key: "replay-1" };
+				expect(await jsonOf(post("/docs/lightrag/query", request, auth))).toMatchObject({ degraded: true });
+				healthy = true;
+				const served = await jsonOf(post("/docs/lightrag/query", request, auth));
+				expect(served).toMatchObject({ backend: "lightrag", chunks: [expect.objectContaining({ content: "A LightRAG chunk." })] });
+				expect(served.degraded).toBeUndefined();
+				expect(await jsonOf(post("/docs/lightrag/query", request, auth))).toMatchObject({ backend: "lightrag" });
+				expect(planeCalls).toBe(2);
+			} finally {
+				await stop();
+			}
+		});
 	});
 });
 
