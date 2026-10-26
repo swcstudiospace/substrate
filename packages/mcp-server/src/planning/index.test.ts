@@ -92,6 +92,13 @@ describe("buildPlanningIndex: determinism and shape", () => {
 		expect(context && "plan" in context).toBe(false);
 	});
 
+	test("frontmatter cannot move a document to another phase: a phase 52 directory decides, whatever its frontmatter says", async () => {
+		const path = ".planning/phases/52-planning-awareness-core/52-02-PLAN.md";
+		const { index } = await indexOf({ ...BASE, [`${PHASE}/52-02-PLAN.md`]: "---\nphase: 53\n---\n# Plan\n" });
+		const record = indexRecords(index).find((entry) => entry.path === path);
+		expect(record).toMatchObject({ kind: "phase", phase: "52", frontmatter: { phase: 53 } });
+	});
+
 	test("no file body reaches the index: the marker in ROADMAP's body is absent from the whole index", async () => {
 		const { index } = await indexOf(BASE);
 		expect(JSON.stringify(index)).not.toContain(SECRET_BODY);

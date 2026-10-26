@@ -494,6 +494,11 @@ function twoCheckouts(): FakeTree {
 	});
 }
 
+/** The two checkouts of `twoCheckouts`, the one with the smaller session id first: it is the announcer of their conflicts. */
+function announcerFirst(tree: FakeTree): [string, string] {
+	return planningSessionId(tree, CHECKOUT_A) < planningSessionId(tree, CHECKOUT_B) ? [CHECKOUT_A, CHECKOUT_B] : [CHECKOUT_B, CHECKOUT_A];
+}
+
 describe("planning reports, watcher gaps and conflicts on the write path (phase 53, SOTA-09)", () => {
 	test("a complete change stamps this checkout's report into its heartbeat, and another reader sees its plan ids", async () => {
 		const tree = new FakeTree({ ...GIT, [PLAN]: "---\nplan: 52-01\n---\nBODY\n" });
@@ -560,6 +565,7 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		backend.clockMs = SERVER_NOW + 3_000;
 		tree.deniedListings.delete(`${CHECKOUT_A}/.planning/phases/${PHASE_54}`);
 		await a.scan();
+		await b.scan();
 		expect(conflictEventsOf(attempts)).toHaveLength(1);
 		expect(conflictEventsOf(attempts)[0]?.payload).toMatchObject({ kind: "planning.conflict", key: { by: "phase", phase: "53" } });
 	});
@@ -756,7 +762,7 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		expect(storedRecord(backend, tree, TREE_ROOT).touched).toEqual(expect.arrayContaining(firstTimes));
 	});
 
-	test("two checkouts whose origins differ only in letter case share one conflict, and each announces it (greptile case thread)", async () => {
+	test("two checkouts whose origins differ only in letter case share one conflict, and exactly one announces it (greptile case thread)", async () => {
 		const tree = new FakeTree({
 			...checkoutOf(CHECKOUT_A, "gsd/p53-a", { [phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md")]: "# context\n" }, "SomeOrg/Repo"),
 			...checkoutOf(CHECKOUT_B, "gsd/p53-b", { [phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md")]: "# context\n" }, "someorg/repo"),
@@ -776,12 +782,11 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 
 		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b\n");
 		await b.scan();
+		await a.scan();
 		expect(conflictEventsOf(attempts)).toHaveLength(1);
 
-		await a.scan();
-		expect(conflictEventsOf(attempts)).toHaveLength(2);
+		await b.scan();
 		expect(conflictEventsOf(attempts)).toEqual([
-			expect.objectContaining({ payload: expect.objectContaining({ kind: "planning.conflict", key: { by: "phase", phase: "53" } }) }),
 			expect.objectContaining({ payload: expect.objectContaining({ kind: "planning.conflict", key: { by: "phase", phase: "53" } }) }),
 		]);
 	});
@@ -844,6 +849,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b\n");
 		await b.scan();
 		await b.scan();
+		await a.scan();
 
 		const sessionIds = [planningSessionId(tree, CHECKOUT_A), planningSessionId(tree, CHECKOUT_B)].sort();
 		expect(conflictEventsOf(attempts)).toEqual([
@@ -943,6 +949,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		await b.scan();
 		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a\n");
 		await a.scan();
+		await b.scan();
 		expect(conflictEventsOf(attempts)).toHaveLength(1);
 		const bRecord = backend.values.get(`${PRESENCE_KEY_PREFIX}${planningSessionId(tree, CHECKOUT_B)}`);
 
@@ -975,6 +982,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		await a.scan();
 		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_54, "54-PLAN.md"), "---\nplan: shared-plan\n---\nBODY, edited\n");
 		await b.scan();
+		await a.scan();
 
 		expect(conflictEventsOf(attempts)).toEqual([
 			expect.objectContaining({ payload: expect.objectContaining({ kind: "planning.conflict", key: { by: "plan", plan: "shared-plan" }, phases: ["53", "54"] }) }),
@@ -1002,32 +1010,122 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		const backend = new RecordingPresenceBackend();
 		backend.clockMs = SERVER_NOW;
 		const presence = new DragonflyPresenceStore(backend);
+		const [announcer, other] = announcerFirst(tree);
 		const attempts: EventInput[] = [];
-		const a = announcingObserver(tree, presence, attempts, true, CHECKOUT_A);
-		await a.scan();
-		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a\n");
-		await a.scan();
-		const refusing = announcingObserver(tree, presence, attempts, false, CHECKOUT_B);
+		const refusing = announcingObserver(tree, presence, attempts, false, announcer);
+		const second = announcingObserver(tree, presence, attempts, true, other);
 		await refusing.scan();
-		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b\n");
+		await second.scan();
+		tree.setContent(phaseDoc(announcer, PHASE_53, "53-CONTEXT.md"), "# context, a\n");
+		await refusing.scan();
+		tree.setContent(phaseDoc(other, PHASE_53, "53-CONTEXT.md"), "# context, b\n");
+		await second.scan();
 		await refusing.scan();
 		await refusing.scan();
 		expect(conflictEventsOf(attempts)).toHaveLength(2);
 
-		const accepting = announcingObserver(tree, presence, attempts, true, CHECKOUT_B);
+		const accepting = announcingObserver(tree, presence, attempts, true, announcer);
 		await accepting.scan();
 		await accepting.scan();
 		expect(conflictEventsOf(attempts)).toHaveLength(3);
 
 		backend.clockMs = SERVER_NOW + 100_000;
 		await accepting.scan();
+		await second.scan();
 		expect(conflictEventsOf(attempts)).toHaveLength(3);
 
-		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a again\n");
-		await a.scan();
-		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, b again\n");
+		tree.setContent(phaseDoc(announcer, PHASE_53, "53-CONTEXT.md"), "# context, a again\n");
+		await accepting.scan();
+		tree.setContent(phaseDoc(other, PHASE_53, "53-CONTEXT.md"), "# context, b again\n");
+		await second.scan();
 		await accepting.scan();
 		expect(conflictEventsOf(attempts)).toHaveLength(4);
+	});
+
+	test("of two observers over one conflict, only the one with the smallest session id announces it, once, however often both scan", async () => {
+		const tree = twoCheckouts();
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		const [announcer, other] = announcerFirst(tree);
+		const announced: EventInput[] = [];
+		const silent: EventInput[] = [];
+		const a = announcingObserver(tree, presence, announced, true, announcer);
+		const b = announcingObserver(tree, presence, silent, true, other);
+		await a.scan();
+		await b.scan();
+
+		tree.setContent(phaseDoc(announcer, PHASE_53, "53-CONTEXT.md"), "# context, announcer\n");
+		await a.scan();
+		tree.setContent(phaseDoc(other, PHASE_53, "53-CONTEXT.md"), "# context, other\n");
+		await b.scan();
+		await a.scan();
+		await b.scan();
+		await a.scan();
+
+		expect(conflictEventsOf(announced)).toHaveLength(1);
+		expect(conflictEventsOf(silent)).toEqual([]);
+	});
+
+	test("the announcer announces a conflict again once it clears and returns, and the other observer announces neither time", async () => {
+		const tree = twoCheckouts();
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		const [announcer, other] = announcerFirst(tree);
+		const announced: EventInput[] = [];
+		const silent: EventInput[] = [];
+		const a = announcingObserver(tree, presence, announced, true, announcer);
+		const b = announcingObserver(tree, presence, silent, true, other);
+		await a.scan();
+		await b.scan();
+
+		tree.setContent(phaseDoc(announcer, PHASE_53, "53-CONTEXT.md"), "# context, announcer\n");
+		await a.scan();
+		tree.setContent(phaseDoc(other, PHASE_53, "53-CONTEXT.md"), "# context, other\n");
+		await b.scan();
+		await a.scan();
+		expect(conflictEventsOf(announced)).toHaveLength(1);
+
+		backend.clockMs = SERVER_NOW + 100_000;
+		await a.scan();
+		await b.scan();
+		expect(conflictEventsOf(announced)).toHaveLength(1);
+
+		tree.setContent(phaseDoc(announcer, PHASE_53, "53-CONTEXT.md"), "# context, announcer again\n");
+		await a.scan();
+		tree.setContent(phaseDoc(other, PHASE_53, "53-CONTEXT.md"), "# context, other again\n");
+		await b.scan();
+		await a.scan();
+		expect(conflictEventsOf(announced)).toHaveLength(2);
+		expect(conflictEventsOf(silent)).toEqual([]);
+	});
+
+	test("an observer whose session is not the smallest emits nothing, though its own scan sees the conflict", async () => {
+		const tree = twoCheckouts();
+		const backend = new RecordingPresenceBackend();
+		backend.clockMs = SERVER_NOW;
+		const presence = new DragonflyPresenceStore(backend);
+		const [announcer, other] = announcerFirst(tree);
+		const announced: EventInput[] = [];
+		const silent: EventInput[] = [];
+		const a = announcingObserver(tree, presence, announced, true, announcer);
+		const b = announcingObserver(tree, presence, silent, true, other);
+		await a.scan();
+		await b.scan();
+
+		tree.setContent(phaseDoc(announcer, PHASE_53, "53-CONTEXT.md"), "# context, announcer\n");
+		await a.scan();
+		tree.setContent(phaseDoc(other, PHASE_53, "53-CONTEXT.md"), "# context, other\n");
+		await b.scan();
+
+		expect(conflictEventsOf(silent)).toEqual([]);
+		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({
+			state: "ok",
+			conflicts: [{ status: "open", key: { by: "phase", phase: "53" } }],
+		});
+		await a.scan();
+		expect(conflictEventsOf(announced)).toHaveLength(1);
 	});
 
 	test("two checkouts of unrelated repositories that touch the same phase number do not conflict (greptile repo thread)", async () => {
@@ -1109,6 +1207,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		tree.denied.delete(`${CHECKOUT_A}/.git/config`);
 		backend.clockMs = SERVER_NOW + 1_000;
 		expect(await a.scan()).toMatchObject({ state: "observed", heartbeat: { state: "written" } });
+		await b.scan();
 		expect(storedRecord(backend, tree, CHECKOUT_A)).toMatchObject({ repo: REPO, touched: [{ phase: "53", plan: null, observedAtMs: SERVER_NOW }] });
 		expect(conflictEventsOf(attempts)).toHaveLength(1);
 	});
@@ -1127,6 +1226,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		await b.scan();
 		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, a\n");
 		await a.scan();
+		await b.scan();
 		expect(conflictEventsOf(attempts)).toHaveLength(1);
 
 		// 255 more sessions sort before the two conflicting ones and push the listing past its bound: one of them is not listed.
@@ -1135,10 +1235,12 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 			backend.values.set(`${PRESENCE_KEY_PREFIX}${filler(n)}`, JSON.stringify({ sessionId: filler(n), worktree: `/work/${filler(n)}`, branch: "gsd/aa", lastHeartbeatMs: SERVER_NOW }));
 		}
 		await a.scan();
+		await b.scan();
 		expect(conflictEventsOf(attempts)).toHaveLength(1);
 
 		for (let n = 0; n < 255; n += 1) backend.values.delete(`${PRESENCE_KEY_PREFIX}${filler(n)}`);
 		await a.scan();
+		await b.scan();
 		expect(conflictEventsOf(attempts)).toHaveLength(1);
 	});
 });

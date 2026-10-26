@@ -20,9 +20,10 @@
  * not cut, since a cut list claims absences. The report stays `report-limit` until the claims that did not fit have left the
  * freshness window, which the overflowing change's observation time dates.
  *
- * Conflicts: after each scan that can read the server clock, the observer lists the presence snapshot, detects conflicts
- * within one repository (`conflicts.ts`) and announces each one of its own repository that is not already open, once. A
- * conflict that clears and returns is announced again. A conflict the ledger did not store is retried on the next scan.
+ * Conflicts: after each scan that can read the server clock, the observer lists the presence snapshot and detects conflicts
+ * within one repository (`conflicts.ts`). Every observer reads the same snapshot, so the smallest session of a conflict alone
+ * announces it, once, when it is not already open. A conflict that clears and returns is announced again. A conflict the ledger
+ * did not store is retried on the next scan.
  *
  * Scans never overlap: a tick that arrives during a scan shares that scan rather than starting another. A failure is reported
  * on stderr when it appears or changes, and once more when the scans succeed again. Shutdown waits for a scan in flight.
@@ -253,7 +254,7 @@ export class PlanningObserver {
 		}
 		const sinceChange = sinceLastScan !== null && sinceLastScan.complete && changesIn(sinceLastScan) > 0;
 		const heartbeat = await this.heartbeat(root, sinceChange || gapMoved, ttlMs, repo, nowMs);
-		await this.announce(repo, ttlMs);
+		await this.announce(root, repo, ttlMs);
 		return { state: "observed", outcome, heartbeat };
 	}
 
@@ -398,13 +399,16 @@ export class PlanningObserver {
 	}
 
 	/**
-	 * Announces each conflict of this checkout's repository that is not already open, once. A conflict that is no longer detected
-	 * leaves the open set, so its return is announced again. A conflict the ledger did not store stays out of the set, so the next
-	 * scan tries again.
+	 * Announces each conflict of this checkout's repository that is not already open, once, when this checkout is the
+	 * conflict's announcer: the session with the smallest id among its sessions. Every observer reads the same snapshot, so
+	 * exactly one of them announces a conflict, with no coordination. A conflict that is no longer detected leaves the open
+	 * set, so its return is announced again. A conflict the ledger did not store stays out of the set, so the next scan tries
+	 * again.
 	 */
-	private async announce(repo: RepoLookup, ttlMs: number): Promise<void> {
+	private async announce(root: string, repo: RepoLookup, ttlMs: number): Promise<void> {
 		const presence = this.deps.presence;
 		if (presence === null) return;
+		const sessionId = planningSessionId(this.deps.fs, root);
 		const listing = await presence.listWithin(PRESENCE_MAX_SESSIONS).catch(() => null);
 		if (listing === null) return;
 		// The clock is read after the listing, which takes time: a peer that passed its freshness window while the scan ran is expired.
@@ -415,6 +419,9 @@ export class PlanningObserver {
 		const next = new Set<string>();
 		for (const conflict of detected.conflicts) {
 			if (repoName === null || repoKey(conflict.repo) !== repoKey(repoName)) continue;
+			// The announcer is the smallest session of the conflict (`sessionIds` is sorted). Known limit: when that session has
+			// no running observer, no observer announces the conflict. This is accepted, and it is recorded in the PR body.
+			if (conflict.sessionIds[0] !== sessionId) continue;
 			const signature = conflictSignature(conflict);
 			if (this.openConflicts.has(signature)) {
 				next.add(signature);
