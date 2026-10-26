@@ -3,11 +3,17 @@ phase: 52-planning-awareness-core
 verified: 2026-10-22
 status: passed
 score: 6 of 6 criteria PASS
-verified_on: gsd/p52-wiring at 01894695c5b20cbb5952aad5a6c3038a30637ed8 (wiring); core gsd/p52-planning-core at e13593834c67155ff9b041827b88855c1b82440b, whose tree equals 8a9b1bf (tree 6bf463576b7b063226b337cdbe80c41837800b7d); core history holds a stray merge of wiring, so the core work is checked by tree
+verified_on: gsd/p52-wiring at b7d6768 (re-verified 2026-10-26; prior wiring verification at 01894695c5b20cbb5952aad5a6c3038a30637ed8); core gsd/p52-planning-core at e13593834c67155ff9b041827b88855c1b82440b, whose tree equals 8a9b1bf (tree 6bf463576b7b063226b337cdbe80c41837800b7d); core history holds a stray merge of wiring, so the core work is checked by tree
 covered_files: ["packages/mcp-server/src/planning/index.ts", "packages/mcp-server/src/planning/index.test.ts", "packages/mcp-server/src/planning/fs.ts", "packages/mcp-server/src/planning/tree.fixtures.ts", "packages/mcp-server/src/planning/diff.ts", "packages/mcp-server/src/planning/events.ts", "packages/mcp-server/src/planning/events.test.ts", "packages/mcp-server/src/planning/read.ts", "packages/mcp-server/src/planning/read.test.ts", "packages/mcp-server/src/planning/observer.ts", "packages/mcp-server/src/planning/observer.test.ts", "packages/mcp-server/src/planning/checkout.ts", "packages/mcp-server/src/planning/checkout.test.ts", "packages/mcp-server/src/planning/config.ts", "packages/mcp-server/src/planning/presence.ts", "packages/mcp-server/src/planning/presence-dragonfly.ts", "packages/mcp-server/src/planning/presence-client.ts", "packages/mcp-server/src/planning-mcp.test.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/index.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/event-sources.ts", "packages/audit/src/policy.ts", "docs/config-reference.md", "docs/event-vocabulary.md", "docs/data-planes.md", ".env.example"]
 ---
 
 # 52-VERIFICATION: Planning index, session presence and change diffs (file-first)
+
+## Re-verification (2026-10-26)
+
+- Head: gsd/p52-wiring at b7d6768. `bun run verify` green at that head: 6134 pass, 0 fail. The 177 Postgres-only tests are skipped locally and run in CI.
+- Since the prior wiring verification: owed-heartbeat expiry on the server clock (9cf0c6d), the preflight wiring for planning/config.ts (c89275f), and undated owed writes never written as active, with the preflight skip for releases that predate planning/config.ts (b7d6768). Their tests are in the gate run above.
+- The residuals in the verification below are unchanged.
 
 ## Gates
 
