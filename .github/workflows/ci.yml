@@ -79,6 +79,9 @@ jobs:
 
       - name: Set up uv (pinned)
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        env:
+          # The Omega runner's tool cache (/opt/hostedtoolcache) is not writable by this job, so setup-uv fails with EACCES.
+          RUNNER_TOOL_CACHE: ${{ runner.temp }}/tool-cache
         with:
           version: "0.13.4"
 
@@ -150,10 +153,9 @@ jobs:
 
   lint-report:
     name: Lint (Biome, report-only)
-    # Report-only: findings never block a pull request. `continue-on-error` keeps this job advisory
-    # until the baseline is triaged; making it blocking is a separate, reviewed change.
+    # Report-only: findings never block a pull request. The Lint step carries `continue-on-error`, so the check stays green
+    # and the findings are reported in the log; making it blocking is a separate, reviewed change.
     if: vars.CI_ENABLED == 'true' && github.event_name != 'schedule' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    continue-on-error: true
     runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 10
     steps:
@@ -171,4 +173,5 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Lint (report only; findings do not fail the job)
+        continue-on-error: true
         run: bunx biome lint --reporter=summary .
