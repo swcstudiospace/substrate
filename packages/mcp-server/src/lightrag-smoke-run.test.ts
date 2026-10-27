@@ -482,6 +482,30 @@ describe("runSmoke: health", () => {
 		expect(result.report.version).toBeNull();
 		expect(statusOf(result, "health")?.reason).toBe("healthy, core version not reported");
 	});
+
+	test("a version carrying the URL, the host or the key never reaches the JSON or the human output", async () => {
+		for (const version of [`1.5.7 ${URL_BASE}`, "1.5.7-lightrag.test", KEY, `v${KEY}`, "x".repeat(41), "1.5.7\nnext line"]) {
+			const fake = fakeServer({ apiKey: KEY });
+			const hostile: FetchLike = async (input, init) =>
+				String(input).endsWith("/health") ? json({ status: "healthy", core_version: version }) : fake.fetch(input, init);
+			const { deps } = harness({ apiKey: KEY }, { fetchImpl: hostile });
+			const result = await runSmoke(deps);
+			expect(result.report.version).toBeNull();
+			expect(statusOf(result, "health")?.reason).toBe("healthy, core version not reported");
+			for (const text of [JSON.stringify(result.report), formatSmoke(result)]) {
+				expect(text).not.toContain(KEY);
+				expect(text).not.toContain("lightrag.test");
+				expect(text).not.toContain("xxxxxxxx");
+			}
+		}
+	});
+
+	test("a plain version string is kept", async () => {
+		const { deps } = harness({ apiKey: KEY, version: "1.5.7+build.3-rc1" });
+		const result = await runSmoke(deps);
+		expect(result.report.version).toBe("1.5.7+build.3-rc1");
+		expect(formatSmoke(result)).toContain("(core 1.5.7+build.3-rc1)");
+	});
 });
 
 describe("main", () => {

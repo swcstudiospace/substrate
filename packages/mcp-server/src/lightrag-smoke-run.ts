@@ -297,8 +297,11 @@ export async function runSmoke(deps: SmokeDeps): Promise<SmokeResult> {
 				if (reason.startsWith("lightrag unreachable") || reason === "lightrag circuit open") state.unreachable = true;
 				return fail(reason);
 			}
-			state.version = probe.version ?? null;
-			return pass(`healthy, ${probe.version !== undefined ? `core ${probe.version}` : "core version not reported"}`);
+			// The version is server-provided text that reaches the report: a strict version shape that survives the scrub unchanged, else null.
+			const reported = probe.version;
+			const version = typeof reported === "string" && /^[\w.+-]{1,40}$/.test(reported) && scrub(reported) === reported ? reported : null;
+			state.version = version;
+			return pass(`healthy, ${version !== null ? `core ${version}` : "core version not reported"}`);
 		}),
 	);
 
