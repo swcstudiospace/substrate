@@ -1,0 +1,57 @@
+name: Hindsight lag
+
+# Weekly watcher: is the pinned Hindsight (.github/hindsight-pin.json) falling behind the upstream
+# stable releases? `scripts/hindsight-lag.ts` keeps ONE open issue labelled `hindsight-lag` while a
+# newer stable release has existed for `lag_alert_days`, and closes it once the pin is current. It
+# opens no pull request and touches nothing on Railway: an upgrade is a manual, operator-only act
+# (docs/runbooks/hindsight-upgrade.md, docs/ci.md).
+#
+# Same conventions as ci.yml: the Omega CI runner pool ([self-hosted, linux, x64, omega-ci]), never
+# GitHub-hosted runners, and CI_ENABLED as the switch (unset: the job is skipped, which GitHub reports
+# as a skipped, not failed, check). The only secret is the run's own GITHUB_TOKEN, limited to reading
+# the repository and writing issues. The workflow has no pull_request trigger, so a fork's code never
+# reaches the runner.
+#
+# The last step runs only when an earlier one failed and opens or updates one issue labelled
+# `hindsight-lag-failed`, so a broken watcher is itself visible. A later successful run closes it.
+on:
+  schedule:
+    - cron: "43 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: hindsight-lag
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  lag:
+    name: Compare the pin with upstream
+    if: vars.CI_ENABLED == 'true'
+    runs-on: [self-hosted, linux, x64, omega-ci]
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        with:
+          bun-version: "1.4.0"
+
+      # The script imports nothing outside Bun and node:path, so there is no install step.
+      - name: Compare the pin with the upstream stable releases and sync the one issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bun scripts/hindsight-lag.ts --repo "$GITHUB_REPOSITORY" --token-env GITHUB_TOKEN
+
+      - name: Report a failed watcher run in its own issue
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bun scripts/hindsight-lag.ts --report-failure --repo "$GITHUB_REPOSITORY" --token-env GITHUB_TOKEN --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
