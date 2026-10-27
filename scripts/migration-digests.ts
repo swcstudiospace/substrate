@@ -40,6 +40,34 @@ export function migrationDigests(steps: ReadonlyArray<Pick<MigrationStep, "versi
 	return digests;
 }
 
+const isIdentChar = (char: string | undefined): boolean => char !== undefined && /[\w$]/.test(char);
+
+/**
+ * Where the `'…'` string or `"…"` identifier that opens at `i` ends (the index after its closing quote), or `-1` when it
+ * never closes. `''` / `""` is an escaped quote; `\` escapes in an `E'…'` string.
+ */
+function quotedEnd(sql: string, i: number): number {
+	const char = sql[i] as string;
+	const backslashEscapes = char === "'" && (sql[i - 1] === "E" || sql[i - 1] === "e") && !isIdentChar(sql[i - 2]);
+	let j = i + 1;
+	while (j < sql.length) {
+		if (backslashEscapes && sql[j] === "\\") j += 2;
+		else if (sql[j] === char && sql[j + 1] === char) j += 2;
+		else if (sql[j] === char) return j + 1;
+		else j += 1;
+	}
+	return -1;
+}
+
+/** Where the dollar-quoted body that opens at `i` ends (to the end of `sql` when unterminated), or `null` when `$` at `i` opens none (`$1`, a `$` inside a word). */
+function dollarQuotedEnd(sql: string, i: number): number | null {
+	if (isIdentChar(sql[i - 1])) return null;
+	const tag = /^\$(?:[A-Za-z_]\w*)?\$/.exec(sql.slice(i, i + 64))?.[0];
+	if (tag === undefined) return null;
+	const end = sql.indexOf(tag, i + tag.length);
+	return end === -1 ? sql.length : end + tag.length;
+}
+
 /**
  * `sql` without `--` line comments and C-style block comments, each replaced by one space. Comment markers inside a
  * single-quoted string (`''` is an escaped quote; `\` escapes in an `E'…'` string), a double-quoted identifier or a
@@ -48,7 +76,6 @@ export function migrationDigests(steps: ReadonlyArray<Pick<MigrationStep, "versi
  * digest (`statementsOf`) does not call this, so it cannot change any step's digest.
  */
 export function stripSqlComments(sql: string): string {
-	const isIdent = (char: string | undefined): boolean => char !== undefined && /[\w$]/.test(char);
 	let out = "";
 	let i = 0;
 	while (i < sql.length) {
@@ -68,27 +95,18 @@ export function stripSqlComments(sql: string): string {
 				i = end + 2;
 			}
 		} else if (char === "'" || char === '"') {
-			const backslashEscapes = char === "'" && (sql[i - 1] === "E" || sql[i - 1] === "e") && !isIdent(sql[i - 2]);
-			let j = i + 1;
-			while (j < sql.length) {
-				if (backslashEscapes && sql[j] === "\\") j += 2;
-				else if (sql[j] === char && sql[j + 1] === char) j += 2;
-				else if (sql[j] === char) break;
-				else j += 1;
-			}
-			const stop = Math.min(j + 1, sql.length);
+			const end = quotedEnd(sql, i);
+			const stop = end === -1 ? sql.length : end;
 			out += sql.slice(i, stop);
 			i = stop;
-		} else if (char === "$" && !isIdent(sql[i - 1])) {
-			const tag = /^\$(?:[A-Za-z_]\w*)?\$/.exec(sql.slice(i, i + 64))?.[0];
-			if (tag === undefined) {
+		} else if (char === "$") {
+			const end = dollarQuotedEnd(sql, i);
+			if (end === null) {
 				out += char;
 				i += 1;
 			} else {
-				const end = sql.indexOf(tag, i + tag.length);
-				const stop = end === -1 ? sql.length : end + tag.length;
-				out += sql.slice(i, stop);
-				i = stop;
+				out += sql.slice(i, end);
+				i = end;
 			}
 		} else {
 			out += char;
@@ -98,9 +116,45 @@ export function stripSqlComments(sql: string): string {
 	return out;
 }
 
-/** The statements of `sql` for analysis: comments removed, whitespace collapsed, lower-cased, no trailing `;`. */
+/**
+ * The statements of comment-free `sql` for analysis: split on a `;` only outside a string literal, a quoted identifier and
+ * a dollar-quoted body, with the CONTENTS of every literal and quoted identifier blanked (the quotes stay), so a `;`, a
+ * `--` or a word such as `rename` inside a default value is neither a statement boundary nor a keyword. A dollar-quoted
+ * body (a `DO` block, a function body) stays as code, so the checks still see what it runs. An unterminated quote is
+ * left as it is, so the analysis sees the rest of the text. Each statement is trimmed, empty ones dropped.
+ */
+function maskedStatementsOf(sql: string): string[] {
+	const statements: string[] = [];
+	let current = "";
+	let i = 0;
+	while (i < sql.length) {
+		const char = sql[i] as string;
+		const end = char === "'" || char === '"' ? quotedEnd(sql, i) : char === "$" ? dollarQuotedEnd(sql, i) : null;
+		if (char === ";") {
+			statements.push(current);
+			current = "";
+			i += 1;
+		} else if (end === null || end === -1) {
+			current += char;
+			i += 1;
+		} else if (char === "$") {
+			current += sql.slice(i, end);
+			i = end;
+		} else {
+			current += `${char}${" ".repeat(end - i - 2)}${char}`;
+			i = end;
+		}
+	}
+	statements.push(current);
+	return statements.map((statement) => statement.trim()).filter((statement) => statement.length > 0);
+}
+
+/**
+ * The statements of `sql` for analysis: comments removed, split outside literals, literal contents blanked, whitespace
+ * collapsed, lower-cased, no trailing `;`.
+ */
 export function normalizedStatements(sql: string): string[] {
-	return statementsOf(stripSqlComments(sql)).map((statement) => statement.replace(/\s+/g, " ").trim().toLowerCase());
+	return maskedStatementsOf(stripSqlComments(sql)).map((statement) => statement.replace(/\s+/g, " ").trim().toLowerCase());
 }
 
 /** Splits at commas that are not inside parentheses: the clauses of one `alter table`. */

@@ -382,11 +382,42 @@ describe("stripSqlComments is quote-aware", () => {
 	test("a quoted '--' no longer hides a following destructive statement (the real-world bypass)", () => {
 		const sql = "alter table graph_index add column if not exists label text default '--'; delete from memory_entries";
 		expect(normalizedStatements(sql)).toEqual([
-			"alter table graph_index add column if not exists label text default '--'",
+			"alter table graph_index add column if not exists label text default ' '",
 			"delete from memory_entries",
 		]);
 		const problems = checkMigrationSteps([step(1, sql)], allowTables("graph_index"));
 		expect(problems).toContain("step 1 (s1): destructive DELETE FROM is not allowlisted");
+	});
+
+	test("a ';' inside a string default is not a statement boundary, and the statement stays additive", () => {
+		const sql = "alter table graph_index add column if not exists label text default '--; pending'";
+		expect(normalizedStatements(sql)).toEqual(["alter table graph_index add column if not exists label text default ' '"]);
+		expect(checkMigrationSteps([step(1, sql)], allowTables("graph_index"))).toEqual([]);
+	});
+
+	test("a destructive word inside a string default is not a destructive statement", () => {
+		const sql = "alter table graph_index add column if not exists label text default '-- rename', add column if not exists note text default 'drop table x; truncate y; delete from z'";
+		expect(normalizedStatements(sql)).toHaveLength(1);
+		expect(checkMigrationSteps([step(1, sql)], allowTables("graph_index"))).toEqual([]);
+	});
+
+	test("a ';' inside a dollar-quoted body does not split, and the body is still checked as code", () => {
+		const sql = "do $$ begin delete from a; raise notice 'x'; end $$";
+		expect(normalizedStatements(sql)).toEqual(["do $$ begin delete from a; raise notice 'x'; end $$"]);
+		expect(checkMigrationSteps([step(1, sql)], allowTables("a"))).toContain("step 1 (s1): destructive DELETE FROM is not allowlisted");
+	});
+
+	test("a doubled quote and an E-string escape stay inside the literal when splitting", () => {
+		expect(normalizedStatements("select 'it''s; fine'; select 2")).toEqual(["select ' '", "select 2"]);
+		expect(normalizedStatements("select E'a\\';b'; select 2")).toEqual(["select e' '", "select 2"]);
+	});
+
+	test("an unterminated string is not masked, so the analysis sees the rest", () => {
+		expect(normalizedStatements("select 'a; delete from t")).toEqual(["select 'a", "delete from t"]);
+	});
+
+	test("the digest still splits on every ';' and is unaffected by the analysis reader", () => {
+		expect(stepDigest(step(1, "select '--; pending'"))).toBe(new Bun.CryptoHasher("sha256").update("select '--\npending'").digest("hex"));
 	});
 });
 

@@ -831,7 +831,9 @@ export async function resolveDocumentIds(
 	const now = opts.now ?? Date.now;
 	const started = now();
 	for (let poll = 0; poll < maxPolls; poll += 1) {
-		const answered = await call(config, fetchImpl, `/documents/track_status/${encodeURIComponent(id)}`, { method: "GET", timeoutMs });
+		const remainingMs = deadlineMs - (now() - started);
+		if (remainingMs <= 0) return { ok: false, reason: "lightrag: track_status deadline exceeded with no documents" };
+		const answered = await call(config, fetchImpl, `/documents/track_status/${encodeURIComponent(id)}`, { method: "GET", timeoutMs: Math.min(timeoutMs, remainingMs) });
 		if (!answered.ok) return answered;
 		const listed = readMember(answered.body, "documents");
 		if (!Array.isArray(listed)) return { ok: false, reason: "lightrag: unexpected track_status shape" };
@@ -851,15 +853,16 @@ export async function resolveDocumentIds(
 			});
 		}
 		if (documents.length > 0) return { ok: true, ids: documents.map((document) => document.id), documents };
-		if (now() - started >= deadlineMs) return { ok: false, reason: "lightrag: track_status deadline exceeded with no documents" };
-		if (poll < maxPolls - 1 && intervalMs > 0) await sleep(intervalMs);
+		const leftMs = deadlineMs - (now() - started);
+		if (leftMs <= 0) return { ok: false, reason: "lightrag: track_status deadline exceeded with no documents" };
+		if (poll < maxPolls - 1 && intervalMs > 0) await sleep(Math.min(intervalMs, leftMs));
 	}
 	return { ok: false, reason: "lightrag: track_status listed no documents" };
 }
 
 /**
  * Delete documents by id (`DELETE /documents/delete_document`
- * `{ doc_ids, delete_file: false, delete_llm_cache: false }`). The ids
+ * `{ doc_ids, delete_file, delete_llm_cache: false }`; `delete_file` is false unless `options.deleteFile` is true). The ids
  * must be real document ids ({@link resolveDocumentIds}), never track ids.
  * Upstream strips and de-duplicates them and refuses an empty id; the
  * deletion runs in the background, so `ok` means `deletion_started`:
@@ -875,6 +878,7 @@ export async function deleteDocuments(
 	documentIds: readonly string[],
 	fetchImpl: FetchLike = fetch,
 	timeoutMs = 8000,
+	options: { deleteFile?: boolean } = {},
 ): Promise<{ ok: true } | { ok: false; reason: string; retryable?: true }> {
 	void datasetId;
 	if (documentIds.length === 0) return { ok: true };
@@ -883,7 +887,7 @@ export async function deleteDocuments(
 	const answered = await call(config, fetchImpl, "/documents/delete_document", {
 		method: "DELETE",
 		json: true,
-		body: JSON.stringify({ doc_ids: ids, delete_file: false, delete_llm_cache: false }),
+		body: JSON.stringify({ doc_ids: ids, delete_file: options.deleteFile ?? false, delete_llm_cache: false }),
 		timeoutMs,
 	});
 	if (!answered.ok) return answered;
