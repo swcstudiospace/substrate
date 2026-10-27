@@ -1,11 +1,13 @@
 ---
 phase: 43-lane-a
 verified: 2026-10-21
-status: passed in-repo. The live egress proof and the live restart are operator-gated and were not run
+status: human_needed
 score: 2 of 2 criteria proven in-repo (H-D1 egress composition, H-D3 VM-task re-adoption); live proofs not run
 verified_on: gsd/v13x-43-lane-a on its final tree, against origin/main 3e9a106 as the base
 covered_files: ["packages/dispatcher/src/substrate_dispatcher/sessions.py", "packages/dispatcher/src/substrate_dispatcher/dispatch.py", "packages/dispatcher/src/substrate_dispatcher/__main__.py", "packages/dispatcher/src/substrate_dispatcher/host.py", "packages/dispatcher/tests/test_readoption.py", "packages/dispatcher/tests/test_dispatch.py", "packages/dispatcher/tests/test_claude_code_route.py", "packages/host/src/sandbox-options.test.ts", "docs/runbooks/lane-a-host.md", "docs/dispatcher.md"]
 ---
+
+> Status detail, kept verbatim from the original frontmatter: passed in-repo. The live egress proof and the live restart are operator-gated and were not run
 
 # 43-VERIFICATION: LANE-A
 

@@ -13,7 +13,7 @@ Notion and Linear stay the source of truth for intent. GitHub is the source of t
 | **Ultrathink** | TimescaleDB | index / coordination | `postgresql://…@<ultrathink-forwarder>:5432/<db>` |
 | **Ultrathink** | DragonflyDB | idle: not the production cache (the VPS cache is the loopback redis; see the DragonflyDB wiring row); keep, repurpose or decommission is an operator decision | `redis://…@<ultrathink-forwarder>:6379` |
 | **Agent Substrate** | Hindsight | memory / recall | `http://<agent-substrate-forwarder>:8888` |
-| **Agent Substrate** | RAGFlow | documents | `http://<agent-substrate-forwarder>:9380` |
+ | **Agent Substrate** | LightRAG | documents + planning graph (live steering, .planning optimized) | `http://<agent-substrate-forwarder>:9621` |
 
 The reach column is a placeholder, not a machine name. `docs/railway-tailscale.md` is the cutover note. No service keeps a public TCP proxy or public database domain after the cutover.
 
@@ -25,7 +25,7 @@ The reach column is a placeholder, not a machine name. `docs/railway-tailscale.m
 | **Index**: plain Postgres tables, no hypertables, continuous aggregates or Timescale policies (0 hypertables measured 2026-10-13). Graph tables `graph_index`, `graph_nodes` (leases live here: `claimed_by`, `lease_id`, `lease_expires_at`, `lease_epoch`), `graph_edges`, `graph_steps`, `graph_bindings`; governance tables `memory_entries`, `memory_writes` (idempotency ledger), `memory_reviews`, `memory_quarantine`. The desk's own tables (intake, claims, receipts, roster) are not in this repo | TimescaleDB | `substrate-mcp` only (`graph_register`, claims, `memory_write`, the governance gate); migrated on boot by `index-store.ts` | Applied by `substrate index sweep` / `substrate-index-sweep.timer` (`index-sweep.ts`; dry-run unless `SUBSTRATE_INDEX_SWEEP=apply`): terminal graphs + 90 days with their nodes/edges/steps/bindings — never while any node holds a live lease (claims do not refuse a finished graph), re-checked per node inside the delete; superseded memory versions 90 days; spent derived idempotency keys 7 days, explicit keys 30 days (exactly-once holds that long); decided reviews 30 days; quarantine rows whose content later landed 30 days. Counted but never deleted: pending reviews, unresolved quarantine. Memory `ttl` classes (`graph \| 30d \| permanent`, uplift-3 N4) are judged on every serving read by one predicate (`memoryExpiry`: `30d` at `created + 30 d`; `graph` once its graph is finished or no longer indexed; `permanent` never) under `SUBSTRATE_MEMORY_EXPIRY`: `report` (default) serves expired entries tagged `expired`, counts them in `substrate.memory.expired{mode=served}` and the sweep only counts them; `enforce` hides them from the brief and `memory_search` (operators may pass `include_expired`), counts `mode=hidden`, and lets the sweep delete them — still only under `apply`. The retain forward refuses an expired entry in both modes. Pool: `SUBSTRATE_PG_POOL_MAX` 8, `statement_timeout` 5 s, `application_name=substrate-mcp` | Treating a row as proof that work shipped; secrets |
 | **Cache**: the brief, memory search, a graph view, and the last complete brief per surface and arguments (`brief-snapshot`, served with a dated banner only while a live source is down). Rate counters are the admission buckets (uplift-3 N3): key class `budget:<surface>:<class>`, one hash per authenticated surface and class (`read`, `write`, `coordination`; untokened bridge callers share `anonymous`), stepped by one Lua `EVAL`, always with a TTL. An idempotency mirror stays a target, not a current key | DragonflyDB | `substrate-mcp` | Brief 300 s; memory search 600 s; graph view 60 s; brief snapshot `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S` (3600 s, `0` = off); budget bucket: the burst's refill time, never under 1 s | Queues, locks, sessions, anything that must survive a restart. Dragonfly may carry the wake-up hints when `SUBSTRATE_EVENT_BUS=on` (see Current wiring, Event wake-up hints), and still holds no authoritative state. A Dragonfly outage returns the same answers, uncached, and admits every caller (`bypass`) |
 | **Memory**: decisions with receipt paths, environment facts, verified commands, gotchas, working preferences | Postgres index inside Timescale, and Hindsight for the desk | `substrate-mcp` writes the index (`memory_write` / `memory_search`). The desk gateway writes and reads Hindsight with its own keys when those are set | Index rows follow the governance gate; Hindsight banks are retained until replaced | Unverified claims, secrets (D-04 redaction), another surface's or seat's bank |
-| **Documents**: repo docs, skills, contracts, ADRs; product docs | RAGFlow | `substrate-mcp` (`docs_ingest`, `POST /docs/ingest`, `POST /docs/merge-trigger`); the desk gateway with its own keys for its own paths | Re-ingest on merge via the asynchronous merge trigger (202, one background job per dataset); the last five versions per dataset are a bookkeeping list in the docs state file (pins for citations, trigger idempotency), not a plane-side policy; a superseded document is deleted only with `SUBSTRATE_DOCS_PRUNE_SUPERSEDED=1` (default off) | Secrets, receipts, transcripts |
+ | **Documents + Planning Graph**: repo docs, .planning/ (markdown with goals/deps/success for graph between folders), skills, contracts, ADRs | LightRAG (RAGFlow replacement, hosted same Railway project) | `substrate-mcp` (`docs_ingest`); .planning scanner for graph hints + vector; gateway keys | Re-ingest on merge or polling hash change; hybrid /mix queries; last-5 bookkeeping; superseded delete opt-in | Secrets, transcripts |
 
 ## Hindsight banks
 
@@ -99,11 +99,36 @@ What `substrate-mcp` reads today. Hindsight is read by `substrate-mcp` `planes/h
 | TimescaleDB | `substrate-mcp` | `SUBSTRATE_PG_URL` | read |
 | DragonflyDB | `substrate-mcp` read-through cache | `DRAGONFLY_URL`; `SUBSTRATE_CACHE=0` disables; `SUBSTRATE_CACHE_CONNECT_TIMEOUT_MS` / `SUBSTRATE_CACHE_COMMAND_TIMEOUT_MS` (250 ms each) bound every connect and command | read when set; fail-open when unset, refused or `0`. Production points at co-located loopback redis after a measured 180–310 ms tailnet RTT made the Railway hop unusable (Greptile P1 disposition recorded); the 250 ms budgets are sized for that loopback hop. The Railway Dragonfly (180–310 ms RTT, 5 GB volume) is idle and unused by production; whether to keep, repurpose or decommission it is an operator decision this repo does not make (nothing here deletes or reconfigures a Railway service). The VPS cache stays redis because the generation and budget counters rely on `maxmemory-policy volatile-lru` (`infra/vps/redis-substrate.conf`): Dragonfly has no `maxmemory-policy` (eviction is `--cache_mode`, which may evict any key), so that invariant cannot be expressed there |
 | Hindsight | `substrate-mcp` `planes/hindsight.ts` (gateway keeps its own keys for its own paths) | server env `HINDSIGHT_URL`, `HINDSIGHT_API_KEY` | read by `substrate-mcp` since Phase 26; the desk's `pd-*` banks are never named here |
-| RAGFlow | `substrate-mcp` `planes/ragflow.ts` (gateway keeps its own keys for its own paths) | server env `RAGFLOW_URL`, `RAGFLOW_API_KEY` | read by `substrate-mcp` since Phase 25; `RAGFLOW_MCP_URL` is never read |
+ | LightRAG | `substrate-mcp` `planes/lightrag.ts` (gateway keeps keys) | server env `LIGHTRAG_URL`, `LIGHTRAG_API_KEY` (same Railway project for low latency) | read by substrate (replaces RAGFlow); Railway orchestrator provisions; graph for live steering across GSD sessions |
 
 The cache covers `POST /brief`, `memory_brief`, `memory_search`, `memory_recall` and `graph_get`. It does not cover writes, `events_*` or leases. Keys are `substrate:v1` plus a hash of the normalized arguments, the caller surface and a generation; the generation keys are read in one `MGET` before the entry is read. An accepted memory write, and a write whose commit is uncertain, bumps the memory generation. A `memory_search` also depends on the shared graphs generation, because a `ttl: graph` entry's liveness is read off its graph's status and a finished graph must drop the searches that still list it; and the expiry mode (`SUBSTRATE_MEMORY_EXPIRY=enforce`) is part of the memory-search, `brief` and `brief-snapshot` keys, so an entry cached under `report` is never served under `enforce`. A graph write — a claim, release, completion or registration — bumps that graph's generation and a shared graphs generation, so a brief that lists other graphs refreshes too. A heartbeat bumps only the graph's own generation: a renewed lease changes no text a repo brief shows before its refresh deadline, and bumping the shared key on every heartbeat is what held the hit ratio at 1 %. A stored answer expires at its class TTL or at the next lease or reverify deadline, whichever is sooner. A brief composed while any source failed or missed its budget is never stored. The `brief-snapshot` class is the exception to the generation rule: keyed by surface and arguments only, written when a brief is composed complete, read only when the live compose came back degraded, and served with a first line `_(substrate brief snapshot from <time>; live sources degraded: <sources>)_` — see `docs/observability.md` for the headers that mark it. `GET /healthz` adds `{enabled, connected, mode, hits, misses, bypasses, errors, cooldownUntil}` with `mode` of `off`, `on` or `degraded`. The status code does not depend on the cache. The same counters are the `substrate.cache.operations` metric.
 
 Concurrent identical misses share one load (uplift-4 S4): the in-process in-flight map is keyed by the final cache key (so a caller that reads a newer generation has a different key and never joins an older flight), holds at most 256 entries (beyond that requests load independently), and an entry is deleted the moment its promise settles, however it settles. A caller that joins a flight whose owner produced a degraded answer (the brief's `store` refused it) loads for itself, because "degraded" belongs to the owner's call. A flight older than 15 s is not joined. A caller that passes its own budget (`deadlineMs`) and a degraded answer (`onDeadline`) to `getOrLoad` keeps that deadline while it waits on another caller's load: when its own timer wins it answers its degraded reply without starting a load and without cancelling the shared one, so a short-budget search never waits out a long-budget recall. This is always on and changes no answer, only the number of duplicate loads. `SUBSTRATE_CACHE_SWR=off|shadow|enforce` (default `shadow`) and `SUBSTRATE_CACHE_SWR_WINDOW_S` (default 30, max 300) add stale-while-revalidate for **the brief only**: a brief miss (a generation moved) that finds a `brief-snapshot` last-good younger than the window is answered with that text in `enforce`, while one background refresh per key (at most 16 at once) composes a fresh brief, stores it and moves the last-good. The snapshot records the lease or reverify deadline its text embeds (`until`, epoch ms, or `null` for none); a last-good past its `until`, one with an unreadable `until`, and one written by a release that did not record it at all (no `until`: its deadline is unknown) are never served stale. A degraded refresh is never stored and never becomes the last-good; a refresh that outlives its 15 s backstop deadline writes nothing when it finally settles and keeps its slot and its key until it does, so neither the 16-refresh cap nor one-refresh-per-key loosens. `shadow` takes the same decision beside the live load (no extra serial round trip), counts it as `would_serve_stale` and serves the live brief exactly as `off` does; the probe is started and never awaited, so a slow snapshot read cannot hold a finished brief or the flight slot, and it is silent, so a failing probe read neither counts an error nor marks the cache degraded. A stale brief keeps `state: complete` and is advertised additively: `POST /brief` adds `X-Substrate-Brief-Age: <seconds>` (on the 304 too) and the MCP `memory_brief` `structuredContent` adds `age_s` (also on `not_modified`); both are absent unless the brief was served stale. Read-your-writes therefore holds only in `off` and `shadow`: in `enforce` a brief read right after a write can be up to the window old until the refresh lands. `memory_search`, `memory_recall`, `graph_get` and `docs_search` are single-flight only: they have no generation-free last-good, and serving a pre-write memory or docs answer is not a trade this uplift makes. `substrate.cache.operations` carries `class` (`brief`, `memory-search`, `graph-view`, `brief-snapshot`, `docs-search`, `budget`, `gen`) and `result` (`hit|miss|coalesced|stale|refresh|would_serve_stale|bypass|error`) beside the existing `mode`. `bun scripts/cache-stats.ts` is the operator-run census of key classes, value bytes and the `maxmemory` they justify (bounded `SCAN`, `TYPE` and `STRLEN` only, every command raced against a 250 ms wall budget, no value read, loopback URLs only unless `--allow-remote`), with the running service's hit, stale and coalesced ratios read from its loopback `/healthz` (which needs the bearer: `SUBSTRATE_TOKEN` or `SUBSTRATE_TOKEN_FILE`, sent only as a header; a 401/403 is named in the output, not a silent gap).
+
+### Endpoint policy
+
+Each data-plane endpoint is classed before `substrate-mcp` connects to it. There are three classes:
+
+- **loopback**: `localhost`, `127.x.y.z`, `::1` or `[::1]`.
+- **proxy**: a host and port listed in `SUBSTRATE_DB_PROXY_ALLOW`.
+- **direct**: anything else, including any URL that does not parse.
+
+The scheme does not decide the class. When a URL names no port, the scheme's default port is used for the match: `http` 80, `https` 443, `postgres` and `postgresql` 5432, `redis` and `rediss` 6379. Host spellings are canonicalised before the match, so `127.1` is loopback. The address `0.0.0.0` is not loopback.
+
+`SUBSTRATE_DB_PROXY_ALLOW` is a comma-separated list of `host:port` entries, for example a tailnet proxy listening on a chosen port (`proxy-host:5432`). Entries are trimmed, a host is lowercased, and the port must be 1 to 65535. A malformed entry refuses boot, naming the variable and the entry's position, never its text. Blank means no entries.
+
+`SUBSTRATE_DB_ENDPOINT_POLICY` is `warn` (default) or `enforce`. Any other value refuses boot, naming the variable.
+
+- `warn`: nothing is refused. A direct endpoint is reported at boot as a `db.endpoint` audit event.
+- `enforce`: a configured direct endpoint refuses boot with a message naming the variable (`GREPTIME_URL`, `SUBSTRATE_PG_URL` or `DRAGONFLY_URL`) and the policy, never the URL.
+
+DragonflyDB: a `redis` or `rediss` URL is accepted only when its class is loopback or proxy. Any other class is refused and the cache is off (fail-open), as before. The refusal of `rediss` to a non-loopback host is new.
+
+Boot audit: one `db.endpoint` event (kind `note`, surface `substrate`, runtime `mcp-server`) is emitted per configured plane, once at listen, with a payload of `action`, `runtime`, `plane`, `class` and `policy`. It carries no URL, host or credential, and it never blocks boot.
+
+Per-call access is metered by the existing plane duration and error metrics, not by per-call audit events, to avoid flooding the ledger.
+
+Not done here and operator-gated: the Tailscale forwarders, their ACL, the allow list values, the cutover, and the live proof. RBAC and connection pooling are deferred.
 
 ### Request-path flags (uplift-5 U5-3)
 
@@ -137,9 +162,15 @@ Admission budgets (uplift-3 N3) are the one key class that is not a cached answe
 `SUBSTRATE_CACHE_PRELOAD` is `on` or `off`, default `off`. `SUBSTRATE_CACHE_PRELOAD_TOP`
 is an integer from 1 to 20, default 3. `SUBSTRATE_CACHE_PRELOAD_S` is an integer from
 10 to 3600, default 300. An out-of-range value, or any other switch value, refuses boot
-and names the variable. `on` with no cache (`DRAGONFLY_URL` unset or refused, or
-`SUBSTRATE_CACHE=0`) refuses boot too, and names `SUBSTRATE_CACHE_PRELOAD`: a warm-up
+and names the variable. `on` with no cache because `DRAGONFLY_URL` is unset or
+`SUBSTRATE_CACHE=0` refuses boot too, and names `SUBSTRATE_CACHE_PRELOAD`: a warm-up
 with nowhere to store would only compose.
+
+A `DRAGONFLY_URL` refused by the endpoint policy is a different case. Under `warn` the refusal
+is fail-open, as for the cache: the server boots uncached with the preload off, and stderr logs
+`SUBSTRATE_CACHE_PRELOAD=on skipped: the cache endpoint is refused, so the cache is off`. Under
+`enforce` the refused endpoint refuses boot first (see Endpoint policy), so the preload's own
+check is never reached.
 
 With the switch on, the substrate counts brief requests per repo over a sliding hour,
 for at most 256 repos, and remembers the last brief request seen for each repo: its
@@ -180,13 +211,15 @@ Cache invalidation is not driven by hints. Generation counters remain the only i
 
 ## Target after the private-forwarder cutover
 
+The DragonflyDB URL must name a loopback host or a proxy listed in `SUBSTRATE_DB_PROXY_ALLOW`. Under `SUBSTRATE_DB_ENDPOINT_POLICY=enforce`, a direct host is refused at boot; under `warn` it is reported as a `db.endpoint` event (see Endpoint policy). The forwarder placeholder below is therefore valid only once its `host:port` is listed in the allow list.
+
 | Store | Reader | Env var | Reach |
 |---|---|---|---|
 | GreptimeDB | `substrate-mcp` | `GREPTIME_URL` | `http://<ultrathink-forwarder>:4000` |
 | TimescaleDB | `substrate-mcp` | `SUBSTRATE_PG_URL` | `postgresql://…@<ultrathink-forwarder>:5432/<db>` |
 | DragonflyDB | `substrate-mcp` | `DRAGONFLY_URL` | `redis://…@<ultrathink-forwarder>:6379` |
 | Hindsight | desk gateway | gateway `HINDSIGHT_URL` | `http://<agent-substrate-forwarder>:8888` |
-| RAGFlow | desk gateway | gateway `RAGFLOW_URL` | `http://<agent-substrate-forwarder>:9380` |
+ | LightRAG | desk gateway | `LIGHTRAG_URL` | `http://<agent-substrate-forwarder>:9621` (LightRAG default; /query with /hybrid, graph endpoints) |
 
 ## Environment keys
 
@@ -202,6 +235,18 @@ Railway services are managed by the `railway_*` MCP tools. The control plane is 
 - **The `/slo` cost row is report-only.** It is the `railwayCost` key, is never folded into `breached`, and is cached for 15 minutes. See [observability.md](observability.md).
 
 The live write proof and the first live cost read are operator-gated, and each is recorded with its approval reference. Nothing in the automated tests reaches Railway.
+
+## Unified resource fabric (Phase 51)
+
+The `fabric_status`, `fabric_optimize` and `fabric_compliance` MCP tools give one read-only view of six resources: Dragonfly, the TimescaleDB index, GreptimeDB, RAGFlow, Hindsight and the Tailscale proxy layer. They read the existing health, the Railway cost report and the Hindsight retain outbox, and add no probe.
+
+- **Endpoint class.** The Tailscale dimension is the phase-48 class of each data-plane endpoint: `loopback`, `proxy` or `direct`. It is derived from `SUBSTRATE_DB_PROXY_ALLOW` and the data-plane URL variables (`GREPTIME_URL`, `SUBSTRATE_PG_URL`, `DRAGONFLY_URL`), and never printed. There is no separate Tailscale probe.
+- **State.** Each row is `ok`, `degraded`, `unavailable` or `unconfigured`. A resource nothing configures is `unconfigured`, never `ok`. A configured resource that gives no answer within 1.5 seconds is `unavailable`, and its row names the reason.
+- **Suggestions.** `fabric_optimize` lists deterministic suggestions, each with the evidence it fired on. It executes nothing and changes no configuration. Per-service scaling stays with `railway_scale_suggest`.
+- **Compliance.** `fabric_compliance` reports PASS, FAIL or NOT_APPLICABLE per check. The endpoint checks read `SUBSTRATE_DB_ENDPOINT_POLICY`. An unconfigured resource is NOT_APPLICABLE, never PASS.
+- **Environment.** The fabric adds no environment variable. It reads only names documented elsewhere in this file: `SUBSTRATE_DB_ENDPOINT_POLICY`, `SUBSTRATE_DB_PROXY_ALLOW`, `SUBSTRATE_CACHE`, `SUBSTRATE_EVENT_BUS` and the `SUBSTRATE_RAILWAY_*` budget and price names.
+
+Limitation: the cache client has no ping, so a configured Dragonfly reads `unavailable` until a cache command has connected, and the fabric sends no command of its own to probe it.
 
 ## Fail-open budget (unchanged)
 

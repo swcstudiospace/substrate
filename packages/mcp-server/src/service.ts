@@ -55,6 +55,7 @@ import {
 	type ScriptOutcome,
 } from "./cache.ts";
 import { isReviewToken, type SubstrateConfig } from "./config.ts";
+import type { DbPlane } from "./db-endpoints.ts";
 import { DesktopBusy, type DesktopDriver, type DesktopLogEntry, type DesktopRunResult } from "./desktop/driver.ts";
 import {
 	DatasetListCache,
@@ -62,8 +63,12 @@ import {
 	createVersionStore,
 	isSyncLive,
 	latestVersion,
+	latestVersionFor,
+	lightragSearchDatasets,
 	noteSkillsSyncFastForward,
 	pinsFromVersions,
+	pinsByName,
+	recordVersion,
 	recordTrigger,
 	TRIGGER_FIELD_MAX,
 	refreshDataset,
@@ -75,6 +80,12 @@ import {
 import {
 	batchIngestPages,
 	documentProvenance,
+	batchPagesForIngest,
+	planningContentHash,
+	planningHintFromJson,
+	planningIngestTrigger,
+	planningPageSha,
+	scanIngestPages,
 	ingestDocs,
 	loadIngestRecords,
 	preflightIngestPages,
@@ -86,7 +97,7 @@ import {
 	type PageSettlement,
 } from "./docs-ingest.ts";
 import { LagSettler, TRIGGER_RECORD_DEADLINE_MS, withDeadline, createFreshnessState, evaluateFreshness, type DatasetFreshness, type FreshnessState } from "./docs-freshness.ts";
-import { DEFAULT_SEARCH_DATASET_NAMES, DOCS_CONTEXT_LEDGER_BUDGET_MS, UNTRUSTED_DOCS_NOTICE, citationProvenanceCounts, docsContextEvents, docsContextMemories, searchDocs, searchReplyStorable, type DocsContext, type DocsContextEvent, type DocsContextMemory, type SearchReply } from "./docs-search.ts";
+import { DEFAULT_SEARCH_DATASET_NAMES, DOCS_CONTEXT_LEDGER_BUDGET_MS, UNTRUSTED_DOCS_NOTICE, citationProvenanceCounts, docsContextEvents, docsContextMemories, normalizeRepoId, scopedDatasetName, searchDocs, searchReplyStorable, type DocsContext, type DocsContextEvent, type DocsContextMemory, type SearchReply } from "./docs-search.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
 	analyzeDrift,
@@ -97,7 +108,7 @@ import {
 	type DriftReport,
 } from "./drift.ts";
 import { createEventBus, type EventBus, type EventBusClient, type EventBusStats, type EventHint } from "./event-bus.ts";
-import { checkIdempotencyKey, checkReplayTs, eventHash, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
+import { checkIdempotencyKey, checkReplayTs, eventHash, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, planningIngestTrigger as planningEventTrigger, verifyChain } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import {
 	GreptimeClient,
@@ -135,7 +146,10 @@ import { governMemoryWrite } from "./memory-write.ts";
 import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachable.ts";
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth, type HindsightConfig } from "./planes/hindsight.ts";
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
+import { lightragOp } from "./planes/lightrag.ts";
 import { RailwayClient } from "./railway.ts";
+import type { FabricSources } from "./fabric/types.ts";
+import { FABRIC_HEALTH_WINDOW_MS } from "./fabric/gather.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
 import {
@@ -557,6 +571,9 @@ interface IdempotencyPlan {
  * pick by accident: sharing a turn with one would only make the two wait for each other.
  */
 const KEY_TURN_PREFIX = "\u0000idempotency:";
+
+/** The dataset planning pages are ingested into: the agent-substrate checkout's dataset (`docs/data-planes.md`). */
+const PLANNING_DATASET = "agent-substrate";
 
 /**
  * One closed UTC hour of the ledger, digested in ingest order for the hourly anchor.
@@ -1266,6 +1283,8 @@ export class Substrate {
 	private readonly ragflowFetch: FetchLike;
 	/** Hindsight fetch, gated. Tests inject the fake underneath; production uses the global fetch. */
 	private readonly hindsightFetch: FetchLike;
+	/** LightRAG fetch, gated on the LightRAG plane's own breaker: a RAGFlow outage never refuses a LightRAG call. Tests inject the fake underneath; production uses the global fetch. */
+	private readonly lightragFetch: FetchLike;
 	/** Railway control-plane client (Phase 45, D45-a); tests inject a recording fetch through `stores.railway`. */
 	readonly railway: RailwayClient;
 	/** Background retains in flight, drained (bounded) on shutdown. */
@@ -1314,6 +1333,15 @@ export class Substrate {
 		emit: (event) => this.emit(event),
 		report: (line) => process.stderr.write(`[substrate] ${line}\n`),
 	});
+	/** The checkout whose `.planning/` tree the planning refresh reads: the process cwd unless a test injects one. */
+	private readonly planningBaseDir: string;
+	/** Per-path hash of the planning pages as the LightRAG plane last indexed them; null until the first pass. */
+	private planningHashes: Map<string, string> | null = null;
+	/** The planning pass in flight, if any: one at a time, and a request during it marks the next pass dirty. */
+	private planningPass: Promise<void> | null = null;
+	private planningDirty = false;
+	/** Stops the planning poll's interval; null while the poll is not running. */
+	private planningStop: (() => void) | null = null;
 	/** `graphId/nodeId` → tail of that node's gated-completion chain. */
 	private readonly completionChains = new Map<string, Promise<void>>();
 	// uplift-2 R1 — brief fast path. The options `composeBrief` runs under, read
@@ -1350,6 +1378,8 @@ export class Substrate {
 			cache?: ReadThroughCache;
 			ragflowFetch?: FetchLike;
 			hindsightFetch?: FetchLike;
+			lightragFetch?: FetchLike;
+			planningBaseDir?: string;
 			desktop?: DesktopDriver | null;
 			railway?: RailwayClient;
 			/** Tests inject the bus through this factory; production builds it from config. */
@@ -1411,6 +1441,7 @@ export class Substrate {
 		this.dodGateTest = stores?.dodGate ?? {};
 		this.ragflowFetch = gatedFetch(this.planes.gate("ragflow"), stores?.ragflowFetch ?? fetch, ragflowOp);
 		this.hindsightFetch = gatedFetch(this.planes.gate("hindsight"), stores?.hindsightFetch ?? fetch, hindsightOp);
+		this.lightragFetch = gatedFetch(this.planes.gate("lightrag"), stores?.lightragFetch ?? fetch, lightragOp);
 		this.cache =
 			stores?.cache ??
 			createReadThroughCache(config, {
@@ -1423,6 +1454,7 @@ export class Substrate {
 		// uplift-2 R1
 		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays, graphRead: config.requestPath.briefGraphRead };
 		this.narrowBumps = config.requestPath.cacheBumpScope === "narrow";
+		this.planningBaseDir = stores?.planningBaseDir ?? process.cwd();
 		// uplift-2 R3: the outbox hydrates its file (if any) now, so entries parked
 		// before a restart are due again from the first drain tick. Every drop —
 		// bound, exhausted attempts, a memory-only queue at shutdown — ends with
@@ -2079,6 +2111,7 @@ export class Substrate {
 			if (result.lookupFailed) this.observer.eventReplay?.({ result: "lookup_failed" });
 			else if (result.stored) this.observer.eventReplay?.({ result: "appended" });
 		}
+		this.planningEvent(input);
 		if (result.stored) this.publishHint(result.event);
 		return result;
 	}
@@ -3185,9 +3218,12 @@ export class Substrate {
 		}
 
 		// memory's `expected_version` contract, checked before any git work: a stale proposal opens no pull
-		// request and writes no registry row. With governance off, or no index, nothing is recorded, so only an
-		// expected 0 (or none) passes.
-		if (request.expected_version !== undefined) {
+		// request and writes no registry row. It runs inside proposeSkill after the ledger replay, so an identical
+		// versioned retry still answers from the ledger. With governance off, or no index, nothing is recorded, so
+		// only an expected 0 (or none) passes.
+		const expected = request.expected_version;
+		const beforeWork = async (mergedPrUrl: string | null): Promise<{ unlessUnchanged: Error } | null> => {
+			if (expected === undefined) return null;
 			let recorded: { version: number; pr_url: string | null } | null = null;
 			if (this.config.skillsGovernance !== "off" && this.index !== null) {
 				try {
@@ -3197,9 +3233,14 @@ export class Substrate {
 					throw new ProposeFailed(`could not read the skill's version; nothing was proposed: ${reason}`);
 				}
 			}
-			const stale = skillVersionStale(request.name, recorded, request.expected_version);
-			if (stale) throw stale;
-		}
+			const stale = skillVersionStale(request.name, recorded, expected);
+			if (!stale) return null;
+			// An identical retry of the merged proposal the registry still records is the write that already succeeded.
+			// The git path confirms it: unchanged while main holds the content, and refused as stale before any commit or
+			// push once main has moved on.
+			if (mergedPrUrl !== null && recorded?.pr_url === mergedPrUrl) return { unlessUnchanged: stale };
+			throw stale;
+		};
 
 		const sessionId = normalizeIdentifier(request.session_id);
 		const graphId = normalizeIdentifier(request.graph_id);
@@ -3225,6 +3266,7 @@ export class Substrate {
 				dryRun,
 				reopen: request.reopen === true,
 				allowDocExamples: new Set(request.allow_doc_examples ?? []),
+				...(expected !== undefined ? { beforeWork } : {}),
 			});
 			if (!dryRun) await this.recordProposedSkill(request, result, surface);
 			if (!dryRun) {
@@ -3636,6 +3678,39 @@ export class Substrate {
 				session_id: `mirror:${ctx.graphId}:${ctx.nodeId}`,
 				payload: { action: "mirror", target: success.target, op: success.op, status: "ok" },
 			}).catch(() => undefined);
+		}
+	}
+
+	/**
+	 * D48-d: one `db.endpoint` note per data plane that has a configured endpoint, written once at boot. The payload
+	 * names the plane, the access class and the policy, never the URL, the host or a credential. A plane with no
+	 * endpoint emits nothing. A refused write is logged and never blocks boot.
+	 */
+	async emitDbEndpoints(): Promise<void> {
+		const { policy, classes } = this.config.dbEndpoints;
+		const planes: readonly DbPlane[] = ["greptime", "postgres", "dragonfly"];
+		const configured: Record<DbPlane, boolean> = {
+			greptime: this.config.greptime !== null,
+			postgres: this.config.postgresUrl !== undefined,
+			// A refused Dragonfly URL is still a configured endpoint: the cache is off, and the boot record says why it is refused.
+			dragonfly: this.config.dragonflyUrl !== undefined || this.config.dragonflyRefused !== null,
+		};
+		for (const plane of planes) {
+			if (!configured[plane]) continue;
+			const endpointClass = classes[plane];
+			try {
+				const emitted = await this.emit({
+					surface: "substrate",
+					kind: "note",
+					summary: `db endpoint ${plane}: ${endpointClass} (policy ${policy})`,
+					session_id: `db-endpoint:${plane}`,
+					payload: { action: "db.endpoint", runtime: "mcp-server", plane, class: endpointClass, policy },
+				});
+				if (!emitted.stored) process.stderr.write(`[substrate] db endpoint event for ${plane} not recorded: ledger unavailable\n`);
+			} catch (cause) {
+				const reason = cause instanceof Error ? redact(cause.message).slice(0, 200) : "unknown error";
+				process.stderr.write(`[substrate] db endpoint event for ${plane} not recorded: ${reason}\n`);
+			}
 		}
 	}
 
@@ -4369,7 +4444,7 @@ export class Substrate {
 	 * datasets; unknown names are ignored and raw ids are never accepted.
 	 *
 	 * uplift-2 R6: the answer is cached under the `docs-search` class, keyed
-	 * by the normalised question, the dataset names and the current pins,
+	 * by the normalised question, the dataset names (under the repo scope when one is set), the current pins, the repo and the planning hash,
 	 * and invalidated by `gen:docs` (bumped by every ingest and every
 	 * recorded version); a degraded reply is never stored. Citations carry
 	 * their own document's commit; the dataset's newest recorded version
@@ -4390,7 +4465,7 @@ export class Substrate {
 	 * cached chunks and is never stored.
 	 */
 	async searchDocs(
-		input: { question?: unknown; datasets?: unknown; session_id?: unknown; context?: unknown },
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown; repo_id?: unknown; planning_hash?: unknown; context?: unknown; probe?: unknown; cooling?: unknown },
 		callerSurface: Surface | null,
 	): Promise<SearchReply> {
 		const surface = callerSurface ?? "claude-code";
@@ -4417,7 +4492,7 @@ export class Substrate {
 	}
 
 	private async searchDocsUnmeasured(
-		input: { question?: unknown; datasets?: unknown; session_id?: unknown; context?: unknown },
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown; repo_id?: unknown; planning_hash?: unknown; context?: unknown; probe?: unknown; cooling?: unknown },
 		surface: Surface,
 		callerSurface: Surface | null,
 		noteLoaded: () => void,
@@ -4427,26 +4502,38 @@ export class Substrate {
 		const names = Array.isArray(input.datasets)
 			? input.datasets.filter((name): name is string => typeof name === "string").filter((name) => DEFAULT_SEARCH_DATASET_NAMES.includes(name))
 			: [...DEFAULT_SEARCH_DATASET_NAMES];
+		const repoId = normalizeRepoId(typeof input.repo_id === "string" ? input.repo_id : null);
+		const planningHash = typeof input.planning_hash === "string" && input.planning_hash.trim().length > 0 ? input.planning_hash.trim() : null;
 		await this.hydrateDocsSeen();
-		const pins = pinsFromVersions(this.docsVersions);
+		const pins = this.config.docsBackend === "lightrag" ? pinsByName(this.docsVersions, names, this.config.docsBackend) : pinsFromVersions(this.docsVersions, this.config.docsBackend);
 		const degradedDatasets = isSyncLive(this.docsSkillsSync) && !this.docsSkillsRefreshFailed ? [] : ["agent-skills"];
 		const load = (): Promise<SearchReply> => {
 			noteLoaded();
 			return searchDocs(
 				{
 					config: this.config.ragflow,
+					backend: this.config.docsBackend,
+					lightragConfig: this.config.lightrag,
+					lightragDatasets: { list: async () => lightragSearchDatasets(names), invalidate: () => undefined },
 					datasetNames: names,
 					pins,
 					degradedDatasets,
 					emit: (event) => this.emit(event),
 					surface,
 					...(sessionId !== undefined ? { sessionId } : {}),
+					repoId,
+					planningHash,
 					fetchImpl: this.ragflowFetch,
+					lightragFetch: this.lightragFetch,
 					datasets: this.docsDatasetList,
 					retrieval: this.config.docsRetrieval,
 					provenanceOf: (documentId) => documentProvenance(this.docsIngestSeen, documentId),
 					budgetMs: this.config.docsSearchBudgetMs,
 					breakerState: () => this.planes.gate("ragflow").breaker?.state() ?? "closed",
+					lightragBreakerState: () => this.planes.gate("lightrag").breaker?.state() ?? "closed",
+					lightragRetry: this.config.ragMachine,
+					lightragCooling: input.cooling === true,
+					lightragHindsight: async (query) => (await this.recallMemories({ query }, callerSurface)).results,
 				},
 				question,
 			);
@@ -4455,14 +4542,18 @@ export class Substrate {
 			this.cache.getOrLoad<SearchReply>({
 				klass: "docs-search",
 				surface,
-				args: { question: question.trim().replace(/\s+/g, " ").toLowerCase(), datasets: [...names].sort(), pins, degraded: degradedDatasets },
+				args: { question: question.trim().replace(/\s+/g, " ").toLowerCase(), backend: this.config.docsBackend, datasets: names.map((name) => scopedDatasetName(repoId, name)).sort(), pins, degraded: degradedDatasets, repo_id: repoId, planning_hash: planningHash },
 				generations: [DOCS_GENERATION_KEY],
 				load,
 				store: searchReplyStorable,
 			});
-		// An empty question and an unconfigured plane are answered (degraded)
-		// without touching the cache: there is nothing to key on.
-		const chunks = question.trim().length === 0 || this.config.ragflow === null ? await load() : await cached();
+		// An empty question and an unconfigured selected backend are answered (degraded)
+		// without touching the cache: there is nothing to key on. A half-open probe also skips it: the probe must
+		// reach the plane, or a cached reply would clear ERROR without the plane answering. A refused search (`cooling`)
+		// keeps the cache: a reply cached for its question is served, and a miss runs `load`, which answers from
+		// Hindsight on the cooling path, so LightRAG is not asked.
+		const configured = this.config.docsBackend === "lightrag" ? this.config.lightrag !== null : this.config.ragflow !== null;
+		const chunks = question.trim().length === 0 || !configured || input.probe === true ? await load() : await cached();
 		// The context is attached per call, after the chunks: a session's events
 		// belong to that session, so the cached answer never carries them.
 		if (input.context !== true) return chunks;
@@ -4590,20 +4681,24 @@ export class Substrate {
 		const pages = Array.isArray(input.pages) ? input.pages : [];
 		await this.hydrateDocsSeen();
 		const outcome = await ingestDocs(
-			this.docsIngestDeps(roots, callerSurface, sessionId),
+			this.docsIngestDeps(typeof input.dataset === "string" ? input.dataset : "", roots, callerSurface, sessionId),
 			{
 				dataset: typeof input.dataset === "string" ? input.dataset : "",
 				...(typeof input.commit === "string" ? { commit: input.commit } : {}),
 				pages: pages
 					.filter((page): page is Record<string, unknown> => page !== null && typeof page === "object" && !Array.isArray(page))
-					.map((page) => ({
-						path: typeof page.path === "string" ? page.path : "",
-						...("real_path" in page && typeof page.real_path === "string" ? { real_path: page.real_path } : {}),
-						...("source_url" in page && typeof page.source_url === "string" ? { source_url: page.source_url } : {}),
-						body: typeof page.body === "string" ? page.body : "",
-						...("heading_path" in page && typeof page.heading_path === "string" ? { heading_path: page.heading_path } : {}),
-						...("expected_version" in page && typeof page.expected_version === "number" && Number.isInteger(page.expected_version) && page.expected_version >= 0 ? { expected_version: page.expected_version } : {}),
-					})),
+					.map((page) => {
+						const graph = planningHintFromJson(page.graph);
+						return {
+							path: typeof page.path === "string" ? page.path : "",
+							...("real_path" in page && typeof page.real_path === "string" ? { real_path: page.real_path } : {}),
+							...("source_url" in page && typeof page.source_url === "string" ? { source_url: page.source_url } : {}),
+							body: typeof page.body === "string" ? page.body : "",
+							...("heading_path" in page && typeof page.heading_path === "string" ? { heading_path: page.heading_path } : {}),
+							...("expected_version" in page && typeof page.expected_version === "number" && Number.isInteger(page.expected_version) && page.expected_version >= 0 ? { expected_version: page.expected_version } : {}),
+							...(graph !== undefined ? { graph } : {}),
+						};
+					}),
 				...(sessionId !== undefined ? { session_id: sessionId } : {}),
 			},
 		);
@@ -4618,10 +4713,14 @@ export class Substrate {
 	 * The dependencies every docs ingest in this service runs with: the plane, the record stores, the roots the
 	 * guard checks pages against, and the caller's surface. A refresh's preflight and each of its calls share
 	 * these, so they refuse the same pages for the same reasons.
+	 * `dataset` is the one LightRAG dataset the ingest resolves, identified by its name, so a LightRAG
+	 * ingest never lists datasets through the RAGFlow gate (its breaker and outages do not refuse uploads).
 	 */
-	private docsIngestDeps(roots: readonly string[] | undefined, surface: Surface | null, sessionId?: string): IngestDeps {
+	private docsIngestDeps(dataset: string, roots: readonly string[] | undefined, surface: Surface | null, sessionId?: string): IngestDeps {
 		return {
 			config: this.config.ragflow,
+			backend: this.config.docsBackend,
+			lightragConfig: this.config.lightrag,
 			roots: roots ?? this.config.docsIngestRoots,
 			vmGuest: this.config.vmGuest,
 			seen: this.docsIngestSeen,
@@ -4633,6 +4732,8 @@ export class Substrate {
 			surface,
 			...(sessionId !== undefined ? { sessionId } : {}),
 			fetchImpl: this.ragflowFetch,
+			lightragFetch: this.lightragFetch,
+			lightragDatasets: { list: async () => lightragSearchDatasets([dataset]), invalidate: () => undefined },
 			datasets: this.docsDatasetList,
 			prune: this.config.docsPruneSuperseded,
 		};
@@ -4641,10 +4742,10 @@ export class Substrate {
 	// uplift-2 R6 — dataset versions and the merge-trigger, moved here from
 	// the HTTP server so they share the state file and the gated fetch.
 
-	/** The newest recorded version of a dataset, after hydration; the merge-trigger's idempotency key. */
+	/** The newest version the selected backend recorded for a dataset, after hydration: the merge-trigger's idempotency key. A version another backend recorded completes nothing here. */
 	async latestDocsVersion(dataset: string): Promise<DatasetVersion | undefined> {
 		await this.hydrateDocsSeen();
-		return latestVersion(this.docsVersions, dataset);
+		return latestVersionFor(this.docsVersions, dataset, this.config.docsBackend);
 	}
 
 	/**
@@ -4661,11 +4762,13 @@ export class Substrate {
 	 * and bump the docs generation. The version store is the service's, so
 	 * the pin reaches the next search and the next trigger's idempotency
 	 * check, restart or not.
+	 * The selected backend decides the record: LightRAG names its own dataset, RAGFlow resolves it by name.
 	 */
 	async recordDocsVersion(
 		fields: { dataset: string; commit: string; content_sha256: string },
 		surface: Surface,
 	): Promise<{ ok: true; version: DatasetVersion; created: boolean } | { ok: false; reason: string }> {
+		if (this.config.docsBackend === "lightrag") return this.recordLightragVersion(fields, surface);
 		if (this.config.ragflow === null) return { ok: false, reason: "ragflow-not-configured" };
 		await this.hydrateDocsSeen();
 		const refreshed = await refreshDataset(
@@ -4684,6 +4787,40 @@ export class Substrate {
 			await this.cache.bump(DOCS_GENERATION_KEY);
 		}
 		return refreshed;
+	}
+
+	/**
+	 * The version record of a LightRAG deployment, RAGFlow configured or not. LightRAG names its datasets, so the dataset's id
+	 * is its name, the id the LightRAG search and ingest already use for it. Stamped `backend: "lightrag"`, numbered, stored,
+	 * noted and persisted as `refreshDataset` does, and the docs generation is bumped the same way.
+	 */
+	private async recordLightragVersion(
+		fields: { dataset: string; commit: string; content_sha256: string },
+		surface: Surface,
+	): Promise<{ ok: true; version: DatasetVersion; created: boolean }> {
+		await this.hydrateDocsSeen();
+		const last = latestVersion(this.docsVersions, fields.dataset);
+		const generation = Number(/^v(\d+)$/.exec(last?.version ?? "")?.[1] ?? 0);
+		const version: DatasetVersion = {
+			dataset: fields.dataset,
+			dataset_id: fields.dataset,
+			version: `v${generation + 1}`,
+			commit: fields.commit,
+			content_sha256: fields.content_sha256,
+			ingested_at: new Date().toISOString(),
+			backend: "lightrag",
+		};
+		recordVersion(this.docsVersions, version);
+		await this.emit({
+			surface,
+			kind: "note",
+			summary: `docs dataset ${fields.dataset} refreshed to ${version.version}`,
+			session_id: `docs-refresh:${version.version}`,
+			payload: { action: "docs.ingest", backend: "lightrag", dataset_id: fields.dataset, version: version.version, commit: fields.commit, content_sha256: fields.content_sha256 },
+		});
+		await this.persistDocsSeen();
+		await this.cache.bump(DOCS_GENERATION_KEY);
+		return { ok: true, version, created: false };
 	}
 
 	/**
@@ -4764,7 +4901,11 @@ export class Substrate {
 			return outcome;
 		};
 		try {
-			if (this.config.ragflow === null) return finish({ ok: false, reason: "ragflow-not-configured", job });
+			// LightRAG-only: no RAGFlow list to ensure against, so the ingest and the version record
+			// below go to the selected plane under the dataset's name.
+			if (this.config.ragflow === null && this.config.docsBackend !== "lightrag") {
+				return finish({ ok: false, reason: "ragflow-not-configured", job });
+			}
 			// The checkout's roots are read before any plane call: a checkout that cannot be read
 			// fails this job alone, and the pinned version keeps serving with its age (D42-5).
 			let roots: readonly string[];
@@ -4777,14 +4918,16 @@ export class Substrate {
 			// checkout, which may have moved on since the trigger was accepted; it is checked again below.
 			const refusedBefore = await this.checkoutRefusal(request);
 			if (refusedBefore !== null) return finish({ ok: false, reason: refusedBefore, job });
-			// The guarded ingest reads the plane's dataset by name and refuses
-			// `unknown-dataset`, so on a configured plane without the dataset it
-			// must exist before that ingest runs: discover first, create only on
-			// a name-miss. Order stays honest — ensure, ingest, and only then
-			// record the version.
-			const ensured = await resolveDatasets({ config: this.config.ragflow, fetchImpl: this.ragflowFetch, datasets: this.docsDatasetList }, [request.dataset]);
-			if (!ensured.ok) return finish({ ok: false, reason: ensured.reason, job });
-			const created = ensured.datasets[0]?.created === true;
+			// With RAGFlow configured the dataset is discovered first and created only on a
+			// name-miss, so ids stay aligned with the list the search reads. Order stays honest:
+			// ensure, ingest, and only then record the version. A LightRAG-only plane has no RAGFlow
+			// list to ensure against.
+			let created = false;
+			if (this.config.docsBackend === "ragflow" && this.config.ragflow !== null) {
+				const ensured = await resolveDatasets({ config: this.config.ragflow, fetchImpl: this.ragflowFetch, datasets: this.docsDatasetList }, [request.dataset]);
+				if (!ensured.ok) return finish({ ok: false, reason: ensured.reason, job });
+				created = ensured.datasets[0]?.created === true;
+			}
 			// A path that exists but cannot be read fails the job here, not as a smaller page set.
 			let pages: IngestPage[];
 			try {
@@ -4797,22 +4940,124 @@ export class Substrate {
 			if (refusedAfter !== null) return finish({ ok: false, reason: refusedAfter, job });
 			// Every page passes the ingest gates before the first call writes, so a content refusal (an outside path,
 			// an oversize page, a secret) leaves the plane as it was, as a single call did.
-			const gated = await preflightIngestPages(this.docsIngestDeps(roots, surface), { dataset: request.dataset, commit: request.commit, pages });
+			const gated = await preflightIngestPages(this.docsIngestDeps(request.dataset, roots, surface), { dataset: request.dataset, commit: request.commit, pages });
 			if (gated !== undefined) return finish({ ok: false, reason: gated, job });
 			// The pages go to the plane in calls that each fit one ingest call. Each call upserts its pages as it lands;
 			// the version is recorded only after the last call. A failure after an earlier call wrote is `stored`: the
 			// plane then holds some of this commit's pages while the pin still names the prior version.
 			let stored = false;
+			// LightRAG isolates each file: a page that failed is counted here, not refused in the call.
+			let failedPages = 0;
 			for (const batch of batchIngestPages(pages)) {
 				const ingested = await this.ingestDocs({ dataset: request.dataset, commit: request.commit, pages: batch }, surface, roots);
 				stored = stored || ingested.changed;
 				if (!ingested.ok) return finish({ ok: false, reason: ingested.reason, job, ...(stored ? { stored } : {}) });
+				failedPages += ingested.results.filter((result) => result.status === "failed").length;
 			}
+			// A page that failed leaves the version unrecorded, so a retry re-uploads only the pages still missing.
+			if (failedPages > 0) return finish({ ok: false, reason: `partial: ${failedPages} page(s) failed; retry the refresh`, job, ...(stored ? { stored } : {}) });
 			const refreshed = await this.recordDocsVersion(request, surface);
 			if (!refreshed.ok) return finish({ ok: false, reason: refreshed.reason, job, ...(stored ? { stored } : {}) });
 			return finish({ ok: true, version: refreshed.version, created: created || refreshed.created, job });
 		} catch (cause) {
 			return finish({ ok: false, reason: redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200), job });
+		}
+	}
+
+	// ── live steering: a planning change refreshes the docs plane (SPE-19390) ──────
+
+	/**
+	 * Start the planning poll (`SUBSTRATE_LIGHTRAG_POLL_MS`): a pass now and one every
+	 * interval, unref'd so it never holds the process open. Only the LightRAG plane is
+	 * refreshed. Idempotent.
+	 */
+	startPlanningPoll(): void {
+		if (this.planningStop !== null || !this.planningEnabled()) return;
+		const handle = setInterval(() => this.requestPlanningRefresh("planning-poll"), this.config.lightragPollMs);
+		handle.unref();
+		this.planningStop = () => clearInterval(handle);
+		this.requestPlanningRefresh("planning-poll");
+	}
+
+	/** Stop the planning poll. A pass in flight finishes; `planningRefreshIdle` waits for it. */
+	stopPlanningPoll(): void {
+		this.planningStop?.();
+		this.planningStop = null;
+	}
+
+	/** Resolves when no planning pass is in flight: the shutdown seam, never on a request path. */
+	async planningRefreshIdle(): Promise<void> {
+		await this.planningPass;
+	}
+
+	/** Whether planning changes refresh this process's docs plane: the LightRAG plane only. */
+	private planningEnabled(): boolean {
+		return this.config.docsBackend === "lightrag" && this.config.lightrag !== null;
+	}
+
+	/**
+	 * A stored event that names `.planning/` paths asks for a planning refresh. The docs
+	 * plane's own events are skipped: an ingest's note quotes the planning URLs it stored,
+	 * and those must not re-trigger the refresh it came from. Never throws.
+	 */
+	private planningEvent(input: EventInput): void {
+		if (!this.planningEnabled()) return;
+		const action = input.payload?.action;
+		if (typeof action === "string" && action.startsWith("docs.")) return;
+		if (planningEventTrigger(input).triggered) this.requestPlanningRefresh("planning-changed");
+	}
+
+	/**
+	 * One planning pass at a time: a request while a pass runs marks the next pass dirty,
+	 * so a burst of edits costs at most one more scan.
+	 */
+	private requestPlanningRefresh(reason: string): void {
+		if (this.planningPass !== null) {
+			this.planningDirty = true;
+			return;
+		}
+		this.planningPass = (async () => {
+			let next = reason;
+			do {
+				this.planningDirty = false;
+				await this.runPlanningRefresh(next);
+				next = "planning-dirty";
+			} while (this.planningDirty);
+			this.planningPass = null;
+		})();
+	}
+
+	/**
+	 * Scan the planning roots and index what changed since the last pass. Changed pages go
+	 * through the guarded ingest in batches; a page the plane refused stays pending for the
+	 * next pass. The `docs.planning` note carries the planning hash steering sessions compare
+	 * against. Never throws: a timer must not crash the process.
+	 */
+	private async runPlanningRefresh(reason: string): Promise<void> {
+		if (!this.planningEnabled()) return;
+		try {
+			await this.hydrateDocsSeen();
+			const roots = this.config.lightragPlanningRoots;
+			const pages = await scanIngestPages(this.planningBaseDir, roots);
+			const trigger = planningIngestTrigger(pages, this.planningHashes, roots);
+			if (!trigger.triggered) return;
+			const pending = new Set(trigger.paths);
+			const hashes = this.planningHashes ?? new Map<string, string>();
+			this.planningHashes = hashes;
+			for (const batch of batchPagesForIngest(pages.filter((page) => pending.has(page.path)))) {
+				const outcome = await this.ingestDocs({ dataset: PLANNING_DATASET, pages: batch }, "substrate");
+				if (!outcome.ok) break;
+				const failed = new Set(outcome.results.filter((result) => result.status === "failed").map((result) => result.path));
+				for (const page of batch) if (!failed.has(page.path)) hashes.set(page.path, planningPageSha(page));
+			}
+			await this.emit({
+				surface: "substrate",
+				kind: "note",
+				summary: `planning refresh (${reason}): ${trigger.paths.length} changed page(s) under .planning/`,
+				payload: { action: "docs.planning", reason, paths: trigger.paths, planning_hash: planningContentHash(pages) },
+			});
+		} catch (cause) {
+			process.stderr.write(`[substrate] planning refresh failed — ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
 		}
 	}
 
@@ -5843,6 +6088,7 @@ export class Substrate {
 			cache: this.cache.health().enabled,
 			hindsight: hindsightFromEnv() !== null,
 			ragflow: this.config.ragflow !== null,
+			lightrag: this.config.lightrag !== null,
 		};
 	}
 
@@ -5893,46 +6139,28 @@ export class Substrate {
 	 * minute, never more, and `null` with `jobs.ledgerReason` when it could not
 	 * be had. It does not touch the status code.
 	 */
-	async health(): Promise<SubstrateHealth> {
+	async health(options: { readonly greptimeTimeoutMs?: number } = {}): Promise<SubstrateHealth> {
+		// `options.greptimeTimeoutMs` bounds the Greptime probes for the fabric (phase 51). Unset, which is how `/healthz`
+		// calls it, each Greptime call is made exactly as on main: no argument, the client's own timeout, and no wait added.
+		const timeoutMs = options.greptimeTimeoutMs;
+		// The probes start at once, so one slow Greptime does not hold the others back.
 		// A store that throws is down. `/healthz` has to answer that; a 500 would hide the outage from the monitor.
-		let greptime = false;
-		if (this.greptime) {
-			try {
-				greptime = await this.greptime.ping();
-			} catch {
-				greptime = false;
-			}
-		}
-		const appendOnly = greptime ? (await this.greptime?.ensureAppendMode().catch(() => null)) ?? null : null;
-		const quotingDialectKnown = greptime
-			? await this.greptime?.probeDialect().then(() => this.greptime?.quotingDialectKnown === true).catch(() => false) ?? false
-			: false;
-		const hindsight = hindsightFromEnv();
-		const [index, capacity, hindsightOk, ragflowOk, probe, ledgerCapacity] = await Promise.all([
-			this.index
-				? Promise.resolve()
-						.then(() => this.index!.ping(HEALTH_PROBE_MS))
-						.catch(() => false)
-				: Promise.resolve(false),
-			this.index ? this.indexCapacityForHealth(this.index) : Promise.resolve(null),
-			hindsight
-				? probeHealth(hindsight, this.hindsightFetch, HEALTH_PROBE_MS).then((probed) => probed.ok, () => false)
-				: Promise.resolve(null),
-			this.config.ragflow
-				? listDatasets(this.config.ragflow, this.ragflowFetch, HEALTH_PROBE_MS).then((listed) => listed.ok, () => false)
-				: Promise.resolve(null),
-			// Only a reachable ledger is probed: an unreachable one is already not
-			// writable, and a write that cannot connect would only charge the
-			// breaker twice. Keeps the client's own write timeout rather than
-			// HEALTH_PROBE_MS so a slow day does not read as a full disk. The
-			// `.then` wrapper is for a test fake without the method: `null`, never a throw.
-			greptime
-				? Promise.resolve()
-						.then(() => this.greptime!.probeWritable(this.config.ledger.writeProbeS * 1000))
-						.catch(() => null)
-				: Promise.resolve(null),
-			greptime ? bounded(() => this.greptime!.capacity(HEALTH_PROBE_MS), HEALTH_PROBE_MS) : Promise.resolve(null),
+		const probes = this.healthProbes(timeoutMs, true);
+		const indexStore = this.index;
+		const [greptimeReading, index, hindsightOk, ragflowOk, capacity, ledgerCapacity] = await Promise.all([
+			probes.greptime,
+			probes.index,
+			probes.hindsight,
+			probes.ragflow,
+			indexStore ? this.indexCapacityForHealth(indexStore) : Promise.resolve(null),
+			probes.ledgerCapacity,
 		]);
+		// The jobs and archive reads run after the probes, as on main: the Greptime ping has its verdict before the ledger's
+		// coverage read asks the same breaker for a call.
+		const ledgerJobs = await this.ledgerJobs();
+		const indexArchive = await this.indexArchiveHealth();
+		const greptime = greptimeReading.up;
+		const { appendOnly, quotingDialectKnown, probe } = greptimeReading;
 		const cache = this.cache.health();
 		const breakers = this.planes.snapshots();
 		// uplift-3 N2: every size read that answered in time is one runway sample;
@@ -5949,17 +6177,14 @@ export class Substrate {
 			cache: !cache.enabled ? null : cache.connected ? true : cache.mode === "degraded" || cache.cooldownUntil !== null ? false : null,
 			hindsight: hindsightOk,
 			ragflow: ragflowOk,
+			// Not probed by health: no LightRAG health call exists, so the breaker alone says whether calls are refused.
+			lightrag: null,
 		};
 		const planes = {} as SubstrateHealth["planes"];
 		for (const plane of PLANES) {
 			planes[plane] = { ok: ok[plane], breaker: breakers[plane], lastErrorAt: breakers[plane]?.lastErrorAt ?? null };
 		}
-		const metadataWritable = greptime && quotingDialectKnown && (appendOnly === true || this.config.allowDeduplicatingLedger);
-		// A probe that has not run yet (or is off) neither proves nor disproves;
-		// only a failed one overrides the metadata.
-		const eventsWritable = metadataWritable && probe?.lastProbeOk !== false;
-		const ledgerJobs = await this.ledgerJobs();
-		const indexArchive = await this.indexArchiveHealth();
+		const eventsWritable = this.eventsWritableOf(greptimeReading);
 		return {
 			index,
 			greptime,
@@ -5982,12 +6207,164 @@ export class Substrate {
 		};
 	}
 
+	/**
+	 * The probes `health()` and the fabric read. Each starts now and settles on its own; none waits for another. `probeWrites`
+	 * is whether the Greptime write probe may write: `/healthz` may, on its cadence; the fabric may not, and reads the last verdict.
+	 */
+	private healthProbes(timeoutMs: number | undefined, probeWrites: boolean): HealthProbes {
+		const greptimeClient = this.greptime;
+		const indexStore = this.index;
+		const hindsight = hindsightFromEnv();
+		const greptimeUp = greptimeClient ? this.greptimePing(greptimeClient, timeoutMs) : Promise.resolve(false);
+		const greptimeReading = greptimeClient
+			? greptimeUp.then((up) => (up ? this.greptimeReads(greptimeClient, timeoutMs, probeWrites) : ABSENT_GREPTIME))
+			: Promise.resolve(ABSENT_GREPTIME);
+		return {
+			greptime: greptimeReading,
+			// The size read starts when the ping answers, beside the write probe and not after it. The fabric's Greptime row does not need it.
+			ledgerCapacity: greptimeClient
+				? greptimeUp.then((up) => (up ? bounded(() => greptimeClient.capacity(HEALTH_PROBE_MS), HEALTH_PROBE_MS) : null))
+				: Promise.resolve(null),
+			index: indexStore
+				? Promise.resolve()
+						.then(() => indexStore.ping(HEALTH_PROBE_MS))
+						.catch(() => false)
+				: Promise.resolve(false),
+			hindsight: hindsight
+				? probeHealth(hindsight, this.hindsightFetch, HEALTH_PROBE_MS).then((probed) => probed.ok, () => false)
+				: Promise.resolve(null),
+			ragflow: this.config.ragflow
+				? listDatasets(this.config.ragflow, this.ragflowFetch, HEALTH_PROBE_MS).then((listed) => listed.ok, () => false)
+				: Promise.resolve(null),
+		};
+	}
+
+	/** The Greptime ping: the gate for every other Greptime read. Never rejects. */
+	private async greptimePing(client: GreptimeClient, timeoutMs: number | undefined): Promise<boolean> {
+		return (await this.healthBound(timeoutMs, () => (timeoutMs === undefined ? client.ping() : client.ping(timeoutMs)))) === true;
+	}
+
+	/** The reads after a yes ping: append-mode, dialect and the write probe. Never rejects. */
+	private async greptimeReads(client: GreptimeClient, timeoutMs: number | undefined, probeWrites: boolean): Promise<GreptimeProbe> {
+		// The append-mode, dialect and write-probe reads are independent of one another, so they run together, each under its own
+		// bound. Main ran them one after another; no read's value depends on another's, so the verdicts are the same. On the default
+		// path each read keeps the client's own timeout, as on main. The size read is not here: the events write does not need it.
+		const [appendOnly, quotingDialectKnown, write] = await Promise.all([
+			this.healthBound(timeoutMs, () => client.ensureAppendMode()).then((answer) => answer ?? null),
+			this.healthBound(timeoutMs, async () => {
+				await client.probeDialect();
+				return client.quotingDialectKnown === true;
+			}).then((answer) => answer === true),
+			this.writeProbeReading(client, timeoutMs, probeWrites),
+		]);
+		return { up: true, appendOnly, quotingDialectKnown, probe: write.probe, writeTimedOut: write.timedOut };
+	}
+
+	/**
+	 * The write probe and whether it timed out. A write still waiting at the bound is not a write that succeeded, so the fabric
+	 * reads it as unavailable; it is not the same as a probe that did not run. A probe that throws reads as it always has.
+	 * On the default path there is no bound, so the client's own write timeout applies, as on main.
+	 */
+	private async writeProbeReading(client: GreptimeClient, timeoutMs: number | undefined, probeWrites: boolean): Promise<WriteReading> {
+		// Interval 0 writes nothing and returns the last verdict, so a read with `probeWrites` off never writes.
+		const work = () => client.probeWritable(probeWrites ? this.config.ledger.writeProbeS * 1000 : 0);
+		if (timeoutMs === undefined) {
+			const probe = await Promise.resolve().then(work).catch(() => null);
+			return { probe, timedOut: false };
+		}
+		const outcome = await outcomeWithin(work, timeoutMs);
+		if (outcome.kind === "answer") return { probe: outcome.value, timedOut: false };
+		return { probe: null, timedOut: outcome.kind === "timeout" };
+	}
+
+	/** Whether the ledger accepts writes: the ping's yes, the dialect and append-mode checks, and a write probe that has not failed. */
+	private eventsWritableOf(reading: GreptimeProbe): boolean {
+		const metadataWritable = reading.up && reading.quotingDialectKnown && (reading.appendOnly === true || this.config.allowDeduplicatingLedger);
+		// A probe that has not run yet (or is off) neither proves nor disproves; only a failed one overrides the metadata.
+		return metadataWritable && reading.probe?.lastProbeOk !== false;
+	}
+
+	/** The field behind `sharedHealthProbes`: the probes, when they started, and the Greptime bound they ran with. */
+	private healthShare: { at: number; greptimeTimeoutMs: number | undefined; probes: HealthProbes } | null = null;
+
+	/**
+	 * The probes one window shares (phase 51). The fabric reads them through `fabricSources()`, so calls in one window issue
+	 * one probe per source, and concurrent callers share the same in-flight probes. The memo is keyed on the Greptime bound,
+	 * so a bounded probe never serves another caller. `/healthz` calls `health()`, which starts its own probes, as on main. The fabric's
+	 * probes never write: their Greptime write verdict is the last one `/healthz` recorded.
+	 */
+	sharedHealthProbes(windowMs: number, options: { readonly greptimeTimeoutMs?: number } = {}): HealthProbes {
+		const now = Date.now();
+		const share = this.healthShare;
+		if (share !== null && share.greptimeTimeoutMs === options.greptimeTimeoutMs && now - share.at >= 0 && now - share.at < windowMs) {
+			return share.probes;
+		}
+		const probes = this.healthProbes(options.greptimeTimeoutMs, false);
+		this.healthShare = { at: now, greptimeTimeoutMs: options.greptimeTimeoutMs, probes };
+		return probes;
+	}
+
+	/** `work` under the fabric's bound when one is given. Without one it runs as `/healthz` always has: the client's own timeout, and a throw answers null. Never rejects. */
+	private healthBound<T>(ms: number | undefined, work: () => Promise<T>): Promise<T | null> {
+		return ms === undefined ? Promise.resolve().then(work).catch(() => null) : bounded(work, ms);
+	}
+
 	/** `/healthz.eventBus`: the counters of the bus this process holds. A bus that keeps none (a test fake) reads as zero. */
 	private eventBusHealth(): EventBusHealth {
 		const bus = this.eventBus;
 		if (bus === null) return { enabled: false };
 		const stats: EventBusStats = bus.stats?.() ?? { published: 0, publishFailures: 0, oversizeDropped: 0, malformedIgnored: 0, subscriptionDrops: 0 };
 		return { enabled: true, published: stats.published, failed: stats.publishFailures, oversize: stats.oversizeDropped, malformed: stats.malformedIgnored };
+	}
+
+	/**
+	 * The fabric's read-only view of this process (phase 51, SOTA-07). It reads through the existing health, the
+	 * Railway cost report and the retain outbox, adds no probe, and carries presence and endpoint classes only:
+	 * no URL, host or credential is in the view.
+	 */
+	fabricSources(): FabricSources {
+		const { dbEndpoints } = this.config;
+		return {
+			now: () => new Date().toISOString(),
+			health: () => {
+				const probes = this.sharedHealthProbes(FABRIC_HEALTH_WINDOW_MS, { greptimeTimeoutMs: HEALTH_PROBE_MS });
+				return {
+					greptime: probes.greptime.then((probe) => ({
+						up: probe.up,
+						eventsWritable: this.eventsWritableOf(probe),
+						writeTimedOut: probe.writeTimedOut,
+						// With the write probe on, a probe that has recorded no verdict is an unknown write. With it off (interval 0) the
+						// verdict is metadata-only, so nothing is missing and the Greptime row is not unavailable for want of a write.
+						writeUnread: this.config.ledger.writeProbeS > 0 && (probe.probe === null || probe.probe.lastProbeAt === null),
+					})),
+					index: probes.index,
+					hindsight: probes.hindsight,
+					ragflow: probes.ragflow,
+				};
+			},
+			snapshot: () => ({
+				cache: this.cache.health(),
+				eventBus: { enabled: this.eventBusHealth().enabled },
+				breakers: this.planes.snapshots(),
+			}),
+			railwayCost: () => this.railway.costReport(),
+			outbox: () => {
+				const stats = this.retainOutboxStats();
+				return { size: stats.size, oldestAt: stats.oldestAt };
+			},
+			config: {
+				endpointPolicy: dbEndpoints.policy,
+				endpointClasses: { ...dbEndpoints.classes },
+				configured: {
+					"timescaledb-index": this.index !== null,
+					greptime: this.config.greptime !== null,
+					dragonfly: this.config.dragonflyUrl !== undefined || this.config.dragonflyRefused !== null,
+					hindsight: hindsightFromEnv() !== null,
+					ragflow: this.config.ragflow !== null,
+				},
+				dragonflyRefused: this.config.dragonflyRefused !== null,
+			},
+		};
 	}
 
 	/** The last index size report `SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S` keeps, and the measurement still running. */
@@ -6129,6 +6506,52 @@ export class Substrate {
 		if (memo === null || now - memo.at >= LEDGER_JOBS_MEMO_MS) return null;
 		return { ledger: memo.value, reason: memo.reason };
 	}
+}
+
+/** One Greptime probe's reading: the ping, and after a yes the dialect, append-mode and write-probe checks. */
+export interface GreptimeProbe {
+	readonly up: boolean;
+	readonly appendOnly: boolean | null;
+	readonly quotingDialectKnown: boolean;
+	readonly probe: LedgerProbe | null;
+	/** The write probe ran out its bound: the write is still waiting, which is neither a pass nor a failure. */
+	readonly writeTimedOut: boolean;
+}
+
+/** The probes `health()` and the fabric read. Each settles on its own, so none waits for another. */
+export interface HealthProbes {
+	readonly greptime: Promise<GreptimeProbe>;
+	/** The size read. Only `health()` waits for it: the fabric's Greptime row does not depend on it. */
+	readonly ledgerCapacity: Promise<LedgerCapacity | null>;
+	readonly index: Promise<boolean>;
+	readonly hindsight: Promise<boolean | null>;
+	readonly ragflow: Promise<boolean | null>;
+}
+
+/** The reading of a Greptime that did not answer its ping: nothing past the ping is read. */
+const ABSENT_GREPTIME: GreptimeProbe = { up: false, appendOnly: null, quotingDialectKnown: false, probe: null, writeTimedOut: false };
+
+/** The write probe's reading: the probe, and whether the bound expired before it answered. */
+interface WriteReading {
+	readonly probe: LedgerProbe | null;
+	readonly timedOut: boolean;
+}
+
+/** How a probe ended under a bound: its answer, a timeout, or a throw. A probe is never a null that could mean either. */
+type ProbeOutcome<T> = { readonly kind: "answer"; readonly value: T } | { readonly kind: "timeout" } | { readonly kind: "failed" };
+
+/** `work` under `ms`: its answer, `timeout` when it outlasts `ms`, `failed` when it throws. Never rejects. */
+function outcomeWithin<T>(work: () => Promise<T>, ms: number): Promise<ProbeOutcome<T>> {
+	const { promise: expired, resolve: expire } = Promise.withResolvers<ProbeOutcome<T>>();
+	const timer = setTimeout(() => expire({ kind: "timeout" }), ms);
+	timer.unref?.();
+	const answer = Promise.resolve()
+		.then(work)
+		.then<ProbeOutcome<T>, ProbeOutcome<T>>(
+			(value) => ({ kind: "answer", value }),
+			() => ({ kind: "failed" }),
+		);
+	return Promise.race([answer, expired]).finally(() => clearTimeout(timer));
 }
 
 /** How long one `anchorCoverage` read serves `/healthz.jobs.ledger` (uplift-3 N6). */

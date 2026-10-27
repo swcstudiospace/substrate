@@ -1,19 +1,22 @@
 # Verification gate and CI
 
-The gate is four checks, run in this order. `bun run verify` runs them locally; `.github/workflows/ci.yml` runs the same commands on GitHub.
+The gate is five checks, run in this order. `bun run verify` runs them locally; `.github/workflows/ci.yml` runs the same commands on GitHub.
 
 | Step | Command | What it proves |
 |---|---|---|
 | `install` | `bun install --frozen-lockfile` | `bun.lock` matches every `package.json` |
 | `types` | `bunx tsc --noEmit` | the whole workspace typechecks |
 | `tests` | `bun test` | the full suite passes |
+| `python` | `uv run --no-project --with httpx==0.28.1 --with pytest==9.1.1 python -m pytest packages/miner/tests packages/dispatcher/tests` | the miner and dispatcher Python suites pass, in an ephemeral environment pinned to the versions they were verified with |
 | `locks` | `bun run check:phase-close` | the event vocabulary, store lock, audit policy and redaction locks hold |
 | `audit` (opt-in) | `bun scripts/audit-gate.ts` | no high or critical advisory in the lockfile, except the accepted risks below; needs the network |
 
 ## Run it locally
 
+Prerequisites: Bun 1.4.0 and `uv` on `PATH`. The `python` step runs `uv run`. CI installs the pinned `uv` release and checks its SHA-256 before use, so a local run needs `uv` installed too.
+
 ```sh
-bun run verify              # install, types, tests, locks
+bun run verify              # install, types, tests, python, locks
 bun run verify --audit      # plus the dependency audit
 bun run verify --only types,locks
 bun run verify --keep-going # do not stop at the first failure
@@ -22,11 +25,11 @@ bun run verify --list
 
 A passing step prints one line (with the pass/skip/fail counts for the suite). A failing step prints the last 60 lines of its output and the run stops, exit code 1. Exit code 2 means bad usage.
 
-`scripts/verify.test.ts` reads `.github/workflows/ci.yml` and fails when the workflow runs different commands from `bun run verify`, when a job loses its `CI_ENABLED` switch, or when the report-only `boot-gate` job stops being last, report-only or limited to `bun install --frozen-lockfile` and `bun run gate:boot`, so the workflow cannot drift apart silently.
+`scripts/verify.test.ts` reads `.github/workflows/ci.yml` and fails when the workflow runs different commands from `bun run verify`, when a job loses its `CI_ENABLED` switch, when the report-only `boot-gate` job stops being report-only or limited to `bun install --frozen-lockfile` and `bun run gate:boot`, or when the report-only `lint-report` job stops being report-only or limited to the install and `bunx biome lint`, so the workflow cannot drift apart silently.
 
 ### The database-backed tests
 
-About 56 tests (leases, memory, search, graph bindings) skip when `SUBSTRATE_TEST_PG_URL` is unset, and `bun run verify` says so. CI runs them against a scratch Postgres 16. To run them locally, use the rehearsal twin ([`rehearsal.md`](rehearsal.md)), which starts a scratch Postgres and GreptimeDB and writes an env file that exports the variable:
+About 56 tests (leases, memory, search, graph bindings) skip when `SUBSTRATE_TEST_PG_URL` is unset, and `bun run verify` says so. CI runs them against a scratch Postgres 16 that the `verify` job starts from the runner image's PostgreSQL 16 binaries (see below). To run them locally, use the rehearsal twin ([`rehearsal.md`](rehearsal.md)), which starts a scratch Postgres and GreptimeDB and writes an env file that exports the variable:
 
 ```sh
 bun run rehearsal up --name local --port 0
@@ -40,11 +43,16 @@ Nothing in the suite needs GreptimeDB; the real-store proofs are the rehearsal s
 
 | Job | Runner | When | Steps |
 |---|---|---|---|
-| `verify` ("Typecheck, tests and repo locks") | `ubuntu-latest` | same-repo pull request, push to `main`, on demand (never on the schedule) | the four steps above, with a Postgres 16 service container and a full-history checkout (`check:phase-close` diffs against a baseline commit) |
-| `dependency-audit` ("Known-vulnerability audit") | `ubuntu-latest` | same-repo pull request, push to `main`, Mondays 03:17 UTC, on demand | `bun install --frozen-lockfile --ignore-scripts`, `bun scripts/audit-gate.ts` |
-| `boot-gate` ("Boot and prove (report-only)") | `[self-hosted, Linux, X64]` | same-repo pull request, push to `main`, on demand (never on the schedule); only when `BOOT_GATE` is `true` | `bun install --frozen-lockfile`, `bun run gate:boot` |
+| `verify` ("Typecheck, tests and repo locks") | `[self-hosted, linux, x64, omega-ci]` | same-repo pull request, push to `main`, on demand (never on the schedule) | the five steps above, with a scratch Postgres 16 (the local `scratch-postgres` action) and a full-history checkout (`check:phase-close` diffs against a baseline commit) |
+| `dependency-audit` ("Known-vulnerability audit") | `[self-hosted, linux, x64, omega-ci]` | push to `main`, Mondays 03:17 UTC, on demand (never on a pull request) | `bun install --frozen-lockfile --ignore-scripts`, `bun scripts/audit-gate.ts` |
+| `boot-gate` ("Boot and prove (report-only)") | `[self-hosted, linux, x64, omega-ci]` | same-repo pull request, push to `main`, on demand (never on the schedule); only when `BOOT_GATE` is `true` | `bun install --frozen-lockfile`, `bun run gate:boot` |
+| `lint-report` ("Lint (Biome, report-only)") | `[self-hosted, linux, x64, omega-ci]` | same-repo pull request, push to `main`, on demand (never on the schedule) | `bun install --frozen-lockfile`, `bunx biome lint --reporter=summary .` (`continue-on-error`: findings never block) |
 
-Fork pull requests run none of these jobs: each job's `if:` skips a pull request whose head repository is not this repository, because a fork's code would otherwise run on this repository's runners. Same-repo pull requests do run the audit, so a new high or critical advisory fails `dependency-audit` until the package is upgraded or listed under the accepted risks below. The weekly scheduled run re-checks the lockfile for advisories published between changes; a red scheduled run is the signal to upgrade.
+Fork pull requests run none of these jobs: each job's `if:` skips a pull request whose head repository is not this repository, because a fork's code would otherwise run on the shared runner pool.
+
+Lint is report-only. `bun run lint` runs `biome lint` (Biome 2.6.2 with the recommended rules; the formatter is off, so nothing is reformatted). The `lint-report` job runs the same command with `continue-on-error`, so its findings are advisory. Making it blocking is a separate decision, taken after the findings are triaged.
+
+Every job runs on the Omega CI runner pool (`[self-hosted, linux, x64, omega-ci]`, [swcstudiospace/Omega-Prime `docs/ci-runners.md`](https://github.com/swcstudiospace/Omega-Prime/blob/main/docs/ci-runners.md)), never on GitHub-hosted runners. Jobs run as an unprivileged user with no Docker and no `sudo`, so there are no service containers. The `verify` job's scratch database comes from [`.github/actions/scratch-postgres`](../.github/actions/scratch-postgres/action.yml): it runs `initdb` and `pg_ctl` from the image's PostgreSQL 16 into `$RUNNER_TEMP`, listening on 127.0.0.1 and a port the kernel reports free for that job (parallel jobs on one runner host never clash), with trust authentication on loopback. It creates `substrate_test` and exports `SUBSTRATE_TEST_PG_URL`. An `if: always()` step of the same action stops the cluster. Both are `uses:` steps, so the job's `run:` lines stay exactly the gate's four commands. The dependency audit runs on pushes to `main`, weekly and on demand, not on pull requests, so a new high or critical advisory fails it until the package is upgraded or listed under the accepted risks below. The weekly scheduled run re-checks the lockfile for advisories published between changes; a red scheduled run is the signal to upgrade.
 
 ### Accepted risk and the audit gate
 
@@ -68,7 +76,7 @@ Adding or changing an entry is a reviewed change to `.github/audit-accepted-risk
 
 The job is **report-only**: `continue-on-error: true`, so a red or exit-2 run is reported on the run page and never blocks a pull request or turns the workflow red. It has no Postgres service container; the harness starts its own stores.
 
-It is opt-in on a second repository variable, because it starts containers on the shared self-hosted runner:
+It is opt-in on a second repository variable, because it starts containers. **On the Omega CI pool it cannot run yet:** the pool has no Docker daemon, so the harness exits 2 at its Docker preflight. Keep `BOOT_GATE` unset until the rehearsal harness gains a native-process store backend (PostgreSQL 16 and `greptime` binaries are in the runner image; the outage step would pause the ledger process instead of its container). The constraints below describe the Docker harness as it stands:
 
 ```sh
 gh variable set BOOT_GATE --body true --repo swcstudiospace/agent-substrate   # on (also needs CI_ENABLED)
@@ -100,4 +108,4 @@ gh variable delete CI_ENABLED --repo swcstudiospace/agent-substrate            #
 - Keep `permissions: contents: read` and `persist-credentials: false`. No secrets belong in this file; the database password is a scratch value for a container that lives for one job.
 - Change a gate command in `scripts/verify.ts` and in the workflow together; the drift test names whichever one you forgot.
 - The job and step names are stable on purpose: they are what a branch-protection rule would require.
-- No Python tests exist on `main` yet. When the dispatcher and miner land (milestone v1.3), add a `setup-python` step pinned by commit SHA and a pytest step to `verify`, and mirror it in `scripts/verify.ts`.
+- The Python suites in `packages/miner/tests` and `packages/dispatcher/tests` run in the `python` step of `verify` and in the `verify` job. Their dependencies come from `uv run --no-project` with exact pins; keep those pins in sync with the packages' declared `httpx>=0.27` and `pytest>=8.0`.

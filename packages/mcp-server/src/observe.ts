@@ -296,6 +296,8 @@ export function createObservability(
 			bootWarnings.push(`slo checkpoint carried ${skipped.length} metric(s) this release does not record or whose buckets moved, left out: ${skipped.join(", ")}`);
 		}
 	}
+	// phase 51: the data planes on a configured proxy, counted from the endpoint classes at boot. The fabric's tailscale-proxy row reads the same classes.
+	instruments.setEndpointProxyPlanes(Object.values(config.dbEndpoints.classes).filter((endpointClass) => endpointClass === "proxy").length);
 	const epoch = restored ? restored.epoch + 1 : 1;
 	const since = restored ? restored.since : new Date(instruments.registry.startedAt).toISOString();
 	/** ISO time of the newest checkpoint write this process knows of. */
@@ -649,6 +651,9 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"railway_cost",
 	"railway_scale",
 	"railway_deploy",
+	"fabric_status",
+	"fabric_optimize",
+	"fabric_compliance",
 	// REST routes, as `server.ts` audits them. A route audited under a tool's own name
 	// (`/memory` as `memory_write`) is covered by that name above and not repeated.
 	"brief",

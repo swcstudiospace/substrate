@@ -69,7 +69,7 @@ implicit allow.
   unauthenticated caller arrives as `unknown` and writes nothing at all. This
   is the teeth: default-deny that a wildcard quietly defeats is not default-deny.
 
-**Swarm surfaces (ADR 0001 S3).** The 15 `swarm-a01-orch` … `swarm-a15-doc` surfaces are
+**Swarm surfaces (ADR 0001 S3).** The 30 `swarm-a01-orch` … `swarm-a30-custody` surfaces are
 known surfaces, so the `"*"` grants above already cover them; no swarm-specific grant
 exists and none is needed. Under the default grants their working set is
 `decision`/`fact` at `graph:` and `repo:` scope, and `fact` (not `decision`) at their own

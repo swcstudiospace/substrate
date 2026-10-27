@@ -1,11 +1,11 @@
 /** Shared shapes for the substrate. Mirrors Notion §5.2 and §5.3. */
 
 /**
- * The 15 Agent Swarm agents, A01..A15 in order, one surface each.
+ * The 30 Agent Swarm agents, A01..A30 in order, one surface each.
  *
  * Real surfaces rather than one shared `swarm` surface: memory RBAC is default-deny
  * per surface and a lease holder is (surface, session_id), so a shared surface would
- * make all 15 agents one memory writer and one lease holder. Server-side each has its
+ * make all 30 agents one memory writer and one lease holder. Server-side each has its
  * own `SUBSTRATE_TOKEN_<SURFACE>`; see `docs/swarm-correlation.md`.
  */
 export const SWARM_SURFACES = [
@@ -24,6 +24,21 @@ export const SWARM_SURFACES = [
 	"swarm-a13-obs",
 	"swarm-a14-maint",
 	"swarm-a15-doc",
+	"swarm-a16-cloud",
+	"swarm-a17-plat",
+	"swarm-a18-supply",
+	"swarm-a19-event",
+	"swarm-a20-finops",
+	"swarm-a21-k8s",
+	"swarm-a22-gitops",
+	"swarm-a23-mesh",
+	"swarm-a24-ksec",
+	"swarm-a25-resil",
+	"swarm-a26-sol",
+	"swarm-a27-audit",
+	"swarm-a28-chain",
+	"swarm-a29-dapp",
+	"swarm-a30-custody",
 ] as const;
 export type SwarmSurface = (typeof SWARM_SURFACES)[number];
 
@@ -481,4 +496,142 @@ export interface GraphView extends GraphIndexRow {
 	nodes: GraphNode[];
 	steps: GraphStep[];
 	edges: GraphEdge[];
+}
+
+/**
+ * Which docs plane serves a retrieval. `ragflow` is the incumbent default;
+ * `lightrag` is the graph-backed cutover target. Additive: no existing
+ * reply or input shape changes meaning.
+ */
+export const RETRIEVAL_BACKENDS = ["ragflow", "lightrag"] as const;
+export type RetrievalBackend = (typeof RETRIEVAL_BACKENDS)[number];
+
+/**
+ * Pick the serving backend from what is configured. An explicit preference
+ * wins when it is available; otherwise ragflow keeps today's default when it
+ * is configured; otherwise lightrag; otherwise null (no plane reachable).
+ */
+export function selectRetrievalBackend(
+	available: { ragflow: boolean; lightrag: boolean },
+	prefer?: RetrievalBackend,
+): RetrievalBackend | null {
+	if (prefer !== undefined && available[prefer]) return prefer;
+	if (available.ragflow) return "ragflow";
+	if (available.lightrag) return "lightrag";
+	return null;
+}
+
+/** One directed edge in a planning-graph hint: `source -[kind]-> target`. */
+export interface PlanningGraphRelation {
+	source: string;
+	target: string;
+	kind: string;
+}
+
+/**
+ * Graph context a planning scan hands to ingest/retrieval so the LightRAG
+ * plane can bias toward the entities and relations the plan actually names.
+ * `phase` is the originating phase id (e.g. `"03-foundation"`); empty
+ * entity/relation lists mean "no bias".
+ */
+export interface PlanningGraphHint {
+	phase: string;
+	entities: string[];
+	relations: PlanningGraphRelation[];
+}
+
+/**
+ * What the serving plane reports about graph coverage on a reply: the
+ * entity/relation counts behind the citations. 0 means none or unknown.
+ * Lives on `SearchReply.graph` (optional, LightRAG-served replies only).
+ */
+export interface SearchGraphStats {
+	entities: number;
+	relations: number;
+}
+
+/**
+ * Which graph nodes back a citation: the matched entity names and, when the
+ * backend reports it, how many relations support the chunk. Lives on
+ * `SearchCitation.graph` (optional, LightRAG-served citations only; absent
+ * on RAGFlow citations).
+ */
+export interface CitationGraphProvenance {
+	entities: string[];
+	relations?: number;
+}
+/**
+ * Explicit RAG state machine for the GSD-Core optimization and RAG
+ * replacement (SPE-19388, SPE-19384). The machine is owned by the serving
+ * layer (`mcp.ts` singleton, shared with `server.ts` routes); the docs
+ * search/ingest path only reports transitions, never mutates the machine
+ * directly. Every transition is logged as one structured stderr line, and
+ * the snapshot (with `stateHash` for polling change detection) is served
+ * on `docs_rag_state` / `GET /rag/state`.
+ */
+export const RAG_STATES = ["IDLE", "STEERING", "CONTEXT_REFRESH", "DEGRADED", "ERROR"] as const;
+export type RagState = (typeof RAG_STATES)[number];
+
+/**
+ * Allowed transitions. `IDLE` only steers; steering either refreshes
+ * context or bails out; a refresh either lands or degrades; a degraded
+ * plane may retry (steer again), recover, or trip the breaker to `ERROR`;
+ * `ERROR` only leaves via a fresh steer or an explicit reset to `IDLE`.
+ */
+export const RAG_STATE_TRANSITIONS: Record<RagState, readonly RagState[]> = {
+	IDLE: ["STEERING"],
+	STEERING: ["CONTEXT_REFRESH", "IDLE", "DEGRADED"],
+	CONTEXT_REFRESH: ["IDLE", "DEGRADED"],
+	DEGRADED: ["STEERING", "ERROR", "IDLE"],
+	ERROR: ["STEERING", "IDLE"],
+};
+
+/** Whether `from -> to` is an allowed transition. */
+export function canTransitionRagState(from: RagState, to: RagState): boolean {
+	return RAG_STATE_TRANSITIONS[from].includes(to);
+}
+
+/** Observable RAG machine snapshot. `stateHash` changes on every mutation. */
+export interface RagStateSnapshot {
+	state: RagState;
+	updatedAt: string;
+	consecutiveFailures: number;
+	consecutiveSuccesses: number;
+	lastReason?: string;
+	stateHash: string;
+}
+
+/** Deterministic hash for snapshot change detection (FNV-1a, hex). */
+export function ragStateHash(state: RagState, failures: number, successes: number, reason: string | undefined): string {
+	const text = `${state}|${failures}|${successes}|${reason ?? ""}`;
+	let hash = 0x811c9dc5;
+	for (let index = 0; index < text.length; index += 1) {
+		hash ^= text.charCodeAt(index);
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+/** One LightRAG REST `/query` hit, as the query surface serves it (REST/JSON). */
+export interface RagLightragChunk {
+	content: string;
+	title: string;
+	sourceUrl: string;
+	score: number;
+}
+
+/**
+ * What `docs_lightrag_query` / `POST /docs/lightrag/query` answers: the
+ * LightRAG REST JSON result with graph coverage, the serving state, and —
+ * when the plane failed and Hindsight answered instead — `fallback:
+ * "hindsight"`. `degraded` is set only when nothing could be served.
+ */
+export interface RagLightragResult {
+	backend: "lightrag";
+	chunks: RagLightragChunk[];
+	graph: SearchGraphStats;
+	state: RagStateSnapshot;
+	degraded?: true;
+	reason?: string;
+	fallback?: "hindsight";
 }

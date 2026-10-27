@@ -1,11 +1,13 @@
 ---
 phase: 47-forecast-preload
 verified: 2026-10-21
-status: passed in-repo. Live forecast accuracy and the live Dragonfly warm-up are not exercised
+status: human_needed
 score: 2 of 2 acceptance criteria proven in-repo (predictive rows on /slo; pattern-based preload)
 verified_on: gsd/v15-47-forecast on its final tree, based on origin/main f2138e1
 covered_files: ["packages/observability/src/forecast.ts", "packages/observability/src/forecast.test.ts", "packages/observability/src/index.ts", "packages/mcp-server/src/metrics-history.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/slo-history.test.ts", "packages/mcp-server/src/preload.ts", "packages/mcp-server/src/preload.test.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/index.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/flag-registry.ts", ".env.example", "docs/observability.md", "docs/data-planes.md", "docs/config-reference.md"]
 ---
+
+> Status detail, kept verbatim from the original frontmatter: passed in-repo. Live forecast accuracy and the live Dragonfly warm-up are not exercised
 
 # 47-VERIFICATION: Predictive SLO rows and pattern-based cache preload
 

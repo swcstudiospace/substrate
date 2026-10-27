@@ -13,10 +13,13 @@ import { loadConfig } from "./config.ts";
 import {
 	INGEST_CALL_MAX_BYTES,
 	INGEST_PAGE_MAX_BYTES,
+	extractPlanningGraphHint,
 	batchIngestPages,
 	ingestDocs,
+	isPlanningPage,
 	loadIngestRecords,
 	nodeIo,
+	planningPhaseOf,
 	preflightIngestPages,
 	saveIngestRecords,
 	scanIngestPages,
@@ -294,6 +297,32 @@ describe("docs_ingest review hardening", () => {
 		if (linked.ok) throw new Error("expected a refusal");
 		expect(linked.reason).toBe("outside-roots");
 		expect(fake.uploads).toHaveLength(0);
+	});
+
+	test("refuses a secret in graph strings on the LightRAG path before any upload", async () => {
+		const fake = new RagflowFake();
+		const events: EventInput[] = [];
+		const outcome = await ingestDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: { url: "http://lightrag.test" },
+				lightragDatasets: { list: async () => ({ ok: true, datasets: [{ id: "agent-substrate", name: "agent-substrate" }] }), invalidate: () => undefined },
+				lightragFetch: fake.fetch,
+				seen: new Map<string, IngestRecord>(),
+				poll: { intervalMs: 0 },
+				emit: async (event: EventInput): Promise<unknown> => {
+					events.push(event);
+					return { stored: false };
+				},
+				surface: "omp",
+			},
+			{ dataset: "agent-substrate", pages: [{ ...PAGE, graph: { phase: "docs", entities: ["sk-proj-abcdefghij1234567890"], relations: [] } }] },
+		);
+		if (outcome.ok) throw new Error("expected a refusal");
+		expect(outcome.reason).toMatch(/^secret-findings/);
+		expect(fake.uploads).toHaveLength(0);
+		expect(JSON.stringify(events)).not.toContain("sk-proj-");
 	});
 
 	test("keys records by dataset so a second dataset ingests and the first still skips", async () => {
@@ -577,6 +606,19 @@ describe("docs_ingest expected_version (memory's contract)", () => {
 		expect(warnings.at(-1)?.payload).toMatchObject({ action: "docs.ingest", status: "refused", reason: "version.stale" });
 	});
 
+	test("a stale docs write is refused with outcome conflict and uploads nothing", async () => {
+		const fake = new RagflowFake();
+		const { ingest } = harness(fake);
+		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
+		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
+		const uploadsBefore = fake.uploads.length;
+
+		const stale = await ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, body: `${PAGE.body} Stale.`, expected_version: 7 }] });
+		if (stale.ok) throw new Error("expected a version.stale refusal");
+		expect(stale).toMatchObject({ refused: true, reason: "version.stale", outcome: "conflict" });
+		expect(fake.uploads).toHaveLength(uploadsBefore);
+	});
+
 	test("a matching expected_version is accepted and the record version increments", async () => {
 		const fake = new RagflowFake();
 		const { seen, ingest } = harness(fake);
@@ -609,6 +651,35 @@ describe("docs_ingest expected_version (memory's contract)", () => {
 		if (!skipped.ok) throw new Error(`expected skip: ${skipped.reason}`);
 		expect(skipped.results[0]?.status).toBe("unchanged");
 		expect([...seen.values()][0]?.version).toBe(2);
+	});
+});
+
+describe("docs_ingest expected_version on the LightRAG plane", () => {
+	test("a page expecting a version nothing has on record is refused before any upload", async () => {
+		const fake = new RagflowFake();
+		const events: EventInput[] = [];
+		const seen = new Map<string, IngestRecord>();
+		const outcome = await ingestDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: { url: "http://lightrag.test" },
+				lightragDatasets: { list: async () => ({ ok: true, datasets: [{ id: "agent-substrate", name: "agent-substrate" }] }), invalidate: () => undefined },
+				lightragFetch: fake.fetch,
+				seen,
+				poll: { intervalMs: 0 },
+				emit: async (event: EventInput): Promise<unknown> => {
+					events.push(event);
+					return { stored: false };
+				},
+				surface: "omp",
+			},
+			{ dataset: "agent-substrate", pages: [{ ...PAGE, expected_version: 7 }] },
+		);
+		if (outcome.ok) throw new Error("expected a version.stale refusal");
+		expect(outcome).toMatchObject({ refused: true, reason: "version.stale", page: PAGE.path, current_version: null, changed: false });
+		expect(fake.uploads).toHaveLength(0);
+		expect(seen.size).toBe(0);
 	});
 });
 
@@ -816,5 +887,206 @@ describe("a refresh's ingest calls (split under the call limit)", () => {
 		expect(await preflightIngestPages(deps, { dataset: "agent-substrate", pages: wideSkills() })).toBeUndefined();
 		expect(await preflightIngestPages(deps, { dataset: "agent-substrate", pages: [] })).toBe("no-pages");
 		expect(fake.uploads).toHaveLength(0);
+	});
+});
+
+describe("planning scan graph hints (LightRAG path)", () => {
+	test("isPlanningPage admits only .planning markdown", () => {
+		expect(isPlanningPage(".planning/PROJECT.md")).toBe(true);
+		expect(isPlanningPage(".planning/phases/25-x/PLAN.md")).toBe(true);
+		expect(isPlanningPage("docs/data-planes.md")).toBe(false);
+		expect(isPlanningPage(".planning/diagram.png")).toBe(false);
+		expect(isPlanningPage(".planning/../docs/escape.md")).toBe(false);
+	});
+
+	test("planningPhaseOf names the phase directory, else the planning path", () => {
+		expect(planningPhaseOf(".planning/phases/25-x/PLAN.md")).toBe("25-x");
+		expect(planningPhaseOf(".planning/PROJECT.md")).toBe("PROJECT");
+		expect(planningPhaseOf("docs/data-planes.md")).toBe("docs/data-planes");
+	});
+
+	test("headings become entities with parent-child contains relations", () => {
+		const hint = extractPlanningGraphHint(".planning/phases/25-x/PLAN.md", "# Phase plan\n\n## Access path\n");
+		expect(hint?.phase).toBe("25-x");
+		expect(hint?.entities).toEqual(["Phase plan", "Access path"]);
+		expect(hint?.relations).toEqual([{ source: "Phase plan", target: "Access path", kind: "contains" }]);
+	});
+
+	test("markdown links become links-to from the enclosing heading, targets verbatim", () => {
+		const hint = extractPlanningGraphHint(
+			".planning/phases/25-x/PLAN.md",
+			"# Phase plan\n\nImplements the [retriever](../docs/data-planes.md) for the phase.\n\n## Access path\n",
+		);
+		expect(hint?.relations).toEqual([
+			{ source: "Phase plan", target: "Access path", kind: "contains" },
+			{ source: "Phase plan", target: "../docs/data-planes.md", kind: "links-to" },
+		]);
+	});
+
+	test("non-planning pages yield no hint; heading-less planning pages yield empty lists", () => {
+		expect(extractPlanningGraphHint("docs/data-planes.md", "# Heading\n")).toBeUndefined();
+		expect(extractPlanningGraphHint(".planning/note.md", "Just prose with a [link](target.md).\n")).toEqual({
+			phase: "note",
+			entities: [],
+			relations: [{ source: "note", target: "target.md", kind: "links-to" }],
+		});
+	});
+
+	test("fences and frontmatter contribute nothing; images and duplicate headings are skipped", () => {
+		const hint = extractPlanningGraphHint(
+			".planning/PROJECT.md",
+			"---\ntitle: sample\n---\n\n```\n# Not a heading\n```\n\n# Real\n\n![diagram](img.png)\n\n# Real\n",
+		);
+		expect(hint?.entities).toEqual(["Real"]);
+		expect(hint?.relations).toEqual([]);
+	});
+
+	test("scanIngestPages attaches graph hints to planning pages only", async () => {
+		const root = mkdtempSync(join(tmpdir(), "substrate-scan-graph-"));
+		try {
+			mkdirSync(join(root, ".planning", "phase-a"), { recursive: true });
+			mkdirSync(join(root, "docs"), { recursive: true });
+			writeFileSync(join(root, ".planning", "phase-a", "PLAN.md"), "# Phase A\n\nImplements the [retriever](../docs/data-planes.md).\n");
+			writeFileSync(join(root, "docs", "small.md"), "# Small\n");
+			const pages = await scanIngestPages(root, ["docs/", ".planning/"]);
+			expect(pages.map((page) => page.path).sort()).toEqual([".planning/phase-a/PLAN.md", "docs/small.md"]);
+			const planning = pages.find((page) => page.path === ".planning/phase-a/PLAN.md");
+			expect(planning?.graph).toEqual({
+				phase: "phase-a",
+				entities: ["Phase A"],
+				relations: [{ source: "Phase A", target: "../docs/data-planes.md", kind: "links-to" }],
+			});
+			const docs = pages.find((page) => page.path === "docs/small.md");
+			expect(docs).toBeDefined();
+			expect("graph" in (docs as object)).toBe(false);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("an oversize planning file is stat-checked, never read, and yields no hint", async () => {
+		const root = mkdtempSync(join(tmpdir(), "substrate-scan-graph-size-"));
+		try {
+			mkdirSync(join(root, ".planning"), { recursive: true });
+			writeFileSync(join(root, ".planning", "huge.md"), "x".repeat(INGEST_PAGE_MAX_BYTES + 1));
+			const reads: string[] = [];
+			const io: ScanIo = {
+				...nodeIo,
+				readFile: (path, options) => {
+					reads.push(String(path));
+					return nodeIo.readFile(path, options);
+				},
+			};
+			const pages = await scanIngestPages(root, [".planning/"], io);
+			expect(pages).toEqual([]);
+			expect(reads.some((path) => path.endsWith("huge.md"))).toBe(false);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("ingest accepts call-level graphHints on the RAGFlow path unchanged", async () => {
+		const fake = new RagflowFake();
+		const { ingest } = harness(fake);
+		const outcome = await ingest({
+			dataset: "agent-substrate",
+			commit: "abc123",
+			pages: [PAGE],
+			graphHints: [{ phase: "test", entities: ["substrate"], relations: [] }],
+		});
+		if (!outcome.ok) throw new Error(`expected ingest: ${outcome.reason}`);
+		expect(outcome.results).toHaveLength(1);
+		expect(outcome.results[0]?.status).toBe("ingested");
+		expect(fake.uploads).toHaveLength(1);
+	});
+});
+
+/**
+ * A LightRAG stand-in for the ingest path. The upload route records each file it accepts (its content, source URL
+ * and the graph the form carries) and answers 500 for any content `failUploadWhen` names. Scan and parse status
+ * answer at once.
+ */
+class LightragFake {
+	readonly uploads: Array<{ content: string; source_url: string; graph: string }> = [];
+	failUploadWhen: ((content: string) => boolean) | null = null;
+	readonly fetch: FetchLike = async (input, init) => {
+		const url = new URL(String(input));
+		if (init?.method === "POST" && url.pathname === "/documents/upload") {
+			const form = init.body as FormData;
+			const content = await (form.get("file") as Blob).text();
+			if (this.failUploadWhen?.(content) === true) return Response.json({ detail: "upload refused" }, { status: 500 });
+			const id = `trk-${this.uploads.length + 1}`;
+			this.uploads.push({ content, source_url: String(form.get("source_url")), graph: String(form.get("graph_entities") ?? "") });
+			return Response.json({ status: "success", data: { track_id: id } });
+		}
+		if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+		if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+		return Response.json({ detail: "no route" }, { status: 404 });
+	};
+}
+
+function lightragHarness(fake: LightragFake) {
+	const seen = new Map<string, IngestRecord>();
+	const deps: IngestDeps = {
+		config: null,
+		backend: "lightrag",
+		lightragConfig: { url: "http://lightrag.test" },
+		lightragDatasets: { list: async () => ({ ok: true, datasets: [{ id: "agent-substrate", name: "agent-substrate" }] }), invalidate: () => undefined },
+		lightragFetch: fake.fetch,
+		seen,
+		poll: { intervalMs: 0 },
+		emit: async (): Promise<unknown> => ({ stored: false }),
+		surface: "omp",
+	};
+	return { seen, ingest: (input: IngestInput): Promise<IngestOutcome> => ingestDocs(deps, input) };
+}
+
+describe("docs_ingest on the LightRAG plane: failed writes and graph corrections", () => {
+	test("a later page of a source URL is not written once an earlier page of that URL failed in the call", async () => {
+		const fake = new LightragFake();
+		fake.failUploadWhen = (content) => content.startsWith("First");
+		const { seen, ingest } = lightragHarness(fake);
+		const outcome = await ingest({
+			dataset: "agent-substrate",
+			pages: [
+				{ ...PAGE, body: "First version of the data planes.", expected_version: 0 },
+				{ ...PAGE, body: "Second version of the data planes.", expected_version: 1 },
+				{ path: "docs/other.md", source_url: "https://example.com/agent-substrate/other", body: "An unrelated page." },
+			],
+		});
+		if (!outcome.ok) throw new Error(`expected a partial ingest: ${outcome.reason}`);
+		const [first, second, other] = outcome.results;
+		expect(first).toMatchObject({ path: PAGE.path, status: "failed" });
+		expect(first?.error).toMatch(/lightrag 500/);
+		expect(second).toMatchObject({ path: PAGE.path, status: "failed" });
+		expect(second?.error).toMatch(/earlier page/);
+		expect(other).toMatchObject({ path: "docs/other.md", status: "ingested" });
+		expect(fake.uploads.map((upload) => upload.content)).toEqual(["An unrelated page."]);
+		expect(seen.size).toBe(1);
+	});
+
+	test("a graph correction with unchanged markdown is a change: the page re-uploads with the corrected graph", async () => {
+		const fake = new LightragFake();
+		const { ingest } = lightragHarness(fake);
+		const page = (entity: string) => ({
+			path: ".planning/phases/01-graph/PLAN.md",
+			source_url: "file:///repo/.planning/phases/01-graph/PLAN.md",
+			body: "# Plan\n\nThe plan body.",
+			graph: { phase: "01-graph", entities: [entity], relations: [] },
+		});
+		const first = await ingest({ dataset: "agent-substrate", pages: [page("Draft entity")] });
+		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
+		expect(first.results[0]?.status).toBe("ingested");
+
+		const corrected = await ingest({ dataset: "agent-substrate", pages: [page("Corrected entity")] });
+		if (!corrected.ok) throw new Error(`expected the correction to store: ${corrected.reason}`);
+		expect(corrected.results[0]?.status).toBe("replaced");
+		expect(fake.uploads).toHaveLength(2);
+		expect(fake.uploads[1]?.graph).toContain("Corrected entity");
+
+		const repeat = await ingest({ dataset: "agent-substrate", pages: [page("Corrected entity")] });
+		if (!repeat.ok) throw new Error(`expected ingest: ${repeat.reason}`);
+		expect(repeat.results[0]?.status).toBe("unchanged");
+		expect(fake.uploads).toHaveLength(2);
 	});
 });

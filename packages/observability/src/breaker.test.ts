@@ -191,7 +191,7 @@ describe("callPlane", () => {
 		// Still every call reaches the plane: no BreakerOpenError, ever.
 		expect(await callPlane(gate, "get", async () => "value")).toBe("value");
 		expect(samples.map((sample) => sample.outcome)).toEqual(["error", "error", "error", "ok"]);
-		expect(registry.snapshots()).toEqual({ greptime: null, index: null, cache: null, hindsight: null, ragflow: null });
+		expect(registry.snapshots()).toEqual({ greptime: null, index: null, cache: null, hindsight: null, ragflow: null, lightrag: null });
 	});
 
 	test("the registry hands out one gate per plane, and snapshots every plane", () => {

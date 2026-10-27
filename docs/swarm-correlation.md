@@ -7,7 +7,7 @@ actually made it.
 
 ## Surfaces and tokens
 
-The 15 swarm agents are surfaces, A01..A15 in this order:
+The thirty swarm agents are surfaces, A01..A30 in this order:
 
 | Agent | Surface | Server-side token variable |
 | --- | --- | --- |
@@ -26,10 +26,25 @@ The 15 swarm agents are surfaces, A01..A15 in this order:
 | A13 | `swarm-a13-obs` | `SUBSTRATE_TOKEN_SWARM_A13_OBS` |
 | A14 | `swarm-a14-maint` | `SUBSTRATE_TOKEN_SWARM_A14_MAINT` |
 | A15 | `swarm-a15-doc` | `SUBSTRATE_TOKEN_SWARM_A15_DOC` |
+| A16 | `swarm-a16-cloud` | `SUBSTRATE_TOKEN_SWARM_A16_CLOUD` |
+| A17 | `swarm-a17-plat` | `SUBSTRATE_TOKEN_SWARM_A17_PLAT` |
+| A18 | `swarm-a18-supply` | `SUBSTRATE_TOKEN_SWARM_A18_SUPPLY` |
+| A19 | `swarm-a19-event` | `SUBSTRATE_TOKEN_SWARM_A19_EVENT` |
+| A20 | `swarm-a20-finops` | `SUBSTRATE_TOKEN_SWARM_A20_FINOPS` |
+| A21 | `swarm-a21-k8s` | `SUBSTRATE_TOKEN_SWARM_A21_K8S` |
+| A22 | `swarm-a22-gitops` | `SUBSTRATE_TOKEN_SWARM_A22_GITOPS` |
+| A23 | `swarm-a23-mesh` | `SUBSTRATE_TOKEN_SWARM_A23_MESH` |
+| A24 | `swarm-a24-ksec` | `SUBSTRATE_TOKEN_SWARM_A24_KSEC` |
+| A25 | `swarm-a25-resil` | `SUBSTRATE_TOKEN_SWARM_A25_RESIL` |
+| A26 | `swarm-a26-sol` | `SUBSTRATE_TOKEN_SWARM_A26_SOL` |
+| A27 | `swarm-a27-audit` | `SUBSTRATE_TOKEN_SWARM_A27_AUDIT` |
+| A28 | `swarm-a28-chain` | `SUBSTRATE_TOKEN_SWARM_A28_CHAIN` |
+| A29 | `swarm-a29-dapp` | `SUBSTRATE_TOKEN_SWARM_A29_DAPP` |
+| A30 | `swarm-a30-custody` | `SUBSTRATE_TOKEN_SWARM_A30_CUSTODY` |
 
 They are real surfaces, not one shared `swarm` surface: memory RBAC is default-deny per
 surface and a lease holder is (surface, `session_id`), so a shared surface would make all
-15 agents one memory writer and one lease holder. Fifteen surfaces means fifteen tokens.
+thirty agents one memory writer and one lease holder. Thirty surfaces means thirty tokens.
 
 The variable name is the **server's** convention (`SUBSTRATE_TOKEN_<SURFACE>`, `-` → `_`,
 uppercased). A swarm client process holds exactly one token, in `SUBSTRATE_TOKEN`, and
