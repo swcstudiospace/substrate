@@ -159,7 +159,7 @@ describe("runCanary against the fake", () => {
 		const fake = new HindsightFake();
 		const hanging = intercept(fake, (method, path) => (method === "POST" && path.endsWith("/memories/recall") ? new Promise<Response>(() => {}) : null));
 		const delay: CanaryDeps["delay"] = (ms) => ({
-			promise: ms === RECALL_BUDGET ? Promise.resolve() : new Promise<void>(() => {}),
+			promise: ms === RECALL_BUDGET || ms === 2000 ? Promise.resolve() : new Promise<void>(() => {}),
 			cancel: () => {},
 		});
 		const { deps } = harness(hanging, { delay });
@@ -169,6 +169,42 @@ describe("runCanary against the fake", () => {
 		expect(recall?.status).toBe("fail");
 		expect(recall?.reason).toContain("recall-timeout");
 		expect(statusOf(outcome.report, "document-delete")).toBe("pass");
+		expect(fake.banks.size).toBe(0);
+	});
+
+	test("a bank create that completes after its timer won is still deleted by cleanup", async () => {
+		const fake = new HindsightFake();
+		const gate = Promise.withResolvers<void>();
+		let createInFlight = false;
+		const putStarted = Promise.withResolvers<void>();
+		const late: FetchLike = async (input, init) => {
+			const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+			if ((init?.method ?? "GET").toUpperCase() === "PUT" && url.pathname.endsWith("/banks/sub-canary-abcd1234")) {
+				createInFlight = true;
+				putStarted.resolve();
+				await gate.promise;
+				createInFlight = false;
+			}
+			const response = await fake.fetch(input, init);
+			// Without a drain, the request that is still in flight lands only after cleanup has deleted the bank.
+			if ((init?.method ?? "GET").toUpperCase() === "DELETE" && url.pathname.endsWith("/banks/sub-canary-abcd1234")) gate.resolve();
+			return response;
+		};
+		// The per-call timer fires only while the create is in flight, so it is reported as a timeout and the request is still running.
+		// Cleanup's drain wait (2000 ms) lets the create finish first: the gate opens exactly when that wait starts.
+		const delay: CanaryDeps["delay"] = (ms) => {
+			if (ms === 2000) {
+				gate.resolve();
+				return { promise: new Promise<void>(() => {}), cancel: () => {} };
+			}
+			if (ms !== 8000) return { promise: new Promise<void>(() => {}), cancel: () => {} };
+			// Fires only for a call whose PUT is in flight when the signal arrives; every later call gets a timer that stays quiet.
+			return { promise: putStarted.promise.then(() => (createInFlight ? undefined : new Promise<void>(() => {}))), cancel: () => {} };
+		};
+		const outcome = await runCanary(harness(late, { delay }).deps);
+		for (let tick = 0; tick < 50; tick++) await Promise.resolve();
+		expect(statusOf(outcome.report, "bank-ensure")).toBe("fail");
+		// The late create landed before the delete, so the bank is gone; a late create after the delete would leave it behind.
 		expect(fake.banks.size).toBe(0);
 	});
 

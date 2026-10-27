@@ -95,9 +95,11 @@ export interface CanaryLimits {
 	recallBudgetMs: number;
 	/** Whole-run deadline: checks past it fail, cleanup still runs. */
 	deadlineMs: number;
+	/** Cleanup waits at most this long for calls whose timer already won (a late create must not outlive the bank delete). */
+	drainMs: number;
 }
 
-export const DEFAULT_CANARY_LIMITS: CanaryLimits = { callTimeoutMs: 8000, recallBudgetMs: 4000, deadlineMs: 120_000 };
+export const DEFAULT_CANARY_LIMITS: CanaryLimits = { callTimeoutMs: 8000, recallBudgetMs: 4000, deadlineMs: 120_000, drainMs: 2000 };
 
 export interface CanaryDeps {
 	args: CanaryArgs;
@@ -190,9 +192,17 @@ export async function runCanary(deps: CanaryDeps): Promise<CanaryOutcome> {
 	let docRetained = false;
 	let docDeleted = false;
 
+	// Calls still in flight when their timer won: cleanup waits for them to settle so a late create cannot outlive the bank delete.
+	const pending = new Set<Promise<unknown>>();
 	const guard = async <T>(op: Promise<HindsightResult<T>>, ms: number, label: string): Promise<HindsightResult<T>> => {
 		const timer = deps.delay(ms);
 		const timedOut: HindsightResult<T> = { ok: false, error: { kind: "timeout", message: `${label}: no answer within ${ms}ms` } };
+		const tracked = op.then(
+			() => undefined,
+			() => undefined,
+		);
+		pending.add(tracked);
+		void tracked.then(() => pending.delete(tracked));
 		try {
 			return await Promise.race([op, timer.promise.then(() => timedOut)]);
 		} finally {
@@ -350,6 +360,13 @@ export async function runCanary(deps: CanaryDeps): Promise<CanaryOutcome> {
 	}
 
 	// (9) bank delete (always, once a bank may exist) and a follow-up lookup
+	// Wait (bounded) for any call whose timer already won, so a late create finishes before the bank delete.
+	if (pending.size > 0) {
+		const settle = deps.delay(limits.drainMs);
+		await Promise.race([Promise.allSettled([...pending]), settle.promise]);
+		settle.cancel();
+	}
+
 	if (!bankAttempted || !bankOwned) {
 		skipStep("bank-delete", unreachable ? "candidate unreachable" : bankAttempted ? "bank not owned by this run; not deleted" : "no bank was created");
 	} else {

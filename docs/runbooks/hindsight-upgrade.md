@@ -88,7 +88,7 @@ Steps 1 to 5 change no running service: 1 and 2 only read production or copy its
 Re-tagging the images is **not enough**: the new version migrated Hindsight's Postgres when it started, and an older version may not read the migrated schema. Whether a given migration is reversible is **not verified**; assume it is not.
 
 1. Scale down or stop the three Hindsight services so nothing writes during the restore.
-2. Restore the step 2 backup: the Railway volume snapshot, or `pg_restore --clean --if-exists --no-owner` of the dump into the Hindsight database (`$TARGET_DB_URL` set from the secret store, never printed).
+2. Restore the step 2 backup into a **fresh, empty database**, never on top of the migrated one: `pg_restore --clean` only drops objects the dump knows about, so tables, indexes and columns that the newer version added would survive and an older version could trip over them. Either restore the Railway volume snapshot, or create a new database (for example `hindsight_restore_<date>`) and run `pg_restore --no-owner --no-acl` of the dump into it, then point `HINDSIGHT_API_DATABASE_URL` on the three services at it (a Railway reference variable composed from the Postgres service variables, never a pasted URL). The old, migrated database stays untouched until the soak ends, so the rollback is itself reversible. Check the table count of the restored database against the backup before switching.
 3. Set the three image tags back to the previous tag you wrote down, and accept the deploy as in step 6.
 4. Run step 7's checks against the restored deployment.
 5. State the loss honestly in the evidence row: everything retained in Hindsight between the backup and the rollback is gone from Hindsight. Accepted memories are kept in the Postgres index as the governed store; whether a re-retain of that window is possible with the current tools is **not verified**.
@@ -96,8 +96,8 @@ Re-tagging the images is **not enough**: the new version migrated Hindsight's Po
 
 ## Not verified when this runbook was written
 
-- Which upstream release fixes #4696, and whether 0.10.3, 1.0.0 or 1.1.0 still hangs on recall.
-- Whether our client works unchanged against any version above 0.9.1 (it is tested against 0.9.1 only; the canary is how you find out).
+- Which upstream release fixes #4696. The 2026-10-27 trial (evidence below) could not tell: its real-bank recall soak timed out at the 4 s budget on 0.9.1, 0.10.3 and 1.1.0 alike, so it does not separate the versions. Run the soak from inside the private network, and record per-bank latency, before relying on it.
+- Whether our client works unchanged against any version above 0.9.1. Observed: the canary passed on 0.10.3 and 1.1.0 (every check except the opt-in refresh and the informational bank-id note). Not observed: the whole client surface under production traffic.
 - The shape of `POST mental-models/{id}/refresh` against 1.1.0.
 - Which Railway service and volume hold Hindsight's Postgres, whether each migration is reversible, and whether the three services must move together or can move one at a time.
 - The time bound of the `/healthz` hindsight block, and whether a scratch substrate-mcp can be pointed at an external candidate.
@@ -106,6 +106,6 @@ Re-tagging the images is **not enough**: the new version migrated Hindsight's Po
 
 | Date (UTC) | From → to | Approval ref | Backup taken (snapshot / dump) | Canary exit and mental-model shape | Verification (step 7) | Outcome (kept / rolled back) |
 | --- | --- | --- | --- | --- | --- | --- |
-| | | | | | | |
+| 2026-10-27 | 0.9.1 → 0.10.3 → 1.1.0, trial only (throwaway candidate service on a copy of the production database; nothing on the three production services changed) | operator authorisation in session (trial, then upgrade only if the gates passed) | Logical dump of the production database (58 MB, 23 tables) restored into a pristine backup database `hindsight_backup_20261027` (kept) and a candidate copy (dropped); the in-place migrations on the copy ran cleanly 0.9.1 → 0.10.3 → 1.1.0 | Canary exit 0 on 0.10.3 and on 1.1.0; mental-model refresh not requested | Recall soak, 176 recalls over 8 real banks, 4 s budget: 108 timeouts on 0.10.3, 104 on 1.1.0, **106 on a 0.9.1 control over a fresh copy of the same backup**, p50 about 4 s on all three | **Kept on 0.9.1.** The "recall latency passes" gate was not demonstrated, so no upgrade; the soak does not distinguish the versions |
 
 One row per upgrade or rollback. Versions, exit codes and names only: never a URL, a key, a token or a connection string.
