@@ -40,9 +40,62 @@ export function migrationDigests(steps: ReadonlyArray<Pick<MigrationStep, "versi
 	return digests;
 }
 
-/** `sql` without `--` line comments and C-style block comments. The migration SQL holds no string literal that contains either. */
+/**
+ * `sql` without `--` line comments and C-style block comments, each replaced by one space. Comment markers inside a
+ * single-quoted string (`''` is an escaped quote; `\` escapes in an `E'…'` string), a double-quoted identifier or a
+ * dollar-quoted body (`$$…$$`, `$tag$…$tag$`) are text, not comments, and a quote inside a comment opens nothing. An
+ * unterminated string, quoted identifier or block comment is kept verbatim to the end, so the analysis sees all of it. The
+ * digest (`statementsOf`) does not call this, so it cannot change any step's digest.
+ */
 export function stripSqlComments(sql: string): string {
-	return sql.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
+	const isIdent = (char: string | undefined): boolean => char !== undefined && /[\w$]/.test(char);
+	let out = "";
+	let i = 0;
+	while (i < sql.length) {
+		const char = sql[i] as string;
+		const next = sql[i + 1];
+		if (char === "-" && next === "-") {
+			const end = sql.indexOf("\n", i);
+			out += " ";
+			i = end === -1 ? sql.length : end;
+		} else if (char === "/" && next === "*") {
+			const end = sql.indexOf("*/", i + 2);
+			if (end === -1) {
+				out += sql.slice(i);
+				i = sql.length;
+			} else {
+				out += " ";
+				i = end + 2;
+			}
+		} else if (char === "'" || char === '"') {
+			const backslashEscapes = char === "'" && (sql[i - 1] === "E" || sql[i - 1] === "e") && !isIdent(sql[i - 2]);
+			let j = i + 1;
+			while (j < sql.length) {
+				if (backslashEscapes && sql[j] === "\\") j += 2;
+				else if (sql[j] === char && sql[j + 1] === char) j += 2;
+				else if (sql[j] === char) break;
+				else j += 1;
+			}
+			const stop = Math.min(j + 1, sql.length);
+			out += sql.slice(i, stop);
+			i = stop;
+		} else if (char === "$" && !isIdent(sql[i - 1])) {
+			const tag = /^\$(?:[A-Za-z_]\w*)?\$/.exec(sql.slice(i, i + 64))?.[0];
+			if (tag === undefined) {
+				out += char;
+				i += 1;
+			} else {
+				const end = sql.indexOf(tag, i + tag.length);
+				const stop = end === -1 ? sql.length : end + tag.length;
+				out += sql.slice(i, stop);
+				i = stop;
+			}
+		} else {
+			out += char;
+			i += 1;
+		}
+	}
+	return out;
 }
 
 /** The statements of `sql` for analysis: comments removed, whitespace collapsed, lower-cased, no trailing `;`. */
