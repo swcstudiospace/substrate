@@ -23,6 +23,7 @@ import {
 	type HindsightConfig,
 	type HindsightResult,
 	bankConfig,
+	bankStats,
 	deleteBank,
 	deleteDocument,
 	ensureBank,
@@ -301,6 +302,12 @@ export async function runCanary(deps: CanaryDeps): Promise<CanaryOutcome> {
 		if (listed.value.banks.some((entry) => entry.bank_id === bank)) return pass();
 		if (listed.value.truncated) return { status: "skip", reason: "bank listing truncated; canary bank not seen in the first page set" };
 		return failed("canary bank missing from the bank listing");
+	});
+
+	// (2c) the inventory's other route: the stats read must parse on the still-empty canary bank (a not-found right after create is a FAIL)
+	await needsBank("bank-stats", async () => {
+		const stats = await call("GET bank stats", (ms) => bankStats(config, bank, deps.fetch, { timeoutMs: ms }));
+		return stats.ok ? pass() : failed(why("bank stats", stats.error));
 	});
 
 	// (3) retain one synthetic document

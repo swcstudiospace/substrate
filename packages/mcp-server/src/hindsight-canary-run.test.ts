@@ -109,6 +109,7 @@ describe("runCanary against the fake", () => {
 			"health-version",
 			"bank-ensure",
 			"bank-list",
+			"bank-stats",
 			"retain",
 			"recall",
 			"document-get",
@@ -353,6 +354,58 @@ describe("runCanary against the fake", () => {
 		);
 		const outcome = await runCanary(harness(lying).deps);
 		expect(statusOf(outcome.report, "bank-list")).toBe("skip");
+	});
+
+	test("bank-stats passes on the fake, runs before retain, and fails (exit 1) on an error or unreadable reply", async () => {
+		const fake = new HindsightFake();
+		const ok = await runCanary(harness(fake.fetch).deps);
+		expect(statusOf(ok.report, "bank-stats")).toBe("pass");
+		const ids = ok.report?.checks.map((check) => check.id) ?? [];
+		expect(ids.indexOf("bank-stats")).toBe(ids.indexOf("bank-list") + 1);
+		expect(ids.indexOf("bank-stats")).toBeLessThan(ids.indexOf("retain"));
+		const statsAt = fake.requests.findIndex((request) => request.path.endsWith("/stats"));
+		const retainAt = fake.requests.findIndex((request) => request.method === "POST" && request.path.endsWith("/memories"));
+		expect(statsAt).toBeGreaterThan(-1);
+		expect(statsAt).toBeLessThan(retainAt);
+
+		const erroring = new HindsightFake();
+		const errorReply = intercept(erroring, (method, path) =>
+			method === "GET" && path.endsWith("/stats") ? Response.json({ detail: `boom ${URL_PLACEHOLDER} ${KEY_PLACEHOLDER}` }, { status: 500 }) : null,
+		);
+		const failedStats = await runCanary(harness(errorReply).deps);
+		expect(statusOf(failedStats.report, "bank-stats")).toBe("fail");
+		expect(failedStats.code).toBe(1);
+		const reason = failedStats.report?.checks.find((check) => check.id === "bank-stats")?.reason ?? "";
+		expect(reason).not.toContain(KEY_PLACEHOLDER);
+		expect(reason).not.toContain("hindsight-candidate");
+		expect(erroring.banks.size).toBe(0);
+
+		const notFound = new HindsightFake();
+		const missing = intercept(notFound, (method, path) =>
+			method === "GET" && path.endsWith("/stats") ? Response.json({ detail: "bank not found" }, { status: 404 }) : null,
+		);
+		const gone = await runCanary(harness(missing).deps);
+		expect(statusOf(gone.report, "bank-stats")).toBe("fail");
+		expect(gone.code).toBe(1);
+
+		const unreadable = new HindsightFake();
+		const garbled = intercept(unreadable, (method, path) =>
+			method === "GET" && path.endsWith("/stats") ? new Response("not json", { status: 200 }) : null,
+		);
+		const bad = await runCanary(harness(garbled).deps);
+		expect(statusOf(bad.report, "bank-stats")).toBe("fail");
+		expect(bad.code).toBe(1);
+	});
+
+	test("bank-stats is skipped when no usable bank exists", async () => {
+		const fake = new HindsightFake();
+		fake.failRetainWith = 500;
+		const lying = intercept(fake, (method, path) =>
+			method === "PATCH" && path.endsWith("/config") ? Response.json({ config: { retain_extraction_mode: "server-default" } }) : null,
+		);
+		const outcome = await runCanary(harness(lying).deps);
+		expect(statusOf(outcome.report, "bank-stats")).toBe("skip");
+		expect(fake.requests.some((request) => request.path.endsWith("/stats"))).toBe(false);
 	});
 
 	describe("recall budget", () => {
