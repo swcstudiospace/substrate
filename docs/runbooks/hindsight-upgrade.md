@@ -20,7 +20,7 @@
 
 ## What the watcher does
 
-`.github/workflows/hindsight-lag.yml` runs `scripts/hindsight-lag.ts` every Monday and on demand, on the Omega CI runner pool, behind `CI_ENABLED`. It compares the pin with the stable releases of `vectorize-io/hindsight` (prereleases and drafts ignored), and keeps **one** open issue labelled `hindsight-lag`: opened when the newest unpinned stable release is at least `lag_alert_days` old, updated while that stays true, closed when it stops being true. The issue shows the pinned version, the latest, the age, whether any newer release notes mention a breaking change, and the state of each `blocked_by` issue. It opens no pull request and never touches Railway. If the watcher itself fails, its last step opens one issue labelled `hindsight-lag-failed`; the next good run closes it.
+`.github/workflows/hindsight-lag.yml` runs `scripts/hindsight-lag.ts` every Monday and on demand, on the Omega CI runner pool, behind `CI_ENABLED`. It compares the pin with the stable releases of `vectorize-io/hindsight` (prereleases and drafts ignored), and keeps **one** open issue labelled `hindsight-lag`: opened once the **oldest** stable release newer than the pin has existed for at least `lag_alert_days` (the age counts from that first newer release, so an older release can trigger the alert while the newest one is only a day old), updated while that stays true, closed when it stops being true. The issue and its title name the **newest** stable release as the latest. The issue shows the pinned version, the latest, the age, whether any newer release notes mention a breaking change, and the state of each `blocked_by` issue. It opens no pull request and never touches Railway. If the watcher itself fails, a second job (`report-failure`, with its own checkout and Bun setup) opens one issue labelled `hindsight-lag-failed`; the next good run closes it.
 
 Run it by hand, read-only, without a token:
 
@@ -64,7 +64,7 @@ Steps 1 to 5 change no running service: 1 and 2 only read production or copy its
    bun packages/mcp-server/src/hindsight-canary-run.ts --confirm-throwaway --json --mental-model-refresh
    ```
 
-   Exit codes: `0` every check passed, `1` a check failed, `2` usage or configuration refused (no `--confirm-throwaway`, no candidate configured), `3` the candidate was unreachable. Anything but `0` stops the upgrade. The runner creates one bank under your prefix, named `canary-` plus a random suffix, and removes it at the end. Its output carries neither the URL nor the key. Record the recorded `mental-model-refresh` shape if it ran. A recall that hangs or times out is the #4696 symptom: stop.
+   Exit codes: `0` every check passed, `1` a check failed, `2` usage or configuration refused (no `--confirm-throwaway`, no candidate configured), `3` the candidate was unreachable. Anything but `0` stops the upgrade. The runner creates one bank under your prefix, named `canary-` plus a random suffix, and removes it at the end. Its output carries neither the URL nor the key. Record the recorded `mental-model-refresh` shape if it ran. A recall that hangs or times out is the #4696 symptom: stop. The recall check uses the budget the client uses: `HINDSIGHT_RECALL_BUDGET_MS` when it is set in that shell (a positive integer, else the 4000 ms default), so set it to production's value to test the real limit.
 5. **Run the plane tests and read the candidate's health.**
 
    ```sh

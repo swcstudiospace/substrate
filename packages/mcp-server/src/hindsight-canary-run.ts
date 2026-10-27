@@ -9,6 +9,8 @@
  * Reach comes from `hindsightFromEnv` (HINDSIGHT_URL, HINDSIGHT_API_KEY, the
  * bank prefix): no new env var. The run touches ONE bank it creates, named
  * `<prefix>canary-<random>`, and deletes it at the end even after a failure.
+ * The recall check uses the client's own budget: HINDSIGHT_RECALL_BUDGET_MS when
+ * set to a positive integer, else the 4000 ms default.
  *
  * Exit codes: 0 every check passed (skips allowed), 1 a check failed,
  * 2 usage or configuration refused, 3 the candidate was unreachable.
@@ -26,6 +28,7 @@ import {
 	ensureBank,
 	getDocument,
 	hindsightFromEnv,
+	listBanks,
 	patchDocumentTags,
 	probeHealth,
 	probeVersion,
@@ -33,6 +36,7 @@ import {
 	retainMemories,
 	send,
 } from "./planes/hindsight.ts";
+import { DEFAULT_RECALL_BUDGET_MS } from "./memory-recall.ts";
 
 export const CANARY_USAGE = `usage: bun packages/mcp-server/src/hindsight-canary-run.ts --confirm-throwaway [--json] [--mental-model-refresh]
   --confirm-throwaway      REQUIRED: the configured Hindsight is a candidate, never production
@@ -99,7 +103,18 @@ export interface CanaryLimits {
 	drainMs: number;
 }
 
-export const DEFAULT_CANARY_LIMITS: CanaryLimits = { callTimeoutMs: 8000, recallBudgetMs: 4000, deadlineMs: 120_000, drainMs: 2000 };
+export const DEFAULT_CANARY_LIMITS: CanaryLimits = { callTimeoutMs: 8000, recallBudgetMs: DEFAULT_RECALL_BUDGET_MS, deadlineMs: 120_000, drainMs: 2000 };
+
+/**
+ * The client's own recall budget (`HINDSIGHT_RECALL_BUDGET_MS`): a positive decimal integer, else the default. Same parse as
+ * `positiveIntOr` in config.ts (not imported: config.ts pulls the whole service config), same default as `memory_recall`.
+ */
+function envRecallBudgetMs(raw: string | undefined): number {
+	const trimmed = raw?.trim() ?? "";
+	if (!/^\d+$/.test(trimmed)) return DEFAULT_RECALL_BUDGET_MS;
+	const value = Number(trimmed);
+	return value > 0 ? value : DEFAULT_RECALL_BUDGET_MS;
+}
 
 export interface CanaryDeps {
 	args: CanaryArgs;
@@ -153,7 +168,7 @@ function failed(reason: string): StepResult {
 }
 
 export async function runCanary(deps: CanaryDeps): Promise<CanaryOutcome> {
-	const limits: CanaryLimits = { ...DEFAULT_CANARY_LIMITS, ...deps.limits };
+	const limits: CanaryLimits = { ...DEFAULT_CANARY_LIMITS, recallBudgetMs: envRecallBudgetMs(deps.env.HINDSIGHT_RECALL_BUDGET_MS), ...deps.limits };
 	const refuse = (message: string): CanaryOutcome => {
 		deps.err(`${message}\n${CANARY_USAGE}`);
 		return { code: 2, report: null };
@@ -279,6 +294,15 @@ export async function runCanary(deps: CanaryDeps): Promise<CanaryOutcome> {
 		});
 	}
 
+	// (2b) the inventory route: the canary bank must be listed (a truncated listing cannot prove absence, so it skips)
+	await needsBank("bank-list", async () => {
+		const listed = await call("GET banks", (ms) => listBanks(config, deps.fetch, { timeoutMs: ms }));
+		if (!listed.ok) return failed(why("list banks", listed.error));
+		if (listed.value.banks.some((entry) => entry.bank_id === bank)) return pass();
+		if (listed.value.truncated) return { status: "skip", reason: "bank listing truncated; canary bank not seen in the first page set" };
+		return failed("canary bank missing from the bank listing");
+	});
+
 	// (3) retain one synthetic document
 	await needsBank("retain", async () => {
 		const retained = await call("retain", (ms) =>
@@ -327,6 +351,27 @@ export async function runCanary(deps: CanaryDeps): Promise<CanaryOutcome> {
 		if (!got.ok) return failed(why("get", got.error));
 		if (got.value === null) return failed("document vanished after tag patch");
 		return got.value.tags.includes("canary-patched") ? pass() : failed("patched tag not visible on the document");
+	});
+
+	// (6b) retain again under the same document id: retainMemories always sends update_mode "replace", so the old body must be gone
+	await needsDoc("document-replace", async () => {
+		const replacedMarker = `canary-replaced-${suffix}`;
+		const again = await call("retain replace", (ms) =>
+			retainMemories(
+				config,
+				bank,
+				[{ content: `Hindsight canary replacement document ${replacedMarker}`, tags: ["canary"], document_id: documentId }],
+				deps.fetch,
+				ms,
+			),
+		);
+		if (!again.ok) return failed(why("retain replace", again.error));
+		const got = await call("GET document", (ms) => getDocument(config, bank, documentId, deps.fetch, ms));
+		if (!got.ok) return failed(why("get after replace", got.error));
+		if (got.value === null) return failed("document vanished after replace");
+		if (got.value.text === undefined) return { status: "skip", reason: "document text not exposed; replace not observable" };
+		if (got.value.text.includes(marker)) return failed("replace kept the old document body");
+		return got.value.text.includes(replacedMarker) ? pass() : failed("replaced body not readable");
 	});
 
 	// (7) delete, then delete again: a no-op or not-found success

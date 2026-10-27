@@ -102,12 +102,21 @@ describe("semver", () => {
 });
 
 describe("the pin file", () => {
-	test("the committed pin file parses and declares the intended pin", () => {
+	test("the committed pin file is well formed, whatever version it pins", () => {
+		// Structure and invariants only: a valid pin update after an upgrade or rollback must not fail this test.
 		const pin = parsePin(readFileSync(join(ROOT, PIN_PATH), "utf8"));
-		expect(pin.pinned).toBe("0.9.1");
-		expect(pin.images).toEqual(["hindsight-api", "hindsight-worker", "hindsight-control-plane"]);
-		expect(pin.blocked_by).toEqual([{ repo: "vectorize-io/hindsight", issue: 4696, reason: "recall hang in 0.10.x" }]);
-		expect(pin.lag_alert_days).toBe(7);
+		expect(pin.images.length).toBeGreaterThan(0);
+		expect(parseSemver(pin.pinned)).not.toBeNull();
+		expect(parseSemver(pin.tested_against)).not.toBeNull();
+		expect(Number.isNaN(Date.parse(`${pin.pinned_since}T00:00:00Z`))).toBe(false);
+		expect(Date.parse(`${pin.pinned_since}T00:00:00Z`)).toBeLessThanOrEqual(Date.now());
+		expect(Number.isInteger(pin.lag_alert_days)).toBe(true);
+		expect(pin.lag_alert_days).toBeGreaterThan(0);
+		for (const blocker of pin.blocked_by) {
+			expect(blocker.repo).toMatch(/^[^/\s]+\/[^/\s]+$/);
+			expect(blocker.issue).toBeGreaterThan(0);
+			expect(blocker.reason.trim().length).toBeGreaterThan(0);
+		}
 	});
 
 	test("accepts the fixture and an empty blocked_by", () => {

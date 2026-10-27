@@ -108,10 +108,12 @@ describe("runCanary against the fake", () => {
 		expect(outcome.report?.checks.map((check) => check.id)).toEqual([
 			"health-version",
 			"bank-ensure",
+			"bank-list",
 			"retain",
 			"recall",
 			"document-get",
 			"tag-patch",
+			"document-replace",
 			"document-delete",
 			"mental-model-refresh",
 			"bank-delete",
@@ -316,5 +318,102 @@ describe("runCanary against the fake", () => {
 		const second = await runCanary(harness(new HindsightFake().fetch, {}, { mentalModelRefresh: true }).deps);
 		expect(statusOf(second.report, "mental-model-refresh")).toBe("fail");
 		expect(second.code).toBe(1);
+	});
+
+	test("bank-list passes when the listing holds the canary bank, fails on a broken or missing listing, skips when truncated", async () => {
+		const ok = await runCanary(harness(new HindsightFake().fetch).deps);
+		expect(statusOf(ok.report, "bank-list")).toBe("pass");
+
+		const broken = new HindsightFake();
+		broken.failListWith = 500;
+		const failedList = await runCanary(harness(broken.fetch).deps);
+		expect(statusOf(failedList.report, "bank-list")).toBe("fail");
+		expect(failedList.code).toBe(1);
+		expect(broken.banks.size).toBe(0);
+
+		const hidden = new HindsightFake();
+		const missing = intercept(hidden, (method, path) => (method === "GET" && path === "/v1/default/banks" ? Response.json({ banks: [], total: 0 }) : null));
+		const absent = await runCanary(harness(missing).deps);
+		expect(statusOf(absent.report, "bank-list")).toBe("fail");
+		expect(absent.code).toBe(1);
+
+		const crowded = new HindsightFake();
+		for (let i = 0; i < 250; i++) crowded.seed(`sub-other-${i}`, []);
+		const truncated = await runCanary(harness(crowded.fetch).deps);
+		expect(statusOf(truncated.report, "bank-list")).toBe("skip");
+		expect(truncated.code).toBe(0);
+		expect(crowded.banks.has("sub-canary-abcd1234")).toBe(false);
+	});
+
+	test("bank-list is skipped when no usable bank exists", async () => {
+		const fake = new HindsightFake();
+		fake.failRetainWith = 500;
+		const lying = intercept(fake, (method, path) =>
+			method === "PATCH" && path.endsWith("/config") ? Response.json({ config: { retain_extraction_mode: "server-default" } }) : null,
+		);
+		const outcome = await runCanary(harness(lying).deps);
+		expect(statusOf(outcome.report, "bank-list")).toBe("skip");
+	});
+
+	describe("recall budget", () => {
+		async function recallTimerMs(env: Record<string, string | undefined>, limits: CanaryDeps["limits"] = {}): Promise<number[]> {
+			const seen: number[] = [];
+			const delay: CanaryDeps["delay"] = (ms) => {
+				seen.push(ms);
+				return { promise: new Promise<void>(() => {}), cancel: () => {} };
+			};
+			await runCanary(harness(new HindsightFake().fetch, { env: { ...ENV, ...env }, delay, limits }).deps);
+			return seen;
+		}
+
+		test("uses HINDSIGHT_RECALL_BUDGET_MS, as the client does", async () => {
+			expect(await recallTimerMs({ HINDSIGHT_RECALL_BUDGET_MS: "2500" })).toContain(2500);
+		});
+		test("an invalid or non-positive value falls back to the 4000 ms default", async () => {
+			for (const raw of ["abc", "0", "-5", "1.5", ""]) {
+				const seen = await recallTimerMs({ HINDSIGHT_RECALL_BUDGET_MS: raw });
+				expect(seen).toContain(4000);
+			}
+		});
+		test("limits.recallBudgetMs wins over the env", async () => {
+			const seen = await recallTimerMs({ HINDSIGHT_RECALL_BUDGET_MS: "2500" }, { recallBudgetMs: 3333 });
+			expect(seen).toContain(3333);
+			expect(seen).not.toContain(2500);
+		});
+	});
+
+	test("document-replace passes on a replacing candidate, fails when the old body survives, skips when text is not exposed", async () => {
+		const ok = await runCanary(harness(new HindsightFake().fetch).deps);
+		expect(statusOf(ok.report, "document-replace")).toBe("pass");
+
+		// A candidate that appends instead of replacing: the document still carries the first body's marker.
+		const appendingFake = new HindsightFake();
+		const appending = intercept(appendingFake, (method, path) =>
+			method === "GET" && path.includes("/documents/")
+				? appendingFake.fetch(`${URL_PLACEHOLDER}${path}`).then(async (response) => {
+						if (!response.ok) return response;
+						const doc = (await response.json()) as Record<string, unknown>;
+						return Response.json({ ...doc, text: `canary-marker-abcd1234 ${String(doc.text)}` });
+					})
+				: null,
+		);
+		const outcome = await runCanary(harness(appending).deps);
+		expect(statusOf(outcome.report, "document-replace")).toBe("fail");
+		expect(outcome.code).toBe(1);
+
+		const textlessFake = new HindsightFake();
+		const textless = intercept(textlessFake, (method, path) =>
+			method === "GET" && path.includes("/documents/")
+				? textlessFake.fetch(`${URL_PLACEHOLDER}${path}`).then(async (response) => {
+						if (!response.ok) return response;
+						const doc = (await response.json()) as Record<string, unknown>;
+						const { text: _text, ...rest } = doc;
+						return Response.json(rest);
+					})
+				: null,
+		);
+		const skipped = await runCanary(harness(textless).deps);
+		expect(statusOf(skipped.report, "document-replace")).toBe("skip");
+		expect(skipped.code).toBe(0);
 	});
 });
