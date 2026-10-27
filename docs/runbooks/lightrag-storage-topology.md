@@ -274,6 +274,17 @@ read from the server env file by name.
 10. HARD_STOP: `select * from pg_available_extensions where name = 'vector'`
     on the chosen Postgres returns a row, and the extension version meets
     0.7.0 if `HNSW_HALFVEC` is chosen.
+11. HARD_STOP: after the operator has deployed the server (never by an agent),
+    run the live smoke runner from the repo root with the target's
+    `LIGHTRAG_URL` and `LIGHTRAG_API_KEY` in the environment:
+    `bun packages/mcp-server/src/lightrag-smoke-run.ts --confirm-live [--json]`.
+    It health-checks, proves an anonymous request is refused, ingests and
+    queries one synthetic document, deletes only that document, and checks the
+    clear-all denylist. Exit codes: 0 all checks passed, 1 a check failed
+    (`unauthenticated-access-allowed` means the server needs an API key),
+    2 usage or config (no `--confirm-live`, no `LIGHTRAG_URL`), 3 unreachable.
+    `--no-auth-expected` skips only the anonymous check, for a deliberately
+    keyless server, and the output warns about it.
 
 ## Upgrade and re-index design
 
