@@ -27,11 +27,18 @@
  *   4. query: the marker comes back in a returned chunk (`only_need_context`,
  *      the client's default mode).
  *   5. delete: ONLY the document id this run created is removed through the
- *      per-document route, and it no longer appears. It runs in a `finally`
- *      block, so a failed ingest or query still cleans up (within its own
- *      budget, `cleanupBudgetMs`, which is not part of the total deadline).
+ *      per-document route (with `delete_file`, so the uploaded synthetic file
+ *      goes too), and it no longer appears. It runs in a `finally` block, so a
+ *      failed ingest or query still cleans up (within its own budget,
+ *      `cleanupBudgetMs`, which is not part of the total deadline). An upload
+ *      whose answer was lost may still have been stored and cannot be found
+ *      without its track id: the check then FAILS naming the file and marker
+ *      for removal by hand. Only an explicit HTTP 4xx refusal skips it.
  *   6. clear-all-guard: the client's own denylist refuses `DELETE /documents`
  *      locally, with no network call (a regression guard).
+ *
+ * No request starts after its budget ends and every request is capped to the
+ * time left, in the run (`totalDeadlineMs`) and in cleanup alike.
  *
  * Output: a human summary, or with `--json` one object
  * `{ schema: 1, version, checks: [{ name, status, reason, durationMs }], ok }`
@@ -163,6 +170,15 @@ export interface SmokeDeps {
 	guardCall?: typeof lightragCall;
 }
 
+/** A fetch bounded by one deadline, plus whether it ever refused to start a request. */
+interface Budget {
+	refused: boolean;
+	fetch: FetchLike;
+}
+
+/** An explicit HTTP 4xx answer (`lightrag 409`, `lightrag 422`, ...): the server saw the request and refused it. */
+const KNOWN_REFUSAL = /^lightrag 4\d\d\b/;
+
 export interface Outcome {
 	status: SmokeCheckStatus;
 	reason: string;
@@ -260,25 +276,57 @@ export async function runSmoke(deps: SmokeDeps): Promise<SmokeResult> {
 		return { name, status: outcome.status, reason: scrub(outcome.reason), durationMs: Math.max(0, Math.round(now() - started)) };
 	};
 
+	/**
+	 * A fetch bounded by one budget. It refuses to START a request once `until` has passed (the client sees a transport failure and `refused`
+	 * is set, so "never sent" is told apart from "sent, no answer") and caps every request it does start to the time left, including the
+	 * client's own follow-up requests (the upload's text fallback, the track polls).
+	 */
+	const budgeted = (until: number): Budget => {
+		const view: Budget = {
+			refused: false,
+			fetch: async (input, init) => {
+				const left = until - now();
+				if (left <= 0) {
+					view.refused = true;
+					throw new Error("run deadline exceeded before the request started");
+				}
+				const cap = AbortSignal.timeout(left);
+				return fetchImpl(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, cap]) : cap });
+			},
+		};
+		return view;
+	};
+	/** A check that cannot start inside the budget fails with a deadline reason instead of running late. */
+	const exhausted = (until: number, what: string): Outcome | null => (until - now() <= 0 ? fail(`deadline exceeded before ${what}`) : null);
+	const runBudget = budgeted(deadline);
+
 	const state = {
 		version: null as string | null,
 		unreachable: false,
 		marker: null as string | null,
+		fileName: null as string | null,
 		trackId: null as string | null,
 		docIds: [] as string[],
 		ingested: false,
+		/** An upload request was started. */
+		uploadAttempted: false,
+		/** The upload failed without proof that nothing was stored (lost reply, timeout, 5xx, unreadable answer). */
+		uploadUncertain: false,
+		/** Why the upload is known not to have stored anything. */
+		uploadRefusal: "",
 	};
 	const checks: SmokeCheck[] = [];
 
-	/** Wait for the pipeline to go idle, by polling single reads against the injected clock. */
-	const waitIdle = async (until: number): Promise<{ ok: true } | { ok: false; reason: string }> => {
+	/** Wait for the pipeline to go idle, by polling single reads against the injected clock; no read starts, and none is accepted, past `until`. */
+	const waitIdle = async (view: Budget, until: number): Promise<{ ok: true } | { ok: false; reason: string }> => {
 		for (;;) {
-			const read = await pollParseStatus(config, { dataset_id: "", document_id: "" }, fetchImpl, {
+			if (until - now() <= 0) return { ok: false, reason: "pipeline did not go idle before the deadline" };
+			const read = await pollParseStatus(config, { dataset_id: "", document_id: "" }, view.fetch, {
 				maxPolls: 1,
 				intervalMs: 0,
 				timeoutMs: callTimeoutMs,
 			});
-			if (read.ok) return { ok: true };
+			if (read.ok) return now() > until ? { ok: false, reason: "pipeline did not go idle before the deadline" } : { ok: true };
 			if (read.reason.startsWith("lightrag recovery required")) {
 				return { ok: false, reason: `recovery_required: ${read.reason.slice("lightrag recovery required".length).replace(/^:\s*/, "") || "the workspace is fenced"}` };
 			}
@@ -291,8 +339,9 @@ export async function runSmoke(deps: SmokeDeps): Promise<SmokeResult> {
 	// 1. health
 	checks.push(
 		await run("health", async () => {
-			const probe = await probeLightrag(config, fetchImpl, callTimeoutMs);
+			const probe = await probeLightrag(config, runBudget.fetch, callTimeoutMs);
 			if (!probe.ok) {
+				if (runBudget.refused) return fail("deadline exceeded before the health probe");
 				const reason = probe.reason ?? "unhealthy";
 				if (reason.startsWith("lightrag unreachable") || reason === "lightrag circuit open") state.unreachable = true;
 				return fail(reason);
@@ -319,12 +368,15 @@ export async function runSmoke(deps: SmokeDeps): Promise<SmokeResult> {
 							"NO-AUTH-EXPECTED: anonymous access was NOT verified; this deployment is assumed to run without an API key and anyone who can reach it can read and write",
 						);
 					}
+					const over = exhausted(deadline, "the anonymous check");
+					if (over !== null) return over;
 					// The same client with no key: no X-API-Key header, a read-only protected route.
-					const anonymous = await pollParseStatus({ url: config.url }, { dataset_id: "", document_id: "" }, fetchImpl, {
+					const anonymous = await pollParseStatus({ url: config.url }, { dataset_id: "", document_id: "" }, runBudget.fetch, {
 						maxPolls: 1,
 						intervalMs: 0,
 						timeoutMs: callTimeoutMs,
 					});
+					if (runBudget.refused) return fail("deadline exceeded before the anonymous check");
 					if (!anonymous.ok && /^lightrag (401|403)$/.test(anonymous.reason)) {
 						return pass(`anonymous request refused (${anonymous.reason.slice("lightrag ".length)})`);
 					}
@@ -341,20 +393,31 @@ export async function runSmoke(deps: SmokeDeps): Promise<SmokeResult> {
 					const marker = newMarker();
 					if (!MARKER_SHAPE.test(marker)) return fail("the marker generator returned an invalid marker");
 					state.marker = marker;
+					const fileName = `lightrag-smoke-${marker}.md`;
+					state.fileName = fileName;
+					const over = exhausted(deadline, "the upload");
+					if (over !== null) return over;
+					state.uploadAttempted = true;
 					const uploaded = await uploadDocument(
 						config,
 						{
-							name: `lightrag-smoke-${marker}.md`,
+							name: fileName,
 							content: `# LightRAG smoke document\n\nSynthetic text for the substrate smoke run. Marker: ${marker}. Safe to delete.\n`,
 							metadata: { source_url: `lightrag-smoke:${marker}`, commit: "smoke", heading_path: "smoke" },
 						},
-						fetchImpl,
+						runBudget.fetch,
 						callTimeoutMs,
 					);
-					if (!uploaded.ok) return fail(`upload failed: ${uploaded.reason}`);
+					if (!uploaded.ok) {
+						// Only an explicit HTTP 4xx, or a request that never left, proves nothing was stored: a lost, timed-out or unreadable answer may follow an accepted upload.
+						const refusal = KNOWN_REFUSAL.exec(uploaded.reason)?.[0];
+						state.uploadUncertain = !runBudget.refused && refusal === undefined;
+						state.uploadRefusal = runBudget.refused ? "request not sent" : (refusal ?? uploaded.reason);
+						return fail(`upload failed: ${uploaded.reason}`);
+					}
 					state.trackId = uploaded.track_id;
 					const left = Math.max(0, deadline - now());
-					const resolved = await resolveDocumentIds(config, uploaded.track_id, fetchImpl, {
+					const resolved = await resolveDocumentIds(config, uploaded.track_id, runBudget.fetch, {
 						maxPolls: Math.max(1, Math.ceil(left / pollIntervalMs) + 1),
 						intervalMs: pollIntervalMs,
 						timeoutMs: callTimeoutMs,
@@ -364,10 +427,13 @@ export async function runSmoke(deps: SmokeDeps): Promise<SmokeResult> {
 					});
 					if (!resolved.ok) return fail(`document id not resolved: ${resolved.reason}`);
 					state.docIds = resolved.ids;
-					const idle = await waitIdle(deadline);
+					const idle = await waitIdle(runBudget, deadline);
 					if (!idle.ok) return fail(idle.reason);
-					const settled = await resolveDocumentIds(config, uploaded.track_id, fetchImpl, { maxPolls: 1, timeoutMs: callTimeoutMs, now });
+					const beforeSettled = exhausted(deadline, "the final document status read");
+					if (beforeSettled !== null) return beforeSettled;
+					const settled = await resolveDocumentIds(config, uploaded.track_id, runBudget.fetch, { maxPolls: 1, timeoutMs: callTimeoutMs, deadlineMs: Math.max(0, deadline - now()), now });
 					if (!settled.ok) return fail(`document status unreadable after the pipeline went idle: ${settled.reason}`);
+					if (now() > deadline) return fail("deadline exceeded: the final document status arrived after the run budget");
 					const unprocessed = settled.documents.find((document) => document.status?.toLowerCase() !== "processed");
 					if (unprocessed !== undefined) {
 						const detail = unprocessed.error_msg ? `: ${unprocessed.error_msg}` : "";
@@ -383,10 +449,13 @@ export async function runSmoke(deps: SmokeDeps): Promise<SmokeResult> {
 				await run("query", async () => {
 					const marker = state.marker;
 					if (!state.ingested || marker === null) return skip("ingest did not complete");
+					const over = exhausted(deadline, "the query");
+					if (over !== null) return over;
 					// `queryWithGraph` is the request path `queryForTool` wraps (same body, mode default and `only_need_context`);
 					// `queryForTool` additionally caps each snippet at 1200 chars, which can cut the marker out of a long context string.
-					const answered = await queryWithGraph(config, `Which document mentions ${marker}?`, fetchImpl, { timeoutMs: queryTimeoutMs });
+					const answered = await queryWithGraph(config, `Which document mentions ${marker}?`, runBudget.fetch, { timeoutMs: queryTimeoutMs });
 					if (!answered.ok) return fail(`query failed: ${answered.reason}`);
+					if (now() > deadline) return fail("deadline exceeded: the query answered after the run budget");
 					if (!answered.chunks.some((chunk) => chunk.content.includes(marker))) {
 						return fail(`query returned ${answered.chunks.length} chunk(s), none containing the marker`);
 					}
@@ -398,26 +467,39 @@ export async function runSmoke(deps: SmokeDeps): Promise<SmokeResult> {
 			checks.push(
 				await run("delete", async () => {
 					const trackId = state.trackId;
-					if (trackId === null) return skip("nothing was uploaded");
+					if (trackId === null) {
+						if (!state.uploadAttempted) return skip("nothing was uploaded");
+						if (!state.uploadUncertain) return skip(`the upload was refused (${state.uploadRefusal}); nothing was stored`);
+						// The server may have accepted the upload before its answer was lost, and the client cannot look a document up by marker
+						// (`track_status` needs the track id the lost answer carried): name the leftover so the operator can remove it.
+						return fail(`upload may be stored (reply lost) and cannot be found by marker: delete ${state.fileName ?? "the file"} (marker ${state.marker ?? "unknown"}) by hand`);
+					}
 					const until = now() + cleanupBudgetMs;
+					const cleanup = budgeted(until);
+					const byHand = `delete ${state.fileName ?? "the file"} (marker ${state.marker ?? "unknown"}) by hand`;
 					let ids = state.docIds;
 					if (ids.length === 0) {
-						const found = await resolveDocumentIds(config, trackId, fetchImpl, { maxPolls: 1, timeoutMs: callTimeoutMs, now });
+						const found = await resolveDocumentIds(config, trackId, cleanup.fetch, { maxPolls: 1, timeoutMs: callTimeoutMs, deadlineMs: Math.max(0, until - now()), now });
 						if (!found.ok) {
-							return fail(`cleanup could not resolve the created document id (${found.reason}); delete the marker ${state.marker ?? "document"} by hand`);
+							return fail(`cleanup could not resolve the created document id (${found.reason}); ${byHand}`);
 						}
 						ids = found.ids;
 					}
 					for (;;) {
-						const deleted = await deleteDocuments(config, "", ids, fetchImpl, callTimeoutMs);
+						if (until - now() <= 0) return fail(`cleanup budget ran out before the delete request started; ${byHand}`);
+						// `deleteFile` removes the uploaded synthetic Markdown file too; the ids are only the ones this run created.
+						const deleted = await deleteDocuments(config, "", ids, cleanup.fetch, callTimeoutMs, { deleteFile: true });
 						if (deleted.ok) break;
 						if (deleted.retryable !== true || now() >= until) return fail(`delete failed: ${deleted.reason}`);
 						await sleep(Math.max(1, Math.min(pollIntervalMs, until - now())));
 					}
-					const idle = await waitIdle(until);
+					const idle = await waitIdle(cleanup, until);
 					if (!idle.ok) return fail(`delete did not complete: ${idle.reason}`);
+					let listedOnce = false;
 					for (;;) {
-						const listed = await resolveDocumentIds(config, trackId, fetchImpl, { maxPolls: 1, timeoutMs: callTimeoutMs, now });
+						if (until - now() <= 0) return fail(listedOnce ? "the created document is still listed after the delete" : "cleanup budget ran out before the delete could be verified");
+						const listed = await resolveDocumentIds(config, trackId, cleanup.fetch, { maxPolls: 1, timeoutMs: callTimeoutMs, now });
+						listedOnce = true;
 						if (!listed.ok) {
 							// The track listing is empty once the document is gone; any other failure is a real one.
 							if (listed.reason === "lightrag: track_status listed no documents" || listed.reason === "lightrag: track_status deadline exceeded with no documents") break;

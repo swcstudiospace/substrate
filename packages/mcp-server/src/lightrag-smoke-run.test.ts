@@ -57,6 +57,8 @@ interface FakeServer {
 	calls: Call[];
 	docs: Map<string, { id: string; track: string; text: string }>;
 	clearAll: () => number;
+	/** Every id a delete request named, with the `delete_file` flag it carried. */
+	deletions: Array<{ id: string; deleteFile: boolean }>;
 }
 
 interface JsonReport {
@@ -73,6 +75,7 @@ function bodyField(body: unknown, name: string): unknown {
 
 /** A stateful LightRAG stand-in: documents, a pipeline that goes busy then idle, auth, query and delete. */
 function fakeServer(options: FakeOptions): FakeServer {
+	const deletions: Array<{ id: string; deleteFile: boolean }> = [];
 	const calls: Call[] = [];
 	const docs = new Map<string, { id: string; track: string; text: string }>();
 	docs.set("pre-existing", { id: "pre-existing", track: "trk-old", text: "an unrelated document that must survive" });
@@ -146,12 +149,13 @@ function fakeServer(options: FakeOptions): FakeServer {
 			const requested = bodyField(body, "doc_ids");
 			const ids = Array.isArray(requested) ? requested.map(String) : [];
 			if (options.ignoreDelete !== true) for (const id of ids) docs.delete(id);
+			for (const id of ids) deletions.push({ id, deleteFile: bodyField(body, "delete_file") === true });
 			busyReads = options.busyReads ?? 1;
 			return json({ status: "deletion_started", message: "ok" });
 		}
 		return json({ detail: "Not Found" }, 404);
 	};
-	return { fetch: fetchImpl, calls, docs, clearAll: () => clearAll };
+	return { fetch: fetchImpl, calls, docs, deletions, clearAll: () => clearAll };
 }
 
 function harness(options: FakeOptions, overrides: Partial<SmokeDeps> = {}) {
@@ -228,7 +232,7 @@ describe("runSmoke: a healthy, guarded server", () => {
 		// Only the document this run created went; the pre-existing one and clear-all are untouched.
 		const deletes = deleteCalls(fake);
 		expect(deletes).toHaveLength(1);
-		expect(deletes[0]?.body).toEqual({ doc_ids: ["doc-1"], delete_file: false, delete_llm_cache: false });
+		expect(deletes[0]?.body).toEqual({ doc_ids: ["doc-1"], delete_file: true, delete_llm_cache: false });
 		expect(fake.docs.has("doc-1")).toBe(false);
 		expect(fake.docs.has("pre-existing")).toBe(true);
 		expect(fake.clearAll()).toBe(0);
@@ -317,7 +321,7 @@ describe("runSmoke: ingest", () => {
 		// Cleanup ran after the failure and deleted only the created id.
 		const deletes = deleteCalls(fake);
 		expect(deletes).toHaveLength(1);
-		expect(deletes[0]?.body).toEqual({ doc_ids: ["doc-1"], delete_file: false, delete_llm_cache: false });
+		expect(deletes[0]?.body).toEqual({ doc_ids: ["doc-1"], delete_file: true, delete_llm_cache: false });
 		expect(statusOf(result, "delete")?.status).toBe("fail");
 		expect(result.exitCode).toBe(1);
 		// Bounded: total deadline plus the cleanup budget, plus one poll interval of slack.
@@ -359,16 +363,16 @@ describe("runSmoke: ingest", () => {
 		expect(clock.t - start).toBeLessThanOrEqual(20_000 + 10_000 + 1000);
 	});
 
-	test("an upload the server refuses fails the ingest and skips the delete: nothing was created", async () => {
+	test("an upload the server refuses with a 4xx fails the ingest and skips the delete: nothing was created", async () => {
 		const failing: FetchLike = async (input, init) => {
-			if (String(input).endsWith("/documents/upload")) return json({ detail: "boom" }, 500);
+			if (String(input).endsWith("/documents/upload")) return json({ detail: "boom" }, 422);
 			return fakeServer({ apiKey: KEY }).fetch(input, init);
 		};
 		const { deps } = harness({ apiKey: KEY }, { fetchImpl: failing });
 		const result = await runSmoke(deps);
-		expect(statusOf(result, "ingest")?.reason).toBe("upload failed: lightrag 500");
+		expect(statusOf(result, "ingest")?.reason).toBe("upload failed: lightrag 422");
 		expect(statusOf(result, "delete")?.status).toBe("skip");
-		expect(statusOf(result, "delete")?.reason).toBe("nothing was uploaded");
+		expect(statusOf(result, "delete")?.reason).toBe("the upload was refused (lightrag 422); nothing was stored");
 	});
 
 	test("a marker generator returning an unusable marker fails before any upload", async () => {
@@ -400,7 +404,7 @@ describe("runSmoke: delete", () => {
 		expect(statusOf(result, "delete")?.status).toBe("pass");
 		const deletes = deleteCalls(fake);
 		expect(deletes).toHaveLength(2);
-		expect(deletes.every((call) => JSON.stringify(call.body) === JSON.stringify({ doc_ids: ["doc-1"], delete_file: false, delete_llm_cache: false }))).toBe(true);
+		expect(deletes.every((call) => JSON.stringify(call.body) === JSON.stringify({ doc_ids: ["doc-1"], delete_file: true, delete_llm_cache: false }))).toBe(true);
 		expect(sleeps.length).toBeGreaterThan(0);
 	});
 
@@ -411,6 +415,203 @@ describe("runSmoke: delete", () => {
 		expect(cleanup?.status).toBe("fail");
 		expect(cleanup?.reason).toBe("the created document is still listed after the delete");
 		expect(clock.t - start).toBeLessThanOrEqual(20_000 + 10_000 + 1000);
+	});
+});
+
+/** The fetch the fake server sees, wrapped so a test can break one request the way a real network does. */
+type Wrap = (fake: FakeServer, path: string, method: string, input: Parameters<FetchLike>[0], init: Parameters<FetchLike>[1]) => Promise<Response> | null;
+
+function wrapped(fake: FakeServer, wrap: Wrap): FetchLike {
+	return async (input, init) => {
+		const url = String(input);
+		const path = url.replace(/^https?:\/\/[^/]+/, "").replace(/\?.*$/, "");
+		const handled = wrap(fake, path, init?.method ?? "GET", input, init);
+		return handled !== null ? handled : fake.fetch(input, init);
+	};
+}
+
+const FILE_NAME = `lightrag-smoke-${MARKER}.md`;
+
+describe("runSmoke: an upload whose answer is lost", () => {
+	test("a network error after the server stored the document fails the run and names the file and marker for hand cleanup", async () => {
+		const fake = fakeServer({ apiKey: KEY });
+		const lost = wrapped(fake, (inner, path, method, input, init) =>
+			method === "POST" && path === "/documents/upload"
+				? inner.fetch(input, init).then(() => {
+						throw new Error("socket hang up");
+					})
+				: null,
+		);
+		const { deps } = harness({ apiKey: KEY }, { fetchImpl: lost });
+		const result = await runSmoke(deps);
+		expect(statusOf(result, "ingest")?.status).toBe("fail");
+		const cleanup = statusOf(result, "delete");
+		expect(cleanup?.status).toBe("fail");
+		expect(cleanup?.reason).toContain(MARKER);
+		expect(cleanup?.reason).toContain(FILE_NAME);
+		expect(result.exitCode).toBe(1);
+		// The server kept the document, and the run did not pretend to delete a document it cannot identify.
+		expect(fake.docs.has("doc-1")).toBe(true);
+		expect(deleteCalls(fake)).toHaveLength(0);
+		expect(JSON.stringify(result.report)).not.toContain(KEY);
+	});
+
+	test("a reply that is not JSON, and a gateway 502, are uncertain too", async () => {
+		for (const answer of [() => new Response("<html>upstream</html>", { status: 200 }), () => json({ detail: "bad gateway" }, 502)]) {
+			const fake = fakeServer({ apiKey: KEY });
+			const broken = wrapped(fake, (_inner, path, method) => (method === "POST" && path === "/documents/upload" ? Promise.resolve(answer()) : null));
+			const { deps } = harness({ apiKey: KEY }, { fetchImpl: broken });
+			const result = await runSmoke(deps);
+			expect(statusOf(result, "delete")?.status).toBe("fail");
+			expect(statusOf(result, "delete")?.reason).toContain(FILE_NAME);
+			expect(statusOf(result, "delete")?.reason).toContain(MARKER);
+		}
+	});
+
+	test("an explicit HTTP 4xx refusal is known: nothing was stored, so the delete is skipped and the run still fails on the ingest", async () => {
+		const fake = fakeServer({ apiKey: KEY });
+		const refused = wrapped(fake, (_inner, path, method) => (method === "POST" && path === "/documents/upload" ? Promise.resolve(json({ detail: "too large" }, 413)) : null));
+		const { deps } = harness({ apiKey: KEY }, { fetchImpl: refused });
+		const result = await runSmoke(deps);
+		expect(statusOf(result, "ingest")?.reason).toBe("upload failed: lightrag 413");
+		expect(statusOf(result, "delete")?.status).toBe("skip");
+		expect(statusOf(result, "delete")?.reason).toContain("lightrag 413");
+		expect(result.exitCode).toBe(1);
+	});
+});
+
+describe("runSmoke: the run budget bounds every request", () => {
+	/** An advance of the fake clock inside one request, so a request can "take" time without a real wait. */
+	const nth = (counter: { n: number }, at: number): boolean => {
+		counter.n += 1;
+		return counter.n === at;
+	};
+
+	test("an idle answer that arrives after the deadline is not accepted, and no query is sent", async () => {
+		const fake = fakeServer({ apiKey: KEY, busyReads: 0 });
+		const { deps, clock } = harness({ apiKey: KEY }, {});
+		const keyedReads = { n: 0 };
+		const slow = wrapped(fake, (inner, path, _method, input, init) => {
+			if (path === "/documents/pipeline_status" && new Headers(init?.headers).has("x-api-key") && nth(keyedReads, 1)) {
+				return inner.fetch(input, init).then((response) => {
+					clock.t += 25_000;
+					return response;
+				});
+			}
+			return null;
+		});
+		const result = await runSmoke({ ...deps, fetchImpl: slow });
+		expect(statusOf(result, "ingest")?.status).toBe("fail");
+		expect(statusOf(result, "ingest")?.reason).toBe("pipeline did not go idle before the deadline");
+		expect(statusOf(result, "query")?.status).toBe("skip");
+		expect(fake.calls.some((call) => call.path === "/query")).toBe(false);
+		// Cleanup has its own budget and still removed the document.
+		expect(statusOf(result, "delete")?.status).toBe("pass");
+	});
+
+	test("a query that cannot start inside the budget fails with a deadline reason and is never sent", async () => {
+		const fake = fakeServer({ apiKey: KEY });
+		const { deps, clock, start } = harness({ apiKey: KEY }, {});
+		const statusReads = { n: 0 };
+		// The final document status read ends exactly on the deadline: it is accepted, but nothing may start after it.
+		const slow = wrapped(fake, (inner, path, _method, input, init) => {
+			if (path.startsWith("/documents/track_status/") && nth(statusReads, 2)) {
+				return inner.fetch(input, init).then((response) => {
+					clock.t = start + 20_000;
+					return response;
+				});
+			}
+			return null;
+		});
+		const result = await runSmoke({ ...deps, fetchImpl: slow });
+		expect(statusOf(result, "ingest")?.status).toBe("pass");
+		expect(statusOf(result, "query")?.status).toBe("fail");
+		expect(statusOf(result, "query")?.reason).toBe("deadline exceeded before the query");
+		expect(fake.calls.some((call) => call.path === "/query")).toBe(false);
+		expect(result.exitCode).toBe(1);
+	});
+
+	test("a final status read that finishes after the deadline fails the ingest instead of succeeding late", async () => {
+		const fake = fakeServer({ apiKey: KEY });
+		const { deps, clock } = harness({ apiKey: KEY }, {});
+		const statusReads = { n: 0 };
+		const slow = wrapped(fake, (inner, path, _method, input, init) => {
+			if (path.startsWith("/documents/track_status/") && nth(statusReads, 2)) {
+				return inner.fetch(input, init).then((response) => {
+					clock.t += 38_000;
+					return response;
+				});
+			}
+			return null;
+		});
+		const result = await runSmoke({ ...deps, fetchImpl: slow });
+		expect(statusOf(result, "ingest")?.status).toBe("fail");
+		expect(statusOf(result, "ingest")?.reason).toContain("deadline exceeded");
+		expect(statusOf(result, "query")?.status).toBe("skip");
+		expect(fake.calls.some((call) => call.path === "/query")).toBe(false);
+		expect(result.exitCode).toBe(1);
+	});
+
+	test("each request is capped to the time left in the budget: the query gets what remains, not its full timeout", async () => {
+		const fake = fakeServer({ apiKey: KEY });
+		const { deps, clock, start } = harness({ apiKey: KEY }, {});
+		const timeouts: number[] = [];
+		const original = AbortSignal.timeout;
+		AbortSignal.timeout = (ms: number) => {
+			timeouts.push(ms);
+			return original.call(AbortSignal, ms);
+		};
+		let timeoutAtQuery: number | undefined;
+		const statusReads = { n: 0 };
+		const slow = wrapped(fake, (inner, path, _method, input, init) => {
+			if (path === "/query") timeoutAtQuery = timeouts[timeouts.length - 1];
+			if (path.startsWith("/documents/track_status/") && nth(statusReads, 2)) {
+				return inner.fetch(input, init).then((response) => {
+					// 3 s of the 20 s budget are left for the query; its own timeout is 30 s.
+					clock.t = start + 17_000;
+					return response;
+				});
+			}
+			return null;
+		});
+		try {
+			const result = await runSmoke({ ...deps, fetchImpl: slow });
+			expect(statusOf(result, "query")?.status).toBe("pass");
+		} finally {
+			AbortSignal.timeout = original;
+		}
+		expect(timeoutAtQuery).toBe(3000);
+	});
+
+	test("cleanup keeps its own budget: a delete that ends the budget is followed by no further request", async () => {
+		const fake = fakeServer({ apiKey: KEY, busyReads: 0 });
+		const { deps, clock } = harness({ apiKey: KEY }, {});
+		const slow = wrapped(fake, (inner, path, method, input, init) => {
+			if (method === "DELETE" && path === "/documents/delete_document") {
+				return inner.fetch(input, init).then((response) => {
+					clock.t += 11_000;
+					return response;
+				});
+			}
+			return null;
+		});
+		const result = await runSmoke({ ...deps, fetchImpl: slow });
+		const cleanup = statusOf(result, "delete");
+		expect(cleanup?.status).toBe("fail");
+		expect(cleanup?.reason).toBe("delete did not complete: pipeline did not go idle before the deadline");
+		const last = fake.calls[fake.calls.length - 1];
+		expect(`${last?.method} ${last?.path}`).toBe("DELETE /documents/delete_document");
+	});
+});
+
+describe("runSmoke: the synthetic file is removed with its document", () => {
+	test("delete_file is true for the created id and no other id is ever deleted", async () => {
+		const { fake, deps } = harness({ apiKey: KEY, busyDeleteOnce: true });
+		await runSmoke(deps);
+		expect(fake.deletions.length).toBeGreaterThan(0);
+		expect(fake.deletions.every((entry) => entry.id === "doc-1" && entry.deleteFile === true)).toBe(true);
+		expect(fake.deletions.some((entry) => entry.id === "pre-existing")).toBe(false);
+		expect(fake.docs.has("pre-existing")).toBe(true);
 	});
 });
 
