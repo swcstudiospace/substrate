@@ -14,6 +14,7 @@ import {
 	ConsistencyUsageError,
 	executeRepairPlan,
 	ledgerWriteReader,
+	configuredBanks,
 	listBankDocuments,
 	outboxFileReader,
 	parseConsistencyArgs,
@@ -26,6 +27,7 @@ import { contentHash } from "./memory-write.ts";
 import type { EventQuery } from "./greptime.ts";
 import type { FetchLike, HindsightConfig } from "./planes/hindsight.ts";
 import type { MemoryEntry } from "./types.ts";
+import { SURFACES } from "./types.ts";
 
 const NOW = Date.parse("2026-10-26T12:00:00.000Z");
 const FORGOTTEN = `forgotten:fg_${"b".repeat(26)}`;
@@ -105,6 +107,7 @@ function fake(entries: MemoryEntry[], docs: Array<[string, string | null]>, setu
 		},
 		bankFor: (writer) => `sub-${writer}`,
 		bankPrefix: "sub-",
+		banks: [BANK],
 		repair: {
 			readEntry: async (id) => {
 				log.push(`readEntry:${id}`);
@@ -256,6 +259,52 @@ describe("exit codes", () => {
 		expect(result.code).toBe(3);
 		expect(result.stdout).toContain("INCOMPLETE");
 		expect(result.stdout).toContain("plane_listing_unavailable");
+	});
+
+	test("the configured banks reach the verifier: a bank with no index row but an orphan document is drift (exit 1)", async () => {
+		const f = consistent();
+		f.ctx.banks = [BANK, "sub-swept"];
+		f.docs.set("stray-doc", "mem_gone");
+		const listed: string[] = [];
+		f.ctx.readers.plane.listDocuments = async (bank) => {
+			listed.push(bank);
+			const ids = [...f.docs.keys()].filter((id) => (id === "stray-doc") === (bank === "sub-swept")).sort();
+			return { ids, next: null };
+		};
+		const result = await run(["--json"], f);
+		expect(listed.sort()).toEqual([BANK, "sub-swept"]);
+		expect(result.code).toBe(1);
+		const report = JSON.parse(result.stdout);
+		expect(report.findings).toMatchObject([{ code: "plane_document_orphan", bank: "sub-swept", document_id: "stray-doc" }]);
+		expect(report.coverage.banks).toEqual({ configured: [BANK, "sub-swept"], examined: [BANK, "sub-swept"], skipped: [], listing_truncated: [] });
+	});
+
+	test("a configured bank that cannot be read is skipped, not clean (exit 3), and the other banks are still read", async () => {
+		const f = consistent();
+		f.ctx.banks = [BANK, "sub-down"];
+		f.ctx.readers.plane.listDocuments = async (bank) => {
+			if (bank === "sub-down") throw new Error("connect ECONNREFUSED 10.1.2.3:8888");
+			return { ids: [...f.docs.keys()].sort(), next: null };
+		};
+		const result = await run(["--json"], f);
+		expect(result.code).toBe(3);
+		const report = JSON.parse(result.stdout);
+		expect(report.ok).toBe(false);
+		expect(report.stores.plane.state).toBe("ok");
+		expect(report.coverage.banks.skipped).toHaveLength(1);
+		expect(report.coverage.banks.skipped[0].bank).toBe("sub-down");
+		expect(result.stdout).not.toContain("10.1.2.3");
+	});
+
+	test("configuredBanks is every surface's writer bank plus HINDSIGHT_BANKS, sorted and de-duplicated", () => {
+		const plane: HindsightConfig = { url: "http://hs.test", apiKey: "k", bankPrefix: "sub-" };
+		const banks = configuredBanks(plane, { HINDSIGHT_BANKS: "sub-extra, sub-hermes, pd-desk" });
+		expect(banks).toContain("sub-hermes");
+		expect(banks).toContain("sub-extra");
+		expect(banks).not.toContain("pd-desk");
+		expect(new Set(banks).size).toBe(banks.length);
+		expect([...banks].sort()).toEqual(banks);
+		expect(banks.length).toBe(SURFACES.length + 1);
 	});
 
 	test("3 wins over 1: drift and an unreachable ledger together", async () => {

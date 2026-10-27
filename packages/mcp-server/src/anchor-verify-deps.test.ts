@@ -10,6 +10,7 @@ import {
 	anchorVerifyBlocker,
 	CKPT_LOOKUP_WINDOW_MS,
 	LOOKUP_ROW_LIMIT,
+	ROTATION_READ_MAX_PAGES,
 	verifyCheckpointRef,
 	verifyEventRef,
 	type AnchorLedger,
@@ -92,6 +93,7 @@ class FakeLedger {
 		const rows = this.events
 			.filter((e) => Object.entries(match).every(([column, value]) => value === undefined || (e as unknown as Record<string, unknown>)[column] === value))
 			.filter((e) => query.since === undefined || e.ts >= query.since)
+			.filter((e) => query.until === undefined || e.ts <= query.until)
 			.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0))
 			.slice(0, query.limit ?? 50);
 		return rows.map(toRow);
@@ -308,7 +310,23 @@ describe("the signer set: the configured key plus operator rotations", () => {
 		const draft = buildSignerRotateEvent({ new_pubkey: newKey, effective_from_ms: H, reason: "rotate the anchor key" });
 		return event({ id, surface: surface as SubstrateEvent["surface"], kind: draft.kind, summary: draft.summary, payload: { ...draft.payload }, ts: new Date(H + HOUR_MS).toISOString(), session_id: null });
 	};
-
+	/** An operator note retiring `oldKey` and introducing `newKey` at `at`; the note's own time is `at`. */
+	const retirement = (oldKey: string, newKey: string, at: number): SubstrateEvent => {
+		const draft = buildSignerRotateEvent({ old_pubkey: oldKey, new_pubkey: newKey, effective_from_ms: at, reason: "retire the old anchor key" });
+		return event({ id: "evt_v16_retire", surface: OPERATOR as SubstrateEvent["surface"], kind: draft.kind, summary: draft.summary, payload: { ...draft.payload }, ts: new Date(at).toISOString(), session_id: null });
+	};
+	/** Operator reads that never run out: every page is full of fresh unrelated notes, so only the page cap stops the read. */
+	const endlessNotes = (w: World): void => {
+		let served = 0;
+		w.ledger.queryEvents = async (query: EventQuery = {}) => {
+			w.ledger.calls.queryEvents++;
+			w.ledger.queries.push(query);
+			return Array.from({ length: LOOKUP_ROW_LIMIT }, () => {
+				const n = served++;
+				return toRow(event({ id: `evt_v16_endless_${n}`, surface: OPERATOR as SubstrateEvent["surface"], session_id: null, ts: new Date(H + 40 * HOUR_MS - n).toISOString() }));
+			});
+		};
+	};
 	test("an operator's rotation lets the new key anchor; the read asks only operator surfaces, only for notes", async () => {
 		const w = world(event({ id: "evt_v16_note" }), { signer: SIGNER_B });
 		w.ledger.events.push(rotation(OPERATOR, SIGNER_B));
@@ -324,21 +342,18 @@ describe("the signer set: the configured key plus operator rotations", () => {
 		expect((await verifyEventRef(w.ports, "evt_v16_note")).status).toBe("mismatch");
 	});
 
-	test("a rotation read that hit its limit may be missing one: a signer-only mismatch is unverified and says why", async () => {
+	test("a rotation read that cannot be completed is never anchored: a signer-only mismatch is unverified with rotation-read-incomplete", async () => {
 		const w = world(event({ id: "evt_v16_note" }), { signer: SIGNER_B });
-		for (let i = 0; i < LOOKUP_ROW_LIMIT; i++) {
-			w.ledger.events.push(event({ id: `evt_v16_filler_${i}`, surface: OPERATOR as SubstrateEvent["surface"], session_id: null, ts: new Date(H + HOUR_MS + i).toISOString() }));
-		}
+		endlessNotes(w);
 		const result = await verifyEventRef(w.ports, "evt_v16_note");
 		expect(result).toMatchObject({ status: "unverified", signer_set_complete: false });
+		expect(result.reasons.join(" ")).toContain("rotation-read-incomplete");
 		expect(result.reasons.join(" ")).toContain("older rotation may be missing");
 	});
 
-	test("the same limit does not hide a real disagreement: a different root stays a mismatch", async () => {
+	test("the same gap does not hide a real disagreement: a different root stays a mismatch", async () => {
 		const w = world(event({ id: "evt_v16_note" }), { signer: SIGNER_B });
-		for (let i = 0; i < LOOKUP_ROW_LIMIT; i++) {
-			w.ledger.events.push(event({ id: `evt_v16_filler_${i}`, surface: OPERATOR as SubstrateEvent["surface"], session_id: null, ts: new Date(H + HOUR_MS + i).toISOString() }));
-		}
+		endlessNotes(w);
 		// The ledger's hour no longer hashes to the anchored root.
 		w.ledger.leaves = w.ledger.leaves.map((leaf, i) => (i === 0 ? { ...leaf, hash: "f".repeat(64) } : leaf));
 		const result = await verifyEventRef(w.ports, "evt_v16_note");
@@ -352,6 +367,53 @@ describe("the signer set: the configured key plus operator rotations", () => {
 		const result = await verifyEventRef(w.ports, "evt_v16_note");
 		expect(result).toMatchObject({ status: "unverified", signer_set_complete: false });
 		expect(result.reasons.join(" ")).toContain("could not be read");
+	});
+
+	test("a failed rotation read never lets the bootstrap signer pass as anchored: unverified, rotation-read-incomplete", async () => {
+		// SIGNER_A is the configured key and signed the anchor: without the read it would verify, but a retirement may be hidden.
+		const w = world(event({ id: "evt_v16_note" }));
+		w.ledger.failQuery = "greptime unreachable";
+		const result = await verifyEventRef(w.ports, "evt_v16_note");
+		expect(result).toMatchObject({ status: "unverified", signer_set_complete: false });
+		expect(result.reasons.join(" ")).toContain("rotation-read-incomplete");
+		expect(await anchorEvidenceFor(w.ports, "evt_v16_note")).toMatchObject({ status: "unverified", proof_ref: null });
+	});
+
+	test("a rotation read cut by the page cap never lets the bootstrap signer pass as anchored", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		endlessNotes(w);
+		const result = await verifyEventRef(w.ports, "evt_v16_note");
+		expect(result).toMatchObject({ status: "unverified", signer_set_complete: false });
+		expect(result.reasons.join(" ")).toContain("rotation-read-incomplete");
+		expect(w.ledger.calls.queryEvents).toBe(ROTATION_READ_MAX_PAGES);
+	});
+
+	test("a retirement beyond the old 500-note bound is seen: the retired signer is unverified, signer-retired", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		const retired = retirement(SIGNER_A, SIGNER_B, H - 3 * HOUR_MS);
+		w.ledger.events.push(retired);
+		// 600 newer notes of the operator surface: the oldest 100 plus the retirement lie beyond the first page.
+		for (let i = 0; i < 600; i++) {
+			w.ledger.events.push(event({ id: `evt_v16_filler_${i}`, surface: OPERATOR as SubstrateEvent["surface"], session_id: null, ts: new Date(H + HOUR_MS + i).toISOString() }));
+		}
+		const result = await verifyEventRef(w.ports, "evt_v16_note");
+		expect(result).toMatchObject({ status: "unverified" });
+		expect(result.reasons.join(" ")).toContain("signer-retired");
+		expect(result).not.toHaveProperty("signer_set_complete");
+		expect(result.signer_set).toMatchObject({ rotation_notes_applied: 1, read_gap: null });
+		expect(w.ledger.calls.queryEvents).toBe(2);
+	});
+
+	test("a signer retired after the anchor still verifies as anchored, however many unrelated notes there are", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		w.ledger.events.push(retirement(SIGNER_A, SIGNER_B, BLOCK_TIME_MS + HOUR_MS));
+		for (let i = 0; i < 600; i++) {
+			w.ledger.events.push(event({ id: `evt_v16_filler_${i}`, surface: OPERATOR as SubstrateEvent["surface"], session_id: null, ts: new Date(H + 5 * HOUR_MS + i).toISOString() }));
+		}
+		const result = await verifyEventRef(w.ports, "evt_v16_note");
+		expect(result.status).toBe("anchored");
+		expect(result).not.toHaveProperty("signer_set_complete");
+		expect(result.signer_set).toMatchObject({ entries: 2, rotation_notes_applied: 1, read_gap: null });
 	});
 });
 
@@ -441,14 +503,31 @@ describe("SUBSTRATE_ANCHOR_SIGNER_SET is the bootstrap when set", () => {
 		});
 	});
 
-	test("a rotation read that hit its 500-note window says so in the summary, and a failed one says why", async () => {
+	test("a retired window in the configured set, closed at or before the anchored hour, is unverified with signer-retired", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		withSet(w, [{ pubkey: SIGNER_A, valid_from_ms: 0, valid_until_ms: H }, { pubkey: SIGNER_B, valid_from_ms: H, valid_until_ms: null }], SIGNER_B);
+		const result = await verifyEventRef(w.ports, "evt_v16_note");
+		expect(result.status).toBe("unverified");
+		expect(result.reasons.join(" ")).toContain("signer-retired");
+	});
+
+	test("a rotation read that exhausts its notes reports no gap, a capped one says so in the summary, and a failed one says why", async () => {
 		const full = world(event({ id: "evt_v16_note" }));
 		for (let i = 0; i < LOOKUP_ROW_LIMIT; i++) {
 			full.ledger.events.push(event({ id: `evt_v16_filler_${i}`, surface: OPERATOR as SubstrateEvent["surface"], session_id: null, ts: new Date(H + HOUR_MS + i).toISOString() }));
 		}
-		const truncated = await verifyEventRef(full.ports, "evt_v16_note");
-		expect(truncated).toMatchObject({ status: "anchored", signer_set_complete: false });
-		expect(truncated.signer_set?.read_gap).toContain(`${LOOKUP_ROW_LIMIT}-note limit`);
+		const exhausted = await verifyEventRef(full.ports, "evt_v16_note");
+		expect(exhausted.status).toBe("anchored");
+		expect(exhausted).not.toHaveProperty("signer_set_complete");
+		expect(exhausted.signer_set?.read_gap).toBeNull();
+
+		const capped = world(event({ id: "evt_v16_note" }));
+		const served = { n: 0 };
+		capped.ledger.queryEvents = async () =>
+			Array.from({ length: LOOKUP_ROW_LIMIT }, () => toRow(event({ id: `evt_v16_endless_${served.n++}`, surface: OPERATOR as SubstrateEvent["surface"], session_id: null, ts: new Date(H + 40 * HOUR_MS - served.n).toISOString() })));
+		const truncated = await verifyEventRef(capped.ports, "evt_v16_note");
+		expect(truncated).toMatchObject({ status: "unverified", signer_set_complete: false });
+		expect(truncated.signer_set?.read_gap).toContain(`${ROTATION_READ_MAX_PAGES}-page limit`);
 
 		const failed = world(event({ id: "evt_v16_note" }));
 		failed.ledger.failQuery = "greptime unreachable";

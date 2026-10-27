@@ -60,11 +60,12 @@ import {
 	bankForSurface,
 	deleteDocument,
 	getDocument,
+	hindsightBanksFromEnv,
 	hindsightFromEnv,
 	type FetchLike,
 	type HindsightConfig,
 } from "./planes/hindsight.ts";
-import type { MemoryEntry } from "./types.ts";
+import { SURFACES, type MemoryEntry } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Argument grammar
@@ -344,6 +345,8 @@ export interface RunnerContext {
 	bankFor: (writer: string) => string;
 	/** The configured bank prefix: `--bank` must name a bank under it (a `pd-*` desk bank is never touched). */
 	bankPrefix: string;
+	/** Every bank the server is configured to write or recall into: each one is examined, with or without index rows. */
+	banks: readonly string[];
 	repair: RepairPorts;
 	close(): Promise<void>;
 }
@@ -408,6 +411,7 @@ export async function runConsistency(argv: readonly string[], deps: RunnerDeps):
 			report = await verifyConsistency(context.readers, {
 				now: deps.now,
 				bankFor: context.bankFor,
+				configuredBanks: context.banks,
 				...(args.bank !== null ? { bank: args.bank } : {}),
 				...(args.since !== null ? { since: args.since } : {}),
 				...(args.limit !== null ? { maxEntries: args.limit } : {}),
@@ -602,6 +606,15 @@ function readTextOrNull(path: string): string | null {
 	}
 }
 
+/**
+ * Every bank the server is configured with: the writer bank of each known surface (`bankForSurface`) and the
+ * explicit recall set (`HINDSIGHT_BANKS`, already limited to the bank prefix). Sorted and de-duplicated. The
+ * verifier examines all of them, so a bank whose index rows were swept still has its documents checked.
+ */
+export function configuredBanks(plane: HindsightConfig, env: Record<string, string | undefined>): string[] {
+	return [...new Set([...SURFACES.map((surface) => bankForSurface(plane, surface)), ...(hindsightBanksFromEnv(env) ?? [])])].sort();
+}
+
 /** Open the real stores from the server's environment. Credentials are read here and only here. */
 export async function openRealContext(): Promise<RunnerContext | { refused: string }> {
 	const config = loadConfig();
@@ -647,6 +660,7 @@ export async function openRealContext(): Promise<RunnerContext | { refused: stri
 		},
 		bankFor: (writer) => bankForSurface(plane, writer),
 		bankPrefix: plane.bankPrefix,
+		banks: configuredBanks(plane, process.env),
 		repair: {
 			readEntry: (id) => index.readEntry(id),
 			documentShared: (entry) => index.memoryDocumentShared(entry),

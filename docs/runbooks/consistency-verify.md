@@ -77,6 +77,7 @@ The verdict is one of `CLEAN` (no findings, every store read, no skipped check),
 | `coverage.plane_listing` | `complete`, `partial`, `unavailable` (the plane has no usable listing route) or `not_checked` |
 | `coverage.outbox` | `known` (the parked set was read) or `unknown` (see the limits) |
 | `coverage.ledger` | `compared`, `partial` or `not_checked` |
+| `coverage.banks` | per-bank plane coverage: `configured` (every bank the server is configured with: each surface's writer bank plus `HINDSIGHT_BANKS`; all of them are listed, whether or not the index has a row for them, so a bank whose rows were swept still has its orphan documents found), `examined` (documents listed and compared), `skipped` (`{bank, reason}`: the listing did not run; each one makes `ok` false) and `listing_truncated` (the `max_documents` bound cut the listing short) |
 | `coverage.skipped_checks` | checks that could not run, as `<check>:<reason>`; any entry makes `ok` false |
 | `counts` | exact counts: entries examined, current, superseded, forgotten, expected in the plane, parked retains, hash checked and unchecked, shared documents, ledger pairs, `findings_total`, `findings_by_code` |
 | `findings[]` | sorted, at most 500: `code`, `id`, `stores`, `bank`, `document_id`, `entry_id` or `event_id`, `detail` |

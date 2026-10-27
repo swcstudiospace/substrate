@@ -206,6 +206,13 @@ export interface ConsistencyOptions {
 	documentIdOf?: (entry: MemoryEntry) => string | null;
 	/** Restrict the run to one bank. */
 	bank?: string;
+	/**
+	 * The banks the server is configured to write and recall (the surface banks plus `HINDSIGHT_BANKS`).
+	 * Every one is examined whether or not the index holds a row for it: a bank whose rows were swept can
+	 * still hold orphan documents. Ignored when `bank` restricts the run. Without it only the banks the
+	 * examined index rows name are walked.
+	 */
+	configuredBanks?: readonly string[];
 	/** Only entries created at or after this ISO instant. */
 	since?: string;
 	maxEntries?: number;
@@ -237,6 +244,7 @@ interface ResolvedOptions {
 	bankFor: (writer: string) => string;
 	documentIdOf: (entry: MemoryEntry) => string | null;
 	bank: string | null;
+	configuredBanks: string[];
 	since: string | null;
 	sinceMs: number | null;
 	maxEntries: number;
@@ -279,11 +287,15 @@ function resolveOptions(options: ConsistencyOptions): ResolvedOptions {
 		since = new Date(parsed).toISOString();
 	}
 	if (options.bank !== undefined && options.bank.length === 0) throw new ConsistencyOptionError("bank must not be empty");
+	if (options.configuredBanks?.some((bank) => typeof bank !== "string" || bank.length === 0) === true) {
+		throw new ConsistencyOptionError("configuredBanks must hold only non-empty bank names");
+	}
 	return {
 		now: options.now,
 		bankFor: options.bankFor,
 		documentIdOf: options.documentIdOf ?? defaultDocumentId,
 		bank: options.bank ?? null,
+		configuredBanks: [...new Set(options.configuredBanks ?? [])].sort(compareText),
 		since,
 		sinceMs,
 		maxEntries: boundedInt("maxEntries", options.maxEntries, DEFAULT_MAX_ENTRIES, 1, MAX_ENTRIES_CEILING),
@@ -362,11 +374,24 @@ export interface ConsistencyCounts {
 	findings_by_code: Record<FindingCode, number>;
 }
 
+/** What the plane check covered, per bank. A bank in `skipped` was NOT checked for orphans or duplicates, whatever else the report says. */
+export interface BankCoverage {
+	/** The configured banks the run was given (sorted); empty when it was given none. */
+	configured: string[];
+	/** Banks whose plane documents were listed and compared with the index (a truncated listing is also in `listing_truncated`). */
+	examined: string[];
+	/** Banks whose document listing did not run, with a short reason. Each one makes `ok` false. */
+	skipped: Array<{ bank: string; reason: string }>;
+	/** Banks whose document listing a bound (`max_documents`) cut short: documents past it were not seen. */
+	listing_truncated: string[];
+}
+
 export interface ConsistencyCoverage {
 	/** `known`: the parked set was read. `unknown`: no outbox reader, a memory-only outbox, or a read that failed. */
 	outbox: "known" | "unknown";
 	plane_listing: "complete" | "partial" | "unavailable" | "not_checked";
 	ledger: "compared" | "partial" | "not_checked";
+	banks: BankCoverage;
 	/** Checks that could not run, as `<check>:<reason>`. Any entry makes `ok` false. */
 	skipped_checks: string[];
 }
@@ -548,7 +573,13 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 
 	const counts = emptyCounts();
 	const stores: Record<Store, StoreStatus> = { index: { state: "not_checked" }, plane: { state: "not_checked" }, ledger: { state: "not_checked" } };
-	const coverage: ConsistencyCoverage = { outbox: "unknown", plane_listing: "not_checked", ledger: "not_checked", skipped_checks: [] };
+	const coverage: ConsistencyCoverage = {
+		outbox: "unknown",
+		plane_listing: "not_checked",
+		ledger: "not_checked",
+		banks: { configured: cfg.configuredBanks.map(token), examined: [], skipped: [], listing_truncated: [] },
+		skipped_checks: [],
+	};
 	const findings: Finding[] = [];
 	let truncated = false;
 	let ledgerWindow: ConsistencyScope["ledger_window"] = null;
@@ -709,7 +740,7 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 			if (item.state === "current") currentKeys.add(docKey(item.bank, item.docId));
 			else if (item.state === "forgotten") forgottenKeys.add(docKey(item.bank, item.docId));
 		}
-		const banks = [...new Set([...items.map((item) => item.bank), ...(cfg.bank !== null ? [cfg.bank] : [])])].sort(compareText);
+		const banks = [...new Set([...items.map((item) => item.bank), ...(cfg.bank !== null ? [cfg.bank] : cfg.configuredBanks)])].sort(compareText);
 		counts.banks_examined = banks.length;
 
 		const lookup = (bank: string, id: string): Promise<PlaneDocumentView | null> => {
@@ -728,9 +759,12 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 		let listingPartial = false;
 		let listedAny = false;
 		const unlistedFor = new Set<string>();
+		const itemBanks = new Set(items.map((item) => item.bank));
+		let skippedConfiguredOnly = 0;
 
 		for (const bank of banks) {
 			// 2a. the bank's document listing, when the plane has one.
+			let skipReason: string | null = null;
 			let listed: Set<string> | null = null;
 			let listingComplete = false;
 			if (readers.plane.listDocuments !== undefined && !listingUnsupported) {
@@ -771,13 +805,27 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 					listedAny = true;
 					if (!listingComplete) listingPartial = true;
 				} catch (cause) {
-					if (!(cause instanceof ReaderUnsupported)) throw cause;
-					listingUnsupported = true;
+					if (cause instanceof ReaderUnsupported) {
+						listingUnsupported = true;
+					} else if (!itemBanks.has(bank) && bank !== cfg.bank && !(cause instanceof ReaderFailure && cause.reason === "deadline_exceeded")) {
+						// A configured bank with no index row is only examined for stray documents: when it cannot be read it
+						// is reported as skipped (which makes the run not clean) instead of failing the plane for the banks that were read.
+						skipReason = `listing failed: ${cause instanceof ReaderFailure ? cause.reason : describe(cause)}`;
+					} else {
+						throw cause;
+					}
 				}
 			} else if (readers.plane.listDocuments === undefined) {
 				listingUnsupported = true;
 			}
-			if (listed === null) unlistedFor.add(bank);
+			if (listed === null) {
+				unlistedFor.add(bank);
+				coverage.banks.skipped.push({ bank: token(bank), reason: skipReason ?? "the plane has no usable document listing" });
+				if (!itemBanks.has(bank)) skippedConfiguredOnly += 1;
+			} else {
+				coverage.banks.examined.push(token(bank));
+				if (!listingComplete) coverage.banks.listing_truncated.push(token(bank));
+			}
 
 			// 2b. an expected entry whose document is absent. A listing that lacks it is confirmed by a point read.
 			const wanted = items.filter((item) => item.bank === bank && item.expected && item.docId !== null && !parked.has(item.entry.id));
@@ -920,7 +968,11 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 		else coverage.plane_listing = "complete";
 		if (coverage.plane_listing === "unavailable") {
 			coverage.skipped_checks.push("duplicate_document:plane_listing_unavailable", "plane_document_orphan:plane_listing_unavailable");
+		} else {
+			// A bank that was not listed is not clean: the global entries above cover the case where no bank could be.
+			for (const skipped of coverage.banks.skipped) coverage.skipped_checks.push(`plane_bank_skipped:${skipped.bank}:${skipped.reason}`);
 		}
+		counts.banks_examined = banks.length - skippedConfiguredOnly;
 	}
 
 	// ── the ledger comparison ─────────────────────────────────────────────
@@ -1121,6 +1173,9 @@ export function formatReportText(report: ConsistencyReport): string {
 	}
 	for (const skipped of report.coverage.skipped_checks) lines.push(`  skipped  ${skipped}`);
 	if (report.coverage.outbox === "unknown") lines.push("  note     retain outbox not readable: a missing document may be a parked retain");
+	if (report.coverage.banks.listing_truncated.length > 0) {
+		lines.push(`  note     document listing cut short for ${report.coverage.banks.listing_truncated.length} bank(s): ${report.coverage.banks.listing_truncated.join(", ")}`);
+	}
 	if (unreachable.length > 0) lines.push(`  unread   ${unreachable.join(", ")}: ok cannot be claimed`);
 	return `${lines.join("\n")}\n`;
 }

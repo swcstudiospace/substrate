@@ -1,4 +1,4 @@
-import { encodeMetadata, listPinnedIn, type PinnedCheckpoint, refFor, pinTree, readPinnedSnapshotIn } from "./pin.ts";
+import { encodeMetadata, listPinnedIn, type PinnedCheckpoint, pinTree, readPinnedSnapshotIn } from "./pin.ts";
 import { validateTarget } from "./plan.ts";
 import { resolvePolicy } from "./policy.ts";
 import { openRepo, type Runner } from "./runner.ts";
@@ -32,13 +32,12 @@ export type PinParams = {
 };
 
 /**
- * Make a snapshot durable under `refs/substrate/checkpoints/<id>` (see pin.ts for the warning about
- * pushing that namespace). Idempotent for the same id and tree.
+ * Make a snapshot durable under `refs/substrate/checkpoints/<worktree scope>/<id>` (see pin.ts for the
+ * scope and for the warning about pushing that namespace). Idempotent for the same id and tree.
  */
 export async function pinSnapshot(params: PinParams): Promise<PinResult> {
 	const ctx = await openRepo(params);
 	const tree = await validateTarget(ctx, params.snapshot);
-	refFor("checkpoints", params.id);
 	const metadata = params.metadata === undefined ? undefined : encodeMetadata(params.metadata);
 	return pinTree(ctx, "checkpoints", params.id, tree, metadata);
 }
@@ -46,9 +45,11 @@ export async function pinSnapshot(params: PinParams): Promise<PinResult> {
 export type ListPinnedParams = { worktree: string; now?: Clock; run?: Runner };
 
 /**
- * The pinned checkpoints of a worktree (`refs/substrate/checkpoints/*`) with their id, commit, tree
- * and parsed metadata. A corrupt metadata trailer is reported on its entry, never thrown. These refs
- * are the local checkpoint registry: they work with no server.
+ * The pinned checkpoints of THIS worktree with their id, commit, tree and parsed metadata: its own
+ * scope under `refs/substrate/checkpoints/`, plus, for the main worktree only, unscoped checkpoints
+ * made before scoping. Another linked worktree's checkpoints are never listed. A corrupt metadata
+ * trailer is reported on its entry, never thrown. These refs are the local checkpoint registry: they
+ * work with no server.
  */
 export async function listPinned(params: ListPinnedParams): Promise<PinnedCheckpoint[]> {
 	return listPinnedIn(await openRepo(params));
