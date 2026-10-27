@@ -3,7 +3,7 @@
  *
  * The production runner uses `child_process.spawn` with an argv array and no shell: paths are never
  * interpolated into a command string. `spawn` rather than `execFile` because two calls need what
- * `execFile` cannot give: stdin for NUL-separated pathspec lists, and stdout streamed straight into
+ * `execFile` cannot give: stdin for newline- or NUL-separated path and index lists, and stdout streamed straight into
  * a file (blob contents are never buffered in memory).
  */
 

@@ -22,9 +22,9 @@
  *    maxFileBytes, nested repositories) are in neither tree, so a restore neither writes nor deletes
  *    them. A target path that would have to overwrite or replace such an excluded file or directory
  *    fails the restore (and rolls it back) instead.
- *  - Conversion attributes (`text`, `eol`, `filter`) in `.gitattributes` are applied by git when it
- *    hashes the worktree. If they make the re-hash of a restored file differ from its blob,
- *    verification fails and the restore is rolled back; it never reports a false success.
+ *  - Conversion attributes and config (`text`, `eol`, `filter`, `core.autocrlf`) are ignored: files
+ *    are hashed with `hash-object --no-filters`, so a snapshot and the verification re-hash are over
+ *    the exact bytes on disk and a restore writes those bytes back.
  *  - A file written between the safety snapshot and the end of the restore by another process is
  *    not protected (the lock only serialises restores).
  */
