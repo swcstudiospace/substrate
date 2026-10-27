@@ -375,6 +375,37 @@ describe("--repair", () => {
 		expect(f.mutating()).toEqual(["retain:mem_missing"]);
 	});
 
+	test("an entry forgotten while the repair's retain was in flight has the document the retain re-created removed", async () => {
+		const f = messy();
+		const missing = f.repairView.get("mem_missing") as MemoryEntry;
+		const real = f.ctx.repair.retain;
+		// The forget marks the entry and deletes its document while the POST is in flight; the POST lands afterwards.
+		f.ctx.repair.retain = async (e, bank, documentId) => {
+			const result = await real(e, bank, documentId);
+			f.repairView.set(e.id, { ...e, superseded_by: FORGOTTEN });
+			return result;
+		};
+		const result = await run(["--json", "--repair"], f);
+		const document = defaultDocumentId(missing) as string;
+		expect(f.mutating()).toEqual(["delete:key-mem_forgotten", "retain:mem_missing", `delete:${document}`]);
+		expect(f.docs.has(document)).toBe(false);
+		const outcome = JSON.parse(result.stdout).repairs.outcomes.find((o: { action: string }) => o.action === "re_retain");
+		expect(outcome).toMatchObject({ outcome: "skipped", reason: expect.stringContaining("forgotten while the repair ran") });
+	});
+
+	test("a forgotten entry's re-created document is left when a live entry shares it", async () => {
+		const f = messy();
+		const real = f.ctx.repair.retain;
+		f.ctx.repair.retain = async (e, bank, documentId) => {
+			const result = await real(e, bank, documentId);
+			f.repairView.set(e.id, { ...e, superseded_by: FORGOTTEN });
+			f.ctx.repair.documentShared = async () => true;
+			return result;
+		};
+		await run(["--json", "--repair"], f);
+		expect(f.mutating()).toEqual(["delete:key-mem_forgotten", "retain:mem_missing"]);
+	});
+
 	test("the retain gate's refusal is skipped; a throwing retain fails that action only, with no URL in the report", async () => {
 		const refused = await run(["--json", "--repair"], messy({ retain: { forwarded: false, reason: "retain.expired" } }));
 		expect(JSON.parse(refused.stdout).repairs.outcomes.find((o: { action: string }) => o.action === "re_retain")).toMatchObject({ outcome: "skipped", reason: "retain.expired" });

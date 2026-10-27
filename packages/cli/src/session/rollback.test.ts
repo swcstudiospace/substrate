@@ -3,7 +3,7 @@
  * state really goes back, nothing is left half done, and the ledger hears about it exactly once.
  */
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { existsSync, lstatSync, readFileSync, readlinkSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readlinkSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { RandomBytes } from "../../../mcp-server/src/session-events.ts";
 import { SimulatedCrash, readPinnedSnapshot, snapshot } from "../../../worktree-snapshot/src/index.ts";
@@ -540,6 +540,54 @@ describe("a restore that goes wrong", () => {
 		// The pre-restore checkpoint taken before the crash is still there to undo with.
 		const { checkpoints } = await listLocalCheckpoints({ worktree: w.dir });
 		expect(checkpoints.some((c) => c.trigger === "pre-restore")).toBe(true);
+	});
+
+	test("a crash mid-restore leaves a journalled commit that sync holds back until recover finishes the restore, then delivers once", async () => {
+		const w = world();
+		const { c1 } = await twoStates(w);
+		const crashed = await roll(w, c1.checkpoint.ckpt_id, {
+			hooks: {
+				beforeOp: (index) => {
+					if (index === 3) throw new SimulatedCrash("process died");
+				},
+			},
+		}).catch((caught: unknown) => caught);
+		expect(crashed).toBeInstanceOf(SimulatedCrash);
+		const marked = listPending(w.pendingDir).items.find((item) => item.kind === "rollback");
+		expect(marked?.kind === "rollback" && marked.restoring).toBe(true);
+		expect(marked?.kind === "rollback" && marked.commit.files.added + marked.commit.files.modified + marked.commit.files.deleted).toBeGreaterThan(0);
+
+		// Before the restore is finished the ledger is not told.
+		const early = await replayPending({ dir: w.pendingDir, clientFor: () => w.server });
+		expect(early.failed.some((entry) => entry.kind === "rollback" && entry.code === "restore-in-progress")).toBe(true);
+		expect(w.server.deliveries.commit).toBe(0);
+
+		const next = await roll(w, c1.checkpoint.ckpt_id, { dryRun: true });
+		expect(next.recovered).toMatchObject({ direction: "forward" });
+		const settled = listPending(w.pendingDir).items.find((item) => item.kind === "rollback");
+		expect(settled?.kind === "rollback" && settled.restoring).toBeUndefined();
+		const synced = await replayPending({ dir: w.pendingDir, clientFor: () => w.server });
+		expect(synced.delivered.some((entry) => entry.kind === "rollback")).toBe(true);
+		expect(w.server.deliveries.commit).toBe(1);
+		expect(listPending(w.pendingDir).items.filter((item) => item.kind === "rollback")).toEqual([]);
+	});
+
+	test("a rollback that crashed before its restore began is dropped by the next run, never delivered", async () => {
+		const w = world();
+		const { c1 } = await twoStates(w);
+		const crashed = await roll(w, c1.checkpoint.ckpt_id, {
+			hooks: {
+				beforeOp: (index) => {
+					if (index === 0) throw new SimulatedCrash("process died");
+				},
+			},
+		}).catch((caught: unknown) => caught);
+		expect(crashed).toBeInstanceOf(SimulatedCrash);
+		// Forget the journal: as if the process died before the restore wrote it.
+		rmSync(journalPath(w), { force: true });
+		await roll(w, c1.checkpoint.ckpt_id, { dryRun: true });
+		expect(listPending(w.pendingDir).items.filter((item) => item.kind === "rollback")).toEqual([]);
+		expect(w.server.deliveries.commit).toBe(0);
 	});
 
 	test("a failure that is handled rolls back, is reported honestly with the safety ref, and writes nothing to the ledger", async () => {

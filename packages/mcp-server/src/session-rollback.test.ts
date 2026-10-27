@@ -808,6 +808,60 @@ describe("session_rollback_commit: committed", () => {
 		expect(w.ledger.byAction("session.rollback")).toHaveLength(1);
 	});
 
+	test("a forget whose ledger note cannot be recorded stops the commit: its rows are marked and nothing else would remember the batch", async () => {
+		const w = world();
+		const target = await record(w, 1);
+		seedMemory(w, target.ts);
+		const p = await plan(w, 1);
+		w.ledger.failInsertFor = (event) => event.payload["action"] === FORGET_ACTION;
+
+		const failed = await w.substrate.sessionRollbackCommit(commitInput(p), ME);
+
+		expect(errorOf(failed)).toMatchObject({ code: "forget-incomplete", retryable: true });
+		expect(errorOf(failed).message).toContain("could not be recorded");
+		// Never reported as a finished rollback.
+		expect(w.ledger.byAction("session.rollback")).toHaveLength(0);
+		expect(w.index.forgotten()).toHaveLength(2);
+	});
+
+	test("a forget note that fails once is repeated with the same request, and the commit completes with the real totals", async () => {
+		const w = world();
+		const target = await record(w, 1);
+		seedMemory(w, target.ts);
+		const p = await plan(w, 1);
+		let failures = 1;
+		w.ledger.failInsertFor = (event) => event.payload["action"] === FORGET_ACTION && failures-- > 0;
+
+		const result = await w.substrate.sessionRollbackCommit(commitInput(p), ME);
+
+		expect(result).toMatchObject({ ok: true, memory: { superseded_entries: 2 } });
+		expect(w.ledger.byAction(FORGET_ACTION)).toHaveLength(1);
+		expect(w.ledger.byAction("session.rollback")).toHaveLength(1);
+		// The repeat is the same forget call: one forget id on the note, and no second mark.
+		expect(w.index.marks).toHaveLength(1);
+	});
+
+	test("another surface's entries cannot crowd out the caller's: the writer is part of the selection, ahead of its limit", async () => {
+		const w = world();
+		const target = await record(w, 1);
+		// More foreign rows than one selection can hold, all older than the caller's own two.
+		for (let n = 0; n < 5_001; n++) w.index.entries.push(entry({ id: `mem_h_${String(n).padStart(5, "0")}`, created: at(target.ts + 1_000 + n), writer: "hermes" }));
+		w.index.entries.push(entry({ id: "mem_mine_1", created: at(target.ts + 60_000) }), entry({ id: "mem_mine_2", created: at(target.ts + 61_000) }));
+
+		const mine = await plan(w, 1);
+
+		expect(mine.memory).toEqual({ would_forget: 2, sample_ids: ["mem_mine_1", "mem_mine_2"], truncated: false });
+		expect(w.index.selectWriters).toEqual(["claude-code"]);
+		const committed = await w.substrate.sessionRollbackCommit(commitInput(mine), ME);
+		expect(committed).toMatchObject({ ok: true, memory: { superseded_entries: 2, truncated: false } });
+		expect(w.index.forgotten().sort()).toEqual(["mem_mine_1", "mem_mine_2"]);
+		// An operator reads every writer's rows.
+		const operator = await plan(w, 1, OPERATOR);
+		expect(w.index.selectWriters.at(-1)).toBeNull();
+		expect(operator.memory.would_forget).toBe(5_000);
+		expect(operator.memory.truncated).toBe(true);
+	});
+
 	test("a plane that cannot delete reports plane_pending, and a re-run of the same rollback retries only that deletion", async () => {
 		await withPlaneEnv(async () => {
 			let planeUp = false;

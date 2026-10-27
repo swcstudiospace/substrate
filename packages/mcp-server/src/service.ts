@@ -144,7 +144,7 @@ import { briefFanoutOf, fanOutBriefRecall, recallMemories, resolveRecallBanks, U
 import { emitRetainWarning, forwardRetain, replayRetain, retainDocumentId, type RetainDeps, type RetainOutboxSink } from "./memory-retain.ts";
 import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
-import { forgetEntries, selectForRollback, type ForgetReport, type ForgetRequest, type RollbackSelectRequest, type RollbackSelection } from "./memory-forget.ts";
+import { forgetEntries, selectForRollback, type ForgetReport, type ForgetRequest, type PlaneDeleteResult, type RollbackSelectRequest, type RollbackSelection } from "./memory-forget.ts";
 import { ForgetUnavailableError, forgetDocumentId, planeDeleteFor } from "./memory-forget-plane.ts";
 import { verifyMemoryRecord, MemoryVerifyError, type MemoryVerifyResult } from "./memory-verify.ts";
 import { anchorEvidenceFor, verifyCheckpointRef, type AnchorVerifyPorts, type CheckpointVerifyToolResult, type SignerSetSummary } from "./anchor-verify-deps.ts";
@@ -2820,6 +2820,7 @@ export class Substrate {
 		const surface = callerSurface ?? "unattributed";
 		const config = hindsightFromEnv();
 		const banks = hindsightBanksFromEnv();
+		const index = this.index;
 		return this.cache.getOrLoad({
 			klass: "memory-search",
 			surface,
@@ -2845,6 +2846,9 @@ export class Substrate {
 						vmGuest: this.config.vmGuest,
 						fetchImpl: this.hindsightFetch,
 						budgetMs: budgetMs ?? this.config.hindsightBudgets.recallBudgetMs,
+						// A forgotten entry's document can outlive the forget (a plane delete that is still pending): its text is
+						// withheld here, from the index's own record, until the deletion lands.
+						...(index === null ? {} : { forgotten: (ids: readonly string[]) => index.forgottenEntryIds(ids) }),
 					},
 					query,
 					callerSurface,
@@ -3166,11 +3170,14 @@ export class Substrate {
 							throw cause;
 						}
 					},
-					documentShared: (entry) => index.memoryDocumentShared(entry),
+					// The shared-document check runs inside the document's retain queue, next to the delete it guards: a retain
+					// of the same document that was queued first has landed, and one that lands later is a new write the delete
+					// does not remove. Asked before the queue, a replacement written in between would be deleted with it.
 					deletePlaneDocument: (entry) => {
 						const documentId = hindsight === null ? null : forgetDocumentId(entry);
-						if (hindsight === null || documentId === null) return deletePlane(entry);
-						return this.chainRetain(`${hindsight.url} ${bankForSurface(hindsight, entry.writer)} ${documentId}`, () => deletePlane(entry));
+						const guarded = async (): Promise<PlaneDeleteResult> => ((await index.memoryDocumentShared(entry)) ? { ok: true, skipped: "document-shared" } : deletePlane(entry));
+						if (hindsight === null || documentId === null) return guarded();
+						return this.chainRetain(`${hindsight.url} ${bankForSurface(hindsight, entry.writer)} ${documentId}`, guarded);
 					},
 					emit: async (payload, summary, meta) => {
 						const sessionId = caller.session_id ?? payload.session_id;
@@ -3350,7 +3357,7 @@ export class Substrate {
 			},
 			emit: (input) => this.emit(input),
 			verifyAnchor: (eventId, sessionId, surface) => verifyCheckpointRef(this.anchorVerifyPorts(), eventId, { sessionId, surface }),
-			selectEntries: (sessionId, afterIso, untilIso) => this.selectRollbackEntries(sessionId, afterIso, untilIso),
+			selectEntries: (sessionId, afterIso, untilIso, writer) => this.selectRollbackEntries(sessionId, afterIso, untilIso, writer),
 			forget: (request, caller) => this.memoryForget(request, caller),
 			anchorTimeoutMs: DEFAULT_ANCHOR_TIMEOUT_MS,
 			nowMs: () => Date.now(),
@@ -3359,21 +3366,22 @@ export class Substrate {
 
 	/**
 	 * The entries a rollback to `afterIso` would forget, with their writers (`selectMemoryForRollback` returns ids only).
+	 * `writer` limits the read to one surface's entries, ahead of the selection limit; null reads every writer's (an operator).
 	 * No index means no memory entries exist, so there is nothing to forget: an empty selection, not an error.
 	 */
-	private async selectRollbackEntries(sessionId: string, afterIso: string, untilIso: string | null): Promise<EntrySelection> {
+	private async selectRollbackEntries(sessionId: string, afterIso: string, untilIso: string | null, writer: string | null): Promise<EntrySelection> {
 		const index = this.index;
 		if (index === null) return { entries: [], truncated: false };
 		let found: ReadonlyArray<Pick<MemoryEntry, "id" | "writer">> = [];
 		const selection = await selectForRollback(
 			{
-				entriesCreatedAfter: async (session, after, graphId, limit, until) => {
-					const result = await index.memoryEntriesCreatedAfter(session, after, graphId, limit, until);
+				entriesCreatedAfter: async (session, after, graphId, limit, until, onlyWriter) => {
+					const result = await index.memoryEntriesCreatedAfter(session, after, graphId, limit, until, onlyWriter ?? null);
 					found = result.entries;
 					return result;
 				},
 			},
-			{ session_id: sessionId, after: afterIso, limit: ROLLBACK_SELECTION_LIMIT, ...(untilIso !== null ? { until: untilIso } : {}) },
+			{ session_id: sessionId, after: afterIso, limit: ROLLBACK_SELECTION_LIMIT, ...(untilIso !== null ? { until: untilIso } : {}), ...(writer !== null ? { writer } : {}) },
 		);
 		const writers = new Map<string, string>(found.map((entry): [string, string] => [entry.id, String(entry.writer)]));
 		return { entries: selection.entry_ids.map((id) => ({ id, writer: writers.get(id) ?? "" })), truncated: selection.truncated };

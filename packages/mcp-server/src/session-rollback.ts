@@ -82,6 +82,8 @@ export const FORGET_BATCH_SIZE = FORGET_PAYLOAD_ENTRY_IDS;
 export const MAX_FORGET_BATCHES = 100;
 /** Earlier forget notes whose plane deletions one run retries. */
 export const MAX_PLANE_RETRY_GROUPS = 20;
+/** Repeats of a forget call whose ledger note was not recorded, before the commit stops as incomplete. */
+export const FORGET_NOTE_RETRIES = 2;
 /** How long a plan waits for the anchor check before answering without it. */
 export const DEFAULT_ANCHOR_TIMEOUT_MS = 4_000;
 /** How far before its record time a checkpoint's `taken_at_ms` may lie and still be honoured (a checkpoint taken offline and synced late). */
@@ -136,8 +138,12 @@ export interface SessionRollbackDeps {
 	emit(input: EventInput): Promise<EmitOutcome>;
 	/** The anchor verdict of one checkpoint event. May throw or be slow: a plan answers without it. */
 	verifyAnchor(eventId: string, sessionId: string, surface: Surface): Promise<{ status: string; reasons: readonly string[] }>;
-	/** Entries of the session created strictly after `afterIso`, and at or before `untilIso` when it is not null, still in force (no index: none). Throws when the index cannot be read. */
-	selectEntries(sessionId: string, afterIso: string, untilIso: string | null): Promise<EntrySelection>;
+	/**
+	 * Entries of the session created strictly after `afterIso`, and at or before `untilIso` when it is not null, still in force
+	 * (no index: none). `writer` keeps one surface's entries (null: every writer's), applied before the selection limit so another
+	 * surface's rows cannot crowd the caller's out. Throws when the index cannot be read.
+	 */
+	selectEntries(sessionId: string, afterIso: string, untilIso: string | null, writer: string | null): Promise<EntrySelection>;
 	/** `Substrate.memoryForget`. */
 	forget(request: ForgetRequest, caller: { surface: Surface; session_id: string }): Promise<ForgetReport>;
 	/** Bound on the anchor check; 0 or less means unbounded. */
@@ -573,11 +579,12 @@ async function selectEntries(deps: SessionRollbackDeps, ctx: PlanContext, caller
 	let selection: EntrySelection;
 	try {
 		const cutMs = checkpointCut(Date.parse(ctx.target.event.ts), ctx.target.payload.taken_at_ms).cutMs;
-		selection = await deps.selectEntries(ctx.sessionId, new Date(cutMs).toISOString(), ctx.untilIso);
+		// Another surface's entries in this session are not this caller's to forget (an operator may): the writer is asked for
+		// in the query, ahead of its limit, so a session full of other writers' rows cannot hide the caller's own.
+		selection = await deps.selectEntries(ctx.sessionId, new Date(cutMs).toISOString(), ctx.untilIso, caller.isOperator ? null : caller.surface);
 	} catch (cause) {
 		return refuse("unavailable", `the memory index could not be read, so the rollback's memory part cannot be planned: ${describe(cause)}`, RETRYABLE);
 	}
-	// Entries written by another surface in this session are not this caller's to forget (an operator may).
 	const mine = selection.entries.filter((entry) => caller.isOperator || entry.writer === caller.surface);
 	return { ids: distinct(mine.map((entry) => entry.id)), truncated: selection.truncated };
 }
@@ -867,24 +874,38 @@ async function forgetSelected(
 			if (batches >= MAX_FORGET_BATCHES) incomplete(`the cap of ${MAX_FORGET_BATCHES} forget batches was reached`);
 			const chunk = fresh.slice(at, at + FORGET_BATCH_SIZE);
 			batches++;
-			let report: ForgetReport;
-			try {
-				report = await deps.forget(
-					{
-						reason: "rollback",
-						entry_ids: chunk,
-						actor: "agent",
-						session_id: ctx.sessionId,
-						checkpoint_id: ctx.target.payload.ckpt_id,
-						rollback_id: ctx.rollbackId,
-					},
-					{ surface: caller.surface, session_id: ctx.sessionId },
-				);
-			} catch (cause) {
-				return incomplete(`the memory forget failed (${describe(cause)})`);
+			const forgetChunk = async (): Promise<ForgetReport> => {
+				try {
+					return await deps.forget(
+						{
+							reason: "rollback",
+							entry_ids: chunk,
+							actor: "agent",
+							session_id: ctx.sessionId,
+							checkpoint_id: ctx.target.payload.ckpt_id,
+							rollback_id: ctx.rollbackId,
+						},
+						{ surface: caller.surface, session_id: ctx.sessionId },
+					);
+				} catch (cause) {
+					return incomplete(`the memory forget failed (${describe(cause)})`);
+				}
+			};
+			let report = await forgetChunk();
+			// A forget whose note was not recorded has marked its rows already, so the next selection no longer finds them: the
+			// note is the only trace of the batch. The same request is repeated (same forget id: the rows read back as this
+			// call's own, the plane delete and the note run again) and, when that does not record it either, the commit stops.
+			let deletedBefore = 0;
+			for (let retry = 0; !report.ledger.emitted && retry < FORGET_NOTE_RETRIES; retry++) {
+				deletedBefore += report.plane.deleted;
+				report = await forgetChunk();
 			}
 			for (const id of chunk) attempted.add(id);
 			tally(report, run);
+			run.deleted += deletedBefore;
+			if (!report.ledger.emitted) {
+				incomplete(`the forget note ${report.forget_id} could not be recorded (${report.ledger.reason}), so the rollback is not complete and was not recorded`);
+			}
 		}
 		if (!truncated) break;
 		try {

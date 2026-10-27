@@ -329,6 +329,19 @@ describe("session checkpoints", () => {
 		expect(body.checkpoints.map((c) => c.ledger.state).sort()).toEqual(["unreachable", "unreachable", "unreachable"]);
 	});
 
+	test("a local checkpoint the server does not hold is `not-on-server` under the code the real server answers, `not-found`", async () => {
+		for (const code of ["not-found", "target-not-found"]) {
+			const r = rig();
+			r.server.notFoundCode = code;
+			await session(r, "checkpoint", "--session", SESSION);
+			r.server.checkpoints.clear();
+			r.out.length = 0;
+			expect(await session(r, "checkpoints", "--json")).toBe(EXIT_DONE);
+			const body = json(r) as { checkpoints: Array<{ ledger: { state: string } }> };
+			expect(body.checkpoints.map((c) => c.ledger.state)).toEqual(["not-on-server"]);
+		}
+	});
+
 	test("--offline never asks the server", async () => {
 		const r = rig();
 		await session(r, "checkpoint", "--session", SESSION);
@@ -474,6 +487,10 @@ describe("recover", () => {
 		expect(json(crashing)).toMatchObject({ ok: true, command: "recover", recovered: true, direction: "forward" });
 		expect(existsSync(join(crashing.dir, ".git", "substrate-restore", "restore-journal.json"))).toBe(false);
 		expect(await runSession(["recover"], recovered)).toBe(EXIT_DONE);
+		// The rollback journalled before the crash is delivered by sync once recover has finished the restore.
+		expect(crashing.server.deliveries.commit).toBe(0);
+		expect(await runSession(["sync"], recovered)).toBe(EXIT_DONE);
+		expect(crashing.server.deliveries.commit).toBe(1);
 	});
 });
 

@@ -70,6 +70,12 @@ export interface RecallDeps {
 	budgetMs?: number;
 	/** A guest instance never sends queries to the plane. */
 	vmGuest?: boolean;
+	/**
+	 * Which of these index entry ids are forgotten. A hit whose document names a forgotten entry (`metadata.entry_id`)
+	 * is dropped: a forget whose plane deletion is still pending must not keep serving the text. When the lookup throws,
+	 * every hit that names an entry is withheld (fail closed) and the reply is degraded.
+	 */
+	forgotten?: (entryIds: readonly string[]) => Promise<ReadonlySet<string>>;
 }
 
 /**
@@ -227,6 +233,31 @@ function rankedHits(answers: readonly BankAnswer[]): DerivedMemoryHit[] {
 	return best.map(({ bank, hit }) => derive(bank, hit));
 }
 
+const entryIdOf = (hit: RecallHit): string | undefined => (typeof hit.metadata.entry_id === "string" && hit.metadata.entry_id.length > 0 ? hit.metadata.entry_id : undefined);
+
+/**
+ * The answers without the hits whose document belongs to a forgotten index entry. `unchecked` is true when the
+ * lookup failed: the hits that name an entry are then withheld too, because their state is unknown.
+ */
+async function withoutForgotten(
+	forgotten: (entryIds: readonly string[]) => Promise<ReadonlySet<string>>,
+	answers: readonly BankAnswer[],
+): Promise<{ answers: BankAnswer[]; unchecked: boolean }> {
+	const ids = [...new Set(answers.flatMap((answer) => answer.hits.flatMap((hit) => entryIdOf(hit) ?? [])))];
+	if (ids.length === 0) return { answers: [...answers], unchecked: false };
+	let gone: ReadonlySet<string> | null = null;
+	try {
+		gone = await forgotten(ids);
+	} catch {
+		// Fail closed: an entry that cannot be looked up may be a forgotten one.
+	}
+	const keep = (hit: RecallHit): boolean => {
+		const id = entryIdOf(hit);
+		return id === undefined || (gone !== null && !gone.has(id));
+	};
+	return { answers: answers.map((answer) => ({ ...answer, hits: answer.hits.filter(keep) })), unchecked: gone === null };
+}
+
 export async function recallMemories(
 	deps: RecallDeps,
 	query: string,
@@ -249,7 +280,8 @@ export async function recallMemories(
 	const config = deps.config;
 	const fetchImpl = deps.fetchImpl ?? fetch;
 	const caller: MemoryCaller = { surface: callerSurface ?? "unattributed", repo: callerRepo };
-	const answers = await recallAcrossBanks(config, resolved.banks, query, caller, fetchImpl, deps.budgetMs ?? DEFAULT_RECALL_BUDGET_MS);
+	const answered = await recallAcrossBanks(config, resolved.banks, query, caller, fetchImpl, deps.budgetMs ?? DEFAULT_RECALL_BUDGET_MS);
+	const { answers, unchecked } = deps.forgotten === undefined ? { answers: answered, unchecked: false } : await withoutForgotten(deps.forgotten, answered);
 	const failures: string[] = [];
 	let timedOut = false;
 	for (const answer of answers) {
@@ -258,6 +290,7 @@ export async function recallMemories(
 		if (answer.failure.timedOut) timedOut = true;
 	}
 	const results = rankedHits(answers);
+	if (unchecked) failures.push("index: forgotten-entry check unavailable, hits that name an index entry were withheld");
 	if (failures.length > 0) {
 		// A budget miss leads with its own marker whichever banks answered; the
 		// rest keep the outage / partial wording the callers already read.

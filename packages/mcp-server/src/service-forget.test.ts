@@ -51,8 +51,17 @@ class ForgetStore extends FakeStore {
 		return changed;
 	}
 
+	/** How often the shared-document question was asked. */
+	sharedChecks = 0;
+
 	async memoryDocumentShared(): Promise<boolean> {
+		this.sharedChecks += 1;
 		return this.shared;
+	}
+
+	/** The ids whose `superseded_by` is a forget marker, as `IndexStore.forgottenEntryIds` answers. */
+	async forgottenEntryIds(ids: readonly string[]): Promise<Set<string>> {
+		return new Set(ids.filter((id) => isForgetMarker(this.rows.get(id)?.entry.superseded_by)));
 	}
 
 	/** The index's search: a body match, and a superseded row (a forgotten one included) only when asked for. */
@@ -557,6 +566,37 @@ describe("Substrate.memoryForget: the same chain as the retains", () => {
 		});
 	});
 
+	test("the shared-document check runs with the delete it guards, behind the retain still in flight, not before the queue", async () => {
+		await inWorld({}, async (w) => {
+			const { promise: opened, resolve: open } = Promise.withResolvers<void>();
+			w.plane.gate = opened;
+			const written = await w.substrate.writeMemory({
+				scope: "graph:ut-1",
+				kind: "fact",
+				subject: "handoff-rule",
+				text: "fence every handoff of the node lease",
+				writer: "cursor",
+				source_event: "evt_e2e",
+			});
+			const id = written.entry?.id ?? "";
+			await until(() => w.plane.posts === 1, "the retain reached the plane");
+
+			const forgetting = w.substrate.memoryForget(forgetRequest([id]), CALLER);
+			await until(() => w.store.markCalls.length === 1, "the entry was marked");
+			await settle();
+			// Asked before the queue, the answer would be stale by the time the delete ran: a replacement could land in between.
+			expect(w.store.sharedChecks).toBe(0);
+			expect(deletes(w.fake)).toEqual([]);
+
+			open();
+			const report = await forgetting;
+			await w.substrate.drainPendingRetains(2000);
+
+			expect(w.store.sharedChecks).toBe(1);
+			expect(report.plane.deleted).toBe(1);
+		});
+	});
+
 	test("a parked retain replay for a forgotten entry answers gone: it sends nothing and leaves the outbox", async () => {
 		await inWorld({}, async (w) => {
 			w.fake.failRetainWith = 503;
@@ -590,6 +630,38 @@ describe("Substrate.memoryForget: recall, the brief and memory search stop servi
 			await w.substrate.memoryForget(forgetRequest([written.entry.id]), CALLER);
 
 			expect((await w.substrate.recallMemories({ query: "handoff" }, "cursor")).results).toEqual([]);
+		});
+	});
+
+	test("a forget whose plane delete is still pending does not keep serving the text: recall and memory_search drop the hit", async () => {
+		await inWorld({}, async (w) => {
+			const written = await writeOne(w, "fence every handoff of the node lease", "handoff-rule");
+			w.plane.deleteAnswer = status(503);
+
+			const report = await w.substrate.memoryForget(forgetRequest([written.entry.id]), CALLER);
+
+			expect(report.plane_pending).toBe(1);
+			// The document is still in the plane: only the index's record of the forget keeps its text out of the answers.
+			expect(bankDocs(w.fake)).toEqual(["fence every handoff of the node lease"]);
+			expect((await w.substrate.recallMemories({ query: "handoff" }, "cursor")).results).toEqual([]);
+			const searched = await w.substrate.searchMemory("handoff", undefined, undefined, false, "cursor");
+			expect(searched.entries).toEqual([]);
+			expect(searched.derived).toEqual([]);
+		});
+	});
+
+	test("a recall whose forgotten-entry check fails withholds the hits that name an entry and says so", async () => {
+		await inWorld({}, async (w) => {
+			await writeOne(w, "fence every handoff of the node lease", "handoff-rule");
+			w.store.forgottenEntryIds = async () => {
+				throw new Error("index unreachable");
+			};
+
+			const reply = await w.substrate.recallMemories({ query: "handoff" }, "cursor");
+
+			expect(reply.results).toEqual([]);
+			expect(reply.degraded).toBe(true);
+			expect(reply.reason).toContain("forgotten-entry check unavailable");
 		});
 	});
 

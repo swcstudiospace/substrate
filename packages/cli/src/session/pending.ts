@@ -63,11 +63,16 @@ export interface PendingCheckpoint extends PendingBase {
 
 export type PendingCommit = { target_ckpt_id: string; plan_digest: string | null } & CommittedRollbackFields;
 
-/** `id` is the rollback id. `commit.plan_digest` is null when no plan was ever obtained. */
+/**
+ * `id` is the rollback id. `commit.plan_digest` is null when no plan was ever obtained. `restoring` marks an item
+ * written BEFORE its restore ran: a crash then leaves a record `recover` can finish (forward) or drop (rolled
+ * back), and `sync` never delivers it while the restore is unfinished.
+ */
 export interface PendingRollback extends PendingBase {
 	kind: "rollback";
 	id: string;
 	commit: PendingCommit;
+	restoring?: true;
 }
 
 export type PendingItem = PendingCheckpoint | PendingRollback;
@@ -196,10 +201,11 @@ export function parsePendingItem(value: unknown): PendingItem {
 		return { ...parseBase(item), kind: "checkpoint", id, record };
 	}
 	if (item.kind === "rollback") {
-		exactKeys(item, "item", ["version", "kind", "id", "session_id", "surface", "queued_at", "attempts", "commit"], ["last_error"]);
+		exactKeys(item, "item", ["version", "kind", "id", "session_id", "surface", "queued_at", "attempts", "commit"], ["last_error", "restoring"]);
 		const id = text(item.id, "id", 64);
 		if (!ROLLBACK_ID_PATTERN.test(id)) fail("id is not a rollback id");
-		return { ...parseBase(item), kind: "rollback", id, commit: parseCommit(item.commit) };
+		if (item.restoring !== undefined && item.restoring !== true) fail("restoring must be true when present");
+		return { ...parseBase(item), kind: "rollback", id, commit: parseCommit(item.commit), ...(item.restoring === true ? { restoring: true as const } : {}) };
 	}
 	return fail("kind must be checkpoint or rollback");
 }
@@ -260,6 +266,29 @@ export function writePending(dir: string, item: PendingItem): void {
 
 export function removePending(dir: string, kind: PendingKind, id: string): void {
 	rmSync(join(dir, fileNameOf(kind, id)), { force: true });
+}
+
+/**
+ * Settle the rollbacks marked `restoring` after `recoverRestore` ran. `forward`: the restore finished, so the
+ * mark is cleared and the commit is deliverable. Anything else for that id (rolled back) or, with no journal at
+ * all (`recovered` null), every marked item: the restore did not take effect, so the commit is dropped.
+ * Returns the ids it cleared and the ids it dropped.
+ */
+export function settleInterruptedRestores(dir: string, recovered: { id: string; direction: "forward" | "rollback" } | null): { completed: string[]; dropped: string[] } {
+	const settled = { completed: [] as string[], dropped: [] as string[] };
+	for (const item of listPending(dir).items) {
+		if (item.kind !== "rollback" || item.restoring !== true) continue;
+		if (recovered !== null && item.id !== recovered.id) continue;
+		if (recovered !== null && recovered.direction === "forward") {
+			const { restoring: _marked, ...rest } = item;
+			writePending(dir, rest);
+			settled.completed.push(item.id);
+		} else {
+			removePending(dir, "rollback", item.id);
+			settled.dropped.push(item.id);
+		}
+	}
+	return settled;
 }
 
 export interface CorruptPending {
@@ -370,6 +399,11 @@ export async function replayPending(params: ReplayParams): Promise<ReplayOutcome
 	for (const item of listing.items) {
 		if (stopped) {
 			outcome.skipped++;
+			continue;
+		}
+		if (item.kind === "rollback" && item.restoring === true) {
+			// Its restore has not finished (or crashed): telling the ledger now could record a rollback the files never took.
+			outcome.failed.push({ kind: "rollback", id: item.id, code: "restore-in-progress", message: "the restore of this rollback is not finished; run `substrate session recover`", retryable: false });
 			continue;
 		}
 		const client = params.clientFor(item.surface);

@@ -627,6 +627,21 @@ describe("selectForRollback", () => {
 		expect(s.untils).toEqual(["2026-10-26T14:00:00.456Z", "2026-10-26T12:00:00.000Z"]);
 	});
 
+	test("a writer is sent to the store, which applies it before its limit; none means every writer's; a bad one is refused", async () => {
+		const writers: Array<string | null | undefined> = [];
+		const deps = {
+			async entriesCreatedAfter(_session: string, _after: string, _graph: string | null, _limit: number, _until: string | null, writer?: string | null) {
+				writers.push(writer);
+				return { entries: [{ id: "mem_a" }], truncated: false };
+			},
+		};
+		await selectForRollback(deps, { session_id: "sess-1", after: "2026-10-26T12:00:00Z", writer: "claude-code" });
+		await selectForRollback(deps, { session_id: "sess-1", after: "2026-10-26T12:00:00Z" });
+		expect(writers).toEqual(["claude-code", null]);
+		await expect(selectForRollback(deps, { session_id: "sess-1", after: "2026-10-26T12:00:00Z", writer: "" })).rejects.toMatchObject({ name: "ForgetError", path: "writer" });
+		expect(writers).toHaveLength(2);
+	});
+
 	test("an until before after, or not an instant, is refused before the store is asked", async () => {
 		const s = store(["mem_a"]);
 		await expect(selectForRollback(s.deps, { session_id: "sess-1", after: "2026-10-26T12:00:00Z", until: "2026-10-26T11:59:59.999Z" })).rejects.toMatchObject({ name: "ForgetError", path: "until", rule: "range" });

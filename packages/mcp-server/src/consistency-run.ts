@@ -254,6 +254,30 @@ async function evaluate(ports: RepairPorts, step: Extract<RepairStep, { op: "req
 	}
 }
 
+/**
+ * The check after a repair's retain. This runner is its own process, outside the server's per-document write queue, so a
+ * forget can mark the entry and delete its document while the retain's POST is in flight, and the POST then lands after the
+ * delete and brings the forgotten text back. The entry is read again once the retain has landed: one forgotten meanwhile has
+ * the copy this repair just wrote removed, unless a live entry of the same writer shares the document. The forget's mark
+ * always precedes its own delete, so a forget that lands after this read deletes the copy itself.
+ */
+async function afterRetain(ports: RepairPorts, entry: MemoryEntry, step: Extract<RepairStep, { op: "retain_document" }>): Promise<Pick<RepairOutcome, "outcome" | "reason">> {
+	try {
+		const current = await ports.readEntry(entry.id);
+		if (current === null || !isForgetMarker(current.superseded_by)) return { outcome: "repaired" };
+		if (await ports.documentShared(current)) {
+			return { outcome: "skipped", reason: "the entry was forgotten while the repair ran; a live entry shares the document, which was left in place" };
+		}
+		await ports.deleteDocument(step.bank, step.document_id);
+		return { outcome: "skipped", reason: "the entry was forgotten while the repair ran; the document the repair re-created was removed" };
+	} catch (cause) {
+		return {
+			outcome: "failed",
+			reason: scrubReason(`the document was re-retained but the entry could not be confirmed current, or its stale copy removed: ${cause instanceof Error ? cause.message : String(cause)}`),
+		};
+	}
+}
+
 async function runAction(ports: RepairPorts, action: RepairAction): Promise<Pick<RepairOutcome, "outcome" | "reason">> {
 	const problem = wellFormed(action);
 	if (problem !== null) return { outcome: "failed", reason: `plan refused: ${problem}` };
@@ -271,7 +295,7 @@ async function runAction(ports: RepairPorts, action: RepairAction): Promise<Pick
 			case "retain_document": {
 				if (entry === undefined || entry === null) return { outcome: "skipped", reason: "the entry is gone" };
 				const retained = await ports.retain(entry, step.bank, step.document_id);
-				if (retained.forwarded) return { outcome: "repaired" };
+				if (retained.forwarded) return afterRetain(ports, entry, step);
 				const reason = scrubReason(retained.reason ?? "the retain did not forward");
 				// A refusal by the retain gate (expired, unsourced, unredacted, guest) is the gate's verdict, not a repair that broke.
 				return /^(retain\.|vm-guest|hindsight is not configured)/.test(reason) ? { outcome: "skipped", reason } : { outcome: "failed", reason };

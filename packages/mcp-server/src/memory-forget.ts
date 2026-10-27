@@ -426,9 +426,12 @@ export interface ForgetDeps {
 	/** Delete the entry's plane document. The caller resolves the bank and the document id from the entry. May return `skipped` when there is nowhere to delete (plane not configured). */
 	deletePlaneDocument(entry: MemoryEntry): Promise<PlaneDeleteResult>;
 	/**
-	 * True when another live entry now maps to the same plane document (a subject-addressed document is shared by
-	 * every entry with that scope, kind and subject), so deleting it would remove memory that is still in force.
-	 * Absent: never skipped for that reason.
+	 * True when another live entry of the SAME WRITER now maps to the same plane document (a subject-addressed
+	 * document is shared by every entry of that writer with that scope, kind and subject), so deleting it would remove
+	 * memory that is still in force. Absent: never skipped for that reason. This check runs where `forgetEntries` calls
+	 * it, outside any queue: an adapter that serialises plane writes (the service's per-document retain queue) leaves
+	 * it unset and asks the same question inside `deletePlaneDocument`, after the writes queued before the delete have
+	 * landed, answering `{ ok: true, skipped: "document-shared" }`.
 	 */
 	documentShared?(entry: MemoryEntry): Promise<boolean>;
 	/** Emit the one ledger note. The caller adds its authenticated `surface` and the `session_id`. */
@@ -636,6 +639,7 @@ export interface RollbackSelectDeps {
 		graphId: string | null,
 		limit: number,
 		untilIso: string | null,
+		writer?: string | null,
 	): Promise<{ entries: ReadonlyArray<Pick<MemoryEntry, "id">>; truncated: boolean }>;
 }
 
@@ -652,6 +656,11 @@ export interface RollbackSelectRequest {
 	 * not be before `after`.
 	 */
 	until?: string;
+	/**
+	 * Only entries this surface wrote. The writer is part of the query, ahead of the limit: filtered afterwards, a page
+	 * full of another surface's rows would hide the caller's own and the selection would look complete when it is not.
+	 */
+	writer?: string;
 }
 
 export interface RollbackSelection {
@@ -672,7 +681,7 @@ export interface RollbackSelection {
  */
 export async function selectForRollback(deps: RollbackSelectDeps, request: RollbackSelectRequest): Promise<RollbackSelection> {
 	const rec = asRecord(request, "request");
-	assertKeys(rec, "", ["session_id", "after"], ["graph_id", "limit", "until"]);
+	assertKeys(rec, "", ["session_id", "after"], ["graph_id", "limit", "until", "writer"]);
 	const sessionId = sessionIdField(rec["session_id"], "session_id");
 	const afterRaw = parseString(rec["after"], "after", 1, 64);
 	if (!ISO_INSTANT.test(afterRaw) || Number.isNaN(Date.parse(afterRaw))) {
@@ -696,7 +705,8 @@ export async function selectForRollback(deps: RollbackSelectDeps, request: Rollb
 		if (value < 1 || value > MAX_ROLLBACK_SELECT_LIMIT) throw new ForgetError("range", "limit", `must be between 1 and ${MAX_ROLLBACK_SELECT_LIMIT}`);
 		limit = value;
 	}
-	const found = await deps.entriesCreatedAfter(sessionId, after, graphId, limit, until);
+	const writer = rec["writer"] === undefined ? null : parseString(rec["writer"], "writer", 1, 64);
+	const found = await deps.entriesCreatedAfter(sessionId, after, graphId, limit, until, writer);
 	// A store that returned more than asked (a bug on its side) is trimmed here and reported as truncated.
 	const ids = [...new Set(found.entries.map((entry) => entry.id))];
 	return { entry_ids: ids.slice(0, limit), truncated: found.truncated || ids.length > limit, after };

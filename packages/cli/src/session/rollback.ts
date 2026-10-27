@@ -78,7 +78,7 @@ import {
 	createCheckpoint,
 	listLocalCheckpoints,
 } from "./checkpoint.ts";
-import { PendingJournalError, resolvePendingDir, writePending } from "./pending.ts";
+import { PendingJournalError, removePending, resolvePendingDir, settleInterruptedRestores, writePending } from "./pending.ts";
 
 /** The command to run when a restore was interrupted or could not be rolled back. */
 export const RECOVER_COMMAND = "substrate session recover";
@@ -346,6 +346,12 @@ export async function rollback(params: RollbackParams): Promise<RollbackResult> 
 		if (error instanceof GitCommandError) return failed("git-failed", messageOf(error));
 		return failed("recovery-failed", `an interrupted restore could not be recovered: ${messageOf(error)}`, restoreFailureFields(error));
 	}
+	try {
+		const dir = params.pendingDir ?? (await resolvePendingDir(params.worktree, run));
+		settleInterruptedRestores(dir, out.recovered === null ? null : { id: out.recovered.id, direction: out.recovered.direction });
+	} catch (error) {
+		warnings.push(`the pending journal of an interrupted restore could not be settled: ${messageOf(error).slice(0, MAX_DETAIL_CHARS)}`);
+	}
 
 	// 2. The target, from the local registry.
 	let local: LocalCheckpoints;
@@ -480,7 +486,42 @@ export async function rollback(params: RollbackParams): Promise<RollbackResult> 
 		if (isUnreachable({ code: pre.server.code, message: "", retryable: true })) client = offlineClient();
 	}
 
-	// 7. The restore.
+	// 7. The restore. The commit is journalled FIRST, marked `restoring`: a crash anywhere in the restore leaves a
+	// record that `recover` finishes forward (and `sync` then delivers) or drops, so the ledger never misses a
+	// rollback whose files were put back. The file counts are the plan's and the transcript outcome the "never
+	// rewound" one until the restore and the transcript step say otherwise.
+	const fields: CommittedRollbackFields = {
+		from_ckpt_id: baseline.ckpt_id,
+		pre_restore_tree: pre.checkpoint.tree,
+		pre_restore_ckpt_id: pre.checkpoint.ckpt_id,
+		files: filesOf(restorePlan.counts),
+		transcript: "unsupported",
+		until_ms: untilMs,
+	};
+	if (plan === null) fields.local_only = true;
+	let digest: string | null = plan?.plan_digest ?? null;
+	let pendingDir: string;
+	const queue = (restoring: boolean, lastError?: string): void => {
+		writePending(pendingDir, {
+			version: 1,
+			kind: "rollback",
+			id: rollbackId,
+			session_id: sessionId,
+			surface,
+			queued_at: params.now().toISOString(),
+			attempts: restoring ? 0 : 1,
+			...(lastError === undefined ? {} : { last_error: lastError.slice(0, 300) }),
+			commit: { target_ckpt_id: target.ckpt_id, plan_digest: digest, ...fields },
+			...(restoring ? { restoring: true as const } : {}),
+		});
+	};
+	try {
+		pendingDir = params.pendingDir ?? (await resolvePendingDir(params.worktree, run));
+		queue(true);
+	} catch (error) {
+		const detail = error instanceof PendingJournalError ? error.message : "the pending journal could not be written";
+		return failed("pending-journal-failed", `the rollback was not journalled, so no file was changed: ${detail}`, { modified: false });
+	}
 	let restored: RestoreResult;
 	try {
 		restored = await restore({
@@ -496,18 +537,21 @@ export async function rollback(params: RollbackParams): Promise<RollbackResult> 
 		});
 	} catch (error) {
 		if (error instanceof SimulatedCrash) throw error;
+		const modifiedAndOpen = error instanceof RestoreFailedError && error.modified && !error.rolledBack;
+		// A restore that did not take effect (refused, or rolled back) is not a rollback: drop its journalled commit.
+		// One left half done keeps it: `recover` completes the restore and then the record is delivered.
+		if (!modifiedAndOpen) removePending(pendingDir, "rollback", rollbackId);
 		if (error instanceof RestoreDriftError) return refuse("drift-detected", error.message);
 		if (error instanceof WorktreeBusyError) return refuse("session-busy", error.message);
 		if (error instanceof RestoreRecoveryRequiredError) {
 			return failed(error.code, `${error.message}; run \`${RECOVER_COMMAND}\``, { recover: RECOVER_COMMAND });
 		}
-		const fields = restoreFailureFields(error);
+		const fieldsOfFailure = restoreFailureFields(error);
 		const code = error instanceof WorktreeSnapshotError ? error.code : "unexpected";
-		return failed(code, messageOf(error), fields);
+		return failed(code, messageOf(error), fieldsOfFailure);
 	}
-	const files = filesOf(restored.plan.counts);
-	out.restore = { safety_ref: restored.safetyRef, files, operations_total: restored.plan.counts.total };
-
+	fields.files = filesOf(restored.plan.counts);
+	out.restore = { safety_ref: restored.safetyRef, files: fields.files, operations_total: restored.plan.counts.total };
 	// 8. The transcript. The files are already restored, so a failing port must not undo or fail the rollback.
 	let transcript: TranscriptRewindResult;
 	try {
@@ -527,17 +571,8 @@ export async function rollback(params: RollbackParams): Promise<RollbackResult> 
 	}
 	out.transcript = transcript;
 
-	// 9. The ledger commit.
-	const fields: CommittedRollbackFields = {
-		from_ckpt_id: baseline.ckpt_id,
-		pre_restore_tree: pre.checkpoint.tree,
-		pre_restore_ckpt_id: pre.checkpoint.ckpt_id,
-		files,
-		transcript: transcript.outcome,
-		...(plan === null ? { local_only: true } : {}),
-		until_ms: untilMs,
-	};
-	let digest: string | null = plan?.plan_digest ?? null;
+	// 9. The ledger commit, from the record journalled before the restore with the real transcript outcome now known.
+	fields.transcript = transcript.outcome;
 	let lastError: { code: string; message: string } | null = null;
 	if (plan === null || out.mode === "local-only") {
 		lastError = { code: "offline", message: "no plan was obtained from the server" };
@@ -555,6 +590,11 @@ export async function rollback(params: RollbackParams): Promise<RollbackResult> 
 				out.status = "committed";
 				out.ledger = { state: "committed", event_id: committed.value.event_id };
 				if (committed.value.memory !== undefined) out.memory = committed.value.memory;
+				try {
+					removePending(pendingDir, "rollback", rollbackId);
+				} catch {
+					// Delivered: a record left behind is replayed by `sync`, which the ledger treats as the same rollback id.
+				}
 				return out;
 			}
 			lastError = committed.error;
@@ -579,18 +619,7 @@ export async function rollback(params: RollbackParams): Promise<RollbackResult> 
 	out.status = "commit-pending";
 	const reason = lastError ?? { code: "unknown", message: "the commit was not delivered" };
 	try {
-		const dir = params.pendingDir ?? (await resolvePendingDir(params.worktree, run));
-		writePending(dir, {
-			version: 1,
-			kind: "rollback",
-			id: rollbackId,
-			session_id: sessionId,
-			surface,
-			queued_at: params.now().toISOString(),
-			attempts: 1,
-			last_error: `${reason.code}: ${reason.message}`.slice(0, 300),
-			commit: { target_ckpt_id: target.ckpt_id, plan_digest: digest, ...fields },
-		});
+		queue(false, `${reason.code}: ${reason.message}`);
 		out.ledger = { state: "pending", message: `${reason.code}: ${reason.message}` };
 	} catch (error) {
 		const detail = error instanceof PendingJournalError ? error.message : "the pending journal could not be written";
