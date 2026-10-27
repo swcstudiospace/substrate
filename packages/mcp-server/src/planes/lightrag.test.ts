@@ -526,6 +526,19 @@ describe("delete (DELETE /documents/delete_document)", () => {
 		expect(JSON.stringify(fake.calls[0]?.body)).not.toContain("ds-berlin");
 	});
 
+	test("delete_file is false by default and true only when options.deleteFile asks for it", async () => {
+		const started = json({ status: "deletion_started", message: "m", doc_id: "d" });
+		const fake = fakeLightrag({ "DELETE /documents/delete_document": [started, started, started] });
+		await deleteDocuments(PLAIN, "ds", ["d"], fake.fetch);
+		await deleteDocuments(PLAIN, "ds", ["d"], fake.fetch, 8000, { deleteFile: false });
+		await deleteDocuments(PLAIN, "ds", ["d"], fake.fetch, 8000, { deleteFile: true });
+		expect(fake.calls.map((call) => call.body)).toEqual([
+			{ doc_ids: ["d"], delete_file: false, delete_llm_cache: false },
+			{ doc_ids: ["d"], delete_file: false, delete_llm_cache: false },
+			{ doc_ids: ["d"], delete_file: true, delete_llm_cache: false },
+		]);
+	});
+
 	test("ids are stripped and de-duplicated, as upstream requires, before they go out", async () => {
 		const fake = fakeLightrag({ "DELETE /documents/delete_document": [json({ status: "deletion_started", message: "m", doc_id: "d" })] });
 		await deleteDocuments(PLAIN, "ds", [" doc-1 ", "doc-1", "doc-2"], fake.fetch);
@@ -708,6 +721,28 @@ describe("document ids (GET /documents/track_status/{track_id})", () => {
 		const outcome = await resolveDocumentIds(KEYED, "t", slow.fetch, { maxPolls: 10, deadlineMs: 1000, sleep, now: () => (clock += 600) });
 		expect(outcome).toEqual({ ok: false, reason: "lightrag: track_status deadline exceeded with no documents" });
 		expect(slow.calls.length).toBeLessThan(10);
+	});
+
+	test("the remaining budget is checked before every read and caps the wait: deadlineMs 100 with intervalMs 500 never starts a second read", async () => {
+		const empty = { track_id: "t", documents: [], total_count: 0, status_summary: {} };
+		let clock = 0;
+		const waits: number[] = [];
+		const sleep = async (ms: number) => {
+			waits.push(ms);
+			clock += ms;
+		};
+		const fake = fakeLightrag({ "GET /documents/track_status/t": [json(empty), json(TRACKED)] });
+		const outcome = await resolveDocumentIds(KEYED, "t", fake.fetch, { deadlineMs: 100, intervalMs: 500, sleep, now: () => clock });
+		expect(outcome).toEqual({ ok: false, reason: "lightrag: track_status deadline exceeded with no documents" });
+		expect(fake.calls).toHaveLength(1);
+		expect(waits).toEqual([100]);
+	});
+
+	test("a spent budget makes no read at all", async () => {
+		const fake = fakeLightrag({});
+		const outcome = await resolveDocumentIds(KEYED, "t", fake.fetch, { deadlineMs: 0, now: () => 5 });
+		expect(outcome).toEqual({ ok: false, reason: "lightrag: track_status deadline exceeded with no documents" });
+		expect(fake.calls).toHaveLength(0);
 	});
 
 	test("a failed read, a wrong shape and a blank track id are reasons", async () => {
