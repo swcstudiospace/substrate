@@ -1,5 +1,5 @@
 /**
- * `substrate session checkpoint|checkpoints|rollback|recover|sync` (v1.6, phase 61).
+ * `substrate session checkpoint|checkpoints|rollback|recover|sync|hook|hook-config` (v1.6, phase 61).
  *
  * The grammar, the exit codes and the output live here; the work lives in `checkpoint.ts`, `rollback.ts`
  * and `pending.ts`. Like `substrate ledger`, a wrong flag is refused BEFORE any work, with the usage text
@@ -52,6 +52,9 @@ import { CKPT_ID_PATTERN, type FetchLike, type RollbackServerClient, createRollb
 import { OMP_SESSION_MAX_BYTES, OmpForkError, ompTranscriptRef } from "./omp-fork.ts";
 import { PendingJournalError, listPending, replayPending, resolvePendingDir, settleInterruptedRestores } from "./pending.ts";
 import { type RollbackResult, type TranscriptPort, RollbackInputError, rollback } from "./rollback.ts";
+import { HOOK_TIMEOUT_MS, describeOutcome, readProcessStdin, runHook } from "./hook.ts";
+import { HOOK_CONFIG_TARGETS, type HookConfigTarget, renderHookConfig } from "./hook-config.ts";
+import { HOOK_TRIGGERS, type HookTrigger } from "./trigger-policy.ts";
 
 export const EXIT_DONE = 0;
 export const EXIT_FAILED = 1;
@@ -65,6 +68,8 @@ export const SESSION_USAGE =
 	"       substrate session rollback <ckpt|seq|previous> [--session ID] [--surface S] [--dry-run] [--force] [--offline] [--json]\n" +
 	"       substrate session recover [--json]\n" +
 	"       substrate session sync [--json]\n" +
+	"       substrate session hook <turn|plan-step|steering|baseline> [--session ID] [--surface S] [--plan-phase P] [--plan-step S] [--verbose]   (reads a JSON envelope on stdin; fail-open: always exits 0)\n" +
+	`       substrate session hook-config <${HOOK_CONFIG_TARGETS.join("|")}>   (prints the hook configuration to install; installs nothing)\n` +
 	`triggers: ${CHECKPOINT_TRIGGERS.join(", ")}\n` +
 	"exit: 0 done, 1 failed, 2 usage, 3 refused (drift, anchor mismatch, unknown or foreign target), 4 files restored but the ledger commit is pending\n" +
 	"--omp-session FILE records where in that omp session file the checkpoint was taken (entry id, turn number, prefix digest; never content or the path). A file that cannot be read or parsed does not fail the checkpoint: it is made without a transcript reference and the output says why.\n";
@@ -102,15 +107,19 @@ export interface SessionDeps {
 	pendingDir?: string;
 	policy?: SnapshotPolicy;
 	hooks?: RestoreHooks;
+	/** Reads the hook envelope for `session hook` (default: the process's stdin, bounded). A test seam. */
+	stdin?: () => Promise<string>;
+	/** The overall budget of `session hook` in milliseconds (default `HOOK_TIMEOUT_MS`). A test seam. */
+	hookTimeoutMs?: number;
 }
 
 // ---------------------------------------------------------------------------
 // Grammar
 // ---------------------------------------------------------------------------
 
-type Sub = "checkpoint" | "checkpoints" | "rollback" | "recover" | "sync";
+type Sub = "checkpoint" | "checkpoints" | "rollback" | "recover" | "sync" | "hook" | "hook-config";
 
-const SUBCOMMANDS: readonly Sub[] = ["checkpoint", "checkpoints", "rollback", "recover", "sync"];
+const SUBCOMMANDS: readonly Sub[] = ["checkpoint", "checkpoints", "rollback", "recover", "sync", "hook", "hook-config"];
 const VALUE_FLAGS: readonly string[] = ["session", "surface", "trigger", "transcript-ref", "omp-session", "plan-phase", "plan-step"];
 const ALLOWED: Record<Sub, readonly string[]> = {
 	checkpoint: ["json", "session", "surface", "trigger", "transcript-ref", "omp-session", "plan-phase", "plan-step"],
@@ -118,6 +127,8 @@ const ALLOWED: Record<Sub, readonly string[]> = {
 	rollback: ["json", "session", "surface", "dry-run", "force", "offline"],
 	recover: ["json"],
 	sync: ["json"],
+	hook: ["session", "surface", "plan-phase", "plan-step", "verbose"],
+	"hook-config": [],
 };
 
 interface Parsed {
@@ -157,6 +168,10 @@ export function parseSessionArgs(argv: readonly string[]): Parsed | string {
 		if (target !== "previous" && !/^[0-9]+$/.test(target) && !CKPT_ID_PATTERN.test(target)) {
 			return "the rollback target must be a checkpoint id (ckpt_...), a seq number, or `previous`";
 		}
+	} else if (sub === "hook") {
+		if (positional.length !== 1 || !(HOOK_TRIGGERS as readonly string[]).includes(positional[0] as string)) return `hook takes exactly one trigger: ${HOOK_TRIGGERS.join(", ")}`;
+	} else if (sub === "hook-config") {
+		if (positional.length !== 1 || !(HOOK_CONFIG_TARGETS as readonly string[]).includes(positional[0] as string)) return `hook-config takes exactly one target: ${HOOK_CONFIG_TARGETS.join(", ")}`;
 	} else if (positional.length > 0) {
 		return `\`session ${sub}\` takes no positional argument`;
 	}
@@ -234,15 +249,9 @@ function ledgerLine(server: CheckpointResult["server"]): string {
 
 export async function runSession(argv: readonly string[], deps: SessionDeps): Promise<number> {
 	const parsed = parseSessionArgs(argv);
-	if (typeof parsed === "string") {
-		deps.err(`${parsed}\n${SESSION_USAGE}`);
-		return EXIT_USAGE;
-	}
+	if (typeof parsed === "string") return refuse(argv, parsed, deps);
 	const surface = flagValue(parsed, "surface") ?? DEFAULT_SURFACE;
-	if (!(SURFACES as readonly string[]).includes(surface)) {
-		deps.err(`unknown surface ${JSON.stringify(surface.slice(0, 64))}\n${SESSION_USAGE}`);
-		return EXIT_USAGE;
-	}
+	if (!(SURFACES as readonly string[]).includes(surface)) return refuse(argv, `unknown surface ${JSON.stringify(surface.slice(0, 64))}`, deps);
 	const out = new Output(deps);
 	const json = parsed.flags.has("json");
 	const run = deps.run ?? spawnRunner;
@@ -272,6 +281,11 @@ export async function runSession(argv: readonly string[], deps: SessionDeps): Pr
 				return await commandRollback(parsed, deps, out, run, surface, clientFor, usage);
 			case "recover":
 				return await commandRecover(deps, out, run, json, failure);
+			case "hook":
+				return await commandHook(parsed, deps, out, run, surface, clientFor);
+			case "hook-config":
+				deps.out(renderHookConfig(parsed.positional[0] as HookConfigTarget));
+				return EXIT_DONE;
 			default:
 				return await commandSync(deps, out, run, json, clientFor);
 		}
@@ -281,6 +295,20 @@ export async function runSession(argv: readonly string[], deps: SessionDeps): Pr
 		if (error instanceof WorktreeSnapshotError || error instanceof PendingJournalError) return failure(error.code, error.message);
 		return failure("unexpected", error instanceof Error ? error.message : String(error));
 	}
+}
+
+/**
+ * A refused command line. Every command exits 2 with the usage text, except `hook`: it runs inside a host's
+ * turn, where a Claude Code hook that exits 2 blocks the turn from ending, so a misconfigured hook exits 0
+ * and, with `--verbose`, says why on one stderr line.
+ */
+function refuse(argv: readonly string[], reason: string, deps: SessionDeps): number {
+	if (argv[0] === "hook") {
+		if (argv.includes("--verbose")) deps.err(`substrate session hook: ignored (${reason.slice(0, 200)})\n`);
+		return EXIT_DONE;
+	}
+	deps.err(`${reason}\n${SESSION_USAGE}`);
+	return EXIT_USAGE;
 }
 
 type ClientFor = (surface: string, timeoutMs: number) => RollbackServerClient;
@@ -702,4 +730,45 @@ async function commandSync(deps: SessionDeps, out: Output, run: Runner, json: bo
 		if (outcome.remaining > 0) out.line(`${outcome.remaining} item(s) still pending`);
 	}
 	return clean ? EXIT_DONE : EXIT_FAILED;
+}
+
+// ---------------------------------------------------------------------------
+// hook
+// ---------------------------------------------------------------------------
+
+/**
+ * `session hook <trigger>`: fail-open by contract. Whatever happens, the exit is 0 and stdout stays empty;
+ * `--verbose` adds one stderr line saying what happened.
+ */
+async function commandHook(parsed: Parsed, deps: SessionDeps, out: Output, run: Runner, surface: string, clientFor: ClientFor): Promise<number> {
+	const trigger = parsed.positional[0] as HookTrigger;
+	let line: string;
+	try {
+		const timeoutMs = deps.hookTimeoutMs ?? HOOK_TIMEOUT_MS;
+		const phase = flagValue(parsed, "plan-phase");
+		const step = flagValue(parsed, "plan-step");
+		// An empty value (a script whose `$(git rev-parse ...)` printed nothing) means no reference.
+		const planRef: PlanRef | undefined = phase || step ? { ...(phase ? { phase } : {}), ...(step ? { step } : {}) } : undefined;
+		const outcome = await runHook({
+			trigger,
+			worktree: deps.worktree,
+			surface,
+			...(flagValue(parsed, "session") === undefined ? {} : { sessionId: flagValue(parsed, "session") }),
+			...(planRef === undefined ? {} : { planRef }),
+			// The client gives up before the hook's own budget, so a slow server still leaves the record in the pending journal.
+			client: clientFor(surface, Math.min(deps.timeoutMs, Math.max(1, Math.floor(timeoutMs * 0.8)))),
+			now: deps.now,
+			randomBytes: deps.randomBytes,
+			readStdin: deps.stdin ?? readProcessStdin,
+			timeoutMs,
+			run,
+			pendingDir: deps.pendingDir,
+			policy: deps.policy,
+		});
+		line = describeOutcome(trigger, outcome);
+	} catch (error) {
+		line = `substrate session hook ${trigger}: failed open (${error instanceof Error ? error.message : "unexpected"})`;
+	}
+	if (parsed.flags.has("verbose")) out.error(line);
+	return EXIT_DONE;
 }
