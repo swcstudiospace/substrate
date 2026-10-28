@@ -180,7 +180,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_HINDSIGHT_INVENTORY_INTERVAL_S` | number | 60 | 30..3600 | 60 s. See `docs/data-planes.md` | mcp-server/hindsight-inventory.ts | yes |
 | `HINDSIGHT_MENTAL_MODELS` | list | none | bank=id[,id...] entries separated by semicolon; bank must be in HINDSIGHT_BANKS; id matches A-Za-z0-9_- up to 80 characters; at most 20 models | no weekly refresh; no timer starts. See `docs/memory-governance.md` | mcp-server/config.ts | no |
 
-## Documents plane (RAGFlow)
+## Documents plane (LightRAG when LIGHTRAG_URL is set; RAGFlow is the legacy fallback)
 
 | Name | Kind | Default | Allowed | Unset means | Read by | In `.env.example` |
 | --- | --- | --- | --- | --- | --- | --- |

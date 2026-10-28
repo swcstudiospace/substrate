@@ -9,7 +9,7 @@ that `claude-ultrathink` already mints for every uplifted prompt
 Graph-of-Thought node and one sub-issue per Chain-of-Thought step.
 
 Notion and Linear are the source of truth. TimescaleDB is the index and queue, GreptimeDB is the
-event log, DragonflyDB is a cache, Hindsight is memory and RAGFlow is documents — five Railway
+event log, DragonflyDB is a cache, Hindsight is memory and LightRAG is documents — five Railway
 services in two projects, reached over Tailscale. See [`docs/data-planes.md`](docs/data-planes.md)
 and [`docs/railway-tailscale.md`](docs/railway-tailscale.md).
 
@@ -105,7 +105,7 @@ scratch Postgres and ledger in local containers, nothing production — and driv
 brief/emit/register/claim wire proof over it. Details in [`docs/rehearsal.md`](docs/rehearsal.md).
 `bun run parity:check` is the read-only production check that the unit owns `127.0.0.1:7410`
 and serves `main`; the procedure around it lives in [`docs/runbooks/production-parity.md`](docs/runbooks/production-parity.md).
-`bun run verify` runs the whole verification gate (frozen install, `tsc`, the full suite, the Python suites through `uv`, the repo locks); the CI workflow
+`bun run verify` runs the whole verification gate (frozen install, `tsc`, the blocking Biome lint, the full suite, the Python suites through `uv`, the repo locks); the CI workflow
 runs the same commands once the organisation can run Actions. See [`docs/ci.md`](docs/ci.md).
 
 `substrate-mcp` exposes MCP over streamable HTTP at `/mcp`, and — because agent hooks cannot
