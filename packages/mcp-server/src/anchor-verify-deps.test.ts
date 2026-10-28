@@ -893,6 +893,34 @@ describe("a re-anchored hour: the operator's note is a pointer, the chain transa
 		expect(sigsRead(w)).toEqual([]);
 	});
 
+	test("a valid bound note on one surface does not complete a read another surface cut by its page cap: the read is partial and the verifier leaves the hour unverified, the state the executor refuses as notes-incomplete", async () => {
+		const w = world(event({ id: "evt_v16_note" }), { operators: [OPERATOR, "omp"] });
+		w.ledger.events.push(note(w, { id: "evt_v16_good" }));
+		const session = reanchorSessionId(storedRow(w).period_start);
+		const original = w.ledger.queryEvents.bind(w.ledger);
+		let served = 0;
+		w.ledger.queryEvents = async (query: EventQuery = {}) => {
+			if (query.match?.session_id !== session || query.match.surface !== "omp") return original(query);
+			// The other operator surface holds more notes than the page cap reads: a newer bound note could hide behind them.
+			return Array.from({ length: LOOKUP_ROW_LIMIT }, () => {
+				const n = served++;
+				return toRow(event({ id: `evt_v16_flood_${n}`, surface: "omp" as SubstrateEvent["surface"], session_id: session, ts: new Date(H + 40 * HOUR_MS - n * 1000).toISOString() }));
+			});
+		};
+		// The valid note's transaction is on the cluster: were the partial read trusted, the hour would verify as anchored.
+		cluster(w, { [NEW_SIGNATURE]: tx(storedRow(w).memo) });
+
+		const { records, incomplete } = await readReanchorNotes(w.ports, H, storedRow(w));
+		expect(records.map((record) => record.event_id)).toEqual(["evt_v16_good"]);
+		expect(incomplete).toContain(`omp in ${session} hit the ${REANCHOR_READ_MAX_PAGES}-page limit`);
+		await expect(followReanchor(w.ports, H, storedRow(w))).rejects.toBeInstanceOf(ReanchorReadIncomplete);
+
+		const result = await verifyEventRef(w.ports, "evt_v16_note");
+		expect(result.status).toBe("unverified");
+		expect(result.reasons.join(" ")).toContain("could not be read completely");
+		expect(sigsRead(w)).toEqual([]);
+	});
+
 	test("a failed first read of the replacement is the failed read of the verification too: unverified, never a mismatch against the stale signer", async () => {
 		const w = world(event({ id: "evt_v16_note" }));
 		const rotation = buildSignerRotateEvent({ old_pubkey: SIGNER_A, new_pubkey: SIGNER_B, effective_from_ms: H + 4 * HOUR_MS, reason: "rotate the anchor key" });

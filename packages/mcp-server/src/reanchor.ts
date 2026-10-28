@@ -30,7 +30,8 @@
  *     of its memo by the signer is found by PAGING `getSignaturesForAddress` backwards (`before`) until a signature older than the
  *     plan's earliest period start (or the end of the signer's history) is reached, and is ADOPTED, never duplicated. A listing
  *     that cannot be read refuses (`rpc-unreadable`), and a page cap hit before the horizon refuses (`discovery-incomplete`): a miss
- *     in a bounded listing is never read as proof that nothing was sent.
+ *     in a bounded listing is never read as proof that nothing was sent. A notes read the verifier would call incomplete (a surface cut
+ *     by its page cap) refuses (`notes-incomplete`) before any send, exactly as the verifier leaves the hour unverified.
  *
  * The memo carries period, root and count only, never event content; the keypair is only ever a path on a CLI argv.
  *
@@ -271,6 +272,7 @@ export type RefusalCode =
 	| "root-mismatch"
 	| "present-on-cluster"
 	| "discovery-incomplete"
+	| "notes-incomplete"
 	| "reanchor-locked"
 	| "send-failed"
 	| "unexpected";
@@ -340,7 +342,8 @@ export interface ReanchorDeps {
 	clock?: () => number;
 	/**
 	 * The recorded `anchor.reanchor` notes of an hour that are bound to it, read through the trusted-surface read the verifier uses
-	 * (`readReanchorNotes`). May throw: the executor then treats the hour as having no recorded note and falls back to discovery.
+	 * (`readReanchorNotes`). May throw: the executor then treats the hour as having no recorded note and falls back to discovery. A
+	 * result with `incomplete` set is refused (`notes-incomplete`), as the verifier leaves the hour unverified.
 	 */
 	notes: (hour: SavedPlanHour) => Promise<ReanchorNotes>;
 	/** The lock held across discovery, send and recording. */
@@ -493,7 +496,9 @@ interface RecordedState {
  * does not know, or that is wrong or failed, means the hour is NOT recorded, whatever older notes say (the verifier never falls back
  * to an older one): `signature` is null, `stale` names that note so the repair note gets its own idempotency key, and discovery runs
  * and adopts an earlier valid send or sends once. A transaction that cannot be read refuses, because a recorded send may be live. A
- * notes read that fails is no note: discovery follows it.
+ * notes read that is incomplete (`incomplete` set: a surface cut by its page cap may hold a NEWER bound note than any returned) refuses
+ * with `notes-incomplete`, the way the verifier treats it (`ReanchorReadIncomplete`, hour unverified): the pointer it follows is
+ * unknown, so nothing is sent. A notes read that fails is no note: discovery follows it.
  */
 async function recordedSignature(hour: SavedPlanHour, deps: ReanchorDeps): Promise<RecordedState> {
 	let notes: ReanchorNotes;
@@ -501,6 +506,12 @@ async function recordedSignature(hour: SavedPlanHour, deps: ReanchorDeps): Promi
 		notes = await deps.notes(hour);
 	} catch {
 		return { signature: null, stale: null };
+	}
+	if (notes.incomplete !== null) {
+		throw new Refusal(
+			"notes-incomplete",
+			`${hour.period_start}: the anchor.reanchor notes could not be read completely (${notes.incomplete}), so the pointer the verifier follows is unknown: nothing was sent`,
+		);
 	}
 	const newest = newestBoundNote(notes.records, { root: hour.root, event_count: hour.event_count, tx_sig: hour.previous_tx_sig });
 	if (newest === null) return { signature: null, stale: null };

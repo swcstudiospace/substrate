@@ -116,6 +116,8 @@ class World {
 	noteRecords = new Map<number, ReanchorRecord[]>();
 	notesCalls: string[] = [];
 	notesFail = false;
+	/** The `incomplete` reason `readReanchorNotes` would report, per hour; absent means a complete read. */
+	notesIncomplete = new Map<number, string>();
 	/** The `before` cursor of each listing call, and a listing of filler signatures that never reaches the horizon. */
 	listBefore: Array<string | undefined> = [];
 	endlessListing = false;
@@ -256,7 +258,7 @@ class World {
 			notes: async (hour): Promise<ReanchorNotes> => {
 				this.notesCalls.push(hour.period_start);
 				if (this.notesFail) throw new Error("ledger down");
-				return { records: this.noteRecords.get(hour.period_start_ms) ?? [], incomplete: null };
+				return { records: this.noteRecords.get(hour.period_start_ms) ?? [], incomplete: this.notesIncomplete.get(hour.period_start_ms) ?? null };
 			},
 			lock: this.lock,
 			...over,
@@ -850,6 +852,40 @@ describe("recorded notes are read before discovery", () => {
 		expect(result).toMatchObject({ code: 0, sent: 0, adopted: 1 });
 		expect(result.stdout).toContain(`${hourIso(H1)} adopted ${done} (already recorded)`);
 		expect(w.rpcCalls.some((call) => call.startsWith("list:"))).toBe(false);
+		w.expectUntouched();
+	});
+
+	test("an incomplete notes read is refused before any send even when another surface holds a valid newest bound note; the same note read completely is recorded", async () => {
+		const done = newSig(7);
+		const incomplete = new World(ONE);
+		incomplete.chain.set(done, { ...TX_TEMPLATE, memo: memoOf(H1, 1) });
+		incomplete.noteRecords.set(H1, [noteRecord(1, H1, done)]);
+		incomplete.notesIncomplete.set(H1, "the notes of omp in anchor:x hit the 20-page limit before the newest re-anchor note was found");
+		const refused = await incomplete.run(ONE);
+		expect(refused).toMatchObject({ code: 1, refused: "notes-incomplete", sent: 0, adopted: 0 });
+		expect(refused.stderr).toContain("REFUSED notes-incomplete");
+		expect(refused.stderr).toContain(`${hourIso(H1)}: the anchor.reanchor notes could not be read completely (the notes of omp in anchor:x hit the 20-page limit`);
+		expect(refused.stderr).toContain("nothing was sent");
+		// No listing either: the refusal comes before discovery.
+		expect(incomplete.listBefore).toEqual([]);
+		incomplete.expectUntouched();
+
+		const complete = new World(ONE);
+		complete.chain.set(done, { ...TX_TEMPLATE, memo: memoOf(H1, 1) });
+		complete.noteRecords.set(H1, [noteRecord(1, H1, done)]);
+		const recorded = await complete.run(ONE);
+		expect(recorded).toMatchObject({ code: 0, refused: null, sent: 0, adopted: 1 });
+		expect(recorded.stdout).toContain(`${hourIso(H1)} adopted ${done} (already recorded)`);
+		complete.expectUntouched();
+	});
+
+	test("an incomplete notes read of a LATER hour refuses the whole run before the first send, though the earlier hour is clean", async () => {
+		const w = new World(TWO);
+		w.notesIncomplete.set(H2, "the notes of omp in anchor:y could not be read past one instant");
+		const result = await w.run(TWO, { maxHours: 2 });
+		expect(result).toMatchObject({ code: 1, refused: "notes-incomplete", sent: 0 });
+		expect(result.stderr).toContain(`${hourIso(H2)}: the anchor.reanchor notes could not be read completely`);
+		expect(w.notesCalls).toEqual([hourIso(H1), hourIso(H2)]);
 		w.expectUntouched();
 	});
 
