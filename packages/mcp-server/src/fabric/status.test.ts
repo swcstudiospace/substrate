@@ -16,7 +16,7 @@ function withService(name: ServiceName, patch: Partial<FabricFacts["services"][S
 }
 
 describe("buildFabricStatus", () => {
-	test("reports exactly the six resources, in report order", () => {
+	test("reports exactly the seven resources, in report order", () => {
 		const status = buildFabricStatus(healthyFacts());
 		expect(status.resources.map((row) => row.resource)).toEqual([...FABRIC_RESOURCES]);
 	});
@@ -30,6 +30,21 @@ describe("buildFabricStatus", () => {
 	test("a configured resource that gives no true answer is unavailable, not ok", () => {
 		expect(rowOf(withService("greptime", { answered: null }), "greptime").state).toBe("unavailable");
 		expect(rowOf(withService("ragflow", { answered: false }), "ragflow").state).toBe("unavailable");
+	});
+
+	test("a configured LightRAG answers like its siblings: true is ok, false, null and an open breaker are not", () => {
+		expect(rowOf(healthyFacts(), "lightrag").state).toBe("ok");
+		expect(rowOf(withService("lightrag", { answered: false }), "lightrag").state).toBe("unavailable");
+		expect(rowOf(withService("lightrag", { answered: null }), "lightrag").state).toBe("unavailable");
+		expect(rowOf(withService("lightrag", { breaker: "open" }), "lightrag").state).toBe("unavailable");
+		expect(rowOf(withService("lightrag", { breaker: "half-open" }), "lightrag").state).toBe("degraded");
+	});
+
+	test("an unconfigured LightRAG is unconfigured however it was probed, and the ragflow row is independent", () => {
+		expect(rowOf(withService("lightrag", { configured: false, answered: true }), "lightrag").state).toBe("unconfigured");
+		const legacy = withService("ragflow", { configured: false, answered: null, breaker: "off" });
+		expect(rowOf(legacy, "ragflow").state).toBe("unconfigured");
+		expect(rowOf(legacy, "lightrag").state).toBe("ok");
 	});
 
 	test("an open breaker is unavailable even when the last answer was true", () => {
@@ -60,6 +75,7 @@ describe("buildFabricStatus", () => {
 
 	test("the HTTP planes report not-applicable as their endpoint class", () => {
 		expect(rowOf(healthyFacts(), "ragflow").endpointClass).toBe("not-applicable");
+		expect(rowOf(healthyFacts(), "lightrag").endpointClass).toBe("not-applicable");
 		expect(rowOf(healthyFacts(), "hindsight").endpointClass).toBe("not-applicable");
 	});
 
@@ -82,7 +98,7 @@ describe("buildFabricStatus", () => {
 		expect(rowOf(facts, "dragonfly").endpointClass).toBe("direct");
 	});
 
-	test("counts add up to the six rows", () => {
+	test("counts add up to the seven rows", () => {
 		const status = buildFabricStatus(withService("greptime", { answered: false }));
 		const total = status.counts.ok + status.counts.degraded + status.counts.unavailable + status.counts.unconfigured;
 		expect(total).toBe(FABRIC_RESOURCES.length);

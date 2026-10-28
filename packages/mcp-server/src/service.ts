@@ -6764,12 +6764,7 @@ export class Substrate {
 			probes.ragflow,
 			indexStore ? this.indexCapacityForHealth(indexStore) : Promise.resolve(null),
 			probes.ledgerCapacity,
-			// `GET /health` on the LightRAG plane, only when configured, bounded like the other planes' probes and fail-open: a
-			// probe that throws reads as down, and `null` stays "not configured". Not part of `HealthProbes`, so the fabric's
-			// shared probes add no LightRAG call.
-			this.config.lightrag
-				? probeLightrag(this.config.lightrag, this.lightragFetch, HEALTH_PROBE_MS).then((probed) => probed.ok, () => false)
-				: Promise.resolve(null),
+			probes.lightrag,
 		]);
 		// The jobs and archive reads run after the probes, as on main: the Greptime ping has its verdict before the ledger's
 		// coverage read asks the same breaker for a call.
@@ -6850,6 +6845,11 @@ export class Substrate {
 				: Promise.resolve(null),
 			ragflow: this.config.ragflow
 				? listDatasets(this.config.ragflow, this.ragflowFetch, HEALTH_PROBE_MS).then((listed) => listed.ok, () => false)
+				: Promise.resolve(null),
+			// `GET /health` on the LightRAG plane, only when configured, bounded like the other planes' probes and fail-open: a
+			// probe that throws reads as down, and `null` stays "not configured". `/healthz` and the fabric share this one probe.
+			lightrag: this.config.lightrag
+				? probeLightrag(this.config.lightrag, this.lightragFetch, HEALTH_PROBE_MS).then((probed) => probed.ok, () => false)
 				: Promise.resolve(null),
 		};
 	}
@@ -6955,6 +6955,7 @@ export class Substrate {
 					index: probes.index,
 					hindsight: probes.hindsight,
 					ragflow: probes.ragflow,
+					lightrag: probes.lightrag,
 				};
 			},
 			snapshot: () => ({
@@ -6976,6 +6977,7 @@ export class Substrate {
 					dragonfly: this.config.dragonflyUrl !== undefined || this.config.dragonflyRefused !== null,
 					hindsight: hindsightFromEnv() !== null,
 					ragflow: this.config.ragflow !== null,
+					lightrag: this.config.lightrag !== null,
 				},
 				dragonflyRefused: this.config.dragonflyRefused !== null,
 			},
@@ -7141,6 +7143,8 @@ export interface HealthProbes {
 	readonly index: Promise<boolean>;
 	readonly hindsight: Promise<boolean | null>;
 	readonly ragflow: Promise<boolean | null>;
+	/** `GET /health` on the LightRAG plane: `null` when not configured, `false` for a probe that failed or threw. */
+	readonly lightrag: Promise<boolean | null>;
 }
 
 /** The reading of a Greptime that did not answer its ping: nothing past the ping is read. */

@@ -45,7 +45,7 @@ describe("buildFabricCompliance", () => {
 	test("an unconfigured resource is never a pass: every resource check is not applicable", () => {
 		const { checks } = report(unconfiguredFacts());
 		const resourceChecks = checks.filter((candidate) => candidate.id.startsWith("resource-state."));
-		expect(resourceChecks).toHaveLength(6);
+		expect(resourceChecks).toHaveLength(7);
 		for (const candidate of resourceChecks) expect(candidate.status).toBe("NOT_APPLICABLE");
 	});
 
@@ -55,6 +55,17 @@ describe("buildFabricCompliance", () => {
 		});
 		expect(check(facts, "resource-state.ragflow")).toMatchObject({ status: "FAIL", evidence: "state unavailable; source: health().planes.ragflow" });
 		expect(check(facts, "resource-state.greptime").status).toBe("PASS");
+	});
+
+	test("a LightRAG that does not answer fails its check, and an unconfigured one is not applicable", () => {
+		const facts = healthyFacts({
+			services: { ...healthyFacts().services, lightrag: { configured: true, held: false, answered: false, breaker: "closed", degraded: false, source: "health().planes.lightrag" } },
+		});
+		expect(check(facts, "resource-state.lightrag")).toMatchObject({ status: "FAIL", evidence: "state unavailable; source: health().planes.lightrag" });
+		const absent = healthyFacts({
+			services: { ...healthyFacts().services, lightrag: { configured: false, held: false, answered: null, breaker: "off", degraded: false, source: "health().planes.lightrag" } },
+		});
+		expect(check(absent, "resource-state.lightrag").status).toBe("NOT_APPLICABLE");
 	});
 
 	test("every fabric tool is fail-open in the audit, so the audit check passes", () => {

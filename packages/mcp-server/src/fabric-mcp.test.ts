@@ -65,7 +65,7 @@ describe("fabric tools", () => {
 		}
 	});
 
-	test("fabric_status reports the six resources, and a resource nothing configures is never ok", async () => {
+	test("fabric_status reports the seven resources, and a resource nothing configures is never ok", async () => {
 		const { fetch } = recordingFetch(() => ({}));
 		const client = await connect(substrateWith({}, fetch));
 		const reply = await call(client, "fabric_status");
@@ -76,10 +76,11 @@ describe("fabric tools", () => {
 			"timescaledb-index",
 			"greptime",
 			"ragflow",
+			"lightrag",
 			"hindsight",
 			"tailscale-proxy",
 		]);
-		for (const name of ["dragonfly", "timescaledb-index", "greptime", "ragflow", "tailscale-proxy"]) {
+		for (const name of ["dragonfly", "timescaledb-index", "greptime", "ragflow", "lightrag", "tailscale-proxy"]) {
 			expect(body.resources.find((row) => row.resource === name)?.state).toBe("unconfigured");
 		}
 	});
@@ -122,12 +123,58 @@ describe("fabric tools", () => {
 		expect(reply.text).not.toContain(TOKEN);
 		const body = reply.json() as { checks: Array<{ id: string; status: string; evidence: string }> };
 		const statusOf = (id: string) => body.checks.find((check) => check.id === id)?.status;
-		for (const id of ["resource-state.greptime", "resource-state.timescaledb-index", "resource-state.dragonfly", "resource-state.ragflow"]) {
+		for (const id of ["resource-state.greptime", "resource-state.timescaledb-index", "resource-state.dragonfly", "resource-state.ragflow", "resource-state.lightrag"]) {
 			expect(statusOf(id)).toBe("NOT_APPLICABLE");
 		}
 		expect(statusOf("resource-state.tailscale-proxy")).toBe("NOT_APPLICABLE");
 		expect(statusOf("audit-policy-fabric-tools")).toBe("PASS");
 		expect(statusOf("report-redaction")).toBe("PASS");
+	});
+});
+
+/** A substrate with LightRAG configured (and RAGFlow not), reached only through `lightragFetch`. */
+function substrateWithLightrag(lightragFetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>) {
+	const { fetch } = recordingFetch(() => ({}));
+	return new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" }), {
+		index: null,
+		greptime: null,
+		railway: new RailwayClient(railwayFromEnv({}), { fetch }),
+		lightragFetch,
+	});
+}
+
+describe("the LightRAG fabric row", () => {
+	test("LightRAG configured and answering healthy is ok, and an unset RAGFlow stays unconfigured", async () => {
+		const paths: string[] = [];
+		const client = await connect(
+			substrateWithLightrag(async (input, init) => {
+				paths.push(`${init?.method ?? "GET"} ${new URL(String(input)).pathname}`);
+				return Response.json({ status: "healthy", core_version: "1.5.7", pipeline_busy: false });
+			}),
+		);
+		const body = (await call(client, "fabric_status")).json() as { resources: Array<{ resource: string; state: string; endpointClass: string; source: string }> };
+		const row = (name: string) => body.resources.find((candidate) => candidate.resource === name);
+		expect(row("lightrag")).toMatchObject({ state: "ok", endpointClass: "not-applicable", source: "health().planes.lightrag" });
+		expect(row("ragflow")?.state).toBe("unconfigured");
+		expect(paths).toEqual(["GET /health"]);
+	});
+
+	test("a LightRAG that refuses its probe is unavailable, never ok, and fabric_compliance fails its check", async () => {
+		const client = await connect(substrateWithLightrag(async () => Response.json({ detail: "Invalid API Key" }, { status: 403 })));
+		const status = (await call(client, "fabric_status")).json() as { resources: Array<{ resource: string; state: string }> };
+		expect(status.resources.find((candidate) => candidate.resource === "lightrag")?.state).toBe("unavailable");
+		const compliance = (await call(client, "fabric_compliance")).json() as { checks: Array<{ id: string; status: string }> };
+		expect(compliance.checks.find((check) => check.id === "resource-state.lightrag")?.status).toBe("FAIL");
+	});
+
+	test("a LightRAG whose fetch throws is unavailable", async () => {
+		const client = await connect(
+			substrateWithLightrag(async () => {
+				throw new Error("connect refused");
+			}),
+		);
+		const status = (await call(client, "fabric_status")).json() as { resources: Array<{ resource: string; state: string }> };
+		expect(status.resources.find((candidate) => candidate.resource === "lightrag")?.state).toBe("unavailable");
 	});
 });
 

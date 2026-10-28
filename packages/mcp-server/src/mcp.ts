@@ -2206,9 +2206,9 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 	server.registerTool(
 		"fabric_status",
 		{
-			title: "Status of the six fabric resources",
+			title: "Status of the seven fabric resources",
 			description:
-				"One row per resource: Dragonfly, the TimescaleDB index, GreptimeDB, RAGFlow, Hindsight and the Tailscale proxy layer. " +
+				"One row per resource: Dragonfly, the TimescaleDB index, GreptimeDB, RAGFlow, LightRAG, Hindsight and the Tailscale proxy layer. " +
 				"Each row has its endpoint class (loopback, proxy, direct, unset or not-applicable), a state (ok, degraded, unavailable " +
 				"or unconfigured) and a fixed phrase naming its source. A resource that is not configured is unconfigured, never ok. " +
 				"A read: it changes nothing and needs no approval.",
