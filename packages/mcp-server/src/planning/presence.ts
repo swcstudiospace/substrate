@@ -1,9 +1,12 @@
 /**
- * Session presence for the planning plane (phase 52, SOTA-08).
+ * Session presence for the planning plane (phase 52, SOTA-08; phase 58, liveness).
  *
- * A session is "active" while its last heartbeat is within the TTL and "stale" after it. Staleness
- * is derived, never stored as a state: `classifySessions` is pure and never removes a record, and
- * no store in this module deletes one. History is append-only. Nothing here truncates it.
+ * A session is "active" while its last sign of life is within the TTL and "stale" after it. A sign of life is a change
+ * heartbeat (`lastHeartbeatMs`: planning documents changed) or a liveness write (`livenessMs`: the observer scanned the
+ * checkout and it was there), so a session that thinks for hours without touching a planning document stays active while
+ * its observer runs, and `idleForMs` reports how long it has been quiet. Staleness is derived, never stored as a state:
+ * `classifySessions` is pure and never removes a record, and no store in this module deletes one. History is append-only.
+ * Nothing here truncates it.
  *
  * Ports: `PresenceStore` (where heartbeats live), `HistorySink` (the append-only log, TimescaleDB in
  * production), and `PresenceClock` (the backend's own clock). Production adapters live beside this
@@ -68,7 +71,17 @@ export const SessionRecordSchema = z.object({
 	sessionId: z.string().regex(SESSION_ID_RE),
 	worktree: z.string().min(1).max(1024),
 	branch: z.string().min(1).max(256),
+	/**
+	 * The server time of the last change heartbeat: the last time the checkout's planning documents changed. It keeps this
+	 * meaning; a liveness write does not move it.
+	 */
 	lastHeartbeatMs: z.number().int().nonnegative(),
+	/**
+	 * The server time of the last liveness write: the observer's scan proved the checkout alive, whether or not anything changed.
+	 * Optional on the wire: a record without it is read as before, with the change heartbeat as its liveness. A change
+	 * heartbeat does not write it, since its own time is then the liveness.
+	 */
+	livenessMs: z.number().int().nonnegative().optional(),
 	planning: PlanningReportSchema.optional(),
 	repo: REPO_ID.nullable().optional(),
 	touched: z.array(TouchedPairSchema).max(MAX_REPORT_ENTRIES).optional(),
@@ -82,7 +95,14 @@ export type SessionStatus = "active" | "stale";
 
 export interface ClassifiedSession extends SessionRecord {
 	status: SessionStatus;
+	/** Milliseconds since the session's last sign of life (`livenessOf`). `status` is judged against it. */
 	ageMs: number;
+}
+
+/** A classified session with the time since its last planning change. `classifySessions` always returns it. */
+export interface LiveClassifiedSession extends ClassifiedSession {
+	/** Milliseconds since the last planning change (`lastHeartbeatMs`). Not what makes a session stale: a live session can be idle for days. */
+	idleForMs: number;
 }
 
 /** The presence port. `touch` records a heartbeat; `list` returns every record the backend still holds. */
@@ -107,18 +127,27 @@ export interface PresenceClock {
 }
 
 /**
- * Classify each record against `nowMs`. A record is stale when its age is strictly greater than
- * `ttlMs`, so a heartbeat exactly `ttlMs` old is still active. A heartbeat ahead of `nowMs`
- * (clock skew) has a negative age and is active. The input is not modified, and nothing is removed.
+ * Classify each record against `nowMs`. A session is alive at the later of its last change heartbeat and its liveness time
+ * (`livenessMs`; an old record has none, so its change heartbeat is its liveness). It is stale when that age is strictly
+ * greater than `ttlMs`, so a sign of life exactly `ttlMs` old is still active. A sign of life ahead of `nowMs` (clock skew)
+ * has a negative age and is active. `ageMs` is the age of the last sign of life; `idleForMs` is the time since the last
+ * planning change, which a session that is alive but quiet can hold far past the TTL. The input is not modified, and nothing
+ * is removed.
  */
-export function classifySessions(records: readonly SessionRecord[], nowMs: number, ttlMs: number): ClassifiedSession[] {
+export function classifySessions(records: readonly SessionRecord[], nowMs: number, ttlMs: number): LiveClassifiedSession[] {
 	assertTtlMs(ttlMs);
 	return records
-		.map((record): ClassifiedSession => {
-			const ageMs = nowMs - record.lastHeartbeatMs;
-			return { ...record, ageMs, status: ageMs > ttlMs ? "stale" : "active" };
+		.map((record): LiveClassifiedSession => {
+			const ageMs = nowMs - livenessOf(record);
+			const idleForMs = nowMs - record.lastHeartbeatMs;
+			return { ...record, ageMs, idleForMs, status: ageMs > ttlMs ? "stale" : "active" };
 		})
 		.sort((a, b) => compareText(a.sessionId, b.sessionId));
+}
+
+/** The server time of a session's last sign of life: its liveness time, or its change heartbeat when the record carries none or an older one. */
+export function livenessOf(record: Pick<SessionRecord, "lastHeartbeatMs" | "livenessMs">): number {
+	return Math.max(record.lastHeartbeatMs, record.livenessMs ?? 0);
 }
 
 /**

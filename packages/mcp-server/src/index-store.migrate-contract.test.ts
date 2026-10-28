@@ -217,7 +217,7 @@ describe("the real MIGRATION_STEPS satisfy the contract", () => {
 		expect(checkMigrationSteps(MIGRATION_STEPS).join("\n")).toBe("");
 	});
 
-	test("no step on main is at or above the first reversible version, so the convention is enforced through the synthetic lists below", () => {
+	test("every real step at or above the first reversible version (33, 34) declares down and phase, and the convention is also enforced through the synthetic lists below", () => {
 		expect(FIRST_REVERSIBLE_VERSION).toBe(33);
 		expect(MIGRATION_STEPS.filter((candidate) => candidate.version >= FIRST_REVERSIBLE_VERSION).every((candidate) => candidate.down !== undefined && candidate.phase !== undefined)).toBe(true);
 	});

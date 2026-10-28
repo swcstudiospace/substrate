@@ -8,8 +8,10 @@
  * Both are typed. A plane with no root answers `disabled` and never an error; invalid settings answer `misconfigured`
  * with the keys, never the values; a failed index or presence read answers `unavailable` with a code.
  *
- * `planning_status` carries hashes and counts only: no file body and no frontmatter. It also says whether completion
- * checkpoints survive a restart, read from the configured directory (`checkpoint-store.ts`).
+ * `planning_status` carries hashes and counts, and the GSD-Core position (`position.ts`): fields parsed from STATE.md and
+ * ROADMAP.md, redacted and capped, and never a file body or the frontmatter itself. The position is composed from the scan
+ * that built the index, with no second read. It also says whether completion checkpoints survive a restart, read from the
+ * configured directory (`checkpoint-store.ts`).
  *
  * `planning_sessions` is classified against the server's clock. When that clock cannot be read, sessions are listed as
  * `unknown` and the reason is given. They are not guessed as active. Each session carries its planning view, and the view
@@ -18,7 +20,8 @@
 import type { CompletionStoreView } from "./checkpoint-store.ts";
 import type { PlanningConfigError, PlanningConfigResult, PlanningLimits } from "./config.ts";
 import { detectConflicts, sessionViewOf, type PlanningConflict, type SessionView } from "./conflicts.ts";
-import { buildPlanningIndex, indexRecords, isErrorRecord, type PlanningFileRecord, type PlanningFs, type PlanningIndexFailure, type PlanningKind, type PlanningRecord } from "./index.ts";
+import { buildPlanningIndex, indexRecords, isErrorRecord, positionOf, type PlanningFileRecord, type PlanningFs, type PlanningIndexFailure, type PlanningKind, type PlanningRecord } from "./index.ts";
+import type { PositionResult } from "./position.ts";
 import { DragonflyPresenceStore, PRESENCE_MAX_SESSIONS } from "./presence-dragonfly.ts";
 import { classifySessions, type SessionRecord, type SessionStatus, type UnknownViewReason } from "./presence.ts";
 
@@ -59,6 +62,8 @@ export type PlanningStatusView =
 			limits: PlanningLimits;
 			truncated: boolean;
 			counts: { documents: number; errors: number; byKind: Partial<Record<PlanningKind, number>> };
+			/** Where GSD-Core is: milestone, phase, plan, step, status and progress, from STATE.md and ROADMAP.md. Set whenever the index was read. */
+			position?: PositionResult;
 			documents: PlanningHashRow[];
 			errors: PlanningErrorRow[];
 			/** Whether completion checkpoints survive a restart. Read from the configured directory; see `checkpoint-store.ts`. */
@@ -74,6 +79,8 @@ export interface PlanningSessionRow {
 	branch: string;
 	lastHeartbeatMs: number;
 	ageMs: number | null;
+	/** Milliseconds since the last planning change, or null when the server clock could not be read. A live session can be idle for hours and still be `active`: `status` follows its last sign of life, not this. */
+	idleForMs: number | null;
 	status: SessionStatus | "unknown";
 	/** The session's planning view: its scan time when known, or why it is unknown. */
 	planning: PlanningRowState;
@@ -131,6 +138,7 @@ export class PlanningReader {
 			limits,
 			truncated: built.index.truncated,
 			counts: countOf(records),
+			position: positionOf(built.index),
 			documents: records.filter(isFileRecord).map(hashRow),
 			errors: records.filter(isErrorRecord).map((record) => ({
 				path: record.path,
@@ -165,6 +173,7 @@ export class PlanningReader {
 						branch: record.branch,
 						lastHeartbeatMs: record.lastHeartbeatMs,
 						ageMs: null,
+						idleForMs: null,
 						status: "unknown",
 						planning: { state: "unknown", reason: "clock-unavailable" },
 					})),
@@ -184,6 +193,7 @@ export class PlanningReader {
 					branch: entry.branch,
 					lastHeartbeatMs: entry.lastHeartbeatMs,
 					ageMs: entry.ageMs,
+					idleForMs: entry.idleForMs,
 					status: entry.status,
 					planning: planningRowOf(sessionViewOf(entry, clock.nowMs, ttlMs)),
 				})),

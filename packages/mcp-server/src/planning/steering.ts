@@ -12,8 +12,11 @@
  *   ten directives per minute. A refused directive is not queued and not audited.
  * - A directive that conflicts with the target's active plan cannot be acknowledged as `applied`
  *   without an explicit `confirm: true` in the acknowledgement. A declined outcome needs no confirm.
- * - No file writes. Nothing in this module touches the filesystem. Records live in memory; a
- *   durable store is a later wiring step.
+ * - Restart safety and an acknowledgement deadline. The append-only audit log is the durable record, so a restarted
+ *   process rebuilds the inbox with {@link SteeringInbox.restore} from rows the sink read back, and never re-audits
+ *   them. {@link SteeringInbox.expireStale} closes every directive that stayed queued past the acknowledgement TTL
+ *   with a system acknowledgement (`declined`, reason `timeout`), audited before the directive leaves the pending set.
+ * - No file writes. Nothing in this module touches the filesystem.
  *
  * Every mutating call runs under one lock, so audit order, rate tokens and state never interleave.
  */
@@ -34,6 +37,19 @@ export const STEERING_BODY_MAX = 4_096;
 /** One attempt plus one retry for every audit write. */
 export const STEERING_AUDIT_ATTEMPTS = 2;
 
+export const STEERING_ACK_TTL_ENV = "SUBSTRATE_PLANNING_STEERING_ACK_TTL_S";
+export const STEERING_EXPIRY_SWEEP_ENV = "SUBSTRATE_PLANNING_STEERING_EXPIRY_SWEEP_S";
+
+/** A queued directive nobody acknowledged within this many seconds expires as `declined:timeout`. One day. */
+export const DEFAULT_STEERING_ACK_TTL_S = 86_400;
+/** Inclusive bounds, in seconds: one minute to thirty days. Outside them the value is refused, not clamped. */
+export const STEERING_ACK_TTL_BOUNDS_S = { min: 60, max: 2_592_000 } as const;
+/** How often the owner of the inbox should call {@link SteeringInbox.expireStale}, in seconds. */
+export const DEFAULT_STEERING_EXPIRY_SWEEP_S = 60;
+export const STEERING_EXPIRY_SWEEP_BOUNDS_S = { min: 1, max: 3_600 } as const;
+/** One expiry pass closes at most this many directives, so the inbox lock is never held for an unbounded run. */
+export const STEERING_EXPIRY_BATCH = 100;
+
 const RATE_WINDOW_MS = 60_000;
 const DIRECTIVE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const PRINCIPAL_RE = /^[A-Za-z0-9][A-Za-z0-9._@:-]{0,127}$/;
@@ -49,6 +65,10 @@ export const STEERING_OUTCOMES = ["applied", "declined"] as const;
 
 export type SteeringPriority = (typeof STEERING_PRIORITIES)[number];
 export type SteeringOutcome = (typeof STEERING_OUTCOMES)[number];
+
+/** Why a system closed a directive. A human acknowledgement carries no reason. */
+export const STEERING_ACK_REASONS = ["timeout"] as const;
+export type SteeringAckReason = (typeof STEERING_ACK_REASONS)[number];
 
 const PRIORITY_RANK: Record<SteeringPriority, number> = { high: 0, normal: 1, low: 2 };
 
@@ -95,6 +115,27 @@ export const SteeringAcknowledgementSchema = z
 
 export type SteeringAcknowledgement = z.infer<typeof SteeringAcknowledgementSchema>;
 
+/** The stored form of an acknowledgement, as the audit log holds it. A human acknowledgement has no `reason`. */
+export const SteeringStoredAcknowledgementSchema = z
+	.object({
+		atMs: z.number().int().nonnegative(),
+		outcome: z.enum(STEERING_OUTCOMES),
+		confirmed: z.boolean(),
+		reason: z.enum(STEERING_ACK_REASONS).nullish(),
+	})
+	.strict();
+
+/** One directive as read back from the audit log: its snapshot, the time it was queued, and its acknowledgement if any. */
+const SteeringRestoreEntrySchema = z
+	.object({
+		directive: SteeringDirectiveSchema,
+		queuedAtMs: z.number().int().nonnegative(),
+		acknowledgement: SteeringStoredAcknowledgementSchema.nullish(),
+	})
+	.strict();
+
+export type SteeringStoredAcknowledgement = z.infer<typeof SteeringStoredAcknowledgementSchema>;
+
 export type SteeringRecord =
 	| { state: "queued"; directive: SteeringDirective; queuedAtMs: number }
 	| {
@@ -104,6 +145,8 @@ export type SteeringRecord =
 			acknowledgedAtMs: number;
 			outcome: SteeringOutcome;
 			confirmed: boolean;
+			/** Present only on a system acknowledgement. */
+			reason?: SteeringAckReason;
 	  };
 
 /** What the audit sink receives. Only the directive snapshot carries content, and it is already redacted. */
@@ -116,6 +159,8 @@ export type SteeringAuditEntry =
 			targetSessionId: string;
 			outcome: SteeringOutcome;
 			confirmed: boolean;
+			/** Present only on a system acknowledgement. It is part of the audited payload, so a changed reason under the same key is a conflict. */
+			reason?: SteeringAckReason;
 	  };
 
 /** The append-only history port (the `HistorySink` shape of phase 52, typed for steering entries). */
@@ -126,6 +171,11 @@ export interface SteeringHistorySink {
 	 * Optional: a sink with no durable store has none, and every attempt takes a fresh time. A rejection is an audit failure.
 	 */
 	savedAtMs?(event: "queued" | "acknowledged", directiveId: string): Promise<number | null>;
+	/**
+	 * The acknowledgement already saved for a directive, or null when none is. Used to adopt another process's
+	 * acknowledgement when an expiry loses a race to it. Optional: a sink with no durable store has none. A rejection is reported, never guessed.
+	 */
+	readAcknowledgement?(directiveId: string): Promise<unknown>;
 }
 
 export interface SteeringClock {
@@ -137,6 +187,11 @@ export interface SteeringPolicy {
 	allowlist: readonly string[];
 	/** Directives per minute per target session. */
 	ratePerMin: number;
+	/**
+	 * The acknowledgement deadline in milliseconds after a directive was queued. Absent, nothing ever expires:
+	 * {@link SteeringInbox.expireStale} reports `ttlMs: null` and changes nothing.
+	 */
+	ackTtlMs?: number;
 }
 
 export interface SteeringInboxDeps {
@@ -162,6 +217,46 @@ export type SteeringError =
 
 export type SteeringResult<T> = { ok: true; value: T } | { ok: false; error: SteeringError };
 
+export type SteeringRestoreSkipCode = "invalid-entry" | "agent-author-refused";
+
+/** An entry `restore` did not load. `issues` are field paths only: a value, and so a secret, is never echoed. */
+export interface SteeringRestoreSkip {
+	index: number;
+	/** The entry's directive id when it has a well-formed one, else null. */
+	directiveId: string | null;
+	code: SteeringRestoreSkipCode;
+	issues: string[];
+}
+
+export interface SteeringRestoreReport {
+	/** Directives loaded, or upgraded from queued to acknowledged. */
+	restored: string[];
+	/** Directives already held in the state the entry describes, or further along. Nothing changed. */
+	unchanged: string[];
+	skipped: SteeringRestoreSkip[];
+}
+
+export interface SteeringExpiryFailure {
+	directiveId: string;
+	/** The audit failure's code. `AUDIT_CONFLICT` means the key holds a different acknowledgement that could not be read back. */
+	lastErrorCode: string;
+}
+
+export interface SteeringExpiryReport {
+	/** The TTL this pass used, or null when the policy has none (nothing expires). */
+	ttlMs: number | null;
+	/** Queued directives examined. */
+	checked: number;
+	/** Closed by this pass as `declined:timeout`. Includes one whose identical row was already saved by another process. */
+	expired: string[];
+	/** Closed by someone else first with a different acknowledgement; that acknowledgement was adopted. */
+	adopted: string[];
+	/** Still pending: the audit write failed or conflicted and the stored row could not be read. */
+	failed: SteeringExpiryFailure[];
+	/** Due but not attempted this pass, because of the batch bound or an audit outage that ended the pass. */
+	deferred: number;
+}
+
 interface TokenBucket {
 	tokens: number;
 	updatedAtMs: number;
@@ -180,6 +275,10 @@ export class SteeringInbox {
 		const { ratePerMin } = deps.policy;
 		if (!Number.isSafeInteger(ratePerMin) || ratePerMin < STEERING_RATE_BOUNDS.min || ratePerMin > STEERING_RATE_BOUNDS.max) {
 			throw new RangeError("ratePerMin must be an integer within the steering rate bounds");
+		}
+		const { ackTtlMs } = deps.policy;
+		if (ackTtlMs !== undefined && (!Number.isSafeInteger(ackTtlMs) || ackTtlMs < 1)) {
+			throw new RangeError("ackTtlMs must be a positive integer number of milliseconds");
 		}
 		this.capacity = ratePerMin;
 		this.allowlist = new Set(deps.policy.allowlist);
@@ -217,6 +316,26 @@ export class SteeringInbox {
 			if (record.directive.targetSessionId === sessionId) records.push(structuredClone(record));
 		}
 		return records.sort((a, b) => compareDirectives(a.directive, b.directive));
+	}
+
+	/**
+	 * Loads directives read back from the audit log. Never audits, never throws, and is idempotent: an entry for a
+	 * directive already held changes nothing, except that a queued record is upgraded when the entry is acknowledged.
+	 * An entry that fails the directive schema is skipped and reported, not loaded.
+	 */
+	restore(entries: readonly unknown[]): Promise<SteeringRestoreReport> {
+		return this.exclusive(async () => this.doRestore(entries));
+	}
+
+	/**
+	 * Closes every queued directive older than the acknowledgement TTL with `declined:timeout`, appended through the
+	 * sink before the directive leaves the pending set. The audited time is the deadline (`queuedAtMs + ttl`), not
+	 * `nowMs`, so two processes expiring one directive write the same payload and the second sees a same-hash repeat.
+	 * A directive is due when `nowMs - queuedAtMs >= ttl`. Running it again changes nothing.
+	 */
+	expireStale(nowMs: number): Promise<SteeringExpiryReport> {
+		if (!Number.isSafeInteger(nowMs) || nowMs < 0) throw new RangeError("nowMs must be a non-negative integer");
+		return this.exclusive(() => this.doExpireStale(nowMs));
 	}
 
 	private async doEnqueue(input: unknown): Promise<SteeringResult<SteeringRecord>> {
@@ -285,6 +404,112 @@ export class SteeringInbox {
 		};
 		this.records.set(directive.id, record);
 		return { ok: true, value: structuredClone(record) };
+	}
+
+	private doRestore(entries: readonly unknown[]): SteeringRestoreReport {
+		const report: SteeringRestoreReport = { restored: [], unchanged: [], skipped: [] };
+		entries.forEach((entry, index) => {
+			const parsed = SteeringRestoreEntrySchema.safeParse(entry);
+			if (!parsed.success) {
+				report.skipped.push({ index, directiveId: wellFormedDirectiveId(entry), code: "invalid-entry", issues: issuePaths(parsed.error) });
+				return;
+			}
+			const { directive, queuedAtMs, acknowledgement } = parsed.data;
+			// No human flow can audit an agent author, so such a row did not come from this inbox. It is not loaded.
+			if (directive.author.kind === "agent") {
+				report.skipped.push({ index, directiveId: directive.id, code: "agent-author-refused", issues: [] });
+				return;
+			}
+			const current = this.records.get(directive.id);
+			if (current !== undefined && (current.state === "acknowledged" || acknowledgement == null)) {
+				report.unchanged.push(directive.id);
+				return;
+			}
+			this.records.set(directive.id, recordFromStore(directive, queuedAtMs, acknowledgement ?? null));
+			report.restored.push(directive.id);
+		});
+		return report;
+	}
+
+	private async doExpireStale(nowMs: number): Promise<SteeringExpiryReport> {
+		const ttlMs = this.deps.policy.ackTtlMs ?? null;
+		const report: SteeringExpiryReport = { ttlMs, checked: 0, expired: [], adopted: [], failed: [], deferred: 0 };
+		const due: Array<Extract<SteeringRecord, { state: "queued" }>> = [];
+		for (const record of this.records.values()) {
+			if (record.state !== "queued") continue;
+			report.checked += 1;
+			if (ttlMs !== null && nowMs - record.queuedAtMs >= ttlMs) due.push(record);
+		}
+		if (ttlMs === null) return report;
+		due.sort((a, b) => a.queuedAtMs - b.queuedAtMs || compareText(a.directive.id, b.directive.id));
+
+		let attempted = 0;
+		for (const record of due.slice(0, STEERING_EXPIRY_BATCH)) {
+			attempted += 1;
+			const { directive } = record;
+			const deadlineMs = record.queuedAtMs + ttlMs;
+			const audited = await this.auditExpiry({
+				event: "acknowledged",
+				atMs: deadlineMs,
+				directiveId: directive.id,
+				targetSessionId: directive.targetSessionId,
+				outcome: "declined",
+				confirmed: false,
+				reason: "timeout",
+			});
+			if (audited.ok) {
+				this.records.set(
+					directive.id,
+					recordFromStore(directive, record.queuedAtMs, { atMs: deadlineMs, outcome: "declined", confirmed: false, reason: "timeout" }),
+				);
+				report.expired.push(directive.id);
+				continue;
+			}
+			if (audited.lastErrorCode === AUDIT_CONFLICT_CODE) {
+				// The key holds a different acknowledgement: another process closed this directive first. Take its word.
+				const stored = await this.readStoredAcknowledgement(directive.id);
+				if (stored !== null) {
+					this.records.set(directive.id, recordFromStore(directive, record.queuedAtMs, stored));
+					report.adopted.push(directive.id);
+				} else {
+					report.failed.push({ directiveId: directive.id, lastErrorCode: audited.lastErrorCode });
+				}
+				continue;
+			}
+			// The audit store is unavailable. The directive stays pending, and the pass ends so an outage is not hammered.
+			report.failed.push({ directiveId: directive.id, lastErrorCode: audited.lastErrorCode });
+			break;
+		}
+		report.deferred = due.length - attempted;
+		return report;
+	}
+
+	/** Append with the bounded retry, except that a conflict is final: the same key and payload will conflict again. */
+	private async auditExpiry(entry: SteeringAuditEntry): Promise<{ ok: true } | { ok: false; lastErrorCode: string }> {
+		let lastErrorCode = "UNKNOWN";
+		for (let attempt = 0; attempt < STEERING_AUDIT_ATTEMPTS; attempt++) {
+			try {
+				await this.deps.history.append(entry);
+				return { ok: true };
+			} catch (cause) {
+				lastErrorCode = errnoCode(cause);
+				if (lastErrorCode === AUDIT_CONFLICT_CODE) break;
+			}
+		}
+		return { ok: false, lastErrorCode };
+	}
+
+	/** The acknowledgement another process saved, validated at the edge. Null when the sink cannot read it or it is not well formed. */
+	private async readStoredAcknowledgement(directiveId: string): Promise<SteeringStoredAcknowledgement | null> {
+		const read = this.deps.history.readAcknowledgement;
+		if (read === undefined) return null;
+		try {
+			const parsed = SteeringStoredAcknowledgementSchema.safeParse(await read.call(this.deps.history, directiveId));
+			return parsed.success ? parsed.data : null;
+		} catch {
+			// A failed read leaves the directive pending; the caller reports it as failed, with the conflict code.
+			return null;
+		}
 	}
 
 	/**
@@ -377,6 +602,28 @@ export function loadSteeringSettings(env: Readonly<Record<string, string | undef
 	return { ok: true, settings: { enabled, allowlist, ratePerMin } };
 }
 
+export interface SteeringExpirySettings {
+	/** Milliseconds a directive may stay queued before it expires as `declined:timeout`. */
+	ackTtlMs: number;
+	/** Milliseconds between {@link SteeringInbox.expireStale} passes, for the process that owns the timer. */
+	expirySweepMs: number;
+}
+
+export type SteeringExpiryConfigResult = { ok: true; settings: SteeringExpirySettings } | { ok: false; errors: SteeringConfigError[] };
+
+/**
+ * The acknowledgement deadline and the sweep interval, from the environment. Both are whole seconds in the
+ * environment. A malformed or out-of-range value is a typed error naming its key, never a fallback; an unset key
+ * takes its default. Separate from {@link loadSteeringSettings} so that loader's result is unchanged.
+ */
+export function loadSteeringExpirySettings(env: Readonly<Record<string, string | undefined>>): SteeringExpiryConfigResult {
+	const errors: SteeringConfigError[] = [];
+	const ttlS = integerSetting(env, STEERING_ACK_TTL_ENV, DEFAULT_STEERING_ACK_TTL_S, STEERING_ACK_TTL_BOUNDS_S, errors);
+	const sweepS = integerSetting(env, STEERING_EXPIRY_SWEEP_ENV, DEFAULT_STEERING_EXPIRY_SWEEP_S, STEERING_EXPIRY_SWEEP_BOUNDS_S, errors);
+	if (errors.length > 0) return { ok: false, errors };
+	return { ok: true, settings: { ackTtlMs: ttlS * 1_000, expirySweepMs: sweepS * 1_000 } };
+}
+
 /**
  * Whether the steering tools are registered. They are when the switch is on, and also when it is malformed: a
  * malformed switch is answered by `misconfigured` results, never hidden as an absent tool. An unset or off switch
@@ -443,6 +690,31 @@ function integerSetting(
 		return fallback;
 	}
 	return value;
+}
+
+/** The code a conflicting append carries: the key holds a row with a different payload. */
+const AUDIT_CONFLICT_CODE = "AUDIT_CONFLICT";
+
+function recordFromStore(directive: SteeringDirective, queuedAtMs: number, ack: SteeringStoredAcknowledgement | null): SteeringRecord {
+	if (ack === null) return { state: "queued", directive, queuedAtMs };
+	const record: SteeringRecord = {
+		state: "acknowledged",
+		directive,
+		queuedAtMs,
+		acknowledgedAtMs: ack.atMs,
+		outcome: ack.outcome,
+		confirmed: ack.confirmed,
+	};
+	if (ack.reason != null) record.reason = ack.reason;
+	return record;
+}
+
+/** The directive id of an unvalidated restore entry, only when it is well formed; else null. Never an arbitrary value. */
+function wellFormedDirectiveId(entry: unknown): string | null {
+	if (typeof entry !== "object" || entry === null || !("directive" in entry)) return null;
+	const directive = entry.directive;
+	if (typeof directive !== "object" || directive === null || !("id" in directive)) return null;
+	return typeof directive.id === "string" && DIRECTIVE_ID_RE.test(directive.id) ? directive.id : null;
 }
 
 function fail<T>(error: SteeringError): SteeringResult<T> {
