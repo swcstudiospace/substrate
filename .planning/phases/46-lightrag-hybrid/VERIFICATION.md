@@ -1,43 +1,32 @@
 ---
 phase: 46-lightrag-hybrid
-verified: 2026-10-26
+verified: 2026-10-28
 status: human_needed
-score: 1 of 6 acceptance criteria proven in repository; 2 and 3 need operator approval for live steps; 4 and 5 are not met
-verified_on: gsd/autonomous-run-2026-10-24 at 2c82176
-covered_files: ["packages/mcp-server/src/docs-search.ts", "packages/mcp-server/src/docs-search.test.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/mcp.test.ts", "packages/mcp-server/src/server.test.ts", "packages/mcp-server/src/planes/lightrag.ts", "docs/docs-plane.md"]
+score: 1 of 6 success criteria MET in the repository (criterion 1). Criterion 3 was performed live in Run 11 (naive mode; operator-run, not re-checked by this record). Criterion 4 is NOT MET (no comparator exists) and criterion 5 is PARTIAL (cutover done, removal not); criteria 2, 4, 5 and 6 need per-run operator approval.
+verified_on: main at 31a9bb36 (files read; nothing was run)
 ---
 
 # 46-VERIFICATION: LightRAG hybrid RAG and the RAGFlow migration
 
-## Gates on the verified tree
+## Gates
 
-| Check | Command | Result |
-|---|---|---|
-| Composite gate | `env -u SUBSTRATE_TEST_PG_URL bun run verify` | exit 0: typecheck clean; `bun test` 6086 pass, 177 skip (Postgres-only, run in CI), 0 fail; Python suites pass; repo locks pass |
-| Python suites | `uv run --no-project --with httpx==0.28.1 --with pytest==9.1.1 python -m pytest packages/miner/tests packages/dispatcher/tests` | 321 passed |
-| Repo locks | `bun run check:phase-close` | exit 0 in three runs, 2.2 to 2.3 s |
-| Fail-before for the degraded contract | new and changed tests run on `0570e77` | five fail, the replay pin passes before and after |
+Not run by the author of this record. The full gate runs in CI on main (frozen install, tsc with the strict flags, blocking Biome lint, the full bun test suite against a scratch Postgres, the Python suites, the repo locks) and the orchestrator records the run in .planning/STATE.md. This record's evidence is file paths and test titles read on main; nothing was executed and no test counts or CI numbers are stated here.
 
-## Acceptance criteria
+## Success criteria
 
-| # | Criterion (PLAN.md) | Evidence in repository | Status |
+| # | Criterion | Status | Evidence |
 |---|---|---|---|
-| 1 | `docs_search` returns context-augmented results on the LightRAG hybrid plane | Tests `5e3c694`; docs `2a29aed`; context and deadline fixes `280860b`, `39b28c2`; one degraded contract for `docs_search` and `docs_lightrag_query` `2c82176` | pass in repository, against fakes |
-| 2 | RAGFlow dataset archived with a verified checksum | T5 is a HARD_STOP and has not run | human_needed: needs operator approval for this run |
-| 3 | LightRAG deployed to production with a timed health probe | T6 is a HARD_STOP and has not run | human_needed: needs operator approval for this run |
-| 4 | Parity gate: zero dataset, source and version mismatches; sampled citations match at 100 percent | T3 recorded in PLAN (ten queries, fail closed). T4 comparator is BLOCKED on T5 and a read-only RAGFlow export. T7 is a HARD_STOP | not met |
-| 5 | Logged cutover with delta pass; RAGFlow removal only after criteria 1 to 4 and the RAG-dependent phases | T8 is a HARD_STOP. W1 to W4 removal is on operator hold until LightRAG deploys | not met |
-| 6 | Each live step needs the operator's approval for that run | No approval granted | standing rule |
+| 1 | docs_search answers from LightRAG with hybrid search and Hindsight context, with tests | MET (with fakes) | `packages/mcp-server/src/planes/lightrag.ts:59` `DEFAULT_QUERY_MODE = "hybrid"` (line moved from :40 by later edits; PR #154 wording only). `packages/mcp-server/src/docs-search.test.ts` describe `docs_search context on the LightRAG backend (Q2, Q3)`: test `a LightRAG search that succeeds carries the Hindsight context when the caller asks for it: memories from recall, events from the session's last five ledger rows` (line ~1678); test `the same LightRAG success asked without context carries no context key, and neither recall nor the ledger is read` (line ~1696); test `the same LightRAG success with context set to false carries no context key, and neither recall nor the ledger is read` (line ~1708). Docs: `docs/docs-plane.md` lines 1, 11-14, 120-147 describe LightRAG as the live production backend, the hybrid default, opt-in context, and Hindsight fallback (wording corrected by PR #154, commit `94f9d484`). Production serves docs from LightRAG since Run 11 (`SUBSTRATE_DOCS_BACKEND=lightrag`), in `naive` query mode on the bypass LLM; hybrid mode fails the smoke query check in that state (STATE.md Run 11). |
+| 2 | The RAGFlow dataset is archived, with a verified checksum, before any deletion | OPERATOR-GATED | No archive checksum is recorded in the repository. The operator re-scope (ROADMAP Phase 46 note, 2026-10-25) states RAGFlow was checked and found empty (no datasets, empty knowledgebase folder) and authorized removing RAGFlow and its resources, but the live archive step still needs per-run operator approval. The `ragflow` Railway service was deleted 2026-10-25; storage services (`elasticsearch`, `mysql`, `storage`, `redis`) still need their own approval. No per-run approval for this run is recorded. |
+| 3 | LightRAG is deployed to Agent Substrate production and passes a timed health probe | MET live in naive mode (Run 11, operator-run; not re-checked here); graph and hybrid modes OPERATOR-GATED | Deployed per STATE.md Run 11: `lightrag` v1.5.7, `lightrag-postgres` (pgvector), `lightrag-llm-bypass` on Railway; `lightrag-smoke-run --confirm-live` passed all six checks in naive mode; production cut over to release `5cf930a0` with `SUBSTRATE_DOCS_BACKEND=lightrag` and `/healthz` listing a closed `lightrag` plane. Graph and hybrid retrieval cannot pass while LightRAG runs on the bypass LLM (naive mode only); a real LLM needs the operator's LLM decision (`shunt login xai` or equivalent plus a network path from Railway). No per-run operator approval for a fresh deploy/probe is recorded, and this record read STATE.md only: it did not touch the live service. |
+| 4 | The migration job and parity comparator pass PARITY_GATE before any ingestion | NOT MET (comparator not built; its live run is OPERATOR-GATED) | The ten-query sample and 100 percent fail-closed rate are recorded in PLAN.md T3. No parity comparator exists in the repository (no `PARITY_GATE` implementation found under `packages/` or `scripts/`), so this criterion is a repository gap as well as a gated live step: the comparator is blocked on the RAGFlow archive (criterion 2), a read-only RAGFlow export, per-run operator approval and the operator's LLM decision, since hybrid/graph retrieval is unavailable in naive mode. |
+| 5 | Cutover is a logged, reversible switch with a delta pass; RAGFlow code and service removed only after criteria 1-4, the RAG-dependent phases, and separate storage approval | PARTIAL (cutover done in Run 11; removal NOT MET and OPERATOR-GATED) | Production already serves docs from LightRAG (Run 11 cutover), but the removal half is not met: `packages/mcp-server/src/planes/ragflow.ts` is still present on main (the legacy fallback backend), and about 25 files still name RAGFlow (STATE.md Run 11). Removal waits on criteria 1-4, the RAG-dependent phases, and the operator's LLM decision per the Run 11 addendum. No per-run approval recorded. |
+| 6 | Every live step runs only after the operator approves it for that run | OPERATOR-GATED | Standing rule. No approval for this run is recorded; approvals do not carry over between runs. |
 
-## Not proven
+## Residual risks
 
-- LightRAG live behaviour: no deploy, fakes only.
-- That recalled memories improve answers. The context block proves the plumbing and the caps only.
-- Presentation differences between `docs_search` and `docs_lightrag_query` that are not degraded semantics: the no-hit fallback marker, the `backend` and `graph` fields, the notice text, the no-hit reason suffix, the chunk field names, and a stale comment in `types.ts`. They are listed in commit `2c82176` and remain open.
-
-## Human verification items
-
-1. Approve T5, the RAGFlow archive with checksum (criterion 2). Then approve T6, the LightRAG deploy and health probe (criterion 3).
-2. Choose the LLM route for LightRAG: an API key, or the bridge `/chat` contract, which is not yet readable.
-3. Confirm the phrase "phase 46 cutover" in `docs/docs-plane.md`, which comes from the re-scope brief and is not defined in `docs/`.
-4. After T5 and the RAGFlow export, review the T4 comparator design before T7.
+- LightRAG runs in naive mode on the bypass LLM (`infra/railway/lightrag-llm-bypass.ts`); no graph is built and hybrid/graph modes need a real LLM credential plus a network path from Railway. Operator decisions still open (STATE.md Run 11): real LLM route, milestone completion and archive, Notion re-login and Linear plan limit, dropping `hindsight_backup_20261027`, empty `HINDSIGHT_BANKS` on the host.
+- Rollback to `702ed32e` is app-only: that release has no LightRAG client and the RAGFlow service is deleted, so docs search would be unavailable until a backend is restored (Run 11 addendum).
+- Presentation differences between `docs_search` and `docs_lightrag_query` that are not degraded semantics (no-hit fallback marker, `backend`/`graph` fields, notice text, no-hit reason suffix, chunk field names, a stale comment in `types.ts`) were listed in commit `2c82176` and remain open as noted in the prior record.
+- That recalled memories improve answers is unproven; the context block proves the plumbing and the caps only.
+- The phrase "phase 46 cutover" in `docs/docs-plane.md` comes from the re-scope brief and is not defined elsewhere under `docs/`; still needs operator confirmation (carried forward).
