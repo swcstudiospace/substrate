@@ -157,11 +157,26 @@ const pause = new Int32Array(new SharedArrayBuffer(4));
 let takeoverSeq = 0;
 
 /**
+ * How long a lock directory with no pid file is presumed to be mid-acquisition. Its
+ * owner has done `mkdir` and is about to write the pid; no recoverer may judge the
+ * directory ownerless before it is older than this (by its own mtime).
+ */
+export const OWNERLESS_LOCK_GRACE_MS = 2_000;
+
+/** The one step of acquisition a test needs to interleave with a concurrent recoverer. */
+export interface StateLockIo {
+	/** Write the owner's pid file into the freshly made lock directory. */
+	writePid(pidPath: string, pid: string): void;
+}
+
+const realLockIo: StateLockIo = { writePid: (pidPath, pid) => writeFileSync(pidPath, pid) };
+
+/**
  * Whether the lock instance at `lock` is free to take: a dead owner's, or an
  * ownerless one older than the bound. A pid file that is present but unparsable is
  * owned as far as anyone can tell, never stale.
  */
-function lockIsStale(lock: string): boolean {
+export function lockIsStale(lock: string): boolean {
 	let pid = Number.NaN;
 	let pidMissing = false;
 	try {
@@ -177,7 +192,7 @@ function lockIsStale(lock: string): boolean {
 	} catch {
 		return false;
 	}
-	return age > 250;
+	return age > OWNERLESS_LOCK_GRACE_MS;
 }
 
 /**
@@ -220,37 +235,52 @@ function takeStaleLock(lock: string): boolean {
  * One lock around the whole read, change and write. An atomic rename of the state file
  * does not stop two children from reading the same `next` and returning the same PR number.
  */
-function acquireStateLock(statePath: string): () => void {
+export function acquireStateLock(statePath: string, io: StateLockIo = realLockIo): () => void {
 	const lock = `${statePath}.lock`;
 	const started = Date.now();
 	for (;;) {
+		let lostRace = false;
 		try {
 			mkdirSync(lock, { mode: 0o700 });
 			try {
-				writeFileSync(join(lock, "pid"), String(process.pid));
+				io.writePid(join(lock, "pid"), String(process.pid));
 			} catch (writeCause) {
-				// Our mkdir won but the pid never landed: drop exactly that half-made
-				// instance. `rmdirSync` only removes an empty directory, so a fresh lock
-				// another child has claimed since is never deleted wholesale.
-				try {
-					rmdirSync(lock);
-				} catch {
-					// Taken over or claimed meanwhile; age-based recovery covers leftovers.
+				if ((writeCause as NodeJS.ErrnoException).code === "ENOENT") {
+					// The directory we just made was reclaimed as ownerless before the
+					// pid landed. There is nothing of ours left to drop (and an empty
+					// directory at the path now belongs to someone else): lost the race,
+					// so go back to `mkdir`.
+					lostRace = true;
+				} else {
+					// Our mkdir won but the pid never landed: drop exactly that half-made
+					// instance. `rmdirSync` only removes an empty directory, so a fresh lock
+					// another child has claimed since is never deleted wholesale.
+					try {
+						rmdirSync(lock);
+					} catch {
+						// Taken over or claimed meanwhile; age-based recovery covers leftovers.
+					}
+					throw writeCause;
 				}
-				throw writeCause;
 			}
-			const owner = process.pid;
-			return () => {
-				// Release only the lock still owned by this process, never a successor's.
-				try {
-					if (readFileSync(join(lock, "pid"), "utf8").trim() !== String(owner)) return;
-				} catch {
-					return;
-				}
-				rmSync(lock, { recursive: true, force: true });
-			};
+			if (!lostRace) {
+				const owner = process.pid;
+				return () => {
+					// Release only the lock still owned by this process, never a successor's.
+					try {
+						if (readFileSync(join(lock, "pid"), "utf8").trim() !== String(owner)) return;
+					} catch {
+						return;
+					}
+					rmSync(lock, { recursive: true, force: true });
+				};
+			}
 		} catch (cause) {
 			if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
+		}
+		if (lostRace) {
+			if (Date.now() - started > 5_000) throw new Error("fake gh state lock busy");
+			continue;
 		}
 		// The path is held by someone: reclaim it only when it is identifiably stale,
 		// through an atomic takeover that a single recoverer wins.

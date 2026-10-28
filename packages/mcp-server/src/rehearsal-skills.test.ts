@@ -9,7 +9,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EMPTY_STATE, fakeGh, fakeGhScript, readState, runFakeGh, writeState, type FakeGhState } from "./rehearsal-fake-gh.ts";
+import { EMPTY_STATE, OWNERLESS_LOCK_GRACE_MS, acquireStateLock, fakeGh, fakeGhScript, lockIsStale, readState, runFakeGh, writeState, type FakeGhState } from "./rehearsal-fake-gh.ts";
 import { FIXTURE_REPO, SEED_SKILL, buildSkillsFixture, removeSkillsFixture, skillsPaths } from "./rehearsal-skills.ts";
 
 const made: string[] = [];
@@ -139,6 +139,53 @@ describe("fakeGh", () => {
 		expect(final.prs).toHaveLength(count);
 		expect(new Set(final.prs.map((pr) => pr.number)).size).toBe(count);
 		expect(existsSync(lock)).toBe(false);
+	});
+
+	test("a lock directory reclaimed between mkdir and the pid write is a lost race: retry, never throw", () => {
+		const run = tempRun();
+		const statePath = join(run, "gh-state.json");
+		const lock = `${statePath}.lock`;
+		let writes = 0;
+		const release = acquireStateLock(statePath, {
+			writePid: (pidPath, pid) => {
+				writes++;
+				// Another child saw our pid-less directory and removed it as ownerless.
+				if (writes === 1) rmSync(lock, { recursive: true, force: true });
+				writeFileSync(pidPath, pid);
+			},
+		});
+		expect(writes).toBe(2);
+		expect(readFileSync(join(lock, "pid"), "utf8")).toBe(String(process.pid));
+		release();
+		expect(existsSync(lock)).toBe(false);
+	});
+
+	test("a pid write failing for any reason but a reclaimed directory still propagates and leaves no lock", () => {
+		const run = tempRun();
+		const statePath = join(run, "gh-state.json");
+		const lock = `${statePath}.lock`;
+		const denied = Object.assign(new Error("denied"), { code: "EACCES" });
+		expect(() =>
+			acquireStateLock(statePath, {
+				writePid: () => {
+					throw denied;
+				},
+			}),
+		).toThrow("denied");
+		expect(existsSync(lock)).toBe(false);
+	});
+
+	test("a pid-less lock directory younger than the grace window is never judged ownerless", () => {
+		const run = tempRun();
+		const lock = join(run, "gh-state.json.lock");
+		mkdirSync(lock);
+		expect(lockIsStale(lock)).toBe(false);
+		const young = new Date(Date.now() - OWNERLESS_LOCK_GRACE_MS / 2);
+		utimesSync(lock, young, young);
+		expect(lockIsStale(lock)).toBe(false);
+		const old = new Date(Date.now() - OWNERLESS_LOCK_GRACE_MS - 5_000);
+		utimesSync(lock, old, old);
+		expect(lockIsStale(lock)).toBe(true);
 	});
 
 	test("pr create and pr list refuse missing arguments instead of guessing", () => {
