@@ -1,19 +1,19 @@
 ---
 gsd_state_version: "1.0"
-milestone: v1.3.x
-milestone_name: Should-have hardening
-status: "main 28ea65f4 (2026-10-28). Phases 34-62 merged to main (46 open: LightRAG deployed naive-mode, graph/hybrid and RAGFlow removal operator-gated). v1.3.x, v1.5, v1.6 all await operator completion; no milestone beyond v1.4 archived."
+milestone: v1.5
+milestone_name: SOTA enhancements
+status: "main 28ea65f4 (2026-10-28). Active milestone v1.5: phases 45-54, 9 of 10 complete, phase 46 open (LightRAG deployed naive-mode; graph/hybrid and RAGFlow removal operator-gated). v1.3.x is complete in repo and awaits operator completion; v1.6 (phases 55-62) also awaits it. No milestone beyond v1.4 archived."
 stopped_at: "Run 11 addendum (PR #141): reconcile planning records, then operator decisions on milestone completion"
 last_updated: "2026-10-28T00:00:00.000Z"
 last_activity: 2026-10-28
 last_activity_desc: "Run 11: LightRAG deployed, production cut over; docs state-run11b merged"
 state_head: 28ea65f41ca8
 progress:
-  total_phases: 8
-  completed_phases: 8
-  total_plans: 8
-  completed_plans: 8
-  percent: 100
+  total_phases: 10
+  completed_phases: 9
+  total_plans: 7
+  completed_plans: 6
+  percent: 90
 current_phase: 46
 current_phase_name: lightrag-hybrid
 ---
@@ -161,9 +161,9 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: main = 28ea65f4 (2026-10-28). Phases 34-62 are merged to main. Phase 46 is open: LightRAG is deployed in naive mode; graph and hybrid modes and the RAGFlow removal are operator-gated.
+Phase: main = 28ea65f4 (2026-10-28). Active milestone v1.5 (phases 45-54): 9 of 10 phases complete. Phase 46 is open: LightRAG is deployed in naive mode; graph and hybrid modes and the RAGFlow removal are operator-gated. Phases 34-62 are merged to main.
 Plan: —
-Status: v1.3.x, v1.5 and v1.6 all await operator completion confirmation; none is archived beyond v1.4. Gap closure for the v1.6 partial criteria of phases 58, 59 and 61 is in progress.
+Status: v1.3.x is complete in repo and awaits operator completion confirmation; v1.5 and v1.6 also await it (phase 46 is the open v1.5 phase); none is archived beyond v1.4. Gap closure for the v1.6 partial criteria of phases 58, 59 and 61 is in progress.
 Last activity: 2026-10-28 — Run 11: LightRAG deployed, production cut over; planning records reconciled in Run 12
 
 ## Preflight record (2026-10-23, graph ut-mvlknrx6-2849044e)
@@ -626,7 +626,7 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
   - 59, 60 and 61: PRs #128 and #129.
   - 62: PR #130.
   - Phases 53-62 all merged 2026-10-28.
-- **VERIFICATION `verified_on` values are pre-squash branch tips:** 52: b7d6768 and e135938; 53: 2c50263; 54: 5548c62; 55-57 and 59-62: 8752578; 58: 7edfd79. These SHAs name branch heads from before the squash merges, so they may not be reachable from main. They will be re-verified on main later in this run.
+- **VERIFICATION `verified_on` values are not all reachable from main:** 52: b7d6768 and e135938; 53: 2c50263; 54: 5548c62; 55-57 and 59-62: 8752578; 58: 7edfd79. Checked with `git merge-base --is-ancestor` against main (28ea65f4): only e135938 and 8752578 are ancestors of main. b7d6768, 2c50263, 5548c62 and 7edfd79 are tips of replaced branches and are not reachable from main. Phases 52-62 will be re-verified on main later in this run.
 - **Still open:**
   - Phase 46: LightRAG runs in naive mode on the bypass LLM; graph and hybrid modes and the RAGFlow removal are operator-gated.
   - v1.6 partial criteria: phase 58 criterion 2 (join with `docs_steering_session`), phase 59 criterion 5 (re-anchor send) and phase 61 criterion 3 (automatic checkpoint triggers). They are being closed in this run; phases 58, 59 and 61 stay unticked in ROADMAP until then.

@@ -784,7 +784,7 @@ Plans:
 
 **Goal**: Agents see other sessions' `.planning` state through the substrate, read-only and file-first: no session writes into another session's `.planning`, and every backing service is optional with a file-only fallback.
 
-**Status**: Complete. Merged to main as PR #104 (core, 2026-10-27; merged by squash because the branch history contains a reverted muse merge) and PR #134 (wiring, 2026-10-28). Draft PR #109 was closed and replaced.
+**Status**: Complete. Merged to main as PR #104 (core, 2026-10-27; a merge commit, 1dd01347, with two parents) and PR #134 (wiring, 2026-10-28). Draft PR #109 was closed and replaced.
 
 **Depends on**: Phase 50 (existing event bus and pub/sub hints), Phase 17 (frozen event vocabulary; no new event kinds)
 
