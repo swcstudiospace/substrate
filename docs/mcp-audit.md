@@ -284,8 +284,8 @@ The chain tip advances **only on a successful write**, for the same reason.
 
 | | Tools | Why |
 | --- | --- | --- |
-| **fail-open** | every read — `memory_brief`, `memory_search`, `memory_pending`, `events_query`, `events_verify`, `graph_get`, `coord_handoff_verify`, `coord_handoff_list`, `coord_drift_scan` — plus `events_emit`, and the `/brief`, `/events`, `/events/query`, `/verify`, `/drift`, `/evidence` routes | These sit inside a prompt's hook budget. The substrate is not allowed to fail an agent's turn, and an unwritable audit file is not a reason to start. The call still produces a record; it is just not a gate. |
-| **fail-closed** | `graph_claim`, `graph_release`, `graph_complete`, `graph_register`, `graph_heartbeat`, `graph_bind`, `memory_write`, `coord_handoff`, `coord_reap_leases`, `desktop_run` | Everything that grants or transfers exclusive ownership of a node, or writes shared state another agent will act on. A claim nobody recorded is how two agents end up holding one node, and the whole point of `graph_claim` is that they cannot. |
+| **fail-open** | every read — `memory_brief`, `memory_search`, `memory_pending`, `events_query`, `events_verify`, `graph_get`, `coord_handoff_verify`, `coord_handoff_list`, `coord_drift_scan`, `checkpoint_verify`, `memory_verify`, `session_rollback_plan` — plus `events_emit` and `session_checkpoint`, and the `/brief`, `/events`, `/events/query`, `/verify`, `/drift`, `/evidence` routes | These sit inside a prompt's hook budget. The substrate is not allowed to fail an agent's turn, and an unwritable audit file is not a reason to start. The call still produces a record; it is just not a gate. |
+| **fail-closed** | `graph_claim`, `graph_release`, `graph_complete`, `graph_register`, `graph_heartbeat`, `graph_bind`, `memory_write`, `coord_handoff`, `coord_reap_leases`, `desktop_run`, `session_rollback_commit` | Everything that grants or transfers exclusive ownership of a node, or writes shared state another agent will act on. A claim nobody recorded is how two agents end up holding one node, and the whole point of `graph_claim` is that they cannot. |
 
 ### Planned in v1.3
 
@@ -306,6 +306,11 @@ lives in [event-vocabulary.md](event-vocabulary.md).
 | `issue_get` (23) | fail-open | A read of untrusted tracker text. |
 | `graph_find` (23) | fail-open | A read of the index. |
 | `memory_recall` (26) | fail-open | A read like `memory_search`. |
+| `checkpoint_verify` (v1.6 phase 59, **landed**) | fail-open | Reads the ledger and devnet to say whether a `session.checkpoint` sits inside an anchored hourly root; sends no transaction and writes nothing, like `events_verify`. |
+| `memory_verify` (v1.6 phase 60, **landed**) | fail-open | Rehashes one memory entry the caller may read and checks that the ledger event its write rested on is anchored; a read, like `memory_search`. |
+| `session_checkpoint` (v1.6 phase 61, **landed**) | fail-open | Appends one `session.checkpoint` note as the caller's surface, the nearest write to `events_emit`: the client journals a checkpoint the server did not record and offers it again, so an unwritable audit file must not fail the agent's turn over it. Admission class `write`. |
+| `session_rollback_plan` (v1.6 phase 61, **landed**) | fail-open | A read: the target checkpoint, the anchor verdict and the memory a rollback would forget; writes and forgets nothing. Admission class `read`. |
+| `session_rollback_commit` (v1.6 phase 61, **landed**) | fail-closed | Takes memory every agent reads out of force (`memory.forget`, reason `rollback`), deletes its Hindsight documents and appends the `session.rollback` note: shared state other agents act on, the nearest write to `memory_write`, so an unrecorded commit is refused and the client keeps it in its pending journal. Admission class `write`. |
 | `agent_card` (29) | fail-open | The Agent Card REST route is a read, audited under this name. |
 
 **An unknown tool is fail-closed.** Deny by default, like `assertAppendOnly` in the

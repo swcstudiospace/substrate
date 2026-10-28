@@ -173,6 +173,20 @@ function assertConfig(config: CheckpointVerifyConfig, nowMs: number): void {
 	if (!Number.isFinite(nowMs)) throw new CheckpointVerifyError("invalid-config", "nowMs must be a finite number");
 }
 
+/** What the anchor check decides about one event: the part `verifyCheckpoint` and `verifyEventAnchor` share. */
+interface AnchorVerdict {
+	status: CheckpointVerifyStatus;
+	hour_start: string | null;
+	evidence: CheckpointEvidence;
+	reasons: string[];
+}
+
+/** The verdict for any ledger event (not only a checkpoint): `memory_verify` anchors an entry's `source_event` through it. */
+export interface EventAnchorResult extends AnchorVerdict {
+	ref: string;
+	event: Pick<SubstrateEvent, "id" | "ts" | "kind" | "session_id">;
+}
+
 /**
  * Verify one checkpoint against the anchored hourly roots. Throws `CheckpointVerifyError` for a bad
  * ref, a bad config, an unknown event or an event that is not a checkpoint; every other outcome is a
@@ -180,11 +194,8 @@ function assertConfig(config: CheckpointVerifyConfig, nowMs: number): void {
  * and never `mismatch`.
  */
 export async function verifyCheckpoint(deps: CheckpointVerifyDeps, ref: string): Promise<CheckpointVerifyResult> {
-	const { config, nowMs } = deps;
-	assertConfig(config, nowMs);
-	if (typeof ref !== "string" || !OPAQUE_ID_RE.test(ref)) {
-		throw new CheckpointVerifyError("invalid-ref", "ref must be a checkpoint id (ckpt_...) or an event id of 1..128 characters from [A-Za-z0-9._:-]");
-	}
+	assertConfig(deps.config, deps.nowMs);
+	assertRef(ref);
 	const found = await deps.findEvent(ref);
 	if (found === null) throw new CheckpointVerifyError("not-found", `no event or checkpoint matches ${ref}`);
 	const { event, ingested_at_ms } = found;
@@ -200,7 +211,53 @@ export async function verifyCheckpoint(deps: CheckpointVerifyDeps, ref: string):
 	if (CKPT_ID_RE.test(ref) ? payload.ckpt_id !== ref : event.id !== ref) {
 		throw new CheckpointVerifyError("ref-mismatch", `the reader returned event ${event.id} (${payload.ckpt_id}) for ref ${ref}`);
 	}
+	const verdict = await verifyAnchoredEvent(deps, event, ingested_at_ms);
+	return {
+		status: verdict.status,
+		ref,
+		checkpoint: {
+			ckpt_id: payload.ckpt_id,
+			seq: payload.seq,
+			trigger: payload.trigger,
+			git_tree: payload.git_tree,
+			manifest_sha256: payload.manifest_sha256,
+			event_id: event.id,
+			session_id: event.session_id,
+		},
+		hour_start: verdict.hour_start,
+		evidence: verdict.evidence,
+		reasons: verdict.reasons,
+	};
+}
 
+/**
+ * Verify that one ledger event, by event id, sits inside an anchored hourly root. The same statuses and
+ * the same errors as `verifyCheckpoint` (bad ref, bad config, unknown event, a reader that returned a
+ * different event), except that any event kind is accepted. It proves the event is in the ledger and
+ * anchored; it says nothing about what the event is about.
+ */
+export async function verifyEventAnchor(deps: CheckpointVerifyDeps, eventRef: string): Promise<EventAnchorResult> {
+	assertConfig(deps.config, deps.nowMs);
+	assertRef(eventRef);
+	const found = await deps.findEvent(eventRef);
+	if (found === null) throw new CheckpointVerifyError("not-found", `no event matches ${eventRef}`);
+	const { event, ingested_at_ms } = found;
+	if (event.id !== eventRef) {
+		throw new CheckpointVerifyError("ref-mismatch", `the reader returned event ${event.id} for ref ${eventRef}`);
+	}
+	const verdict = await verifyAnchoredEvent(deps, event, ingested_at_ms);
+	return { ...verdict, ref: eventRef, event: { id: event.id, ts: event.ts, kind: event.kind, session_id: event.session_id } };
+}
+
+function assertRef(ref: unknown): asserts ref is string {
+	if (typeof ref !== "string" || !OPAQUE_ID_RE.test(ref)) {
+		throw new CheckpointVerifyError("invalid-ref", "ref must be a checkpoint id (ckpt_...) or an event id of 1..128 characters from [A-Za-z0-9._:-]");
+	}
+}
+
+/** The proof, anchors-row and chain checks for one stored event. The config and ref are already validated. */
+async function verifyAnchoredEvent(deps: CheckpointVerifyDeps, event: SubstrateEvent, ingested_at_ms: number | null): Promise<AnchorVerdict> {
+	const { config, nowMs } = deps;
 	const hour = ingested_at_ms === null || !Number.isFinite(ingested_at_ms) ? null : hourStart(ingested_at_ms);
 	const evidence: CheckpointEvidence = {
 		event_hash: event.hash,
@@ -215,18 +272,8 @@ export async function verifyCheckpoint(deps: CheckpointVerifyDeps, ref: string):
 		block_time_ms: null,
 		finality: null,
 	};
-	const result = (status: CheckpointVerifyStatus, reasons: string[]): CheckpointVerifyResult => ({
+	const result = (status: CheckpointVerifyStatus, reasons: string[]): AnchorVerdict => ({
 		status,
-		ref,
-		checkpoint: {
-			ckpt_id: payload.ckpt_id,
-			seq: payload.seq,
-			trigger: payload.trigger,
-			git_tree: payload.git_tree,
-			manifest_sha256: payload.manifest_sha256,
-			event_id: event.id,
-			session_id: event.session_id,
-		},
 		hour_start: hour === null ? null : hourIso(hour),
 		evidence,
 		reasons,

@@ -67,8 +67,11 @@ import {
 	type ReleaseDecision,
 } from "./lease.ts";
 import { redact } from "./redact.ts";
-import { isForgetMarker, MAX_FORGET_ENTRIES, MAX_ROLLBACK_SELECT_LIMIT } from "./memory-forget.ts";
+import { FORGET_MARKER_PREFIX, isForgetMarker, MAX_FORGET_ENTRIES, MAX_ROLLBACK_SELECT_LIMIT } from "./memory-forget.ts";
 import { transition, type SkillDecision, type SkillDecisionResult, type SkillRegistryRow, type SkillState } from "./skills/registry.ts";
+
+/** The most entry ids one `forgottenEntryIds` call reads (a recall fan-out holds a few hits per bank). */
+const MAX_FORGET_LOOKUP_IDS = 500;
 
 /**
  * Statuses that mean a graph is finished, so it is no longer "open" in a brief.
@@ -1801,12 +1804,20 @@ export class IndexStore implements MemoryStore {
 	 * precision of an event `ts`), so a tie keeps the entry: one written in the same millisecond as the rollback point
 	 * is not selected. `session` and `graphId` go through `normalizeIdentifier`, the form the gate stores them in.
 	 * There is no index on `session_id`; the scan is bounded by the session's own rows being few, and the limit.
+	 *
+	 * `untilIso`, when not null, is an INCLUSIVE upper bound (whole milliseconds): an entry created after it belongs to
+	 * the timeline the session began once the rollback started, so a rollback delivered late never reaches it. Null
+	 * means no upper bound. It must not be before `afterIso`.
+	 *
+	 * `writer`, when not null, keeps only that surface's entries, in the query and so ahead of the limit.
 	 */
 	async memoryEntriesCreatedAfter(
 		session: string,
 		afterIso: string,
 		graphId: string | null = null,
 		limit = 1000,
+		untilIso: string | null = null,
+		writer: string | null = null,
 	): Promise<{ entries: MemoryEntry[]; truncated: boolean }> {
 		const sessionId = normalizeIdentifier(session);
 		if (sessionId === null) throw new Error("memoryEntriesCreatedAfter: session is required");
@@ -1818,13 +1829,22 @@ export class IndexStore implements MemoryStore {
 			throw new Error(`memoryEntriesCreatedAfter: limit must be an integer from 1 to ${MAX_ROLLBACK_SELECT_LIMIT}`);
 		}
 		const after = new Date(afterMs).toISOString();
+		let until: string | null = null;
+		if (untilIso !== null) {
+			const untilMs = Date.parse(untilIso);
+			if (Number.isNaN(untilMs)) throw new Error(`memoryEntriesCreatedAfter: "${untilIso.slice(0, 40)}" is not an instant`);
+			if (untilMs < afterMs) throw new Error("memoryEntriesCreatedAfter: the upper bound is before the lower bound");
+			until = new Date(untilMs).toISOString();
+		}
 		return this.plane("memory.forget.select", async () => {
 			const rows = (await this.sql`
 				select * from memory_entries
 				where session_id = ${sessionId}
 				  ${graph === null ? this.sql`` : this.sql`and graph_id = ${graph}`}
+				  ${writer === null ? this.sql`` : this.sql`and writer = ${writer}`}
 				  and superseded_by is null
 				  and date_trunc('milliseconds', created) > ${after}::timestamptz
+				  ${until === null ? this.sql`` : this.sql`and date_trunc('milliseconds', created) <= ${until}::timestamptz`}
 				order by created asc, id asc
 				limit ${limit + 1}`) as Array<Record<string, unknown>>;
 			return { entries: rows.slice(0, limit).map((row) => toMemoryEntry(row)), truncated: rows.length > limit };
@@ -1833,20 +1853,40 @@ export class IndexStore implements MemoryStore {
 
 	/**
 	 * True when ANOTHER entry in force shares this entry's plane document. A subject-addressed entry's document id is
-	 * derived from (scope, kind, subject) (`retainDocumentId`), so every live entry with that triple writes to one
-	 * document; deleting it for a forgotten entry would remove memory that is still in force. A subject-less entry has
-	 * a document of its own and is never shared. The `documentShared` dependency of `forgetEntries`.
+	 * derived from (scope, kind, subject) (`retainDocumentId`) and lives in its WRITER's bank (`bankForSurface`), so
+	 * every live entry of the same writer with that triple writes to one document; deleting it for a forgotten entry
+	 * would remove memory that is still in force. A live entry of another writer has its own document in its own
+	 * bank and does not share this one. A subject-less entry has a document of its own and is never shared. The
+	 * `documentShared` dependency of `forgetEntries`; the service asks it inside the document's retain queue.
 	 */
-	async memoryDocumentShared(entry: Pick<MemoryEntry, "id" | "scope" | "kind" | "subject">): Promise<boolean> {
+	async memoryDocumentShared(entry: Pick<MemoryEntry, "id" | "scope" | "kind" | "subject" | "writer">): Promise<boolean> {
 		const subject = entry.subject;
 		if (subject === undefined || subject.length === 0) return false;
 		return this.plane("memory.forget.shared", async () => {
 			const rows = (await this.sql`
 				select 1 as shared from memory_entries
-				where scope = ${entry.scope} and kind = ${entry.kind} and subject = ${subject}
+				where scope = ${entry.scope} and kind = ${entry.kind} and subject = ${subject} and writer = ${entry.writer}
 				  and id <> ${entry.id} and superseded_by is null
 				limit 1`) as Array<Record<string, unknown>>;
 			return rows.length > 0;
+		});
+	}
+
+	/**
+	 * Which of these entry ids are forgotten (their `superseded_by` is a forget marker). The recall leg uses it to drop
+	 * a Hindsight hit whose document outlived the forget (a pending plane deletion): the text of a forgotten entry
+	 * must not be served from the plane while its deletion is retried. An id with no row, or one that is current or
+	 * really superseded, is not in the answer. At most {@link MAX_FORGET_LOOKUP_IDS} ids are read.
+	 */
+	async forgottenEntryIds(ids: readonly string[]): Promise<Set<string>> {
+		const distinct = [...new Set(ids)];
+		if (distinct.length === 0) return new Set();
+		if (distinct.length > MAX_FORGET_LOOKUP_IDS) throw new Error(`forgottenEntryIds: ${distinct.length} ids exceeds the ${MAX_FORGET_LOOKUP_IDS}-id bound`);
+		return this.plane("memory.forget.lookup", async () => {
+			const rows = (await this.sql`
+				select id from memory_entries
+				where id in ${this.sql(distinct)} and superseded_by like ${`${FORGET_MARKER_PREFIX}%`}`) as Array<Record<string, unknown>>;
+			return new Set(rows.map((row) => String(row.id)));
 		});
 	}
 

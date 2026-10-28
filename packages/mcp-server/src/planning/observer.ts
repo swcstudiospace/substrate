@@ -36,7 +36,7 @@
  * so the same change is published on the next scan. The index cache is separate: it always holds the latest scan.
  */
 import type { EventInput } from "../types.ts";
-import { branchOf, gitLayout, planningSessionId, repoOf, type RepoLookup } from "./checkout.ts";
+import { branchOf, gitLayout, planningSessionId, repoOf, type OriginUrlRunner, type RepoLookup } from "./checkout.ts";
 import { conflictEvent, conflictOriginMs, conflictSignature, detectConflicts, repoKey } from "./conflicts.ts";
 import type { PlanningConfigResult } from "./config.ts";
 import { diffPlanningIndex, type PlanningDiff, type PlanningSnapshot } from "./diff.ts";
@@ -105,6 +105,8 @@ export interface PlanningObserverDeps {
 	timers?: PlanningTimers;
 	/** Where a failure is reported. Omitted in production, where it goes to stderr; a test injects one to read the lines. */
 	report?: (line: string) => void;
+	/** How the checkout's origin URL is asked of git. Omitted in production, where it is `git config --get remote.origin.url`. */
+	originUrl?: OriginUrlRunner;
 }
 
 /** The phase and plan of one described document. `plan` is null when the document names none. */
@@ -219,7 +221,7 @@ export class PlanningObserver {
 		const clock = this.deps.presence === null ? null : await readClock(this.deps.presence);
 		const nowMs = clock !== null && clock.ok ? clock.nowMs : null;
 		const gapMoved = nowMs !== null ? this.stampReport(built, nowMs) : this.withdrawReport();
-		const repo = await repoOf(this.deps.fs, root);
+		const repo = await repoOf(this.deps.fs, root, this.deps.originUrl);
 		if (!built.ok) {
 			await this.heartbeat(root, false, ttlMs, repo, nowMs);
 			return { state: "unavailable", code: built.code };

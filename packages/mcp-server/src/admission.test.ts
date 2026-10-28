@@ -379,6 +379,18 @@ describe("the class tables are exhaustive over what the server serves", () => {
 		expect({ approve: routeClass("POST", "/skills/approve"), list: routeClass("GET", "/skills") }).toEqual({ approve: "write", list: "read" });
 	});
 
+	test("the anchor verification tools are reads: they read the ledger and devnet and write nothing", () => {
+		expect({ checkpoint: toolClass("checkpoint_verify"), memory: toolClass("memory_verify") }).toEqual({ checkpoint: "read", memory: "read" });
+	});
+
+	test("the session rollback tools: the plan is a read, the checkpoint and the commit are writes", () => {
+		expect({ plan: toolClass("session_rollback_plan"), checkpoint: toolClass("session_checkpoint"), commit: toolClass("session_rollback_commit") }).toEqual({
+			plan: "read",
+			checkpoint: "write",
+			commit: "write",
+		});
+	});
+
 	test("an unknown route or tool is a read; monitor GETs and /mcp are not metered here; a POST to a monitor path is", () => {
 		expect(DEFAULT_CLASS).toBe("read");
 		expect(routeClass("POST", "/not-a-route")).toBe("read");

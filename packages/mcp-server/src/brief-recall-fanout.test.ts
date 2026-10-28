@@ -367,6 +367,62 @@ describe("brief recall fan-out (SUBSTRATE_BRIEF_RECALL=enforce)", () => {
 	});
 });
 
+describe("brief recall fan-out and forgotten entries", () => {
+	const named = (id: string, text: string, entry: string | null, score: number) => ({
+		id,
+		text,
+		document_id: `${id}-doc`,
+		tags: [],
+		metadata: { scope: `repo:${REPO}`, ...(entry !== null ? { entry_id: entry } : {}) },
+		score,
+	});
+	const seed = (fake: HindsightFake): void => {
+		fake.seed(OWN_BANK, [named("live", "use pnpm, not npm", "mem_live", 0.9), named("gone", "a forgotten lesson", "mem_gone", 0.8), named("plain", "a lesson with no entry", null, 0.7)]);
+	};
+
+	test("a forgotten entry's hit is dropped before the bank's answer settles, so neither the answer nor onAnswer holds it", async () => {
+		await withHindsight(async () => {
+			const fake = new HindsightFake();
+			seed(fake);
+			const config = hindsightFromEnv();
+			if (config === null) throw new Error("the Hindsight env is not set");
+			const seen: string[] = [];
+			let unchecked = 0;
+			const answer = await fanOutBriefRecall({ config, banks: [OWN_BANK], fetchImpl: fake.fetch, budgetMs: 1500 }, buildRecallQuery(REPO, []), { surface: REQUEST.surface, repo: REPO }, {
+				forgotten: async (ids) => new Set(ids.filter((id) => id === "mem_gone")),
+				onAnswer: (bankAnswer) => seen.push(...bankAnswer.hits.map((hit) => hit.text)),
+				onUnchecked: () => {
+					unchecked++;
+				},
+			});
+			expect(answer.hits.map((hit) => hit.text).sort()).toEqual(["a lesson with no entry", "use pnpm, not npm"]);
+			expect(seen.sort()).toEqual(["a lesson with no entry", "use pnpm, not npm"]);
+			expect(unchecked).toBe(0);
+		});
+	});
+
+	test("a check that fails withholds every hit that names an entry, keeps the others, and says it was unchecked", async () => {
+		await withHindsight(async () => {
+			const fake = new HindsightFake();
+			seed(fake);
+			const config = hindsightFromEnv();
+			if (config === null) throw new Error("the Hindsight env is not set");
+			let unchecked = 0;
+			const answer = await fanOutBriefRecall({ config, banks: [OWN_BANK], fetchImpl: fake.fetch, budgetMs: 1500 }, buildRecallQuery(REPO, []), { surface: REQUEST.surface, repo: REPO }, {
+				forgotten: async () => {
+					throw new Error("index unreachable");
+				},
+				onUnchecked: () => {
+					unchecked++;
+				},
+			});
+			expect(answer.answered).toEqual([OWN_BANK]);
+			expect(answer.hits.map((hit) => hit.text)).toEqual(["a lesson with no entry"]);
+			expect(unchecked).toBe(1);
+		});
+	});
+});
+
 describe("brief recall fan-out is off the text for off and shadow", () => {
 	test("off and shadow serve today's text, and neither calls a bank for the fan-out", async () => {
 		await withHindsight(async () => {
