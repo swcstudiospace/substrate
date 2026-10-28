@@ -22,6 +22,7 @@ import type { MetricHistoryPoint } from "./greptime.ts";
 import {
 	ALL_METRIC_SERIES,
 	DROPPED_METRIC,
+	EVENT_METRIC_SERIES,
 	EXTENDED_METRIC_SERIES,
 	MAX_METRIC_BATCH,
 	MAX_METRIC_POINTS,
@@ -119,6 +120,17 @@ describe("the series allow-list", () => {
 		expect(names.length).toBeGreaterThanOrEqual(10);
 		expect(names.length).toBeLessThanOrEqual(14);
 		for (const name of names) expect(name).toMatch(/^[a-z0-9_.]+$/);
+	});
+
+	test("planning.transition is a core series with one closed outcome label: its two outcomes are stored, and any other name or label is refused", () => {
+		expect(Object.hasOwn(METRIC_SERIES, "planning.transition")).toBe(true);
+		expect(Object.hasOwn(metricSeriesFor("core"), "planning.transition")).toBe(true);
+		expect(canonicalLabels("planning.transition", { outcome: "applied" })).toBe('{"outcome":"applied"}');
+		expect(canonicalLabels("planning.transition", { outcome: "refused" })).toBe('{"outcome":"refused"}');
+		expect(canonicalLabels("planning.transition", { outcome: "dropped" })).toBeNull();
+		expect(canonicalLabels("planning.transition", { surface: "grok-bot" })).toBeNull();
+		expect(canonicalLabels("planning.transition", {})).toBeNull();
+		expect(canonicalLabels("planning.unlisted", { outcome: "applied" })).toBeNull();
 	});
 
 	test("canonicalLabels takes only the series' own label with a value from its closed set", () => {
@@ -957,8 +969,9 @@ describe("the extended series (uplift-5 S6)", () => {
 	const core = Object.keys(METRIC_SERIES);
 	const extra = Object.keys(EXTENDED_METRIC_SERIES);
 
-	test("the allow-list is two tiers: core is exactly today's 11, extended adds distinct closed series, and the mode picks one", () => {
-		expect(core).toHaveLength(11);
+	test("the allow-list is two tiers: core is today's 11 plus the event-written planning.transition, extended adds distinct closed series, and the mode picks one", () => {
+		expect(core).toHaveLength(12);
+		expect(core).toContain("planning.transition");
 		expect(extra.length).toBeGreaterThan(0);
 		expect(extra.filter((name) => core.includes(name))).toEqual([]);
 		expect(Object.keys(ALL_METRIC_SERIES)).toEqual([...core, ...extra]);
@@ -1156,7 +1169,8 @@ describe("the extended series (uplift-5 S6)", () => {
 
 	test("the worst case is under the batch cap: every label of every series active in one tick is the sum of the specs, and the real collector emits exactly that many rows", () => {
 		// What the specs allow: one row per label value (or one row) per series.
-		const bound = Object.values(ALL_METRIC_SERIES).reduce((total, spec) => total + (spec.values?.size ?? 1), 0);
+		const sampled = Object.entries(ALL_METRIC_SERIES).filter(([name]) => !Object.hasOwn(EVENT_METRIC_SERIES, name));
+		const bound = sampled.reduce((total, [, spec]) => total + (spec.values?.size ?? 1), 0);
 		expect(bound).toBeLessThan(MAX_METRIC_BATCH);
 
 		const instruments = new SubstrateInstruments();
@@ -1181,7 +1195,8 @@ describe("the extended series (uplift-5 S6)", () => {
 		expect(rows).toHaveLength(bound);
 		expect(rows.length).toBeLessThan(MAX_METRIC_BATCH);
 		// Core alone is the same exercise with the extended rows left out.
-		expect(Object.values(METRIC_SERIES).reduce((total, spec) => total + (spec.values?.size ?? 1), 0)).toBe(rows.filter((row) => Object.hasOwn(METRIC_SERIES, row.series)).length);
+		const sampledCore = Object.entries(METRIC_SERIES).filter(([name]) => !Object.hasOwn(EVENT_METRIC_SERIES, name));
+		expect(sampledCore.reduce((total, [, spec]) => total + (spec.values?.size ?? 1), 0)).toBe(rows.filter((row) => Object.hasOwn(METRIC_SERIES, row.series)).length);
 	});
 
 	test("the ledger-side label check knows the extended series: its closed label is kept and a foreign one is not", () => {

@@ -176,6 +176,7 @@ import { DragonflyPresenceStore } from "./planning/presence-dragonfly.ts";
 import { PlanningObserver, type PlanningObserverDeps, type PlanningTimers } from "./planning/observer.ts";
 import { FileBaselineStore } from "./planning/baseline-store.ts";
 import { PlanningReader } from "./planning/read.ts";
+import { greptimeMetricSink, stdoutMetricSink } from "./planning/telemetry.ts";
 import { completionStoreView, type CompletionStoreView } from "./planning/checkpoint-store.ts";
 import type { SteeringWiring } from "./planning/steering-tools.ts";
 import { SteeringInbox, type SteeringHistorySink } from "./planning/steering.ts";
@@ -1553,12 +1554,22 @@ export class Substrate {
 		if (baselineProblems.length + livenessProblems.length > 0) {
 			process.stderr.write(`[substrate] planning settings invalid; using the defaults for: ${[...baselineProblems, ...livenessProblems].map((error) => error.key).join(", ")}\n`);
 		}
+		// Phase 54 (SOTA-10): a planning transition is a metric row only when the metrics-history switch is on (the ledger's
+		// writer then stores it). Otherwise it goes to stdout alone, so the documented off switch writes no metric_samples row.
+		const transitionWriter = this.greptime;
 		this.planningObserver = new PlanningObserver({
 			settings: config.planning,
 			fs: planningFs,
 			presence: planningPresence,
 			// A keyed conflict warning asks for the replay lookup, so under `accept` as under `enforce` any number of observers leave one row.
 			emit: planningDeps.emit ?? (async (event: EventInput) => (await this.emit(event, { replay: true })).stored),
+			metrics:
+				planningDeps.metrics ??
+				(config.metricsHistory.enabled && transitionWriter !== null
+					? greptimeMetricSink((rows) => transitionWriter.recordMetricSamples(rows, config.metricsHistory.ttl))
+					: stdoutMetricSink()),
+			fallback: planningDeps.fallback,
+			clock: planningDeps.clock,
 			dedup: planningDeps.dedup ?? config.eventIdempotency !== "off",
 			timers: planningDeps.timers,
 			report: planningDeps.report,

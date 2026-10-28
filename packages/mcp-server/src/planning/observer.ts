@@ -32,6 +32,12 @@
  * Scans never overlap: a tick that arrives during a scan shares that scan rather than starting another. A failure is reported
  * on stderr when it appears or changes, and once more when the scans succeed again. Shutdown waits for a scan in flight.
  *
+ * Transitions (phase 54): each scan that moves the plane's view from one session state to another writes one
+ * `planning.transition` record through `metrics`, with the stdout line as its fallback. The record is handed to its sinks
+ * without being awaited, so a slow metric write does not delay the scan. The scan is the write cadence: a transition is
+ * recorded where a scan detects it, and a read never records one. A baseline taken from the baseline store keeps no state, so
+ * the first change published against it is recorded as a move from the state that scan saw to itself.
+ *
  * The baseline is the ledger's view of the checkout: what it was last told. A failed publish holds it, so the same change is
  * published on the next scan. With a baseline store (`baseline-store.ts`) the observer takes the stored baseline on its first
  * scan and saves the baseline in the background after a change (throttled, retried while a save fails, never on a scan's
@@ -48,16 +54,21 @@ import { BaselineStoreError, type BaselineLoad, type BaselineStore, type StoredB
 import { branchOf, gitLayout, planningSessionId, repoOf, type OriginUrlRunner, type RepoLookup } from "./checkout.ts";
 import { conflictEvent, conflictOriginMs, conflictSignature, detectConflicts, repoKey } from "./conflicts.ts";
 import type { PlanningConfigError, PlanningConfigResult } from "./config.ts";
-import { diffPlanningIndex, type PlanningDiff, type PlanningSnapshot } from "./diff.ts";
+import { diffPlanningIndex, type PathChange, type PlanningDiff, type PlanningSnapshot } from "./diff.ts";
 import { observePlanningChange } from "./events.ts";
 import { buildPlanningIndex, errnoCode, indexRecords, isErrorRecord, snapshotOf, updatePlanningIndex, type PlanningFs, type PlanningIndex, type PlanningIndexFailure, type PlanningIndexResult } from "./index.ts";
 import { DragonflyPresenceStore, PRESENCE_MAX_SESSIONS } from "./presence-dragonfly.ts";
 import { classifySessions, MAX_REPORT_ENTRIES, REPORT_ID_MAX, touchedWithin, type PlanningReport, type SessionRecord, type TouchedPair } from "./presence.ts";
 import { observeScan, planIdentity, unknownReport, type WatcherGap } from "./report.ts";
 import { readClock, resolveSettings } from "./read.ts";
+import type { SessionState } from "./states.ts";
+import { emitTransition, stdoutMetricSink, transitionRecord, type MetricSink, type TransitionClock, type TransitionOutcome, type TransitionRecord } from "./telemetry.ts";
 
 /** The session id the ledger row carries for a change observed by this plane. */
 export const PLANNING_OBSERVER_SESSION = "planning-observer";
+
+/** The phase id a planning transition is recorded under: the planning plane's view, which spans every phase document. */
+export const PLANNING_TRANSITION_PHASE = "planning";
 
 /** The handle a scan timer returns. Opaque to the observer: it is only passed back to `clearInterval`. */
 export type PlanningTimerHandle = unknown;
@@ -76,6 +87,9 @@ const GLOBAL_TIMERS: PlanningTimers = {
 	},
 	clearInterval: (timer) => clearInterval(timer as ReturnType<typeof setInterval>),
 };
+
+/** Most transition deliveries in flight at once. Past it a record goes straight to the stdout fallback, so the set stays bounded. */
+export const MAX_PENDING_TRANSITIONS = 64;
 
 /** Where a failure is reported in production: stderr, as the server's other background notes are. */
 const STDERR_REPORT = (line: string): void => {
@@ -113,6 +127,12 @@ export interface PlanningObserverDeps {
 	presence: DragonflyPresenceStore | null;
 	/** The ledger ingest (`Substrate.emit`). Resolves true when the event was stored. */
 	emit: (event: EventInput) => Promise<boolean>;
+	/** The primary sink for `planning.transition` records: the metrics writer when the ledger is configured, else stdout. */
+	metrics: MetricSink;
+	/** Written once when `metrics` does not deliver. Default: one JSON line on stdout. */
+	fallback?: MetricSink;
+	/** The record's clock. Default: the host clock, which stamps a record and classifies nothing. */
+	clock?: TransitionClock;
 	/**
 	 * True when the ledger deduplicates a keyed event (`SUBSTRATE_EVENT_IDEMPOTENCY` is `accept` or `enforce`, and `emit` asks for
 	 * the lookup). Every observer then announces each conflict under its deterministic key; otherwise the smallest session alone does.
@@ -169,10 +189,16 @@ type PhasePlan = Pick<TouchedPair, "phase" | "plan">;
 export class PlanningObserver {
 	/** The index of the latest scan, which the next scan updates. Holds whatever the last scan found, even when a publish failed. */
 	private index: { root: string; index: PlanningIndex } | null = null;
-	/** The latest scan's snapshot. A heartbeat reports the change since it, so it moves with every scan. */
-	private lastScan: { root: string; snapshot: PlanningSnapshot } | null = null;
+	/** The latest scan's snapshot and state. A heartbeat reports the change since it, so it moves with every scan. */
+	private lastScan: { root: string; snapshot: PlanningSnapshot; state: SessionState } | null = null;
 	/** The publish baseline: what the ledger has been told. It holds when a publish fails, so the change is retried. */
-	private baseline: { root: string; snapshot: PlanningSnapshot } | null = null;
+	private baseline: StoredBaseline | null = null;
+	/** The session state the plane was in when `baseline` was taken. Null for a baseline restored from the store, which keeps no state. */
+	private baselineState: SessionState | null = null;
+	/** The identity of the held change whose transition is already recorded, so a later scan of that change records nothing. */
+	private recordedHold: string | null = null;
+	/** Scheduled transition deliveries not yet settled. */
+	private readonly pendingTransitions = new Set<Promise<void>>();
 	/**
 	 * The last complete snapshot whose change was claimed: a touched pair is taken against it. It moves on a claim and on a
 	 * complete scan with no change. It holds on an incomplete scan and while the clock is unreadable, so a change observed then
@@ -297,6 +323,23 @@ export class PlanningObserver {
 		return run;
 	}
 
+	/**
+	 * Waits for the scan in flight, then for the transition deliveries in flight, up to `deadline`: resolves `settled` when neither is
+	 * left, or `deadline` when the bound came first. Never rejects. Shutdown passes its timer as the bound. A scan running when this is
+	 * called cannot schedule a transition after the settle returns, because the settle waits for that scan first. A scan never waits
+	 * on this. Without a bound it waits for everything.
+	 */
+	async settleTransitions(deadline: Promise<void> = Promise.withResolvers<void>().promise): Promise<"settled" | "deadline"> {
+		const flushed = (async (): Promise<"settled"> => {
+			for (;;) {
+				if (this.running !== null) await this.running;
+				if (this.pendingTransitions.size === 0) return "settled";
+				await Promise.all([...this.pendingTransitions]);
+			}
+		})();
+		return Promise.race([flushed, deadline.then((): "deadline" => "deadline")]);
+	}
+
 	/** One timer tick: a scan (shared with one already in flight), then the report for its outcome. */
 	private async tick(): Promise<void> {
 		this.note(await this.scan());
@@ -320,6 +363,7 @@ export class PlanningObserver {
 		const fsDeps = { fs: this.deps.fs, limits: { maxFiles: limits.maxFiles, maxBytes: limits.maxBytes } };
 		const cached = this.index !== null && this.index.root === root ? this.index.index : null;
 		const built = cached === null ? await buildPlanningIndex(root, fsDeps) : await updatePlanningIndex(root, fsDeps, cached);
+
 		const clock = this.deps.presence === null ? null : await readClock(this.deps.presence);
 		const nowMs = clock !== null && clock.ok ? clock.nowMs : null;
 		const gapMoved = nowMs !== null ? this.stampReport(built, nowMs) : this.withdrawReport();
@@ -334,9 +378,12 @@ export class PlanningObserver {
 		this.liveTarget = { root, ttlMs, repo };
 
 		const next = snapshotOf(built.index);
+		const state = indexState(built.index);
 		// The change since the scan before: a heartbeat reports it, so a change is heartbeated once, in the scan that sees it.
 		const sinceLastScan = this.lastScan !== null && this.lastScan.root === root ? diffPlanningIndex(this.lastScan.snapshot, next) : null;
-		this.lastScan = { root, snapshot: next };
+		// The state the scan before saw. A revert and a held change record their move from there: the publish baseline's state lags while a change is held.
+		const observedBefore = this.lastScan !== null && this.lastScan.root === root ? this.lastScan.state : null;
+		this.lastScan = { root, snapshot: next, state };
 		this.claimTouches(root, next, phasePlansOf(built.index), nowMs, ttlMs);
 		// The overflow holds while the claims it could not keep are inside the freshness window of the change that overflowed.
 		if (nowMs !== null) {
@@ -346,7 +393,9 @@ export class PlanningObserver {
 		if (this.touchedOverflow && nowMs !== null) this.report = unknownReport(nowMs, "report-limit");
 
 		if (this.restoreTried !== root && (this.baseline === null || this.baseline.root !== root)) await this.restoreBaseline(root);
-		const previous = this.baseline !== null && this.baseline.root === root ? this.baseline.snapshot : null;
+		// Read after the restore, so a restored baseline is the one a transition moves from.
+		const current = this.baseline;
+		const previous = current !== null && current.root === root ? current.snapshot : null;
 		const diff = previous === null ? null : diffPlanningIndex(previous, next);
 		const changed = diff !== null && diff.complete && changesIn(diff) > 0;
 		let outcome: ObserverOutcome;
@@ -358,23 +407,88 @@ export class PlanningObserver {
 				sessionId: PLANNING_OBSERVER_SESSION,
 				publisher: { publish: this.deps.emit },
 			});
-			this.baseline = { root, snapshot: observed.baseline };
+			// A failed publish holds the baseline; every other outcome advances it. The transition follows the same rule.
+			const held = observed.outcome === "not-published";
+			const transition = observed.outcome === "published" ? "applied" : held ? "refused" : unpublishedOutcome(previous, diff);
+			this.settle(root, current, state, { snapshot: observed.baseline, next, diff, outcome: transition, held, observedBefore });
 			outcome = observed.outcome;
 		} else if (changed) {
 			// Without a repo nothing can be published. A complete change is reported once and ends here, unless the failure that
 			// hid the repo was transient: then the baseline holds, and the next scan sees the same change again.
-			if (!repo.transient) this.baseline = { root, snapshot: next };
+			if (!repo.transient) this.settle(root, current, state, { snapshot: next, next, diff, outcome: "refused", held: false, observedBefore });
 			outcome = "repo-unknown";
 		} else {
-			this.baseline = { root, snapshot: next };
+			this.settle(root, current, state, { snapshot: next, next, diff, outcome: unpublishedOutcome(previous, diff), held: false, observedBefore });
 			outcome = previous === null ? "baseline" : diff !== null && !diff.complete ? "incomplete" : "unchanged";
 		}
+		// The transition was scheduled, not awaited, and the baseline advanced in `settle` above: the baseline save below saves the
+		// advanced baseline, and nothing after it (heartbeat, liveness beat, announcement) waits on the metric write.
 		const sinceChange = sinceLastScan !== null && sinceLastScan.complete && changesIn(sinceLastScan) > 0;
 		const heartbeat = await this.heartbeat(root, sinceChange || gapMoved, ttlMs, repo, nowMs);
 		const liveness = await this.livenessBeat(root, heartbeat, ttlMs, repo, nowMs);
 		await this.announce(root, repo, ttlMs);
 		this.persistBaseline(root);
 		return liveness === undefined ? { state: "observed", outcome, heartbeat } : { state: "observed", outcome, heartbeat, liveness };
+	}
+
+	/**
+	 * Records the transition this scan made, if any, then moves the baseline. A held change keeps the baseline's state: its
+	 * transition is recorded once, on first detection, and a later scan of the same change records nothing. A baseline restored
+	 * from the store has no state, so a move from it is recorded as a move from this scan's own state.
+	 */
+	private settle(
+		root: string,
+		current: StoredBaseline | null,
+		state: SessionState,
+		change: { snapshot: PlanningSnapshot; next: PlanningSnapshot; diff: PlanningDiff | null; outcome: TransitionOutcome | null; held: boolean; observedBefore: SessionState | null },
+	): void {
+		const { diff, outcome } = change;
+		// The state the baseline was taken in; a restored baseline has none, so the move reads from this scan's own state.
+		const baselineState = this.baselineState ?? state;
+		const incomplete = diff !== null && !diff.complete;
+		const key = diff !== null && diff.removed !== null && outcome !== null ? changeKey({ added: diff.added, removed: diff.removed, changed: diff.changed }, change.next) : null;
+		if (change.held) {
+			if (outcome !== null && current !== null && key !== this.recordedHold) {
+				this.recordedHold = key;
+				this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: change.observedBefore ?? baselineState, to: state, outcome, incomplete }, this.deps.clock ?? hostClock));
+			}
+			if (current !== null) this.baseline = { root, snapshot: change.snapshot };
+			return;
+		}
+		const recorded = key !== null && key === this.recordedHold;
+		if (outcome !== null && current !== null && !recorded) {
+			this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: baselineState, to: state, outcome, incomplete }, this.deps.clock ?? hostClock));
+		} else if (current !== null && this.recordedHold !== null && diff !== null && diff.complete && changesIn(diff) === 0) {
+			// A revert: the held change is undone, so the baseline matches the checkout again and nothing is published. It is recorded
+			// once, as refused, because the reverted change never reached the ledger.
+			this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: change.observedBefore ?? baselineState, to: state, outcome: "refused" }, this.deps.clock ?? hostClock));
+		}
+		this.advance(root, change.snapshot, state);
+	}
+
+	/** Moves the baseline. A new baseline forgets a held change. */
+	private advance(root: string, snapshot: PlanningSnapshot, state: SessionState): void {
+		this.recordedHold = null;
+		this.baseline = { root, snapshot };
+		this.baselineState = state;
+	}
+
+	/**
+	 * Hands one `planning.transition` record to its sinks without waiting for them, so the scan never waits on the metric write.
+	 * The deliveries in flight are bounded by {@link MAX_PENDING_TRANSITIONS}: past the bound a record goes to the fallback alone,
+	 * so a stalled primary can neither grow the set nor lose a record. `emitTransition` never throws; a fallback that fails is
+	 * written to stderr.
+	 */
+	private schedule(record: TransitionRecord): void {
+		const fallback = this.deps.fallback ?? stdoutMetricSink();
+		const tracked = this.pendingTransitions.size < MAX_PENDING_TRANSITIONS;
+		const delivery: Promise<void> = emitTransition(record, tracked ? this.deps.metrics : fallback, fallback).then((delivered) => {
+			if (tracked) this.pendingTransitions.delete(delivery);
+			if (delivered.status === "failed") {
+				process.stderr.write(`[substrate] planning transition not delivered: ${delivered.primary.sink} ${delivered.primary.reason}, ${delivered.fallback.sink} ${delivered.fallback.reason}\n`);
+			}
+		});
+		if (tracked) this.pendingTransitions.add(delivery);
 	}
 
 	/**
@@ -621,7 +735,9 @@ export class PlanningObserver {
 			this.reporter("[substrate] planning observer: stored baseline names another checkout root; scanning as a first run");
 			return;
 		}
+		// The store keeps no state: a restored baseline has none, and the first move from it reads from the state that scan finds.
 		this.baseline = loaded.baseline;
+		this.baselineState = null;
 		this.savedBaseline = loaded.baseline;
 	}
 
@@ -741,6 +857,32 @@ function reportViewOf(report: PlanningReport | null): string {
 /** The number of paths a complete diff changes. A removal is counted only when the diff vouches for removals. */
 function changesIn(diff: PlanningDiff): number {
 	return diff.added.length + (diff.removed?.length ?? 0) + diff.changed.length;
+}
+
+/** The identity of a change: its paths and the hashes they now have. A held change detected again has the same identity. */
+function changeKey(diff: { added: PathChange[]; removed: PathChange[]; changed: PathChange[] }, after: PlanningSnapshot): string {
+	const hashes = new Map(after.records.map((record) => [record.path, record.sha256] as const));
+	const hashed = (changes: PathChange[]): [string, string | null][] => changes.map(({ path }) => [path, hashes.get(path) ?? null]);
+	return JSON.stringify({ added: hashed(diff.added), removed: diff.removed.map(({ path }) => path), changed: hashed(diff.changed) });
+}
+
+/** The transition outcome of a scan that published nothing: an incomplete diff that vouches for a change is refused; the rest record nothing. */
+function unpublishedOutcome(previous: PlanningSnapshot | null, diff: PlanningDiff | null): TransitionOutcome | null {
+	if (diff === null || diff.complete) return null;
+	const added = previous?.truncated === true ? 0 : diff.added.length;
+	return added + diff.changed.length > 0 ? "refused" : null;
+}
+
+/** The host clock. It stamps a transition record and classifies nothing. */
+const hostClock: TransitionClock = () => new Date();
+
+/**
+ * The state of a planning index for its transition record: DEGRADED when the view is partial (truncated, or a document could
+ * not be read), EMPTY with no document, SUCCESS otherwise.
+ */
+function indexState(index: PlanningIndex): SessionState {
+	if (index.truncated || Object.keys(index.errors).length > 0) return "DEGRADED";
+	return Object.keys(index.documents).length === 0 ? "EMPTY" : "SUCCESS";
 }
 
 /**

@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FABRIC_RESOURCES } from "../packages/mcp-server/src/fabric/types.ts";
 import { ALL_METRIC_SERIES, METRIC_SERIES, parseHistoryStep, parseHistoryWindow } from "../packages/mcp-server/src/metrics-history.ts";
+import { TRANSITION_SERIES } from "../packages/mcp-server/src/planning/telemetry.ts";
 import { DEFAULT_THRESHOLDS, docsSearchObjective, sloCatalogue, type SloTarget } from "../packages/observability/src/index.ts";
 import {
 	DATASOURCE_TYPE,
@@ -262,6 +263,12 @@ describe("the committed JSON is a valid Grafana dashboard", () => {
 	test("every series the code records is drawn somewhere, so a new series cannot ship without a panel", () => {
 		const drawn = new Set(dashboards.flatMap(([, dashboard]) => dashboard.panels.map(seriesOf)).filter((series): series is string => series !== null));
 		expect([...drawn].sort()).toEqual(Object.keys(ALL_METRIC_SERIES).sort());
+	});
+
+	test("the planning transition panel draws the planning.transition series the observer records", () => {
+		const panel = chartFor(parse(committed(), PLANES), TRANSITION_SERIES);
+		expect(panel.type).toBe("timeseries");
+		expect(seriesOf(panel)).toBe(TRANSITION_SERIES);
 	});
 
 	test("the window and step variables are values the route accepts, the default is among them, and no window outruns the default retention", () => {

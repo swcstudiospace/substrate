@@ -17,7 +17,7 @@
  * Off unless `SUBSTRATE_METRICS_HISTORY=on`. Off, nothing here runs: no timer, no
  * table, no instrument, and the route answers `{ enabled: false }`.
  *
- * The allow-list has two tiers (uplift-5 S6). `core` is the original 11 series
+ * The allow-list has two tiers (uplift-5 S6). `core` is the original 11 series plus `planning.transition` (phase 54),
  * and is what every deployment gets. `extended` (`SUBSTRATE_METRICS_HISTORY_SERIES`)
  * adds the evidence the promotion advisor reads and the data-plane dashboards
  * draw: cache results, brief profile bytes saved, brief recall results, recall
@@ -50,6 +50,7 @@ import {
 } from "@substrate/observability";
 import type { MetricsHistorySeriesMode, MetricsHistorySettings } from "./config.ts";
 import type { GreptimeClient, MetricHistoryPoint } from "./greptime.ts";
+import { TRANSITION_OUTCOMES } from "./planning/telemetry.ts";
 import { SURFACES } from "./types.ts";
 
 /** The counter a dropped batch is counted on, by closed reason. */
@@ -93,6 +94,7 @@ const SURFACE_VALUES: ReadonlySet<string> = new Set<string>([...SURFACES, "other
 const PLANE_VALUES: ReadonlySet<string> = new Set<string>(PLANES);
 const DECISION_VALUES: ReadonlySet<string> = new Set<string>(ADMISSION_DECISIONS);
 const OUTCOME_VALUES: ReadonlySet<string> = new Set<string>(DOCS_SEARCH_OUTCOMES);
+const TRANSITION_OUTCOME_VALUES: ReadonlySet<string> = new Set<string>(TRANSITION_OUTCOMES);
 
 /**
  * The core series: the only ones a default deployment samples and serves. A
@@ -112,7 +114,11 @@ export const METRIC_SERIES: Readonly<Record<string, SeriesSpec>> = {
 	"docs.search": { kind: "counter", label: "outcome", values: OUTCOME_VALUES, agg: "sum", unit: "{search}" },
 	"docs.p95": { kind: "histogram", label: null, values: null, agg: "max", unit: "ms" },
 	"capacity.runway_days": { kind: "gauge", label: null, values: null, agg: "avg", unit: "days" },
+	"planning.transition": { kind: "counter", label: "outcome", values: TRANSITION_OUTCOME_VALUES, agg: "sum", unit: "{transition}" },
 };
+
+/** Series a producer writes when the event happens, not from a registry sample. The sampler's rows and its bound leave them out. */
+export const EVENT_METRIC_SERIES: Readonly<Record<string, true>> = { "planning.transition": true };
 
 const CACHE_RESULT_VALUES: ReadonlySet<string> = new Set<string>(CACHE_METRIC_RESULTS);
 const RECALL_RESULT_VALUES: ReadonlySet<string> = new Set<string>(BRIEF_RECALL_RESULTS);
@@ -275,7 +281,7 @@ export class SampleCollector {
 	private primed = false;
 	private readonly tracked: ReadonlySet<string>;
 
-	/** `mode` is the series tier: `core` (the default) is exactly the original 11 series. */
+	/** `mode` is the series tier: `core` (the default) is the original 11 series and `planning.transition`. */
 	constructor(private readonly mode: MetricsHistorySeriesMode = "core") {
 		this.tracked = mode === "extended" ? EXTENDED_TRACKED : CORE_TRACKED;
 	}

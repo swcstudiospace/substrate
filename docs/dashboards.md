@@ -97,8 +97,9 @@ file only when its series is missing from the allow-list the generator is given.
 `SUBSTRATE_METRICS_HISTORY_SERIES=core|extended` (default `core`) picks the allow-list
 the sampler writes and `/slo/history` serves.
 
-- `core` is the original 11 series. With the variable unset, empty or `core`, the
-  sampler, the rows and the route answers are those of uplift-4 S6.
+- `core` is the original 11 series, and `planning.transition` (phase 54), written once per detected planning change rather than
+  sampled. With the variable unset, empty or `core`, the sampler and its rows are those of uplift-4 S6; the route also serves the
+  transition series, which is empty until a planning change is seen.
 - `extended` adds the evidence the promotion advisor reads. All are read from
   instruments that already exist; counters are the interval's delta (reset-safe),
   gauges are the reading at the sample.

@@ -2,6 +2,9 @@
  * The planning observer (phase 52, SOTA-08): the only writer of the planning plane. A scan publishes a complete change once,
  * with the sha256 before and after for each path, and heartbeats the checkout it saw change. A scan that sees no change
  * writes nothing. Each test runs on an in-memory tree and a recording presence backend.
+ *
+ * Phase 54: each scan that moves the plane's view from one session state to another records one `planning.transition`
+ * through the metric sink, with the stdout line as its fallback. The transition tests live here, with the scan that detects them.
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
@@ -18,8 +21,10 @@ import { classifySessions, type SessionRecord } from "./presence.ts";
 import { PlanningReader, type PlanningSessionsView } from "./read.ts";
 import {
 	DEFAULT_LIVENESS_INTERVAL_MS,
+	MAX_PENDING_TRANSITIONS,
 	PLANNING_LIVENESS_INTERVAL_ENV,
 	PLANNING_OBSERVER_SESSION,
+	PLANNING_TRANSITION_PHASE,
 	PlanningObserver,
 	livenessPeriodMs,
 	loadLivenessSettings,
@@ -28,6 +33,7 @@ import {
 } from "./observer.ts";
 import type { OriginUrlResult, OriginUrlRunner } from "./checkout.ts";
 import { DragonflyPresenceStore, PRESENCE_KEY_PREFIX, presenceRetentionS } from "./presence-dragonfly.ts";
+import { stdoutMetricSink, type MetricSink, type SinkResult, type TransitionRecord } from "./telemetry.ts";
 import type { PlanningFs } from "./index.ts";
 import { FakeTree, TREE_ROOT } from "./tree.fixtures.ts";
 
@@ -35,22 +41,51 @@ const PHASE = `${TREE_ROOT}/.planning/phases/52-planning-awareness-core`;
 const CONTEXT = ".planning/phases/52-planning-awareness-core/52-CONTEXT.md";
 const REPO = "swcstudiospace/agent-substrate";
 const BRANCH = "gsd/p52-wiring";
+const ORIGIN = '[remote "origin"]\n\turl = git@github.com:swcstudiospace/agent-substrate.git\n';
 const GIT: Record<string, string> = {
 	[`${TREE_ROOT}/.git/config`]: `[remote "origin"]\n\turl = git@github.com:${REPO}.git\n`,
 	[`${TREE_ROOT}/.git/HEAD`]: `ref: refs/heads/${BRANCH}\n`,
 };
+const BODY = "BODY-SECRET-TEXT";
+const FRONTMATTER_SECRET = "FM-SECRET-VALUE";
+const CLOCK = (): Date => new Date("2026-10-22T12:00:00.000Z");
 
 function sha256(text: string): string {
 	return createHash("sha256").update(text).digest("hex");
 }
 
+/** Two good phase documents and one with an unclosed frontmatter fence, over the given git files. */
+function seededTree(git: Record<string, string> = GIT): FakeTree {
+	return new FakeTree({
+		...git,
+		[`${PHASE}/52-PLAN.md`]: `---\nphase: "52"\nnote: ${FRONTMATTER_SECRET}\n---\n${BODY} plan\n`,
+		[`${PHASE}/52-CONTEXT.md`]: `${BODY} context\n`,
+		[`${PHASE}/BAD.md`]: `---\nphase: [unclosed\n${BODY} bad\n`,
+	});
+}
+
+/** A sink that keeps each record it is given and answers `result`. */
+function recordingSink(name: string, result: SinkResult = { ok: true }) {
+	const records: TransitionRecord[] = [];
+	const sink: MetricSink = {
+		name,
+		emit: async (record) => {
+			records.push(record);
+			return result;
+		},
+	};
+	return { sink, records };
+}
+
 function observerOver(
 	tree: FakeTree,
-	options: { presence?: DragonflyPresenceStore | null; accept?: () => boolean; originUrl?: OriginUrlRunner } = {},
-): { observer: PlanningObserver; events: EventInput[] } {
+	options: { presence?: DragonflyPresenceStore | null; accept?: () => boolean; env?: Record<string, string>; originUrl?: OriginUrlRunner; metrics?: MetricSink; fallback?: MetricSink } = {},
+): { observer: PlanningObserver; events: EventInput[]; transitions: TransitionRecord[]; fallbacks: TransitionRecord[] } {
 	const events: EventInput[] = [];
+	const metrics = recordingSink("greptime");
+	const fallback = recordingSink("stdout");
 	const observer = new PlanningObserver({
-		settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+		settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT, ...options.env }),
 		fs: tree,
 		presence: options.presence ?? null,
 		// The tree is in memory, so git is never run: the config file in the tree is what the origin is read from.
@@ -60,8 +95,11 @@ function observerOver(
 			if (stored) events.push(event);
 			return stored;
 		},
+		metrics: options.metrics ?? metrics.sink,
+		fallback: options.fallback ?? fallback.sink,
+		clock: CLOCK,
 	});
-	return { observer, events };
+	return { observer, events, transitions: metrics.records, fallbacks: fallback.records };
 }
 
 function storedSession(backend: RecordingPresenceBackend): Record<string, unknown> {
@@ -218,9 +256,299 @@ describe("the observer's scans", () => {
 		expect(events).toEqual([]);
 		expect(backend.writes).toEqual([]);
 	});
+
+	test("the first read is a baseline, an unchanged read emits nothing, and a changed read emits one planning.changed note", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		const { observer, events } = observerOver(tree);
+
+		expect(await observer.scan()).toMatchObject({ outcome: "baseline" });
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged" });
+		expect(events).toEqual([]);
+
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "published" });
+		expect(events).toHaveLength(1);
+		const [event] = events;
+		expect(event).toMatchObject({
+			surface: "substrate",
+			kind: "note",
+			repo: REPO,
+			session_id: PLANNING_OBSERVER_SESSION,
+			payload: {
+				kind: "planning.changed",
+				repo: REPO,
+				added: [],
+				removed: [],
+				changed: [{ path: CONTEXT, before: sha256(`${BODY} context\n`), after: sha256(`${BODY} edited\n`) }],
+			},
+		});
+		expect(JSON.stringify(event)).not.toContain(BODY);
+	});
+
+	test("a change in a checkout with no git data is reported as repo-unknown and emits nothing", async () => {
+		const tree = seededTree({});
+		const { observer, events } = observerOver(tree);
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "repo-unknown" });
+		expect(events).toEqual([]);
+	});
+
+	test("a ledger that does not store the event is reported as not-stored, not as emitted", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		const { observer, events } = observerOver(tree, { accept: () => false });
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-PLAN.md`, "changed\n");
+		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "not-published" });
+		expect(events).toEqual([]);
+	});
 });
 
-describe("the observer's heartbeat", () => {
+describe("the observer on a truncated index", () => {
+	/** An observer whose index keeps two documents of the three seeded, so the third (BAD.md, last by path) is past the cutoff. */
+	function truncatingObserver(tree: FakeTree) {
+		return observerOver(tree, { env: { [PLANNING_MAX_FILES_ENV]: "2" } });
+	}
+
+	test("a change to a kept document is reported as partial, writes no ledger note, and reports no removal", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		const { observer, events } = truncatingObserver(tree);
+
+		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "baseline" });
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "incomplete" });
+		expect(events).toEqual([]);
+	});
+
+	test("a document past the cutoff that disappears is not reported as a removal", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		const { observer, events } = truncatingObserver(tree);
+
+		await observer.scan();
+		tree.remove(`${PHASE}/BAD.md`);
+		// The index is complete now, but the previous one was not: the diff is still partial, so nothing is removed or written.
+		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "incomplete" });
+		expect(events).toEqual([]);
+	});
+});
+
+describe("planning.transition", () => {
+	test("a detected change writes one transition record, and an unchanged read writes none", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		const { observer, transitions, fallbacks } = observerOver(tree);
+		await observer.scan();
+		await observer.scan();
+		await observer.settleTransitions();
+		expect(transitions).toEqual([]);
+
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		await observer.scan();
+		await observer.settleTransitions();
+		expect(transitions).toEqual([{ phaseId: PLANNING_TRANSITION_PHASE, from: "DEGRADED", to: "DEGRADED", outcome: "applied", ts: "2026-10-22T12:00:00.000Z" }]);
+		expect(fallbacks).toEqual([]);
+	});
+
+	test("a change that clears the view's degradation records the move from DEGRADED to SUCCESS", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		const { observer, transitions } = observerOver(tree);
+		await observer.scan();
+		tree.remove(`${PHASE}/BAD.md`);
+		await observer.scan();
+		await observer.settleTransitions();
+		expect(transitions).toEqual([expect.objectContaining({ from: "DEGRADED", to: "SUCCESS", outcome: "applied" })]);
+	});
+
+	test("a change the ledger does not store is held, and its transition is recorded once, on first detection", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		let accept = false;
+		const { observer, transitions } = observerOver(tree, { accept: () => accept });
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-PLAN.md`, "changed\n");
+		expect(await observer.scan()).toMatchObject({ outcome: "not-published" });
+		await observer.settleTransitions();
+		expect(transitions).toEqual([expect.objectContaining({ outcome: "refused" })]);
+
+		accept = true;
+		expect(await observer.scan()).toMatchObject({ outcome: "published" });
+		await observer.settleTransitions();
+		expect(transitions).toEqual([expect.objectContaining({ outcome: "refused" })]);
+	});
+
+	test("a failing primary sink falls back once, to stdout, and the primary is called once", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		const primary = recordingSink("greptime", { ok: false, reason: "refused", detail: "rows dropped: invalid=1" });
+		const lines: string[] = [];
+		const { observer } = observerOver(tree, { metrics: primary.sink, fallback: stdoutMetricSink((line) => lines.push(line)) });
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		await observer.scan();
+		await observer.settleTransitions();
+		expect(primary.records).toHaveLength(1);
+		expect(lines).toHaveLength(1);
+		expect(JSON.parse(lines[0]!)).toEqual({ metric: "planning.transition", phaseId: "planning", from: "DEGRADED", to: "DEGRADED", outcome: "applied", ts: "2026-10-22T12:00:00.000Z" });
+	});
+});
+
+describe("planning.transition delivery", () => {
+	test("a metric write that never resolves does not hold up the planning_status reply", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		const stalled: MetricSink = { name: "greptime", emit: () => new Promise<SinkResult>(() => {}) };
+		const { observer } = observerOver(tree, { metrics: stalled });
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		// The scan is awaited directly: a reply held up by the stalled write would never resolve, and the test would time out.
+		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "published" });
+	});
+
+	test("a config read that throws holds the transition, and the next readable read records it exactly once", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		const metrics = recordingSink("greptime");
+		const { observer } = observerOver(tree, { metrics: metrics.sink });
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		tree.denied.add(`${TREE_ROOT}/.git/config`);
+		const failed = await observer.scan();
+		tree.denied.delete(`${TREE_ROOT}/.git/config`);
+		expect(failed).toMatchObject({ state: "observed", outcome: "repo-unknown" });
+		await observer.settleTransitions();
+		expect(metrics.records).toEqual([]);
+
+		const recovered = await observer.scan();
+		await observer.settleTransitions();
+		expect(recovered).toMatchObject({ state: "observed", outcome: "published" });
+		const after = await observer.scan();
+		await observer.settleTransitions();
+		expect(after).toMatchObject({ state: "observed", outcome: "unchanged" });
+		expect(metrics.records).toEqual([expect.objectContaining({ phaseId: PLANNING_TRANSITION_PHASE, outcome: "applied" })]);
+	});
+
+	test("a delivery that completes before the shutdown bound finishes before shutdown resolves", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		const delivered: TransitionRecord[] = [];
+		const release = Promise.withResolvers<void>();
+		const gated: MetricSink = {
+			name: "greptime",
+			emit: async (record) => {
+				await release.promise;
+				delivered.push(record);
+				return { ok: true };
+			},
+		};
+		const { observer } = observerOver(tree, { metrics: gated });
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		await observer.scan();
+		const bound = Promise.withResolvers<void>();
+		const shutdown = observer.settleTransitions(bound.promise);
+		release.resolve();
+		expect(await shutdown).toBe("settled");
+		expect(delivered).toHaveLength(1);
+	});
+
+	test("a delivery still pending when the shutdown bound passes does not hold shutdown past it", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		const stalled: MetricSink = { name: "greptime", emit: () => Promise.withResolvers<SinkResult>().promise };
+		const { observer } = observerOver(tree, { metrics: stalled });
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		await observer.scan();
+		const bound = Promise.withResolvers<void>();
+		const shutdown = observer.settleTransitions(bound.promise);
+		bound.resolve();
+		expect(await shutdown).toBe("deadline");
+	});
+
+	test("past the bound a record goes to the fallback, and the primary never holds more deliveries than the bound", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		const primaryCalls: TransitionRecord[] = [];
+		const stalled: MetricSink = {
+			name: "greptime",
+			emit: (record) => {
+				primaryCalls.push(record);
+				return Promise.withResolvers<SinkResult>().promise;
+			},
+		};
+		const fallback = recordingSink("stdout");
+		const { observer } = observerOver(tree, { metrics: stalled, fallback: fallback.sink });
+		await observer.scan();
+		for (let i = 0; i <= MAX_PENDING_TRANSITIONS; i++) {
+			tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edit ${i}\n`);
+			await observer.scan();
+		}
+		expect(primaryCalls).toHaveLength(MAX_PENDING_TRANSITIONS);
+		expect(fallback.records).toHaveLength(1);
+	}, 60_000);
+
+	test("a shutdown settle waits for the scan in flight: it reports the deadline while that scan is held, and delivers its transition once it ends", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		const metrics = recordingSink("greptime");
+		const { promise: atPublish, resolve: reachedPublish } = Promise.withResolvers<void>();
+		const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+		let holdPublish = false;
+		const observer = new PlanningObserver({
+			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+			fs: tree,
+			presence: null,
+			emit: async () => {
+				if (holdPublish) {
+					reachedPublish();
+					await gate;
+				}
+				return true;
+			},
+			metrics: metrics.sink,
+			fallback: recordingSink("stdout").sink,
+			clock: CLOCK,
+		});
+		await observer.scan();
+
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited\n");
+		holdPublish = true;
+		const scanning = observer.scan();
+		await atPublish;
+		const { promise: deadline, resolve: expire } = Promise.withResolvers<void>();
+		const settling = observer.settleTransitions(deadline);
+		expire();
+		expect(await settling).toBe("deadline");
+		expect(metrics.records).toEqual([]);
+
+		release();
+		await scanning;
+		expect(await observer.settleTransitions()).toBe("settled");
+		expect(metrics.records).toEqual([expect.objectContaining({ outcome: "applied" })]);
+	});
+});
+
+describe("the planning heartbeat", () => {
+	test("a session whose change the observer saw appears in planning_sessions afterwards", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/HEAD`]: `ref: refs/heads/${BRANCH}\n` });
+		const backend = new RecordingPresenceBackend();
+		const presence = new DragonflyPresenceStore(backend);
+		const { observer } = observerOver(tree, { presence });
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		expect(await observer.scan()).toMatchObject({ outcome: "published", heartbeat: { state: "written" } });
+
+		const stored = await presence.listWithin(10);
+		expect(stored.records.map((record) => [record.worktree, record.branch, record.activePhase])).toEqual([[TREE_ROOT, BRANCH, null]]);
+
+		const reader = new PlanningReader({ settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }), fs: tree, presence });
+		const sessions = await reader.sessions();
+		expect(sessions.state === "ok" && sessions.sessions).toEqual([
+			expect.objectContaining({ sessionId: expect.stringMatching(/^wt-[0-9a-f]{24}$/), worktree: TREE_ROOT, status: "active", ageMs: 0 }),
+		]);
+	});
+
+	test("a checkout with no git entry records a failed heartbeat, and the scan still returns its summary", async () => {
+		const tree = seededTree({});
+		const backend = new RecordingPresenceBackend();
+		const { observer } = observerOver(tree, { presence: new DragonflyPresenceStore(backend) });
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "repo-unknown", heartbeat: { state: "failed", detail: "no-git-entry" } });
+		expect(backend.writes).toEqual([]);
+	});
+
 	test("an observed change writes the checkout's heartbeat under its session key, with its branch from HEAD", async () => {
 		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
 		const backend = new RecordingPresenceBackend();
@@ -233,6 +561,38 @@ describe("the observer's heartbeat", () => {
 		expect(backend.writes).toHaveLength(1);
 		expect(backend.writes[0]?.key.startsWith(PRESENCE_KEY_PREFIX)).toBe(true);
 		expect(storedSession(backend)).toMatchObject({ worktree: TREE_ROOT, branch: BRANCH, lastHeartbeatMs: backend.clockMs });
+	});
+
+	test("a checkout whose presence write fails records a failed heartbeat, and its change is still published", async () => {
+		class FailingWrites extends RecordingPresenceBackend {
+			async setWithTtl(): Promise<void> {
+				throw new Error("SET refused");
+			}
+		}
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/HEAD`]: `ref: refs/heads/${BRANCH}\n` });
+		const { observer, events } = observerOver(tree, { presence: new DragonflyPresenceStore(new FailingWrites()) });
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "published", heartbeat: { state: "failed" } });
+		expect(events).toHaveLength(1);
+	});
+
+	test("the observer's timer is refused while the plane is disabled, and runs only between start and stop", () => {
+		const disabled = new PlanningObserver({
+			settings: loadPlanningSettings({}),
+			fs: new FakeTree({}),
+			presence: null,
+			emit: async () => true,
+			metrics: recordingSink("greptime").sink,
+		});
+		expect(disabled.start()).toBe(false);
+
+		const { observer } = observerOver(new FakeTree({}));
+		expect(observer.start()).toBe(true);
+		expect(observer.start()).toBe(true);
+		observer.stop();
+		expect(observer.start()).toBe(true);
+		observer.stop();
 	});
 
 	test("a failed heartbeat is owed: the next scan retries it with nothing else changed, and it stops once written", async () => {
@@ -400,6 +760,7 @@ describe("the observer's heartbeat", () => {
 				fs: new FakeTree({}),
 				presence: null,
 				emit: async () => true,
+				metrics: recordingSink("greptime").sink,
 				timers: {
 					setInterval: (_run, ms) => {
 						delays.push(ms);
@@ -415,7 +776,7 @@ describe("the observer's heartbeat", () => {
 		expect(scheduledWith({})).toEqual([15_000]);
 		expect(scheduledWith({ [PLANNING_SCAN_INTERVAL_ENV]: "2500" })).toEqual([2_500]);
 
-		const disabled = new PlanningObserver({ settings: loadPlanningSettings({}), fs: new FakeTree({}), presence: null, emit: async () => true });
+		const disabled = new PlanningObserver({ settings: loadPlanningSettings({}), fs: new FakeTree({}), presence: null, emit: async () => true, metrics: recordingSink("greptime").sink });
 		expect(disabled.start()).toBe(false);
 	});
 
@@ -426,6 +787,7 @@ describe("the observer's heartbeat", () => {
 			fs: new FakeTree({}),
 			presence: null,
 			emit: async () => true,
+			metrics: recordingSink("greptime").sink,
 			timers: {
 				setInterval: () => {
 					events.push("set");
@@ -458,6 +820,7 @@ function gapObserver(tree: FakeTree, presence: DragonflyPresenceStore, maxFiles:
 		fs: tree,
 		presence,
 		emit: async () => true,
+		metrics: recordingSink("greptime").sink,
 	});
 }
 
@@ -471,6 +834,7 @@ function announcingObserver(tree: FakeTree, presence: DragonflyPresenceStore, at
 			attempts.push(event);
 			return stored;
 		},
+		metrics: recordingSink("greptime").sink,
 	});
 }
 
@@ -506,6 +870,7 @@ function keyedObserver(tree: FakeTree, presence: DragonflyPresenceStore, ledger:
 		fs: tree,
 		presence,
 		emit: ledger.emit,
+		metrics: recordingSink("greptime").sink,
 		dedup: true,
 	});
 }
@@ -655,6 +1020,7 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		const observer = new PlanningObserver({
 			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
 			fs: tree,
+			metrics: recordingSink("greptime").sink,
 			presence: null,
 			emit: async (event) => {
 				if (failures > 0) {
@@ -734,6 +1100,7 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		const observer = new PlanningObserver({
 			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
 			fs: tree,
+			metrics: recordingSink("greptime").sink,
 			presence,
 			emit: async () => accept,
 		});
@@ -758,6 +1125,7 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		const observer = new PlanningObserver({
 			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
 			fs: tree,
+			metrics: recordingSink("greptime").sink,
 			presence,
 			emit: async () => false,
 		});
@@ -816,6 +1184,7 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		const observer = new PlanningObserver({
 			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
 			fs: tree,
+			metrics: recordingSink("greptime").sink,
 			presence,
 			emit: async () => accept,
 		});
@@ -876,6 +1245,7 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		const observer = new PlanningObserver({
 			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
 			fs: tree,
+			metrics: recordingSink("greptime").sink,
 			presence: null,
 			emit: async () => {
 				await blocked;
@@ -1311,6 +1681,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		const a = new PlanningObserver({
 			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: CHECKOUT_A }),
 			fs: tree,
+			metrics: recordingSink("greptime").sink,
 			presence,
 			emit: async (event) => {
 				attempts.push(event);
@@ -1394,6 +1765,239 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 	});
 });
 
+describe("the planning baseline", () => {
+	test("a scan asked for while a slow scan runs shares it, and the baseline never moves back", async () => {
+		const { promise: atGate, resolve: reached } = Promise.withResolvers<void>();
+		const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+		let gated = false;
+		// The first read of the document returns its old bytes, then waits. A scan asked for meanwhile shares that scan: no second
+		// scan starts behind it, so the baseline only ever moves forward.
+		class SlowTree extends FakeTree {
+			override async openRead(path: string, limit: number, accept: (real: string) => boolean, reuse: (signature: string) => boolean) {
+				const opened = await super.openRead(path, limit, accept, reuse);
+				if (!gated && path.endsWith("52-CONTEXT.md")) {
+					gated = true;
+					reached();
+					await gate;
+				}
+				return opened;
+			}
+		}
+		const tree = new SlowTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: `${BODY} one\n` });
+		const { observer, events } = observerOver(tree);
+
+		const slow = observer.scan();
+		await atGate;
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} two\n`);
+		const fresh = observer.scan();
+		let freshDone = false;
+		void fresh.then(() => {
+			freshDone = true;
+		});
+		await Promise.resolve();
+		expect(freshDone).toBe(false);
+
+		release();
+		expect(await slow).toMatchObject({ outcome: "baseline" });
+		expect(await fresh).toMatchObject({ outcome: "baseline" });
+		expect(await observer.scan()).toMatchObject({ outcome: "published" });
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged" });
+		expect(events).toHaveLength(1);
+	});
+});
+
+describe("the origin of a checkout", () => {
+	test("a .git file names a git directory whose config holds the origin", async () => {
+		const tree = seededTree({
+			[`${TREE_ROOT}/.git`]: "gitdir: /git-admin\n",
+			"/git-admin/config": ORIGIN,
+		});
+		const { observer, events } = observerOver(tree);
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		expect(await observer.scan()).toMatchObject({ outcome: "published" });
+		expect(events.map((event) => event.repo)).toEqual([REPO]);
+	});
+
+	test("a linked worktree's git directory reads the shared config from its commondir", async () => {
+		const tree = seededTree({
+			[`${TREE_ROOT}/.git`]: "gitdir: /common-git/worktrees/wt\n",
+			"/common-git/config": ORIGIN,
+			"/common-git/worktrees/wt/commondir": "../..\n",
+			"/common-git/worktrees/wt/HEAD": `ref: refs/heads/${BRANCH}\n`,
+		});
+		const { observer, events } = observerOver(tree);
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		expect(await observer.scan()).toMatchObject({ outcome: "published" });
+		expect(events.map((event) => event.repo)).toEqual([REPO]);
+	});
+
+	test("an unreadable .git/config still returns the document summary, and the transition is published once it is readable", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		const { observer, events } = observerOver(tree);
+		await observer.scan();
+
+		tree.denied.add(`${TREE_ROOT}/.git/config`);
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "repo-unknown" });
+		expect(events).toEqual([]);
+
+		tree.denied.delete(`${TREE_ROOT}/.git/config`);
+		expect(await observer.scan()).toMatchObject({ outcome: "published" });
+		expect(events.map((event) => event.repo)).toEqual([REPO]);
+
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged" });
+		expect(events).toHaveLength(1);
+	});
+});
+
+describe("a planning change whose publish fails", () => {
+	test("is re-sent by the next read, and stored exactly once after the publish succeeds", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		let accept = false;
+		const { observer, events } = observerOver(tree, { accept: () => accept });
+		await observer.scan();
+
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		expect(await observer.scan()).toMatchObject({ outcome: "not-published" });
+		expect(events).toEqual([]);
+
+		accept = true;
+		expect(await observer.scan()).toMatchObject({ outcome: "published" });
+		expect(events).toHaveLength(1);
+
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged" });
+		expect(events).toHaveLength(1);
+	});
+});
+
+describe("a failed publish holds the baseline through the reader", () => {
+	test("two failed publishes hold the baseline, and the next read publishes the change exactly once", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		let failures = 2;
+		const { observer, events } = observerOver(tree, {
+			accept: () => {
+				if (failures > 0) {
+					failures--;
+					return false;
+				}
+				return true;
+			},
+		});
+		await observer.scan();
+
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		expect(await observer.scan()).toMatchObject({ outcome: "not-published" });
+		expect(await observer.scan()).toMatchObject({ outcome: "not-published" });
+		expect(events).toEqual([]);
+
+		expect(await observer.scan()).toMatchObject({ outcome: "published" });
+		expect(events).toHaveLength(1);
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged" });
+		expect(events).toHaveLength(1);
+	});
+});
+
+describe("held, incomplete and failed-heartbeat states are reported", () => {
+	test("a file added and then edited while the ledger is down records one refused transition for each distinct change", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		const { observer, transitions } = observerOver(tree, { accept: () => false });
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-NOTES.md`, "first\n");
+		await observer.scan();
+		await observer.settleTransitions();
+		tree.setContent(`${PHASE}/52-NOTES.md`, "second\n");
+		await observer.scan();
+		await observer.settleTransitions();
+		expect(transitions).toEqual([expect.objectContaining({ outcome: "refused" }), expect.objectContaining({ outcome: "refused" })]);
+	});
+
+	test("a revert of a held change records its own transition, so an outage does not hide it", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		let accept = false;
+		const { observer, events, transitions } = observerOver(tree, { accept: () => accept });
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		expect(await observer.scan()).toMatchObject({ outcome: "not-published" });
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} context\n`);
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged" });
+		await observer.settleTransitions();
+		expect(transitions).toEqual([expect.objectContaining({ outcome: "refused" }), expect.objectContaining({ outcome: "refused" })]);
+
+		accept = true;
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged" });
+		await observer.settleTransitions();
+		expect(transitions).toHaveLength(2);
+		expect(events).toEqual([]);
+	});
+
+	test("a revert to an empty plane records the move from the state the previous scan saw, not the publish baseline's", async () => {
+		const tree = new FakeTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN, [`${TREE_ROOT}/.planning/README.txt`]: "not a document\n" });
+		let accept = false;
+		const { observer, transitions } = observerOver(tree, { accept: () => accept });
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} context\n`);
+		expect(await observer.scan()).toMatchObject({ outcome: "not-published" });
+		tree.remove(`${PHASE}/52-CONTEXT.md`);
+		expect(await observer.scan()).toMatchObject({ outcome: "unchanged" });
+		await observer.settleTransitions();
+		expect(transitions).toEqual([
+			expect.objectContaining({ from: "EMPTY", to: "SUCCESS", outcome: "refused" }),
+			expect.objectContaining({ from: "SUCCESS", to: "EMPTY", outcome: "refused" }),
+		]);
+	});
+
+	test("a second held change records the move from the state the previous scan saw, not the publish baseline's", async () => {
+		const tree = new FakeTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN, [`${TREE_ROOT}/.planning/README.txt`]: "not a document\n" });
+		const { observer, transitions } = observerOver(tree, { accept: () => false });
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} context\n`);
+		expect(await observer.scan()).toMatchObject({ outcome: "not-published" });
+		tree.setContent(`${PHASE}/BAD.md`, `---\nphase: [unclosed\n${BODY} bad\n`);
+		expect(await observer.scan()).toMatchObject({ outcome: "not-published" });
+		await observer.settleTransitions();
+		expect(transitions).toEqual([
+			expect.objectContaining({ from: "EMPTY", to: "SUCCESS", outcome: "refused" }),
+			expect.objectContaining({ from: "SUCCESS", to: "DEGRADED", outcome: "refused" }),
+		]);
+	});
+
+	test("an unlistable directory with an edit in a readable directory records that edit as an incomplete refused transition", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN });
+		tree.setContent(`${TREE_ROOT}/.planning/phases/53-locked/53-PLAN.md`, `${BODY} locked\n`);
+		tree.deniedListings.add(`${TREE_ROOT}/.planning/phases/53-locked`);
+		const { observer, events, transitions } = observerOver(tree);
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		expect(await observer.scan()).toMatchObject({ outcome: "incomplete" });
+		await observer.settleTransitions();
+		expect(events).toEqual([]);
+		expect(transitions).toEqual([expect.objectContaining({ outcome: "refused", incomplete: true })]);
+	});
+
+	test("an unreadable .git/HEAD on an observed change is a failed heartbeat, and the change is still published", async () => {
+		const tree = seededTree({ ...GIT, [`${TREE_ROOT}/.git/HEAD`]: `ref: refs/heads/${BRANCH}\n` });
+		tree.denied.add(`${TREE_ROOT}/.git/HEAD`);
+		const { observer, events } = observerOver(tree, { presence: new DragonflyPresenceStore(new RecordingPresenceBackend()) });
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		expect(await observer.scan()).toMatchObject({ state: "observed", outcome: "published", heartbeat: { state: "failed" } });
+		expect(events).toHaveLength(1);
+	});
+
+	test("a missing git entry is a definitive absence: the change is not published, and the heartbeat names it", async () => {
+		const tree = seededTree({});
+		const backend = new RecordingPresenceBackend();
+		const { observer, events } = observerOver(tree, { presence: new DragonflyPresenceStore(backend) });
+		await observer.scan();
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} edited\n`);
+		expect(await observer.scan()).toEqual({ state: "observed", outcome: "repo-unknown", heartbeat: { state: "failed", detail: "no-git-entry" } });
+		expect(events).toEqual([]);
+		expect(backend.writes).toEqual([]);
+	});
+});
+
 describe("the observer under a change the ledger does not store, failure, load and shutdown", () => {
 	/** A filesystem whose directory reads wait for `gate`, so a scan can be held in flight. */
 	function gatedFs(tree: FakeTree, gate: Promise<unknown>): PlanningFs {
@@ -1432,6 +2036,7 @@ describe("the observer under a change the ledger does not store, failure, load a
 			fs: tree,
 			presence: null,
 			emit: async () => true,
+			metrics: recordingSink("greptime").sink,
 			timers: {
 				setInterval: (run: () => Promise<unknown>) => {
 					tick = run;
@@ -1462,6 +2067,7 @@ describe("the observer under a change the ledger does not store, failure, load a
 			fs: gatedFs(tree, gate),
 			presence: null,
 			emit: async () => true,
+			metrics: recordingSink("greptime").sink,
 			timers: {
 				setInterval: (run: () => Promise<unknown>) => {
 					tick = run;
@@ -1491,6 +2097,7 @@ describe("the observer under a change the ledger does not store, failure, load a
 			fs: gatedFs(tree, gate),
 			presence: null,
 			emit: async () => true,
+			metrics: recordingSink("greptime").sink,
 		});
 		let finished = false;
 		const scanning = observer.scan().then((scan) => {
@@ -1513,6 +2120,7 @@ function liveObserver(tree: FakeTree, events: EventInput[], extra: Partial<Plann
 	return new PlanningObserver({
 		settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT, ...env }),
 		fs: tree,
+		metrics: recordingSink("greptime").sink,
 		presence: null,
 		emit: async (event) => {
 			events.push(event);
