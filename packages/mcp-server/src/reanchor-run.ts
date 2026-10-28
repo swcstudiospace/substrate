@@ -22,9 +22,9 @@
  * flag, an unset `GREPTIME_URL`, an unset `SOLANA_ANCHOR_KEYPAIR` or `SOLANA_ANCHOR_PUBKEY`, a `SOLANA_RPC_URL` the devnet guard
  * refuses). No new environment variable: the names `loadConfig` already reads.
  */
-import { readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { createRpc, execFileRunner, RpcError, type Rpc } from "@substrate/ledger";
 import { loadConfig, operatorSurfaces, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
 import { readReanchorNotes, resolveSignerSet } from "./anchor-verify-deps.ts";
@@ -183,6 +183,12 @@ export function fileLock(path: string, options: LockFileOptions = {}): ReanchorL
 	const alive = options.alive ?? processAlive;
 	return {
 		acquire(): LockAttempt {
+			// A fresh SUBSTRATE_STATE_DIR may not exist yet: create it (owner only) so a missing parent is not read as a held lock.
+			try {
+				mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+			} catch (cause) {
+				return { held: `the lock directory ${dirname(path)} could not be created: ${reasonOf(cause)}` };
+			}
 			for (let attempt = 0; attempt < 3; attempt++) {
 				const mine = JSON.stringify({ pid, started_ms: now() });
 				try {

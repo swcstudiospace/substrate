@@ -381,6 +381,17 @@ describe("fileLock: create-exclusive, broken only by a dead pid (or an old unrea
 		expect("release" in fileLock(path, { pid: 4343, now: () => NOW + 2000, alive: () => true }).acquire()).toBe(true);
 	});
 
+	test("a lock in a state directory that does not exist yet creates the directory and is taken, not read as held", () => {
+		const root = mkdtempSync(join(tmpdir(), "p59-lock-fresh-"));
+		const path = join(root, "new", "state", "substrate-reanchor-test.lock");
+		expect(existsSync(join(root, "new"))).toBe(false);
+		const taken = fileLock(path, { pid: 4242, now: () => NOW, alive: () => true }).acquire();
+		if (!("release" in taken)) throw new Error(`expected the lock, got: ${taken.held}`);
+		expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ pid: 4242, started_ms: NOW });
+		taken.release();
+		expect(existsSync(path)).toBe(false);
+	});
+
 	test("a lock whose pid is dead is stale and is broken, whatever its age", () => {
 		const path = lockPath();
 		writeFileSync(path, JSON.stringify({ pid: 999_999, started_ms: NOW }));
