@@ -23,7 +23,7 @@ If a credential has been exposed in a commit, issue, pull request, log or transc
 
 ## Dependency advisories
 
-`scripts/audit-gate.ts` reads `bun audit --json` and fails on any high or critical advisory that is not listed in [`.github/audit-accepted-risk.json`](.github/audit-accepted-risk.json). The `dependency-audit` CI job runs it on pushes to `main` and weekly; `bun run verify --audit` runs it locally. Each accepted entry names the advisory id, the package and exact version, the reason, an `owner` and a `review_by` date. Once `review_by` has passed, the gate fails until the entry is re-reviewed (extended with a new date) or removed. An entry within 30 days of its date produces a warning. Accepting a risk is a reviewed change to that file made by the owner. See [`docs/ci.md`](docs/ci.md).
+`scripts/audit-gate.ts` reads `bun audit --json` and fails on any high or critical advisory that is not listed in [`.github/audit-accepted-risk.json`](.github/audit-accepted-risk.json). The `dependency-audit` CI job runs it on pushes to `main` and weekly; `bun run verify --audit` runs it locally. Each accepted entry names the advisory id, the package and exact version, the reason, an `owner` and a `review_by` date. Once `review_by` has passed, the gate fails until the entry is re-reviewed and extended with a new date, or the affected dependency is upgraded or removed so that the advisory is no longer reported; deleting the entry while the advisory is still reported only turns it into an unlisted advisory, which also fails. An entry within 30 days of its date produces a warning. Accepting a risk is a reviewed change to that file made by the owner. See [`docs/ci.md`](docs/ci.md).
 
 ## Scope
 
