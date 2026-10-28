@@ -277,15 +277,15 @@ describe("substrate evidence", () => {
 
 		test("a node answer of { error } writes the document, names the node and the error, and exits 1", async () => {
 			const graph = "ut-cli-ev-nodeerr";
-			const base = await cleanServer(graph, { node: { error: "GREPTIME_URL is not set" } });
+			const base = await cleanServer(graph, { node: { error: "the ledger is not configured" } });
 
 			const result = await run(["evidence", "--graph", graph, "--node", "n1"], { SUBSTRATE_URL: base });
 
 			expect(result.exitCode).toBe(1);
-			expect(result.stderr).toContain("[substrate] node n1: GREPTIME_URL is not set");
+			expect(result.stderr).toContain("[substrate] node n1: the ledger is not configured");
 			const document = JSON.parse(result.stdout) as { graph_id: string; node: unknown };
 			expect(document.graph_id).toBe(graph);
-			expect(document.node).toEqual({ error: "GREPTIME_URL is not set" });
+			expect(document.node).toEqual({ error: "the ledger is not configured" });
 		});
 
 		test("a bundle-only answer (a server that ignores node_id) still writes the document, warns and exits 1", async () => {

@@ -191,9 +191,9 @@ describe("parseEvidenceBundle", () => {
 		const withArtifact = parseEvidenceBundle(bodyWith(["node", artifact]));
 		if (!withArtifact.ok) throw new Error(`rejected a valid node: ${JSON.stringify(withArtifact)}`);
 		expect<unknown>(withArtifact.node).toEqual(artifact);
-		const withError = parseEvidenceBundle(bodyWith(["node", { error: "GREPTIME_URL is not set" }]));
+		const withError = parseEvidenceBundle(bodyWith(["node", { error: "the ledger is not configured" }]));
 		if (!withError.ok) throw new Error(`rejected a node error: ${JSON.stringify(withError)}`);
-		expect(withError.node).toEqual({ error: "GREPTIME_URL is not set" });
+		expect(withError.node).toEqual({ error: "the ledger is not configured" });
 		const without = parseEvidenceBundle(bodyWith());
 		if (!without.ok) throw new Error("rejected a bundle without a node");
 		expect(without.node).toBeUndefined();
