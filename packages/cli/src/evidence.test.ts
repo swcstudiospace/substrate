@@ -288,6 +288,21 @@ describe("substrate evidence", () => {
 			expect(document.node).toEqual({ error: "GREPTIME_URL is not set" });
 		});
 
+		test("a bundle-only answer (a server that ignores node_id) still writes the document, warns and exits 1", async () => {
+			const graph = "ut-cli-ev-oldserver";
+			const requests: string[] = [];
+			const base = await cleanServer(graph, { requests });
+
+			const result = await run(["evidence", "--graph", graph, "--node", "n1"], { SUBSTRATE_URL: base });
+
+			expect(result.exitCode).toBe(1);
+			expect(requests.map((raw) => JSON.parse(raw))).toEqual([{ graph_id: graph, format: "json", node_id: "n1" }]);
+			expect(result.stderr).toContain("[substrate] node n1: the server answered without a node artifact");
+			const document = JSON.parse(result.stdout) as { graph_id: string };
+			expect(document.graph_id).toBe(graph);
+			expect(document).not.toHaveProperty("node");
+		});
+
 		test("a node member of the wrong shape is not an evidence bundle", async () => {
 			const graph = "ut-cli-ev-nodebad";
 			const base = await cleanServer(graph, { node: { node_id: "n1", claim: "granted" } });
