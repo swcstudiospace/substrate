@@ -72,7 +72,7 @@ Record the row counts of every table in the copy (the same query is used against
 ```sh
 cat > ~/backups/counts.sql <<'SQL'
 select format('select %L as tbl, count(*) from %I.%I', schemaname || '.' || tablename, schemaname, tablename)
-from pg_tables where schemaname in ('public', 'substrate') order by 1 \gexec
+from pg_tables where schemaname in ('public', 'substrate') and tablename <> 'schema_migrations' order by 1 \gexec
 SQL
 docker exec -i index-rehearsal psql -U postgres -d substrate_copy -At -F ' ' < ~/backups/counts.sql > ~/backups/counts-copy-before.txt
 cat ~/backups/counts-copy-before.txt
@@ -89,15 +89,17 @@ try { await store.migrate(); console.log("migrate: ok"); } finally { await store
 '
 ```
 
-Then compare. Row counts must not change (migrations create objects, they never delete rows), and the ledger must hold every step:
+Then compare. Row counts of the data tables must not change (migrations create objects, they never delete rows). `counts.sql` leaves `schema_migrations` out of that comparison on purpose: the first ledgered run creates the table and every newly applied step adds one row to it, so it is expected to differ. Check the ledger on its own: it must hold exactly the steps of the branch, by version and name:
 
 ```sh
 docker exec -i index-rehearsal psql -U postgres -d substrate_copy -At -F ' ' < ~/backups/counts.sql > ~/backups/counts-copy-after.txt
 diff ~/backups/counts-copy-before.txt ~/backups/counts-copy-after.txt && echo "row counts unchanged"
 docker exec index-rehearsal psql -U postgres -d substrate_copy -At -c 'select count(*), max(version) from schema_migrations'
+bun -e 'import { MIGRATION_STEPS } from "./packages/mcp-server/src/index-store.ts"; for (const s of MIGRATION_STEPS) console.log(s.version, s.name)' > ~/backups/ledger-expected.txt
+docker exec index-rehearsal psql -U postgres -d substrate_copy -At -F ' ' -c 'select version, name from schema_migrations order by version' | diff ~/backups/ledger-expected.txt - && echo "ledger lists every step"
 ```
 
-`diff` prints nothing and the second command prints `N|N` (the `N` from the top of this runbook). Run `migrate()` a second time and run the counts again: it must still print `N|N` and the same counts (a migration that is not idempotent shows up here).
+The first `diff` prints nothing, the second command prints `N|N` (the `N` from the top of this runbook) and the last `diff` prints nothing. Run `migrate()` a second time and run the checks again: they must give the same result (a migration that is not idempotent shows up here, and a second run adds no ledger row).
 
 Now run the repo's checks against the copy, from `$BRANCH`:
 
@@ -131,7 +133,7 @@ docker run --rm -i \
   sh -c 'set -a; . /run/substrate.env; set +a; psql "$SUBSTRATE_PG_URL" -At -c "select count(*), max(version) from schema_migrations"'
 ```
 
-(The last command fails with `relation "schema_migrations" does not exist` on a database that has never run a ledgered `migrate()`: that is the "no ledger yet" case above, not an error in the runbook.)
+(The last command fails with `relation "schema_migrations" does not exist` on a database that has never run a ledgered `migrate()`: that is the "no ledger yet" case above, not an error in the runbook. Note its count, or that the table is missing: the ledger grows from that count to `N` in step 7, one row per newly applied step.)
 
 **If the backup fails, or `pg_restore -l` does not show 12 table-data entries, abort.** Do not apply without a backup taken in this session.
 
@@ -155,18 +157,20 @@ A second boot or run waits on the advisory lock (`lock_timeout` 180 s) rather th
 
 ## 7. Verify production
 
-Ledger rows and the highest version equal `N`; the new objects exist; the row counts did not change; the service is healthy:
+Ledger rows and the highest version equal `N`; the ledger lists every step by name; the new objects exist; the data-table row counts did not change (the ledger is compared on its own, not in the counts); the service is healthy:
 
 ```sh
 docker run --rm -i -v /etc/substrate/substrate.env:/run/substrate.env:ro postgres:16 \
   sh -c 'set -a; . /run/substrate.env; set +a; psql "$SUBSTRATE_PG_URL" -At -c "select count(*), max(version) from schema_migrations"'
+docker run --rm -i -v /etc/substrate/substrate.env:/run/substrate.env:ro postgres:16 \
+  sh -c 'set -a; . /run/substrate.env; set +a; psql "$SUBSTRATE_PG_URL" -At -F " " -c "select version, name from schema_migrations order by version"' | diff ~/backups/ledger-expected.txt - && echo "ledger lists every step"
 docker run --rm -i -v /etc/substrate/substrate.env:/run/substrate.env:ro postgres:16 \
   sh -c 'set -a; . /run/substrate.env; set +a; psql "$SUBSTRATE_PG_URL" -At -F " "' < ~/backups/counts.sql > ~/backups/counts-prod-after.txt
 diff ~/backups/counts-prod-before.txt ~/backups/counts-prod-after.txt && echo "row counts unchanged"
 curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7410/healthz
 ```
 
-Expect `N|N`, no `diff` output, and `200`. A table or column a new step adds may legitimately appear in the counts or the schema; a changed row count in an existing table is not expected from a migration and means stop and investigate. Check the new objects by name, for example `\d <table>` in `psql`, against the step you read in `index-store.ts`. If `/healthz` needs a bearer, use the token file the deploy health check uses (`infra/vps/README.md`); do not paste a token on a command line.
+Expect `N|N`, no output from either `diff`, and `200`. The ledger's growth is the one expected change in `schema_migrations`: from the count you noted in step 5 (or no table at all) to `N`, one row per step that production had not applied yet, each by name in the listing. A table or column a new step adds may legitimately appear in the counts or the schema; a changed row count in an existing data table is not expected from a migration and means stop and investigate. Check the new objects by name, for example `\d <table>` in `psql`, against the step you read in `index-store.ts`. If `/healthz` needs a bearer, use the token file the deploy health check uses (`infra/vps/README.md`); do not paste a token on a command line.
 
 ## Backing out
 

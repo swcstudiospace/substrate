@@ -24,6 +24,7 @@ import {
 	isAdditiveStatement,
 	migrationDigests,
 	normalizedStatements,
+	stripSqlComments,
 	stepDigest,
 } from "../../../scripts/migration-digests.ts";
 import { ARCHIVE_TABLES } from "./index-archive-spec.ts";
@@ -334,6 +335,89 @@ describe("rule (b): no destructive statement", () => {
 	test("an allowlisted version is exempt from this rule only", () => {
 		const allow: ContractAllowlists = { idempotence: {}, destructive: { 1: "contract step reviewed in phase 99" }, tables: {} };
 		expect(checkMigrationSteps([step(1, "drop table if exists a")], allow)).toEqual([]);
+	});
+});
+
+describe("stripSqlComments is quote-aware", () => {
+	test("comments are replaced by a space", () => {
+		expect(stripSqlComments("a -- c\nb /* d */ e")).toBe("a  \nb   e");
+	});
+
+	test("a marker inside a single-quoted string is text", () => {
+		expect(stripSqlComments("default '--' x")).toBe("default '--' x");
+		expect(stripSqlComments("default '/* y */' x")).toBe("default '/* y */' x");
+	});
+
+	test("a doubled quote does not end the string", () => {
+		expect(stripSqlComments("'it''s -- here' -- gone")).toBe("'it''s -- here'  ");
+	});
+
+	test("a backslash escapes only in an E string", () => {
+		expect(stripSqlComments("E'a\\'--b' -- gone")).toBe("E'a\\'--b'  ");
+		expect(stripSqlComments("'a\\' -- gone")).toBe("'a\\'  ");
+	});
+
+	test("a marker inside a double-quoted identifier is text", () => {
+		expect(stripSqlComments('select "a--b", "c/*d" -- gone')).toBe('select "a--b", "c/*d"  ');
+	});
+
+	test("a marker inside a dollar-quoted body is text, for $$ and $tag$", () => {
+		expect(stripSqlComments("do $$ -- keep\n$$ -- gone")).toBe("do $$ -- keep\n$$  ");
+		expect(stripSqlComments("do $fn$ /* keep */ $$ $fn$ /* gone */")).toBe("do $fn$ /* keep */ $$ $fn$  ");
+	});
+
+	test("a positional parameter is not a dollar quote", () => {
+		expect(stripSqlComments("select $1 -- gone\n, 'x'")).toBe("select $1  \n, 'x'");
+	});
+
+	test("a quote inside a comment opens no string", () => {
+		expect(stripSqlComments("-- don't\nselect 1 /* it's */ ; select 2")).toBe(" \nselect 1   ; select 2");
+	});
+
+	test("an unterminated string or block comment is kept to the end", () => {
+		expect(stripSqlComments("select 'a -- b")).toBe("select 'a -- b");
+		expect(stripSqlComments("select 1 /* open ; delete from a")).toBe("select 1 /* open ; delete from a");
+	});
+
+	test("a quoted '--' no longer hides a following destructive statement (the real-world bypass)", () => {
+		const sql = "alter table graph_index add column if not exists label text default '--'; delete from memory_entries";
+		expect(normalizedStatements(sql)).toEqual([
+			"alter table graph_index add column if not exists label text default ' '",
+			"delete from memory_entries",
+		]);
+		const problems = checkMigrationSteps([step(1, sql)], allowTables("graph_index"));
+		expect(problems).toContain("step 1 (s1): destructive DELETE FROM is not allowlisted");
+	});
+
+	test("a ';' inside a string default is not a statement boundary, and the statement stays additive", () => {
+		const sql = "alter table graph_index add column if not exists label text default '--; pending'";
+		expect(normalizedStatements(sql)).toEqual(["alter table graph_index add column if not exists label text default ' '"]);
+		expect(checkMigrationSteps([step(1, sql)], allowTables("graph_index"))).toEqual([]);
+	});
+
+	test("a destructive word inside a string default is not a destructive statement", () => {
+		const sql = "alter table graph_index add column if not exists label text default '-- rename', add column if not exists note text default 'drop table x; truncate y; delete from z'";
+		expect(normalizedStatements(sql)).toHaveLength(1);
+		expect(checkMigrationSteps([step(1, sql)], allowTables("graph_index"))).toEqual([]);
+	});
+
+	test("a ';' inside a dollar-quoted body does not split, and the body is still checked as code", () => {
+		const sql = "do $$ begin delete from a; raise notice 'x'; end $$";
+		expect(normalizedStatements(sql)).toEqual(["do $$ begin delete from a; raise notice 'x'; end $$"]);
+		expect(checkMigrationSteps([step(1, sql)], allowTables("a"))).toContain("step 1 (s1): destructive DELETE FROM is not allowlisted");
+	});
+
+	test("a doubled quote and an E-string escape stay inside the literal when splitting", () => {
+		expect(normalizedStatements("select 'it''s; fine'; select 2")).toEqual(["select ' '", "select 2"]);
+		expect(normalizedStatements("select E'a\\';b'; select 2")).toEqual(["select e' '", "select 2"]);
+	});
+
+	test("an unterminated string is not masked, so the analysis sees the rest", () => {
+		expect(normalizedStatements("select 'a; delete from t")).toEqual(["select 'a", "delete from t"]);
+	});
+
+	test("the digest still splits on every ';' and is unaffected by the analysis reader", () => {
+		expect(stepDigest(step(1, "select '--; pending'"))).toBe(new Bun.CryptoHasher("sha256").update("select '--\npending'").digest("hex"));
 	});
 });
 

@@ -4,12 +4,13 @@
  * The tree is built in a TEMPORARY index (`GIT_INDEX_FILE` inside the git directory), so the real
  * index, HEAD, branch, stash and refs are never touched. The candidate file list is enumerated with
  * `git ls-files` and filtered here (name rules first, then size) before a single byte is hashed;
- * the filtered list is fed to `git add -A -f --pathspec-from-file` on stdin, so a large worktree
- * cannot overflow argv and an excluded file is never read.
+ * the filtered list is fed to `git hash-object --no-filters --stdin-paths` and `update-index
+ * --index-info` on stdin, so a large worktree cannot overflow argv, an excluded file is never read
+ * and the stored bytes are the exact bytes on disk (no attribute or config conversion).
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { lstatSync, rmSync, type Stats } from "node:fs";
+import { lstatSync, readlinkSync, rmSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import { GitCommandError, SnapshotPolicyError, UnsupportedPathError } from "./errors.ts";
 import { ancestorsOf, assertSafeRelativePath, comparePaths, decodePath, isObjectId } from "./paths.ts";
@@ -156,6 +157,46 @@ function parentsAreDirectories(root: string, path: string, cache: Map<string, bo
 
 export type BuiltTree = { tree: string; skipped: SkippedPath[]; included: string[] };
 
+/**
+ * Store every included path as its RAW bytes and return the `update-index --index-info -z` records.
+ *
+ * `git add` would run the repository's attribute-driven conversions (`text=auto`, `eol`, `ident`,
+ * clean/smudge filters, `core.autocrlf`) and store the converted blob, losing the original bytes;
+ * restore writes blobs back verbatim and the verification re-hash would convert the same way, so the
+ * loss would go unnoticed. `hash-object --no-filters` hashes the file as is, whatever `.gitattributes`,
+ * `.git/info/attributes` or the config say. A symlink is hashed from its link target (hash-object
+ * would follow the link). The mode follows git's own rule: 120000 for a link, 100755 when the owner
+ * execute bit is set, 100644 otherwise.
+ */
+async function hashRawEntries(ctx: RepoContext, paths: readonly string[]): Promise<Buffer[]> {
+	const modes = new Map<string, EntryMode>();
+	const shas = new Map<string, string>();
+	const files: string[] = [];
+	for (const path of paths) {
+		const stat = lstatSync(join(ctx.root, path));
+		if (stat.isSymbolicLink()) {
+			modes.set(path, "120000");
+			const target = readlinkSync(join(ctx.root, path), { encoding: "buffer" });
+			shas.set(path, (await gitText(ctx, ["hash-object", "-w", "--no-filters", "--stdin"], { input: target })).trim());
+		} else {
+			modes.set(path, (stat.mode & 0o100) !== 0 ? "100755" : "100644");
+			files.push(path);
+		}
+	}
+	if (files.length > 0) {
+		// `--stdin-paths` unquotes a line that starts with a double quote; `./` keeps such a name literal.
+		const input = `${files.map((path) => (path.startsWith('"') ? `./${path}` : path)).join("\n")}\n`;
+		const lines = (await gitText(ctx, ["hash-object", "-w", "--no-filters", "--stdin-paths"], { input })).split("\n");
+		if (lines.length !== files.length) throw new GitCommandError("git hash-object returned an unexpected number of ids");
+		for (const [index, path] of files.entries()) shas.set(path, (lines[index] ?? "").trim());
+	}
+	return paths.map((path) => {
+		const sha = shas.get(path);
+		if (sha === undefined || !isObjectId(sha)) throw new GitCommandError("git hash-object did not return an object id");
+		return Buffer.concat([Buffer.from(`${modes.get(path)} ${sha}\t`, "ascii"), Buffer.from(path, "utf8"), Buffer.from([0])]);
+	});
+}
+
 /** Build the tree of the worktree's current file state under a policy, without touching the real index. */
 export async function buildTree(ctx: RepoContext, policy: ResolvedPolicy): Promise<BuiltTree> {
 	const candidates = await enumerate(ctx, policy);
@@ -204,8 +245,8 @@ export async function buildTree(ctx: RepoContext, policy: ResolvedPolicy): Promi
 	try {
 		await git(ctx, ["read-tree", "--empty"], { env });
 		if (included.length > 0) {
-			const input = `${included.map((path) => `:(literal)${path}`).join("\0")}\0`;
-			await git(ctx, ["add", "-A", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"], { env, input });
+			const records = await hashRawEntries(ctx, included);
+			await git(ctx, ["update-index", "-z", "--index-info"], { env, input: Buffer.concat(records) });
 		}
 		const tree = await gitText(ctx, ["write-tree"], { env });
 		assertObjectId(tree, "write-tree output");
