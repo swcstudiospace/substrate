@@ -16,7 +16,7 @@ bun install --frozen-lockfile
 bunx tsc --noEmit                    # typecheck
 bun test                             # full suite; set SUBSTRATE_TEST_PG_URL to run the live index tests
 python3 -m pytest packages/miner/tests packages/dispatcher/tests
-bun run check:phase-close            # event vocabulary, store lock, audit policy and redaction locks
+bun run check:phase-close            # event vocabulary, store lock and audit policy; the redaction locks run in bun test
 bun run verify                       # the whole gate: install, types, lint, tests, python, locks
 bun run verify --only types,locks    # selected steps (ids: install, types, lint, tests, python, locks, audit)
 bun run verify --list                # print the steps
