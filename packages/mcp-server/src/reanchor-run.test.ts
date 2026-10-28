@@ -7,14 +7,15 @@
  * No ledger, no network, no clock of its own. The process-boundary tests spawn the real entry with a scrubbed environment and reach
  * only the argument, plan-file and configuration refusals and the dry run, which all happen before any connection.
  */
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { formatMemo, HOUR_MS, hourIso, type Rpc, type RunResult } from "@substrate/ledger";
 import { DEVNET_GENESIS_HASH } from "./anchor.ts";
 import type { ReanchorDeps, ReanchorOptions } from "./reanchor.ts";
-import { openRealContext, runReanchorCli, type ReanchorCliDeps } from "./reanchor-run.ts";
+import { fileLock, LOCK_STALE_MS, openRealContext, runReanchorCli, type ReanchorCliDeps } from "./reanchor-run.ts";
+import { Substrate } from "./service.ts";
 
 const GENESIS = "GH7ome3EiwEr7tu9JuTh2dpYWBJK3z69Xm1ZE3MEE6JC";
 const PUBKEY = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo";
@@ -179,7 +180,8 @@ describe("--execute through the CLI", () => {
 
 	test("a plan with no hour is done without opening anything", async () => {
 		const s = spies();
-		const empty = JSON.stringify({ schema: 1, dry_run: true, chain: { observed_genesis: GENESIS }, plan: { dry_run: true, hours: [] } });
+		// What `reanchor-plan-run.ts --json` prints for a window with no anchors row: the planner reads no chain, so no genesis.
+		const empty = JSON.stringify({ schema: 1, dry_run: true, chain: { observed_genesis: null }, plan: { dry_run: true, hours: [] } });
 		const result = await runReanchorCli(["--plan", "p.json", "--execute", "--confirm-genesis", GENESIS], { ...s.cli, readPlan: () => empty });
 		expect(result).toMatchObject({ code: 0, stderr: "" });
 		expect(s.opened).toEqual([]);
@@ -234,6 +236,136 @@ describe("openRealContext: the devnet guard and the configuration, before any co
 		const named = openRealContext({ ...OPTIONS, surface: "hermes" }, { env, ...seams });
 		if ("refused" in named) throw new Error(`unexpected refusal: ${named.refused}`);
 		expect(named.surface).toBe("hermes");
+	});
+});
+
+describe("openRealContext leaves the running server's retain outbox alone", () => {
+	const OPTIONS: ReanchorOptions = { planPath: "p.json", execute: true, confirmGenesis: GENESIS, maxHours: 1, surface: null };
+
+	test("a durable outbox path in the environment is neither read nor rewritten, and no drain timer is started", () => {
+		const dir = mkdtempSync(join(tmpdir(), "p59-outbox-"));
+		const path = join(dir, "retain-outbox.jsonl");
+		const parked = (id: string): Record<string, unknown> => ({
+			id,
+			bank: "sub-omp",
+			document_id: "doc-1",
+			entry_id: "mem_1",
+			surface: "omp",
+			entry_hash: "0123456789abcdef",
+			attempts: 1,
+			next_at: 0,
+			last_reason: "timeout",
+			enqueued_at: 1,
+		});
+		// Two lines for one document: hydrating the file would compact it to one line, which rewrites it, and park one entry, which starts the drain.
+		const before = `${JSON.stringify(parked("a"))}\n${JSON.stringify(parked("b"))}\n`;
+		writeFileSync(path, before);
+		const mtime = statSync(path).mtimeMs;
+
+		const delays: unknown[] = [];
+		const spy = spyOn(globalThis, "setInterval").mockImplementation(((_handler: unknown, delay?: number) => {
+			delays.push(delay);
+			return { unref: () => undefined, ref: () => undefined };
+		}) as never);
+		try {
+			const built = openRealContext(OPTIONS, {
+				env: {
+					GREPTIME_URL: "http://127.0.0.1:9",
+					SOLANA_ANCHOR_KEYPAIR: "/etc/substrate/key.json",
+					SOLANA_ANCHOR_PUBKEY: PUBKEY,
+					SUBSTRATE_RETAIN_OUTBOX_PATH: path,
+					SUBSTRATE_RETAIN_DRAIN_MS: "12345",
+				},
+				ledgerFor: () => ({ anchorForPeriod: async () => null, queryEvents: async () => [] }) as never,
+			});
+			if ("refused" in built) throw new Error(`unexpected refusal: ${built.refused}`);
+			if (!(built.substrate instanceof Substrate)) throw new Error("expected the real substrate");
+			// A memory-only, empty queue: the server's file was never hydrated.
+			expect(built.substrate.retainOutboxStats()).toMatchObject({ size: 0, durable: false });
+		} finally {
+			spy.mockRestore();
+		}
+		expect(delays).not.toContain(12345);
+		expect(readFileSync(path, "utf8")).toBe(before);
+		expect(statSync(path).mtimeMs).toBe(mtime);
+		expect(readdirSync(dir)).toEqual(["retain-outbox.jsonl"]);
+	});
+
+	test("the lock lives beside the plan file", () => {
+		const dir = mkdtempSync(join(tmpdir(), "p59-lockdir-"));
+		const built = openRealContext(
+			{ ...OPTIONS, planPath: join(dir, "plan.json") },
+			{
+				env: { GREPTIME_URL: "http://127.0.0.1:9", SOLANA_ANCHOR_KEYPAIR: "/etc/substrate/key.json", SOLANA_ANCHOR_PUBKEY: PUBKEY },
+				ledgerFor: () => ({ anchorForPeriod: async () => null, queryEvents: async () => [] }) as never,
+				substrateFor: () => ({}) as never,
+			},
+		);
+		if ("refused" in built) throw new Error(`unexpected refusal: ${built.refused}`);
+		const held = built.lock.acquire();
+		if (!("release" in held)) throw new Error("expected the lock");
+		expect(readdirSync(dir)).toEqual([".reanchor.lock"]);
+		held.release();
+		expect(readdirSync(dir)).toEqual([]);
+	});
+});
+
+describe("fileLock: create-exclusive, stale by a dead pid or by age, released by its owner only", () => {
+	const lockPath = (): string => join(mkdtempSync(join(tmpdir(), "p59-lock-")), ".reanchor.lock");
+
+	test("a second acquire while the first holds is refused with the holder named; the release frees it", () => {
+		const path = lockPath();
+		const first = fileLock(path, { pid: 4242, now: () => NOW, alive: () => true }).acquire();
+		if (!("release" in first)) throw new Error("expected the lock");
+		expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ pid: 4242, started_ms: NOW });
+
+		const second = fileLock(path, { pid: 4343, now: () => NOW + 1000, alive: () => true }).acquire();
+		if (!("held" in second)) throw new Error("expected the second run to be refused");
+		expect(second.held).toContain("pid 4242");
+		expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ pid: 4242, started_ms: NOW });
+
+		first.release();
+		expect(existsSync(path)).toBe(false);
+		expect("release" in fileLock(path, { pid: 4343, now: () => NOW + 2000, alive: () => true }).acquire()).toBe(true);
+	});
+
+	test("a lock whose pid is dead is stale and is broken, whatever its age", () => {
+		const path = lockPath();
+		writeFileSync(path, JSON.stringify({ pid: 999_999, started_ms: NOW }));
+		const taken = fileLock(path, { pid: 4343, now: () => NOW + 1000, alive: (pid) => pid !== 999_999 }).acquire();
+		expect("release" in taken).toBe(true);
+		expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ pid: 4343, started_ms: NOW + 1000 });
+	});
+
+	test("a lock older than thirty minutes is stale even when its pid is alive; one just under that age is held", () => {
+		const old = lockPath();
+		writeFileSync(old, JSON.stringify({ pid: 4242, started_ms: NOW - LOCK_STALE_MS - 1 }));
+		expect("release" in fileLock(old, { pid: 4343, now: () => NOW, alive: () => true }).acquire()).toBe(true);
+
+		const fresh = lockPath();
+		writeFileSync(fresh, JSON.stringify({ pid: 4242, started_ms: NOW - LOCK_STALE_MS + 1000 }));
+		expect(fileLock(fresh, { pid: 4343, now: () => NOW, alive: () => true }).acquire()).toHaveProperty("held");
+	});
+
+	test("a lock file that does not parse is judged by its modification time alone", () => {
+		const fresh = lockPath();
+		writeFileSync(fresh, "");
+		expect(fileLock(fresh, { now: () => Date.now(), alive: () => false }).acquire()).toHaveProperty("held");
+
+		const old = lockPath();
+		writeFileSync(old, "not json");
+		const hourAgo = new Date(Date.now() - 2 * HOUR_MS);
+		utimesSync(old, hourAgo, hourAgo);
+		expect(fileLock(old, { now: () => Date.now(), alive: () => false }).acquire()).toHaveProperty("release");
+	});
+
+	test("a release never removes a lock that another run has since taken", () => {
+		const path = lockPath();
+		const first = fileLock(path, { pid: 4242, now: () => NOW, alive: () => true }).acquire();
+		if (!("release" in first)) throw new Error("expected the lock");
+		writeFileSync(path, JSON.stringify({ pid: 4343, started_ms: NOW + 5 }));
+		first.release();
+		expect(existsSync(path)).toBe(true);
 	});
 });
 

@@ -8,9 +8,12 @@
  */
 import { describe, expect, test } from "bun:test";
 import { formatMemo, HOUR_MS, hourIso, type AddressMemo, type Rpc, type RunResult, type TransactionMemo } from "@substrate/ledger";
+import type { ReanchorNotes, ReanchorRecord } from "./anchor-verify-deps.ts";
 import { DEVNET_GENESIS_HASH, MAX_HOURS_PER_RUN, REQUIRED_BALANCE_LAMPORTS } from "./anchor.ts";
 import type { AnchorRow } from "./greptime.ts";
 import {
+	DISCOVERY_MAX_PAGES,
+	DISCOVERY_PAGE_SIZE,
 	dryRunReanchor,
 	executeReanchor,
 	MAINNET_BETA_GENESIS_HASH,
@@ -20,10 +23,14 @@ import {
 	ReanchorRunUsageError,
 	SEND_FEE_LAMPORTS,
 	TESTNET_GENESIS_HASH,
+	type LockAttempt,
 	type ReanchorDeps,
+	type ReanchorLock,
 	type ReanchorOptions,
 	type ReanchorResult,
 } from "./reanchor.ts";
+import { buildReanchorEvent, parseReanchorPayload } from "./reanchor-plan.ts";
+import { runReanchorPlan } from "./reanchor-plan-run.ts";
 import type { EventInput } from "./types.ts";
 
 /** A reset devnet's new genesis hash: valid base58, none of the three public clusters'. */
@@ -104,6 +111,19 @@ class World {
 	sendCode = 0;
 	readBackMemo: string | null | undefined = undefined;
 	emitStored = true;
+	/** The recorded notes the ledger would answer, per hour; `emit` adds the notes the executor writes. */
+	noteRecords = new Map<number, ReanchorRecord[]>();
+	notesCalls: string[] = [];
+	notesFail = false;
+	/** The `before` cursor of each listing call, and a listing of filler signatures that never reaches the horizon. */
+	listBefore: Array<string | undefined> = [];
+	endlessListing = false;
+	/** When set, the send waits on it, so a run stays in flight while a second one starts. */
+	sendGate: Promise<void> | null = null;
+	/** Resolved when a send reaches the gate: the signal that the run is in flight, so a test never waits on a clock. */
+	readonly sendReached = Promise.withResolvers<void>();
+	lockHeldBy: string | null = null;
+	lockReleases = 0;
 
 	runnerCalls: string[][] = [];
 	rpcCalls: string[] = [];
@@ -148,10 +168,16 @@ class World {
 			this.rpcCalls.push(`tx:${signature.slice(0, 2)}:${commitment}`);
 			return this.chain.get(signature) ?? null;
 		},
-		addressMemos: async (pubkey) => {
+		addressMemos: async (pubkey, limit, before) => {
 			this.rpcCalls.push(`list:${pubkey.slice(0, 4)}`);
+			this.listBefore.push(before);
 			if (this.listingFails) throw new Error("fetch failed: https://rpc.example.invalid/v1/key-4411");
-			return this.listing;
+			if (this.endlessListing) {
+				const page = this.listBefore.length;
+				return Array.from({ length: limit }, (_, i) => ({ signature: `filler-${page}-${i}`, memo: null, err: null, slot: 1 }));
+			}
+			const start = before === undefined ? 0 : this.listing.findIndex((hint) => hint.signature === before) + 1;
+			return this.listing.slice(start, start + limit);
 		},
 		getGenesisHash: async () => {
 			this.rpcCalls.push("genesis");
@@ -169,6 +195,10 @@ class World {
 		if (argv[1] === "pubkey") return { code: 0, stdout: `${this.keygenOut}\n`, stderr: "" };
 		if (argv[1] !== "transfer") throw new TypeError(`the fake runner answers only pubkey and transfer, got ${String(argv[1])}`);
 		if (this.sendCode !== 0) return { code: this.sendCode, stdout: "", stderr: "Error: RPC response error -32002 at https://rpc.example.invalid/v1/key-4411" };
+		if (this.sendGate !== null) {
+			this.sendReached.resolve();
+			await this.sendGate;
+		}
 		const signature = newSig(++this.sends);
 		const memo = argv[5] as string;
 		this.chain.set(signature, { ...TX_TEMPLATE, memo: this.readBackMemo === undefined ? memo : this.readBackMemo });
@@ -188,7 +218,27 @@ class World {
 		},
 		emit: async (input: EventInput) => {
 			this.emitted.push(input);
-			return this.emitStored ? { stored: true } : { stored: false, error: "greptime refused https://10.0.0.9:4000" };
+			if (!this.emitStored) return { stored: false, error: "greptime refused https://10.0.0.9:4000" };
+			// The ledger now holds the note: a later run reads it back.
+			const payload = parseReanchorPayload(input.payload);
+			const hourMs = Date.parse(payload.period_start);
+			const record: ReanchorRecord = { event_id: `evt_note_${this.emitted.length}`, ts: hourIso(NOW), surface: SURFACE, payload };
+			this.noteRecords.set(hourMs, [record, ...(this.noteRecords.get(hourMs) ?? [])]);
+			return { stored: true };
+		},
+	};
+
+	/** One run at a time: a second acquire while held is refused, as `fileLock` does. */
+	readonly lock: ReanchorLock = {
+		acquire: (): LockAttempt => {
+			if (this.lockHeldBy !== null) return { held: this.lockHeldBy };
+			this.lockHeldBy = "pid 1";
+			return {
+				release: () => {
+					this.lockReleases += 1;
+					this.lockHeldBy = null;
+				},
+			};
 		},
 	};
 
@@ -202,6 +252,12 @@ class World {
 			surface: SURFACE,
 			operatorSurfaces: new Set([SURFACE]),
 			clock: () => NOW,
+			notes: async (hour): Promise<ReanchorNotes> => {
+				this.notesCalls.push(hour.period_start);
+				if (this.notesFail) throw new Error("ledger down");
+				return { records: this.noteRecords.get(hour.period_start_ms) ?? [], incomplete: null };
+			},
+			lock: this.lock,
 			...over,
 		};
 	}
@@ -228,6 +284,40 @@ describe("the saved plan", () => {
 
 	test("a plan with no hour is valid and means nothing to do", () => {
 		expect(parseSavedPlan(planText([])).hours).toEqual([]);
+	});
+
+	test("a plan with no hour and no observed genesis (the planner reads no chain for an empty window) is valid", () => {
+		expect(parseSavedPlan(planText([], { chain: { observed_genesis: null } }))).toEqual({ observed_genesis: null, hours: [] });
+	});
+
+	test("the report the real planner prints for a window with no anchors row round-trips, and executing it reads and sends nothing", async () => {
+		const planned = await runReanchorPlan(["--json"], {
+			now: () => NOW,
+			open: async () => ({
+				ledger: { anchorsBetween: async () => [] },
+				rpc: {
+					getGenesisHash: async () => {
+						throw new Error("an empty window reads no chain");
+					},
+					transactionMemo: async () => {
+						throw new Error("an empty window reads no chain");
+					},
+				},
+				expectedGenesis: DEVNET_GENESIS_HASH,
+			}),
+		});
+		expect(planned.code).toBe(0);
+		expect(JSON.parse(planned.stdout).chain.observed_genesis).toBeNull();
+
+		const plan = parseSavedPlan(planned.stdout);
+		expect(plan).toEqual({ observed_genesis: null, hours: [] });
+		const w = new World([]);
+		const result = await executeReanchor(plan, options(), w.deps());
+		expect(result).toMatchObject({ code: 0, refused: null, sent: 0 });
+		expect(result.stdout).toContain("the plan has no hour to re-anchor");
+		expect(w.rpcCalls).toEqual([]);
+		expect(w.runnerCalls).toEqual([]);
+		expect(w.lockHeldBy).toBeNull();
 	});
 
 	test.each([
@@ -539,35 +629,28 @@ describe("adopt before send", () => {
 		expect(w.emitted[0]?.idempotency_key).toBe(`reanchor:${hourIso(H1)}:${adopted}`);
 	});
 
-	test("an adopted hour whose note is already stored is not recorded twice", async () => {
+	test("an adopted hour whose note is already stored is done by that note: nothing is listed, sent or recorded twice", async () => {
 		const w = new World(ONE);
 		const adopted = newSig(7);
-		w.listing = [{ signature: adopted, memo: memoOf(H1, 1), err: null, slot: 5 }];
 		w.chain.set(adopted, { ...TX_TEMPLATE, memo: memoOf(H1, 1) });
-		const asked: Array<[string, string]> = [];
-		const result = await w.run(ONE, {}, {
-			recorded: async (period, signature) => {
-				asked.push([period, signature]);
-				return true;
-			},
-		});
+		w.noteRecords.set(H1, [noteRecord(1, H1, adopted)]);
+		const result = await w.run(ONE);
 		expect(result).toMatchObject({ code: 0, sent: 0, adopted: 1 });
-		expect(asked).toEqual([[hourIso(H1), adopted]]);
+		expect(w.notesCalls).toEqual([hourIso(H1)]);
 		expect(result.stdout).toContain("already recorded");
+		expect(w.listBefore).toEqual([]);
 		w.expectUntouched();
 	});
 
-	test("a failing `recorded` lookup records anyway: a duplicate note is harmless, a missing one is not", async () => {
+	test("a notes read that fails is no note: the earlier send is still found by discovery and recorded anyway, a duplicate note is harmless, a missing one is not", async () => {
 		const w = new World(ONE);
 		const adopted = newSig(7);
 		w.listing = [{ signature: adopted, memo: memoOf(H1, 1), err: null, slot: 5 }];
 		w.chain.set(adopted, { ...TX_TEMPLATE, memo: memoOf(H1, 1) });
-		const result = await w.run(ONE, {}, {
-			recorded: async () => {
-				throw new Error("ledger down");
-			},
-		});
+		w.notesFail = true;
+		const result = await w.run(ONE);
 		expect(result.code).toBe(0);
+		expect(w.sendCalls).toEqual([]);
 		expect(w.emitted).toHaveLength(1);
 	});
 
@@ -660,7 +743,7 @@ describe("the one send", () => {
 		expect(w.sendCalls).toHaveLength(1);
 		expect(w.emitted).toHaveLength(1);
 
-		const second = await w.run(TWO, { maxHours: 1 }, { recorded: async (period, signature) => period === hourIso(H1) && signature === newSig(1) });
+		const second = await w.run(TWO, { maxHours: 1 });
 		expect(second).toMatchObject({ code: 0, sent: 1, adopted: 1 });
 		expect(w.sendCalls).toHaveLength(2);
 		expect(w.sendCalls[1]?.[5]).toBe(formatMemo({ periodStartMs: H2, rootHex: rootFor(2), count: countFor(2) }));
@@ -739,5 +822,213 @@ describe("the one send", () => {
 		await w.run(ONE);
 		expect(Object.keys(w.ledger)).toEqual(["anchorForPeriod"]);
 		expect(w.ledgerCalls.every((ms) => ms === H1)).toBe(true);
+	});
+});
+
+function noteRecord(n: number, hourMs: number, signature: string, over: { previous?: string } = {}): ReanchorRecord {
+	const draft = buildReanchorEvent({
+		period_start: hourIso(hourMs),
+		root: rootFor(n),
+		event_count: countFor(n),
+		previous_tx_sig: over.previous ?? oldSig(n),
+		new_tx_sig: signature,
+		genesis: GENESIS,
+	});
+	return { event_id: `evt_note_${n}`, ts: hourIso(hourMs + 3 * HOUR_MS), surface: SURFACE, payload: draft.payload };
+}
+
+const memoOf = (hourMs: number, n: number): string => formatMemo({ periodStartMs: hourMs, rootHex: rootFor(n), count: countFor(n) });
+
+describe("recorded notes are read before discovery", () => {
+	test("a bound note whose transaction verifies finishes the hour: no listing, no send, no second note", async () => {
+		const w = new World(ONE);
+		const done = newSig(7);
+		w.chain.set(done, { ...TX_TEMPLATE, memo: memoOf(H1, 1) });
+		w.noteRecords.set(H1, [noteRecord(1, H1, done)]);
+		const result = await w.run(ONE);
+		expect(result).toMatchObject({ code: 0, sent: 0, adopted: 1 });
+		expect(result.stdout).toContain(`${hourIso(H1)} adopted ${done} (already recorded)`);
+		expect(w.rpcCalls.some((call) => call.startsWith("list:"))).toBe(false);
+		w.expectUntouched();
+	});
+
+	test("a note that is not proof is ignored and discovery follows: a signature the cluster does not know, a note bound to another row, a memo that is not the hour's", async () => {
+		const unknown = newSig(7);
+		const other = newSig(8);
+		const wrong = newSig(9);
+		const w = new World(ONE);
+		w.chain.set(wrong, { ...TX_TEMPLATE, memo: memoOf(H1, 2) });
+		w.noteRecords.set(H1, [noteRecord(1, H1, unknown), noteRecord(1, H1, other, { previous: oldSig(5) }), noteRecord(1, H1, wrong)]);
+		const result = await w.run(ONE);
+		expect(result).toMatchObject({ code: 0, sent: 1, adopted: 0 });
+		expect(w.listBefore).toEqual([undefined]);
+		expect(w.sendCalls).toHaveLength(1);
+	});
+
+	test("the notes of every hour are read before the first send", async () => {
+		const w = new World(TWO);
+		const result = await w.run(TWO, { maxHours: 2 });
+		expect(result).toMatchObject({ code: 0, sent: 2 });
+		expect(w.notesCalls).toEqual([hourIso(H1), hourIso(H2)]);
+	});
+});
+
+describe("discovery pages back through the signer's history", () => {
+	const HOURS = 200;
+	const planned: Planned[] = Array.from({ length: HOURS }, (_, k) => ({ hourMs: H1 + k * HOUR_MS, n: k + 1 }));
+	const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+	const uniqueSig = (k: number): string => `${BASE58.charAt(Math.floor(k / 58))}${BASE58.charAt(k % 58)}${"c".repeat(86)}`;
+
+	/** The world after several runs: one confirmed memo per planned hour, newest first, so the earliest hours lie far past the first page. */
+	function sentWorld(): World {
+		const w = new World(planned);
+		w.listing = planned.map(({ hourMs, n }, k) => ({ signature: uniqueSig(k), memo: memoOf(hourMs, n), err: null, slot: 5 + k })).reverse();
+		for (const [k, { hourMs, n }] of planned.entries()) w.chain.set(uniqueSig(k), { ...TX_TEMPLATE, memo: memoOf(hourMs, n) });
+		return w;
+	}
+
+	test("a 200-hour plan whose earliest receipts fall outside the first 100 signatures is found by paging: every hour is adopted, none resent", async () => {
+		const w = sentWorld();
+		const result = await w.run(planned);
+		expect(result).toMatchObject({ code: 0, refused: null, sent: 0, adopted: HOURS });
+		expect(w.sendCalls).toEqual([]);
+		expect(w.emitted).toHaveLength(HOURS);
+		// Three calls: the newest page, the next one older (before the oldest signature of the first), and the empty end of the history.
+		expect(w.listBefore).toEqual([undefined, uniqueSig(HOURS - DISCOVERY_PAGE_SIZE), uniqueSig(0)]);
+	});
+
+	test("the same world with the notes already recorded lists nothing at all", async () => {
+		const w = sentWorld();
+		for (const [k, { hourMs, n }] of planned.entries()) w.noteRecords.set(hourMs, [noteRecord(n, hourMs, uniqueSig(k))]);
+		const result = await w.run(planned);
+		expect(result).toMatchObject({ code: 0, sent: 0, adopted: HOURS });
+		expect(w.listBefore).toEqual([]);
+		w.expectUntouched();
+	});
+
+	test("paging stops at the first page that ends before the plan's earliest hour", async () => {
+		const w = new World(ONE);
+		const before = (H1 - HOUR_MS) / 1000;
+		w.listing = Array.from({ length: DISCOVERY_PAGE_SIZE + 50 }, (_, i) => ({ signature: `old-${i}`, memo: null, err: null, slot: 1, blockTime: before }));
+		const result = await w.run(ONE);
+		expect(result).toMatchObject({ code: 0, sent: 1 });
+		expect(w.listBefore).toEqual([undefined]);
+	});
+
+	test("a page that ends at or after the earliest hour is followed by the next one", async () => {
+		const w = new World(ONE);
+		const after = (H1 + HOUR_MS) / 1000;
+		w.listing = Array.from({ length: DISCOVERY_PAGE_SIZE + 50 }, (_, i) => ({ signature: `new-${i}`, memo: null, err: null, slot: 1, blockTime: after }));
+		const result = await w.run(ONE);
+		expect(result).toMatchObject({ code: 0, sent: 1 });
+		expect(w.listBefore).toEqual([undefined, `new-${DISCOVERY_PAGE_SIZE - 1}`]);
+	});
+
+	test("a listing that never reaches the horizon refuses at the page cap instead of concluding nothing was sent, and sends nothing", async () => {
+		const w = new World(ONE);
+		w.endlessListing = true;
+		const result = await w.run(ONE);
+		expect(result).toMatchObject({ code: 1, refused: "discovery-incomplete", sent: 0 });
+		expect(result.stderr).toContain("an earlier send cannot be ruled out");
+		expect(w.listBefore).toHaveLength(DISCOVERY_MAX_PAGES);
+		w.expectUntouched();
+	});
+
+	test("a page that cannot be read refuses as rpc-unreadable, however far the paging had got", async () => {
+		const w = new World(ONE);
+		w.endlessListing = true;
+		const list = w.rpc.addressMemos.bind(w.rpc);
+		w.rpc.addressMemos = async (pubkey, limit, before) => {
+			if (w.listBefore.length === 2) throw new Error("fetch failed: https://rpc.example.invalid/v1/key-4411");
+			return list(pubkey, limit, before);
+		};
+		const result = await w.run(ONE);
+		expect(result).toMatchObject({ code: 1, refused: "rpc-unreadable", sent: 0 });
+		expect(result.stderr).not.toContain("rpc.example.invalid");
+		w.expectUntouched();
+	});
+});
+
+describe("every read-only check of every hour finishes before the first send", () => {
+	test("a later hour whose stored signature exists on the cluster is refused before the first hour is sent", async () => {
+		const w = new World(TWO);
+		w.chain.set(oldSig(2), { ...TX_TEMPLATE, memo: memoOf(H2, 2) });
+		const result = await w.run(TWO, { maxHours: 2 });
+		expect(result).toMatchObject({ code: 1, refused: "present-on-cluster", sent: 0 });
+		expect(result.stderr).toContain(hourIso(H2));
+		w.expectUntouched();
+	});
+
+	test("a later hour with a conflicting earlier memo is refused before the first hour is sent", async () => {
+		const w = new World(TWO);
+		const conflicting = newSig(8);
+		const memo = formatMemo({ periodStartMs: H2, rootHex: rootFor(9), count: countFor(2) });
+		w.listing = [{ signature: conflicting, memo, err: null, slot: 5 }];
+		w.chain.set(conflicting, { ...TX_TEMPLATE, memo });
+		const result = await w.run(TWO, { maxHours: 2 });
+		expect(result).toMatchObject({ code: 1, refused: "root-mismatch", sent: 0 });
+		w.expectUntouched();
+	});
+
+	test("a later hour whose earlier transaction cannot be read is refused before the first hour is sent", async () => {
+		const w = new World(TWO);
+		w.listing = [{ signature: newSig(8), memo: memoOf(H2, 2), err: null, slot: 5 }];
+		const result = await w.run(TWO, { maxHours: 2 });
+		expect(result).toMatchObject({ code: 1, refused: "rpc-unreadable", sent: 0 });
+		w.expectUntouched();
+	});
+});
+
+describe("overlapping runs", () => {
+	test("a second run while the first is in flight is refused as reanchor-locked, before it lists or sends anything; the first completes and releases the lock", async () => {
+		const w = new World(ONE);
+		const gate = Promise.withResolvers<void>();
+		w.sendGate = gate.promise;
+		const first = w.run(ONE);
+		await w.sendReached.promise;
+		expect(w.lockHeldBy).toBe("pid 1");
+		const listedByFirst = w.listBefore.length;
+
+		const second = await w.run(ONE);
+		expect(second).toMatchObject({ code: 1, refused: "reanchor-locked", sent: 0, adopted: 0 });
+		expect(second.stderr).toContain("pid 1");
+		expect(w.sendCalls).toHaveLength(1);
+		expect(w.listBefore).toHaveLength(listedByFirst);
+		expect(w.emitted).toEqual([]);
+
+		gate.resolve();
+		expect(await first).toMatchObject({ code: 0, sent: 1 });
+		expect(w.lockHeldBy).toBeNull();
+		expect(w.lockReleases).toBe(1);
+
+		// With the lock free again the next run adopts the recorded hour and sends nothing.
+		expect(await w.run(ONE)).toMatchObject({ code: 0, sent: 0, adopted: 1 });
+		expect(w.sendCalls).toHaveLength(1);
+	});
+
+	test("the lock is released on every way out: a refusal after it, a failed send and a failed note", async () => {
+		const refused = new World(ONE);
+		refused.listingFails = true;
+		expect(await refused.run(ONE)).toMatchObject({ refused: "rpc-unreadable" });
+		expect(refused.lockHeldBy).toBeNull();
+		expect(refused.lockReleases).toBe(1);
+
+		const failedSend = new World(ONE);
+		failedSend.sendCode = 1;
+		expect(await failedSend.run(ONE)).toMatchObject({ refused: "send-failed" });
+		expect(failedSend.lockHeldBy).toBeNull();
+
+		const failedNote = new World(ONE);
+		failedNote.emitStored = false;
+		expect(await failedNote.run(ONE)).toMatchObject({ refused: "store-failed" });
+		expect(failedNote.lockHeldBy).toBeNull();
+	});
+
+	test("a gate that refuses before the lock never takes it", async () => {
+		const w = new World(ONE);
+		w.balance = 0;
+		expect(await w.run(ONE)).toMatchObject({ refused: "unfunded" });
+		expect(w.lockReleases).toBe(0);
+		expect(w.lockHeldBy).toBeNull();
 	});
 });

@@ -149,7 +149,7 @@ import { governMemoryWrite } from "./memory-write.ts";
 import { forgetEntries, selectForRollback, type ForgetReport, type ForgetRequest, type PlaneDeleteResult, type RollbackSelectRequest, type RollbackSelection } from "./memory-forget.ts";
 import { ForgetUnavailableError, forgetDocumentId, planeDeleteFor } from "./memory-forget-plane.ts";
 import { verifyMemoryRecord, MemoryVerifyError, type MemoryVerifyResult } from "./memory-verify.ts";
-import { anchorEvidenceFor, followReanchor, verifyCheckpointRef, type AnchorVerifyPorts, type CheckpointVerifyToolResult, type SignerSetSummary } from "./anchor-verify-deps.ts";
+import { anchorEvidenceFor, followReanchor, ReanchorReadIncomplete, verifyCheckpointRef, type AnchorVerifyPorts, type CheckpointVerifyToolResult, type SignerSetSummary } from "./anchor-verify-deps.ts";
 import { CheckpointVerifyError } from "./checkpoint-verify.ts";
 import {
 	DEFAULT_ANCHOR_TIMEOUT_MS,
@@ -6618,7 +6618,18 @@ export class Substrate {
 		if (!greptime) throw new Error("GREPTIME_URL is not set");
 		const stored = await greptime.anchorForPeriod(hour);
 		// After a devnet reset the stored row names a vanished signature; an operator's `anchor.reanchor` note for the hour points at its replacement.
-		const row = stored === null ? null : await followReanchor(this.anchorVerifyPorts(), hour, stored);
+		let row: typeof stored = null;
+		if (stored !== null) {
+			try {
+				row = await followReanchor(this.anchorVerifyPorts(), hour, stored);
+			} catch (cause) {
+				// The notes could not all be read, so judging the stored row could pass over a newer pointer: unverified, with the reason.
+				if (cause instanceof ReanchorReadIncomplete) {
+					return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: stored.tx_sig, reason: redact(cause.message) };
+				}
+				throw cause;
+			}
+		}
 		if (!row) {
 			if (!isClosed(hour, now, INGEST_LAG_MS) || now < hourEnd(hour) + VERIFY_PENDING_MS) {
 				return { period_start, period_end, status: "pending", event_count: digest.event_count, root: digest.root };

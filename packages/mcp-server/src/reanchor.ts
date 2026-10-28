@@ -10,7 +10,8 @@
  * DRY RUN BY DEFAULT. {@link dryRunReanchor} is pure: it prints `would re-anchor <hour>` per planned hour and touches no port, so
  * no runner can be called. Only {@link executeReanchor} sends, and only after every gate below has passed.
  *
- * Gates of `--execute`, all before the first send (the one runner call that spends fee):
+ * Gates of `--execute`, ALL before the first send (the one runner call that spends fee), so no refusal can follow a send except
+ * the send's own failure and the note's:
  *  1. `--confirm-genesis` was given, and the endpoint URL passes the devnet guard (`assertDevnetRpcUrl`).
  *  2. The live `getGenesisHash` equals `--confirm-genesis`, equals the plan's observed genesis and every hour's target genesis,
  *     and is not the mainnet-beta or the testnet genesis. A genesis other than `DEVNET_GENESIS_HASH` is accepted HERE ONLY: that is
@@ -20,8 +21,16 @@
  *  4. For every plan hour the digest is recomputed from the ledger and refused as `root-mismatch` unless the stored row, the
  *     recomputed root and count, and the stored memo (exactly `formatMemo` of the hour, root and count) all agree with the plan
  *     byte for byte.
- *  5. Per hour: the stored `tx_sig` is absent on the cluster (present means this is not a reset), and an earlier send of this very
- *     memo by the signer is ADOPTED, never duplicated.
+ *  5. The run's lock (`deps.lock`; the entry builds `fileLock`: a file beside the plan, create-exclusive, stale after a dead pid or
+ *     30 minutes) is held from here to the end of the run, across discovery, send and recording, so two overlapping runs cannot
+ *     both pass discovery before either send is visible; the second refuses as `reanchor-locked`.
+ *  6. For EVERY plan hour, read-only, before the first send: the stored `tx_sig` is absent on the cluster (present means this is not
+ *     a reset); a recorded `anchor.reanchor` note bound to the hour, read through the same trusted-surface read the verifier uses,
+ *     whose transaction verifies on chain means the hour is done (adopted, never sent); for each hour without one, an earlier send
+ *     of its memo by the signer is found by PAGING `getSignaturesForAddress` backwards (`before`) until a signature older than the
+ *     plan's earliest period start (or the end of the signer's history) is reached, and is ADOPTED, never duplicated. A listing
+ *     that cannot be read refuses (`rpc-unreadable`), and a page cap hit before the horizon refuses (`discovery-incomplete`): a miss
+ *     in a bounded listing is never read as proof that nothing was sent.
  *
  * The memo carries period, root and count only, never event content; the keypair is only ever a path on a CLI argv.
  *
@@ -48,7 +57,7 @@ import {
 	type TransactionMemo,
 } from "@substrate/ledger";
 import { isAbsolute } from "node:path";
-import { reanchorSessionId } from "./anchor-verify-deps.ts";
+import { isBoundNote, reanchorSessionId, type ReanchorNotes } from "./anchor-verify-deps.ts";
 import { ADDRESS_MEMO_LIMIT, DEVNET_GENESIS_HASH, MAX_HOURS_PER_RUN, REQUIRED_BALANCE_LAMPORTS } from "./anchor.ts";
 import type { AnchorRow, GreptimeClient } from "./greptime.ts";
 import { buildReanchorEvent } from "./reanchor-plan.ts";
@@ -80,6 +89,7 @@ export const REANCHOR_RUN_USAGE =
 	"  --confirm-genesis HASH the genesis hash the endpoint must report; it must also equal the plan's observed genesis (required with --execute)\n" +
 	`  --max-hours N          at most N transactions sent per run, 1..${MAX_HOURS_PER_RUN}, default 1 (an hour already sent is adopted, not counted)\n` +
 	"  --surface NAME         the operator surface the anchor.reanchor note is written as (needed when several operator surfaces exist)\n" +
+	"  (lock)                 a lock file `.reanchor.lock` beside the plan file is held across discovery, send and recording; an overlapping run refuses (reanchor-locked)\n" +
 	"  environment (names only; none is new): GREPTIME_*, SOLANA_RPC_URL, SOLANA_ANCHOR_KEYPAIR, SOLANA_ANCHOR_PUBKEY, SOLANA_CLI\n" +
 	"exit: 0 dry run or done, 1 refused or failed (the first line on stderr names the gate), 2 usage or configuration\n";
 
@@ -172,8 +182,8 @@ export interface SavedPlanHour {
 }
 
 export interface SavedPlan {
-	/** The genesis hash the planning run observed on the cluster the hours would be written to. */
-	observed_genesis: string;
+	/** The genesis hash the planning run observed on the cluster the hours would be written to; null only for a plan with no hour (the planner reads no chain then). */
+	observed_genesis: string | null;
 	/** Ascending by hour. */
 	hours: SavedPlanHour[];
 }
@@ -209,7 +219,8 @@ function planHour(raw: unknown, index: number, observedGenesis: string): SavedPl
 /**
  * Parse the JSON `reanchor-plan-run.ts --json` printed. Refuses anything that is not a schema-1 dry-run report with an observed
  * genesis, or whose hours are not each self-consistent (memo = `formatMemo` of the hour, root and count). A plan with no hours is
- * valid: there is nothing to do.
+ * valid: there is nothing to do, and the planner then reads no chain, so its observed genesis is `null` and that is accepted for
+ * an empty plan only.
  */
 export function parseSavedPlan(text: string): SavedPlan {
 	let body: unknown;
@@ -221,12 +232,14 @@ export function parseSavedPlan(text: string): SavedPlan {
 	if (!isRecord(body)) throw new ReanchorPlanError("the plan file is not a JSON object");
 	if (body["schema"] !== 1) throw new ReanchorPlanError("the plan file is not schema 1");
 	if (body["dry_run"] !== true) throw new ReanchorPlanError("the plan file is not a dry-run plan (dry_run is not true)");
+	const plan = body["plan"];
+	const rawHours = isRecord(plan) ? plan["hours"] : undefined;
+	if (!isRecord(plan) || plan["dry_run"] !== true || !Array.isArray(rawHours)) throw new ReanchorPlanError("the plan has no plan.hours list");
 	const chain = body["chain"];
 	const observed = isRecord(chain) ? chain["observed_genesis"] : undefined;
+	if (observed === null && rawHours.length === 0) return { observed_genesis: null, hours: [] };
 	if (typeof observed !== "string" || !GENESIS_RE.test(observed)) throw new ReanchorPlanError("the plan has no observed genesis hash (chain.observed_genesis)");
-	const plan = body["plan"];
-	if (!isRecord(plan) || plan["dry_run"] !== true || !Array.isArray(plan["hours"])) throw new ReanchorPlanError("the plan has no plan.hours list");
-	const hours = (plan["hours"] as unknown[]).map((raw, index) => planHour(raw, index, observed));
+	const hours = rawHours.map((raw: unknown, index: number) => planHour(raw, index, observed));
 	const seen = new Set<number>();
 	for (const hour of hours) {
 		if (seen.has(hour.period_start_ms)) throw new ReanchorPlanError(`the plan names ${hour.period_start} twice`);
@@ -255,6 +268,8 @@ export type RefusalCode =
 	| "digest-failed"
 	| "root-mismatch"
 	| "present-on-cluster"
+	| "discovery-incomplete"
+	| "reanchor-locked"
 	| "send-failed"
 	| "unexpected";
 
@@ -301,6 +316,14 @@ export interface ReanchorEnv {
 	cli: string;
 }
 
+/** The result of trying to take the run's lock: the held lock to release, or why it is held by another run. */
+export type LockAttempt = { release(): void } | { held: string };
+
+/** The inter-process lock a run holds across discovery, send and recording. Synchronous: the file system call is one step. */
+export interface ReanchorLock {
+	acquire(): LockAttempt;
+}
+
 export interface ReanchorDeps {
 	/** `anchorForPeriod` is the only ledger read the executor makes; it never writes the `anchors` table. */
 	ledger: Pick<GreptimeClient, "anchorForPeriod">;
@@ -313,8 +336,13 @@ export interface ReanchorDeps {
 	/** The surfaces the verifier trusts for `anchor.reanchor` (`operatorSurfaces(config)`). */
 	operatorSurfaces: ReadonlySet<string>;
 	clock?: () => number;
-	/** Whether an `anchor.reanchor` note for this hour and new signature is already stored, so an adopted hour is not recorded twice. */
-	recorded?: (periodStartIso: string, newTxSig: string) => Promise<boolean>;
+	/**
+	 * The recorded `anchor.reanchor` notes of an hour that are bound to it, read through the trusted-surface read the verifier uses
+	 * (`readReanchorNotes`). May throw: the executor then treats the hour as having no recorded note and falls back to discovery.
+	 */
+	notes: (hour: SavedPlanHour) => Promise<ReanchorNotes>;
+	/** The lock held across discovery, send and recording. */
+	lock: ReanchorLock;
 }
 
 class Refusal extends Error {
@@ -445,34 +473,98 @@ async function checkPreviousAbsent(hour: SavedPlanHour, rpc: Rpc): Promise<void>
 	}
 }
 
+/** Signatures one discovery page asks for. */
+export const DISCOVERY_PAGE_SIZE = ADDRESS_MEMO_LIMIT;
+/** Pages discovery may read before it refuses: the hard cap on `getSignaturesForAddress` calls. */
+export const DISCOVERY_MAX_PAGES = 100;
+
 /**
- * Gate 5b, adopt before send: an earlier send of this hour's memo by the signer (a re-anchor whose note was lost, or a run cut short
- * after the send) is found through the address listing and confirmed by reading the transaction. The same root and count adopt; a
- * different root or count for this hour is refused. Returns the signature to adopt, or null when nothing was sent yet.
+ * Gate 6a, for one hour: a recorded `anchor.reanchor` note bound to the hour (same root, count and previous signature) whose
+ * transaction is on this cluster, memo-exact and signed by the key, means the hour is done. Returns that signature, or null. A note
+ * whose transaction the cluster does not know is not proof; a transaction that cannot be read refuses, because a recorded send may
+ * be live. A notes read that fails is no note: discovery follows it.
  */
-async function findEarlierSend(hour: SavedPlanHour, deps: ReanchorDeps): Promise<string | null> {
-	const { rpc, env } = deps;
-	let listing: AddressMemo[];
+async function recordedSignature(hour: SavedPlanHour, deps: ReanchorDeps): Promise<string | null> {
+	let notes: ReanchorNotes;
 	try {
-		listing = await rpc.addressMemos(env.pubkey, ADDRESS_MEMO_LIMIT);
-	} catch (cause) {
-		throw new Refusal("rpc-unreadable", `${hour.period_start}: the signer's recent signatures could not be listed: ${reasonOf(cause)}`);
+		notes = await deps.notes(hour);
+	} catch {
+		return null;
 	}
-	for (const hint of listing) {
-		const parsed = hint.memo === null ? null : parseMemo(hint.memo);
-		if (parsed === null || parsed.periodStartMs !== hour.period_start_ms) continue;
+	const binding = { root: hour.root, event_count: hour.event_count, tx_sig: hour.previous_tx_sig };
+	for (const record of notes.records) {
+		if (!isBoundNote(record, binding)) continue;
+		let found: TransactionMemo | null;
+		try {
+			found = await lookup(deps.rpc, record.payload.new_tx_sig);
+		} catch (cause) {
+			throw new Refusal("rpc-unreadable", `${hour.period_start}: the recorded transaction ${record.payload.new_tx_sig} could not be read: ${reasonOf(cause)}`);
+		}
+		if (found === null || found.memo === null || found.payer !== deps.env.pubkey || !found.payerSigned || found.err !== null) continue;
+		const memo = parseMemo(found.memo);
+		if (memo !== null && memo.periodStartMs === hour.period_start_ms && memo.rootHex === hour.root && memo.count === hour.event_count) return record.payload.new_tx_sig;
+	}
+	return null;
+}
+
+/**
+ * Gate 6b, one listing for the hours without a recorded note: the signer's signatures are paged backwards (`before` the oldest
+ * signature of the previous page) and every memo naming a wanted hour is kept as a hint. Paging stops when the signer's history is
+ * exhausted (a short page) or a page ends at a block older than the earliest wanted period start: nothing before it can be a send of
+ * these hours. A cap hit first is `discovery-incomplete`, an unreadable page `rpc-unreadable`; neither is ever read as "absent".
+ */
+async function listEarlierSends(hours: readonly SavedPlanHour[], deps: ReanchorDeps): Promise<Map<number, string[]>> {
+	const { rpc, env } = deps;
+	const wanted = new Set(hours.map((hour) => hour.period_start_ms));
+	const horizonMs = Math.min(...wanted);
+	const hints = new Map<number, string[]>();
+	let before: string | undefined;
+	for (let page = 1; ; page++) {
+		let listing: AddressMemo[];
+		try {
+			listing = await rpc.addressMemos(env.pubkey, DISCOVERY_PAGE_SIZE, before);
+		} catch (cause) {
+			throw new Refusal("rpc-unreadable", `the signer's signatures could not be listed (page ${page}): ${reasonOf(cause)}`);
+		}
+		for (const hint of listing) {
+			const parsed = hint.memo === null ? null : parseMemo(hint.memo);
+			if (parsed === null || !wanted.has(parsed.periodStartMs)) continue;
+			const known = hints.get(parsed.periodStartMs);
+			if (known === undefined) hints.set(parsed.periodStartMs, [hint.signature]);
+			else known.push(hint.signature);
+		}
+		const oldest = listing[listing.length - 1];
+		if (oldest === undefined || listing.length < DISCOVERY_PAGE_SIZE) return hints;
+		if (typeof oldest.blockTime === "number" && oldest.blockTime * 1000 < horizonMs) return hints;
+		if (page >= DISCOVERY_MAX_PAGES) {
+			throw new Refusal(
+				"discovery-incomplete",
+				`the signer's signatures were not listed back to ${hourIso(horizonMs)} within ${DISCOVERY_MAX_PAGES} pages of ${DISCOVERY_PAGE_SIZE}, so an earlier send cannot be ruled out: nothing was sent`,
+			);
+		}
+		before = oldest.signature;
+	}
+}
+
+/**
+ * Gate 6c, for one hour: the hinted transactions are confirmed by reading them. The same root and count adopt; a different root or
+ * count for this hour is refused. Returns the signature to adopt, or null when no hinted transaction is this hour's memo by the signer.
+ */
+async function confirmEarlierSend(hour: SavedPlanHour, signatures: readonly string[], deps: ReanchorDeps): Promise<string | null> {
+	const { rpc, env } = deps;
+	for (const signature of signatures) {
 		let confirmed: TransactionMemo | null;
 		try {
-			confirmed = await rpc.transactionMemo(hint.signature, "confirmed");
+			confirmed = await rpc.transactionMemo(signature, "confirmed");
 		} catch (cause) {
-			throw new Refusal("rpc-unreadable", `${hour.period_start}: transaction ${hint.signature} could not be read: ${reasonOf(cause)}`);
+			throw new Refusal("rpc-unreadable", `${hour.period_start}: transaction ${signature} could not be read: ${reasonOf(cause)}`);
 		}
 		// A listed memo for this hour whose transaction cannot be read may already anchor it: sending again could duplicate it.
-		if (confirmed === null) throw new Refusal("rpc-unreadable", `${hour.period_start}: transaction ${hint.signature} could not be read, so an earlier send cannot be ruled out`);
+		if (confirmed === null) throw new Refusal("rpc-unreadable", `${hour.period_start}: transaction ${signature} could not be read, so an earlier send cannot be ruled out`);
 		if (confirmed.memo === null || confirmed.payer !== env.pubkey || !confirmed.payerSigned || confirmed.err !== null) continue;
 		const memo = parseMemo(confirmed.memo);
 		if (memo === null || memo.periodStartMs !== hour.period_start_ms) continue;
-		if (memo.rootHex === hour.root && memo.count === hour.event_count) return hint.signature;
+		if (memo.rootHex === hour.root && memo.count === hour.event_count) return signature;
 		throw new Refusal("root-mismatch", `${hour.period_start}: the cluster already holds a memo by the signer for this hour with root ${memo.rootHex} over ${memo.count} events, not the stored ${hour.root} over ${hour.event_count}`);
 	}
 	return null;
@@ -560,7 +652,9 @@ async function recordReanchor(hour: SavedPlanHour, newTxSig: string, genesis: st
 /**
  * `--execute`: send the plan's hours, at most `options.maxHours` transactions, after every gate. Never throws: every refusal is a
  * result with code 1 and the first word of stderr naming the gate. The only mutating calls are the one `runner` send per hour and the
- * one `substrate.emit` note; the `anchors` table is never written.
+ * one `substrate.emit` note; the `anchors` table is never written. Every read-only check of every hour (gates 1 to 4, then the lock
+ * and gate 6) finishes before the first send; what can still stop a run after a send is that send's own failure, its read-back and
+ * its note. Hours already sent and recorded are adopted by a re-run, so stopping there is safe.
  */
 export async function executeReanchor(plan: SavedPlan, options: ReanchorOptions, deps: ReanchorDeps): Promise<ReanchorResult> {
 	if (!options.execute) return dryRunReanchor(plan, options);
@@ -585,35 +679,60 @@ export async function executeReanchor(plan: SavedPlan, options: ReanchorOptions,
 		const genesis = await checkGates(plan, options, deps, budget);
 		for (const hour of plan.hours) await checkHour(hour, deps, now);
 
-		let left = 0;
-		for (const hour of plan.hours) {
-			await checkPreviousAbsent(hour, deps.rpc);
-			const earlier = await findEarlierSend(hour, deps);
-			let signature: string;
-			if (earlier !== null) {
-				signature = earlier;
-				state.adopted += 1;
-				out.push(`[reanchor] ${hour.period_start} adopted ${signature}`);
-			} else {
-				if (state.sent >= cap) {
-					left += 1;
+		const lock = deps.lock.acquire();
+		if ("held" in lock) throw new Refusal("reanchor-locked", `another re-anchor run is in progress (${lock.held}); wait for it to finish, or remove the lock file if that run is gone`);
+		try {
+			// Every read-only check of every hour first: nothing below this loop and the discovery that follows can refuse before a send.
+			const recorded = new Map<number, string>();
+			const unrecorded: SavedPlanHour[] = [];
+			for (const hour of plan.hours) {
+				await checkPreviousAbsent(hour, deps.rpc);
+				const noted = await recordedSignature(hour, deps);
+				if (noted === null) unrecorded.push(hour);
+				else recorded.set(hour.period_start_ms, noted);
+			}
+			const earlier = new Map<number, string>();
+			if (unrecorded.length > 0) {
+				const hints = await listEarlierSends(unrecorded, deps);
+				for (const hour of unrecorded) {
+					const adopted = await confirmEarlierSend(hour, hints.get(hour.period_start_ms) ?? [], deps);
+					if (adopted !== null) earlier.set(hour.period_start_ms, adopted);
+				}
+			}
+
+			let left = 0;
+			for (const hour of plan.hours) {
+				const noted = recorded.get(hour.period_start_ms);
+				if (noted !== undefined) {
+					state.adopted += 1;
+					out.push(`[reanchor] ${hour.period_start} adopted ${noted} (already recorded)`);
 					continue;
 				}
-				signature = await sendMemo(hour, deps);
-				state.sent += 1;
-				out.push(`[reanchor] ${hour.period_start} re-anchored ${signature}`);
+				const found = earlier.get(hour.period_start_ms);
+				let signature: string;
+				if (found !== undefined) {
+					signature = found;
+					state.adopted += 1;
+					out.push(`[reanchor] ${hour.period_start} adopted ${signature}`);
+				} else {
+					if (state.sent >= cap) {
+						left += 1;
+						continue;
+					}
+					signature = await sendMemo(hour, deps);
+					state.sent += 1;
+					out.push(`[reanchor] ${hour.period_start} re-anchored ${signature}`);
+				}
+				await recordReanchor(hour, signature, genesis, deps);
 			}
-			if (earlier !== null && deps.recorded !== undefined && (await deps.recorded(hour.period_start, signature).catch(() => false))) {
-				out.push(`[reanchor] ${hour.period_start} already recorded`);
-				continue;
+			out.push(`[reanchor] done: ${state.sent} sent, ${state.adopted} adopted, ${left} left in the plan${left > 0 ? " (run again)" : ""}`);
+			if (genesis !== DEVNET_GENESIS_HASH) {
+				out.push(`[reanchor] note: verification reads anything on genesis ${genesis} as unverified until DEVNET_GENESIS_HASH moves to it (runbook step b)`);
 			}
-			await recordReanchor(hour, signature, genesis, deps);
+			return done(null, null);
+		} finally {
+			lock.release();
 		}
-		out.push(`[reanchor] done: ${state.sent} sent, ${state.adopted} adopted, ${left} left in the plan${left > 0 ? " (run again)" : ""}`);
-		if (genesis !== DEVNET_GENESIS_HASH) {
-			out.push(`[reanchor] note: verification reads anything on genesis ${genesis} as unverified until DEVNET_GENESIS_HASH moves to it (runbook step b)`);
-		}
-		return done(null, null);
 	} catch (cause) {
 		if (cause instanceof Refusal) return done(cause.code, cause.message);
 		return done("unexpected", reasonOf(cause));

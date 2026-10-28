@@ -12,8 +12,10 @@ import {
 	CKPT_LOOKUP_WINDOW_MS,
 	LOOKUP_ROW_LIMIT,
 	MAX_OPERATOR_SURFACES,
-	readReanchorRecords,
+	readReanchorNotes,
+	REANCHOR_READ_MAX_PAGES,
 	reanchorSessionId,
+	ReanchorReadIncomplete,
 	ROTATION_READ_MAX_PAGES,
 	verifyCheckpointRef,
 	verifyEventRef,
@@ -320,12 +322,13 @@ describe("the signer set: the configured key plus operator rotations", () => {
 		const draft = buildSignerRotateEvent({ old_pubkey: oldKey, new_pubkey: newKey, effective_from_ms: at, reason: "retire the old anchor key" });
 		return event({ id: "evt_v16_retire", surface: OPERATOR as SubstrateEvent["surface"], kind: draft.kind, summary: draft.summary, payload: { ...draft.payload }, ts: new Date(at).toISOString(), session_id: null });
 	};
-	/** Operator reads that never run out: every page is full of fresh unrelated notes, so only the page cap stops the read. */
+	/** Operator reads that never run out: every page is full of fresh unrelated notes, so only the page cap stops the read. The hour's re-anchor session has none. */
 	const endlessNotes = (w: World): void => {
 		let served = 0;
 		w.ledger.queryEvents = async (query: EventQuery = {}) => {
 			w.ledger.calls.queryEvents++;
 			w.ledger.queries.push(query);
+			if (query.match?.session_id !== undefined) return [];
 			return Array.from({ length: LOOKUP_ROW_LIMIT }, () => {
 				const n = served++;
 				return toRow(event({ id: `evt_v16_endless_${n}`, surface: OPERATOR as SubstrateEvent["surface"], session_id: null, ts: new Date(H + 40 * HOUR_MS - n).toISOString() }));
@@ -337,7 +340,7 @@ describe("the signer set: the configured key plus operator rotations", () => {
 		w.ledger.events.push(rotation(OPERATOR, SIGNER_B));
 		const result = await verifyEventRef(w.ports, "evt_v16_note");
 		expect(result.status).toBe("anchored");
-		const rotationQueries = w.ledger.queries.filter((query) => query.match?.surface !== undefined);
+		const rotationQueries = w.ledger.queries.filter((query) => query.match?.surface !== undefined && query.match.session_id === undefined);
 		expect(rotationQueries).toEqual([{ match: { kind: "note", surface: OPERATOR }, limit: LOOKUP_ROW_LIMIT, order: "desc", includePayload: true }]);
 	});
 
@@ -754,7 +757,7 @@ describe("a re-anchored hour: the operator's note is a pointer, the chain transa
 		expect((await verifyWith(SECOND_SIGNATURE)).result.status).toBe("anchored");
 	});
 
-	test("readReanchorRecords reads one session of the hour, keeps only operator notes of that hour, newest first", async () => {
+	test("readReanchorNotes reads the hour's session once per operator surface, keeps only notes of that hour, newest first", async () => {
 		const w = world(event({ id: "evt_v16_note" }));
 		const otherHour = buildReanchorEvent({ period_start: new Date(H + HOUR_MS).toISOString(), root: storedRow(w).root, event_count: 5, previous_tx_sig: SIGNATURE, new_tx_sig: SECOND_SIGNATURE, genesis: DEVNET_GENESIS_HASH });
 		w.ledger.events.push(
@@ -765,17 +768,112 @@ describe("a re-anchored hour: the operator's note is a pointer, the chain transa
 			event({ id: "evt_v16_plain", surface: OPERATOR as SubstrateEvent["surface"], session_id: reanchorSessionId(storedRow(w).period_start), ts: NOTE_TS }),
 			note(w, { id: "evt_v16_elsewhere", session: "sess-elsewhere" }),
 		);
-		const records = await readReanchorRecords(w.ports, H);
+		const { records, incomplete } = await readReanchorNotes(w.ports, H);
+		expect(incomplete).toBeNull();
 		expect(records.map((record) => record.event_id)).toEqual(["evt_v16_b", "evt_v16_a"]);
 		expect(records.every((record) => record.surface === OPERATOR && record.payload.new_tx_sig === NEW_SIGNATURE)).toBe(true);
-		expect(w.ledger.queries).toEqual([{ match: { kind: "note", session_id: "anchor:2026-10-20T10" }, limit: LOOKUP_ROW_LIMIT, order: "desc", includePayload: true }]);
+		// The author filter is in the query itself, so the row limit applies to trusted notes only.
+		expect(w.ledger.queries).toEqual([{ match: { kind: "note", session_id: "anchor:2026-10-20T10", surface: OPERATOR }, limit: LOOKUP_ROW_LIMIT, order: "desc", includePayload: true }]);
 	});
 
-	test("readReanchorRecords asks nothing without an operator surface or a ledger", async () => {
+	test("readReanchorNotes asks nothing without an operator surface or a ledger", async () => {
 		const w = world(event({ id: "evt_v16_note" }));
-		expect(await readReanchorRecords({ ...w.ports, operatorSurfaces: new Set() }, H)).toEqual([]);
-		expect(await readReanchorRecords({ ...w.ports, ledger: null }, H)).toEqual([]);
+		expect(await readReanchorNotes({ ...w.ports, operatorSurfaces: new Set() }, H)).toEqual({ records: [], incomplete: null });
+		expect(await readReanchorNotes({ ...w.ports, ledger: null }, H)).toEqual({ records: [], incomplete: null });
 		expect(w.ledger.queries).toEqual([]);
+	});
+
+	test("every operator surface is read: the newest bound note across them wins", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		w.ports.operatorSurfaces = new Set([OPERATOR, "omp"]);
+		w.ledger.events.push(note(w, { id: "evt_v16_hermes", ts: new Date(H + 4 * HOUR_MS).toISOString() }), note(w, { id: "evt_v16_omp", surface: "omp", newSig: SECOND_SIGNATURE, ts: NOTE_TS }));
+		const { records } = await readReanchorNotes(w.ports, H, storedRow(w));
+		expect(records.map((record) => record.event_id)).toEqual(["evt_v16_omp", "evt_v16_hermes"]);
+		expect(w.ledger.queries.map((query) => query.match?.surface)).toEqual(["hermes", "omp"]);
+		const followed = await followReanchor(w.ports, H, storedRow(w));
+		expect(followed.tx_sig).toBe(SECOND_SIGNATURE);
+	});
+
+	test("600 ordinary notes of another caller in the predictable session, newer than the real note, do not hide it", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		w.ledger.events.push(note(w));
+		for (let i = 0; i < 600; i++) {
+			w.ledger.events.push(event({ id: `evt_v16_noise_${i}`, surface: "omp" as SubstrateEvent["surface"], session_id: reanchorSessionId(storedRow(w).period_start), ts: new Date(H + 6 * HOUR_MS + i * 1000).toISOString() }));
+		}
+		cluster(w, { [NEW_SIGNATURE]: tx(storedRow(w).memo) });
+		const result = await verifyEventRef(w.ports, "evt_v16_note");
+		expect(result.status).toBe("anchored");
+		if (!("evidence" in result)) throw new Error("expected evidence");
+		expect(result.evidence.signature).toBe(NEW_SIGNATURE);
+		const sessionQueries = w.ledger.queries.filter((query) => query.match?.session_id !== undefined);
+		expect(sessionQueries).toHaveLength(1);
+		expect(sessionQueries[0]?.match?.surface).toBe(OPERATOR);
+	});
+
+	test("a trusted surface's own noise is paged past until the newest bound note is found", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		w.ledger.events.push(note(w));
+		const session = reanchorSessionId(storedRow(w).period_start);
+		for (let i = 0; i < 600; i++) {
+			w.ledger.events.push(event({ id: `evt_v16_noise_${i}`, surface: OPERATOR as SubstrateEvent["surface"], session_id: session, ts: new Date(H + 6 * HOUR_MS + i * 1000).toISOString() }));
+		}
+		cluster(w, { [NEW_SIGNATURE]: tx(storedRow(w).memo) });
+		const result = await verifyEventRef(w.ports, "evt_v16_note");
+		expect(result.status).toBe("anchored");
+		const sessionQueries = w.ledger.queries.filter((query) => query.match?.session_id !== undefined);
+		expect(sessionQueries).toHaveLength(2);
+		// The second page continues from the oldest note of the first (the 500th newest of 600 noise notes).
+		expect(sessionQueries[1]?.until).toBe(new Date(H + 6 * HOUR_MS + 100 * 1000).toISOString());
+	});
+
+	test("a read cut by its page cap is unverified with a reason of its own: the stored row is never judged through it", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		w.ledger.events.push(note(w));
+		const session = reanchorSessionId(storedRow(w).period_start);
+		const original = w.ledger.queryEvents.bind(w.ledger);
+		let served = 0;
+		w.ledger.queryEvents = async (query: EventQuery = {}) => {
+			if (query.match?.session_id !== session) return original(query);
+			w.ledger.calls.queryEvents++;
+			w.ledger.queries.push(query);
+			// A trusted surface with more notes than the page cap reads: the real note is never reached.
+			return Array.from({ length: LOOKUP_ROW_LIMIT }, () => {
+				const n = served++;
+				return toRow(event({ id: `evt_v16_flood_${n}`, surface: OPERATOR as SubstrateEvent["surface"], session_id: session, ts: new Date(H + 40 * HOUR_MS - n * 1000).toISOString() }));
+			});
+		};
+		cluster(w, { [NEW_SIGNATURE]: tx(storedRow(w).memo) });
+
+		const { incomplete } = await readReanchorNotes(w.ports, H, storedRow(w));
+		expect(incomplete).toContain(`${REANCHOR_READ_MAX_PAGES}-page limit`);
+		await expect(followReanchor(w.ports, H, storedRow(w))).rejects.toBeInstanceOf(ReanchorReadIncomplete);
+
+		const result = await verifyEventRef(w.ports, "evt_v16_note");
+		expect(result.status).toBe("unverified");
+		expect(result.reasons.join(" ")).toContain("could not be read completely");
+		// The old signature was never asked about.
+		expect(sigsRead(w)).toEqual([]);
+	});
+
+	test("a failed first read of the replacement is the failed read of the verification too: unverified, never a mismatch against the stale signer", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		const rotation = buildSignerRotateEvent({ old_pubkey: SIGNER_A, new_pubkey: SIGNER_B, effective_from_ms: H + 4 * HOUR_MS, reason: "rotate the anchor key" });
+		w.ledger.events.push(
+			event({ id: "evt_v16_rotate", surface: OPERATOR as SubstrateEvent["surface"], session_id: null, kind: rotation.kind, summary: rotation.summary, payload: { ...rotation.payload }, ts: new Date(H + 4 * HOUR_MS).toISOString() }),
+			note(w),
+		);
+		const replacement = tx(storedRow(w).memo, { payer: SIGNER_B });
+		let reads = 0;
+		w.rpc.transactionMemo = async (signature: string, commitment: string) => {
+			w.rpc.calls.push([signature, commitment]);
+			reads++;
+			// The first read fails; a second one would succeed, and would name a signer other than the stored row's.
+			if (reads === 1) throw new Error("rpc down");
+			return commitment === "finalized" ? replacement : null;
+		};
+		const result = await verifyEventRef(w.ports, "evt_v16_note");
+		expect(result.status).toBe("unverified");
+		expect(reads).toBe(1);
 	});
 
 	test("followReanchor swaps only the pointer: the row's root, count and memo stay, and a chain read adds the signer and slot", async () => {

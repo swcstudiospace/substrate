@@ -13,16 +13,20 @@
  * It is the ONLY module that constructs the real executor (`execFileRunner`). Nothing else imports it: no test, no CI job, no
  * workflow, no package script, no systemd unit. The default mode opens nothing at all (no config, no ledger, no endpoint, no
  * runner). `--execute` is OPERATOR ONLY and is run by hand from the runbook (`docs/runbooks/devnet-reset-and-reanchor.md`, step e).
+ * `--execute` holds a lock file (`.reanchor.lock`, beside the plan file) across discovery, send and recording, and touches only the
+ * ledger: its `Substrate` has an in-memory retain outbox, so it never opens the live server's `SUBSTRATE_RETAIN_OUTBOX_PATH` file or
+ * starts a drain timer. A plan with no hour (the planner read no chain, so no observed genesis) is done at once, exit 0.
  *
  * Exit codes: 0 dry run printed, or every hour done; 1 a gate refused or a send or record failed (stderr starts with
  * `[reanchor] REFUSED <code>`; nothing further was sent); 2 usage, an unreadable or invalid plan, or missing configuration (a bad
  * flag, an unset `GREPTIME_URL`, an unset `SOLANA_ANCHOR_KEYPAIR` or `SOLANA_ANCHOR_PUBKEY`, a `SOLANA_RPC_URL` the devnet guard
  * refuses). No new environment variable: the names `loadConfig` already reads.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { createRpc, execFileRunner, RpcError, type Rpc } from "@substrate/ledger";
 import { loadConfig, operatorSurfaces, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
-import { readReanchorRecords } from "./anchor-verify-deps.ts";
+import { readReanchorNotes } from "./anchor-verify-deps.ts";
 import { GreptimeClient } from "./greptime.ts";
 import {
 	dryRunReanchor,
@@ -33,7 +37,9 @@ import {
 	ReanchorPlanError,
 	ReanchorRunUsageError,
 	reasonOf,
+	type LockAttempt,
 	type ReanchorDeps,
+	type ReanchorLock,
 	type ReanchorOptions,
 	type SavedPlan,
 } from "./reanchor.ts";
@@ -98,6 +104,100 @@ export interface OpenOptions {
 	substrateFor?: (config: SubstrateConfig, greptime: GreptimeClient) => ReanchorDeps["substrate"];
 }
 
+/** A lock older than this is stale whatever its pid says. */
+export const LOCK_STALE_MS = 30 * 60_000;
+
+export interface LockFileOptions {
+	pid?: number;
+	now?: () => number;
+	/** Whether the process of a pid is alive; the real one signals it with signal 0. */
+	alive?: (pid: number) => boolean;
+}
+
+function errorCode(cause: unknown): unknown {
+	return typeof cause === "object" && cause !== null && "code" in cause ? cause.code : undefined;
+}
+
+function processAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (cause) {
+		// No permission to signal means the process exists.
+		return errorCode(cause) === "EPERM";
+	}
+}
+
+/** The lock file as read: its raw text (to compare before breaking it), the holder's pid when it parses, and when it started. */
+function readHolder(path: string): { raw: string; pid: number | null; startedMs: number } | null {
+	let raw: string;
+	let mtimeMs: number;
+	try {
+		raw = readFileSync(path, "utf8");
+		mtimeMs = statSync(path).mtimeMs;
+	} catch {
+		// The file vanished between the failed create and this read.
+		return null;
+	}
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (typeof parsed === "object" && parsed !== null && "pid" in parsed && "started_ms" in parsed) {
+			const { pid, started_ms: startedMs } = parsed;
+			if (typeof pid === "number" && Number.isSafeInteger(pid) && typeof startedMs === "number" && Number.isFinite(startedMs)) return { raw, pid, startedMs };
+		}
+	} catch {
+		// A file another run is still writing, or garbage: judged by its age alone.
+	}
+	return { raw, pid: null, startedMs: mtimeMs };
+}
+
+/**
+ * The real lock of a run: `path` created exclusively (`wx`) with the holder's pid and start time, held across discovery, send and
+ * recording. An existing file is stale, and broken, when its pid is dead or it is older than {@link LOCK_STALE_MS}; an unreadable one
+ * is judged by its age only. The release removes the file only while it still holds this run's own text, so a lock taken over after a
+ * stale break is never removed by the old holder. A second run finding a live lock gets `held`, never waits.
+ */
+export function fileLock(path: string, options: LockFileOptions = {}): ReanchorLock {
+	const pid = options.pid ?? process.pid;
+	const now = options.now ?? Date.now;
+	const alive = options.alive ?? processAlive;
+	return {
+		acquire(): LockAttempt {
+			for (let attempt = 0; attempt < 3; attempt++) {
+				const mine = JSON.stringify({ pid, started_ms: now() });
+				try {
+					writeFileSync(path, mine, { flag: "wx", mode: 0o600 });
+					return {
+						release: () => {
+							try {
+								if (readFileSync(path, "utf8") === mine) unlinkSync(path);
+							} catch {
+								// Already gone: nothing to release.
+							}
+						},
+					};
+				} catch (cause) {
+					if (errorCode(cause) !== "EEXIST") return { held: `the lock file ${path} could not be created: ${reasonOf(cause)}` };
+				}
+				const holder = readHolder(path);
+				if (holder === null) continue;
+				const stale = now() - holder.startedMs > LOCK_STALE_MS || (holder.pid !== null && !alive(holder.pid));
+				if (!stale) {
+					const by = holder.pid === null ? "another run" : `pid ${holder.pid}`;
+					return { held: `${by} holds ${path} since ${new Date(holder.startedMs).toISOString()}` };
+				}
+				// Break it only while it is still the very file judged stale.
+				try {
+					if (readFileSync(path, "utf8") === holder.raw) unlinkSync(path);
+				} catch {
+					// Taken or removed by another run meanwhile: the next create decides.
+				}
+			}
+			return { held: `the lock file ${path} is contended` };
+		},
+	};
+}
+
 /**
  * Build the real ports from the server's environment. The devnet guard runs first: a refused `SOLANA_RPC_URL` returns
  * `{ refused }` before a ledger client exists and before any request is made. The keypair is only ever a path on a CLI argv.
@@ -128,7 +228,11 @@ export function openRealContext(options: ReanchorOptions, open: OpenOptions = {}
 		throw cause;
 	}
 	const greptime = open.ledgerFor !== undefined ? open.ledgerFor(config.greptime) : new GreptimeClient(config.greptime);
-	const substrate = open.substrateFor !== undefined ? open.substrateFor(config, greptime) : new Substrate(config, { greptime });
+	// The server's retain outbox file (SUBSTRATE_RETAIN_OUTBOX_PATH) belongs to the running server: constructing a Substrate with it would
+	// hydrate and rewrite that file and start a second drain timer. This process needs only the ledger, so the outbox is memory-only (and,
+	// never fed, empty and timer-less), and the Postgres index and the event bus the re-anchor never uses are not built either.
+	const isolated: SubstrateConfig = { ...config, retainOutbox: { ...config.retainOutbox, path: null } };
+	const substrate = open.substrateFor !== undefined ? open.substrateFor(isolated, greptime) : new Substrate(isolated, { greptime, index: null, eventBus: () => null });
 	const operators = operatorSurfaces(config);
 	// An explicit --surface is judged by the executor against the operator set; with none, a single operator surface is the answer.
 	const sole = operators.size === 1 ? ([...operators][0] as Surface) : null;
@@ -141,8 +245,15 @@ export function openRealContext(options: ReanchorOptions, open: OpenOptions = {}
 		env: { rpcUrl, keypairPath, pubkey, cli },
 		surface,
 		operatorSurfaces: operators,
-		recorded: async (periodStartIso, newTxSig) =>
-			(await readReanchorRecords({ ledger: greptime, rowToEvent, operatorSurfaces: operators }, Date.parse(periodStartIso))).some((record) => record.payload.new_tx_sig === newTxSig),
+		// The same trusted-surface read the verifier uses, bound to the hour's stored row.
+		notes: (hour) =>
+			readReanchorNotes({ ledger: greptime, rowToEvent, operatorSurfaces: operators }, hour.period_start_ms, {
+				root: hour.root,
+				event_count: hour.event_count,
+				tx_sig: hour.previous_tx_sig,
+			}),
+		// Beside the plan file: the one directory this entry already controls.
+		lock: fileLock(join(dirname(resolve(options.planPath)), ".reanchor.lock")),
 	};
 }
 

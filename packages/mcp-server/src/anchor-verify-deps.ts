@@ -16,7 +16,11 @@
  *   swaps only the row's `tx_sig` (and the signer, slot and time the chain and the event show); the verifier then reads that
  *   transaction from the chain and applies the same signer-set, memo, root and proof checks as for any row. An event from a
  *   non-operator surface, a malformed one, or one bound to another row is ignored, and an event can never make an hour pass
- *   without its chain transaction verifying. The anchors row itself is never rewritten.
+ *   without its chain transaction verifying. The anchors row itself is never rewritten. The notes are read PER operator surface
+ *   (the hour's session is predictable and any caller may write ordinary notes into it, so a limit applied before the author filter
+ *   could hide the real note), paged until the newest bound note is found; a read cut by its page cap leaves the hour `unverified`
+ *   with a reason of its own (`ReanchorReadIncomplete`). One transaction read per signature is shared by the pointer's signer lookup
+ *   and the verification itself, so a failed read is never judged against a stale signer.
  * - `fetchAnchorTransaction`: `Rpc.transactionMemo`, asked at `finalized` and then at `confirmed` (an anchor lands at
  *   `confirmed` first), with the RPC's block time converted from seconds to milliseconds.
  * - `getGenesisHash`: the RPC's.
@@ -298,39 +302,113 @@ export interface ReanchorRecord {
 	payload: ReanchorPayload;
 }
 
+/** Pages of {@link LOOKUP_ROW_LIMIT} notes one operator surface may take in one hour's session before the re-anchor read is called incomplete. */
+export const REANCHOR_READ_MAX_PAGES = 20;
+
+/**
+ * The re-anchor notes of an hour could not all be read (a page limit, a read that cannot advance), so a newer pointer than the one
+ * found, or the only one, may be missing. The verifier reports the hour `unverified` with this message and never reads through the old row.
+ */
+export class ReanchorReadIncomplete extends Error {
+	override name = "ReanchorReadIncomplete";
+}
+
+/** What a note must be bound to: the stored row's root, event count and signature (the note's `previous_tx_sig`). */
+export type ReanchorBinding = Pick<AnchorRow, "root" | "event_count" | "tx_sig">;
+
+/** Whether `record` is bound to `binding`: same root, same event count, and `previous_tx_sig` equal to the row's signature. */
+export function isBoundNote(record: ReanchorRecord, binding: ReanchorBinding): boolean {
+	return record.payload.root === binding.root && record.payload.event_count === binding.event_count && record.payload.previous_tx_sig === binding.tx_sig;
+}
+
+/** The valid `anchor.reanchor` notes of one hour written by an operator surface, newest first, and why the read may be incomplete. */
+export interface ReanchorNotes {
+	records: ReanchorRecord[];
+	/** Null when every trusted note of the hour's session was read (or the newest bound one was found on each surface); otherwise the reason. */
+	incomplete: string | null;
+}
+
+function noteRecord(ports: Pick<AnchorVerifyPorts, "rowToEvent" | "operatorSurfaces">, row: Record<string, unknown>, periodStart: string): { event: SubstrateEvent; record: ReanchorRecord | null } {
+	const event = ports.rowToEvent(row);
+	if (event.kind !== "note" || !ports.operatorSurfaces.has(event.surface)) return { event, record: null };
+	let payload: ReanchorPayload;
+	try {
+		payload = parseReanchorPayload(event.payload, { stored: true });
+	} catch {
+		return { event, record: null };
+	}
+	if (payload.period_start !== periodStart) return { event, record: null };
+	return { event, record: { event_id: event.id, ts: event.ts, surface: event.surface, payload } };
+}
+
 /**
  * The valid `anchor.reanchor` notes of one hour written by an OPERATOR surface, newest first. The ledger accepts events from any
  * authenticated caller, so a note from another surface, a malformed one, or one naming another hour is ignored; `events_emit`
- * additionally refuses the action from a non-operator (`reserved-actions.ts`). Throws when the ledger read fails: the caller decides
- * what an unreadable ledger means (the verifier keeps the stored row).
+ * additionally refuses the action from a non-operator (`reserved-actions.ts`).
+ *
+ * Read per trusted surface: the session of an hour (`anchor:<hour>`) is predictable and any caller may write ordinary notes into it,
+ * so a row limit applied before the author filter could be filled with other callers' notes and push the real one out of the window.
+ * Each operator surface is read newest first in pages of {@link LOOKUP_ROW_LIMIT} (keyset on `ts`) until its newest note bound to
+ * `binding` is found (when given) or its notes are exhausted, at most {@link REANCHOR_READ_MAX_PAGES} pages; a surface that is cut by
+ * that limit, or cannot advance, makes the result `incomplete` rather than silently shorter. Throws when the ledger read fails: the
+ * caller decides what an unreadable ledger means.
  */
-export async function readReanchorRecords(ports: Pick<AnchorVerifyPorts, "ledger" | "rowToEvent" | "operatorSurfaces">, periodStartMs: number): Promise<ReanchorRecord[]> {
-	if (ports.ledger === null || ports.operatorSurfaces.size === 0) return [];
+export async function readReanchorNotes(ports: Pick<AnchorVerifyPorts, "ledger" | "rowToEvent" | "operatorSurfaces">, periodStartMs: number, binding?: ReanchorBinding): Promise<ReanchorNotes> {
+	if (ports.ledger === null || ports.operatorSurfaces.size === 0) return { records: [], incomplete: null };
 	const periodStart = new Date(periodStartMs).toISOString();
-	const rows = await ports.ledger.queryEvents({ match: { kind: "note", session_id: reanchorSessionId(periodStart) }, limit: LOOKUP_ROW_LIMIT, order: "desc", includePayload: true });
+	const session = reanchorSessionId(periodStart);
 	const records: ReanchorRecord[] = [];
-	for (const row of rows) {
-		const event = ports.rowToEvent(row);
-		if (event.kind !== "note" || !ports.operatorSurfaces.has(event.surface)) continue;
-		let payload: ReanchorPayload;
-		try {
-			payload = parseReanchorPayload(event.payload, { stored: true });
-		} catch {
-			continue;
+	const gaps: string[] = [];
+	const seen = new Set<string>();
+	for (const surface of [...ports.operatorSurfaces].sort()) {
+		let until: string | undefined;
+		for (let page = 1; ; page++) {
+			const rows = await ports.ledger.queryEvents({
+				match: { kind: "note", session_id: session, surface },
+				limit: LOOKUP_ROW_LIMIT,
+				order: "desc",
+				includePayload: true,
+				...(until !== undefined ? { until } : {}),
+			});
+			let fresh = 0;
+			let oldest: string | undefined;
+			let found = false;
+			for (const row of rows) {
+				const { event, record } = noteRecord(ports, row, periodStart);
+				oldest = event.ts;
+				if (seen.has(event.id)) continue;
+				seen.add(event.id);
+				fresh++;
+				if (record === null) continue;
+				records.push(record);
+				if (binding !== undefined && isBoundNote(record, binding)) found = true;
+			}
+			if (found || rows.length < LOOKUP_ROW_LIMIT) break;
+			if (fresh === 0 || oldest === undefined) {
+				gaps.push(`the notes of ${surface} in ${session} could not be read past one instant (${LOOKUP_ROW_LIMIT} or more notes share it)`);
+				break;
+			}
+			if (page >= REANCHOR_READ_MAX_PAGES) {
+				gaps.push(`the notes of ${surface} in ${session} hit the ${REANCHOR_READ_MAX_PAGES}-page limit (${REANCHOR_READ_MAX_PAGES * LOOKUP_ROW_LIMIT} notes) before the newest re-anchor note was found`);
+				break;
+			}
+			until = oldest;
 		}
-		if (payload.period_start !== periodStart) continue;
-		records.push({ event_id: event.id, ts: event.ts, surface: event.surface, payload });
 	}
-	return records.sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts));
+	records.sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts));
+	return { records, incomplete: gaps.length === 0 ? null : gaps.join("; ") };
 }
 
 /**
  * The row verification should judge: the stored row, or, when a valid operator `anchor.reanchor` note for the hour is bound to it
  * (same root, same event count, and `previous_tx_sig` equal to the row's signature), the same row pointing at the note's
  * replacement transaction. The newest bound note wins; an older one is never a fallback, so a newer note naming a transaction that does
- * not verify leaves the hour unverified or mismatched rather than passing through an older pointer. Never throws: any failed
- * read keeps the stored row. `fetchTx` reads the replacement's signer and slot (the event carries neither) from the chain; without it, or
- * when it fails, the stored row's own signer stays and the verifier's own read of the transaction judges it.
+ * not verify leaves the hour unverified or mismatched rather than passing through an older pointer. A ledger read that fails keeps the
+ * stored row; a read that is incomplete ({@link ReanchorNotes.incomplete}) throws {@link ReanchorReadIncomplete}, because the stored row
+ * would then be judged although a newer pointer may exist. `fetchTx` reads the replacement's signer and slot (the event carries neither)
+ * from the chain; without it, or when it fails, the stored row's own signer stays. The verifier must then judge the SAME read: the caller
+ * shares one transaction read between this call and the verification (`prepare`), so a failed read is a failed read for both and the
+ * stale signer is never compared with a later, successful one.
  */
 export async function followReanchor(
 	ports: Pick<AnchorVerifyPorts, "ledger" | "rowToEvent" | "operatorSurfaces">,
@@ -338,13 +416,14 @@ export async function followReanchor(
 	row: AnchorRow,
 	fetchTx?: (signature: string) => Promise<AnchorTransactionRead | null>,
 ): Promise<AnchorRow> {
-	let records: ReanchorRecord[];
+	let notes: ReanchorNotes;
 	try {
-		records = await readReanchorRecords(ports, periodStartMs);
+		notes = await readReanchorNotes(ports, periodStartMs, row);
 	} catch {
 		return row;
 	}
-	const pointer = records.find((record) => record.payload.root === row.root && record.payload.event_count === row.event_count && record.payload.previous_tx_sig === row.tx_sig);
+	if (notes.incomplete !== null) throw new ReanchorReadIncomplete(`the anchor.reanchor notes of this hour could not be read completely: ${notes.incomplete}`);
+	const pointer = notes.records.find((record) => isBoundNote(record, row));
 	if (pointer === undefined) return row;
 	let read: AnchorTransactionRead | null = null;
 	if (fetchTx !== undefined) {
@@ -368,14 +447,24 @@ async function prepare(ports: AnchorVerifyPorts, lookup: CheckpointLookup): Prom
 		// The configured key is not a valid public key, or the rotation fold refused: nothing can be checked against a signer set.
 		return `the signer set could not be built: ${describe(cause)}`;
 	}
+	// One read per signature for the whole verification: the replacement's signer is taken from the same read the verifier then judges, so a
+	// failed first read stays a failed read (unverified) and is never paired with the stored row's signer on a second, successful one.
+	const transactionReads = new Map<string, Promise<AnchorTransactionRead | null>>();
+	const readTransaction = (signature: string): Promise<AnchorTransactionRead | null> => {
+		const shared = transactionReads.get(signature);
+		if (shared !== undefined) return shared;
+		const started = fetchTransaction(ports.rpc(), signature);
+		transactionReads.set(signature, started);
+		return started;
+	};
 	const deps: CheckpointVerifyDeps = {
 		findEvent: (ref) => (CKPT_ID.test(ref) ? findCheckpoint(ports, ledger, ref, lookup) : findById(ports, ledger, ref)),
 		listHourLeaves: async (hourStartMs, maxLeaves) => (await ledger.hourLeaves(hourStartMs)).slice(0, maxLeaves + 1).map(({ event_id, hash }) => ({ event_id, hash })),
 		readAnchorRow: async (hourStartMs) => {
 			const row = await ledger.anchorForPeriod(hourStartMs);
-			return row === null ? null : followReanchor(ports, hourStartMs, row, (signature) => fetchTransaction(ports.rpc(), signature));
+			return row === null ? null : followReanchor(ports, hourStartMs, row, readTransaction);
 		},
-		fetchAnchorTransaction: (signature) => fetchTransaction(ports.rpc(), signature),
+		fetchAnchorTransaction: readTransaction,
 		getGenesisHash: () => ports.rpc().getGenesisHash(),
 		signerSet: signers.set,
 		nowMs: ports.nowMs(),

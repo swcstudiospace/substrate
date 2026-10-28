@@ -95,15 +95,21 @@ describe("addressMemos and balance", () => {
 			{
 				result: [
 					{ signature: SIG, slot: 7, err: null, memo: `[105] ${MEMO}`, blockTime: 1 },
-					{ signature: "3".repeat(88), slot: 6, err: { InstructionError: [0, "x"] }, memo: null, blockTime: 1 },
+					{ signature: "3".repeat(88), slot: 6, err: { InstructionError: [0, "x"] }, memo: null, blockTime: null },
 				],
 			},
 		]);
 		expect(await rpc.addressMemos(PAYER, 100)).toEqual([
-			{ signature: SIG, memo: MEMO, err: null, slot: 7 },
-			{ signature: "3".repeat(88), memo: null, err: { InstructionError: [0, "x"] }, slot: 6 },
+			{ signature: SIG, memo: MEMO, err: null, slot: 7, blockTime: 1 },
+			{ signature: "3".repeat(88), memo: null, err: { InstructionError: [0, "x"] }, slot: 6, blockTime: null },
 		]);
 		expect(requests[0]).toMatchObject({ method: "getSignaturesForAddress", params: [PAYER, { limit: 100 }] });
+	});
+
+	test("a before cursor is passed through so a caller can page backwards", async () => {
+		const { rpc, requests } = fakeRpc([{ result: [] }]);
+		expect(await rpc.addressMemos(PAYER, 50, SIG)).toEqual([]);
+		expect(requests[0]).toMatchObject({ method: "getSignaturesForAddress", params: [PAYER, { limit: 50, before: SIG }] });
 	});
 
 	test("balance returns result.value", async () => {
