@@ -135,6 +135,7 @@ export const FABRIC_SERIES: Readonly<Record<FabricResourceName, { series: string
 	"timescaledb-index": { series: "capacity.runway_days", note: "The index volume's runway in days, fitted over its size history." },
 	greptime: { series: "plane.availability", note: "The greptime line is the ledger's call availability." },
 	ragflow: { series: "plane.p95", note: "The ragflow line is RAGFlow's call latency at p95." },
+	lightrag: { series: "plane.p95", note: "The lightrag line is LightRAG's call latency at p95." },
 	hindsight: { series: "hindsight.outbox_size", note: "Retain forwards parked for replay. Needs SUBSTRATE_METRICS_HISTORY_SERIES=extended." },
 	"tailscale-proxy": { series: "endpoint.proxy_planes", note: "A count of the data planes on a configured proxy (SUBSTRATE_DB_PROXY_ALLOW), set at boot from the endpoint classes. Needs SUBSTRATE_METRICS_HISTORY_SERIES=extended." },
 };

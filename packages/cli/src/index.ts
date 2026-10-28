@@ -8,7 +8,7 @@
  *   substrate verify <graph_id>              recompute the hash chain for a graph
  *   substrate drift [--repo R] [--path P]    compare git, the ledger and the claims
  *   substrate handoff --to S --goal G ...    record a signed handoff packet
- *   substrate evidence --graph G             the evidence bundle, as JSON or HTML
+ *   substrate evidence --graph G [--node N]  the evidence bundle, as JSON or HTML; --node adds that node's artifact (JSON)
  *   substrate lessons add|recall|digest|outcome   the lessons bank (docs/lessons-bank.md)
  *   substrate skills propose|list|approve ...  propose, list or decide a skill (docs/runbooks/skills-governance.md)
  *   substrate docs ingest --dataset NAME --path PATH --source-url URL [...]
@@ -363,23 +363,40 @@ async function cmdHandoff(args: Record<string, string | true>): Promise<void> {
 }
 
 /**
- * `substrate evidence --graph ut-… [--format json|html] [--out PATH]`
+ * `substrate evidence --graph ut-… [--node N] [--format json|html] [--out PATH]`
  *
  * The bundle is composed by `substrate-mcp`, not here: it is the process holding the
  * metric snapshot and the audit chain, and a second composer would be a second
  * answer to the same question. This command asks for it and puts it somewhere.
  *
+ * With `--node N` the server also answers with that node's artifact (claim, Linear, Notion and
+ * Definition-of-Done steps) as the `node` member of the JSON document.
+ *
  * A stub, deliberately — the bundle says so in its own `pending` list.
  */
 async function cmdEvidence(args: Record<string, string | true>): Promise<number> {
+	const usage = "usage: substrate evidence --graph <graph_id> [--node <node_id>] [--format json|html] [--out PATH]\n";
 	const graphId = str(args.graph);
 	if (!graphId) {
-		process.stderr.write("usage: substrate evidence --graph <graph_id> [--format json|html] [--out PATH]\n");
+		process.stderr.write(usage);
+		return 2;
+	}
+	// `--node` with no value (the flag alone, or an empty string) names no node: a typo, not "every node".
+	const nodeRequested = args.node !== undefined;
+	const nodeId = str(args.node);
+	if (nodeRequested && !nodeId) {
+		process.stderr.write(usage);
 		return 2;
 	}
 	const format = str(args.format) ?? (str(args.out)?.endsWith(".html") ? "html" : "json");
 	if (format !== "json" && format !== "html") {
 		process.stderr.write(`[substrate] unknown --format ${format}; expected json or html\n`);
+		return 2;
+	}
+	// The HTML is rendered here from the bundle, and the bundle type has no node member, so the node
+	// artifact would be silently dropped. Say so instead.
+	if (nodeId && format === "html") {
+		process.stderr.write("[substrate] --node cannot be combined with --format html: the node artifact is part of the JSON document only\n");
 		return 2;
 	}
 
@@ -391,7 +408,9 @@ async function cmdEvidence(args: Record<string, string | true>): Promise<number>
 	// document does not contain.
 	// `/evidence` runs the same hour loop as `/verify`, so it waits out the same whole-verify budget,
 	// plus a margin for the reads the server makes after that loop (teachables, audit) and the response.
-	const response = await post("/evidence", { graph_id: graphId, format: "json" }, "claude-code", verifyBudgetMs() + EVIDENCE_RESPONSE_MARGIN_MS);
+	const request: Record<string, string> = { graph_id: graphId, format: "json" };
+	if (nodeId) request.node_id = nodeId;
+	const response = await post("/evidence", request, "claude-code", verifyBudgetMs() + EVIDENCE_RESPONSE_MARGIN_MS);
 	if (!response) {
 		process.stderr.write(`[substrate] unreachable at ${base()}; evidence needs a running substrate-mcp\n`);
 		return 1;
@@ -429,6 +448,20 @@ async function cmdEvidence(args: Record<string, string | true>): Promise<number>
 		}
 	} else {
 		process.stdout.write(`${document}\n`);
+	}
+
+	// A requested artifact that could not be built is a failure, like a broken chain, but only after the
+	// document is out: it still carries the bundle and the server's `node: { error }` answer. The remaining
+	// checks still run so their findings are reported too.
+	let nodeFailed = false;
+	if (nodeId) {
+		if (parsed.node === undefined) {
+			process.stderr.write(`[substrate] node ${nodeId}: the server answered without a node artifact\n`);
+			nodeFailed = true;
+		} else if ("error" in parsed.node) {
+			process.stderr.write(`[substrate] node ${nodeId}: ${parsed.node.error}\n`);
+			nodeFailed = true;
+		}
 	}
 
 	// Non-zero when the evidence itself says something is wrong, so this composes in a
@@ -492,7 +525,7 @@ async function cmdEvidence(args: Record<string, string | true>): Promise<number>
 		process.stderr.write(`[substrate] ${bundle.slo_summary.breached} SLO(s) breached for ${graphId}\n`);
 		return 1;
 	}
-	return 0;
+	return nodeFailed ? 1 : 0;
 }
 
 /**
@@ -716,7 +749,7 @@ switch (command) {
 				"substrate drift [--repo R] [--path P] [--idle SECONDS] [--json]\n" +
 				"substrate handoff --to S --goal G [--files a,b] [--dod 'x;y'] [--blockers 'z']\n" +
 				"                  [--graph G] [--node N] [--lease L] [--release] [--session I]\n" +
-				"substrate evidence --graph <graph_id> [--format json|html] [--out PATH]\n" +
+				"substrate evidence --graph <graph_id> [--node <node_id>] [--format json|html] [--out PATH]\n" +
 				"substrate lessons add|ingest|recall|digest|outcome ...   (substrate lessons help)\n" +
 				"substrate skills propose --dir PATH [--name N] [--rationale R] [--remove a,b] [--session I] [--graph G]\n" +
 				"                         [--dry-run] [--replace] [--reopen] [--allow-doc-examples pem,jwt]\n" +

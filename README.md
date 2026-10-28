@@ -108,6 +108,8 @@ and serves `main`; the procedure around it lives in [`docs/runbooks/production-p
 `bun run verify` runs the whole verification gate (frozen install, `tsc`, the blocking Biome lint, the full suite, the Python suites through `uv`, the repo locks); the CI workflow
 runs the same commands once the organisation can run Actions. See [`docs/ci.md`](docs/ci.md).
 
+Contribution rules are in [`CONTRIBUTING.md`](CONTRIBUTING.md); report a vulnerability as [`SECURITY.md`](SECURITY.md) describes.
+
 `substrate-mcp` exposes MCP over streamable HTTP at `/mcp`, and — because agent hooks cannot
 call MCP tools — the same briefing, event and memory paths as plain `POST /brief`,
 `POST /events`, `POST /events/query`, `POST /memory` and `POST /verify`.
@@ -146,11 +148,12 @@ Two more planes, both reached only through `substrate-mcp` and neither of them i
   local append-only file. Separate from `agent_events` on purpose: an audit has to survive an
   outage of the store it audits, and `agent_events` is writable by the agents being audited.
 
-`substrate evidence --graph ut-… [--out evidence.html]` puts both chains' verdicts, each hour's devnet
+`substrate evidence --graph ut-… [--format json|html] [--out evidence.html]` puts both chains' verdicts, each hour's devnet
 anchor (with its transaction and explorer link), the graph's teachable moments, the SLO results and the
 allowed/denied tally into one self-contained document. It exits 1 when an hour devnet cannot verify. It is
 a stub and says so: Phase 2's Linear/Notion cross-check and the reconciliation of model spend are named in
-its own `pending` list rather than left to read as nothing to report.
+its own `pending` list rather than left to read as nothing to report. `substrate evidence --graph ut-… --node N [--out evidence.json]`
+adds that node's claim, Linear, Notion and DoD artifact as `node`; it is JSON only, so `--format html` and an `.html` `--out` are refused with exit 2.
 
 `emit` fails open and `claimNode` fails **closed**: a claim whose event never reached the
 ledger is withdrawn, because a lock the substrate cannot tell another agent about is worse

@@ -6,12 +6,13 @@
  */
 import type { DbPlane, EndpointClass } from "../db-endpoints.ts";
 
-/** The six resources the fabric reports, in report order. */
+/** The seven resources the fabric reports, in report order. */
 export const FABRIC_RESOURCES = [
 	"dragonfly",
 	"timescaledb-index",
 	"greptime",
 	"ragflow",
+	"lightrag",
 	"hindsight",
 	"tailscale-proxy",
 ] as const;
@@ -116,7 +117,7 @@ export interface FabricHealthView {
 		bypasses: number;
 	};
 	eventBus: { enabled: boolean };
-	breakers: Record<"greptime" | "index" | "cache" | "hindsight" | "ragflow", { readonly state: "closed" | "open" | "half-open" } | null>;
+	breakers: Record<"greptime" | "index" | "cache" | "hindsight" | "ragflow" | "lightrag", { readonly state: "closed" | "open" | "half-open" } | null>;
 }
 
 /**
@@ -129,6 +130,7 @@ export interface FabricHealthParts {
 	index: Promise<boolean>;
 	hindsight: Promise<boolean | null>;
 	ragflow: Promise<boolean | null>;
+	lightrag: Promise<boolean | null>;
 }
 
 /** The structural view of the Railway cost report that the fabric reads. */

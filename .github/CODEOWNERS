@@ -1,0 +1,14 @@
+# Every path has the same single maintainer today; the entries below name the
+# trees where a change needs the owner's review even if the default ever widens.
+* @SomeRandmGuyy
+
+/.github/ @SomeRandmGuyy
+/infra/ @SomeRandmGuyy
+/packages/ledger/ @SomeRandmGuyy
+/packages/audit/ @SomeRandmGuyy
+/.planning/ @SomeRandmGuyy
+/docs/adr/ @SomeRandmGuyy
+
+# The one redactor module, its contract and its lock tests.
+/packages/mcp-server/src/redact*.ts @SomeRandmGuyy
+/docs/redaction.md @SomeRandmGuyy

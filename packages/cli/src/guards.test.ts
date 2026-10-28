@@ -180,6 +180,36 @@ describe("parseEvidenceBundle", () => {
 		expect(parsed.ok).toBe(true);
 	});
 
+	test("a node member is carried beside the bundle, whether an artifact or an error", () => {
+		const artifact = {
+			node_id: "n1",
+			claim: [{ ts: null, action: "granted" }],
+			linear: [{ ts: "t", op: "relate", status: "ok", reason: null, blocker_node: "n0", edge_kind: "blocks" }],
+			notion: [{ ts: "t", op: "page", status: "failed", reason: "rate-limited" }],
+			dod: [{ ts: "t", status: "refused", reason: "dod-refused" }],
+		};
+		const withArtifact = parseEvidenceBundle(bodyWith(["node", artifact]));
+		if (!withArtifact.ok) throw new Error(`rejected a valid node: ${JSON.stringify(withArtifact)}`);
+		expect<unknown>(withArtifact.node).toEqual(artifact);
+		const withError = parseEvidenceBundle(bodyWith(["node", { error: "the ledger is not configured" }]));
+		if (!withError.ok) throw new Error(`rejected a node error: ${JSON.stringify(withError)}`);
+		expect(withError.node).toEqual({ error: "the ledger is not configured" });
+		const without = parseEvidenceBundle(bodyWith());
+		if (!without.ok) throw new Error("rejected a bundle without a node");
+		expect(without.node).toBeUndefined();
+	});
+
+	test("a node member of the wrong shape is malformed and names the field", () => {
+		expect(malformed(bodyWith(["node", "n1"]))).toBe("bundle.node must be an object");
+		expect(malformed(bodyWith(["node", { error: 7 }]))).toBe("bundle.node.error must be a string");
+		expect(malformed(bodyWith(["node", { node_id: "n1", claim: "x", linear: [], notion: [], dod: [] }]))).toBe(
+			"bundle.node.claim must be a list",
+		);
+		expect(
+			malformed(bodyWith(["node", { node_id: "n1", claim: [], linear: [], notion: [], dod: [{ ts: null, status: "maybe", reason: null }] }])),
+		).toBe("bundle.node.dod[0].status must be one of approved, refused, warning");
+	});
+
 	test("text that is not JSON takes the invalid-json path", () => {
 		expect(parseEvidenceBundle("<html>502</html>")).toEqual({ ok: false, reason: "invalid-json" });
 	});
