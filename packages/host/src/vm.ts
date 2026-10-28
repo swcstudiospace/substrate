@@ -323,7 +323,7 @@ http.createServer((req, res) => {
     const input = { method: req.method, path: req.url, headers: req.headers, bodyBase64: Buffer.concat(chunks).toString("base64") };
     execFile("agentos-substrate", ["model-fetch", "--json", JSON.stringify(input)], { maxBuffer: 64 * 1024 * 1024 }, (error, stdout) => {
       let reply = null;
-      try { reply = JSON.parse(String(stdout || "")); } catch {}
+      try { reply = JSON.parse(String(stdout || "")); } catch { /* unparseable stdout leaves reply null, which answers 502 below */ }
       const result = reply && reply.result ? reply.result : null;
       if (error || !result) { res.writeHead(502, { "content-type": "application/json" }); res.end(JSON.stringify({ error: "model relay failed" })); return; }
       res.writeHead(result.status, result.headers || {});

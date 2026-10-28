@@ -39,6 +39,14 @@ bun run rehearsal down --name local
 
 Nothing in the suite needs GreptimeDB; the real-store proofs are the rehearsal smokes (`bun run rehearsal smoke`, `bun run smoke:vocabulary`). `bun run parity:check` and the other production checks read the operator's host and are never run by CI.
 
+### Code ratchet
+
+`scripts/code-ratchet.ts` counts risky patterns in every non-test `.ts` file under `packages/` and `scripts/`: explicit `any`, `as unknown as`, TypeScript and lint suppression comments, non-null assertions, empty `catch` blocks, `console.*` calls in `packages/*/src`, `process.exit(` outside CLI entrypoints, and `JSON.parse(...) as Type` casts. Matches inside strings, template text, regex literals and comments are ignored. Test files are counted and reported separately but never gate.
+
+`bun test` runs `scripts/code-ratchet.test.ts`, which fails when a source counter rises above `scripts/code-ratchet.baseline.json`, and also when one falls below it, so the baseline can only move down. After removing offenders, run `bun scripts/code-ratchet.ts --write` and commit the new baseline. `bun scripts/code-ratchet.ts` prints the table; `--check` exits 1 on a regression.
+
+A CLI entrypoint may call `process.exit`. A file counts as one when it has a shebang, uses `import.meta.main`, is named `*-run.ts`, `index.ts` or `main.ts`, lives under `scripts/`, or carries a `// ratchet-entrypoint` line comment (put it above the guard that makes the file run).
+
 ## CI
 
 | Job | Runner | When | Steps |
