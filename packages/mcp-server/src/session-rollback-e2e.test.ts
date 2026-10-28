@@ -143,7 +143,9 @@ describe("checkpoint, mutate, rollback, against the real server", () => {
 			expect(c2Payload?.["chain_head"]).toEqual({ event_id: c1Event.id, hash: c1Event.hash });
 			// Every event of the session is chained to the one before it.
 			const chain = w.ledger.events.filter((candidate) => candidate.session_id === SESSION);
-			chain.forEach((candidate, position) => expect(candidate.prev).toBe(position === 0 ? null : (chain[position - 1]?.hash ?? null)));
+			chain.forEach((candidate, position) => {
+				expect(candidate.prev).toBe(position === 0 ? null : (chain[position - 1]?.hash ?? null));
+			});
 
 			// The memory: what was written after the checkpoint, by this surface, in this session, is out of force.
 			expect(w.index.forgotten().sort()).toEqual(["mem_after_1", "mem_after_2"]);

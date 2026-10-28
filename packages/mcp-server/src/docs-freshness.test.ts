@@ -658,9 +658,15 @@ describe("the lag timer", () => {
 				setInterval: (handler, ms) => {
 					calls.setInterval.push(ms);
 					tick = handler;
-					return { unref: () => void (calls.unref += 1) };
+					return {
+						unref: () => {
+							calls.unref += 1;
+						},
+					};
 				},
-				clearInterval: () => void (calls.cleared += 1),
+				clearInterval: () => {
+					calls.cleared += 1;
+				},
 			},
 		});
 		return { timer, calls, tick: () => tick(), gate };

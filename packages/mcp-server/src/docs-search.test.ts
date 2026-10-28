@@ -1011,7 +1011,15 @@ describe("search graph metadata (LightRAG path)", () => {
 		seedHeadings(fake);
 		const events: EventInput[] = [];
 		const reply = await searchDocs(
-			{ config: CONFIG, emit: async (event) => ((events.push(event)), { stored: false }), fetchImpl: fake.fetch, graphHints: HINTS },
+			{
+				config: CONFIG,
+				emit: async (event) => {
+					events.push(event);
+					return { stored: false };
+				},
+				fetchImpl: fake.fetch,
+				graphHints: HINTS,
+			},
 			"who reads RAGFlow?",
 		);
 		expect(reply.degraded).toBeUndefined();

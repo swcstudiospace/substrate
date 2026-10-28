@@ -160,15 +160,13 @@ async function startHttp(stores: Record<string, unknown>, env: Record<string, st
  * found`, or a reply that is neither shape.
  */
 async function refuses(client: Client, name: string, args: unknown): Promise<boolean> {
-	let result;
-	try {
-		result = await client.callTool({ name, arguments: args as Record<string, unknown> });
-	} catch (err: unknown) {
+	const result = await client.callTool({ name, arguments: args as Record<string, unknown> }).catch((err: unknown) => {
 		if (err instanceof McpError && err.code === ErrorCode.InternalError && /expected record/.test(err.message) && /"arguments"/.test(err.message)) {
-			return true;
+			return null;
 		}
 		throw err;
-	}
+	});
+	if (result === null) return true;
 	if (result.isError !== true) return false;
 	const text = textOf(result);
 	const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

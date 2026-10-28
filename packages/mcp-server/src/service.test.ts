@@ -3118,7 +3118,6 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 				_n: string,
 				request: { lease_id?: string | null; force?: boolean },
 				caller: Surface | null,
-				alsoSetState?: string,
 			) => {
 				const decision = decideRelease(leaseSnapshot(node as never), { ...request, caller }, Date.now());
 				if (!decision.ok || decision.action === "noop") return { released: decision.ok, node, decision };

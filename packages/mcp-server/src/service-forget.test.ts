@@ -60,7 +60,7 @@ class ForgetStore extends FakeStore {
 	}
 
 	/** The ids whose `superseded_by` is a forget marker, as `IndexStore.forgottenEntryIds` answers. */
-	async forgottenEntryIds(ids: readonly string[]): Promise<Set<string>> {
+	override async forgottenEntryIds(ids: readonly string[]): Promise<Set<string>> {
 		return new Set(ids.filter((id) => isForgetMarker(this.rows.get(id)?.entry.superseded_by)));
 	}
 

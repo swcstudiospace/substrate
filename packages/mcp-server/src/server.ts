@@ -70,7 +70,7 @@ import { scanIngestPages, readSkillsCheckoutPages, skillsCheckoutRoots, type Ing
 import { formatDrift } from "./drift.ts";
 import { IdempotencyRefusal, InvalidEventError } from "./event.ts";
 import { checkoutHead } from "./git.ts";
-import { type CursorPosition, type GreptimeClient } from "./greptime.ts";
+import type { CursorPosition, GreptimeClient } from "./greptime.ts";
 import { InvalidHandoffError } from "./handoff.ts";
 import {
 	attributedSurface,
@@ -509,7 +509,7 @@ export function healthStatus(
  * `SUBSTRATE_TOKEN_<SURFACE>`.
  * Both are one line, and both leave a record of the decision.
  */
-export function memoryWriter(surface: Surface | null, bodyWriter: unknown): string {
+export function memoryWriter(surface: Surface | null, _bodyWriter: unknown): string {
 	return surface ?? "unknown";
 }
 

@@ -259,7 +259,6 @@ import {
 	type GraphNode,
 	type GraphView,
 	type MemoryEntry,
-	type MemoryEntryInput,
 	type MemoryReadOptions,
 	type MemorySearch,
 	type MemorySearchPage,
@@ -6444,7 +6443,7 @@ export class Substrate {
 			// verdict, not only the session that held the gap. A new session
 			// whose hash no longer matches its summary must fail even when
 			// its hour is still open and skips the digest.
-			for (const [key, members] of freshBySession) {
+			for (const members of freshBySession.values()) {
 				if (!members.some((member) => byEvent.has(member.id))) continue;
 				const result = verifyChain(inChainOrder(members));
 				if (!result.ok) {

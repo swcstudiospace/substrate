@@ -1640,7 +1640,9 @@ export function loadAdmissionSettings(env: Record<string, string | undefined>): 
 			const rps = env[`${prefix}_RPS`];
 			const burst = env[`${prefix}_BURST`];
 			if ((rps?.trim() ?? "") === "" && (burst?.trim() ?? "") === "") continue;
-			(overrides[surface] ??= {})[klass] = {
+			const surfaceOverrides = overrides[surface] ?? {};
+			overrides[surface] = surfaceOverrides;
+			surfaceOverrides[klass] = {
 				rps: positiveRateOr(rps, classes[klass].rps),
 				burst: positiveOr(burst, classes[klass].burst),
 			};

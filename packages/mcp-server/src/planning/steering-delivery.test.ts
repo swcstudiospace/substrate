@@ -79,7 +79,12 @@ class StubSessionMachine implements SessionStatePort {
 
 function clockAt(start: number): { nowMs(): number; set(ms: number): void } {
 	let now = start;
-	return { nowMs: () => now, set: (ms) => void (now = ms) };
+	return {
+		nowMs: () => now,
+		set: (ms) => {
+			now = ms;
+		},
+	};
 }
 
 function directive(overrides: Partial<SteeringDirective> = {}): SteeringDirective {
@@ -307,7 +312,12 @@ describe("steeringQueuedEvent and SteeringHintAnnouncer", () => {
 
 	test("one hint per directive id, however many times it is announced, and a second directive gets its own", async () => {
 		const events: EventInput[] = [];
-		const announcer = new SteeringHintAnnouncer({ emit: async (event) => (events.push(event), true) });
+		const announcer = new SteeringHintAnnouncer({
+			emit: async (event) => {
+				events.push(event);
+				return true;
+			},
+		});
 		expect(await announcer.announce(directive())).toBe("announced");
 		expect(await announcer.announce(directive())).toBe("duplicate");
 		expect(await announcer.announce(directive({ id: "dir-2" }))).toBe("announced");

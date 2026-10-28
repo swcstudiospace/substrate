@@ -40,7 +40,6 @@ const res = (stdout: string | Buffer, code = 0, stderr = ""): BufferRunResult =>
 const W = 4;
 const H = 3;
 const pixel = (x: number, y: number) => [10 * x + 1, 20 * y + 2, 7 * x + 5 * y + 3] as const;
-const EXPECTED_RGB = Buffer.from(Array.from({ length: W * H }, (_, n) => [...pixel(n % W, Math.floor(n / W))]).flat());
 
 /**
  * A synthetic XWD: big-endian header, window name, ncolors × 12-byte colours, then rows of 4-byte
@@ -56,7 +55,9 @@ function xwd(o: { byteOrder: 0 | 1; version?: number; format?: number; bpp?: num
 		100 + name.length, o.version ?? 7, o.format ?? 2, 24, W, H, 0, o.byteOrder, 32, o.byteOrder, 32, bpp,
 		bytesPerLine, 4, 0xff0000, 0xff00, 0xff, 8, 256, o.ncolors ?? 0, W, H, 0, 0, 0,
 	];
-	fields.forEach((value, i) => header.writeUInt32BE(value, i * 4));
+	fields.forEach((value, i) => {
+		header.writeUInt32BE(value, i * 4);
+	});
 	const pixels = Buffer.alloc(bytesPerLine * H);
 	for (let y = 0; y < H; y++) {
 		for (let x = 0; x < W; x++) {
