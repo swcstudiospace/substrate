@@ -176,9 +176,59 @@ const validateBundle: Validator = object({
 	notes: arrayOf(isString),
 });
 
-/** What the server's `/evidence` body parsed to: the bundle, text that is not JSON, or JSON of the wrong shape. */
+/**
+ * The `node` member `POST /evidence` adds when asked for one node: the per-node artifact, or `{ error }` when the
+ * server could not build it (an unreadable or unconfigured ledger). Mirrors `NodeArtifact` in the server's
+ * `node-artifact.ts`; every field the document carries is checked, so nothing reaches the output unchecked.
+ */
+export type EvidenceNode =
+	| { error: string }
+	| {
+			node_id: string;
+			claim: Array<{ ts: string | null; action: string }>;
+			linear: Array<{
+				ts: string | null;
+				op: string;
+				status: "ok" | "failed";
+				reason: string | null;
+				blocker_node: string | null;
+				edge_kind: string | null;
+			}>;
+			notion: Array<{ ts: string | null; op: string; status: "ok" | "failed"; reason: string | null }>;
+			dod: Array<{ ts: string | null; status: "approved" | "refused" | "warning"; reason: string | null }>;
+	  };
+
+const MIRROR_STATUSES = ["ok", "failed"];
+
+const validateNodeArtifact: Validator = object({
+	node_id: isString,
+	claim: arrayOf(object({ ts: nullable(isString), action: isString })),
+	linear: arrayOf(
+		object({
+			ts: nullable(isString),
+			op: isString,
+			status: oneOf(...MIRROR_STATUSES),
+			reason: nullable(isString),
+			blocker_node: nullable(isString),
+			edge_kind: nullable(isString),
+		}),
+	),
+	notion: arrayOf(object({ ts: nullable(isString), op: isString, status: oneOf(...MIRROR_STATUSES), reason: nullable(isString) })),
+	dod: arrayOf(object({ ts: nullable(isString), status: oneOf("approved", "refused", "warning"), reason: nullable(isString) })),
+});
+
+/** The problem with a `node` member, or `undefined` when it is `{ error: string }` or a whole artifact. */
+const validateEvidenceNode: Validator = (value, path) => {
+	if (isRecord(value) && "error" in value) return object({ error: isString })(value, path);
+	return validateNodeArtifact(value, path);
+};
+
+/**
+ * What the server's `/evidence` body parsed to: the bundle (with the `node` member when the server sent one),
+ * text that is not JSON, or JSON of the wrong shape.
+ */
 export type EvidenceParse =
-	| { ok: true; bundle: EvidenceBundle }
+	| { ok: true; bundle: EvidenceBundle; node?: EvidenceNode }
 	| { ok: false; reason: "invalid-json" }
 	| { ok: false; reason: "malformed"; detail: string };
 
@@ -192,5 +242,12 @@ export function parseEvidenceBundle(body: string): EvidenceParse {
 	const problem = validateBundle(parsed, "bundle");
 	if (problem !== undefined) return { ok: false, reason: "malformed", detail: problem };
 	// `validateBundle` checked every field the CLI reads, which is what the cast below asserts.
-	return { ok: true, bundle: parsed as EvidenceBundle };
+	const bundle = parsed as EvidenceBundle;
+	// The node member is outside the bundle type: it is validated on its own and carried beside the bundle.
+	const member: unknown = (parsed as JsonObject).node;
+	if (member === undefined) return { ok: true, bundle };
+	const nodeProblem = validateEvidenceNode(member, "bundle.node");
+	if (nodeProblem !== undefined) return { ok: false, reason: "malformed", detail: nodeProblem };
+	// `validateEvidenceNode` checked the whole member, which is what the cast below asserts.
+	return { ok: true, bundle, node: member as EvidenceNode };
 }
