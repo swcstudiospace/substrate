@@ -108,6 +108,8 @@ and serves `main`; the procedure around it lives in [`docs/runbooks/production-p
 `bun run verify` runs the whole verification gate (frozen install, `tsc`, the full suite, the Python suites through `uv`, the repo locks); the CI workflow
 runs the same commands once the organisation can run Actions. See [`docs/ci.md`](docs/ci.md).
 
+Contribution rules are in [`CONTRIBUTING.md`](CONTRIBUTING.md); report a vulnerability as [`SECURITY.md`](SECURITY.md) describes.
+
 `substrate-mcp` exposes MCP over streamable HTTP at `/mcp`, and — because agent hooks cannot
 call MCP tools — the same briefing, event and memory paths as plain `POST /brief`,
 `POST /events`, `POST /events/query`, `POST /memory` and `POST /verify`.
