@@ -23,14 +23,13 @@
  *
  * Counting is syntax-based: every file is parsed once (no parent pointers, ScriptKind.TS) with the
  * TypeScript compiler API and walked with `ts.forEachChild`, so strings, template text, regex literals
- * and comments can never be mistaken for code. Comments are collected without visiting tokens: for each
- * AST node the leading trivia at `node.pos` and the trailing trivia at `node.end` are read (de-duplicated
- * on comment position), plus the trivia before the end-of-file token. That sees every comment that sits
- * between AST nodes, which includes suppression directives (they precede a statement, member or
- * property). A comment inside an otherwise-empty construct has no child node to carry it and is covered
- * by the node text itself instead: an empty block reads its inner trivia explicitly, and the empty-catch
- * counter inspects the block's inner text. A file whose text contains none of the substrings a counter
- * needs is not parsed (a pure optimisation).
+ * and comments can never be mistaken for code. Comments are not AST nodes: after the walk the whole text
+ * is scanned once with `ts.createScanner` (trivia kept) and every single-line and multi-line comment token
+ * is read, wherever it sits (between nodes, before `else`/`finally`/a closing `)`, inside an empty block).
+ * The scanner cannot tell code from string, template and regex text on its own, so the walk records the
+ * span of each such literal token and the scan jumps over it. The scan only runs when the text contains
+ * a substring a comment could count for. A file whose text contains none of the substrings a counter
+ * needs is not parsed (a pure optimisation). The empty-catch counter inspects the block's inner text.
  *
  *   explicit_any                 every `any` type keyword (annotations, casts, generics, aliases, unions)
  *   as_unknown_as                double casts through unknown
@@ -93,6 +92,8 @@ const CONSOLE_METHODS = new Set(["log", "error", "warn", "info", "debug"]);
  * between `as` and `unknown`, or around a member dot, can never hide a match.
  */
 const COUNTER_HINTS = ["any", "!", "unknown", "@ts-", "biome-ignore", "eslint-disable", "catch", "console", "exit", "parse"];
+/** A comment can only change a counter or the entrypoint fact when it holds one of these, so the comment scan is skipped without them. */
+const COMMENT_HINTS = ["@ts-", "biome-ignore", "eslint-disable", "ratchet-entrypoint"];
 
 export function isTestFile(relativePath: string): boolean {
 	return relativePath.endsWith(".test.ts");
@@ -139,7 +140,7 @@ type Analysis = { counters: CounterSet; entrypoint: boolean };
  * The walk uses `ts.forEachChild` (AST nodes only, no token objects) and no parent pointers.
  */
 function analyze(relativePath: string, text: string): Analysis {
-	// JSDoc parsing is skipped: comments are read as trivia, and no counter needs the JSDoc tree.
+	// JSDoc parsing is skipped: comments are read by the scanner, and no counter needs the JSDoc tree.
 	const sourceFile = ts.createSourceFile(
 		relativePath,
 		text,
@@ -153,17 +154,31 @@ function analyze(relativePath: string, text: string): Analysis {
 	let entrypoint =
 		text.startsWith("#!") || relativePath.startsWith("scripts/") || name.endsWith("-run.ts") || name === "index.ts" || name === "main.ts";
 	let processExits = 0;
-	const seenComments = new Set<number>();
+	// Start -> end of every literal token whose text may look like a comment (string, template part, regex).
+	const literalEnds = new Map<number, number>();
 
-	const readComments = (ranges: ts.CommentRange[] | undefined): void => {
-		if (ranges === undefined) return;
-		for (const range of ranges) {
-			if (seenComments.has(range.pos)) continue;
-			seenComments.add(range.pos);
-			const comment = text.slice(range.pos, range.end);
-			counters.ts_suppressions += matchCount(TS_SUPPRESSION_PATTERN, comment);
-			counters.lint_suppressions += matchCount(LINT_SUPPRESSION_PATTERN, comment);
-			if (range.kind === ts.SyntaxKind.SingleLineCommentTrivia && ENTRYPOINT_MARKER.test(comment) && startsOwnLine(text, range.pos)) entrypoint = true;
+	const readComment = (kind: ts.SyntaxKind, start: number, end: number): void => {
+		const comment = text.slice(start, end);
+		counters.ts_suppressions += matchCount(TS_SUPPRESSION_PATTERN, comment);
+		counters.lint_suppressions += matchCount(LINT_SUPPRESSION_PATTERN, comment);
+		if (kind === ts.SyntaxKind.SingleLineCommentTrivia && ENTRYPOINT_MARKER.test(comment) && startsOwnLine(text, start)) entrypoint = true;
+	};
+
+	/**
+	 * One linear scan of the whole text reads every comment token, wherever it sits: between AST nodes, before a
+	 * token that is not a node (`else`, `finally`, `)`, `]`, `;`), or inside an empty construct. The scanner cannot tell
+	 * code from string, template and regex text, so the AST walk recorded those literal spans and the scan jumps over them.
+	 */
+	const readComments = (): void => {
+		const scanner = ts.createScanner(ts.ScriptTarget.Latest, false, ts.LanguageVariant.Standard, text);
+		for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
+			const start = scanner.getTokenStart();
+			const literalEnd = literalEnds.get(start);
+			if (literalEnd !== undefined) {
+				scanner.resetTokenState(literalEnd);
+				continue;
+			}
+			if (token === ts.SyntaxKind.SingleLineCommentTrivia || token === ts.SyntaxKind.MultiLineCommentTrivia) readComment(token, start, scanner.getTokenEnd());
 		}
 	};
 
@@ -205,40 +220,26 @@ function analyze(relativePath: string, text: string): Analysis {
 				if (access.name.text === "main" && ts.isMetaProperty(access.expression) && access.expression.keywordToken === ts.SyntaxKind.ImportKeyword) entrypoint = true;
 				break;
 			}
+			case ts.SyntaxKind.StringLiteral:
+			case ts.SyntaxKind.NoSubstitutionTemplateLiteral:
+			case ts.SyntaxKind.TemplateHead:
+			case ts.SyntaxKind.TemplateMiddle:
+			case ts.SyntaxKind.TemplateTail:
+			case ts.SyntaxKind.RegularExpressionLiteral:
+				// Template middle/tail tokens start at their `}`.
+				literalEnds.set(node.getStart(sourceFile), node.end);
+				break;
 			default:
 				break;
 		}
 	};
 
-	// Trivia starts with whitespace or `/` (or a non-ASCII space); any other ASCII character proves there is none to scan.
-	const mayHaveTrivia = (position: number): boolean => {
-		const code = text.charCodeAt(position);
-		return code <= 47 || code >= 128 || Number.isNaN(code);
-	};
-
 	const visit = (node: ts.Node): void => {
-		// JSDoc blocks are ordinary comments too; the node that follows them reports them.
-		if (node.kind >= ts.SyntaxKind.FirstJSDocNode && node.kind <= ts.SyntaxKind.LastJSDocNode) return;
 		countNode(node);
-		// Comments between AST nodes: before a node (own-line ones as leading trivia, same-line ones such as
-		// `f(/* c */ x)` as the trailing trivia of the preceding token) and after it.
-		if (node.pos !== node.end) {
-			if (mayHaveTrivia(node.pos)) {
-				readComments(ts.getLeadingCommentRanges(text, node.pos));
-				readComments(ts.getTrailingCommentRanges(text, node.pos));
-			}
-			if (mayHaveTrivia(node.end)) readComments(ts.getTrailingCommentRanges(text, node.end));
-		}
-		// An empty block has no child node to carry the comments inside its braces; read them right after the `{`.
-		if (node.kind === ts.SyntaxKind.Block && (node as ts.Block).statements.length === 0) {
-			const afterBrace = node.getStart(sourceFile) + 1;
-			readComments(ts.getLeadingCommentRanges(text, afterBrace));
-			readComments(ts.getTrailingCommentRanges(text, afterBrace));
-		}
 		ts.forEachChild(node, visit);
 	};
 	visit(sourceFile);
-	readComments(ts.getLeadingCommentRanges(text, sourceFile.endOfFileToken.pos));
+	if (COMMENT_HINTS.some((hint) => text.includes(hint))) readComments();
 
 	if (!entrypoint) counters.process_exit_non_entrypoint = processExits;
 	return { counters, entrypoint };

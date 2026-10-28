@@ -138,6 +138,44 @@ describe("ts_suppressions", () => {
 		expect(counted("ts_suppressions", "// @ts-ignore\n// @ts-ignore\nconst a = 1;\n/* @ts-nocheck */")).toBe(3);
 	});
 
+	test("counts a comment before a token that is not an AST node", () => {
+		expect(counted("ts_suppressions", "do { work(); }\n// @ts-ignore\nwhile (missingName);")).toBe(1);
+		expect(counted("ts_suppressions", "if (a) { b(); }\n// @ts-ignore\nelse { c(); }")).toBe(1);
+		expect(counted("ts_suppressions", "try { a(); }\n// @ts-ignore\nfinally { b(); }")).toBe(1);
+		expect(counted("ts_suppressions", "f(\n\ta,\n\t// @ts-expect-error\n);")).toBe(1);
+		expect(counted("ts_suppressions", "const a = [\n\t1,\n\t// @ts-ignore\n];")).toBe(1);
+	});
+
+	test("counts a block comment between tokens", () => {
+		expect(counted("ts_suppressions", "f(/* @ts-expect-error */ x);")).toBe(1);
+		expect(counted("ts_suppressions", "const a = b /* @ts-ignore */ + c;")).toBe(1);
+	});
+
+	test("a comment after a division is a real comment", () => {
+		expect(counted("ts_suppressions", "const c = a / b // @ts-ignore")).toBe(1);
+		expect(counted("ts_suppressions", "const c = a / b / d; // @ts-ignore")).toBe(1);
+	});
+
+	test("comment-like text inside every kind of literal does not count", () => {
+		expect(counted("ts_suppressions", "const s = '// @ts-ignore';")).toBe(0);
+		expect(counted("ts_suppressions", 'const s = "/* @ts-ignore */";')).toBe(0);
+		expect(counted("ts_suppressions", "const t = `// @ts-ignore`;")).toBe(0);
+		expect(counted("ts_suppressions", "const t = `// @ts-ignore ${a} // @ts-ignore ${b} // @ts-ignore`;")).toBe(0);
+		expect(counted("ts_suppressions", "const t = `a ${'// @ts-ignore'} b`;")).toBe(0);
+		expect(counted("ts_suppressions", "const r = /\\/\\/ @ts-ignore/;")).toBe(0);
+		expect(counted("ts_suppressions", "const r = /'/g; const s = '// @ts-ignore';")).toBe(0);
+		expect(counted("lint_suppressions", "const s = '// biome-ignore lint/suspicious/noExplicitAny: x';")).toBe(0);
+		expect(counted("lint_suppressions", "const t = `${a} // biome-ignore lint/style/noNonNullAssertion: x ${b} // eslint-disable`;")).toBe(0);
+	});
+
+	test("a real comment next to a literal still counts", () => {
+		expect(counted("ts_suppressions", "const r = /'/; // @ts-ignore")).toBe(1);
+		expect(counted("ts_suppressions", "const s = '// x'; // @ts-ignore")).toBe(1);
+		expect(counted("ts_suppressions", "const t = `a ${b /* @ts-ignore */} c`;")).toBe(1);
+		expect(counted("ts_suppressions", "const t = `a ${b} c`; // @ts-ignore")).toBe(1);
+		expect(counted("lint_suppressions", "const t = `a ${b}`; // biome-ignore lint/style/useConst: x")).toBe(1);
+	});
+
 	test("does not count strings, templates, regexes or ordinary comments", () => {
 		expect(counted("ts_suppressions", 'const s = "@ts-ignore";')).toBe(0);
 		expect(counted("ts_suppressions", "const s = `// @ts-ignore`;")).toBe(0);
@@ -245,6 +283,7 @@ describe("process_exit_non_entrypoint", () => {
 		expect(counted("process_exit_non_entrypoint", `#!/usr/bin/env bun\n${exit}`)).toBe(0);
 		expect(counted("process_exit_non_entrypoint", `if (import.meta.main) ${exit}`)).toBe(0);
 		expect(counted("process_exit_non_entrypoint", `// ratchet-entrypoint: reason\n${exit}`)).toBe(0);
+		expect(counted("process_exit_non_entrypoint", `if (a) { b(); }\n// ratchet-entrypoint\nelse { c(); }\n${exit}`)).toBe(0);
 		expect(counted("process_exit_non_entrypoint", exit, "packages/demo/src/thing-run.ts")).toBe(0);
 		expect(counted("process_exit_non_entrypoint", exit, "packages/demo/src/index.ts")).toBe(0);
 		expect(counted("process_exit_non_entrypoint", exit, "packages/demo/src/main.ts")).toBe(0);
