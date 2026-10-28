@@ -31,7 +31,7 @@
 
 A checkpoint lists what it skipped (`skipped <path> (<reason>)`), so a missing file is explained, not silent. A restore neither writes nor deletes an excluded path: the files a checkpoint does not hold are not touched by a rollback either, including a file that was skipped (for example too large) when the checkpoint was taken and has since changed (the checkpoint records its skipped paths in the pinned commit message, and the plan reports them as `skippedInSnapshot`; a checkpoint pinned before this was recorded has no such list, so a file it never captured and that is now in the worktree is treated as created after it). A checkpoint records at most 5,000 skipped paths (1 MiB of JSON): when more were skipped it keeps the first ones in path order, the plan reports `skipped_list_truncated` (`recorded` of `total`), and a skipped file beyond them is not protected, so it is removed like a new file only if it fits the policy now and is absent from the checkpoint (a file that is still too large is not in the worktree tree and is never touched).
 
-**Triggers** (the `--trigger` value): `turn`, `plan-step`, `steering`, `manual` (the default), `pre-restore`, `baseline`. The CLI takes a checkpoint when you run `substrate session checkpoint`. Which hooks, plan steps or steering integrations call it automatically at this release is **UNVERIFIED**: check what your surface's hook configuration actually runs before relying on a checkpoint existing at a boundary you did not take yourself.
+**Triggers** (the `--trigger` value): `turn`, `plan-step`, `steering`, `manual` (the default), `pre-restore`, `baseline`. `manual` is what `substrate session checkpoint` takes; `pre-restore` is what a rollback takes itself. The other four have an entry point, `substrate session hook <trigger>` (see "Automatic checkpoints" below), but **nothing calls it until an operator installs the printed hook configuration in a host**: check what your host's hook configuration actually runs, and `substrate session checkpoints`, before relying on a checkpoint existing at a boundary you did not take yourself.
 
 **The ledger sees a checkpoint as** a `session.checkpoint` note: ids, a git tree id, a manifest digest and counts. Never file, transcript or memory content.
 
@@ -43,6 +43,8 @@ substrate session checkpoints [--session ID] [--surface S] [--offline] [--json]
 substrate session rollback <ckpt|seq|previous> [--session ID] [--surface S] [--dry-run] [--force] [--offline] [--json]
 substrate session recover [--json]
 substrate session sync [--json]
+substrate session hook <turn|plan-step|steering|baseline> [--session ID] [--surface S] [--plan-phase P] [--plan-step S] [--verbose]
+substrate session hook-config <claude-code|git-post-commit>
 ```
 
 | Exit | Meaning |
@@ -56,6 +58,33 @@ substrate session sync [--json]
 The session id comes from `--session`. With no flag it is the one session that has local checkpoints in this worktree; with none or several the command refuses and asks for `--session`. `--surface` (default `claude-code`) selects the bearer; the server binds a session to the surface that wrote it.
 
 Every line of output is scrubbed: the bearer, anything the redactor recognises, and absolute paths (`<worktree>`, `~`).
+
+## Automatic checkpoints (hooks)
+
+| Boundary | Entry point | Limit |
+| --- | --- | --- |
+| turn | `substrate session hook turn` | at most one per 60 s; skipped when the worktree is unchanged since the newest checkpoint |
+| plan step | `substrate session hook plan-step [--plan-phase P] [--plan-step S]` | at most one per 10 s; skipped when unchanged |
+| steering | `substrate session hook steering` (envelope field `directive_id`) | one per directive; skipped when unchanged |
+| session baseline | `substrate session hook baseline` | only while the session has no checkpoint |
+| manual | `substrate session checkpoint` | none |
+
+The limits count checkpoints of the **same** trigger, so a manual checkpoint does not suppress a turn one. They are defaults from a cost argument (a checkpoint hashes the worktree), not measurements (ADR 0007).
+
+**What the hook does.** It reads a JSON envelope on stdin (`session_id`, `cwd`, `transcript_path`; `directive_id` for steering), takes the checkpoint if one is due, and prints nothing. It is **fail-open**: malformed or empty stdin, a missing session, an unreachable server, a bad flag or a 10-second timeout all exit 0, so a host never blocks on it; add `--verbose` to see one stderr line saying what happened. The session id is `--session`, else the envelope's `session_id`, else the one session that already has checkpoints in the worktree. A checkpoint taken while the server is down is journaled; run `substrate session sync` later.
+
+**Installing it (an operator step; nothing here installs anything).** Print the configuration and put it where the host reads it:
+
+```
+substrate session hook-config claude-code        # settings JSON: a Stop hook that runs `substrate session hook turn`
+substrate session hook-config git-post-commit    # a post-commit script body that runs `substrate session hook plan-step` in the background
+```
+
+- **Claude Code.** Merge the printed `hooks` object into `.claude/settings.json` (this project) or `~/.claude/settings.json` (every project); if a `Stop` list exists, add the entry to it. `substrate` must be on the PATH of the hook (otherwise replace it with `bun <checkout>/packages/cli/src/index.ts`).
+- **git.** Save the printed script as `.git/hooks/post-commit` and `chmod +x` it, or append its command line to an existing `post-commit`. The commit never waits for it. There is no envelope on stdin, so the session is the one that already has checkpoints in the worktree; add `--session ID` to the command line when there could be several.
+- **Check it.** After a turn or a commit, `substrate session checkpoints --session ID` should list a `turn` or `plan-step` checkpoint; if not, rerun the command by hand with `--verbose` and the envelope on stdin, for example `echo '{"session_id":"ID","cwd":"/path/to/worktree"}' | substrate session hook turn --verbose`.
+
+**Outside this repository.** Firing the hook from omp, GSD-Core (phase and plan-step boundaries), Ultrathink (plan nodes), Swarm (lane boundaries) or a steering-delivery host is those projects' work: none of them was changed, and none calls the hook today. For steering, a host that applies a directive pipes `{"session_id":"ID","directive_id":"DIRECTIVE"}` to `substrate session hook steering`; no printed configuration exists for it.
 
 ## A worked example
 
@@ -202,7 +231,7 @@ A snapshot tree can hold untracked files and gitignored `.planning/` notes. **Ne
 ## UNVERIFIED and open
 
 - Whether the installed omp resumes a forked session file (above).
-- Which hooks or integrations take `turn`, `plan-step` or `steering` checkpoints automatically at this release.
+- Which sibling hosts (omp, GSD-Core, Ultrathink, Swarm, a steering-delivery host) fire `substrate session hook` at their boundaries: the entry points and printed Claude Code and git configuration are shipped here, the firing is not.
 - Who takes omp checkpoints automatically: `--omp-session` exists, but no shipped hook calling it was verified.
 - The omp bucket name for a working directory outside the home directory and the temp root follows the rule in `omp://session.md` (`--<encoded absolute path>--`) but was not checked against a real directory.
 - Rollback was not rehearsed against the live server or the live ledger by the work that wrote this runbook.

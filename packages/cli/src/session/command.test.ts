@@ -106,6 +106,10 @@ describe("the grammar is refused before any work", () => {
 		["--omp-session together with --transcript-ref", ["checkpoint", "--session", "s", "--omp-session", "a.jsonl", "--transcript-ref", '{"surface":"claude-code","session_locator":"abc","turn_no":7}']],
 		["--omp-session on another subcommand", ["checkpoints", "--omp-session", "a.jsonl"]],
 		["an empty --omp-session", ["checkpoint", "--session", "s", "--omp-session", ""]],
+		["hook-config with no target", ["hook-config"]],
+		["hook-config with an unknown target", ["hook-config", "vim"]],
+		["hook-config with two targets", ["hook-config", "claude-code", "git-post-commit"]],
+		["a flag on hook-config", ["hook-config", "claude-code", "--json"]],
 	];
 	for (const [name, argv] of refused) {
 		test(`${name}: usage on stderr, exit 2, no server call, no checkpoint`, async () => {
@@ -130,7 +134,7 @@ describe("the grammar is refused before any work", () => {
 	});
 
 	test("the usage text names every subcommand and the exit codes", () => {
-		for (const word of ["checkpoint", "checkpoints", "rollback", "recover", "sync", "exit: 0 done, 1 failed, 2 usage, 3 refused", "4 files restored"]) {
+		for (const word of ["checkpoint", "checkpoints", "rollback", "recover", "sync", "hook", "hook-config", "exit: 0 done, 1 failed, 2 usage, 3 refused", "4 files restored"]) {
 			expect(SESSION_USAGE).toContain(word);
 		}
 	});
