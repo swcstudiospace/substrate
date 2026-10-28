@@ -266,6 +266,17 @@ The `planning_status` and `planning_sessions` MCP tools read the planning checko
 - **Commands.** The presence client sends only `GET`, `SET ... EX`, `SCAN` and `TIME`. Every reply has a deadline (`COMMAND_TIMEOUT_MS`, 250 ms, the cache's budget); a reply that misses it fails the call and the connection is discarded. It is a separate module from the cache client, so the cache's command lock is unchanged.
 - **History.** Presence history is not yet written to TimescaleDB. That table is an operator-gated production step (see `.planning/phases/52-planning-awareness-core/PLAN.md`).
 
+## Steering inbox (phase 53)
+
+The `steering_queue`, `steering_acknowledge` and `steering_list` MCP tools carry directives from an operator to a planning session. They are registered while `SUBSTRATE_PLANNING_STEERING` is on, and also when it is malformed, so a bad setting is answered rather than hidden.
+
+- **Queue.** The author is the calling operator's surface and is always human; it must be on `SUBSTRATE_PLANNING_STEERING_PRINCIPALS`. The server assigns the directive id (a random UUID), and a caller that supplies an `id` is refused as an unknown field. A non-operator or agent caller, an unlisted principal and a session past `SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN` are refused with a typed error. A directive is audited before it is queued.
+- **Acknowledge.** The target session answers `applied` or `declined`. A directive that conflicts with the active plan needs `confirm: true` to be applied. The acknowledgement is audited before it takes effect.
+- **List.** `steering_list` returns every directive for one session, queued and acknowledged. Each carries a `state`; an acknowledged directive keeps its `outcome` and `confirmed` flag. It is a read and writes no audit row.
+- **Authorship.** The author comes only from the operator caller. No tool argument names an author, and the argument schemas refuse one as an unknown field.
+- **Settings.** Invalid `SUBSTRATE_PLANNING_STEERING*` values make every steering tool answer `misconfigured`, naming the failing keys and never their values. Startup logs those keys once.
+- **Sink.** Writes are fail-closed. With no audit sink injected they answer `not-configured` and record nothing, and no production code injects the durable sink yet, so production writes answer `not-configured`. The durable sink is the Postgres table `planning_steering_audit`, created only when `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` is on, after migration 33 is rehearsed on a restored dump. A repeat of the same payload is a no-op. A different payload under a saved `(directive, transition)` key is an `AUDIT_CONFLICT`, and the write is refused. The table is append-only at the application level; a database-level REVOKE or trigger is an operator decision.
+
 ## Fail-open budget (unchanged)
 
 A substrate outage never blocks a prompt. `fetchBrief` returns `""` within 1.5 s. Every cache miss and every Dragonfly, Hindsight or RAGFlow error falls through to the next source or to an empty result with a logged reason. Writes to Greptime and Timescale are the only calls allowed to fail closed, and only for the caller that asked for durability.

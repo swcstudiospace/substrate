@@ -43,12 +43,13 @@ export interface ContractAllowlists {
 /**
  * The exceptions for the real steps.
  *
- * - `idempotence`: none. Steps 1..32 are all `create … if not exists` or `add column if not exists`.
+ * - `idempotence`: none. Steps 1..33 are all `create … if not exists` or `add column if not exists`.
  * - `destructive`: none. The one destructive statement in the migrator, `drop index if exists memory_reviews_hash_idx`,
  *   lives in `IndexStore.migrate()` itself and is deliberately not a ledgered step.
  * - `tables`: `schema_migrations` is the ledger `migrate()` creates for itself (it is not a step, listed so a step that
- *   ever creates it is not flagged), and `skills_registry` (step 17) is not in the index archive's closed table list
- *   (`index-archive-spec.ts`); archiving it is a separate change.
+ *   ever creates it is not flagged), `skills_registry` (step 17) is not in the index archive's closed table list
+ *   (`index-archive-spec.ts`); archiving it is a separate change, and `planning_steering_audit` (step 33) is an opt-in,
+ *   append-only audit table that is likewise not in that closed list.
  */
 export const REAL_ALLOWLISTS: ContractAllowlists = {
 	idempotence: {},
@@ -56,6 +57,7 @@ export const REAL_ALLOWLISTS: ContractAllowlists = {
 	tables: {
 		schema_migrations: "the migration ledger that IndexStore.migrate() creates itself; it is not archive data",
 		skills_registry: "step 17 predates the archive's closed table list and is not part of it; archiving it is a separate change",
+		planning_steering_audit: "step 33 is an opt-in (steering-audit), append-only steering audit table; it is not part of the archive's closed table list and archiving it is a separate change",
 	},
 };
 

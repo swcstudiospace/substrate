@@ -14,12 +14,66 @@ import { z } from "zod";
 /** The shape a session id takes. It is also the Redis key suffix, so it is restricted. */
 export const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
+/** Why a session's planning view cannot be trusted for conflicts (phase 53, D53-h). */
+export const UNKNOWN_VIEW_REASONS = [
+	"no-scan",
+	"scan-failed",
+	"scan-truncated",
+	"scan-unlisted",
+	"scan-has-errors",
+	"scan-stale",
+	"report-limit",
+	"clock-unavailable",
+] as const;
+export type UnknownViewReason = (typeof UNKNOWN_VIEW_REASONS)[number];
+
+/** Most entries (phases and plan ids together) one planning report carries. A larger index is reported as `report-limit`. */
+export const MAX_REPORT_ENTRIES = 512;
+
+/** The longest phase or plan id a planning report or a touched pair carries. */
+export const REPORT_ID_MAX = 128;
+const REPORT_ID = z.string().min(1).max(REPORT_ID_MAX);
+
+export const PhaseReportSchema = z.object({ phase: REPORT_ID, plans: z.array(REPORT_ID).max(MAX_REPORT_ENTRIES) }).strict();
+export type PhaseReport = z.infer<typeof PhaseReportSchema>;
+
+/**
+ * A session's planning report: what its own checkout's index says. It rides in the session's presence record and is
+ * rewritten by that checkout's reads. `known` lists the phases the index holds, with the plan ids under each. `unknown`
+ * gives the reason. Every other reader judges the report against its own clock: an older report is stale.
+ */
+export const PlanningReportSchema = z.discriminatedUnion("status", [
+	z
+		.object({ status: z.literal("known"), scannedAtMs: z.number().int().nonnegative(), phases: z.array(PhaseReportSchema).max(MAX_REPORT_ENTRIES) })
+		.strict(),
+	z.object({ status: z.literal("unknown"), scannedAtMs: z.number().int().nonnegative(), reason: z.enum(UNKNOWN_VIEW_REASONS) }).strict(),
+]);
+export type PlanningReport = z.infer<typeof PlanningReportSchema>;
+
+/**
+ * A planning change this checkout made (phase 53, SOTA-09): the phase it touched and the plan it named, or null for a document
+ * that names none. `observedAtMs` is the server's time of the complete observation that saw it. A pair counts only while it is
+ * inside the presence TTL (`touchedWithin`).
+ */
+export const TouchedPairSchema = z.object({ phase: REPORT_ID, plan: REPORT_ID.nullable(), observedAtMs: z.number().int().nonnegative() }).strict();
+export type TouchedPair = z.infer<typeof TouchedPairSchema>;
+
+/** A repository's identity, `owner/name`. Two checkouts take part in one conflict only when they name the same repository. */
+export const REPO_ID = z
+	.string()
+	.max(256)
+	.regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
+
 export const SessionRecordSchema = z.object({
 	sessionId: z.string().regex(SESSION_ID_RE),
 	worktree: z.string().min(1).max(1024),
 	branch: z.string().min(1).max(256),
-	activePhase: z.string().min(1).max(64).nullable(),
 	lastHeartbeatMs: z.number().int().nonnegative(),
+	planning: PlanningReportSchema.optional(),
+	repo: REPO_ID.nullable().optional(),
+	touched: z.array(TouchedPairSchema).max(MAX_REPORT_ENTRIES).optional(),
+	// Older readers require this field and reject a record without it, so writers keep emitting null. This reader accepts an absent field, null, or a phase string.
+	activePhase: z.string().min(1).max(64).nullable().optional(),
 });
 
 export type SessionRecord = z.infer<typeof SessionRecordSchema>;
@@ -65,6 +119,15 @@ export function classifySessions(records: readonly SessionRecord[], nowMs: numbe
 			return { ...record, ageMs, status: ageMs > ttlMs ? "stale" : "active" };
 		})
 		.sort((a, b) => compareText(a.sessionId, b.sessionId));
+}
+
+/**
+ * The touched pairs still inside the freshness window. A pair observed exactly `ttlMs` ago still counts, as a heartbeat exactly
+ * `ttlMs` old is still active. A pair ahead of `nowMs` (clock skew) counts. The input is not modified.
+ */
+export function touchedWithin(pairs: readonly TouchedPair[], nowMs: number, ttlMs: number): TouchedPair[] {
+	assertTtlMs(ttlMs);
+	return pairs.filter((pair) => nowMs - pair.observedAtMs <= ttlMs);
 }
 
 /** Every record the store holds, classified against the clock's own time. */

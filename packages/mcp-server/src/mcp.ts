@@ -21,6 +21,7 @@ import { buildFabricSuggestions } from "./fabric/optimize.ts";
 import { buildFabricStatus } from "./fabric/status.ts";
 import { DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT } from "./greptime.ts";
 import { MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS } from "./lease.ts";
+import { acknowledgeSteering, queueSteering, STEERING_ACKNOWLEDGE_INPUT, STEERING_LIST_INPUT, STEERING_QUEUE_INPUT, listSteering, steeringFailed, type SteeringCaller, type SteeringWriteResult } from "./planning/steering-tools.ts";
 import { MemoryVerifyError } from "./memory-verify.ts";
 import { ragRetryDelay } from "./rag-retry.ts";
 import { reservedEmitRefusal } from "./reserved-actions.ts";
@@ -2303,6 +2304,63 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		},
 		async () => json(await substrate.planning.sessions()),
 	);
+
+	/**
+	 * The steering tools (phase 53, SOTA-09). Registered only while SUBSTRATE_PLANNING_STEERING is on. A write needs an operator
+	 * caller, and answers not-configured, and records nothing, while no audit sink is injected. The rules live in `planning/steering.ts`.
+	 */
+	if (substrate.steering.enabled) {
+		const steering = substrate.steering;
+		// Authorship is the transport's: the caller's surface and operator flag, never a tool argument.
+		const steeringCaller: SteeringCaller = { surface: callerSurface, isOperator };
+		const steeringReply = (result: SteeringWriteResult) => (steeringFailed(result) ? { ...json(result), isError: true } : json(result));
+		server.registerTool(
+			"steering_queue",
+			{
+				title: "Queue a steering directive for a planning session",
+				description:
+					"Queues one directive to a planning session, as the calling operator. The principal is the caller's surface and must be on " +
+					"SUBSTRATE_PLANNING_STEERING_PRINCIPALS. Each session has a rate limit. The server assigns the directive id, returned as " +
+					"directive_id; the caller cannot choose it. The directive is audited before it is queued. A refusal carries a typed error: " +
+					"forbidden (operator-required or caller-identity-missing), principal-not-allowed, rate-limited, invalid-directive or " +
+					"audit-unavailable (its code is the driver's, or AUDIT_CONFLICT when the audit row was saved with other content). Answers " +
+					"misconfigured, naming the settings keys, while the steering settings are invalid, and not-configured while no audit sink is injected.",
+				inputSchema: STEERING_QUEUE_INPUT,
+				annotations: { destructiveHint: false, idempotentHint: false },
+			},
+			async (args) => steeringReply(await queueSteering(steering, steeringCaller, args)),
+		);
+		server.registerTool(
+			"steering_acknowledge",
+			{
+				title: "Acknowledge a steering directive",
+				description:
+					"The calling operator acknowledges a queued directive for the target session as applied or declined. Applying a directive " +
+					"that conflicts with the active plan needs confirm: true. The acknowledgement is audited before it takes effect. A refusal " +
+					"carries a typed error: forbidden, not-found, wrong-session, already-acknowledged, confirmation-required or audit-unavailable. " +
+					"Answers misconfigured while the steering settings are invalid.",
+				inputSchema: STEERING_ACKNOWLEDGE_INPUT,
+				annotations: { destructiveHint: false, idempotentHint: false },
+			},
+			async (args) => steeringReply(await acknowledgeSteering(steering, steeringCaller, args)),
+		);
+		server.registerTool(
+			"steering_list",
+			{
+				title: "Queued steering directives for a session",
+				description:
+					"The directives for one planning session, queued and acknowledged, highest priority first. Each carries its state; an acknowledged " +
+					"directive keeps its outcome and confirm flag. The author is the operator who queued it, never an argument. A read: it changes " +
+					"nothing. Answers misconfigured, naming the settings keys, while the steering settings are invalid.",
+				inputSchema: STEERING_LIST_INPUT,
+				annotations: { readOnlyHint: true },
+			},
+			async (args) => {
+				const listed = listSteering(steering, args);
+				return listed.status === "misconfigured" ? { ...json(listed), isError: true } : json(listed);
+			},
+		);
+	}
 
 	server.registerTool(
 		"railway_scale",

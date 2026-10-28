@@ -425,6 +425,7 @@ async function emitPhaseUnit(walk: Walk, unit: PhaseUnit): Promise<void> {
 		add(walk, unit.entry);
 		return;
 	}
+	// Decision: a document's phase is its directory's, never its frontmatter's. Frontmatter may supply the plan id only.
 	await collectDocuments(walk, unit.relDir, unit.real, unit.entries, "phase", PHASE_DIR.exec(unit.name)?.[1]);
 }
 

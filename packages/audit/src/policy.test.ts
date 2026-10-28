@@ -60,9 +60,18 @@ describe("auditMode", () => {
 			"session_rollback_plan",
 			"planning_status",
 			"planning_sessions",
+			"steering_list",
 		]) {
 			expect(auditMode(tool)).toBe("fail-open");
 		}
+	});
+
+	test("the steering writes are fail-closed", () => {
+		// A directive changes what a planning session does next, so each write is recorded before it takes effect.
+		expect({ queue: auditMode("steering_queue"), acknowledge: auditMode("steering_acknowledge") }).toEqual({
+			queue: "fail-closed",
+			acknowledge: "fail-closed",
+		});
 	});
 
 	test("every REST route server.ts audits has a mode", () => {

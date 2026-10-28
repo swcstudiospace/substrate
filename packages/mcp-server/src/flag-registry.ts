@@ -312,6 +312,9 @@ export const FLAGS: readonly FlagSpec[] = [
 	{ name: "NOTION_TASK_GRAPH_DS", kind: "string", plane: "server", default: "the repo's task-graph data source id", allowed: "data source id", unset: "the built-in id", readBy: "mcp-server/config.ts, host/sync.ts", documented: true },
 	{ name: "HERMES_LINEAR_URL", kind: "string", plane: "server", default: "http://127.0.0.1:8792", allowed: "URL", unset: "the connector's loopback address", readBy: "mcp-server/config.ts", documented: true },
 	{ name: "SUBSTRATE_DOD_GATE_TIMEOUT_MS", kind: "number", plane: "server", default: "35000", allowed: "positive integer ms", unset: "35000 ms", readBy: "mcp-server/config.ts", documented: true },
+	{ name: "SUBSTRATE_PLANNING_STEERING", kind: "toggle", plane: "server", default: "off", allowed: "on | off (1/0, true/false, yes/no; case- and space-insensitive; anything else refuses the steering settings with a typed error naming the variable)", unset: "off: steering is not enabled and no steering tool is registered; on: steering_queue and steering_acknowledge act only for an operator caller, steering_list is a read, and each write answers not-configured until an audit sink is injected", readBy: "mcp-server/planning/steering.ts", documented: true },
+	{ name: "SUBSTRATE_PLANNING_STEERING_PRINCIPALS", kind: "list", plane: "server", default: "none", allowed: "comma separated principal ids (letters, digits and . _ @ : -; 1 to 128 characters each; an empty entry is refused)", unset: "empty: every principal is refused, so no steering directive can be queued", readBy: "mcp-server/planning/steering.ts", documented: true },
+	{ name: "SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN", kind: "number", plane: "server", default: "10", allowed: "whole number 1..1000 (not an integer or out of range: refused with a typed error naming the variable)", unset: "10 directives per minute per target session", readBy: "mcp-server/planning/steering.ts", documented: true },
 
 	// ── ledger ────────────────────────────────────────────────────────────────
 	{ name: "GREPTIME_URL", kind: "secret-ref", plane: "ledger", default: "none", allowed: "HTTP SQL base URL", unset: "no ledger: events are not recorded and claims are not withdrawn for it", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
@@ -493,11 +496,13 @@ export const FLAGS: readonly FlagSpec[] = [
 			manual: "/healthz.capacity.index.graphNodes shows the HOT-update and dead-row ratios the tune is meant to move",
 		},
 	},
+	{ name: "SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE", kind: "toggle", plane: "index", default: "off", allowed: "on | off (1/0, true/false, yes/no; anything else is off)", unset: "off: migrate() creates no planning_steering_audit table, so steering audit writes fail closed until an operator turns it on", readBy: "mcp-server/planning/steering-store.ts", documented: true },
 	{ name: "SUBSTRATE_INDEX_VOLUME_BYTES", kind: "number", plane: "index", default: "none", allowed: "bytes", unset: "no capacity runway row (the ceiling is unknown)", readBy: "observability/config.ts", documented: true, doc: "docs/observability.md" },
 	{ name: "SUBSTRATE_PLANNING_ROOT", kind: "path", plane: "index", default: "none", allowed: "absolute checkout path", unset: "planning plane disabled: nothing under .planning/ is read and no default path exists", readBy: "mcp-server/planning/config.ts", documented: true },
 	{ name: "SUBSTRATE_PLANNING_PRESENCE_TTL_S", kind: "number", plane: "index", default: "90", allowed: "1..86400", unset: "90 s: a session with no heartbeat for longer is stale", readBy: "mcp-server/planning/config.ts", documented: true },
 	{ name: "SUBSTRATE_PLANNING_MAX_FILES", kind: "number", plane: "index", default: "500", allowed: "1..10000", unset: "500 documents per planning index; the rest are counted as truncated", readBy: "mcp-server/planning/config.ts", documented: true },
 	{ name: "SUBSTRATE_PLANNING_MAX_BYTES", kind: "number", plane: "index", default: "262144", allowed: "1024..4194304", unset: "256 KiB per document; a larger document is an error record", readBy: "mcp-server/planning/config.ts", documented: true },
+	{ name: "SUBSTRATE_PLANNING_CHECKPOINT_DIR", kind: "path", plane: "index", default: "none", allowed: "absolute directory path", unset: "checkpoints stay in memory, and planning_status reports them as not durable", readBy: "mcp-server/planning/config.ts", documented: true },
 	{ name: "SUBSTRATE_PLANNING_SCAN_INTERVAL_MS", kind: "number", plane: "index", default: "15000", allowed: "1000..3600000", unset: "15000 ms between planning observer scans; a change is seen within one interval", readBy: "mcp-server/planning/config.ts", documented: true },
 
 	// ── cache ─────────────────────────────────────────────────────────────────
