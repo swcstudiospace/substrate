@@ -77,7 +77,7 @@ ignore rule lands through the normal owner-reviewed agent-skills PR path, never 
    Rollback: restore the removed files from backup; revert the `.gitignore` PR before merge.
    NOT executed by the phase executor.
 
-Phase 25 hook point: after each sync fast-forward, the RAGFlow `agent-skills` dataset
+Phase 25 hook point: after each sync fast-forward, the docs-plane `agent-skills` dataset
 refresh trigger runs (docs plane). This phase only documents the hook; Phase 25 owns it.
 
 ## SKILL-07 live tail: the gated cutover sequence
