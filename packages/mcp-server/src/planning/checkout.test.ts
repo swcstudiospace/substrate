@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gitOriginUrl, repoFromGitConfig, repoOf } from "./checkout.ts";
+import { type GitRunResult, gitOriginUrl, originUrlRunner, repoFromGitConfig, repoOf } from "./checkout.ts";
 import { nodePlanningFs } from "./fs.ts";
 import { FakeTree, TREE_ROOT } from "./tree.fixtures.ts";
 
@@ -125,5 +125,51 @@ describe("repoOf asks git, so a configured origin is found wherever git finds it
 		const tree = new FakeTree({ [`${TREE_ROOT}/.git/config`]: '[remote "origin"]\n\turl = https://github.com/acme/repo.git\n' });
 		expect(await repoOf(tree, TREE_ROOT, async () => ({ kind: "unavailable" }))).toEqual({ state: "known", repo: "acme/repo" });
 		expect(await gitOriginUrl(join(scratch, "does-not-exist"))).toEqual({ kind: "unavailable" });
+	});
+
+	describe("exit 1 from git config is 'no origin' only when git accepted the repository", () => {
+		const exit = (code: number, stdout = ""): GitRunResult => ({ kind: "exit", code, stdout });
+		const scripted = (answers: Record<string, GitRunResult>) => {
+			const calls: string[][] = [];
+			const runner = originUrlRunner(async (_root, args) => {
+				calls.push([...args]);
+				return answers[args[0] ?? ""] ?? { kind: "failed" };
+			});
+			return { calls, runner };
+		};
+		const tree = () => new FakeTree({ [`${TREE_ROOT}/.git/config`]: '[remote "origin"]\n\turl = https://github.com/acme/repo.git\n' });
+
+		test("exit 1 then a failing rev-parse (dubious ownership) is transient, never origin-missing", async () => {
+			const { calls, runner } = scripted({ config: exit(1), "rev-parse": exit(128) });
+			expect(await runner(TREE_ROOT)).toEqual({ kind: "failed" });
+			expect(calls).toEqual([["config", "--get", "remote.origin.url"], ["rev-parse", "--git-dir"]]);
+			expect(await repoOf(tree(), TREE_ROOT, runner)).toEqual({ state: "unknown", reason: "origin-unresolved", transient: true });
+		});
+
+		test("exit 1 then a passing rev-parse is a definite origin-missing", async () => {
+			const { runner } = scripted({ config: exit(1), "rev-parse": exit(0, ".git\n") });
+			expect(await runner(TREE_ROOT)).toEqual({ kind: "none" });
+			expect(await repoOf(tree(), TREE_ROOT, runner)).toEqual({ state: "unknown", reason: "origin-missing", transient: false });
+		});
+
+		test("an empty answer on exit 0 is checked the same way", async () => {
+			expect(await scripted({ config: exit(0, "\n"), "rev-parse": exit(128) }).runner(TREE_ROOT)).toEqual({ kind: "failed" });
+			expect(await scripted({ config: exit(0, "\n"), "rev-parse": exit(0) }).runner(TREE_ROOT)).toEqual({ kind: "none" });
+		});
+
+		test("a url answer needs no second question, and another nonzero exit is a failure without one", async () => {
+			const found = scripted({ config: exit(0, "https://github.com/acme/repo.git\n") });
+			expect(await found.runner(TREE_ROOT)).toEqual({ kind: "value", url: "https://github.com/acme/repo.git" });
+			expect(found.calls).toHaveLength(1);
+			const broken = scripted({ config: exit(128) });
+			expect(await broken.runner(TREE_ROOT)).toEqual({ kind: "failed" });
+			expect(broken.calls).toHaveLength(1);
+		});
+
+		test("git unavailable or timing out passes through, and a rev-parse that times out is transient", async () => {
+			expect(await scripted({ config: { kind: "unavailable" } }).runner(TREE_ROOT)).toEqual({ kind: "unavailable" });
+			expect(await scripted({ config: { kind: "failed" } }).runner(TREE_ROOT)).toEqual({ kind: "failed" });
+			expect(await scripted({ config: exit(1), "rev-parse": { kind: "failed" } }).runner(TREE_ROOT)).toEqual({ kind: "failed" });
+		});
 	});
 });
