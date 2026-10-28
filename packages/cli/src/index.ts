@@ -49,6 +49,7 @@
  */
 import { chainStateOf, renderEvidenceHtml, type EvidenceBundle } from "@substrate/evidence";
 import { list, parseArgs, str } from "./args.ts";
+import { driftExitCode, parseEmitPayload, parseEvidenceBundle } from "./guards.ts";
 import { resolveBearer } from "./token.ts";
 import { docsTimeout, runDocs } from "./docs.ts";
 import { httpMemory, lessonsTimeout, runLessons } from "./lessons.ts";
@@ -174,10 +175,13 @@ async function cmdEmit(args: Record<string, string | true>): Promise<void> {
 	let payload: Record<string, unknown> | undefined;
 	const rawPayload = str(args.payload);
 	if (rawPayload) {
-		try {
-			payload = JSON.parse(rawPayload) as Record<string, unknown>;
-		} catch {
+		const parsed = parseEmitPayload(rawPayload);
+		if (parsed.kind === "ok") {
+			payload = parsed.payload;
+		} else if (parsed.kind === "invalid-json") {
 			process.stderr.write("[substrate] --payload is not valid JSON; dropping it\n");
+		} else {
+			process.stderr.write("[substrate] --payload is not a JSON object; dropping it\n");
 		}
 	}
 	const surface = str(args.surface) ?? "claude-code";
@@ -306,13 +310,7 @@ async function cmdDrift(args: Record<string, string | true>): Promise<number> {
 	// `--json` always exited 0, so a hook or cron that branched on the status saw
 	// every scan as clean — the one thing the status code is for.
 	if (args.json) {
-		try {
-			const report = JSON.parse(body) as { ok?: boolean; findings?: unknown[] };
-			return report.ok === true || (report.findings?.length ?? 0) === 0 ? 0 : 1;
-		} catch {
-			// A reply that is not the report at all is not a clean scan either.
-			return 1;
-		}
+		return driftExitCode(body);
 	}
 	return body.includes("— no drift") ? 0 : 1;
 }
@@ -404,13 +402,16 @@ async function cmdEvidence(args: Record<string, string | true>): Promise<number>
 		return 1;
 	}
 
-	let bundle: EvidenceBundle;
-	try {
-		bundle = JSON.parse(body) as EvidenceBundle;
-	} catch {
-		process.stderr.write("[substrate] evidence was not valid JSON\n");
+	const parsed = parseEvidenceBundle(body);
+	if (!parsed.ok) {
+		process.stderr.write(
+			parsed.reason === "invalid-json"
+				? "[substrate] evidence was not valid JSON\n"
+				: `[substrate] evidence is not an evidence bundle: ${parsed.detail}\n`,
+		);
 		return 1;
 	}
+	const bundle: EvidenceBundle = parsed.bundle;
 
 	// Rendering is not composing: the bundle is the answer, and this only presents it.
 	// `substrate-mcp` remains the only thing that decides what is in it.
@@ -595,20 +596,27 @@ switch (command) {
 	case "brief":
 		await cmdBrief(args);
 		process.exit(0);
+		break;
 	case "emit":
 		await cmdEmit(args);
 		process.exit(0);
+		break;
 	case "run":
 		process.exit(await cmdRun(rest));
+		break;
 	case "verify":
 		process.exit(await cmdVerify(rest[0]));
+		break;
 	case "drift":
 		process.exit(await cmdDrift(args));
+		break;
 	case "handoff":
 		await cmdHandoff(args);
 		process.exit(0);
+		break;
 	case "evidence":
 		process.exit(await cmdEvidence(args));
+		break;
 	case "lessons":
 		process.exit(
 			await runLessons(rest, {
@@ -625,6 +633,7 @@ switch (command) {
 				err: (text) => process.stderr.write(text),
 			}),
 		);
+		break;
 	case "skills":
 		process.exit(
 			await runSkills(rest, {
@@ -636,6 +645,7 @@ switch (command) {
 				err: (text) => process.stderr.write(text),
 			}),
 		);
+		break;
 	case "docs":
 		process.exit(
 			await runDocs(rest, {
@@ -648,10 +658,13 @@ switch (command) {
 				vmGuest: (process.env.SUBSTRATE_VM_GUEST?.trim() ?? "") === "1",
 			}),
 		);
+		break;
 	case "index":
 		process.exit(cmdIndex(rest, args));
+		break;
 	case "ledger":
 		process.exit(cmdLedger(rest, args));
+		break;
 	case "spool":
 		process.exit(
 			await runSpool(rest, {
@@ -659,8 +672,10 @@ switch (command) {
 				err: (text) => process.stderr.write(text),
 			}),
 		);
+		break;
 	case "consistency":
 		process.exit(cmdConsistency(rest));
+		break;
 	case "memory":
 		process.exit(
 			await runMemory(rest, {
@@ -675,6 +690,7 @@ switch (command) {
 				err: (text) => process.stderr.write(text),
 			}),
 		);
+		break;
 	case "session":
 		process.exit(
 			await runSession(rest, {
@@ -690,6 +706,7 @@ switch (command) {
 				err: (text) => process.stderr.write(text),
 			}),
 		);
+		break;
 	default:
 		process.stdout.write(
 			"substrate brief [--repo R] [--branch B] [--graph G] [--surface S] [--write]\n" +
