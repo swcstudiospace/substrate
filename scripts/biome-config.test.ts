@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 
 type Level = "error" | "warn" | "off";
 interface BiomeConfig {
-	linter: { rules: Record<string, unknown> };
+	linter: { enabled?: boolean; rules: Record<string, unknown> };
 }
 
 const config = JSON.parse(readFileSync(join(import.meta.dir, "..", "biome.json"), "utf8")) as BiomeConfig;
@@ -31,6 +31,10 @@ describe("biome.json", () => {
 		expect(rules.preset).toBe("recommended");
 	});
 
+	test("the linter is enabled", () => {
+		expect(config.linter.enabled).toBe(true);
+	});
+
 	for (const [group, names] of Object.entries(PROMOTED)) {
 		for (const name of names) {
 			test(`${group}/${name} is an error`, () => {
@@ -46,6 +50,21 @@ describe("biome.json", () => {
 			});
 		}
 	}
+
+	test("no rule is off except the documented three", () => {
+		const off: string[] = [];
+		const walk = (path: string, node: unknown): void => {
+			if (node === "off") off.push(path);
+			else if (typeof node === "object" && node !== null) {
+				const record = node as Record<string, unknown>;
+				if (record.level === "off") off.push(path);
+				else for (const [key, child] of Object.entries(record)) walk(path === "" ? key : `${path}/${key}`, child);
+			}
+		};
+		walk("", rules);
+		const documented = Object.entries(OFF).flatMap(([group, names]) => names.map((name) => `${group}/${name}`));
+		expect(off.sort()).toEqual(documented.sort());
+	});
 
 	test("noNonNullAssertion and useOptionalChain stay warnings", () => {
 		expect(level("style", "noNonNullAssertion")).toBe("warn" as Level);

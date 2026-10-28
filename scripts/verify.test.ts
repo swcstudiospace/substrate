@@ -13,6 +13,7 @@ import {
 	GATE_STEPS,
 	main,
 	parseArgs,
+	parseLintCounts,
 	parseTestCounts,
 	runStep,
 	selectSteps,
@@ -94,6 +95,21 @@ describe("parseTestCounts and skipNote", () => {
 		expect(skipNote(counts, { SUBSTRATE_TEST_PG_URL: "postgres://scratch" })).toBeNull();
 		expect(skipNote({ pass: 10, skip: 0, fail: 0 }, {})).toBeNull();
 		expect(skipNote(null, {})).toBeNull();
+	});
+});
+
+describe("parseLintCounts", () => {
+	test("reads the warning and info totals from Biome's summary", () => {
+		expect(parseLintCounts("Checked 300 files in 1s.\nFound 657 warnings.\nFound 6 infos.\n")).toEqual({ warnings: 657, infos: 6 });
+	});
+
+	test("accepts the singular form and colour codes", () => {
+		expect(parseLintCounts("\u001b[33mFound 1 warning.\u001b[0m\nFound 1 info.\n")).toEqual({ warnings: 1, infos: 1 });
+	});
+
+	test("is zero when the summary lines are absent", () => {
+		expect(parseLintCounts("Checked 300 files in 1s. No fixes applied.\n")).toEqual({ warnings: 0, infos: 0 });
+		expect(parseLintCounts("")).toEqual({ warnings: 0, infos: 0 });
 	});
 });
 
@@ -192,6 +208,15 @@ describe("main", () => {
 		expect(written).toContain("[verify] pass: install, types, lint, tests, python, locks");
 		expect(written).not.toContain("FAIL");
 		expect(written).not.toContain("note");
+	});
+
+	test("a passing lint step keeps Biome's warning and info counts visible", async () => {
+		const output = "Checked 300 files in 1s.\nFound 657 warnings.\nFound 6 infos.\n";
+		const { run } = fakeRun({ lint: { output } });
+		const { result, written } = await quietly(() => main(["--only", "lint"], { run }));
+
+		expect(result).toBe(0);
+		expect(written).toContain("ok   Lint (Biome) (0.0s): 657 warnings, 6 infos");
 	});
 
 	test("the first failing step stops the run, shows its output tail and exits 1", async () => {

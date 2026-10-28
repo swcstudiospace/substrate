@@ -139,6 +139,27 @@ export function parseTestCounts(output: string): TestCounts | null {
 	return { pass, skip: read("skip") ?? 0, fail };
 }
 
+export interface LintCounts {
+	warnings: number;
+	infos: number;
+}
+
+/** An ANSI colour sequence; built from the ESC code so the pattern holds no control character. */
+const ANSI_COLOUR = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
+
+/**
+ * Read Biome's `Found N warnings.` / `Found N infos.` summary lines (zero when absent, singular or plural, ANSI
+ * colour ignored), so a passing lint step still shows how many non-blocking diagnostics remain.
+ */
+export function parseLintCounts(output: string): LintCounts {
+	const plain = output.replace(ANSI_COLOUR, "");
+	const read = (word: string): number => {
+		const match = plain.match(new RegExp(`Found (\\d+) ${word}s?\\.`));
+		return match?.[1] === undefined ? 0 : Number(match[1]);
+	};
+	return { warnings: read("warning"), infos: read("info") };
+}
+
 /** A reminder when tests were skipped because no scratch database was configured; null otherwise. */
 export function skipNote(counts: TestCounts | null, env: Readonly<Record<string, string | undefined>>): string | null {
 	if (counts === null || counts.skip === 0) return null;
@@ -217,7 +238,12 @@ export async function main(argv: readonly string[] = process.argv.slice(2), deps
 	for (const step of steps) {
 		const result = await (deps.run ?? runStep)(step, ROOT);
 		const counts = step.id === "tests" ? parseTestCounts(result.output) : null;
-		const detail = counts ? `: ${counts.pass} pass, ${counts.skip} skip, ${counts.fail} fail` : "";
+		const lint = step.id === "lint" ? parseLintCounts(result.output) : null;
+		const detail = counts
+			? `: ${counts.pass} pass, ${counts.skip} skip, ${counts.fail} fail`
+			: lint
+				? `: ${lint.warnings} warnings, ${lint.infos} infos`
+				: "";
 		if (result.ok) {
 			process.stdout.write(`[verify] ok   ${step.label} (${seconds(result.ms)})${detail}\n`);
 			const note = skipNote(counts, deps.env ?? process.env);
