@@ -1,8 +1,10 @@
 /**
  * Per-worktree lock files: `<git dir>/substrate-restore.lock` (one restore at a time) and
  * `<git dir>/substrate-checkpoint.lock` (one checkpoint sequence allocation at a time). They are two
- * files, never one: a rollback takes its pre-restore checkpoint while the restore is in progress, so a
- * shared lock would deadlock. A lock is created atomically with its content (pid, process start time,
+ * files, never one, so that no code path relies on nested locks: a checkpoint taken from inside a held
+ * restore lock would deadlock on a shared file, and checkpoint creation should not block behind a long
+ * restore. Today they are never nested: `rollback` finishes its pre-restore checkpoint before `restore`
+ * acquires the restore lock on entry. A lock is created atomically with its content (pid, process start time,
  * host, token). The content is written to a private temporary file with O_EXCL and hard-linked into
  * place, so another process never reads a half-written lock.
  *

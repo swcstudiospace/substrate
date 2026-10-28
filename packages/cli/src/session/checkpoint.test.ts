@@ -5,6 +5,7 @@ import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { RandomBytes } from "../../../mcp-server/src/session-events.ts";
 import { type Runner, WorktreeBusyError, pinSnapshot, snapshot, spawnRunner } from "../../../worktree-snapshot/src/index.ts";
 import { cleanupTemp, FIXED_NOW, git, makeRepo, tempDir, writeFiles } from "../../../worktree-snapshot/src/testkit.ts";
@@ -253,7 +254,7 @@ describe("sequence allocation across callers sharing one git directory", () => {
 
 	test("two processes making checkpoints at once never pin the same seq", async () => {
 		const { dir } = setup();
-		const script = new URL("./checkpoint-worker.ts", import.meta.url).pathname;
+		const script = fileURLToPath(new URL("./checkpoint-worker.ts", import.meta.url));
 		const workers = [0, 1].map(() => Bun.spawn([process.execPath, script, dir, "2"], { stdout: "pipe", stderr: "pipe" }));
 		const outputs = await Promise.all(workers.map(async (worker) => ({ code: await worker.exited, out: await new Response(worker.stdout).text(), err: await new Response(worker.stderr).text() })));
 
@@ -342,7 +343,7 @@ describe("sequence allocation across callers sharing one git directory", () => {
 		expect(existsSync(lockPath(dir))).toBe(true);
 	});
 
-	test("the restore lock does not block a checkpoint (a rollback checkpoints while it restores)", async () => {
+	test("a held restore lock does not block a checkpoint (separate lock files)", async () => {
 		const { dir, pendingDir, server, randomBytes } = setup();
 		writeFileSync(join(dir, ".git", "substrate-restore.lock"), JSON.stringify({ pid: process.pid, startedAt: "2026-01-01T00:00:00.000Z", procStart: null, host: hostname(), token: "restore" }));
 		const result = await createCheckpoint({ worktree: dir, sessionId: SESSION, trigger: "pre-restore", surface: "claude-code", client: server, now: FIXED_NOW, randomBytes, pendingDir });

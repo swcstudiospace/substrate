@@ -18,7 +18,10 @@
  * the choice of `seq` and the pin happen while one process holds it, so two processes sharing a git
  * directory can never pin the same seq (the ledger key `ckpt:s.<session>:<seq>` would have deduped one
  * of them silently). The snapshot, which is slow, is taken before the lock; the server call after it.
- * It is NOT the restore lock (a rollback takes its pre-restore checkpoint during a restore). A lock that
+ * It is NOT the restore lock: the two are separate files so that no path depends on nesting them (a
+ * checkpoint taken from inside a held restore lock would deadlock, and checkpoint creation never waits
+ * behind a long restore). Today they are never nested: `rollback` finishes its pre-restore checkpoint
+ * before `restore` takes the restore lock. A lock that
  * stays busy past its bounded wait fails the call with `WorktreeBusyError`; nothing was pinned.
  */
 import { realpathSync } from "node:fs";
