@@ -169,6 +169,14 @@ export interface FanOutOptions {
 	keep?: (hit: RecallHit) => boolean;
 	/** Called once per bank as its answer settles, so a caller that stops waiting still holds the banks that answered. */
 	onAnswer?: (answer: BankAnswer) => void;
+	/**
+	 * Which of these index entry ids are forgotten, asked once per bank for the hits it gave, inside the fan-out's own budget. A hit whose
+	 * document names a forgotten entry (`metadata.entry_id`) is dropped before the answer settles, so `onAnswer` and a partial read never
+	 * hold it. A lookup that throws or misses the budget withholds every hit that names an entry (fail closed) and calls `onUnchecked`.
+	 */
+	forgotten?: (entryIds: readonly string[]) => Promise<ReadonlySet<string>>;
+	/** Called when a bank's forgotten-entry lookup failed or ran out of time, so the caller can decline to keep the answer. */
+	onUnchecked?: () => void;
 }
 
 /**
@@ -195,6 +203,7 @@ export async function recallAcrossBanks(
 		) && (options.keep === undefined || options.keep(hit));
 	const controller = new AbortController();
 	const budget = setTimeout(() => controller.abort(), budgetMs);
+	const deadline = Date.now() + budgetMs;
 	const ask = async (bank: string): Promise<BankAnswer> => {
 		const recalled = await recallBank(config, bank, { query, signal: controller.signal, keep }, fetchImpl);
 		if (!recalled.ok) {
@@ -204,7 +213,10 @@ export async function recallAcrossBanks(
 			if (recalled.error.kind === "timeout") return { bank, hits: [], failure: { reason: "budget exceeded", timedOut: true } };
 			return { bank, hits: [], failure: { reason: recalled.error.message, timedOut: false } };
 		}
-		return { bank, hits: recalled.value };
+		if (options.forgotten === undefined) return { bank, hits: recalled.value };
+		const checked = await withoutForgotten(options.forgotten, [{ bank, hits: recalled.value }], deadline - Date.now());
+		if (checked.unchecked) options.onUnchecked?.();
+		return { bank, hits: checked.answers[0]?.hits ?? [] };
 	};
 	let settled: PromiseSettledResult<BankAnswer>[];
 	try {

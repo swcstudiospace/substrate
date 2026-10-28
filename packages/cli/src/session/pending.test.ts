@@ -9,6 +9,7 @@ import { cleanupTemp, git, makeRepo, tempDir } from "../../../worktree-snapshot/
 import {
 	MAX_PENDING_BYTES,
 	MAX_PENDING_ITEMS,
+	MAX_PLANE_RETRIES,
 	PENDING_DIR_NAME,
 	type PendingCheckpoint,
 	type PendingItem,
@@ -108,6 +109,9 @@ describe("writePending and listPending", () => {
 			{ ...rollbackItem(1, "d"), commit: { ...rollbackItem(1, "d").commit, pre_restore_tree: "xyz" } },
 			{ ...rollbackItem(1, "d"), commit: { ...rollbackItem(1, "d").commit, until_ms: -1 } },
 			{ ...rollbackItem(1, "d"), commit: { ...rollbackItem(1, "d").commit, until_ms: "yesterday" } },
+			{ ...rollbackItem(1, "d"), plane_retries: -1 },
+			{ ...rollbackItem(1, "d"), plane_retries: MAX_PLANE_RETRIES + 1 },
+			{ ...rollbackItem(1, "d"), plane_retries: 1, restoring: true },
 			{ ...checkpointItem(1), record: { ...checkpointItem(1).record, taken_at_ms: -3 } },
 		];
 		for (const item of bad) {
@@ -128,6 +132,13 @@ describe("writePending and listPending", () => {
 		expect(items.find((item) => item.id === bounded.id)).toEqual(bounded);
 		expect(items.find((item) => item.id === taken.id)).toEqual(taken);
 		expect(items.find((item) => item.id === rbId(2))).toEqual(rollbackItem(2, "d"));
+	});
+
+	test("plane_retries of a rollback survives the journal", () => {
+		const dir = dirOf();
+		const kept = rollbackItem(1, "d", { plane_retries: 2 });
+		writePending(dir, kept);
+		expect(listPending(dir).items).toEqual([kept]);
 	});
 
 	test("checkpoints list before rollbacks, in seq order, whatever the write order", () => {
@@ -264,6 +275,71 @@ describe("replayPending", () => {
 		old.checkpoints.set(ckptId(1), { ...checkpointItem(1).record, session_id: SESSION, event_id: "evt_seed" });
 		await replayPending({ dir: dirWith(rollbackItem(2, null)), clientFor: () => old });
 		expect(old.planRequests).toEqual([{ session_id: SESSION, target_ckpt_id: ckptId(1), rollback_id: rbId(2) }]);
+	});
+
+	test("a commit whose reply says the plane deletes are pending stays in the journal and is sent again, until the server reports none", async () => {
+		const fake = server();
+		fake.checkpoints.set(ckptId(1), { ...checkpointItem(1).record, session_id: SESSION, event_id: "evt_seed" });
+		fake.planePendingReplies = 2;
+		const dir = dirWith(rollbackItem(1, null));
+
+		const first = await replayPending({ dir, clientFor: () => fake });
+		expect(first.delivered).toHaveLength(1);
+		expect(first.plane_pending).toEqual([{ id: rbId(1), event_id: first.delivered[0]?.event_id ?? "", retries: 0 }]);
+		expect(first).toMatchObject({ failed: [], remaining: 1, warnings: [] });
+		expect(listPending(dir).items[0]).toMatchObject({ kind: "rollback", id: rbId(1), plane_retries: 0 });
+
+		// The same commit is sent again, and the server answers pending once more: kept, counted, not announced as delivered again.
+		const second = await replayPending({ dir, clientFor: () => fake });
+		expect(second.delivered).toEqual([]);
+		expect(second.plane_pending).toMatchObject([{ id: rbId(1), retries: 1 }]);
+		expect(second.remaining).toBe(1);
+
+		// No pending deletes left: the record goes.
+		const third = await replayPending({ dir, clientFor: () => fake });
+		expect(third.delivered).toMatchObject([{ kind: "rollback", id: rbId(1) }]);
+		expect(third).toMatchObject({ remaining: 0, plane_pending: [], warnings: [] });
+		expect(listPending(dir).items).toEqual([]);
+		// The server recorded the rollback once; the later sends were replays of it.
+		expect(fake.deliveries.commit).toBe(1);
+	});
+
+	test("a server that keeps reporting pending deletes is sent the commit a bounded number of times, then the record is dropped with a named warning", async () => {
+		const fake = server();
+		fake.checkpoints.set(ckptId(1), { ...checkpointItem(1).record, session_id: SESSION, event_id: "evt_seed" });
+		fake.planePendingReplies = 1_000;
+		const dir = dirWith(rollbackItem(1, null));
+
+		await replayPending({ dir, clientFor: () => fake });
+		for (let retries = 1; retries < MAX_PLANE_RETRIES; retries++) {
+			const outcome = await replayPending({ dir, clientFor: () => fake });
+			expect(outcome.plane_pending).toMatchObject([{ id: rbId(1), retries }]);
+			expect(outcome.warnings).toEqual([]);
+		}
+
+		const last = await replayPending({ dir, clientFor: () => fake });
+		expect(last.warnings).toHaveLength(1);
+		expect(last.warnings[0]).toContain("plane-pending-exhausted");
+		expect(last.warnings[0]).toContain(rbId(1));
+		expect(last).toMatchObject({ remaining: 0, plane_pending: [], failed: [] });
+		expect(listPending(dir).items).toEqual([]);
+		// One first delivery and MAX_PLANE_RETRIES sends again, then nothing more.
+		expect(fake.calls.filter((call) => call.startsWith(`commit:${rbId(1)}`))).toHaveLength(MAX_PLANE_RETRIES + 1);
+		const before = fake.calls.length;
+		await replayPending({ dir, clientFor: () => fake });
+		expect(fake.calls.length).toBe(before);
+	});
+
+	test("a server that cannot be reached leaves a plane-pending record in place with its retry count", async () => {
+		const fake = server();
+		fake.checkpoints.set(ckptId(1), { ...checkpointItem(1).record, session_id: SESSION, event_id: "evt_seed" });
+		fake.planePendingReplies = 1;
+		const dir = dirWith(rollbackItem(1, null));
+		await replayPending({ dir, clientFor: () => fake });
+		fake.down = true;
+		const outcome = await replayPending({ dir, clientFor: () => fake });
+		expect(outcome.failed).toHaveLength(1);
+		expect(listPending(dir).items[0]).toMatchObject({ plane_retries: 0, attempts: 2 });
 	});
 
 	test("a replay that crashed after the server acknowledged is harmless: the item is sent again and held once", async () => {

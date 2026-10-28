@@ -138,6 +138,31 @@ describe("a rollback that works", () => {
 		expect(w.transcript.requests[0]).toMatchObject({ sessionId: SESSION, targetCkptId: c1.checkpoint.ckpt_id, rollbackId: result.rollback_id });
 	});
 
+	test("a commit the server recorded with its plane deletes still pending keeps a replayable record, and sync sends the same commit again until they are done", async () => {
+		const w = world();
+		const { c1 } = await twoStates(w);
+		w.server.planePendingReplies = 2;
+
+		const result = await roll(w, c1.checkpoint.ckpt_id);
+
+		// The ledger has it, so the rollback is committed; but the deletes are the server's to retry, and only a repeat of this commit makes it.
+		expect(result.status).toBe("committed");
+		expect(result.ledger.state).toBe("committed");
+		expect(result.memory?.plane_pending).toBe(true);
+		expect(result.warnings.join(" ")).toContain("Hindsight deletes are pending");
+		const kept = listPending(w.pendingDir).items;
+		expect(kept).toHaveLength(1);
+		expect(kept[0]).toMatchObject({ kind: "rollback", id: result.rollback_id, plane_retries: 0 });
+
+		const first = await replayPending({ dir: w.pendingDir, clientFor: () => w.server });
+		expect(first.plane_pending).toMatchObject([{ id: result.rollback_id, retries: 1 }]);
+		const second = await replayPending({ dir: w.pendingDir, clientFor: () => w.server });
+		expect(second.delivered).toMatchObject([{ kind: "rollback", id: result.rollback_id }]);
+		expect(second).toMatchObject({ remaining: 0, plane_pending: [], warnings: [] });
+		expect(listPending(w.pendingDir).items).toEqual([]);
+		expect(w.server.deliveries.commit).toBe(1);
+	});
+
 	test("the pre-restore checkpoint makes the rollback itself undoable, with no drift right after it", async () => {
 		const w = world();
 		const { c1, c2 } = await twoStates(w);

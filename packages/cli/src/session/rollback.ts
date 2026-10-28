@@ -550,7 +550,7 @@ export async function rollback(params: RollbackParams): Promise<RollbackResult> 
 	if (plan === null) fields.local_only = true;
 	let digest: string | null = plan?.plan_digest ?? null;
 	let pendingDir: string;
-	const queue = (restoring: boolean, lastError?: string): void => {
+	const queue = (restoring: boolean, lastError?: string, planeRetries?: number): void => {
 		writePending(pendingDir, {
 			version: 1,
 			kind: "rollback",
@@ -562,6 +562,7 @@ export async function rollback(params: RollbackParams): Promise<RollbackResult> 
 			...(lastError === undefined ? {} : { last_error: lastError.slice(0, 300) }),
 			commit: { target_ckpt_id: target.ckpt_id, plan_digest: digest, ...fields },
 			...(restoring ? { restoring: true as const } : {}),
+			...(planeRetries === undefined ? {} : { plane_retries: planeRetries }),
 		});
 	};
 	try {
@@ -640,6 +641,18 @@ export async function rollback(params: RollbackParams): Promise<RollbackResult> 
 				out.status = "committed";
 				out.ledger = { state: "committed", event_id: committed.value.event_id };
 				if (committed.value.memory !== undefined) out.memory = committed.value.memory;
+				if (committed.value.memory?.plane_pending === true) {
+					// The server recorded the rollback but its Hindsight deletes are not done, and it retries them only when it is sent this same
+					// commit again: the record stays in the journal (marked, so `sync` sends it again, bounded) instead of being removed as delivered.
+					try {
+						queue(false, "plane-pending: the rollback is recorded; its Hindsight deletes are pending", 0);
+						warnings.push("the ledger recorded the rollback but its Hindsight deletes are pending; `substrate session sync` sends the commit again to retry them");
+					} catch (error) {
+						const detail = error instanceof PendingJournalError ? error.message : "the pending journal could not be written";
+						warnings.push(`the ledger recorded the rollback but its Hindsight deletes are pending, and the retry record could not be kept (${detail})`);
+					}
+					return out;
+				}
 				try {
 					removePending(pendingDir, "rollback", rollbackId);
 				} catch {

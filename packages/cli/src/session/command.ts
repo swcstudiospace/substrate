@@ -687,14 +687,16 @@ async function commandSync(deps: SessionDeps, out: Output, run: Runner, json: bo
 		}
 	}
 	const outcome = await replayPending({ dir, clientFor: (surface) => clientFor(surface, Math.max(deps.timeoutMs, ROLLBACK_MIN_TIMEOUT_MS)) });
-	const clean = outcome.failed.length === 0 && outcome.skipped === 0 && outcome.corrupt.length === 0 && outcome.remaining === 0;
+	const clean = outcome.failed.length === 0 && outcome.skipped === 0 && outcome.corrupt.length === 0 && outcome.remaining === 0 && outcome.warnings.length === 0;
 	if (json) {
 		out.json({ ok: clean, command: "sync", ...outcome, ...(settleNote === null ? {} : { note: settleNote }) });
 	} else {
 		if (settleNote !== null) out.line(settleNote);
-		if (outcome.delivered.length + outcome.failed.length + outcome.skipped + outcome.corrupt.length === 0) out.line("nothing pending");
+		if (outcome.delivered.length + outcome.plane_pending.length + outcome.failed.length + outcome.skipped + outcome.corrupt.length + outcome.warnings.length === 0) out.line("nothing pending");
 		for (const item of outcome.delivered) out.line(`delivered ${item.kind} ${item.id} (event ${item.event_id})`);
+		for (const item of outcome.plane_pending) out.line(`rollback ${item.id} is recorded (event ${item.event_id}); its Hindsight deletes are still pending, sent again ${item.retries} time(s) so far`);
 		for (const item of outcome.failed) out.line(`not delivered ${item.kind} ${item.id}: ${item.code}: ${item.message}`);
+		for (const warning of outcome.warnings) out.line(`warning: ${warning}`);
 		if (outcome.skipped > 0) out.line(`${outcome.skipped} item(s) not attempted: the server was unreachable`);
 		for (const bad of outcome.corrupt) out.line(`corrupt pending file ${bad.file}: ${bad.reason} (skipped, not deleted)`);
 		if (outcome.remaining > 0) out.line(`${outcome.remaining} item(s) still pending`);

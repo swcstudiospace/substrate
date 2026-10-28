@@ -127,6 +127,15 @@ export class FakeServer implements RollbackServerClient {
 		return { ok: true, value: { plan } };
 	}
 
+	/** How many more commit answers (a first delivery or a replay of a held commit) report `plane_pending: true`, as a server whose Hindsight deletes keep failing does. */
+	planePendingReplies = 0;
+
+	private takePlanePending(): boolean {
+		if (this.planePendingReplies <= 0) return false;
+		this.planePendingReplies--;
+		return true;
+	}
+
 	async commitRollback(request: CommitRollbackRequest): Promise<ClientResult<CommitRollbackOk>> {
 		this.calls.push(`commit:${request.rollback_id}:${request.outcome}`);
 		if (this.down || this.downForCommits) return failure("network", "connection refused", true);
@@ -136,7 +145,7 @@ export class FakeServer implements RollbackServerClient {
 			return { ok: true, value: { event_id: this.event() } };
 		}
 		const held = this.commits.get(request.rollback_id);
-		if (held !== undefined) return { ok: true, value: { event_id: held.event_id, memory: { superseded_entries: 0, forgotten_documents: 0, plane_pending: false, truncated: false } } };
+		if (held !== undefined) return { ok: true, value: { event_id: held.event_id, memory: { superseded_entries: 0, forgotten_documents: 0, plane_pending: this.takePlanePending(), truncated: false } } };
 		if (this.staleCommits > 0) {
 			this.staleCommits--;
 			this.salt++;
@@ -148,7 +157,7 @@ export class FakeServer implements RollbackServerClient {
 		this.deliveries.commit++;
 		return {
 			ok: true,
-			value: { event_id, memory: { superseded_entries: this.laterOf(request.target_ckpt_id, request.session_id).length, forgotten_documents: 1, plane_pending: false, truncated: false } },
+			value: { event_id, memory: { superseded_entries: this.laterOf(request.target_ckpt_id, request.session_id).length, forgotten_documents: 1, plane_pending: this.takePlanePending(), truncated: false } },
 		};
 	}
 }

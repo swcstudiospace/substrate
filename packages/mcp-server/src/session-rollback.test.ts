@@ -14,6 +14,7 @@ import { Substrate } from "./service.ts";
 import {
 	MAX_CLIENT_CLOCK_SKEW_MS,
 	MAX_TAKEN_AT_AGE_MS,
+	FORGET_BATCH_ACTION,
 	checkpointCut,
 	deriveRollbackId,
 	rollbackPlanDigest,
@@ -154,6 +155,31 @@ describe("session_checkpoint", () => {
 
 		expect(again).toMatchObject({ ok: true, stored: false, event_id: plain(first)["event_id"] });
 		expect(w.ledger.byAction("session.checkpoint")).toHaveLength(1);
+	});
+
+	test("a retry that arrives while the first write is still slow waits for it: one event, the second answer is the existing one", async () => {
+		const w = world();
+		const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+		const { promise: inFirstWrite, resolve: entered } = Promise.withResolvers<void>();
+		const original = w.ledger.insertEvent.bind(w.ledger);
+		w.ledger.insertEvent = async (event) => {
+			if (event.payload["action"] === "session.checkpoint") {
+				entered();
+				await gate;
+			}
+			return original(event);
+		};
+
+		const first = w.substrate.sessionCheckpoint(checkpointRequest(1), ME);
+		await inFirstWrite;
+		// The first call is inside its ledger write: its checkpoint is not readable yet. The retry starts now.
+		const retry = w.substrate.sessionCheckpoint(checkpointRequest(1), ME);
+		release();
+		const [a, b] = await Promise.all([first, retry]);
+
+		expect(w.ledger.byAction("session.checkpoint")).toHaveLength(1);
+		expect(a).toMatchObject({ ok: true, stored: true });
+		expect(b).toMatchObject({ ok: true, stored: false, event_id: plain(a)["event_id"] });
 	});
 
 	test("a different checkpoint at an already-recorded seq is recorded under its own event, with a warning, even under enforce", async () => {
@@ -839,6 +865,53 @@ describe("session_rollback_commit: committed", () => {
 		expect(w.ledger.byAction("session.rollback")).toHaveLength(1);
 		// The repeat is the same forget call: one forget id on the note, and no second mark.
 		expect(w.index.marks).toHaveLength(1);
+	});
+
+	test("a forget batch is on record before its rows are marked, so a note that never lands does not lose it: the next plan lists the batch and the commit finishes it", async () => {
+		const w = world();
+		const target = await record(w, 1);
+		seedMemory(w, target.ts);
+		const p = await plan(w, 1);
+		w.ledger.failInsertFor = (event) => event.payload["action"] === FORGET_ACTION;
+
+		const failed = await w.substrate.sessionRollbackCommit(commitInput(p), ME);
+
+		expect(errorOf(failed).code).toBe("forget-incomplete");
+		// The record exists, names the same forget id the marks carry, and the rows are marked.
+		expect(w.ledger.byAction(FORGET_BATCH_ACTION)).toHaveLength(1);
+		expect(w.ledger.byAction(FORGET_ACTION)).toHaveLength(0);
+		expect(w.index.forgotten()).toHaveLength(2);
+		w.ledger.failInsertFor = null;
+
+		// The marked rows no longer match the index selection, yet the plan still lists them: they belong to an unfinished batch.
+		const again = await plan(w, 1, ME, p.rollback_id);
+		expect(again.memory.would_forget).toBe(2);
+		const done = await w.substrate.sessionRollbackCommit(commitInput(again), ME);
+
+		expect(done).toMatchObject({ ok: true, memory: { superseded_entries: 2 } });
+		expect(w.ledger.byAction(FORGET_ACTION)).toHaveLength(1);
+		expect(w.ledger.byAction(FORGET_BATCH_ACTION)).toHaveLength(1);
+		expect(w.ledger.byAction("session.rollback")).toHaveLength(1);
+		// Finished as the same call: no second mark.
+		expect(w.index.marks).toHaveLength(1);
+		// Once finished, a plan of the same rollback no longer lists the batch.
+		expect((await plan(w, 1, ME, p.rollback_id)).memory.would_forget).toBe(0);
+	});
+
+	test("a ledger that cannot record the batch stops the commit before anything is marked", async () => {
+		const w = world();
+		const target = await record(w, 1);
+		seedMemory(w, target.ts);
+		const p = await plan(w, 1);
+		w.ledger.failInsertFor = (event) => event.payload["action"] === FORGET_BATCH_ACTION;
+
+		const failed = await w.substrate.sessionRollbackCommit(commitInput(p), ME);
+
+		expect(errorOf(failed)).toMatchObject({ code: "forget-incomplete", retryable: true });
+		expect(errorOf(failed).message).toContain("before it started");
+		expect(w.index.marks).toHaveLength(0);
+		expect(w.index.forgotten()).toEqual([]);
+		expect(w.ledger.byAction("session.rollback")).toHaveLength(0);
 	});
 
 	test("another surface's entries cannot crowd out the caller's: the writer is part of the selection, ahead of its limit", async () => {

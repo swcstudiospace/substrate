@@ -40,6 +40,8 @@ export const MAX_PENDING_ITEMS = 500;
 export const MAX_PENDING_BYTES = 64 * 1024;
 const MAX_ERROR_CHARS = 300;
 const MAX_ATTEMPTS = 1_000_000;
+/** Times `sync` sends a recorded commit again while the server still reports pending plane deletes, before it gives up and says so. */
+export const MAX_PLANE_RETRIES = 5;
 
 export type PendingKind = "checkpoint" | "rollback";
 export type CheckpointRecord = Omit<CheckpointPayload, "action">;
@@ -73,6 +75,12 @@ export interface PendingRollback extends PendingBase {
 	id: string;
 	commit: PendingCommit;
 	restoring?: true;
+	/**
+	 * Present once the server RECORDED this rollback but answered that its Hindsight deletes are still pending
+	 * (`memory.plane_pending`): the record is kept so `sync` sends the same commit again, which is the only thing that makes the server
+	 * retry them. The value is how many times it has been sent again since. At {@link MAX_PLANE_RETRIES} the record is dropped with a warning.
+	 */
+	plane_retries?: number;
 }
 
 export type PendingItem = PendingCheckpoint | PendingRollback;
@@ -201,11 +209,20 @@ export function parsePendingItem(value: unknown): PendingItem {
 		return { ...parseBase(item), kind: "checkpoint", id, record };
 	}
 	if (item.kind === "rollback") {
-		exactKeys(item, "item", ["version", "kind", "id", "session_id", "surface", "queued_at", "attempts", "commit"], ["last_error", "restoring"]);
+		exactKeys(item, "item", ["version", "kind", "id", "session_id", "surface", "queued_at", "attempts", "commit"], ["last_error", "restoring", "plane_retries"]);
 		const id = text(item.id, "id", 64);
 		if (!ROLLBACK_ID_PATTERN.test(id)) fail("id is not a rollback id");
 		if (item.restoring !== undefined && item.restoring !== true) fail("restoring must be true when present");
-		return { ...parseBase(item), kind: "rollback", id, commit: parseCommit(item.commit), ...(item.restoring === true ? { restoring: true as const } : {}) };
+		const planeRetries = item.plane_retries === undefined ? undefined : count(item.plane_retries, "plane_retries", MAX_PLANE_RETRIES);
+		if (planeRetries !== undefined && item.restoring === true) fail("plane_retries and restoring cannot both be set: a commit the server recorded has a finished restore");
+		return {
+			...parseBase(item),
+			kind: "rollback",
+			id,
+			commit: parseCommit(item.commit),
+			...(item.restoring === true ? { restoring: true as const } : {}),
+			...(planeRetries === undefined ? {} : { plane_retries: planeRetries }),
+		};
 	}
 	return fail("kind must be checkpoint or rollback");
 }
@@ -369,6 +386,10 @@ export interface ReplayOutcome {
 	corrupt: CorruptPending[];
 	/** Items left in the journal after this replay. */
 	remaining: number;
+	/** Rollbacks the server recorded whose Hindsight deletes are still pending: kept in the journal, sent again by the next sync (bounded). */
+	plane_pending: Array<{ id: string; event_id: string; retries: number }>;
+	/** Named conditions the operator must see: a rollback whose pending plane deletes were given up on. */
+	warnings: string[];
 }
 
 export interface ReplayParams {
@@ -394,7 +415,7 @@ function noteAttempt(dir: string, item: PendingItem, error: { code: string; mess
 export async function replayPending(params: ReplayParams): Promise<ReplayOutcome> {
 	const { dir } = params;
 	const listing = listPending(dir);
-	const outcome: ReplayOutcome = { delivered: [], failed: [], skipped: 0, corrupt: listing.corrupt, remaining: 0 };
+	const outcome: ReplayOutcome = { delivered: [], failed: [], skipped: 0, corrupt: listing.corrupt, remaining: 0, plane_pending: [], warnings: [] };
 	let stopped = false;
 	for (const item of listing.items) {
 		if (stopped) {
@@ -409,6 +430,7 @@ export async function replayPending(params: ReplayParams): Promise<ReplayOutcome
 		const client = params.clientFor(item.surface);
 		let failure: { code: string; message: string; retryable: boolean } | null = null;
 		let eventId = "";
+		let planePending = false;
 		if (item.kind === "checkpoint") {
 			const result = await client.recordCheckpoint({ ...item.record, session_id: item.session_id });
 			if (result.ok) eventId = result.value.event_id;
@@ -439,6 +461,7 @@ export async function replayPending(params: ReplayParams): Promise<ReplayOutcome
 				});
 				if (committed.ok) {
 					eventId = committed.value.event_id;
+					planePending = committed.value.memory?.plane_pending === true;
 					failure = null;
 					break;
 				}
@@ -454,6 +477,26 @@ export async function replayPending(params: ReplayParams): Promise<ReplayOutcome
 			}
 		}
 		if (failure === null) {
+			if (item.kind === "rollback" && planePending) {
+				// The server recorded the rollback but its Hindsight deletes are not done, and it retries them only when it is sent this same
+				// commit again: the record stays (a bounded number of times) instead of being treated as delivered.
+				const retries = item.plane_retries === undefined ? 0 : item.plane_retries + 1;
+				if (retries >= MAX_PLANE_RETRIES) {
+					removePending(dir, item.kind, item.id);
+					outcome.warnings.push(
+						`plane-pending-exhausted: rollback ${item.id} is recorded (event ${eventId}) but the server still reports its Hindsight deletes pending after ${MAX_PLANE_RETRIES} retries; the pending record was dropped, so nothing retries them from this worktree: ask the operator to check the Hindsight plane`,
+					);
+					continue;
+				}
+				try {
+					writePending(dir, { ...item, plane_retries: retries, last_error: "plane-pending: the rollback is recorded; its Hindsight deletes are pending" });
+				} catch {
+					// Bookkeeping only: the record is intact and the next sync sends the commit again.
+				}
+				outcome.plane_pending.push({ id: item.id, event_id: eventId, retries });
+				if (item.plane_retries === undefined) outcome.delivered.push({ kind: item.kind, id: item.id, event_id: eventId });
+				continue;
+			}
 			removePending(dir, item.kind, item.id);
 			outcome.delivered.push({ kind: item.kind, id: item.id, event_id: eventId });
 			continue;

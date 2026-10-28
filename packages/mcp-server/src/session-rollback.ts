@@ -37,6 +37,8 @@ import {
 	FORGET_ACTION,
 	FORGET_PAYLOAD_ENTRY_IDS,
 	ForgetError,
+	forgetIdFor,
+	isForgetId,
 	MAX_ROLLBACK_SELECT_LIMIT,
 	parseForgetPayload,
 	type ForgetPayload,
@@ -82,6 +84,8 @@ export const FORGET_BATCH_SIZE = FORGET_PAYLOAD_ENTRY_IDS;
 export const MAX_FORGET_BATCHES = 100;
 /** Earlier forget notes whose plane deletions one run retries. */
 export const MAX_PLANE_RETRY_GROUPS = 20;
+/** The note a forget batch is recorded as, before its rows are marked: what lets a later plan finish a batch whose `memory.forget` note was never written. */
+export const FORGET_BATCH_ACTION = "session.rollback.forget_batch";
 /** Repeats of a forget call whose ledger note was not recorded, before the commit stops as incomplete. */
 export const FORGET_NOTE_RETRIES = 2;
 /** How long a plan waits for the anchor check before answering without it. */
@@ -427,6 +431,39 @@ export async function sessionCheckpoint(deps: SessionRollbackDeps, input: unknow
 			throw cause;
 		}
 
+		// Two calls for one checkpoint in this process are serialised: a client that retries a timed-out request while the first
+		// ledger write is still slow would otherwise miss the replay lookup in both and write the checkpoint twice.
+		return await serialisedByCheckpoint(`${sessionId}\u0000${payload.ckpt_id}`, () => recordCheckpoint(deps, sessionId, payload, caller));
+	} catch (cause) {
+		if (cause instanceof Refusal) return cause.failure;
+		throw cause;
+	}
+}
+
+/** The checkpoint writes in flight in this process, by session and checkpoint id: the tail of the calls queued behind one another. */
+const checkpointFlights = new Map<string, Promise<unknown>>();
+
+async function serialisedByCheckpoint<T>(key: string, work: () => Promise<T>): Promise<T> {
+	const earlier = checkpointFlights.get(key);
+	const run = (async (): Promise<T> => {
+		if (earlier !== undefined) await earlier;
+		return work();
+	})();
+	// What a later call waits for never rejects: its own outcome does not depend on how the earlier call ended.
+	const tail = run.then(
+		() => undefined,
+		() => undefined,
+	);
+	checkpointFlights.set(key, tail);
+	try {
+		return await run;
+	} finally {
+		if (checkpointFlights.get(key) === tail) checkpointFlights.delete(key);
+	}
+}
+
+async function recordCheckpoint(deps: SessionRollbackDeps, sessionId: string, payload: CheckpointPayload, caller: RollbackCaller): Promise<CheckpointResult> {
+	try {
 		const notes = await readNotes(deps, sessionId);
 		const known = checkpointsIn(notes.events);
 		const same = known.find((record) => record.payload.ckpt_id === payload.ckpt_id);
@@ -568,11 +605,41 @@ interface PlanContext {
 	untilIso: string | null;
 }
 
+/** A forget batch an earlier run recorded before it marked the rows, and never recorded the note of. */
+interface UnfinishedBatch {
+	forget_id: string;
+	entry_ids: string[];
+}
+
 interface BuiltPlan {
 	plan: RollbackPlan;
-	/** Every entry that would be forgotten (the plan shows twenty). */
+	/** Every entry that would be forgotten (the plan shows twenty): the selection and the entries of every unfinished batch. */
 	entryIds: string[];
 	truncated: boolean;
+	/** Batches an earlier run marked (or was about to mark) without recording their forget note; a commit finishes each as the same forget call. */
+	unfinished: UnfinishedBatch[];
+}
+
+/**
+ * The forget batches this rollback started and never finished. A batch is recorded in the ledger BEFORE its rows are marked
+ * ({@link FORGET_BATCH_ACTION}); it is finished when its `memory.forget` note exists. A marked row leaves the selection, so without
+ * this record a batch whose note could not be written would be lost to every later plan. A record whose forget id is not the one
+ * this rollback and checkpoint would derive from its entries is not trusted.
+ */
+function unfinishedBatches(ctx: PlanContext, caller: RollbackCaller): UnfinishedBatch[] {
+	const recorded = new Set(forgetNotesOf(ctx.notes.events, ctx.rollbackId, caller).map((note) => note.forget_id));
+	const out = new Map<string, UnfinishedBatch>();
+	for (const event of ctx.notes.events) {
+		if (event.surface !== caller.surface || event.kind !== "note" || event.payload["action"] !== FORGET_BATCH_ACTION || event.payload["rollback_id"] !== ctx.rollbackId) continue;
+		const forgetId = event.payload["forget_id"];
+		const ids = event.payload["entry_ids"];
+		if (typeof forgetId !== "string" || !isForgetId(forgetId) || recorded.has(forgetId) || out.has(forgetId)) continue;
+		if (!Array.isArray(ids) || ids.length === 0 || ids.length > FORGET_BATCH_SIZE || !ids.every((id) => typeof id === "string" && id.length > 0)) continue;
+		const entryIds = ids as string[];
+		if (forgetIdFor({ reason: "rollback", entry_ids: entryIds, rollback_id: ctx.rollbackId, checkpoint_id: ctx.target.payload.ckpt_id }) !== forgetId) continue;
+		out.set(forgetId, { forget_id: forgetId, entry_ids: entryIds });
+	}
+	return [...out.values()];
 }
 
 async function selectEntries(deps: SessionRollbackDeps, ctx: PlanContext, caller: RollbackCaller): Promise<{ ids: string[]; truncated: boolean }> {
@@ -592,6 +659,9 @@ async function selectEntries(deps: SessionRollbackDeps, ctx: PlanContext, caller
 async function buildPlan(deps: SessionRollbackDeps, ctx: PlanContext, caller: RollbackCaller, withAnchor: boolean): Promise<BuiltPlan> {
 	const { target } = ctx;
 	const selected = await selectEntries(deps, ctx, caller);
+	// The rows of a batch an earlier run marked are out of the selection: they are planned (and finished) from its record instead.
+	const unfinished = unfinishedBatches(ctx, caller);
+	const entryIds = distinct([...selected.ids, ...unfinished.flatMap((batch) => batch.entry_ids)]);
 	const later = ctx.visible
 		.filter((record) => record.payload.seq > target.payload.seq)
 		.sort((a, b) => a.payload.seq - b.payload.seq || (a.payload.ckpt_id < b.payload.ckpt_id ? -1 : 1))
@@ -611,16 +681,16 @@ async function buildPlan(deps: SessionRollbackDeps, ctx: PlanContext, caller: Ro
 		},
 		later_checkpoints: later,
 		anchor: withAnchor ? await anchorOf(deps, target, ctx.sessionId) : null,
-		memory: { would_forget: selected.ids.length, sample_ids: selected.ids.slice(0, MAX_SAMPLE_IDS), truncated: selected.truncated },
+		memory: { would_forget: entryIds.length, sample_ids: entryIds.slice(0, MAX_SAMPLE_IDS), truncated: selected.truncated },
 		plan_digest: rollbackPlanDigest({
 			rollbackId: ctx.rollbackId,
 			sessionId: ctx.sessionId,
 			targetCkptId: target.payload.ckpt_id,
 			targetEventHash: target.event.hash,
-			entryIds: selected.ids,
+			entryIds,
 		}),
 	};
-	return { plan, entryIds: selected.ids, truncated: selected.truncated };
+	return { plan, entryIds, truncated: selected.truncated, unfinished };
 }
 
 function newestSeqRecord(records: readonly CheckpointRecord[]): CheckpointRecord | null {
@@ -846,9 +916,43 @@ function tally(report: ForgetReport, into: Totals): void {
 }
 
 /**
+ * Write the record of one forget batch to the ledger before its rows are marked. Answers `forget-incomplete` (nothing was marked
+ * yet, so nothing is lost) when the ledger does not store it.
+ */
+async function recordBatch(deps: SessionRollbackDeps, ctx: PlanContext, caller: RollbackCaller, request: ForgetRequest, incomplete: (why: string) => never): Promise<void> {
+	const forgetId = forgetIdFor(request);
+	let emitted: EmitOutcome;
+	try {
+		emitted = await deps.emit({
+			surface: caller.surface,
+			kind: "note",
+			summary: `session rollback ${ctx.rollbackId}: forget batch ${forgetId} (${request.entry_ids.length} entries) started`,
+			actor: "agent",
+			session_id: ctx.sessionId,
+			payload: {
+				action: FORGET_BATCH_ACTION,
+				forget_id: forgetId,
+				rollback_id: ctx.rollbackId,
+				checkpoint_id: ctx.target.payload.ckpt_id,
+				entry_count: request.entry_ids.length,
+				entry_ids: request.entry_ids,
+			},
+		});
+	} catch (cause) {
+		return incomplete(`the forget batch ${forgetId} could not be recorded before it started (${describe(cause)}); nothing in it was marked`);
+	}
+	if (!emitted.stored) incomplete(`the forget batch ${forgetId} could not be recorded before it started (${clip(emitted.error ?? "the event ledger did not store it")}); nothing in it was marked`);
+}
+
+/**
  * Forget every selected entry in batches of {@link FORGET_BATCH_SIZE}, selecting again while the selection was
  * truncated, under a hard cap on batches. A forget that throws or a cap that is hit stops the run and answers
  * `forget-incomplete`: what was marked stays marked (the marks are idempotent), so the retry is safe.
+ *
+ * Each batch is written to the ledger ({@link FORGET_BATCH_ACTION}) BEFORE its rows are marked: a marked row leaves every later
+ * selection, so a batch whose forget note then could not be written would otherwise leave nothing to finish it from. The batches
+ * an earlier run left without a note (`first.unfinished`) run first, each as exactly the call it was (same entries, so the same
+ * forget id: its rows read back as its own, the plane deletes and the note run again).
  */
 async function forgetSelected(
 	deps: SessionRollbackDeps,
@@ -867,46 +971,47 @@ async function forgetSelected(
 			...RETRYABLE,
 			done: { superseded_entries: done.superseded + run.superseded, forgotten_documents: done.deleted + run.deleted, plane_pending: run.pending > 0 },
 		});
+	const runBatch = async (chunk: readonly string[], recorded: boolean): Promise<void> => {
+		if (batches >= MAX_FORGET_BATCHES) incomplete(`the cap of ${MAX_FORGET_BATCHES} forget batches was reached`);
+		batches++;
+		const request: ForgetRequest = {
+			reason: "rollback",
+			entry_ids: [...chunk],
+			actor: "agent",
+			session_id: ctx.sessionId,
+			checkpoint_id: ctx.target.payload.ckpt_id,
+			rollback_id: ctx.rollbackId,
+		};
+		if (!recorded) await recordBatch(deps, ctx, caller, request, incomplete);
+		const forgetChunk = async (): Promise<ForgetReport> => {
+			try {
+				return await deps.forget(request, { surface: caller.surface, session_id: ctx.sessionId });
+			} catch (cause) {
+				return incomplete(`the memory forget failed (${describe(cause)})`);
+			}
+		};
+		let report = await forgetChunk();
+		// A forget whose note was not recorded has marked its rows already, so the next selection no longer finds them: the
+		// batch record is the only trace of it. The same request is repeated (same forget id: the rows read back as this
+		// call's own, the plane delete and the note run again) and, when that does not record it either, the commit stops
+		// and the next plan finishes the batch from its record.
+		let deletedBefore = 0;
+		for (let retry = 0; !report.ledger.emitted && retry < FORGET_NOTE_RETRIES; retry++) {
+			deletedBefore += report.plane.deleted;
+			report = await forgetChunk();
+		}
+		for (const id of chunk) attempted.add(id);
+		tally(report, run);
+		run.deleted += deletedBefore;
+		if (!report.ledger.emitted) {
+			incomplete(`the forget note ${report.forget_id} could not be recorded (${report.ledger.reason}), so the rollback is not complete and was not recorded; the batch is on record and the next plan finishes it`);
+		}
+	};
+	for (const batch of first.unfinished) await runBatch(batch.entry_ids, true);
 	for (;;) {
 		const fresh = ids.filter((id) => !attempted.has(id));
 		if (fresh.length === 0) break;
-		for (let at = 0; at < fresh.length; at += FORGET_BATCH_SIZE) {
-			if (batches >= MAX_FORGET_BATCHES) incomplete(`the cap of ${MAX_FORGET_BATCHES} forget batches was reached`);
-			const chunk = fresh.slice(at, at + FORGET_BATCH_SIZE);
-			batches++;
-			const forgetChunk = async (): Promise<ForgetReport> => {
-				try {
-					return await deps.forget(
-						{
-							reason: "rollback",
-							entry_ids: chunk,
-							actor: "agent",
-							session_id: ctx.sessionId,
-							checkpoint_id: ctx.target.payload.ckpt_id,
-							rollback_id: ctx.rollbackId,
-						},
-						{ surface: caller.surface, session_id: ctx.sessionId },
-					);
-				} catch (cause) {
-					return incomplete(`the memory forget failed (${describe(cause)})`);
-				}
-			};
-			let report = await forgetChunk();
-			// A forget whose note was not recorded has marked its rows already, so the next selection no longer finds them: the
-			// note is the only trace of the batch. The same request is repeated (same forget id: the rows read back as this
-			// call's own, the plane delete and the note run again) and, when that does not record it either, the commit stops.
-			let deletedBefore = 0;
-			for (let retry = 0; !report.ledger.emitted && retry < FORGET_NOTE_RETRIES; retry++) {
-				deletedBefore += report.plane.deleted;
-				report = await forgetChunk();
-			}
-			for (const id of chunk) attempted.add(id);
-			tally(report, run);
-			run.deleted += deletedBefore;
-			if (!report.ledger.emitted) {
-				incomplete(`the forget note ${report.forget_id} could not be recorded (${report.ledger.reason}), so the rollback is not complete and was not recorded`);
-			}
-		}
+		for (let at = 0; at < fresh.length; at += FORGET_BATCH_SIZE) await runBatch(fresh.slice(at, at + FORGET_BATCH_SIZE), false);
 		if (!truncated) break;
 		try {
 			const again = await selectEntries(deps, ctx, caller);

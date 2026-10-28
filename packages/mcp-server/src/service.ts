@@ -2007,7 +2007,10 @@ export class Substrate {
 		const graphId = this.recallGraphId(request);
 		// Under `graph` the answer holds the claimed graph's lines, so another graph (or none) must never be served this entry; under `off` the key is the key it was.
 		const args = { ...fanoutSnapshotArgs(repo, banks, query), ...(scope === "graph" && graphId !== null ? { graph: graphId } : {}) };
+		let unchecked = false;
+		const index = this.index;
 		const fanOut = async (): Promise<RecallSnapshot | null> => {
+			unchecked = false;
 			const fanout = await fanOutBriefRecall(
 				{ config: hindsight, banks, fetchImpl: this.hindsightFetch, budgetMs: briefRecallBudgetMs(this.config.briefRecall.budgetMs) },
 				query,
@@ -2018,6 +2021,9 @@ export class Substrate {
 					onAnswer: (bankAnswer) => {
 						answers.set(bankAnswer.bank, bankAnswer);
 					},
+					// The same rule `recallMemories` applies: a forget whose plane delete is still pending must not keep serving its text in a brief.
+					// A lookup that fails withholds the hits that name an entry, and the answer is not stored.
+					...(index === null ? {} : { forgotten: (ids: readonly string[]) => index.forgottenEntryIds(ids), onUnchecked: () => { unchecked = true; } }),
 				},
 			);
 			if (fanout.answered.length === 0) return null;
@@ -2031,7 +2037,8 @@ export class Substrate {
 			args,
 			generations: [MEMORY_GENERATION_KEY, RECALL_GENERATION_KEY],
 			refreshAt: (loaded) => (loaded === null ? null : Date.parse(loaded.at) + ttlS * 1000),
-			store: (loaded) => loaded !== null,
+			// An answer whose forgotten-entry check failed is withheld in part: served once, never held for the TTL.
+			store: (loaded) => loaded !== null && !unchecked,
 			load: async () => {
 				fetched = true;
 				return fanOut();

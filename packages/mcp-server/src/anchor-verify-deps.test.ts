@@ -10,6 +10,7 @@ import {
 	anchorVerifyBlocker,
 	CKPT_LOOKUP_WINDOW_MS,
 	LOOKUP_ROW_LIMIT,
+	MAX_OPERATOR_SURFACES,
 	ROTATION_READ_MAX_PAGES,
 	verifyCheckpointRef,
 	verifyEventRef,
@@ -532,6 +533,19 @@ describe("SUBSTRATE_ANCHOR_SIGNER_SET is the bootstrap when set", () => {
 		const failed = world(event({ id: "evt_v16_note" }));
 		failed.ledger.failQuery = "greptime unreachable";
 		expect((await verifyEventRef(failed.ports, "evt_v16_note")).signer_set?.read_gap).toContain("could not be read");
+	});
+
+	test("operator surfaces past the read cap make the signer set incomplete, never a clean read", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		w.ports.operatorSurfaces = new Set(Array.from({ length: MAX_OPERATOR_SURFACES + 1 }, (_, i) => `op-${i}`));
+		const result = await verifyEventRef(w.ports, "evt_v16_note");
+		expect(result).toMatchObject({ status: "unverified", signer_set_complete: false });
+		expect(result.signer_set?.read_gap).toContain("1 of 9 operator surfaces were not read");
+		expect(result.signer_set?.read_gap).toContain(`op-${MAX_OPERATOR_SURFACES}`);
+
+		const within = world(event({ id: "evt_v16_note" }));
+		within.ports.operatorSurfaces = new Set(Array.from({ length: MAX_OPERATOR_SURFACES }, (_, i) => `op-${i}`));
+		expect((await verifyEventRef(within.ports, "evt_v16_note")).signer_set?.read_gap).toBeNull();
 	});
 
 	test("the memory reader's observer receives the same summary", async () => {

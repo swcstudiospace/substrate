@@ -196,11 +196,16 @@ async function readSignerSet(ports: AnchorVerifyPorts, ledger: AnchorLedger): Pr
 	// Throws when the configured anchor key is not a public key: `prepare` answers that as an unverified reason.
 	const bootstrap = configured !== null ? parseSignerSet(configured) : parseSignerSet([{ pubkey: ports.solana.pubkey as string, valid_from_ms: 0, valid_until_ms: null }]);
 	const source = configured !== null ? "env" : "pubkey";
-	const surfaces = [...ports.operatorSurfaces].sort().slice(0, MAX_OPERATOR_SURFACES);
+	const allSurfaces = [...ports.operatorSurfaces].sort();
+	const surfaces = allSurfaces.slice(0, MAX_OPERATOR_SURFACES);
 	if (surfaces.length === 0) return { set: bootstrap, gap: null, summary: { source, entries: bootstrap.length, rotation_notes_applied: 0, rotation_issues: [], read_gap: null } };
 	const events: RotationEventInput[] = [];
 	const seen = new Set<string>();
-	let gap: string | null = null;
+	// Surfaces past the cap are never read, so a retirement on one of them could not be applied: say so rather than report a complete read.
+	let gap: string | null =
+		allSurfaces.length > surfaces.length
+			? `${allSurfaces.length - surfaces.length} of ${allSurfaces.length} operator surfaces were not read (the cap is ${MAX_OPERATOR_SURFACES}: ${allSurfaces.slice(MAX_OPERATOR_SURFACES).join(", ")}), so a retirement on one of them may be missing`
+			: null;
 	for (const surface of surfaces) {
 		let until: string | undefined;
 		for (let page = 0; ; page++) {

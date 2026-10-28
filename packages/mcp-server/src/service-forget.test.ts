@@ -698,4 +698,34 @@ describe("Substrate.memoryForget: recall, the brief and memory search stop servi
 			expect(await w.substrate.brief(request)).not.toContain("quote versions in every conflict reply");
 		});
 	});
+
+	test("the brief's recalled context: a forgotten entry whose plane delete failed is not served, and a failed check withholds entry hits without storing the answer", async () => {
+		await inWorld({ ledger: false, env: { SUBSTRATE_BRIEF_RECALL: "enforce" } }, async (w) => {
+			const hit = (id: string, text: string, entry: string) => ({ id, text, document_id: `${id}-doc`, tags: [], metadata: { scope: "repo:acme/app", entry_id: entry }, score: 0.9 });
+			w.fake.seed("sub-cursor", [hit("live", "keep the lease fenced", "mem_live"), hit("gone", "a forgotten lesson text", "mem_gone")]);
+			seedRow(w.store, "mem_live");
+			// The row is forgotten (the index's marker), the plane document is still there: only the index keeps its text out.
+			seedRow(w.store, "mem_gone", { superseded_by: `forgotten:fg_${"a".repeat(26)}` });
+			const request = { repo: "acme/app", surface: "cursor" } as const;
+
+			// The recall section is for the caller whose bearer is the surface the brief names, so the bearer is passed (`brief()` passes none).
+			const served = (await w.substrate.briefDetailed(request, undefined, request.surface)).text;
+
+			expect(served).toContain("keep the lease fenced");
+			expect(served).not.toContain("a forgotten lesson text");
+			const stored = [...w.redis.values.keys()].filter((key) => classOf(key) === "recall-snapshot").length;
+			// The checked answer is held, so the unchecked one below is compared against a real baseline.
+			expect(stored).toBe(1);
+
+			// A check that cannot be answered withholds what names an entry, and that answer is not held.
+			w.store.forgottenEntryIds = async () => {
+				throw new Error("index unreachable");
+			};
+			await Promise.all([w.cache.bump(MEMORY_GENERATION_KEY), w.cache.bump(RECALL_GENERATION_KEY)]);
+			const withheld = (await w.substrate.briefDetailed(request, undefined, request.surface)).text;
+			expect(withheld).not.toContain("keep the lease fenced");
+			expect(withheld).not.toContain("a forgotten lesson text");
+			expect([...w.redis.values.keys()].filter((key) => classOf(key) === "recall-snapshot").length).toBe(stored);
+		});
+	});
 });
