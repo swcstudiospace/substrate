@@ -13,7 +13,7 @@
  * It is the ONLY module that constructs the real executor (`execFileRunner`). Nothing else imports it: no test, no CI job, no
  * workflow, no package script, no systemd unit. The default mode opens nothing at all (no config, no ledger, no endpoint, no
  * runner). `--execute` is OPERATOR ONLY and is run by hand from the runbook (`docs/runbooks/devnet-reset-and-reanchor.md`, step e).
- * `--execute` holds a lock file (`.reanchor.lock`, beside the plan file) across discovery, send and recording, and touches only the
+ * `--execute` holds a lock file (`substrate-reanchor-<signer>.lock` in `SUBSTRATE_STATE_DIR`, else the temp directory) across discovery, send and recording, and touches only the
  * ledger: its `Substrate` has an in-memory retain outbox, so it never opens the live server's `SUBSTRATE_RETAIN_OUTBOX_PATH` file or
  * starts a drain timer. A plan with no hour (the planner read no chain, so no observed genesis) is done at once, exit 0.
  *
@@ -23,7 +23,8 @@
  * refuses). No new environment variable: the names `loadConfig` already reads.
  */
 import { readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { isAbsolute, join } from "node:path";
 import { createRpc, execFileRunner, RpcError, type Rpc } from "@substrate/ledger";
 import { loadConfig, operatorSurfaces, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
 import { readReanchorNotes, resolveSignerSet } from "./anchor-verify-deps.ts";
@@ -104,7 +105,7 @@ export interface OpenOptions {
 	substrateFor?: (config: SubstrateConfig, greptime: GreptimeClient) => ReanchorDeps["substrate"];
 }
 
-/** A lock older than this is stale whatever its pid says. */
+/** An unreadable lock file (garbage, a half-written file) older than this is broken; a lock with a live pid never is. */
 export const LOCK_STALE_MS = 30 * 60_000;
 
 export interface LockFileOptions {
@@ -152,10 +153,29 @@ function readHolder(path: string): { raw: string; pid: number | null; startedMs:
 }
 
 /**
+ * The lock file of a signer's re-anchor runs: `substrate-reanchor-<first 12 characters of the signer's public key>.lock` in
+ * `SUBSTRATE_STATE_DIR` when that is set and absolute, else in the OS temp directory. Keyed by the signer and not by the plan file, so
+ * two copies of a plan in different directories (or two plans) share one lock.
+ */
+export function reanchorLockPath(env: Record<string, string | undefined>, pubkey: string): string {
+	const configured = env["SUBSTRATE_STATE_DIR"]?.trim() ?? "";
+	const stateDir = configured !== "" && isAbsolute(configured) ? configured : tmpdir();
+	return join(stateDir, `substrate-reanchor-${pubkey.slice(0, 12)}.lock`);
+}
+
+/**
  * The real lock of a run: `path` created exclusively (`wx`) with the holder's pid and start time, held across discovery, send and
- * recording. An existing file is stale, and broken, when its pid is dead or it is older than {@link LOCK_STALE_MS}; an unreadable one
- * is judged by its age only. The release removes the file only while it still holds this run's own text, so a lock taken over after a
- * stale break is never removed by the old holder. A second run finding a live lock gets `held`, never waits.
+ * recording. An existing file is broken ONLY when its recorded pid is not alive on this host, or when it cannot be read (not a lock
+ * this code wrote: garbage or a half-written file) and is older than {@link LOCK_STALE_MS}. A live pid is never broken, however old
+ * the lock: a degraded run (a 120 s send timeout, read-back retries, several hours) can outlast any fixed age, and breaking its lock
+ * would let a second run send the same hours. The price is pid reuse: a dead run's pid that the OS handed to an unrelated live process
+ * keeps the lock held until the operator removes the file (named in the `held` message), which is the safe direction. The release
+ * removes the file only while it still holds this run's own text, so a lock taken over after a break is never removed by the old
+ * holder. A second run finding a live lock gets `held`, never waits.
+ *
+ * Accepted race: two runs that both find the same dead lock can interleave so that one removes the fresh lock the other has just
+ * created in the instant between the other's compare and its unlink, and both then hold a lock. That window is a few microseconds
+ * wide and needs two operators starting a re-anchor at the same moment; for a hand-run CLI it is accepted and no machinery guards it.
  */
 export function fileLock(path: string, options: LockFileOptions = {}): ReanchorLock {
 	const pid = options.pid ?? process.pid;
@@ -181,10 +201,11 @@ export function fileLock(path: string, options: LockFileOptions = {}): ReanchorL
 				}
 				const holder = readHolder(path);
 				if (holder === null) continue;
-				const stale = now() - holder.startedMs > LOCK_STALE_MS || (holder.pid !== null && !alive(holder.pid));
+				// A live pid is never stale (see above); an unreadable lock has no pid and is judged by its age.
+				const stale = holder.pid !== null ? !alive(holder.pid) : now() - holder.startedMs > LOCK_STALE_MS;
 				if (!stale) {
 					const by = holder.pid === null ? "another run" : `pid ${holder.pid}`;
-					return { held: `${by} holds ${path} since ${new Date(holder.startedMs).toISOString()}` };
+					return { held: `${by} holds ${path} since ${new Date(holder.startedMs).toISOString()} (remove the file only after confirming no re-anchor run is alive)` };
 				}
 				// Break it only while it is still the very file judged stale.
 				try {
@@ -262,8 +283,8 @@ export function openRealContext(options: ReanchorOptions, open: OpenOptions = {}
 				operatorSurfaces: operators,
 				nowMs: () => Date.now(),
 			}),
-		// Beside the plan file: the one directory this entry already controls.
-		lock: fileLock(join(dirname(resolve(options.planPath)), ".reanchor.lock")),
+		// One lock per signer, in one directory per host, not beside the plan file: a copy of the plan elsewhere must not be a second lock.
+		lock: fileLock(reanchorLockPath(open.env ?? process.env, pubkey)),
 	};
 }
 

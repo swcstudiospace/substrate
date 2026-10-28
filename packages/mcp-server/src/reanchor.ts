@@ -351,7 +351,7 @@ export interface ReanchorDeps {
 	clock?: () => number;
 	/**
 	 * The recorded `anchor.reanchor` notes of an hour that are bound to it, read through the trusted-surface read the verifier uses
-	 * (`readReanchorNotes`). May throw: the executor then treats the hour as having no recorded note and falls back to discovery. A
+	 * (`readReanchorNotes`). A throw refuses (`notes-incomplete`) before any send: the pointer the verifier follows is unknown. A
 	 * result with `incomplete` set is refused (`notes-incomplete`), as the verifier leaves the hour unverified.
 	 */
 	notes: (hour: SavedPlanHour) => Promise<ReanchorNotes>;
@@ -553,14 +553,18 @@ interface RecordedState {
  * and adopts an earlier valid send or sends once. A transaction that cannot be read refuses, because a recorded send may be live. A
  * notes read that is incomplete (`incomplete` set: a surface cut by its page cap may hold a NEWER bound note than any returned) refuses
  * with `notes-incomplete`, the way the verifier treats it (`ReanchorReadIncomplete`, hour unverified): the pointer it follows is
- * unknown, so nothing is sent. A notes read that fails is no note: discovery follows it.
+ * unknown, so nothing is sent. A notes read that fails refuses the same way: a failed read is never read as "no note".
  */
 async function recordedSignature(hour: SavedPlanHour, deps: ReanchorDeps, signers: SignerSet): Promise<RecordedState> {
 	let notes: ReanchorNotes;
 	try {
 		notes = await deps.notes(hour);
-	} catch {
-		return { signature: null, stale: null };
+	} catch (cause) {
+		// An unreadable ledger is not an absent note: a newer bound note may exist, and the note write needs the same ledger.
+		throw new Refusal(
+			"notes-incomplete",
+			`${hour.period_start}: the anchor.reanchor notes could not be read (${reasonOf(cause)}), so the pointer the verifier follows is unknown: nothing was sent`,
+		);
 	}
 	if (notes.incomplete !== null) {
 		throw new Refusal(
@@ -660,6 +664,17 @@ async function confirmEarlierSend(hour: SavedPlanHour, signatures: readonly stri
 	return null;
 }
 
+/** Minutes an operator waits after a send that ended without a readable signature: a blockhash is valid for about 150 slots, so two minutes outlast it. */
+export const SEND_SETTLE_MINUTES = 2;
+
+/**
+ * Said whenever a send ended without a signature to read back (a non-zero exit, a timeout or a signal: `code` null, an output with no
+ * signature). The runner kills `solana transfer` at its timeout, so the transaction may already be broadcast and land later; a blockhash
+ * is valid for about 150 slots (about a minute), so after two minutes a transaction that did not land never will. Re-running at once
+ * could find nothing yet and send the hour a second time (two fees, two memos).
+ */
+const MAY_STILL_LAND = `the transaction MAY STILL LAND: wait at least ${String(SEND_SETTLE_MINUTES)} minutes (a blockhash expires after about 150 slots) before re-running, after which discovery adopts it if it landed`;
+
 /** The one send: `transferMemoArgv` with the plan's stored memo, then the job's own read-back. Returns the new signature. */
 async function sendMemo(hour: SavedPlanHour, deps: ReanchorDeps): Promise<string> {
 	const { runner, rpc, env } = deps;
@@ -675,12 +690,14 @@ async function sendMemo(hour: SavedPlanHour, deps: ReanchorDeps): Promise<string
 	} catch (cause) {
 		throw new Refusal("send-failed", `${hour.period_start}: the send could not run: ${reasonOf(cause)}`);
 	}
-	if (sent.code !== 0) throw new Refusal("send-failed", `${hour.period_start}: the send exited ${String(sent.code)}: ${reasonOf(sent.stderr)}`);
+	if (sent.code !== 0) {
+		throw new Refusal("send-failed", `${hour.period_start}: the send exited ${String(sent.code)}: ${reasonOf(sent.stderr)}; ${MAY_STILL_LAND}`);
+	}
 	let signature: string;
 	try {
 		signature = parseSignature(sent.stdout);
 	} catch (cause) {
-		throw new Refusal("send-failed", `${hour.period_start}: ${reasonOf(cause)}`);
+		throw new Refusal("send-failed", `${hour.period_start}: ${reasonOf(cause)}; ${MAY_STILL_LAND}`);
 	}
 	let readBack: TransactionMemo | null;
 	try {

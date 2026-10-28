@@ -4145,7 +4145,9 @@ describe("verifyGraph hour report", () => {
 	const HOUR = 3_600_000;
 	const START_ISO = "2026-10-01T10:00:00.000Z";
 	const END_ISO = "2026-10-01T11:00:00.000Z";
-	const PUBKEY = "TestPubkey1111111111111111111111111111111";
+	const PUBKEY = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T";
+	/** The block time (seconds) of the fixtures' anchor transaction: the hour's end plus five minutes. The signer set always has a block time to judge by. */
+	const BLOCK_S = (H + HOUR + 5 * 60_000) / 1000;
 
 	/** Two chained events in one session, stored as Greptime returns them. */
 	function sessionRows(session = "sess-1", graph = "ut-1") {
@@ -4189,7 +4191,7 @@ describe("verifyGraph hour report", () => {
 	function rpcReturning(memo: string | null, over: Record<string, unknown> = {}) {
 		return {
 			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-			transactionMemo: async () => ({ memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: null, ...over }),
+			transactionMemo: async () => ({ memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: BLOCK_S, ...over }),
 		};
 	}
 
@@ -4293,7 +4295,7 @@ describe("verifyGraph hour report", () => {
 		});
 		const rpc = {
 			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-			transactionMemo: async () => ({ memo: world.memo, payer: "SomeoneElse11111111111111111111111111111", payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: null }),
+			transactionMemo: async () => ({ memo: world.memo, payer: "SomeoneElse11111111111111111111111111111", payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: BLOCK_S }),
 		};
 		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
 		expect(verdict.hours[0]?.status).toBe("mismatch");
@@ -4555,7 +4557,7 @@ describe("verifyGraph hour report", () => {
 		const rpc = {
 			transactionMemo: async () => {
 				rpcCalls += 1;
-				return { memo: world.memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: null };
+				return { memo: world.memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: BLOCK_S };
 			},
 		};
 		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
@@ -5018,31 +5020,50 @@ describe("verifyGraph hour report", () => {
 			expect(hour).toMatchObject({ status: "mismatch", reason: "memo is not signed by SOLANA_ANCHOR_PUBKEY" });
 		});
 
-		test("a block time the cluster did not report leaves a retired key's hour unverified, with the reason", async () => {
-			const hour = await hourOf(sessionRows(), { payer: KEY_A, blockTime: null });
-			expect(hour?.status).toBe("unverified");
-			expect(hour?.reason).toContain("no block time");
+		test("a block time the cluster did not report leaves the hour unverified for every payer, the configured key included", async () => {
+			for (const payer of [KEY_A, KEY_B]) {
+				const hour = await hourOf(sessionRows(), { payer, blockTime: null });
+				expect(hour?.status).toBe("unverified");
+				expect(hour?.reason).toContain("no block time yet");
+			}
 		});
 
-		test("a rotation read that may be incomplete leaves another key's hour unverified, and the configured key's hour anchored as before", async () => {
+		test("a rotation read that may be incomplete leaves every payer's hour unverified, whether the signer would pass or fail its window, the configured key included", async () => {
 			const down = {
 				queryEvents: async () => {
 					throw new Error("ledger down");
 				},
 			};
-			const other = await hourOf(sessionRows(), { payer: KEY_A, blockTime: BEFORE_S }, OPERATOR, down);
-			expect(other?.status).toBe("unverified");
-			expect(other?.reason).toContain("rotation read may be incomplete");
-
-			const configured = await hourOf(sessionRows(), { payer: KEY_B, blockTime: AFTER_S }, OPERATOR, down);
-			expect(configured?.status).toBe("anchored");
+			const cases: Array<{ payer: string; blockTime: number }> = [
+				{ payer: KEY_A, blockTime: BEFORE_S },
+				{ payer: KEY_A, blockTime: AFTER_S },
+				{ payer: KEY_B, blockTime: AFTER_S },
+				{ payer: KEY_B, blockTime: BEFORE_S },
+				{ payer: KEY_C, blockTime: BEFORE_S },
+			];
+			for (const over of cases) {
+				const hour = await hourOf(sessionRows(), over, OPERATOR, down);
+				expect(hour?.status).toBe("unverified");
+				expect(hour?.reason).toContain("rotation-read-incomplete");
+			}
 		});
 
-		test("a single-key deployment with a valid key is judged exactly as before: its own signature is anchored with or without a block time, another key is a mismatch", async () => {
+		test("a signer set that cannot be built leaves the hour unverified with the cause, the configured key included", async () => {
+			const malformed = await hourOf(sessionRows(), { payer: KEY_B, blockTime: AFTER_S }, { SUBSTRATE_ANCHOR_SIGNER_SET: "not json" });
+			expect(malformed?.status).toBe("unverified");
+			expect(malformed?.reason).toContain("signer set cannot be built");
+			expect(malformed?.reason).toContain("malformed");
+
+			const invalidKey = await hourOf(sessionRows(), { payer: KEY_B, blockTime: AFTER_S }, { SOLANA_ANCHOR_PUBKEY: "not-a-public-key", SUBSTRATE_ANCHOR_SIGNER_SET: undefined });
+			expect(invalidKey?.status).toBe("unverified");
+			expect(invalidKey?.reason).toContain("signer set cannot be built");
+		});
+
+		test("a single-key deployment with a valid key anchors its own signature at a block time, and a foreign key is a mismatch", async () => {
 			const world = sessionRows();
 			const single = (over: Record<string, unknown>) => hourOf(world, over, { SOLANA_ANCHOR_PUBKEY: KEY_B, SUBSTRATE_ANCHOR_SIGNER_SET: undefined });
 			expect((await single({ payer: KEY_B, blockTime: BEFORE_S }))?.status).toBe("anchored");
-			expect((await single({ payer: KEY_B, blockTime: null }))?.status).toBe("anchored");
+			expect((await single({ payer: KEY_B, blockTime: null }))?.status).toBe("unverified");
 			const foreign = await single({ payer: KEY_A, blockTime: BEFORE_S });
 			expect(foreign?.status).toBe("mismatch");
 		});

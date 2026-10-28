@@ -719,32 +719,31 @@ interface SignerFault {
 }
 
 /**
- * Judge the payer of an hour's anchor transaction the way `checkpoint_verify` does: by the signer set (`acceptsSigner`) at the
- * transaction's own block time. `signers` is the per-verify memoised read, awaited only here. Null means accepted.
+ * Judge the payer of an hour's anchor transaction exactly as strictly as `checkpoint_verify` does (it settles a signer gap and an
+ * unresolved block time the same way): by the signer set (`acceptsSigner`) at the transaction's own block time, for EVERY payer,
+ * the configured key (`SOLANA_ANCHOR_PUBKEY`) included. `signers` is the per-verify memoised read, awaited only here. Null means
+ * accepted.
  *
- * - The configured key (`SOLANA_ANCHOR_PUBKEY`) keeps today's verdict where the set cannot speak: a set that cannot be built, or a
- *   transaction without a block time, is accepted for it; with a readable set and a block time its window is enforced.
- * - Any other payer needs the set: it is `unverified` when the rotation read may be incomplete (a missing rotation note may be what
- *   adds or retires it) or when its block time is unknown, `mismatch` when it is outside every window or not in the set. A set that
- *   cannot be built at all leaves only the configured key known, so another payer stays the old `mismatch`.
+ * - A payer that is unknown (null) is `mismatch`.
+ * - A set that cannot be built (a malformed signer set, an invalid key, a refused fold) is `unverified` with the redacted cause.
+ * - A rotation read that may be incomplete (`gap`) is `unverified`: a missing rotation note may be what adds or retires the signer,
+ *   so neither an accept nor a window-based `mismatch` is sound on an incomplete set.
+ * - A transaction without a block time is `unverified`: the signer's valid window cannot be checked.
+ * - On a complete set with a block time, a payer outside every window (or not in the set) is `mismatch`.
  */
-async function judgeSigner(memo: TransactionMemo, pubkey: string, signers: () => Promise<{ set: SignerSet; gap: string | null }>): Promise<SignerFault | null> {
-	const notConfigured: SignerFault = { status: "mismatch", reason: "memo is not signed by SOLANA_ANCHOR_PUBKEY" };
-	if (memo.payer === null) return notConfigured;
-	const configured = memo.payer === pubkey;
+async function judgeSigner(memo: TransactionMemo, signers: () => Promise<{ set: SignerSet; gap: string | null }>): Promise<SignerFault | null> {
+	if (memo.payer === null) return { status: "mismatch", reason: "memo is not signed by SOLANA_ANCHOR_PUBKEY" };
 	let read: { set: SignerSet; gap: string | null };
 	try {
 		read = await signers();
-	} catch {
-		return configured ? null : notConfigured;
+	} catch (cause) {
+		return { status: "unverified", reason: redact(`the signer set cannot be built, so the signer cannot be checked: ${String(cause)}`).slice(0, 300) };
 	}
-	if (read.gap !== null && !configured) {
-		return { status: "unverified", reason: redact(`the signer rotation read may be incomplete (${read.gap}), so the signer cannot be shown to be current`).slice(0, 300) };
+	if (read.gap !== null) {
+		return { status: "unverified", reason: redact(`rotation-read-incomplete: ${read.gap}`).slice(0, 300) };
 	}
 	if (memo.blockTime === null) {
-		if (configured) return null;
-		if (!read.set.some((entry) => entry.pubkey === memo.payer)) return notConfigured;
-		return { status: "unverified", reason: "the transaction reports no block time, so the signer's valid window cannot be checked" };
+		return { status: "unverified", reason: "the transaction reports no block time yet, so the signer's valid window cannot be checked" };
 	}
 	const verdict = acceptsSigner(read.set, memo.payer, memo.blockTime * 1000);
 	return verdict.ok ? null : { status: "mismatch", reason: redact(verdict.reason).slice(0, 300) };
@@ -6728,7 +6727,7 @@ export class Substrate {
 		if (!memo.payerSigned) {
 			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "memo is not signed by SOLANA_ANCHOR_PUBKEY" };
 		}
-		const signerFault = await judgeSigner(memo, pubkey, signers);
+		const signerFault = await judgeSigner(memo, signers);
 		if (signerFault !== null) {
 			return { period_start, period_end, status: signerFault.status, event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: signerFault.reason };
 		}

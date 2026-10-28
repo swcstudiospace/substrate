@@ -14,7 +14,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { formatMemo, HOUR_MS, hourIso, type Rpc, type RunResult } from "@substrate/ledger";
 import { DEVNET_GENESIS_HASH } from "./anchor.ts";
 import type { ReanchorDeps, ReanchorOptions } from "./reanchor.ts";
-import { fileLock, LOCK_STALE_MS, openRealContext, runReanchorCli, type ReanchorCliDeps } from "./reanchor-run.ts";
+import { fileLock, LOCK_STALE_MS, openRealContext, reanchorLockPath, runReanchorCli, type ReanchorCliDeps } from "./reanchor-run.ts";
 import { Substrate } from "./service.ts";
 
 const GENESIS = "GH7ome3EiwEr7tu9JuTh2dpYWBJK3z69Xm1ZE3MEE6JC";
@@ -324,26 +324,45 @@ describe("openRealContext leaves the running server's retain outbox alone", () =
 		expect(readdirSync(dir)).toEqual(["retain-outbox.jsonl"]);
 	});
 
-	test("the lock lives beside the plan file", () => {
-		const dir = mkdtempSync(join(tmpdir(), "p59-lockdir-"));
-		const built = openRealContext(
-			{ ...OPTIONS, planPath: join(dir, "plan.json") },
-			{
-				env: { [GREPTIME_URL_KEY]: "http://127.0.0.1:9", SOLANA_ANCHOR_KEYPAIR: "/etc/substrate/key.json", SOLANA_ANCHOR_PUBKEY: PUBKEY },
-				ledgerFor: () => ({ anchorForPeriod: async () => null, queryEvents: async () => [] }) as never,
-				substrateFor: () => ({}) as never,
-			},
-		);
-		if ("refused" in built) throw new Error(`unexpected refusal: ${built.refused}`);
-		const held = built.lock.acquire();
-		if (!("release" in held)) throw new Error("expected the lock");
-		expect(readdirSync(dir)).toEqual([".reanchor.lock"]);
-		held.release();
-		expect(readdirSync(dir)).toEqual([]);
+	test("the lock is keyed by the signer and lives in SUBSTRATE_STATE_DIR: two copies of a plan in different directories share it", () => {
+		const state = mkdtempSync(join(tmpdir(), "p59-state-"));
+		const planA = mkdtempSync(join(tmpdir(), "p59-plan-a-"));
+		const planB = mkdtempSync(join(tmpdir(), "p59-plan-b-"));
+		const env = { [GREPTIME_URL_KEY]: "http://127.0.0.1:9", SOLANA_ANCHOR_KEYPAIR: "/etc/substrate/key.json", SOLANA_ANCHOR_PUBKEY: PUBKEY, SUBSTRATE_STATE_DIR: state };
+		const open = (planPath: string): ReanchorDeps => {
+			const built = openRealContext(
+				{ ...OPTIONS, planPath },
+				{
+					env,
+					ledgerFor: () => ({ anchorForPeriod: async () => null, queryEvents: async () => [] }) as never,
+					substrateFor: () => ({}) as never,
+				},
+			);
+			if ("refused" in built) throw new Error(`unexpected refusal: ${built.refused}`);
+			return built;
+		};
+		const first = open(join(planA, "plan.json")).lock.acquire();
+		if (!("release" in first)) throw new Error("expected the lock");
+		expect(readdirSync(state)).toEqual([`substrate-reanchor-${PUBKEY.slice(0, 12)}.lock`]);
+		expect(readdirSync(planA)).toEqual([]);
+
+		const second = open(join(planB, "plan.json")).lock.acquire();
+		expect(second).toHaveProperty("held");
+		expect(readdirSync(planB)).toEqual([]);
+		first.release();
+		expect(readdirSync(state)).toEqual([]);
+	});
+
+	test("the lock path is in SUBSTRATE_STATE_DIR only when that is set and absolute, else in the OS temp directory", () => {
+		const name = `substrate-reanchor-${PUBKEY.slice(0, 12)}.lock`;
+		expect(reanchorLockPath({ SUBSTRATE_STATE_DIR: "/var/lib/substrate" }, PUBKEY)).toBe(join("/var/lib/substrate", name));
+		expect(reanchorLockPath({}, PUBKEY)).toBe(join(tmpdir(), name));
+		expect(reanchorLockPath({ SUBSTRATE_STATE_DIR: "  " }, PUBKEY)).toBe(join(tmpdir(), name));
+		expect(reanchorLockPath({ SUBSTRATE_STATE_DIR: "relative/dir" }, PUBKEY)).toBe(join(tmpdir(), name));
 	});
 });
 
-describe("fileLock: create-exclusive, stale by a dead pid or by age, released by its owner only", () => {
+describe("fileLock: create-exclusive, broken only by a dead pid (or an old unreadable file), released by its owner only", () => {
 	const lockPath = (): string => join(mkdtempSync(join(tmpdir(), "p59-lock-")), ".reanchor.lock");
 
 	test("a second acquire while the first holds is refused with the holder named; the release frees it", () => {
@@ -370,14 +389,16 @@ describe("fileLock: create-exclusive, stale by a dead pid or by age, released by
 		expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ pid: 4343, started_ms: NOW + 1000 });
 	});
 
-	test("a lock older than thirty minutes is stale even when its pid is alive; one just under that age is held", () => {
+	test("a lock whose pid is alive is never broken, however old: a long degraded run keeps its lock", () => {
 		const old = lockPath();
-		writeFileSync(old, JSON.stringify({ pid: 4242, started_ms: NOW - LOCK_STALE_MS - 1 }));
-		expect("release" in fileLock(old, { pid: 4343, now: () => NOW, alive: () => true }).acquire()).toBe(true);
+		writeFileSync(old, JSON.stringify({ pid: 4242, started_ms: NOW - 10 * LOCK_STALE_MS }));
+		const refused = fileLock(old, { pid: 4343, now: () => NOW, alive: () => true }).acquire();
+		if (!("held" in refused)) throw new Error("expected the second run to be refused");
+		expect(refused.held).toContain("pid 4242");
+		expect(JSON.parse(readFileSync(old, "utf8"))).toEqual({ pid: 4242, started_ms: NOW - 10 * LOCK_STALE_MS });
 
-		const fresh = lockPath();
-		writeFileSync(fresh, JSON.stringify({ pid: 4242, started_ms: NOW - LOCK_STALE_MS + 1000 }));
-		expect(fileLock(fresh, { pid: 4343, now: () => NOW, alive: () => true }).acquire()).toHaveProperty("held");
+		// The same old lock with a dead pid is broken.
+		expect("release" in fileLock(old, { pid: 4343, now: () => NOW, alive: (pid) => pid !== 4242 }).acquire()).toBe(true);
 	});
 
 	test("a lock file that does not parse is judged by its modification time alone", () => {

@@ -22,7 +22,7 @@ const HOUR = 3_600_000;
 const NOW = H + 5 * HOUR;
 const GRAPH = "ut-teach-41";
 const SESSION = "sess-p41-anchor";
-const PUBKEY = "TestPubkey1111111111111111111111111111111";
+const PUBKEY = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T";
 const SIG = "sig-scratch-41";
 const EXPLORER = `https://explorer.solana.com/tx/${SIG}?cluster=devnet`;
 const hourIso = (ms: number) => new Date(ms).toISOString();

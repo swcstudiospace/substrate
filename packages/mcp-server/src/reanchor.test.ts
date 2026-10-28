@@ -119,6 +119,8 @@ class World {
 	signerCalls = 0;
 	listingFails = false;
 	sendCode = 0;
+	/** The send is killed at the runner's timeout: no exit code, no output, and the transaction may still land. */
+	sendTimesOut = false;
 	readBackMemo: string | null | undefined = undefined;
 	emitStored = true;
 	/** The recorded notes the ledger would answer, per hour; `emit` adds the notes the executor writes. */
@@ -213,6 +215,7 @@ class World {
 		this.runnerCalls.push([...argv]);
 		if (argv[1] === "pubkey") return { code: 0, stdout: `${this.keygenOut}\n`, stderr: "" };
 		if (argv[1] !== "transfer") throw new TypeError(`the fake runner answers only pubkey and transfer, got ${String(argv[1])}`);
+		if (this.sendTimesOut) return { code: null, stdout: "", stderr: "" };
 		if (this.sendCode !== 0) return { code: this.sendCode, stdout: "", stderr: "Error: RPC response error -32002 at https://rpc.example.invalid/v1/key-4411" };
 		if (this.sendGate !== null) {
 			this.sendReached.resolve();
@@ -666,16 +669,18 @@ describe("adopt before send", () => {
 		w.expectUntouched();
 	});
 
-	test("a notes read that fails is no note: the earlier send is still found by discovery and recorded anyway, a duplicate note is harmless, a missing one is not", async () => {
+	test("a notes read that fails refuses notes-incomplete before any listing, send or note: the pointer the verifier follows is unknown", async () => {
 		const w = new World(ONE);
 		const adopted = newSig(7);
 		w.listing = [{ signature: adopted, memo: memoOf(H1, 1), err: null, slot: 5 }];
 		w.chain.set(adopted, { ...TX_TEMPLATE, memo: memoOf(H1, 1) });
 		w.notesFail = true;
 		const result = await w.run(ONE);
-		expect(result.code).toBe(0);
-		expect(w.sendCalls).toEqual([]);
-		expect(w.emitted).toHaveLength(1);
+		expect(result).toMatchObject({ code: 1, refused: "notes-incomplete", sent: 0, adopted: 0 });
+		expect(result.stderr).toContain("could not be read");
+		expect(result.stderr).toContain("pointer the verifier follows is unknown");
+		expect(w.listBefore).toEqual([]);
+		w.expectUntouched();
 	});
 
 	test("a memo for the hour with another root on the new cluster is refused, never adopted and never overwritten", async () => {
@@ -807,6 +812,27 @@ describe("the one send", () => {
 		expect(result).toMatchObject({ code: 1, refused: "send-failed", sent: 0 });
 		expect(result.stderr).not.toContain("rpc.example.invalid");
 		expect(w.emitted).toEqual([]);
+	});
+
+	test("a send killed at its timeout (no exit code) is send-failed and says the transaction may still land and to wait; a re-run after it landed adopts it and sends nothing", async () => {
+		const w = new World(ONE);
+		w.sendTimesOut = true;
+		const first = await w.run(ONE);
+		expect(first).toMatchObject({ code: 1, refused: "send-failed", sent: 0 });
+		expect(first.stderr).toContain("MAY STILL LAND");
+		expect(first.stderr).toContain("wait at least 2 minutes");
+		expect(w.sendCalls).toHaveLength(1);
+		expect(w.emitted).toEqual([]);
+
+		// The broadcast transaction lands afterwards and is listed at `confirmed`: the next run adopts it instead of sending the hour twice.
+		const landed = newSig(7);
+		w.chain.set(landed, { ...TX_TEMPLATE, memo: memoOf(H1, 1) });
+		w.listing = [{ signature: landed, memo: memoOf(H1, 1), err: null, slot: 7 }];
+		w.sendTimesOut = false;
+		const second = await w.run(ONE);
+		expect(second).toMatchObject({ code: 0, sent: 0, adopted: 1 });
+		expect(w.sendCalls).toHaveLength(1);
+		expect(w.emitted).toHaveLength(1);
 	});
 
 	test("a send whose read-back does not carry the memo is send-failed and the run stops before the next hour", async () => {
