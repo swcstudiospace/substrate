@@ -69,6 +69,7 @@ const CKPT_ID = /^ckpt_[0-9a-z]{26}$/;
 const ROLLBACK_ID = /^rb_[0-9a-z]{26}$/;
 /** An entry id: `mem_<32 hex>` in practice, any opaque id for rows older than the gate. Never a path. */
 const OPAQUE_ID = /^[A-Za-z0-9._:-]+$/;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: detects C0/DEL control characters in untrusted ids
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
 

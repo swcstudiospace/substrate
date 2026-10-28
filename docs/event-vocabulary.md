@@ -170,6 +170,15 @@ Surface rule names: `herdr-agent` is the agent herdr detected, mapped onto
 never body-supplied; `memory-writer` is the memory's writer; `lease-holder`
 is the lease holder. A fixed name is always that surface.
 
+The four `memory.write.*` rows share one emitter (`auditMemoryWrite`) and no `payload.action`; the payload keys
+are `outcome`, `reason` (`accepted` on a plain acceptance), `scope`, `kind`, `strategy`, `review_id` and
+`quarantine_id`. An accepted write adds `entry_id`: the id of the entry the gate stored, read from the gate's
+result and never from the request, so a caller cannot choose it. It is a payload key on the existing `note`
+(or, for an accepted write the read-back could not verify, `warning`), not a new kind or surface. Refused,
+quarantined and conflicting writes stored nothing and carry no `entry_id`. Events written before the key
+existed lack it; the consistency verifier pairs those by writer, scope, kind and time
+([consistency-verify.md](runbooks/consistency-verify.md#limits-stated-plainly)).
+
 The three `skills.propose` rows share `payload.action: "skill.propose"` and are told
 apart by kind and `payload.status`: a `note` for an outcome, a `warning` with status
 `refused` for a guard's refusal, a `warning` with status `failed` for a git or `gh`

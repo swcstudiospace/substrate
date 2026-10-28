@@ -109,7 +109,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * a string on the next bump.
  */
 function unmappedCount(map: Record<string, number>, agent: string): number {
-	const count = Object.prototype.hasOwnProperty.call(map, agent) ? map[agent] : 0;
+	const count = Object.hasOwn(map, agent) ? map[agent] : 0;
 	return typeof count === "number" ? count : 0;
 }
 

@@ -130,6 +130,7 @@ const FLAGS = {
 } as const;
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
 // Control characters are refused in every operator-typed value.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: rejects C0 and DEL control characters in operator-typed values
 const CONTROL = /[\u0000-\u001f\u007f]/;
 
 function checkText(flag: string, value: string, max: number): string {

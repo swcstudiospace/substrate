@@ -773,7 +773,9 @@ export async function searchDocs(deps: SearchDeps, question: string): Promise<Se
 		try {
 			const raw = await deps.lightrag(effectiveQuestion);
 			const scopeName = repoId !== null ? scopedDatasetName(repoId, "lightrag") : "lightrag";
-			parseLightRagJson(raw).forEach((hit, index) => citations.push(lightRagCite(hit, scopeName, index)));
+			parseLightRagJson(raw).forEach((hit, index) => {
+				citations.push(lightRagCite(hit, scopeName, index));
+			});
 		} catch {
 			// LightRAG down: RAGFlow citations stand alone.
 		}

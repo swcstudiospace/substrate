@@ -7,7 +7,6 @@ import {
 	diagnose,
 	entryFromExecStart,
 	isDevCheckout,
-	listGitTree,
 	listReleaseTree,
 	loadUnits,
 	parseDisableAssignments,

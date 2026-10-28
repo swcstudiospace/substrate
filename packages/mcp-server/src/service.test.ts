@@ -1482,6 +1482,79 @@ describe("memory.write is fail-closed", () => {
 		expect(emitted[0]?.payload).toMatchObject({ outcome: "quarantined", quarantine_id: "memq_1" });
 		expect(JSON.stringify(emitted)).not.toContain("ghp_");
 	});
+
+	describe("the accepted audit event names the stored entry", () => {
+		/** An index whose stored row carries an id the gate did not mint, so the id in the event can only have come from the stored result. */
+		function storingAs(storedId: string) {
+			let row: Record<string, unknown> | null = null;
+			return {
+				claimWrite: async () => ({ claimed: true, holder: "service-test" }),
+				finishWrite: async () => undefined,
+				insertEntry: async (candidate: Record<string, unknown>) => {
+					row = { ...candidate, id: storedId };
+					return { ok: true, entry: row };
+				},
+				readEntry: async () => row,
+			};
+		}
+
+		test("an accepted write carries the id of the entry the result stored, as snake_case entry_id", async () => {
+			const { emitted, greptime } = auditing();
+			const substrate = new Substrate(loadConfig({}), { index: acceptingIndex() as never, greptime: greptime as never });
+
+			const result = await substrate.writeMemory(entry);
+
+			expect(result.outcome).toBe("accepted");
+			expect(typeof result.entry?.id).toBe("string");
+			expect(emitted).toHaveLength(1);
+			expect(emitted[0]?.payload).toMatchObject({ outcome: "accepted", entry_id: result.entry?.id });
+		});
+
+		test("the id comes from the stored result even when the caller supplies a conflicting one", async () => {
+			const { emitted, greptime } = auditing();
+			const substrate = new Substrate(loadConfig({}), { index: storingAs("mem_stored_by_index") as never, greptime: greptime as never });
+
+			// `id` and `entry_id` are not request fields; a JSON caller can still send them, and neither may reach the ledger.
+			const result = await substrate.writeMemory({ ...entry, id: "mem_forged_by_caller", entry_id: "mem_forged_by_caller" } as never);
+
+			expect(result.outcome).toBe("accepted");
+			expect(result.entry?.id).toBe("mem_stored_by_index");
+			expect(emitted).toHaveLength(1);
+			expect((emitted[0]?.payload as Record<string, unknown>).entry_id).toBe("mem_stored_by_index");
+			expect(JSON.stringify(emitted)).not.toContain("mem_forged_by_caller");
+		});
+
+		test("a denied, conflicting or quarantined write stored nothing and carries no entry_id", async () => {
+			const denied = auditing();
+			await new Substrate(loadConfig({}), { index: {} as never, greptime: denied.greptime as never }).writeMemory({ ...entry, scope: "person:ove", id: "mem_forged_by_caller" } as never);
+
+			const conflicted = auditing();
+			const reviewIndex = {
+				claimWrite: async () => ({ claimed: true, holder: "service-test" }),
+				enqueueReview: async () => "memr_1",
+				finishWrite: async () => undefined,
+			};
+			await new Substrate(loadConfig({}), { index: reviewIndex as never, greptime: conflicted.greptime as never }).writeMemory({ ...entry, scope: "global", entry_id: "mem_forged_by_caller" } as never);
+
+			const quarantined = auditing();
+			await new Substrate(loadConfig({}), { index: { quarantineEntry: async () => "memq_1" } as never, greptime: quarantined.greptime as never }).writeMemory({
+				...entry,
+				text: "poller needs GITHUB_TOKEN=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				entry_id: "mem_forged_by_caller",
+			} as never);
+
+			for (const [outcome, { emitted }] of [
+				["denied", denied],
+				["conflict", conflicted],
+				["quarantined", quarantined],
+			] as const) {
+				expect(emitted).toHaveLength(1);
+				const payload = emitted[0]?.payload as Record<string, unknown>;
+				expect(payload.outcome).toBe(outcome);
+				expect("entry_id" in payload).toBe(false);
+			}
+		});
+	});
 });
 
 describe("reviewer tokens", () => {
@@ -3118,7 +3191,6 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 				_n: string,
 				request: { lease_id?: string | null; force?: boolean },
 				caller: Surface | null,
-				alsoSetState?: string,
 			) => {
 				const decision = decideRelease(leaseSnapshot(node as never), { ...request, caller }, Date.now());
 				if (!decision.ok || decision.action === "noop") return { released: decision.ok, node, decision };

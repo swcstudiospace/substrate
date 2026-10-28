@@ -19,7 +19,9 @@ A rollback can only return to a checkpoint that exists. The CLI can take a check
 | `baseline` | the first checkpoint of a session that predates the feature, so it cannot be rolled back before it (D55-3) | **value accepted, nothing creates it automatically** | an operator or hook may pass `--trigger baseline` |
 | `turn` | a turn ended | **no** | value accepted; no hook calls it |
 | `plan-step` | a plan step or lane boundary completed | **no** | value accepted; `--plan-phase` and `--plan-step` carry the reference (each at most 64 characters); no hook calls it |
-| `steering` | a steering directive was applied | **no, and depends on phase 58** | durable steering lives on the branch stacked on the held draft pull requests; the state-machine join with `docs_steering_session` is a small follow-up when that stack merges |
+| `steering` | a steering directive was applied | **no hook calls it; the server hints** | an applied pause or redirect acknowledgement moves the session's `docs_steering_session` state and the `steering_acknowledge` reply carries `checkpoint_hint` (below); taking the checkpoint is the acknowledging session's hook or agent |
+
+**The steering checkpoint hint.** When an applied `pause` or `redirect` acknowledgement actually moves the live session (to `PAUSED` or `CONTEXT_REFRESH`), the `steering_acknowledge` reply carries `checkpoint_hint: { "trigger": "steering", "directive_id": "<id>" }`, and only when the state actually changed. It is a hint and no ledger event: the server stays read-only on worktrees (ADR 0005), so the checkpoint itself is the session's own `substrate session checkpoint --trigger steering` run from its worktree. A refused transition (for example a redirect for a `PAUSED` session), a session the server does not hold, and a request for the state the session already holds (a pause for a `PAUSED` session, a redirect for a `CONTEXT_REFRESH` session: `session_state` reads `unchanged`, and no `docs.steering` note is recorded) carry no hint; the acknowledgement stands in every case. The join is by session id: a directive's `targetSessionId` must be the id the session passes to `docs_steering_session`, held under whichever surface wrote it; two surfaces holding the same id is refused as `ambiguous`.
 
 ## The hook contract every proposal shares
 
@@ -48,7 +50,7 @@ Each: the event, the command, the failure behaviour, the owner, the risk.
 - **Command.** `substrate session checkpoint --trigger plan-step --plan-phase <phase> --plan-step <plan>-<task>` from the agent running the workflow, `|| true`.
 - **Failure.** Never stops the workflow; a missing CLI or server is ignored.
 - **Owner.** GSD-Core. Only an installed copy (version 1.18.0 under the user's agents directory) was found; its upstream repository was not located (UNVERIFIED).
-- **Risk.** Workflows are markdown followed by a model, so a step is not guaranteed to run; a host hook is more reliable than a prompt line. **Name collision:** GSD-Core already says "checkpoint" for checkpoint plans and `[checkpoint]` heartbeats, and the unmerged phase 53 draft uses "plan-step checkpoint" for a resume record keyed by file hash. Neither is a session checkpoint.
+- **Risk.** Workflows are markdown followed by a model, so a step is not guaranteed to run; a host hook is more reliable than a prompt line. **Name collision:** GSD-Core already says "checkpoint" for checkpoint plans and `[checkpoint]` heartbeats, and phase 53 (merged, PR #136) uses "plan-step checkpoint" for a resume record keyed by file hash. Neither is a session checkpoint.
 
 ### Ultrathink (plan node boundaries)
 

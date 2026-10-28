@@ -13,6 +13,7 @@ const CHORD = "[A-Za-z0-9_]+(?:\\+[A-Za-z0-9_]+)*";
 const KEYS = new RegExp(`^${CHORD}(?: ${CHORD}){0,7}$`);
 const KEYS_RULE = "keys must be 1..8 space-separated chords of [A-Za-z0-9_] names joined by +, e.g. ctrl+alt+t Return";
 /** Printable text plus \n and \t: no other C0 control, DEL or C1 control. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: rejects C0/C1 control characters in untrusted typed text
 const TYPEABLE = /^[^\u0000-\u0008\u000b-\u001f\u007f-\u009f]*$/;
 
 const settleMs = z.number().int().min(0).max(5000).optional().describe("wait after the action, ms");

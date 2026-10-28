@@ -5,7 +5,7 @@
  * exactly once per idempotency key; everything else warns without touching
  * the write — which already succeeded, so the forward never blocks it.
  */
-import { beforeEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { HindsightFake } from "./hindsight-fake.ts";
 import { forwardRetain, replayRetain, retainDocumentId, type RetainDeps } from "./memory-retain.ts";
 import { clearEnsuredBanks, type HindsightConfig } from "./planes/hindsight.ts";

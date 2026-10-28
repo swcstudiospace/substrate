@@ -102,7 +102,8 @@ file.hooks ??= {};
 const changes: string[] = [];
 
 for (const [event, entry] of Object.entries(DESIRED)) {
-	const list: HookEntry[] = (file.hooks[event] ??= []);
+	const list: HookEntry[] = file.hooks[event] ?? [];
+	file.hooks[event] = list;
 	const mine = list.findIndex((e) => e["substrate-managed"] === true);
 
 	if (remove) {

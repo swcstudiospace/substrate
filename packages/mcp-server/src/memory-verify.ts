@@ -86,6 +86,7 @@ const MAX_PROOF_REF = 200;
 const MAX_DETAIL = 200;
 
 function oneLine(value: string, max: number): string {
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: strips C0/DEL control characters from untrusted text
 	const flat = value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
 	return flat.length > max ? `${flat.slice(0, max)}…` : flat;
 }

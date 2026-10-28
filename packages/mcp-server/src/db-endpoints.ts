@@ -43,7 +43,7 @@ export function parseProxyAllow(raw: string | undefined): ProxyAllow {
 	return keys;
 }
 
-export function classifyEndpoint(plane: DbPlane, url: string | undefined, allow: ProxyAllow): EndpointClass {
+export function classifyEndpoint(_plane: DbPlane, url: string | undefined, allow: ProxyAllow): EndpointClass {
 	if (url === undefined || url === "") return "direct";
 	const target = endpointTarget(url);
 	if (target === undefined) return "direct";

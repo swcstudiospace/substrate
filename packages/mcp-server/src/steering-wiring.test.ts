@@ -169,7 +169,7 @@ async function seedPreviousProcess(sql: FakeAuditSql, directives: Array<Record<s
 	for (const entry of directives) expect((await previous.enqueue(entry)).ok).toBe(true);
 }
 
-/** The live session state machine, stubbed. It MIRRORS main's `steeringStateTransition` (event.ts, SPE-19390) and is to be replaced by the real adapter when this stack lands on main. */
+/** A port stub for the tests that inject one (the seam). It MIRRORS `steeringStateTransition` (event.ts); production wires the real `SteeringSessionRegistry`, which the last describe below drives. */
 class StubSessionMachine implements SessionStatePort {
 	readonly states = new Map<string, SessionStateName>();
 
@@ -178,7 +178,7 @@ class StubSessionMachine implements SessionStatePort {
 		const ok = current === target || (current === "ACTIVE" && (target === "CONTEXT_REFRESH" || target === "PAUSED")) || (current === "CONTEXT_REFRESH" && (target === "ACTIVE" || target === "PAUSED")) || (current === "PAUSED" && target === "RESUMED") || (current === "RESUMED" && (target === "ACTIVE" || target === "PAUSED"));
 		if (!ok) return { ok: false, reason: `steering transition ${current} -> ${target} refused` };
 		this.states.set(sessionKey, target);
-		return { ok: true };
+		return { ok: true, changed: current !== target };
 	}
 }
 
@@ -199,7 +199,7 @@ function harness(env: Record<string, string | undefined> = {}, options: { sql?: 
 		index: null,
 		greptime: null,
 		planning: { presence: null, emit: async () => true },
-		steering: { history: null, durable: new SteeringAuditSink(sql, sql), sessionState: options.sessionState ?? null, timers, nowMs: clock.nowMs, report: (line) => lines.push(line) },
+		steering: { history: null, durable: new SteeringAuditSink(sql, sql), ...(options.sessionState !== undefined ? { sessionState: options.sessionState } : {}), timers, nowMs: clock.nowMs, report: (line) => lines.push(line) },
 	});
 	return { substrate, sql, clock, timers, lines };
 }
@@ -552,10 +552,137 @@ describe("an acknowledgement drives the session state", () => {
 		}
 	});
 
-	test("with no session state wired, which is production in this branch, the reply is the plain acknowledgement", async () => {
+	test("a pause for an already PAUSED session reads unchanged and carries no checkpoint_hint", async () => {
+		const machine = new StubSessionMachine();
+		machine.states.set("sess-a", "PAUSED");
+		const reply = await queuedAndAcknowledged(machine, "pause", "applied");
+		expect(reply).toMatchObject({ isError: false, body: { status: "acknowledged", session_state: { status: "unchanged" } } });
+		expect(Object.hasOwn(reply.body, "checkpoint_hint")).toBe(false);
+		expect(machine.states.get("sess-a")).toBe("PAUSED");
+	});
+
+	test("a pause that moves the session still carries the checkpoint_hint", async () => {
+		const reply = await queuedAndAcknowledged(new StubSessionMachine(), "pause", "applied");
+		expect(reply).toMatchObject({ body: { session_state: { status: "applied", state: "PAUSED" }, checkpoint_hint: { trigger: "steering" } } });
+	});
+
+	test("with the port injected as null the reply is the plain acknowledgement: no session_state, no checkpoint_hint", async () => {
 		const reply = await queuedAndAcknowledged(null, "pause", "applied");
 		expect(reply).toMatchObject({ isError: false, body: { status: "acknowledged", outcome: "applied" } });
 		expect(Object.hasOwn(reply.body, "session_state")).toBe(false);
+		expect(Object.hasOwn(reply.body, "checkpoint_hint")).toBe(false);
+	});
+});
+
+describe("the two steering mechanisms share one state model", () => {
+	/** A substrate on the production default port: no port injected. Its `emit` is recorded and answers stored. */
+	function shared() {
+		const { substrate } = harness();
+		const events: EventInput[] = [];
+		spyOn(substrate, "emit").mockImplementation((async (event: EventInput) => {
+			events.push(event);
+			return { event: { id: `ev-${events.length}` }, stored: true };
+		}) as never);
+		/** The `docs.steering` notes only: the queue hint and other events are not this describe's concern. */
+		const steeringNotes = () => events.filter((event) => event.payload?.["action"] === "docs.steering");
+		return { substrate, steeringNotes };
+	}
+
+	const SESSION = { session_id: "sess-a", repo_id: "owner/name" };
+
+	test("the registry is the default port while steering is on, and no port exists while it is off", () => {
+		const on = harness().substrate;
+		expect(on.sessionState).toBe(on.steeringSessions);
+		const off = harness({ SUBSTRATE_PLANNING_STEERING: "off" }).substrate;
+		expect(off.sessionState).toBeNull();
+	});
+
+	test("a pause acknowledged through the inbox changes the state docs_steering_session reports, and the ledger names the directive", async () => {
+		const { substrate, steeringNotes } = shared();
+		const client = await connect(substrate, OPERATOR);
+		expect((await call(client, "docs_steering_session", { ...SESSION, state: "ACTIVE" })).isError).toBe(false);
+		const queued = await call(client, "steering_queue", { ...QUEUE_ARGS, action: "pause" });
+		const directiveId = String(queued.body.directive_id);
+		expect(await call(client, "steering_list", { session_id: "sess-a" })).toMatchObject({ body: { status: "listed", session_state: { status: "held", state: "ACTIVE" } } });
+
+		const acknowledged = await call(client, "steering_acknowledge", { directive_id: directiveId, session_id: "sess-a", outcome: "applied" });
+		expect(acknowledged).toMatchObject({
+			isError: false,
+			body: { status: "acknowledged", session_state: { status: "applied", state: "PAUSED" }, checkpoint_hint: { trigger: "steering", directive_id: directiveId } },
+		});
+
+		// docs_steering_session's own state is PAUSED: the claim of previous_state PAUSED is checked against the stored state and holds.
+		const reported = await call(client, "docs_steering_session", { ...SESSION, state: "PAUSED", previous_state: "PAUSED" });
+		expect(reported).toMatchObject({ isError: false, body: { state: "PAUSED" } });
+		expect(await call(client, "steering_list", { session_id: "sess-a" })).toMatchObject({ body: { session_state: { status: "held", state: "PAUSED" } } });
+
+		// The ledger carries one note for the acknowledgement, with the directive id.
+		const driven = steeringNotes().filter((event) => event.payload?.["directive_id"] === directiveId);
+		expect(driven).toHaveLength(1);
+		expect(driven[0]).toMatchObject({ surface: "omp", kind: "warning", session_id: "sess-a" });
+		expect(driven[0]?.payload).toMatchObject({ state: "PAUSED", previous_state: "ACTIVE", via: "steering_acknowledge" });
+	});
+
+	test("the reverse reads: a state docs_steering_session sets is the state the inbox side sees, and a resume lets a later redirect apply", async () => {
+		const { substrate } = shared();
+		const client = await connect(substrate, OPERATOR);
+		await call(client, "docs_steering_session", { ...SESSION, state: "ACTIVE" });
+		await call(client, "docs_steering_session", { ...SESSION, state: "PAUSED" });
+		await call(client, "docs_steering_session", { ...SESSION, state: "RESUMED" });
+		expect(substrate.steeringSessions.get("omp", "sess-a")?.state).toBe("RESUMED");
+
+		const queued = await call(client, "steering_queue", { ...QUEUE_ARGS, action: "pause" });
+		const acknowledged = await call(client, "steering_acknowledge", { directive_id: queued.body.directive_id, session_id: "sess-a", outcome: "applied" });
+		expect(acknowledged).toMatchObject({ body: { session_state: { status: "applied", state: "PAUSED" } } });
+		expect(substrate.steeringSessions.get("omp", "sess-a")?.state).toBe("PAUSED");
+	});
+
+	test("a redirect for a PAUSED session is refused, the acknowledgement stands, no hint is given and the state is unchanged", async () => {
+		const { substrate, steeringNotes } = shared();
+		const client = await connect(substrate, OPERATOR);
+		await call(client, "docs_steering_session", { ...SESSION, state: "PAUSED" });
+		const queued = await call(client, "steering_queue", { ...QUEUE_ARGS, action: "redirect" });
+		const directiveId = String(queued.body.directive_id);
+		const notesBefore = steeringNotes().length;
+
+		const acknowledged = await call(client, "steering_acknowledge", { directive_id: directiveId, session_id: "sess-a", outcome: "applied" });
+		expect(acknowledged.isError).toBe(false);
+		expect(acknowledged.body).toMatchObject({
+			status: "acknowledged",
+			outcome: "applied",
+			session_state: { status: "refused", state: "CONTEXT_REFRESH", reason: "steering transition PAUSED -> CONTEXT_REFRESH refused" },
+		});
+		expect(Object.hasOwn(acknowledged.body, "checkpoint_hint")).toBe(false);
+		expect(substrate.steeringSessions.get("omp", "sess-a")?.state).toBe("PAUSED");
+		expect(steeringNotes()).toHaveLength(notesBefore);
+		expect(substrate.steering.inbox?.get(directiveId)?.state).toBe("acknowledged");
+	});
+
+	test("a session the server holds no state for is reported as not registered, and the acknowledgement stands", async () => {
+		const { substrate } = shared();
+		const client = await connect(substrate, OPERATOR);
+		const queued = await call(client, "steering_queue", { ...QUEUE_ARGS, action: "pause" });
+		expect(await call(client, "steering_list", { session_id: "sess-a" })).toMatchObject({ body: { session_state: { status: "none" } } });
+
+		const acknowledged = await call(client, "steering_acknowledge", { directive_id: queued.body.directive_id, session_id: "sess-a", outcome: "applied" });
+		expect(acknowledged).toMatchObject({ isError: false, body: { status: "acknowledged", session_state: { status: "refused", state: "PAUSED", reason: "session not registered" } } });
+		expect(Object.hasOwn(acknowledged.body, "checkpoint_hint")).toBe(false);
+	});
+
+	test("a pause for an already PAUSED session and a redirect for an already CONTEXT_REFRESH session are unchanged: no hint, no note, state kept", async () => {
+		for (const [action, held] of [["pause", "PAUSED"], ["redirect", "CONTEXT_REFRESH"]] as const) {
+			const { substrate, steeringNotes } = shared();
+			const client = await connect(substrate, OPERATOR);
+			await call(client, "docs_steering_session", { ...SESSION, state: held });
+			const queued = await call(client, "steering_queue", { ...QUEUE_ARGS, action });
+			const notesBefore = steeringNotes().length;
+
+			const acknowledged = await call(client, "steering_acknowledge", { directive_id: queued.body.directive_id, session_id: "sess-a", outcome: "applied" });
+			expect(acknowledged).toMatchObject({ isError: false, body: { status: "acknowledged", outcome: "applied", session_state: { status: "unchanged" } } });
+			expect(Object.hasOwn(acknowledged.body, "checkpoint_hint")).toBe(false);
+			expect(substrate.steeringSessions.get("omp", "sess-a")?.state).toBe(held);
+			expect(steeringNotes()).toHaveLength(notesBefore);
+		}
 	});
 });
 

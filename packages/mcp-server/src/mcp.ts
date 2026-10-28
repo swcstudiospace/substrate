@@ -23,13 +23,14 @@ import { DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT } from "./greptime.ts";
 import { MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS } from "./lease.ts";
 import { queueSteering, STEERING_ACKNOWLEDGE_INPUT, STEERING_LIST_INPUT, STEERING_QUEUE_INPUT, listSteering, steeringFailed, type SteeringCaller, type SteeringWriteResult } from "./planning/steering-tools.ts";
 import { acknowledgeSteeringWithState } from "./planning/steering-delivery.ts";
+import { steeringSessionEvent } from "./planning/session-state.ts";
 import { MemoryVerifyError } from "./memory-verify.ts";
 import { ragRetryDelay } from "./rag-retry.ts";
 import { reservedEmitRefusal } from "./reserved-actions.ts";
 import { approvalRefValid, RailwayRequestError, type ServiceRef, type WriteGate, type WriteOutcome, type WriteRefusal } from "./railway.ts";
 import { redact, redactValue } from "./redact.ts";
 import { augmentQuestionWithSteering, normalizeRepoId, UNTRUSTED_DOCS_NOTICE } from "./docs-search.ts";
-import { nextSteeringSession, scopeRepoId, STEERING_STATES, steeringSessionPayload, type SteeringSession, type SteeringSessionState } from "./event.ts";
+import { nextSteeringSession, scopeRepoId, STEERING_STATES, type SteeringSessionState } from "./event.ts";
 import {
 	CORRELATION_ID_PATTERN,
 	GRAPH_ID_PATTERN,
@@ -88,7 +89,7 @@ const surfaceSchema = z.enum(SURFACES);
  * reports what the write was actually attributed to, so a caller never has to guess
  * whether its argument was taken.
  */
-export function memoryToolWriter(callerSurface: Surface | null, argSurface: Surface | undefined): string {
+export function memoryToolWriter(callerSurface: Surface | null, _argSurface: Surface | undefined): string {
 	return callerSurface ?? "unknown";
 }
 
@@ -483,29 +484,13 @@ function lightragReply(result: RagLightragResult) {
 }
 
 /**
- * Live steering sessions by identity: the surface that holds a session and its
- * `session_id`. A transition is checked against the stored state; a caller's
- * `previous_state` only ever confirms or refuses it. Process-local, so a restart
- * forgets them, and past the cap the oldest is forgotten; the ledger keeps every
- * transition as an event.
+ * Live steering sessions live on the `Substrate` (`substrate.steeringSessions`, `planning/session-state.ts`): the surface that
+ * holds a session and its `session_id`. A transition is checked against the stored state; a caller's `previous_state` only
+ * ever confirms or refuses it. Process-local, so a restart forgets them, and past the cap the oldest is forgotten; the ledger
+ * keeps every transition as an event. The same registry is what an acknowledged steering directive drives.
  */
-const STEERING_SESSION_CAP = 1000;
-const steeringSessions = new Map<string, SteeringSession>();
 /** Why a steering write from an anonymous caller is refused: it has no surface to hold a session under. */
 const STEERING_NEEDS_SURFACE = "docs_steering_session needs an authenticated surface; nothing was changed";
-
-function steeringSessionKey(callerSurface: Surface, sessionId: string): string {
-	return `${callerSurface}:${sessionId}`;
-}
-
-function rememberSteeringSession(key: string, session: SteeringSession): void {
-	steeringSessions.delete(key);
-	if (steeringSessions.size >= STEERING_SESSION_CAP) {
-		const oldest = steeringSessions.keys().next();
-		if (!oldest.done) steeringSessions.delete(oldest.value);
-	}
-	steeringSessions.set(key, session);
-}
 
 
 /** Snippets are redacted and capped before reply, like docs_search (D25-04); the plane client applies the same cap. */
@@ -1560,7 +1545,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				// omits: its steering, repo tag and planning hash. The repo tag is validated
 				// here and keys the cache; retrieval always reads the shared corpus.
 				// An anonymous caller holds no steering session of its own, so it reads none.
-				const live = session_id === undefined || callerSurface === null ? undefined : steeringSessions.get(steeringSessionKey(callerSurface, session_id));
+				const live = session_id === undefined || callerSurface === null ? undefined : substrate.steeringSessions.get(callerSurface, session_id);
 				const scoped = normalizeRepoId(repo_id ?? live?.repo_id ?? null);
 				const steered = augmentQuestionWithSteering(question, steering ?? live?.steering ?? null);
 				const reply = await substrate.searchDocs(
@@ -1633,8 +1618,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 						? (previous_state as SteeringSessionState)
 						: null;
 			if (previous_state !== undefined && previous === null) return refusal(`unknown steering state: ${JSON.stringify(previous_state).slice(0, 80)}`);
-			const key = steeringSessionKey(callerSurface, session_id);
-			const known = steeringSessions.get(key);
+			const known = substrate.steeringSessions.get(callerSurface, session_id);
 			if (known !== undefined && scopeRepoId(repo_id) !== known.repo_id) {
 				return refusal(`session ${session_id.slice(0, 80)} belongs to ${known.repo_id}, not ${repo_id.slice(0, 80)}`);
 			}
@@ -1660,15 +1644,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				Date.now(),
 			);
 			if (!next.ok) return refusal(next.reason);
-			rememberSteeringSession(key, next.session);
-			const { event, stored, error, warning } = await substrate.emit({
-				surface: callerSurface,
-				kind: state === "PAUSED" ? "warning" : "note",
-				summary: `docs steering ${next.previous ?? "none"} -> ${next.session.state} for ${next.session.repo_id}`,
-				session_id: next.session.session_id,
-				repo: next.session.repo_id,
-				payload: steeringSessionPayload(next.session, next.previous),
-			});
+			substrate.steeringSessions.put(callerSurface, session_id, next.session);
+			const { event, stored, error, warning } = await substrate.emit(steeringSessionEvent(callerSurface, next.session, next.previous));
 			return json({
 				...next.session,
 				stored,
@@ -2354,7 +2331,9 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					"The calling operator acknowledges a queued directive for the target session as applied or declined. Applying a directive " +
 					"that conflicts with the active plan needs confirm: true. The acknowledgement is audited before it takes effect. When the " +
 					"server has a live session state wired, an applied pause moves the session to PAUSED and an applied redirect to CONTEXT_REFRESH " +
-					"(annotate and declined change nothing); a transition the session refuses is reported as session_state refused, never forced. A refusal " +
+					"(annotate and declined change nothing), the same session docs_steering_session holds, and the reply then carries checkpoint_hint " +
+					"{ trigger: steering, directive_id } for the session to take a steering checkpoint; a transition the session refuses (or a session " +
+					"the server does not hold) is reported as session_state refused, never forced. A refusal " +
 					"carries a typed error: forbidden, not-found, wrong-session, already-acknowledged, confirmation-required or audit-unavailable. " +
 					"Answers misconfigured while the steering settings are invalid.",
 				inputSchema: STEERING_ACKNOWLEDGE_INPUT,
@@ -2368,14 +2347,19 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				title: "Queued steering directives for a session",
 				description:
 					"The directives for one planning session, queued and acknowledged, highest priority first. Each carries its state; an acknowledged " +
-					"directive keeps its outcome and confirm flag. The author is the operator who queued it, never an argument. A read: it changes " +
-					"nothing. Answers misconfigured, naming the settings keys, while the steering settings are invalid.",
+					"directive keeps its outcome and confirm flag. The author is the operator who queued it, never an argument. A listed reply also " +
+					"carries session_state: the live docs_steering_session state held under that session id (held with its state, none, or ambiguous " +
+					"when two surfaces hold the id). A read: it changes nothing. Answers misconfigured, naming the settings keys, while the steering settings are invalid.",
 				inputSchema: STEERING_LIST_INPUT,
 				annotations: { readOnlyHint: true },
 			},
 			async (args) => {
 				const listed = listSteering(steering, args);
-				return listed.status === "misconfigured" ? { ...json(listed), isError: true } : json(listed);
+				if (listed.status === "misconfigured") return { ...json(listed), isError: true };
+				if (listed.status !== "listed") return json(listed);
+				const held = substrate.steeringSessions.lookup(args.session_id);
+				const sessionState = held.status === "one" ? { status: "held", state: held.session.state } : { status: held.status };
+				return json({ ...listed, session_state: sessionState });
 			},
 		);
 	}

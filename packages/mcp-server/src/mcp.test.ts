@@ -59,6 +59,15 @@ async function connect(
 	return { client, substrate };
 }
 
+/** Another caller on a substrate that already exists: the steering sessions live on the substrate, so two callers meet there. */
+async function attach(substrate: Substrate, surface: Surface | null) {
+	const server = createMcpServer(substrate, surface);
+	const client = new Client({ name: "substrate-test", version: "0.0.0" });
+	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+	await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+	return client;
+}
+
 /** A tool's JSON reply. Every substrate tool answers with one text block. */
 async function call(client: Client, name: string, args: Record<string, unknown> = {}) {
 	const result = await client.callTool({ name, arguments: args });
@@ -864,8 +873,9 @@ describe("skills_propose", () => {
 		const tool = (await client.listTools()).tools.find((candidate) => candidate.name === "skills_propose");
 
 		expect(tool).toBeDefined();
-		expect(tool?.annotations).toMatchObject({ destructiveHint: false, openWorldHint: true });
-		const properties = Object.keys((tool?.inputSchema as { properties?: Record<string, unknown> }).properties ?? {});
+		if (!tool) throw new Error("skills_propose is not registered");
+		expect(tool.annotations).toMatchObject({ destructiveHint: false, openWorldHint: true });
+		const properties = Object.keys((tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {});
 		expect(properties.sort()).toEqual(
 			["allow_doc_examples", "dry_run", "expected_version", "files", "graph_id", "mode", "name", "rationale", "remove", "reopen", "session_id", "surface"].sort(),
 		);
@@ -1065,7 +1075,7 @@ describe("docs_steering_session belongs to the caller's surface", () => {
 	test("an anonymous caller cannot read or overwrite a session an authenticated caller holds", async () => {
 		const { greptime } = ledger();
 		const owner = await connect(greptime, "claude-code");
-		const anonymous = await connect(greptime, null);
+		const anonymous = { client: await attach(owner.substrate, null) };
 		const base = { session_id: "shared-steer-1", repo_id: "owner/name" };
 
 		const held = await call(owner.client, "docs_steering_session", {
@@ -1086,6 +1096,23 @@ describe("docs_steering_session belongs to the caller's surface", () => {
 		const after = await call(owner.client, "docs_steering_session", { ...base, state: "CONTEXT_REFRESH", previous_state: "ACTIVE" });
 		expect(after.isError).toBe(false);
 		expect(after.json()).toMatchObject({ state: "CONTEXT_REFRESH", steering: "keep the planning slice", planning_hash: "plan-a" });
+	});
+});
+
+describe("docs_steering_session sessions belong to one substrate", () => {
+	test("a second substrate does not see a session the first holds, so one process's sessions never leak into another's", async () => {
+		const { greptime } = ledger();
+		const first = await connect(greptime);
+		const second = await connect(greptime);
+		const base = { session_id: "per-substrate-1", repo_id: "owner/name" };
+
+		expect((await call(first.client, "docs_steering_session", { ...base, state: "ACTIVE" })).isError).toBe(false);
+		expect(first.substrate.steeringSessions.get("omp", "per-substrate-1")?.state).toBe("ACTIVE");
+		expect(second.substrate.steeringSessions.get("omp", "per-substrate-1")).toBeUndefined();
+
+		// The second substrate has never seen the session, so a claim about its previous state is refused there.
+		const claim = await call(second.client, "docs_steering_session", { ...base, state: "PAUSED", previous_state: "ACTIVE" });
+		expect(claim.isError).toBe(true);
 	});
 });
 
