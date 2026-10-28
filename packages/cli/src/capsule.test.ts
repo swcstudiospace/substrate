@@ -787,11 +787,15 @@ describe("httpCapsuleMcp", () => {
 		expect(plain.seen[0]?.url).toBe("http://substrate.invalid:7410/mcp");
 		const sent = JSON.parse(String(plain.seen[0]?.init.body));
 		expect(sent).toMatchObject({ jsonrpc: "2.0", method: "tools/call", params: { name: "memory_search", arguments: { query: "" } } });
-		expect((plain.seen[0]?.init.headers as Record<string, string>).authorization).toBe("Bearer tok-synthetic");
+		const plainHeaders = plain.seen[0]?.init.headers as Record<string, string> | undefined;
+		if (!plainHeaders) throw new Error("the plain call sent no headers");
+		expect(plainHeaders.authorization).toBe("Bearer tok-synthetic");
 
 		const sse = connect(() => new Response(`event: message\ndata: ${rpc({ status: "verified" })}\n\n`));
 		expect(await sse.mcp.call("memory_verify", { id: "mem_1" })).toEqual({ status: "verified" });
-		expect((sse.seen[0]?.init.headers as Record<string, string>).authorization).toBeUndefined();
+		const sseHeaders = sse.seen[0]?.init.headers as Record<string, string> | undefined;
+		if (!sseHeaders) throw new Error("the SSE call sent no headers");
+		expect(sseHeaders.authorization).toBeUndefined();
 	});
 
 	test("an unreachable server, a refusal and a malformed answer are typed, and a diagnostic never carries the URL or the token", async () => {
