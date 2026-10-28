@@ -18,13 +18,14 @@
  * names a session and none is added here. `transcript_path` is accepted and ignored: it is a Claude Code
  * transcript, which the omp transcript reference does not describe.
  *
- * A turn costs one extra tree hash over a bare `session checkpoint`: the cheap rules (rate limit, baseline,
- * directive dedupe) run first, then one snapshot is hashed to compare its tree with the last checkpoint's, and
- * `createCheckpoint` snapshots again only when a checkpoint is really due.
+ * A turn costs no extra tree hash over a bare `session checkpoint`: the cheap rules (rate limit, baseline,
+ * directive dedupe) run first on an unlocked list; if they pass, `createCheckpoint` takes the one snapshot and
+ * re-runs the whole policy, with the tree id of that snapshot, under the checkpoint lock (`admit`), so two
+ * overlapping hooks cannot both pass on the same history.
  */
 import { isAbsolute } from "node:path";
 import type { RandomBytes } from "../../../mcp-server/src/session-events.ts";
-import { type Clock, type Runner, type SnapshotPolicy, snapshot, spawnRunner } from "../../../worktree-snapshot/src/index.ts";
+import { type Clock, type Runner, type SnapshotPolicy, spawnRunner } from "../../../worktree-snapshot/src/index.ts";
 import {
 	type CheckpointResult,
 	type LocalCheckpoint,
@@ -160,29 +161,28 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 	}
 	if (sessionId.length === 0 || sessionId.length > MAX_SESSION_ID) return { status: "failed", reason: "the session id must be 1 to 512 characters" };
 
-	const own = checkpointsOfSession(checkpoints, sessionId);
-	const last = own[own.length - 1];
-	const lastOfTrigger = [...own].reverse().find((checkpoint) => checkpoint.trigger === params.trigger);
 	const key = params.trigger === "steering" && parsed.directive_id !== undefined ? directiveKey(parsed.directive_id) : undefined;
-	const seen = new Set<string>();
-	for (const checkpoint of own) {
-		if (checkpoint.trigger === "steering" && checkpoint.plan_ref?.step !== undefined) seen.add(checkpoint.plan_ref.step);
-	}
-	const base = {
-		trigger: params.trigger,
-		nowMs: params.now().getTime(),
-		last: asPolicy(last),
-		lastOfTrigger: asPolicy(lastOfTrigger),
-		...(key === undefined ? {} : { directiveKey: key, seenDirectiveKeys: seen }),
+	// The policy input for a history: `checkpoints` are the session's, ascending by seq.
+	const policyInput = (own: readonly LocalCheckpoint[], currentTreeId?: string) => {
+		const last = own[own.length - 1];
+		const lastOfTrigger = [...own].reverse().find((checkpoint) => checkpoint.trigger === params.trigger);
+		const seen = new Set<string>();
+		for (const checkpoint of own) {
+			if (checkpoint.trigger === "steering" && checkpoint.plan_ref?.step !== undefined) seen.add(checkpoint.plan_ref.step);
+		}
+		return {
+			trigger: params.trigger,
+			nowMs: params.now().getTime(),
+			last: asPolicy(last),
+			lastOfTrigger: asPolicy(lastOfTrigger),
+			...(key === undefined ? {} : { directiveKey: key, seenDirectiveKeys: seen }),
+			...(currentTreeId === undefined ? {} : { currentTreeId }),
+		};
 	};
 
-	// The cheap rules first: they need no snapshot.
-	const early = shouldCheckpoint(base);
+	// The cheap rules first, on the unlocked list: they need no snapshot.
+	const early = shouldCheckpoint(policyInput(checkpointsOfSession(checkpoints, sessionId)));
 	if (!early.take) return { status: "skipped", reason: early.reason };
-	// Then the one that needs the tree.
-	const snap = await snapshot({ worktree, policy: params.policy, now: params.now, run });
-	const decision = shouldCheckpoint({ ...base, currentTreeId: snap.tree });
-	if (!decision.take) return { status: "skipped", reason: decision.reason };
 
 	const planRef: PlanRef | undefined = key === undefined ? params.planRef : { step: key };
 	const result = await createCheckpoint({
@@ -197,7 +197,13 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 		run,
 		pendingDir: params.pendingDir,
 		policy: params.policy,
+		// The decision that counts: the whole policy again, with the history read under the checkpoint lock and the tree of the snapshot about to be pinned.
+		admit: ({ existing, tree }) => {
+			const decision = shouldCheckpoint(policyInput(existing, tree));
+			return decision.take ? { take: true } : { take: false, reason: decision.reason };
+		},
 	});
+	if ("status" in result) return { status: "skipped", reason: result.reason };
 	return { status: "checkpointed", ckpt_id: result.checkpoint.ckpt_id, seq: result.checkpoint.seq, created: result.created, ledger: result.server.status };
 }
 

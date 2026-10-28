@@ -4,6 +4,7 @@
  * stdout. The clock is injected; nothing sleeps.
  */
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { type Runner, spawnRunner } from "../../../worktree-snapshot/src/index.ts";
 import { cleanupTemp, makeRepo, tempDir, writeFiles } from "../../../worktree-snapshot/src/testkit.ts";
 import { type LocalCheckpoint, listLocalCheckpoints } from "./checkpoint.ts";
 import { EXIT_DONE, type SessionDeps, runSession } from "./command.ts";
@@ -351,6 +352,66 @@ describe("runHook directly", () => {
 
 	test("the default budget is ten seconds", () => {
 		expect(HOOK_TIMEOUT_MS).toBe(10_000);
+	});
+});
+
+describe("overlapping hooks and the number of snapshots", () => {
+	const hookParams = (r: Rig, trigger: "turn" | "plan-step", seed: number, run?: Runner) => ({
+		trigger,
+		worktree: r.dir,
+		surface: "claude-code",
+		client: r.server,
+		now: r.deps.now,
+		randomBytes: seededRandomBytes(seed),
+		readStdin: async () => envelope(r),
+		...(run === undefined ? {} : { run }),
+	});
+
+	test("two plan-step hooks started together inside the interval make exactly one checkpoint and skip the other", async () => {
+		const r = rig();
+		const outcomes = await Promise.all([runHook(hookParams(r, "plan-step", 1)), runHook(hookParams(r, "plan-step", 2))]);
+
+		expect(outcomes.map((outcome) => outcome.status).sort()).toEqual(["checkpointed", "skipped"]);
+		const skipped = outcomes.find((outcome) => outcome.status === "skipped");
+		expect(skipped?.status === "skipped" && skipped.reason).toContain("rate limited");
+		expect((await mine(r)).map((c) => c.seq)).toEqual([1]);
+		expect(r.server.deliveries.checkpoint).toBe(1);
+	});
+
+	/** A runner that counts the snapshots taken: each one starts from `git read-tree --empty` on a temporary index. */
+	function countingRunner(): { run: Runner; snapshots: () => number } {
+		let count = 0;
+		const run: Runner = async (argv, options) => {
+			if (argv.includes("read-tree")) count += 1;
+			return spawnRunner(argv, options);
+		};
+		return { run, snapshots: () => count };
+	}
+
+	test("the first automatic checkpoint hashes the worktree once, and an unchanged tree afterwards is skipped after one hash too", async () => {
+		const r = rig();
+		const { run, snapshots } = countingRunner();
+		const first = await runHook(hookParams(r, "turn", 1, run));
+		expect(first.status).toBe("checkpointed");
+		expect(snapshots()).toBe(1);
+
+		r.clock.ms = T0 + 3_600_000;
+		const second = await runHook(hookParams(r, "turn", 2, run));
+		expect(second.status === "skipped" && second.reason).toContain("unchanged");
+		expect(snapshots()).toBe(2);
+		expect(await mine(r)).toHaveLength(1);
+	});
+
+	test("a hook the cheap rules decline takes no snapshot at all", async () => {
+		const r = rig();
+		const { run, snapshots } = countingRunner();
+		await runHook(hookParams(r, "turn", 1, run));
+		const before = snapshots();
+		r.clock.ms = T0 + 1_000;
+		writeFiles(r.dir, { "a.txt": "beta\n" });
+		const outcome = await runHook(hookParams(r, "turn", 2, run));
+		expect(outcome.status === "skipped" && outcome.reason).toContain("rate limited");
+		expect(snapshots()).toBe(before);
 	});
 });
 
