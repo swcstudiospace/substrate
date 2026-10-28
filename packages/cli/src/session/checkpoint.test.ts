@@ -307,8 +307,10 @@ describe("sequence allocation across callers sharing one git directory", () => {
 		});
 		const mine = await createCheckpoint({ ...base, randomBytes, run, seq: 1 });
 
+		const rival = rivals[0];
+		if (!rival) throw new Error("the contending call never created a checkpoint");
 		expect(mine.created).toBe(false);
-		expect(mine.checkpoint.ckpt_id).toBe(rivals[0]?.checkpoint.ckpt_id);
+		expect(mine.checkpoint.ckpt_id).toBe(rival.checkpoint.ckpt_id);
 		expect((await listLocalCheckpoints({ worktree: dir })).checkpoints).toHaveLength(1);
 		expect(existsSync(lockPath(dir))).toBe(false);
 	});
