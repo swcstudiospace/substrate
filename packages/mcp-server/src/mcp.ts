@@ -1744,7 +1744,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"under `idempotency_key`. A LightRAG-served reply is replayed for five minutes; a degraded or fallback reply is never replayed. The reply carries the RAG machine snapshot and the untrusted-text notice.",
 			inputSchema: {
 				question: z.string().describe("The docs question, in your words."),
-				mode: z.enum(["naive", "local", "global", "hybrid", "mix"]).optional().describe("LightRAG query mode; omitted means hybrid, or the mode a leading /mix or /hybrid in the question names."),
+				mode: z.enum(["naive", "local", "global", "hybrid", "mix"]).optional().describe("LightRAG query mode; omitted means the mode a leading /mix or /hybrid in the question names, else the deployment default (SUBSTRATE_LIGHTRAG_QUERY_MODE, hybrid when unset)."),
 				top_k: z.number().optional().describe("Most chunks to ask for; clamped to 10."),
 				entities: z.array(z.string()).optional().describe("Planning-graph entities steering this query."),
 				relations: z

@@ -16,6 +16,8 @@ import {
 	lightragOp,
 	parseDocuments,
 	pollParseStatus,
+	resolveQueryMode,
+	isGraphMode,
 	probeLightrag,
 	queryForTool,
 	queryWithGraph,
@@ -131,6 +133,42 @@ describe("retrieval (POST /query)", () => {
 			top_k: 3,
 			only_need_context: true,
 		});
+	});
+
+	test("an unset config sends exactly the request it always did: hybrid, no extra keys", async () => {
+		const fake = fakeLightrag({ "POST /query": [json({ data: { chunks: [{ content: "x" }] } })] });
+		await retrieveChunks(KEYED, { question: "where is the plan?" }, fake.fetch);
+		expect(fake.calls[0]?.body).toEqual({ query: "where is the plan?", mode: "hybrid", top_k: 10, only_need_context: true });
+		expect(Object.keys(fake.calls[0]?.body as object).sort()).toEqual(["mode", "only_need_context", "query", "top_k"]);
+	});
+
+	test("a naive default in the config sends mode naive for a question with no prefix", async () => {
+		const fake = fakeLightrag({ "POST /query": [json({ data: { chunks: [{ content: "x" }] } })] });
+		const outcome = await retrieveChunks({ ...PLAIN, queryMode: "naive" }, { question: "which document mentions the marker?" }, fake.fetch);
+		expect(fake.calls[0]?.body).toEqual({ query: "which document mentions the marker?", mode: "naive", top_k: 10, only_need_context: true });
+		if (!outcome.ok) throw new Error(outcome.reason);
+		expect(outcome.detail).toEqual({ mode: "naive", counts: { entities: 0, relations: 0 }, provenance: { entities: [], relations: 0 } });
+	});
+
+	test("a /mix or /hybrid prefix beats a naive default, and an explicit mode beats the prefix", async () => {
+		const naive: LightragConfig = { ...PLAIN, queryMode: "naive" };
+		const fake = fakeLightrag({ "POST /query": [json({ data: { chunks: [{ content: "x" }] } }), json({ data: { chunks: [{ content: "x" }] } }), json({ data: { chunks: [{ content: "x" }] } })] });
+		await retrieveChunks(naive, { question: "/mix how do the planes relate?" }, fake.fetch);
+		await retrieveChunks(naive, { question: "/hybrid how do the planes relate?" }, fake.fetch);
+		await retrieveChunks(naive, { question: "/mix how do the planes relate?", mode: "local" }, fake.fetch);
+		expect(fake.calls.map((call) => call.body)).toEqual([
+			{ query: "how do the planes relate?", mode: "mix", top_k: 10, only_need_context: true },
+			{ query: "how do the planes relate?", mode: "hybrid", top_k: 10, only_need_context: true },
+			{ query: "/mix how do the planes relate?", mode: "local", top_k: 10, only_need_context: true },
+		]);
+	});
+
+	test("queryForTool reports the configured default mode it queried in", async () => {
+		const fake = fakeLightrag({ "POST /query": [json({ data: { chunks: [{ content: "x" }] } })] });
+		const answered = await queryForTool({ ...KEYED, queryMode: "naive" }, { question: "where is it?" }, fake.fetch);
+		if (!answered.ok) throw new Error(answered.reason);
+		expect(answered.mode).toBe("naive");
+		expect(fake.calls[0]?.body).toMatchObject({ mode: "naive" });
 	});
 
 	test("parses the { data: { chunks } } envelope into the RAGFlow chunk shape", async () => {
@@ -921,5 +959,21 @@ describe("request checks", () => {
 	test("documentName flattens repo paths and keeps the suffix", () => {
 		expect(documentName("docs/a/README.md")).toBe("docs__a__README.md");
 		expect(documentName("/README.md")).toBe("README.md");
+	});
+});
+
+describe("resolveQueryMode precedence", () => {
+	test("explicit mode, then a graph prefix, then the fallback, then hybrid", () => {
+		expect(resolveQueryMode("/mix q", "global", "naive")).toEqual({ mode: "global", query: "/mix q" });
+		expect(resolveQueryMode("/mix q", undefined, "naive")).toEqual({ mode: "mix", query: "q" });
+		expect(resolveQueryMode("/hybrid q", undefined, "naive")).toEqual({ mode: "hybrid", query: "q" });
+		expect(resolveQueryMode("q", undefined, "naive")).toEqual({ mode: "naive", query: "q" });
+		expect(resolveQueryMode("q", undefined, "local")).toEqual({ mode: "local", query: "q" });
+		expect(resolveQueryMode("q")).toEqual({ mode: "hybrid", query: "q" });
+	});
+
+	test("isGraphMode is false for naive, so a naive answer claims no relations", () => {
+		expect(isGraphMode("naive")).toBe(false);
+		expect(isGraphMode("hybrid")).toBe(true);
 	});
 });

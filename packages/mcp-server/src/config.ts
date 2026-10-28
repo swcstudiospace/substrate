@@ -19,6 +19,7 @@ import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
 import { DEFAULT_RECALL_BUDGET_MS } from "./memory-recall.ts";
 import { NOTION_API_URL } from "./notion.ts";
 import { DEFAULT_RETRIEVAL_KNOBS, ragflowFromEnv, type RagflowConfig, type RetrievalKnobs } from "./planes/ragflow.ts";
+import { isLightragQueryMode, type LightragQueryMode } from "./planes/lightrag.ts";
 import { railwayFromEnv, type RailwayConfig } from "./railway.ts";
 import { hindsightBanksFromEnv } from "./planes/hindsight.ts";
 import { loadRecallConfig, parseRecallScope, type RecallConfig, type RecallScope } from "./recall-snapshot.ts";
@@ -50,22 +51,40 @@ export type DocsBackend = (typeof DOCS_BACKENDS)[number];
  * LightRAG reach. `LIGHTRAG_URL` names it; `LIGHTRAG_API_KEY` is sent when
  * the deployment guards reads/writes. Null leaves the LightRAG path
  * unconfigured (the RAGFlow path is unchanged).
+ *
+ * `queryMode` is the default mode for a query that names none and has no
+ * `/mix` or `/hybrid` prefix (`SUBSTRATE_LIGHTRAG_QUERY_MODE`); absent means
+ * `hybrid`. A LightRAG with no real LLM builds no knowledge graph and must use
+ * `naive`.
  */
 export interface LightragConfig {
 	url: string;
 	apiKey?: string;
+	queryMode?: LightragQueryMode;
+}
+
+/**
+ * `SUBSTRATE_LIGHTRAG_QUERY_MODE`, case- and space-insensitive. Unset or blank
+ * is no default (`mode` null); an unrecognised value is no default too, and is
+ * carried back as `rejected` so a typo never silently picks a mode.
+ */
+export function resolveLightragQueryMode(env: Record<string, string | undefined> = process.env): { mode: LightragQueryMode | null; rejected: boolean } {
+	const raw = env.SUBSTRATE_LIGHTRAG_QUERY_MODE?.trim().toLowerCase();
+	if (!raw) return { mode: null, rejected: false };
+	return isLightragQueryMode(raw) ? { mode: raw, rejected: false } : { mode: null, rejected: true };
 }
 
 /**
  * The substrate's LightRAG reach, or null when it has none.
  *
- * Reads `LIGHTRAG_URL` / `LIGHTRAG_API_KEY` only.
+ * Reads `LIGHTRAG_URL` / `LIGHTRAG_API_KEY` and the `SUBSTRATE_LIGHTRAG_QUERY_MODE` default only.
  */
 export function lightragFromEnv(env: Record<string, string | undefined> = process.env): LightragConfig | null {
 	const url = env.LIGHTRAG_URL?.trim().replace(/\/+$/, "");
 	if (!url) return null;
 	const apiKey = env.LIGHTRAG_API_KEY?.trim();
-	return apiKey ? { url, apiKey } : { url };
+	const { mode } = resolveLightragQueryMode(env);
+	return { url, ...(apiKey ? { apiKey } : {}), ...(mode !== null ? { queryMode: mode } : {}) };
 }
 
 /**
@@ -242,6 +261,12 @@ export interface SubstrateConfig {
 	 * LightRAG path degraded rather than broken.
 	 */
 	lightrag: LightragConfig | null;
+	/**
+	 * Whether `SUBSTRATE_LIGHTRAG_QUERY_MODE` was set to a value that is not a
+	 * LightRAG query mode (it then falls back to hybrid). A flag, not the value:
+	 * the boot warning names the key only.
+	 */
+	lightragQueryModeRejected: boolean;
 	/**
 	 * Ms between LightRAG planning polls (SPE-19385).
 	 *
@@ -1021,6 +1046,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		lightrag: lightragFromEnv(env),
 		docsBackend: docsBackendPick.backend,
 		docsBackendRejected: docsBackendPick.rejected,
+		lightragQueryModeRejected: resolveLightragQueryMode(env).rejected,
 		railwayHosting: railwayHostingFromEnv(env),
 		lightragPollMs: positiveOr(env.SUBSTRATE_LIGHTRAG_POLL_MS, DEFAULT_LIGHTRAG_POLL_MS),
 		lightragPlanningRoots: lightragPlanningRoots.length > 0 ? lightragPlanningRoots : [...DEFAULT_LIGHTRAG_PLANNING_ROOTS],
@@ -1911,6 +1937,10 @@ export function configWarnings(config: SubstrateConfig): string[] {
 	}
 	if (config.docsBackendRejected !== null) {
 		warnings.push(`SUBSTRATE_DOCS_BACKEND "${config.docsBackendRejected}" is not a docs plane; docs serve ${config.docsBackend}`);
+	}
+	// Named by key only, never by value: the warning goes to a log.
+	if (config.lightragQueryModeRejected) {
+		warnings.push("SUBSTRATE_LIGHTRAG_QUERY_MODE is not one of naive, local, global, hybrid or mix; LightRAG queries use hybrid");
 	}
 	// Named by variable and value only, never a credential; before the early return, as the skills warning is.
 	if (config.agentSkillsRootRejected !== null) {

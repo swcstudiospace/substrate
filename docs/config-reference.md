@@ -193,6 +193,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_LIGHTRAG_API_KEY` | secret-ref | none | API key override for the Railway hosting layer | LIGHTRAG_API_KEY applies. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LIGHTRAG_PROJECT` | string | none | Railway project label, report-only: it names the project in Railway plans and status and never scopes ingest or search | no project label. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LIGHTRAG_POLL_MS` | number | 5000 | positive integer ms | 5000 ms | mcp-server/config.ts | yes |
+| `SUBSTRATE_LIGHTRAG_QUERY_MODE` | string | hybrid | naive \| local \| global \| hybrid \| mix | hybrid (graph) unless a question starts with /mix or /hybrid or a caller names a mode; an unrecognised value is named in the boot warnings and also means hybrid. A LightRAG with no real LLM (the Railway bypass LLM) builds no graph and needs naive. See `docs/runbooks/lightrag-storage-topology.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LIGHTRAG_PLANNING_ROOTS` | list | .planning/ | comma separated path prefixes | .planning/ | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_BACKEND` | string | reach-derived | lightrag \| ragflow | LIGHTRAG_URL presence decides: set means lightrag, else ragflow. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `RAILWAY_TOKEN` | secret-ref | none | Railway API token managing the project | Railway mutations stay stubbed; reads still report the plan | mcp-server/config.ts | yes |
@@ -396,6 +397,11 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `CHAOS_TIMEOUT_MS` | number | 10000 | ms | 10000 ms. See `docs/observability.md` | scripts/chaos-smoke.ts | yes |
 | `CHAOS_WINDOW_MS` | number | 60000 | ms | 60000 ms. See `docs/observability.md` | scripts/chaos-smoke.ts | yes |
 | `CLAUDE_CONFIG_PATH` | path | $HOME/.claude.json | file path | the default under HOME. See `docs/uat.md` | scripts/uat-phase0.ts | yes |
+| `LLM_PROXY_SHUNT_URL` | string | http://127.0.0.1:3001 | http(s) URL; cleartext http only to a loopback host | the loopback default. See `docs/runbooks/lightrag-storage-topology.md` | scripts/llm-proxy-smoke.ts | no |
+| `LLM_PROXY_AIO_GROK_URL` | string | http://127.0.0.1:41417 | http(s) URL; cleartext http only to a loopback host | the loopback default. See `docs/runbooks/lightrag-storage-topology.md` | scripts/llm-proxy-smoke.ts | no |
+| `LLM_PROXY_HERMES_URL` | string | http://127.0.0.1:8645 | http(s) URL; cleartext http only to a loopback host | the loopback default. See `docs/runbooks/lightrag-storage-topology.md` | scripts/llm-proxy-smoke.ts | no |
+| `LLM_PROXY_DUMMY_KEY` | string | dummy-not-a-real-key | any placeholder; never a real key | the literal dummy key. See `docs/runbooks/lightrag-storage-topology.md` | scripts/llm-proxy-smoke.ts | no |
+| `LLM_PROXY_TIMEOUT_MS` | number | 20000 | 1..600000 ms | 20000 ms per provider probe. See `docs/runbooks/lightrag-storage-topology.md` | scripts/llm-proxy-smoke.ts | no |
 | `SUBSTRATE_REHEARSAL_<NAME>` | string | none | harness-owned | the rehearsal harness refuses to start the dependent smoke. See `docs/rehearsal.md` | scripts/rehearsal.ts | no |
 
 ## Promotion policies
