@@ -144,7 +144,7 @@ describe("lease persist and heartbeat", () => {
 });
 
 describe("issueGet reply guard", () => {
-	const FOUND = { found: true, graph_id: "g", node_id: "n", identifier: "SWC-1", title: "t", description: "d", untrusted: "u" };
+	const FOUND = { found: true as const, graph_id: "g", node_id: "n", identifier: "SWC-1", title: "t", description: "d", untrusted: "u" };
 
 	function issueClient(reply: string): SubstrateClient {
 		const { fetchImpl } = captureFetch(() => new Response(reply, { status: 200 }));
