@@ -2,12 +2,13 @@
  * createCheckpoint and the local registry, on real temporary git repositories with a fake server.
  */
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import type { RandomBytes } from "../../../mcp-server/src/session-events.ts";
-import { pinSnapshot, snapshot } from "../../../worktree-snapshot/src/index.ts";
+import { type Runner, WorktreeBusyError, pinSnapshot, snapshot, spawnRunner } from "../../../worktree-snapshot/src/index.ts";
 import { cleanupTemp, FIXED_NOW, git, makeRepo, tempDir, writeFiles } from "../../../worktree-snapshot/src/testkit.ts";
-import { CheckpointError, checkpointsOfSession, createCheckpoint, listLocalCheckpoints } from "./checkpoint.ts";
+import { CheckpointError, type CheckpointResult, checkpointsOfSession, createCheckpoint, listLocalCheckpoints } from "./checkpoint.ts";
 import { offlineClient } from "./client.ts";
 import { listPending, replayPending } from "./pending.ts";
 import { FakeServer, seededRandomBytes } from "./testkit.ts";
@@ -225,6 +226,128 @@ describe("createCheckpoint", () => {
 		await expect(createCheckpoint({ ...base, seq: 0 })).rejects.toMatchObject({ code: "invalid-input" });
 		expect((await listLocalCheckpoints({ worktree: dir })).checkpoints).toEqual([]);
 		expect(server.calls).toEqual([]);
+	});
+});
+
+describe("sequence allocation across callers sharing one git directory", () => {
+	const lockPath = (dir: string): string => join(dir, ".git", "substrate-checkpoint.lock");
+
+	test("two checkpoints started together get two distinct, contiguous seqs and two distinct pinned refs", async () => {
+		const { dir, pendingDir, server, randomBytes } = setup();
+		const base = { worktree: dir, sessionId: SESSION, trigger: "manual" as const, surface: "claude-code", client: server, now: FIXED_NOW, randomBytes, pendingDir, lockWait: { delayMs: 5 } };
+		const results = await Promise.all([createCheckpoint(base), createCheckpoint(base)]);
+
+		expect(results.every((result) => result.created)).toBe(true);
+		const [first, second] = results.map((result) => result.checkpoint).sort((a, b) => a.seq - b.seq);
+		expect([first?.seq, second?.seq]).toEqual([1, 2]);
+		expect(first?.ref).not.toBe(second?.ref);
+		expect(second?.prev_ckpt_id).toBe(first?.ckpt_id);
+		expect(first?.prev_ckpt_id).toBeUndefined();
+		const local = await listLocalCheckpoints({ worktree: dir });
+		expect(local.invalid).toEqual([]);
+		expect(local.checkpoints.map((c) => c.seq)).toEqual([1, 2]);
+		// Two distinct ledger keys (`ckpt:s.<session>:<seq>`): neither record is deduped away.
+		expect([...server.checkpoints.values()].map((record) => record.seq).sort()).toEqual([1, 2]);
+		expect(existsSync(lockPath(dir))).toBe(false);
+	});
+
+	test("two processes making checkpoints at once never pin the same seq", async () => {
+		const { dir } = setup();
+		const script = new URL("./checkpoint-worker.ts", import.meta.url).pathname;
+		const workers = [0, 1].map(() => Bun.spawn([process.execPath, script, dir, "2"], { stdout: "pipe", stderr: "pipe" }));
+		const outputs = await Promise.all(workers.map(async (worker) => ({ code: await worker.exited, out: await new Response(worker.stdout).text(), err: await new Response(worker.stderr).text() })));
+
+		for (const output of outputs) expect({ code: output.code, err: output.err }).toEqual({ code: 0, err: "" });
+		const made = outputs.flatMap((output) => output.out.trim().split("\n").map((line) => JSON.parse(line) as { seq: number; ckpt_id: string; ref: string }));
+		expect(made.map((entry) => entry.seq).sort()).toEqual([1, 2, 3, 4]);
+		expect(new Set(made.map((entry) => entry.ref)).size).toBe(4);
+		const local = checkpointsOfSession((await listLocalCheckpoints({ worktree: dir })).checkpoints, "race");
+		expect(local.map((c) => c.seq)).toEqual([1, 2, 3, 4]);
+		// One unbroken chain: each checkpoint follows the one before it.
+		expect(local.map((c) => c.prev_ckpt_id)).toEqual([undefined, local[0]?.ckpt_id, local[1]?.ckpt_id, local[2]?.ckpt_id]);
+		expect(existsSync(lockPath(dir))).toBe(false);
+	});
+
+	/** A runner that, once the snapshot is taken (the first lookup of the git directory), lets another caller make a checkpoint first. */
+	function contended(onLost: () => Promise<unknown>): Runner {
+		let fired = false;
+		return async (argv, options) => {
+			if (!fired && argv[1] === "-C" && argv.includes("--absolute-git-dir")) {
+				fired = true;
+				await onLost();
+			}
+			return spawnRunner(argv, options);
+		};
+	}
+
+	test("a seq taken by someone else while this call was snapshotting is not reused: the next one is made, chained to it", async () => {
+		const { dir, pendingDir, server, randomBytes } = setup();
+		const base = { worktree: dir, sessionId: SESSION, trigger: "manual" as const, surface: "claude-code", client: server, now: FIXED_NOW, pendingDir };
+		const rivals: CheckpointResult[] = [];
+		const run = contended(async () => {
+			rivals.push(await createCheckpoint({ ...base, randomBytes: seededRandomBytes(99) }));
+		});
+		const mine = await createCheckpoint({ ...base, randomBytes, run });
+
+		expect(rivals[0]?.checkpoint.seq).toBe(1);
+		expect(mine.created).toBe(true);
+		expect(mine.checkpoint.seq).toBe(2);
+		expect(mine.checkpoint.prev_ckpt_id).toBe(rivals[0]?.checkpoint.ckpt_id);
+		expect(server.checkpoints.get(mine.checkpoint.ckpt_id)).toMatchObject({ seq: 2, prev_ckpt_id: rivals[0]?.checkpoint.ckpt_id });
+		expect((await listLocalCheckpoints({ worktree: dir })).checkpoints.map((c) => c.seq)).toEqual([1, 2]);
+	});
+
+	test("an explicit seq that someone else made while this call was snapshotting returns their checkpoint and pins nothing", async () => {
+		const { dir, pendingDir, server, randomBytes } = setup();
+		const base = { worktree: dir, sessionId: SESSION, trigger: "manual" as const, surface: "claude-code", client: server, now: FIXED_NOW, pendingDir };
+		const rivals: CheckpointResult[] = [];
+		const run = contended(async () => {
+			rivals.push(await createCheckpoint({ ...base, randomBytes: seededRandomBytes(99), seq: 1 }));
+		});
+		const mine = await createCheckpoint({ ...base, randomBytes, run, seq: 1 });
+
+		expect(mine.created).toBe(false);
+		expect(mine.checkpoint.ckpt_id).toBe(rivals[0]?.checkpoint.ckpt_id);
+		expect((await listLocalCheckpoints({ worktree: dir })).checkpoints).toHaveLength(1);
+		expect(existsSync(lockPath(dir))).toBe(false);
+	});
+
+	/** A lock record in the format `acquireWorktreeLock` writes. */
+	function writeLock(dir: string, pid: number): void {
+		writeFileSync(lockPath(dir), JSON.stringify({ pid, startedAt: "2026-01-01T00:00:00.000Z", procStart: null, host: hostname(), token: "held-by-test" }));
+	}
+
+	test("a stale checkpoint lock (its owner is gone) is broken and the checkpoint is made", async () => {
+		const { dir, pendingDir, server, randomBytes } = setup();
+		const gone = Bun.spawn(["true"]);
+		await gone.exited;
+		writeLock(dir, gone.pid);
+		const result = await createCheckpoint({ worktree: dir, sessionId: SESSION, trigger: "manual", surface: "claude-code", client: server, now: FIXED_NOW, randomBytes, pendingDir });
+		expect(result.checkpoint.seq).toBe(1);
+		expect(existsSync(lockPath(dir))).toBe(false);
+	});
+
+	test("a checkpoint lock that stays busy fails the call with a typed error after the bounded wait, and pins nothing", async () => {
+		const { dir, pendingDir, server, randomBytes } = setup();
+		writeLock(dir, process.pid);
+		const sleeps: number[] = [];
+		const lockWait = { attempts: 3, delayMs: 7, sleep: async (ms: number): Promise<void> => void sleeps.push(ms) };
+		const attempt = createCheckpoint({ worktree: dir, sessionId: SESSION, trigger: "manual", surface: "claude-code", client: server, now: FIXED_NOW, randomBytes, pendingDir, lockWait });
+		await expect(attempt).rejects.toBeInstanceOf(WorktreeBusyError);
+		await expect(attempt).rejects.toMatchObject({ code: "worktree-busy" });
+		expect(sleeps).toEqual([7, 7]);
+		expect((await listLocalCheckpoints({ worktree: dir })).checkpoints).toEqual([]);
+		expect(server.calls).toEqual([]);
+		// The holder's lock is untouched: a caller that did not take it never removes it.
+		expect(existsSync(lockPath(dir))).toBe(true);
+	});
+
+	test("the restore lock does not block a checkpoint (a rollback checkpoints while it restores)", async () => {
+		const { dir, pendingDir, server, randomBytes } = setup();
+		writeFileSync(join(dir, ".git", "substrate-restore.lock"), JSON.stringify({ pid: process.pid, startedAt: "2026-01-01T00:00:00.000Z", procStart: null, host: hostname(), token: "restore" }));
+		const result = await createCheckpoint({ worktree: dir, sessionId: SESSION, trigger: "pre-restore", surface: "claude-code", client: server, now: FIXED_NOW, randomBytes, pendingDir });
+		expect(result.checkpoint.seq).toBe(1);
+		expect(existsSync(join(dir, ".git", "substrate-restore.lock"))).toBe(true);
 	});
 });
 

@@ -19,6 +19,12 @@
 
 `substrate session checkpoint` snapshots the exact file state of the worktree and pins it as `refs/substrate/checkpoints/<worktree scope>/<ckpt id>` (a parentless commit whose tree is the snapshot). The scope (`w-` plus 16 hex digits) is derived from the worktree's own git directory, so linked worktrees of one repository each list and roll back only their own checkpoints; checkpoints pinned before scoping (`refs/substrate/checkpoints/<ckpt id>`) stay in place and belong to the main worktree only. The session id, the sequence number, the trigger, an optional transcript pointer and an optional plan reference travel in the pinned commit's message, so the refs **are** the local checkpoint registry: listing and rolling back work with the server unreachable.
 
+**How the sequence number is chosen.** The ref is named by the checkpoint id, not the sequence, so git's create-only ref update cannot arbitrate a sequence number; instead `seq` is allocated under a lock file, `<git dir>/substrate-checkpoint.lock` (separate from `substrate-restore.lock`, because a rollback takes its `pre-restore` checkpoint while it restores):
+
+- Under the lock the command lists the session's checkpoints, takes the highest `seq` plus one (or the `seq` an API caller asked for) and pins, so two processes sharing a git directory never pin the same `seq` and the numbers stay contiguous. The snapshot itself is taken before the lock and the server call after it; the lock is held only for the list and the pin.
+- A busy lock is waited for up to about 5 seconds (100 tries, 50 ms apart); after that the command fails with `worktree-busy` (exit 1, fail-open for hooks, ADR 0007) and nothing is pinned. A lock whose owner is gone (same host, process no longer running) is broken; a lock from another host or one that cannot be read is never broken automatically, so remove it by hand if no checkpoint is running.
+- A requested `seq` that another process made while this one was snapshotting returns that checkpoint instead of making a second one.
+
 **Boundaries — what a checkpoint holds, and what it never does:**
 
 | Included | Not included |
