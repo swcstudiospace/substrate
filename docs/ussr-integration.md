@@ -7,7 +7,7 @@ USSR here means Ultrathink (planning), Substrate (this repository: memory, ledge
 ## What v1.6 adds, in four lines
 
 1. **Memory in tandem.** Docs answers can carry the caller's Hindsight memory beside LightRAG chunks, and a brief for a graph can carry recall lines about that graph. Both are off by default.
-2. **Live steering.** One mechanism exists on this branch (`docs_steering_session`, held in process memory). The durable, delivered, position-aware version is **draft-stack dependent** (below).
+2. **Live steering.** Two steering mechanisms exist on main: `docs_steering_session` (held in process memory) and the durable, delivered, position-aware steering of phase 58 (merged as PR #137 on 2026-10-28). They do not yet share one state model; the join is open (below).
 3. **Checkpoints and rollback.** A session's worktree can be checkpointed and rolled back by a CLI; the server plans, verifies and audits. Memory written after the checkpoint is superseded, not deleted.
 4. **Eternal logging.** Every checkpoint and rollback is a ledger event inside an hourly Merkle root that an operator-run job writes to Solana devnet. **No anchor has ever been sent**; the chain is evidence, not storage.
 
@@ -78,20 +78,20 @@ Flags, all default off or inert (names only; the registry is `packages/mcp-serve
 
 - Every live anchor step: the read-only genesis preflight first, then funding the key, the `SOLANA_*` environment lines, installing the timer, the first send, any re-anchor, any signer rotation. **A genesis-hash constant error went unnoticed from phase 28 until 2026-10-26 because no live anchor was ever run**; it is corrected in this milestone (`docs/adr/0006-memo-only-anchoring.md`, which also gives the preflight). `anchor-run.ts --dry-run` is not a genesis check.
 - LightRAG deploy, ingest and cutover, and the cost approval for its Postgres service (`docs/runbooks/lightrag-storage-topology.md`).
-- Production index migrations (`docs/runbooks/index-migration-rehearsal.md`); migration step 33 is reserved by an unmerged draft.
+- Production index migrations (`docs/runbooks/index-migration-rehearsal.md`); migration step 33 belongs to phase 53 (merged as PR #136), and applying it in production is operator-run.
 - `substrate consistency verify --repair` and `--repair-orphans` (they write to the production Hindsight plane).
 - A live blob bucket for capsules (`S3BlobStore` is unwired; ADR 0003).
 - Turning any v1.6 flag on in production (`docs/runbooks/flag-promotion.md`).
 - Changes in the sibling repositories: ADR 0007 is proposals only; the owners decide.
 - Merging, completing or archiving the milestone.
 
-## Draft-stack dependent
+## Phase 58 steering: merged, state-model join still open
 
-Phase 58 (durable steering, delivery to the session, multi-day liveness, the GSD position model in `planning_status`) lives on a branch **stacked on the held draft pull requests #104, #109, #110 and #111** (`.planning/ROADMAP.md`, phase 58 "Status") and cannot land before they merge; merge is on operator hold. It is **not on this branch**, so on this branch:
+Phase 58 (durable steering, delivery to the session, multi-day liveness, the GSD position model in `planning_status`) is merged to main as PR #137 (2026-10-28), on top of phases 52-54 (PRs #104, #134, #136 and #135, all merged; `.planning/ROADMAP.md`, phase 58 "Status"). Its criterion 2 is still partial, so:
 
-- steering is the in-memory `docs_steering_session` state machine (ACTIVE, CONTEXT_REFRESH, PAUSED, RESUMED); it is lost on a restart and its text reaches a session only through the next `docs_search`;
+- steering has two mechanisms: the in-memory `docs_steering_session` state machine (ACTIVE, CONTEXT_REFRESH, PAUSED, RESUMED), which is lost on a restart and whose text reaches a session only through the next `docs_search`, and the durable steering inbox;
 - the `steering` checkpoint trigger exists as a value and nothing calls it;
-- the join between that state machine and the durable steering inbox is a small follow-up when the stack lands. The rollback code on this branch contains no steering code beyond the trigger value.
+- the adapter that joins that state machine to the durable steering inbox is not written yet (gap closure in progress). The rollback code contains no steering code beyond the trigger value.
 
 ## Honest limits
 

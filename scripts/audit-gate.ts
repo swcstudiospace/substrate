@@ -9,8 +9,9 @@
  * An advisory passes only when `.github/audit-accepted-risk.json` lists the same GHSA id,
  * package, and severity at the version the lockfile installs, and that package is installed at
  * no other version. Any other high or critical advisory fails the gate, including one whose
- * severity has risen since it was accepted. An accepted advisory past its
- * `review_by` date still passes, with a warning. Exit 0 when nothing fails, 1 when something
+ * severity has risen since it was accepted. An accepted advisory whose `review_by` date is within
+ * 30 days (inclusive) prints a warning; on the `review_by` day itself it still passes with that
+ * warning, and the day after it fails the gate. Exit 0 when nothing fails, 1 when something
  * does, 2 on a usage or input error. See docs/ci.md.
  */
 import { join } from "node:path";
@@ -51,9 +52,14 @@ export interface GateResult {
 	failing: Finding[];
 	accepted: Array<{ finding: Finding; risk: AcceptedRisk }>;
 	warnings: string[];
+	/** Accepted risks whose `review_by` is in the past; each one fails the gate. */
+	expired: string[];
 }
 
 const GATING_SEVERITIES: Record<string, true> = { high: true, critical: true };
+/** An accepted risk warns once `review_by` is this many days away or fewer. */
+const REVIEW_WARNING_DAYS = 30;
+const MS_PER_DAY = 86_400_000;
 const RISK_FIELDS = ["id", "package", "version", "severity", "reason", "owner", "review_by"] as const;
 const ALLOWLIST_PATH = ".github/audit-accepted-risk.json";
 
@@ -70,9 +76,19 @@ function exactVersion(installed: Installed, pkg: string): string | undefined {
 	return versions?.size === 1 ? [...versions][0] : undefined;
 }
 
+/** Whole days from `from` to `to`, both `YYYY-MM-DD`; negative when `to` is earlier. */
+function daysBetween(from: string, to: string): number {
+	const utcDay = (date: string): number => {
+		const [year, month, day] = date.split("-").map(Number);
+		return Date.UTC(year ?? 0, (month ?? 1) - 1, day ?? 1);
+	};
+	return Math.round((utcDay(to) - utcDay(from)) / MS_PER_DAY);
+}
+
 /**
  * Splits high and critical advisories into failing and accepted. `today` is `YYYY-MM-DD`; an
- * accepted risk warns once `today` is later than its `review_by`. Pure: no I/O, no clock.
+ * accepted risk warns when `review_by` is at most 30 days away (the `review_by` day included) and
+ * is listed as expired once `today` is later than its `review_by`. Pure: no I/O, no clock.
  */
 export function filterAdvisories(
 	audit: AuditJson,
@@ -80,7 +96,7 @@ export function filterAdvisories(
 	accepted: readonly AcceptedRisk[],
 	today: string,
 ): GateResult {
-	const result: GateResult = { failing: [], accepted: [], warnings: [] };
+	const result: GateResult = { failing: [], accepted: [], warnings: [], expired: [] };
 	for (const [pkg, advisories] of Object.entries(audit)) {
 		for (const advisory of advisories) {
 			if (!Object.hasOwn(GATING_SEVERITIES, advisory.severity)) continue;
@@ -98,8 +114,11 @@ export function filterAdvisories(
 				continue;
 			}
 			result.accepted.push({ finding, risk });
-			if (today > risk.review_by) {
-				result.warnings.push(`${risk.id} (${pkg}@${risk.version}): review_by ${risk.review_by} has passed; re-review it, then extend or remove the entry`);
+			const daysLeft = daysBetween(today, risk.review_by);
+			if (daysLeft < 0) {
+				result.expired.push(`accepted risk ${risk.id} expired on ${risk.review_by}: re-review or upgrade`);
+			} else if (daysLeft <= REVIEW_WARNING_DAYS) {
+				result.warnings.push(`${risk.id} (${pkg}@${risk.version}): review_by ${risk.review_by} is ${daysLeft === 0 ? "today" : `in ${daysLeft} day${daysLeft === 1 ? "" : "s"}`}; re-review it, then extend or remove the entry`);
 			}
 		}
 	}
@@ -151,8 +170,9 @@ export function formatReport(result: GateResult, reported: number): string {
 	for (const finding of result.failing) {
 		lines.push(`FAIL      ${finding.id}  ${finding.package}@${finding.version}  ${finding.severity}  ${finding.title}  (not in ${ALLOWLIST_PATH})`);
 	}
+	for (const message of result.expired) lines.push(`FAIL      ${message}`);
 	for (const warning of result.warnings) lines.push(`warning: ${warning}`);
-	lines.push(`audit gate: ${result.failing.length} unlisted high or critical, ${result.accepted.length} accepted, ${reported} advisories reported`);
+	lines.push(`audit gate: ${result.failing.length} unlisted high or critical, ${result.expired.length} expired, ${result.accepted.length} accepted, ${reported} advisories reported`);
 	return `${lines.join("\n")}\n`;
 }
 
@@ -206,7 +226,7 @@ export async function main(argv: readonly string[], root = join(import.meta.dir,
 		const reported = Object.values(audit).reduce((sum, advisories) => sum + advisories.length, 0);
 		const result = filterAdvisories(audit, installedVersions(lock), allowlist, new Date().toISOString().slice(0, 10));
 		process.stdout.write(formatReport(result, reported));
-		return result.failing.length > 0 ? 1 : 0;
+		return result.failing.length > 0 || result.expired.length > 0 ? 1 : 0;
 	} catch (error) {
 		if (!(error instanceof GateInputError)) throw error;
 		process.stderr.write(`audit-gate: ${error.message}\n`);

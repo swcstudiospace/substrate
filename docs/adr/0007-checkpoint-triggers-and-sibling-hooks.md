@@ -50,7 +50,7 @@ Each: the event, the command, the failure behaviour, the owner, the risk.
 - **Command.** `substrate session checkpoint --trigger plan-step --plan-phase <phase> --plan-step <plan>-<task>` from the agent running the workflow, `|| true`.
 - **Failure.** Never stops the workflow; a missing CLI or server is ignored.
 - **Owner.** GSD-Core. Only an installed copy (version 1.18.0 under the user's agents directory) was found; its upstream repository was not located (UNVERIFIED).
-- **Risk.** Workflows are markdown followed by a model, so a step is not guaranteed to run; a host hook is more reliable than a prompt line. **Name collision:** GSD-Core already says "checkpoint" for checkpoint plans and `[checkpoint]` heartbeats, and the unmerged phase 53 draft uses "plan-step checkpoint" for a resume record keyed by file hash. Neither is a session checkpoint.
+- **Risk.** Workflows are markdown followed by a model, so a step is not guaranteed to run; a host hook is more reliable than a prompt line. **Name collision:** GSD-Core already says "checkpoint" for checkpoint plans and `[checkpoint]` heartbeats, and phase 53 (merged, PR #136) uses "plan-step checkpoint" for a resume record keyed by file hash. Neither is a session checkpoint.
 
 ### Ultrathink (plan node boundaries)
 

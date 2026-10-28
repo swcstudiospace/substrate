@@ -8,6 +8,10 @@
  * (`positionParts`): the parsed, redacted, capped fields `position.ts` reads out of them, never their text. The part is
  * parsed from the bytes the scan already read and is kept with an unchanged document, so `positionOf` needs no second pass.
  *
+ * Superseded phase directories: a phase directory that holds a `SUPERSEDED.md` document is ignored by `positionOf` when
+ * another directory carries the same phase number (a replaced plan kept as history). Two or more directories without the
+ * marker stay ambiguous.
+ *
  * `buildPlanningIndex` is the full rebuild. `updatePlanningIndex` takes the previous index of the same root and reuses a
  * document's content while its stat fingerprint (`signature`) is unchanged, so an unchanged document is neither read nor
  * hashed again. For the same tree the two results are equal.
@@ -163,6 +167,8 @@ const TOP_LEVEL: ReadonlyArray<readonly [string, PlanningKind]> = [
 const PHASE_DIR = /^(\d+(?:\.\d+)?)-/;
 const PHASE_PATH = new RegExp(`^${PLANNING_DIR.replace(".", "\\.")}/phases/([^/]+)(?:/([^/]+))?$`);
 const PLAN_OR_SUMMARY = /(?:PLAN|SUMMARY)\.md$/;
+/** A document of this name in a phase directory marks it superseded by another directory of the same phase number. */
+const SUPERSEDED_MARKER = "SUPERSEDED.md";
 const FENCE_OPEN = /^\ufeff?---\r?\n/;
 /** Trailing spaces or tabs after the opening `---` are not part of the fence. The shared parser wants the newline right after it. */
 const OPENING_FENCE_TRAILING = /^(\ufeff?---)[ \t]+(?=\r?\n)/;
@@ -332,21 +338,43 @@ export function snapshotOf(index: PlanningIndex): PlanningSnapshot {
  * Where GSD-Core is, from the parts the scan parsed out of STATE.md and ROADMAP.md and the phase directories and plan files
  * the index holds. Nothing is read: the scan that built the index is the only pass over the files. A STATE.md or ROADMAP.md
  * that was not described becomes an error entry of the position, with the index's own reason when it has one.
+ *
+ * Superseded phase directories: when several directories share a phase number, one that holds a `SUPERSEDED.md` document is
+ * ignored, along with its plan files. If more than one directory without the marker remains, the position stays ambiguous.
+ * A lone directory is never dropped, marker or not.
  */
 export function positionOf(index: PlanningIndex): PositionResult {
-	const phases = new Set<string>();
-	const plans: string[] = [];
+	const names = new Set<string>();
+	const superseded = new Set<string>();
+	const files: Array<{ dir: string; file: string }> = [];
 	for (const path of [...Object.keys(index.documents), ...Object.keys(index.errors)]) {
 		const match = PHASE_PATH.exec(path);
 		if (match === null) continue;
-		phases.add(match[1] ?? "");
+		const dir = match[1] ?? "";
+		names.add(dir);
 		const file = match[2];
-		if (file !== undefined && PLAN_OR_SUMMARY.test(file)) plans.push(file);
+		if (file === undefined) continue;
+		if (file === SUPERSEDED_MARKER) superseded.add(dir);
+		files.push({ dir, file });
+	}
+	const byNumber = new Map<string, string[]>();
+	for (const name of names) {
+		const number = PHASE_DIR.exec(name)?.[1]?.replace(/^0+(?=\d)/, "");
+		if (number === undefined) continue;
+		byNumber.set(number, [...(byNumber.get(number) ?? []), name]);
+	}
+	const ignored = new Set<string>();
+	for (const dirs of byNumber.values()) {
+		if (dirs.length > 1) for (const dir of dirs) if (superseded.has(dir)) ignored.add(dir);
+	}
+	const plans: string[] = [];
+	for (const { dir, file } of files) {
+		if (!ignored.has(dir) && PLAN_OR_SUMMARY.test(file)) plans.push(file);
 	}
 	return composePosition({
 		state: partOutcomeOf(index, index.positionParts.state, "STATE.md"),
 		roadmap: partOutcomeOf(index, index.positionParts.roadmap, "ROADMAP.md"),
-		phases: [...phases],
+		phases: [...names].filter((name) => !ignored.has(name)),
 		plans,
 	});
 }

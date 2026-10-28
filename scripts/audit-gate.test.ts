@@ -1,8 +1,8 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, spyOn, test } from "bun:test";
-import { type AcceptedRisk, type AuditJson, filterAdvisories, installedVersions, main, parseAllowlist } from "./audit-gate.ts";
+import { type AcceptedRisk, type AuditJson, filterAdvisories, formatReport, installedVersions, main, parseAllowlist } from "./audit-gate.ts";
 
 const PI_URL = "https://github.com/advisories/GHSA-jfgx-wxx8-mp94";
 const FTP_URL = "https://github.com/advisories/GHSA-c475-qrg2-pj4r";
@@ -57,17 +57,38 @@ describe("filterAdvisories", () => {
 		expect(result.accepted).toHaveLength(1);
 	});
 
-	test("an allowlisted advisory past its review_by warns and still passes", () => {
-		const result = filterAdvisories(audit, installed, [risk], "2027-01-20");
+	test("an allowlisted advisory 31 days before its review_by does not warn", () => {
+		const result = filterAdvisories(audit, installed, [risk], "2026-12-19");
 		expect(result.failing).toEqual([]);
-		expect(result.accepted).toHaveLength(1);
-		expect(result.warnings).toHaveLength(1);
-		expect(result.warnings[0]).toContain("review_by 2027-01-19 has passed");
+		expect(result.expired).toEqual([]);
+		expect(result.warnings).toEqual([]);
 	});
 
-	test("an allowlisted advisory on its review_by date does not warn yet", () => {
+	test("an allowlisted advisory 30 days before its review_by warns with its id, package and date and still passes", () => {
+		const result = filterAdvisories(audit, installed, [risk], "2026-12-20");
+		expect(result.failing).toEqual([]);
+		expect(result.expired).toEqual([]);
+		expect(result.accepted).toHaveLength(1);
+		expect(result.warnings).toHaveLength(1);
+		expect(result.warnings[0]).toContain("GHSA-jfgx-wxx8-mp94");
+		expect(result.warnings[0]).toContain(PI);
+		expect(result.warnings[0]).toContain("2027-01-19");
+	});
+
+	test("an allowlisted advisory on its review_by day passes with a warning", () => {
 		const result = filterAdvisories(audit, installed, [risk], "2027-01-19");
+		expect(result.failing).toEqual([]);
+		expect(result.expired).toEqual([]);
+		expect(result.accepted).toHaveLength(1);
+		expect(result.warnings).toHaveLength(1);
+	});
+
+	test("an allowlisted advisory the day after its review_by is expired and fails the gate", () => {
+		const result = filterAdvisories(audit, installed, [risk], "2027-01-20");
+		expect(result.failing).toEqual([]);
 		expect(result.warnings).toEqual([]);
+		expect(result.expired).toEqual(["accepted risk GHSA-jfgx-wxx8-mp94 expired on 2027-01-19: re-review or upgrade"]);
+		expect(formatReport(result, 2)).toContain("FAIL      accepted risk GHSA-jfgx-wxx8-mp94 expired on 2027-01-19: re-review or upgrade");
 	});
 
 	test("an allowlisted advisory fails when the lockfile moves to another version", () => {
@@ -140,5 +161,42 @@ describe("main", () => {
 			stderr.mockRestore();
 			await rm(dir, { recursive: true, force: true });
 		}
+	});
+
+	/** Runs `main` on a temp root holding the lockfile, an allowlist with `reviewBy`, and a saved audit of the allowlisted advisory. */
+	async function runWithReviewBy(reviewBy: string): Promise<{ code: number; stdout: string }> {
+		const dir = await mkdtemp(join(tmpdir(), "audit-gate-"));
+		let stdout = "";
+		const write = spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+			stdout += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+			return true;
+		});
+		try {
+			await mkdir(join(dir, ".github"), { recursive: true });
+			await writeFile(join(dir, "bun.lock"), `{\n  "packages": {\n    "${PI}": ["${PI}@0.60.0", "", {}, "sha512-z"],\n  }\n}\n`);
+			await writeFile(join(dir, ".github", "audit-accepted-risk.json"), JSON.stringify({ accepted: [{ ...risk, review_by: reviewBy }] }));
+			const file = join(dir, "audit.json");
+			await writeFile(file, JSON.stringify(audit));
+			const code = await main(["--input", file], dir);
+			return { code, stdout };
+		} finally {
+			write.mockRestore();
+			await rm(dir, { recursive: true, force: true });
+		}
+	}
+
+	test("exits 1 and names the entry when an accepted risk is past its review_by date", async () => {
+		// `main` reads the real clock, so the dates are far enough away to hold on any day.
+		const { code, stdout } = await runWithReviewBy("2020-01-01");
+		expect(code).toBe(1);
+		expect(stdout).toContain(`accepted risk ${risk.id} expired on 2020-01-01`);
+		expect(stdout).toContain("1 expired");
+	});
+
+	test("exits 0 when the accepted risk is far from its review_by date", async () => {
+		const { code, stdout } = await runWithReviewBy("2999-01-01");
+		expect(code).toBe(0);
+		expect(stdout).not.toContain("expired on");
+		expect(stdout).toContain("0 expired");
 	});
 });

@@ -631,6 +631,64 @@ Status: Executing
 		expect(positionOf(index).position.plan).toBe("58-02-PLAN");
 	});
 
+	describe("two directories with one phase number", () => {
+		const PHASE_46_STATE = POSITION_STATE.replace("current_phase: 58", "current_phase: 46")
+			.replace("current_phase_name: live-session-steering", "current_phase_name: lightrag-hybrid")
+			.replace("Phase: 58 — Live session steering", "Phase: 46 — LightRAG hybrid")
+			.replace("Plan: 58-02-PLAN\n", "");
+		const PHASE_46_FILES: Record<string, string> = {
+			[`${P}/STATE.md`]: PHASE_46_STATE,
+			[`${P}/ROADMAP.md`]: POSITION_ROADMAP,
+			[`${P}/phases/46-lightrag-hybrid/46-01-PLAN.md`]: "# lightrag plan\n",
+			[`${P}/phases/46-ragflow-hybrid/46-01-PLAN.md`]: "# ragflow plan\n",
+			[`${P}/phases/46-ragflow-hybrid/46-01-SUMMARY.md`]: "# ragflow summary\n",
+		};
+
+		test("both unmarked: the position stays ambiguous and has no slug", async () => {
+			const { index } = await indexOf(PHASE_46_FILES);
+			const result = positionOf(index);
+			expect(result.ok).toBe(false);
+			expect(result.position.phase).toEqual({ name: "lightrag-hybrid", number: "46", slug: null });
+			expect(result.errors).toContainEqual({ code: "ambiguous-phase-dir", detail: "phase 46 has 2 directories: 46-lightrag-hybrid, 46-ragflow-hybrid", where: "phases" });
+		});
+
+		test("one directory holds SUPERSEDED.md: it is ignored, the other gives the slug and its plan, and the position is ok", async () => {
+			const files = { ...PHASE_46_FILES, [`${P}/phases/46-ragflow-hybrid/SUPERSEDED.md`]: "# superseded by 46-lightrag-hybrid\n" };
+			const { index } = await indexOf(files);
+			const result = positionOf(index);
+			expect(result.ok).toBe(true);
+			expect(result.errors).toEqual([]);
+			expect(result.position.phase).toEqual({ name: "lightrag-hybrid", number: "46", slug: "lightrag-hybrid" });
+			// The superseded directory's summary does not mark the live directory's plan done.
+			expect(result.position.plan).toBe("46-01-PLAN");
+		});
+
+		test("two unmarked directories stay ambiguous even when a third directory of the number is superseded", async () => {
+			const files = {
+				...PHASE_46_FILES,
+				[`${P}/phases/46-old-draft/SUPERSEDED.md`]: "# superseded\n",
+				[`${P}/phases/46-old-draft/46-01-PLAN.md`]: "# old plan\n",
+			};
+			const { index } = await indexOf(files);
+			const result = positionOf(index);
+			expect(result.ok).toBe(false);
+			expect(result.position.phase?.slug).toBeNull();
+			expect(result.errors).toContainEqual({ code: "ambiguous-phase-dir", detail: "phase 46 has 2 directories: 46-lightrag-hybrid, 46-ragflow-hybrid", where: "phases" });
+		});
+
+		test("a lone directory that holds SUPERSEDED.md is still the phase's directory", async () => {
+			const files = {
+				[`${P}/STATE.md`]: PHASE_46_STATE,
+				[`${P}/ROADMAP.md`]: POSITION_ROADMAP,
+				[`${P}/phases/46-ragflow-hybrid/SUPERSEDED.md`]: "# superseded\n",
+			};
+			const { index } = await indexOf(files);
+			const result = positionOf(index);
+			expect(result.ok).toBe(true);
+			expect(result.position.phase?.slug).toBe("ragflow-hybrid");
+		});
+	});
+
 	test("the position adds no file text to the index: the state's body marker is absent from the whole index", async () => {
 		const { index } = await indexOf(POSITION_FILES);
 		expect(JSON.stringify(index)).not.toContain(STATE_BODY_MARKER);
