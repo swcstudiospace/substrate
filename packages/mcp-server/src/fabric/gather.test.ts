@@ -17,6 +17,7 @@ function snapshot(): FabricHealthView {
 			cache: { state: "closed" },
 			hindsight: { state: "closed" },
 			ragflow: { state: "closed" },
+			lightrag: { state: "closed" },
 		},
 	};
 }
@@ -28,6 +29,7 @@ function healthyParts(): FabricHealthParts {
 		index: Promise.resolve(true),
 		hindsight: Promise.resolve(true),
 		ragflow: Promise.resolve(true),
+		lightrag: Promise.resolve(true),
 	};
 }
 
@@ -46,7 +48,7 @@ function sources(overrides: Partial<FabricSources> = {}): FabricSources {
 		config: {
 			endpointPolicy: "enforce",
 			endpointClasses: { greptime: "proxy" },
-			configured: { dragonfly: true, "timescaledb-index": true, greptime: true, ragflow: true, hindsight: true },
+			configured: { dragonfly: true, "timescaledb-index": true, greptime: true, ragflow: true, lightrag: true, hindsight: true },
 			dragonflyRefused: false,
 		},
 		...overrides,
@@ -81,6 +83,7 @@ describe("gatherFabricFacts", () => {
 		expect(rowOf(facts, "greptime").state).toBe("ok");
 		expect(rowOf(facts, "hindsight").state).toBe("ok");
 		expect(rowOf(facts, "ragflow").state).toBe("ok");
+		expect(rowOf(facts, "lightrag").state).toBe("ok");
 		expect(rowOf(facts, "dragonfly").state).toBe("ok");
 		expect(buildFabricStatus(facts).resources).toHaveLength(FABRIC_RESOURCES.length);
 	});
@@ -136,5 +139,81 @@ describe("a stalled write on the Greptime row", () => {
 		expect(row.state).toBe("unavailable");
 		expect(row.source).toBe("health().greptime: timeout");
 		expect(buildFabricStatus(facts).counts.ok).toBeLessThan(FABRIC_RESOURCES.length);
+	});
+});
+
+describe("the LightRAG row", () => {
+	test("a configured LightRAG whose probe answers true is ok, read from planes.lightrag", async () => {
+		const facts = await gatherFabricFacts(sources());
+		expect(facts.services.lightrag).toEqual({
+			configured: true,
+			held: false,
+			answered: true,
+			breaker: "closed",
+			degraded: false,
+			source: "health().planes.lightrag",
+		});
+		expect(rowOf(facts, "lightrag")).toMatchObject({ state: "ok", endpointClass: "not-applicable", source: "health().planes.lightrag" });
+	});
+
+	test("a probe that answers false is unavailable, never a pass", async () => {
+		const facts = await gatherFabricFacts(sources({ health: () => ({ ...healthyParts(), lightrag: Promise.resolve(false) }) }));
+		expect(rowOf(facts, "lightrag").state).toBe("unavailable");
+		expect(rowOf(facts, "ragflow").state).toBe("ok");
+	});
+
+	test("a probe that misses the deadline is unavailable with the timeout reason, and the other rows keep their state", async () => {
+		const facts = await gatherFabricFacts(sources({ health: () => ({ ...healthyParts(), lightrag: never<boolean | null>() }) }), { deadlineMs: 20 });
+		const row = rowOf(facts, "lightrag");
+		expect(row.state).toBe("unavailable");
+		expect(row.source).toBe("health().planes.lightrag: timeout");
+		expect(rowOf(facts, "ragflow").state).toBe("ok");
+		expect(rowOf(facts, "greptime").state).toBe("ok");
+	});
+
+	test("a probe that throws is failed, named as such", async () => {
+		const facts = await gatherFabricFacts(sources({ health: () => ({ ...healthyParts(), lightrag: Promise.reject(new Error("boom")) }) }));
+		expect(rowOf(facts, "lightrag")).toMatchObject({ state: "unavailable", source: "health().planes.lightrag: failed" });
+	});
+
+	test("an unconfigured LightRAG is unconfigured, and a null probe answer never makes it healthy", async () => {
+		const base = sources();
+		const facts = await gatherFabricFacts({
+			...base,
+			health: () => ({ ...healthyParts(), lightrag: Promise.resolve(null) }),
+			config: { ...base.config, configured: { ...base.config.configured, lightrag: false } },
+		});
+		expect(rowOf(facts, "lightrag").state).toBe("unconfigured");
+		expect(buildFabricStatus(facts).counts.ok).toBe(FABRIC_RESOURCES.length - 1);
+	});
+
+	test("a configured LightRAG with no probe answer (null) is unavailable, not ok", async () => {
+		const facts = await gatherFabricFacts(sources({ health: () => ({ ...healthyParts(), lightrag: Promise.resolve(null) }) }));
+		expect(rowOf(facts, "lightrag").state).toBe("unavailable");
+	});
+
+	test("LightRAG set and RAGFlow unset: the lightrag row is live and the ragflow row is unconfigured", async () => {
+		const base = sources();
+		const facts = await gatherFabricFacts({
+			...base,
+			health: () => ({ ...healthyParts(), ragflow: Promise.resolve(null) }),
+			config: { ...base.config, configured: { ...base.config.configured, ragflow: false } },
+		});
+		expect(rowOf(facts, "lightrag").state).toBe("ok");
+		expect(rowOf(facts, "ragflow").state).toBe("unconfigured");
+	});
+
+	test("the LightRAG breaker state appears on its row: open is unavailable, half-open is degraded, off reads off", async () => {
+		const withBreaker = (breaker: FabricHealthView["breakers"]["lightrag"]) =>
+			gatherFabricFacts(sources({ snapshot: () => ({ ...snapshot(), breakers: { ...snapshot().breakers, lightrag: breaker } }) }));
+		const open = await withBreaker({ state: "open" });
+		expect(open.services.lightrag.breaker).toBe("open");
+		expect(rowOf(open, "lightrag").state).toBe("unavailable");
+		const halfOpen = await withBreaker({ state: "half-open" });
+		expect(halfOpen.services.lightrag.breaker).toBe("half-open");
+		expect(rowOf(halfOpen, "lightrag").state).toBe("degraded");
+		const off = await withBreaker(null);
+		expect(off.services.lightrag.breaker).toBe("off");
+		expect(rowOf(off, "lightrag").state).toBe("ok");
 	});
 });

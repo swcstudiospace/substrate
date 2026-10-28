@@ -27,6 +27,7 @@ function absentFacts(): FabricFacts {
 			"timescaledb-index": absent,
 			greptime: absent,
 			ragflow: absent,
+			lightrag: absent,
 			hindsight: absent,
 		},
 		cache: null,
@@ -87,6 +88,17 @@ describe("buildFabricSuggestions", () => {
 		);
 		expect(found).toMatchObject({ resource: "ragflow", severity: "attention" });
 		expect(found?.evidence).toBe("state unavailable; source: health().planes.ragflow");
+	});
+
+	test("an unavailable LightRAG is named like any resource, and an unconfigured one yields nothing", () => {
+		const found = suggest(withService("lightrag", { answered: false, source: "health().planes.lightrag" })).find(
+			(suggestion) => suggestion.id === "unavailable.lightrag",
+		);
+		expect(found).toMatchObject({ resource: "lightrag", severity: "attention" });
+		expect(found?.evidence).toBe("state unavailable; source: health().planes.lightrag");
+		expect(suggest(withService("lightrag", { configured: false, answered: null, breaker: "off" })).map((suggestion) => suggestion.id)).not.toContain(
+			"unavailable.lightrag",
+		);
 	});
 
 	test("an open Hindsight breaker with queued retains still yields the backlog, with its count and oldest age", () => {

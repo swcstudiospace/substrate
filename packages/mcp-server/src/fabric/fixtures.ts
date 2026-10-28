@@ -19,6 +19,7 @@ export function healthyServices(): Record<ServiceName, ServiceReading> {
 		"timescaledb-index": readyService("health().index"),
 		greptime: readyService("health().greptime"),
 		ragflow: readyService("health().planes.ragflow"),
+		lightrag: readyService("health().planes.lightrag"),
 		hindsight: readyService("health().planes.hindsight"),
 	};
 }
@@ -45,6 +46,7 @@ export function unconfiguredFacts(): FabricFacts {
 		"timescaledb-index": absentService(),
 		greptime: absentService(),
 		ragflow: absentService(),
+		lightrag: absentService(),
 		hindsight: absentService(),
 	};
 	return {
