@@ -29,15 +29,15 @@ import type { SQL } from "bun";
 import { redact } from "../redact.ts";
 import { errnoCode } from "./index.ts";
 import { SESSION_ID_RE } from "./presence.ts";
-import {
+import type {
 	STEERING_ACTIONS,
-	type SteeringAckReason,
-	type SteeringAuditEntry,
-	type SteeringHistorySink,
-	type SteeringInbox,
-	type SteeringOutcome,
-	type SteeringPriority,
-	type SteeringRestoreReport,
+	SteeringAckReason,
+	SteeringAuditEntry,
+	SteeringHistorySink,
+	SteeringInbox,
+	SteeringOutcome,
+	SteeringPriority,
+	SteeringRestoreReport,
 } from "./steering.ts";
 
 export const STEERING_AUDIT_TABLE = "planning_steering_audit";

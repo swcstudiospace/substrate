@@ -174,7 +174,7 @@ const DEFINITIONS = [
 		String.raw`^\s*(?:(?:public|private|protected|static|async|override)\s+)*(${REDACTOR_NAME})\s*(?:<[^>]*>)?\([^)]*\)\s*(?::[^{=;]+)?\{`,
 		"gm",
 	),
-	new RegExp(String.raw`\bclass\s+(\w*Redactor)\b`, "g"),
+	/\bclass\s+(\w*Redactor)\b/g,
 	new RegExp(String.raw`^\s*(?:async\s+)?def\s+(${REDACTOR_NAME})\s*\(`, "gm"),
 	new RegExp(String.raw`^\s*(?:function\s+)?(${REDACTOR_NAME})\s*\(\)\s*\{`, "gm"),
 ];

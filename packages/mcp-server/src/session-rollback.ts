@@ -101,6 +101,7 @@ const MAX_KEY_ECHO_CHARS = 64;
 const CKPT_ID = /^ckpt_[0-9a-z]{26}$/;
 const ROLLBACK_ID = /^rb_[0-9a-z]{26}$/;
 const HEX_64 = /^[0-9a-f]{64}$/;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: detects C0/DEL control characters in untrusted ids
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 
 // ---------------------------------------------------------------------------
@@ -798,6 +799,7 @@ function parseCommit(input: unknown): CommittedRequest | RefusedRequest {
 			if (typeof rec["detail"] !== "string" || rec["detail"].length === 0) refuse("invalid-request", "detail must be a non-empty string");
 			// Redacted, stripped of anything path-shaped (a token with a slash) and cut BEFORE it becomes a payload: a refusal's
 			// free text is the one place a file path or a secret could ride into the ledger.
+			// biome-ignore lint/suspicious/noControlCharactersInRegex: strips C0/DEL control characters from untrusted refusal text
 			detail = redact(rec["detail"]).replace(/\S*[\\/]\S*/g, "[path]").replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 300).trim();
 			if (detail.length === 0) detail = undefined;
 		}

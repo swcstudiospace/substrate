@@ -13,7 +13,6 @@ import { governMemoryWrite } from "./memory-write.ts";
 import { FakeStore } from "./memory-write.test.ts";
 import { Substrate } from "./service.ts";
 import {
-	TEACHABLE_SUBJECT_PREFIX,
 	isTeachable,
 	teachableEvent,
 	teachableSlug,

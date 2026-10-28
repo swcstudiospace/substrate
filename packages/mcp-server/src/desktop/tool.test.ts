@@ -50,7 +50,9 @@ function xwd(): Buffer {
 	const bytesPerLine = W * unit + 4;
 	const header = Buffer.alloc(100);
 	const fields = [100 + name.length, 7, 2, 24, W, H, 0, 0, 32, 0, 32, 32, bytesPerLine, 4, 0xff0000, 0xff00, 0xff, 8, 256, 0, W, H, 0, 0, 0];
-	fields.forEach((value, i) => header.writeUInt32BE(value, i * 4));
+	fields.forEach((value, i) => {
+		header.writeUInt32BE(value, i * 4);
+	});
 	const pixels = Buffer.alloc(bytesPerLine * H);
 	for (let y = 0; y < H; y++) {
 		for (let x = 0; x < W; x++) {

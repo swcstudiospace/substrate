@@ -565,7 +565,7 @@ describe("the planning heartbeat", () => {
 
 	test("a checkout whose presence write fails records a failed heartbeat, and its change is still published", async () => {
 		class FailingWrites extends RecordingPresenceBackend {
-			async setWithTtl(): Promise<void> {
+			override async setWithTtl(): Promise<void> {
 				throw new Error("SET refused");
 			}
 		}
@@ -1934,7 +1934,7 @@ describe("held, incomplete and failed-heartbeat states are reported", () => {
 
 	test("a revert to an empty plane records the move from the state the previous scan saw, not the publish baseline's", async () => {
 		const tree = new FakeTree({ ...GIT, [`${TREE_ROOT}/.git/config`]: ORIGIN, [`${TREE_ROOT}/.planning/README.txt`]: "not a document\n" });
-		let accept = false;
+		const accept = false;
 		const { observer, transitions } = observerOver(tree, { accept: () => accept });
 		await observer.scan();
 		tree.setContent(`${PHASE}/52-CONTEXT.md`, `${BODY} context\n`);

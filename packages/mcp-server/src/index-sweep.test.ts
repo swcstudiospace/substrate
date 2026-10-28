@@ -260,7 +260,7 @@ describe("the classes", () => {
 			{ graph_id: "ut-b", live: false },
 			{ graph_id: "ut-b", live: true },
 		];
-		const [nodes, graphsThenRest, ...more] = batch.then!(picked, locked);
+		const [nodes, graphsThenRest, ...more] = batch.decide!(picked, locked);
 		expect(more).toEqual([]);
 		// Only the graphs with no live node are named — ut-b in neither statement, so
 		// none of its rows (its free node included) is touched; ut-c, nodeless, goes.
@@ -281,7 +281,7 @@ describe("the classes", () => {
 		for (const statement of [nodes!, graphsThenRest!]) expect(JSON.stringify(statement)).not.toContain("ut-b");
 
 		// Every picked graph live: nothing is issued at all.
-		expect(batch.then!([{ graph_id: "ut-b" }], [{ graph_id: "ut-b", live: true }])).toEqual([]);
+		expect(batch.decide!([{ graph_id: "ut-b" }], [{ graph_id: "ut-b", live: true }])).toEqual([]);
 	});
 
 	test("entries-superseded never names a forgotten row: its count and its delete both exclude the forget marker", () => {

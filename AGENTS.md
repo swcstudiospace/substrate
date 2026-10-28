@@ -16,7 +16,7 @@ Cursor cloud agents in this repository follow the rules below. Grok Bot is the `
 
 The development loop is Bun 1.4.0 (the version CI pins) plus system Python 3.12 and `uv`. `bun` and `bunx` are on `/usr/local/bin`. `bun run verify` runs the Python suites through `uv run` with pinned httpx and pytest, so `uv` must be on `PATH`.
 
-Scratch Postgres 16 is started on boot. Use the same user and password as `SUBSTRATE_TEST_PG_URL` in `.github/workflows/ci.yml`, on `127.0.0.1:5432`:
+Scratch Postgres 16 is started on boot. Use the same user and password as the scratch Postgres that CI starts through `.github/actions/scratch-postgres` (it exports `SUBSTRATE_TEST_PG_URL` in CI), on `127.0.0.1:5432`:
 
 - `SUBSTRATE_PG_URL` points at database `substrate`. `substrate-mcp` is already listening on `127.0.0.1:7410` with that index, so `GET /healthz` is 200 and `POST /brief` returns the markdown brief.
 - `SUBSTRATE_TEST_PG_URL` points at database `substrate_test`. Set it before `bun test` so the live index tests (leases, memory, search, graph bindings) run.

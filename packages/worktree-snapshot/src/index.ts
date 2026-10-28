@@ -24,6 +24,7 @@ export {
 	WorktreeSnapshotError,
 } from "./errors.ts";
 export { type PlanRestoreParams, planRestore } from "./plan.ts";
+export { acquireWorktreeLockWithin, CHECKPOINT_LOCK_FILE, type LockWait, type WorktreeLock } from "./lock.ts";
 export {
 	DEFAULT_EXCLUDE_DIRS,
 	DEFAULT_EXCLUDE_GLOBS,

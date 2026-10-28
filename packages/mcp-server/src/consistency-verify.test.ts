@@ -12,6 +12,7 @@ import {
 	FINDING_CODES,
 	ReaderUnsupported,
 	defaultDocumentId,
+	findContender,
 	formatReportJson,
 	formatReportText,
 	planRepairs,
@@ -21,6 +22,7 @@ import {
 	type ConsistencyReaders,
 	type ConsistencyReport,
 	type IndexCursor,
+	type LedgerPair,
 	type LedgerWriteEvent,
 	type Timer,
 } from "./consistency-verify.ts";
@@ -435,7 +437,7 @@ describe("ledger comparison", () => {
 		const report = await run(w);
 		expect(codes(report)).toEqual(["index_entry_without_ledger_write"]);
 		expect(report.findings[0]).toMatchObject({ id: "mem_a", entry_id: "mem_a", stores: ["index", "ledger"] });
-		expect(report.findings[0]?.detail).toContain("carries no entry id");
+		expect(report.findings[0]?.detail).toContain("without an entry id");
 	});
 
 	test("an event with no entry is ledger_write_without_entry and names the event", async () => {
@@ -445,6 +447,167 @@ describe("ledger comparison", () => {
 		expect(codes(report)).toEqual(["ledger_write_without_entry"]);
 		expect(report.findings[0]).toMatchObject({ id: "ev-orphan", event_id: "ev-orphan", stores: ["ledger", "index"] });
 		expect(report.findings[0]?.detail).toContain("idempotent replay");
+	});
+
+	describe("pairing by the entry id the event names", () => {
+		const named = (e: MemoryEntry, namesEntry: string, offsetSeconds = 2): LedgerWriteEvent => ({ ...ledgerEvent(e, offsetSeconds), id: `ev-names-${namesEntry}`, entry_id: namesEntry });
+
+		test("an exact entry id wins over a heuristic candidate that fits better by time", async () => {
+			const a = entry("mem_a", { created: minutesAgo(30) });
+			const b = entry("mem_b", { created: minutesAgo(45) });
+			const w = world([a, b], { events: "none" });
+			// By writer, scope, kind and time this event belongs to mem_a; it names mem_b.
+			w.events.push(named(a, "mem_b"));
+			const report = await run(w);
+			expect(codes(report)).toEqual(["index_entry_without_ledger_write"]);
+			expect(report.findings[0]).toMatchObject({ id: "mem_a", entry_id: "mem_a" });
+			expect(report.counts.ledger_pairs).toBe(1);
+			expect(report.counts.ledger_events_judged).toBe(1);
+		});
+
+		test("an exact entry id pairs even when the event is far outside the heuristic lag", async () => {
+			const a = entry("mem_a");
+			const w = world([a], { events: "none" });
+			w.events.push(named(a, "mem_a", 600));
+			const report = await run(w);
+			expect(report.findings).toEqual([]);
+			expect(report.counts.ledger_pairs).toBe(1);
+		});
+
+		test("a replayed write naming the same entry is a second event for it, not a finding", async () => {
+			const a = entry("mem_a");
+			const w = world([a], { events: "none" });
+			w.events.push(named(a, "mem_a"), { ...named(a, "mem_a", 5), id: "ev-replay" });
+			const report = await run(w);
+			expect(report.findings).toEqual([]);
+			expect(report.counts.ledger_pairs).toBe(1);
+			expect(report.counts.ledger_events_judged).toBe(2);
+		});
+
+		test("a legacy event without entry_id still pairs by the heuristic beside an event that names its entry", async () => {
+			const a = entry("mem_a", { created: minutesAgo(30) });
+			const b = entry("mem_b", { created: minutesAgo(45) });
+			const w = world([a, b], { events: "none" });
+			w.events.push(named(a, "mem_a"), ledgerEvent(b));
+			const report = await run(w);
+			expect(report.findings).toEqual([]);
+			expect(report.ok).toBe(true);
+			expect(report.counts.ledger_pairs).toBe(2);
+		});
+
+		test("round-1 data: a legacy audit given to a replayed entry may be its neighbour's, so the neighbour is reported as ambiguous, never clean", async () => {
+			const a = entry("mem_a", { created: minutesAgo(30) });
+			const b = entry("mem_b", { created: new Date(Date.parse(minutesAgo(30)) + 1000).toISOString() });
+			const w = world([a, b], { events: "none" });
+			// One legacy event (written before entry_id existed) at +2 s; a replay 10 minutes later names mem_a.
+			w.events.push(ledgerEvent(a), named(a, "mem_a", 600));
+			const report = await run(w);
+			expect(codes(report)).toEqual(["ledger_pairing_ambiguous"]);
+			expect(report.findings[0]).toMatchObject({
+				id: "mem_b",
+				entry_id: "mem_b",
+				contender_entry_id: "mem_a",
+				legacy_event_id: "ev-mem_a",
+				stores: ["index", "ledger"],
+			});
+			expect(report.findings[0]?.detail).toContain("cannot say which");
+			expect(report.ok).toBe(false);
+			expect(report.counts.findings_by_code.ledger_pairing_ambiguous).toBe(1);
+			expect(report.counts.findings_by_code.index_entry_without_ledger_write).toBe(0);
+			expect(report.counts.ledger_pairs).toBe(1);
+			expect(report.counts.ledger_events_judged).toBe(2);
+		});
+
+		test("round-2 data: mem_a was stored unaudited and retried after the upgrade, mem_b keeps its legacy audit: reported as ambiguous, not as a missing audit", async () => {
+			const a = entry("mem_a", { created: minutesAgo(30) });
+			const b = entry("mem_b", { created: new Date(Date.parse(minutesAgo(30)) + 1000).toISOString() });
+			const w = world([a, b], { events: "none" });
+			// The legacy event is mem_b's own audit (+1 s after mem_b); the exact event is the retry that recovered mem_a.
+			w.events.push({ ...ledgerEvent(b, 1), id: "ev-legacy-b" }, named(a, "mem_a", 600));
+			const report = await run(w);
+			expect(codes(report)).toEqual(["ledger_pairing_ambiguous"]);
+			expect(report.findings.some((finding) => finding.code === "index_entry_without_ledger_write")).toBe(false);
+			expect(report.findings[0]).toMatchObject({ entry_id: "mem_b", contender_entry_id: "mem_a", legacy_event_id: "ev-legacy-b" });
+			expect(report.ok).toBe(false);
+		});
+
+		test("a neighbour outside the lag window of the legacy event keeps the plain missing-audit finding", async () => {
+			const a = entry("mem_a", { created: minutesAgo(30) });
+			const b = entry("mem_b", { created: new Date(Date.parse(minutesAgo(30)) + 200_000).toISOString() });
+			const w = world([a, b], { events: "none" });
+			// The legacy event at a+2 s precedes mem_b by 198 s, beyond the 30 s skew: it cannot be mem_b's.
+			w.events.push(ledgerEvent(a), named(a, "mem_a", 600));
+			const report = await run(w);
+			expect(codes(report)).toEqual(["index_entry_without_ledger_write"]);
+			expect(report.findings[0]).toMatchObject({ id: "mem_b", entry_id: "mem_b" });
+			expect(report.counts.findings_by_code.ledger_pairing_ambiguous).toBe(0);
+		});
+
+		test("a neighbour exactly at the skew boundary still contends; one millisecond beyond it does not", async () => {
+			const a = entry("mem_a", { created: minutesAgo(30) });
+			const at = (extraMs: number): MemoryEntry => entry("mem_b", { created: new Date(Date.parse(minutesAgo(30)) + extraMs).toISOString() });
+			// The legacy event sits 2 s after mem_a: mem_b created at +32 s is exactly 30 s (the skew) after it.
+			const onBoundary = world([a, at(32_000)], { events: "none" });
+			onBoundary.events.push(ledgerEvent(a), named(a, "mem_a", 600));
+			const inside = await run(onBoundary);
+			expect(codes(inside)).toEqual(["ledger_pairing_ambiguous"]);
+			expect(inside.findings[0]).toMatchObject({ entry_id: "mem_b", contender_entry_id: "mem_a", legacy_event_id: "ev-mem_a" });
+			const beyond = world([a, at(32_001)], { events: "none" });
+			beyond.events.push(ledgerEvent(a), named(a, "mem_a", 600));
+			expect(codes(await run(beyond))).toEqual(["index_entry_without_ledger_write"]);
+		});
+
+		test("a neighbour in another bucket keeps the plain missing-audit finding", async () => {
+			const a = entry("mem_a", { created: minutesAgo(30) });
+			const b = entry("mem_b", { created: new Date(Date.parse(minutesAgo(30)) + 1000).toISOString(), kind: "decision" });
+			const w = world([a, b], { events: "none" });
+			w.events.push(ledgerEvent(a), named(a, "mem_a", 600));
+			const report = await run(w);
+			expect(codes(report)).toEqual(["index_entry_without_ledger_write"]);
+			expect(report.findings[0]).toMatchObject({ id: "mem_b", entry_id: "mem_b" });
+		});
+
+		test("an entry satisfied only by an exact event, with no neighbour, is clean", async () => {
+			const a = entry("mem_a");
+			const w = world([a], { events: "none" });
+			w.events.push(named(a, "mem_a", 600));
+			const report = await run(w);
+			expect(report.findings).toEqual([]);
+			expect(report.ok).toBe(true);
+			expect(report.counts.ledger_pairs).toBe(1);
+		});
+
+		test("an entry with only an event naming it is satisfied and takes no other entry's legacy event", async () => {
+			const a = entry("mem_a", { created: minutesAgo(30) });
+			const b = entry("mem_b", { created: minutesAgo(25) });
+			const w = world([a, b], { events: "none" });
+			w.events.push(named(a, "mem_a"), ledgerEvent(b));
+			const report = await run(w);
+			expect(report.findings).toEqual([]);
+			expect(report.ok).toBe(true);
+			expect(report.counts.ledger_pairs).toBe(2);
+			expect(report.counts.ledger_events_judged).toBe(2);
+		});
+
+		test("an event naming an entry the index does not hold is reported and never takes another entry's slot", async () => {
+			const a = entry("mem_a");
+			const w = world([a], { events: "none" });
+			w.events.push(named(a, "mem_gone"));
+			const report = await run(w);
+			expect(codes(report).sort()).toEqual(["index_entry_without_ledger_write", "ledger_write_without_entry"]);
+			const orphan = report.findings.find((finding) => finding.code === "ledger_write_without_entry");
+			expect(orphan).toMatchObject({ event_id: "ev-names-mem_gone", entry_id: "mem_gone", stores: ["ledger", "index"] });
+			expect(orphan?.detail).toContain("mem_gone");
+		});
+
+		test("a malformed entry_id is no id: the event pairs like a legacy one", async () => {
+			const a = entry("mem_a");
+			const w = world([a], { events: "none" });
+			w.events.push({ ...ledgerEvent(a), entry_id: 7 as unknown as string });
+			const report = await run(w);
+			expect(report.findings).toEqual([]);
+			expect(report.counts.ledger_pairs).toBe(1);
+		});
 	});
 
 	test("the event's scope is compared in canonical form", async () => {
@@ -888,5 +1051,46 @@ describe("configured banks with no index row", () => {
 
 	test("a configured bank name must not be empty", async () => {
 		await expect(run(world([]), { configuredBanks: [""] })).rejects.toBeInstanceOf(ConsistencyOptionError);
+	});
+});
+
+describe("findContender", () => {
+	const pair = (entryId: string, eventId: string, eventTsMs: number): LedgerPair => ({ entry: { id: entryId, tsMs: eventTsMs - 1000 }, event: { id: eventId, tsMs: eventTsMs } });
+
+	test("an empty contender list is never searched and yields nothing, however many entries ask", () => {
+		// Any element read would throw: the list is a proxy that fails on every property except `length`.
+		const guarded = new Proxy<LedgerPair[]>([], {
+			get(_target, key) {
+				if (key === "length") return 0;
+				throw new Error(`unexpected read of ${String(key)}`);
+			},
+		});
+		for (let i = 0; i < 2000; i += 1) {
+			expect(findContender(guarded, NOW + i * 1000, 30_000, 120_000)).toBeUndefined();
+		}
+	});
+
+	test("finds the contender exactly at -skew and at lag, and not one millisecond beyond either", () => {
+		const skew = 30_000;
+		const lag = 120_000;
+		const entryTs = NOW;
+		// event.ts - entry.ts == -skew
+		expect(findContender([pair("mem_x", "ev-1", entryTs - skew)], entryTs, skew, lag)?.event.id).toBe("ev-1");
+		expect(findContender([pair("mem_x", "ev-1", entryTs - skew - 1)], entryTs, skew, lag)).toBeUndefined();
+		// event.ts - entry.ts == lag
+		expect(findContender([pair("mem_x", "ev-2", entryTs + lag)], entryTs, skew, lag)?.event.id).toBe("ev-2");
+		expect(findContender([pair("mem_x", "ev-2", entryTs + lag + 1)], entryTs, skew, lag)).toBeUndefined();
+	});
+
+	test("picks the first contender in bucket order among several inside the window, and skips earlier ones outside it", () => {
+		const pairs = [
+			pair("mem_old", "ev-old", NOW - 600_000),
+			pair("mem_a", "ev-a", NOW + 10_000),
+			pair("mem_b", "ev-b", NOW + 10_000),
+			pair("mem_late", "ev-late", NOW + 900_000),
+		];
+		expect(findContender(pairs, NOW, 30_000, 120_000)?.entry.id).toBe("mem_a");
+		expect(findContender(pairs, NOW + 800_000, 30_000, 120_000)?.entry.id).toBe("mem_late");
+		expect(findContender(pairs, NOW + 400_000, 30_000, 120_000)).toBeUndefined();
 	});
 });

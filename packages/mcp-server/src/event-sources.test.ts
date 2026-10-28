@@ -294,6 +294,8 @@ describe("the memory.write verdict rows", () => {
 				...(want.reason === undefined ? [] : ["reason"]),
 				// A quarantined write names the parked row a reviewer would look for.
 				...(id === "memory.write.quarantined" ? ["quarantine_id"] : []),
+				// An accepted write names the entry it stored, so the consistency verifier pairs by id.
+				...(id === "memory.write.accepted" ? ["entry_id"] : []),
 				"scope",
 			].sort();
 			expect(keys).toEqual(wantKeys);

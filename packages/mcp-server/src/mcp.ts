@@ -88,7 +88,7 @@ const surfaceSchema = z.enum(SURFACES);
  * reports what the write was actually attributed to, so a caller never has to guess
  * whether its argument was taken.
  */
-export function memoryToolWriter(callerSurface: Surface | null, argSurface: Surface | undefined): string {
+export function memoryToolWriter(callerSurface: Surface | null, _argSurface: Surface | undefined): string {
 	return callerSurface ?? "unknown";
 }
 

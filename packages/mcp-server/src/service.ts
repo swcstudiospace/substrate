@@ -259,7 +259,6 @@ import {
 	type GraphNode,
 	type GraphView,
 	type MemoryEntry,
-	type MemoryEntryInput,
 	type MemoryReadOptions,
 	type MemorySearch,
 	type MemorySearchPage,
@@ -2719,6 +2718,12 @@ export class Substrate {
 				...(result.reason ? { reason: result.reason } : {}),
 				scope: request.scope,
 				kind: request.kind,
+				// The stored row's id, read ONLY from the gate's result — never from the
+				// request, whose `id`-shaped fields are caller-controlled. It lets the
+				// consistency verifier pair this event with its index row exactly instead
+				// of by writer + scope + kind + time. Omitted on every write that stored
+				// nothing (refused, quarantined, conflicting), so absence stays honest.
+				...(result.outcome === "accepted" && result.entry ? { entry_id: result.entry.id } : {}),
 				...(result.strategy ? { strategy: result.strategy } : {}),
 				...(result.review_id ? { review_id: result.review_id } : {}),
 				...(result.quarantine_id ? { quarantine_id: result.quarantine_id } : {}),
@@ -6444,7 +6449,7 @@ export class Substrate {
 			// verdict, not only the session that held the gap. A new session
 			// whose hash no longer matches its summary must fail even when
 			// its hour is still open and skips the digest.
-			for (const [key, members] of freshBySession) {
+			for (const members of freshBySession.values()) {
 				if (!members.some((member) => byEvent.has(member.id))) continue;
 				const result = verifyChain(inChainOrder(members));
 				if (!result.ok) {

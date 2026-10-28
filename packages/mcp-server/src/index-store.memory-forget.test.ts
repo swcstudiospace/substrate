@@ -63,6 +63,7 @@ function fakeSql(handler: (statement: Statement) => Array<Record<string, unknown
 			});
 			return out;
 		}
+		// biome-ignore lint/suspicious/noThenProperty: deliberate thenable fake; the driver's tagged-template fragments run when awaited
 		then(resolve: (rows: Array<Record<string, unknown>>) => unknown, reject: (cause: unknown) => unknown): Promise<unknown> {
 			const params: unknown[] = [];
 			const statement = { text: squash(this.render(params)), params };

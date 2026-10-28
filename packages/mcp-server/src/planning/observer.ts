@@ -57,7 +57,7 @@ import type { PlanningConfigError, PlanningConfigResult } from "./config.ts";
 import { diffPlanningIndex, type PathChange, type PlanningDiff, type PlanningSnapshot } from "./diff.ts";
 import { observePlanningChange } from "./events.ts";
 import { buildPlanningIndex, errnoCode, indexRecords, isErrorRecord, snapshotOf, updatePlanningIndex, type PlanningFs, type PlanningIndex, type PlanningIndexFailure, type PlanningIndexResult } from "./index.ts";
-import { DragonflyPresenceStore, PRESENCE_MAX_SESSIONS } from "./presence-dragonfly.ts";
+import { type DragonflyPresenceStore, PRESENCE_MAX_SESSIONS } from "./presence-dragonfly.ts";
 import { classifySessions, MAX_REPORT_ENTRIES, REPORT_ID_MAX, touchedWithin, type PlanningReport, type SessionRecord, type TouchedPair } from "./presence.ts";
 import { observeScan, planIdentity, unknownReport, type WatcherGap } from "./report.ts";
 import { readClock, resolveSettings } from "./read.ts";
