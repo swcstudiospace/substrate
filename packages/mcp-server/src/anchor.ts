@@ -51,7 +51,7 @@ import { GreptimeError, INGEST_LAG_MS, type GreptimeClient, type NewAnchor } fro
 import { redact } from "./redact.ts";
 import type { HourDigest, Substrate } from "./service.ts";
 
-export const DEVNET_GENESIS_HASH = "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC";
+export const DEVNET_GENESIS_HASH = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
 
 /** At most this many non-empty hours anchor per run; empty hours are free, older unanchored hours wait for the next tick. */
 export const MAX_HOURS_PER_RUN = 24;

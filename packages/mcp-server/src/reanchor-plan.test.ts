@@ -19,7 +19,7 @@ import {
  */
 
 const H0 = Date.UTC(2026, 9, 20, 10);
-const OLD_GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC";
+const OLD_GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
 const NEW_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
 const SIGNER = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo";
 const NEW_SIGNER = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";

@@ -22,6 +22,21 @@
  *    maxFileBytes, nested repositories) are in neither tree, so a restore neither writes nor deletes
  *    them. A target path that would have to overwrite or replace such an excluded file or directory
  *    fails the restore (and rolls it back) instead.
+ *  - Paths the TARGET snapshot skipped when it was taken (`snapshot.skipped`: too large, secret
+ *    pattern, nested repository) are absent from its tree because they were never captured. A restore
+ *    leaves them as they are even if they now fit the policy; the plan lists them as
+ *    `skippedInSnapshot`. The list travels in the restore journal and in a pin's commit message. A
+ *    snapshot with no record (pinned before it was recorded) cannot tell such a file from one created
+ *    after it, so that file is removed like any other new file. The same holds beyond the cap of a
+ *    pin's list: a pin records at most 5,000 skipped paths (1 MiB of JSON), and when more were skipped
+ *    only the first ones, in path order, are protected and the plan carries `skippedTruncated`. A
+ *    skipped path beyond the cap that is still skipped today (too large, secret) is not in the
+ *    worktree tree at all and is untouched; one that fits the policy now and is absent from the target
+ *    tree is removed like a new file.
+ *  - A restore that preserves skipped files leaves a tree that matches no checkpoint exactly (the
+ *    preserved files are in the worktree, not in the target tree). Callers that compare the worktree
+ *    with a checkpoint (`expectedCurrentTree`) pass that checkpoint's skipped list as
+ *    `expectedCurrentSkipped`, so those files are not drift while any other difference still is.
  *  - Conversion attributes and config (`text`, `eol`, `filter`, `core.autocrlf`) are ignored: files
  *    are hashed with `hash-object --no-filters`, so a snapshot and the verification re-hash are over
  *    the exact bytes on disk and a restore writes those bytes back.
@@ -42,7 +57,7 @@ import { acquireWorktreeLock } from "./lock.ts";
 import { applyOperations, makeApplyContext, removeTemporaries } from "./apply.ts";
 import { deletePin, pinTree, refFor } from "./pin.ts";
 import { isValidId } from "./paths.ts";
-import { countOperations, nonExcludedPaths, planBetween, validateTarget } from "./plan.ts";
+import { countOperations, nonExcludedPaths, planBetween, skippedOf, validateTarget } from "./plan.ts";
 import { resolvePolicy } from "./policy.ts";
 import { openRepo, type RepoContext, type Runner } from "./runner.ts";
 import { assertTreeExists, buildSnapshot, buildTree, diffTrees, directoriesOf, lsTree } from "./tree.ts";
@@ -53,6 +68,7 @@ import type {
 	RestoreHooks,
 	RestorePlan,
 	RestoreResult,
+	SkippedPath,
 	Snapshot,
 	SnapshotPolicy,
 } from "./types.ts";
@@ -72,11 +88,16 @@ function describe(error: unknown, root: string): string {
 	return message.split(root).join("<worktree>");
 }
 
-/** Require the worktree tree to equal `goalTree` on every path the policy lets us touch. */
-async function verifyTree(ctx: RepoContext, policy: ResolvedPolicy, goalTree: string): Promise<void> {
+/** Require the worktree tree to equal `goalTree` on every path the policy lets us touch and the snapshot did not skip. */
+async function verifyTree(
+	ctx: RepoContext,
+	policy: ResolvedPolicy,
+	goalTree: string,
+	skipped: readonly SkippedPath[],
+): Promise<void> {
 	const after = await buildTree(ctx, policy);
 	if (after.tree === goalTree) return;
-	const paths = nonExcludedPaths(await diffTrees(ctx, after.tree, goalTree), policy);
+	const paths = nonExcludedPaths(await diffTrees(ctx, after.tree, goalTree), policy, skipped);
 	if (paths.length > 0) throw new VerifyMismatch(paths);
 }
 
@@ -86,16 +107,17 @@ async function converge(
 	policy: ResolvedPolicy,
 	goalTree: string,
 	id: string,
-	options: { hooks?: RestoreHooks; cleanupPaths?: readonly string[] } = {},
+	options: { hooks?: RestoreHooks; cleanupPaths?: readonly string[]; skipped?: readonly SkippedPath[] } = {},
 ): Promise<RestorePlan> {
 	const apply = makeApplyContext(ctx, id, goalTree);
 	// Leftovers of a crashed write would otherwise be read as untracked files and planned for deletion.
 	removeTemporaries(apply, options.cleanupPaths ?? []);
 	const current = await buildTree(ctx, policy);
-	const plan = await planBetween(ctx, policy, current.tree, goalTree);
+	const skipped = options.skipped ?? [];
+	const plan = await planBetween(ctx, policy, current.tree, goalTree, undefined, skipped);
 	const keep = directoriesOf(await lsTree(ctx, goalTree));
 	await applyOperations(apply, plan.operations, keep, options.hooks);
-	await verifyTree(ctx, policy, goalTree);
+	await verifyTree(ctx, policy, goalTree, skipped);
 	return plan;
 }
 
@@ -116,7 +138,7 @@ async function rollBack(state: RunState, cause: unknown): Promise<never> {
 	state.keepJournal = true;
 	writeJournal(state.journalDir, { ...journal, state: "rolling-back" });
 	try {
-		await converge(ctx, state.policy, journal.safetyTree, journal.id);
+		await converge(ctx, state.policy, journal.safetyTree, journal.id, { skipped: journal.safetySkipped });
 	} catch (rollbackError) {
 		throw new RestoreFailedError(
 			`the restore failed (${describe(cause, ctx.root)}) and rolling back to the safety snapshot also failed (${describe(rollbackError, ctx.root)}); run recoverRestore`,
@@ -154,6 +176,11 @@ export type RestoreParams = {
 	id: string;
 	/** The tree the session believes the worktree has; a difference is drift and refuses the restore. */
 	expectedCurrentTree?: string;
+	/**
+	 * What the snapshot behind `expectedCurrentTree` skipped. Those paths were never part of it, so a
+	 * difference at one (a file a restore left in place, say) is not drift. Everything else stays exact.
+	 */
+	expectedCurrentSkipped?: readonly SkippedPath[];
 	/** Proceed although the worktree changed outside the session. */
 	force?: boolean;
 	journalDir?: string;
@@ -178,8 +205,10 @@ export async function restore(params: RestoreParams): Promise<RestoreResult> {
 			throw new RestoreRecoveryRequiredError("a restore journal from an interrupted restore exists; run recoverRestore first");
 		}
 		const targetTree = await validateTarget(ctx, params.target);
+		const targetSkipped = skippedOf(params.target);
 		const current = await buildTree(ctx, policy);
-		let plan = await planBetween(ctx, policy, current.tree, targetTree, params.expectedCurrentTree);
+		const planOptions = { expectedSkipped: params.expectedCurrentSkipped, truncated: params.target.skippedTruncated ?? null };
+		let plan = await planBetween(ctx, policy, current.tree, targetTree, params.expectedCurrentTree, targetSkipped, planOptions);
 		if (plan.drift.length > 0 && params.force !== true) throw new RestoreDriftError(plan.drift);
 
 		let safety: Snapshot;
@@ -198,7 +227,7 @@ export async function restore(params: RestoreParams): Promise<RestoreResult> {
 		}
 		if (safety.tree !== current.tree) {
 			// The worktree changed while the safety snapshot was taken: plan against what was pinned.
-			plan = await planBetween(ctx, policy, safety.tree, targetTree, params.expectedCurrentTree);
+			plan = await planBetween(ctx, policy, safety.tree, targetTree, params.expectedCurrentTree, targetSkipped, planOptions);
 			if (plan.drift.length > 0 && params.force !== true) throw new RestoreDriftError(plan.drift);
 		}
 
@@ -212,6 +241,8 @@ export async function restore(params: RestoreParams): Promise<RestoreResult> {
 			safetyRef,
 			targetRef,
 			policy,
+			targetSkipped,
+			safetySkipped: safety.skipped,
 			operations: plan.operations.map((operation) => ({ op: operation.op, path: operation.path })),
 		};
 		const keep = directoriesOf(await lsTree(ctx, targetTree));
@@ -221,7 +252,7 @@ export async function restore(params: RestoreParams): Promise<RestoreResult> {
 		try {
 			const apply = makeApplyContext(ctx, id, targetTree);
 			await applyOperations(apply, plan.operations, keep, params.hooks);
-			await verifyTree(ctx, policy, targetTree);
+			await verifyTree(ctx, policy, targetTree, targetSkipped);
 		} catch (error) {
 			if (error instanceof SimulatedCrash) {
 				// A crash performs no rollback and keeps the journal for recoverRestore.
@@ -268,10 +299,11 @@ export async function recoverRestore(params: RecoverParams): Promise<RecoverResu
 		state = { ctx, policy: journal.policy, journalDir, journal, keepJournal: false };
 		const direction = journal.state === "rolling-back" ? "rollback" : "forward";
 		const goal = direction === "forward" ? journal.targetTree : journal.safetyTree;
+		const goalSkipped = direction === "forward" ? journal.targetSkipped : journal.safetySkipped;
 		const cleanupPaths = journal.operations.map((operation) => operation.path);
 		let plan: RestorePlan;
 		try {
-			plan = await converge(ctx, journal.policy, goal, journal.id, { hooks: params.hooks, cleanupPaths });
+			plan = await converge(ctx, journal.policy, goal, journal.id, { hooks: params.hooks, cleanupPaths, skipped: goalSkipped });
 		} catch (error) {
 			if (error instanceof SimulatedCrash) {
 				state.keepJournal = true;

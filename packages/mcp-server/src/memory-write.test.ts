@@ -33,6 +33,11 @@ export class FakeStore implements MemoryStore {
 	readonly quarantined: Array<NewMemoryEntry & { reason: QuarantineReason; detail: string }> = [];
 	readonly reviews: Array<NewMemoryEntry & { reason: string; state: string; entry_id: string | null; created: number }> = [];
 
+	/** Which of these entry ids a forget has marked. This fake never forgets, so the answer is always empty. */
+	async forgottenEntryIds(_ids: readonly string[]): Promise<Set<string>> {
+		return new Set();
+	}
+
 	/** Makes the read-back miss, which is the only way to reach `verified_persisted: false`. */
 	hideFromReadBack = false;
 	/** Makes the insert throw before writing anything, standing in for an index that is down. */

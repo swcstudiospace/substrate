@@ -741,6 +741,12 @@ boot warning; the valid entries still apply. Unset, no refresh runs and no timer
   running starts nothing. Shutdown clears the timer and waits for a pass in flight,
   within the shutdown flush bound.
 
+## Forgetting and verifying memory (v1.6, phases 57 and 60)
+
+**Forget** (`Substrate.memoryForget`, an internal method the rollback path calls; there is no tool). It marks the named entries out of force (`superseded_by = 'forgotten:fg_...'`), deletes their Hindsight documents and emits ONE ledger `note` (`payload.action: "memory.forget"`) as the caller's surface. Order: mark first (the brief, search and recall stop serving the entry at once, and the recall and memory cache generations move), then the plane delete with a bounded fan-out, then the note. The row stays for audit, and the sweeper never removes it (`entries-superseded` excludes the marker, however old). A plane failure never undoes the mark: the report counts it as pending, and a re-run of the same request retries only that deletion. The delete is queued behind any retain of the same document still in flight, so a late forward cannot bring the document back. A parked retain for a forgotten entry is dropped as gone. Forgetting an entry that superseded an older one does not restore the older one. `selectMemoryForRollback` lists the entries a rollback point should forget: written in the session after the checkpoint's instant and still in force.
+
+**`memory_verify {id}`** (read-only, audit fail-open). Two checks on one entry the caller can read: does the stored content still hash to the `entry_hash` the gate wrote, and is the ledger event the write cited (`source_event`) inside an anchored hourly root. `status` is `verified`, `hash-mismatch`, `pending`, `unanchored`, `unverified` or `anchor-mismatch`. `verified` means the hash is intact and the cited event is anchored; it does not prove that event concerns this entry. An entry the caller cannot read (another surface's `agent:` scope, or past its lifetime under `SUBSTRATE_MEMORY_EXPIRY=enforce` for a non-operator) answers as absent. The reply carries hashes and a transaction signature, never the entry's text. See `docs/greptime-ledger.md` § Verifying a checkpoint for the anchor half.
+
 ## Running the proofs
 
 ```sh

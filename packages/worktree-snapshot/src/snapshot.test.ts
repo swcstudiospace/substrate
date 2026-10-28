@@ -218,7 +218,7 @@ describe("pinSnapshot and readPinnedSnapshot", () => {
 		const dir = goldenRepo();
 		const snap = await snapshot({ worktree: dir, now: FIXED_NOW });
 		const pin = await pinSnapshot({ worktree: dir, snapshot: snap, id: "ckpt-0001", now: FIXED_NOW });
-		expect(pin.ref).toBe("refs/substrate/checkpoints/ckpt-0001");
+		expect(pin.ref).toMatch(/^refs\/substrate\/checkpoints\/w-[0-9a-f]{16}\/ckpt-0001$/);
 		expect(git(dir, ["rev-parse", `${pin.ref}^{tree}`]).trim()).toBe(snap.tree);
 		expect(git(dir, ["log", "-1", "--format=%an|%ae|%cn|%ce|%at|%P", pin.ref]).trim()).toBe(
 			"Substrate Snapshot|snapshot@substrate.invalid|Substrate Snapshot|snapshot@substrate.invalid|1767225600|",
@@ -228,7 +228,7 @@ describe("pinSnapshot and readPinnedSnapshot", () => {
 		// The HEAD branch and the real refs are untouched.
 		expect(git(dir, ["for-each-ref", "--format=%(refname)"]).trim().split("\n").sort()).toEqual([
 			"refs/heads/main",
-			"refs/substrate/checkpoints/ckpt-0001",
+			pin.ref,
 		]);
 	});
 

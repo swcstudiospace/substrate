@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { CHAIN_VERDICTS, type ChainEvidenceInput, classifyChainEvidence, SIGNATURE_STATUSES, YOUNG_ANCHOR_GRACE_MS } from "./devnet-reset.ts";
 
-const DEVNET = "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC";
+const DEVNET = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
 const WIPED = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
 const ANCHORED_AT = Date.UTC(2026, 9, 20, 12);
 const OLD = ANCHORED_AT + 3_600_000;

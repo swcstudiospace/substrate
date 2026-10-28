@@ -30,7 +30,13 @@ These apply to every source:
   `skill.decline`, `skill.retire`, `skill.approve.refused`, `docs.ingest`,
   `docs.search`, `teachable`, `anchor`, `mirror`, `dispatch`, `approval`,
   `skills.sync`, `dod`, `doctor`, `slo.transition`, `docs.freshness`, `docs.canary`,
-  `index.archive`, `alert`, `session.checkpoint`, `session.rollback`, `session.rollback.refused`.
+  `index.archive`, `alert`, and the v1.6 actions `session.checkpoint`, `session.rollback`,
+  `session.rollback.refused`, `memory.forget`, `memory.capsule.export`,
+  `memory.capsule.redact`, `anchor.signer.rotate`, `anchor.reanchor`.
+- **Reserved actions are not writable through `events_emit` or `POST /events`.** A reader trusts `anchor.signer.rotate`, `session.checkpoint`, `session.rollback`,
+  `session.rollback.refused`, `session.rollback.forget_batch` and `memory.forget` by their action alone, and the event carries no proof of its writer, so both
+  doors refuse them with a `reserved-action` error (nothing written) unless the caller is an operator emitting as its own surface; the server's own emits do not
+  pass those doors (`RESERVED_NOTE_ACTIONS` in `packages/mcp-server/src/reserved-actions.ts` is the one list).
 - **`payload.runtime` names a non-agent producer** acting for an agent or for
   the host (`herdr`, `agentos`, `anchor`, `dispatcher`, `skills-sync`,
   `doctor` — the runtime doctor, uplift-3 N1, one `warning` per drift class
@@ -191,8 +197,12 @@ kinds only. Each is emitted from the caller's own surface (the authenticated cal
 body-supplied) with `session_id` set to the session it concerns, so it chains into that
 session. None carries `repo` (a per-turn checkpoint would crowd a repo's brief) or a
 `runtime`. The contract is encoded and validated in
-`packages/mcp-server/src/session-events.ts`; nothing is wired to the service, an MCP tool
-or an HTTP route by this change.
+`packages/mcp-server/src/session-events.ts`. The tools `session_checkpoint`,
+`session_rollback_plan` and `session_rollback_commit` (registered in `mcp.ts`, admitted in
+`admission.ts`, listed in `packages/audit/src/policy.ts`) build and emit them, and the
+`substrate session` CLI reaches them over the MCP endpoint (`/mcp`); see the tools paragraph below.
+`checkpoint_verify` and `memory_verify` are read-only tools that resolve a checkpoint or a
+memory entry to its hourly root and emit nothing.
 
 - `session.checkpoint` (`note`, `payload.action: "session.checkpoint"`): `ckpt_id`
   (`ckpt_` + 26 characters of `0-9a-z`), `seq` (integer >= 1, per session), `trigger`
@@ -200,7 +210,8 @@ or an HTTP route by this change.
   64 lowercase hex), optional `git_base_commit` (same), optional `branch` (<= 200),
   `manifest_sha256` (64 hex), `file_count`, `skipped_count` (integers >= 0), optional
   `transcript_ref`, optional `chain_head {event_id, hash}`, optional `plan_ref {phase?,
-  step?}` (each <= 64) and optional `prev_ckpt_id`.
+  step?}` (each <= 64), optional `prev_ckpt_id` and optional `taken_at_ms` (integer >= 0,
+  epoch milliseconds when the client pinned the snapshot; a checkpoint written without it stays valid).
 - `transcript_ref`: `surface` (a `SURFACES` member), `session_locator` (1..128, an opaque
   id such as a session uuid or conversation id, never a path: no `/`, `\`, `~` or space),
   optional `entry_id` (1..64), optional `turn_no` (integer >= 0), optional
@@ -226,6 +237,10 @@ points at an earlier one through `target_event_id` and `target_hash`; the append
 is never rewritten or deleted from. A refused rollback is a `session.rollback.refused`
 warning.
 
+**The three tools (v1.6 phase 61).** `session_checkpoint` appends a `session.checkpoint` note as the caller's surface and attaches the ledger chain position (`chain_head`, the session's newest event, observed by the server) itself; a checkpoint id already recorded answers `stored: false` with the existing event. `session_rollback_plan` (read only) answers the target checkpoint, the later ones, the anchor verdict (`null` when it cannot be computed in time; it never blocks), how many of the caller's memory entries written in the session after the checkpoint a rollback would forget, and a `plan_digest` over the rollback id, session, target checkpoint and its event hash, and the sorted ids that would be forgotten, never over the later checkpoints. `session_rollback_commit` appends `session.rollback.refused`, or for `committed` recomputes the plan (a different digest answers `stale-plan` and changes nothing), forgets the memory after the target in batches of 50 (`memory.forget`, reason `rollback`; rows and ledger stay, recall stops serving them, Hindsight documents are deleted) and appends ONE `session.rollback` note with the real totals; it is idempotent by `rollback_id`. A checkpoint belongs to the surface that recorded it: another surface's checkpoint answers `not-found` (the CLI treats that as the `target-not-found` refusal). The server never touches a worktree and never reads a transcript. A commit made without a server plan (`local_only`) is accepted on the same checks and its note's summary says the checkpoint was not anchored.
+
+**Which memory a rollback reaches.** The memory cut of a checkpoint is the EARLIER of its ledger record time and its `taken_at_ms`, so a checkpoint taken offline and recorded hours later still forgets what was written in between. A `taken_at_ms` more than 30 days before the record time or more than 30 seconds after it is ignored (the record time stands) and the `session_checkpoint` answer carries a warning that names why. The upper bound is `until_ms` (an integer, epoch milliseconds, on both `session_rollback_plan` and `session_rollback_commit`): memory created AFTER it belongs to the new timeline the session began once the rollback started and is never forgotten, so a commit delivered late (an offline rollback synced hours later) does not forget it. `until_ms` must not be more than 30 seconds ahead of the server clock or before the cut; absent means now. The CLI sets it to the instant the rollback began and keeps it in the pending journal, so a later sync plans and commits with the same bound. The plan digest covers the forgotten entry ids, so it covers the bound through them: a commit sent with another bound than its plan answers `stale-plan`.
+
 **Anchoring.** The events ride the existing hourly Merkle root to Solana devnet with no
 ledger, memo or anchors change (roots only, never event contents). Anchoring lags the hour
 close by about an hour plus the 5 minute ingest lag, and `substrate verify` reports the hour
@@ -242,8 +257,16 @@ repeated refusal is a new fact.
 Phase 57 defines the ledger note for forgetting memory, using an existing kind only. One
 `note` per forget call (`payload.action: "memory.forget"`), emitted from the caller's own
 surface with the target session's `session_id`; it carries no `repo` and no `runtime`. The
-contract is encoded and validated in `packages/mcp-server/src/memory-forget.ts`; nothing is
-wired to the service or an MCP tool by this change.
+contract is encoded and validated in `packages/mcp-server/src/memory-forget.ts`. It is wired
+to the service as `memoryForget` in `service.ts`, an internal method with no MCP tool or HTTP
+route of its own: `session_rollback_commit` calls it for the entries a rollback forgets. The
+Phase 60 and Phase 59 notes `memory.capsule.export`, `memory.capsule.redact`,
+`anchor.signer.rotate` and `anchor.reanchor` are caller-surface notes with their own builders
+(`capsule.ts`, `signer-set.ts`, `reanchor-plan.ts`). `substrate capsule` posts the two capsule
+notes through the CLI event path (`packages/cli/src/capsule.ts`); an operator posts the signer
+rotation with `events_emit` (`docs/runbooks/anchor-signer-rotation.md`). Nothing in the verifier
+reads `anchor.reanchor` yet (`docs/runbooks/devnet-reset-and-reanchor.md`), and no code emits it
+automatically. The server emits none of them by itself.
 
 - Payload: `forget_id` (`fg_` + 26 lowercase hex, derived from the sorted entry ids, the
   reason and the rollback or checkpoint id, so a retried call reuses it), `reason`
