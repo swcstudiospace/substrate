@@ -18,7 +18,7 @@
  * so the same change is published on the next scan. The index cache is separate: it always holds the latest scan.
  */
 import type { EventInput } from "../types.ts";
-import { branchOf, gitLayout, planningSessionId, repoOf } from "./checkout.ts";
+import { branchOf, gitLayout, planningSessionId, repoOf, type OriginUrlRunner } from "./checkout.ts";
 import type { PlanningConfigResult } from "./config.ts";
 import { diffPlanningIndex, type PlanningDiff, type PlanningSnapshot } from "./diff.ts";
 import { observePlanningChange } from "./events.ts";
@@ -86,6 +86,8 @@ export interface PlanningObserverDeps {
 	timers?: PlanningTimers;
 	/** Where a failure is reported. Omitted in production, where it goes to stderr. */
 	report?: (line: string) => void;
+	/** How the checkout's origin URL is asked of git. Omitted in production, where it is `git config --get remote.origin.url`. */
+	originUrl?: OriginUrlRunner;
 }
 
 export class PlanningObserver {
@@ -178,7 +180,7 @@ export class PlanningObserver {
 		const previous = this.baseline !== null && this.baseline.root === root ? this.baseline.snapshot : null;
 		const diff = previous === null ? null : diffPlanningIndex(previous, next);
 		const ttlMs = limits.presenceTtlS * 1000;
-		const repo = await repoOf(this.deps.fs, root);
+		const repo = await repoOf(this.deps.fs, root, this.deps.originUrl);
 		// The server's clock, read once per scan: the time a heartbeat's observation is stamped with, and the time an owed one is aged against.
 		const clock = this.deps.presence === null ? null : await readClock(this.deps.presence);
 		const nowMs = clock !== null && clock.ok ? clock.nowMs : null;

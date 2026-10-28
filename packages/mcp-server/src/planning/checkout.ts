@@ -7,7 +7,7 @@ import { join, resolve as resolvePath } from "node:path";
 import type { PlanningFs } from "./index.ts";
 
 /** Why a change could not be attributed to a repo. Each reason is a typed result, never an exception out of the observer. */
-export type RepoUnknownReason = "no-git-entry" | "git-file-malformed" | "git-dir-unreadable" | "config-unreadable" | "config-missing" | "origin-missing";
+export type RepoUnknownReason = "no-git-entry" | "git-file-malformed" | "git-dir-unreadable" | "origin-unresolved" | "config-unreadable" | "config-missing" | "origin-missing";
 
 /** The session a checkout heartbeats as: stable for the path, and shaped to pass the session id rule. */
 export function planningSessionId(fs: PlanningFs, root: string): string {
@@ -54,12 +54,54 @@ export async function branchOf(fs: PlanningFs, gitDir: string): Promise<string> 
 export type RepoLookup = { state: "known"; repo: string } | { state: "unknown"; reason: RepoUnknownReason; transient: boolean };
 
 /**
- * The `owner/name` of the `origin` remote, read from the common git directory's config. A definitive absence (no git entry,
- * no config, no origin) is `transient: false`. A read that failed for any other reason (denied, I/O, or removed between the
- * stat and the read) is `transient: true`: the caller must not advance its baseline on it, so the change is published by the
- * next successful read.
+ * What asking git for a checkout's origin URL came to. `value` is git's effective answer, includes resolved; `none` is git
+ * saying there is no such key; `failed` is git running but not answering (a timeout, a signal, or an error exit); `unavailable`
+ * is git not being runnable at all (no binary, no such directory), the one case the caller may read the config file itself.
  */
-export async function repoOf(fs: PlanningFs, root: string): Promise<RepoLookup> {
+export type OriginUrlResult = { kind: "value"; url: string } | { kind: "none" } | { kind: "failed" } | { kind: "unavailable" };
+
+/** Asks git for the `remote.origin.url` of the checkout at `root`. It never throws. */
+export type OriginUrlRunner = (root: string) => Promise<OriginUrlResult>;
+
+/** The longest `git config` may take before the answer is `failed`. */
+export const ORIGIN_URL_TIMEOUT_MS = 3000;
+
+/** The only variables the git child sees: where to find git and the user's config, and no prompt. No repository-selecting variable (`GIT_DIR` and the like) and no secret passes. */
+const GIT_CHILD_ENV = ["PATH", "HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"];
+
+/**
+ * Git's own answer for `remote.origin.url`, run in the checkout with a fixed argv and no shell. Git resolves `include.path` and
+ * `includeIf` files, the system and global config, and the last `url` in the file, which a read of `.git/config` alone cannot.
+ * Exit 1 is git's "no such key"; any other nonzero exit, a signal, or the timeout is a failure to answer.
+ */
+export const gitOriginUrl: OriginUrlRunner = async (root) => {
+	const env: Record<string, string> = { GIT_TERMINAL_PROMPT: "0" };
+	for (const name of GIT_CHILD_ENV) {
+		const value = process.env[name];
+		if (value !== undefined) env[name] = value;
+	}
+	try {
+		const proc = Bun.spawn(["git", "config", "--get", "remote.origin.url"], { cwd: root, env, stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: ORIGIN_URL_TIMEOUT_MS, killSignal: "SIGKILL" });
+		const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+		if (proc.signalCode !== null) return { kind: "failed" };
+		if (code === 1) return { kind: "none" };
+		if (code !== 0) return { kind: "failed" };
+		const url = stdout.trim();
+		return url === "" ? { kind: "none" } : { kind: "value", url };
+	} catch (error) {
+		// Bun throws from `spawn` itself when the binary or the working directory is absent; that is "git cannot run".
+		return error instanceof Error && "code" in error && error.code === "ENOENT" ? { kind: "unavailable" } : { kind: "failed" };
+	}
+};
+
+/**
+ * The `owner/name` of the `origin` remote. Git is asked first, run in the checkout, so an origin defined in an included
+ * config file is found as it is by every git command. The common directory's `config` is read directly only when git cannot
+ * run at all. A definitive absence (no git entry, git saying there is no origin, or no config) is `transient: false`. An
+ * answer that failed for any other reason (a git error or timeout, or a config that could not be read) is `transient: true`:
+ * the caller must not advance its baseline on it, so the change is published by the next successful read.
+ */
+export async function repoOf(fs: PlanningFs, root: string, originUrl: OriginUrlRunner = gitOriginUrl): Promise<RepoLookup> {
 	let layout: GitLayout;
 	try {
 		layout = await gitLayout(fs, root);
@@ -67,6 +109,13 @@ export async function repoOf(fs: PlanningFs, root: string): Promise<RepoLookup> 
 		return { state: "unknown", reason: "git-dir-unreadable", transient: true };
 	}
 	if (!layout.ok) return { state: "unknown", reason: layout.reason, transient: false };
+	const asked = await originUrl(root);
+	if (asked.kind === "failed") return { state: "unknown", reason: "origin-unresolved", transient: true };
+	if (asked.kind === "none") return { state: "unknown", reason: "origin-missing", transient: false };
+	if (asked.kind === "value") {
+		const repo = repoFromUrl(asked.url);
+		return repo === null ? { state: "unknown", reason: "origin-missing", transient: false } : { state: "known", repo };
+	}
 	let config: string | null;
 	try {
 		config = await textOf(fs, join(layout.commonDir, "config"));
@@ -99,6 +148,11 @@ export function repoFromGitConfig(text: string): string | null {
 		if (inOrigin && entry !== null && (entry[1] ?? "").toLowerCase() === "url") url = unquoted(withoutComment(entry[2] ?? ""));
 	}
 	if (url === null) return null;
+	return repoFromUrl(url);
+}
+
+/** The `owner/name` a remote URL names, in its ssh, https or scp-like form, or null when it names none. */
+function repoFromUrl(url: string): string | null {
 	const match = /[:/]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/.exec(url);
 	return match ? `${match[1]}/${match[2]}` : null;
 }
