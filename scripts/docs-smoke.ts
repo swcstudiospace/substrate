@@ -278,7 +278,9 @@ export function parseKeyValues(text: string): Record<string, string[]> {
 		const key = line.slice(0, eq).trim();
 		const value = line.slice(eq + 1).trim();
 		if (!key) continue;
-		(out[key] ??= []).push(value);
+		const bucket = out[key] ?? [];
+		out[key] = bucket;
+		bucket.push(value);
 	}
 	return out;
 }

@@ -31,7 +31,7 @@ import { commit, gitPush, prCreate } from "../packages/host/src/hostfns.ts";
 import { parseRoute } from "../packages/host/src/options.ts";
 import { LeaseStore } from "../packages/host/src/substrate.ts";
 import { HostSync, LinearLink, NotionSync, syncTask } from "../packages/host/src/sync.ts";
-import { MemoryTaskStore, TaskService, TaskStore, type VmHandle } from "../packages/host/src/tasks.ts";
+import { TaskService, TaskStore, type VmHandle } from "../packages/host/src/tasks.ts";
 import { createApprovals, decodeCallback } from "../packages/host/src/telegram.ts";
 import {
 	workedRunner,
@@ -452,7 +452,7 @@ async function main(argv: string[]): Promise<number> {
 	const hostCtx = {
 		graphId: GID, nodeId: NID, store,
 		substrate: { graphGet: (id: string) => substrate.graphGet(id) },
-		run: workedRunner(GID, REPO, BRANCH, argvLog),
+		run: workedRunner(REPO, BRANCH, argvLog),
 		log: (line: string) => logs.push(line),
 	};
 	const committed = await commit({ ...hostCtx, message: "lane33 rehearsal" });
@@ -484,7 +484,7 @@ async function main(argv: string[]): Promise<number> {
 		done.completed === true && calls.completes[0]?.leaseId === leaseId,
 		JSON.stringify(done).slice(0, 120),
 	);
-	actor2.resolvers.splice(0).forEach((resolve) => resolve({ stopReason: "end_turn" }));
+	for (const resolve of actor2.resolvers.splice(0)) resolve({ stopReason: "end_turn" });
 	await service2.turns.get(`${GID}/${NID}`);
 	const final = store.get(GID, NID);
 	check("single release; turn settled Done", final?.released === true && calls.releases.length === 0 && final?.exit_code === 0, `released=${final?.released} exit=${final?.exit_code}`);

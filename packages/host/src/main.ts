@@ -16,7 +16,7 @@ import { createApiServer } from "./api.ts";
 import { startTrackerProxy } from "./mcp-proxy.ts";
 import { formatRoute, type MountRoute, parseMountRoute, parseRoute, parseTestsRoute, type Route, type TestsRoute, trackerRoute } from "./options.ts";
 import { defaultSandboxStatePath, destroySandbox, listSandboxes, runEgressCleanup, setEgressWarnSink } from "./sandbox-provider.ts";
-import { type SandboxNetwork } from "./sandbox-options.ts";
+import type { SandboxNetwork } from "./sandbox-options.ts";
 import type { Skill, TrackerLocators } from "./seed.ts";
 import { LeaseStore, SubstrateClient } from "./substrate.ts";
 import { HostSync, LinearLink, NotionSync } from "./sync.ts";

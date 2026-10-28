@@ -1,7 +1,7 @@
 /**
  * Steering delivery (phase 58): the `steering` notice a session reads, the acknowledgement-to-state mapping, the one hint per
  * queued directive, and the expiry timer. Everything runs on an injected clock, injected timers and in-memory sinks: no network,
- * no real delay. The session state machine here is a stub (see `StubSessionMachine`), because the real one lives on another branch.
+ * no real delay. The session state machine here is a stub (see `StubSessionMachine`); the real adapter, `SteeringSessionRegistry`, is tested in `session-state.test.ts`.
  */
 import { describe, expect, test } from "bun:test";
 import type { EventInput } from "../types.ts";
@@ -21,6 +21,7 @@ import {
 	steeringQueuedEvent,
 	type SessionStateName,
 	type SessionStatePort,
+	type SessionTransitionContext,
 	type SessionTransitionResult,
 } from "./steering-delivery.ts";
 import { queueSteering, type SteeringCaller, type SteeringWiring } from "./steering-tools.ts";
@@ -43,23 +44,25 @@ class MemorySink implements SteeringHistorySink {
 }
 
 /**
- * A stub of the live steering session state machine. It MIRRORS main's `steeringStateTransition` (event.ts, SPE-19390: states
+ * A stub of the live steering session state machine, for the seam. It MIRRORS main's `steeringStateTransition` (event.ts, SPE-19390: states
  * ACTIVE, CONTEXT_REFRESH, PAUSED, RESUMED; ACTIVE to CONTEXT_REFRESH or PAUSED, CONTEXT_REFRESH to ACTIVE or PAUSED, PAUSED to
- * RESUMED, RESUMED to ACTIVE or PAUSED, a state to itself) and must be replaced by the real adapter over `nextSteeringSession`
- * when this stack lands on main. It refuses what the rules refuse and never forces a transition.
+ * RESUMED, RESUMED to ACTIVE or PAUSED, a state to itself). The production port is the registry over `nextSteeringSession`
+ * (`session-state.ts`). It refuses what the rules refuse and never forces a transition.
  */
 class StubSessionMachine implements SessionStatePort {
 	readonly states = new Map<string, SessionStateName>();
 	readonly calls: Array<[string, SessionStateName]> = [];
+	readonly directiveIds: string[] = [];
 	throws = false;
 
-	applyTransition(sessionKey: string, target: SessionStateName): SessionTransitionResult {
+	applyTransition(sessionKey: string, target: SessionStateName, context?: SessionTransitionContext): SessionTransitionResult {
 		this.calls.push([sessionKey, target]);
+		if (context !== undefined) this.directiveIds.push(context.directiveId);
 		if (this.throws) throw new Error("state store unavailable");
 		const current = this.states.get(sessionKey) ?? "ACTIVE";
 		if (!StubSessionMachine.allowed(current, target)) return { ok: false, reason: `steering transition ${current} -> ${target} refused` };
 		this.states.set(sessionKey, target);
-		return { ok: true };
+		return { ok: true, changed: current !== target };
 	}
 
 	private static allowed(current: SessionStateName, next: SessionStateName): boolean {
@@ -233,6 +236,8 @@ describe("acknowledgeSteeringWithState", () => {
 		expect(reply).toMatchObject({ status: "acknowledged", outcome: "applied", session_state: { status: "applied", state: "PAUSED" } });
 		expect(machine.states.get("sess-a")).toBe("PAUSED");
 		expect(machine.calls).toEqual([["sess-a", "PAUSED"]]);
+		expect(machine.directiveIds).toEqual([id]);
+		expect(reply).toMatchObject({ checkpoint_hint: { trigger: "steering", directive_id: id } });
 	});
 
 	test("an applied redirect moves the session to CONTEXT_REFRESH, and the machine's own rules take it back to ACTIVE", async () => {
@@ -240,8 +245,9 @@ describe("acknowledgeSteeringWithState", () => {
 		const { wiring, id } = await queued("redirect", machine);
 		const reply = await acknowledgeSteeringWithState(wiring, OPERATOR, { directive_id: id, session_id: "sess-a", outcome: "applied" }, machine);
 		expect(reply).toMatchObject({ session_state: { status: "applied", state: "CONTEXT_REFRESH" } });
+		expect(reply).toMatchObject({ checkpoint_hint: { trigger: "steering", directive_id: id } });
 		expect(machine.states.get("sess-a")).toBe("CONTEXT_REFRESH");
-		expect(machine.applyTransition("sess-a", "ACTIVE")).toEqual({ ok: true });
+		expect(machine.applyTransition("sess-a", "ACTIVE")).toEqual({ ok: true, changed: true });
 	});
 
 	test("an applied annotate and every declined outcome leave the session where it is and never call the port", async () => {
@@ -251,6 +257,20 @@ describe("acknowledgeSteeringWithState", () => {
 			const reply = await acknowledgeSteeringWithState(wiring, OPERATOR, { directive_id: id, session_id: "sess-a", outcome }, machine);
 			expect(reply).toMatchObject({ status: "acknowledged", outcome, session_state: { status: "unchanged" } });
 			expect(machine.calls).toEqual([]);
+			expect(Object.hasOwn(reply, "checkpoint_hint")).toBe(false);
+		}
+	});
+
+	test("a pause for an already PAUSED session and a redirect for an already CONTEXT_REFRESH session report unchanged and carry no checkpoint hint", async () => {
+		for (const [action, held] of [["pause", "PAUSED"], ["redirect", "CONTEXT_REFRESH"]] as const) {
+			const machine = new StubSessionMachine();
+			machine.states.set("sess-a", held);
+			const { wiring, id } = await queued(action, machine);
+			const reply = await acknowledgeSteeringWithState(wiring, OPERATOR, { directive_id: id, session_id: "sess-a", outcome: "applied" }, machine);
+			expect(reply).toMatchObject({ status: "acknowledged", outcome: "applied", session_state: { status: "unchanged" } });
+			expect(machine.calls).toEqual([["sess-a", held]]);
+			expect(machine.states.get("sess-a")).toBe(held);
+			expect(Object.hasOwn(reply, "checkpoint_hint")).toBe(false);
 		}
 	});
 
@@ -264,6 +284,7 @@ describe("acknowledgeSteeringWithState", () => {
 			session_state: { status: "refused", state: "CONTEXT_REFRESH", reason: "steering transition PAUSED -> CONTEXT_REFRESH refused" },
 		});
 		expect(machine.states.get("sess-a")).toBe("PAUSED");
+		expect(Object.hasOwn(reply, "checkpoint_hint")).toBe(false);
 		expect(inbox.get(id)?.state).toBe("acknowledged");
 	});
 

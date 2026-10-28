@@ -186,7 +186,7 @@ function parseAuditJson(text: string): AuditJson {
 	if (data === null || typeof data !== "object" || Array.isArray(data)) throw new GateInputError("the audit output is not an object");
 	for (const [pkg, advisories] of Object.entries(data)) {
 		if (!Array.isArray(advisories)) throw new GateInputError(`the audit output: ${pkg} is not an array`);
-		advisories.forEach((advisory, index) => checkAdvisory(advisory, `${pkg}[${index}]`));
+		for (const [index, advisory] of advisories.entries()) checkAdvisory(advisory, `${pkg}[${index}]`);
 	}
 	return data as AuditJson;
 }

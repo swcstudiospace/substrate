@@ -107,12 +107,12 @@ mkdir -p node_modules
 printf '%s\\n' "$*" >> "$STUB_LOG/systemctl"
 if [[ "$1" == "show" ]]; then
   unit="\${!#}"
-  key="$STUB_LOG/show-count-\$unit"
+  key="$STUB_LOG/show-count-$unit"
   count=0
-  if [[ -f "\$key" ]]; then count=\$(cat "\$key"); fi
-  count=\$((count + 1))
-  printf '%s\\n' "\$count" > "\$key"
-  if [[ "\${FAIL_LOOP:-}" == "1" && "\$unit" == "substrate-collector-grok.service" && \$((count % 2)) -eq 0 ]]; then
+  if [[ -f "$key" ]]; then count=$(cat "$key"); fi
+  count=$((count + 1))
+  printf '%s\\n' "$count" > "$key"
+  if [[ "\${FAIL_LOOP:-}" == "1" && "$unit" == "substrate-collector-grok.service" && $((count % 2)) -eq 0 ]]; then
     printf 'ActiveState=activating\\nSubState=auto-restart\\nNRestarts=1\\n'
   else
     printf 'ActiveState=active\\nSubState=running\\nNRestarts=0\\n'

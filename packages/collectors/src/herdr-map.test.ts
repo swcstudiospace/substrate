@@ -61,7 +61,7 @@ describe("pinned agent table", () => {
 	test("every 0.9.1 enum id is mapped or explicitly unmapped, and muse is separate", () => {
 		expect(INTEGRATION_TARGETS).toHaveLength(17);
 		for (const id of INTEGRATION_TARGETS) {
-			const mapped = Object.prototype.hasOwnProperty.call(HERDR_AGENT_SURFACES, id);
+			const mapped = Object.hasOwn(HERDR_AGENT_SURFACES, id);
 			const unmapped = HERDR_UNMAPPED.has(id);
 			expect({ id, classified: mapped !== unmapped && (mapped || unmapped) }).toEqual({ id, classified: true });
 		}

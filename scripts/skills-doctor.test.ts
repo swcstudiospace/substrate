@@ -98,17 +98,12 @@ describe("hermesApprovalFindings", () => {
 
 describe("bridgeEnvFindings", () => {
 	test("a tokenless env file is clean", () => {
-		expect(bridgeEnvFindings("/etc/substrate/substrate-bridge.env", "SUBSTRATE_URL=http://127.0.0.1:7410\n")).toEqual(
-			[],
-		);
+		expect(bridgeEnvFindings("SUBSTRATE_URL=http://127.0.0.1:7410\n")).toEqual([]);
 	});
 
 	test("a single-token variable names the variable and never its value", () => {
 		for (const name of ["SUBSTRATE_TOKEN", "SUBSTRATE_TOKEN_FILE"] as const) {
-			const findings = bridgeEnvFindings(
-				"/etc/substrate/substrate-bridge.env",
-				`${name}=hunter2-bridge-secret\n`,
-			);
+			const findings = bridgeEnvFindings(`${name}=hunter2-bridge-secret\n`);
 			expect(findings.map((finding) => finding.code)).toEqual(["bridge-env"]);
 			expect(findings[0]?.detail).toContain(name);
 			expect(JSON.stringify(findings)).not.toContain("hunter2-bridge-secret");
@@ -116,24 +111,19 @@ describe("bridgeEnvFindings", () => {
 	});
 
 	test("a file that does not set SUBSTRATE_URL is a finding and does not echo other values", () => {
-		const findings = bridgeEnvFindings(
-			"/etc/substrate/substrate-bridge.env",
-			"NOTES=/tmp/do-not-echo-this-value\n",
-		);
+		const findings = bridgeEnvFindings("NOTES=/tmp/do-not-echo-this-value\n");
 		expect(findings.map((finding) => finding.code)).toEqual(["bridge-env"]);
 		expect(findings[0]?.detail).toContain("SUBSTRATE_URL");
 		expect(JSON.stringify(findings)).not.toContain("do-not-echo-this-value");
 	});
 
 	test("an empty assignment does not count as the URL", () => {
-		const findings = bridgeEnvFindings("/etc/substrate/substrate-bridge.env", "SUBSTRATE_URL=\n");
+		const findings = bridgeEnvFindings("SUBSTRATE_URL=\n");
 		expect(findings[0]?.detail).toContain("SUBSTRATE_URL");
 	});
 
 	test("a missing env file is a finding", () => {
-		expect(bridgeEnvFindings("/etc/substrate/substrate-bridge.env", null).map((finding) => finding.code)).toEqual([
-			"bridge-env",
-		]);
+		expect(bridgeEnvFindings(null).map((finding) => finding.code)).toEqual(["bridge-env"]);
 	});
 });
 

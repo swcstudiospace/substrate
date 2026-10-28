@@ -64,8 +64,6 @@ const STATES = [
 ] as const;
 const TEAM_ID = "team-rh";
 const DONE_ID = "state-done";
-const stateName = (id: string): string =>
-	id === DONE_ID ? "Done" : (STATES.find((s) => s.id === id)?.name ?? id);
 
 interface FakeWorld {
 	issues: Map<string, LinearIssue>;

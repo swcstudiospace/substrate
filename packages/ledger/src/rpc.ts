@@ -170,8 +170,8 @@ export function createRpc({ url, timeoutMs, attempts, backoffMs, fetchImpl = fet
 				continue;
 			}
 			const body = parsed as { result?: T; error?: { code?: unknown; message?: unknown } };
-			const hasResult = Object.prototype.hasOwnProperty.call(body, "result");
-			const hasError = Object.prototype.hasOwnProperty.call(body, "error") && body.error != null;
+			const hasResult = Object.hasOwn(body, "result");
+			const hasError = Object.hasOwn(body, "error") && body.error != null;
 			if (!hasResult && !hasError) {
 				lastFailure = `malformed JSON-RPC response: ${text.slice(0, ERROR_EXCERPT_CHARS)}`;
 				continue;

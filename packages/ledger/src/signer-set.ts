@@ -24,6 +24,7 @@ export const ROTATION_MAX_BACKDATE_MS = 24 * 3_600_000;
 export const ROTATION_MAX_FUTURE_MS = 30 * 24 * 3_600_000;
 
 const BASE58_PUBKEY_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: rejects C0 control characters and DEL in untrusted signer-set labels
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 const EVENT_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 

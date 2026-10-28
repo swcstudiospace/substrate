@@ -4,6 +4,23 @@ import { parseRoute, type Route, sessionEnv, type TestsRoute, trackerRoute } fro
 import { renderPrompt, type RenderPromptInput, type SeedFile, type SeedFilesInput, seedFiles, substrateProxyLoopback } from "./seed.ts";
 import type { GraphView } from "./substrate.ts";
 
+/** The slice of the seeded ultrathink-state.json these tests read. */
+interface SeededState {
+	sessionId: string;
+	host: string;
+	result: unknown;
+	plan: { graphId: string; task: { item: string }; [list: string]: unknown };
+	tracking: {
+		graphId: string;
+		status: string;
+		linearTeam: string;
+		linear: { nodes: unknown; steps: unknown };
+		notion: { taskUrl?: string; nodes: unknown };
+		errors: unknown;
+		updatedAt: number;
+	};
+}
+
 const A = ["loopback", "hostfn_proxy", "anthropic_key"] as const;
 const B = ["hooks", "prompt_hostfn", "host_after_turn"] as const;
 const C = ["vm_git", "sandbox_git", "hostfn_commit"] as const;
@@ -281,7 +298,7 @@ describe("seedFiles (SC-2, D-08, D-11)", () => {
 
 	test("ultrathink-state.json is a complete-tracking SessionRecord for the node; the .xml is the rendered prompt", () => {
 		const files = seedFiles(seedInput());
-		const state = JSON.parse(fileAt(files, "/home/agentos/.substrate/ultrathink-state.json")) as Record<string, any>;
+		const state = JSON.parse(fileAt(files, "/home/agentos/.substrate/ultrathink-state.json")) as SeededState;
 		expect(state.sessionId).toBe(NID);
 		expect(state.host).toBe("claude-code");
 		expect(state).not.toHaveProperty("engine");
@@ -315,7 +332,7 @@ describe("seedFiles (SC-2, D-08, D-11)", () => {
 
 	test("omits the Linear ref and the Notion task url when the graph lacks them", () => {
 		const files = seedFiles(seedInput({ graph: BARE_GRAPH }));
-		const state = JSON.parse(fileAt(files, "/home/agentos/.substrate/ultrathink-state.json")) as Record<string, any>;
+		const state = JSON.parse(fileAt(files, "/home/agentos/.substrate/ultrathink-state.json")) as SeededState;
 		expect(state.tracking.status).toBe("complete");
 		expect(state.tracking.linear.nodes).toEqual({});
 		expect(state.tracking.notion).not.toHaveProperty("taskUrl");
