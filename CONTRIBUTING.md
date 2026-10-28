@@ -17,11 +17,11 @@ bunx tsc --noEmit                    # typecheck
 bun test                             # full suite; set SUBSTRATE_TEST_PG_URL to run the live index tests
 python3 -m pytest packages/miner/tests packages/dispatcher/tests
 bun run check:phase-close            # event vocabulary, store lock, audit policy and redaction locks
-bun run verify                       # the whole gate: install, types, tests, python, locks
-bun run verify --only types,locks    # selected steps (ids: install, types, tests, python, locks, audit)
+bun run verify                       # the whole gate: install, types, lint, tests, python, locks
+bun run verify --only types,locks    # selected steps (ids: install, types, lint, tests, python, locks, audit)
 bun run verify --list                # print the steps
 bun run verify --audit               # also run the dependency audit (needs the network)
-bun run lint                         # Biome; report-only in CI
+bun run lint                         # Biome; errors block the gate, warnings stay visible
 ```
 
 `bun run verify` is the gate CI runs; a drift test (`scripts/verify.test.ts`) fails when the workflow and `scripts/verify.ts` disagree. Change a gate command in both together.
