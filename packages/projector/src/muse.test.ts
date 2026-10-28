@@ -353,4 +353,85 @@ describe("generated muse hook", () => {
 		expect(Object.keys(line).sort()).toEqual(["collector", "error", "kind", "source", "status", "surface", "ts"]);
 		expect(line).toMatchObject({ collector: "muse", source: "muse.tool_call", kind: "tool.call", surface: "muse", status: 400 });
 	}, SPAWN_TEST_TIMEOUT_MS);
+
+	test("an open stdin cannot hold the turn: the hook exits 0 with empty stdout", async () => {
+		const dir = temp();
+		expect(run(dir, ["--bundle-only"], { url: "http://127.0.0.1:1" }).code).toBe(0);
+		const started = Date.now();
+		const proc = Bun.spawn(["bun", join(dir, "bundle", "hooks", "post-tool-use.ts")], {
+			cwd: dir,
+			env: { PATH: process.env.PATH ?? "", HOME: dir },
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+		// The hook budget is 1.5 s plus process start; a 5 s stdin wait would fail this.
+		expect(Date.now() - started).toBeLessThan(4000);
+		expect(code).toBe(0);
+		expect(stdout).toBe("");
+	}, SPAWN_TEST_TIMEOUT_MS);
+
+	test("a collector that never answers cannot hold the turn past the budget", async () => {
+		const dir = temp();
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			fetch: () => new Promise<Response>(() => {}),
+		});
+		try {
+			expect(run(dir, ["--bundle-only"], { url: `http://127.0.0.1:${server.port}` }).code).toBe(0);
+			const started = Date.now();
+			const proc = Bun.spawn(["bun", join(dir, "bundle", "hooks", "post-tool-use.ts")], {
+				cwd: dir,
+				env: { PATH: process.env.PATH ?? "", HOME: dir },
+				stdin: new Blob([JSON.stringify({ tool_name: "Read" })]),
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			// The POST gets only the budget stdin left over, so a hung collector is abandoned in time.
+			expect(Date.now() - started).toBeLessThan(4000);
+			expect(code).toBe(0);
+			expect(stdout).toBe("");
+		} finally {
+			server.stop(true);
+		}
+	}, SPAWN_TEST_TIMEOUT_MS);
+
+	test("the stdin wait and the POST share one deadline, not a fresh timer each", async () => {
+		const dir = temp();
+		const received = Promise.withResolvers<void>();
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			fetch() {
+				received.resolve();
+				return new Promise<Response>(() => {});
+			},
+		});
+		try {
+			expect(run(dir, ["--bundle-only"], { url: `http://127.0.0.1:${server.port}` }).code).toBe(0);
+			const started = Date.now();
+			const proc = Bun.spawn(["bun", join(dir, "bundle", "hooks", "post-tool-use.ts")], {
+				cwd: dir,
+				env: { PATH: process.env.PATH ?? "", HOME: dir },
+				stdin: "pipe",
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			proc.stdin.write(JSON.stringify({ tool_name: "Read" }));
+			// Real 1 s delay, the one allowed exception: the hook runs in a child process, so fake timers cannot drive its deadline. Stdin closes after it, so the POST starts with budget already spent.
+			await Bun.sleep(1000);
+			proc.stdin.end();
+			await received.promise;
+			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			// One shared 1.5 s budget ends near 1.5 s plus process start. Fresh timers for the POST would end near 2.5 s plus start.
+			expect(Date.now() - started).toBeLessThan(2500);
+			expect(code).toBe(0);
+			expect(stdout).toBe("");
+		} finally {
+			server.stop(true);
+		}
+	}, SPAWN_TEST_TIMEOUT_MS);
 });
