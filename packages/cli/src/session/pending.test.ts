@@ -304,6 +304,33 @@ describe("replayPending", () => {
 		expect(fake.deliveries.commit).toBe(1);
 	});
 
+	test("an offline rollback kept for a plane retry holds the digest the server accepted, so the next sync commits it without planning again", async () => {
+		const fake = server();
+		fake.checkpoints.set(ckptId(1), { ...checkpointItem(1).record, session_id: SESSION, event_id: "evt_seed" });
+		fake.planePendingReplies = 2;
+		const dir = dirWith(rollbackItem(1, null));
+		expect(listPending(dir).items[0]).toMatchObject({ commit: { plan_digest: null } });
+
+		await replayPending({ dir, clientFor: () => fake });
+		expect(fake.planRequests).toHaveLength(1);
+		const kept = listPending(dir).items[0];
+		const digest = fake.commits.get(rbId(1))?.plan_digest;
+		expect(typeof digest).toBe("string");
+		expect(kept).toMatchObject({ kind: "rollback", plane_retries: 0, commit: { plan_digest: digest } });
+
+		// The target checkpoint is gone from the server's bounded read: a re-plan would answer not-found, so none may be asked for.
+		fake.checkpoints.clear();
+		const second = await replayPending({ dir, clientFor: () => fake });
+		expect(fake.planRequests).toHaveLength(1);
+		expect(fake.calls.filter((call) => call.startsWith(`commit:${rbId(1)}`))).toHaveLength(2);
+		expect(second).toMatchObject({ failed: [], plane_pending: [{ id: rbId(1), retries: 1 }] });
+
+		const third = await replayPending({ dir, clientFor: () => fake });
+		expect(fake.planRequests).toHaveLength(1);
+		expect(third).toMatchObject({ failed: [], remaining: 0, plane_pending: [], warnings: [] });
+		expect(listPending(dir).items).toEqual([]);
+	});
+
 	test("a server that keeps reporting pending deletes is sent the commit a bounded number of times, then the record is dropped with a named warning", async () => {
 		const fake = server();
 		fake.checkpoints.set(ckptId(1), { ...checkpointItem(1).record, session_id: SESSION, event_id: "evt_seed" });

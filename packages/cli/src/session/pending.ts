@@ -431,6 +431,8 @@ export async function replayPending(params: ReplayParams): Promise<ReplayOutcome
 		let failure: { code: string; message: string; retryable: boolean } | null = null;
 		let eventId = "";
 		let planePending = false;
+		// The digest the server accepted for a rollback commit: a record kept for a plane retry must hold it, never the queued null.
+		let acceptedDigest: string | null = null;
 		if (item.kind === "checkpoint") {
 			const result = await client.recordCheckpoint({ ...item.record, session_id: item.session_id });
 			if (result.ok) eventId = result.value.event_id;
@@ -462,6 +464,7 @@ export async function replayPending(params: ReplayParams): Promise<ReplayOutcome
 				if (committed.ok) {
 					eventId = committed.value.event_id;
 					planePending = committed.value.memory?.plane_pending === true;
+					acceptedDigest = digest;
 					failure = null;
 					break;
 				}
@@ -489,7 +492,8 @@ export async function replayPending(params: ReplayParams): Promise<ReplayOutcome
 					continue;
 				}
 				try {
-					writePending(dir, { ...item, plane_retries: retries, last_error: "plane-pending: the rollback is recorded; its Hindsight deletes are pending" });
+					// The digest the server accepted is kept, so an offline rollback (queued with a null digest) re-sends the very commit it recorded.
+					writePending(dir, { ...item, commit: { ...item.commit, plan_digest: acceptedDigest ?? item.commit.plan_digest }, plane_retries: retries, last_error: "plane-pending: the rollback is recorded; its Hindsight deletes are pending" });
 				} catch {
 					// Bookkeeping only: the record is intact and the next sync sends the commit again.
 				}
