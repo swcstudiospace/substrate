@@ -99,8 +99,14 @@ afterAll(() => {
 	for (const close of closers) close();
 });
 
+/** What a test hands the loopback: where to record request bodies, and the `node` member to answer a `node_id` with. */
+interface EvidenceServe {
+	requests?: string[];
+	node?: unknown;
+}
+
 /** An isolated loopback whose `POST /evidence` answers with the production bundle. */
-async function serveEvidence(substrate: Substrate, rpc: unknown, now: number): Promise<string> {
+async function serveEvidence(substrate: Substrate, rpc: unknown, now: number, serve: EvidenceServe = {}): Promise<string> {
 	const observed = createObservability(loadConfig({}));
 	await observed.start();
 	closers.push(() => observed.stop());
@@ -115,12 +121,15 @@ async function serveEvidence(substrate: Substrate, rpc: unknown, now: number): P
 		});
 		req.on("end", () => {
 			void (async () => {
-				const parsed = JSON.parse(body) as { graph_id?: unknown };
+				serve.requests?.push(body);
+				const parsed = JSON.parse(body) as { graph_id?: unknown; node_id?: unknown };
 				const bundle = await buildGraphEvidence(observed, substrate, String(parsed.graph_id), [], undefined, {
 					rpc: rpc as never,
 					now,
 				});
-				res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(bundle));
+				// The production server adds the `node` member only when the request names a node.
+				const answer = typeof parsed.node_id === "string" && "node" in serve ? { ...bundle, node: serve.node } : bundle;
+				res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(answer));
 			})();
 		});
 	});
@@ -192,5 +201,102 @@ describe("substrate evidence", () => {
 			[anchored.iso, "anchored"],
 			[open.iso, "pending"],
 		]);
+	});
+
+	describe("--node", () => {
+		const ARTIFACT = {
+			node_id: "n1",
+			claim: [{ ts: "2026-10-01T10:00:00.000Z", action: "granted" }],
+			linear: [
+				{ ts: "2026-10-01T10:00:01.000Z", op: "claim", status: "ok", reason: null, blocker_node: null, edge_kind: null },
+			],
+			notion: [{ ts: "2026-10-01T10:00:02.000Z", op: "page", status: "failed", reason: "rate-limited" }],
+			dod: [{ ts: "2026-10-01T10:00:03.000Z", status: "approved", reason: null }],
+		};
+
+		/** A clean graph (one anchored hour) whose loopback records each request body. */
+		async function cleanServer(graph: string, serve: EvidenceServe): Promise<string> {
+			const world = buildHour(H, "sess-ev-n", graph);
+			const substrate = new Substrate(loadConfig({ SOLANA_ANCHOR_PUBKEY: PUBKEY }), {
+				index: null,
+				greptime: stubGreptime([world], { [H]: anchorRow(H, world, "sig-ev-n") }) as never,
+			});
+			const rpc = { getGenesisHash: async () => GENESIS, transactionMemo: async () => memoTx(world.memo) };
+			return serveEvidence(substrate, rpc, H + 4 * HOUR, serve);
+		}
+
+		test("sends node_id and prints the server's node member", async () => {
+			const graph = "ut-cli-ev-node";
+			const requests: string[] = [];
+			const base = await cleanServer(graph, { requests, node: ARTIFACT });
+
+			const result = await run(["evidence", "--graph", graph, "--node", "n1"], { SUBSTRATE_URL: base });
+
+			expect(result.exitCode).toBe(0);
+			expect(requests.map((raw) => JSON.parse(raw))).toEqual([{ graph_id: graph, format: "json", node_id: "n1" }]);
+			const document = JSON.parse(result.stdout) as { graph_id: string; node: unknown };
+			expect(document.graph_id).toBe(graph);
+			expect(document.node).toEqual(ARTIFACT);
+		});
+
+		test("without --node the request is exactly graph_id and format, and no node member is printed", async () => {
+			const graph = "ut-cli-ev-nonode";
+			const requests: string[] = [];
+			const base = await cleanServer(graph, { requests, node: ARTIFACT });
+
+			const result = await run(["evidence", "--graph", graph], { SUBSTRATE_URL: base });
+
+			expect(result.exitCode).toBe(0);
+			expect(requests).toEqual([JSON.stringify({ graph_id: graph, format: "json" })]);
+			expect(JSON.parse(result.stdout)).not.toHaveProperty("node");
+		});
+
+		test("--node without a value is a usage error and sends nothing", async () => {
+			const requests: string[] = [];
+			const base = await cleanServer("ut-cli-ev-novalue", { requests });
+
+			const result = await run(["evidence", "--graph", "ut-cli-ev-novalue", "--node"], { SUBSTRATE_URL: base });
+
+			expect(result.exitCode).toBe(2);
+			expect(result.stderr).toContain("usage: substrate evidence --graph <graph_id> [--node <node_id>]");
+			expect(requests).toEqual([]);
+		});
+
+		test("--node with --format html is a usage error that names the JSON-only artifact", async () => {
+			const requests: string[] = [];
+			const base = await cleanServer("ut-cli-ev-html", { requests });
+
+			const result = await run(["evidence", "--graph", "ut-cli-ev-html", "--node", "n1", "--format", "html"], {
+				SUBSTRATE_URL: base,
+			});
+
+			expect(result.exitCode).toBe(2);
+			expect(result.stderr).toContain("the node artifact is part of the JSON document only");
+			expect(requests).toEqual([]);
+		});
+
+		test("a node answer of { error } writes the document, names the node and the error, and exits 1", async () => {
+			const graph = "ut-cli-ev-nodeerr";
+			const base = await cleanServer(graph, { node: { error: "GREPTIME_URL is not set" } });
+
+			const result = await run(["evidence", "--graph", graph, "--node", "n1"], { SUBSTRATE_URL: base });
+
+			expect(result.exitCode).toBe(1);
+			expect(result.stderr).toContain("[substrate] node n1: GREPTIME_URL is not set");
+			const document = JSON.parse(result.stdout) as { graph_id: string; node: unknown };
+			expect(document.graph_id).toBe(graph);
+			expect(document.node).toEqual({ error: "GREPTIME_URL is not set" });
+		});
+
+		test("a node member of the wrong shape is not an evidence bundle", async () => {
+			const graph = "ut-cli-ev-nodebad";
+			const base = await cleanServer(graph, { node: { node_id: "n1", claim: "granted" } });
+
+			const result = await run(["evidence", "--graph", graph, "--node", "n1"], { SUBSTRATE_URL: base });
+
+			expect(result.exitCode).toBe(1);
+			expect(result.stderr).toContain("bundle.node.claim must be a list");
+			expect(result.stdout).toBe("");
+		});
 	});
 });
