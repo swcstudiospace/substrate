@@ -576,7 +576,9 @@ function writeEventOf(row: Record<string, unknown>): LedgerWriteEvent | null {
 	if (payload === null || typeof payload !== "object") return null;
 	const fields = payload as Record<string, unknown>;
 	if (fields.outcome !== "accepted" || typeof fields.scope !== "string" || typeof fields.kind !== "string") return null;
-	return { id: row.id, ts: new Date(tsMs).toISOString(), surface: row.surface, scope: fields.scope, kind: fields.kind };
+	// Carried only when the payload names one (the key is newer than the events); the key is absent, never `undefined`, so a legacy event keeps its old shape.
+	const entryId = typeof fields.entry_id === "string" && fields.entry_id.length > 0 ? { entry_id: fields.entry_id } : {};
+	return { id: row.id, ts: new Date(tsMs).toISOString(), surface: row.surface, scope: fields.scope, kind: fields.kind, ...entryId };
 }
 
 /**

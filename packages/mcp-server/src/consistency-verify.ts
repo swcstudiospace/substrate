@@ -26,14 +26,24 @@
  * - A subject-addressed document is shared by every entry with that scope,
  *   kind and subject, so a document a live entry still owns is never an
  *   orphan and never a forgotten entry's leftover.
- * - The ledger's write event carries the decision, never the entry id (see
- *   `auditMemoryWrite`). The two ledger findings therefore compare by what
- *   the event DOES carry: writer surface, canonical scope, memory kind and
- *   time. They are exact in count within a bucket and approximate in
- *   identity, and a replayed idempotent write or an entry the sweeper
- *   deleted can explain a `ledger_write_without_entry`. The window is
- *   bounded (default seven days) so the ledger's own retention and the
- *   sweeper do not turn into noise.
+ * - The ledger's write event carries the stored entry id (`entry_id`, see
+ *   `auditMemoryWrite`), and an event with one satisfies exactly that entry.
+ *   An event written before the key existed carries none: the two ledger
+ *   findings then compare by what such an event DOES carry: writer surface,
+ *   canonical scope, memory kind and time. That heuristic runs first, over
+ *   every scanned entry and every event without an entry id, so a legacy
+ *   event is consumed by the entry it matched before the key existed; an
+ *   event that names an entry only ever adds a satisfied entry and never
+ *   frees a legacy event for another one. The heuristic is exact in count
+ *   within a bucket and approximate in identity, and a replayed idempotent
+ *   write or an entry the sweeper deleted can explain a
+ *   `ledger_write_without_entry`. When an entry that no event names could just
+ *   as well own the legacy event the heuristic gave to an entry an exact event
+ *   also names (an entry written before the upgrade and retried after it), the
+ *   data cannot tell which entry lacks an audit: that is reported as
+ *   `ledger_pairing_ambiguous`, never guessed either way. The window is bounded (default seven
+ *   days) so the ledger's own retention and the sweeper do not turn into
+ *   noise.
  *
  * Failure model: a reader that throws or times out marks ITS store
  * `store_unreachable` in the report and `ok` false. The run never crashes
@@ -64,6 +74,7 @@ export const FINDING_CODES = [
 	"hash_mismatch",
 	"index_entry_missing_in_plane",
 	"index_entry_without_ledger_write",
+	"ledger_pairing_ambiguous",
 	"ledger_write_without_entry",
 	"plane_document_orphan",
 ] as const;
@@ -156,6 +167,11 @@ export interface LedgerWriteEvent {
 	surface: string;
 	scope: string;
 	kind: string;
+	/**
+	 * The stored entry's id, when the event carries one (`auditMemoryWrite` writes it from the gate's result).
+	 * Events written before the key existed lack it and are paired by the writer + scope + kind + time heuristic.
+	 */
+	entry_id?: string;
 }
 
 /**
@@ -329,6 +345,10 @@ export interface Finding {
 	expected_document_id?: string;
 	entry_id?: string;
 	event_id?: string;
+	/** For `ledger_pairing_ambiguous`: the other entry the same legacy event may belong to. */
+	contender_entry_id?: string;
+	/** For `ledger_pairing_ambiguous`: the event written without an entry id that either entry may own. */
+	legacy_event_id?: string;
 	/** A fixed-template sentence over validated tokens. Never content. */
 	detail: string;
 }
@@ -554,6 +574,32 @@ function bucketOf(writer: string, scope: string, kind: string): string {
 function bucketParts(bucket: string): { writer: string; scope: string; kind: string } {
 	const parts = JSON.parse(bucket) as string[];
 	return { writer: parts[0] ?? "", scope: parts[1] ?? "", kind: parts[2] ?? "" };
+}
+
+/** A recorded (entry, legacy event) pair of one bucket. */
+export interface LedgerPair {
+	entry: { id: string; tsMs: number };
+	event: { id: string; tsMs: number };
+}
+
+/**
+ * The first pair, in bucket order, whose legacy event could be the audit of an entry created at `entryTsMs`: the
+ * event's time minus the entry's lies in `[-skewMs, lagMs]` (both ends inclusive, the matcher's own rule). `pairs` MUST
+ * be sorted by event time with ties in bucket order, so the first pair at or after the lower bound is the answer when it
+ * is inside the upper one. A binary search, not a scan: O(log n) per call, and O(1) for an empty list.
+ */
+export function findContender(pairs: readonly LedgerPair[], entryTsMs: number, skewMs: number, lagMs: number): LedgerPair | undefined {
+	if (pairs.length === 0) return undefined;
+	const lower = entryTsMs - skewMs;
+	let lo = 0;
+	let hi = pairs.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if ((pairs[mid] as LedgerPair).event.tsMs < lower) lo = mid + 1;
+		else hi = mid;
+	}
+	const candidate = pairs[lo];
+	return candidate !== undefined && candidate.event.tsMs - entryTsMs <= lagMs ? candidate : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -993,7 +1039,7 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 		}
 		ledgerWindow = { from: new Date(windowFrom).toISOString(), to: new Date(windowTo).toISOString() };
 
-		const events: Array<{ id: string; tsMs: number; bucket: string }> = [];
+		const events: Array<{ id: string; tsMs: number; bucket: string; entryId: string | null }> = [];
 		const seen = new Set<string>();
 		let cursor: string | null = null;
 		let partial = false;
@@ -1018,7 +1064,9 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 					partial = true;
 					break;
 				}
-				events.push({ id: event.id, tsMs, bucket: bucketOf(event.surface, event.scope, event.kind) });
+				// A non-string or empty entry_id is no id: such an event pairs like a legacy one.
+				const entryId = typeof event.entry_id === "string" && event.entry_id.length > 0 ? event.entry_id : null;
+				events.push({ id: event.id, tsMs, bucket: bucketOf(event.surface, event.scope, event.kind), entryId });
 			}
 			if (partial || page.next === null) break;
 			// A page may carry no write events at all (the reader filters a window of notes), so progress is the cursor moving.
@@ -1037,6 +1085,27 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 		}
 		coverage.ledger = "compared";
 
+		// Events that name no entry (written before `entry_id` existed) pair by the heuristic, over EVERY scanned entry,
+		// exactly as they did before the key existed: an exact event never frees a legacy event for another entry.
+		// Events that name an entry then satisfy that entry on top of the heuristic (an entry named by several events
+		// counts one pair). An event naming an entry the scan did not read never falls back to the heuristic: it would
+		// steal the event of an entry that has its own, so it is reported as it is.
+		const itemIds = new Set<string>();
+		for (const item of items) itemIds.add(item.entry.id);
+		const exactEntryIds = new Set<string>();
+		const heuristicMatchedIds = new Set<string>();
+		const namedWithoutEntry: Array<{ id: string; tsMs: number; bucket: string; entryId: string }> = [];
+		const heuristicEvents: Array<{ id: string; tsMs: number; bucket: string }> = [];
+		for (const event of events) {
+			if (event.entryId === null) {
+				heuristicEvents.push(event);
+			} else if (itemIds.has(event.entryId)) {
+				exactEntryIds.add(event.entryId);
+			} else {
+				namedWithoutEntry.push({ id: event.id, tsMs: event.tsMs, bucket: event.bucket, entryId: event.entryId });
+			}
+		}
+
 		// Entries a writer's surface can have an event for, created inside the judged window.
 		const entriesByBucket = new Map<string, Array<{ id: string; tsMs: number }>>();
 		for (const item of items) {
@@ -1049,7 +1118,7 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 			entriesByBucket.set(bucket, list);
 		}
 		const eventsByBucket = new Map<string, Array<{ id: string; tsMs: number }>>();
-		for (const event of events) {
+		for (const event of heuristicEvents) {
 			// Every event up to now pairs (an entry near the window's end may have its event after it); only the judged range reports.
 			const list = eventsByBucket.get(event.bucket) ?? [];
 			list.push({ id: event.id, tsMs: event.tsMs });
@@ -1066,6 +1135,7 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 			let j = 0;
 			const unmatchedEntries: Array<{ id: string; tsMs: number }> = [];
 			const unmatchedEvents: Array<{ id: string; tsMs: number }> = [];
+			const pairs: Array<{ entry: { id: string; tsMs: number }; event: { id: string; tsMs: number } }> = [];
 			while (i < entryList.length && j < eventList.length) {
 				const entry = entryList[i] as { id: string; tsMs: number };
 				const event = eventList[j] as { id: string; tsMs: number };
@@ -1080,20 +1150,43 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 					i += 1;
 				} else {
 					counts.ledger_pairs += 1;
+					heuristicMatchedIds.add(entry.id);
+					pairs.push({ entry, event });
 					i += 1;
 					j += 1;
 				}
 			}
 			unmatchedEntries.push(...entryList.slice(i));
 			unmatchedEvents.push(...eventList.slice(j));
+			// Only a pair whose entry an exact event names can contend; with none, no unmatched entry needs a search at all.
+			// `pairs` is built in bucket order, which is event time order (ties by id), so `contenders` is sorted already.
+			const contenders = exactEntryIds.size === 0 ? [] : pairs.filter((pair) => exactEntryIds.has(pair.entry.id));
 			for (const entry of unmatchedEntries) {
+				// An event that names this entry satisfies it (its pair is counted below).
+				if (exactEntryIds.has(entry.id)) continue;
+				// A legacy event the heuristic gave to an entry that an exact event also names could as well be this entry's own
+				// audit (the other entry then had none until a retry after the upgrade). The data cannot say which: report that.
+				const contender = findContender(contenders, entry.tsMs, cfg.ledgerSkewMs, cfg.ledgerLagMs);
+				if (contender !== undefined) {
+					add({
+						code: "ledger_pairing_ambiguous",
+						id: token(entry.id),
+						stores: ["index", "ledger"],
+						bank: bankLabel,
+						entry_id: token(entry.id),
+						contender_entry_id: token(contender.entry.id),
+						legacy_event_id: token(contender.event.id),
+						detail: `the memory.write event ${token(contender.event.id)} (writer ${token(writer)}, ${token(kind)} at ${token(scope)}) carries no entry id and may be the audit of this entry or of entry ${token(contender.entry.id)}; an exact event also names entry ${token(contender.entry.id)}, so one of the two entries may have no audit and the data cannot say which`,
+					});
+					continue;
+				}
 				add({
 					code: "index_entry_without_ledger_write",
 					id: token(entry.id),
 					stores: ["index", "ledger"],
 					bank: bankLabel,
 					entry_id: token(entry.id),
-					detail: `no accepted memory.write event for writer ${token(writer)}, ${token(kind)} at ${token(scope)} within ${Math.round(cfg.ledgerLagMs / 1000)}s after this entry (the event carries no entry id, so entries match by writer, scope, kind and time)`,
+					detail: `no accepted memory.write event names this entry or matches writer ${token(writer)}, ${token(kind)} at ${token(scope)} within ${Math.round(cfg.ledgerLagMs / 1000)}s after it (an event written without an entry id can only match by writer, scope, kind and time)`,
 				});
 			}
 			for (const event of unmatchedEvents) {
@@ -1107,8 +1200,25 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 					detail: `an accepted memory.write event (writer ${token(writer)}, ${token(kind)} at ${token(scope)}) has no index entry created within ${Math.round(cfg.ledgerLagMs / 1000)}s before it (the event carries no entry id: it may be an idempotent replay or an entry the sweeper deleted)`,
 				});
 			}
-			counts.ledger_events_judged += eventList.filter((event) => event.tsMs >= judgedEventFrom && event.tsMs <= windowTo).length;
 		}
+		// An entry satisfied by an event that names it, and by no heuristic pair, is one more pair.
+		for (const id of exactEntryIds) {
+			if (!heuristicMatchedIds.has(id)) counts.ledger_pairs += 1;
+		}
+		for (const event of namedWithoutEntry) {
+			if (event.tsMs < judgedEventFrom || event.tsMs > windowTo) continue;
+			const { writer, scope, kind } = bucketParts(event.bucket);
+			add({
+				code: "ledger_write_without_entry",
+				id: token(event.id),
+				stores: ["ledger", "index"],
+				bank: token(cfg.bankFor(writer)),
+				event_id: token(event.id),
+				entry_id: token(event.entryId),
+				detail: `an accepted memory.write event (writer ${token(writer)}, ${token(kind)} at ${token(scope)}) names entry ${token(event.entryId)}, which the index scan did not return (the entry may have been swept, or lies beyond the scan bound)`,
+			});
+		}
+		counts.ledger_events_judged += events.filter((event) => event.tsMs >= judgedEventFrom && event.tsMs <= windowTo).length;
 	}
 
 	// ── assemble ──────────────────────────────────────────────────────────
@@ -1313,8 +1423,9 @@ export function planRepairs(report: ConsistencyReport): RepairPlan {
 				unrepairable.push({ finding: finding.code, finding_id: finding.id, reason: "the index row is authoritative: review the row, nothing is rewritten automatically" });
 				continue;
 			case "index_entry_without_ledger_write":
+			case "ledger_pairing_ambiguous":
 			case "ledger_write_without_entry":
-				unrepairable.push({ finding: finding.code, finding_id: finding.id, reason: "the ledger is append-only and the event carries no entry id: review by hand" });
+				unrepairable.push({ finding: finding.code, finding_id: finding.id, reason: "the ledger is append-only and this run cannot repair a pairing between it and the index: review by hand" });
 				continue;
 		}
 		unrepairable.push({ finding: finding.code, finding_id: finding.id, reason: "the finding lacks the ids a repair needs" });
