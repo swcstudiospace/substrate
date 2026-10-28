@@ -27,7 +27,7 @@ import type { MemorySearch, MemorySearchPage, SubstrateEvent } from "./types.ts"
 const H = Date.UTC(2026, 8, 1, 10);
 const HOUR = 3_600_000;
 const NOW = H + 5 * HOUR;
-const PUBKEY = "TestPubkey1111111111111111111111111111111";
+const PUBKEY = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T";
 
 /** A `FakeStore` that also answers prefix searches, newest first. */
 class ScratchIndex extends FakeStore {

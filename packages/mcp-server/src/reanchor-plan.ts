@@ -284,7 +284,7 @@ export interface ReanchorEventDraft {
 	kind: "note";
 	summary: string;
 	payload: ReanchorPayload;
-	/** Stable per (hour, new signature): a replay of the same re-anchor is the same fact. */
+	/** Stable per (hour, new signature): a replay of the same re-anchor is the same fact. The executor's repair of a stale pointer derives its own key (`reanchor.ts`, `repairIdempotencyKey`). */
 	idempotency_key: string;
 }
 

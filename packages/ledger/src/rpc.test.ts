@@ -95,15 +95,31 @@ describe("addressMemos and balance", () => {
 			{
 				result: [
 					{ signature: SIG, slot: 7, err: null, memo: `[105] ${MEMO}`, blockTime: 1 },
-					{ signature: "3".repeat(88), slot: 6, err: { InstructionError: [0, "x"] }, memo: null, blockTime: 1 },
+					{ signature: "3".repeat(88), slot: 6, err: { InstructionError: [0, "x"] }, memo: null, blockTime: null },
 				],
 			},
 		]);
 		expect(await rpc.addressMemos(PAYER, 100)).toEqual([
-			{ signature: SIG, memo: MEMO, err: null, slot: 7 },
-			{ signature: "3".repeat(88), memo: null, err: { InstructionError: [0, "x"] }, slot: 6 },
+			{ signature: SIG, memo: MEMO, err: null, slot: 7, blockTime: 1 },
+			{ signature: "3".repeat(88), memo: null, err: { InstructionError: [0, "x"] }, slot: 6, blockTime: null },
 		]);
 		expect(requests[0]).toMatchObject({ method: "getSignaturesForAddress", params: [PAYER, { limit: 100 }] });
+	});
+
+	test("a before cursor is passed through so a caller can page backwards", async () => {
+		const { rpc, requests } = fakeRpc([{ result: [] }]);
+		expect(await rpc.addressMemos(PAYER, 50, SIG)).toEqual([]);
+		expect(requests[0]).toMatchObject({ method: "getSignaturesForAddress", params: [PAYER, { limit: 50, before: SIG }] });
+	});
+
+	test("commitment is sent only when passed", async () => {
+		const { rpc, requests } = fakeRpc([{ result: [] }, { result: [] }, { result: [] }]);
+		await rpc.addressMemos(PAYER, 10);
+		await rpc.addressMemos(PAYER, 10, SIG, "confirmed");
+		await rpc.addressMemos(PAYER, 10, undefined, "finalized");
+		expect(requests[0]?.params).toEqual([PAYER, { limit: 10 }]);
+		expect(requests[1]?.params).toEqual([PAYER, { limit: 10, before: SIG, commitment: "confirmed" }]);
+		expect(requests[2]?.params).toEqual([PAYER, { limit: 10, commitment: "finalized" }]);
 	});
 
 	test("balance returns result.value", async () => {

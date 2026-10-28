@@ -85,7 +85,14 @@ export type TransactionMemo = {
 	blockTime: number | null;
 };
 
-export type AddressMemo = { signature: string; memo: string | null; err: unknown; slot: number | null };
+export type AddressMemo = {
+	signature: string;
+	memo: string | null;
+	err: unknown;
+	slot: number | null;
+	/** Seconds since the epoch the cluster reports for the transaction's block, when the listing carries it. */
+	blockTime?: number | null;
+};
 
 export type RpcOptions = {
 	url: string;
@@ -99,8 +106,12 @@ export type RpcOptions = {
 export interface Rpc {
 	/** The memo transaction's fields verify needs, or null when the node does not know the signature. */
 	transactionMemo(signature: string, commitment: Commitment): Promise<TransactionMemo | null>;
-	/** Recent signatures touching `pubkey`, memo text only as a hint (confirm with transactionMemo). */
-	addressMemos(pubkey: string, limit: number): Promise<AddressMemo[]>;
+	/**
+	 * Signatures touching `pubkey`, newest first, memo text only as a hint (confirm with transactionMemo). `before` is the signature to
+	 * continue from: the page returned starts just older than it, so a caller can walk backwards through a long history. `commitment`,
+	 * when given, is sent in the request config; absent, the node's default (finalized) applies and the request is unchanged.
+	 */
+	addressMemos(pubkey: string, limit: number, before?: string, commitment?: Commitment): Promise<AddressMemo[]>;
 	/** The cluster's genesis hash, for the job's devnet gate. Thin `getGenesisHash` call. */
 	getGenesisHash(): Promise<string>;
 	/** Lamports held by `pubkey`. */
@@ -115,7 +126,7 @@ type ParsedTransaction = {
 	meta?: { err?: unknown; fee?: unknown } | null;
 	transaction?: { message?: { accountKeys?: ParsedAccountKey[]; instructions?: ParsedInstruction[] } };
 };
-type SignatureInfo = { signature?: unknown; memo?: unknown; err?: unknown; slot?: unknown };
+type SignatureInfo = { signature?: unknown; memo?: unknown; err?: unknown; slot?: unknown; blockTime?: unknown };
 
 const numberOrNull = (v: unknown): number | null => (typeof v === "number" ? v : null);
 
@@ -213,8 +224,11 @@ export function createRpc({ url, timeoutMs, attempts, backoffMs, fetchImpl = fet
 			};
 		},
 
-		async addressMemos(pubkey: string, limit: number): Promise<AddressMemo[]> {
-			const list = await call<SignatureInfo[]>("getSignaturesForAddress", [pubkey, { limit }]);
+		async addressMemos(pubkey: string, limit: number, before?: string, commitment?: Commitment): Promise<AddressMemo[]> {
+			const config: { limit: number; before?: string; commitment?: Commitment } = { limit };
+			if (before !== undefined) config.before = before;
+			if (commitment !== undefined) config.commitment = commitment;
+			const list = await call<SignatureInfo[]>("getSignaturesForAddress", [pubkey, config]);
 			if (!Array.isArray(list)) throw new RpcError("getSignaturesForAddress returned a non-array");
 			return list
 				.filter((s): s is SignatureInfo & { signature: string } => typeof s?.signature === "string")
@@ -223,6 +237,7 @@ export function createRpc({ url, timeoutMs, attempts, backoffMs, fetchImpl = fet
 					memo: stripListingPrefix(typeof s.memo === "string" ? s.memo : null),
 					err: s.err ?? null,
 					slot: numberOrNull(s.slot),
+					blockTime: numberOrNull(s.blockTime),
 				}));
 		},
 
