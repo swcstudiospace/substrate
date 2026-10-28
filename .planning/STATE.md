@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.3.x
 milestone_name: Should-have hardening
-status: "v1.4 complete and archived 2026-10-24 (local, not published). v1.3.x open: phases 37-44 verified in repo, live proofs pending, phases 37-39 need an operator waiver. v1.5 open: phase 46 partial (criterion 1 in repo), phases 52-54 in review as draft PRs."
-stopped_at: "run 2026-10-24 (graph ut-mvm0p0jr-874c2ace): v1.4 complete; phase 46 partial; v1.3.x blocked on the 37-39 waiver; awaiting operator decisions"
-last_updated: "2026-10-24T06:47:20.607Z"
-last_activity: 2026-10-24
-last_activity_desc: Milestone v1.4 completed and archived
-state_head: c1868cfa2d55618577b6bddc864b2f8ec89c6df8
+status: "main 28ea65f4 (2026-10-28). Phases 34-62 merged to main (46 open: LightRAG deployed naive-mode, graph/hybrid and RAGFlow removal operator-gated). v1.3.x, v1.5, v1.6 all await operator completion; no milestone beyond v1.4 archived."
+stopped_at: "Run 11 addendum (PR #141): reconcile planning records, then operator decisions on milestone completion"
+last_updated: "2026-10-28T00:00:00.000Z"
+last_activity: 2026-10-28
+last_activity_desc: "Run 11: LightRAG deployed, production cut over; docs state-run11b merged"
+state_head: 28ea65f41ca8
 progress:
   total_phases: 8
-  completed_phases: 1
+  completed_phases: 8
   total_plans: 8
   completed_plans: 8
-  percent: 13
-current_phase: 40
-current_phase_name: docs-memory
+  percent: 100
+current_phase: 46
+current_phase_name: lightrag-hybrid
 ---
 
 # State
@@ -161,10 +161,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: v1.3.x phases 37-44 open; phase 46 partial in v1.5
+Phase: main = 28ea65f4 (2026-10-28). Phases 34-62 are merged to main. Phase 46 is open: LightRAG is deployed in naive mode; graph and hybrid modes and the RAGFlow removal are operator-gated.
 Plan: —
-Status: v1.3.x blocked on an operator waiver for the live criteria of phases 37-39; v1.5 open (phase 46 partial; phases 52-54 in review)
-Last activity: 2026-10-24 — Milestone v1.4 completed and archived
+Status: v1.3.x, v1.5 and v1.6 all await operator completion confirmation; none is archived beyond v1.4. Gap closure for the v1.6 partial criteria of phases 58, 59 and 61 is in progress.
+Last activity: 2026-10-28 — Run 11: LightRAG deployed, production cut over; planning records reconciled in Run 12
 
 ## Preflight record (2026-10-23, graph ut-mvlknrx6-2849044e)
 
@@ -206,9 +206,11 @@ Items acknowledged and deferred, most recent first:
 ## Operator Next Steps
 
 - Decision 1: waive or verify the live criteria of phases 37-39. Only the operator can waive; v1.3.x cannot complete without it.
+- Resolved 2026-10-28: Decision 1 is resolved. The waiver for phases 37-39 is recorded in 585ef28.
 - Decision 2: approve or defer each phase 46 live step (T5 archive, T6 deploy and health probe, T7 migration and parity gate, T8 cutover and RAGFlow removal), one approval per run.
 - Decision 3: PR #123 stays held. When the run branch ships, choose to close #123 or merge it; the run branch already contains its two commits.
 - Decision 4: merge order for drafts #104 and #109-#111. #109 is based on the stale gsd/p51-fabric-impl; #110 and #111 stack on gsd/p52-wiring.
+- Resolved 2026-10-28: Decision 4 is resolved. During Run 10 the drafts were merged or replaced: #104 (merged), #134, #135 and #136 (replays of #109, #111 and #110), and #137 (replay of #131); #109, #110, #111 and #131 were closed.
 - Decision 5: approve shipping the dependency audit fix (fix/audit-advisories-upgrade, 6106504, local only) as its own PR.
 - Decision 6: approve pushing and opening PRs through the ship path. The Ship step is not run: the run is not finished.
 - Decision 7: out-of-path branches quality/biome-report-only, test/swarm-pins-a16-a30 and the ad9e4de merge on gsd/p52-planning-core: keep or delete.
@@ -609,3 +611,24 @@ PR B's defaults: `SUBSTRATE_BRIEF_GRAPH_READ=full`, `SUBSTRATE_CACHE_BUMP_SCOPE=
 ### Run 11 addendum: Phase 46 RAGFlow removal is gated, not skipped
 
 Phase 46 criterion 5 allows removing the RAGFlow code and service only after criteria 1 to 4 pass and every RAG-dependent phase passes. Graph and hybrid retrieval cannot pass while LightRAG runs on the bypass LLM (naive mode only), and the RAGFlow code is still the fallback backend setting. Note that `deploy-release.sh rollback` to `702ed32e` is an app-only rollback: the RAGFlow service was deleted on 2026-10-25 and `702ed32e` has no LightRAG client, so docs search would be unavailable after it until a backend is restored. So the removal waits on the operator's LLM decision (`shunt login xai` or `hermes auth add xai-oauth --type oauth`, plus a network path from Railway). Production already serves docs from LightRAG (`SUBSTRATE_DOCS_BACKEND=lightrag`); the dead `ragflow-oauth-*` Railway services stay until that removal is approved. The v1.6 repo-only residuals (REST twins, the `baseline` checkpoint trigger, the phase 58 join, the anchor re-send, automatic checkpoint triggers) were not started: they are separate scoped work, not part of this deploy.
+
+## Reconciliation (2026-10-28, Run 12)
+
+Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 said "draft PR", "not merged" and "In review"; they now state the merge facts below.
+
+- **PR-to-phase merge map (phases 52-62):**
+  - 52: PR #104 (core, merged 2026-10-27) and PR #134 (wiring, merged 2026-10-28); draft #109 closed.
+  - 53: PR #136 (replaced draft #110, closed).
+  - 54: PR #135 (replaced draft #111, closed).
+  - 55 and 56: PR #127.
+  - 57: PRs #128 and #129.
+  - 58: PR #137 (replaced draft #131, closed).
+  - 59, 60 and 61: PRs #128 and #129.
+  - 62: PR #130.
+  - Phases 53-62 all merged 2026-10-28.
+- **VERIFICATION `verified_on` values are pre-squash branch tips:** 52: b7d6768 and e135938; 53: 2c50263; 54: 5548c62; 55-57 and 59-62: 8752578; 58: 7edfd79. These SHAs name branch heads from before the squash merges, so they may not be reachable from main. They will be re-verified on main later in this run.
+- **Still open:**
+  - Phase 46: LightRAG runs in naive mode on the bypass LLM; graph and hybrid modes and the RAGFlow removal are operator-gated.
+  - v1.6 partial criteria: phase 58 criterion 2 (join with `docs_steering_session`), phase 59 criterion 5 (re-anchor send) and phase 61 criterion 3 (automatic checkpoint triggers). They are being closed in this run; phases 58, 59 and 61 stay unticked in ROADMAP until then.
+  - Milestone completion confirmations for v1.3.x, v1.5 and v1.6 (operator-only).
+- **Remote branches (nothing deleted):** `quality/biome-report-only` is superseded by main's lint-report job. `test/swarm-pins-a16-a30` is superseded because its tests are already on main in `packages/mcp-server/src/server.test.ts`. No branch was deleted.
