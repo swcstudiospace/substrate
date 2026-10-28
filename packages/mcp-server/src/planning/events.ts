@@ -8,7 +8,7 @@
  * Both the summary and the payload pass through the existing redactor.
  *
  * The publish port wraps the existing event bus. The bus carries wake-up hints only (D50-b), so a
- * hint has no payload. The ledger write that stores the full event is a wiring step, not done here.
+ * hint has no payload. The full event is stored through the ledger by the observer (`observer.ts`), the only caller that publishes.
  */
 import type { EventBus, EventHint } from "../event-bus.ts";
 import { MAX_PAYLOAD_BYTES } from "../event.ts";

@@ -55,6 +55,8 @@ describe("auditMode", () => {
 			"fabric_status",
 			"fabric_optimize",
 			"fabric_compliance",
+			"planning_status",
+			"planning_sessions",
 		]) {
 			expect(auditMode(tool)).toBe("fail-open");
 		}
