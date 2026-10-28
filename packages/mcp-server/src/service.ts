@@ -6728,7 +6728,10 @@ export class Substrate {
 			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "memo is not signed by SOLANA_ANCHOR_PUBKEY" };
 		}
 		const signerFault = await judgeSigner(memo, signers);
-		if (signerFault !== null) {
+		// A proven signer fault is final. An UNVERIFIABLE signer (no block time yet, an incomplete rotation read, an unbuildable set)
+		// waits for the content checks below: a transaction that already disagrees with the ledger is a mismatch whatever its signer,
+		// and that known cause must not be hidden behind the missing time (`checkpoint_verify` ranks proven disagreements first).
+		if (signerFault !== null && signerFault.status === "mismatch") {
 			return { period_start, period_end, status: signerFault.status, event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: signerFault.reason };
 		}
 		if (memo.err !== null && memo.err !== undefined) {
@@ -6746,6 +6749,9 @@ export class Substrate {
 		}
 		if (row.root !== digest.root || row.event_count !== digest.event_count || row.memo !== memo.memo) {
 			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "anchors row disagrees with the memo" };
+		}
+		if (signerFault !== null) {
+			return { period_start, period_end, status: signerFault.status, event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: signerFault.reason };
 		}
 		return { period_start, period_end, status: "anchored", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, ...(memo.slot !== null ? { slot: memo.slot } : {}) };
 	}

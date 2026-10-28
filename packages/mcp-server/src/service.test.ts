@@ -5028,6 +5028,30 @@ describe("verifyGraph hour report", () => {
 			}
 		});
 
+		test("a transaction that already disagrees with the ledger is a mismatch, not hidden behind an unverifiable signer (no block time, an incomplete rotation read, a failed transaction)", async () => {
+			const wrongRoot = formatMemo({ periodStartMs: H, rootHex: "0".repeat(64), count: 2 });
+			const noTime = await hourOf(sessionRows(), { payer: KEY_B, blockTime: null, memo: wrongRoot });
+			expect(noTime?.status).toBe("mismatch");
+			expect(noTime?.reason).toContain("chain root");
+
+			const down = {
+				queryEvents: async () => {
+					throw new Error("ledger down");
+				},
+			};
+			const gap = await hourOf(sessionRows(), { payer: KEY_B, blockTime: AFTER_S, memo: wrongRoot }, OPERATOR, down);
+			expect(gap?.status).toBe("mismatch");
+			expect(gap?.reason).toContain("chain root");
+
+			const failed = await hourOf(sessionRows(), { payer: KEY_B, blockTime: null, err: { InstructionError: [0, "Custom"] } });
+			expect(failed?.status).toBe("mismatch");
+			expect(failed?.reason).toBe("anchor transaction failed");
+
+			// The same transaction with a correct memo and no block time is still only unverified.
+			const clean = await hourOf(sessionRows(), { payer: KEY_B, blockTime: null });
+			expect(clean?.status).toBe("unverified");
+		});
+
 		test("a rotation read that may be incomplete leaves every payer's hour unverified, whether the signer would pass or fail its window, the configured key included", async () => {
 			const down = {
 				queryEvents: async () => {
