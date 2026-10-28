@@ -44,7 +44,10 @@ export function parseKeyValues(text: string): Record<string, string[]> {
 	for (const line of text.split("\n")) {
 		const at = line.indexOf("=");
 		if (at <= 0) continue;
-		(out[line.slice(0, at)] ??= []).push(line.slice(at + 1));
+		const key = line.slice(0, at);
+		const bucket = out[key] ?? [];
+		out[key] = bucket;
+		bucket.push(line.slice(at + 1));
 	}
 	return out;
 }
@@ -315,7 +318,13 @@ async function main(): Promise<number> {
 		const warnings = proposals.filter((event) => event.kind === "warning");
 		check(["opened", "existing", "declined", "unchanged"].every((status) => notes.includes(status)) && notes.filter((status) => status === "opened").length >= 3, "note events record opened, existing, declined and unchanged", `${notes.length} notes`);
 		check(warnings.length >= 5 && warnings.every((event) => event.payload?.status === "refused"), "warning events record each refusal", `${warnings.length} warnings`);
-		check(warnings.some((event) => Array.isArray(event.payload?.rules) && (event.payload?.rules as string[]).length > 0), "a refusal's event carries rule names");
+		check(
+			warnings.some((event) => {
+				const rules = event.payload?.rules;
+				return Array.isArray(rules) && rules.length > 0;
+			}),
+			"a refusal's event carries rule names",
+		);
 		check(proposals.every((event) => event.surface === agentSurface || event.surface === "claude-code"), "every event is attributed to a token surface");
 
 		const auditPath = join(runDir, "mcp-audit.jsonl");

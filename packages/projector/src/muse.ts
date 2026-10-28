@@ -124,8 +124,11 @@ const HOOK_LINES = [
 	"",
 	"function readConfig(): HookConfig | null {",
 	"\ttry {",
-	'\t\tconst parsed = JSON.parse(readFileSync(new URL("./substrate.json", import.meta.url), "utf8")) as Partial<HookConfig>;',
-	'\t\tif (typeof parsed.url !== "string" || typeof parsed.tokenFile !== "string" || typeof parsed.stateDir !== "string") return null;',
+	'\t\tconst parsed: unknown = JSON.parse(readFileSync(new URL("./substrate.json", import.meta.url), "utf8"));',
+	'\t\tif (typeof parsed !== "object" || parsed === null) return null;',
+	'\t\tif (!("url" in parsed) || typeof parsed.url !== "string") return null;',
+	'\t\tif (!("tokenFile" in parsed) || typeof parsed.tokenFile !== "string") return null;',
+	'\t\tif (!("stateDir" in parsed) || typeof parsed.stateDir !== "string") return null;',
 	"\t\treturn { url: parsed.url, tokenFile: parsed.tokenFile, stateDir: parsed.stateDir };",
 	"\t} catch {",
 	"\t\treturn null;",
@@ -202,7 +205,9 @@ const HOOK_LINES = [
 	"\tconst cfg = readConfig();",
 	"\tif (cfg) {",
 	"\t\tconst raw = await readStdin(remainingMs());",
-	"\t\tconst payload = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};",
+	"\t\tconst decoded: unknown = raw ? JSON.parse(raw) : {};",
+	'\t\tif (typeof decoded !== "object" || decoded === null || Array.isArray(decoded)) throw new Error("hook payload is not an object");',
+	"\t\tconst payload: Record<string, unknown> = Object.fromEntries(Object.entries(decoded));",
 	'\t\tconst tool = typeof payload.tool_name === "string" && payload.tool_name ? payload.tool_name : "unknown";',
 	'\t\tconst sessionId = typeof payload.session_id === "string" ? payload.session_id : undefined;',
 	"\t\tconst fields: Record<string, unknown> = { tool };",
@@ -320,24 +325,100 @@ function fail(step: string, result: MuseResult): never {
 	throw new MuseFailed(step);
 }
 
+/** A decoded `--json` answer from the Muse CLI when it is a plain object, else null. */
+function asObject(value: unknown): object | null {
+	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
+}
+
+function field(source: object, key: string): unknown {
+	return key in source ? Reflect.get(source, key) : undefined;
+}
+
+function stringField(value: unknown, key: string): string | undefined {
+	const source = asObject(value);
+	if (source === null) return undefined;
+	const found = field(source, key);
+	return typeof found === "string" ? found : undefined;
+}
+
+export interface ValidateReport {
+	valid: unknown;
+	diagnosticCount: number;
+}
+
+/** The `plugins validate --json` answer: an object whose `diagnostics`, when present, is an array. Null for any other shape. */
+export function parseValidateReport(value: unknown): ValidateReport | null {
+	const report = asObject(value);
+	if (report === null) return null;
+	const diagnostics = field(report, "diagnostics");
+	if (diagnostics === undefined || diagnostics === null) return { valid: field(report, "valid"), diagnosticCount: 0 };
+	if (!Array.isArray(diagnostics)) return null;
+	return { valid: field(report, "valid"), diagnosticCount: diagnostics.length };
+}
+
+export interface InstalledPlugin {
+	id: string | undefined;
+	cachePath: string | undefined;
+}
+
+/** The `plugins list --json` answer: an object whose `plugins`, when present, is an array of objects. Null for any other shape. */
+export function parseInstalledPlugins(value: unknown): InstalledPlugin[] | null {
+	const listing = asObject(value);
+	if (listing === null) return null;
+	const plugins = field(listing, "plugins");
+	if (plugins === undefined || plugins === null) return [];
+	if (!Array.isArray(plugins)) return null;
+	const installed: InstalledPlugin[] = [];
+	for (const entry of plugins) {
+		const item = asObject(entry);
+		if (item === null) return null;
+		installed.push({
+			id: stringField(field(item, "plugin"), "id"),
+			cachePath: stringField(field(item, "record"), "cache_path"),
+		});
+	}
+	return installed;
+}
+
+/** The capability statuses of a `plugins inspect --json` answer: `runtime_capabilities`, when present, an array of objects. Null for any other shape. */
+export function parseCapabilityStatuses(value: unknown): unknown[] | null {
+	const report = asObject(value);
+	if (report === null) return null;
+	const capabilities = field(report, "runtime_capabilities");
+	if (capabilities === undefined || capabilities === null) return [];
+	if (!Array.isArray(capabilities)) return null;
+	const statuses: unknown[] = [];
+	for (const capability of capabilities) {
+		const item = asObject(capability);
+		if (item === null) return null;
+		statuses.push(field(item, "status"));
+	}
+	return statuses;
+}
+
 function requireValid(result: MuseResult): void {
 	if (result.status !== 0) fail("validate", result);
-	let parsed: { valid?: boolean; diagnostics?: unknown[] };
+	let parsed: ValidateReport | null;
 	try {
-		parsed = JSON.parse(result.stdout) as { valid?: boolean; diagnostics?: unknown[] };
+		parsed = parseValidateReport(JSON.parse(result.stdout));
 	} catch (cause) {
 		process.stderr.write(`[muse-projector] cannot parse validate output: ${String(cause)}\n`);
 		throw new MuseFailed("validate");
 	}
-	if (parsed.valid !== true || (parsed.diagnostics?.length ?? 0) > 0) fail("validate (diagnostics present)", result);
+	if (parsed === null) {
+		process.stderr.write("[muse-projector] cannot parse validate output: unexpected shape\n");
+		throw new MuseFailed("validate");
+	}
+	if (parsed.valid !== true || parsed.diagnosticCount > 0) fail("validate (diagnostics present)", result);
 }
 
 function installedPluginIds(): string[] {
 	const result = runMuse(["plugins", "list", "--json"]);
 	if (result.status !== 0) return [];
 	try {
-		const parsed = JSON.parse(result.stdout) as { plugins?: Array<{ plugin?: { id?: string } }> };
-		return (parsed.plugins ?? []).map((entry) => entry.plugin?.id).filter((id): id is string => typeof id === "string");
+		const plugins = parseInstalledPlugins(JSON.parse(result.stdout));
+		if (plugins === null) return [];
+		return plugins.flatMap((plugin) => (plugin.id === undefined ? [] : [plugin.id]));
 	} catch {
 		return [];
 	}
@@ -365,10 +446,9 @@ function checkInstalled(projected: BundleFiles): string[] {
 	if (listed.status !== 0) return ["list"];
 	let cache: string | undefined;
 	try {
-		const parsed = JSON.parse(listed.stdout) as {
-			plugins?: Array<{ plugin?: { id?: string }; record?: { cache_path?: string } }>;
-		};
-		cache = (parsed.plugins ?? []).find((entry) => entry.plugin?.id === PLUGIN_ID)?.record?.cache_path;
+		const plugins = parseInstalledPlugins(JSON.parse(listed.stdout));
+		if (plugins === null) return ["list"];
+		cache = plugins.find((plugin) => plugin.id === PLUGIN_ID)?.cachePath;
 	} catch {
 		return ["list"];
 	}
@@ -376,9 +456,9 @@ function checkInstalled(projected: BundleFiles): string[] {
 	const inspected = runMuse(["plugins", "inspect", PLUGIN_ID, "--json"]);
 	if (inspected.status !== 0) return ["inspect"];
 	try {
-		const parsed = JSON.parse(inspected.stdout) as { runtime_capabilities?: Array<{ status?: string }> };
-		const caps = parsed.runtime_capabilities ?? [];
-		if (caps.length === 0 || caps.some((cap) => cap.status !== "trusted_enabled")) return ["trust"];
+		const statuses = parseCapabilityStatuses(JSON.parse(inspected.stdout));
+		if (statuses === null) return ["inspect"];
+		if (statuses.length === 0 || statuses.some((status) => status !== "trusted_enabled")) return ["trust"];
 	} catch {
 		return ["inspect"];
 	}

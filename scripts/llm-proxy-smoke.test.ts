@@ -214,7 +214,14 @@ describe("states, per wire format", () => {
 describe("the request", () => {
 	test("anthropic-messages: POST /v1/messages with x-api-key and the pong prompt at max_tokens 8", async () => {
 		const seen: { url: string; init: RequestInit }[] = [];
-		await probeProvider(ANTHROPIC, BASE, ctx(async (url, init) => (seen.push({ url, init }), anthropicOk())));
+		await probeProvider(
+			ANTHROPIC,
+			BASE,
+			ctx(async (url, init) => {
+				seen.push({ url, init });
+				return anthropicOk();
+			}),
+		);
 		expect(seen).toHaveLength(1);
 		const { url, init } = seen[0] as { url: string; init: RequestInit };
 		const headers = init.headers as Record<string, string>;
@@ -230,7 +237,14 @@ describe("the request", () => {
 
 	test("openai-chat: POST /v1/chat/completions with a bearer", async () => {
 		const seen: { url: string; init: RequestInit }[] = [];
-		await probeProvider(OPENAI, "http://127.0.0.1:8645", ctx(async (url, init) => (seen.push({ url, init }), openaiOk())));
+		await probeProvider(
+			OPENAI,
+			"http://127.0.0.1:8645",
+			ctx(async (url, init) => {
+				seen.push({ url, init });
+				return openaiOk();
+			}),
+		);
 		const { url, init } = seen[0] as { url: string; init: RequestInit };
 		const headers = init.headers as Record<string, string>;
 		expect(url).toBe("http://127.0.0.1:8645/v1/chat/completions");
@@ -286,7 +300,10 @@ describe("loopback rule", () => {
 		const err: string[] = [];
 		const code = await main([], {
 			env: { LLM_PROXY_HERMES_URL: "http://203.0.113.9:8645" },
-			fetch: async (url) => (calls.push(url), anthropicOk()),
+			fetch: async (url) => {
+				calls.push(url);
+				return anthropicOk();
+			},
 			stdout: () => undefined,
 			stderr: (text) => void err.push(text),
 		});
@@ -344,7 +361,17 @@ describe("exit code and output", () => {
 	async function run(argv: string[], fetchFn: FetchFn, env: Record<string, string> = {}): Promise<{ code: number; out: string; err: string }> {
 		let out = "";
 		let err = "";
-		const code = await main(argv, { env, fetch: fetchFn, now: () => 0, stdout: (t) => void (out += t), stderr: (t) => void (err += t) });
+		const code = await main(argv, {
+			env,
+			fetch: fetchFn,
+			now: () => 0,
+			stdout: (t) => {
+				out += t;
+			},
+			stderr: (t) => {
+				err += t;
+			},
+		});
 		return { code, out, err };
 	}
 
@@ -402,7 +429,15 @@ describe("exit code and output", () => {
 	test("the elapsed time comes from the injected clock", async () => {
 		const report = await (async () => {
 			let out = "";
-			await main(["--json", "--only", "hermes"], { env: {}, fetch: async () => openaiOk(), now: ticks(10, 35), stdout: (t) => void (out += t), stderr: () => undefined });
+			await main(["--json", "--only", "hermes"], {
+				env: {},
+				fetch: async () => openaiOk(),
+				now: ticks(10, 35),
+				stdout: (t) => {
+					out += t;
+				},
+				stderr: () => undefined,
+			});
 			return JSON.parse(out) as Report;
 		})();
 		expect(report.providers[0]).toMatchObject({ state: "ok", ms: 25 });
@@ -418,7 +453,14 @@ describe("exit code and output", () => {
 
 	test("an override URL and a custom timeout reach the request", async () => {
 		const seen: string[] = [];
-		await run(["--only", "hermes"], async (url) => (seen.push(url), openaiOk()), { LLM_PROXY_HERMES_URL: "http://127.0.0.1:9999/", LLM_PROXY_TIMEOUT_MS: "250" });
+		await run(
+			["--only", "hermes"],
+			async (url) => {
+				seen.push(url);
+				return openaiOk();
+			},
+			{ LLM_PROXY_HERMES_URL: "http://127.0.0.1:9999/", LLM_PROXY_TIMEOUT_MS: "250" },
+		);
 		expect(seen).toEqual(["http://127.0.0.1:9999/v1/chat/completions"]);
 	});
 });
@@ -435,7 +477,17 @@ describe("secrecy", () => {
 		for (const argv of [[], ["--json"]]) {
 			let out = "";
 			let err = "";
-			await main(argv, { env: { LLM_PROXY_DUMMY_KEY: key }, fetch: echo, now: () => 0, stdout: (t) => void (out += t), stderr: (t) => void (err += t) });
+			await main(argv, {
+				env: { LLM_PROXY_DUMMY_KEY: key },
+				fetch: echo,
+				now: () => 0,
+				stdout: (t) => {
+					out += t;
+				},
+				stderr: (t) => {
+					err += t;
+				},
+			});
 			expect(out).not.toContain(key);
 			expect(err).not.toContain(key);
 			expect(out).toContain("authentication_error");
@@ -447,14 +499,30 @@ describe("secrecy", () => {
 	test("the default dummy key is sent and not printed", async () => {
 		let out = "";
 		const echo: FetchFn = async (_u, init) => json(401, { error: { type: "authentication_error", message: `bad ${(init.headers as Record<string, string>)["x-api-key"]}` } });
-		await main(["--only", "shunt"], { env: {}, fetch: echo, now: () => 0, stdout: (t) => void (out += t), stderr: () => undefined });
+		await main(["--only", "shunt"], {
+			env: {},
+			fetch: echo,
+			now: () => 0,
+			stdout: (t) => {
+				out += t;
+			},
+			stderr: () => undefined,
+		});
 		expect(out).not.toContain(DEFAULT_DUMMY_KEY);
 		expect(out).toContain("[scrubbed]");
 	});
 
 	test("response bodies are never printed: a 200 and a failed read leave no body text in the output", async () => {
 		let out = "";
-		await main(["--json", "--only", "hermes"], { env: {}, fetch: async () => new Response("TOP-SECRET-BODY-TEXT", { status: 200 }), now: () => 0, stdout: (t) => void (out += t), stderr: () => undefined });
+		await main(["--json", "--only", "hermes"], {
+			env: {},
+			fetch: async () => new Response("TOP-SECRET-BODY-TEXT", { status: 200 }),
+			now: () => 0,
+			stdout: (t) => {
+				out += t;
+			},
+			stderr: () => undefined,
+		});
 		expect(out).not.toContain("TOP-SECRET-BODY-TEXT");
 		expect(out).toContain('"state":"invalid"');
 	});

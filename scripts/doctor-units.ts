@@ -22,7 +22,7 @@
  * distro units is not audited by accident. Pass --all to lift that.
  */
 import { spawnSync } from "node:child_process";
-import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync, type Stats, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
 export const RELEASE_CURRENT = "/opt/agent-substrate/current";
@@ -282,7 +282,7 @@ export function listReleaseTree(release: string): Set<string> {
 						continue;
 					}
 					if (!inside(resolved)) continue;
-					let st;
+					let st: Stats;
 					try {
 						st = statSync(resolved);
 					} catch {

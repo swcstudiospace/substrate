@@ -15,7 +15,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApiServer } from "../packages/host/src/api.ts";
-import { branchFor, commit, gitPush, prCreate, type Runner } from "../packages/host/src/hostfns.ts";
+import { commit, gitPush, prCreate, type Runner } from "../packages/host/src/hostfns.ts";
 import { parseRoute } from "../packages/host/src/options.ts";
 import {
 	buildContainerSpec,
@@ -232,7 +232,7 @@ function addWorktree(dir: string, gid: string, branch: string): { worktreesRoot:
 }
 
 /** Fake git/gh runner for the worked node: probes answer clean, every argv is recorded. */
-export function workedRunner(gid: string, repo: string, branch: string, argvLog: string[][]): Runner {
+export function workedRunner(repo: string, branch: string, argvLog: string[][]): Runner {
 	return async (argv) => {
 		argvLog.push([...argv]);
 		// Host git argv: the guard (-C, --git-dir, --work-tree, hooks and fsmonitor off) precedes the subcommand.
@@ -354,7 +354,7 @@ export async function runWorkedNode(): Promise<SmokeResult[]> {
 			nodeId: nid,
 			store,
 			substrate: { graphGet: (id: string) => substrate.graphGet(id) },
-			run: workedRunner(gid, repo, branch, argvLog),
+			run: workedRunner(repo, branch, argvLog),
 			worktreeRoot: setup.worktreesRoot,
 			log: (line: string) => logs.push(line),
 		};

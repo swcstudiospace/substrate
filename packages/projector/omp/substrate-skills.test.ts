@@ -110,7 +110,9 @@ describe("createHandler", () => {
 		expect(calls).toHaveLength(1);
 		expect(calls[0]?.url).toBe("http://127.0.0.1:7410/skills/propose");
 		expect(calls[0]?.init.method).toBe("POST");
-		expect((calls[0]?.init.headers as Record<string, string>).authorization).toBe(`Bearer ${BEARER}`);
+		const proposeCall = calls[0];
+		if (!proposeCall) throw new Error("expected one propose call");
+		expect((proposeCall.init.headers as Record<string, string>).authorization).toBe(`Bearer ${BEARER}`);
 		const body = JSON.parse(String(calls[0]?.init.body));
 		expect(body).toMatchObject(expectedBody);
 		expect(body.rationale).toContain("manage_skill");

@@ -603,7 +603,9 @@ describe("Ultrathink bar publisher", () => {
 		request({});
 		expect(emitted).toHaveLength(1);
 		expect(emitted[0]?.channel).toBe(SUBSTRATE_STATUS_CHANNEL);
-		expect((emitted[0]?.data as SubstrateBusStatus).state).toBe("checking");
+		const published = emitted[0];
+		if (!published) throw new Error("no status was published");
+		expect((published.data as SubstrateBusStatus).state).toBe("checking");
 	});
 
 	test("an automatic poll publishes IN_USE, and the extension sets no footer or widget", async () => {

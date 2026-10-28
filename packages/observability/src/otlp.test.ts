@@ -10,6 +10,40 @@ const RESOURCE = {
 	deploymentEnvironment: "prod",
 };
 
+type NonEmpty<T> = [T, ...T[]];
+
+/** The slice of the OTLP/JSON metric body these tests read. */
+interface OtlpDataPoint {
+	asInt?: string;
+	asDouble?: number;
+	timeUnixNano?: string;
+	startTimeUnixNano?: string;
+	count?: string;
+	bucketCounts?: string[];
+	explicitBounds?: number[];
+}
+interface OtlpMetric {
+	name: string;
+	sum: { dataPoints: NonEmpty<OtlpDataPoint>; aggregationTemporality: number; isMonotonic: boolean };
+	histogram: { dataPoints: NonEmpty<OtlpDataPoint> };
+}
+interface OtlpMetricsBody {
+	resourceMetrics: NonEmpty<{
+		resource: { attributes: Array<{ key: string }> };
+		scopeMetrics: NonEmpty<{ metrics: OtlpMetric[] }>;
+	}>;
+}
+/** The slice of the OTLP/JSON trace body these tests read. */
+interface OtlpSpansBody {
+	resourceSpans: NonEmpty<{ scopeSpans: NonEmpty<{ spans: NonEmpty<Record<string, unknown>> }> }>;
+}
+
+function metricNamed(body: OtlpMetricsBody, name: string): OtlpMetric {
+	const metric = body.resourceMetrics[0].scopeMetrics[0].metrics.find((candidate) => candidate.name === name);
+	if (!metric) throw new Error(`no metric named ${name}`);
+	return metric;
+}
+
 describe("unixNanoString", () => {
 	test("builds the digits by string arithmetic, not by a float multiply", () => {
 		// A unix nanosecond timestamp is past Number.MAX_SAFE_INTEGER, so `ms * 1e6` is
@@ -25,7 +59,7 @@ describe("unixNanoString", () => {
 	});
 
 	test("never produces more than nine digits of fraction", () => {
-		expect(unixNanoString(1_790_186_361_859.9999999)).toHaveLength("1790186361859".length + 6);
+		expect(unixNanoString(1_790_186_361_859 + 0.9999999)).toHaveLength("1790186361859".length + 6);
 	});
 
 	test("refuses a nonsense timestamp rather than emitting NaN", () => {
@@ -58,12 +92,9 @@ describe("encodeMetrics", () => {
 
 	test("64-bit fields are strings", () => {
 		// A number would lose precision above 2^53, and `timeUnixNano` is ~1.8e18 today.
-		const { body } = encodeMetrics(snapshot(), RESOURCE, 1000, 2000) as {
-			body: { resourceMetrics: Array<{ scopeMetrics: Array<{ metrics: Array<Record<string, any>> }> }> };
-		};
-		const metrics = body.resourceMetrics[0]!.scopeMetrics[0]!.metrics;
-		const sum = metrics.find((metric) => metric.name === "substrate.emit.total")!;
-		const histogram = metrics.find((metric) => metric.name === "substrate.brief.duration")!;
+		const { body } = encodeMetrics(snapshot(), RESOURCE, 1000, 2000) as { body: OtlpMetricsBody };
+		const sum = metricNamed(body, "substrate.emit.total");
+		const histogram = metricNamed(body, "substrate.brief.duration");
 
 		expect(sum.sum.dataPoints[0].asInt).toBe("3");
 		expect(sum.sum.dataPoints[0].timeUnixNano).toBe("2000000000");
@@ -73,37 +104,31 @@ describe("encodeMetrics", () => {
 	});
 
 	test("a double counter uses asDouble, not asInt", () => {
-		const { body } = encodeMetrics(snapshot(), RESOURCE, 1000, 2000) as { body: any };
-		const cost = body.resourceMetrics[0].scopeMetrics[0].metrics.find(
-			(metric: any) => metric.name === "substrate.cost.usd",
-		);
+		const { body } = encodeMetrics(snapshot(), RESOURCE, 1000, 2000) as { body: OtlpMetricsBody };
+		const cost = metricNamed(body, "substrate.cost.usd");
 
 		expect(cost.sum.dataPoints[0].asDouble).toBeCloseTo(0.125, 10);
 		expect(cost.sum.dataPoints[0].asInt).toBeUndefined();
 	});
 
 	test("counters are cumulative and monotonic, which is what makes a missed export harmless", () => {
-		const { body } = encodeMetrics(snapshot(), RESOURCE, 1000, 2000) as { body: any };
-		const sum = body.resourceMetrics[0].scopeMetrics[0].metrics.find(
-			(metric: any) => metric.name === "substrate.emit.total",
-		);
+		const { body } = encodeMetrics(snapshot(), RESOURCE, 1000, 2000) as { body: OtlpMetricsBody };
+		const sum = metricNamed(body, "substrate.emit.total");
 
 		expect(sum.sum.aggregationTemporality).toBe(2);
 		expect(sum.sum.isMonotonic).toBe(true);
 	});
 
 	test("carries explicitBounds so a collector can recompute the quantile itself", () => {
-		const { body } = encodeMetrics(snapshot(), RESOURCE, 1000, 2000) as { body: any };
-		const histogram = body.resourceMetrics[0].scopeMetrics[0].metrics.find(
-			(metric: any) => metric.name === "substrate.brief.duration",
-		);
+		const { body } = encodeMetrics(snapshot(), RESOURCE, 1000, 2000) as { body: OtlpMetricsBody };
+		const histogram = metricNamed(body, "substrate.brief.duration");
 
 		expect(histogram.histogram.dataPoints[0].explicitBounds).toEqual([10, 100]);
 	});
 
 	test("names the service on the resource, not on every point", () => {
-		const { body } = encodeMetrics(snapshot(), RESOURCE, 1000, 2000) as { body: any };
-		const attributes = body.resourceMetrics[0].resource.attributes.map((pair: any) => pair.key);
+		const { body } = encodeMetrics(snapshot(), RESOURCE, 1000, 2000) as { body: OtlpMetricsBody };
+		const attributes = body.resourceMetrics[0].resource.attributes.map((pair) => pair.key);
 
 		expect(attributes).toContain("service.name");
 		expect(attributes).toContain("service.instance.id");
@@ -113,7 +138,7 @@ describe("encodeMetrics", () => {
 	test("omits instruments that have no series", () => {
 		const registry = new MetricRegistry(1000);
 		registry.counter("never.used");
-		const { body, items } = encodeMetrics(registry.snapshot(), RESOURCE, 1000, 2000) as { body: any; items: number };
+		const { body, items } = encodeMetrics(registry.snapshot(), RESOURCE, 1000, 2000) as { body: OtlpMetricsBody; items: number };
 
 		expect(items).toBe(0);
 		expect(body.resourceMetrics[0].scopeMetrics[0].metrics).toEqual([]);
@@ -134,7 +159,7 @@ describe("encodeSpans", () => {
 	};
 
 	test("ids stay hex and times become nano strings", () => {
-		const { body } = encodeSpans([span], RESOURCE) as { body: any };
+		const { body } = encodeSpans([span], RESOURCE) as { body: OtlpSpansBody };
 		const encoded = body.resourceSpans[0].scopeSpans[0].spans[0];
 
 		expect(encoded.traceId).toBe(span.traceId);
@@ -145,18 +170,18 @@ describe("encodeSpans", () => {
 	test("a root span omits parentSpanId rather than sending all-zeros", () => {
 		// Some collectors reject the explicit all-zero form; the spec treats an absent
 		// parent as the root either way.
-		const { body } = encodeSpans([span], RESOURCE) as { body: any };
+		const { body } = encodeSpans([span], RESOURCE) as { body: OtlpSpansBody };
 		expect("parentSpanId" in body.resourceSpans[0].scopeSpans[0].spans[0]).toBe(false);
 	});
 
 	test("a child span carries its parent", () => {
-		const { body } = encodeSpans([{ ...span, parentSpanId: "aaaaaaaaaaaaaaaa" }], RESOURCE) as { body: any };
+		const { body } = encodeSpans([{ ...span, parentSpanId: "aaaaaaaaaaaaaaaa" }], RESOURCE) as { body: OtlpSpansBody };
 		expect(body.resourceSpans[0].scopeSpans[0].spans[0].parentSpanId).toBe("aaaaaaaaaaaaaaaa");
 	});
 
 	test("an error status carries its message", () => {
 		const { body } = encodeSpans([{ ...span, status: { code: SPAN_STATUS.error, message: "boom" } }], RESOURCE) as {
-			body: any;
+			body: OtlpSpansBody;
 		};
 		expect(body.resourceSpans[0].scopeSpans[0].spans[0].status).toEqual({ code: 2, message: "boom" });
 	});
