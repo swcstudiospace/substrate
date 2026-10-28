@@ -77,6 +77,21 @@ function partition(changes: readonly RawChange[], policy: ResolvedPolicy): { kep
 }
 
 /**
+ * A lookup from a path to the skipped entry that covers it: an exact entry, or, for a skipped nested
+ * repository (`unsupported-submodule`), anything under its directory. Undefined when nothing covers it.
+ */
+function skippedMatcher(skipped: readonly SkippedPath[]): (path: string) => SkippedPath | undefined {
+	if (skipped.length === 0) return () => undefined;
+	const exact = new Map<string, SkippedPath>();
+	const directories: SkippedPath[] = [];
+	for (const entry of skipped) {
+		exact.set(entry.path, entry);
+		if (entry.reason === "unsupported-submodule") directories.push(entry);
+	}
+	return (path) => exact.get(path) ?? directories.find((dir) => path.startsWith(`${dir.path}/`));
+}
+
+/**
  * Deletions of paths the snapshot SKIPPED (too large, secret, submodule, unsupported type) are not
  * deletions at all: a skipped path is absent from the target tree because it was never captured, not
  * because it did not exist. They are split out of `changes` so a restore leaves them as they are.
@@ -87,19 +102,11 @@ function protectSkipped(
 	skipped: readonly SkippedPath[],
 ): { kept: RawChange[]; skippedInSnapshot: SkippedPath[] } {
 	if (skipped.length === 0) return { kept: [...changes], skippedInSnapshot: [] };
-	const exact = new Map<string, SkippedPath>();
-	const directories: SkippedPath[] = [];
-	for (const entry of skipped) {
-		exact.set(entry.path, entry);
-		if (entry.reason === "unsupported-submodule") directories.push(entry);
-	}
+	const covering = skippedMatcher(skipped);
 	const kept: RawChange[] = [];
 	const skippedInSnapshot: SkippedPath[] = [];
 	for (const change of changes) {
-		const entry =
-			change.status === "D"
-				? (exact.get(change.path) ?? directories.find((dir) => change.path.startsWith(`${dir.path}/`)))
-				: undefined;
+		const entry = change.status === "D" ? covering(change.path) : undefined;
 		if (entry === undefined) kept.push(change);
 		else skippedInSnapshot.push({ path: change.path, reason: entry.reason });
 	}
@@ -143,6 +150,9 @@ export function skippedOf(snapshot: Pick<Snapshot, "skipped">): SkippedPath[] {
 /**
  * The plan that turns `currentTree` into `targetTree`. `drift` is expected-to-current. `skipped` is
  * what the target snapshot skipped when it was taken: those paths are left alone, never deleted.
+ * `options.expectedSkipped` is what the snapshot that `expectedCurrentTree` stands for skipped: those
+ * paths were never part of it, so a difference at one is not drift (see `skippedMatcher`).
+ * `options.truncated` says the target's skipped list was capped when it was pinned; the plan repeats it.
  */
 export async function planBetween(
 	ctx: RepoContext,
@@ -151,6 +161,7 @@ export async function planBetween(
 	targetTree: string,
 	expectedCurrentTree?: string,
 	skipped: readonly SkippedPath[] = [],
+	options: { expectedSkipped?: readonly SkippedPath[]; truncated?: { total: number } | null } = {},
 ): Promise<RestorePlan> {
 	const { kept: named, ignored } = partition(await diffTrees(ctx, currentTree, targetTree), policy);
 	const { kept, skippedInSnapshot } = protectSkipped(named, skipped);
@@ -158,8 +169,10 @@ export async function planBetween(
 	let drift: RestoreOperation[] = [];
 	if (expectedCurrentTree !== undefined) {
 		await assertTreeExists(ctx, expectedCurrentTree, "expectedCurrentTree");
+		const expectedSkipped = skippedMatcher(options.expectedSkipped ?? []);
 		drift = partition(await diffTrees(ctx, expectedCurrentTree, currentTree), policy)
-			.kept.map(toOperation)
+			.kept.filter((change) => expectedSkipped(change.path) === undefined)
+			.map(toOperation)
 			.sort((a, b) => comparePaths(a.path, b.path));
 	}
 	return {
@@ -170,7 +183,25 @@ export async function planBetween(
 		drift,
 		ignored: ignored.sort((a, b) => comparePaths(a.path, b.path)),
 		skippedInSnapshot: skippedInSnapshot.sort((a, b) => comparePaths(a.path, b.path)),
+		...(options.truncated ? { skippedTruncated: { recorded: skipped.length, total: options.truncated.total } } : {}),
 	};
+}
+
+/**
+ * True when `left` and `right` differ only at paths `skipped` covers: the paths a snapshot skipped are
+ * not part of it, so a worktree that holds them (a restore leaves them in place) is still "at" that
+ * snapshot. Any difference elsewhere, including a real edit to a captured file, makes this false.
+ */
+export async function treesMatchIgnoringSkipped(
+	ctx: RepoContext,
+	left: string,
+	right: string,
+	skipped: readonly SkippedPath[],
+): Promise<boolean> {
+	if (left === right) return true;
+	if (skipped.length === 0) return false;
+	const covered = skippedMatcher(skipped);
+	return (await diffTrees(ctx, left, right)).every((change) => covered(change.path) !== undefined);
 }
 
 /** Check a snapshot's shape, that its tree exists, and that its manifest matches that tree. */
@@ -195,6 +226,8 @@ export type PlanRestoreParams = {
 	worktree: string;
 	target: Snapshot;
 	expectedCurrentTree?: string;
+	/** What the snapshot behind `expectedCurrentTree` skipped: a difference at one of those paths is not drift. */
+	expectedCurrentSkipped?: readonly SkippedPath[];
 	policy?: SnapshotPolicy;
 	now?: Clock;
 	run?: Runner;
@@ -209,5 +242,8 @@ export async function planRestore(params: PlanRestoreParams): Promise<RestorePla
 	const policy = resolvePolicy(params.policy);
 	const targetTree = await validateTarget(ctx, params.target);
 	const current = await buildTree(ctx, policy);
-	return planBetween(ctx, policy, current.tree, targetTree, params.expectedCurrentTree, skippedOf(params.target));
+	return planBetween(ctx, policy, current.tree, targetTree, params.expectedCurrentTree, skippedOf(params.target), {
+		expectedSkipped: params.expectedCurrentSkipped,
+		truncated: params.target.skippedTruncated ?? null,
+	});
 }

@@ -1,9 +1,9 @@
-import { encodeMetadata, listPinnedIn, type PinnedCheckpoint, pinTree, readPinnedSnapshotIn } from "./pin.ts";
-import { skippedOf, validateTarget } from "./plan.ts";
+import { encodeMetadata, listPinnedIn, type PinnedCheckpoint, pinTree, readPinnedSkippedIn, readPinnedSnapshotIn } from "./pin.ts";
+import { skippedOf, treesMatchIgnoringSkipped, validateTarget } from "./plan.ts";
 import { resolvePolicy } from "./policy.ts";
 import { openRepo, type Runner } from "./runner.ts";
 import { buildSnapshot } from "./tree.ts";
-import type { Clock, PinResult, Snapshot, SnapshotPolicy } from "./types.ts";
+import type { Clock, PinResult, Snapshot, SkippedPath, SnapshotPolicy } from "./types.ts";
 
 export type SnapshotParams = { worktree: string; policy?: SnapshotPolicy; now?: Clock; run?: Runner };
 
@@ -39,7 +39,7 @@ export async function pinSnapshot(params: PinParams): Promise<PinResult> {
 	const ctx = await openRepo(params);
 	const tree = await validateTarget(ctx, params.snapshot);
 	const metadata = params.metadata === undefined ? undefined : encodeMetadata(params.metadata);
-	return pinTree(ctx, "checkpoints", params.id, tree, metadata, skippedOf(params.snapshot));
+	return pinTree(ctx, "checkpoints", params.id, tree, metadata, skippedOf(params.snapshot), params.snapshot.skippedTruncated?.total);
 }
 
 export type ListPinnedParams = { worktree: string; now?: Clock; run?: Runner };
@@ -61,4 +61,29 @@ export type ReadPinnedParams = { worktree: string; ref: string; now?: Clock; run
 export async function readPinnedSnapshot(params: ReadPinnedParams): Promise<Snapshot> {
 	const ctx = await openRepo(params);
 	return readPinnedSnapshotIn(ctx, params.ref);
+}
+
+/** The skipped paths recorded by a pinned ref (the first entries of them when the pin's list was capped), without listing its tree. */
+export async function readPinnedSkipped(params: ReadPinnedParams): Promise<SkippedPath[]> {
+	return readPinnedSkippedIn(await openRepo(params), params.ref);
+}
+
+export type SameTreeParams = {
+	worktree: string;
+	left: string;
+	right: string;
+	/** The skipped list of the snapshot one of the trees belongs to: differences at those paths are ignored. */
+	ignoreSkipped: readonly SkippedPath[];
+	now?: Clock;
+	run?: Runner;
+};
+
+/**
+ * Whether two trees are the same except at paths a snapshot skipped. A restore leaves the skipped
+ * files of its target in the worktree, so the worktree's tree then differs from the target's by
+ * exactly those paths; this lets a caller still recognise it as "at" that checkpoint. Every other
+ * difference, including an edit to a captured file, makes it false.
+ */
+export async function sameTreeIgnoringSkipped(params: SameTreeParams): Promise<boolean> {
+	return treesMatchIgnoringSkipped(await openRepo(params), params.left, params.right, params.ignoreSkipped);
 }

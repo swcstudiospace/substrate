@@ -145,7 +145,8 @@ async function resolveRefTree(ctx: RepoContext, ref: string): Promise<string | n
  * the same id returns the existing commit; a different tree under an existing id is refused.
  * `metadata`, when given, is canonical JSON from `encodeMetadata`; it is written once, with the
  * commit, and an idempotent re-pin keeps the metadata the pin was created with. `skipped` is the list
- * of paths the snapshot skipped; it is stored in a separate trailer, written once like the metadata.
+ * of paths the snapshot skipped; it is stored in a separate trailer, written once like the metadata, and
+ * capped (see `encodeSkippedTrailer`); `skippedTotal` is how many paths the snapshot skipped in all.
  */
 export async function pinTree(
 	ctx: RepoContext,
@@ -154,6 +155,7 @@ export async function pinTree(
 	tree: string,
 	metadata?: string,
 	skipped: readonly SkippedPath[] = [],
+	skippedTotal: number = skipped.length,
 ): Promise<PinResult> {
 	const ref = await pinRef(ctx, namespace, id);
 	await assertTreeExists(ctx, tree);
@@ -177,10 +179,12 @@ export async function pinTree(
 	// it is not part of any hash, and a pin of a snapshot that skipped nothing is byte-identical to before.
 	const trailers = [
 		...(metadata === undefined ? [] : [`${METADATA_TRAILER}: ${metadata}`]),
-		...(skipped.length === 0 ? [] : [`${SKIPPED_TRAILER}: ${JSON.stringify(skipped.map(({ path, reason }) => ({ path, reason })))}`]),
+		...(skipped.length === 0 && skippedTotal <= skipped.length ? [] : [`${SKIPPED_TRAILER}: ${encodeSkippedTrailer(skipped, skippedTotal)}`]),
 	];
 	const message = trailers.length === 0 ? `substrate ${namespace} ${id}` : `substrate ${namespace} ${id}\n\n${trailers.join("\n")}`;
-	const commit = await gitText(ctx, ["commit-tree", tree, "-m", message], { env });
+	// The message goes through stdin, never an argv element: a long skipped list (thousands of paths) would
+	// exceed the per-argument limit of the OS (128 KiB on Linux) and git could not even start (E2BIG).
+	const commit = await gitText(ctx, ["commit-tree", tree, "-F", "-"], { env, input: `${message}\n` });
 	assertObjectId(commit, "commit-tree output");
 	// The empty old value makes update-ref fail rather than overwrite a ref created concurrently.
 	await git(ctx, ["update-ref", ref, commit, ""]);
@@ -192,38 +196,83 @@ export async function deletePin(ctx: RepoContext, ref: string): Promise<void> {
 	await git(ctx, ["update-ref", "-d", ref]);
 }
 
+/** The most skipped paths a pin's trailer records; a longer list is stored as its first entries plus the total. */
+export const MAX_SKIPPED_ENTRIES = 5000;
+
+/** The most bytes of skipped-path JSON a pin's trailer carries, so a few very long paths cannot bloat every checkpoint listing. */
+export const MAX_SKIPPED_BYTES = 1024 * 1024;
+
+/**
+ * The JSON of the skipped trailer. A list within both caps is the plain array (as it always was). A
+ * longer one, or one that was already truncated before it was pinned (`total` above the list), is
+ * `{"truncated":true,"total":N,"entries":[...]}` holding the first entries in the order given (path order).
+ */
+function encodeSkippedTrailer(skipped: readonly SkippedPath[], total: number): string {
+	const entries: SkippedPath[] = [];
+	let bytes = 2;
+	for (const { path, reason } of skipped) {
+		const size = Buffer.byteLength(JSON.stringify({ path, reason }), "utf8") + 1;
+		if (entries.length >= MAX_SKIPPED_ENTRIES || bytes + size > MAX_SKIPPED_BYTES) break;
+		entries.push({ path, reason });
+		bytes += size;
+	}
+	if (entries.length === skipped.length && total <= skipped.length) return JSON.stringify(entries);
+	return JSON.stringify({ truncated: true, total: Math.max(total, skipped.length), entries });
+}
+
 /**
  * The skipped paths a pin recorded, from its `Substrate-Checkpoint-Skipped` trailer; empty for a pin
  * without one (made before skipped paths were recorded, or by a snapshot that skipped nothing).
- * A trailer that is present but unreadable is an error, never "nothing skipped": guessing empty would
- * let a restore delete files the checkpoint never captured.
+ * `truncated` is set when the pin held more skipped paths than the trailer's caps allow: only the first
+ * `skipped.length` of `total` are known. A trailer that is present but unreadable is an error, never
+ * "nothing skipped": guessing empty would let a restore delete files the checkpoint never captured.
  */
-async function readSkippedTrailer(ctx: RepoContext, ref: string): Promise<SkippedPath[]> {
+async function readSkippedTrailer(ctx: RepoContext, ref: string): Promise<{ skipped: SkippedPath[]; truncated: { total: number } | null }> {
 	const message = await gitText(ctx, ["show", "-s", "--format=%B", ref]);
 	const prefix = `${SKIPPED_TRAILER}: `;
 	const lines = message.split("\n").filter((line) => line.startsWith(prefix));
-	if (lines.length === 0) return [];
+	if (lines.length === 0) return { skipped: [], truncated: null };
+	const unreadable = new SnapshotPolicyError(`${ref} has an unreadable skipped-paths trailer`);
 	let value: unknown;
 	try {
 		value = lines.length === 1 ? JSON.parse((lines[0] ?? "").slice(prefix.length)) : null;
 	} catch {
 		value = null;
 	}
-	if (!Array.isArray(value)) throw new SnapshotPolicyError(`${ref} has an unreadable skipped-paths trailer`);
-	const parsed = parseSkipped(value);
-	if (parsed.length !== value.length) throw new SnapshotPolicyError(`${ref} has an unreadable skipped-paths trailer`);
-	return parsed;
+	let list: unknown = value;
+	let truncated: { total: number } | null = null;
+	if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+		const { truncated: marker, total, entries } = value as { truncated?: unknown; total?: unknown; entries?: unknown };
+		if (marker !== true || !Array.isArray(entries) || typeof total !== "number" || !Number.isSafeInteger(total) || total < entries.length) {
+			throw unreadable;
+		}
+		list = entries;
+		truncated = { total };
+	}
+	if (!Array.isArray(list)) throw unreadable;
+	const parsed = parseSkipped(list);
+	if (parsed.length !== list.length) throw unreadable;
+	return { skipped: parsed, truncated };
 }
 
 /**
  * A Snapshot rebuilt from a pinned ref. `headCommit` and `branch` are null; `skipped` is what the
- * pin recorded (see `pinTree`), so a restore to this snapshot leaves those paths alone.
+ * pin recorded (see `pinTree`), so a restore to this snapshot leaves those paths alone. A pin whose
+ * list was capped carries `skippedTruncated`.
  */
 export async function readPinnedSnapshotIn(ctx: RepoContext, ref: string): Promise<Snapshot> {
 	await assertOwnedPinRef(ctx, ref);
 	const tree = await resolveRefTree(ctx, ref);
 	if (tree === null) throw new SnapshotPolicyError(`${ref} does not exist`);
-	return snapshotOfTree(ctx, tree, { skipped: await readSkippedTrailer(ctx, ref), headCommit: null, branch: null });
+	const { skipped, truncated } = await readSkippedTrailer(ctx, ref);
+	const snap = await snapshotOfTree(ctx, tree, { skipped, headCommit: null, branch: null });
+	return truncated === null ? snap : { ...snap, skippedTruncated: truncated };
+}
+
+/** Only the skipped paths a pin recorded, without listing its tree: cheap enough to ask of every checkpoint of a session. */
+export async function readPinnedSkippedIn(ctx: RepoContext, ref: string): Promise<SkippedPath[]> {
+	await assertOwnedPinRef(ctx, ref);
+	return (await readSkippedTrailer(ctx, ref)).skipped;
 }
 
 /** A pinned checkpoint as `listPinned` reports it. */

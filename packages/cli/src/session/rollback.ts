@@ -15,7 +15,8 @@
  *  4. `planRestore`: the exact changes and counts. A dry run stops here and changes nothing.
  *  5. Drift (the worktree is not at any checkpoint of the session: it matches none of their trees, so it
  *     differs from the newest one by changes no checkpoint holds) refuses unless `force`. Right after a
- *     rollback the worktree IS at the target's tree, so rolling back again is not drift. Refusals are
+ *     rollback the worktree IS at the target's tree, so rolling back again is not drift: a checkpoint also
+ *     matches when the trees differ only at paths it skipped (the files a restore leaves in place). Refusals are
  *     reported to the server, fail-open.
  *  6. Take a `pre-restore` checkpoint of the current state BEFORE any file is touched.
  *  7. `restore()` with the drift tree. On failure the outcome is reported honestly: rolled back or not,
@@ -43,6 +44,7 @@ import {
 	type RestoreResult,
 	type Runner,
 	type Snapshot,
+	type SkippedPath,
 	type SnapshotPolicy,
 	GitCommandError,
 	RestoreDriftError,
@@ -52,11 +54,13 @@ import {
 	WorktreeBusyError,
 	WorktreeSnapshotError,
 	planRestore,
+	readPinnedSkipped,
 	readPinnedSnapshot,
 	snapshot,
 	recoverRestore,
 	restore,
 	spawnRunner,
+	sameTreeIgnoringSkipped,
 } from "../../../worktree-snapshot/src/index.ts";
 import {
 	type AnchorStatus,
@@ -133,6 +137,8 @@ export interface PlanSummary {
 	drift_count: number;
 	drift: OperationSummary[];
 	ignored_count: number;
+	/** Present only when the target checkpoint recorded a capped list of skipped paths: `recorded` of `total` are protected. */
+	skipped_list_truncated?: { recorded: number; total: number };
 }
 
 export interface RecoveredInfo {
@@ -242,7 +248,45 @@ function summarisePlan(plan: RestorePlan): PlanSummary {
 		drift_count: plan.drift.length,
 		drift: shown(plan.drift, MAX_DRIFT_SHOWN),
 		ignored_count: plan.ignored.length,
+		...(plan.skippedTruncated === undefined ? {} : { skipped_list_truncated: plan.skippedTruncated }),
 	};
+}
+
+/** The paths a checkpoint's snapshot skipped; null when its pin cannot be read. Only the checkpoints that skipped something are read. */
+async function skippedOfCheckpoint(
+	params: Pick<RollbackParams, "worktree" | "now">,
+	run: Runner,
+	checkpoint: LocalCheckpoint,
+): Promise<SkippedPath[] | null> {
+	if (checkpoint.skipped_count === 0) return [];
+	try {
+		return await readPinnedSkipped({ worktree: params.worktree, ref: checkpoint.ref, now: params.now, run });
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The session's newest checkpoint the worktree is at: its tree is the worktree's, or differs from it only at
+ * paths that checkpoint skipped. A restore leaves the skipped files of its target in the worktree, so right
+ * after one the worktree's tree is the target's plus those files, which is not any checkpoint's tree exactly.
+ * Every other difference (an edit to a captured file) keeps a checkpoint from matching.
+ */
+async function findBaseline(
+	params: Pick<RollbackParams, "worktree" | "now">,
+	run: Runner,
+	mine: readonly LocalCheckpoint[],
+	currentTree: string,
+): Promise<{ checkpoint: LocalCheckpoint; skipped: SkippedPath[] } | null> {
+	for (const checkpoint of [...mine].reverse()) {
+		if (checkpoint.tree === currentTree) return { checkpoint, skipped: [] };
+		const skipped = await skippedOfCheckpoint(params, run, checkpoint);
+		if (skipped === null || skipped.length === 0) continue;
+		if (await sameTreeIgnoringSkipped({ worktree: params.worktree, left: currentTree, right: checkpoint.tree, ignoreSkipped: skipped, now: params.now, run })) {
+			return { checkpoint, skipped };
+		}
+	}
+	return null;
 }
 
 /** What the ledger records as file counts: a mode change or a type change is a modification. */
@@ -365,12 +409,16 @@ export async function rollback(params: RollbackParams): Promise<RollbackResult> 
 	const resolved = resolveTarget(params.target, local.checkpoints, mine);
 	if (!resolved.ok) return refuse(resolved.reason, resolved.detail, resolved.ckptId);
 	const target = resolved.checkpoint;
-	// The baseline the worktree is compared with: the session's newest checkpoint whose tree the worktree has
-	// now, else its newest checkpoint. Changes since the baseline are drift.
+	// The baseline the worktree is compared with: the session's newest checkpoint the worktree is at, else its
+	// newest checkpoint. "At" means the same tree, or the same tree but for the paths that checkpoint skipped
+	// (a restore leaves skipped files in place). Changes since the baseline are drift.
 	let baseline: LocalCheckpoint;
+	let baselineSkipped: SkippedPath[] = [];
 	try {
 		const current = await snapshot({ worktree: params.worktree, policy: params.policy, now: params.now, run });
-		baseline = [...mine].reverse().find((checkpoint) => checkpoint.tree === current.tree) ?? mine[mine.length - 1] ?? target;
+		const found = await findBaseline(params, run, mine, current.tree);
+		baseline = found?.checkpoint ?? mine[mine.length - 1] ?? target;
+		baselineSkipped = found?.skipped ?? (await skippedOfCheckpoint(params, run, baseline)) ?? [];
 	} catch (error) {
 		return failed("snapshot-failed", `the worktree could not be snapshotted: ${messageOf(error)}`);
 	}
@@ -436,7 +484,7 @@ export async function rollback(params: RollbackParams): Promise<RollbackResult> 
 	// 4. The exact local plan.
 	let restorePlan: RestorePlan;
 	try {
-		restorePlan = await planRestore({ worktree: params.worktree, target: targetSnapshot, expectedCurrentTree: baseline.tree, policy: params.policy, now: params.now, run });
+		restorePlan = await planRestore({ worktree: params.worktree, target: targetSnapshot, expectedCurrentTree: baseline.tree, expectedCurrentSkipped: baselineSkipped, policy: params.policy, now: params.now, run });
 	} catch (error) {
 		return failed("plan-failed", messageOf(error));
 	}
@@ -530,6 +578,7 @@ export async function rollback(params: RollbackParams): Promise<RollbackResult> 
 			target: targetSnapshot,
 			id: rollbackId,
 			expectedCurrentTree: baseline.tree,
+			expectedCurrentSkipped: baselineSkipped,
 			force: params.force,
 			policy: params.policy,
 			now: params.now,

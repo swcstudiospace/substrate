@@ -27,7 +27,16 @@
  *    leaves them as they are even if they now fit the policy; the plan lists them as
  *    `skippedInSnapshot`. The list travels in the restore journal and in a pin's commit message. A
  *    snapshot with no record (pinned before it was recorded) cannot tell such a file from one created
- *    after it, so that file is removed like any other new file.
+ *    after it, so that file is removed like any other new file. The same holds beyond the cap of a
+ *    pin's list: a pin records at most 5,000 skipped paths (1 MiB of JSON), and when more were skipped
+ *    only the first ones, in path order, are protected and the plan carries `skippedTruncated`. A
+ *    skipped path beyond the cap that is still skipped today (too large, secret) is not in the
+ *    worktree tree at all and is untouched; one that fits the policy now and is absent from the target
+ *    tree is removed like a new file.
+ *  - A restore that preserves skipped files leaves a tree that matches no checkpoint exactly (the
+ *    preserved files are in the worktree, not in the target tree). Callers that compare the worktree
+ *    with a checkpoint (`expectedCurrentTree`) pass that checkpoint's skipped list as
+ *    `expectedCurrentSkipped`, so those files are not drift while any other difference still is.
  *  - Conversion attributes (`text`, `eol`, `filter`) in `.gitattributes` are applied by git when it
  *    hashes the worktree. If they make the re-hash of a restored file differ from its blob,
  *    verification fails and the restore is rolled back; it never reports a false success.
@@ -167,6 +176,11 @@ export type RestoreParams = {
 	id: string;
 	/** The tree the session believes the worktree has; a difference is drift and refuses the restore. */
 	expectedCurrentTree?: string;
+	/**
+	 * What the snapshot behind `expectedCurrentTree` skipped. Those paths were never part of it, so a
+	 * difference at one (a file a restore left in place, say) is not drift. Everything else stays exact.
+	 */
+	expectedCurrentSkipped?: readonly SkippedPath[];
 	/** Proceed although the worktree changed outside the session. */
 	force?: boolean;
 	journalDir?: string;
@@ -193,7 +207,8 @@ export async function restore(params: RestoreParams): Promise<RestoreResult> {
 		const targetTree = await validateTarget(ctx, params.target);
 		const targetSkipped = skippedOf(params.target);
 		const current = await buildTree(ctx, policy);
-		let plan = await planBetween(ctx, policy, current.tree, targetTree, params.expectedCurrentTree, targetSkipped);
+		const planOptions = { expectedSkipped: params.expectedCurrentSkipped, truncated: params.target.skippedTruncated ?? null };
+		let plan = await planBetween(ctx, policy, current.tree, targetTree, params.expectedCurrentTree, targetSkipped, planOptions);
 		if (plan.drift.length > 0 && params.force !== true) throw new RestoreDriftError(plan.drift);
 
 		let safety: Snapshot;
@@ -212,7 +227,7 @@ export async function restore(params: RestoreParams): Promise<RestoreResult> {
 		}
 		if (safety.tree !== current.tree) {
 			// The worktree changed while the safety snapshot was taken: plan against what was pinned.
-			plan = await planBetween(ctx, policy, safety.tree, targetTree, params.expectedCurrentTree, targetSkipped);
+			plan = await planBetween(ctx, policy, safety.tree, targetTree, params.expectedCurrentTree, targetSkipped, planOptions);
 			if (plan.drift.length > 0 && params.force !== true) throw new RestoreDriftError(plan.drift);
 		}
 

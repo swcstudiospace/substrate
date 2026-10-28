@@ -604,6 +604,9 @@ function renderRollback(out: Output, r: RollbackResult): void {
 			if (r.plan.operations_truncated) out.line("  ...");
 		}
 		if (r.plan.drift_count > 0) out.line(`drift: ${r.plan.drift_count} path(s) changed since the newest checkpoint`);
+		if (r.plan.skipped_list_truncated !== undefined) {
+			out.line(`note: the checkpoint recorded only ${r.plan.skipped_list_truncated.recorded} of ${r.plan.skipped_list_truncated.total} skipped paths; a skipped file beyond them that fits the policy now is removed like a new file`);
+		}
 	}
 	if (r.memory_preview !== undefined && r.memory_preview.would_forget > 0) {
 		out.line(`memory: ${r.memory_preview.would_forget} entr${r.memory_preview.would_forget === 1 ? "y" : "ies"} would be forgotten`);

@@ -29,7 +29,7 @@
 | | credential-shaped files: `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `*.p12`, `credentials*.json`, `*.keystore` |
 | | nested git repositories (they appear as directories and are not entered) |
 
-A checkpoint lists what it skipped (`skipped <path> (<reason>)`), so a missing file is explained, not silent. A restore neither writes nor deletes an excluded path: the files a checkpoint does not hold are not touched by a rollback either, including a file that was skipped (for example too large) when the checkpoint was taken and has since changed (the checkpoint records its skipped paths in the pinned commit message, and the plan reports them as `skippedInSnapshot`; a checkpoint pinned before this was recorded has no such list, so a file it never captured and that is now in the worktree is treated as created after it).
+A checkpoint lists what it skipped (`skipped <path> (<reason>)`), so a missing file is explained, not silent. A restore neither writes nor deletes an excluded path: the files a checkpoint does not hold are not touched by a rollback either, including a file that was skipped (for example too large) when the checkpoint was taken and has since changed (the checkpoint records its skipped paths in the pinned commit message, and the plan reports them as `skippedInSnapshot`; a checkpoint pinned before this was recorded has no such list, so a file it never captured and that is now in the worktree is treated as created after it). A checkpoint records at most 5,000 skipped paths (1 MiB of JSON): when more were skipped it keeps the first ones in path order, the plan reports `skipped_list_truncated` (`recorded` of `total`), and a skipped file beyond them is not protected, so it is removed like a new file only if it fits the policy now and is absent from the checkpoint (a file that is still too large is not in the worktree tree and is never touched).
 
 **Triggers** (the `--trigger` value): `turn`, `plan-step`, `steering`, `manual` (the default), `pre-restore`, `baseline`. The CLI takes a checkpoint when you run `substrate session checkpoint`. Which hooks, plan steps or steering integrations call it automatically at this release is **UNVERIFIED**: check what your surface's hook configuration actually runs before relying on a checkpoint existing at a boundary you did not take yourself.
 
@@ -142,7 +142,7 @@ The outcome is recorded in the `session.rollback` note (`moved-leaf`, `marker-on
 
 ## Drift, `--force`, and what blocks a rollback
 
-**Drift** means the worktree is not at any checkpoint of the session: its tree matches none of them, and it differs from the newest by changes no checkpoint holds. Right after a rollback the worktree **is** at the target's tree, so rolling back again is not drift.
+**Drift** means the worktree is not at any checkpoint of the session: its tree matches none of them, and it differs from the newest by changes no checkpoint holds. Right after a rollback the worktree **is** at the target's tree, so rolling back again is not drift, even though the files the checkpoint skipped were left in place: a checkpoint matches when the trees differ only at paths it skipped, while any other change (an edit to a captured file) is still drift.
 
 A rollback refuses (exit 3, and the refusal is recorded as `session.rollback.refused`, fail-open) when:
 - the worktree has drifted (work that no checkpoint holds would be lost), or

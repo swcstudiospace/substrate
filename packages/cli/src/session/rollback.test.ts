@@ -6,7 +6,7 @@ import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync, lstatSync, readFileSync, readlinkSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { RandomBytes } from "../../../mcp-server/src/session-events.ts";
-import { SimulatedCrash, readPinnedSnapshot, snapshot } from "../../../worktree-snapshot/src/index.ts";
+import { MAX_SKIPPED_ENTRIES, SimulatedCrash, readPinnedSnapshot, snapshot } from "../../../worktree-snapshot/src/index.ts";
 import { mutateToB, SCENARIO_POLICY, writeScenarioA } from "../../../worktree-snapshot/src/scenario.ts";
 import { cleanupTemp, expectWorktreeMatches, FIXED_NOW, fileStateHash, git, makeRepo, tempDir, writeFiles } from "../../../worktree-snapshot/src/testkit.ts";
 import { type CheckpointResult, createCheckpoint, listLocalCheckpoints } from "./checkpoint.ts";
@@ -670,5 +670,82 @@ describe("the transcript step", () => {
 
 	test("the default port reports unsupported and never claims to have moved anything", async () => {
 		expect(await unsupportedTranscriptPort.rewind({ sessionId: "s", surface: "claude-code", rollbackId: "rb", targetCkptId: "ckpt" })).toMatchObject({ outcome: "unsupported" });
+	});
+});
+
+describe("skipped files and the baseline", () => {
+	/** large.bin is too large to be captured at c1; at c2 it is small (captured) and main.ts is edited. */
+	async function skippedThenShrunk(w: World): Promise<{ c1: CheckpointResult; c2: CheckpointResult }> {
+		writeFiles(w.dir, { "large.bin": "L".repeat(100) });
+		const c1 = await checkpoint(w);
+		expect(c1.checkpoint.skipped_count).toBeGreaterThan(0);
+		writeFiles(w.dir, { "large.bin": "small\n", "src/main.ts": "main v2\n" });
+		const c2 = await checkpoint(w);
+		return { c1, c2 };
+	}
+
+	const read = (w: World, path: string): string => readFileSync(join(w.dir, path), "utf8");
+
+	test("a rollback that keeps a skipped file leaves a tree no checkpoint has, and repeating it is not drift", async () => {
+		const w = world();
+		const { c1 } = await skippedThenShrunk(w);
+
+		const first = await roll(w, c1.checkpoint.ckpt_id);
+		expect(first.status).toBe("committed");
+		expect(read(w, "large.bin")).toBe("small\n");
+		expect(read(w, "src/main.ts")).toBe("main v1\n");
+		const trees = (await listLocalCheckpoints({ worktree: w.dir, now: FIXED_NOW })).checkpoints.map((c) => c.tree);
+		expect(trees).not.toContain(await treeOf(w));
+
+		const again = await roll(w, c1.checkpoint.ckpt_id);
+		expect(again.status).toBe("committed");
+		expect(again.plan?.drift_count).toBe(0);
+		expect(read(w, "large.bin")).toBe("small\n");
+		expect(read(w, "src/main.ts")).toBe("main v1\n");
+	});
+
+	test("undoing that rollback is not drift either, and brings back the edit it reverted", async () => {
+		const w = world();
+		const { c1, c2 } = await skippedThenShrunk(w);
+		const first = await roll(w, c1.checkpoint.ckpt_id);
+		expect(first.status).toBe("committed");
+
+		const undo = await roll(w, first.pre_restore?.ckpt_id ?? "missing");
+		expect(undo.status).toBe("committed");
+		expect(undo.plan?.drift_count).toBe(0);
+		expect(read(w, "src/main.ts")).toBe("main v2\n");
+		expect(await treeOf(w)).toBe(c2.checkpoint.tree);
+	});
+
+	test("a genuine edit after such a rollback is still drift, and --force still goes through", async () => {
+		const w = world();
+		const { c1 } = await skippedThenShrunk(w);
+		expect((await roll(w, c1.checkpoint.ckpt_id)).status).toBe("committed");
+
+		writeFiles(w.dir, { "src/util.ts": "edited by the user\n" });
+		const refused = await roll(w, c1.checkpoint.ckpt_id);
+		expect(refused.status).toBe("refused");
+		expect(refused.refusal?.reason).toBe("drift-detected");
+		expect(refused.plan?.drift.map((operation) => operation.path)).toContain("src/util.ts");
+		expect(read(w, "src/util.ts")).toBe("edited by the user\n");
+
+		const forced = await roll(w, c1.checkpoint.ckpt_id, { force: true });
+		expect(forced.status).toBe("committed");
+		expect(read(w, "src/util.ts")).toBe("util v1\n");
+	});
+
+	test("more than 5,000 skipped files: the checkpoint is taken, and a rollback to it reports the capped list", async () => {
+		const w = world();
+		const bulk: Record<string, string> = {};
+		for (let index = 0; index <= MAX_SKIPPED_ENTRIES; index++) bulk[`bulk/${"d".repeat(40)}-${String(index).padStart(5, "0")}.bin`] = "B".repeat(100);
+		writeFiles(w.dir, bulk);
+		const c1 = await checkpoint(w);
+		expect(c1.checkpoint.skipped_count).toBeGreaterThan(MAX_SKIPPED_ENTRIES);
+		writeFiles(w.dir, { "src/main.ts": "main v2\n" });
+		await checkpoint(w);
+
+		const dry = await roll(w, c1.checkpoint.ckpt_id, { dryRun: true });
+		expect(dry.status).toBe("dry-run");
+		expect(dry.plan?.skipped_list_truncated).toEqual({ recorded: MAX_SKIPPED_ENTRIES, total: c1.checkpoint.skipped_count ?? 0 });
 	});
 });
