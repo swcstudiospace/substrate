@@ -25,7 +25,8 @@
  *   matched here), so unrelated notes no longer hide a rotation. When the read is still cut by that hard cap, cannot advance, or
  *   fails, the set may be incomplete and a signer is not provably current: an `anchored` verdict, and a `mismatch` that rests on
  *   the signer alone, are reported as `unverified` with reason `rotation-read-incomplete`. A signer whose window closed at or
- *   before the anchored hour started is `unverified` with reason `signer-retired` instead of `mismatch`; one retired after that
+ *   before the anchored hour started, on a complete read, stays a `mismatch` (a known bad signature, so a rollback refuses) and
+ *   gains the reason `signer-retired`; one retired after that
  *   hour is judged by the verifier against the anchor's block time, as before. Every result of a verification that started
  *   carries a small `signer_set` summary (source, size, rotation notes applied, rotation notes ignored and why, the read gap), so
  *   an ignored rotation note is not silent.
@@ -298,7 +299,8 @@ async function prepare(ports: AnchorVerifyPorts, lookup: CheckpointLookup): Prom
  *   the same evidence would not have if the observed signer were in the set: a missing rotation looks exactly like a forged
  *   signer, so only the signer is in doubt. Any other disagreement (the root, the proof, the count, the memo) stays a `mismatch`.
  * - The read is complete and the signer's window closed at or before the anchored hour started: a `mismatch` that only the
- *   signer explains is `unverified` with reason `signer-retired`. A signer retired after that hour keeps the verifier's own
+ *   signer explains stays a `mismatch` and gains the reason `signer-retired`. It is a KNOWN mismatch, never `unverified`:
+ *   `unverified` lets a rollback proceed, and a complete read leaves nothing unknown. A signer retired after that hour keeps the verifier's own
  *   verdict, which judges it against the anchor's block time.
  *
  * `again` re-runs the verification with the extra signer and answers its status.
@@ -323,7 +325,7 @@ async function settleSignerGap<R extends { status: string; evidence: CheckpointE
 	const hourStartMs = Date.parse(result.hour_start);
 	const retired = signerSet.find((entry) => entry.pubkey === signer && entry.valid_until_ms !== null && entry.valid_until_ms <= hourStartMs);
 	if (retired === undefined || (await again(signer)) !== "anchored") return reported;
-	return { ...reported, status: "unverified", reasons: [...result.reasons, `signer-retired: ${signer} was retired at ${new Date(retired.valid_until_ms as number).toISOString()}, at or before the anchored hour ${result.hour_start}`] };
+	return { ...reported, reasons: [...result.reasons, `signer-retired: ${signer} was retired at ${new Date(retired.valid_until_ms as number).toISOString()}, at or before the anchored hour ${result.hour_start}`] };
 }
 
 /** The deps with one more signer, valid for all time: what the signer set would be if no rotation were missing. */

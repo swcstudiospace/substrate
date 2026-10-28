@@ -29,7 +29,7 @@
 | | credential-shaped files: `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `*.p12`, `credentials*.json`, `*.keystore` |
 | | nested git repositories (they appear as directories and are not entered) |
 
-A checkpoint lists what it skipped (`skipped <path> (<reason>)`), so a missing file is explained, not silent. A restore neither writes nor deletes an excluded path: the files a checkpoint does not hold are not touched by a rollback either.
+A checkpoint lists what it skipped (`skipped <path> (<reason>)`), so a missing file is explained, not silent. A restore neither writes nor deletes an excluded path: the files a checkpoint does not hold are not touched by a rollback either, including a file that was skipped (for example too large) when the checkpoint was taken and has since changed (the checkpoint records its skipped paths in the pinned commit message, and the plan reports them as `skippedInSnapshot`; a checkpoint pinned before this was recorded has no such list, so a file it never captured and that is now in the worktree is treated as created after it).
 
 **Triggers** (the `--trigger` value): `turn`, `plan-step`, `steering`, `manual` (the default), `pre-restore`, `baseline`. The CLI takes a checkpoint when you run `substrate session checkpoint`. Which hooks, plan steps or steering integrations call it automatically at this release is **UNVERIFIED**: check what your surface's hook configuration actually runs before relying on a checkpoint existing at a boundary you did not take yourself.
 

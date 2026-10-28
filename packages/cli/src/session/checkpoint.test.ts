@@ -228,6 +228,25 @@ describe("createCheckpoint", () => {
 	});
 });
 
+describe("linked worktrees of one repository", () => {
+	test("a fresh sibling worktree inherits nothing of the main worktree's session: no listing, seq 1, no chain", async () => {
+		const { dir, pendingDir, server, randomBytes } = setup();
+		const sibling = join(tempDir(), "sibling");
+		git(dir, ["worktree", "add", "-q", "-b", "wt-sibling", sibling]);
+		const base = { sessionId: SESSION, trigger: "manual" as const, surface: "claude-code", client: server, now: FIXED_NOW, randomBytes, pendingDir };
+		const mine = await createCheckpoint({ ...base, worktree: dir });
+		expect(mine.checkpoint.seq).toBe(1);
+
+		expect((await listLocalCheckpoints({ worktree: sibling })).checkpoints).toEqual([]);
+		const theirs = await createCheckpoint({ ...base, worktree: sibling });
+		expect(theirs.checkpoint.seq).toBe(1);
+		expect(theirs.checkpoint.prev_ckpt_id).toBeUndefined();
+		// Each worktree still lists exactly its own one.
+		expect((await listLocalCheckpoints({ worktree: sibling })).checkpoints.map((c) => c.ckpt_id)).toEqual([theirs.checkpoint.ckpt_id]);
+		expect((await listLocalCheckpoints({ worktree: dir })).checkpoints.map((c) => c.ckpt_id)).toEqual([mine.checkpoint.ckpt_id]);
+	});
+});
+
 describe("listLocalCheckpoints", () => {
 	test("a checkpoint ref with no or damaged metadata is reported as invalid and not offered as a target", async () => {
 		const { dir, pendingDir, server, randomBytes } = setup();

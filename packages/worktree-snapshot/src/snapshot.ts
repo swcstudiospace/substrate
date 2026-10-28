@@ -1,5 +1,5 @@
 import { encodeMetadata, listPinnedIn, type PinnedCheckpoint, pinTree, readPinnedSnapshotIn } from "./pin.ts";
-import { validateTarget } from "./plan.ts";
+import { skippedOf, validateTarget } from "./plan.ts";
 import { resolvePolicy } from "./policy.ts";
 import { openRepo, type Runner } from "./runner.ts";
 import { buildSnapshot } from "./tree.ts";
@@ -39,7 +39,7 @@ export async function pinSnapshot(params: PinParams): Promise<PinResult> {
 	const ctx = await openRepo(params);
 	const tree = await validateTarget(ctx, params.snapshot);
 	const metadata = params.metadata === undefined ? undefined : encodeMetadata(params.metadata);
-	return pinTree(ctx, "checkpoints", params.id, tree, metadata);
+	return pinTree(ctx, "checkpoints", params.id, tree, metadata, skippedOf(params.snapshot));
 }
 
 export type ListPinnedParams = { worktree: string; now?: Clock; run?: Runner };

@@ -178,14 +178,15 @@ const run = (argv: string[], f: Fake) =>
 
 describe("argument grammar", () => {
 	test("defaults and every flag", () => {
-		expect(parseConsistencyArgs([])).toEqual({ json: false, bank: null, limit: null, since: null, repair: false, repairOrphans: false });
-		expect(parseConsistencyArgs(["--json", "--bank", "sub-hermes", "--limit", "250", "--since", "2026-10-01T00:00:00Z", "--repair", "--repair-orphans"])).toEqual({
+		expect(parseConsistencyArgs([])).toEqual({ json: false, bank: null, limit: null, since: null, repair: false, repairOrphans: false, serverStopped: false });
+		expect(parseConsistencyArgs(["--json", "--bank", "sub-hermes", "--limit", "250", "--since", "2026-10-01T00:00:00Z", "--repair", "--server-stopped", "--repair-orphans"])).toEqual({
 			json: true,
 			bank: "sub-hermes",
 			limit: 250,
 			since: "2026-10-01T00:00:00.000Z",
 			repair: true,
 			repairOrphans: true,
+			serverStopped: true,
 		});
 		expect(parseConsistencyArgs(["--since", "2026-10-01T02:00:00+02:00"]).since).toBe("2026-10-01T00:00:00.000Z");
 	});
@@ -210,6 +211,9 @@ describe("argument grammar", () => {
 		[["--since", "2026-10-01"], "--since needs"],
 		[["--since", "2026-13-45T00:00:00Z"], "--since needs"],
 		[["--repair-orphans"], "together with --repair"],
+		[["--repair"], "--server-stopped"],
+		[["--repair", "--repair-orphans"], "--server-stopped"],
+		[["--server-stopped"], "together with --repair"],
 	])("refuses %j", (argv, message) => {
 		expect(() => parseConsistencyArgs(argv)).toThrow(ConsistencyUsageError);
 		expect(() => parseConsistencyArgs(argv)).toThrow(message);
@@ -369,9 +373,56 @@ describe("exit codes", () => {
 });
 
 describe("--repair", () => {
+	test("without --server-stopped a repair is refused with a usage error naming the reason, and nothing is opened or sent", async () => {
+		const f = messy();
+		for (const argv of [["--repair"], ["--json", "--repair"], ["--repair", "--repair-orphans"]]) {
+			const result = await run(argv, f);
+			expect(result.code).toBe(2);
+			expect(result.stdout).toBe("");
+			expect(result.stderr).toContain("--server-stopped");
+			expect(result.stderr).toContain("write queue");
+		}
+		expect(f.counters.opens).toBe(0);
+		expect(f.log).toEqual([]);
+		// Verification alone is unchanged: read-only, no flag.
+		expect((await run(["--json"], messy())).code).toBe(1);
+	});
+
+	test("a row that changed after the checks and before the write is skipped with a named reason, and nothing is sent", async () => {
+		const f = messy();
+		const real = f.ctx.repair.documentShared;
+		// The forgotten entry's document is checked, then a replacement shares it just before the delete.
+		let checks = 0;
+		f.ctx.repair.documentShared = async (e) => {
+			checks += 1;
+			return checks > 1 ? true : real(e);
+		};
+		const result = await run(["--json", "--repair", "--server-stopped"], f);
+		expect(f.mutating()).toEqual(["retain:mem_missing"]);
+		const outcome = JSON.parse(result.stdout).repairs.outcomes.find((o: { action: string }) => o.action === "delete_forgotten_document");
+		expect(outcome).toMatchObject({ outcome: "skipped", reason: expect.stringContaining("re-read before the write: a live entry shares the document") });
+		expect(f.docs.has(defaultDocumentId(f.entries.find((e) => e.id === "mem_forgotten") as MemoryEntry) as string)).toBe(true);
+	});
+
+	test("an entry row that changed between the first read and the last look is not retained", async () => {
+		const f = messy();
+		const real = f.ctx.repair.readEntry;
+		let reads = 0;
+		f.ctx.repair.readEntry = async (id) => {
+			const row = await real(id);
+			if (id !== "mem_missing" || row === null) return row;
+			reads += 1;
+			return reads > 1 ? { ...row, entry_hash: "f".repeat(64) } : row;
+		};
+		const result = await run(["--json", "--repair", "--server-stopped"], f);
+		expect(f.mutating()).toEqual(["delete:key-mem_forgotten"]);
+		const outcome = JSON.parse(result.stdout).repairs.outcomes.find((o: { action: string }) => o.action === "re_retain");
+		expect(outcome).toMatchObject({ outcome: "skipped", reason: expect.stringContaining("entry row changed between the plan and the write") });
+	});
+
 	test("performs only the two safe plane actions and leaves the orphan alone", async () => {
 		const f = messy();
-		const result = await run(["--json", "--repair"], f);
+		const result = await run(["--json", "--repair", "--server-stopped"], f);
 		expect(result.code).toBe(1);
 		expect(f.mutating()).toEqual(["delete:key-mem_forgotten", "retain:mem_missing"]);
 		expect(f.docs.has("orphan-doc")).toBe(true);
@@ -386,7 +437,7 @@ describe("--repair", () => {
 
 	test("--repair-orphans adds the orphan's deletion and nothing else", async () => {
 		const f = messy();
-		const result = await run(["--json", "--repair", "--repair-orphans"], f);
+		const result = await run(["--json", "--repair", "--server-stopped", "--repair-orphans"], f);
 		expect(f.mutating()).toEqual(["delete:key-mem_forgotten", "retain:mem_missing", "delete:orphan-doc"]);
 		expect(f.docs.has("orphan-doc")).toBe(false);
 		expect(JSON.parse(result.stdout).repairs.counts.repaired).toBe(3);
@@ -396,7 +447,7 @@ describe("--repair", () => {
 		const f = messy();
 		const missing = f.repairView.get("mem_missing") as MemoryEntry;
 		f.repairView.set("mem_missing", { ...missing, superseded_by: "mem_newer" });
-		const result = await run(["--json", "--repair"], f);
+		const result = await run(["--json", "--repair", "--server-stopped"], f);
 		expect(f.mutating()).toEqual(["delete:key-mem_forgotten"]);
 		const outcome = JSON.parse(result.stdout).repairs.outcomes.find((o: { action: string }) => o.action === "re_retain");
 		expect(outcome).toMatchObject({ outcome: "skipped", reason: "the entry is no longer current" });
@@ -411,7 +462,7 @@ describe("--repair", () => {
 			if (id === "mem_missing") f.docs.set(defaultDocumentId(missing) as string, "mem_missing");
 			return real(id);
 		};
-		const result = await run(["--json", "--repair"], f);
+		const result = await run(["--json", "--repair", "--server-stopped"], f);
 		expect(f.mutating()).toEqual(["delete:key-mem_forgotten"]);
 		const outcome = JSON.parse(result.stdout).repairs.outcomes.find((o: { action: string }) => o.action === "re_retain");
 		expect(outcome).toMatchObject({ outcome: "already_consistent", reason: "the document exists now" });
@@ -420,7 +471,7 @@ describe("--repair", () => {
 	test("a forgotten entry's document that a live entry shares is skipped", async () => {
 		const f = messy();
 		f.ctx.repair.documentShared = async () => true;
-		await run(["--json", "--repair"], f);
+		await run(["--json", "--repair", "--server-stopped"], f);
 		expect(f.mutating()).toEqual(["retain:mem_missing"]);
 	});
 
@@ -434,7 +485,7 @@ describe("--repair", () => {
 			f.repairView.set(e.id, { ...e, superseded_by: FORGOTTEN });
 			return result;
 		};
-		const result = await run(["--json", "--repair"], f);
+		const result = await run(["--json", "--repair", "--server-stopped"], f);
 		const document = defaultDocumentId(missing) as string;
 		expect(f.mutating()).toEqual(["delete:key-mem_forgotten", "retain:mem_missing", `delete:${document}`]);
 		expect(f.docs.has(document)).toBe(false);
@@ -451,16 +502,16 @@ describe("--repair", () => {
 			f.ctx.repair.documentShared = async () => true;
 			return result;
 		};
-		await run(["--json", "--repair"], f);
+		await run(["--json", "--repair", "--server-stopped"], f);
 		expect(f.mutating()).toEqual(["delete:key-mem_forgotten", "retain:mem_missing"]);
 	});
 
 	test("the retain gate's refusal is skipped; a throwing retain fails that action only, with no URL in the report", async () => {
-		const refused = await run(["--json", "--repair"], messy({ retain: { forwarded: false, reason: "retain.expired" } }));
+		const refused = await run(["--json", "--repair", "--server-stopped"], messy({ retain: { forwarded: false, reason: "retain.expired" } }));
 		expect(JSON.parse(refused.stdout).repairs.outcomes.find((o: { action: string }) => o.action === "re_retain")).toMatchObject({ outcome: "skipped", reason: "retain.expired" });
 
 		const f = messy({ retain: "throws" });
-		const thrown = await run(["--json", "--repair"], f);
+		const thrown = await run(["--json", "--repair", "--server-stopped"], f);
 		const out = JSON.parse(thrown.stdout);
 		expect(out.repairs.counts).toMatchObject({ failed: 1, repaired: 1 });
 		expect(thrown.stdout).not.toContain("https://");
@@ -471,24 +522,24 @@ describe("--repair", () => {
 
 	test("is skipped, with a note, when the plane could not be read", async () => {
 		const f = messy({ listing: "down" });
-		const result = await run(["--repair"], f);
+		const result = await run(["--repair", "--server-stopped"], f);
 		expect(result.code).toBe(3);
 		expect(f.mutating()).toEqual([]);
 		expect(result.stdout).toContain("repair skipped");
-		const json = await run(["--json", "--repair"], messy({ listing: "down" }));
+		const json = await run(["--json", "--repair", "--server-stopped"], messy({ listing: "down" }));
 		expect(JSON.parse(json.stdout).repairs).toBeUndefined();
 		expect(json.stderr).toContain("repair skipped");
 	});
 
 	test("the text form says what was done and to re-run", async () => {
-		const result = await run(["--repair"], messy());
+		const result = await run(["--repair", "--server-stopped"], messy());
 		expect(result.stdout).toContain("repair   2 repaired, 0 already consistent, 1 skipped, 0 failed (orphan deletion off)");
 		expect(result.stdout).toContain("re-run the verifier to confirm");
 	});
 
 	test("a repair run on a consistent system calls no plane write at all", async () => {
 		const f = consistent();
-		const result = await run(["--repair", "--repair-orphans"], f);
+		const result = await run(["--repair", "--server-stopped", "--repair-orphans"], f);
 		expect(result.code).toBe(0);
 		expect(f.log).toEqual([]);
 	});

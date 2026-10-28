@@ -1,5 +1,5 @@
 /**
- * `substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair] [--repair-orphans]`
+ * `substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair --server-stopped] [--repair-orphans]`
  * (v1.6, phase 57).
  *
  * Like `substrate ledger`, the work runs in `packages/mcp-server/src/consistency-run.ts` from this checkout (or
@@ -11,22 +11,23 @@
  * `ok` cannot be claimed.
  *
  * The grammar is the runner's own (`parseConsistencyArgs`) and is strict on purpose: a value flag takes its
- * value as the NEXT word (never `--bank=B`), a boolean flag takes none, and `--repair-orphans` needs
- * `--repair`. Ranges (the `--limit` ceiling, whether `--bank` carries the configured prefix) are the runner's to
+ * value as the NEXT word (never `--bank=B`), a boolean flag takes none, and `--repair-orphans` and `--server-stopped` need
+ * `--repair` (which in turn needs `--server-stopped`: the runner refuses it otherwise). Ranges (the `--limit` ceiling, whether `--bank` carries the configured prefix) are the runner's to
  * judge, because they depend on its configuration; the shapes are checked here.
  */
 
 export const CONSISTENCY_USAGE =
-	"usage: substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair [--repair-orphans]]\n" +
+	"usage: substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair --server-stopped [--repair-orphans]]\n" +
 	"  --json            print the report as JSON\n" +
 	"  --bank B          one bank only\n" +
 	"  --limit N         examine at most N entries, newest first\n" +
 	"  --since ISO       only entries created at or after this instant, e.g. 2026-10-01T00:00:00Z\n" +
 	"  --repair          carry out the safe repairs (re-retain a missing document, delete a forgotten entry's document)\n" +
+	"  --server-stopped  required by --repair: you assert substrate-mcp and every writer are stopped (the runner refuses --repair without it)\n" +
 	"  --repair-orphans  with --repair: also delete plane documents nothing in force owns\n" +
 	"exit: 0 consistent, 1 drift found, 2 usage or a refusal, 3 a store was unreachable or a check could not run\n";
 
-const BOOLEAN_FLAGS = ["json", "repair", "repair-orphans"] as const;
+const BOOLEAN_FLAGS = ["json", "repair", "repair-orphans", "server-stopped"] as const;
 const VALUE_FLAGS = ["bank", "limit", "since"] as const;
 /** The runner's own shapes, checked here so a malformed value never costs a process. */
 const BANK_NAME = /^[A-Za-z0-9._-]{1,128}$/;
@@ -65,6 +66,7 @@ export function consistencyRunnerArgs(argv: readonly string[]): string[] | null 
 		return null;
 	}
 	if (seen.has("repair-orphans") && !seen.has("repair")) return null;
+	if (seen.has("server-stopped") && !seen.has("repair")) return null;
 	return out;
 }
 

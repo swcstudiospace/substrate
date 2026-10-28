@@ -313,6 +313,22 @@ describe("anchor status", () => {
 		expect(forced.warnings.some((warning) => warning.includes("anchor mismatch overridden"))).toBe(true);
 	});
 
+	test("a retired signer (mismatch, signer-retired) refuses a rollback; an unreadable rotation list (unverified, rotation-read-incomplete) only warns", async () => {
+		const w = world();
+		const { c1 } = await twoStates(w);
+		w.server.anchorStatus = "mismatch";
+		w.server.anchorReasons = ["signer-retired: a key was retired at 2026-01-01T00:00:00.000Z, at or before the anchored hour"];
+		const refused = await roll(w, c1.checkpoint.ckpt_id);
+		expect(refused).toMatchObject({ status: "refused", refusal: { reason: "hash-mismatch" }, anchor: { status: "mismatch" } });
+		expect(await treeOf(w)).not.toBe(c1.checkpoint.tree);
+
+		w.server.anchorStatus = "unverified";
+		w.server.anchorReasons = ["rotation-read-incomplete: the rotation notes could not be read"];
+		const open = await roll(w, c1.checkpoint.ckpt_id, { dryRun: true });
+		expect(open.status).toBe("dry-run");
+		expect(open.blocked_by).toEqual([]);
+	});
+
 	test("a plan with no anchor information is reported as unverified, not as anchored", async () => {
 		const w = world();
 		const { c1 } = await twoStates(w);

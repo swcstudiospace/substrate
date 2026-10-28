@@ -17,9 +17,10 @@ import { realpathSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { SnapshotPolicyError } from "./errors.ts";
 import { isValidId } from "./paths.ts";
+import { parseSkipped } from "./plan.ts";
 import { git, gitText, gitTry, type RepoContext } from "./runner.ts";
 import { assertObjectId, assertTreeExists, snapshotOfTree } from "./tree.ts";
-import type { PinResult, Snapshot } from "./types.ts";
+import type { PinResult, Snapshot, SkippedPath } from "./types.ts";
 
 export const REF_ROOT = "refs/substrate";
 
@@ -30,6 +31,9 @@ export const MAX_METADATA_BYTES = 4096;
 
 /** The commit-message trailer that carries a pin's metadata as one line of canonical JSON. */
 export const METADATA_TRAILER = "Substrate-Checkpoint-Metadata";
+
+/** The commit-message trailer that carries the paths the snapshot skipped, as one line of JSON. */
+export const SKIPPED_TRAILER = "Substrate-Checkpoint-Skipped";
 
 const MAX_METADATA_DEPTH = 16;
 
@@ -140,7 +144,8 @@ async function resolveRefTree(ctx: RepoContext, ref: string): Promise<string | n
  * Pin a tree under `refs/substrate/<namespace>/<id>`. Idempotent: pinning the same tree again under
  * the same id returns the existing commit; a different tree under an existing id is refused.
  * `metadata`, when given, is canonical JSON from `encodeMetadata`; it is written once, with the
- * commit, and an idempotent re-pin keeps the metadata the pin was created with.
+ * commit, and an idempotent re-pin keeps the metadata the pin was created with. `skipped` is the list
+ * of paths the snapshot skipped; it is stored in a separate trailer, written once like the metadata.
  */
 export async function pinTree(
 	ctx: RepoContext,
@@ -148,6 +153,7 @@ export async function pinTree(
 	id: string,
 	tree: string,
 	metadata?: string,
+	skipped: readonly SkippedPath[] = [],
 ): Promise<PinResult> {
 	const ref = await pinRef(ctx, namespace, id);
 	await assertTreeExists(ctx, tree);
@@ -167,8 +173,13 @@ export async function pinTree(
 		GIT_COMMITTER_EMAIL: IDENTITY.email,
 		GIT_COMMITTER_DATE: date,
 	};
-	const message =
-		metadata === undefined ? `substrate ${namespace} ${id}` : `substrate ${namespace} ${id}\n\n${METADATA_TRAILER}: ${metadata}`;
+	// The skipped-paths list rides in its own trailer, so the tree and the manifest digest are unchanged:
+	// it is not part of any hash, and a pin of a snapshot that skipped nothing is byte-identical to before.
+	const trailers = [
+		...(metadata === undefined ? [] : [`${METADATA_TRAILER}: ${metadata}`]),
+		...(skipped.length === 0 ? [] : [`${SKIPPED_TRAILER}: ${JSON.stringify(skipped.map(({ path, reason }) => ({ path, reason })))}`]),
+	];
+	const message = trailers.length === 0 ? `substrate ${namespace} ${id}` : `substrate ${namespace} ${id}\n\n${trailers.join("\n")}`;
 	const commit = await gitText(ctx, ["commit-tree", tree, "-m", message], { env });
 	assertObjectId(commit, "commit-tree output");
 	// The empty old value makes update-ref fail rather than overwrite a ref created concurrently.
@@ -182,14 +193,37 @@ export async function deletePin(ctx: RepoContext, ref: string): Promise<void> {
 }
 
 /**
- * A Snapshot rebuilt from a pinned ref. `headCommit` and `branch` are null and `skipped` is empty:
- * a pin stores only the tree.
+ * The skipped paths a pin recorded, from its `Substrate-Checkpoint-Skipped` trailer; empty for a pin
+ * without one (made before skipped paths were recorded, or by a snapshot that skipped nothing).
+ * A trailer that is present but unreadable is an error, never "nothing skipped": guessing empty would
+ * let a restore delete files the checkpoint never captured.
+ */
+async function readSkippedTrailer(ctx: RepoContext, ref: string): Promise<SkippedPath[]> {
+	const message = await gitText(ctx, ["show", "-s", "--format=%B", ref]);
+	const prefix = `${SKIPPED_TRAILER}: `;
+	const lines = message.split("\n").filter((line) => line.startsWith(prefix));
+	if (lines.length === 0) return [];
+	let value: unknown;
+	try {
+		value = lines.length === 1 ? JSON.parse((lines[0] ?? "").slice(prefix.length)) : null;
+	} catch {
+		value = null;
+	}
+	if (!Array.isArray(value)) throw new SnapshotPolicyError(`${ref} has an unreadable skipped-paths trailer`);
+	const parsed = parseSkipped(value);
+	if (parsed.length !== value.length) throw new SnapshotPolicyError(`${ref} has an unreadable skipped-paths trailer`);
+	return parsed;
+}
+
+/**
+ * A Snapshot rebuilt from a pinned ref. `headCommit` and `branch` are null; `skipped` is what the
+ * pin recorded (see `pinTree`), so a restore to this snapshot leaves those paths alone.
  */
 export async function readPinnedSnapshotIn(ctx: RepoContext, ref: string): Promise<Snapshot> {
 	await assertOwnedPinRef(ctx, ref);
 	const tree = await resolveRefTree(ctx, ref);
 	if (tree === null) throw new SnapshotPolicyError(`${ref} does not exist`);
-	return snapshotOfTree(ctx, tree, { skipped: [], headCommit: null, branch: null });
+	return snapshotOfTree(ctx, tree, { skipped: await readSkippedTrailer(ctx, ref), headCommit: null, branch: null });
 }
 
 /** A pinned checkpoint as `listPinned` reports it. */

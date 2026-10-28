@@ -388,7 +388,7 @@ describe("the signer set: the configured key plus operator rotations", () => {
 		expect(w.ledger.calls.queryEvents).toBe(ROTATION_READ_MAX_PAGES);
 	});
 
-	test("a retirement beyond the old 500-note bound is seen: the retired signer is unverified, signer-retired", async () => {
+	test("a retirement beyond the old 500-note bound is seen: the retired signer is a mismatch, signer-retired", async () => {
 		const w = world(event({ id: "evt_v16_note" }));
 		const retired = retirement(SIGNER_A, SIGNER_B, H - 3 * HOUR_MS);
 		w.ledger.events.push(retired);
@@ -397,7 +397,7 @@ describe("the signer set: the configured key plus operator rotations", () => {
 			w.ledger.events.push(event({ id: `evt_v16_filler_${i}`, surface: OPERATOR as SubstrateEvent["surface"], session_id: null, ts: new Date(H + HOUR_MS + i).toISOString() }));
 		}
 		const result = await verifyEventRef(w.ports, "evt_v16_note");
-		expect(result).toMatchObject({ status: "unverified" });
+		expect(result).toMatchObject({ status: "mismatch" });
 		expect(result.reasons.join(" ")).toContain("signer-retired");
 		expect(result).not.toHaveProperty("signer_set_complete");
 		expect(result.signer_set).toMatchObject({ rotation_notes_applied: 1, read_gap: null });
@@ -503,11 +503,11 @@ describe("SUBSTRATE_ANCHOR_SIGNER_SET is the bootstrap when set", () => {
 		});
 	});
 
-	test("a retired window in the configured set, closed at or before the anchored hour, is unverified with signer-retired", async () => {
+	test("a retired window in the configured set, closed at or before the anchored hour, is a mismatch with signer-retired", async () => {
 		const w = world(event({ id: "evt_v16_note" }));
 		withSet(w, [{ pubkey: SIGNER_A, valid_from_ms: 0, valid_until_ms: H }, { pubkey: SIGNER_B, valid_from_ms: H, valid_until_ms: null }], SIGNER_B);
 		const result = await verifyEventRef(w.ports, "evt_v16_note");
-		expect(result.status).toBe("unverified");
+		expect(result.status).toBe("mismatch");
 		expect(result.reasons.join(" ")).toContain("signer-retired");
 	});
 

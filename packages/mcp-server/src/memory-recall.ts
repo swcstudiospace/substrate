@@ -235,27 +235,42 @@ function rankedHits(answers: readonly BankAnswer[]): DerivedMemoryHit[] {
 
 const entryIdOf = (hit: RecallHit): string | undefined => (typeof hit.metadata.entry_id === "string" && hit.metadata.entry_id.length > 0 ? hit.metadata.entry_id : undefined);
 
+/** What the forgotten-entry lookup settled as: the forgotten ids, or why they are unknown. */
+type ForgottenLookup = { gone: ReadonlySet<string> } | { gone: null; timedOut: boolean };
+
 /**
  * The answers without the hits whose document belongs to a forgotten index entry. `unchecked` is true when the
- * lookup failed: the hits that name an entry are then withheld too, because their state is unknown.
+ * lookup failed or ran out of time: the hits that name an entry are then withheld too, because their state is unknown.
+ * The lookup runs inside the recall's own budget: `remainingMs` is what is left of it when the lookup starts, and a lookup
+ * that has not answered by then is a failed one (`timedOut`), never waited for.
  */
 async function withoutForgotten(
 	forgotten: (entryIds: readonly string[]) => Promise<ReadonlySet<string>>,
 	answers: readonly BankAnswer[],
-): Promise<{ answers: BankAnswer[]; unchecked: boolean }> {
+	remainingMs: number,
+): Promise<{ answers: BankAnswer[]; unchecked: boolean; timedOut: boolean }> {
 	const ids = [...new Set(answers.flatMap((answer) => answer.hits.flatMap((hit) => entryIdOf(hit) ?? [])))];
-	if (ids.length === 0) return { answers: [...answers], unchecked: false };
-	let gone: ReadonlySet<string> | null = null;
-	try {
-		gone = await forgotten(ids);
-	} catch {
-		// Fail closed: an entry that cannot be looked up may be a forgotten one.
-	}
+	if (ids.length === 0) return { answers: [...answers], unchecked: false, timedOut: false };
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const expired = new Promise<ForgottenLookup>((resolve) => {
+		timer = setTimeout(() => resolve({ gone: null, timedOut: true }), Math.max(0, remainingMs));
+	});
+	const looked = (async (): Promise<ForgottenLookup> => {
+		try {
+			return { gone: await forgotten(ids) };
+		} catch {
+			// Fail closed: an entry that cannot be looked up may be a forgotten one.
+			return { gone: null, timedOut: false };
+		}
+	})();
+	const outcome = await Promise.race([looked, expired]);
+	clearTimeout(timer);
+	const gone = outcome.gone;
 	const keep = (hit: RecallHit): boolean => {
 		const id = entryIdOf(hit);
 		return id === undefined || (gone !== null && !gone.has(id));
 	};
-	return { answers: answers.map((answer) => ({ ...answer, hits: answer.hits.filter(keep) })), unchecked: gone === null };
+	return { answers: answers.map((answer) => ({ ...answer, hits: answer.hits.filter(keep) })), unchecked: gone === null, timedOut: "timedOut" in outcome && outcome.timedOut };
 }
 
 export async function recallMemories(
@@ -280,17 +295,21 @@ export async function recallMemories(
 	const config = deps.config;
 	const fetchImpl = deps.fetchImpl ?? fetch;
 	const caller: MemoryCaller = { surface: callerSurface ?? "unattributed", repo: callerRepo };
-	const answered = await recallAcrossBanks(config, resolved.banks, query, caller, fetchImpl, deps.budgetMs ?? DEFAULT_RECALL_BUDGET_MS);
-	const { answers, unchecked } = deps.forgotten === undefined ? { answers: answered, unchecked: false } : await withoutForgotten(deps.forgotten, answered);
+	const budgetMs = deps.budgetMs ?? DEFAULT_RECALL_BUDGET_MS;
+	// One deadline for the whole recall: the forgotten-entry lookup spends what the fan-out left, never more.
+	const deadline = Date.now() + budgetMs;
+	const answered = await recallAcrossBanks(config, resolved.banks, query, caller, fetchImpl, budgetMs);
+	const checked = deps.forgotten === undefined ? { answers: answered, unchecked: false, timedOut: false } : await withoutForgotten(deps.forgotten, answered, deadline - Date.now());
+	const { answers, unchecked } = checked;
 	const failures: string[] = [];
-	let timedOut = false;
+	let timedOut = checked.timedOut;
 	for (const answer of answers) {
 		if (answer.failure === undefined) continue;
 		failures.push(`${answer.bank}: ${answer.failure.reason}`);
 		if (answer.failure.timedOut) timedOut = true;
 	}
 	const results = rankedHits(answers);
-	if (unchecked) failures.push("index: forgotten-entry check unavailable, hits that name an index entry were withheld");
+	if (unchecked) failures.push(checked.timedOut ? "index: forgotten-entry check timed out, hits that name an index entry were withheld" : "index: forgotten-entry check unavailable, hits that name an index entry were withheld");
 	if (failures.length > 0) {
 		// A budget miss leads with its own marker whichever banks answered; the
 		// rest keep the outage / partial wording the callers already read.
