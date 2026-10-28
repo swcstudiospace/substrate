@@ -37,7 +37,11 @@
  *   frees a legacy event for another one. The heuristic is exact in count
  *   within a bucket and approximate in identity, and a replayed idempotent
  *   write or an entry the sweeper deleted can explain a
- *   `ledger_write_without_entry`. The window is bounded (default seven
+ *   `ledger_write_without_entry`. When an entry that no event names could just
+ *   as well own the legacy event the heuristic gave to an entry an exact event
+ *   also names (an entry written before the upgrade and retried after it), the
+ *   data cannot tell which entry lacks an audit: that is reported as
+ *   `ledger_pairing_ambiguous`, never guessed either way. The window is bounded (default seven
  *   days) so the ledger's own retention and the sweeper do not turn into
  *   noise.
  *
@@ -70,6 +74,7 @@ export const FINDING_CODES = [
 	"hash_mismatch",
 	"index_entry_missing_in_plane",
 	"index_entry_without_ledger_write",
+	"ledger_pairing_ambiguous",
 	"ledger_write_without_entry",
 	"plane_document_orphan",
 ] as const;
@@ -341,6 +346,10 @@ export interface Finding {
 	expected_document_id?: string;
 	entry_id?: string;
 	event_id?: string;
+	/** For `ledger_pairing_ambiguous`: the other entry the same legacy event may belong to. */
+	contender_entry_id?: string;
+	/** For `ledger_pairing_ambiguous`: the event written without an entry id that either entry may own. */
+	legacy_event_id?: string;
 	/** A fixed-template sentence over validated tokens. Never content. */
 	detail: string;
 }
@@ -1101,6 +1110,7 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 			let j = 0;
 			const unmatchedEntries: Array<{ id: string; tsMs: number }> = [];
 			const unmatchedEvents: Array<{ id: string; tsMs: number }> = [];
+			const pairs: Array<{ entry: { id: string; tsMs: number }; event: { id: string; tsMs: number } }> = [];
 			while (i < entryList.length && j < eventList.length) {
 				const entry = entryList[i] as { id: string; tsMs: number };
 				const event = eventList[j] as { id: string; tsMs: number };
@@ -1116,6 +1126,7 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 				} else {
 					counts.ledger_pairs += 1;
 					heuristicMatchedIds.add(entry.id);
+					pairs.push({ entry, event });
 					i += 1;
 					j += 1;
 				}
@@ -1125,6 +1136,26 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 			for (const entry of unmatchedEntries) {
 				// An event that names this entry satisfies it (its pair is counted below).
 				if (exactEntryIds.has(entry.id)) continue;
+				// A legacy event the heuristic gave to an entry that an exact event also names could as well be this entry's own
+				// audit (the other entry then had none until a retry after the upgrade). The data cannot say which: report that.
+				const contender = pairs.find((pair) => {
+					if (!exactEntryIds.has(pair.entry.id)) return false;
+					const delta = pair.event.tsMs - entry.tsMs;
+					return delta >= -cfg.ledgerSkewMs && delta <= cfg.ledgerLagMs;
+				});
+				if (contender !== undefined) {
+					add({
+						code: "ledger_pairing_ambiguous",
+						id: token(entry.id),
+						stores: ["index", "ledger"],
+						bank: bankLabel,
+						entry_id: token(entry.id),
+						contender_entry_id: token(contender.entry.id),
+						legacy_event_id: token(contender.event.id),
+						detail: `the memory.write event ${token(contender.event.id)} (writer ${token(writer)}, ${token(kind)} at ${token(scope)}) carries no entry id and may be the audit of this entry or of entry ${token(contender.entry.id)}; an exact event also names entry ${token(contender.entry.id)}, so one of the two entries may have no audit and the data cannot say which`,
+					});
+					continue;
+				}
 				add({
 					code: "index_entry_without_ledger_write",
 					id: token(entry.id),
@@ -1368,6 +1399,7 @@ export function planRepairs(report: ConsistencyReport): RepairPlan {
 				unrepairable.push({ finding: finding.code, finding_id: finding.id, reason: "the index row is authoritative: review the row, nothing is rewritten automatically" });
 				continue;
 			case "index_entry_without_ledger_write":
+			case "ledger_pairing_ambiguous":
 			case "ledger_write_without_entry":
 				unrepairable.push({ finding: finding.code, finding_id: finding.id, reason: "the ledger is append-only and this run cannot repair a pairing between it and the index: review by hand" });
 				continue;

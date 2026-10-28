@@ -493,17 +493,72 @@ describe("ledger comparison", () => {
 			expect(report.counts.ledger_pairs).toBe(2);
 		});
 
-		test("a replay naming an entry does not free that entry's legacy event for a neighbour: the neighbour is still reported", async () => {
+		test("round-1 data: a legacy audit given to a replayed entry may be its neighbour's, so the neighbour is reported as ambiguous, never clean", async () => {
 			const a = entry("mem_a", { created: minutesAgo(30) });
 			const b = entry("mem_b", { created: new Date(Date.parse(minutesAgo(30)) + 1000).toISOString() });
 			const w = world([a, b], { events: "none" });
-			// Only mem_a was ever audited, by an event written before entry_id existed; a replay 10 minutes later names it.
+			// One legacy event (written before entry_id existed) at +2 s; a replay 10 minutes later names mem_a.
+			w.events.push(ledgerEvent(a), named(a, "mem_a", 600));
+			const report = await run(w);
+			expect(codes(report)).toEqual(["ledger_pairing_ambiguous"]);
+			expect(report.findings[0]).toMatchObject({
+				id: "mem_b",
+				entry_id: "mem_b",
+				contender_entry_id: "mem_a",
+				legacy_event_id: "ev-mem_a",
+				stores: ["index", "ledger"],
+			});
+			expect(report.findings[0]?.detail).toContain("cannot say which");
+			expect(report.ok).toBe(false);
+			expect(report.counts.findings_by_code.ledger_pairing_ambiguous).toBe(1);
+			expect(report.counts.findings_by_code.index_entry_without_ledger_write).toBe(0);
+			expect(report.counts.ledger_pairs).toBe(1);
+			expect(report.counts.ledger_events_judged).toBe(2);
+		});
+
+		test("round-2 data: mem_a was stored unaudited and retried after the upgrade, mem_b keeps its legacy audit: reported as ambiguous, not as a missing audit", async () => {
+			const a = entry("mem_a", { created: minutesAgo(30) });
+			const b = entry("mem_b", { created: new Date(Date.parse(minutesAgo(30)) + 1000).toISOString() });
+			const w = world([a, b], { events: "none" });
+			// The legacy event is mem_b's own audit (+1 s after mem_b); the exact event is the retry that recovered mem_a.
+			w.events.push({ ...ledgerEvent(b, 1), id: "ev-legacy-b" }, named(a, "mem_a", 600));
+			const report = await run(w);
+			expect(codes(report)).toEqual(["ledger_pairing_ambiguous"]);
+			expect(report.findings.some((finding) => finding.code === "index_entry_without_ledger_write")).toBe(false);
+			expect(report.findings[0]).toMatchObject({ entry_id: "mem_b", contender_entry_id: "mem_a", legacy_event_id: "ev-legacy-b" });
+			expect(report.ok).toBe(false);
+		});
+
+		test("a neighbour outside the lag window of the legacy event keeps the plain missing-audit finding", async () => {
+			const a = entry("mem_a", { created: minutesAgo(30) });
+			const b = entry("mem_b", { created: new Date(Date.parse(minutesAgo(30)) + 200_000).toISOString() });
+			const w = world([a, b], { events: "none" });
+			// The legacy event at a+2 s precedes mem_b by 198 s, beyond the 30 s skew: it cannot be mem_b's.
 			w.events.push(ledgerEvent(a), named(a, "mem_a", 600));
 			const report = await run(w);
 			expect(codes(report)).toEqual(["index_entry_without_ledger_write"]);
 			expect(report.findings[0]).toMatchObject({ id: "mem_b", entry_id: "mem_b" });
+			expect(report.counts.findings_by_code.ledger_pairing_ambiguous).toBe(0);
+		});
+
+		test("a neighbour in another bucket keeps the plain missing-audit finding", async () => {
+			const a = entry("mem_a", { created: minutesAgo(30) });
+			const b = entry("mem_b", { created: new Date(Date.parse(minutesAgo(30)) + 1000).toISOString(), kind: "decision" });
+			const w = world([a, b], { events: "none" });
+			w.events.push(ledgerEvent(a), named(a, "mem_a", 600));
+			const report = await run(w);
+			expect(codes(report)).toEqual(["index_entry_without_ledger_write"]);
+			expect(report.findings[0]).toMatchObject({ id: "mem_b", entry_id: "mem_b" });
+		});
+
+		test("an entry satisfied only by an exact event, with no neighbour, is clean", async () => {
+			const a = entry("mem_a");
+			const w = world([a], { events: "none" });
+			w.events.push(named(a, "mem_a", 600));
+			const report = await run(w);
+			expect(report.findings).toEqual([]);
+			expect(report.ok).toBe(true);
 			expect(report.counts.ledger_pairs).toBe(1);
-			expect(report.counts.ledger_events_judged).toBe(2);
 		});
 
 		test("an entry with only an event naming it is satisfied and takes no other entry's legacy event", async () => {
