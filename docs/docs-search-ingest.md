@@ -148,7 +148,7 @@ no `note`.
 
 ## Hybrid retrieval and context augmentation
 
-The docs plane is `lightrag` or `ragflow`, chosen by `resolveDocsBackend` (`packages/mcp-server/src/config.ts:74`): `SUBSTRATE_DOCS_BACKEND` wins when set to a usable value; otherwise a set `LIGHTRAG_URL` selects `lightrag` and an unset one selects `ragflow`, the default (`config.ts:75`). `lightragFromEnv` (`config.ts:58`) reads `LIGHTRAG_URL` and the optional `LIGHTRAG_API_KEY`. RAGFlow stays the plane until the pending phase 46 cutover.
+The docs plane is `lightrag` or `ragflow`, chosen by `resolveDocsBackend` in `packages/mcp-server/src/config.ts`: `SUBSTRATE_DOCS_BACKEND` wins when set to a usable value; otherwise a set `LIGHTRAG_URL` selects `lightrag` and an unset one selects `ragflow`, the legacy fallback. `lightragFromEnv` in the same file reads `LIGHTRAG_URL` and the optional `LIGHTRAG_API_KEY`. Production has served docs from LightRAG since the cutover of 2026-10-28 (`SUBSTRATE_DOCS_BACKEND=lightrag`, naive query mode until the operator decides on a real LLM). The RAGFlow service was deleted on 2026-10-25; its code stays until the operator approves removal.
 
 ### LightRAG query
 
