@@ -37,6 +37,8 @@
  * neither a network nor a timer.
  */
 
+import { redact } from "../packages/mcp-server/src/redact.ts";
+
 export const SCHEMA = 1;
 export const DEFAULT_DUMMY_KEY = "dummy-not-a-real-key";
 export const DEFAULT_TIMEOUT_MS = 20_000;
@@ -146,14 +148,14 @@ const KEYLIKE: readonly RegExp[] = [
 ];
 
 /**
- * One line, bounded, with anything bearer- or key-like replaced by `[scrubbed]`:
- * the literal `secrets` (the dummy key, the only credential this script sends), `Bearer …`, `key: value`
- * pairs and any long opaque token. Credential-shape detection beyond that belongs to the central redactor
- * (redact-lock rule 4), so this does not try to recognise vendor or JWT formats.
+ * One line, bounded, with anything bearer- or key-like replaced by `[scrubbed]`: the literal `secrets` (the
+ * dummy key, the only credential this script sends), then the repo's shared redactor (which owns credential
+ * shapes: JWTs, vendor keys, bearer values; redact-lock rule 4), then `key: value` pairs and long opaque tokens.
  */
 export function scrubSecrets(text: string, secrets: readonly string[], max = REASON_MAX): string {
 	let out = text;
 	for (const secret of secrets) if (secret.length > 0) out = out.split(secret).join("[scrubbed]");
+	out = redact(out);
 	for (const pattern of KEYLIKE) out = out.replace(pattern, "[scrubbed]");
 	out = out.replace(/\s+/g, " ").trim();
 	return out.length > max ? `${out.slice(0, max - 1)}…` : out;

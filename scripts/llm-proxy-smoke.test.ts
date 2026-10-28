@@ -465,6 +465,12 @@ describe("secrecy", () => {
 		expect(text).toContain("a [scrubbed] b");
 	});
 
+	test("scrubSecrets runs the shared redactor, so a vendor-prefixed key never reaches a reason", () => {
+		const text = scrubSecrets("rejected sk-ant-api03-ABCDEFGHIJKLMNOP for this account", []);
+		expect(text).not.toContain("ABCDEFGHIJKLMNOP");
+		expect(text).toContain("REDACTED");
+	});
+
 	test("scrubSecrets leaves ordinary prose alone", () => {
 		expect(scrubSecrets("invalid x-api-key", [])).toBe("invalid x-api-key");
 		expect(scrubSecrets("run `shunt login xai` (invalid_grant)", [])).toBe("run `shunt login xai` (invalid_grant)");
