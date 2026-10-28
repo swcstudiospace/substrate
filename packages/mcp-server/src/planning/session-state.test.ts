@@ -53,7 +53,7 @@ describe("applyTransition", () => {
 		const { reg, events } = registry();
 		reg.put("omp", "s-1", session("s-1", "ACTIVE", { steering: "stay on the slice", planning_hash: "plan-a" }));
 
-		expect(await reg.applyTransition("s-1", "PAUSED", { directiveId: "dir-1" })).toEqual({ ok: true });
+		expect(await reg.applyTransition("s-1", "PAUSED", { directiveId: "dir-1" })).toEqual({ ok: true, changed: true });
 
 		expect(reg.get("omp", "s-1")).toMatchObject({ state: "PAUSED", steering: "stay on the slice", planning_hash: "plan-a", updated_at: new Date(T0 + 5_000).toISOString() });
 		expect(events).toHaveLength(1);
@@ -75,7 +75,7 @@ describe("applyTransition", () => {
 	test("a pause from RESUMED applies", async () => {
 		const { reg, events } = registry();
 		reg.put("omp", "s-1", session("s-1", "RESUMED"));
-		expect(await reg.applyTransition("s-1", "PAUSED", { directiveId: "dir-2" })).toEqual({ ok: true });
+		expect(await reg.applyTransition("s-1", "PAUSED", { directiveId: "dir-2" })).toEqual({ ok: true, changed: true });
 		expect(reg.get("omp", "s-1")?.state).toBe("PAUSED");
 		expect(events).toHaveLength(1);
 		expect(events[0]?.payload).toMatchObject({ previous_state: "RESUMED", directive_id: "dir-2" });
@@ -84,7 +84,7 @@ describe("applyTransition", () => {
 	test("a redirect moves ACTIVE to CONTEXT_REFRESH as a note, not a warning", async () => {
 		const { reg, events } = registry();
 		reg.put("omp", "s-1", session("s-1", "ACTIVE"));
-		expect(await reg.applyTransition("s-1", "CONTEXT_REFRESH", { directiveId: "dir-3" })).toEqual({ ok: true });
+		expect(await reg.applyTransition("s-1", "CONTEXT_REFRESH", { directiveId: "dir-3" })).toEqual({ ok: true, changed: true });
 		expect(reg.get("omp", "s-1")?.state).toBe("CONTEXT_REFRESH");
 		expect(events[0]?.kind).toBe("note");
 	});
@@ -117,8 +117,21 @@ describe("applyTransition", () => {
 	test("a ledger that cannot take the note never undoes the transition", async () => {
 		const { reg } = registry({ failEmit: true });
 		reg.put("omp", "s-1", session("s-1", "ACTIVE"));
-		expect(await reg.applyTransition("s-1", "PAUSED", { directiveId: "dir-7" })).toEqual({ ok: true });
+		expect(await reg.applyTransition("s-1", "PAUSED", { directiveId: "dir-7" })).toEqual({ ok: true, changed: true });
 		expect(reg.get("omp", "s-1")?.state).toBe("PAUSED");
+	});
+
+	test("a pause for an already PAUSED session and a redirect for an already CONTEXT_REFRESH session succeed unchanged: nothing stored, no note", async () => {
+		const { reg, events } = registry();
+		const paused = session("s-1", "PAUSED");
+		const refreshing = session("s-2", "CONTEXT_REFRESH");
+		reg.put("omp", "s-1", paused);
+		reg.put("omp", "s-2", refreshing);
+		expect(await reg.applyTransition("s-1", "PAUSED", { directiveId: "dir-8" })).toEqual({ ok: true, changed: false });
+		expect(await reg.applyTransition("s-2", "CONTEXT_REFRESH", { directiveId: "dir-9" })).toEqual({ ok: true, changed: false });
+		expect(reg.get("omp", "s-1")).toBe(paused);
+		expect(reg.get("omp", "s-2")).toBe(refreshing);
+		expect(events).toEqual([]);
 	});
 });
 

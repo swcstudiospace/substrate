@@ -103,7 +103,7 @@ export function sessionStateForAcknowledgement(ack: { action: SteeringDirective[
 	}
 }
 
-export type SessionTransitionResult = { ok: true } | { ok: false; reason: string };
+export type SessionTransitionResult = { ok: true; changed: boolean } | { ok: false; reason: string };
 
 /** What the acknowledgement tells the port about the transition it asks for: the directive that drives it. */
 export interface SessionTransitionContext {
@@ -112,9 +112,10 @@ export interface SessionTransitionContext {
 
 /**
  * The live session state, as the acknowledgement path sees it. `applyTransition` moves one session to `target` through the
- * state machine's own transition rules, and refuses (`ok: false`) what they refuse. It must not force a transition.
- * `sessionKey` is the directive's target session id; the adapter derives its own store key from it. The result may be a promise:
- * an adapter that records the transition in the ledger awaits that record.
+ * state machine's own transition rules, and refuses (`ok: false`) what they refuse. It must not force a transition. On success
+ * it says whether the stored state actually changed (`changed`): a request for the state the session already holds is
+ * accepted with `changed: false`. `sessionKey` is the directive's target session id; the adapter derives its own store key
+ * from it. The result may be a promise: an adapter that records the transition in the ledger awaits that record.
  */
 export interface SessionStatePort {
 	applyTransition(sessionKey: string, target: SessionStateName, context: SessionTransitionContext): SessionTransitionResult | Promise<SessionTransitionResult>;
@@ -125,7 +126,8 @@ export type SessionStateOutcome = { status: "unchanged" } | { status: "applied";
 
 /**
  * A hint to the acknowledging session (its hook or agent), never an action of the server's, which stays read-only on worktrees:
- * the session moved to PAUSED or CONTEXT_REFRESH by a directive, so it may take a checkpoint with trigger `steering`.
+ * the session actually moved to PAUSED or CONTEXT_REFRESH by a directive, so it may take a checkpoint with trigger `steering`.
+ * A directive that left the session in the state it already held carries no hint.
  */
 export interface SteeringCheckpointHint {
 	trigger: "steering";
@@ -137,7 +139,7 @@ export type SteeringAcknowledgeReply = SteeringWriteResult & { session_state?: S
 /**
  * Acknowledge a directive, then drive the session state from the outcome. The acknowledgement is audited first and stands
  * whatever the port says: a refused transition is reported in `session_state`, not rolled back. An applied pause or redirect
- * that moved the session also carries `checkpoint_hint` (the session may checkpoint). With no port the reply is exactly the acknowledgement's.
+ * that moved the session (its state actually changed) also carries `checkpoint_hint` (the session may checkpoint); one that left it where it was reports `session_state` unchanged and no hint. With no port the reply is exactly the acknowledgement's.
  */
 export async function acknowledgeSteeringWithState(
 	wiring: SteeringWiring,
@@ -154,6 +156,7 @@ export async function acknowledgeSteeringWithState(
 	try {
 		const moved = await port.applyTransition(record.directive.targetSessionId, target, { directiveId: result.directive_id });
 		if (!moved.ok) return { ...result, session_state: { status: "refused", state: target, reason: redact(moved.reason).slice(0, 200) } };
+		if (!moved.changed) return { ...result, session_state: { status: "unchanged" } };
 		return { ...result, session_state: { status: "applied", state: target }, checkpoint_hint: { trigger: "steering", directive_id: result.directive_id } };
 	} catch (cause) {
 		// The acknowledgement is already audited and effective; a port that throws must not turn it into a failed call.

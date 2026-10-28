@@ -62,7 +62,7 @@ class StubSessionMachine implements SessionStatePort {
 		const current = this.states.get(sessionKey) ?? "ACTIVE";
 		if (!StubSessionMachine.allowed(current, target)) return { ok: false, reason: `steering transition ${current} -> ${target} refused` };
 		this.states.set(sessionKey, target);
-		return { ok: true };
+		return { ok: true, changed: current !== target };
 	}
 
 	private static allowed(current: SessionStateName, next: SessionStateName): boolean {
@@ -242,7 +242,7 @@ describe("acknowledgeSteeringWithState", () => {
 		expect(reply).toMatchObject({ session_state: { status: "applied", state: "CONTEXT_REFRESH" } });
 		expect(reply).toMatchObject({ checkpoint_hint: { trigger: "steering", directive_id: id } });
 		expect(machine.states.get("sess-a")).toBe("CONTEXT_REFRESH");
-		expect(machine.applyTransition("sess-a", "ACTIVE")).toEqual({ ok: true });
+		expect(machine.applyTransition("sess-a", "ACTIVE")).toEqual({ ok: true, changed: true });
 	});
 
 	test("an applied annotate and every declined outcome leave the session where it is and never call the port", async () => {
@@ -252,6 +252,19 @@ describe("acknowledgeSteeringWithState", () => {
 			const reply = await acknowledgeSteeringWithState(wiring, OPERATOR, { directive_id: id, session_id: "sess-a", outcome }, machine);
 			expect(reply).toMatchObject({ status: "acknowledged", outcome, session_state: { status: "unchanged" } });
 			expect(machine.calls).toEqual([]);
+			expect(Object.hasOwn(reply, "checkpoint_hint")).toBe(false);
+		}
+	});
+
+	test("a pause for an already PAUSED session and a redirect for an already CONTEXT_REFRESH session report unchanged and carry no checkpoint hint", async () => {
+		for (const [action, held] of [["pause", "PAUSED"], ["redirect", "CONTEXT_REFRESH"]] as const) {
+			const machine = new StubSessionMachine();
+			machine.states.set("sess-a", held);
+			const { wiring, id } = await queued(action, machine);
+			const reply = await acknowledgeSteeringWithState(wiring, OPERATOR, { directive_id: id, session_id: "sess-a", outcome: "applied" }, machine);
+			expect(reply).toMatchObject({ status: "acknowledged", outcome: "applied", session_state: { status: "unchanged" } });
+			expect(machine.calls).toEqual([["sess-a", held]]);
+			expect(machine.states.get("sess-a")).toBe(held);
 			expect(Object.hasOwn(reply, "checkpoint_hint")).toBe(false);
 		}
 	});

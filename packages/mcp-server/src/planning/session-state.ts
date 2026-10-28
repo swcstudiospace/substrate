@@ -112,9 +112,11 @@ export class SteeringSessionRegistry implements SessionStatePort {
 	}
 
 	/**
-	 * Moves the session a directive targets to `target`, by the state machine's own rules, and records one `docs.steering` note
-	 * that names the directive. A session the registry does not hold, a session id two surfaces hold, and a transition the rules
-	 * refuse are all refused and change nothing. `sessionKey` is the directive's target session id.
+	 * Moves the session a directive targets to `target`, by the state machine's own rules, and reports whether the state moved
+	 * (`changed`). A move records one `docs.steering` note that names the directive. A request for the state the session already
+	 * holds is allowed by the rules but is no transition: it returns `changed: false`, stores nothing and records no note (the
+	 * acknowledgement itself is audited by the steering audit). A session the registry does not hold, a session id two surfaces
+	 * hold, and a transition the rules refuse are all refused and change nothing. `sessionKey` is the directive's target session id.
 	 */
 	async applyTransition(sessionKey: string, target: SessionStateName, context: SessionTransitionContext): Promise<SessionTransitionResult> {
 		const found = this.lookup(sessionKey);
@@ -133,13 +135,14 @@ export class SteeringSessionRegistry implements SessionStatePort {
 			this.nowMs(),
 		);
 		if (!next.ok) return { ok: false, reason: next.reason };
+		if (session.state === target) return { ok: true, changed: false };
 		this.put(surface, session.session_id, next.session);
 		try {
 			await this.emit(steeringSessionEvent(surface, next.session, next.previous, { directive_id: context.directiveId, via: STEERING_ACKNOWLEDGE_VIA }));
 		} catch {
 			// The transition is stored and the acknowledgement is audited; a note the ledger cannot take is not a refusal.
 		}
-		return { ok: true };
+		return { ok: true, changed: true };
 	}
 
 	private forget(key: string): void {

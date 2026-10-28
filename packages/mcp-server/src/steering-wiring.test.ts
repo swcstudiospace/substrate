@@ -178,7 +178,7 @@ class StubSessionMachine implements SessionStatePort {
 		const ok = current === target || (current === "ACTIVE" && (target === "CONTEXT_REFRESH" || target === "PAUSED")) || (current === "CONTEXT_REFRESH" && (target === "ACTIVE" || target === "PAUSED")) || (current === "PAUSED" && target === "RESUMED") || (current === "RESUMED" && (target === "ACTIVE" || target === "PAUSED"));
 		if (!ok) return { ok: false, reason: `steering transition ${current} -> ${target} refused` };
 		this.states.set(sessionKey, target);
-		return { ok: true };
+		return { ok: true, changed: current !== target };
 	}
 }
 
@@ -552,6 +552,20 @@ describe("an acknowledgement drives the session state", () => {
 		}
 	});
 
+	test("a pause for an already PAUSED session reads unchanged and carries no checkpoint_hint", async () => {
+		const machine = new StubSessionMachine();
+		machine.states.set("sess-a", "PAUSED");
+		const reply = await queuedAndAcknowledged(machine, "pause", "applied");
+		expect(reply).toMatchObject({ isError: false, body: { status: "acknowledged", session_state: { status: "unchanged" } } });
+		expect(Object.hasOwn(reply.body, "checkpoint_hint")).toBe(false);
+		expect(machine.states.get("sess-a")).toBe("PAUSED");
+	});
+
+	test("a pause that moves the session still carries the checkpoint_hint", async () => {
+		const reply = await queuedAndAcknowledged(new StubSessionMachine(), "pause", "applied");
+		expect(reply).toMatchObject({ body: { session_state: { status: "applied", state: "PAUSED" }, checkpoint_hint: { trigger: "steering" } } });
+	});
+
 	test("with the port injected as null the reply is the plain acknowledgement: no session_state, no checkpoint_hint", async () => {
 		const reply = await queuedAndAcknowledged(null, "pause", "applied");
 		expect(reply).toMatchObject({ isError: false, body: { status: "acknowledged", outcome: "applied" } });
@@ -653,6 +667,22 @@ describe("the two steering mechanisms share one state model", () => {
 		const acknowledged = await call(client, "steering_acknowledge", { directive_id: queued.body.directive_id, session_id: "sess-a", outcome: "applied" });
 		expect(acknowledged).toMatchObject({ isError: false, body: { status: "acknowledged", session_state: { status: "refused", state: "PAUSED", reason: "session not registered" } } });
 		expect(Object.hasOwn(acknowledged.body, "checkpoint_hint")).toBe(false);
+	});
+
+	test("a pause for an already PAUSED session and a redirect for an already CONTEXT_REFRESH session are unchanged: no hint, no note, state kept", async () => {
+		for (const [action, held] of [["pause", "PAUSED"], ["redirect", "CONTEXT_REFRESH"]] as const) {
+			const { substrate, steeringNotes } = shared();
+			const client = await connect(substrate, OPERATOR);
+			await call(client, "docs_steering_session", { ...SESSION, state: held });
+			const queued = await call(client, "steering_queue", { ...QUEUE_ARGS, action });
+			const notesBefore = steeringNotes().length;
+
+			const acknowledged = await call(client, "steering_acknowledge", { directive_id: queued.body.directive_id, session_id: "sess-a", outcome: "applied" });
+			expect(acknowledged).toMatchObject({ isError: false, body: { status: "acknowledged", outcome: "applied", session_state: { status: "unchanged" } } });
+			expect(Object.hasOwn(acknowledged.body, "checkpoint_hint")).toBe(false);
+			expect(substrate.steeringSessions.get("omp", "sess-a")?.state).toBe(held);
+			expect(steeringNotes()).toHaveLength(notesBefore);
+		}
 	});
 });
 
