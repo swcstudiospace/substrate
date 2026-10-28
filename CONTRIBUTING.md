@@ -22,6 +22,7 @@ bun run verify --only types,locks    # selected steps (ids: install, types, lint
 bun run verify --list                # print the steps
 bun run verify --audit               # also run the dependency audit (needs the network)
 bun run lint                         # Biome; errors block the gate, warnings stay visible
+bun scripts/code-ratchet.ts --check  # risky-pattern counters against scripts/code-ratchet.baseline.json (also run by bun test)
 ```
 
 `bun run verify` is the gate CI runs; a drift test (`scripts/verify.test.ts`) fails when the workflow and `scripts/verify.ts` disagree. Change a gate command in both together.
@@ -47,6 +48,7 @@ bun run lint                         # Biome; errors block the gate, warnings st
 - Decision logic is proved against a fake store ([`docs/memory-governance.md`](docs/memory-governance.md)). Behaviour that only a real database can settle (concurrency, unique indexes, ordering) runs against Postgres through `SUBSTRATE_TEST_PG_URL` and skips loudly without it, rather than against a mock ([`docs/coordination.md`](docs/coordination.md)).
 - Redaction goes through the single module `packages/mcp-server/src/redact.ts`; `redact-lock.test.ts` fails the suite when another package redacts through anything else ([`docs/redaction.md`](docs/redaction.md)).
 - Production checks (`bun run parity:check` and the other `doctor`/`deploy` scripts) read the operator's host and are not part of the gate.
+- A counter in `scripts/code-ratchet.baseline.json` (explicit `any`, `as unknown as`, suppression comments, non-null assertions, empty `catch`, `console.*`, stray `process.exit`, `JSON.parse(...) as Type`) may only fall. Remove the offender and run `bun scripts/code-ratchet.ts --write` to lower the baseline; raising it means deleting the file in a reviewed change and regenerating it ([`docs/ci.md`](docs/ci.md#code-ratchet)).
 
 ## Generated files
 

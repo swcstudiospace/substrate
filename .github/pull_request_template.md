@@ -19,4 +19,4 @@ Tracked: <!-- Linear, Notion or phase link -->
 - [ ] Greptile review is 5/5 with no open threads, and CI is green ([AGENTS.md](../AGENTS.md), [docs/ci.md](../docs/ci.md)). A failed, skipped or unavailable review is a blocker.
 - [ ] `bun run verify` passes locally, or CI is the authority ([docs/ci.md](../docs/ci.md)).
 - [ ] Files under `.planning/` changed only through a GSD workflow.
-- [ ] A deliberate change to a baseline or lock (for example the `check:phase-close` baseline, `.github/audit-accepted-risk.json`) is called out under Risk.
+- [ ] A deliberate change to a baseline or lock (for example `scripts/code-ratchet.baseline.json`, the `check:phase-close` baseline, `.github/audit-accepted-risk.json`) is called out under Risk.
