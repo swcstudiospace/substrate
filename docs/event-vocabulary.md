@@ -142,6 +142,7 @@ These apply to every source:
 | `memory.capsule.redact` | 60 | `note` | `caller` | `memory.capsule.redact` | — | — | no |
 | `anchor.signer.rotate` | 59 | `note` | `caller` | `anchor.signer.rotate` | — | — | no |
 | `anchor.reanchor` | 59 | `note` | `caller` | `anchor.reanchor` | — | — | no |
+| `planning.changed` | 52 | `note` | `substrate` | — | — | origin remote of the planning checkout | no |
 | `muse.brief_writer` | 19 | — | — | — | — | — | no |
 | `memory.retain` | 26 | — | — | — | — | — | no |
 | `memory.recall` | 26 | — | — | — | — | — | no |
