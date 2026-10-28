@@ -7,7 +7,7 @@
  * answers only `solana-keygen pubkey` and `solana transfer`; any other argv is a TypeError.
  */
 import { describe, expect, test } from "bun:test";
-import { type Commitment, formatMemo, HOUR_MS, hourIso, type AddressMemo, type Rpc, type RunResult, type TransactionMemo } from "@substrate/ledger";
+import { type Commitment, formatMemo, HOUR_MS, hourIso, type AddressMemo, type Rpc, type RunResult, type SignerSet, type TransactionMemo } from "@substrate/ledger";
 import type { ReanchorNotes, ReanchorRecord } from "./anchor-verify-deps.ts";
 import { DEVNET_GENESIS_HASH, MAX_HOURS_PER_RUN, REQUIRED_BALANCE_LAMPORTS } from "./anchor.ts";
 import type { AnchorRow } from "./greptime.ts";
@@ -108,6 +108,15 @@ class World {
 	/** Transactions the cluster knows, by signature. The planned old signatures are NOT here: a reset wiped them. */
 	chain = new Map<string, TransactionMemo>();
 	listing: AddressMemo[] = [];
+	/** The listing of one address, when a test gives an address its own history; every other address answers `listing`. */
+	listingBy = new Map<string, AddressMemo[]>();
+	/** Every address a discovery call asked for, in order. */
+	listAddresses: string[] = [];
+	/** The signer set `deps.signers` answers (the configured key alone, valid for all time), its gap, whether it fails, and how often it was read. */
+	signerSet: SignerSet = [{ pubkey: PUBKEY, valid_from_ms: 0, valid_until_ms: null }];
+	signerGap: string | null = null;
+	signersFail = false;
+	signerCalls = 0;
 	listingFails = false;
 	sendCode = 0;
 	readBackMemo: string | null | undefined = undefined;
@@ -176,6 +185,7 @@ class World {
 		},
 		addressMemos: async (pubkey, limit, before, commitment) => {
 			this.rpcCalls.push(`list:${pubkey.slice(0, 4)}`);
+			this.listAddresses.push(pubkey);
 			this.listBefore.push(before);
 			this.listCommitments.push(commitment);
 			if (this.unfinalizedSends && commitment !== "confirmed") return [];
@@ -184,8 +194,9 @@ class World {
 				const page = this.listBefore.length;
 				return Array.from({ length: limit }, (_, i) => ({ signature: `filler-${page}-${i}`, memo: null, err: null, slot: 1 }));
 			}
-			const start = before === undefined ? 0 : this.listing.findIndex((hint) => hint.signature === before) + 1;
-			return this.listing.slice(start, start + limit);
+			const source = this.listingBy.get(pubkey) ?? this.listing;
+			const start = before === undefined ? 0 : source.findIndex((hint) => hint.signature === before) + 1;
+			return source.slice(start, start + limit);
 		},
 		getGenesisHash: async () => {
 			this.rpcCalls.push("genesis");
@@ -209,7 +220,7 @@ class World {
 		}
 		const signature = newSig(++this.sends);
 		const memo = argv[5] as string;
-		this.chain.set(signature, { ...TX_TEMPLATE, memo: this.readBackMemo === undefined ? memo : this.readBackMemo });
+		this.chain.set(signature, { ...TX_TEMPLATE, blockTime: NOW / 1000, memo: this.readBackMemo === undefined ? memo : this.readBackMemo });
 		this.listing.unshift({ signature, memo, err: null, slot: 7 });
 		return { code: 0, stdout: JSON.stringify({ signature }), stderr: "" };
 	};
@@ -264,6 +275,11 @@ class World {
 				this.notesCalls.push(hour.period_start);
 				if (this.notesFail) throw new Error("ledger down");
 				return { records: this.noteRecords.get(hour.period_start_ms) ?? [], incomplete: this.notesIncomplete.get(hour.period_start_ms) ?? null };
+			},
+			signers: async () => {
+				this.signerCalls += 1;
+				if (this.signersFail) throw new Error("ledger down at https://10.0.0.9:4000");
+				return { set: this.signerSet, gap: this.signerGap };
 			},
 			lock: this.lock,
 			...over,
@@ -1197,5 +1213,159 @@ describe("overlapping runs", () => {
 		expect(await w.run(ONE)).toMatchObject({ refused: "unfunded" });
 		expect(w.lockReleases).toBe(0);
 		expect(w.lockHeldBy).toBeNull();
+	});
+});
+
+describe("the signer set decides which transactions count", () => {
+	/** The earlier job key, retired at ROTATED_AT; the configured key (PUBKEY) is valid from then on. */
+	const KEY_A = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
+	const ROTATED_AT = H1 + 3 * HOUR_MS;
+	const A_SIGNED_S = (H1 + 2 * HOUR_MS) / 1000;
+	const AFTER_ROTATION_S = (ROTATED_AT + HOUR_MS) / 1000;
+	const rotated: SignerSet = [
+		{ pubkey: KEY_A, valid_from_ms: 0, valid_until_ms: ROTATED_AT },
+		{ pubkey: PUBKEY, valid_from_ms: ROTATED_AT, valid_until_ms: null },
+	];
+	const sigA = newSig(7);
+	const byA = (memo: string, blockTime: number | null = A_SIGNED_S): TransactionMemo => ({ ...TX_TEMPLATE, payer: KEY_A, memo, blockTime });
+	const hintA = { signature: sigA, memo: memoOf(H1, 1), err: null, slot: 5 };
+	const noReach = (w: World): string[] => w.rpcCalls.filter((call) => call.startsWith("list:") || call.startsWith("tx:"));
+
+	function rotatedWorld(planned: readonly Planned[] = TWO): World {
+		const w = new World(planned);
+		w.signerSet = rotated;
+		return w;
+	}
+
+	test("an hour key A re-anchored before the rotation is adopted from its recorded note: only the unfinished hour is sent, by the configured key, and every signer of the set is listed", async () => {
+		const w = rotatedWorld();
+		w.chain.set(sigA, byA(memoOf(H1, 1)));
+		w.noteRecords.set(H1, [noteRecord(1, H1, sigA)]);
+		const result = await w.run(TWO, { maxHours: 2 });
+		expect(result).toMatchObject({ code: 0, refused: null, sent: 1, adopted: 1 });
+		expect(result.stdout).toContain(`${hourIso(H1)} adopted ${sigA} (already recorded)`);
+		expect(w.sendCalls).toHaveLength(1);
+		expect(w.sendCalls[0]?.[5]).toBe(memoOf(H2, 2));
+		expect(w.emitted.map((event) => event.payload?.["period_start"])).toEqual([hourIso(H2)]);
+		// Hour 2 had no note, so discovery ran: it listed the retired key's address as well as the configured one's.
+		expect(w.listAddresses).toEqual([KEY_A, PUBKEY]);
+		// One read of the signer set for the whole run.
+		expect(w.signerCalls).toBe(1);
+	});
+
+	test("the same hour found by discovery (no note) is adopted from key A's own listing; a re-run adopts both hours and sends nothing", async () => {
+		const w = rotatedWorld();
+		w.chain.set(sigA, byA(memoOf(H1, 1)));
+		w.listingBy.set(KEY_A, [hintA]);
+		w.listingBy.set(PUBKEY, []);
+		const first = await w.run(TWO, { maxHours: 2 });
+		expect(first).toMatchObject({ code: 0, refused: null, sent: 1, adopted: 1 });
+		expect(first.stdout).toContain(`${hourIso(H1)} adopted ${sigA}`);
+		expect(first.stdout).not.toContain("already recorded");
+		expect(w.sendCalls).toHaveLength(1);
+		expect(w.sendCalls[0]?.[5]).toBe(memoOf(H2, 2));
+		expect(w.listAddresses).toEqual([KEY_A, PUBKEY]);
+		expect(w.emitted).toHaveLength(2);
+		expect(w.emitted[0]?.payload).toMatchObject({ period_start: hourIso(H1), new_tx_sig: sigA });
+
+		const again = await w.run(TWO, { maxHours: 2 });
+		expect(again).toMatchObject({ code: 0, sent: 0, adopted: 2 });
+		expect(again.stdout).toContain(`${hourIso(H1)} adopted ${sigA} (already recorded)`);
+		expect(w.sendCalls).toHaveLength(1);
+		expect(w.emitted).toHaveLength(2);
+		// Both hours were recorded: the second run listed nothing.
+		expect(w.listAddresses).toEqual([KEY_A, PUBKEY]);
+	});
+
+	test("a configured key outside its window is refused before the chain is read or anything is sent, with the reason the verifier would give", async () => {
+		const retired = new World(TWO);
+		retired.signerSet = [
+			{ pubkey: PUBKEY, valid_from_ms: 0, valid_until_ms: NOW - HOUR_MS },
+			{ pubkey: KEY_A, valid_from_ms: NOW - HOUR_MS, valid_until_ms: null },
+		];
+		const result = await retired.run(TWO, { maxHours: 2 });
+		expect(result).toMatchObject({ code: 1, refused: "signer-not-current", sent: 0, adopted: 0 });
+		expect(result.stderr).toContain("REFUSED signer-not-current");
+		expect(result.stderr).toContain("outside its valid window");
+		expect(noReach(retired)).toEqual([]);
+		expect(retired.notesCalls).toEqual([]);
+		expect(retired.runnerCalls).toEqual([[KEYGEN, "pubkey", KEYPAIR]]);
+		expect(retired.lockReleases).toBe(0);
+		retired.expectUntouched();
+
+		const absent = new World(TWO);
+		absent.signerSet = [{ pubkey: KEY_A, valid_from_ms: 0, valid_until_ms: null }];
+		const missing = await absent.run(TWO, { maxHours: 2 });
+		expect(missing).toMatchObject({ code: 1, refused: "signer-not-current", sent: 0 });
+		expect(missing.stderr).toContain("is not in the signer set");
+		absent.expectUntouched();
+	});
+
+	test("a rotation read that may be incomplete, or a signer set that cannot be read, refuses before any send", async () => {
+		const gap = new World(TWO);
+		gap.signerGap = "the signer rotation read of omp hit its 50-page limit (25000 notes), so an older rotation may be missing";
+		const incomplete = await gap.run(TWO, { maxHours: 2 });
+		expect(incomplete).toMatchObject({ code: 1, refused: "signer-set-incomplete", sent: 0, adopted: 0 });
+		expect(incomplete.stderr).toContain("REFUSED signer-set-incomplete");
+		expect(incomplete.stderr).toContain("50-page limit");
+		expect(incomplete.stderr).toContain("nothing was sent");
+		expect(noReach(gap)).toEqual([]);
+		gap.expectUntouched();
+
+		const down = new World(TWO);
+		down.signersFail = true;
+		const unreadable = await down.run(TWO, { maxHours: 2 });
+		expect(unreadable).toMatchObject({ code: 1, refused: "signer-set-incomplete", sent: 0 });
+		expect(unreadable.stderr).toContain("could not be read");
+		expect(unreadable.stderr).not.toContain("10.0.0.9");
+		expect(noReach(down)).toEqual([]);
+		down.expectUntouched();
+	});
+
+	test("a transaction whose signer was not allowed at ITS block time is no proof: a recorded pointer to it is stale, discovery ignores it, and the hour is sent once", async () => {
+		const w = rotatedWorld(ONE);
+		w.chain.set(sigA, byA(memoOf(H1, 1), AFTER_ROTATION_S));
+		w.noteRecords.set(H1, [noteRecord(1, H1, sigA, { id: "evt_note_stale" })]);
+		w.listingBy.set(KEY_A, [hintA]);
+		const result = await w.run(ONE);
+		expect(result).toMatchObject({ code: 0, sent: 1, adopted: 0 });
+		expect(w.sendCalls).toHaveLength(1);
+		expect(w.emitted[0]?.payload).toMatchObject({ new_tx_sig: newSig(1) });
+		expect(w.emitted[0]?.idempotency_key).toBe(repairIdempotencyKey(hourIso(H1), newSig(1), "evt_note_stale"));
+	});
+
+	test("the configured key's own transaction from before its window counts for nothing either, and a hint listed under two addresses is read once", async () => {
+		const w = rotatedWorld(ONE);
+		const sigB = newSig(8);
+		w.chain.set(sigB, { ...TX_TEMPLATE, memo: memoOf(H1, 1), blockTime: A_SIGNED_S });
+		w.listing = [{ signature: sigB, memo: memoOf(H1, 1), err: null, slot: 5 }];
+		const result = await w.run(ONE);
+		expect(result).toMatchObject({ code: 0, sent: 1, adopted: 0 });
+		expect(w.listAddresses).toEqual([KEY_A, PUBKEY]);
+		expect(w.rpcCalls.filter((call) => call.startsWith(`tx:${sigB.slice(0, 2)}`))).toHaveLength(1);
+	});
+
+	test("a signer of the set whose transaction has no block time cannot be judged against a window: the run refuses as rpc-unreadable instead of sending the hour again", async () => {
+		const recorded = rotatedWorld(ONE);
+		recorded.chain.set(sigA, byA(memoOf(H1, 1), null));
+		recorded.noteRecords.set(H1, [noteRecord(1, H1, sigA)]);
+		const fromNote = await recorded.run(ONE);
+		expect(fromNote).toMatchObject({ code: 1, refused: "rpc-unreadable", sent: 0, adopted: 0 });
+		expect(fromNote.stderr).toContain("has no block time");
+		recorded.expectUntouched();
+
+		const listed = rotatedWorld(ONE);
+		listed.chain.set(sigA, byA(memoOf(H1, 1), null));
+		listed.listingBy.set(KEY_A, [hintA]);
+		const fromListing = await listed.run(ONE);
+		expect(fromListing).toMatchObject({ code: 1, refused: "rpc-unreadable", sent: 0, adopted: 0 });
+		expect(fromListing.stderr).toContain("has no block time");
+		listed.expectUntouched();
+
+		// A payer outside the set is not a signer at all: its missing block time changes nothing.
+		const foreign = new World(ONE);
+		foreign.chain.set(sigA, byA(memoOf(H1, 1), null));
+		foreign.listing = [hintA];
+		expect(await foreign.run(ONE)).toMatchObject({ code: 0, sent: 1, adopted: 0 });
 	});
 });

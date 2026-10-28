@@ -84,6 +84,7 @@ function spies(): { cli: ReanchorCliDeps; opened: ReanchorOptions[]; runnerCalls
 		operatorSurfaces: new Set(["omp"]),
 		clock: () => NOW,
 		notes: async () => ({ records: [], incomplete: null }),
+		signers: async () => ({ set: [{ pubkey: PUBKEY, valid_from_ms: 0, valid_until_ms: null }], gap: null }),
 		lock: { acquire: () => ({ release: () => undefined }) },
 	};
 	return {
@@ -238,6 +239,33 @@ describe("openRealContext: the devnet guard and the configuration, before any co
 		const named = openRealContext({ ...OPTIONS, surface: "hermes" }, { env, ...seams });
 		if ("refused" in named) throw new Error(`unexpected refusal: ${named.refused}`);
 		expect(named.surface).toBe("hermes");
+	});
+
+	test("the signers port is the verifier's own signer-set read over the same ledger: the configured key alone, a failed rotation read as a gap, a malformed set as a failure", async () => {
+		const env = { GREPTIME_URL: GREPTIME, ...SOLANA, SUBSTRATE_TOKEN_OMP: "tok-omp-0123456789abcdef0123456789abcdef", SUBSTRATE_OPERATOR_TOKENS: "tok-omp-0123456789abcdef0123456789abcdef" };
+		const built = openRealContext(OPTIONS, { env, ledgerFor: () => ({ anchorForPeriod: async () => null, queryEvents: async () => [] }) as never, substrateFor: () => ({}) as never });
+		if ("refused" in built) throw new Error(`unexpected refusal: ${built.refused}`);
+		const read = await built.signers();
+		expect(read.gap).toBeNull();
+		expect(read.set).toMatchObject([{ pubkey: PUBKEY, valid_from_ms: 0, valid_until_ms: null }]);
+
+		const cut = openRealContext(OPTIONS, {
+			env,
+			ledgerFor: () =>
+				({
+					anchorForPeriod: async () => null,
+					queryEvents: async () => {
+						throw new Error("ledger down");
+					},
+				}) as never,
+			substrateFor: () => ({}) as never,
+		});
+		if ("refused" in cut) throw new Error(`unexpected refusal: ${cut.refused}`);
+		expect((await cut.signers()).gap).toContain("could not be read");
+
+		const malformed = openRealContext(OPTIONS, { env: { ...env, SUBSTRATE_ANCHOR_SIGNER_SET: "not json" }, ledgerFor: () => ({ anchorForPeriod: async () => null, queryEvents: async () => [] }) as never, substrateFor: () => ({}) as never });
+		if ("refused" in malformed) throw new Error(`unexpected refusal: ${malformed.refused}`);
+		await expect(malformed.signers()).rejects.toThrow("SUBSTRATE_ANCHOR_SIGNER_SET is malformed");
 	});
 });
 

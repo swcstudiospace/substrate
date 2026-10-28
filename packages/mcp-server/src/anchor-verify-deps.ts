@@ -266,6 +266,19 @@ async function readSignerSet(ports: AnchorVerifyPorts, ledger: AnchorLedger): Pr
 	return { set: derived.set, gap, summary };
 }
 
+/**
+ * The effective signer set for callers outside the verifier (the re-anchor executor, `substrate verify`): the same read the
+ * verifier makes (`readSignerSet`), with the ledger taken from the ports exactly as `prepare` takes it. `gap` says the rotation
+ * read may be incomplete. Throws when the ledger is not configured, the configured key is not a public key, or the fold refuses.
+ */
+export async function resolveSignerSet(ports: AnchorVerifyPorts): Promise<{ set: SignerSet; gap: string | null }> {
+	if (ports.ledger === null) throw new Error("the event ledger is not configured (GREPTIME_URL), so the signer set cannot be read");
+	// A malformed SUBSTRATE_ANCHOR_SIGNER_SET leaves the set null: reading on would silently fall back to the public key alone.
+	if ((ports.solana.signerSetProblem ?? null) !== null) throw new Error("SUBSTRATE_ANCHOR_SIGNER_SET is malformed (the server's boot warnings say why)");
+	const { set, gap } = await readSignerSet(ports, ports.ledger);
+	return { set, gap };
+}
+
 /** Level a transaction was found at, asked highest first. A node that does not know the signature at any level answers null. */
 async function fetchTransaction(rpc: Rpc, signature: string): Promise<AnchorTransactionRead | null> {
 	for (const level of SIGNATURE_LEVELS) {

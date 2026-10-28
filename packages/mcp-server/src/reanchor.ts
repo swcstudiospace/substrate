@@ -18,6 +18,11 @@
  *     the reset case (the constant moves to the new genesis in a release, runbook step b, before or after this send).
  *  3. The signer key shown by `solana-keygen pubkey` is the configured anchor public key, it holds the rent-exempt minimum plus
  *     the fees of the sends this run may make, and an operator surface exists to write the record as.
+ *  3b. The effective signer set (`deps.signers`: the bootstrap folded with the operator's rotation notes, the set `checkpoint_verify`
+ *     judges against) is read ONCE. A failed read, or one whose rotation read may be incomplete, refuses (`signer-set-incomplete`); a
+ *     configured key that the set does not accept NOW refuses (`signer-not-current`). A transaction counts for an hour when its payer
+ *     is accepted by the set at THAT transaction's block time (a missing block time refuses, `rpc-unreadable`), and discovery lists the
+ *     signatures of every key in the set, so an hour an earlier key re-anchored before a rotation is adopted, not sent again.
  *  4. For every plan hour the digest is recomputed from the ledger and refused as `root-mismatch` unless the stored row, the
  *     recomputed root and count, and the stored memo (exactly `formatMemo` of the hour, root and count) all agree with the plan
  *     byte for byte.
@@ -42,6 +47,7 @@
  * from the chain (`anchor-verify-deps.ts`, `followReanchor`).
  */
 import {
+	acceptsSigner,
 	AMOUNT_ZERO,
 	assertDevnetRpcUrl,
 	formatMemo,
@@ -56,6 +62,7 @@ import {
 	type Rpc,
 	type RunResult,
 	type Runner,
+	type SignerSet,
 	type TransactionMemo,
 } from "@substrate/ledger";
 import { createHash } from "node:crypto";
@@ -264,6 +271,8 @@ export type RefusalCode =
 	| "genesis-mismatch"
 	| "wrong-cluster"
 	| "signer-mismatch"
+	| "signer-set-incomplete"
+	| "signer-not-current"
 	| "unfunded"
 	| "no-operator-surface"
 	| "store-failed"
@@ -346,6 +355,11 @@ export interface ReanchorDeps {
 	 * result with `incomplete` set is refused (`notes-incomplete`), as the verifier leaves the hour unverified.
 	 */
 	notes: (hour: SavedPlanHour) => Promise<ReanchorNotes>;
+	/**
+	 * The effective signer set `checkpoint_verify` judges against (`resolveSignerSet`): the bootstrap folded with the operator's rotation
+	 * notes. Read ONCE per run, before any send. A throw or a `gap` (the rotation read may be incomplete) refuses (`signer-set-incomplete`).
+	 */
+	signers: () => Promise<{ set: SignerSet; gap: string | null }>;
 	/** The lock held across discovery, send and recording. */
 	lock: ReanchorLock;
 }
@@ -428,6 +442,41 @@ async function checkGates(plan: SavedPlan, options: ReanchorOptions, deps: Reanc
 }
 
 /**
+ * Gate 3b: the effective signer set, read ONCE per run before any send, judged the way `checkpoint_verify` judges it. A read that
+ * fails, or whose rotation read may be incomplete (`gap`), refuses (`signer-set-incomplete`): a missing rotation note could mean the
+ * configured key is retired, or that an earlier send was by a key this run does not know. The configured key must be accepted NOW
+ * (`signer-not-current`): a replacement it signs outside its window would be rejected by the verifier and then called "already
+ * recorded" by every later run.
+ */
+async function readSigners(deps: ReanchorDeps, now: number): Promise<SignerSet> {
+	let signers: { set: SignerSet; gap: string | null };
+	try {
+		signers = await deps.signers();
+	} catch (cause) {
+		throw new Refusal("signer-set-incomplete", `the signer set could not be read (${reasonOf(cause)}), so which keys the verifier accepts is unknown: nothing was sent`);
+	}
+	if (signers.gap !== null) {
+		throw new Refusal("signer-set-incomplete", `the signer set may be incomplete (${reasonOf(signers.gap)}), so a rotation the verifier applies may be missing here: nothing was sent`);
+	}
+	const current = acceptsSigner(signers.set, deps.env.pubkey, now);
+	if (!current.ok) throw new Refusal("signer-not-current", `SOLANA_ANCHOR_PUBKEY is not a valid anchor signer now (${current.reason}): a transaction it signed would be rejected by the verifier, so nothing was sent`);
+	return signers.set;
+}
+
+/**
+ * Is this transaction signed by a key the signer set accepts at THE TRANSACTION'S block time (the verifier's rule)? A payer outside
+ * the set, or outside its window at that time, is false. A block time the cluster did not report cannot be judged against a window:
+ * it refuses (`rpc-unreadable`) rather than being read as "not by the signer", which would send the hour again.
+ */
+function signedByAcceptedKey(found: TransactionMemo, set: SignerSet, hour: SavedPlanHour, signature: string): boolean {
+	if (found.payer === null || !set.some((entry) => entry.pubkey === found.payer)) return false;
+	if (found.blockTime === null) {
+		throw new Refusal("rpc-unreadable", `${hour.period_start}: transaction ${signature} has no block time, so whether its signer was allowed at the time cannot be told: nothing was sent`);
+	}
+	return acceptsSigner(set, found.payer, found.blockTime * 1000).ok;
+}
+
+/**
  * Gate 4, for one hour: the stored row, the plan and the recomputed digest must agree byte for byte. Read-only. A disagreement is a
  * ledger-integrity question, never something a re-anchor may paper over.
  */
@@ -492,7 +541,7 @@ interface RecordedState {
 /**
  * Gate 6a, for one hour: the NEWEST `anchor.reanchor` note bound to the hour (same root, count and previous signature; chosen by
  * `newestBoundNote`, the same choice the verifier makes) is the only pointer that counts. Its transaction being on this cluster,
- * memo-exact and signed by the key means the hour is done: its signature is returned. A newest note whose transaction the cluster
+ * memo-exact and signed by a key the signer set accepts at the transaction's block time means the hour is done: its signature is returned. A newest note whose transaction the cluster
  * does not know, or that is wrong or failed, means the hour is NOT recorded, whatever older notes say (the verifier never falls back
  * to an older one): `signature` is null, `stale` names that note so the repair note gets its own idempotency key, and discovery runs
  * and adopts an earlier valid send or sends once. A transaction that cannot be read refuses, because a recorded send may be live. A
@@ -500,7 +549,7 @@ interface RecordedState {
  * with `notes-incomplete`, the way the verifier treats it (`ReanchorReadIncomplete`, hour unverified): the pointer it follows is
  * unknown, so nothing is sent. A notes read that fails is no note: discovery follows it.
  */
-async function recordedSignature(hour: SavedPlanHour, deps: ReanchorDeps): Promise<RecordedState> {
+async function recordedSignature(hour: SavedPlanHour, deps: ReanchorDeps, signers: SignerSet): Promise<RecordedState> {
 	let notes: ReanchorNotes;
 	try {
 		notes = await deps.notes(hour);
@@ -521,9 +570,17 @@ async function recordedSignature(hour: SavedPlanHour, deps: ReanchorDeps): Promi
 	} catch (cause) {
 		throw new Refusal("rpc-unreadable", `${hour.period_start}: the recorded transaction ${newest.payload.new_tx_sig} could not be read: ${reasonOf(cause)}`);
 	}
-	if (found !== null && found.memo !== null && found.payer === deps.env.pubkey && found.payerSigned && found.err === null) {
+	if (found !== null && found.memo !== null && found.payerSigned && found.err === null) {
 		const memo = parseMemo(found.memo);
-		if (memo !== null && memo.periodStartMs === hour.period_start_ms && memo.rootHex === hour.root && memo.count === hour.event_count) return { signature: newest.payload.new_tx_sig, stale: null };
+		if (
+			memo !== null &&
+			memo.periodStartMs === hour.period_start_ms &&
+			memo.rootHex === hour.root &&
+			memo.count === hour.event_count &&
+			signedByAcceptedKey(found, signers, hour, newest.payload.new_tx_sig)
+		) {
+			return { signature: newest.payload.new_tx_sig, stale: null };
+		}
 	}
 	return { signature: null, stale: newest.event_id };
 }
@@ -535,45 +592,49 @@ async function recordedSignature(hour: SavedPlanHour, deps: ReanchorDeps): Promi
  * exhausted (a short page) or a page ends at a block older than the earliest wanted period start: nothing before it can be a send of
  * these hours. A cap hit first is `discovery-incomplete`, an unreadable page `rpc-unreadable`; neither is ever read as "absent".
  */
-async function listEarlierSends(hours: readonly SavedPlanHour[], deps: ReanchorDeps): Promise<Map<number, string[]>> {
-	const { rpc, env } = deps;
+async function listEarlierSends(hours: readonly SavedPlanHour[], deps: ReanchorDeps, signers: SignerSet): Promise<Map<number, string[]>> {
+	const { rpc } = deps;
 	const wanted = new Set(hours.map((hour) => hour.period_start_ms));
 	const horizonMs = Math.min(...wanted);
 	const hints = new Map<number, string[]>();
-	let before: string | undefined;
-	for (let page = 1; ; page++) {
-		let listing: AddressMemo[];
-		try {
-			listing = await rpc.addressMemos(env.pubkey, DISCOVERY_PAGE_SIZE, before, "confirmed");
-		} catch (cause) {
-			throw new Refusal("rpc-unreadable", `the signer's signatures could not be listed (page ${page}): ${reasonOf(cause)}`);
+	// Every distinct key of the signer set: an hour an earlier key sent is listed under that key's address, not the configured one's.
+	for (const address of new Set(signers.map((entry) => entry.pubkey))) {
+		let before: string | undefined;
+		for (let page = 1; ; page++) {
+			let listing: AddressMemo[];
+			try {
+				listing = await rpc.addressMemos(address, DISCOVERY_PAGE_SIZE, before, "confirmed");
+			} catch (cause) {
+				throw new Refusal("rpc-unreadable", `the signer's signatures could not be listed (page ${page}): ${reasonOf(cause)}`);
+			}
+			for (const hint of listing) {
+				const parsed = hint.memo === null ? null : parseMemo(hint.memo);
+				if (parsed === null || !wanted.has(parsed.periodStartMs)) continue;
+				const known = hints.get(parsed.periodStartMs);
+				if (known === undefined) hints.set(parsed.periodStartMs, [hint.signature]);
+				else if (!known.includes(hint.signature)) known.push(hint.signature);
+			}
+			const oldest = listing[listing.length - 1];
+			if (oldest === undefined || listing.length < DISCOVERY_PAGE_SIZE) break;
+			if (typeof oldest.blockTime === "number" && oldest.blockTime * 1000 < horizonMs) break;
+			if (page >= DISCOVERY_MAX_PAGES) {
+				throw new Refusal(
+					"discovery-incomplete",
+					`the signer's signatures were not listed back to ${hourIso(horizonMs)} within ${DISCOVERY_MAX_PAGES} pages of ${DISCOVERY_PAGE_SIZE}, so an earlier send cannot be ruled out: nothing was sent`,
+				);
+			}
+			before = oldest.signature;
 		}
-		for (const hint of listing) {
-			const parsed = hint.memo === null ? null : parseMemo(hint.memo);
-			if (parsed === null || !wanted.has(parsed.periodStartMs)) continue;
-			const known = hints.get(parsed.periodStartMs);
-			if (known === undefined) hints.set(parsed.periodStartMs, [hint.signature]);
-			else known.push(hint.signature);
-		}
-		const oldest = listing[listing.length - 1];
-		if (oldest === undefined || listing.length < DISCOVERY_PAGE_SIZE) return hints;
-		if (typeof oldest.blockTime === "number" && oldest.blockTime * 1000 < horizonMs) return hints;
-		if (page >= DISCOVERY_MAX_PAGES) {
-			throw new Refusal(
-				"discovery-incomplete",
-				`the signer's signatures were not listed back to ${hourIso(horizonMs)} within ${DISCOVERY_MAX_PAGES} pages of ${DISCOVERY_PAGE_SIZE}, so an earlier send cannot be ruled out: nothing was sent`,
-			);
-		}
-		before = oldest.signature;
 	}
+	return hints;
 }
 
 /**
  * Gate 6c, for one hour: the hinted transactions are confirmed by reading them. The same root and count adopt; a different root or
  * count for this hour is refused. Returns the signature to adopt, or null when no hinted transaction is this hour's memo by the signer.
  */
-async function confirmEarlierSend(hour: SavedPlanHour, signatures: readonly string[], deps: ReanchorDeps): Promise<string | null> {
-	const { rpc, env } = deps;
+async function confirmEarlierSend(hour: SavedPlanHour, signatures: readonly string[], deps: ReanchorDeps, signers: SignerSet): Promise<string | null> {
+	const { rpc } = deps;
 	for (const signature of signatures) {
 		let confirmed: TransactionMemo | null;
 		try {
@@ -583,9 +644,10 @@ async function confirmEarlierSend(hour: SavedPlanHour, signatures: readonly stri
 		}
 		// A listed memo for this hour whose transaction cannot be read may already anchor it: sending again could duplicate it.
 		if (confirmed === null) throw new Refusal("rpc-unreadable", `${hour.period_start}: transaction ${signature} could not be read, so an earlier send cannot be ruled out`);
-		if (confirmed.memo === null || confirmed.payer !== env.pubkey || !confirmed.payerSigned || confirmed.err !== null) continue;
+		if (confirmed.memo === null || !confirmed.payerSigned || confirmed.err !== null) continue;
 		const memo = parseMemo(confirmed.memo);
 		if (memo === null || memo.periodStartMs !== hour.period_start_ms) continue;
+		if (!signedByAcceptedKey(confirmed, signers, hour, signature)) continue;
 		if (memo.rootHex === hour.root && memo.count === hour.event_count) return signature;
 		throw new Refusal("root-mismatch", `${hour.period_start}: the cluster already holds a memo by the signer for this hour with root ${memo.rootHex} over ${memo.count} events, not the stored ${hour.root} over ${hour.event_count}`);
 	}
@@ -711,6 +773,7 @@ export async function executeReanchor(plan: SavedPlan, options: ReanchorOptions,
 		const cap = Math.min(options.maxHours, MAX_HOURS_PER_RUN);
 		const budget = Math.min(cap, plan.hours.length);
 		const genesis = await checkGates(plan, options, deps, budget);
+		const signers = await readSigners(deps, now);
 		for (const hour of plan.hours) await checkHour(hour, deps, now);
 
 		const lock = deps.lock.acquire();
@@ -722,7 +785,7 @@ export async function executeReanchor(plan: SavedPlan, options: ReanchorOptions,
 			const unrecorded: SavedPlanHour[] = [];
 			for (const hour of plan.hours) {
 				await checkPreviousAbsent(hour, deps.rpc);
-				const noted = await recordedSignature(hour, deps);
+				const noted = await recordedSignature(hour, deps, signers);
 				if (noted.signature === null) {
 					unrecorded.push(hour);
 					if (noted.stale !== null) stale.set(hour.period_start_ms, noted.stale);
@@ -730,9 +793,9 @@ export async function executeReanchor(plan: SavedPlan, options: ReanchorOptions,
 			}
 			const earlier = new Map<number, string>();
 			if (unrecorded.length > 0) {
-				const hints = await listEarlierSends(unrecorded, deps);
+				const hints = await listEarlierSends(unrecorded, deps, signers);
 				for (const hour of unrecorded) {
-					const adopted = await confirmEarlierSend(hour, hints.get(hour.period_start_ms) ?? [], deps);
+					const adopted = await confirmEarlierSend(hour, hints.get(hour.period_start_ms) ?? [], deps, signers);
 					if (adopted !== null) earlier.set(hour.period_start_ms, adopted);
 				}
 			}

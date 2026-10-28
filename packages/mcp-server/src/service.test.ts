@@ -4957,6 +4957,117 @@ describe("verifyGraph hour report", () => {
 		expect(verdict.hours[0]?.reason).toContain("timed out before this hour was checked");
 		expect(verdict.ok).toBe(false);
 	});
+
+	describe("the signer is judged by the signer set at the transaction's block time (as checkpoint_verify judges it)", () => {
+		const KEY_A = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
+		const KEY_B = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo";
+		const KEY_C = "SysvarC1ock11111111111111111111111111111111";
+		const ROTATED_AT = H + 3 * HOUR;
+		const BEFORE_S = (H + 2 * HOUR) / 1000;
+		const AFTER_S = (H + 4 * HOUR) / 1000;
+		/** Key A until the rotation, key B (the job's configured key) from it. */
+		const ROTATED = JSON.stringify([
+			{ pubkey: KEY_A, valid_from_ms: 0, valid_until_ms: ROTATED_AT },
+			{ pubkey: KEY_B, valid_from_ms: ROTATED_AT, valid_until_ms: null },
+		]);
+		const OPERATOR = { SUBSTRATE_TOKEN_OMP: "tok-omp-0123456789abcdef0123456789abcdef", SUBSTRATE_OPERATOR_TOKENS: "tok-omp-0123456789abcdef0123456789abcdef" };
+
+		function stub(world: ReturnType<typeof sessionRows>, extra: Record<string, unknown> = {}) {
+			return {
+				readEvents: async () => world.rows,
+				graphIngest: async () => world.records,
+				firstIngestMs: async () => H,
+				hourLeaves: async () => world.leaves,
+				anchorForPeriod: async () => anchorRow(world),
+				...extra,
+			};
+		}
+
+		async function hourOf(world: ReturnType<typeof sessionRows>, over: Record<string, unknown>, env: Record<string, string | undefined> = {}, extra: Record<string, unknown> = {}) {
+			const substrate = substrateWith(stub(world, extra), { SOLANA_ANCHOR_PUBKEY: KEY_B, SUBSTRATE_ANCHOR_SIGNER_SET: ROTATED, ...env });
+			const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo, over) as never });
+			return verdict.hours[0];
+		}
+
+		test("an hour key A anchored before the rotation stays anchored once the job key is B", async () => {
+			const hour = await hourOf(sessionRows(), { payer: KEY_A, blockTime: BEFORE_S });
+			expect(hour).toMatchObject({ period_start: START_ISO, status: "anchored" });
+		});
+
+		test("a payer outside its window at the block time is a mismatch carrying the window rule's reason; so is the configured key before its window", async () => {
+			const late = await hourOf(sessionRows(), { payer: KEY_A, blockTime: AFTER_S });
+			expect(late?.status).toBe("mismatch");
+			expect(late?.reason).toContain("outside its valid window");
+
+			const early = await hourOf(sessionRows(), { payer: KEY_B, blockTime: BEFORE_S });
+			expect(early?.status).toBe("mismatch");
+			expect(early?.reason).toContain("outside its valid window");
+
+			const current = await hourOf(sessionRows(), { payer: KEY_B, blockTime: AFTER_S });
+			expect(current?.status).toBe("anchored");
+		});
+
+		test("a payer that is in no window of the set is a mismatch", async () => {
+			const hour = await hourOf(sessionRows(), { payer: KEY_C, blockTime: BEFORE_S });
+			expect(hour?.status).toBe("mismatch");
+			expect(hour?.reason).toContain("is not in the signer set");
+		});
+
+		test("an unsigned fee payer stays the old mismatch, whatever the set says", async () => {
+			const hour = await hourOf(sessionRows(), { payer: KEY_A, payerSigned: false, blockTime: BEFORE_S });
+			expect(hour).toMatchObject({ status: "mismatch", reason: "memo is not signed by SOLANA_ANCHOR_PUBKEY" });
+		});
+
+		test("a block time the cluster did not report leaves a retired key's hour unverified, with the reason", async () => {
+			const hour = await hourOf(sessionRows(), { payer: KEY_A, blockTime: null });
+			expect(hour?.status).toBe("unverified");
+			expect(hour?.reason).toContain("no block time");
+		});
+
+		test("a rotation read that may be incomplete leaves another key's hour unverified, and the configured key's hour anchored as before", async () => {
+			const down = {
+				queryEvents: async () => {
+					throw new Error("ledger down");
+				},
+			};
+			const other = await hourOf(sessionRows(), { payer: KEY_A, blockTime: BEFORE_S }, OPERATOR, down);
+			expect(other?.status).toBe("unverified");
+			expect(other?.reason).toContain("rotation read may be incomplete");
+
+			const configured = await hourOf(sessionRows(), { payer: KEY_B, blockTime: AFTER_S }, OPERATOR, down);
+			expect(configured?.status).toBe("anchored");
+		});
+
+		test("a single-key deployment with a valid key is judged exactly as before: its own signature is anchored with or without a block time, another key is a mismatch", async () => {
+			const world = sessionRows();
+			const single = (over: Record<string, unknown>) => hourOf(world, over, { SOLANA_ANCHOR_PUBKEY: KEY_B, SUBSTRATE_ANCHOR_SIGNER_SET: undefined });
+			expect((await single({ payer: KEY_B, blockTime: BEFORE_S }))?.status).toBe("anchored");
+			expect((await single({ payer: KEY_B, blockTime: null }))?.status).toBe("anchored");
+			const foreign = await single({ payer: KEY_A, blockTime: BEFORE_S });
+			expect(foreign?.status).toBe("mismatch");
+		});
+
+		test("the signer set is read once per verify, and only when an hour has a transaction to judge", async () => {
+			const world = sessionRows();
+			// A rotation read is the per-surface note query with no session; the re-anchor notes of an hour are read inside its session.
+			let rotationReads = 0;
+			const counting = {
+				queryEvents: async (query: { match?: Record<string, unknown> }) => {
+					if (query.match?.["session_id"] === undefined) rotationReads += 1;
+					return [];
+				},
+			};
+			const anchored = await hourOf(world, { payer: KEY_B, blockTime: AFTER_S }, OPERATOR, counting);
+			expect(anchored?.status).toBe("anchored");
+			expect(rotationReads).toBe(1);
+
+			rotationReads = 0;
+			const pending = substrateWith(stub(world, { ...counting, anchorForPeriod: async () => null }), { SOLANA_ANCHOR_PUBKEY: KEY_B, SUBSTRATE_ANCHOR_SIGNER_SET: ROTATED, ...OPERATOR });
+			const verdict = await pending.verifyGraph("ut-1", { now: H + 2 * HOUR, rpc: rpcReturning(world.memo) as never });
+			expect(verdict.hours[0]?.status).toBe("pending");
+			expect(rotationReads).toBe(0);
+		});
+	});
 });
 
 /**

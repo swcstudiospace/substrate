@@ -26,7 +26,7 @@ import { readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { createRpc, execFileRunner, RpcError, type Rpc } from "@substrate/ledger";
 import { loadConfig, operatorSurfaces, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
-import { readReanchorNotes } from "./anchor-verify-deps.ts";
+import { readReanchorNotes, resolveSignerSet } from "./anchor-verify-deps.ts";
 import { GreptimeClient } from "./greptime.ts";
 import {
 	dryRunReanchor,
@@ -251,6 +251,16 @@ export function openRealContext(options: ReanchorOptions, open: OpenOptions = {}
 				root: hour.root,
 				event_count: hour.event_count,
 				tx_sig: hour.previous_tx_sig,
+			}),
+		// The same effective signer set `checkpoint_verify` judges against, read from the same ports as the notes.
+		signers: () =>
+			resolveSignerSet({
+				ledger: greptime,
+				rowToEvent,
+				rpc: () => rpc,
+				solana: { pubkey, problem: null, signerSet: config.solana.signerSet, signerSetProblem: config.solana.signerSetProblem },
+				operatorSurfaces: operators,
+				nowMs: () => Date.now(),
 			}),
 		// Beside the plan file: the one directory this entry already controls.
 		lock: fileLock(join(dirname(resolve(options.planPath)), ".reanchor.lock")),
