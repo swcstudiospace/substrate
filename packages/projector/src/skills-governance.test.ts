@@ -23,6 +23,13 @@ import { type Action, GROK_KNOWN_REAL, apply, inventory, main, plan, postWarning
 import { attributedSurface } from "../../mcp-server/src/mcp.ts";
 import type { Surface } from "../../mcp-server/src/types.ts";
 
+/** The payload of the warning at `index`, failing the test when that warning was never posted. */
+function payloadOf<T>(events: WarningEvent[], index: number): T {
+	const event = events[index];
+	if (!event) throw new Error(`no warning at index ${index}`);
+	return event.payload as T;
+}
+
 let T: string;
 let LIB: string;
 let EXP: string;
@@ -250,7 +257,7 @@ describe("warning dedupe", () => {
 		skill(LIB, "c");
 		await run();
 		expect(warnings).toHaveLength(3);
-		expect((warnings[2]?.payload as { names: string[] }).names).toEqual(["b", "c"]);
+		expect(payloadOf<{ names: string[] }>(warnings, 2).names).toEqual(["b", "c"]);
 
 		skill(LIB, "d");
 		await run(async () => false);
@@ -283,7 +290,7 @@ describe("enforce", () => {
 		expect(linked("a")).toBe(true);
 		expect(linked("b")).toBe(false);
 		expect(out).toContain("[projector] claude held link-new b (not approved)");
-		expect((warnings[0]?.payload as { reason: string; mode: string; names: string[] }).names).toEqual(["b"]);
+		expect(payloadOf<{ names: string[] }>(warnings, 0).names).toEqual(["b"]);
 	});
 
 	test("a skill already linked that is no longer approved keeps its link, its library copy and every other link", async () => {
@@ -296,7 +303,7 @@ describe("enforce", () => {
 		expect(readlinkSync(join(CLAUDE.dir, "b"))).toBe(join(LIB, "b"));
 		expect(existsSync(join(LIB, "b", "SKILL.md"))).toBe(true);
 		expect(readdirSync(CLAUDE.dir).sort()).toEqual(["a", "b"]);
-		expect((warnings[0]?.payload as { names: string[] }).names).toEqual(["b"]);
+		expect(payloadOf<{ names: string[] }>(warnings, 0).names).toEqual(["b"]);
 	});
 
 	test("gating removes exactly the actions that put a library link where there was none or an exports link: link-new, backup-then-link and repoint; skip-warns and removals pass through, nothing is added", () => {
@@ -383,7 +390,7 @@ describe("approved cache", () => {
 		expect(linked("a")).toBe(true);
 		expect(linked("b")).toBe(false);
 		expect(out.some((l) => l.includes("using the cached set"))).toBe(true);
-		expect((warnings[0]?.payload as { reason: string }).reason).toBe("unapproved");
+		expect(payloadOf<{ reason: string }>(warnings, 0).reason).toBe("unapproved");
 	});
 
 	test("with no cache and no answer nothing new is linked, existing links stay, and one warning says why", async () => {
@@ -442,7 +449,7 @@ describe("approved cache", () => {
 		const warnings: WarningEvent[] = [];
 		await project(opts(gov("enforce", unreachable()), warnings, []));
 		expect(linked("a")).toBe(false);
-		expect((warnings[0]?.payload as { reason: string }).reason).toBe("approved-list-unavailable");
+		expect(payloadOf<{ reason: string }>(warnings, 0).reason).toBe("approved-list-unavailable");
 	});
 
 	test("a cache that cannot be written is one stdout line, not a failed run or a lost projection", async () => {
@@ -485,7 +492,7 @@ describe("names from the server", () => {
 		await project(opts(gov("enforce", fakeFetch(() => approvedBody(["../a", "a/../a"]))), warnings, []));
 		expect(linked("a")).toBe(false);
 		expect(existsSync(CACHE) ? readApprovedCache(CACHE, ORIGIN)?.names : new Set()).toEqual(new Set());
-		expect((warnings[0]?.payload as { names: string[] }).names).toEqual(["a"]);
+		expect(payloadOf<{ names: string[] }>(warnings, 0).names).toEqual(["a"]);
 	});
 });
 
@@ -496,6 +503,17 @@ describe("fetch outcome reasons", () => {
 		}
 		const refused = await fetchApproved(TARGET, unreachable());
 		expect(refused.ok === false && refused.reason.startsWith("skills unreachable: ")).toBe(true);
+	});
+
+	test("a 200 JSON body of the wrong shape is a malformed answer; a well-formed body still yields the approved list", async () => {
+		for (const body of ["null", "[]", "{}", '"text"', '{"skills":"a"}']) {
+			expect(await fetchApproved(TARGET, fakeFetch(() => new Response(body)))).toEqual({ ok: false, reason: "skills answer malformed" });
+		}
+		const ok = await fetchApproved(TARGET, fakeFetch(() => approvedBody(["a", "b"], { library: "owner/skills" })));
+		expect(ok.ok).toBe(true);
+		if (!ok.ok) throw new Error("expected an approved list");
+		expect([...ok.list.names].sort()).toEqual(["a", "b"]);
+		expect(ok.list.library).toBe("owner/skills");
 	});
 });
 
@@ -566,7 +584,7 @@ describe("a list the server cut", () => {
 		writeApprovedCache(CACHE, new Set(["a"]), 0, true, SRC);
 		const warnings: WarningEvent[] = [];
 		await project(opts(gov("report", unreachable()), warnings, []));
-		expect((warnings[0]?.payload as { reason: string }).reason).toBe("approved-list-truncated");
+		expect(payloadOf<{ reason: string }>(warnings, 0).reason).toBe("approved-list-truncated");
 	});
 
 	test("a complete list keeps the plain unapproved reason and carries no truncated field", async () => {
@@ -694,7 +712,7 @@ describe("cache source identity", () => {
 		expect(linked("b")).toBe(false);
 		expect(readlinkSync(join(CLAUDE.dir, "a"))).toBe(join(LIB, "a"));
 		expect(warnings).toHaveLength(1);
-		expect((warnings[0]?.payload as { reason: string }).reason).toBe("approved-list-unavailable");
+		expect(payloadOf<{ reason: string }>(warnings, 0).reason).toBe("approved-list-unavailable");
 	});
 
 	test("a failing fetch against the same origin uses the cache, whatever the path or credentials of the URL", async () => {

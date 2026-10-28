@@ -544,7 +544,8 @@ describe("single-use approvals through the real service (33-02, D33-06)", () => 
 			input: { cmd: `deploy ${ghp} ${lin}` }, options: OPTIONS,
 		});
 		const sent = calls.find((c) => c.method === "sendMessage");
-		expect(String((sent?.params as Record<string, unknown>).text)).toContain("[REDACTED]");
+		if (!sent) throw new Error("expected a sendMessage call");
+		expect(String((sent.params as Record<string, unknown>).text)).toContain("[REDACTED]");
 		await broker.handleUpdate(update({ data: postedCallback(calls, 0), id: "cb-ok" }));
 		svc.service.now = () => new Date(T0 + 60_001);
 		expect(await svc.service.sweepApprovalTimeouts(GID, NID)).toBe(1);

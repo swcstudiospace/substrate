@@ -575,6 +575,10 @@ export function checkNames(
 			}
 			case "external":
 				return { id: client.id, surface: client.surface, state: client.state, status: "external", detail: delivery.note };
+			default: {
+				const unhandled: never = delivery;
+				throw new Error(`unhandled client delivery: ${JSON.stringify(unhandled)}`);
+			}
 		}
 	});
 	const strandedLive = clients.filter((c) => isLive(c.state) && c.status !== "ok" && c.status !== "external").map((c) => c.id);

@@ -273,15 +273,6 @@ async function main(argv: string[]): Promise<number> {
 		});
 		check(projected.status === 0, "muse bundle projects into the isolated scope", String(projected.stderr).slice(0, 160));
 		const hookPath = join(bundleDir, "hooks", "post-tool-use.ts");
-		let hookUrl = "";
-		try {
-			const hookConfig: unknown = JSON.parse(readFileSync(join(bundleDir, "hooks", "substrate.json"), "utf8"));
-			if (hookConfig && typeof hookConfig === "object" && "url" in hookConfig && typeof hookConfig.url === "string") {
-				hookUrl = hookConfig.url;
-			}
-		} catch {
-			hookUrl = "";
-		}
 		const hookSession = `muse-hook-${Date.now().toString(36)}`;
 		const hooked = await runHook(hookPath, repo, scratchHome, { tool_name: "Edit", session_id: hookSession, tool_use_id: "call-7", outcome: "success", duration_ms: 35 });
 		check(hooked.code === 0 && hooked.stdout === "", "muse hook emits with empty stdout", `exit ${hooked.code}`);

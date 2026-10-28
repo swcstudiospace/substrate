@@ -503,7 +503,8 @@ export function apply(changes: readonly Change[]): Change[] {
 				const now = lstatSync(directory.path, { throwIfNoEntry: false });
 				if (!now) continue;
 				if (!now.isDirectory() || !sameIdentity(now, directory.stat)) {
-					throw new Error(`${directory.path} changed externally; preserved instead of removing`);
+					failures.push(`directory cleanup: Error: ${directory.path} changed externally; preserved instead of removing`);
+					continue;
 				}
 				rmdirSync(directory.path);
 			} catch (cause) {

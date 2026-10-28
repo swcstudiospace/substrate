@@ -162,13 +162,12 @@ export function originOf(url: string): string | null {
  */
 export function parseApproved(body: unknown): ApprovedList | null {
 	if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
-	const record = body as Record<string, unknown>;
-	if (!Array.isArray(record.skills)) return null;
+	if (!("skills" in body) || !Array.isArray(body.skills)) return null;
 	const names = new Set<string>();
 	let dropped = 0;
-	let truncated = record.truncated === true;
-	for (const entry of record.skills) {
-		const name = entry !== null && typeof entry === "object" && !Array.isArray(entry) ? (entry as Record<string, unknown>).name : undefined;
+	let truncated = "truncated" in body && body.truncated === true;
+	for (const entry of body.skills) {
+		const name = entry !== null && typeof entry === "object" && !Array.isArray(entry) && "name" in entry ? entry.name : undefined;
 		if (typeof name !== "string" || !SKILL_NAME_RE.test(name)) {
 			dropped++;
 			continue;
@@ -179,7 +178,7 @@ export function parseApproved(body: unknown): ApprovedList | null {
 		}
 		names.add(name);
 	}
-	const library = typeof record.library === "string" && record.library.length > 0 && record.library.length <= MAX_SOURCE_CHARS ? record.library : null;
+	const library = "library" in body && typeof body.library === "string" && body.library.length > 0 && body.library.length <= MAX_SOURCE_CHARS ? body.library : null;
 	return { names, truncated, dropped, library };
 }
 

@@ -95,7 +95,12 @@ function captureStderr(): { lines: string[]; restore: () => void } {
 		lines.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
 		return true;
 	}) as typeof process.stderr.write;
-	return { lines, restore: () => void (process.stderr.write = original) };
+	return {
+		lines,
+		restore: () => {
+			process.stderr.write = original;
+		},
+	};
 }
 
 let restoreEnv: () => void = () => undefined;

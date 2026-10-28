@@ -292,7 +292,7 @@ export function monitorScriptFindings(paths: DoctorPaths, deps: DoctorDeps): Fin
 }
 
 /** Assignment names leave this function; values never do. */
-export function bridgeEnvFindings(bridgeEnvFile: string, envText: string | null): Finding[] {
+export function bridgeEnvFindings(envText: string | null): Finding[] {
 	if (envText === null) {
 		return [{ code: "bridge-env", detail: "the bridge env file is not installed yet" }];
 	}
@@ -322,7 +322,7 @@ export function doctor(paths: DoctorPaths, deps: DoctorDeps): Finding[] {
 		...ompLinkFindings(paths, deps),
 		...hermesApprovalFindings(deps.readFile(join(paths.homeDir, HERMES_CONFIG_REL))),
 		...monitorScriptFindings(paths, deps),
-		...bridgeEnvFindings(paths.bridgeEnvFile, deps.readFile(paths.bridgeEnvFile)),
+		...bridgeEnvFindings(deps.readFile(paths.bridgeEnvFile)),
 	];
 }
 

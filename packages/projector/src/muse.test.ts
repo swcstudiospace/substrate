@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parseCapabilityStatuses, parseInstalledPlugins, parseValidateReport } from "./muse.ts";
 
 const CLI = join(import.meta.dir, "muse.ts");
 const ROOT = join(import.meta.dir, "..", "..", "..");
@@ -36,6 +37,10 @@ function writeStub(dir: string): string {
 			"await Bun.write(log, prev + JSON.stringify(args) + '\\n');",
 			"const cmd = args[1];",
 			"if (cmd === 'validate') {",
+			"  if (process.env.MUSE_STUB_RAW_VALIDATE !== undefined) {",
+			"    console.log(process.env.MUSE_STUB_RAW_VALIDATE);",
+			"    process.exit(0);",
+			"  }",
 			"  if (process.env.MUSE_STUB_INVALID === '1') {",
 			"    console.log(JSON.stringify({ valid: false, diagnostics: [{ message: 'no' }] }));",
 			"    process.exit(0);",
@@ -44,12 +49,20 @@ function writeStub(dir: string): string {
 			"  process.exit(0);",
 			"}",
 			"if (cmd === 'list') {",
+			"  if (process.env.MUSE_STUB_RAW_LIST !== undefined) {",
+			"    console.log(process.env.MUSE_STUB_RAW_LIST);",
+			"    process.exit(0);",
+			"  }",
 			"  const cache = process.env.MUSE_STUB_CACHE ?? '';",
 			"  const plugins = cache ? [{ plugin: { id: 'substrate' }, record: { cache_path: cache } }] : [];",
 			"  console.log(JSON.stringify({ plugins }));",
 			"  process.exit(0);",
 			"}",
 			"if (cmd === 'inspect') {",
+			"  if (process.env.MUSE_STUB_RAW_INSPECT !== undefined) {",
+			"    console.log(process.env.MUSE_STUB_RAW_INSPECT);",
+			"    process.exit(0);",
+			"  }",
 			"  console.log(JSON.stringify({ runtime_capabilities: [{ status: process.env.MUSE_STUB_STATUS ?? 'trusted_enabled' }] }));",
 			"  process.exit(0);",
 			"}",
@@ -90,6 +103,8 @@ interface RunOpts {
 	cache?: string;
 	status?: string;
 	invalid?: boolean;
+	/** Raw stdout the stub prints for a subcommand instead of its well-formed answer. */
+	raw?: { validate?: string; list?: string; inspect?: string };
 }
 
 function run(dir: string, args: string[], opts: RunOpts = {}): { code: number; out: string; err: string; calls: string[][] } {
@@ -113,6 +128,9 @@ function run(dir: string, args: string[], opts: RunOpts = {}): { code: number; o
 			...(opts.cache ? { MUSE_STUB_CACHE: opts.cache } : {}),
 			...(opts.status ? { MUSE_STUB_STATUS: opts.status } : {}),
 			...(opts.invalid ? { MUSE_STUB_INVALID: "1" } : {}),
+			...(opts.raw?.validate !== undefined ? { MUSE_STUB_RAW_VALIDATE: opts.raw.validate } : {}),
+			...(opts.raw?.list !== undefined ? { MUSE_STUB_RAW_LIST: opts.raw.list } : {}),
+			...(opts.raw?.inspect !== undefined ? { MUSE_STUB_RAW_INSPECT: opts.raw.inspect } : {}),
 		},
 	});
 	const calls = statExists(log)
@@ -430,6 +448,134 @@ describe("generated muse hook", () => {
 			expect(Date.now() - started).toBeLessThan(2500);
 			expect(code).toBe(0);
 			expect(stdout).toBe("");
+		} finally {
+			server.stop(true);
+		}
+	}, SPAWN_TEST_TIMEOUT_MS);
+});
+
+describe("muse CLI answer guards", () => {
+	test("parseValidateReport keeps valid and the diagnostic count, and rejects any other shape", () => {
+		expect(parseValidateReport({ valid: true, diagnostics: [] })).toEqual({ valid: true, diagnosticCount: 0 });
+		expect(parseValidateReport({ valid: false, diagnostics: [{ message: "no" }] })).toEqual({ valid: false, diagnosticCount: 1 });
+		expect(parseValidateReport({ valid: true })).toEqual({ valid: true, diagnosticCount: 0 });
+		for (const malformed of [null, "text", 7, [], { valid: true, diagnostics: "none" }]) {
+			expect(parseValidateReport(malformed)).toBeNull();
+		}
+	});
+
+	test("parseInstalledPlugins keeps ids and cache paths, and rejects any other shape", () => {
+		expect(parseInstalledPlugins({ plugins: [{ plugin: { id: "substrate" }, record: { cache_path: "/cache" } }, {}] })).toEqual([
+			{ id: "substrate", cachePath: "/cache" },
+			{ id: undefined, cachePath: undefined },
+		]);
+		expect(parseInstalledPlugins({})).toEqual([]);
+		for (const malformed of [null, "text", [], { plugins: "nope" }, { plugins: [null] }, { plugins: [7] }]) {
+			expect(parseInstalledPlugins(malformed)).toBeNull();
+		}
+	});
+
+	test("parseCapabilityStatuses keeps each status, and rejects any other shape", () => {
+		expect(parseCapabilityStatuses({ runtime_capabilities: [{ status: "trusted_enabled" }, { status: "review_needed" }] })).toEqual([
+			"trusted_enabled",
+			"review_needed",
+		]);
+		expect(parseCapabilityStatuses({})).toEqual([]);
+		for (const malformed of [null, "text", [], { runtime_capabilities: "x" }, { runtime_capabilities: [null] }]) {
+			expect(parseCapabilityStatuses(malformed)).toBeNull();
+		}
+	});
+});
+
+describe("muse projector with malformed CLI answers", () => {
+	test("a validate answer of the wrong shape fails validate and installs nothing", () => {
+		const dir = temp();
+		const result = run(dir, [], { raw: { validate: "null" } });
+		expect(result.code).toBe(1);
+		expect(result.err).toContain("cannot parse validate output");
+		expect(result.calls.map((call) => call[1])).toEqual(["validate"]);
+	}, SPAWN_TEST_TIMEOUT_MS);
+
+	test("a list answer of the wrong shape reads as nothing installed, so the plugin is installed", () => {
+		const dir = temp();
+		const result = run(dir, [], { raw: { list: '{"plugins":"nope"}' } });
+		expect(result.code).toBe(0);
+		expect(result.calls.map((call) => call[1])).toEqual(["validate", "list", "install", "approve"]);
+	}, SPAWN_TEST_TIMEOUT_MS);
+
+	test("--check reports list for a list answer of the wrong shape", () => {
+		const dir = temp();
+		expect(run(dir, ["--bundle-only"]).code).toBe(0);
+		const checked = run(dir, ["--check"], { cache: join(dir, "bundle"), raw: { list: '{"plugins":5}' } });
+		expect(checked.code).toBe(1);
+		expect(checked.out).toContain("list");
+	}, SPAWN_TEST_TIMEOUT_MS);
+
+	test("--check reports inspect for an inspect answer of the wrong shape", () => {
+		const dir = temp();
+		expect(run(dir, ["--bundle-only"]).code).toBe(0);
+		const checked = run(dir, ["--check"], { cache: join(dir, "bundle"), raw: { inspect: '{"runtime_capabilities":"x"}' } });
+		expect(checked.code).toBe(1);
+		expect(checked.out).toContain("inspect");
+		expect(checked.out).not.toContain("trust");
+	}, SPAWN_TEST_TIMEOUT_MS);
+});
+
+describe("generated muse hook with malformed input", () => {
+	async function runHook(dir: string, stdin: string): Promise<{ code: number; stdout: string }> {
+		const proc = Bun.spawn(["bun", join(dir, "bundle", "hooks", "post-tool-use.ts")], {
+			cwd: dir,
+			env: { PATH: process.env.PATH ?? "", HOME: dir },
+			stdin: new Blob([stdin]),
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+		return { code, stdout };
+	}
+
+	test("a substrate.json with a non-string field is no config: nothing is posted and the turn ends cleanly", async () => {
+		const dir = temp();
+		let posts = 0;
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			fetch() {
+				posts += 1;
+				return new Response("{}", { status: 202 });
+			},
+		});
+		try {
+			expect(run(dir, ["--bundle-only"], { url: `http://127.0.0.1:${server.port}` }).code).toBe(0);
+			const valid = await runHook(dir, JSON.stringify({ tool_name: "Read" }));
+			expect(valid).toEqual({ code: 0, stdout: "" });
+			expect(posts).toBe(1);
+			writeFileSync(join(dir, "bundle", "hooks", "substrate.json"), JSON.stringify({ url: 7, tokenFile: "/x", stateDir: "/y" }));
+			const malformed = await runHook(dir, JSON.stringify({ tool_name: "Read" }));
+			expect(malformed).toEqual({ code: 0, stdout: "" });
+			expect(posts).toBe(1);
+		} finally {
+			server.stop(true);
+		}
+	}, SPAWN_TEST_TIMEOUT_MS);
+
+	test("a stdin payload that is not a JSON object posts nothing and the turn ends cleanly", async () => {
+		const dir = temp();
+		let posts = 0;
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			fetch() {
+				posts += 1;
+				return new Response("{}", { status: 202 });
+			},
+		});
+		try {
+			expect(run(dir, ["--bundle-only"], { url: `http://127.0.0.1:${server.port}` }).code).toBe(0);
+			for (const malformed of ["null", "[1]", '"text"']) {
+				expect(await runHook(dir, malformed)).toEqual({ code: 0, stdout: "" });
+			}
+			expect(posts).toBe(0);
 		} finally {
 			server.stop(true);
 		}

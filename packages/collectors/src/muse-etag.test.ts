@@ -107,7 +107,7 @@ describe("muse writer and the brief ETag", () => {
 		expect(readFileSync(briefPath(repo), "utf8")).toBe("first brief");
 		expect(state.repos[repo]?.etag).toBe('W/"aaaa"');
 		expect(state.counters.unchanged).toBe(0);
-		const saved = loadState(process.env.SUBSTRATE_COLLECTOR_STATE as string);
+		loadState(process.env.SUBSTRATE_COLLECTOR_STATE as string);
 
 		const past = new Date("2020-01-01T00:00:00.000Z");
 		utimesSync(briefPath(repo), past, past);

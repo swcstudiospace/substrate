@@ -53,6 +53,21 @@ export type IssueReply =
 	| { found: true; graph_id: string; node_id: string; identifier: string; title: string; description: string; untrusted: string }
 	| { found: false; reason: string };
 
+/** Whether `value` has the `/issue` reply shape: `found: true` with the six text fields, or `found: false` with a reason. */
+export function isIssueReply(value: unknown): value is IssueReply {
+	if (typeof value !== "object" || value === null || !("found" in value)) return false;
+	if (value.found === false) return "reason" in value && typeof value.reason === "string";
+	if (value.found !== true) return false;
+	return (
+		"graph_id" in value && typeof value.graph_id === "string" &&
+		"node_id" in value && typeof value.node_id === "string" &&
+		"identifier" in value && typeof value.identifier === "string" &&
+		"title" in value && typeof value.title === "string" &&
+		"description" in value && typeof value.description === "string" &&
+		"untrusted" in value && typeof value.untrusted === "string"
+	);
+}
+
 export type HeartbeatReply = { ok: boolean; reason?: string };
 
 export type Dod = { summary: string; tests_pass: boolean; review_pass?: boolean };
@@ -194,7 +209,8 @@ export function sseMessages(text: string): unknown[] {
 		const payload = dataLines.join("\n");
 		dataLines = [];
 		try {
-			messages.push(JSON.parse(payload));
+			const parsed: unknown = JSON.parse(payload);
+			messages.push(parsed);
 		} catch {
 			throw new SubstrateError(`unparseable SSE data: ${payload.slice(0, 200)}`);
 		}
@@ -257,7 +273,8 @@ export class SubstrateClient {
 		let messages: unknown[];
 		if (text.trimStart().startsWith("{")) {
 			try {
-				messages = [JSON.parse(text)];
+				const body: unknown = JSON.parse(text);
+				messages = [body];
 			} catch {
 				throw new SubstrateError(`${tool}: unparseable JSON body: ${text.slice(0, 200)}`);
 			}
@@ -283,7 +300,8 @@ export class SubstrateClient {
 		const isError = result && typeof result === "object" && "isError" in result ? result.isError === true : false;
 		if (isError) throw new SubstrateError(`${tool}: tool error: ${firstText.slice(0, 200)}`);
 		try {
-			return JSON.parse(firstText);
+			const parsed: unknown = JSON.parse(firstText);
+			return parsed;
 		} catch {
 			return firstText;
 		}
@@ -389,7 +407,14 @@ export class SubstrateClient {
 		}
 		const text = await response.text();
 		if (response.status >= 400) throw new SubstrateError(`issue_get: HTTP ${response.status}: ${text.slice(0, 200)}`);
-		return JSON.parse(text) as IssueReply;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(text);
+		} catch {
+			throw new SubstrateError(`issue_get: unparseable JSON body: ${text.slice(0, 200)}`);
+		}
+		if (!isIssueReply(parsed)) throw new SubstrateError(`issue_get: unexpected reply shape: ${text.slice(0, 200)}`);
+		return parsed;
 	}
 
 	/** POST /brief as surface claude-code. Fails open: any error yields a one-line placeholder brief. */

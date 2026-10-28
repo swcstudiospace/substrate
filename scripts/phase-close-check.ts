@@ -19,7 +19,7 @@
  * non-empty), 2 precondition refused (a lock file is missing or the baseline
  * object is absent, e.g. in a shallow clone).
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { EVENT_KINDS, SURFACES } from "../packages/mcp-server/src/types.ts";
 

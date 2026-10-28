@@ -9,6 +9,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	heartbeatDue,
+	isIssueReply,
+	SubstrateError,
 	LeaseStore,
 	resolveHostBearer,
 	SubstrateClient,
@@ -68,7 +70,7 @@ describe("resolveHostBearer", () => {
 
 describe("bearer carriage", () => {
 	test("every tool call carries the Authorization bearer header", async () => {
-		const { seen, fetchImpl } = captureFetch((url) =>
+		const { seen, fetchImpl } = captureFetch(() =>
 			jsonRpc(1, { graph_id: "g", node_id: "n", nodes: [] }),
 		);
 		const client = new SubstrateClient({ baseUrl: "http://127.0.0.1:9", fetchImpl, bearer: "test-bearer" });
@@ -79,7 +81,7 @@ describe("bearer carriage", () => {
 	});
 
 	test("anonymous client sends no authorization header", async () => {
-		const { seen, fetchImpl } = captureFetch((url) =>
+		const { seen, fetchImpl } = captureFetch(() =>
 			jsonRpc(1, { graph_id: "g", node_id: "n", nodes: [] }),
 		);
 		const client = new SubstrateClient({
@@ -103,7 +105,7 @@ describe("bearer carriage", () => {
 describe("lease persist and heartbeat", () => {
 	test("claimAndPersist writes the lease id to a 0600 file", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "lease-"));
-		const { fetchImpl } = captureFetch((url) => jsonRpc(1, { claimed: true, lease_id: "lease-123" }));
+		const { fetchImpl } = captureFetch(() => jsonRpc(1, { claimed: true, lease_id: "lease-123" }));
 		const client = new SubstrateClient({ baseUrl: "http://127.0.0.1:9", fetchImpl, bearer: "test-bearer" });
 		const store = new LeaseStore(dir);
 		const reply = await client.claimAndPersist(store, "g", "n", "claude-code", "s");
@@ -116,7 +118,7 @@ describe("lease persist and heartbeat", () => {
 
 	test("claim without a lease id persists nothing", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "lease-"));
-		const { fetchImpl } = captureFetch((url) => jsonRpc(1, { claimed: true }));
+		const { fetchImpl } = captureFetch(() => jsonRpc(1, { claimed: true }));
 		const client = new SubstrateClient({ baseUrl: "http://127.0.0.1:9", fetchImpl, bearer: "test-bearer" });
 		const store = new LeaseStore(dir);
 		await client.claimAndPersist(store, "g", "n", "claude-code", "s");
@@ -138,5 +140,47 @@ describe("lease persist and heartbeat", () => {
 		const client = new SubstrateClient({ baseUrl: "http://127.0.0.1:9", fetchImpl, bearer: "test-bearer" });
 		expect(await client.heartbeat("g", "n", "lease-123")).toEqual({ ok: true });
 		expect(calls).toHaveLength(1);
+	});
+});
+
+describe("issueGet reply guard", () => {
+	const FOUND = { found: true, graph_id: "g", node_id: "n", identifier: "SWC-1", title: "t", description: "d", untrusted: "u" };
+
+	function issueClient(reply: string): SubstrateClient {
+		const { fetchImpl } = captureFetch(() => new Response(reply, { status: 200 }));
+		return new SubstrateClient({ baseUrl: "http://127.0.0.1:9", fetchImpl, bearer: "test-bearer" });
+	}
+
+	test("a well-formed found or not-found reply is returned unchanged", async () => {
+		expect(await issueClient(JSON.stringify(FOUND)).issueGet("g", "n")).toEqual(FOUND);
+		expect(await issueClient(JSON.stringify({ found: false, reason: "linear mirror off" })).issueGet("g", "n")).toEqual({
+			found: false,
+			reason: "linear mirror off",
+		});
+	});
+
+	test("a reply of the wrong shape or not JSON is a SubstrateError, the same failure as an HTTP error", async () => {
+		const malformed = [
+			"null",
+			"[]",
+			'"text"',
+			"{}",
+			'{"found":"yes"}',
+			'{"found":false}',
+			JSON.stringify({ ...FOUND, title: 7 }),
+			JSON.stringify({ found: true, graph_id: "g" }),
+			"<html>proxy</html>",
+		];
+		for (const reply of malformed) {
+			await expect(issueClient(reply).issueGet("g", "n")).rejects.toBeInstanceOf(SubstrateError);
+		}
+	});
+
+	test("isIssueReply accepts exactly the two documented shapes", () => {
+		expect(isIssueReply(FOUND)).toBe(true);
+		expect(isIssueReply({ found: false, reason: "r" })).toBe(true);
+		expect(isIssueReply({ ...FOUND, extra: 1 })).toBe(true);
+		expect(isIssueReply({ found: true, reason: "r" })).toBe(false);
+		expect(isIssueReply(undefined)).toBe(false);
 	});
 });
