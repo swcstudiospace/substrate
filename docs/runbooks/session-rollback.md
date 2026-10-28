@@ -17,7 +17,7 @@
 
 ## What a checkpoint is
 
-`substrate session checkpoint` snapshots the exact file state of the worktree and pins it as `refs/substrate/checkpoints/<ckpt id>` (a parentless commit whose tree is the snapshot). The session id, the sequence number, the trigger, an optional transcript pointer and an optional plan reference travel in the pinned commit's message, so the refs **are** the local checkpoint registry: listing and rolling back work with the server unreachable.
+`substrate session checkpoint` snapshots the exact file state of the worktree and pins it as `refs/substrate/checkpoints/<worktree scope>/<ckpt id>` (a parentless commit whose tree is the snapshot). The scope (`w-` plus 16 hex digits) is derived from the worktree's own git directory, so linked worktrees of one repository each list and roll back only their own checkpoints; checkpoints pinned before scoping (`refs/substrate/checkpoints/<ckpt id>`) stay in place and belong to the main worktree only. The session id, the sequence number, the trigger, an optional transcript pointer and an optional plan reference travel in the pinned commit's message, so the refs **are** the local checkpoint registry: listing and rolling back work with the server unreachable.
 
 **Boundaries — what a checkpoint holds, and what it never does:**
 
@@ -29,7 +29,7 @@
 | | credential-shaped files: `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `*.p12`, `credentials*.json`, `*.keystore` |
 | | nested git repositories (they appear as directories and are not entered) |
 
-A checkpoint lists what it skipped (`skipped <path> (<reason>)`), so a missing file is explained, not silent. A restore neither writes nor deletes an excluded path: the files a checkpoint does not hold are not touched by a rollback either.
+A checkpoint lists what it skipped (`skipped <path> (<reason>)`), so a missing file is explained, not silent. A restore neither writes nor deletes an excluded path: the files a checkpoint does not hold are not touched by a rollback either, including a file that was skipped (for example too large) when the checkpoint was taken and has since changed (the checkpoint records its skipped paths in the pinned commit message, and the plan reports them as `skippedInSnapshot`; a checkpoint pinned before this was recorded has no such list, so a file it never captured and that is now in the worktree is treated as created after it).
 
 **Triggers** (the `--trigger` value): `turn`, `plan-step`, `steering`, `manual` (the default), `pre-restore`, `baseline`. The CLI takes a checkpoint when you run `substrate session checkpoint`. Which hooks, plan steps or steering integrations call it automatically at this release is **UNVERIFIED**: check what your surface's hook configuration actually runs before relying on a checkpoint existing at a boundary you did not take yourself.
 
@@ -195,7 +195,7 @@ substrate session recover
 
 ## The checkpoint refs: do not publish them
 
-A snapshot tree can hold untracked files and gitignored `.planning/` notes. **Never** run `git push --mirror`, `git push --all`, or any refspec that matches `refs/substrate/*` from a repository that holds pins, and do not add `refs/substrate` to a fetch or push refspec. Git does not fetch or push that namespace by default; keep it that way. Pruning old pins is a manual `git update-ref -d refs/substrate/checkpoints/<id>` followed by normal git garbage collection; nothing here deletes a checkpoint for you.
+A snapshot tree can hold untracked files and gitignored `.planning/` notes. **Never** run `git push --mirror`, `git push --all`, or any refspec that matches `refs/substrate/*` from a repository that holds pins, and do not add `refs/substrate` to a fetch or push refspec. Git does not fetch or push that namespace by default; keep it that way. Pruning old pins is a manual `git update-ref -d <ref>` (the ref `substrate session` lists for the checkpoint) followed by normal git garbage collection; nothing here deletes a checkpoint for you.
 
 ## UNVERIFIED and open
 

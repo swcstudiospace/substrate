@@ -8,9 +8,10 @@ import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rm
 import { join, resolve, sep } from "node:path";
 import { SnapshotPolicyError } from "./errors.ts";
 import { isObjectId, isValidId } from "./paths.ts";
+import { parseSkipped } from "./plan.ts";
 import { resolvePolicy } from "./policy.ts";
 import type { RepoContext } from "./runner.ts";
-import type { ResolvedPolicy } from "./types.ts";
+import type { ResolvedPolicy, SkippedPath } from "./types.ts";
 
 export const JOURNAL_FILE = "restore-journal.json";
 
@@ -26,6 +27,10 @@ export type Journal = {
 	safetyRef: string;
 	targetRef: string;
 	policy: ResolvedPolicy;
+	/** What the target snapshot skipped: left alone by the forward restore and by its recovery. Absent in old journals. */
+	targetSkipped: SkippedPath[];
+	/** What the safety snapshot skipped: left alone by the rollback. Absent in old journals. */
+	safetySkipped: SkippedPath[];
 	/** The planned operations (kind and path only), for audit; recovery recomputes from the trees. */
 	operations: { op: string; path: string }[];
 };
@@ -130,5 +135,11 @@ export function readJournal(dir: string): Journal | null {
 			operations.push({ op: operation.op, path: operation.path });
 		}
 	}
-	return { ...(value as Journal), policy, operations };
+	return {
+		...(value as Journal),
+		policy,
+		operations,
+		targetSkipped: parseSkipped(value.targetSkipped),
+		safetySkipped: parseSkipped(value.safetySkipped),
+	};
 }

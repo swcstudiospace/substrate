@@ -163,20 +163,53 @@ export class FakeIndex {
 		return changed;
 	}
 
-	async memoryEntriesCreatedAfter(session: string, afterIso: string, _graph: string | null, limit: number, untilIso: string | null = null): Promise<{ entries: MemoryEntry[]; truncated: boolean }> {
+	/** The writer each selection was asked to keep, in order (null: every writer's). */
+	selectWriters: Array<string | null> = [];
+
+	async memoryEntriesCreatedAfter(
+		session: string,
+		afterIso: string,
+		_graph: string | null,
+		limit: number,
+		untilIso: string | null = null,
+		writer: string | null = null,
+	): Promise<{ entries: MemoryEntry[]; truncated: boolean }> {
 		this.selectLimits.push(limit);
 		this.selectBounds.push([afterIso, untilIso]);
+		this.selectWriters.push(writer);
 		if (this.failSelect !== null) throw new Error(this.failSelect);
 		const after = Date.parse(afterIso);
 		const until = untilIso === null ? Infinity : Date.parse(untilIso);
+		// The writer filter runs before the limit, as the SQL does.
 		const found = this.entries
-			.filter((candidate) => candidate.session_id === session && candidate.superseded_by === undefined && Date.parse(candidate.created) > after && Date.parse(candidate.created) <= until)
+			.filter(
+				(candidate) =>
+					candidate.session_id === session &&
+					(writer === null || candidate.writer === writer) &&
+					candidate.superseded_by === undefined &&
+					Date.parse(candidate.created) > after &&
+					Date.parse(candidate.created) <= until,
+			)
 			.sort((a, b) => Date.parse(a.created) - Date.parse(b.created) || (a.id < b.id ? -1 : 1));
 		return { entries: found.slice(0, limit).map((candidate) => ({ ...candidate })), truncated: found.length > limit };
 	}
 
-	async memoryDocumentShared(): Promise<boolean> {
-		return false;
+	/** Another entry in force, of the same writer, with the same scope, kind and subject. */
+	async memoryDocumentShared(entry: Pick<MemoryEntry, "id" | "scope" | "kind" | "subject" | "writer">): Promise<boolean> {
+		if (entry.subject === undefined || entry.subject.length === 0) return false;
+		return this.entries.some(
+			(candidate) =>
+				candidate.id !== entry.id &&
+				candidate.scope === entry.scope &&
+				candidate.kind === entry.kind &&
+				candidate.subject === entry.subject &&
+				candidate.writer === entry.writer &&
+				candidate.superseded_by === undefined,
+		);
+	}
+
+	async forgottenEntryIds(ids: readonly string[]): Promise<Set<string>> {
+		return new Set(this.entries.filter((candidate) => ids.includes(candidate.id) && isForgetMarker(candidate.superseded_by)).map((candidate) => candidate.id));
 	}
 
 	forgotten(): string[] {

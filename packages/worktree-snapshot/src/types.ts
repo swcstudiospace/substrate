@@ -85,6 +85,12 @@ export type RestorePlan = {
 	drift: RestoreOperation[];
 	/** Paths the policy excludes by name; they are neither written nor deleted. */
 	ignored: IgnoredPath[];
+	/**
+	 * Paths the target snapshot skipped when it was taken (too large, secret, ...) that exist in the
+	 * worktree now. They are absent from the target tree because they were never captured, so a restore
+	 * leaves them exactly as they are (it neither deletes nor overwrites them): `skipped-in-snapshot`.
+	 */
+	skippedInSnapshot: SkippedPath[];
 };
 
 export type RestoreHooks = {

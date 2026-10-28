@@ -50,7 +50,7 @@ import {
 } from "./checkpoint.ts";
 import { CKPT_ID_PATTERN, type FetchLike, type RollbackServerClient, createRollbackServerClient, isUnreachable } from "./client.ts";
 import { OMP_SESSION_MAX_BYTES, OmpForkError, ompTranscriptRef } from "./omp-fork.ts";
-import { PendingJournalError, listPending, replayPending, resolvePendingDir } from "./pending.ts";
+import { PendingJournalError, listPending, replayPending, resolvePendingDir, settleInterruptedRestores } from "./pending.ts";
 import { type RollbackResult, type TranscriptPort, RollbackInputError, rollback } from "./rollback.ts";
 
 export const EXIT_DONE = 0;
@@ -490,7 +490,7 @@ async function commandCheckpoints(
 			const planned = await client.planRollback({ session_id: checkpoint.session_id, target_ckpt_id: checkpoint.ckpt_id });
 			if (planned.ok) {
 				views.set(checkpoint.ckpt_id, { state: "recorded", anchor: planned.value.plan.anchor?.status ?? "unverified" });
-			} else if (planned.error.code === "target-not-found") {
+			} else if (planned.error.code === "not-found" || planned.error.code === "target-not-found") {
 				views.set(checkpoint.ckpt_id, { state: "not-on-server" });
 			} else if (isUnreachable(planned.error)) {
 				reachable = false;
@@ -647,16 +647,20 @@ function renderRollback(out: Output, r: RollbackResult): void {
 async function commandRecover(deps: SessionDeps, out: Output, run: Runner, json: boolean, failure: Failure): Promise<number> {
 	try {
 		const result = await recoverRestore({ worktree: deps.worktree, now: deps.now, run, hooks: deps.hooks });
+		// The commit journalled before the interrupted restore: delivered by `sync` when the restore was finished, dropped when it was not.
+		const dir = deps.pendingDir ?? (await resolvePendingDir(deps.worktree, run));
+		const settled = settleInterruptedRestores(dir, result.recovered ? { id: result.id, direction: result.direction } : null);
 		if (!result.recovered) {
-			if (json) out.json({ ok: true, command: "recover", recovered: false });
-			else out.line("nothing to recover");
+			if (json) out.json({ ok: true, command: "recover", recovered: false, ...(settled.dropped.length > 0 ? { dropped_rollbacks: settled.dropped } : {}) });
+			else out.line(settled.dropped.length > 0 ? `nothing to recover; dropped ${settled.dropped.length} rollback record(s) whose restore never began` : "nothing to recover");
 			return EXIT_DONE;
 		}
 		const files = { added: result.counts.add, modified: result.counts.modify + result.counts.chmod + result.counts.retype, deleted: result.counts.delete };
 		if (json) {
-			out.json({ ok: true, command: "recover", recovered: true, id: result.id, direction: result.direction, files, safety_ref: result.safetyRef });
+			out.json({ ok: true, command: "recover", recovered: true, id: result.id, direction: result.direction, files, safety_ref: result.safetyRef, ...(settled.completed.length > 0 ? { ledger: "pending", sync: "substrate session sync" } : {}) });
 		} else {
 			out.line(`recovered restore ${result.id} (${result.direction === "forward" ? "completed" : "rolled back"}): ${files.added} added, ${files.modified} modified, ${files.deleted} deleted; safety ref ${result.safetyRef}`);
+			if (settled.completed.length > 0) out.line("its rollback is not yet in the ledger; run `substrate session sync` to deliver it");
 		}
 		return EXIT_DONE;
 	} catch (error) {
@@ -667,11 +671,24 @@ async function commandRecover(deps: SessionDeps, out: Output, run: Runner, json:
 
 async function commandSync(deps: SessionDeps, out: Output, run: Runner, json: boolean, clientFor: ClientFor): Promise<number> {
 	const dir = deps.pendingDir ?? (await resolvePendingDir(deps.worktree, run));
+	// A crashed restore leaves its rollback record marked `restoring`, which replay holds back. Finish the restore the way
+	// `recover` does (it takes the worktree lock, so a restore that is genuinely running is left alone and its record stays
+	// marked) so a crash never leaves a rollback undelivered until the operator happens to know to run `recover`.
+	let settleNote: string | null = null;
+	if (listPending(dir).items.some((item) => item.kind === "rollback" && item.restoring === true)) {
+		try {
+			const result = await recoverRestore({ worktree: deps.worktree, now: deps.now, run, hooks: deps.hooks });
+			settleInterruptedRestores(dir, result.recovered ? { id: result.id, direction: result.direction } : null);
+		} catch (error) {
+			settleNote = `an interrupted restore could not be settled before syncing: ${error instanceof Error ? error.message : String(error)}`;
+		}
+	}
 	const outcome = await replayPending({ dir, clientFor: (surface) => clientFor(surface, Math.max(deps.timeoutMs, ROLLBACK_MIN_TIMEOUT_MS)) });
 	const clean = outcome.failed.length === 0 && outcome.skipped === 0 && outcome.corrupt.length === 0 && outcome.remaining === 0;
 	if (json) {
-		out.json({ ok: clean, command: "sync", ...outcome });
+		out.json({ ok: clean, command: "sync", ...outcome, ...(settleNote === null ? {} : { note: settleNote }) });
 	} else {
+		if (settleNote !== null) out.line(settleNote);
 		if (outcome.delivered.length + outcome.failed.length + outcome.skipped + outcome.corrupt.length === 0) out.line("nothing pending");
 		for (const item of outcome.delivered) out.line(`delivered ${item.kind} ${item.id} (event ${item.event_id})`);
 		for (const item of outcome.failed) out.line(`not delivered ${item.kind} ${item.id}: ${item.code}: ${item.message}`);

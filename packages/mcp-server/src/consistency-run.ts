@@ -2,7 +2,7 @@
 /**
  * The `consistency verify` runner (v1.6, phase 57, unit d; `ledger-run.ts` and `index-sweep-run.ts` precedent).
  *
- *   bun packages/mcp-server/src/consistency-run.ts [--json] [--bank BANK] [--limit N] [--since ISO] [--repair [--repair-orphans]]
+ *   bun packages/mcp-server/src/consistency-run.ts [--json] [--bank BANK] [--limit N] [--since ISO] [--repair --server-stopped [--repair-orphans]]
  *
  * It compares the TimescaleDB memory index, the Hindsight documents and the ledger's memory-write events
  * (`consistency-verify.ts`) and prints the drift. It lives in this package because it is a store client: the
@@ -15,6 +15,14 @@
  * adds the deletion of a plane document nothing in force owns. Every action re-reads the world first and acts
  * only if the finding still holds. The index and the ledger are NEVER written: the retain path's own warnings are
  * captured here, not emitted.
+ *
+ * Every repair writes to the plane from this separate process, outside the server's per-document retain queue, so it cannot
+ * be made safe against a live server (a forget can delete a document while a repair's retain is in flight and the retain
+ * then recreates the forgotten text; a replacement entry saved after the shared-document read shares the document id of the
+ * one the repair then deletes). `--repair` therefore requires `--server-stopped`, the operator's assertion that substrate-mcp
+ * and every other writer are stopped: without it the run refuses with a usage error (exit 2) before it sends anything.
+ * Verification alone is read-only and needs no flag. As defence in depth each repair also re-reads the entry, the
+ * shared-document answer and the document right before its write and skips with a named reason if anything changed.
  *
  * Exit codes: 0 consistent, 1 drift found, 2 usage or a refusal (a bad flag, an unset store), 3 a store was
  * unreachable or a check could not run, so `ok` cannot be claimed (it wins over 1: the JSON still lists the drift
@@ -60,23 +68,25 @@ import {
 	bankForSurface,
 	deleteDocument,
 	getDocument,
+	hindsightBanksFromEnv,
 	hindsightFromEnv,
 	type FetchLike,
 	type HindsightConfig,
 } from "./planes/hindsight.ts";
-import type { MemoryEntry } from "./types.ts";
+import { SURFACES, type MemoryEntry } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Argument grammar
 // ---------------------------------------------------------------------------
 
 export const CONSISTENCY_USAGE =
-	"usage: consistency-run.ts [--json] [--bank BANK] [--limit N] [--since ISO] [--repair [--repair-orphans]]\n" +
+	"usage: consistency-run.ts [--json] [--bank BANK] [--limit N] [--since ISO] [--repair --server-stopped [--repair-orphans]]\n" +
 	"  --json            print the report as JSON (default: a short summary)\n" +
 	"  --bank BANK       one bank only (a name under the configured bank prefix)\n" +
 	`  --limit N         examine at most N entries, newest first (1..${MAX_ENTRIES_CEILING}, default 5000)\n` +
 	"  --since ISO       only entries created at or after this instant, e.g. 2026-10-01T00:00:00Z\n" +
 	"  --repair          carry out the safe repairs: re-retain a missing document, delete a forgotten entry's document\n" +
+	"  --server-stopped  required by --repair: you assert substrate-mcp and every writer are stopped (a repair cannot join the server's write queue)\n" +
 	"  --repair-orphans  with --repair: also delete plane documents nothing in force owns\n" +
 	"exit: 0 consistent, 1 drift found, 2 usage, 3 a store was unreachable (ok cannot be claimed)\n";
 
@@ -94,16 +104,18 @@ export interface ConsistencyArgs {
 	since: string | null;
 	repair: boolean;
 	repairOrphans: boolean;
+	/** The operator's assertion that the server and every other writer are stopped; `--repair` needs it. */
+	serverStopped: boolean;
 }
 
-const BOOLEAN_FLAGS = ["json", "repair", "repair-orphans"] as const;
+const BOOLEAN_FLAGS = ["json", "repair", "repair-orphans", "server-stopped"] as const;
 const VALUE_FLAGS = ["bank", "limit", "since"] as const;
 const BANK_NAME = /^[A-Za-z0-9._-]{1,128}$/;
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 /**
- * Strict: only the six flags, each at most once, a value flag always followed by its value (`--bank B`, never
- * `--bank=B`), no positional argument. `--repair-orphans` without `--repair` is refused rather than ignored.
+ * Strict: only the seven flags, each at most once, a value flag always followed by its value (`--bank B`, never
+ * `--bank=B`), no positional argument. `--repair-orphans` without `--repair` is refused rather than ignored, and so is `--repair` without `--server-stopped`.
  */
 export function parseConsistencyArgs(argv: readonly string[]): ConsistencyArgs {
 	const booleans = new Set<string>();
@@ -154,7 +166,14 @@ export function parseConsistencyArgs(argv: readonly string[]): ConsistencyArgs {
 	const repair = booleans.has("repair");
 	const repairOrphans = booleans.has("repair-orphans");
 	if (repairOrphans && !repair) throw new ConsistencyUsageError("--repair-orphans only applies together with --repair");
-	return { json: booleans.has("json"), bank, limit, since, repair, repairOrphans };
+	const serverStopped = booleans.has("server-stopped");
+	if (serverStopped && !repair) throw new ConsistencyUsageError("--server-stopped only applies together with --repair");
+	if (repair && !serverStopped) {
+		throw new ConsistencyUsageError(
+			"--repair writes to the plane from outside the server's write queue, so a retain or forget in flight could revive a forgotten document or delete a replacement: stop substrate-mcp and every writer, then add --server-stopped",
+		);
+	}
+	return { json: booleans.has("json"), bank, limit, since, repair, repairOrphans, serverStopped };
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +273,54 @@ async function evaluate(ports: RepairPorts, step: Extract<RepairStep, { op: "req
 	}
 }
 
+/**
+ * The check after a repair's retain. This runner is its own process, outside the server's per-document write queue, so a
+ * forget can mark the entry and delete its document while the retain's POST is in flight, and the POST then lands after the
+ * delete and brings the forgotten text back. The entry is read again once the retain has landed: one forgotten meanwhile has
+ * the copy this repair just wrote removed, unless a live entry of the same writer shares the document. The forget's mark
+ * always precedes its own delete, so a forget that lands after this read deletes the copy itself.
+ */
+async function afterRetain(ports: RepairPorts, entry: MemoryEntry, step: Extract<RepairStep, { op: "retain_document" }>): Promise<Pick<RepairOutcome, "outcome" | "reason">> {
+	try {
+		const current = await ports.readEntry(entry.id);
+		if (current === null || !isForgetMarker(current.superseded_by)) return { outcome: "repaired" };
+		if (await ports.documentShared(current)) {
+			return { outcome: "skipped", reason: "the entry was forgotten while the repair ran; a live entry shares the document, which was left in place" };
+		}
+		await ports.deleteDocument(step.bank, step.document_id);
+		return { outcome: "skipped", reason: "the entry was forgotten while the repair ran; the document the repair re-created was removed" };
+	} catch (cause) {
+		return {
+			outcome: "failed",
+			reason: scrubReason(`the document was re-retained but the entry could not be confirmed current, or its stale copy removed: ${cause instanceof Error ? cause.message : String(cause)}`),
+		};
+	}
+}
+
+/** What of an entry row decides whether a repair still applies: the state it is in, and the content a retain would send. */
+const rowOf = (entry: MemoryEntry | null | undefined): string =>
+	entry === undefined || entry === null ? "absent" : JSON.stringify([entry.id, entry.superseded_by ?? null, entry.version, entry.entry_hash, entry.scope, entry.kind, entry.subject ?? null, entry.writer]);
+
+/**
+ * The last look before a plane write (defence in depth: the operator guard `--server-stopped` is what makes a repair safe).
+ * Everything the action read and required is read and required again, immediately before the write, and the entry row must
+ * be the one the action started from. Anything else is a skip with the reason named, so a row that changed between the
+ * plan and the apply is never acted on.
+ */
+async function changedBeforeWrite(ports: RepairPorts, action: RepairAction, first: MemoryEntry | null | undefined): Promise<Pick<RepairOutcome, "outcome" | "reason"> | null> {
+	let entry: MemoryEntry | null | undefined;
+	for (const step of action.steps) {
+		if (step.op === "read_entry") {
+			entry = await ports.readEntry(step.entry_id);
+			if (rowOf(entry) !== rowOf(first)) return { outcome: "skipped", reason: "the entry row changed between the plan and the write; nothing was sent" };
+		} else if (step.op === "require") {
+			const verdict = await evaluate(ports, step, entry);
+			if (verdict !== "pass") return { outcome: verdict.outcome, reason: `re-read before the write: ${verdict.reason}` };
+		}
+	}
+	return null;
+}
+
 async function runAction(ports: RepairPorts, action: RepairAction): Promise<Pick<RepairOutcome, "outcome" | "reason">> {
 	const problem = wellFormed(action);
 	if (problem !== null) return { outcome: "failed", reason: `plan refused: ${problem}` };
@@ -270,13 +337,17 @@ async function runAction(ports: RepairPorts, action: RepairAction): Promise<Pick
 			}
 			case "retain_document": {
 				if (entry === undefined || entry === null) return { outcome: "skipped", reason: "the entry is gone" };
+				const changed = await changedBeforeWrite(ports, action, entry);
+				if (changed !== null) return changed;
 				const retained = await ports.retain(entry, step.bank, step.document_id);
-				if (retained.forwarded) return { outcome: "repaired" };
+				if (retained.forwarded) return afterRetain(ports, entry, step);
 				const reason = scrubReason(retained.reason ?? "the retain did not forward");
 				// A refusal by the retain gate (expired, unsourced, unredacted, guest) is the gate's verdict, not a repair that broke.
 				return /^(retain\.|vm-guest|hindsight is not configured)/.test(reason) ? { outcome: "skipped", reason } : { outcome: "failed", reason };
 			}
 			case "delete_document": {
+				const changed = await changedBeforeWrite(ports, action, entry);
+				if (changed !== null) return changed;
 				const deleted = await ports.deleteDocument(step.bank, step.document_id);
 				return deleted === "deleted" ? { outcome: "repaired" } : { outcome: "already_consistent", reason: "the document was already gone" };
 			}
@@ -320,6 +391,8 @@ export interface RunnerContext {
 	bankFor: (writer: string) => string;
 	/** The configured bank prefix: `--bank` must name a bank under it (a `pd-*` desk bank is never touched). */
 	bankPrefix: string;
+	/** Every bank the server is configured to write or recall into: each one is examined, with or without index rows. */
+	banks: readonly string[];
 	repair: RepairPorts;
 	close(): Promise<void>;
 }
@@ -384,6 +457,7 @@ export async function runConsistency(argv: readonly string[], deps: RunnerDeps):
 			report = await verifyConsistency(context.readers, {
 				now: deps.now,
 				bankFor: context.bankFor,
+				configuredBanks: context.banks,
 				...(args.bank !== null ? { bank: args.bank } : {}),
 				...(args.since !== null ? { since: args.since } : {}),
 				...(args.limit !== null ? { maxEntries: args.limit } : {}),
@@ -414,7 +488,7 @@ export async function runConsistency(argv: readonly string[], deps: RunnerDeps):
 			else if (repairNote !== null) stdout += `  ${repairNote}\n`;
 			else if (plan.actions.length > 0) {
 				const orphan = plan.actions.filter((a) => a.class === "orphan").length;
-				stdout += `  repairs available: ${plan.actions.length - orphan} safe, ${orphan} orphan (re-run with --repair${orphan > 0 ? " [--repair-orphans]" : ""})\n`;
+				stdout += `  repairs available: ${plan.actions.length - orphan} safe, ${orphan} orphan (stop the server, then re-run with --repair --server-stopped${orphan > 0 ? " [--repair-orphans]" : ""})\n`;
 			}
 		}
 		return { code: exitCodeOf(report), stdout, stderr: repairNote !== null && args.json ? `${repairNote}\n` : "" };
@@ -578,6 +652,15 @@ function readTextOrNull(path: string): string | null {
 	}
 }
 
+/**
+ * Every bank the server is configured with: the writer bank of each known surface (`bankForSurface`) and the
+ * explicit recall set (`HINDSIGHT_BANKS`, already limited to the bank prefix). Sorted and de-duplicated. The
+ * verifier examines all of them, so a bank whose index rows were swept still has its documents checked.
+ */
+export function configuredBanks(plane: HindsightConfig, env: Record<string, string | undefined>): string[] {
+	return [...new Set([...SURFACES.map((surface) => bankForSurface(plane, surface)), ...(hindsightBanksFromEnv(env) ?? [])])].sort();
+}
+
 /** Open the real stores from the server's environment. Credentials are read here and only here. */
 export async function openRealContext(): Promise<RunnerContext | { refused: string }> {
 	const config = loadConfig();
@@ -623,6 +706,7 @@ export async function openRealContext(): Promise<RunnerContext | { refused: stri
 		},
 		bankFor: (writer) => bankForSurface(plane, writer),
 		bankPrefix: plane.bankPrefix,
+		banks: configuredBanks(plane, process.env),
 		repair: {
 			readEntry: (id) => index.readEntry(id),
 			documentShared: (entry) => index.memoryDocumentShared(entry),

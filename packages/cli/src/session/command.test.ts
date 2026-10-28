@@ -329,6 +329,19 @@ describe("session checkpoints", () => {
 		expect(body.checkpoints.map((c) => c.ledger.state).sort()).toEqual(["unreachable", "unreachable", "unreachable"]);
 	});
 
+	test("a local checkpoint the server does not hold is `not-on-server` under the code the real server answers, `not-found`", async () => {
+		for (const code of ["not-found", "target-not-found"]) {
+			const r = rig();
+			r.server.notFoundCode = code;
+			await session(r, "checkpoint", "--session", SESSION);
+			r.server.checkpoints.clear();
+			r.out.length = 0;
+			expect(await session(r, "checkpoints", "--json")).toBe(EXIT_DONE);
+			const body = json(r) as { checkpoints: Array<{ ledger: { state: string } }> };
+			expect(body.checkpoints.map((c) => c.ledger.state)).toEqual(["not-on-server"]);
+		}
+	});
+
 	test("--offline never asks the server", async () => {
 		const r = rig();
 		await session(r, "checkpoint", "--session", SESSION);
@@ -474,6 +487,37 @@ describe("recover", () => {
 		expect(json(crashing)).toMatchObject({ ok: true, command: "recover", recovered: true, direction: "forward" });
 		expect(existsSync(join(crashing.dir, ".git", "substrate-restore", "restore-journal.json"))).toBe(false);
 		expect(await runSession(["recover"], recovered)).toBe(EXIT_DONE);
+		// The rollback journalled before the crash is delivered by sync once recover has finished the restore.
+		expect(crashing.server.deliveries.commit).toBe(0);
+		expect(await runSession(["sync"], recovered)).toBe(EXIT_DONE);
+		expect(crashing.server.deliveries.commit).toBe(1);
+	});
+
+	test("sync alone finishes a crashed restore and delivers its journalled rollback once, without `recover`", async () => {
+		const crashing = rig({
+			hooks: {
+				beforeOp: (index) => {
+					if (index === 3) throw new SimulatedCrash("process died");
+				},
+			},
+		});
+		await session(crashing, "checkpoint", "--session", SESSION);
+		mutateToB(crashing.dir);
+		await session(crashing, "checkpoint", "--session", SESSION);
+		const [first] = [...crashing.server.checkpoints.values()].sort((a, b) => a.seq - b.seq);
+		expect(await session(crashing, "rollback", first?.ckpt_id ?? "")).toBe(EXIT_FAILED);
+		expect(existsSync(join(crashing.dir, ".git", "substrate-restore", "restore-journal.json"))).toBe(true);
+		expect(crashing.server.deliveries.commit).toBe(0);
+
+		// A new process that runs only `sync`: the restore is completed and the commit is delivered, not held back as restore-in-progress.
+		const restarted = { ...crashing.deps, hooks: undefined };
+		crashing.out.length = 0;
+		expect(await runSession(["sync", "--json"], restarted)).toBe(EXIT_DONE);
+		expect(json(crashing)).toMatchObject({ ok: true, command: "sync", remaining: 0, failed: [] });
+		expect(existsSync(join(crashing.dir, ".git", "substrate-restore", "restore-journal.json"))).toBe(false);
+		expect(crashing.server.deliveries.commit).toBe(1);
+		expect(await runSession(["sync"], restarted)).toBe(EXIT_DONE);
+		expect(crashing.server.deliveries.commit).toBe(1);
 	});
 });
 

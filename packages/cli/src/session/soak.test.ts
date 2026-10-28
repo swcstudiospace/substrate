@@ -228,6 +228,12 @@ async function runCliSoak(tracker: HandleTracker): Promise<void> {
 	expect(existsSync(restoreJournal)).toBe(false);
 	expect(existsSync(restoreLock)).toBe(false);
 	await expectConsistent("after recover");
+	// The commit journalled before the crash is the crashed rollback's own: `recover` finished the restore, `sync` delivers it once.
+	expect(pendingItems().map((item) => item.kind)).toEqual(["rollback"]);
+	const beforeSync = server.deliveries.commit;
+	expect(await runSession(["sync"], sessionDeps())).toBe(EXIT_DONE);
+	expect(server.deliveries.commit).toBe(beforeSync + 1);
+	expect(pendingItems()).toEqual([]);
 
 	// -- a restore that dies before its first file: the worktree is exactly as it was, and the next rollback recovers and commits -------
 	nowMs += STEP;
@@ -249,6 +255,11 @@ async function runCliSoak(tracker: HandleTracker): Promise<void> {
 	expect(existsSync(restoreJournal)).toBe(false);
 	expect(server.deliveries.commit).toBe(commitsBefore + 1);
 	await expectConsistent("after the resumed rollback");
+	// The rollback the first run journalled before it died was settled forward by this run's recovery and waits for `sync`, delivered once.
+	expect(pendingItems().map((item) => item.kind)).toEqual(["rollback"]);
+	expect(resumed.warnings.some((warning) => warning.includes("substrate session sync"))).toBe(true);
+	expect(await runSession(["sync"], sessionDeps())).toBe(EXIT_DONE);
+	expect(server.deliveries.commit).toBe(commitsBefore + 2);
 
 	// -- the registry at the end ---------------------------------------------------------------------------------------
 	const mine = await registry();

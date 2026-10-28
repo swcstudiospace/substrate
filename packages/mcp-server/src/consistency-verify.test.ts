@@ -191,7 +191,13 @@ describe("a clean run", () => {
 		expect(report.counts.banks_examined).toBe(2);
 		expect(report.counts.hash_checked).toBe(3);
 		expect(report.counts.ledger_pairs).toBe(3);
-		expect(report.coverage).toEqual({ outbox: "known", plane_listing: "complete", ledger: "compared", skipped_checks: [] });
+		expect(report.coverage).toEqual({
+			outbox: "known",
+			plane_listing: "complete",
+			ledger: "compared",
+			banks: { configured: [], examined: ["sub-claude-code", "sub-hermes"], skipped: [], listing_truncated: [] },
+			skipped_checks: [],
+		});
 		expect(Object.values(report.counts.findings_by_code).every((n) => n === 0)).toBe(true);
 		expect(Object.keys(report.counts.findings_by_code).sort()).toEqual([...FINDING_CODES].sort());
 	});
@@ -800,5 +806,87 @@ describe("paging that does not move", () => {
 		const report = await run(w);
 		expect(report.stores.index.state).toBe("store_unreachable");
 		expect(report.stores.index.reason).toContain("empty page");
+	});
+});
+
+describe("configured banks with no index row", () => {
+	const configured = ["sub-hermes", "sub-swept"];
+
+	test("a configured bank holding only orphan documents is reported as orphans; without the list it was never looked at", async () => {
+		const w = world([entry("mem_a")]);
+		putDoc(w, "sub-swept", "stray-one", "mem_gone");
+		putDoc(w, "sub-swept", "stray-two", null);
+		expect((await run(w)).ok).toBe(true);
+		const report = await run(w, { configuredBanks: configured });
+		expect(codes(report)).toEqual(["plane_document_orphan", "plane_document_orphan"]);
+		expect(report.findings.map((finding) => [finding.bank, finding.document_id])).toEqual([
+			["sub-swept", "stray-one"],
+			["sub-swept", "stray-two"],
+		]);
+		expect(report.ok).toBe(false);
+		expect(report.counts.banks_examined).toBe(2);
+		expect(report.coverage.banks).toEqual({ configured, examined: configured, skipped: [], listing_truncated: [] });
+	});
+
+	test("an empty index with configured banks still lists every bank: the plane listing is complete, not not_checked", async () => {
+		const w = world([]);
+		putDoc(w, "sub-swept", "stray-one", "mem_gone");
+		const report = await run(w, { configuredBanks: configured });
+		expect(w.calls.lists).toBe(2);
+		expect(report.coverage.plane_listing).toBe("complete");
+		expect(codes(report)).toEqual(["plane_document_orphan"]);
+	});
+
+	test("a configured bank that cannot be read is skipped with a reason, the other banks are still read, and the verdict is not clean", async () => {
+		const w = world([entry("mem_a")]);
+		const list = w.readers.plane.listDocuments?.bind(w.readers.plane);
+		w.readers.plane.listDocuments = async (bank, request) => {
+			if (bank === "sub-swept") throw new Error("hindsight unreachable at https://hs.internal:8888/v1");
+			return (list as NonNullable<typeof list>)(bank, request);
+		};
+		const report = await run(w, { configuredBanks: configured });
+		expect(report.stores.plane).toEqual({ state: "ok" });
+		expect(report.findings).toEqual([]);
+		expect(report.ok).toBe(false);
+		expect(report.coverage.plane_listing).toBe("partial");
+		expect(report.coverage.banks.examined).toEqual(["sub-hermes"]);
+		expect(report.coverage.banks.skipped).toEqual([{ bank: "sub-swept", reason: "listing failed: hindsight unreachable at <url>" }]);
+		expect(report.coverage.skipped_checks).toEqual(["plane_bank_skipped:sub-swept:listing failed: hindsight unreachable at <url>"]);
+		expect(report.counts.banks_examined).toBe(1);
+		expect(JSON.stringify(report)).not.toContain("hs.internal");
+		expect(formatReportText(report)).toContain("INCOMPLETE");
+	});
+
+	test("a plane with no document listing skips every configured bank and says so once", async () => {
+		const w = world([], { listing: false });
+		const report = await run(w, { configuredBanks: configured });
+		expect(report.coverage.plane_listing).toBe("unavailable");
+		expect(report.coverage.banks.examined).toEqual([]);
+		expect(report.coverage.banks.skipped.map((skipped) => skipped.bank)).toEqual(configured);
+		expect(report.coverage.skipped_checks).toEqual(["duplicate_document:plane_listing_unavailable", "plane_document_orphan:plane_listing_unavailable"]);
+		expect(report.ok).toBe(false);
+	});
+
+	test("a document cap that cuts a configured bank's listing is reported per bank", async () => {
+		const w = world([]);
+		putDoc(w, "sub-swept", "stray-one", "mem_gone");
+		putDoc(w, "sub-swept", "stray-two", "mem_gone");
+		const report = await run(w, { configuredBanks: ["sub-swept"], maxDocuments: 1 });
+		expect(report.truncated).toBe(true);
+		expect(report.coverage.banks.listing_truncated).toEqual(["sub-swept"]);
+		expect(formatReportText(report)).toContain("document listing cut short for 1 bank(s): sub-swept");
+	});
+
+	test("a bank filter restricts the run to that bank whatever is configured", async () => {
+		const w = world([]);
+		putDoc(w, "sub-swept", "stray-one", "mem_gone");
+		const report = await run(w, { bank: "sub-hermes", configuredBanks: configured });
+		expect(w.calls.lists).toBe(1);
+		expect(report.findings).toEqual([]);
+		expect(report.coverage.banks.examined).toEqual(["sub-hermes"]);
+	});
+
+	test("a configured bank name must not be empty", async () => {
+		await expect(run(world([]), { configuredBanks: [""] })).rejects.toBeInstanceOf(ConsistencyOptionError);
 	});
 });

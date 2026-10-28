@@ -22,7 +22,7 @@
  *   substrate spool status|flush             the collector event spool (docs/collectors.md, "Event spool")
  *   substrate session checkpoint|checkpoints|rollback|recover|sync   session checkpoints and rollback
  *       (exit 0 done, 1 failed, 2 usage, 3 refused, 4 files restored but the ledger commit is pending)
- *   substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair [--repair-orphans]]
+ *   substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair --server-stopped [--repair-orphans]]
  *       the memory consistency verifier: the index, the plane and the ledger compared
  *       (exit 0 consistent, 1 drift, 2 usage, 3 a store could not be read; docs/runbooks/consistency-verify.md)
  *   substrate memory capsule export|verify|redact ...   memory capsules (docs/runbooks/memory-capsules.md)
@@ -710,7 +710,7 @@ switch (command) {
 				"substrate index archive [--out DIR] [--page-size N] | verify-archive <dir> | restore --scratch URL <dir>\n" +
 				"substrate ledger coverage [--json] | archive [--until D] [--out DIR] [--page-size N] | verify-archive <dir> [--day D]\n" +
 				"substrate session checkpoint | checkpoints | rollback <ckpt|seq|previous> | recover | sync   (substrate session for the flags)\n" +
-				"substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair [--repair-orphans]]   (exit 0 consistent, 1 drift, 2 usage, 3 unreadable store)\n" +
+				"substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair --server-stopped [--repair-orphans]]   (exit 0 consistent, 1 drift, 2 usage, 3 unreadable store)\n" +
 				"substrate memory capsule export --out FILE [--session S] [--repo R] [--since ISO] [--limit N] [--store DIR]\n" +
 				"                         | verify FILE [--anchors] | redact FILE --ids a,b --reason TEXT --out FILE2   (substrate memory capsule for the flags)\n" +
 				"substrate spool status [--json] | flush [--json] [--budget-ms N]   (the event spool needs SUBSTRATE_EVENT_SPOOL=on)\n",

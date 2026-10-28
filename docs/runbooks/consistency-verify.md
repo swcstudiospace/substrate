@@ -36,7 +36,7 @@ bun --env-file=/etc/substrate/substrate.env packages/mcp-server/src/consistency-
 Grammar (strict: each flag at most once, a value flag takes its value as the **next** argument, never `--bank=B`, no positional argument):
 
 ```
-consistency-run.ts [--json] [--bank BANK] [--limit N] [--since ISO] [--repair [--repair-orphans]]
+consistency-run.ts [--json] [--bank BANK] [--limit N] [--since ISO] [--repair --server-stopped [--repair-orphans]]
 ```
 
 | Flag | Meaning |
@@ -45,7 +45,8 @@ consistency-run.ts [--json] [--bank BANK] [--limit N] [--since ISO] [--repair [-
 | `--bank BANK` | one bank only. It must start with the configured bank prefix (`HINDSIGHT_BANK_PREFIX`); a desk bank (`pd-*`) is refused and never touched |
 | `--limit N` | examine at most N entries, newest first, 1 to 50 000 (default 5 000) |
 | `--since ISO` | only entries created at or after this instant, with a time and a zone (`2026-10-01T00:00:00Z`) |
-| `--repair` | carry out the safe repairs (below). **OPERATOR ONLY** |
+| `--repair` | carry out the safe repairs (below). **OPERATOR ONLY.** Refused (exit 2, nothing sent) without `--server-stopped` |
+| `--server-stopped` | only together with `--repair`: your assertion that `substrate-mcp` and every other writer are stopped (see "The server must be stopped") |
 | `--repair-orphans` | only together with `--repair`: also delete plane documents nothing in force owns. **OPERATOR ONLY** |
 
 **Environment, names only (none is new):** `SUBSTRATE_PG_URL` (the index), `GREPTIME_URL` with `GREPTIME_USER`, `GREPTIME_PASSWORD`, `GREPTIME_DB` (the ledger), `HINDSIGHT_URL`, `HINDSIGHT_API_KEY`, `HINDSIGHT_BANK_PREFIX` (the plane), `SUBSTRATE_RETAIN_OUTBOX_PATH` (read-only, to tell a parked retain from a missing one) and `HINDSIGHT_RETAIN_TIMEOUT_MS`. An unset store is refused with exit 2 and names the variable (`SUBSTRATE_PG_URL is not set`, `GREPTIME_URL is not set`, `HINDSIGHT_URL and HINDSIGHT_API_KEY must both be set`) before any connection. The runner never prints a URL, a token or entry content.
@@ -77,6 +78,7 @@ The verdict is one of `CLEAN` (no findings, every store read, no skipped check),
 | `coverage.plane_listing` | `complete`, `partial`, `unavailable` (the plane has no usable listing route) or `not_checked` |
 | `coverage.outbox` | `known` (the parked set was read) or `unknown` (see the limits) |
 | `coverage.ledger` | `compared`, `partial` or `not_checked` |
+| `coverage.banks` | per-bank plane coverage: `configured` (every bank the server is configured with: each surface's writer bank plus `HINDSIGHT_BANKS`; all of them are listed, whether or not the index has a row for them, so a bank whose rows were swept still has its orphan documents found), `examined` (documents listed and compared), `skipped` (`{bank, reason}`: the listing did not run; each one makes `ok` false) and `listing_truncated` (the `max_documents` bound cut the listing short) |
 | `coverage.skipped_checks` | checks that could not run, as `<check>:<reason>`; any entry makes `ok` false |
 | `counts` | exact counts: entries examined, current, superseded, forgotten, expected in the plane, parked retains, hash checked and unchecked, shared documents, ledger pairs, `findings_total`, `findings_by_code` |
 | `findings[]` | sorted, at most 500: `code`, `id`, `stores`, `bank`, `document_id`, `entry_id` or `event_id`, `detail` |
@@ -114,10 +116,21 @@ A repair does not change the exit code. **Re-run the verifier to confirm.** Exit
 Only two kinds of change exist, both **plane writes**: re-retain one document, or delete one document. There is no index write and no ledger write in the executor to call. `--repair` runs only when both the index and the plane were read (otherwise `repair skipped: the index and the plane must both have been read`). For each action it **re-reads the world first** and acts only if the finding still holds: `already_consistent` if someone fixed it, `skipped` if the entry or document changed in a way that makes the action unsafe, `failed` if a port threw (the reason redacted, URLs stripped). An action that is not exactly the shape the planner produces is refused (`plan refused`).
 
 - `--repair` runs the **safe** class: `re_retain` and `delete_forgotten_document`.
-- `--repair-orphans` (never alone) adds the **orphan** class: `delete_orphan_document`, for `plane_document_orphan` with an entry id and `duplicate_document`. Without it those actions are reported `skipped: orphan deletion needs --repair-orphans`.
+- `--repair-orphans` (never alone; with `--repair --server-stopped`) adds the **orphan** class: `delete_orphan_document`, for `plane_document_orphan` with an entry id and `duplicate_document`. Without it those actions are reported `skipped: orphan deletion needs --repair-orphans`.
 - **A repair leaves no ledger trace.** The retain path's own warnings are captured and returned in the outcome, not emitted: write what you ran and its outcome in your incident notes.
 - A plan is `complete: false` when the findings list was cut (more than 500) or a store was unreachable; repair what is listed, then re-run.
-- Run it in this order: summary; `--json` saved; read the findings; `--repair`; re-run; only then `--repair --repair-orphans` if orphans remain and you have looked at them.
+- Run it in this order: summary; `--json` saved; read the findings; stop the server; `--repair --server-stopped`; re-run; only then `--repair --server-stopped --repair-orphans` if orphans remain and you have looked at them.
+
+### The server must be stopped (`--server-stopped`)
+
+Every repair writes to the plane from this separate process, which cannot join the server's in-process per-document retain queue. Against a live server that is unsafe in two ways, both found in review:
+
+- **A repair can revive forgotten memory.** A rollback marks an entry forgotten and deletes its document; a repair's re-retain POST that was already in flight can finish after that delete and recreate the forgotten text.
+- **A repair can delete replacement memory.** After the shared-document read says no live entry owns the document, a new entry with the same writer, scope, kind and subject can be saved and retained before the repair's DELETE reaches the plane. Both use the same document id, so the delete removes the new memory.
+
+No read-then-write check closes either window, and a distributed lock is not worth building for a rare operator repair, so the rule is a guard: **`--repair` (and `--repair-orphans`) refuses to run unless you pass `--server-stopped`**, your statement that `substrate-mcp` and every other writer (agent surfaces, the retain outbox drain, a second operator) are stopped for the duration. Without it the runner exits 2 with the reason before it opens a store or sends a request. The read-only verification path needs no flag and is unchanged.
+
+As defence in depth, right before each plane write the runner reads the entry, the shared-document answer and the document again and skips the action, naming why (`the entry row changed between the plan and the write`, `re-read before the write: a live entry shares the document`), if the row is no longer the one the plan saw. That narrows the window; it does not replace stopping the server.
 
 ## Limits, stated plainly
 

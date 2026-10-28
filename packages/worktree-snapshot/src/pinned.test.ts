@@ -1,11 +1,12 @@
 /**
  * pinSnapshot's metadata trailer and listPinned() against real git repositories.
  */
+import { join } from "node:path";
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { SnapshotPolicyError } from "./errors.ts";
 import { MAX_METADATA_BYTES, METADATA_TRAILER } from "./pin.ts";
-import { listPinned, pinSnapshot, snapshot } from "./snapshot.ts";
-import { cleanupTemp, FIXED_NOW, git, makeRepo, writeFiles } from "./testkit.ts";
+import { listPinned, pinSnapshot, readPinnedSnapshot, snapshot } from "./snapshot.ts";
+import { cleanupTemp, FIXED_NOW, git, makeRepo, tempDir, writeFiles } from "./testkit.ts";
 import type { Snapshot } from "./types.ts";
 
 afterAll(cleanupTemp);
@@ -28,7 +29,7 @@ describe("pinSnapshot metadata", () => {
 		expect(listed).toEqual([
 			{
 				id: ID_A,
-				ref: `refs/substrate/checkpoints/${ID_A}`,
+				ref: pin.ref,
 				commit: pin.commit,
 				tree: snap.tree,
 				createdAt: "2026-01-01T00:00:00.000Z",
@@ -142,5 +143,71 @@ describe("listPinned", () => {
 	test("an empty repository lists nothing", async () => {
 		const dir = makeRepo();
 		expect(await listPinned({ worktree: dir })).toEqual([]);
+	});
+});
+
+describe("checkpoints of linked worktrees", () => {
+	/** The main worktree and two linked worktrees of one repository, each holding its own file. */
+	function worktrees(): { main: string; one: string; two: string } {
+		const main = makeRepo();
+		const base = tempDir();
+		const one = join(base, "one");
+		const two = join(base, "two");
+		git(main, ["worktree", "add", "-q", "-b", "wt-one", one]);
+		git(main, ["worktree", "add", "-q", "-b", "wt-two", two]);
+		writeFiles(main, { "a.txt": "main\n" });
+		writeFiles(one, { "a.txt": "one\n" });
+		writeFiles(two, { "a.txt": "two\n" });
+		return { main, one, two };
+	}
+
+	async function pinIn(dir: string, id: string): Promise<string> {
+		const snap = await snapshot({ worktree: dir, now: FIXED_NOW });
+		return (await pinSnapshot({ worktree: dir, snapshot: snap, id, now: FIXED_NOW })).ref;
+	}
+
+	test("each worktree lists only its own checkpoints", async () => {
+		const { main, one, two } = worktrees();
+		await pinIn(main, ID_A);
+		await pinIn(one, ID_B);
+		// The same id in two worktrees is two distinct checkpoints, not a collision.
+		await pinIn(two, ID_B);
+		const ids = async (dir: string): Promise<string[]> => (await listPinned({ worktree: dir })).map((entry) => entry.id);
+		expect(await ids(main)).toEqual([ID_A]);
+		expect(await ids(one)).toEqual([ID_B]);
+		expect(await ids(two)).toEqual([ID_B]);
+		const oneRef = (await listPinned({ worktree: one }))[0]?.ref;
+		const twoRef = (await listPinned({ worktree: two }))[0]?.ref;
+		expect(oneRef).not.toBe(twoRef);
+	});
+
+	test("the scope is stable across calls: a re-pin is idempotent and lists once", async () => {
+		const { main, one } = worktrees();
+		for (const dir of [main, one]) {
+			const first = await pinIn(dir, ID_A);
+			expect(await pinIn(dir, ID_A)).toBe(first);
+			expect(await listPinned({ worktree: dir })).toHaveLength(1);
+		}
+	});
+
+	test("reading another worktree's checkpoint is refused, in both directions", async () => {
+		const { main, one } = worktrees();
+		const mainRef = await pinIn(main, ID_A);
+		const oneRef = await pinIn(one, ID_B);
+		await expect(readPinnedSnapshot({ worktree: one, ref: mainRef })).rejects.toBeInstanceOf(SnapshotPolicyError);
+		await expect(readPinnedSnapshot({ worktree: main, ref: oneRef })).rejects.toBeInstanceOf(SnapshotPolicyError);
+		expect((await readPinnedSnapshot({ worktree: one, ref: oneRef })).tree).toBe((await snapshot({ worktree: one })).tree);
+		expect((await readPinnedSnapshot({ worktree: main, ref: mainRef })).tree).toBe((await snapshot({ worktree: main })).tree);
+	});
+
+	test("a checkpoint made before scoping belongs to the main worktree only", async () => {
+		const { main, one } = worktrees();
+		const snap = await snapshot({ worktree: main, now: FIXED_NOW });
+		const legacyRef = `refs/substrate/checkpoints/${ID_A}`;
+		git(main, ["update-ref", legacyRef, git(main, ["commit-tree", snap.tree, "-m", "legacy"]).trim()]);
+		expect((await listPinned({ worktree: main })).map((entry) => entry.ref)).toEqual([legacyRef]);
+		expect((await readPinnedSnapshot({ worktree: main, ref: legacyRef })).tree).toBe(snap.tree);
+		expect(await listPinned({ worktree: one })).toEqual([]);
+		await expect(readPinnedSnapshot({ worktree: one, ref: legacyRef })).rejects.toBeInstanceOf(SnapshotPolicyError);
 	});
 });

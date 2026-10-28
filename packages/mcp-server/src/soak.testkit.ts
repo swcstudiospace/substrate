@@ -496,7 +496,7 @@ export function consistencyReaders(fakes: Fakes): ConsistencyReaders {
 				return { entries: slice, next };
 			},
 			entry: async (id) => fakes.index.readEntry(id),
-			documentShared: async () => fakes.index.memoryDocumentShared(),
+			documentShared: async (entry) => fakes.index.memoryDocumentShared(entry),
 		},
 		plane,
 		ledger: ledgerWriteReader(fakes.ledger as unknown as Pick<GreptimeClient, "queryEvents">),

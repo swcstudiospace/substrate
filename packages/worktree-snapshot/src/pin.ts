@@ -12,11 +12,15 @@
  * namespace by default.
  */
 
+import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { relative, resolve } from "node:path";
 import { SnapshotPolicyError } from "./errors.ts";
 import { isValidId } from "./paths.ts";
+import { parseSkipped } from "./plan.ts";
 import { git, gitText, gitTry, type RepoContext } from "./runner.ts";
 import { assertObjectId, assertTreeExists, snapshotOfTree } from "./tree.ts";
-import type { PinResult, Snapshot } from "./types.ts";
+import type { PinResult, Snapshot, SkippedPath } from "./types.ts";
 
 export const REF_ROOT = "refs/substrate";
 
@@ -27,6 +31,9 @@ export const MAX_METADATA_BYTES = 4096;
 
 /** The commit-message trailer that carries a pin's metadata as one line of canonical JSON. */
 export const METADATA_TRAILER = "Substrate-Checkpoint-Metadata";
+
+/** The commit-message trailer that carries the paths the snapshot skipped, as one line of JSON. */
+export const SKIPPED_TRAILER = "Substrate-Checkpoint-Skipped";
 
 const MAX_METADATA_DEPTH = 16;
 
@@ -81,11 +88,51 @@ const IDENTITY = {
 	email: "snapshot@substrate.invalid",
 };
 
-const PINNED_REF_RE = /^refs\/substrate\/(?:checkpoints|safety|restore-target)\/[A-Za-z0-9._-]{8,64}$/;
+/**
+ * A pin ref. Checkpoints live in a per-worktree scope, `refs/substrate/checkpoints/<scope>/<id>`,
+ * because linked worktrees of one repository share `refs/`: without a scope every worktree would list,
+ * read and restore the others' checkpoints. `<scope>` is `w-` and 16 hex digits of the SHA-256 of
+ * this worktree's git directory relative to the repository's common git directory (empty for the
+ * main worktree, `worktrees/<name>` for a linked one), so it is stable across calls and across a move
+ * of the repository, distinct between linked worktrees, and one constant for the main worktree.
+ * A checkpoint ref WITHOUT a scope (`refs/substrate/checkpoints/<id>`) was made before scoping; only
+ * the main worktree owns those, and they are read in place, never renamed.
+ */
+const PINNED_REF_RE =
+	/^refs\/substrate\/(?:(?:safety|restore-target)\/|checkpoints\/(?:w-[0-9a-f]{16}\/)?)[A-Za-z0-9._-]{8,64}$/;
 
-export function refFor(namespace: PinNamespace, id: string): string {
+const SCOPE_RE = /^w-[0-9a-f]{16}$/;
+
+type WorktreeScope = { scope: string; isMain: boolean };
+
+async function worktreeScope(ctx: RepoContext): Promise<WorktreeScope> {
+	const common = realpathSync(resolve(ctx.root, await gitText(ctx, ["rev-parse", "--git-common-dir"])));
+	const relativeGitDir = relative(common, ctx.gitDir);
+	const scope = `w-${createHash("sha256").update(relativeGitDir).digest("hex").slice(0, 16)}`;
+	return { scope, isMain: relativeGitDir === "" };
+}
+
+/** The ref a pin of `namespace`/`id` lives at in this worktree; only checkpoints are scoped. */
+export async function pinRef(ctx: RepoContext, namespace: PinNamespace, id: string): Promise<string> {
+	if (!isValidId(id)) throw new SnapshotPolicyError("id must match ^[A-Za-z0-9._-]{8,64}$");
+	if (namespace !== "checkpoints") return `${REF_ROOT}/${namespace}/${id}`;
+	return `${REF_ROOT}/checkpoints/${(await worktreeScope(ctx)).scope}/${id}`;
+}
+
+/** The flat ref of a safety or restore-target pin (their ids are unique per restore and live in this worktree's journal). */
+export function refFor(namespace: Exclude<PinNamespace, "checkpoints">, id: string): string {
 	if (!isValidId(id)) throw new SnapshotPolicyError("id must match ^[A-Za-z0-9._-]{8,64}$");
 	return `${REF_ROOT}/${namespace}/${id}`;
+}
+
+/** Refuse any pin ref that is malformed or is another worktree's checkpoint. */
+async function assertOwnedPinRef(ctx: RepoContext, ref: string): Promise<void> {
+	if (!PINNED_REF_RE.test(ref)) throw new SnapshotPolicyError("not a substrate pin ref");
+	if (!ref.startsWith(CHECKPOINT_REF_PREFIX)) return;
+	const own = await worktreeScope(ctx);
+	const segments = ref.slice(CHECKPOINT_REF_PREFIX.length).split("/");
+	const owned = segments.length === 2 ? segments[0] === own.scope : own.isMain;
+	if (!owned) throw new SnapshotPolicyError("that checkpoint belongs to another worktree of this repository");
 }
 
 async function resolveRefTree(ctx: RepoContext, ref: string): Promise<string | null> {
@@ -97,7 +144,8 @@ async function resolveRefTree(ctx: RepoContext, ref: string): Promise<string | n
  * Pin a tree under `refs/substrate/<namespace>/<id>`. Idempotent: pinning the same tree again under
  * the same id returns the existing commit; a different tree under an existing id is refused.
  * `metadata`, when given, is canonical JSON from `encodeMetadata`; it is written once, with the
- * commit, and an idempotent re-pin keeps the metadata the pin was created with.
+ * commit, and an idempotent re-pin keeps the metadata the pin was created with. `skipped` is the list
+ * of paths the snapshot skipped; it is stored in a separate trailer, written once like the metadata.
  */
 export async function pinTree(
 	ctx: RepoContext,
@@ -105,8 +153,9 @@ export async function pinTree(
 	id: string,
 	tree: string,
 	metadata?: string,
+	skipped: readonly SkippedPath[] = [],
 ): Promise<PinResult> {
-	const ref = refFor(namespace, id);
+	const ref = await pinRef(ctx, namespace, id);
 	await assertTreeExists(ctx, tree);
 	const existing = await resolveRefTree(ctx, ref);
 	if (existing !== null) {
@@ -124,8 +173,13 @@ export async function pinTree(
 		GIT_COMMITTER_EMAIL: IDENTITY.email,
 		GIT_COMMITTER_DATE: date,
 	};
-	const message =
-		metadata === undefined ? `substrate ${namespace} ${id}` : `substrate ${namespace} ${id}\n\n${METADATA_TRAILER}: ${metadata}`;
+	// The skipped-paths list rides in its own trailer, so the tree and the manifest digest are unchanged:
+	// it is not part of any hash, and a pin of a snapshot that skipped nothing is byte-identical to before.
+	const trailers = [
+		...(metadata === undefined ? [] : [`${METADATA_TRAILER}: ${metadata}`]),
+		...(skipped.length === 0 ? [] : [`${SKIPPED_TRAILER}: ${JSON.stringify(skipped.map(({ path, reason }) => ({ path, reason })))}`]),
+	];
+	const message = trailers.length === 0 ? `substrate ${namespace} ${id}` : `substrate ${namespace} ${id}\n\n${trailers.join("\n")}`;
 	const commit = await gitText(ctx, ["commit-tree", tree, "-m", message], { env });
 	assertObjectId(commit, "commit-tree output");
 	// The empty old value makes update-ref fail rather than overwrite a ref created concurrently.
@@ -134,19 +188,42 @@ export async function pinTree(
 }
 
 export async function deletePin(ctx: RepoContext, ref: string): Promise<void> {
-	if (!PINNED_REF_RE.test(ref)) throw new SnapshotPolicyError("not a substrate pin ref");
+	await assertOwnedPinRef(ctx, ref);
 	await git(ctx, ["update-ref", "-d", ref]);
 }
 
 /**
- * A Snapshot rebuilt from a pinned ref. `headCommit` and `branch` are null and `skipped` is empty:
- * a pin stores only the tree.
+ * The skipped paths a pin recorded, from its `Substrate-Checkpoint-Skipped` trailer; empty for a pin
+ * without one (made before skipped paths were recorded, or by a snapshot that skipped nothing).
+ * A trailer that is present but unreadable is an error, never "nothing skipped": guessing empty would
+ * let a restore delete files the checkpoint never captured.
+ */
+async function readSkippedTrailer(ctx: RepoContext, ref: string): Promise<SkippedPath[]> {
+	const message = await gitText(ctx, ["show", "-s", "--format=%B", ref]);
+	const prefix = `${SKIPPED_TRAILER}: `;
+	const lines = message.split("\n").filter((line) => line.startsWith(prefix));
+	if (lines.length === 0) return [];
+	let value: unknown;
+	try {
+		value = lines.length === 1 ? JSON.parse((lines[0] ?? "").slice(prefix.length)) : null;
+	} catch {
+		value = null;
+	}
+	if (!Array.isArray(value)) throw new SnapshotPolicyError(`${ref} has an unreadable skipped-paths trailer`);
+	const parsed = parseSkipped(value);
+	if (parsed.length !== value.length) throw new SnapshotPolicyError(`${ref} has an unreadable skipped-paths trailer`);
+	return parsed;
+}
+
+/**
+ * A Snapshot rebuilt from a pinned ref. `headCommit` and `branch` are null; `skipped` is what the
+ * pin recorded (see `pinTree`), so a restore to this snapshot leaves those paths alone.
  */
 export async function readPinnedSnapshotIn(ctx: RepoContext, ref: string): Promise<Snapshot> {
-	if (!PINNED_REF_RE.test(ref)) throw new SnapshotPolicyError("not a substrate pin ref");
+	await assertOwnedPinRef(ctx, ref);
 	const tree = await resolveRefTree(ctx, ref);
 	if (tree === null) throw new SnapshotPolicyError(`${ref} does not exist`);
-	return snapshotOfTree(ctx, tree, { skipped: [], headCommit: null, branch: null });
+	return snapshotOfTree(ctx, tree, { skipped: await readSkippedTrailer(ctx, ref), headCommit: null, branch: null });
 }
 
 /** A pinned checkpoint as `listPinned` reports it. */
@@ -190,11 +267,14 @@ function parseMetadataTrailer(body: string): { metadata: Record<string, unknown>
 }
 
 /**
- * Every ref under `refs/substrate/checkpoints/`, sorted by ref name, with its parsed metadata. A
- * corrupt trailer is reported on that entry (`metadata: null`, `metadataError`), never thrown: one
- * damaged pin must not hide the others, and the pinned refs are the local checkpoint registry.
+ * Every checkpoint of THIS worktree under `refs/substrate/checkpoints/`, sorted by ref name, with its
+ * parsed metadata: the ones in this worktree's scope, plus, for the main worktree only, the unscoped
+ * ones made before scoping. Another worktree's checkpoints are never listed. A corrupt trailer is
+ * reported on that entry (`metadata: null`, `metadataError`), never thrown: one damaged pin must not
+ * hide the others, and the pinned refs are the local checkpoint registry.
  */
 export async function listPinnedIn(ctx: RepoContext): Promise<PinnedCheckpoint[]> {
+	const own = await worktreeScope(ctx);
 	const format = ["%(refname)", "%(objectname)", "%(tree)", "%(committerdate:unix)", "%(contents:body)"].join("%1f") + "%1e";
 	const output = (await git(ctx, ["for-each-ref", `--format=${format}`, "--sort=refname", CHECKPOINT_REF_PREFIX])).toString("utf8");
 	const entries: PinnedCheckpoint[] = [];
@@ -205,9 +285,14 @@ export async function listPinnedIn(ctx: RepoContext): Promise<PinnedCheckpoint[]
 		const fields = text.split(FIELD_SEPARATOR);
 		if (fields.length !== 5) throw new SnapshotPolicyError("unexpected git for-each-ref output while listing checkpoints");
 		const [ref = "", commit = "", tree = "", unix = "", body = ""] = fields;
-		const id = ref.slice(CHECKPOINT_REF_PREFIX.length);
-		// A ref whose name is not a valid pin id was not made by pinSnapshot; it is not a checkpoint of ours.
-		if (!ref.startsWith(CHECKPOINT_REF_PREFIX) || !isValidId(id)) continue;
+		const rest = ref.slice(CHECKPOINT_REF_PREFIX.length);
+		const segments = rest.split("/");
+		const id = segments[segments.length - 1] ?? "";
+		if (!ref.startsWith(CHECKPOINT_REF_PREFIX) || segments.length > 2 || !isValidId(id)) continue;
+		if (segments.length === 2) {
+			// A scoped pin is ours only in our own scope; a malformed or foreign scope is not a checkpoint of ours.
+			if (!SCOPE_RE.test(segments[0] ?? "") || segments[0] !== own.scope) continue;
+		} else if (!own.isMain) continue;
 		const seconds = Number(unix);
 		if (tree === "" || !Number.isFinite(seconds)) {
 			entries.push({

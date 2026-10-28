@@ -43,6 +43,8 @@ export class FakeServer implements RollbackServerClient {
 	down = false;
 	unauthorized = false;
 	anchorStatus: AnchorStatus | null = "anchored";
+	/** The reasons the plan carries with a non-anchored status; the default names the status. */
+	anchorReasons: string[] | null = null;
 	staleCommits = 0;
 	salt = 0;
 	/** Set to fail commits (not plans) as an unreachable server would. */
@@ -118,7 +120,7 @@ export class FakeServer implements RollbackServerClient {
 				...(target.transcript_ref === undefined ? {} : { transcript_ref: target.transcript_ref }),
 			},
 			later_checkpoints: this.laterOf(target.ckpt_id, request.session_id),
-			anchor: this.anchorStatus === null ? null : { status: this.anchorStatus, reasons: this.anchorStatus === "anchored" ? [] : [`status ${this.anchorStatus}`] },
+			anchor: this.anchorStatus === null ? null : { status: this.anchorStatus, reasons: this.anchorReasons ?? (this.anchorStatus === "anchored" ? [] : [`status ${this.anchorStatus}`]) },
 			memory: { would_forget: 2, sample_ids: ["mem_a", "mem_b"], truncated: false },
 			plan_digest: this.digest(target.ckpt_id, request.session_id),
 		};

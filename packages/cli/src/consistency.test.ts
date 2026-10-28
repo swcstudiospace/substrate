@@ -61,6 +61,11 @@ describe("consistencyRunnerArgs", () => {
 		expect(consistencyRunnerArgs(["verify", "--repair-orphans"])).toBeNull();
 		expect(consistencyRunnerArgs(["verify", "--repair-orphans", "--repair"])).toEqual(["--repair-orphans", "--repair"]);
 	});
+
+	test("--server-stopped is forwarded with --repair and refused without it", () => {
+		expect(consistencyRunnerArgs(["verify", "--repair", "--server-stopped"])).toEqual(["--repair", "--server-stopped"]);
+		expect(consistencyRunnerArgs(["verify", "--server-stopped"])).toBeNull();
+	});
 });
 
 describe("runConsistency", () => {

@@ -19,11 +19,17 @@
  *   surface is ignored). The bootstrap is `SUBSTRATE_ANCHOR_SIGNER_SET` when it is set (it REPLACES the next form: keep the old
  *   key in it with its `valid_until_ms` and rotating the job key by `SOLANA_ANCHOR_PUBKEY` leaves every old anchor verifiable),
  *   else the configured anchor public key alone, valid from the epoch with no end. A malformed `SUBSTRATE_ANCHOR_SIGNER_SET`
- *   answers `unverified` with a fixed reason, never an empty set. The rotation read is the newest 500 notes of each operator
- *   surface; when a surface returns a full page, or the read fails, the set may be incomplete, and a `mismatch` that rests on the
- *   signer alone is reported as `unverified` with that reason instead. Every result of a verification that started carries a
- *   small `signer_set` summary (source, size, rotation notes applied, rotation notes ignored and why, the read gap), so an
- *   ignored rotation note is not silent.
+ *   answers `unverified` with a fixed reason, never an empty set. The rotation read takes the `note` events of each operator
+ *   surface newest first and pages (keyset on `ts`, {@link ROTATION_READ_MAX_PAGES} pages of 500 at most) until the surface is
+ *   exhausted, keeping only the `anchor.signer.rotate` ones (the ledger cannot filter on a payload field, so the action is
+ *   matched here), so unrelated notes no longer hide a rotation. When the read is still cut by that hard cap, cannot advance, or
+ *   fails, the set may be incomplete and a signer is not provably current: an `anchored` verdict, and a `mismatch` that rests on
+ *   the signer alone, are reported as `unverified` with reason `rotation-read-incomplete`. A signer whose window closed at or
+ *   before the anchored hour started, on a complete read, stays a `mismatch` (a known bad signature, so a rollback refuses) and
+ *   gains the reason `signer-retired`; one retired after that
+ *   hour is judged by the verifier against the anchor's block time, as before. Every result of a verification that started
+ *   carries a small `signer_set` summary (source, size, rotation notes applied, rotation notes ignored and why, the read gap), so
+ *   an ignored rotation note is not silent.
  * - `expectedGenesis`: devnet's (`DEVNET_GENESIS_HASH`).
  *
  * Solana unconfigured (no anchor public key, or a refused RPC URL) or no ledger: the answer is `unverified` with the reason,
@@ -59,6 +65,8 @@ import type { SubstrateEvent } from "./types.ts";
 export const CKPT_LOOKUP_WINDOW_MS = 7 * 24 * 3_600_000;
 /** Rows one bounded lookup reads: the ledger's own per-read cap. */
 export const LOOKUP_ROW_LIMIT = MAX_QUERY_LIMIT;
+/** Rotation read: pages of {@link LOOKUP_ROW_LIMIT} notes one operator surface may take before the read is called incomplete. */
+export const ROTATION_READ_MAX_PAGES = 50;
 /** Operator surfaces whose rotation events are read. */
 export const MAX_OPERATOR_SURFACES = 8;
 
@@ -115,7 +123,7 @@ export interface SignerSetSummary {
 	rotation_notes_applied: number;
 	/** Rotation notes that were ignored, with the rule that ignored them (at most {@link MAX_REPORTED_ROTATION_ISSUES}). */
 	rotation_issues: Array<{ event_id: string; reason: string }>;
-	/** Why the rotation read may be incomplete (a full 500-note page, or a failed read), or null. */
+	/** Why the rotation read may be incomplete (the page cap, no progress, or a failed read), or null. */
 	read_gap: string | null;
 }
 
@@ -191,22 +199,39 @@ async function readSignerSet(ports: AnchorVerifyPorts, ledger: AnchorLedger): Pr
 	const surfaces = [...ports.operatorSurfaces].sort().slice(0, MAX_OPERATOR_SURFACES);
 	if (surfaces.length === 0) return { set: bootstrap, gap: null, summary: { source, entries: bootstrap.length, rotation_notes_applied: 0, rotation_issues: [], read_gap: null } };
 	const events: RotationEventInput[] = [];
+	const seen = new Set<string>();
 	let gap: string | null = null;
 	for (const surface of surfaces) {
-		let rows: Array<Record<string, unknown>>;
-		try {
-			rows = await ledger.queryEvents({ match: { kind: "note", surface }, limit: LOOKUP_ROW_LIMIT, order: "desc", includePayload: true });
-		} catch (cause) {
-			gap = `the signer rotation events of ${surface} could not be read: ${describe(cause)}`;
-			continue;
-		}
-		if (rows.length >= LOOKUP_ROW_LIMIT) {
-			gap = `the signer rotation read of ${surface} hit its ${LOOKUP_ROW_LIMIT}-note limit, so an older rotation may be missing`;
-		}
-		for (const row of rows) {
-			const event = eventOf(ports, row);
-			if (event.payload["action"] !== ANCHOR_SIGNER_ROTATE_ACTION) continue;
-			events.push({ event_id: event.id, ts_ms: Date.parse(event.ts), surface: event.surface, payload: event.payload });
+		let until: string | undefined;
+		for (let page = 0; ; page++) {
+			if (page >= ROTATION_READ_MAX_PAGES) {
+				gap = `the signer rotation read of ${surface} hit its ${ROTATION_READ_MAX_PAGES}-page limit (${ROTATION_READ_MAX_PAGES * LOOKUP_ROW_LIMIT} notes), so an older rotation may be missing`;
+				break;
+			}
+			let rows: Array<Record<string, unknown>>;
+			try {
+				rows = await ledger.queryEvents({ match: { kind: "note", surface }, limit: LOOKUP_ROW_LIMIT, order: "desc", includePayload: true, ...(until !== undefined ? { until } : {}) });
+			} catch (cause) {
+				gap = `the signer rotation events of ${surface} could not be read: ${describe(cause)}`;
+				break;
+			}
+			let fresh = 0;
+			let oldest: string | undefined;
+			for (const row of rows) {
+				const event = eventOf(ports, row);
+				oldest = event.ts;
+				if (seen.has(event.id)) continue;
+				seen.add(event.id);
+				fresh++;
+				if (event.payload["action"] !== ANCHOR_SIGNER_ROTATE_ACTION) continue;
+				events.push({ event_id: event.id, ts_ms: Date.parse(event.ts), surface: event.surface, payload: event.payload });
+			}
+			if (rows.length < LOOKUP_ROW_LIMIT) break;
+			if (fresh === 0 || oldest === undefined) {
+				gap = `the signer rotation read of ${surface} could not advance past one instant (${LOOKUP_ROW_LIMIT} or more notes share it), so an older rotation may be missing`;
+				break;
+			}
+			until = oldest;
 		}
 	}
 	const derived = signerSetFromRotationEvents(bootstrap, events, {
@@ -267,24 +292,40 @@ async function prepare(ports: AnchorVerifyPorts, lookup: CheckpointLookup): Prom
 }
 
 /**
- * A `mismatch` is `unverified` when the signer set may be incomplete AND the same evidence would verify with the observed
- * signer in the set: a missing rotation looks exactly like a forged signer, so only the signer is in doubt. Any other
- * disagreement (the root, the proof, the count, the memo) stays a `mismatch`. `again` re-runs the verification with the extra
- * signer and answers its status.
+ * Settles what the signer set may or may not say about a verdict.
+ *
+ * - The rotation read is incomplete (`gap`): a signer is not provably current, since a missing note may have retired it. An
+ *   `anchored` verdict is `unverified` with reason `rotation-read-incomplete` (never `anchored`), and so is a `mismatch` that
+ *   the same evidence would not have if the observed signer were in the set: a missing rotation looks exactly like a forged
+ *   signer, so only the signer is in doubt. Any other disagreement (the root, the proof, the count, the memo) stays a `mismatch`.
+ * - The read is complete and the signer's window closed at or before the anchored hour started: a `mismatch` that only the
+ *   signer explains stays a `mismatch` and gains the reason `signer-retired`. It is a KNOWN mismatch, never `unverified`:
+ *   `unverified` lets a rollback proceed, and a complete read leaves nothing unknown. A signer retired after that hour keeps the verifier's own
+ *   verdict, which judges it against the anchor's block time.
+ *
+ * `again` re-runs the verification with the extra signer and answers its status.
  */
-async function settleSignerGap<R extends { status: string; evidence: CheckpointEvidence; reasons: string[] }>(
+async function settleSignerGap<R extends { status: string; evidence: CheckpointEvidence; reasons: string[]; hour_start: string | null }>(
 	result: R,
 	gap: string | null,
 	summary: SignerSetSummary,
+	signerSet: SignerSet,
 	again: (extraSigner: string) => Promise<string>,
 ): Promise<R & { signer_set_complete?: false; signer_set: SignerSetSummary }> {
 	const reported = { ...result, signer_set: summary };
-	if (gap === null) return reported;
-	const flagged = { ...reported, signer_set_complete: false as const };
 	const signer = result.evidence.signer;
-	if (result.status !== "mismatch" || signer === null) return flagged;
-	if ((await again(signer)) !== "anchored") return flagged;
-	return { ...flagged, status: "unverified", reasons: [...result.reasons, gap] };
+	if (gap !== null) {
+		const flagged = { ...reported, signer_set_complete: false as const };
+		const incomplete = { ...flagged, status: "unverified", reasons: [...result.reasons, `rotation-read-incomplete: ${gap}`] };
+		if (result.status === "anchored") return incomplete;
+		if (result.status !== "mismatch" || signer === null) return flagged;
+		return (await again(signer)) === "anchored" ? incomplete : flagged;
+	}
+	if (result.status !== "mismatch" || signer === null || result.hour_start === null) return reported;
+	const hourStartMs = Date.parse(result.hour_start);
+	const retired = signerSet.find((entry) => entry.pubkey === signer && entry.valid_until_ms !== null && entry.valid_until_ms <= hourStartMs);
+	if (retired === undefined || (await again(signer)) !== "anchored") return reported;
+	return { ...reported, reasons: [...result.reasons, `signer-retired: ${signer} was retired at ${new Date(retired.valid_until_ms as number).toISOString()}, at or before the anchored hour ${result.hour_start}`] };
 }
 
 /** The deps with one more signer, valid for all time: what the signer set would be if no rotation were missing. */
@@ -300,7 +341,7 @@ export async function verifyCheckpointRef(ports: AnchorVerifyPorts, ref: string,
 	const prepared = await prepare(ports, lookup);
 	if (typeof prepared === "string") return { status: "unverified", ref, reasons: [prepared] };
 	const result = await verifyCheckpoint(prepared.deps, ref);
-	return settleSignerGap(result, prepared.gap, prepared.summary, async (signer) => (await verifyCheckpoint(withSigner(prepared.deps, signer), ref)).status);
+	return settleSignerGap(result, prepared.gap, prepared.summary, prepared.deps.signerSet, async (signer) => (await verifyCheckpoint(withSigner(prepared.deps, signer), ref)).status);
 }
 
 /** Verify that one ledger event, by event id, sits in an anchored root. Same errors and statuses as `verifyCheckpointRef`. */
@@ -308,7 +349,7 @@ export async function verifyEventRef(ports: AnchorVerifyPorts, eventId: string):
 	const prepared = await prepare(ports, {});
 	if (typeof prepared === "string") return { status: "unverified", ref: eventId, reasons: [prepared] };
 	const result = await verifyEventAnchor(prepared.deps, eventId);
-	return settleSignerGap(result, prepared.gap, prepared.summary, async (signer) => (await verifyEventAnchor(withSigner(prepared.deps, signer), eventId)).status);
+	return settleSignerGap(result, prepared.gap, prepared.summary, prepared.deps.signerSet, async (signer) => (await verifyEventAnchor(withSigner(prepared.deps, signer), eventId)).status);
 }
 
 /**

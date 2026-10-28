@@ -1,6 +1,6 @@
 /**
  * Local checkpoints of a session (v1.6, phase 61). A checkpoint is the exact file state of the worktree,
- * pinned as `refs/substrate/checkpoints/<ckpt id>` by `@substrate/worktree-snapshot`, with its session,
+ * pinned as `refs/substrate/checkpoints/<worktree scope>/<ckpt id>` by `@substrate/worktree-snapshot`, with its session,
  * `seq`, trigger and transcript pointer stored as a metadata trailer in the pinned commit. Those refs ARE
  * the local checkpoint registry: listing, choosing a rollback target and rolling back all work with the
  * server unreachable.
