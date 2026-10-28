@@ -8,9 +8,12 @@ import { DEVNET_GENESIS_HASH } from "./anchor.ts";
 import {
 	anchorEvidenceFor,
 	anchorVerifyBlocker,
+	followReanchor,
 	CKPT_LOOKUP_WINDOW_MS,
 	LOOKUP_ROW_LIMIT,
 	MAX_OPERATOR_SURFACES,
+	readReanchorRecords,
+	reanchorSessionId,
 	ROTATION_READ_MAX_PAGES,
 	verifyCheckpointRef,
 	verifyEventRef,
@@ -20,6 +23,7 @@ import {
 import { CheckpointVerifyError } from "./checkpoint-verify.ts";
 import { eventHash } from "./event.ts";
 import type { AnchorRow, EventQuery, HourLeaf } from "./greptime.ts";
+import { buildReanchorEvent } from "./reanchor-plan.ts";
 import { rowToEvent } from "./service.ts";
 import { buildCheckpointEvent } from "./session-events.ts";
 import type { SubstrateEvent } from "./types.ts";
@@ -386,7 +390,8 @@ describe("the signer set: the configured key plus operator rotations", () => {
 		const result = await verifyEventRef(w.ports, "evt_v16_note");
 		expect(result).toMatchObject({ status: "unverified", signer_set_complete: false });
 		expect(result.reasons.join(" ")).toContain("rotation-read-incomplete");
-		expect(w.ledger.calls.queryEvents).toBe(ROTATION_READ_MAX_PAGES);
+		// The rotation pages, plus the one read of the hour's re-anchor notes.
+		expect(w.ledger.calls.queryEvents).toBe(ROTATION_READ_MAX_PAGES + 1);
 	});
 
 	test("a retirement beyond the old 500-note bound is seen: the retired signer is a mismatch, signer-retired", async () => {
@@ -402,7 +407,8 @@ describe("the signer set: the configured key plus operator rotations", () => {
 		expect(result.reasons.join(" ")).toContain("signer-retired");
 		expect(result).not.toHaveProperty("signer_set_complete");
 		expect(result.signer_set).toMatchObject({ rotation_notes_applied: 1, read_gap: null });
-		expect(w.ledger.calls.queryEvents).toBe(2);
+		// Two rotation pages; the re-anchor notes of the hour are read once per verification, and the retired signer is re-checked once.
+		expect(w.ledger.calls.queryEvents).toBe(4);
 	});
 
 	test("a signer retired after the anchor still verifies as anchored, however many unrelated notes there are", async () => {
@@ -581,5 +587,224 @@ describe("the memory reader's view", () => {
 			},
 		} as unknown as AnchorLedger;
 		await expect(anchorEvidenceFor(w.ports, "evt_v16_note")).rejects.toThrow("boom");
+	});
+});
+
+describe("a re-anchored hour: the operator's note is a pointer, the chain transaction is the proof", () => {
+	const NEW_SIGNATURE = `6${"d".repeat(87)}`;
+	const SECOND_SIGNATURE = `7${"e".repeat(87)}`;
+	const NOTE_TS = new Date(H + 5 * HOUR_MS).toISOString();
+	const NEW_BLOCK_TIME_S = (H + 5 * HOUR_MS) / 1000;
+
+	const storedRow = (w: World): AnchorRow => w.ledger.row as AnchorRow;
+	const tx = (memo: string, over: Partial<TransactionMemo> = {}): TransactionMemo => ({ memo, payer: SIGNER_A, payerSigned: true, err: null, fee: 5000, slot: 9000, blockTime: NEW_BLOCK_TIME_S, ...over });
+
+	/** An `anchor.reanchor` note for the world's hour, bound to its stored row unless `over` says otherwise. */
+	function note(w: World, over: { id?: string; surface?: string; newSig?: string; previous?: string; root?: string; count?: number; ts?: string; session?: string | null; extra?: Record<string, unknown> } = {}): SubstrateEvent {
+		const row = storedRow(w);
+		const draft = buildReanchorEvent({
+			period_start: row.period_start,
+			root: over.root ?? row.root,
+			event_count: over.count ?? row.event_count,
+			previous_tx_sig: over.previous ?? row.tx_sig,
+			new_tx_sig: over.newSig ?? NEW_SIGNATURE,
+			genesis: DEVNET_GENESIS_HASH,
+		});
+		return event({
+			id: over.id ?? "evt_v16_reanchor",
+			surface: (over.surface ?? OPERATOR) as SubstrateEvent["surface"],
+			kind: draft.kind,
+			summary: draft.summary,
+			payload: { ...draft.payload, ...over.extra },
+			session_id: over.session === undefined ? reanchorSessionId(row.period_start) : over.session,
+			ts: over.ts ?? NOTE_TS,
+		});
+	}
+
+	/** The cluster after a reset: it knows exactly the signatures in `known` (at the finalized level) and not the old one. */
+	function cluster(w: World, known: Record<string, TransactionMemo>): void {
+		w.rpc.transactionMemo = async (signature: string, commitment: string) => {
+			w.rpc.calls.push([signature, commitment]);
+			return commitment === "finalized" ? (known[signature] ?? null) : null;
+		};
+	}
+
+	const sigsRead = (w: World): string[] => [...new Set(w.rpc.calls.map(([signature]) => signature))];
+
+	test("an operator's note is followed: the replacement transaction is read and verified, and the anchors row is not touched", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		w.ledger.events.push(note(w));
+		cluster(w, { [NEW_SIGNATURE]: tx(storedRow(w).memo) });
+
+		const result = await verifyEventRef(w.ports, "evt_v16_note");
+
+		expect(result).toMatchObject({ status: "anchored", reasons: [] });
+		if (!("evidence" in result)) throw new Error("expected evidence");
+		expect(result.evidence).toMatchObject({ signature: NEW_SIGNATURE, signer: SIGNER_A, slot: 9000, finality: "finalized", count: 5, block_time_ms: H + 5 * HOUR_MS });
+		// The old signature is never asked about: the replacement is the transaction that is judged.
+		expect(sigsRead(w)).toEqual([NEW_SIGNATURE]);
+		expect(storedRow(w).tx_sig).toBe(SIGNATURE);
+		expect(await anchorEvidenceFor(w.ports, "evt_v16_note")).toEqual({ status: "anchored", proof_ref: NEW_SIGNATURE });
+	});
+
+	test("the checkpoint verifier follows it the same way", async () => {
+		const w = world(checkpoint());
+		w.ledger.events.push(note(w));
+		cluster(w, { [NEW_SIGNATURE]: tx(storedRow(w).memo) });
+		const result = await verifyCheckpointRef(w.ports, CKPT, { sessionId: "sess-v16" });
+		expect(result.status).toBe("anchored");
+		if (!("evidence" in result)) throw new Error("expected evidence");
+		expect(result.evidence.signature).toBe(NEW_SIGNATURE);
+	});
+
+	test("the replacement's signer and slot come from the chain, so a re-anchor signed by a later key still verifies", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		const rotation = buildSignerRotateEvent({ old_pubkey: SIGNER_A, new_pubkey: SIGNER_B, effective_from_ms: H + 4 * HOUR_MS, reason: "rotate the anchor key" });
+		w.ledger.events.push(
+			event({ id: "evt_v16_rotate", surface: OPERATOR as SubstrateEvent["surface"], session_id: null, kind: rotation.kind, summary: rotation.summary, payload: { ...rotation.payload }, ts: new Date(H + 4 * HOUR_MS).toISOString() }),
+			note(w),
+		);
+		cluster(w, { [NEW_SIGNATURE]: tx(storedRow(w).memo, { payer: SIGNER_B }) });
+		const result = await verifyEventRef(w.ports, "evt_v16_note");
+		expect(result.status).toBe("anchored");
+		if (!("evidence" in result)) throw new Error("expected evidence");
+		expect(result.evidence.signer).toBe(SIGNER_B);
+	});
+
+	test("a forged note from a surface that is not an operator is ignored: the old signature is read, it is gone, and the hour stays unverified", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		w.ledger.events.push(note(w, { surface: "omp" }));
+		// Even though the transaction the forged note names would verify.
+		cluster(w, { [NEW_SIGNATURE]: tx(storedRow(w).memo) });
+		const result = await verifyEventRef(w.ports, "evt_v16_note");
+		expect(result.status).toBe("unverified");
+		if (!("evidence" in result)) throw new Error("expected evidence");
+		expect(result.evidence.signature).toBe(SIGNATURE);
+		expect(sigsRead(w)).toEqual([SIGNATURE]);
+		expect(await anchorEvidenceFor(w.ports, "evt_v16_note")).toMatchObject({ status: "unverified", proof_ref: null });
+	});
+
+	test("with no operator surface configured the ledger is not even asked for notes", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		w.ports.operatorSurfaces = new Set();
+		w.ledger.events.push(note(w));
+		cluster(w, { [NEW_SIGNATURE]: tx(storedRow(w).memo) });
+		expect((await verifyEventRef(w.ports, "evt_v16_note")).status).toBe("unverified");
+		expect(w.ledger.queries).toEqual([]);
+	});
+
+	test("a note can never make an hour pass without its transaction verifying: another root, a failed transaction, a signer outside the set, an unknown signature", async () => {
+		const row = (w: World): string => storedRow(w).memo;
+		const cases: Array<[string, (w: World) => TransactionMemo | null, "mismatch" | "unverified"]> = [
+			["a memo with another root", () => tx(formatMemo({ periodStartMs: H, rootHex: "f".repeat(64), count: 5 })), "mismatch"],
+			["a memo with another count", () => tx(formatMemo({ periodStartMs: H, rootHex: "f".repeat(64), count: 6 })), "mismatch"],
+			["a memo for another hour", () => tx(formatMemo({ periodStartMs: H + HOUR_MS, rootHex: "f".repeat(64), count: 5 })), "mismatch"],
+			["a failed transaction", (w) => tx(row(w), { err: { InstructionError: [0, "Custom"] } }), "mismatch"],
+			["a signer outside the signer set", (w) => tx(row(w), { payer: SIGNER_B }), "mismatch"],
+			["an unsigned fee payer", (w) => tx(row(w), { payerSigned: false }), "mismatch"],
+			["a signature the cluster does not know", () => null, "unverified"],
+		];
+		for (const [name, transaction, status] of cases) {
+			const w = world(event({ id: "evt_v16_note" }));
+			w.ledger.events.push(note(w));
+			const known = transaction(w);
+			cluster(w, known === null ? {} : { [NEW_SIGNATURE]: known });
+			const result = await verifyEventRef(w.ports, "evt_v16_note");
+			expect({ name, status: result.status }).toEqual({ name, status });
+			expect(await anchorEvidenceFor(w.ports, "evt_v16_note")).toMatchObject({ proof_ref: null });
+		}
+	});
+
+	test("a note bound to another row is ignored: another root, another count or another previous signature", async () => {
+		for (const over of [{ root: "f".repeat(64) }, { count: 4 }, { previous: `8${"f".repeat(87)}` }]) {
+			const w = world(event({ id: "evt_v16_note" }));
+			w.ledger.events.push(note(w, over));
+			cluster(w, { [NEW_SIGNATURE]: tx(storedRow(w).memo) });
+			const result = await verifyEventRef(w.ports, "evt_v16_note");
+			expect(result.status).toBe("unverified");
+			expect(sigsRead(w)).toEqual([SIGNATURE]);
+		}
+	});
+
+	test("a malformed note from an operator (an unknown key) is ignored", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		w.ledger.events.push(note(w, { extra: { unexpected: 1 } }));
+		cluster(w, { [NEW_SIGNATURE]: tx(storedRow(w).memo) });
+		expect((await verifyEventRef(w.ports, "evt_v16_note")).status).toBe("unverified");
+		expect(sigsRead(w)).toEqual([SIGNATURE]);
+	});
+
+	test("the newest bound note wins and an older one is never a fallback", async () => {
+		/** An hour with an older note naming NEW_SIGNATURE and a newer one naming SECOND_SIGNATURE; the cluster knows `known`. */
+		const verifyWith = async (known: string) => {
+			const w = world(event({ id: "evt_v16_note" }));
+			w.ledger.events.push(note(w, { id: "evt_v16_reanchor_old", newSig: NEW_SIGNATURE, ts: new Date(H + 4 * HOUR_MS).toISOString() }), note(w, { id: "evt_v16_reanchor_new", newSig: SECOND_SIGNATURE, ts: NOTE_TS }));
+			cluster(w, { [known]: tx(storedRow(w).memo) });
+			return { w, result: await verifyEventRef(w.ports, "evt_v16_note") };
+		};
+
+		// The newer note names a transaction the cluster does not know: unverified, although the older one would verify.
+		const unknown = await verifyWith(NEW_SIGNATURE);
+		expect(unknown.result.status).toBe("unverified");
+		if (!("evidence" in unknown.result)) throw new Error("expected evidence");
+		expect(unknown.result.evidence.signature).toBe(SECOND_SIGNATURE);
+		expect(sigsRead(unknown.w)).toEqual([SECOND_SIGNATURE]);
+
+		// The newer note names the verifying one: anchored through the newer.
+		expect((await verifyWith(SECOND_SIGNATURE)).result.status).toBe("anchored");
+	});
+
+	test("readReanchorRecords reads one session of the hour, keeps only operator notes of that hour, newest first", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		const otherHour = buildReanchorEvent({ period_start: new Date(H + HOUR_MS).toISOString(), root: storedRow(w).root, event_count: 5, previous_tx_sig: SIGNATURE, new_tx_sig: SECOND_SIGNATURE, genesis: DEVNET_GENESIS_HASH });
+		w.ledger.events.push(
+			note(w, { id: "evt_v16_a", ts: new Date(H + 4 * HOUR_MS).toISOString() }),
+			note(w, { id: "evt_v16_b", ts: NOTE_TS }),
+			note(w, { id: "evt_v16_forged", surface: "omp" }),
+			event({ id: "evt_v16_other_hour", surface: OPERATOR as SubstrateEvent["surface"], kind: otherHour.kind, summary: otherHour.summary, payload: { ...otherHour.payload }, session_id: reanchorSessionId(storedRow(w).period_start), ts: NOTE_TS }),
+			event({ id: "evt_v16_plain", surface: OPERATOR as SubstrateEvent["surface"], session_id: reanchorSessionId(storedRow(w).period_start), ts: NOTE_TS }),
+			note(w, { id: "evt_v16_elsewhere", session: "sess-elsewhere" }),
+		);
+		const records = await readReanchorRecords(w.ports, H);
+		expect(records.map((record) => record.event_id)).toEqual(["evt_v16_b", "evt_v16_a"]);
+		expect(records.every((record) => record.surface === OPERATOR && record.payload.new_tx_sig === NEW_SIGNATURE)).toBe(true);
+		expect(w.ledger.queries).toEqual([{ match: { kind: "note", session_id: "anchor:2026-10-20T10" }, limit: LOOKUP_ROW_LIMIT, order: "desc", includePayload: true }]);
+	});
+
+	test("readReanchorRecords asks nothing without an operator surface or a ledger", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		expect(await readReanchorRecords({ ...w.ports, operatorSurfaces: new Set() }, H)).toEqual([]);
+		expect(await readReanchorRecords({ ...w.ports, ledger: null }, H)).toEqual([]);
+		expect(w.ledger.queries).toEqual([]);
+	});
+
+	test("followReanchor swaps only the pointer: the row's root, count and memo stay, and a chain read adds the signer and slot", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		w.ledger.events.push(note(w));
+		const row = storedRow(w);
+
+		const bare = await followReanchor(w.ports, H, row);
+		expect(bare).toEqual({ ...row, tx_sig: NEW_SIGNATURE, anchored_at: NOTE_TS });
+
+		const read = await followReanchor(w.ports, H, row, async (signature) => {
+			expect(signature).toBe(NEW_SIGNATURE);
+			return { memo: row.memo, signer: SIGNER_B, signerSigned: true, err: null, slot: 77, blockTimeMs: H, finality: "finalized" };
+		});
+		expect(read).toEqual({ ...row, tx_sig: NEW_SIGNATURE, signer: SIGNER_B, slot: 77, anchored_at: NOTE_TS });
+		// The stored row object itself was not changed.
+		expect(row.tx_sig).toBe(SIGNATURE);
+
+		const failing = await followReanchor(w.ports, H, row, async () => {
+			throw new Error("rpc down");
+		});
+		expect(failing).toEqual({ ...row, tx_sig: NEW_SIGNATURE, anchored_at: NOTE_TS });
+	});
+
+	test("followReanchor keeps the stored row when the ledger cannot be read, and never throws", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		w.ledger.events.push(note(w));
+		w.ledger.failQuery = "greptime unreachable";
+		const row = storedRow(w);
+		expect(await followReanchor(w.ports, H, row)).toBe(row);
 	});
 });

@@ -10,7 +10,13 @@
  *   surface within the last seven days, the one whose payload names the checkpoint. A checkpoint older than that, or from
  *   another surface, is not found by id: pass its event id or its session id.
  * - `listHourLeaves`: `greptime.hourLeaves`, cut at `maxLeaves + 1` (the verifier needs no more to call an hour too big).
- * - `readAnchorRow`: `greptime.anchorForPeriod`, the row the anchor job wrote.
+ * - `readAnchorRow`: `greptime.anchorForPeriod`, the row the anchor job wrote, then {@link followReanchor}: after a devnet reset the
+ *   row still names the old (vanished) signature, and the `anchor.reanchor` event an OPERATOR surface wrote for that hour is a
+ *   POINTER to the replacement transaction. A valid event bound to the stored row (same hour, root, count and previous signature)
+ *   swaps only the row's `tx_sig` (and the signer, slot and time the chain and the event show); the verifier then reads that
+ *   transaction from the chain and applies the same signer-set, memo, root and proof checks as for any row. An event from a
+ *   non-operator surface, a malformed one, or one bound to another row is ignored, and an event can never make an hour pass
+ *   without its chain transaction verifying. The anchors row itself is never rewritten.
  * - `fetchAnchorTransaction`: `Rpc.transactionMemo`, asked at `finalized` and then at `confirmed` (an anchor lands at
  *   `confirmed` first), with the RPC's block time converted from seconds to milliseconds.
  * - `getGenesisHash`: the RPC's.
@@ -57,7 +63,8 @@ import {
 	type CheckpointVerifyResult,
 	type EventAnchorResult,
 } from "./checkpoint-verify.ts";
-import { MAX_QUERY_LIMIT, type GreptimeClient } from "./greptime.ts";
+import { MAX_QUERY_LIMIT, type AnchorRow, type GreptimeClient } from "./greptime.ts";
+import { parseReanchorPayload, type ReanchorPayload } from "./reanchor-plan.ts";
 import { redact } from "./redact.ts";
 import type { SubstrateEvent } from "./types.ts";
 
@@ -274,6 +281,82 @@ async function fetchTransaction(rpc: Rpc, signature: string): Promise<AnchorTran
 	return null;
 }
 
+/**
+ * The session the `anchor.reanchor` event of an hour is written in: the anchor job's own per-hour session
+ * (`anchor:<YYYY-MM-DDTHH>`), so the verifier reads one small session instead of paging a surface's notes.
+ */
+export function reanchorSessionId(periodStartIso: string): string {
+	return `anchor:${periodStartIso.slice(0, 13)}`;
+}
+
+/** One `anchor.reanchor` note the verifier accepts as a candidate pointer. */
+export interface ReanchorRecord {
+	event_id: string;
+	/** ISO time the note was written. */
+	ts: string;
+	surface: string;
+	payload: ReanchorPayload;
+}
+
+/**
+ * The valid `anchor.reanchor` notes of one hour written by an OPERATOR surface, newest first. The ledger accepts events from any
+ * authenticated caller, so a note from another surface, a malformed one, or one naming another hour is ignored; `events_emit`
+ * additionally refuses the action from a non-operator (`reserved-actions.ts`). Throws when the ledger read fails: the caller decides
+ * what an unreadable ledger means (the verifier keeps the stored row).
+ */
+export async function readReanchorRecords(ports: Pick<AnchorVerifyPorts, "ledger" | "rowToEvent" | "operatorSurfaces">, periodStartMs: number): Promise<ReanchorRecord[]> {
+	if (ports.ledger === null || ports.operatorSurfaces.size === 0) return [];
+	const periodStart = new Date(periodStartMs).toISOString();
+	const rows = await ports.ledger.queryEvents({ match: { kind: "note", session_id: reanchorSessionId(periodStart) }, limit: LOOKUP_ROW_LIMIT, order: "desc", includePayload: true });
+	const records: ReanchorRecord[] = [];
+	for (const row of rows) {
+		const event = ports.rowToEvent(row);
+		if (event.kind !== "note" || !ports.operatorSurfaces.has(event.surface)) continue;
+		let payload: ReanchorPayload;
+		try {
+			payload = parseReanchorPayload(event.payload, { stored: true });
+		} catch {
+			continue;
+		}
+		if (payload.period_start !== periodStart) continue;
+		records.push({ event_id: event.id, ts: event.ts, surface: event.surface, payload });
+	}
+	return records.sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts));
+}
+
+/**
+ * The row verification should judge: the stored row, or, when a valid operator `anchor.reanchor` note for the hour is bound to it
+ * (same root, same event count, and `previous_tx_sig` equal to the row's signature), the same row pointing at the note's
+ * replacement transaction. The newest bound note wins; an older one is never a fallback, so a newer note naming a transaction that does
+ * not verify leaves the hour unverified or mismatched rather than passing through an older pointer. Never throws: any failed
+ * read keeps the stored row. `fetchTx` reads the replacement's signer and slot (the event carries neither) from the chain; without it, or
+ * when it fails, the stored row's own signer stays and the verifier's own read of the transaction judges it.
+ */
+export async function followReanchor(
+	ports: Pick<AnchorVerifyPorts, "ledger" | "rowToEvent" | "operatorSurfaces">,
+	periodStartMs: number,
+	row: AnchorRow,
+	fetchTx?: (signature: string) => Promise<AnchorTransactionRead | null>,
+): Promise<AnchorRow> {
+	let records: ReanchorRecord[];
+	try {
+		records = await readReanchorRecords(ports, periodStartMs);
+	} catch {
+		return row;
+	}
+	const pointer = records.find((record) => record.payload.root === row.root && record.payload.event_count === row.event_count && record.payload.previous_tx_sig === row.tx_sig);
+	if (pointer === undefined) return row;
+	let read: AnchorTransactionRead | null = null;
+	if (fetchTx !== undefined) {
+		try {
+			read = await fetchTx(pointer.payload.new_tx_sig);
+		} catch {
+			read = null;
+		}
+	}
+	return { ...row, tx_sig: pointer.payload.new_tx_sig, signer: read?.signer ?? row.signer, slot: read?.slot ?? row.slot, anchored_at: pointer.ts };
+}
+
 async function prepare(ports: AnchorVerifyPorts, lookup: CheckpointLookup): Promise<Prepared | string> {
 	const blocker = anchorVerifyBlocker(ports);
 	if (blocker !== null) return blocker;
@@ -288,7 +371,10 @@ async function prepare(ports: AnchorVerifyPorts, lookup: CheckpointLookup): Prom
 	const deps: CheckpointVerifyDeps = {
 		findEvent: (ref) => (CKPT_ID.test(ref) ? findCheckpoint(ports, ledger, ref, lookup) : findById(ports, ledger, ref)),
 		listHourLeaves: async (hourStartMs, maxLeaves) => (await ledger.hourLeaves(hourStartMs)).slice(0, maxLeaves + 1).map(({ event_id, hash }) => ({ event_id, hash })),
-		readAnchorRow: (hourStartMs) => ledger.anchorForPeriod(hourStartMs),
+		readAnchorRow: async (hourStartMs) => {
+			const row = await ledger.anchorForPeriod(hourStartMs);
+			return row === null ? null : followReanchor(ports, hourStartMs, row, (signature) => fetchTransaction(ports.rpc(), signature));
+		},
 		fetchAnchorTransaction: (signature) => fetchTransaction(ports.rpc(), signature),
 		getGenesisHash: () => ports.rpc().getGenesisHash(),
 		signerSet: signers.set,

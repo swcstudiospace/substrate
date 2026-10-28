@@ -33,7 +33,7 @@ These apply to every source:
   `index.archive`, `alert`, and the v1.6 actions `session.checkpoint`, `session.rollback`,
   `session.rollback.refused`, `memory.forget`, `memory.capsule.export`,
   `memory.capsule.redact`, `anchor.signer.rotate`, `anchor.reanchor`.
-- **Reserved actions are not writable through `events_emit` or `POST /events`.** A reader trusts `anchor.signer.rotate`, `session.checkpoint`, `session.rollback`,
+- **Reserved actions are not writable through `events_emit` or `POST /events`.** A reader trusts `anchor.signer.rotate`, `anchor.reanchor`, `session.checkpoint`, `session.rollback`,
   `session.rollback.refused`, `session.rollback.forget_batch` and `memory.forget` by their action alone, and the event carries no proof of its writer, so both
   doors refuse them with a `reserved-action` error (nothing written) unless the caller is an operator emitting as its own surface; the server's own emits do not
   pass those doors (`RESERVED_NOTE_ACTIONS` in `packages/mcp-server/src/reserved-actions.ts` is the one list).
@@ -265,9 +265,12 @@ Phase 60 and Phase 59 notes `memory.capsule.export`, `memory.capsule.redact`,
 `anchor.signer.rotate` and `anchor.reanchor` are caller-surface notes with their own builders
 (`capsule.ts`, `signer-set.ts`, `reanchor-plan.ts`). `substrate capsule` posts the two capsule
 notes through the CLI event path (`packages/cli/src/capsule.ts`); an operator posts the signer
-rotation with `events_emit` (`docs/runbooks/anchor-signer-rotation.md`). Nothing in the verifier
-reads `anchor.reanchor` yet (`docs/runbooks/devnet-reset-and-reanchor.md`), and no code emits it
-automatically. The server emits none of them by itself.
+rotation with `events_emit` (`docs/runbooks/anchor-signer-rotation.md`). `anchor.reanchor` is written by the
+operator-run `reanchor-run.ts --execute` (`reanchor.ts`) as an operator surface, in the hour's anchor session
+(`anchor:<YYYY-MM-DDTHH>`), with idempotency key `reanchor:<period_start>:<new_tx_sig>`. The verifier
+(`anchor-verify-deps.ts`, `followReanchor`) reads it from an operator surface only, as a pointer to the replacement
+transaction, and still judges that transaction from the chain; the `anchors` row is never rewritten
+(`docs/runbooks/devnet-reset-and-reanchor.md`). No other code emits it. The server emits none of them by itself.
 
 - Payload: `forget_id` (`fg_` + 26 lowercase hex, derived from the sorted entry ids, the
   reason and the rollback or checkpoint id, so a retried call reuses it), `reason`

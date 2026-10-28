@@ -149,7 +149,7 @@ import { governMemoryWrite } from "./memory-write.ts";
 import { forgetEntries, selectForRollback, type ForgetReport, type ForgetRequest, type PlaneDeleteResult, type RollbackSelectRequest, type RollbackSelection } from "./memory-forget.ts";
 import { ForgetUnavailableError, forgetDocumentId, planeDeleteFor } from "./memory-forget-plane.ts";
 import { verifyMemoryRecord, MemoryVerifyError, type MemoryVerifyResult } from "./memory-verify.ts";
-import { anchorEvidenceFor, verifyCheckpointRef, type AnchorVerifyPorts, type CheckpointVerifyToolResult, type SignerSetSummary } from "./anchor-verify-deps.ts";
+import { anchorEvidenceFor, followReanchor, verifyCheckpointRef, type AnchorVerifyPorts, type CheckpointVerifyToolResult, type SignerSetSummary } from "./anchor-verify-deps.ts";
 import { CheckpointVerifyError } from "./checkpoint-verify.ts";
 import {
 	DEFAULT_ANCHOR_TIMEOUT_MS,
@@ -6616,7 +6616,9 @@ export class Substrate {
 		}
 		const greptime = this.greptime;
 		if (!greptime) throw new Error("GREPTIME_URL is not set");
-		const row = await greptime.anchorForPeriod(hour);
+		const stored = await greptime.anchorForPeriod(hour);
+		// After a devnet reset the stored row names a vanished signature; an operator's `anchor.reanchor` note for the hour points at its replacement.
+		const row = stored === null ? null : await followReanchor(this.anchorVerifyPorts(), hour, stored);
 		if (!row) {
 			if (!isClosed(hour, now, INGEST_LAG_MS) || now < hourEnd(hour) + VERIFY_PENDING_MS) {
 				return { period_start, period_end, status: "pending", event_count: digest.event_count, root: digest.root };

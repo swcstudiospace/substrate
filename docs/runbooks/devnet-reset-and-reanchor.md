@@ -122,47 +122,83 @@ The JSON (`schema: 1`, `dry_run: true`) has `window`, `chain` (`expected_genesis
 
 The `notes` array repeats the fixed reminders: a dry run; the memo is the stored one; the new transaction must be signed by a key in the signer set **at its own block time**, which will be later than the hour it anchors; record each real re-anchor with an `anchor.reanchor` event.
 
-## 5. What can be done today, and the open point
+## 5. The re-anchor: what the hourly job cannot do, and the entry that does
 
-Steps 1 to 4 work today. So does **funding the key**, and so will **fresh hours** once the genesis constant is updated. Re-sending the old hours with the anchor job does **not** work today. The reason is below, stated from the code, not guessed.
+Steps 1 to 4 and funding the key need no code beyond what is already here. Re-sending the old hours is done by `packages/mcp-server/src/reanchor-run.ts` (its logic is `reanchor.ts`), an **operator-run** entry point: nothing starts it, no timer, no CI job, no agent. The send itself is an operator step.
 
-### Open point: how the job treats an hour that already has a row
+### Why the hourly job cannot do it
 
-What `packages/mcp-server/src/anchor.ts` does today (symbols; line numbers as of this branch):
+What `packages/mcp-server/src/anchor.ts` does today (symbols):
 
-1. **The sweep skips any hour that has an `anchors` row.** It reads the window `[max(coverage start, now − 7 days), now)` with `anchorsBetween`, marks every row's `period_start` as anchored (about lines 390 to 393) and skips those hours (about line 432). Rows older than seven days are not read at all.
-2. **`--period <hour>` on an anchored hour takes the adopt path** (about lines 402 to 414 and `checkAdopt`). It lists the key's 100 most recent signatures on the cluster and looks for a memo for that hour. On a wiped cluster there is none, so the verdict is `none`, the job prints `already anchored` and **sends nothing** (about lines 579 to 584). Even a found memo only writes an `anchor.written` note with `adopted: true`; the stored row is left untouched.
-3. **Before any send the job re-reads the hour's row** with `anchorForPeriod` and stops if one exists (about lines 592 to 603).
-4. **The cluster gate is a constant.** `DEVNET_GENESIS_HASH` is compared in `checkPreconditions` and in the adoption path, so after a reset the job refuses even a fresh hour (`wrong-cluster`). The verifier uses the same constant as `expectedGenesis` (`packages/mcp-server/src/anchor-verify-deps.ts`, and the `verify` read-back in `service.ts`).
-5. **A row is written at most once.** `GreptimeClient.insertAnchor` documents that the table deduplicates by `period_start` and that callers never write an hour twice (`packages/mcp-server/src/greptime.ts`). **Whether a second insert replaces the row or is ignored is UNVERIFIED**: no code or test in this repo exercises it against a live store.
-6. **The verifier follows the row, not the chain.** `checkpoint_verify` reads the row for the hour (`anchorForPeriod`) and looks up **its** `tx_sig`. Nothing reads the `anchor.reanchor` event yet: it is defined and validated in `reanchor-plan.ts` and listed in `docs/event-vocabulary.md`, and nothing in the verifier consumes it.
+1. **The sweep skips any hour that has an `anchors` row.** It reads the window `[max(coverage start, now − 7 days), now)` with `anchorsBetween`, marks every row's `period_start` as anchored and skips those hours. Rows older than seven days are not read at all.
+2. **`--period <hour>` on an anchored hour takes the adopt path** (`checkAdopt`). It lists the key's 100 most recent signatures on the cluster and looks for a memo for that hour. On a wiped cluster there is none, so the job prints `already anchored` and **sends nothing**.
+3. **Before any send the job re-reads the hour's row** with `anchorForPeriod` and stops if one exists.
+4. **The cluster gate is a constant.** `DEVNET_GENESIS_HASH` is compared in `checkPreconditions` and in the adoption path, so after a reset the job refuses even a fresh hour (`wrong-cluster`) until the constant moves (step b).
+5. **A row is written at most once.** `GreptimeClient.insertAnchor` documents that the table deduplicates by `period_start`. **Whether a second insert replaces the row or is ignored is UNVERIFIED**: no code or test in this repo exercises it against a live store. For that reason **the re-anchor never writes the `anchors` table**: the row keeps naming the old signature, and the verifier follows the `anchor.reanchor` note (below) to the new one.
 
-So a re-send needs a change that does not exist, and this runbook does **not** invent a flag for it. What would have to change, for the owner to decide:
+### What the re-anchor entry does
 
-- a deliberate **re-anchor mode of the job**, driven by the saved plan: only the plan's hours are candidates, each recomputed from the ledger and refused (as `root-mismatch`) unless root and count equal the stored row, so exactly the same memo v1 content is sent;
-- the **row-exists skips bypassed for those hours only**, and the cluster check made against the new genesis;
-- a place where the **new signature is recorded that the verifier reads**: either the `anchors` row is replaced (a decision on the table's replace-or-ignore behaviour, which needs a live check) or the verifier learns to follow `anchor.reanchor` events;
-- the **expected genesis** moved to the new cluster's hash, or made configurable (a new setting needs its flag-registry and configuration-reference entries);
-- the `anchor.reanchor` event emitted on success (`buildReanchorEvent`; idempotency key `reanchor:<period_start>:<new_tx_sig>`).
+`reanchor-run.ts --plan FILE` takes the plan saved in step 3 (`schema: 1`, `dry_run: true`).
 
-A manual `solana transfer … --with-memo` of the plan's memo is technically possible (the argv shape is `transferMemoArgv`, `packages/ledger/src/solana.ts`), but it bypasses the job's genesis, balance and read-back checks and leaves `checkpoint_verify` at `unverified`, because the row still names the old signature. This runbook gives no command for it.
+- **The default is a DRY RUN.** It prints `would re-anchor <hour>` per planned hour and stops. It opens no configuration, no ledger, no endpoint and no runner, so it needs no environment and can send nothing.
+- **`--execute` is explicit and OPERATOR ONLY.** It needs `--confirm-genesis <hash>`: the genesis hash of the cluster you mean to write to. `--max-hours N` (default 1, at most 24) caps the transactions sent per run. `--surface NAME` names the operator surface the note is written as; it is needed when more than one operator surface exists (a single one is used by default). A flag without `--execute` changes nothing: it is still a dry run.
+- **Environment, names only (none is new):** `GREPTIME_URL` (and `GREPTIME_USER`, `GREPTIME_PASSWORD`, `GREPTIME_DB`), `SOLANA_RPC_URL`, `SOLANA_ANCHOR_KEYPAIR`, `SOLANA_ANCHOR_PUBKEY`, `SOLANA_CLI`. The keypair is only ever a path on the Solana CLI's argv: do not paste it or print the file.
+
+Gates, all checked **before the first send** (a refusal prints `[reanchor] REFUSED <code>: <reason>` on stderr, exits 1 and sends nothing further):
+
+| Code | The gate |
+| --- | --- |
+| `genesis-unconfirmed` | `--execute` without `--confirm-genesis` |
+| `rpc-url-refused` | `SOLANA_RPC_URL` fails the devnet guard (mainnet or testnet host, userinfo, non-http scheme, fragment) |
+| `wrong-cluster` | the endpoint reports the **mainnet-beta** or **testnet** genesis hash, even when you confirm it (`5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d`, `4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY`: the values in the Anza validator documentation, <https://docs.anza.xyz/clusters/available>) |
+| `genesis-mismatch` | the live genesis is not the `--confirm-genesis` you gave, or is not the genesis the plan observed (re-run the plan) |
+| `rpc-unreadable` | the genesis, balance, a signature or the signer's recent signatures could not be read |
+| `signer-mismatch` | `solana-keygen pubkey` of the keypair is not `SOLANA_ANCHOR_PUBKEY`, or the keypair path is not absolute |
+| `unfunded` | the key holds less than the rent-exempt minimum plus the fees of the sends this run may make (`REQUIRED_BALANCE_LAMPORTS` = 895 880, then 5 000 lamports for each further send) |
+| `no-operator-surface` | no operator surface to write the note as (see `--surface`): the verifier ignores a note from any other surface, so nothing is sent that could not be recorded |
+| `row-missing`, `store-failed`, `digest-failed` | the stored `anchors` row cannot be read, or the hour cannot be recomputed |
+| `root-mismatch` | for **every** plan hour, the stored row, the plan and the digest recomputed from the ledger must agree on root, event count and memo **byte for byte** (the memo must be exactly `formatMemo` of the hour, root and count). A difference is a ledger-integrity question, never repaired. The same refusal applies when the new cluster already holds a memo by the signer for that hour with a different root |
+| `present-on-cluster` | the stored signature exists on the cluster: this is not a reset for that hour |
+
+Then, hour by hour in ascending order: an earlier send of this very memo by the signer on the new cluster is **adopted** (found through the signer's recent signatures and confirmed by reading the transaction), never sent twice; otherwise the entry sends the stored memo with `transferMemoArgv` (the same argv shape as the hourly job) and applies the job's read-back (memo, period, root, count, fee payer and signature, no error). Any failure there is `send-failed` and the run stops before the next hour. An hour whose send was cut short is picked up by running the same command again: the transaction is adopted, not repeated. Adopted hours do not count against `--max-hours`.
+
+The verification caveat: `checkpoint_verify` still compares the cluster's genesis with `DEVNET_GENESIS_HASH`. A re-anchored hour therefore reads `unverified` (reset-suspected) until step b has moved the constant to the new genesis; afterwards it reads `anchored` if, and only if, the replacement transaction verifies like any anchor (memo, root, inclusion proof, and a signer valid at its block time).
 
 ### Procedure
 
 | Step | Who | What |
 | --- | --- | --- |
 | a. Steps 1 to 4 above, plan saved | operator | read-only. Do this first and keep the file |
-| b. **OPERATOR ONLY** Decide the genesis update | owner | the expected genesis must move to the new cluster's hash (a code change and a release; `deploy-release.sh`, `docs/runbooks/release-gate.md`). Devnet-only stays true: the URL guard and the genesis gate remain |
+| b. **OPERATOR ONLY** Decide the genesis update | owner | the expected genesis must move to the new cluster's hash (a code change and a release; `deploy-release.sh`, `docs/runbooks/release-gate.md`). Devnet-only stays true: the URL guard and the genesis gate remain. Step e may run before or after it: it is gated by `--confirm-genesis`, not by the constant |
 | c. **OPERATOR ONLY** Fund the key on the new cluster | operator | the key must hold at least `REQUIRED_BALANCE_LAMPORTS` = 895 880 (rent-exempt minimum plus one fee; `anchor.ts`), otherwise the job stops with `unfunded`. Use the devnet faucet. It is rate limited and often refuses, and the repo has not verified its limits. **Do not paste the keypair path or print the file** |
 | d. **OPERATOR ONLY** Let fresh hours anchor | timer / operator | after (b) is deployed, `systemctl start substrate-anchor.service` (or wait for the timer). Preview first with `bun --env-file=/etc/substrate/substrate.env packages/mcp-server/src/anchor-run.ts --dry-run`: it prints `would anchor <hour>` and sends nothing. It anchors at most 24 non-empty hours per run within seven days; an older hour needs `anchor-run.ts --period <HOUR>` (**OPERATOR ONLY**, one hour per run, it sends) |
-| e. **BLOCKED today** Re-send the old hours | — | see the open point. Wait for the change; do not edit rows by hand. Deleting or overwriting an `anchors` row has no tool, no test and unverified store semantics |
-| f. Record each real re-anchor | operator | after (e) exists and has sent: an `anchor.reanchor` note from your own surface (below) |
+| e. **OPERATOR ONLY** Re-send the old hours | operator | first the dry run, then one hour, then the rest (commands below). **The send itself is operator-run.** Deleting or overwriting an `anchors` row has no tool, no test and unverified store semantics: never do it by hand |
+| f. Record each real re-anchor | the entry | automatic: step e writes one `anchor.reanchor` note per hour as an operator surface (below). Only a `store-failed` refusal after a send needs you: run step e again (it adopts the transaction and records it) |
+
+Step e, from the host, with the plan saved in step 3 (`<PLAN_FILE>`) and the new cluster's genesis hash (`<NEW_GENESIS_HASH>`, the plan's `chain.observed_genesis`):
+
+```sh
+cd /opt/agent-substrate/current
+# 1. DRY RUN (the default): reads nothing, sends nothing; prints "would re-anchor <hour>" per hour
+bun packages/mcp-server/src/reanchor-run.ts --plan <PLAN_FILE>
+
+# 2. OPERATOR ONLY: send ONE hour first (--max-hours defaults to 1). It sends a transaction.
+bun --env-file=/etc/substrate/substrate.env packages/mcp-server/src/reanchor-run.ts \
+  --plan <PLAN_FILE> --execute --confirm-genesis <NEW_GENESIS_HASH> [--surface <OPERATOR_SURFACE>]
+
+# 3. Check it (read-only): checkpoint_verify { "ckpt_id": "<CKPT_ID>", "session_id": "<SESSION_ID>" } for a checkpoint in that hour,
+#    then the rest, at most 24 sends per run:
+bun --env-file=/etc/substrate/substrate.env packages/mcp-server/src/reanchor-run.ts \
+  --plan <PLAN_FILE> --execute --confirm-genesis <NEW_GENESIS_HASH> --max-hours 24 [--surface <OPERATOR_SURFACE>]
+```
+
+Exit codes: `0` the dry run was printed or every hour is done (the last line says how many hours are left in the plan when `--max-hours` cut the run: run it again), `1` a gate refused or a send or record failed (read the `REFUSED` line), `2` usage, an unreadable or invalid plan file, or missing configuration (a bad flag, an unset `GREPTIME_URL`, `SOLANA_ANCHOR_KEYPAIR` or `SOLANA_ANCHOR_PUBKEY`, a refused `SOLANA_RPC_URL`).
 
 The re-anchor transaction is signed at its own, later block time, so its signer must be valid **then** (`docs/runbooks/anchor-signer-rotation.md`: a key is accepted by the block time of the transaction, never by "is it the current key"). The verifier does not require the block time to be near the hour: it uses it only for the signer window.
 
-### The `anchor.reanchor` event (after a real re-anchor only)
+### The `anchor.reanchor` event (written by step e)
 
-Kind `note`, from the caller's own surface, no `repo`, built by `buildReanchorEvent` (`reanchor-plan.ts`):
+Kind `note`, written by `reanchor-run.ts --execute` as the operator surface it was given (`--surface`, or the single operator surface), in the hour's anchor session (`session_id: anchor:<YYYY-MM-DDTHH>`), no `repo`, built by `buildReanchorEvent` (`reanchor-plan.ts`) with the idempotency key `reanchor:<period_start>:<new_tx_sig>`:
 
 ```json
 {
@@ -176,7 +212,11 @@ Kind `note`, from the caller's own surface, no `repo`, built by `buildReanchorEv
 }
 ```
 
-Unknown keys are refused. The root and count must be the stored row's, unchanged. Emit it once (`events_emit` has no idempotency parameter; check `events_query` before retrying). It carries hashes, signatures and a genesis hash only, never event content.
+Unknown keys are refused. The root and count are the stored row's, unchanged. The action is **reserved**: `events_emit` and `POST /events` refuse it from anyone but an operator writing as its own surface (`reserved-actions.ts`). It carries hashes, signatures and a genesis hash only, never event content.
+
+**How the verifier uses it.** For an hour whose stored row names a vanished signature, `checkpoint_verify` / `memory_verify` / `substrate verify` read this hour's anchor session for `anchor.reanchor` notes written by an **operator surface**, and follow the newest one whose root, event count and `previous_tx_sig` equal the stored row's. The note is only a pointer: the verifier reads the transaction it names from the chain and applies the same checks as for any row (memo, recomputed root, inclusion proof, fee payer, signer valid at the block time). A note from another surface, a malformed note, or one bound to another row is ignored; a note naming a transaction that does not verify leaves the hour `unverified` or `mismatch`, never `anchored`. The `anchors` row is never rewritten.
+
+If step e reports `store-failed` after a send, do **not** send again by hand: run the same command again. It finds the transaction, adopts it and writes the note. Only if the ledger stays unwritable, emit the printed payload yourself with `events_emit` as your own operator surface and `session_id: anchor:<YYYY-MM-DDTHH>` (the verifier reads that session only).
 
 ## Abort and rollback
 
