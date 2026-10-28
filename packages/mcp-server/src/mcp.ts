@@ -21,7 +21,8 @@ import { buildFabricSuggestions } from "./fabric/optimize.ts";
 import { buildFabricStatus } from "./fabric/status.ts";
 import { DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT } from "./greptime.ts";
 import { MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS } from "./lease.ts";
-import { acknowledgeSteering, queueSteering, STEERING_ACKNOWLEDGE_INPUT, STEERING_LIST_INPUT, STEERING_QUEUE_INPUT, listSteering, steeringFailed, type SteeringCaller, type SteeringWriteResult } from "./planning/steering-tools.ts";
+import { queueSteering, STEERING_ACKNOWLEDGE_INPUT, STEERING_LIST_INPUT, STEERING_QUEUE_INPUT, listSteering, steeringFailed, type SteeringCaller, type SteeringWriteResult } from "./planning/steering-tools.ts";
+import { acknowledgeSteeringWithState } from "./planning/steering-delivery.ts";
 import { MemoryVerifyError } from "./memory-verify.ts";
 import { ragRetryDelay } from "./rag-retry.ts";
 import { reservedEmitRefusal } from "./reserved-actions.ts";
@@ -1522,7 +1523,9 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"are ignored and raw ids are never accepted. Read-only: one note event lists the returned URLs, " +
 				"and an unreachable plane answers empty with a reason instead of failing the turn. `context: true` " +
 				"adds a `context` block: up to 3 recalled memories for the question and the last 5 events of " +
-				"`session_id`, each framed untrusted.",
+				"`session_id`, each framed untrusted. While steering is on and directives are queued for `session_id`, " +
+				"the reply also carries a `steering` notice: their count and up to 3 entries (id, action, priority, age_ms, " +
+				"a redacted body of at most 200 characters). It is per call, never cached, and absent when nothing is queued.",
 			inputSchema: {
 				question: z.string().describe("The docs question, in your words."),
 				datasets: z.array(z.string()).optional().describe("Dataset names to search. Omitted means all readable datasets."),
@@ -2282,9 +2285,11 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		{
 			title: "Planning index for the configured checkout",
 			description:
-				"Counts, sha256 hashes and error records for the planning documents under the configured checkout's .planning/. " +
-				"Never a file body and never a frontmatter value. An unset root answers disabled. A read: it writes nothing and changes " +
-				"no file, and it sends no heartbeat. Changes are published by the server's planning observer, not by this tool.",
+				"Counts, sha256 hashes and error records for the planning documents under the configured checkout's .planning/, and the " +
+				"GSD-Core `position` (milestone, phase, plan, step, status, progress) parsed from STATE.md and ROADMAP.md, redacted and " +
+				"capped; a missing or malformed file is an entry in its errors. Never a file body and never a frontmatter value. An unset " +
+				"root answers disabled. A read: it writes nothing and changes no file, and it sends no heartbeat. Changes are published by " +
+				"the server's planning observer, not by this tool.",
 			inputSchema: {},
 			annotations: { readOnlyHint: true },
 		},
@@ -2298,7 +2303,9 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			description:
 				"The sessions heartbeating into the planning plane, each active, stale or unknown against the server's own clock. " +
 				"An unset root answers disabled; an unset cache endpoint answers unavailable. A read: it writes nothing and sends no " +
-				"heartbeat. The server's planning observer heartbeats a checkout when it sees that checkout change a planning document.",
+				"heartbeat. The server's planning observer heartbeats a checkout when it sees that checkout change a planning document, " +
+				"and refreshes a quiet checkout's liveness on each scan, so a session idle for hours stays active; `idleForMs` is the " +
+				"time since its last planning change.",
 			inputSchema: {},
 			annotations: { readOnlyHint: true },
 		},
@@ -2328,7 +2335,16 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				inputSchema: STEERING_QUEUE_INPUT,
 				annotations: { destructiveHint: false, idempotentHint: false },
 			},
-			async (args) => steeringReply(await queueSteering(steering, steeringCaller, args)),
+			async (args) => {
+				const queued = await queueSteering(steering, steeringCaller, args);
+				// A queued directive wakes its session with one hint (a stored `note`, no body). It never fails the queue: the
+				// directive is already audited, and the announcer reports and absorbs its own failures.
+				if (queued.status === "queued") {
+					const record = steering.inbox?.get(queued.directive_id) ?? null;
+					if (record !== null) await substrate.steeringHints.announce(record.directive);
+				}
+				return steeringReply(queued);
+			},
 		);
 		server.registerTool(
 			"steering_acknowledge",
@@ -2336,13 +2352,15 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				title: "Acknowledge a steering directive",
 				description:
 					"The calling operator acknowledges a queued directive for the target session as applied or declined. Applying a directive " +
-					"that conflicts with the active plan needs confirm: true. The acknowledgement is audited before it takes effect. A refusal " +
+					"that conflicts with the active plan needs confirm: true. The acknowledgement is audited before it takes effect. When the " +
+					"server has a live session state wired, an applied pause moves the session to PAUSED and an applied redirect to CONTEXT_REFRESH " +
+					"(annotate and declined change nothing); a transition the session refuses is reported as session_state refused, never forced. A refusal " +
 					"carries a typed error: forbidden, not-found, wrong-session, already-acknowledged, confirmation-required or audit-unavailable. " +
 					"Answers misconfigured while the steering settings are invalid.",
 				inputSchema: STEERING_ACKNOWLEDGE_INPUT,
 				annotations: { destructiveHint: false, idempotentHint: false },
 			},
-			async (args) => steeringReply(await acknowledgeSteering(steering, steeringCaller, args)),
+			async (args) => steeringReply(await acknowledgeSteeringWithState(steering, steeringCaller, args, substrate.sessionState)),
 		);
 		server.registerTool(
 			"steering_list",

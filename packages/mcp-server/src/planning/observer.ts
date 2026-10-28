@@ -32,13 +32,22 @@
  * Scans never overlap: a tick that arrives during a scan shares that scan rather than starting another. A failure is reported
  * on stderr when it appears or changes, and once more when the scans succeed again. Shutdown waits for a scan in flight.
  *
- * The baseline is process-local. The first scan is a baseline and publishes nothing. A failed publish holds the baseline,
- * so the same change is published on the next scan. The index cache is separate: it always holds the latest scan.
+ * The baseline is the ledger's view of the checkout: what it was last told. A failed publish holds it, so the same change is
+ * published on the next scan. With a baseline store (`baseline-store.ts`) the observer takes the stored baseline on its first
+ * scan and saves the baseline in the background after a change (throttled, retried while a save fails, never on a scan's
+ * critical path), so a restart publishes what changed while it was down. With no store, or no usable stored baseline, the
+ * first scan in a process is a baseline and publishes nothing. The index cache is separate: it always holds the latest scan.
+ *
+ * Liveness (phase 58): a session is alive, not only changing. With `deps.liveness` set, a scan that read the checkout refreshes
+ * the presence record without moving its change time (`livenessBeat`), so a session quiet for days stays active while the
+ * observer runs and its `idleForMs` grows. Dragonfly holds only this ephemeral record: the baseline never goes there. The beat
+ * also runs on its own timer (`livenessPeriodMs`, at most a third of the freshness window), independent of the scan interval.
  */
 import type { EventInput } from "../types.ts";
+import { BaselineStoreError, type BaselineLoad, type BaselineStore, type StoredBaseline } from "./baseline-store.ts";
 import { branchOf, gitLayout, planningSessionId, repoOf, type OriginUrlRunner, type RepoLookup } from "./checkout.ts";
 import { conflictEvent, conflictOriginMs, conflictSignature, detectConflicts, repoKey } from "./conflicts.ts";
-import type { PlanningConfigResult } from "./config.ts";
+import type { PlanningConfigError, PlanningConfigResult } from "./config.ts";
 import { diffPlanningIndex, type PlanningDiff, type PlanningSnapshot } from "./diff.ts";
 import { observePlanningChange } from "./events.ts";
 import { buildPlanningIndex, errnoCode, indexRecords, isErrorRecord, snapshotOf, updatePlanningIndex, type PlanningFs, type PlanningIndex, type PlanningIndexFailure, type PlanningIndexResult } from "./index.ts";
@@ -80,6 +89,14 @@ export type PlanningHeartbeat =
 	| { state: "presence-unset" }
 	| { state: "failed"; detail: string };
 
+/** What one scan did about the checkout's liveness. Present only when the liveness heartbeat is configured. `covered`: this scan's change heartbeat was the sign of life. */
+export type PlanningLiveness =
+	| { state: "written" }
+	| { state: "covered" }
+	| { state: "not-due" }
+	| { state: "presence-unset" }
+	| { state: "failed"; detail: string };
+
 /** What one scan did with the change it saw. `repo-unknown` is a change that cannot be attributed to a repo, so it is not published. */
 export type ObserverOutcome = "baseline" | "unchanged" | "incomplete" | "published" | "not-published" | "repo-unknown";
 
@@ -87,7 +104,7 @@ export type ObserverScan =
 	| { state: "disabled" }
 	| { state: "unavailable"; code: PlanningIndexFailure }
 	| { state: "failed"; detail: string }
-	| { state: "observed"; outcome: ObserverOutcome; heartbeat: PlanningHeartbeat };
+	| { state: "observed"; outcome: ObserverOutcome; heartbeat: PlanningHeartbeat; liveness?: PlanningLiveness };
 
 export interface PlanningObserverDeps {
 	settings: PlanningConfigResult;
@@ -105,8 +122,45 @@ export interface PlanningObserverDeps {
 	timers?: PlanningTimers;
 	/** Where a failure is reported. Omitted in production, where it goes to stderr; a test injects one to read the lines. */
 	report?: (line: string) => void;
+	/** The durable baseline store. Null or omitted keeps the baseline in memory, as before: the first scan of a process is a baseline. */
+	baselines?: BaselineStore | null;
+	/** The host clock the baseline-save throttle reads, in milliseconds. Omitted in production (`Date.now`); a test injects one. */
+	now?: () => number;
+	/** The least time between baseline saves, in milliseconds. Omitted: `DEFAULT_BASELINE_SAVE_INTERVAL_MS`. */
+	baselineSaveIntervalMs?: number;
+	/** The liveness heartbeat. Null or omitted writes none: a quiet checkout reads stale after the freshness window, as before. */
+	liveness?: LivenessSettings | null;
 	/** How the checkout's origin URL is asked of git. Omitted in production, where it is `git config --get remote.origin.url`. */
 	originUrl?: OriginUrlRunner;
+}
+
+/** Where the observer's liveness heartbeat is configured: how often a quiet checkout refreshes its record. Read by `loadLivenessSettings`. */
+export const PLANNING_LIVENESS_INTERVAL_ENV = "SUBSTRATE_PLANNING_LIVENESS_INTERVAL_MS";
+/** 0 refreshes the record on every scan. */
+export const DEFAULT_LIVENESS_INTERVAL_MS = 0;
+/** Inclusive bounds. Outside them the value is refused, not clamped. */
+export const LIVENESS_INTERVAL_BOUNDS = { min: 0, max: 3_600_000 } as const;
+
+/** The least time between baseline saves when `deps.baselineSaveIntervalMs` is omitted. */
+export const DEFAULT_BASELINE_SAVE_INTERVAL_MS = 5_000;
+
+export interface LivenessSettings {
+	/** The least time between liveness writes, in milliseconds. It never exceeds a third of the freshness window. */
+	intervalMs: number;
+}
+
+export type LivenessConfigResult = { ok: true; settings: LivenessSettings } | { ok: false; errors: PlanningConfigError[] };
+
+/** Parse the liveness settings from an environment map. A value that is set but not a plain integer in range is an error; it is never echoed. */
+export function loadLivenessSettings(env: Readonly<Record<string, string | undefined>>): LivenessConfigResult {
+	const raw = env[PLANNING_LIVENESS_INTERVAL_ENV];
+	if (raw === undefined) return { ok: true, settings: { intervalMs: DEFAULT_LIVENESS_INTERVAL_MS } };
+	if (!/^[0-9]+$/.test(raw)) return { ok: false, errors: [{ key: PLANNING_LIVENESS_INTERVAL_ENV, reason: "not-integer" }] };
+	const value = Number(raw);
+	if (!Number.isSafeInteger(value) || value < LIVENESS_INTERVAL_BOUNDS.min || value > LIVENESS_INTERVAL_BOUNDS.max) {
+		return { ok: false, errors: [{ key: PLANNING_LIVENESS_INTERVAL_ENV, reason: "out-of-range", min: LIVENESS_INTERVAL_BOUNDS.min, max: LIVENESS_INTERVAL_BOUNDS.max }] };
+	}
+	return { ok: true, settings: { intervalMs: value } };
 }
 
 /** The phase and plan of one described document. `plan` is null when the document names none. */
@@ -152,32 +206,77 @@ export class PlanningObserver {
 	private running: Promise<ObserverScan> | null = null;
 	/** The problem last reported, or null while the scans are healthy. A report fires only when the problem changes. */
 	private problem: string | null = null;
+	/** The root whose stored baseline has been looked for. A root is restored at most once, on its first successful scan. Process-local. */
+	private restoreTried: string | null = null;
+	/** The baseline last written to, or read from, the store. A baseline that differs from it is dirty. At most one snapshot is held for it. Process-local. */
+	private savedBaseline: StoredBaseline | null = null;
+	/** The save in flight, or null. It never rejects, and a scan does not wait for it. */
+	private baselineSave: Promise<void> | null = null;
+	/** When the last save was attempted, by the host clock (`deps.now`); null before the first. Saves are at least `baselineSaveIntervalMs` apart. */
+	private lastSaveAttemptMs: number | null = null;
+	/** The save failure last reported, or null while saves land. A report fires only when it changes. */
+	private saveProblem: string | null = null;
+	/** The server time of the last presence write that landed (change or liveness); null before one, or when its clock was unreadable. The liveness interval runs from it. Process-local. */
+	private lastPresenceMs: number | null = null;
+	/** The liveness timer, or undefined while it is not running. It beats independently of the scan interval. */
+	private livenessTimer: PlanningTimerHandle | undefined;
+	/** The liveness beat in flight, or null. It never rejects. */
+	private livenessRun: Promise<void> | null = null;
+	/** The liveness-timer failure last reported, or null while its beats land. A report fires only when it changes. */
+	private livenessProblem: string | null = null;
+	/** What the liveness timer beats for: the checkout the latest scan read. Null before a scan, and after a scan that could not read it. Process-local. */
+	private liveTarget: { root: string; ttlMs: number; repo: RepoLookup } | null = null;
 	private readonly timers: PlanningTimers;
 	private readonly reporter: (line: string) => void;
+	private readonly clock: () => number;
+	private readonly saveIntervalMs: number;
 
 	constructor(private readonly deps: PlanningObserverDeps) {
 		this.timers = deps.timers ?? GLOBAL_TIMERS;
 		this.reporter = deps.report ?? STDERR_REPORT;
+		this.clock = deps.now ?? Date.now;
+		this.saveIntervalMs = deps.baselineSaveIntervalMs ?? DEFAULT_BASELINE_SAVE_INTERVAL_MS;
+		if (!Number.isFinite(this.saveIntervalMs) || this.saveIntervalMs < 0) throw new RangeError("baselineSaveIntervalMs must be a non-negative number");
 	}
 
-	/** Start the scan timer at the configured cadence, unref'd. Nothing starts while the plane is disabled or misconfigured. Returns whether it is running. */
+	/**
+	 * Start the scan timer at the configured cadence, unref'd, and, when liveness is configured and a presence store exists, the
+	 * liveness timer beside it (`livenessPeriodMs`). Nothing starts while the plane is disabled or misconfigured. Returns whether it
+	 * is running. The liveness timer is scheduled first so the scan timer is the one a test's single-slot fake keeps.
+	 */
 	start(): boolean {
 		if (this.timer !== undefined) return true;
 		const resolved = resolveSettings(this.deps.settings);
 		if (!resolved.ready) return false;
+		const liveness = this.deps.liveness;
+		if (liveness !== undefined && liveness !== null && this.deps.presence !== null) {
+			this.livenessTimer = this.timers.setInterval(() => this.livenessTick(), livenessPeriodMs(liveness, resolved.limits.scanIntervalMs, resolved.limits.presenceTtlS * 1000));
+		}
 		this.timer = this.timers.setInterval(() => this.tick(), resolved.limits.scanIntervalMs);
 		return true;
 	}
 
-	/** Clear the timer. A scan in flight finishes; `idle` waits for it. No new scan starts from the timer. */
+	/** Clear both timers. A scan or liveness beat in flight finishes; `idle` waits for it. Nothing new starts from a timer. */
 	stop(): void {
 		this.timers.clearInterval(this.timer);
 		this.timer = undefined;
+		if (this.livenessTimer !== undefined) this.timers.clearInterval(this.livenessTimer);
+		this.livenessTimer = undefined;
 	}
 
-	/** Resolves once no scan is in flight. The shutdown path waits on it, inside its own bound. Never rejects. */
-	idle(): Promise<void> {
-		return this.running === null ? Promise.resolve() : this.running.then(() => undefined);
+	/**
+	 * Resolves once no scan, no liveness beat and no baseline save is in flight. A scan can start a save as it ends, so it looks
+	 * again after each wait. The shutdown path waits on it, inside its own bound, after `stop`. Never rejects.
+	 */
+	async idle(): Promise<void> {
+		for (;;) {
+			const pending: Array<Promise<unknown>> = [];
+			if (this.running !== null) pending.push(this.running);
+			if (this.livenessRun !== null) pending.push(this.livenessRun);
+			if (this.baselineSave !== null) pending.push(this.baselineSave);
+			if (pending.length === 0) return;
+			await Promise.all(pending);
+		}
 	}
 
 	/** One scan. A call made while a scan is in flight shares that scan: no second scan starts behind it. Never rejects. */
@@ -187,7 +286,10 @@ export class PlanningObserver {
 
 	private startScan(): Promise<ObserverScan> {
 		const run = this.scanOnce()
-			.catch(failedScan)
+			.catch((cause: unknown) => {
+				this.liveTarget = null;
+				return failedScan(cause);
+			})
 			.finally(() => {
 				this.running = null;
 			});
@@ -223,10 +325,13 @@ export class PlanningObserver {
 		const gapMoved = nowMs !== null ? this.stampReport(built, nowMs) : this.withdrawReport();
 		const repo = await repoOf(this.deps.fs, root, this.deps.originUrl);
 		if (!built.ok) {
+			// A checkout the scan could not read is not proven alive: the liveness timer stops beating until a scan reads it.
+			this.liveTarget = null;
 			await this.heartbeat(root, false, ttlMs, repo, nowMs);
 			return { state: "unavailable", code: built.code };
 		}
 		this.index = { root, index: built.index };
+		this.liveTarget = { root, ttlMs, repo };
 
 		const next = snapshotOf(built.index);
 		// The change since the scan before: a heartbeat reports it, so a change is heartbeated once, in the scan that sees it.
@@ -240,6 +345,7 @@ export class PlanningObserver {
 		}
 		if (this.touchedOverflow && nowMs !== null) this.report = unknownReport(nowMs, "report-limit");
 
+		if (this.restoreTried !== root && (this.baseline === null || this.baseline.root !== root)) await this.restoreBaseline(root);
 		const previous = this.baseline !== null && this.baseline.root === root ? this.baseline.snapshot : null;
 		const diff = previous === null ? null : diffPlanningIndex(previous, next);
 		const changed = diff !== null && diff.complete && changesIn(diff) > 0;
@@ -265,8 +371,10 @@ export class PlanningObserver {
 		}
 		const sinceChange = sinceLastScan !== null && sinceLastScan.complete && changesIn(sinceLastScan) > 0;
 		const heartbeat = await this.heartbeat(root, sinceChange || gapMoved, ttlMs, repo, nowMs);
+		const liveness = await this.livenessBeat(root, heartbeat, ttlMs, repo, nowMs);
 		await this.announce(root, repo, ttlMs);
-		return { state: "observed", outcome, heartbeat };
+		this.persistBaseline(root);
+		return liveness === undefined ? { state: "observed", outcome, heartbeat } : { state: "observed", outcome, heartbeat, liveness };
 	}
 
 	/**
@@ -388,7 +496,7 @@ export class PlanningObserver {
 	}
 
 	/** Writes the checkout's session record. The result is written, or failed with an error code: never a message, which can carry host paths. */
-	private async touchCheckout(root: string, presence: DragonflyPresenceStore, currentRepo: string | null, ttlMs: number): Promise<PlanningHeartbeat> {
+	private async touchCheckout(root: string, presence: DragonflyPresenceStore, currentRepo: string | null, ttlMs: number, kind: "change" | "liveness" = "change"): Promise<Extract<PlanningHeartbeat, { state: "written" | "failed" }>> {
 		try {
 			const layout = await gitLayout(this.deps.fs, root);
 			if (!layout.ok) return { state: "failed", detail: layout.reason };
@@ -402,11 +510,181 @@ export class PlanningObserver {
 				touched: this.touched,
 				...(this.report === null ? {} : { planning: this.report }),
 			};
-			await presence.touch(record, ttlMs);
+			await (kind === "liveness" ? presence.touchLiveness(record, ttlMs) : presence.touch(record, ttlMs));
 			return { state: "written" };
 		} catch (cause: unknown) {
 			return { state: "failed", detail: errnoCode(cause) };
 		}
+	}
+
+	/**
+	 * The liveness heartbeat (phase 58): a scan that read the checkout proves it alive, whether or not anything changed, so a
+	 * session that thinks for hours without touching a planning document stays active. It runs only when `deps.liveness` is set,
+	 * and only after a scan that built the index: a checkout that cannot be read is not proven alive. A scan whose change
+	 * heartbeat landed is already covered (that write is also a sign of life). A failed change heartbeat is not retried here:
+	 * the same backend would refuse it. Otherwise a write is due on the first scan and then `intervalMs` after the last presence
+	 * write, capped at a third of the freshness window so a beat always lands well inside it. A write that fails is reported
+	 * (`problemOf`) and tried again on the next scan, since a failure does not move the last-write time. The same write is also
+	 * driven by its own timer (`livenessTick`), so a scan interval longer than the freshness window cannot make a live session
+	 * look dead.
+	 */
+	private async livenessBeat(root: string, heartbeat: PlanningHeartbeat, ttlMs: number, repo: RepoLookup, nowMs: number | null): Promise<PlanningLiveness | undefined> {
+		const settings = this.deps.liveness;
+		if (settings === undefined || settings === null) return undefined;
+		const presence = this.deps.presence;
+		if (presence === null) return { state: "presence-unset" };
+		if (heartbeat.state === "written") {
+			this.lastPresenceMs = nowMs;
+			return { state: "covered" };
+		}
+		if (heartbeat.state === "failed") return { state: "failed", detail: heartbeat.detail };
+		return this.livenessWrite(root, presence, settings, ttlMs, repo, nowMs);
+	}
+
+	/** The due check and the write of one liveness beat, shared by the scan and the liveness timer. */
+	private async livenessWrite(root: string, presence: DragonflyPresenceStore, settings: LivenessSettings, ttlMs: number, repo: RepoLookup, nowMs: number | null): Promise<PlanningLiveness> {
+		if (nowMs === null) return { state: "failed", detail: "clock-unavailable" };
+		const everyMs = Math.min(settings.intervalMs, Math.floor(ttlMs / 3));
+		const elapsedMs = this.lastPresenceMs === null ? null : nowMs - this.lastPresenceMs;
+		// A server clock that moved backwards (negative elapsed time) is due: it cannot show how long the record has been held.
+		if (elapsedMs !== null && elapsedMs >= 0 && elapsedMs < everyMs) return { state: "not-due" };
+		const currentRepo = repo.state === "known" ? repo.repo : null;
+		const result = await this.touchCheckout(root, presence, currentRepo, ttlMs, "liveness");
+		if (result.state === "failed") return result;
+		this.lastPresenceMs = nowMs;
+		// The liveness record carries the same report and repository a change heartbeat does, so they are written: a view change must not re-arm a change heartbeat for them.
+		this.written = this.report;
+		this.writtenRepo = currentRepo;
+		return { state: "written" };
+	}
+
+	/**
+	 * One tick of the liveness timer, which runs on its own cadence (`livenessPeriodMs`), not the scan's. It beats for the
+	 * checkout the last scan read (`liveTarget`, dropped by a scan that could not read it); `touchCheckout` reads the git layout
+	 * again, so a checkout that has vanished since then is not written. A scan in flight beats for itself, and a beat in flight
+	 * is not doubled. Never rejects: a failure is reported once when it appears or changes, and once more on recovery.
+	 */
+	private async livenessTick(): Promise<void> {
+		const settings = this.deps.liveness;
+		const presence = this.deps.presence;
+		const target = this.liveTarget;
+		if (settings === undefined || settings === null || presence === null || target === null) return;
+		if (this.running !== null || this.livenessRun !== null) return;
+		const run = (async () => {
+			try {
+				const clock = await readClock(presence);
+				const beat = await this.livenessWrite(target.root, presence, settings, target.ttlMs, target.repo, clock.ok ? clock.nowMs : null);
+				this.noteLiveness(beat.state === "failed" ? beat.detail : null);
+			} catch (cause: unknown) {
+				this.noteLiveness(errnoCode(cause));
+			}
+		})().finally(() => {
+			this.livenessRun = null;
+		});
+		this.livenessRun = run;
+		await run;
+	}
+
+	/** Reports a liveness-timer failure when it appears or changes, and the recovery when the beats land again. Silent while nothing changes. */
+	private noteLiveness(problem: string | null): void {
+		if (problem === this.livenessProblem) return;
+		const before = this.livenessProblem;
+		this.livenessProblem = problem;
+		if (problem !== null) this.reporter(`[substrate] planning observer: liveness timer heartbeat failed: ${problem}`);
+		else if (before !== null) this.reporter("[substrate] planning observer: liveness timer heartbeats succeed again");
+	}
+
+	/**
+	 * Takes the stored baseline of this checkout as the publish baseline, once per root, so the first scan diffs the tree against
+	 * what the ledger was last told and publishes what changed while the observer was down. No store, no file, a file for another
+	 * root, or a file that cannot be used leaves no baseline, and the first scan is a baseline as before: the last three are
+	 * reported, and the next save replaces the bad file. Changes found this way are published but not claimed as touched pairs:
+	 * their time is unknown, and claiming them at restart would show a stale edit as active.
+	 */
+	private async restoreBaseline(root: string): Promise<void> {
+		this.restoreTried = root;
+		const store = this.deps.baselines;
+		if (store === undefined || store === null) return;
+		let loaded: BaselineLoad;
+		try {
+			loaded = await store.load(planningSessionId(this.deps.fs, root));
+		} catch (cause: unknown) {
+			this.reporter(`[substrate] planning observer: stored baseline not read: ${cause instanceof BaselineStoreError ? cause.message : errnoCode(cause)}; scanning as a first run`);
+			return;
+		}
+		if (loaded.state === "unusable") {
+			this.reporter(`[substrate] planning observer: stored baseline unusable (${loaded.reason}${loaded.detail === null ? "" : `: ${loaded.detail}`}); scanning as a first run`);
+			return;
+		}
+		if (loaded.state !== "loaded") return;
+		if (loaded.baseline.root !== root) {
+			this.reporter("[substrate] planning observer: stored baseline names another checkout root; scanning as a first run");
+			return;
+		}
+		this.baseline = loaded.baseline;
+		this.savedBaseline = loaded.baseline;
+	}
+
+	/**
+	 * Starts a save of the publish baseline when it differs from the stored one, no save is in flight, and the last attempt is
+	 * older than `baselineSaveIntervalMs` (host clock, injected). It never waits for the save: a slow or failing store cannot
+	 * hold a scan. A failed save leaves the baseline dirty, so a later scan tries again. A crash before a save lands loses at
+	 * most the baseline advance since the last save, so a restart may publish that change a second time: delivery is at least once.
+	 */
+	private persistBaseline(root: string): void {
+		const baseline = this.baseline;
+		if (this.deps.baselines === undefined || this.deps.baselines === null || baseline === null || baseline.root !== root) return;
+		if (this.baselineSave !== null) return;
+		// Equal content needs no save. The newest object is held, not the first one saved, so a quiet tree retains one snapshot.
+		if (this.savedBaseline !== null && sameBaseline(this.savedBaseline, baseline)) {
+			this.savedBaseline = baseline;
+			return;
+		}
+		const nowMs = this.clock();
+		const sinceMs = this.lastSaveAttemptMs === null ? null : nowMs - this.lastSaveAttemptMs;
+		// A host clock that moved backwards (negative elapsed time) is due.
+		if (sinceMs !== null && sinceMs >= 0 && sinceMs < this.saveIntervalMs) return;
+		this.startSave(baseline, nowMs);
+	}
+
+	/** Saves `baseline` in the background. The result is recorded, never thrown: a failure is reported once and the baseline stays dirty. */
+	private startSave(baseline: StoredBaseline, nowMs: number): void {
+		const store = this.deps.baselines;
+		if (store === undefined || store === null) return;
+		this.lastSaveAttemptMs = nowMs;
+		this.baselineSave = (async () => {
+			try {
+				await store.save(planningSessionId(this.deps.fs, baseline.root), baseline);
+				this.savedBaseline = baseline;
+				this.noteSave(null);
+			} catch (cause: unknown) {
+				this.noteSave(cause instanceof BaselineStoreError ? cause.message : errnoCode(cause));
+			}
+		})().finally(() => {
+			this.baselineSave = null;
+		});
+	}
+
+	/** Reports a save failure when it appears or changes, and the recovery when saves land again. Silent while nothing changes. */
+	private noteSave(problem: string | null): void {
+		if (problem === this.saveProblem) return;
+		const before = this.saveProblem;
+		this.saveProblem = problem;
+		if (problem !== null) this.reporter(`[substrate] planning observer: baseline save failed: ${problem}; it is retried`);
+		else if (before !== null) this.reporter("[substrate] planning observer: baseline saves succeed again");
+	}
+
+	/**
+	 * Saves the publish baseline now when it is dirty, ignoring the throttle, and waits for it. The shutdown path calls it (inside
+	 * its own bound) so a clean stop loses no baseline advance. Never rejects: a failure is reported like any other save failure.
+	 */
+	async flushBaseline(): Promise<void> {
+		while (this.baselineSave !== null) await this.baselineSave;
+		const baseline = this.baseline;
+		if (this.deps.baselines === undefined || this.deps.baselines === null || baseline === null) return;
+		if (this.savedBaseline !== null && sameBaseline(this.savedBaseline, baseline)) return;
+		this.startSave(baseline, this.clock());
+		await this.baselineSave;
 	}
 
 	/**
@@ -513,7 +791,31 @@ function problemOf(scan: ObserverScan): string | null {
 	if (scan.state === "unavailable") return `scan unavailable: ${scan.code}`;
 	if (scan.state === "failed") return `scan failed: ${scan.detail}`;
 	if (scan.heartbeat.state === "failed") return `heartbeat failed: ${scan.heartbeat.detail}`;
+	if (scan.liveness?.state === "failed") return `liveness heartbeat failed: ${scan.liveness.detail}`;
 	if (scan.outcome === "not-published") return "a change was not stored by the ledger, and is retried on the next scan";
 	if (scan.outcome === "repo-unknown") return "a change could not be attributed to a repo, so nothing was published";
 	return null;
+}
+
+/** True when two baselines say the same: the same root and the same documents, hashes, truncation and unlisted directories. */
+function sameBaseline(a: StoredBaseline, b: StoredBaseline): boolean {
+	if (a === b) return true;
+	if (a.root !== b.root || a.snapshot.truncated !== b.snapshot.truncated) return false;
+	if (a.snapshot.unlisted.length !== b.snapshot.unlisted.length || a.snapshot.records.length !== b.snapshot.records.length) return false;
+	if (a.snapshot.unlisted.some((path, index) => path !== b.snapshot.unlisted[index])) return false;
+	return a.snapshot.records.every((record, index) => {
+		const other = b.snapshot.records[index];
+		return other !== undefined && other.path === record.path && other.sha256 === record.sha256;
+	});
+}
+
+/**
+ * The period of the liveness timer, in milliseconds. It never exceeds a third of the freshness window, so a beat lands well
+ * inside it whatever the scan interval is, and it follows the configured interval when that is shorter. An interval of 0 means
+ * a beat as often as a scan would, so it takes the scan interval, still capped at a third of the window.
+ */
+export function livenessPeriodMs(settings: LivenessSettings, scanIntervalMs: number, ttlMs: number): number {
+	const cap = Math.floor(ttlMs / 3);
+	const wanted = settings.intervalMs > 0 ? settings.intervalMs : scanIntervalMs;
+	return Math.max(1, Math.min(wanted, cap));
 }

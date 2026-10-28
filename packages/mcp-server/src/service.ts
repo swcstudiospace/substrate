@@ -173,11 +173,14 @@ import { RailwayClient } from "./railway.ts";
 import { nodePlanningFs } from "./planning/fs.ts";
 import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
 import { DragonflyPresenceStore } from "./planning/presence-dragonfly.ts";
-import { PlanningObserver, type PlanningObserverDeps } from "./planning/observer.ts";
+import { PlanningObserver, type PlanningObserverDeps, type PlanningTimers } from "./planning/observer.ts";
+import { FileBaselineStore } from "./planning/baseline-store.ts";
 import { PlanningReader } from "./planning/read.ts";
 import { completionStoreView, type CompletionStoreView } from "./planning/checkpoint-store.ts";
 import type { SteeringWiring } from "./planning/steering-tools.ts";
 import { SteeringInbox, type SteeringHistorySink } from "./planning/steering.ts";
+import { DEFAULT_STEERING_RESTORE_LIMIT, DEFAULT_STEERING_RESTORE_MAX_PAGES, restoreSteeringInboxPaged, type SteeringAuditSink, type SteeringRestoreStop } from "./planning/steering-store.ts";
+import { SteeringExpirySweeper, SteeringHintAnnouncer, steeringNoticeFor, type SessionStatePort, type SteeringNotice } from "./planning/steering-delivery.ts";
 import type { FabricSources } from "./fabric/types.ts";
 import { FABRIC_HEALTH_WINDOW_MS } from "./fabric/gather.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
@@ -1423,6 +1426,14 @@ export class Substrate {
 	readonly steering: SteeringWiring;
 	/** Phase 52: the planning observer, the plane's only writer: it publishes a checkout's change and heartbeats it. Started by `startPlanning`. */
 	readonly planningObserver: PlanningObserver;
+	/** Phase 58: the Postgres audit sink behind the inbox while `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` is on (or a test injects one). Null keeps the inbox in memory. */
+	private readonly steeringDurable: SteeringAuditSink | null;
+	/** Phase 58: closes directives nobody acknowledged in time. Null unless the inbox is durable. Started by `startSteering`. */
+	private readonly steeringSweeper: SteeringExpirySweeper | null;
+	/** Phase 58: one wake-up hint per queued directive. */
+	readonly steeringHints: SteeringHintAnnouncer;
+	/** Phase 58: the live session state an acknowledgement drives. Null in this branch's production wiring: the adapter joins when the live session state machine does. */
+	readonly sessionState: SessionStatePort | null;
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
@@ -1447,8 +1458,19 @@ export class Substrate {
 			rpc?: Rpc;
 			/** Tests inject the planning filesystem, presence store and ledger write; production builds them from config. */
 			planning?: Partial<Omit<PlanningObserverDeps, "settings">> & { checkpoints?: CompletionStoreView };
-			/** Tests and wiring inject the steering audit sink. With none, the steering writes answer not-configured and record nothing. */
-			steering?: { history: SteeringHistorySink | null };
+			/**
+			 * Tests and wiring inject the steering audit sink. With none, the steering writes answer not-configured and record nothing.
+			 * `durable` is a sink that also reads (the Postgres one): it becomes the inbox's history, the restart reads come from it and
+			 * the expiry sweep runs. Without it, no restore and no sweep happen.
+			 */
+			steering?: {
+				history: SteeringHistorySink | null;
+				durable?: SteeringAuditSink | null;
+				sessionState?: SessionStatePort | null;
+				timers?: PlanningTimers;
+				nowMs?: () => number;
+				report?: (line: string) => void;
+			};
 		},
 		observer: SubstrateObserver = {},
 	) {
@@ -1523,6 +1545,14 @@ export class Substrate {
 		const planningFs = planningDeps.fs ?? nodePlanningFs();
 		const planningPresence = planningDeps.presence !== undefined ? planningDeps.presence : productionPresence(config);
 		this.planning = new PlanningReader({ settings: config.planning, fs: planningFs, presence: planningPresence, checkpoints: planningDeps.checkpoints ?? completionStoreView(config.planningCheckpoint) });
+		const baselineDirectory = config.planningBaseline.ok ? config.planningBaseline.directory : null;
+		const baselineProblems = config.planningBaseline.ok ? [] : config.planningBaseline.errors;
+		const livenessProblems = config.planningLiveness.ok ? [] : config.planningLiveness.errors;
+		// A bad baseline directory or liveness interval never refuses boot: the keys are named once, and the observer runs with
+		// an in-memory baseline and the default liveness interval (every scan), which is what unset means.
+		if (baselineProblems.length + livenessProblems.length > 0) {
+			process.stderr.write(`[substrate] planning settings invalid; using the defaults for: ${[...baselineProblems, ...livenessProblems].map((error) => error.key).join(", ")}\n`);
+		}
 		this.planningObserver = new PlanningObserver({
 			settings: config.planning,
 			fs: planningFs,
@@ -1530,25 +1560,50 @@ export class Substrate {
 			// A keyed conflict warning asks for the replay lookup, so under `accept` as under `enforce` any number of observers leave one row.
 			emit: planningDeps.emit ?? (async (event: EventInput) => (await this.emit(event, { replay: true })).stored),
 			dedup: planningDeps.dedup ?? config.eventIdempotency !== "off",
+			timers: planningDeps.timers,
+			report: planningDeps.report,
+			now: planningDeps.now,
+			baselineSaveIntervalMs: planningDeps.baselineSaveIntervalMs,
+			baselines: planningDeps.baselines !== undefined ? planningDeps.baselines : baselineDirectory === null ? null : new FileBaselineStore(baselineDirectory),
+			// Liveness runs whenever presence does: a quiet checkout is alive while its observer scans.
+			liveness: planningDeps.liveness !== undefined ? planningDeps.liveness : planningPresence === null ? null : { intervalMs: config.planningLiveness.ok ? config.planningLiveness.settings.intervalMs : 0 },
 		});
-		// Phase 53 (SOTA-09): the steering inbox. Built only while SUBSTRATE_PLANNING_STEERING is on and an audit sink is injected.
+		// Phase 53 (SOTA-09): the steering inbox. Built only while SUBSTRATE_PLANNING_STEERING is on and an audit sink exists.
 		// Invalid settings keep the tools registered, so they answer `misconfigured` naming the keys, and the keys are logged once at boot.
+		// Phase 58: the acknowledgement deadline and sweep interval are part of those settings.
 		const steeringSettings = config.steering.ok ? config.steering.settings : null;
-		const steeringErrors = config.steering.ok ? [] : config.steering.errors;
+		const steeringErrors = [...(config.steering.ok ? [] : config.steering.errors), ...(config.steeringExpiry.ok ? [] : config.steeringExpiry.errors)];
 		if (steeringErrors.length > 0) {
 			process.stderr.write(`[substrate] steering settings invalid; steering tools answer misconfigured: ${steeringErrors.map((error) => error.key).join(", ")}\n`);
 		}
-		const steeringHistory = stores?.steering?.history ?? null;
-		const steeringClock = { nowMs: () => Date.now() };
+		const steeringSeam = stores?.steering;
+		// The durable sink: injected, or the audit table's own sink when its opt-in is on and an index exists. Any other case
+		// keeps the inbox exactly as it was before phase 58: in memory, with whatever history was injected (none in production).
+		this.steeringDurable =
+			steeringSeam !== undefined
+				? (steeringSeam.durable ?? null)
+				: config.steeringAuditTable && steeringSettings !== null && steeringSettings.enabled && this.index !== null
+					? this.index.steeringAudit()
+					: null;
+		const steeringHistory = this.steeringDurable ?? steeringSeam?.history ?? null;
+		const steeringClock = { nowMs: steeringSeam?.nowMs ?? (() => Date.now()) };
+		const ackTtlMs = this.steeringDurable !== null && config.steeringExpiry.ok ? config.steeringExpiry.settings.ackTtlMs : undefined;
+		const steeringInbox =
+			steeringSettings !== null && steeringSettings.enabled && steeringHistory !== null && steeringErrors.length === 0
+				? new SteeringInbox({ history: steeringHistory, clock: steeringClock, policy: ackTtlMs === undefined ? steeringSettings : { ...steeringSettings, ackTtlMs } })
+				: null;
 		this.steering = {
 			enabled: config.steeringRegistered,
 			clock: steeringClock,
 			settingsErrors: steeringErrors,
-			inbox:
-				steeringSettings !== null && steeringSettings.enabled && steeringHistory !== null
-					? new SteeringInbox({ history: steeringHistory, clock: steeringClock, policy: steeringSettings })
-					: null,
+			inbox: steeringInbox,
 		};
+		this.sessionState = steeringSeam?.sessionState ?? null;
+		this.steeringHints = new SteeringHintAnnouncer({ emit: async (event: EventInput) => (await this.emit(event)).stored, report: steeringSeam?.report });
+		this.steeringSweeper =
+			steeringInbox !== null && this.steeringDurable !== null && config.steeringExpiry.ok
+				? new SteeringExpirySweeper({ inbox: steeringInbox, intervalMs: config.steeringExpiry.settings.expirySweepMs, nowMs: steeringSeam?.nowMs, timers: steeringSeam?.timers, report: steeringSeam?.report })
+				: null;
 		// uplift-2 R1
 		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays, graphRead: config.requestPath.briefGraphRead };
 		this.narrowBumps = config.requestPath.cacheBumpScope === "narrow";
@@ -2997,10 +3052,69 @@ export class Substrate {
 		return this.planningObserver.start();
 	}
 
-	/** Phase 52: clear the planning observer's timer, then resolve once a scan in flight has finished. The caller bounds the wait. */
+	/**
+	 * Phase 52: clear the planning observer's timer, then resolve once a scan in flight has finished. The caller bounds the wait.
+	 * Phase 58: the baseline is then flushed, so a clean stop loses no baseline advance. The flush never rejects.
+	 */
 	async stopPlanning(): Promise<void> {
 		this.planningObserver.stop();
 		await this.planningObserver.idle();
+		await this.planningObserver.flushBaseline();
+	}
+
+	/**
+	 * Phase 58 (live steering): bring the durable inbox up. With the audit table opt-in on, the open directives are read back
+	 * from `planning_steering_audit` into the inbox (nothing is audited by a restore), then the expiry sweep timer starts (unref'd).
+	 * A read that fails is reported on stderr and the inbox starts empty: it never refuses boot. Without a durable sink this
+	 * does nothing. Safe to call twice: a restore is idempotent and the sweeper starts once.
+	 */
+	async startSteering(): Promise<{ restored: number; skipped: number; truncated: boolean; readFailed: string | null; sweeping: boolean }> {
+		const inbox = this.steering.inbox;
+		const sink = this.steeringDurable;
+		const none = { restored: 0, skipped: 0, truncated: false, readFailed: null, sweeping: false };
+		if (inbox === null || sink === null) return none;
+		let outcome: { restored: number; skipped: number; truncated: boolean; readFailed: string | null; stoppedBy: SteeringRestoreStop | null } = { restored: 0, skipped: 0, truncated: false, readFailed: null, stoppedBy: null };
+		try {
+			// Every page of open directives, not one read: a directive past the first page would otherwise be missed until the next restart. The page cap is named when hit.
+			const result = await restoreSteeringInboxPaged(inbox, sink, { limit: DEFAULT_STEERING_RESTORE_LIMIT, maxPages: DEFAULT_STEERING_RESTORE_MAX_PAGES });
+			if (result.ok) {
+				outcome = { restored: result.value.report.restored.length, skipped: result.value.report.skipped.length, truncated: result.value.truncated, readFailed: null, stoppedBy: result.value.stoppedBy };
+			} else {
+				outcome = { ...outcome, readFailed: result.error.code };
+			}
+		} catch (cause) {
+			// A restore must never refuse boot: the directives stay in the append-only table, and the inbox starts empty.
+			outcome = { ...outcome, readFailed: cause instanceof Error && cause.name !== "" ? cause.name : "UNKNOWN" };
+		}
+		if (outcome.readFailed !== null) {
+			process.stderr.write(`[substrate] steering restore failed (${outcome.readFailed}); the inbox starts empty and the open directives stay in planning_steering_audit\n`);
+		} else {
+			process.stdout.write(`[substrate] steering: ${outcome.restored} open directive(s) restored${outcome.skipped > 0 ? `, ${outcome.skipped} skipped` : ""}${outcome.truncated ? ` (not every open directive was restored: ${outcome.stoppedBy ?? "truncated"}; the rest stay in planning_steering_audit)` : ""}\n`);
+		}
+		const { stoppedBy: _stoppedBy, ...restored } = outcome;
+		return { ...restored, sweeping: this.steeringSweeper?.start() ?? false };
+	}
+
+	/** Phase 58: clear the expiry timer and start no further pass, then resolve once a pass in flight has finished. The caller bounds the wait. */
+	async stopSteering(): Promise<void> {
+		this.steeringSweeper?.stop();
+		await this.steeringSweeper?.idle();
+	}
+
+	/**
+	 * Phase 58: the `steering` notice for one session's `docs_search`, or null: steering off, no session named, nothing queued, or
+	 * the inbox could not be read. Never throws. The inbox is in memory, so this is a map walk and never delays a search.
+	 */
+	private steeringNoticeOf(sessionId: string | undefined): SteeringNotice | null {
+		const inbox = this.steering.inbox;
+		if (inbox === null || sessionId === undefined) return null;
+		try {
+			return steeringNoticeFor(inbox, sessionId, this.steering.clock.nowMs());
+		} catch (cause) {
+			// Fail-open: a notice is a courtesy on a search that already succeeded. A fault here is reported and the reply goes out without it.
+			process.stderr.write(`[substrate] steering notice skipped: ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200)}\n`);
+			return null;
+		}
 	}
 
 	/** Start the recall prefetch, the Hindsight inventory and the cache preloader (phase 47). The first two are no-ops while their flags are off; each timer is unref'd. */
@@ -5017,8 +5131,11 @@ export class Substrate {
 		const chunks = question.trim().length === 0 || !configured || input.probe === true ? await load() : await cached();
 		// The context is attached per call, after the chunks: a session's events
 		// belong to that session, so the cached answer never carries them.
-		if (input.context !== true) return chunks;
-		return { ...chunks, context: await this.docsContextOf(question, callerSurface, sessionId) };
+		const answered = input.context === true ? { ...chunks, context: await this.docsContextOf(question, callerSurface, sessionId) } : chunks;
+		// The steering notice is per call like the context: it names the calling session's queued directives, so it is attached
+		// after the cache and a reply that carries it is never stored (`searchReplyStorable`).
+		const steering = this.steeringNoticeOf(sessionId);
+		return steering === null ? answered : { ...answered, steering };
 	}
 
 	/**

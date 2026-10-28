@@ -24,8 +24,10 @@ import { hindsightBanksFromEnv } from "./planes/hindsight.ts";
 import { loadRecallConfig, parseRecallScope, type RecallConfig, type RecallScope } from "./recall-snapshot.ts";
 import { DEFAULT_TANDEM_OPTIONS, parseTandemOptions, type TandemOptions } from "./tandem-recall.ts";
 import { loadCheckpointDirectory, loadPlanningSettings, type CheckpointDirectoryResult, type PlanningConfigResult } from "./planning/config.ts";
-import { loadSteeringSettings, steeringToolsRegistered, type SteeringConfigResult } from "./planning/steering.ts";
+import { loadSteeringExpirySettings, loadSteeringSettings, steeringToolsRegistered, type SteeringConfigResult, type SteeringExpiryConfigResult } from "./planning/steering.ts";
 import { steeringAuditTableEnabled } from "./planning/steering-store.ts";
+import { loadBaselineDirectory, type BaselineDirectoryResult } from "./planning/baseline-store.ts";
+import { loadLivenessSettings, type LivenessConfigResult } from "./planning/observer.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
 import { EVENT_IDEMPOTENCY_MODES, MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type EventIdempotencyMode, type MemoryExpiryMode, type Surface } from "./types.ts";
 
@@ -651,6 +653,12 @@ export interface SubstrateConfig {
 	steeringAuditTable: boolean;
 	/** Whether the steering tools are registered: the switch is on, or it is malformed and so answered as `misconfigured`. Off registers none. */
 	steeringRegistered: boolean;
+	/** `SUBSTRATE_PLANNING_STEERING_ACK_TTL_S` and `SUBSTRATE_PLANNING_STEERING_EXPIRY_SWEEP_S` (phase 58): the acknowledgement deadline and the expiry sweep interval. A bad value is a typed result, and the steering tools answer `misconfigured`. See `planning/steering.ts`. */
+	steeringExpiry: SteeringExpiryConfigResult;
+	/** `SUBSTRATE_PLANNING_BASELINE_DIR` (phase 58): where the observer keeps its publish baseline durably. Unset keeps it in memory. See `planning/baseline-store.ts`. */
+	planningBaseline: BaselineDirectoryResult;
+	/** `SUBSTRATE_PLANNING_LIVENESS_INTERVAL_MS` (phase 58): how often a quiet checkout refreshes its presence record. See `planning/observer.ts`. */
+	planningLiveness: LivenessConfigResult;
 	// uplift-3 N2 — restart-durable SLO history and notifications
 	/**
 	 * Where the SLO checkpoint is written and restored from
@@ -1138,6 +1146,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// Phase 53 (SOTA-09): the audit table opt-in. Off creates nothing at boot; on creates it through the gated migration step.
 		steeringAuditTable: steeringAuditTableEnabled(env),
 		steeringRegistered: steeringToolsRegistered(env),
+		// Phase 58 (live steering): the acknowledgement deadline and the expiry sweep interval. Environment only; a bad value is a typed result.
+		steeringExpiry: loadSteeringExpirySettings(env),
+		// Phase 58: the durable observer baseline directory and the liveness interval. Environment only; a bad value is a typed result.
+		planningBaseline: loadBaselineDirectory(env),
+		planningLiveness: loadLivenessSettings(env),
 	};
 }
 

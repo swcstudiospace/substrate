@@ -51,6 +51,7 @@ import type {
 	Surface,
 } from "./types.ts";
 import { EDGE_KINDS } from "./types.ts";
+import { SteeringAuditSink, bunSteeringAuditReadSql, bunSteeringAuditSql } from "./planning/steering-store.ts";
 import {
 	DEFAULT_LEASE_TTL_SECONDS,
 	decideClaim,
@@ -662,6 +663,27 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 				)
 			)`,
 	},
+	// Steering audit reason (phase 58, live steering): why a system closed a directive. A queued directive nobody
+	// acknowledged in time is closed by an acknowledged row with outcome 'declined' and reason 'timeout'; a human
+	// acknowledgement leaves it NULL. Same opt-in as step 33: with SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE off this
+	// step is skipped and not ledgered, and the table it alters does not exist.
+	// Additive and idempotent: one nullable column added `if not exists`, with its check inline so it is added only with
+	// the column. No existing row is touched, and existing rows keep their payload hash because a NULL reason is left
+	// out of the hash. The shape check of step 33 is left as it is: it does not mention the column.
+	// OPERATORS: rehearse on a restored dump before production, like step 33.
+	{
+		version: 34,
+		name: "planning_steering_audit_reason",
+		optIn: "steering-audit",
+		phase: "expand",
+		down: `alter table planning_steering_audit drop column if exists reason`,
+		sql: `
+			alter table planning_steering_audit
+				add column if not exists reason text
+				constraint planning_steering_audit_reason_check check (
+					reason is null or (transition = 'acknowledged' and outcome = 'declined' and reason = 'timeout')
+				)`,
+	},
 ];
 
 /** The steps `migrate()` runs for these opt-ins, in version order. A step whose opt-in is off is left out and not ledgered. */
@@ -691,6 +713,15 @@ export class IndexStore implements MemoryStore {
 	/** One index call under the plane gate. Without a gate it is just `fn()`. */
 	private plane<T>(op: string, fn: () => Promise<T>): Promise<T> {
 		return callPlane(this.gate, op, fn, { isFailure: isStoreFailure });
+	}
+
+	/**
+	 * The steering audit sink over this store's pool (phase 58, live steering): the append-only `planning_steering_audit`
+	 * writes and the bounded reads that restore the inbox after a restart. It only builds the sink; no statement runs until
+	 * the inbox uses it, and the table exists only when the `steering-audit` opt-in ran its migration steps.
+	 */
+	steeringAudit(): SteeringAuditSink {
+		return new SteeringAuditSink(bunSteeringAuditSql(this.sql), bunSteeringAuditReadSql(this.sql));
 	}
 
 	/**
