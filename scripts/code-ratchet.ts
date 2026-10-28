@@ -10,32 +10,51 @@
  *   bun scripts/code-ratchet.ts          print the counters next to the baseline
  *   bun scripts/code-ratchet.ts --check  exit 1 when a source counter exceeds its baseline
  *   bun scripts/code-ratchet.ts --write  rewrite the baseline from the current counters
+ *   bun scripts/code-ratchet.ts --with-tests  also print the informational test counters
+ *
+ * `--write` only ever lowers: when the baseline file exists and any source
+ * counter is above its baseline value, it prints the offending counters, exits
+ * 1 and leaves the file untouched. Raising a baseline means deleting the file
+ * deliberately, in a reviewed change, and generating it again.
  *
  * Source = every non-`*.test.ts` file under packages/** and scripts/**.
- * Test = every `*.test.ts` file there. Test counters are reported and stored
- * for information; only source counters gate.
+ * Test files (`*.test.ts`) are skipped unless `--with-tests` / `scan(root, { includeTests: true })`
+ * asks for them; their counters are informational, are not stored in the baseline and never gate.
  *
- * Counters (matches inside string literals, template text, regex literals and
- * comments are ignored, except the suppression counters, which live in comments):
- *   explicit_any                 `: any`, `as any`, `<any>`, `any[]`, `Record<string, any>`
+ * Counting is syntax-based: every file is parsed once (no parent pointers, ScriptKind.TS) with the
+ * TypeScript compiler API and walked with `ts.forEachChild`, so strings, template text, regex literals
+ * and comments can never be mistaken for code. Comments are collected without visiting tokens: for each
+ * AST node the leading trivia at `node.pos` and the trailing trivia at `node.end` are read (de-duplicated
+ * on comment position), plus the trivia before the end-of-file token. That sees every comment that sits
+ * between AST nodes, which includes suppression directives (they precede a statement, member or
+ * property). A comment inside an otherwise-empty construct has no child node to carry it and is covered
+ * by the node text itself instead: an empty block reads its inner trivia explicitly, and the empty-catch
+ * counter inspects the block's inner text. A file whose text contains none of the substrings a counter
+ * needs is not parsed (a pure optimisation).
+ *
+ *   explicit_any                 every `any` type keyword (annotations, casts, generics, aliases, unions)
  *   as_unknown_as                double casts through unknown
  *   ts_suppressions              the three TypeScript suppression comments (ignore, expect-error, nocheck)
  *   lint_suppressions            biome and eslint suppression comments
- *   non_null_assertions          `x!.y`, `x!;`, `x!)`, `x!,`, `x![i]` (`!=` and `!==` never match)
- *   empty_catch                  an empty catch block (no comment and no statement inside the braces)
- *   console_calls                console.log/error/warn/info/debug in packages/<pkg>/src
- *   process_exit_non_entrypoint  process.exit( in a file that is not a CLI entrypoint
- *   json_parse_casts             `JSON.parse(...) as <Type>` (one level of nested parentheses allowed)
+ *   non_null_assertions          every postfix `!` assertion (`x!.y`, `x!()`, `x![i]`, a trailing `x!`)
+ *   empty_catch                  a catch block with no statement and no comment inside the braces
+ *   console_calls                console.log/error/warn/info/debug calls in packages/<pkg>/.../src
+ *   process_exit_non_entrypoint  process.exit(...) calls in a file that is not a CLI entrypoint
+ *   json_parse_casts             `JSON.parse(...) as <Type>` for any type except unknown and const
  *
  * A CLI entrypoint is a file that has a shebang, uses import.meta.main,
- * carries a line comment consisting of the word ratchet-entrypoint (put it
- * above the guard that makes the file run), is named `*-run.ts`, `index.ts`
- * or `main.ts`, or lives under scripts/. Such files may call process.exit.
+ * carries a line comment consisting of the word ratchet-entrypoint (on its own
+ * line, above the guard that makes the file run), is named `*-run.ts`,
+ * `index.ts` or `main.ts`, or lives under scripts/. Such files may call
+ * process.exit.
  *
  * Deterministic: sorted walk, no network, node_modules, dist and .git skipped.
+ * A scanned root that does not exist is skipped; any other read error throws,
+ * so an incomplete scan can never pass.
  */
-import { type Dirent, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { type Dirent, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, sep } from "node:path";
+import * as ts from "typescript";
 
 export const COUNTER_NAMES = [
 	"explicit_any",
@@ -51,9 +70,10 @@ export const COUNTER_NAMES = [
 
 export type CounterName = (typeof COUNTER_NAMES)[number];
 export type CounterSet = Record<CounterName, number>;
-export type Counters = { source: CounterSet; test: CounterSet };
+/** `test` is present only when the scan was asked to include test files. */
+export type Counters = { source: CounterSet; test?: CounterSet | undefined };
 export type BaselineCounters = Partial<Record<CounterName, number>>;
-export type Baseline = { _generated_by: string; source: BaselineCounters; test: BaselineCounters };
+export type Baseline = { _generated_by: string; source: BaselineCounters };
 
 export const BASELINE_COMMAND = "bun scripts/code-ratchet.ts --write";
 export const BASELINE_PATH = join(import.meta.dir, "code-ratchet.baseline.json");
@@ -62,257 +82,20 @@ export const LOWER_BASELINE_MESSAGE = "ratchet: lower the baseline in scripts/co
 const SKIPPED_DIRECTORIES = new Set(["node_modules", "dist", ".git"]);
 const SCANNED_ROOTS = ["packages", "scripts"];
 
-const NEWLINE = 10;
-const CARRIAGE_RETURN = 13;
-const SLASH = 47;
-const STAR = 42;
-const BACKSLASH = 92;
-const BACKTICK = 96;
-const SINGLE_QUOTE = 39;
-const DOUBLE_QUOTE = 34;
-const OPEN_BRACE = 123;
-const CLOSE_BRACE = 125;
-
-/** Characters after which a `/` starts a regex literal rather than a division. */
-const REGEX_PRECEDERS = "(,=:[!&|?{};+-*%<>~^";
-const REGEX_KEYWORDS = new Set(["return", "typeof", "case", "throw", "else", "do", "in", "of", "void", "delete", "await", "yield", "new"]);
-
-function isIdentifierCode(code: number): boolean {
-	return (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 95 || code === 36 || code > 127;
-}
-
-function isWhitespaceCode(code: number): boolean {
-	return code === 32 || code === 9 || code === NEWLINE || code === CARRIAGE_RETURN;
-}
-
-export type MaskedSource = {
-	/** Strings, template text, regex literals and comments blanked. */
-	code: string;
-	/** Strings, template text and regex literals blanked; comments kept. */
-	commented: string;
-};
-
-/**
- * Blank every non-code region with spaces, keeping newlines and all offsets, so
- * line structure survives and matchers cannot fire on text that is not code.
- */
-export function maskSource(text: string): MaskedSource {
-	const length = text.length;
-	const code = new Uint16Array(length);
-	const commented = new Uint16Array(length);
-	for (let index = 0; index < length; index += 1) {
-		const unit = text.charCodeAt(index);
-		code[index] = unit;
-		commented[index] = unit;
-	}
-	const blank = (target: Uint16Array, from: number, to: number): void => {
-		for (let index = from; index < to; index += 1) {
-			const unit = text.charCodeAt(index);
-			target[index] = unit === NEWLINE || unit === CARRIAGE_RETURN ? unit : 32;
-		}
-	};
-	const blankBoth = (from: number, to: number): void => {
-		blank(code, from, to);
-		blank(commented, from, to);
-	};
-
-	/** End index (exclusive of the closing quote) of a quoted string starting at `start`. */
-	const stringEnd = (start: number, quote: number): number => {
-		let index = start + 1;
-		while (index < length) {
-			const unit = text.charCodeAt(index);
-			if (unit === BACKSLASH) index += 2;
-			else if (unit === quote || unit === NEWLINE) return index;
-			else index += 1;
-		}
-		return length;
-	};
-
-	/** Index of the closing slash of a regex literal opening at `start`, or -1 when it is not one. */
-	const regexEnd = (start: number): number => {
-		let inClass = false;
-		let index = start + 1;
-		while (index < length) {
-			const unit = text.charCodeAt(index);
-			if (unit === NEWLINE) return -1;
-			if (unit === BACKSLASH) {
-				index += 2;
-				continue;
-			}
-			if (unit === 91) inClass = true;
-			else if (unit === 93) inClass = false;
-			else if (unit === SLASH && !inClass) return index;
-			index += 1;
-		}
-		return -1;
-	};
-
-	// Brace depth inside each open `${ ... }` template expression, innermost last.
-	const expressions: number[] = [];
-
-	/** Blank template text from `from`; returns the index to resume code scanning at. */
-	const templateBody = (from: number): number => {
-		let index = from;
-		while (index < length) {
-			const unit = text.charCodeAt(index);
-			if (unit === BACKSLASH) {
-				index += 2;
-				continue;
-			}
-			if (unit === BACKTICK) {
-				blankBoth(from, index);
-				return index + 1;
-			}
-			if (unit === 36 && text.charCodeAt(index + 1) === OPEN_BRACE) {
-				blankBoth(from, index);
-				expressions.push(0);
-				return index + 2;
-			}
-			index += 1;
-		}
-		blankBoth(from, length);
-		return length;
-	};
-
-	let index = 0;
-	let previous = "";
-	let previousWord = "";
-	if (text.startsWith("#!")) {
-		const end = text.indexOf("\n");
-		index = end < 0 ? length : end;
-		blankBoth(0, index);
-	}
-	while (index < length) {
-		const unit = text.charCodeAt(index);
-		if (unit === SLASH) {
-			const next = text.charCodeAt(index + 1);
-			if (next === SLASH) {
-				const end = text.indexOf("\n", index);
-				const stop = end < 0 ? length : end;
-				blank(code, index, stop);
-				index = stop;
-				continue;
-			}
-			if (next === STAR) {
-				const end = text.indexOf("*/", index + 2);
-				const stop = end < 0 ? length : end + 2;
-				blank(code, index, stop);
-				index = stop;
-				continue;
-			}
-			if (previous === "" || REGEX_PRECEDERS.includes(previous) || (previous === "a" && REGEX_KEYWORDS.has(previousWord))) {
-				const close = regexEnd(index);
-				if (close > 0) {
-					blankBoth(index + 1, close);
-					index = close + 1;
-					previous = "a";
-					previousWord = "";
-					continue;
-				}
-			}
-			previous = "/";
-			previousWord = "";
-			index += 1;
-			continue;
-		}
-		if (unit === SINGLE_QUOTE || unit === DOUBLE_QUOTE) {
-			const close = stringEnd(index, unit);
-			blankBoth(index + 1, close);
-			index = close < length && text.charCodeAt(close) === unit ? close + 1 : close;
-			previous = '"';
-			previousWord = "";
-			continue;
-		}
-		if (unit === BACKTICK) {
-			index = templateBody(index + 1);
-			previous = '"';
-			previousWord = "";
-			continue;
-		}
-		if (unit === OPEN_BRACE) {
-			if (expressions.length > 0) expressions[expressions.length - 1] = (expressions[expressions.length - 1] ?? 0) + 1;
-			previous = "{";
-			previousWord = "";
-			index += 1;
-			continue;
-		}
-		if (unit === CLOSE_BRACE) {
-			const depth = expressions[expressions.length - 1];
-			if (depth === 0) {
-				expressions.pop();
-				index = templateBody(index + 1);
-				previous = '"';
-				previousWord = "";
-				continue;
-			}
-			if (depth !== undefined) expressions[expressions.length - 1] = depth - 1;
-			previous = "}";
-			previousWord = "";
-			index += 1;
-			continue;
-		}
-		if (isIdentifierCode(unit)) {
-			let end = index + 1;
-			while (end < length && isIdentifierCode(text.charCodeAt(end))) end += 1;
-			previous = "a";
-			previousWord = text.slice(index, end);
-			index = end;
-			continue;
-		}
-		if (!isWhitespaceCode(unit)) {
-			previous = text[index] ?? "";
-			previousWord = "";
-		}
-		index += 1;
-	}
-	const decoder = new TextDecoder("utf-16le");
-	return { code: decoder.decode(code), commented: decoder.decode(commented) };
-}
-
-type RegexCounter = {
-	name: CounterName;
-	surface: keyof MaskedSource;
-	pattern: RegExp;
-};
-
-const REGEX_COUNTERS: readonly RegexCounter[] = [
-	{
-		name: "explicit_any",
-		surface: "code",
-		pattern: /:\s*any\b|\bas\s+any\b|<any>|\bany\[\]|Record<\s*string\s*,\s*any\s*>/g,
-	},
-	{ name: "as_unknown_as", surface: "code", pattern: /\bas\s+unknown\s+as\b/g },
-	{ name: "ts_suppressions", surface: "commented", pattern: /@ts-(?:ignore|expect-error|nocheck)\b/g },
-	{ name: "lint_suppressions", surface: "commented", pattern: /\b(?:biome-ignore|eslint-disable)/g },
-	{ name: "non_null_assertions", surface: "code", pattern: /[\w)\]]!(?:\.|;|\)|,|\[)/g },
-	{ name: "empty_catch", surface: "commented", pattern: /\bcatch\s*(?:\([^)]*\))?\s*\{\s*\}/g },
-	{ name: "json_parse_casts", surface: "code", pattern: /JSON\.parse\((?:[^()]|\([^()]*\))*\)\s+as\s+[A-Z{]/g },
-];
-
-const CONSOLE_PATTERN = /\bconsole\.(?:log|error|warn|info|debug)\b/g;
-const PROCESS_EXIT_PATTERN = /\bprocess\.exit\(/g;
-const ENTRYPOINT_MARKER = /^[ \t]*\/\/[ \t]*ratchet-entrypoint\b/m;
-const IMPORT_META_MAIN = /\bimport\.meta\.main\b/;
+const TS_SUPPRESSION_PATTERN = /@ts-(?:ignore|expect-error|nocheck)\b/g;
+const LINT_SUPPRESSION_PATTERN = /\b(?:biome-ignore|eslint-disable)/g;
+const ENTRYPOINT_MARKER = /^\/\/[ \t]*ratchet-entrypoint\b/;
 const PACKAGE_SOURCE_PATH = /^packages\/[^/]+\/(?:.+\/)?src\//;
-
-function count(pattern: RegExp, text: string): number {
-	let total = 0;
-	for (const _match of text.matchAll(pattern)) total += 1;
-	return total;
-}
+const CONSOLE_METHODS = new Set(["log", "error", "warn", "info", "debug"]);
+/**
+ * Cheap pre-check: text with none of these substrings cannot contribute to any counter, so it is not parsed.
+ * Deliberately loose (`unknown`, `console`, `exit`, `parse` rather than the exact spellings) so whitespace
+ * between `as` and `unknown`, or around a member dot, can never hide a match.
+ */
+const COUNTER_HINTS = ["any", "!", "unknown", "@ts-", "biome-ignore", "eslint-disable", "catch", "console", "exit", "parse"];
 
 export function isTestFile(relativePath: string): boolean {
 	return relativePath.endsWith(".test.ts");
-}
-
-/** True when the file is a CLI entrypoint, so it may call process.exit. */
-export function isEntrypoint(relativePath: string, text: string, masked: MaskedSource = maskSource(text)): boolean {
-	if (text.startsWith("#!")) return true;
-	if (relativePath.startsWith("scripts/")) return true;
-	const name = basename(relativePath);
-	if (name.endsWith("-run.ts") || name === "index.ts" || name === "main.ts") return true;
-	if (IMPORT_META_MAIN.test(masked.code)) return true;
-	return ENTRYPOINT_MARKER.test(masked.commented);
 }
 
 export function emptyCounterSet(): CounterSet {
@@ -321,29 +104,178 @@ export function emptyCounterSet(): CounterSet {
 	return set;
 }
 
-/** Count every pattern in one file. `relativePath` is root-relative with `/` separators. */
-export function countFile(relativePath: string, text: string): CounterSet {
-	const masked = maskSource(text);
-	const set = emptyCounterSet();
-	for (const counter of REGEX_COUNTERS) set[counter.name] = count(counter.pattern, masked[counter.surface]);
-	if (PACKAGE_SOURCE_PATH.test(relativePath)) set.console_calls = count(CONSOLE_PATTERN, masked.code);
-	if (!isEntrypoint(relativePath, text, masked)) set.process_exit_non_entrypoint = count(PROCESS_EXIT_PATTERN, masked.code);
-	return set;
+function matchCount(pattern: RegExp, text: string): number {
+	let total = 0;
+	for (const _match of text.matchAll(pattern)) total += 1;
+	return total;
 }
 
-function walk(directory: string, relativeDirectory: string, found: string[]): void {
+function skipParentheses(expression: ts.Expression): ts.Expression {
+	let current = expression;
+	while (ts.isParenthesizedExpression(current)) current = current.expression;
+	return current;
+}
+
+/** True for `<object>.<property>` where the object is the plain identifier `objectName`. */
+function isMemberOf(expression: ts.Expression, objectName: string, property: (name: string) => boolean): boolean {
+	return ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.expression) && expression.expression.text === objectName && property(expression.name.text);
+}
+
+function isConstAssertionType(type: ts.TypeNode): boolean {
+	return ts.isTypeReferenceNode(type) && ts.isIdentifier(type.typeName) && type.typeName.text === "const";
+}
+
+/** True when the comment starts its own line (only whitespace before it), as the entrypoint marker must. */
+function startsOwnLine(text: string, position: number): boolean {
+	if (position === 0) return true;
+	const lineStart = text.lastIndexOf("\n", position - 1) + 1;
+	return text.slice(lineStart, position).trim() === "";
+}
+
+type Analysis = { counters: CounterSet; entrypoint: boolean };
+
+/**
+ * Parse once, walk once: every counter and the entrypoint facts of one file. `relativePath` is root-relative with `/` separators.
+ * The walk uses `ts.forEachChild` (AST nodes only, no token objects) and no parent pointers.
+ */
+function analyze(relativePath: string, text: string): Analysis {
+	// JSDoc parsing is skipped: comments are read as trivia, and no counter needs the JSDoc tree.
+	const sourceFile = ts.createSourceFile(
+		relativePath,
+		text,
+		{ languageVersion: ts.ScriptTarget.Latest, jsDocParsingMode: ts.JSDocParsingMode.ParseNone },
+		false,
+		ts.ScriptKind.TS,
+	);
+	const counters = emptyCounterSet();
+	const countsConsole = PACKAGE_SOURCE_PATH.test(relativePath);
+	const name = basename(relativePath);
+	let entrypoint =
+		text.startsWith("#!") || relativePath.startsWith("scripts/") || name.endsWith("-run.ts") || name === "index.ts" || name === "main.ts";
+	let processExits = 0;
+	const seenComments = new Set<number>();
+
+	const readComments = (ranges: ts.CommentRange[] | undefined): void => {
+		if (ranges === undefined) return;
+		for (const range of ranges) {
+			if (seenComments.has(range.pos)) continue;
+			seenComments.add(range.pos);
+			const comment = text.slice(range.pos, range.end);
+			counters.ts_suppressions += matchCount(TS_SUPPRESSION_PATTERN, comment);
+			counters.lint_suppressions += matchCount(LINT_SUPPRESSION_PATTERN, comment);
+			if (range.kind === ts.SyntaxKind.SingleLineCommentTrivia && ENTRYPOINT_MARKER.test(comment) && startsOwnLine(text, range.pos)) entrypoint = true;
+		}
+	};
+
+	const countNode = (node: ts.Node): void => {
+		switch (node.kind) {
+			case ts.SyntaxKind.AnyKeyword:
+				counters.explicit_any += 1;
+				break;
+			case ts.SyntaxKind.NonNullExpression:
+				counters.non_null_assertions += 1;
+				break;
+			case ts.SyntaxKind.CatchClause: {
+				const block = (node as ts.CatchClause).block;
+				if (block.statements.length === 0 && text.slice(block.getStart(sourceFile) + 1, block.end - 1).trim() === "") counters.empty_catch += 1;
+				break;
+			}
+			case ts.SyntaxKind.AsExpression: {
+				const cast = node as ts.AsExpression;
+				const inner = skipParentheses(cast.expression);
+				if (ts.isAsExpression(inner) && inner.type.kind === ts.SyntaxKind.UnknownKeyword) counters.as_unknown_as += 1;
+				if (
+					ts.isCallExpression(inner) &&
+					isMemberOf(inner.expression, "JSON", (property) => property === "parse") &&
+					cast.type.kind !== ts.SyntaxKind.UnknownKeyword &&
+					!isConstAssertionType(cast.type)
+				) {
+					counters.json_parse_casts += 1;
+				}
+				break;
+			}
+			case ts.SyntaxKind.CallExpression: {
+				const callee = (node as ts.CallExpression).expression;
+				if (countsConsole && isMemberOf(callee, "console", (property) => CONSOLE_METHODS.has(property))) counters.console_calls += 1;
+				if (isMemberOf(callee, "process", (property) => property === "exit")) processExits += 1;
+				break;
+			}
+			case ts.SyntaxKind.PropertyAccessExpression: {
+				const access = node as ts.PropertyAccessExpression;
+				if (access.name.text === "main" && ts.isMetaProperty(access.expression) && access.expression.keywordToken === ts.SyntaxKind.ImportKeyword) entrypoint = true;
+				break;
+			}
+			default:
+				break;
+		}
+	};
+
+	// Trivia starts with whitespace or `/` (or a non-ASCII space); any other ASCII character proves there is none to scan.
+	const mayHaveTrivia = (position: number): boolean => {
+		const code = text.charCodeAt(position);
+		return code <= 47 || code >= 128 || Number.isNaN(code);
+	};
+
+	const visit = (node: ts.Node): void => {
+		// JSDoc blocks are ordinary comments too; the node that follows them reports them.
+		if (node.kind >= ts.SyntaxKind.FirstJSDocNode && node.kind <= ts.SyntaxKind.LastJSDocNode) return;
+		countNode(node);
+		// Comments between AST nodes: before a node (own-line ones as leading trivia, same-line ones such as
+		// `f(/* c */ x)` as the trailing trivia of the preceding token) and after it.
+		if (node.pos !== node.end) {
+			if (mayHaveTrivia(node.pos)) {
+				readComments(ts.getLeadingCommentRanges(text, node.pos));
+				readComments(ts.getTrailingCommentRanges(text, node.pos));
+			}
+			if (mayHaveTrivia(node.end)) readComments(ts.getTrailingCommentRanges(text, node.end));
+		}
+		// An empty block has no child node to carry the comments inside its braces; read them right after the `{`.
+		if (node.kind === ts.SyntaxKind.Block && (node as ts.Block).statements.length === 0) {
+			const afterBrace = node.getStart(sourceFile) + 1;
+			readComments(ts.getLeadingCommentRanges(text, afterBrace));
+			readComments(ts.getTrailingCommentRanges(text, afterBrace));
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(sourceFile);
+	readComments(ts.getLeadingCommentRanges(text, sourceFile.endOfFileToken.pos));
+
+	if (!entrypoint) counters.process_exit_non_entrypoint = processExits;
+	return { counters, entrypoint };
+}
+
+/** True when the file is a CLI entrypoint, so it may call process.exit. */
+export function isEntrypoint(relativePath: string, text: string): boolean {
+	return analyze(relativePath, text).entrypoint;
+}
+
+/**
+ * Count every pattern in one file. `relativePath` is root-relative with `/` separators.
+ * A file whose text holds none of the substrings any counter needs is not parsed at all.
+ */
+export function countFile(relativePath: string, text: string): CounterSet {
+	if (!COUNTER_HINTS.some((hint) => text.includes(hint))) return emptyCounterSet();
+	return analyze(relativePath, text).counters;
+}
+
+function isMissingEntry(error: unknown): boolean {
+	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+function walk(directory: string, relativeDirectory: string, found: string[], isRoot: boolean): void {
 	let entries: Dirent[];
 	try {
 		entries = readdirSync(directory, { withFileTypes: true });
-	} catch {
-		// A scanned root that does not exist (a checkout without scripts/) simply contributes no files.
-		return;
+	} catch (error) {
+		// Only a scanned root that does not exist (a checkout without scripts/) contributes no files.
+		if (isRoot && isMissingEntry(error)) return;
+		throw new Error(`code-ratchet: cannot read ${directory}: ${error instanceof Error ? error.message : String(error)}`);
 	}
 	entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
 	for (const entry of entries) {
 		if (entry.isDirectory()) {
 			if (SKIPPED_DIRECTORIES.has(entry.name)) continue;
-			walk(join(directory, entry.name), `${relativeDirectory}/${entry.name}`, found);
+			walk(join(directory, entry.name), `${relativeDirectory}/${entry.name}`, found, false);
 		} else if (entry.isFile() && entry.name.endsWith(".ts")) {
 			found.push(`${relativeDirectory}/${entry.name}`);
 		}
@@ -353,15 +285,18 @@ function walk(directory: string, relativeDirectory: string, found: string[]): vo
 /** Sorted root-relative paths of every scanned `.ts` file. */
 export function listFiles(root: string): string[] {
 	const found: string[] = [];
-	for (const scanned of SCANNED_ROOTS) walk(join(root, scanned), scanned, found);
+	for (const scanned of SCANNED_ROOTS) walk(join(root, scanned), scanned, found, true);
 	return found;
 }
 
-export function scan(root: string): Counters {
-	const counters: Counters = { source: emptyCounterSet(), test: emptyCounterSet() };
+/** Source counters always; test counters only with `includeTests` (informational, never gating). */
+export function scan(root: string, options: { includeTests?: boolean } = {}): Counters {
+	const includeTests = options.includeTests === true;
+	const counters: Counters = { source: emptyCounterSet(), test: includeTests ? emptyCounterSet() : undefined };
 	for (const relativePath of listFiles(root)) {
-		const text = readFileSync(join(root, ...relativePath.split("/")), "utf8");
 		const target = isTestFile(relativePath) ? counters.test : counters.source;
+		if (target === undefined) continue;
+		const text = readFileSync(join(root, ...relativePath.split("/")), "utf8");
 		const fileCounters = countFile(relativePath, text);
 		for (const name of COUNTER_NAMES) target[name] += fileCounters[name];
 	}
@@ -410,13 +345,17 @@ export function loadBaseline(path: string = BASELINE_PATH): Baseline {
 		}
 		return counters;
 	};
-	return { _generated_by: String(field(parsed, "_generated_by") ?? BASELINE_COMMAND), source: read(field(parsed, "source")), test: read(field(parsed, "test")) };
+	return { _generated_by: String(field(parsed, "_generated_by") ?? BASELINE_COMMAND), source: read(field(parsed, "source")) };
 }
 
+/** The `test` column appears only when the scan included test files. */
 export function formatTable(counters: Counters, baseline: Baseline | undefined): string {
-	const rows = [["counter", "source", "baseline", "test"]];
+	const testCounters = counters.test;
+	const rows = [testCounters ? ["counter", "source", "baseline", "test"] : ["counter", "source", "baseline"]];
 	for (const name of COUNTER_NAMES) {
-		rows.push([name, String(counters.source[name]), baseline ? String(baseline.source[name] ?? "?") : "-", String(counters.test[name])]);
+		const row = [name, String(counters.source[name]), baseline ? String(baseline.source[name] ?? "?") : "-"];
+		if (testCounters) row.push(String(testCounters[name]));
+		rows.push(row);
 	}
 	const widths = rows[0]?.map((_cell, column) => Math.max(...rows.map((row) => (row[column] ?? "").length))) ?? [];
 	return rows
@@ -425,35 +364,74 @@ export function formatTable(counters: Counters, baseline: Baseline | undefined):
 }
 
 export function serializeBaseline(counters: Counters): string {
-	const ordered = (set: CounterSet): CounterSet => {
-		const out = emptyCounterSet();
-		for (const name of COUNTER_NAMES) out[name] = set[name];
-		return out;
-	};
-	const baseline: Baseline = { _generated_by: BASELINE_COMMAND, source: ordered(counters.source), test: ordered(counters.test) };
+	const source = emptyCounterSet();
+	for (const name of COUNTER_NAMES) source[name] = counters.source[name];
+	const baseline: Baseline = { _generated_by: BASELINE_COMMAND, source };
 	return `${JSON.stringify(baseline, null, "\t")}\n`;
 }
 
-function main(argv: string[]): number {
-	const root = join(import.meta.dir, "..");
+/** One line per source counter that is above the existing baseline's value. A counter the baseline lacks is not an offender. */
+export function raisedCounters(source: CounterSet, baseline: BaselineCounters): string[] {
+	const offenders: string[] = [];
+	for (const name of COUNTER_NAMES) {
+		const limit = baseline[name];
+		if (typeof limit === "number" && source[name] > limit) offenders.push(`${name}: baseline ${limit} -> now ${source[name]}`);
+	}
+	return offenders;
+}
+
+/**
+ * Write the baseline from fresh counters. When the file already exists a source counter may only stay or fall:
+ * the offending counters are returned and the file is left untouched. A missing file is created (first generation).
+ */
+export function writeBaseline(path: string, counters: Counters): { written: boolean; offenders: string[] } {
+	if (existsSync(path)) {
+		const offenders = raisedCounters(counters.source, loadBaseline(path).source);
+		if (offenders.length > 0) return { written: false, offenders };
+	}
+	writeFileSync(path, serializeBaseline(counters));
+	return { written: true, offenders: [] };
+}
+
+export type CliOptions = {
+	root: string;
+	baselinePath: string;
+	out: (text: string) => void;
+	err: (text: string) => void;
+};
+
+const DEFAULT_OPTIONS: CliOptions = {
+	root: join(import.meta.dir, ".."),
+	baselinePath: BASELINE_PATH,
+	out: (text) => process.stdout.write(text),
+	err: (text) => process.stderr.write(text),
+};
+
+export function main(argv: string[], options: Partial<CliOptions> = {}): number {
+	const { root, baselinePath, out, err } = { ...DEFAULT_OPTIONS, ...options };
 	const flags = new Set(argv);
-	const known = new Set(["--check", "--write"]);
+	const known = new Set(["--check", "--write", "--with-tests"]);
 	for (const flag of flags) {
 		if (!known.has(flag)) {
-			process.stderr.write(`unknown argument ${flag}\nusage: bun scripts/code-ratchet.ts [--check | --write]\n`);
+			err(`unknown argument ${flag}\nusage: bun scripts/code-ratchet.ts [--check | --write] [--with-tests]\n`);
 			return 2;
 		}
 	}
-	const counters = scan(root);
+	const counters = scan(root, { includeTests: flags.has("--with-tests") });
 	if (flags.has("--write")) {
-		writeFileSync(BASELINE_PATH, serializeBaseline(counters));
-		process.stdout.write(`${formatTable(counters, undefined)}\nwrote ${BASELINE_PATH.split(sep).slice(-2).join("/")}\n`);
+		const result = writeBaseline(baselinePath, counters);
+		if (!result.written) {
+			err(`ratchet: refusing to raise the baseline; fix the code, or delete ${baselinePath.split(sep).slice(-2).join("/")} in a reviewed change\n`);
+			for (const line of result.offenders) err(`${line}\n`);
+			return 1;
+		}
+		out(`${formatTable(counters, undefined)}\nwrote ${baselinePath.split(sep).slice(-2).join("/")}\n`);
 		return 0;
 	}
-	const baseline = loadBaseline();
-	process.stdout.write(`${formatTable(counters, baseline)}\n`);
+	const baseline = loadBaseline(baselinePath);
+	out(`${formatTable(counters, baseline)}\n`);
 	const comparison = compare(counters.source, baseline.source);
-	for (const line of [...comparison.under, ...comparison.over, ...comparison.missing]) process.stdout.write(`${line}\n`);
+	for (const line of [...comparison.under, ...comparison.over, ...comparison.missing]) out(`${line}\n`);
 	if (flags.has("--check")) return comparison.over.length > 0 || comparison.missing.length > 0 ? 1 : 0;
 	return 0;
 }
