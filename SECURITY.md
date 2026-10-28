@@ -6,7 +6,7 @@ Only `main` is supported. There are no release branches and no published package
 
 ## Reporting a vulnerability
 
-Report privately to the maintainer, [@SomeRandmGuyy](https://github.com/SomeRandmGuyy). Do not open a public issue or pull request for a vulnerability. When GitHub private vulnerability reporting (a private security advisory) is enabled for the repository, use that flow.
+Report privately to the maintainer, [@SomeRandmGuyy](https://github.com/SomeRandmGuyy). This repository is private and GitHub's private vulnerability reporting and repository security advisories are not available for it today (both API endpoints answer 404), so there is no form to fill in: send the report over the channel through which you were given access to the repository (the maintainer's invitation, or the direct contact you already share with them). If you have no such channel, ask the person who granted you access to put you in touch with the maintainer. Do not open a public issue or pull request for a vulnerability. If the repository later enables GitHub's private reporting, that flow replaces this paragraph.
 
 A report should contain:
 
