@@ -10,7 +10,7 @@ import type { RandomBytes } from "../../../mcp-server/src/session-events.ts";
 import { type Runner, WorktreeBusyError, pinSnapshot, snapshot, spawnRunner } from "../../../worktree-snapshot/src/index.ts";
 import { cleanupTemp, FIXED_NOW, git, makeRepo, tempDir, writeFiles } from "../../../worktree-snapshot/src/testkit.ts";
 import { CheckpointError, type CheckpointResult, checkpointsOfSession, createCheckpoint, listLocalCheckpoints } from "./checkpoint.ts";
-import { offlineClient } from "./client.ts";
+import { type ClientResult, type RecordCheckpointOk, type RecordCheckpointRequest, offlineClient } from "./client.ts";
 import { listPending, replayPending } from "./pending.ts";
 import { FakeServer, seededRandomBytes } from "./testkit.ts";
 
@@ -389,5 +389,111 @@ describe("listLocalCheckpoints", () => {
 			"bad-metadata-0001": "the metadata ckpt_id does not match the ref",
 			[badTrigger]: "the metadata trigger is not a known trigger",
 		});
+	});
+});
+
+type RecordRequest = RecordCheckpointRequest;
+
+describe("the pending record is written before the server request (write-ahead)", () => {
+	test("the record is in the journal while the request is in flight, and gone once the server accepted the checkpoint", async () => {
+		const { dir, pendingDir, randomBytes } = setup();
+		const inFlight: Array<{ id: string; attempts: number }[]> = [];
+		class WatchingServer extends FakeServer {
+			override recordCheckpoint(request: RecordRequest): Promise<ClientResult<RecordCheckpointOk>> {
+				inFlight.push(listPending(pendingDir).items.map((item) => ({ id: item.id, attempts: item.attempts })));
+				return super.recordCheckpoint(request);
+			}
+		}
+		const server = new WatchingServer();
+		const result = await createCheckpoint({ worktree: dir, sessionId: SESSION, trigger: "turn", surface: "claude-code", client: server, now: FIXED_NOW, randomBytes, pendingDir });
+
+		expect(result.server).toMatchObject({ status: "recorded", stored: true });
+		expect(inFlight).toEqual([[{ id: result.checkpoint.ckpt_id, attempts: 0 }]]);
+		expect(listPending(pendingDir).items).toEqual([]);
+	});
+
+	test("a request that never completes (the process ends at its deadline) leaves a record that sync delivers", async () => {
+		const { dir, pendingDir, randomBytes } = setup();
+		const started = Promise.withResolvers<void>();
+		class HangingServer extends FakeServer {
+			override recordCheckpoint(_request: RecordRequest): Promise<ClientResult<RecordCheckpointOk>> {
+				started.resolve();
+				return new Promise(() => {});
+			}
+		}
+		// The call is abandoned, as a hook's overall deadline abandons it.
+		void createCheckpoint({ worktree: dir, sessionId: SESSION, trigger: "turn", surface: "claude-code", client: new HangingServer(), now: FIXED_NOW, randomBytes, pendingDir });
+		await started.promise;
+
+		const [pinned] = (await listLocalCheckpoints({ worktree: dir })).checkpoints;
+		expect(pinned?.seq).toBe(1);
+		const queued = listPending(pendingDir).items;
+		expect(queued).toHaveLength(1);
+		expect(queued[0]).toMatchObject({ kind: "checkpoint", id: pinned?.ckpt_id, session_id: SESSION, surface: "claude-code", attempts: 0 });
+
+		const server = new FakeServer();
+		const outcome = await replayPending({ dir: pendingDir, clientFor: () => server });
+		expect(outcome.delivered).toHaveLength(1);
+		expect(server.checkpoints.get(pinned?.ckpt_id as string)).toMatchObject({ seq: 1, git_tree: pinned?.tree });
+		expect(listPending(pendingDir).items).toEqual([]);
+	});
+
+	test("a failed request keeps the record and counts the attempt, as before", async () => {
+		const { dir, pendingDir, server, randomBytes } = setup();
+		server.down = true;
+		const result = await createCheckpoint({ worktree: dir, sessionId: SESSION, trigger: "turn", surface: "claude-code", client: server, now: FIXED_NOW, randomBytes, pendingDir });
+		expect(result.server).toMatchObject({ status: "pending", code: "network" });
+		expect(listPending(pendingDir).items[0]).toMatchObject({ id: result.checkpoint.ckpt_id, attempts: 1, last_error: "network: connection refused" });
+	});
+
+	test("a journal that cannot take the record does not stop the request: an accepted checkpoint is recorded", async () => {
+		const { dir, randomBytes } = setup();
+		const server = new FakeServer();
+		const blocked = join(tempDir(), "a-file");
+		writeFileSync(blocked, "not a directory");
+		const result = await createCheckpoint({ worktree: dir, sessionId: SESSION, trigger: "manual", surface: "claude-code", client: server, now: FIXED_NOW, randomBytes, pendingDir: join(blocked, "pending") });
+		expect(result.server).toMatchObject({ status: "recorded", stored: true });
+		expect(server.deliveries.checkpoint).toBe(1);
+	});
+});
+
+describe("admission under the checkpoint lock", () => {
+	const lockPath = (dir: string): string => join(dir, ".git", "substrate-checkpoint.lock");
+
+	test("a decline returns skipped: nothing is pinned, the server and journal are untouched, no lock is left", async () => {
+		const { dir, pendingDir, server, randomBytes } = setup();
+		const result = await createCheckpoint({ worktree: dir, sessionId: SESSION, trigger: "turn", surface: "claude-code", client: server, now: FIXED_NOW, randomBytes, pendingDir, admit: () => ({ take: false, reason: "not now" }) });
+		expect(result).toEqual({ status: "skipped", reason: "not now" });
+		expect((await listLocalCheckpoints({ worktree: dir })).checkpoints).toEqual([]);
+		expect(server.calls).toEqual([]);
+		expect(existsSync(pendingDir)).toBe(false);
+		expect(existsSync(lockPath(dir))).toBe(false);
+	});
+
+	test("admit sees the session's checkpoints read under the lock and the tree id of the snapshot that would be pinned", async () => {
+		const { dir, pendingDir, server, randomBytes } = setup();
+		const base = { worktree: dir, surface: "claude-code", client: server, now: FIXED_NOW, randomBytes, pendingDir, trigger: "manual" as const };
+		await createCheckpoint({ ...base, sessionId: "other" });
+		const first = await createCheckpoint({ ...base, sessionId: SESSION });
+		const seen: Array<{ sessions: string[]; seqs: number[]; tree: string; lockHeld: boolean }> = [];
+		const second = await createCheckpoint({
+			...base,
+			sessionId: SESSION,
+			admit: ({ existing, tree }) => {
+				seen.push({ sessions: existing.map((c) => c.session_id), seqs: existing.map((c) => c.seq), tree, lockHeld: existsSync(lockPath(dir)) });
+				return { take: true };
+			},
+		});
+		expect(seen).toEqual([{ sessions: [SESSION], seqs: [1], tree: first.checkpoint.tree, lockHeld: true }]);
+		expect("status" in second).toBe(false);
+		if ("status" in second) throw new Error("the checkpoint was skipped");
+		expect(second.checkpoint).toMatchObject({ seq: 2, prev_ckpt_id: first.checkpoint.ckpt_id });
+		expect(existsSync(lockPath(dir))).toBe(false);
+	});
+
+	test("without admit the result is never a skip", async () => {
+		const { dir, pendingDir, server, randomBytes } = setup();
+		const result = await createCheckpoint({ worktree: dir, sessionId: SESSION, trigger: "manual", surface: "claude-code", client: server, now: FIXED_NOW, randomBytes, pendingDir });
+		expect(result.created).toBe(true);
 	});
 });

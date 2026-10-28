@@ -9,7 +9,7 @@ that `claude-ultrathink` already mints for every uplifted prompt
 Graph-of-Thought node and one sub-issue per Chain-of-Thought step.
 
 Notion and Linear are the source of truth. TimescaleDB is the index and queue, GreptimeDB is the
-event log, DragonflyDB is a cache, Hindsight is memory and RAGFlow is documents — five Railway
+event log, DragonflyDB is a cache, Hindsight is memory and LightRAG is documents — five Railway
 services in two projects, reached over Tailscale. See [`docs/data-planes.md`](docs/data-planes.md)
 and [`docs/railway-tailscale.md`](docs/railway-tailscale.md).
 

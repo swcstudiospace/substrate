@@ -8,10 +8,10 @@ out-of-root or oversize reaches a dataset.
 The plane is chosen in `resolveDocsBackend` (`packages/mcp-server/src/config.ts:74`).
 `SUBSTRATE_DOCS_BACKEND` (`lightrag` or `ragflow`, case-insensitive) wins.
 Otherwise a set `LIGHTRAG_URL` selects `lightrag`, and an unset one selects
-`ragflow`. So with `LIGHTRAG_URL` unset the default docs backend is RAGFlow
-(`config.ts:75`). `lightragFromEnv` (`config.ts:58`) reads `LIGHTRAG_URL` and
-the optional `LIGHTRAG_API_KEY`. RAGFlow remains the plane until the
-pending phase 46 cutover; it is not a runtime fallback for LightRAG (see
+`ragflow`. LightRAG is the live production backend (Run 11); RAGFlow is only the
+legacy fallback when `LIGHTRAG_URL` is unset (`config.ts:75`). `lightragFromEnv` (`config.ts:58`) reads `LIGHTRAG_URL` and
+the optional `LIGHTRAG_API_KEY`. The RAGFlow code stays until the operator approves
+its removal (phase 46); it is not a runtime fallback for LightRAG (see
 "Failure and fallback" below).
 
 ## The two tools
