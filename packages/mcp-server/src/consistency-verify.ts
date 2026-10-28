@@ -577,6 +577,32 @@ function bucketParts(bucket: string): { writer: string; scope: string; kind: str
 	return { writer: parts[0] ?? "", scope: parts[1] ?? "", kind: parts[2] ?? "" };
 }
 
+/** A recorded (entry, legacy event) pair of one bucket. */
+export interface LedgerPair {
+	entry: { id: string; tsMs: number };
+	event: { id: string; tsMs: number };
+}
+
+/**
+ * The first pair, in bucket order, whose legacy event could be the audit of an entry created at `entryTsMs`: the
+ * event's time minus the entry's lies in `[-skewMs, lagMs]` (both ends inclusive, the matcher's own rule). `pairs` MUST
+ * be sorted by event time with ties in bucket order, so the first pair at or after the lower bound is the answer when it
+ * is inside the upper one. A binary search, not a scan: O(log n) per call, and O(1) for an empty list.
+ */
+export function findContender(pairs: readonly LedgerPair[], entryTsMs: number, skewMs: number, lagMs: number): LedgerPair | undefined {
+	if (pairs.length === 0) return undefined;
+	const lower = entryTsMs - skewMs;
+	let lo = 0;
+	let hi = pairs.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if ((pairs[mid] as LedgerPair).event.tsMs < lower) lo = mid + 1;
+		else hi = mid;
+	}
+	const candidate = pairs[lo];
+	return candidate !== undefined && candidate.event.tsMs - entryTsMs <= lagMs ? candidate : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // verifyConsistency
 // ---------------------------------------------------------------------------
@@ -1133,16 +1159,15 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 			}
 			unmatchedEntries.push(...entryList.slice(i));
 			unmatchedEvents.push(...eventList.slice(j));
+			// Only a pair whose entry an exact event names can contend; with none, no unmatched entry needs a search at all.
+			// `pairs` is built in bucket order, which is event time order (ties by id), so `contenders` is sorted already.
+			const contenders = exactEntryIds.size === 0 ? [] : pairs.filter((pair) => exactEntryIds.has(pair.entry.id));
 			for (const entry of unmatchedEntries) {
 				// An event that names this entry satisfies it (its pair is counted below).
 				if (exactEntryIds.has(entry.id)) continue;
 				// A legacy event the heuristic gave to an entry that an exact event also names could as well be this entry's own
 				// audit (the other entry then had none until a retry after the upgrade). The data cannot say which: report that.
-				const contender = pairs.find((pair) => {
-					if (!exactEntryIds.has(pair.entry.id)) return false;
-					const delta = pair.event.tsMs - entry.tsMs;
-					return delta >= -cfg.ledgerSkewMs && delta <= cfg.ledgerLagMs;
-				});
+				const contender = findContender(contenders, entry.tsMs, cfg.ledgerSkewMs, cfg.ledgerLagMs);
 				if (contender !== undefined) {
 					add({
 						code: "ledger_pairing_ambiguous",

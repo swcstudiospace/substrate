@@ -12,6 +12,7 @@ import {
 	FINDING_CODES,
 	ReaderUnsupported,
 	defaultDocumentId,
+	findContender,
 	formatReportJson,
 	formatReportText,
 	planRepairs,
@@ -21,6 +22,7 @@ import {
 	type ConsistencyReaders,
 	type ConsistencyReport,
 	type IndexCursor,
+	type LedgerPair,
 	type LedgerWriteEvent,
 	type Timer,
 } from "./consistency-verify.ts";
@@ -541,6 +543,20 @@ describe("ledger comparison", () => {
 			expect(report.counts.findings_by_code.ledger_pairing_ambiguous).toBe(0);
 		});
 
+		test("a neighbour exactly at the skew boundary still contends; one millisecond beyond it does not", async () => {
+			const a = entry("mem_a", { created: minutesAgo(30) });
+			const at = (extraMs: number): MemoryEntry => entry("mem_b", { created: new Date(Date.parse(minutesAgo(30)) + extraMs).toISOString() });
+			// The legacy event sits 2 s after mem_a: mem_b created at +32 s is exactly 30 s (the skew) after it.
+			const onBoundary = world([a, at(32_000)], { events: "none" });
+			onBoundary.events.push(ledgerEvent(a), named(a, "mem_a", 600));
+			const inside = await run(onBoundary);
+			expect(codes(inside)).toEqual(["ledger_pairing_ambiguous"]);
+			expect(inside.findings[0]).toMatchObject({ entry_id: "mem_b", contender_entry_id: "mem_a", legacy_event_id: "ev-mem_a" });
+			const beyond = world([a, at(32_001)], { events: "none" });
+			beyond.events.push(ledgerEvent(a), named(a, "mem_a", 600));
+			expect(codes(await run(beyond))).toEqual(["index_entry_without_ledger_write"]);
+		});
+
 		test("a neighbour in another bucket keeps the plain missing-audit finding", async () => {
 			const a = entry("mem_a", { created: minutesAgo(30) });
 			const b = entry("mem_b", { created: new Date(Date.parse(minutesAgo(30)) + 1000).toISOString(), kind: "decision" });
@@ -1035,5 +1051,46 @@ describe("configured banks with no index row", () => {
 
 	test("a configured bank name must not be empty", async () => {
 		await expect(run(world([]), { configuredBanks: [""] })).rejects.toBeInstanceOf(ConsistencyOptionError);
+	});
+});
+
+describe("findContender", () => {
+	const pair = (entryId: string, eventId: string, eventTsMs: number): LedgerPair => ({ entry: { id: entryId, tsMs: eventTsMs - 1000 }, event: { id: eventId, tsMs: eventTsMs } });
+
+	test("an empty contender list is never searched and yields nothing, however many entries ask", () => {
+		// Any element read would throw: the list is a proxy that fails on every property except `length`.
+		const guarded = new Proxy<LedgerPair[]>([], {
+			get(_target, key) {
+				if (key === "length") return 0;
+				throw new Error(`unexpected read of ${String(key)}`);
+			},
+		});
+		for (let i = 0; i < 2000; i += 1) {
+			expect(findContender(guarded, NOW + i * 1000, 30_000, 120_000)).toBeUndefined();
+		}
+	});
+
+	test("finds the contender exactly at -skew and at lag, and not one millisecond beyond either", () => {
+		const skew = 30_000;
+		const lag = 120_000;
+		const entryTs = NOW;
+		// event.ts - entry.ts == -skew
+		expect(findContender([pair("mem_x", "ev-1", entryTs - skew)], entryTs, skew, lag)?.event.id).toBe("ev-1");
+		expect(findContender([pair("mem_x", "ev-1", entryTs - skew - 1)], entryTs, skew, lag)).toBeUndefined();
+		// event.ts - entry.ts == lag
+		expect(findContender([pair("mem_x", "ev-2", entryTs + lag)], entryTs, skew, lag)?.event.id).toBe("ev-2");
+		expect(findContender([pair("mem_x", "ev-2", entryTs + lag + 1)], entryTs, skew, lag)).toBeUndefined();
+	});
+
+	test("picks the first contender in bucket order among several inside the window, and skips earlier ones outside it", () => {
+		const pairs = [
+			pair("mem_old", "ev-old", NOW - 600_000),
+			pair("mem_a", "ev-a", NOW + 10_000),
+			pair("mem_b", "ev-b", NOW + 10_000),
+			pair("mem_late", "ev-late", NOW + 900_000),
+		];
+		expect(findContender(pairs, NOW, 30_000, 120_000)?.entry.id).toBe("mem_a");
+		expect(findContender(pairs, NOW + 800_000, 30_000, 120_000)?.entry.id).toBe("mem_late");
+		expect(findContender(pairs, NOW + 400_000, 30_000, 120_000)).toBeUndefined();
 	});
 });
