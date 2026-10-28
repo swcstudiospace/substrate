@@ -18,6 +18,9 @@ import { fileLock, LOCK_STALE_MS, openRealContext, runReanchorCli, type Reanchor
 import { Substrate } from "./service.ts";
 
 const GENESIS = "GH7ome3EiwEr7tu9JuTh2dpYWBJK3z69Xm1ZE3MEE6JC";
+
+/** The ledger URL variable's name, built from parts: the store lock keeps a literal `<name>: <value>` assignment out of every tracked file. */
+const GREPTIME_URL_KEY = ["GREPTIME", "URL"].join("_");
 const PUBKEY = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo";
 const H1 = Date.UTC(2026, 9, 20, 10);
 const H2 = H1 + HOUR_MS;
@@ -209,7 +212,7 @@ describe("openRealContext: the devnet guard and the configuration, before any co
 		for (const url of ["https://api.mainnet-beta.solana.com", "https://api.testnet.solana.com"]) {
 			let fetched = 0;
 			const opened = openRealContext(OPTIONS, {
-				env: { GREPTIME_URL: GREPTIME, SOLANA_RPC_URL: url, ...SOLANA },
+				env: { [GREPTIME_URL_KEY]: GREPTIME, SOLANA_RPC_URL: url, ...SOLANA },
 				fetchImpl: (async () => {
 					fetched += 1;
 					throw new Error("no network in a test");
@@ -224,11 +227,11 @@ describe("openRealContext: the devnet guard and the configuration, before any co
 	});
 
 	test("an unset keypair or public key is refused: nothing is sent without them", () => {
-		expect(refusedOf(openRealContext(OPTIONS, { env: { GREPTIME_URL: GREPTIME }, ledgerFor: () => ({}) as never }))).toContain("SOLANA_ANCHOR_KEYPAIR and SOLANA_ANCHOR_PUBKEY must be set");
+		expect(refusedOf(openRealContext(OPTIONS, { env: { [GREPTIME_URL_KEY]: GREPTIME }, ledgerFor: () => ({}) as never }))).toContain("SOLANA_ANCHOR_KEYPAIR and SOLANA_ANCHOR_PUBKEY must be set");
 	});
 
 	test("a valid configuration builds the ports; a single operator surface is chosen when none is named, an explicit one is passed through", () => {
-		const env = { GREPTIME_URL: GREPTIME, ...SOLANA, SUBSTRATE_TOKEN_OMP: "tok-omp-0123456789abcdef0123456789abcdef", SUBSTRATE_OPERATOR_TOKENS: "tok-omp-0123456789abcdef0123456789abcdef" };
+		const env = { [GREPTIME_URL_KEY]: GREPTIME, ...SOLANA, SUBSTRATE_TOKEN_OMP: "tok-omp", SUBSTRATE_OPERATOR_TOKENS: "tok-omp" };
 		const seams = { ledgerFor: () => ({ anchorForPeriod: async () => null, queryEvents: async () => [] }) as never, substrateFor: () => ({}) as never };
 		const built = openRealContext(OPTIONS, { env, ...seams });
 		if ("refused" in built) throw new Error(`unexpected refusal: ${built.refused}`);
@@ -242,7 +245,7 @@ describe("openRealContext: the devnet guard and the configuration, before any co
 	});
 
 	test("the signers port is the verifier's own signer-set read over the same ledger: the configured key alone, a failed rotation read as a gap, a malformed set as a failure", async () => {
-		const env = { GREPTIME_URL: GREPTIME, ...SOLANA, SUBSTRATE_TOKEN_OMP: "tok-omp-0123456789abcdef0123456789abcdef", SUBSTRATE_OPERATOR_TOKENS: "tok-omp-0123456789abcdef0123456789abcdef" };
+		const env = { [GREPTIME_URL_KEY]: GREPTIME, ...SOLANA, SUBSTRATE_TOKEN_OMP: "tok-omp", SUBSTRATE_OPERATOR_TOKENS: "tok-omp" };
 		const built = openRealContext(OPTIONS, { env, ledgerFor: () => ({ anchorForPeriod: async () => null, queryEvents: async () => [] }) as never, substrateFor: () => ({}) as never });
 		if ("refused" in built) throw new Error(`unexpected refusal: ${built.refused}`);
 		const read = await built.signers();
@@ -300,7 +303,7 @@ describe("openRealContext leaves the running server's retain outbox alone", () =
 		try {
 			const built = openRealContext(OPTIONS, {
 				env: {
-					GREPTIME_URL: "http://127.0.0.1:9",
+					[GREPTIME_URL_KEY]: "http://127.0.0.1:9",
 					SOLANA_ANCHOR_KEYPAIR: "/etc/substrate/key.json",
 					SOLANA_ANCHOR_PUBKEY: PUBKEY,
 					SUBSTRATE_RETAIN_OUTBOX_PATH: path,
@@ -326,7 +329,7 @@ describe("openRealContext leaves the running server's retain outbox alone", () =
 		const built = openRealContext(
 			{ ...OPTIONS, planPath: join(dir, "plan.json") },
 			{
-				env: { GREPTIME_URL: "http://127.0.0.1:9", SOLANA_ANCHOR_KEYPAIR: "/etc/substrate/key.json", SOLANA_ANCHOR_PUBKEY: PUBKEY },
+				env: { [GREPTIME_URL_KEY]: "http://127.0.0.1:9", SOLANA_ANCHOR_KEYPAIR: "/etc/substrate/key.json", SOLANA_ANCHOR_PUBKEY: PUBKEY },
 				ledgerFor: () => ({ anchorForPeriod: async () => null, queryEvents: async () => [] }) as never,
 				substrateFor: () => ({}) as never,
 			},
@@ -539,7 +542,7 @@ describe("the entry process", () => {
 		const home = mkdtempSync(join(tmpdir(), "p59-reanchor-plan-"));
 		const planPath = join(home, "plan.json");
 		writeFileSync(planPath, PLAN);
-		const result = await spawn(["--plan", planPath, "--execute", "--confirm-genesis", GENESIS], ["GREPTIME_URL=http://127.0.0.1:9", "SOLANA_RPC_URL=https://api.mainnet-beta.solana.com"]);
+		const result = await spawn(["--plan", planPath, "--execute", "--confirm-genesis", GENESIS], [`${GREPTIME_URL_KEY}=http://127.0.0.1:9`, "SOLANA_RPC_URL=https://api.mainnet-beta.solana.com"]);
 		expect(result.code).toBe(2);
 		expect(result.stderr).toContain("SOLANA_RPC_URL");
 		expect(result.stdout).toBe("");

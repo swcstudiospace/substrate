@@ -4970,7 +4970,7 @@ describe("verifyGraph hour report", () => {
 			{ pubkey: KEY_A, valid_from_ms: 0, valid_until_ms: ROTATED_AT },
 			{ pubkey: KEY_B, valid_from_ms: ROTATED_AT, valid_until_ms: null },
 		]);
-		const OPERATOR = { SUBSTRATE_TOKEN_OMP: "tok-omp-0123456789abcdef0123456789abcdef", SUBSTRATE_OPERATOR_TOKENS: "tok-omp-0123456789abcdef0123456789abcdef" };
+		const OPERATOR = { SUBSTRATE_TOKEN_OMP: "tok-omp", SUBSTRATE_OPERATOR_TOKENS: "tok-omp" };
 
 		function stub(world: ReturnType<typeof sessionRows>, extra: Record<string, unknown> = {}) {
 			return {
