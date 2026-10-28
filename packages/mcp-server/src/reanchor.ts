@@ -530,7 +530,8 @@ async function recordedSignature(hour: SavedPlanHour, deps: ReanchorDeps): Promi
 
 /**
  * Gate 6b, one listing for the hours without a recorded note: the signer's signatures are paged backwards (`before` the oldest
- * signature of the previous page) and every memo naming a wanted hour is kept as a hint. Paging stops when the signer's history is
+ * signature of the previous page) at `confirmed` commitment (a send is read back at `confirmed`, so a confirmed but not yet finalized
+ * send must be found by the very next run) and every memo naming a wanted hour is kept as a hint. Paging stops when the signer's history is
  * exhausted (a short page) or a page ends at a block older than the earliest wanted period start: nothing before it can be a send of
  * these hours. A cap hit first is `discovery-incomplete`, an unreadable page `rpc-unreadable`; neither is ever read as "absent".
  */
@@ -543,7 +544,7 @@ async function listEarlierSends(hours: readonly SavedPlanHour[], deps: ReanchorD
 	for (let page = 1; ; page++) {
 		let listing: AddressMemo[];
 		try {
-			listing = await rpc.addressMemos(env.pubkey, DISCOVERY_PAGE_SIZE, before);
+			listing = await rpc.addressMemos(env.pubkey, DISCOVERY_PAGE_SIZE, before, "confirmed");
 		} catch (cause) {
 			throw new Refusal("rpc-unreadable", `the signer's signatures could not be listed (page ${page}): ${reasonOf(cause)}`);
 		}

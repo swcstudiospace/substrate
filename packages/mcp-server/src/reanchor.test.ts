@@ -7,7 +7,7 @@
  * answers only `solana-keygen pubkey` and `solana transfer`; any other argv is a TypeError.
  */
 import { describe, expect, test } from "bun:test";
-import { formatMemo, HOUR_MS, hourIso, type AddressMemo, type Rpc, type RunResult, type TransactionMemo } from "@substrate/ledger";
+import { type Commitment, formatMemo, HOUR_MS, hourIso, type AddressMemo, type Rpc, type RunResult, type TransactionMemo } from "@substrate/ledger";
 import type { ReanchorNotes, ReanchorRecord } from "./anchor-verify-deps.ts";
 import { DEVNET_GENESIS_HASH, MAX_HOURS_PER_RUN, REQUIRED_BALANCE_LAMPORTS } from "./anchor.ts";
 import type { AnchorRow } from "./greptime.ts";
@@ -121,6 +121,9 @@ class World {
 	/** The `before` cursor of each listing call, and a listing of filler signatures that never reaches the horizon. */
 	listBefore: Array<string | undefined> = [];
 	endlessListing = false;
+	/** The commitment of each listing call, and a cluster whose sends are confirmed but not yet finalized (a finalized listing misses them). */
+	listCommitments: Array<Commitment | undefined> = [];
+	unfinalizedSends = false;
 	/** When set, the send waits on it, so a run stays in flight while a second one starts. */
 	sendGate: Promise<void> | null = null;
 	/** Resolved when a send reaches the gate: the signal that the run is in flight, so a test never waits on a clock. */
@@ -171,9 +174,11 @@ class World {
 			this.rpcCalls.push(`tx:${signature.slice(0, 2)}:${commitment}`);
 			return this.chain.get(signature) ?? null;
 		},
-		addressMemos: async (pubkey, limit, before) => {
+		addressMemos: async (pubkey, limit, before, commitment) => {
 			this.rpcCalls.push(`list:${pubkey.slice(0, 4)}`);
 			this.listBefore.push(before);
+			this.listCommitments.push(commitment);
+			if (this.unfinalizedSends && commitment !== "confirmed") return [];
 			if (this.listingFails) throw new Error("fetch failed: https://rpc.example.invalid/v1/key-4411");
 			if (this.endlessListing) {
 				const page = this.listBefore.length;
@@ -820,6 +825,28 @@ describe("the one send", () => {
 		expect(w.sendCalls).toHaveLength(1);
 	});
 
+	test("a send that is confirmed but not yet finalized is found by the very next run: discovery lists at confirmed, so it is adopted, never sent twice", async () => {
+		const w = new World(ONE);
+		w.unfinalizedSends = true;
+		w.emitStored = false;
+		const first = await w.run(ONE);
+		expect(first).toMatchObject({ code: 1, refused: "store-failed", sent: 1 });
+		expect(w.sendCalls).toHaveLength(1);
+
+		w.emitStored = true;
+		const again = await w.run(ONE);
+		expect(again).toMatchObject({ code: 0, refused: null, sent: 0, adopted: 1 });
+		expect(again.stdout).toContain(`${hourIso(H1)} adopted ${newSig(1)}`);
+		// One transfer across both runs; the note was written by the second.
+		expect(w.sendCalls).toHaveLength(1);
+		expect(w.runnerCalls.filter((argv) => argv[1] === "transfer")).toHaveLength(1);
+		expect(w.emitted).toHaveLength(2);
+		expect(w.emitted[1]?.payload).toMatchObject({ action: "anchor.reanchor", new_tx_sig: newSig(1), previous_tx_sig: oldSig(1) });
+		// Every discovery listing asked at confirmed.
+		expect(w.listCommitments.length).toBeGreaterThan(0);
+		expect(w.listCommitments.every((commitment) => commitment === "confirmed")).toBe(true);
+	});
+
 	test("the ledger fake has no write method: the anchors table is never touched by the executor", async () => {
 		const w = new World(ONE);
 		await w.run(ONE);
@@ -1078,9 +1105,9 @@ describe("discovery pages back through the signer's history", () => {
 		const w = new World(ONE);
 		w.endlessListing = true;
 		const list = w.rpc.addressMemos.bind(w.rpc);
-		w.rpc.addressMemos = async (pubkey, limit, before) => {
+		w.rpc.addressMemos = async (pubkey, limit, before, commitment) => {
 			if (w.listBefore.length === 2) throw new Error("fetch failed: https://rpc.example.invalid/v1/key-4411");
-			return list(pubkey, limit, before);
+			return list(pubkey, limit, before, commitment);
 		};
 		const result = await w.run(ONE);
 		expect(result).toMatchObject({ code: 1, refused: "rpc-unreadable", sent: 0 });

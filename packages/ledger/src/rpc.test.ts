@@ -112,6 +112,16 @@ describe("addressMemos and balance", () => {
 		expect(requests[0]).toMatchObject({ method: "getSignaturesForAddress", params: [PAYER, { limit: 50, before: SIG }] });
 	});
 
+	test("commitment is sent only when passed", async () => {
+		const { rpc, requests } = fakeRpc([{ result: [] }, { result: [] }, { result: [] }]);
+		await rpc.addressMemos(PAYER, 10);
+		await rpc.addressMemos(PAYER, 10, SIG, "confirmed");
+		await rpc.addressMemos(PAYER, 10, undefined, "finalized");
+		expect(requests[0]?.params).toEqual([PAYER, { limit: 10 }]);
+		expect(requests[1]?.params).toEqual([PAYER, { limit: 10, before: SIG, commitment: "confirmed" }]);
+		expect(requests[2]?.params).toEqual([PAYER, { limit: 10, commitment: "finalized" }]);
+	});
+
 	test("balance returns result.value", async () => {
 		const { rpc, requests } = fakeRpc([{ result: { context: { slot: 1 }, value: 1_000_000_000 } }]);
 		expect(await rpc.balance(PAYER)).toBe(1_000_000_000);

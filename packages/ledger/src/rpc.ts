@@ -108,9 +108,10 @@ export interface Rpc {
 	transactionMemo(signature: string, commitment: Commitment): Promise<TransactionMemo | null>;
 	/**
 	 * Signatures touching `pubkey`, newest first, memo text only as a hint (confirm with transactionMemo). `before` is the signature to
-	 * continue from: the page returned starts just older than it, so a caller can walk backwards through a long history.
+	 * continue from: the page returned starts just older than it, so a caller can walk backwards through a long history. `commitment`,
+	 * when given, is sent in the request config; absent, the node's default (finalized) applies and the request is unchanged.
 	 */
-	addressMemos(pubkey: string, limit: number, before?: string): Promise<AddressMemo[]>;
+	addressMemos(pubkey: string, limit: number, before?: string, commitment?: Commitment): Promise<AddressMemo[]>;
 	/** The cluster's genesis hash, for the job's devnet gate. Thin `getGenesisHash` call. */
 	getGenesisHash(): Promise<string>;
 	/** Lamports held by `pubkey`. */
@@ -223,8 +224,11 @@ export function createRpc({ url, timeoutMs, attempts, backoffMs, fetchImpl = fet
 			};
 		},
 
-		async addressMemos(pubkey: string, limit: number, before?: string): Promise<AddressMemo[]> {
-			const list = await call<SignatureInfo[]>("getSignaturesForAddress", [pubkey, before === undefined ? { limit } : { limit, before }]);
+		async addressMemos(pubkey: string, limit: number, before?: string, commitment?: Commitment): Promise<AddressMemo[]> {
+			const config: { limit: number; before?: string; commitment?: Commitment } = { limit };
+			if (before !== undefined) config.before = before;
+			if (commitment !== undefined) config.commitment = commitment;
+			const list = await call<SignatureInfo[]>("getSignaturesForAddress", [pubkey, config]);
 			if (!Array.isArray(list)) throw new RpcError("getSignaturesForAddress returned a non-array");
 			return list
 				.filter((s): s is SignatureInfo & { signature: string } => typeof s?.signature === "string")
