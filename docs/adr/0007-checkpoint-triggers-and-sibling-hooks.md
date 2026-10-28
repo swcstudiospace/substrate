@@ -19,7 +19,9 @@ A rollback can only return to a checkpoint that exists. The CLI can take a check
 | `baseline` | the first checkpoint of a session that predates the feature, so it cannot be rolled back before it (D55-3) | **value accepted, nothing creates it automatically** | an operator or hook may pass `--trigger baseline` |
 | `turn` | a turn ended | **no** | value accepted; no hook calls it |
 | `plan-step` | a plan step or lane boundary completed | **no** | value accepted; `--plan-phase` and `--plan-step` carry the reference (each at most 64 characters); no hook calls it |
-| `steering` | a steering directive was applied | **no, and depends on phase 58** | durable steering lives on the branch stacked on the held draft pull requests; the state-machine join with `docs_steering_session` is a small follow-up when that stack merges |
+| `steering` | a steering directive was applied | **no hook calls it; the server hints** | an applied pause or redirect acknowledgement moves the session's `docs_steering_session` state and the `steering_acknowledge` reply carries `checkpoint_hint` (below); taking the checkpoint is the acknowledging session's hook or agent |
+
+**The steering checkpoint hint.** When an applied `pause` or `redirect` acknowledgement actually moves the live session (to `PAUSED` or `CONTEXT_REFRESH`), the `steering_acknowledge` reply carries `checkpoint_hint: { "trigger": "steering", "directive_id": "<id>" }`. It is a hint and no ledger event: the server stays read-only on worktrees (ADR 0005), so the checkpoint itself is the session's own `substrate session checkpoint --trigger steering` run from its worktree. A refused transition (for example a redirect for a `PAUSED` session) and a session the server does not hold carry no hint; the acknowledgement stands either way. The join is by session id: a directive's `targetSessionId` must be the id the session passes to `docs_steering_session`, held under whichever surface wrote it; two surfaces holding the same id is refused as `ambiguous`.
 
 ## The hook contract every proposal shares
 
