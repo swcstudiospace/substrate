@@ -42,6 +42,14 @@ import {
 	type TimerHandle,
 	type TimerSeam,
 } from "./recall-snapshot.ts";
+import {
+	GRAPH_RECALL_MAX_HITS,
+	RECALL_SCOPES,
+	parseRecallScope,
+	recallScopeKey,
+	scopeRecall,
+	withGraphScope,
+} from "./recall-snapshot.ts";
 
 const T0 = Date.parse("2026-10-14T09:00:00.000Z");
 const TTL_S = 900;
@@ -831,5 +839,140 @@ describe("RecallPrefetcher", () => {
 		prefetcher.want("omp", "acme/app");
 		await prefetcher.tick();
 		expect(recalls).toHaveLength(1);
+	});
+});
+
+// ── graph scope (phase 57c) ──────────────────────────────────────────────────
+
+describe("graph recall scope", () => {
+	const OWN = "sub-omp";
+	const ownSnapshot: RecallSnapshot = {
+		bank: OWN,
+		banks: [OWN],
+		at: new Date(T0 - 60_000).toISOString(),
+		hits: [{ text: "own one", type: "world" }, { text: "own two" }, { text: "own three" }],
+	};
+	const hit = (text: string, graphId: string | undefined, extra: Partial<RecallHitInput> = {}): RecallHitInput => ({
+		bank: OWN,
+		text,
+		scope: "repo:acme/app",
+		...(graphId !== undefined ? { graph_id: graphId } : {}),
+		...extra,
+	});
+	const hits: RecallHitInput[] = [
+		hit("graph a one", "g-a"),
+		hit("graph b one", "g-b"),
+		hit("graph a two", "g-a", { type: "decision" }),
+		hit("no graph at all", undefined),
+		hit("graph a three", "g-a"),
+		hit("graph a four", "g-a"),
+	];
+
+	test("parseRecallScope: only graph turns it on, anything else is off", () => {
+		expect(parseRecallScope("graph")).toBe("graph");
+		expect(parseRecallScope("  GRAPH ")).toBe("graph");
+		for (const raw of [undefined, null, "", "off", "node", "true"]) expect(parseRecallScope(raw)).toBe("off");
+		expect(RECALL_SCOPES).toEqual(["off", "graph"]);
+	});
+
+	test("recallScopeKey: off adds nothing to a key, graph adds its own part", () => {
+		expect(recallScopeKey("off")).toEqual({});
+		expect(recallScopeKey("graph")).toEqual({ recallScope: "graph" });
+	});
+
+	test("scopeRecall keeps only hits whose graph_id equals the claimed graph, in recall order, within the budget", () => {
+		expect(scopeRecall(hits, "g-a", 2)).toEqual([{ text: "graph a one" }, { text: "graph a two", type: "decision" }]);
+		expect(scopeRecall(hits, "g-b")).toEqual([{ text: "graph b one" }]);
+		expect(scopeRecall(hits, "g-none")).toEqual([]);
+		// The budget is the graph's own, never past GRAPH_RECALL_MAX_HITS, and never a hit without a graph.
+		expect(scopeRecall(hits, "g-a", 99)).toHaveLength(GRAPH_RECALL_MAX_HITS);
+		expect(scopeRecall(hits, "g-a")).toHaveLength(GRAPH_RECALL_MAX_HITS);
+	});
+
+	test("scopeRecall: a blank graph id, a zero or invalid budget keep nothing", () => {
+		expect(scopeRecall(hits, "  ")).toEqual([]);
+		expect(scopeRecall(hits, "g-a", 0)).toEqual([]);
+		expect(scopeRecall(hits, "g-a", -3)).toEqual([]);
+		expect(scopeRecall(hits, "g-a", Number.NaN)).toEqual([]);
+	});
+
+	test("scopeRecall folds, redacts, clips and deduplicates; excluded lines and other banks are not kept", () => {
+		const long = "x".repeat(MAX_RECALL_HIT_CHARS * 2);
+		const lines = scopeRecall(
+			[
+				hit(`leak ${SECRET}\nnext line`, "g-a"),
+				hit(long, "g-a"),
+				hit("graph a one", "g-a"),
+				hit("graph a one", "g-a"),
+				hit("already shown", "g-a"),
+				hit("foreign bank", "g-a", { bank: "sub-other" }),
+			],
+			"g-a",
+			GRAPH_RECALL_MAX_HITS,
+			{ banks: [OWN], exclude: ["already shown"] },
+		);
+		expect(lines).toHaveLength(3);
+		expect(lines[0]!.text).not.toContain(SECRET);
+		expect(lines[0]!.text).not.toContain("\n");
+		expect(Array.from(lines[1]!.text).length).toBeLessThanOrEqual(MAX_RECALL_HIT_CHARS);
+		expect(lines[2]).toEqual({ text: "graph a one" });
+	});
+
+	test("scope off is the snapshot itself: the same object, the same section, the same bytes", () => {
+		const before = JSON.stringify(ownSnapshot);
+		const scoped = withGraphScope("off", ownSnapshot, hits, "g-a");
+		expect(scoped).toBe(ownSnapshot);
+		expect(JSON.stringify(scoped)).toBe(before);
+		expect(recallSection(scoped, T0)).toEqual(recallSection(ownSnapshot, T0));
+		// No claimed graph under graph scope is the same: nothing to scope to.
+		expect(withGraphScope("graph", ownSnapshot, hits, null)).toBe(ownSnapshot);
+		// No hit of the claimed graph: still the snapshot itself.
+		expect(withGraphScope("graph", ownSnapshot, hits, "g-none")).toBe(ownSnapshot);
+	});
+
+	test("scope graph adds the claimed graph's lines under their own budget; the own-bank lines keep theirs", () => {
+		const scoped = withGraphScope("graph", ownSnapshot, hits, "g-a");
+		expect(scoped).not.toBe(ownSnapshot);
+		expect(scoped.hits).toEqual(ownSnapshot.hits);
+		expect(scoped.hits).toHaveLength(MAX_RECALL_HITS);
+		expect(scoped.graph).toEqual({
+			graph_id: "g-a",
+			hits: [{ text: "graph a one" }, { text: "graph a two", type: "decision" }, { text: "graph a three" }],
+		});
+		// The input snapshot is not mutated.
+		expect(ownSnapshot.graph).toBeUndefined();
+		const section = recallSection(scoped, T0);
+		expect(section.lines.slice(2)).toEqual([
+			"- own one (world)",
+			"- own two",
+			"- own three",
+			"- [graph g-a] graph a one",
+			"- [graph g-a] graph a two (decision)",
+			"- [graph g-a] graph a three",
+		]);
+		expect(section.items[3]!.clip).toEqual(["- [graph g-a] ".length, "- [graph g-a] ".length + "graph a one".length]);
+	});
+
+	test("a graph line that repeats an own-bank line is not shown twice, and a smaller budget is honoured", () => {
+		const scoped = withGraphScope("graph", ownSnapshot, [hit("own two", "g-a"), hit("graph a one", "g-a"), hit("graph a two", "g-a")], "g-a", 1);
+		expect(scoped.graph?.hits).toEqual([{ text: "graph a one" }]);
+	});
+
+	test("a graph-scoped snapshot survives the cache round trip; an unscoped one carries no graph key", () => {
+		const scoped = withGraphScope("graph", ownSnapshot, hits, "g-a");
+		expect(parseRecallSnapshot(JSON.parse(JSON.stringify(scoped)))).toEqual(scoped);
+		const parsedOwn = parseRecallSnapshot(JSON.parse(JSON.stringify(ownSnapshot)));
+		expect(JSON.stringify(parsedOwn)).toBe(JSON.stringify(ownSnapshot));
+		expect(Object.hasOwn(parsedOwn ?? {}, "graph")).toBe(false);
+		// Past the graph budget, or an empty graph id, is not what the module writes.
+		const tooMany = { ...scoped, graph: { graph_id: "g-a", hits: Array.from({ length: GRAPH_RECALL_MAX_HITS + 1 }, (_, i) => ({ text: `l${i}` })) } };
+		expect(parseRecallSnapshot(tooMany)).toBeNull();
+		expect(parseRecallSnapshot({ ...scoped, graph: { graph_id: "", hits: [{ text: "x" }] } })).toBeNull();
+	});
+
+	test("a snapshot with only graph lines is not cold; one with neither is", () => {
+		const graphOnly: RecallSnapshot = { ...ownSnapshot, hits: [], graph: { graph_id: "g-a", hits: [{ text: "graph a one" }] } };
+		expect(snapshotState(graphOnly, T0, TTL_S)).toBe("fresh");
+		expect(snapshotState({ ...ownSnapshot, hits: [] }, T0, TTL_S)).toBe("cold");
 	});
 });

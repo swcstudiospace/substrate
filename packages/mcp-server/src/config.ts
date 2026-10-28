@@ -5,7 +5,7 @@
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
 import { createHash, timingSafeEqual } from "node:crypto";
-import { SOLANA_CLI_DEFAULT } from "@substrate/ledger";
+import { assertDevnetRpcUrl, SOLANA_CLI_DEFAULT } from "@substrate/ledger";
 import { ADMISSION_CLASSES, loadBreakerSettings, type AdmissionClass, type BreakerSettings } from "@substrate/observability";
 import { loadBriefProfileConfig, type BriefProfileConfig } from "./brief-profile.ts";
 import { ADMISSION_MODES, type AdmissionMode, type AdmissionSettings, type BucketLimit } from "./admission.ts";
@@ -454,8 +454,13 @@ export interface SubstrateConfig {
 	 * operator sets them, and the job exits 2 with usage until they do. The
 	 * keypair is only ever a path the CLI reads — it is never opened or
 	 * logged here. `pubkey` is non-secret.
+	 *
+	 * `problem` is null unless `rpcUrl` is refused by the devnet-only URL guard
+	 * (`assertDevnetRpcUrl`: not http(s), userinfo, a fragment, or a mainnet/testnet
+	 * host). It never crashes boot; `configWarnings` reports it, and the anchor job
+	 * and the verify read-back refuse to touch the network while it is set.
 	 */
-	solana: { rpcUrl: string; keypairPath: string | null; pubkey: string | null; cli: string };
+	solana: { rpcUrl: string; keypairPath: string | null; pubkey: string | null; cli: string; problem: string | null };
 	/**
 	 * Whole-verify devnet budget in milliseconds (D28-18).
 	 *
@@ -718,6 +723,29 @@ function readSkills(env: Record<string, string | undefined>): SubstrateConfig["s
 	}
 	return { repo, remoteUrl, stateDir, gh, problem };
 }
+/**
+ * The anchor job's devnet identity, in the `loadConfig` trim-or-default style.
+ *
+ * Never throws: a refused `SOLANA_RPC_URL` sets `problem` (the guard's own message, which never
+ * echoes the URL) and is kept as given rather than silently replaced by the default, because a
+ * fallback would anchor to a cluster the operator did not choose.
+ */
+function readSolana(env: Record<string, string | undefined>): SubstrateConfig["solana"] {
+	const rpcUrl = env.SOLANA_RPC_URL?.trim() || "https://api.devnet.solana.com";
+	let problem: string | null = null;
+	try {
+		assertDevnetRpcUrl(rpcUrl);
+	} catch (cause) {
+		problem = `SOLANA_RPC_URL refused: ${cause instanceof Error ? cause.message : String(cause)}`;
+	}
+	return {
+		rpcUrl,
+		keypairPath: env.SOLANA_ANCHOR_KEYPAIR?.trim() || null,
+		pubkey: env.SOLANA_ANCHOR_PUBKEY?.trim() || null,
+		cli: env.SOLANA_CLI?.trim() || SOLANA_CLI_DEFAULT,
+		problem,
+	};
+}
 /** "swarm-a05-be" → "SUBSTRATE_TOKEN_SWARM_A05_BE": the inverse of the suffix mapping in `tokenConfig`. */
 export function tokenEnvName(surface: Surface): string {
 	return `SUBSTRATE_TOKEN_${surface.toUpperCase().replace(/-/g, "_")}`;
@@ -956,12 +984,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		desktopDir: desktopDirRaw.startsWith("/") ? desktopDirRaw : DEFAULT_DESKTOP_DIR,
 		desktopIgnored: desktopNames.filter((name) => !isKnownDesktopSurface(name)),
 		desktopDirRejected: desktopDirRaw !== "" && !desktopDirRaw.startsWith("/") ? desktopDirRaw : null,
-		solana: {
-			rpcUrl: env.SOLANA_RPC_URL?.trim() || "https://api.devnet.solana.com",
-			keypairPath: env.SOLANA_ANCHOR_KEYPAIR?.trim() || null,
-			pubkey: env.SOLANA_ANCHOR_PUBKEY?.trim() || null,
-			cli: env.SOLANA_CLI?.trim() || SOLANA_CLI_DEFAULT,
-		},
+		solana: readSolana(env),
 		verifyTimeoutMs: Number.isFinite(Number(env.SUBSTRATE_VERIFY_TIMEOUT_MS)) && Number(env.SUBSTRATE_VERIFY_TIMEOUT_MS) > 0
 			? Number(env.SUBSTRATE_VERIFY_TIMEOUT_MS)
 			: 30_000,
@@ -1724,6 +1747,10 @@ export function configWarnings(config: SubstrateConfig): string[] {
 	// Named by key, never by value: the warning goes to a log.
 	if (config.skills.problem) {
 		warnings.push(`skill proposals are refused until the skills library is fixed: ${config.skills.problem}`);
+	}
+	// Before the early return too: a refused RPC URL stops anchoring and verify on every deployment.
+	if (config.solana.problem) {
+		warnings.push(`anchoring and the verify read-back are refused until SOLANA_RPC_URL is fixed: ${config.solana.problem}`);
 	}
 	if (config.docsBackendRejected !== null) {
 		warnings.push(`SUBSTRATE_DOCS_BACKEND "${config.docsBackendRejected}" is not a docs plane; docs serve ${config.docsBackend}`);

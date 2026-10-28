@@ -137,6 +137,11 @@ These apply to every source:
 | `session.checkpoint` | 55 | `note` | `caller` | `session.checkpoint` | — | — | no |
 | `session.rollback` | 55 | `note` | `caller` | `session.rollback` | — | — | no |
 | `session.rollback.refused` | 55 | `warning` | `caller` | `session.rollback.refused` | — | — | no |
+| `memory.forget` | 57 | `note` | `caller` | `memory.forget` | — | — | no |
+| `memory.capsule.export` | 60 | `note` | `caller` | `memory.capsule.export` | — | — | no |
+| `memory.capsule.redact` | 60 | `note` | `caller` | `memory.capsule.redact` | — | — | no |
+| `anchor.signer.rotate` | 59 | `note` | `caller` | `anchor.signer.rotate` | — | — | no |
+| `anchor.reanchor` | 59 | `note` | `caller` | `anchor.reanchor` | — | — | no |
 | `muse.brief_writer` | 19 | — | — | — | — | — | no |
 | `memory.retain` | 26 | — | — | — | — | — | no |
 | `memory.recall` | 26 | — | — | — | — | — | no |
@@ -230,6 +235,26 @@ and a rollback with `rb:<session token>:<rollback_id>`, plus the original `ts` o
 ledger only honours the key under `SUBSTRATE_EVENT_IDEMPOTENCY=accept` or `enforce`; the default
 `off` ignores it, so a retried event would append a duplicate. A refusal carries no key: a
 repeated refusal is a new fact.
+
+## Memory forget events
+
+Phase 57 defines the ledger note for forgetting memory, using an existing kind only. One
+`note` per forget call (`payload.action: "memory.forget"`), emitted from the caller's own
+surface with the target session's `session_id`; it carries no `repo` and no `runtime`. The
+contract is encoded and validated in `packages/mcp-server/src/memory-forget.ts`; nothing is
+wired to the service or an MCP tool by this change.
+
+- Payload: `forget_id` (`fg_` + 26 lowercase hex, derived from the sorted entry ids, the
+  reason and the rollback or checkpoint id, so a retried call reuses it), `reason`
+  (`rollback`, `expiry`, `operator`), `actor` (`agent`, `human`), `entry_count` (1..200),
+  `entry_ids` (the first 50, sorted), `counts {marked, already_forgotten, already_superseded,
+  missing}` and `plane {deleted, absent, pending, skipped}` (each sums to `entry_count`), and
+  optional `session_id`, `checkpoint_id` and `rollback_id`.
+- **Forgotten, not deleted.** The index row stays; its `superseded_by` is set to the marker
+  `forgotten:<forget_id>`, so the brief and `memory_search` (without `include_superseded`)
+  stop serving it at once. Its plane document is deleted afterwards; a plane failure never
+  undoes the mark and is retried by re-running the same request. The ledger is never rewritten.
+- **No content.** The note carries ids and counts only, never memory text.
 
 ## Silent sources
 

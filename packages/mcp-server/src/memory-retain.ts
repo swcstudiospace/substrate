@@ -35,7 +35,7 @@ import {
 	type HindsightConfig,
 	type HindsightResult,
 } from "./planes/hindsight.ts";
-import { canonicalJson, sha256Hex } from "./event.ts";
+import { canonicalJson, normalizeIdentifier, sha256Hex } from "./event.ts";
 import { memoryExpiry, type GraphLifetime, type MemoryExpiry } from "./memory-policy.ts";
 import { applyRule, redact, REDACTION_RULES } from "./redact.ts";
 import { isTransientRetainReason, type RetainOutboxCandidate } from "./retain-outbox.ts";
@@ -127,6 +127,28 @@ export function retainDocumentId(entry: MemoryEntry, idempotencyKey: string): st
 	return `subj_${sha256Hex(canonicalJson({ scope: entry.scope, kind: entry.kind, subject })).slice(0, 32)}`;
 }
 
+/** The metadata keys that tie a plane document back to the graph, session and node that wrote it. */
+export const RETAIN_JOIN_KEYS = ["graph_id", "session_id", "node_id"] as const;
+
+/**
+ * The join keys one entry can carry. An identifier is kept only when it is a
+ * string that `normalizeIdentifier` (the form the ledger and index store it
+ * in) returns unchanged: an absent, empty, over-long or redactable one is
+ * dropped rather than sent, and never fails the write. `node_id` is read
+ * structurally because `MemoryEntry` does not declare it yet; an entry
+ * without one simply carries none.
+ */
+export function retainJoinKeys(entry: MemoryEntry): Record<string, string> {
+	const source: Record<string, unknown> = { ...entry };
+	const keys: Record<string, string> = {};
+	for (const key of RETAIN_JOIN_KEYS) {
+		const value = source[key];
+		if (typeof value !== "string") continue;
+		if (normalizeIdentifier(value) === value) keys[key] = value;
+	}
+	return keys;
+}
+
 /** What the live forward and the outbox replay both hand to `forwardEntry`. */
 export interface RetainTarget {
 	entry: MemoryEntry;
@@ -214,6 +236,10 @@ async function forwardEntry(deps: RetainDeps, config: HindsightConfig, target: R
 	};
 	if (typeof entry.subject === "string" && entry.subject.length > 0) metadata.subject = entry.subject;
 	if (entry.repo) metadata.repo = entry.repo;
+	// Join keys (phase 57): metadata only, never part of the document id
+	// (that would re-create every existing document) and never a tag
+	// (unbounded cardinality).
+	Object.assign(metadata, retainJoinKeys(entry));
 	const texts = [entry.text, context, ...Object.values(metadata)];
 	const rules = [...new Set(texts.flatMap((text) => findingRules(text)))];
 	if (rules.length > 0) {

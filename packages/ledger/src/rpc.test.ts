@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { bs58decode, createRpc, RpcError } from "./rpc.ts";
+import { assertDevnetRpcUrl, bs58decode, createRpc, RpcError, RpcUrlError } from "./rpc.ts";
 
 const URL_ = "https://rpc.test.invalid";
 const PAYER = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T";
@@ -179,5 +179,87 @@ describe("bs58decode", () => {
 		expect([...padded.slice(0, 2)]).toEqual([0, 0]);
 		expect([...padded.slice(2)]).toEqual([...plain]);
 		expect(() => bs58decode("0OIl")).toThrow();
+	});
+});
+
+describe("assertDevnetRpcUrl (defence in depth beside the genesis-hash gate)", () => {
+	const ACCEPTED = [
+		"https://api.devnet.solana.com",
+		"https://API.DEVNET.SOLANA.COM/",
+		"http://127.0.0.1:8899",
+		"http://localhost:8899",
+		"https://rpc.test.invalid",
+		"https://devnet.helius-rpc.com/?api-key=abc",
+		// Only the host is judged: a devnet host whose path mentions mainnet is a path, not a cluster.
+		"https://rpc.example.invalid/mainnet-proxy/devnet",
+	];
+	const REFUSED: Array<[string, RegExp]> = [
+		["https://api.mainnet-beta.solana.com", /mainnet or testnet/],
+		["https://api.testnet.solana.com", /mainnet or testnet/],
+		["https://API.MAINNET-BETA.SOLANA.COM", /mainnet or testnet/],
+		["https://Api.TestNet.Solana.Com/", /mainnet or testnet/],
+		["https://mainnet.helius-rpc.com/?api-key=abc", /mainnet or testnet/],
+		["https://solana-mainnet.g.alchemy.com/v2/key", /mainnet or testnet/],
+		// A mainnet host that merely contains devnet in the path is still mainnet.
+		["https://api.mainnet-beta.solana.com/devnet", /mainnet or testnet/],
+		["https://rpc.example.invalid@api.mainnet-beta.solana.com/devnet", /userinfo/],
+		["https://user:pass@api.devnet.solana.com", /userinfo/],
+		["https://token@api.devnet.solana.com", /userinfo/],
+		["https://@api.devnet.solana.com", /userinfo/],
+		["https://api.devnet.solana.com/#frag", /fragment/],
+		["https://api.devnet.solana.com/#", /fragment/],
+		["ftp://api.devnet.solana.com", /not http\(s\)/],
+		["wss://api.devnet.solana.com", /not http\(s\)/],
+		["file:///tmp/validator.sock", /not http\(s\)/],
+		["api.devnet.solana.com", /not a valid absolute URL/],
+		["", /not a valid absolute URL/],
+	];
+
+	for (const url of ACCEPTED) {
+		test(`accepts ${url}`, () => {
+			expect(() => assertDevnetRpcUrl(url)).not.toThrow();
+		});
+	}
+
+	for (const [url, message] of REFUSED) {
+		test(`refuses ${JSON.stringify(url)} with a typed, actionable error`, () => {
+			let error: unknown;
+			try {
+				assertDevnetRpcUrl(url);
+			} catch (cause) {
+				error = cause;
+			}
+			expect(error).toBeInstanceOf(RpcUrlError);
+			expect(error).toBeInstanceOf(RpcError);
+			expect((error as Error).message).toMatch(message);
+		});
+	}
+
+	test("the refusal never echoes credentials from the URL", () => {
+		for (const url of ["https://user:s3cret@api.devnet.solana.com", "https://s3cret@api.mainnet-beta.solana.com/?k=s3cret#s3cret"]) {
+			try {
+				assertDevnetRpcUrl(url);
+			} catch (cause) {
+				expect((cause as Error).message).not.toContain("s3cret");
+			}
+		}
+	});
+
+	test("createRpc refuses to build an RPC object for a refused URL and sends nothing", () => {
+		let requests = 0;
+		const fetchImpl = (async () => {
+			requests += 1;
+			return new Response("{}");
+		}) as unknown as typeof fetch;
+		for (const [url] of REFUSED) {
+			expect(() => createRpc({ url, timeoutMs: 1000, attempts: 1, backoffMs: 0, fetchImpl })).toThrow(RpcUrlError);
+		}
+		expect(requests).toBe(0);
+	});
+
+	test("createRpc still builds for the default devnet and a local test-validator URL", () => {
+		for (const url of ["https://api.devnet.solana.com", "http://localhost:8899"]) {
+			expect(() => createRpc({ url, timeoutMs: 1000, attempts: 1, backoffMs: 0 })).not.toThrow();
+		}
 	});
 });
