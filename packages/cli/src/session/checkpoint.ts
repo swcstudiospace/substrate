@@ -6,9 +6,10 @@
  * server unreachable.
  *
  * `createCheckpoint` snapshots the worktree, pins it, then tells the server (`session_checkpoint`). A server
- * failure is NOT a checkpoint failure: the local checkpoint stands and a pending record is journaled
- * (`pending.ts`) so `substrate session sync` can record it later; replay sends the same ckpt id and seq, so
- * it is harmless. Only a local failure (the snapshot or the pin) throws.
+ * failure is NOT a checkpoint failure: the local checkpoint stands. The pending record (`pending.ts`) is written
+ * BEFORE the request (write-ahead) and removed when the server accepts it, so a request that fails, or a process
+ * that ends while it is in flight, leaves a record `substrate session sync` delivers; replay sends the same ckpt
+ * id and seq, so it is harmless. Only a local failure (the snapshot or the pin) throws.
  *
  * `seq` is the highest local seq of the session plus one, and `prev_ckpt_id` is the checkpoint it follows.
  * Asking for a seq that already exists returns that checkpoint instead of making another (idempotent by
@@ -51,7 +52,7 @@ import {
 	spawnRunner,
 } from "../../../worktree-snapshot/src/index.ts";
 import { CKPT_ID_PATTERN, type RollbackServerClient } from "./client.ts";
-import { PendingJournalError, resolvePendingDir, writePending, type CheckpointRecord } from "./pending.ts";
+import { PendingJournalError, type PendingCheckpoint, removePending, resolvePendingDir, writePending, type CheckpointRecord } from "./pending.ts";
 
 export type PlanRef = { phase?: string; step?: string };
 
@@ -180,6 +181,21 @@ export interface CheckpointResult {
 	file_count: number;
 }
 
+/** What `admit` decides under the checkpoint lock. */
+export type CheckpointAdmission = { take: true } | { take: false; reason: string };
+
+/** `existing` is the session's checkpoints (ascending by seq) as listed under the lock; `tree` is the tree id of the snapshot about to be pinned. */
+export interface CheckpointAdmitContext {
+	existing: readonly LocalCheckpoint[];
+	tree: string;
+}
+
+/** `createCheckpoint` declined by `admit`: nothing was pinned and the server was not contacted. */
+export interface CheckpointSkipped {
+	status: "skipped";
+	reason: string;
+}
+
 export interface CreateCheckpointParams {
 	worktree: string;
 	sessionId: string;
@@ -199,13 +215,22 @@ export interface CreateCheckpointParams {
 	seq?: number;
 	/** How long to wait for the checkpoint lock when another process holds it (default 100 tries, 50 ms apart); tests inject `sleep`. */
 	lockWait?: LockWait;
+	/**
+	 * Evaluated under the checkpoint lock, right after the list and before the seq decision, with the snapshot this
+	 * call already took. A decline releases the lock and returns `{ status: "skipped", reason }`: the policy that
+	 * admits a checkpoint and the pin that follows it are one atomic step, so overlapping callers cannot both pass
+	 * on the same history. Without `admit` the result never is a skip.
+	 */
+	admit?: (context: CheckpointAdmitContext) => CheckpointAdmission;
 }
 
 /**
  * Create (or find) a checkpoint and offer it to the server. Throws `CheckpointError` for invalid input and
  * the snapshot library's errors for a local failure; a server failure never throws.
  */
-export async function createCheckpoint(params: CreateCheckpointParams): Promise<CheckpointResult> {
+export function createCheckpoint(params: CreateCheckpointParams & { admit: NonNullable<CreateCheckpointParams["admit"]> }): Promise<CheckpointResult | CheckpointSkipped>;
+export function createCheckpoint(params: Omit<CreateCheckpointParams, "admit"> & { admit?: undefined }): Promise<CheckpointResult>;
+export async function createCheckpoint(params: CreateCheckpointParams): Promise<CheckpointResult | CheckpointSkipped> {
 	const run = params.run ?? spawnRunner;
 	const { sessionId, trigger } = params;
 	if (typeof sessionId !== "string" || sessionId.length === 0 || sessionId.length > 512) {
@@ -231,8 +256,8 @@ export async function createCheckpoint(params: CreateCheckpointParams): Promise<
 	const takenAtMs = params.now().getTime();
 	const ckptId = newCheckpointId(params.randomBytes);
 
-	// The decision that counts: list, choose the seq and pin while holding the checkpoint lock, so a concurrent
-	// process cannot take the same seq between the list and the pin.
+	// The decision that counts: list, admit, choose the seq and pin while holding the checkpoint lock, so a concurrent
+	// process cannot take the same seq (or pass the same policy on the same history) between the list and the pin.
 	const lock = await acquireWorktreeLockWithin(await resolveGitDir(params.worktree, run), params.now, {
 		...params.lockWait,
 		file: CHECKPOINT_LOCK_FILE,
@@ -241,7 +266,12 @@ export async function createCheckpoint(params: CreateCheckpointParams): Promise<
 	let record: CheckpointRecord;
 	let checkpoint: LocalCheckpoint;
 	try {
-		const decision = decideSeq((await listLocalCheckpoints({ worktree: params.worktree, run, now: params.now })).checkpoints, sessionId, params.seq);
+		const listed = (await listLocalCheckpoints({ worktree: params.worktree, run, now: params.now })).checkpoints;
+		if (params.admit !== undefined) {
+			const admission = params.admit({ existing: checkpointsOfSession(listed, sessionId), tree: snap.tree });
+			if (!admission.take) return { status: "skipped", reason: admission.reason };
+		}
+		const decision = decideSeq(listed, sessionId, params.seq);
 		// Another process made this seq while this one was snapshotting: it is that process's checkpoint now.
 		if (decision.kind === "found") {
 			lock.release();
@@ -358,28 +388,53 @@ async function offerExisting(params: CreateCheckpointParams, run: Runner, found:
 	return { checkpoint: found, created: false, server, skipped: [], file_count: record.file_count };
 }
 
-/** Record with the server; on any failure journal it. Never throws. */
+/**
+ * Record with the server, write-ahead. The pending record is journaled BEFORE the request, so a process that dies
+ * or times out while the request is in flight leaves a record `substrate session sync` delivers (replay sends the
+ * same ckpt id, seq and idempotency key). The record is removed when the server accepts it; a request that fails
+ * keeps it with the error. A journal that cannot take the record does not stop the request. Never throws.
+ */
 async function offerToServer(params: CreateCheckpointParams, run: Runner, record: CheckpointRecord): Promise<CheckpointServerStatus> {
-	const result = await params.client.recordCheckpoint({ ...record, session_id: params.sessionId });
-	if (result.ok) return { status: "recorded", event_id: result.value.event_id, stored: result.value.stored };
-	const { code, message } = result.error;
+	const item = (attempts: number, lastError?: string): PendingCheckpoint => ({
+		version: 1,
+		kind: "checkpoint",
+		id: record.ckpt_id,
+		session_id: params.sessionId,
+		surface: params.surface,
+		queued_at: params.now().toISOString(),
+		attempts,
+		...(lastError === undefined ? {} : { last_error: lastError }),
+		record,
+	});
+	let dir: string | undefined;
+	let journalError: string | undefined;
 	try {
-		const dir = params.pendingDir ?? (await resolvePendingDir(params.worktree, run));
-		writePending(dir, {
-			version: 1,
-			kind: "checkpoint",
-			id: record.ckpt_id,
-			session_id: params.sessionId,
-			surface: params.surface,
-			queued_at: params.now().toISOString(),
-			attempts: 1,
-			last_error: `${code}: ${message}`.slice(0, 300),
-			record,
-		});
-		return { status: "pending", code, message };
+		dir = params.pendingDir ?? (await resolvePendingDir(params.worktree, run));
+		writePending(dir, item(0));
 	} catch (error) {
-		// The local checkpoint stands either way; report that the ledger will not hear of it until it is re-offered.
-		const journalError = error instanceof PendingJournalError ? error.message : "the pending journal could not be written";
-		return { status: "unrecorded", code, message, journal_error: journalError };
+		dir = undefined;
+		journalError = error instanceof PendingJournalError ? error.message : "the pending journal could not be written";
 	}
+	const result = await params.client.recordCheckpoint({ ...record, session_id: params.sessionId });
+	if (result.ok) {
+		if (dir !== undefined) {
+			try {
+				removePending(dir, "checkpoint", record.ckpt_id);
+			} catch {
+				// The server has the record; a leftover pending file is delivered again and deduped by its idempotency key.
+			}
+		}
+		return { status: "recorded", event_id: result.value.event_id, stored: result.value.stored };
+	}
+	const { code, message } = result.error;
+	if (dir === undefined) {
+		// The local checkpoint stands either way; report that the ledger will not hear of it until it is re-offered.
+		return { status: "unrecorded", code, message, journal_error: journalError ?? "the pending journal could not be written" };
+	}
+	try {
+		writePending(dir, item(1, `${code}: ${message}`.slice(0, 300)));
+	} catch {
+		// The write-ahead record already stands; only its attempt count and error text are not updated.
+	}
+	return { status: "pending", code, message };
 }
