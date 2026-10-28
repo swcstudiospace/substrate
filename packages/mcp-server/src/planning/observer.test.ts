@@ -26,6 +26,7 @@ import {
 	type PlanningObserverDeps,
 	type PlanningTimers,
 } from "./observer.ts";
+import type { OriginUrlResult, OriginUrlRunner } from "./checkout.ts";
 import { DragonflyPresenceStore, PRESENCE_KEY_PREFIX, presenceRetentionS } from "./presence-dragonfly.ts";
 import type { PlanningFs } from "./index.ts";
 import { FakeTree, TREE_ROOT } from "./tree.fixtures.ts";
@@ -45,13 +46,15 @@ function sha256(text: string): string {
 
 function observerOver(
 	tree: FakeTree,
-	options: { presence?: DragonflyPresenceStore | null; accept?: () => boolean } = {},
+	options: { presence?: DragonflyPresenceStore | null; accept?: () => boolean; originUrl?: OriginUrlRunner } = {},
 ): { observer: PlanningObserver; events: EventInput[] } {
 	const events: EventInput[] = [];
 	const observer = new PlanningObserver({
 		settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
 		fs: tree,
 		presence: options.presence ?? null,
+		// The tree is in memory, so git is never run: the config file in the tree is what the origin is read from.
+		originUrl: options.originUrl ?? (async () => ({ kind: "unavailable" })),
 		emit: async (event) => {
 			const stored = options.accept ? options.accept() : true;
 			if (stored) events.push(event);
@@ -181,6 +184,21 @@ describe("the observer's scans", () => {
 		expect(await observer.scan()).toEqual({ state: "observed", outcome: "repo-unknown", heartbeat: { state: "failed", detail: "no-git-entry" } });
 		expect(events).toEqual([]);
 		expect(await observer.scan()).toMatchObject({ outcome: "unchanged" });
+	});
+
+	test("a change while git cannot answer is held, not dropped: it is published once git answers", async () => {
+		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
+		let answer: OriginUrlResult = { kind: "failed" };
+		const { observer, events } = observerOver(tree, { originUrl: async () => answer });
+		await observer.scan();
+
+		tree.setContent(`${PHASE}/52-CONTEXT.md`, "# context, edited\n");
+		expect(await observer.scan()).toMatchObject({ outcome: "repo-unknown", heartbeat: { state: "presence-unset" } });
+		expect(events).toEqual([]);
+
+		answer = { kind: "value", url: `git@github.com:${REPO}.git` };
+		expect(await observer.scan()).toMatchObject({ outcome: "published" });
+		expect(events).toHaveLength(1);
 	});
 
 	test("without a cache endpoint a change is still published, and the heartbeat says presence is unset", async () => {

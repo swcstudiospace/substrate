@@ -73,14 +73,21 @@ describe("entry hash", () => {
 	});
 
 	test("the constants shared with the gate still match the gate's source", () => {
-		// `contentHash` in memory-write.ts is not exported, so this module rebuilds its preimage. Pin the three facts
-		// the rebuild depends on, so a change to the gate fails here instead of silently splitting the hash in two.
+		// `entryHashFor` calls the gate's exported `contentHash`. The independent preimages above fail when the gate's
+		// preimage changes; these facts pin that the gate still exports what this module calls, so it cannot go back
+		// to a private copy that drifts.
 		const source = readFileSync(join(import.meta.dir, "memory-write.ts"), "utf8");
 		expect(source).toMatch(/const HASH_TENANT = "swc";/);
 		expect(source).toMatch(/const HASH_VERSION_MARKER = 2;/);
 		expect(source).toMatch(/function contentHash\(input: \{[^}]*\}\): string \{\s*return sha256Hex\(canonicalJson\(input\)\);/);
 		expect(source).toMatch(/hv: HASH_VERSION_MARKER,\s*tenant: HASH_TENANT,/);
 		expect(source).toMatch(/const contentV1 = contentHash\(\{ scope: scope\.canonical, kind, subject, text, writer \}\);/);
+		expect(source).toMatch(/export const HASH_TENANT\b/);
+		expect(source).toMatch(/export const HASH_VERSION_MARKER\b/);
+		expect(source).toMatch(/export function contentHash\(/);
+		const record = readFileSync(join(import.meta.dir, "memory-record.ts"), "utf8");
+		expect(record).toMatch(/from "\.\/memory-write\.ts"/);
+		expect(record).not.toMatch(/sha256Hex\(canonicalJson/);
 	});
 });
 

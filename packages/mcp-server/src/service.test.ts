@@ -4116,7 +4116,7 @@ describe("verifyGraph hour report", () => {
 
 	function rpcReturning(memo: string | null, over: Record<string, unknown> = {}) {
 		return {
-			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
 			transactionMemo: async () => ({ memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: null, ...over }),
 		};
 	}
@@ -4220,7 +4220,7 @@ describe("verifyGraph hour report", () => {
 			anchorForPeriod: async () => anchorRow(world),
 		});
 		const rpc = {
-			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
 			transactionMemo: async () => ({ memo: world.memo, payer: "SomeoneElse11111111111111111111111111111", payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: null }),
 		};
 		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
@@ -4284,7 +4284,7 @@ describe("verifyGraph hour report", () => {
 			anchorForPeriod: async () => anchorRow(world),
 		});
 		const rpc = {
-			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
 			transactionMemo: async () => {
 				throw new Error("fetch failed");
 			},
@@ -4304,7 +4304,7 @@ describe("verifyGraph hour report", () => {
 			anchorForPeriod: async () => anchorRow(world),
 		});
 		const rpc = {
-			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
 			transactionMemo: async () => null,
 		};
 		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
@@ -4506,7 +4506,7 @@ describe("verifyGraph hour report", () => {
 			{ SUBSTRATE_VERIFY_TIMEOUT_MS: String(VERIFY_RESPONSE_MARGIN_MS + 150) },
 		);
 		const rpc = {
-			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
 			transactionMemo: (): Promise<never> => Promise.withResolvers<never>().promise,
 		};
 		const started = Date.now();

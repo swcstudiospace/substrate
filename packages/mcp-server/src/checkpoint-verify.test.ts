@@ -18,6 +18,7 @@ import {
 	DEFAULT_ANCHOR_LAG_MS,
 	type HourLeafRead,
 	verifyCheckpoint,
+	verifyEventAnchor,
 } from "./checkpoint-verify.ts";
 import { eventHash } from "./event.ts";
 import { INGEST_LAG_MS, type AnchorRow } from "./greptime.ts";
@@ -31,7 +32,7 @@ import type { SubstrateEvent } from "./types.ts";
  */
 
 const H = Date.UTC(2026, 9, 20, 10);
-const GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC";
+const GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
 const OTHER_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
 // Real 32-byte public keys (the three memo program ids), so base58 validation is exercised for real.
 const SIGNER_A = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo";
@@ -534,16 +535,18 @@ describe("rotated signers: accepted by the anchor's block time, not by who is cu
 	});
 });
 
+/** The typed error code a verify call rejects with, or "no error". Shared by every block that checks caller errors. */
+const code = async (promise: Promise<unknown>): Promise<string> => {
+	try {
+		await promise;
+	} catch (cause) {
+		if (cause instanceof CheckpointVerifyError) return cause.code;
+		throw cause;
+	}
+	return "no error";
+};
+
 describe("caller errors are typed errors, not statuses", () => {
-	const code = async (promise: Promise<unknown>): Promise<string> => {
-		try {
-			await promise;
-		} catch (cause) {
-			if (cause instanceof CheckpointVerifyError) return cause.code;
-			throw cause;
-		}
-		return "no error";
-	};
 
 	test("a malformed ref", async () => {
 		const { deps } = depsFor(scenario(2, 0));
@@ -587,5 +590,60 @@ describe("caller errors are typed errors, not statuses", () => {
 			expect({ config, code: await code(verifyCheckpoint(depsFor(s, { config }).deps, CKPT)) }).toEqual({ config, code: "invalid-config" });
 		}
 		expect(await code(verifyCheckpoint(depsFor(s, { nowMs: Number.NaN }).deps, CKPT))).toBe("invalid-config");
+	});
+});
+
+describe("verifyEventAnchor: any ledger event, not only a checkpoint", () => {
+	/** A `note` event placed at `index` of a `size`-event hour anchored by SIGNER_A. */
+	function noteScenario(size: number, index: number): { s: Scenario; note: SubstrateEvent } {
+		const s = scenario(size, (index + 1) % size);
+		const base: Omit<SubstrateEvent, "hash"> = {
+			...(({ hash: _h, ...rest }) => rest)(s.event),
+			id: "evt_p59bnote0000000000000000000002",
+			kind: "note",
+			summary: "a plain note",
+			payload: { action: "memory.forget" },
+		};
+		const note: SubstrateEvent = { ...base, hash: eventHash(base) };
+		const leaves = s.leaves.map((leaf, i) => (i === index ? { event_id: note.id, hash: note.hash } : leaf));
+		const root = merkleRootHex(leaves.map((leaf) => leaf.hash));
+		const memo = formatMemo({ periodStartMs: H, rootHex: root, count: size });
+		return { note, s: { ...s, leaves, root, row: { ...s.row, root, memo }, tx: { ...s.tx, memo } } };
+	}
+
+	test("a non-checkpoint event is anchored through the generic function and verifyCheckpoint still refuses it", async () => {
+		const { s, note } = noteScenario(5, 3);
+		const { deps } = depsFor(s, { findEvent: async (ref) => (ref === note.id ? { event: note, ingested_at_ms: H + 30 * 60_000 } : null) });
+		const result = await verifyEventAnchor(deps, note.id);
+		expect(result).toMatchObject({ status: "anchored", ref: note.id, reasons: [], event: { id: note.id, kind: "note", session_id: "sess-p59b" } });
+		expect(result.evidence).toMatchObject({ event_hash: note.hash, leaf_index: 3, computed_root: s.root, anchored_root: s.root, count: 5, signer: SIGNER_A });
+		expect(result.evidence.proof).not.toBeNull();
+		expect(await code(verifyCheckpoint(deps, note.id))).toBe("not-a-checkpoint");
+	});
+
+	test("a checkpoint event verifies the same through both entry points", async () => {
+		const s = scenario(4, 2);
+		const { deps } = depsFor(s);
+		const generic = await verifyEventAnchor(deps, s.event.id);
+		const specific = await verifyCheckpoint(deps, s.event.id);
+		expect({ status: generic.status, hour_start: generic.hour_start, evidence: generic.evidence, reasons: generic.reasons }).toEqual({
+			status: specific.status,
+			hour_start: specific.hour_start,
+			evidence: specific.evidence,
+			reasons: specific.reasons,
+		});
+	});
+
+	test("a tampered event is a mismatch and the typed errors are the same as verifyCheckpoint's", async () => {
+		const { s, note } = noteScenario(3, 1);
+		const tampered: SubstrateEvent = { ...note, summary: "rewritten after the fact" };
+		const { deps } = depsFor(s, { findEvent: async () => ({ event: tampered, ingested_at_ms: H + 30 * 60_000 }) });
+		const result = await verifyEventAnchor(deps, note.id);
+		expect(result.status).toBe("mismatch");
+		expect(await code(verifyEventAnchor(deps, "not a ref!"))).toBe("invalid-ref");
+		expect(await code(verifyEventAnchor(deps, "evt_someotherevent"))).toBe("ref-mismatch");
+		const missing = depsFor(s, { findEvent: async () => null }).deps;
+		expect(await code(verifyEventAnchor(missing, note.id))).toBe("not-found");
+		expect(await code(verifyEventAnchor(depsFor(s, { nowMs: Number.NaN }).deps, note.id))).toBe("invalid-config");
 	});
 });

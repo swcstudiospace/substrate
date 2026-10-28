@@ -21,7 +21,7 @@ const CLI = join(REPO_ROOT, "packages", "cli", "src", "index.ts");
 const H = Date.UTC(2026, 9, 1, 10);
 const HOUR = 3_600_000;
 const PUBKEY = "TestPubkey1111111111111111111111111111111";
-const GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC";
+const GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
 
 /** One closed hour of fixture: its store rows, ingest records, and the digest they imply. */
 interface HourWorld {

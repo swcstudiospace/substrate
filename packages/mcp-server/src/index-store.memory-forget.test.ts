@@ -164,6 +164,26 @@ describe("memoryEntriesCreatedAfter against a fake connection", () => {
 		});
 	});
 
+	test("an upper bound adds an inclusive whole-millisecond predicate before the order, and the limit stays last", async () => {
+		const { index, statements } = store();
+		await index.memoryEntriesCreatedAfter("sess-1", "2026-10-20T12:00:00.000Z", null, 5, "2026-10-20T13:00:00.789123Z");
+		expect(statements).toEqual([
+			{
+				text: `${SELECT} ${TAIL}2::timestamptz and date_trunc('milliseconds', created) <= $3::timestamptz order by created asc, id asc limit $4`,
+				params: ["sess-1", "2026-10-20T12:00:00.000Z", "2026-10-20T13:00:00.789Z", 6],
+			},
+		]);
+		await index.memoryEntriesCreatedAfter("sess-1", "2026-10-20T12:00:00.000Z", "g-9", 5, "2026-10-20T12:00:00.000Z");
+		expect(statements[1]?.params).toEqual(["sess-1", "g-9", "2026-10-20T12:00:00.000Z", "2026-10-20T12:00:00.000Z", 6]);
+	});
+
+	test("refuses an unparseable upper bound and one before the lower bound, before any SQL", async () => {
+		const { index, statements } = store();
+		await expect(index.memoryEntriesCreatedAfter("sess-1", "2026-10-20T12:00:00.000Z", null, 5, "later")).rejects.toThrow(/not an instant/);
+		await expect(index.memoryEntriesCreatedAfter("sess-1", "2026-10-20T12:00:00.000Z", null, 5, "2026-10-20T11:59:59.999Z")).rejects.toThrow(/upper bound is before/);
+		expect(statements).toEqual([]);
+	});
+
 	test("one row over the limit means truncated, and the extra row is not returned", async () => {
 		const { index } = store((statement) => {
 			const limit = Number(statement.params.at(-1)) - 1;
@@ -202,20 +222,36 @@ describe("memoryEntriesCreatedAfter against a fake connection", () => {
 describe("memoryDocumentShared against a fake connection", () => {
 	test("a subject-less entry has a document of its own and sends no SQL", async () => {
 		const { index, statements } = store();
-		expect(await index.memoryDocumentShared({ id: "mem_a", scope: "global", kind: "fact", subject: undefined })).toBe(false);
-		expect(await index.memoryDocumentShared({ id: "mem_a", scope: "global", kind: "fact", subject: "" })).toBe(false);
+		expect(await index.memoryDocumentShared({ id: "mem_a", scope: "global", kind: "fact", subject: undefined, writer: "claude-code" })).toBe(false);
+		expect(await index.memoryDocumentShared({ id: "mem_a", scope: "global", kind: "fact", subject: "", writer: "claude-code" })).toBe(false);
 		expect(statements).toEqual([]);
 	});
 
-	test("a subject-addressed entry asks for another live entry with the same scope, kind and subject", async () => {
+	test("a subject-addressed entry asks for another live entry of the same writer with the same scope, kind and subject", async () => {
 		const { index, statements } = store((statement) => (statement.params.includes("shared") ? [{ shared: 1 }] : []));
-		const entry = { id: "mem_a", scope: "repo:acme/app", kind: "decision" as const };
+		const entry = { id: "mem_a", scope: "repo:acme/app", kind: "decision" as const, writer: "claude-code" };
 		expect(await index.memoryDocumentShared({ ...entry, subject: "shared" })).toBe(true);
 		expect(await index.memoryDocumentShared({ ...entry, subject: "alone" })).toBe(false);
+		// The writer is part of the question: another surface's live twin lives in another bank's document and does not keep this one.
 		expect(statements[0]).toEqual({
-			text: "select 1 as shared from memory_entries where scope = $1 and kind = $2 and subject = $3 and id <> $4 and superseded_by is null limit 1",
-			params: ["repo:acme/app", "decision", "shared", "mem_a"],
+			text: "select 1 as shared from memory_entries where scope = $1 and kind = $2 and subject = $3 and writer = $4 and id <> $5 and superseded_by is null limit 1",
+			params: ["repo:acme/app", "decision", "shared", "claude-code", "mem_a"],
 		});
+	});
+});
+
+describe("forgottenEntryIds against a fake connection", () => {
+	test("asks only for rows whose superseded_by is a forget marker, and answers the ids it found", async () => {
+		const { index, statements } = store(() => [{ id: "mem_b" }]);
+		expect(await index.forgottenEntryIds(["mem_a", "mem_b", "mem_a"])).toEqual(new Set(["mem_b"]));
+		expect(statements).toEqual([{ text: "select id from memory_entries where id in ($1,$2) and superseded_by like $3", params: ["mem_a", "mem_b", "forgotten:%"] }]);
+	});
+
+	test("no ids sends no SQL, and an unbounded list is refused before any", async () => {
+		const { index, statements } = store();
+		expect(await index.forgottenEntryIds([])).toEqual(new Set());
+		await expect(index.forgottenEntryIds(Array.from({ length: 501 }, (_, i) => `mem_${i}`))).rejects.toThrow(/exceeds the 500-id bound/);
+		expect(statements).toEqual([]);
 	});
 });
 
@@ -327,6 +363,15 @@ describeLive("forget against a live index", () => {
 		expect(page.entries.map((entry) => entry.id)).toEqual([id("after-1"), id("old-30d")]);
 	});
 
+	test("an upper bound is inclusive in whole milliseconds: the new timeline's rows are not selected", async () => {
+		const upTo1s = await index.memoryEntriesCreatedAfter(SESSION, at(0), null, 100, at(1000));
+		expect(upTo1s.entries.map((entry) => entry.id)).toEqual([id("after-1"), id("old-30d")]);
+		expect((await index.memoryEntriesCreatedAfter(SESSION, at(0), null, 100, at(0))).entries).toEqual([]);
+		expect((await index.memoryEntriesCreatedAfter(SESSION, at(0), null, 100, at(2000))).entries.map((entry) => entry.id)).toEqual(
+			["after-1", "old-30d", "after-2", "after-3"].map(id),
+		);
+	});
+
 	test("the mark changes only rows with no superseded_by, keeps every row, and a second call changes nothing", async () => {
 		const marker = forgetMarker(forgetIdFor({ reason: "operator", entry_ids: [id("after-1"), id("after-2"), id("after-sup")] }));
 		const first = await index.markMemoryForgotten([id("after-1"), id("after-2"), id("after-sup"), id("missing")], marker);
@@ -372,7 +417,7 @@ describeLive("forget against a live index", () => {
 	});
 
 	test("a live twin keeps a subject-addressed document shared; once it is forgotten the document is no longer shared", async () => {
-		const a = { id: id("sib-a"), scope: SCOPE, kind: "decision" as const, subject: "twin" };
+		const a = { id: id("sib-a"), scope: SCOPE, kind: "decision" as const, subject: "twin", writer: "cursor" };
 		expect(await index.memoryDocumentShared(a)).toBe(true);
 		await index.markMemoryForgotten([id("sib-b")], forgetMarker(`fg_${"c".repeat(26)}`));
 		expect(await index.memoryDocumentShared(a)).toBe(false);

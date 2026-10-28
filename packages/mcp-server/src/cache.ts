@@ -105,6 +105,17 @@ export function graphGenerationKey(graphId: string): string {
 export const DOCS_GENERATION_KEY = `${CACHE_PREFIX}:gen:docs`;
 
 /**
+ * When memory was last forgotten, in epoch ms, deployment-wide (not per repo). A plain value set with a TTL, not a
+ * counter, so it is read as a time and never as a generation. It lives in the `gen` class beside the counters and
+ * is read by no cached answer: only the saved-brief readers ask it (`snapshotSurvivesForget`), because a
+ * `brief-snapshot` has no generation and so cannot see a forget through the memory and recall counters.
+ */
+export const FORGET_MARK_KEY = `${CACHE_PREFIX}:gen:forgotten`;
+
+/** Seconds the mark outlives the longest saved brief it has to guard, so a snapshot saved just before a forget is covered to its last second. */
+export const FORGET_MARK_MARGIN_S = 300;
+
+/**
  * Soonest future timestamp, in epoch ms. A cached answer must not outlive the
  * next lease expiry or reverify deadline baked into it.
  */
@@ -826,6 +837,48 @@ export class ReadThroughCache {
 		} catch (cause) {
 			this.staleGenerations.add(key);
 			this.fail(cause, false, "gen");
+		}
+	}
+
+	/**
+	 * Record a forget: set {@link FORGET_MARK_KEY} to now, held for `ttlSeconds`. A failed write marks the key stale, the
+	 * way a failed bump marks a generation: until a later write lands, no saved brief is served (`snapshotSurvivesForget`
+	 * answers false), because a mark that may be set but cannot be read back is not "no forget".
+	 */
+	async markForget(ttlSeconds: number): Promise<void> {
+		if (!this.enabled || !this.redis) return;
+		const redis = this.redis;
+		try {
+			await this.attempt(() => redis.set(FORGET_MARK_KEY, String(this.now()), Math.max(1, Math.ceil(ttlSeconds))));
+			this.staleGenerations.delete(FORGET_MARK_KEY);
+			this.noteConnected();
+		} catch (cause) {
+			this.staleGenerations.add(FORGET_MARK_KEY);
+			this.fail(cause, false, "gen");
+		}
+	}
+
+	/**
+	 * Whether a saved brief composed at `at` (the snapshot's own ISO timestamp) may be served: it must be strictly later
+	 * than the last forget. False for a mark that cannot be checked (the read failed, the value is not a time, the last
+	 * mark write failed) and for an unreadable `at`. `quiet` counts and degrades nothing, for the stale-while-revalidate
+	 * probe, which is an optimisation; the degraded fallback is not quiet, like `peek`.
+	 */
+	async snapshotSurvivesForget(at: string, quiet: boolean): Promise<boolean> {
+		if (!this.enabled || !this.redis) return false;
+		const atMs = Date.parse(at);
+		if (!Number.isFinite(atMs)) return false;
+		if (this.staleGenerations.has(FORGET_MARK_KEY)) return false;
+		const redis = this.redis;
+		try {
+			const raw = await this.attempt(() => redis.get(FORGET_MARK_KEY));
+			if (!quiet) this.noteConnected();
+			if (raw === null) return true;
+			const markedMs = Number(raw);
+			return Number.isFinite(markedMs) && atMs > markedMs;
+		} catch (cause) {
+			if (!quiet) this.fail(cause, true, "gen");
+			return false;
 		}
 	}
 

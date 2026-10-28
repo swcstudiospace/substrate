@@ -18,6 +18,7 @@ import { gatedFetch } from "@substrate/observability";
 import {
 	ConfigError,
 	configWarnings,
+	contextualRecallConfigWarnings,
 	desktopConfigWarnings,
 	eventIdempotencyConfigWarnings,
 	hashVersionConfigWarnings,
@@ -88,6 +89,7 @@ for (const warning of [
 	...briefRecallConfigWarnings(config),
 	...hindsightInventoryConfigWarnings(config),
 	...requestPathConfigWarnings(config),
+	...contextualRecallConfigWarnings(config),
 	...eventIdempotencyConfigWarnings(config),
 	...config.mentalModels.warnings,
 	...planningConfigWarnings(config.planning),

@@ -25,6 +25,8 @@ export type Snapshot = {
 	manifestSha256: string;
 	entries: SnapshotEntry[];
 	skipped: SkippedPath[];
+	/** Set on a snapshot read from a pin whose skipped list was capped: `skipped` holds the first entries of `total`. */
+	skippedTruncated?: { total: number };
 	createdAt: string;
 };
 
@@ -85,6 +87,19 @@ export type RestorePlan = {
 	drift: RestoreOperation[];
 	/** Paths the policy excludes by name; they are neither written nor deleted. */
 	ignored: IgnoredPath[];
+	/**
+	 * Paths the target snapshot skipped when it was taken (too large, secret, ...) that exist in the
+	 * worktree now. They are absent from the target tree because they were never captured, so a restore
+	 * leaves them exactly as they are (it neither deletes nor overwrites them): `skipped-in-snapshot`.
+	 */
+	skippedInSnapshot: SkippedPath[];
+	/**
+	 * Present only when the target's skipped list was capped when it was pinned: `recorded` paths are
+	 * known of `total` skipped. A skipped file beyond the cap is not protected: if it is in the
+	 * worktree now (it fits the policy today) and absent from the target tree, the restore removes it
+	 * like any new file.
+	 */
+	skippedTruncated?: { recorded: number; total: number };
 };
 
 export type RestoreHooks = {

@@ -286,9 +286,9 @@ function refuse(
 }
 
 /** Constant tenant folded into a v2 preimage. Not a column. */
-const HASH_TENANT = "swc";
+export const HASH_TENANT = "swc";
 /** Hash-version marker folded into a v2 preimage. The number 2, key `hv`. */
-const HASH_VERSION_MARKER = 2;
+export const HASH_VERSION_MARKER = 2;
 
 /** Derive a key from the content, so an interrupted retry dedupes without one. */
 function derivedKey(entryHash: string, sourceEvent: string | null, reviewed: boolean): string {
@@ -310,7 +310,7 @@ function writerKey(writer: string, explicitKey: string): string {
  * a reviewer's token has to hash the same, or approval-by-resubmit could never
  * find the proposal it is approving.
  */
-function contentHash(input: {
+export function contentHash(input: {
 	scope: string;
 	kind: MemoryKind;
 	subject: string | null;

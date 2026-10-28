@@ -45,7 +45,7 @@
  */
 import type { EventInput } from "../types.ts";
 import { BaselineStoreError, type BaselineLoad, type BaselineStore, type StoredBaseline } from "./baseline-store.ts";
-import { branchOf, gitLayout, planningSessionId, repoOf, type RepoLookup } from "./checkout.ts";
+import { branchOf, gitLayout, planningSessionId, repoOf, type OriginUrlRunner, type RepoLookup } from "./checkout.ts";
 import { conflictEvent, conflictOriginMs, conflictSignature, detectConflicts, repoKey } from "./conflicts.ts";
 import type { PlanningConfigError, PlanningConfigResult } from "./config.ts";
 import { diffPlanningIndex, type PlanningDiff, type PlanningSnapshot } from "./diff.ts";
@@ -130,6 +130,8 @@ export interface PlanningObserverDeps {
 	baselineSaveIntervalMs?: number;
 	/** The liveness heartbeat. Null or omitted writes none: a quiet checkout reads stale after the freshness window, as before. */
 	liveness?: LivenessSettings | null;
+	/** How the checkout's origin URL is asked of git. Omitted in production, where it is `git config --get remote.origin.url`. */
+	originUrl?: OriginUrlRunner;
 }
 
 /** Where the observer's liveness heartbeat is configured: how often a quiet checkout refreshes its record. Read by `loadLivenessSettings`. */
@@ -321,7 +323,7 @@ export class PlanningObserver {
 		const clock = this.deps.presence === null ? null : await readClock(this.deps.presence);
 		const nowMs = clock !== null && clock.ok ? clock.nowMs : null;
 		const gapMoved = nowMs !== null ? this.stampReport(built, nowMs) : this.withdrawReport();
-		const repo = await repoOf(this.deps.fs, root);
+		const repo = await repoOf(this.deps.fs, root, this.deps.originUrl);
 		if (!built.ok) {
 			// A checkout the scan could not read is not proven alive: the liveness timer stops beating until a scan reads it.
 			this.liveTarget = null;

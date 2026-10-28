@@ -600,16 +600,55 @@ describe("memory.forget payload validator and builder", () => {
 describe("selectForRollback", () => {
 	function store(entries: string[], truncated = false) {
 		const calls: Array<[string, string, string | null, number]> = [];
+		const untils: Array<string | null> = [];
 		return {
 			calls,
+			untils,
 			deps: {
-				async entriesCreatedAfter(session: string, after: string, graph: string | null, limit: number) {
+				async entriesCreatedAfter(session: string, after: string, graph: string | null, limit: number, until: string | null) {
 					calls.push([session, after, graph, limit]);
+					untils.push(until);
 					return { entries: entries.map((id) => ({ id })), truncated };
 				},
 			},
 		};
 	}
+
+	test("no until means no upper bound is sent", async () => {
+		const s = store(["mem_a"]);
+		await selectForRollback(s.deps, { session_id: "sess-1", after: "2026-10-26T12:00:00Z" });
+		expect(s.untils).toEqual([null]);
+	});
+
+	test("an until instant is normalised to whole milliseconds UTC and sent to the store; equal to after is allowed", async () => {
+		const s = store(["mem_a"]);
+		await selectForRollback(s.deps, { session_id: "sess-1", after: "2026-10-26T12:00:00Z", until: "2026-10-26T16:00:00.456789+02:00" });
+		await selectForRollback(s.deps, { session_id: "sess-1", after: "2026-10-26T12:00:00Z", until: "2026-10-26T12:00:00.000Z" });
+		expect(s.untils).toEqual(["2026-10-26T14:00:00.456Z", "2026-10-26T12:00:00.000Z"]);
+	});
+
+	test("a writer is sent to the store, which applies it before its limit; none means every writer's; a bad one is refused", async () => {
+		const writers: Array<string | null | undefined> = [];
+		const deps = {
+			async entriesCreatedAfter(_session: string, _after: string, _graph: string | null, _limit: number, _until: string | null, writer?: string | null) {
+				writers.push(writer);
+				return { entries: [{ id: "mem_a" }], truncated: false };
+			},
+		};
+		await selectForRollback(deps, { session_id: "sess-1", after: "2026-10-26T12:00:00Z", writer: "claude-code" });
+		await selectForRollback(deps, { session_id: "sess-1", after: "2026-10-26T12:00:00Z" });
+		expect(writers).toEqual(["claude-code", null]);
+		await expect(selectForRollback(deps, { session_id: "sess-1", after: "2026-10-26T12:00:00Z", writer: "" })).rejects.toMatchObject({ name: "ForgetError", path: "writer" });
+		expect(writers).toHaveLength(2);
+	});
+
+	test("an until before after, or not an instant, is refused before the store is asked", async () => {
+		const s = store(["mem_a"]);
+		await expect(selectForRollback(s.deps, { session_id: "sess-1", after: "2026-10-26T12:00:00Z", until: "2026-10-26T11:59:59.999Z" })).rejects.toMatchObject({ name: "ForgetError", path: "until", rule: "range" });
+		await expect(selectForRollback(s.deps, { session_id: "sess-1", after: "2026-10-26T12:00:00Z", until: "soon" })).rejects.toMatchObject({ name: "ForgetError", path: "until", rule: "format" });
+		await expect(selectForRollback(s.deps, { session_id: "sess-1", after: "2026-10-26T12:00:00Z", until: 5 as never })).rejects.toMatchObject({ name: "ForgetError", path: "until", rule: "type" });
+		expect(s.calls).toEqual([]);
+	});
 
 	test("asks the store for entries strictly after the instant, in whole milliseconds, with the default cap", async () => {
 		const s = store(["mem_a", "mem_b"]);

@@ -236,3 +236,37 @@ describe("config knobs", () => {
 		expect(config.retainOutbox).toEqual({ path: "/var/lib/substrate/retain-outbox.jsonl", max: 500, maxAttempts: 10, drainMs: 30_000 });
 	});
 });
+
+describe("the forgotten-entry lookup spends the recall's own budget", () => {
+	const named = (id: string, entry: string): RecallHit => ({ id, text: `text of ${entry}`, tags: [], metadata: { entry_id: entry }, score: 0.5, document_id: `mwd_${id}` });
+
+	test("a lookup that never answers is cut at the budget: hits naming an entry are withheld and the reply says it timed out", async () => {
+		const fake = new HindsightFake();
+		fake.seed("sub-hermes", [named("h1", "mem_1"), hit("h2", "a hit that names no entry", 0.4, "mwd_h2")]);
+		const started = Date.now();
+		const reply = await recallMemories({ ...deps(fake), budgetMs: 60, forgotten: () => new Promise<ReadonlySet<string>>(() => {}) }, "text", "hermes");
+		expect(Date.now() - started).toBeLessThan(1500);
+		expect(reply.degraded).toBe(true);
+		expect(reply.reason?.startsWith("recall-timeout")).toBe(true);
+		expect(reply.reason).toContain("forgotten-entry check timed out");
+		expect(reply.results.map((found) => found.text)).toEqual(["a hit that names no entry"]);
+	});
+
+	test("a lookup that throws still fails closed, with the unavailable wording and no timeout marker", async () => {
+		const fake = new HindsightFake();
+		fake.seed("sub-hermes", [named("h1", "mem_1")]);
+		const reply = await recallMemories({ ...deps(fake), forgotten: async () => { throw new Error("index down"); } }, "text", "hermes");
+		expect(reply.degraded).toBe(true);
+		expect(reply.reason).toContain("forgotten-entry check unavailable");
+		expect(reply.reason?.startsWith("recall-timeout")).toBe(false);
+		expect(reply.results).toEqual([]);
+	});
+
+	test("a lookup that answers in time drops the forgotten entry and leaves the reply whole", async () => {
+		const fake = new HindsightFake();
+		fake.seed("sub-hermes", [named("h1", "mem_1"), named("h2", "mem_2")]);
+		const reply = await recallMemories({ ...deps(fake), forgotten: async () => new Set(["mem_1"]) }, "text", "hermes");
+		expect(reply.degraded).toBe(false);
+		expect(reply.results.map((found) => found.text)).toEqual(["text of mem_2"]);
+	});
+});

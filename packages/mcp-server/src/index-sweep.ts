@@ -45,6 +45,7 @@
  *     delete keeps its graph whole — every node, edge, step and binding.
  */
 import { DEFAULT_LEASE_TTL_SECONDS } from "./lease.ts";
+import { FORGET_MARKER_PREFIX } from "./memory-forget.ts";
 import { retainDocumentId } from "./memory-retain.ts";
 import { bankForSurface, type HindsightConfig } from "./planes/hindsight.ts";
 import type { MemoryEntry, MemoryExpiryMode } from "./types.ts";
@@ -439,12 +440,15 @@ export const SWEEP_CLASSES: readonly SweepClass[] = [
 	},
 	// The standing entry's `supersedes` pointer then names a row that is gone; a
 	// decision log older than the window is exactly what this retention gives up.
+	// A FORGOTTEN row (`superseded_by = 'forgotten:fg_...'`, `memory-forget.ts`) is not a replaced version: it is the
+	// audit record of what was forgotten and why, so it is kept however old it is.
 	simpleClass(
 		"entries-superseded",
 		"supersededDays",
 		"memory_entries",
 		"id",
-		"superseded_by is not null and created < $1::timestamptz",
+		"superseded_by is not null and created < $1::timestamptz " +
+			`and left(superseded_by, ${FORGET_MARKER_PREFIX.length}) <> '${FORGET_MARKER_PREFIX}'`,
 	),
 	// The `30d` retention class, fixed by its name: the policy cannot move it.
 	// `created < cutoff` is `memoryExpiry`'s `created + 30d <= now`, to the instant.

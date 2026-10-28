@@ -260,6 +260,10 @@ The key is absent when steering is off, no session is named, or nothing is queue
 
 `POST /docs/search` takes `context` with the same meaning. A `context` that is not a JSON boolean, `null` included, answers `400` with `{"error": "datasets must be a string array, session_id a string and context a boolean"}` before the search runs.
 
+### Tandem recall (v1.6 phase 57, `SUBSTRATE_DOCS_TANDEM=off|on`, default `off`)
+
+With the LightRAG plane serving, `on` asks the caller's Hindsight memory as well (`SUBSTRATE_DOCS_TANDEM_LIMIT` hits, 1..10, default 5, under `SUBSTRATE_DOCS_TANDEM_BUDGET_MS`, 50..10000, default 1500) and merges the two lists by reciprocal-rank fusion (`tandem-recall.ts`). Each citation names its origin and provenance; a memory is marked `derived: true` and is untrusted text like the rest. The Hindsight leg is an enrichment, not a dependency: a timeout, a breaker refusal or an error leaves the LightRAG answer exactly as it was, and the reply's `tandem` note says how the leg ended (`ok`, `empty`, `timeout`, `failed`). A tandem reply is never stored in the docs-search cache (a memory can be forgotten at any moment), and while the flag is on the cache key carries a `tandem` part, so a reply stored before the flip is never served in place of a tandem one. `off` is the LightRAG reply unchanged, with no Hindsight call. A value other than `off` or `on` is `off` and named at boot; an out-of-range limit or budget is capped and named.
+
 ## The six ingest refusals
 
 `docs_ingest` scans the body AND the outgoing metadata (`source_url`,

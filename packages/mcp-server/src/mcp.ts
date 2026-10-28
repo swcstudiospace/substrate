@@ -11,6 +11,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { BRIEF_PROFILES, BRIEF_STATES } from "@substrate/observability";
 import { z } from "zod";
 import { BRIEF_SOURCES } from "./brief.ts";
+import { CheckpointVerifyError } from "./checkpoint-verify.ts";
 import { parseBriefProfile } from "./brief-profile.ts";
 import { DesktopRunInput } from "./desktop/actions.ts";
 import { DEFAULT_IDLE_SECONDS, formatDrift } from "./drift.ts";
@@ -22,9 +23,11 @@ import { DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT } from "./greptime.ts";
 import { MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS } from "./lease.ts";
 import { queueSteering, STEERING_ACKNOWLEDGE_INPUT, STEERING_LIST_INPUT, STEERING_QUEUE_INPUT, listSteering, steeringFailed, type SteeringCaller, type SteeringWriteResult } from "./planning/steering-tools.ts";
 import { acknowledgeSteeringWithState } from "./planning/steering-delivery.ts";
+import { MemoryVerifyError } from "./memory-verify.ts";
 import { ragRetryDelay } from "./rag-retry.ts";
+import { reservedEmitRefusal } from "./reserved-actions.ts";
 import { approvalRefValid, RailwayRequestError, type ServiceRef, type WriteGate, type WriteOutcome, type WriteRefusal } from "./railway.ts";
-import { redact } from "./redact.ts";
+import { redact, redactValue } from "./redact.ts";
 import { augmentQuestionWithSteering, normalizeRepoId, UNTRUSTED_DOCS_NOTICE } from "./docs-search.ts";
 import { nextSteeringSession, scopeRepoId, STEERING_STATES, steeringSessionPayload, type SteeringSession, type SteeringSessionState } from "./event.ts";
 import {
@@ -933,6 +936,188 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 	);
 
 	server.registerTool(
+		"checkpoint_verify",
+		{
+			title: "Verify a session checkpoint against the anchored ledger",
+			description:
+				"Is this `session.checkpoint` event inside an hourly Merkle root that was written to Solana devnet? Pass exactly one of `ckpt_id` " +
+				"or `event_id`. The reply is one of five statuses: `anchored` (the inclusion proof verifies against a root a known signer wrote " +
+				"on devnet), `pending` (the hour is not closed or its anchor may still land, about three hours), `unanchored` (the hour closed " +
+				"long ago and no anchor exists), `unverified` (the chain or the ledger could not settle it: Solana unconfigured, an unreachable RPC, " +
+				"a devnet reset, an hour too large to rebuild; never a verdict of tampering) and `mismatch` (a read that succeeded disagrees with the " +
+				"ledger). The evidence carries hashes, the proof path, public keys and a transaction signature only, never event contents. " +
+				"A `ckpt_id` is searched for in the newest 500 notes of `session_id` when given, else of your own surface in the last seven days; " +
+				"an older or foreign checkpoint needs its `event_id`. The reply carries `signer_set` ({source: env|pubkey, entries, rotation_notes_applied, " +
+				"rotation_issues, read_gap}): which bootstrap judged the signer, and any rotation note that was ignored or a read that was truncated. " +
+				"Read-only: no transaction is ever sent.",
+			inputSchema: {
+				ckpt_id: z.string().regex(/^ckpt_[0-9a-z]{26}$/).optional().describe("the checkpoint id, ckpt_ plus 26 characters of 0-9 a-z"),
+				event_id: z.string().min(1).max(128).optional().describe("the ledger event id of the checkpoint"),
+				session_id: z.string().min(1).max(512).optional().describe("narrows a `ckpt_id` search to this session"),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async (request) => {
+			try {
+				return json(redactValue(await substrate.checkpointVerify(request, { surface: callerSurface })));
+			} catch (cause) {
+				if (cause instanceof CheckpointVerifyError) return refusal(redact(`${cause.code}: ${cause.message}`).slice(0, 400));
+				throw cause;
+			}
+		},
+	);
+
+	server.registerTool(
+		"memory_verify",
+		{
+			title: "Verify a memory entry against the anchored ledger",
+			description:
+				"Two checks on one memory entry you can read. First, does its stored content still hash to the `entry_hash` the governance gate " +
+				"wrote? Second, is the ledger event the write rested on (`source_event`) inside an anchored hourly root? `status` is `verified`, " +
+				"`hash-mismatch`, `pending`, `unanchored`, `unverified` or `anchor-mismatch`, with the reasons in order. `verified` means the hash is " +
+				"intact AND the cited source event is anchored; it does NOT prove that event concerns this entry. A forgotten entry reports that it " +
+				"was forgotten. An entry you cannot read (another surface's `agent:` scope, or past its lifetime under enforcement) answers as if absent. " +
+				"The reply carries hashes and a transaction signature, never the entry's text, plus `signer_set` (as in checkpoint_verify) when an anchor check ran. Read-only.",
+			inputSchema: {
+				id: z.string().min(1).max(200).describe("the memory entry id"),
+				repo: z.string().optional().describe("owner/name of the repo you are working in; `agent:` entries are readable only for it, as in memory_search"),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async ({ id, repo }) => {
+			try {
+				return json(redactValue(await substrate.memoryVerify(id, { surface: callerSurface, repo, isOperator })));
+			} catch (cause) {
+				if (cause instanceof MemoryVerifyError) return refusal(redact(`${cause.rule}: ${cause.message}`).slice(0, 400));
+				throw cause;
+			}
+		},
+	);
+
+	/**
+	 * The caller the session rollback tools act for: the token's surface, or `claude-code` for an untokened local run
+	 * (the `events_emit` rule), refused when the anonymous bridge names that surface as tokened. The tools write
+	 * ledger notes and read checkpoints as this surface, so they take the same bridge rule `events_emit` does.
+	 */
+	function rollbackCaller(): { caller: { surface: Surface; isOperator: boolean } } | { refused: string } {
+		const attribution = attributedSurface(callerSurface, undefined);
+		if ("refused" in attribution) return { refused: attribution.refused };
+		const blocked = bridgeBlock("emit", attribution.surface);
+		if (blocked) return { refused: blocked };
+		return { caller: { surface: attribution.surface, isOperator } };
+	}
+
+	server.registerTool(
+		"session_checkpoint",
+		{
+			title: "Record a session checkpoint",
+			description:
+				"Record one `session.checkpoint` note in the append-only ledger as YOUR surface, in `session_id`'s hash chain: the checkpoint id, " +
+				"its seq, trigger, git tree, manifest digest and counts, and optionally a transcript pointer and a plan reference. The server attaches " +
+				"the ledger chain position (`chain_head`) itself. Required: `session_id`, `ckpt_id`, `seq`, `trigger` (turn, plan-step, steering, " +
+				"manual, pre-restore, baseline), `git_tree`, `manifest_sha256`, `file_count`, `skipped_count`; optional: `git_base_commit`, `branch`, " +
+				"`transcript_ref`, `plan_ref`, `prev_ckpt_id`, `taken_at_ms` (epoch ms when the snapshot was pinned: a checkpoint recorded late cuts memory at " +
+				"the earlier of that and its record time; honoured from 30 days before to 30 seconds after the record time, else ignored with a warning). " +
+				"Idempotent by `ckpt_id`: a repeat answers `stored: false` with the existing `event_id`. " +
+				"A seq or `prev_ckpt_id` that disagrees with your newest recorded checkpoint is a warning in the reply, never a failure (a client may record " +
+				"late). Carries ids, digests and counts only, never file, transcript or memory content. The server never touches a worktree and never " +
+				"reads a transcript. Answers `{ok:true, ckpt_id, event_id, stored}` or `{ok:false, error:{code, message}}`.",
+			inputSchema: {
+				session_id: z.string().optional().describe("the session the checkpoint belongs to"),
+				ckpt_id: z.string().optional().describe("ckpt_ plus 26 characters of 0-9 a-z"),
+				seq: z.number().optional().describe("1-based position among the session's checkpoints"),
+				trigger: z.string().optional().describe("turn, plan-step, steering, manual, pre-restore or baseline"),
+				git_tree: z.string().optional().describe("the checkpoint's git tree object id (40 or 64 lowercase hex)"),
+				git_base_commit: z.string().optional(),
+				branch: z.string().optional(),
+				manifest_sha256: z.string().optional().describe("sha256 of the file manifest, 64 lowercase hex"),
+				file_count: z.number().optional(),
+				skipped_count: z.number().optional(),
+				transcript_ref: z.record(z.string(), z.unknown()).optional().describe("an opaque pointer into the surface's transcript, never a path"),
+				plan_ref: z.record(z.string(), z.unknown()).optional().describe("{phase?, step?}"),
+				prev_ckpt_id: z.string().optional(),
+				taken_at_ms: z.number().optional().describe("epoch milliseconds when the snapshot was pinned; non-negative integer"),
+				chain_head: z.record(z.string(), z.unknown()).optional().describe("ignored: the server attaches the ledger chain position itself"),
+			},
+			annotations: { destructiveHint: false, idempotentHint: true },
+		},
+		async (args) => {
+			const acting = rollbackCaller();
+			if ("refused" in acting) return json({ ok: false, error: { code: "not-authorized", message: redact(acting.refused).slice(0, 400) } });
+			return json(redactValue(await substrate.sessionCheckpoint(args, acting.caller)));
+		},
+	);
+
+	server.registerTool(
+		"session_rollback_plan",
+		{
+			title: "Plan a session rollback",
+			description:
+				"Plan a rollback of `session_id` to one of YOUR surface's checkpoints. Read-only: nothing is written or forgotten. Answers " +
+				"`{ok:true, plan}`: the target checkpoint (ids, seq, event hash, git tree, manifest digest), the later checkpoints (informational), " +
+				"the anchor verdict (`anchored`, `pending`, `unanchored`, `unverified` or `mismatch`, or null when it could not be computed in time: " +
+				"it never blocks the plan), how many of YOUR surface's memory entries written in the session after the checkpoint a rollback would " +
+				"forget (with up to 20 sample ids), and the `plan_digest` `session_rollback_commit` must present. The digest does not cover the later " +
+				"checkpoints, so the pre-restore checkpoint a client takes after planning does not invalidate it. A checkpoint that is not yours, or " +
+				"not in this session, answers `not-found`. The server never touches a worktree and never reads a transcript.",
+			inputSchema: {
+				session_id: z.string().optional(),
+				target_ckpt_id: z.string().optional().describe("the checkpoint to go back to, ckpt_ plus 26 characters of 0-9 a-z"),
+				rollback_id: z.string().optional().describe("rb_ plus 26 characters of 0-9 a-z; derived from the session, the target and the newest checkpoint when absent"),
+				until_ms: z.number().optional().describe("epoch ms: memory written after it belongs to the session's new timeline and is never selected; not more than 30 seconds ahead, not before the checkpoint's cut; absent means now"),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async (args) => {
+			const acting = rollbackCaller();
+			if ("refused" in acting) return json({ ok: false, error: { code: "not-authorized", message: redact(acting.refused).slice(0, 400) } });
+			return json(redactValue(await substrate.sessionRollbackPlan(args, acting.caller)));
+		},
+	);
+
+	server.registerTool(
+		"session_rollback_commit",
+		{
+			title: "Commit or refuse a session rollback",
+			description:
+				"Record the outcome of a rollback the client carried out on its own worktree. `outcome: \"refused\"` (with `reason`, one of " +
+				"not-authorized, session-busy, target-not-found, chain-unverified, hash-mismatch, drift-detected, ledger-down, blob-missing, " +
+				"transcript-stale, invalid-request, and an optional short `detail`) appends one `session.rollback.refused` warning. " +
+				"`outcome: \"committed\"` requires the `plan_digest` from `session_rollback_plan` plus `from_ckpt_id`, `pre_restore_tree`, " +
+				"`pre_restore_ckpt_id`, `files` ({added, modified, deleted}) and `transcript` (moved-leaf, marker-only, unsupported, stale); " +
+				"`local_only` marks a commit made without a server plan. `until_ms` (epoch ms) bounds the memory forgotten to what was written at or before it: " +
+				"send the bound the plan used, so a commit delivered late does not forget the session's new timeline. The plan is recomputed: a digest that no longer matches answers `stale-plan` " +
+				"and changes nothing. Otherwise the memory entries YOUR surface wrote in the session after the checkpoint are taken out of force (never " +
+				"deleted: recall, search and the brief stop serving them, the rows and the ledger stay for audit), their Hindsight documents are deleted, " +
+				"and one `session.rollback` note is appended with the real totals. Idempotent by `rollback_id`: a repeat answers the earlier result " +
+				"without forgetting again (a pending document deletion is retried). If the forget cannot complete, nothing is recorded and the answer " +
+				"is `forget-incomplete` (retryable). The server never touches a worktree and never reads a transcript.",
+			inputSchema: {
+				session_id: z.string().optional(),
+				rollback_id: z.string().optional().describe("rb_ plus 26 characters of 0-9 a-z"),
+				target_ckpt_id: z.string().optional(),
+				plan_digest: z.string().optional().describe("64 lowercase hex; required when outcome is committed"),
+				outcome: z.string().optional().describe("committed or refused"),
+				reason: z.string().optional().describe("refused: why"),
+				detail: z.string().optional().describe("refused: a short explanation, redacted and cut to 300 characters"),
+				from_ckpt_id: z.string().optional().describe("committed: the checkpoint the worktree was at before the restore"),
+				pre_restore_tree: z.string().optional().describe("committed: git tree of the pre-restore checkpoint"),
+				pre_restore_ckpt_id: z.string().optional(),
+				files: z.record(z.string(), z.unknown()).optional().describe("committed: {added, modified, deleted} counts"),
+				transcript: z.string().optional().describe("committed: moved-leaf, marker-only, unsupported or stale"),
+				local_only: z.boolean().optional(),
+				until_ms: z.number().optional().describe("committed: the same bound the plan was made with"),
+			},
+			annotations: { destructiveHint: true, idempotentHint: true },
+		},
+		async (args) => {
+			const acting = rollbackCaller();
+			if ("refused" in acting) return json({ ok: false, error: { code: "not-authorized", message: redact(acting.refused).slice(0, 400) } });
+			return json(redactValue(await substrate.sessionRollbackCommit(args, acting.caller)));
+		},
+	);
+
+	server.registerTool(
 		"events_emit",
 		{
 			title: "Emit an event",
@@ -960,6 +1145,10 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			if ("refused" in attribution) return refusal(attribution.refused);
 			const blocked = bridgeBlock("emit", attribution.surface);
 			if (blocked) return refusal(blocked);
+			// A note a reader trusts by its action alone (a signer rotation, a forget batch, a checkpoint, a rollback) is the server's
+			// or an operator's to write: a refusal names `reserved-action` and nothing is appended.
+			const reserved = reservedEmitRefusal({ payload: args.payload, surface: attribution.surface, callerSurface, isOperator });
+			if (reserved !== null) return refusal(reserved);
 			const { event, stored, error, warning } = await substrate.emit({
 				...args,
 				surface: attribution.surface,

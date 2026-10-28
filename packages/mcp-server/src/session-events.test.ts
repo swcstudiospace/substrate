@@ -209,6 +209,7 @@ describe("CheckpointPayload", () => {
 			chain_head: { event_id: "evt_0123456789abcdef0123456789abcdef", hash: HEX_64 },
 			plan_ref: { phase: "55", step: "55-02" },
 			prev_ckpt_id: CKPT_B,
+			taken_at_ms: 1_788_000_000_000,
 		});
 		expect(parseCheckpointPayload(full)).toEqual(full);
 	});
@@ -293,6 +294,24 @@ describe("CheckpointPayload", () => {
 
 	test("a plan_ref of exactly 64 characters is accepted", () => {
 		expect(parseCheckpointPayload(checkpoint({ plan_ref: { phase: "p".repeat(64), step: "s".repeat(64) } })).plan_ref?.step).toHaveLength(64);
+	});
+
+	test("taken_at_ms is optional, and when present a non-negative safe integer (a payload without it stays valid)", () => {
+		expect("taken_at_ms" in parseCheckpointPayload(checkpoint())).toBe(false);
+		expect(parseCheckpointPayload(checkpoint({ taken_at_ms: 0 })).taken_at_ms).toBe(0);
+		expect(parseCheckpointPayload(checkpoint({ taken_at_ms: 1_788_000_000_123 })).taken_at_ms).toBe(1_788_000_000_123);
+		expectFail(() => parseCheckpointPayload(checkpoint({ taken_at_ms: -1 })), "range", "taken_at_ms");
+		expectFail(() => parseCheckpointPayload(checkpoint({ taken_at_ms: 1.5 })), "type", "taken_at_ms");
+		expectFail(() => parseCheckpointPayload(checkpoint({ taken_at_ms: "1788000000000" })), "type", "taken_at_ms");
+		expectFail(() => parseCheckpointPayload(checkpoint({ taken_at_ms: null })), "type", "taken_at_ms");
+		expectFail(() => parseCheckpointPayload(checkpoint({ taken_at_ms: Number.MAX_SAFE_INTEGER + 1 })), "type", "taken_at_ms");
+	});
+
+	test("the builder keeps taken_at_ms in the payload and still keys the event by session and seq", () => {
+		const { action: _a, ...fields } = checkpoint({ taken_at_ms: 1_788_000_000_000 });
+		const draft = buildCheckpointEvent(SESSION, fields as never);
+		expect(draft.payload.taken_at_ms).toBe(1_788_000_000_000);
+		expect(draft.idempotency_key).toBe(checkpointIdempotencyKey(SESSION, draft.payload.seq));
 	});
 });
 
