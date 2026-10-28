@@ -26,9 +26,9 @@
  *  4. For every plan hour the digest is recomputed from the ledger and refused as `root-mismatch` unless the stored row, the
  *     recomputed root and count, and the stored memo (exactly `formatMemo` of the hour, root and count) all agree with the plan
  *     byte for byte.
- *  5. The run's lock (`deps.lock`; the entry builds `fileLock`: a file beside the plan, create-exclusive, stale after a dead pid or
- *     30 minutes) is held from here to the end of the run, across discovery, send and recording, so two overlapping runs cannot
- *     both pass discovery before either send is visible; the second refuses as `reanchor-locked`.
+ *  5. The run's lock (`deps.lock`; the entry builds `fileLock`: ONE file per host, `<SUBSTRATE_STATE_DIR or /var/lib/substrate>/substrate-reanchor.lock`,
+ *     create-exclusive, stale after a dead pid or 30 minutes) is held from here to the end of the run, across discovery, send and recording, so two
+ *     overlapping runs cannot both pass discovery before either send is visible; the second refuses as `reanchor-locked`.
  *  6. For EVERY plan hour, read-only, before the first send: the stored `tx_sig` is absent on the cluster (present means this is not
  *     a reset); the NEWEST `anchor.reanchor` note bound to the hour (`newestBoundNote`, the same pointer the verifier follows; an
  *     older note is never a fallback), whose transaction verifies on chain, means the hour is done (adopted, never sent); for each hour without one, an earlier send
@@ -99,8 +99,8 @@ export const REANCHOR_RUN_USAGE =
 	"  --confirm-genesis HASH the genesis hash the endpoint must report; it must also equal the plan's observed genesis (required with --execute)\n" +
 	`  --max-hours N          at most N transactions sent per run, 1..${MAX_HOURS_PER_RUN}, default 1 (an hour already sent is adopted, not counted)\n` +
 	"  --surface NAME         the operator surface the anchor.reanchor note is written as (needed when several operator surfaces exist)\n" +
-	"  (lock)                 a lock file `.reanchor.lock` beside the plan file is held across discovery, send and recording; an overlapping run refuses (reanchor-locked)\n" +
-	"  environment (names only; none is new): GREPTIME_*, SOLANA_RPC_URL, SOLANA_ANCHOR_KEYPAIR, SOLANA_ANCHOR_PUBKEY, SOLANA_CLI\n" +
+	"  (lock)                 the lock file `<SUBSTRATE_STATE_DIR or /var/lib/substrate>/substrate-reanchor.lock` is held across discovery, send and recording; when it is not available the run refuses (reanchor-locked)\n" +
+	"  environment (names only): GREPTIME_*, SOLANA_RPC_URL, SOLANA_ANCHOR_KEYPAIR, SOLANA_ANCHOR_PUBKEY, SOLANA_CLI; and SUBSTRATE_STATE_DIR (absolute; read by this CLI only for the lock directory)\n" +
 	"exit: 0 dry run or done, 1 refused or failed (the first line on stderr names the gate), 2 usage or configuration\n";
 
 /** A usage error: the entry prints it with {@link REANCHOR_RUN_USAGE} and exits 2. */
@@ -668,10 +668,11 @@ async function confirmEarlierSend(hour: SavedPlanHour, signatures: readonly stri
 export const SEND_SETTLE_MINUTES = 2;
 
 /**
- * Said whenever a send ended without a signature to read back (a non-zero exit, a timeout or a signal: `code` null, an output with no
+ * Said whenever a send's outcome is not proven: no signature to read back (a non-zero exit, a timeout or a signal: `code` null, an output with no
  * signature). The runner kills `solana transfer` at its timeout, so the transaction may already be broadcast and land later; a blockhash
  * is valid for about 150 slots (about a minute), so after two minutes a transaction that did not land never will. Re-running at once
- * could find nothing yet and send the hour a second time (two fees, two memos).
+ * could find nothing yet and send the hour a second time (two fees, two memos). A read-back that threw, or returned null or another memo at
+ * `confirmed`, is the same race (RPC lag), so both read-back refusals say it too.
  */
 const MAY_STILL_LAND = `the transaction MAY STILL LAND: wait at least ${String(SEND_SETTLE_MINUTES)} minutes (a blockhash expires after about 150 slots) before re-running, after which discovery adopts it if it landed`;
 
@@ -703,7 +704,7 @@ async function sendMemo(hour: SavedPlanHour, deps: ReanchorDeps): Promise<string
 	try {
 		readBack = await rpc.transactionMemo(signature, "confirmed");
 	} catch (cause) {
-		throw new Refusal("send-failed", `${hour.period_start}: sent ${signature} but its read-back failed (re-run to adopt it if it landed): ${reasonOf(cause)}`);
+		throw new Refusal("send-failed", `${hour.period_start}: sent ${signature} but its read-back failed (re-run to adopt it if it landed): ${reasonOf(cause)}; ${MAY_STILL_LAND}`);
 	}
 	const back = readBack?.memo !== null && readBack?.memo !== undefined ? parseMemo(readBack.memo) : null;
 	if (
@@ -716,7 +717,7 @@ async function sendMemo(hour: SavedPlanHour, deps: ReanchorDeps): Promise<string
 		!readBack.payerSigned ||
 		readBack.err !== null
 	) {
-		throw new Refusal("send-failed", `${hour.period_start}: sent ${signature} but its read-back does not match the memo (re-run to adopt it if it landed)`);
+		throw new Refusal("send-failed", `${hour.period_start}: sent ${signature} but its read-back does not match the memo (re-run to adopt it if it landed); ${MAY_STILL_LAND}`);
 	}
 	return signature;
 }
@@ -799,7 +800,7 @@ export async function executeReanchor(plan: SavedPlan, options: ReanchorOptions,
 		for (const hour of plan.hours) await checkHour(hour, deps, now);
 
 		const lock = deps.lock.acquire();
-		if ("held" in lock) throw new Refusal("reanchor-locked", `another re-anchor run is in progress (${lock.held}); wait for it to finish, or remove the lock file if that run is gone`);
+		if ("held" in lock) throw new Refusal("reanchor-locked", `the re-anchor lock is not available (${lock.held}): if another run holds it, wait for it to finish; otherwise fix the cause named`);
 		try {
 			// Every read-only check of every hour first: nothing below this loop and the discovery that follows can refuse before a send.
 			const recorded = new Map<number, string>();

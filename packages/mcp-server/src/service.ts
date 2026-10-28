@@ -719,10 +719,11 @@ interface SignerFault {
 }
 
 /**
- * Judge the payer of an hour's anchor transaction exactly as strictly as `checkpoint_verify` does (it settles a signer gap and an
+ * Judge the payer of an hour's anchor transaction by the same signer rules as `checkpoint_verify` (it settles a signer gap and an
  * unresolved block time the same way): by the signer set (`acceptsSigner`) at the transaction's own block time, for EVERY payer,
- * the configured key (`SOLANA_ANCHOR_PUBKEY`) included. `signers` is the per-verify memoised read, awaited only here. Null means
- * accepted.
+ * the configured key (`SOLANA_ANCHOR_PUBKEY`) included. `checkHour` ranks a proven disagreement above an unverifiable signer, as
+ * `checkpoint_verify` does; unlike it, `checkHour` does not compare the anchors row's `signer` column. `signers` is the per-verify
+ * memoised read, awaited only here. Null means accepted.
  *
  * - A payer that is unknown (null) is `mismatch`.
  * - A set that cannot be built (a malformed signer set, an invalid key, a refused fold) is `unverified` with the redacted cause.

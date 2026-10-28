@@ -324,46 +324,83 @@ describe("openRealContext leaves the running server's retain outbox alone", () =
 		expect(readdirSync(dir)).toEqual(["retain-outbox.jsonl"]);
 	});
 
-	test("the lock is keyed by the signer and lives in SUBSTRATE_STATE_DIR: two copies of a plan in different directories share it", () => {
+	const NAME = "substrate-reanchor.lock";
+	const OTHER_PUBKEY = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+	const lockEnv = (state: string, pubkey: string = PUBKEY): Record<string, string> => ({
+		[GREPTIME_URL_KEY]: "http://127.0.0.1:9",
+		SOLANA_ANCHOR_KEYPAIR: "/etc/substrate/key.json",
+		SOLANA_ANCHOR_PUBKEY: pubkey,
+		SUBSTRATE_STATE_DIR: state,
+	});
+	const openLock = (env: Record<string, string>, planPath: string): ReanchorDeps => {
+		const built = openRealContext(
+			{ ...OPTIONS, planPath },
+			{
+				env,
+				ledgerFor: () => ({ anchorForPeriod: async () => null, queryEvents: async () => [] }) as never,
+				substrateFor: () => ({}) as never,
+			},
+		);
+		if ("refused" in built) throw new Error(`unexpected refusal: ${built.refused}`);
+		return built;
+	};
+
+	test("the lock lives in SUBSTRATE_STATE_DIR and is keyed by neither plan nor signer: two copies of a plan in different directories share it", () => {
 		const state = mkdtempSync(join(tmpdir(), "p59-state-"));
 		const planA = mkdtempSync(join(tmpdir(), "p59-plan-a-"));
 		const planB = mkdtempSync(join(tmpdir(), "p59-plan-b-"));
-		const env = { [GREPTIME_URL_KEY]: "http://127.0.0.1:9", SOLANA_ANCHOR_KEYPAIR: "/etc/substrate/key.json", SOLANA_ANCHOR_PUBKEY: PUBKEY, SUBSTRATE_STATE_DIR: state };
-		const open = (planPath: string): ReanchorDeps => {
-			const built = openRealContext(
-				{ ...OPTIONS, planPath },
-				{
-					env,
-					ledgerFor: () => ({ anchorForPeriod: async () => null, queryEvents: async () => [] }) as never,
-					substrateFor: () => ({}) as never,
-				},
-			);
-			if ("refused" in built) throw new Error(`unexpected refusal: ${built.refused}`);
-			return built;
-		};
-		const first = open(join(planA, "plan.json")).lock.acquire();
+		const env = lockEnv(state);
+		const first = openLock(env, join(planA, "plan.json")).lock.acquire();
 		if (!("release" in first)) throw new Error("expected the lock");
-		expect(readdirSync(state)).toEqual([`substrate-reanchor-${PUBKEY.slice(0, 12)}.lock`]);
+		expect(readdirSync(state)).toEqual([NAME]);
 		expect(readdirSync(planA)).toEqual([]);
 
-		const second = open(join(planB, "plan.json")).lock.acquire();
+		const second = openLock(env, join(planB, "plan.json")).lock.acquire();
 		expect(second).toHaveProperty("held");
 		expect(readdirSync(planB)).toEqual([]);
 		first.release();
 		expect(readdirSync(state)).toEqual([]);
 	});
 
-	test("the lock path is in SUBSTRATE_STATE_DIR only when that is set and absolute, else in the OS temp directory", () => {
-		const name = `substrate-reanchor-${PUBKEY.slice(0, 12)}.lock`;
-		expect(reanchorLockPath({ SUBSTRATE_STATE_DIR: "/var/lib/substrate" }, PUBKEY)).toBe(join("/var/lib/substrate", name));
-		expect(reanchorLockPath({}, PUBKEY)).toBe(join(tmpdir(), name));
-		expect(reanchorLockPath({ SUBSTRATE_STATE_DIR: "  " }, PUBKEY)).toBe(join(tmpdir(), name));
-		expect(reanchorLockPath({ SUBSTRATE_STATE_DIR: "relative/dir" }, PUBKEY)).toBe(join(tmpdir(), name));
+	test("two different signer keys share one lock: a run around a key rotation still excludes the other", () => {
+		const state = mkdtempSync(join(tmpdir(), "p59-state-keys-"));
+		const first = openLock(lockEnv(state, PUBKEY), "a.json").lock.acquire();
+		if (!("release" in first)) throw new Error("expected the lock");
+		expect(readdirSync(state)).toEqual([NAME]);
+
+		const second = openLock(lockEnv(state, OTHER_PUBKEY), "b.json").lock.acquire();
+		expect(second).toHaveProperty("held");
+		expect(readdirSync(state)).toEqual([NAME]);
+		first.release();
+		expect(readdirSync(state)).toEqual([]);
+	});
+
+	test("the lock path: SUBSTRATE_STATE_DIR when set, /var/lib/substrate when unset or blank, never the temp directory; a relative value is refused", () => {
+		expect(reanchorLockPath({ SUBSTRATE_STATE_DIR: "/srv/state" })).toEqual({ path: join("/srv/state", NAME) });
+		expect(reanchorLockPath({})).toEqual({ path: join("/var/lib/substrate", NAME) });
+		expect(reanchorLockPath({ SUBSTRATE_STATE_DIR: "  " })).toEqual({ path: join("/var/lib/substrate", NAME) });
+		expect(reanchorLockPath({ SUBSTRATE_STATE_DIR: "relative/dir" })).toEqual({ refused: "SUBSTRATE_STATE_DIR must be an absolute path (it holds the re-anchor lock)" });
+	});
+
+	test("a relative SUBSTRATE_STATE_DIR is refused by openRealContext before any ledger client or request exists", () => {
+		let fetched = 0;
+		const opened = openRealContext(OPTIONS, {
+			env: lockEnv("relative/dir"),
+			fetchImpl: (async () => {
+				fetched += 1;
+				throw new Error("no network in a test");
+			}) as unknown as typeof fetch,
+			ledgerFor: () => {
+				throw new Error("a refused state directory must not build a ledger client");
+			},
+		});
+		expect(opened).toEqual({ refused: "SUBSTRATE_STATE_DIR must be an absolute path (it holds the re-anchor lock)" });
+		expect(fetched).toBe(0);
 	});
 });
 
 describe("fileLock: create-exclusive, broken only by a dead pid (or an old unreadable file), released by its owner only", () => {
-	const lockPath = (): string => join(mkdtempSync(join(tmpdir(), "p59-lock-")), ".reanchor.lock");
+	const lockPath = (): string => join(mkdtempSync(join(tmpdir(), "p59-lock-")), "substrate-reanchor.lock");
 
 	test("a second acquire while the first holds is refused with the holder named; the release frees it", () => {
 		const path = lockPath();
@@ -383,7 +420,7 @@ describe("fileLock: create-exclusive, broken only by a dead pid (or an old unrea
 
 	test("a lock in a state directory that does not exist yet creates the directory and is taken, not read as held", () => {
 		const root = mkdtempSync(join(tmpdir(), "p59-lock-fresh-"));
-		const path = join(root, "new", "state", "substrate-reanchor-test.lock");
+		const path = join(root, "new", "state", "substrate-reanchor.lock");
 		expect(existsSync(join(root, "new"))).toBe(false);
 		const taken = fileLock(path, { pid: 4242, now: () => NOW, alive: () => true }).acquire();
 		if (!("release" in taken)) throw new Error(`expected the lock, got: ${taken.held}`);

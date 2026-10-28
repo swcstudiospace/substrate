@@ -841,14 +841,48 @@ describe("the one send", () => {
 		const result = await w.run(TWO, { maxHours: 2 });
 		expect(result).toMatchObject({ code: 1, refused: "send-failed", sent: 0 });
 		expect(result.stderr).toContain("re-run to adopt");
+		expect(result.stderr).toContain(newSig(1));
+		expect(result.stderr).toContain("MAY STILL LAND");
+		expect(result.stderr).toContain("wait at least 2 minutes");
 		expect(w.sendCalls).toHaveLength(1);
 		expect(w.emitted).toEqual([]);
 	});
 
-	test("a read-back with no memo at all is send-failed", async () => {
+	test("a read-back with no memo at all is send-failed and says to wait before re-running", async () => {
 		const w = new World(ONE);
 		w.readBackMemo = null;
-		expect(await w.run(ONE)).toMatchObject({ code: 1, refused: "send-failed" });
+		const result = await w.run(ONE);
+		expect(result).toMatchObject({ code: 1, refused: "send-failed" });
+		expect(result.stderr).toContain("wait at least 2 minutes");
+	});
+
+	test("a read-back that finds no transaction yet (RPC lag at confirmed) is send-failed, names the signature and says to wait before re-running", async () => {
+		const w = new World(ONE);
+		const read = w.rpc.transactionMemo.bind(w.rpc);
+		w.rpc.transactionMemo = async (signature, commitment) => (signature === newSig(1) ? null : read(signature, commitment));
+		const result = await w.run(ONE);
+		expect(result).toMatchObject({ code: 1, refused: "send-failed", sent: 0 });
+		expect(result.stderr).toContain(newSig(1));
+		expect(result.stderr).toContain("re-run to adopt it if it landed");
+		expect(result.stderr).toContain("MAY STILL LAND");
+		expect(result.stderr).toContain("wait at least 2 minutes");
+		expect(w.emitted).toEqual([]);
+	});
+
+	test("a read-back that throws is send-failed, names the signature and says to wait before re-running", async () => {
+		const w = new World(ONE);
+		const read = w.rpc.transactionMemo.bind(w.rpc);
+		w.rpc.transactionMemo = async (signature, commitment) => {
+			if (signature === newSig(1)) throw new Error("rpc timeout");
+			return read(signature, commitment);
+		};
+		const result = await w.run(ONE);
+		expect(result).toMatchObject({ code: 1, refused: "send-failed", sent: 0 });
+		expect(result.stderr).toContain(newSig(1));
+		expect(result.stderr).toContain("its read-back failed");
+		expect(result.stderr).toContain("MAY STILL LAND");
+		expect(result.stderr).toContain("wait at least 2 minutes");
+		expect(w.emitted).toEqual([]);
 	});
 
 	test("a note the ledger did not store is reported with the full payload and is never resent: a re-run adopts the transaction", async () => {
@@ -1201,6 +1235,9 @@ describe("overlapping runs", () => {
 		const second = await w.run(ONE);
 		expect(second).toMatchObject({ code: 1, refused: "reanchor-locked", sent: 0, adopted: 0 });
 		expect(second.stderr).toContain("pid 1");
+		expect(second.stderr).toContain("the re-anchor lock is not available (pid 1)");
+		expect(second.stderr).toContain("if another run holds it, wait for it to finish; otherwise fix the cause named");
+		expect(second.stderr).not.toContain("another re-anchor run is in progress");
 		expect(w.sendCalls).toHaveLength(1);
 		expect(w.listBefore).toHaveLength(listedByFirst);
 		expect(w.emitted).toEqual([]);

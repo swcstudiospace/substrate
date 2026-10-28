@@ -13,17 +13,17 @@
  * It is the ONLY module that constructs the real executor (`execFileRunner`). Nothing else imports it: no test, no CI job, no
  * workflow, no package script, no systemd unit. The default mode opens nothing at all (no config, no ledger, no endpoint, no
  * runner). `--execute` is OPERATOR ONLY and is run by hand from the runbook (`docs/runbooks/devnet-reset-and-reanchor.md`, step e).
- * `--execute` holds a lock file (`substrate-reanchor-<signer>.lock` in `SUBSTRATE_STATE_DIR`, else the temp directory) across discovery, send and recording, and touches only the
+ * `--execute` holds a lock file (`<SUBSTRATE_STATE_DIR or /var/lib/substrate>/substrate-reanchor.lock`) across discovery, send and recording, and touches only the
  * ledger: its `Substrate` has an in-memory retain outbox, so it never opens the live server's `SUBSTRATE_RETAIN_OUTBOX_PATH` file or
  * starts a drain timer. A plan with no hour (the planner read no chain, so no observed genesis) is done at once, exit 0.
  *
  * Exit codes: 0 dry run printed, or every hour done; 1 a gate refused or a send or record failed (stderr starts with
  * `[reanchor] REFUSED <code>`; nothing further was sent); 2 usage, an unreadable or invalid plan, or missing configuration (a bad
  * flag, an unset `GREPTIME_URL`, an unset `SOLANA_ANCHOR_KEYPAIR` or `SOLANA_ANCHOR_PUBKEY`, a `SOLANA_RPC_URL` the devnet guard
- * refuses). No new environment variable: the names `loadConfig` already reads.
+ * refuses). `SUBSTRATE_STATE_DIR` is the one variable this CLI reads for itself (the lock directory; a relative value is refused with exit 2);
+ * every other name is one `loadConfig` already reads.
  */
 import { mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { createRpc, execFileRunner, RpcError, type Rpc } from "@substrate/ledger";
 import { loadConfig, operatorSurfaces, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
@@ -153,14 +153,26 @@ function readHolder(path: string): { raw: string; pid: number | null; startedMs:
 }
 
 /**
- * The lock file of a signer's re-anchor runs: `substrate-reanchor-<first 12 characters of the signer's public key>.lock` in
- * `SUBSTRATE_STATE_DIR` when that is set and absolute, else in the OS temp directory. Keyed by the signer and not by the plan file, so
- * two copies of a plan in different directories (or two plans) share one lock.
+ * The registry default of `SUBSTRATE_STATE_DIR` (`flag-registry.ts`, entry `SUBSTRATE_STATE_DIR`: default and unset value
+ * `/var/lib/substrate`). Keep the two in step.
  */
-export function reanchorLockPath(env: Record<string, string | undefined>, pubkey: string): string {
+export const DEFAULT_STATE_DIR = "/var/lib/substrate";
+
+/** The lock's file name: fixed, so two runs with different signer keys (around a rotation, say) still exclude each other. */
+export const REANCHOR_LOCK_NAME = "substrate-reanchor.lock";
+
+/**
+ * The one lock file of re-anchor runs on this host: `substrate-reanchor.lock` in `SUBSTRATE_STATE_DIR` (a blank value counts as unset),
+ * else in {@link DEFAULT_STATE_DIR}. Deliberately NOT the OS temp directory (`$TMPDIR` or a private systemd tmp differ per operator, so
+ * two operators would lock different files and both send) and not keyed by the plan file or the signer: a copy of a plan elsewhere, or a
+ * run under another key, is the same lock. A relative `SUBSTRATE_STATE_DIR` is refused (it would resolve against each operator's own
+ * working directory), never replaced by a default.
+ */
+export function reanchorLockPath(env: Record<string, string | undefined>): { path: string } | { refused: string } {
 	const configured = env["SUBSTRATE_STATE_DIR"]?.trim() ?? "";
-	const stateDir = configured !== "" && isAbsolute(configured) ? configured : tmpdir();
-	return join(stateDir, `substrate-reanchor-${pubkey.slice(0, 12)}.lock`);
+	if (configured === "") return { path: join(DEFAULT_STATE_DIR, REANCHOR_LOCK_NAME) };
+	if (!isAbsolute(configured)) return { refused: "SUBSTRATE_STATE_DIR must be an absolute path (it holds the re-anchor lock)" };
+	return { path: join(configured, REANCHOR_LOCK_NAME) };
 }
 
 /**
@@ -240,6 +252,8 @@ export function openRealContext(options: ReanchorOptions, open: OpenOptions = {}
 	if (config.solana.problem) return { refused: config.solana.problem };
 	const { rpcUrl, keypairPath, pubkey, cli } = config.solana;
 	if (!keypairPath || !pubkey) return { refused: "SOLANA_ANCHOR_KEYPAIR and SOLANA_ANCHOR_PUBKEY must be set" };
+	const lockPath = reanchorLockPath(open.env ?? process.env);
+	if ("refused" in lockPath) return { refused: lockPath.refused };
 	let rpc: Rpc;
 	try {
 		rpc = createRpc({
@@ -289,8 +303,8 @@ export function openRealContext(options: ReanchorOptions, open: OpenOptions = {}
 				operatorSurfaces: operators,
 				nowMs: () => Date.now(),
 			}),
-		// One lock per signer, in one directory per host, not beside the plan file: a copy of the plan elsewhere must not be a second lock.
-		lock: fileLock(reanchorLockPath(open.env ?? process.env, pubkey)),
+		// One lock per host and state directory, not per signer or plan file: a copy of the plan elsewhere, or a run under another key, must not be a second lock.
+		lock: fileLock(lockPath.path),
 	};
 }
 
