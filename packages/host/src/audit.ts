@@ -258,6 +258,7 @@ function runCli(): void {
 	}
 }
 
+// ratchet-entrypoint: runs only when executed directly, so the CLI may exit with a status code.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 	try {
 		runCli();

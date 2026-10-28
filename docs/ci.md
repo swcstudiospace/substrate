@@ -40,6 +40,14 @@ bun run rehearsal down --name local
 
 Nothing in the suite needs GreptimeDB; the real-store proofs are the rehearsal smokes (`bun run rehearsal smoke`, `bun run smoke:vocabulary`). `bun run parity:check` and the other production checks read the operator's host and are never run by CI.
 
+### Code ratchet
+
+`scripts/code-ratchet.ts` counts risky patterns in every non-test `.ts` file under `packages/` and `scripts/`: explicit `any`, `as unknown as`, TypeScript and lint suppression comments, non-null assertions, empty `catch` blocks, `console.*` calls in `packages/*/src`, `process.exit(` calls outside CLI entrypoints, and `JSON.parse(...) as Type` casts (every type except `unknown` and `const`). Counting is AST-based: each file is parsed once with the TypeScript compiler API and walked by syntax node (`ts.forEachChild`, no token objects), so strings, template text, regex literals and comment text are never mistaken for code. Suppression comments are read by one linear `ts.createScanner` pass over the whole text (so a comment before `else`, `finally` or a closing `)` counts too) that jumps over the string, template and regex literal spans the AST walk recorded, and an empty `catch` that holds an explanatory comment is accepted. A file whose text holds none of the substrings any counter needs is not parsed at all. Only source counters exist in the baseline and only they gate; `*.test.ts` files are skipped unless you pass `--with-tests`, which adds an informational test column to the table. A scanned root that does not exist is skipped; any other unreadable directory fails the scan, so an incomplete scan can never pass.
+
+`bun test` runs `scripts/code-ratchet.test.ts`, which fails when a source counter rises above `scripts/code-ratchet.baseline.json`, and also when one falls below it, so the baseline can only move down. After removing offenders, run `bun scripts/code-ratchet.ts --write` and commit the new baseline. `--write` only ever lowers: when the baseline file exists and any source counter is above its baseline value it prints each offending counter, exits 1 and leaves the file untouched. Raising a baseline means deleting the file deliberately, in a reviewed change, and generating it again. `bun scripts/code-ratchet.ts` prints the table; `--check` exits 1 on a regression; `--with-tests` adds the informational test counts.
+
+A CLI entrypoint may call `process.exit`. A file counts as one when it has a shebang, uses `import.meta.main`, is named `*-run.ts`, `index.ts` or `main.ts`, lives under `scripts/`, or carries a `// ratchet-entrypoint` line comment (put it above the guard that makes the file run).
+
 ## CI
 
 | Job | Runner | When | Steps |

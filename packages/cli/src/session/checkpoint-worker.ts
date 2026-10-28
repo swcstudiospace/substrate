@@ -19,5 +19,5 @@ for (let i = 0; i < Number(count); i += 1) {
 		now: () => new Date(),
 		randomBytes: (length) => crypto.getRandomValues(new Uint8Array(length)),
 	});
-	console.log(JSON.stringify({ seq: checkpoint.seq, ckpt_id: checkpoint.ckpt_id, ref: checkpoint.ref }));
+	process.stdout.write(`${JSON.stringify({ seq: checkpoint.seq, ckpt_id: checkpoint.ckpt_id, ref: checkpoint.ref })}\n`);
 }
