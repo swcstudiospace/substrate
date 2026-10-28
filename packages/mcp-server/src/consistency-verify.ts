@@ -27,10 +27,14 @@
  *   kind and subject, so a document a live entry still owns is never an
  *   orphan and never a forgotten entry's leftover.
  * - The ledger's write event carries the stored entry id (`entry_id`, see
- *   `auditMemoryWrite`), and an event with one pairs with exactly that entry.
+ *   `auditMemoryWrite`), and an event with one satisfies exactly that entry.
  *   An event written before the key existed carries none: the two ledger
  *   findings then compare by what such an event DOES carry: writer surface,
- *   canonical scope, memory kind and time. That heuristic is exact in count
+ *   canonical scope, memory kind and time. That heuristic runs first, over
+ *   every scanned entry and every event without an entry id, so a legacy
+ *   event is consumed by the entry it matched before the key existed; an
+ *   event that names an entry only ever adds a satisfied entry and never
+ *   frees a legacy event for another one. The heuristic is exact in count
  *   within a bucket and approximate in identity, and a replayed idempotent
  *   write or an entry the sweeper deleted can explain a
  *   `ledger_write_without_entry`. The window is bounded (default seven
@@ -1047,23 +1051,22 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 		}
 		coverage.ledger = "compared";
 
-		// Exact pairing first: an event that names its entry pairs with that entry, whatever its bucket or timing says
-		// (a replayed idempotent write names the entry it replayed, which may be older than the window). An entry named by
-		// several events counts one pair. An event naming an entry the scan did not read never falls back to the
-		// heuristic: it would steal the event of an entry that has its own, so it is reported as it is.
+		// Events that name no entry (written before `entry_id` existed) pair by the heuristic, over EVERY scanned entry,
+		// exactly as they did before the key existed: an exact event never frees a legacy event for another entry.
+		// Events that name an entry then satisfy that entry on top of the heuristic (an entry named by several events
+		// counts one pair). An event naming an entry the scan did not read never falls back to the heuristic: it would
+		// steal the event of an entry that has its own, so it is reported as it is.
 		const itemIds = new Set<string>();
 		for (const item of items) itemIds.add(item.entry.id);
 		const exactEntryIds = new Set<string>();
+		const heuristicMatchedIds = new Set<string>();
 		const namedWithoutEntry: Array<{ id: string; tsMs: number; bucket: string; entryId: string }> = [];
 		const heuristicEvents: Array<{ id: string; tsMs: number; bucket: string }> = [];
 		for (const event of events) {
 			if (event.entryId === null) {
 				heuristicEvents.push(event);
 			} else if (itemIds.has(event.entryId)) {
-				if (!exactEntryIds.has(event.entryId)) {
-					exactEntryIds.add(event.entryId);
-					counts.ledger_pairs += 1;
-				}
+				exactEntryIds.add(event.entryId);
 			} else {
 				namedWithoutEntry.push({ id: event.id, tsMs: event.tsMs, bucket: event.bucket, entryId: event.entryId });
 			}
@@ -1075,7 +1078,6 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 			if (!KNOWN_SURFACES.has(item.entry.writer)) continue;
 			if (Number.isNaN(item.createdMs) || item.createdMs < windowFrom || item.createdMs > windowTo) continue;
 			counts.ledger_entries_judged += 1;
-			if (exactEntryIds.has(item.entry.id)) continue;
 			const bucket = bucketOf(item.entry.writer, item.entry.scope, item.entry.kind);
 			const list = entriesByBucket.get(bucket) ?? [];
 			list.push({ id: item.entry.id, tsMs: item.createdMs });
@@ -1113,6 +1115,7 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 					i += 1;
 				} else {
 					counts.ledger_pairs += 1;
+					heuristicMatchedIds.add(entry.id);
 					i += 1;
 					j += 1;
 				}
@@ -1120,6 +1123,8 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 			unmatchedEntries.push(...entryList.slice(i));
 			unmatchedEvents.push(...eventList.slice(j));
 			for (const entry of unmatchedEntries) {
+				// An event that names this entry satisfies it (its pair is counted below).
+				if (exactEntryIds.has(entry.id)) continue;
 				add({
 					code: "index_entry_without_ledger_write",
 					id: token(entry.id),
@@ -1140,6 +1145,10 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 					detail: `an accepted memory.write event (writer ${token(writer)}, ${token(kind)} at ${token(scope)}) has no index entry created within ${Math.round(cfg.ledgerLagMs / 1000)}s before it (the event carries no entry id: it may be an idempotent replay or an entry the sweeper deleted)`,
 				});
 			}
+		}
+		// An entry satisfied by an event that names it, and by no heuristic pair, is one more pair.
+		for (const id of exactEntryIds) {
+			if (!heuristicMatchedIds.has(id)) counts.ledger_pairs += 1;
 		}
 		for (const event of namedWithoutEntry) {
 			if (event.tsMs < judgedEventFrom || event.tsMs > windowTo) continue;

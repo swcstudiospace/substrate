@@ -493,6 +493,31 @@ describe("ledger comparison", () => {
 			expect(report.counts.ledger_pairs).toBe(2);
 		});
 
+		test("a replay naming an entry does not free that entry's legacy event for a neighbour: the neighbour is still reported", async () => {
+			const a = entry("mem_a", { created: minutesAgo(30) });
+			const b = entry("mem_b", { created: new Date(Date.parse(minutesAgo(30)) + 1000).toISOString() });
+			const w = world([a, b], { events: "none" });
+			// Only mem_a was ever audited, by an event written before entry_id existed; a replay 10 minutes later names it.
+			w.events.push(ledgerEvent(a), named(a, "mem_a", 600));
+			const report = await run(w);
+			expect(codes(report)).toEqual(["index_entry_without_ledger_write"]);
+			expect(report.findings[0]).toMatchObject({ id: "mem_b", entry_id: "mem_b" });
+			expect(report.counts.ledger_pairs).toBe(1);
+			expect(report.counts.ledger_events_judged).toBe(2);
+		});
+
+		test("an entry with only an event naming it is satisfied and takes no other entry's legacy event", async () => {
+			const a = entry("mem_a", { created: minutesAgo(30) });
+			const b = entry("mem_b", { created: minutesAgo(25) });
+			const w = world([a, b], { events: "none" });
+			w.events.push(named(a, "mem_a"), ledgerEvent(b));
+			const report = await run(w);
+			expect(report.findings).toEqual([]);
+			expect(report.ok).toBe(true);
+			expect(report.counts.ledger_pairs).toBe(2);
+			expect(report.counts.ledger_events_judged).toBe(2);
+		});
+
 		test("an event naming an entry the index does not hold is reported and never takes another entry's slot", async () => {
 			const a = entry("mem_a");
 			const w = world([a], { events: "none" });
