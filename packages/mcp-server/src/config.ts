@@ -23,6 +23,7 @@ import { railwayFromEnv, type RailwayConfig } from "./railway.ts";
 import { hindsightBanksFromEnv } from "./planes/hindsight.ts";
 import { loadRecallConfig, parseRecallScope, type RecallConfig, type RecallScope } from "./recall-snapshot.ts";
 import { DEFAULT_TANDEM_OPTIONS, parseTandemOptions, type TandemOptions } from "./tandem-recall.ts";
+import { loadPlanningSettings, type PlanningConfigResult } from "./planning/config.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
 import { EVENT_IDEMPOTENCY_MODES, MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type EventIdempotencyMode, type MemoryExpiryMode, type Surface } from "./types.ts";
 
@@ -638,6 +639,8 @@ export interface SubstrateConfig {
 	eventIdempotencyRejected: string | null;
 	/** `SUBSTRATE_EVENT_BUS` (phase 50, D50-g): the Dragonfly wake-up hints. See `EventBusSettings`. */
 	eventBus: EventBusSettings;
+	/** `SUBSTRATE_PLANNING_*` (phase 52, SOTA-08): the planning root, presence window and read bounds. See `planning/config.ts`. */
+	planning: PlanningConfigResult;
 	// uplift-3 N2 — restart-durable SLO history and notifications
 	/**
 	 * Where the SLO checkpoint is written and restored from
@@ -1116,6 +1119,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		...eventIdempotencyFromEnv(env.SUBSTRATE_EVENT_IDEMPOTENCY),
 		// Phase 50 (D50-g): the bus rides the cache endpoint, and is off with a reason when that endpoint is missing or refused.
 		eventBus: loadEventBusSettings(env, cache),
+		// Phase 52 (SOTA-08): the planning plane's root and limits. Environment only; a bad value is a typed result.
+		planning: loadPlanningSettings(env),
 	};
 }
 

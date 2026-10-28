@@ -168,6 +168,11 @@ import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, p
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
 import { lightragOp, probeLightrag, queryForTool, type LightragQueryMode, type LightragToolOutcome } from "./planes/lightrag.ts";
 import { RailwayClient } from "./railway.ts";
+import { nodePlanningFs } from "./planning/fs.ts";
+import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
+import { DragonflyPresenceStore } from "./planning/presence-dragonfly.ts";
+import { PlanningObserver, type PlanningObserverDeps } from "./planning/observer.ts";
+import { PlanningReader } from "./planning/read.ts";
 import type { FabricSources } from "./fabric/types.ts";
 import { FABRIC_HEALTH_WINDOW_MS } from "./fabric/gather.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
@@ -1286,6 +1291,12 @@ function productionEventBus(config: SubstrateConfig): EventBus | null {
 	});
 }
 
+/** The presence store (phase 52): Dragonfly on the cache endpoint, or null when that endpoint is unset or refused. Connects on first use. */
+function productionPresence(config: SubstrateConfig): DragonflyPresenceStore | null {
+	if (!config.dragonflyUrl || config.dragonflyRefused !== null) return null;
+	return new DragonflyPresenceStore(dragonflyPresenceBackend(config.dragonflyUrl, config.cacheConnectTimeoutMs));
+}
+
 export class Substrate {
 	readonly index: IndexStore | null;
 	readonly greptime: GreptimeClient | null;
@@ -1401,6 +1412,10 @@ export class Substrate {
 	private readonly emitChains = new Map<string, Promise<void>>();
 	/** Phase 50: the Dragonfly wake-up hints; null while `SUBSTRATE_EVENT_BUS` is off, or its endpoint is missing or refused. */
 	readonly eventBus: EventBus | null;
+	/** Phase 52: the planning reads behind `planning_status` and `planning_sessions`. Read-only: they write nothing. Disabled unless `SUBSTRATE_PLANNING_ROOT` is set. */
+	readonly planning: PlanningReader;
+	/** Phase 52: the planning observer, the plane's only writer: it publishes a checkout's change and heartbeats it. Started by `startPlanning`. */
+	readonly planningObserver: PlanningObserver;
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
@@ -1423,6 +1438,8 @@ export class Substrate {
 			eventBus?: () => EventBus | null;
 			/** Tests inject the devnet RPC the verification tools read through; production builds one from `SOLANA_RPC_URL`. */
 			rpc?: Rpc;
+			/** Tests inject the planning filesystem, presence store and ledger write; production builds them from config. */
+			planning?: Partial<Omit<PlanningObserverDeps, "settings">>;
 		},
 		observer: SubstrateObserver = {},
 	) {
@@ -1490,6 +1507,17 @@ export class Substrate {
 				gate: this.planes.gate("cache"),
 			});
 		this.eventBus = stores?.eventBus !== undefined ? stores.eventBus() : productionEventBus(config);
+		// Phase 52 (SOTA-08): the planning reads and the observer share one filesystem and one presence store. Presence rides the cache endpoint; with none, the sessions read says so.
+		const planningDeps = stores?.planning ?? {};
+		const planningFs = planningDeps.fs ?? nodePlanningFs();
+		const planningPresence = planningDeps.presence !== undefined ? planningDeps.presence : productionPresence(config);
+		this.planning = new PlanningReader({ settings: config.planning, fs: planningFs, presence: planningPresence });
+		this.planningObserver = new PlanningObserver({
+			settings: config.planning,
+			fs: planningFs,
+			presence: planningPresence,
+			emit: planningDeps.emit ?? (async (event: EventInput) => (await this.emit(event)).stored),
+		});
 		// uplift-2 R1
 		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays, graphRead: config.requestPath.briefGraphRead };
 		this.narrowBumps = config.requestPath.cacheBumpScope === "narrow";
@@ -2927,6 +2955,17 @@ export class Substrate {
 		} catch (cause) {
 			process.stderr.write(`[substrate] hindsight: outbox gauges unavailable — ${redact(String(cause)).slice(0, 200)}\n`);
 		}
+	}
+
+	/** Phase 52: start the planning observer's scan timer (unref'd). Off, with nothing started, while `SUBSTRATE_PLANNING_ROOT` is unset or misconfigured. */
+	startPlanning(): boolean {
+		return this.planningObserver.start();
+	}
+
+	/** Phase 52: clear the planning observer's timer, then resolve once a scan in flight has finished. The caller bounds the wait. */
+	async stopPlanning(): Promise<void> {
+		this.planningObserver.stop();
+		await this.planningObserver.idle();
 	}
 
 	/** Start the recall prefetch, the Hindsight inventory and the cache preloader (phase 47). The first two are no-ops while their flags are off; each timer is unref'd. */

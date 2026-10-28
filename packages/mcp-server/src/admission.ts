@@ -225,6 +225,8 @@ export const TOOL_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	fabric_status: "read",
 	fabric_optimize: "read",
 	fabric_compliance: "read",
+	planning_status: "read",
+	planning_sessions: "read",
 	railway_scale: "write",
 	railway_deploy: "write",
 	coord_handoff: "write",

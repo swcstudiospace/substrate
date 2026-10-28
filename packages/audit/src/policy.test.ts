@@ -58,6 +58,8 @@ describe("auditMode", () => {
 			"checkpoint_verify",
 			"memory_verify",
 			"session_rollback_plan",
+			"planning_status",
+			"planning_sessions",
 		]) {
 			expect(auditMode(tool)).toBe("fail-open");
 		}

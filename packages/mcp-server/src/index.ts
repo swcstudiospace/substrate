@@ -32,6 +32,7 @@ import {
 	swarmTokenWarnings,
 } from "./config.ts";
 import { briefProfileConfigWarnings } from "./brief-profile.ts";
+import { planningConfigWarnings } from "./planning/config.ts";
 import { hindsightInventoryConfigWarnings } from "./hindsight-inventory.ts";
 import { briefRecallConfigWarnings } from "./recall-snapshot.ts";
 import { bufferRunner, createDesktopDriver } from "./desktop/driver.ts";
@@ -91,6 +92,7 @@ for (const warning of [
 	...contextualRecallConfigWarnings(config),
 	...eventIdempotencyConfigWarnings(config),
 	...config.mentalModels.warnings,
+	...planningConfigWarnings(config.planning),
 ]) {
 	process.stderr.write(`[substrate] misconfigured — ${warning}\n`);
 }
@@ -182,6 +184,8 @@ server.listen(config.port, config.host, () => {
 	void substrate.emitDbEndpoints();
 	// uplift-4 S5: each timer starts only under its own flag (both default off) and is unref'd.
 	const background = substrate.startRecall();
+	// Phase 52: the planning observer's scan timer. Off while SUBSTRATE_PLANNING_ROOT is unset; unref'd.
+	substrate.startPlanning();
 	if (background.recall) process.stdout.write(`[substrate] brief recall: ${config.briefRecall.mode}, refresh every ${config.briefRecall.intervalS} s, snapshot ttl ${config.briefRecall.ttlS} s\n`);
 	if (background.inventory) process.stdout.write(`[substrate] hindsight inventory: on, every ${config.hindsightInventory.intervalS} s, read-only\n`);
 	// Memory governance: the weekly mental-model refresh, named by HINDSIGHT_MENTAL_MODELS. Unref'd; the first pass
@@ -217,6 +221,8 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		const recallStopped = substrate.stopRecall();
 		// Phase 47: the cache preloader's timer is cleared with them; a tick in flight finishes on its own.
 		substrate.stopPreload();
+		// Phase 52: the planning observer's timer is cleared now; a scan in flight is awaited inside the bound below.
+		const planningStopped = substrate.stopPlanning();
 		// Phase 50: the wake-up hint connections close with the timers; no subscriber outlives the shutdown.
 		substrate.stopEventBus();
 		observability.stop();
@@ -243,6 +249,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 					mentalModelRefresh?.flush(),
 					watchdogStopped,
 					recallStopped,
+					planningStopped,
 				]),
 				Bun.sleep(SHUTDOWN_FLUSH_MS),
 			]);

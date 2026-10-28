@@ -7,14 +7,17 @@ import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_FILES,
 	DEFAULT_PRESENCE_TTL_S,
+	DEFAULT_SCAN_INTERVAL_MS,
 	PLANNING_MAX_BYTES_ENV,
 	PLANNING_MAX_FILES_ENV,
 	PLANNING_PRESENCE_TTL_ENV,
+	PLANNING_SCAN_INTERVAL_ENV,
 	PLANNING_ROOT_ENV,
 	loadPlanningSettings,
+	planningConfigWarnings,
 } from "./config.ts";
 
-const DEFAULTS = { presenceTtlS: 90, maxFiles: 500, maxBytes: 262_144 };
+const DEFAULTS = { presenceTtlS: 90, maxFiles: 500, maxBytes: 262_144, scanIntervalMs: DEFAULT_SCAN_INTERVAL_MS };
 
 describe("loadPlanningSettings: the plane is off unless a root is set", () => {
 	test("an empty environment is disabled, with the documented defaults and no root", () => {
@@ -47,12 +50,21 @@ describe("loadPlanningSettings: the plane is off unless a root is set", () => {
 			errors: [{ key: PLANNING_ROOT_ENV, reason: "invalid-characters" }],
 		});
 	});
+
+	test("a malformed scan interval is a boot warning that names its key and never its value, and a valid environment has none", () => {
+		const refused = loadPlanningSettings({ [PLANNING_ROOT_ENV]: "/srv/checkout", [PLANNING_SCAN_INTERVAL_ENV]: "abc" });
+		const warnings = planningConfigWarnings(refused);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain(PLANNING_SCAN_INTERVAL_ENV);
+		expect(warnings.join("\n")).not.toContain("abc");
+		expect(planningConfigWarnings(loadPlanningSettings({ [PLANNING_ROOT_ENV]: "/srv/checkout" }))).toEqual([]);
+	});
 });
 
 describe("loadPlanningSettings: numeric settings", () => {
 	test("valid values are taken as given", () => {
-		const env = { [PLANNING_PRESENCE_TTL_ENV]: "120", [PLANNING_MAX_FILES_ENV]: "40", [PLANNING_MAX_BYTES_ENV]: "65536" };
-		expect(loadPlanningSettings(env)).toEqual({ ok: true, settings: { enabled: false, presenceTtlS: 120, maxFiles: 40, maxBytes: 65_536 } });
+		const env = { [PLANNING_PRESENCE_TTL_ENV]: "120", [PLANNING_MAX_FILES_ENV]: "40", [PLANNING_MAX_BYTES_ENV]: "65536", [PLANNING_SCAN_INTERVAL_ENV]: "2500" };
+		expect(loadPlanningSettings(env)).toEqual({ ok: true, settings: { enabled: false, presenceTtlS: 120, maxFiles: 40, maxBytes: 65_536, scanIntervalMs: 2_500 } });
 	});
 
 	test.each([
