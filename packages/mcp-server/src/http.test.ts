@@ -1642,6 +1642,7 @@ describe("desktop_run at the HTTP gate", () => {
 						return { code: 0, stdout: Buffer.from(""), stderr: "" };
 					},
 					dir,
+					lockPort: 0,
 					sleep: async () => {},
 				}),
 			},

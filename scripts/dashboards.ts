@@ -120,6 +120,7 @@ export const SERIES_SOURCES: Readonly<Record<string, string>> = {
 	"memory.expired": METRIC.memoryExpired,
 	"hindsight.outbox_size": OUTBOX_SIZE_METRIC,
 	"hindsight.outbox_oldest_age_s": OUTBOX_OLDEST_METRIC,
+	"planning.transition": "PlanningObserver scan path (planning/observer.ts)",
 	"index.archive_age_s": INDEX_ARCHIVE_AGE_METRIC,
 	"endpoint.proxy_planes": ENDPOINT_PROXY_PLANES_METRIC,
 };
@@ -276,6 +277,7 @@ function planeItems(): Item[] {
 		{ kind: "chart", series: "emit.p95", title: "Emit latency p95", note: "p95 of the time to append one event. No objective." },
 		{ kind: "chart", series: "plane.p95", title: "Plane call latency p95", note: `Per data plane (${PLANES.join(", ")}); a refused call (breaker open) carries no duration and is not in it.` },
 		{ kind: "chart", series: "docs.search", title: "Docs searches by outcome", note: "hit, empty or degraded searches per step.", stack: true, bars: true },
+		{ kind: "chart", series: "planning.transition", title: "Planning transitions by outcome", note: "One record per detected planning change: applied when the change reached the ledger, refused when it did not.", stack: true, bars: true },
 		{ kind: "row", title: "Extended series (needs SUBSTRATE_METRICS_HISTORY_SERIES=extended)" },
 		{
 			kind: "chart",

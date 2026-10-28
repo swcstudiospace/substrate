@@ -153,6 +153,7 @@ import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
 import { DragonflyPresenceStore } from "./planning/presence-dragonfly.ts";
 import { PlanningObserver, type PlanningObserverDeps } from "./planning/observer.ts";
 import { PlanningReader } from "./planning/read.ts";
+import { greptimeMetricSink, stdoutMetricSink } from "./planning/telemetry.ts";
 import type { FabricSources } from "./fabric/types.ts";
 import { FABRIC_HEALTH_WINDOW_MS } from "./fabric/gather.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
@@ -1473,11 +1474,21 @@ export class Substrate {
 		const planningFs = planningDeps.fs ?? nodePlanningFs();
 		const planningPresence = planningDeps.presence !== undefined ? planningDeps.presence : productionPresence(config);
 		this.planning = new PlanningReader({ settings: config.planning, fs: planningFs, presence: planningPresence });
+		// Phase 54 (SOTA-10): a planning transition is a metric row only when the metrics-history switch is on (the ledger's
+		// writer then stores it). Otherwise it goes to stdout alone, so the documented off switch writes no metric_samples row.
+		const transitionWriter = this.greptime;
 		this.planningObserver = new PlanningObserver({
 			settings: config.planning,
 			fs: planningFs,
 			presence: planningPresence,
 			emit: planningDeps.emit ?? (async (event: EventInput) => (await this.emit(event)).stored),
+			metrics:
+				planningDeps.metrics ??
+				(config.metricsHistory.enabled && transitionWriter !== null
+					? greptimeMetricSink((rows) => transitionWriter.recordMetricSamples(rows, config.metricsHistory.ttl))
+					: stdoutMetricSink()),
+			fallback: planningDeps.fallback,
+			clock: planningDeps.clock,
 		});
 		// uplift-2 R1
 		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays, graphRead: config.requestPath.briefGraphRead };

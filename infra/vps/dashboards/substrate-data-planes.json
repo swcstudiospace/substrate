@@ -1176,14 +1176,135 @@
       "type": "timeseries"
     },
     {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "substrate-slo-history"
+      },
+      "description": "One record per detected planning change: applied when the change reached the ledger, refused when it did not. Series `planning.transition` (counter, sum per step, {transition}), source `PlanningObserver scan path (planning/observer.ts)`. One line per `outcome`.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 42
+      },
+      "id": 13,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "Time",
+              "type": "timestamp"
+            },
+            {
+              "selector": "value",
+              "text": "Value",
+              "type": "number"
+            },
+            {
+              "selector": "labels.outcome",
+              "text": "outcome",
+              "type": "string"
+            }
+          ],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "substrate-slo-history"
+          },
+          "filters": [],
+          "format": "table",
+          "refId": "A",
+          "root_selector": "points",
+          "source": "url",
+          "type": "json",
+          "url": "/slo/history",
+          "url_options": {
+            "data": "",
+            "method": "GET",
+            "params": [
+              {
+                "key": "series",
+                "value": "planning.transition"
+              },
+              {
+                "key": "window",
+                "value": "$window"
+              },
+              {
+                "key": "step",
+                "value": "$step"
+              }
+            ]
+          }
+        }
+      ],
+      "title": "Planning transitions by outcome",
+      "transformations": [
+        {
+          "id": "partitionByValues",
+          "options": {
+            "fields": [
+              "outcome"
+            ]
+          }
+        }
+      ],
+      "type": "timeseries"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 42
+        "y": 50
       },
-      "id": 13,
+      "id": 14,
       "panels": [],
       "title": "Extended series (needs SUBSTRATE_METRICS_HISTORY_SERIES=extended)",
       "type": "row"
@@ -1231,9 +1352,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 43
+        "y": 51
       },
-      "id": 14,
+      "id": 15,
       "options": {
         "legend": {
           "calcs": [],
@@ -1352,9 +1473,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 43
+        "y": 51
       },
-      "id": 15,
+      "id": 16,
       "options": {
         "legend": {
           "calcs": [],
@@ -1459,9 +1580,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 51
+        "y": 59
       },
-      "id": 16,
+      "id": 17,
       "options": {
         "legend": {
           "calcs": [],
@@ -1580,9 +1701,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 51
+        "y": 59
       },
-      "id": 17,
+      "id": 18,
       "options": {
         "legend": {
           "calcs": [],
@@ -1701,9 +1822,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 59
+        "y": 67
       },
-      "id": 18,
+      "id": 19,
       "options": {
         "legend": {
           "calcs": [],
@@ -1822,9 +1943,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 59
+        "y": 67
       },
-      "id": 19,
+      "id": 20,
       "options": {
         "legend": {
           "calcs": [],
@@ -1929,9 +2050,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 67
+        "y": 75
       },
-      "id": 20,
+      "id": 21,
       "options": {
         "legend": {
           "calcs": [],
@@ -2036,9 +2157,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 67
+        "y": 75
       },
-      "id": 21,
+      "id": 22,
       "options": {
         "legend": {
           "calcs": [],

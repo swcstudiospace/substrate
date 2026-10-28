@@ -1,14 +1,17 @@
 /**
  * The planning reads over an in-memory tree and a recording presence backend (phase 52, SOTA-08). Both reads answer typed
  * results, and neither writes anything: no presence heartbeat, no ledger note, no file, on the first call or any later one.
+ * Every sessions answer carries the session view's state (phase 54), derived from the body alone.
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { RecordingPresenceBackend } from "./backend.fixtures.ts";
 import { PLANNING_MAX_FILES_ENV, PLANNING_ROOT_ENV, loadPlanningSettings } from "./config.ts";
+import { dragonflyPresenceBackend, type PresenceRedisClient } from "./presence-client.ts";
 import { DragonflyPresenceStore, PRESENCE_KEY_PREFIX, PRESENCE_MAX_SESSIONS } from "./presence-dragonfly.ts";
 import type { SessionRecord } from "./presence.ts";
-import { PlanningReader } from "./read.ts";
+import { PlanningReader, type PlanningSessionsView } from "./read.ts";
+import { SESSION_STATES } from "./states.ts";
 import { FakeTree, TREE_ROOT } from "./tree.fixtures.ts";
 
 const P = `${TREE_ROOT}/.planning`;
@@ -47,6 +50,12 @@ function session(sessionId: string, lastHeartbeatMs: number): SessionRecord {
 	return { sessionId, worktree: `/work/${sessionId}`, branch: "gsd/p52-wiring", activePhase: null, lastHeartbeatMs };
 }
 
+/** Every session view names one of the six states, with a line that is never blank. */
+function expectNonBlankState(view: PlanningSessionsView): void {
+	expect(SESSION_STATES).toContain(view.view.state);
+	expect(view.view.text.trim()).not.toBe("");
+}
+
 describe("planning_status", () => {
 	test("counts, hashes and the error record are reported, and no file body or frontmatter value is", async () => {
 		const view = await readerOver(seededTree()).status();
@@ -63,11 +72,21 @@ describe("planning_status", () => {
 		expect(await readerOver(seededTree(), { root: null }).status()).toEqual({ state: "disabled", reason: "root-unset" });
 	});
 
+	test("an absent root answers disabled, never an error", async () => {
+		const view = await new PlanningReader({ settings: loadPlanningSettings({}), fs: new FakeTree({}), presence: null }).status();
+		expect(view).toEqual({ state: "disabled", reason: "root-unset" });
+	});
+
 	test("a relative root answers misconfigured, naming the key and never the value", async () => {
 		const view = await readerOver(seededTree(), { root: "relative/checkout" }).status();
 		expect(view.state).toBe("misconfigured");
 		expect(JSON.stringify(view)).toContain(PLANNING_ROOT_ENV);
 		expect(JSON.stringify(view)).not.toContain("relative/checkout");
+	});
+
+	test("a relative root answers misconfigured, naming the key and not the value", async () => {
+		const view = await readerOver(seededTree(), { root: "relative/checkout" }).status();
+		expect(view).toEqual({ state: "misconfigured", errors: [{ key: PLANNING_ROOT_ENV, reason: "not-absolute" }] });
 	});
 
 	test("a root that does not exist answers unavailable with the failure code", async () => {
@@ -98,6 +117,20 @@ describe("planning_sessions", () => {
 		]);
 	});
 
+	test("a session past its freshness window is listed as stale with its age, and a fresh one as active", async () => {
+		const backend = new RecordingPresenceBackend();
+		const now = backend.clockMs;
+		storeSession(backend, session("drifted", now - 120_000));
+		storeSession(backend, session("fresh", now));
+		const view = await readerOver(seededTree(), { presence: new DragonflyPresenceStore(backend) }).sessions();
+		expect(view).toMatchObject({ state: "ok", presenceTtlS: 90, clock: { state: "server" }, truncated: false, view: { state: "STALE" } });
+		if (view.state !== "ok") return;
+		expect(view.sessions.map((row) => [row.sessionId, row.status, row.ageMs])).toEqual([
+			["drifted", "stale", 120_000],
+			["fresh", "active", 0],
+		]);
+	});
+
 	test("when the server clock cannot be read, sessions are listed as unknown and the reason is given", async () => {
 		const backend = new RecordingPresenceBackend();
 		storeSession(backend, session("wt-only", backend.clockMs - 1_000));
@@ -106,10 +139,23 @@ describe("planning_sessions", () => {
 		if (view.state !== "ok") throw new Error(`expected ok, got ${view.state}`);
 		expect(view.clock.state).toBe("unavailable");
 		expect(view.sessions).toEqual([expect.objectContaining({ sessionId: "wt-only", status: "unknown", ageMs: null })]);
+		expect(view).toMatchObject({ view: { state: "DEGRADED" } });
 	});
 
 	test("with no cache endpoint, sessions answer unavailable with presence-backend-unset", async () => {
-		expect(await readerOver(seededTree(), { presence: null }).sessions()).toEqual({ state: "unavailable", code: "presence-backend-unset" });
+		expect(await readerOver(seededTree(), { presence: null }).sessions()).toMatchObject({
+			state: "unavailable",
+			code: "presence-backend-unset",
+			view: { state: "DEGRADED" },
+		});
+	});
+
+	test("no Dragonfly endpoint answers unavailable with presence-backend-unset", async () => {
+		expect(await readerOver(new FakeTree({}), { presence: null }).sessions()).toMatchObject({
+			state: "unavailable",
+			code: "presence-backend-unset",
+			view: { state: "DEGRADED" },
+		});
 	});
 
 	test("a listing past the bound says it was truncated and holds exactly the bound", async () => {
@@ -131,6 +177,53 @@ describe("planning_sessions", () => {
 		expect(view.code).toBe("presence-listing-failed");
 		expect(view.detail).toContain("wt-bad");
 		expect(JSON.stringify(view)).not.toContain("SECRETVALUE");
+	});
+
+	test("a corrupt stored session fails the listing as unavailable, naming the key and not the value", async () => {
+		const backend = new RecordingPresenceBackend();
+		backend.values.set(`${PRESENCE_KEY_PREFIX}corrupt`, '{"sessionId":"corrupt","secret":"SHOULD-NOT-APPEAR"}');
+		const view = await readerOver(seededTree(), { presence: new DragonflyPresenceStore(backend) }).sessions();
+		expect(view.state).toBe("unavailable");
+		expect(JSON.stringify(view)).toContain(`${PRESENCE_KEY_PREFIX}corrupt`);
+		expect(JSON.stringify(view)).not.toContain("SHOULD-NOT-APPEAR");
+	});
+
+	test("an absent root answers disabled, never an error", async () => {
+		const view = await readerOver(seededTree(), { root: null }).sessions();
+		expect(view).toMatchObject({ state: "disabled", reason: "root-unset", view: { state: "DEGRADED" } });
+		expectNonBlankState(view);
+	});
+
+	test("planning_sessions returns its error within the command deadline", async () => {
+		const stalled: PresenceRedisClient = { connect: async () => {}, send: () => new Promise<never>(() => {}), close: () => {} };
+		const presence = new DragonflyPresenceStore(dragonflyPresenceBackend("redis://127.0.0.1:6379", 250, () => stalled, 20));
+		const started = performance.now();
+		const view = await readerOver(new FakeTree({}), { presence }).sessions();
+		expect(performance.now() - started).toBeLessThan(1000);
+		expect(view).toMatchObject({ state: "unavailable", code: "presence-listing-failed" });
+		expect(view.state === "unavailable" && view.detail).toContain("deadline (20 ms presence SCAN)");
+	});
+});
+
+describe("planning_sessions state", () => {
+	test("an empty root has the EMPTY state", async () => {
+		const view = await readerOver(new FakeTree({}), { presence: new DragonflyPresenceStore(new RecordingPresenceBackend()) }).sessions();
+		expect(view).toMatchObject({ state: "ok", sessions: [], view: { state: "EMPTY" } });
+		expectNonBlankState(view);
+	});
+
+	test("a root with a stale session has the STALE state", async () => {
+		const backend = new RecordingPresenceBackend();
+		storeSession(backend, session("wt-drifted", backend.clockMs - 120_000));
+		const view = await readerOver(new FakeTree({}), { presence: new DragonflyPresenceStore(backend) }).sessions();
+		expect(view).toMatchObject({ state: "ok", view: { state: "STALE" } });
+		expectNonBlankState(view);
+	});
+
+	test("a disabled root has the DEGRADED state, not a blank one", async () => {
+		const view = await readerOver(new FakeTree({}), { root: null }).sessions();
+		expect(view).toMatchObject({ state: "disabled", view: { state: "DEGRADED" } });
+		expectNonBlankState(view);
 	});
 });
 

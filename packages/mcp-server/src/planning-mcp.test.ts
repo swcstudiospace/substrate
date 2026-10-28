@@ -20,6 +20,7 @@ const CALLER: McpCaller = { surface: "omp", isOperator: false };
 const PLANNING_TOOLS = ["planning_status", "planning_sessions"] as const;
 const BODY = "PLANNING-BODY-SECRET";
 const PHASE = ".planning/phases/52-planning-awareness-core";
+const GREPTIME_URL_KEY = ["GREPTIME", "URL"].join("_");
 
 let dir: string;
 let root: string;
@@ -79,8 +80,12 @@ describe("planning tools", () => {
 		for (const name of PLANNING_TOOLS) {
 			const reply = await call(client, name);
 			expect(reply.isError).toBe(false);
-			expect(reply.json()).toEqual({ state: "disabled", reason: "root-unset" });
+			expect(reply.json()["state"]).toBe("disabled");
+			expect(reply.json()["reason"]).toBe("root-unset");
 		}
+		const sessions = (await call(client, "planning_sessions")).json()["view"] as { state: string; text: string };
+		expect(sessions.state).toBe("DEGRADED");
+		expect(sessions.text.trim()).not.toBe("");
 	});
 
 	test("with a root, planning_status reports counts and hashes and never a file body", async () => {
@@ -117,5 +122,120 @@ describe("planning tools", () => {
 		expect(ledger).toHaveLength(1);
 		expect(ledger[0]).toMatchObject({ surface: "substrate", kind: "note", repo: "swcstudiospace/agent-substrate", payload: { kind: "planning.changed" } });
 		expect(JSON.stringify(ledger)).not.toContain(BODY);
+	});
+});
+
+describe("the planning transition follows the metrics-history switch", () => {
+	/** A substrate whose ledger writer keeps each write it is asked for. The planning reader gets no sink, so the wiring under test chooses it. */
+	function substrateWithLedgerWriter(env: Record<string, string>, writes: unknown[][]) {
+		const greptime = {
+			recordMetricSamples: async (rows: unknown[]) => {
+				writes.push(rows);
+				return { stored: rows.length, drops: {} };
+			},
+		};
+		return new Substrate(loadConfig({ ...env, [GREPTIME_URL_KEY]: "http://greptime.test:4000", [PLANNING_ROOT_ENV]: root }), {
+			index: null,
+			greptime: greptime as never,
+			planning: { presence: null, emit: async () => true },
+		});
+	}
+
+	/** One detected change after a baseline read. Returns the stdout lines a transition wrote while it was delivered. */
+	async function oneDetectedChange(substrate: Substrate): Promise<string[]> {
+		await mkdir(join(root, ".git"), { recursive: true });
+		await writeFile(join(root, ".git", "config"), '[remote "origin"]\n\turl = git@github.com:swcstudiospace/agent-substrate.git\n');
+		await writeFile(join(root, PHASE, "52-CONTEXT.md"), `${BODY}\n`);
+		await substrate.planningObserver.scan();
+		const lines: string[] = [];
+		const original = process.stdout.write;
+		process.stdout.write = ((chunk: string | Uint8Array) => {
+			lines.push(String(chunk));
+			return true;
+		}) as typeof process.stdout.write;
+		try {
+			await writeFile(join(root, PHASE, "52-CONTEXT.md"), `${BODY} edited\n`);
+			await substrate.planningObserver.scan();
+			await substrate.planningObserver.settleTransitions();
+		} finally {
+			process.stdout.write = original;
+		}
+		return lines.filter((line) => line.includes("planning.transition"));
+	}
+
+	test("with the switch unset, the transition is one stdout line and no ledger write", async () => {
+		const writes: unknown[][] = [];
+		const lines = await oneDetectedChange(substrateWithLedgerWriter({}, writes));
+		expect(writes).toEqual([]);
+		expect(lines.map((line) => JSON.parse(line))).toEqual([expect.objectContaining({ metric: "planning.transition", outcome: "applied" })]);
+	});
+
+	test("with the switch on, the transition is one ledger metric write and no stdout line", async () => {
+		const writes: unknown[][] = [];
+		const lines = await oneDetectedChange(substrateWithLedgerWriter({ SUBSTRATE_METRICS_HISTORY: "on" }, writes));
+		expect(writes).toEqual([[expect.objectContaining({ series: "planning.transition", labels: { outcome: "applied" }, value: 1 })]]);
+		expect(lines).toEqual([]);
+	});
+});
+
+describe("a held change's transition reaches stdout once, whatever the ledger does", () => {
+	/** A substrate with no ledger writer; `emit`, when given, stands in for the planning ledger publish. */
+	function substrateWithoutLedger(emit?: (event: EventInput) => Promise<boolean>) {
+		return new Substrate(loadConfig({ [PLANNING_ROOT_ENV]: root }), {
+			index: null,
+			greptime: null,
+			planning: emit === undefined ? { presence: null } : { presence: null, emit },
+		});
+	}
+
+	/** The planning.transition lines written to stdout while `run` executes, parsed. */
+	async function transitionLines(run: () => Promise<void>): Promise<Record<string, unknown>[]> {
+		const lines: string[] = [];
+		const original = process.stdout.write;
+		process.stdout.write = ((chunk: string | Uint8Array) => {
+			lines.push(String(chunk));
+			return true;
+		}) as typeof process.stdout.write;
+		try {
+			await run();
+		} finally {
+			process.stdout.write = original;
+		}
+		return lines.filter((line) => line.includes("planning.transition")).map((line) => JSON.parse(line) as Record<string, unknown>);
+	}
+
+	async function withOrigin(): Promise<void> {
+		await mkdir(join(root, ".git"), { recursive: true });
+		await writeFile(join(root, ".git", "config"), '[remote "origin"]\n\turl = git@github.com:swcstudiospace/agent-substrate.git\n');
+		await writeFile(join(root, PHASE, "52-CONTEXT.md"), `${BODY}\n`);
+	}
+
+	test("with no ledger configured, a held change writes one transition line, and a later read of it writes no second", async () => {
+		await withOrigin();
+		const substrate = substrateWithoutLedger();
+		await substrate.planningObserver.scan();
+		const records = await transitionLines(async () => {
+			await writeFile(join(root, PHASE, "52-CONTEXT.md"), `${BODY} edited\n`);
+			const held = await substrate.planningObserver.scan();
+			expect(held).toMatchObject({ state: "observed", outcome: "not-published" });
+			await substrate.planningObserver.settleTransitions();
+			await substrate.planningObserver.scan();
+			await substrate.planningObserver.settleTransitions();
+		});
+		expect(records).toEqual([expect.objectContaining({ metric: "planning.transition", outcome: "refused" })]);
+	});
+
+	test("with a failed ledger write, a held change writes one transition line, and a later read of it writes no second", async () => {
+		await withOrigin();
+		const substrate = substrateWithoutLedger(async () => false);
+		await substrate.planningObserver.scan();
+		const records = await transitionLines(async () => {
+			await writeFile(join(root, PHASE, "52-CONTEXT.md"), `${BODY} edited\n`);
+			await substrate.planningObserver.scan();
+			await substrate.planningObserver.settleTransitions();
+			await substrate.planningObserver.scan();
+			await substrate.planningObserver.settleTransitions();
+		});
+		expect(records).toEqual([expect.objectContaining({ metric: "planning.transition", outcome: "refused" })]);
 	});
 });
