@@ -1,11 +1,12 @@
 # Verification gate and CI
 
-The gate is five checks, run in this order. `bun run verify` runs them locally; `.github/workflows/ci.yml` runs the same commands on GitHub.
+The gate is six checks, run in this order. `bun run verify` runs them locally; `.github/workflows/ci.yml` runs the same commands on GitHub.
 
 | Step | Command | What it proves |
 |---|---|---|
 | `install` | `bun install --frozen-lockfile` | `bun.lock` matches every `package.json` |
 | `types` | `bunx tsc --noEmit` | the whole workspace typechecks |
+| `lint` | `bunx biome lint --reporter=summary .` | Biome reports no error-level diagnostic; warnings stay visible in the summary but do not fail the step |
 | `tests` | `bun test` | the full suite passes |
 | `python` | `uv run --no-project --with httpx==0.28.1 --with pytest==9.1.1 python -m pytest packages/miner/tests packages/dispatcher/tests` | the miner and dispatcher Python suites pass, in an ephemeral environment pinned to the versions they were verified with |
 | `locks` | `bun run check:phase-close` | the event vocabulary, store lock, audit policy and redaction locks hold |
@@ -16,7 +17,7 @@ The gate is five checks, run in this order. `bun run verify` runs them locally; 
 Prerequisites: Bun 1.4.0 and `uv` on `PATH`. The `python` step runs `uv run`. CI installs the pinned `uv` release and checks its SHA-256 before use, so a local run needs `uv` installed too.
 
 ```sh
-bun run verify              # install, types, tests, python, locks
+bun run verify              # install, types, lint, tests, python, locks
 bun run verify --audit      # plus the dependency audit
 bun run verify --only types,locks
 bun run verify --keep-going # do not stop at the first failure
@@ -25,7 +26,7 @@ bun run verify --list
 
 A passing step prints one line (with the pass/skip/fail counts for the suite). A failing step prints the last 60 lines of its output and the run stops, exit code 1. Exit code 2 means bad usage.
 
-`scripts/verify.test.ts` reads `.github/workflows/ci.yml` and fails when the workflow runs different commands from `bun run verify`, when a job loses its `CI_ENABLED` switch, when the report-only `boot-gate` job stops being report-only or limited to `bun install --frozen-lockfile` and `bun run gate:boot`, or when the report-only `lint-report` job stops being report-only or limited to the install and `bunx biome lint`, so the workflow cannot drift apart silently.
+`scripts/biome-config.test.ts` pins the Biome rule levels below, so loosening the gate needs a deliberate test change. `scripts/verify.test.ts` reads `.github/workflows/ci.yml` and fails when the workflow runs different commands from `bun run verify`, when a job loses its `CI_ENABLED` switch, when the report-only `boot-gate` job stops being report-only or limited to `bun install --frozen-lockfile` and `bun run gate:boot`, so the workflow cannot drift apart silently.
 
 ### The database-backed tests
 
@@ -43,14 +44,29 @@ Nothing in the suite needs GreptimeDB; the real-store proofs are the rehearsal s
 
 | Job | Runner | When | Steps |
 |---|---|---|---|
-| `verify` ("Typecheck, tests and repo locks") | `[self-hosted, linux, x64, omega-ci]` | same-repo pull request, push to `main`, on demand (never on the schedule) | the five steps above, with a scratch Postgres 16 (the local `scratch-postgres` action) and a full-history checkout (`check:phase-close` diffs against a baseline commit) |
+| `verify` ("Typecheck, lint, tests and repo locks") | `[self-hosted, linux, x64, omega-ci]` | same-repo pull request, push to `main`, on demand (never on the schedule) | the six steps above, with a scratch Postgres 16 (the local `scratch-postgres` action) and a full-history checkout (`check:phase-close` diffs against a baseline commit) |
 | `dependency-audit` ("Known-vulnerability audit") | `[self-hosted, linux, x64, omega-ci]` | push to `main`, Mondays 03:17 UTC, on demand (never on a pull request) | `bun install --frozen-lockfile --ignore-scripts`, `bun scripts/audit-gate.ts` |
 | `boot-gate` ("Boot and prove (report-only)") | `[self-hosted, linux, x64, omega-ci]` | same-repo pull request, push to `main`, on demand (never on the schedule); only when `BOOT_GATE` is `true` | `bun install --frozen-lockfile`, `bun run gate:boot` |
-| `lint-report` ("Lint (Biome, report-only)") | `[self-hosted, linux, x64, omega-ci]` | same-repo pull request, push to `main`, on demand (never on the schedule) | `bun install --frozen-lockfile`, `bunx biome lint --reporter=summary .` (`continue-on-error`: findings never block) |
 
 Fork pull requests run none of these jobs: each job's `if:` skips a pull request whose head repository is not this repository, because a fork's code would otherwise run on the shared runner pool.
 
-Lint is report-only. `bun run lint` runs `biome lint` (Biome, pinned exactly to 2.6.3 in the root `package.json`, with the recommended rules; the formatter is off, so nothing is reformatted). Every root devDependency (`@biomejs/biome`, `@types/bun`, `typescript`) is pinned to an exact version, so a fresh install cannot move the toolchain without a reviewed change. The `lint-report` job runs the same command with `continue-on-error`, so its findings are advisory. Making it blocking is a separate decision, taken after the findings are triaged.
+Lint is blocking: the `lint` step (`bunx biome lint --reporter=summary .`, also `bun run lint` without the reporter) sits between `Typecheck` and `Tests` in the `verify` job and in `bun run verify`. Biome exits non-zero only on errors, so warnings stay visible but do not block. Biome is pinned exactly to 2.6.3 in the root `package.json` with the `recommended` preset; the formatter is off, so nothing is reformatted. Every root devDependency (`@biomejs/biome`, `@types/bun`, `typescript`) is pinned to an exact version, so a fresh install cannot move the toolchain without a reviewed change.
+
+Rule decisions in `biome.json`:
+
+| Rule | Level | Why |
+|---|---|---|
+| `suspicious/noExplicitAny`, `noProto`, `noPrototypeBuiltins`, `noUselessEscapeInString` | error | real defects or type holes; the tree is clean |
+| `correctness/noUnusedImports`, `noUnusedVariables`, `noUnusedFunctionParameters` | error | dead code; the tree is clean |
+| `style/useConst`, `useImportType` | error | cheap, mechanical, tree is clean (`useImportType` matches `verbatimModuleSyntax`) |
+| `complexity/noCommaOperator`, `useRegexLiterals` | error | obscure constructs; the tree is clean |
+| `style/noNonNullAssertion` | warn | hundreds of existing uses, governed separately by a code ratchet |
+| `complexity/useOptionalChain` | warn | a style preference with existing sites; not worth blocking |
+| `suspicious/noTemplateCurlyInString` | off | false positives on intentional `${...}` text such as templates and docs strings |
+| `complexity/useLiteralKeys` | off | conflicts with `noPropertyAccessFromIndexSignature`-style bracket access on index signatures |
+| `style/useTemplate` | off | string concatenation is often clearer; purely stylistic |
+
+The compiler is stricter too: `tsconfig.json` enables `noImplicitOverride`, `noImplicitReturns`, `noUnusedLocals` and `noUnusedParameters` on top of `strict`.
 
 Every job runs on the Omega CI runner pool (`[self-hosted, linux, x64, omega-ci]`, [swcstudiospace/Omega-Prime `docs/ci-runners.md`](https://github.com/swcstudiospace/Omega-Prime/blob/main/docs/ci-runners.md)), never on GitHub-hosted runners. Jobs run as an unprivileged user with no Docker and no `sudo`, so there are no service containers. The `verify` job's scratch database comes from [`.github/actions/scratch-postgres`](../.github/actions/scratch-postgres/action.yml): it runs `initdb` and `pg_ctl` from the image's PostgreSQL 16 into `$RUNNER_TEMP`, listening on 127.0.0.1 and a port the kernel reports free for that job (parallel jobs on one runner host never clash), with trust authentication on loopback. It creates `substrate_test` and exports `SUBSTRATE_TEST_PG_URL`. An `if: always()` step of the same action stops the cluster. Both are `uses:` steps, so the job's `run:` lines stay exactly the gate's four commands. The dependency audit runs on pushes to `main`, weekly and on demand, not on pull requests, so a new high or critical advisory fails it until the package is upgraded or listed under the accepted risks below. The weekly scheduled run re-checks the lockfile for advisories published between changes; a red scheduled run is the signal to upgrade.
 
@@ -104,7 +120,7 @@ gh variable set CI_ENABLED --body true --repo swcstudiospace/agent-substrate   #
 gh variable delete CI_ENABLED --repo swcstudiospace/agent-substrate            # off (kill switch)
 ```
 
-**Status on 2026-10-09: off.** The first run on pull request 27 failed before any step started, with the annotation "The job was not started because recent account payments have failed or your spending limit needs to be increased". The organisation's Actions usage for the month is already large (other repositories), so enabling this is the operator's decision about spend, not a code change. After the account can run jobs: fix billing, run the workflow once by hand (`gh workflow run CI --ref main` after setting the variable, or open a pull request), confirm `verify` is green, and optionally require `CI / Typecheck, tests and repo locks` in branch protection when the repository's plan supports it. The first run on a real runner may expose a setup detail this repository could not test (for example the Postgres service health check); fix it in a small pull request, or clear the variable while you do.
+**Status on 2026-10-09: off.** The first run on pull request 27 failed before any step started, with the annotation "The job was not started because recent account payments have failed or your spending limit needs to be increased". The organisation's Actions usage for the month is already large (other repositories), so enabling this is the operator's decision about spend, not a code change. After the account can run jobs: fix billing, run the workflow once by hand (`gh workflow run CI --ref main` after setting the variable, or open a pull request), confirm `verify` is green, and optionally require `CI / Typecheck, lint, tests and repo locks` in branch protection when the repository's plan supports it. The first run on a real runner may expose a setup detail this repository could not test (for example the Postgres service health check); fix it in a small pull request, or clear the variable while you do.
 
 ## Editing the workflow
 
