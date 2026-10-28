@@ -1520,7 +1520,7 @@ describe("memory.write is fail-closed", () => {
 			expect(result.outcome).toBe("accepted");
 			expect(result.entry?.id).toBe("mem_stored_by_index");
 			expect(emitted).toHaveLength(1);
-			expect((emitted[0]?.payload as Record<string, unknown>).entry_id).toBe("mem_stored_by_index");
+			expect(((emitted[0]?.payload ?? {}) as Record<string, unknown>).entry_id).toBe("mem_stored_by_index");
 			expect(JSON.stringify(emitted)).not.toContain("mem_forged_by_caller");
 		});
 

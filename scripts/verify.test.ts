@@ -37,20 +37,20 @@ const ids = (argv: string[]): string[] => {
 };
 
 describe("parseArgs", () => {
-	test("defaults select the five gate steps and leave the audit out", () => {
+	test("defaults select the six gate steps and leave the audit out", () => {
 		expect(options([])).toEqual({ audit: false, only: null, skip: [], keepGoing: false, list: false, help: false });
-		expect(ids([])).toEqual(["install", "types", "tests", "python", "locks"]);
+		expect(ids([])).toEqual(["install", "types", "lint", "tests", "python", "locks"]);
 	});
 
 	test("--audit appends the audit; --only names exactly the steps asked for, in gate order", () => {
-		expect(ids(["--audit"])).toEqual(["install", "types", "tests", "python", "locks", "audit"]);
+		expect(ids(["--audit"])).toEqual(["install", "types", "lint", "tests", "python", "locks", "audit"]);
 		expect(ids(["--only", "locks,types"])).toEqual(["types", "locks"]);
 		expect(ids(["--only=audit"])).toEqual(["audit"]);
 	});
 
 	test("--skip removes steps, repeats accumulate, and --only plus --skip compose", () => {
-		expect(ids(["--skip", "install"])).toEqual(["types", "tests", "python", "locks"]);
-		expect(ids(["--skip=install", "--skip", "tests"])).toEqual(["types", "python", "locks"]);
+		expect(ids(["--skip", "install"])).toEqual(["types", "lint", "tests", "python", "locks"]);
+		expect(ids(["--skip=install", "--skip", "tests"])).toEqual(["types", "lint", "python", "locks"]);
 		expect(ids(["--only", "types,tests", "--skip", "tests"])).toEqual(["types"]);
 	});
 
@@ -63,7 +63,7 @@ describe("parseArgs", () => {
 		expect(parseArgs(["--only"])).toEqual({ error: "--only needs a value" });
 		expect(parseArgs(["--only", "--audit"])).toEqual({ error: "--only needs a value" });
 		expect(parseArgs(["--skip="])).toEqual({ error: "--skip needs at least one step id" });
-		expect(parseArgs(["--only=lint"])).toEqual({ error: expect.stringContaining("unknown step lint") });
+		expect(parseArgs(["--only=nope"])).toEqual({ error: expect.stringContaining("unknown step nope") });
 		expect(parseArgs(["--onlyfoo"])).toEqual({ error: "unknown option --onlyfoo" });
 	});
 
@@ -182,14 +182,14 @@ describe("main", () => {
 		expect(empty.written).toContain("no steps selected");
 	});
 
-	test("an all-pass run runs the five gate steps in order, reports the suite counts and exits 0", async () => {
+	test("an all-pass run runs the six gate steps in order, reports the suite counts and exits 0", async () => {
 		const { ran, run } = fakeRun();
 		const { result, written } = await quietly(() => main([], { run, env: { SUBSTRATE_TEST_PG_URL: "postgres://scratch" } }));
 
 		expect(result).toBe(0);
-		expect(ran).toEqual(["install", "types", "tests", "python", "locks"]);
+		expect(ran).toEqual(["install", "types", "lint", "tests", "python", "locks"]);
 		expect(written).toContain("ok   Test suite (0.0s): 12 pass, 3 skip, 0 fail");
-		expect(written).toContain("[verify] pass: install, types, tests, python, locks");
+		expect(written).toContain("[verify] pass: install, types, lint, tests, python, locks");
 		expect(written).not.toContain("FAIL");
 		expect(written).not.toContain("note");
 	});
@@ -212,7 +212,7 @@ describe("main", () => {
 		const { result, written } = await quietly(() => main(["--keep-going"], { run }));
 
 		expect(result).toBe(1);
-		expect(ran).toEqual(["install", "types", "tests", "python", "locks"]);
+		expect(ran).toEqual(["install", "types", "lint", "tests", "python", "locks"]);
 		expect(written).toContain("[verify] FAIL: Typecheck, Repo locks");
 	});
 
@@ -227,11 +227,11 @@ describe("main", () => {
 	test("--audit adds the audit step and --skip leaves one out", async () => {
 		const audited = fakeRun();
 		await quietly(() => main(["--audit"], { run: audited.run }));
-		expect(audited.ran).toEqual(["install", "types", "tests", "python", "locks", "audit"]);
+		expect(audited.ran).toEqual(["install", "types", "lint", "tests", "python", "locks", "audit"]);
 
 		const skipped = fakeRun();
 		await quietly(() => main(["--skip", "install,tests"], { run: skipped.run }));
-		expect(skipped.ran).toEqual(["types", "python", "locks"]);
+		expect(skipped.ran).toEqual(["types", "lint", "python", "locks"]);
 	});
 
 	test("skipped live tests are noted unless a scratch database is configured (blank counts as unset)", async () => {
@@ -271,7 +271,7 @@ describe("the gate matches the CI workflow", () => {
 	});
 
 	test("the boot-gate job is report-only, opt-in on its own variable, and runs only the install and `bun run gate:boot`", () => {
-		const job = between("boot-gate", "lint-report");
+		const job = between("boot-gate");
 		// The harness refuses a checkout without node_modules, so the install is a prerequisite, not part of the gate.
 		expect(runLines(job)).toEqual(["bun install --frozen-lockfile", "bun run gate:boot"]);
 		expect(job).toMatch(/^ {4}continue-on-error: true$/m);
@@ -281,13 +281,6 @@ describe("the gate matches the CI workflow", () => {
 		// Neither gating job may become advisory by accident.
 		expect(between("verify", "dependency-audit")).not.toContain("continue-on-error");
 		expect(between("dependency-audit", "boot-gate")).not.toContain("continue-on-error");
-	});
-
-	test("the lint job is report-only and runs only the install and the Biome lint", () => {
-		const job = between("lint-report");
-		expect(runLines(job)).toEqual(["bun install --frozen-lockfile", "bunx biome lint --reporter=summary ."]);
-		expect(job).toMatch(/^ {8}continue-on-error: true\n {8}run: bunx biome lint --reporter=summary \.$/m);
-		expect(job).not.toMatch(/^ {4}services:/m);
 	});
 
 	test("every job stays behind the CI_ENABLED switch", () => {
@@ -304,7 +297,6 @@ describe("the gate matches the CI workflow", () => {
 			verify: `vars.CI_ENABLED == 'true' && github.event_name != 'schedule' && ${sameRepoOnly}`,
 			"dependency-audit": "vars.CI_ENABLED == 'true' && github.event_name != 'pull_request'",
 			"boot-gate": `vars.CI_ENABLED == 'true' && vars.BOOT_GATE == 'true' && github.event_name != 'schedule' && ${sameRepoOnly}`,
-			"lint-report": `vars.CI_ENABLED == 'true' && github.event_name != 'schedule' && ${sameRepoOnly}`,
 		};
 		const jobsSection = workflow.slice(workflow.indexOf("\njobs:\n"));
 		const ids = [...jobsSection.matchAll(/^ {2}([a-z][a-z-]*):$/gm)].map((match) => match[1] as string);

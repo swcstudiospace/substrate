@@ -3,7 +3,7 @@
  * The repository's verification gate in one command.
  *
  * `bun run verify` runs the checks the CI workflow runs, in the same order:
- * a frozen-lockfile install, `tsc --noEmit`, the full test suite and the repo
+ * a frozen-lockfile install, `tsc --noEmit`, `biome lint` (errors block, warnings stay visible), the full test suite and the repo
  * locks (`check:phase-close`). `--audit` adds the known-vulnerability audit,
  * which needs the network. A step's output is shown only when the step fails;
  * otherwise one line per step reports its duration and, for the test suite,
@@ -19,7 +19,7 @@
  */
 import { join } from "node:path";
 
-export type StepId = "install" | "types" | "tests" | "python" | "locks" | "audit";
+export type StepId = "install" | "types" | "lint" | "tests" | "python" | "locks" | "audit";
 
 export interface GateStep {
 	readonly id: StepId;
@@ -33,6 +33,7 @@ export interface GateStep {
 export const GATE_STEPS: readonly GateStep[] = [
 	{ id: "install", label: "Frozen-lockfile install", argv: ["bun", "install", "--frozen-lockfile"] },
 	{ id: "types", label: "Typecheck", argv: ["bunx", "tsc", "--noEmit"] },
+	{ id: "lint", label: "Lint (Biome)", argv: ["bunx", "biome", "lint", "--reporter=summary", "."] },
 	{ id: "tests", label: "Test suite", argv: ["bun", "test"] },
 	{
 		id: "python",

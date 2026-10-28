@@ -14,7 +14,31 @@
 	"linter": {
 		"enabled": true,
 		"rules": {
-			"preset": "recommended"
+			"preset": "recommended",
+			"suspicious": {
+				"noExplicitAny": "error",
+				"noProto": "error",
+				"noPrototypeBuiltins": "error",
+				"noUselessEscapeInString": "error",
+				"noTemplateCurlyInString": "off"
+			},
+			"correctness": {
+				"noUnusedImports": "error",
+				"noUnusedVariables": "error",
+				"noUnusedFunctionParameters": "error"
+			},
+			"style": {
+				"useConst": "error",
+				"useImportType": "error",
+				"noNonNullAssertion": "warn",
+				"useTemplate": "off"
+			},
+			"complexity": {
+				"noCommaOperator": "error",
+				"useRegexLiterals": "error",
+				"useLiteralKeys": "off",
+				"useOptionalChain": "warn"
+			}
 		}
 	},
 	"assist": {
