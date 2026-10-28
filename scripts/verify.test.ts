@@ -297,6 +297,14 @@ describe("the gate matches the CI workflow", () => {
 		for (const line of ifLines) expect(line).toContain("vars.CI_ENABLED == 'true'");
 	});
 
+	test("every job that can run on a pull_request is limited to same-repo branches", () => {
+		const ifLines = [...workflow.matchAll(/^ {4}if: (.+)$/gm)].map((match) => match[1] as string);
+		// A job whose `if:` excludes pull_request outright (`github.event_name != 'pull_request'` not followed by `||`) never runs for a fork.
+		const gated = ifLines.filter((line) => line.includes("vars.CI_ENABLED") && !/github\.event_name != 'pull_request'(?! \|\|)/.test(line));
+		expect(gated.length).toBeGreaterThan(0);
+		for (const line of gated) expect(line).toContain("github.event.pull_request.head.repo.full_name == github.repository");
+	});
+
 	test("package.json exposes the gate as `bun run verify`", () => {
 		const manifest = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> };
 		expect(manifest.scripts.verify).toBe("bun scripts/verify.ts");

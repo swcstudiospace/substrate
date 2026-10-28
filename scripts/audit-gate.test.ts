@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, spyOn, test } from "bun:test";
-import { type AcceptedRisk, type AuditJson, filterAdvisories, installedVersions, main, parseAllowlist } from "./audit-gate.ts";
+import { type AcceptedRisk, type AuditJson, filterAdvisories, formatReport, installedVersions, main, parseAllowlist } from "./audit-gate.ts";
 
 const PI_URL = "https://github.com/advisories/GHSA-jfgx-wxx8-mp94";
 const FTP_URL = "https://github.com/advisories/GHSA-c475-qrg2-pj4r";
@@ -57,17 +57,38 @@ describe("filterAdvisories", () => {
 		expect(result.accepted).toHaveLength(1);
 	});
 
-	test("an allowlisted advisory past its review_by warns and still passes", () => {
-		const result = filterAdvisories(audit, installed, [risk], "2027-01-20");
+	test("an allowlisted advisory 31 days before its review_by does not warn", () => {
+		const result = filterAdvisories(audit, installed, [risk], "2026-12-19");
 		expect(result.failing).toEqual([]);
-		expect(result.accepted).toHaveLength(1);
-		expect(result.warnings).toHaveLength(1);
-		expect(result.warnings[0]).toContain("review_by 2027-01-19 has passed");
+		expect(result.expired).toEqual([]);
+		expect(result.warnings).toEqual([]);
 	});
 
-	test("an allowlisted advisory on its review_by date does not warn yet", () => {
+	test("an allowlisted advisory 30 days before its review_by warns with its id, package and date and still passes", () => {
+		const result = filterAdvisories(audit, installed, [risk], "2026-12-20");
+		expect(result.failing).toEqual([]);
+		expect(result.expired).toEqual([]);
+		expect(result.accepted).toHaveLength(1);
+		expect(result.warnings).toHaveLength(1);
+		expect(result.warnings[0]).toContain("GHSA-jfgx-wxx8-mp94");
+		expect(result.warnings[0]).toContain(PI);
+		expect(result.warnings[0]).toContain("2027-01-19");
+	});
+
+	test("an allowlisted advisory on its review_by day passes with a warning", () => {
 		const result = filterAdvisories(audit, installed, [risk], "2027-01-19");
+		expect(result.failing).toEqual([]);
+		expect(result.expired).toEqual([]);
+		expect(result.accepted).toHaveLength(1);
+		expect(result.warnings).toHaveLength(1);
+	});
+
+	test("an allowlisted advisory the day after its review_by is expired and fails the gate", () => {
+		const result = filterAdvisories(audit, installed, [risk], "2027-01-20");
+		expect(result.failing).toEqual([]);
 		expect(result.warnings).toEqual([]);
+		expect(result.expired).toEqual(["accepted risk GHSA-jfgx-wxx8-mp94 expired on 2027-01-19: re-review or upgrade"]);
+		expect(formatReport(result, 2)).toContain("FAIL      accepted risk GHSA-jfgx-wxx8-mp94 expired on 2027-01-19: re-review or upgrade");
 	});
 
 	test("an allowlisted advisory fails when the lockfile moves to another version", () => {
