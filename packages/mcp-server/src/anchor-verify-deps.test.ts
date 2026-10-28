@@ -12,6 +12,7 @@ import {
 	CKPT_LOOKUP_WINDOW_MS,
 	LOOKUP_ROW_LIMIT,
 	MAX_OPERATOR_SURFACES,
+	newestBoundNote,
 	readReanchorNotes,
 	REANCHOR_READ_MAX_PAGES,
 	reanchorSessionId,
@@ -755,6 +756,43 @@ describe("a re-anchored hour: the operator's note is a pointer, the chain transa
 
 		// The newer note names the verifying one: anchored through the newer.
 		expect((await verifyWith(SECOND_SIGNATURE)).result.status).toBe("anchored");
+	});
+
+	test("newestBoundNote is the one pointer shared with the re-anchor executor: the newest bound note, never an older one, null when none is bound", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		w.ledger.events.push(
+			note(w, { id: "evt_v16_old", newSig: NEW_SIGNATURE, ts: new Date(H + 4 * HOUR_MS).toISOString() }),
+			note(w, { id: "evt_v16_new", newSig: SECOND_SIGNATURE, ts: NOTE_TS }),
+			note(w, { id: "evt_v16_unbound", newSig: SECOND_SIGNATURE, previous: `8${"f".repeat(87)}`, ts: new Date(H + 6 * HOUR_MS).toISOString() }),
+		);
+		const { records } = await readReanchorNotes(w.ports, H, storedRow(w));
+		expect(records.map((record) => record.event_id)).toEqual(["evt_v16_unbound", "evt_v16_new", "evt_v16_old"]);
+
+		// The unbound (newest overall) note is skipped; the newest BOUND one is chosen, and the older one is not a fallback.
+		expect(newestBoundNote(records, storedRow(w))?.event_id).toBe("evt_v16_new");
+		expect(newestBoundNote(records.slice(2), storedRow(w))?.event_id).toBe("evt_v16_old");
+		expect(newestBoundNote([], storedRow(w))).toBeNull();
+		expect(newestBoundNote(records, { ...storedRow(w), root: "f".repeat(64) })).toBeNull();
+
+		// The verifier follows exactly that note.
+		expect((await followReanchor(w.ports, H, storedRow(w))).tx_sig).toBe(newestBoundNote(records, storedRow(w))?.payload.new_tx_sig as string);
+	});
+
+	test("an older valid note beside a newer one naming a missing transaction leaves the hour unverified: the executor must therefore not call it recorded", async () => {
+		const w = world(event({ id: "evt_v16_note" }));
+		w.ledger.events.push(
+			note(w, { id: "evt_v16_old", newSig: NEW_SIGNATURE, ts: new Date(H + 4 * HOUR_MS).toISOString() }),
+			note(w, { id: "evt_v16_new", newSig: SECOND_SIGNATURE, ts: NOTE_TS }),
+		);
+		cluster(w, { [NEW_SIGNATURE]: tx(storedRow(w).memo) });
+		const result = await verifyEventRef(w.ports, "evt_v16_note");
+		expect(result.status).toBe("unverified");
+		if (!("evidence" in result)) throw new Error("expected evidence");
+		expect(result.evidence.signature).toBe(SECOND_SIGNATURE);
+
+		// A repair note written later (same signature as the older note, newer ts) becomes the pointer and the hour verifies.
+		w.ledger.events.push(note(w, { id: "evt_v16_repair", newSig: NEW_SIGNATURE, ts: new Date(H + 5 * HOUR_MS + 30 * 60_000).toISOString() }));
+		expect((await verifyEventRef(w.ports, "evt_v16_note")).status).toBe("anchored");
 	});
 
 	test("readReanchorNotes reads the hour's session once per operator surface, keeps only notes of that hour, newest first", async () => {

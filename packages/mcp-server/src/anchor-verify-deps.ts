@@ -321,6 +321,15 @@ export function isBoundNote(record: ReanchorRecord, binding: ReanchorBinding): b
 	return record.payload.root === binding.root && record.payload.event_count === binding.event_count && record.payload.previous_tx_sig === binding.tx_sig;
 }
 
+/**
+ * The one pointer that counts for an hour: the first record of the newest-first `records` that is bound to `binding`, or null. The
+ * verifier ({@link followReanchor}) and the re-anchor executor (`reanchor.ts`) both choose their note through this, so an older bound
+ * note is never a fallback for a newer one in either place.
+ */
+export function newestBoundNote(records: readonly ReanchorRecord[], binding: ReanchorBinding): ReanchorRecord | null {
+	return records.find((record) => isBoundNote(record, binding)) ?? null;
+}
+
 /** The valid `anchor.reanchor` notes of one hour written by an operator surface, newest first, and why the read may be incomplete. */
 export interface ReanchorNotes {
 	records: ReanchorRecord[];
@@ -423,8 +432,8 @@ export async function followReanchor(
 		return row;
 	}
 	if (notes.incomplete !== null) throw new ReanchorReadIncomplete(`the anchor.reanchor notes of this hour could not be read completely: ${notes.incomplete}`);
-	const pointer = notes.records.find((record) => isBoundNote(record, row));
-	if (pointer === undefined) return row;
+	const pointer = newestBoundNote(notes.records, row);
+	if (pointer === null) return row;
 	let read: AnchorTransactionRead | null = null;
 	if (fetchTx !== undefined) {
 		try {

@@ -25,8 +25,8 @@
  *     30 minutes) is held from here to the end of the run, across discovery, send and recording, so two overlapping runs cannot
  *     both pass discovery before either send is visible; the second refuses as `reanchor-locked`.
  *  6. For EVERY plan hour, read-only, before the first send: the stored `tx_sig` is absent on the cluster (present means this is not
- *     a reset); a recorded `anchor.reanchor` note bound to the hour, read through the same trusted-surface read the verifier uses,
- *     whose transaction verifies on chain means the hour is done (adopted, never sent); for each hour without one, an earlier send
+ *     a reset); the NEWEST `anchor.reanchor` note bound to the hour (`newestBoundNote`, the same pointer the verifier follows; an
+ *     older note is never a fallback), whose transaction verifies on chain, means the hour is done (adopted, never sent); for each hour without one, an earlier send
  *     of its memo by the signer is found by PAGING `getSignaturesForAddress` backwards (`before`) until a signature older than the
  *     plan's earliest period start (or the end of the signer's history) is reached, and is ADOPTED, never duplicated. A listing
  *     that cannot be read refuses (`rpc-unreadable`), and a page cap hit before the horizon refuses (`discovery-incomplete`): a miss
@@ -34,7 +34,8 @@
  *
  * The memo carries period, root and count only, never event content; the keypair is only ever a path on a CLI argv.
  *
- * Recording: one `anchor.reanchor` note per hour (`buildReanchorEvent`, idempotency key `reanchor:<period_start>:<new_tx_sig>`),
+ * Recording: one `anchor.reanchor` note per hour (`buildReanchorEvent`, idempotency key `reanchor:<period_start>:<new_tx_sig>`; a repair
+ * of a stale newest note hashes that note's event id into the key so it is stored even when an older note names the same signature),
  * written as an operator surface in the hour's anchor session. The `anchors` row is NEVER rewritten (the table's replace-or-ignore
  * behaviour is unverified): the verifier follows the note as a pointer to the new transaction and still judges that transaction
  * from the chain (`anchor-verify-deps.ts`, `followReanchor`).
@@ -56,8 +57,9 @@ import {
 	type Runner,
 	type TransactionMemo,
 } from "@substrate/ledger";
+import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
-import { isBoundNote, reanchorSessionId, type ReanchorNotes } from "./anchor-verify-deps.ts";
+import { newestBoundNote, reanchorSessionId, type ReanchorNotes } from "./anchor-verify-deps.ts";
 import { ADDRESS_MEMO_LIMIT, DEVNET_GENESIS_HASH, MAX_HOURS_PER_RUN, REQUIRED_BALANCE_LAMPORTS } from "./anchor.ts";
 import type { AnchorRow, GreptimeClient } from "./greptime.ts";
 import { buildReanchorEvent } from "./reanchor-plan.ts";
@@ -478,33 +480,41 @@ export const DISCOVERY_PAGE_SIZE = ADDRESS_MEMO_LIMIT;
 /** Pages discovery may read before it refuses: the hard cap on `getSignaturesForAddress` calls. */
 export const DISCOVERY_MAX_PAGES = 100;
 
+/** What the recorded notes say about one hour: the signature when the hour is recorded, else the event id of a stale newest note (null when there is none). */
+interface RecordedState {
+	signature: string | null;
+	stale: string | null;
+}
+
 /**
- * Gate 6a, for one hour: a recorded `anchor.reanchor` note bound to the hour (same root, count and previous signature) whose
- * transaction is on this cluster, memo-exact and signed by the key, means the hour is done. Returns that signature, or null. A note
- * whose transaction the cluster does not know is not proof; a transaction that cannot be read refuses, because a recorded send may
- * be live. A notes read that fails is no note: discovery follows it.
+ * Gate 6a, for one hour: the NEWEST `anchor.reanchor` note bound to the hour (same root, count and previous signature; chosen by
+ * `newestBoundNote`, the same choice the verifier makes) is the only pointer that counts. Its transaction being on this cluster,
+ * memo-exact and signed by the key means the hour is done: its signature is returned. A newest note whose transaction the cluster
+ * does not know, or that is wrong or failed, means the hour is NOT recorded, whatever older notes say (the verifier never falls back
+ * to an older one): `signature` is null, `stale` names that note so the repair note gets its own idempotency key, and discovery runs
+ * and adopts an earlier valid send or sends once. A transaction that cannot be read refuses, because a recorded send may be live. A
+ * notes read that fails is no note: discovery follows it.
  */
-async function recordedSignature(hour: SavedPlanHour, deps: ReanchorDeps): Promise<string | null> {
+async function recordedSignature(hour: SavedPlanHour, deps: ReanchorDeps): Promise<RecordedState> {
 	let notes: ReanchorNotes;
 	try {
 		notes = await deps.notes(hour);
 	} catch {
-		return null;
+		return { signature: null, stale: null };
 	}
-	const binding = { root: hour.root, event_count: hour.event_count, tx_sig: hour.previous_tx_sig };
-	for (const record of notes.records) {
-		if (!isBoundNote(record, binding)) continue;
-		let found: TransactionMemo | null;
-		try {
-			found = await lookup(deps.rpc, record.payload.new_tx_sig);
-		} catch (cause) {
-			throw new Refusal("rpc-unreadable", `${hour.period_start}: the recorded transaction ${record.payload.new_tx_sig} could not be read: ${reasonOf(cause)}`);
-		}
-		if (found === null || found.memo === null || found.payer !== deps.env.pubkey || !found.payerSigned || found.err !== null) continue;
+	const newest = newestBoundNote(notes.records, { root: hour.root, event_count: hour.event_count, tx_sig: hour.previous_tx_sig });
+	if (newest === null) return { signature: null, stale: null };
+	let found: TransactionMemo | null;
+	try {
+		found = await lookup(deps.rpc, newest.payload.new_tx_sig);
+	} catch (cause) {
+		throw new Refusal("rpc-unreadable", `${hour.period_start}: the recorded transaction ${newest.payload.new_tx_sig} could not be read: ${reasonOf(cause)}`);
+	}
+	if (found !== null && found.memo !== null && found.payer === deps.env.pubkey && found.payerSigned && found.err === null) {
 		const memo = parseMemo(found.memo);
-		if (memo !== null && memo.periodStartMs === hour.period_start_ms && memo.rootHex === hour.root && memo.count === hour.event_count) return record.payload.new_tx_sig;
+		if (memo !== null && memo.periodStartMs === hour.period_start_ms && memo.rootHex === hour.root && memo.count === hour.event_count) return { signature: newest.payload.new_tx_sig, stale: null };
 	}
-	return null;
+	return { signature: null, stale: newest.event_id };
 }
 
 /**
@@ -614,8 +624,19 @@ async function sendMemo(hour: SavedPlanHour, deps: ReanchorDeps): Promise<string
 	return signature;
 }
 
-/** Write the `anchor.reanchor` note as the operator surface. The transaction is already on chain: a lost note is reported with its full payload and never resent. */
-async function recordReanchor(hour: SavedPlanHour, newTxSig: string, genesis: string, deps: ReanchorDeps): Promise<void> {
+/**
+ * The idempotency key of a REPAIR note: `reanchor:<period_start>:r:<first 40 hex of sha256(new_tx_sig + ":" + supersedes)>`, where
+ * `supersedes` is the event id of the stale newest note the repair replaces. The plain key (`reanchor:<period_start>:<new_tx_sig>`)
+ * would equal that of an older note naming the same signature, so the repair would be deduplicated away and the stale note would stay
+ * the verifier's pointer. A full signature plus an event id would overflow the 128-character key limit, hence the hash. A replay of
+ * the same repair (same stale note) has the same key; once the repair is stored it is the newest bound note and no further repair is made.
+ */
+export function repairIdempotencyKey(period_start: string, newTxSig: string, supersedes: string): string {
+	return `reanchor:${period_start}:r:${createHash("sha256").update(`${newTxSig}:${supersedes}`).digest("hex").slice(0, 40)}`;
+}
+
+/** Write the `anchor.reanchor` note as the operator surface. The transaction is already on chain: a lost note is reported with its full payload and never resent. `supersedes` is the stale newest note a repair replaces. */
+async function recordReanchor(hour: SavedPlanHour, newTxSig: string, genesis: string, deps: ReanchorDeps, supersedes: string | null): Promise<void> {
 	const draft = buildReanchorEvent({
 		period_start: hour.period_start,
 		root: hour.root,
@@ -624,6 +645,7 @@ async function recordReanchor(hour: SavedPlanHour, newTxSig: string, genesis: st
 		new_tx_sig: newTxSig,
 		genesis,
 	});
+	const idempotencyKey = supersedes === null ? draft.idempotency_key : repairIdempotencyKey(hour.period_start, newTxSig, supersedes);
 	const manual = `payload ${JSON.stringify(draft.payload)} as surface ${String(deps.surface)}, session ${reanchorSessionId(hour.period_start)}`;
 	let stored = false;
 	let why = "the ledger did not store it";
@@ -634,7 +656,7 @@ async function recordReanchor(hour: SavedPlanHour, newTxSig: string, genesis: st
 			summary: draft.summary,
 			session_id: reanchorSessionId(hour.period_start),
 			payload: { ...draft.payload },
-			idempotency_key: draft.idempotency_key,
+			idempotency_key: idempotencyKey,
 		});
 		stored = result.stored === true;
 		if (!stored && result.error !== undefined) why = reasonOf(result.error);
@@ -684,12 +706,15 @@ export async function executeReanchor(plan: SavedPlan, options: ReanchorOptions,
 		try {
 			// Every read-only check of every hour first: nothing below this loop and the discovery that follows can refuse before a send.
 			const recorded = new Map<number, string>();
+			const stale = new Map<number, string>();
 			const unrecorded: SavedPlanHour[] = [];
 			for (const hour of plan.hours) {
 				await checkPreviousAbsent(hour, deps.rpc);
 				const noted = await recordedSignature(hour, deps);
-				if (noted === null) unrecorded.push(hour);
-				else recorded.set(hour.period_start_ms, noted);
+				if (noted.signature === null) {
+					unrecorded.push(hour);
+					if (noted.stale !== null) stale.set(hour.period_start_ms, noted.stale);
+				} else recorded.set(hour.period_start_ms, noted.signature);
 			}
 			const earlier = new Map<number, string>();
 			if (unrecorded.length > 0) {
@@ -723,7 +748,7 @@ export async function executeReanchor(plan: SavedPlan, options: ReanchorOptions,
 					state.sent += 1;
 					out.push(`[reanchor] ${hour.period_start} re-anchored ${signature}`);
 				}
-				await recordReanchor(hour, signature, genesis, deps);
+				await recordReanchor(hour, signature, genesis, deps, stale.get(hour.period_start_ms) ?? null);
 			}
 			out.push(`[reanchor] done: ${state.sent} sent, ${state.adopted} adopted, ${left} left in the plan${left > 0 ? " (run again)" : ""}`);
 			if (genesis !== DEVNET_GENESIS_HASH) {

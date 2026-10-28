@@ -21,6 +21,7 @@ import {
 	parseSavedPlan,
 	ReanchorPlanError,
 	ReanchorRunUsageError,
+	repairIdempotencyKey,
 	SEND_FEE_LAMPORTS,
 	TESTNET_GENESIS_HASH,
 	type LockAttempt,
@@ -825,7 +826,7 @@ describe("the one send", () => {
 	});
 });
 
-function noteRecord(n: number, hourMs: number, signature: string, over: { previous?: string } = {}): ReanchorRecord {
+function noteRecord(n: number, hourMs: number, signature: string, over: { previous?: string; id?: string } = {}): ReanchorRecord {
 	const draft = buildReanchorEvent({
 		period_start: hourIso(hourMs),
 		root: rootFor(n),
@@ -834,7 +835,7 @@ function noteRecord(n: number, hourMs: number, signature: string, over: { previo
 		new_tx_sig: signature,
 		genesis: GENESIS,
 	});
-	return { event_id: `evt_note_${n}`, ts: hourIso(hourMs + 3 * HOUR_MS), surface: SURFACE, payload: draft.payload };
+	return { event_id: over.id ?? `evt_note_${n}`, ts: hourIso(hourMs + 3 * HOUR_MS), surface: SURFACE, payload: draft.payload };
 }
 
 const memoOf = (hourMs: number, n: number): string => formatMemo({ periodStartMs: hourMs, rootHex: rootFor(n), count: countFor(n) });
@@ -852,17 +853,28 @@ describe("recorded notes are read before discovery", () => {
 		w.expectUntouched();
 	});
 
-	test("a note that is not proof is ignored and discovery follows: a signature the cluster does not know, a note bound to another row, a memo that is not the hour's", async () => {
-		const unknown = newSig(7);
-		const other = newSig(8);
-		const wrong = newSig(9);
+	test("only the newest bound note is examined: one that is not proof (a signature the cluster does not know, a memo that is not the hour's, a failed transaction) sends the hour to discovery; a note bound to another row is not a pointer at all", async () => {
+		const pointer = newSig(7);
+		const cases: Array<[string, (w: World) => void]> = [
+			["unknown", () => undefined],
+			["wrong memo", (w) => w.chain.set(pointer, { ...TX_TEMPLATE, memo: memoOf(H1, 2) })],
+			["failed", (w) => w.chain.set(pointer, { ...TX_TEMPLATE, memo: memoOf(H1, 1), err: { InstructionError: [0, "Custom"] } })],
+		];
+		for (const [label, setup] of cases) {
+			const w = new World(ONE);
+			setup(w);
+			w.noteRecords.set(H1, [noteRecord(1, H1, pointer, { id: "evt_note_stale" })]);
+			const result = await w.run(ONE);
+			expect([label, result.code, result.sent, result.adopted]).toEqual([label, 0, 1, 0]);
+			expect(w.listBefore).toEqual([undefined]);
+			expect(w.sendCalls).toHaveLength(1);
+		}
 		const w = new World(ONE);
-		w.chain.set(wrong, { ...TX_TEMPLATE, memo: memoOf(H1, 2) });
-		w.noteRecords.set(H1, [noteRecord(1, H1, unknown), noteRecord(1, H1, other, { previous: oldSig(5) }), noteRecord(1, H1, wrong)]);
+		w.noteRecords.set(H1, [noteRecord(1, H1, newSig(8), { previous: oldSig(5) })]);
 		const result = await w.run(ONE);
 		expect(result).toMatchObject({ code: 0, sent: 1, adopted: 0 });
-		expect(w.listBefore).toEqual([undefined]);
-		expect(w.sendCalls).toHaveLength(1);
+		// Not bound, so not a stale pointer either: the note keeps the plain key.
+		expect(w.emitted[0]?.idempotency_key).toBe(`reanchor:${hourIso(H1)}:${newSig(1)}`);
 	});
 
 	test("the notes of every hour are read before the first send", async () => {
@@ -870,6 +882,98 @@ describe("recorded notes are read before discovery", () => {
 		const result = await w.run(TWO, { maxHours: 2 });
 		expect(result).toMatchObject({ code: 0, sent: 2 });
 		expect(w.notesCalls).toEqual([hourIso(H1), hourIso(H2)]);
+	});
+});
+
+describe("the newest bound note is the only pointer that counts", () => {
+	const stale = "evt_note_stale";
+
+	test("an older valid note does not short-circuit a newer note naming a missing transaction: discovery adopts, no send, and a NEW note is written under its own key", async () => {
+		const w = new World(ONE);
+		const older = newSig(7);
+		const missing = newSig(8);
+		w.chain.set(older, { ...TX_TEMPLATE, memo: memoOf(H1, 1) });
+		w.listing = [{ signature: older, memo: memoOf(H1, 1), err: null, slot: 5 }];
+		w.noteRecords.set(H1, [noteRecord(1, H1, missing, { id: stale }), noteRecord(1, H1, older, { id: "evt_note_old" })]);
+
+		const result = await w.run(ONE);
+
+		expect(result).toMatchObject({ code: 0, sent: 0, adopted: 1 });
+		expect(result.stdout).toContain(`${hourIso(H1)} adopted ${older}`);
+		expect(result.stdout).not.toContain("already recorded");
+		expect(w.listBefore).toEqual([undefined]);
+		expect(w.sendCalls).toEqual([]);
+		expect(w.emitted).toHaveLength(1);
+		expect(w.emitted[0]?.payload).toMatchObject({ action: "anchor.reanchor", new_tx_sig: older, previous_tx_sig: oldSig(1) });
+
+		// The older note names the same signature under the plain key, so the repair must carry a different one.
+		const plain = `reanchor:${hourIso(H1)}:${older}`;
+		const key = w.emitted[0]?.idempotency_key as string;
+		expect(key).not.toBe(plain);
+		expect(key).toMatch(/^[A-Za-z0-9._:-]{8,128}$/);
+		expect(key).toBe(repairIdempotencyKey(hourIso(H1), older, stale));
+
+		// The new note is now the newest bound note and verifies: a re-run is done by it and writes nothing.
+		const again = await w.run(ONE);
+		expect(again).toMatchObject({ code: 0, sent: 0, adopted: 1 });
+		expect(again.stdout).toContain("already recorded");
+		expect(w.emitted).toHaveLength(1);
+		expect(w.sendCalls).toEqual([]);
+	});
+
+	test("a repair key depends on the note it replaces, so two different stale notes never collide, and the plain key is unchanged without one", () => {
+		const plain = buildReanchorEvent({ period_start: hourIso(H1), root: rootFor(1), event_count: countFor(1), previous_tx_sig: oldSig(1), new_tx_sig: newSig(7), genesis: GENESIS }).idempotency_key;
+		const a = repairIdempotencyKey(hourIso(H1), newSig(7), "evt_a");
+		const b = repairIdempotencyKey(hourIso(H1), newSig(7), "evt_b");
+		expect(plain).toBe(`reanchor:${hourIso(H1)}:${newSig(7)}`);
+		expect(new Set([plain, a, b]).size).toBe(3);
+		expect(repairIdempotencyKey(hourIso(H1), newSig(7), "evt_a")).toBe(a);
+		for (const key of [plain, a, b]) expect(key).toMatch(/^[A-Za-z0-9._:-]{8,128}$/);
+	});
+
+	test("a newest note that verifies finishes the hour even when an older bound note names a missing transaction: nothing is listed, sent or written", async () => {
+		const w = new World(ONE);
+		const newest = newSig(7);
+		w.chain.set(newest, { ...TX_TEMPLATE, memo: memoOf(H1, 1) });
+		w.noteRecords.set(H1, [noteRecord(1, H1, newest, { id: "evt_note_new" }), noteRecord(1, H1, newSig(8), { id: "evt_note_old" })]);
+		const result = await w.run(ONE);
+		expect(result).toMatchObject({ code: 0, sent: 0, adopted: 1 });
+		expect(result.stdout).toContain(`${hourIso(H1)} adopted ${newest} (already recorded)`);
+		expect(w.rpcCalls.some((call) => call.startsWith("list:"))).toBe(false);
+		w.expectUntouched();
+	});
+
+	test("a newest note that does not verify and a discovery that finds nothing: exactly one send and one new note naming it", async () => {
+		const w = new World(ONE);
+		w.noteRecords.set(H1, [noteRecord(1, H1, newSig(7), { id: stale })]);
+		const result = await w.run(ONE);
+		expect(result).toMatchObject({ code: 0, sent: 1, adopted: 0 });
+		expect(w.sendCalls).toHaveLength(1);
+		expect(w.emitted).toHaveLength(1);
+		expect(w.emitted[0]?.payload).toMatchObject({ new_tx_sig: newSig(1), previous_tx_sig: oldSig(1) });
+		expect(w.emitted[0]?.idempotency_key).toMatch(/^reanchor:.+:r:[0-9a-f]{40}$/);
+
+		// The note it wrote is the newest bound one and its transaction is on the fake chain: a re-run sends nothing more.
+		const again = await w.run(ONE);
+		expect(again).toMatchObject({ code: 0, sent: 0, adopted: 1 });
+		expect(w.sendCalls).toHaveLength(1);
+		expect(w.emitted).toHaveLength(1);
+	});
+
+	test("a newest note whose transaction cannot be read refuses as rpc-unreadable, and an older valid note does not rescue it", async () => {
+		const w = new World(ONE);
+		const older = newSig(7);
+		w.chain.set(older, { ...TX_TEMPLATE, memo: memoOf(H1, 1) });
+		w.noteRecords.set(H1, [noteRecord(1, H1, newSig(8), { id: stale }), noteRecord(1, H1, older, { id: "evt_note_old" })]);
+		const read = w.rpc.transactionMemo.bind(w.rpc);
+		w.rpc.transactionMemo = async (signature, commitment) => {
+			if (signature === newSig(8)) throw new Error("fetch failed: https://rpc.example.invalid/v1/key-4411");
+			return read(signature, commitment);
+		};
+		const result = await w.run(ONE);
+		expect(result).toMatchObject({ code: 1, refused: "rpc-unreadable", sent: 0 });
+		expect(w.sendCalls).toEqual([]);
+		expect(w.emitted).toEqual([]);
 	});
 });
 
