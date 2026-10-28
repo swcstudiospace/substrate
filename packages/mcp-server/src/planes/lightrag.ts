@@ -110,8 +110,9 @@ export type LightragChunk = RagflowChunk;
 export interface LightragRetrievalRequest {
 	question: string;
 	/**
-	 * Query mode. Defaults to `hybrid` (graph). `mix` is the deeper graph
-	 * blend for planning passes that need multi-hop relations.
+	 * Query mode. Defaults to `config.queryMode` (`SUBSTRATE_LIGHTRAG_QUERY_MODE`),
+	 * else `hybrid` (graph). `mix` is the deeper graph blend for planning
+	 * passes that need multi-hop relations.
 	 */
 	mode?: LightragQueryMode;
 	/** Most chunks to ask for. Clamped to <= 10 on the wire (D25-03). */
@@ -135,13 +136,16 @@ const QUERY_MODE_PREFIXES: Readonly<Record<string, LightragQueryMode>> = {
 };
 
 /**
- * Resolve the query mode: an explicit `mode` wins, else a leading
- * `/mix` or `/hybrid` question prefix selects the graph mode and is
- * stripped from the query, else the graph default (`hybrid`).
+ * Resolve the query mode. Precedence, highest first: an explicit `mode`
+ * the caller passed; a leading `/mix` or `/hybrid` question prefix (the
+ * graph modes, stripped from the query, and honoured even when the
+ * default is `naive`); `fallback` (the deployment's configured default,
+ * `SUBSTRATE_LIGHTRAG_QUERY_MODE`); else the graph default (`hybrid`).
  */
 export function resolveQueryMode(
 	question: string,
 	requested?: LightragQueryMode,
+	fallback: LightragQueryMode = DEFAULT_QUERY_MODE,
 ): { mode: LightragQueryMode; query: string } {
 	if (requested !== undefined) return { mode: requested, query: question };
 	const head = question.trimStart().slice(0, 8).toLowerCase();
@@ -150,7 +154,7 @@ export function resolveQueryMode(
 			return { mode, query: question.replace(new RegExp(`^\\s*${prefix}\\s*`, "i"), "") };
 		}
 	}
-	return { mode: DEFAULT_QUERY_MODE, query: question };
+	return { mode: fallback, query: question };
 }
 
 /** The fetch surface the plane client needs: injectable for rehearsal fakes. */
@@ -329,10 +333,11 @@ function contextEntries(data: unknown, body: unknown): unknown[] {
 
 /**
  * Retrieve chunks for a question (`POST /query`, `{ query, mode, top_k,
- * only_need_context: true }`). Graph modes (`hybrid`, the default, and
- * `mix`) fuse local entity detail with global relation context — the
- * planning pass asks for `mix` explicitly or prefixes the question with
- * `/mix`.
+ * only_need_context: true }`). Graph modes (`hybrid`, the default unless
+ * `config.queryMode` names another, and `mix`) fuse local entity detail with
+ * global relation context — the planning pass asks for `mix` explicitly or
+ * prefixes the question with `/mix`. A `naive` default (a LightRAG with no
+ * real LLM, so no knowledge graph) retrieves vector chunks only.
  *
  * Transport, auth (401/403) and shape failures come back as
  * `{ ok: false, reason }` — never a throw inside an agent's turn. An
@@ -432,7 +437,7 @@ export async function queryWithGraph(
 	opts: { mode?: LightragQueryMode; topK?: number; timeoutMs?: number } = {},
 ): Promise<LightragQueryOutcome> {
 	if (question.trim().length === 0) return { ok: false, reason: "lightrag: empty query" };
-	const resolved = resolveQueryMode(question, opts.mode);
+	const resolved = resolveQueryMode(question, opts.mode, config.queryMode);
 	if (resolved.query.trim().length === 0) return { ok: false, reason: "lightrag: empty query" };
 	const topK = Math.max(1, Math.min(opts.topK ?? MAX_LIGHTRAG_TOP_K, MAX_LIGHTRAG_TOP_K));
 	const answered = await call(config, fetchImpl, "/query", {

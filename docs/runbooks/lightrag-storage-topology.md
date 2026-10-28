@@ -188,6 +188,10 @@ v1.5.7 is UNVERIFIED; read it from the registry before pinning.
   (`docs/railway-tailscale.md`, `docs/data-planes.md`). Bind and expose per
   upstream's rule: do not expose `0.0.0.0` without `LIGHTRAG_API_KEY` or
   `AUTH_ACCOUNTS` (`env.example` 11).
+- A LightRAG started with the bypass LLM (`infra/railway/lightrag-llm-bypass.ts`)
+  must set `SUBSTRATE_LIGHTRAG_QUERY_MODE=naive` on the substrate, because the
+  graph modes (`hybrid`, `mix`, `local`, `global`) need a real LLM to build
+  the knowledge graph they read.
 
 ## Volume, backup and restore
 
@@ -387,6 +391,61 @@ in place (do not do that), the rollback is a restore from the last `pg_dump -Fc`
   derivation, or the chunking in a way that requires a re-index is UNVERIFIED
   for versions other than those named. Treat every minor-version bump as a
   re-index until a release note says otherwise.
+
+## The LLM proxies (why LightRAG runs on a bypass LLM today)
+
+LightRAG needs a real LLM for the graph modes. Today it runs with the bypass
+LLM (`infra/railway/lightrag-llm-bypass.ts`) because no LLM the host holds a
+login for is reachable from Railway. What the VPS has, read on the host
+(not re-verified by this runbook's author), all on loopback:
+
+1. `shunt`, `127.0.0.1:3001`, Anthropic-compatible `POST /v1/messages`.
+   Claude routes pass the caller's credential on to Anthropic, so a dummy key
+   answers 401 `invalid x-api-key`: reachable, not authenticated. Grok routes
+   use a stored xAI OAuth session; when that session is dead the answer is a
+   401 naming `invalid_grant` and `shunt login xai`.
+2. `aio-grok-proxy`, `127.0.0.1:41417`, Anthropic-compatible
+   `POST /v1/messages`. It ignores the client key and uses the host's
+   SuperGrok session: model `grok-4.6` with a dummy `x-api-key` returned 200
+   with a text answer. This is the one path that works today. A non-Grok model
+   name is forwarded to Anthropic and answers 401.
+3. `hermes proxy`, planned on `127.0.0.1:8645`, xAI OpenAI-compatible
+   `POST /v1/chat/completions`. It is not running (it needs
+   `hermes auth add xai-oauth --type oauth`), so a connection is refused.
+
+Check them any time, from the repo root on the VPS. It sends one 8-token
+request per proxy with a dummy key and prints one state per provider
+(`ok`, `unauthenticated`, `unreachable`, `invalid`), never a key or a body:
+
+```sh
+bun scripts/llm-proxy-smoke.ts [--json] [--only <name>]...
+```
+
+Exit 0 when at least one provider is `ok`, 1 when none is, 2 on a usage
+error. The probes are `shunt` (a Claude route), `shunt-grok` (a Grok route on
+the same port), `aio-grok-proxy` and `hermes`. `LLM_PROXY_SHUNT_URL`,
+`LLM_PROXY_AIO_GROK_URL` and `LLM_PROXY_HERMES_URL` override a base URL;
+an `http:` URL to a non-loopback host is refused before any request, so the
+dummy key never goes to a remote cleartext host. `LLM_PROXY_DUMMY_KEY` and
+`LLM_PROXY_TIMEOUT_MS` (default 20000) are the other settings; all five are in
+`docs/config-reference.md`.
+
+**Why Railway cannot use them.** All three listen on the VPS's loopback. The
+Tailscale forwarder carries traffic one way, from the VPS to Railway services
+(`docs/railway-tailscale.md`), not from Railway to the VPS. Exposing a proxy
+publicly to close that gap would be a security hole, not a workaround:
+`aio-grok-proxy` ignores the client key, so anyone who can reach it spends the
+operator's SuperGrok subscription login.
+
+**What a real LLM for LightRAG takes (two steps, both operator work).**
+
+1. A live login on the host: `shunt login xai` and/or
+   `hermes auth add xai-oauth --type oauth`. Re-run the smoke until a provider
+   reports `ok`. `aio-grok-proxy` already does.
+2. A deliberate network path from the Railway LightRAG service to that proxy.
+   This needs a design decision (for example an authenticated, private path
+   that does not publish the login) and is not made here. Until then LightRAG
+   keeps the bypass LLM and the substrate keeps `SUBSTRATE_LIGHTRAG_QUERY_MODE=naive`.
 
 ## Related
 

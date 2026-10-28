@@ -158,7 +158,7 @@ The query mode is resolved by `resolveQueryMode` (`lightrag.ts:118-130`):
 
 1. An explicit `mode` argument wins. Only in-substrate callers pass one (`queryWithGraph`, `lightrag.ts:373`); `docs_search` has no `mode` field.
 2. Else a leading `/mix` or `/hybrid` in the question selects that mode and is stripped from the query.
-3. Else the default, `hybrid` (`DEFAULT_QUERY_MODE`, `lightrag.ts:40`).
+3. Else the deployment default: `SUBSTRATE_LIGHTRAG_QUERY_MODE` (`naive`, `local`, `global`, `hybrid` or `mix`, case-insensitive; `LightragConfig.queryMode`), and `hybrid` (`DEFAULT_QUERY_MODE`, `lightrag.ts:40`) when it is unset or not a mode. A LightRAG with no real LLM builds no knowledge graph and must use `naive`, which retrieves vector chunks only.
 
 The modes are `naive`, `local`, `global`, `hybrid` and `mix` (`lightrag.ts:37`). `hybrid` and `mix` fuse the knowledge graph (`isGraphMode`, `lightrag.ts:50`). `dataset_ids` is accepted and ignored: LightRAG serves one knowledge base per server (`lightrag.ts:95-99`).
 

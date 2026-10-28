@@ -385,6 +385,48 @@ describe("railwayHostingFromEnv: the LightRAG key without a public URL", () => {
 	});
 });
 
+describe("SUBSTRATE_LIGHTRAG_QUERY_MODE", () => {
+	const REACH = { LIGHTRAG_URL: "http://lightrag.test/" };
+
+	test("unset leaves the reach exactly as before: no queryMode key, no warning", () => {
+		expect(loadConfig(REACH).lightrag).toStrictEqual({ url: "http://lightrag.test" });
+		expect(loadConfig({ ...REACH, LIGHTRAG_API_KEY: "k" }).lightrag).toStrictEqual({ url: "http://lightrag.test", apiKey: "k" });
+		expect(configWarnings(loadConfig(REACH))).toEqual([]);
+	});
+
+	test("each valid mode is parsed, case- and space-insensitively", () => {
+		for (const mode of ["naive", "local", "global", "hybrid", "mix"] as const) {
+			expect(loadConfig({ ...REACH, SUBSTRATE_LIGHTRAG_QUERY_MODE: mode }).lightrag?.queryMode).toBe(mode);
+		}
+		const config = loadConfig({ ...REACH, SUBSTRATE_LIGHTRAG_QUERY_MODE: "  NaIvE " });
+		expect(config.lightrag?.queryMode).toBe("naive");
+		expect(config.lightragQueryModeRejected).toBe(false);
+		expect(configWarnings(config)).toEqual([]);
+	});
+
+	test("an invalid value falls back to the default and is named by key, never by value", () => {
+		const config = loadConfig({ ...REACH, SUBSTRATE_LIGHTRAG_QUERY_MODE: "bypass-secret-value" });
+		expect(config.lightrag).toStrictEqual({ url: "http://lightrag.test" });
+		expect(config.lightragQueryModeRejected).toBe(true);
+		const warnings = configWarnings(config);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("SUBSTRATE_LIGHTRAG_QUERY_MODE");
+		expect(warnings.join("\n")).not.toContain("bypass-secret-value");
+	});
+
+	test("an empty or blank value is unset: default, no warning", () => {
+		for (const raw of ["", "   "]) {
+			const config = loadConfig({ ...REACH, SUBSTRATE_LIGHTRAG_QUERY_MODE: raw });
+			expect(config.lightrag).toStrictEqual({ url: "http://lightrag.test" });
+			expect(configWarnings(config)).toEqual([]);
+		}
+	});
+
+	test("an invalid value warns even with no LightRAG reach configured", () => {
+		expect(configWarnings(loadConfig({ SUBSTRATE_LIGHTRAG_QUERY_MODE: "nope" }))).toEqual([expect.stringContaining("SUBSTRATE_LIGHTRAG_QUERY_MODE")]);
+	});
+});
+
 describe("data-plane endpoint policy (phase 48)", () => {
 	const GREPTIME_HOST = "greptime.test.invalid";
 	const GREPTIME_URL_KEY = ["GREPTIME", "URL"].join("_");
