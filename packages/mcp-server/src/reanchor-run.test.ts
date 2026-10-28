@@ -83,6 +83,8 @@ function spies(): { cli: ReanchorCliDeps; opened: ReanchorOptions[]; runnerCalls
 		surface: "omp",
 		operatorSurfaces: new Set(["omp"]),
 		clock: () => NOW,
+		notes: async () => ({ records: [], incomplete: null }),
+		lock: { acquire: () => ({ release: () => undefined }) },
 	};
 	return {
 		cli: {
