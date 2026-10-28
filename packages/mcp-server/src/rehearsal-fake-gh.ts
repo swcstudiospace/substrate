@@ -163,13 +163,19 @@ let takeoverSeq = 0;
  */
 export const OWNERLESS_LOCK_GRACE_MS = 2_000;
 
-/** The one step of acquisition a test needs to interleave with a concurrent recoverer. */
+/** The steps of acquisition a test needs to interleave with a concurrent recoverer. */
 export interface StateLockIo {
-	/** Write the owner's pid file into the freshly made lock directory. */
+	/**
+	 * Create the owner's pid file in the freshly made lock directory. It MUST be an
+	 * exclusive create: EEXIST (a successor's directory that already has its owner) and
+	 * ENOENT (the directory vanished) both mean this acquisition lost the race.
+	 */
 	writePid(pidPath: string, pid: string): void;
+	/** The bounded pause between acquisition attempts. Defaults to a 5 ms sleep. */
+	wait?(): void;
 }
 
-const realLockIo: StateLockIo = { writePid: (pidPath, pid) => writeFileSync(pidPath, pid) };
+const realLockIo: StateLockIo = { writePid: (pidPath, pid) => writeFileSync(pidPath, pid, { flag: "wx" }) };
 
 /**
  * Whether the lock instance at `lock` is free to take: a dead owner's, or an
@@ -245,11 +251,13 @@ export function acquireStateLock(statePath: string, io: StateLockIo = realLockIo
 			try {
 				io.writePid(join(lock, "pid"), String(process.pid));
 			} catch (writeCause) {
-				if ((writeCause as NodeJS.ErrnoException).code === "ENOENT") {
-					// The directory we just made was reclaimed as ownerless before the
-					// pid landed. There is nothing of ours left to drop (and an empty
-					// directory at the path now belongs to someone else): lost the race,
-					// so go back to `mkdir`.
+				const code = (writeCause as NodeJS.ErrnoException).code;
+				if (code === "ENOENT" || code === "EEXIST") {
+					// ENOENT: the directory we just made was reclaimed as ownerless before
+					// the pid landed. EEXIST: it was reclaimed AND a successor made its own
+					// directory at this path and already wrote its pid. Either way there is
+					// nothing of ours left to drop (whatever sits at the path now belongs to
+					// someone else) and we do not own the lock: go back to `mkdir`.
 					lostRace = true;
 				} else {
 					// Our mkdir won but the pid never landed: drop exactly that half-made
@@ -280,6 +288,7 @@ export function acquireStateLock(statePath: string, io: StateLockIo = realLockIo
 		}
 		if (lostRace) {
 			if (Date.now() - started > 5_000) throw new Error("fake gh state lock busy");
+			pauseBetweenAttempts(io);
 			continue;
 		}
 		// The path is held by someone: reclaim it only when it is identifiably stale,
@@ -290,8 +299,13 @@ export function acquireStateLock(statePath: string, io: StateLockIo = realLockIo
 			// A lock that cannot even be stat'ed is gone already; retry the acquire.
 		}
 		if (Date.now() - started > 5_000) throw new Error("fake gh state lock busy");
-		Atomics.wait(pause, 0, 0, 5);
+		pauseBetweenAttempts(io);
 	}
+}
+
+function pauseBetweenAttempts(io: StateLockIo): void {
+	if (io.wait) io.wait();
+	else Atomics.wait(pause, 0, 0, 5);
 }
 
 /** What the installed script runs: answer on stdout and stderr, return the exit code. */

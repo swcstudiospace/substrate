@@ -160,6 +160,64 @@ describe("fakeGh", () => {
 		expect(existsSync(lock)).toBe(false);
 	});
 
+	test("a lock directory replaced by a successor's own before our pid write is a lost race: one holder at a time", () => {
+		const run = tempRun();
+		const statePath = join(run, "gh-state.json");
+		const lock = `${statePath}.lock`;
+		const events: string[] = [];
+		let writes = 0;
+		let waits = 0;
+		const release = acquireStateLock(statePath, {
+			writePid: (pidPath, pid) => {
+				writes++;
+				if (writes === 1) {
+					// A has made its directory. B reclaims it as ownerless, makes its OWN
+					// directory at the same path and writes its pid there.
+					rmSync(lock, { recursive: true, force: true });
+					mkdirSync(lock);
+					writeFileSync(join(lock, "pid"), String(process.pid), { flag: "wx" });
+					events.push("B acquired");
+				} else {
+					events.push("A acquired");
+				}
+				// A's exclusive pid create: inside B's directory it must fail with EEXIST.
+				writeFileSync(pidPath, pid, { flag: "wx" });
+			},
+			wait: () => {
+				waits++;
+				// B finishes its critical section while A waits to retry.
+				if (waits === 1) {
+					events.push("B released");
+					rmSync(lock, { recursive: true, force: true });
+				}
+			},
+		});
+		expect(events).toEqual(["B acquired", "B released", "A acquired"]);
+		expect(writes).toBe(2);
+		expect(waits).toBeGreaterThanOrEqual(1);
+		expect(readFileSync(join(lock, "pid"), "utf8")).toBe(String(process.pid));
+		release();
+		expect(existsSync(lock)).toBe(false);
+	});
+
+	test("a stale holder's release never removes a successor's lock", () => {
+		const run = tempRun();
+		const statePath = join(run, "gh-state.json");
+		const lock = `${statePath}.lock`;
+		const releaseStale = acquireStateLock(statePath);
+		// The lock was reclaimed and a successor (another pid) now owns a fresh instance.
+		rmSync(lock, { recursive: true, force: true });
+		mkdirSync(lock);
+		writeFileSync(join(lock, "pid"), String(process.pid + 1), { flag: "wx" });
+		releaseStale();
+		expect(readFileSync(join(lock, "pid"), "utf8")).toBe(String(process.pid + 1));
+		// A successor still mid-acquisition (no pid yet) is equally untouched.
+		rmSync(lock, { recursive: true, force: true });
+		mkdirSync(lock);
+		releaseStale();
+		expect(existsSync(lock)).toBe(true);
+	});
+
 	test("a pid write failing for any reason but a reclaimed directory still propagates and leaves no lock", () => {
 		const run = tempRun();
 		const statePath = join(run, "gh-state.json");
