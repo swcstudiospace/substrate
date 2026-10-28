@@ -733,6 +733,7 @@ export class IndexStore implements MemoryStore {
 	async migrate(): Promise<void> {
 		const reserved = await this.sql.reserve();
 		let migrateFailed = false;
+		let unlockFailure: { cause: unknown } | undefined;
 		try {
 			// SET does not accept bind parameters. The timeouts are numeric constants.
 			await reserved.unsafe(`SET lock_timeout = ${INDEX_MIGRATE_LOCK_TIMEOUT_MS}`);
@@ -783,9 +784,11 @@ export class IndexStore implements MemoryStore {
 				} catch {
 					// Already dead. The session lock dies with the connection.
 				}
-				if (!migrateFailed) throw cause;
+				unlockFailure = { cause };
 			}
 		}
+		// Reached only when the migration itself succeeded: a failed migration's error is already propagating.
+		if (unlockFailure !== undefined) throw unlockFailure.cause;
 		// After the reserved connection is back in the pool. `tuneGraphNodes` uses
 		// `this.sql`, so running it while `reserve()` holds the only connection
 		// (`SUBSTRATE_PG_POOL_MAX=1`) waits on itself and boot never finishes.

@@ -244,7 +244,7 @@ describeLive("index sweep against a live index", () => {
 			// either way it resolves against this transaction's committed outcome).
 			lateClaim = claimLive("g-terminal-race-free");
 			const row: Record<string, unknown> = {};
-			for (const statement of batch.then!(picked, locked)) {
+			for (const statement of batch.decide!(picked, locked)) {
 				Object.assign(row, ((await tx.unsafe(statement.text, statement.params as unknown[])) as Array<Record<string, unknown>>)[0]);
 			}
 			return row;

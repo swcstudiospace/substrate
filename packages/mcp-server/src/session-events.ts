@@ -157,6 +157,7 @@ const HEX_64 = /^[0-9a-f]{64}$/;
 const GIT_HEX = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 /** Opaque ids: no slash, backslash, space or `~`, so a path can never pass as one. */
 const OPAQUE_ID = /^[A-Za-z0-9._:-]+$/;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: detects C0/DEL control characters in untrusted ids
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 const SURFACE_SET: ReadonlySet<string> = new Set(SURFACES);
 
@@ -201,7 +202,9 @@ function asRecord(value: unknown, path: string): Rec {
 /** Reject any key that looks like content, at any depth. Input is already size-capped, so the walk is bounded. */
 function assertNoContentKeys(value: unknown, path: string): void {
 	if (Array.isArray(value)) {
-		value.forEach((inner, i) => assertNoContentKeys(inner, `${path}[${i}]`));
+		value.forEach((inner, i) => {
+			assertNoContentKeys(inner, `${path}[${i}]`);
+		});
 		return;
 	}
 	if (!isPlainObject(value)) return;

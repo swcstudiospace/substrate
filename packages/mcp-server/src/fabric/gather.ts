@@ -7,14 +7,7 @@
  * in the fixed `source` phrase. The synchronous counters and breaker states need no wait. The call always returns
  * the facts, and nothing throws to the caller.
  */
-import {
-	type BreakerReading,
-	type FabricCostView,
-	type FabricFacts,
-	type FabricSources,
-	type ServiceName,
-	type ServiceReading,
-} from "./types.ts";
+import type { BreakerReading, FabricCostView, FabricFacts, FabricSources, ServiceName, ServiceReading } from "./types.ts";
 
 /** The per-plane deadline for each read the fabric makes, in ms. */
 export const FABRIC_SOURCE_DEADLINE_MS = 1500;

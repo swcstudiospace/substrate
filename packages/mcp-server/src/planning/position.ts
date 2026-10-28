@@ -659,6 +659,7 @@ function counterProgress(value: unknown): { done: number; total: number } | null
 function clean(value: string): string {
 	const flat = value
 		.slice(0, LINE_PREFIX_MAX)
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: strips C0/DEL control characters and line separators from untrusted text
 		.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();

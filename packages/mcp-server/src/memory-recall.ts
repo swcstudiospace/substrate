@@ -16,7 +16,6 @@
  * `planes/hindsight`; the service hands them the fan-out as an injected function.
  */
 import {
-	MAX_RECALL_PER_BANK,
 	recallBank,
 	type FetchLike,
 	type HindsightConfig,

@@ -467,7 +467,7 @@ export class Mirror {
 
 class ClaimCommentFailed extends Error {
 	readonly state: string;
-	readonly cause: unknown;
+	override readonly cause: unknown;
 	constructor(state: string, cause: unknown) {
 		super(`claim comment failed after the state move to ${state}`);
 		this.state = state;

@@ -387,7 +387,7 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 	const coverageHour = hourStart(coverageMs);
 	const windowStart = Math.max(coverageHour, now - ANCHOR_LOOKBACK_MS);
 
-	let anchored: Record<string, true> = {};
+	const anchored: Record<string, true> = {};
 	try {
 		const rows = await greptime.anchorsBetween(windowStart, now);
 		for (const row of rows) anchored[row.period_start] = true;

@@ -1400,8 +1400,7 @@ export async function scrapePlanningPages(
 	let pages: IngestPage[];
 	try {
 		pages = await scanIngestPages(baseDir, roots, io);
-	} catch (cause) {
-		const reason = cause instanceof Error ? cause.message : String(cause);
+	} catch {
 		report("ERROR");
 		return { state: "ERROR", pages: [], sanitized: new Map(), errors: [], hash: previousHash ?? "", changed: false };
 	}

@@ -101,7 +101,6 @@ export const DEFAULT_LEDGER_GRACE_MS = 60_000;
 /** Entries read per examined entry before the scan stops: a bank filter must not make one run walk the whole table. */
 const READ_FACTOR = 10;
 const MAX_REASON_CHARS = 200;
-const MAX_TOKEN_CHARS = 200;
 
 // ---------------------------------------------------------------------------
 // Readers

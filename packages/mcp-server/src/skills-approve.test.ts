@@ -321,7 +321,14 @@ describe("skills_approve: values and configuration are refused before gh is aske
 	});
 
 	test("a skills library that is not fixed stops before gh", async () => {
-		const w = world({}, { config: (config) => void (config.skills.problem = "SUBSTRATE_SKILLS_GH must be an absolute path") });
+		const w = world(
+			{},
+			{
+				config: (config) => {
+					config.skills.problem = "SUBSTRATE_SKILLS_GH must be an absolute path";
+				},
+			},
+		);
 		const failure = await error(w.substrate.approveSkill(approve, asOperator));
 		expect(failure).toBeInstanceOf(SkillApprovalFailed);
 		expect((failure as SkillApprovalFailed).status).toBe(502);
