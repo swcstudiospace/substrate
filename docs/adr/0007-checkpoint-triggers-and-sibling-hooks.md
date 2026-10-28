@@ -19,7 +19,7 @@ A rollback can only return to a checkpoint that exists. The CLI can take a check
 | `baseline` | the first checkpoint of a session that predates the feature, so it cannot be rolled back before it (D55-3) | **value accepted, nothing creates it automatically** | an operator or hook may pass `--trigger baseline` |
 | `turn` | a turn ended | **no** | value accepted; no hook calls it |
 | `plan-step` | a plan step or lane boundary completed | **no** | value accepted; `--plan-phase` and `--plan-step` carry the reference (each at most 64 characters); no hook calls it |
-| `steering` | a steering directive was applied | **no, and depends on phase 58** | durable steering lives on the branch stacked on the held draft pull requests; the state-machine join with `docs_steering_session` is a small follow-up when that stack merges |
+| `steering` | a steering directive was applied | **no, and depends on phase 58** | durable steering is merged (phase 58, PR #137); the state-machine join with `docs_steering_session` is not written yet (gap closure in progress) |
 
 ## The hook contract every proposal shares
 
@@ -48,7 +48,7 @@ Each: the event, the command, the failure behaviour, the owner, the risk.
 - **Command.** `substrate session checkpoint --trigger plan-step --plan-phase <phase> --plan-step <plan>-<task>` from the agent running the workflow, `|| true`.
 - **Failure.** Never stops the workflow; a missing CLI or server is ignored.
 - **Owner.** GSD-Core. Only an installed copy (version 1.18.0 under the user's agents directory) was found; its upstream repository was not located (UNVERIFIED).
-- **Risk.** Workflows are markdown followed by a model, so a step is not guaranteed to run; a host hook is more reliable than a prompt line. **Name collision:** GSD-Core already says "checkpoint" for checkpoint plans and `[checkpoint]` heartbeats, and the unmerged phase 53 draft uses "plan-step checkpoint" for a resume record keyed by file hash. Neither is a session checkpoint.
+- **Risk.** Workflows are markdown followed by a model, so a step is not guaranteed to run; a host hook is more reliable than a prompt line. **Name collision:** GSD-Core already says "checkpoint" for checkpoint plans and `[checkpoint]` heartbeats, and phase 53 (merged, PR #136) uses "plan-step checkpoint" for a resume record keyed by file hash. Neither is a session checkpoint.
 
 ### Ultrathink (plan node boundaries)
 
