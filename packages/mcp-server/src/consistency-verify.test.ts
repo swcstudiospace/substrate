@@ -435,7 +435,7 @@ describe("ledger comparison", () => {
 		const report = await run(w);
 		expect(codes(report)).toEqual(["index_entry_without_ledger_write"]);
 		expect(report.findings[0]).toMatchObject({ id: "mem_a", entry_id: "mem_a", stores: ["index", "ledger"] });
-		expect(report.findings[0]?.detail).toContain("carries no entry id");
+		expect(report.findings[0]?.detail).toContain("without an entry id");
 	});
 
 	test("an event with no entry is ledger_write_without_entry and names the event", async () => {
@@ -445,6 +445,73 @@ describe("ledger comparison", () => {
 		expect(codes(report)).toEqual(["ledger_write_without_entry"]);
 		expect(report.findings[0]).toMatchObject({ id: "ev-orphan", event_id: "ev-orphan", stores: ["ledger", "index"] });
 		expect(report.findings[0]?.detail).toContain("idempotent replay");
+	});
+
+	describe("pairing by the entry id the event names", () => {
+		const named = (e: MemoryEntry, namesEntry: string, offsetSeconds = 2): LedgerWriteEvent => ({ ...ledgerEvent(e, offsetSeconds), id: `ev-names-${namesEntry}`, entry_id: namesEntry });
+
+		test("an exact entry id wins over a heuristic candidate that fits better by time", async () => {
+			const a = entry("mem_a", { created: minutesAgo(30) });
+			const b = entry("mem_b", { created: minutesAgo(45) });
+			const w = world([a, b], { events: "none" });
+			// By writer, scope, kind and time this event belongs to mem_a; it names mem_b.
+			w.events.push(named(a, "mem_b"));
+			const report = await run(w);
+			expect(codes(report)).toEqual(["index_entry_without_ledger_write"]);
+			expect(report.findings[0]).toMatchObject({ id: "mem_a", entry_id: "mem_a" });
+			expect(report.counts.ledger_pairs).toBe(1);
+			expect(report.counts.ledger_events_judged).toBe(1);
+		});
+
+		test("an exact entry id pairs even when the event is far outside the heuristic lag", async () => {
+			const a = entry("mem_a");
+			const w = world([a], { events: "none" });
+			w.events.push(named(a, "mem_a", 600));
+			const report = await run(w);
+			expect(report.findings).toEqual([]);
+			expect(report.counts.ledger_pairs).toBe(1);
+		});
+
+		test("a replayed write naming the same entry is a second event for it, not a finding", async () => {
+			const a = entry("mem_a");
+			const w = world([a], { events: "none" });
+			w.events.push(named(a, "mem_a"), { ...named(a, "mem_a", 5), id: "ev-replay" });
+			const report = await run(w);
+			expect(report.findings).toEqual([]);
+			expect(report.counts.ledger_pairs).toBe(1);
+			expect(report.counts.ledger_events_judged).toBe(2);
+		});
+
+		test("a legacy event without entry_id still pairs by the heuristic beside an event that names its entry", async () => {
+			const a = entry("mem_a", { created: minutesAgo(30) });
+			const b = entry("mem_b", { created: minutesAgo(45) });
+			const w = world([a, b], { events: "none" });
+			w.events.push(named(a, "mem_a"), ledgerEvent(b));
+			const report = await run(w);
+			expect(report.findings).toEqual([]);
+			expect(report.ok).toBe(true);
+			expect(report.counts.ledger_pairs).toBe(2);
+		});
+
+		test("an event naming an entry the index does not hold is reported and never takes another entry's slot", async () => {
+			const a = entry("mem_a");
+			const w = world([a], { events: "none" });
+			w.events.push(named(a, "mem_gone"));
+			const report = await run(w);
+			expect(codes(report).sort()).toEqual(["index_entry_without_ledger_write", "ledger_write_without_entry"]);
+			const orphan = report.findings.find((finding) => finding.code === "ledger_write_without_entry");
+			expect(orphan).toMatchObject({ event_id: "ev-names-mem_gone", entry_id: "mem_gone", stores: ["ledger", "index"] });
+			expect(orphan?.detail).toContain("mem_gone");
+		});
+
+		test("a malformed entry_id is no id: the event pairs like a legacy one", async () => {
+			const a = entry("mem_a");
+			const w = world([a], { events: "none" });
+			w.events.push({ ...ledgerEvent(a), entry_id: 7 as unknown as string });
+			const report = await run(w);
+			expect(report.findings).toEqual([]);
+			expect(report.counts.ledger_pairs).toBe(1);
+		});
 	});
 
 	test("the event's scope is compared in canonical form", async () => {

@@ -388,7 +388,8 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		surface: "memory-writer",
 		// The write verdicts have one emitter: the service's `auditMemoryWrite`. Its
 		// payload names outcome, reason, scope and kind — there is no `payload.action`
-		// to declare, so like the herdr rows these declare no actions.
+		// to declare, so like the herdr rows these declare no actions. An accepted
+		// write also names the stored entry (`entry_id`), taken from the gate's result.
 		carriesRepo: false,
 		periodic: false,
 		sample: () => ({
@@ -400,6 +401,7 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 				outcome: "accepted",
 				kind: "fact",
 				scope: "repo:swcstudiospace/agent-substrate",
+				entry_id: "mem_p26-write",
 			},
 		}),
 	},
