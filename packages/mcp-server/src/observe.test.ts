@@ -364,6 +364,12 @@ describe("auditToolCalls", () => {
 		expect(normalizeRoute("/skills/approve/../../etc")).toBe("other");
 	});
 
+	test("each steering tool is a known tool and keeps its own name as its observe label", () => {
+		for (const name of ["steering_queue", "steering_acknowledge", "steering_list"]) {
+			expect({ name, label: toolLabel(name) }).toEqual({ name, label: name });
+		}
+	});
+
 	test("toolLabel keeps the tools that exist", () => {
 		expect(toolLabel("graph_claim")).toBe("graph_claim");
 		expect(toolLabel("desktop_run")).toBe("desktop_run");
@@ -371,6 +377,11 @@ describe("auditToolCalls", () => {
 		expect(toolLabel("issue_get")).toBe("issue_get");
 		expect(toolLabel("docs_search")).toBe("docs_search");
 		expect(toolLabel("docs_ingest")).toBe("docs_ingest");
+		expect(toolLabel("checkpoint_verify")).toBe("checkpoint_verify");
+		expect(toolLabel("memory_verify")).toBe("memory_verify");
+		expect(toolLabel("session_checkpoint")).toBe("session_checkpoint");
+		expect(toolLabel("session_rollback_plan")).toBe("session_rollback_plan");
+		expect(toolLabel("session_rollback_commit")).toBe("session_rollback_commit");
 		expect(toolLabel("events")).toBe("events");
 		expect(toolLabel("../../etc/passwd")).toBe("unrecognized");
 	});

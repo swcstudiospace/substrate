@@ -15,7 +15,7 @@ import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { IndexStore, MIGRATION_STEPS, indexMigrateLockKey } from "./index-store.ts";
+import { IndexStore, MIGRATION_STEPS, applicableMigrationSteps, indexMigrateLockKey } from "./index-store.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
 const describeLive = PG_URL ? describe : describe.skip;
@@ -99,9 +99,10 @@ describeLive("migrate against a live index", () => {
 			return Number(row.n);
 		};
 		const once = await count();
-		expect(once).toBe(MIGRATION_STEPS.length);
+		const applicable = applicableMigrationSteps({ "steering-audit": false });
+		expect(once).toBe(applicable.length);
 		const versions = (await raw`select version from schema_migrations order by version`) as Array<{ version: number }>;
-		expect(versions.map((row) => Number(row.version))).toEqual(MIGRATION_STEPS.map((step) => step.version));
+		expect(versions.map((row) => Number(row.version))).toEqual(applicable.map((step) => step.version));
 		await store.migrate();
 		expect(await count()).toBe(once);
 		const indexes = (await raw`

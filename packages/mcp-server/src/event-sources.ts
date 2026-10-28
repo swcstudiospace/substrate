@@ -1365,6 +1365,22 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 			},
 		}),
 	},
+	{
+		id: "steering.queued",
+		phase: 58,
+		kind: "note",
+		surface: { fixed: "substrate" },
+		actions: ["steering.queued"],
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "substrate",
+			kind: "note",
+			summary: "steering pause queued for wt-sample",
+			session_id: "wt-sample",
+			payload: { action: "steering.queued", directive_id: "steer-sample", target_session_id: "wt-sample", steering_action: "pause", priority: "normal" },
+		}),
+	},
 ];
 
 export const SILENT_SOURCES: readonly SilentSource[] = [

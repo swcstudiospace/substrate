@@ -106,6 +106,7 @@ import { approvalBodyProblem, approvalFailure, toApprovalRequest } from "./skill
 import { EVENT_KINDS, SURFACES, type Surface } from "./types.ts";
 import { isLocalPeer, livezBody, LoopLagMonitor } from "./watchdog.ts";
 import { ragRetryDelay } from "./rag-retry.ts";
+import { reservedEmitRefusal } from "./reserved-actions.ts";
 
 /** One hour. Anonymous callers are logged once per window, not once per request. */
 const ANONYMOUS_LOG_INTERVAL_MS = 60 * 60 * 1000;
@@ -1178,6 +1179,13 @@ export function createHttpServer(
 				if (surface === null && anonymousBridge(config) && tokenedSurfaces(config).has(attribution.surface)) {
 					eventRefusal = "attribution";
 					sendJson(res, 403, { error: "an untokened caller cannot emit as a surface that has a token" });
+					return;
+				}
+				// A note a reader trusts by its action alone is the server's or an operator's to write (see `reserved-actions.ts`).
+				const reserved = reservedEmitRefusal({ payload: body.payload, surface: attribution.surface, callerSurface: surface, isOperator: caller.isOperator });
+				if (reserved !== null) {
+					eventRefusal = "attribution";
+					sendJson(res, 403, { error: reserved });
 					return;
 				}
 				// `x-substrate-replay: 1` marks a re-send of an earlier attempt (U5-4a). Read here, honoured

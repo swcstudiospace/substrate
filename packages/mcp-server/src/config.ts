@@ -5,7 +5,7 @@
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
 import { createHash, timingSafeEqual } from "node:crypto";
-import { assertDevnetRpcUrl, SOLANA_CLI_DEFAULT } from "@substrate/ledger";
+import { assertDevnetRpcUrl, parseSignerSet, SignerSetError, SOLANA_CLI_DEFAULT, type SignerSet } from "@substrate/ledger";
 import { ADMISSION_CLASSES, loadBreakerSettings, type AdmissionClass, type BreakerSettings } from "@substrate/observability";
 import { loadBriefProfileConfig, type BriefProfileConfig } from "./brief-profile.ts";
 import { ADMISSION_MODES, type AdmissionMode, type AdmissionSettings, type BucketLimit } from "./admission.ts";
@@ -21,8 +21,13 @@ import { NOTION_API_URL } from "./notion.ts";
 import { DEFAULT_RETRIEVAL_KNOBS, ragflowFromEnv, type RagflowConfig, type RetrievalKnobs } from "./planes/ragflow.ts";
 import { railwayFromEnv, type RailwayConfig } from "./railway.ts";
 import { hindsightBanksFromEnv } from "./planes/hindsight.ts";
-import { loadRecallConfig, type RecallConfig } from "./recall-snapshot.ts";
-import { loadPlanningSettings, type PlanningConfigResult } from "./planning/config.ts";
+import { loadRecallConfig, parseRecallScope, type RecallConfig, type RecallScope } from "./recall-snapshot.ts";
+import { DEFAULT_TANDEM_OPTIONS, parseTandemOptions, type TandemOptions } from "./tandem-recall.ts";
+import { loadCheckpointDirectory, loadPlanningSettings, type CheckpointDirectoryResult, type PlanningConfigResult } from "./planning/config.ts";
+import { loadSteeringExpirySettings, loadSteeringSettings, steeringToolsRegistered, type SteeringConfigResult, type SteeringExpiryConfigResult } from "./planning/steering.ts";
+import { steeringAuditTableEnabled } from "./planning/steering-store.ts";
+import { loadBaselineDirectory, type BaselineDirectoryResult } from "./planning/baseline-store.ts";
+import { loadLivenessSettings, type LivenessConfigResult } from "./planning/observer.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
 import { EVENT_IDEMPOTENCY_MODES, MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type EventIdempotencyMode, type MemoryExpiryMode, type Surface } from "./types.ts";
 
@@ -460,8 +465,21 @@ export interface SubstrateConfig {
 	 * (`assertDevnetRpcUrl`: not http(s), userinfo, a fragment, or a mainnet/testnet
 	 * host). It never crashes boot; `configWarnings` reports it, and the anchor job
 	 * and the verify read-back refuse to touch the network while it is set.
+	 *
+	 * `signerSet` is the parsed `SUBSTRATE_ANCHOR_SIGNER_SET` (null when unset): the verifier's bootstrap signer set,
+	 * which REPLACES `[pubkey]` so a rotated job key does not drop the keys that signed earlier anchors. A malformed
+	 * value is `signerSetProblem` (a rule and a field path, NEVER the value) with `signerSet` null; verification then
+	 * answers `unverified` with a fixed reason instead of judging against a missing or empty set.
 	 */
-	solana: { rpcUrl: string; keypairPath: string | null; pubkey: string | null; cli: string; problem: string | null };
+	solana: {
+		rpcUrl: string;
+		keypairPath: string | null;
+		pubkey: string | null;
+		cli: string;
+		problem: string | null;
+		signerSet: SignerSet | null;
+		signerSetProblem: string | null;
+	};
 	/**
 	 * Whole-verify devnet budget in milliseconds (D28-18).
 	 *
@@ -506,6 +524,13 @@ export interface SubstrateConfig {
 	 * `problems` are the boot warnings for a value that was refused or capped (`requestPathConfigWarnings`).
 	 */
 	requestPath: RequestPathSettings;
+	// v1.6 phase 57c
+	/**
+	 * The off-by-default recall flags: `SUBSTRATE_DOCS_TANDEM=off|on` with `SUBSTRATE_DOCS_TANDEM_LIMIT` (1..10, default 5)
+	 * and `SUBSTRATE_DOCS_TANDEM_BUDGET_MS` (50..10000, default 1500), and `SUBSTRATE_BRIEF_RECALL_SCOPE=off|graph`.
+	 * `problems` are the boot warnings for a value that was refused or capped (`contextualRecallConfigWarnings`).
+	 */
+	contextualRecall: ContextualRecallSettings;
 	// uplift-2 R5
 	/**
 	 * Ledger chain cache, chain-tip lookback, write-probe cadence and opt-in TTL,
@@ -620,6 +645,20 @@ export interface SubstrateConfig {
 	eventBus: EventBusSettings;
 	/** `SUBSTRATE_PLANNING_*` (phase 52, SOTA-08): the planning root, presence window and read bounds. See `planning/config.ts`. */
 	planning: PlanningConfigResult;
+	/** `SUBSTRATE_PLANNING_CHECKPOINT_DIR` (phase 53, SOTA-09): where completion checkpoints are kept durably. Unset keeps them in memory. See `planning/checkpoint-store.ts`. */
+	planningCheckpoint: CheckpointDirectoryResult;
+	/** `SUBSTRATE_PLANNING_STEERING*` (phase 53, SOTA-09): the steering switch, principal allowlist and rate. See `planning/steering.ts`. */
+	steering: SteeringConfigResult;
+	/** `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` (phase 53, SOTA-09): on lets `migrate()` create `planning_steering_audit`. Off by default. */
+	steeringAuditTable: boolean;
+	/** Whether the steering tools are registered: the switch is on, or it is malformed and so answered as `misconfigured`. Off registers none. */
+	steeringRegistered: boolean;
+	/** `SUBSTRATE_PLANNING_STEERING_ACK_TTL_S` and `SUBSTRATE_PLANNING_STEERING_EXPIRY_SWEEP_S` (phase 58): the acknowledgement deadline and the expiry sweep interval. A bad value is a typed result, and the steering tools answer `misconfigured`. See `planning/steering.ts`. */
+	steeringExpiry: SteeringExpiryConfigResult;
+	/** `SUBSTRATE_PLANNING_BASELINE_DIR` (phase 58): where the observer keeps its publish baseline durably. Unset keeps it in memory. See `planning/baseline-store.ts`. */
+	planningBaseline: BaselineDirectoryResult;
+	/** `SUBSTRATE_PLANNING_LIVENESS_INTERVAL_MS` (phase 58): how often a quiet checkout refreshes its presence record. See `planning/observer.ts`. */
+	planningLiveness: LivenessConfigResult;
 	// uplift-3 N2 — restart-durable SLO history and notifications
 	/**
 	 * Where the SLO checkpoint is written and restored from
@@ -741,13 +780,36 @@ function readSolana(env: Record<string, string | undefined>): SubstrateConfig["s
 	} catch (cause) {
 		problem = `SOLANA_RPC_URL refused: ${cause instanceof Error ? cause.message : String(cause)}`;
 	}
+	const { signerSet, signerSetProblem } = readAnchorSignerSet(env.SUBSTRATE_ANCHOR_SIGNER_SET);
 	return {
 		rpcUrl,
 		keypairPath: env.SOLANA_ANCHOR_KEYPAIR?.trim() || null,
 		pubkey: env.SOLANA_ANCHOR_PUBKEY?.trim() || null,
 		cli: env.SOLANA_CLI?.trim() || SOLANA_CLI_DEFAULT,
 		problem,
+		signerSet,
+		signerSetProblem,
 	};
+}
+
+/**
+ * `SUBSTRATE_ANCHOR_SIGNER_SET`: unset or blank is no set (the verifier's bootstrap stays `[SOLANA_ANCHOR_PUBKEY]`). A value
+ * that `parseSignerSet` refuses, and an empty array, is a problem naming the rule and the field path, never the value: an
+ * env value can be a pasted secret, and a path that would be an unknown key's own text is left out. The set is then null,
+ * never silently empty.
+ */
+function readAnchorSignerSet(raw: string | undefined): { signerSet: SignerSet | null; signerSetProblem: string | null } {
+	const text = raw?.trim() ?? "";
+	if (text === "") return { signerSet: null, signerSetProblem: null };
+	try {
+		const set = parseSignerSet(text);
+		if (set.length === 0) return { signerSet: null, signerSetProblem: "SUBSTRATE_ANCHOR_SIGNER_SET is not a valid signer set: it names no signer" };
+		return { signerSet: set, signerSetProblem: null };
+	} catch (cause) {
+		if (!(cause instanceof SignerSetError)) return { signerSet: null, signerSetProblem: "SUBSTRATE_ANCHOR_SIGNER_SET could not be read as a signer set" };
+		const where = cause.rule === "unknown_key" || cause.path === "" ? "" : ` at ${cause.path}`;
+		return { signerSet: null, signerSetProblem: `SUBSTRATE_ANCHOR_SIGNER_SET is not a valid signer set: ${cause.rule}${where}` };
+	}
 }
 /** "swarm-a05-be" → "SUBSTRATE_TOKEN_SWARM_A05_BE": the inverse of the suffix mapping in `tokenConfig`. */
 export function tokenEnvName(surface: Surface): string {
@@ -1005,6 +1067,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		cachePreload,
 		// uplift-5 U5-3
 		requestPath: loadRequestPathSettings(env),
+		// v1.6 phase 57c
+		contextualRecall: loadContextualRecallSettings(env),
 		// uplift-2 R5
 		ledger: loadLedgerSettings(env),
 		// uplift-4 S2
@@ -1075,6 +1139,18 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		eventBus: loadEventBusSettings(env, cache),
 		// Phase 52 (SOTA-08): the planning plane's root and limits. Environment only; a bad value is a typed result.
 		planning: loadPlanningSettings(env),
+		// Phase 53 (SOTA-09): the durable checkpoint directory. Unset keeps checkpoints in memory; a bad value is a typed result.
+		planningCheckpoint: loadCheckpointDirectory(env),
+		// Phase 53 (SOTA-09): the steering switch, allowlist and rate. Environment only; a bad value is a typed result.
+		steering: loadSteeringSettings(env),
+		// Phase 53 (SOTA-09): the audit table opt-in. Off creates nothing at boot; on creates it through the gated migration step.
+		steeringAuditTable: steeringAuditTableEnabled(env),
+		steeringRegistered: steeringToolsRegistered(env),
+		// Phase 58 (live steering): the acknowledgement deadline and the expiry sweep interval. Environment only; a bad value is a typed result.
+		steeringExpiry: loadSteeringExpirySettings(env),
+		// Phase 58: the durable observer baseline directory and the liveness interval. Environment only; a bad value is a typed result.
+		planningBaseline: loadBaselineDirectory(env),
+		planningLiveness: loadLivenessSettings(env),
 	};
 }
 
@@ -1436,6 +1512,63 @@ export function requestPathConfigWarnings(config: SubstrateConfig): string[] {
 	return [...config.requestPath.problems];
 }
 
+/** v1.6 phase 57c: the two off-by-default recall flags, parsed. */
+export interface ContextualRecallSettings {
+	/** `SUBSTRATE_DOCS_TANDEM` (`off` | `on`), `_LIMIT` (1..10, default 5) and `_BUDGET_MS` (50..10000, default 1500): LightRAG and Hindsight in one docs answer. */
+	tandem: TandemOptions;
+	/** `SUBSTRATE_BRIEF_RECALL_SCOPE` (`off` | `graph`): the brief's recall also shows the claimed node's graph. */
+	recallScope: RecallScope;
+	problems: string[];
+}
+
+/**
+ * v1.6 phase 57c: an unset or empty flag is the default silently. A value outside the vocabulary keeps the
+ * default and is named in `problems`, so a typo never switches a policy on. A number that is not a whole
+ * number keeps the default; one outside its range is capped to the nearest bound; both are named. A problem
+ * names the variable, the kind of problem and the value taken, NEVER the value read: an env value can be a
+ * pasted secret, and the boot log is shared.
+ */
+function loadContextualRecallSettings(env: Record<string, string | undefined>): ContextualRecallSettings {
+	const problems: string[] = [];
+	const choice = <T extends string>(name: string, raw: string | undefined, allowed: readonly [T, T], fallback: T): T => {
+		const trimmed = raw?.trim() ?? "";
+		if (trimmed === "") return fallback;
+		const value = trimmed.toLowerCase();
+		if ((allowed as readonly string[]).includes(value)) return value as T;
+		problems.push(`${name} is neither ${allowed[0]} nor ${allowed[1]}; running as ${fallback}`);
+		return fallback;
+	};
+	const whole = (name: string, raw: string | undefined, fallback: number, min: number, max: number): number => {
+		const trimmed = raw?.trim() ?? "";
+		if (trimmed === "") return fallback;
+		if (!/^\d+$/.test(trimmed)) {
+			problems.push(`${name} is not a whole number; using ${fallback}`);
+			return fallback;
+		}
+		const value = Number(trimmed);
+		if (value >= min && value <= max) return value;
+		const capped = Math.min(max, Math.max(min, value));
+		problems.push(`${name} is outside ${min}..${max}; using ${capped}`);
+		return capped;
+	};
+	const mode = choice("SUBSTRATE_DOCS_TANDEM", env.SUBSTRATE_DOCS_TANDEM, ["off", "on"], "off");
+	const scope = choice("SUBSTRATE_BRIEF_RECALL_SCOPE", env.SUBSTRATE_BRIEF_RECALL_SCOPE, ["off", "graph"], "off");
+	return {
+		tandem: parseTandemOptions({
+			enabled: mode,
+			hindsight_limit: whole("SUBSTRATE_DOCS_TANDEM_LIMIT", env.SUBSTRATE_DOCS_TANDEM_LIMIT, DEFAULT_TANDEM_OPTIONS.hindsight_limit, 1, 10),
+			budget_ms: whole("SUBSTRATE_DOCS_TANDEM_BUDGET_MS", env.SUBSTRATE_DOCS_TANDEM_BUDGET_MS, DEFAULT_TANDEM_OPTIONS.budget_ms, 50, 10_000),
+		}),
+		recallScope: parseRecallScope(scope),
+		problems,
+	};
+}
+
+/** The v1.6 recall flags that were refused or capped, for the boot log. Names, problem kinds and the value taken; never the raw value read. */
+export function contextualRecallConfigWarnings(config: SubstrateConfig): string[] {
+	return [...config.contextualRecall.problems];
+}
+
 /** uplift-3 N3: a finite rate > 0, fractions kept (0.5 rps is one call per 2 s); anything else is the default. */
 function positiveRateOr(raw: string | undefined, fallback: number): number {
 	const value = Number(raw?.trim());
@@ -1704,6 +1837,21 @@ export function isOperator(config: SubstrateConfig, authorization: string | null
 }
 
 /**
+ * The surfaces an operator token authenticates as, by the same rule as {@link isOperator}: a swarm surface and the
+ * `substrate` host-job surface are never operators, listed or not. Empty on a bare local run (no surface tokens), where
+ * `isOperator` calls the machine's owner the operator but a ledger event carries no proof of who wrote it: a reader that
+ * must trust an operator's event (a signer rotation) fails closed there.
+ */
+export function operatorSurfaces(config: SubstrateConfig): Set<Surface> {
+	const surfaces = new Set<Surface>();
+	for (const token of config.operatorTokens) {
+		const named = config.tokens.get(token);
+		if (named !== undefined && !isSwarmSurface(named) && named !== "substrate") surfaces.add(named);
+	}
+	return surfaces;
+}
+
+/**
  * A presented bearer that names no surface, once any surface token exists.
  *
  * The bridge accepts a *missing* token. It does not accept a token that is not
@@ -1756,6 +1904,10 @@ export function configWarnings(config: SubstrateConfig): string[] {
 	// Before the early return too: a refused RPC URL stops anchoring and verify on every deployment.
 	if (config.solana.problem) {
 		warnings.push(`anchoring and the verify read-back are refused until SOLANA_RPC_URL is fixed: ${config.solana.problem}`);
+	}
+	// Named by variable, rule and field path only: the value never reaches the log.
+	if (config.solana.signerSetProblem !== null) {
+		warnings.push(`checkpoint_verify and memory_verify answer unverified until SUBSTRATE_ANCHOR_SIGNER_SET is fixed: ${config.solana.signerSetProblem}`);
 	}
 	if (config.docsBackendRejected !== null) {
 		warnings.push(`SUBSTRATE_DOCS_BACKEND "${config.docsBackendRejected}" is not a docs plane; docs serve ${config.docsBackend}`);

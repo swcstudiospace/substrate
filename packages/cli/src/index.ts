@@ -20,6 +20,13 @@
  *   substrate index archive|verify-archive|restore   the verified logical export of the Postgres
  *       index and its restore-to-scratch proof (docs/runbooks/index-archive.md)
  *   substrate spool status|flush             the collector event spool (docs/collectors.md, "Event spool")
+ *   substrate session checkpoint|checkpoints|rollback|recover|sync   session checkpoints and rollback
+ *       (exit 0 done, 1 failed, 2 usage, 3 refused, 4 files restored but the ledger commit is pending)
+ *   substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair --server-stopped [--repair-orphans]]
+ *       the memory consistency verifier: the index, the plane and the ledger compared
+ *       (exit 0 consistent, 1 drift, 2 usage, 3 a store could not be read; docs/runbooks/consistency-verify.md)
+ *   substrate memory capsule export|verify|redact ...   memory capsules (docs/runbooks/memory-capsules.md)
+ *       (exit 0 done, 1 failed or incomplete, 2 usage, 3 verify --anchors could not finish)
  *
  * With `SUBSTRATE_EVENT_SPOOL=on`, `emit` parks an event that failed for a retryable reason
  * (network error, timeout, 5xx) in the spool and returns at once — it never replays; `spool flush`
@@ -49,8 +56,17 @@ import { runSkills, skillsTimeout } from "./skills.ts";
 import { runLedger } from "./ledger.ts";
 import { runSpool } from "./spool.ts";
 import { spoolConfig } from "../../collectors/src/spool.ts";
+import { runSession } from "./session/command.ts";
+import type { TranscriptPort } from "./session/rollback.ts";
+import { runConsistency } from "./consistency.ts";
+import { httpCapsuleMcp, nodeCapsuleFs, runMemory } from "./capsule.ts";
+import { createTranscriptPort, resolveOmpSessionsDir } from "./session/transcript-port.ts";
+import { LocalBlobStore } from "../../mcp-server/src/blob-store.ts";
+import { postEvent as emitEvent } from "../../collectors/src/emit.ts";
 import { INDEX_ARCHIVE_SUBCOMMANDS, INDEX_ARCHIVE_USAGE, runIndexArchive } from "./index-archive.ts";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -524,6 +540,54 @@ function cmdLedger(argv: string[], args: Record<string, string | true>): number 
 	});
 }
 
+/**
+ * `substrate consistency verify …` — the same spawn-the-runner shape as `ledger`: the index, plane and ledger
+ * credentials live in the server package only. The grammar check and the exit-code mapping are `runConsistency`'s.
+ */
+function cmdConsistency(argv: string[]): number {
+	const runner = join(import.meta.dir, "..", "..", "mcp-server", "src", "consistency-run.ts");
+	return runConsistency(argv, {
+		// A runner that ended on a signal has no status; -1 is not an exit code `runConsistency` passes through.
+		spawn: (runnerArgs) => spawnSync(process.execPath, [runner, ...runnerArgs], { stdio: "inherit", env: process.env }).status ?? -1,
+		err: (text) => process.stderr.write(text),
+	});
+}
+
+/**
+ * The transcript adapter for `substrate session rollback`: omp gets a forked session file, every other surface a
+ * marker. All file access is the real filesystem here and nowhere else; the port itself is injected with it.
+ * Built on the first rewind, so `checkpoint`, `checkpoints`, `recover` and `sync` never look for an omp bucket.
+ */
+function transcriptPort(surface: string): TranscriptPort {
+	return {
+		rewind: (request) => {
+			const home = homedir();
+			return createTranscriptPort({
+				surface,
+				// omp's default sessions root; an omp started with another profile or agent directory keeps its sessions elsewhere,
+				// which is reported as `unsupported` (the bucket is not found), never guessed.
+				ompSessionsDir: resolveOmpSessionsDir({
+					candidates: [process.cwd(), git(["rev-parse", "--show-toplevel"])],
+					homeDir: home,
+					tmpRoot: tmpdir(),
+					sessionsRoot: join(home, ".omp", "agent", "sessions"),
+					realpath: (path) => realpathSync(path),
+					isDirectory: (path) => existsSync(path) && statSync(path).isDirectory(),
+				}),
+				listDir: (dir) => readdir(dir),
+				readFile: async (path, maxBytes) => {
+					const info = await stat(path);
+					if (info.size > maxBytes) throw new Error(`the file is ${info.size} bytes; the limit is ${maxBytes}`);
+					return readFile(path, "utf8");
+				},
+				writeFile: (path, text, options) => writeFile(path, text, options),
+				now: () => new Date(),
+				newSessionId: () => crypto.randomUUID(),
+			}).rewind(request);
+		},
+	};
+}
+
 const [command, ...rest] = process.argv.slice(2);
 const args = parseArgs(rest);
 
@@ -595,6 +659,37 @@ switch (command) {
 				err: (text) => process.stderr.write(text),
 			}),
 		);
+	case "consistency":
+		process.exit(cmdConsistency(rest));
+	case "memory":
+		process.exit(
+			await runMemory(rest, {
+				mcpFor: (surface) =>
+					httpCapsuleMcp({ url: base(), token: resolveBearer(surface, process.env) ?? undefined, timeoutMs: lessonsTimeout(process.env.SUBSTRATE_TIMEOUT_MS) }),
+				fs: nodeCapsuleFs(),
+				openStore: (dir) => new LocalBlobStore(dir),
+				emit: (event) => emitEvent(event, { timeoutMs: timeout(), collector: "cli", source: "cli.memory-capsule", url: base(), ...(event.idempotency_key === undefined ? {} : { idempotencyKey: event.idempotency_key }) }),
+				now: () => new Date(),
+				cwd: process.cwd(),
+				out: (text) => process.stdout.write(text),
+				err: (text) => process.stderr.write(text),
+			}),
+		);
+	case "session":
+		process.exit(
+			await runSession(rest, {
+				worktree: git(["rev-parse", "--show-toplevel"]) || process.cwd(),
+				url: base(),
+				tokenFor: (surface) => resolveBearer(surface, process.env) ?? undefined,
+				timeoutMs: timeout(),
+				now: () => new Date(),
+				randomBytes: (length) => crypto.getRandomValues(new Uint8Array(length)),
+				// The surface is the command's own `--surface` (default claude-code), the same default `runSession` applies.
+				transcript: transcriptPort(str(args.surface) ?? "claude-code"),
+				out: (text) => process.stdout.write(text),
+				err: (text) => process.stderr.write(text),
+			}),
+		);
 	default:
 		process.stdout.write(
 			"substrate brief [--repo R] [--branch B] [--graph G] [--surface S] [--write]\n" +
@@ -614,6 +709,10 @@ switch (command) {
 				"substrate index sweep [--apply] [--json]   (--apply also needs SUBSTRATE_INDEX_SWEEP=apply)\n" +
 				"substrate index archive [--out DIR] [--page-size N] | verify-archive <dir> | restore --scratch URL <dir>\n" +
 				"substrate ledger coverage [--json] | archive [--until D] [--out DIR] [--page-size N] | verify-archive <dir> [--day D]\n" +
+				"substrate session checkpoint | checkpoints | rollback <ckpt|seq|previous> | recover | sync   (substrate session for the flags)\n" +
+				"substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair --server-stopped [--repair-orphans]]   (exit 0 consistent, 1 drift, 2 usage, 3 unreadable store)\n" +
+				"substrate memory capsule export --out FILE [--session S] [--repo R] [--since ISO] [--limit N] [--store DIR]\n" +
+				"                         | verify FILE [--anchors] | redact FILE --ids a,b --reason TEXT --out FILE2   (substrate memory capsule for the flags)\n" +
 				"substrate spool status [--json] | flush [--json] [--budget-ms N]   (the event spool needs SUBSTRATE_EVENT_SPOOL=on)\n",
 		);
 		process.exit(command ? 2 : 0);

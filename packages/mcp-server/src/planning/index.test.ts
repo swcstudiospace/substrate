@@ -10,6 +10,7 @@ import {
 	indexRecords,
 	isErrorRecord,
 	mapBounded,
+	positionOf,
 	readFrontmatter,
 	snapshotOf,
 	updatePlanningIndex,
@@ -90,6 +91,13 @@ describe("buildPlanningIndex: determinism and shape", () => {
 		expect(plan).toMatchObject({ kind: "phase", phase: "52", plan: "52-01-PLAN", frontmatter: { phase: 52, requirements: ["SOTA-08"] } });
 		expect(context).toMatchObject({ kind: "phase", phase: "52" });
 		expect(context && "plan" in context).toBe(false);
+	});
+
+	test("frontmatter cannot move a document to another phase: a phase 52 directory decides, whatever its frontmatter says", async () => {
+		const path = ".planning/phases/52-planning-awareness-core/52-02-PLAN.md";
+		const { index } = await indexOf({ ...BASE, [`${PHASE}/52-02-PLAN.md`]: "---\nphase: 53\n---\n# Plan\n" });
+		const record = indexRecords(index).find((entry) => entry.path === path);
+		expect(record).toMatchObject({ kind: "phase", phase: "52", frontmatter: { phase: 53 } });
 	});
 
 	test("no file body reaches the index: the marker in ROADMAP's body is absent from the whole index", async () => {
@@ -550,5 +558,126 @@ describe("readFrontmatter", () => {
 
 	test("trailing whitespace does not rescue an unclosed fence", () => {
 		expect(readFrontmatter("---  \nphase: 52\n")).toEqual({ state: "malformed" });
+	});
+});
+
+describe("positionOf: the GSD-Core position from the scan that built the index", () => {
+	const STATE_BODY_MARKER = "BODY-MARKER-state-only";
+	const POSITION_STATE = `---
+milestone: v1.6
+milestone_name: Live steering
+status: executing
+stopped_at: "58-02-PLAN step 1"
+current_phase: 58
+current_phase_name: live-session-steering
+---
+
+# State
+
+## Current
+
+${STATE_BODY_MARKER}
+
+## Current Position
+
+Phase: 58 — Live session steering
+Plan: 58-02-PLAN
+Status: Executing
+`;
+	const POSITION_ROADMAP = `# Roadmap
+
+## Phase Details
+
+### Phase 58: Live session steering
+
+**Status**: In progress
+
+## Progress
+
+| Phase | Milestone | Plans Complete | Status | Completed |
+|-------|-----------|----------------|--------|-----------|
+| 57. Tandem memory | v1.6 | 1/1 | Complete | 2026-10-26 |
+| 58. Live session steering | v1.6 | 1/2 | In progress | - |
+`;
+	const POSITION_FILES: Record<string, string> = {
+		[`${P}/STATE.md`]: POSITION_STATE,
+		[`${P}/ROADMAP.md`]: POSITION_ROADMAP,
+		[`${P}/phases/58-live-session-steering/58-01-PLAN.md`]: "# plan 1\n",
+		[`${P}/phases/58-live-session-steering/58-01-SUMMARY.md`]: "# summary 1\n",
+	};
+	const EXPECTED = {
+		errors: [],
+		ok: true,
+		position: {
+			milestone: "v1.6",
+			milestone_name: "Live steering",
+			phase: { name: "Live session steering", number: "58", slug: "live-session-steering" },
+			plan: "58-02-PLAN",
+			progress: { phases_done: 1, phases_total: 2 },
+			status: "executing",
+			step: "58-02-PLAN step 1",
+		},
+	};
+
+	test("a tree's STATE.md, ROADMAP.md, phase directories and plan files give the exact position", async () => {
+		const { index } = await indexOf(POSITION_FILES);
+		expect(positionOf(index)).toEqual(EXPECTED);
+	});
+
+	test("the plan comes from the files when the state has no Plan line: the first plan without a summary", async () => {
+		const state = POSITION_STATE.replace("Plan: 58-02-PLAN\n", "").replace("## Current Position", "## Not The Position");
+		const files = { ...POSITION_FILES, [`${P}/STATE.md`]: state, [`${P}/phases/58-live-session-steering/58-02-PLAN.md`]: "# plan 2\n" };
+		const { index } = await indexOf(files);
+		expect(positionOf(index).position.plan).toBe("58-02-PLAN");
+	});
+
+	test("the position adds no file text to the index: the state's body marker is absent from the whole index", async () => {
+		const { index } = await indexOf(POSITION_FILES);
+		expect(JSON.stringify(index)).not.toContain(STATE_BODY_MARKER);
+	});
+
+	test("a state with nothing in it, a missing file and an unreadable one are error entries of the position", async () => {
+		const bare = await indexOf(BASE);
+		expect(positionOf(bare.index).errors).toEqual([{ code: "no-position", detail: "no frontmatter position and no Current Position section", where: "STATE.md" }]);
+
+		const none = await indexOf({ [`${P}/PROJECT.md`]: "# Project\n" });
+		expect(positionOf(none.index)).toEqual({
+			errors: [
+				{ code: "missing", detail: "ROADMAP.md was not found", where: "ROADMAP.md" },
+				{ code: "missing", detail: "STATE.md was not found", where: "STATE.md" },
+			],
+			ok: false,
+			position: { milestone: null, milestone_name: null, phase: null, plan: null, progress: null, status: null, step: null },
+		});
+
+		const broken = await indexOf({ ...POSITION_FILES, [`${P}/STATE.md`]: "---\nmilestone: [unclosed\n# State\n" });
+		expect(positionOf(broken.index).errors).toEqual([
+			{ code: "malformed-frontmatter", detail: "frontmatter has no closing fence or is not a YAML mapping", where: "STATE.md" },
+		]);
+
+		const large = await indexOf({ ...POSITION_FILES, [`${P}/STATE.md`]: `${POSITION_STATE}${"x".repeat(2_000)}` }, {}, { maxFiles: 500, maxBytes: 1_024 });
+		expect(positionOf(large.index).errors).toEqual([{ code: "too-large", detail: "exceeds 1024 bytes", where: "STATE.md" }]);
+	});
+
+	test("an unchanged tree is an update that reads no bytes and keeps the position, and an edit re-reads only the changed file", async () => {
+		const tree = new FakeTree(POSITION_FILES);
+		const built = await buildPlanningIndex(TREE_ROOT, { fs: tree, limits: LIMITS });
+		if (!built.ok) throw new Error(built.code);
+		tree.returnedFrom.splice(0);
+
+		const same = await updatePlanningIndex(TREE_ROOT, { fs: tree, limits: LIMITS }, built.index);
+		if (!same.ok) throw new Error(same.code);
+		expect(tree.returnedFrom).toEqual([]);
+		expect(same.index).toEqual(built.index);
+		expect(positionOf(same.index)).toEqual(EXPECTED);
+
+		tree.setContent(`${P}/STATE.md`, POSITION_STATE.replace("status: executing", "status: blocked"));
+		const edited = await updatePlanningIndex(TREE_ROOT, { fs: tree, limits: LIMITS }, same.index);
+		if (!edited.ok) throw new Error(edited.code);
+		expect(tree.returnedFrom).toEqual([`${P}/STATE.md`]);
+		expect(positionOf(edited.index).position.status).toBe("blocked");
+		const rebuilt = await buildPlanningIndex(TREE_ROOT, { fs: tree, limits: LIMITS });
+		if (!rebuilt.ok) throw new Error(rebuilt.code);
+		expect(edited.index).toEqual(rebuilt.index);
 	});
 });

@@ -47,7 +47,7 @@ function storeSession(backend: RecordingPresenceBackend, record: SessionRecord):
 }
 
 function session(sessionId: string, lastHeartbeatMs: number): SessionRecord {
-	return { sessionId, worktree: `/work/${sessionId}`, branch: "gsd/p52-wiring", activePhase: null, lastHeartbeatMs };
+	return { sessionId, worktree: `/work/${sessionId}`, branch: "gsd/p52-wiring", lastHeartbeatMs };
 }
 
 /** Every session view names one of the six states, with a line that is never blank. */
@@ -66,6 +66,39 @@ describe("planning_status", () => {
 		const text = JSON.stringify(view);
 		expect(text).not.toContain(BODY);
 		expect(text).not.toContain(FRONTMATTER_SECRET);
+	});
+
+	test("the GSD-Core position is carried from the same scan, with its secrets redacted and no body text", async () => {
+		const token = "ghp_Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2";
+		const state = `---\nmilestone: v1.6\nstatus: executing\nstopped_at: "pushed with ${token}"\ncurrent_phase: 58\n---\n# State\n\n${BODY} prose\n\n## Current Position\n\nPhase: 58\nPlan: 58-01-PLAN\n`;
+		const roadmap = `### Phase 58: Live steering\n\n| Phase | Milestone | Plans Complete | Status | Completed |\n|---|---|---|---|---|\n| 58. Live steering | v1.6 | 0/1 | In progress | - |\n`;
+		const tree = new FakeTree({ [`${P}/STATE.md`]: state, [`${P}/ROADMAP.md`]: roadmap, [`${P}/phases/58-live-steering/58-01-PLAN.md`]: "# plan\n" });
+		const view = await readerOver(tree).status();
+		if (view.state !== "ok") throw new Error(`expected ok, got ${view.state}`);
+		expect(view.position).toEqual({
+			errors: [],
+			ok: true,
+			position: {
+				milestone: "v1.6",
+				milestone_name: null,
+				phase: { name: "Live steering", number: "58", slug: "live-steering" },
+				plan: "58-01-PLAN",
+				progress: { phases_done: 0, phases_total: 1 },
+				status: "executing",
+				step: "pushed with [REDACTED]",
+			},
+		});
+		const text = JSON.stringify(view);
+		expect(text).not.toContain("Z9y8X7w6V5u4T3s2R1q0");
+		expect(text).not.toContain(BODY);
+	});
+
+	test("without STATE.md and ROADMAP.md the position says so in typed errors and every field is null", async () => {
+		const view = await readerOver(seededTree()).status();
+		if (view.state !== "ok") throw new Error(`expected ok, got ${view.state}`);
+		expect(view.position?.ok).toBe(false);
+		expect(view.position?.errors.map((error) => `${error.where}:${error.code}`)).toEqual(["ROADMAP.md:missing", "STATE.md:missing"]);
+		expect(view.position?.position.phase).toBeNull();
 	});
 
 	test("an unset root answers disabled, never an error", async () => {
@@ -128,6 +161,22 @@ describe("planning_sessions", () => {
 		expect(view.sessions.map((row) => [row.sessionId, row.status, row.ageMs])).toEqual([
 			["drifted", "stale", 120_000],
 			["fresh", "active", 0],
+		]);
+	});
+
+	test("a session idle for hours but alive reads active and reports how long it has been idle", async () => {
+		const backend = new RecordingPresenceBackend();
+		const now = backend.clockMs;
+		const hour = 3_600_000;
+		// Its last planning change was 5 hours ago; its observer wrote a liveness record 20 seconds ago.
+		storeSession(backend, { ...session("wt-quiet", now - 5 * hour), livenessMs: now - 20_000 });
+		// No liveness record at all: its change heartbeat is its only sign of life, so it is stale.
+		storeSession(backend, session("wt-silent", now - 5 * hour));
+		const view = await readerOver(seededTree(), { presence: new DragonflyPresenceStore(backend) }).sessions();
+		if (view.state !== "ok") throw new Error(`expected ok, got ${view.state}`);
+		expect(view.sessions.map((row) => [row.sessionId, row.status, row.ageMs, row.idleForMs])).toEqual([
+			["wt-quiet", "active", 20_000, 5 * hour],
+			["wt-silent", "stale", 5 * hour, 5 * hour],
 		]);
 	});
 
@@ -248,5 +297,93 @@ describe("neither read writes anything", () => {
 		const reader = readerOver(seededTree(), { presence: null });
 		const first = await reader.status();
 		expect(await reader.status()).toEqual(first);
+	});
+});
+
+describe("planning_status checkpoint durability (phase 53, SOTA-09)", () => {
+	test("with no checkpoint directory configured, planning_status says the checkpoints are not durable", async () => {
+		expect(await readerOver(seededTree()).status()).toMatchObject({ state: "ok", checkpoints: { durable: false, reason: "checkpoint-dir-unset" } });
+	});
+
+	test("a configured checkpoint directory reports the checkpoints as durable", async () => {
+		const reader = new PlanningReader({ settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }), fs: seededTree(), presence: null, checkpoints: { durable: true } });
+		expect(await reader.status()).toMatchObject({ state: "ok", checkpoints: { durable: true } });
+	});
+});
+
+describe("a stalled Dragonfly reply", () => {
+	test("planning_sessions returns its error within the command deadline", async () => {
+		const stalled: PresenceRedisClient = { connect: async () => {}, send: () => new Promise<never>(() => {}), close: () => {} };
+		const presence = new DragonflyPresenceStore(dragonflyPresenceBackend("redis://127.0.0.1:6379", 250, () => stalled, 20));
+		const started = performance.now();
+		const view = await readerOver(seededTree(), { presence }).sessions();
+		expect(performance.now() - started).toBeLessThan(1000);
+		expect(view).toMatchObject({ state: "unavailable", code: "presence-listing-failed" });
+		expect(view.state === "unavailable" && view.detail).toContain("deadline (20 ms presence SCAN)");
+	});
+});
+
+describe("planning_sessions planning rows and conflicts (phase 53, SOTA-09)", () => {
+	/** A session whose touched pairs are inside the freshness window, with its planning report known at the server's clock. */
+	function touching(backend: RecordingPresenceBackend, sessionId: string, touched: Array<[string, string | null]>): SessionRecord {
+		return {
+			sessionId,
+			worktree: `/work/${sessionId}`,
+			branch: `gsd/${sessionId}`,
+			repo: "owner/name",
+			lastHeartbeatMs: backend.clockMs,
+			touched: touched.map(([phase, plan]) => ({ phase, plan, observedAtMs: backend.clockMs })),
+			planning: { status: "known", scannedAtMs: backend.clockMs, phases: [] },
+		};
+	}
+
+	function planningOf(view: PlanningSessionsView, sessionId: string) {
+		if (view.state !== "ok") throw new Error(`planning_sessions is ${view.state}`);
+		return view.sessions.find((row) => row.sessionId === sessionId)?.planning;
+	}
+
+	test("two known sessions on one phase are one open conflict, and the read writes nothing", async () => {
+		const backend = new RecordingPresenceBackend();
+		storeSession(backend, touching(backend, "alpha", [["53", "53-01"]]));
+		storeSession(backend, touching(backend, "beta", [["53", "53-01"]]));
+		const reader = readerOver(seededTree(), { presence: new DragonflyPresenceStore(backend) });
+		expect(await reader.sessions()).toMatchObject({
+			state: "ok",
+			conflicts: [{ key: { by: "phase", phase: "53" }, plans: ["53-01"], sessionIds: ["alpha", "beta"], status: "open" }],
+		});
+		expect(backend.writes).toEqual([]);
+	});
+
+	test("a touched pair older than the freshness window no longer conflicts, and the read writes nothing", async () => {
+		const backend = new RecordingPresenceBackend();
+		const old = { ...touching(backend, "alpha", [["53", "53-01"]]), touched: [{ phase: "53", plan: "53-01", observedAtMs: backend.clockMs - 90_001 }] };
+		storeSession(backend, old);
+		storeSession(backend, touching(backend, "beta", [["53", "53-01"]]));
+		expect(await readerOver(seededTree(), { presence: new DragonflyPresenceStore(backend) }).sessions()).toMatchObject({ state: "ok", conflicts: [] });
+		expect(backend.writes).toEqual([]);
+	});
+
+	test("sessions of two repositories that touch one phase number do not conflict on the read", async () => {
+		const backend = new RecordingPresenceBackend();
+		storeSession(backend, touching(backend, "alpha", [["53", "53-01"]]));
+		storeSession(backend, { ...touching(backend, "beta", [["53", "53-01"]]), repo: "owner/two" });
+		expect(await readerOver(seededTree(), { presence: new DragonflyPresenceStore(backend) }).sessions()).toMatchObject({ state: "ok", conflicts: [] });
+	});
+
+	test("a session in a watcher gap is unknown in its row and takes no part in conflict detection", async () => {
+		const backend = new RecordingPresenceBackend();
+		storeSession(backend, { ...touching(backend, "alpha", [["52", null]]), planning: { status: "unknown", scannedAtMs: backend.clockMs, reason: "scan-truncated" } });
+		storeSession(backend, touching(backend, "beta", [["52", "52-01"]]));
+		const view = await readerOver(seededTree(), { presence: new DragonflyPresenceStore(backend) }).sessions();
+		expect(view).toMatchObject({ state: "ok", conflicts: [] });
+		expect(planningOf(view as PlanningSessionsView, "alpha")).toEqual({ state: "unknown", reason: "scan-truncated" });
+	});
+
+	test("a report older than the freshness window is unknown as stale in its row", async () => {
+		const backend = new RecordingPresenceBackend();
+		storeSession(backend, touching(backend, "alpha", [["52", "52-01"]]));
+		backend.clockMs += 90_001;
+		const view = await readerOver(seededTree(), { presence: new DragonflyPresenceStore(backend) }).sessions();
+		expect(planningOf(view as PlanningSessionsView, "alpha")).toEqual({ state: "unknown", reason: "scan-stale" });
 	});
 });

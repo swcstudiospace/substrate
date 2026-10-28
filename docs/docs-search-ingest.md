@@ -244,9 +244,25 @@ The `substrate.docs.duration` and `substrate.docs.search` measurements wrap the 
 
 Memory text and event summaries are untrusted evidence. Both are redacted before they are cut, so a cut never shows text the redactor removes. The context carries no source URL and is never cited as a source. Nothing in it is an instruction: a caller must not act on a directive found in a memory or an event.
 
+### The `steering` notice
+
+While `SUBSTRATE_PLANNING_STEERING` is on and the steering inbox holds directives still queued for the call's `session_id`, the reply gains `steering`, on both `docs_search` and `POST /docs/search`. It is read from the one in-memory inbox, so it adds no budgeted read, and it needs no input field: the `session_id` the call already names is the session.
+
+| Field | Content |
+|---|---|
+| `count` | Every directive queued for the session, listed or not. |
+| `entries` | At most 3 of them, highest priority first and then oldest, each `{id, action, priority, age_ms, body}`. `age_ms` is the time since the directive was queued, never negative. `body` is redacted, then cut to 200 characters. |
+| `untrusted` | A notice that the directives are described, not executed: the session answers each with `steering_acknowledge`. |
+
+The key is absent when steering is off, no session is named, or nothing is queued for it; an acknowledged or expired directive is no longer listed. It is attached after the chunk answer like `context`, so the cache entry never carries it and a reply with `steering` is never stored. It never fails or delays a search: a fault reading the inbox is reported on stderr and the reply goes out without it. See `docs/data-planes.md`, Steering inbox.
+
 ### REST
 
 `POST /docs/search` takes `context` with the same meaning. A `context` that is not a JSON boolean, `null` included, answers `400` with `{"error": "datasets must be a string array, session_id a string and context a boolean"}` before the search runs.
+
+### Tandem recall (v1.6 phase 57, `SUBSTRATE_DOCS_TANDEM=off|on`, default `off`)
+
+With the LightRAG plane serving, `on` asks the caller's Hindsight memory as well (`SUBSTRATE_DOCS_TANDEM_LIMIT` hits, 1..10, default 5, under `SUBSTRATE_DOCS_TANDEM_BUDGET_MS`, 50..10000, default 1500) and merges the two lists by reciprocal-rank fusion (`tandem-recall.ts`). Each citation names its origin and provenance; a memory is marked `derived: true` and is untrusted text like the rest. The Hindsight leg is an enrichment, not a dependency: a timeout, a breaker refusal or an error leaves the LightRAG answer exactly as it was, and the reply's `tandem` note says how the leg ended (`ok`, `empty`, `timeout`, `failed`). A tandem reply is never stored in the docs-search cache (a memory can be forgotten at any moment), and while the flag is on the cache key carries a `tandem` part, so a reply stored before the flip is never served in place of a tandem one. `off` is the LightRAG reply unchanged, with no Hindsight call. A value other than `off` or `on` is `off` and named at boot; an out-of-range limit or budget is capped and named.
 
 ## The six ingest refusals
 

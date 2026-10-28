@@ -48,6 +48,11 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `NOTION_TASK_GRAPH_DS` | string | the repo's task-graph data source id | data source id | the built-in id | mcp-server/config.ts, host/sync.ts | yes |
 | `HERMES_LINEAR_URL` | string | http://127.0.0.1:8792 | URL | the connector's loopback address | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOD_GATE_TIMEOUT_MS` | number | 35000 | positive integer ms | 35000 ms | mcp-server/config.ts | yes |
+| `SUBSTRATE_PLANNING_STEERING` | toggle | off | on \| off (1/0, true/false, yes/no; case- and space-insensitive; anything else refuses the steering settings with a typed error naming the variable) | off: steering is not enabled and no steering tool is registered; on: steering_queue and steering_acknowledge act only for an operator caller, steering_list is a read, and each write answers not-configured until an audit sink is injected | mcp-server/planning/steering.ts | yes |
+| `SUBSTRATE_PLANNING_STEERING_PRINCIPALS` | list | none | comma separated principal ids (letters, digits and . _ @ : -; 1 to 128 characters each; an empty entry is refused) | empty: every principal is refused, so no steering directive can be queued | mcp-server/planning/steering.ts | yes |
+| `SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN` | number | 10 | whole number 1..1000 (not an integer or out of range: refused with a typed error naming the variable) | 10 directives per minute per target session | mcp-server/planning/steering.ts | yes |
+| `SUBSTRATE_PLANNING_STEERING_ACK_TTL_S` | number | 86400 | whole seconds 60..2592000 (not an integer or out of range: refused with a typed error naming the variable, and the steering tools answer misconfigured) | 86400 s (one day): a directive nobody acknowledged by then is closed as declined with reason timeout, audited, and no longer offered to its session | mcp-server/planning/steering.ts | yes |
+| `SUBSTRATE_PLANNING_STEERING_EXPIRY_SWEEP_S` | number | 60 | whole seconds 1..3600 (not an integer or out of range: refused with a typed error naming the variable, and the steering tools answer misconfigured) | 60 s between expiry passes; the pass runs only while steering is on with the audit table enabled | mcp-server/planning/steering.ts | yes |
 | `RAILWAY_API_TOKEN` | secret-ref | none | Railway API token, sent as a bearer token to the public API | every railway_* tool reports unconfigured and the writes refuse before any request. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
 | `SUBSTRATE_RAILWAY_WRITES` | toggle | off | on | off: railway_scale and railway_deploy refuse with writes-disabled before any request; on still needs an operator and an approval reference. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
 
@@ -72,6 +77,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SOLANA_RPC_URL` | string | https://api.devnet.solana.com | URL | public devnet | mcp-server/config.ts | yes |
 | `SOLANA_ANCHOR_KEYPAIR` | path | none | keypair file path | the hourly anchor job is not configured | mcp-server/config.ts | yes |
 | `SOLANA_ANCHOR_PUBKEY` | string | none | public key | anchors are not verified against a key | mcp-server/config.ts | yes |
+| `SUBSTRATE_ANCHOR_SIGNER_SET` | string | none | JSON array of up to 16 signer entries {pubkey, valid_from_ms, valid_until_ms or null, label} | the verifier's signer set starts from SOLANA_ANCHOR_PUBKEY alone (valid from the epoch, no end); a malformed value makes checkpoint_verify and memory_verify answer unverified, never an empty set. See `docs/runbooks/anchor-signer-rotation.md` | mcp-server/config.ts | yes |
 | `SOLANA_CLI` | path | the solana CLI install path | binary | the built-in path | mcp-server/config.ts | yes |
 | `SUBSTRATE_VERIFY_TIMEOUT_MS` | number | 30000 | positive ms | 30000 ms | mcp-server/config.ts | yes |
 | `SUBSTRATE_EVENT_IDEMPOTENCY` | mode | off | off \| accept \| enforce (case- and space-insensitive; anything else is off with a boot warning) | off: POST /events ignores idempotency_key and the x-substrate-replay header; nothing is stored and responses are unchanged. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
@@ -103,12 +109,16 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_INDEX_ARCHIVE_ALLOW_ROOTFS` | toggle | false | 1 \| true \| yes (case-insensitive; anything else is off) | an archive on the root filesystem is refused. See `docs/runbooks/index-archive.md` | mcp-server/index-archive.ts | yes |
 | `SUBSTRATE_INDEX_SCRATCH_URL` | secret-ref | none | scratch postgres URL | substrate index restore needs --scratch. See `docs/runbooks/index-archive.md` | mcp-server/index-run.ts | yes |
 | `SUBSTRATE_INDEX_TUNE` | mode | off | off \| apply (anything but apply is off) | off: no storage tune; anything but apply is off. See `docs/runbooks/index-archive.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` | toggle | off | on \| off (1/0, true/false, yes/no; anything else is off) | off: migrate() creates no planning_steering_audit table, so steering audit writes fail closed until an operator turns it on | mcp-server/planning/steering-store.ts | yes |
 | `SUBSTRATE_INDEX_VOLUME_BYTES` | number | none | bytes | no capacity runway row (the ceiling is unknown). See `docs/observability.md` | observability/config.ts | yes |
 | `SUBSTRATE_PLANNING_ROOT` | path | none | absolute checkout path | planning plane disabled: nothing under .planning/ is read and no default path exists | mcp-server/planning/config.ts | yes |
 | `SUBSTRATE_PLANNING_PRESENCE_TTL_S` | number | 90 | 1..86400 | 90 s: a session with no heartbeat for longer is stale | mcp-server/planning/config.ts | yes |
 | `SUBSTRATE_PLANNING_MAX_FILES` | number | 500 | 1..10000 | 500 documents per planning index; the rest are counted as truncated | mcp-server/planning/config.ts | yes |
 | `SUBSTRATE_PLANNING_MAX_BYTES` | number | 262144 | 1024..4194304 | 256 KiB per document; a larger document is an error record | mcp-server/planning/config.ts | yes |
+| `SUBSTRATE_PLANNING_CHECKPOINT_DIR` | path | none | absolute directory path | checkpoints stay in memory, and planning_status reports them as not durable | mcp-server/planning/config.ts | yes |
 | `SUBSTRATE_PLANNING_SCAN_INTERVAL_MS` | number | 15000 | 1000..3600000 | 15000 ms between planning observer scans; a change is seen within one interval | mcp-server/planning/config.ts | yes |
+| `SUBSTRATE_PLANNING_BASELINE_DIR` | path | none | absolute directory path | the observer baseline stays in memory: the first scan after a restart is a baseline, so a change made while the process was down is not published | mcp-server/planning/baseline-store.ts | yes |
+| `SUBSTRATE_PLANNING_LIVENESS_INTERVAL_MS` | number | 0 | whole milliseconds 0..3600000 (0 refreshes on every scan; the interval never exceeds a third of the presence window; not an integer or out of range: refused with a typed error naming the variable) | 0: a quiet checkout refreshes its presence record on every scan, so a long-idle session stays active while its process runs | mcp-server/planning/observer.ts | yes |
 
 ## Cache (loopback redis)
 
@@ -148,6 +158,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_BRIEF_RECALL_INTERVAL_S` | number | 120 | 30..3600 | 120 s. See `docs/data-planes.md` | mcp-server/recall-snapshot.ts | yes |
 | `SUBSTRATE_BRIEF_RECALL_TTL_S` | number | 900 | 60..86400 | 900 s. See `docs/data-planes.md` | mcp-server/recall-snapshot.ts | yes |
 | `SUBSTRATE_BRIEF_RECALL_BUDGET_MS` | number | 1500 | 100..10000 | 1500 ms. See `docs/data-planes.md` | mcp-server/recall-snapshot.ts | yes |
+| `SUBSTRATE_BRIEF_RECALL_SCOPE` | mode | off | off \| graph (case- and space-insensitive; anything else is off, named at boot) | off: the brief's recall lines are the surface's own banks only; graph adds up to three lines about the claimed node's graph and gives such a brief its own cache key. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 
 ## Recall plane (Hindsight)
 
@@ -201,6 +212,9 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT` | number | 0.3 | [0, 1] | 0.3. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_RAGFLOW_RERANK_ID` | string | none | reranker model id | no reranker: no rerank_id is sent. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_SEARCH_BUDGET_MS` | number | 4000 | 0 = no shared deadline | 4000 ms. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_DOCS_TANDEM` | toggle | off | off \| on (case- and space-insensitive; anything else is off, named at boot) | off: a docs search answers from its own plane only, as before; on adds the caller's Hindsight memory to a LightRAG answer as derived, never-cached items. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_DOCS_TANDEM_LIMIT` | number | 5 | 1..10 whole number (outside it is capped, not a number is 5, both named at boot) | 5 Hindsight hits asked for and merged. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_DOCS_TANDEM_BUDGET_MS` | number | 1500 | 50..10000 whole milliseconds (outside it is capped, not a number is 1500, both named at boot) | 1500 ms for the Hindsight leg; it never extends the search past it. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_RAG_MAX_RETRIES` | number | 2 | non-negative integer | 2 | mcp-server/config.ts | yes |
 | `SUBSTRATE_RAG_RETRY_BASE_MS` | number | 200 | positive integer ms | 200 ms | mcp-server/config.ts | yes |
 | `SUBSTRATE_RAG_BREAKER_THRESHOLD` | number | 3 | positive integer | 3 consecutive failures | mcp-server/config.ts | yes |

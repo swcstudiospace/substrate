@@ -289,6 +289,8 @@ describe("SOLANA_* anchor config", () => {
 			pubkey: null,
 			cli: SOLANA_CLI_DEFAULT,
 			problem: null,
+			signerSet: null,
+			signerSetProblem: null,
 		});
 	});
 
@@ -305,6 +307,8 @@ describe("SOLANA_* anchor config", () => {
 			pubkey: "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
 			cli: "/usr/local/bin/solana",
 			problem: null,
+			signerSet: null,
+			signerSetProblem: null,
 		});
 	});
 

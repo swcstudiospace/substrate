@@ -19,6 +19,7 @@ import {
 	INDEX_MIGRATE_STATEMENT_TIMEOUT_MS,
 	IndexStore,
 	MIGRATION_STEPS,
+	applicableMigrationSteps,
 	indexMigrateLockKey,
 } from "./index-store.ts";
 
@@ -34,12 +35,16 @@ interface FakeOptions {
 	failDdlAt?: number;
 	/** The advisory unlock query throws, as on a connection that died mid-migration. */
 	failUnlock?: boolean;
+	/** The opt-in migrations the store runs; absent is every opt-in off, the store's default. */
+	migrationOptIns?: { "steering-audit": boolean };
 }
 
 /** A recording stand-in for `sql.reserve()`'s connection, with a transactional in-memory `schema_migrations`. */
 function fakeIndex(options: FakeOptions = {}) {
 	const events: string[] = [];
 	const ledger = new Set(options.applied ?? []);
+	const tables = new Set<string>();
+	const columns = new Set<string>();
 	let pending: number[] = [];
 
 	const reserved = Object.assign(
@@ -101,9 +106,21 @@ function fakeIndex(options: FakeOptions = {}) {
 				else if (text === "RESET lock_timeout") events.push("reset lock_timeout");
 				else if (text === "RESET statement_timeout") events.push("reset statement_timeout");
 				else if (text === "drop index if exists memory_reviews_hash_idx") events.push("drop memory_reviews_hash_idx");
-				else if (ddl !== undefined) {
+				else if (/^drop table if exists \w+$/.test(text)) {
+					const table = text.slice("drop table if exists ".length);
+					tables.delete(table);
+					events.push(`drop table ${table}`);
+				} else if (/^alter table \w+ drop column if exists \w+$/.test(text)) {
+					const [table, column] = text.slice("alter table ".length).split(" drop column if exists ") as [string, string];
+					columns.delete(`${table}.${column}`);
+					events.push(`drop column ${table}.${column}`);
+				} else if (ddl !== undefined) {
 					events.push(`ddl ${ddl}`);
 					if (options.failDdlAt === ddl) throw new Error(`boom at step ${ddl}`);
+					const created = /^create table if not exists (\w+)/i.exec(text);
+					if (created?.[1]) tables.add(created[1]);
+					const added = /^alter table (\w+) add column if not exists (\w+)/i.exec(text);
+					if (added?.[1] && added[2]) columns.add(`${added[1]}.${added[2]}`);
 				} else events.push(`unexpected unsafe: ${text}`);
 				return [];
 			},
@@ -117,11 +134,13 @@ function fakeIndex(options: FakeOptions = {}) {
 	);
 
 	const sql = { reserve: async () => reserved } as unknown as SQL;
-	const store = new IndexStore("postgres://unused.invalid/index", { sql });
-	return { store, events, ledger };
+	const store = new IndexStore("postgres://unused.invalid/index", { sql, ...(options.migrationOptIns ? { migrationOptIns: options.migrationOptIns } : {}) });
+	return { store, events, ledger, tables, columns, reserved };
 }
 
-const ALL = MIGRATION_STEPS.map((step) => step.version);
+/** The steps `migrate()` runs by default: every opt-in off, so the opt-in steps 33 and 34 are neither run nor ledgered. */
+const ALL = applicableMigrationSteps({ "steering-audit": false }).map((step) => step.version);
+const ALL_WITH_STEERING_AUDIT = applicableMigrationSteps({ "steering-audit": true }).map((step) => step.version);
 
 const PROLOGUE = [
 	`set lock_timeout ${INDEX_MIGRATE_LOCK_TIMEOUT_MS}`,
@@ -133,9 +152,9 @@ const PROLOGUE = [
 const EPILOGUE = ["drop memory_reviews_hash_idx", "unlock", "reset lock_timeout", "reset statement_timeout", "release"];
 
 /** What `migrate()` must send when `applied` is already in the ledger and nothing fails. */
-function expectedRun(applied: ReadonlySet<number>): string[] {
+function expectedRun(applied: ReadonlySet<number>, versions: readonly number[] = ALL): string[] {
 	const body: string[] = [];
-	for (const version of ALL) {
+	for (const version of versions) {
 		body.push(`check ${version}`);
 		if (!applied.has(version)) body.push("begin", `ddl ${version}`, `ledger ${version}`, "commit");
 	}
@@ -147,6 +166,44 @@ const isDdl = (event: string): boolean => event.startsWith("ddl ") || event === 
 describe("IndexStore.migrate() against a fake connection", () => {
 	test("the harness itself: every step's text is distinct, so a recorded DDL maps to exactly one version", () => {
 		expect(DDL_VERSION.size).toBe(MIGRATION_STEPS.length);
+	});
+
+	test("the opt-in steps 33 and 34 are skipped by default: no check, no DDL, no ledger row", async () => {
+		const { store, events, ledger } = fakeIndex();
+		await store.migrate();
+		expect(ALL).not.toContain(33);
+		expect(ALL).not.toContain(34);
+		for (const version of [33, 34]) {
+			expect(events).not.toContain(`check ${version}`);
+			expect(events).not.toContain(`ddl ${version}`);
+			expect(ledger.has(version)).toBe(false);
+		}
+	});
+
+	test("with the steering-audit opt-in, steps 33 and 34 each apply in their own transaction and their downs reverse them", async () => {
+		const table = MIGRATION_STEPS.find((candidate) => candidate.version === 33);
+		const reason = MIGRATION_STEPS.find((candidate) => candidate.version === 34);
+		expect(table?.name).toBe("planning_steering_audit");
+		expect(table?.down).toBe("drop table if exists planning_steering_audit");
+		expect(reason?.name).toBe("planning_steering_audit_reason");
+		expect(reason?.down).toBe("alter table planning_steering_audit drop column if exists reason");
+		const { store, events, ledger, tables, columns, reserved } = fakeIndex({ migrationOptIns: { "steering-audit": true } });
+		await store.migrate();
+		expect(ALL_WITH_STEERING_AUDIT).toEqual([...ALL, 33, 34]);
+		expect(events).toEqual(expectedRun(new Set(), ALL_WITH_STEERING_AUDIT));
+		expect(ledger.has(33)).toBe(true);
+		expect(ledger.has(34)).toBe(true);
+		expect(tables.has("planning_steering_audit")).toBe(true);
+		expect(columns.has("planning_steering_audit.reason")).toBe(true);
+
+		await reserved.unsafe(reason?.down ?? "");
+		expect(columns.has("planning_steering_audit.reason")).toBe(false);
+		expect(tables.has("planning_steering_audit")).toBe(true);
+		expect(events.at(-1)).toBe("drop column planning_steering_audit.reason");
+
+		await reserved.unsafe(table?.down ?? "");
+		expect(tables.has("planning_steering_audit")).toBe(false);
+		expect(events.at(-1)).toBe("drop table planning_steering_audit");
 	});
 
 	test("an empty ledger: the full ordered sequence, one BEGIN..COMMIT with the ledger insert per step", async () => {

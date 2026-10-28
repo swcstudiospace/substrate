@@ -42,7 +42,9 @@ import {
 	type BriefSection,
 } from "./brief-profile.ts";
 import {
+	CACHE_TTL,
 	DOCS_GENERATION_KEY,
+	FORGET_MARK_MARGIN_S,
 	GRAPHS_GENERATION_KEY,
 	MEMORY_GENERATION_KEY,
 	RECALL_GENERATION_KEY,
@@ -54,7 +56,7 @@ import {
 	type ReadThroughCache,
 	type ScriptOutcome,
 } from "./cache.ts";
-import { isReviewToken, type LightragConfig, type SubstrateConfig } from "./config.ts";
+import { isReviewToken, operatorSurfaces, type LightragConfig, type SubstrateConfig } from "./config.ts";
 import type { DbPlane } from "./db-endpoints.ts";
 import { DesktopBusy, type DesktopDriver, type DesktopLogEntry, type DesktopRunResult } from "./desktop/driver.ts";
 import {
@@ -114,6 +116,7 @@ import {
 	GreptimeClient,
 	INGEST_LAG_MS,
 	IngestNotRecorded,
+	MAX_QUERY_LIMIT,
 	queryLimit,
 	type EventQuery,
 	type LedgerCapacity,
@@ -138,11 +141,30 @@ import { createMirror, type EdgeOutcome, type EdgeRelation, type Mirror, type Mi
 import { runDodGate, type DodEvidence } from "./dod-gate.ts";
 import { nodeArtifact, type NodeArtifact } from "./node-artifact.ts";
 import { CAUSAL_WINDOW, LINKED_EVENTS, causalChain, graphLinks, type ReducedEvent } from "./memory-graph.ts";
-import { normalizeSubject } from "./memory-policy.ts";
+import { memoryExpiry, normalizeSubject, visibleToCaller } from "./memory-policy.ts";
 import { briefFanoutOf, fanOutBriefRecall, recallMemories, resolveRecallBanks, UNTRUSTED_MEMORY_NOTICE, type BankAnswer, type RecallReply } from "./memory-recall.ts";
 import { emitRetainWarning, forwardRetain, replayRetain, retainDocumentId, type RetainDeps, type RetainOutboxSink } from "./memory-retain.ts";
 import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
+import { forgetEntries, selectForRollback, type ForgetReport, type ForgetRequest, type PlaneDeleteResult, type RollbackSelectRequest, type RollbackSelection } from "./memory-forget.ts";
+import { ForgetUnavailableError, forgetDocumentId, planeDeleteFor } from "./memory-forget-plane.ts";
+import { verifyMemoryRecord, MemoryVerifyError, type MemoryVerifyResult } from "./memory-verify.ts";
+import { anchorEvidenceFor, verifyCheckpointRef, type AnchorVerifyPorts, type CheckpointVerifyToolResult, type SignerSetSummary } from "./anchor-verify-deps.ts";
+import { CheckpointVerifyError } from "./checkpoint-verify.ts";
+import {
+	DEFAULT_ANCHOR_TIMEOUT_MS,
+	ROLLBACK_SELECTION_LIMIT,
+	sessionCheckpoint,
+	sessionRollbackCommit,
+	sessionRollbackPlan,
+	type CheckpointResult,
+	type CommitResult,
+	type EntrySelection,
+	type PlanResult,
+	type RollbackCaller,
+	type SessionNotes,
+	type SessionRollbackDeps,
+} from "./session-rollback.ts";
 import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachable.ts";
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth, type HindsightConfig } from "./planes/hindsight.ts";
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
@@ -151,9 +173,15 @@ import { RailwayClient } from "./railway.ts";
 import { nodePlanningFs } from "./planning/fs.ts";
 import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
 import { DragonflyPresenceStore } from "./planning/presence-dragonfly.ts";
-import { PlanningObserver, type PlanningObserverDeps } from "./planning/observer.ts";
+import { PlanningObserver, type PlanningObserverDeps, type PlanningTimers } from "./planning/observer.ts";
+import { FileBaselineStore } from "./planning/baseline-store.ts";
 import { PlanningReader } from "./planning/read.ts";
 import { greptimeMetricSink, stdoutMetricSink } from "./planning/telemetry.ts";
+import { completionStoreView, type CompletionStoreView } from "./planning/checkpoint-store.ts";
+import type { SteeringWiring } from "./planning/steering-tools.ts";
+import { SteeringInbox, type SteeringHistorySink } from "./planning/steering.ts";
+import { DEFAULT_STEERING_RESTORE_LIMIT, DEFAULT_STEERING_RESTORE_MAX_PAGES, restoreSteeringInboxPaged, type SteeringAuditSink, type SteeringRestoreStop } from "./planning/steering-store.ts";
+import { SteeringExpirySweeper, SteeringHintAnnouncer, steeringNoticeFor, type SessionStatePort, type SteeringNotice } from "./planning/steering-delivery.ts";
 import type { FabricSources } from "./fabric/types.ts";
 import { FABRIC_HEALTH_WINDOW_MS } from "./fabric/gather.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
@@ -166,14 +194,17 @@ import {
 	buildRecallQuery,
 	fanoutFresh,
 	fanoutSnapshot,
+	GRAPH_RECALL_MAX_HITS,
 	fanoutSnapshotArgs,
 	parseRecallSnapshot,
 	recallBriefResult,
 	recallKey,
+	recallScopeKey,
 	RECALL_TITLE_PREFIX,
 	recallSnapshotArgs,
 	repoScope,
 	snapshotState,
+	withGraphScope,
 	type RecallLook,
 	type RecallSnapshot,
 } from "./recall-snapshot.ts";
@@ -566,6 +597,12 @@ export interface EmitOptions {
 	replay?: boolean;
 }
 
+/** Who is forgetting: the authenticated surface (the ledger note's own `surface`) and, when it has one, its session. */
+export interface ForgetCaller {
+	surface: Surface;
+	session_id?: string;
+}
+
 /** What `SUBSTRATE_EVENT_IDEMPOTENCY` makes of one request: its validated key (null: none) and whether it takes the ledger lookup. */
 interface IdempotencyPlan {
 	key: string | null;
@@ -672,6 +709,12 @@ export const VERIFY_PENDING_MS = 3 * HOUR_MS;
 export const VERIFY_RPC_TIMEOUT_MS = 5_000;
 export const VERIFY_RPC_ATTEMPTS = 2;
 export const VERIFY_RPC_BACKOFF_MS = 200;
+/** What `memory_verify` waits for the anchor lookup: it reads the hour's leaves, then the chain, so it gets more than a single read. */
+export const MEMORY_VERIFY_ANCHOR_TIMEOUT_MS = 15_000;
+/** Pages of 500 notes one rollback tool reads to find a session's checkpoints (4,000 notes), so a chatty session cannot make a tool read without end. */
+export const ROLLBACK_NOTE_PAGES = 8;
+/** Rows per page of that read (the ledger's own per-read cap). */
+export const ROLLBACK_NOTE_PAGE_ROWS = MAX_QUERY_LIMIT;
 /**
  * Cap on the time reserved for the `/verify` response after the last hour
  * check (D28-18). The CLI waits out the whole-verify budget, so every hour
@@ -1361,6 +1404,8 @@ export class Substrate {
 	private readonly briefOptions: { budgetMs: number; recentWindowDays: number; graphRead: "full" | "lite" };
 	// uplift-5 U5-3 — `SUBSTRATE_CACHE_BUMP_SCOPE=narrow`: a retain bumps the recall generation, a brief drops the heartbeat-bumped graph key.
 	private readonly narrowBumps: boolean;
+	/** The devnet RPC a test injected for `checkpoint_verify` and `memory_verify`; null builds one from config on first use. */
+	private readonly rpcOverride: Rpc | null;
 	// uplift-4 S5 — recall in the brief and the Hindsight inventory
 	/** The wanted registry, the prefetch timer and the post-retain refresh; inert unless `SUBSTRATE_BRIEF_RECALL` is `shadow` or `enforce`. */
 	private readonly recall: RecallPrefetcher;
@@ -1378,8 +1423,18 @@ export class Substrate {
 	readonly eventBus: EventBus | null;
 	/** Phase 52: the planning reads behind `planning_status` and `planning_sessions`. Read-only: they write nothing. Disabled unless `SUBSTRATE_PLANNING_ROOT` is set. */
 	readonly planning: PlanningReader;
+	/** Phase 53 (SOTA-09): the steering wiring. `inbox` is null unless steering is on and an audit sink is injected, so a write answers not-configured. */
+	readonly steering: SteeringWiring;
 	/** Phase 52: the planning observer, the plane's only writer: it publishes a checkout's change and heartbeats it. Started by `startPlanning`. */
 	readonly planningObserver: PlanningObserver;
+	/** Phase 58: the Postgres audit sink behind the inbox while `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` is on (or a test injects one). Null keeps the inbox in memory. */
+	private readonly steeringDurable: SteeringAuditSink | null;
+	/** Phase 58: closes directives nobody acknowledged in time. Null unless the inbox is durable. Started by `startSteering`. */
+	private readonly steeringSweeper: SteeringExpirySweeper | null;
+	/** Phase 58: one wake-up hint per queued directive. */
+	readonly steeringHints: SteeringHintAnnouncer;
+	/** Phase 58: the live session state an acknowledgement drives. Null in this branch's production wiring: the adapter joins when the live session state machine does. */
+	readonly sessionState: SessionStatePort | null;
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
@@ -1400,8 +1455,23 @@ export class Substrate {
 			railway?: RailwayClient;
 			/** Tests inject the bus through this factory; production builds it from config. */
 			eventBus?: () => EventBus | null;
+			/** Tests inject the devnet RPC the verification tools read through; production builds one from `SOLANA_RPC_URL`. */
+			rpc?: Rpc;
 			/** Tests inject the planning filesystem, presence store and ledger write; production builds them from config. */
-			planning?: Partial<Omit<PlanningObserverDeps, "settings">>;
+			planning?: Partial<Omit<PlanningObserverDeps, "settings">> & { checkpoints?: CompletionStoreView };
+			/**
+			 * Tests and wiring inject the steering audit sink. With none, the steering writes answer not-configured and record nothing.
+			 * `durable` is a sink that also reads (the Postgres one): it becomes the inbox's history, the restart reads come from it and
+			 * the expiry sweep runs. Without it, no restore and no sweep happen.
+			 */
+			steering?: {
+				history: SteeringHistorySink | null;
+				durable?: SteeringAuditSink | null;
+				sessionState?: SessionStatePort | null;
+				timers?: PlanningTimers;
+				nowMs?: () => number;
+				report?: (line: string) => void;
+			};
 		},
 		observer: SubstrateObserver = {},
 	) {
@@ -1425,6 +1495,8 @@ export class Substrate {
 					? new IndexStore(config.postgresUrl, {
 							gate: this.planes.gate("index"),
 							tune: config.indexArchive.tune,
+							// Phase 53 (SOTA-09): the steering audit table is created only when its opt-in is on.
+							migrationOptIns: { "steering-audit": config.steeringAuditTable },
 							// uplift-3 N4: the mode is config, the count goes to the observer.
 							memoryExpiry: {
 								mode: config.memoryExpiry,
@@ -1473,7 +1545,15 @@ export class Substrate {
 		const planningDeps = stores?.planning ?? {};
 		const planningFs = planningDeps.fs ?? nodePlanningFs();
 		const planningPresence = planningDeps.presence !== undefined ? planningDeps.presence : productionPresence(config);
-		this.planning = new PlanningReader({ settings: config.planning, fs: planningFs, presence: planningPresence });
+		this.planning = new PlanningReader({ settings: config.planning, fs: planningFs, presence: planningPresence, checkpoints: planningDeps.checkpoints ?? completionStoreView(config.planningCheckpoint) });
+		const baselineDirectory = config.planningBaseline.ok ? config.planningBaseline.directory : null;
+		const baselineProblems = config.planningBaseline.ok ? [] : config.planningBaseline.errors;
+		const livenessProblems = config.planningLiveness.ok ? [] : config.planningLiveness.errors;
+		// A bad baseline directory or liveness interval never refuses boot: the keys are named once, and the observer runs with
+		// an in-memory baseline and the default liveness interval (every scan), which is what unset means.
+		if (baselineProblems.length + livenessProblems.length > 0) {
+			process.stderr.write(`[substrate] planning settings invalid; using the defaults for: ${[...baselineProblems, ...livenessProblems].map((error) => error.key).join(", ")}\n`);
+		}
 		// Phase 54 (SOTA-10): a planning transition is a metric row only when the metrics-history switch is on (the ledger's
 		// writer then stores it). Otherwise it goes to stdout alone, so the documented off switch writes no metric_samples row.
 		const transitionWriter = this.greptime;
@@ -1481,7 +1561,8 @@ export class Substrate {
 			settings: config.planning,
 			fs: planningFs,
 			presence: planningPresence,
-			emit: planningDeps.emit ?? (async (event: EventInput) => (await this.emit(event)).stored),
+			// A keyed conflict warning asks for the replay lookup, so under `accept` as under `enforce` any number of observers leave one row.
+			emit: planningDeps.emit ?? (async (event: EventInput) => (await this.emit(event, { replay: true })).stored),
 			metrics:
 				planningDeps.metrics ??
 				(config.metricsHistory.enabled && transitionWriter !== null
@@ -1489,10 +1570,55 @@ export class Substrate {
 					: stdoutMetricSink()),
 			fallback: planningDeps.fallback,
 			clock: planningDeps.clock,
+			dedup: planningDeps.dedup ?? config.eventIdempotency !== "off",
+			timers: planningDeps.timers,
+			report: planningDeps.report,
+			now: planningDeps.now,
+			baselineSaveIntervalMs: planningDeps.baselineSaveIntervalMs,
+			baselines: planningDeps.baselines !== undefined ? planningDeps.baselines : baselineDirectory === null ? null : new FileBaselineStore(baselineDirectory),
+			// Liveness runs whenever presence does: a quiet checkout is alive while its observer scans.
+			liveness: planningDeps.liveness !== undefined ? planningDeps.liveness : planningPresence === null ? null : { intervalMs: config.planningLiveness.ok ? config.planningLiveness.settings.intervalMs : 0 },
 		});
+		// Phase 53 (SOTA-09): the steering inbox. Built only while SUBSTRATE_PLANNING_STEERING is on and an audit sink exists.
+		// Invalid settings keep the tools registered, so they answer `misconfigured` naming the keys, and the keys are logged once at boot.
+		// Phase 58: the acknowledgement deadline and sweep interval are part of those settings.
+		const steeringSettings = config.steering.ok ? config.steering.settings : null;
+		const steeringErrors = [...(config.steering.ok ? [] : config.steering.errors), ...(config.steeringExpiry.ok ? [] : config.steeringExpiry.errors)];
+		if (steeringErrors.length > 0) {
+			process.stderr.write(`[substrate] steering settings invalid; steering tools answer misconfigured: ${steeringErrors.map((error) => error.key).join(", ")}\n`);
+		}
+		const steeringSeam = stores?.steering;
+		// The durable sink: injected, or the audit table's own sink when its opt-in is on and an index exists. Any other case
+		// keeps the inbox exactly as it was before phase 58: in memory, with whatever history was injected (none in production).
+		this.steeringDurable =
+			steeringSeam !== undefined
+				? (steeringSeam.durable ?? null)
+				: config.steeringAuditTable && steeringSettings !== null && steeringSettings.enabled && this.index !== null
+					? this.index.steeringAudit()
+					: null;
+		const steeringHistory = this.steeringDurable ?? steeringSeam?.history ?? null;
+		const steeringClock = { nowMs: steeringSeam?.nowMs ?? (() => Date.now()) };
+		const ackTtlMs = this.steeringDurable !== null && config.steeringExpiry.ok ? config.steeringExpiry.settings.ackTtlMs : undefined;
+		const steeringInbox =
+			steeringSettings !== null && steeringSettings.enabled && steeringHistory !== null && steeringErrors.length === 0
+				? new SteeringInbox({ history: steeringHistory, clock: steeringClock, policy: ackTtlMs === undefined ? steeringSettings : { ...steeringSettings, ackTtlMs } })
+				: null;
+		this.steering = {
+			enabled: config.steeringRegistered,
+			clock: steeringClock,
+			settingsErrors: steeringErrors,
+			inbox: steeringInbox,
+		};
+		this.sessionState = steeringSeam?.sessionState ?? null;
+		this.steeringHints = new SteeringHintAnnouncer({ emit: async (event: EventInput) => (await this.emit(event)).stored, report: steeringSeam?.report });
+		this.steeringSweeper =
+			steeringInbox !== null && this.steeringDurable !== null && config.steeringExpiry.ok
+				? new SteeringExpirySweeper({ inbox: steeringInbox, intervalMs: config.steeringExpiry.settings.expirySweepMs, nowMs: steeringSeam?.nowMs, timers: steeringSeam?.timers, report: steeringSeam?.report })
+				: null;
 		// uplift-2 R1
 		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays, graphRead: config.requestPath.briefGraphRead };
 		this.narrowBumps = config.requestPath.cacheBumpScope === "narrow";
+		this.rpcOverride = stores?.rpc ?? null;
 		this.planningBaseDir = stores?.planningBaseDir ?? process.cwd();
 		// uplift-2 R3: the outbox hydrates its file (if any) now, so entries parked
 		// before a restart are due again from the first drain tick. Every drop —
@@ -1545,6 +1671,7 @@ export class Substrate {
 						text: hit.text,
 						...(hit.scope !== undefined ? { scope: hit.scope } : {}),
 						...(hit.type !== undefined ? { type: hit.type } : {}),
+						...(hit.graph_id !== undefined ? { graph_id: hit.graph_id } : {}),
 					})),
 				};
 			},
@@ -1803,6 +1930,8 @@ export class Substrate {
 				// The recall mode changes the rendered text, so it is in every key the text lives under
 				// (answer, last-good snapshot): a shadow entry is never served as enforce, nor the reverse.
 				...recallKey(recallActive ? recallMode : "off", recallActive ? this.recallBankOf(request.surface) : null),
+				// Only an enforcing, active recall shows the scope's lines, so only that brief gets the scope's key part.
+				...recallScopeKey(recallActive && recallMode === "enforce" ? this.config.contextualRecall.recallScope : "off"),
 			};
 			const encoded = await this.cache.getOrLoad({
 				klass: "brief",
@@ -1845,6 +1974,8 @@ export class Substrate {
 								lastGood: async () => {
 									const good = await this.cache.peekQuiet<BriefSnapshot>("brief-snapshot", request.surface, args);
 									if (good === null) return null;
+									// A snapshot saved at or before the last forget may carry forgotten text, and a mark that cannot be read is not "no forget".
+									if (!(await this.cache.snapshotSurvivesForget(good.at, true))) return null;
 									const atMs = Date.parse(good.at);
 									// An absent `until` is a snapshot from before the deadline was recorded: its lease or
 									// reverify time is unknown, so it is not a last-good. Null means "no deadline", a number
@@ -1899,8 +2030,10 @@ export class Substrate {
 				await noteRecall(sections, detail);
 				return detail;
 			}
-			const snapshot =
+			const found =
 				this.config.briefSnapshotTtlS > 0 ? await this.cache.peek<BriefSnapshot>("brief-snapshot", request.surface, args) : null;
+			// Refused like an absent snapshot (the degraded brief below) when it was saved at or before the last forget, or the mark cannot be read.
+			const snapshot = found !== null && (await this.cache.snapshotSurvivesForget(found.at, false)) ? found : null;
 			if (snapshot === null) {
 				const detail = this.servedBrief(live, sections, "degraded", failed, null, requestedProfile, profileSurface);
 				await noteRecall(sections, detail);
@@ -1941,6 +2074,15 @@ export class Substrate {
 	private recallBankOf(surface: string): string | null {
 		const hindsight = hindsightFromEnv();
 		return hindsight === null ? null : bankForSurface(hindsight, surface);
+	}
+
+	/**
+	 * The graph a graph-scoped brief recall reads (`SUBSTRATE_BRIEF_RECALL_SCOPE=graph`): the graph the brief asks about,
+	 * in the form the ledger and index store it. Null under `off` (the default) and when the request names none, which is
+	 * what leaves the recall exactly as it was.
+	 */
+	private recallGraphId(request: BriefRequest): string | null {
+		return this.config.contextualRecall.recallScope === "graph" ? normalizeIdentifier(request.graph_id) : null;
 	}
 
 	/** The Hindsight config a recall for this request may use, or null: no repo, no Hindsight, a VM guest, no cache, or a surface outside the list. */
@@ -1990,22 +2132,31 @@ export class Substrate {
 		const ttlS = this.config.briefRecall.ttlS;
 		const subjects = this.recall.registry.forSurface(surface, now, WANTED_MAX).find((pair) => pair.repo === repo)?.subjects ?? [];
 		const query = buildRecallQuery(repo, subjects);
-		const args = fanoutSnapshotArgs(repo, banks, query);
+		const scope = this.config.contextualRecall.recallScope;
+		const graphId = this.recallGraphId(request);
+		// Under `graph` the answer holds the claimed graph's lines, so another graph (or none) must never be served this entry; under `off` the key is the key it was.
+		const args = { ...fanoutSnapshotArgs(repo, banks, query), ...(scope === "graph" && graphId !== null ? { graph: graphId } : {}) };
+		let unchecked = false;
+		const index = this.index;
 		const fanOut = async (): Promise<RecallSnapshot | null> => {
+			unchecked = false;
 			const fanout = await fanOutBriefRecall(
 				{ config: hindsight, banks, fetchImpl: this.hindsightFetch, budgetMs: briefRecallBudgetMs(this.config.briefRecall.budgetMs) },
 				query,
 				{ surface, repo },
 				{
 					// Another repo's copy of the same text must not reach the cross-bank dedupe, where it could hide this repo's own copy.
-					keep: (hit) => hit.metadata.scope === repoScope(repo),
+					keep: (hit) => hit.metadata.scope === repoScope(repo) || (graphId !== null && hit.metadata.graph_id === graphId),
 					onAnswer: (bankAnswer) => {
 						answers.set(bankAnswer.bank, bankAnswer);
 					},
+					// The same rule `recallMemories` applies: a forget whose plane delete is still pending must not keep serving its text in a brief.
+					// A lookup that fails withholds the hits that name an entry, and the answer is not stored.
+					...(index === null ? {} : { forgotten: (ids: readonly string[]) => index.forgottenEntryIds(ids), onUnchecked: () => { unchecked = true; } }),
 				},
 			);
 			if (fanout.answered.length === 0) return null;
-			return fanoutSnapshot(fanout.answered, fanout.hits, repo, bankForSurface(hindsight, surface), now);
+			return withGraphScope(scope, fanoutSnapshot(fanout.answered, fanout.hits, repo, bankForSurface(hindsight, surface), now), fanout.hits, graphId, GRAPH_RECALL_MAX_HITS);
 		};
 		let fetched = false;
 		// A hit returns the stored entry, which is validated below; a load runs the fan-out and stores its answer.
@@ -2015,7 +2166,8 @@ export class Substrate {
 			args,
 			generations: [MEMORY_GENERATION_KEY, RECALL_GENERATION_KEY],
 			refreshAt: (loaded) => (loaded === null ? null : Date.parse(loaded.at) + ttlS * 1000),
-			store: (loaded) => loaded !== null,
+			// An answer whose forgotten-entry check failed is withheld in part: served once, never held for the TTL.
+			store: (loaded) => loaded !== null && !unchecked,
 			load: async () => {
 				fetched = true;
 				return fanOut();
@@ -2041,9 +2193,16 @@ export class Substrate {
 			const answer = answers.get(bank);
 			return answer === undefined ? [] : [answer];
 		});
+		const scope = this.config.contextualRecall.recallScope;
 		const fanout = briefFanoutOf(completed);
 		if (fanout.answered.length === 0) return null;
-		return fanoutSnapshot(fanout.answered, fanout.hits, repo, bankForSurface(target.hindsight, request.surface), Date.now());
+		return withGraphScope(
+			scope,
+			fanoutSnapshot(fanout.answered, fanout.hits, repo, bankForSurface(target.hindsight, request.surface), Date.now()),
+			fanout.hits,
+			this.recallGraphId(request),
+			GRAPH_RECALL_MAX_HITS,
+		);
 	}
 
 	/** The compose options recall adds: the subject sink in `shadow` and `enforce`, and the fan-out read only in `enforce` (the shadow text is exactly today's). `onCut` runs when the read is cut at the cap. */
@@ -2797,6 +2956,7 @@ export class Substrate {
 		const surface = callerSurface ?? "unattributed";
 		const config = hindsightFromEnv();
 		const banks = hindsightBanksFromEnv();
+		const index = this.index;
 		return this.cache.getOrLoad({
 			klass: "memory-search",
 			surface,
@@ -2822,6 +2982,9 @@ export class Substrate {
 						vmGuest: this.config.vmGuest,
 						fetchImpl: this.hindsightFetch,
 						budgetMs: budgetMs ?? this.config.hindsightBudgets.recallBudgetMs,
+						// A forgotten entry's document can outlive the forget (a plane delete that is still pending): its text is
+						// withheld here, from the index's own record, until the deletion lands.
+						...(index === null ? {} : { forgotten: (ids: readonly string[]) => index.forgottenEntryIds(ids) }),
 					},
 					query,
 					callerSurface,
@@ -2861,6 +3024,7 @@ export class Substrate {
 		if (left > 0 && this.retainOutbox.size() > 0) {
 			await Promise.race([this.drainRetainOutbox(), Bun.sleep(left)]);
 		}
+		if (options.abandon === true) this.stopRetainDrain();
 		if (options.abandon === true && !this.retainOutbox.durable) this.retainOutbox.abandonAll();
 		await this.awaitTrackedRetains(Math.max(0, deadline - Date.now()));
 	}
@@ -2899,10 +3063,69 @@ export class Substrate {
 		return this.planningObserver.start();
 	}
 
-	/** Phase 52: clear the planning observer's timer, then resolve once a scan in flight has finished. The caller bounds the wait. */
+	/**
+	 * Phase 52: clear the planning observer's timer, then resolve once a scan in flight has finished. The caller bounds the wait.
+	 * Phase 58: the baseline is then flushed, so a clean stop loses no baseline advance. The flush never rejects.
+	 */
 	async stopPlanning(): Promise<void> {
 		this.planningObserver.stop();
 		await this.planningObserver.idle();
+		await this.planningObserver.flushBaseline();
+	}
+
+	/**
+	 * Phase 58 (live steering): bring the durable inbox up. With the audit table opt-in on, the open directives are read back
+	 * from `planning_steering_audit` into the inbox (nothing is audited by a restore), then the expiry sweep timer starts (unref'd).
+	 * A read that fails is reported on stderr and the inbox starts empty: it never refuses boot. Without a durable sink this
+	 * does nothing. Safe to call twice: a restore is idempotent and the sweeper starts once.
+	 */
+	async startSteering(): Promise<{ restored: number; skipped: number; truncated: boolean; readFailed: string | null; sweeping: boolean }> {
+		const inbox = this.steering.inbox;
+		const sink = this.steeringDurable;
+		const none = { restored: 0, skipped: 0, truncated: false, readFailed: null, sweeping: false };
+		if (inbox === null || sink === null) return none;
+		let outcome: { restored: number; skipped: number; truncated: boolean; readFailed: string | null; stoppedBy: SteeringRestoreStop | null } = { restored: 0, skipped: 0, truncated: false, readFailed: null, stoppedBy: null };
+		try {
+			// Every page of open directives, not one read: a directive past the first page would otherwise be missed until the next restart. The page cap is named when hit.
+			const result = await restoreSteeringInboxPaged(inbox, sink, { limit: DEFAULT_STEERING_RESTORE_LIMIT, maxPages: DEFAULT_STEERING_RESTORE_MAX_PAGES });
+			if (result.ok) {
+				outcome = { restored: result.value.report.restored.length, skipped: result.value.report.skipped.length, truncated: result.value.truncated, readFailed: null, stoppedBy: result.value.stoppedBy };
+			} else {
+				outcome = { ...outcome, readFailed: result.error.code };
+			}
+		} catch (cause) {
+			// A restore must never refuse boot: the directives stay in the append-only table, and the inbox starts empty.
+			outcome = { ...outcome, readFailed: cause instanceof Error && cause.name !== "" ? cause.name : "UNKNOWN" };
+		}
+		if (outcome.readFailed !== null) {
+			process.stderr.write(`[substrate] steering restore failed (${outcome.readFailed}); the inbox starts empty and the open directives stay in planning_steering_audit\n`);
+		} else {
+			process.stdout.write(`[substrate] steering: ${outcome.restored} open directive(s) restored${outcome.skipped > 0 ? `, ${outcome.skipped} skipped` : ""}${outcome.truncated ? ` (not every open directive was restored: ${outcome.stoppedBy ?? "truncated"}; the rest stay in planning_steering_audit)` : ""}\n`);
+		}
+		const { stoppedBy: _stoppedBy, ...restored } = outcome;
+		return { ...restored, sweeping: this.steeringSweeper?.start() ?? false };
+	}
+
+	/** Phase 58: clear the expiry timer and start no further pass, then resolve once a pass in flight has finished. The caller bounds the wait. */
+	async stopSteering(): Promise<void> {
+		this.steeringSweeper?.stop();
+		await this.steeringSweeper?.idle();
+	}
+
+	/**
+	 * Phase 58: the `steering` notice for one session's `docs_search`, or null: steering off, no session named, nothing queued, or
+	 * the inbox could not be read. Never throws. The inbox is in memory, so this is a map walk and never delays a search.
+	 */
+	private steeringNoticeOf(sessionId: string | undefined): SteeringNotice | null {
+		const inbox = this.steering.inbox;
+		if (inbox === null || sessionId === undefined) return null;
+		try {
+			return steeringNoticeFor(inbox, sessionId, this.steering.clock.nowMs());
+		} catch (cause) {
+			// Fail-open: a notice is a courtesy on a search that already succeeded. A fault here is reported and the reply goes out without it.
+			process.stderr.write(`[substrate] steering notice skipped: ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200)}\n`);
+			return null;
+		}
 	}
 
 	/** Start the recall prefetch, the Hindsight inventory and the cache preloader (phase 47). The first two are no-ops while their flags are off; each timer is unref'd. */
@@ -3036,6 +3259,17 @@ export class Substrate {
 	}
 
 	/**
+	 * Stop the periodic outbox drain. The timer is unref'd, so a process never waits on it, but a Substrate rebuilt in the
+	 * same process (an embedded host, a restart test) would otherwise leak one live interval per boot. Shutdown calls it
+	 * through `drainPendingRetains({ abandon: true })`; the durable outbox keeps its entries for the next boot either way.
+	 */
+	private stopRetainDrain(): void {
+		if (this.retainDrainTimer === null) return;
+		clearInterval(this.retainDrainTimer);
+		this.retainDrainTimer = null;
+	}
+
+	/**
 	 * One outbox pass: serial, one plane call per entry, skipped by the outbox
 	 * while the breaker is open. `all` ignores the backoff schedule — the
 	 * recovery path and tests use it; the timer and shutdown replay due entries.
@@ -3101,6 +3335,297 @@ export class Substrate {
 			if (outcome.queued === true) return { transient: outcome.reason ?? "retain-network" };
 			return "permanent";
 		});
+	}
+
+	/**
+	 * Forget memory entries (v1.6 phase 57): mark them out of force in the index (recall, the brief and search stop
+	 * serving them at once), delete their Hindsight documents, and emit ONE `note` with `payload.action: "memory.forget"`
+	 * as the caller's surface. The rows and the ledger stay for audit; see `memory-forget.ts` for the contract.
+	 *
+	 * An internal method (no tool): the rollback path calls it. A plane failure never undoes the index mark, it is reported
+	 * as pending and a re-run of the same request retries only that deletion. The plane delete is chained behind any live
+	 * or replayed retain of the same document, so a forward still in flight cannot land after the delete and bring it back.
+	 * When a mark may have changed a row, or a plane delete newly removed a document (a re-run that only completes a pending
+	 * deletion changes no row but removes a document a cached recall may still carry), the recall and memory generations
+	 * move, so a cached search, brief or recall never serves a forgotten entry. A pure no-op moves nothing. Throws
+	 * `ForgetUnavailableError` without an index and `ForgetError` for a bad request.
+	 */
+	async memoryForget(request: ForgetRequest, caller: ForgetCaller): Promise<ForgetReport> {
+		const index = this.index;
+		if (index === null) throw new ForgetUnavailableError();
+		const hindsight = hindsightFromEnv();
+		const deletePlane = planeDeleteFor({
+			config: hindsight,
+			vmGuest: this.config.vmGuest,
+			fetchImpl: this.hindsightFetch,
+			timeoutMs: this.config.hindsightBudgets.retainTimeoutMs,
+		});
+		// A mark that throws may still have committed (the statement is one, but the reply can be lost), so it counts as touched.
+		let touched = false;
+		try {
+			const report = await forgetEntries(
+				{
+					readEntry: (id) => index.readEntry(id),
+					markForgotten: async (ids, marker) => {
+						try {
+							const changed = await index.markMemoryForgotten(ids, marker);
+							if (changed.length > 0) touched = true;
+							return changed;
+						} catch (cause) {
+							touched = true;
+							throw cause;
+						}
+					},
+					// The shared-document check runs inside the document's retain queue, next to the delete it guards: a retain
+					// of the same document that was queued first has landed, and one that lands later is a new write the delete
+					// does not remove. Asked before the queue, a replacement written in between would be deleted with it.
+					deletePlaneDocument: (entry) => {
+						const documentId = hindsight === null ? null : forgetDocumentId(entry);
+						const guarded = async (): Promise<PlaneDeleteResult> => ((await index.memoryDocumentShared(entry)) ? { ok: true, skipped: "document-shared" } : deletePlane(entry));
+						if (hindsight === null || documentId === null) return guarded();
+						return this.chainRetain(`${hindsight.url} ${bankForSurface(hindsight, entry.writer)} ${documentId}`, guarded);
+					},
+					emit: async (payload, summary, meta) => {
+						const sessionId = caller.session_id ?? payload.session_id;
+						const emitted = await this.emit({
+							surface: caller.surface,
+							kind: "note",
+							summary,
+							actor: payload.actor,
+							...(sessionId !== undefined ? { session_id: sessionId } : {}),
+							payload: { ...payload },
+							idempotency_key: meta.idempotency_key,
+						});
+						// `emit` reports a ledger that is down as `stored: false` instead of throwing; `forgetEntries` reads a throw as "not emitted".
+						if (!emitted.stored) throw new Error(emitted.error ?? "the event ledger did not store the note");
+					},
+					now: () => Date.now(),
+				},
+				request,
+			);
+			if (report.plane.deleted > 0) touched = true;
+			return report;
+		} finally {
+			// `bump` never throws: a failed bump marks the generation stale, which the cache reads as a bypass until a bump lands.
+			// A saved brief has no generation, so the forget is also marked by time; held past the longest snapshot it must refuse (the TTL a restart may have lowered included).
+			if (touched) {
+				await Promise.all([
+					this.cache.bump(RECALL_GENERATION_KEY),
+					this.cache.bump(MEMORY_GENERATION_KEY),
+					this.cache.markForget(Math.max(this.config.briefSnapshotTtlS, CACHE_TTL["brief-snapshot"]) + FORGET_MARK_MARGIN_S),
+				]);
+			}
+		}
+	}
+
+	/**
+	 * The entries a rollback to `request.after` should forget: written in the session (and graph) strictly after the
+	 * instant and still in force, over `IndexStore.memoryEntriesCreatedAfter`. Read-only. Feed the ids to `memoryForget`
+	 * in batches of `MAX_FORGET_ENTRIES`, then ask again while `truncated` is true.
+	 */
+	async selectMemoryForRollback(request: RollbackSelectRequest): Promise<RollbackSelection> {
+		const index = this.index;
+		if (index === null) throw new ForgetUnavailableError();
+		return selectForRollback(
+			{ entriesCreatedAfter: (sessionId, afterIso, graphId, limit, untilIso) => index.memoryEntriesCreatedAfter(sessionId, afterIso, graphId, limit, untilIso) },
+			request,
+		);
+	}
+
+	/** The ledger and devnet reads anchor verification goes through. Built per call; the RPC client is built on first use, so an unconfigured Solana never constructs one. */
+	private anchorVerifyPorts(): AnchorVerifyPorts {
+		let rpc: Rpc | null = null;
+		return {
+			ledger: this.greptime,
+			rowToEvent,
+			rpc: () => {
+				rpc ??= this.rpcOverride ?? createRpc({ url: this.config.solana.rpcUrl, timeoutMs: VERIFY_RPC_TIMEOUT_MS, attempts: VERIFY_RPC_ATTEMPTS, backoffMs: VERIFY_RPC_BACKOFF_MS });
+				return rpc;
+			},
+			solana: {
+				pubkey: this.config.solana.pubkey,
+				problem: this.config.solana.problem,
+				signerSet: this.config.solana.signerSet,
+				signerSetProblem: this.config.solana.signerSetProblem,
+			},
+			operatorSurfaces: operatorSurfaces(this.config),
+			nowMs: () => Date.now(),
+		};
+	}
+
+	/**
+	 * `checkpoint_verify` (v1.6 phase 59): is this `session.checkpoint` inside an hourly root written to devnet? Exactly one of
+	 * `ckpt_id` and `event_id`. A checkpoint id is searched in the newest 500 notes of the named session, else of the caller's
+	 * own surface in the last seven days (the ledger has no read by payload). Throws `CheckpointVerifyError` for a bad or unknown
+	 * ref; Solana or the ledger being unconfigured is a status (`unverified`), decided before any read. Sends no transaction.
+	 */
+	async checkpointVerify(input: { ckpt_id?: string; event_id?: string; session_id?: string }, caller: { surface: Surface | null }): Promise<CheckpointVerifyToolResult> {
+		const { ckpt_id: ckptId, event_id: eventId } = input;
+		if ((ckptId === undefined) === (eventId === undefined)) {
+			throw new CheckpointVerifyError("invalid-ref", "pass exactly one of ckpt_id or event_id");
+		}
+		const ref = (ckptId ?? eventId) as string;
+		try {
+			return await verifyCheckpointRef(this.anchorVerifyPorts(), ref, {
+				...(input.session_id !== undefined ? { sessionId: input.session_id } : {}),
+				...(caller.surface !== null ? { surface: caller.surface } : {}),
+			});
+		} catch (cause) {
+			if (cause instanceof CheckpointVerifyError && cause.code === "not-found" && ckptId !== undefined) {
+				throw new CheckpointVerifyError(
+					"not-found",
+					`${cause.message}; a checkpoint id is searched in the newest 500 notes of the session named by session_id, else of your own surface in the last 7 days: pass session_id or the checkpoint's event_id`,
+				);
+			}
+			throw cause;
+		}
+	}
+
+	/**
+	 * `memory_verify` (v1.6 phase 60): does the entry still hash to its stored `entry_hash`, and is the ledger event its write rested
+	 * on inside an anchored root? The entry is read the way `memory_search` reads it for this caller: another surface's `agent:` scope
+	 * and an entry past its lifetime under `enforce` (operators excepted) answer as absent, so this tool never reveals what a search
+	 * would not. Throws `MemoryVerifyError` for a bad or unreadable id. `verified` does not prove the source event concerns this entry.
+	 */
+	async memoryVerify(id: string, caller: { surface: string | null; repo?: string; isOperator: boolean }): Promise<MemoryVerifyResult & { signer_set?: SignerSetSummary }> {
+		const index = this.index;
+		if (index === null) throw new MemoryVerifyError("not_found", "no memory index is configured (SUBSTRATE_PG_URL), so no entry can be read");
+		const reader = { surface: caller.surface ?? "unattributed", repo: normalizeIdentifier(caller.repo) };
+		const ports = this.anchorVerifyPorts();
+		let signers: SignerSetSummary | undefined;
+		const result = await verifyMemoryRecord(
+			{
+				getEntry: async (entryId) => {
+					const entry = await index.readEntry(entryId);
+					if (entry === null || !visibleToCaller(entry.scope, entry.repo, reader)) return null;
+					if (this.config.memoryExpiry === "enforce" && !caller.isOperator) {
+						const graph = entry.ttl === "graph" ? await index.graphLifetime(entry) : null;
+						if (memoryExpiry(entry, graph).expired) return null;
+					}
+					return entry;
+				},
+				anchorEvidence: (eventId) =>
+					anchorEvidenceFor(ports, eventId, (summary) => {
+						signers = summary;
+					}),
+				anchorTimeoutMs: MEMORY_VERIFY_ANCHOR_TIMEOUT_MS,
+			},
+			id,
+		);
+		// What the anchor check judged against: an ignored rotation note or a truncated read is visible here, not only in the reasons.
+		return signers === undefined ? result : { ...result, signer_set: signers };
+	}
+
+	/**
+	 * The session's `note` events, newest first, payloads included: the part of a session the rollback tools read. Paged
+	 * backwards by `ts` (inclusive bound, so rows sharing the oldest `ts` are read again and de-duplicated by id) for at
+	 * most {@link ROLLBACK_NOTE_PAGES} pages; `complete` is false when the pages ran out before the session's start.
+	 * Throws when the ledger is not configured or cannot be read.
+	 */
+	private async readSessionNotes(sessionId: string): Promise<SessionNotes> {
+		const ledger = this.greptime;
+		if (ledger === null) throw new Error("GREPTIME_URL is not set");
+		const session = normalizeIdentifier(sessionId);
+		if (session === null) throw new Error("the session id is empty after normalisation");
+		const seen = new Map<string, SubstrateEvent>();
+		let until: string | undefined;
+		for (let page = 0; page < ROLLBACK_NOTE_PAGES; page++) {
+			const rows = await ledger.queryEvents({
+				match: { kind: "note", session_id: session },
+				...(until !== undefined ? { until } : {}),
+				limit: ROLLBACK_NOTE_PAGE_ROWS,
+				order: "desc",
+				includePayload: true,
+			});
+			let fresh = 0;
+			let oldest: string | undefined;
+			for (const row of rows) {
+				const event = rowToEvent(row);
+				oldest = event.ts;
+				if (seen.has(event.id)) continue;
+				seen.set(event.id, event);
+				fresh++;
+			}
+			if (rows.length < ROLLBACK_NOTE_PAGE_ROWS) return { events: [...seen.values()], complete: true };
+			// A full page of rows already seen means more than a page share one `ts`: no bound can move past them.
+			if (fresh === 0 || oldest === undefined) return { events: [...seen.values()], complete: false };
+			until = oldest;
+		}
+		return { events: [...seen.values()], complete: false };
+	}
+
+	/** The ports the rollback tools run on. Built per call; nothing is held between calls. */
+	private sessionRollbackDeps(): SessionRollbackDeps {
+		return {
+			readSessionNotes: (sessionId) => this.readSessionNotes(sessionId),
+			chainHead: async (sessionId) => {
+				const ledger = this.greptime;
+				const session = normalizeIdentifier(sessionId);
+				if (ledger === null || session === null) return null;
+				const rows = await ledger.queryEvents({ match: { session_id: session }, limit: 1, order: "desc" });
+				const head = rows[0];
+				if (head === undefined) return null;
+				const event = rowToEvent(head);
+				return { event_id: event.id, hash: event.hash };
+			},
+			emit: (input) => this.emit(input),
+			verifyAnchor: (eventId, sessionId, surface) => verifyCheckpointRef(this.anchorVerifyPorts(), eventId, { sessionId, surface }),
+			selectEntries: (sessionId, afterIso, untilIso, writer) => this.selectRollbackEntries(sessionId, afterIso, untilIso, writer),
+			// No index means no entries exist, so a recorded batch has nothing to name: absent, which leaves that batch ignored.
+			readEntry: async (id) => (this.index === null ? null : await this.index.readEntry(id)),
+			forget: (request, caller) => this.memoryForget(request, caller),
+			anchorTimeoutMs: DEFAULT_ANCHOR_TIMEOUT_MS,
+			nowMs: () => Date.now(),
+		};
+	}
+
+	/**
+	 * The entries a rollback to `afterIso` would forget, with their writers (`selectMemoryForRollback` returns ids only).
+	 * `writer` limits the read to one surface's entries, ahead of the selection limit; null reads every writer's (an operator).
+	 * No index means no memory entries exist, so there is nothing to forget: an empty selection, not an error.
+	 */
+	private async selectRollbackEntries(sessionId: string, afterIso: string, untilIso: string | null, writer: string | null): Promise<EntrySelection> {
+		const index = this.index;
+		if (index === null) return { entries: [], truncated: false };
+		let found: ReadonlyArray<Pick<MemoryEntry, "id" | "writer">> = [];
+		const selection = await selectForRollback(
+			{
+				entriesCreatedAfter: async (session, after, graphId, limit, until, onlyWriter) => {
+					const result = await index.memoryEntriesCreatedAfter(session, after, graphId, limit, until, onlyWriter ?? null);
+					found = result.entries;
+					return result;
+				},
+			},
+			{ session_id: sessionId, after: afterIso, limit: ROLLBACK_SELECTION_LIMIT, ...(untilIso !== null ? { until: untilIso } : {}), ...(writer !== null ? { writer } : {}) },
+		);
+		const writers = new Map<string, string>(found.map((entry): [string, string] => [entry.id, String(entry.writer)]));
+		return { entries: selection.entry_ids.map((id) => ({ id, writer: writers.get(id) ?? "" })), truncated: selection.truncated };
+	}
+
+	/**
+	 * `session_checkpoint` (v1.6 phase 61): record one `session.checkpoint` note as the caller's surface, with the ledger
+	 * chain position attached from the ledger. Never throws for a bad request or a ledger outage: both are `{ ok: false }`
+	 * answers. The server touches no worktree and reads no transcript.
+	 */
+	async sessionCheckpoint(input: unknown, caller: RollbackCaller): Promise<CheckpointResult> {
+		return sessionCheckpoint(this.sessionRollbackDeps(), input, caller);
+	}
+
+	/**
+	 * `session_rollback_plan` (v1.6 phase 61, read only): the target checkpoint, the later ones, the anchor verdict (fail
+	 * open), the memory a rollback would forget, and the digest a commit must present.
+	 */
+	async sessionRollbackPlan(input: unknown, caller: RollbackCaller): Promise<PlanResult> {
+		return sessionRollbackPlan(this.sessionRollbackDeps(), input, caller);
+	}
+
+	/**
+	 * `session_rollback_commit` (v1.6 phase 61): record a refused rollback, or commit one the client carried out: re-check
+	 * the plan digest, forget the memory written after the target (reason `rollback`), and append one `session.rollback`
+	 * note. Idempotent by rollback id.
+	 */
+	async sessionRollbackCommit(input: unknown, caller: RollbackCaller): Promise<CommitResult> {
+		return sessionRollbackCommit(this.sessionRollbackDeps(), input, caller);
 	}
 
 	/**
@@ -4584,6 +5109,7 @@ export class Substrate {
 					lightragRetry: this.config.ragMachine,
 					lightragCooling: input.cooling === true,
 					lightragHindsight: async (query) => (await this.recallMemories({ query }, callerSurface)).results,
+					tandem: this.config.contextualRecall.tandem,
 				},
 				question,
 			);
@@ -4592,7 +5118,17 @@ export class Substrate {
 			this.cache.getOrLoad<SearchReply>({
 				klass: "docs-search",
 				surface,
-				args: { question: question.trim().replace(/\s+/g, " ").toLowerCase(), backend: this.config.docsBackend, datasets: names.map((name) => scopedDatasetName(repoId, name)).sort(), pins, degraded: degradedDatasets, repo_id: repoId, planning_hash: planningHash },
+				// The tandem key part only exists while tandem is on: a flag flip never answers from a plain reply stored before it, and the off key is the key it was.
+				args: {
+					question: question.trim().replace(/\s+/g, " ").toLowerCase(),
+					backend: this.config.docsBackend,
+					datasets: names.map((name) => scopedDatasetName(repoId, name)).sort(),
+					pins,
+					degraded: degradedDatasets,
+					repo_id: repoId,
+					planning_hash: planningHash,
+					...(this.config.contextualRecall.tandem.enabled ? { tandem: true } : {}),
+				},
 				generations: [DOCS_GENERATION_KEY],
 				load,
 				store: searchReplyStorable,
@@ -4606,8 +5142,11 @@ export class Substrate {
 		const chunks = question.trim().length === 0 || !configured || input.probe === true ? await load() : await cached();
 		// The context is attached per call, after the chunks: a session's events
 		// belong to that session, so the cached answer never carries them.
-		if (input.context !== true) return chunks;
-		return { ...chunks, context: await this.docsContextOf(question, callerSurface, sessionId) };
+		const answered = input.context === true ? { ...chunks, context: await this.docsContextOf(question, callerSurface, sessionId) } : chunks;
+		// The steering notice is per call like the context: it names the calling session's queued directives, so it is attached
+		// after the cache and a reply that carries it is never stored (`searchReplyStorable`).
+		const steering = this.steeringNoticeOf(sessionId);
+		return steering === null ? answered : { ...answered, steering };
 	}
 
 	/**

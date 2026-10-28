@@ -32,6 +32,13 @@ export const FAIL_CLOSED_TOOLS: ReadonlySet<string> = new Set([
 	// Phase 45 (D45-h): a Railway write changes a live project, so it is recorded before it runs.
 	"railway_scale",
 	"railway_deploy",
+	// Phase 53 (SOTA-09): a steering directive changes what a planning session does next, so it is recorded before it is queued
+	// or acknowledged. Each write also answers not-configured, and records nothing, while no audit sink is injected.
+	"steering_queue",
+	"steering_acknowledge",
+	// v1.6 (phase 61): a rollback commit takes memory other agents read out of force and deletes its plane documents (nearest: `memory_write`),
+	// so an unrecorded one is refused; the client keeps it in its pending journal and delivers it later.
+	"session_rollback_commit",
 ]);
 
 /**
@@ -77,6 +84,8 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	// read answers typed, so a planning outage must not refuse the turn. Writes come from the server's planning observer, not a read.
 	"planning_status",
 	"planning_sessions",
+	// Phase 53 (SOTA-09): the steering read. The directives for one session, queued or acknowledged, are inspection only.
+	"steering_list",
 	// The one write that is fail-open on purpose: an event costs a line in the trail,
 	// and refusing the turn over it would make a substrate outage an outage of the host.
 	"events_emit",
@@ -98,6 +107,13 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	// SPE-19388: RAG plane reads, served as an MCP tool and a REST route under one name.
 	"docs_lightrag_query", // A read of the LightRAG plane, like `docs_search`.
 	"docs_rag_state", // A read of the in-process RAG state machine, like `docs_search`.
+	// v1.6 (phases 59 and 60): anchor verification reads. They read the ledger and devnet and write nothing, like `events_verify`.
+	"checkpoint_verify",
+	"memory_verify",
+	// v1.6 (phase 61): session rollback. The plan is a read. A checkpoint is one ledger note, the nearest write to `events_emit`:
+	// the client journals an unrecorded checkpoint and re-offers it, so an unwritable audit file must not fail the agent's turn over it.
+	"session_rollback_plan",
+	"session_checkpoint",
 ]);
 
 /**

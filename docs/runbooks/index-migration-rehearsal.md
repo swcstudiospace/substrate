@@ -14,13 +14,14 @@
 - **Port 5434, never 5432.** Port 5432 on this host belongs to another project's container. The rehearsal container uses `127.0.0.1:5434`.
 - **Production had no migration ledger before the first `migrate()`.** The first run on a database that predates `schema_migrations` finds an empty ledger and replays every idempotent step (`create … if not exists`, `add column if not exists`), stamping each version as it commits. On a database that already has the objects that is a no-op per step; it is also why a step's text must never be edited after it was applied (`index-store.migrate-contract.test.ts` pins every applied step by digest).
 - **A step's `down` is documentation.** `MigrationStep.down` (steps from version 33) is for an operator to read and run by hand. `migrate()` never executes it.
+- **Some steps are opt-in and are not in the default count.** Steps 33 `planning_steering_audit` and 34 `planning_steering_audit_reason` run only when `IndexStore` is built with `migrationOptIns: { "steering-audit": true }`, which the service does when `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` is on (default off). While it is off, `migrate()` skips both steps and does not ledger them, so the ledger holds `applicableMigrationSteps(...)`, not every `MIGRATION_STEPS` entry. The commands below use the default (opt-in off), which is what production runs unless that variable is set. To rehearse the opt-in steps, pass `{ "steering-audit": true }` to both `applicableMigrationSteps` and the `IndexStore` constructor in the commands below, and rehearse them before turning the variable on; that one rehearsal covers 33 and 34 together, since 34 alters the table 33 creates.
 - **Read the steps from the branch, not from `main`.** The rehearsal must run the code that will be deployed. Every command below that runs `bun` does so from the branch worktree, `$BRANCH`:
 
 ```sh
 BRANCH=/root/src/worktrees/<the-branch-worktree>   # the checkout of the release you are about to deploy
 git -C "$BRANCH" log -1 --oneline
 cd "$BRANCH" && bun install --frozen-lockfile
-bun -e 'import { MIGRATION_STEPS } from "./packages/mcp-server/src/index-store.ts"; console.log(MIGRATION_STEPS.length, MIGRATION_STEPS.at(-1)?.name)'
+bun -e 'import { applicableMigrationSteps } from "./packages/mcp-server/src/index-store.ts"; const steps = applicableMigrationSteps({ "steering-audit": false }); console.log(steps.length, steps.at(-1)?.name)'
 ```
 
 Write down the step count `N` it prints: it is the ledger's expected `count(*)` and `max(version)` at the end. To list what is new, compare with what production already has (step 5 below), then read those steps in `index-store.ts` and, if they declare `down`, read it too.
@@ -95,7 +96,7 @@ Then compare. Row counts of the data tables must not change (migrations create o
 docker exec -i index-rehearsal psql -U postgres -d substrate_copy -At -F ' ' < ~/backups/counts.sql > ~/backups/counts-copy-after.txt
 diff ~/backups/counts-copy-before.txt ~/backups/counts-copy-after.txt && echo "row counts unchanged"
 docker exec index-rehearsal psql -U postgres -d substrate_copy -At -c 'select count(*), max(version) from schema_migrations'
-bun -e 'import { MIGRATION_STEPS } from "./packages/mcp-server/src/index-store.ts"; for (const s of MIGRATION_STEPS) console.log(s.version, s.name)' > ~/backups/ledger-expected.txt
+bun -e 'import { applicableMigrationSteps } from "./packages/mcp-server/src/index-store.ts"; for (const s of applicableMigrationSteps({ "steering-audit": false })) console.log(s.version, s.name)' > ~/backups/ledger-expected.txt
 docker exec index-rehearsal psql -U postgres -d substrate_copy -At -F ' ' -c 'select version, name from schema_migrations order by version' | diff ~/backups/ledger-expected.txt - && echo "ledger lists every step"
 ```
 

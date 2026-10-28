@@ -49,6 +49,14 @@ function substrateWith(env: Record<string, string | undefined>, ledger: EventInp
 	});
 }
 
+/** A real repository with `origin` set: the observer resolves `origin` by asking git, which does not recognise a bare config file. */
+function gitInitWithOrigin(): void {
+	for (const args of [["init", "-q"], ["remote", "add", "origin", "git@github.com:swcstudiospace/agent-substrate.git"]]) {
+		const run = Bun.spawnSync(["git", "-C", root, ...args], { env: { PATH: process.env["PATH"] ?? "", HOME: root, GIT_CONFIG_NOSYSTEM: "1" } });
+		expect(run.exitCode).toBe(0);
+	}
+}
+
 async function connect(substrate: Substrate) {
 	const server = createMcpServer(substrate, CALLER);
 	const client = new Client({ name: "substrate-test", version: "0.0.0" });
@@ -104,8 +112,8 @@ describe("planning tools", () => {
 
 	test("status reads write nothing to the ledger: a change reaches it only through the planning observer's scan", async () => {
 		await writeFile(join(root, PHASE, "52-CONTEXT.md"), `${BODY}\n`);
-		await mkdir(join(root, ".git"), { recursive: true });
-		await writeFile(join(root, ".git", "config"), '[remote "origin"]\n\turl = git@github.com:swcstudiospace/agent-substrate.git\n');
+		// A real repository: the observer resolves `origin` by asking git, which does not recognise a bare config file.
+		gitInitWithOrigin();
 		const ledger: EventInput[] = [];
 		const substrate = substrateWith({ [PLANNING_ROOT_ENV]: root }, ledger);
 		const client = await connect(substrate);
@@ -143,8 +151,7 @@ describe("the planning transition follows the metrics-history switch", () => {
 
 	/** One detected change after a baseline read. Returns the stdout lines a transition wrote while it was delivered. */
 	async function oneDetectedChange(substrate: Substrate): Promise<string[]> {
-		await mkdir(join(root, ".git"), { recursive: true });
-		await writeFile(join(root, ".git", "config"), '[remote "origin"]\n\turl = git@github.com:swcstudiospace/agent-substrate.git\n');
+		gitInitWithOrigin();
 		await writeFile(join(root, PHASE, "52-CONTEXT.md"), `${BODY}\n`);
 		await substrate.planningObserver.scan();
 		const lines: string[] = [];
@@ -205,8 +212,7 @@ describe("a held change's transition reaches stdout once, whatever the ledger do
 	}
 
 	async function withOrigin(): Promise<void> {
-		await mkdir(join(root, ".git"), { recursive: true });
-		await writeFile(join(root, ".git", "config"), '[remote "origin"]\n\turl = git@github.com:swcstudiospace/agent-substrate.git\n');
+		gitInitWithOrigin();
 		await writeFile(join(root, PHASE, "52-CONTEXT.md"), `${BODY}\n`);
 	}
 

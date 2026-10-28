@@ -5,10 +5,18 @@
  * staleness is judged against that same server time. A caller's `lastHeartbeatMs` is therefore not
  * trusted; the stored value carries the server's reading.
  *
- * Expiry: a key is written with `SET ... EX retentionS`, where the retention is the largest freshness window the settings
- * allow plus a one-hour margin. The freshness window (`SUBSTRATE_PLANNING_PRESENCE_TTL_S`) is NOT the key expiry. A session
- * whose heartbeat is older than the freshness window is still held, so it is listed as `stale` and not dropped. The server
- * removes it only once the retention has closed with no new heartbeat. A freshness window that leaves no margin is refused.
+ * Expiry: a key is written with `SET ... EX retentionS`, where the retention is the freshness window plus a margin derived from
+ * it (twice the window, between five minutes and a day: `presenceRetentionS`), so the key never lives past two days. The
+ * freshness window (`SUBSTRATE_PLANNING_PRESENCE_TTL_S`) is NOT the key expiry. A session whose sign of life is older than the
+ * window is still held, so it is listed as `stale` and not dropped. The server removes it only once the retention has closed
+ * with no new heartbeat. Every heartbeat, change or liveness, renews the key.
+ *
+ * Cache-only: this is Dragonfly, so presence is ephemeral by owner decision. Nothing durable lives under these keys: the
+ * observer's baseline and every record of truth are kept elsewhere (`baseline-store.ts`, the ledger).
+ *
+ * Liveness: `touch` is a change heartbeat and stamps both the change time and the liveness with the server's time.
+ * `touchLiveness` renews the record without moving the change time, so a session quiet for days stays active while its
+ * observer scans, and its `idleForMs` grows.
  *
  * Bounds: enumeration is a bounded SCAN (see `presence-client.ts`). A listing reads at most `limit`
  * sessions. When more exist, `listWithin` says so with `truncated: true`, and `list` refuses instead
@@ -30,10 +38,30 @@ import { SessionRecordSchema, type PresenceStore, type SessionRecord } from "./p
 export const PRESENCE_KEY_PREFIX = "substrate:v1:planning:presence:";
 /** The largest freshness window the settings allow, in seconds. Taken from the same bounds `loadPlanningSettings` enforces. */
 export const PRESENCE_TTL_MAX_S = PLANNING_BOUNDS.presenceTtlS.max;
-/** How long a key outlives its freshness window, in seconds. A session that goes stale stays readable for this long. */
-export const PRESENCE_RETENTION_MARGIN_S = 3_600;
-/** Server-side key expiry, in seconds: the largest freshness window plus the margin. Stale sessions stay listed until it closes. */
-export const PRESENCE_RETENTION_S = PRESENCE_TTL_MAX_S + PRESENCE_RETENTION_MARGIN_S;
+/** How a key's lifetime is derived from the freshness window. The margin is twice the window, held between these bounds, in seconds. */
+export const PRESENCE_MARGIN_FACTOR = 2;
+export const PRESENCE_MARGIN_MIN_S = 300;
+export const PRESENCE_MARGIN_MAX_S = 86_400;
+/** The longest a presence key lives, in seconds: the largest freshness window plus the largest margin. */
+export const PRESENCE_RETENTION_MAX_S = PRESENCE_TTL_MAX_S + PRESENCE_MARGIN_MAX_S;
+
+/** How long a key outlives its freshness window of `ttlS` seconds: `PRESENCE_MARGIN_FACTOR` windows, between the bounds above. */
+export function presenceMarginS(ttlS: number): number {
+	return Math.min(PRESENCE_MARGIN_MAX_S, Math.max(PRESENCE_MARGIN_MIN_S, Math.ceil(ttlS * PRESENCE_MARGIN_FACTOR)));
+}
+
+/**
+ * Server-side key expiry for a freshness window of `ttlMs`, in whole seconds: the window rounded up plus its margin. Stale sessions
+ * stay listed until it closes. It is always at most `PRESENCE_RETENTION_MAX_S`. A window that is not positive and finite, or is
+ * longer than the settings allow, is refused: a longer one would leave no margin under the bounded key lifetime.
+ */
+export function presenceRetentionS(ttlMs: number): number {
+	if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new RangeError("ttlMs must be a positive number");
+	if (ttlMs > PRESENCE_TTL_MAX_S * 1000) throw new RangeError("ttlMs must not exceed the largest presence freshness window");
+	const ttlS = Math.ceil(ttlMs / 1000);
+	return ttlS + presenceMarginS(ttlS);
+}
+
 /** The most sessions one listing reads. Beyond it the listing is marked truncated. */
 export const PRESENCE_MAX_SESSIONS = 256;
 /** The most time one listing may take, in milliseconds. Each command has its own reply deadline; this bounds the listing as a whole. */
@@ -57,23 +85,39 @@ export interface PresenceListing {
 }
 
 export class DragonflyPresenceStore implements PresenceStore {
-	constructor(
-		private readonly backend: PresenceBackend,
-		private readonly retentionS: number = PRESENCE_RETENTION_S,
-	) {
-		if (!Number.isSafeInteger(retentionS) || retentionS < 1) throw new RangeError("retentionS must be a positive integer");
-	}
+	constructor(private readonly backend: PresenceBackend) {}
 
 	/**
-	 * Records a heartbeat stamped with the server's time. `ttlMs` is the freshness window. The key outlives it by the retention
-	 * margin, so a session at the largest window is still held when that window closes.
+	 * Records a change heartbeat stamped with the server's time. `ttlMs` is the freshness window. The key outlives it by a margin
+	 * derived from the window (`presenceRetentionS`), so a session that goes stale stays listed for a while. The server's time is
+	 * both the change time and the liveness time, so the stored record carries no `livenessMs` of its own.
 	 */
 	async touch(record: SessionRecord, ttlMs: number): Promise<void> {
 		const valid = SessionRecordSchema.parse(record);
-		if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new RangeError("ttlMs must be a positive number");
-		if (ttlMs > (this.retentionS - PRESENCE_RETENTION_MARGIN_S) * 1000) throw new RangeError("ttlMs must leave the presence retention margin past it");
+		const retentionS = presenceRetentionS(ttlMs);
 		const stamped: SessionRecord = { ...valid, lastHeartbeatMs: await this.backend.serverTimeMs() };
-		await this.backend.setWithTtl(keyFor(valid.sessionId), JSON.stringify(stamped), this.retentionS);
+		delete stamped.livenessMs;
+		await this.backend.setWithTtl(keyFor(valid.sessionId), JSON.stringify(stamped), retentionS);
+	}
+
+	/**
+	 * Records a liveness heartbeat: the checkout was scanned and is alive. The record is rewritten with the caller's report,
+	 * repository and touched pairs, `livenessMs` set to the server's time, and `lastHeartbeatMs` (the last planning change) kept as
+	 * the key held it. A key that is absent, expired or does not parse has no change time to keep, so the server's time stands in
+	 * for it: the session reads as idle from its first sighting. Overwriting an unparseable value is deliberate: nothing this store
+	 * wrote can be unparseable, and the value would otherwise fail every listing.
+	 *
+	 * The observer is the only writer of a session's key and runs one write at a time, so this read-then-write needs no lock.
+	 * The key's lifetime is renewed exactly as a change heartbeat renews it.
+	 */
+	async touchLiveness(record: SessionRecord, ttlMs: number): Promise<void> {
+		const valid = SessionRecordSchema.parse(record);
+		const retentionS = presenceRetentionS(ttlMs);
+		const key = keyFor(valid.sessionId);
+		const nowMs = await this.backend.serverTimeMs();
+		const held = await this.backend.get(key);
+		const stamped: SessionRecord = { ...valid, lastHeartbeatMs: heldChangeTime(held) ?? nowMs, livenessMs: nowMs };
+		await this.backend.setWithTtl(key, JSON.stringify(stamped), retentionS);
 	}
 
 	/** Every held record, sorted by session id. Refuses, rather than answer partially, when more than the bound exist. */
@@ -137,4 +181,17 @@ function parseStored(key: string, value: string): SessionRecord {
 	const parsed = SessionRecordSchema.safeParse(json);
 	if (!parsed.success) throw new Error(`presence record ${key} does not match the session schema`);
 	return parsed.data;
+}
+
+/** The change time a held value carries, or null when there is no value or it is not a session record. A liveness write keeps it. */
+function heldChangeTime(value: string | null): number | null {
+	if (value === null) return null;
+	let json: unknown;
+	try {
+		json = JSON.parse(value);
+	} catch {
+		return null;
+	}
+	const parsed = SessionRecordSchema.safeParse(json);
+	return parsed.success ? parsed.data.lastHeartbeatMs : null;
 }

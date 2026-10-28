@@ -4,7 +4,9 @@
  * Reads `.planning/` under a checkout and keys each document's content by its sha256. The index holds metadata only: a
  * content entry has the byte size and the parsed frontmatter, never the text. Identical bytes at any number of paths
  * share one content entry, whose `paths` lists them. Each described document has a path entry that names its content by
- * sha256, and each path that could not be described has an error entry.
+ * sha256, and each path that could not be described has an error entry. STATE.md and ROADMAP.md also leave a position part
+ * (`positionParts`): the parsed, redacted, capped fields `position.ts` reads out of them, never their text. The part is
+ * parsed from the bytes the scan already read and is kept with an unchanged document, so `positionOf` needs no second pass.
  *
  * `buildPlanningIndex` is the full rebuild. `updatePlanningIndex` takes the previous index of the same root and reuses a
  * document's content while its stat fingerprint (`signature`) is unchanged, so an unchanged document is neither read nor
@@ -20,6 +22,7 @@
 import { isAbsolute, join, relative, sep } from "node:path";
 import { parseFrontmatter } from "../skills/frontmatter.ts";
 import type { PlanningSnapshot } from "./diff.ts";
+import { composePosition, parseRoadmapPart, parseStatePart, type PartOutcome, type PositionError, type PositionResult, type RoadmapPart, type StatePart } from "./position.ts";
 
 export const PLANNING_DIR = ".planning";
 
@@ -73,6 +76,18 @@ export interface PlanningDocument {
 	signature: string;
 }
 
+/** A parsed position part and the sha256 of the bytes it came from, so an unchanged document keeps its part. */
+export interface PositionPartEntry<T> {
+	outcome: PartOutcome<T>;
+	sha256: string;
+}
+
+/** The parsed position parts of the two documents the position reads. Fields only, never text; see `position.ts`. */
+export interface PositionParts {
+	roadmap?: PositionPartEntry<RoadmapPart>;
+	state?: PositionPartEntry<StatePart>;
+}
+
 export interface PlanningIndex {
 	/** Keyed by sha256, sorted by key. Identical bytes at any paths share one entry. */
 	contents: Record<string, PlanningContent>;
@@ -84,6 +99,8 @@ export interface PlanningIndex {
 	truncated: boolean;
 	/** Directories the walk could not list (an error record names each). Their documents are unknown, so a diff must not read them as removed. Sorted. */
 	unlisted: string[];
+	/** The position parts of STATE.md and ROADMAP.md, parsed from the bytes the scan read: fields only, never text. See `positionOf`. */
+	positionParts: PositionParts;
 }
 
 export type PlanningIndexFailure = "root-unavailable" | "planning-dir-unavailable" | "planning-dir-dangling" | "planning-dir-outside-root";
@@ -144,6 +161,8 @@ const TOP_LEVEL: ReadonlyArray<readonly [string, PlanningKind]> = [
 ];
 
 const PHASE_DIR = /^(\d+(?:\.\d+)?)-/;
+const PHASE_PATH = new RegExp(`^${PLANNING_DIR.replace(".", "\\.")}/phases/([^/]+)(?:/([^/]+))?$`);
+const PLAN_OR_SUMMARY = /(?:PLAN|SUMMARY)\.md$/;
 const FENCE_OPEN = /^\ufeff?---\r?\n/;
 /** Trailing spaces or tabs after the opening `---` are not part of the fence. The shared parser wants the newline right after it. */
 const OPENING_FENCE_TRAILING = /^(\ufeff?---)[ \t]+(?=\r?\n)/;
@@ -191,9 +210,12 @@ type PhaseUnit = { type: "error"; key: string; entry: ErrorEntry } | { type: "gr
 /** A directory resolved: absent, an error record for it, or its real location, which is inside the root. */
 type Resolved = { state: "absent" } | { state: "error"; entry: ErrorEntry } | { state: "dir"; real: string } | { state: "file" };
 
-/** One document described: its path entry and its content, or the error record for its path. */
+/** The position part of a described STATE.md or ROADMAP.md, with the bytes it came from. */
+type PositionPart = { kind: "state"; entry: PositionPartEntry<StatePart> } | { kind: "roadmap"; entry: PositionPartEntry<RoadmapPart> };
+
+/** One document described: its path entry and its content, or the error record for its path. `part` is set for STATE.md and ROADMAP.md only. */
 type Described =
-	| { ok: true; document: PlanningDocument; sha256: string; bytes: number; frontmatter: Record<string, unknown> | undefined }
+	| { ok: true; document: PlanningDocument; sha256: string; bytes: number; frontmatter: Record<string, unknown> | undefined; part: PositionPart | null }
 	| { ok: false; record: PlanningErrorRecord };
 
 export type Frontmatter = { state: "none" } | { state: "parsed"; data: Record<string, unknown> } | { state: "malformed" };
@@ -248,6 +270,7 @@ async function scanPlanning(root: string, deps: PlanningIndexDeps, previous: Pla
 	const contents = new Map<string, PlanningContent>();
 	const documents: Record<string, PlanningDocument> = {};
 	const errors: Record<string, PlanningErrorRecord> = {};
+	const positionParts: PositionParts = {};
 	for (const entry of kept) {
 		if (entry.type === "error") {
 			errors[entry.path] = entry.record;
@@ -259,6 +282,8 @@ async function scanPlanning(root: string, deps: PlanningIndexDeps, previous: Pla
 			continue;
 		}
 		documents[entry.path] = described.document;
+		if (described.part?.kind === "state") positionParts.state = described.part.entry;
+		else if (described.part?.kind === "roadmap") positionParts.roadmap = described.part.entry;
 		const held = contents.get(described.sha256);
 		if (held === undefined) {
 			const content: PlanningContent = { bytes: described.bytes, paths: [entry.path] };
@@ -276,6 +301,7 @@ async function scanPlanning(root: string, deps: PlanningIndexDeps, previous: Pla
 			errors,
 			truncated: walk.found.length > limits.maxFiles,
 			unlisted: [...walk.unlisted].sort(compareText),
+			positionParts,
 		},
 	};
 }
@@ -300,6 +326,37 @@ export function indexRecords(index: PlanningIndex): PlanningRecord[] {
 export function snapshotOf(index: PlanningIndex): PlanningSnapshot {
 	const records = indexRecords(index).map((record) => ({ path: record.path, sha256: record.sha256 }));
 	return { records, truncated: index.truncated, unlisted: index.unlisted };
+}
+
+/**
+ * Where GSD-Core is, from the parts the scan parsed out of STATE.md and ROADMAP.md and the phase directories and plan files
+ * the index holds. Nothing is read: the scan that built the index is the only pass over the files. A STATE.md or ROADMAP.md
+ * that was not described becomes an error entry of the position, with the index's own reason when it has one.
+ */
+export function positionOf(index: PlanningIndex): PositionResult {
+	const phases = new Set<string>();
+	const plans: string[] = [];
+	for (const path of [...Object.keys(index.documents), ...Object.keys(index.errors)]) {
+		const match = PHASE_PATH.exec(path);
+		if (match === null) continue;
+		phases.add(match[1] ?? "");
+		const file = match[2];
+		if (file !== undefined && PLAN_OR_SUMMARY.test(file)) plans.push(file);
+	}
+	return composePosition({
+		state: partOutcomeOf(index, index.positionParts.state, "STATE.md"),
+		roadmap: partOutcomeOf(index, index.positionParts.roadmap, "ROADMAP.md"),
+		phases: [...phases],
+		plans,
+	});
+}
+
+function partOutcomeOf<T>(index: PlanningIndex, held: PositionPartEntry<T> | undefined, where: "STATE.md" | "ROADMAP.md"): PartOutcome<T> {
+	if (held !== undefined) return held.outcome;
+	const record = index.errors[`${PLANNING_DIR}/${where}`];
+	if (record === undefined) return { ok: false, error: { code: "missing", detail: `${where} was not found`, where } };
+	const code: PositionError["code"] = record.error.code === "too-large" || record.error.code === "malformed-frontmatter" ? record.error.code : "unreadable";
+	return { ok: false, error: { code, detail: record.error.detail, where } };
 }
 
 /** The frontmatter of a document: none, a parsed mapping, or malformed. Only `---` fenced blocks count. */
@@ -425,6 +482,7 @@ async function emitPhaseUnit(walk: Walk, unit: PhaseUnit): Promise<void> {
 		add(walk, unit.entry);
 		return;
 	}
+	// Decision: a document's phase is its directory's, never its frontmatter's. Frontmatter may supply the plan id only.
 	await collectDocuments(walk, unit.relDir, unit.real, unit.entries, "phase", PHASE_DIR.exec(unit.name)?.[1]);
 }
 
@@ -526,14 +584,30 @@ async function collectDocuments(
 
 /**
  * The content a previous index holds for `path` under `signature`, when it may be reused under the current limits. A
- * document over the current `maxBytes` is never reused, so the limit applies as it would in a full rebuild.
+ * document over the current `maxBytes` is never reused, so the limit applies as it would in a full rebuild. STATE.md and
+ * ROADMAP.md are reused only with the position part parsed from those same bytes; without it they are read again.
  */
-function reusableContent(walk: Walk, path: string, signature: string): { sha256: string; bytes: number; frontmatter: Record<string, unknown> | undefined } | null {
+function reusableContent(
+	walk: Walk,
+	path: string,
+	signature: string,
+	kind: PlanningKind,
+): { sha256: string; bytes: number; frontmatter: Record<string, unknown> | undefined; part: PositionPart | null } | null {
 	const prior: PlanningDocument | undefined = walk.previous?.documents[path];
 	if (prior === undefined || prior.signature !== signature) return null;
 	const content: PlanningContent | undefined = walk.previous?.contents[prior.sha256];
 	if (content === undefined || content.bytes > walk.maxBytes) return null;
-	return { sha256: prior.sha256, bytes: content.bytes, frontmatter: content.frontmatter };
+	let part: PositionPart | null = null;
+	if (kind === "state") {
+		const held = walk.previous?.positionParts.state;
+		if (held === undefined || held.sha256 !== prior.sha256) return null;
+		part = { kind, entry: held };
+	} else if (kind === "roadmap") {
+		const held = walk.previous?.positionParts.roadmap;
+		if (held === undefined || held.sha256 !== prior.sha256) return null;
+		part = { kind, entry: held };
+	}
+	return { sha256: prior.sha256, bytes: content.bytes, frontmatter: content.frontmatter, part };
 }
 
 async function describeDocument(walk: Walk, entry: FileEntry): Promise<Described> {
@@ -549,7 +623,7 @@ async function describeDocument(walk: Walk, entry: FileEntry): Promise<Described
 			entry.abs,
 			walk.maxBytes + 1,
 			(real) => isInside(real, walk.realRoot),
-			(signature) => reusableContent(walk, entry.path, signature) !== null,
+			(signature) => reusableContent(walk, entry.path, signature, entry.kind) !== null,
 		),
 	);
 	if (!opened.ok) return fail("unreadable", `open failed: ${opened.code}`);
@@ -559,9 +633,9 @@ async function describeDocument(walk: Walk, entry: FileEntry): Promise<Described
 	if (!found.isFile) return fail("unreadable", "not a regular file");
 	if (found.bytes === null) {
 		// The fingerprint matched the previous index, so the bytes were not read. The content is the previous one.
-		const reused = reusableContent(walk, entry.path, found.signature);
+		const reused = reusableContent(walk, entry.path, found.signature, entry.kind);
 		if (reused === null) return fail("unreadable", "unchanged document has no reusable content");
-		return describedOf(entry, found.signature, reused.sha256, reused.bytes, reused.frontmatter);
+		return describedOf(entry, found.signature, reused.sha256, reused.bytes, reused.frontmatter, reused.part);
 	}
 	// Too large is reported without a byte count: the file was not read to its end.
 	if (found.bytes.byteLength > walk.maxBytes) return fail("too-large", `exceeds ${walk.maxBytes} bytes`);
@@ -574,14 +648,29 @@ async function describeDocument(walk: Walk, entry: FileEntry): Promise<Described
 	if (frontmatter.state === "malformed") {
 		return fail("malformed-frontmatter", "frontmatter has no closing fence or is not a YAML mapping", sha256, bytes);
 	}
-	return describedOf(entry, found.signature, sha256, bytes, frontmatter.state === "parsed" ? frontmatter.data : undefined);
+	const part = positionPartOf(entry.kind, sha256, text, frontmatter, walk.maxBytes);
+	return describedOf(entry, found.signature, sha256, bytes, frontmatter.state === "parsed" ? frontmatter.data : undefined, part);
 }
 
-function describedOf(entry: FileEntry, signature: string, sha256: string, bytes: number, frontmatter: Record<string, unknown> | undefined): Described {
+/** The position part of STATE.md or ROADMAP.md, parsed from the text just read. Other documents have none. */
+function positionPartOf(kind: PlanningKind, sha256: string, text: string, frontmatter: Frontmatter, maxBytes: number): PositionPart | null {
+	if (kind === "state") return { kind, entry: { outcome: parseStatePart(text, frontmatter, maxBytes), sha256 } };
+	if (kind === "roadmap") return { kind, entry: { outcome: parseRoadmapPart(text, frontmatter, maxBytes), sha256 } };
+	return null;
+}
+
+function describedOf(
+	entry: FileEntry,
+	signature: string,
+	sha256: string,
+	bytes: number,
+	frontmatter: Record<string, unknown> | undefined,
+	part: PositionPart | null,
+): Described {
 	const document: PlanningDocument = { kind: entry.kind, sha256, signature };
 	if (entry.phase !== undefined) document.phase = entry.phase;
 	if (entry.plan !== undefined) document.plan = entry.plan;
-	return { ok: true, document, sha256, bytes, frontmatter };
+	return { ok: true, document, sha256, bytes, frontmatter, part };
 }
 
 function errorEntry(path: string, code: PlanningRecordErrorCode, detail: string, kind?: PlanningKind): ErrorEntry {
