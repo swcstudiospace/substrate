@@ -417,6 +417,7 @@ describe("the send stays operator-run", () => {
 			"./service.ts",
 			"./types.ts",
 			"@substrate/ledger",
+			"node:crypto",
 			"node:path",
 		]);
 		expect(imports(source).find((found) => found.from === "@substrate/ledger")?.names).not.toContain("execFileRunner");
