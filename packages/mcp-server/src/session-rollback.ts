@@ -148,6 +148,8 @@ export interface SessionRollbackDeps {
 	 * surface's rows cannot crowd the caller's out. Throws when the index cannot be read.
 	 */
 	selectEntries(sessionId: string, afterIso: string, untilIso: string | null, writer: string | null): Promise<EntrySelection>;
+	/** One memory entry's writer, session and creation instant by id, in any state (forgotten included), or null when it is gone. Throws when the index cannot be read. */
+	readEntry(id: string): Promise<{ writer: string; session_id?: string; created: string } | null>;
 	/** `Substrate.memoryForget`. */
 	forget(request: ForgetRequest, caller: { surface: Surface; session_id: string }): Promise<ForgetReport>;
 	/** Bound on the anchor check; 0 or less means unbounded. */
@@ -625,10 +627,18 @@ interface BuiltPlan {
  * ({@link FORGET_BATCH_ACTION}); it is finished when its `memory.forget` note exists. A marked row leaves the selection, so without
  * this record a batch whose note could not be written would be lost to every later plan. A record whose forget id is not the one
  * this rollback and checkpoint would derive from its entries is not trusted.
+ *
+ * A hash proves a record is well formed, not that its writer was entitled to the entries: the ledger is writable, and a note
+ * is only as good as the door that let it in. So every entry of a recovered batch is read again and must be this session's, written
+ * after the checkpoint's cut and no later than the rollback's upper bound, and the caller's own (an operator's: any writer's) --
+ * the rules {@link selectEntries} applies. One entry that is not (or is gone) leaves the whole batch ignored: a batch is finished
+ * as exactly the call it was, and a partly forged one is not that call.
  */
-function unfinishedBatches(ctx: PlanContext, caller: RollbackCaller): UnfinishedBatch[] {
+async function unfinishedBatches(deps: SessionRollbackDeps, ctx: PlanContext, caller: RollbackCaller): Promise<UnfinishedBatch[]> {
 	const recorded = new Set(forgetNotesOf(ctx.notes.events, ctx.rollbackId, caller).map((note) => note.forget_id));
 	const out = new Map<string, UnfinishedBatch>();
+	const cutMs = checkpointCut(Date.parse(ctx.target.event.ts), ctx.target.payload.taken_at_ms).cutMs;
+	const untilMs = ctx.untilIso === null ? Number.POSITIVE_INFINITY : Date.parse(ctx.untilIso);
 	for (const event of ctx.notes.events) {
 		if (event.surface !== caller.surface || event.kind !== "note" || event.payload["action"] !== FORGET_BATCH_ACTION || event.payload["rollback_id"] !== ctx.rollbackId) continue;
 		const forgetId = event.payload["forget_id"];
@@ -637,7 +647,19 @@ function unfinishedBatches(ctx: PlanContext, caller: RollbackCaller): Unfinished
 		if (!Array.isArray(ids) || ids.length === 0 || ids.length > FORGET_BATCH_SIZE || !ids.every((id) => typeof id === "string" && id.length > 0)) continue;
 		const entryIds = ids as string[];
 		if (forgetIdFor({ reason: "rollback", entry_ids: entryIds, rollback_id: ctx.rollbackId, checkpoint_id: ctx.target.payload.ckpt_id }) !== forgetId) continue;
-		out.set(forgetId, { forget_id: forgetId, entry_ids: entryIds });
+		let entitled: boolean;
+		try {
+			const rows = await Promise.all(entryIds.map((id) => deps.readEntry(id)));
+			entitled = rows.every((row) => {
+				if (row === null || row.session_id !== ctx.sessionId) return false;
+				if (!caller.isOperator && row.writer !== caller.surface) return false;
+				const createdMs = Date.parse(row.created);
+				return createdMs > cutMs && createdMs <= untilMs;
+			});
+		} catch (cause) {
+			return refuse("unavailable", `the memory index could not be read, so the rollback's unfinished forget batches cannot be checked: ${describe(cause)}`, RETRYABLE);
+		}
+		if (entitled) out.set(forgetId, { forget_id: forgetId, entry_ids: entryIds });
 	}
 	return [...out.values()];
 }
@@ -660,7 +682,7 @@ async function buildPlan(deps: SessionRollbackDeps, ctx: PlanContext, caller: Ro
 	const { target } = ctx;
 	const selected = await selectEntries(deps, ctx, caller);
 	// The rows of a batch an earlier run marked are out of the selection: they are planned (and finished) from its record instead.
-	const unfinished = unfinishedBatches(ctx, caller);
+	const unfinished = await unfinishedBatches(deps, ctx, caller);
 	const entryIds = distinct([...selected.ids, ...unfinished.flatMap((batch) => batch.entry_ids)]);
 	const later = ctx.visible
 		.filter((record) => record.payload.seq > target.payload.seq)
@@ -1026,7 +1048,8 @@ async function forgetSelected(
 	return { run, truncated };
 }
 
-const inflight = new Map<string, Promise<CommitResult>>();
+/** The commit running for each (session, rollback id): the identity of the request it answers, and its answer. */
+const inflight = new Map<string, { same: string; flight: Promise<CommitResult> }>();
 
 async function commitCommitted(deps: SessionRollbackDeps, request: CommittedRequest, caller: RollbackCaller): Promise<CommitResult> {
 	const sessionId = request.session_id;
@@ -1156,19 +1179,31 @@ export async function sessionRollbackCommit(deps: SessionRollbackDeps, input: un
 	try {
 		const request = parseCommit(input);
 		if (request.outcome === "refused") return await commitRefused(deps, request, caller);
-		// Two identical requests in flight in this process are one commit: the second waits for the first's answer.
-		const key = sha256Hex(canonicalJson({ surface: caller.surface, operator: caller.isOperator, request }));
-		const running = inflight.get(key);
-		if (running !== undefined) return await running;
+		// One commit of a rollback id runs at a time in this process, whatever else the request says: a client that timed out
+		// and retries after a batch finished sends a smaller plan and a different digest for the same rollback, and that must wait
+		// for the first run, not start a second forget beside it. An identical request shares the running answer; any other
+		// one waits for it to settle and then runs itself, which finds the recorded rollback (and answers it, or refuses a
+		// conflicting target) or, when the first run failed, runs fresh.
+		const lock = sha256Hex(canonicalJson({ session_id: request.session_id, rollback_id: request.rollback_id }));
+		const same = sha256Hex(canonicalJson({ surface: caller.surface, operator: caller.isOperator, request }));
+		for (let running = inflight.get(lock); running !== undefined; running = inflight.get(lock)) {
+			if (running.same === same) return await running.flight;
+			await running.flight.then(
+				() => undefined,
+				() => undefined,
+			);
+			// A waiter that wakes before the owner's cleanup must not wait on the settled flight again.
+			if (inflight.get(lock) === running) inflight.delete(lock);
+		}
 		const flight = commitCommitted(deps, request, caller).catch((cause: unknown): CommitResult => {
 			if (cause instanceof Refusal) return cause.failure;
 			throw cause;
 		});
-		inflight.set(key, flight);
+		inflight.set(lock, { same, flight });
 		try {
 			return await flight;
 		} finally {
-			inflight.delete(key);
+			if (inflight.get(lock)?.flight === flight) inflight.delete(lock);
 		}
 	} catch (cause) {
 		if (cause instanceof Refusal) return cause.failure;

@@ -9,7 +9,7 @@
 import { describe, expect, test } from "bun:test";
 import { loadConfig } from "./config.ts";
 import type { GreptimeClient } from "./greptime.ts";
-import { FORGET_ACTION } from "./memory-forget.ts";
+import { FORGET_ACTION, forgetIdFor } from "./memory-forget.ts";
 import { Substrate } from "./service.ts";
 import {
 	MAX_CLIENT_CLOCK_SKEW_MS,
@@ -896,6 +896,72 @@ describe("session_rollback_commit: committed", () => {
 		expect(w.index.marks).toHaveLength(1);
 		// Once finished, a plan of the same rollback no longer lists the batch.
 		expect((await plan(w, 1, ME, p.rollback_id)).memory.would_forget).toBe(0);
+	});
+
+	test("a forget batch note naming entries that are not the caller's, not this session's, not after the cut or not there is ignored, and nothing of it is forgotten", async () => {
+		const w = world();
+		const target = await record(w, 1);
+		const ids = seedMemory(w, target.ts);
+		const p = await plan(w, 1);
+		// Well formed and hash-true, as a note written around the emit door would be: each names one entry the caller may not forget.
+		for (const forged of [[ids.otherWriter], [ids.mineBefore], [ids.otherSession], ["mem_does_not_exist"]]) {
+			await w.substrate.emit({
+				surface: "claude-code",
+				kind: "note",
+				summary: "forged forget batch",
+				session_id: SESSION,
+				payload: {
+					action: FORGET_BATCH_ACTION,
+					forget_id: forgetIdFor({ reason: "rollback", entry_ids: forged, rollback_id: p.rollback_id, checkpoint_id: ckptId(1) }),
+					rollback_id: p.rollback_id,
+					checkpoint_id: ckptId(1),
+					entry_count: forged.length,
+					entry_ids: forged,
+				},
+			});
+		}
+
+		const again = await plan(w, 1, ME, p.rollback_id);
+
+		// Only the caller's own two entries are planned: the forged batches add nothing.
+		expect(again.memory.would_forget).toBe(2);
+		expect(again.memory.sample_ids).toEqual(["mem_after_1", "mem_after_2"]);
+		const done = await w.substrate.sessionRollbackCommit(commitInput(again), ME);
+		expect(done).toMatchObject({ ok: true, memory: { superseded_entries: 2 } });
+		expect(w.index.forgotten().sort()).toEqual(["mem_after_1", "mem_after_2"]);
+	});
+
+	test("two commits of one rollback id that differ in their request are one run: the retry waits for the first and answers the rollback it recorded", async () => {
+		const w = world();
+		const target = await record(w, 1);
+		seedMemory(w, target.ts);
+		const p = await plan(w, 1);
+		const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+		const { promise: inFirstNote, resolve: entered } = Promise.withResolvers<void>();
+		const original = w.ledger.insertEvent.bind(w.ledger);
+		w.ledger.insertEvent = async (event) => {
+			if (event.payload["action"] === "session.rollback") {
+				entered();
+				await gate;
+			}
+			return original(event);
+		};
+
+		const first = w.substrate.sessionRollbackCommit(commitInput(p), ME);
+		await inFirstNote;
+		// The first run has forgotten both entries and is inside its rollback note. A client that timed out plans again: the plan is
+		// smaller now, so it commits a different digest for the same rollback id.
+		const smaller = await plan(w, 1, ME, p.rollback_id);
+		expect(smaller.plan_digest).not.toBe(p.plan_digest);
+		const retry = w.substrate.sessionRollbackCommit(commitInput(smaller), ME);
+		release();
+		const [a, b] = await Promise.all([first, retry]);
+
+		expect(a).toMatchObject({ ok: true });
+		expect(b).toMatchObject({ ok: true, replayed: true, event_id: plain(a)["event_id"] });
+		expect(w.ledger.byAction("session.rollback")).toHaveLength(1);
+		expect(w.ledger.byAction(FORGET_BATCH_ACTION)).toHaveLength(1);
+		expect(w.index.marks).toHaveLength(1);
 	});
 
 	test("a ledger that cannot record the batch stops the commit before anything is marked", async () => {

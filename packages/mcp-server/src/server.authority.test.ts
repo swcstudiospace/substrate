@@ -420,6 +420,41 @@ describe("a swarm token names the caller over the wire", () => {
 		expect(written.map((event) => event.surface)).toEqual(["swarm-a05-be"]);
 	});
 
+	test("REST /events: a reserved action is refused by name for a surface token that is not an operator, even naming the operator's surface; an operator writes it as itself only", async () => {
+		written.length = 0;
+		const rotation = { payload: { action: "anchor.signer.rotate" } };
+
+		const forgedAsOperator = await postEvent("tok-hermes", { ...rotation, surface: "cursor" });
+		const forgedAsSelf = await postEvent("tok-hermes", rotation);
+		const swarm = await postEvent("tok-a05", { payload: { action: "session.rollback.forget_batch" } });
+		const forgedBody = (await forgedAsOperator.json()) as { error: string };
+
+		expect(forgedAsOperator.status).toBe(403);
+		expect(forgedBody.error).toContain("reserved-action");
+		expect(forgedAsSelf.status).toBe(403);
+		expect(swarm.status).toBe(403);
+		expect(written).toEqual([]);
+
+		const own = await postEvent("tok-operator", rotation);
+		const other = await postEvent("tok-operator", { ...rotation, surface: "hermes" });
+
+		expect(own.status).toBe(202);
+		expect(other.status).toBe(403);
+		expect(written.map((event) => event.surface)).toEqual(["cursor"]);
+	});
+
+	test("MCP events_emit: the same rule, so a hermes token cannot post a signer rotation as the operator surface", async () => {
+		written.length = 0;
+		const rotation = { kind: "note", summary: "rotation", payload: { action: "anchor.signer.rotate" } };
+
+		const forged = (await callTool("tok-hermes", "events_emit", { ...rotation, surface: "cursor" })) as { error: string };
+		const own = (await callTool("tok-operator", "events_emit", rotation)) as { stored: boolean };
+
+		expect(forged.error).toContain("reserved-action");
+		expect(own.stored).toBe(true);
+		expect(written.map((event) => event.surface)).toEqual(["cursor"]);
+	});
+
 	test("MCP graph_claim: A05's token cannot claim as A09, and can claim as itself", async () => {
 		claimedAs.length = 0;
 

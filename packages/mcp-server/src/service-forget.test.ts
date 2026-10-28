@@ -12,7 +12,7 @@
  * replay of a forgotten entry is dropped; and recall, the brief and memory search stop serving a forgotten entry.
  */
 import { describe, expect, test } from "bun:test";
-import { MEMORY_GENERATION_KEY, RECALL_GENERATION_KEY, ReadThroughCache, classOf, type CacheRedis } from "./cache.ts";
+import { CACHE_TTL, FORGET_MARK_KEY, FORGET_MARK_MARGIN_S, MEMORY_GENERATION_KEY, RECALL_GENERATION_KEY, ReadThroughCache, classOf, type CacheRedis } from "./cache.ts";
 import { loadConfig } from "./config.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import { ForgetError, isForgetMarker, type ForgetRequest } from "./memory-forget.ts";
@@ -75,11 +75,17 @@ class ForgetStore extends FakeStore {
 class CountingRedis implements CacheRedis {
 	readonly values = new Map<string, string>();
 	readonly incrs = new Map<string, number>();
+	/** The TTL each key was last set with. */
+	readonly ttls = new Map<string, number>();
+	/** Keys whose read throws, as a cache that answers everything but one lookup. */
+	readonly failGet = new Set<string>();
 	async get(key: string): Promise<string | null> {
+		if (this.failGet.has(key)) throw new Error("cache read failed");
 		return this.values.get(key) ?? null;
 	}
-	async set(key: string, value: string): Promise<void> {
+	async set(key: string, value: string, ttlSeconds: number): Promise<void> {
 		this.values.set(key, value);
+		this.ttls.set(key, ttlSeconds);
 	}
 	async incr(key: string): Promise<number> {
 		this.incrs.set(key, (this.incrs.get(key) ?? 0) + 1);
@@ -133,12 +139,18 @@ interface World {
 	plane: Plane;
 }
 
-function world(options: { env?: Record<string, string>; ledger?: boolean; index?: boolean } = {}): World {
+function world(options: { env?: Record<string, string>; ledger?: boolean; index?: boolean; now?: () => number; swr?: boolean } = {}): World {
 	clearEnsuredBanks();
 	const fake = new HindsightFake();
 	const store = new ForgetStore();
 	const redis = new CountingRedis();
-	const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
+	const cache = new ReadThroughCache({
+		redis,
+		enabled: true,
+		log: () => {},
+		...(options.now === undefined ? {} : { now: options.now }),
+		...(options.swr === true ? { swr: { mode: "enforce" as const, windowS: 30 } } : {}),
+	});
 	const ledger = new LedgerStub();
 	const plane: Plane = { deleteAnswer: null, gate: null, posts: 0 };
 	const hindsightFetch: FetchLike = async (input, init) => {
@@ -174,7 +186,7 @@ function setEnv(values: Record<string, string | undefined>): () => void {
 	};
 }
 
-async function inWorld<T>(options: { env?: Record<string, string>; ledger?: boolean; plane?: boolean }, body: (w: World) => Promise<T>): Promise<T> {
+async function inWorld<T>(options: { env?: Record<string, string>; ledger?: boolean; plane?: boolean; now?: () => number; swr?: boolean }, body: (w: World) => Promise<T>): Promise<T> {
 	const restore = setEnv(options.plane === false ? HINDSIGHT_OFF : HINDSIGHT_ON);
 	try {
 		return await body(world(options));
@@ -521,6 +533,137 @@ describe("Substrate.memoryForget: cache generations", () => {
 			await expect(w.substrate.memoryForget(forgetRequest(["mem_a"]), CALLER)).rejects.toThrow("index went away");
 			expect(w.redis.bumps()).toEqual({ memory: before.memory + 1, recall: before.recall + 1 });
 			expect(w.ledger.forgetNotes()).toEqual([]);
+		});
+	});
+});
+
+describe("Substrate.memoryForget: a saved brief has no generation, so the forget is marked by time", () => {
+	/** A brief whose memory read can be taken down, the live source a snapshot stands in for. */
+	const request = { repo: "acme/app", surface: "cursor" } as const;
+	const takeMemoryDown = (w: World) => {
+		w.store.memoryForBrief = async () => {
+			throw new Error("index memory read failed");
+		};
+	};
+	const bumpGenerations = (w: World) => Promise.all([w.cache.bump(MEMORY_GENERATION_KEY), w.cache.bump(RECALL_GENERATION_KEY)]);
+
+	test("the mark is set with a TTL past the snapshot's, on a changed row and on a plane-only retry, and never on a no-op", async () => {
+		await inWorld({}, async (w) => {
+			const written = await writeOne(w, "fence every handoff of the node lease", "handoff-rule");
+			expect(w.redis.values.has(FORGET_MARK_KEY)).toBe(false);
+			expect(classOf(FORGET_MARK_KEY)).toBe("gen");
+
+			w.plane.deleteAnswer = status(503);
+			await w.substrate.memoryForget(forgetRequest([written.entry.id]), CALLER);
+			expect(Number.isFinite(Number(w.redis.values.get(FORGET_MARK_KEY)))).toBe(true);
+			expect(w.redis.ttls.get(FORGET_MARK_KEY)).toBeGreaterThanOrEqual(CACHE_TTL["brief-snapshot"] + FORGET_MARK_MARGIN_S);
+
+			// A re-run that changes no row but removes the document still sets it.
+			w.redis.values.delete(FORGET_MARK_KEY);
+			w.plane.deleteAnswer = null;
+			await w.substrate.memoryForget(forgetRequest([written.entry.id]), CALLER);
+			expect(w.redis.values.has(FORGET_MARK_KEY)).toBe(true);
+
+			// A pure no-op moves nothing, the mark included.
+			w.redis.values.delete(FORGET_MARK_KEY);
+			await w.substrate.memoryForget(forgetRequest([written.entry.id]), CALLER);
+			expect(w.redis.values.has(FORGET_MARK_KEY)).toBe(false);
+		});
+	});
+
+	test("a snapshot saved before a forget is never served when a live source fails after it", async () => {
+		await inWorld({ ledger: false }, async (w) => {
+			seedRow(w.store, "mem_decision", { text: "quote versions in every conflict reply" });
+			const saved = await w.substrate.briefDetailed(request);
+			expect(saved.state).toBe("complete");
+			expect(saved.text).toContain("quote versions in every conflict reply");
+			expect([...w.redis.values.keys()].some((key) => classOf(key) === "brief-snapshot")).toBe(true);
+
+			await w.substrate.memoryForget(forgetRequest(["mem_decision"]), CALLER);
+			takeMemoryDown(w);
+			await bumpGenerations(w);
+
+			const served = await w.substrate.briefDetailed(request);
+			expect(served.state).toBe("degraded");
+			expect(served.failed).toEqual(["memory"]);
+			expect(served.text).not.toContain("quote versions in every conflict reply");
+		});
+	});
+
+	test("stale-while-revalidate does not serve a last-good saved before a forget", async () => {
+		await inWorld({ ledger: false, swr: true }, async (w) => {
+			seedRow(w.store, "mem_decision", { text: "quote versions in every conflict reply" });
+			const saved = await w.substrate.briefDetailed(request);
+			expect(saved.text).toContain("quote versions in every conflict reply");
+
+			await w.substrate.memoryForget(forgetRequest(["mem_decision"]), CALLER);
+
+			// The generations moved, so the brief misses; the last-good is the only stale candidate.
+			const served = await w.substrate.briefDetailed(request);
+			expect(served.ageS).toBeUndefined();
+			expect(served.text).not.toContain("quote versions in every conflict reply");
+		});
+	});
+
+	test("a snapshot saved after the forget is still served", async () => {
+		// The mark is set by this clock, five seconds behind the snapshot's own (real) timestamp, so the snapshot is strictly later.
+		let offsetMs = -5_000;
+		await inWorld({ ledger: false, now: () => Date.now() + offsetMs }, async (w) => {
+			seedRow(w.store, "mem_gone", { text: "a forgotten lesson text" });
+			seedRow(w.store, "mem_keep", { text: "quote versions in every conflict reply" });
+			await w.substrate.memoryForget(forgetRequest(["mem_gone"]), CALLER);
+			offsetMs = 0;
+
+			const saved = await w.substrate.briefDetailed(request);
+			expect(saved.state).toBe("complete");
+			expect(saved.text).toContain("quote versions in every conflict reply");
+
+			takeMemoryDown(w);
+			await bumpGenerations(w);
+			const served = await w.substrate.briefDetailed(request);
+			expect(served.state).toBe("snapshot");
+			expect(served.text).toContain("quote versions in every conflict reply");
+			expect(served.text).not.toContain("a forgotten lesson text");
+		});
+	});
+
+	test("a mark that cannot be read refuses the snapshot: the brief is degraded, not served from a saved copy", async () => {
+		await inWorld({ ledger: false }, async (w) => {
+			seedRow(w.store, "mem_decision", { text: "quote versions in every conflict reply" });
+			await w.substrate.briefDetailed(request);
+			expect([...w.redis.values.keys()].some((key) => classOf(key) === "brief-snapshot")).toBe(true);
+
+			w.redis.failGet.add(FORGET_MARK_KEY);
+			takeMemoryDown(w);
+			await bumpGenerations(w);
+			const served = await w.substrate.briefDetailed(request);
+			expect(served.state).toBe("degraded");
+			expect(served.failed).toEqual(["memory"]);
+			expect(served.text).not.toContain("quote versions in every conflict reply");
+
+			// Control: the same call with a readable mark and no forget serves the snapshot.
+			w.redis.failGet.delete(FORGET_MARK_KEY);
+			expect((await w.substrate.briefDetailed(request)).state).toBe("snapshot");
+		});
+	});
+
+	test("a mark that could not be written refuses every snapshot until a later forget lands it", async () => {
+		await inWorld({ ledger: false }, async (w) => {
+			seedRow(w.store, "mem_a", { text: "quote versions in every conflict reply" });
+			seedRow(w.store, "mem_b");
+			await w.substrate.briefDetailed(request);
+
+			const set = w.redis.set.bind(w.redis);
+			w.redis.set = async (key, value, ttl) => {
+				if (key === FORGET_MARK_KEY) throw new Error("cache write failed");
+				return set(key, value, ttl);
+			};
+			await w.substrate.memoryForget(forgetRequest(["mem_b"]), CALLER);
+			expect(w.redis.values.has(FORGET_MARK_KEY)).toBe(false);
+
+			takeMemoryDown(w);
+			await bumpGenerations(w);
+			expect((await w.substrate.briefDetailed(request)).state).toBe("degraded");
 		});
 	});
 });

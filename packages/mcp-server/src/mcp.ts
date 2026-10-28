@@ -23,6 +23,7 @@ import { DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT } from "./greptime.ts";
 import { MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS } from "./lease.ts";
 import { MemoryVerifyError } from "./memory-verify.ts";
 import { ragRetryDelay } from "./rag-retry.ts";
+import { reservedEmitRefusal } from "./reserved-actions.ts";
 import { approvalRefValid, RailwayRequestError, type ServiceRef, type WriteGate, type WriteOutcome, type WriteRefusal } from "./railway.ts";
 import { redact, redactValue } from "./redact.ts";
 import { augmentQuestionWithSteering, normalizeRepoId, UNTRUSTED_DOCS_NOTICE } from "./docs-search.ts";
@@ -1142,6 +1143,10 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			if ("refused" in attribution) return refusal(attribution.refused);
 			const blocked = bridgeBlock("emit", attribution.surface);
 			if (blocked) return refusal(blocked);
+			// A note a reader trusts by its action alone (a signer rotation, a forget batch, a checkpoint, a rollback) is the server's
+			// or an operator's to write: a refusal names `reserved-action` and nothing is appended.
+			const reserved = reservedEmitRefusal({ payload: args.payload, surface: attribution.surface, callerSurface, isOperator });
+			if (reserved !== null) return refusal(reserved);
 			const { event, stored, error, warning } = await substrate.emit({
 				...args,
 				surface: attribution.surface,

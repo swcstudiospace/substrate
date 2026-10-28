@@ -42,7 +42,9 @@ import {
 	type BriefSection,
 } from "./brief-profile.ts";
 import {
+	CACHE_TTL,
 	DOCS_GENERATION_KEY,
+	FORGET_MARK_MARGIN_S,
 	GRAPHS_GENERATION_KEY,
 	MEMORY_GENERATION_KEY,
 	RECALL_GENERATION_KEY,
@@ -1877,6 +1879,8 @@ export class Substrate {
 								lastGood: async () => {
 									const good = await this.cache.peekQuiet<BriefSnapshot>("brief-snapshot", request.surface, args);
 									if (good === null) return null;
+									// A snapshot saved at or before the last forget may carry forgotten text, and a mark that cannot be read is not "no forget".
+									if (!(await this.cache.snapshotSurvivesForget(good.at, true))) return null;
 									const atMs = Date.parse(good.at);
 									// An absent `until` is a snapshot from before the deadline was recorded: its lease or
 									// reverify time is unknown, so it is not a last-good. Null means "no deadline", a number
@@ -1931,8 +1935,10 @@ export class Substrate {
 				await noteRecall(sections, detail);
 				return detail;
 			}
-			const snapshot =
+			const found =
 				this.config.briefSnapshotTtlS > 0 ? await this.cache.peek<BriefSnapshot>("brief-snapshot", request.surface, args) : null;
+			// Refused like an absent snapshot (the degraded brief below) when it was saved at or before the last forget, or the mark cannot be read.
+			const snapshot = found !== null && (await this.cache.snapshotSurvivesForget(found.at, false)) ? found : null;
 			if (snapshot === null) {
 				const detail = this.servedBrief(live, sections, "degraded", failed, null, requestedProfile, profileSurface);
 				await noteRecall(sections, detail);
@@ -3247,7 +3253,14 @@ export class Substrate {
 			return report;
 		} finally {
 			// `bump` never throws: a failed bump marks the generation stale, which the cache reads as a bypass until a bump lands.
-			if (touched) await Promise.all([this.cache.bump(RECALL_GENERATION_KEY), this.cache.bump(MEMORY_GENERATION_KEY)]);
+			// A saved brief has no generation, so the forget is also marked by time; held past the longest snapshot it must refuse (the TTL a restart may have lowered included).
+			if (touched) {
+				await Promise.all([
+					this.cache.bump(RECALL_GENERATION_KEY),
+					this.cache.bump(MEMORY_GENERATION_KEY),
+					this.cache.markForget(Math.max(this.config.briefSnapshotTtlS, CACHE_TTL["brief-snapshot"]) + FORGET_MARK_MARGIN_S),
+				]);
+			}
 		}
 	}
 
@@ -3404,6 +3417,8 @@ export class Substrate {
 			emit: (input) => this.emit(input),
 			verifyAnchor: (eventId, sessionId, surface) => verifyCheckpointRef(this.anchorVerifyPorts(), eventId, { sessionId, surface }),
 			selectEntries: (sessionId, afterIso, untilIso, writer) => this.selectRollbackEntries(sessionId, afterIso, untilIso, writer),
+			// No index means no entries exist, so a recorded batch has nothing to name: absent, which leaves that batch ignored.
+			readEntry: async (id) => (this.index === null ? null : await this.index.readEntry(id)),
 			forget: (request, caller) => this.memoryForget(request, caller),
 			anchorTimeoutMs: DEFAULT_ANCHOR_TIMEOUT_MS,
 			nowMs: () => Date.now(),

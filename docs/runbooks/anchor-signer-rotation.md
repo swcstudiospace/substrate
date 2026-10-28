@@ -102,6 +102,8 @@ Unknown keys are refused; `reason` has no control characters; `old_pubkey` must 
 }
 ```
 
+`events_emit` refuses `anchor.signer.rotate` (a `reserved-action` error, nothing written) unless the token is an operator's and the note is attributed to that token's own surface, so a non-operator token cannot retire a key by naming an operator surface.
+
 The reply must say `stored: true`. The CLI alternative is `substrate emit --kind note --surface <OPERATOR_SURFACE> --session anchor-admin:<YYYYMMDD> --actor human --summary '<SUMMARY>' --payload '<PAYLOAD_JSON>'`, with two traps: **it always exits 0, even when the note was not stored**, and it adds `repo` from the current directory's git origin, which puts the note in that repo's brief, so run it from a directory that is not a git checkout. Either way, read the note back before going on:
 
 ```json

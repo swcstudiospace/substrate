@@ -240,7 +240,9 @@ async function readSignerSet(ports: AnchorVerifyPorts, ledger: AnchorLedger): Pr
 		}
 	}
 	const derived = signerSetFromRotationEvents(bootstrap, events, {
-		// Rotation events are honoured only from an operator surface: the ledger takes events from any authenticated caller.
+		// Rotation events are honoured only from an operator surface. The event carries no proof of who wrote it, so the surface is
+		// only as good as the door that wrote it: `events_emit` and `POST /events` refuse `anchor.signer.rotate` from any caller that is
+		// not an operator writing as its own surface (`reserved-actions.ts`). This check is the second line behind that door, not the first.
 		authorize: (event) => event.surface !== undefined && ports.operatorSurfaces.has(event.surface),
 	});
 	const summary: SignerSetSummary = {
