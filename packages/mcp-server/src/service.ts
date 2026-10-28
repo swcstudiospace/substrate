@@ -8,7 +8,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { RedisClient } from "bun";
 import { decideClaim, type ClaimDecision } from "@substrate/audit";
-import { createRpc, formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type TransactionMemo } from "@substrate/ledger";
+import { acceptsSigner, createRpc, formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type SignerSet, type TransactionMemo } from "@substrate/ledger";
 import {
 	PLANES,
 	PlaneRegistry,
@@ -149,7 +149,7 @@ import { governMemoryWrite } from "./memory-write.ts";
 import { forgetEntries, selectForRollback, type ForgetReport, type ForgetRequest, type PlaneDeleteResult, type RollbackSelectRequest, type RollbackSelection } from "./memory-forget.ts";
 import { ForgetUnavailableError, forgetDocumentId, planeDeleteFor } from "./memory-forget-plane.ts";
 import { verifyMemoryRecord, MemoryVerifyError, type MemoryVerifyResult } from "./memory-verify.ts";
-import { anchorEvidenceFor, verifyCheckpointRef, type AnchorVerifyPorts, type CheckpointVerifyToolResult, type SignerSetSummary } from "./anchor-verify-deps.ts";
+import { anchorEvidenceFor, followReanchor, ReanchorReadIncomplete, resolveSignerSet, verifyCheckpointRef, type AnchorVerifyPorts, type CheckpointVerifyToolResult, type SignerSetSummary } from "./anchor-verify-deps.ts";
 import { CheckpointVerifyError } from "./checkpoint-verify.ts";
 import {
 	DEFAULT_ANCHOR_TIMEOUT_MS,
@@ -641,8 +641,10 @@ export interface HourDigest {
  * One hour's anchor verdict inside {@link VerifyVerdict} (D28-15).
  *
  * `anchored` needs the full triple-check: the row's `tx_sig` reads back from
- * devnet, the memo comes from a memo-program instruction signed by
- * `SOLANA_ANCHOR_PUBKEY` with `err === null`, it parses as v1, its period is
+ * devnet, the memo comes from a memo-program instruction signed by a key
+ * the signer set accepts at the transaction's block time (the configured
+ * `SOLANA_ANCHOR_PUBKEY` alone unless a set or rotation widens it, the
+ * rule `checkpoint_verify` applies) with `err === null`, it parses as v1, its period is
  * this hour, and its root and count equal the recomputed digest — which also
  * equals the row. `pending` is no row inside the 3 h window (or the hour not
  * closed yet); `unanchored`, `mismatch` and `unverified` all fail the verify.
@@ -709,6 +711,45 @@ export const VERIFY_PENDING_MS = 3 * HOUR_MS;
 export const VERIFY_RPC_TIMEOUT_MS = 5_000;
 export const VERIFY_RPC_ATTEMPTS = 2;
 export const VERIFY_RPC_BACKOFF_MS = 200;
+
+/** The verdict of an hour whose transaction signer is not accepted: `mismatch` is a known bad signer, `unverified` leaves it open. */
+interface SignerFault {
+	status: "mismatch" | "unverified";
+	reason: string;
+}
+
+/**
+ * Judge the payer of an hour's anchor transaction by the same signer rules as `checkpoint_verify` (it settles a signer gap and an
+ * unresolved block time the same way): by the signer set (`acceptsSigner`) at the transaction's own block time, for EVERY payer,
+ * the configured key (`SOLANA_ANCHOR_PUBKEY`) included. `checkHour` ranks a proven disagreement above an unverifiable signer, as
+ * `checkpoint_verify` does; unlike it, `checkHour` does not compare the anchors row's `signer` column. `signers` is the per-verify
+ * memoised read, awaited only here. Null means accepted.
+ *
+ * - A payer that is unknown (null) is `mismatch`.
+ * - A set that cannot be built (a malformed signer set, an invalid key, a refused fold) is `unverified` with the redacted cause.
+ * - A rotation read that may be incomplete (`gap`) is `unverified`: a missing rotation note may be what adds or retires the signer,
+ *   so neither an accept nor a window-based `mismatch` is sound on an incomplete set.
+ * - A transaction without a block time is `unverified`: the signer's valid window cannot be checked.
+ * - On a complete set with a block time, a payer outside every window (or not in the set) is `mismatch`.
+ */
+async function judgeSigner(memo: TransactionMemo, signers: () => Promise<{ set: SignerSet; gap: string | null }>): Promise<SignerFault | null> {
+	if (memo.payer === null) return { status: "mismatch", reason: "memo is not signed by SOLANA_ANCHOR_PUBKEY" };
+	let read: { set: SignerSet; gap: string | null };
+	try {
+		read = await signers();
+	} catch (cause) {
+		return { status: "unverified", reason: redact(`the signer set cannot be built, so the signer cannot be checked: ${String(cause)}`).slice(0, 300) };
+	}
+	if (read.gap !== null) {
+		return { status: "unverified", reason: redact(`rotation-read-incomplete: ${read.gap}`).slice(0, 300) };
+	}
+	if (memo.blockTime === null) {
+		return { status: "unverified", reason: "the transaction reports no block time yet, so the signer's valid window cannot be checked" };
+	}
+	const verdict = acceptsSigner(read.set, memo.payer, memo.blockTime * 1000);
+	return verdict.ok ? null : { status: "mismatch", reason: redact(verdict.reason).slice(0, 300) };
+}
+
 /** What `memory_verify` waits for the anchor lookup: it reads the hour's leaves, then the chain, so it gets more than a single read. */
 export const MEMORY_VERIFY_ANCHOR_TIMEOUT_MS = 15_000;
 /** Pages of 500 notes one rollback tool reads to find a session's checkpoints (4,000 notes), so a chatty session cannot make a tool read without end. */
@@ -6500,6 +6541,14 @@ export class Substrate {
 		return rpc;
 	};
 
+	// The signer set is read at most once per verify, and only when an hour has a transaction to judge: a verify with no anchored hour
+	// makes no rotation read.
+	let signerRead: Promise<{ set: SignerSet; gap: string | null }> | null = null;
+	const signers = (): Promise<{ set: SignerSet; gap: string | null }> => {
+		signerRead ??= resolveSignerSet(this.anchorVerifyPorts());
+		return signerRead;
+	};
+
 	const hours: HourReport[] = [];
 	for (const hour of [...byHour.keys()].sort((a, b) => a - b)) {
 		const memberCount = byHour.get(hour)?.length ?? 0;
@@ -6521,7 +6570,7 @@ export class Substrate {
 			});
 			continue;
 		}
-		hours.push(await this.checkHourWithBudget(hour, now, readRpc, pubkey, memberCount, remaining - margin));
+		hours.push(await this.checkHourWithBudget(hour, now, readRpc, pubkey, memberCount, signers, remaining - margin));
 	}
 
 	const failing = hours.find((hour) => hour.status !== "anchored" && hour.status !== "pending");
@@ -6563,6 +6612,7 @@ export class Substrate {
 		readRpc: () => Rpc,
 		pubkey: string | null,
 		memberCount: number,
+		signers: () => Promise<{ set: SignerSet; gap: string | null }>,
 		allowanceMs: number,
 	): Promise<HourReport> {
 		const period_start = hourIso(hour);
@@ -6581,7 +6631,7 @@ export class Substrate {
 				Math.max(0, allowanceMs),
 			);
 			timer.unref?.();
-			this.checkHour(hour, now, readRpc, pubkey, memberCount).then(
+			this.checkHour(hour, now, readRpc, pubkey, memberCount, signers).then(
 				(report) => {
 					clearTimeout(timer);
 					resolve(report);
@@ -6608,6 +6658,7 @@ export class Substrate {
 		readRpc: () => Rpc,
 		pubkey: string | null,
 		memberCount: number,
+		signers: () => Promise<{ set: SignerSet; gap: string | null }>,
 	): Promise<HourReport> {
 		const period_start = hourIso(hour);
 		const period_end = hourIso(hourEnd(hour));
@@ -6628,7 +6679,20 @@ export class Substrate {
 		}
 		const greptime = this.greptime;
 		if (!greptime) throw new Error("GREPTIME_URL is not set");
-		const row = await greptime.anchorForPeriod(hour);
+		const stored = await greptime.anchorForPeriod(hour);
+		// After a devnet reset the stored row names a vanished signature; an operator's `anchor.reanchor` note for the hour points at its replacement.
+		let row: typeof stored = null;
+		if (stored !== null) {
+			try {
+				row = await followReanchor(this.anchorVerifyPorts(), hour, stored);
+			} catch (cause) {
+				// The notes could not all be read, so judging the stored row could pass over a newer pointer: unverified, with the reason.
+				if (cause instanceof ReanchorReadIncomplete) {
+					return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: stored.tx_sig, reason: redact(cause.message) };
+				}
+				throw cause;
+			}
+		}
 		if (!row) {
 			if (!isClosed(hour, now, INGEST_LAG_MS) || now < hourEnd(hour) + VERIFY_PENDING_MS) {
 				return { period_start, period_end, status: "pending", event_count: digest.event_count, root: digest.root };
@@ -6659,8 +6723,17 @@ export class Substrate {
 		if (!memo.memo) {
 			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "transaction carries no memo-program instruction" };
 		}
-		if (memo.payer !== pubkey || !memo.payerSigned) {
+		// The signer is judged the way `checkpoint_verify` judges it: by the signer set at the transaction's own block time, so an hour a
+		// key signed before a rotation stays valid after the job key moved on, and a key outside its window is not accepted.
+		if (!memo.payerSigned) {
 			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "memo is not signed by SOLANA_ANCHOR_PUBKEY" };
+		}
+		const signerFault = await judgeSigner(memo, signers);
+		// A proven signer fault is final. An UNVERIFIABLE signer (no block time yet, an incomplete rotation read, an unbuildable set)
+		// waits for the content checks below: a transaction that already disagrees with the ledger is a mismatch whatever its signer,
+		// and that known cause must not be hidden behind the missing time (`checkpoint_verify` ranks proven disagreements first).
+		if (signerFault !== null && signerFault.status === "mismatch") {
+			return { period_start, period_end, status: signerFault.status, event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: signerFault.reason };
 		}
 		if (memo.err !== null && memo.err !== undefined) {
 			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "anchor transaction failed" };
@@ -6677,6 +6750,9 @@ export class Substrate {
 		}
 		if (row.root !== digest.root || row.event_count !== digest.event_count || row.memo !== memo.memo) {
 			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "anchors row disagrees with the memo" };
+		}
+		if (signerFault !== null) {
+			return { period_start, period_end, status: signerFault.status, event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: signerFault.reason };
 		}
 		return { period_start, period_end, status: "anchored", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, ...(memo.slot !== null ? { slot: memo.slot } : {}) };
 	}

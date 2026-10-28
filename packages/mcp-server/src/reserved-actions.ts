@@ -6,18 +6,20 @@
  * who wrote it (its `surface` is attribution a non-swarm token may choose, its `actor` is self-declared), so the only point
  * that can keep those notes honest is the door callers write through. These actions are written by the server itself
  * (`Substrate.emit` from `session_checkpoint`, `session_rollback_commit` and `memoryForget`, which do not pass this check) or,
- * for the signer rotation, by an operator; a tokened caller that is not an operator is refused, and an operator is held to its
- * own authenticated surface (the surface `operatorSurfaces` reads rotations from).
+ * for the signer rotation and the re-anchor record, by an operator; a tokened caller that is not an operator is refused, and an operator is held to its
+ * own authenticated surface (the surface `operatorSurfaces` reads rotations and re-anchors from).
  *
  * ONE list: add an action here when a reader starts to treat it as authoritative.
  */
 import { ANCHOR_SIGNER_ROTATE_ACTION } from "@substrate/ledger";
 import { FORGET_ACTION } from "./memory-forget.ts";
+import { ANCHOR_REANCHOR_ACTION } from "./reanchor-plan.ts";
 import { SESSION_CHECKPOINT_ACTION, SESSION_ROLLBACK_ACTION, SESSION_ROLLBACK_REFUSED_ACTION } from "./session-events.ts";
 import { FORGET_BATCH_ACTION } from "./session-rollback.ts";
 
 export const RESERVED_NOTE_ACTIONS: ReadonlySet<string> = new Set([
 	ANCHOR_SIGNER_ROTATE_ACTION,
+	ANCHOR_REANCHOR_ACTION,
 	SESSION_CHECKPOINT_ACTION,
 	SESSION_ROLLBACK_ACTION,
 	SESSION_ROLLBACK_REFUSED_ACTION,
