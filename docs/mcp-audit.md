@@ -415,6 +415,7 @@ under a megabyte a day.
 ```sh
 substrate evidence --graph ut-mfk2p3-9a3b1c7d                       # JSON to stdout
 substrate evidence --graph ut-mfk2p3-9a3b1c7d --out evidence.html   # the document
+substrate evidence --graph ut-mfk2p3-9a3b1c7d --node n1             # JSON with that node's artifact as `node`
 ```
 
 The bundle is composed by `substrate-mcp`, not by the CLI: that is the process
