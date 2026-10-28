@@ -1,5 +1,5 @@
 /**
- * Aggregate status across the six fabric resources (phase 51, SOTA-07). Pure: it reads a facts object and
+ * Aggregate status across the seven fabric resources (phase 51, SOTA-07). Pure: it reads a facts object and
  * returns rows, so it is testable without a service, a socket or a clock.
  *
  * State rules, applied in this order for a service row:
@@ -65,7 +65,7 @@ export function proxyRow(facts: FabricFacts): FabricResourceStatus {
 	};
 }
 
-/** The six rows in report order, with per-state counts. Pure. */
+/** The seven rows in report order, with per-state counts. Pure. */
 export function buildFabricStatus(facts: FabricFacts): FabricStatus {
 	const at = facts.checkedAt;
 	const resources: FabricResourceStatus[] = [
@@ -73,6 +73,7 @@ export function buildFabricStatus(facts: FabricFacts): FabricStatus {
 		serviceRow("timescaledb-index", facts.endpoints.postgres ?? "unset", facts.services["timescaledb-index"], at),
 		serviceRow("greptime", facts.endpoints.greptime ?? "unset", facts.services.greptime, at),
 		serviceRow("ragflow", "not-applicable", facts.services.ragflow, at),
+		serviceRow("lightrag", "not-applicable", facts.services.lightrag, at),
 		serviceRow("hindsight", "not-applicable", facts.services.hindsight, at),
 		proxyRow(facts),
 	];
