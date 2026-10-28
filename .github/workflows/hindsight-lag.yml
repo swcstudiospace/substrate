@@ -28,7 +28,6 @@ concurrency:
 
 permissions:
   contents: read
-  issues: write
 
 jobs:
   lag:
@@ -36,6 +35,9 @@ jobs:
     if: vars.CI_ENABLED == 'true'
     runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
     steps:
       - name: Check out the repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2

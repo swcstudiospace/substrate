@@ -297,6 +297,24 @@ describe("the gate matches the CI workflow", () => {
 		for (const line of ifLines) expect(line).toContain("vars.CI_ENABLED == 'true'");
 	});
 
+	test("every job's `if:` is exactly its reviewed expression, so only same-repo pull requests reach the shared runner", () => {
+		const sameRepoOnly = "(github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)";
+		// A deliberate table: adding, removing or editing a job's condition must be reflected here.
+		const expected: Record<string, string> = {
+			verify: `vars.CI_ENABLED == 'true' && github.event_name != 'schedule' && ${sameRepoOnly}`,
+			"dependency-audit": "vars.CI_ENABLED == 'true' && github.event_name != 'pull_request'",
+			"boot-gate": `vars.CI_ENABLED == 'true' && vars.BOOT_GATE == 'true' && github.event_name != 'schedule' && ${sameRepoOnly}`,
+			"lint-report": `vars.CI_ENABLED == 'true' && github.event_name != 'schedule' && ${sameRepoOnly}`,
+		};
+		const jobsSection = workflow.slice(workflow.indexOf("\njobs:\n"));
+		const ids = [...jobsSection.matchAll(/^ {2}([a-z][a-z-]*):$/gm)].map((match) => match[1] as string);
+		expect([...ids].sort()).toEqual(Object.keys(expected).sort());
+		ids.forEach((id, index) => {
+			const ifLines = [...between(id, ids[index + 1]).matchAll(/^ {4}if: (.+)$/gm)].map((match) => match[1] as string);
+			expect(ifLines).toEqual([expected[id] as string]);
+		});
+	});
+
 	test("package.json exposes the gate as `bun run verify`", () => {
 		const manifest = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> };
 		expect(manifest.scripts.verify).toBe("bun scripts/verify.ts");

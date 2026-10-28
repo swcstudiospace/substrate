@@ -19,7 +19,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { FIXTURE_ENV_KEYS } from "./rehearsal-env.ts";
+import type { FIXTURE_ENV_KEYS } from "./rehearsal-env.ts";
 import { EMPTY_STATE, fakeGhScript, writeState } from "./rehearsal-fake-gh.ts";
 
 /** The library slug the fixture answers to: what `SUBSTRATE_SKILLS_REPO` is set to and the fake PR URLs carry. */

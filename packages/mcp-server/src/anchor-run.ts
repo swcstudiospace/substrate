@@ -12,6 +12,7 @@
  */
 import { createRpc, execFileRunner, isClosed } from "@substrate/ledger";
 import { ANCHOR_USAGE, UsageError, parseAnchorArgs, runAnchorJob } from "./anchor.ts";
+import type { AnchorCliOptions } from "./anchor.ts";
 import { loadConfig } from "./config.ts";
 import { GreptimeClient, INGEST_LAG_MS } from "./greptime.ts";
 import { Substrate } from "./service.ts";
@@ -26,7 +27,7 @@ function exitUsage(message: string): never {
 	process.exit(2);
 }
 
-let flags;
+let flags: AnchorCliOptions;
 try {
 	flags = parseAnchorArgs(process.argv.slice(2));
 } catch (cause) {

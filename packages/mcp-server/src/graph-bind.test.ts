@@ -413,7 +413,9 @@ describeLive("correlation bindings against a live index", () => {
 		const winner = results.find((result) => result.status === "created")!.graph_id;
 		for (const result of results) expect(result.graph_id).toBe(winner);
 		// The conflict flag is exactly "the stored graph is not the one I offered".
-		results.forEach((result, i) => expect(result.conflict).toBe(offers[i] !== winner));
+		results.forEach((result, i) => {
+			expect(result.conflict).toBe(offers[i] !== winner);
+		});
 		expect(await a.graphForCorrelation(id)).toBe(winner);
 	});
 

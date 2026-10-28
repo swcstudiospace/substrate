@@ -1040,6 +1040,23 @@ describe("lesson transport diagnostics", () => {
 		},
 	);
 
+	test.each(["null", "[]", "42", '"reply"'])("a search reply that is JSON but not an object (%s) is not a JSON-RPC reply", async (body) => {
+		fake.rawReplies = [new Response(body, { status: 200 })];
+		const memory = httpMemory({ url: fake.url, token: fake.token, timeoutMs: 2000 });
+		const failure = await memory.page({ scope: "repo:acme/widgets", subject_prefix: "lesson:", limit: 100 }).catch((cause: unknown) => cause);
+		if (!(failure instanceof Error)) throw new Error("memory_search accepted a reply that is not a JSON-RPC envelope");
+		expect(failure.message).toContain("HTTP 200");
+		expect(failure.message).toContain("no JSON-RPC reply");
+	});
+
+	test.each([{ result: "ok" }, { result: 7 }, { result: ["x"] }])("a search reply whose result is not an object (%j) is refused like a reply with no result", async (payload) => {
+		fake.rawReplies = [Response.json(payload, { status: 200 })];
+		const memory = httpMemory({ url: fake.url, token: fake.token, timeoutMs: 2000 });
+		const failure = await memory.page({ scope: "repo:acme/widgets", subject_prefix: "lesson:", limit: 100 }).catch((cause: unknown) => cause);
+		if (!(failure instanceof Error)) throw new Error("memory_search accepted a malformed result");
+		expect(failure.message).toContain("memory_search answered HTTP 200");
+	});
+
 	test("non-JSON write refusals redact before truncating and preserve the request and HTTP status", async () => {
 		const remoteToken = "z".repeat(64);
 		fake.rawReplies = [new Response(`denied ${fake.token} ${".".repeat(155)} Bearer ${remoteToken}`, { status: 503 })];

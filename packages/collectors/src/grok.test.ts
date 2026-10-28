@@ -28,7 +28,12 @@ function captureStderr(): { lines: string[]; restore: () => void } {
 		return true;
 	};
 	process.stderr.write = patched as typeof process.stderr.write;
-	return { lines, restore: () => void (process.stderr.write = original) };
+	return {
+		lines,
+		restore: () => {
+			process.stderr.write = original;
+		},
+	};
 }
 
 interface Fixture {

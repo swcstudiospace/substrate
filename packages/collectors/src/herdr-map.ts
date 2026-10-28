@@ -117,7 +117,7 @@ export function isRelease(data: unknown): boolean {
 export function surfaceForHerdrAgent(agent: string | null | undefined): Surface | null {
 	if (!agent) return null;
 	const table: Record<string, Surface> = HERDR_AGENT_SURFACES;
-	return Object.prototype.hasOwnProperty.call(table, agent) ? (table[agent] ?? null) : null;
+	return Object.hasOwn(table, agent) ? (table[agent] ?? null) : null;
 }
 
 /** One reconciled transition → one substrate event. Never throws. */

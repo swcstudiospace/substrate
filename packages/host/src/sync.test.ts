@@ -104,7 +104,9 @@ describe("HostSync.syncPr (D-10, T-03-07-03)", () => {
 				Branch: { rich_text: [{ text: { content: BRANCH } }] },
 			},
 		});
-		expect(Object.keys((notion[1]?.body as { properties: object }).properties).sort()).toEqual([...SYNC_WRITABLE].sort());
+		const patch = notion[1];
+		if (!patch) throw new Error("expected a second notion request (the PATCH)");
+		expect(Object.keys((patch.body as { properties: object }).properties).sort()).toEqual([...SYNC_WRITABLE].sort());
 	});
 
 	test("no Task row → no PATCH and notion no_task_row; Notion 500 → failed:500; the Linear half still runs either way", async () => {
@@ -200,7 +202,9 @@ describe("HostSync.verifyModelSync (read-only, sync_by model_mcp)", () => {
 		});
 		expect(await both.sync.verifyModelSync({ graphId: GID, node: node(), prUrl: PR_URL })).toEqual({ notion: true, linear: true });
 		expect(both.requests.map((r) => `${r.method} ${new URL(r.url).pathname}`)).toEqual([`POST /v1/data_sources/${DEFAULT_TASK_GRAPH_DS}/query`, "POST /graphql"]);
-		expect(String((both.requests[1]?.body as { query: string }).query).trimStart().startsWith("query")).toBe(true);
+		const graphqlRequest = both.requests[1];
+		if (!graphqlRequest) throw new Error("expected a second request (the graphql read)");
+		expect(String((graphqlRequest.body as { query: string }).query).trimStart().startsWith("query")).toBe(true);
 
 		const neither = hostSync({
 			[`POST /v1/data_sources/${DEFAULT_TASK_GRAPH_DS}/query`]: () => ({ body: { results: [{ id: PAGE_ID, properties: { "PR URL": { type: "url", url: null } } }] } }),

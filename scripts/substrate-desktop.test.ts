@@ -124,7 +124,7 @@ interface Rig {
 }
 type RunResult = { code: number; out: string; err: string; log: string; envFile: string };
 
-function makeRig(knobs: Knobs = {}): Rig {
+function makeRig(): Rig {
 	const stubDir = mkdtempSync(join(tmpdir(), "substrate-desktop-stub-"));
 	made.push(stubDir);
 	writeFileSync(join(stubDir, "docker"), DOCKER_STUB, { mode: 0o755 });
@@ -151,7 +151,7 @@ function baseEnv(rig: Rig, knobs: Knobs): Record<string, string> {
 }
 
 function runScript(sub: string, knobs: Knobs = {}, extraEnv: Record<string, string> = {}): RunResult {
-	const rig = makeRig(knobs);
+	const rig = makeRig();
 	const child = Bun.spawnSync(["bash", SCRIPT, sub], {
 		env: { ...baseEnv(rig, knobs), ...extraEnv },
 		stdout: "pipe",

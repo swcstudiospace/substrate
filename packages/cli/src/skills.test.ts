@@ -445,7 +445,7 @@ describe("readSkillDir, the timeout and the cap", () => {
 		writeFileSync(join(dir, "__proto__"), "kept\n");
 		const withProto = readSkillDir(dir);
 		expect(Object.keys(withProto).sort()).toEqual(["SKILL.md", "__proto__", "scripts/run.sh"]);
-		expect(withProto["__proto__"]).toBe("kept\n");
+		expect(Object.getOwnPropertyDescriptor(withProto, "__proto__")?.value).toBe("kept\n");
 		expect(() => readSkillDir(join(dir, "missing"))).toThrow();
 		expect(DirRefused.prototype).toBeInstanceOf(Error);
 		writeFileSync(join(dir, "notes.md"), Buffer.from([0xef, 0xbb, 0xbf, 0x6e, 0x6f, 0x74, 0x65, 0x73, 0x0a]));

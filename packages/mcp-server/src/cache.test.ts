@@ -1939,7 +1939,10 @@ describe("stale-while-revalidate (uplift-4 S4)", () => {
 			const cache = cacheWith(redis, mode);
 			const probe = probeOf();
 			let version = 0;
-			const load = async () => `v${(version += 1)}`;
+			const load = async () => {
+				version += 1;
+				return `v${version}`;
+			};
 			const answers: string[] = [];
 			answers.push(await call(cache, probe, { load }));
 			answers.push(await call(cache, probe, { load }));

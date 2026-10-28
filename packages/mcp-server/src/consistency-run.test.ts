@@ -703,6 +703,27 @@ describe("ledgerWriteReader", () => {
 		expect(page.next).toBe(`0|${new Date(NOW - 1000).toISOString()}`);
 	});
 
+	test("an event's entry_id is carried when the payload names one and absent otherwise", async () => {
+		const named = (over: Record<string, unknown>) => JSON.stringify({ outcome: "accepted", scope: "repo:acme/app", kind: "fact", ...over });
+		const reader = ledgerWriteReader({
+			queryEvents: async () => [
+				row("with-id", NOW - 5000, { payload: named({ entry_id: "mem_stored" }) }),
+				row("legacy", NOW - 4000),
+				row("empty-id", NOW - 3000, { payload: named({ entry_id: "" }) }),
+				row("number-id", NOW - 2000, { payload: named({ entry_id: 7 }) }),
+			],
+		});
+		const page = await reader.memoryWrites({ since: minutesAgo(10), until: minutesAgo(0), limit: 500, cursor: null });
+		expect(page.events.map((e) => [e.id, e.entry_id])).toEqual([
+			["with-id", "mem_stored"],
+			["legacy", undefined],
+			["empty-id", undefined],
+			["number-id", undefined],
+		]);
+		// The key is absent, not undefined, on an event that names no entry.
+		expect("entry_id" in (page.events[1] as object)).toBe(false);
+	});
+
 	test("a malformed cursor is refused", async () => {
 		const reader = ledgerWriteReader({ queryEvents: async () => [] });
 		await expect(reader.memoryWrites({ since: "a", until: "b", limit: 5, cursor: "9|nope" })).rejects.toThrow("bad cursor");

@@ -181,6 +181,7 @@ import { completionStoreView, type CompletionStoreView } from "./planning/checkp
 import type { SteeringWiring } from "./planning/steering-tools.ts";
 import { SteeringInbox, type SteeringHistorySink } from "./planning/steering.ts";
 import { DEFAULT_STEERING_RESTORE_LIMIT, DEFAULT_STEERING_RESTORE_MAX_PAGES, restoreSteeringInboxPaged, type SteeringAuditSink, type SteeringRestoreStop } from "./planning/steering-store.ts";
+import { SteeringSessionRegistry } from "./planning/session-state.ts";
 import { SteeringExpirySweeper, SteeringHintAnnouncer, steeringNoticeFor, type SessionStatePort, type SteeringNotice } from "./planning/steering-delivery.ts";
 import type { FabricSources } from "./fabric/types.ts";
 import { FABRIC_HEALTH_WINDOW_MS } from "./fabric/gather.ts";
@@ -259,7 +260,6 @@ import {
 	type GraphNode,
 	type GraphView,
 	type MemoryEntry,
-	type MemoryEntryInput,
 	type MemoryReadOptions,
 	type MemorySearch,
 	type MemorySearchPage,
@@ -1433,7 +1433,12 @@ export class Substrate {
 	private readonly steeringSweeper: SteeringExpirySweeper | null;
 	/** Phase 58: one wake-up hint per queued directive. */
 	readonly steeringHints: SteeringHintAnnouncer;
-	/** Phase 58: the live session state an acknowledgement drives. Null in this branch's production wiring: the adapter joins when the live session state machine does. */
+	/**
+	 * Phase 58: the live steering sessions `docs_steering_session` holds. One registry per instance, so a test and a restart start empty.
+	 * It is also the port an acknowledgement drives (see `sessionState`), which is how the two steering mechanisms share one state model.
+	 */
+	readonly steeringSessions: SteeringSessionRegistry;
+	/** Phase 58: the live session state an acknowledgement drives. The registry while steering is on, unless a test injects another; null while steering is off. */
 	readonly sessionState: SessionStatePort | null;
 
 	/** `stores` is a test seam; production always builds them from config. */
@@ -1609,7 +1614,8 @@ export class Substrate {
 			settingsErrors: steeringErrors,
 			inbox: steeringInbox,
 		};
-		this.sessionState = steeringSeam?.sessionState ?? null;
+		this.steeringSessions = new SteeringSessionRegistry({ emit: (event: EventInput) => this.emit(event) });
+		this.sessionState = steeringSeam?.sessionState !== undefined ? steeringSeam.sessionState : steeringInbox !== null ? this.steeringSessions : null;
 		this.steeringHints = new SteeringHintAnnouncer({ emit: async (event: EventInput) => (await this.emit(event)).stored, report: steeringSeam?.report });
 		this.steeringSweeper =
 			steeringInbox !== null && this.steeringDurable !== null && config.steeringExpiry.ok
@@ -2719,6 +2725,12 @@ export class Substrate {
 				...(result.reason ? { reason: result.reason } : {}),
 				scope: request.scope,
 				kind: request.kind,
+				// The stored row's id, read ONLY from the gate's result — never from the
+				// request, whose `id`-shaped fields are caller-controlled. It lets the
+				// consistency verifier pair this event with its index row exactly instead
+				// of by writer + scope + kind + time. Omitted on every write that stored
+				// nothing (refused, quarantined, conflicting), so absence stays honest.
+				...(result.outcome === "accepted" && result.entry ? { entry_id: result.entry.id } : {}),
 				...(result.strategy ? { strategy: result.strategy } : {}),
 				...(result.review_id ? { review_id: result.review_id } : {}),
 				...(result.quarantine_id ? { quarantine_id: result.quarantine_id } : {}),
@@ -6444,7 +6456,7 @@ export class Substrate {
 			// verdict, not only the session that held the gap. A new session
 			// whose hash no longer matches its summary must fail even when
 			// its hour is still open and skips the digest.
-			for (const [key, members] of freshBySession) {
+			for (const members of freshBySession.values()) {
 				if (!members.some((member) => byEvent.has(member.id))) continue;
 				const result = verifyChain(inChainOrder(members));
 				if (!result.ok) {

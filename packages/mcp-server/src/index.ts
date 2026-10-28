@@ -31,6 +31,7 @@ import {
 	sloConfigWarnings,
 	swarmTokenWarnings,
 } from "./config.ts";
+import type { SubstrateConfig } from "./config.ts";
 import { briefProfileConfigWarnings } from "./brief-profile.ts";
 import { planningConfigWarnings } from "./planning/config.ts";
 import { hindsightInventoryConfigWarnings } from "./hindsight-inventory.ts";
@@ -46,7 +47,7 @@ import { createWatchdog, livezUrlFor } from "./watchdog.ts";
 import { MentalModelRefresh } from "./mental-model-refresh.ts";
 import { hindsightFromEnv, hindsightOp } from "./planes/hindsight.ts";
 
-let config;
+let config: SubstrateConfig;
 try {
 	// The one host probe `loadConfig` takes: whether the state directory exists,
 	// so an unset SUBSTRATE_SLO_CHECKPOINT lands in it on a deployed host and

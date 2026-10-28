@@ -48,7 +48,7 @@ import {
 	retryPendingNotes,
 	verifyArchive,
 } from "./ledger-archive.ts";
-import type { NoteOutcome } from "./ledger-archive.ts";
+import type { LedgerCommand, NoteOutcome } from "./ledger-archive.ts";
 import type { EventInput } from "./types.ts";
 import { redact } from "./redact.ts";
 import { Substrate } from "./service.ts";
@@ -63,7 +63,7 @@ function reasonOf(cause: unknown): string {
 	return redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 300);
 }
 
-let command;
+let command: LedgerCommand;
 try {
 	command = parseLedgerArgs(process.argv.slice(2));
 } catch (cause) {

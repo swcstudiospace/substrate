@@ -13,7 +13,18 @@
  * `seq` is the highest local seq of the session plus one, and `prev_ckpt_id` is the checkpoint it follows.
  * Asking for a seq that already exists returns that checkpoint instead of making another (idempotent by
  * session and seq) and offers it to the server again.
+ *
+ * The sequence is allocated under `<git dir>/substrate-checkpoint.lock`: the list of existing checkpoints,
+ * the choice of `seq` and the pin happen while one process holds it, so two processes sharing a git
+ * directory can never pin the same seq (the ledger key `ckpt:s.<session>:<seq>` would have deduped one
+ * of them silently). The snapshot, which is slow, is taken before the lock; the server call after it.
+ * It is NOT the restore lock: the two are separate files so that no path depends on nesting them (a
+ * checkpoint taken from inside a held restore lock would deadlock, and checkpoint creation never waits
+ * behind a long restore). Today they are never nested: `rollback` finishes its pre-restore checkpoint
+ * before `restore` takes the restore lock. A lock that
+ * stays busy past its bounded wait fails the call with `WorktreeBusyError`; nothing was pinned.
  */
+import { realpathSync } from "node:fs";
 import {
 	CHECKPOINT_TRIGGERS,
 	type CheckpointTrigger,
@@ -24,11 +35,15 @@ import {
 	parseTranscriptRef,
 } from "../../../mcp-server/src/session-events.ts";
 import {
+	CHECKPOINT_LOCK_FILE,
 	type Clock,
+	GitCommandError,
+	type LockWait,
 	type PinnedCheckpoint,
 	type Runner,
 	type SkippedPath,
 	type SnapshotPolicy,
+	acquireWorktreeLockWithin,
 	listPinned,
 	pinSnapshot,
 	readPinnedSnapshot,
@@ -182,6 +197,8 @@ export interface CreateCheckpointParams {
 	policy?: SnapshotPolicy;
 	/** Ask for this seq. An existing checkpoint with it is returned; a seq at or below the highest, not existing, is refused. */
 	seq?: number;
+	/** How long to wait for the checkpoint lock when another process holds it (default 100 tries, 50 ms apart); tests inject `sleep`. */
+	lockWait?: LockWait;
 }
 
 /**
@@ -205,80 +222,118 @@ export async function createCheckpoint(params: CreateCheckpointParams): Promise<
 			throw new CheckpointError("invalid-input", `transcript_ref: ${cause instanceof Error ? cause.message : "invalid"}`);
 		}
 	}
-	const existing = checkpointsOfSession((await listLocalCheckpoints({ worktree: params.worktree, run, now: params.now })).checkpoints, sessionId);
-	const last = existing[existing.length - 1];
-	const highest = last?.seq ?? 0;
-	if (params.seq !== undefined) {
-		if (!Number.isSafeInteger(params.seq) || params.seq < 1) throw new CheckpointError("invalid-input", "seq must be a positive integer");
-		const found = existing.find((checkpoint) => checkpoint.seq === params.seq);
-		if (found !== undefined) return offerExisting(params, run, found);
-		if (params.seq <= highest) throw new CheckpointError("seq-conflict", `seq ${params.seq} is not taken but the session is already at seq ${highest}`);
-	}
-	const seq = params.seq ?? highest + 1;
+	// A first look, before the slow snapshot: a seq that already exists is answered without one, and a refused seq fails early.
+	const early = decideSeq((await listLocalCheckpoints({ worktree: params.worktree, run, now: params.now })).checkpoints, sessionId, params.seq);
+	if (early.kind === "found") return offerExisting(params, run, early.found);
 
 	const snap = await snapshot({ worktree: params.worktree, policy: params.policy, now: params.now, run });
 	// When the files were pinned: a checkpoint the server hears of hours later cuts memory at THIS instant, not at its record time.
 	const takenAtMs = params.now().getTime();
 	const ckptId = newCheckpointId(params.randomBytes);
-	const record: CheckpointRecord = {
-		ckpt_id: ckptId,
-		seq,
-		trigger,
-		git_tree: snap.tree,
-		...(snap.headCommit === null ? {} : { git_base_commit: snap.headCommit }),
-		// The contract caps a branch name at 200 characters; a longer name is left out, not truncated.
-		...(snap.branch === null || snap.branch.length > 200 ? {} : { branch: snap.branch }),
-		manifest_sha256: snap.manifestSha256,
-		file_count: snap.entries.length,
-		skipped_count: snap.skipped.length,
-		...(transcriptRef === undefined ? {} : { transcript_ref: transcriptRef }),
-		...(params.planRef === undefined ? {} : { plan_ref: params.planRef }),
-		...(last === undefined ? {} : { prev_ckpt_id: last.ckpt_id }),
-		taken_at_ms: takenAtMs,
-	};
+
+	// The decision that counts: list, choose the seq and pin while holding the checkpoint lock, so a concurrent
+	// process cannot take the same seq between the list and the pin.
+	const lock = await acquireWorktreeLockWithin(await resolveGitDir(params.worktree, run), params.now, {
+		...params.lockWait,
+		file: CHECKPOINT_LOCK_FILE,
+		label: "checkpoint",
+	});
+	let record: CheckpointRecord;
+	let checkpoint: LocalCheckpoint;
 	try {
-		// The same validation the ledger event goes through, before anything is pinned.
-		buildCheckpointEvent(sessionId, record);
-	} catch (cause) {
-		throw new CheckpointError("invalid-input", cause instanceof Error ? cause.message : "the checkpoint is not valid");
-	}
-	const pin = await pinSnapshot({
-		worktree: params.worktree,
-		snapshot: snap,
-		id: ckptId,
-		metadata: {
+		const decision = decideSeq((await listLocalCheckpoints({ worktree: params.worktree, run, now: params.now })).checkpoints, sessionId, params.seq);
+		// Another process made this seq while this one was snapshotting: it is that process's checkpoint now.
+		if (decision.kind === "found") {
+			lock.release();
+			return await offerExisting(params, run, decision.found);
+		}
+		const { seq, last } = decision;
+		record = {
 			ckpt_id: ckptId,
 			seq,
 			trigger,
+			git_tree: snap.tree,
+			...(snap.headCommit === null ? {} : { git_base_commit: snap.headCommit }),
+			// The contract caps a branch name at 200 characters; a longer name is left out, not truncated.
+			...(snap.branch === null || snap.branch.length > 200 ? {} : { branch: snap.branch }),
+			manifest_sha256: snap.manifestSha256,
+			file_count: snap.entries.length,
+			skipped_count: snap.skipped.length,
+			...(transcriptRef === undefined ? {} : { transcript_ref: transcriptRef }),
+			...(params.planRef === undefined ? {} : { plan_ref: params.planRef }),
+			...(last === undefined ? {} : { prev_ckpt_id: last.ckpt_id }),
+			taken_at_ms: takenAtMs,
+		};
+		try {
+			// The same validation the ledger event goes through, before anything is pinned.
+			buildCheckpointEvent(sessionId, record);
+		} catch (cause) {
+			throw new CheckpointError("invalid-input", cause instanceof Error ? cause.message : "the checkpoint is not valid");
+		}
+		const pin = await pinSnapshot({
+			worktree: params.worktree,
+			snapshot: snap,
+			id: ckptId,
+			metadata: {
+				ckpt_id: ckptId,
+				seq,
+				trigger,
+				session_id: sessionId,
+				transcript_ref: transcriptRef,
+				prev_ckpt_id: record.prev_ckpt_id,
+				plan_ref: params.planRef,
+				file_count: record.file_count,
+				skipped_count: record.skipped_count,
+				taken_at_ms: takenAtMs,
+			},
+			now: params.now,
+			run,
+		});
+		checkpoint = {
+			ckpt_id: ckptId,
+			ref: pin.ref,
+			commit: pin.commit,
+			tree: snap.tree,
+			createdAt: params.now().toISOString(),
+			seq,
+			trigger,
 			session_id: sessionId,
-			transcript_ref: transcriptRef,
-			prev_ckpt_id: record.prev_ckpt_id,
-			plan_ref: params.planRef,
+			...(transcriptRef === undefined ? {} : { transcript_ref: transcriptRef }),
+			...(record.prev_ckpt_id === undefined ? {} : { prev_ckpt_id: record.prev_ckpt_id }),
+			...(params.planRef === undefined ? {} : { plan_ref: params.planRef }),
 			file_count: record.file_count,
 			skipped_count: record.skipped_count,
 			taken_at_ms: takenAtMs,
-		},
-		now: params.now,
-		run,
-	});
-	const checkpoint: LocalCheckpoint = {
-		ckpt_id: ckptId,
-		ref: pin.ref,
-		commit: pin.commit,
-		tree: snap.tree,
-		createdAt: params.now().toISOString(),
-		seq,
-		trigger,
-		session_id: sessionId,
-		...(transcriptRef === undefined ? {} : { transcript_ref: transcriptRef }),
-		...(record.prev_ckpt_id === undefined ? {} : { prev_ckpt_id: record.prev_ckpt_id }),
-		...(params.planRef === undefined ? {} : { plan_ref: params.planRef }),
-		file_count: record.file_count,
-		skipped_count: record.skipped_count,
-		taken_at_ms: takenAtMs,
-	};
+		};
+	} finally {
+		lock.release();
+	}
 	const server = await offerToServer(params, run, record);
 	return { checkpoint, created: true, server, skipped: snap.skipped, file_count: record.file_count };
+}
+
+type SeqDecision = { kind: "found"; found: LocalCheckpoint } | { kind: "new"; seq: number; last: LocalCheckpoint | undefined };
+
+/** What a request for `requested` (or the next seq) means given the checkpoints that exist: an existing checkpoint, or the seq to make and the one it follows. */
+function decideSeq(all: readonly LocalCheckpoint[], sessionId: string, requested: number | undefined): SeqDecision {
+	const existing = checkpointsOfSession(all, sessionId);
+	const last = existing[existing.length - 1];
+	const highest = last?.seq ?? 0;
+	if (requested !== undefined) {
+		if (!Number.isSafeInteger(requested) || requested < 1) throw new CheckpointError("invalid-input", "seq must be a positive integer");
+		const found = existing.find((checkpoint) => checkpoint.seq === requested);
+		if (found !== undefined) return { kind: "found", found };
+		if (requested <= highest) throw new CheckpointError("seq-conflict", `seq ${requested} is not taken but the session is already at seq ${highest}`);
+	}
+	return { kind: "new", seq: requested ?? highest + 1, last };
+}
+
+/** The worktree's own git directory (per linked worktree, like the checkpoint scope), where the checkpoint lock lives. */
+async function resolveGitDir(worktree: string, run: Runner): Promise<string> {
+	const result = await run(["git", "-C", worktree, "rev-parse", "--absolute-git-dir"]);
+	const gitDir = result.code === 0 ? result.stdout.toString("utf8").trim() : "";
+	if (gitDir.length === 0) throw new GitCommandError("cannot resolve the git directory of the worktree");
+	return realpathSync(gitDir);
 }
 
 async function offerExisting(params: CreateCheckpointParams, run: Runner, found: LocalCheckpoint): Promise<CheckpointResult> {

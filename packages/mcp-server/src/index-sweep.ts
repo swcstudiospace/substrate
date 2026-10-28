@@ -179,10 +179,10 @@ export interface SweepStatement {
 
 /**
  * One round of deletion. `pick` either deletes outright and returns
- * `{ deleted, …children }` (the simple classes), or — when `then` is present —
+ * `{ deleted, …children }` (the simple classes), or — when `decide` is present —
  * only selects and locks the keys to remove, returning one row per key;
  * `lock(picked)`, when present, then locks and re-reads the rows the decision
- * depends on, and `then(picked, locked)` builds the statements that do the
+ * depends on, and `decide(picked, locked)` builds the statements that do the
  * removing from both. Each of those returns one row whose columns are merged
  * into the round's result.
  *
@@ -195,10 +195,10 @@ export interface SweepStatement {
  */
 export interface SweepBatch {
 	pick: SweepStatement;
-	/** With `then`: locks the rows `then` decides on; its rows are `then`'s second argument. */
+	/** With `decide`: locks the rows `decide` decides on; its rows are `decide`'s second argument. */
 	lock?: (picked: Array<Record<string, unknown>>) => SweepStatement;
-	then?: (picked: Array<Record<string, unknown>>, locked: Array<Record<string, unknown>>) => SweepStatement[];
-	/** With `then`: the key under which picked-but-not-deleted rows are reported. */
+	decide?: (picked: Array<Record<string, unknown>>, locked: Array<Record<string, unknown>>) => SweepStatement[];
+	/** With `decide`: the key under which picked-but-not-deleted rows are reported. */
 	skippedAs?: string;
 }
 
@@ -411,7 +411,7 @@ export const SWEEP_CLASSES: readonly SweepClass[] = [
 					`where n.graph_id ${IDS_IN("$1")} for update`,
 				params: [JSON.stringify(picked.map((row) => String(row.graph_id)))],
 			}),
-			then: (picked, locked) => {
+			decide: (picked, locked) => {
 				const live = new Set(locked.filter((row) => row.live === true).map((row) => String(row.graph_id)));
 				const doomed = picked.map((row) => String(row.graph_id)).filter((graphId) => !live.has(graphId));
 				if (doomed.length === 0) return [];
@@ -525,18 +525,18 @@ function int(value: unknown): number {
 }
 
 /**
- * One round of a class's delete: run `pick`; with `then`, run `lock` on what it
+ * One round of a class's delete: run `pick`; with `decide`, run `lock` on what it
  * picked (when the class has one), feed the picked and locked rows to the
  * follow-up statements and merge their one-row results. Returns how many rows
  * the round *picked* (what bounds the loop) and the merged columns.
  */
 async function runBatch(run: SweepRunner, batch: SweepBatch): Promise<{ picked: number; row: Record<string, unknown> }> {
 	const picked = await run(batch.pick);
-	if (!batch.then) return { picked: int(picked[0]?.deleted), row: picked[0] ?? {} };
+	if (!batch.decide) return { picked: int(picked[0]?.deleted), row: picked[0] ?? {} };
 	if (picked.length === 0) return { picked: 0, row: {} };
 	const locked = batch.lock ? await run(batch.lock(picked)) : [];
 	const row: Record<string, unknown> = {};
-	for (const statement of batch.then(picked, locked)) Object.assign(row, (await run(statement))[0] ?? {});
+	for (const statement of batch.decide(picked, locked)) Object.assign(row, (await run(statement))[0] ?? {});
 	if (batch.skippedAs) row[batch.skippedAs] = picked.length - int(row.deleted);
 	return { picked: picked.length, row };
 }

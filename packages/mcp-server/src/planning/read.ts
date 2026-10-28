@@ -24,8 +24,8 @@ import type { PlanningConfigError, PlanningConfigResult, PlanningLimits } from "
 import { detectConflicts, sessionViewOf, type PlanningConflict, type SessionView } from "./conflicts.ts";
 import { buildPlanningIndex, indexRecords, isErrorRecord, positionOf, type PlanningFileRecord, type PlanningFs, type PlanningIndexFailure, type PlanningKind, type PlanningRecord } from "./index.ts";
 import type { PositionResult } from "./position.ts";
-import { DragonflyPresenceStore, PRESENCE_MAX_SESSIONS } from "./presence-dragonfly.ts";
-import { classifySessions, type SessionRecord, type SessionStatus, type UnknownViewReason } from "./presence.ts";
+import { type DragonflyPresenceStore, PRESENCE_MAX_SESSIONS } from "./presence-dragonfly.ts";
+import { classifySessions, type SessionStatus, type UnknownViewReason } from "./presence.ts";
 import { deriveSessionState, type SessionViewState } from "./states.ts";
 
 export interface PlanningDisabled {
