@@ -899,6 +899,7 @@ describe("routes", () => {
 			}
 			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
 			if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+			if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
 			return Response.json({ detail: "no route" }, { status: 404 });
 		}) as typeof fetch;
 		const docs = docsFixture({ "README.md": "The substrate is the only door." });
@@ -1120,6 +1121,7 @@ describe("routes", () => {
 				if (init?.method === "POST" && url.pathname === "/documents/upload") return Response.json({ status: "success", data: { track_id: "trk-1" } });
 				if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
 				if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+				if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
 				return Response.json({ detail: "no route" }, { status: 404 });
 			}) as unknown as typeof fetch;
 			const { greptime } = ledger();
@@ -1214,6 +1216,7 @@ describe("routes", () => {
 				if (init?.method === "POST" && url.pathname === "/documents/upload") return Response.json({ status: "success", data: { track_id: "trk-1" } });
 				if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
 				if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+				if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
 				return Response.json({ detail: "no route" }, { status: 404 });
 			}) as unknown as typeof fetch;
 			const { greptime } = ledger();

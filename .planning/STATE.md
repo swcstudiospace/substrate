@@ -549,6 +549,16 @@ PR B's defaults: `SUBSTRATE_BRIEF_GRAPH_READ=full`, `SUBSTRATE_CACHE_BUMP_SCOPE=
 - Gates on the run branch after the closeout: `bun run verify` and `bun scripts/audit-gate.ts`, recorded in the audit section 4.
 - Removals this run: temporary logs and counts under /tmp created by this run (`/tmp/gate-*.log`, `/tmp/pc-*.log`, `/tmp/noUnused-count.txt`). Temporary worktrees were removed after each fail-before check. No phase artifact, branch, worktree, stash or user change was removed.
 
+## Run 8: planner graph ut-mvp59le0-8815e6d1 (2026-10-26)
+
+- Request: use LightRAG and Hindsight with DragonflyDB, GreptimeDB and TimescaleDB; migrations for the LightRAG change; live session steering for multi-day GSD-Core sessions; Solana devnet logging and an Anda-inspired Eternal Memory Knowledge Nexus; session rollback to an exact chat moment with file revert. The plan was written without repository access.
+- Tracking: `track complete` ran once: partial (Linear is blocked by the workspace free-issue limit and fails open; Notion rows exist). Notion Task 405bc1a0c7ae814ab9ffe212722cb2a4 is Implementing. Session marked kicked off.
+- Recon: ten read-only scouts plus a read-only Railway inventory and upstream sources. Findings and corrected assumptions are in `.planning/phases/55-migration-safety/CONTEXT.md`.
+- Clarifications settled from evidence, not asked: rollback marks memory superseded (the ledger is append-only); memo-only anchoring (memo v1 is fixed); a CLI plus read-only MCP and REST twins; edits stay in this repository.
+- Milestone v1.6 (phases 55 to 62, SOTA-11 to SOTA-18) is defined by hand in ROADMAP.md and REQUIREMENTS.md. `gsd-new-milestone` was not run: its milestone-switch and phase-clear steps would reset this file and archive the open v1.5 phase directories, which the held milestone-complete decision forbids.
+- Held and HARD_STOP, unchanged: LightRAG deploy and ingest (Phase 46 T5 to T8), production migrations, the anchor key and timer and any devnet send, mainnet, merges to main, milestone completion, PRs on other repositories.
+- P0 finding on the first read of the upstream source: the LightRAG client's `deleteDocuments` calls `DELETE /documents`, which LightRAG implements as clear-all. No server exists yet, so nothing was lost. Phase 56 fixes it and denylists the route.
+
 ## Run 9: planner graph ut-mvq2q73k-300071f3 (2026-10-27)
 
 - Request: raise code quality and complete GSD phases and milestones; LightRAG "has not been deployed although RAGFlow was removed"; Hindsight "has not been updated for days and is not upgrading autonomously". Planning ran degraded (a provider error on three node fills). Tracking failed open: Linear is at its free-issue limit and Notion needs `ultrathink-mcp auth login notion`, so this graph has no rows and no sync was possible.

@@ -85,6 +85,35 @@ Source for all entries: `.planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota
   - Acceptance: each phase transition emits a GreptimeDB metric with a stdout fallback when GreptimeDB is disabled or unreachable; the session view reports exactly one of LOADING, EMPTY, STALE, DEGRADED, ERROR, SUCCESS; a documented inventory separates disk state from Railway-hosted state and lists host-bound paths and units; no cutover, DNS change or production deploy in scope.
   - Target files: packages/observability, docs, config-reference
 
+## v1.6 contextual memory requirements
+
+Source for all entries: the operator request of 2026-10-26 as planned by the Ultrathink graph ut-mvp59le0-8815e6d1, corrected against the repository (`.planning/phases/55-migration-safety/CONTEXT.md`). IDs continue the SOTA series.
+
+- [ ] **SOTA-11**: Migration safety, session event vocabulary and the v1.6 baseline. Phase: 55. Source: .planning/ROADMAP.md Phase 55 (defined 2026-10-26)
+  - Acceptance: an offline contract test rejects non-idempotent, destructive or edited-after-applied migration steps; a fake-connection harness proves lock-before-DDL, one transaction per step, rollback without a ledger row, zero DDL on re-run and partial resume; a rollback-compat test rejects non-additive or undocumented later steps; `session.checkpoint`, `session.rollback` and `session.rollback.refused` are note and warning events with validated payload builders and the vocabulary locks (EVENT_KINDS 12, SURFACES 42) stay green; an operator rehearsal runbook marks every production step operator-run.
+  - Target files: packages/mcp-server/src/index-store.ts and tests, event-sources.ts, session-events.ts, docs/event-vocabulary.md, docs/runbooks
+- [ ] **SOTA-12**: LightRAG client contract alignment and storage topology. Phase: 56. Source: .planning/ROADMAP.md Phase 56 (defined 2026-10-26)
+  - Acceptance: the client cannot emit the clear-all route and deletes only by real document id; completion is read from the `busy` flag with explicit reasons for a fenced workspace and an unknown shape; the key is sent as `X-API-Key` only; track ids resolve to document ids and a 409 is a typed outcome; one `/query` client remains behind the breaker; a health probe fills `planes.lightrag.ok`; an upstream-derived route fixture with provenance and a contract test; the storage topology and upgrade design are written down; no live action.
+  - Target files: packages/mcp-server/src/planes/lightrag.ts and tests, mcp.ts, server.ts, service.ts, docs/runbooks/lightrag-storage-topology.md
+- [ ] **SOTA-13**: Tandem memory, LightRAG with Hindsight, with provenance and forget. Phase: 57. Source: .planning/ROADMAP.md Phase 57 (defined 2026-10-26)
+  - Acceptance: retain metadata carries graph, session and node ids and recall exposes them with unchanged document ids; merged, deduplicated, cited LightRAG and Hindsight answers with the existing degraded fallback intact; a forget primitive that emits one ledger note per call and keeps the superseded index row; a cross-store consistency verifier reporting JSON drift with a non-zero exit code and no repair without a flag.
+  - Target files: packages/mcp-server/src/memory-retain.ts, memory-recall.ts, memory-forget.ts, tandem-recall.ts, docs-search.ts, service.ts
+- [ ] **SOTA-14**: Live session steering for multi-day GSD-Core sessions. Phase: 58. Source: .planning/ROADMAP.md Phase 58 (defined 2026-10-26)
+  - Acceptance: durable directives that survive a restart and expire to an audited timeout; delivery to the target session within one scan interval and one shared state model for the two steering mechanisms; liveness that outlasts 25 hours of quiet; a STATE.md and ROADMAP.md position model; DragonflyDB limited to hints and ephemeral presence.
+  - Target files: packages/mcp-server/src/planning/*, mcp.ts, event.ts, the TimescaleDB index schema (opt-in step), config-reference
+- [ ] **SOTA-15**: Eternal logging, verifiable checkpoint and rollback events on Solana devnet. Phase: 59. Source: .planning/ROADMAP.md Phase 59 (defined 2026-10-26)
+  - Acceptance: Merkle inclusion proofs for every tree size and index with tamper rejection; a checkpoint verification command reporting one of anchored, pending, unanchored, unverified or mismatch; mainnet and testnet RPC URLs refused at configuration load and at RPC construction; a signer set with validity windows and audited rotation; devnet reset detection apart from tampering with a re-anchor procedure; no transaction sent outside operator-run steps.
+  - Target files: packages/ledger/src, packages/mcp-server/src/anchor.ts, service.ts, config.ts, packages/evidence, docs/runbooks
+- [ ] **SOTA-16**: Eternal Memory Knowledge Nexus. Phase: 60. Source: .planning/ROADMAP.md Phase 60 (defined 2026-10-26)
+  - Acceptance: governed memory records expose id, version, supersession chain, provenance and content hash and verify against an anchored root; deterministic capsules with a digest recorded as a ledger event and a content-addressed blob store (local and an S3-compatible adapter tested against a fake); redaction that keeps the hash and a tombstone; a decision record mapping Anda and KIP concepts with licenses noted.
+  - Target files: packages/mcp-server/src (memory verification and capsule modules), docs/adr
+- [ ] **SOTA-17**: Session rollback to an exact chat moment with file revert. Phase: 61. Source: .planning/ROADMAP.md Phase 61 (defined 2026-10-26)
+  - Acceptance: tree-hash equality after snapshot, mutate and restore, with recovery after an interruption and never a partial end state; a dry-run, drift refusal and an always-taken safety snapshot; checkpoints at defined boundaries carrying an opaque transcript reference, git tree, manifest digest and chain head; an append-only rollback event with memory supersession and recall exclusion; per-surface transcript handling without rewriting any transcript; rollback from local checkpoints when the chain is unreachable.
+  - Target files: packages/worktree-snapshot, packages/cli, packages/collectors, packages/mcp-server/src, TimescaleDB index schema (opt-in step), docs/runbooks
+- [ ] **SOTA-18**: Soak, runbooks and v1.6 close. Phase: 62. Source: .planning/ROADMAP.md Phase 62 (defined 2026-10-26)
+  - Acceptance: a simulated multi-day run with bounded memory and handles and clean resume; runbooks for migration rehearsal, LightRAG hosting, chain outage and devnet reset, rollback and key rotation; decision records for store roles, rollback semantics and memo-only anchoring; STATE and ROADMAP reflect every phase and the milestone audit is written.
+  - Target files: soak tests, docs/runbooks, docs/adr, .planning
+
 ## Out of scope and deferred
 
 Defer (v2+), from `.planning/research/SUMMARY.md` line 70:
@@ -124,6 +153,14 @@ Anti-features, from `.planning/research/SUMMARY.md` line 72:
 | SOTA-08 | 52 | Pending |
 | SOTA-09 | 53 | Pending |
 | SOTA-10 | 54 | Pending |
+| SOTA-11 | 55 | Pending |
+| SOTA-12 | 56 | Pending |
+| SOTA-13 | 57 | Pending |
+| SOTA-14 | 58 | Pending |
+| SOTA-15 | 59 | Pending |
+| SOTA-16 | 60 | Pending |
+| SOTA-17 | 61 | Pending |
+| SOTA-18 | 62 | Pending |
 
 ---
 *Requirements defined: 2026-10-21*

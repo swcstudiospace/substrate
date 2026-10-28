@@ -1,0 +1,152 @@
+{
+	"provenance": "DERIVED FROM THE UPSTREAM SOURCE, NOT RECORDED FROM A LIVE SERVER. Every route, request field and sample response below was written by hand from HKUDS/LightRAG tag v1.5.7 (2026-09-02): lightrag_api_routers_document_routes.py, lightrag_api_routers_query_routes.py, lightrag_api_lightrag_server.py and utils_api.py. No LightRAG server was called. OPERATOR STEP (before the first live ingest): fetch the deployed server's /openapi.json (`curl -H \"X-API-Key: $LIGHTRAG_API_KEY\" $LIGHTRAG_URL/openapi.json`) and diff its paths, methods, request-body required fields and response schemas against this file; any difference is a contract defect to fix here and in planes/lightrag.ts before cutover. Until that diff is done this fixture proves only that the client matches the v1.5.7 source, not the deployment.",
+	"upstream": { "project": "HKUDS/LightRAG", "tag": "v1.5.7", "date": "2026-09-02" },
+	"auth": {
+		"header": "X-API-Key",
+		"neverSent": ["Authorization"],
+		"source": "lightrag v1.5.7 utils_api.py:427-468 (combined_dependency validates any bearer token as a JWT first and answers 401 'Invalid token. Please login again.')"
+	},
+	"denylist": [
+		{
+			"method": "DELETE",
+			"path": "/documents",
+			"reason": "clear_documents(): deletes ALL documents, entities, relationships and files; takes no request model and ignores any body",
+			"source": "lightrag v1.5.7 lightrag_api_routers_document_routes.py:5749-5784"
+		}
+	],
+	"routes": [
+		{
+			"id": "query",
+			"method": "POST",
+			"path": "/query",
+			"source": "lightrag v1.5.7 lightrag_api_routers_query_routes.py:377 (route), :30-45 (QueryRequest: mode local|global|hybrid|naive|mix|bypass, default mix, only_need_context), :285-306 (QueryResponse)",
+			"request": { "kind": "json", "required": ["query"], "optional": ["mode", "top_k", "only_need_context"], "ignoredByServer": [] },
+			"responseFieldsRead": ["response"],
+			"sampleResponse": { "response": "Entity: Hindsight (store). Chunk: Hindsight is the memory plane. [reference_id 1]", "references": null, "llm_generated": false },
+			"clientExpects": { "ok": true, "chunks": [{ "content": "Entity: Hindsight (store). Chunk: Hindsight is the memory plane. [reference_id 1]" }] }
+		},
+		{
+			"id": "upload",
+			"method": "POST",
+			"path": "/documents/upload",
+			"source": "lightrag v1.5.7 lightrag_api_routers_document_routes.py:5124 (route; file: UploadFile = File(...) is the only field), :926-952 (InsertResponse: status success|partial_success|failure, message, track_id; same-name conflict is HTTP 409)",
+			"request": {
+				"kind": "multipart",
+				"required": ["file"],
+				"optional": [],
+				"ignoredByServer": ["file_source", "source_url", "commit", "heading_path", "graph_entities", "graph_relations"]
+			},
+			"responseFieldsRead": ["track_id"],
+			"sampleResponse": { "status": "success", "message": "File 'docs__a__README.md' uploaded successfully. Processing will continue in background.", "track_id": "upload_20260902_170612_abc123" },
+			"clientExpects": { "ok": true, "track_id": "upload_20260902_170612_abc123" }
+		},
+		{
+			"id": "text",
+			"method": "POST",
+			"path": "/documents/text",
+			"source": "lightrag v1.5.7 lightrag_api_routers_document_routes.py:5455 (route), :805-862 (InsertTextRequest: text required, file_source optional, pydantic ignores the other members), :926-952 (InsertResponse; 409 on a same-name file_source)",
+			"request": {
+				"kind": "json",
+				"required": ["text", "file_source"],
+				"optional": [],
+				"ignoredByServer": ["source_url", "commit", "heading_path", "graph_entities", "graph_relations"]
+			},
+			"responseFieldsRead": ["track_id"],
+			"sampleResponse": { "status": "success", "message": "Text successfully received. Processing will continue in background.", "track_id": "insert_20260902_170700_def456" },
+			"clientExpects": { "ok": true, "track_id": "insert_20260902_170700_def456" }
+		},
+		{
+			"id": "scan",
+			"method": "POST",
+			"path": "/documents/scan",
+			"source": "lightrag v1.5.7 lightrag_api_routers_document_routes.py:4409 (route, no request model), :375-403 (ScanResponse: status scanning_started|scanning_skipped_pipeline_busy, message, track_id)",
+			"request": { "kind": "json", "required": [], "optional": [], "ignoredByServer": [] },
+			"responseFieldsRead": [],
+			"sampleResponse": { "status": "scanning_started", "message": "Scanning process has been initiated in the background", "track_id": "scan_20260902_170800_ghi789" },
+			"clientExpects": { "ok": true }
+		},
+		{
+			"id": "pipeline_status",
+			"method": "GET",
+			"path": "/documents/pipeline_status",
+			"source": "lightrag v1.5.7 lightrag_api_routers_document_routes.py:6065 (route), :1384-1427 (PipelineStatusResponse: busy, recovery_required, recovery_kind, recovery_message, extra fields allowed; there is no `status` field)",
+			"request": { "kind": "none", "required": [], "optional": [], "ignoredByServer": [] },
+			"responseFieldsRead": ["busy", "recovery_required", "recovery_message", "recovery_kind"],
+			"responseFieldsOptional": ["scanning", "destructive_busy", "pending_enqueues"],
+			"sampleResponse": {
+				"busy": false,
+				"job_name": "Default Job",
+				"job_start": null,
+				"docs": 0,
+				"batchs": 0,
+				"cur_batch": 0,
+				"latest_message": "",
+				"history_messages": [],
+				"update_status": {},
+				"recovery_required": false,
+				"recovery_kind": null,
+				"recovery_message": null
+			},
+			"clientExpects": { "ok": true }
+		},
+		{
+			"id": "track_status",
+			"method": "GET",
+			"path": "/documents/track_status/{track_id}",
+			"source": "lightrag v1.5.7 lightrag_api_routers_document_routes.py:6347 (route), :1155-1196 (TrackStatusResponse: track_id, documents[], total_count, status_summary), :1100-1119 (DocStatusResponse: id, status, file_path, error_msg, ...)",
+			"request": { "kind": "none", "required": [], "optional": [], "ignoredByServer": [] },
+			"responseFieldsRead": ["documents", "documents[].id", "documents[].status", "documents[].file_path", "documents[].error_msg"],
+			"sampleResponse": {
+				"track_id": "upload_20260902_170612_abc123",
+				"documents": [
+					{
+						"id": "doc-3f2a9c",
+						"content_summary": "Setup guide",
+						"content_length": 1520,
+						"status": "processed",
+						"created_at": "2026-09-02T17:06:12",
+						"updated_at": "2026-09-02T17:06:40",
+						"track_id": "upload_20260902_170612_abc123",
+						"chunks_count": 2,
+						"error_msg": null,
+						"metadata": null,
+						"file_path": "docs__a__README.md"
+					}
+				],
+				"total_count": 1,
+				"status_summary": { "processed": 1 }
+			},
+			"clientExpects": { "ok": true, "ids": ["doc-3f2a9c"] }
+		},
+		{
+			"id": "delete_document",
+			"method": "DELETE",
+			"path": "/documents/delete_document",
+			"source": "lightrag v1.5.7 lightrag_api_routers_document_routes.py:6186-6215 (route), :1063-1090 (DeleteDocRequest: doc_ids non-empty, unique, stripped; delete_file and delete_llm_cache default false), :6177-6184 (DeleteDocByIdResponse: status deletion_started|busy|not_allowed, message, doc_id; runs in the background)",
+			"request": { "kind": "json", "required": ["doc_ids"], "optional": ["delete_file", "delete_llm_cache"], "ignoredByServer": [] },
+			"responseFieldsRead": ["status", "message"],
+			"sampleResponse": { "status": "deletion_started", "message": "Document deletion for 1 documents has been initiated. Processing will continue in background.", "doc_id": "doc-3f2a9c" },
+			"clientExpects": { "ok": true }
+		},
+		{
+			"id": "health",
+			"method": "GET",
+			"path": "/health",
+			"source": "lightrag v1.5.7 lightrag_api_lightrag_server.py:2789 (route, combined_auth unless whitelisted), :2851-2925 (handler: status, auth_mode, core_version, api_version, pipeline_busy, pipeline_active; configuration only for authenticated callers)",
+			"request": { "kind": "none", "required": [], "optional": [], "ignoredByServer": [] },
+			"responseFieldsRead": ["status", "pipeline_busy", "core_version", "api_version"],
+			"sampleResponse": {
+				"status": "healthy",
+				"auth_mode": "enabled",
+				"core_version": "1.5.7",
+				"api_version": "0273",
+				"webui_available": true,
+				"workspace_available": true,
+				"api_docs_available": true,
+				"pipeline_busy": false,
+				"pipeline_active": false
+			},
+			"clientExpects": { "ok": true, "busy": false, "version": "1.5.7" }
+		}
+	]
+}

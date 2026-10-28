@@ -81,6 +81,40 @@ was ingested. "On merge" is the `substrate-docs-refresh` host timer (every
 skills-sync fast-forward hook for `agent-skills` once Phase 22 lands — never
 a GitHub Action, which cannot reach the loopback substrate.
 
+## LightRAG client contract
+
+Where LightRAG keeps its state (storage backends, workspace, embedding model
+and dimension, image pin) is a setting of the LightRAG server, not of
+`substrate-mcp`; the decision record, the operator preflight and the upgrade
+design are in `docs/runbooks/lightrag-storage-topology.md`. The contract the
+client keeps with the server (upstream v1.5.7; the recorded route list is
+`packages/mcp-server/src/planes/__fixtures__/lightrag-v1.5.7-routes.json`):
+
+- **Auth.** `LIGHTRAG_API_KEY` is sent as `X-API-Key` and only that. It is
+  never sent as `Authorization: Bearer`: the server reads a bearer value as a
+  JWT first and answers 401 to one that is not (`lightrag/api/utils_api.py`
+  427-468), so a key sent as a bearer can fail a request the header alone
+  would pass. The key is never put in a reason string.
+- **Pipeline status.** `GET /documents/pipeline_status` returns a `busy`
+  boolean. `busy: true` means ingest is still running; `busy: false` means
+  idle. A reply with no recognisable `busy` flag is reported as an
+  unexpected shape rather than polled until `parse-timeout`.
+- **Delete.** Removing one document is `DELETE /documents/delete_document`
+  with `{ "doc_ids": [...] }`. `DELETE /documents` is the clear-all route and
+  is never called; the client denylists it.
+- **`track_id` is not a document id.** `POST /documents/upload`, `/text` and
+  `/texts` return a `track_id` (`InsertResponse`). The document ids it
+  covers come from `GET /documents/track_status/{track_id}`. The id a delete
+  takes is the document id.
+- **Health.** A read-only `GET /health` probe feeds `planes.lightrag.ok`;
+  before it, no LightRAG health call existed and the value was always null.
+- **Exposure.** Set the server's `WHITELIST_PATHS` to `/health` at most: the
+  default also exempts the Ollama-compatible `/api/*` routes from auth.
+
+These behaviours land with the phase 56 client change in
+`planes/lightrag.ts`; until that change is merged the client still sends the
+key in both headers and treats a missing `busy` flag as busy.
+
 ## Hybrid retrieval and context
 
 Retrieval on the LightRAG plane is a graph-hybrid query; the mode and the

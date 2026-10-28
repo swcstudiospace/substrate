@@ -49,7 +49,8 @@ import {
 	TRUST_LEVELS,
 	type Surface,
 } from "./types.ts";
-import type { LightragConfig, RagMachineSettings } from "./config.ts";
+import type { RagMachineSettings } from "./config.ts";
+import { LIGHTRAG_CIRCUIT_OPEN, LIGHTRAG_SNIPPET_CAP } from "./planes/lightrag.ts";
 import {
 	canTransitionRagState,
 	ragStateHash,
@@ -502,106 +503,8 @@ function rememberSteeringSession(key: string, session: SteeringSession): void {
 }
 
 
-/** Clamp the requested top-k to the wire bound (D25-03: at most 10). */
-export const MAX_RAG_LIGHTRAG_TOP_K = 10;
-
-/** Snippets are redacted and capped before reply, like docs_search (D25-04). */
-export const RAG_SNIPPET_CAP = 1200;
-
-/**
- * Candidate context entries from a `/query` reply, in the shapes the shared LightRAG
- * adapter reads: a bare array, a list under a known key, or LightRAG's `response`
- * answer (a string, or an array of entries). Reading only arrays turned a valid
- * answer into an unexpected shape and sent it to the Hindsight fallback.
- */
-function contextEntries(data: unknown, body: unknown): unknown[] {
-	if (Array.isArray(data)) return data;
-	if (data !== null && typeof data === "object") {
-		for (const key of ["contexts", "chunks", "documents", "results", "sources"]) {
-			const value = (data as Record<string, unknown>)[key];
-			if (Array.isArray(value)) return value;
-		}
-	}
-	if (body !== null && typeof body === "object" && "response" in body) {
-		const response = (body as Record<string, unknown>).response;
-		if (Array.isArray(response)) return response;
-		if (typeof response === "string" && response.length > 0) return [{ content: response }];
-	}
-	return [];
-}
-
-/**
- * One LightRAG REST `/query` attempt over JSON (`{ query, mode, top_k,
- * only_need_context: true }`). Transport, auth (401/403) and shape failures
- * come back as `{ ok: false, reason }` — never a throw inside an agent's
- * turn. The API key travels only in headers, never in a reason string.
- */
-export async function queryLightragRest(
-	lightrag: LightragConfig,
-	input: { question: string; mode?: string; topK?: number },
-	fetchImpl: typeof fetch = fetch,
-	timeoutMs = 4000,
-): Promise<{ ok: true; chunks: RagLightragChunk[] } | { ok: false; reason: string }> {
-	const question = input.question.trim();
-	if (question.length === 0) return { ok: false, reason: "lightrag: empty query" };
-	const topK = Math.max(1, Math.min(input.topK ?? MAX_RAG_LIGHTRAG_TOP_K, MAX_RAG_LIGHTRAG_TOP_K));
-	let response: Response;
-	try {
-		response = await fetchImpl(`${lightrag.url}/query`, {
-			method: "POST",
-			headers: {
-				"content-type": "application/json",
-				...(lightrag.apiKey !== undefined ? { "x-api-key": lightrag.apiKey, authorization: `Bearer ${lightrag.apiKey}` } : {}),
-			},
-			body: JSON.stringify({
-				query: question,
-				...(input.mode !== undefined ? { mode: input.mode } : {}),
-				top_k: topK,
-				only_need_context: true,
-			}),
-			signal: AbortSignal.timeout(timeoutMs),
-		});
-	} catch (cause) {
-		return { ok: false, reason: `lightrag unreachable: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}` };
-	}
-	if (response.status === 401 || response.status === 403) return { ok: false, reason: `lightrag ${response.status}` };
-	if (!response.ok) return { ok: false, reason: `lightrag ${response.status}` };
-	let body: unknown;
-	try {
-		body = await response.json();
-	} catch {
-		return { ok: false, reason: "lightrag: response was not JSON" };
-	}
-	const data: unknown =
-		body !== null && typeof body === "object" && "data" in body ? (body as Record<string, unknown>).data : body;
-	const entries = contextEntries(data, body);
-	const chunks: RagLightragChunk[] = [];
-	for (const entry of entries) {
-		if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
-		const record = entry as Record<string, unknown>;
-		const content = [record.content, record.text, record.snippet, record.excerpt].find(
-			(value) => typeof value === "string",
-		);
-		if (typeof content !== "string" || content.length === 0) continue;
-		const title = [record.document_name, record.title, record.file_path, record.file_source].find(
-			(value) => typeof value === "string",
-		);
-		const sourceUrl = [record.source_url, record.url, record.source, record.file_path].find(
-			(value) => typeof value === "string",
-		);
-		const score = [record.score, record.similarity, record.relevance_score].find(
-			(value) => typeof value === "number" && Number.isFinite(value),
-		);
-		chunks.push({
-			content: redact(content).slice(0, RAG_SNIPPET_CAP),
-			title: redact(typeof title === "string" ? title : "doc"),
-			sourceUrl: redact(typeof sourceUrl === "string" ? sourceUrl : "lightrag:unrecorded"),
-			score: typeof score === "number" ? score : 0,
-		});
-	}
-	if (chunks.length === 0) return { ok: false, reason: "lightrag: unexpected response shape" };
-	return { ok: true, chunks };
-}
+/** Snippets are redacted and capped before reply, like docs_search (D25-04); the plane client applies the same cap. */
+export const RAG_SNIPPET_CAP = LIGHTRAG_SNIPPET_CAP;
 
 /**
  * Prompt augmentation for the STEERING state (directory hierarchy default):
@@ -1648,7 +1551,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"under `idempotency_key`. A LightRAG-served reply is replayed for five minutes; a degraded or fallback reply is never replayed. The reply carries the RAG machine snapshot and the untrusted-text notice.",
 			inputSchema: {
 				question: z.string().describe("The docs question, in your words."),
-				mode: z.enum(["naive", "local", "global", "hybrid", "mix"]).optional().describe("LightRAG query mode; omitted means the plane default."),
+				mode: z.enum(["naive", "local", "global", "hybrid", "mix"]).optional().describe("LightRAG query mode; omitted means hybrid, or the mode a leading /mix or /hybrid in the question names."),
 				top_k: z.number().optional().describe("Most chunks to ask for; clamped to 10."),
 				entities: z.array(z.string()).optional().describe("Planning-graph entities steering this query."),
 				relations: z
@@ -1713,7 +1616,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				let lastReason = "lightrag unreachable";
 				for (let attempt = 0; attempt <= settings.maxRetries; attempt += 1) {
 					if (attempt > 0) await ragRetryDelay(settings.retryBaseMs, attempt);
-					const answered = await queryLightragRest(lightrag, { question: augmented, ...(mode !== undefined ? { mode } : {}), ...(top_k !== undefined ? { topK: top_k } : {}) });
+					const answered = await substrate.lightragQuery(lightrag, { question: augmented, ...(mode !== undefined ? { mode } : {}), ...(top_k !== undefined ? { topK: top_k } : {}) });
 					if (answered.ok) {
 						const state = ragMachine.recordSuccess("lightrag_query:served", report);
 						const result: RagLightragResult = {
@@ -1726,6 +1629,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 						return lightragReply(result);
 					}
 					lastReason = answered.reason;
+					// An open plane breaker refused the call without reaching LightRAG: another attempt would be refused too, so it is not retried.
+					if (answered.reason === LIGHTRAG_CIRCUIT_OPEN) break;
 				}
 				ragMachine.recordFailure(settings, `lightrag_query: ${lastReason}`, report);
 				const degraded = await hindsightRagFallback(substrate, callerSurface, question, entityList, relationList, lastReason);

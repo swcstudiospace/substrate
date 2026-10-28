@@ -954,6 +954,24 @@ describe("append-mode enforcement", () => {
 		});
 	});
 
+	test("healthz probes LightRAG GET /health when it is configured: ok, a refused key reads down, and an unconfigured plane stays null", async () => {
+		const { greptime } = ledger(false);
+		const calls: string[] = [];
+		let answer = 200;
+		const lightragFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			calls.push(`${init?.method ?? "GET"} ${new URL(String(input)).pathname}`);
+			return answer === 200
+				? Response.json({ status: "healthy", core_version: "1.5.7", pipeline_busy: false })
+				: Response.json({ detail: "Invalid API Key" }, { status: answer });
+		};
+		const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" }), { index: null, greptime: greptime as never, lightragFetch });
+		expect((await substrate.health()).planes.lightrag.ok).toBe(true);
+		answer = 403;
+		expect((await substrate.health()).planes.lightrag.ok).toBe(false);
+		expect(calls).toEqual(["GET /health", "GET /health"]);
+		expect((await substrateWith(greptime).health()).planes.lightrag.ok).toBeNull();
+	});
+
 	test("healthz.jobs.ledger comes from one coverage read a minute, and is null with a reason when the ledger cannot be read (uplift-3 N6)", async () => {
 		const { greptime } = ledger(true);
 		let reads = 0;
@@ -1177,6 +1195,7 @@ describe("append-mode enforcement", () => {
 					}
 					if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
 					if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+					if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
 					return Response.json({ detail: "no route" }, { status: 404 });
 				},
 			},
@@ -1210,6 +1229,7 @@ describe("append-mode enforcement", () => {
 					}
 					if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
 					if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+					if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
 					return Response.json({ detail: "no route" }, { status: 404 });
 				},
 			},
@@ -1245,6 +1265,7 @@ describe("append-mode enforcement", () => {
 					}
 					if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
 					if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+					if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
 					return Response.json({ detail: "no route" }, { status: 404 });
 				},
 			},

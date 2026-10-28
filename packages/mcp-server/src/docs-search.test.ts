@@ -753,6 +753,7 @@ describe("LightRAG search and the RAGFlow plane", () => {
 			}
 			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
 			if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+			if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
 			return Response.json({ detail: "no route" }, { status: 404 });
 		};
 		const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }), { index: null, greptime: null, lightragFetch: lightragIngest });
