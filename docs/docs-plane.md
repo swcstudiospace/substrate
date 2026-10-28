@@ -5,14 +5,17 @@ the substrate only: no agent holds `LIGHTRAG_API_KEY`, `LIGHTRAG_URL`,
 `RAGFLOW_API_KEY` or `RAGFLOW_MCP_URL`, and nothing secret, unsourced,
 out-of-root or oversize reaches a dataset.
 
-The plane is chosen in `resolveDocsBackend` (`packages/mcp-server/src/config.ts:74`).
+The plane is chosen in `resolveDocsBackend` in `packages/mcp-server/src/config.ts`.
 `SUBSTRATE_DOCS_BACKEND` (`lightrag` or `ragflow`, case-insensitive) wins.
 Otherwise a set `LIGHTRAG_URL` selects `lightrag`, and an unset one selects
-`ragflow`. LightRAG is the live production backend (Run 11); RAGFlow is only the
-legacy fallback when `LIGHTRAG_URL` is unset (`config.ts:75`). `lightragFromEnv` (`config.ts:58`) reads `LIGHTRAG_URL` and
-the optional `LIGHTRAG_API_KEY`. The RAGFlow code stays until the operator approves
-its removal (phase 46); it is not a runtime fallback for LightRAG (see
-"Failure and fallback" below).
+`ragflow`. LightRAG is the live production backend: it was cut over on
+2026-10-28 (Run 11) with `SUBSTRATE_DOCS_BACKEND=lightrag`, in naive query mode
+until the operator decides on a real LLM for graph and hybrid retrieval.
+RAGFlow is only the legacy fallback when `LIGHTRAG_URL` is unset (`resolveDocsBackend`).
+`lightragFromEnv` in the same file reads `LIGHTRAG_URL` and the optional
+`LIGHTRAG_API_KEY`. The RAGFlow service was deleted on 2026-10-25; its code stays
+until the operator approves removal (phase 46), and it is not a runtime fallback
+for LightRAG (see "Failure and fallback" below).
 
 ## The two tools
 
@@ -29,7 +32,7 @@ closed-list reason. On the RAGFlow plane that list is `not-configured`,
 `unauthenticated`, `unknown-dataset`, `invalid-request`, `ragflow-timeout`,
 `ragflow-unreachable`, `ragflow-error`, `ragflow-bad-response`. On the
 LightRAG plane a failed query reads `lightrag unreachable: …` or
-`lightrag circuit open` (`planes/lightrag.ts:73-75`), and the reply is the
+`lightrag circuit open` (`unreachable` and `LIGHTRAG_CIRCUIT_OPEN` in `planes/lightrag.ts`), and the reply is the
 Hindsight fallback when recall finds something. Anonymous callers get
 `unauthenticated` with no plane call and no event; every authenticated
 search emits exactly one event (`docs.search` note or warning), fail-open,
@@ -93,7 +96,7 @@ client keeps with the server (upstream v1.5.7; the recorded route list is
 - **Auth.** `LIGHTRAG_API_KEY` is sent as `X-API-Key` and only that. It is
   never sent as `Authorization: Bearer`: the server reads a bearer value as a
   JWT first and answers 401 to one that is not (`lightrag/api/utils_api.py`
-  427-468), so a key sent as a bearer can fail a request the header alone
+  upstream), so a key sent as a bearer can fail a request the header alone
   would pass. The key is never put in a reason string.
 - **Pipeline status.** `GET /documents/pipeline_status` returns a `busy`
   boolean. `busy: true` means ingest is still running; `busy: false` means
@@ -111,37 +114,38 @@ client keeps with the server (upstream v1.5.7; the recorded route list is
 - **Exposure.** Set the server's `WHITELIST_PATHS` to `/health` at most: the
   default also exempts the Ollama-compatible `/api/*` routes from auth.
 
-These behaviours land with the phase 56 client change in
-`planes/lightrag.ts`; until that change is merged the client still sends the
-key in both headers and treats a missing `busy` flag as busy.
+These behaviours are implemented in `planes/lightrag.ts` (phase 56): the key
+goes out as `X-API-Key` only and the `busy` flag is read as the idle signal.
 
 ## Hybrid retrieval and context
 
-Retrieval on the LightRAG plane is a graph-hybrid query; the mode and the
+Retrieval on the LightRAG plane is a graph-hybrid query by design (production runs naive until the operator's LLM decision); the mode and the
 context block are described in `docs/docs-search-ingest.md`, section "Hybrid
 retrieval and context augmentation". In brief:
 
-- The query mode defaults to `hybrid` (`DEFAULT_QUERY_MODE`,
-  `planes/lightrag.ts:40`). A leading `/mix` or `/hybrid` in the question
-  selects that mode and is stripped from the query (`resolveQueryMode`,
-  `planes/lightrag.ts:118-130`).
-- `context` is opt-in and off by default on every backend
-  (`service.ts:4554`). With `context: true` a successful LightRAG answer
+- The query mode defaults to `hybrid` (`DEFAULT_QUERY_MODE` in
+  `planes/lightrag.ts`). `SUBSTRATE_LIGHTRAG_QUERY_MODE` overrides it, and
+  production sets `naive` because LightRAG runs on the bypass LLM (Run 11);
+  `hybrid` fails the smoke query check in that state. A leading `/mix` or
+  `/hybrid` in the question selects that mode and is stripped from the query
+  (`resolveQueryMode` in `planes/lightrag.ts`).
+- `context` is opt-in and off by default on every backend (`searchDocs` in
+  `service.ts`). With `context: true` a successful LightRAG answer
   carries the Hindsight context block beside its citations.
 
 ## Failure and fallback
 
 On the LightRAG plane a failed query is retried under the plane's retry
 policy. If it still fails, or the LightRAG breaker is open, the answer
-falls back to Hindsight recall (`lightragFallback`, `docs-search.ts:895-921`):
+falls back to Hindsight recall (`lightragFallback` in `docs-search.ts`):
 
 - The reply is Hindsight-sourced: `backend: "hindsight"`,
   `fallback: "hindsight"`, `degraded: true`, and `reason` names the LightRAG
   failure. Its notice reads "Served from Hindsight fallback: <reason>."
-  (`hindsightFallbackReply`, `docs-search.ts:617-626`).
+  (`hindsightFallbackReply` in `docs-search.ts`).
 - A warning event `docs search failed: <reason>` carries
-  `fallback: "hindsight"` (`docs-search.ts:908-917`).
-- A degraded reply is never cached (`docs-search.ts:144`).
+  `fallback: "hindsight"` (emitted by `lightragFallback`).
+- A degraded reply is never cached (`searchReplyStorable` in `docs-search.ts`).
 - If recall finds nothing, the plain degraded reply stands with the LightRAG
   reason.
 - An unconfigured LightRAG plane (`lightrag-not-configured`) takes the same
