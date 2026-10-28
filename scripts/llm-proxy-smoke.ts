@@ -142,15 +142,14 @@ export function resolveTimeout(env: Env): number | { error: string } {
 const KEYLIKE: readonly RegExp[] = [
 	/\bBearer\s+\S+/gi,
 	/\b(?:x-api-key|api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|secret|password)\b["']?\s*[:=]\s*["']?[^\s"',;]+/gi,
-	/\beyJ[A-Za-z0-9_-]{4,}(?:\.[A-Za-z0-9_-]+){0,2}/g,
-	/\b(?:sk|xai|pk|ghp|gho|ghs)[-_][A-Za-z0-9_-]{8,}/gi,
 	/[A-Za-z0-9_+/=-]{32,}/g,
 ];
 
 /**
  * One line, bounded, with anything bearer- or key-like replaced by `[scrubbed]`:
- * the literal `secrets` (the dummy key), `Bearer …`, `key: value` pairs, JWTs,
- * vendor key prefixes, and any long opaque token.
+ * the literal `secrets` (the dummy key, the only credential this script sends), `Bearer …`, `key: value`
+ * pairs and any long opaque token. Credential-shape detection beyond that belongs to the central redactor
+ * (redact-lock rule 4), so this does not try to recognise vendor or JWT formats.
  */
 export function scrubSecrets(text: string, secrets: readonly string[], max = REASON_MAX): string {
 	let out = text;

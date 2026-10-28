@@ -459,9 +459,9 @@ describe("secrecy", () => {
 		expect(out).toContain('"state":"invalid"');
 	});
 
-	test("scrubSecrets removes bearer, key=value, JWT, vendor-prefixed and long opaque tokens", () => {
-		const text = scrubSecrets("a Bearer tok_123 b api_key=abc123 c eyJhbGciOi.eyJzdWIi.sig d xai-AAAABBBBCCCC e ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 f literal-secret g", ["literal-secret"]);
-		expect(text).not.toMatch(/tok_123|abc123|eyJ|xai-AAAA|ABCDEFGHIJ|literal-secret/);
+	test("scrubSecrets removes the literal secret, bearer values, key=value pairs and long opaque tokens", () => {
+		const text = scrubSecrets("a Bearer tok_123 b api_key=abc123 c ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 d literal-secret e", ["literal-secret"]);
+		expect(text).not.toMatch(/tok_123|abc123|ABCDEFGHIJ|literal-secret/);
 		expect(text).toContain("a [scrubbed] b");
 	});
 
