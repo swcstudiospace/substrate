@@ -391,8 +391,12 @@ async function liveGenesis(rpc: Rpc): Promise<string> {
 	}
 }
 
-/** Gates 1 to 3: everything that must hold before ANY hour is looked at, so nothing is sent on a wrong cluster, key or balance. */
-async function checkGates(plan: SavedPlan, options: ReanchorOptions, deps: ReanchorDeps, sendBudget: number): Promise<string> {
+/**
+ * Gates 1 to 3: everything that must hold before ANY hour is looked at, so nothing is sent on a wrong cluster, key or balance. The key
+ * gate is two checks: the keypair file is the configured public key, and the configured public key is a signer the verifier accepts
+ * NOW (`readSigners`, the effective signer set). Returns the confirmed genesis and that signer set.
+ */
+async function checkGates(plan: SavedPlan, options: ReanchorOptions, deps: ReanchorDeps, sendBudget: number, now: number): Promise<{ genesis: string; signers: SignerSet }> {
 	const { rpc, runner, env } = deps;
 	if (options.confirmGenesis === null) throw new Refusal("genesis-unconfirmed", "--execute needs --confirm-genesis <hash>: the operator must name the cluster being written to");
 	try {
@@ -419,6 +423,8 @@ async function checkGates(plan: SavedPlan, options: ReanchorOptions, deps: Reanc
 		throw new Refusal("signer-mismatch", `solana-keygen pubkey failed: ${reasonOf(cause)}`);
 	}
 	if (shown !== env.pubkey) throw new Refusal("signer-mismatch", "solana-keygen pubkey does not equal SOLANA_ANCHOR_PUBKEY");
+	// The key file matches; whether the verifier would ACCEPT that key now is the signer set's say (rotation windows), read once per run.
+	const signers = await readSigners(deps, now);
 
 	let balance: number;
 	try {
@@ -438,7 +444,7 @@ async function checkGates(plan: SavedPlan, options: ReanchorOptions, deps: Reanc
 			"no operator surface to record the re-anchor as: name one with --surface (it must be a surface an operator token maps to), because the verifier ignores a note from any other",
 		);
 	}
-	return genesis;
+	return { genesis, signers };
 }
 
 /**
@@ -772,8 +778,7 @@ export async function executeReanchor(plan: SavedPlan, options: ReanchorOptions,
 		const now = (deps.clock ?? Date.now)();
 		const cap = Math.min(options.maxHours, MAX_HOURS_PER_RUN);
 		const budget = Math.min(cap, plan.hours.length);
-		const genesis = await checkGates(plan, options, deps, budget);
-		const signers = await readSigners(deps, now);
+		const { genesis, signers } = await checkGates(plan, options, deps, budget, now);
 		for (const hour of plan.hours) await checkHour(hour, deps, now);
 
 		const lock = deps.lock.acquire();
