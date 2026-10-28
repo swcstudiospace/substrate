@@ -29,7 +29,7 @@ Not run by the author of this record. The full gate (frozen install, tsc with th
 - Everything is checked against the upstream source at one tag. The fixture was hand-written; if it misread the source, the contract test would pass against a wrong table. Mitigation is the operator `/openapi.json` diff, which has not been run (no live proof in the repository).
 - No evidence in the repository that any request this client builds has reached a real LightRAG server; the live `/openapi.json` diff, deploy, ingest and cutover remain operator-gated (phase 46 T5 to T8).
 - UNVERIFIED in the runbook: whether `HNSW` fails on 3072-dimension embeddings, whether the Timescale image has pgvector, which services use the existing Postgres service, and whether a workspace header exists.
-- The docs plane has no live backend until the cutover: the RAGFlow service is deleted and `SUBSTRATE_DOCS_BACKEND` defaults to RAGFlow while `LIGHTRAG_URL` is unset ([INFERENCE] from `docs-plane.md`, unchanged).
+- The docs plane had no live backend until the Run 11 cutover of 2026-10-28 (STATE.md Run 11: `SUBSTRATE_DOCS_BACKEND=lightrag`, LightRAG in naive mode); before it the RAGFlow service was deleted (2026-10-25) and `SUBSTRATE_DOCS_BACKEND` defaulted to RAGFlow while `LIGHTRAG_URL` was unset. The live `/openapi.json` diff of this phase's contract check is still operator-gated.
 - The RAGFlow client code is still in the repository (`packages/mcp-server/src/planes/ragflow.ts`); removal belongs to phase 46.
 
 ## Operator-gated
