@@ -11,7 +11,7 @@ Railway private networking is scoped to one project and one environment. Service
 | Project / env | Machine name (derived) | `CONNECTION_MAPPING_n` |
 |---|---|---|
 | Ultrathink / production | `<ultrathink-forwarder>` | `4000:<greptime>:4000` · `4001:<greptime>:4001` · `4003:<greptime>:4003` · `5432:<timescale>:5432` · `6379:<dragonfly>:6379` |
-| Agent Substrate / production | `<agent-substrate-forwarder>` | `8888:<hindsight>:8888` · `9380:<ragflow>:9380` · `80:<ragflow>:80` |
+| Agent Substrate / production | `<agent-substrate-forwarder>` | `8888:<hindsight>:8888` · `80:<lightrag>:9621` (since 2026-10-28, Run 11; the earlier `9380:<ragflow>:9380` and `80:<ragflow>:80` entries named the RAGFlow service deleted on 2026-10-25) |
 
 Service names above are the expected defaults; confirm each against the project before setting the mapping. Each forwarder gets a volume (machine identity survives redeploys), `TS_AUTHKEY` from a **reusable, tagged** key (`tag:railway-forwarder`), and key expiry disabled in the Tailscale admin console. Services must listen on `::`; Railway database images already do.
 
