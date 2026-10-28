@@ -48,6 +48,9 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `NOTION_TASK_GRAPH_DS` | string | the repo's task-graph data source id | data source id | the built-in id | mcp-server/config.ts, host/sync.ts | yes |
 | `HERMES_LINEAR_URL` | string | http://127.0.0.1:8792 | URL | the connector's loopback address | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOD_GATE_TIMEOUT_MS` | number | 35000 | positive integer ms | 35000 ms | mcp-server/config.ts | yes |
+| `SUBSTRATE_PLANNING_STEERING` | toggle | off | on \| off (1/0, true/false, yes/no; case- and space-insensitive; anything else refuses the steering settings with a typed error naming the variable) | off: steering is not enabled and no steering tool is registered; on: steering_queue and steering_acknowledge act only for an operator caller, steering_list is a read, and each write answers not-configured until an audit sink is injected | mcp-server/planning/steering.ts | yes |
+| `SUBSTRATE_PLANNING_STEERING_PRINCIPALS` | list | none | comma separated principal ids (letters, digits and . _ @ : -; 1 to 128 characters each; an empty entry is refused) | empty: every principal is refused, so no steering directive can be queued | mcp-server/planning/steering.ts | yes |
+| `SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN` | number | 10 | whole number 1..1000 (not an integer or out of range: refused with a typed error naming the variable) | 10 directives per minute per target session | mcp-server/planning/steering.ts | yes |
 | `RAILWAY_API_TOKEN` | secret-ref | none | Railway API token, sent as a bearer token to the public API | every railway_* tool reports unconfigured and the writes refuse before any request. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
 | `SUBSTRATE_RAILWAY_WRITES` | toggle | off | on | off: railway_scale and railway_deploy refuse with writes-disabled before any request; on still needs an operator and an approval reference. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
 
@@ -103,11 +106,13 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_INDEX_ARCHIVE_ALLOW_ROOTFS` | toggle | false | 1 \| true \| yes (case-insensitive; anything else is off) | an archive on the root filesystem is refused. See `docs/runbooks/index-archive.md` | mcp-server/index-archive.ts | yes |
 | `SUBSTRATE_INDEX_SCRATCH_URL` | secret-ref | none | scratch postgres URL | substrate index restore needs --scratch. See `docs/runbooks/index-archive.md` | mcp-server/index-run.ts | yes |
 | `SUBSTRATE_INDEX_TUNE` | mode | off | off \| apply (anything but apply is off) | off: no storage tune; anything but apply is off. See `docs/runbooks/index-archive.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` | toggle | off | on \| off (1/0, true/false, yes/no; anything else is off) | off: migrate() creates no planning_steering_audit table, so steering audit writes fail closed until an operator turns it on | mcp-server/planning/steering-store.ts | yes |
 | `SUBSTRATE_INDEX_VOLUME_BYTES` | number | none | bytes | no capacity runway row (the ceiling is unknown). See `docs/observability.md` | observability/config.ts | yes |
 | `SUBSTRATE_PLANNING_ROOT` | path | none | absolute checkout path | planning plane disabled: nothing under .planning/ is read and no default path exists | mcp-server/planning/config.ts | yes |
 | `SUBSTRATE_PLANNING_PRESENCE_TTL_S` | number | 90 | 1..86400 | 90 s: a session with no heartbeat for longer is stale | mcp-server/planning/config.ts | yes |
 | `SUBSTRATE_PLANNING_MAX_FILES` | number | 500 | 1..10000 | 500 documents per planning index; the rest are counted as truncated | mcp-server/planning/config.ts | yes |
 | `SUBSTRATE_PLANNING_MAX_BYTES` | number | 262144 | 1024..4194304 | 256 KiB per document; a larger document is an error record | mcp-server/planning/config.ts | yes |
+| `SUBSTRATE_PLANNING_CHECKPOINT_DIR` | path | none | absolute directory path | checkpoints stay in memory, and planning_status reports them as not durable | mcp-server/planning/config.ts | yes |
 | `SUBSTRATE_PLANNING_SCAN_INTERVAL_MS` | number | 15000 | 1000..3600000 | 15000 ms between planning observer scans; a change is seen within one interval | mcp-server/planning/config.ts | yes |
 
 ## Cache (loopback redis)

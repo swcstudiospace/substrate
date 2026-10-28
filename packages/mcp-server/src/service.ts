@@ -153,6 +153,9 @@ import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
 import { DragonflyPresenceStore } from "./planning/presence-dragonfly.ts";
 import { PlanningObserver, type PlanningObserverDeps } from "./planning/observer.ts";
 import { PlanningReader } from "./planning/read.ts";
+import { completionStoreView, type CompletionStoreView } from "./planning/checkpoint-store.ts";
+import type { SteeringWiring } from "./planning/steering-tools.ts";
+import { SteeringInbox, type SteeringHistorySink } from "./planning/steering.ts";
 import type { FabricSources } from "./fabric/types.ts";
 import { FABRIC_HEALTH_WINDOW_MS } from "./fabric/gather.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
@@ -1377,6 +1380,8 @@ export class Substrate {
 	readonly eventBus: EventBus | null;
 	/** Phase 52: the planning reads behind `planning_status` and `planning_sessions`. Read-only: they write nothing. Disabled unless `SUBSTRATE_PLANNING_ROOT` is set. */
 	readonly planning: PlanningReader;
+	/** Phase 53 (SOTA-09): the steering wiring. `inbox` is null unless steering is on and an audit sink is injected, so a write answers not-configured. */
+	readonly steering: SteeringWiring;
 	/** Phase 52: the planning observer, the plane's only writer: it publishes a checkout's change and heartbeats it. Started by `startPlanning`. */
 	readonly planningObserver: PlanningObserver;
 
@@ -1400,7 +1405,9 @@ export class Substrate {
 			/** Tests inject the bus through this factory; production builds it from config. */
 			eventBus?: () => EventBus | null;
 			/** Tests inject the planning filesystem, presence store and ledger write; production builds them from config. */
-			planning?: Partial<Omit<PlanningObserverDeps, "settings">>;
+			planning?: Partial<Omit<PlanningObserverDeps, "settings">> & { checkpoints?: CompletionStoreView };
+			/** Tests and wiring inject the steering audit sink. With none, the steering writes answer not-configured and record nothing. */
+			steering?: { history: SteeringHistorySink | null };
 		},
 		observer: SubstrateObserver = {},
 	) {
@@ -1424,6 +1431,8 @@ export class Substrate {
 					? new IndexStore(config.postgresUrl, {
 							gate: this.planes.gate("index"),
 							tune: config.indexArchive.tune,
+							// Phase 53 (SOTA-09): the steering audit table is created only when its opt-in is on.
+							migrationOptIns: { "steering-audit": config.steeringAuditTable },
 							// uplift-3 N4: the mode is config, the count goes to the observer.
 							memoryExpiry: {
 								mode: config.memoryExpiry,
@@ -1472,13 +1481,33 @@ export class Substrate {
 		const planningDeps = stores?.planning ?? {};
 		const planningFs = planningDeps.fs ?? nodePlanningFs();
 		const planningPresence = planningDeps.presence !== undefined ? planningDeps.presence : productionPresence(config);
-		this.planning = new PlanningReader({ settings: config.planning, fs: planningFs, presence: planningPresence });
+		this.planning = new PlanningReader({ settings: config.planning, fs: planningFs, presence: planningPresence, checkpoints: planningDeps.checkpoints ?? completionStoreView(config.planningCheckpoint) });
 		this.planningObserver = new PlanningObserver({
 			settings: config.planning,
 			fs: planningFs,
 			presence: planningPresence,
-			emit: planningDeps.emit ?? (async (event: EventInput) => (await this.emit(event)).stored),
+			// A keyed conflict warning asks for the replay lookup, so under `accept` as under `enforce` any number of observers leave one row.
+			emit: planningDeps.emit ?? (async (event: EventInput) => (await this.emit(event, { replay: true })).stored),
+			dedup: planningDeps.dedup ?? config.eventIdempotency !== "off",
 		});
+		// Phase 53 (SOTA-09): the steering inbox. Built only while SUBSTRATE_PLANNING_STEERING is on and an audit sink is injected.
+		// Invalid settings keep the tools registered, so they answer `misconfigured` naming the keys, and the keys are logged once at boot.
+		const steeringSettings = config.steering.ok ? config.steering.settings : null;
+		const steeringErrors = config.steering.ok ? [] : config.steering.errors;
+		if (steeringErrors.length > 0) {
+			process.stderr.write(`[substrate] steering settings invalid; steering tools answer misconfigured: ${steeringErrors.map((error) => error.key).join(", ")}\n`);
+		}
+		const steeringHistory = stores?.steering?.history ?? null;
+		const steeringClock = { nowMs: () => Date.now() };
+		this.steering = {
+			enabled: config.steeringRegistered,
+			clock: steeringClock,
+			settingsErrors: steeringErrors,
+			inbox:
+				steeringSettings !== null && steeringSettings.enabled && steeringHistory !== null
+					? new SteeringInbox({ history: steeringHistory, clock: steeringClock, policy: steeringSettings })
+					: null,
+		};
 		// uplift-2 R1
 		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays, graphRead: config.requestPath.briefGraphRead };
 		this.narrowBumps = config.requestPath.cacheBumpScope === "narrow";
