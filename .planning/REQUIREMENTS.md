@@ -33,7 +33,7 @@
 - [ ] **WATCH-01**: A documentation change in a registered repository reaches the docs plane within a configured lag with no manual command.
 - [ ] **WATCH-02**: Triggers coalesce: a burst of edits costs one sync per repository, and a restart re-ingests nothing that has not changed.
 - [ ] **WATCH-03**: The default triggers write nothing into any repository; git hooks are an operator-run opt-in, and neither hooks nor the filesystem watcher ever block or fail the user's git command or editor.
-- [ ] **WATCH-04**: A reconcile timer finds changes that no trigger saw, including a push made from another machine that the local checkout has not pulled, without the local and remote views overwriting each other.
+- [ ] **WATCH-04**: A reconcile timer finds changes that no trigger saw, including a push made from another machine that the local checkout has not pulled (read through a Substrate-managed mirror, never a fetch into the user's clone), without the local and remote views overwriting each other and without a local edit hiding an unrelated remote update.
 - [ ] **WATCH-05**: A sync reports its outcome, lag and failures as events and metrics, and a freshness breach raises the existing `docs.freshness` warning.
 
 ### Docs Reflect (phase 66)

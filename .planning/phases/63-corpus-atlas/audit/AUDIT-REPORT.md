@@ -32,7 +32,7 @@ What phase 68 changes: `SUBSTRATE_WORKTREE_ROOTS` replaces the hard-coded root; 
 | UNVERIFIED item | Why not probed | Command an operator would run |
 |---|---|---|
 | TEI reachable from this host; model, dimension, batch limit | Substrate has no TEI client; the URL is not in the repository | `curl -fsS "$TEI_URL/health"` and `curl -fsS "$TEI_URL/info"` |
-| Dragonfly on Railway (idle per `docs/data-planes.md`) | Railway access is operator-held | call the `fabric_status` tool and read the dragonfly row |
+| The Railway Dragonfly service (idle per `docs/data-planes.md`) | Railway access is operator-held; `fabric_status` reports the configured cache, which in production is the loopback redis, not the Railway service | list the Railway project's services with the Railway CLI or MCP (read-only) and read the Dragonfly service's status |
 | Greptime and Timescale versions and editions | Needs database credentials | `select version()` over the Greptime SQL endpoint; `psql "$SUBSTRATE_PG_URL" -c "select version()" -c "select extname from pg_extension"` |
 | Anchor key funded, timer state | Key is operator-held; no Substrate timer is installed on this host | `systemctl list-timers 'substrate-*'`; run the anchor entry with `--dry-run`; check the balance of `$SOLANA_ANCHOR_PUBKEY` |
 | Production flags | Env file holds secrets | list names only: `sed 's/=.*//' <env file>` |
