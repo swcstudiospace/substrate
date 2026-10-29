@@ -57,7 +57,10 @@ function world(options: { enabled?: boolean; verify?: AnchorVerifier } = {}) {
 	const otherEvents: EventInput[] = [];
 	const roots = new CorpusRootKeeper({
 		store: () => store,
-		emit: async (event) => void rootEvents.push(event),
+		emit: async (event) => {
+			rootEvents.push(event);
+			return { stored: true };
+		},
 		clock,
 	});
 	const deps: CorpusServiceDeps = {
