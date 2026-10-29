@@ -7,6 +7,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@substrate/audit": "workspace:*",
+    "@substrate/corpus": "workspace:*",
     "@substrate/evidence": "workspace:*",
     "@substrate/ledger": "workspace:*",
     "@substrate/observability": "workspace:*",

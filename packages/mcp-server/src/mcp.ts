@@ -9,6 +9,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { BRIEF_PROFILES, BRIEF_STATES } from "@substrate/observability";
+import { CORPUS_PROTOCOL } from "@substrate/corpus";
 import { z } from "zod";
 import { BRIEF_SOURCES } from "./brief.ts";
 import { CheckpointVerifyError } from "./checkpoint-verify.ts";
@@ -1737,6 +1738,62 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				ragMachine.recordFailure(machineSettings, `docs_ingest: ${outcome.reason}`);
 			}
 			return outcome.ok ? json(outcome) : { ...json(outcome), isError: true };
+		},
+	);
+
+	server.registerTool(
+		"corpus_status",
+		{
+			title: "Status of the corpus manifest",
+			description:
+				"The corpus atlas manifest (v1.7 phase 63): how many documents are active and tombstoned in total, by repository, by kind and by tier, " +
+				"when the last ingest wrote, and the manifest version. A read: it changes nothing. Needs an authenticated surface. " +
+				"Answers `corpus.disabled` while the server runs with SUBSTRATE_CORPUS off.",
+			inputSchema: {},
+			annotations: { readOnlyHint: true },
+		},
+		async () => {
+			const reply = await substrate.corpusStatus(callerSurface);
+			return reply.ok ? json(reply.body) : { ...json(reply.body), isError: true };
+		},
+	);
+
+	server.registerTool(
+		"corpus_ingest",
+		{
+			title: "Bulk-ingest corpus documents and tombstones",
+			description:
+				"Put documentation files from many repositories into the docs plane in batches, with the manifest kept in step, and remove tombstoned ones. " +
+				"Each document carries its repo, path, kind, tier, sha256, source and body; the body must hash to its sha256. Fail-closed: a redactor finding, " +
+				"an oversize or mismatching body, an unauthenticated caller, a VM guest, a server with SUBSTRATE_CORPUS off or with no LightRAG backend is refused " +
+				"and nothing is sent. A document already recorded at the same sha256 answers `unchanged`. At most 200 documents and 500 tombstones per call.",
+			inputSchema: {
+				documents: z
+					.array(
+						z.object({
+							repo: z.string().describe("owner/name, or local/<directory> for a checkout with no origin."),
+							path: z.string().describe("Repository-relative path with forward slashes."),
+							kind: z.string(),
+							tier: z.number().int(),
+							sha256: z.string().describe("sha256 of the body's UTF-8 bytes, lowercase hex."),
+							bytes: z.number().int().min(0),
+							source: z.string().describe("fs, github or greptile."),
+							commit: z.string().optional(),
+							body: z.string(),
+						}),
+					)
+					.optional()
+					.describe("Documents to add or replace."),
+				tombstones: z
+					.array(z.object({ repo: z.string(), path: z.string() }))
+					.optional()
+					.describe("Manifest keys whose plane document should be removed."),
+			},
+			annotations: { destructiveHint: true, openWorldHint: true },
+		},
+		async ({ documents, tombstones }) => {
+			const reply = await substrate.corpusIngest({ protocol: CORPUS_PROTOCOL, documents: documents ?? [], tombstones: tombstones ?? [] }, callerSurface);
+			return reply.ok ? json(reply.body) : { ...json(reply.body), isError: true };
 		},
 	);
 

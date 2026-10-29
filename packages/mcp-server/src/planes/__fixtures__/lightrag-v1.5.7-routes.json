@@ -56,6 +56,16 @@
 			"clientExpects": { "ok": true, "track_id": "insert_20260902_170700_def456" }
 		},
 		{
+			"id": "texts",
+			"method": "POST",
+			"path": "/documents/texts",
+			"source": "lightrag v1.5.7 lightrag_api_routers_document_routes.py:5585 (route), :865-923 (InsertTextsRequest: texts min 1 and stripped non-empty, file_sources normalised by reject_unsafe_document_source :212-226 then normalize_file_path :245-254, optional chunking), :926-952 (InsertResponse; same-name conflict is HTTP 409, never a duplicated 200), :5640-5677 (one file_source per text, none unknown_source, unique after normalisation, else 400; 409 when doc_status already holds the name), :3461-3486 (413 above MAX_TEXTS_PER_REQUEST, default 0 = no ceiling), and lightrag/pipeline.py:996-999 (doc id is hash of the file name for a known source), :1233-1265 and :1340-1409 (identical text under another name: no new document, a FAILED dup- record with metadata original_doc_id under this track id)",
+			"request": { "kind": "json", "required": ["texts", "file_sources"], "optional": ["chunking"], "ignoredByServer": [] },
+			"responseFieldsRead": ["track_id"],
+			"sampleResponse": { "status": "success", "message": "Texts successfully received. Processing will continue in background.", "track_id": "insert_20260902_171000_ghi012" },
+			"clientExpects": [{ "name": "docs__a__README.md", "status": "ingested", "documentId": "doc-3f2a9c" }]
+		},
+		{
 			"id": "scan",
 			"method": "POST",
 			"path": "/documents/scan",

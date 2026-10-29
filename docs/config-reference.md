@@ -53,7 +53,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN` | number | 10 | whole number 1..1000 (not an integer or out of range: refused with a typed error naming the variable) | 10 directives per minute per target session | mcp-server/planning/steering.ts | yes |
 | `SUBSTRATE_PLANNING_STEERING_ACK_TTL_S` | number | 86400 | whole seconds 60..2592000 (not an integer or out of range: refused with a typed error naming the variable, and the steering tools answer misconfigured) | 86400 s (one day): a directive nobody acknowledged by then is closed as declined with reason timeout, audited, and no longer offered to its session | mcp-server/planning/steering.ts | yes |
 | `SUBSTRATE_PLANNING_STEERING_EXPIRY_SWEEP_S` | number | 60 | whole seconds 1..3600 (not an integer or out of range: refused with a typed error naming the variable, and the steering tools answer misconfigured) | 60 s between expiry passes; the pass runs only while steering is on with the audit table enabled | mcp-server/planning/steering.ts | yes |
-| `SUBSTRATE_STEERING_WAIT_MAX_MS` | number | 30000 | 1000..120000 (out of range clamps; unparseable falls back) | 30000 ms: the longest GET /steering/wait holds one request before it answers 204. See `docs/data-planes.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_STEERING_WAIT_MAX_MS` | number | 30000 | 1000..120000 (out of range clamps; unparseable falls back) | 30000 ms: the longest GET /steering/wait holds one request before it answers 204; a longer timeout_ms is clamped to it and the answer reports the wait it got. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `RAILWAY_API_TOKEN` | secret-ref | none | Railway API token, sent as a bearer token to the public API | every railway_* tool reports unconfigured and the writes refuse before any request. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
 | `SUBSTRATE_RAILWAY_WRITES` | toggle | off | on | off: railway_scale and railway_deploy refuse with writes-disabled before any request; on still needs an operator and an approval reference. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
 
@@ -145,7 +145,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 
 | Name | Kind | Default | Allowed | Unset means | Read by | In `.env.example` |
 | --- | --- | --- | --- | --- | --- | --- |
-| `SUBSTRATE_BRIEF_SESSIONS` | toggle | off | on \| off (1/0, true/false, yes/no; anything else is off) | off: the brief carries no sessions, steering or handoffs section and is byte-identical to before; on: those sections are appended live to every full brief. See `docs/data-planes.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_BRIEF_SESSIONS` | toggle | off | on \| off (1/0, true/false, yes/no; anything else is off) | off: the brief carries no sessions, steering or handoffs section and is byte-identical to before, and the session_context tool and GET /session/context refuse with session-context.disabled; on: those sections are appended live to every full brief (under the brief's own deadline) and the digest is served. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_BRIEF_BUDGET_MS` | number | 1200 | 0 = no deadline | 1200 ms. See `docs/observability.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_BRIEF_RECENT_WINDOW_DAYS` | number | 30 | positive integer | 30 days. See `docs/observability.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S` | number | 3600 | 0 = no snapshots | 3600 s. See `docs/observability.md` | mcp-server/config.ts | yes |
@@ -231,6 +231,10 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_DOCS_CANARY_MANIFEST` | path | none | JSON file with sha256 and dataset_commit | the live canary refuses to run. See `docs/docs-search-ingest.md` | scripts/docs-golden.ts | yes |
 | `SUBSTRATE_DOCS_CANARY_STATE` | path | /var/lib/substrate/docs-canary-last.json | file path | the default state file. See `docs/docs-search-ingest.md` | scripts/docs-golden.ts | yes |
 | `SUBSTRATE_DOCS_TIMEOUT_MS` | number | 180000 | positive ms | 180000 ms (the CLI's docs ingest and merge-trigger calls). See `docs/docs-search-ingest.md` | cli/docs.ts | yes |
+| `SUBSTRATE_CORPUS` | toggle | off | on \| off | off: POST /corpus/ingest answers 503 corpus.disabled and nothing reaches the docs plane. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_CORPUS_CONCURRENCY` | number | 4 | 1..16 | 4 batches in flight at once. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_CORPUS_BATCH_DOCS` | number | 20 | 1..200 | 20 documents per batch. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_CORPUS_BATCH_BYTES` | number | 1000000 | 10000..5000000 | 1000000 bytes per batch. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
 
 ## Admission budgets and circuit breakers
 
@@ -350,6 +354,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 
 | Name | Kind | Default | Allowed | Unset means | Read by | In `.env.example` |
 | --- | --- | --- | --- | --- | --- | --- |
+| `SUBSTRATE_CORPUS_ROOTS` | list | /root/src/repos | colon separated directories | the CLI scans /root/src/repos when no --root is given. See `docs/runbooks/corpus-ingest.md` | cli/corpus/index.ts | yes |
 | `SUBSTRATE_TIMEOUT_MS` | number | 1500 | positive ms | 1500 ms (the CLI's lessons calls) | cli/index.ts | yes |
 | `SUBSTRATE_SKILLS_TIMEOUT_MS` | number | 180000 | positive ms | 180000 ms (the CLI's skills calls) | cli/skills.ts | yes |
 | `SUBSTRATE_CLI` | path | the CLI entry in the checkout | path | the built-in path | projector/cursor.ts | yes |

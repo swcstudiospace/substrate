@@ -2,7 +2,7 @@
  * The durable copy of the live steering session registry (phase 67, live steering GA).
  *
  * `SteeringSessionRegistry` (`session-state.ts`) holds the sessions `docs_steering_session` writes in process memory. With
- * `SUBSTRATE_STEERING_SESSIONS_TABLE` on, every write is also upserted to `steering_sessions` (migration step 35, opt-in like
+ * `SUBSTRATE_STEERING_SESSIONS_TABLE` on, every write is also upserted to `steering_sessions` (migration step 37, opt-in like
  * `planning_steering_audit`), and the registry reads the newest rows back at boot. This module is the port the registry
  * talks to and the Postgres adapter behind it; it holds no state, reads no environment and starts no timer.
  *

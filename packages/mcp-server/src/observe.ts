@@ -671,6 +671,8 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"steering_acknowledge",
 	"steering_list",
 	"session_context",
+	"corpus_status",
+	"corpus_ingest",
 	// REST routes, as `server.ts` audits them. A route audited under a tool's own name
 	// (`/memory` as `memory_write`) is covered by that name above and not repeated.
 	"brief",

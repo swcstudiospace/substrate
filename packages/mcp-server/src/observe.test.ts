@@ -366,7 +366,7 @@ describe("auditToolCalls", () => {
 	});
 
 	test("each steering tool is a known tool and keeps its own name as its observe label", () => {
-		for (const name of ["steering_queue", "steering_acknowledge", "steering_list"]) {
+		for (const name of ["steering_queue", "steering_acknowledge", "steering_list", "corpus_status", "corpus_ingest"]) {
 			expect({ name, label: toolLabel(name) }).toEqual({ name, label: name });
 		}
 	});

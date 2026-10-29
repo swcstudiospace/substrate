@@ -97,6 +97,7 @@ describe("lightragOp", () => {
 		expect(lightragOp("POST", "http://l/query")).toBe("query");
 		expect(lightragOp("POST", "http://l/documents/upload")).toBe("upload");
 		expect(lightragOp("POST", "http://l/documents/text")).toBe("upload");
+		expect(lightragOp("POST", "http://l/documents/texts")).toBe("upload");
 		expect(lightragOp("POST", "http://l/documents/scan")).toBe("scan");
 		expect(lightragOp("GET", "http://l/documents/pipeline_status")).toBe("pipeline-status");
 		expect(lightragOp("DELETE", "http://l/documents")).toBe("document-delete");

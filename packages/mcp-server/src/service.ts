@@ -169,6 +169,10 @@ import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachab
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth, type HindsightConfig } from "./planes/hindsight.ts";
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
 import { lightragOp, probeLightrag, queryForTool, type LightragQueryMode, type LightragToolOutcome } from "./planes/lightrag.ts";
+import { createLightragBulkPlane, type LightragBulkPlane } from "./planes/lightrag-bulk.ts";
+import { corpusIngestReply, corpusPlanReply, corpusStatusReply, type CorpusReply, type CorpusServiceDeps } from "./corpus/service.ts";
+import type { CorpusStore } from "./corpus/store.ts";
+import type { CorpusIngestResponse, CorpusPlanResponse, CorpusStatusResponse } from "@substrate/corpus";
 import { RailwayClient } from "./railway.ts";
 import { nodePlanningFs } from "./planning/fs.ts";
 import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
@@ -1387,6 +1391,9 @@ export class Substrate {
 	private readonly hindsightFetch: FetchLike;
 	/** LightRAG fetch, gated on the LightRAG plane's own breaker: a RAGFlow outage never refuses a LightRAG call. Tests inject the fake underneath; production uses the global fetch. */
 	private readonly lightragFetch: FetchLike;
+	/** Test seam for the corpus manifest and bulk plane; production builds them from the index and the LightRAG config. */
+	private readonly corpusSeam: { store?: CorpusStore; plane?: LightragBulkPlane } | null;
+	private corpusPlaneCache: LightragBulkPlane | null = null;
 	/** Railway control-plane client (Phase 45, D45-a); tests inject a recording fetch through `stores.railway`. */
 	readonly railway: RailwayClient;
 	/** Background retains in flight, drained (bounded) on shutdown. */
@@ -1504,6 +1511,8 @@ export class Substrate {
 			ragflowFetch?: FetchLike;
 			hindsightFetch?: FetchLike;
 			lightragFetch?: FetchLike;
+			/** Tests inject the corpus manifest and the LightRAG bulk plane; production builds them from the index and `config.lightrag`. */
+			corpus?: { store?: CorpusStore; plane?: LightragBulkPlane };
 			planningBaseDir?: string;
 			desktop?: DesktopDriver | null;
 			railway?: RailwayClient;
@@ -1590,6 +1599,7 @@ export class Substrate {
 		this.ragflowFetch = gatedFetch(this.planes.gate("ragflow"), stores?.ragflowFetch ?? fetch, ragflowOp);
 		this.hindsightFetch = gatedFetch(this.planes.gate("hindsight"), stores?.hindsightFetch ?? fetch, hindsightOp);
 		this.lightragFetch = gatedFetch(this.planes.gate("lightrag"), stores?.lightragFetch ?? fetch, lightragOp);
+		this.corpusSeam = stores?.corpus ?? null;
 		this.cache =
 			stores?.cache ??
 			createReadThroughCache(config, {
@@ -5619,6 +5629,41 @@ export class Substrate {
 			await this.cache.bump(DOCS_GENERATION_KEY);
 		}
 		return outcome;
+	}
+
+	/**
+	 * The corpus doors' dependencies (v1.7 phase 63). Built on each call so a server with `SUBSTRATE_CORPUS` off never touches
+	 * the index or builds a plane: the gates in `corpus/service.ts` answer first.
+	 */
+	private corpusDeps(): CorpusServiceDeps {
+		const lightrag = this.config.docsBackend === "lightrag" ? this.config.lightrag : null;
+		if (this.config.corpus.enabled && this.corpusPlaneCache === null && this.corpusSeam?.plane === undefined && lightrag !== null) {
+			this.corpusPlaneCache = createLightragBulkPlane(lightrag, { fetch: this.lightragFetch });
+		}
+		return {
+			settings: this.config.corpus,
+			vmGuest: this.config.vmGuest,
+			store: this.config.corpus.enabled ? (this.corpusSeam?.store ?? this.index?.corpusStore() ?? null) : null,
+			plane: this.corpusSeam?.plane ?? this.corpusPlaneCache,
+			emit: (event) => this.emit(event),
+		};
+	}
+
+	/** `POST /corpus/plan` and the planning half of the `substrate corpus plan` command. */
+	corpusPlan(raw: unknown, callerSurface: Surface | null): Promise<CorpusReply<CorpusPlanResponse>> {
+		return corpusPlanReply(this.corpusDeps(), raw, callerSurface);
+	}
+
+	/** `GET /corpus/status` and the `corpus_status` tool. */
+	corpusStatus(callerSurface: Surface | null): Promise<CorpusReply<CorpusStatusResponse>> {
+		return corpusStatusReply(this.corpusDeps(), callerSurface);
+	}
+
+	/** `POST /corpus/ingest` and the `corpus_ingest` tool. A run that stored or removed anything invalidates every cached `docs_search` answer, as `docs_ingest` does. */
+	async corpusIngest(raw: unknown, callerSurface: Surface | null): Promise<CorpusReply<CorpusIngestResponse>> {
+		const reply = await corpusIngestReply(this.corpusDeps(), raw, callerSurface);
+		if (reply.ok && reply.body.counts.ingested + reply.body.counts.tombstoned > 0) await this.cache.bump(DOCS_GENERATION_KEY);
+		return reply;
 	}
 
 	/**

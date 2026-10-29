@@ -33,6 +33,7 @@ export const DATASET_TRIGGERS: Readonly<Record<string, string>> = {
 	desklanes: "merge to main of desklanes",
 	clippyos: "merge to main of clippyos",
 	auctioning: "merge to main of auctioning",
+	corpus: "SUBSTRATE_CORPUS bulk ingest (substrate corpus ingest --execute); no merge trigger",
 };
 
 /** How many versions each dataset keeps (D25-06). */

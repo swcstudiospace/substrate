@@ -90,7 +90,7 @@ describe("the steering audit reason column (step 34) follows the same opt-in", (
 	});
 });
 
-describe("the steering sessions table (step 35) has its own opt-in", () => {
+describe("the steering sessions table (step 37) has its own opt-in", () => {
 	const SESSIONS_DDL = "create table if not exists steering_sessions";
 
 	test("with the opt-in off or absent, migrate() never creates steering_sessions", async () => {
@@ -108,12 +108,12 @@ describe("the steering sessions table (step 35) has its own opt-in", () => {
 	});
 
 	test("the step is gated, additive and idempotent, and lists only when its opt-in is on", () => {
-		const step = MIGRATION_STEPS.find((candidate) => candidate.version === 35);
+		const step = MIGRATION_STEPS.find((candidate) => candidate.version === 37);
 		expect(step?.optIn).toBe("steering-sessions");
 		expect(step?.phase).toBe("expand");
 		expect(step?.sql).not.toMatch(/\b(drop|delete|truncate|update)\b/i);
 		const versions = (optIns: MigrationOptIns) => applicableMigrationSteps(optIns).map((candidate) => candidate.version);
-		expect(versions({ "steering-sessions": false })).not.toContain(35);
-		expect(versions({ "steering-sessions": true })).toContain(35);
+		expect(versions({ "steering-sessions": false })).not.toContain(37);
+		expect(versions({ "steering-sessions": true })).toContain(37);
 	});
 });

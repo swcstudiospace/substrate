@@ -189,7 +189,7 @@ describe("IndexStore.migrate() against a fake connection", () => {
 		expect(reason?.down).toBe("alter table planning_steering_audit drop column if exists reason");
 		const { store, events, ledger, tables, columns, reserved } = fakeIndex({ migrationOptIns: { "steering-audit": true } });
 		await store.migrate();
-		expect(ALL_WITH_STEERING_AUDIT).toEqual([...ALL, 33, 34]);
+		expect(ALL_WITH_STEERING_AUDIT).toEqual([...ALL, 33, 34].sort((a, b) => a - b));
 		expect(events).toEqual(expectedRun(new Set(), ALL_WITH_STEERING_AUDIT));
 		expect(ledger.has(33)).toBe(true);
 		expect(ledger.has(34)).toBe(true);
@@ -206,23 +206,23 @@ describe("IndexStore.migrate() against a fake connection", () => {
 		expect(events.at(-1)).toBe("drop table planning_steering_audit");
 	});
 
-	test("with the steering-sessions opt-in, step 35 applies in its own transaction and its down reverses it; off, it is skipped and not ledgered", async () => {
-		const step = MIGRATION_STEPS.find((candidate) => candidate.version === 35);
+	test("with the steering-sessions opt-in, step 37 applies in its own transaction and its down reverses it; off, it is skipped and not ledgered", async () => {
+		const step = MIGRATION_STEPS.find((candidate) => candidate.version === 37);
 		expect(step?.name).toBe("steering_sessions");
 		expect(step?.down).toBe("drop table if exists steering_sessions");
 		const withSessions = applicableMigrationSteps({ "steering-audit": false, "steering-sessions": true }).map((candidate) => candidate.version);
-		expect(withSessions).toEqual([...ALL, 35]);
+		expect(withSessions).toEqual([...ALL, 37]);
 		const on = fakeIndex({ migrationOptIns: { "steering-audit": false, "steering-sessions": true } });
 		await on.store.migrate();
 		expect(on.events).toEqual(expectedRun(new Set(), withSessions));
-		expect(on.ledger.has(35)).toBe(true);
+		expect(on.ledger.has(37)).toBe(true);
 		expect(on.tables.has("steering_sessions")).toBe(true);
 		await on.reserved.unsafe(step?.down ?? "");
 		expect(on.tables.has("steering_sessions")).toBe(false);
 
 		const off = fakeIndex({ migrationOptIns: { "steering-audit": true, "steering-sessions": false } });
 		await off.store.migrate();
-		expect(off.ledger.has(35)).toBe(false);
+		expect(off.ledger.has(37)).toBe(false);
 		expect(off.tables.has("steering_sessions")).toBe(false);
 	});
 
