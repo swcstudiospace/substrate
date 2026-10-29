@@ -39,15 +39,17 @@
  * 60 s, above the 120 s run ceiling (D30-16).
  *
  * Exit codes: 0 every check passed, 1 a check failed, 2 precondition refused
- * (no consumer.env, a refused target, missing token files, or an unreachable
- * twin). A stale or absent band is a FAIL line, never a pass (D30-18).
+ * (no consumer.env, a refused target, missing token files, an unreachable
+ * twin, or a docker endpoint that cannot be proven local: a failed, timed-out
+ * or empty `docker context inspect` refuses, it never proceeds). A stale or
+ * absent band is a FAIL line, never a pass (D30-18).
  */
 import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isAuditRecord } from "../packages/audit/src/record.ts";
 import { decodePng } from "../packages/mcp-server/src/desktop/png.ts";
-import { RehearsalRefused, parseShellExports, refuseSmokeUrl, runDirFor } from "./rehearsal.ts";
+import { RehearsalRefused, parseShellExports, refuseDockerEndpoint, refuseSmokeUrl, runDirFor } from "./rehearsal.ts";
 
 /** Smoke flags: the harness instance plus the listed and unlisted surfaces. */
 export interface SmokeOptions {
@@ -276,6 +278,22 @@ function inspectRecruitment(): string | null {
 	const run = runArgv([...RECRUITMENT_INSPECT], SPAWN_TIMEOUT_MS);
 	if (!run.ok) return null;
 	return run.out.trim();
+}
+
+/** The same endpoint read the lifecycle script and the desktop driver use. */
+const DOCKER_ENDPOINT_PROBE = ["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"] as const;
+/** A hung docker client must not hang the smoke: the probe is bounded. */
+const LOCALITY_PROBE_TIMEOUT_MS = 10_000;
+
+/**
+ * Refuse unless the probe PROVES a local unix socket. A probe that failed or
+ * timed out, or that answered nothing, proves nothing, so it refuses instead
+ * of letting the smoke drive a possibly remote engine. Returns the reason, or
+ * null when the endpoint is local.
+ */
+export function refuseUnprovenDockerLocality(probe: { ok: boolean; out: string }): string | null {
+	if (!probe.ok) return "could not prove the local docker endpoint: the docker context probe failed or timed out; refusing";
+	return refuseDockerEndpoint(probe.out);
 }
 
 /** `status` key=value lines from the lifecycle script, run from this checkout. */
@@ -609,6 +627,12 @@ export async function main(argv: string[]): Promise<number> {
 		process.stdout.write(`${ok ? "  ok  " : " FAIL "} ${what}${detail ? ` — ${detail}` : ""}\n`);
 	};
 	process.stdout.write(`\n[desktop-smoke] ${opts.name} surface ${opts.surface} unlisted ${opts.unlisted}\n\n`);
+
+	// Every docker call below (the recruitment inspect and the lifecycle script's
+	// status) must hit the local engine, and the smoke types into a live
+	// desktop: refuse before any request unless the endpoint is proven local.
+	const locality = refuseUnprovenDockerLocality(runArgv([...DOCKER_ENDPOINT_PROBE], LOCALITY_PROBE_TIMEOUT_MS));
+	if (locality !== null) throw new RehearsalRefused(locality);
 
 	const health = await getStatus(`${base}/healthz`, bearer, REQUEST_TIMEOUT_MS);
 	if (health !== 200) throw new RehearsalRefused(`twin at ${base} is not answering /healthz`);

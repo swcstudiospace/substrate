@@ -32,6 +32,7 @@ echo "docker $*" >>"$STUB_LOG"
 		remote) echo "tcp://other-host:2375" ;;
 		broken) exit 1 ;;
 		empty) : ;;
+		hang) exec sleep 30 ;;
 		*) echo "unix:///var/run/docker.sock" ;;
 		esac
 		;;
@@ -112,7 +113,7 @@ type Knobs = {
 	dfAvail?: string;
 	image?: "present" | "absent";
 	container?: ContainerKnob;
-	endpoint?: "local" | "remote" | "broken" | "empty";
+	endpoint?: "local" | "remote" | "broken" | "empty" | "hang";
 	geometry?: "ok" | "hang";
 };
 
@@ -279,9 +280,23 @@ describe("substrate-desktop.sh up", () => {
 		assertCleanArgv(r.log);
 	});
 
-	itRoot("a failed endpoint probe proceeds; later calls fail truthfully", () => {
+	itRoot("a failed endpoint probe refuses before any later docker call", () => {
 		const r = runScript("up", { endpoint: "broken" });
-		expect(r.code).toBe(0);
+		expect(r.code).not.toBe(0);
+		expect(r.err).toContain("could not prove the local docker endpoint");
+		expect(dockerLines(r.log).some((line) => line.startsWith("docker run "))).toBe(false);
+		expect(dockerLines(r.log).some((line) => line.startsWith("docker start "))).toBe(false);
+		expect(dockerLines(r.log).some((line) => line.startsWith("docker image "))).toBe(false);
+		assertCleanArgv(r.log);
+	});
+
+	itRoot("a hung endpoint probe is bounded and refuses", () => {
+		const start = Date.now();
+		const r = runScript("up", { endpoint: "hang" }, { SUBSTRATE_DESKTOP_PROBE_TIMEOUT_S: "1" });
+		expect(Date.now() - start).toBeLessThan(15_000);
+		expect(r.code).not.toBe(0);
+		expect(r.err).toContain("could not prove the local docker endpoint");
+		expect(dockerLines(r.log).some((line) => line.startsWith("docker run "))).toBe(false);
 		assertCleanArgv(r.log);
 	});
 

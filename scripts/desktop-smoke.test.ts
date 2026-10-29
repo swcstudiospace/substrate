@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { DesktopRunInput } from "../packages/mcp-server/src/desktop/actions.ts";
 import { decodePng, encodePng } from "../packages/mcp-server/src/desktop/png.ts";
 import { RehearsalRefused, refuseSmokeUrl } from "./rehearsal.ts";
-import { dumpedHoldsTyped, findBand, markerText, nonceRgb, parseRpcBody, parseSmokeArgs, sha256Hex, shouldRetryNonce, type NonceRgb } from "./desktop-smoke.ts";
+import { dumpedHoldsTyped, findBand, markerText, nonceRgb, parseRpcBody, parseSmokeArgs, refuseUnprovenDockerLocality, sha256Hex, shouldRetryNonce, type NonceRgb } from "./desktop-smoke.ts";
 
 /** Paint a test frame: background wash plus solid exact-RGB rectangles. */
 function paintImage(width: number, height: number, bg: NonceRgb, rects: Array<{ x: number; y: number; w: number; h: number; color: NonceRgb }>): Buffer {
@@ -166,6 +166,26 @@ describe("smoke target guard", () => {
 
 	test("a loopback twin passes", () => {
 		expect(refuseSmokeUrl("http://127.0.0.1:17410/mcp")).toBeNull();
+	});
+});
+
+describe("refuseUnprovenDockerLocality", () => {
+	test("a failed or timed-out probe refuses with the could-not-prove reason", () => {
+		expect(refuseUnprovenDockerLocality({ ok: false, out: "" })).toContain("could not prove the local docker endpoint");
+		// A probe that died after printing a local-looking endpoint still proves nothing.
+		expect(refuseUnprovenDockerLocality({ ok: false, out: "unix:///var/run/docker.sock\n" })).toContain("could not prove the local docker endpoint");
+	});
+
+	test("an empty answer refuses", () => {
+		expect(refuseUnprovenDockerLocality({ ok: true, out: "\n" })).toContain("refusing without locality proof");
+	});
+
+	test("a non-local endpoint refuses", () => {
+		expect(refuseUnprovenDockerLocality({ ok: true, out: "tcp://other-host:2375\n" })).toContain("refusing non-local docker endpoint");
+	});
+
+	test("a local unix socket proceeds", () => {
+		expect(refuseUnprovenDockerLocality({ ok: true, out: "unix:///var/run/docker.sock\n" })).toBeNull();
 	});
 });
 
