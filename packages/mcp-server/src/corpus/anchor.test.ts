@@ -204,6 +204,27 @@ describe("a root with no event", () => {
 		expect(unread.status).toBe("unverified");
 		expect(unread.reasons.join(" ")).toContain("could not be decoded");
 	});
+
+	test("a matching row nested too deeply to hash is counted as unreadable and does not hide an older valid event", async () => {
+		const ledger = new FakeLedger();
+		const valid = rootEvent("evt_valid", START + 1_000);
+		ledger.events = [valid];
+		// The ledger gives a newer row whose payload names the root and parses, but is nested far past what the canonical encoder can walk.
+		const depth = 50_000;
+		const deepPayload = `{"action":"${CORPUS_ROOT_ACTION}","root":"${ROOT}","deep":${'{"a":'.repeat(depth)}1${"}".repeat(depth)}}`;
+		const deepRow = { ...toRow(rootEvent("evt_deep", START + 2_000)), payload: deepPayload };
+		const realQuery = ledger.queryEvents.bind(ledger);
+		ledger.queryEvents = async (query) => [deepRow, ...(await realQuery(query))];
+		const answer = await corpusAnchorStatus(portsOf(ledger), ROOT, verifierOf({ evt_valid: verdict("anchored", "evt_valid") }));
+		// The valid event is still judged and reported; the read is not complete, which the status would say if nothing had matched.
+		expect(answer).toMatchObject({ status: "anchored", eventId: "evt_valid" });
+		const nothing = new FakeLedger();
+		const realNothing = nothing.queryEvents.bind(nothing);
+		nothing.queryEvents = async (query) => [deepRow, ...(await realNothing(query))];
+		const unread = await corpusAnchorStatus(portsOf(nothing), ROOT, verifierOf({}));
+		expect(unread.status).toBe("unverified");
+		expect(unread.reasons.join(" ")).toContain("could not be decoded");
+	});
 });
 
 describe("a root carried by several events", () => {

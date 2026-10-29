@@ -62,7 +62,7 @@ function integerOf(value: unknown): number | null {
 
 /** The gap an unreadable row leaves, or null when every row was read. */
 function unreadableGap(unreadable: number): string | null {
-	return unreadable === 0 ? null : `${unreadable} root event row${unreadable === 1 ? "" : "s"} could not be decoded, so the one asked for may be among them`;
+	return unreadable === 0 ? null : `${unreadable} root event row${unreadable === 1 ? "" : "s"} could not be decoded or hashed, so the one asked for may be among them`;
 }
 
 /** The newest events whose payload names `root`, and why the read may not have reached the start of the session (null when it did). */
@@ -102,8 +102,17 @@ async function findRootEvents(ports: AnchorVerifyPorts, root: string): Promise<{
 			seen.add(event.id);
 			fresh += 1;
 			if (event.payload["action"] !== CORPUS_ROOT_ACTION || event.payload["root"] !== root) continue;
-			const { hash: _stored, ...content } = event;
-			candidates.push({ eventId: event.id, count: integerOf(event.payload["count"]), manifestVersion: integerOf(event.payload["manifest_version"]), contentHash: eventHash(content) });
+			let contentHash: string;
+			try {
+				const { hash: _stored, ...content } = event;
+				contentHash = eventHash(content);
+			} catch {
+				// A payload nested too deeply to hash decoded fine and cannot be judged: counted like a row that would not decode, so it
+				// neither fails the lookup nor hides the older, valid events for this root.
+				unreadable += 1;
+				continue;
+			}
+			candidates.push({ eventId: event.id, count: integerOf(event.payload["count"]), manifestVersion: integerOf(event.payload["manifest_version"]), contentHash });
 			if (candidates.length >= MAX_ANCHOR_CANDIDATES) return { candidates, gap: null };
 		}
 		if (rows.length < LOOKUP_ROW_LIMIT) return { candidates, gap: unreadableGap(unreadable) };
