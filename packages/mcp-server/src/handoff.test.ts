@@ -281,6 +281,20 @@ describe("replayable from the packet alone", () => {
 		}
 	});
 
+	test("short text a second redaction pass would still change is settled first, so it keeps all its words and its stored form is the signed one", () => {
+		const goal = 'Rotate API_TOKEN="example", then deploy the new build and run all checks before handing over.';
+		const blocker = 'Waiting on PASSWORD="hunter2", and the staging deploy after it.';
+		const signed = signHandoff(packet({ goal, blockers: [blocker], notes: 'Use SECRET="abc", then retry once.' }), SIGNER);
+		expect(signed.goal).toContain("then deploy the new build and run all checks before handing over.");
+		expect(signed.blockers[0]).toContain("and the staging deploy after it.");
+		expect(JSON.stringify(signed)).not.toMatch(/example"|hunter2|abc"/);
+		const event = normalizeEvent({ surface: "grok-bot", kind: "handoff", summary: "handoff", payload: { handoff: signed } }, null);
+		const stored = event.payload.handoff as HandoffPacket;
+		expect(canonicalJson(stored)).toBe(canonicalJson(signed));
+		expect(isStoredHandoff(stored)).toBe(true);
+		expect(verifyHandoff(stored, KEYS)).toEqual({ ok: true, key_id: "k1" });
+	});
+
 	test("a large packet is trimmed before signing, so the stored packet is the signed one", () => {
 		const signed = signHandoff(
 			packet({

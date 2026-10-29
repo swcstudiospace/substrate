@@ -162,27 +162,51 @@ export interface HandoffInput {
 
 export class InvalidHandoffError extends Error {}
 
-/** How many times the cap is moved back to make the text a fixed point of redaction. Each move is at least two characters, and the tail is the only part that changes. */
-const STABLE_CUT_ATTEMPTS = 24;
+/** Passes of redaction that settle a text, and tries that make its cut text stable. Redaction converges in a pass or two on any real text; a bound keeps a hostile one from looping. */
+const SETTLE_PASSES = 8;
+const STABLE_CUT_ATTEMPTS = 32;
 
+/** The text after redaction has run until another pass changes nothing, or null when it never does. */
+function settle(text: string): string | null {
+	let current = redact(text).trim();
+	for (let pass = 0; pass < SETTLE_PASSES; pass++) {
+		const next = redact(current).trim();
+		if (next === current) return current;
+		current = next;
+	}
+	return null;
+}
+
+/**
+ * One line of a packet: redacted, capped, and stable.
+ *
+ * Redact first, then cap: truncating first can cut a token in half so its own pattern no longer matches, and the fragment would
+ * be signed and stored. Then make it stable, because the event layer redacts every stored string again and the text that was
+ * signed has to be the text that is stored:
+ * - redaction is settled before the cap, so a second pass over the whole text (one that, say, drops a comma after a marker)
+ *   changes nothing later;
+ * - a cap that falls inside a marker (`[REDACTE`) or a value (`password=[REDA`) is completed or replaced by that second pass. If
+ *   the result still fits, it is the form that is kept; if it outgrew the cap, the cut moves back from where it was (never from
+ *   the start) until a second pass changes nothing.
+ * Text that cannot be made stable is not carried, rather than carried in a form that differs from what was signed.
+ */
 function line(value: unknown, limit: number): string | null {
 	if (typeof value !== "string") return null;
-	// Redact first, then cap: truncating first can cut a token in half so its own
-	// pattern no longer matches, and the fragment would be signed and stored.
-	const redacted = redact(value).trim();
-	// Then make sure the cut text is stable: the event layer redacts every stored string again, and a cap that fell inside a
-	// marker (`[REDACTE`) or a value (`password=[REDA`) is completed or replaced by that second pass, so the stored text would
-	// differ from the text that was signed and could outgrow its cap. Cutting further back until a second pass changes nothing
-	// leaves the stored form equal to the signed form.
-	let cut = Math.min(redacted.length, limit);
+	let text = settle(value);
+	if (text === null) return null;
+	let cut = Math.min(text.length, limit);
 	for (let attempt = 0; attempt < STABLE_CUT_ATTEMPTS; attempt++) {
-		const candidate = redacted.slice(0, cut).trim();
+		const candidate = text.slice(0, cut).trim();
 		const again = redact(candidate);
 		if (again === candidate) return candidate.length > 0 ? candidate : null;
-		cut = Math.max(0, cut - Math.max(2, Math.abs(again.length - candidate.length) + 1));
+		if (again.length <= limit) {
+			text = again.trim();
+			cut = Math.min(text.length, limit);
+			continue;
+		}
+		cut = Math.max(0, cut - Math.max(2, again.length - candidate.length + 1));
 		if (cut === 0) return null;
 	}
-	// A text that cannot be made stable is not carried at all, rather than carried in a form that differs from what was signed.
 	return null;
 }
 
