@@ -994,13 +994,15 @@ describe("substrate corpus plan --neardup", () => {
 		stub.on("POST /corpus/plan", () => ({ status: 200, body: plan }));
 		const reply = neardupOf([pairOf(0.95)], { compared: 2 });
 		neardupAnswers({ status: 200, body: reply });
+		// The plan command adds the entries a plan supersedes (docs reflect), so the unchanged output is the plan plus that list.
+		const shown = { ...plan, superseded: [] };
 		const plain = await run(["plan", "--root", root, "--json"], { runner });
-		expect(plain.out).toBe(`${JSON.stringify(plan, null, 2)}\n`);
+		expect(plain.out).toBe(`${JSON.stringify(shown, null, 2)}\n`);
 		expect(stub.requests("/corpus/neardup")).toEqual([]);
 		const asked = await run(["plan", "--root", root, "--neardup", "--json"], { runner });
 		expect(asked.code).toBe(0);
 		const parsed = rec(JSON.parse(asked.out), "plan");
-		expect(Object.keys(parsed)).toEqual([...Object.keys(plan), "neardup"]);
+		expect(Object.keys(parsed)).toEqual([...Object.keys(shown), "neardup"]);
 		expect(parsed.neardup).toEqual({ ...reply, notCompared: { github: 0, unreadable: 0, overLimit: 0 } });
 		expect(asked.out).not.toContain("advisory");
 	});
