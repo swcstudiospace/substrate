@@ -80,11 +80,14 @@ export type PlanAction = (typeof PLAN_ACTIONS)[number];
 
 /**
  * Which part of the manifest a plan may judge. A document the scan did not report is tombstoned only when its repo is in
- * `repos` and its tier is at most `maxTier`, so a scan of one repository or of tier 1 never tombstones the rest.
+ * `repos`, its tier is at most `maxTier` and its source is in `sources`. The caller lists a repo here only when the scan
+ * read it completely: a repository that failed to read, a truncated tree or a cap such as `--max-repos` leaves it out, so a
+ * narrower or failed scan never tombstones the documents it did not cover.
  */
 export interface CorpusScope {
 	repos: string[];
 	maxTier: DocTier;
+	sources: CorpusSource[];
 }
 
 export interface CorpusPlanRequest {
