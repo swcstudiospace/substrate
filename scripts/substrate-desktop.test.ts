@@ -21,7 +21,7 @@ import { join } from "node:path";
 const SCRIPT = join(import.meta.dir, "..", "infra", "desktop", "substrate-desktop.sh");
 const GATE_BYTES = 10737418240;
 
-const DOCKER_STUB = String.raw`#!/usr/bin/env bash
+const DOCKER_STUB = `#!/usr/bin/env bash
 echo "docker $*" >>"$STUB_LOG"
 	if [ -z "$STUB_IMAGE" ]; then STUB_IMAGE=present; fi
 	if [ -z "$STUB_ENDPOINT" ]; then STUB_ENDPOINT=local; fi
@@ -88,7 +88,7 @@ echo "df $*" >>"$STUB_LOG"
 printf '%s\n' "Avail" "$STUB_DF_AVAIL"
 `;
 
-const OPENSSL_STUB = String.raw`#!/usr/bin/env bash
+const OPENSSL_STUB = `#!/usr/bin/env bash
 echo "openssl $*" >>"$STUB_LOG"
 printf '%s' "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 `;
