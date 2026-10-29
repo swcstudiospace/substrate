@@ -175,6 +175,8 @@ describe("the grammar", () => {
 		["listen --after over 128 characters", ["listen", "--session", "s", "--after", "d".repeat(129)]],
 		["a --format that is not text or json", ["context", "--format", "yaml"]],
 		["a --surface that is not a surface name", ["sessions", "--surface", "Not A Surface"]],
+		["queue --conflicts with a value", ["queue", "--session", "s", "--action", "pause", "--body", "x", "--conflicts", "yes"]],
+		["ack --conflicts", ["ack", "d1", "--applied", "--conflicts"]],
 	];
 	for (const [name, argv] of refused) {
 		test(`${name}: usage on stderr, exit 2, nothing sent, nothing on stdout`, async () => {
@@ -273,7 +275,7 @@ describe("sessions", () => {
 
 describe("failures are typed and mapped to exit codes", () => {
 	const cases: Array<[string, Reply, number, string]> = [
-		["a 404 says the server predates the feature or the flag is off", json({ error: "not found" }, 404), EXIT_FAILED, "predates Live Steering"],
+		["a 404 says the server predates the feature or the flag is off, and is a refusal", json({ error: "not found" }, 404), EXIT_REFUSED, "predates Live Steering"],
 		["a 401 is a refusal about the token", json({ error: "unauthorized" }, 401), EXIT_REFUSED, "SUBSTRATE_TOKEN"],
 		["a 500 is a failure and carries the server's message", json({ error: "index down" }, 500), EXIT_FAILED, "index down"],
 		["a 500 with an HTML body is still a failure", new Response("<html>bad gateway</html>", { status: 502 }), EXIT_FAILED, "HTTP 502"],
@@ -362,7 +364,7 @@ describe("status", () => {
 
 	test("a failed session list fails the command", async () => {
 		const r = rig();
-		r.reply = () => json({}, 404);
+		r.reply = () => json({}, 500);
 		expect(await steer(r, "status")).toBe(EXIT_FAILED);
 	});
 
@@ -448,11 +450,22 @@ describe("queue", () => {
 		expect(text(r.err)).toContain("status");
 	});
 
-	test("a 404 says the route is missing, exit 1", async () => {
+	test("a 404 says the route is missing, and is a refusal: exit 3", async () => {
 		const r = rig();
 		r.reply = () => json({}, 404);
-		expect(await steer(r, "queue", "--session", "s", "--action", "pause", "--body", "x")).toBe(EXIT_FAILED);
+		expect(await steer(r, "queue", "--session", "s", "--action", "pause", "--body", "x")).toBe(EXIT_REFUSED);
 		expect(text(r.err)).toContain("predates Live Steering");
+	});
+
+	test("--conflicts sends conflicts_with_active_plan: true, and without it the key is left out", async () => {
+		const r = rig();
+		r.reply = () => json({ status: "queued", directive_id: "d-1" });
+		expect(await steer(r, "queue", "--session", "s", "--action", "redirect", "--body", "x", "--conflicts")).toBe(EXIT_DONE);
+		expect(defined(r.calls[0]).body).toEqual({ session_id: "s", action: "redirect", body: "x", conflicts_with_active_plan: true });
+		const without = rig();
+		without.reply = () => json({ status: "queued", directive_id: "d-2" });
+		await steer(without, "queue", "--session", "s", "--action", "redirect", "--body", "x");
+		expect(Object.keys(defined(without.calls[0]).body ?? {})).not.toContain("conflicts_with_active_plan");
 	});
 
 	test("a reply that says queued without a directive id is a bad response, exit 1, never a success", async () => {
@@ -526,12 +539,41 @@ describe("ack", () => {
 		expect(r.out).toEqual([]);
 	});
 
-	test("a 404 that is not that refusal is still the missing route, exit 1", async () => {
+	test("a 404 that is not that refusal is the missing route or steering switched off: exit 3, the message names the flag", async () => {
 		const r = rig();
 		r.reply = () => json({ error: "live steering is off (SUBSTRATE_PLANNING_STEERING)" }, 404);
-		expect(await steer(r, "ack", "d-1", "--applied")).toBe(EXIT_FAILED);
+		expect(await steer(r, "ack", "d-1", "--applied")).toBe(EXIT_REFUSED);
 		expect(text(r.err)).toContain("predates Live Steering");
+		expect(text(r.err)).toContain("flag that enables it is off");
 	});
+});
+
+describe("queue and ack classify a reply by its typed body before its HTTP status", () => {
+	const writes: Array<[string, string[]]> = [
+		["queue", ["queue", "--session", "s", "--action", "pause", "--body", "x"]],
+		["ack", ["ack", "d-1", "--applied"]],
+	];
+	const outcomes: Array<[string, () => Response, number, string]> = [
+		["misconfigured (HTTP 503)", () => json({ status: "misconfigured", errors: [{ key: "SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN", reason: "not-integer" }] }, 503), EXIT_REFUSED, "misconfigured"],
+		["not-configured (HTTP 503)", () => json({ status: "not-configured" }, 503), EXIT_REFUSED, "not-configured"],
+		["forbidden (HTTP 403)", () => json({ status: "forbidden", reason: "operator-required" }, 403), EXIT_REFUSED, "forbidden: operator-required"],
+		["refused with a retry-after class status (HTTP 503 audit-unavailable)", () => json({ status: "refused", error: { code: "audit-unavailable" } }, 503), EXIT_REFUSED, "refused (audit-unavailable)"],
+		["the typed not-found of a directive (HTTP 404)", () => json({ status: "refused", error: { code: "not-found" } }, 404), EXIT_REFUSED, "refused (not-found)"],
+		["a 404 with no typed body: steering is off or the route is missing", () => json({ error: "not found" }, 404), EXIT_REFUSED, "flag that enables it is off"],
+		["a 404 with a body that is not JSON", () => new Response("<html>no</html>", { status: 404 }), EXIT_REFUSED, "predates Live Steering"],
+		["a 503 with no typed body is a server fault, not a refusal", () => json({ error: "index down" }, 503), EXIT_FAILED, "index down"],
+	];
+	for (const [command, argv] of writes) {
+		for (const [name, reply, exit, message] of outcomes) {
+			test(`${command}: ${name} is exit ${exit}`, async () => {
+				const r = rig();
+				r.reply = reply;
+				expect(await steer(r, ...argv)).toBe(exit);
+				expect(text(r.err)).toContain(message);
+				expect(r.out).toEqual([]);
+			});
+		}
+	}
 });
 
 describe("list", () => {
@@ -609,10 +651,10 @@ describe("context", () => {
 		expect(text(r.err)).toContain("events[].source");
 	});
 
-	test("a 404 says the server predates the feature", async () => {
+	test("a 404 says the server predates the feature, and is a refusal: exit 3", async () => {
 		const r = rig();
 		r.reply = () => json({}, 404);
-		expect(await steer(r, "context")).toBe(EXIT_FAILED);
+		expect(await steer(r, "context")).toBe(EXIT_REFUSED);
 		expect(text(r.err)).toContain("predates Live Steering");
 	});
 });
@@ -726,10 +768,90 @@ describe("listen", () => {
 		expect(r.calls).toHaveLength(2);
 	});
 
-	test("a failure a reconnect cannot fix stops the loop: 401 is a refusal, 404 a failure, a bad body a failure", async () => {
+	/** A request signal that never fires, recording the budget it was asked for. */
+	const budgetSignal = (budgets: number[], ms: number): AbortSignal => {
+		budgets.push(ms);
+		return new AbortController().signal;
+	};
+
+	describe("--max-wait-ms is one budget for the whole command", () => {
+		test("a request that stalls is cut where the budget ends: its signal carries the remaining budget, and the loop ends at once with exit 0", async () => {
+			const budgets: number[] = [];
+			const aborters: AbortController[] = [];
+			const r = rig({
+				signalFor: (ms) => {
+					budgets.push(ms);
+					const controller = new AbortController();
+					aborters.push(controller);
+					return controller.signal;
+				},
+				// A connection that never answers: it only ends when its own signal aborts.
+				fetch: (_input, init) => {
+					const { promise, reject } = Promise.withResolvers<Response>();
+					init.signal.addEventListener("abort", () => reject(Object.assign(new Error("timed out"), { name: "TimeoutError" })), { once: true });
+					return promise;
+				},
+			});
+			const run = steer(r, "listen", "--session", "sess-1", "--max-wait-ms", "1000");
+			for (let turn = 0; turn < 100 && aborters.length === 0; turn++) {
+				const { promise, resolve } = Promise.withResolvers<void>();
+				setImmediate(resolve);
+				await promise;
+			}
+			// The 25 s long poll plus its margin would be 30 s: the budget caps the request at what is left of the command.
+			expect(budgets).toEqual([1_000]);
+			r.clock.ms += 1_000;
+			defined(aborters[0], "the request's abort controller").abort();
+
+			expect(await run).toBe(EXIT_DONE);
+			expect(budgets).toEqual([1_000]);
+			expect(r.sleeps).toEqual([]);
+			expect(text(r.err)).not.toContain("reconnecting");
+			expect(text(r.err)).toContain("stopped after 1000 ms");
+		});
+
+		test("each request is capped at what is left, never above the client's own long-poll timeout", async () => {
+			const budgets: number[] = [];
+			const r = rig({ signalFor: (ms) => budgetSignal(budgets, ms) });
+			r.reply = (call) => timedOut(r, call);
+			expect(await steer(r, "listen", "--session", "sess-1", "--max-wait-ms", "60000")).toBe(EXIT_DONE);
+			// Polls of 25 s, 25 s, 10 s; the request allowance is the poll plus the margin, capped by the time left.
+			expect(budgets).toEqual([30_000, 30_000, 10_000]);
+		});
+
+		test("without --max-wait-ms the request keeps the client's own long-poll timeout", async () => {
+			const budgets: number[] = [];
+			const r = rig({ signalFor: (ms) => budgetSignal(budgets, ms) });
+			r.reply = () => delivered("d-1");
+			await steer(r, "listen", "--session", "sess-1", "--once");
+			expect(budgets).toEqual([LISTEN_POLL_MS + 5_000]);
+		});
+
+		test("the pause after an instant answer is clipped to what is left, and the command then ends with exit 0", async () => {
+			const r = rig();
+			r.reply = () => new Response(null, { status: 204 });
+			expect(await steer(r, "listen", "--session", "sess-1", "--max-wait-ms", "2500")).toBe(EXIT_DONE);
+			expect(r.sleeps).toEqual([1_000, 1_000, 500]);
+			expect(r.calls).toHaveLength(3);
+		});
+
+		test("a pause with nothing left is not slept at all", async () => {
+			const r = rig();
+			// An answer that takes the whole budget and is still too quick to be a long poll: no pause may follow it.
+			r.reply = () => {
+				r.clock.ms += 100;
+				return new Response(null, { status: 204 });
+			};
+			expect(await steer(r, "listen", "--session", "sess-1", "--max-wait-ms", "100")).toBe(EXIT_DONE);
+			expect(r.sleeps).toEqual([]);
+			expect(r.calls).toHaveLength(1);
+		});
+	});
+
+	test("a failure a reconnect cannot fix stops the loop: 401 and 404 are refusals, a bad body a failure", async () => {
 		const expectations: Array<[Response, number]> = [
 			[json({}, 401), EXIT_REFUSED],
-			[json({}, 404), EXIT_FAILED],
+			[json({}, 404), EXIT_REFUSED],
 			[json({ directive: { id: "d-1" } }), EXIT_FAILED],
 			[json({ nothing: true }), EXIT_FAILED],
 		];

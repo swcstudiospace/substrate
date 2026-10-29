@@ -786,21 +786,21 @@ describe("acknowledged directives after a restart", () => {
 		expect((await previous.acknowledge({ directiveId: "d-1", sessionId: "sess-a", outcome: "applied" })).ok).toBe(true);
 	}
 
-	test("the route still lists a directive that was acknowledged before the restart, with its checkpoint hint", async () => {
+	test("the route still lists a directive that was acknowledged before the restart, with no checkpoint hint (the audit holds no transition result)", async () => {
 		const sql = new FakeAuditSql();
 		await acknowledgedByPreviousProcess(sql);
 		const { substrate } = harness({}, { sql });
 		await substrate.startSteering();
 		const inbox = substrate.steering.inbox;
 		if (inbox === null) throw new Error("expected an inbox");
-		// Boot restores open directives only, so the inbox no longer holds it; the in-memory view alone would lose the hint.
+		// Boot restores open directives only, so the inbox no longer holds it; the in-memory view alone would lose the directive.
 		expect(inbox.get("d-1")).toBeNull();
 		expect(listRestDirectives(inbox, { sessionId: "sess-a", status: "acknowledged" })).toEqual([]);
 
 		const durable = await substrate.durableAcknowledgedFor("sess-a");
 		expect(durable).toMatchObject({ history: "durable", truncated: false });
 		expect(listRestDirectives(inbox, { sessionId: "sess-a", status: "acknowledged" }, durable.records)).toMatchObject([
-			{ id: "d-1", status: "acknowledged", outcome: "applied", checkpoint_hint: { trigger: "steering", directive_id: "d-1" } },
+			{ id: "d-1", status: "acknowledged", outcome: "applied", checkpoint_hint: null },
 		]);
 		// The history is read for the session asked about only.
 		expect((await substrate.durableAcknowledgedFor("sess-b")).records).toEqual([]);

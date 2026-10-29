@@ -356,3 +356,43 @@ export function handoffGaps(packet: HandoffPacket): string[] {
 	}
 	return gaps;
 }
+
+/** A named own field of an object read back from storage, untyped. Absent is `undefined`. */
+function storedField(value: object, key: string): unknown {
+	return Object.hasOwn(value, key) ? Reflect.get(value, key) : undefined;
+}
+
+function isStringList(value: unknown, maxItems: number): value is string[] {
+	return Array.isArray(value) && value.length <= maxItems && value.every((item) => typeof item === "string" && item.length <= MAX_LINE);
+}
+
+function isStoredParty(value: unknown): boolean {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+	const surface = storedField(value, "surface");
+	return typeof surface === "string" && surface.length > 0 && surface.length <= MAX_LINE;
+}
+
+/**
+ * Whether a `payload.handoff` read back from the ledger is a packet a reader may use. The ledger takes any payload from
+ * `events_emit`, so a row of kind `handoff` can carry `{}`, a number or a megabyte string. A packet passes when it is an object
+ * with a non-empty goal, `files`, `dod` and `blockers` as lists of strings, `from` and `to` naming a surface, and every field
+ * inside the bounds `buildHandoff` applies (so a genuine packet always passes and a hostile one is the reader's to skip). The
+ * signature is not judged here: an unsigned or unverifiable packet is still a packet, and `verifyHandoff` says what it is.
+ */
+export function isStoredHandoff(value: unknown): value is HandoffPacket {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+	const goal = storedField(value, "goal");
+	if (typeof goal !== "string" || goal.trim().length === 0 || goal.length > MAX_GOAL) return false;
+	if (!isStringList(storedField(value, "files"), MAX_FILES)) return false;
+	if (!isStringList(storedField(value, "dod"), MAX_DOD)) return false;
+	if (!isStringList(storedField(value, "blockers"), MAX_BLOCKERS)) return false;
+	if (!isStoredParty(storedField(value, "from")) || !isStoredParty(storedField(value, "to"))) return false;
+	const notes = storedField(value, "notes");
+	if (notes !== undefined && notes !== null && (typeof notes !== "string" || notes.length > MAX_NOTES)) return false;
+	try {
+		return Buffer.byteLength(canonicalJson(value)) <= MAX_PACKET_BYTES;
+	} catch {
+		// A payload that cannot be serialised is not a packet.
+		return false;
+	}
+}

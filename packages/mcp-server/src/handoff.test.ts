@@ -6,6 +6,7 @@ import {
 	buildHandoff,
 	handoffGaps,
 	handoffSummary,
+	isStoredHandoff,
 	signHandoff,
 	verifyHandoff,
 	type HandoffPacket,
@@ -329,5 +330,51 @@ describe("signing keys from the environment", () => {
 	test("ids that collide leave the live key in place, not the retired one", () => {
 		const config = loadConfig({ SUBSTRATE_HANDOFF_KEY: "new-key", SUBSTRATE_HANDOFF_KEY_PREV: "old-key", SUBSTRATE_HANDOFF_KEY_PREV_ID: "k1" });
 		expect(config.handoffKeys.get("k1")).toBe("new-key");
+	});
+});
+
+describe("isStoredHandoff", () => {
+	test("a packet the builder made passes, signed or not, whatever its verdict", () => {
+		expect(isStoredHandoff(packet())).toBe(true);
+		expect(isStoredHandoff(signHandoff(packet(), SIGNER))).toBe(true);
+		expect(isStoredHandoff({ ...packet(), signature: { alg: "other", key_id: 5, value: null } })).toBe(true);
+	});
+
+	test("a packet at every bound the builder applies still passes", () => {
+		const full = packet({ goal: "g".repeat(1_200), files: Array.from({ length: 40 }, (_, n) => `f${n}`), dod: Array.from({ length: 24 }, (_, n) => `d${n}`), blockers: Array.from({ length: 16 }, (_, n) => `b${n}`) });
+		expect(isStoredHandoff(full)).toBe(true);
+	});
+
+	test("what is not an object with a goal and lists of strings is refused, never thrown on", () => {
+		const good = packet();
+		const refused: unknown[] = [
+			undefined,
+			null,
+			5,
+			"a goal",
+			[],
+			["goal"],
+			{},
+			{ goal: 5 },
+			{ ...good, goal: "" },
+			{ ...good, goal: "   " },
+			{ ...good, goal: "g".repeat(1_201) },
+			{ ...good, files: undefined },
+			{ ...good, files: "a/b.ts" },
+			{ ...good, files: ["a/b.ts", 5] },
+			{ ...good, files: Array.from({ length: 41 }, () => "f") },
+			{ ...good, files: ["x".repeat(401)] },
+			{ ...good, dod: "done when green" },
+			{ ...good, dod: Array.from({ length: 25 }, () => "d") },
+			{ ...good, blockers: [null] },
+			{ ...good, blockers: Array.from({ length: 17 }, () => "b") },
+			{ ...good, from: null },
+			{ ...good, to: { surface: "" } },
+			{ ...good, to: "hermes" },
+			{ ...good, notes: 5 },
+			{ ...good, notes: "n".repeat(1_201) },
+			{ ...good, extra: "e".repeat(13_000) },
+		];
+		for (const value of refused) expect(isStoredHandoff(value)).toBe(false);
 	});
 });

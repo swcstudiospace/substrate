@@ -6,12 +6,14 @@
  * is refused there, and this client does not try to second-guess it. A wrong flag is refused BEFORE anything is sent.
  *
  * Exit codes: 0 done, 1 failed (the server was not reached, answered with an error or with a body that is not a reply),
- * 2 usage, 3 refused (the server understood and said no: not an operator, a rate limit, a bad bearer, steering off).
+ * 2 usage, 3 refused (the server understood and said no, or is not set up for steering: not an operator, a rate limit, a bad
+ * bearer, a typed `misconfigured` or `not-configured` answer, a route that is missing because steering is off).
  *
  * `listen` is the one long-running command. It long-polls `/steering/wait`, prints each directive as it arrives,
  * remembers the last id (sent as `after`) and every id it already printed (so a server that restarted and replays an
  * earlier queued directive does not print it twice), backs off after a transport error, and stops on an interrupt,
- * after `--once` has seen a directive, or when `--max-wait-ms` has passed. Its clock, sleep and fetch are injected, so
+ * after `--once` has seen a directive, or when `--max-wait-ms` has passed. `--max-wait-ms` is one budget for the whole
+ * command: every request is cut at its end and no pause runs past it. Its clock, sleep and fetch are injected, so
  * the whole loop is testable without waiting; every pause is abortable, so an interrupt ends it at once.
  */
 import {
@@ -31,6 +33,7 @@ import {
 	DIRECTIVE_ID_PATTERN,
 	SESSION_ID_PATTERN,
 	STEER_LIMIT_MAX,
+	WAIT_MARGIN_MS,
 	createSteerClient,
 } from "./client.ts";
 import { plain } from "./plain.ts";
@@ -44,13 +47,13 @@ export const EXIT_REFUSED = 3;
 export const STEER_USAGE =
 	"usage: substrate steer sessions [--repo R] [--limit N] [--json]\n" +
 	"       substrate steer status [--repo R] [--session ID] [--json]\n" +
-	"       substrate steer queue --session ID --action pause|redirect|annotate --body TEXT [--priority low|normal|high] [--json]   (operators only)\n" +
+	"       substrate steer queue --session ID --action pause|redirect|annotate --body TEXT [--priority low|normal|high] [--conflicts] [--json]   (operators only)\n" +
 	"       substrate steer ack DIRECTIVE (--applied | --declined) [--confirm] [--json]   (operators only)\n" +
 	"       substrate steer list --session ID [--status queued|acknowledged|all] [--json]\n" +
 	"       substrate steer listen --session ID [--once] [--max-wait-ms N] [--after DIRECTIVE] [--json]\n" +
 	"       substrate steer context [--repo R] [--session ID] [--limit N] [--format text|json]\n" +
 	"every command takes --surface S (the token's surface; default claude-code)\n" +
-	"exit: 0 done, 1 failed, 2 usage, 3 refused by the server (not an operator, rate limited, bad token, steering off)\n";
+	"exit: 0 done, 1 failed, 2 usage, 3 refused by the server (not an operator, rate limited, bad token, steering off or not configured)\n";
 
 /** One poll asks for this long; the server clamps it to its own ceiling (`SUBSTRATE_STEERING_WAIT_MAX_MS`) and says what it applied, which the loop then uses. */
 export const LISTEN_POLL_MS = 25_000;
@@ -96,7 +99,7 @@ const VALUE_FLAGS: readonly string[] = ["repo", "limit", "session", "action", "b
 const ALLOWED: Record<Sub, readonly string[]> = {
 	sessions: ["repo", "limit", "json", "surface"],
 	status: ["repo", "session", "json", "surface"],
-	queue: ["session", "action", "body", "priority", "json", "surface"],
+	queue: ["session", "action", "body", "priority", "conflicts", "json", "surface"],
 	ack: ["applied", "declined", "confirm", "json", "surface"],
 	list: ["session", "status", "json", "surface"],
 	listen: ["session", "once", "max-wait-ms", "after", "json", "surface"],
@@ -208,7 +211,7 @@ export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> 
 }
 
 /** Failures that mean "the server said no" rather than "it could not answer". */
-const REFUSAL_CODES: Record<string, true> = { unauthorized: true, refused: true };
+const REFUSAL_CODES: Record<string, true> = { unauthorized: true, refused: true, "not-found": true };
 
 export async function runSteer(argv: readonly string[], deps: SteerDeps): Promise<number> {
 	if (argv.length === 0 || argv[0] === "help" || argv[0] === "--help" || argv[0] === "-h") {
@@ -337,6 +340,7 @@ async function commandWrite(parsed: ParsedSteer, deps: SteerDeps, client: SteerC
 			action: flag(parsed, "action") as SteerAction,
 			body: flag(parsed, "body") as string,
 			...(priority === undefined ? {} : { priority }),
+			...(parsed.flags.has("conflicts") ? { conflictsWithActivePlan: true } : {}),
 		});
 		if (!result.ok) return failed(result);
 		reply = result.value;
@@ -379,26 +383,36 @@ async function commandListen(parsed: ParsedSteer, deps: SteerDeps, client: Steer
 	// Insertion order is age: the oldest id goes first when the set is full.
 	const printed = new Set<string>();
 
+	// The whole command has one budget (`--max-wait-ms`): what is left of it, or unbounded with no flag.
+	const budgetLeft = (): number => (deadline === undefined ? Number.POSITIVE_INFINITY : deadline - deps.now().getTime());
+	// A pause never runs past the end of the budget, so the command returns promptly once it is spent.
+	const pause = async (wantedMs: number): Promise<void> => {
+		const ms = Math.min(wantedMs, budgetLeft());
+		if (ms > 0) await sleep(ms, deps.interrupt);
+	};
 	// An answer that came back sooner than a long poll is paced, so a misbehaving server cannot spin the loop.
 	const pace = async (polledAt: number): Promise<void> => {
-		if (deps.now().getTime() - polledAt < LISTEN_MIN_POLL_GAP_MS) await sleep(LISTEN_MIN_POLL_GAP_MS * 5, deps.interrupt);
+		if (deps.now().getTime() - polledAt < LISTEN_MIN_POLL_GAP_MS) await pause(LISTEN_MIN_POLL_GAP_MS * 5);
 	};
 
 	for (;;) {
 		if (interrupted()) return EXIT_DONE;
-		const remaining = deadline === undefined ? LISTEN_POLL_MS : deadline - deps.now().getTime();
+		const remaining = budgetLeft();
 		if (remaining <= 0) break;
 		const pollMs = Math.min(LISTEN_POLL_MS, serverWaitMs ?? LISTEN_POLL_MS, remaining);
 		const polledAt = deps.now().getTime();
-		const result = await client.wait({ sessionId, ...(after === undefined ? {} : { after }), timeoutMs: pollMs });
+		// With a budget the request itself is cut at its end: a stalled connection cannot hold the command past `--max-wait-ms`.
+		const result = await client.wait({ sessionId, ...(after === undefined ? {} : { after }), timeoutMs: pollMs, ...(deadline === undefined ? {} : { requestBudgetMs: remaining }) });
 		// Read again after the await: the signal can fire while the poll is in flight.
 		if (interrupted()) return EXIT_DONE;
 
 		if (!result.ok) {
 			// A refusal (a 400 with the server's words, a 403, a 429) is the server saying no: retrying would only repeat it.
 			if (!isTransient(result)) return failed(result);
-			const left = deadline === undefined ? Number.POSITIVE_INFINITY : deadline - deps.now().getTime();
+			const left = budgetLeft();
 			if (left <= 0) break;
+			// A request cut where the budget ends is the end of listening, not a fault to report and retry.
+			if (result.code === "timeout" && deadline !== undefined && remaining <= pollMs + WAIT_MARGIN_MS) break;
 			const delay = Math.min(LISTEN_BACKOFF_BASE_MS * 2 ** Math.min(attempt, 10), LISTEN_BACKOFF_MAX_MS, left);
 			attempt++;
 			deps.err(`substrate steer listen: ${plain(result.message, 300)}; reconnecting in ${Math.ceil(delay / 1_000)}s\n`);

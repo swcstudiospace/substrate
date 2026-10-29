@@ -14,7 +14,7 @@ import { redact } from "../redact.ts";
 import { SESSION_ID_RE } from "./presence.ts";
 import type { SteeringSessionRegistry } from "./session-state.ts";
 import { compareDirectives, type SteeringInbox, type SteeringRecord } from "./steering.ts";
-import { sessionStateForAcknowledgement, type SteeringAcknowledgeReply } from "./steering-delivery.ts";
+import type { SteeringAcknowledgeReply } from "./steering-delivery.ts";
 import { redactedSteeringSession } from "./steering-sessions-store.ts";
 import { STEERING_ACKNOWLEDGE_INPUT, STEERING_QUEUE_INPUT, type SteeringAcknowledgeInput, type SteeringCaller, type SteeringQueueInput, type SteeringWiring, type SteeringWriteResult } from "./steering-tools.ts";
 
@@ -125,10 +125,11 @@ export interface RestDirective {
 const isoOf = (ms: number): string => new Date(ms).toISOString();
 
 /**
- * One inbox record as the REST shape. `checkpoint_hint` follows the acknowledgement's own mapping (`sessionStateForAcknowledgement`):
- * an applied pause or redirect moved the session, so a hint is named. The inbox does not remember whether the session's state
- * actually changed at acknowledgement time, so a directive applied to a session already in that state still names one; taking
- * the checkpoint is harmless.
+ * One inbox record as the REST shape. `checkpoint_hint` is named only when the acknowledgement really moved the session's
+ * state (`record.sessionMoved`, set by `acknowledgeSteeringWithState` from the port's own answer). A move the session refused
+ * (a redirect applied while PAUSED), a request for the state it already held, and a record the inbox never saw move (restored
+ * from the audit history after a restart, which holds no transition result) all give null: a hint is never made from
+ * the directive's action and outcome alone.
  */
 export function restDirective(record: SteeringRecord): RestDirective {
 	const { directive } = record;
@@ -142,13 +143,12 @@ export function restDirective(record: SteeringRecord): RestDirective {
 		created_at: isoOf(directive.createdAtMs),
 	};
 	if (record.state === "queued") return { ...base, status: "queued", acknowledged_at: null, outcome: null, checkpoint_hint: null };
-	const moved = sessionStateForAcknowledgement({ action: directive.action, outcome: record.outcome, reason: record.reason ?? null }) !== null;
 	return {
 		...base,
 		status: "acknowledged",
 		acknowledged_at: isoOf(record.acknowledgedAtMs),
 		outcome: record.outcome,
-		checkpoint_hint: moved ? { trigger: "steering", directive_id: directive.id } : null,
+		checkpoint_hint: record.sessionMoved === true ? { trigger: "steering", directive_id: directive.id } : null,
 	};
 }
 
@@ -209,7 +209,7 @@ export function steeringUnavailable(wiring: SteeringWiring): SteeringUnavailable
 
 // ── POST bodies ───────────────────────────────────────────────────────────────
 
-const QUEUE_FIELDS: readonly string[] = ["session_id", "action", "body", "priority"];
+const QUEUE_FIELDS: readonly string[] = ["session_id", "action", "body", "priority", "conflicts_with_active_plan"];
 const ACKNOWLEDGE_FIELDS: readonly string[] = ["directive_id", "outcome", "confirm"];
 
 function plainObject(body: unknown): Record<string, unknown> | null {
@@ -227,7 +227,11 @@ function issuePaths(issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey> }>)
 	return [...new Set(issues.map((issue) => issue.path.map(String).join(".") || "body"))].join(", ");
 }
 
-/** `{ session_id, action, body, priority? }` as the `steering_queue` input. The route has no author or plan fields, and a directive it queues does not claim to conflict with the active plan. */
+/**
+ * `{ session_id, action, body, priority?, conflicts_with_active_plan? }` as the `steering_queue` input. The route has no author or plan
+ * reference fields. `conflicts_with_active_plan` is an optional boolean (default false; anything else is refused), carried to the
+ * same queue function the tool uses, so the acknowledgement that demands `confirm` for a conflicting directive holds here too.
+ */
 export function parseQueueBody(body: unknown): RestParse<SteeringQueueInput> {
 	const fields = plainObject(body);
 	if (fields === null) return { ok: false, error: "request body must be a JSON object" };
@@ -238,7 +242,7 @@ export function parseQueueBody(body: unknown): RestParse<SteeringQueueInput> {
 		action: fields.action,
 		priority: fields.priority ?? "normal",
 		body: fields.body,
-		conflicts_with_active_plan: false,
+		conflicts_with_active_plan: fields.conflicts_with_active_plan === undefined ? false : fields.conflicts_with_active_plan,
 	});
 	return parsed.success ? { ok: true, value: parsed.data } : { ok: false, error: `invalid ${issuePaths(parsed.error.issues).replace("target_session_id", "session_id")}` };
 }

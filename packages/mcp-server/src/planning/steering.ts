@@ -147,6 +147,11 @@ export type SteeringRecord =
 			confirmed: boolean;
 			/** Present only on a system acknowledgement. */
 			reason?: SteeringAckReason;
+			/**
+			 * True only when the acknowledgement actually moved the session's state (see `noteSessionMoved`). Memory only: the audit
+			 * log does not hold a transition result, so a record restored from it, or one the move was refused for, never carries it.
+			 */
+			sessionMoved?: boolean;
 	  };
 
 /** What the audit sink receives. Only the directive snapshot carries content, and it is already redacted. */
@@ -301,6 +306,17 @@ export class SteeringInbox {
 	get(directiveId: string): SteeringRecord | null {
 		const record = this.records.get(directiveId);
 		return record === undefined ? null : structuredClone(record);
+	}
+
+	/**
+	 * Remembers that the acknowledgement of this directive really changed its session's state, which is the one fact a
+	 * `checkpoint_hint` rests on. A no-op for an id the inbox does not hold or one that is not acknowledged. Returns whether it was set.
+	 */
+	noteSessionMoved(directiveId: string): boolean {
+		const record = this.records.get(directiveId);
+		if (record === undefined || record.state !== "acknowledged") return false;
+		record.sessionMoved = true;
+		return true;
 	}
 
 	/**

@@ -4,9 +4,10 @@
  * clock a number, so nothing here needs a server.
  */
 import { describe, expect, test } from "bun:test";
-import type { SteeringSession } from "../event.ts";
+import type { SteeringSession, SteeringSessionState } from "../event.ts";
 import { defined } from "../test-support.ts";
 import type { Surface } from "../types.ts";
+import { SteeringSessionRegistry } from "./session-state.ts";
 import {
 	listRestDirectives,
 	listSteeringSessions,
@@ -23,7 +24,8 @@ import {
 	steeringUnavailable,
 } from "./steering-rest.ts";
 import { SteeringInbox, steeringRecordsFromEntries, type SteeringAuditEntry, type SteeringError, type SteeringHistorySink, type SteeringRecord } from "./steering.ts";
-import type { SteeringWiring, SteeringWriteResult } from "./steering-tools.ts";
+import { acknowledgeSteeringWithState, type SteeringAcknowledgeReply } from "./steering-delivery.ts";
+import { queueSteering, type SteeringCaller, type SteeringWiring, type SteeringWriteResult } from "./steering-tools.ts";
 
 const NOW = 1_800_000_000_000;
 /** A made-up credential shaped like a GitHub token, so the redactor has something to find. */
@@ -50,6 +52,21 @@ async function queue(inbox: SteeringInbox, id: string, action: "pause" | "redire
 		conflictsWithActivePlan: false,
 	});
 	expect(result.ok).toBe(true);
+}
+
+const OPERATOR: SteeringCaller = { surface: "omp", isOperator: true };
+const wiringOf = (inbox: SteeringInbox): SteeringWiring => ({ enabled: true, inbox, clock: { nowMs: () => NOW }, settingsErrors: [] });
+
+/** A session registry (the port the routes drive) that holds `sess-a` of surface omp in `state`. */
+function registryHolding(state: SteeringSessionState): SteeringSessionRegistry {
+	const registry = new SteeringSessionRegistry({ emit: async () => undefined, nowMs: () => NOW });
+	registry.put("omp", "sess-a", { session_id: "sess-a", repo_id: "owner/name", state, updated_at: new Date(NOW).toISOString() });
+	return registry;
+}
+
+/** The acknowledgement path `POST /steering/acknowledge` runs, over the same inbox and registry. */
+function acknowledge(inbox: SteeringInbox, registry: SteeringSessionRegistry, id: string, confirm?: boolean): Promise<SteeringAcknowledgeReply> {
+	return acknowledgeSteeringWithState(wiringOf(inbox), OPERATOR, { directive_id: id, session_id: "sess-a", outcome: "applied", ...(confirm === undefined ? {} : { confirm }) }, registry);
 }
 
 const params = (query: string): URLSearchParams => new URLSearchParams(query);
@@ -120,14 +137,60 @@ describe("restDirective and checkpoint_hint", () => {
 		expect(shaped).toMatchObject({ id: "d1", session_id: "sess-a", status: "queued", acknowledged_at: null, outcome: null, checkpoint_hint: null, author: "omp", created_at: new Date(NOW).toISOString() });
 	});
 
-	test("an applied pause or redirect names a steering checkpoint hint", async () => {
-		const inbox = inboxOf();
-		await queue(inbox, "p", "pause");
-		await queue(inbox, "r", "redirect");
-		for (const id of ["p", "r"]) expect((await inbox.acknowledge({ directiveId: id, sessionId: "sess-a", outcome: "applied" })).ok).toBe(true);
-		for (const id of ["p", "r"]) {
-			expect(restDirective(defined(inbox.get(id), id))).toMatchObject({ status: "acknowledged", outcome: "applied", checkpoint_hint: { trigger: "steering", directive_id: id } });
+	test("an applied pause or redirect that moved the session names a steering checkpoint hint, on the reply and on the list", async () => {
+		for (const action of ["pause", "redirect"] as const) {
+			const inbox = inboxOf();
+			const registry = registryHolding("ACTIVE");
+			await queue(inbox, "d", action);
+			const reply = await acknowledge(inbox, registry, "d");
+			expect(reply).toMatchObject({ status: "acknowledged", session_state: { status: "applied" }, checkpoint_hint: { trigger: "steering", directive_id: "d" } });
+			expect(restDirective(defined(inbox.get("d"), "d"))).toMatchObject({ status: "acknowledged", outcome: "applied", checkpoint_hint: { trigger: "steering", directive_id: "d" } });
+			expect(listRestDirectives(inbox, { sessionId: "sess-a", status: "acknowledged" })).toMatchObject([{ id: "d", checkpoint_hint: { trigger: "steering", directive_id: "d" } }]);
 		}
+	});
+
+	test("a move the session refused names no hint: not on the reply, not on the list, not after a reload", async () => {
+		const inbox = inboxOf();
+		// PAUSED may only resume, so the move a redirect asks for (CONTEXT_REFRESH) is refused.
+		const registry = registryHolding("PAUSED");
+		await queue(inbox, "d", "redirect");
+		const reply = await acknowledge(inbox, registry, "d");
+		expect(reply).toMatchObject({ status: "acknowledged", outcome: "applied", session_state: { status: "refused", state: "CONTEXT_REFRESH" } });
+		expect(Object.hasOwn(reply, "checkpoint_hint")).toBe(false);
+		expect(registry.get("omp", "sess-a")?.state).toBe("PAUSED");
+		expect(restDirective(defined(inbox.get("d"), "d"))).toMatchObject({ outcome: "applied", checkpoint_hint: null });
+		expect(listRestDirectives(inbox, { sessionId: "sess-a", status: "all" })).toMatchObject([{ id: "d", checkpoint_hint: null }]);
+
+		// A restart-style reload: the boot path restores the acknowledged directive into a fresh inbox, and the history read adds it.
+		const record = defined(inbox.get("d"), "d");
+		if (record.state !== "acknowledged") throw new Error("expected an acknowledged record");
+		const entry = { directive: record.directive, queuedAtMs: record.queuedAtMs, acknowledgement: { atMs: record.acknowledgedAtMs, outcome: record.outcome, confirmed: record.confirmed } };
+		const reloaded = inboxOf();
+		await reloaded.restore([entry]);
+		expect(listRestDirectives(reloaded, { sessionId: "sess-a", status: "all" })).toMatchObject([{ id: "d", status: "acknowledged", checkpoint_hint: null }]);
+		expect(listRestDirectives(inboxOf(), { sessionId: "sess-a", status: "all" }, steeringRecordsFromEntries([entry]))).toMatchObject([{ id: "d", checkpoint_hint: null }]);
+	});
+
+	test("a request for the state the session already holds names no hint", async () => {
+		const inbox = inboxOf();
+		const registry = registryHolding("PAUSED");
+		await queue(inbox, "d", "pause");
+		const reply = await acknowledge(inbox, registry, "d");
+		expect(reply).toMatchObject({ session_state: { status: "unchanged" } });
+		expect(Object.hasOwn(reply, "checkpoint_hint")).toBe(false);
+		expect(restDirective(defined(inbox.get("d"), "d")).checkpoint_hint).toBeNull();
+	});
+
+	test("a conflicting directive queued over the route needs confirm, like the tool's", async () => {
+		const inbox = inboxOf();
+		const registry = registryHolding("ACTIVE");
+		const parsed = parseQueueBody({ session_id: "sess-a", action: "redirect", body: "switch plans", conflicts_with_active_plan: true });
+		if (!parsed.ok) throw new Error(parsed.error);
+		const queued = await queueSteering({ ...wiringOf(inbox), newDirectiveId: () => "c1" }, OPERATOR, parsed.value);
+		expect(queued).toMatchObject({ status: "queued", directive_id: "c1" });
+		expect(await acknowledge(inbox, registry, "c1")).toEqual({ status: "refused", error: { code: "confirmation-required" } });
+		expect(inbox.get("c1")?.state).toBe("queued");
+		expect(await acknowledge(inbox, registry, "c1", true)).toMatchObject({ status: "acknowledged", confirmed: true, checkpoint_hint: { directive_id: "c1" } });
 	});
 
 	test("an annotate, or any declined outcome, moves no session and carries no hint", async () => {
@@ -175,7 +238,8 @@ describe("restDirective and checkpoint_hint", () => {
 		]);
 		expect(history.map((record) => record.directive.id)).toEqual(["gone", "live", "other-session"]);
 		const acknowledged = listRestDirectives(inbox, { sessionId: "sess-a", status: "acknowledged" }, history);
-		expect(acknowledged).toMatchObject([{ id: "gone", status: "acknowledged", outcome: "applied", checkpoint_hint: { trigger: "steering", directive_id: "gone" } }]);
+		// The audit history holds no transition result, so a directive read back from it names no hint, whatever its action and outcome.
+		expect(acknowledged).toMatchObject([{ id: "gone", status: "acknowledged", outcome: "applied", checkpoint_hint: null }]);
 		const all = listRestDirectives(inbox, { sessionId: "sess-a", status: "all" }, history);
 		expect(all.map((entry) => [entry.id, entry.status])).toEqual([
 			["gone", "acknowledged"],
@@ -230,10 +294,19 @@ describe("query parsing", () => {
 });
 
 describe("body parsing", () => {
-	test("a queue body maps to the tool input, defaults the priority and never claims a plan conflict", () => {
+	test("a queue body maps to the tool input, defaults the priority and takes the plan conflict flag, false when absent", () => {
 		const parsed = parseQueueBody({ session_id: "sess-a", action: "pause", body: "hold" });
 		expect(parsed.ok).toBe(true);
 		if (parsed.ok) expect(parsed.value).toMatchObject({ target_session_id: "sess-a", action: "pause", priority: "normal", body: "hold", conflicts_with_active_plan: false });
+	});
+
+	test("conflicts_with_active_plan is carried when true and refused, by name, when it is not a boolean", () => {
+		const conflicting = parseQueueBody({ session_id: "sess-a", action: "redirect", body: "switch", conflicts_with_active_plan: true });
+		expect(conflicting.ok).toBe(true);
+		if (conflicting.ok) expect(conflicting.value.conflicts_with_active_plan).toBe(true);
+		for (const bad of ["true", 1, null, {}]) {
+			expect(parseQueueBody({ session_id: "sess-a", action: "redirect", body: "switch", conflicts_with_active_plan: bad })).toEqual({ ok: false, error: "invalid conflicts_with_active_plan" });
+		}
 	});
 
 	test("an author field, an unknown field, a non-object and an invalid value are refused, naming fields and never values", () => {

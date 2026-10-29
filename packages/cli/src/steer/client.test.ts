@@ -263,6 +263,55 @@ describe("transport", () => {
 		}
 	});
 
+	test("a 503 with a typed misconfigured or not-configured body is the server's reply to a write, not a server error", async () => {
+		const typed = [
+			{ status: "misconfigured", errors: [{ key: "SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN", reason: "not-integer" }] },
+			{ status: "not-configured" },
+		];
+		for (const body of typed) {
+			const { client } = clientFor(Response.json(body, { status: 503 }));
+			expect(await client.queue({ sessionId: "s", action: "pause", body: "x" })).toMatchObject({ ok: true, value: { status: body.status } });
+			expect(await client.acknowledge({ directiveId: "d-1", outcome: "applied" })).toMatchObject({ ok: true, value: { status: body.status } });
+		}
+	});
+
+	test("the same typed 503 on a read is a refusal, which a listener does not retry; an untyped 503 stays a server error", async () => {
+		const typed = clientFor(Response.json({ status: "not-configured", error: "no steering audit sink is configured" }, { status: 503 }));
+		expect(await typed.client.directives({ sessionId: "s" })).toMatchObject({ ok: false, code: "refused", status: 503 });
+		expect(await typed.client.wait({ sessionId: "s", timeoutMs: 1_000 })).toMatchObject({ ok: false, code: "refused", message: expect.stringContaining("no steering audit sink") });
+		const untyped = clientFor(Response.json({ error: "index down" }, { status: 503 }));
+		expect(await untyped.client.directives({ sessionId: "s" })).toMatchObject({ ok: false, code: "server-error", status: 503 });
+		const typedRefusal = clientFor(Response.json({ status: "refused", error: { code: "audit-unavailable" } }, { status: 503 }));
+		expect(await typedRefusal.client.queue({ sessionId: "s", action: "pause", body: "x" })).toMatchObject({ ok: true, value: { status: "refused", error_code: "audit-unavailable" } });
+	});
+
+	test("a typed refusal that lacks what its status promises is a refusal with the server's words, never a success", async () => {
+		const { client } = clientFor(Response.json({ status: "misconfigured", error: "the steering settings are invalid" }, { status: 503 }));
+		expect(await client.queue({ sessionId: "s", action: "pause", body: "x" })).toMatchObject({ ok: false, code: "refused", status: 503 });
+	});
+
+	test("the caller's budget caps a long poll's request, and never raises it", async () => {
+		const budgets: number[] = [];
+		const { client } = clientFor(new Response(null, { status: 204 }), {
+			signalFor: (ms) => {
+				budgets.push(ms);
+				return AbortSignal.timeout(ms);
+			},
+		});
+		await client.wait({ sessionId: "s", timeoutMs: 20_000, requestBudgetMs: 700 });
+		await client.wait({ sessionId: "s", timeoutMs: 20_000, requestBudgetMs: 90_000 });
+		await client.wait({ sessionId: "s", timeoutMs: 20_000 });
+		expect(budgets).toEqual([700, 20_000 + WAIT_MARGIN_MS, 20_000 + WAIT_MARGIN_MS]);
+	});
+
+	test("queue sends conflicts_with_active_plan only when it is given", async () => {
+		const { client, seen } = clientFor(Response.json({ status: "queued", directive_id: "d" }));
+		await client.queue({ sessionId: "s", action: "redirect", body: "x", conflictsWithActivePlan: true });
+		await client.queue({ sessionId: "s", action: "redirect", body: "x" });
+		expect(JSON.parse(defined(defined(seen[0]).body))).toEqual({ session_id: "s", action: "redirect", body: "x", conflicts_with_active_plan: true });
+		expect(JSON.parse(defined(defined(seen[1]).body))).toEqual({ session_id: "s", action: "redirect", body: "x" });
+	});
+
 	test("control characters in a server's error text never reach the message", async () => {
 		const { client } = clientFor(Response.json({ error: "bad\u001b[2J\u001b[Hrequest\u0007" }, { status: 400 }));
 		const result = await client.sessions({});

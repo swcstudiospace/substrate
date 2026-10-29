@@ -8,7 +8,9 @@
  *
  * A 404 on a steering or context route means the server predates the feature or its flag is off, unless its body is the
  * typed `not-found` refusal of a write (an unknown directive): then the route works and the directive is what is missing.
- * The message says which, because "not found" alone sends an operator looking for a typo.
+ * The message says which, because "not found" alone sends an operator looking for a typo. A 503 whose body is the typed
+ * `misconfigured` or `not-configured` answer is the server saying steering is not set up, not a fault to retry: a write
+ * reads it as a reply, a read reports it as a refusal. Typed bodies are recognised before the HTTP class is.
  */
 
 import { plain } from "./plain.ts";
@@ -147,10 +149,10 @@ export interface SteerWait {
 export interface SteerClient {
 	sessions(query: { repoId?: string | undefined; limit?: number | undefined }): Promise<SteerResult<SteerSessions>>;
 	directives(query: { sessionId: string; status?: DirectiveStatusFilter | undefined }): Promise<SteerResult<SteerDirective[]>>;
-	queue(request: { sessionId: string; action: SteerAction; body: string; priority?: SteerPriority | undefined }): Promise<SteerResult<WriteReply>>;
+	queue(request: { sessionId: string; action: SteerAction; body: string; priority?: SteerPriority | undefined; conflictsWithActivePlan?: boolean | undefined }): Promise<SteerResult<WriteReply>>;
 	acknowledge(request: { directiveId: string; outcome: SteerOutcome; confirm?: boolean | undefined }): Promise<SteerResult<WriteReply>>;
 	/** One long poll: the next directive after `after`, or `directive: null` when the server's wait ended with none (HTTP 204). */
-	wait(query: { sessionId: string; after?: string | undefined; timeoutMs: number }): Promise<SteerResult<SteerWait>>;
+	wait(query: { sessionId: string; after?: string | undefined; timeoutMs: number; requestBudgetMs?: number | undefined }): Promise<SteerResult<SteerWait>>;
 	context(query: { repoId?: string | undefined; sessionId?: string | undefined; limit?: number | undefined }): Promise<SteerResult<ContextDigest>>;
 }
 
@@ -323,6 +325,8 @@ export function parseWriteReply(value: unknown): WriteReply | string {
 // Transport
 // ---------------------------------------------------------------------------
 
+const TYPED_REFUSAL_STATUSES = ["forbidden", "refused", "misconfigured", "not-configured"] as const;
+
 const NOT_FOUND_MESSAGE = "the server has no such route: it predates Live Steering, or the flag that enables it is off (docs/live-steering.md)";
 
 const failure = (code: SteerFailureCode, message: string, status?: number): SteerFailure => ({ ok: false, code, message: plain(message, MAX_DIAGNOSTIC_CHARS), ...(status === undefined ? {} : { status }) });
@@ -339,6 +343,11 @@ function wholeMs(value: unknown): number | undefined {
 /** The typed refusal of a write that names an unknown directive: `{ status: "refused", error: { code: "not-found" } }`. */
 function isTypedNotFound(body: unknown): boolean {
 	return isRec(body) && body.status === "refused" && isRec(body.error) && body.error.code === "not-found";
+}
+
+/** The tools' own answers that the server said no or is not set up for steering: `{ status: "misconfigured" | "not-configured" | "forbidden" | "refused", ... }`. */
+function isTypedRefusal(body: unknown): boolean {
+	return isRec(body) && oneOf(body.status, TYPED_REFUSAL_STATUSES) !== undefined;
 }
 
 /** `{ error: "..." }` or the start of the text: what a refusal says. */
@@ -363,7 +372,7 @@ export function createSteerClient(options: SteerClientOptions): SteerClient {
 	const signalFor = options.signalFor ?? ((ms: number) => AbortSignal.timeout(ms));
 	const base = options.url.replace(/\/+$/, "");
 
-	async function exchange(method: "GET" | "POST", path: string, params: Record<string, string | undefined>, body: unknown, requestTimeoutMs: number): Promise<SteerResult<Exchange>> {
+	async function exchange(method: "GET" | "POST", path: string, params: Record<string, string | undefined>, body: unknown, requestTimeoutMs: number, passTypedRefusal = false): Promise<SteerResult<Exchange>> {
 		const query = new URLSearchParams();
 		for (const [key, value] of Object.entries(params)) if (value !== undefined) query.set(key, value);
 		const search = query.toString();
@@ -406,7 +415,12 @@ export function createSteerClient(options: SteerClientOptions): SteerClient {
 		}
 		// Only the typed refusal of a write names a missing directive; any other 404 is a route that is not there (or is switched off).
 		if (status === 404 && !isTypedNotFound(parsed)) return failure("not-found", NOT_FOUND_MESSAGE, status);
-		if (status >= 500) return failure("server-error", `HTTP ${status}: ${errorText(parsed, text)}`, status);
+		if (status >= 500) {
+			// A typed refusal is the server's own answer whatever its HTTP class (`misconfigured` and `not-configured` are 503): a write
+			// hands it on to be read as a reply, a read reports it as a refusal. Only an untyped 5xx is a server error to retry.
+			if (!isTypedRefusal(parsed)) return failure("server-error", `HTTP ${status}: ${errorText(parsed, text)}`, status);
+			if (!passTypedRefusal) return failure("refused", `HTTP ${status}: ${errorText(parsed, text)}`, status);
+		}
 		const waitMs = wholeMs(response.headers.get(WAIT_HEADER));
 		return { ok: true, value: { status, body: parsed, text, ...(waitMs === undefined ? {} : { waitMs }) } };
 	}
@@ -422,9 +436,9 @@ export function createSteerClient(options: SteerClientOptions): SteerClient {
 		return { ok: true, value: checked };
 	}
 
-	/** A write: any non-5xx answer whose body is a tool reply. The reply's `status` says whether it landed. */
+	/** A write: any answer whose body is a tool reply, a typed refusal on a 503 included. The reply's `status` says whether it landed. */
 	async function write(path: string, body: Record<string, unknown>): Promise<SteerResult<WriteReply>> {
-		const result = await exchange("POST", path, {}, body, timeoutMs);
+		const result = await exchange("POST", path, {}, body, timeoutMs, true);
 		if (!result.ok) return result;
 		const checked = parseWriteReply(result.value.body);
 		if (typeof checked === "string") {
@@ -444,6 +458,7 @@ export function createSteerClient(options: SteerClientOptions): SteerClient {
 				action: request.action,
 				body: request.body,
 				...(request.priority === undefined ? {} : { priority: request.priority }),
+				...(request.conflictsWithActivePlan === undefined ? {} : { conflicts_with_active_plan: request.conflictsWithActivePlan }),
 			}),
 		acknowledge: (request) =>
 			write("/steering/acknowledge", {
@@ -452,12 +467,14 @@ export function createSteerClient(options: SteerClientOptions): SteerClient {
 				...(request.confirm === undefined ? {} : { confirm: request.confirm }),
 			}),
 		wait: async (query) => {
+			const longPollTimeoutMs = query.timeoutMs + WAIT_MARGIN_MS;
 			const result = await exchange(
 				"GET",
 				"/steering/wait",
 				{ session_id: query.sessionId, after: query.after, timeout_ms: String(query.timeoutMs) },
 				undefined,
-				query.timeoutMs + WAIT_MARGIN_MS,
+				// The caller's own budget caps the request, so a stalled connection cannot outlive the time the caller has left.
+				query.requestBudgetMs === undefined ? longPollTimeoutMs : Math.max(1, Math.min(longPollTimeoutMs, query.requestBudgetMs)),
 			);
 			if (!result.ok) return result;
 			const { status, body, text, waitMs: headerMs } = result.value;

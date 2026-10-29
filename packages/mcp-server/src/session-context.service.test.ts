@@ -6,11 +6,16 @@
  */
 import { describe, expect, test } from "bun:test";
 import { loadConfig } from "./config.ts";
+import { normalizeEvent } from "./event.ts";
+import { buildHandoff, type HandoffPacket } from "./handoff.ts";
 import type { EventQuery } from "./greptime.ts";
 import { HANDOFF_READ_LIMIT } from "./session-context.ts";
 import { Substrate } from "./service.ts";
 
 const NOW = Date.parse("2026-10-29T12:00:00.000Z");
+
+/** A genuine packet, as `coord_handoff` builds it. */
+const goodPacket = (goal: string): HandoffPacket => buildHandoff({ from: { surface: "grok-bot", session_id: null }, to: { surface: "hermes", session_id: null }, goal });
 
 /** A handoff row as the ledger returns it: loosely typed, payload as JSON text. */
 const handoffRow = (id: string, goal: string, graphId: string): Record<string, unknown> => ({
@@ -20,7 +25,7 @@ const handoffRow = (id: string, goal: string, graphId: string): Record<string, u
 	kind: "handoff",
 	graph_id: graphId,
 	summary: `handoff: ${goal}`,
-	payload: JSON.stringify({ handoff: { goal, signature: null } }),
+	payload: JSON.stringify({ handoff: goodPacket(goal) }),
 	hash: "h",
 	prev: null,
 	actor: "agent",
@@ -131,7 +136,49 @@ describe("the digest's handoff read", () => {
 
 		expect(await substrate.recentHandoffsForGraph("g2")).toEqual({ ok: false });
 		const read = await substrate.recentHandoffsForGraph("g1");
-		expect(read.ok && read.entries.map((entry) => entry.packet?.goal)).toEqual(["ok"]);
+		expect(read.ok && read.entries.map((entry) => entry.packet.goal)).toEqual(["ok"]);
+	});
+});
+
+describe("a hostile handoff payload in the ledger", () => {
+	/** What `events_emit` stores for a `handoff` event: any payload is accepted, so the ledger can hold each of these. */
+	const storedRow = (id: string, graphId: string, payload: Record<string, unknown>): Record<string, unknown> => {
+		const event = normalizeEvent({ surface: "grok-bot", kind: "handoff", summary: `handoff ${id}`, graph_id: graphId, payload }, null);
+		return { ...handoffRow(id, "unused", graphId), payload: JSON.stringify(event.payload) };
+	};
+	const hostile = (graphId: string): Array<Record<string, unknown>> => [
+		storedRow("e-empty", graphId, { handoff: {} }),
+		storedRow("e-number", graphId, { handoff: { goal: 5 } }),
+		storedRow("e-null", graphId, { handoff: null }),
+		storedRow("e-text", graphId, { handoff: "a string" }),
+		storedRow("e-list", graphId, { handoff: ["goal"] }),
+		storedRow("e-huge", graphId, { handoff: { ...goodPacket("x"), goal: "g".repeat(4_000) } }),
+		storedRow("e-lists", graphId, { handoff: { ...goodPacket("y"), files: "not a list", blockers: [1, 2] } }),
+		handoffRow("e-good", "the good packet", graphId),
+	];
+
+	test("is skipped alone: the digest and the typed read keep the good packet and report no failure", async () => {
+		const { fake, greptime } = ledger();
+		fake.rowsByGraph.set("g1", hostile("g1"));
+		const substrate = new Substrate(loadConfig({}), { index: indexWith(["g1"]) as never, greptime: greptime as never });
+
+		const digest = await substrate.sessionContext({ repoId: "owner/name", sessionId: null });
+		expect(digest.handoffs.map((handoff) => handoff.goal)).toEqual(["the good packet"]);
+		expect(digest.notes.filter((note) => note.startsWith("handoffs"))).toEqual([]);
+
+		const read = await substrate.recentHandoffsForGraph("g1");
+		expect(read.ok && read.entries.map((entry) => entry.packet.goal)).toEqual(["the good packet"]);
+	});
+
+	test("does not fail the brief: the good packet is listed and the section is not replaced by a note", async () => {
+		const { fake, greptime } = ledger();
+		fake.rowsByGraph.set("ut-1", hostile("ut-1"));
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_BRIEF_SESSIONS: "on" }), { index: indexWith([]) as never, greptime: greptime as never });
+
+		const text = await substrate.brief({ surface: "cursor", repo: "owner/name", graph_id: "ut-1" });
+
+		expect(text).toContain("the good packet");
+		expect(text).not.toContain("Live handoffs not included");
 	});
 });
 

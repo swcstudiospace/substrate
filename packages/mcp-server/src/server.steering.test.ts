@@ -176,20 +176,47 @@ describe("GET /steering/sessions", () => {
 });
 
 describe("GET /steering/directives", () => {
-	test("a directive applied as a pause lists with its checkpoint hint, a queued one without", async () => {
-		const { get, post } = await serve(TOKEN_ENV);
+	type Listed = { directives: Array<{ id: string; status: string; checkpoint_hint: { trigger: string; directive_id: string } | null }> };
+
+	test("a directive applied as a pause that moved the session lists with its checkpoint hint, a queued one without", async () => {
+		const { get, post, substrate } = await serve(TOKEN_ENV);
+		substrate.steeringSessions.put("omp", "sess-a", session("sess-a"));
 		const first = ((await (await post("/steering/queue", queueBody, AUTH_OMP)).json()) as { directive_id: string }).directive_id;
 		await post("/steering/queue", { ...queueBody, action: "annotate", body: "later" }, AUTH_OMP);
-		await post("/steering/acknowledge", { directive_id: first, outcome: "applied" }, AUTH_OMP);
+		const acknowledged = await (await post("/steering/acknowledge", { directive_id: first, outcome: "applied" }, AUTH_OMP)).json();
+		expect(acknowledged).toMatchObject({ session_state: { status: "applied", state: "PAUSED" }, checkpoint_hint: { trigger: "steering", directive_id: first } });
 
-		const listed = (await (await get("/steering/directives?session_id=sess-a", AUTH_OMP)).json()) as {
-			directives: Array<{ id: string; status: string; checkpoint_hint: { trigger: string; directive_id: string } | null }>;
-		};
+		const listed = (await (await get("/steering/directives?session_id=sess-a", AUTH_OMP)).json()) as Listed;
 		const applied = defined(listed.directives.find((entry) => entry.id === first), "the applied directive");
 		expect(applied).toMatchObject({ status: "acknowledged", checkpoint_hint: { trigger: "steering", directive_id: first } });
 		const queued = defined(listed.directives.find((entry) => entry.status === "queued"), "the queued directive");
 		expect(queued.checkpoint_hint).toBeNull();
 		expect((await get("/steering/directives", AUTH_OMP)).status).toBe(400);
+	});
+
+	test("a redirect applied while the session is PAUSED is refused its move and lists with no hint, as the reply carried none", async () => {
+		const { get, post, substrate } = await serve(TOKEN_ENV);
+		substrate.steeringSessions.put("omp", "sess-a", { ...session("sess-a"), state: "PAUSED" });
+		const id = ((await (await post("/steering/queue", { ...queueBody, action: "redirect", body: "Look elsewhere." }, AUTH_OMP)).json()) as { directive_id: string }).directive_id;
+		const acknowledged = (await (await post("/steering/acknowledge", { directive_id: id, outcome: "applied" }, AUTH_OMP)).json()) as Record<string, unknown>;
+		expect(acknowledged).toMatchObject({ status: "acknowledged", session_state: { status: "refused", state: "CONTEXT_REFRESH" } });
+		expect(Object.hasOwn(acknowledged, "checkpoint_hint")).toBe(false);
+
+		const listed = (await (await get("/steering/directives?session_id=sess-a", AUTH_OMP)).json()) as Listed;
+		expect(defined(listed.directives.find((entry) => entry.id === id), "the redirect")).toMatchObject({ status: "acknowledged", checkpoint_hint: null });
+	});
+
+	test("a directive queued as conflicting needs confirm to be applied, over the route as through the tool", async () => {
+		const { post, substrate } = await serve(TOKEN_ENV);
+		substrate.steeringSessions.put("omp", "sess-a", session("sess-a"));
+		expect((await post("/steering/queue", { ...queueBody, conflicts_with_active_plan: "yes" }, AUTH_OMP)).status).toBe(400);
+		const id = ((await (await post("/steering/queue", { ...queueBody, conflicts_with_active_plan: true }, AUTH_OMP)).json()) as { directive_id: string }).directive_id;
+		const refused = await post("/steering/acknowledge", { directive_id: id, outcome: "applied" }, AUTH_OMP);
+		expect(refused.status).toBe(409);
+		expect(await refused.json()).toMatchObject({ status: "refused", error: { code: "confirmation-required" } });
+		const confirmed = await post("/steering/acknowledge", { directive_id: id, outcome: "applied", confirm: true }, AUTH_OMP);
+		expect(confirmed.status).toBe(200);
+		expect(await confirmed.json()).toMatchObject({ status: "acknowledged", confirmed: true });
 	});
 });
 

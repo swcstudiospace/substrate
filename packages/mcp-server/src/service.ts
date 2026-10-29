@@ -130,6 +130,7 @@ import {
 	buildHandoff,
 	handoffGaps,
 	handoffSummary,
+	isStoredHandoff,
 	signHandoff,
 	verifyHandoff,
 	type HandoffInput,
@@ -3279,7 +3280,8 @@ export class Substrate {
 	/**
 	 * Phase 67: the acknowledged directives of one session read back from the durable audit history (`planning_steering_audit`),
 	 * for `GET /steering/directives`. Boot restores only the open directives, so a directive acknowledged before a restart is in
-	 * the table and no longer in memory; this is how the route still lists it with its `checkpoint_hint`. At most
+	 * the table and no longer in memory; this is how the route still lists it (with no `checkpoint_hint`: the audit holds no
+	 * transition result, and a hint needs the session's actual move). At most
 	 * {@link STEERING_ACKNOWLEDGED_HISTORY_LIMIT} rows, newest acknowledgement first. Without the audit table only the inbox
 	 * exists (`memory-only`); a read that fails is `unavailable`, never an empty answer. Never throws.
 	 */
@@ -3394,7 +3396,7 @@ export class Substrate {
 										read.ok
 											? read.entries.flatMap((entry) => {
 													const createdAtMs = Date.parse(entry.ts);
-													return entry.packet === null || !Number.isFinite(createdAtMs) ? [] : [{ graphId, goal: entry.packet.goal, createdAtMs, verified: entry.verdict.ok }];
+													return Number.isFinite(createdAtMs) ? [{ graphId, goal: entry.packet.goal, createdAtMs, verified: entry.verdict.ok }] : [];
 												})
 											: [],
 									),
@@ -3454,7 +3456,10 @@ export class Substrate {
 							: async () => {
 									const read = await this.recentHandoffsForGraph(graphId);
 									if (!read.ok) throw new Error("handoff read failed");
-									return read.entries.flatMap((entry) => (entry.packet === null ? [] : [{ goal: entry.packet.goal, createdAtMs: Date.parse(entry.ts), verified: entry.verdict.ok }]));
+									return read.entries.flatMap((entry) => {
+										const createdAtMs = Date.parse(entry.ts);
+										return Number.isFinite(createdAtMs) ? [{ goal: entry.packet.goal, createdAtMs, verified: entry.verdict.ok }] : [];
+									});
 								},
 				},
 				deadline.race,
@@ -6441,12 +6446,14 @@ export class Substrate {
 	 * Phase 67: the newest handoff packets of one graph, for the context digest and the brief's handoffs section. A bounded,
 	 * handoff-only read of the ledger (the `handoff` kind, newest first, {@link HANDOFF_READ_LIMIT} rows), not the graph's whole
 	 * history as {@link handoffsForGraph} reads it. A ledger that cannot answer is `{ ok: false }`, never an empty list that reads
-	 * as "no handoffs"; a row that does not decode is one fewer packet. `cut` says the window was full, so older packets may exist.
+	 * as "no handoffs". The ledger takes any payload from `events_emit`, so a row whose `payload.handoff` is not a well-formed
+	 * packet ({@link isStoredHandoff}), or that does not decode or verify, is skipped alone: one fewer packet, never a thrown read
+	 * and never a bad value for the readers to redact. `cut` says the window was full, so older packets may exist.
 	 */
 	async recentHandoffsForGraph(
 		graphId: string,
 		limit: number = HANDOFF_READ_LIMIT,
-	): Promise<{ ok: true; entries: Array<{ event_id: string; ts: string; packet: HandoffPacket | null; verdict: HandoffVerdict }>; cut: boolean } | { ok: false }> {
+	): Promise<{ ok: true; entries: Array<{ event_id: string; ts: string; packet: HandoffPacket; verdict: HandoffVerdict }>; cut: boolean } | { ok: false }> {
 		const greptime = this.greptime;
 		if (greptime === null) return { ok: true, entries: [], cut: false };
 		let rows: Array<Record<string, unknown>>;
@@ -6455,12 +6462,13 @@ export class Substrate {
 		} catch {
 			return { ok: false };
 		}
-		const entries: Array<{ event_id: string; ts: string; packet: HandoffPacket | null; verdict: HandoffVerdict }> = [];
+		const entries: Array<{ event_id: string; ts: string; packet: HandoffPacket; verdict: HandoffVerdict }> = [];
 		for (const row of rows) {
 			try {
 				const event = rowToEvent(row);
-				const packet = (event.payload.handoff ?? null) as HandoffPacket | null;
-				entries.push({ event_id: event.id, ts: event.ts, packet, verdict: packet ? this.verifyHandoffPacket(packet) : { ok: false, reason: "malformed" } });
+				const packet: unknown = event.payload.handoff;
+				if (!isStoredHandoff(packet)) continue;
+				entries.push({ event_id: event.id, ts: event.ts, packet, verdict: this.verifyHandoffPacket(packet) });
 			} catch {
 				// One row the ledger returned malformed is one fewer packet, not a failed read.
 			}
