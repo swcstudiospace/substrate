@@ -4,10 +4,10 @@ milestone: v1.5
 milestone_name: SOTA enhancements
 status: Awaiting next milestone
 stopped_at: "Run 12: all code PRs merged; milestone closeouts decided by the owner, archive PR next"
-last_updated: "2026-10-29T00:04:39.029Z"
+last_updated: "2026-10-29T00:04:46.738Z"
 last_activity: 2026-10-29
-last_activity_desc: Milestone v1.5 completed and archived
-state_head: 7227b001a7dcf3a3d33050b6235ffb68c18f634a
+last_activity_desc: Milestone v1.6 completed and archived
+state_head: acdcbcb2a9b0799aae536647001371a597cbf6b3
 progress:
   total_phases: 10
   completed_phases: 9
@@ -161,10 +161,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: Milestone v1.5 complete
+Phase: Milestone v1.6 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-10-29 — Milestone v1.5 completed and archived
+Last activity: 2026-10-29 — Milestone v1.6 completed and archived
 
 ## Preflight record (2026-10-23, graph ut-mvlknrx6-2849044e)
 

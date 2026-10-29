@@ -1,5 +1,14 @@
 # Milestones
 
+## v1.6 v1.6 (Shipped: 2026-10-29)
+
+**Phases completed:** 8 phases, 0 plans, 0 tasks
+
+**Key accomplishments:**
+- (none recorded)
+
+---
+
 ## v1.5 v1.5 (Shipped: 2026-10-29)
 
 **Phases completed:** 11 phases, 11 plans, 0 tasks
