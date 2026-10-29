@@ -1,186 +1,104 @@
-# Requirements: Agent Substrate — v1.3.x, v1.5 and v1.6 programs
+# Requirements: Agent Substrate — v1.7 Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet
 
-**Defined:** 2026-10-21
+**Defined:** 2026-10-29
 **Core Value:** Every agent on the host shares one brief, one event log, one governed memory plane, one skills library and one Graph ID.
-**Archived:** all three programs were closed as override closeouts and archived (Run 12): `milestones/v1.3.x-REQUIREMENTS.md`, `milestones/v1.5-REQUIREMENTS.md` and `milestones/v1.6-REQUIREMENTS.md` hold their snapshots. This file stays as the live traceability record: a ticked row is satisfied or waived, an unticked row is accepted debt, partial or operator-gated, and its row carries the reason and the date.
+**Archived:** the v1.3.x, v1.5 and v1.6 requirements moved to `milestones/v1.3.x-REQUIREMENTS.md`, `milestones/v1.5-REQUIREMENTS.md` and `milestones/v1.6-REQUIREMENTS.md` when this milestone was defined; earlier programs are archived beside them.
 
 ## Sources
 
-- `.planning/research/SUMMARY.md` lines 64–72: must-have (64–66), should-have (68), defer (70), anti-features to hold (72).
-- `.planning/research/FEATURES.md` Differentiators table, rows for the 15 v1.3.x IDs at lines 197–222 (table header at line 195).
-- `.planning/milestones/v1.3-REQUIREMENTS.md` line 85 (DOCS-04), cited only for the D-D1 conflict.
-- `.planning/uplift-7/7-SOTA-ENHANCEMENTS.md`: the seven SOTA enhancements, lines 16–63.
+- The owner's request of 2026-10-29 (Run 14): eight features and process improvements that use Solana devnet, GreptimeDB, TimescaleDB, DragonflyDB and TEI; ingest the documentation of every repository on the VPS, on GitHub and in the Greptile knowledge bases; re-ingest automatically when documentation changes; make the docs RAG self-improving the way Hindsight is; present Live Steering, which has not been demonstrated to the owner; and optimise many sessions working in git worktrees.
+- Run 14 scout evidence, read from main at 9d3f2085: the docs plane ingests one page at a time and cannot delete, rename or filter by repository; the planning refresh keeps its hashes in memory; steering is pull-only and has no command or view; no component knows the worktrees under `/root/src/worktrees`; TEI has no client in the repository. Each phase's CONTEXT.md lists the file and line evidence.
+- `.planning/milestones/v1.6-REQUIREMENTS.md` (SOTA-13 to SOTA-18) and `.planning/PROJECT.md` "Next Milestone Goals": the `checkpoint_hint` reader and the `steering` and `baseline` hook triggers are carried into STEER-05.
 
-Column mapping. The FEATURES.md Differentiators header is `| ID | Area | Feature | Value Proposition | Complexity | Notes |` (line 195). This file uses: Item = Feature; Outcome = Value Proposition; Notes = the FEATURES.md Notes column, verbatim; it sometimes names a dependency and sometimes gives a rationale. Where Notes is empty, the value is "not stated".
+## v1.7 requirements
 
-## v1.3.x should-have requirements
+### Corpus Atlas (phase 63)
 
-Source for all entries: `.planning/research/FEATURES.md` lines 197–222 and `.planning/research/SUMMARY.md` line 68. Phase mapping is set by the program plan, not by the sources.
+- [ ] **ATLAS-01**: A scan of the repositories on the VPS lists every documentation file with repo, path, kind, tier, sha256 and size, and collapses clones, linked worktrees and byte-identical copies into one canonical entry.
+- [ ] **ATLAS-02**: `substrate corpus plan` reports what a bulk ingest would add, change, rename or tombstone against the server's manifest, without sending a document body.
+- [ ] **ATLAS-03**: A bulk ingest route puts new and changed documents into the docs plane with repo, path, kind, tier and commit provenance and without a serial wait per page, and refuses secrets the way `docs_ingest` does.
+- [ ] **ATLAS-04**: A document removed or renamed in its repository is tombstoned: its docs-plane document is deleted and its manifest row says so.
+- [ ] **ATLAS-05**: Running the same scan and ingest again changes nothing, and an interrupted run resumes where it stopped.
+- [ ] **ATLAS-06**: Greptile knowledge-base documents and GitHub repositories with no local clone enter the same manifest through documented source adapters.
 
-- [x] **A-D1**: Lane B events reach the graph's brief and evidence without agents passing ids
-  - Item: Infer the graph from the per-Graph-ID worktree path for herdr and Muse events. Area: A (Lane B collectors). Complexity: LOW. Notes: Needs C-T3. Phase: 37. Source: FEATURES.md:197
-- [x] **B-D1**: Closes `coordination.md:321` "Not done"
-  - Item: Mirror graph edges (`requires` / `blocks` / `gated_by`) into Linear relations. Area: B (claim mirror). Complexity: MEDIUM. Notes: not stated. Phase: 38. Source: FEATURES.md:200
-- [x] **B-D3**: One artifact shows claim → Linear → Notion → DoD
-  - Item: Put mirror outcomes in `substrate evidence` per node. Area: B (claim mirror). Complexity: LOW. Notes: M6. Phase: 38. Source: FEATURES.md:202
-- [x] **C-D2**: The dispatched context can be replayed from the ledger (v0.3 §2)
-  - Item: Dispatch as a signed handoff packet (goal from the issue, DoD lines, files). Area: C (dispatcher). Complexity: LOW-MEDIUM. Notes: M2. Phase: 39. Source: FEATURES.md:204. Decision (2026-10-21): the goal is the issue identifier and the DoD lines are fixed; issue prose stays out of the packet (DISP-07).
-- [x] **C-D4**: A stale-brief warning before acting (v0.3 §2)
-  - Item: Run `coord_drift_scan` on the worktree before launch. Area: C (dispatcher). Complexity: LOW. Notes: M2. Phase: 39. Source: FEATURES.md:206
-- [ ] **D-D1**: `data-planes.md:34`
-  - Item: Cross-surface recall in the brief: a bounded, cached fan-out over the `sub-*` banks. Area: D (docs plane). Complexity: MEDIUM. Notes: `agentId:"*"` is an Agentmemory idiom, and Hindsight banks are isolated ([docs](https://docs.hindsight.vectorize.io/memory-banks/)). Phase: 40. Source: FEATURES.md:207
-  - Decision (2026-10-21): DOCS-04 is amended to allow recall inside the brief, as a bounded, cached fan-out (this item). The original DOCS-04 wording is in `.planning/milestones/v1.3-REQUIREMENTS.md:85`. The research anti-feature at `.planning/research/SUMMARY.md:72` still reads "recall inside the synchronous brief"; this decision accepts it for this bounded case only. Open for the phase 40 discuss step: whether the 1.5 s brief budget still applies.
-  - Status (2026-10-28): complete in repo (PR #92); live proof operator-gated (accepted debt 2026-10-23).
-- [ ] **D-D3**: One memory plane (the §5.0 no-silo rule)
-  - Item: Retire Claude Code's global `hindsight` stdio MCP and Hermes supermemory once the `sub-*` banks answer, with restore routes recorded first. Area: D (docs plane). Complexity: MEDIUM. Notes: P10. Phase: 40. Source: FEATURES.md:209
-- [ ] **D-D4**: Mental models replace stale detail (`data-planes.md:27,39`)
-  - Item: A weekly `reflect` per bank. Area: D (docs plane). Complexity: LOW. Notes: not stated. Phase: 40. Source: FEATURES.md:210
-  - Status (2026-10-28): complete in repo (PR #92); live proof operator-gated (accepted debt 2026-10-23).
-- [ ] **E-D1**: PR and incident evidence anyone can check outside the system (v0.3 6.x)
-  - Item: Anchors in the evidence bundle: a tx signature and an explorer link per hour. Area: E (ledger anchor). Complexity: LOW. Notes: M6. Phase: 41. Source: FEATURES.md:211
-  - Status (2026-10-28): complete in repo; live proof operator-gated (accepted debt 2026-10-23).
-- [ ] **E-D2**: A user addition carried in the brief's area E
-  - Item: Anchor teachable moments (graph id plus an observation digest). Area: E/F (as written in source). Complexity: MEDIUM. Notes: Needs F-D2 and E-T4. Phase: 41. Source: FEATURES.md:212
-  - Status (2026-10-28): complete in repo; live proof operator-gated (accepted debt 2026-10-23).
-- [ ] **F-D3**: §5.1; v0.3 "4.x Skill approve audit"
-  - Item: `skills_list` and an approve/decline audit trail. Area: F (skills plane). Complexity: LOW-MEDIUM. Notes: In September, approval meant the owner merging the PR (D-16). How `declined` is reported was left unspecified. Phase: 42. Source: FEATURES.md:215
-  - Status (2026-10-28): complete in repo; live proof operator-gated (accepted debt 2026-10-23).
-- [ ] **F-D4**: Skills become searchable through `docs_search`
-  - Item: Re-ingest the `agent-skills` dataset after each fast-forward. Area: F/D (as written in source). Complexity: LOW. Notes: D-T3. Phase: 42. Source: FEATURES.md:216
-  - Status (2026-10-28): complete in repo; live proof operator-gated (accepted debt 2026-10-23).
-- [ ] **H-D1**: September N3: the container could reach example.com
-  - Item: An enforced egress allowlist for the sandbox container. Area: H (Lane A). Complexity: MEDIUM. Notes: not stated. Phase: 43. Source: FEATURES.md:219
-  - Status (2026-10-28): complete in repo; live proof operator-gated (accepted debt 2026-10-23).
-- [ ] **H-D3**: No orphaned VMs
-  - Item: Re-adopt running tasks after a dispatcher restart (N4). Area: H (Lane A). Complexity: LOW-MEDIUM. Notes: not stated. Phase: 43. Source: FEATURES.md:221
-  - Status (2026-10-28): complete in repo; live proof operator-gated (accepted debt 2026-10-23).
-- [x] **I-D1**: A regression check for every later phase
-  - Item: The UAT as a repeatable script run against any `SUBSTRATE_URL`. Area: I (Phase 0 UAT). Complexity: LOW-MEDIUM. Notes: not stated. Phase: 44. Source: FEATURES.md:222
+### Embedding fabric (phase 64)
 
-## v1.5 SOTA requirements
+- [ ] **EMB-01**: Substrate has a TEI client with batching, timeout, retry and a breaker, and refuses a model or dimension that differs from the pinned one.
+- [ ] **EMB-02**: Embeddings are cached in Dragonfly by model and content hash, and every key carries a TTL.
+- [ ] **EMB-03**: TEI is a fabric resource: `fabric_status` reports its health, model and dimension, and the compliance check names an endpoint that is not private.
+- [ ] **EMB-04**: The corpus planner reports near-duplicate documents by cosine similarity and never drops one without a record.
 
-Source for all entries: `.planning/uplift-7/7-SOTA-ENHANCEMENTS.md`. The Acceptance and Target files lines are copied verbatim.
+### Doc Watch (phase 65)
 
-- [ ] **SOTA-01**: Railway Resource Orchestrator. Phase: 45. Source: .planning/uplift-7/7-SOTA-ENHANCEMENTS.md:16–21
-  - Acceptance: MCP tool lists Railway resources, basic scale suggestion, cost report in /slo.
-  - Target files: packages/mcp-server/src (new railway.ts), docs/data-planes.md, config-reference.md
-  - Budget: $50 per month at test scale, confirmed 2026-10-21 (uplift-7/BLOCKING-UNKNOWNS.md item 8).
-  - Status (2026-10-28): complete in repo; live proof operator-gated (accepted debt 2026-10-23).
-- [ ] **SOTA-02**: LightRAG hybrid RAG with Hindsight context and the RAGFlow migration. Phase: 46. Source: .planning/uplift-7/7-SOTA-ENHANCEMENTS.md:23–28
-  - Acceptance: docs_search returns context-augmented results; tests for hybrid.
-  - Target files: packages/mcp-server/src/planes/lightrag.ts, planes/hindsight.ts, docs/docs-plane.md (planes/ragflow.ts is the legacy fallback backend, to be removed in the migration)
-  - Status (2026-10-28): partial; see Phase 46. LightRAG is deployed in naive mode; graph and hybrid modes and the RAGFlow removal are operator-gated.
-- [ ] **SOTA-03**: GreptimeDB + Dragonfly Predictive Analytics & Cache. Phase: 47. Source: .planning/uplift-7/7-SOTA-ENHANCEMENTS.md:30–35
-  - Acceptance: /slo has predictive rows; cache preloads based on patterns.
-  - Target files: packages/mcp-server/src/cache.ts, greptime code, observability, data-planes.md
-  - Status (2026-10-28): complete in repo; live proof operator-gated (accepted debt 2026-10-23).
-- [ ] **SOTA-04**: TailscaleDB Secure Unified Proxy Layer. Phase: 48. Source: .planning/uplift-7/7-SOTA-ENHANCEMENTS.md:37–42
-  - Acceptance: All DBs accessed via secure proxy; audit events for access.
-  - Target files: docs/railway-tailscale.md, data-planes.md, config for DBs
-  - Status (2026-10-28): complete in repo; live proof operator-gated (accepted debt 2026-10-23).
-- [ ] **SOTA-05**: Hindsight Graph Memory with Greptime Events. Phase: 49. Source: .planning/uplift-7/7-SOTA-ENHANCEMENTS.md:44–49
-  - Acceptance: memory_search returns graph-linked results; recall uses causal.
-  - Target files: packages/mcp-server/src/planes/hindsight.ts, memory code, greptime
-  - Status (2026-10-28): complete in repo; live proof operator-gated (accepted debt 2026-10-23).
-- [ ] **SOTA-06**: Dragonfly Pub/Sub for Real-time Events. Phase: 50. Source: .planning/uplift-7/7-SOTA-ENHANCEMENTS.md:51–56
-  - Acceptance: Real-time notifications for events via Dragonfly; tests.
-  - Target files: packages/mcp-server/src/cache.ts, event emit code
-  - Status (2026-10-28): complete in repo; live proof operator-gated (accepted debt 2026-10-23).
-- [x] **SOTA-07**: Enterprise Unified Resource Fabric. Phase: 51. Source: .planning/uplift-7/7-SOTA-ENHANCEMENTS.md:58–63
-  - Acceptance: New MCP tools for fabric status, optimization suggestions; compliance report.
-  - Target files: packages/mcp-server/src (new fabric/), observability, docs, config-reference
+- [ ] **WATCH-01**: A documentation change in a registered repository reaches the docs plane within a configured lag with no manual command.
+- [ ] **WATCH-02**: Triggers coalesce: a burst of edits costs one sync per repository, and a restart re-ingests nothing that has not changed.
+- [ ] **WATCH-03**: Git hooks and the filesystem watcher never block or fail the user's git command or editor.
+- [ ] **WATCH-04**: A reconcile timer finds changes that no trigger saw.
+- [ ] **WATCH-05**: A sync reports its outcome, lag and failures as events and metrics, and a freshness breach raises the existing `docs.freshness` warning.
 
-- [x] **SOTA-08**: GSD-Core planning index and cross-session awareness core. Phase: 52. Source: .planning/ROADMAP.md Phase 52 (defined 2026-10-22; not in .planning/uplift-7/7-SOTA-ENHANCEMENTS.md, which lists items 1–7 only)
-  - Acceptance: deterministic content-hash index of `.planning` artifacts where a full rebuild equals the incremental result; session presence with server-time TTL, stale derived at read time and never deleted; planning-change diffs on the existing event bus carrying paths and hashes, never bodies; read-only MCP tools `planning_status` and `planning_sessions`, each with an entry in `packages/audit/src/policy.ts`; file-only mode works with every backing service disabled; environment-only configuration.
-  - Target files: packages/mcp-server/src (new planning/ modules), packages/audit/src/policy.ts, docs, config-reference
-- [x] **SOTA-09**: Steering, conflict control and checkpoint/resume. Phase: 53. Source: .planning/ROADMAP.md Phase 53 (defined 2026-10-22; not in .planning/uplift-7/7-SOTA-ENHANCEMENTS.md, which lists items 1–7 only)
-  - Acceptance: steering directives queued, then acknowledged, then audited in TimescaleDB before any file change, and held with no file change when the audit cannot be written; conflicts between sessions on the same parsed phase or plan id emit events and never auto-resolve; a watcher gap marks the session view unknown until a full rescan; kill-and-restart at a plan-step boundary yields exactly one completion record keyed by phase id, plan step and file hash.
-  - Target files: packages/mcp-server/src (planning steering and checkpoint modules), TimescaleDB index schema, config-reference
-- [x] **SOTA-10**: Planning observability and migration inventory. Phase: 54. Source: .planning/ROADMAP.md Phase 54 (defined 2026-10-22; not in .planning/uplift-7/7-SOTA-ENHANCEMENTS.md, which lists items 1–7 only)
-  - Acceptance: each phase transition emits a GreptimeDB metric with a stdout fallback when GreptimeDB is disabled or unreachable; the session view reports exactly one of LOADING, EMPTY, STALE, DEGRADED, ERROR, SUCCESS; a documented inventory separates disk state from Railway-hosted state and lists host-bound paths and units; no cutover, DNS change or production deploy in scope.
-  - Target files: packages/observability, docs, config-reference
+### Docs Reflect (phase 66)
 
-## v1.6 contextual memory requirements
+- [ ] **REFLECT-01**: Every `docs_search` is recorded as a bounded, redacted retrieval event.
+- [ ] **REFLECT-02**: A session can mark a citation helpful, unhelpful, stale, wrong or duplicate through `docs_feedback`.
+- [ ] **REFLECT-03**: Documents carry an authority score from tier, kind, recency, supersession and feedback, and `docs_search` can re-rank by it, in shadow first.
+- [ ] **REFLECT-04**: A document that a newer version, an archive or an explicit marker supersedes is flagged in its citations.
+- [ ] **REFLECT-05**: A reflect run writes per-repository digests into the docs plane and retains them in Hindsight, and lists the queries the corpus could not answer.
 
-Source for all entries: the operator request of 2026-10-26 as planned by the Ultrathink graph ut-mvp59le0-8815e6d1, corrected against the repository (`.planning/phases/55-migration-safety/CONTEXT.md`). IDs continue the SOTA series.
+### Live Steering GA (phase 67)
 
-- [x] **SOTA-11**: Migration safety, session event vocabulary and the v1.6 baseline. Phase: 55. Source: .planning/ROADMAP.md Phase 55 (defined 2026-10-26)
-  - Acceptance: an offline contract test rejects non-idempotent, destructive or edited-after-applied migration steps; a fake-connection harness proves lock-before-DDL, one transaction per step, rollback without a ledger row, zero DDL on re-run and partial resume; a rollback-compat test rejects non-additive or undocumented later steps; `session.checkpoint`, `session.rollback` and `session.rollback.refused` are note and warning events with validated payload builders and the vocabulary locks (EVENT_KINDS 12, SURFACES 42) stay green; an operator rehearsal runbook marks every production step operator-run.
-  - Target files: packages/mcp-server/src/index-store.ts and tests, event-sources.ts, session-events.ts, docs/event-vocabulary.md, docs/runbooks
-- [x] **SOTA-12**: LightRAG client contract alignment and storage topology. Phase: 56. Source: .planning/ROADMAP.md Phase 56 (defined 2026-10-26)
-  - Acceptance: the client cannot emit the clear-all route and deletes only by real document id; completion is read from the `busy` flag with explicit reasons for a fenced workspace and an unknown shape; the key is sent as `X-API-Key` only; track ids resolve to document ids and a 409 is a typed outcome; one `/query` client remains behind the breaker; a health probe fills `planes.lightrag.ok`; an upstream-derived route fixture with provenance and a contract test; the storage topology and upgrade design are written down; no live action.
-  - Target files: packages/mcp-server/src/planes/lightrag.ts and tests, mcp.ts, server.ts, service.ts, docs/runbooks/lightrag-storage-topology.md
-- [x] **SOTA-13**: Tandem memory, LightRAG with Hindsight, with provenance and forget. Phase: 57. Source: .planning/ROADMAP.md Phase 57 (defined 2026-10-26)
-  - Acceptance: retain metadata carries graph, session and node ids and recall exposes them with unchanged document ids; merged, deduplicated, cited LightRAG and Hindsight answers with the existing degraded fallback intact; a forget primitive that emits one ledger note per call and keeps the superseded index row; a cross-store consistency verifier reporting JSON drift with a non-zero exit code and no repair without a flag.
-  - Target files: packages/mcp-server/src/memory-retain.ts, memory-recall.ts, memory-forget.ts, tandem-recall.ts, docs-search.ts, service.ts
-- [x] **SOTA-14**: Live session steering for multi-day GSD-Core sessions. Phase: 58. Source: .planning/ROADMAP.md Phase 58 (defined 2026-10-26)
-  - Acceptance: durable directives that survive a restart and expire to an audited timeout; delivery to the target session within one scan interval and one shared state model for the two steering mechanisms; liveness that outlasts 25 hours of quiet; a STATE.md and ROADMAP.md position model; DragonflyDB limited to hints and ephemeral presence.
-  - Target files: packages/mcp-server/src/planning/*, mcp.ts, event.ts, the TimescaleDB index schema (opt-in step), config-reference
-  - Status (2026-10-28): complete in repo (PRs #137 and #147); `phases/58-live-steering/VERIFICATION.md` passed, 5 of 5 criteria, on main 2026-10-28.
-- [x] **SOTA-15**: Eternal logging, verifiable checkpoint and rollback events on Solana devnet. Phase: 59. Source: .planning/ROADMAP.md Phase 59 (defined 2026-10-26)
-  - Acceptance: Merkle inclusion proofs for every tree size and index with tamper rejection; a checkpoint verification command reporting one of anchored, pending, unanchored, unverified or mismatch; mainnet and testnet RPC URLs refused at configuration load and at RPC construction; a signer set with validity windows and audited rotation; devnet reset detection apart from tampering with a re-anchor procedure; no transaction sent outside operator-run steps.
-  - Target files: packages/ledger/src, packages/mcp-server/src/anchor.ts, service.ts, config.ts, packages/evidence, docs/runbooks
-  - Status (2026-10-28): Complete in the repository (PRs #128, #129, #150); `.planning/phases/59-eternal-logging/VERIFICATION.md` human_needed: live anchoring, key funding, the anchor timer and any devnet send are operator-gated.
-- [x] **SOTA-16**: Eternal Memory Knowledge Nexus. Phase: 60. Source: .planning/ROADMAP.md Phase 60 (defined 2026-10-26)
-  - Acceptance: governed memory records expose id, version, supersession chain, provenance and content hash and verify against an anchored root; deterministic capsules with a digest recorded as a ledger event and a content-addressed blob store (local and an S3-compatible adapter tested against a fake); redaction that keeps the hash and a tombstone; a decision record mapping Anda and KIP concepts with licenses noted.
-  - Target files: packages/mcp-server/src (memory verification and capsule modules), docs/adr
-- [ ] **SOTA-17**: Session rollback to an exact chat moment with file revert. Phase: 61. Source: .planning/ROADMAP.md Phase 61 (defined 2026-10-26)
-  - Acceptance: tree-hash equality after snapshot, mutate and restore, with recovery after an interruption and never a partial end state; a dry-run, drift refusal and an always-taken safety snapshot; checkpoints at defined boundaries carrying an opaque transcript reference, git tree, manifest digest and chain head; an append-only rollback event with memory supersession and recall exclusion; per-surface transcript handling without rewriting any transcript; rollback from local checkpoints when the chain is unreachable.
-  - Target files: packages/worktree-snapshot, packages/cli, packages/collectors, packages/mcp-server/src, docs/runbooks (a TimescaleDB opt-in schema step was listed here and was NOT built: checkpoints are ledger notes plus local pinned git refs)
-  - Status (2026-10-28): merged (PRs #128, #129, #146, #148); criterion 3 partial: no host installs or fires the hook until an operator installs the printed configuration (ADR 0007, decision D55-4); no live rehearsal.
-- [x] **SOTA-18**: Soak, runbooks and v1.6 close. Phase: 62. Source: .planning/ROADMAP.md Phase 62 (defined 2026-10-26)
-  - Acceptance: a simulated multi-day run with bounded memory and handles and clean resume; runbooks for migration rehearsal, LightRAG hosting, chain outage and devnet reset, rollback and key rotation; decision records for store roles, rollback semantics and memo-only anchoring; STATE and ROADMAP reflect every phase and the milestone audit is written.
-  - Target files: soak tests, docs/runbooks, docs/adr, .planning
+- [ ] **STEER-01**: `substrate steer` lists live sessions and their steering state, and queues, acknowledges and lists directives for an operator.
+- [ ] **STEER-02**: A session can ask what the other live sessions of its repository are doing and receives a bounded, redacted digest that carries its provenance.
+- [ ] **STEER-03**: `memory_brief` carries sessions, steering and handoff sections behind a flag.
+- [ ] **STEER-04**: Steering session state survives a server restart.
+- [ ] **STEER-05**: The session hook reads `checkpoint_hint` and writes the checkpoint it names, and a context trigger injects the digest at session start.
+- [ ] **STEER-06**: A session can wait for a directive with a long poll instead of polling `docs_search`.
+
+### Worktree Fleet (phase 68)
+
+- [ ] **FLEET-01**: Worktree locations are configurable, and every worktree of a repository is found through git, not through a path convention.
+- [ ] **FLEET-02**: A worktree registry records path, repo, branch, head, base, dirty state, ahead and behind, last activity, size and the attributed session or graph.
+- [ ] **FLEET-03**: `substrate worktree prune` removes only worktrees that are clean, pushed and merged, never the primary checkout, and records each removal.
+- [ ] **FLEET-04**: `substrate worktree conflicts` predicts textual conflicts between the active worktrees of a repository and suggests a merge order.
+- [ ] **FLEET-05**: Worktree creation refuses below a configured free-disk floor, and the doctor reports disk pressure from worktrees.
+- [ ] **FLEET-06**: A session's brief names other sessions' worktrees that touch the same files.
+
+### Doc Proofs (phase 69)
+
+- [ ] **PROOF-01**: The corpus manifest has a deterministic Merkle root over (repo, path, sha256) leaves.
+- [ ] **PROOF-02**: Each sync records the root as a ledger event, so the existing hourly anchor covers it without a new memo format.
+- [ ] **PROOF-03**: `substrate corpus prove` gives an inclusion proof for one document and `substrate corpus verify` checks it offline and against the anchored hour when chain evidence exists.
+- [ ] **PROOF-04**: `docs_search` replies carry the short corpus root of what the session saw.
+
+### Docs SLO and eval (phase 70)
+
+- [ ] **EVAL-01**: A self-supervised golden set generated from the corpus is scored for recall at k, MRR and latency.
+- [ ] **EVAL-02**: A deterministic offline harness guards ranking, dedupe and re-rank regressions in CI.
+- [ ] **EVAL-03**: Freshness, ingest throughput and retrieval quality are metrics with SLO thresholds visible in `fabric_status` and the docs canary.
+- [ ] **EVAL-04**: A broken link, or a document without a title, in `docs/` or `.planning/` fails a test.
+- [ ] **EVAL-05**: An operator runbook covers deploy, first ingest, timers, rollback and the check that proves each.
 
 ## Out of scope and deferred
 
-Defer (v2+), from `.planning/research/SUMMARY.md` line 70:
+- Graph and hybrid LightRAG modes: they need an LLM route that only the operator can provide (production runs naive mode). Nothing in this milestone requires one; REFLECT-05 is deterministic.
+- Removing the RAGFlow code (TODO register D-15), deploys, Railway writes, funding the anchor key, devnet sends outside the existing anchor job, and installing hooks or timers on a host: all operator-gated. This milestone ships the code, the staged units and the runbooks.
+- Agents queueing steering directives for other agents: directive authors stay human (v1.6 decision); STEER-02 shares context, it does not delegate authority.
+- A new on-chain memo format: PROOF-02 rides the existing hourly anchor.
+- Moving `packages/collectors/src/cursor-stop.ts` and the cli to collectors import cycle, `noPropertyAccessFromIndexSignature` and coverage thresholds stay deferred as recorded in Run 13.
 
-**Defer (v2+):** A-D2 herdr-hosted dispatch, A-D3 Orca tee, B-D2 Linear Agent Sessions, C-D3 extra launchers, D-D2 ingest on merge, G-D1 cua, H-D2 Codex/OpenCode/Pi VMs.
+## Traceability (v1.7)
 
-Anti-features, from `.planning/research/SUMMARY.md` line 72:
-
-**Anti-features to hold:** substrate sending Done itself; `labelIds` overwrite; rolling back a lease on tracker failure; dispatcher claiming for the agent; issue text in prompts; RAGFlow MCP as backend; Hindsight as store of record; Dragonfly as queue/lock; recall inside the synchronous brief; event contents on chain; porting `chain.ts`; auto-merging skills; stopping production for UAT scenario 7; proof rows in the production ledger.
-
-## Traceability (v1.3.x, v1.5 and v1.6)
-
-Checkbox convention: a ticked requirement is satisfied or waived by the operator (its row says which); an unticked one is accepted debt, partial or operator-gated, and its row carries the reason and the date.
+Checkbox convention: a ticked requirement is satisfied or waived by the operator (its row says which); an unticked one is not yet delivered, partial or operator-gated, and its row carries the reason and the date.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| A-D1 | 37 | Complete (PR #89) |
-| B-D1 | 38 | Complete (PR #90) |
-| B-D3 | 38 | Complete (PR #90) |
-| C-D2 | 39 | Complete (PR #91); signing needs `SUBSTRATE_HANDOFF_KEY` |
-| C-D4 | 39 | Complete (PR #91) |
-| D-D1 | 40 | Complete (PR #92); live proof operator-gated (accepted debt 2026-10-23); no live effect until `SUBSTRATE_BRIEF_RECALL` and `HINDSIGHT_BANKS` are set |
-| D-D3 | 40 | Accepted debt 2026-10-23 (STATE.md); not delivered in the repository: the restore drill and retirement exist as a runbook only (40-VERIFICATION criterion 2 NOT MET); needs the restore drill and owner approval |
-| D-D4 | 40 | Complete (PR #92); live proof operator-gated (accepted debt 2026-10-23); narrowed to config-named models, see the phase 40 SUMMARY |
-| E-D1 | 41 | Complete in repo; live proof operator-gated (accepted debt 2026-10-23) |
-| E-D2 | 41 | Complete in repo; live proof operator-gated (accepted debt 2026-10-23) |
-| F-D3 | 42 | Complete in repo; live proof operator-gated (accepted debt 2026-10-23) |
-| F-D4 | 42 | Complete in repo; live proof operator-gated (accepted debt 2026-10-23) |
-| H-D1 | 43 | Complete in repo; live proof operator-gated (accepted debt 2026-10-23) |
-| H-D3 | 43 | Complete in repo; live proof operator-gated (accepted debt 2026-10-23) |
-| I-D1 | 44 | Complete (PR #95) |
-| SOTA-01 | 45 | Complete in repo; live proof operator-gated (accepted debt 2026-10-23) |
-| SOTA-02 | 46 | Partial; criterion 1 in repo; LightRAG deployed in naive mode; graph and hybrid modes and RAGFlow removal operator-gated |
-| SOTA-03 | 47 | Complete in repo; live proof operator-gated (accepted debt 2026-10-23) |
-| SOTA-04 | 48 | Complete in repo; live proof operator-gated (accepted debt 2026-10-23) |
-| SOTA-05 | 49 | Complete in repo; live proof operator-gated (accepted debt 2026-10-23) |
-| SOTA-06 | 50 | Complete in repo; live proof operator-gated (accepted debt 2026-10-23) |
-| SOTA-07 | 51 | Complete (PR #108) |
-| SOTA-08 | 52 | Complete (PR #104 merged 2026-10-27, PR #134 merged 2026-10-28) |
-| SOTA-09 | 53 | Complete (PR #136, replaced draft #110, merged 2026-10-28) |
-| SOTA-10 | 54 | Complete (PR #135, replaced draft #111, merged 2026-10-28) |
-| SOTA-11 | 55 | Complete (PR #127, merged 2026-10-28): `index-store.migrate-contract.test.ts`, `index-store.migrate-harness.test.ts`, `rollback-compat.test.ts`, `session-events.test.ts`, `docs/runbooks/index-migration-rehearsal.md`; production rehearsal operator-run. `phases/55-migration-safety/VERIFICATION.md` |
-| SOTA-12 | 56 | Complete (PR #127, merged 2026-10-28): `planes/lightrag.test.ts` (clear-all denylist), `planes/lightrag.contract.test.ts` against `planes/__fixtures__/lightrag-v1.5.7-routes.json`; derived from upstream source, not a live server; deploy operator-gated. `phases/56-lightrag-contract/VERIFICATION.md` |
-| SOTA-13 | 57 | Complete with fakes (PRs #128, #129, merged 2026-10-28): `memory-forget.test.ts`, `service-forget.test.ts`, `tandem-recall.test.ts`, `service-tandem-scope.test.ts`, `consistency-verify.test.ts`; the forget has no automatic expiry or operator trigger; Hindsight document-list route unverified. `phases/57-tandem-memory/VERIFICATION.md` |
-| SOTA-14 | 58 | Complete (PRs #137 and #147, merged 2026-10-28): the gap (criterion 2, the state join) was closed by #147; `planning/steering-durable.test.ts`, `steering-wiring.test.ts` (`describe("the two steering mechanisms share one state model")`), `planning/session-state.test.ts`, `planning/position.test.ts`; `phases/58-live-steering/VERIFICATION.md` passed 5 of 5 on main 2026-10-28 |
-| SOTA-15 | 59 | Complete in the repository (PRs #128, #129, #150, merged 2026-10-28); VERIFICATION human_needed: live anchoring, key funding, the anchor timer and any devnet send are operator-gated: `ledger/src/merkle-proof.test.ts`, `checkpoint-verify.test.ts`, `signer-set.test.ts`, `devnet-reset.test.ts`, `reanchor-plan.test.ts`, `mcp-server/src/reanchor.test.ts`, `reanchor-run.test.ts`. `phases/59-eternal-logging/VERIFICATION.md` |
-| SOTA-16 | 60 | Complete with fakes (PRs #128, #129, merged 2026-10-28): `memory-record.test.ts`, `memory-verify.test.ts`, `capsule.test.ts`, `blob-store.test.ts`, `blob-store-s3.test.ts`, `cli/src/capsule.test.ts`, ADRs 0002 and 0003; bucket use operator-gated. `phases/60-eternal-nexus/VERIFICATION.md` |
-| SOTA-17 | 61 | Merged (PRs #128, #129, #146, #148, merged 2026-10-28); criterion 3 partial: no host installs or fires the hook until an operator installs the printed configuration (ADR 0007, decision D55-4); criteria 1, 2, 4, 5, 6 met: `worktree-snapshot/src/*.test.ts`, `cli/src/session/rollback.test.ts`, `session-rollback.test.ts`, `session-rollback-e2e.test.ts`; no live rehearsal. `phases/61-session-rollback/VERIFICATION.md` |
-| SOTA-18 | 62 | Complete (PR #130, merged 2026-10-28): `mcp-server/src/soak-multiday.test.ts` and `cli/src/session/soak.test.ts` (committed in 8752578), six runbooks, ADRs 0004-0007, `v1.6-MILESTONE-AUDIT.md`; milestone completion is an operator decision. `phases/62-soak-and-close/VERIFICATION.md` |
+| ATLAS-01 to ATLAS-06 | 63 | Planned |
+| EMB-01 to EMB-04 | 64 | Planned |
+| WATCH-01 to WATCH-05 | 65 | Planned |
+| REFLECT-01 to REFLECT-05 | 66 | Planned |
+| STEER-01 to STEER-06 | 67 | Planned |
+| FLEET-01 to FLEET-06 | 68 | Planned |
+| PROOF-01 to PROOF-04 | 69 | Planned |
+| EVAL-01 to EVAL-05 | 70 | Planned |
 
 ---
-*Requirements defined: 2026-10-21*
+*Requirements defined: 2026-10-29*
