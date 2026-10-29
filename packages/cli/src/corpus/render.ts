@@ -171,21 +171,12 @@ export const TEXT_LIMIT = 300;
 export const REASON_LIMIT = 10;
 
 /**
- * Text from a file or a server made safe for a terminal: control characters (C0, DEL, C1) and the Unicode line and paragraph
- * separators are written as `\uNNNN` escapes, and the text is cut at {@link TEXT_LIMIT} characters. A name or a reason can
- * never move the cursor, clear the screen or forge a line of its own.
+ * Server or file text for a verify line: `printable` (control characters escaped) and cut at {@link TEXT_LIMIT} characters, so a
+ * long reason or name cannot swamp the report.
  */
-export function printable(text: string): string {
-	let out = "";
-	let shown = 0;
-	for (const char of text) {
-		if (shown >= TEXT_LIMIT) return `${out}...`;
-		const code = char.codePointAt(0) ?? 0;
-		const control = code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029;
-		out += control ? `\\u${code.toString(16).padStart(4, "0")}` : char;
-		shown += 1;
-	}
-	return out;
+function clip(text: string): string {
+	const safe = printable(text);
+	return safe.length > TEXT_LIMIT ? `${safe.slice(0, TEXT_LIMIT)}...` : safe;
 }
 
 export interface VerifyReport {
@@ -208,16 +199,16 @@ export function isValidReport(report: VerifyReport): boolean {
 function anchorLines(report: VerifyReport): string[] {
 	if (!report.online) return ["anchor: not checked (use --online to ask the server)\n"];
 	const { anchor } = report;
-	if (anchor === null) return [`anchor: check skipped, ${printable(report.anchorSkipped ?? "no answer")}\n`];
+	if (anchor === null) return [`anchor: check skipped, ${clip(report.anchorSkipped ?? "no answer")}\n`];
 	const lines = [`anchor: ${anchor.status}\n`];
 	const signature = anchor.evidence?.signature ?? null;
 	const hourlyRoot = anchor.evidence?.anchoredRoot ?? null;
 	const slot = anchor.evidence?.slot ?? null;
-	if (anchor.hourStart !== null) lines.push(`  hour: ${printable(anchor.hourStart)}\n`);
-	if (anchor.eventId !== null) lines.push(`  root event: ${printable(anchor.eventId)}\n`);
-	if (signature !== null) lines.push(`  transaction: ${printable(signature)}${slot === null ? "" : ` (slot ${slot})`}\n`);
-	if (hourlyRoot !== null) lines.push(`  hourly root: ${printable(hourlyRoot)}\n`);
-	for (const reason of anchor.reasons.slice(0, REASON_LIMIT)) lines.push(`  ${printable(reason)}\n`);
+	if (anchor.hourStart !== null) lines.push(`  hour: ${clip(anchor.hourStart)}\n`);
+	if (anchor.eventId !== null) lines.push(`  root event: ${clip(anchor.eventId)}\n`);
+	if (signature !== null) lines.push(`  transaction: ${clip(signature)}${slot === null ? "" : ` (slot ${slot})`}\n`);
+	if (hourlyRoot !== null) lines.push(`  hourly root: ${clip(hourlyRoot)}\n`);
+	for (const reason of anchor.reasons.slice(0, REASON_LIMIT)) lines.push(`  ${clip(reason)}\n`);
 	lines.push(more(REASON_LIMIT, anchor.reasons.length));
 	if (anchor.status === "unanchored") lines.push("  the root is not inside an anchored hour: the proof still shows the document was in the manifest with this root\n");
 	return lines;
@@ -226,12 +217,12 @@ function anchorLines(report: VerifyReport): string[] {
 export function renderVerify(report: VerifyReport): string {
 	const { proof, offline } = report;
 	const out: string[] = [
-		`document: ${printable(proof.repo)}:${printable(proof.documentPath)}\n`,
-		`root: ${printable(proof.root)} (leaf ${proof.index + 1} of ${proof.treeSize}, manifest version ${proof.manifestVersion})\n`,
-		offline.valid ? "proof: valid\n" : `proof: INVALID, ${printable(offline.reason)}\n`,
+		`document: ${clip(proof.repo)}:${clip(proof.documentPath)}\n`,
+		`root: ${clip(proof.root)} (leaf ${proof.index + 1} of ${proof.treeSize}, manifest version ${proof.manifestVersion})\n`,
+		offline.valid ? "proof: valid\n" : `proof: INVALID, ${clip(offline.reason)}\n`,
 		...anchorLines(report),
 	];
-	if (report.conflict !== null) out.push(`anchor answer contradicts the proof: ${printable(report.conflict)}\n`);
+	if (report.conflict !== null) out.push(`anchor answer contradicts the proof: ${clip(report.conflict)}\n`);
 	out.push(isValidReport(report) ? "result: valid\n" : "result: invalid\n");
 	return out.join("");
 }

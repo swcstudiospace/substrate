@@ -213,7 +213,7 @@ describe("substrate corpus verify, offline", () => {
 		expect(result.out).not.toContain("\u001b");
 		expect(result.out).not.toContain("\u0007");
 		expect(result.out).not.toContain("\u2028");
-		expect(result.out).toContain("\\u001b[2J\\u0007bell\\u2028line.md");
+		expect(result.out).toContain("\\x1b[2J\\x07bell\\u2028line.md");
 	});
 
 	test("--json carries the verdict as data", async () => {

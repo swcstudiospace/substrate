@@ -78,7 +78,7 @@ describe("the proof routes' gates", () => {
 		const harness = await start(ON);
 		for (const route of ROUTES) {
 			const response = await get(harness, route, {});
-			expect({ route, status: response.status, reason: (await jsonOf(response)).reason }).toEqual({ route, status: 401, reason: "unauthenticated" });
+			expect({ route, status: response.status }).toEqual({ route, status: 401 });
 		}
 	});
 

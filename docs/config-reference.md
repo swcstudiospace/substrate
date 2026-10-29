@@ -227,7 +227,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_DOCS_CANARY_MANIFEST` | path | none | JSON file with sha256 and dataset_commit | the live canary refuses to run. See `docs/docs-search-ingest.md` | scripts/docs-golden.ts | yes |
 | `SUBSTRATE_DOCS_CANARY_STATE` | path | /var/lib/substrate/docs-canary-last.json | file path | the default state file. See `docs/docs-search-ingest.md` | scripts/docs-golden.ts | yes |
 | `SUBSTRATE_DOCS_TIMEOUT_MS` | number | 180000 | positive ms | 180000 ms (the CLI's docs ingest and merge-trigger calls). See `docs/docs-search-ingest.md` | cli/docs.ts | yes |
-| `SUBSTRATE_CORPUS` | toggle | off | on \| off | off: POST /corpus/ingest answers 503 corpus.disabled and nothing reaches the docs plane. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_CORPUS` | toggle | off | on \| off | off: every /corpus route (ingest, plan, status, root, proof, anchor) answers 503 corpus.disabled, nothing reaches the docs plane, and docs_search replies carry no corpus_root. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CORPUS_CONCURRENCY` | number | 4 | 1..16 | 4 batches in flight at once. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CORPUS_BATCH_DOCS` | number | 20 | 1..200 | 20 documents per batch. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CORPUS_BATCH_BYTES` | number | 1000000 | 10000..5000000 | 1000000 bytes per batch. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |

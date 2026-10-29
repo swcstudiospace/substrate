@@ -33,6 +33,15 @@ const REASON_MAX = 300;
 /** The verifier. A parameter so a test can give every classification without a chain. */
 export type AnchorVerifier = (ports: AnchorVerifyPorts, eventId: string) => Promise<EventAnchorToolResult>;
 
+/** What the lookup answers for an event the verifier refused to judge (a malformed id, an event that vanished): a status of its own, with no chain evidence. */
+interface RefusedJudgement {
+	status: "unverified" | "unanchored";
+	ref: string;
+	reasons: string[];
+}
+
+type Judged = EventAnchorToolResult | RefusedJudgement;
+
 interface Candidate {
 	eventId: string;
 	count: number | null;
@@ -100,7 +109,7 @@ async function findRootEvents(ports: AnchorVerifyPorts, root: string): Promise<{
 	}
 }
 
-function evidenceOf(result: EventAnchorToolResult): CorpusAnchorEvidence | null {
+function evidenceOf(result: Judged): CorpusAnchorEvidence | null {
 	if (!("evidence" in result)) return null;
 	const evidence: CheckpointEvidence = result.evidence;
 	return {
@@ -117,7 +126,7 @@ function evidenceOf(result: EventAnchorToolResult): CorpusAnchorEvidence | null 
 	};
 }
 
-function answer(root: string, status: CorpusAnchorStatus, reasons: string[], candidate: Candidate | null, result: EventAnchorToolResult | null): CorpusAnchorResponse {
+function answer(root: string, status: CorpusAnchorStatus, reasons: string[], candidate: Candidate | null, result: Judged | null): CorpusAnchorResponse {
 	return {
 		protocol: CORPUS_PROTOCOL,
 		root,
@@ -132,7 +141,7 @@ function answer(root: string, status: CorpusAnchorStatus, reasons: string[], can
 }
 
 /** Judges one candidate. A caller error of the verifier (a malformed id, an event that vanished) is a status of its own, never a throw. */
-async function judge(ports: AnchorVerifyPorts, verify: AnchorVerifier, candidate: Candidate): Promise<EventAnchorToolResult> {
+async function judge(ports: AnchorVerifyPorts, verify: AnchorVerifier, candidate: Candidate): Promise<Judged> {
 	try {
 		return await verify(ports, candidate.eventId);
 	} catch (cause) {

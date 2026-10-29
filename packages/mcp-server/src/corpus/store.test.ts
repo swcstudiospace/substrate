@@ -128,14 +128,16 @@ describeLive("the corpus manifest against a live index", () => {
 	});
 
 	test("activeLeaves returns the active rows' leaves with the manifest version of the same read, and says when a limit cut it", async () => {
-		await store.recordIngested(doc("leaf-one.md", { repo: OTHER, sha256: "1".repeat(64) }));
-		await store.recordIngested(doc("leaf-two.md", { repo: OTHER, sha256: "2".repeat(64) }));
-		await store.recordIngested(doc("leaf-gone.md", { repo: OTHER, sha256: "3".repeat(64) }));
-		await store.markTombstoned(OTHER, "leaf-gone.md");
+		// A repository of its own: earlier tests of this file leave rows under the shared one.
+		const leafRepo = `Acme/leaves-${MARKER}`;
+		await store.recordIngested(doc("leaf-one.md", { repo: leafRepo, sha256: "1".repeat(64) }));
+		await store.recordIngested(doc("leaf-two.md", { repo: leafRepo, sha256: "2".repeat(64) }));
+		await store.recordIngested(doc("leaf-gone.md", { repo: leafRepo, sha256: "3".repeat(64) }));
+		await store.markTombstoned(leafRepo, "leaf-gone.md");
 		const all = await store.activeLeaves(1_000_000);
 		expect(all.truncated).toBe(false);
 		expect(all.manifestVersion).toBe(await store.manifestVersion());
-		const ours = all.leaves.filter((leaf) => leaf.repo === OTHER);
+		const ours = all.leaves.filter((leaf) => leaf.repo === leafRepo);
 		expect(ours.map((leaf) => [leaf.path, leaf.sha256]).sort()).toEqual([
 			["leaf-one.md", "1".repeat(64)],
 			["leaf-two.md", "2".repeat(64)],

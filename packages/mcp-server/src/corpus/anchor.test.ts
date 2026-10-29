@@ -21,6 +21,7 @@ const HOUR = new Date(START).toISOString();
 
 function rootEvent(id: string, at: number, over: { root?: string; action?: string; payload?: Record<string, unknown> } = {}): SubstrateEvent {
 	const base: Omit<SubstrateEvent, "hash"> = {
+		id,
 		ts: new Date(at).toISOString(),
 		surface: "substrate",
 		session_id: CORPUS_ROOT_SESSION,
