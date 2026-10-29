@@ -216,7 +216,8 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 	let observedModel: string | null = null;
 	/** Set when a read named a model other than the expected one; cleared only by a read that names the expected one. */
 	let modelRefused = false;
-	let verifying: Promise<{ ok: true } | { ok: false; reason: TeiReason }> | null = null;
+	/** The model check in flight and the timeout it runs under: a caller joins it only when its own timeout is the same. */
+	let verifying: { timeoutMs: number; result: Promise<{ ok: true } | { ok: false; reason: TeiReason }> } | null = null;
 
 	const expectedModel = (): string | null => config?.model ?? learnedModel;
 	const expectedDim = (): number | null => config?.dim ?? learnedDim;
@@ -339,10 +340,16 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 	}
 
 	function ensureVerified(timeoutMs: number): Promise<{ ok: true } | { ok: false; reason: TeiReason }> {
-		verifying ??= verifyModel(timeoutMs).finally(() => {
-			verifying = null;
-		});
-		return verifying;
+		// A check started under a shorter timeout would end a longer caller's check early, so only callers with the same timeout share one.
+		if (verifying !== null && verifying.timeoutMs === timeoutMs) return verifying.result;
+		const mine: NonNullable<typeof verifying> = {
+			timeoutMs,
+			result: verifyModel(timeoutMs).finally(() => {
+				if (verifying === mine) verifying = null;
+			}),
+		};
+		verifying = mine;
+		return mine.result;
 	}
 
 	async function embed(texts: readonly string[], options: TeiEmbedOptions = {}): Promise<TeiEmbedResult> {

@@ -576,6 +576,22 @@ describe("one timeout for every request of a call", () => {
 		});
 		expect(plain).toEqual([CONFIG.timeoutMs, CONFIG.timeoutMs]);
 	});
+
+	test("concurrent calls with different timeouts each run their own model check, and calls with the same timeout share one", async () => {
+		const tei = fakeTei();
+		const { client } = clientFor(CONFIG, tei.fetch);
+		const asked = await recordTimeouts(async () => {
+			await Promise.all([client.embed(["a"], { timeoutMs: 100 }), client.embed(["b"])]);
+		});
+		expect(tei.infoCalls()).toHaveLength(2);
+		// One /info and one /embed per call, each under its own call's timeout.
+		expect([...asked].sort((a, b) => a - b)).toEqual([100, 100, CONFIG.timeoutMs, CONFIG.timeoutMs]);
+
+		const shared = fakeTei();
+		const other = clientFor(CONFIG, shared.fetch);
+		await Promise.all([other.client.embed(["a"]), other.client.embed(["b"])]);
+		expect(shared.infoCalls()).toHaveLength(1);
+	});
 });
 
 describe("probe after a recovery", () => {
