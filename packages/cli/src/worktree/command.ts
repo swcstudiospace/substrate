@@ -13,6 +13,7 @@
  * `review` when that cannot be checked. Every removal leaves one ledger note through the events route
  * (fail-open: a note that was not recorded is said so on stderr, and `--json` carries its delivery result).
  */
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { graphIdForWorktree } from "../../../collectors/src/worktree-graph.ts";
 import {
@@ -365,9 +366,24 @@ function renderForecast(repo: string, forecast: ConflictForecast, deps: Worktree
 async function conflictSearchRoots(args: WorktreeArgs, deps: WorktreeDeps): Promise<string[]> {
 	if (args.repo !== undefined) {
 		const dir = resolve(deps.cwd, args.repo);
-		if ((await gitOut(deps.git, ["rev-parse", "--git-dir"], dir)) !== null) return [...new Set([dir, ...args.roots.map((root) => resolve(deps.cwd, root))])];
+		// `git rev-parse --git-dir` also answers inside an ordinary subfolder of a checkout (`owner/name` can be one), so only a
+		// directory that is itself the top of a work tree replaces the configured roots.
+		const top = await gitOut(deps.git, ["rev-parse", "--show-toplevel"], dir);
+		if (top !== null && sameDirectory(top, dir)) return [...new Set([dir, ...args.roots.map((root) => resolve(deps.cwd, root))])];
 	}
 	return roots(args, deps);
+}
+
+/** Whether two paths name one directory, symbolic links resolved when they exist. */
+function sameDirectory(a: string, b: string): boolean {
+	const real = (path: string): string => {
+		try {
+			return realpathSync(path);
+		} catch {
+			return resolve(path);
+		}
+	};
+	return real(a) === real(b);
 }
 
 async function commandConflicts(args: WorktreeArgs, deps: WorktreeDeps): Promise<number> {

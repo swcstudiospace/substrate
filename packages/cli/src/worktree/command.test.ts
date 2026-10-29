@@ -295,6 +295,25 @@ describe("conflicts", () => {
 		expect(text).toContain("rebase");
 		expect(git(a, ["status", "--porcelain"])).toBe("");
 	});
+
+	test("--repo owner/name that is an ordinary subfolder of the current checkout still searches the configured roots", async () => {
+		const repo = makeRepo();
+		commit(repo.dir, "shared.txt", "one\ntwo\nthree\n");
+		git(repo.dir, ["push", "-q", "origin", "main"]);
+		const root = tempDir();
+		const a = addWorktree(repo, root, "a");
+		const b = addWorktree(repo, root, "b");
+		commit(a, "shared.txt", "A\ntwo\nthree\n");
+		commit(b, "shared.txt", "B\ntwo\nthree\n");
+		// The repository's identity is `owner/name`, as for a GitHub clone; set after the push, which needs the local origin.
+		git(repo.dir, ["remote", "set-url", "origin", "git@github.com:owner/name.git"]);
+		// The current directory is another checkout where `owner/name` is a plain folder: git answers there, but it is not a checkout root.
+		const other = makeRepo();
+		mkdirSync(join(other.dir, "owner", "name"), { recursive: true });
+		const h = harness({ cwd: other.dir }, { SUBSTRATE_WORKTREE_ROOTS: root });
+		expect(await runWorktree(["conflicts", "--repo", "owner/name"], h.deps)).toBe(0);
+		expect(h.out.join("")).toContain("CONFLICT in shared.txt");
+	});
 });
 
 describe("provision", () => {
