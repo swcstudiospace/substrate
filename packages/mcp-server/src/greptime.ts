@@ -42,7 +42,19 @@ import {
 
 const DEFAULT_TIMEOUT_MS = 5000;
 
-export class GreptimeError extends Error {}
+export class GreptimeError extends Error {
+	/**
+	 * The store said the table does not exist. Decided from the text the store sent, before
+	 * any credential scrub, because scrubbing a configured user such as `found` replaces that
+	 * word inside `Table not found` with the redaction marker and the wording is gone from `message`.
+	 */
+	readonly missingTable: boolean;
+
+	constructor(message: string, options: { missingTable?: boolean } = {}) {
+		super(message);
+		this.missingTable = options.missingTable === true;
+	}
+}
 
 /**
  * The ledger did not answer, or answered broken: unreachable, timed out, a 5xx,
@@ -705,7 +717,13 @@ function credentialNeedles(config: GreptimeConfig): string[] {
 	} catch {
 		// A URL that does not parse has no userinfo to extract; the whole string is already listed.
 	}
-	return needles.filter((needle) => needle === config.url || needle.length >= MIN_BARE_SECRET_LENGTH);
+	const bare = needles.filter((needle) => needle === config.url || needle.length >= MIN_BARE_SECRET_LENGTH);
+	// A JSON error body echoes a value in its escaped spelling (`pa"ss` arrives as `pa\"ss`),
+	// which no longer contains the raw value. Longest first so the longer spelling is listed
+	// ahead of any shorter one it overlaps.
+	const spellings = new Set(bare);
+	for (const needle of bare) spellings.add(JSON.stringify(needle).slice(1, -1));
+	return [...spellings].sort((a, b) => b.length - a.length);
 }
 
 export class GreptimeClient {
@@ -783,6 +801,16 @@ export class GreptimeClient {
 		return redact(redactKnown(text, this.knownSecrets));
 	}
 
+	/**
+	 * A response body as it may appear in a diagnostic: scrubbed whole, then cut to `limit`.
+	 * Clipping first would cut a secret that straddles the limit, leave `redactKnown` unable
+	 * to match its complete value and let the surviving prefix through; clipping the scrubbed
+	 * text can only cut redaction markers or harmless text.
+	 */
+	private clippedBody(text: string, limit: number): string {
+		return this.scrub(text).slice(0, limit);
+	}
+
 	/** A transport failure with its message scrubbed and its `name` kept (`TimeoutError`, `AbortError`). */
 	private scrubTransportError(cause: unknown): unknown {
 		if (!(cause instanceof Error)) return this.scrub(String(cause));
@@ -856,7 +884,7 @@ export class GreptimeClient {
 					// here, on the way in. The name survives: `callPlane` reads it to tell a timeout.
 					throw this.scrubTransportError(cause);
 				}
-				if (response.status >= 500) throw new GreptimeUnavailable(this.scrub(`greptime ${response.status}: ${text.slice(0, 500)}`));
+				if (response.status >= 500) throw new GreptimeUnavailable(`greptime ${response.status}: ${this.clippedBody(text, 500)}`);
 				return { status: response.status, text };
 			});
 		} catch (cause) {
@@ -866,15 +894,20 @@ export class GreptimeClient {
 		}
 
 		const { status, text } = answer;
-		if (status < 200 || status >= 300) throw new GreptimeError(this.scrub(`greptime ${status}: ${text.slice(0, 500)}`));
+		if (status < 200 || status >= 300) {
+			throw new GreptimeError(`greptime ${status}: ${this.clippedBody(text, 500)}`, { missingTable: MISSING_TABLE.test(text.slice(0, 500)) });
+		}
 
 		let body: GreptimeResponse;
 		try {
 			body = JSON.parse(text) as GreptimeResponse;
 		} catch {
-			throw new GreptimeError(this.scrub(`greptime returned non-JSON: ${text.slice(0, 200)}`));
+			throw new GreptimeError(`greptime returned non-JSON: ${this.clippedBody(text, 200)}`, { missingTable: MISSING_TABLE.test(text.slice(0, 200)) });
 		}
-		if (body.error) throw new GreptimeError(this.scrub(`greptime: ${body.error}`));
+		if (body.error) {
+			const reported = `greptime: ${body.error}`;
+			throw new GreptimeError(this.scrub(reported), { missingTable: MISSING_TABLE.test(reported) });
+		}
 
 		const records = body.output?.[0]?.records;
 		if (!records?.rows) return [];
@@ -2377,7 +2410,7 @@ export class GreptimeClient {
 			);
 		} catch (cause) {
 			// Only the store's own "no such table" answer: it was never created (the history was never on), which is an empty history.
-			if (cause instanceof GreptimeError && !(cause instanceof GreptimeUnavailable) && MISSING_TABLE.test(cause.message)) return { points: [], stepS };
+			if (cause instanceof GreptimeError && !(cause instanceof GreptimeUnavailable) && cause.missingTable) return { points: [], stepS };
 			throw cause;
 		}
 		const points: MetricHistoryPoint[] = [];
