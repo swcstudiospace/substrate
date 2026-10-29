@@ -1415,6 +1415,22 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 			payload: { action: "docs.corpus.refused", status: "refused", reason: "secret-findings", count: 1, rules: ["generic-secret"] },
 		}),
 	},
+	{
+		id: "docs.corpus.root",
+		phase: 69,
+		kind: "note",
+		surface: { fixed: "substrate" },
+		actions: ["docs.corpus.root"],
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "substrate",
+			kind: "note",
+			summary: "corpus root 0123456789ab over 42 documents (manifest 7)",
+			session_id: "corpus-root",
+			payload: { action: "docs.corpus.root", root: HEX_64, count: 42, manifest_version: 7 },
+		}),
+	},
 ];
 
 export const SILENT_SOURCES: readonly SilentSource[] = [

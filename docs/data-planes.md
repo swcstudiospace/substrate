@@ -291,6 +291,14 @@ The corpus atlas keeps one Postgres table, `corpus_documents` (migration step 35
 - **Writers.** `substrate-mcp` only: `POST /corpus/ingest` and the `corpus_ingest` tool, after the plane accepted a document (and, for an `update`, with no plane write: the row's `source`, `kind`, `tier` and `commit` are refreshed when the sha256 is equal). One request runs at a time per process, in the phases tombstones, inserts, superseded deletes (`docs/runbooks/corpus-ingest.md`). `POST /corpus/plan`, `GET /corpus/status` and `corpus_status` read it. All of them answer `503 corpus.disabled` while `SUBSTRATE_CORPUS` is off (the default), so shipping a release that holds the table exposes nothing.
 - **Plane.** The ingest reaches LightRAG through the bulk plane (`planes/lightrag-bulk.ts`, `POST /documents/texts`) and no other way: the CLI sends documents to the server and never to LightRAG. Operations are in `docs/runbooks/corpus-ingest.md`; the dataset and its citations are in `docs/docs-plane.md`.
 
+## Corpus proofs (phase 69)
+
+The manifest has a Merkle root: an RFC 6962 tree, built with the ledger package's own functions, over the active rows' `(repo, path, sha256)` leaves sorted by `(repo, path)`. It is computed from `corpus_documents` on the server (one read of at most 100,000 active rows) and cached per manifest version in process memory; nothing new is stored in Postgres or Dragonfly, and no migration is added.
+
+- **Ledger.** After an ingest that moved the manifest, `substrate-mcp` writes one `note` on surface `substrate`, session `corpus-root`, `payload.action: "docs.corpus.root"` with `root`, `count` and `manifest_version`, at most one per five seconds and never in the request's path. The hourly anchor covers it like any other event; the anchor job, its funded key and its timer stay operator-gated and the memo format is unchanged. The action is reserved (`RESERVED_NOTE_ACTIONS`).
+- **Reads.** `GET /corpus/root`, `GET /corpus/proof` and `GET /corpus/anchor` (bearer, audited under `corpus_status`) and `substrate corpus prove|verify`. `docs_search` carries `corpus_root` and `corpus_count` from the cached root. All of it answers `503 corpus.disabled`, or leaves the reply unchanged, while `SUBSTRATE_CORPUS` is off.
+- **Details.** The leaf encoding, the empty-manifest root, the anchor statuses, what a root does not cover and how a third party verifies are in `docs/corpus-proofs.md`.
+
 ## Fail-open budget (unchanged)
 
 A substrate outage never blocks a prompt. `fetchBrief` returns `""` within 1.5 s. Every cache miss and every Dragonfly, Hindsight or RAGFlow error falls through to the next source or to an empty result with a logged reason. Writes to Greptime and Timescale are the only calls allowed to fail closed, and only for the caller that asked for durability.

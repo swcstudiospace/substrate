@@ -170,9 +170,11 @@ import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, p
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
 import { lightragOp, probeLightrag, queryForTool, type LightragQueryMode, type LightragToolOutcome } from "./planes/lightrag.ts";
 import { createLightragBulkPlane, type LightragBulkPlane } from "./planes/lightrag-bulk.ts";
-import { corpusIngestReply, corpusPlanReply, corpusStatusReply, type CorpusReply, type CorpusServiceDeps } from "./corpus/service.ts";
+import { corpusAnchorReply, corpusIngestReply, corpusPlanReply, corpusProofReply, corpusRootReply, corpusStatusReply, type CorpusReply, type CorpusServiceDeps } from "./corpus/service.ts";
+import type { AnchorVerifier } from "./corpus/anchor.ts";
+import { CorpusRootKeeper, type RootClock } from "./corpus/root.ts";
 import type { CorpusStore } from "./corpus/store.ts";
-import type { CorpusIngestResponse, CorpusPlanResponse, CorpusStatusResponse } from "@substrate/corpus";
+import { shortRoot, type CorpusAnchorResponse, type CorpusIngestResponse, type CorpusPlanResponse, type CorpusProofResponse, type CorpusRootResponse, type CorpusStatusResponse } from "@substrate/corpus";
 import { RailwayClient } from "./railway.ts";
 import { nodePlanningFs } from "./planning/fs.ts";
 import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
@@ -1385,9 +1387,10 @@ export class Substrate {
 	private readonly hindsightFetch: FetchLike;
 	/** LightRAG fetch, gated on the LightRAG plane's own breaker: a RAGFlow outage never refuses a LightRAG call. Tests inject the fake underneath; production uses the global fetch. */
 	private readonly lightragFetch: FetchLike;
-	/** Test seam for the corpus manifest and bulk plane; production builds them from the index and the LightRAG config. */
-	private readonly corpusSeam: { store?: CorpusStore; plane?: LightragBulkPlane } | null;
+	/** Test seam for the corpus manifest, bulk plane, root clock and anchor verifier; production builds them from the index, the LightRAG config and the devnet reads. */
+	private readonly corpusSeam: { store?: CorpusStore; plane?: LightragBulkPlane; rootClock?: RootClock; anchorVerifier?: AnchorVerifier } | null;
 	private corpusPlaneCache: LightragBulkPlane | null = null;
+	private corpusRootKeeper: CorpusRootKeeper | null = null;
 	/** Railway control-plane client (Phase 45, D45-a); tests inject a recording fetch through `stores.railway`. */
 	readonly railway: RailwayClient;
 	/** Background retains in flight, drained (bounded) on shutdown. */
@@ -1503,8 +1506,8 @@ export class Substrate {
 			ragflowFetch?: FetchLike;
 			hindsightFetch?: FetchLike;
 			lightragFetch?: FetchLike;
-			/** Tests inject the corpus manifest and the LightRAG bulk plane; production builds them from the index and `config.lightrag`. */
-			corpus?: { store?: CorpusStore; plane?: LightragBulkPlane };
+			/** Tests inject the corpus manifest, the LightRAG bulk plane, the root clock and the anchor verifier; production builds them from the index, `config.lightrag` and the devnet reads. */
+			corpus?: { store?: CorpusStore; plane?: LightragBulkPlane; rootClock?: RootClock; anchorVerifier?: AnchorVerifier };
 			planningBaseDir?: string;
 			desktop?: DesktopDriver | null;
 			railway?: RailwayClient;
@@ -5239,7 +5242,7 @@ export class Substrate {
 		// The steering notice is per call like the context: it names the calling session's queued directives, so it is attached
 		// after the cache and a reply that carries it is never stored (`searchReplyStorable`).
 		const steering = this.steeringNoticeOf(sessionId);
-		return steering === null ? answered : { ...answered, steering };
+		return this.withCorpusRoot(steering === null ? answered : { ...answered, steering });
 	}
 
 	/**
@@ -5403,10 +5406,38 @@ export class Substrate {
 		return {
 			settings: this.config.corpus,
 			vmGuest: this.config.vmGuest,
-			store: this.config.corpus.enabled ? (this.corpusSeam?.store ?? this.index?.corpusStore() ?? null) : null,
+			store: this.corpusStore(),
 			plane: this.corpusSeam?.plane ?? this.corpusPlaneCache,
 			emit: (event) => this.emit(event),
+			roots: this.corpusRoots(),
+			anchor: { ports: () => this.anchorVerifyPorts(), verify: this.corpusSeam?.anchorVerifier },
 		};
+	}
+
+	/** The manifest, or null while `SUBSTRATE_CORPUS` is off or there is no index. */
+	private corpusStore(): CorpusStore | null {
+		return this.config.corpus.enabled ? (this.corpusSeam?.store ?? this.index?.corpusStore() ?? null) : null;
+	}
+
+	/** The root cache and the root event (v1.7 phase 69), one per service so a coalesced event and a cached root outlive a request. */
+	private corpusRoots(): CorpusRootKeeper {
+		this.corpusRootKeeper ??= new CorpusRootKeeper({ store: () => this.corpusStore(), emit: (event) => this.emit(event), clock: this.corpusSeam?.rootClock });
+		return this.corpusRootKeeper;
+	}
+
+	/**
+	 * Phase 69: a `docs_search` reply names the corpus root it was answered under, from the cache only. With `SUBSTRATE_CORPUS` off the
+	 * reply is returned untouched. A root that is not cached yet is left out and its computation starts off this call's path.
+	 */
+	private withCorpusRoot(reply: SearchReply): SearchReply {
+		if (!this.config.corpus.enabled) return reply;
+		const roots = this.corpusRoots();
+		const snapshot = roots.peek();
+		if (snapshot === null) {
+			roots.warm();
+			return reply;
+		}
+		return { ...reply, corpus_root: shortRoot(snapshot.root), corpus_count: snapshot.count };
 	}
 
 	/** `POST /corpus/plan` and the planning half of the `substrate corpus plan` command. */
@@ -5424,6 +5455,21 @@ export class Substrate {
 		const reply = await corpusIngestReply(this.corpusDeps(), raw, callerSurface);
 		if (reply.ok && reply.body.counts.ingested + reply.body.counts.tombstoned > 0) await this.cache.bump(DOCS_GENERATION_KEY);
 		return reply;
+	}
+
+	/** `GET /corpus/root`: the Merkle root over the active manifest. */
+	corpusRoot(callerSurface: Surface | null): Promise<CorpusReply<CorpusRootResponse>> {
+		return corpusRootReply(this.corpusDeps(), callerSurface);
+	}
+
+	/** `GET /corpus/proof` and the `substrate corpus prove` command. */
+	corpusProof(query: { repo: string | null; path: string | null }, callerSurface: Surface | null): Promise<CorpusReply<CorpusProofResponse>> {
+		return corpusProofReply(this.corpusDeps(), query, callerSurface);
+	}
+
+	/** `GET /corpus/anchor` and the online half of `substrate corpus verify`: is this root inside an anchored hour? */
+	corpusAnchor(root: string | null, callerSurface: Surface | null): Promise<CorpusReply<CorpusAnchorResponse>> {
+		return corpusAnchorReply(this.corpusDeps(), root, callerSurface);
 	}
 
 	/**
