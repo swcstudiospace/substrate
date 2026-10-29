@@ -216,8 +216,12 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 	let observedModel: string | null = null;
 	/** Set when a read named a model other than the expected one; cleared only by a read that names the expected one. */
 	let modelRefused = false;
-	/** The model check in flight and the timeout it runs under: a caller joins it only when its own timeout is the same. */
-	let verifying: { timeoutMs: number; result: Promise<{ ok: true } | { ok: false; reason: TeiReason }> } | null = null;
+	/** Numbers model checks in the order they started, so a reply that arrives late can be told from a newer one. */
+	let checkSeq = 0;
+	/** The start number of the newest check that saw another model: only a check that started after it may lift the refusal. */
+	let refusedBySeq = 0;
+	/** Model checks in flight, by the timeout they run under: a call joins a check only when its own timeout is the same. */
+	const verifying = new Map<number, Promise<{ ok: true } | { ok: false; reason: TeiReason }>>();
 
 	const expectedModel = (): string | null => config?.model ?? learnedModel;
 	const expectedDim = (): number | null => config?.dim ?? learnedDim;
@@ -321,6 +325,8 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 	async function verifyModel(timeoutMs: number): Promise<{ ok: true } | { ok: false; reason: TeiReason }> {
 		const first = modelCheckedAt === null;
 		if (!first && !modelRefused && now() - (modelCheckedAt ?? 0) < MODEL_RECHECK_MS) return { ok: true };
+		checkSeq += 1;
+		const started = checkSeq;
 		const read = await readInfo(timeoutMs, true);
 		if (!read.ok) {
 			if (modelRefused) return { ok: false, reason: "model-mismatch" };
@@ -330,8 +336,12 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 		const wanted = expectedModel();
 		if (wanted !== null && read.info.modelId !== wanted) {
 			modelRefused = true;
+			refusedBySeq = Math.max(refusedBySeq, started);
 			return { ok: false, reason: "model-mismatch" };
 		}
+		// A reply that names the expected model lifts a refusal only when its check started after the newest check that saw
+		// another model: an older reply arriving late says nothing about what the service serves now.
+		if (started < refusedBySeq) return { ok: false, reason: "model-mismatch" };
 		modelRefused = false;
 		learnedModel ??= read.info.modelId;
 		batchLimit ??= read.info.maxClientBatchSize;
@@ -340,16 +350,15 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 	}
 
 	function ensureVerified(timeoutMs: number): Promise<{ ok: true } | { ok: false; reason: TeiReason }> {
-		// A check started under a shorter timeout would end a longer caller's check early, so only callers with the same timeout share one.
-		if (verifying !== null && verifying.timeoutMs === timeoutMs) return verifying.result;
-		const mine: NonNullable<typeof verifying> = {
-			timeoutMs,
-			result: verifyModel(timeoutMs).finally(() => {
-				if (verifying === mine) verifying = null;
-			}),
-		};
-		verifying = mine;
-		return mine.result;
+		// A check started under a shorter timeout would end a longer caller's check early, so only calls with the same timeout
+		// share one; every in-flight check stays registered until it settles.
+		const running = verifying.get(timeoutMs);
+		if (running !== undefined) return running;
+		const check: Promise<{ ok: true } | { ok: false; reason: TeiReason }> = verifyModel(timeoutMs).finally(() => {
+			if (verifying.get(timeoutMs) === check) verifying.delete(timeoutMs);
+		});
+		verifying.set(timeoutMs, check);
+		return check;
 	}
 
 	async function embed(texts: readonly string[], options: TeiEmbedOptions = {}): Promise<TeiEmbedResult> {

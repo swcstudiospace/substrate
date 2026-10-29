@@ -592,6 +592,34 @@ describe("one timeout for every request of a call", () => {
 		await Promise.all([other.client.embed(["a"]), other.client.embed(["b"])]);
 		expect(shared.infoCalls()).toHaveLength(1);
 	});
+
+	test("three overlapping calls with timeouts 10000, 100 and 10000 start two model checks: the two matching calls share the first", async () => {
+		const tei = fakeTei();
+		const { client } = clientFor(CONFIG, tei.fetch);
+		await Promise.all([client.embed(["a"]), client.embed(["b"], { timeoutMs: 100 }), client.embed(["c"])]);
+		expect(tei.infoCalls()).toHaveLength(2);
+	});
+
+	test("an older reply that names the expected model cannot lift a refusal recorded by a newer check, and a later failed read keeps the refusal", async () => {
+		const healthy = fakeTei();
+		let infoSeen = 0;
+		const held = Promise.withResolvers<Response>();
+		const fetchImpl: PlaneFetch = async (input, init) => {
+			if (new URL(String(input)).pathname !== "/info") return healthy.fetch(input, init);
+			infoSeen += 1;
+			// The first check is held; the second one (a shorter timeout, so a separate check) sees another model; later reads fail.
+			if (infoSeen === 1) return held.promise;
+			if (infoSeen === 2) return Response.json({ model_id: "other-model", max_input_length: 512, max_client_batch_size: 2 });
+			return new Response("", { status: 503 });
+		};
+		const { client } = clientFor({ ...CONFIG, model: "test-model" }, fetchImpl);
+		const older = client.embed(["a"]);
+		expect(await client.embed(["b"], { timeoutMs: 100 })).toEqual({ ok: false, reason: "model-mismatch" });
+		held.resolve(Response.json({ model_id: "test-model", max_input_length: 512, max_client_batch_size: 2 }));
+		expect(await older).toEqual({ ok: false, reason: "model-mismatch" });
+		expect(await client.embed(["c"])).toEqual({ ok: false, reason: "model-mismatch" });
+		expect(healthy.embedCalls()).toHaveLength(0);
+	});
 });
 
 describe("probe after a recovery", () => {
