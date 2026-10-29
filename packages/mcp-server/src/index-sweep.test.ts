@@ -25,6 +25,7 @@ import {
 	type SweepStatement,
 } from "./index-sweep.ts";
 import { FORGET_MARKER_PREFIX } from "./memory-forget.ts";
+import { defined } from "./test-support.ts";
 
 /** 2026-10-13T12:00Z — the cutoffs below are this minus whole days. */
 const NOW = Date.UTC(2026, 9, 13, 12);
@@ -149,8 +150,8 @@ describe("planSweep", () => {
 		// Everything else is untouched by the switch, cutoffs included.
 		const plain = planSweep(DEFAULT_SWEEP_POLICY, NOW);
 		for (const [i, step] of enforced.entries()) {
-			expect(step.cutoff).toBe(plain[i]!.cutoff);
-			if (!step.cls.id.startsWith("entries-ttl-")) expect(step.cls).toBe(plain[i]!.cls);
+			expect(step.cutoff).toBe(defined(plain[i]).cutoff);
+			if (!step.cls.id.startsWith("entries-ttl-")) expect(step.cls).toBe(defined(plain[i]).cls);
 		}
 		// And `SWEEP_CLASSES` itself did not change under anyone's feet.
 		expect(SWEEP_CLASSES.filter((cls) => cls.id.startsWith("entries-ttl-")).every((cls) => cls.mode === "report")).toBe(true);
@@ -186,7 +187,7 @@ describe("the classes", () => {
 			const del = cls.deleteBatch(cutoff, 500).pick;
 			const predicate = /where (.+)$/.exec(count.text)?.[1];
 			expect(predicate).toBeDefined();
-			expect(del.text).toContain(predicate!);
+			expect(del.text).toContain(defined(predicate));
 			expect(del.text).toMatch(/limit \$\d+ for update skip locked/);
 			expect(count.params[0]).toBe(cutoff);
 			expect(del.params[0]).toBe(cutoff);
@@ -203,28 +204,28 @@ describe("the classes", () => {
 	});
 
 	test("idempotency rows: derived and explicit are split, and in-flight claims are never touched", () => {
-		expect(by["writes-derived-spent"]!.count(cutoff).text).toContain(
+		expect(defined(by["writes-derived-spent"]).count(cutoff).text).toContain(
 			"memory_writes q where explicit = false and outcome <> 'in-flight' and claimed < $1::timestamptz",
 		);
-		expect(by["writes-explicit-spent"]!.count(cutoff).text).toContain(
+		expect(defined(by["writes-explicit-spent"]).count(cutoff).text).toContain(
 			"memory_writes q where explicit = true and outcome <> 'in-flight' and claimed < $1::timestamptz",
 		);
 	});
 
 	test("reviews: decided rows only, judged on when they were decided", () => {
-		expect(by["reviews-decided"]!.count(cutoff).text).toContain(
+		expect(defined(by["reviews-decided"]).count(cutoff).text).toContain(
 			"memory_reviews q where state <> 'pending' and coalesce(decided, created) < $1::timestamptz",
 		);
 	});
 
 	test("quarantine: released means the same content later landed; the rest is reported, never deleted", () => {
 		const landed = "exists (select 1 from memory_entries e where e.entry_hash = q.entry_hash)";
-		expect(by["quarantine-released"]!.count(cutoff).text).toContain(`created < $1::timestamptz and ${landed}`);
-		expect(by["quarantine-unresolved"]!.count(cutoff).text).toContain(`created < $1::timestamptz and not ${landed}`);
+		expect(defined(by["quarantine-released"]).count(cutoff).text).toContain(`created < $1::timestamptz and ${landed}`);
+		expect(defined(by["quarantine-unresolved"]).count(cutoff).text).toContain(`created < $1::timestamptz and not ${landed}`);
 	});
 
 	test("terminal graphs: the status list is the brief's, no graph with a live lease is a candidate, and the cascade locks every node then decides per graph", () => {
-		const graphs = by["graphs-terminal"]!;
+		const graphs = defined(by["graphs-terminal"]);
 		const liveLease =
 			"n.claimed_by is not null and coalesce(n.lease_expires_at, n.claimed_at + make_interval(secs => 900)) > now()";
 		const count = graphs.count(cutoff);
@@ -233,10 +234,10 @@ describe("the classes", () => {
 		expect(count.params).toEqual([cutoff, TERMINAL_GRAPH_STATUSES.join("|")]);
 		expect(TERMINAL_GRAPH_STATUSES).toEqual(["Merged", "Resolved", "Done", "Won't Fix", "Closed", "Failed", "Canceled"]);
 
-		const batch = graphs.deleteBatch!(cutoff, 100);
+		const batch = defined(graphs.deleteBatch)(cutoff, 100);
 		// The pick is the count's predicate — live-lease exclusion included — locked.
 		expect(batch.pick.text).toBe(
-			`select g.graph_id from graph_index g where ${/where (.+)$/.exec(count.text)![1]} limit $3 for update skip locked`,
+			`select g.graph_id from graph_index g where ${defined(defined(/where (.+)$/.exec(count.text))[1])} limit $3 for update skip locked`,
 		);
 		expect(batch.pick.params).toEqual([cutoff, TERMINAL_GRAPH_STATUSES.join("|"), 100]);
 		expect(batch.skippedAs).toBe("skipped_live_lease");
@@ -245,7 +246,7 @@ describe("the classes", () => {
 		// The lock takes every node row of the picked graphs — plain `for update`, so
 		// it waits for a claim in flight and reads the row version that claim wrote —
 		// and reports each row's lease state; the ids travel as JSON text.
-		const lock = batch.lock!(picked);
+		const lock = defined(batch.lock)(picked);
 		expect(lock.text).toBe(
 			`select n.graph_id, (${liveLease}) as live from graph_nodes n ` +
 				"where n.graph_id in (select jsonb_array_elements_text($1::text::jsonb)) for update",
@@ -260,48 +261,48 @@ describe("the classes", () => {
 			{ graph_id: "ut-b", live: false },
 			{ graph_id: "ut-b", live: true },
 		];
-		const [nodes, graphsThenRest, ...more] = batch.decide!(picked, locked);
+		const [nodes, graphsThenRest, ...more] = defined(batch.decide)(picked, locked);
 		expect(more).toEqual([]);
 		// Only the graphs with no live node are named — ut-b in neither statement, so
 		// none of its rows (its free node included) is touched; ut-c, nodeless, goes.
 		const ids = JSON.stringify(["ut-a", "ut-c"]);
-		expect(nodes!.text).toContain("delete from graph_nodes n where n.graph_id in (select jsonb_array_elements_text($1::text::jsonb)) returning 1");
-		expect(nodes!.text).not.toContain("claimed_by");
-		expect(nodes!.params).toEqual([ids]);
+		expect(defined(nodes).text).toContain("delete from graph_nodes n where n.graph_id in (select jsonb_array_elements_text($1::text::jsonb)) returning 1");
+		expect(defined(nodes).text).not.toContain("claimed_by");
+		expect(defined(nodes).params).toEqual([ids]);
 		// Then the index row only where no node survived, and the FK-less tables only for graphs whose row went.
-		expect(graphsThenRest!.text).toContain(
+		expect(defined(graphsThenRest).text).toContain(
 			"delete from graph_index gi where gi.graph_id in (select jsonb_array_elements_text($1::text::jsonb)) " +
 				"and not exists (select 1 from graph_nodes n where n.graph_id = gi.graph_id) returning gi.graph_id",
 		);
 		for (const table of ["graph_edges", "graph_steps", "graph_bindings"]) {
-			expect(graphsThenRest!.text).toContain(`delete from ${table} where graph_id in (select graph_id from g)`);
+			expect(defined(graphsThenRest).text).toContain(`delete from ${table} where graph_id in (select graph_id from g)`);
 		}
-		expect(graphsThenRest!.text).toMatch(/as deleted, .*as edges, .*as steps, .*as bindings$/);
-		expect(graphsThenRest!.params).toEqual([ids]);
-		for (const statement of [nodes!, graphsThenRest!]) expect(JSON.stringify(statement)).not.toContain("ut-b");
+		expect(defined(graphsThenRest).text).toMatch(/as deleted, .*as edges, .*as steps, .*as bindings$/);
+		expect(defined(graphsThenRest).params).toEqual([ids]);
+		for (const statement of [defined(nodes), defined(graphsThenRest)]) expect(JSON.stringify(statement)).not.toContain("ut-b");
 
 		// Every picked graph live: nothing is issued at all.
-		expect(batch.decide!([{ graph_id: "ut-b" }], [{ graph_id: "ut-b", live: true }])).toEqual([]);
+		expect(defined(batch.decide)([{ graph_id: "ut-b" }], [{ graph_id: "ut-b", live: true }])).toEqual([]);
 	});
 
 	test("entries-superseded never names a forgotten row: its count and its delete both exclude the forget marker", () => {
-		const cls = by["entries-superseded"]!;
+		const cls = defined(by["entries-superseded"]);
 		// The forget unit's marker is `forgotten:fg_...`; the predicate is built from the module's own prefix.
 		const exclusion = `left(superseded_by, ${FORGET_MARKER_PREFIX.length}) <> '${FORGET_MARKER_PREFIX}'`;
 		expect(cls.count(cutoff).text).toContain(exclusion);
-		expect(cls.deleteBatch!(cutoff, 10).pick.text).toContain(exclusion);
+		expect(defined(cls.deleteBatch)(cutoff, 10).pick.text).toContain(exclusion);
 		// The exclusion narrows the predicate; it does not replace the not-null rule.
 		expect(cls.count(cutoff).text).toContain("superseded_by is not null and created < $1::timestamptz");
 	});
 
 	test("memory entries: superseded versions are deletable; ttl classes only count rows the reads still return", () => {
-		expect(by["entries-superseded"]!.count(cutoff).text).toContain(
+		expect(defined(by["entries-superseded"]).count(cutoff).text).toContain(
 			"memory_entries q where superseded_by is not null and created < $1::timestamptz",
 		);
-		expect(by["entries-ttl-30d"]!.count(cutoff).text).toContain(
+		expect(defined(by["entries-ttl-30d"]).count(cutoff).text).toContain(
 			"memory_entries where ttl = '30d' and superseded_by is null and created < $1::timestamptz",
 		);
-		const graphTtl = by["entries-ttl-graph"]!.count(cutoff);
+		const graphTtl = defined(by["entries-ttl-graph"]).count(cutoff);
 		expect(graphTtl.text).toContain("ttl = 'graph' and superseded_by is null and created < $1::timestamptz");
 		// The graph is `memoryGraphId`'s: `graph_id`, or the tail of a `graph:` scope —
 		// the identity the reads judge by, so the sweep and `memoryExpiry` agree.
@@ -316,17 +317,17 @@ describe("the classes", () => {
 		// `SWEEP_CLASSES` itself never exposes it: nothing that plans without the
 		// switch can reach a ttl delete.
 		for (const id of ["entries-ttl-30d", "entries-ttl-graph"] as const) {
-			expect(by[id]!.deleteBatch).toBeUndefined();
-			expect(by[id]!.underEnforce?.mode).toBe("delete");
-			const count = by[id]!.count(cutoff);
-			const pick = by[id]!.underEnforce!.deleteBatch(cutoff, 500).pick;
+			expect(defined(by[id]).deleteBatch).toBeUndefined();
+			expect(defined(by[id]).underEnforce?.mode).toBe("delete");
+			const count = defined(by[id]).count(cutoff);
+			const pick = defined(defined(by[id]).underEnforce).deleteBatch(cutoff, 500).pick;
 			// Same `from … where …` text in both statements, then the limit as the next parameter.
 			const predicate = count.text.slice(count.text.indexOf("from ") + 5);
 			expect(pick.text).toContain(`select id from ${predicate} limit $${count.params.length + 1} for update skip locked`);
 			expect(pick.text).toContain("delete from memory_entries q using doomed where q.id = doomed.id");
 			expect(pick.params).toEqual([...count.params, 500]);
 		}
-		expect(by["entries-superseded"]!.underEnforce).toBeUndefined();
+		expect(defined(by["entries-superseded"]).underEnforce).toBeUndefined();
 	});
 });
 
@@ -506,7 +507,7 @@ describe("executeSweep", () => {
 		expect(statements.filter((statement) => statement.text.startsWith("select g.graph_id"))).toHaveLength(1);
 		// The lock carries both picked ids; every delete carries only the free graph —
 		// the claimed graph's unleased sibling node is never named by any statement.
-		const lock = statements.find((statement) => statement.text.startsWith("select n.graph_id"))!;
+		const lock = defined(statements.find((statement) => statement.text.startsWith("select n.graph_id")));
 		expect(lock.params).toEqual([JSON.stringify(["g-free", "g-claimed"])]);
 		const deletes = statements.filter((statement) => statement.text.includes("delete from"));
 		expect(deletes).toHaveLength(2);
