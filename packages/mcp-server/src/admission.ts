@@ -184,6 +184,9 @@ export const ROUTE_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	"/corpus/plan": "read",
 	"/corpus/status": "read",
 	"/corpus/ingest": "write",
+	"/corpus/root": "read",
+	"/corpus/proof": "read",
+	"/corpus/anchor": "read",
 };
 
 /** Monitoring traffic. Exempt on GET only: a POST to one of these is a 404, and a 404 is metered like any other unknown path. */
