@@ -4,9 +4,11 @@
  */
 import { describe, expect, test } from "bun:test";
 import { CORPUS_PROTOCOL, DIGEST_PATH, MAX_DIGEST_CHARS, MAX_GAPS_LIMIT, MAX_REFLECT_DIGESTS, DEFAULT_GAPS_LIMIT, corpusDocumentName, documentKey, type CorpusReflectResponse } from "@substrate/corpus";
+import type { AnchorVerifyPorts } from "../anchor-verify-deps.ts";
 import type { CorpusSettings } from "../config.ts";
 import type { Surface } from "../types.ts";
 import { defined } from "../test-support.ts";
+import { CorpusRootKeeper } from "./root.ts";
 import { FakeReflectStore } from "./reflect-testkit.ts";
 import {
 	type ReflectReply,
@@ -25,6 +27,20 @@ const REPO = "swcstudiospace/agent-substrate";
 const OTHER = "swcstudiospace/other";
 const OPEN: CorpusSettings = { enabled: true, concurrency: 4, batchDocs: 20, batchBytes: 1_000_000 };
 
+/** The anchor check is never reached by these doors; a port that throws proves it. */
+const UNUSED_PORTS: AnchorVerifyPorts = {
+	ledger: null,
+	rowToEvent: () => {
+		throw new Error("not used");
+	},
+	rpc: () => {
+		throw new Error("not used");
+	},
+	solana: { pubkey: null, problem: null },
+	operatorSurfaces: new Set<string>(),
+	nowMs: () => 0,
+};
+
 interface Retained {
 	repo: string;
 	text: string;
@@ -42,6 +58,8 @@ function world(over: Partial<ReflectServiceDeps> = {}, retain: (input: Retained)
 		store,
 		plane,
 		emit: async () => undefined,
+		roots: new CorpusRootKeeper({ store: () => store, emit: async () => ({ stored: true }) }),
+		anchor: { ports: () => UNUSED_PORTS },
 		reflect,
 		gapScore: 0.2,
 		retainDigest: async (input) => {

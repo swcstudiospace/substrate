@@ -15,6 +15,7 @@ import {
 	MAX_GAPS_LIMIT,
 	MAX_REFLECT_DIGESTS,
 	documentKey,
+	isSha256Hex,
 	isValidPath,
 	isValidRepo,
 	type CorpusDocument,
@@ -27,7 +28,7 @@ import type { Surface } from "../types.ts";
 import { corpusGate, ingestCorpus, type GateReason } from "./ingest.ts";
 import { FEEDBACK_VERDICTS, GAP_WINDOW_DAYS, isFeedbackVerdict, type FeedbackVerdict, type ReflectStore } from "./reflect-store.ts";
 import type { CorpusServiceDeps } from "./service.ts";
-import { isRecord, isSha256Hex } from "./validate.ts";
+import { isRecord } from "./validate.ts";
 
 /** The tier a digest is stored at: the classifier gives the virtual digest path tier 1, and the server writes the same. */
 export const DIGEST_TIER = 1;
