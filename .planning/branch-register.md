@@ -13,7 +13,7 @@ Result: of 84 remote branches not contained in main, **60 are heads of merged PR
 | #168 | the desktop wrapper and smoke refuse to run unless the docker endpoint is proven local (the driver already did); bounded, force-killed probe | commit 76a4b2c3 |
 | #169 | every GreptimeClient diagnostic is scrubbed of configured credentials (scrub, then clip; JSON-escaped spellings; the missing-table fact stays structured) | commit 76a4b2c3 |
 
-Not ported, deliberately: an audit row for a malformed or oversize `/skills/propose` body (main's tests pin the opposite: a refusal that never reaches the audit call leaves no record; that contract is the owner's to change), the production-identity runbook rewrite (the archive's copy records the real 2026-10-10 switch-on that the rewrite lacks), and the `greptime-smoke` extension (needs a live twin to verify).
+Not ported, deliberately: an audit row for an oversize or malformed REST `/skills/propose` body (main's `invalid-write-roundtrip.test.ts` pins that a body refused before the audit call leaves no record, and that an MCP call is audited `allowed` before the tool refuses it; that contract is the owner's to change), the production-identity runbook rewrite (the archive's copy records the real 2026-10-10 switch-on that the rewrite lacks), and the `greptime-smoke` extension (needs a live twin to verify).
 
 ## The 24 remote branches without a merged head
 
