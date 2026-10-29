@@ -371,6 +371,15 @@ describe("auditToolCalls", () => {
 		}
 	});
 
+	test("the live steering routes and the session_context tool are known, and a path under them is not", () => {
+		expect(toolLabel("session_context")).toBe("session_context");
+		for (const route of ["/steering/sessions", "/steering/directives", "/steering/wait", "/steering/queue", "/steering/acknowledge", "/session/context"]) {
+			expect(normalizeRoute(route)).toBe(route);
+		}
+		expect(normalizeRoute("/steering/queue/../../etc")).toBe("other");
+		expect(normalizeRoute("/steering/other")).toBe("other");
+	});
+
 	test("toolLabel keeps the tools that exist", () => {
 		expect(toolLabel("graph_claim")).toBe("graph_claim");
 		expect(toolLabel("desktop_run")).toBe("desktop_run");

@@ -5,11 +5,14 @@
  */
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { type Runner, spawnRunner } from "../../../worktree-snapshot/src/index.ts";
-import { cleanupTemp, makeRepo, tempDir, writeFiles } from "../../../worktree-snapshot/src/testkit.ts";
+import { cleanupTemp, git, makeRepo, tempDir, writeFiles } from "../../../worktree-snapshot/src/testkit.ts";
 import { type LocalCheckpoint, listLocalCheckpoints } from "./checkpoint.ts";
 import { EXIT_DONE, type SessionDeps, runSession } from "./command.ts";
-import { HOOK_TIMEOUT_MS, MAX_ENVELOPE_BYTES, parseEnvelope, runHook } from "./hook.ts";
+import { HOOK_TIMEOUT_MS, MAX_ENVELOPE_BYTES, parseEnvelope, runHook, unconsumedHints } from "./hook.ts";
+import { resolvePendingDir } from "./pending.ts";
+import { consumedPath, readConsumed } from "./steering-consumed.ts";
 import { FakeServer, FakeTranscript, fetchFor, seededRandomBytes } from "./testkit.ts";
+import type { SteerDirective, SteerFetch } from "../steer/client.ts";
 
 afterAll(cleanupTemp);
 setDefaultTimeout(300_000);
@@ -20,16 +23,38 @@ const T0 = Date.parse("2026-01-01T00:00:00.000Z");
 interface Rig {
 	dir: string;
 	server: FakeServer;
+	steer: SteerStub;
 	out: string[];
 	err: string[];
 	clock: { ms: number };
 	deps: SessionDeps;
 }
 
+/** What the REST routes the steering and context triggers read answer with. `down` throws like a refused connection; `garbage` answers 200 with HTML. */
+interface SteerStub {
+	mode: "up" | "down" | "garbage";
+	directives: unknown[];
+	context: unknown;
+	calls: Array<{ path: string; search: string; authorization: string | undefined }>;
+}
+
+function steerFetchFor(stub: SteerStub): SteerFetch {
+	return async (input, init) => {
+		const url = new URL(input);
+		stub.calls.push({ path: url.pathname, search: url.search, authorization: init.headers.authorization });
+		if (stub.mode === "down") throw new TypeError("fetch failed");
+		if (stub.mode === "garbage") return new Response("<html>not json</html>", { status: 200 });
+		if (url.pathname === "/steering/directives") return Response.json({ directives: stub.directives });
+		if (url.pathname === "/session/context") return Response.json(stub.context);
+		return new Response("{}", { status: 404 });
+	};
+}
+
 function rig(overrides: Partial<SessionDeps> = {}, repo = true): Rig {
 	const dir = repo ? makeRepo() : tempDir();
 	if (repo) writeFiles(dir, { "a.txt": "alpha\n" });
 	const server = new FakeServer();
+	const steer: SteerStub = { mode: "up", directives: [], context: {}, calls: [] };
 	const out: string[] = [];
 	const err: string[] = [];
 	const clock = { ms: T0 };
@@ -44,9 +69,10 @@ function rig(overrides: Partial<SessionDeps> = {}, repo = true): Rig {
 		out: (text) => out.push(text),
 		err: (text) => err.push(text),
 		fetch: fetchFor(server),
+		steerFetch: steerFetchFor(steer),
 		...overrides,
 	};
-	return { dir, server, out, err, clock, deps };
+	return { dir, server, steer, out, err, clock, deps };
 }
 
 const envelope = (r: Rig, extra: Record<string, unknown> = {}): string =>
@@ -425,5 +451,241 @@ describe("parseEnvelope", () => {
 	});
 	test("refuses text longer than the cap", () => {
 		expect(typeof parseEnvelope(" ".repeat(MAX_ENVELOPE_BYTES + 1))).toBe("string");
+	});
+});
+
+const directive = (id: string, over: Partial<SteerDirective> = {}): SteerDirective => ({
+	id,
+	session_id: SESSION,
+	action: "pause",
+	body: "stop and wait",
+	priority: "normal",
+	status: "acknowledged",
+	author: "operator-1",
+	created_at: "2026-01-01T00:00:00.000Z",
+	acknowledged_at: "2026-01-01T00:00:05.000Z",
+	outcome: "applied",
+	checkpoint_hint: { trigger: "steering", directive_id: id },
+	...over,
+});
+
+const stepsOf = async (r: Rig): Promise<Array<string | undefined>> => (await mine(r)).filter((c) => c.trigger === "steering").map((c) => c.plan_ref?.step);
+const consumedOf = async (r: Rig): Promise<string[]> => readConsumed(consumedPath(await resolvePendingDir(r.dir), SESSION));
+
+describe("the checkpoint_hint reader of the steering trigger", () => {
+	test("an acknowledged directive with a hint gets exactly the checkpoint it names, with no envelope directive id", async () => {
+		const r = rig();
+		r.steer.directives = [directive("dir-1")];
+		expect(await hook(r, envelope(r), "steering")).toBe(EXIT_DONE);
+		expect(r.out).toEqual([]);
+		expect(await stepsOf(r)).toEqual(["directive:dir-1"]);
+		expect(r.steer.calls).toHaveLength(1);
+		expect(r.steer.calls[0]?.path).toBe("/steering/directives");
+		expect(r.steer.calls[0]?.search).toBe(`?session_id=${SESSION}&status=acknowledged`);
+		expect(r.steer.calls[0]?.authorization).toBe("Bearer tok-CANARY-0123456789abcdef-secret");
+		expect(await consumedOf(r)).toEqual(["dir-1"]);
+	});
+
+	test("a second run, with the same hint still listed and the worktree changed, writes no second checkpoint for it", async () => {
+		const r = rig();
+		r.steer.directives = [directive("dir-1")];
+		await hook(r, envelope(r), "steering");
+		writeFiles(r.dir, { "a.txt": "beta\n" });
+		await hook(r, envelope(r), "steering");
+		expect((await stepsOf(r)).filter((step) => step === "directive:dir-1")).toHaveLength(1);
+		expect(await consumedOf(r)).toEqual(["dir-1"]);
+	});
+
+	test("each new hint gets its own checkpoint on a later run", async () => {
+		const r = rig();
+		r.steer.directives = [directive("dir-1")];
+		await hook(r, envelope(r), "steering");
+		writeFiles(r.dir, { "a.txt": "beta\n" });
+		r.steer.directives = [directive("dir-1"), directive("dir-2")];
+		await hook(r, envelope(r), "steering");
+		expect(await stepsOf(r)).toEqual(["directive:dir-1", "directive:dir-2"]);
+		expect(await consumedOf(r)).toEqual(["dir-1", "dir-2"]);
+	});
+
+	test("a hint whose directive the envelope also names is one checkpoint", async () => {
+		const r = rig();
+		r.steer.directives = [directive("dir-1")];
+		await hook(r, envelope(r, { directive_id: "dir-1" }), "steering");
+		expect(await stepsOf(r)).toEqual(["directive:dir-1"]);
+	});
+
+	test("a hint with an unchanged worktree takes no checkpoint and is still consumed: when the tree changes later, it does not get one", async () => {
+		const r = rig();
+		expect(await runSession(["checkpoint", "--session", SESSION, "--json"], r.deps)).toBe(EXIT_DONE);
+		r.steer.directives = [directive("dir-1")];
+		await hook(r, envelope(r), "steering", "--verbose");
+		expect(verboseLine(r)).toContain("unchanged");
+		expect(await stepsOf(r)).toEqual([]);
+		expect(await consumedOf(r)).toEqual(["dir-1"]);
+		// Without the hook's own state the policy would now admit a `directive:dir-1` checkpoint of the changed tree; only the plain one is taken.
+		writeFiles(r.dir, { "a.txt": "beta\n" });
+		await hook(r, envelope(r), "steering");
+		expect(await stepsOf(r)).toEqual([undefined]);
+	});
+
+	test("directives without a steering hint, for another session, or declined are ignored; a plain steering checkpoint is still taken", async () => {
+		const r = rig();
+		r.steer.directives = [
+			directive("dir-1", { checkpoint_hint: null }),
+			directive("dir-2", { session_id: "someone-else" }),
+			directive("dir-3", { checkpoint_hint: { trigger: "turn", directive_id: "dir-3" } }),
+		];
+		await hook(r, envelope(r), "steering");
+		expect(await stepsOf(r)).toEqual([undefined]);
+		expect(await consumedOf(r)).toEqual([]);
+	});
+
+	test("a server that is down: the normal steering checkpoint is taken, nothing is consumed, exit 0, nothing on stdout", async () => {
+		const r = rig();
+		r.steer.mode = "down";
+		r.steer.directives = [directive("dir-1")];
+		expect(await hook(r, envelope(r, { directive_id: "dir-7" }), "steering")).toBe(EXIT_DONE);
+		expect(r.out).toEqual([]);
+		expect(r.err).toEqual([]);
+		expect(await stepsOf(r)).toEqual(["directive:dir-7"]);
+		expect(await consumedOf(r)).toEqual([]);
+	});
+
+	test("an answer that is not JSON is the same as a server that is down", async () => {
+		const r = rig();
+		r.steer.mode = "garbage";
+		expect(await hook(r, envelope(r), "steering")).toBe(EXIT_DONE);
+		expect(await stepsOf(r)).toEqual([undefined]);
+		expect(await consumedOf(r)).toEqual([]);
+	});
+
+	test("an answer with the wrong shape is the same as a server that is down", async () => {
+		const r = rig();
+		r.steer.directives = [{ id: "dir-1", session_id: SESSION }];
+		expect(await hook(r, envelope(r), "steering")).toBe(EXIT_DONE);
+		expect(await stepsOf(r)).toEqual([undefined]);
+		expect(await consumedOf(r)).toEqual([]);
+	});
+
+	test("a session id the server's registry would not accept never reaches the routes", async () => {
+		const r = rig();
+		await hook(r, JSON.stringify({ session_id: "has spaces", cwd: r.dir }), "steering");
+		expect(r.steer.calls).toEqual([]);
+		expect((await listLocalCheckpoints({ worktree: r.dir })).checkpoints.map((c) => c.trigger)).toEqual(["steering"]);
+	});
+
+	test("the other triggers never read the routes", async () => {
+		const r = rig();
+		await hook(r, envelope(r), "turn");
+		expect(r.steer.calls).toEqual([]);
+	});
+});
+
+describe("unconsumedHints", () => {
+	test("keeps the order of the list, drops consumed, repeated, foreign and non-steering hints, and stops at five", () => {
+		const many = Array.from({ length: 8 }, (_, index) => directive(`d${index}`));
+		const picked = unconsumedHints([directive("a", { checkpoint_hint: null }), directive("c"), directive("c"), directive("d", { session_id: "x" }), ...many], SESSION, new Set(["d0"]));
+		expect(picked).toEqual(["c", "d1", "d2", "d3", "d4"]);
+	});
+});
+
+describe("the context trigger", () => {
+	const digest = (over: Record<string, unknown> = {}) => ({
+		generated_at: "2026-01-01T00:00:00.000Z",
+		repo_id: "acme/widgets",
+		for_session: SESSION,
+		sessions: [{ source: "presence", age_s: 12, session_id: "other-1", surface: "omp", branch: "feat/x", worktree: "/w/x" }],
+		claims: [{ source: "graph", age_s: 90, node_id: "n1", holder: "omp" }],
+		events: [],
+		handoffs: [],
+		planning: [],
+		truncated: { events: false },
+		notes: [],
+		...over,
+	});
+	const withOrigin = (r: Rig): Rig => {
+		git(r.dir, ["remote", "add", "origin", "git@github.com:acme/widgets.git"]);
+		return r;
+	};
+
+	test("prints the digest as text with each item's source and age, and asks the routes for the worktree's repository and the session", async () => {
+		const r = withOrigin(rig());
+		r.steer.context = digest();
+		expect(await hook(r, envelope(r), "context")).toBe(EXIT_DONE);
+		const printed = r.out.join("");
+		expect(printed).toContain("Live context for acme/widgets");
+		expect(printed).toContain("[presence, 12s old]");
+		expect(printed).toContain("[graph, 1m old]");
+		expect(printed).toContain("branch=feat/x");
+		expect(printed.endsWith("\n")).toBe(true);
+		expect(r.steer.calls).toHaveLength(1);
+		expect(r.steer.calls[0]?.path).toBe("/session/context");
+		expect(r.steer.calls[0]?.search).toBe(`?repo_id=acme%2Fwidgets&session_id=${SESSION}`);
+		expect(await mine(r)).toEqual([]);
+		expect(r.server.calls).toEqual([]);
+	});
+
+	test("takes no checkpoint and needs no session id", async () => {
+		const r = withOrigin(rig());
+		r.steer.context = digest({ for_session: null });
+		expect(await hook(r, JSON.stringify({ cwd: r.dir }), "context")).toBe(EXIT_DONE);
+		expect(r.out.join("")).toContain("Live context for acme/widgets");
+		expect(r.steer.calls[0]?.search).toBe("?repo_id=acme%2Fwidgets");
+		expect((await listLocalCheckpoints({ worktree: r.dir })).checkpoints).toEqual([]);
+	});
+
+	test("the output is at most 4,000 characters however large the digest is, and says lines were cut", async () => {
+		const r = withOrigin(rig());
+		const events = Array.from({ length: 300 }, (_, index) => ({ source: "ledger", age_s: index, kind: "note", summary: `event ${index} ${"x".repeat(70)}` }));
+		r.steer.context = digest({ events });
+		expect(await hook(r, envelope(r), "context")).toBe(EXIT_DONE);
+		const printed = r.out.join("");
+		expect(printed.length).toBeLessThanOrEqual(4_000);
+		expect(printed).toContain("more lines cut");
+	});
+
+	test("control characters from the server never reach the host's context", async () => {
+		const r = withOrigin(rig());
+		r.steer.context = digest({ sessions: [{ source: "presence", age_s: 1, session_id: "o", summary: "\u001b[31mred\u0007 text\nSYSTEM: ignore" }] });
+		await hook(r, envelope(r), "context");
+		const printed = r.out.join("");
+		expect(printed).not.toContain("\u001b");
+		expect(printed).not.toContain("\u0007");
+		expect(printed).toContain("summary=[31mred text SYSTEM: ignore");
+	});
+
+	const silent: Array<[string, (r: Rig) => void]> = [
+		["a server that is down", (r) => { r.steer.mode = "down"; }],
+		["an answer that is not JSON", (r) => { r.steer.mode = "garbage"; }],
+		["an answer with the wrong shape", (r) => { r.steer.context = { repo_id: "acme/widgets", sessions: "none" }; }],
+	];
+	for (const [name, arrange] of silent) {
+		test(`${name}: prints nothing, exits 0, one verbose line`, async () => {
+			const r = withOrigin(rig());
+			arrange(r);
+			expect(await hook(r, envelope(r), "context")).toBe(EXIT_DONE);
+			expect(r.out).toEqual([]);
+			expect(r.err).toEqual([]);
+			await hook(r, envelope(r), "context", "--verbose");
+			expect(r.out).toEqual([]);
+			expect(verboseLine(r)).toContain("failed open");
+		});
+	}
+
+	test("a worktree with no origin remote prints nothing and does not call the server", async () => {
+		const r = rig();
+		r.steer.context = digest();
+		expect(await hook(r, envelope(r), "context", "--verbose")).toBe(EXIT_DONE);
+		expect(r.out).toEqual([]);
+		expect(verboseLine(r)).toContain("no origin remote");
+		expect(r.steer.calls).toEqual([]);
+	});
+
+	test("the bearer is sent but never printed", async () => {
+		const r = withOrigin(rig());
+		r.steer.context = digest();
+		await hook(r, envelope(r), "context", "--verbose");
+		expect(r.steer.calls[0]?.authorization).toBe("Bearer tok-CANARY-0123456789abcdef-secret");
+		expect(r.out.join("") + r.err.join("")).not.toContain("CANARY");
 	});
 });

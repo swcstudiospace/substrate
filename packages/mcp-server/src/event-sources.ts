@@ -1383,6 +1383,22 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 			payload: { action: "steering.queued", directive_id: "steer-sample", target_session_id: "wt-sample", steering_action: "pause", priority: "normal" },
 		}),
 	},
+	{
+		id: "steering.persist_failed",
+		phase: 67,
+		kind: "warning",
+		surface: "caller",
+		actions: ["steering.persist_failed"],
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "warning",
+			summary: "steering session sess-sample was not saved to steering_sessions: connection refused",
+			session_id: "sess-sample",
+			payload: { action: "steering.persist_failed", reason: "connection refused" },
+		}),
+	},
 ];
 
 export const SILENT_SOURCES: readonly SilentSource[] = [

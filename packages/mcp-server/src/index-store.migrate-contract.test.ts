@@ -58,6 +58,7 @@ export const REAL_ALLOWLISTS: ContractAllowlists = {
 		schema_migrations: "the migration ledger that IndexStore.migrate() creates itself; it is not archive data",
 		skills_registry: "step 17 predates the archive's closed table list and is not part of it; archiving it is a separate change",
 		planning_steering_audit: "step 33 is an opt-in (steering-audit), append-only steering audit table; it is not part of the archive's closed table list and archiving it is a separate change",
+		steering_sessions: "step 35 is an opt-in (steering-sessions) restart cache of live steering session state; it is not part of the archive's closed table list and is rebuilt from the live registry, not archived",
 	},
 };
 

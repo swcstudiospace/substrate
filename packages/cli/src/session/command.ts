@@ -55,6 +55,8 @@ import { type RollbackResult, type TranscriptPort, RollbackInputError, rollback 
 import { HOOK_TIMEOUT_MS, describeOutcome, readProcessStdin, runHook } from "./hook.ts";
 import { HOOK_CONFIG_TARGETS, type HookConfigTarget, renderHookConfig } from "./hook-config.ts";
 import { HOOK_TRIGGERS, type HookTrigger } from "./trigger-policy.ts";
+import { type SteerClient, type SteerFetch, createSteerClient } from "../steer/client.ts";
+import { MAX_DIGEST_CHARS } from "../steer/render.ts";
 
 export const EXIT_DONE = 0;
 export const EXIT_FAILED = 1;
@@ -68,7 +70,7 @@ export const SESSION_USAGE =
 	"       substrate session rollback <ckpt|seq|previous> [--session ID] [--surface S] [--dry-run] [--force] [--offline] [--json]\n" +
 	"       substrate session recover [--json]\n" +
 	"       substrate session sync [--json]\n" +
-	"       substrate session hook <turn|plan-step|steering|baseline> [--session ID] [--surface S] [--plan-phase P] [--plan-step S] [--verbose]   (reads a JSON envelope on stdin; fail-open: always exits 0)\n" +
+	"       substrate session hook <turn|plan-step|steering|baseline|context> [--session ID] [--surface S] [--plan-phase P] [--plan-step S] [--verbose]   (reads a JSON envelope on stdin; fail-open: always exits 0; `context` prints the live-context digest)\n" +
 	`       substrate session hook-config <${HOOK_CONFIG_TARGETS.join("|")}>   (prints the hook configuration to install; installs nothing)\n` +
 	`triggers: ${CHECKPOINT_TRIGGERS.join(", ")}\n` +
 	"exit: 0 done, 1 failed, 2 usage, 3 refused (drift, anchor mismatch, unknown or foreign target), 4 files restored but the ledger commit is pending\n" +
@@ -111,6 +113,8 @@ export interface SessionDeps {
 	stdin?: () => Promise<string>;
 	/** The overall budget of `session hook` in milliseconds (default `HOOK_TIMEOUT_MS`). A test seam. */
 	hookTimeoutMs?: number;
+	/** The fetch of the REST routes the `steering` and `context` hook triggers read (default: global `fetch`). A test seam. */
+	steerFetch?: SteerFetch;
 }
 
 // ---------------------------------------------------------------------------
@@ -267,6 +271,17 @@ export async function runSession(argv: readonly string[], deps: SessionDeps): Pr
 			...(deps.signalFor === undefined ? {} : { signalFor: deps.signalFor }),
 		});
 	};
+	const steerClientFor: SteerClientFor = (forSurface, timeoutMs) => {
+		const token = deps.tokenFor(forSurface);
+		out.protect(token);
+		return createSteerClient({
+			url: deps.url,
+			...(token === undefined ? {} : { token }),
+			timeoutMs,
+			...(deps.steerFetch === undefined ? {} : { fetch: deps.steerFetch }),
+			...(deps.signalFor === undefined ? {} : { signalFor: deps.signalFor }),
+		});
+	};
 	const failure = (code: string, message: string, exit = EXIT_FAILED): number => {
 		if (json) out.json({ ok: false, error: { code, message } });
 		else out.error(`substrate session ${parsed.sub}: ${message}`);
@@ -288,7 +303,7 @@ export async function runSession(argv: readonly string[], deps: SessionDeps): Pr
 			case "recover":
 				return await commandRecover(deps, out, run, json, failure);
 			case "hook":
-				return await commandHook(parsed, deps, out, run, surface, clientFor);
+				return await commandHook(parsed, deps, out, run, surface, clientFor, steerClientFor);
 			case "hook-config":
 				deps.out(renderHookConfig(parsed.positional[0] as HookConfigTarget));
 				return EXIT_DONE;
@@ -318,6 +333,7 @@ function refuse(argv: readonly string[], reason: string, deps: SessionDeps): num
 }
 
 type ClientFor = (surface: string, timeoutMs: number) => RollbackServerClient;
+type SteerClientFor = (surface: string, timeoutMs: number) => SteerClient;
 type Usage = (message: string) => number;
 type Failure = (code: string, message: string, exit?: number) => number;
 
@@ -743,10 +759,10 @@ async function commandSync(deps: SessionDeps, out: Output, run: Runner, json: bo
 // ---------------------------------------------------------------------------
 
 /**
- * `session hook <trigger>`: fail-open by contract. Whatever happens, the exit is 0 and stdout stays empty;
- * `--verbose` adds one stderr line saying what happened.
+ * `session hook <trigger>`: fail-open by contract. Whatever happens, the exit is 0. Stdout stays empty, except that the
+ * `context` trigger prints its digest; `--verbose` adds one stderr line saying what happened.
  */
-async function commandHook(parsed: Parsed, deps: SessionDeps, out: Output, run: Runner, surface: string, clientFor: ClientFor): Promise<number> {
+async function commandHook(parsed: Parsed, deps: SessionDeps, out: Output, run: Runner, surface: string, clientFor: ClientFor, steerClientFor: SteerClientFor): Promise<number> {
 	const trigger = parsed.positional[0] as HookTrigger;
 	let line: string;
 	try {
@@ -763,6 +779,8 @@ async function commandHook(parsed: Parsed, deps: SessionDeps, out: Output, run: 
 			...(planRef === undefined ? {} : { planRef }),
 			// The client gives up before the hook's own budget, so a slow server still leaves the record in the pending journal.
 			client: clientFor(surface, Math.min(deps.timeoutMs, Math.max(1, Math.floor(timeoutMs * 0.8)))),
+			// The REST client of the hint reader and the digest; the other triggers never call it.
+			...(trigger === "steering" || trigger === "context" ? { steer: steerClientFor(surface, Math.min(deps.timeoutMs, Math.max(1, Math.floor(timeoutMs * 0.3)))) } : {}),
 			now: deps.now,
 			randomBytes: deps.randomBytes,
 			readStdin: deps.stdin ?? readProcessStdin,
@@ -772,6 +790,8 @@ async function commandHook(parsed: Parsed, deps: SessionDeps, out: Output, run: 
 			policy: deps.policy,
 		});
 		line = describeOutcome(trigger, outcome);
+		// The `context` trigger is the one hook that prints: the digest, already bounded, for the host to inject.
+		if (outcome.status === "context") deps.out(`${out.clean(outcome.text).slice(0, MAX_DIGEST_CHARS - 1)}\n`);
 	} catch (error) {
 		line = `substrate session hook ${trigger}: failed open (${error instanceof Error ? error.message : "unexpected"})`;
 	}

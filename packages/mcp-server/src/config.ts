@@ -676,6 +676,14 @@ export interface SubstrateConfig {
 	steering: SteeringConfigResult;
 	/** `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` (phase 53, SOTA-09): on lets `migrate()` create `planning_steering_audit`. Off by default. */
 	steeringAuditTable: boolean;
+	/** `SUBSTRATE_STEERING_SESSIONS_TABLE` (phase 67): on persists the steering session registry to `steering_sessions` and loads it at boot. Off by default; nothing changes while it is off. */
+	steeringSessionsTable: boolean;
+	/** `SUBSTRATE_STEERING_SESSION_TTL_S` (phase 67): sessions older than this are dropped when the durable registry loads. Default 604800. */
+	steeringSessionTtlS: number;
+	/** `SUBSTRATE_STEERING_WAIT_MAX_MS` (phase 67): the longest `GET /steering/wait` holds a request. Default 30000, bound 1000..120000. */
+	steeringWaitMaxMs: number;
+	/** `SUBSTRATE_BRIEF_SESSIONS` (phase 67): on adds the `sessions`, `steering` and `handoffs` sections to the brief. Off by default: the brief is exactly what it was. */
+	briefSessions: boolean;
 	/** Whether the steering tools are registered: the switch is on, or it is malformed and so answered as `misconfigured`. Off registers none. */
 	steeringRegistered: boolean;
 	/** `SUBSTRATE_PLANNING_STEERING_ACK_TTL_S` and `SUBSTRATE_PLANNING_STEERING_EXPIRY_SWEEP_S` (phase 58): the acknowledgement deadline and the expiry sweep interval. A bad value is a typed result, and the steering tools answer `misconfigured`. See `planning/steering.ts`. */
@@ -1173,6 +1181,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// Phase 53 (SOTA-09): the audit table opt-in. Off creates nothing at boot; on creates it through the gated migration step.
 		steeringAuditTable: steeringAuditTableEnabled(env),
 		steeringRegistered: steeringToolsRegistered(env),
+		// Phase 67 (live steering GA): the durable session registry, its TTL, the long-poll bound and the brief sections. Environment only.
+		steeringSessionsTable: toggleOn(env.SUBSTRATE_STEERING_SESSIONS_TABLE),
+		steeringSessionTtlS: boundedInt(env.SUBSTRATE_STEERING_SESSION_TTL_S, 604_800, 60, 31_536_000),
+		steeringWaitMaxMs: boundedInt(env.SUBSTRATE_STEERING_WAIT_MAX_MS, 30_000, 1_000, 120_000),
+		briefSessions: toggleOn(env.SUBSTRATE_BRIEF_SESSIONS),
 		// Phase 58 (live steering): the acknowledgement deadline and the expiry sweep interval. Environment only; a bad value is a typed result.
 		steeringExpiry: loadSteeringExpirySettings(env),
 		// Phase 58: the durable observer baseline directory and the liveness interval. Environment only; a bad value is a typed result.
@@ -2119,6 +2132,11 @@ function boundedInt(raw: string | undefined, fallback: number, min: number, max:
 	const n = Number(raw?.trim());
 	if (raw === undefined || raw.trim() === "" || !Number.isFinite(n)) return fallback;
 	return Math.min(max, Math.max(min, Math.trunc(n)));
+}
+
+/** A switch that is on for `on`, `1`, `true` or `yes` (any case); anything else, unset included, is off. */
+function toggleOn(raw: string | undefined): boolean {
+	return /^(1|true|yes|on)$/i.test(raw?.trim() ?? "");
 }
 
 /**

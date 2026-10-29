@@ -178,6 +178,13 @@ export const ROUTE_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	"/handoff": "write",
 	"/slo/history": "read",
 	"/docs/lightrag/query": "read",
+	// Phase 67 (live steering GA): the steering routes mirror the steering tools. A held long poll is one admission, like one read.
+	"/steering/sessions": "read",
+	"/steering/directives": "read",
+	"/steering/wait": "read",
+	"/steering/queue": "write",
+	"/steering/acknowledge": "write",
+	"/session/context": "read",
 };
 
 /** Monitoring traffic. Exempt on GET only: a POST to one of these is a 404, and a 404 is metered like any other unknown path. */
@@ -230,6 +237,7 @@ export const TOOL_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	steering_queue: "write",
 	steering_acknowledge: "write",
 	steering_list: "read",
+	session_context: "read",
 	railway_scale: "write",
 	railway_deploy: "write",
 	coord_handoff: "write",

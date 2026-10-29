@@ -1,0 +1,163 @@
+/**
+ * The long-poll registry behind `GET /steering/wait` (phase 67, live steering GA).
+ *
+ * A session that wants to hear about a directive without polling `docs_search` holds one request open here. The registry is
+ * in process, like the inbox it reads: a waiter is a closure over a `check` that asks the inbox for the next queued directive,
+ * and a queue for that session calls {@link SteeringWaiters.notify}, which re-runs each waiter's check. It adds no second
+ * inbox, no table and no event: the directive is read from the inbox, the one place that holds it.
+ *
+ * Bounds and cleanup, because a held request is a held socket:
+ * - at most {@link STEERING_WAIT_PER_SESSION_MAX} waiters per session and {@link STEERING_WAIT_TOTAL_MAX} overall; a request past
+ *   either is answered `busy` at once, never queued;
+ * - every waiter leaves the registry exactly once, whichever way it ends: a directive, the timeout, the client's abort signal, or
+ *   `closeAll` at shutdown. Its timer is cleared and its abort listener removed on every one of those paths;
+ * - a directive that was queued before the call is returned at once, without registering anything.
+ */
+import type { SteeringInbox, SteeringRecord } from "./steering.ts";
+
+/** Waiters one session may hold at once. */
+export const STEERING_WAIT_PER_SESSION_MAX = 4;
+/** Waiters the whole process may hold at once. */
+export const STEERING_WAIT_TOTAL_MAX = 256;
+
+/** A queued record: the shape a waiter is woken with. */
+export type QueuedSteeringRecord = Extract<SteeringRecord, { state: "queued" }>;
+
+/** How a wait ended. `busy` and `closed` are the registry's own answers; the rest are the caller's story. */
+export type SteeringWaitResult =
+	| { status: "directive"; record: QueuedSteeringRecord }
+	| { status: "timeout" }
+	| { status: "aborted" }
+	| { status: "closed" }
+	| { status: "busy"; scope: "session" | "total" };
+
+/** The timer seam. Production uses the global timer, unref'd; a test injects its own so no real sleep happens. */
+export interface SteeringWaitTimers {
+	set(run: () => void, ms: number): unknown;
+	clear(handle: unknown): void;
+}
+
+const GLOBAL_TIMERS: SteeringWaitTimers = {
+	set: (run, ms) => {
+		const handle = setTimeout(run, ms);
+		handle.unref();
+		return handle;
+	},
+	clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
+/**
+ * The next queued directive for `sessionId` newer than the directive `after` names, oldest first, or null. `after` is a
+ * cursor: a directive the inbox does not hold (a restart forgot it, or it was never one) filters nothing, so the caller sees
+ * every queued directive rather than none. Newer means queued later, with the id breaking a tie in the same millisecond.
+ * A read: it changes nothing in the inbox.
+ */
+export function nextQueuedDirective(inbox: SteeringInbox, sessionId: string, after: string | null): QueuedSteeringRecord | null {
+	const queued = inbox.recordsFor(sessionId).filter((record): record is QueuedSteeringRecord => record.state === "queued");
+	queued.sort((a, b) => a.queuedAtMs - b.queuedAtMs || (a.directive.id < b.directive.id ? -1 : a.directive.id > b.directive.id ? 1 : 0));
+	const cursor = after === null ? null : inbox.get(after);
+	if (cursor === null) return queued[0] ?? null;
+	return (
+		queued.find(
+			(record) => record.queuedAtMs > cursor.queuedAtMs || (record.queuedAtMs === cursor.queuedAtMs && record.directive.id > cursor.directive.id),
+		) ?? null
+	);
+}
+
+interface Waiter {
+	check: () => QueuedSteeringRecord | null;
+	finish: (result: SteeringWaitResult) => void;
+}
+
+export interface SteeringWaitersDeps {
+	timers?: SteeringWaitTimers;
+	/** Test seams; default to {@link STEERING_WAIT_PER_SESSION_MAX} and {@link STEERING_WAIT_TOTAL_MAX}. */
+	perSessionMax?: number;
+	totalMax?: number;
+}
+
+export interface SteeringWaitRequest {
+	sessionId: string;
+	timeoutMs: number;
+	/** The caller's abort: when it fires the waiter ends `aborted` and leaves no timer or listener behind. */
+	signal?: AbortSignal;
+	/** Asks the inbox for the next directive for this wait. Called once up front and again on every notify for the session. */
+	check: () => QueuedSteeringRecord | null;
+}
+
+export class SteeringWaiters {
+	private readonly bySession = new Map<string, Set<Waiter>>();
+	private readonly timers: SteeringWaitTimers;
+	private readonly perSessionMax: number;
+	private readonly totalMax: number;
+	private total = 0;
+	private closed = false;
+
+	constructor(deps: SteeringWaitersDeps = {}) {
+		this.timers = deps.timers ?? GLOBAL_TIMERS;
+		this.perSessionMax = deps.perSessionMax ?? STEERING_WAIT_PER_SESSION_MAX;
+		this.totalMax = deps.totalMax ?? STEERING_WAIT_TOTAL_MAX;
+	}
+
+	/** Waiters held right now, across sessions. */
+	get size(): number {
+		return this.total;
+	}
+
+	/** Holds the request until a directive is queued for the session, the timeout passes, the signal aborts or the registry closes. */
+	wait(request: SteeringWaitRequest): Promise<SteeringWaitResult> {
+		if (this.closed) return Promise.resolve({ status: "closed" });
+		if (request.signal?.aborted === true) return Promise.resolve({ status: "aborted" });
+		const ready = request.check();
+		if (ready !== null) return Promise.resolve({ status: "directive", record: ready });
+		const held = this.bySession.get(request.sessionId) ?? new Set<Waiter>();
+		if (held.size >= this.perSessionMax) return Promise.resolve({ status: "busy", scope: "session" });
+		if (this.total >= this.totalMax) return Promise.resolve({ status: "busy", scope: "total" });
+		const { promise, resolve } = Promise.withResolvers<SteeringWaitResult>();
+		let done = false;
+		let timer: unknown;
+		const finish = (result: SteeringWaitResult): void => {
+			if (done) return;
+			done = true;
+			this.timers.clear(timer);
+			request.signal?.removeEventListener("abort", onAbort);
+			held.delete(waiter);
+			if (held.size === 0 && this.bySession.get(request.sessionId) === held) this.bySession.delete(request.sessionId);
+			this.total -= 1;
+			resolve(result);
+		};
+		const onAbort = (): void => finish({ status: "aborted" });
+		const waiter: Waiter = { check: request.check, finish };
+		held.add(waiter);
+		this.bySession.set(request.sessionId, held);
+		this.total += 1;
+		timer = this.timers.set(() => finish({ status: "timeout" }), request.timeoutMs);
+		request.signal?.addEventListener("abort", onAbort, { once: true });
+		return promise;
+	}
+
+	/** Wakes the waiters of one session whose check now finds a directive. Waiters whose check finds none keep waiting. */
+	notify(sessionId: string): void {
+		const held = this.bySession.get(sessionId);
+		if (held === undefined) return;
+		for (const waiter of [...held]) {
+			let found: QueuedSteeringRecord | null;
+			try {
+				found = waiter.check();
+			} catch {
+				// A check that throws cannot be trusted to find anything later either: end this wait rather than hold the socket.
+				waiter.finish({ status: "closed" });
+				continue;
+			}
+			if (found !== null) waiter.finish({ status: "directive", record: found });
+		}
+	}
+
+	/** Ends every waiter as `closed` and refuses new ones. For shutdown: no request outlives the server. */
+	closeAll(): void {
+		this.closed = true;
+		for (const held of [...this.bySession.values()]) {
+			for (const waiter of [...held]) waiter.finish({ status: "closed" });
+		}
+	}
+}

@@ -53,6 +53,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN` | number | 10 | whole number 1..1000 (not an integer or out of range: refused with a typed error naming the variable) | 10 directives per minute per target session | mcp-server/planning/steering.ts | yes |
 | `SUBSTRATE_PLANNING_STEERING_ACK_TTL_S` | number | 86400 | whole seconds 60..2592000 (not an integer or out of range: refused with a typed error naming the variable, and the steering tools answer misconfigured) | 86400 s (one day): a directive nobody acknowledged by then is closed as declined with reason timeout, audited, and no longer offered to its session | mcp-server/planning/steering.ts | yes |
 | `SUBSTRATE_PLANNING_STEERING_EXPIRY_SWEEP_S` | number | 60 | whole seconds 1..3600 (not an integer or out of range: refused with a typed error naming the variable, and the steering tools answer misconfigured) | 60 s between expiry passes; the pass runs only while steering is on with the audit table enabled | mcp-server/planning/steering.ts | yes |
+| `SUBSTRATE_STEERING_WAIT_MAX_MS` | number | 30000 | 1000..120000 (out of range clamps; unparseable falls back) | 30000 ms: the longest GET /steering/wait holds one request before it answers 204. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `RAILWAY_API_TOKEN` | secret-ref | none | Railway API token, sent as a bearer token to the public API | every railway_* tool reports unconfigured and the writes refuse before any request. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
 | `SUBSTRATE_RAILWAY_WRITES` | toggle | off | on | off: railway_scale and railway_deploy refuse with writes-disabled before any request; on still needs an operator and an approval reference. See `docs/data-planes.md` | mcp-server/railway.ts | yes |
 
@@ -110,6 +111,8 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_INDEX_SCRATCH_URL` | secret-ref | none | scratch postgres URL | substrate index restore needs --scratch. See `docs/runbooks/index-archive.md` | mcp-server/index-run.ts | yes |
 | `SUBSTRATE_INDEX_TUNE` | mode | off | off \| apply (anything but apply is off) | off: no storage tune; anything but apply is off. See `docs/runbooks/index-archive.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` | toggle | off | on \| off (1/0, true/false, yes/no; anything else is off) | off: migrate() creates no planning_steering_audit table, so steering audit writes fail closed until an operator turns it on | mcp-server/planning/steering-store.ts | yes |
+| `SUBSTRATE_STEERING_SESSIONS_TABLE` | toggle | off | on \| off (1/0, true/false, yes/no; anything else is off) | off: the steering session registry stays in process memory and migrate() creates no steering_sessions table; on: sessions are written through to steering_sessions and loaded at boot. See `docs/data-planes.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_STEERING_SESSION_TTL_S` | number | 604800 | 60..31536000 (out of range clamps; unparseable falls back) | 604800 s (seven days): a steering session not updated for longer is dropped when the durable registry loads; read only while SUBSTRATE_STEERING_SESSIONS_TABLE is on. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_INDEX_VOLUME_BYTES` | number | none | bytes | no capacity runway row (the ceiling is unknown). See `docs/observability.md` | observability/config.ts | yes |
 | `SUBSTRATE_PLANNING_ROOT` | path | none | absolute checkout path | planning plane disabled: nothing under .planning/ is read and no default path exists | mcp-server/planning/config.ts | yes |
 | `SUBSTRATE_PLANNING_PRESENCE_TTL_S` | number | 90 | 1..86400 | 90 s: a session with no heartbeat for longer is stale | mcp-server/planning/config.ts | yes |
@@ -142,6 +145,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 
 | Name | Kind | Default | Allowed | Unset means | Read by | In `.env.example` |
 | --- | --- | --- | --- | --- | --- | --- |
+| `SUBSTRATE_BRIEF_SESSIONS` | toggle | off | on \| off (1/0, true/false, yes/no; anything else is off) | off: the brief carries no sessions, steering or handoffs section and is byte-identical to before; on: those sections are appended live to every full brief. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_BRIEF_BUDGET_MS` | number | 1200 | 0 = no deadline | 1200 ms. See `docs/observability.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_BRIEF_RECENT_WINDOW_DAYS` | number | 30 | positive integer | 30 days. See `docs/observability.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S` | number | 3600 | 0 = no snapshots | 3600 s. See `docs/observability.md` | mcp-server/config.ts | yes |

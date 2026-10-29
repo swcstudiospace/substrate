@@ -61,6 +61,7 @@ describe("auditMode", () => {
 			"planning_status",
 			"planning_sessions",
 			"steering_list",
+			"session_context",
 		]) {
 			expect(auditMode(tool)).toBe("fail-open");
 		}

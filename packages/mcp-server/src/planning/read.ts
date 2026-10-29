@@ -22,6 +22,7 @@
 import type { CompletionStoreView } from "./checkpoint-store.ts";
 import type { PlanningConfigError, PlanningConfigResult, PlanningLimits } from "./config.ts";
 import { detectConflicts, sessionViewOf, type PlanningConflict, type SessionView } from "./conflicts.ts";
+import { scopeRepoId } from "../event.ts";
 import { buildPlanningIndex, indexRecords, isErrorRecord, positionOf, type PlanningFileRecord, type PlanningFs, type PlanningIndexFailure, type PlanningKind, type PlanningRecord } from "./index.ts";
 import type { PositionResult } from "./position.ts";
 import { type DragonflyPresenceStore, PRESENCE_MAX_SESSIONS } from "./presence-dragonfly.ts";
@@ -162,6 +163,43 @@ export class PlanningReader {
 	async sessions(): Promise<PlanningSessionsView> {
 		const body = await this.sessionsBody();
 		return { ...body, view: sessionStateOf(body) };
+	}
+
+	/** Whether `sessionsForRepo` has anything to read: the plane has a root and a presence store. */
+	presenceConfigured(): boolean {
+		return resolveSettings(this.deps.settings).ready && this.deps.presence !== null;
+	}
+
+	/**
+	 * The active presence records of one repository, for the session context digest (phase 67). Read-only, like `sessions`:
+	 * no heartbeat, no note. Stale records are left out, and a record that names no repository matches none. Rejects when the
+	 * listing or the server clock cannot be read, and the digest turns that into a note: it never guesses a session active.
+	 */
+	async sessionsForRepo(repo: string): Promise<{ rows: PlanningSessionRow[]; truncated: boolean }> {
+		const resolved = resolveSettings(this.deps.settings);
+		const presence = this.deps.presence;
+		if (!resolved.ready || presence === null) return { rows: [], truncated: false };
+		const listing = await presence.listWithin(PRESENCE_MAX_SESSIONS);
+		const clock = await readClock(presence);
+		if (!clock.ok) throw new Error("the presence server clock could not be read");
+		const scope = scopeRepoId(repo);
+		const ofRepo = listing.records.filter((record) => scopeRepoId(record.repo) === scope);
+		const active = classifySessions(ofRepo, clock.nowMs, resolved.limits.presenceTtlS * 1000).filter((entry) => entry.status === "active");
+		return {
+			rows: active.map(
+				(entry): PlanningSessionRow => ({
+					sessionId: entry.sessionId,
+					worktree: entry.worktree,
+					branch: entry.branch,
+					lastHeartbeatMs: entry.lastHeartbeatMs,
+					ageMs: entry.ageMs,
+					idleForMs: entry.idleForMs,
+					status: entry.status,
+					planning: planningRowOf(sessionViewOf(entry, clock.nowMs, resolved.limits.presenceTtlS * 1000)),
+				}),
+			),
+			truncated: listing.truncated,
+		};
 	}
 
 	private async sessionsBody(): Promise<PlanningSessionsBody> {

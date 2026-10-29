@@ -22,6 +22,8 @@
  *   substrate spool status|flush             the collector event spool (docs/collectors.md, "Event spool")
  *   substrate session checkpoint|checkpoints|rollback|recover|sync   session checkpoints and rollback
  *       (exit 0 done, 1 failed, 2 usage, 3 refused, 4 files restored but the ledger commit is pending)
+ *   substrate steer sessions|status|queue|ack|list|listen|context   Live Steering from a terminal (docs/live-steering.md)
+ *       (exit 0 done, 1 failed, 2 usage, 3 refused by the server: not an operator, rate limited, bad token)
  *   substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair --server-stopped [--repair-orphans]]
  *       the memory consistency verifier: the index, the plane and the ledger compared
  *       (exit 0 consistent, 1 drift, 2 usage, 3 a store could not be read; docs/runbooks/consistency-verify.md)
@@ -58,6 +60,7 @@ import { runLedger } from "./ledger.ts";
 import { runSpool } from "./spool.ts";
 import { spoolConfig } from "../../collectors/src/spool.ts";
 import { runSession } from "./session/command.ts";
+import { runSteer } from "./steer/index.ts";
 import type { TranscriptPort } from "./session/rollback.ts";
 import { runConsistency } from "./consistency.ts";
 import { httpCapsuleMcp, nodeCapsuleFs, runMemory } from "./capsule.ts";
@@ -741,6 +744,25 @@ switch (command) {
 			}),
 		);
 		break;
+	case "steer": {
+		// SIGINT ends `steer listen` cleanly (exit 0); an in-flight long poll is aborted with it.
+		const interrupt = new AbortController();
+		process.once("SIGINT", () => interrupt.abort());
+		process.exit(
+			await runSteer(rest, {
+				url: base(),
+				tokenFor: (surface) => resolveBearer(surface, process.env) ?? undefined,
+				timeoutMs: Math.max(timeout(), 5_000),
+				now: () => new Date(),
+				repo: () => repoSlug(),
+				out: (text) => process.stdout.write(text),
+				err: (text) => process.stderr.write(text),
+				signalFor: (ms) => AbortSignal.any([AbortSignal.timeout(ms), interrupt.signal]),
+				interrupt: interrupt.signal,
+			}),
+		);
+		break;
+	}
 	default:
 		process.stdout.write(
 			"substrate brief [--repo R] [--branch B] [--graph G] [--surface S] [--write]\n" +
@@ -761,6 +783,7 @@ switch (command) {
 				"substrate index archive [--out DIR] [--page-size N] | verify-archive <dir> | restore --scratch URL <dir>\n" +
 				"substrate ledger coverage [--json] | archive [--until D] [--out DIR] [--page-size N] | verify-archive <dir> [--day D]\n" +
 				"substrate session checkpoint | checkpoints | rollback <ckpt|seq|previous> | recover | sync   (substrate session for the flags)\n" +
+				"substrate steer sessions | status | queue --session ID --action A --body T | ack DIRECTIVE --applied|--declined | list --session ID | listen --session ID [--once] | context   (substrate steer for the flags; exit 0 done, 1 failed, 2 usage, 3 refused)\n" +
 				"substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair --server-stopped [--repair-orphans]]   (exit 0 consistent, 1 drift, 2 usage, 3 unreadable store)\n" +
 				"substrate memory capsule export --out FILE [--session S] [--repo R] [--since ISO] [--limit N] [--store DIR]\n" +
 				"                         | verify FILE [--anchors] | redact FILE --ids a,b --reason TEXT --out FILE2   (substrate memory capsule for the flags)\n" +
