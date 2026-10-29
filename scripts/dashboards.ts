@@ -343,7 +343,7 @@ function steps(threshold: Threshold | undefined): Json[] {
 }
 
 function chartPanel(item: Extract<Item, { kind: "chart" }>, spec: SeriesSpec, id: number, gridPos: JsonObject): JsonObject {
-	const source = Object.hasOwn(SERIES_SOURCES, item.series) ? SERIES_SOURCES[item.series]! : null;
+	const source = Object.hasOwn(SERIES_SOURCES, item.series) ? (SERIES_SOURCES[item.series] ?? null) : null;
 	if (source === null) throw new Error(`series ${item.series} has no entry in SERIES_SOURCES; add its instrument to scripts/dashboards.ts`);
 	const labelNote = spec.label === null ? "" : ` One line per \`${spec.label}\`.`;
 	const description = `${item.note} Series \`${item.series}\` (${spec.kind}, ${spec.agg} per step, ${spec.unit}), source \`${source}\`.${labelNote}`;
@@ -369,7 +369,7 @@ function chartPanel(item: Extract<Item, { kind: "chart" }>, spec: SeriesSpec, id
 				},
 				mappings: [],
 				thresholds: { mode: "absolute", steps: steps(item.threshold) },
-				unit: Object.hasOwn(GRAFANA_UNITS, spec.unit) ? GRAFANA_UNITS[spec.unit]! : "short",
+				unit: Object.hasOwn(GRAFANA_UNITS, spec.unit) ? (GRAFANA_UNITS[spec.unit] ?? "short") : "short",
 			},
 			overrides: [],
 		},
@@ -417,15 +417,16 @@ function panels(items: Item[], series: Readonly<Record<string, SeriesSpec>>): Js
 			pendingRow = item.title;
 			continue;
 		}
-		if (item.kind === "chart" && !Object.hasOwn(series, item.series)) continue;
+		const spec = item.kind === "chart" && Object.hasOwn(series, item.series) ? series[item.series] : undefined;
+		if (item.kind === "chart" && spec === undefined) continue;
 		if (pendingRow !== null) {
 			out.push({ collapsed: false, gridPos: layout.row(), id: layout.nextId(), panels: [], title: pendingRow, type: "row" });
 			pendingRow = null;
 		}
 		if (item.kind === "text") {
 			out.push({ gridPos: layout.panel(), id: layout.nextId(), options: { content: item.content, mode: "markdown" }, title: item.title, type: "text" });
-		} else {
-			out.push(chartPanel(item, series[item.series]!, layout.nextId(), layout.panel()));
+		} else if (spec !== undefined) {
+			out.push(chartPanel(item, spec, layout.nextId(), layout.panel()));
 		}
 	}
 	return out;
@@ -492,7 +493,10 @@ function sortKeys(value: Json): Json {
 	if (Array.isArray(value)) return value.map(sortKeys);
 	if (value !== null && typeof value === "object") {
 		const sorted: JsonObject = {};
-		for (const key of Object.keys(value).sort()) sorted[key] = sortKeys(value[key]!);
+		for (const key of Object.keys(value).sort()) {
+			const child = value[key];
+			if (child !== undefined) sorted[key] = sortKeys(child);
+		}
 		return sorted;
 	}
 	return value;
@@ -626,7 +630,8 @@ export function main(argv: readonly string[]): number {
 	let check = false;
 	let out = DEFAULT_OUT_DIR;
 	for (let i = 0; i < argv.length; i += 1) {
-		const arg = argv[i]!;
+		const arg = argv[i];
+		if (arg === undefined) continue;
 		if (arg === "--check") {
 			check = true;
 		} else if (arg === "--out") {

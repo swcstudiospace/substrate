@@ -132,18 +132,30 @@ export function scanSource(file: string, source: string): EnvRead[] {
 	const push = (name: string, form: EnvReadForm, index: number): void => {
 		reads.push({ name, form, file, line: lineOf(text, index) });
 	};
-	for (const match of text.matchAll(ACCESS_DOT)) push(match[1]!, "access", match.index!);
-	for (const match of text.matchAll(ACCESS_INDEX)) push(match[2]!, "access", match.index!);
-	for (const match of text.matchAll(ACCESS_CALL)) push(match[2]!, "access", match.index!);
+	// A match whose capture group or index is missing carries no name to report, so it is skipped.
+	const pushGroup = (pattern: RegExp, group: number, form: EnvReadForm): void => {
+		for (const match of text.matchAll(pattern)) {
+			const name = match[group];
+			const index = match.index;
+			if (name === undefined || index === undefined) continue;
+			push(name, form, index);
+		}
+	};
+	pushGroup(ACCESS_DOT, 1, "access");
+	pushGroup(ACCESS_INDEX, 2, "access");
+	pushGroup(ACCESS_CALL, 2, "access");
 	for (const match of text.matchAll(DESTRUCTURE)) {
-		for (const part of match[1]!.split(",")) {
+		const list = match[1];
+		const index = match.index;
+		if (list === undefined || index === undefined) continue;
+		for (const part of list.split(",")) {
 			const name = /^\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(part)?.[1];
-			if (name !== undefined && /^[A-Z][A-Z0-9_]*$/.test(name)) push(name, "access", match.index!);
+			if (name !== undefined && /^[A-Z][A-Z0-9_]*$/.test(name)) push(name, "access", index);
 		}
 	}
-	for (const match of text.matchAll(LITERAL_NAME)) push(match[2]!, "literal", match.index!);
-	for (const match of text.matchAll(LITERAL_PREFIX)) push(match[2]!, "template", match.index!);
-	for (const match of text.matchAll(TEMPLATE_PREFIX)) push(match[1]!, "template", match.index!);
+	pushGroup(LITERAL_NAME, 2, "literal");
+	pushGroup(LITERAL_PREFIX, 2, "template");
+	pushGroup(TEMPLATE_PREFIX, 1, "template");
 	return reads;
 }
 

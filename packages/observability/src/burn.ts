@@ -143,7 +143,7 @@ export class BurnLedger {
 	/** Record one observation of `metric` and answer the per-hour rate it supports. */
 	observe(metric: string, total: number, atMs: number): BurnReading {
 		const samples = this.#byMetric.get(metric) ?? [];
-		while (samples.length > 0 && samples[0]!.atMs < atMs - this.windowMs) samples.shift();
+		for (let first = samples[0]; first !== undefined && first.atMs < atMs - this.windowMs; first = samples[0]) samples.shift();
 		const last = samples[samples.length - 1];
 		if (last !== undefined && total < last.total) samples.length = 0;
 		// Reads landing in the same wall-clock second coalesce into one sample.
@@ -154,21 +154,18 @@ export class BurnLedger {
 		// forever. At the cap the ring now holds 480 distinct seconds (eight
 		// minutes) whatever the read rate; slower readers are bounded by the
 		// window instead, as before.
-		if (
-			samples.length > 0 &&
-			Math.floor(samples[samples.length - 1]!.atMs / 1000) === Math.floor(atMs / 1000)
-		) {
-			const current = samples[samples.length - 1]!;
-			current.atMs = atMs;
-			current.total = total;
+		const tail = samples[samples.length - 1];
+		if (tail !== undefined && Math.floor(tail.atMs / 1000) === Math.floor(atMs / 1000)) {
+			tail.atMs = atMs;
+			tail.total = total;
 		} else {
 			samples.push({ atMs, total });
 		}
 		if (samples.length > BURN_MAX_SAMPLES) samples.splice(0, samples.length - BURN_MAX_SAMPLES);
 		this.#byMetric.set(metric, samples);
 
-		// `push` guarantees at least one entry, so the base read after it is safe.
-		const base = samples[0]!;
+		// `push` guarantees at least one entry; the fallback only keeps the types honest.
+		const base = samples[0] ?? { atMs, total };
 		const spanMs = atMs - base.atMs;
 		const perHour =
 			spanMs > 0 && spanMs >= this.minSpanMs && total >= base.total

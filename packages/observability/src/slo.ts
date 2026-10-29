@@ -569,7 +569,7 @@ export class PlaneWindow {
 
 	observe(plane: PlaneName, ok: number, total: number, atMs: number): PlaneWindowReading {
 		const samples = this.byPlane[plane] ?? [];
-		while (samples.length > 0 && samples[0]!.atMs < atMs - this.windowMs) samples.shift();
+		for (let first = samples[0]; first !== undefined && first.atMs < atMs - this.windowMs; first = samples[0]) samples.shift();
 		const last = samples[samples.length - 1];
 		if (last !== undefined && (total < last.total || ok < last.ok)) samples.length = 0;
 		if (last !== undefined && samples.length > 0 && Math.floor(last.atMs / this.bucketMs) === Math.floor(atMs / this.bucketMs)) {
@@ -584,7 +584,8 @@ export class PlaneWindow {
 		const cap = Math.ceil(this.windowMs / this.bucketMs) + 1;
 		if (samples.length > cap) samples.splice(0, samples.length - cap);
 		this.byPlane[plane] = samples;
-		const base = samples[0]!;
+		// The push above guarantees an entry; the fallback only keeps the types honest.
+		const base = samples[0] ?? { atMs, ok, total, baseAtMs: atMs, baseOk: ok, baseTotal: total };
 		return { ok: ok - base.baseOk, total: total - base.baseTotal, spanMs: atMs - base.baseAtMs, samples: samples.length };
 	}
 }
@@ -819,7 +820,7 @@ export function evaluateCapacitySlos(ring: CapacityRing, options: CapacityEvalOp
 		];
 	}
 	const spanMs = newest !== undefined && oldest !== undefined ? newest.at - oldest.at : 0;
-	if (samples.length < 2 || spanMs < minSpanMs) {
+	if (newest === undefined || oldest === undefined || samples.length < 2 || spanMs < minSpanMs) {
 		return [
 			{
 				...base,
@@ -845,7 +846,7 @@ export function evaluateCapacitySlos(ring: CapacityRing, options: CapacityEvalOp
 		sxx += dt * dt;
 	}
 	const bytesPerDay = sxx > 0 ? (sxy / sxx) * DAY_MS : 0;
-	const current = newest!.databaseBytes;
+	const current = newest.databaseBytes;
 	const remaining = options.volumeBytes - current;
 	const mb = (bytes: number) => `${(bytes / 1_048_576).toFixed(1)} MiB`;
 	if (remaining <= 0) {

@@ -174,13 +174,13 @@ export interface MetricSampleRow {
  * member of every closed set is a short slug with no quote or backslash.
  */
 export function canonicalLabels(series: string, labels: Record<string, unknown>): string | null {
-	if (!Object.hasOwn(ALL_METRIC_SERIES, series)) return null;
-	const spec = ALL_METRIC_SERIES[series]!;
+	const spec = Object.hasOwn(ALL_METRIC_SERIES, series) ? ALL_METRIC_SERIES[series] : undefined;
+	if (spec === undefined) return null;
 	const keys = Object.keys(labels);
 	if (spec.label === null) return keys.length === 0 ? "{}" : null;
 	if (keys.length !== 1 || keys[0] !== spec.label) return null;
 	const value = labels[spec.label];
-	if (typeof value !== "string" || !spec.values!.has(value)) return null;
+	if (typeof value !== "string" || spec.values?.has(value) !== true) return null;
 	return JSON.stringify({ [spec.label]: value });
 }
 
@@ -190,14 +190,14 @@ export function canonicalLabels(series: string, labels: Record<string, unknown>)
  * reads back as no labels.
  */
 export function readLabels(series: string, raw: unknown): Record<string, string> {
-	if (!Object.hasOwn(ALL_METRIC_SERIES, series)) return {};
-	const spec = ALL_METRIC_SERIES[series]!;
+	const spec = Object.hasOwn(ALL_METRIC_SERIES, series) ? ALL_METRIC_SERIES[series] : undefined;
+	if (spec === undefined) return {};
 	if (spec.label === null || typeof raw !== "string") return {};
 	try {
 		const parsed = JSON.parse(raw) as unknown;
 		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
 		const value = (parsed as Record<string, unknown>)[spec.label];
-		return typeof value === "string" && spec.values!.has(value) ? { [spec.label]: value } : {};
+		return typeof value === "string" && spec.values?.has(value) === true ? { [spec.label]: value } : {};
 	} catch {
 		return {};
 	}
@@ -262,8 +262,14 @@ export function counterDelta(previous: number | undefined, current: number): num
 /** The same for a histogram's bucket counts: any bucket going down is a reset of the whole point. */
 export function bucketDeltas(previous: readonly number[] | undefined, current: readonly number[]): number[] {
 	const now = current.map(finiteNonNegative);
-	if (previous === undefined || previous.length !== now.length || now.some((value, i) => value < previous[i]!)) return now;
-	return now.map((value, i) => value - previous[i]!);
+	if (previous === undefined || previous.length !== now.length) return now;
+	const deltas: number[] = [];
+	for (const [i, value] of now.entries()) {
+		const before = previous[i];
+		if (before === undefined || value < before) return now;
+		deltas.push(value - before);
+	}
+	return deltas;
 }
 
 /**
@@ -347,10 +353,11 @@ export class SampleCollector {
 
 /** The label value for an attribute, folded into the closed set; `null` when the series should skip the point. */
 function labelFor(series: string, raw: unknown): string | null {
-	const spec = ALL_METRIC_SERIES[series]!;
+	const values = ALL_METRIC_SERIES[series]?.values;
+	if (values === undefined || values === null) return null;
 	const value = String(raw ?? "");
-	if (spec.values!.has(value)) return value;
-	return spec.values === SURFACE_VALUES ? "other" : null;
+	if (values.has(value)) return value;
+	return values === SURFACE_VALUES ? "other" : null;
 }
 
 interface MergedBuckets {
@@ -436,7 +443,8 @@ function rowsFrom(deltas: { counters: CounterDelta[]; histograms: HistogramDelta
 	const rows: MetricSampleRow[] = [];
 
 	const quantiles = (series: string, metric: string, q: number, pick: (attributes: Attributes) => string | null): void => {
-		const spec = METRIC_SERIES[series]!;
+		const spec = METRIC_SERIES[series];
+		if (spec === undefined) return;
 		for (const [label, group] of mergeBy(deltas.histograms, metric, pick)) {
 			if (group.count <= 0) continue;
 			rows.push({ tsMs, series, labels: spec.label === null ? {} : { [spec.label]: label }, value: quantileOf(group, q), count: group.count });
@@ -634,13 +642,18 @@ const MAX_STEP_S = 86_400;
 /** A window in seconds (`90m`, `6h`, `7d`), or `null`. */
 export function parseHistoryWindow(raw: string): number | null {
 	const match = WINDOW_PATTERN.exec(raw);
-	return match === null ? null : Number(match[1]) * UNIT_SECONDS[match[2]!]!;
+	if (match === null) return null;
+	const unit = UNIT_SECONDS[match[2] ?? ""];
+	return unit === undefined ? null : Number(match[1]) * unit;
 }
 
 /** A step in seconds (`60`, `90s`, `5m`, `1h`), or `null`. */
 export function parseHistoryStep(raw: string): number | null {
 	const match = STEP_PATTERN.exec(raw);
-	return match === null ? null : Number(match[1]) * UNIT_SECONDS[match[2] === "" ? "s" : match[2]!]!;
+	if (match === null) return null;
+	const suffix = match[2] ?? "";
+	const unit = UNIT_SECONDS[suffix === "" ? "s" : suffix];
+	return unit === undefined ? null : Number(match[1]) * unit;
 }
 
 /** How long an answer is served again, and how many are kept. The route scans the whole TTL window through the shared ledger gate, so it is memoised. */
@@ -661,7 +674,7 @@ const HISTORY_RETRY_AFTER_S = 5;
  * and is only ever raised, never lowered.
  */
 export function effectiveHistoryStep(series: string, windowMs: number, requestedStepS: number): number {
-	const labelValues = Object.hasOwn(ALL_METRIC_SERIES, series) ? (ALL_METRIC_SERIES[series]!.values?.size ?? 1) : 1;
+	const labelValues = Object.hasOwn(ALL_METRIC_SERIES, series) ? (ALL_METRIC_SERIES[series]?.values?.size ?? 1) : 1;
 	const maxBuckets = Math.max(1, Math.floor(MAX_METRIC_POINTS / labelValues) - 1);
 	const needed = Math.ceil(windowMs / 1000 / maxBuckets);
 	const requested = Math.min(MAX_STEP_S, Math.max(MIN_STEP_S, Math.ceil(requestedStepS)));
@@ -778,7 +791,8 @@ export async function metricHistoryAnswer(deps: MetricHistoryDeps, params: URLSe
 	if (!deps.settings.enabled || deps.greptime === null) return { status: 404, body: { enabled: false } };
 	const series = params.get("series") ?? "";
 	const allowed = metricSeriesFor(deps.settings.series);
-	if (!Object.hasOwn(allowed, series)) {
+	const spec = Object.hasOwn(allowed, series) ? allowed[series] : undefined;
+	if (spec === undefined) {
 		return { status: 400, body: { enabled: true, error: "series is not one of the recorded series", series: Object.keys(allowed) } };
 	}
 	const windowS = parseHistoryWindow(params.get("window") ?? DEFAULT_WINDOW);
@@ -802,7 +816,6 @@ export async function metricHistoryAnswer(deps: MetricHistoryDeps, params: URLSe
 		} catch {
 			return { status: 503, body: { enabled: true, error: "the history store could not answer" } };
 		}
-		const spec = allowed[series]!;
 		return {
 			status: 200,
 			body: {
