@@ -207,6 +207,13 @@ export interface SearchReply {
 	 * cache never holds it.
 	 */
 	rerank?: { applied: true; moved: number };
+	/**
+	 * Present only with `SUBSTRATE_CORPUS=on` and a corpus root already cached: the first 12 hex characters of the corpus Merkle
+	 * root (`corpus_root`) and the number of documents it covers (`corpus_count`), so the session's ledger trail says which corpus
+	 * it read. Per call, read from the cache and never computed here, so the answer cache never holds them.
+	 */
+	corpus_root?: string;
+	corpus_count?: number;
 }
 
 /**

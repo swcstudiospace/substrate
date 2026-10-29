@@ -5,7 +5,7 @@
  *
  *     SUBSTRATE_TEST_PG_URL=postgres://… bun test corpus/reflect-store
  *
- * The tables are the real migration (step 36); every row is namespaced to one run's marker and removed afterwards.
+ * The tables are the real migration (step 38); every row is namespaced to one run's marker and removed afterwards.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { SQL } from "bun";

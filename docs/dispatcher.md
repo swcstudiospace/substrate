@@ -36,7 +36,7 @@ the tag is among the issue's last 50 comments.
 | `invalid-graph-id` | graph id unsafe as worktree name | no |
 | `invalid-ids` | identifier/node/graph/repo unsafe for the prompt | no, gives up |
 | `no-checkout` | no verified checkout of the repo on this host | next tick |
-| `low-disk` | under 5 GiB free on `/` | next tick |
+| `low-disk` | under `SUBSTRATE_WORKTREE_MIN_FREE_GB` (default 5 GiB) free on `/` ([worktree-fleet.md](worktree-fleet.md)) | next tick |
 | `path-conflict` | worktree path taken by something untracked | next tick |
 | `git-failed` | git could not prepare the worktree | next tick |
 | `host-refused` | substrate-host refused the task | next tick |

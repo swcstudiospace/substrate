@@ -134,6 +134,26 @@ describeLive("the corpus manifest against a live index", () => {
 		expect(await store.activeReferences(`doc-${MARKER}-unknown`)).toBe(0);
 	});
 
+	test("activeLeaves returns the active rows' leaves with the manifest version of the same read, and says when a limit cut it", async () => {
+		// A repository of its own: earlier tests of this file leave rows under the shared one.
+		const leafRepo = `Acme/leaves-${MARKER}`;
+		await store.recordIngested(doc("leaf-one.md", { repo: leafRepo, sha256: "1".repeat(64) }));
+		await store.recordIngested(doc("leaf-two.md", { repo: leafRepo, sha256: "2".repeat(64) }));
+		await store.recordIngested(doc("leaf-gone.md", { repo: leafRepo, sha256: "3".repeat(64) }));
+		await store.markTombstoned(leafRepo, "leaf-gone.md");
+		const all = await store.activeLeaves(1_000_000);
+		expect(all.truncated).toBe(false);
+		expect(all.manifestVersion).toBe(await store.manifestVersion());
+		const ours = all.leaves.filter((leaf) => leaf.repo === leafRepo);
+		expect(ours.map((leaf) => [leaf.path, leaf.sha256]).sort()).toEqual([
+			["leaf-one.md", "1".repeat(64)],
+			["leaf-two.md", "2".repeat(64)],
+		]);
+		const cut = await store.activeLeaves(1);
+		expect(cut.truncated).toBe(true);
+		expect(cut.leaves).toHaveLength(1);
+	});
+
 	test("status counts this run's rows by state, kind and tier, and names the manifest version", async () => {
 		const status = await store.status();
 		expect(status.total).toBe(status.active + status.tombstoned);

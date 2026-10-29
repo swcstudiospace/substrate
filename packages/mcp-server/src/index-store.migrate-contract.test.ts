@@ -49,7 +49,8 @@ export interface ContractAllowlists {
  * - `tables`: `schema_migrations` is the ledger `migrate()` creates for itself (it is not a step, listed so a step that
  *   ever creates it is not flagged), `skills_registry` (step 17) is not in the index archive's closed table list
  *   (`index-archive-spec.ts`); archiving it is a separate change, and `planning_steering_audit` (step 33) is an opt-in,
- *   append-only audit table that is likewise not in that closed list.
+ *   append-only audit table that is likewise not in that closed list. `worktrees` (step 36) is the worktree registry, which each
+ *   host's next report rebuilds, so an archive of it would only restore stale paths.
  */
 export const REAL_ALLOWLISTS: ContractAllowlists = {
 	idempotence: {},
@@ -59,8 +60,9 @@ export const REAL_ALLOWLISTS: ContractAllowlists = {
 		skills_registry: "step 17 predates the archive's closed table list and is not part of it; archiving it is a separate change",
 		planning_steering_audit: "step 33 is an opt-in (steering-audit), append-only steering audit table; it is not part of the archive's closed table list and archiving it is a separate change",
 		corpus_documents: "step 35 is the corpus manifest, rebuilt by re-running the corpus scan and ingest; it is not part of the archive's closed table list and archiving it is a separate change",
-		corpus_retrievals: "step 36 is the retrieval telemetry, written only under SUBSTRATE_DOCS_TELEMETRY: a bounded, redacted log that the retention sweep ages out; it is not part of the archive's closed table list, and adding it would change the schema hash that every earlier archive was verified against",
-		corpus_feedback: "step 36 holds the readers' verdicts on corpus documents; it is not part of the archive's closed table list (adding a table changes the schema hash every earlier archive was verified against) and a lost verdict only costs the re-rank some evidence it collects again",
+		worktrees: "step 36 is the worktree registry, rebuilt by the next report from each host; archiving stale paths would only restore them, and the closed table list stays as it is",
+		corpus_retrievals: "step 38 is the retrieval telemetry, written only under SUBSTRATE_DOCS_TELEMETRY: a bounded, redacted log that the retention sweep ages out; it is not part of the archive's closed table list, and adding it would change the schema hash that every earlier archive was verified against",
+		corpus_feedback: "step 38 holds the readers' verdicts on corpus documents; it is not part of the archive's closed table list (adding a table changes the schema hash every earlier archive was verified against) and a lost verdict only costs the re-rank some evidence it collects again",
 	},
 };
 

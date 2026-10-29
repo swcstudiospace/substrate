@@ -1,5 +1,5 @@
 /**
- * `substrate corpus scan|plan|ingest|reflect|status` (v1.7 phases 63 and 66).
+ * `substrate corpus scan|plan|ingest|reflect|status|prove|verify` (v1.7 phases 63, 66 and 69).
  *
  *   substrate corpus scan   [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--source fs|github|greptile]...
  *                           [--greptile-dir DIR] [--github-owner OWNER] [--max-repos N] [--json] [--entries]
@@ -7,13 +7,19 @@
  *   substrate corpus ingest (plan options) [--execute] [--batch-docs N] [--batch-bytes N]
  *   substrate corpus reflect [--repo R]... [--root DIR]... [--max-bytes N] [--server URL] [--execute] [--json]
  *   substrate corpus status [--server URL] [--json] [--gaps [--limit N]]
+ *   substrate corpus prove  --repo R --path P [--out FILE] [--server URL]
+ *   substrate corpus verify FILE [--online] [--server URL] [--json]
  *
  * Discovery runs here, where the files are; the server never reads a path. `scan` needs no server. `plan` sends entries
  * without bodies. `ingest` is a dry run until `--execute`, then sends the tombstones first, as requests of their own, and
  * then the bodies of the documents the plan says must change in bounded batches. `reflect` builds one digest per repository
  * from its `.planning` files and is a dry run until `--execute`. Exit codes: 0 done (every document ingested, updated, unchanged or tombstoned; every digest stored or unchanged), 1 a request failed or any document or digest ended refused or failed, 2 usage.
+ * `prove` asks the server for one document's inclusion proof and prints it (and writes it with --out). `verify` checks such a file
+ * offline, with no server; with --online it also asks the server whether the root is inside an anchored hour, and with no answer
+ * it says the anchor check was skipped. `verify` exits 0 valid, 1 invalid (a proof that does not hold, or an anchor answer that
+ * contradicts it), 2 usage.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import {
 	CORPUS_PROTOCOL,
 	CORPUS_SOURCES,
@@ -24,6 +30,7 @@ import {
 	MAX_INGEST_DOCUMENTS,
 	isCorpusSource,
 	isDocTier,
+	type CorpusAnchorResponse,
 	type CorpusPlanRequest,
 	type CorpusSource,
 	type DocTier,
@@ -31,11 +38,26 @@ import {
 	type GitRunner,
 } from "@substrate/corpus";
 import { createBodyStore, type BodyStore } from "./bodies.ts";
-import { createCorpusClient, type ClientError, type CorpusClient } from "./client.ts";
+import { createCorpusClient, isProofResponse, type ClientError, type CorpusClient } from "./client.ts";
 import { executeIngest } from "./ingest.ts";
 import { collectInventory, type Inventory, type InventoryOptions } from "./inventory.ts";
+import { conflictWith, MAX_PROOF_FILE_BYTES, verifyProofOffline } from "./proof.ts";
 import { collectDigests, executeReflect, type ReflectCollection } from "./reflect.ts";
-import { printable, renderGaps, renderIngest, renderInventory, renderPlan, renderReflectOutcome, renderReflectPlan, renderStatus, supersededEntries } from "./render.ts";
+import {
+	isValidReport,
+	jsonVerifyReport,
+	printable,
+	renderGaps,
+	renderIngest,
+	renderInventory,
+	renderPlan,
+	renderReflectOutcome,
+	renderReflectPlan,
+	renderStatus,
+	renderVerify,
+	supersededEntries,
+	type VerifyReport,
+} from "./render.ts";
 
 export const USAGE =
 	"substrate corpus scan [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--source fs|github|greptile]... [--greptile-dir DIR]\n" +
@@ -44,7 +66,9 @@ export const USAGE =
 	"substrate corpus ingest [plan options] [--execute] [--batch-docs N] [--batch-bytes N]   (a dry run without --execute; --batch-docs is capped at the server limit of 200)\n" +
 	"substrate corpus reflect [--repo R]... [--root DIR]... [--max-bytes N] [--server URL] [--execute] [--json]\n" +
 	"                      (digest of each repository's .planning/STATE.md and ROADMAP.md; a dry run without --execute; exits 1 when a digest was refused or failed or a repository could not be digested)\n" +
-	"substrate corpus status [--server URL] [--json] [--gaps [--limit N]]   (--gaps lists the queries the corpus could not answer; --limit is capped at the server limit of 200)\n";
+	"substrate corpus status [--server URL] [--json] [--gaps [--limit N]]   (--gaps lists the queries the corpus could not answer; --limit is capped at the server limit of 200)\n" +
+	"substrate corpus prove --repo R --path P [--out FILE] [--server URL]   (prints the inclusion proof of one document)\n" +
+	"substrate corpus verify FILE [--online] [--server URL] [--json]   (0 valid, 1 invalid, 2 usage; offline unless --online)\n";
 
 export const DEFAULT_ROOT = "/root/src/repos";
 export const DEFAULT_BATCH_DOCS = 20;
@@ -65,6 +89,7 @@ export interface CorpusDeps {
 	runner?: GitRunner | undefined;
 	gh?: GhRunner | undefined;
 	readFile?: ((path: string) => Uint8Array) | undefined;
+	writeFile?: ((path: string, text: string) => void) | undefined;
 }
 
 const SCAN_VALUES = ["root", "tier", "max-bytes", "source", "greptile-dir", "github-owner", "max-repos"] as const;
@@ -72,6 +97,8 @@ const SCAN_VALUES = ["root", "tier", "max-bytes", "source", "greptile-dir", "git
 interface FlagSpec {
 	values: readonly string[];
 	bools: readonly string[];
+	/** How many bare arguments the command takes (a file name). */
+	positionals?: number;
 }
 
 const SPECS: Record<string, FlagSpec> = {
@@ -80,19 +107,27 @@ const SPECS: Record<string, FlagSpec> = {
 	ingest: { values: [...SCAN_VALUES, "server", "batch-docs", "batch-bytes"], bools: ["json", "execute", "help"] },
 	status: { values: ["server", "limit"], bools: ["json", "gaps", "help"] },
 	reflect: { values: ["repo", "root", "max-bytes", "server"], bools: ["json", "execute", "help"] },
+	prove: { values: ["repo", "path", "out", "server"], bools: ["help"] },
+	verify: { values: ["server"], bools: ["json", "online", "help"], positionals: 1 },
 };
 
 interface Parsed {
 	values: Map<string, string[]>;
 	bools: Set<string>;
+	positionals: string[];
 }
 
 function parseFlags(argv: readonly string[], spec: FlagSpec): Parsed | string {
 	const values = new Map<string, string[]>();
 	const bools = new Set<string>();
+	const positionals: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i] ?? "";
-		if (!arg.startsWith("--")) return `unexpected argument ${JSON.stringify(arg)}`;
+		if (!arg.startsWith("--")) {
+			if (positionals.length >= (spec.positionals ?? 0)) return `unexpected argument ${JSON.stringify(arg)}`;
+			positionals.push(arg);
+			continue;
+		}
 		const eq = arg.indexOf("=");
 		const name = arg.slice(2, eq === -1 ? undefined : eq);
 		if (spec.bools.includes(name)) {
@@ -107,7 +142,7 @@ function parseFlags(argv: readonly string[], spec: FlagSpec): Parsed | string {
 			return `unknown flag --${name}`;
 		}
 	}
-	return { values, bools };
+	return { values, bools, positionals };
 }
 
 function positiveInt(text: string | undefined): number | null {
@@ -241,6 +276,8 @@ export async function runCorpus(argv: string[], deps: CorpusDeps): Promise<numbe
 	try {
 		if (sub === "status") return await status(parsed, deps);
 		if (sub === "reflect") return await reflect(parsed, deps);
+		if (sub === "prove") return await prove(parsed, deps);
+		if (sub === "verify") return await verify(parsed, deps);
 		const args = resolveScanArgs(parsed, deps.env);
 		if (typeof args === "string") return usage(args);
 		if (sub === "scan") {
@@ -361,6 +398,103 @@ async function reflect(parsed: Parsed, deps: CorpusDeps): Promise<number> {
 	if (outcome.fatal !== null) deps.err(`[substrate] corpus reflect stopped: ${describeError(outcome.fatal)}\n`);
 	const { failed, refused } = outcome.summary.counts;
 	return outcome.fatal !== null || failed > 0 || refused > 0 || incomplete ? 1 : 0;
+}
+
+async function prove(parsed: Parsed, deps: CorpusDeps): Promise<number> {
+	const repo = last(parsed, "repo");
+	const path = last(parsed, "path");
+	if (repo === undefined || path === undefined) {
+		deps.err("[substrate] corpus prove: --repo and --path are required\n");
+		return 2;
+	}
+	const result = await clientFor(parsed, deps).proof(repo, path);
+	if (!result.ok) {
+		deps.err(`[substrate] corpus prove failed: ${printable(describeError(result.error))}\n`);
+		return 1;
+	}
+	// A proof is handed on only after it holds, so a server that answers with one that does not is reported, not written.
+	const verdict = verifyProofOffline(result.value);
+	if (!verdict.valid) {
+		deps.err(`[substrate] corpus prove failed: the server's proof does not verify: ${printable(verdict.reason)}\n`);
+		return 1;
+	}
+	// A valid proof of another document is still not the one asked for: the file would claim a document it does not cover.
+	if (result.value.repo !== repo || result.value.documentPath !== path) {
+		deps.err(
+			`[substrate] corpus prove failed: the server answered with a proof for a different document (${printable(result.value.repo)} ${printable(result.value.documentPath)}), not ${printable(repo)} ${printable(path)}\n`,
+		);
+		return 1;
+	}
+	const text = `${JSON.stringify(result.value, null, 2)}\n`;
+	const file = last(parsed, "out");
+	if (file !== undefined) {
+		try {
+			(deps.writeFile ?? ((target, content) => writeFileSync(target, content)))(file, text);
+		} catch (cause) {
+			deps.err(`[substrate] corpus prove failed: could not write ${printable(file)}: ${printable(cause instanceof Error ? cause.message : String(cause))}\n`);
+			return 1;
+		}
+		deps.err(`[substrate] corpus prove: proof written to ${printable(file)}\n`);
+	}
+	deps.out(text);
+	return 0;
+}
+
+/** Reads a proof file, refusing one over {@link MAX_PROOF_FILE_BYTES} before reading it. */
+function readBounded(target: string): Uint8Array {
+	if (statSync(target).size > MAX_PROOF_FILE_BYTES) throw new Error(`larger than ${MAX_PROOF_FILE_BYTES} bytes`);
+	return readFileSync(target);
+}
+
+/** Reads and parses a proof file. A file that cannot be read or is not JSON is a usage error (2); JSON that is not a proof is an invalid one. */
+function readProofFile(file: string, deps: CorpusDeps): { ok: true; value: unknown } | { ok: false; message: string } {
+	let text: string;
+	try {
+		const bytes = (deps.readFile ?? readBounded)(file);
+		if (bytes.byteLength > MAX_PROOF_FILE_BYTES) return { ok: false, message: `${printable(file)} is larger than ${MAX_PROOF_FILE_BYTES} bytes, which no proof is` };
+		text = new TextDecoder().decode(bytes);
+	} catch (cause) {
+		return { ok: false, message: `cannot read ${printable(file)}: ${printable(cause instanceof Error ? cause.message : String(cause))}` };
+	}
+	try {
+		const value: unknown = JSON.parse(text);
+		return { ok: true, value };
+	} catch {
+		return { ok: false, message: `${printable(file)} is not JSON` };
+	}
+}
+
+async function verify(parsed: Parsed, deps: CorpusDeps): Promise<number> {
+	const file = parsed.positionals[0];
+	if (file === undefined) {
+		deps.err("[substrate] corpus verify: a proof FILE is required\n");
+		return 2;
+	}
+	const read = readProofFile(file, deps);
+	if (!read.ok) {
+		deps.err(`[substrate] corpus verify: ${read.message}\n`);
+		return 2;
+	}
+	const proof = read.value;
+	if (!isProofResponse(proof)) {
+		deps.err(`[substrate] corpus verify: invalid, ${printable(file)} is not a corpus proof (protocol ${CORPUS_PROTOCOL})\n`);
+		return 1;
+	}
+	const offline = verifyProofOffline(proof);
+	const online = parsed.bools.has("online");
+	let anchor: CorpusAnchorResponse | null = null;
+	let anchorSkipped: string | null = null;
+	if (online && !offline.valid) {
+		anchorSkipped = "the proof is invalid, so the server was not asked";
+	} else if (online) {
+		// The root was checked as hex by the offline verification above, so what is sent is 64 lowercase hex characters.
+		const answer = await clientFor(parsed, deps).anchor(proof.root);
+		if (answer.ok) anchor = answer.value;
+		else anchorSkipped = describeError(answer.error);
+	}
+	const report: VerifyReport = { proof, offline, online, anchor, anchorSkipped, conflict: anchor === null ? null : conflictWith(proof, anchor) };
+	deps.out(parsed.bools.has("json") ? jsonVerifyReport(report) : renderVerify(report));
+	return isValidReport(report) ? 0 : 1;
 }
 
 /** The request a plan sends: the entries without bodies, and the coverage of what the scan read completely. */

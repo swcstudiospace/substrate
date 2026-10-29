@@ -4,21 +4,26 @@
  * corpus off is reported as a closed error kind with a message the operator can act on; nothing here throws for those.
  */
 import {
+	CORPUS_ANCHOR_STATUSES,
 	CORPUS_PROTOCOL,
 	CORPUS_ROUTES,
 	DEFAULT_GAPS_LIMIT,
 	INGEST_STATUSES,
 	MAX_GAPS_LIMIT,
+	MAX_PROOF_PATH_LENGTH,
 	PLAN_ACTIONS,
 	REFLECT_STATUSES,
 	isDocKind,
 	isDocTier,
 	isRecord,
+	isSha256Hex,
+	type CorpusAnchorResponse,
 	type CorpusGapsResponse,
 	type CorpusIngestRequest,
 	type CorpusIngestResponse,
 	type CorpusPlanRequest,
 	type CorpusPlanResponse,
+	type CorpusProofResponse,
 	type CorpusReflectRequest,
 	type CorpusReflectResponse,
 	type CorpusStatusResponse,
@@ -51,6 +56,8 @@ export interface CorpusClient {
 	reflect(request: CorpusReflectRequest): Promise<ClientResult<CorpusReflectResponse>>;
 	/** The queries the corpus could not answer; `limit` is clamped to the server's maximum. */
 	gaps(limit?: number): Promise<ClientResult<CorpusGapsResponse>>;
+	proof(repo: string, path: string): Promise<ClientResult<CorpusProofResponse>>;
+	anchor(root: string): Promise<ClientResult<CorpusAnchorResponse>>;
 }
 
 /** The marker the server puts in a 503 when the corpus feature flag is off. */
@@ -174,6 +181,66 @@ export function isGapsResponse(value: unknown): value is CorpusGapsResponse {
 	);
 }
 
+/** The shape of a proof, as the server answers it and as `prove --out` writes it. Hex values are checked by the verifier, not here. */
+export function isProofResponse(value: unknown): value is CorpusProofResponse {
+	return (
+		isRecord(value) &&
+		value.protocol === CORPUS_PROTOCOL &&
+		typeof value.repo === "string" &&
+		typeof value.documentPath === "string" &&
+		typeof value.sha256 === "string" &&
+		typeof value.leaf === "string" &&
+		isCount(value.index) &&
+		isCount(value.treeSize) &&
+		Array.isArray(value.path) &&
+		value.path.length <= MAX_PROOF_PATH_LENGTH &&
+		value.path.every((step) => typeof step === "string") &&
+		typeof value.root === "string" &&
+		isCount(value.manifestVersion)
+	);
+}
+
+function isNullableCount(value: unknown): boolean {
+	return value === null || isCount(value);
+}
+
+function isNullableString(value: unknown): boolean {
+	return value === null || typeof value === "string";
+}
+
+function isAnchorEvidence(value: unknown): boolean {
+	return (
+		isRecord(value) &&
+		isNullableString(value.anchoredRoot) &&
+		isNullableCount(value.hourEventCount) &&
+		isNullableString(value.eventHash) &&
+		isNullableCount(value.leafIndex) &&
+		(value.hourProof === null || (Array.isArray(value.hourProof) && value.hourProof.length <= MAX_PROOF_PATH_LENGTH && value.hourProof.every((step) => typeof step === "string"))) &&
+		isNullableString(value.signature) &&
+		isNullableCount(value.slot) &&
+		isNullableString(value.signer) &&
+		isNullableCount(value.blockTimeMs) &&
+		(value.finality === null || value.finality === "processed" || value.finality === "confirmed" || value.finality === "finalized")
+	);
+}
+
+export function isAnchorResponse(value: unknown): value is CorpusAnchorResponse {
+	return (
+		isRecord(value) &&
+		value.protocol === CORPUS_PROTOCOL &&
+		isSha256Hex(value.root) &&
+		typeof value.status === "string" &&
+		(CORPUS_ANCHOR_STATUSES as readonly string[]).includes(value.status) &&
+		Array.isArray(value.reasons) &&
+		value.reasons.every((reason) => typeof reason === "string") &&
+		isNullableString(value.eventId) &&
+		isNullableCount(value.count) &&
+		isNullableCount(value.manifestVersion) &&
+		isNullableString(value.hourStart) &&
+		(value.evidence === null || isAnchorEvidence(value.evidence))
+	);
+}
+
 function fail(kind: ErrorKind, message: string, status?: number): { ok: false; error: ClientError } {
 	return { ok: false, error: { kind, message, ...(status === undefined ? {} : { status }) } };
 }
@@ -247,5 +314,7 @@ export function createCorpusClient(config: ClientConfig): CorpusClient {
 			const wanted = limit === undefined || !Number.isInteger(limit) || limit < 1 ? DEFAULT_GAPS_LIMIT : Math.min(limit, MAX_GAPS_LIMIT);
 			return call("GET", `${CORPUS_ROUTES.gaps}?limit=${wanted}`, undefined, isGapsResponse);
 		},
+		proof: (repo, path) => call("GET", `${CORPUS_ROUTES.proof}?${new URLSearchParams({ repo, path }).toString()}`, undefined, isProofResponse),
+		anchor: (root) => call("GET", `${CORPUS_ROUTES.anchor}?${new URLSearchParams({ root }).toString()}`, undefined, isAnchorResponse),
 	};
 }

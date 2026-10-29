@@ -1,7 +1,7 @@
 /**
  * What the docs RAG learns from use (v1.7 phase 66), behind an interface so the telemetry recorder, the feedback door, the
  * authority index and the gap report run against a fake in tests: retrieval rows (`corpus_retrievals`), feedback verdicts
- * (`corpus_feedback`) and the gap aggregate over the rows. Both tables come from migration step 36.
+ * (`corpus_feedback`) and the gap aggregate over the rows. Both tables come from migration step 38.
  */
 import type { SQL } from "bun";
 import type { FeedbackCounts } from "@substrate/corpus";
@@ -102,7 +102,7 @@ function isoOf(value: unknown): string {
 	return at === null || Number.isNaN(at.getTime()) ? new Date(0).toISOString() : at.toISOString();
 }
 
-/** The Bun SQL adapter over `corpus_retrievals` and `corpus_feedback` (migration step 36). */
+/** The Bun SQL adapter over `corpus_retrievals` and `corpus_feedback` (migration step 38). */
 export function bunReflectStore(sql: SQL): ReflectStore {
 	return {
 		async appendRetrieval(row: RetrievalRow): Promise<void> {

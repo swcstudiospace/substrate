@@ -41,6 +41,8 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_SKILLS_STATE` | path | /var/lib/substrate/skills | directory | the default state directory. See `docs/skills-propose.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_SKILLS_GH` | string | gh | gh binary | gh from PATH. See `docs/skills-propose.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_SKILLS_GOVERNANCE` | mode | off | off \| report \| enforce (case- and space-insensitive; anything else is off with a boot warning) | off: skills_propose records no registry row, nothing is filtered, and the skills projector makes no fetch (skills_approve and skills_list still exist). See `docs/runbooks/skills-governance.md` | mcp-server/config.ts, projector/skills-governance.ts | yes |
+| `SUBSTRATE_WORKTREE_REGISTRY` | toggle | off | off \| on (case- and space-insensitive; anything else is off) | off: POST /worktrees/report, GET /worktrees and worktree_list answer 503 worktrees.disabled and nothing is stored. See `docs/worktree-fleet-api.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_WORKTREE_REGISTRY_TTL_S` | number | 1209600 | 60..31536000 whole seconds | 1209600 s (14 days): an accepted report deletes its own host's rows last seen longer ago than this. See `docs/worktree-fleet-api.md` | mcp-server/config.ts | yes |
 | `LINEAR_API_KEY` | secret-ref | none | Linear API key | Linear sync is off | mcp-server/config.ts, host/sync.ts | yes |
 | `LINEAR_API_URL` | string | https://api.linear.app/graphql | URL | the real API; the rehearsal points it at a loopback fake. See `docs/rehearsal.md` | mcp-server/config.ts | yes |
 | `NOTION_API_KEY` | secret-ref | none | Notion integration key | Notion sync is off | mcp-server/config.ts, host/sync.ts | yes |
@@ -136,6 +138,8 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_CACHE_PRELOAD_TOP` | number | 3 | 1..20 | 3 repos per tick. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CACHE_PRELOAD_S` | number | 300 | 10..3600 | 300 s. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_EVENT_BUS` | toggle | off | on \| off (case- and space-insensitive; anything else refuses boot naming the variable) | off: no pub/sub connection and /events/stream reads the ledger on its poll only; on without DRAGONFLY_URL, or with a refused URL, is off with a boot log line. See `docs/data-planes.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_EMBED_CACHE` | toggle | off | on \| off (case- and space-insensitive; anything else is off) | off: every embed goes to TEI and nothing is read from or written to the emb cache class. See `docs/embedding-fabric.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_EMBED_CACHE_TTL_S` | number | 604800 | 60..2592000 seconds (clamped) | 604800 s (one week); every written entry carries it. See `docs/embedding-fabric.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CACHE_BUMP_SCOPE` | mode | legacy | legacy \| narrow (case- and space-insensitive; anything else is legacy, named at boot) | legacy: a Hindsight retain or outbox replay bumps the memory generation (flushes every brief and search, twice per forwarded write) and a heartbeat flushes graph-scoped briefs. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 
 ## Brief and recall-in-the-brief
@@ -196,6 +200,12 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_LIGHTRAG_QUERY_MODE` | string | hybrid | naive \| local \| global \| hybrid \| mix | hybrid (graph) unless a question starts with /mix or /hybrid or a caller names a mode; an unrecognised value is named in the boot warnings and also means hybrid. A LightRAG with no real LLM (the Railway bypass LLM) builds no graph and needs naive. See `docs/runbooks/lightrag-storage-topology.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LIGHTRAG_PLANNING_ROOTS` | list | .planning/ | comma separated path prefixes | .planning/ | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_BACKEND` | string | reach-derived | lightrag \| ragflow | LIGHTRAG_URL presence decides: set means lightrag, else ragflow. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `TEI_URL` | string | none | TEI base URL, loopback or a host:port in SUBSTRATE_DB_PROXY_ALLOW | the embedding service is unconfigured: every embed answers not-configured, nothing is sent and the tei fabric row is unconfigured; a direct URL refuses boot under SUBSTRATE_DB_ENDPOINT_POLICY=enforce. See `docs/embedding-fabric.md` | mcp-server/config.ts | yes |
+| `TEI_API_KEY` | secret-ref | none | API key, sent as a bearer token to TEI and never logged or reported | TEI is reached unauthenticated. See `docs/embedding-fabric.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_TEI_MODEL` | string | learned | the model_id TEI's /info reports | the first model_id /info reports is learned and held; a TEI that later reports another is refused (model-mismatch). See `docs/embedding-fabric.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_TEI_DIM` | number | learned | 1..8192 | the length of the first good vector is learned and held; a vector of another length is refused (dim-mismatch). See `docs/embedding-fabric.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_TEI_TIMEOUT_MS` | number | 10000 | 100..120000 ms (clamped) | 10000 ms per request. See `docs/embedding-fabric.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_TEI_BATCH` | number | 32 | 1..512 (clamped) | 32 texts per /embed request, lowered to the server's max_client_batch_size when that is smaller. See `docs/embedding-fabric.md` | mcp-server/config.ts | yes |
 | `RAILWAY_TOKEN` | secret-ref | none | Railway API token managing the project | Railway mutations stay stubbed; reads still report the plan | mcp-server/config.ts | yes |
 | `RAILWAY_PROJECT_ID` | string | none | Railway project id hosting LightRAG | unpinned: the plan carries a null project | mcp-server/config.ts | yes |
 | `RAILWAY_ENVIRONMENT_ID` | string | none | Railway environment id | unpinned: the plan carries a null environment | mcp-server/config.ts | yes |
@@ -227,7 +237,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_DOCS_CANARY_MANIFEST` | path | none | JSON file with sha256 and dataset_commit | the live canary refuses to run. See `docs/docs-search-ingest.md` | scripts/docs-golden.ts | yes |
 | `SUBSTRATE_DOCS_CANARY_STATE` | path | /var/lib/substrate/docs-canary-last.json | file path | the default state file. See `docs/docs-search-ingest.md` | scripts/docs-golden.ts | yes |
 | `SUBSTRATE_DOCS_TIMEOUT_MS` | number | 180000 | positive ms | 180000 ms (the CLI's docs ingest and merge-trigger calls). See `docs/docs-search-ingest.md` | cli/docs.ts | yes |
-| `SUBSTRATE_CORPUS` | toggle | off | on \| off | off: POST /corpus/ingest answers 503 corpus.disabled and nothing reaches the docs plane. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_CORPUS` | toggle | off | on \| off | off: every /corpus route (ingest, plan, status, root, proof, anchor) answers 503 corpus.disabled, nothing reaches the docs plane, and docs_search replies carry no corpus_root. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CORPUS_CONCURRENCY` | number | 4 | 1..16 | 4 batches in flight at once. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CORPUS_BATCH_DOCS` | number | 20 | 1..200 | 20 documents per batch. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CORPUS_BATCH_BYTES` | number | 1000000 | 10000..5000000 | 1000000 bytes per batch. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
@@ -354,6 +364,9 @@ Which environment a name belongs in is part of the row: the server's shared env 
 
 | Name | Kind | Default | Allowed | Unset means | Read by | In `.env.example` |
 | --- | --- | --- | --- | --- | --- | --- |
+| `SUBSTRATE_WORKTREE_ROOTS` | list | none | colon-separated absolute directories (relative entries are dropped) | the worktree commands say no root is configured and exit 2, and the doctor adds no worktree row; the collector's graph attribution still falls back to /var/lib/substrate/worktrees (also when no entry is an absolute path); the dispatcher does not read this variable and always uses that directory. See `docs/worktree-fleet-api.md` | fleet/config.ts, cli/worktree, collectors/worktree-graph.ts, scripts/doctor-runtime.ts | yes |
+| `SUBSTRATE_WORKTREE_MIN_FREE_GB` | number | 5 | positive number of gigabytes (anything else is the default) | 5 GB: worktree creation refuses below it (substrate worktree provision, and the dispatcher's ensure_worktree, which reads it in Python and is not covered by the scan). See `docs/worktree-fleet-api.md` | fleet/config.ts, cli/worktree, dispatcher/worktree.py | yes |
+| `SUBSTRATE_WORKTREE_IDLE_DAYS` | number | 14 | positive number of days (anything else is the default) | 14 days: a worktree must be untouched this long before prune may call it safe, and the registry listing calls a worktree stale after it. See `docs/worktree-fleet-api.md` | fleet/config.ts, cli/worktree, mcp-server/config.ts | yes |
 | `SUBSTRATE_CORPUS_ROOTS` | list | /root/src/repos | colon separated directories | the CLI scans /root/src/repos when no --root is given. See `docs/runbooks/corpus-ingest.md` | cli/corpus/index.ts | yes |
 | `SUBSTRATE_TIMEOUT_MS` | number | 1500 | positive ms | 1500 ms (the CLI's lessons calls) | cli/index.ts | yes |
 | `SUBSTRATE_SKILLS_TIMEOUT_MS` | number | 180000 | positive ms | 180000 ms (the CLI's skills calls) | cli/skills.ts | yes |

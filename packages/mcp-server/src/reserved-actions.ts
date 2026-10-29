@@ -12,6 +12,7 @@
  * ONE list: add an action here when a reader starts to treat it as authoritative.
  */
 import { ANCHOR_SIGNER_ROTATE_ACTION } from "@substrate/ledger";
+import { CORPUS_ROOT_ACTION } from "./corpus/root.ts";
 import { FORGET_ACTION } from "./memory-forget.ts";
 import { ANCHOR_REANCHOR_ACTION } from "./reanchor-plan.ts";
 import { SESSION_CHECKPOINT_ACTION, SESSION_ROLLBACK_ACTION, SESSION_ROLLBACK_REFUSED_ACTION } from "./session-events.ts";
@@ -25,6 +26,7 @@ export const RESERVED_NOTE_ACTIONS: ReadonlySet<string> = new Set([
 	SESSION_ROLLBACK_REFUSED_ACTION,
 	FORGET_BATCH_ACTION,
 	FORGET_ACTION,
+	CORPUS_ROOT_ACTION,
 ]);
 
 /** The reserved action a payload names, or null. `payload` is whatever the caller sent, so anything that is not an object names none. */
