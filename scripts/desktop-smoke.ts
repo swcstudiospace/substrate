@@ -58,6 +58,9 @@ export interface SmokeOptions {
 	unlisted: string;
 }
 
+/** Optional test seam: bound the docker locality probe in milliseconds. */
+const PROBE_TIMEOUT_FLAG = "--probe-timeout-ms";
+
 /** Parse `--name/--surface/--unlisted`; anything else is a refusal. */
 export function parseSmokeArgs(argv: string[]): SmokeOptions {
 	let name = "p30";
@@ -65,7 +68,9 @@ export function parseSmokeArgs(argv: string[]): SmokeOptions {
 	let unlisted = "cursor";
 	for (let i = 0; i < argv.length; i++) {
 		const token = argv[i] ?? "";
-		if (token === "--name" || token === "--surface" || token === "--unlisted") {
+		if (token === PROBE_TIMEOUT_FLAG) {
+			i++; // the value is read by probeTimeoutMs; a bad one falls back to the default
+		} else if (token === "--name" || token === "--surface" || token === "--unlisted") {
 			const value = argv[i + 1];
 			if (value === undefined || value.startsWith("--")) throw new RehearsalRefused(`${token} needs a value`);
 			if (token === "--name") name = value;
@@ -284,12 +289,10 @@ function inspectRecruitment(): string | null {
 const DOCKER_ENDPOINT_PROBE = ["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"] as const;
 /** A hung docker client must not hang the smoke: the probe is bounded. */
 const LOCALITY_PROBE_TIMEOUT_MS = 10_000;
-/** Test seam for the probe bound; operators leave it unset. */
-const PROBE_TIMEOUT_ENV = "SUBSTRATE_DESKTOP_SMOKE_PROBE_TIMEOUT_MS";
-
-/** The probe bound in ms: the seam when it is a positive integer, else 10 s. */
-export function probeTimeoutMs(env: Record<string, string | undefined>): number {
-	const raw = env[PROBE_TIMEOUT_ENV] ?? "";
+/** The probe bound in ms: `--probe-timeout-ms <positive integer>` (a test seam), else 10 s. */
+export function probeTimeoutMs(argv: string[]): number {
+	const at = argv.indexOf(PROBE_TIMEOUT_FLAG);
+	const raw = at < 0 ? "" : (argv[at + 1] ?? "");
 	return /^[1-9][0-9]*$/.test(raw) ? Number(raw) : LOCALITY_PROBE_TIMEOUT_MS;
 }
 
@@ -639,7 +642,7 @@ export async function main(argv: string[]): Promise<number> {
 	// Every docker call below (the recruitment inspect and the lifecycle script's
 	// status) must hit the local engine, and the smoke types into a live
 	// desktop: refuse before any request unless the endpoint is proven local.
-	const locality = refuseUnprovenDockerLocality(runArgv([...DOCKER_ENDPOINT_PROBE], probeTimeoutMs(process.env)));
+	const locality = refuseUnprovenDockerLocality(runArgv([...DOCKER_ENDPOINT_PROBE], probeTimeoutMs(argv)));
 	if (locality !== null) throw new RehearsalRefused(locality);
 
 	const health = await getStatus(`${base}/healthz`, bearer, REQUEST_TIMEOUT_MS);

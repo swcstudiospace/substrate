@@ -239,10 +239,11 @@ describe("dumpedHoldsTyped", () => {
 
 describe("probeTimeoutMs", () => {
 	test("defaults to 10 s and accepts only a positive integer seam", () => {
-		expect(probeTimeoutMs({})).toBe(10_000);
-		expect(probeTimeoutMs({ SUBSTRATE_DESKTOP_SMOKE_PROBE_TIMEOUT_MS: "250" })).toBe(250);
+		expect(probeTimeoutMs([])).toBe(10_000);
+		expect(probeTimeoutMs(["--name", "x", "--probe-timeout-ms", "250"])).toBe(250);
+		expect(probeTimeoutMs(["--probe-timeout-ms"])).toBe(10_000);
 		for (const bad of ["", "0", "-5", "1.5", "soon"]) {
-			expect(probeTimeoutMs({ SUBSTRATE_DESKTOP_SMOKE_PROBE_TIMEOUT_MS: bad })).toBe(10_000);
+			expect(probeTimeoutMs(["--probe-timeout-ms", bad])).toBe(10_000);
 		}
 	});
 });
@@ -267,7 +268,7 @@ interface SmokeRun {
 }
 
 /** Run the smoke's `main` against a counting twin and a fake docker. */
-async function runSmoke(probe: ProbeBehaviour, env: Record<string, string> = {}): Promise<SmokeRun> {
+async function runSmoke(probe: ProbeBehaviour, extraArgs: string[] = []): Promise<SmokeRun> {
 	const dir = mkdtempSync(join(tmpdir(), "desktop-smoke-entry-"));
 	smokeMade.push(dir);
 	const stubDir = join(dir, "bin");
@@ -299,8 +300,8 @@ async function runSmoke(probe: ProbeBehaviour, env: Record<string, string> = {})
 			`export SUBSTRATE_URL='http://127.0.0.1:${twin.port}'\nexport SUBSTRATE_REHEARSAL_TOKENS_DIR='${tokensDir}'\n`,
 		);
 		const start = Date.now();
-		const child = Bun.spawn([process.execPath, SMOKE, "--name", "entry"], {
-			env: { PATH: `${stubDir}:/usr/bin:/bin`, HOME: dir, XDG_RUNTIME_DIR: runtime, ...env },
+		const child = Bun.spawn([process.execPath, SMOKE, "--name", "entry", ...extraArgs], {
+			env: { PATH: `${stubDir}:/usr/bin:/bin`, HOME: dir, XDG_RUNTIME_DIR: runtime },
 			stdout: "pipe",
 			stderr: "pipe",
 		});
@@ -327,7 +328,7 @@ describe("desktop-smoke entry point locality gate", () => {
 	});
 
 	test("a hung probe is bounded by the timeout seam, exits 2, sends nothing", async () => {
-		const run = await runSmoke("hang", { SUBSTRATE_DESKTOP_SMOKE_PROBE_TIMEOUT_MS: "500" });
+		const run = await runSmoke("hang", ["--probe-timeout-ms", "500"]);
 		expect(run.code).toBe(2);
 		expect(run.err).toContain("could not prove the local docker endpoint");
 		expect(run.ms).toBeLessThan(8_000);
