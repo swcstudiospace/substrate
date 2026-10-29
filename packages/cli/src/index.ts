@@ -22,6 +22,8 @@
  *   substrate spool status|flush             the collector event spool (docs/collectors.md, "Event spool")
  *   substrate session checkpoint|checkpoints|rollback|recover|sync   session checkpoints and rollback
  *       (exit 0 done, 1 failed, 2 usage, 3 refused, 4 files restored but the ledger commit is pending)
+ *   substrate corpus scan|plan|ingest|status   the documentation corpus of every repository (docs/corpus.md)
+ *       (exit 0 done, 1 failed, 2 usage; ingest is a dry run until --execute)
  *   substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair --server-stopped [--repair-orphans]]
  *       the memory consistency verifier: the index, the plane and the ledger compared
  *       (exit 0 consistent, 1 drift, 2 usage, 3 a store could not be read; docs/runbooks/consistency-verify.md)
@@ -62,6 +64,7 @@ import { httpClaimsLookup, httpReportPoster, runWorktree } from "./worktree/comm
 import { runSpool } from "./spool.ts";
 import { spoolConfig } from "../../collectors/src/spool.ts";
 import { runSession } from "./session/command.ts";
+import { CORPUS_TIMEOUT_MS, runCorpus } from "./corpus/index.ts";
 import type { TranscriptPort } from "./session/rollback.ts";
 import { runConsistency } from "./consistency.ts";
 import { httpCapsuleMcp, nodeCapsuleFs, runMemory } from "./capsule.ts";
@@ -776,6 +779,18 @@ switch (command) {
 			}),
 		);
 		break;
+	case "corpus":
+		process.exit(
+			await runCorpus(rest, {
+				url: base(),
+				token: resolveBearer("claude-code", process.env) ?? undefined,
+				timeoutMs: CORPUS_TIMEOUT_MS,
+				env: process.env,
+				out: (text) => process.stdout.write(text),
+				err: (text) => process.stderr.write(text),
+			}),
+		);
+		break;
 	default:
 		process.stdout.write(
 			"substrate brief [--repo R] [--branch B] [--graph G] [--surface S] [--write]\n" +
@@ -801,6 +816,7 @@ switch (command) {
 				"                         | verify FILE [--anchors] | redact FILE --ids a,b --reason TEXT --out FILE2   (substrate memory capsule for the flags)\n" +
 				"substrate spool status [--json] | flush [--json] [--budget-ms N]   (the event spool needs SUBSTRATE_EVENT_SPOOL=on)\n" +
 				"substrate worktree list|status|scan|prune|conflicts|provision|disk ...   (substrate worktree --help; roots from SUBSTRATE_WORKTREE_ROOTS)\n",
+				"substrate corpus scan | plan | ingest [--execute] | status   (substrate corpus --help for the flags; ingest is a dry run without --execute)\n",
 		);
 		process.exit(command ? 2 : 0);
 }

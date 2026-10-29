@@ -229,6 +229,10 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_DOCS_CANARY_MANIFEST` | path | none | JSON file with sha256 and dataset_commit | the live canary refuses to run. See `docs/docs-search-ingest.md` | scripts/docs-golden.ts | yes |
 | `SUBSTRATE_DOCS_CANARY_STATE` | path | /var/lib/substrate/docs-canary-last.json | file path | the default state file. See `docs/docs-search-ingest.md` | scripts/docs-golden.ts | yes |
 | `SUBSTRATE_DOCS_TIMEOUT_MS` | number | 180000 | positive ms | 180000 ms (the CLI's docs ingest and merge-trigger calls). See `docs/docs-search-ingest.md` | cli/docs.ts | yes |
+| `SUBSTRATE_CORPUS` | toggle | off | on \| off | off: POST /corpus/ingest answers 503 corpus.disabled and nothing reaches the docs plane. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_CORPUS_CONCURRENCY` | number | 4 | 1..16 | 4 batches in flight at once. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_CORPUS_BATCH_DOCS` | number | 20 | 1..200 | 20 documents per batch. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_CORPUS_BATCH_BYTES` | number | 1000000 | 10000..5000000 | 1000000 bytes per batch. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
 
 ## Admission budgets and circuit breakers
 
@@ -351,6 +355,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_WORKTREE_ROOTS` | list | none | colon-separated absolute directories (relative entries are dropped) | the worktree commands say no root is configured and exit 2, and the doctor adds no worktree row; the collector's graph attribution still falls back to /var/lib/substrate/worktrees (also when no entry is an absolute path); the dispatcher does not read this variable and always uses that directory. See `docs/worktree-fleet-api.md` | fleet/config.ts, cli/worktree, collectors/worktree-graph.ts, scripts/doctor-runtime.ts | yes |
 | `SUBSTRATE_WORKTREE_MIN_FREE_GB` | number | 5 | positive number of gigabytes (anything else is the default) | 5 GB: worktree creation refuses below it (substrate worktree provision, and the dispatcher's ensure_worktree, which reads it in Python and is not covered by the scan). See `docs/worktree-fleet-api.md` | fleet/config.ts, cli/worktree, dispatcher/worktree.py | yes |
 | `SUBSTRATE_WORKTREE_IDLE_DAYS` | number | 14 | positive number of days (anything else is the default) | 14 days: a worktree must be untouched this long before prune may call it safe, and the registry listing calls a worktree stale after it. See `docs/worktree-fleet-api.md` | fleet/config.ts, cli/worktree, mcp-server/config.ts | yes |
+| `SUBSTRATE_CORPUS_ROOTS` | list | /root/src/repos | colon separated directories | the CLI scans /root/src/repos when no --root is given. See `docs/runbooks/corpus-ingest.md` | cli/corpus/index.ts | yes |
 | `SUBSTRATE_TIMEOUT_MS` | number | 1500 | positive ms | 1500 ms (the CLI's lessons calls) | cli/index.ts | yes |
 | `SUBSTRATE_SKILLS_TIMEOUT_MS` | number | 180000 | positive ms | 180000 ms (the CLI's skills calls) | cli/skills.ts | yes |
 | `SUBSTRATE_CLI` | path | the CLI entry in the checkout | path | the built-in path | projector/cursor.ts | yes |

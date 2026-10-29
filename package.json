@@ -16,7 +16,8 @@
     "packages/audit",
     "packages/evidence",
     "packages/worktree-snapshot",
-    "packages/fleet"
+    "packages/fleet",
+    "packages/corpus"
   ],
   "scripts": {
     "test": "bun test",

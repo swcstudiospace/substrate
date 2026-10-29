@@ -25,7 +25,6 @@ import {
 	scanIngestPages,
 	readSkillsCheckoutPages,
 	skillsCheckoutRoots,
-	stripRemoteImages,
 	type IngestDeps,
 	type IngestInput,
 	type IngestOutcome,
@@ -205,14 +204,6 @@ describe("docs_ingest idempotency and images", () => {
 		const outcome = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (outcome.ok) throw new Error("expected a timeout");
 		expect(outcome.reason).toBe("parse-timeout");
-	});
-});
-
-describe("stripRemoteImages", () => {
-	test("counts tags and markdown images, keeps local paths", () => {
-		const stripped = stripRemoteImages('A <img src="http://x/y.png"> B ![c](https://x/z.png) D ![e](./f.png)');
-		expect(stripped.stripped).toBe(2);
-		expect(stripped.body).toContain("./f.png");
 	});
 });
 

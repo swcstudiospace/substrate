@@ -329,6 +329,15 @@ const APPROVAL_NEEDS_OPERATOR = "skills_approve needs an operator token; nothing
 const LIST_NEEDS_SURFACE = "skills_list needs an authenticated surface";
 /** Why an anonymous ingest is refused, even on a run that allows anonymous callers. */
 const INGEST_NEEDS_SURFACE = "docs_ingest needs an authenticated surface; nothing was ingested";
+/** Why an anonymous corpus request is refused, even on a run that allows anonymous callers. */
+const CORPUS_NEEDS_SURFACE = "the corpus needs an authenticated surface; nothing was read or changed";
+
+/** How many items the named member of a request body holds, for an audit record that must not carry the items. */
+function listLength(body: unknown, member: string): number {
+	if (body === null || typeof body !== "object" || Array.isArray(body)) return 0;
+	const list: unknown = (body as Record<string, unknown>)[member];
+	return Array.isArray(list) ? list.length : 0;
+}
 /** Why an anonymous merge-trigger is refused, even on a run that allows anonymous callers. */
 const MERGE_TRIGGER_NEEDS_SURFACE = "docs merge-trigger needs an authenticated surface; nothing was refreshed";
 /** Why an anonymous worktree report is refused, even on a run that allows anonymous callers. */
@@ -1572,6 +1581,44 @@ export function createHttpServer(
 				sendJson(res, 200, outcome);
 				return;
 			}
+
+			// The corpus atlas doors (v1.7 phase 63): plan and status are reads (fail-open audit under `corpus_status`), ingest is
+			// the write (fail-closed audit under `corpus_ingest`). An anonymous caller is refused before the body is read. With
+			// `SUBSTRATE_CORPUS` off each answers 503 `corpus.disabled` from `substrate.corpus*` and nothing is read or sent.
+			if (req.method === "POST" && url.pathname === "/corpus/plan") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req, DOCS_MAX_BODY_BYTES));
+				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "plan", entries: listLength(parsed, "entries") }))) return;
+				const reply = await substrate.corpusPlan(parsed, surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			if (req.method === "POST" && url.pathname === "/corpus/ingest") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req, DOCS_MAX_BODY_BYTES));
+				// Counts only: the audit record never carries a document body.
+				const fields = { documents: listLength(parsed, "documents"), tombstones: listLength(parsed, "tombstones") };
+				if (!(await auditedRest(res, observability, surface, "corpus_ingest", fields))) return;
+				const reply = await substrate.corpusIngest(parsed, surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			if (req.method === "GET" && url.pathname === "/corpus/status") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "status" }))) return;
+				const reply = await substrate.corpusStatus(surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
 			// SPE-19388 LightRAG query surface (SPE-19384 RAG replacement):
 			// REST/JSON over `POST /query`, same Hindsight fallback and
 			// idempotency as the `docs_lightrag_query` MCP tool. Read-only
@@ -1984,7 +2031,7 @@ export function createHttpServer(
 
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
-			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/mcp" || url.pathname === "/memory" || url.pathname === "/worktrees/report")) {
+			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/corpus/plan" || url.pathname === "/corpus/ingest" || url.pathname === "/mcp" || url.pathname === "/memory" || url.pathname === "/worktrees/report")) {
 				sendJson(res, 413, { error: cause.message });
 				return;
 			}
