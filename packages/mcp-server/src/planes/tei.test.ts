@@ -620,6 +620,26 @@ describe("one timeout for every request of a call", () => {
 		expect(await client.embed(["c"])).toEqual({ ok: false, reason: "model-mismatch" });
 		expect(healthy.embedCalls()).toHaveLength(0);
 	});
+
+	test("a call prefers a fresh verdict to an older check that is still in flight under its own timeout", async () => {
+		const healthy = fakeTei();
+		let infoSeen = 0;
+		const stalled = Promise.withResolvers<Response>();
+		const fetchImpl: PlaneFetch = async (input, init) => {
+			if (new URL(String(input)).pathname !== "/info") return healthy.fetch(input, init);
+			infoSeen += 1;
+			// The first check stalls; a second one, under a different timeout, answers at once.
+			return infoSeen === 1 ? stalled.promise : Response.json({ model_id: "test-model", max_input_length: 512, max_client_batch_size: 2 });
+		};
+		const { client } = clientFor({ ...CONFIG, model: "test-model" }, fetchImpl);
+		const first = client.embed(["a"]);
+		expect((await client.embed(["b"], { timeoutMs: 100 })).ok).toBe(true);
+		// The first group's timeout again: the verdict is fresh, so this call does not wait on the stalled check.
+		expect((await client.embed(["c"])).ok).toBe(true);
+		expect(infoSeen).toBe(2);
+		stalled.resolve(Response.json({ model_id: "test-model", max_input_length: 512, max_client_batch_size: 2 }));
+		expect((await first).ok).toBe(true);
+	});
 });
 
 describe("probe after a recovery", () => {

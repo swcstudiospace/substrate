@@ -318,13 +318,18 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 		return response.status >= 200 && response.status < 300 ? { ok: true } : { ok: false, reason: "unavailable" };
 	}
 
+	/** A model verdict that is recent and not a refusal: nothing to ask `/info` for. */
+	function verdictIsFresh(): boolean {
+		return modelCheckedAt !== null && !modelRefused && now() - modelCheckedAt < MODEL_RECHECK_MS;
+	}
+
 	/**
 	 * Reads `/info` and applies the model pin. Learns the model and the batch limit the first time. A refusal is
 	 * remembered and answered until a read names the expected model again, so a failed read cannot lift it.
 	 */
 	async function verifyModel(timeoutMs: number): Promise<{ ok: true } | { ok: false; reason: TeiReason }> {
 		const first = modelCheckedAt === null;
-		if (!first && !modelRefused && now() - (modelCheckedAt ?? 0) < MODEL_RECHECK_MS) return { ok: true };
+		if (verdictIsFresh()) return { ok: true };
 		checkSeq += 1;
 		const started = checkSeq;
 		const read = await readInfo(timeoutMs, true);
@@ -352,6 +357,9 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 	function ensureVerified(timeoutMs: number): Promise<{ ok: true } | { ok: false; reason: TeiReason }> {
 		// A check started under a shorter timeout would end a longer caller's check early, so only calls with the same timeout
 		// share one; every in-flight check stays registered until it settles.
+		// A fresh verdict wins over an older check still in flight (it may be stalled under another call's timeout); a refusal is
+		// never fresh, so it still waits for a check.
+		if (verdictIsFresh()) return Promise.resolve({ ok: true });
 		const running = verifying.get(timeoutMs);
 		if (running !== undefined) return running;
 		const check: Promise<{ ok: true } | { ok: false; reason: TeiReason }> = verifyModel(timeoutMs).finally(() => {
