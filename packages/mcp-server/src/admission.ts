@@ -189,6 +189,7 @@ export const ROUTE_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	"/worktrees/claims": "read",
 	"/worktrees/report": "write",
 	"/corpus/plan": "read",
+	"/corpus/neardup": "read",
 	"/corpus/status": "read",
 	"/corpus/ingest": "write",
 	"/corpus/root": "read",

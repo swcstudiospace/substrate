@@ -3,16 +3,16 @@
  *
  *   substrate corpus scan   [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--source fs|github|greptile]...
  *                           [--greptile-dir DIR] [--github-owner OWNER] [--max-repos N] [--json] [--entries]
- *   substrate corpus plan   (scan options) [--server URL]
+ *   substrate corpus plan   (scan options) [--server URL] [--neardup [--threshold N] [--neardup-max N]]
  *   substrate corpus ingest (plan options) [--execute] [--batch-docs N] [--batch-bytes N]
  *   substrate corpus status [--server URL] [--json]
  *   substrate corpus prove  --repo R --path P [--out FILE] [--server URL]
  *   substrate corpus verify FILE [--online] [--server URL] [--json]
  *
  * Discovery runs here, where the files are; the server never reads a path. `scan` needs no server. `plan` sends entries
- * without bodies. `ingest` is a dry run until `--execute`, then sends the tombstones first, as requests of their own, and
- * then the bodies of the documents the plan says must change in bounded batches. Exit codes: 0 done (every document ingested, updated, unchanged or tombstoned), 1 a request failed or any document ended refused or failed, 2 usage.
- * `prove` asks the server for one document's inclusion proof and prints it (and writes it with --out). `verify` checks such a file
+ * without bodies; with `--neardup` it then sends the first 4000 characters of each local document the plan would write to
+ * `POST /corpus/neardup` and prints the pairs that look alike (advisory: nothing is dropped on that signal). `ingest` is a dry run until `--execute`, then sends the tombstones first, as requests of their own, and
+ * then the bodies of the documents the plan says must change in bounded batches. Exit codes: 0 done (every document ingested, updated, unchanged or tombstoned), 1 a request failed, any document ended refused or failed, or a requested near-duplicate comparison could not be answered, 2 usage.
  * offline, with no server; with --online it also asks the server whether the root is inside an anchored hour, and with no answer
  * it says the anchor check was skipped. `verify` exits 0 valid, 1 invalid (a proof that does not hold, or an anchor answer that
  * contradicts it), 2 usage.
@@ -25,9 +25,13 @@ import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_TIER,
 	MAX_INGEST_DOCUMENTS,
+	MAX_NEARDUP_ITEMS,
+	MAX_NEARDUP_THRESHOLD,
+	MIN_NEARDUP_THRESHOLD,
 	isCorpusSource,
 	isDocTier,
 	type CorpusAnchorResponse,
+	type CorpusNeardupResponse,
 	type CorpusPlanRequest,
 	type CorpusSource,
 	type DocTier,
@@ -38,13 +42,14 @@ import { createBodyStore, type BodyStore } from "./bodies.ts";
 import { createCorpusClient, isProofResponse, type ClientError, type CorpusClient } from "./client.ts";
 import { executeIngest } from "./ingest.ts";
 import { collectInventory, type Inventory, type InventoryOptions } from "./inventory.ts";
+import { neardupRequest, prefixReaderOf, selectNeardupItems } from "./neardup.ts";
 import { conflictWith, MAX_PROOF_FILE_BYTES, verifyProofOffline } from "./proof.ts";
-import { isValidReport, jsonVerifyReport, printable, renderIngest, renderInventory, renderPlan, renderStatus, renderVerify, type VerifyReport } from "./render.ts";
+import { isValidReport, jsonVerifyReport, printable, renderIngest, renderInventory, renderNeardup, renderPlan, renderStatus, renderVerify, type VerifyReport } from "./render.ts";
 
 export const USAGE =
 	"substrate corpus scan [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--source fs|github|greptile]... [--greptile-dir DIR]\n" +
 	"                      [--github-owner OWNER] [--max-repos N] [--json] [--entries]\n" +
-	"substrate corpus plan [scan options] [--server URL] [--json]\n" +
+	"substrate corpus plan [scan options] [--server URL] [--json] [--neardup [--threshold 0.5-1] [--neardup-max N]]   (--neardup is advisory: nothing is dropped on it; N is at most 1000)\n" +
 	"substrate corpus ingest [plan options] [--execute] [--batch-docs N] [--batch-bytes N]   (a dry run without --execute; --batch-docs is capped at the server limit of 200)\n" +
 	"substrate corpus status [--server URL] [--json]\n" +
 	"substrate corpus prove --repo R --path P [--out FILE] [--server URL]   (prints the inclusion proof of one document)\n" +
@@ -69,6 +74,8 @@ export interface CorpusDeps {
 	runner?: GitRunner | undefined;
 	gh?: GhRunner | undefined;
 	readFile?: ((path: string) => Uint8Array) | undefined;
+	/** Reads at most `maxBytes` from the start of a file; the near-duplicate excerpts use it so a large file is never loaded whole. Defaults to `readFile` cut to the budget when only that is injected. */
+	readPrefix?: ((path: string, maxBytes: number) => Uint8Array) | undefined;
 	writeFile?: ((path: string, text: string) => void) | undefined;
 }
 
@@ -83,7 +90,7 @@ interface FlagSpec {
 
 const SPECS: Record<string, FlagSpec> = {
 	scan: { values: SCAN_VALUES, bools: ["json", "entries", "help"] },
-	plan: { values: [...SCAN_VALUES, "server"], bools: ["json", "help"] },
+	plan: { values: [...SCAN_VALUES, "server", "threshold", "neardup-max"], bools: ["json", "neardup", "help"] },
 	ingest: { values: [...SCAN_VALUES, "server", "batch-docs", "batch-bytes"], bools: ["json", "execute", "help"] },
 	status: { values: ["server"], bools: ["json", "help"] },
 	prove: { values: ["repo", "path", "out", "server"], bools: ["help"] },
@@ -259,7 +266,11 @@ export async function runCorpus(argv: string[], deps: CorpusDeps): Promise<numbe
 			deps.out(parsed.bools.has("json") ? jsonReport(inventory, parsed.bools.has("entries")) : renderInventory(inventory));
 			return 0;
 		}
-		if (sub === "plan") return await plan(args, parsed, deps);
+		if (sub === "plan") {
+			const neardup = resolveNeardupArgs(parsed);
+			if (typeof neardup === "string") return usage(neardup);
+			return await plan(args, parsed, deps, neardup);
+		}
 		const docsFlag = last(parsed, "batch-docs");
 		const bytesFlag = last(parsed, "batch-bytes");
 		const batchDocs = docsFlag === undefined ? positiveInt(deps.env.SUBSTRATE_CORPUS_BATCH_DOCS) ?? DEFAULT_BATCH_DOCS : positiveInt(docsFlag);
@@ -397,14 +408,67 @@ function planRequest(inventory: Inventory): CorpusPlanRequest {
 	return { protocol: CORPUS_PROTOCOL, entries: inventory.entries, scope: inventory.scope };
 }
 
-async function plan(args: ScanArgs, parsed: Parsed, deps: CorpusDeps): Promise<number> {
+interface NeardupArgs {
+	/** Absent: the server's default. */
+	threshold: number | undefined;
+	max: number;
+}
+
+/** `--neardup` with its options, null without `--neardup`, or the usage error. The two options mean nothing without the flag, so they are refused. */
+function resolveNeardupArgs(parsed: Parsed): NeardupArgs | string | null {
+	const thresholdText = last(parsed, "threshold");
+	const maxText = last(parsed, "neardup-max");
+	if (!parsed.bools.has("neardup")) return thresholdText === undefined && maxText === undefined ? null : "--threshold and --neardup-max need --neardup";
+	let threshold: number | undefined;
+	if (thresholdText !== undefined) {
+		const value = /^(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)$/.test(thresholdText) ? Number(thresholdText) : Number.NaN;
+		if (!(value >= MIN_NEARDUP_THRESHOLD && value <= MAX_NEARDUP_THRESHOLD)) return `--threshold must be a number from ${MIN_NEARDUP_THRESHOLD} to ${MAX_NEARDUP_THRESHOLD}`;
+		threshold = value;
+	}
+	let max = MAX_NEARDUP_ITEMS;
+	if (maxText !== undefined) {
+		const value = positiveInt(maxText);
+		if (value === null || value > MAX_NEARDUP_ITEMS) return `--neardup-max must be a whole number from 1 to ${MAX_NEARDUP_ITEMS}`;
+		max = value;
+	}
+	return { threshold, max };
+}
+
+async function plan(args: ScanArgs, parsed: Parsed, deps: CorpusDeps, neardup: NeardupArgs | null): Promise<number> {
 	const inventory = await collectInventory(inventoryOptions(args, deps, undefined));
-	const result = await clientFor(parsed, deps).plan(planRequest(inventory));
+	const client = clientFor(parsed, deps);
+	const result = await client.plan(planRequest(inventory));
 	if (!result.ok) {
 		deps.err(`[substrate] corpus plan failed: ${describeError(result.error)}\n`);
 		return 1;
 	}
-	deps.out(parsed.bools.has("json") ? `${JSON.stringify(result.value, null, 2)}\n` : renderPlan(result.value, inventory));
+	const json = parsed.bools.has("json");
+	if (neardup === null) {
+		deps.out(json ? `${JSON.stringify(result.value, null, 2)}\n` : renderPlan(result.value, inventory));
+		return 0;
+	}
+	// The comparison is asked for, so a failure of it is a failure of the command; the plan is printed either way.
+	const selection = selectNeardupItems(result.value, inventory, prefixReaderOf(deps.readPrefix, deps.readFile), neardup.max);
+	let reply: CorpusNeardupResponse | null = null;
+	let failure: ClientError | null = null;
+	if (selection.items.length > 0) {
+		const answered = await client.neardup(neardupRequest(selection.items, neardup.threshold));
+		if (answered.ok) reply = answered.value;
+		else failure = answered.error;
+	}
+	if (json) {
+		const notCompared = { github: selection.github, unreadable: selection.unreadable, overLimit: selection.overLimit };
+		const empty: CorpusNeardupResponse = { protocol: CORPUS_PROTOCOL, model: null, dimension: null, compared: 0, pairs: [], truncated: false, skipped: [] };
+		const section = failure === null ? { ...(reply ?? empty), notCompared } : { error: failure.message };
+		deps.out(`${JSON.stringify({ ...result.value, neardup: section }, null, 2)}\n`);
+	} else {
+		deps.out(renderPlan(result.value, inventory));
+		if (failure === null) deps.out(renderNeardup(selection, reply));
+	}
+	if (failure !== null) {
+		deps.err(`[substrate] corpus plan --neardup: the near-duplicate comparison could not run: ${describeError(failure)}\n`);
+		return 1;
+	}
 	return 0;
 }
 

@@ -14,6 +14,7 @@ export const CORPUS_DATASET = "corpus";
 /** The routes the CLI calls. */
 export const CORPUS_ROUTES = {
 	plan: "/corpus/plan",
+	neardup: "/corpus/neardup",
 	ingest: "/corpus/ingest",
 	status: "/corpus/status",
 	root: "/corpus/root",
@@ -129,6 +130,83 @@ export interface CorpusPlanResponse {
 	counts: Record<PlanAction, number>;
 	/** Increases whenever the manifest changes; a plan made against an older version is still valid, only less fresh. */
 	manifestVersion: number;
+}
+
+/**
+ * `POST /corpus/neardup` (phase 64): document excerpts in, the pairs of them whose embeddings are closer than a threshold
+ * out. The signal is advisory: nothing is dropped, skipped, tombstoned or changed because of it.
+ */
+export const MAX_NEARDUP_ITEMS = 1000;
+/** Longest `text` of one item, in UTF-16 code units (JavaScript string length); the CLI cuts its excerpt to this. */
+export const MAX_NEARDUP_TEXT_CHARS = 4000;
+export const MIN_NEARDUP_THRESHOLD = 0.5;
+export const MAX_NEARDUP_THRESHOLD = 1;
+export const DEFAULT_NEARDUP_THRESHOLD = 0.92;
+export const MAX_NEARDUP_PAIRS = 1000;
+export const DEFAULT_NEARDUP_PAIRS = 200;
+/** The most `skipped` entries a reply lists. */
+export const MAX_NEARDUP_SKIPPED = 100;
+
+/**
+ * Why the embedding service could not answer, as the server reports it in `detail` of a `503 corpus.embeddings-unavailable`.
+ * The same closed list as the TEI client's reasons; the server's handler checks at compile time that the client's list fits here.
+ */
+export const EMBEDDING_REASONS = [
+	"not-configured",
+	"breaker-open",
+	"timeout",
+	"unavailable",
+	"bad-response",
+	"model-mismatch",
+	"dim-mismatch",
+	"input-refused",
+] as const;
+export type EmbeddingReason = (typeof EMBEDDING_REASONS)[number];
+
+export function isEmbeddingReason(value: unknown): value is EmbeddingReason {
+	return typeof value === "string" && (EMBEDDING_REASONS as readonly string[]).includes(value);
+}
+
+export interface NeardupItem {
+	repo: string;
+	path: string;
+	text: string;
+}
+
+export interface CorpusNeardupRequest {
+	protocol: typeof CORPUS_PROTOCOL;
+	items: NeardupItem[];
+	/** In [0.5, 1]; default {@link DEFAULT_NEARDUP_THRESHOLD}. */
+	threshold?: number | undefined;
+	/** An integer in [1, 1000]; default {@link DEFAULT_NEARDUP_PAIRS}. */
+	maxPairs?: number | undefined;
+}
+
+export interface NeardupKey {
+	repo: string;
+	path: string;
+}
+
+export interface NeardupPair {
+	a: NeardupKey;
+	b: NeardupKey;
+	/** Cosine similarity, rounded to four decimals. */
+	similarity: number;
+}
+
+export interface CorpusNeardupResponse {
+	protocol: typeof CORPUS_PROTOCOL;
+	/** The embedding model and its dimension; null when no item had text to embed. */
+	model: string | null;
+	dimension: number | null;
+	/** How many items were embedded and compared. */
+	compared: number;
+	/** Most similar first. */
+	pairs: NeardupPair[];
+	/** True when more pairs than `maxPairs` matched. */
+	truncated: boolean;
+	/** Items that were not embedded (`empty`: no text), at most {@link MAX_NEARDUP_SKIPPED}. */
+	skipped: Array<NeardupKey & { reason: "empty" }>;
 }
 
 export interface CorpusIngestRequest {
