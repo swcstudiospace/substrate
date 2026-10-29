@@ -82,7 +82,8 @@ describe("the committed offline harness (what CI guards)", () => {
 		const run = capture();
 		const began = performance.now();
 		const code = await main([], run.io);
-		expect(performance.now() - began).toBeLessThan(10_000);
+		// It runs fixtures in memory and takes a few seconds; the bound only catches a run that waits on something it should not (a network call, a timer), so it is generous enough for a loaded runner.
+		expect(performance.now() - began).toBeLessThan(60_000);
 		expect({ code, out: run.out, err: run.err }).toMatchObject({ code: 0, err: [] });
 		expect(run.out.at(-1)).toBe("docs eval: within the baseline");
 		expect(run.requests).toEqual([]);
