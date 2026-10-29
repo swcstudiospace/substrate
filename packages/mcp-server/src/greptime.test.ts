@@ -384,6 +384,245 @@ describe("the ledger client, continued", () => {
 	});
 });
 
+describe("diagnostics never carry the endpoint's credentials", () => {
+	// Built at run time so no secret-looking literal sits in the repo.
+	const USER = ["ledger", "writer"].join("-");
+	const PASSWORD = ["pw", "Zk4r", "9Lm2", "xQ"].join("");
+	const BASIC = Buffer.from(`${USER}:${PASSWORD}`).toString("base64");
+	const secretConfig: GreptimeConfig = { url: "http://greptime.test", user: USER, password: PASSWORD, db: "substrate" };
+	/** What a proxy or a client library might quote back: the user, the password and the Basic token. */
+	const echo = `rejected user ${USER} with password ${PASSWORD} (basic ${BASIC})`;
+
+	function expectClean(text: string): void {
+		for (const secret of [USER, PASSWORD, BASIC]) expect(text).not.toContain(secret);
+	}
+
+	async function rejection(run: Promise<unknown>): Promise<Error> {
+		return run.then(
+			() => {
+				throw new Error("expected the call to reject");
+			},
+			(cause: unknown) => {
+				if (!(cause instanceof Error)) throw new Error("expected an Error");
+				return cause;
+			},
+		);
+	}
+
+	function gated(): { gate: PlaneGate; samples: PlaneSample[]; breaker: CircuitBreaker } {
+		const samples: PlaneSample[] = [];
+		const breaker = new CircuitBreaker("greptime", { failureThreshold: 5, openMs: 30_000 }, () => 0);
+		return { gate: { plane: "greptime", breaker, observe: (sample) => samples.push(sample) }, samples, breaker };
+	}
+
+	test("a transport error that quotes the credentials is scrubbed and still unreachable", async () => {
+		globalThis.fetch = (() => Promise.reject(new Error(`connect refused: ${echo}`))) as unknown as typeof fetch;
+		const error = await rejection(new GreptimeClient(secretConfig).sql("SELECT 1"));
+		expect(error).toBeInstanceOf(GreptimeUnavailable);
+		expect(error.message).toContain("greptime unreachable");
+		expect(error.message).toContain("connect refused");
+		expectClean(error.message);
+	});
+
+	test("the gate's observer and the breaker's lastError see the scrubbed text, and a timeout is still a timeout", async () => {
+		const { gate, samples, breaker } = gated();
+		globalThis.fetch = (() => Promise.reject(new DOMException(`timed out: ${echo}`, "TimeoutError"))) as unknown as typeof fetch;
+		const error = await rejection(new GreptimeClient(secretConfig, { gate }).sql("SELECT 1"));
+		expectClean(error.message);
+		expect(error.message).toContain("TimeoutError");
+		expect(samples).toHaveLength(1);
+		expect(samples[0]?.outcome).toBe("timeout");
+		expectClean(samples[0]?.reason ?? "");
+		expectClean(breaker.snapshot().lastError ?? "");
+		expect(breaker.snapshot().lastError).toContain("timed out");
+	});
+
+	test("a 5xx body that echoes the credentials is scrubbed in the error, the sample and the breaker", async () => {
+		const { gate, samples, breaker } = gated();
+		stubFetch(() => new Response(echo, { status: 503 }));
+		const error = await rejection(new GreptimeClient(secretConfig, { gate }).sql("SELECT 1"));
+		expect(error).toBeInstanceOf(GreptimeUnavailable);
+		expect(error.message).toContain("greptime 503");
+		expectClean(error.message);
+		expectClean(samples[0]?.reason ?? "");
+		expectClean(breaker.snapshot().lastError ?? "");
+	});
+
+	test("a 4xx body, a non-JSON 200 and a JSON error field are each scrubbed", async () => {
+		const client = new GreptimeClient(secretConfig);
+
+		stubFetch(() => new Response(echo, { status: 401 }));
+		const rejected = await rejection(client.sql("SELECT 1"));
+		expect(rejected.message).toContain("greptime 401");
+		expectClean(rejected.message);
+
+		stubFetch(() => new Response(echo, { status: 200 }));
+		const notJson = await rejection(client.sql("SELECT 1"));
+		expect(notJson.message).toContain("non-JSON");
+		expectClean(notJson.message);
+
+		stubFetch(() => ({ error: echo }));
+		const sqlError = await rejection(client.sql("SELECT 1"));
+		expect(sqlError).not.toBeInstanceOf(GreptimeUnavailable);
+		expect(sqlError.message).toContain("greptime:");
+		expectClean(sqlError.message);
+	});
+
+	test("credentials embedded in the endpoint URL are scrubbed, percent-escapes included", async () => {
+		const raw = ["pw", "@Zk4r", "9Lm2"].join("");
+		const embedded: GreptimeConfig = {
+			url: `http://svc:${encodeURIComponent(raw)}@greptime.test`,
+			user: undefined,
+			password: undefined,
+			db: "substrate",
+		};
+		// A server that decoded the userinfo and quoted only the password back.
+		stubFetch(() => new Response(`login failed for password ${raw}`, { status: 401 }));
+		const error = await rejection(new GreptimeClient(embedded).sql("SELECT 1"));
+		expect(error.message).toContain("login failed");
+		expect(error.message).not.toContain(raw);
+		expect(error.message).not.toContain(encodeURIComponent(raw));
+
+		globalThis.fetch = (() => Promise.reject(new Error(`cannot reach ${embedded.url}/v1/sql`))) as unknown as typeof fetch;
+		const unreachable = await rejection(new GreptimeClient(embedded).sql("SELECT 1"));
+		expect(unreachable.message).toContain("cannot reach");
+		expect(unreachable.message).not.toContain(raw);
+		expect(unreachable.message).not.toContain(encodeURIComponent(raw));
+	});
+
+	test("a migrate warning built from a failed CREATE is scrubbed", async () => {
+		stubFetch((statement) => {
+			if (statement.includes("append_mode") && statement.includes("CREATE")) return { error: echo };
+			if (statement.includes("SHOW CREATE TABLE")) return records(["Create Table"], [["CREATE TABLE ..."]]);
+			return affected;
+		});
+		const { warnings } = await new GreptimeClient(secretConfig).migrate();
+		expect(warnings.some((warning) => warning.includes("created without append_mode"))).toBe(true);
+		expectClean(warnings.join("\n"));
+	});
+
+	test("IngestNotRecorded carries the scrubbed cause", async () => {
+		stubFetch((statement) =>
+			statement.includes('INSERT INTO "event_ingest"') ? new Response(echo, { status: 500 }) : defaultReply(statement),
+		);
+		const error = await rejection(new GreptimeClient(secretConfig).insertEvent(normalizeEvent(input, null)));
+		expect(error).toBeInstanceOf(IngestNotRecorded);
+		expect(error.message).toContain("greptime 500");
+		expectClean(error.message);
+	});
+
+	test("a short user and password do not mangle ordinary diagnostics", async () => {
+		stubFetch(() => new Response("nope", { status: 400 }));
+		const error = await rejection(new GreptimeClient(config).sql("SELECT 1"));
+		expect(error.message).toBe("greptime 400: nope");
+	});
+
+	/** `n` characters of harmless words ending in a space, so a secret placed after it is never part of a longer token. */
+	function padding(n: number): string {
+		return `${"lorem ".repeat(Math.ceil(n / 6)).slice(0, n - 1)} `;
+	}
+
+	test("a credential that straddles a clip limit is scrubbed whole before the body is cut", async () => {
+		const client = new GreptimeClient(secretConfig);
+		const half = PASSWORD.slice(0, 4);
+
+		// Starts five characters before the 500-character cutoff of an error body.
+		stubFetch(() => new Response(`${padding(495)}${PASSWORD} trailing`, { status: 401 }));
+		const rejected = await rejection(client.sql("SELECT 1"));
+		expect(rejected.message).toContain("greptime 401");
+		expect(rejected.message).not.toContain(half);
+		expectClean(rejected.message);
+
+		// The same cutoff on the 5xx path, which reaches the observer and the breaker.
+		const { gate, samples, breaker } = gated();
+		stubFetch(() => new Response(`${padding(495)}${PASSWORD} trailing`, { status: 503 }));
+		const unavailable = await rejection(new GreptimeClient(secretConfig, { gate }).sql("SELECT 1"));
+		expect(unavailable).toBeInstanceOf(GreptimeUnavailable);
+		for (const text of [unavailable.message, samples[0]?.reason ?? "", breaker.snapshot().lastError ?? ""]) {
+			expect(text).not.toContain(half);
+			expectClean(text);
+		}
+
+		// The 200-character cutoff of a non-JSON 200.
+		stubFetch(() => new Response(`${padding(195)}${PASSWORD} trailing`, { status: 200 }));
+		const notJson = await rejection(client.sql("SELECT 1"));
+		expect(notJson.message).toContain("non-JSON");
+		expect(notJson.message).not.toContain(half);
+		expectClean(notJson.message);
+	});
+
+	test("a Basic token that a clip would cut just before its final '=' is still scrubbed", async () => {
+		expect(BASIC.endsWith("=")).toBe(true);
+		const start = 500 - (BASIC.length - 1);
+		const client = new GreptimeClient(secretConfig);
+		stubFetch(() => new Response(`${padding(start)}${BASIC} trailing`, { status: 400 }));
+		const rejected = await rejection(client.sql("SELECT 1"));
+		expect(rejected.message).not.toContain(BASIC.slice(0, 8));
+		expectClean(rejected.message);
+
+		const shorter = 200 - (BASIC.length - 1);
+		stubFetch(() => new Response(`${padding(shorter)}${BASIC} trailing`, { status: 200 }));
+		const notJson = await rejection(client.sql("SELECT 1"));
+		expect(notJson.message).not.toContain(BASIC.slice(0, 8));
+		expectClean(notJson.message);
+	});
+
+	test("a password with a quote and a backslash is scrubbed in its JSON-escaped spelling too", async () => {
+		const tricky = ["pa", '"', "ss", "\\", "word42"].join("");
+		const config: GreptimeConfig = { url: "http://greptime.test", user: USER, password: tricky, db: "substrate" };
+		const escaped = JSON.stringify(tricky).slice(1, -1);
+		expect(escaped).not.toBe(tricky);
+		const client = new GreptimeClient(config);
+		const expectNoPassword = (text: string): void => {
+			expect(text).not.toContain(tricky);
+			expect(text).not.toContain(escaped);
+			expect(text).not.toContain("word42");
+		};
+
+		stubFetch(() => new Response(JSON.stringify({ code: 7003, error: `rejected password ${tricky}` }), { status: 401 }));
+		const jsonRejected = await rejection(client.sql("SELECT 1"));
+		expect(jsonRejected.message).toContain("greptime 401");
+		expectNoPassword(jsonRejected.message);
+
+		const { gate, samples } = gated();
+		stubFetch(() => new Response(JSON.stringify({ error: `down for ${tricky}` }), { status: 503 }));
+		const unavailable = await rejection(new GreptimeClient(config, { gate }).sql("SELECT 1"));
+		expectNoPassword(unavailable.message);
+		expectNoPassword(samples[0]?.reason ?? "");
+
+		stubFetch(() => new Response(`login failed for password ${tricky}`, { status: 401 }));
+		const freeText = await rejection(client.sql("SELECT 1"));
+		expect(freeText.message).toContain("login failed");
+		expectNoPassword(freeText.message);
+	});
+
+	test("a configured user that is part of the missing-table wording still reads as an empty history", async () => {
+		const config: GreptimeConfig = { url: "http://greptime.test", user: "found", password: PASSWORD, db: "substrate" };
+		const client = new GreptimeClient(config);
+		const window = { series: "brief.p95", fromMs: 1_000_000, toMs: 2_000_000, stepS: 60 };
+
+		stubFetch(() => ({ error: `Table not found: metric_samples (password ${PASSWORD})` }));
+		expect(await client.readMetricHistory(window)).toEqual({ points: [], stepS: 60 });
+		const missing = await rejection(client.sql("SELECT 1"));
+		if (!(missing instanceof GreptimeError)) throw new Error("expected a GreptimeError");
+		expect(missing.missingTable).toBe(true);
+		// The displayed text is scrubbed: the user is gone from the wording and the password with it.
+		expect(missing.message).toContain("[REDACTED]");
+		expect(missing.message).not.toContain("found");
+		expect(missing.message).not.toContain(PASSWORD);
+
+		stubFetch(() => new Response("Table not found: metric_samples", { status: 400 }));
+		expect(await client.readMetricHistory(window)).toEqual({ points: [], stepS: 60 });
+
+		// A different SQL error is still an error, with or without the user's name in it.
+		stubFetch(() => ({ error: "syntax error near found" }));
+		await expect(client.readMetricHistory(window)).rejects.toBeInstanceOf(GreptimeError);
+		const other = await rejection(client.sql("SELECT 1"));
+		if (!(other instanceof GreptimeError)) throw new Error("expected a GreptimeError");
+		expect(other.missingTable).toBe(false);
+	});
+});
+
 describe("probeDialect", () => {
 	test("asks the server once and caches the answer", async () => {
 		const { sql } = stubFetch(() => records(["n"], [[4]]));
