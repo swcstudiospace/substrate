@@ -662,7 +662,7 @@ async function measureGolden(io: GoldenIo, base: string, bearer: string): Promis
 	if (io.goldenRecall === undefined) return null;
 	try {
 		const report = await io.goldenRecall(base, bearer);
-		if (report === null) io.stderr("docs canary: golden recall not measured (no documents to ask about, or a question failed or came back degraded)");
+		if (report === null) io.stderr("docs canary: golden recall not measured (no documents to ask about, the scan of docs/ was partial, or a question failed or came back degraded)");
 		return report;
 	} catch {
 		io.stderr("docs canary: golden recall not measured (the documents could not be read)");
@@ -724,7 +724,12 @@ if (import.meta.main) {
 			offline: async (fixture) =>
 				(await searchGoldenOffline(corpus, fixture, { commit: fixture.corpus_manifest.dataset_commit ?? "golden-offline" })).reply,
 			goldenRecall: (base, bearer) =>
-				measureGoldenRecall(base, bearer, { env: process.env, fetchImpl: (input, init) => fetch(input, init), now: () => performance.now() }),
+				measureGoldenRecall(base, bearer, {
+					env: process.env,
+					fetchImpl: (input, init) => fetch(input, init),
+					now: () => performance.now(),
+					stderr: (line) => process.stderr.write(`${line}\n`),
+				}),
 			readState: () => {
 				try {
 					return readFileSync(process.env.SUBSTRATE_DOCS_CANARY_STATE?.trim() || DEFAULT_CANARY_STATE, "utf8");

@@ -137,4 +137,42 @@ describe("substrate corpus eval", () => {
 		expect(high.code).toBe(0);
 		expect(high.err).toContain("above the limit; asking 500");
 	});
+
+	test("a checkout whose git listing fails is reported as a partial scan, while the other checkout still supplies the questions", async () => {
+		stub.on("POST /docs/search", goodSearch);
+		const root = tempDir("corpus-eval-partial-");
+		dirs.push(root);
+		writeTree(root, {
+			"alpha/.git/HEAD": "",
+			"alpha/README.md": "# Alpha project overview\n\nAlpha is a sample project for tests.\n",
+			"alpha/docs/guide.md": "# Backup restore drill guide\n\nWe restore nightly snapshots.\n",
+			"broken/.git/HEAD": "",
+			"broken/README.md": "# Broken project overview\n\nThis checkout cannot be listed.\n",
+		});
+		const runner = fakeGit({
+			[join(root, "alpha")]: { branch: "main", remoteDefault: "main", head: "e".repeat(40), origin: "git@github.com:Acme/Alpha.git", files: ["README.md", "docs/guide.md"] },
+			[join(root, "broken")]: { branch: "main", remoteDefault: "main", head: "d".repeat(40), origin: "git@github.com:Acme/Broken.git", files: ["README.md"], lsFilesFails: true },
+		});
+		const pass = await run(["eval", "--root", root, "--server", stub.url], { runner });
+		expect(pass.code).toBe(0);
+		expect(pass.out).toContain("not read completely: 1");
+		expect(pass.out).toContain("Acme/Broken [fs]: git ls-files failed");
+		expect(pass.out).toContain("recall@5 holds the objective 0.6 (partial: 1 repository(ies) not read completely)");
+		expect(pass.err).toContain("partial scan: 1 repository(ies)");
+		const json = JSON.parse((await run(["eval", "--root", root, "--server", stub.url, "--json"], { runner })).out);
+		expect(json).toMatchObject({ partial: true, incomplete: { count: 1, listed: [{ repo: "Acme/Broken", source: "fs" }] } });
+
+		// A breach over the partial scan still exits 1.
+		stub.on("POST /docs/search", () => ({ status: 200, body: { chunks: [{ source_url: README }] } }));
+		const breach = await run(["eval", "--root", root, "--server", stub.url], { runner });
+		expect(breach.code).toBe(1);
+		expect(breach.out).toContain("(partial: 1 repository(ies) not read completely)");
+
+		// With nothing skipped there is no partial label at all.
+		stub.on("POST /docs/search", goodSearch);
+		const { root: fullRoot, runner: fullRunner } = tree();
+		const full = await run(["eval", "--root", fullRoot, "--server", stub.url], { runner: fullRunner });
+		expect(full.code).toBe(0);
+		expect(`${full.out}${full.err}`).not.toContain("partial");
+	});
 });

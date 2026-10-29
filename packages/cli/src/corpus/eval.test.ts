@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { documentKey, sourceUrl, SLO_DEFAULTS, type CorpusEntry, type EvalDocument } from "@substrate/corpus";
-import { evaluateCorpus, EVAL_LISTED_PROBLEMS, readEvalDocuments, type EvalRequest } from "./eval.ts";
+import { evaluateCorpus, EVAL_LISTED_PROBLEMS, readEvalDocuments, type EvalDocuments, type EvalRequest } from "./eval.ts";
 import { defined } from "../../../corpus/src/test-support.ts";
 import type { Inventory } from "./inventory.ts";
 
@@ -55,6 +55,24 @@ describe("readEvalDocuments", () => {
 		const { docs } = readEvalDocuments(inventoryOf({ "a.md": "x" }), () => new Uint8Array([0xef, 0xbb, 0xbf, 0x23, 0x20, 0x54]));
 		expect(defined(docs[0]).text.startsWith("\ufeff")).toBe(true);
 	});
+
+	test("carries the repositories the scan did not read completely, from its report, with their source and reason", () => {
+		const inventory = inventoryOf({ "a.md": "x" });
+		inventory.report.repos = [
+			{ repo: "acme/atlas", dir: "/w/atlas", source: "fs", files: 1, bytes: 1, complete: true },
+			{ repo: "acme/beta", dir: "/w/beta", source: "fs", files: 0, bytes: 0, complete: false, incomplete: "git ls-files failed in /w/beta (exit 128)" },
+			{ repo: "acme/gamma", dir: "github:acme/gamma", source: "github", files: 2, bytes: 9, complete: false },
+		];
+		const { incomplete } = readEvalDocuments(inventory, () => encode("# A doc here\n"));
+		expect(incomplete).toEqual({
+			count: 2,
+			listed: [
+				{ repo: "acme/beta", source: "fs", reason: "git ls-files failed in /w/beta (exit 128)" },
+				{ repo: "acme/gamma", source: "github", reason: "incomplete" },
+			],
+		});
+		expect(readEvalDocuments(inventoryOf({ "a.md": "x" }), () => encode("x")).incomplete).toEqual({ count: 0, listed: [] });
+	});
 });
 
 const DOCS: EvalDocument[] = [
@@ -64,10 +82,12 @@ const DOCS: EvalDocument[] = [
 const GUIDE = sourceUrl("acme/atlas", "docs/guide.md");
 const README = sourceUrl("acme/atlas", "README.md");
 
+const PLAIN_DOCUMENTS: EvalDocuments = { docs: DOCS, unreadable: { count: 0, listed: [] }, incomplete: { count: 0, listed: [] } };
+
 function request(over: Partial<EvalRequest> & { answer?: (question: string) => Response } = {}): EvalRequest {
 	const { answer, ...rest } = over;
 	return {
-		documents: { docs: DOCS, unreadable: { count: 0, listed: [] } },
+		documents: PLAIN_DOCUMENTS,
 		maxQueries: 500,
 		thresholds: { ...SLO_DEFAULTS },
 		server: {
@@ -95,7 +115,7 @@ describe("evaluateCorpus", () => {
 	});
 
 	test("a dry run still names the files it could not read, in both forms, and exits 0", async () => {
-		const documents = { docs: DOCS, unreadable: { count: 2, listed: ["acme/atlas:x.md"] } };
+		const documents = { ...PLAIN_DOCUMENTS, unreadable: { count: 2, listed: ["acme/atlas:x.md"] } };
 		const human = await evaluateCorpus(request({ server: null, documents }));
 		expect(human.code).toBe(0);
 		expect(human.warning).toContain("2 document(s) could not be read");
@@ -135,7 +155,7 @@ describe("evaluateCorpus", () => {
 	});
 
 	test("no documents means no questions, and a live run with none is not a pass", async () => {
-		const outcome = await evaluateCorpus(request({ documents: { docs: [], unreadable: { count: 0, listed: [] } } }));
+		const outcome = await evaluateCorpus(request({ documents: { ...PLAIN_DOCUMENTS, docs: [] } }));
 		expect(outcome.code).toBe(1);
 		expect(outcome.warning).toContain("no question could be generated");
 	});
@@ -143,5 +163,35 @@ describe("evaluateCorpus", () => {
 	test("the number of questions is capped by maxQueries", async () => {
 		const outcome = await evaluateCorpus(request({ server: null, maxQueries: 2 }));
 		expect(outcome.text).toContain("questions it would ask: 2");
+	});
+
+	test("a scan that skipped a repository is partial: both forms name it, a pass is labelled partial, and the exit code is still the objective's", async () => {
+		const incomplete = { count: 3, listed: [{ repo: "acme/gone", source: "fs", reason: "git ls-files failed in /w/gone (exit 128)\u001b[2J" }] };
+		const documents = { ...PLAIN_DOCUMENTS, incomplete };
+		const human = await evaluateCorpus(request({ documents }));
+		expect(human.code).toBe(0);
+		expect(human.text).toContain("not read completely: 3");
+		expect(human.text).toContain("acme/gone [fs]: git ls-files failed in /w/gone (exit 128)\\x1b[2J");
+		expect(human.text).toContain("+2 more");
+		expect(human.text).not.toContain("\u001b");
+		expect(human.text).toContain("recall@5 holds the objective 0.6 (partial: 3 repository(ies) not read completely)");
+		expect(human.warning).toContain("partial scan: 3 repository(ies)");
+		const asJson = JSON.parse((await evaluateCorpus(request({ documents, json: true }))).text);
+		expect(asJson).toMatchObject({ mode: "live", partial: true, incomplete: { count: 3, listed: [{ repo: "acme/gone", source: "fs" }] }, breaches: [] });
+		expect(asJson.warnings.some((line: string) => line.startsWith("partial scan"))).toBe(true);
+
+		// A breach over a partial scan still exits 1 and carries the label.
+		const breach = await evaluateCorpus(request({ documents, answer: () => Response.json({ chunks: [{ source_url: README }] }) }));
+		expect(breach.code).toBe(1);
+		expect(breach.text).toContain("FAIL recall@5 0.500 is under the objective 0.6 (partial: 3 repository(ies) not read completely)");
+
+		// A dry run says so too, and a complete scan says nothing about it.
+		const dry = await evaluateCorpus(request({ documents, server: null }));
+		expect(dry.code).toBe(0);
+		expect(dry.text).toContain("not read completely: 3");
+		expect(JSON.parse((await evaluateCorpus(request({ documents, server: null, json: true }))).text)).toMatchObject({ mode: "dry-run", partial: true });
+		const whole = await evaluateCorpus(request());
+		expect(whole.text).not.toContain("partial");
+		expect(JSON.parse((await evaluateCorpus(request({ json: true }))).text)).toMatchObject({ partial: false, incomplete: { count: 0, listed: [] } });
 	});
 });

@@ -43,7 +43,7 @@ export const USAGE =
 	"substrate corpus plan [scan options] [--server URL] [--json]\n" +
 	"substrate corpus ingest [plan options] [--execute] [--batch-docs N] [--batch-bytes N]   (a dry run without --execute; --batch-docs is capped at the server limit of 200)\n" +
 	"substrate corpus status [--server URL] [--json]\n" +
-	"substrate corpus eval [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--max-queries N] [--server URL] [--json]   (the golden set of the local scan; without --server it only counts the questions; exit 1 when recall at 5 is under SUBSTRATE_DOCS_SLO_RECALL5 or the run could not be scored in full)\n";
+	"substrate corpus eval [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--max-queries N] [--server URL] [--json]   (the golden set of the local scan; without --server it only counts the questions; exit 1 when recall at 5 is under SUBSTRATE_DOCS_SLO_RECALL5 or the run could not be scored in full; a scan that skipped a repository is listed and labelled partial)\n";
 
 export const DEFAULT_ROOT = "/root/src/repos";
 export const DEFAULT_BATCH_DOCS = 20;

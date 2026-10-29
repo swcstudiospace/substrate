@@ -549,7 +549,7 @@ export interface MetricsHistorySamplerDeps {
 	 * Runs before each sample so a reading that needs I/O (the corpus manifest's newest change) is current when the snapshot is
 	 * taken. Fail-open: a rejection costs that reading its refresh, never the sample.
 	 */
-	beforeSample?: (() => Promise<void>) | undefined;
+	beforeSample?: (() => Promise<unknown>) | undefined;
 }
 
 /** Register the drop counter. Called before the registry is seeded, so a checkpoint can restore it. */

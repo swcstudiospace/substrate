@@ -15,12 +15,14 @@ import {
 	duplicateCollapseFailures,
 	loadFixtureDocuments,
 	main,
+	measureGoldenRecall,
 	MRR_TOLERANCE,
 	parseArgs,
-	parseBaseline,
+	parseBaselines,
 	RECALL5_TOLERANCE,
 	reportLive,
 	runOffline,
+	runServer,
 	USAGE,
 	type Baseline,
 	type EvalIo,
@@ -86,11 +88,15 @@ describe("the committed offline harness (what CI guards)", () => {
 		expect(run.requests).toEqual([]);
 	});
 
-	test("the committed baseline is one the parser accepts and the current run does not fall below", () => {
-		const baseline = defined(parseBaseline(readFileSync(BASELINE_PATH, "utf8")), "committed baseline");
-		const { score } = runOffline(loadFixtureDocuments(), () => 0);
-		expect(compareToBaseline(score, baseline).failures).toEqual([]);
-		expect(baselineOf(score).queries).toBeGreaterThanOrEqual(baseline.queries);
+	test("the committed baselines are ones the parser accepts and the current runs do not fall below", async () => {
+		const baselines = defined(parseBaselines(readFileSync(BASELINE_PATH, "utf8")), "committed baseline");
+		const docs = loadFixtureDocuments();
+		const lexical = await runOffline(docs, () => 0);
+		const server = await runServer(docs, () => 0);
+		expect(compareToBaseline(lexical.score, baselines.lexical).failures).toEqual([]);
+		expect(compareToBaseline(server.score, baselines.server).failures).toEqual([]);
+		expect(baselineOf(lexical.score).queries).toBeGreaterThanOrEqual(baselines.lexical.queries);
+		expect(baselineOf(server.score).queries).toBeGreaterThanOrEqual(baselines.server.queries);
 	});
 
 	test("--json prints one parseable object with the verdict", async () => {
@@ -117,10 +123,10 @@ describe("the fixture corpus and the generator over it", () => {
 		expect(docs.filter((doc) => doc.text.startsWith("# Cache tuning")).length).toBe(2);
 	});
 
-	test("asks a good number of questions and never one that names a copy or a title two pages share", () => {
+	test("asks a good number of questions, names the canonical copy of a copied page and never a title two pages share", () => {
 		expect(golden.length).toBeGreaterThan(60);
 		const expected = new Set(golden.map((query) => query.expected));
-		expect(expected.has("acme/atlas:docs/backup-restore.md")).toBe(false);
+		expect(expected.has("acme/atlas:docs/backup-restore.md")).toBe(true);
 		expect(expected.has("acme/atlas:milestones/v1.1/docs/backup-restore.md")).toBe(false);
 		expect(golden.some((query) => query.query === "Incident response handbook")).toBe(false);
 		expect(golden.some((query) => query.query === "Getting started")).toBe(false);
@@ -140,41 +146,63 @@ describe("the fixture corpus and the generator over it", () => {
 
 describe("what the harness catches", () => {
 	const docs = loadFixtureDocuments();
-	const baseline = defined(parseBaseline(readFileSync(BASELINE_PATH, "utf8")), "committed baseline");
+	const baselines = defined(parseBaselines(readFileSync(BASELINE_PATH, "utf8")), "committed baseline");
+	const reversed = (hits: readonly LexicalHit[]): readonly LexicalHit[] => [...hits].reverse();
 
-	test("a re-rank that puts the best hit last fails the comparison", () => {
-		const reversed = (hits: readonly LexicalHit[]): readonly LexicalHit[] => [...hits].reverse();
-		const run = runOffline(docs, () => 0, reversed);
-		const comparison = compareToBaseline(run.score, baseline);
-		expect(comparison.ok).toBe(false);
-		expect(comparison.failures.join(" ")).toMatch(/MRR fell|recall@5 fell/);
+	test("a re-rank that puts the best hit last fails the comparison, in the retriever alone and through the server's search code", async () => {
+		const lexical = compareToBaseline((await runOffline(docs, () => 0, reversed)).score, baselines.lexical);
+		expect(lexical.ok).toBe(false);
+		expect(lexical.failures.join(" ")).toMatch(/MRR fell|recall@5 fell/);
+		const server = compareToBaseline((await runServer(docs, () => 0, reversed)).score, baselines.server);
+		expect(server.ok).toBe(false);
+		expect(server.failures.join(" ")).toMatch(/MRR fell|recall@5 fell/);
 	});
 
-	test("a re-rank that drops the leading hit fails it too", () => {
-		const run = runOffline(docs, () => 0, (hits) => hits.slice(1));
-		expect(compareToBaseline(run.score, baseline).ok).toBe(false);
+	test("a re-rank that drops the leading hit fails it too, on both paths", async () => {
+		expect(compareToBaseline((await runOffline(docs, () => 0, (hits) => hits.slice(1))).score, baselines.lexical).ok).toBe(false);
+		expect(compareToBaseline((await runServer(docs, () => 0, (hits) => hits.slice(1))).score, baselines.server).ok).toBe(false);
 	});
 
-	test("an identity re-rank changes nothing: the hook is a seam, not a behaviour", () => {
-		expect(runOffline(docs, () => 0, (hits) => hits).score).toEqual(runOffline(docs, () => 0).score);
+	test("an identity re-rank changes nothing: the hook is a seam, not a behaviour", async () => {
+		expect((await runOffline(docs, () => 0, (hits) => hits)).score).toEqual((await runOffline(docs, () => 0)).score);
+		expect((await runServer(docs, () => 0, (hits) => hits)).score).toEqual((await runServer(docs, () => 0)).score);
 	});
 
-	test("the shipped pipeline collapses every group of identical documents to its smallest key", () => {
-		expect(runOffline(docs, () => 0).duplicateFailures).toEqual([]);
+	test("the server path is the production search code: it answers the retriever's best hit first and never more than ten documents", async () => {
+		const lexical = await runOffline(docs, () => 0);
+		const server = await runServer(docs, () => 0);
+		expect(server.score.queries).toBe(lexical.score.queries);
+		for (const result of server.results) {
+			expect(result.ranked.length).toBeLessThanOrEqual(10);
+			expect(new Set(result.ranked).size).toBe(result.ranked.length);
+		}
+		expect(server.results.map((result) => result.ranked[0])).toEqual(lexical.results.map((result) => result.ranked[0]));
 	});
 
-	test("a retriever that answers both copies of a page, or the wrong one, is reported", () => {
+	test("the shipped pipeline collapses every group of identical documents to its smallest key, on both paths", async () => {
+		expect((await runOffline(docs, () => 0)).duplicateFailures).toEqual([]);
+		expect((await runServer(docs, () => 0)).duplicateFailures).toEqual([]);
+	});
+
+	test("the golden set scores a hit on any copy of a page: it asks the archive copy's questions through the canonical one", async () => {
+		const run = await runOffline(docs, () => 0);
+		const asked = run.golden.filter((question) => question.expected === "acme/atlas:docs/backup-restore.md");
+		expect(asked.length).toBeGreaterThan(0);
+		for (const question of asked) expect(question.alsoExpected).toEqual(["acme/atlas:milestones/v1.1/docs/backup-restore.md"]);
+	});
+
+	test("a retriever that answers both copies of a page, or the wrong one, is reported", async () => {
 		const copies: Array<{ repo: string; path: string; text: string }> = [
 			{ repo: "r/a", path: "docs/x.md", text: "# Same page\n\nwords\n" },
 			{ repo: "r/a", path: "milestones/docs/x.md", text: "# Same page\n\nwords\n" },
 			{ repo: "r/a", path: "docs/y.md", text: "# Other page\n\nelse\n" },
 		];
-		expect(duplicateCollapseFailures(copies, () => ["r/a:docs/x.md", "r/a:milestones/docs/x.md"])).toEqual([
+		expect(await duplicateCollapseFailures(copies, () => ["r/a:docs/x.md", "r/a:milestones/docs/x.md"])).toEqual([
 			"r/a:docs/x.md = r/a:milestones/docs/x.md answered as r/a:docs/x.md, r/a:milestones/docs/x.md",
 		]);
-		expect(duplicateCollapseFailures(copies, () => ["r/a:milestones/docs/x.md"])).toHaveLength(1);
-		expect(duplicateCollapseFailures(copies, () => ["r/a:docs/y.md"])).toEqual(["r/a:docs/x.md = r/a:milestones/docs/x.md answered as nothing"]);
-		expect(duplicateCollapseFailures(copies, () => ["r/a:docs/x.md", "r/a:docs/y.md"])).toEqual([]);
+		expect(await duplicateCollapseFailures(copies, () => ["r/a:milestones/docs/x.md"])).toHaveLength(1);
+		expect(await duplicateCollapseFailures(copies, () => ["r/a:docs/y.md"])).toEqual(["r/a:docs/x.md = r/a:milestones/docs/x.md answered as nothing"]);
+		expect(await duplicateCollapseFailures(copies, async () => ["r/a:docs/x.md", "r/a:docs/y.md"])).toEqual([]);
 	});
 });
 
@@ -210,16 +238,22 @@ describe("the failure path of main", () => {
 		return join(root, "baseline.json");
 	}
 
-	test("a doctored baseline that asks for more than the fixtures give exits 1 and names the failure", async () => {
-		const doctored = baselineFile(JSON.stringify({ queries: 5000, recall1: 1, recall5: 1, recall10: 1, mrr: 1 }));
-		const run = capture({ baselinePath: doctored });
-		expect(await main([], run.io)).toBe(1);
-		expect(run.out.some((line) => line.startsWith("FAIL the golden set shrank from 5000 to"))).toBe(true);
-		expect(run.out.at(-1)).toBe("docs eval: REGRESSION against the baseline");
+	test("a doctored baseline that asks for more than the fixtures give exits 1, names the failure and which baseline it was", async () => {
+		const high = { queries: 5000, recall1: 1, recall5: 1, recall10: 1, mrr: 1 };
+		const fine = { queries: 1, recall1: 0, recall5: 0, recall10: 0, mrr: 0 };
+		for (const [lexical, server, failing] of [
+			[high, fine, "lexical"],
+			[fine, high, "server"],
+		] as const) {
+			const run = capture({ baselinePath: baselineFile(JSON.stringify({ lexical, server })) });
+			expect(await main([], run.io)).toBe(1);
+			expect(run.out.filter((line) => line.startsWith("FAIL "))).toEqual([expect.stringMatching(new RegExp(`^FAIL ${failing}: the golden set shrank from 5000 to`))]);
+			expect(run.out.at(-1)).toBe("docs eval: REGRESSION against the baseline");
+		}
 	});
 
 	test("a missing or unreadable baseline exits 1 with the way to record one", async () => {
-		for (const path of [join(tmpdir(), "substrate-docs-eval-no-such-baseline.json"), baselineFile("not json"), baselineFile(JSON.stringify({ queries: 1 }))]) {
+		for (const path of [join(tmpdir(), "substrate-docs-eval-no-such-baseline.json"), baselineFile("not json"), baselineFile(JSON.stringify({ queries: 1 })), baselineFile(JSON.stringify({ lexical: BASE }))]) {
 			const run = capture({ baselinePath: path });
 			expect(await main([], run.io)).toBe(1);
 			expect(run.err.join("\n")).toContain("--write-baseline");
@@ -230,18 +264,25 @@ describe("the failure path of main", () => {
 		const path = baselineFile("{}");
 		const write = capture({ baselinePath: path });
 		expect(await main(["--write-baseline"], write.io)).toBe(0);
-		const written = defined(parseBaseline(readFileSync(path, "utf8")), "written baseline");
-		expect(written.queries).toBeGreaterThan(50);
+		const written = defined(parseBaselines(readFileSync(path, "utf8")), "written baseline");
+		expect(written.lexical.queries).toBeGreaterThan(50);
+		expect(written.server.queries).toBe(written.lexical.queries);
 		const again = capture({ baselinePath: path });
 		expect(await main([], again.io)).toBe(0);
 	});
 });
 
-describe("parseBaseline and parseArgs", () => {
-	test("a baseline needs a whole question count and four scores in [0, 1]", () => {
-		expect(parseBaseline('{"queries":3,"recall1":0.5,"recall5":1,"recall10":1,"mrr":0.75}')).toEqual({ queries: 3, recall1: 0.5, recall5: 1, recall10: 1, mrr: 0.75 });
-		for (const bad of ["", "[]", "null", '{"queries":1.5,"recall1":0,"recall5":0,"recall10":0,"mrr":0}', '{"queries":1,"recall1":2,"recall5":0,"recall10":0,"mrr":0}', '{"queries":1,"recall1":0,"recall5":0,"recall10":0}']) {
-			expect(parseBaseline(bad)).toBeNull();
+describe("parseBaselines and parseArgs", () => {
+	const entry = '{"queries":3,"recall1":0.5,"recall5":1,"recall10":1,"mrr":0.75}';
+	const parsedEntry = { queries: 3, recall1: 0.5, recall5: 1, recall10: 1, mrr: 0.75 };
+
+	test("a baseline file needs a lexical and a server entry, each with a whole question count and four scores in [0, 1]", () => {
+		expect(parseBaselines(`{"lexical":${entry},"server":${entry}}`)).toEqual({ lexical: parsedEntry, server: parsedEntry });
+		const bad = '{"queries":1,"recall1":2,"recall5":0,"recall10":0,"mrr":0}';
+		const short = '{"queries":1,"recall1":0,"recall5":0,"recall10":0}';
+		const fractional = '{"queries":1.5,"recall1":0,"recall5":0,"recall10":0,"mrr":0}';
+		for (const text of ["", "[]", "null", entry, `{"lexical":${entry}}`, `{"server":${entry}}`, `{"lexical":${entry},"server":${bad}}`, `{"lexical":${short},"server":${entry}}`, `{"lexical":${entry},"server":${fractional}}`]) {
+			expect(parseBaselines(text)).toBeNull();
 		}
 	});
 
@@ -267,7 +308,20 @@ describe("collectLocalDocuments", () => {
 			"docs/notes.txt": "x",
 			"README.md": "# outside docs\n",
 		});
-		expect(collectLocalDocuments(root, "acme/atlas").map((doc) => `${doc.repo}:${doc.path}`)).toEqual(["acme/atlas:docs/a.md", "acme/atlas:docs/b.md", "acme/atlas:docs/runbooks/r.md"]);
+		const scan = collectLocalDocuments(root, "acme/atlas");
+		expect(scan.docs.map((doc) => `${doc.repo}:${doc.path}`)).toEqual(["acme/atlas:docs/a.md", "acme/atlas:docs/b.md", "acme/atlas:docs/runbooks/r.md"]);
+		expect(scan.incomplete).toEqual([]);
+	});
+
+	test("a bound that cut the walk is reported by name, and a walk within its bounds reports nothing", () => {
+		const root = tree({ "docs/a.md": "# A\n", "docs/b.md": "# B\n", "docs/c.md": "# C\n", "docs/d1/d2/d3.md": "# D\n" });
+		const files = collectLocalDocuments(root, "acme/atlas", "docs", { maxFiles: 2, maxDepth: 8 });
+		expect(files.docs).toHaveLength(2);
+		expect(files.incomplete).toEqual(["file-limit"]);
+		const depth = collectLocalDocuments(root, "acme/atlas", "docs", { maxFiles: 10, maxDepth: 1 });
+		expect(depth.docs.map((doc) => doc.path)).toEqual(["docs/a.md", "docs/b.md", "docs/c.md"]);
+		expect(depth.incomplete).toEqual(["depth-limit"]);
+		expect(collectLocalDocuments(root, "acme/atlas", "docs", { maxFiles: 4, maxDepth: 2 }).incomplete).toEqual([]);
 	});
 });
 
@@ -321,5 +375,30 @@ describe("the live tier", () => {
 		const miss: QueryResult[] = [{ query: "q", expected: "a:b.md", ranked: [], latencyMs: 1 }];
 		expect(reportLive(1, { results: miss, failed: 0, degraded: 0, aborted: null }, true, quiet)).toBe(1);
 		expect(scoreRun(miss).recall5).toBe(0);
+	});
+
+	test("a scan of docs/ that a bound cut is partial: the canary measures nothing and says why, and the script labels the verdict", async () => {
+		const deep = tree({
+			"docs/alpha.md": "# Alpha backup drill\n\nWe restore nightly snapshots.\n",
+			"docs/a/b/c/d/e/f/g/h/i/too-deep.md": "# Too deep to be read\n",
+		});
+		const answered = capture({ repoRoot: deep, env }, () => Response.json({ chunks: [{ source_url: alpha }] }));
+		expect(await measureGoldenRecall("http://127.0.0.1:7410", "test-bearer", answered.io)).toBeNull();
+		expect(answered.err.join("\n")).toContain("the scan of docs/ was partial (depth-limit)");
+
+		const whole = capture({ repoRoot: root, env }, () => Response.json({ chunks: [{ source_url: alpha }] }));
+		expect(await measureGoldenRecall("http://127.0.0.1:7410", "test-bearer", whole.io)).toMatchObject({ asked: 4 });
+		expect(whole.err).toEqual([]);
+
+		const passing = capture({ repoRoot: deep, env: { ...env, SUBSTRATE_DOCS_SLO_RECALL5: "0.4" } }, () => Response.json({ chunks: [{ source_url: alpha }] }));
+		expect(await main(["--live", "http://127.0.0.1:7410"], passing.io)).toBe(0);
+		expect(passing.out.some((line) => line.startsWith("PARTIAL recall@5"))).toBe(true);
+		expect(passing.err.join("\n")).toContain("the scan of docs/ was partial (depth-limit)");
+		const asJson = capture({ repoRoot: deep, env: { ...env, SUBSTRATE_DOCS_SLO_RECALL5: "0.4" } }, () => Response.json({ chunks: [{ source_url: alpha }] }));
+		await main(["--live", "http://127.0.0.1:7410", "--json"], asJson.io);
+		expect(JSON.parse(defined(asJson.out[0]))).toMatchObject({ partial: true, incomplete: ["depth-limit"] });
+		const full = capture({ repoRoot: root, env: { ...env, SUBSTRATE_DOCS_SLO_RECALL5: "0.4" } }, () => Response.json({ chunks: [{ source_url: alpha }] }));
+		await main(["--live", "http://127.0.0.1:7410", "--json"], full.io);
+		expect(JSON.parse(defined(full.out[0]))).toMatchObject({ partial: false, incomplete: [] });
 	});
 });

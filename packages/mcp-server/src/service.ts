@@ -174,7 +174,7 @@ import { createEmbeddingService, type EmbeddingService } from "./embed.ts";
 import { createLightragBulkPlane, type LightragBulkPlane } from "./planes/lightrag-bulk.ts";
 import { corpusIngestReply, corpusPlanReply, corpusStatusReply, type CorpusReply, type CorpusServiceDeps } from "./corpus/service.ts";
 import type { CorpusStore } from "./corpus/store.ts";
-import { CorpusSloState } from "./corpus/slo.ts";
+import { CorpusSloState, DOCS_CANARY_ACTION, DOCS_CANARY_SURFACE, type CorpusRefresh } from "./corpus/slo.ts";
 import type { CorpusIngestResponse, CorpusPlanResponse, CorpusStatusResponse } from "@substrate/corpus";
 import { RailwayClient } from "./railway.ts";
 import { nodePlanningFs } from "./planning/fs.ts";
@@ -191,7 +191,7 @@ import { DEFAULT_STEERING_RESTORE_LIMIT, DEFAULT_STEERING_RESTORE_MAX_PAGES, res
 import { SteeringSessionRegistry } from "./planning/session-state.ts";
 import { SteeringExpirySweeper, SteeringHintAnnouncer, steeringNoticeFor, type SessionStatePort, type SteeringNotice } from "./planning/steering-delivery.ts";
 import type { FabricSources } from "./fabric/types.ts";
-import { FABRIC_HEALTH_WINDOW_MS } from "./fabric/gather.ts";
+import { CORPUS_MANIFEST_READ_MS, FABRIC_HEALTH_WINDOW_MS, within } from "./fabric/gather.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
 import {
@@ -1414,7 +1414,7 @@ export class Substrate {
 	/** The one door to embeddings: the TEI client behind the `emb` cache class (`SUBSTRATE_EMBED_CACHE`). */
 	readonly embeddings: EmbeddingService;
 	/** Test seam for the corpus manifest and bulk plane; production builds them from the index and the LightRAG config. */
-	private readonly corpusSeam: { store?: CorpusStore; plane?: LightragBulkPlane } | null;
+	private readonly corpusSeam: { store?: CorpusStore; plane?: LightragBulkPlane; nowMs?: () => number } | null;
 	private corpusPlaneCache: LightragBulkPlane | null = null;
 	/** The corpus readings behind the SLO gauges and the `corpus` fabric row (phase 70). */
 	private readonly corpusSlo: CorpusSloState;
@@ -1536,8 +1536,8 @@ export class Substrate {
 			hindsightFetch?: FetchLike;
 			lightragFetch?: FetchLike;
 			teiFetch?: FetchLike;
-			/** Tests inject the corpus manifest and the LightRAG bulk plane; production builds them from the index and `config.lightrag`. */
-			corpus?: { store?: CorpusStore; plane?: LightragBulkPlane };
+			/** Tests inject the corpus manifest, the LightRAG bulk plane and the clock an ingest request is timed with; production builds them from the index and `config.lightrag` and times with `performance.now`. */
+			corpus?: { store?: CorpusStore; plane?: LightragBulkPlane; nowMs?: () => number };
 			planningBaseDir?: string;
 			desktop?: DesktopDriver | null;
 			railway?: RailwayClient;
@@ -5562,32 +5562,47 @@ export class Substrate {
 		return reply;
 	}
 
-	/**
-	 * Reads the manifest's newest change into the freshness reading (phase 70). Fail-open and bounded: an index that does not
-	 * answer keeps the previous reading, and a server with the corpus off or no index reads nothing.
-	 */
-	async refreshCorpusReadings(): Promise<void> {
-		if (!this.config.corpus.enabled) return;
-		const store = this.corpusSeam?.store ?? this.index?.corpusStore() ?? null;
-		if (store === null) return;
-		const status = await bounded(() => store.status(), HEALTH_PROBE_MS);
-		if (status !== null) this.corpusSlo.setLastChangeFrom(status.lastIngestAt);
+	/** The clock an ingest request is timed with: the test seam's when one is injected, else `performance.now`. */
+	private corpusNowMs(): number {
+		return this.corpusSeam?.nowMs?.() ?? performance.now();
 	}
 
-	/** A stored `docs.canary` report from the canary carries `golden_recall5`, which becomes the corpus recall reading. */
+	/**
+	 * Reads the manifest's newest change into the freshness reading (phase 70), bounded by `boundMs` (shorter than the fabric's
+	 * per-source deadline, so the fabric hears a late read as `timeout` and never as a fresh success). A read that fails or runs
+	 * out of time keeps the last good reading and does not refresh it, and the answer says which: `timeout` or `failed`. A server
+	 * with the corpus off or no manifest has nothing to read and answers `ok`.
+	 */
+	async refreshCorpusReadings(boundMs: number = CORPUS_MANIFEST_READ_MS): Promise<CorpusRefresh> {
+		if (!this.config.corpus.enabled) return "ok";
+		const store = this.corpusSeam?.store ?? this.index?.corpusStore() ?? null;
+		if (store === null) return "ok";
+		const read = await within(() => store.status(), boundMs);
+		if (!read.ok) return read.reason;
+		this.corpusSlo.setLastChangeFrom(read.value.lastIngestAt);
+		return "ok";
+	}
+
+	/**
+	 * A stored `docs.canary` report from the canary carries `golden_recall5`, which becomes the corpus recall reading. The reading
+	 * is the canary's alone: the doors refuse the action to every caller but a `substrate` host-job token (`reserved-actions.ts`),
+	 * and this check, which holds for the server's own emits too, takes only an event attributed to that surface.
+	 */
 	private noteDocsCanary(event: SubstrateEvent): void {
-		if (!this.config.corpus.enabled || event.surface !== "substrate") return;
-		if (event.payload.action !== "docs.canary" || event.payload.runtime !== "docs-canary") return;
+		if (!this.config.corpus.enabled || event.surface !== DOCS_CANARY_SURFACE) return;
+		if (event.payload.action !== DOCS_CANARY_ACTION || event.payload.runtime !== "docs-canary") return;
 		this.corpusSlo.recordGolden(event.payload);
 	}
 
 	/** `POST /corpus/ingest` and the `corpus_ingest` tool. A run that stored or removed anything invalidates every cached `docs_search` answer, as `docs_ingest` does. */
 	async corpusIngest(raw: unknown, callerSurface: Surface | null): Promise<CorpusReply<CorpusIngestResponse>> {
-		const startedAt = performance.now();
+		const startedAt = this.corpusNowMs();
 		const reply = await corpusIngestReply(this.corpusDeps(), raw, callerSurface);
 		if (reply.ok && reply.body.counts.ingested + reply.body.counts.tombstoned > 0) await this.cache.bump(DOCS_GENERATION_KEY);
 		if (reply.ok) {
-			this.corpusSlo.recordIngest(reply.body.counts.ingested + reply.body.counts.updated, performance.now() - startedAt);
+			// Documents the plane took, never the metadata-only refreshes (`updated`): those send nothing to LightRAG, and counting
+			// them would let one slow upload hide behind many cheap rows.
+			this.corpusSlo.recordIngest(reply.body.counts.ingested, this.corpusNowMs() - startedAt);
 			await this.refreshCorpusReadings();
 		}
 		return reply;
@@ -7290,8 +7305,9 @@ export class Substrate {
 			},
 			railwayCost: () => this.railway.costReport(),
 			corpus: async () => {
-				await this.refreshCorpusReadings();
-				return this.corpusSlo.readings(Date.now());
+				const refreshed = await this.refreshCorpusReadings();
+				// The last good reading is still reported, next to the reason it is not fresh.
+				return { readings: this.corpusSlo.readings(Date.now()), unread: refreshed === "ok" ? null : refreshed };
 			},
 			outbox: () => {
 				const stats = this.retainOutboxStats();

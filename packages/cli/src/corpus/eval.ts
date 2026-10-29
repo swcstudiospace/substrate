@@ -17,6 +17,7 @@ import {
 	type SloBreach,
 	type SloThresholds,
 } from "@substrate/corpus";
+import { printable } from "./render.ts";
 import type { Inventory } from "./inventory.ts";
 
 /** The extensions of the documents the questions are written from. */
@@ -24,10 +25,19 @@ export const EVAL_EXTENSIONS: readonly string[] = [".md", ".markdown", ".mdx"];
 /** How many unreadable documents a report names; the rest are counted. */
 export const EVAL_LISTED_PROBLEMS = 10;
 
+/** A repository the scan did not read completely: its documents may be missing from the questions, so a result over the rest is partial. */
+export interface IncompleteRepo {
+	repo: string;
+	source: string;
+	reason: string;
+}
+
 export interface EvalDocuments {
 	docs: EvalDocument[];
 	/** Documents the scan listed that could not be read from the working tree. */
 	unreadable: { count: number; listed: string[] };
+	/** Repositories the scan did not read completely (a failed `git ls-files`, a truncated tree), as its report names them. */
+	incomplete: { count: number; listed: IncompleteRepo[] };
 }
 
 /** The scan's Markdown documents with their text. A file that cannot be read is counted and named, never fatal: one bad file must not stop the run. */
@@ -48,7 +58,12 @@ export function readEvalDocuments(inventory: Inventory, read: (path: string) => 
 			if (unreadable.listed.length < EVAL_LISTED_PROBLEMS) unreadable.listed.push(key);
 		}
 	}
-	return { docs, unreadable };
+	const skipped = inventory.report.repos.filter((repo) => !repo.complete);
+	const incomplete: EvalDocuments["incomplete"] = {
+		count: skipped.length,
+		listed: skipped.slice(0, EVAL_LISTED_PROBLEMS).map((repo) => ({ repo: repo.repo, source: repo.source, reason: repo.incomplete ?? "incomplete" })),
+	};
+	return { docs, unreadable, incomplete };
 }
 
 export interface EvalServer {
@@ -77,7 +92,20 @@ export interface EvalOutcome {
 
 function problems(documents: EvalDocuments): string[] {
 	const { count, listed } = documents.unreadable;
-	return count === 0 ? [] : [`${count} document(s) could not be read from the working tree${listed.length === 0 ? "" : `: ${listed.join(", ")}${count > listed.length ? `, +${count - listed.length} more` : ""}`}`];
+	const lines = count === 0 ? [] : [`${count} document(s) could not be read from the working tree${listed.length === 0 ? "" : `: ${listed.join(", ")}${count > listed.length ? `, +${count - listed.length} more` : ""}`}`];
+	// A result over a scan that skipped a repository is a result over part of the corpus, and says so wherever the warnings go.
+	if (documents.incomplete.count > 0) lines.push(`partial scan: ${documents.incomplete.count} repository(ies) were not read completely, so the questions and the verdict cover only the rest`);
+	return lines;
+}
+
+/** The human listing of the repositories the scan skipped, through `printable` (a reason carries an operating-system message). Empty for a complete scan. */
+function incompleteLines(documents: EvalDocuments): string[] {
+	const { count, listed } = documents.incomplete;
+	if (count === 0) return [];
+	const out = [`not read completely: ${count}`];
+	for (const repo of listed) out.push(`  ${printable(repo.repo)} [${printable(repo.source)}]: ${printable(repo.reason)}`);
+	if (count > listed.length) out.push(`  +${count - listed.length} more`);
+	return out;
 }
 
 function scoreLine(score: RunScore): string {
@@ -89,11 +117,12 @@ export async function evaluateCorpus(request: EvalRequest): Promise<EvalOutcome>
 	const golden = generateGolden(request.documents.docs, { maxQueries: request.maxQueries });
 	const warnings = problems(request.documents);
 	const documents = request.documents.docs.length;
+	const partial = request.documents.incomplete.count > 0;
 	if (request.server === null) {
 		const text = request.json
-			? `${JSON.stringify({ mode: "dry-run", documents, questions: golden.length, unreadable: request.documents.unreadable, warnings })}\n`
-			: `documents read: ${documents}\nquestions it would ask: ${golden.length} (add --server URL to ask them)\n`;
-		return { code: 0, text, warning: warnings.map((line) => `[substrate] corpus eval: ${line}\n`).join("") };
+			? `${JSON.stringify({ mode: "dry-run", documents, questions: golden.length, partial, incomplete: request.documents.incomplete, unreadable: request.documents.unreadable, warnings })}\n`
+			: [`documents read: ${documents}`, ...incompleteLines(request.documents), `questions it would ask: ${golden.length} (add --server URL to ask them)`, ""].join("\n");
+		return { code: 0, text, warning: warnings.map((line) => `[substrate] corpus eval: ${printable(line)}\n`).join("") };
 	}
 
 	const live = await runLiveQueries(golden, { base: request.server.url, token: request.server.token, fetchImpl: request.server.fetchImpl, now: request.now });
@@ -106,8 +135,10 @@ export async function evaluateCorpus(request: EvalRequest): Promise<EvalOutcome>
 	if (live.degraded > 0) notScored.push(`${live.degraded} question(s) were answered degraded (a plane outage, not a miss)`);
 	if (live.aborted !== null) notScored.push(`the run stopped early (${live.aborted})`);
 	if (golden.length > 0 && answered === 0 && live.failed === 0 && live.degraded === 0 && live.aborted === null) notScored.push("no question was answered");
+	// The exit code is the objective's alone: a partial scan changes the label of the verdict, never whether the run passed.
 	const code = breaches.length > 0 || notScored.length > 0 ? 1 : 0;
 	const allWarnings = [...warnings, ...notScored];
+	const scope = partial ? ` (partial: ${request.documents.incomplete.count} repository(ies) not read completely)` : "";
 	const text = request.json
 		? `${JSON.stringify({
 				mode: "live",
@@ -117,6 +148,8 @@ export async function evaluateCorpus(request: EvalRequest): Promise<EvalOutcome>
 				failed: live.failed,
 				degraded: live.degraded,
 				aborted: live.aborted,
+				partial,
+				incomplete: request.documents.incomplete,
 				score,
 				threshold: request.thresholds.recall5,
 				breaches,
@@ -125,10 +158,13 @@ export async function evaluateCorpus(request: EvalRequest): Promise<EvalOutcome>
 			})}\n`
 		: [
 				`documents read: ${documents}`,
+				...incompleteLines(request.documents),
 				`questions: ${golden.length}, answered ${answered}, failed ${live.failed}, degraded ${live.degraded}`,
 				scoreLine(score),
-				breaches.length > 0 ? `FAIL recall@5 ${score.recall5.toFixed(3)} is under the objective ${request.thresholds.recall5}` : `recall@5 holds the objective ${request.thresholds.recall5}`,
+				breaches.length > 0
+					? `FAIL recall@5 ${score.recall5.toFixed(3)} is under the objective ${request.thresholds.recall5}${scope}`
+					: `recall@5 holds the objective ${request.thresholds.recall5}${scope}`,
 				"",
 			].join("\n");
-	return { code, text, warning: allWarnings.map((line) => `[substrate] corpus eval: ${line}\n`).join("") };
+	return { code, text, warning: allWarnings.map((line) => `[substrate] corpus eval: ${printable(line)}\n`).join("") };
 }

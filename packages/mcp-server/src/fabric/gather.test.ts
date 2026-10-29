@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { gatherFabricFacts } from "./gather.ts";
 import { buildFabricStatus } from "./status.ts";
 import { SLO_DEFAULTS, type SloReadings } from "@substrate/corpus";
-import { FABRIC_RESOURCES, type FabricCostView, type FabricFacts, type FabricHealthParts, type FabricHealthView, type FabricSources } from "./types.ts";
+import { FABRIC_RESOURCES, type CorpusSourceReading, type FabricCostView, type FabricFacts, type FabricHealthParts, type FabricHealthView, type FabricSources } from "./types.ts";
 
 const NOW = "2026-10-21T00:00:00.000Z";
 const COST: FabricCostView = { status: "ok", projectedMonthlyUsd: 3, budgetUsd: 50 };
@@ -49,7 +49,7 @@ function sources(overrides: Partial<FabricSources> = {}): FabricSources {
 		health: () => healthyParts(),
 		snapshot,
 		railwayCost: async () => COST,
-		corpus: async () => CORPUS_READINGS,
+		corpus: async () => ({ readings: CORPUS_READINGS, unread: null }),
 		outbox: () => ({ size: 0, oldestAt: null }),
 		config: {
 			endpointPolicy: "enforce",
@@ -186,7 +186,7 @@ describe("the corpus row", () => {
 			...base,
 			corpus: async () => {
 				asked += 1;
-				return CORPUS_READINGS;
+				return { readings: CORPUS_READINGS, unread: null };
 			},
 			config: { ...base.config, corpusEnabled: false },
 		});
@@ -196,12 +196,22 @@ describe("the corpus row", () => {
 	});
 
 	test("readings that miss the deadline or throw make the corpus row degraded with the reason, and the planes keep their state", async () => {
-		const slow = await gatherFabricFacts({ ...sources(), corpus: () => never<SloReadings>() }, { deadlineMs: 20 });
+		const slow = await gatherFabricFacts({ ...sources(), corpus: () => never<CorpusSourceReading>() }, { deadlineMs: 20 });
 		expect(rowOf(slow, "corpus")).toMatchObject({ state: "degraded", source: "corpus.slo: timeout" });
 		expect(rowOf(slow, "greptime").state).toBe("ok");
 		const broken = await gatherFabricFacts({ ...sources(), corpus: () => Promise.reject(new Error("index gone")) });
 		expect(rowOf(broken, "corpus")).toMatchObject({ state: "degraded", source: "corpus.slo: failed" });
 		expect(broken.corpus.readings).toEqual({ freshnessS: null, recall5: null, ingestDocsPerS: null });
+	});
+
+	test("a source that answers with a failed manifest read makes the row degraded with that reason, whatever it kept as the last reading, and a healthy read is ok", async () => {
+		for (const unread of ["timeout", "failed"] as const) {
+			const facts = await gatherFabricFacts({ ...sources(), corpus: async () => ({ readings: CORPUS_READINGS, unread }) });
+			expect(facts.corpus).toMatchObject({ readings: CORPUS_READINGS, unread });
+			expect(rowOf(facts, "corpus")).toMatchObject({ state: "degraded", source: `corpus.slo: ${unread}` });
+		}
+		const healthy = await gatherFabricFacts(sources());
+		expect(rowOf(healthy, "corpus")).toMatchObject({ state: "ok", source: "corpus.slo" });
 	});
 });
 

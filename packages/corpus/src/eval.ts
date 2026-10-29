@@ -22,8 +22,10 @@ export type GoldenKind = "title" | "heading" | "lead";
 
 export interface GoldenQuery {
 	query: string;
-	/** The `repo:path` key of the one document that should be found. */
+	/** The `repo:path` key of the document that should be found: the canonical copy when the page exists as several identical copies. */
 	expected: string;
+	/** The keys of the other identical copies of that page; a hit on any of them answers the question. Absent when the page has no copy. */
+	alsoExpected?: readonly string[];
 	kind: GoldenKind;
 }
 
@@ -76,10 +78,15 @@ export function wordsOf(text: string): string[] {
 	return text.split(/\s+/).filter((word) => word.length > 0);
 }
 
-const FENCE = /^\s{0,3}(```|~~~)/;
+/** A fence line: up to three spaces, a run of three or more backticks or tildes, then whatever follows (the info string, or nothing on a closer). */
+const FENCE = /^\s{0,3}(`{3,}|~{3,})(.*)$/;
 const BLOCK_START = /^\s{0,3}(#{1,6}\s|[-*+]\s|\d+[.)]\s|>|\||<|---+\s*$|\*\*\*+\s*$|\[[^\]]+\]:)/;
 
-/** The lines of a document without its YAML front matter, as `[line, insideFence]` pairs. */
+/**
+ * The lines of a document without its YAML front matter, as `[line, insideFence]` pairs. A fence closes as CommonMark closes it:
+ * on a run of the same character, at least as long as the one that opened it, with no info string. So a four-backtick block that
+ * shows a three-backtick example stays one block, and a fence that never closes runs to the end of the document.
+ */
 function bodyLines(text: string): Array<{ line: string; fenced: boolean }> {
 	const lines = text.slice(0, EVAL_MAX_TEXT_CHARS).replace(/\r\n?/g, "\n").split("\n");
 	let start = 0;
@@ -88,17 +95,23 @@ function bodyLines(text: string): Array<{ line: string; fenced: boolean }> {
 		if (close > 0) start = close + 1;
 	}
 	const out: Array<{ line: string; fenced: boolean }> = [];
-	let fence: string | null = null;
+	let open: { char: string; length: number } | null = null;
 	for (const line of lines.slice(start)) {
-		const marker = FENCE.exec(line)?.[1];
-		if (marker !== undefined) {
-			// A fence closes only on its own marker, so a ``` inside a ~~~ block stays text.
-			if (fence === null) fence = marker;
-			else if (fence === marker) fence = null;
+		const match = FENCE.exec(line);
+		const run = match?.[1];
+		const info = match?.[2] ?? "";
+		if (open !== null) {
+			if (run !== undefined && run.charAt(0) === open.char && run.length >= open.length && info.trim() === "") open = null;
 			out.push({ line, fenced: true });
 			continue;
 		}
-		out.push({ line, fenced: fence !== null });
+		// A backtick fence's info string may not hold a backtick: such a line is inline code, not an opener.
+		if (run !== undefined && !(run.charAt(0) === "`" && info.includes("`"))) {
+			open = { char: run.charAt(0), length: run.length };
+			out.push({ line, fenced: true });
+			continue;
+		}
+		out.push({ line, fenced: false });
 	}
 	return out;
 }
@@ -180,24 +193,36 @@ const KIND_RANK: Readonly<Record<GoldenKind, number>> = { title: 0, lead: 1, hea
  * the title, and the first sentence of its first paragraph cut to twelve words. Over the per-document cap the title is kept
  * and the rest are chosen with the seed.
  *
- * A question is dropped, never guessed, when it cannot name one document: fewer than three words, a phrase that occurs in
- * more than one document's title, or the same phrase asked by two different documents (copies and archives of one page).
+ * Documents with identical text (copies and archives of one page) are one answer group: the copy with the smallest key asks
+ * the questions, and a hit on any copy of the group answers them (`alsoExpected`). A question is dropped, never guessed, when
+ * it cannot name one group: fewer than three words, a phrase that occurs in more than one group's title, or the same phrase
+ * asked by two different groups. Who asks a phrase is counted over every candidate BEFORE any sampling, so a page's questions
+ * do not depend on which of them another page happened to keep.
  */
 export function generateGolden(docs: readonly EvalDocument[], options: GenerateGoldenOptions = {}): GoldenQuery[] {
 	const perDocument = Math.max(1, Math.floor(options.perDocument ?? GOLDEN_QUERIES_PER_DOCUMENT));
 	const maxQueries = Math.max(0, Math.floor(options.maxQueries ?? GOLDEN_DEFAULT_MAX_QUERIES));
 	const random = seededRandom(options.seed ?? GOLDEN_DEFAULT_SEED);
-	const ordered = docs
-		.map((doc) => ({ key: documentKey(doc.repo, doc.path), outline: outlineOf(doc.text) }))
+	const keyed = docs
+		.map((doc) => ({ key: documentKey(doc.repo, doc.path), text: doc.text.slice(0, EVAL_MAX_TEXT_CHARS).replace(/\r\n?/g, "\n") }))
 		.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-	const titles = ordered.map((doc) => normalised(doc.outline.title ?? ""));
+	// The first key in order is the canonical copy of its text.
+	const groups = new Map<string, { key: string; copies: string[] }>();
+	for (const { key, text } of keyed) {
+		const group = groups.get(text);
+		if (group === undefined) groups.set(text, { key, copies: [] });
+		else if (key !== group.key) group.copies.push(key);
+	}
+	const ordered = [...groups.entries()].map(([text, group]) => ({ ...group, outline: outlineOf(text) }));
+	const titles = ordered.map((group) => normalised(group.outline.title ?? ""));
 	const inTitles = (query: string): number => {
 		const needle = ` ${normalised(query)} `;
 		return titles.reduce((count, title) => (` ${title} `.includes(needle) ? count + 1 : count), 0);
 	};
 
-	const candidates: GoldenQuery[] = [];
-	for (const { key, outline } of ordered) {
+	const candidates: Array<{ group: (typeof ordered)[number]; own: GoldenQuery[] }> = [];
+	for (const group of ordered) {
+		const { key, outline } = group;
 		const own: GoldenQuery[] = [];
 		const title = outline.title;
 		if (title !== null) own.push({ query: title, expected: key, kind: "title" });
@@ -205,23 +230,29 @@ export function generateGolden(docs: readonly EvalDocument[], options: GenerateG
 		if (outline.lead !== null) own.push({ query: outline.lead, expected: key, kind: "lead" });
 		// Title first, then the lead, then headings in document order: the order a reader meets them is the order kept.
 		own.sort((a, b) => KIND_RANK[a.kind] - KIND_RANK[b.kind]);
-		const usable = own.filter((candidate) => wordsOf(candidate.query).length >= GOLDEN_MIN_WORDS && inTitles(candidate.query) <= 1);
+		candidates.push({ group, own: own.filter((candidate) => wordsOf(candidate.query).length >= GOLDEN_MIN_WORDS && inTitles(candidate.query) <= 1) });
+	}
+
+	// The same phrase from two groups points at neither. Counted over every candidate, before any group samples its own.
+	const owners = new Map<string, Set<string>>();
+	for (const { own } of candidates) {
+		for (const candidate of own) {
+			const phrase = normalised(candidate.query);
+			const set = owners.get(phrase) ?? new Set<string>();
+			set.add(candidate.expected);
+			owners.set(phrase, set);
+		}
+	}
+
+	const unambiguous: GoldenQuery[] = [];
+	for (const { group, own } of candidates) {
+		const usable = own.filter((candidate) => (owners.get(normalised(candidate.query))?.size ?? 0) === 1);
 		const kept =
 			usable.length <= perDocument
 				? usable
 				: [...usable.slice(0, 1), ...sampleIndexes(usable.length - 1, perDocument - 1, random).map((index) => usable[index + 1] as GoldenQuery)];
-		candidates.push(...kept);
+		for (const candidate of kept) unambiguous.push(group.copies.length === 0 ? candidate : { ...candidate, alsoExpected: group.copies });
 	}
-
-	// The same phrase from two documents points at neither.
-	const owners = new Map<string, Set<string>>();
-	for (const candidate of candidates) {
-		const phrase = normalised(candidate.query);
-		const set = owners.get(phrase) ?? new Set<string>();
-		set.add(candidate.expected);
-		owners.set(phrase, set);
-	}
-	const unambiguous = candidates.filter((candidate) => (owners.get(normalised(candidate.query))?.size ?? 0) === 1);
 	if (unambiguous.length <= maxQueries) return unambiguous;
 	return sampleIndexes(unambiguous.length, maxQueries, random).map((index) => unambiguous[index] as GoldenQuery);
 }
@@ -230,14 +261,41 @@ export function generateGolden(docs: readonly EvalDocument[], options: GenerateG
 export interface QueryResult {
 	query: string;
 	expected: string;
+	/** The other identical copies of the expected page (see {@link GoldenQuery.alsoExpected}); a hit on any of them is a hit. */
+	alsoExpected?: readonly string[];
 	ranked: readonly string[];
 	latencyMs: number;
 }
 
-/** The share of questions whose expected key is among the first `k` answers. 0 for no questions. */
+/** The outcome of asking `question`: its expected key and its copies carried over, so every runner scores a hit on any copy the same way. */
+export function resultOf(question: GoldenQuery, ranked: readonly string[], latencyMs: number): QueryResult {
+	return {
+		query: question.query,
+		expected: question.expected,
+		...(question.alsoExpected === undefined ? {} : { alsoExpected: question.alsoExpected }),
+		ranked,
+		latencyMs,
+	};
+}
+
+/** The 0-based place of the best-placed accepted key (the expected one or any copy of it) among `ranked`, or -1 for a miss. */
+function answerRank(result: QueryResult): number {
+	let best = -1;
+	for (const key of [result.expected, ...(result.alsoExpected ?? [])]) {
+		const index = result.ranked.indexOf(key);
+		if (index >= 0 && (best < 0 || index < best)) best = index;
+	}
+	return best;
+}
+
+/** The share of questions whose expected page (any copy of it) is among the first `k` answers. 0 for no questions. */
 export function recallAtK(results: readonly QueryResult[], k: number): number {
 	if (results.length === 0) return 0;
-	const hits = results.filter((result) => result.ranked.slice(0, Math.max(0, k)).includes(result.expected)).length;
+	const limit = Math.max(0, Math.floor(k));
+	const hits = results.filter((result) => {
+		const rank = answerRank(result);
+		return rank >= 0 && rank < limit;
+	}).length;
 	return hits / results.length;
 }
 
@@ -246,7 +304,7 @@ export function mrr(results: readonly QueryResult[]): number {
 	if (results.length === 0) return 0;
 	let total = 0;
 	for (const result of results) {
-		const index = result.ranked.indexOf(result.expected);
+		const index = answerRank(result);
 		if (index >= 0) total += 1 / (index + 1);
 	}
 	return total / results.length;

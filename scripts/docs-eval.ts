@@ -2,7 +2,7 @@
 /**
  * The docs retrieval harness (v1.7 phase 70): a self-supervised golden set scored for recall at k, MRR and latency.
  *
- *   bun scripts/docs-eval.ts                       # offline: fixtures, the lexical retriever, the committed baseline
+ *   bun scripts/docs-eval.ts                       # offline: fixtures, the lexical retriever and the server's search code, the committed baselines
  *   bun scripts/docs-eval.ts --json                # the same, as one JSON object
  *   bun scripts/docs-eval.ts --write-baseline      # offline: record today's scores as scripts/docs-eval.baseline.json
  *   bun scripts/docs-eval.ts --live URL [--json]   # read-only: this checkout's docs asked of a running server's POST /docs/search
@@ -11,9 +11,12 @@
  *
  * `docs-eval.test.ts` runs it inside `bun test`, so no workflow step is added. The golden set is generated from
  * `packages/corpus/fixtures/eval/` (about thirty invented documents, with copies, near-duplicates and one title in two
- * repositories) and answered by the deterministic lexical retriever of `eval-lexical.ts`. It guards the pipeline logic around
- * the embeddings (what reaches ranking, the collapse of exact duplicates, the re-rank step), not their quality. A fall of more
- * than 0.02 in recall at 5 or 0.03 in MRR against the baseline fails (exit 1); a rise prints a hint to record a new baseline.
+ * repositories) and answered twice: by the deterministic lexical retriever of `eval-lexical.ts` alone (`lexical`), and by the
+ * production `Substrate.searchDocs` over a fake LightRAG plane that serves that retriever's hits (`server`,
+ * `packages/mcp-server/src/docs-eval-server.ts`). Each has its own baseline in `docs-eval.baseline.json`. They guard the
+ * pipeline logic around the embeddings (what reaches ranking, the collapse of exact duplicates, the re-rank step, and for
+ * `server` the plane client's parsing, citation, sort and cap), not their quality. A fall of more than 0.02 in recall at 5 or
+ * 0.03 in MRR against a baseline fails (exit 1); a rise prints a hint to record a new baseline.
  *
  * ## Live (what the canary reads)
  *
@@ -34,6 +37,7 @@ import {
 	isRecord,
 	loadSloThresholds,
 	outlineOf,
+	resultOf,
 	runLiveQueries,
 	scoreRun,
 	sloBreaches,
@@ -44,6 +48,7 @@ import {
 	type Rerank,
 	type RunScore,
 } from "../packages/corpus/src/index.ts";
+import { createServerEvalSearch } from "../packages/mcp-server/src/docs-eval-server.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 export const FIXTURE_DIR = join(REPO_ROOT, "packages", "corpus", "fixtures", "eval");
@@ -73,14 +78,32 @@ export interface Baseline {
 	mrr: number;
 }
 
+/**
+ * The two committed baselines. `lexical` is the retriever alone (`eval-lexical.ts`); `server` is the same retriever behind the
+ * production search code (`searchDocs` over a fake LightRAG plane, `docs-eval-server.ts`). See `docs/corpus-eval.md` for what
+ * each one guards.
+ */
+export interface Baselines {
+	lexical: Baseline;
+	server: Baseline;
+}
+
 /** The scores rounded to four places, the form the baseline file keeps. */
 export function baselineOf(score: RunScore): Baseline {
 	const round = (value: number): number => Math.round(value * 10_000) / 10_000;
 	return { queries: score.queries, recall1: round(score.recall1), recall5: round(score.recall5), recall10: round(score.recall10), mrr: round(score.mrr) };
 }
 
-/** A baseline file's contents, or null when it is not one. */
-export function parseBaseline(text: string): Baseline | null {
+function baselineEntry(parsed: unknown): Baseline | null {
+	if (!isRecord(parsed)) return null;
+	const { queries, recall1, recall5, recall10, mrr } = parsed;
+	const unit = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+	if (typeof queries !== "number" || !Number.isInteger(queries) || queries < 0 || !unit(recall1) || !unit(recall5) || !unit(recall10) || !unit(mrr)) return null;
+	return { queries, recall1, recall5, recall10, mrr };
+}
+
+/** A baseline file's contents (a `lexical` and a `server` entry), or null when it is not one. */
+export function parseBaselines(text: string): Baselines | null {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(text);
@@ -88,10 +111,9 @@ export function parseBaseline(text: string): Baseline | null {
 		return null;
 	}
 	if (!isRecord(parsed)) return null;
-	const { queries, recall1, recall5, recall10, mrr } = parsed;
-	const unit = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
-	if (typeof queries !== "number" || !Number.isInteger(queries) || queries < 0 || !unit(recall1) || !unit(recall5) || !unit(recall10) || !unit(mrr)) return null;
-	return { queries, recall1, recall5, recall10, mrr };
+	const lexical = baselineEntry(parsed.lexical);
+	const server = baselineEntry(parsed.server);
+	return lexical === null || server === null ? null : { lexical, server };
 }
 
 export interface Comparison {
@@ -141,21 +163,51 @@ export function loadFixtureDocuments(dir: string = FIXTURE_DIR): EvalDocument[] 
 	});
 }
 
-/** Every `*.md` under `root/subdir` as a document of `repo`, in path order, within the file and depth bounds. */
-export function collectLocalDocuments(root: string, repo: string, subdir = "docs"): EvalDocument[] {
+/** The documents of a checkout's docs directory, and why the walk did not reach every Markdown file in it. */
+export interface LocalDocuments {
+	docs: EvalDocument[];
+	/** Closed reasons the scan stopped short (`file-limit`, `depth-limit`); empty is a complete scan. */
+	incomplete: Array<"file-limit" | "depth-limit">;
+}
+
+/** The bounds of a local walk. */
+export interface LocalDocumentLimits {
+	maxFiles: number;
+	maxDepth: number;
+}
+
+/** Every `*.md` under `root/subdir` as a document of `repo`, in path order, within the file and depth bounds; a bound that cut the walk is reported, never silent. */
+export function collectLocalDocuments(
+	root: string,
+	repo: string,
+	subdir = "docs",
+	limits: LocalDocumentLimits = { maxFiles: LOCAL_DOCS_MAX_FILES, maxDepth: LOCAL_DOCS_MAX_DEPTH },
+): LocalDocuments {
 	const start = join(root, subdir);
 	const found: string[] = [];
+	const incomplete = new Set<LocalDocuments["incomplete"][number]>();
 	const walk = (dir: string, depth: number): void => {
-		if (depth > LOCAL_DOCS_MAX_DEPTH || found.length >= LOCAL_DOCS_MAX_FILES) return;
+		if (depth > limits.maxDepth) {
+			incomplete.add("depth-limit");
+			return;
+		}
 		for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
-			if (found.length >= LOCAL_DOCS_MAX_FILES) return;
 			const path = join(dir, entry.name);
-			if (entry.isDirectory()) walk(path, depth + 1);
-			else if (entry.isFile() && entry.name.endsWith(".md")) found.push(path);
+			if (entry.isDirectory()) {
+				// Once the file bound is reached a directory may still hold Markdown, and nothing more is read to find out.
+				if (found.length >= limits.maxFiles) incomplete.add("file-limit");
+				else walk(path, depth + 1);
+			} else if (entry.isFile() && entry.name.endsWith(".md")) {
+				if (found.length >= limits.maxFiles) incomplete.add("file-limit");
+				else found.push(path);
+			}
 		}
 	};
 	walk(start, 0);
-	return found.map((file) => ({ repo, path: relative(root, file).split(sep).join("/"), text: readFileSync(file, "utf8") }));
+	return {
+		docs: found.map((file) => ({ repo, path: relative(root, file).split(sep).join("/"), text: readFileSync(file, "utf8") })),
+		incomplete: [...incomplete],
+	};
 }
 
 export interface OfflineRun {
@@ -167,11 +219,15 @@ export interface OfflineRun {
 }
 
 /**
- * The golden set cannot ask for a document that has an exact copy (its question names two documents and is dropped), so a
- * de-duplication regression would not move the scores. Each group of identical documents is therefore probed directly: asked
- * for by its own title, the answer must hold the smallest key of the group once and no other member.
+ * The golden set asks nothing that a de-duplication regression would move (a copy is one answer group, so a retriever that
+ * answers either copy scores a hit), so a regression there would not show in the scores. Each group of identical documents is
+ * therefore probed directly: asked for by its own title, the answer must hold the smallest key of the group once and no other
+ * member.
  */
-export function duplicateCollapseFailures(docs: readonly EvalDocument[], search: (query: string) => readonly string[]): string[] {
+export async function duplicateCollapseFailures(
+	docs: readonly EvalDocument[],
+	search: (query: string) => readonly string[] | Promise<readonly string[]>,
+): Promise<string[]> {
 	const groups = new Map<string, string[]>();
 	for (const doc of docs) {
 		const keys = groups.get(doc.text) ?? [];
@@ -183,22 +239,36 @@ export function duplicateCollapseFailures(docs: readonly EvalDocument[], search:
 		if (keys.length < 2) continue;
 		const sorted = [...keys].sort();
 		const query = outlineOf(text).title ?? text.split(/\s+/).slice(0, 12).join(" ");
-		const present = search(query).filter((key) => keys.includes(key));
+		const present = (await search(query)).filter((key) => keys.includes(key));
 		if (present.length !== 1 || present[0] !== sorted[0]) failures.push(`${sorted.join(" = ")} answered as ${present.length === 0 ? "nothing" : present.join(", ")}`);
 	}
 	return failures;
 }
 
-/** The golden set of `docs`, each question answered by the lexical retriever over the same documents. `rerank` plugs the authority scores in. */
-export function runOffline(docs: readonly EvalDocument[], now: () => number, rerank?: Rerank): OfflineRun {
-	const golden = generateGolden(docs);
+/** The golden set of `docs`, each question answered by the lexical retriever alone over the same documents. `rerank` plugs the authority scores in. */
+export async function runOffline(docs: readonly EvalDocument[], now: () => number, rerank?: Rerank): Promise<OfflineRun> {
 	const index = createLexicalIndex(docs.map((doc) => ({ key: documentKey(doc.repo, doc.path), text: doc.text })));
-	const results = golden.map((question): QueryResult => {
+	return runSearch(docs, now, async (query) => index.search(query, { limit: 10, rerank }).map((hit) => hit.key));
+}
+
+/**
+ * The same golden set answered through the production search code: the real `Substrate.searchDocs` over a fake LightRAG plane
+ * that serves the same retriever's hits (`docs-eval-server.ts`). `rerank` plugs in at the plane, so the answer the server sorts,
+ * caps and cites is the re-ranked one.
+ */
+export async function runServer(docs: readonly EvalDocument[], now: () => number, rerank?: Rerank): Promise<OfflineRun> {
+	return runSearch(docs, now, createServerEvalSearch(docs, { rerank }));
+}
+
+async function runSearch(docs: readonly EvalDocument[], now: () => number, search: (query: string) => Promise<readonly string[]>): Promise<OfflineRun> {
+	const golden = generateGolden(docs);
+	const results: QueryResult[] = [];
+	for (const question of golden) {
 		const began = now();
-		const ranked = index.search(question.query, { limit: 10, rerank }).map((hit) => hit.key);
-		return { query: question.query, expected: question.expected, ranked, latencyMs: now() - began };
-	});
-	const duplicateFailures = duplicateCollapseFailures(docs, (query) => index.search(query, { limit: 10, rerank }).map((hit) => hit.key));
+		const ranked = await search(question.query);
+		results.push(resultOf(question, ranked, now() - began));
+	}
+	const duplicateFailures = await duplicateCollapseFailures(docs, search);
 	return { golden, results, score: scoreRun(results), duplicateFailures };
 }
 
@@ -245,30 +315,60 @@ export async function main(argv: readonly string[], io: EvalIo): Promise<number>
 	}
 	if (parsed.mode === "live") return runLive(parsed.url, parsed.json, io);
 
-	const run = runOffline(loadFixtureDocuments(io.fixtureDir ?? FIXTURE_DIR), io.now);
+	const docs = loadFixtureDocuments(io.fixtureDir ?? FIXTURE_DIR);
+	const lexical = await runOffline(docs, io.now);
+	const server = await runServer(docs, io.now);
 	const baselinePath = io.baselinePath ?? BASELINE_PATH;
 	if (parsed.writeBaseline) {
-		writeFileSync(baselinePath, `${JSON.stringify(baselineOf(run.score), null, "\t")}\n`);
-		io.stdout(`baseline written: ${formatScore(run.score)}`);
+		writeFileSync(baselinePath, `${JSON.stringify({ lexical: baselineOf(lexical.score), server: baselineOf(server.score) }, null, "\t")}\n`);
+		io.stdout(`baseline written: lexical ${formatScore(lexical.score)}`);
+		io.stdout(`baseline written: server ${formatScore(server.score)}`);
 		return 0;
 	}
 	const text = readTextOrNull(baselinePath);
-	const baseline = text === null ? null : parseBaseline(text);
-	if (baseline === null) {
+	const baselines = text === null ? null : parseBaselines(text);
+	if (baselines === null) {
 		io.stderr("no usable baseline: record one with `bun scripts/docs-eval.ts --write-baseline`");
 		return 1;
 	}
-	const comparison = compareToBaseline(run.score, baseline);
-	const failures = [...comparison.failures, ...run.duplicateFailures.map((failure) => `de-duplication: ${failure}`)];
+	const lexicalComparison = compareToBaseline(lexical.score, baselines.lexical);
+	const serverComparison = compareToBaseline(server.score, baselines.server);
+	const failures = [
+		...lexicalComparison.failures.map((failure) => `lexical: ${failure}`),
+		...lexical.duplicateFailures.map((failure) => `lexical de-duplication: ${failure}`),
+		...serverComparison.failures.map((failure) => `server: ${failure}`),
+		...server.duplicateFailures.map((failure) => `server de-duplication: ${failure}`),
+	];
+	const hints = [...lexicalComparison.hints, ...serverComparison.hints];
 	const ok = failures.length === 0;
-	if (parsed.json) io.stdout(JSON.stringify({ mode: "offline", score: run.score, baseline, ok, failures, hints: comparison.hints }));
-	else {
-		io.stdout(formatScore(run.score));
+	if (parsed.json) {
+		io.stdout(
+			JSON.stringify({
+				mode: "offline",
+				score: lexical.score,
+				baseline: baselines.lexical,
+				server: { score: server.score, baseline: baselines.server },
+				ok,
+				failures,
+				hints,
+			}),
+		);
+	} else {
+		io.stdout(`lexical ${formatScore(lexical.score)}`);
+		io.stdout(`server  ${formatScore(server.score)}`);
 		for (const failure of failures) io.stdout(`FAIL ${failure}`);
-		for (const hint of comparison.hints) io.stdout(`hint: ${hint}`);
+		for (const hint of new Set(hints)) io.stdout(`hint: ${hint}`);
 		io.stdout(ok ? "docs eval: within the baseline" : "docs eval: REGRESSION against the baseline");
 	}
 	return ok ? 0 : 1;
+}
+
+/** A live run and the walk it was asked from. */
+export interface LiveAsked {
+	asked: number;
+	live: LiveRun;
+	/** Why the local scan did not reach every document; empty is a full scan. */
+	incomplete: LocalDocuments["incomplete"];
 }
 
 /** The golden set of this checkout's `docs/`, asked of the server at `url` as `token`. */
@@ -277,11 +377,11 @@ export async function askLive(
 	token: string,
 	io: Pick<EvalIo, "env" | "fetchImpl" | "now" | "repoRoot">,
 	maxQueries: number = LIVE_MAX_QUERIES,
-): Promise<{ asked: number; live: LiveRun }> {
+): Promise<LiveAsked> {
 	const repo = io.env.SUBSTRATE_DOCS_EVAL_REPO?.trim() || DEFAULT_EVAL_REPO;
-	const docs = collectLocalDocuments(io.repoRoot ?? REPO_ROOT, repo);
+	const { docs, incomplete } = collectLocalDocuments(io.repoRoot ?? REPO_ROOT, repo);
 	const golden = generateGolden(docs, { maxQueries });
-	return { asked: golden.length, live: await runLiveQueries(golden, { base: url, token, fetchImpl: io.fetchImpl, now: io.now }) };
+	return { asked: golden.length, live: await runLiveQueries(golden, { base: url, token, fetchImpl: io.fetchImpl, now: io.now }), incomplete };
 }
 
 async function runLive(url: string, json: boolean, io: EvalIo): Promise<number> {
@@ -290,8 +390,8 @@ async function runLive(url: string, json: boolean, io: EvalIo): Promise<number> 
 		io.stderr(USAGE);
 		return 2;
 	}
-	const { asked, live } = await askLive(url, token, io);
-	return reportLive(asked, live, json, io);
+	const { asked, live, incomplete } = await askLive(url, token, io);
+	return reportLive(asked, live, json, io, incomplete);
 }
 
 /** What the canary reports on the events route: the recall at 5 of the golden set and how many questions it asked. */
@@ -302,30 +402,50 @@ export interface GoldenRecallReport {
 
 /**
  * The canary's measurement: null when it could not be taken (no documents to ask about, or any question failed, came back
- * degraded or was left unasked), because a recall over the answered questions alone would read as better than it is.
+ * degraded or was left unasked, or the scan of `docs/` was partial), because a recall over the answered questions or the scanned
+ * documents alone would read as better than it is. A partial scan says why on stderr.
  */
 export async function measureGoldenRecall(
 	url: string,
 	token: string,
-	io: Pick<EvalIo, "env" | "fetchImpl" | "now" | "repoRoot">,
+	io: Pick<EvalIo, "env" | "fetchImpl" | "now" | "repoRoot" | "stderr">,
 ): Promise<GoldenRecallReport | null> {
-	const { asked, live } = await askLive(url, token, io, CANARY_GOLDEN_MAX_QUERIES);
+	const { asked, live, incomplete } = await askLive(url, token, io, CANARY_GOLDEN_MAX_QUERIES);
+	if (incomplete.length > 0) {
+		io.stderr(`docs canary: golden recall not measured, the scan of docs/ was partial (${incomplete.join(", ")}); a recall over part of the documents is not reported`);
+		return null;
+	}
 	if (live.failed > 0 || live.degraded > 0 || live.aborted !== null || live.results.length === 0) return null;
 	return { recall5: scoreRun(live.results).recall5, asked };
 }
 
-/** Prints a live run and returns its exit code. Shared with the canary, which reports the same recall. */
-export function reportLive(asked: number, live: LiveRun, json: boolean, io: Pick<EvalIo, "env" | "stdout" | "stderr">): number {
+/**
+ * Prints a live run and returns its exit code. Shared with the canary, which reports the same recall. A partial scan is said in
+ * both forms and in the verdict line; it never changes the exit code, which is the SLO's.
+ */
+export function reportLive(
+	asked: number,
+	live: LiveRun,
+	json: boolean,
+	io: Pick<EvalIo, "env" | "stdout" | "stderr">,
+	incomplete: readonly string[] = [],
+): number {
 	const score = scoreRun(live.results);
 	const thresholds = loadSloThresholds(io.env);
 	const breaches = sloBreaches({ freshnessS: null, recall5: live.results.length === 0 ? null : score.recall5, ingestDocsPerS: null }, thresholds);
 	const unusable = live.failed > 0 || live.degraded > 0 || live.aborted !== null || live.results.length === 0;
-	if (json) io.stdout(JSON.stringify({ mode: "live", dataset: LIVE_DEFAULT_DATASET, asked, answered: live.results.length, failed: live.failed, degraded: live.degraded, aborted: live.aborted, score, threshold: thresholds.recall5, breaches }));
-	else {
+	const partial = incomplete.length > 0;
+	if (json) {
+		io.stdout(
+			JSON.stringify({ mode: "live", dataset: LIVE_DEFAULT_DATASET, asked, answered: live.results.length, failed: live.failed, degraded: live.degraded, aborted: live.aborted, partial, incomplete, score, threshold: thresholds.recall5, breaches }),
+		);
+	} else {
 		io.stdout(formatScore(score));
 		io.stdout(`asked ${asked}, answered ${live.results.length}, failed ${live.failed}, degraded ${live.degraded}${live.aborted === null ? "" : `, stopped early (${live.aborted})`}`);
-		if (breaches.length > 0) io.stdout(`FAIL recall@5 ${score.recall5.toFixed(3)} is under the SLO ${thresholds.recall5}`);
+		if (breaches.length > 0) io.stdout(`FAIL recall@5 ${score.recall5.toFixed(3)} is under the SLO ${thresholds.recall5}${partial ? " (partial scan)" : ""}`);
+		else if (partial && !unusable) io.stdout(`PARTIAL recall@5 ${score.recall5.toFixed(3)} holds the SLO ${thresholds.recall5} over a partial scan`);
 	}
+	if (partial) io.stderr(`docs eval: the scan of docs/ was partial (${incomplete.join(", ")}); the scores cover only the documents it reached`);
 	if (unusable) {
 		io.stderr("docs eval: not every question could be scored (failed, degraded, stopped early or none answered); the scores above cover only the answered ones");
 		return 3;

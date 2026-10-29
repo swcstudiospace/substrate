@@ -8,7 +8,7 @@
  * every question.
  */
 import { isRecord } from "./guards.ts";
-import type { GoldenQuery, QueryResult } from "./eval.ts";
+import { resultOf, type GoldenQuery, type QueryResult } from "./eval.ts";
 
 /** The route the live run asks. */
 export const LIVE_SEARCH_PATH = "/docs/search";
@@ -113,7 +113,7 @@ export async function runLiveQueries(queries: readonly GoldenQuery[], options: L
 		const latencyMs = options.now() - began;
 		if (reply.kind === "ranked") {
 			consecutive = 0;
-			results.push({ query: golden.query, expected: golden.expected, ranked: reply.keys, latencyMs });
+			results.push(resultOf(golden, reply.keys, latencyMs));
 		} else if (reply.kind === "degraded") {
 			consecutive += 1;
 			degraded += 1;

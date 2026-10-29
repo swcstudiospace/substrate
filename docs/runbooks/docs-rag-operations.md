@@ -111,21 +111,23 @@ journalctl -u substrate-docs-canary -n 50          # look for: golden recall@5 <
 systemctl enable --now substrate-docs-canary.timer
 ```
 
-**Check.** The journal line names a recall and a count, the unit exits 0, and `fabric_status` then shows `recall5.reading` in the `corpus` row. If the journal says `golden recall not measured`, the reason is on the line above it (no `docs/` in the release, or a question failed).
+**Check.** The journal line names a recall and a count, the unit exits 0, and `fabric_status` then shows `recall5.reading` in the `corpus` row. If the journal says `golden recall not measured`, the reason is on the line above it (no `docs/` in the release, a scan of `docs/` that a bound cut short, or a question that failed). The posted report (`docs.canary`) is accepted only from the canary's own `substrate` token: any other token is refused with `reserved-action`, so a missing reading is never one somebody else could have written.
 
 **Rollback.** `systemctl disable --now substrate-corpus-sync.timer substrate-corpus-watch.service substrate-docs-canary.timer`, then remove the unit files and `systemctl daemon-reload`. Documents stay on the plane; they simply stop following the repositories.
 
 ## 6. Turn the re-rank on
 
-The re-rank (phase 66) prefers the current document to the one it replaced, using the authority scores. It has three modes: `SUBSTRATE_DOCS_RERANK=off` (the default), `shadow` (records what it would have changed and changes nothing) and `on`. Promote it the way [`flag-promotion.md`](flag-promotion.md) says to promote any flag, with the corpus numbers as the evidence:
+**This step waits for the re-rank implementation.** Nothing in this checkout reads `SUBSTRATE_DOCS_RERANK` or `SUBSTRATE_DOCS_TELEMETRY` (`grep -rn SUBSTRATE_DOCS_RERANK packages scripts` finds no reader), so setting them changes no behaviour, and a `corpus eval` run afterwards would pass for reasons that have nothing to do with the re-rank. Do not follow the steps below, and do not record a value for it as a promotion, until that grep finds a reader in `packages/mcp-server/src`; the same way step 5 waits for the sync units.
+
+The re-rank (phase 66) is meant to prefer the current document to the one it replaced, using the authority scores, with three modes: `SUBSTRATE_DOCS_RERANK=off` (the default), `shadow` (records what it would have changed and changes nothing) and `on`. Once it exists, promote it the way [`flag-promotion.md`](flag-promotion.md) says to promote any flag, with the corpus numbers as the evidence:
 
 1. Record the number to beat: `substrate corpus eval --root /root/src/repos --server "$SUBSTRATE_URL" --json > before.json`.
 2. Set `SUBSTRATE_DOCS_RERANK=shadow`, restart, and let it run for the days you choose. Read what it would have changed in the retrieval telemetry (`SUBSTRATE_DOCS_TELEMETRY=on`).
 3. Change `shadow` to `on`, restart.
 
-**Check.** The same `corpus eval` command exits 0 and its `recall5` is not under `before.json`'s; the next canary report keeps `corpus.golden_recall5` at or above the objective; `fabric_status` shows the `corpus` row `ok`. Offline, `bun scripts/docs-eval.ts` must keep passing: its re-rank hook is what guards the order.
+**Check.** Not available until the re-rank is implemented (see the notice above): with no reader of the flag, a `corpus eval` that passes proves nothing about the re-rank. Offline, `bun scripts/docs-eval.ts` guards the order of its hook, on the lexical run and through the server's search code.
 
-**Rollback.** Set the value back to `shadow` or `off` and restart. The re-rank acts at query time and writes nothing to the manifest or the plane, so nothing is left to undo.
+**Rollback.** Set the value back to `shadow` or `off` and restart (once the re-rank exists). The re-rank acts at query time and writes nothing to the manifest or the plane, so nothing is left to undo.
 
 ## 7. Read the objectives
 
@@ -141,9 +143,9 @@ The row's `detail` has `freshnessS`, `recall5` and `ingestDocsPerS`, each `{ rea
 | You see | It means | Do this |
 | --- | --- | --- |
 | `corpus` row `degraded`, `corpus.slo: breached freshness` | The newest ingested document is older than `SUBSTRATE_DOCS_SLO_FRESHNESS_S`. Either the sync stopped, or nothing changed (the reading is the age of the newest document, so a quiet corpus ages). | `systemctl status substrate-corpus-sync.timer`, `journalctl -u substrate-corpus-sync`; run `substrate corpus ingest --execute` by hand. If the repositories simply did not change, raise the threshold. |
-| `corpus.slo: breached recall5` | The last golden-set recall at 5 reported by the canary is under `SUBSTRATE_DOCS_SLO_RECALL5`. Retrieval got worse, or the documents the golden set asks about are not in the corpus. | `substrate corpus eval --server "$SUBSTRATE_URL"` for a fresh reading; check `substrate corpus status` holds this repository; if you just promoted the re-rank, set it back (step 6). |
-| `corpus.slo: breached ingest` | An ingest request that sent documents averaged under `SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S`. The plane is slow or a large first ingest is under way. A request that sent nothing is never judged. | `fabric_status` for the `lightrag` row; lower `SUBSTRATE_CORPUS_CONCURRENCY` if the host is starved; wait out a first ingest. |
-| `corpus.slo: timeout` or `failed` | The readings could not be read within the fabric's deadline (the manifest did not answer). | `fabric_status`'s `timescaledb-index` row; [`../observability.md`](../observability.md). |
+| `corpus.slo: breached recall5` | The last golden-set recall at 5 reported by the canary is under `SUBSTRATE_DOCS_SLO_RECALL5`. Retrieval got worse, or the documents the golden set asks about are not in the corpus. | `substrate corpus eval --server "$SUBSTRATE_URL"` for a fresh reading; check `substrate corpus status` holds this repository. |
+| `corpus.slo: breached ingest` | An ingest request that uploaded documents to the plane averaged under `SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S`. The plane is slow or a large first ingest is under way. Rows only refreshed in the manifest (`updated`) are not uploads and do not count; a request that uploaded nothing is never judged. | `fabric_status` for the `lightrag` row; lower `SUBSTRATE_CORPUS_CONCURRENCY` if the host is starved; wait out a first ingest. |
+| `corpus.slo: timeout` or `failed` | The corpus readings could not be read: the manifest read ran out of its 1 second bound (`timeout`) or threw (`failed`), or the fabric's own deadline passed. The freshness reading keeps its last good value and is not refreshed until a read succeeds. | `fabric_status`'s `timescaledb-index` row; [`../observability.md`](../observability.md). |
 | The canary unit failed with `golden recall@5 … is under SUBSTRATE_DOCS_SLO_RECALL5` | The same breach as above, seen from the daily run. | As for `breached recall5`. |
 | `docs canary regression: …` warning event | A fixture question stopped finding its page. | [`../docs-search-ingest.md`](../docs-search-ingest.md). |
 | `docs.freshness` warning event | An accepted merge trigger has no recorded ingest after `SUBSTRATE_DOCS_TRIGGER_LAG_MIN`. | [`../observability.md`](../observability.md). |
@@ -152,7 +154,7 @@ The row's `detail` has `freshnessS`, `recall5` and `ingestDocsPerS`, each `{ rea
 
 ## 9. CI and the baseline
 
-`bun test` runs `scripts/docs-eval.test.ts`, which runs the offline harness against the committed baseline. A failure there is a change in ranking inputs, de-duplication or the re-rank order. If the change is intended, run `bun scripts/docs-eval.ts --write-baseline`, read the diff and commit it with the change ([`../corpus-eval.md`](../corpus-eval.md)).
+`bun test` runs `scripts/docs-eval.test.ts`, which runs the offline harness against the committed baselines, once for the lexical retriever and once for the production search code behind a fake plane. A failure there is a change in ranking inputs, de-duplication, the re-rank hook order or the server's handling of an answer, and the failing line says which baseline (`lexical:` or `server:`). If the change is intended, run `bun scripts/docs-eval.ts --write-baseline`, read the diff and commit it with the change ([`../corpus-eval.md`](../corpus-eval.md)).
 
 ## 10. Roll back, step by step
 
@@ -160,7 +162,7 @@ The row's `detail` has `freshnessS`, `recall5` and `ingestDocsPerS`, each `{ rea
 | --- | --- | --- |
 | The release | `infra/vps/deploy-release.sh rollback` | Everything but code: units, env files, stores, migrations. |
 | The corpus | `SUBSTRATE_CORPUS=off`, restart | The manifest and every plane document; the routes answer `503 corpus.disabled`. |
-| The re-rank | `SUBSTRATE_DOCS_RERANK=shadow` or `off`, restart | Nothing: it writes nothing. |
+| The re-rank | Nothing to undo yet: this checkout has no reader of `SUBSTRATE_DOCS_RERANK` (step 6 waits for the re-rank implementation). Once it lands: `SUBSTRATE_DOCS_RERANK=shadow` or `off`, restart | Nothing: it writes nothing. |
 | The timers | `systemctl disable --now` each timer and the watcher, remove the unit files | Documents on the plane. |
 | The manifest table | Its migration step is `phase: "expand"` and additive; an older release ignores it. The step's declared `down` (`drop table if exists corpus_documents`) is an operator statement that nothing in the code runs; run it only with the corpus off, and read [`rollback-compat.md`](rollback-compat.md) first. | The plane documents, now unreferenced by any row. |
 | Plane documents | `substrate corpus reconcile` lists the `corpus:` documents the plane holds that no active manifest row names (orphans), and the rows whose plane document is gone; with `--execute` it deletes the orphans and re-queues the missing ones. It needs `SUBSTRATE_CORPUS=on`, so run it before step 2's rollback, and read its `--help` for the exact flags. It is staged by the phase 65 unit. | Nothing else on the plane. |

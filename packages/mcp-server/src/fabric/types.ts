@@ -133,6 +133,12 @@ export interface CorpusSloFacts {
 	unread: "timeout" | "failed" | null;
 }
 
+/** What the corpus source answers with: the readings the server holds, and why the manifest read behind them failed when it did. */
+export interface CorpusSourceReading {
+	readings: SloReadings;
+	unread: "timeout" | "failed" | null;
+}
+
 export interface FabricFacts {
 	checkedAt: string;
 	endpointPolicy: "warn" | "enforce";
@@ -210,8 +216,11 @@ export interface FabricSources {
 	/** The synchronous counters and breaker states, read at the moment of the call. */
 	snapshot(): FabricHealthView;
 	railwayCost(): Promise<FabricCostView>;
-	/** The corpus readings (phase 70). Read under the same per-source deadline as the planes. */
-	corpus(): Promise<SloReadings>;
+	/**
+	 * The corpus readings (phase 70). Read under the same per-source deadline as the planes; a manifest read that failed or ran out
+	 * of its own, shorter bound is reported in `unread`, never swallowed.
+	 */
+	corpus(): Promise<CorpusSourceReading>;
 	outbox(): { size: number; oldestAt: string | null };
 	config: FabricConfigView;
 }

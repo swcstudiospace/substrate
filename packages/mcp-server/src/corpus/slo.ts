@@ -6,6 +6,13 @@
  */
 import { goldenRecallOf, ingestDocsPerSecond, type SloReadings } from "@substrate/corpus";
 
+/** The action the docs canary reports under, and the one surface its token authenticates as. `reserved-actions.ts` keeps every other caller from writing it. */
+export const DOCS_CANARY_ACTION = "docs.canary";
+export const DOCS_CANARY_SURFACE = "substrate";
+
+/** How a manifest read behind the readings ended: it answered (or there was nothing to read), it ran out of its bound, or it failed. */
+export type CorpusRefresh = "ok" | "timeout" | "failed";
+
 /** Where a reading is announced, so the registry's gauges follow it. Both are optional: a server without observability has none. */
 export interface CorpusSloSinks {
 	ingestRate?: ((docsPerSecond: number) => void) | undefined;
@@ -36,13 +43,14 @@ export class CorpusSloState {
 	}
 
 	/**
-	 * One finished ingest request: `sent` documents (ingested plus updated) over `elapsedMs` of wall time. The gauge takes the
-	 * rate whatever it is, 0 included; the SLO reading takes it only when documents were sent, because a request that found
+	 * One finished ingest request: `uploaded` documents the plane took (the response's `ingested` count, never the metadata-only
+	 * `updated` rows, which send nothing to the plane) over `elapsedMs` of wall time. The gauge takes the
+	 * rate whatever it is, 0 included; the SLO reading takes it only when documents were uploaded, because a request that found
 	 * everything unchanged is idle, not slow.
 	 */
-	recordIngest(sent: number, elapsedMs: number): void {
-		const rate = ingestDocsPerSecond(sent, elapsedMs);
-		this.ingestReading = sent > 0 ? rate : null;
+	recordIngest(uploaded: number, elapsedMs: number): void {
+		const rate = ingestDocsPerSecond(uploaded, elapsedMs);
+		this.ingestReading = uploaded > 0 ? rate : null;
 		this.sinks.ingestRate?.(rate);
 	}
 

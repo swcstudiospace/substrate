@@ -61,6 +61,27 @@ describe("outlineOf", () => {
 	test("plainText keeps link text and code words and drops emphasis and tags", () => {
 		expect(plainText("See [the **guide**](a.md) for `code` <b>now</b> ##")).toBe("See the guide for code now");
 	});
+
+	test("a fence closes only on a run of its own character at least as long as its opener, so a longer block holds a shorter example", () => {
+		const outline = outlineOf(
+			["# Doc title here", "", "Real lead sentence for this page.", "", "````md", "```js", "# Fake title in code", "## Fake heading in code", "```", "Paragraph inside the block.", "````", "", "## Real heading"].join("\n"),
+		);
+		expect(outline).toEqual({ title: "Doc title here", headings: ["Real heading"], lead: "Real lead sentence for this page" });
+		// The example's own heading would be the lead if the block had closed early.
+		expect(outlineOf("````\n```\n## inside\n```\n````\n## after").headings).toEqual(["after"]);
+	});
+
+	test("a closer with an info string does not close, and an unterminated fence runs to the end of the document", () => {
+		expect(outlineOf("```\n```js\n## inside\n```\n## outside").headings).toEqual(["outside"]);
+		expect(outlineOf("# Title of doc\n\n```\n## hidden heading\nstill code text").headings).toEqual([]);
+		expect(outlineOf("```\n## hidden\n").lead).toBeNull();
+	});
+
+	test("a tilde fence is closed by tildes only, not by backticks or a shorter tilde run", () => {
+		expect(outlineOf(["~~~~", "```", "## inside one", "~~~", "## inside two", "~~~~", "", "## After"].join("\n")).headings).toEqual(["After"]);
+		// Not a fence at all: a backtick opener with a backtick in its info string is inline code.
+		expect(outlineOf("``` not a fence `code`\n\n## Visible").headings).toEqual(["Visible"]);
+	});
 });
 
 describe("generateGolden", () => {
@@ -104,9 +125,11 @@ describe("generateGolden", () => {
 		]);
 	});
 
-	test("an exact copy of a page, such as an archive, asks nothing about either copy", () => {
+	test("an exact copy of a page, such as an archive, is one answer group asked once through its canonical copy", () => {
 		const copy: EvalDocument = { ...alpha, path: "milestones/v1/docs/alpha.md" };
-		expect(generateGolden([alpha, copy])).toEqual([]);
+		const golden = generateGolden([alpha, copy]);
+		expect(golden.map((query) => [query.query, query.expected])).toEqual(generateGolden([alpha]).map((query) => [query.query, query.expected]));
+		for (const query of golden) expect(query.alsoExpected).toEqual(["r/a:milestones/v1/docs/alpha.md"]);
 	});
 
 	test("a title that is a phrase of another title is ambiguous too", () => {
@@ -136,6 +159,35 @@ describe("generateGolden", () => {
 		expect(generateGolden(docs, { maxQueries: 2, seed: 3 })).toEqual(capped);
 		for (const query of capped) expect(all).toContainEqual(query);
 		expect(generateGolden(docs, { maxQueries: 0 })).toEqual([]);
+	});
+
+	test("copies of a page are one answer group: the canonical copy's retriever scores full recall at the default settings, and so does one that returns another copy", () => {
+		const sections = Array.from({ length: 8 }, (_, i) => `## Section number ${i + 1}\n\nText.\n`).join("\n");
+		const text = `# Many headings document\n\nThe opening sentence of this page.\n\n${sections}`;
+		const first: EvalDocument = { repo: "r/m", path: "docs/m.md", text };
+		const second: EvalDocument = { repo: "r/m", path: "archive/m.md", text };
+		const golden = generateGolden([first, second]);
+		expect(golden).toHaveLength(GOLDEN_QUERIES_PER_DOCUMENT);
+		const canonical = "r/m:archive/m.md";
+		for (const query of golden) {
+			expect(query.expected).toBe(canonical);
+			expect(query.alsoExpected).toEqual(["r/m:docs/m.md"]);
+		}
+		const asked = (ranked: string): QueryResult[] => golden.map((query) => ({ query: query.query, expected: query.expected, ...(query.alsoExpected === undefined ? {} : { alsoExpected: query.alsoExpected }), ranked: [ranked], latencyMs: 1 }));
+		expect(scoreRun(asked(canonical)).recall5).toBe(1);
+		expect(scoreRun(asked("r/m:docs/m.md")).recall5).toBe(1);
+		expect(scoreRun(asked("r/other:x.md")).recall5).toBe(0);
+	});
+
+	test("a phrase two different pages both ask is dropped for both whatever each page would have sampled", () => {
+		const own = (name: string): string => Array.from({ length: 8 }, (_, i) => `## ${name} part ${i + 1}\n\nText.\n`).join("\n");
+		const one: EvalDocument = { repo: "r/one", path: "g.md", text: `# Getting started here\n\n${own("First")}\n## Shared part\n\nText.\n` };
+		const two: EvalDocument = { repo: "r/two", path: "g.md", text: `# Getting started here\n\n${own("Second")}\n## Shared part\n\nText.\n` };
+		for (let seed = 1; seed <= 25; seed++) {
+			const golden = generateGolden([one, two], { seed });
+			expect(golden.filter((query) => query.query.endsWith("Shared part"))).toEqual([]);
+			expect(golden.length).toBeGreaterThan(0);
+		}
 	});
 });
 
@@ -198,5 +250,13 @@ describe("metrics", () => {
 		expect(score.p50Ms).toBe(2);
 		expect(score.p95Ms).toBe(4);
 		expect(scoreRun([])).toEqual({ queries: 0, recall1: 0, recall5: 0, recall10: 0, mrr: 0, p50Ms: 0, p95Ms: 0 });
+	});
+
+	test("a hit on any copy of the expected page counts, at the best place among them", () => {
+		const copied: QueryResult = { query: "q", expected: "A", alsoExpected: ["B", "C"], ranked: ["x", "C", "A"], latencyMs: 1 };
+		expect(recallAtK([copied], 1)).toBe(0);
+		expect(recallAtK([copied], 2)).toBe(1);
+		expect(mrr([copied])).toBe(0.5);
+		expect(recallAtK([{ ...copied, ranked: ["x", "y"] }], 5)).toBe(0);
 	});
 });
