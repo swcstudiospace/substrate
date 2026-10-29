@@ -51,7 +51,7 @@ function isState(value: string): value is SteeringSessionState {
  * `/steering/sessions` answer need so a credential pasted into a direction is not kept or handed on. Identifiers and the state
  * are not changed, so the session's key stays the one its owner wrote.
  */
-export function redactedSteeringSession(session: SteeringSession): SteeringSession {
+export function steeringSessionWithoutSecrets(session: SteeringSession): SteeringSession {
 	return {
 		...session,
 		...(session.planning_hash === undefined ? {} : { planning_hash: redact(session.planning_hash) }),
@@ -72,7 +72,7 @@ export function storedSessionOf(row: Record<string, unknown>): StoredSteeringSes
 	const planningHash = row.planning_hash;
 	return {
 		surface,
-		session: redactedSteeringSession({
+		session: steeringSessionWithoutSecrets({
 			session_id: String(row.session_id),
 			repo_id: String(row.repo_id),
 			state,

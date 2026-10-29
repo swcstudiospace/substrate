@@ -15,7 +15,7 @@ import { SESSION_ID_RE } from "./presence.ts";
 import type { SteeringSessionRegistry } from "./session-state.ts";
 import { compareDirectives, type SteeringInbox, type SteeringRecord } from "./steering.ts";
 import type { SteeringAcknowledgeReply } from "./steering-delivery.ts";
-import { redactedSteeringSession } from "./steering-sessions-store.ts";
+import { steeringSessionWithoutSecrets } from "./steering-sessions-store.ts";
 import { STEERING_ACKNOWLEDGE_INPUT, STEERING_QUEUE_INPUT, type SteeringAcknowledgeInput, type SteeringCaller, type SteeringQueueInput, type SteeringWiring, type SteeringWriteResult } from "./steering-tools.ts";
 
 /** `GET /steering/sessions` lists at most this many sessions per call. */
@@ -90,7 +90,7 @@ export function listSteeringSessions(
 		);
 	const sessions = visible.slice(0, query.limit).map((entry): RestSteeringSession => {
 		// The directions are caller-supplied text: they pass the redactor on the way out as they do on the way into the table.
-		const session = redactedSteeringSession(entry.session);
+		const session = steeringSessionWithoutSecrets(entry.session);
 		return {
 			session_id: session.session_id,
 			surface: entry.surface,
