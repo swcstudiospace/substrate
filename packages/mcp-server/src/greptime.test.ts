@@ -2670,6 +2670,19 @@ describe("metric_samples (uplift-4 S6)", () => {
 		expect(statement).not.toContain("slash");
 	});
 
+	test("null, undefined and unknown-series entries are counted as invalid without rejecting the batch", async () => {
+		// A producer outside the type system can hand over anything; the predicate stands in for that boundary without a cast.
+		const asRows = (entries: readonly unknown[]): entries is readonly MetricSampleRow[] => true;
+		const entries: readonly unknown[] = [row({ tsMs: NOW + 1 }), null, undefined, row({ series: "not.a.series" })];
+		if (!asRows(entries)) throw new Error("expected the entries to be accepted as rows");
+		const { sql } = stubFetch();
+		const result = await new GreptimeClient(config).recordMetricSamples(entries);
+		expect(result).toEqual({ stored: 1, drops: { invalid: 3 } });
+		const statement = defined(inserts(sql)[0], "an INSERT statement");
+		expect(statement).not.toContain("not.a.series");
+		expect(statement.match(/\), \(/g)).toBeNull();
+	});
+
 	test("numbers the columns cannot hold are dropped as invalid", async () => {
 		const { sql } = stubFetch();
 		const result = await new GreptimeClient(config).recordMetricSamples([

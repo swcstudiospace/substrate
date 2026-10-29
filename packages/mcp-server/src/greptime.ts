@@ -2325,8 +2325,8 @@ export class GreptimeClient {
 		let capped = 0;
 		for (const row of rows) {
 			const labels = validMetricRow(row);
-			// A row that passed validMetricRow names a series in the allow-list, so a missing spec only repeats that refusal.
-			const kind = ALL_METRIC_SERIES[row.series]?.kind;
+			// Look the spec up only for a row validMetricRow accepted: a null or undefined entry must be counted as invalid, not throw on `row.series`.
+			const kind = labels === null ? undefined : ALL_METRIC_SERIES[row.series]?.kind;
 			if (labels === null || kind === undefined) {
 				invalid += 1;
 			} else if (accepted.length >= MAX_METRIC_BATCH) {
