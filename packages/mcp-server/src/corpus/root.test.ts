@@ -234,6 +234,29 @@ describe("CorpusRootKeeper", () => {
 		expect(defined(keeper.peek(), "the settled root").count).toBe(4);
 	});
 
+	test("a root event an earlier ingest owes is written after a later ingest that changed nothing settles", async () => {
+		const { clock, emitted, keeper, store } = harness();
+		seed(defined(store), 2);
+		// The earlier ingest changed the manifest; its timer is pending.
+		keeper.manifestChanged();
+		keeper.writeStarted();
+		// The timer fires while a later ingest writes: nothing is recorded, and the timer is spent.
+		clock.fire();
+		await flush();
+		expect(emitted).toEqual([]);
+		expect(clock.timers).toEqual([]);
+		// That ingest changed nothing, but the event is still owed, so settling arms it again.
+		keeper.writeSettled(false);
+		expect(clock.timers).toHaveLength(1);
+		clock.fire();
+		await flush();
+		expect(emitted.map((event) => event.payload?.count)).toEqual([2]);
+		// Once written, a later unchanged ingest owes nothing.
+		keeper.writeStarted();
+		keeper.writeSettled(false);
+		expect(clock.timers).toEqual([]);
+	});
+
 	test("an ingest that changed nothing leaves the root recomputable and writes no event", async () => {
 		const { clock, emitted, keeper, store } = harness();
 		seed(defined(store), 2);

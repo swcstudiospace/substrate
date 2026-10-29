@@ -138,8 +138,9 @@ export interface CorpusRootKeeperDeps {
  *   it with the manifest's version, so a write this process did not note is not served as current.
  * - An ingest brackets its writes with `writeStarted()` and `writeSettled()`. While one is in flight the cache is empty and no read
  *   is cached, so a search never names a root the batches already saved have outdated.
- * - A root is recorded only when no ingest is writing (the event follows `writeSettled`) and only when it differs from the root
- *   written last, so a state is recorded once however the batches were ordered and an unchanged manifest writes nothing.
+ * - A root is recorded only when no ingest is writing (the event follows `writeSettled`, which re-arms an event a timer found
+ *   deferred) and only when it differs from the root written last, so a state is recorded once however the batches were ordered
+ *   and an unchanged manifest writes nothing.
  * - `manifestChanged()` bumps the generation and schedules one root event. Events are coalesced: at most one per
  *   {@link ROOT_EMIT_MIN_INTERVAL_MS}, and the one that goes out reads the manifest when its timer fires, so the latest state wins.
  *   The timer runs after the request that noted the change has answered, and a failure of any kind is swallowed: a root event
@@ -158,6 +159,8 @@ export class CorpusRootKeeper {
 	private lastEmittedRoot: string | null = null;
 	/** The ingests whose writes have started and not settled. */
 	private writers = 0;
+	/** A root event is owed: the manifest changed and no root written or judged unneeded since. It survives a timer that fired during an ingest. */
+	private owed = false;
 	/** The one root write in flight, and whether another was asked for while it ran. */
 	private emitting: Promise<void> | null = null;
 	private emitAgain = false;
@@ -229,12 +232,17 @@ export class CorpusRootKeeper {
 	writeSettled(changed: boolean): void {
 		this.writers = Math.max(0, this.writers - 1);
 		if (changed) this.manifestChanged();
-		else this.generation += 1;
+		else {
+			this.generation += 1;
+			// An event an earlier ingest owed may have been deferred by this one; its timer is gone, so it is armed again here.
+			if (this.writers === 0 && this.owed) this.scheduleEmit();
+		}
 	}
 
 	/** The manifest changed: forget the cached root and schedule one root event. Returns at once and never throws. */
 	manifestChanged(): void {
 		this.generation += 1;
+		this.owed = true;
 		this.scheduleEmit();
 	}
 
@@ -273,7 +281,9 @@ export class CorpusRootKeeper {
 			// While an ingest writes, the manifest is between versions: nothing is recorded now, and `writeSettled` owes the event after it.
 			if (this.writers > 0) return;
 			const read = await this.read();
-			if (this.writers > 0 || !read.ok || read.snapshot.count === 0 || read.snapshot.root === this.lastEmittedRoot) return;
+			if (this.writers > 0) return;
+			this.owed = false;
+			if (!read.ok || read.snapshot.count === 0 || read.snapshot.root === this.lastEmittedRoot) return;
 			const { root, count, manifestVersion } = read.snapshot;
 			this.lastWriteMs = this.clock.now();
 			await this.deps.emit({
