@@ -8,8 +8,8 @@
  *   substrate corpus status [--server URL] [--json]
  *
  * Discovery runs here, where the files are; the server never reads a path. `scan` needs no server. `plan` sends entries
- * without bodies. `ingest` is a dry run until `--execute`, then sends the bodies of the documents the plan says must
- * change in bounded batches and the tombstones last. Exit codes: 0 done, 1 failed (a request, or a document), 2 usage.
+ * without bodies. `ingest` is a dry run until `--execute`, then sends the tombstones first, as requests of their own, and
+ * then the bodies of the documents the plan says must change in bounded batches. Exit codes: 0 done, 1 failed (a request, or a document), 2 usage.
  */
 import { readFileSync } from "node:fs";
 import {
@@ -18,6 +18,7 @@ import {
 	DEFAULT_GITHUB_MAX_REPOS,
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_TIER,
+	MAX_INGEST_DOCUMENTS,
 	isCorpusSource,
 	isDocTier,
 	type CorpusPlanRequest,
@@ -36,7 +37,7 @@ export const USAGE =
 	"substrate corpus scan [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--source fs|github|greptile]... [--greptile-dir DIR]\n" +
 	"                      [--github-owner OWNER] [--max-repos N] [--json] [--entries]\n" +
 	"substrate corpus plan [scan options] [--server URL] [--json]\n" +
-	"substrate corpus ingest [plan options] [--execute] [--batch-docs N] [--batch-bytes N]   (a dry run without --execute)\n" +
+	"substrate corpus ingest [plan options] [--execute] [--batch-docs N] [--batch-bytes N]   (a dry run without --execute; --batch-docs is capped at the server limit of 200)\n" +
 	"substrate corpus status [--server URL] [--json]\n";
 
 export const DEFAULT_ROOT = "/root/src/repos";
@@ -242,7 +243,10 @@ export async function runCorpus(argv: string[], deps: CorpusDeps): Promise<numbe
 		const batchBytes = bytesFlag === undefined ? positiveInt(deps.env.SUBSTRATE_CORPUS_BATCH_BYTES) ?? DEFAULT_BATCH_BYTES : positiveInt(bytesFlag);
 		if (batchDocs === null) return usage("--batch-docs must be a positive integer");
 		if (batchBytes === null) return usage("--batch-bytes must be a positive integer");
-		return await ingest(args, parsed, deps, batchDocs, batchBytes);
+		// The server refuses a request of more documents than its limit, which would stop the whole ingest, so a larger value is lowered.
+		const docsPerRequest = Math.min(batchDocs, MAX_INGEST_DOCUMENTS);
+		if (docsPerRequest < batchDocs) deps.err(`[substrate] corpus ingest: batch of ${batchDocs} documents is above the server limit; using ${docsPerRequest}\n`);
+		return await ingest(args, parsed, deps, docsPerRequest, batchBytes);
 	} catch (cause) {
 		deps.err(`[substrate] corpus ${sub} failed: ${cause instanceof Error ? cause.message : String(cause)}\n`);
 		return 1;
@@ -268,7 +272,7 @@ async function status(parsed: Parsed, deps: CorpusDeps): Promise<number> {
 	return 0;
 }
 
-/** The request a plan sends: the entries without bodies, and the scope of what the scan read completely. */
+/** The request a plan sends: the entries without bodies, and the coverage of what the scan read completely. */
 function planRequest(inventory: Inventory): CorpusPlanRequest {
 	return { protocol: CORPUS_PROTOCOL, entries: inventory.entries, scope: inventory.scope };
 }
@@ -280,7 +284,7 @@ async function plan(args: ScanArgs, parsed: Parsed, deps: CorpusDeps): Promise<n
 		deps.err(`[substrate] corpus plan failed: ${describeError(result.error)}\n`);
 		return 1;
 	}
-	deps.out(parsed.bools.has("json") ? `${JSON.stringify(result.value, null, 2)}\n` : renderPlan(result.value, inventory.scope));
+	deps.out(parsed.bools.has("json") ? `${JSON.stringify(result.value, null, 2)}\n` : renderPlan(result.value, inventory));
 	return 0;
 }
 
@@ -303,11 +307,11 @@ async function ingest(args: ScanArgs, parsed: Parsed, deps: CorpusDeps, batchDoc
 			deps.out(
 				json
 					? `${JSON.stringify({ dryRun: true, plan: planned.value }, null, 2)}\n`
-					: `${renderPlan(planned.value, inventory.scope)}dry run: nothing was sent; add --execute to ingest this plan\n`,
+					: `${renderPlan(planned.value, inventory)}dry run: nothing was sent; add --execute to ingest this plan\n`,
 			);
 			return 0;
 		}
-		if (!json) deps.out(renderPlan(planned.value, inventory.scope));
+		if (!json) deps.out(renderPlan(planned.value, inventory));
 		const outcome = await executeIngest({
 			plan: planned.value,
 			inventory,

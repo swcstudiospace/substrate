@@ -30,6 +30,16 @@ describe("inspectBytes", () => {
 		expect(inspectBytes(Uint8Array.of(97, 0, 98), 10)).toEqual({ ok: false, reason: "binary" });
 		expect(inspectBytes(Uint8Array.of(0xff, 0xfe, 0x41), 10)).toEqual({ ok: false, reason: "invalid-utf8" });
 	});
+
+	test("keeps a leading byte-order mark in the text so the body hashes like the bytes", () => {
+		const bytes = Uint8Array.of(0xef, 0xbb, 0xbf, ...new TextEncoder().encode("# bom\n"));
+		const result = inspectBytes(bytes, 100);
+		if (!result.ok) throw new Error("a BOM document is valid UTF-8");
+		expect(result.text.startsWith("\uFEFF")).toBe(true);
+		expect(result.sha256).toBe(createHash("sha256").update(bytes).digest("hex"));
+		// What the server does with the body it receives: encode and hash.
+		expect(createHash("sha256").update(new TextEncoder().encode(result.text)).digest("hex")).toBe(result.sha256);
+	});
 });
 
 describe("SkipLog", () => {
@@ -201,8 +211,8 @@ describe("scanRoots over a git checkout", () => {
 		expect(byRepo.get("Acme/Fine")).toMatchObject({ complete: true, files: 1 });
 		expect(defined(byRepo.get("Acme/Broken")?.incomplete, "reason")).toContain("ls-files");
 		expect(result.entries.map((e) => e.repo)).toEqual(["Acme/Fine", "Acme/Flaky"]);
-		// What the plan may judge: only the repository that read completely.
-		expect(buildScope({ reports: result.report.repos, maxTier: 2, sources: ["fs"] }).repos).toEqual(["Acme/Fine"]);
+		// What the plan may judge: only the repository that read completely, under the source that read it.
+		expect(buildScope({ reports: result.report.repos, maxTier: 2 }).coverage).toEqual([{ repo: "Acme/Fine", source: "fs" }]);
 	});
 
 	test("a clone and a linked worktree of one origin scan as one repository", async () => {
@@ -322,22 +332,54 @@ describe("scanRoots over copy collections", () => {
 		expect(defined(result.report.repos[0], "report")).toMatchObject({ repo: "local/c1", complete: false });
 		expect(result.entries).toEqual([]);
 	});
+
+	test("a collection emptied of its documents is read completely with zero entries, so its rows can be removed", async () => {
+		const root = fixture({ "c1/docs/a.md": "a\n", "c2/docs/b.md": "b\n" });
+		rmSync(join(root, "c1", "docs", "a.md"));
+		const result = await scanRoots({ roots: [root], runner: fakeGit({}) });
+		expect(result.entries.map((e) => documentKey(e.repo, e.path))).toEqual(["local/c2:docs/b.md"]);
+		expect(result.report.repos.map((r) => [r.repo, r.files, r.complete])).toEqual([
+			["local/c1", 0, true],
+			["local/c2", 1, true],
+		]);
+		expect(result.report.emptyCollections).toBe(1);
+		expect(buildScope({ reports: result.report.repos, maxTier: 2 }).coverage).toEqual([
+			{ repo: "local/c1", source: "fs" },
+			{ repo: "local/c2", source: "fs" },
+		]);
+	});
 });
 
 describe("buildScope", () => {
 	const report = (repo: string, complete: boolean, source: RepoReport["source"] = "fs"): RepoReport => ({ repo, dir: repo, source, files: 1, bytes: 1, complete });
 
-	test("lists only repositories every source read completely, sorted, with the scan's tier and the sources it used", () => {
+	test("lists each (repository, source) pair that was read completely, sorted, with the scan's tier", () => {
 		const scope = buildScope({
 			reports: [report("b/two", true), report("a/one", true), report("c/three", false), report("a/one", false, "greptile"), report("d/four", true, "github")],
 			maxTier: 1,
-			sources: ["github", "fs"],
 		});
-		expect(scope).toEqual({ repos: ["b/two", "d/four"], maxTier: 1, sources: ["fs", "github"] });
+		expect(scope).toEqual({
+			coverage: [
+				{ repo: "a/one", source: "fs" },
+				{ repo: "b/two", source: "fs" },
+				{ repo: "d/four", source: "github" },
+			],
+			maxTier: 1,
+		});
+	});
+
+	test("a source that read a repository incompletely, or never reported it, leaves only that pair out", () => {
+		// `Acme/Zed` was read from disk, its Greptile export fell beyond the repository cap (no report), and its GitHub tree was truncated.
+		const scope = buildScope({ reports: [report("Acme/Zed", true), report("Acme/Zed", false, "github")], maxTier: 2 });
+		expect(scope.coverage).toEqual([{ repo: "Acme/Zed", source: "fs" }]);
+	});
+
+	test("two reports of one pair must both be complete", () => {
+		expect(buildScope({ reports: [report("a/one", true), report("a/one", false)], maxTier: 2 }).coverage).toEqual([]);
 	});
 
 	test("a scan that read nothing covers nothing", () => {
-		expect(buildScope({ reports: [], maxTier: 2, sources: ["fs"] })).toEqual({ repos: [], maxTier: 2, sources: ["fs"] });
+		expect(buildScope({ reports: [], maxTier: 2 })).toEqual({ coverage: [], maxTier: 2 });
 	});
 });
 

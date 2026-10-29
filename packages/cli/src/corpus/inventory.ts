@@ -1,10 +1,10 @@
 /**
  * One inventory from every requested source: the filesystem scan, the GitHub repositories without a local clone and a
- * Greptile export, merged into one sorted entry list and one report, plus the scope a plan may judge.
+ * Greptile export, merged into one sorted entry list and one report, plus the coverage a plan may judge.
  *
- * The scope names only repositories that were read completely. A repository that failed to read, a truncated tree, a
- * repository cut by `--max-repos` and a source that was not asked for are therefore never in it, so a narrower or failed
- * scan cannot make the server tombstone documents it did not cover.
+ * The coverage names only (repository, source) pairs that source read completely. A repository that failed to read, a
+ * truncated tree, a repository cut by `--max-repos`, a source that was not asked for, or one that never reached a given
+ * repository leave their pair out, so a narrower or failed scan cannot make the server tombstone documents it did not cover.
  */
 import {
 	buildScope,
@@ -51,6 +51,8 @@ export interface InventoryReport {
 	collapsed: ScanReport["collapsed"];
 	skipped: SkippedFile[];
 	skippedByReason: Partial<Record<SkipReason, number>>;
+	/** Repositories read completely that hold no eligible document: still covered, so their old rows are tombstoned. */
+	emptyCollections: number;
 	notes: string[];
 }
 
@@ -154,7 +156,7 @@ export async function collectInventory(opts: InventoryOptions): Promise<Inventor
 		paths,
 		sources: opts.sources,
 		maxTier: opts.maxTier,
-		report: { checkouts, repos, collapsed, skipped, skippedByReason, notes },
-		scope: buildScope({ reports: repos, maxTier: opts.maxTier, sources: opts.sources }),
+		report: { checkouts, repos, collapsed, skipped, skippedByReason, emptyCollections: repos.filter((repo) => repo.complete && repo.files === 0).length, notes },
+		scope: buildScope({ reports: repos, maxTier: opts.maxTier }),
 	};
 }

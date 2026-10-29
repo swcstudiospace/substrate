@@ -211,7 +211,12 @@ function explore(dir: string, depth: number, walk: Walk): void {
 	if (holdsDocs(dir)) {
 		walk.collections.length = collectionsBefore;
 		walk.collections.push(dir);
+		return;
 	}
+	// A readable immediate child of a root that holds no checkout and no documentation is a collection that was emptied:
+	// it stays a collection so the scan covers it with zero entries and its old rows are tombstoned, instead of it
+	// looking like a directory the scan never reached.
+	if (depth === 1 && walk.gitDirs.length === gitsBefore) walk.collections.push(dir);
 }
 
 interface Ranked {

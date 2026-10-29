@@ -7,7 +7,7 @@
  * `manifestVersion()` (the maximum) only grows; nothing deletes a row, a removal is a `tombstoned` state.
  */
 import type { SQL } from "bun";
-import { isCorpusSource, isDocKind, isDocTier, type CorpusScope, type CorpusSource, type CorpusStatusResponse, type DocKind, type DocTier } from "@substrate/corpus";
+import { isCorpusSource, isDocKind, isDocTier, type CorpusSource, type CorpusStatusResponse, type DocKind, type DocTier } from "@substrate/corpus";
 
 export type ManifestState = "active" | "tombstoned";
 
@@ -39,15 +39,31 @@ export interface RecordedDocument {
 	documentId: string;
 }
 
+/** What `refreshMetadata` writes: the descriptive columns of a document whose bytes the manifest already holds. */
+export interface RefreshedMetadata {
+	repo: string;
+	path: string;
+	sha256: string;
+	kind: DocKind;
+	tier: DocTier;
+	source: CorpusSource;
+	commit?: string | undefined;
+}
+
 /** `status()` without the protocol member the route adds. */
 export type CorpusStatusSummary = Omit<CorpusStatusResponse, "protocol">;
 
 export interface CorpusStore {
-	/** Every row, any state, whose repo is in `scope.repos`. The planner applies the tier and source limits itself. */
-	rowsInScope(scope: CorpusScope): Promise<ManifestRow[]>;
+	/** Every row, any state, whose repo is in `repos`. The planner applies the coverage and tier limits itself. */
+	rowsForRepos(repos: readonly string[]): Promise<ManifestRow[]>;
 	rowFor(repo: string, path: string): Promise<ManifestRow | null>;
 	/** Upserts the row as `active` under the given plane document id and takes the next `manifest_seq`. */
 	recordIngested(row: RecordedDocument): Promise<void>;
+	/**
+	 * Refreshes `kind`, `tier`, `source` and `commit` of the ACTIVE row at this sha256 and takes the next `manifest_seq`; the
+	 * plane document is untouched. False when there is no active row at that sha256 (it changed or was removed meanwhile).
+	 */
+	refreshMetadata(row: RefreshedMetadata): Promise<boolean>;
 	/** Marks an active row `tombstoned`; false when there was no active row, so a repeat is a no-op. */
 	markTombstoned(repo: string, path: string): Promise<boolean>;
 	/** How many ACTIVE rows hold this plane document id. */
@@ -93,10 +109,10 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 		return numberOf(rows[0]?.version);
 	}
 	return {
-		async rowsInScope(scope: CorpusScope): Promise<ManifestRow[]> {
-			if (scope.repos.length === 0) return [];
+		async rowsForRepos(repos: readonly string[]): Promise<ManifestRow[]> {
+			if (repos.length === 0) return [];
 			// `in ${sql(array)}` is the form Bun's SQL expands to a value list; an array passed to `any()` is malformed.
-			const rows: Array<Record<string, unknown>> = await sql`select * from corpus_documents where repo in ${sql(scope.repos)} order by repo, path`;
+			const rows: Array<Record<string, unknown>> = await sql`select * from corpus_documents where repo in ${sql([...repos])} order by repo, path`;
 			return rows.flatMap((row) => {
 				const parsed = toManifestRow(row);
 				return parsed === null ? [] : [parsed];
@@ -106,6 +122,19 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 			const rows: Array<Record<string, unknown>> = await sql`select * from corpus_documents where repo = ${repo} and path = ${path}`;
 			const row = rows[0];
 			return row === undefined ? null : toManifestRow(row);
+		},
+		async refreshMetadata(row: RefreshedMetadata): Promise<boolean> {
+			const rows = await sql`
+				update corpus_documents
+				set kind = ${row.kind},
+					tier = ${row.tier},
+					source = ${row.source},
+					commit_sha = ${row.commit ?? null},
+					updated_at = now(),
+					manifest_seq = nextval(pg_get_serial_sequence('corpus_documents', 'manifest_seq'))
+				where repo = ${row.repo} and path = ${row.path} and state = 'active' and sha256 = ${row.sha256}
+				returning 1 as changed`;
+			return rows.length === 1;
 		},
 		async recordIngested(row: RecordedDocument): Promise<void> {
 			await sql`

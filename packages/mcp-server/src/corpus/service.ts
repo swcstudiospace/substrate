@@ -12,7 +12,7 @@ import type { CorpusSettings } from "../config.ts";
 import type { LightragBulkPlane } from "../planes/lightrag-bulk.ts";
 import type { EventInput, Surface } from "../types.ts";
 import { corpusGate, ingestCorpus, type GateReason } from "./ingest.ts";
-import { planCorpus } from "./plan.ts";
+import { planCorpus, planRepos } from "./plan.ts";
 import type { CorpusStore } from "./store.ts";
 import { parseIngestRequest, parsePlanRequest, type RequestRefusal } from "./validate.ts";
 
@@ -56,7 +56,6 @@ const MESSAGES: Readonly<Record<CorpusRefusalReason, string>> = {
 	"too-many-documents": "the ingest carries more documents than one request may",
 	"too-many-tombstones": "the ingest carries more tombstones than one request may",
 	"empty-request": "the ingest carries no document and no tombstone",
-	"empty-scope": "the plan's scope names no repository or no source, so it would judge nothing",
 	"bad-scope": "the plan's scope is not valid",
 	"bad-repo": "a repository name is not owner/name or local/<directory>",
 	"bad-path": "a path is not a normal repository-relative path",
@@ -102,7 +101,7 @@ async function emitRefusal(deps: CorpusServiceDeps, surface: Surface, reason: Co
 		);
 }
 
-/** `POST /corpus/plan`: what an ingest would add, change, rename or tombstone. Reads the manifest; writes nothing. */
+/** `POST /corpus/plan`: what an ingest would add, change, update, rename or tombstone. Reads the manifest; writes nothing. */
 export async function corpusPlanReply(deps: CorpusServiceDeps, raw: unknown, surface: Surface | null): Promise<CorpusReply<CorpusPlanResponse>> {
 	const gated = gateOf(deps, surface, false);
 	if (gated !== null) return gated;
@@ -112,10 +111,9 @@ export async function corpusPlanReply(deps: CorpusServiceDeps, raw: unknown, sur
 	const store = deps.store;
 	if (store === null) return refusal(503, "corpus.index-unavailable");
 	try {
-		// An entry's own repo may lie outside the scope (a scan that was cut short still reports what it read); its rows are
-		// needed to tell an add from a change, but the planner never tombstones outside `scope.repos`.
-		const repos = [...new Set([...scope.repos, ...entries.map((entry) => entry.repo)])];
-		const rows = await store.rowsInScope({ ...scope, repos });
+		// Rows are read for the repositories the entries name (to tell an add from a change or an update) and those the coverage
+		// lists (the only ones a row may be tombstoned in); the planner still tombstones only covered (repo, source) pairs.
+		const rows = await store.rowsForRepos(planRepos(entries, scope));
 		const plan = planCorpus(entries, scope, rows);
 		return { ok: true, status: 200, body: { protocol: CORPUS_PROTOCOL, items: plan.items, counts: plan.counts, manifestVersion: await store.manifestVersion() } };
 	} catch {

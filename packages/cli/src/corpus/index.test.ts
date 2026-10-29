@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { CORPUS_PROTOCOL, isRecord, type GhRunner, type GitRunner, type IngestStatus, type PlanItem } from "@substrate/corpus";
+import { CORPUS_PROTOCOL, isRecord, MAX_INGEST_DOCUMENTS, MAX_INGEST_TOMBSTONES, type GhRunner, type GitRunner, type IngestStatus, type PlanItem } from "@substrate/corpus";
 import { defined, fakeGit, tempDir, writeTree } from "../../../corpus/src/test-support.ts";
 import { runCorpus, USAGE } from "./index.ts";
 import { CorpusStub, fakeGhOwner, ingestOf, planOf, statusOf, type Reply, type Seen } from "./testkit.ts";
@@ -139,7 +140,10 @@ describe("substrate corpus scan", () => {
 		expect("entries" in plain).toBe(false);
 		const report = rec(plain.report, "report");
 		expect(rec(report.totals, "totals").files).toBe(3);
-		expect(rec(report.scope, "scope").repos).toEqual(["Acme/Alpha", "Acme/Beta"]);
+		expect(rec(report.scope, "scope").coverage).toEqual([
+			{ repo: "Acme/Alpha", source: "fs" },
+			{ repo: "Acme/Beta", source: "fs" },
+		]);
 		const full = rec(JSON.parse((await run(["scan", "--root", root, "--json", "--entries"], { runner })).out), "output");
 		expect(list(full.entries, "entries").map((e) => `${e.repo}:${e.path}`)).toEqual(["Acme/Alpha:README.md", "Acme/Alpha:docs/guide.md", "Acme/Beta:README.md"]);
 	});
@@ -190,7 +194,7 @@ describe("substrate corpus scan", () => {
 });
 
 describe("substrate corpus plan", () => {
-	test("sends the entries without bodies, the scope the scan read completely, and prints the counts", async () => {
+	test("sends the entries without bodies, the coverage the scan read completely, and prints the counts", async () => {
 		const { root, runner } = fixture();
 		planAllAdd();
 		const result = await run(["plan", "--root", root], { runner });
@@ -204,8 +208,14 @@ describe("substrate corpus plan", () => {
 		for (const entry of entries) {
 			expect(Object.keys(entry).sort()).toEqual(["bytes", "commit", "kind", "path", "repo", "sha256", "source", "tier"]);
 		}
-		expect(body.scope).toEqual({ repos: ["Acme/Alpha", "Acme/Beta"], maxTier: 2, sources: ["fs"] });
-		expect(result.out).toContain("plan: add 3, change 0, rename 0, tombstone 0, unchanged 0");
+		expect(body.scope).toEqual({
+			coverage: [
+				{ repo: "Acme/Alpha", source: "fs" },
+				{ repo: "Acme/Beta", source: "fs" },
+			],
+			maxTier: 2,
+		});
+		expect(result.out).toContain("plan: add 3, change 0, update 0, rename 0, tombstone 0, unchanged 0");
 		expect(result.out).toContain("add (3):");
 		expect(stub.seen).toHaveLength(1);
 	});
@@ -235,49 +245,80 @@ describe("substrate corpus plan", () => {
 		expect(stub.requests("/corpus/plan")).toHaveLength(1);
 	});
 
-	describe("the scope never covers what the scan did not read", () => {
+	describe("the coverage never includes what the scan did not read", () => {
 		test("a tier-1 scan declares tier 1, so documents ingested at tier 2 are not judged", async () => {
 			const { root, runner } = fixture();
 			const scope = await planScope(["--root", root, "--tier", "1"], { runner });
 			expect(scope.maxTier).toBe(1);
 		});
 
-		test("a repository that failed to read is left out of the scope", async () => {
+		test("a repository that failed to read is left out of the coverage", async () => {
 			const { root, runner } = fixture({ betaLsFails: true });
 			const scope = await planScope(["--root", root], { runner });
-			expect(scope.repos).toEqual(["Acme/Alpha"]);
+			expect(scope.coverage).toEqual([{ repo: "Acme/Alpha", source: "fs" }]);
 			const sent = rec(defined(stub.requests("/corpus/plan")[0], "request").body, "request");
 			expect(list(sent.entries, "entries").every((e) => e.repo === "Acme/Alpha")).toBe(true);
 		});
 
-		test("one source only declares only that source and its own repositories", async () => {
+		test("one source only declares its own pairs", async () => {
 			const exportDir = tempDir("greptile-");
 			dirs.push(exportDir);
 			writeTree(exportDir, { "Acme/Gamma/architecture.md": "# gamma\n" });
 			const { runner } = fixture();
 			const scope = await planScope(["--source", "greptile", "--greptile-dir", exportDir], { runner });
-			expect(scope).toEqual({ repos: ["Acme/Gamma"], maxTier: 2, sources: ["greptile"] });
+			expect(scope).toEqual({ coverage: [{ repo: "Acme/Gamma", source: "greptile" }], maxTier: 2 });
 		});
 
-		test("--max-repos leaves the repositories it cut out of the scope", async () => {
+		test("--max-repos leaves the repositories it cut out of the coverage", async () => {
 			const gh = fakeGhOwner({ "Acme/One": { files: { "README.md": "one\n" } }, "Acme/Two": { files: { "README.md": "two\n" } } });
 			const scope = await planScope(["--source", "github", "--github-owner", "Acme", "--max-repos", "1"], { gh });
-			expect(scope).toEqual({ repos: ["Acme/One"], maxTier: 2, sources: ["github"] });
+			expect(scope).toEqual({ coverage: [{ repo: "Acme/One", source: "github" }], maxTier: 2 });
 		});
 
-		test("a truncated GitHub tree leaves its repository out, while local clones stay in and are not read twice", async () => {
+		test("a repository read from disk is not covered for a Greptile export that the cap left unread", async () => {
+			const exportDir = tempDir("greptile-");
+			dirs.push(exportDir);
+			writeTree(exportDir, { "Acme/Alpha/architecture.md": "# alpha\n", "Acme/Beta/architecture.md": "# beta\n" });
+			const { root, runner } = fixture();
+			const scope = await planScope(["--root", root, "--source", "fs,greptile", "--greptile-dir", exportDir, "--max-repos", "1"], { runner });
+			expect(scope.coverage).toEqual([
+				{ repo: "Acme/Alpha", source: "fs" },
+				{ repo: "Acme/Alpha", source: "greptile" },
+				{ repo: "Acme/Beta", source: "fs" },
+			]);
+		});
+
+		test("a truncated GitHub tree leaves its pair out, while local clones stay in and are not read twice", async () => {
 			const { root, runner } = fixture();
 			const gh = fakeGhOwner({
 				"Acme/Alpha": { files: { "README.md": "api copy\n" } },
 				"Acme/Zed": { files: { "README.md": "zed\n" }, truncated: true },
 			});
 			const scope = await planScope(["--root", root, "--source", "fs,github", "--github-owner", "Acme"], { runner, gh });
-			expect(scope).toEqual({ repos: ["Acme/Alpha", "Acme/Beta"], maxTier: 2, sources: ["fs", "github"] });
+			expect(scope).toEqual({
+				coverage: [
+					{ repo: "Acme/Alpha", source: "fs" },
+					{ repo: "Acme/Beta", source: "fs" },
+				],
+				maxTier: 2,
+			});
 			const sent = rec(defined(stub.requests("/corpus/plan")[0], "request").body, "request");
 			const sources = list(sent.entries, "entries").map((e) => `${e.repo}:${e.source}`);
 			expect(sources).toContain("Acme/Alpha:fs");
 			expect(sources).not.toContain("Acme/Alpha:github");
 			expect(sources).toContain("Acme/Zed:github");
+		});
+
+		test("a scan that read nothing completely still plans its entries with an empty coverage, and says what was left out", async () => {
+			const gh = fakeGhOwner({ "Acme/Zed": { files: { "README.md": "zed\n" }, truncated: true } });
+			planAllAdd();
+			const result = await run(["plan", "--source", "github", "--github-owner", "Acme"], { gh });
+			expect(result.code).toBe(0);
+			const body = rec(defined(stub.requests("/corpus/plan")[0], "request").body, "request");
+			expect(body.scope).toEqual({ coverage: [], maxTier: 2 });
+			expect(list(body.entries, "entries").map((e) => `${e.repo}:${e.path}`)).toEqual(["Acme/Zed:README.md"]);
+			expect(result.out).toContain("coverage is empty");
+			expect(result.out).toContain("Acme/Zed [github]: the tree is truncated");
 		});
 	});
 
@@ -318,7 +359,7 @@ describe("substrate corpus ingest", () => {
 		expect(requests.every((r) => r.tombstones.length === 0)).toBe(true);
 		const bodies = Object.fromEntries(requests.flatMap((r) => r.documents).map((d) => [`${d.repo}:${d.path}`, d.body]));
 		expect(bodies).toEqual({ "Acme/Alpha:README.md": "# alpha\n", "Acme/Alpha:docs/guide.md": "guide\n", "Acme/Beta:README.md": "# beta\n" });
-		expect(result.out).toContain("ingest: ingested 3, unchanged 0, tombstoned 0, refused 0, failed 0");
+		expect(result.out).toContain("ingest: ingested 3, updated 0, unchanged 0, tombstoned 0, refused 0, failed 0");
 	});
 
 	test("--batch-bytes closes a batch before it passes the byte bound, and a flag beats the environment", async () => {
@@ -350,7 +391,7 @@ describe("substrate corpus ingest", () => {
 		expect(refused.out).toContain("[secret-findings]");
 	});
 
-	test("tombstones go last, and a rename's old row is removed only when the new document was recorded", async () => {
+	test("the tombstones go first as a request of their own, and a rename's old row is removed before the new document is sent", async () => {
 		const { root, runner } = fixture();
 		const items: PlanItem[] = [
 			{ action: "rename", repo: "Acme/Alpha", path: "docs/guide.md", sha256: "a".repeat(64), renamedFrom: "docs/old-guide.md" },
@@ -362,21 +403,95 @@ describe("substrate corpus ingest", () => {
 		expect(good.code).toBe(0);
 		const sent = stub.requests("/corpus/ingest").map((s) => ingestParts(s));
 		expect(sent).toHaveLength(2);
-		expect(defined(sent[0], "batch").documents.map((d) => d.path)).toEqual(["docs/guide.md"]);
-		const last = defined(sent[1], "tombstone request");
-		expect(last.documents).toEqual([]);
-		expect(last.tombstones).toEqual([
+		const first = defined(sent[0], "tombstone request");
+		expect(first.documents).toEqual([]);
+		expect(first.tombstones).toEqual([
 			{ repo: "Acme/Alpha", path: "docs/old-guide.md" },
 			{ repo: "Acme/Alpha", path: "old/gone.md" },
 		]);
+		const second = defined(sent[1], "document request");
+		expect(second.documents.map((d) => d.path)).toEqual(["docs/guide.md"]);
+		expect(second.tombstones).toEqual([]);
 		expect(good.out).toContain("tombstoned 2");
+	});
 
-		stub.seen = [];
-		stub.on("POST /corpus/ingest", answerIngest((_repo, path) => path === "docs/guide.md"));
-		const bad = await run(["ingest", "--root", root, "--execute"], { runner });
-		expect(bad.code).toBe(1);
-		const afterFailure = stub.requests("/corpus/ingest").map((s) => ingestParts(s));
-		expect(defined(afterFailure[1], "tombstone request").tombstones).toEqual([{ repo: "Acme/Alpha", path: "old/gone.md" }]);
+	test("a rename whose old row could not be removed is not inserted, because the plane would link it to the old document", async () => {
+		const { root, runner } = fixture();
+		const items: PlanItem[] = [{ action: "rename", repo: "Acme/Alpha", path: "docs/guide.md", renamedFrom: "docs/old-guide.md" }];
+		stub.on("POST /corpus/plan", () => ({ status: 200, body: planOf(items) }));
+		stub.on("POST /corpus/ingest", answerIngest((_repo, path) => path === "docs/old-guide.md"));
+		const result = await run(["ingest", "--root", root, "--execute"], { runner });
+		expect(result.code).toBe(1);
+		const sent = stub.requests("/corpus/ingest").map((s) => ingestParts(s));
+		expect(sent).toHaveLength(1);
+		expect(defined(sent[0], "tombstone request").documents).toEqual([]);
+		expect(result.out).toContain("Acme/Alpha:docs/guide.md  [rename-source-not-removed]");
+	});
+
+	test("a rename whose new document is not in the scan keeps its old row", async () => {
+		const { root, runner } = fixture();
+		const items: PlanItem[] = [{ action: "rename", repo: "Acme/Alpha", path: "docs/missing.md", renamedFrom: "docs/old-guide.md" }];
+		stub.on("POST /corpus/plan", () => ({ status: 200, body: planOf(items) }));
+		stub.on("POST /corpus/ingest", answerIngest());
+		const result = await run(["ingest", "--root", root, "--execute"], { runner });
+		expect(result.code).toBe(1);
+		expect(stub.requests("/corpus/ingest")).toEqual([]);
+		expect(result.out).toContain("Acme/Alpha:docs/missing.md  [not-in-scan]");
+	});
+
+	test("tombstones are split into requests no larger than the server accepts", async () => {
+		const { root, runner } = fixture();
+		const items: PlanItem[] = Array.from({ length: MAX_INGEST_TOMBSTONES + 1 }, (_, i) => ({ action: "tombstone", repo: "Acme/Alpha", path: `old/t${i}.md` }));
+		stub.on("POST /corpus/plan", () => ({ status: 200, body: planOf(items) }));
+		stub.on("POST /corpus/ingest", answerIngest());
+		const result = await run(["ingest", "--root", root, "--execute"], { runner });
+		expect(result.code).toBe(0);
+		const sent = stub.requests("/corpus/ingest").map((s) => ingestParts(s));
+		expect(sent.map((request) => request.tombstones.length)).toEqual([MAX_INGEST_TOMBSTONES, 1]);
+		expect(sent.every((request) => request.documents.length === 0)).toBe(true);
+	});
+
+	test("--batch-docs above the server limit is lowered to it, so no request is refused for its size", async () => {
+		const root = tempDir("corpus-cli-");
+		dirs.push(root);
+		const tracked = Array.from({ length: MAX_INGEST_DOCUMENTS + 5 }, (_, i) => `docs/d${String(i).padStart(3, "0")}.md`);
+		writeTree(root, { "big/.git/HEAD": "", ...Object.fromEntries(tracked.map((rel) => [`big/${rel}`, `${rel}\n`])) });
+		const runner = fakeGit({ [join(root, "big")]: { origin: "git@github.com:Acme/Big.git", branch: "main", remoteDefault: "main", head: HEAD, files: tracked } });
+		planAllAdd();
+		stub.on("POST /corpus/ingest", answerIngest());
+		const result = await run(["ingest", "--root", root, "--execute", "--batch-docs", "100000"], { runner });
+		expect(result.code).toBe(0);
+		expect(stub.requests("/corpus/ingest").map((s) => ingestParts(s).documents.length)).toEqual([MAX_INGEST_DOCUMENTS, 5]);
+		expect(result.err).toContain("above the server limit");
+	});
+
+	test("an update is sent with its body like an add, and the answer is counted as updated", async () => {
+		const { root, runner } = fixture();
+		stub.on("POST /corpus/plan", () => ({ status: 200, body: planOf([{ action: "update", repo: "Acme/Alpha", path: "README.md" }]) }));
+		stub.on("POST /corpus/ingest", (seen) => ({
+			status: 200,
+			body: ingestOf(ingestParts(seen).documents.map((d) => ({ repo: String(d.repo), path: String(d.path), status: "updated" as const }))),
+		}));
+		const result = await run(["ingest", "--root", root, "--execute"], { runner });
+		expect(result.code).toBe(0);
+		const documents = stub.requests("/corpus/ingest").flatMap((s) => ingestParts(s).documents);
+		expect(documents).toHaveLength(1);
+		expect(documents[0]).toMatchObject({ repo: "Acme/Alpha", path: "README.md", body: "# alpha\n" });
+		expect(result.out).toContain("update 1");
+		expect(result.out).toContain("updated 1");
+	});
+
+	test("a document that starts with a byte-order mark is sent with a body that hashes to the planned sha256", async () => {
+		const root = tempDir("corpus-cli-");
+		dirs.push(root);
+		writeTree(root, { "alpha/.git/HEAD": "", "alpha/README.md": Uint8Array.of(0xef, 0xbb, 0xbf, 0x23, 0x20, 0x61, 0x0a) });
+		const runner = fakeGit({ [join(root, "alpha")]: { origin: "git@github.com:Acme/Alpha.git", branch: "main", remoteDefault: "main", head: HEAD, files: ["README.md"] } });
+		planAllAdd();
+		stub.on("POST /corpus/ingest", answerIngest());
+		const result = await run(["ingest", "--root", root, "--execute"], { runner });
+		expect(result.code).toBe(0);
+		const document = defined(stub.requests("/corpus/ingest").flatMap((s) => ingestParts(s).documents)[0], "document");
+		expect(createHash("sha256").update(new TextEncoder().encode(String(document.body))).digest("hex")).toBe(String(document.sha256));
 	});
 
 	test("a file that changed after the scan is not sent, because its hash is no longer the planned one", async () => {
@@ -425,7 +540,7 @@ describe("substrate corpus ingest", () => {
 		const result = await run(["ingest", "--root", root, "--execute"], { runner });
 		expect(result.code).toBe(0);
 		expect(stub.requests("/corpus/ingest")).toEqual([]);
-		expect(result.out).toContain("ingest: ingested 0, unchanged 0, tombstoned 0, refused 0, failed 0");
+		expect(result.out).toContain("ingest: ingested 0, updated 0, unchanged 0, tombstoned 0, refused 0, failed 0");
 	});
 });
 

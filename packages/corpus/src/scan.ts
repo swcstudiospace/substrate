@@ -6,8 +6,8 @@
  * large, no NUL byte, valid UTF-8) and hashed. The result is deterministic: the same tree always gives the same output,
  * entries sorted by `(repo, path)`.
  *
- * Each repository reports whether it was read completely. The CLI sends only the complete ones in the plan's scope, so
- * a failed read never lets the server tombstone what the scan did not see.
+ * Each repository reports whether it was read completely. The CLI lists only the complete (repository, source) pairs as
+ * the plan's coverage, so a failed read never lets the server tombstone what the scan did not see.
  */
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
@@ -15,10 +15,10 @@ import { join } from "node:path";
 import { classify, isExcludedSegment } from "./classify.ts";
 import { type Checkout, type Collection, type DirEntry, defaultGitRunner, discoverRepos, type GitRunner, hasGitEntry, readEntries } from "./discover.ts";
 import {
+	type CorpusCoverage,
 	type CorpusEntry,
 	type CorpusScope,
 	type CorpusSource,
-	CORPUS_SOURCES,
 	type DocTier,
 	documentKey,
 } from "./protocol.ts";
@@ -88,6 +88,8 @@ export interface ScanReport {
 	/** Up to `MAX_LISTED_SKIPS` skipped files. */
 	skipped: SkippedFile[];
 	skippedByReason: Partial<Record<SkipReason, number>>;
+	/** Repositories read completely that hold no eligible document (an emptied collection or checkout); they are still covered. */
+	emptyCollections: number;
 	notes: string[];
 }
 
@@ -133,7 +135,9 @@ export type Inspected =
 	| { ok: true; sha256: string; bytes: number; text: string }
 	| { ok: false; reason: "empty" | "too-large" | "binary" | "invalid-utf8" };
 
-const decoder = new TextDecoder("utf-8", { fatal: true });
+// `ignoreBOM` keeps a leading byte-order mark in the text: the sha256 covers the original bytes, so the body sent to the
+// server must hash to the same value.
+const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /** The size, NUL and UTF-8 rules every adapter applies, and the sha256 of the raw bytes. */
 export function inspectBytes(data: Uint8Array, maxBytes: number): Inspected {
@@ -209,19 +213,24 @@ export function compareEntries(a: { repo: string; path: string }, b: { repo: str
 }
 
 /**
- * The repositories a scan may let the server judge: those every report of which is complete. A repository that appears
- * in two sources is listed only when both read it completely.
+ * The (repository, source) pairs a scan may let the server judge: those every report of which is complete. A pair read by
+ * a source that was requested but never reported (a cap, a skipped export) contributes nothing, and a repository that one
+ * source read completely is not thereby covered for another.
  */
-export function buildScope(input: { reports: readonly RepoReport[]; maxTier: DocTier; sources: readonly CorpusSource[] }): CorpusScope {
-	const status = new Map<string, boolean>();
-	for (const report of input.reports) status.set(report.repo, (status.get(report.repo) ?? true) && report.complete);
+export function buildScope(input: { reports: readonly RepoReport[]; maxTier: DocTier }): CorpusScope {
+	const pairs = new Map<string, { coverage: CorpusCoverage; complete: boolean }>();
+	for (const report of input.reports) {
+		const key = `${report.source}\0${report.repo}`;
+		const known = pairs.get(key);
+		if (known === undefined) pairs.set(key, { coverage: { repo: report.repo, source: report.source }, complete: report.complete });
+		else known.complete = known.complete && report.complete;
+	}
 	return {
-		repos: [...status.entries()]
-			.filter(([, complete]) => complete)
-			.map(([repo]) => repo)
-			.sort(compareText),
+		coverage: [...pairs.values()]
+			.filter((pair) => pair.complete)
+			.map((pair) => pair.coverage)
+			.sort((a, b) => compareText(a.repo, b.repo) || compareText(a.source, b.source)),
 		maxTier: input.maxTier,
-		sources: CORPUS_SOURCES.filter((source) => input.sources.includes(source)),
 	};
 }
 
@@ -414,6 +423,7 @@ export async function scanRoots(opts: ScanOptions): Promise<ScanResult> {
 			},
 			skipped: reader.skips.listed,
 			skippedByReason: reader.skips.byReason,
+			emptyCollections: repos.filter((repo) => repo.complete && repo.files === 0).length,
 			notes: found.notes,
 		},
 	};

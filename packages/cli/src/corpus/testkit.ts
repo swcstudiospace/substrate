@@ -70,13 +70,13 @@ export class CorpusStub {
 }
 
 export function planOf(items: PlanItem[], unchanged = 0): CorpusPlanResponse {
-	const counts: Record<PlanAction, number> = { add: 0, change: 0, rename: 0, tombstone: 0, unchanged };
+	const counts: Record<PlanAction, number> = { add: 0, change: 0, update: 0, rename: 0, tombstone: 0, unchanged };
 	for (const item of items) counts[item.action] += 1;
 	return { protocol: CORPUS_PROTOCOL, items, counts, manifestVersion: 7 };
 }
 
 export function ingestOf(results: CorpusIngestResponse["results"]): CorpusIngestResponse {
-	const typed: Record<IngestStatus, number> = { ingested: 0, unchanged: 0, tombstoned: 0, refused: 0, failed: 0 };
+	const typed: Record<IngestStatus, number> = { ingested: 0, updated: 0, unchanged: 0, tombstoned: 0, refused: 0, failed: 0 };
 	for (const result of results) typed[result.status] += 1;
 	return { protocol: CORPUS_PROTOCOL, results, counts: typed, manifestVersion: 8 };
 }

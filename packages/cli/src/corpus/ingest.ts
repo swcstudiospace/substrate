@@ -1,12 +1,18 @@
 /**
- * The execute half of `substrate corpus ingest`: read the bodies of the documents a plan says must change, send them in
- * bounded batches, then send the tombstones. Bodies are read one document at a time, so memory is bounded by one batch.
+ * The execute half of `substrate corpus ingest`: send the tombstones first, as requests of their own, then read the
+ * bodies of the documents a plan says must change and send them in bounded batches. Bodies are read one document at a
+ * time, so memory is bounded by one batch.
  *
- * Re-running is safe: the server skips rows it already recorded, so a run killed half way resumes without re-sending.
- * A rename's old row is removed only when the new document was recorded; otherwise the old text would be lost.
+ * Tombstones go first so that a rename deletes the old plane document before the same text is inserted under the new
+ * name: the plane answers an insert of identical text with the old document, which the removal would otherwise leave
+ * linked. Re-running is safe: the server skips rows it already recorded, so a run killed half way resumes without
+ * re-sending. A rename's old row is removed only when the new document's body can be read, and the new document is sent
+ * only when the old row was removed.
  */
 import {
 	CORPUS_PROTOCOL,
+	MAX_INGEST_DOCUMENTS,
+	MAX_INGEST_TOMBSTONES,
 	documentKey,
 	inspectBytes,
 	type CorpusDocument,
@@ -21,9 +27,6 @@ import type { ClientError, CorpusClient } from "./client.ts";
 import type { Inventory } from "./inventory.ts";
 import type { IngestProblem, IngestSummary } from "./render.ts";
 
-/** Tombstones sent per request. */
-export const TOMBSTONE_BATCH = 200;
-
 export interface IngestInput {
 	plan: CorpusPlanResponse;
 	inventory: Inventory;
@@ -32,6 +35,7 @@ export interface IngestInput {
 	bodies: BodyStore | null;
 	readFile: (path: string) => Uint8Array;
 	maxBytes: number;
+	/** Documents per request; never more than the server accepts (`MAX_INGEST_DOCUMENTS`), whatever is asked. */
 	batchDocs: number;
 	batchBytes: number;
 }
@@ -74,10 +78,11 @@ function renamedFromPath(item: PlanItem): string | null {
 }
 
 export async function executeIngest(input: IngestInput): Promise<IngestOutcome> {
-	const counts: Record<IngestStatus, number> = { ingested: 0, unchanged: 0, tombstoned: 0, refused: 0, failed: 0 };
+	const counts: Record<IngestStatus, number> = { ingested: 0, updated: 0, unchanged: 0, tombstoned: 0, refused: 0, failed: 0 };
 	const problems: IngestProblem[] = [];
 	const statusOf = new Map<string, IngestStatus>();
 	const state: { manifestVersion: number | null; fatal: ClientError | null } = { manifestVersion: null, fatal: null };
+	const batchDocs = Math.max(1, Math.min(Math.floor(input.batchDocs), MAX_INGEST_DOCUMENTS));
 
 	const record = (repo: string, path: string, status: IngestStatus, reason?: string): void => {
 		counts[status] += 1;
@@ -99,6 +104,32 @@ export async function executeIngest(input: IngestInput): Promise<IngestOutcome> 
 	};
 
 	const entryByKey = new Map(input.inventory.entries.map((entry) => [documentKey(entry.repo, entry.path), entry]));
+
+	// Phase 1: every tombstone, in requests of their own, before any document is inserted.
+	const tombstones = new Map<string, { repo: string; path: string }>();
+	const removedBefore = new Map<string, string>();
+	for (const item of input.plan.items) {
+		if (item.action === "tombstone") {
+			tombstones.set(documentKey(item.repo, item.path), { repo: item.repo, path: item.path });
+		} else if (item.action === "rename") {
+			const from = renamedFromPath(item);
+			const entry = entryByKey.get(documentKey(item.repo, item.path));
+			// The old text is removed only when the new text can still be sent.
+			if (from !== null && entry !== undefined && loadBody(entry, input).ok) {
+				tombstones.set(documentKey(item.repo, from), { repo: item.repo, path: from });
+				removedBefore.set(documentKey(item.repo, item.path), documentKey(item.repo, from));
+			}
+		}
+	}
+	const pending = [...tombstones.values()];
+	for (let start = 0; start < pending.length && state.fatal === null; start += MAX_INGEST_TOMBSTONES) {
+		const chunk = pending.slice(start, start + MAX_INGEST_TOMBSTONES);
+		const response = await input.client.ingest({ protocol: CORPUS_PROTOCOL, documents: [], tombstones: chunk });
+		if (response.ok) absorb(response.value, chunk);
+		else failAll(chunk, response.error);
+	}
+
+	// Phase 2: the documents, in batches bounded by count and bytes.
 	let batch: CorpusDocument[] = [];
 	let batchBytes = 0;
 	const flush = async (): Promise<void> => {
@@ -112,41 +143,33 @@ export async function executeIngest(input: IngestInput): Promise<IngestOutcome> 
 	};
 
 	for (const item of input.plan.items) {
-		if (item.action !== "add" && item.action !== "change" && item.action !== "rename") continue;
+		if (item.action !== "add" && item.action !== "change" && item.action !== "update" && item.action !== "rename") continue;
 		if (state.fatal !== null) break;
 		const entry = entryByKey.get(documentKey(item.repo, item.path));
 		if (entry === undefined) {
 			record(item.repo, item.path, "failed", "not-in-scan");
 			continue;
 		}
+		const source = removedBefore.get(documentKey(item.repo, item.path));
+		if (source !== undefined) {
+			const removed = statusOf.get(source);
+			// Inserting the new name while the old row is still there would link it to the old plane document.
+			if (removed !== "tombstoned" && removed !== "unchanged") {
+				record(item.repo, item.path, "failed", "rename-source-not-removed");
+				continue;
+			}
+		}
 		const loaded = loadBody(entry, input);
 		if (!loaded.ok) {
 			record(item.repo, item.path, "failed", loaded.reason);
 			continue;
 		}
-		if (batch.length > 0 && (batch.length >= input.batchDocs || batchBytes + entry.bytes > input.batchBytes)) await flush();
+		if (batch.length > 0 && (batch.length >= batchDocs || batchBytes + entry.bytes > input.batchBytes)) await flush();
 		if (state.fatal !== null) break;
 		batch.push({ ...entry, body: loaded.body });
 		batchBytes += entry.bytes;
 	}
 	if (state.fatal === null) await flush();
-
-	const tombstones: Array<{ repo: string; path: string }> = [];
-	for (const item of input.plan.items) {
-		if (item.action === "tombstone") {
-			tombstones.push({ repo: item.repo, path: item.path });
-		} else if (item.action === "rename") {
-			const from = renamedFromPath(item);
-			const recorded = statusOf.get(documentKey(item.repo, item.path));
-			if (from !== null && (recorded === "ingested" || recorded === "unchanged")) tombstones.push({ repo: item.repo, path: from });
-		}
-	}
-	for (let start = 0; start < tombstones.length && state.fatal === null; start += TOMBSTONE_BATCH) {
-		const chunk = tombstones.slice(start, start + TOMBSTONE_BATCH);
-		const response = await input.client.ingest({ protocol: CORPUS_PROTOCOL, documents: [], tombstones: chunk });
-		if (response.ok) absorb(response.value, chunk);
-		else failAll(chunk, response.error);
-	}
 
 	return { summary: { counts, problems, manifestVersion: state.manifestVersion }, fatal: state.fatal };
 }

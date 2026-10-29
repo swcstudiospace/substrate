@@ -5,10 +5,10 @@
  * order of a plane write, a manifest write and a plane delete.
  */
 import { createHash } from "node:crypto";
-import type { CorpusDocument, CorpusEntry, CorpusScope } from "@substrate/corpus";
+import type { CorpusDocument, CorpusEntry } from "@substrate/corpus";
 import type { BulkDocumentOutcome, BulkTextDocument, LightragBulkPlane } from "../planes/lightrag-bulk.ts";
 import { planeDocumentIdForName } from "./names.ts";
-import type { CorpusStatusSummary, CorpusStore, ManifestRow, RecordedDocument } from "./store.ts";
+import type { CorpusStatusSummary, CorpusStore, ManifestRow, RecordedDocument, RefreshedMetadata } from "./store.ts";
 
 export function sha256Hex(text: string): string {
 	return createHash("sha256").update(text, "utf8").digest("hex");
@@ -60,8 +60,8 @@ export class FakeStore implements CorpusStore {
 		return this.rows.get(this.key(repo, path));
 	}
 
-	async rowsInScope(scope: CorpusScope): Promise<ManifestRow[]> {
-		return [...this.rows.values()].filter((row) => scope.repos.includes(row.repo));
+	async rowsForRepos(repos: readonly string[]): Promise<ManifestRow[]> {
+		return [...this.rows.values()].filter((row) => repos.includes(row.repo));
 	}
 
 	async rowFor(repo: string, path: string): Promise<ManifestRow | null> {
@@ -74,6 +74,15 @@ export class FakeStore implements CorpusStore {
 		this.log.push(`record:${row.path}`);
 		this.seq += 1;
 		this.rows.set(key, { ...row, commit: row.commit ?? null, state: "active", manifestSeq: this.seq });
+	}
+
+	async refreshMetadata(row: RefreshedMetadata): Promise<boolean> {
+		const held = this.row(row.repo, row.path);
+		if (held === undefined || held.state !== "active" || held.sha256 !== row.sha256) return false;
+		this.log.push(`refresh:${row.path}`);
+		this.seq += 1;
+		this.rows.set(this.key(row.repo, row.path), { ...held, kind: row.kind, tier: row.tier, source: row.source, commit: row.commit ?? null, manifestSeq: this.seq });
+		return true;
 	}
 
 	async markTombstoned(repo: string, path: string): Promise<boolean> {
@@ -116,22 +125,38 @@ export class FakePlane implements LightragBulkPlane {
 	readonly deletes: string[][] = [];
 	/** Names answered `failed` with this reason. */
 	readonly failNames = new Map<string, string>();
+	/** Ids whose deletion is refused: the document stays and the id is reported failed. */
 	readonly failDeleteIds = new Set<string>();
+	/** Ids whose deletion ran but whose completion wait failed (a timeout, a fenced plane): reported failed, the document is gone. */
+	readonly unconfirmedDeleteIds = new Set<string>();
 	unavailable = false;
 	maxInFlight = 0;
 	private inFlight = 0;
+	private readonly holds = new Map<string, Promise<void>>();
+	/** Every plane call as it starts and ends, in order (the shared log only holds the effects). */
+	readonly calls: string[] = [];
 
 	constructor(private readonly log: string[] = []) {}
+
+	/**
+	 * Delays the answer for a document name until the returned function is called. The plane decides the outcome when the
+	 * batch arrives (identical text answers the existing document's id) and only the answer is late, as on a busy pipeline.
+	 */
+	hold(name: string): () => void {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		this.holds.set(name, promise);
+		return resolve;
+	}
 
 	async insertBatch(docs: readonly BulkTextDocument[]): Promise<BulkDocumentOutcome[]> {
 		this.inFlight += 1;
 		this.maxInFlight = Math.max(this.maxInFlight, this.inFlight);
 		this.batches.push(docs.map((doc) => doc.name));
+		for (const doc of docs) this.calls.push(`insert-start:${doc.name}`);
 		// Two microtask turns: every worker the caller started is in flight before the first batch settles.
 		await Promise.resolve();
 		await Promise.resolve();
-		this.inFlight -= 1;
-		return docs.map((doc): BulkDocumentOutcome => {
+		const outcomes = docs.map((doc): BulkDocumentOutcome => {
 			if (this.unavailable) return { name: doc.name, status: "failed", reason: "plane-unavailable" };
 			const forced = this.failNames.get(doc.name);
 			if (forced !== undefined) return { name: doc.name, status: "failed", reason: forced };
@@ -147,10 +172,15 @@ export class FakePlane implements LightragBulkPlane {
 			this.log.push(`plane:${doc.name}`);
 			return { name: doc.name, status: "ingested", documentId: id };
 		});
+		await Promise.all(docs.map((doc) => this.holds.get(doc.name)));
+		this.inFlight -= 1;
+		for (const doc of docs) this.calls.push(`insert-end:${doc.name}`);
+		return outcomes;
 	}
 
 	async deleteDocuments(ids: readonly string[]): Promise<{ deleted: string[]; failed: Array<{ id: string; reason: string }> }> {
 		this.deletes.push([...ids]);
+		this.calls.push(`delete-start:${ids.join(",")}`);
 		const deleted: string[] = [];
 		const failed: Array<{ id: string; reason: string }> = [];
 		for (const id of ids) {
@@ -160,8 +190,14 @@ export class FakePlane implements LightragBulkPlane {
 			}
 			for (const [name, held] of [...this.documents]) if (held.id === id) this.documents.delete(name);
 			this.log.push(`delete:${id}`);
-			deleted.push(id);
+			if (this.unconfirmedDeleteIds.has(id)) failed.push({ id, reason: "timeout" });
+			else deleted.push(id);
 		}
 		return { deleted, failed };
+	}
+
+	/** The plane document ids that exist now. */
+	liveIds(): Set<string> {
+		return new Set([...this.documents.values()].map((held) => held.id));
 	}
 }

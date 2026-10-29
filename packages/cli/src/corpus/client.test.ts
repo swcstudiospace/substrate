@@ -7,7 +7,7 @@ const stub = new CorpusStub();
 afterAll(() => stub.stop());
 
 const client = (token: string | null = "tok-1", timeoutMs = 2000) => createCorpusClient({ url: stub.url, token: token ?? undefined, timeoutMs });
-const request: CorpusPlanRequest = { protocol: CORPUS_PROTOCOL, entries: [], scope: { repos: [], maxTier: 2, sources: ["fs"] } };
+const request: CorpusPlanRequest = { protocol: CORPUS_PROTOCOL, entries: [], scope: { coverage: [], maxTier: 2 } };
 
 describe("the corpus client", () => {
 	test("posts the plan with the bearer and returns the guarded answer", async () => {

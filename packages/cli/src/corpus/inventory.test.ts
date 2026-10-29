@@ -20,7 +20,7 @@ function tree(files: Record<string, string>): string {
 const BASE = { maxTier: 2 as const, maxBytes: 1_000_000, maxRepos: 50 };
 
 describe("collectInventory", () => {
-	test("merges the sources into one sorted list and one scope of the repositories read completely", async () => {
+	test("merges the sources into one sorted list and the (repository, source) pairs read completely", async () => {
 		const root = tree({ "alpha/.git/HEAD": "", "alpha/README.md": "# alpha\n" });
 		const exportDir = tree({ "Acme/Gamma/architecture.md": "# gamma\n" });
 		const runner = fakeGit({ [join(root, "alpha")]: { origin: "git@github.com:Acme/Alpha.git", files: ["README.md"], branch: "main" } });
@@ -39,7 +39,14 @@ describe("collectInventory", () => {
 			"Acme/Gamma:architecture.md:greptile",
 			"Acme/Zed:README.md:github",
 		]);
-		expect(inventory.scope).toEqual({ repos: ["Acme/Alpha", "Acme/Gamma", "Acme/Zed"], maxTier: 2, sources: ["fs", "github", "greptile"] });
+		expect(inventory.scope).toEqual({
+			coverage: [
+				{ repo: "Acme/Alpha", source: "fs" },
+				{ repo: "Acme/Gamma", source: "greptile" },
+				{ repo: "Acme/Zed", source: "github" },
+			],
+			maxTier: 2,
+		});
 		expect(inventory.paths.has("Acme/Alpha:README.md")).toBe(true);
 		expect(inventory.paths.has("Acme/Zed:README.md")).toBe(false);
 	});
@@ -71,11 +78,11 @@ describe("collectInventory", () => {
 		expect(inventory.report.notes.some((note) => note.includes("Acme/Alpha:architecture.md") && note.includes("more than one source"))).toBe(true);
 	});
 
-	test("a repository that is complete in one source and not in another stays out of the scope", async () => {
+	test("a repository that is complete in one source and not in another is covered for the first source only", async () => {
 		const exportDir = tree({ "Acme/Same/x.md": "x\n" });
 		const gh = fakeGhOwner({ "Acme/Same": { files: { "README.md": "r\n" }, truncated: true } });
 		const inventory = await collectInventory({ ...BASE, roots: [], sources: ["github", "greptile"], githubOwner: "Acme", greptileDir: exportDir, gh });
-		expect(inventory.scope.repos).toEqual([]);
+		expect(inventory.scope.coverage).toEqual([{ repo: "Acme/Same", source: "greptile" }]);
 		expect(inventory.entries).toHaveLength(2);
 	});
 
@@ -86,5 +93,16 @@ describe("collectInventory", () => {
 		expect(inventory.report.skippedByReason).toEqual({ empty: 2 });
 		expect(inventory.report.collapsed.identical).toBe(1);
 		expect(inventory.report.collapsed.identicalCopies).toEqual([{ keep: "local/c1:docs/a.md", copies: ["local/c2:docs/a.md"] }]);
+	});
+
+	test("an emptied collection is covered with zero entries and counted", async () => {
+		const root = tree({ "c1/notes.txt": "no documents left\n", "c2/docs/a.md": "a\n" });
+		const inventory = await collectInventory({ ...BASE, roots: [root], sources: ["fs"], runner: fakeGit({}) });
+		expect(inventory.entries.map((e) => e.repo)).toEqual(["local/c2"]);
+		expect(inventory.scope.coverage).toEqual([
+			{ repo: "local/c1", source: "fs" },
+			{ repo: "local/c2", source: "fs" },
+		]);
+		expect(inventory.report.emptyCollections).toBe(1);
 	});
 });

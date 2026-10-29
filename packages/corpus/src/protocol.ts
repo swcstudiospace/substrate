@@ -74,20 +74,35 @@ export interface CorpusDocument extends CorpusEntry {
 	body: string;
 }
 
-/** `plan` and `status` use these actions; `unchanged` rows are counted and never listed. */
-export const PLAN_ACTIONS = ["add", "change", "rename", "tombstone", "unchanged"] as const;
+/**
+ * `plan` and `status` use these actions; `unchanged` rows are counted and never listed. `update` is the same sha256
+ * under a different source, kind or tier: a manifest-only refresh that never touches the docs plane.
+ */
+export const PLAN_ACTIONS = ["add", "change", "update", "rename", "tombstone", "unchanged"] as const;
 export type PlanAction = (typeof PLAN_ACTIONS)[number];
 
+/** Bounds both sides enforce: the CLI keeps its requests inside them and the server refuses a request outside them. */
+export const MAX_PLAN_ENTRIES = 20_000;
+export const MAX_COVERAGE_PAIRS = 4_000;
+export const MAX_INGEST_DOCUMENTS = 200;
+export const MAX_INGEST_TOMBSTONES = 500;
+
+/** One (repository, source) pair a scan read completely. */
+export interface CorpusCoverage {
+	repo: string;
+	source: CorpusSource;
+}
+
 /**
- * Which part of the manifest a plan may judge. A document the scan did not report is tombstoned only when its repo is in
- * `repos`, its tier is at most `maxTier` and its source is in `sources`. The caller lists a repo here only when the scan
- * read it completely: a repository that failed to read, a truncated tree or a cap such as `--max-repos` leaves it out, so a
- * narrower or failed scan never tombstones the documents it did not cover.
+ * Which part of the manifest a plan may judge. A manifest row the scan did not report is tombstoned only when its
+ * `(repo, source)` pair is in `coverage` and its tier is at most `maxTier`. The caller lists a pair only when that source
+ * read that repository completely: a failed read, a truncated tree or a cap such as `--max-repos` leaves the pair out, so
+ * a narrower or failed scan never tombstones the documents it did not cover. An empty list tombstones nothing; the entries
+ * are still planned and ingested.
  */
 export interface CorpusScope {
-	repos: string[];
+	coverage: CorpusCoverage[];
 	maxTier: DocTier;
-	sources: CorpusSource[];
 }
 
 export interface CorpusPlanRequest {
@@ -120,7 +135,7 @@ export interface CorpusIngestRequest {
 	tombstones: Array<{ repo: string; path: string }>;
 }
 
-export const INGEST_STATUSES = ["ingested", "unchanged", "tombstoned", "refused", "failed"] as const;
+export const INGEST_STATUSES = ["ingested", "updated", "unchanged", "tombstoned", "refused", "failed"] as const;
 export type IngestStatus = (typeof INGEST_STATUSES)[number];
 
 export interface CorpusIngestResultItem {

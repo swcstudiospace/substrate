@@ -2,30 +2,26 @@
  * Guards for what the corpus routes accept: every field of a request body is narrowed here, and the first thing wrong refuses
  * the whole request with a closed reason instead of being guessed at. Pure: no I/O, no clock.
  *
- * Request bounds live here too, so the route, the tool and the tests name one number.
+ * The per-request bounds both sides share come from `@substrate/corpus`; the limits only the server needs live here.
  */
 import {
 	CORPUS_PROTOCOL,
 	CORPUS_SOURCES,
+	MAX_COVERAGE_PAIRS,
+	MAX_INGEST_DOCUMENTS,
+	MAX_INGEST_TOMBSTONES,
+	MAX_PLAN_ENTRIES,
 	isCorpusSource,
 	isDocKind,
 	isDocTier,
+	type CorpusCoverage,
 	type CorpusDocument,
 	type CorpusEntry,
 	type CorpusIngestRequest,
 	type CorpusPlanRequest,
 	type CorpusScope,
-	type CorpusSource,
 } from "@substrate/corpus";
 
-/** One plan request holds at most this many entries (a host with a few hundred repositories reports a few thousand). */
-export const MAX_PLAN_ENTRIES = 20_000;
-/** The repositories one scope names. */
-export const MAX_SCOPE_REPOS = 2_000;
-/** Documents with a body in one ingest request. */
-export const MAX_INGEST_DOCUMENTS = 200;
-/** Tombstones in one ingest request. */
-export const MAX_INGEST_TOMBSTONES = 500;
 /** One document body, as `docs_ingest` caps a page. */
 export const MAX_DOCUMENT_BYTES = 1_000_000;
 export const MAX_PATH_LENGTH = 1024;
@@ -42,7 +38,6 @@ export const REQUEST_REFUSALS = [
 	"too-many-documents",
 	"too-many-tombstones",
 	"empty-request",
-	"empty-scope",
 	"bad-scope",
 	"bad-repo",
 	"bad-path",
@@ -115,31 +110,32 @@ export function parseEntry(raw: unknown): Parsed<CorpusEntry> {
 	return { ok: true, value: { repo, path, kind, tier, sha256, bytes, source, ...(typeof commit === "string" ? { commit } : {}) } };
 }
 
-/** The plan's scope: at least one repo and one source, every repo well formed. An empty scope judges nothing, so it is refused, not read as "everything". */
+/**
+ * The plan's scope: `maxTier` and a `coverage` array of at most {@link MAX_COVERAGE_PAIRS} `{repo, source}` pairs, each repo
+ * well formed and each source known, de-duplicated. An empty coverage is valid: a scan with no complete read still has entries
+ * worth planning, and it simply tombstones nothing.
+ */
 export function parseScope(raw: unknown): Parsed<CorpusScope> {
 	if (!isRecord(raw)) return refuse("bad-scope", "scope must be an object");
-	const { repos, maxTier, sources } = raw;
-	if (!Array.isArray(repos) || !Array.isArray(sources) || !isDocTier(maxTier)) return refuse("bad-scope", "scope needs repos, maxTier and sources");
-	if (repos.length === 0 || sources.length === 0) return refuse("empty-scope");
-	if (repos.length > MAX_SCOPE_REPOS) return refuse("bad-scope", `at most ${MAX_SCOPE_REPOS} repos`);
-	const repoList: string[] = [];
-	for (const repo of repos) {
+	const { coverage, maxTier } = raw;
+	if (!Array.isArray(coverage) || !isDocTier(maxTier)) return refuse("bad-scope", "scope needs coverage and maxTier");
+	if (coverage.length > MAX_COVERAGE_PAIRS) return refuse("bad-scope", `at most ${MAX_COVERAGE_PAIRS} coverage pairs`);
+	const pairs = new Map<string, CorpusCoverage>();
+	for (const item of coverage) {
+		if (!isRecord(item)) return refuse("bad-scope", "a coverage pair must be an object");
+		const { repo, source } = item;
 		if (typeof repo !== "string" || !isValidRepo(repo)) return refuse("bad-repo", typeof repo === "string" ? repo.slice(0, 80) : undefined);
-		repoList.push(repo);
+		if (!isCorpusSource(source)) return refuse("bad-source", `coverage source must be one of ${CORPUS_SOURCES.join(", ")}`);
+		pairs.set(`${repo}\n${source}`, { repo, source });
 	}
-	const sourceList: CorpusSource[] = [];
-	for (const source of sources) {
-		if (!isCorpusSource(source)) return refuse("bad-source", `scope source must be one of ${CORPUS_SOURCES.join(", ")}`);
-		sourceList.push(source);
-	}
-	return { ok: true, value: { repos: [...new Set(repoList)], maxTier, sources: [...new Set(sourceList)] } };
+	return { ok: true, value: { coverage: [...pairs.values()], maxTier } };
 }
 
 function keyOf(entry: Pick<CorpusEntry, "repo" | "path">): string {
 	return `${entry.repo}\n${entry.path}`;
 }
 
-/** `POST /corpus/plan`: the protocol version, at most {@link MAX_PLAN_ENTRIES} well-formed entries with unique keys, and a non-empty scope. */
+/** `POST /corpus/plan`: the protocol version, at most {@link MAX_PLAN_ENTRIES} well-formed entries with unique keys, and a scope (its coverage may be empty). */
 export function parsePlanRequest(raw: unknown): Parsed<CorpusPlanRequest> {
 	if (!isRecord(raw)) return refuse("bad-request", "the body must be a JSON object");
 	if (raw.protocol !== CORPUS_PROTOCOL) return refuse("bad-protocol", `this server speaks protocol ${CORPUS_PROTOCOL}`);

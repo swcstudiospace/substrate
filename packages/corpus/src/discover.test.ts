@@ -183,7 +183,18 @@ describe("discoverRepos", () => {
 		const found = discoverRepos([root], { run: fakeGit({ [wt]: { branch: "main", remoteDefault: "main" } }) });
 		expect(found.checkouts.map((c) => c.dir)).toEqual([wt]);
 		// `copies` is the topmost directory holding documentation outside the nested checkout: one collection, labelled by its name.
-		expect(found.collections).toEqual([{ dir: join(root, "copies"), repo: "local/copies" }]);
+		// `empty` holds no documentation and no checkout, and stays a collection so the scan covers it with zero entries.
+		expect(found.collections).toEqual([
+			{ dir: join(root, "copies"), repo: "local/copies" },
+			{ dir: join(root, "empty"), repo: "local/empty" },
+		]);
+	});
+
+	test("a collection whose last document was removed is still a collection, and a container of checkouts is not", () => {
+		const root = fixture({ "c1/docs/.keep": "", "c2/guide.md": "# guide", "work/app/.git/HEAD": "", "emptied/.keep": "" });
+		const found = discoverRepos([root], { run: fakeGit({ [join(root, "work", "app")]: { branch: "main" } }) });
+		expect(found.collections.map((c) => c.repo)).toEqual(["local/c1", "local/c2", "local/emptied"]);
+		expect(found.checkouts).toHaveLength(1);
 	});
 
 	test("a collection of linked worktrees of one repository collapses like any other", () => {

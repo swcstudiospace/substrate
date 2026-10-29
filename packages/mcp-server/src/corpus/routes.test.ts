@@ -86,7 +86,7 @@ describe("the corpus routes while SUBSTRATE_CORPUS is off", () => {
 	test("every route answers 503 corpus.disabled and nothing reaches the plane or the manifest", async () => {
 		const harness = await start({ SUBSTRATE_TOKEN_OMP: "tok-omp" });
 		const ingest = await post(harness, "/corpus/ingest", ingestBody);
-		const plan = await post(harness, "/corpus/plan", { protocol: CORPUS_PROTOCOL, entries: [], scope: { repos: [REPO], maxTier: 3, sources: ["fs"] } });
+		const plan = await post(harness, "/corpus/plan", { protocol: CORPUS_PROTOCOL, entries: [], scope: { coverage: [{ repo: REPO, source: "fs" }], maxTier: 3 } });
 		const status = await fetch(`${harness.base}/corpus/status`, { headers: AUTH });
 		expect([ingest.status, plan.status, status.status]).toEqual([503, 503, 503]);
 		expect(await reasonOf(ingest)).toBe("corpus.disabled");
@@ -173,6 +173,15 @@ describe("POST /corpus/ingest", () => {
 		expect(harness.store.rows.size).toBe(0);
 	});
 
+	test("a tombstone-only request (no documents) is accepted and removes the row", async () => {
+		const harness = await start(ON);
+		harness.store.seed(makeRow({ repo: REPO, path: "docs/old.md", documentId: "doc-old" }));
+		const response = await post(harness, "/corpus/ingest", { protocol: CORPUS_PROTOCOL, documents: [], tombstones: [{ repo: REPO, path: "docs/old.md" }] });
+		expect(response.status).toBe(200);
+		expect(((await response.json()) as { counts: Record<string, number> }).counts).toMatchObject({ tombstoned: 1 });
+		expect(harness.plane.deletes).toEqual([["doc-old"]]);
+	});
+
 	test("a refused document is reported 200 with its reason and a tombstone removes a manifest row", async () => {
 		const harness = await start(ON);
 		harness.store.seed(makeRow({ repo: REPO, path: "docs/old.md", documentId: "doc-old" }));
@@ -189,7 +198,7 @@ describe("POST /corpus/ingest", () => {
 });
 
 describe("POST /corpus/plan and GET /corpus/status", () => {
-	const scope = { repos: [REPO], maxTier: 3, sources: ["fs"] };
+	const scope = { coverage: [{ repo: REPO, source: "fs" }], maxTier: 3 };
 
 	test("a plan counts add, change, rename and tombstone against the manifest and writes nothing", async () => {
 		const harness = await start(ON);
@@ -201,15 +210,18 @@ describe("POST /corpus/plan and GET /corpus/status", () => {
 		const response = await post(harness, "/corpus/plan", { protocol: CORPUS_PROTOCOL, entries, scope });
 		const body = (await response.json()) as { counts: Record<string, number>; items: Array<{ action: string; renamedFrom?: string }> };
 		expect(response.status).toBe(200);
-		expect(body.counts).toEqual({ add: 1, change: 1, rename: 1, tombstone: 1, unchanged: 0 });
+		expect(body.counts).toEqual({ add: 1, change: 1, update: 0, rename: 1, tombstone: 1, unchanged: 0 });
 		expect(body.items.find((item) => item.action === "rename")?.renamedFrom).toBe("docs/old-name.md");
 		expect(harness.store.rows.size).toBe(before);
 		expect(harness.plane.batches).toEqual([]);
 	});
 
-	test("an empty scope, an unknown protocol and a plan too large are refused 400 with their reasons", async () => {
+	test("an empty coverage is a valid plan, an unknown protocol and a malformed coverage are refused 400 with their reasons", async () => {
 		const harness = await start(ON);
-		expect(await reasonOf(await post(harness, "/corpus/plan", { protocol: CORPUS_PROTOCOL, entries: [], scope: { ...scope, repos: [] } }))).toBe("empty-scope");
+		const empty = await post(harness, "/corpus/plan", { protocol: CORPUS_PROTOCOL, entries: [entryOf(document)], scope: { ...scope, coverage: [] } });
+		expect(empty.status).toBe(200);
+		expect(((await empty.json()) as { counts: Record<string, number> }).counts).toMatchObject({ add: 1, tombstone: 0 });
+		expect(await reasonOf(await post(harness, "/corpus/plan", { protocol: CORPUS_PROTOCOL, entries: [], scope: { ...scope, coverage: [{ repo: REPO }] } }))).toBe("bad-source");
 		expect(await reasonOf(await post(harness, "/corpus/plan", { protocol: 2, entries: [], scope }))).toBe("bad-protocol");
 		const entry = entryOf(document);
 		const response = await post(harness, "/corpus/plan", { protocol: CORPUS_PROTOCOL, entries: Array.from({ length: 20_001 }, () => entry), scope });

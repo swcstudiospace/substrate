@@ -4,6 +4,7 @@ import type { EventInput } from "../types.ts";
 import { defined } from "../test-support.ts";
 import { chunkByLimits, corpusGate, ingestCorpus, type CorpusIngestSettings } from "./ingest.ts";
 import { corpusDocumentName, planeDocumentIdForName } from "./names.ts";
+import { planCorpus } from "./plan.ts";
 import { FakePlane, FakeStore, makeDocument, makeRow, sha256Hex } from "./testkit.ts";
 
 const REPO = "swcstudiospace/agent-substrate";
@@ -52,7 +53,7 @@ describe("ingestCorpus: documents", () => {
 		const response = await run([document]);
 		const id = planeDocumentIdForName(nameOf(document));
 		expect(response.results).toEqual([{ repo: REPO, path: "docs/a.md", status: "ingested", documentId: id }]);
-		expect(response.counts).toEqual({ ingested: 1, unchanged: 0, tombstoned: 0, refused: 0, failed: 0 });
+		expect(response.counts).toEqual({ ingested: 1, updated: 0, unchanged: 0, tombstoned: 0, refused: 0, failed: 0 });
 		expect(plane.documents.get(nameOf(document))?.text).toBe("# A\nbody");
 		expect(store.row(REPO, "docs/a.md")).toMatchObject({ sha256: document.sha256, state: "active", documentId: id, kind: "doc", tier: 1, source: "fs", commit: "c0ffee1" });
 		expect(response.manifestVersion).toBe(await store.manifestVersion());
@@ -105,7 +106,7 @@ describe("ingestCorpus: documents", () => {
 		await run(documents);
 		const sent = plane.batches.length;
 		const again = await run(documents);
-		expect(again.counts).toEqual({ ingested: 0, unchanged: 2, tombstoned: 0, refused: 0, failed: 0 });
+		expect(again.counts).toEqual({ ingested: 0, updated: 0, unchanged: 2, tombstoned: 0, refused: 0, failed: 0 });
 		expect(plane.batches.length).toBe(sent);
 	});
 
@@ -202,7 +203,7 @@ describe("ingestCorpus: plane failures and resuming", () => {
 		expect(store.rows.size).toBe(4);
 		plane.batches.length = 0;
 		const resumed = await run(documents);
-		expect(resumed.counts).toEqual({ ingested: 2, unchanged: 4, tombstoned: 0, refused: 0, failed: 0 });
+		expect(resumed.counts).toEqual({ ingested: 2, updated: 0, unchanged: 4, tombstoned: 0, refused: 0, failed: 0 });
 		expect(plane.batches).toEqual([[nameOf(defined(documents[4], "document 4")), nameOf(defined(documents[5], "document 5"))]]);
 	});
 
@@ -356,5 +357,144 @@ describe("ingestCorpus: tombstones", () => {
 		expect([...plane.documents.keys()]).toEqual([nameOf(moved)]);
 		expect(store.row(REPO, "docs/old.md")?.state).toBe("tombstoned");
 		expect(store.row(REPO, "docs/new.md")?.state).toBe("active");
+	});
+});
+
+/** Lets every promise chain that can progress without a gate progress, so a test observes the state while a gate is held. */
+async function flush(): Promise<void> {
+	for (let turn = 0; turn < 40; turn += 1) await Promise.resolve();
+}
+
+describe("ingestCorpus: phases and single flight", () => {
+	test("the shared-text race: a document added with the text a changed document leaves still points at a live plane document", async () => {
+		const { store, plane, run } = harness({ batchDocs: 1, concurrency: 2 });
+		await run([makeDocument(REPO, "docs/a.md", "text X")]);
+		const sharedId = defined(store.row(REPO, "docs/a.md")?.documentId, "the id of text X");
+		const changed = makeDocument(REPO, "docs/a.md", "text Y");
+		const newcomer = makeDocument(REPO, "docs/b.md", "text X");
+		// The plane answers the newcomer with text X's existing id at once, but the answer arrives after the changed
+		// document's batch has been recorded: the window the old per-batch delete used.
+		const release = plane.hold(nameOf(newcomer));
+		const running = run([changed, newcomer]);
+		await flush();
+		expect(store.row(REPO, "docs/a.md")?.sha256).toBe(changed.sha256);
+		release();
+		const response = await running;
+		expect(response.counts).toMatchObject({ ingested: 2, failed: 0 });
+		expect(store.row(REPO, "docs/b.md")?.documentId).toBe(sharedId);
+		expect(plane.liveIds().has(sharedId)).toBe(true);
+		expect(plane.deletes).toEqual([]);
+	});
+
+	test("a superseded document nobody references any more is deleted only after the whole request is recorded", async () => {
+		const { log, store, plane, run } = harness({ batchDocs: 1, concurrency: 2 });
+		await run([makeDocument(REPO, "docs/a.md", "version one")]);
+		const oldId = defined(store.row(REPO, "docs/a.md")?.documentId, "the old id");
+		log.length = 0;
+		await run([makeDocument(REPO, "docs/a.md", "version two"), makeDocument(REPO, "docs/b.md", "other")]);
+		expect(plane.deletes.at(-1)).toEqual([oldId]);
+		expect(log.at(-1)).toBe(`delete:${oldId}`);
+		expect(log.filter((entry) => entry.startsWith("record:"))).toHaveLength(2);
+	});
+
+	test("a rename in one request deletes the old plane document first, so the new row cites the new name", async () => {
+		const { store, plane, run } = harness();
+		await run([makeDocument(REPO, "docs/old.md", "moved text")]);
+		const oldId = defined(store.row(REPO, "docs/old.md")?.documentId, "the old id");
+		plane.calls.length = 0;
+		const moved = makeDocument(REPO, "docs/new.md", "moved text");
+		const response = await run([moved], [{ repo: REPO, path: "docs/old.md" }]);
+		expect(response.counts).toMatchObject({ ingested: 1, tombstoned: 1, failed: 0 });
+		expect(plane.calls).toEqual([`delete-start:${oldId}`, `insert-start:${nameOf(moved)}`, `insert-end:${nameOf(moved)}`]);
+		expect(store.row(REPO, "docs/new.md")?.documentId).toBe(planeDocumentIdForName(nameOf(moved)));
+		expect(plane.liveIds().has(oldId)).toBe(false);
+	});
+
+	test("two requests at once do not interleave: the second one's plane calls start after the first one's end", async () => {
+		const { store, plane, run } = harness();
+		const first = makeDocument(REPO, "docs/a.md", "first body");
+		const second = makeDocument(REPO, "docs/b.md", "second body");
+		store.seed(makeRow({ repo: REPO, path: "docs/old.md", documentId: "doc-old" }));
+		const release = plane.hold(nameOf(first));
+		const one = run([first]);
+		const two = run([second], [{ repo: REPO, path: "docs/old.md" }]);
+		await flush();
+		expect(plane.calls).toEqual([`insert-start:${nameOf(first)}`]);
+		release();
+		await Promise.all([one, two]);
+		expect(plane.calls).toEqual([
+			`insert-start:${nameOf(first)}`,
+			`insert-end:${nameOf(first)}`,
+			"delete-start:doc-old",
+			`insert-start:${nameOf(second)}`,
+			`insert-end:${nameOf(second)}`,
+		]);
+	});
+
+	test("a same-name leftover is resolved after every batch has recorded: a row that shares its plane document is not left dangling", async () => {
+		const { store, plane, run } = harness({ batchDocs: 1, concurrency: 2 });
+		const stray = makeDocument(REPO, "docs/a.md", "text X");
+		const twin = makeDocument(REPO, "docs/b.md", "text X");
+		const strayId = planeDocumentIdForName(nameOf(stray));
+		plane.documents.set(nameOf(stray), { id: strayId, text: "text X" });
+		const release = plane.hold(nameOf(twin));
+		const running = run([stray, twin]);
+		await flush();
+		release();
+		const response = await running;
+		expect(response.counts).toMatchObject({ ingested: 2, failed: 0 });
+		expect(store.row(REPO, "docs/b.md")?.documentId).toBe(strayId);
+		expect(store.row(REPO, "docs/a.md")?.documentId).toBe(strayId);
+		expect(plane.liveIds().has(strayId)).toBe(true);
+		expect(plane.deletes).toEqual([]);
+	});
+
+	test("a deletion the plane started but never confirmed leaves the row active as delete-failed, and a retry removes it", async () => {
+		const { store, plane, run } = harness();
+		const document = makeDocument(REPO, "docs/a.md", "a");
+		await run([document]);
+		plane.unconfirmedDeleteIds.add(planeDocumentIdForName(nameOf(document)));
+		const unconfirmed = await run([], [{ repo: REPO, path: "docs/a.md" }]);
+		expect(unconfirmed.results[0]).toMatchObject({ status: "failed", reason: "delete-failed" });
+		expect(unconfirmed.counts).toMatchObject({ tombstoned: 0, failed: 1 });
+		expect(store.row(REPO, "docs/a.md")?.state).toBe("active");
+		plane.unconfirmedDeleteIds.clear();
+		const retried = await run([], [{ repo: REPO, path: "docs/a.md" }]);
+		expect(retried.results[0]?.status).toBe("tombstoned");
+		expect(store.row(REPO, "docs/a.md")?.state).toBe("tombstoned");
+	});
+});
+
+describe("ingestCorpus: updates", () => {
+	test("the same bytes read from another source refresh the row with no plane upload, and a later filesystem-only removal works", async () => {
+		const { store, plane, run } = harness();
+		await run([makeDocument(REPO, "docs/a.md", "text", { source: "github", commit: "aaa1111" })]);
+		const id = defined(store.row(REPO, "docs/a.md")?.documentId, "the plane id");
+		const versionBefore = await store.manifestVersion();
+		plane.batches.length = 0;
+		const local = makeDocument(REPO, "docs/a.md", "text", { source: "fs", commit: "bbb2222", tier: 2 });
+		const response = await run([local]);
+		expect(response.results).toEqual([{ repo: REPO, path: "docs/a.md", status: "updated", documentId: id }]);
+		expect(response.counts).toMatchObject({ updated: 1, ingested: 0, unchanged: 0 });
+		expect(plane.batches).toEqual([]);
+		expect(plane.deletes).toEqual([]);
+		expect(store.row(REPO, "docs/a.md")).toMatchObject({ source: "fs", commit: "bbb2222", tier: 2, documentId: id, state: "active" });
+		expect(await store.manifestVersion()).toBeGreaterThan(versionBefore);
+
+		// A second identical run has nothing left to refresh, and the row now sits inside a filesystem-only coverage.
+		expect((await run([local])).counts).toMatchObject({ unchanged: 1, updated: 0 });
+		const rows = await store.rowsForRepos([REPO]);
+		const plan = planCorpus([], { coverage: [{ repo: REPO, source: "fs" }], maxTier: 3 }, rows);
+		expect(plan.items).toEqual([{ action: "tombstone", repo: REPO, path: "docs/a.md", sha256: local.sha256 }]);
+		const removed = await run([], [{ repo: REPO, path: "docs/a.md" }]);
+		expect(removed.results[0]?.status).toBe("tombstoned");
+	});
+
+	test("a refreshed commit that looks like a secret is refused and the row keeps its old values", async () => {
+		const { store, run } = harness();
+		await run([makeDocument(REPO, "docs/a.md", "text", { source: "github" })]);
+		const response = await run([makeDocument(REPO, "docs/a.md", "text", { source: "fs", commit: "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789" })]);
+		expect(response.results[0]).toMatchObject({ status: "refused", reason: "secret-findings" });
+		expect(store.row(REPO, "docs/a.md")?.source).toBe("github");
 	});
 });

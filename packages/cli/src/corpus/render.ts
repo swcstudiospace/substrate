@@ -7,7 +7,6 @@ import {
 	PLAN_ACTIONS,
 	documentKey,
 	type CorpusPlanResponse,
-	type CorpusScope,
 	type CorpusStatusResponse,
 	type IngestStatus,
 	type PlanItem,
@@ -51,10 +50,13 @@ export function renderInventory(inventory: Inventory): string {
 			? "skipped: none\n"
 			: `skipped: ${skippedTotal} (${Object.entries(report.skippedByReason).map(([reason, count]) => `${reason} ${count}`).join(", ")})\n`,
 	);
+	if (report.emptyCollections > 0) {
+		out.push(`empty: ${plural(report.emptyCollections, "repository", "repositories")} read completely with no documents (still covered, so their old rows are removed)\n`);
+	}
 	const incomplete = report.repos.filter((repo) => !repo.complete);
 	if (incomplete.length > 0) {
-		out.push(`not read completely (left out of a plan's scope): ${incomplete.length}\n`);
-		for (const repo of incomplete.slice(0, LIST_LIMIT)) out.push(`  ${repo.repo}: ${repo.incomplete ?? "incomplete"}\n`);
+		out.push(`not read completely (left out of a plan's coverage): ${incomplete.length}\n`);
+		for (const repo of incomplete.slice(0, LIST_LIMIT)) out.push(`  ${repo.repo} [${repo.source}]: ${repo.incomplete ?? "incomplete"}\n`);
 		out.push(more(LIST_LIMIT, incomplete.length));
 	}
 	const listed = [...report.repos].sort((a, b) => b.files - a.files || (a.repo < b.repo ? -1 : a.repo > b.repo ? 1 : 0));
@@ -74,12 +76,26 @@ function describeItem(item: PlanItem): string {
 	return item.action === "rename" && item.renamedFrom !== undefined ? `${key}  (from ${item.renamedFrom})` : key;
 }
 
-export function renderPlan(plan: CorpusPlanResponse, scope: CorpusScope): string {
+export function renderPlan(plan: CorpusPlanResponse, inventory: Inventory): string {
+	const { scope, report } = inventory;
 	const counts = PLAN_ACTIONS.map((action) => `${action} ${plan.counts[action]}`).join(", ");
 	const out: string[] = [
 		`plan: ${counts} (manifest version ${plan.manifestVersion})\n`,
-		`scope: ${plural(scope.repos.length, "repository", "repositories")} read completely, tier <= ${scope.maxTier}, sources ${scope.sources.join(", ")}\n`,
+		`coverage: ${plural(scope.coverage.length, "repository/source pair")} read completely, tier <= ${scope.maxTier}; only manifest rows in these pairs can be tombstoned\n`,
 	];
+	if (scope.coverage.length === 0) out.push("coverage is empty: nothing will be tombstoned, the documents found are still planned and ingested\n");
+	const left = report.repos.filter((repo) => !repo.complete);
+	if (left.length > 0) {
+		out.push(`left out of the coverage (${left.length}):\n`);
+		for (const repo of left.slice(0, LIST_LIMIT)) out.push(`  ${repo.repo} [${repo.source}]: ${repo.incomplete ?? "incomplete"}\n`);
+		out.push(more(LIST_LIMIT, left.length));
+	}
+	if (report.notes.length > 0) {
+		// Notes say what a source never reached (a repository cap, an unreadable export), which no report row can.
+		out.push("notes:\n");
+		for (const note of report.notes.slice(0, LIST_LIMIT)) out.push(`  ${note}\n`);
+		out.push(more(LIST_LIMIT, report.notes.length));
+	}
 	for (const action of PLAN_ACTIONS) {
 		if (action === "unchanged") continue;
 		const items = plan.items.filter((item) => item.action === action);

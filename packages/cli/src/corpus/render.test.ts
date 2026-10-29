@@ -12,19 +12,20 @@ function repoReport(repo: string, over: Partial<RepoReport> = {}): RepoReport {
 	return { repo, dir: `/src/${repo}`, source: "fs", files: 1, bytes: 10, complete: true, ...over };
 }
 
-function inventory(repos: RepoReport[], entries: CorpusEntry[]): Inventory {
+function inventory(repos: RepoReport[], entries: CorpusEntry[], over: Partial<Inventory["scope"]> = {}): Inventory {
 	return {
 		entries,
 		paths: new Map(),
 		sources: ["fs"],
 		maxTier: 2,
-		scope: { repos: [], maxTier: 2, sources: ["fs"] },
+		scope: { coverage: [], maxTier: 2, ...over },
 		report: {
 			checkouts: repos.length + 2,
 			repos,
 			collapsed: { clones: 1, worktrees: 1, identical: 3, identicalGroups: 1, identicalCopies: [] },
 			skipped: [],
 			skippedByReason: { empty: 2, binary: 1 },
+			emptyCollections: 0,
 			notes: ["one note"],
 		},
 	};
@@ -43,8 +44,8 @@ describe("renderInventory", () => {
 		expect(text).toContain("by kind: doc 2, readme 1");
 		expect(text).toContain("collapsed: 1 clone, 1 linked worktree, 3 identical copies in 1 group");
 		expect(text).toContain("skipped: 3 (empty 2, binary 1)");
-		expect(text).toContain("not read completely (left out of a plan's scope): 1");
-		expect(text).toContain("Acme/B: git ls-files failed");
+		expect(text).toContain("not read completely (left out of a plan's coverage): 1");
+		expect(text).toContain("Acme/B [fs]: git ls-files failed");
 		expect(text).toContain("one note");
 	});
 
@@ -53,6 +54,12 @@ describe("renderInventory", () => {
 		expect(text).toContain("0 documents");
 		expect(text).toContain("by tier: none");
 		expect(text).toContain("skipped: none");
+	});
+
+	test("says how many repositories were covered with no documents left", () => {
+		const base = inventory([repoReport("local/c1", { files: 0, bytes: 0 })], []);
+		const text = renderInventory({ ...base, report: { ...base.report, emptyCollections: 1 } });
+		expect(text).toContain("empty: 1 repository read completely with no documents");
 	});
 
 	test("the repository list is cut at the limit with the number left out, largest first", () => {
@@ -65,17 +72,26 @@ describe("renderInventory", () => {
 });
 
 describe("renderPlan and renderIngest", () => {
-	test("a rename shows where it came from", () => {
+	test("a rename shows where it came from, and the coverage line names the pairs", () => {
 		const plan = planOf([{ action: "rename", repo: "Acme/A", path: "docs/new.md", renamedFrom: "docs/old.md" }]);
-		const text = renderPlan(plan, { repos: ["Acme/A"], maxTier: 1, sources: ["fs"] });
+		const text = renderPlan(plan, inventory([], [], { coverage: [{ repo: "Acme/A", source: "fs" }], maxTier: 1 }));
 		expect(text).toContain("rename (1):");
 		expect(text).toContain("Acme/A:docs/new.md  (from docs/old.md)");
-		expect(text).toContain("scope: 1 repository read completely, tier <= 1, sources fs");
+		expect(text).toContain("coverage: 1 repository/source pair read completely, tier <= 1");
+	});
+
+	test("an empty coverage and the pairs that were left out are printed with their reasons", () => {
+		const plan = planOf([{ action: "update", repo: "Acme/A", path: "README.md" }]);
+		const text = renderPlan(plan, inventory([repoReport("Acme/B", { source: "github", complete: false, incomplete: "the tree is truncated" })], []));
+		expect(text).toContain("update 1");
+		expect(text).toContain("update (1):");
+		expect(text).toContain("coverage is empty: nothing will be tombstoned");
+		expect(text).toContain("Acme/B [github]: the tree is truncated");
 	});
 
 	test("ingest problems are listed per status up to the limit", () => {
 		const problems = Array.from({ length: LIST_LIMIT + 3 }, (_, i) => ({ repo: "Acme/A", path: `p${i}.md`, status: "failed" as const, reason: "plane-unavailable" }));
-		const text = renderIngest({ counts: { ingested: 2, unchanged: 0, tombstoned: 0, refused: 0, failed: problems.length }, problems, manifestVersion: 4 });
+		const text = renderIngest({ counts: { ingested: 2, updated: 0, unchanged: 0, tombstoned: 0, refused: 0, failed: problems.length }, problems, manifestVersion: 4 });
 		expect(text).toContain(`failed ${LIST_LIMIT + 3}`);
 		expect(text).toContain(`failed (${LIST_LIMIT + 3}):`);
 		expect(text).toContain("... and 3 more");

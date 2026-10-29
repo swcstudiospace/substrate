@@ -441,6 +441,26 @@ describe("deleteDocuments", () => {
 		expect(count(stuck.calls, "DELETE", "/documents/delete_document")).toBe(6);
 	});
 
+	test("an accepted deletion whose pipeline never confirms idle, or whose poll fails, is reported failed, never deleted", async () => {
+		const stuck = fakePlane({
+			"DELETE /documents/delete_document": [STARTED()],
+			"GET /documents/pipeline_status": [BUSY()],
+		});
+		expect(await stuck.plane.deleteDocuments(["doc-a"])).toEqual({ deleted: [], failed: [{ id: "doc-a", reason: "timeout" }] });
+
+		const fenced = fakePlane({
+			"DELETE /documents/delete_document": [STARTED()],
+			"GET /documents/pipeline_status": [json({ busy: false, recovery_required: true, recovery_message: "fenced" })],
+		});
+		expect(await fenced.plane.deleteDocuments(["doc-a", "doc-b"])).toEqual({
+			deleted: [],
+			failed: [
+				{ id: "doc-a", reason: "plane-unavailable" },
+				{ id: "doc-b", reason: "plane-unavailable" },
+			],
+		});
+	});
+
 	test("a refusal and a transport failure are per-id failures with closed reasons", async () => {
 		const refused = fakePlane({ "DELETE /documents/delete_document": [json({ status: "not_allowed", message: "no", doc_id: "x" })] });
 		expect(await refused.plane.deleteDocuments(["doc-a"])).toEqual({ deleted: [], failed: [{ id: "doc-a", reason: "rejected" }] });

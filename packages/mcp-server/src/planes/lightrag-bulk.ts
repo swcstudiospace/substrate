@@ -441,16 +441,16 @@ function withSignal(base: FetchLike, signal: AbortSignal | undefined): FetchLike
  * unknown id counts as deleted (deleting twice is a no-op). A `busy` answer (a
  * writer holds the pipeline) waits for idle and retries a bounded number of
  * times. The deletion itself runs in the background and holds the destructive
- * slot, which would answer the next insert with a 409; the pipeline is waited on
- * to idle before this returns.
+ * slot, which would answer the next insert with a 409; the pipeline is waited on to idle before this returns, and a wait
+ * that fails (timeout, failed poll, fenced plane) makes the ids `failed`, never `deleted`: the deletion is unconfirmed.
  */
 async function deleteRequest(context: Context, ids: string[]): Promise<{ deleted: true } | { deleted: false; reason: string }> {
 	for (let attempt = 0; attempt <= DELETE_BUSY_RETRIES; attempt += 1) {
 		const answered = await deleteLightragDocuments(context.config, "", ids, context.fetchImpl, DELETE_REQUEST_TIMEOUT_MS);
 		if (answered.ok) {
-			// Started counts as deleted; a wait that fails here only delays the next request, which handles `busy` itself.
-			await waitIdle(context, ids.length);
-			return { deleted: true };
+			// `deletion_started` is only the route's acknowledgement; an idle pipeline is the confirmation.
+			const idle = await waitIdle(context, ids.length);
+			return idle.ok ? { deleted: true } : { deleted: false, reason: idle.reason };
 		}
 		if (answered.retryable !== true) {
 			return { deleted: false, reason: answered.reason.includes("not_allowed") ? "rejected" : closedReason(answered.reason, context) };

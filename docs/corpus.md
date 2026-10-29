@@ -76,7 +76,10 @@ A `.planning` directory may sit at any depth of a monorepo; the rules apply from
 3. **Copy collections.** A directory with no `.git` that holds documentation is a copy collection and is walked as
    `local/<directory name>`, with the same exclusions. A checkout nested inside one is found by discovery and is not read
    twice, so a collection of worktrees collapses like any other. A root that holds checkouts is a container: loose files
-   directly in it are not scanned.
+   directly in it are not scanned. A readable directory directly below a root with no checkout and no documentation in it
+   (a collection whose last document was deleted) is still a collection: it is read with zero entries, counted as an
+   emptied collection in the report, and covered, so its old rows are removed. A checkout with no documentation left is
+   covered the same way.
 4. **Files.** For a checkout the candidates are the tracked files (`git ls-files -z`); for a collection they are the files
    of the walk. A file is skipped, with a reason, when it is a symlink (`symlink`), empty (`empty`), larger than
    `--max-bytes` (`too-large`, decided from its size before it is read), contains a NUL byte (`binary`), is not valid UTF-8
@@ -85,14 +88,17 @@ A `.planning` directory may sit at any depth of a monorepo; the rules apply from
    lexically smallest `(repo, path)`. The report lists each kept entry with the copies it stands for
    (`collapsed.identicalCopies`, at most 200 groups of 20 copies, plus the exact totals `identical` and `identicalGroups`),
    so a collapsed copy can be told from a deleted file. When the canonical copy disappears, the next copy (lexically)
-   becomes canonical, and the plan reports it as a rename of the same sha, not as a delete plus an add. Identical files
-   inside one repository, and files of repositories with an origin, are never collapsed.
+   becomes canonical. The planner matches a rename only inside one repository, so moving the kept copy from `local/c1` to
+   `local/c2` is an `add` of `local/c2`'s path and, when `local/c1` is still covered by the scan, a `tombstone` of the old
+   row; the plane then holds the text once under the new name. Identical files inside one repository, and files of
+   repositories with an origin, are never collapsed.
 
 The scan is deterministic: the same tree gives the same entries, sorted by `(repo, path)` by code unit, and the same
 report. It holds one file body at a time.
 
 Each repository in the report says whether it was read **completely**. A read error, a failed `git ls-files` or a
-truncated GitHub tree makes it incomplete; a skip rule above does not.
+truncated GitHub tree makes it incomplete; a skip rule above does not. The bytes of a file are hashed as they are on disk,
+including a leading byte-order mark, and the body sent to the server keeps it, so the hash the server recomputes matches.
 
 ## The CLI
 
@@ -107,13 +113,20 @@ substrate corpus status [--server URL] [--json]
 - `scan` needs no server. It prints the totals by repository, kind and tier, the bytes, the collapsed counts, the skipped
   reasons and the repositories that were not read completely. `--json` prints `{report}` (with `entries` only when
   `--entries` is given).
-- `plan` scans, then asks the server what a bulk ingest would change: it prints the counts and the first 20 items of each
-  action. It never sends bodies.
+- `plan` scans, then asks the server what a bulk ingest would change: it prints the counts, the coverage, the
+  (repository, source) pairs that were left out of it with the reason, and the first 20 items of each action. It never
+  sends bodies. A scan that read nothing completely still plans its entries, with an empty coverage that tombstones
+  nothing.
 - `ingest` plans first. Without `--execute` it prints the plan and exits 0: a dry run, and it says so. With `--execute`
-  it reads the bodies of the `add`, `change` and `rename` items, sends them in batches, then sends the tombstones, and
-  prints the count of each status. It exits 1 when a document failed or a request failed as a whole. A `refused` document
-  (for example `secret-findings`) is listed and does not fail the run. Re-running is safe: the server skips rows it already
-  recorded, so a run killed half way resumes without re-sending them.
+  it sends the tombstones first, as requests of their own with `documents: []` (at most 500 each), then reads the bodies
+  of the `add`, `change`, `update` and `rename` items and sends them in batches, and prints the count of each status. The
+  order matters for a rename: the plane answers an insert of identical text with the document it already holds, so the
+  old document must be gone before the new name is inserted. A rename's old row is removed only when the new document's
+  text can be read, and the new document is sent only when the old row was removed. It exits 1 when a document failed or
+  a request failed as a whole. A `refused` document (for example `secret-findings`) is listed and does not fail the
+  run. Re-running is safe: the server skips rows it already recorded, so a run killed half way resumes without
+  re-sending them. `--batch-docs` (and `SUBSTRATE_CORPUS_BATCH_DOCS`) above the server limit of 200 documents per
+  request is lowered to 200 with a note on stderr.
 - `status` prints the manifest summary.
 
 ```
@@ -136,21 +149,26 @@ Exit codes: 0 done, 1 failed, 2 usage.
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `SUBSTRATE_CORPUS_ROOTS` | colon-separated default roots when no `--root` is given | `/root/src/repos` |
-| `SUBSTRATE_CORPUS_BATCH_DOCS` | documents per ingest request (`--batch-docs` wins) | 20 |
+| `SUBSTRATE_CORPUS_BATCH_DOCS` | documents per ingest request (`--batch-docs` wins; at most 200, a larger value is lowered) | 20 |
 | `SUBSTRATE_CORPUS_BATCH_BYTES` | body bytes per ingest request (`--batch-bytes` wins) | 1,000,000 |
 
 The server URL and the bearer are the ones the other commands use (`SUBSTRATE_URL`, and the token from
 `SUBSTRATE_TOKEN`, its token file or the per-surface token directory). A batch always holds at least one document, so a
 document larger than the byte bound travels alone.
 
-### The plan's scope
+### The plan's coverage
 
-The plan request carries `scope: {repos, maxTier, sources}`. The server tombstones a document the scan did not report only
-when its repository is in `repos`, its tier is at most `maxTier` and its source is in `sources`. `repos` lists **only
-repositories the scan read completely**: a repository that failed to read, a truncated GitHub tree, a repository cut by
-`--max-repos` and a repository that appears in a source that read it incompletely are left out. `maxTier` is the tier of
-the scan and `sources` are the sources it used. So a narrower scan (`--tier 1` after a tier-2 ingest, `--max-repos`, a
-single `--source`, one `--root`) or a failed one never makes the server forget what it did not cover.
+The plan request carries `scope: {coverage, maxTier}` where `coverage` is a list of `{repo, source}` pairs. The server
+tombstones a manifest row the scan did not report only when its `(repo, source)` pair is in `coverage` and its tier is at
+most `maxTier`. A pair is listed **only when that source read that repository completely**: every eligible file was read
+or refused by a documented rule (empty, binary, too large, symlink, invalid UTF-8). A read failure, a truncated GitHub
+tree, a failed export read and a repository cut by `--max-repos` leave the pair out, and a repository one source read
+completely is not covered for another: after ingesting Greptile documents, a run with `--source fs,greptile --max-repos 1`
+covers the Greptile pair only of the first repository, while the local checkouts stay covered. An emptied collection or
+checkout is covered with zero entries, so its rows are removed. `maxTier` is the tier of the scan, so a narrower scan
+(`--tier 1` after a tier-2 ingest, `--max-repos`, a single `--source`, one `--root`) or a failed one never makes the
+server forget what it did not cover. An empty `coverage` is valid: nothing is tombstoned and the entries are still planned
+and ingested.
 
 ## Sources
 
@@ -196,22 +214,31 @@ as refused credentials and a refused surface. A request that names another `prot
 ### `POST /corpus/plan`
 
 Request: `{protocol, entries, scope}` where `entries` are the entries above without bodies and `scope` is
-`{repos: string[], maxTier: 1|2|3, sources: ("fs"|"github"|"greptile")[]}`.
+`{coverage: [{repo, source: "fs"|"github"|"greptile"}], maxTier: 1|2|3}` (at most 4,000 pairs; 20,000 entries).
+
+A manifest row is identified by `(repo, path)`; its `source` column records which source produced it. An entry that
+matches a row with the same sha256, source, kind and tier is `unchanged`; the same sha256 under a different source, kind
+or tier is `update` (a manifest-only refresh, the docs plane is not touched); a different sha256 is `change`; no row is
+`add`; a tombstone plus an add of one sha256 in the same repository is `rename`. A row with no matching entry is a
+`tombstone` only when its pair is in `coverage` and its tier is at most `maxTier`.
 
 Response: `{protocol, items, counts, manifestVersion}`. Each item is
-`{action: "add"|"change"|"rename"|"tombstone", repo, path, sha256?, renamedFrom?}`; `renamedFrom` is the manifest row the
-document moved from. `counts` has `add`, `change`, `rename`, `tombstone` and `unchanged` (unchanged rows are counted and
-never listed). `manifestVersion` increases whenever the manifest changes.
+`{action: "add"|"change"|"update"|"rename"|"tombstone", repo, path, sha256?, renamedFrom?}`; `renamedFrom` is the manifest
+row the document moved from. `counts` has `add`, `change`, `update`, `rename`, `tombstone` and `unchanged` (unchanged rows
+are counted and never listed). `manifestVersion` increases whenever the manifest changes.
 
 ### `POST /corpus/ingest`
 
 Request: `{protocol, documents, tombstones}` where `documents` are entries plus `body` (the UTF-8 text) and `tombstones`
-are `{repo, path}` rows to remove from the docs plane. The CLI sends documents in batches with no tombstones, then the
-tombstones in requests of their own with `documents: []`. A rename's old row is tombstoned only when its new document was
-recorded.
+are `{repo, path}` rows to remove from the docs plane. `documents: []` with tombstones is a tombstone-only request. The CLI
+sends the tombstones first, as requests of their own, then the document batches. Within one request the server removes the
+tombstoned rows first, then inserts the documents, and only after all of them are recorded deletes the plane documents
+that changed documents superseded; a plane document is deleted only when no active row still holds its id. Ingest
+requests on one server are handled one at a time. An `update` document is sent like an add; when the stored sha256 equals
+the sent one the server refreshes the row's source, kind, tier and commit without touching the plane and answers `updated`.
 
 Response: `{protocol, results, counts, manifestVersion}`. Each result is
-`{repo, path, status: "ingested"|"unchanged"|"tombstoned"|"refused"|"failed", reason?, documentId?}`; `reason` is a closed
+`{repo, path, status: "ingested"|"updated"|"unchanged"|"tombstoned"|"refused"|"failed", reason?, documentId?}`; `reason` is a closed
 code such as `secret-findings` or `plane-unavailable`. `counts` has one number per status.
 
 ### `GET /corpus/status`
@@ -231,9 +258,9 @@ time or null.
 | GitHub repositories per scan (`--max-repos`) | 50 |
 | GitHub repository listing (`-L`) | 1,000 |
 | `gh` calls at once | 4 |
-| Documents per ingest request | 20 (`SUBSTRATE_CORPUS_BATCH_DOCS`) |
+| Documents per ingest request | 20 by default (`SUBSTRATE_CORPUS_BATCH_DOCS`), at most 200 |
 | Body bytes per ingest request | 1,000,000 (`SUBSTRATE_CORPUS_BATCH_BYTES`) |
-| Tombstones per request | 200 |
+| Tombstones per request | 500 |
 | Request timeout of the CLI | 120 seconds |
 | Skipped files listed in a report | 1,000 (the counts per reason are exact) |
 | Identical-copy groups listed | 200 groups of 20 copies (the totals are exact) |

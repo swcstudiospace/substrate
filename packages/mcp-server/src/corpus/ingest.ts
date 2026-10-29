@@ -2,14 +2,23 @@
  * The corpus bulk ingest (v1.7 phase 63): puts new and changed documents into the docs plane in batches, removes tombstoned
  * ones, and keeps the manifest (`corpus_documents`) in step. Called by `POST /corpus/ingest` and the `corpus_ingest` tool.
  *
- * Safety rules the order of work encodes:
+ * One request runs in three phases, and requests on one process are serialised (single flight, held across the whole
+ * request including its plane deletes):
+ * - T, tombstones: for each row the plane document is deleted first (unless an active row that stays shares it) and the row
+ *   is marked removed only after that deletion is confirmed. A deletion that fails or is not confirmed leaves the row active
+ *   (`delete-failed`), so a retry plans it again.
+ * - I, inserts and replacements: batches may run concurrently; each row is written after the plane accepted its document.
+ *   Nothing is deleted from the plane in this phase, so no delete can overlap an insert whose text the plane may answer with
+ *   a document that is about to disappear (identical text under another name shares one plane document id).
+ * - S, superseded documents: only after every row of the request is recorded, the plane documents the changed documents
+ *   replaced are deleted, when no active row holds their id. A crash between I and S leaves an orphan, never a dangling row.
+ *
+ * Other rules the order of work encodes:
  * - Nothing leaves this module for the plane unless the gates pass (`corpusGate`), the body hashes to its entry's sha256, and
  *   the redactor's secret findings are clean. A refused document is never sent and never recorded.
- * - A document the manifest already holds at that sha is `unchanged` and not sent, so a re-run is a no-op and a killed run
- *   resumes with only what it had not recorded.
- * - The manifest row is written after the plane accepted the document and BEFORE the document it supersedes is deleted, so a
- *   crash leaves the old document, or the old and the new, never neither.
- * - A plane document is deleted only when no other active row holds its id (identical text under two names shares one id).
+ * - A document the manifest already holds at that sha, source, kind and tier is `unchanged` and not sent, so a re-run is a
+ *   no-op and a killed run resumes with only what it had not recorded. The same sha under another source, kind or tier is
+ *   `updated`: the row is refreshed and the plane is not touched.
  * - A plane failure marks the affected documents `failed` and records nothing, so a retry sends only them.
  *
  * Tombstones run before the documents: a rename is a tombstone and an add of the same text, and deleting the old document
@@ -20,9 +29,13 @@ import { CORPUS_PROTOCOL, documentKey, sourceUrl, type CorpusDocument, type Corp
 import { findingRules, stripRemoteImages } from "../docs-ingest.ts";
 import type { BulkDocumentOutcome, BulkTextDocument, LightragBulkPlane } from "../planes/lightrag-bulk.ts";
 import type { EventInput, Surface } from "../types.ts";
+import { AsyncMutex } from "./mutex.ts";
 import { corpusDocumentName, isSafeCorpusName, planeDocumentIdForName } from "./names.ts";
 import type { CorpusStore, ManifestRow } from "./store.ts";
 import { MAX_DOCUMENT_BYTES } from "./validate.ts";
+
+/** Ingest requests on this process run one at a time: plane writes and deletes of two requests never interleave. */
+const ingestLock = new AsyncMutex();
 
 /** Why a document is refused before anything is sent. Closed. */
 export const REFUSAL_REASONS = ["too-large", "empty-document", "sha-mismatch", "unsafe-name", "secret-findings"] as const;
@@ -129,6 +142,10 @@ interface Tally {
 	/** Superseded plane documents that could not be deleted: they stay on the plane, unreferenced. */
 	orphaned: number;
 	batches: number;
+	/** Plane document ids the request's changed documents replaced; phase S deletes those nobody references. */
+	superseded: Set<string>;
+	/** Documents the plane answered `conflict` for (a same-name leftover); resolved after every batch has recorded. */
+	conflicts: PreparedDocument[];
 }
 
 function settle(tally: Tally, repo: string, path: string, status: IngestStatus, extra: { reason?: string; documentId?: string | null } = {}): void {
@@ -150,6 +167,37 @@ function refuse(tally: Tally, document: CorpusDocument, reason: (typeof REFUSAL_
 	}
 }
 
+/**
+ * A document whose bytes the manifest already holds but whose source, kind or tier changed: refreshes those columns and the
+ * commit, with no plane write. True when the document is settled here (`updated`, `refused` or `failed`); false when the
+ * active row at that sha256 vanished meanwhile, so the document takes the full path.
+ */
+async function refreshMetadata(deps: CorpusIngestDeps, tally: Tally, document: CorpusDocument, prior: ManifestRow): Promise<boolean> {
+	// The commit lands in the manifest and in citation URLs, so it gets the scan the full path gives a name and a URL.
+	const rules = findingRules(`${sourceUrl(document.repo, document.path, document.commit)}\n${document.commit ?? ""}`);
+	if (rules.length > 0) {
+		refuse(tally, document, "secret-findings", rules);
+		return true;
+	}
+	try {
+		const refreshed = await deps.store.refreshMetadata({
+			repo: document.repo,
+			path: document.path,
+			sha256: document.sha256,
+			kind: document.kind,
+			tier: document.tier,
+			source: document.source,
+			commit: document.commit,
+		});
+		if (!refreshed) return false;
+	} catch {
+		settle(tally, document.repo, document.path, "failed", { reason: "manifest-unavailable" });
+		return true;
+	}
+	settle(tally, document.repo, document.path, "updated", { documentId: prior.documentId });
+	return true;
+}
+
 /** Decides one document: refused, unchanged, or ready to send. A store read that fails fails the document, never the request. */
 async function prepareDocument(deps: CorpusIngestDeps, tally: Tally, document: CorpusDocument): Promise<PreparedDocument | null> {
 	const bytes = Buffer.byteLength(document.body, "utf8");
@@ -169,8 +217,13 @@ async function prepareDocument(deps: CorpusIngestDeps, tally: Tally, document: C
 		return null;
 	}
 	if (prior?.state === "active" && prior.sha256 === document.sha256) {
-		settle(tally, document.repo, document.path, "unchanged", { documentId: prior.documentId });
-		return null;
+		if (prior.source === document.source && prior.kind === document.kind && prior.tier === document.tier) {
+			settle(tally, document.repo, document.path, "unchanged", { documentId: prior.documentId });
+			return null;
+		}
+		// The same bytes under another source, kind or tier: the manifest is refreshed and the plane is not touched.
+		if (await refreshMetadata(deps, tally, document, prior)) return null;
+		prior = null;
 	}
 	const name = corpusDocumentName(document.repo, document.path, document.sha256);
 	if (!isSafeCorpusName(name)) {
@@ -197,7 +250,9 @@ function toBulk(item: PreparedDocument): BulkTextDocument {
 /**
  * A same-name document the plane already holds but the manifest does not: an earlier run was killed between the plane write
  * and the manifest write. If an active row already shares that plane document it is live and is adopted; otherwise it is
- * deleted and the document written again, once, so the row records a document the plane has just processed.
+ * deleted and the document written again, once, so the row records a document the plane has just processed. Runs after every
+ * batch of the request has recorded its rows and one document at a time, so its delete never overlaps an insert and the
+ * reference count it reads includes every row of the request.
  */
 async function resolveConflict(deps: CorpusIngestDeps, item: PreparedDocument): Promise<BulkDocumentOutcome> {
 	const id = planeDocumentIdForName(item.name);
@@ -212,7 +267,41 @@ async function resolveConflict(deps: CorpusIngestDeps, item: PreparedDocument): 
 	}
 }
 
-/** Sends one batch, records the rows the plane accepted, then deletes the plane documents those rows superseded. Never throws. */
+/** Records one plane outcome: the row is written after the plane accepted the document, and the document it replaces is queued for phase S. */
+async function recordOutcome(deps: CorpusIngestDeps, tally: Tally, item: PreparedDocument, outcome: BulkDocumentOutcome): Promise<void> {
+	const { repo, path } = item.document;
+	if (outcome.status !== "ingested") {
+		settle(tally, repo, path, "failed", { reason: failureReason(outcome.reason) });
+		return;
+	}
+	if (outcome.documentId === undefined || outcome.documentId.length === 0) {
+		settle(tally, repo, path, "failed", { reason: "pipeline-failed" });
+		return;
+	}
+	try {
+		await deps.store.recordIngested({
+			repo,
+			path,
+			kind: item.document.kind,
+			tier: item.document.tier,
+			sha256: item.document.sha256,
+			bytes: item.document.bytes,
+			source: item.document.source,
+			commit: item.document.commit,
+			documentId: outcome.documentId,
+		});
+	} catch {
+		// The plane holds the document and the manifest does not: the next run finds the same name, answers `conflict` and
+		// resolves it, so nothing is lost and nothing is sent twice unrecorded.
+		settle(tally, repo, path, "failed", { reason: "manifest-unavailable" });
+		return;
+	}
+	settle(tally, repo, path, "ingested", { documentId: outcome.documentId });
+	const old = item.prior?.documentId;
+	if (old !== undefined && old !== null && old !== outcome.documentId) tally.superseded.add(old);
+}
+
+/** Sends one batch and records the rows the plane accepted. It never deletes from the plane and never throws. */
 async function sendBatch(deps: CorpusIngestDeps, tally: Tally, batch: readonly PreparedDocument[]): Promise<void> {
 	tally.batches += 1;
 	const failAll = (reason: string): void => {
@@ -226,48 +315,20 @@ async function sendBatch(deps: CorpusIngestDeps, tally: Tally, batch: readonly P
 		return failAll("plane-unavailable");
 	}
 	const byName = new Map(outcomes.map((outcome) => [outcome.name, outcome]));
-	const superseded = new Set<string>();
 	for (const item of batch) {
-		const { repo, path } = item.document;
-		let outcome: BulkDocumentOutcome = byName.get(item.name) ?? { name: item.name, status: "failed", reason: "plane-unavailable" };
-		if (outcome.status === "failed" && outcome.reason === "conflict") outcome = await resolveConflict(deps, item);
-		if (outcome.status !== "ingested") {
-			settle(tally, repo, path, "failed", { reason: failureReason(outcome.reason) });
-			continue;
-		}
-		if (outcome.documentId === undefined || outcome.documentId.length === 0) {
-			settle(tally, repo, path, "failed", { reason: "pipeline-failed" });
-			continue;
-		}
-		try {
-			await deps.store.recordIngested({
-				repo,
-				path,
-				kind: item.document.kind,
-				tier: item.document.tier,
-				sha256: item.document.sha256,
-				bytes: item.document.bytes,
-				source: item.document.source,
-				commit: item.document.commit,
-				documentId: outcome.documentId,
-			});
-		} catch {
-			// The plane holds the document and the manifest does not: the next run finds the same name, answers `conflict` and
-			// resolves it above, so nothing is lost and nothing is sent twice unrecorded.
-			settle(tally, repo, path, "failed", { reason: "manifest-unavailable" });
-			continue;
-		}
-		settle(tally, repo, path, "ingested", { documentId: outcome.documentId });
-		const old = item.prior?.documentId;
-		if (old !== undefined && old !== null && old !== outcome.documentId) superseded.add(old);
+		const outcome: BulkDocumentOutcome = byName.get(item.name) ?? { name: item.name, status: "failed", reason: "plane-unavailable" };
+		if (outcome.status === "failed" && outcome.reason === "conflict") tally.conflicts.push(item);
+		else await recordOutcome(deps, tally, item, outcome);
 	}
-	await deleteSuperseded(deps, tally, superseded);
 }
 
-/** Deletes the superseded plane documents nobody references any more; a failure leaves an orphan that is counted, never a failed document. */
-async function deleteSuperseded(deps: CorpusIngestDeps, tally: Tally, ids: ReadonlySet<string>): Promise<void> {
+/**
+ * Phase S: deletes the plane documents the request's changes superseded, when no active row holds their id any more. The
+ * count is read after every row of the request is recorded. A failure leaves an orphan that is counted, never a failed document.
+ */
+async function deleteSuperseded(deps: CorpusIngestDeps, tally: Tally): Promise<void> {
 	const unreferenced: string[] = [];
-	for (const id of ids) {
+	for (const id of tally.superseded) {
 		try {
 			if ((await deps.store.activeReferences(id)) === 0) unreferenced.push(id);
 		} catch {
@@ -284,9 +345,10 @@ async function deleteSuperseded(deps: CorpusIngestDeps, tally: Tally, ids: Reado
 }
 
 /**
- * Tombstones: deletes the plane documents no other active row shares, then marks the rows. A key with no active row is
- * `unchanged`. A plane delete that fails leaves its row active, so the retry deletes again (the plane counts an unknown id
- * as deleted).
+ * Phase T, tombstones. The plane document goes first and the row second: a row is marked removed only after its plane
+ * deletion is confirmed, or when the plane document is shared with an active row that stays (nothing to delete). A key with
+ * no active row is `unchanged`. A plane deletion that fails or is not confirmed (`delete-failed`) leaves its row ACTIVE, so
+ * a retry plans and deletes it again (the plane counts an unknown id as deleted).
  */
 async function tombstone(deps: CorpusIngestDeps, tally: Tally, keys: ReadonlyArray<{ repo: string; path: string }>): Promise<void> {
 	const active: ManifestRow[] = [];
@@ -340,7 +402,7 @@ async function tombstone(deps: CorpusIngestDeps, tally: Tally, keys: ReadonlyArr
 }
 
 function countOf(results: readonly CorpusIngestResultItem[]): Record<IngestStatus, number> {
-	const counts: Record<IngestStatus, number> = { ingested: 0, unchanged: 0, tombstoned: 0, refused: 0, failed: 0 };
+	const counts: Record<IngestStatus, number> = { ingested: 0, updated: 0, unchanged: 0, tombstoned: 0, refused: 0, failed: 0 };
 	for (const result of results) counts[result.status] += 1;
 	return counts;
 }
@@ -355,11 +417,12 @@ async function report(deps: CorpusIngestDeps, tally: Tally, results: readonly Co
 	await safe({
 		surface: deps.surface,
 		kind: "note",
-		summary: `corpus ingest: ${counts.ingested} ingested, ${counts.unchanged} unchanged, ${counts.tombstoned} tombstoned, ${counts.refused} refused, ${counts.failed} failed`,
+		summary: `corpus ingest: ${counts.ingested} ingested, ${counts.updated} updated, ${counts.unchanged} unchanged, ${counts.tombstoned} tombstoned, ${counts.refused} refused, ${counts.failed} failed`,
 		session_id: deps.sessionId,
 		payload: {
 			action: "docs.corpus.ingest",
 			ingested: counts.ingested,
+			updated: counts.updated,
 			unchanged: counts.unchanged,
 			tombstoned: counts.tombstoned,
 			refused: counts.refused,
@@ -384,13 +447,21 @@ async function report(deps: CorpusIngestDeps, tally: Tally, results: readonly Co
 }
 
 /**
- * The ingest. Request bounds and field shapes were checked by `parseIngestRequest`; the gates by `corpusGate`. Returns one
- * result per document and tombstone, in request order, and never throws for a plane or manifest failure.
+ * The ingest, one request, in three phases. Request bounds and field shapes were checked by `parseIngestRequest`; the gates by
+ * `corpusGate`. Returns one result per document and tombstone, in request order, and never throws for a plane or manifest
+ * failure. Requests on this process run one at a time (`ingestLock`), the lock held across the whole request including its
+ * plane deletes.
  */
-export async function ingestCorpus(deps: CorpusIngestDeps, request: CorpusIngestRequest): Promise<CorpusIngestResponse> {
-	const tally: Tally = { results: new Map(), rules: new Map(), orphaned: 0, batches: 0 };
+export function ingestCorpus(deps: CorpusIngestDeps, request: CorpusIngestRequest): Promise<CorpusIngestResponse> {
+	return ingestLock.run(() => runIngest(deps, request));
+}
+
+async function runIngest(deps: CorpusIngestDeps, request: CorpusIngestRequest): Promise<CorpusIngestResponse> {
+	const tally: Tally = { results: new Map(), rules: new Map(), orphaned: 0, batches: 0, superseded: new Set(), conflicts: [] };
+	// Phase T: every tombstone, deletes included, finishes before the first insert.
 	await tombstone(deps, tally, request.tombstones);
 
+	// Phase I: inserts and replacements. Batches may run concurrently, but nothing here deletes from the plane.
 	const prepared: PreparedDocument[] = [];
 	for (const document of request.documents) {
 		const item = await prepareDocument(deps, tally, document);
@@ -398,6 +469,11 @@ export async function ingestCorpus(deps: CorpusIngestDeps, request: CorpusIngest
 	}
 	const batches = chunkByLimits(prepared, deps.settings.batchDocs, deps.settings.batchBytes);
 	await runBounded(batches, deps.settings.concurrency, (batch) => sendBatch(deps, tally, batch));
+	// A same-name leftover is cleared and rewritten only once every batch has recorded its rows, one document at a time.
+	for (const item of tally.conflicts) await recordOutcome(deps, tally, item, await resolveConflict(deps, item));
+
+	// Phase S: only now, with every row of the request recorded, are the plane documents the changes superseded deleted.
+	await deleteSuperseded(deps, tally);
 
 	const results: CorpusIngestResultItem[] = [];
 	for (const { repo, path } of [...request.documents, ...request.tombstones]) {

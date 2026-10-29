@@ -7,8 +7,8 @@ Nothing here runs by itself. The server only answers requests, and it answers no
 ## The shape of it
 
 1. `substrate corpus scan` reads the roots on the machine that has the files and prints entries: repo, path, kind, tier, sha256, size, source, commit. It talks to nothing.
-2. `substrate corpus plan` sends those entries, without bodies, to `POST /corpus/plan` and prints how many documents the server would add, change, rename or tombstone. It changes nothing.
-3. `substrate corpus ingest` is a dry run until `--execute`. With it, the CLI sends the bodies of the documents that must change to `POST /corpus/ingest`, in requests of at most 200 documents and 500 tombstones, and the server puts them into LightRAG in batches.
+2. `substrate corpus plan` sends those entries, without bodies, to `POST /corpus/plan` together with the coverage (the (repository, source) pairs the scan read completely) and prints how many documents the server would add, change, update, rename or tombstone. It changes nothing.
+3. `substrate corpus ingest` is a dry run until `--execute`. With it, the CLI sends the tombstones first, as their own request, and then the bodies of the documents that must be added, changed or updated to `POST /corpus/ingest`, in requests of at most 200 documents and 500 tombstones, and the server puts them into LightRAG in batches.
 4. `substrate corpus status` (`GET /corpus/status`, the `corpus_status` tool) reads the manifest's counts.
 
 The same server doors are the MCP tools `corpus_status` (read, fail-open audit) and `corpus_ingest` (write, fail-closed audit). The CLI never talks to LightRAG: only the server does.
@@ -33,7 +33,7 @@ Authentication: every corpus request needs an authenticated surface (`401` witho
 
 ```
 substrate corpus scan --root /srv/repos            # look at what it finds; nothing leaves the machine
-substrate corpus plan --root /srv/repos --tier 2   # counts: add, change, rename, tombstone, unchanged
+substrate corpus plan --root /srv/repos --tier 2   # counts: add, change, update, rename, tombstone, unchanged
 substrate corpus ingest --root /srv/repos --tier 2             # dry run: prints what it would send
 substrate corpus ingest --root /srv/repos --tier 2 --execute   # sends
 substrate corpus status
@@ -41,7 +41,7 @@ substrate corpus status
 
 Start with the default tiers (tier 2 and below is the default; tier 3 is the bulk and historical material) and one root, read the plan, then widen. On the first run every entry is an `add`. The ingest of a few thousand documents takes a while because each document is parsed by LightRAG; the pipeline wait is once per batch, not once per document.
 
-Read the reply of `ingest --execute`: one result per document and tombstone with a status of `ingested`, `unchanged`, `tombstoned`, `refused` or `failed`, a closed reason for the last two, the counts, and `manifestVersion`. A run that ends with `failed` items is not an error to fix by hand: run it again and only those items are sent.
+Read the reply of `ingest --execute`: one result per document and tombstone with a status of `ingested`, `updated` (the manifest row was refreshed, LightRAG was not touched), `unchanged`, `tombstoned`, `refused` or `failed`, a closed reason for the last two, the counts, and `manifestVersion`. A run that ends with `failed` items is not an error to fix by hand: run it again and only those items are sent.
 
 ## Reading status
 
@@ -51,23 +51,33 @@ Each ingest request leaves one `note` event (`payload.action: "docs.corpus.inges
 
 ## What a tombstone does, and how to undo one
 
-A document is tombstoned when a plan says so: its row is active, its repository was scanned completely, its tier is within the plan's `maxTier`, its source is among the plan's sources, and the scan did not report it. The server then deletes its plane document (only when no other active row shares that plane document: identical text under two names is one plane document), and marks the row `tombstoned`. The row stays, with `tombstoned_at`, so the history is visible.
+A document is tombstoned when a plan says so: its row is active, the scan did not report it, the pair (its repository, its `source`) is in the plan's coverage, and its tier is within the plan's `maxTier`. The coverage lists a (repository, source) pair only when that source read that repository completely: every eligible file was read, or refused by a documented rule (empty, binary, too large). An unreadable file, a truncated GitHub tree, a failed export read and the `--max-repos` cap leave the pair out. A readable collection directory with no documents left (an emptied collection or checkout) is covered with zero entries, so its rows are tombstoned. The server then deletes the document's plane copy (only when no other active row shares that plane document: identical text under two names is one plane document) and, once the deletion is confirmed, marks the row `tombstoned`. The row stays, with `tombstoned_at`, so the history is visible.
 
-A narrower scan never tombstones what it did not cover. These leave the earlier documents untouched, and the plan's counts show it: a `--tier` lower than before, `--max-repos`, `--source`, one `--root` of several, a repository that failed to read, a truncated tree.
+A narrower scan never tombstones what it did not cover. These leave the earlier documents untouched, and the plan's counts show it: a `--tier` lower than before, `--max-repos`, `--source`, one `--root` of several, a repository that failed to read, a truncated tree. A scan with an empty coverage still plans and ingests its readable entries; it only tombstones nothing.
 
-A rename (same sha256, same repo, new path) is planned as one `rename`; the CLI sends the document at its new path and a tombstone for the old one. The server runs the tombstones first, so the plane stores the text again under its new name and a search citation names the new path.
+A manifest row is identified by `(repo, path)`; its `source` column records which source produced it. The same bytes read again from another source, or classified under another kind or tier, are an `update`: the CLI sends the document like an add, the server finds the stored sha256 equal, refreshes `source`, `kind`, `tier` and `commit` in the manifest and answers `updated`, and LightRAG is not touched. This keeps the stored source current, so a document first read from GitHub and later from a local clone can be removed by a filesystem-only scan.
 
-To undo a tombstone, restore the file (or fix the scan that missed it) and run the ingest again. The key reappears, the row is an `add` again, a new plane document is made, and the row returns to `active`. Nothing else is needed: the old plane document is gone and is not brought back.
+A rename (same sha256, same repo, new path) is planned as one `rename`; the CLI sends the tombstone for the old path first and the document at its new path after it. Because the old plane document is deleted before the text is inserted again, the plane stores the text under its new name and a search citation names the new path.
 
 ## Stop and resume
 
-Stopping is safe at any moment: stop the CLI, or restart the server. Every document the server finished is already in the manifest (the row is written after LightRAG accepted the document and before the old version of it is deleted), so the next run reports it `unchanged` and sends nothing for it. A killed run resumes with only the documents it had not recorded.
+Stopping is safe at any moment: stop the CLI, or restart the server. Every document the server finished is already in the manifest (the row is written after LightRAG accepted the document, and the document it replaced is deleted only afterwards), so the next run reports it `unchanged` and sends nothing for it. A killed run resumes with only the documents it had not recorded.
 
 One case needs no action but is worth knowing. If the server dies after LightRAG accepted a document and before the row was written, the plane holds a document the manifest does not know. The next run gets a same-name conflict from LightRAG; the server then clears that stray document, writes it again once and records the row. A conflict that does not clear reports `failed` with `conflict`.
 
-If a superseded plane document could not be deleted (the plane was down at that moment), it stays on the plane unreferenced, the document itself is still `ingested`, and the request's note event counts it in `orphaned_documents`. It is old text of a document that has a newer version; delete it by id through LightRAG if it matters.
+If a superseded plane document could not be deleted (the plane was down at that moment), it stays on the plane unreferenced, the document itself is still `ingested`, and the request's note event counts it in `orphaned_documents`. It is old text of a document that has a newer version; delete it by id through LightRAG if it matters. A crash between phase I and phase S (next section) leaves the same kind of orphan, never a row that points at a deleted document.
 
 A lost manifest (the table dropped, a new database) is rebuilt by running the ingest again: every document is a `conflict` against what the plane still holds, is cleared and written once, so it costs a full re-parse. Plan first and widen slowly.
+
+## Order of work inside a request
+
+The server serialises ingest requests: one runs at a time per server process (single flight), and it holds the lock across the whole request, plane deletes included. Inside a request the work has three phases, so a deletion never overlaps an insert that could be handed the document being deleted (LightRAG answers identical text under another name with the existing document's id):
+
+1. **T, tombstones.** For each row the plane document is deleted first, unless another active row that stays shares it; the row is marked `tombstoned` only after the deletion is confirmed (the pipeline went idle). A deletion that fails or is not confirmed leaves the row `active` and answers `failed` with `delete-failed`; the next plan lists it again.
+2. **I, inserts and replacements.** Batches may run concurrently (`SUBSTRATE_CORPUS_CONCURRENCY`). Each row is written after the plane accepted its document. Nothing is deleted in this phase; a same-name leftover (the `conflict` case below) is cleared and rewritten one document at a time after every batch has recorded.
+3. **S, superseded documents.** Only after every row of the request is recorded, the plane documents that changed documents replaced are deleted, and only when no active row holds their id.
+
+The CLI sends the tombstones first, as their own request (`documents: []`), and only then the document batches, so a rename deletes the old plane document before the same text is inserted under the new name.
 
 ## Reasons you will see
 
@@ -80,7 +90,7 @@ Whole request, `4xx` or `5xx` with `reason` and a sentence in `error`:
 | 503 | `corpus.disabled` | `SUBSTRATE_CORPUS` is not `on`. |
 | 503 | `corpus.backend-unavailable` | The docs backend is not a configured LightRAG. Nothing was sent. |
 | 503 | `corpus.index-unavailable` | There is no index, or it did not answer. |
-| 400 | `bad-request`, `bad-protocol`, `too-many-entries`, `too-many-documents`, `too-many-tombstones`, `empty-request`, `empty-scope`, `bad-scope`, `bad-repo`, `bad-path`, `bad-kind`, `bad-tier`, `bad-sha256`, `bad-bytes`, `bad-source`, `bad-commit`, `bad-body`, `duplicate-entry` | The request is malformed; nothing in it was read further or sent. A plan holds at most 20000 entries and names at least one repo and one source. An ingest holds at most 200 documents and 500 tombstones. |
+| 400 | `bad-request`, `bad-protocol`, `too-many-entries`, `too-many-documents`, `too-many-tombstones`, `empty-request`, `bad-scope`, `bad-repo`, `bad-path`, `bad-kind`, `bad-tier`, `bad-sha256`, `bad-bytes`, `bad-source`, `bad-commit`, `bad-body`, `duplicate-entry` | The request is malformed; nothing in it was read further or sent. A plan holds at most 20000 entries and at most 4000 coverage pairs (an empty coverage is valid: the entries are planned and nothing is tombstoned). An ingest holds at most 200 documents and 500 tombstones; it may hold tombstones only (`documents: []`), but not nothing at all (`empty-request`). |
 | 413 | | The body is over 6,000,000 bytes. |
 
 One document, status `refused` (never sent, never recorded; fix the file, then run again):
@@ -104,7 +114,7 @@ One document or tombstone, status `failed` (the plane or the manifest failed; ru
 | `pipeline-failed` | LightRAG accepted the document and failed to process it. |
 | `duplicate-content` | The text is a duplicate of a document that itself failed. |
 | `manifest-unavailable` | The manifest did not answer. The plane may hold the document; the next run repairs it as above. |
-| `delete-failed` | A tombstone's plane document could not be deleted. The row stays `active`, so the retry deletes it again. |
+| `delete-failed` | A tombstone's plane document could not be deleted, or the plane started the deletion and did not confirm it (a timeout, a failed poll, a fenced plane). The row stays `active`, so the retry plans it and deletes it again. |
 
 ## Related
 

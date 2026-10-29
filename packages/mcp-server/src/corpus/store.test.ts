@@ -59,14 +59,14 @@ describeLive("the corpus manifest against a live index", () => {
 		await index.close().catch(() => undefined);
 	});
 
-	test("a recorded document round-trips through rowFor and rowsInScope", async () => {
+	test("a recorded document round-trips through rowFor and rowsForRepos", async () => {
 		await store.recordIngested(doc("README.md", { tier: 2, commit: undefined }));
 		await store.recordIngested(doc("other.md", { repo: OTHER }));
 		expect(await store.rowFor(REPO, "README.md")).toMatchObject({ repo: REPO, path: "README.md", kind: "doc", tier: 2, sha256: "a".repeat(64), bytes: 12, source: "fs", commit: null, state: "active", documentId: `doc-${MARKER}-README.md` });
-		const scoped = await store.rowsInScope({ repos: [REPO], maxTier: 3, sources: ["fs"] });
+		const scoped = await store.rowsForRepos([REPO]);
 		expect(scoped.map((row) => row.path)).toEqual(["README.md"]);
 		expect(await store.rowFor(REPO, "missing.md")).toBeNull();
-		expect(await store.rowsInScope({ repos: [], maxTier: 3, sources: ["fs"] })).toEqual([]);
+		expect(await store.rowsForRepos([])).toEqual([]);
 	});
 
 	test("recording the same key again replaces the row in place and returns it to active", async () => {
@@ -74,8 +74,21 @@ describeLive("the corpus manifest against a live index", () => {
 		await store.recordIngested(doc("changing.md", { sha256: "b".repeat(64), documentId: `doc-${MARKER}-changing-2` }));
 		const row = defined(await store.rowFor(REPO, "changing.md"), "the row");
 		expect({ sha: row.sha256, id: row.documentId, state: row.state }).toEqual({ sha: "b".repeat(64), id: `doc-${MARKER}-changing-2`, state: "active" });
-		const all = await store.rowsInScope({ repos: [REPO], maxTier: 3, sources: ["fs"] });
+		const all = await store.rowsForRepos([REPO]);
 		expect(all.filter((entry) => entry.path === "changing.md")).toHaveLength(1);
+	});
+
+	test("refreshMetadata rewrites kind, tier, source and commit of the active row at the same sha256 and bumps the version; any other state or sha is untouched", async () => {
+		await store.recordIngested(doc("refresh.md", { source: "github", commit: "aaa1111" }));
+		const before = await store.manifestVersion();
+		const refreshed = { repo: REPO, path: "refresh.md", sha256: "a".repeat(64), kind: "runbook" as const, tier: 2 as const, source: "fs" as const, commit: "bbb2222" };
+		expect(await store.refreshMetadata(refreshed)).toBe(true);
+		expect(await store.rowFor(REPO, "refresh.md")).toMatchObject({ kind: "runbook", tier: 2, source: "fs", commit: "bbb2222", state: "active", documentId: `doc-${MARKER}-refresh.md` });
+		expect(await store.manifestVersion()).toBeGreaterThan(before);
+		expect(await store.refreshMetadata({ ...refreshed, sha256: "c".repeat(64) })).toBe(false);
+		await store.markTombstoned(REPO, "refresh.md");
+		expect(await store.refreshMetadata(refreshed)).toBe(false);
+		expect(await store.refreshMetadata({ ...refreshed, path: "never-existed.md" })).toBe(false);
 	});
 
 	test("a tombstone changes an active row once, a second one is a no-op, and a re-record makes it active again", async () => {

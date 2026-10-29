@@ -1,21 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { CORPUS_PROTOCOL, type CorpusScope } from "@substrate/corpus";
+import { CORPUS_PROTOCOL, MAX_COVERAGE_PAIRS, MAX_INGEST_DOCUMENTS, MAX_INGEST_TOMBSTONES, MAX_PLAN_ENTRIES, type CorpusScope } from "@substrate/corpus";
 import { defined } from "../test-support.ts";
 import { entryOf, makeDocument } from "./testkit.ts";
-import {
-	MAX_INGEST_DOCUMENTS,
-	MAX_INGEST_TOMBSTONES,
-	MAX_PATH_LENGTH,
-	MAX_PLAN_ENTRIES,
-	isValidPath,
-	isValidRepo,
-	parseEntry,
-	parseIngestRequest,
-	parsePlanRequest,
-} from "./validate.ts";
+import { MAX_PATH_LENGTH, isValidPath, isValidRepo, parseEntry, parseIngestRequest, parsePlanRequest } from "./validate.ts";
 
 const REPO = "swcstudiospace/agent-substrate";
-const SCOPE: CorpusScope = { repos: [REPO], maxTier: 2, sources: ["fs"] };
+const SCOPE: CorpusScope = { coverage: [{ repo: REPO, source: "fs" }], maxTier: 2 };
 const GOOD = entryOf(makeDocument(REPO, "docs/a.md", "text"));
 
 function refusedReason(result: { ok: boolean; reason?: string }): string | undefined {
@@ -68,18 +58,39 @@ describe("parseEntry refuses with the first closed reason", () => {
 describe("parsePlanRequest", () => {
 	const base = { protocol: CORPUS_PROTOCOL, entries: [GOOD], scope: SCOPE };
 
-	test("a good request parses and de-duplicates the scope", () => {
-		const parsed = parsePlanRequest({ ...base, scope: { repos: [REPO, REPO], maxTier: 2, sources: ["fs", "fs"] } });
+	test("a good request parses and de-duplicates the coverage pairs", () => {
+		const parsed = parsePlanRequest({
+			...base,
+			scope: {
+				coverage: [
+					{ repo: REPO, source: "fs" },
+					{ repo: REPO, source: "fs" },
+				],
+				maxTier: 2,
+			},
+		});
 		expect(parsed.ok && parsed.value.scope).toEqual(SCOPE);
 	});
 
-	test("another protocol version, an empty scope and a scope with no sources are refused", () => {
+	test("an empty coverage is a valid scope: the entries are planned and nothing is tombstoned", () => {
+		const parsed = parsePlanRequest({ ...base, scope: { coverage: [], maxTier: 3 } });
+		expect(parsed.ok && parsed.value.scope).toEqual({ coverage: [], maxTier: 3 });
+	});
+
+	test("another protocol version and a malformed scope are refused with a closed reason", () => {
 		expect(refusedReason(parsePlanRequest({ ...base, protocol: 2 }))).toBe("bad-protocol");
-		expect(refusedReason(parsePlanRequest({ ...base, scope: { ...SCOPE, repos: [] } }))).toBe("empty-scope");
-		expect(refusedReason(parsePlanRequest({ ...base, scope: { ...SCOPE, sources: [] } }))).toBe("empty-scope");
 		expect(refusedReason(parsePlanRequest({ ...base, scope: { ...SCOPE, maxTier: 7 } }))).toBe("bad-scope");
-		expect(refusedReason(parsePlanRequest({ ...base, scope: { ...SCOPE, sources: ["cvs"] } }))).toBe("bad-source");
+		expect(refusedReason(parsePlanRequest({ ...base, scope: { maxTier: 2 } }))).toBe("bad-scope");
+		expect(refusedReason(parsePlanRequest({ ...base, scope: { ...SCOPE, coverage: ["a/b"] } }))).toBe("bad-scope");
+		expect(refusedReason(parsePlanRequest({ ...base, scope: { ...SCOPE, coverage: [{ repo: "nope", source: "fs" }] } }))).toBe("bad-repo");
+		expect(refusedReason(parsePlanRequest({ ...base, scope: { ...SCOPE, coverage: [{ repo: REPO, source: "cvs" }] } }))).toBe("bad-source");
 		expect(refusedReason(parsePlanRequest({ ...base, scope: undefined }))).toBe("bad-scope");
+	});
+
+	test("the coverage cap is exact: the limit is accepted, one more pair is refused", () => {
+		const pairs = (count: number) => Array.from({ length: count }, (_, index) => ({ repo: `acme/r${index}`, source: "fs" }));
+		expect(parsePlanRequest({ ...base, scope: { coverage: pairs(MAX_COVERAGE_PAIRS), maxTier: 2 } }).ok).toBe(true);
+		expect(refusedReason(parsePlanRequest({ ...base, scope: { coverage: pairs(MAX_COVERAGE_PAIRS + 1), maxTier: 2 } }))).toBe("bad-scope");
 	});
 
 	test("more than the entry cap is refused before any entry is read; one bad entry refuses the whole request", () => {
