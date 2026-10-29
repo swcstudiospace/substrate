@@ -79,7 +79,7 @@ export function lightragOp(method: string, url: string): string {
 	const path = url.replace(/^[a-z]+:\/\/[^/]+/i, "").replace(/\?.*$/, "");
 	if (path === "/query") return "query";
 	if (path === "/health") return "health";
-	if (path === "/documents/upload" || path === "/documents/text") return "upload";
+	if (path === "/documents/upload" || path === "/documents/text" || path === "/documents/texts") return "upload";
 	if (path === "/documents/scan") return "scan";
 	if (path === "/documents/pipeline_status") return "pipeline-status";
 	if (path.startsWith("/documents/track_status/")) return "track-status";

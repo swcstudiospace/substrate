@@ -21,11 +21,16 @@
       "name": "@substrate/cli",
       "version": "0.1.0",
       "dependencies": {
+        "@substrate/corpus": "workspace:*",
         "@substrate/evidence": "workspace:*",
       },
     },
     "packages/collectors": {
       "name": "@substrate/collectors",
+      "version": "0.1.0",
+    },
+    "packages/corpus": {
+      "name": "@substrate/corpus",
       "version": "0.1.0",
     },
     "packages/evidence": {
@@ -58,6 +63,7 @@
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.32.1",
         "@substrate/audit": "workspace:*",
+        "@substrate/corpus": "workspace:*",
         "@substrate/evidence": "workspace:*",
         "@substrate/ledger": "workspace:*",
         "@substrate/observability": "workspace:*",
@@ -483,6 +489,8 @@
     "@substrate/cli": ["@substrate/cli@workspace:packages/cli"],
 
     "@substrate/collectors": ["@substrate/collectors@workspace:packages/collectors"],
+
+    "@substrate/corpus": ["@substrate/corpus@workspace:packages/corpus"],
 
     "@substrate/evidence": ["@substrate/evidence@workspace:packages/evidence"],
 

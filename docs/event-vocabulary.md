@@ -32,7 +32,8 @@ These apply to every source:
   `skills.sync`, `dod`, `doctor`, `slo.transition`, `docs.freshness`, `docs.canary`,
   `index.archive`, `alert`, and the v1.6 actions `session.checkpoint`, `session.rollback`,
   `session.rollback.refused`, `memory.forget`, `memory.capsule.export`,
-  `memory.capsule.redact`, `anchor.signer.rotate`, `anchor.reanchor`.
+  `memory.capsule.redact`, `anchor.signer.rotate`, `anchor.reanchor`, and the v1.7 actions
+  `docs.corpus.ingest` and `docs.corpus.refused`.
 - **Reserved actions are not writable through `events_emit` or `POST /events`.** A reader trusts `anchor.signer.rotate`, `anchor.reanchor`, `session.checkpoint`, `session.rollback`,
   `session.rollback.refused`, `session.rollback.forget_batch` and `memory.forget` by their action alone, and the event carries no proof of its writer, so both
   doors refuse them with a `reserved-action` error (nothing written) unless the caller is an operator emitting as its own surface; the server's own emits do not
@@ -103,6 +104,8 @@ These apply to every source:
 | `docs.search.failed` | 25 | `warning` | `caller` | `docs.search` | — | — | no |
 | `docs.ingest` | 25 | `note` | `caller` | `docs.ingest` | — | — | no |
 | `docs.ingest.refused` | 25 | `warning` | `caller` | `docs.ingest` | — | — | no |
+| `docs.corpus.ingest` | 63 | `note` | `caller` | `docs.corpus.ingest` | — | — | no |
+| `docs.corpus.refused` | 63 | `warning` | `caller` | `docs.corpus.refused` | — | — | no |
 | `memory.retain.failed` | 26 | `warning` | `memory-writer` | `memory.retain` | — | — | no |
 | `memory.write.accepted` | 26 | `note` | `memory-writer` | — | — | — | no |
 | `memory.write.conflict` | 26 | `note` | `memory-writer` | — | — | — | no |

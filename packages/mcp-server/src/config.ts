@@ -651,6 +651,8 @@ export interface SubstrateConfig {
 	 * plane is deleted unless the operator turns this on.
 	 */
 	docsPruneSuperseded: boolean;
+	/** The corpus atlas bulk ingest (v1.7 phase 63): closed unless `SUBSTRATE_CORPUS=on`, with the batching knobs it runs under. */
+	corpus: CorpusSettings;
 	/**
 	 * The three documented retrieval knobs sent on every `docs_search`
 	 * retrieval, from `SUBSTRATE_DOCS_SIMILARITY_THRESHOLD` (0.2),
@@ -1178,6 +1180,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		},
 		// uplift-2 R6
 		docsPruneSuperseded: (env.SUBSTRATE_DOCS_PRUNE_SUPERSEDED?.trim() ?? "") === "1",
+		corpus: loadCorpusSettings(env),
 		docsRetrieval: {
 			similarityThreshold: unitIntervalOr(env.SUBSTRATE_DOCS_SIMILARITY_THRESHOLD, DEFAULT_RETRIEVAL_KNOBS.similarityThreshold),
 			vectorSimilarityWeight: unitIntervalOr(env.SUBSTRATE_DOCS_VECTOR_WEIGHT, ragflowRetrieval.vectorSimilarityWeight),
@@ -1448,6 +1451,38 @@ function positiveOr(raw: string | undefined, fallback: number): number {
 function unitIntervalOr(raw: string | undefined, fallback: number): number {
 	const value = Number(raw?.trim());
 	return raw !== undefined && raw.trim() !== "" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : fallback;
+}
+
+/** The corpus atlas's switch and batching knobs (v1.7 phase 63). */
+export interface CorpusSettings {
+	/** `SUBSTRATE_CORPUS=on`. Off by default: the ingest answers `corpus.disabled` and nothing reaches the docs plane. */
+	enabled: boolean;
+	/** Batches in flight at once (`SUBSTRATE_CORPUS_CONCURRENCY`). */
+	concurrency: number;
+	/** Documents per batch (`SUBSTRATE_CORPUS_BATCH_DOCS`). */
+	batchDocs: number;
+	/** Bytes per batch (`SUBSTRATE_CORPUS_BATCH_BYTES`). */
+	batchBytes: number;
+}
+
+export const CORPUS_CONCURRENCY_BOUNDS = { min: 1, max: 16, fallback: 4 } as const;
+export const CORPUS_BATCH_DOCS_BOUNDS = { min: 1, max: 200, fallback: 20 } as const;
+export const CORPUS_BATCH_BYTES_BOUNDS = { min: 10_000, max: 5_000_000, fallback: 1_000_000 } as const;
+
+/** A whole number clamped into `[min, max]`; a value that is not a whole number is the fallback, so junk never widens a bound. */
+function clampedIntOr(raw: string | undefined, bounds: { min: number; max: number; fallback: number }): number {
+	const trimmed = raw?.trim() ?? "";
+	if (!/^\d+$/.test(trimmed)) return bounds.fallback;
+	return Math.min(bounds.max, Math.max(bounds.min, Number(trimmed)));
+}
+
+export function loadCorpusSettings(env: Record<string, string | undefined>): CorpusSettings {
+	return {
+		enabled: (env.SUBSTRATE_CORPUS?.trim().toLowerCase() ?? "") === "on",
+		concurrency: clampedIntOr(env.SUBSTRATE_CORPUS_CONCURRENCY, CORPUS_CONCURRENCY_BOUNDS),
+		batchDocs: clampedIntOr(env.SUBSTRATE_CORPUS_BATCH_DOCS, CORPUS_BATCH_DOCS_BOUNDS),
+		batchBytes: clampedIntOr(env.SUBSTRATE_CORPUS_BATCH_BYTES, CORPUS_BATCH_BYTES_BOUNDS),
+	};
 }
 
 /**

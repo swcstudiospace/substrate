@@ -189,7 +189,7 @@ describe("IndexStore.migrate() against a fake connection", () => {
 		expect(reason?.down).toBe("alter table planning_steering_audit drop column if exists reason");
 		const { store, events, ledger, tables, columns, reserved } = fakeIndex({ migrationOptIns: { "steering-audit": true } });
 		await store.migrate();
-		expect(ALL_WITH_STEERING_AUDIT).toEqual([...ALL, 33, 34]);
+		expect(ALL_WITH_STEERING_AUDIT).toEqual([...ALL, 33, 34].sort((a, b) => a - b));
 		expect(events).toEqual(expectedRun(new Set(), ALL_WITH_STEERING_AUDIT));
 		expect(ledger.has(33)).toBe(true);
 		expect(ledger.has(34)).toBe(true);

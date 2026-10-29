@@ -178,6 +178,9 @@ export const ROUTE_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	"/handoff": "write",
 	"/slo/history": "read",
 	"/docs/lightrag/query": "read",
+	"/corpus/plan": "read",
+	"/corpus/status": "read",
+	"/corpus/ingest": "write",
 };
 
 /** Monitoring traffic. Exempt on GET only: a POST to one of these is a 404, and a 404 is metered like any other unknown path. */
@@ -214,6 +217,8 @@ export const TOOL_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	session_checkpoint: "write",
 	session_rollback_commit: "write",
 	docs_ingest: "write",
+	corpus_status: "read",
+	corpus_ingest: "write",
 	skills_propose: "write",
 	docs_steering_session: "write",
 	skills_approve: "write",

@@ -30,6 +30,7 @@ import {
 	type FetchLike,
 	type LightragUploadRequest,
 } from "./lightrag.ts";
+import { createLightragBulkPlane, isAcceptableFileSource } from "./lightrag-bulk.ts";
 
 interface FixtureRoute {
 	id: string;
@@ -106,6 +107,10 @@ function cloneFixture(): Fixture {
 	return structuredClone(FIXTURE);
 }
 
+function sampleOf(routeId: string): unknown {
+	return FIXTURE.routes.find((route) => route.id === routeId)?.sampleResponse;
+}
+
 function routeRegex(path: string): RegExp {
 	return new RegExp(`^${path.replace(/[.*+?^$()|[\]\\]/g, "\\$&").replace(/\{[^}]+\}/g, "[^/]+")}$`);
 }
@@ -177,6 +182,10 @@ async function driveClient(fixture: Fixture): Promise<Emitted[]> {
 	await pollParseStatus(CONFIG, { dataset_id: "ds", document_id: "unused" }, fetchImpl, { maxPolls: 1, intervalMs: 0 });
 	await resolveDocumentIds(CONFIG, "upload_20260902_170612_abc123", fetchImpl, { maxPolls: 1 });
 	await deleteDocuments(CONFIG, "ds", ["doc-3f2a9c"], fetchImpl);
+	// The bulk plane reaches texts, pipeline_status and track_status; its delete reaches delete_document again.
+	const bulk = createLightragBulkPlane(CONFIG, { fetch: fetchImpl, sleep: async () => {} });
+	await bulk.insertBatch([{ name: "docs__a__README.md", text: "# Setup\nInstall it." }]);
+	await bulk.deleteDocuments(["doc-3f2a9c"]);
 	await probeLightrag(CONFIG, fetchImpl);
 	return emitted;
 }
@@ -246,6 +255,20 @@ const SCENARIOS: Record<string, (sample: unknown) => Promise<unknown>> = {
 	pipeline_status: (sample) => pollParseStatus(CONFIG, { dataset_id: "ds", document_id: "unused" }, async () => Response.json(sample), { maxPolls: 1, intervalMs: 0 }),
 	track_status: (sample) => resolveDocumentIds(CONFIG, "upload_20260902_170612_abc123", async () => Response.json(sample), { maxPolls: 1 }),
 	delete_document: (sample) => deleteDocuments(CONFIG, "ds", ["doc-3f2a9c"], async () => Response.json(sample)),
+	texts: (sample) => {
+		const trackId = isRecord(sample) ? String(sample.track_id) : "";
+		return createLightragBulkPlane(CONFIG, {
+			fetch: async (input) => {
+				const path = new URL(String(input)).pathname;
+				if (path === "/documents/texts") return Response.json(sample);
+				if (path === "/documents/pipeline_status") return Response.json(sampleOf("pipeline_status"));
+				// The documents are listed only under the track id the texts answer named.
+				if (path === `/documents/track_status/${trackId}`) return Response.json(sampleOf("track_status"));
+				return Response.json({ detail: "unexpected route" }, { status: 404 });
+			},
+			sleep: async () => {},
+		}).insertBatch([{ name: "docs__a__README.md", text: "# Setup" }]);
+	},
 	health: (sample) => probeLightrag(CONFIG, async () => Response.json(sample)),
 };
 
@@ -298,9 +321,15 @@ describe("the v1.5.7 route contract", () => {
 	});
 
 	test("every route path the client source calls is a fixture route (a new route cannot slip past the driver)", async () => {
-		const source = await Bun.file(new URL("./lightrag.ts", import.meta.url)).text();
-		const paths = [...source.matchAll(/call\(config, fetchImpl,\s*([`"])([^`"]*)\1/g)].map((match) => (match[2] ?? "").replace(/\$\{[^}]*\}/g, "x"));
-		expect(paths.length).toBe(FIXTURE.routes.length);
+		const paths: string[] = [];
+		for (const file of ["./lightrag.ts", "./lightrag-bulk.ts"]) {
+			const source = await Bun.file(new URL(file, import.meta.url)).text();
+			for (const match of source.matchAll(/[cC]all\((?:context\.)?config, (?:context\.)?fetchImpl,\s*([`"])([^`"]*)\1/g)) {
+				paths.push((match[2] ?? "").replace(/\$\{[^}]*\}/g, "x"));
+			}
+		}
+		// Each fixture route has exactly one distinct caller path, and every caller path is a fixture route.
+		expect(new Set(paths).size).toBe(FIXTURE.routes.length);
 		for (const path of paths) {
 			expect(FIXTURE.routes.some((route) => routeRegex(route.path).test(path))).toBe(true);
 		}
@@ -315,6 +344,53 @@ describe("the v1.5.7 route contract", () => {
 		const refused = await lightragCall(CONFIG, fetchImpl, "/documents", { method: "DELETE", json: true, body: "{}", timeoutMs: 100 });
 		expect(refused).toEqual({ ok: false, reason: "lightrag clear-all refused" });
 		expect(emitted.some((entry) => entry.path === "/documents")).toBe(false);
+		// The bulk delete uses the same choke point: ids that look like the clear-all route are document ids, never the route.
+		await createLightragBulkPlane(CONFIG, { fetch: fetchImpl, sleep: async () => {} }).deleteDocuments(["documents", "/", ".."]);
+		expect(emitted.some((entry) => entry.method === "DELETE" && entry.path !== "/documents/delete_document")).toBe(false);
+	});
+
+	test("isAcceptableFileSource keeps a name within what upstream accepts unchanged", () => {
+		// reject_unsafe_document_source (control characters, lone surrogates, U+FFFE and U+FFFF) and normalize_file_path
+		// (strip, the unknown_source sentinels, basename only, parser hint removal) of the v1.5.7 source.
+		for (const name of ["docs__a__README.md", "README.md", "name with spaces.md", "ünïcode.md", "emoji-\u{1F600}.md", "open.[bracket.md"]) {
+			expect(isAcceptableFileSource(name)).toBe(true);
+		}
+		for (const name of ["", " padded.md", "padded.md ", "\u0085edge.md", "tab\tinside.md", "nul\u0000.md", "del\u007f.md", "dir/name.md", "no-file-path", "unknown_source", ".", "..", "lone\ud800.md", "lone\udc00.md", "bad\ufffe.md", "bad\uffff.md", "name.[mineru].pdf"]) {
+			expect(isAcceptableFileSource(name)).toBe(false);
+		}
+	});
+
+	test("the texts request carries one accepted file_source per text, in order, and never an unsafe one", async () => {
+		const bodies: unknown[] = [];
+		let names: string[] = [];
+		const bulk = createLightragBulkPlane(CONFIG, {
+			fetch: async (input, init) => {
+				const path = new URL(String(input)).pathname;
+				if (path === "/documents/texts") {
+					const body: unknown = JSON.parse(String(init?.body));
+					bodies.push(body);
+					names = isRecord(body) && Array.isArray(body.file_sources) ? body.file_sources.map(String) : [];
+					return Response.json(sampleOf("texts"));
+				}
+				if (path === "/documents/pipeline_status") return Response.json(sampleOf("pipeline_status"));
+				return Response.json({ track_id: "t", documents: names.map((name, index) => ({ id: `doc-${index}`, status: "processed", file_path: name })) });
+			},
+			sleep: async () => {},
+		});
+		const outcomes = await bulk.insertBatch([
+			{ name: "ok.md", text: "a" },
+			{ name: "dir/unsafe.md", text: "b" },
+			{ name: " padded.md", text: "c" },
+			{ name: "fine__too.md", text: "d" },
+		]);
+		expect(bodies).toEqual([{ texts: ["a", "d"], file_sources: ["ok.md", "fine__too.md"] }]);
+		for (const name of names) expect(isAcceptableFileSource(name)).toBe(true);
+		expect(outcomes.map((outcome) => [outcome.name, outcome.status, outcome.reason])).toEqual([
+			["ok.md", "ingested", undefined],
+			["dir/unsafe.md", "failed", "rejected"],
+			[" padded.md", "failed", "rejected"],
+			["fine__too.md", "ingested", undefined],
+		]);
 	});
 
 	test("each hand-written sample response parses to what the fixture expects", async () => {
@@ -383,6 +459,11 @@ describe("fail-before: the checker rejects a mutated fixture or a non-conforming
 		const tracked = noDocs.routes.find((entry) => entry.id === "track_status");
 		if (tracked !== undefined) tracked.sampleResponse = { track_id: "t", documents: [], total_count: 0, status_summary: {} };
 		expect((await checkSamples(noDocs)).some((line) => line.startsWith("track_status: "))).toBe(true);
+
+		const noTexts = cloneFixture();
+		const texts = noTexts.routes.find((entry) => entry.id === "texts");
+		if (texts !== undefined) texts.sampleResponse = { status: "success", message: "m" };
+		expect((await checkSamples(noTexts)).some((line) => line.startsWith("texts: "))).toBe(true);
 	});
 
 	test("a route with no parsing scenario, or a read field missing from the sample, is a violation", async () => {
