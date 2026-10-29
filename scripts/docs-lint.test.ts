@@ -24,7 +24,7 @@ function tree(files: Record<string, string>): string {
 
 describe("brokenRelativeLinks", () => {
 	const here = "/repo/docs";
-	const present = ["/repo/docs/a.md", "/repo/README.md"];
+	const present = ["/repo/docs/a.md", "/repo/docs/my file.md", "/repo/docs/a(1).md", "/repo/README.md"];
 	const exists = (path: string): boolean => present.includes(path);
 
 	test("flags a target that resolves to no file and accepts one that does", () => {
@@ -45,9 +45,51 @@ describe("brokenRelativeLinks", () => {
 		expect(brokenRelativeLinks(text, here, exists)).toEqual(["gone.md", "also-gone.md"]);
 	});
 
-	test("skips inline code but not a link whose text is code", () => {
-		const text = "`[a](missing.md)` and ``[b](`x`.md)`` and [`c`](gone.md)";
+	test("checks a titled link, and ignores one whose target exists", () => {
+		expect(brokenRelativeLinks('[Guide](missing.md "Guide")', here, exists)).toEqual(["missing.md"]);
+		expect(brokenRelativeLinks('[Guide](a.md "Guide") [Other](a.md \'Other\')', here, exists)).toEqual([]);
+	});
+
+	test("reads an angle-wrapped destination that holds a space", () => {
+		expect(brokenRelativeLinks("[a](<my file.md>)", here, exists)).toEqual([]);
+		expect(brokenRelativeLinks("[b](<no such.md>)", here, exists)).toEqual(["no such.md"]);
+	});
+
+	test("reads a destination with balanced parentheses", () => {
+		expect(brokenRelativeLinks("[a](a(1).md) [b](b(2).md)", here, exists)).toEqual(["b(2).md"]);
+	});
+
+	test("follows a reference-style link to its definition", () => {
+		expect(brokenRelativeLinks("[x][ref]\n\n[ref]: missing.md\n", here, exists)).toEqual(["missing.md"]);
+		expect(brokenRelativeLinks("[x][ref]\n\n[ref]: a.md\n", here, exists)).toEqual([]);
+	});
+
+	test("checks an image destination", () => {
+		expect(brokenRelativeLinks("![alt](img/gone.png) ![ok](a.md)", here, exists)).toEqual(["img/gone.png"]);
+	});
+
+	test("percent-decodes the path and reports a missing one by its decoded name", () => {
+		expect(brokenRelativeLinks("[a](my%20file.md)", here, exists)).toEqual([]);
+		expect(brokenRelativeLinks("[b](no%20such.md#top)", here, exists)).toEqual(["no such.md#top"]);
+		expect(brokenRelativeLinks("[c](100%.md)", here, exists)).toEqual(["100%.md"]);
+	});
+
+	test("strips a query before the existence check and lists a repeated target once", () => {
+		expect(brokenRelativeLinks("[a](a.md?raw=1) [b](gone.md) [c](gone.md#x) [d](gone.md)", here, exists)).toEqual(["gone.md", "gone.md#x"]);
+	});
+
+	test("skips inline code, also one that crosses a line break, but not a link whose text is code", () => {
+		const text = "`[a](missing.md)` and ``[b](`x`.md)`` and [`c`](gone.md)\n\nintro `see\n[d](missing.md)` after";
 		expect(brokenRelativeLinks(text, here, exists)).toEqual(["gone.md"]);
+	});
+
+	test("a three-backtick line inside an indented code block opens no fence", () => {
+		const text = "para\n\n    ```\n    sample\n\n[x](gone.md)\n";
+		expect(brokenRelativeLinks(text, here, exists)).toEqual(["gone.md"]);
+	});
+
+	test("skips a fenced block inside a block quote", () => {
+		expect(brokenRelativeLinks("> ```md\n> [a](missing.md)\n> ```\n\n[b](gone.md)\n", here, exists)).toEqual(["gone.md"]);
 	});
 });
 
@@ -56,7 +98,14 @@ describe("missingTitle", () => {
 		expect(missingTitle("# Title\n\ntext\n")).toBe(false);
 		expect(missingTitle("text\n\n## Section\n")).toBe(true);
 		expect(missingTitle("#Title\n")).toBe(true);
+		expect(missingTitle("#\n")).toBe(true);
 		expect(missingTitle("")).toBe(true);
+	});
+
+	test("accepts extra spaces after the marker and a setext title", () => {
+		expect(missingTitle("#  Title\n")).toBe(false);
+		expect(missingTitle("Title\n=====\n")).toBe(false);
+		expect(missingTitle("Title\n-----\n")).toBe(true);
 	});
 
 	test("looks for the title after YAML front matter, and does not take front matter text for it", () => {
@@ -64,8 +113,10 @@ describe("missingTitle", () => {
 		expect(missingTitle("---\n# a comment: x\n---\n\ntext\n")).toBe(true);
 	});
 
-	test("does not count a heading inside a code fence", () => {
+	test("does not count a heading inside a code fence or an HTML comment", () => {
 		expect(missingTitle("```sh\n# not a title\n```\n")).toBe(true);
+		expect(missingTitle("<!--\n# Hidden title\n-->\n")).toBe(true);
+		expect(missingTitle("<!-- # Hidden title -->\n\n# Shown\n")).toBe(false);
 	});
 });
 
