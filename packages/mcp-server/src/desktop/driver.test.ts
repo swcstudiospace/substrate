@@ -466,7 +466,7 @@ describe("createDesktopDriver", () => {
 			);
 
 			expect(refused).toBeInstanceOf(Error);
-			expect((refused as Error).message).toContain("refusing desktop_run");
+			expect((refused as Error).message).toContain("docker context probe failed; refusing desktop_run");
 			expect((refused as Error).message).not.toContain("other-host");
 			expect(calls).toEqual([contextArgv()]);
 		});
@@ -485,7 +485,7 @@ describe("createDesktopDriver", () => {
 				);
 
 			expect(refused).toBeInstanceOf(Error);
-			expect((refused as Error).message).toContain("docker context probe failed; refusing desktop_run");
+			expect((refused as Error).message).toContain("docker context probe timed out; refusing desktop_run");
 			expect(calls).toEqual([contextArgv()]);
 			expect(events).toEqual([]);
 
