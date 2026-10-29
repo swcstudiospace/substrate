@@ -437,7 +437,7 @@ export function isStoredHandoff(value: unknown): value is HandoffPacket {
 	try {
 		// The builder fits the unsigned packet under the budget and signing adds the signature afterwards, so the two are measured
 		// apart: the packet without its signature against the packet budget, the signature against a bound of its own.
-		const { signature: _signature, ...unsigned } = { ...value };
+		const unsigned = Object.fromEntries(Object.entries(value).filter(([key]) => key !== "signature"));
 		if (Buffer.byteLength(canonicalJson(unsigned)) > MAX_PACKET_BYTES) return false;
 		return signature === undefined || signature === null || Buffer.byteLength(canonicalJson(signature)) <= MAX_SIGNATURE_BYTES;
 	} catch {
