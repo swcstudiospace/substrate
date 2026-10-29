@@ -38,6 +38,9 @@ describe("documentKeyOfUrl", () => {
 	});
 });
 
+/** The guard for questions that are never flagged: these tests are about ranks and requests, not about secrets. */
+const safe = (): boolean => false;
+
 describe("ranksFromSearchReply", () => {
 	test("keeps the first appearance of each corpus document in rank order and a null slot for every result that names none", () => {
 		const reply = ranksFromSearchReply({
@@ -49,7 +52,7 @@ describe("ranksFromSearchReply", () => {
 	test("an expected document in sixth place behind five non-corpus results misses at 5 and hits at 10", async () => {
 		const others = [1, 2, 3, 4, 5].map((n) => ({ source_url: `https://example.com/memory/${n}` }));
 		const fetchImpl: LiveOptions["fetchImpl"] = async () => Response.json({ chunks: [...others, { source_url: A }] });
-		const run = await runLiveQueries([question(1)], { base: "http://127.0.0.1:7410", token: "t", fetchImpl, now: () => 0 });
+		const run = await runLiveQueries([question(1)], { base: "http://127.0.0.1:7410", token: "t", fetchImpl, now: () => 0, unsafe: safe });
 		const score = scoreRun(run.results);
 		expect(score.recall5).toBe(0);
 		expect(score.recall10).toBe(1);
@@ -64,7 +67,6 @@ describe("ranksFromSearchReply", () => {
 });
 
 /** A guard that flags nothing; the guard is a required option, so every run passes one. */
-const safe = (): boolean => false;
 
 describe("runLiveQueries", () => {
 	function options(fetchImpl: LiveOptions["fetchImpl"], clock: { t: number }, unsafe: LiveOptions["unsafe"] = safe): LiveOptions {
