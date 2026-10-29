@@ -160,7 +160,7 @@ const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
 const MARKER = `ut-planning-hashes-${Date.now().toString(36)}`;
 const describeLive = PG_URL ? describe : describe.skip;
 
-// Needs a database (migration step 36):  SUBSTRATE_TEST_PG_URL=postgres://… bun test planning-hash-store
+// Needs a database (migration step 39):  SUBSTRATE_TEST_PG_URL=postgres://… bun test planning-hash-store
 describeLive("the Postgres adapter against a live index", () => {
 	let index: IndexStore;
 	let cleanup: SQL;

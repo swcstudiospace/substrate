@@ -107,6 +107,8 @@ import type { Substrate } from "./service.ts";
 import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
 import { approvalBodyProblem, approvalFailure, toApprovalRequest } from "./skills/registry.ts";
 import { EVENT_KINDS, SURFACES, type Surface } from "./types.ts";
+import { parseClaimsQuery } from "./worktree-claims.ts";
+import { parseWorktreeListQuery, validateWorktreeReport, WORKTREE_REPORT_MAX_BYTES } from "./worktree-registry.ts";
 import { isLocalPeer, livezBody, LoopLagMonitor } from "./watchdog.ts";
 import { ragRetryDelay } from "./rag-retry.ts";
 import { reservedEmitRefusal } from "./reserved-actions.ts";
@@ -304,6 +306,7 @@ const JSON_BODY_ROUTES: Record<string, true> = {
 	"/docs/merge-trigger": true,
 	"/skills/propose": true,
 	"/skills/approve": true,
+	"/worktrees/report": true,
 	"/mcp": true,
 };
 
@@ -340,6 +343,10 @@ function listLength(body: unknown, member: string): number {
 }
 /** Why an anonymous merge-trigger is refused, even on a run that allows anonymous callers. */
 const MERGE_TRIGGER_NEEDS_SURFACE = "docs merge-trigger needs an authenticated surface; nothing was refreshed";
+/** Why an anonymous worktree report is refused, even on a run that allows anonymous callers. */
+const WORKTREE_REPORT_NEEDS_SURFACE = "worktree report needs an authenticated surface; nothing was stored";
+/** Why an anonymous claims read is refused: it names the sessions holding a graph's nodes. */
+const WORKTREE_CLAIMS_NEEDS_SURFACE = "worktree claims need an authenticated surface";
 /** The dataset a post-merge hook triggers when the body names none (DOCS-03's own repo row). */
 const MERGE_TRIGGER_DATASET = "agent-substrate";
 
@@ -1635,6 +1642,38 @@ export function createHttpServer(
 				sendJson(res, reply.status, reply.body);
 				return;
 			}
+			// Corpus proofs (v1.7 phase 69): the root, one document's inclusion proof and a root's anchor status. Reads, audited under
+			// `corpus_status` (fail-open) like the plan and the status; an anonymous caller is refused first.
+			if (req.method === "GET" && url.pathname === "/corpus/root") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "root" }))) return;
+				const reply = await substrate.corpusRoot(surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			if (req.method === "GET" && url.pathname === "/corpus/proof") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "proof" }))) return;
+				const reply = await substrate.corpusProof({ repo: url.searchParams.get("repo"), path: url.searchParams.get("path") }, surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			if (req.method === "GET" && url.pathname === "/corpus/anchor") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "anchor" }))) return;
+				const reply = await substrate.corpusAnchor(url.searchParams.get("root"), surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
 			// SPE-19388 LightRAG query surface (SPE-19384 RAG replacement):
 			// REST/JSON over `POST /query`, same Hindsight fallback and
 			// idempotency as the `docs_lightrag_query` MCP tool. Read-only
@@ -1960,6 +1999,86 @@ export function createHttpServer(
 				return;
 			}
 
+			// The worktree registry (phase 68). A report names a host's checkouts, so an anonymous caller is refused before the body
+			// is read, even on a run that allows untokened callers. A registry that is off, a VM guest and a server with no index are
+			// refused just as early, so nothing is read, audited or stored. The accepted report is audited fail-closed.
+			if (req.method === "POST" && url.pathname === "/worktrees/report") {
+				if (surface === null) {
+					sendJson(res, 401, { error: WORKTREE_REPORT_NEEDS_SURFACE });
+					return;
+				}
+				const refusal = substrate.worktreeGate(true);
+				if (refusal !== null) {
+					sendJson(res, refusal.status, refusal.body);
+					return;
+				}
+				// The cap is the contract's own constant, which the CLI's report splitter reads too, so the two cannot drift.
+				const checked = validateWorktreeReport(JSON.parse(await readBody(req, WORKTREE_REPORT_MAX_BYTES)));
+				if (!checked.ok) {
+					sendJson(res, 400, { error: "worktrees.invalid", problem: checked.problem });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "worktree_report", { host: checked.value.host, worktrees: checked.value.worktrees.length }))) return;
+				const outcome = await substrate.reportWorktrees(checked.value, surface);
+				if (!outcome.ok) {
+					sendJson(res, outcome.status, outcome.body);
+					return;
+				}
+				sendJson(res, 200, { stored: outcome.stored, removed: outcome.removed });
+				return;
+			}
+
+			// The prune guard's question (phase 68): the unexpired leases of one graph. It reads graph data the `graph_get` tool
+			// already serves and writes nothing, so it is audited under that tool's name (fail-open, class `read`) and is not
+			// behind SUBSTRATE_WORKTREE_REGISTRY. An index that is missing or did not answer is 503, never an empty list.
+			if (req.method === "GET" && url.pathname === "/worktrees/claims") {
+				if (surface === null) {
+					sendJson(res, 401, { error: WORKTREE_CLAIMS_NEEDS_SURFACE });
+					return;
+				}
+				const query = parseClaimsQuery(url.searchParams.get("graph_id") ?? undefined);
+				if (!query.ok) {
+					sendJson(res, 400, { error: "worktrees.invalid", problem: query.problem });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "graph_get", { graph_id: query.value }))) return;
+				const outcome = await substrate.worktreeClaims(query.value);
+				if (!outcome.ok) {
+					sendJson(res, outcome.status, outcome.body);
+					return;
+				}
+				sendJson(res, 200, { graph_id: outcome.graph_id, claims: outcome.claims });
+				return;
+			}
+
+			// The registry read, the same filters as the `worktree_list` tool and audited under its name, fail-open.
+			if (req.method === "GET" && url.pathname === "/worktrees") {
+				const refusal = substrate.worktreeGate(false);
+				if (refusal !== null) {
+					sendJson(res, refusal.status, refusal.body);
+					return;
+				}
+				const query = parseWorktreeListQuery({
+					repo: url.searchParams.get("repo") ?? undefined,
+					host: url.searchParams.get("host") ?? undefined,
+					state: url.searchParams.get("state") ?? undefined,
+					limit: url.searchParams.get("limit") ?? undefined,
+				});
+				if (!query.ok) {
+					sendJson(res, 400, { error: "worktrees.invalid", problem: query.problem });
+					return;
+				}
+				const { repo, host, state, limit } = query.value;
+				if (!(await auditedRest(res, observability, surface, "worktree_list", { ...(repo === null ? {} : { repo }), ...(host === null ? {} : { host }), state, limit }))) return;
+				const outcome = await substrate.listWorktrees(query.value);
+				if (!outcome.ok) {
+					sendJson(res, outcome.status, outcome.body);
+					return;
+				}
+				sendJson(res, 200, { worktrees: outcome.worktrees, truncated: outcome.truncated });
+				return;
+			}
+
 			if (url.pathname === "/mcp") {
 				await handleMcp(req, res, substrate, caller, observability, claim, admission);
 				return;
@@ -1967,7 +2086,7 @@ export function createHttpServer(
 
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
-			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/corpus/plan" || url.pathname === "/corpus/ingest" || url.pathname === "/corpus/reconcile" || url.pathname === "/mcp" || url.pathname === "/memory")) {
+			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/corpus/plan" || url.pathname === "/corpus/ingest" || url.pathname === "/corpus/reconcile" || url.pathname === "/mcp" || url.pathname === "/memory" || url.pathname === "/worktrees/report")) {
 				sendJson(res, 413, { error: cause.message });
 				return;
 			}

@@ -45,6 +45,7 @@ import { loadIngestRecords, saveIngestRecords, type IngestRecord } from "./docs-
 import { RetainOutbox, type RetainOutboxEntry } from "./retain-outbox.ts";
 import { Substrate } from "./service.ts";
 import { MIGRATION_STEPS, type MigrationStep } from "./index-store.ts";
+import { defined } from "./test-support.ts";
 
 const FIXTURES = join(import.meta.dir, "../../../fixtures/rollback-9231f43");
 
@@ -633,7 +634,8 @@ const STEPS_ADDED_SINCE_REFERENCE: Readonly<Record<number, string>> = {
 	31: "memory_entries_repo_idx",
 	32: "skills_registry_version",
 	35: "corpus_documents",
-	36: "planning_page_hashes",
+	36: "worktrees",
+	39: "planning_page_hashes",
 };
 /** The highest `MIGRATION_STEPS` version when the pin above was written (commit 9aec7a1). */
 const LAST_STEP_AT_PIN = 32;
@@ -671,6 +673,15 @@ describe("index (Postgres) migration steps added since the 9231f43 reference rel
 	test("every step added since is named in docs/runbooks/rollback-compat.md", () => {
 		const missing = stepsMissingFromRunbook(stepsSinceReference(MIGRATION_STEPS), runbook);
 		expect({ unmentionedSteps: missing }).toEqual({ unmentionedSteps: [] });
+	});
+
+	test("the worktree registry step (phase 68) is one of the steps added since: a new table and its index, both guarded, and both named in the runbook", () => {
+		const step = stepsSinceReference(MIGRATION_STEPS).find((candidate) => candidate.name === "worktrees");
+		expect(step?.phase).toBe("expand");
+		expect(nonAdditiveStatements(defined(step, "the worktrees step"))).toEqual([]);
+		expect(step?.sql).toContain("create table if not exists worktrees");
+		expect(step?.sql).toContain("create index if not exists worktrees_repo_seen_idx");
+		expect(runbook).toContain("`worktrees_repo_seen_idx`");
 	});
 
 	test("the additive rule fires: a drop, a rename, a type change, an unguarded create and a NOT NULL column without a default are each caught", () => {

@@ -72,6 +72,7 @@ import {
 import { redact } from "./redact.ts";
 import { FORGET_MARKER_PREFIX, isForgetMarker, MAX_FORGET_ENTRIES, MAX_ROLLBACK_SELECT_LIMIT } from "./memory-forget.ts";
 import { transition, type SkillDecision, type SkillDecisionResult, type SkillRegistryRow, type SkillState } from "./skills/registry.ts";
+import { PgWorktreeRegistry, type WorktreeRegistryStore } from "./worktree-registry.ts";
 
 /** The most entry ids one `forgottenEntryIds` call reads (a recall fan-out holds a few hits per bank). */
 const MAX_FORGET_LOOKUP_IDS = 500;
@@ -722,13 +723,49 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 			create index if not exists corpus_documents_sha256_idx on corpus_documents (sha256);
 			create index if not exists corpus_documents_docs_document_id_idx on corpus_documents (docs_document_id)`,
 	},
+	// Phase 68 (FLEET-02): the worktree registry, one row per (host, path) as the latest report left it. Additive: a new table and
+	// its index, nothing existing is touched, and an older release never names either. The table holds what reporters sent
+	// (paths, branches, heads, counts), not content. `is_primary` is the report's `primary`, which is a reserved word in SQL.
+	// It is not in the index archive's closed table list: the registry is rebuilt by the next report from each host, so an
+	// archive of it would only restore stale paths.
+	{
+		version: 36,
+		name: "worktrees",
+		phase: "expand",
+		down: `drop table if exists worktrees`,
+		sql: `
+			create table if not exists worktrees (
+				host text not null,
+				path text not null,
+				repo text not null,
+				branch text,
+				head text not null,
+				base text,
+				dirty boolean not null default false,
+				ahead integer,
+				behind integer,
+				last_commit_at timestamptz,
+				size_bytes bigint,
+				locked boolean not null default false,
+				is_primary boolean not null default false,
+				pr_state text not null default 'unknown',
+				session_id text,
+				graph_id text,
+				first_seen_at timestamptz not null,
+				last_seen_at timestamptz not null,
+				reported_at timestamptz not null,
+				primary key (host, path)
+			);
+			create index if not exists worktrees_repo_seen_idx on worktrees (repo, last_seen_at)`,
+	},
 	// v1.7 phase 65 (doc watch): the planning refresh's per-page content hashes, so a restart ingests only the pages that
 	// changed. One row per `.planning/` path; written only by the planning refresh while `SUBSTRATE_PLANNING_HASH_STORE=on`
-	// (the default is off, and an empty table costs nothing, so the step always runs, like step 35).
+	// (the default is off, and an empty table costs nothing, so the step always runs, like step 35). It takes version 39: 36 is
+	// the worktree registry, and the numbers between belong to a branch not merged here.
 	// Additive and idempotent: one new table, no existing row touched. An older release never names it. OPERATORS: rehearse on a
 	// restored dump before production, like steps 33 to 35.
 	{
-		version: 36,
+		version: 39,
 		name: "planning_page_hashes",
 		phase: "expand",
 		down: `drop table if exists planning_page_hashes`,
@@ -788,8 +825,16 @@ export class IndexStore implements MemoryStore {
 	}
 
 	/**
+	 * The worktree registry over this store's pool (phase 68): the upsert-and-sweep report and the filtered listing. It only
+	 * builds the adapter; no statement runs until a report or a listing is served, and the table is created by step 36.
+	 */
+	worktreeRegistry(): WorktreeRegistryStore {
+		return new PgWorktreeRegistry(this.sql, (op, fn) => this.plane(op, fn));
+	}
+
+	/**
 	 * The planning refresh's page hashes over this store's pool (v1.7 phase 65). It only builds the store; no statement runs
-	 * until the refresh loads it, and the table exists after migration step 36.
+	 * until the refresh loads it, and the table exists after migration step 39.
 	 */
 	planningHashStore(): PlanningHashStore {
 		return bunPlanningHashStore(this.sql);

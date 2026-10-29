@@ -97,7 +97,7 @@ export function estimateTokens(bytes: number): number {
  * cache does not know is recorded as `unknown`, never as the raw string.
  * `would_serve_stale` is only ever counted under `SUBSTRATE_CACHE_SWR=shadow`.
  */
-export const CACHE_METRIC_CLASSES = ["brief", "memory-search", "graph-view", "brief-snapshot", "recall-snapshot", "docs-search", "budget", "gen"] as const;
+export const CACHE_METRIC_CLASSES = ["brief", "memory-search", "graph-view", "brief-snapshot", "recall-snapshot", "docs-search", "emb", "budget", "gen"] as const;
 export const CACHE_METRIC_RESULTS = ["hit", "miss", "bypass", "error", "coalesced", "stale", "refresh", "would_serve_stale"] as const;
 export type CacheMetricResult = (typeof CACHE_METRIC_RESULTS)[number];
 

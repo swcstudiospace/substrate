@@ -1416,6 +1416,55 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		}),
 	},
 	{
+		id: "docs.corpus.root",
+		phase: 69,
+		kind: "note",
+		surface: { fixed: "substrate" },
+		actions: ["docs.corpus.root"],
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "substrate",
+			kind: "note",
+			summary: "corpus root 0123456789ab over 42 documents (manifest 7)",
+			session_id: "corpus-root",
+			payload: { action: "docs.corpus.root", root: HEX_64, count: 42, manifest_version: 7 },
+		}),
+	},
+	{
+		id: "worktrees.report",
+		phase: 68,
+		kind: "note",
+		surface: "caller",
+		actions: ["worktrees.report"],
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "note",
+			summary: "worktree report from host-a: 12 stored, 0 removed",
+			session_id: "worktrees:host-a",
+			payload: { action: "worktrees.report", stored: 12, removed: 0 },
+		}),
+	},
+	{
+		id: "worktree.prune",
+		phase: 68,
+		kind: "note",
+		surface: "caller",
+		actions: ["worktree.prune"],
+		carriesRepo: true,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "note",
+			summary: "worktree removed: swcstudiospace/substrate gsd/r14-corpus-atlas",
+			repo: "swcstudiospace/substrate",
+			branch: "gsd/r14-corpus-atlas",
+			payload: { action: "worktree.prune", path: "/srv/worktrees/atlas", head: "0123456789abcdef0123456789abcdef01234567", size_bytes: 1048576, class: "safe", reasons: ["merged"] },
+		}),
+	},
+	{
 		// v1.7 phase 65: one note per `substrate corpus` sync (the watcher, a git hook hint, the sweep, a manual run or the
 		// reconcile): the repository, why it ran, how it ended, the lag from the change to the end of the ingest, and counts.
 		// The server reads only `lag_s`, into the `substrate.corpus.sync_lag_seconds` gauge. Names and numbers, never text.

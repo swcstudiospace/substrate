@@ -50,6 +50,22 @@ export interface RefreshedMetadata {
 	commit?: string | undefined;
 }
 
+/** What the Merkle root covers of one document. */
+export interface ManifestLeaf {
+	repo: string;
+	path: string;
+	sha256: string;
+}
+
+/** The ACTIVE rows' leaves and the manifest version they were read at, from one consistent read. */
+export interface ActiveLeaves {
+	manifestVersion: number;
+	/** At most `limit` leaves, in no particular order. */
+	leaves: ManifestLeaf[];
+	/** True when more than `limit` rows are active: `leaves` is a prefix, so no root may be made from it. */
+	truncated: boolean;
+}
+
 /**
  * `status()` without the protocol member and the lag the route computes. `newestChangeAt` is the newest manifest write of any
  * kind, so the route can age it against its own clock; the freshness check reads `lastIngestAt`.
@@ -76,6 +92,11 @@ export interface CorpusStore {
 	 * than it will use: a full answer means there may be more.
 	 */
 	activeRows(limit: number): Promise<ManifestRow[]>;
+	/**
+	 * The leaves of the ACTIVE rows (at most `limit`, `truncated` when there are more) and the manifest version of the very read
+	 * that returned them, so a root made from them names the version it covers.
+	 */
+	activeLeaves(limit: number): Promise<ActiveLeaves>;
 	status(): Promise<CorpusStatusSummary>;
 	manifestVersion(): Promise<number>;
 }
@@ -191,6 +212,16 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 			});
 		},
 		manifestVersion,
+		async activeLeaves(limit: number): Promise<ActiveLeaves> {
+			// One statement, so the version and the rows come from one snapshot. The left join keeps the version when no row is active.
+			const rows: Array<Record<string, unknown>> = await sql`
+				select v.version::text as version, d.repo, d.path, d.sha256
+				from (select coalesce(max(manifest_seq), 0) as version from corpus_documents) v
+				left join (select repo, path, sha256 from corpus_documents where state = 'active' limit ${limit + 1}) d on true`;
+			const manifestVersion = numberOf(rows[0]?.version);
+			const leaves = rows.flatMap((row) => (typeof row.repo === "string" && typeof row.path === "string" && typeof row.sha256 === "string" ? [{ repo: row.repo, path: row.path, sha256: row.sha256 }] : []));
+			return { manifestVersion, leaves: leaves.slice(0, limit), truncated: leaves.length > limit };
+		},
 		async status(): Promise<CorpusStatusSummary> {
 			const [totals, byRepo, byKind, byTier, last, newest, version] = await Promise.all([
 				sql`select count(*) filter (where state = 'active')::int as active, count(*) filter (where state = 'tombstoned')::int as tombstoned from corpus_documents`,

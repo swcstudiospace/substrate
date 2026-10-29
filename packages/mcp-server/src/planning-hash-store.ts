@@ -4,7 +4,7 @@
  * The refresh used to keep them in a map in memory, so every restart re-ingested every planning page. With
  * `SUBSTRATE_PLANNING_HASH_STORE=on` the map is loaded once from a store behind this port and the pages a batch put into the
  * plane are written back, so a restart ingests only what changed. The port is small on purpose: the Postgres adapter is a
- * table keyed by path (`planning_page_hashes`, migration step 36), the in-memory adapter serves a deployment with no index
+ * table keyed by path (`planning_page_hashes`, migration step 39), the in-memory adapter serves a deployment with no index
  * and the tests.
  *
  * A store never deletes: a page removed from the repository leaves its row, which costs nothing (the refresh only looks
@@ -35,7 +35,7 @@ export function memoryPlanningHashStore(initial: ReadonlyMap<string, string> = n
 	};
 }
 
-/** The Bun SQL adapter over `planning_page_hashes` (migration step 36). */
+/** The Bun SQL adapter over `planning_page_hashes` (migration step 39). */
 export function bunPlanningHashStore(sql: SQL): PlanningHashStore {
 	return {
 		async load() {

@@ -1,5 +1,5 @@
 /**
- * Aggregate status across the seven fabric resources (phase 51, SOTA-07). Pure: it reads a facts object and
+ * Aggregate status across the eight fabric resources (phase 51, SOTA-07; the embedding service joined in phase 64). Pure: it reads a facts object and
  * returns rows, so it is testable without a service, a socket or a clock.
  *
  * State rules, applied in this order for a service row:
@@ -65,7 +65,7 @@ export function proxyRow(facts: FabricFacts): FabricResourceStatus {
 	};
 }
 
-/** The seven rows in report order, with per-state counts. Pure. */
+/** The eight rows in report order, with per-state counts. Pure. */
 export function buildFabricStatus(facts: FabricFacts): FabricStatus {
 	const at = facts.checkedAt;
 	const resources: FabricResourceStatus[] = [
@@ -75,11 +75,20 @@ export function buildFabricStatus(facts: FabricFacts): FabricStatus {
 		serviceRow("ragflow", "not-applicable", facts.services.ragflow, at),
 		serviceRow("lightrag", "not-applicable", facts.services.lightrag, at),
 		serviceRow("hindsight", "not-applicable", facts.services.hindsight, at),
+		teiRow(facts, at),
 		proxyRow(facts),
 	];
 	const counts: FabricStatus["counts"] = { ok: 0, degraded: 0, unavailable: 0, unconfigured: 0 };
 	for (const row of resources) counts[row.state] += 1;
 	return { checkedAt: at, resources, counts };
+}
+
+/** The embedding service's row: its class is `TEI_URL`'s, and a configured one carries the model, its source, the dimension and the latency the client saw. */
+function teiRow(facts: FabricFacts, checkedAt: string): FabricResourceStatus {
+	const row = serviceRow("tei", facts.tei.endpointClass ?? "unset", facts.services.tei, checkedAt);
+	if (!facts.services.tei.configured) return row;
+	const { model, modelSource, dimension, latencyMs } = facts.tei;
+	return { ...row, detail: { model, modelSource, dimension, latencyMs } };
 }
 
 function serviceRow(

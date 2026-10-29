@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { CORPUS_NAME_PREFIX, type CorpusDocument, type CorpusEntry } from "@substrate/corpus";
 import type { BulkDocumentOutcome, BulkTextDocument, LightragBulkPlane, PlaneListedDocument, PlaneListing } from "../planes/lightrag-bulk.ts";
 import { planeDocumentIdForName } from "./names.ts";
-import type { CorpusStatusSummary, CorpusStore, ManifestRow, RecordedDocument, RefreshedMetadata } from "./store.ts";
+import type { ActiveLeaves, CorpusStatusSummary, CorpusStore, ManifestRow, RecordedDocument, RefreshedMetadata } from "./store.ts";
 
 export function sha256Hex(text: string): string {
 	return createHash("sha256").update(text, "utf8").digest("hex");
@@ -113,6 +113,15 @@ export class FakeStore implements CorpusStore {
 
 	async manifestVersion(): Promise<number> {
 		return this.seq;
+	}
+
+	/** Counts every read, so a test can say whether a path asked the manifest at all. */
+	leafReads = 0;
+
+	async activeLeaves(limit: number): Promise<ActiveLeaves> {
+		this.leafReads += 1;
+		const active = [...this.rows.values()].filter((row) => row.state === "active").map(({ repo, path, sha256 }) => ({ repo, path, sha256 }));
+		return { manifestVersion: this.seq, leaves: active.slice(0, limit), truncated: active.length > limit };
 	}
 
 	async status(): Promise<CorpusStatusSummary> {

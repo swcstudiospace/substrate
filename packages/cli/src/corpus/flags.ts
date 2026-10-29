@@ -3,20 +3,28 @@
 export interface FlagSpec {
 	values: readonly string[];
 	bools: readonly string[];
+	/** How many bare arguments the command takes (a file name). */
+	positionals?: number;
 }
 
 export interface Parsed {
 	values: Map<string, string[]>;
 	bools: Set<string>;
+	positionals: string[];
 }
 
 /** The parsed flags, or the sentence that says what was wrong with them. */
 export function parseFlags(argv: readonly string[], spec: FlagSpec): Parsed | string {
 	const values = new Map<string, string[]>();
 	const bools = new Set<string>();
+	const positionals: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i] ?? "";
-		if (!arg.startsWith("--")) return `unexpected argument ${JSON.stringify(arg)}`;
+		if (!arg.startsWith("--")) {
+			if (positionals.length >= (spec.positionals ?? 0)) return `unexpected argument ${JSON.stringify(arg)}`;
+			positionals.push(arg);
+			continue;
+		}
 		const eq = arg.indexOf("=");
 		const name = arg.slice(2, eq === -1 ? undefined : eq);
 		if (spec.bools.includes(name)) {
@@ -31,7 +39,7 @@ export function parseFlags(argv: readonly string[], spec: FlagSpec): Parsed | st
 			return `unknown flag --${name}`;
 		}
 	}
-	return { values, bools };
+	return { values, bools, positionals };
 }
 
 export function positiveInt(text: string | undefined): number | null {

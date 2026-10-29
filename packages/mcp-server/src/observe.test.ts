@@ -371,6 +371,17 @@ describe("auditToolCalls", () => {
 		}
 	});
 
+	test("the worktree registry doors are known tools and known routes, and a path under them is not", () => {
+		expect({ list: toolLabel("worktree_list"), report: toolLabel("worktree_report") }).toEqual({ list: "worktree_list", report: "worktree_report" });
+		expect({ report: normalizeRoute("/worktrees/report"), list: normalizeRoute("/worktrees") }).toEqual({ report: "/worktrees/report", list: "/worktrees" });
+		expect(normalizeRoute("/worktrees/report/../../etc")).toBe("other");
+	});
+
+	test("the worktree claims route is a known route and a path under it is not", () => {
+		expect(normalizeRoute("/worktrees/claims")).toBe("/worktrees/claims");
+		expect(normalizeRoute("/worktrees/claims/../../etc")).toBe("other");
+	});
+
 	test("toolLabel keeps the tools that exist", () => {
 		expect(toolLabel("graph_claim")).toBe("graph_claim");
 		expect(toolLabel("desktop_run")).toBe("desktop_run");

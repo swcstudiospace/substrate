@@ -144,15 +144,18 @@ export {
 } from "./slo.ts";
 
 export {
+	type AuxPlaneName,
 	type BreakerSettings,
 	type BreakerSnapshot,
 	type BreakerState,
+	type GatePlaneName,
 	type PlaneFetch,
 	type PlaneGate,
 	type PlaneName,
 	type PlaneObserver,
 	type PlaneOutcome,
 	type PlaneSample,
+	AUX_PLANES,
 	BREAKER_ENV,
 	BREAKER_FAILURES_ENV,
 	BREAKER_OPEN_MS_ENV,

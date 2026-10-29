@@ -169,10 +169,14 @@ import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachab
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth, type HindsightConfig } from "./planes/hindsight.ts";
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
 import { lightragOp, probeLightrag, queryForTool, type LightragQueryMode, type LightragToolOutcome } from "./planes/lightrag.ts";
+import { createTeiClient, teiOp, type TeiClient } from "./planes/tei.ts";
+import { createEmbeddingService, type EmbeddingService } from "./embed.ts";
 import { createLightragBulkPlane, type LightragBulkPlane } from "./planes/lightrag-bulk.ts";
-import { corpusIngestReply, corpusPlanReply, corpusReconcileReply, corpusStatusReply, type CorpusReply, type CorpusServiceDeps } from "./corpus/service.ts";
+import { corpusAnchorReply, corpusIngestReply, corpusPlanReply, corpusProofReply, corpusReconcileReply, corpusRootReply, corpusStatusReply, type CorpusReply, type CorpusServiceDeps } from "./corpus/service.ts";
+import type { AnchorVerifier } from "./corpus/anchor.ts";
+import { CorpusRootKeeper, type RootClock } from "./corpus/root.ts";
 import type { CorpusStore } from "./corpus/store.ts";
-import type { CorpusIngestResponse, CorpusPlanResponse, CorpusReconcileResponse, CorpusStatusResponse } from "@substrate/corpus";
+import { shortRoot, type CorpusAnchorResponse, type CorpusIngestResponse, type CorpusPlanResponse, type CorpusProofResponse, type CorpusReconcileResponse, type CorpusRootResponse, type CorpusStatusResponse } from "@substrate/corpus";
 import { memoryPlanningHashStore, type PlanningHashStore } from "./planning-hash-store.ts";
 import { RailwayClient } from "./railway.ts";
 import { nodePlanningFs } from "./planning/fs.ts";
@@ -274,6 +278,16 @@ import {
 	type Surface,
 	type SubstrateEvent,
 } from "./types.ts";
+import { liveClaims, type WorktreeClaimsOutcome } from "./worktree-claims.ts";
+import {
+	staleCutoff,
+	type WorktreeListOutcome,
+	type WorktreeListQuery,
+	type WorktreeRefusal,
+	type WorktreeRegistryStore,
+	type WorktreeReport,
+	type WorktreeReportOutcome,
+} from "./worktree-registry.ts";
 
 /** The refusal `resolveRecallBanks` gives an anonymous caller with no bank of its own; the docs context's recall gives the same. */
 const ANONYMOUS_RECALL_REFUSAL = "no recall bank for surface unattributed: configure HINDSIGHT_BANKS";
@@ -1356,6 +1370,9 @@ function productionPresence(config: SubstrateConfig): DragonflyPresenceStore | n
 
 export class Substrate {
 	readonly index: IndexStore | null;
+	/** Phase 68: the registry store a test injected, `null` for none; undefined builds it from the index on first use (see `worktreeAccess`). */
+	private readonly worktreeSeam: WorktreeRegistryStore | null | undefined;
+	private worktreeFromIndex: WorktreeRegistryStore | null = null;
 	readonly greptime: GreptimeClient | null;
 	/** The claim mirror; null when neither tracker key is configured. Tests inject a fake through the seam. */
 	readonly mirror: Mirror | null;
@@ -1388,9 +1405,16 @@ export class Substrate {
 	private readonly hindsightFetch: FetchLike;
 	/** LightRAG fetch, gated on the LightRAG plane's own breaker: a RAGFlow outage never refuses a LightRAG call. Tests inject the fake underneath; production uses the global fetch. */
 	private readonly lightragFetch: FetchLike;
-	/** Test seam for the corpus manifest and bulk plane; production builds them from the index and the LightRAG config. */
-	private readonly corpusSeam: { store?: CorpusStore; plane?: LightragBulkPlane } | null;
+	/** TEI fetch, gated on the embedding plane's own breaker. Tests inject the fake underneath; production uses the global fetch. */
+	private readonly teiFetch: FetchLike;
+	/** The TEI client (phase 64): unconfigured without `TEI_URL`, when every call answers `not-configured` and sends nothing. */
+	private readonly teiClient: TeiClient;
+	/** The one door to embeddings: the TEI client behind the `emb` cache class (`SUBSTRATE_EMBED_CACHE`). */
+	readonly embeddings: EmbeddingService;
+	/** Test seam for the corpus manifest, bulk plane, root clock and anchor verifier; production builds them from the index, the LightRAG config and the devnet reads. */
+	private readonly corpusSeam: { store?: CorpusStore; plane?: LightragBulkPlane; rootClock?: RootClock; anchorVerifier?: AnchorVerifier } | null;
 	private corpusPlaneCache: LightragBulkPlane | null = null;
+	private corpusRootKeeper: CorpusRootKeeper | null = null;
 	/** Railway control-plane client (Phase 45, D45-a); tests inject a recording fetch through `stores.railway`. */
 	readonly railway: RailwayClient;
 	/** Background retains in flight, drained (bounded) on shutdown. */
@@ -1500,6 +1524,8 @@ export class Substrate {
 		readonly config: SubstrateConfig,
 		stores?: {
 			index?: IndexStore | null;
+			/** Phase 68: the worktree registry store. Absent builds it from the index. */
+			worktrees?: WorktreeRegistryStore | null;
 			greptime?: GreptimeClient | null;
 			skills?: SkillProposer;
 			skillRun?: Runner;
@@ -1509,8 +1535,9 @@ export class Substrate {
 			ragflowFetch?: FetchLike;
 			hindsightFetch?: FetchLike;
 			lightragFetch?: FetchLike;
-			/** Tests inject the corpus manifest and the LightRAG bulk plane; production builds them from the index and `config.lightrag`. */
-			corpus?: { store?: CorpusStore; plane?: LightragBulkPlane };
+			teiFetch?: FetchLike;
+			/** Tests inject the corpus manifest, the LightRAG bulk plane, the root clock and the anchor verifier; production builds them from the index, `config.lightrag` and the devnet reads. */
+			corpus?: { store?: CorpusStore; plane?: LightragBulkPlane; rootClock?: RootClock; anchorVerifier?: AnchorVerifier };
 			/** Tests inject the planning refresh's hash store; it is used only while `SUBSTRATE_PLANNING_HASH_STORE` is on. Production uses the index's table, or memory without an index. */
 			planningHashes?: PlanningHashStore;
 			planningBaseDir?: string;
@@ -1569,6 +1596,7 @@ export class Substrate {
 							},
 						})
 					: null;
+		this.worktreeSeam = stores?.worktrees;
 		this.greptime =
 			stores?.greptime !== undefined
 				? stores.greptime
@@ -1605,6 +1633,14 @@ export class Substrate {
 				},
 				gate: this.planes.gate("cache"),
 			});
+		this.teiFetch = gatedFetch(this.planes.gate("tei"), stores?.teiFetch ?? fetch, teiOp);
+		this.teiClient = createTeiClient(config.tei, { fetch: this.teiFetch });
+		this.embeddings = createEmbeddingService({
+			client: this.teiClient,
+			cache: this.cache,
+			cacheEnabled: config.embedCache.enabled,
+			ttlS: config.embedCache.ttlS,
+		});
 		this.eventBus = stores?.eventBus !== undefined ? stores.eventBus() : productionEventBus(config);
 		// Phase 52 (SOTA-08): the planning reads and the observer share one filesystem and one presence store. Presence rides the cache endpoint; with none, the sessions read says so.
 		const planningDeps = stores?.planning ?? {};
@@ -4193,6 +4229,99 @@ export class Substrate {
 	}
 
 	/**
+	 * Whether the worktree registry can serve now, as a refusal or the store. Off is 503 `worktrees.disabled` before anything
+	 * else, so a disabled registry touches no store and a write leaves no audit record (the route asks first). A VM guest may
+	 * not report: the guest has no index of its own and its paths are the host's business. No index is 503 `worktrees.unavailable`.
+	 */
+	private worktreeAccess(write: boolean): { ok: true; store: WorktreeRegistryStore } | WorktreeRefusal {
+		if (this.config.worktreeRegistry.mode !== "on") return { ok: false, status: 503, body: { error: "worktrees.disabled" } };
+		if (write && this.config.vmGuest) return { ok: false, status: 403, body: { error: "worktrees.vm-guest" } };
+		// Built once, on first use, after the mode check: a registry that is off never touches the index.
+		if (this.worktreeSeam === undefined && this.worktreeFromIndex === null && this.index !== null) this.worktreeFromIndex = this.index.worktreeRegistry();
+		const store = this.worktreeSeam !== undefined ? this.worktreeSeam : this.worktreeFromIndex;
+		if (store === null) {
+			return { ok: false, status: 503, body: { error: "worktrees.unavailable", problem: "the worktree registry lives in the index (SUBSTRATE_PG_URL), which is not configured" } };
+		}
+		return { ok: true, store };
+	}
+
+	/** The refusal the routes check before reading a body or writing an audit record; null when the registry can serve. */
+	worktreeGate(write: boolean): WorktreeRefusal | null {
+		const access = this.worktreeAccess(write);
+		return access.ok ? null : access;
+	}
+
+	/**
+	 * One host's worktree report (phase 68, FLEET-02): upsert the rows it lists and sweep that host's expired ones, in one
+	 * transaction, then leave one counts-only `worktrees.report` note. The note is best effort: the report is already stored.
+	 * A store failure is 503 with the redacted reason and nothing is claimed stored.
+	 */
+	async reportWorktrees(report: WorktreeReport, surface: Surface): Promise<WorktreeReportOutcome> {
+		const access = this.worktreeAccess(true);
+		if (!access.ok) return access;
+		let counts: { stored: number; removed: number };
+		try {
+			counts = await access.store.report({
+				host: report.host,
+				reportedAt: new Date(report.reported_at),
+				seenAt: new Date(),
+				ttlS: this.config.worktreeRegistry.ttlS,
+				worktrees: report.worktrees,
+			});
+		} catch (cause) {
+			const problem = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
+			return { ok: false, status: 503, body: { error: "worktrees.unavailable", problem: `the worktree registry could not be written: ${problem}` } };
+		}
+		await this.emit({
+			surface,
+			kind: "note",
+			summary: `worktree report from ${report.host}: ${counts.stored} stored, ${counts.removed} removed`,
+			session_id: `worktrees:${report.host}`,
+			payload: { action: "worktrees.report", stored: counts.stored, removed: counts.removed },
+		}).catch(() => undefined);
+		return { ok: true, ...counts };
+	}
+
+	/** The registry as a reader sees it: filtered, newest first, at most `query.limit` rows with `truncated` saying more exist. */
+	async listWorktrees(query: WorktreeListQuery): Promise<WorktreeListOutcome> {
+		const access = this.worktreeAccess(false);
+		if (!access.ok) return access;
+		try {
+			// One row past the page tells whether it was cut, without counting the table.
+			const rows = await access.store.list({
+				repo: query.repo,
+				host: query.host,
+				state: query.state,
+				limit: query.limit + 1,
+				staleBefore: staleCutoff(Date.now(), this.config.worktreeRegistry.idleDays),
+			});
+			return { ok: true, worktrees: rows.slice(0, query.limit), truncated: rows.length > query.limit };
+		} catch (cause) {
+			const problem = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
+			return { ok: false, status: 503, body: { error: "worktrees.unavailable", problem: `the worktree registry could not be read: ${problem}` } };
+		}
+	}
+
+	/**
+	 * The unexpired leases among one graph's nodes (phase 68): the prune guard's question. It reads the index directly,
+	 * never the graph-view cache, so a lease a heartbeat just extended is never read as lapsed. An unknown graph has no
+	 * claims, but a server with no index or an index that did not answer is 503 and never an empty list: "no claims" must
+	 * only ever mean the index said so, because the caller deletes a directory on it.
+	 */
+	async worktreeClaims(graphId: string): Promise<WorktreeClaimsOutcome> {
+		if (!this.index) {
+			return { ok: false, status: 503, body: { error: "claims.unavailable", problem: "graph claims live in the index (SUBSTRATE_PG_URL), which is not configured" } };
+		}
+		try {
+			const graph = await this.index.getGraph(graphId);
+			return { ok: true, graph_id: graphId, claims: graph === null ? [] : liveClaims(graph.nodes, Date.now()) };
+		} catch (cause) {
+			const problem = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
+			return { ok: false, status: 503, body: { error: "claims.unavailable", problem: `the graph claims could not be read: ${problem}` } };
+		}
+	}
+
+	/**
 	 * Graph edges into Linear relations. Each edge that was created or failed leaves one outcome event on its waiting
 	 * node, so the outcome sits in that node's evidence. A relation that already exists records nothing, so a
 	 * re-registration repeats no event. A skipped edge has no tracker issue, so it records nothing either.
@@ -5248,7 +5377,7 @@ export class Substrate {
 		// The steering notice is per call like the context: it names the calling session's queued directives, so it is attached
 		// after the cache and a reply that carries it is never stored (`searchReplyStorable`).
 		const steering = this.steeringNoticeOf(sessionId);
-		return steering === null ? answered : { ...answered, steering };
+		return this.withCorpusRoot(steering === null ? answered : { ...answered, steering });
 	}
 
 	/**
@@ -5412,10 +5541,38 @@ export class Substrate {
 		return {
 			settings: this.config.corpus,
 			vmGuest: this.config.vmGuest,
-			store: this.config.corpus.enabled ? (this.corpusSeam?.store ?? this.index?.corpusStore() ?? null) : null,
+			store: this.corpusStore(),
 			plane: this.corpusSeam?.plane ?? this.corpusPlaneCache,
 			emit: (event) => this.emit(event),
+			roots: this.corpusRoots(),
+			anchor: { ports: () => this.anchorVerifyPorts(), verify: this.corpusSeam?.anchorVerifier },
 		};
+	}
+
+	/** The manifest, or null while `SUBSTRATE_CORPUS` is off or there is no index. */
+	private corpusStore(): CorpusStore | null {
+		return this.config.corpus.enabled ? (this.corpusSeam?.store ?? this.index?.corpusStore() ?? null) : null;
+	}
+
+	/** The root cache and the root event (v1.7 phase 69), one per service so a coalesced event and a cached root outlive a request. */
+	private corpusRoots(): CorpusRootKeeper {
+		this.corpusRootKeeper ??= new CorpusRootKeeper({ store: () => this.corpusStore(), emit: (event) => this.emit(event), clock: this.corpusSeam?.rootClock });
+		return this.corpusRootKeeper;
+	}
+
+	/**
+	 * Phase 69: a `docs_search` reply names the corpus root it was answered under, from the cache only. With `SUBSTRATE_CORPUS` off the
+	 * reply is returned untouched. A root that is not cached yet is left out and its computation starts off this call's path.
+	 */
+	private withCorpusRoot(reply: SearchReply): SearchReply {
+		if (!this.config.corpus.enabled) return reply;
+		const roots = this.corpusRoots();
+		const snapshot = roots.peek();
+		if (snapshot === null) {
+			roots.warm();
+			return reply;
+		}
+		return { ...reply, corpus_root: shortRoot(snapshot.root), corpus_count: snapshot.count };
 	}
 
 	/** `POST /corpus/plan` and the planning half of the `substrate corpus plan` command. */
@@ -5440,6 +5597,21 @@ export class Substrate {
 		const reply = await corpusReconcileReply(this.corpusDeps(), raw, callerSurface);
 		if (reply.ok && reply.body.repaired.deleted > 0) await this.cache.bump(DOCS_GENERATION_KEY);
 		return reply;
+	}
+
+	/** `GET /corpus/root`: the Merkle root over the active manifest. */
+	corpusRoot(callerSurface: Surface | null): Promise<CorpusReply<CorpusRootResponse>> {
+		return corpusRootReply(this.corpusDeps(), callerSurface);
+	}
+
+	/** `GET /corpus/proof` and the `substrate corpus prove` command. */
+	corpusProof(query: { repo: string | null; path: string | null }, callerSurface: Surface | null): Promise<CorpusReply<CorpusProofResponse>> {
+		return corpusProofReply(this.corpusDeps(), query, callerSurface);
+	}
+
+	/** `GET /corpus/anchor` and the online half of `substrate corpus verify`: is this root inside an anchored hour? */
+	corpusAnchor(root: string | null, callerSurface: Surface | null): Promise<CorpusReply<CorpusAnchorResponse>> {
+		return corpusAnchorReply(this.corpusDeps(), root, callerSurface);
 	}
 
 	/**
@@ -7197,13 +7369,20 @@ export class Substrate {
 					hindsight: probes.hindsight,
 					ragflow: probes.ragflow,
 					lightrag: probes.lightrag,
+					tei: this.teiProbe(FABRIC_HEALTH_WINDOW_MS),
 				};
 			},
-			snapshot: () => ({
-				cache: this.cache.health(),
-				eventBus: { enabled: this.eventBusHealth().enabled },
-				breakers: this.planes.snapshots(),
-			}),
+			snapshot: () => {
+				const seen = this.teiClient.snapshot();
+				return {
+					cache: this.cache.health(),
+					eventBus: { enabled: this.eventBusHealth().enabled },
+					// The pin, else the model an embed learned, else the one `/info` last named: setup can read it before any embedder exists.
+					tei: { model: seen.model ?? seen.observedModel, modelSource: seen.modelSource, dimension: seen.dim, latencyMs: seen.lastLatencyMs },
+					// The embedding plane is not a reported plane, so its breaker is read from its gate beside the six.
+					breakers: { ...this.planes.snapshots(), tei: this.planes.gate("tei").breaker?.snapshot() ?? null },
+				};
+			},
 			railwayCost: () => this.railway.costReport(),
 			outbox: () => {
 				const stats = this.retainOutboxStats();
@@ -7219,10 +7398,32 @@ export class Substrate {
 					hindsight: hindsightFromEnv() !== null,
 					ragflow: this.config.ragflow !== null,
 					lightrag: this.config.lightrag !== null,
+					tei: this.config.tei !== null,
 				},
+				teiEndpoint: dbEndpoints.tei ?? null,
 				dragonflyRefused: this.config.dragonflyRefused !== null,
 			},
 		};
+	}
+
+	/** The field behind `teiProbe`: the last probe and when it started. */
+	private teiProbeShare: { at: number; probe: Promise<boolean | null> } | null = null;
+
+	/**
+	 * Whether TEI answers `/health` and `/info` with the pinned model: `null` when it is not configured, which sends nothing.
+	 * The fabric's calls inside one window share one probe, and `/healthz` never asks: the embedding plane has no row there.
+	 */
+	private teiProbe(windowMs: number): Promise<boolean | null> {
+		if (this.config.tei === null) return Promise.resolve(null);
+		const now = Date.now();
+		const share = this.teiProbeShare;
+		if (share !== null && now - share.at >= 0 && now - share.at < windowMs) return share.probe;
+		const probe = this.teiClient.probe(HEALTH_PROBE_MS).then(
+			(answer) => answer.ok,
+			() => false,
+		);
+		this.teiProbeShare = { at: now, probe };
+		return probe;
 	}
 
 	/** The last index size report `SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S` keeps, and the measurement still running. */

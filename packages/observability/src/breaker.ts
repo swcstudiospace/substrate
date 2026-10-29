@@ -27,6 +27,15 @@
 export const PLANES = ["greptime", "index", "cache", "hindsight", "ragflow", "lightrag"] as const;
 export type PlaneName = (typeof PLANES)[number];
 
+/**
+ * Planes that have a gate and a breaker but are not one of the six reported planes: no `/healthz` row, no SLO and no
+ * metric series label. The embedding service (phase 64) is the first; its state is read through the fabric.
+ */
+export const AUX_PLANES = ["tei"] as const;
+export type AuxPlaneName = (typeof AUX_PLANES)[number];
+/** Every plane that can have a gate. */
+export type GatePlaneName = PlaneName | AuxPlaneName;
+
 export type BreakerState = "closed" | "open" | "half-open";
 
 export interface BreakerSettings {
@@ -69,7 +78,7 @@ export function loadBreakerSettings(env: Record<string, string | undefined> = pr
 }
 
 export interface BreakerSnapshot {
-	plane: PlaneName;
+	plane: GatePlaneName;
 	state: BreakerState;
 	/** Consecutive failures since the last success. */
 	failures: number;
@@ -88,7 +97,7 @@ const MAX_ERROR_LENGTH = 200;
  * failure re-opens for another `openMs`.
  */
 export class CircuitBreaker {
-	readonly plane: PlaneName;
+	readonly plane: GatePlaneName;
 	private readonly settings: BreakerSettings;
 	private readonly now: () => number;
 	private failures = 0;
@@ -98,7 +107,7 @@ export class CircuitBreaker {
 	/** True while the single half-open probe is in flight. */
 	private probing = false;
 
-	constructor(plane: PlaneName, settings: Partial<BreakerSettings> = {}, now: () => number = Date.now) {
+	constructor(plane: GatePlaneName, settings: Partial<BreakerSettings> = {}, now: () => number = Date.now) {
 		this.plane = plane;
 		this.settings = { ...DEFAULT_BREAKER_SETTINGS, ...settings };
 		this.now = now;
@@ -162,10 +171,10 @@ export class CircuitBreaker {
 
 /** The refusal an open breaker answers with, in place of the plane's own error. */
 export class BreakerOpenError extends Error {
-	readonly plane: PlaneName;
+	readonly plane: GatePlaneName;
 	readonly retryAfterMs: number;
 
-	constructor(plane: PlaneName, retryAfterMs: number) {
+	constructor(plane: GatePlaneName, retryAfterMs: number) {
 		super(`${plane} circuit open; retry in ${Math.ceil(retryAfterMs / 1000)} s`);
 		this.name = "BreakerOpenError";
 		this.plane = plane;
@@ -176,7 +185,7 @@ export class BreakerOpenError extends Error {
 export type PlaneOutcome = "ok" | "error" | "timeout" | "open";
 
 export interface PlaneSample {
-	plane: PlaneName;
+	plane: GatePlaneName;
 	/** A short, bounded operation label fixed per client — never a statement or URL. */
 	op: string;
 	outcome: PlaneOutcome;
@@ -187,7 +196,7 @@ export interface PlaneSample {
 export type PlaneObserver = (sample: PlaneSample) => void;
 
 export interface PlaneGate {
-	plane: PlaneName;
+	plane: GatePlaneName;
 	/** Null when breakers are disabled: calls still run and are still measured. */
 	breaker: CircuitBreaker | null;
 	observe: PlaneObserver | null;
@@ -320,7 +329,7 @@ function readBody(response: Response, signal: AbortSignal | null): Promise<Array
 
 /** One gate per plane, sharing the settings and the observer. */
 export class PlaneRegistry {
-	private readonly gates: Partial<Record<PlaneName, PlaneGate>> = {};
+	private readonly gates: Partial<Record<GatePlaneName, PlaneGate>> = {};
 
 	constructor(
 		private readonly settings: BreakerSettings,
@@ -328,7 +337,7 @@ export class PlaneRegistry {
 		private readonly now: () => number = Date.now,
 	) {}
 
-	gate(plane: PlaneName): PlaneGate {
+	gate(plane: GatePlaneName): PlaneGate {
 		const existing = this.gates[plane];
 		if (existing) return existing;
 		const created: PlaneGate = {
