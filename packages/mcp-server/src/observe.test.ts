@@ -371,6 +371,15 @@ describe("auditToolCalls", () => {
 		}
 	});
 
+	test("the live steering routes and the session_context tool are known, and a path under them is not", () => {
+		expect(toolLabel("session_context")).toBe("session_context");
+		for (const route of ["/steering/sessions", "/steering/directives", "/steering/wait", "/steering/queue", "/steering/acknowledge", "/session/context"]) {
+			expect(normalizeRoute(route)).toBe(route);
+		}
+		expect(normalizeRoute("/steering/queue/../../etc")).toBe("other");
+		expect(normalizeRoute("/steering/other")).toBe("other");
+	});
+
 	test("the worktree registry doors are known tools and known routes, and a path under them is not", () => {
 		expect({ list: toolLabel("worktree_list"), report: toolLabel("worktree_report") }).toEqual({ list: "worktree_list", report: "worktree_report" });
 		expect({ report: normalizeRoute("/worktrees/report"), list: normalizeRoute("/worktrees") }).toEqual({ report: "/worktrees/report", list: "/worktrees" });

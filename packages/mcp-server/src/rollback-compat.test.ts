@@ -635,6 +635,7 @@ const STEPS_ADDED_SINCE_REFERENCE: Readonly<Record<number, string>> = {
 	32: "skills_registry_version",
 	35: "corpus_documents",
 	36: "worktrees",
+	37: "steering_sessions",
 };
 /** The highest `MIGRATION_STEPS` version when the pin above was written (commit 9aec7a1). */
 const LAST_STEP_AT_PIN = 32;

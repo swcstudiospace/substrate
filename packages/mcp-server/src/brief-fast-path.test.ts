@@ -291,6 +291,48 @@ describe("Substrate.briefDetailed", () => {
 		expect(redis.commands.filter((command) => command === "SET")).toHaveLength(2);
 	});
 
+	test("snapshot: a directive queued while a source is down still reaches the degraded reply, and is never stored in the snapshot", async () => {
+		let down = false;
+		const redis = new FakeRedis();
+		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
+		const index = {
+			getGraph: async () => {
+				if (down) throw new Error("postgres is down");
+				return graphView("ut-1");
+			},
+			openGraphs: async () => [],
+			memoryForBrief: async () => [],
+		};
+		const substrate = new Substrate(
+			loadConfig({ SUBSTRATE_BRIEF_SESSIONS: "on", SUBSTRATE_PLANNING_STEERING: "on", SUBSTRATE_PLANNING_STEERING_PRINCIPALS: "omp" }),
+			{ index: index as never, greptime: null, cache, steering: { history: { append: async (): Promise<void> => undefined } } },
+		);
+		const own = { ...request, session_id: "sess-a" };
+		const complete = await substrate.briefDetailed(own);
+		expect(complete.state).toBe("complete");
+		const queued = await substrate.steering.inbox?.enqueue({
+			id: "d-late",
+			author: { principalId: "omp", kind: "human" },
+			createdAtMs: Date.now(),
+			priority: "normal",
+			targetSessionId: "sess-a",
+			action: "annotate",
+			body: "Read the migration notes first.",
+			conflictsWithActivePlan: false,
+		});
+		expect(queued?.ok).toBe(true);
+
+		down = true;
+		await redis.incr(graphGenerationKey("ut-1"));
+		const served = await substrate.briefDetailed(own);
+		expect(served.state).toBe("snapshot");
+		expect(served.text).toContain("Steering: 1 queued directive for this session");
+		expect(served.text).toContain("Read the migration notes first.");
+		const stored = redis.values.get(snapshotKey("brief-snapshot", "cursor", { repo: "acme/app", branch: null, graph_id: "ut-1" }));
+		expect(stored).toBeDefined();
+		expect(stored).not.toContain("Read the migration notes first.");
+	});
+
 	test("SUBSTRATE_BRIEF_SNAPSHOT_TTL_S=0 writes no snapshot and reads none", async () => {
 		let down = false;
 		const { substrate, redis } = substrateWith(
