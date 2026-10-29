@@ -269,6 +269,7 @@ import {
 	type Surface,
 	type SubstrateEvent,
 } from "./types.ts";
+import { liveClaims, type WorktreeClaimsOutcome } from "./worktree-claims.ts";
 import {
 	staleCutoff,
 	type WorktreeListOutcome,
@@ -4259,6 +4260,25 @@ export class Substrate {
 		} catch (cause) {
 			const problem = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
 			return { ok: false, status: 503, body: { error: "worktrees.unavailable", problem: `the worktree registry could not be read: ${problem}` } };
+		}
+	}
+
+	/**
+	 * The unexpired leases among one graph's nodes (phase 68): the prune guard's question. It reads the index directly,
+	 * never the graph-view cache, so a lease a heartbeat just extended is never read as lapsed. An unknown graph has no
+	 * claims, but a server with no index or an index that did not answer is 503 and never an empty list: "no claims" must
+	 * only ever mean the index said so, because the caller deletes a directory on it.
+	 */
+	async worktreeClaims(graphId: string): Promise<WorktreeClaimsOutcome> {
+		if (!this.index) {
+			return { ok: false, status: 503, body: { error: "claims.unavailable", problem: "graph claims live in the index (SUBSTRATE_PG_URL), which is not configured" } };
+		}
+		try {
+			const graph = await this.index.getGraph(graphId);
+			return { ok: true, graph_id: graphId, claims: graph === null ? [] : liveClaims(graph.nodes, Date.now()) };
+		} catch (cause) {
+			const problem = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
+			return { ok: false, status: 503, body: { error: "claims.unavailable", problem: `the graph claims could not be read: ${problem}` } };
 		}
 	}
 

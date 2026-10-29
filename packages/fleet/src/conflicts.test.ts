@@ -152,3 +152,20 @@ describe("parsers", () => {
 		expect(parseStatusZ(" M a b.txt\0?? new.txt\0A  src/x.ts\0")).toEqual(["a b.txt", "new.txt", "src/x.ts"]);
 	});
 });
+
+describe("an incomplete forecast says so", () => {
+	test("a missing merge base or a failed diff marks the forecast incomplete and keeps the warning on the entry", async () => {
+		const { a, b } = fixture();
+		const noBase = await forecastConflicts([{ ...forecastInput(a), base: null }, forecastInput(b)], { git: spawnGit });
+		expect(noBase.incomplete).toBe(true);
+		expect(noBase.worktrees.find((entry) => entry.path === a)?.notes.join(" ")).toContain("no merge base");
+
+		const failing: CommandRunner = async (args, cwd) => (args[0] === "diff" ? { code: 128, stdout: "", stderr: "fatal: bad revision" } : spawnGit(args, cwd));
+		const broken = await forecastConflicts([forecastInput(a), forecastInput(b)], { git: failing });
+		expect(broken.incomplete).toBe(true);
+		expect(broken.worktrees.every((entry) => entry.notes.some((note) => note.startsWith("git diff failed")))).toBe(true);
+
+		const whole = await forecastConflicts([forecastInput(a), forecastInput(b)], { git: spawnGit });
+		expect(whole.incomplete).toBe(false);
+	});
+});

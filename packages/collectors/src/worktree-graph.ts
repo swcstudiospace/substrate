@@ -17,6 +17,8 @@ const GRAPH_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 /**
  * The configured roots: absolute entries of `SUBSTRATE_WORKTREE_ROOTS` in the order written, or
  * `[WORKTREE_ROOT]` when it is unset or holds no usable entry. A relative entry is dropped, not guessed at.
+ * Unlike the worktree commands and the doctor (`worktreeRootsFromEnv` in the fleet package), which treat an unset
+ * variable as "no root configured", attribution always has a location to try: the dispatcher's own directory.
  */
 export function worktreeRoots(env: Record<string, string | undefined> = process.env): string[] {
 	const roots: string[] = [];

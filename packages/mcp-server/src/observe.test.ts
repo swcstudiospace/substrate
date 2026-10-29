@@ -377,6 +377,11 @@ describe("auditToolCalls", () => {
 		expect(normalizeRoute("/worktrees/report/../../etc")).toBe("other");
 	});
 
+	test("the worktree claims route is a known route and a path under it is not", () => {
+		expect(normalizeRoute("/worktrees/claims")).toBe("/worktrees/claims");
+		expect(normalizeRoute("/worktrees/claims/../../etc")).toBe("other");
+	});
+
 	test("toolLabel keeps the tools that exist", () => {
 		expect(toolLabel("graph_claim")).toBe("graph_claim");
 		expect(toolLabel("desktop_run")).toBe("desktop_run");

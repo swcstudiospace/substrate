@@ -6,31 +6,46 @@
  * worktree root configured. Roots come from `--root` or `SUBSTRATE_WORKTREE_ROOTS`; nothing is assumed.
  *
  * `prune` is a dry run until `--execute`. With it, only worktrees classified `safe` are removed, each
- * with a plain `git worktree remove` (never `--force`), after the worktree is inspected and classified
- * again; the first failed removal stops the run and is reported, not retried. Every removal leaves one
- * ledger note through the events route (fail-open: a note that could not be written is said so).
+ * with a plain `git worktree remove` (never `--force`), after the worktree's identity (head, branch) is
+ * reloaded from git, it is inspected and classified again, and the server is asked once more for live graph
+ * claims on it; the first failed removal stops the run and is reported, not retried. A worktree whose
+ * directory under a root is a graph id is `never` while the server reports a live claim on that graph and
+ * `review` when that cannot be checked. Every removal leaves one ledger note through the events route
+ * (fail-open: a note that was not recorded is said so on stderr, and `--json` carries its delivery result).
  */
 import { resolve } from "node:path";
+import { graphIdForWorktree } from "../../../collectors/src/worktree-graph.ts";
 import {
 	assertDiskFloor,
 	buildReports,
 	classifyForPrune,
+	type ClaimsFn,
+	type ClaimStatus,
+	claimStatus,
 	collectInventory,
 	type CommandRunner,
 	type ConflictForecast,
 	createPrShared,
 	DiskFloorError,
 	diskPressure,
+	exclusiveBytes,
 	forecastConflicts,
 	type FreeBytesFn,
 	type GitRunner,
 	gitOut,
 	idleDaysFromEnv,
 	inspectWorktree,
+	mapLimit,
+	measureTree,
 	minFreeGbFromEnv,
+	NOT_CHECKED,
+	parseClaimsBody,
 	type PruneClass,
 	type PruneClassification,
+	type PruneContext,
+	reloadWorktree,
 	resolveDefaultRef,
+	type TreeLinks,
 	type WorktreeInfo,
 	type WorktreeReport,
 	worktreeRootsFromEnv,
@@ -63,11 +78,17 @@ export interface WorktreeDeps {
 	emit: (event: EventInput) => Promise<EmitOutcome>;
 	/** `POST /worktrees/report`. */
 	postReport: (report: WorktreeReport) => Promise<PostOutcome>;
+	/** `GET /worktrees/claims`: the live claims of one graph. Never throws; an unanswered question is a failure, not "no claims". */
+	claims: ClaimsFn;
 }
 
 const GIB = 1024 ** 3;
 const NO_ROOT = "no worktree root is configured: set SUBSTRATE_WORKTREE_ROOTS (colon separated) or pass --root DIR\n";
 const CLASS_ORDER: readonly PruneClass[] = ["safe", "review", "never"];
+/** Claim lookups in flight at once. */
+const CLAIM_CONCURRENCY = 4;
+/** Link walks (for the freed-space estimate) in flight at once. */
+const LINK_WALK_CONCURRENCY = 2;
 
 function roots(args: WorktreeArgs, deps: WorktreeDeps): string[] {
 	if (args.roots.length > 0) return [...new Set(args.roots.map((root) => resolve(deps.cwd, root)))];
@@ -97,10 +118,27 @@ function idleDays(args: WorktreeArgs, deps: WorktreeDeps): number | null {
 interface Classified {
 	info: WorktreeInfo;
 	prune: PruneClassification;
+	/** What the server said about live claims; `not-checked` unless the worktree was otherwise safe and is a graph checkout. */
+	claim: ClaimStatus;
 }
 
-function classifyAll(worktrees: readonly WorktreeInfo[], days: number, deps: WorktreeDeps): Classified[] {
-	return worktrees.map((info) => ({ info, prune: classifyForPrune(info, { cwd: deps.cwd, idleDays: days, now: deps.now() }) }));
+function pruneContext(days: number, deps: WorktreeDeps): PruneContext {
+	return { cwd: deps.cwd, idleDays: days, now: deps.now() };
+}
+
+/**
+ * Classify every worktree, then ask the server about live claims for the ones that would otherwise be safe and
+ * sit at `<root>/<graph_id>`: the others are `never` or `review` already, or have no claim to ask about. A claim
+ * that is live makes the worktree `never`; one that could not be checked makes it `review`.
+ */
+async function classifyAll(worktrees: readonly WorktreeInfo[], days: number, rootList: readonly string[], deps: WorktreeDeps): Promise<Classified[]> {
+	return mapLimit(worktrees, CLAIM_CONCURRENCY, async (info): Promise<Classified> => {
+		const prune = classifyForPrune(info, pruneContext(days, deps));
+		const graphId = prune.class === "safe" ? graphIdForWorktree(info.path, rootList) : null;
+		if (graphId === null) return { info, prune, claim: NOT_CHECKED };
+		const claim = await claimStatus(graphId, deps.claims);
+		return { info, prune: classifyForPrune(info, pruneContext(days, deps), claim), claim };
+	});
 }
 
 function describe(info: WorktreeInfo): string {
@@ -134,10 +172,10 @@ async function commandList(args: WorktreeArgs, deps: WorktreeDeps): Promise<numb
 	const days = idleDays(args, deps);
 	if (days === null) return usageError(deps, "--idle-days must be a number of days, zero or more\n");
 	const inventory = await gather(args, deps, rootList, { pr: true, measure: true, ignored: true });
-	const classified = classifyAll(inventory.worktrees, days, deps);
+	const classified = await classifyAll(inventory.worktrees, days, rootList, deps);
 	printNotes(inventory.notes, deps);
 	if (args.json) {
-		deps.out(`${JSON.stringify(classified.map(({ info, prune }) => ({ ...info, prune })), null, 2)}\n`);
+		deps.out(`${JSON.stringify(classified.map(({ info, prune, claim }) => ({ ...info, prune, claims: claim })), null, 2)}\n`);
 		return 0;
 	}
 	if (classified.length === 0) deps.out("no worktrees found\n");
@@ -154,8 +192,11 @@ async function commandScan(args: WorktreeArgs, deps: WorktreeDeps): Promise<numb
 	printNotes(inventory.notes, deps);
 	let stored = 0;
 	let failure: string | null = null;
+	let skipped: Array<{ path: string; reason: string }> = [];
 	if (args.report) {
-		for (const report of buildReports(deps.host, inventory.worktrees, { now: deps.now(), roots: rootList })) {
+		const plan = buildReports(deps.host, inventory.worktrees, { now: deps.now(), roots: rootList });
+		skipped = plan.skipped;
+		for (const report of plan.reports) {
 			const outcome = await deps.postReport(report);
 			if (outcome.ok) stored += outcome.stored;
 			else {
@@ -164,11 +205,13 @@ async function commandScan(args: WorktreeArgs, deps: WorktreeDeps): Promise<numb
 			}
 		}
 	}
+	// A row too large for any body is left out of the report and named, so the rest of the fleet still gets reported.
+	for (const item of skipped) deps.err(`not reported: ${item.path}: ${item.reason}\n`);
 	if (args.json) {
-		deps.out(`${JSON.stringify({ repositories: inventory.repos, worktrees: inventory.worktrees.length, ...(args.report ? { reported: failure === null, stored } : {}) })}\n`);
+		deps.out(`${JSON.stringify({ repositories: inventory.repos, worktrees: inventory.worktrees.length, ...(args.report ? { reported: failure === null && skipped.length === 0, stored, skipped } : {}) })}\n`);
 	} else {
 		deps.out(`scanned ${inventory.worktrees.length} worktrees in ${inventory.repos} repositories\n`);
-		if (args.report && failure === null) deps.out(`reported to the registry: ${stored} stored\n`);
+		if (args.report && failure === null) deps.out(`reported to the registry: ${stored} stored${skipped.length > 0 ? `, ${skipped.length} not reported` : ""}\n`);
 	}
 	if (failure !== null) {
 		deps.err(`report failed: ${failure}\n`);
@@ -196,6 +239,24 @@ function ledgerLine(outcome: EmitOutcome): string {
 	return `ledger: worktree.prune note NOT RECORDED: ${why}. The worktree is already removed.`;
 }
 
+/** How a ledger note was delivered. `spooled` means parked for replay: the note is not recorded yet. */
+type LedgerResult = "stored" | "refused" | "failed" | "spooled";
+
+function ledgerResult(outcome: EmitOutcome): LedgerResult {
+	if (outcome.kind === "stored" || outcome.kind === "refused") return outcome.kind;
+	return outcome.spooled === true ? "spooled" : "failed";
+}
+
+/** The size walks of `paths` with the link tables the freed-space estimate needs; a tree that could not be walked has no entry. */
+async function linkTables(paths: readonly string[]): Promise<Map<string, TreeLinks>> {
+	const walked = await mapLimit(paths, LINK_WALK_CONCURRENCY, async (path) => ({ path, links: (await measureTree(path, { links: true })).links }));
+	const tables = new Map<string, TreeLinks>();
+	for (const { path, links } of walked) {
+		if (links !== null) tables.set(path, links);
+	}
+	return tables;
+}
+
 async function commandPrune(args: WorktreeArgs, deps: WorktreeDeps): Promise<number> {
 	const rootList = roots(args, deps);
 	if (rootList.length === 0) return usageError(deps, NO_ROOT);
@@ -203,13 +264,17 @@ async function commandPrune(args: WorktreeArgs, deps: WorktreeDeps): Promise<num
 	if (days === null) return usageError(deps, "--idle-days must be a number of days, zero or more\n");
 	const inventory = await gather(args, deps, rootList, { pr: true, measure: true, ignored: true });
 	printNotes(inventory.notes, deps);
-	const classified = classifyAll(inventory.worktrees, days, deps);
+	const classified = await classifyAll(inventory.worktrees, days, rootList, deps);
 	const safe = classified.filter((item) => item.prune.class === "safe");
-	const wouldFree = safe.reduce((total, item) => total + (item.info.size_bytes ?? 0), 0);
+	// Removal frees an inode only when every link to it is inside what is removed (see `exclusiveBytes`), so the
+	// estimate is a lower bound: a worktree that shares a hardlinked cache with something that stays frees less.
+	const tables = await linkTables(safe.map((item) => item.info.path));
+	if (tables.size < safe.length) deps.err(`note: ${safe.length - tables.size} worktrees could not be walked completely; they count as freeing nothing in the estimate\n`);
+	const wouldFree = exclusiveBytes([...tables.values()]);
 
 	if (!args.execute) {
 		if (args.json) {
-			deps.out(`${JSON.stringify({ dry_run: true, idle_days: days, would_free_bytes: wouldFree, worktrees: classified.map(({ info, prune }) => ({ path: info.path, repo: info.repo, branch: info.branch, size_bytes: info.size_bytes, class: prune.class, reasons: prune.reasons })) }, null, 2)}\n`);
+			deps.out(`${JSON.stringify({ dry_run: true, idle_days: days, would_free_bytes: wouldFree, worktrees: classified.map(({ info, prune, claim }) => ({ path: info.path, repo: info.repo, branch: info.branch, size_bytes: info.size_bytes, class: prune.class, reasons: prune.reasons, claims: claim })) }, null, 2)}\n`);
 			return 0;
 		}
 		for (const cls of CLASS_ORDER) {
@@ -217,20 +282,32 @@ async function commandPrune(args: WorktreeArgs, deps: WorktreeDeps): Promise<num
 			deps.out(`${cls} (${group.length})\n`);
 			for (const { info, prune } of group) deps.out(`  ${info.path}  ${describe(info)}\n    ${prune.reasons.join("; ")}\n`);
 		}
-		deps.out(`dry run: ${safe.length} worktrees would be removed, freeing about ${megabytes(wouldFree)}; run again with --execute to remove them\n`);
+		deps.out(`dry run: ${safe.length} worktrees would be removed, freeing at least ${megabytes(wouldFree)}; run again with --execute to remove them\n`);
 		return 0;
 	}
 
-	const removed: Array<{ path: string; size_bytes: number | null }> = [];
+	const removed: Array<{ path: string; size_bytes: number | null; ledger: LedgerResult }> = [];
 	const skipped: Array<{ path: string; reasons: string[] }> = [];
 	let failure: { path: string; error: string } | null = null;
+	const skip = (path: string, reasons: string[]): void => {
+		skipped.push({ path, reasons });
+		if (!args.json) deps.err(`skipped ${path}: no longer safe (${reasons.join("; ")})\n`);
+	};
 	for (const { info } of safe) {
-		// The inventory may be minutes old and the worktree may have been used since: look again, from scratch.
-		const again = await inspectWorktree({ path: info.path, head: info.head, branch: info.branch, detached: info.detached, bare: false, locked: info.locked, prunable: info.prunable, primary: info.primary, repoDir: info.repo_dir }, { git: deps.git, pr: createPrShared(deps.gh) });
-		const check = classifyForPrune(again, { cwd: deps.cwd, idleDays: days, now: deps.now() });
+		// The inventory may be minutes old and the worktree may have been used since. Who is on the checkout now (head,
+		// branch) comes from git, never from the inventory: a merge proof for an old head says nothing about the new one.
+		const current = await reloadWorktree(info.path, info.repo_dir, deps.git);
+		if (current === null) {
+			skip(info.path, ["git no longer lists this worktree, or could not list the repository"]);
+			continue;
+		}
+		const again = await inspectWorktree(current, { git: deps.git, pr: createPrShared(deps.gh) });
+		let check = classifyForPrune(again, pruneContext(days, deps));
+		const graphId = check.class === "safe" ? graphIdForWorktree(info.path, rootList) : null;
+		// Asked again, last thing before the removal: a session may have claimed the graph since the inventory.
+		if (graphId !== null) check = classifyForPrune(again, pruneContext(days, deps), await claimStatus(graphId, deps.claims));
 		if (check.class !== "safe") {
-			skipped.push({ path: info.path, reasons: check.reasons });
-			if (!args.json) deps.err(`skipped ${info.path}: no longer safe (${check.reasons.join("; ")})\n`);
+			skip(info.path, check.reasons);
 			continue;
 		}
 		const result = await deps.git(["worktree", "remove", info.path], info.repo_dir);
@@ -238,13 +315,17 @@ async function commandPrune(args: WorktreeArgs, deps: WorktreeDeps): Promise<num
 			failure = { path: info.path, error: result.stderr.trim().slice(0, 300) || `git exited ${result.code}` };
 			break;
 		}
-		removed.push({ path: info.path, size_bytes: again.size_bytes });
 		const outcome = await deps.emit(emitNote(again, check.reasons));
-		if (!args.json) deps.out(`removed ${info.path} (${megabytes(again.size_bytes)})\n${ledgerLine(outcome)}\n`);
+		removed.push({ path: info.path, size_bytes: again.size_bytes, ledger: ledgerResult(outcome) });
+		if (!args.json) deps.out(`removed ${info.path} (${megabytes(again.size_bytes)})\n`);
+		// A note that was not recorded is said so on stderr in every mode: the worktree is gone and the trail has no line for it.
+		if (outcome.kind === "stored") {
+			if (!args.json) deps.out(`${ledgerLine(outcome)}\n`);
+		} else deps.err(`${ledgerLine(outcome)}\n`);
 	}
-	const freed = removed.reduce((total, item) => total + (item.size_bytes ?? 0), 0);
+	const freed = exclusiveBytes(removed.flatMap((item) => tables.get(item.path) ?? []));
 	if (args.json) deps.out(`${JSON.stringify({ dry_run: false, removed, skipped, failed: failure, freed_bytes: freed })}\n`);
-	else deps.out(`removed ${removed.length} worktrees, freeing about ${megabytes(freed)}\n`);
+	else deps.out(`removed ${removed.length} worktrees, freeing at least ${megabytes(freed)}\n`);
 	if (failure !== null) {
 		deps.err(`removal failed for ${failure.path}: ${failure.error}\nstopped; nothing further was removed and nothing was retried\n`);
 		return 1;
@@ -255,13 +336,17 @@ async function commandPrune(args: WorktreeArgs, deps: WorktreeDeps): Promise<num
 // ── conflicts ───────────────────────────────────────────────────────────────
 
 function renderForecast(repo: string, forecast: ConflictForecast, deps: WorktreeDeps): void {
-	deps.out(`${repo}\n`);
+	deps.out(`${repo}${forecast.incomplete ? "  (INCOMPLETE: some changed files could not be listed)" : ""}\n`);
 	for (const entry of forecast.worktrees) {
-		deps.out(`  ${entry.path} [${entry.branch ?? "detached"}] ${entry.files.length === 0 ? "no changes" : `${entry.files.length} changed files`}\n`);
+		let known = `${entry.files.length} changed files`;
+		if (entry.files.length === 0) known = entry.notes.length > 0 ? "changes unknown" : "no changes";
+		else if (entry.notes.length > 0) known += " (list incomplete)";
+		deps.out(`  ${entry.path} [${entry.branch ?? "detached"}] ${known}\n`);
+		for (const note of entry.notes) deps.out(`      warning: ${note}\n`);
 		for (const file of entry.files.slice(0, 10)) deps.out(`      ${file}\n`);
 		if (entry.files.length > 10) deps.out(`      ... ${entry.files.length - 10} more\n`);
 	}
-	if (forecast.overlaps.length === 0) deps.out("  no overlapping files\n");
+	if (forecast.overlaps.length === 0) deps.out(forecast.incomplete ? "  no overlap among the files that could be listed (the forecast is incomplete)\n" : "  no overlapping files\n");
 	for (const pair of forecast.overlaps) {
 		const verdict = pair.prediction === "conflict" ? `CONFLICT in ${pair.conflicted_files.join(", ")}` : pair.prediction === "clean" ? "merges cleanly" : `no prediction${pair.detail === null ? "" : ` (${pair.detail})`}`;
 		deps.out(`  overlap ${pair.a} <-> ${pair.b}: ${pair.files.join(", ")}; ${verdict}\n`);
@@ -272,10 +357,21 @@ function renderForecast(repo: string, forecast: ConflictForecast, deps: Worktree
 	for (const note of forecast.notes) deps.out(`  note: ${note}\n`);
 }
 
+/**
+ * Where `conflicts` looks. A directory named with `--repo` is the search target whatever the environment's roots
+ * are (a repository outside them would otherwise never be searched); `--root` entries are added to it. Without a
+ * directory the configured roots apply, and `--repo owner/name` only filters what they hold.
+ */
+async function conflictSearchRoots(args: WorktreeArgs, deps: WorktreeDeps): Promise<string[]> {
+	if (args.repo !== undefined) {
+		const dir = resolve(deps.cwd, args.repo);
+		if ((await gitOut(deps.git, ["rev-parse", "--git-dir"], dir)) !== null) return [...new Set([dir, ...args.roots.map((root) => resolve(deps.cwd, root))])];
+	}
+	return roots(args, deps);
+}
+
 async function commandConflicts(args: WorktreeArgs, deps: WorktreeDeps): Promise<number> {
-	// One repository may be named by its directory, which needs no root at all.
-	const rootList = roots(args, deps);
-	const searchRoots = rootList.length > 0 ? rootList : args.repo === undefined ? [] : [resolve(deps.cwd, args.repo)];
+	const searchRoots = await conflictSearchRoots(args, deps);
 	if (searchRoots.length === 0) return usageError(deps, NO_ROOT);
 	const inventory = await gather(args, deps, searchRoots, { pr: false, measure: false, ignored: false });
 	printNotes(inventory.notes, deps);
@@ -413,6 +509,28 @@ export function httpReportPoster(config: HttpPosterConfig): (report: WorktreeRep
 			if (!response.ok) return { ok: false, error: `HTTP ${response.status}` };
 			const body: unknown = await response.json();
 			return isStoredBody(body) ? { ok: true, stored: body.stored } : { ok: false, error: "unexpected response body" };
+		} catch (error) {
+			const name = error instanceof Error ? error.name : "";
+			return { ok: false, error: name === "TimeoutError" || name === "AbortError" ? "timeout" : "server unreachable" };
+		}
+	};
+}
+
+/** A lookup of live graph claims over `GET /worktrees/claims` with the caller's bearer. Every failure is a refusal to vouch, never "no claims". */
+export function httpClaimsLookup(config: HttpPosterConfig): ClaimsFn {
+	const doFetch = config.fetchImpl ?? ((url: string, init: RequestInit) => fetch(url, init));
+	return async (graphId) => {
+		if (config.token === undefined) return { ok: false, error: "no bearer token for the claims route" };
+		try {
+			const response = await doFetch(`${config.url}/worktrees/claims?graph_id=${encodeURIComponent(graphId)}`, {
+				method: "GET",
+				headers: { authorization: `Bearer ${config.token}` },
+				signal: AbortSignal.timeout(config.timeoutMs),
+			});
+			if (!response.ok) return { ok: false, error: `HTTP ${response.status}` };
+			const body: unknown = await response.json();
+			const claims = parseClaimsBody(body, graphId);
+			return claims === null ? { ok: false, error: "unexpected response body" } : { ok: true, claims };
 		} catch (error) {
 			const name = error instanceof Error ? error.name : "";
 			return { ok: false, error: name === "TimeoutError" || name === "AbortError" ? "timeout" : "server unreachable" };

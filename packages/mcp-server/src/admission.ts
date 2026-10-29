@@ -179,6 +179,7 @@ export const ROUTE_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	"/slo/history": "read",
 	"/docs/lightrag/query": "read",
 	"/worktrees": "read",
+	"/worktrees/claims": "read",
 	"/worktrees/report": "write",
 };
 

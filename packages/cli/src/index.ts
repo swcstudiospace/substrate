@@ -58,7 +58,7 @@ import { httpMemory, lessonsTimeout, runLessons } from "./lessons.ts";
 import { runSkills, skillsTimeout } from "./skills.ts";
 import { runLedger } from "./ledger.ts";
 import { freeBytes, spawnGh, spawnGit } from "../../fleet/src/index.ts";
-import { httpReportPoster, runWorktree } from "./worktree/command.ts";
+import { httpClaimsLookup, httpReportPoster, runWorktree } from "./worktree/command.ts";
 import { runSpool } from "./spool.ts";
 import { spoolConfig } from "../../collectors/src/spool.ts";
 import { runSession } from "./session/command.ts";
@@ -81,6 +81,8 @@ const DEFAULT_TIMEOUT_MS = 1500;
 const EVIDENCE_RESPONSE_MARGIN_MS = 5_000;
 /** A worktree report holds up to 500 rows per request, so it gets more time than a hook-sized call. */
 const WORKTREE_REPORT_TIMEOUT_MS = 10_000;
+/** A claims lookup answers from one index read, but prune waits on it before every removal, so it gets more than a hook's budget. */
+const WORKTREE_CLAIMS_TIMEOUT_MS = 5_000;
 
 function base(): string {
 	return (process.env.SUBSTRATE_URL?.trim() || DEFAULT_URL).replace(/\/+$/, "");
@@ -720,6 +722,11 @@ switch (command) {
 					token: resolveBearer("claude-code", process.env) ?? undefined,
 					// A report can hold hundreds of rows; the hook-sized default budget is too short for it.
 					timeoutMs: Math.max(timeout(), WORKTREE_REPORT_TIMEOUT_MS),
+				}),
+				claims: httpClaimsLookup({
+					url: base(),
+					token: resolveBearer("claude-code", process.env) ?? undefined,
+					timeoutMs: Math.max(timeout(), WORKTREE_CLAIMS_TIMEOUT_MS),
 				}),
 			}),
 		);

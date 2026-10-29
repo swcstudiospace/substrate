@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { classifyForPrune, type PruneContext } from "./classify.ts";
+import type { ClaimStatus } from "./claims.ts";
 import { type CommandRunner, spawnGit } from "./git.ts";
 import { createPrShared, inspectWorktree, listWorktrees, type WorktreeInfo } from "./inventory.ts";
 import { addWorktree, cleanupTemp, commit, defined, fakeGh, git, makeRepo, tempDir } from "./testkit.ts";
@@ -155,5 +156,29 @@ describe("classification of real worktrees", () => {
 		const linked = await inspect(repo.dir, path, gh);
 		expect(classifyForPrune(linked, ctx({ cwd: join(path, "sub"), now: later().now })).class).toBe("never");
 		expect(classifyForPrune(linked, later()).class).toBe("safe");
+	});
+});
+
+describe("live graph claims", () => {
+	const GRAPH = "ut-mu1-abcd1234";
+	const live: ClaimStatus = { state: "live", graph_id: GRAPH, claims: [{ node_id: "n1", holder: { surface: "hermes", session_id: "s-1" }, expires_at: "2026-10-29T13:00:00.000Z" }] };
+
+	test("a live claim makes an otherwise safe worktree never, and says who holds it", () => {
+		const result = classifyForPrune(info(), ctx(), live);
+		expect(result.class).toBe("never");
+		expect(result.reasons.join(" ")).toContain(`live claim on graph ${GRAPH} (node n1, held by hermes, until 2026-10-29T13:00:00.000Z)`);
+	});
+
+	test("a claim that could not be checked is review, never safe", () => {
+		const result = classifyForPrune(info(), ctx(), { state: "unverified", graph_id: GRAPH, reason: "server unreachable" });
+		expect(result.class).toBe("review");
+		expect(result.reasons.join(" ")).toContain("claims-unverified");
+		expect(result.reasons.join(" ")).toContain("server unreachable");
+	});
+
+	test("no claim, or a worktree that is not a graph checkout, leaves the decision to the other facts", () => {
+		expect(classifyForPrune(info(), ctx(), { state: "none", graph_id: GRAPH }).class).toBe("safe");
+		expect(classifyForPrune(info(), ctx(), { state: "not-checked" }).class).toBe("safe");
+		expect(classifyForPrune(info({ dirty: true }), ctx(), { state: "none", graph_id: GRAPH }).class).toBe("never");
 	});
 });

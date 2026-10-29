@@ -63,6 +63,8 @@ export interface ConflictForecast extends MergeOrder {
 	worktrees: ForecastEntry[];
 	overlaps: OverlapPair[];
 	merge_tree: "available" | "unavailable";
+	/** True when any worktree's changed files could not be listed completely: the lists and overlaps may be missing files. */
+	incomplete: boolean;
 	notes: string[];
 }
 
@@ -198,5 +200,5 @@ export async function forecastConflicts(worktrees: readonly ForecastWorktree[], 
 	if (pending.length > maxPairs) notes.push(`${pending.length} overlapping pairs; only the first ${maxPairs} were predicted`);
 	const overlaps = await mapLimit(pending, options.concurrency ?? DEFAULT_CONCURRENCY, (item, index) => predict(item.a, item.b, item.files, git, available, index < maxPairs));
 	const { order, rebase } = suggestMergeOrder(entries, overlaps);
-	return { worktrees: entries, overlaps, order, rebase, merge_tree: available ? "available" : "unavailable", notes };
+	return { worktrees: entries, overlaps, order, rebase, merge_tree: available ? "available" : "unavailable", incomplete: entries.some((entry) => entry.notes.length > 0), notes };
 }

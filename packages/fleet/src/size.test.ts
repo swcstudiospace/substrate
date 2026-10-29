@@ -2,8 +2,8 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { linkSync, mkdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { measureTree } from "./size.ts";
-import { cleanupTemp, tempDir } from "./testkit.ts";
+import { exclusiveBytes, measureTree } from "./size.ts";
+import { cleanupTemp, defined, tempDir } from "./testkit.ts";
 
 afterAll(cleanupTemp);
 
@@ -72,5 +72,42 @@ describe("measureTree", () => {
 	test("an unreadable root is unknown, not zero", async () => {
 		const result = await measureTree(join(tempDir(), "absent"));
 		expect(result.bytes).toBeNull();
+	});
+});
+
+describe("exclusiveBytes", () => {
+	test("an inode that is also linked from outside the removed tree is not freed; a file with one link is", async () => {
+		const cache = tempDir();
+		const tree = tempDir();
+		bigFile(join(cache, "shared.bin"));
+		linkSync(join(cache, "shared.bin"), join(tree, "shared.bin"));
+		bigFile(join(tree, "own.bin"));
+		const walked = await measureTree(tree, { links: true });
+		// The tree's size counts both files; removing it frees only the one nothing else links to.
+		expect(walked.bytes).toBeGreaterThanOrEqual(2 * MIB);
+		const freed = exclusiveBytes([defined(walked.links, "links")]);
+		expect(freed).toBeGreaterThanOrEqual(MIB);
+		expect(freed).toBeLessThan(1.5 * MIB);
+	});
+
+	test("an inode whose every link is inside the trees removed together is freed once, and not when only one tree goes", async () => {
+		const first = tempDir();
+		const second = tempDir();
+		bigFile(join(first, "x.bin"));
+		linkSync(join(first, "x.bin"), join(second, "x.bin"));
+		const one = defined((await measureTree(first, { links: true })).links, "links");
+		const two = defined((await measureTree(second, { links: true })).links, "links");
+		const both = exclusiveBytes([one, two]);
+		expect(both).toBeGreaterThanOrEqual(MIB);
+		expect(both).toBeLessThan(1.5 * MIB);
+		expect(exclusiveBytes([one])).toBeLessThan(MIB / 2);
+	});
+
+	test("a walk that hit a cap offers no table, and the table is only built when asked for", async () => {
+		const dir = tempDir();
+		for (let i = 0; i < 20; i++) writeFileSync(join(dir, `f${i}`), "x");
+		expect((await measureTree(dir, { maxEntries: 10, links: true })).links).toBeNull();
+		expect((await measureTree(dir)).links).toBeNull();
+		expect((await measureTree(dir, { links: true })).links).not.toBeNull();
 	});
 });

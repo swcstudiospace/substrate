@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { WorktreeInfo } from "./inventory.ts";
-import { buildReport, buildReports, MAX_REPORT_WORKTREES } from "./report.ts";
+import { WORKTREE_REPORT_MAX_BYTES } from "../../mcp-server/src/worktree-registry.ts";
+import { buildReport, buildReports, MAX_REPORT_BYTES, MAX_REPORT_WORKTREES } from "./report.ts";
 
 const NOW = new Date("2026-10-29T12:00:00Z");
 
@@ -79,14 +80,41 @@ describe("buildReport", () => {
 });
 
 describe("buildReports", () => {
-	test("splits an inventory into bodies of at most the route's limit and never drops a worktree", () => {
+	const bodyBytes = (report: unknown): number => Buffer.byteLength(JSON.stringify(report), "utf8");
+
+	test("splits an inventory into bodies of at most the route's row limit and never drops a worktree", () => {
 		const inventory = Array.from({ length: MAX_REPORT_WORKTREES * 2 + 1 }, (_unused, index) => info(`/w/${index}`));
-		const reports = buildReports("h", inventory, { now: NOW, roots: [] });
+		const { reports, skipped } = buildReports("h", inventory, { now: NOW, roots: [] });
 		expect(reports.map((report) => report.worktrees.length)).toEqual([MAX_REPORT_WORKTREES, MAX_REPORT_WORKTREES, 1]);
+		expect(skipped).toEqual([]);
 		expect(buildReport("h", inventory, { now: NOW, roots: [] }).worktrees).toHaveLength(MAX_REPORT_WORKTREES);
 	});
 
+	test("long non-ASCII paths split a batch on encoded bytes long before the row limit, in order, every body under the route's limit", () => {
+		// 1000 characters of 3 bytes each: 500 rows would be about 1.5 MB, over the route's 1,000,000 bytes.
+		const inventory = Array.from({ length: MAX_REPORT_WORKTREES }, (_unused, index) => info(`/${"\u65e5".repeat(1000)}/${index}`));
+		const { reports, skipped } = buildReports("h", inventory, { now: NOW, roots: [] });
+		expect(skipped).toEqual([]);
+		expect(reports.length).toBeGreaterThan(1);
+		for (const report of reports) {
+			expect(report.worktrees.length).toBeLessThan(MAX_REPORT_WORKTREES);
+			expect(bodyBytes(report)).toBeLessThanOrEqual(MAX_REPORT_BYTES);
+			expect(bodyBytes(report)).toBeLessThan(WORKTREE_REPORT_MAX_BYTES);
+		}
+		expect(reports.flatMap((report) => report.worktrees.map((row) => row.path))).toEqual(inventory.map((item) => item.path));
+	});
+
+	test("a single row that cannot fit in any body is skipped with a reason and the rest are still reported", () => {
+		const huge = info(`/${"\u65e5".repeat(400_000)}`);
+		const { reports, skipped } = buildReports("h", [info("/a"), huge, info("/b")], { now: NOW, roots: [] });
+		expect(skipped).toHaveLength(1);
+		expect(skipped[0]?.path).toBe(huge.path);
+		expect(skipped[0]?.reason).toContain("alone");
+		expect(reports.flatMap((report) => report.worktrees.map((row) => row.path))).toEqual(["/a", "/b"]);
+		expect(reports.every((report) => bodyBytes(report) <= MAX_REPORT_BYTES)).toBe(true);
+	});
+
 	test("an empty inventory is one empty report", () => {
-		expect(buildReports("h", [], { now: NOW })[0]?.worktrees).toEqual([]);
+		expect(buildReports("h", [], { now: NOW }).reports[0]?.worktrees).toEqual([]);
 	});
 });

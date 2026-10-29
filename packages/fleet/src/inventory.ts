@@ -4,12 +4,15 @@
  * `discoverRepos` looks for repositories below the configured roots (a `.git` directory or gitfile) and
  * collapses every linked worktree to its common git dir, so one repository is one entry however many
  * of its worktrees sit under the roots. `listWorktrees` then asks git (`git worktree list
- * --porcelain`) for every worktree of that repository, including linked ones outside the roots.
+ * --porcelain -z`) for every worktree of that repository, including linked ones outside the roots. The
+ * listing is NUL-delimited because a path may legally hold a newline.
  * `inspectWorktree` gathers the facts the classifier and the report need. Every unreadable fact becomes
  * null, false-for-clean is never assumed: a failed `git status` is reported as dirty.
  */
+import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, realpathSync, type Stats } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { WORKTREE_REPO_PATTERN } from "../../mcp-server/src/worktree-registry.ts";
 import { type CommandRunner, type GitRunner, gitOut } from "./git.ts";
 import { mapLimit } from "./pool.ts";
 import { Gate, lookupPr, type PrState, PR_NONE, PR_UNKNOWN, type PrInfo, DEFAULT_PR_CONCURRENCY } from "./pr.ts";
@@ -29,33 +32,51 @@ export interface WorktreeEntry {
 	primary: boolean;
 }
 
-/** `git worktree list --porcelain`: blank-line separated blocks of `key value` lines. */
+/**
+ * `git worktree list --porcelain -z`: each field is NUL-terminated and an empty field ends a record, so a path
+ * or a lock reason that holds a newline stays in one piece.
+ */
 export function parseWorktreePorcelain(text: string): WorktreeEntry[] {
 	const entries: WorktreeEntry[] = [];
-	for (const block of text.split(/\n\s*\n/)) {
-		let current: WorktreeEntry | null = null;
-		for (const line of block.split("\n")) {
-			if (line.startsWith("worktree ")) {
-				current = { path: line.slice("worktree ".length), head: null, branch: null, detached: false, bare: false, locked: false, prunable: false, primary: entries.length === 0 };
-				continue;
-			}
-			if (current === null) continue;
-			if (line.startsWith("HEAD ")) current.head = line.slice("HEAD ".length).trim();
-			else if (line.startsWith("branch ")) current.branch = line.slice("branch ".length).trim().replace(/^refs\/heads\//, "");
-			else if (line === "detached") current.detached = true;
-			else if (line === "bare") current.bare = true;
-			else if (line === "locked" || line.startsWith("locked ")) current.locked = true;
-			else if (line === "prunable" || line.startsWith("prunable ")) current.prunable = true;
+	let current: WorktreeEntry | null = null;
+	for (const field of text.split("\0")) {
+		if (field === "") {
+			if (current !== null) entries.push(current);
+			current = null;
+			continue;
 		}
-		if (current !== null) entries.push(current);
+		if (field.startsWith("worktree ")) {
+			if (current !== null) entries.push(current);
+			current = { path: field.slice("worktree ".length), head: null, branch: null, detached: false, bare: false, locked: false, prunable: false, primary: entries.length === 0 };
+			continue;
+		}
+		if (current === null) continue;
+		if (field.startsWith("HEAD ")) current.head = field.slice("HEAD ".length).trim();
+		else if (field.startsWith("branch ")) current.branch = field.slice("branch ".length).trim().replace(/^refs\/heads\//, "");
+		else if (field === "detached") current.detached = true;
+		else if (field === "bare") current.bare = true;
+		else if (field === "locked" || field.startsWith("locked ")) current.locked = true;
+		else if (field === "prunable" || field.startsWith("prunable ")) current.prunable = true;
 	}
+	if (current !== null) entries.push(current);
 	return entries;
 }
 
 /** Every worktree of the repository `repoDir` belongs to, or null when git could not list them. */
 export async function listWorktrees(repoDir: string, git: GitRunner): Promise<WorktreeEntry[] | null> {
-	const result = await git(["worktree", "list", "--porcelain"], repoDir);
+	const result = await git(["worktree", "list", "--porcelain", "-z"], repoDir);
 	return result.code === 0 ? parseWorktreePorcelain(result.stdout) : null;
+}
+
+/**
+ * The worktree at `path` as git lists it now, ready for `inspectWorktree`; null when git cannot list the
+ * repository, no longer lists the path, or lists it as bare. Head, branch and detachment move whenever another
+ * session commits or switches branch, so a decision that follows an earlier inventory must start from this and
+ * never from the inventory's copy: a merge proof for an old head says nothing about the head that is there now.
+ */
+export async function reloadWorktree(path: string, repoDir: string, git: GitRunner): Promise<InspectInput | null> {
+	const entry = (await listWorktrees(repoDir, git))?.find((item) => item.path === path);
+	return entry === undefined || entry.bare ? null : { ...entry, repoDir };
 }
 
 export interface RepoRef {
@@ -156,7 +177,7 @@ export async function discoverRepos(roots: readonly string[], options: DiscoverO
 
 export interface WorktreeInfo {
 	path: string;
-	/** `owner/name` from origin, else `local/<directory>`. */
+	/** `owner/name` from origin, else `local/<directory>` (see `localRepoLabel` for directories the registry would refuse). */
 	repo: string;
 	/** The primary checkout of the repository: where git commands about this worktree run. */
 	repo_dir: string;
@@ -227,6 +248,24 @@ export interface InspectInput extends WorktreeEntry {
 
 const SLUG_PATTERN = /[:/]([^/:]+\/[^/]+?)(?:\.git)?\/?$/;
 
+/** The name part of a repository label holds at most this many characters (the registry pattern's `{1,100}`). */
+const LOCAL_NAME_MAX = 100;
+const LOCAL_HASH_CHARS = 8;
+
+/**
+ * A label for a checkout with no origin that the registry accepts: `local/<directory>` when that already fits
+ * the registry's repository pattern, else `local/<slug>-<8 hex of sha256 of the directory name>`. The slug keeps
+ * `[A-Za-z0-9._-]`, replaces every other character with `-`, drops leading dots and dashes and is never empty,
+ * so two directories whose names differ only in the replaced characters still get different labels.
+ */
+export function localRepoLabel(directory: string): string {
+	const plain = `local/${directory}`;
+	if (WORKTREE_REPO_PATTERN.test(plain)) return plain;
+	const slug = directory.replace(/[^A-Za-z0-9._-]/gu, "-").replace(/^[.-]+/, "") || "repo";
+	const digest = createHash("sha256").update(directory).digest("hex").slice(0, LOCAL_HASH_CHARS);
+	return `local/${slug.slice(0, LOCAL_NAME_MAX - LOCAL_HASH_CHARS - 1)}-${digest}`;
+}
+
 /** The default branch to compare against: origin's HEAD, else `main`, else `master`. */
 export async function resolveDefaultRef(repoDir: string, git: GitRunner): Promise<string | null> {
 	const origin = await gitOut(git, ["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"], repoDir);
@@ -241,7 +280,7 @@ async function repoFacts(repoDir: string, options: InspectOptions): Promise<Repo
 	const load = async (): Promise<RepoFacts> => {
 		const url = await gitOut(options.git, ["remote", "get-url", "origin"], repoDir);
 		const slug = url === null ? null : SLUG_PATTERN.exec(url)?.[1] ?? null;
-		return { repo: slug ?? `local/${basename(repoDir)}`, defaultRef: await resolveDefaultRef(repoDir, options.git) };
+		return { repo: slug ?? localRepoLabel(basename(repoDir)), defaultRef: await resolveDefaultRef(repoDir, options.git) };
 	};
 	if (options.facts === undefined) return load();
 	const cached = options.facts.get(repoDir);

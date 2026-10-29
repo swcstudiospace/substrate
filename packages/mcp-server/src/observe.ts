@@ -96,6 +96,7 @@ const KNOWN_ROUTES = [
 	"/slo/history",
 	"/livez",
 	"/worktrees/report",
+	"/worktrees/claims",
 	"/worktrees",
 ] as const;
 

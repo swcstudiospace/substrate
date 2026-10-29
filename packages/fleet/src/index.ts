@@ -1,4 +1,5 @@
 export * from "./classify.ts";
+export * from "./claims.ts";
 export * from "./config.ts";
 export * from "./conflicts.ts";
 export * from "./disk.ts";

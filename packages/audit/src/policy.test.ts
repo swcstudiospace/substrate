@@ -91,6 +91,8 @@ describe("auditMode", () => {
 			["/verify", "verify"],
 			["/drift", "drift"],
 			["/evidence", "evidence"],
+			// The worktree claims read is audited under the `graph_get` tool it mirrors, so its mode is that tool's.
+			["/worktrees/claims", "graph_get"],
 		]) {
 			expect(FAIL_OPEN_TOOLS.has(tool as string)).toBe(true);
 			expect(route).toBeDefined();

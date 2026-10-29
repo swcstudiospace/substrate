@@ -23,7 +23,7 @@ import type { SQL } from "bun";
 export const WORKTREE_REPORT_PROTOCOL = 1;
 /** Most worktrees one report may carry. */
 export const WORKTREE_REPORT_MAX_ITEMS = 500;
-/** The request body cap for `POST /worktrees/report`, in bytes: the server's default body cap, named here because it is part of the contract. */
+/** The request body cap for `POST /worktrees/report`, in bytes. The route reads under it and the CLI's report splitter packs under it (less a margin). */
 export const WORKTREE_REPORT_MAX_BYTES = 1_000_000;
 /** Longest path accepted, in characters. */
 export const WORKTREE_PATH_MAX_CHARS = 1024;
@@ -121,7 +121,8 @@ export type Parsed<T> = { ok: true; value: T } | { ok: false; problem: string };
 const fail = (problem: string): { ok: false; problem: string } => ({ ok: false, problem });
 
 const HOST_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const REPO_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\/[A-Za-z0-9._-]{1,100}$/;
+/** The repository label a report row may carry: `owner/name`. The fleet package builds its `local/<name>` labels against it. */
+export const WORKTREE_REPO_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\/[A-Za-z0-9._-]{1,100}$/;
 const HEAD_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const ISO_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 
@@ -169,7 +170,7 @@ function validateWorktree(raw: unknown, index: number): Parsed<WorktreeRecord> {
 	if (typeof path !== "string" || !path.startsWith("/") || path.length > WORKTREE_PATH_MAX_CHARS || path.includes("\u0000")) {
 		return fail(`${at}.path must be an absolute path of at most ${WORKTREE_PATH_MAX_CHARS} characters with no NUL`);
 	}
-	if (typeof repo !== "string" || !REPO_PATTERN.test(repo)) return fail(`${at}.repo must be owner/name`);
+	if (typeof repo !== "string" || !WORKTREE_REPO_PATTERN.test(repo)) return fail(`${at}.repo must be owner/name`);
 	if (branch !== null && !isLabel(branch)) return fail(`${at}.branch must be a string of at most ${WORKTREE_TEXT_MAX_CHARS} characters, or null`);
 	if (typeof head !== "string" || !HEAD_PATTERN.test(head)) return fail(`${at}.head must be 40 or 64 hex characters`);
 	if (base !== null && !isLabel(base)) return fail(`${at}.base must be a string of at most ${WORKTREE_TEXT_MAX_CHARS} characters, or null`);
@@ -242,7 +243,7 @@ export interface RawWorktreeListQuery {
 /** Narrows the filters of a listing. An absent member takes its default; a present one that is not valid is refused, never ignored. */
 export function parseWorktreeListQuery(raw: RawWorktreeListQuery): Parsed<WorktreeListQuery> {
 	const { repo, host, state, limit } = raw;
-	if (repo !== undefined && (typeof repo !== "string" || !REPO_PATTERN.test(repo))) return fail("repo must be owner/name");
+	if (repo !== undefined && (typeof repo !== "string" || !WORKTREE_REPO_PATTERN.test(repo))) return fail("repo must be owner/name");
 	if (host !== undefined && (typeof host !== "string" || !HOST_PATTERN.test(host))) return fail("host must be 1 to 128 characters of letters, digits, dot, underscore or hyphen");
 	if (state !== undefined && !isListState(state)) return fail(`state must be one of ${WORKTREE_LIST_STATES.join(", ")}`);
 	let pageSize = WORKTREE_LIST_DEFAULT_LIMIT;

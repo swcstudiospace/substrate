@@ -1,8 +1,9 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { spawnGit } from "./git.ts";
-import { collectInventory, createPrShared, discoverRepos, inspectWorktree, listWorktrees, parseWorktreePorcelain } from "./inventory.ts";
+import { WORKTREE_REPO_PATTERN } from "../../mcp-server/src/worktree-registry.ts";
+import { type CommandRunner, spawnGit } from "./git.ts";
+import { collectInventory, createPrShared, discoverRepos, inspectWorktree, listWorktrees, localRepoLabel, parseWorktreePorcelain, reloadWorktree } from "./inventory.ts";
 import { addWorktree, cleanupTemp, commit, defined, fakeGh, git, makeRepo, tempDir, write } from "./testkit.ts";
 
 afterAll(cleanupTemp);
@@ -27,7 +28,7 @@ describe("parseWorktreePorcelain", () => {
 			"worktree /srv/bare.git",
 			"bare",
 			"",
-		].join("\n");
+		].join("\0");
 		const entries = parseWorktreePorcelain(text);
 		expect(entries.map((entry) => [entry.path, entry.branch, entry.primary])).toEqual([
 			["/srv/repo", "main", true],
@@ -38,6 +39,26 @@ describe("parseWorktreePorcelain", () => {
 		expect(entries[1]?.locked).toBe(true);
 		expect(entries[2]).toMatchObject({ detached: true, prunable: true, locked: false });
 		expect(entries[3]?.bare).toBe(true);
+	});
+
+	test("a path or a lock reason that holds a newline stays in one piece", () => {
+		const text = ["worktree /srv/repo", `HEAD ${"a".repeat(40)}`, "branch refs/heads/main", "", "worktree /srv/wt/two\nlines", `HEAD ${"b".repeat(40)}`, "branch refs/heads/two", "locked because\nreasons", "", ""].join("\0");
+		const entries = parseWorktreePorcelain(text);
+		expect(entries.map((entry) => [entry.path, entry.branch, entry.locked])).toEqual([
+			["/srv/repo", "main", false],
+			["/srv/wt/two\nlines", "two", true],
+		]);
+	});
+
+	test("listWorktrees asks git for NUL-delimited records and keeps a path with a newline whole", async () => {
+		const calls: string[][] = [];
+		const runner: CommandRunner = async (args) => {
+			calls.push(args);
+			return { code: 0, stdout: `worktree /srv/wt/a\nb\0HEAD ${"c".repeat(40)}\0detached\0\0`, stderr: "" };
+		};
+		const listed = await listWorktrees("/srv/repo", runner);
+		expect(calls).toEqual([["worktree", "list", "--porcelain", "-z"]]);
+		expect(listed?.map((entry) => entry.path)).toEqual(["/srv/wt/a\nb"]);
 	});
 });
 
@@ -173,5 +194,64 @@ describe("inspectWorktree", () => {
 
 		write(repo.dir, ".planning/STATE.md", "local\n");
 		expect((await inspectWorktree(input, { git: spawnGit, measure: false })).ignored_work).toEqual([]);
+	});
+});
+
+describe("localRepoLabel", () => {
+	test("a directory name the registry accepts stays local/<name>", () => {
+		expect(localRepoLabel("scratch")).toBe("local/scratch");
+		expect(localRepoLabel("my_repo-2.0")).toBe("local/my_repo-2.0");
+	});
+
+	test.each([
+		["my repo", /^local\/my-repo-[0-9a-f]{8}$/],
+		["dépôt", /^local\/d-p-t-[0-9a-f]{8}$/],
+		["日本語", /^local\/repo-[0-9a-f]{8}$/],
+		[".hidden dir", /^local\/hidden-dir-[0-9a-f]{8}$/],
+		["", /^local\/repo-[0-9a-f]{8}$/],
+	])("%s becomes a label the registry accepts", (name, expected) => {
+		const label = localRepoLabel(name);
+		expect(label).toMatch(expected);
+		expect(WORKTREE_REPO_PATTERN.test(label)).toBe(true);
+		// Stable: the same directory is the same repository on every scan.
+		expect(localRepoLabel(name)).toBe(label);
+	});
+
+	test("a name past the length limit is cut so the whole label still fits, and names that differ stay distinct", () => {
+		const long = localRepoLabel(`${"x".repeat(150)} tail`);
+		expect(WORKTREE_REPO_PATTERN.test(long)).toBe(true);
+		expect(long.slice("local/".length)).toHaveLength(100);
+		expect(localRepoLabel("a b")).not.toBe(localRepoLabel("a?b"));
+	});
+
+	test("a checkout with no remote in a directory called `my repo` is inventoried under a valid label", async () => {
+		const dir = join(tempDir(), "my repo");
+		mkdirSync(dir);
+		git(dir, ["init", "-q", "--initial-branch=main"]);
+		git(dir, ["-c", "user.email=a@b.invalid", "-c", "user.name=n", "commit", "-q", "--allow-empty", "-m", "i"]);
+		const inventory = await collectInventory([dir], { git: spawnGit, maxDepth: 0 });
+		const repo = defined(inventory.worktrees[0], "worktree").repo;
+		expect(repo).toMatch(/^local\/my-repo-[0-9a-f]{8}$/);
+		expect(WORKTREE_REPO_PATTERN.test(repo)).toBe(true);
+	});
+});
+
+describe("reloadWorktree", () => {
+	test("returns the head git lists now, not the one an earlier listing had", async () => {
+		const repo = makeRepo();
+		const path = addWorktree(repo, tempDir(), "moving");
+		const before = defined((await listWorktrees(repo.dir, spawnGit))?.find((item) => item.path === path), "entry");
+		const moved = commit(path, "m.txt", "m\n");
+		const after = defined(await reloadWorktree(path, repo.dir, spawnGit), "reloaded");
+		expect(after.head).toBe(moved);
+		expect(after.head).not.toBe(before.head);
+		expect(after).toMatchObject({ branch: "moving", detached: false, primary: false, repoDir: repo.dir });
+	});
+
+	test("is null for a path git no longer lists, and when git cannot list at all", async () => {
+		const repo = makeRepo();
+		expect(await reloadWorktree(join(tempDir(), "gone"), repo.dir, spawnGit)).toBeNull();
+		const broken: CommandRunner = async () => ({ code: 128, stdout: "", stderr: "fatal" });
+		expect(await reloadWorktree(repo.dir, repo.dir, broken)).toBeNull();
 	});
 });

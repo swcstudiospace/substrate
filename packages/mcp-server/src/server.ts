@@ -106,7 +106,8 @@ import type { Substrate } from "./service.ts";
 import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
 import { approvalBodyProblem, approvalFailure, toApprovalRequest } from "./skills/registry.ts";
 import { EVENT_KINDS, SURFACES, type Surface } from "./types.ts";
-import { parseWorktreeListQuery, validateWorktreeReport } from "./worktree-registry.ts";
+import { parseClaimsQuery } from "./worktree-claims.ts";
+import { parseWorktreeListQuery, validateWorktreeReport, WORKTREE_REPORT_MAX_BYTES } from "./worktree-registry.ts";
 import { isLocalPeer, livezBody, LoopLagMonitor } from "./watchdog.ts";
 import { ragRetryDelay } from "./rag-retry.ts";
 import { reservedEmitRefusal } from "./reserved-actions.ts";
@@ -332,6 +333,8 @@ const INGEST_NEEDS_SURFACE = "docs_ingest needs an authenticated surface; nothin
 const MERGE_TRIGGER_NEEDS_SURFACE = "docs merge-trigger needs an authenticated surface; nothing was refreshed";
 /** Why an anonymous worktree report is refused, even on a run that allows anonymous callers. */
 const WORKTREE_REPORT_NEEDS_SURFACE = "worktree report needs an authenticated surface; nothing was stored";
+/** Why an anonymous claims read is refused: it names the sessions holding a graph's nodes. */
+const WORKTREE_CLAIMS_NEEDS_SURFACE = "worktree claims need an authenticated surface";
 /** The dataset a post-merge hook triggers when the body names none (DOCS-03's own repo row). */
 const MERGE_TRIGGER_DATASET = "agent-substrate";
 
@@ -1907,7 +1910,8 @@ export function createHttpServer(
 					sendJson(res, refusal.status, refusal.body);
 					return;
 				}
-				const checked = validateWorktreeReport(JSON.parse(await readBody(req)));
+				// The cap is the contract's own constant, which the CLI's report splitter reads too, so the two cannot drift.
+				const checked = validateWorktreeReport(JSON.parse(await readBody(req, WORKTREE_REPORT_MAX_BYTES)));
 				if (!checked.ok) {
 					sendJson(res, 400, { error: "worktrees.invalid", problem: checked.problem });
 					return;
@@ -1919,6 +1923,29 @@ export function createHttpServer(
 					return;
 				}
 				sendJson(res, 200, { stored: outcome.stored, removed: outcome.removed });
+				return;
+			}
+
+			// The prune guard's question (phase 68): the unexpired leases of one graph. It reads graph data the `graph_get` tool
+			// already serves and writes nothing, so it is audited under that tool's name (fail-open, class `read`) and is not
+			// behind SUBSTRATE_WORKTREE_REGISTRY. An index that is missing or did not answer is 503, never an empty list.
+			if (req.method === "GET" && url.pathname === "/worktrees/claims") {
+				if (surface === null) {
+					sendJson(res, 401, { error: WORKTREE_CLAIMS_NEEDS_SURFACE });
+					return;
+				}
+				const query = parseClaimsQuery(url.searchParams.get("graph_id") ?? undefined);
+				if (!query.ok) {
+					sendJson(res, 400, { error: "worktrees.invalid", problem: query.problem });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "graph_get", { graph_id: query.value }))) return;
+				const outcome = await substrate.worktreeClaims(query.value);
+				if (!outcome.ok) {
+					sendJson(res, outcome.status, outcome.body);
+					return;
+				}
+				sendJson(res, 200, { graph_id: outcome.graph_id, claims: outcome.claims });
 				return;
 			}
 

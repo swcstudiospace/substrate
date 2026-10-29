@@ -2,13 +2,14 @@
 
 The server keeps one row per git worktree that a host has reported: where it is, which repository and branch, its head, whether it is dirty, how far it is from its base, how big it is, and which session or graph owns it. The CLI and the collectors inspect the checkouts and post what they found; **the server never touches a worktree** (ADR 0005, ADR 0007). The registry answers one question for everyone else: whose worktree is this, and is it safe to leave alone.
 
-The registry is **off by default**. While `SUBSTRATE_WORKTREE_REGISTRY` is anything but `on`, every route and the tool below answer 503 `worktrees.disabled` and nothing is stored or audited.
+The registry is **off by default**. While `SUBSTRATE_WORKTREE_REGISTRY` is anything but `on`, the registry routes and the tool below answer 503 `worktrees.disabled` and nothing is stored or audited. The claims read (below) is the exception: it reads existing graph data, writes nothing and does not depend on the flag.
 
 | Door | What it does | Class | Audit |
 | --- | --- | --- | --- |
 | `POST /worktrees/report` | Stores one host's inventory | write | `worktree_report`, **fail-closed** |
 | `GET /worktrees` | Lists the registry | read | `worktree_list`, fail-open |
 | MCP tool `worktree_list` | The same listing, same arguments and reply | read | `worktree_list`, fail-open |
+| `GET /worktrees/claims` | The unexpired leases of one graph, for the prune guard | read | `graph_get`, fail-open |
 
 The classes are the admission classes of `docs/observability.md`; the audit modes are `packages/audit/src/policy.ts`, described in `docs/mcp-audit.md`. A report the audit chain cannot record is refused (503) and stores nothing; a listing is served whether or not the chain can take its record.
 
@@ -91,6 +92,18 @@ An accepted report is one transaction: the worktrees it lists are upserted by `(
 
 An argument that is present and invalid is refused (400 `worktrees.invalid`, or a tool error), never ignored. The reply is `{ "worktrees": [...], "truncated": <more rows exist> }`, newest `last_seen_at` first and then host and path. Each row has the report's members plus `host`, `first_seen_at` and `last_seen_at`; `session_id` and `graph_id` are left out when the reporter sent none. The listing is open to an anonymous caller on a run that allows one, like the other reads. It answers the 503 rows of the table above while the registry is off or has no index.
 
+## `GET /worktrees/claims?graph_id=<id>`
+
+The question `substrate worktree prune` asks before it removes a checkout that belongs to a graph: does a session hold a live claim there? A session that reuses an old, clean, merged checkout holds a lease without changing a file, so only the server can say so. The route reads the graph through the index (the read behind the `graph_get` tool) and judges each node's lease the way every other lease reader does; it is audited under `graph_get` (fail-open, class `read`). It is **not** behind `SUBSTRATE_WORKTREE_REGISTRY`: it reads existing graph data and writes nothing.
+
+The caller needs an authenticated surface (an anonymous caller is 401, even on a run that allows untokened callers). `graph_id` is required and must be 1 to 128 characters of letters, digits, dot, underscore or hyphen, starting with a letter or digit (400 `worktrees.invalid` otherwise).
+
+```json
+{ "graph_id": "ut-mu1-abcd1234", "claims": [ { "node_id": "n1", "holder": { "surface": "hermes", "session_id": "..." }, "expires_at": "2026-10-29T13:00:00.000Z" } ] }
+```
+
+Only unexpired leases are listed, by node id; a free, released or lapsed node is not a claim, and a graph the index does not know has an empty list. The fencing `lease_id` is never returned. A server with no index (`SUBSTRATE_PG_URL`) or an index that did not answer is **503 `claims.unavailable`** and never an empty list: the caller deletes a directory on "no claims", so "no answer" must not look like it. The CLI treats every failure as `claims-unverified` (`review`), never as safe.
+
 ## Retention
 
 A row is a report's last word about one worktree, not a history. Each accepted report deletes **its own host's** rows whose `last_seen_at` is older than `SUBSTRATE_WORKTREE_REGISTRY_TTL_S` (default 1,209,600 seconds, 14 days), judged at report time by the server's clock. Two consequences:
@@ -109,7 +122,7 @@ All five are read by TypeScript; the dispatcher also reads `SUBSTRATE_WORKTREE_M
 | --- | --- | --- | --- |
 | `SUBSTRATE_WORKTREE_REGISTRY` | `off` | the server | `on` enables the routes and the tool |
 | `SUBSTRATE_WORKTREE_REGISTRY_TTL_S` | `1209600` | the server | the retention window, 60 to 31,536,000 seconds |
-| `SUBSTRATE_WORKTREE_ROOTS` | none | the CLI, the collector, the fleet package, the doctor | colon-separated absolute directories that hold worktrees |
+| `SUBSTRATE_WORKTREE_ROOTS` | none | the CLI, the collector, the fleet package, the doctor | colon-separated absolute directories that hold worktrees. Unset: the CLI and the doctor assume no location; the collector's graph attribution falls back to `/var/lib/substrate/worktrees`; the dispatcher does not read it and always uses that directory |
 | `SUBSTRATE_WORKTREE_MIN_FREE_GB` | `5` | the CLI, the fleet package, the dispatcher | the free-disk floor for creating a worktree |
 | `SUBSTRATE_WORKTREE_IDLE_DAYS` | `14` | the server, the CLI, the fleet package | how long a worktree must be untouched before prune may call it safe, and when a listing calls it `stale` |
 
