@@ -39,6 +39,9 @@ export const FAIL_CLOSED_TOOLS: ReadonlySet<string> = new Set([
 	// v1.6 (phase 61): a rollback commit takes memory other agents read out of force and deletes its plane documents (nearest: `memory_write`),
 	// so an unrecorded one is refused; the client keeps it in its pending journal and delivers it later.
 	"session_rollback_commit",
+	// Phase 68 (FLEET-02): the worktree report is a REST write (no tool). It replaces the registry rows other sessions read
+	// to see whose worktree is whose, so an unrecorded one is refused; the reporter retries on its next run.
+	"worktree_report",
 	// v1.7 (phase 63): a corpus ingest writes the shared docs dataset every agent reads and deletes plane documents (nearest: `docs_ingest`).
 	"corpus_ingest",
 ]);
@@ -90,6 +93,8 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	"steering_list",
 	// Phase 67 (live steering GA): the cross-session digest. A bounded, redacted read of presence, claims and the ledger; it writes nothing.
 	"session_context",
+	// Phase 68 (FLEET-02): the worktree registry read, as an MCP tool and the `GET /worktrees` route under one name. Inspection only.
+	"worktree_list",
 	// The one write that is fail-open on purpose: an event costs a line in the trail,
 	// and refusing the turn over it would make a substrate outage an outage of the host.
 	"events_emit",

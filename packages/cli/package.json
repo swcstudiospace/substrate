@@ -6,6 +6,7 @@
   "main": "src/index.ts",
   "dependencies": {
     "@substrate/corpus": "workspace:*",
-    "@substrate/evidence": "workspace:*"
+    "@substrate/evidence": "workspace:*",
+    "@substrate/fleet": "workspace:*"
   }
 }

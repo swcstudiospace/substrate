@@ -3,27 +3,57 @@
 A dispatched session works in ``/var/lib/substrate/worktrees/<graph_id>`` on branch
 ``substrate/<graph_id>``. The worktree is reused when git already has it registered, created
 from the existing branch when only the branch exists, and created with a new branch otherwise.
-Creation is refused when ``/`` has less than 5 GiB free, and no git command runs in that case.
+Creation is refused when ``/`` has less than the free-disk floor (``SUBSTRATE_WORKTREE_MIN_FREE_GB``,
+default 5 GiB), and no git command runs in that case.
 Every git call is an argv list (never a shell), and nothing here ever deletes a directory or
 checks out a branch in the main checkout.
 """
 
 from __future__ import annotations
 
+import logging
+import math
+import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 GRAPH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 WORKTREES_ROOT = Path("/var/lib/substrate/worktrees")
 REPOS_ROOT = Path("/root/src/repos")
-MIN_FREE_BYTES = 5 * 1024**3  # 5 GiB; refuse when free < this
+DEFAULT_MIN_FREE_GB = 5
+MIN_FREE_ENV = "SUBSTRATE_WORKTREE_MIN_FREE_GB"
 BRANCH_PREFIX = "substrate/"
 
 Runner = Callable[..., subprocess.CompletedProcess]
+logger = logging.getLogger(__name__)
+
+
+def min_free_gb(env: Mapping[str, str] | None = None) -> float:
+    """The free-disk floor in GiB: ``SUBSTRATE_WORKTREE_MIN_FREE_GB`` or the default of 5.
+
+    An unparsable, non-finite or non-positive value falls back to the default with a log line,
+    so a typo never turns the floor off.
+    """
+    raw = (os.environ if env is None else env).get(MIN_FREE_ENV)
+    if raw is None or raw.strip() == "":
+        return float(DEFAULT_MIN_FREE_GB)
+    try:
+        value = float(raw)
+    except ValueError:
+        value = float("nan")
+    if not math.isfinite(value) or value <= 0:
+        logger.warning("%s=%r is not a positive number; using %d GB", MIN_FREE_ENV, raw, DEFAULT_MIN_FREE_GB)
+        return float(DEFAULT_MIN_FREE_GB)
+    return value
+
+
+def min_free_bytes(env: Mapping[str, str] | None = None) -> int:
+    """The floor in bytes, read from the environment at call time."""
+    return int(min_free_gb(env) * 1024**3)
 
 
 class WorktreeRefused(Exception):
@@ -107,7 +137,7 @@ def ensure_worktree(
     run: Runner = subprocess.run,
     disk_usage: Callable[[str], Any] = shutil.disk_usage,
 ) -> Path:
-    """Return the graph's worktree, creating it only with at least MIN_FREE_BYTES free on /."""
+    """Return the graph's worktree, creating it only with at least the free-disk floor free on /."""
     gid = validate_graph_id(graph_id)
     root = Path(root)
     path = root / gid
@@ -115,9 +145,11 @@ def ensure_worktree(
         raise WorktreeRefused(f"worktree path {path} escapes {root}", "invalid-graph-id")
 
     free = disk_usage("/").free
-    if free < MIN_FREE_BYTES:
+    floor = min_free_bytes()
+    if free < floor:
         raise WorktreeRefused(
-            f"only {free / 1024**3:.1f} GB free on /; a worktree needs at least 5 GB", "low-disk"
+            f"only {free / 1024**3:.1f} GB free on /; a worktree needs at least {floor / 1024**3:g} GB",
+            "low-disk",
         )
 
     repo = Path(repo)

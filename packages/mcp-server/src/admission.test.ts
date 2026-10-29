@@ -394,6 +394,10 @@ describe("the class tables are exhaustive over what the server serves", () => {
 		expect({ approve: routeClass("POST", "/skills/approve"), list: routeClass("GET", "/skills") }).toEqual({ approve: "write", list: "read" });
 	});
 
+	test("the worktree claims read is a read on the route, and the tool it is audited under is a read too", () => {
+		expect({ route: routeClass("GET", "/worktrees/claims"), tool: toolClass("graph_get") }).toEqual({ route: "read", tool: "read" });
+	});
+
 	test("the anchor verification tools are reads: they read the ledger and devnet and write nothing", () => {
 		expect({ checkpoint: toolClass("checkpoint_verify"), memory: toolClass("memory_verify") }).toEqual({ checkpoint: "read", memory: "read" });
 	});

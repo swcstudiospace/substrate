@@ -101,6 +101,9 @@ const KNOWN_ROUTES = [
 	"/steering/queue",
 	"/steering/acknowledge",
 	"/session/context",
+	"/worktrees/report",
+	"/worktrees/claims",
+	"/worktrees",
 ] as const;
 
 export function normalizeRoute(pathname: string): string {
@@ -671,6 +674,8 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"steering_acknowledge",
 	"steering_list",
 	"session_context",
+	"worktree_list",
+	"worktree_report",
 	"corpus_status",
 	"corpus_ingest",
 	// REST routes, as `server.ts` audits them. A route audited under a tool's own name

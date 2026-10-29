@@ -279,6 +279,16 @@ import {
 	type Surface,
 	type SubstrateEvent,
 } from "./types.ts";
+import { liveClaims, type WorktreeClaimsOutcome } from "./worktree-claims.ts";
+import {
+	staleCutoff,
+	type WorktreeListOutcome,
+	type WorktreeListQuery,
+	type WorktreeRefusal,
+	type WorktreeRegistryStore,
+	type WorktreeReport,
+	type WorktreeReportOutcome,
+} from "./worktree-registry.ts";
 
 /** The refusal `resolveRecallBanks` gives an anonymous caller with no bank of its own; the docs context's recall gives the same. */
 const ANONYMOUS_RECALL_REFUSAL = "no recall bank for surface unattributed: configure HINDSIGHT_BANKS";
@@ -1359,6 +1369,9 @@ function productionPresence(config: SubstrateConfig): DragonflyPresenceStore | n
 
 export class Substrate {
 	readonly index: IndexStore | null;
+	/** Phase 68: the registry store a test injected, `null` for none; undefined builds it from the index on first use (see `worktreeAccess`). */
+	private readonly worktreeSeam: WorktreeRegistryStore | null | undefined;
+	private worktreeFromIndex: WorktreeRegistryStore | null = null;
 	readonly greptime: GreptimeClient | null;
 	/** The claim mirror; null when neither tracker key is configured. Tests inject a fake through the seam. */
 	readonly mirror: Mirror | null;
@@ -1502,6 +1515,8 @@ export class Substrate {
 		readonly config: SubstrateConfig,
 		stores?: {
 			index?: IndexStore | null;
+			/** Phase 68: the worktree registry store. Absent builds it from the index. */
+			worktrees?: WorktreeRegistryStore | null;
 			greptime?: GreptimeClient | null;
 			skills?: SkillProposer;
 			skillRun?: Runner;
@@ -1573,6 +1588,7 @@ export class Substrate {
 							},
 						})
 					: null;
+		this.worktreeSeam = stores?.worktrees;
 		this.greptime =
 			stores?.greptime !== undefined
 				? stores.greptime
@@ -4421,6 +4437,99 @@ export class Substrate {
 		// is exactly where a claim most needs to be seen.
 		const graph = await this.index?.getGraph(graphId).catch(() => null);
 		return { ...(graph?.repo ? { repo: graph.repo } : {}), ...(graph?.branch ? { branch: graph.branch } : {}) };
+	}
+
+	/**
+	 * Whether the worktree registry can serve now, as a refusal or the store. Off is 503 `worktrees.disabled` before anything
+	 * else, so a disabled registry touches no store and a write leaves no audit record (the route asks first). A VM guest may
+	 * not report: the guest has no index of its own and its paths are the host's business. No index is 503 `worktrees.unavailable`.
+	 */
+	private worktreeAccess(write: boolean): { ok: true; store: WorktreeRegistryStore } | WorktreeRefusal {
+		if (this.config.worktreeRegistry.mode !== "on") return { ok: false, status: 503, body: { error: "worktrees.disabled" } };
+		if (write && this.config.vmGuest) return { ok: false, status: 403, body: { error: "worktrees.vm-guest" } };
+		// Built once, on first use, after the mode check: a registry that is off never touches the index.
+		if (this.worktreeSeam === undefined && this.worktreeFromIndex === null && this.index !== null) this.worktreeFromIndex = this.index.worktreeRegistry();
+		const store = this.worktreeSeam !== undefined ? this.worktreeSeam : this.worktreeFromIndex;
+		if (store === null) {
+			return { ok: false, status: 503, body: { error: "worktrees.unavailable", problem: "the worktree registry lives in the index (SUBSTRATE_PG_URL), which is not configured" } };
+		}
+		return { ok: true, store };
+	}
+
+	/** The refusal the routes check before reading a body or writing an audit record; null when the registry can serve. */
+	worktreeGate(write: boolean): WorktreeRefusal | null {
+		const access = this.worktreeAccess(write);
+		return access.ok ? null : access;
+	}
+
+	/**
+	 * One host's worktree report (phase 68, FLEET-02): upsert the rows it lists and sweep that host's expired ones, in one
+	 * transaction, then leave one counts-only `worktrees.report` note. The note is best effort: the report is already stored.
+	 * A store failure is 503 with the redacted reason and nothing is claimed stored.
+	 */
+	async reportWorktrees(report: WorktreeReport, surface: Surface): Promise<WorktreeReportOutcome> {
+		const access = this.worktreeAccess(true);
+		if (!access.ok) return access;
+		let counts: { stored: number; removed: number };
+		try {
+			counts = await access.store.report({
+				host: report.host,
+				reportedAt: new Date(report.reported_at),
+				seenAt: new Date(),
+				ttlS: this.config.worktreeRegistry.ttlS,
+				worktrees: report.worktrees,
+			});
+		} catch (cause) {
+			const problem = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
+			return { ok: false, status: 503, body: { error: "worktrees.unavailable", problem: `the worktree registry could not be written: ${problem}` } };
+		}
+		await this.emit({
+			surface,
+			kind: "note",
+			summary: `worktree report from ${report.host}: ${counts.stored} stored, ${counts.removed} removed`,
+			session_id: `worktrees:${report.host}`,
+			payload: { action: "worktrees.report", stored: counts.stored, removed: counts.removed },
+		}).catch(() => undefined);
+		return { ok: true, ...counts };
+	}
+
+	/** The registry as a reader sees it: filtered, newest first, at most `query.limit` rows with `truncated` saying more exist. */
+	async listWorktrees(query: WorktreeListQuery): Promise<WorktreeListOutcome> {
+		const access = this.worktreeAccess(false);
+		if (!access.ok) return access;
+		try {
+			// One row past the page tells whether it was cut, without counting the table.
+			const rows = await access.store.list({
+				repo: query.repo,
+				host: query.host,
+				state: query.state,
+				limit: query.limit + 1,
+				staleBefore: staleCutoff(Date.now(), this.config.worktreeRegistry.idleDays),
+			});
+			return { ok: true, worktrees: rows.slice(0, query.limit), truncated: rows.length > query.limit };
+		} catch (cause) {
+			const problem = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
+			return { ok: false, status: 503, body: { error: "worktrees.unavailable", problem: `the worktree registry could not be read: ${problem}` } };
+		}
+	}
+
+	/**
+	 * The unexpired leases among one graph's nodes (phase 68): the prune guard's question. It reads the index directly,
+	 * never the graph-view cache, so a lease a heartbeat just extended is never read as lapsed. An unknown graph has no
+	 * claims, but a server with no index or an index that did not answer is 503 and never an empty list: "no claims" must
+	 * only ever mean the index said so, because the caller deletes a directory on it.
+	 */
+	async worktreeClaims(graphId: string): Promise<WorktreeClaimsOutcome> {
+		if (!this.index) {
+			return { ok: false, status: 503, body: { error: "claims.unavailable", problem: "graph claims live in the index (SUBSTRATE_PG_URL), which is not configured" } };
+		}
+		try {
+			const graph = await this.index.getGraph(graphId);
+			return { ok: true, graph_id: graphId, claims: graph === null ? [] : liveClaims(graph.nodes, Date.now()) };
+		} catch (cause) {
+			const problem = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
+			return { ok: false, status: 503, body: { error: "claims.unavailable", problem: `the graph claims could not be read: ${problem}` } };
+		}
 	}
 
 	/**
