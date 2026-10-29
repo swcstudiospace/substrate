@@ -25,7 +25,7 @@ import { nextSteeringSession, steeringSessionPayload, type SteeringSession, type
 import { redact } from "../redact.ts";
 import type { EventInput, Surface } from "../types.ts";
 import type { SessionStateName, SessionStatePort, SessionTransitionContext, SessionTransitionResult } from "./steering-delivery.ts";
-import type { SteeringSessionsStore } from "./steering-sessions-store.ts";
+import { redactedSteeringSession, type SteeringSessionsStore } from "./steering-sessions-store.ts";
 
 /** The most sessions held. Past it the oldest is forgotten. */
 export const STEERING_SESSION_CAP = 1000;
@@ -195,7 +195,7 @@ export class SteeringSessionRegistry implements SessionStatePort {
 		}
 		this.pendingWrites += 1;
 		this.writeTail = this.writeTail
-			.then(() => store.save(surface, session))
+			.then(() => store.save(surface, redactedSteeringSession(session)))
 			.catch((cause: unknown) => {
 				this.warnPersistFailed(surface, session.session_id, cause instanceof Error ? cause.message : String(cause));
 			})

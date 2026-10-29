@@ -12,6 +12,7 @@
  */
 import type { SQL } from "bun";
 import { STEERING_STATES, type SteeringSession, type SteeringSessionState } from "../event.ts";
+import { redact } from "../redact.ts";
 import { SURFACES, type Surface } from "../types.ts";
 
 /** One stored session, as the registry holds it: the surface that owns it and the session itself. */
@@ -45,6 +46,20 @@ function isState(value: string): value is SteeringSessionState {
 }
 
 /**
+ * A copy of the session with its caller-supplied free text passed through the redactor: the directions and the planning hash,
+ * which arrive from the caller as they are. The ledger event redacts the same text; this is the step the table and the
+ * `/steering/sessions` answer need so a credential pasted into a direction is not kept or handed on. Identifiers and the state
+ * are not changed, so the session's key stays the one its owner wrote.
+ */
+export function redactedSteeringSession(session: SteeringSession): SteeringSession {
+	return {
+		...session,
+		...(session.planning_hash === undefined ? {} : { planning_hash: redact(session.planning_hash) }),
+		...(session.steering === undefined ? {} : { steering: redact(session.steering) }),
+	};
+}
+
+/**
  * A stored row as a session, or null when the row does not parse: a surface or state this build does not know (a newer release
  * wrote it), or a timestamp that is not a date. Such a row is left in the table and left out of the registry.
  */
@@ -57,14 +72,14 @@ export function storedSessionOf(row: Record<string, unknown>): StoredSteeringSes
 	const planningHash = row.planning_hash;
 	return {
 		surface,
-		session: {
+		session: redactedSteeringSession({
 			session_id: String(row.session_id),
 			repo_id: String(row.repo_id),
 			state,
 			...(typeof planningHash === "string" ? { planning_hash: planningHash } : {}),
 			...(typeof steering === "string" ? { steering } : {}),
 			updated_at: updated.toISOString(),
-		},
+		}),
 	};
 }
 

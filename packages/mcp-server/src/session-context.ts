@@ -11,7 +11,8 @@
  * own, and the service builds them (`Substrate.sessionContext`). Rules, each pinned by a test:
  * - **Bounded.** At most {@link SESSION_CONTEXT_LIMITS} items per list and {@link SESSION_CONTEXT_MAX_BYTES} serialised. Past the
  *   byte cap the oldest events go first, then the oldest planning rows, handoffs, claims and sessions, so the cap always holds.
- *   `truncated` names every list that lost items, whether to its count bound or to the byte cap.
+ *   `truncated` names every list that lost items, whether to its count bound, to the byte cap or to a cut before this module saw
+ *   the list: a full ledger window (events and planning), a source that cut its own list, or the bound on the graphs asked about handoffs.
  * - **Redacted.** Every string passes `redact`, and a summary or goal is cut to {@link SESSION_CONTEXT_TEXT_MAX} characters.
  * - **Deterministic.** Newest first, ties broken by id then source, so equal inputs give equal bytes.
  * - **Degrading.** Each source fails alone: a source that is not configured, throws or misses the deadline gives an empty list
@@ -19,7 +20,7 @@
  * - **Never the caller's own.** With `session_id`, that session's own presence, steering and ledger rows are left out.
  */
 import { sharedDeadline } from "./deadline.ts";
-import { scopeRepoId } from "./event.ts";
+import { normalizeIdentifier, scopeRepoId } from "./event.ts";
 import { SESSION_ID_RE } from "./planning/presence.ts";
 import { redact } from "./redact.ts";
 
@@ -33,6 +34,13 @@ export const SESSION_CONTEXT_TEXT_MAX = 200;
 const FIELD_MAX = 200;
 /** One deadline for every source read, so a stalled store costs this and not the sum of its reads. */
 export const SESSION_CONTEXT_BUDGET_MS = 2_000;
+/** The newest handoff packets read for one graph: a bounded, handoff-only window, never the graph's whole history. A full window may have left older packets behind. */
+export const HANDOFF_READ_LIMIT = 10;
+/** The most open graphs `IndexStore.openGraphs` returns. A full answer may have left more behind. */
+export const OPEN_GRAPHS_READ_LIMIT = 10;
+/** The typed reason a context request is refused while `SUBSTRATE_BRIEF_SESSIONS` is off: the sessions feature set is opt-in as a whole. */
+export const SESSION_CONTEXT_DISABLED = "session-context.disabled";
+export const SESSION_CONTEXT_DISABLED_MESSAGE = "session context is off (SUBSTRATE_BRIEF_SESSIONS)";
 
 export type SessionContextList = keyof typeof SESSION_CONTEXT_LIMITS;
 
@@ -42,6 +50,8 @@ export type SessionContextList = keyof typeof SESSION_CONTEXT_LIMITS;
 export interface SourceResult<T> {
 	items: readonly T[];
 	truncated?: boolean;
+	/** A line for `notes` when the source answered only in part (some of its reads failed). Such a list is also `truncated`. */
+	note?: string;
 }
 
 export interface PresenceRow {
@@ -167,6 +177,7 @@ export interface SessionContext {
 }
 
 export interface SessionContextRequest {
+	/** The repository as the caller spelled it, which is how the ledger and the index store it. The session scope key is `scopeRepoId` of it. */
 	repoId: string;
 	/** The asking session. Its own rows are left out. */
 	sessionId: string | null;
@@ -204,14 +215,14 @@ function newestFirst<T>(rows: readonly T[], time: (row: T) => number, ...keys: A
 	});
 }
 
-type Read<T> = { ok: true; items: readonly T[]; truncated: boolean } | { ok: false; note: string };
+type Read<T> = { ok: true; items: readonly T[]; truncated: boolean; note: string | null } | { ok: false; note: string };
 
 /** One source read, alone: not configured, a rejection or a missed deadline is a note, never an exception. */
 async function read<T>(name: string, source: (() => Promise<SourceResult<T>>) | null, race: <V>(promise: Promise<V>) => Promise<V>): Promise<Read<T>> {
 	if (source === null) return { ok: false, note: `${name}: not configured` };
 	try {
 		const result = await race(source());
-		return { ok: true, items: result.items, truncated: result.truncated === true };
+		return { ok: true, items: result.items, truncated: result.truncated === true, note: result.note ?? null };
 	} catch {
 		return { ok: false, note: `${name}: unavailable` };
 	}
@@ -241,18 +252,25 @@ export async function assembleSessionContext(request: SessionContextRequest, sou
 			read("ledger", sources.ledger, deadline.race),
 			read("graphs", sources.graphs, deadline.race),
 		]);
-		for (const result of [presence, steering, claims, ledger, graphs]) if (!result.ok) notes.push(result.note);
+		for (const result of [presence, steering, claims, ledger, graphs]) {
+			if (!result.ok) notes.push(result.note);
+			else if (result.note !== null) notes.push(result.note);
+		}
 
-		// Handoffs are asked about the graphs the claims name and the repository's open graphs, bounded, in a fixed order.
-		const graphIds = [
+		// Handoffs are asked about the graphs the claims name and the repository's open graphs, bounded, in a fixed order. A graph
+		// left out by that bound, or by a source that cut its own list, means the handoffs listed may not be all of them.
+		const graphCandidates = [
 			...new Set([
 				...(claims.ok ? newestFirst(claims.items, (row) => row.claimedAtMs ?? 0, (row) => row.graphId, (row) => row.nodeId).map((row) => row.graphId) : []),
 				...(graphs.ok ? [...graphs.items].sort(compare) : []),
 			]),
-		].slice(0, SESSION_CONTEXT_LIMITS.handoffs);
+		];
+		const graphIds = graphCandidates.slice(0, SESSION_CONTEXT_LIMITS.handoffs);
+		const graphsCut = graphCandidates.length > graphIds.length || (claims.ok && claims.truncated) || (graphs.ok && graphs.truncated);
 		const handoffSource = sources.handoffs;
 		const handoffs = await read("handoffs", handoffSource === null ? null : () => handoffSource(graphIds), deadline.race);
 		if (!handoffs.ok) notes.push(handoffs.note);
+		else if (handoffs.note !== null) notes.push(handoffs.note);
 
 		// sessions: presence and steering, the caller's own left out.
 		const sessionRows: ContextSession[] = [
@@ -321,13 +339,13 @@ export async function assembleSessionContext(request: SessionContextRequest, sou
 		const planning = planningRows.slice(0, cap("planning")).map(
 			(row): ContextPlanning => ({
 				ts: isoOf(row.tsMs),
-				repo: clean(request.repoId),
+				repo: clean(repoScope === "" ? request.repoId : repoScope),
 				changed: row.planningChanged ?? 0,
 				source: "planning.changed",
 				age_s: ageS(nowMs, row.tsMs),
 			}),
 		);
-		truncated.planning = planningRows.length > planning.length;
+		truncated.planning = planningRows.length > planning.length || (ledger.ok && ledger.truncated);
 
 		const handoffRows = handoffs.ok ? newestFirst(handoffs.items, (row) => row.createdAtMs, (row) => row.graphId, (row) => row.goal) : [];
 		const handoffList = handoffRows.slice(0, cap("handoffs")).map(
@@ -340,7 +358,7 @@ export async function assembleSessionContext(request: SessionContextRequest, sou
 				age_s: ageS(nowMs, row.createdAtMs),
 			}),
 		);
-		truncated.handoffs = handoffRows.length > handoffList.length || (handoffs.ok && handoffs.truncated);
+		truncated.handoffs = handoffRows.length > handoffList.length || graphsCut || (handoffs.ok && handoffs.truncated);
 
 		const digest: SessionContext = {
 			generated_at: isoOf(nowMs),
@@ -377,8 +395,10 @@ export type ContextRequestParse = { ok: true; value: SessionContextRequest } | {
 
 /** The one place `repo_id`, `session_id` and `limit` are validated, so the tool and the route refuse the same inputs. */
 export function parseSessionContextArgs(args: { repo_id?: unknown; session_id?: unknown; limit?: unknown }): ContextRequestParse {
-	const repo = typeof args.repo_id === "string" ? scopeRepoId(args.repo_id) : "";
-	if (repo === "") return { ok: false, error: "repo_id is required and must be owner/name" };
+	// The repository keeps the spelling the caller sent: the ledger and the index store a repository as it was written, so a
+	// lower-cased copy would miss `Acme/Widgets`. Only the session scope key (`scopeRepoId`) is lower-case.
+	const spelled = typeof args.repo_id === "string" ? args.repo_id.trim() : "";
+	if (scopeRepoId(spelled) === "") return { ok: false, error: "repo_id is required and must be owner/name" };
 	let sessionId: string | null = null;
 	if (args.session_id !== undefined && args.session_id !== null && args.session_id !== "") {
 		if (typeof args.session_id !== "string" || !SESSION_ID_RE.test(args.session_id)) return { ok: false, error: "session_id must be a session id" };
@@ -390,7 +410,7 @@ export function parseSessionContextArgs(args: { repo_id?: unknown; session_id?: 
 		if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) return { ok: false, error: "limit must be a whole number from 1 to 100" };
 		limit = parsed;
 	}
-	return { ok: true, value: { repoId: repo, sessionId, limit } };
+	return { ok: true, value: { repoId: normalizeIdentifier(spelled) ?? spelled, sessionId, limit } };
 }
 
 // ── ledger rows ───────────────────────────────────────────────────────────────

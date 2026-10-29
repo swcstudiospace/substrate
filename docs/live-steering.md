@@ -8,9 +8,9 @@ Live Steering lets an operator tell a running agent session what to do next, and
 
 **The directive inbox.** An operator queues a *directive* for a session: an `action` (`pause`, `redirect` or `annotate`), a `body` (up to 4,096 characters, redacted before it is stored) and a `priority`. The directive waits until someone acknowledges it as `applied` or `declined`. Acknowledging an applied `pause` moves the session to `PAUSED`, an applied `redirect` to `CONTEXT_REFRESH`; `annotate` and `declined` move nothing. A move that actually changed the state also returns a `checkpoint_hint` (`{ "trigger": "steering", "directive_id": "..." }`): the session may take a checkpoint of its worktree for that directive (see [session rollback](runbooks/session-rollback.md#the-steering-trigger-and-the-checkpoint_hint-reader)). A directive nobody acknowledges within a day is closed as declined with reason `timeout`.
 
-**The context digest.** `session_context` (MCP tool) and `GET /session/context` return a bounded, redacted digest of the other live sessions of the caller's repository: presence, worktree and branch, claims, recent events, handoffs and planning changes. Every item carries its `source` and `age_s`, so a reader can tell a heartbeat from a minute ago from a claim from yesterday. With `SUBSTRATE_BRIEF_SESSIONS` on, `memory_brief` carries the same material as `sessions`, `steering` and `handoffs` sections inside its existing size bound.
+**The context digest.** `session_context` (MCP tool) and `GET /session/context` return a bounded, redacted digest of the other live sessions of the caller's repository: presence, worktree and branch, claims, recent events, handoffs and planning changes. Every item carries its `source` and `age_s`, so a reader can tell a heartbeat from a minute ago from a claim from yesterday. It is part of the sessions feature set behind `SUBSTRATE_BRIEF_SESSIONS`: with the flag off the tool answers the typed refusal `session-context.disabled`, the route answers 503 with the same reason, and nothing is read. With it on, `memory_brief` also carries the same material as `sessions`, `steering` and `handoffs` sections inside its existing size bound, read under the brief's own deadline (a section not ready in time is replaced by one line that names it) and also shown when the brief is served from its last-good snapshot.
 
-**The long poll.** `GET /steering/wait?session_id=&after=&timeout_ms=` holds the request until a directive for that session arrives (HTTP 200 `{ "directive": ... }`) or the wait ends (HTTP 204). `substrate steer listen` loops on it.
+**The long poll.** `GET /steering/wait?session_id=&after=&timeout_ms=` holds the request until a directive for that session arrives (HTTP 200 `{ "directive": ..., "wait_ms": N }`) or the wait ends (HTTP 204 with an `X-Steering-Wait-Ms` header). A `timeout_ms` above `SUBSTRATE_STEERING_WAIT_MAX_MS` is clamped to it, not refused, and `wait_ms` says the wait the request got. `after` is a place in the order directives entered the inbox, so a clock that steps back never hides a queued directive. `substrate steer listen` loops on it.
 
 ## Who may do what
 
@@ -30,10 +30,10 @@ All of them are off or empty by default; with every one unset the server behaves
 | `SUBSTRATE_PLANNING_STEERING` | turns the directive inbox and the `/steering/*` routes on; off: no steering tool or route exists and a client sees 404 |
 | `SUBSTRATE_PLANNING_STEERING_PRINCIPALS` | the operator surfaces allowed to queue and acknowledge; empty means nobody can queue |
 | `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` | makes the audit (and so the inbox) durable in `planning_steering_audit`; without it a restart forgets queued directives and writes fail closed |
-| `SUBSTRATE_BRIEF_SESSIONS` | adds the `sessions`, `steering` and `handoffs` sections to `memory_brief` |
-| `SUBSTRATE_STEERING_SESSIONS_TABLE` | persists the session state registry in `steering_sessions` and loads it at boot |
+| `SUBSTRATE_BRIEF_SESSIONS` | the sessions feature set: adds the `sessions`, `steering` and `handoffs` sections to `memory_brief`, and serves `session_context` and `GET /session/context` (off: both refuse with `session-context.disabled`) |
+| `SUBSTRATE_STEERING_SESSIONS_TABLE` | persists the session state registry in `steering_sessions` and loads it at boot; the session's free text (`steering`, `planning_hash`) is redacted before it is written and in `GET /steering/sessions` |
 | `SUBSTRATE_STEERING_SESSION_TTL_S` | how old a persisted session may be when it is loaded at boot (default seven days); read only with the table on |
-| `SUBSTRATE_STEERING_WAIT_MAX_MS` | the longest one `GET /steering/wait` holds a request (default 30,000 ms) |
+| `SUBSTRATE_STEERING_WAIT_MAX_MS` | the longest one `GET /steering/wait` holds a request (default 30,000 ms); a longer `timeout_ms` is clamped to it and the answer reports the wait it got |
 
 The CLI reads `SUBSTRATE_URL` for the server and a bearer for the surface from `SUBSTRATE_TOKEN` (or the token file and per-surface files the other commands use). `--surface S` picks the token of surface `S`; the default is `claude-code`.
 
@@ -49,7 +49,7 @@ substrate steer listen --session ID [--once] [--max-wait-ms N] [--after DIRECTIV
 substrate steer context [--repo R] [--session ID] [--limit N] [--format text|json]
 ```
 
-`--repo` defaults to the `owner/name` of the working directory's `origin` remote, as `substrate brief` resolves it. Human output is one compact line per item and says how old each is (`updated 5m ago`, `[presence, 12s old]`); text that came from the server has its control characters replaced before it reaches the terminal.
+`--repo` defaults to the `owner/name` of the working directory's `origin` remote, as `substrate brief` resolves it. Human output is one compact line per item and says how old each is (`updated 5m ago`, `[presence, 12s old]`); text that came from the server (names, directive bodies and the server's error messages alike) has its control characters replaced before it reaches the terminal, while `--json` prints the values as they came. `--limit` is a whole number from 1 to 100, the server's own bound, and a directive id (the `ack` argument and `--after`) must be letters, digits and `. _ : -` (at most 128 characters, the first a letter or digit): a value the server would refuse is a usage error before any request.
 
 | Exit | Meaning |
 | --- | --- |
@@ -58,9 +58,9 @@ substrate steer context [--repo R] [--session ID] [--limit N] [--format text|jso
 | 2 | usage: a wrong flag is refused before anything is sent |
 | 3 | refused by the server: not an operator, a principal that is not allowed, rate limited, a directive that needs `--confirm`, a bad token, steering switched off |
 
-A 404 on a `/steering/*` or `/session/context` route means the server predates this feature or its flag is off; the message says so.
+A 404 on a `/steering/*` or `/session/context` route means the server predates this feature or its flag is off; the message says so. The one exception is the typed refusal an `ack` gets for a directive that does not exist (`refused (not-found)`, exit 3), which says the route works and the directive is missing. A reply to `queue` or `ack` counts as a success only when it carries what its status promises (`queued` a `directive_id`; `acknowledged` a `directive_id` and an `outcome`); an incomplete reply or a status the tools do not have is a bad response (exit 1).
 
-`steer listen` prints each directive as it arrives, remembers the last id so a reconnect never prints one twice, backs off (1 s, doubling to 30 s) after a connection error or a 5xx and starts over after the next good answer, and stops on Ctrl-C, after the first directive with `--once`, or when `--max-wait-ms` has passed. It cannot be made to spin: a server that answers a long poll at once is paced.
+`steer listen` prints each directive as it arrives, remembers the last id (sent as `after`) and every id it already printed (the last 1,000), so a server that restarted and replays a directive it still holds does not print it twice, backs off (1 s, doubling to 30 s) after a connection error or a 5xx and starts over after the next good answer, and stops on Ctrl-C, after the first directive with `--once`, or when `--max-wait-ms` has passed. Ctrl-C ends a backoff or a pause at once. Each poll asks for 25 s; the server clamps that to `SUBSTRATE_STEERING_WAIT_MAX_MS` and reports what it applied (`wait_ms` in a delivered answer, `X-Steering-Wait-Ms` on a 204), and the next poll asks for no more than that, so a short server ceiling is not an error. A 400 or other refusal ends the loop with exit 3 rather than being retried. It cannot be made to spin: a server that answers a long poll at once is paced.
 
 ## A worked example
 
@@ -121,8 +121,8 @@ substrate steer context --repo acme/widgets --session sess-7
 
 - **Pull, not push.** A directive reaches a session only when the session (or its host) asks: by `listen`, by the long poll, by `docs_search`, or by the steering hook. The server never writes into a session's worktree or process.
 - **A directive is advice.** The session decides what to do and acknowledges it. A session that never acknowledges leaves the directive queued until it times out as declined after a day.
-- **State is per server.** Without `SUBSTRATE_STEERING_SESSIONS_TABLE` a restart forgets the session registry; without `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` it also forgets queued directives. The registry holds at most 1,000 sessions and drops the oldest.
-- **The digest is bounded and approximate.** Each list is capped, anything cut is named in `truncated`, and every line states its age; a session that stopped heartbeating stays in the list until its age says so.
+- **State is per server.** Without `SUBSTRATE_STEERING_SESSIONS_TABLE` a restart forgets the session registry; without `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` it also forgets queued directives, and `GET /steering/directives` can then answer only from memory (its `history` field says `memory-only`). With the audit table on, a restart restores the open directives and the route reads the session's latest 100 acknowledged directives back from the table, so an applied directive keeps its `checkpoint_hint` until the hook has consumed it. The registry holds at most 1,000 sessions and drops the oldest.
+- **The digest is bounded and approximate.** Each list is capped, anything cut is named in `truncated` (including a full 200-event ledger window and a handoff read that did not cover every graph), a source that failed is named in `notes`, and every line states its age; a session that stopped heartbeating stays in the list until its age says so.
 - **Rate limit.** At most 10 directives a minute per target session by default.
 - **The checkpoint hint is a hint.** It is attached only when an acknowledgement changed the session's state; the checkpoint itself is taken by the hook, and is skipped when the worktree has not changed since the last one.
 

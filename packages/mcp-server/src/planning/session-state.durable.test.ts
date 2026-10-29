@@ -11,10 +11,13 @@ import {
 	STEERING_PERSIST_PENDING_MAX,
 	STEERING_PERSIST_WARN_INTERVAL_MS,
 } from "./session-state.ts";
-import type { SteeringSessionsLoadQuery, SteeringSessionsStore, StoredSteeringSession } from "./steering-sessions-store.ts";
+import { storedSessionOf, type SteeringSessionsLoadQuery, type SteeringSessionsStore, type StoredSteeringSession } from "./steering-sessions-store.ts";
 
 const T0 = 1_800_000_000_000;
 const DAY = 86_400_000;
+
+/** A made-up credential shaped like a GitHub token, so the redactor has something to find. */
+const TOKEN = "ghp_Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2";
 
 const session = (id: string, updatedMs: number, state: SteeringSessionState = "ACTIVE", extra: Partial<SteeringSession> = {}): SteeringSession => ({
 	session_id: id,
@@ -97,6 +100,25 @@ describe("write-through", () => {
 			{ surface: "cursor", id: "s-2", state: "ACTIVE" },
 		]);
 		expect(store.rows.get("omp:s-1")?.session.state).toBe("PAUSED");
+	});
+
+	test("a credential in a session's directions is redacted before it reaches the table, while memory keeps the caller's text", async () => {
+		const store = new FakeStore();
+		const { reg } = build({ store });
+		reg.put("omp", "s-1", session("s-1", T0, "ACTIVE", { steering: `Push with ${TOKEN} then stop`, planning_hash: `h-${TOKEN}` }));
+		await reg.idle();
+		const row = store.rows.get("omp:s-1")?.session;
+		expect(JSON.stringify(row)).not.toContain(TOKEN);
+		expect(row?.steering).toContain("[REDACTED]");
+		expect(row?.planning_hash).toContain("[REDACTED]");
+		expect(row?.session_id).toBe("s-1");
+		expect(reg.get("omp", "s-1")?.steering).toContain(TOKEN);
+	});
+
+	test("a row an earlier build stored with a credential is redacted when it is read back", () => {
+		const stored = storedSessionOf({ surface: "omp", session_id: "s-1", repo_id: "owner/name", state: "ACTIVE", steering: `use ${TOKEN}`, planning_hash: null, updated_at: new Date(T0).toISOString() });
+		expect(JSON.stringify(stored)).not.toContain(TOKEN);
+		expect(stored?.session.steering).toContain("[REDACTED]");
 	});
 
 	test("a transition an acknowledgement drives is written through too", async () => {

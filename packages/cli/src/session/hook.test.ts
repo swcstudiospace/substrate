@@ -10,7 +10,7 @@ import { type LocalCheckpoint, listLocalCheckpoints } from "./checkpoint.ts";
 import { EXIT_DONE, type SessionDeps, runSession } from "./command.ts";
 import { HOOK_TIMEOUT_MS, MAX_ENVELOPE_BYTES, parseEnvelope, runHook, unconsumedHints } from "./hook.ts";
 import { resolvePendingDir } from "./pending.ts";
-import { consumedPath, readConsumed } from "./steering-consumed.ts";
+import { consumedPath, readConsumed, writeConsumed } from "./steering-consumed.ts";
 import { FakeServer, FakeTranscript, fetchFor, seededRandomBytes } from "./testkit.ts";
 import type { SteerDirective, SteerFetch } from "../steer/client.ts";
 
@@ -526,6 +526,35 @@ describe("the checkpoint_hint reader of the steering trigger", () => {
 		writeFiles(r.dir, { "a.txt": "beta\n" });
 		await hook(r, envelope(r), "steering");
 		expect(await stepsOf(r)).toEqual([undefined]);
+	});
+
+	test("a skipped hint stays consumed after more than 200 later decisions, while the server still lists it", async () => {
+		const r = rig();
+		const earlier = Array.from({ length: 250 }, (_, index) => (index === 0 ? "old-skipped" : `filler-${index}`));
+		writeConsumed(consumedPath(await resolvePendingDir(r.dir), SESSION), SESSION, earlier);
+		r.steer.directives = [...earlier.map((id) => directive(id)), directive("dir-new")];
+		await hook(r, envelope(r), "steering");
+		expect(await stepsOf(r)).toEqual(["directive:dir-new"]);
+		const kept = await consumedOf(r);
+		expect(kept).toHaveLength(251);
+		expect(kept[0]).toBe("old-skipped");
+		// The skipped hint has no checkpoint key to stop it, so only the remembered decision does: later edits get the plain checkpoint.
+		writeFiles(r.dir, { "a.txt": "beta\n" });
+		await hook(r, envelope(r), "steering");
+		expect(await stepsOf(r)).toEqual(["directive:dir-new", undefined]);
+	});
+
+	test("the decision of a directive the server no longer lists is forgotten, and an unreadable listing forgets nothing", async () => {
+		const r = rig();
+		writeConsumed(consumedPath(await resolvePendingDir(r.dir), SESSION), SESSION, ["kept", "gone"]);
+		r.steer.mode = "down";
+		await hook(r, envelope(r), "steering");
+		expect(await consumedOf(r)).toEqual(["kept", "gone"]);
+		r.steer.mode = "up";
+		r.steer.directives = [directive("kept", { checkpoint_hint: null })];
+		writeFiles(r.dir, { "a.txt": "gamma\n" });
+		await hook(r, envelope(r), "steering");
+		expect(await consumedOf(r)).toEqual(["kept"]);
 	});
 
 	test("directives without a steering hint, for another session, or declined are ignored; a plain steering checkpoint is still taken", async () => {

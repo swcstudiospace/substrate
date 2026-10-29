@@ -179,14 +179,16 @@ import { PlanningReader } from "./planning/read.ts";
 import { greptimeMetricSink, stdoutMetricSink } from "./planning/telemetry.ts";
 import { completionStoreView, type CompletionStoreView } from "./planning/checkpoint-store.ts";
 import type { SteeringWiring } from "./planning/steering-tools.ts";
-import { SteeringInbox, type SteeringHistorySink } from "./planning/steering.ts";
+import { SteeringInbox, steeringRecordsFromEntries, type SteeringHistorySink } from "./planning/steering.ts";
 import { DEFAULT_STEERING_RESTORE_LIMIT, DEFAULT_STEERING_RESTORE_MAX_PAGES, restoreSteeringInboxPaged, type SteeringAuditSink, type SteeringRestoreStop } from "./planning/steering-store.ts";
 import { SteeringSessionRegistry } from "./planning/session-state.ts";
 import { SteeringExpirySweeper, SteeringHintAnnouncer, steeringNoticeFor, type SessionStatePort, type SteeringNotice } from "./planning/steering-delivery.ts";
 import type { SteeringSessionsStore } from "./planning/steering-sessions-store.ts";
 import { SteeringWaiters } from "./planning/steering-waiters.ts";
-import { handoffsSection, sessionsSection, steeringSection, type BriefSteeringInput } from "./brief-sessions.ts";
-import { assembleSessionContext, planningChangedCount, type SessionContext, type SessionContextRequest } from "./session-context.ts";
+import { STEERING_ACKNOWLEDGED_HISTORY_LIMIT, type DurableAcknowledged } from "./planning/steering-rest.ts";
+import { composeLiveSections, type BriefSteeringInput } from "./brief-sessions.ts";
+import { assembleSessionContext, HANDOFF_READ_LIMIT, OPEN_GRAPHS_READ_LIMIT, planningChangedCount, SESSION_CONTEXT_BUDGET_MS, type SessionContext, type SessionContextRequest } from "./session-context.ts";
+import { sharedDeadline } from "./deadline.ts";
 import type { FabricSources } from "./fabric/types.ts";
 import { FABRIC_HEALTH_WINDOW_MS } from "./fabric/gather.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
@@ -2006,6 +2008,9 @@ export class Substrate {
 				// Only an enforcing, active recall shows the scope's lines, so only that brief gets the scope's key part.
 				...recallScopeKey(recallActive && recallMode === "enforce" ? this.config.contextualRecall.recallScope : "off"),
 			};
+			// Phase 67: the live session sections start now, with the brief, so they share its deadline instead of beginning after it.
+			// Empty at once with `SUBSTRATE_BRIEF_SESSIONS` off. Never rejects.
+			const extraRead = this.liveBriefSections(request);
 			const encoded = await this.cache.getOrLoad({
 				klass: "brief",
 				refresh,
@@ -2098,7 +2103,7 @@ export class Substrate {
 			// `SUBSTRATE_BRIEF_SESSIONS` on, the live session sections are appended after it for this caller only, so they are in no
 			// cache key and no snapshot. With it off `extra` is empty and `live` is the text it has always been, byte for byte.
 			const composed = renderFullBrief(sections);
-			const extra = await this.liveBriefSections(request);
+			const extra = await extraRead;
 			const served = extra.length === 0 ? sections : [...sections, ...extra];
 			const live = extra.length === 0 ? composed : renderFullBrief(served);
 			const profileSurface = bearerSurface ?? request.surface;
@@ -2129,8 +2134,11 @@ export class Substrate {
 				stored !== null && snapshotSections !== null && snapshotSections.length !== stored.length
 					? `_(substrate brief snapshot from ${snapshot.at}; live sources degraded: ${failed.join(", ")})_\n${renderFullBrief(snapshotSections)}`
 					: text;
-			const detail = this.servedBrief(snapshotText, snapshotSections, "snapshot", failed, snapshot.at, requestedProfile, profileSurface);
-			await noteRecall(snapshotSections, detail);
+			// Phase 67: the live session sections are never in the snapshot, but a degraded brief still shows them: a directive queued
+			// a moment ago is in the in-memory inbox whatever the failed sources were.
+			const snapshotServed = extra.length === 0 || snapshotSections === null ? snapshotSections : [...snapshotSections, ...extra];
+			const detail = this.servedBrief(extra.length === 0 ? snapshotText : `${snapshotText}\n${renderFullBrief(extra)}`, snapshotServed, "snapshot", failed, snapshot.at, requestedProfile, profileSurface);
+			await noteRecall(snapshotServed, detail);
 			return detail;
 		} finally {
 			// Timed in `finally` so a brief that threw is still in the histogram. The SLO
@@ -3226,10 +3234,30 @@ export class Substrate {
 	}
 
 	/**
+	 * Phase 67: the acknowledged directives of one session read back from the durable audit history (`planning_steering_audit`),
+	 * for `GET /steering/directives`. Boot restores only the open directives, so a directive acknowledged before a restart is in
+	 * the table and no longer in memory; this is how the route still lists it with its `checkpoint_hint`. At most
+	 * {@link STEERING_ACKNOWLEDGED_HISTORY_LIMIT} rows, newest acknowledgement first. Without the audit table only the inbox
+	 * exists (`memory-only`); a read that fails is `unavailable`, never an empty answer. Never throws.
+	 */
+	async durableAcknowledgedFor(sessionId: string): Promise<DurableAcknowledged> {
+		const sink = this.steeringDurable;
+		if (sink === null) return { records: [], history: "memory-only", truncated: false };
+		try {
+			const page = await sink.readRecent({ sessionId, limit: STEERING_ACKNOWLEDGED_HISTORY_LIMIT });
+			if (!page.ok) return { records: [], history: "unavailable", truncated: false };
+			return { records: steeringRecordsFromEntries(page.value.entries), history: "durable", truncated: page.value.truncated };
+		} catch {
+			return { records: [], history: "unavailable", truncated: false };
+		}
+	}
+
+	/**
 	 * Phase 67: the session context digest for one repository (`session_context`, `GET /session/context`): what its other live
 	 * sessions are doing, from presence, the steering registry, graph claims, the ledger, planning changes and handoff packets.
 	 * Bounded, redacted and degrading per source; see `session-context.ts`. A read: it writes nothing and emits nothing.
-	 * `budgetMs` bounds every source read together; omitted, the digest's own default applies.
+	 * `budgetMs` bounds every source read together; omitted, the digest's own default applies. `request.repoId` is the
+	 * repository as stored (the caller's spelling); the session scope key is its lower-case form.
 	 */
 	async sessionContext(request: SessionContextRequest, budgetMs?: number): Promise<SessionContext> {
 		const stored = normalizeIdentifier(request.repoId) ?? request.repoId;
@@ -3302,16 +3330,33 @@ export class Substrate {
 									truncated: rows.length >= ledgerWindow,
 								};
 							},
-				graphs: index === null ? null : async () => ({ items: (await index.openGraphs(stored)).map((graph) => graph.graph_id) }),
+				graphs:
+					index === null
+						? null
+						: async () => {
+								const open = await index.openGraphs(stored);
+								return { items: open.map((graph) => graph.graph_id), truncated: open.length >= OPEN_GRAPHS_READ_LIMIT };
+							},
 				handoffs:
 					greptime === null
 						? null
 						: async (graphIds) => {
-								const lists = await Promise.all(graphIds.map(async (graphId) => ({ graphId, entries: await this.handoffsForGraph(graphId) })));
+								// Bounded, handoff-only reads (never a graph's whole history). One graph's failed read is named and the rest
+								// are kept; when none answered the source is unavailable, which is not the same as "no handoffs".
+								const reads = await Promise.all(graphIds.map(async (graphId) => ({ graphId, read: await this.recentHandoffsForGraph(graphId) })));
+								const failed = reads.filter(({ read }) => !read.ok).length;
+								if (reads.length > 0 && failed === reads.length) throw new Error("no handoff read answered");
 								return {
-									items: lists.flatMap(({ graphId, entries }) =>
-										entries.flatMap((entry) => (entry.packet === null ? [] : [{ graphId, goal: entry.packet.goal, createdAtMs: Date.parse(entry.ts), verified: entry.verdict.ok }])),
+									items: reads.flatMap(({ graphId, read }) =>
+										read.ok
+											? read.entries.flatMap((entry) => {
+													const createdAtMs = Date.parse(entry.ts);
+													return entry.packet === null || !Number.isFinite(createdAtMs) ? [] : [{ graphId, goal: entry.packet.goal, createdAtMs, verified: entry.verdict.ok }];
+												})
+											: [],
 									),
+									truncated: failed > 0 || reads.some(({ read }) => read.ok && read.cut),
+									...(failed > 0 ? { note: `handoffs: ${failed} of ${reads.length} graphs unavailable` } : {}),
 								};
 							},
 			},
@@ -3322,41 +3367,59 @@ export class Substrate {
 	/**
 	 * Phase 67: the brief's live session sections (`SUBSTRATE_BRIEF_SESSIONS`), built per request and never cached: the other
 	 * live sessions of the repo, the caller's pending directives and session state (when `session_id` is named) and the graph's
-	 * handoff packets. Empty with the flag off. Fail-open: a source that fails drops its own section and never the brief.
+	 * handoff packets. Empty with the flag off. Fail-open: a source that fails drops its own section and never the brief. The
+	 * reads run under the brief's own budget, started with the brief, so they never hold it past that deadline: a section not
+	 * ready by then is replaced by a one-line note that names it. With no deadline configured (budget 0) the digest's own
+	 * default bound applies, so these reads are never unbounded.
 	 */
 	private async liveBriefSections(request: BriefRequest): Promise<BriefSection[]> {
 		if (!this.config.briefSessions) return [];
 		const nowMs = Date.now();
-		const repo = scopeRepoId(request.repo);
-		const sessionId = request.session_id;
-		const [context, handoffs] = await Promise.all([
-			repo === "" ? Promise.resolve(null) : this.sessionContext({ repoId: repo, sessionId: sessionId ?? null, limit: 10 }, this.briefOptions.budgetMs).catch(() => null),
-			request.graph_id === undefined ? Promise.resolve(null) : this.handoffsForGraph(request.graph_id).catch(() => null),
-		]);
-		const sections: Array<BriefSection | null> = [context === null ? null : sessionsSection(context)];
-		if (sessionId !== undefined) {
-			try {
-				const notice = this.steering.inbox === null ? null : steeringNoticeFor(this.steering.inbox, sessionId, this.steering.clock.nowMs());
-				const held = this.steeringSessions.lookup(sessionId);
-				const input: BriefSteeringInput = {
-					sessionId,
-					state: held.status === "one" ? held.session.state : null,
-					steering: held.status === "one" ? (held.session.steering ?? null) : null,
-					pending: (notice?.entries ?? []).map((entry) => ({ id: entry.id, action: entry.action, priority: entry.priority, body: entry.body, ageS: Math.floor(entry.age_ms / 1000) })),
-					pendingTotal: notice?.count ?? 0,
-				};
-				sections.push(steeringSection(input));
-			} catch (cause) {
-				process.stderr.write(`[substrate] brief steering section skipped: ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200)}\n`);
-			}
+		const budgetMs = this.briefOptions.budgetMs > 0 ? this.briefOptions.budgetMs : SESSION_CONTEXT_BUDGET_MS;
+		const deadline = sharedDeadline(budgetMs, "brief live sections");
+		try {
+			// The repository as the ledger and the index store it; a request that names none (or no valid one) gets no sessions section.
+			const repo = scopeRepoId(request.repo) === "" ? null : normalizeIdentifier(request.repo);
+			const sessionId = request.session_id;
+			const graphId = request.graph_id;
+			return await composeLiveSections(
+				{
+					context: repo === null ? null : () => this.sessionContext({ repoId: repo, sessionId: sessionId ?? null, limit: 10 }, budgetMs),
+					steering:
+						sessionId === undefined
+							? null
+							: () => {
+									try {
+										const notice = this.steering.inbox === null ? null : steeringNoticeFor(this.steering.inbox, sessionId, this.steering.clock.nowMs());
+										const held = this.steeringSessions.lookup(sessionId);
+										const input: BriefSteeringInput = {
+											sessionId,
+											state: held.status === "one" ? held.session.state : null,
+											steering: held.status === "one" ? (held.session.steering ?? null) : null,
+											pending: (notice?.entries ?? []).map((entry) => ({ id: entry.id, action: entry.action, priority: entry.priority, body: entry.body, ageS: Math.floor(entry.age_ms / 1000) })),
+											pendingTotal: notice?.count ?? 0,
+										};
+										return input;
+									} catch (cause) {
+										process.stderr.write(`[substrate] brief steering section skipped: ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200)}\n`);
+										return null;
+									}
+								},
+					handoffs:
+						graphId === undefined
+							? null
+							: async () => {
+									const read = await this.recentHandoffsForGraph(graphId);
+									if (!read.ok) throw new Error("handoff read failed");
+									return read.entries.flatMap((entry) => (entry.packet === null ? [] : [{ goal: entry.packet.goal, createdAtMs: Date.parse(entry.ts), verified: entry.verdict.ok }]));
+								},
+				},
+				deadline.race,
+				nowMs,
+			);
+		} finally {
+			deadline.clear();
 		}
-		const open = (handoffs ?? [])
-			.flatMap((entry) => (entry.packet === null ? [] : [{ goal: entry.packet.goal, createdAtMs: Date.parse(entry.ts), verified: entry.verdict.ok }]))
-			.filter((entry) => Number.isFinite(entry.createdAtMs))
-			.sort((a, b) => b.createdAtMs - a.createdAtMs)
-			.slice(0, 10);
-		sections.push(handoffsSection(open, nowMs));
-		return sections.filter((section): section is BriefSection => section !== null);
 	}
 
 	/**
@@ -6201,6 +6264,37 @@ export class Substrate {
 			});
 		}
 		return out;
+	}
+
+	/**
+	 * Phase 67: the newest handoff packets of one graph, for the context digest and the brief's handoffs section. A bounded,
+	 * handoff-only read of the ledger (the `handoff` kind, newest first, {@link HANDOFF_READ_LIMIT} rows), not the graph's whole
+	 * history as {@link handoffsForGraph} reads it. A ledger that cannot answer is `{ ok: false }`, never an empty list that reads
+	 * as "no handoffs"; a row that does not decode is one fewer packet. `cut` says the window was full, so older packets may exist.
+	 */
+	async recentHandoffsForGraph(
+		graphId: string,
+		limit: number = HANDOFF_READ_LIMIT,
+	): Promise<{ ok: true; entries: Array<{ event_id: string; ts: string; packet: HandoffPacket | null; verdict: HandoffVerdict }>; cut: boolean } | { ok: false }> {
+		const greptime = this.greptime;
+		if (greptime === null) return { ok: true, entries: [], cut: false };
+		let rows: Array<Record<string, unknown>>;
+		try {
+			rows = await greptime.queryEvents({ match: { graph_id: normalizeIdentifier(graphId) ?? graphId, kind: "handoff" }, includePayload: true, limit, order: "desc" });
+		} catch {
+			return { ok: false };
+		}
+		const entries: Array<{ event_id: string; ts: string; packet: HandoffPacket | null; verdict: HandoffVerdict }> = [];
+		for (const row of rows) {
+			try {
+				const event = rowToEvent(row);
+				const packet = (event.payload.handoff ?? null) as HandoffPacket | null;
+				entries.push({ event_id: event.id, ts: event.ts, packet, verdict: packet ? this.verifyHandoffPacket(packet) : { ok: false, reason: "malformed" } });
+			} catch {
+				// One row the ledger returned malformed is one fewer packet, not a failed read.
+			}
+		}
+		return { ok: true, entries, cut: rows.length >= limit };
 	}
 
 	// ── drift ──────────────────────────────────────────────────────────────────

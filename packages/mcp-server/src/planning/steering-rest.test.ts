@@ -22,10 +22,12 @@ import {
 	steeringRetryAfterS,
 	steeringUnavailable,
 } from "./steering-rest.ts";
-import { SteeringInbox, type SteeringAuditEntry, type SteeringError, type SteeringHistorySink } from "./steering.ts";
+import { SteeringInbox, steeringRecordsFromEntries, type SteeringAuditEntry, type SteeringError, type SteeringHistorySink, type SteeringRecord } from "./steering.ts";
 import type { SteeringWiring, SteeringWriteResult } from "./steering-tools.ts";
 
 const NOW = 1_800_000_000_000;
+/** A made-up credential shaped like a GitHub token, so the redactor has something to find. */
+const TOKEN = "ghp_Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2";
 
 class MemorySink implements SteeringHistorySink {
 	readonly entries: SteeringAuditEntry[] = [];
@@ -99,6 +101,15 @@ describe("listSteeringSessions", () => {
 		expect(defined(cut.sessions.find((entry) => entry.session_id === "s-cursor"), "the cursor row").pending_directives).toBe(1);
 		expect(cut.sessions[0]).toMatchObject({ planning_hash: null, steering: null });
 	});
+
+	test("a credential in a session's directions is redacted in the answer", () => {
+		const leaky: SteeringSession = { ...session("s-leak", NOW), steering: `Use ${TOKEN} to push`, planning_hash: `hash-${TOKEN}` };
+		const answer = listSteeringSessions(registry([{ surface: "omp", session: leaky }]), null, { surface: "omp", isOperator: true }, { repoId: null, limit: 10 });
+		const row = defined(answer.sessions[0], "the session row");
+		expect(JSON.stringify(answer)).not.toContain(TOKEN);
+		expect(row.steering).toContain("[REDACTED]");
+		expect(row.planning_hash).toContain("[REDACTED]");
+	});
 });
 
 describe("restDirective and checkpoint_hint", () => {
@@ -139,6 +150,59 @@ describe("restDirective and checkpoint_hint", () => {
 		expect(ids("acknowledged")).toEqual(["d1"]);
 		expect(ids("all").sort()).toEqual(["d1", "d2"]);
 	});
+
+	test("a directive the inbox no longer holds is listed from the durable history, and the inbox's own copy wins", async () => {
+		const inbox = inboxOf();
+		await queue(inbox, "live", "annotate");
+		const history = steeringRecordsFromEntries([
+			{
+				directive: { id: "gone", author: { principalId: "omp", kind: "human" }, createdAtMs: NOW - 10, priority: "high", targetSessionId: "sess-a", action: "redirect", body: "Look at the parser.", conflictsWithActivePlan: false },
+				queuedAtMs: NOW - 10,
+				acknowledgement: { atMs: NOW - 5, outcome: "applied", confirmed: false },
+			},
+			// The inbox holds this one as queued; its live state is the answer, not the history's older row.
+			{
+				directive: { id: "live", author: { principalId: "omp", kind: "human" }, createdAtMs: NOW, priority: "normal", targetSessionId: "sess-a", action: "annotate", body: "do live", conflictsWithActivePlan: false },
+				queuedAtMs: NOW,
+				acknowledgement: { atMs: NOW + 1, outcome: "declined", confirmed: false },
+			},
+			{
+				directive: { id: "other-session", author: { principalId: "omp", kind: "human" }, createdAtMs: NOW, priority: "normal", targetSessionId: "sess-b", action: "pause", body: "x", conflictsWithActivePlan: false },
+				queuedAtMs: NOW,
+				acknowledgement: { atMs: NOW + 1, outcome: "applied", confirmed: false },
+			},
+			"not an entry",
+		]);
+		expect(history.map((record) => record.directive.id)).toEqual(["gone", "live", "other-session"]);
+		const acknowledged = listRestDirectives(inbox, { sessionId: "sess-a", status: "acknowledged" }, history);
+		expect(acknowledged).toMatchObject([{ id: "gone", status: "acknowledged", outcome: "applied", checkpoint_hint: { trigger: "steering", directive_id: "gone" } }]);
+		const all = listRestDirectives(inbox, { sessionId: "sess-a", status: "all" }, history);
+		expect(all.map((entry) => [entry.id, entry.status])).toEqual([
+			["gone", "acknowledged"],
+			["live", "queued"],
+		]);
+	});
+
+	test("an agent-authored history row is not listed", () => {
+		const history = steeringRecordsFromEntries([
+			{
+				directive: { id: "bot", author: { principalId: "omp", kind: "agent" }, createdAtMs: NOW, priority: "normal", targetSessionId: "sess-a", action: "pause", body: "x", conflictsWithActivePlan: false },
+				queuedAtMs: NOW,
+				acknowledgement: { atMs: NOW + 1, outcome: "applied", confirmed: false },
+			},
+		]);
+		expect(history).toEqual([]);
+	});
+
+	test("a credential in a directive body does not leave the route", async () => {
+		const inbox = inboxOf();
+		await queue(inbox, "d1", "annotate");
+		const record = defined(inbox.get("d1"), "d1");
+		const leaky: SteeringRecord = { ...record, directive: { ...record.directive, body: `use ${TOKEN} for the push` } };
+		const shaped = restDirective(leaky);
+		expect(shaped.body).not.toContain(TOKEN);
+		expect(shaped.body).toContain("[REDACTED]");
+	});
 });
 
 describe("query parsing", () => {
@@ -150,11 +214,18 @@ describe("query parsing", () => {
 		expect(parseDirectivesQuery(params("session_id=sess-a&status=done")).ok).toBe(false);
 	});
 
-	test("wait defaults to the server maximum, bounds the timeout and validates `after`", () => {
+	test("wait defaults to the server maximum, validates `after` and refuses a timeout that is not a whole number of at least 1", () => {
 		expect(parseWaitQuery(params("session_id=sess-a"), 30_000)).toEqual({ ok: true, value: { sessionId: "sess-a", after: null, timeoutMs: 30_000 } });
 		expect(parseWaitQuery(params("session_id=sess-a&after=d1&timeout_ms=500"), 30_000)).toEqual({ ok: true, value: { sessionId: "sess-a", after: "d1", timeoutMs: 500 } });
-		for (const bad of ["timeout_ms=0", "timeout_ms=30001", "timeout_ms=abc", "after=bad%20id"]) expect(parseWaitQuery(params(`session_id=sess-a&${bad}`), 30_000).ok).toBe(false);
+		for (const bad of ["timeout_ms=0", "timeout_ms=abc", "timeout_ms=-5", "timeout_ms=1.5", "timeout_ms=", "after=bad%20id"]) expect(parseWaitQuery(params(`session_id=sess-a&${bad}`), 30_000).ok).toBe(false);
 		expect(parseWaitQuery(params("timeout_ms=5"), 30_000).ok).toBe(false);
+	});
+
+	test("a wait above the ceiling is clamped to it, not refused", () => {
+		for (const asked of ["30001", "120000", "999999999999999"]) {
+			expect(parseWaitQuery(params(`session_id=sess-a&timeout_ms=${asked}`), 30_000)).toEqual({ ok: true, value: { sessionId: "sess-a", after: null, timeoutMs: 30_000 } });
+		}
+		expect(parseWaitQuery(params("session_id=sess-a&timeout_ms=30000"), 30_000)).toMatchObject({ ok: true, value: { timeoutMs: 30_000 } });
 	});
 });
 

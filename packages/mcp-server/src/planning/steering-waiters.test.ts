@@ -58,6 +58,12 @@ async function queue(inbox: SteeringInbox, id: string, session = "sess-a"): Prom
 	expect(result.ok).toBe(true);
 }
 
+/** Queues at exactly `atMs` on the injected clock, which may be earlier than the last directive's time. */
+async function queueAt(inbox: SteeringInbox, id: string, atMs: number): Promise<void> {
+	clockMs = atMs - 1;
+	await queue(inbox, id);
+}
+
 const idsOf = (record: QueuedSteeringRecord | null): string | null => record?.directive.id ?? null;
 
 describe("nextQueuedDirective", () => {
@@ -93,6 +99,46 @@ describe("nextQueuedDirective", () => {
 		await queue(inbox, "d2");
 		expect((await inbox.acknowledge({ directiveId: "d1", sessionId: "sess-a", outcome: "declined" })).ok).toBe(true);
 		expect(idsOf(nextQueuedDirective(inbox, "sess-a", null))).toBe("d2");
+	});
+
+	test("a clock that moves backwards does not sort a later directive before the delivered one", async () => {
+		const inbox = inboxOf();
+		await queueAt(inbox, "d1", 1_800_000_100_000);
+		await queueAt(inbox, "d2", 1_800_000_000_000);
+		expect(idsOf(nextQueuedDirective(inbox, "sess-a", null))).toBe("d1");
+		expect(idsOf(nextQueuedDirective(inbox, "sess-a", "d1"))).toBe("d2");
+		expect(idsOf(nextQueuedDirective(inbox, "sess-a", "d2"))).toBeNull();
+	});
+
+	test("equal timestamps follow the order the directives entered, not the order of their ids", async () => {
+		const inbox = inboxOf();
+		await queueAt(inbox, "zz-first", 1_800_000_000_000);
+		await queueAt(inbox, "aa-second", 1_800_000_000_000);
+		expect(idsOf(nextQueuedDirective(inbox, "sess-a", null))).toBe("zz-first");
+		expect(idsOf(nextQueuedDirective(inbox, "sess-a", "zz-first"))).toBe("aa-second");
+	});
+
+	test("directives restored at boot take their sequence in restore order, and a new one comes after them", async () => {
+		const inbox = inboxOf();
+		const entry = (id: string, queuedAtMs: number): unknown => ({
+			directive: {
+				id,
+				author: { principalId: "omp", kind: "human" },
+				createdAtMs: queuedAtMs,
+				priority: "normal",
+				targetSessionId: "sess-a",
+				action: "annotate",
+				body: `note ${id}`,
+				conflictsWithActivePlan: false,
+			},
+			queuedAtMs,
+		});
+		const report = await inbox.restore([entry("r-late", 1_800_000_200_000), entry("r-early", 1_800_000_100_000)]);
+		expect(report.restored).toEqual(["r-late", "r-early"]);
+		await queueAt(inbox, "fresh", 1_800_000_050_000);
+		expect(idsOf(nextQueuedDirective(inbox, "sess-a", null))).toBe("r-late");
+		expect(idsOf(nextQueuedDirective(inbox, "sess-a", "r-late"))).toBe("r-early");
+		expect(idsOf(nextQueuedDirective(inbox, "sess-a", "r-early"))).toBe("fresh");
 	});
 });
 

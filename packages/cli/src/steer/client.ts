@@ -6,9 +6,12 @@
  * has the wrong shape is a `bad-response` failure that names what was missing, never a crash and never a cast.
  * Nothing here throws; a transport problem is a typed failure the caller maps to an exit code or to "try again".
  *
- * A 404 on a steering or context route means the server predates the feature or its flag is off. The message says so,
- * because "not found" alone sends an operator looking for a typo.
+ * A 404 on a steering or context route means the server predates the feature or its flag is off, unless its body is the
+ * typed `not-found` refusal of a write (an unknown directive): then the route works and the directive is what is missing.
+ * The message says which, because "not found" alone sends an operator looking for a typo.
  */
+
+import { plain } from "./plain.ts";
 
 /** The subset of `fetch` this client uses. Real `fetch` satisfies it. */
 export type SteerFetch = (input: string, init: { method: "GET" | "POST"; headers: Record<string, string>; body?: string; signal: AbortSignal }) => Promise<Response>;
@@ -24,6 +27,13 @@ export type DirectiveStatusFilter = (typeof DIRECTIVE_STATUS_FILTERS)[number];
 
 /** The session id grammar the server's registry accepts (a hook skips the steering routes for an id outside it). */
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+/**
+ * The directive id (and `after` cursor) grammar of the server's routes. Copied from `DIRECTIVE_ID_RE` in
+ * `packages/mcp-server/src/planning/steering-rest.ts`: the CLI never imports the server package.
+ */
+export const DIRECTIVE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+/** The most sessions (or digest items per list) one request may ask for: `STEERING_SESSIONS_LIMIT_MAX` and the session context's own bound, both in `packages/mcp-server`. */
+export const STEER_LIMIT_MAX = 100;
 
 /** The most characters of a response body that is read; a bigger answer is not one of these routes' replies. */
 export const MAX_RESPONSE_CHARS = 2_000_000;
@@ -109,6 +119,7 @@ export interface WriteReply {
 	/** The whole reply, for `--json`. */
 	raw: Record<string, unknown>;
 	directive_id?: string;
+	outcome?: SteerOutcome;
 	reason?: string;
 	/** `refused.error.code` when the server refused. */
 	error_code?: string;
@@ -126,13 +137,20 @@ export interface SteerClientOptions {
 	signalFor?: ((timeoutMs: number) => AbortSignal) | undefined;
 }
 
+/** One long poll's answer: the directive, or `null` when the wait ended with none, and the wait the server actually applied when it said so. */
+export interface SteerWait {
+	directive: SteerDirective | null;
+	/** The server's effective long-poll length (it clamps an oversized request): `wait_ms` of a 200, the `X-Steering-Wait-Ms` header of either answer. */
+	waitMs?: number;
+}
+
 export interface SteerClient {
 	sessions(query: { repoId?: string | undefined; limit?: number | undefined }): Promise<SteerResult<SteerSessions>>;
 	directives(query: { sessionId: string; status?: DirectiveStatusFilter | undefined }): Promise<SteerResult<SteerDirective[]>>;
 	queue(request: { sessionId: string; action: SteerAction; body: string; priority?: SteerPriority | undefined }): Promise<SteerResult<WriteReply>>;
 	acknowledge(request: { directiveId: string; outcome: SteerOutcome; confirm?: boolean | undefined }): Promise<SteerResult<WriteReply>>;
-	/** One long poll: the next directive after `after`, or `null` when the server's wait ended with none (HTTP 204). */
-	wait(query: { sessionId: string; after?: string | undefined; timeoutMs: number }): Promise<SteerResult<SteerDirective | null>>;
+	/** One long poll: the next directive after `after`, or `directive: null` when the server's wait ended with none (HTTP 204). */
+	wait(query: { sessionId: string; after?: string | undefined; timeoutMs: number }): Promise<SteerResult<SteerWait>>;
 	context(query: { repoId?: string | undefined; sessionId?: string | undefined; limit?: number | undefined }): Promise<SteerResult<ContextDigest>>;
 }
 
@@ -265,14 +283,35 @@ export function parseContextDigest(value: unknown): ContextDigest | string {
 	return { generated_at: value.generated_at, repo_id: value.repo_id, for_session: forSession, lists, truncated, notes: value.notes as string[] };
 }
 
-/** The reply of `steering_queue` or `steering_acknowledge` over REST: an object whose `status` says what happened. */
+/** The statuses of a write's tool reply, and the fields each success status must carry. */
+const WRITE_STATUSES = ["queued", "acknowledged", "forbidden", "refused", "misconfigured", "not-configured"] as const;
+
+/**
+ * The reply of `steering_queue` or `steering_acknowledge` over REST: an object whose `status` is one of the tool's own and
+ * that carries the fields its status promises. `queued` without a directive id, or any unknown status, is a bad response:
+ * a success the CLI cannot name must never print as one.
+ */
 export function parseWriteReply(value: unknown): WriteReply | string {
 	if (!isRec(value)) return "reply is not an object";
-	if (typeof value.status !== "string" || value.status.length === 0) return "status";
-	const reply: WriteReply = { status: value.status, raw: value };
-	if (typeof value.directive_id === "string") reply.directive_id = value.directive_id;
+	const status = oneOf(value.status, WRITE_STATUSES);
+	if (status === undefined) return "status";
+	const reply: WriteReply = { status, raw: value };
+	if (value.directive_id !== undefined) {
+		if (typeof value.directive_id !== "string" || !DIRECTIVE_ID_PATTERN.test(value.directive_id)) return "directive_id";
+		reply.directive_id = value.directive_id;
+	}
+	if (status === "queued" && reply.directive_id === undefined) return "directive_id";
+	if (status === "acknowledged") {
+		if (reply.directive_id === undefined) return "directive_id";
+		const outcome = oneOf(value.outcome, STEER_OUTCOMES);
+		if (outcome === undefined) return "outcome";
+		reply.outcome = outcome;
+	}
 	if (typeof value.reason === "string") reply.reason = value.reason;
+	if (status === "forbidden" && reply.reason === undefined) return "reason";
 	if (isRec(value.error) && typeof value.error.code === "string") reply.error_code = value.error.code;
+	if (status === "refused" && reply.error_code === undefined) return "error.code";
+	if (status === "misconfigured" && !Array.isArray(value.errors)) return "errors";
 	const hint = parseHint(value.checkpoint_hint);
 	if (hint === undefined) return "checkpoint_hint";
 	if (hint !== null) reply.checkpoint_hint = hint;
@@ -286,7 +325,21 @@ export function parseWriteReply(value: unknown): WriteReply | string {
 
 const NOT_FOUND_MESSAGE = "the server has no such route: it predates Live Steering, or the flag that enables it is off (docs/live-steering.md)";
 
-const failure = (code: SteerFailureCode, message: string, status?: number): SteerFailure => ({ ok: false, code, message: message.slice(0, MAX_DIAGNOSTIC_CHARS), ...(status === undefined ? {} : { status }) });
+const failure = (code: SteerFailureCode, message: string, status?: number): SteerFailure => ({ ok: false, code, message: plain(message, MAX_DIAGNOSTIC_CHARS), ...(status === undefined ? {} : { status }) });
+
+/** The header a 204 carries to tell the effective long-poll length (a 200 carries `wait_ms` in its body). */
+const WAIT_HEADER = "x-steering-wait-ms";
+
+/** A whole, positive millisecond count from a header string or a JSON number; anything else is "the server did not say". */
+function wholeMs(value: unknown): number | undefined {
+	const parsed = typeof value === "number" ? value : typeof value === "string" && /^[0-9]{1,9}$/.test(value) ? Number(value) : Number.NaN;
+	return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+/** The typed refusal of a write that names an unknown directive: `{ status: "refused", error: { code: "not-found" } }`. */
+function isTypedNotFound(body: unknown): boolean {
+	return isRec(body) && body.status === "refused" && isRec(body.error) && body.error.code === "not-found";
+}
 
 /** `{ error: "..." }` or the start of the text: what a refusal says. */
 function errorText(body: unknown, text: string): string {
@@ -300,6 +353,8 @@ interface Exchange {
 	/** Absent on 204 and on an empty body. */
 	body: unknown;
 	text: string;
+	/** The server's effective long-poll length from the `X-Steering-Wait-Ms` header, when it sent a usable one. */
+	waitMs?: number;
 }
 
 export function createSteerClient(options: SteerClientOptions): SteerClient {
@@ -331,7 +386,6 @@ export function createSteerClient(options: SteerClientOptions): SteerClient {
 			return failure("unreachable", `the server at ${base} did not answer: ${cause instanceof Error ? cause.message : "unknown error"}`);
 		}
 		const status = response.status;
-		if (status === 404) return failure("not-found", NOT_FOUND_MESSAGE, status);
 		if (status === 401) return failure("unauthorized", "the server refused the bearer token (HTTP 401); set SUBSTRATE_TOKEN", status);
 		let text: string;
 		try {
@@ -345,12 +399,16 @@ export function createSteerClient(options: SteerClientOptions): SteerClient {
 			try {
 				parsed = JSON.parse(text);
 			} catch {
+				if (status === 404) return failure("not-found", NOT_FOUND_MESSAGE, status);
 				if (status >= 500) return failure("server-error", `HTTP ${status}: ${text.slice(0, 200)}`, status);
 				return failure("bad-response", `HTTP ${status}: the server answered with a body that is not JSON`, status);
 			}
 		}
+		// Only the typed refusal of a write names a missing directive; any other 404 is a route that is not there (or is switched off).
+		if (status === 404 && !isTypedNotFound(parsed)) return failure("not-found", NOT_FOUND_MESSAGE, status);
 		if (status >= 500) return failure("server-error", `HTTP ${status}: ${errorText(parsed, text)}`, status);
-		return { ok: true, value: { status, body: parsed, text } };
+		const waitMs = wholeMs(response.headers.get(WAIT_HEADER));
+		return { ok: true, value: { status, body: parsed, text, ...(waitMs === undefined ? {} : { waitMs }) } };
 	}
 
 	/** A read: HTTP 200 and a body the guard accepts. */
@@ -402,13 +460,14 @@ export function createSteerClient(options: SteerClientOptions): SteerClient {
 				query.timeoutMs + WAIT_MARGIN_MS,
 			);
 			if (!result.ok) return result;
-			const { status, body, text } = result.value;
-			if (status === 204) return { ok: true, value: null };
+			const { status, body, text, waitMs: headerMs } = result.value;
+			if (status === 204) return { ok: true, value: { directive: null, ...(headerMs === undefined ? {} : { waitMs: headerMs }) } };
 			if (status !== 200) return failure("refused", `HTTP ${status}: ${errorText(body, text)}`, status);
 			if (!isRec(body)) return failure("bad-response", "the wait answered 200 with a body that is not an object", status);
 			const directive = parseDirective(body.directive);
 			if (typeof directive === "string") return failure("bad-response", `the wait answered 200 with a body that has no valid ${directive}`, status);
-			return { ok: true, value: directive };
+			const waitMs = wholeMs(body.wait_ms) ?? headerMs;
+			return { ok: true, value: { directive, ...(waitMs === undefined ? {} : { waitMs }) } };
 		},
 		context: (query) =>
 			read("/session/context", { repo_id: query.repoId, session_id: query.sessionId, limit: query.limit === undefined ? undefined : String(query.limit) }, parseContextDigest),

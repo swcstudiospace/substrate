@@ -270,6 +270,9 @@ export class SteeringInbox {
 	private readonly allowlist: ReadonlySet<string>;
 	private readonly capacity: number;
 	private tail: Promise<unknown> = Promise.resolve();
+	/** Delivery order: grows by one for every directive that enters the inbox. Unlike a timestamp it never goes backwards and never ties. */
+	private readonly sequences = new Map<string, number>();
+	private lastSequence = 0;
 
 	constructor(private readonly deps: SteeringInboxDeps) {
 		const { ratePerMin } = deps.policy;
@@ -298,6 +301,24 @@ export class SteeringInbox {
 	get(directiveId: string): SteeringRecord | null {
 		const record = this.records.get(directiveId);
 		return record === undefined ? null : structuredClone(record);
+	}
+
+	/**
+	 * The delivery sequence of a directive: a number that grows with every directive that enters this inbox (queued here, or
+	 * restored at boot in restore order), whatever the clock says. Null for an id the inbox does not hold.
+	 */
+	sequenceOf(directiveId: string): number | null {
+		return this.sequences.get(directiveId) ?? null;
+	}
+
+	/** The queued directives of one session with their delivery sequence, lowest sequence first. A read: it changes nothing. */
+	queuedFor(sessionId: string): Array<{ sequence: number; record: Extract<SteeringRecord, { state: "queued" }> }> {
+		const queued: Array<{ sequence: number; record: Extract<SteeringRecord, { state: "queued" }> }> = [];
+		for (const record of this.records.values()) {
+			if (record.state !== "queued" || record.directive.targetSessionId !== sessionId) continue;
+			queued.push({ sequence: this.sequences.get(record.directive.id) ?? Number.MAX_SAFE_INTEGER, record: structuredClone(record) });
+		}
+		return queued.sort((a, b) => a.sequence - b.sequence);
 	}
 
 	/** Queued directives for one session, highest priority first, then oldest, then by id. */
@@ -362,6 +383,7 @@ export class SteeringInbox {
 		this.buckets.set(directive.targetSessionId, { tokens: bucket.tokens - 1, updatedAtMs: bucket.updatedAtMs });
 		const record: SteeringRecord = { state: "queued", directive, queuedAtMs: nowMs };
 		this.records.set(directive.id, record);
+		this.sequences.set(directive.id, ++this.lastSequence);
 		return { ok: true, value: structuredClone(record) };
 	}
 
@@ -426,6 +448,8 @@ export class SteeringInbox {
 				return;
 			}
 			this.records.set(directive.id, recordFromStore(directive, queuedAtMs, acknowledgement ?? null));
+			// A directive this process has not seen takes the next sequence number in restore order. One already held keeps its own.
+			if (!this.sequences.has(directive.id)) this.sequences.set(directive.id, ++this.lastSequence);
 			report.restored.push(directive.id);
 		});
 		return report;
@@ -730,6 +754,20 @@ function compareText(a: string, b: string): number {
 	return a < b ? -1 : a > b ? 1 : 0;
 }
 
-function compareDirectives(a: SteeringDirective, b: SteeringDirective): number {
+export function compareDirectives(a: SteeringDirective, b: SteeringDirective): number {
 	return PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] || a.createdAtMs - b.createdAtMs || compareText(a.id, b.id);
+}
+
+/**
+ * Records read back from the durable audit history, validated by the schema `restore` uses but loaded into no inbox: an entry
+ * that fails it, or names an agent as author, is left out. The caller merges them with what the inbox holds. Never throws.
+ */
+export function steeringRecordsFromEntries(entries: readonly unknown[]): SteeringRecord[] {
+	const records: SteeringRecord[] = [];
+	for (const entry of entries) {
+		const parsed = SteeringRestoreEntrySchema.safeParse(entry);
+		if (!parsed.success || parsed.data.directive.author.kind === "agent") continue;
+		records.push(recordFromStore(parsed.data.directive, parsed.data.queuedAtMs, parsed.data.acknowledgement ?? null));
+	}
+	return records;
 }

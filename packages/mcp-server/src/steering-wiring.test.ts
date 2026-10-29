@@ -14,6 +14,7 @@ import { loadConfig } from "./config.ts";
 import { searchReplyStorable, type SearchReply } from "./docs-search.ts";
 import { createMcpServer, type McpCaller } from "./mcp.ts";
 import { RecordingPresenceBackend } from "./planning/backend.fixtures.ts";
+import { listRestDirectives } from "./planning/steering-rest.ts";
 import type { PlanningTimers } from "./planning/observer.ts";
 import { DragonflyPresenceStore } from "./planning/presence-dragonfly.ts";
 import { SteeringInbox } from "./planning/steering.ts";
@@ -770,5 +771,52 @@ describe("the planning observer's baseline and liveness", () => {
 		} finally {
 			stderr.restore();
 		}
+	});
+});
+
+describe("acknowledged directives after a restart", () => {
+	/** A previous process queues `d-1` for `sess-a` and acknowledges it as applied, leaving both rows in the table. */
+	async function acknowledgedByPreviousProcess(sql: FakeAuditSql): Promise<void> {
+		const previous = new SteeringInbox({
+			history: new SteeringAuditSink(sql, sql),
+			clock: { nowMs: () => T0 },
+			policy: { allowlist: ["omp"], ratePerMin: 100 },
+		});
+		expect((await previous.enqueue(directive())).ok).toBe(true);
+		expect((await previous.acknowledge({ directiveId: "d-1", sessionId: "sess-a", outcome: "applied" })).ok).toBe(true);
+	}
+
+	test("the route still lists a directive that was acknowledged before the restart, with its checkpoint hint", async () => {
+		const sql = new FakeAuditSql();
+		await acknowledgedByPreviousProcess(sql);
+		const { substrate } = harness({}, { sql });
+		await substrate.startSteering();
+		const inbox = substrate.steering.inbox;
+		if (inbox === null) throw new Error("expected an inbox");
+		// Boot restores open directives only, so the inbox no longer holds it; the in-memory view alone would lose the hint.
+		expect(inbox.get("d-1")).toBeNull();
+		expect(listRestDirectives(inbox, { sessionId: "sess-a", status: "acknowledged" })).toEqual([]);
+
+		const durable = await substrate.durableAcknowledgedFor("sess-a");
+		expect(durable).toMatchObject({ history: "durable", truncated: false });
+		expect(listRestDirectives(inbox, { sessionId: "sess-a", status: "acknowledged" }, durable.records)).toMatchObject([
+			{ id: "d-1", status: "acknowledged", outcome: "applied", checkpoint_hint: { trigger: "steering", directive_id: "d-1" } },
+		]);
+		// The history is read for the session asked about only.
+		expect((await substrate.durableAcknowledgedFor("sess-b")).records).toEqual([]);
+	});
+
+	test("without the audit table only the inbox exists, and the answer says so", async () => {
+		const history = { append: async (): Promise<void> => undefined };
+		const substrate = new Substrate(loadConfig(STEERING_ON), { index: null, greptime: null, planning: { presence: null, emit: async () => true }, steering: { history } });
+		expect(await substrate.durableAcknowledgedFor("sess-a")).toEqual({ records: [], history: "memory-only", truncated: false });
+	});
+
+	test("a history that cannot be read is unavailable, not an empty list", async () => {
+		const sql = new FakeAuditSql();
+		await acknowledgedByPreviousProcess(sql);
+		sql.failReads = Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" });
+		const { substrate } = harness({}, { sql });
+		expect(await substrate.durableAcknowledgedFor("sess-a")).toEqual({ records: [], history: "unavailable", truncated: false });
 	});
 });

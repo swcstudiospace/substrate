@@ -115,6 +115,29 @@ describe("parseWriteReply", () => {
 		expect(parseWriteReply({ status: "" })).toBe("status");
 		expect(parseWriteReply([])).toBe("reply is not an object");
 	});
+
+	test("each success status must carry the fields it promises", () => {
+		expect(parseWriteReply({ status: "queued" })).toBe("directive_id");
+		expect(parseWriteReply({ status: "queued", directive_id: "" })).toBe("directive_id");
+		expect(parseWriteReply({ status: "acknowledged", directive_id: "d-1" })).toBe("outcome");
+		expect(parseWriteReply({ status: "acknowledged", directive_id: "d-1", outcome: "maybe" })).toBe("outcome");
+		expect(parseWriteReply({ status: "acknowledged", outcome: "applied" })).toBe("directive_id");
+		expect(parseWriteReply({ status: "forbidden" })).toBe("reason");
+		expect(parseWriteReply({ status: "refused" })).toBe("error.code");
+		expect(parseWriteReply({ status: "misconfigured" })).toBe("errors");
+	});
+
+	test("a status the tools do not have is a bad response, not a reply", () => {
+		expect(parseWriteReply({ status: "done", directive_id: "d-1" })).toBe("status");
+	});
+
+	test("complete replies of every status are kept", () => {
+		expect(parseWriteReply({ status: "queued", directive_id: "d-1" })).toMatchObject({ status: "queued", directive_id: "d-1" });
+		expect(parseWriteReply({ status: "acknowledged", directive_id: "d-1", outcome: "declined" })).toMatchObject({ outcome: "declined" });
+		expect(parseWriteReply({ status: "forbidden", reason: "operator-required" })).toMatchObject({ reason: "operator-required" });
+		expect(parseWriteReply({ status: "misconfigured", errors: [] })).toMatchObject({ status: "misconfigured" });
+		expect(parseWriteReply({ status: "not-configured" })).toMatchObject({ status: "not-configured" });
+	});
 });
 
 describe("transport", () => {
@@ -173,7 +196,7 @@ describe("transport", () => {
 			},
 		});
 		const result = await client.wait({ sessionId: "s", timeoutMs: 20_000 });
-		expect(result).toEqual({ ok: true, value: null });
+		expect(result).toEqual({ ok: true, value: { directive: null } });
 		expect(budgets).toEqual([20_000 + WAIT_MARGIN_MS]);
 	});
 
@@ -213,5 +236,37 @@ describe("transport", () => {
 		const result = await client.sessions({});
 		if (result.ok) throw new Error("expected a failure");
 		expect(result.message.length).toBeLessThanOrEqual(300);
+	});
+
+	test("a 204 carries the server's effective wait in a header, a 200 in its body; a header that is not a whole positive number is ignored", async () => {
+		const header = clientFor(new Response(null, { status: 204, headers: { "x-steering-wait-ms": "1000" } }));
+		expect(await header.client.wait({ sessionId: "s", timeoutMs: 25_000 })).toEqual({ ok: true, value: { directive: null, waitMs: 1_000 } });
+		for (const junk of ["0", "-5", "soon", "1e3", ""]) {
+			const bad = clientFor(new Response(null, { status: 204, headers: { "x-steering-wait-ms": junk } }));
+			expect(await bad.client.wait({ sessionId: "s", timeoutMs: 25_000 })).toEqual({ ok: true, value: { directive: null } });
+		}
+		const directive = { ...goodDirective };
+		const body = clientFor(Response.json({ directive, wait_ms: 2_000 }));
+		expect(await body.client.wait({ sessionId: "s", timeoutMs: 25_000 })).toMatchObject({ ok: true, value: { waitMs: 2_000 } });
+	});
+
+	test("a 404 with the typed not-found refusal of a write is a reply about a directive, not a missing route", async () => {
+		const refusal = { status: "refused", error: { code: "not-found" } };
+		const { client } = clientFor(Response.json(refusal, { status: 404 }));
+		expect(await client.acknowledge({ directiveId: "d-1", outcome: "applied" })).toMatchObject({ ok: true, value: { status: "refused", error_code: "not-found" } });
+	});
+
+	test("any other 404 is a route that is missing or switched off, whatever its body", async () => {
+		for (const answer of [Response.json({ error: "live steering is off" }, { status: 404 }), Response.json({ status: "refused", error: { code: "invalid-directive" } }, { status: 404 }), new Response("<html>no</html>", { status: 404 })]) {
+			const { client } = clientFor(answer);
+			expect(await client.acknowledge({ directiveId: "d-1", outcome: "applied" })).toMatchObject({ ok: false, code: "not-found", status: 404 });
+		}
+	});
+
+	test("control characters in a server's error text never reach the message", async () => {
+		const { client } = clientFor(Response.json({ error: "bad\u001b[2J\u001b[Hrequest\u0007" }, { status: 400 }));
+		const result = await client.sessions({});
+		if (result.ok) throw new Error("expected a failure");
+		expect(result.message).toBe("HTTP 400: bad [2J [Hrequest");
 	});
 });

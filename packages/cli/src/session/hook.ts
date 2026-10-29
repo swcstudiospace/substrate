@@ -42,7 +42,7 @@ import {
 } from "./checkpoint.ts";
 import type { RollbackServerClient } from "./client.ts";
 import { resolvePendingDir } from "./pending.ts";
-import { readConsumed, consumedPath, writeConsumed } from "./steering-consumed.ts";
+import { consumedPath, readConsumed, retainListed, writeConsumed } from "./steering-consumed.ts";
 import { type CheckpointHookTrigger, type HookTrigger, type PolicyCheckpoint, directiveKey, shouldCheckpoint } from "./trigger-policy.ts";
 import { SESSION_ID_PATTERN, type SteerClient, type SteerDirective } from "../steer/client.ts";
 import { MAX_DIGEST_CHARS, renderDigest } from "../steer/render.ts";
@@ -268,7 +268,8 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 	// The steering hook also acts on what the server says it was asked to do: each acknowledged directive that carries a
 	// `checkpoint_hint` gets the checkpoint it names, once. A server that cannot answer leaves exactly the checkpoint above.
 	const statePath = await consumedPathFor(params, worktree, run, session);
-	const consumed = new Set(statePath === undefined ? [] : readConsumed(statePath));
+	const previous = statePath === undefined ? [] : readConsumed(statePath);
+	const consumed = new Set(previous);
 	const listed = await params.steer.directives({ sessionId: session, status: "acknowledged" });
 	const hintIds = listed.ok ? unconsumedHints(listed.value, session, consumed) : [];
 
@@ -291,11 +292,16 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 		outcomes.push(await attempt(envelopeKey, envelopeKey === undefined ? params.planRef : { step: envelopeKey }));
 	}
 
-	if (statePath !== undefined && acted.length > 0) {
-		try {
-			writeConsumed(statePath, session, [...consumed, ...acted]);
-		} catch {
-			// Only a cache of decisions: the next run asks the policy again, which skips what already has a checkpoint.
+	// Decisions are kept for as long as the server still lists the directive (a skipped hint has no checkpoint key to stop it
+	// later); only a complete listing prunes anything, so a failed read leaves the stored decisions as they are.
+	if (statePath !== undefined && listed.ok) {
+		const kept = retainListed([...previous, ...acted], new Set(listed.value.map((directive) => directive.id)));
+		if (acted.length > 0 || kept.length !== previous.length) {
+			try {
+				writeConsumed(statePath, session, kept);
+			} catch {
+				// Only a cache of decisions: the next run asks the policy again, which skips what already has a checkpoint.
+			}
 		}
 	}
 	return outcomes.find((outcome) => outcome.status === "checkpointed") ?? (outcomes[outcomes.length - 1] as HookOutcome);

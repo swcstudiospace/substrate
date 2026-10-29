@@ -10,10 +10,12 @@
  * author is the bearer's surface, and a write needs an operator. Nothing here lets an agent queue a directive.
  */
 import { scopeRepoId } from "../event.ts";
+import { redact } from "../redact.ts";
 import { SESSION_ID_RE } from "./presence.ts";
 import type { SteeringSessionRegistry } from "./session-state.ts";
-import type { SteeringInbox, SteeringRecord } from "./steering.ts";
+import { compareDirectives, type SteeringInbox, type SteeringRecord } from "./steering.ts";
 import { sessionStateForAcknowledgement, type SteeringAcknowledgeReply } from "./steering-delivery.ts";
+import { redactedSteeringSession } from "./steering-sessions-store.ts";
 import { STEERING_ACKNOWLEDGE_INPUT, STEERING_QUEUE_INPUT, type SteeringAcknowledgeInput, type SteeringCaller, type SteeringQueueInput, type SteeringWiring, type SteeringWriteResult } from "./steering-tools.ts";
 
 /** `GET /steering/sessions` lists at most this many sessions per call. */
@@ -86,18 +88,20 @@ export function listSteeringSessions(
 				(a.surface < b.surface ? -1 : a.surface > b.surface ? 1 : 0) ||
 				(a.session.session_id < b.session.session_id ? -1 : a.session.session_id > b.session.session_id ? 1 : 0),
 		);
-	const sessions = visible.slice(0, query.limit).map(
-		(entry): RestSteeringSession => ({
-			session_id: entry.session.session_id,
+	const sessions = visible.slice(0, query.limit).map((entry): RestSteeringSession => {
+		// The directions are caller-supplied text: they pass the redactor on the way out as they do on the way into the table.
+		const session = redactedSteeringSession(entry.session);
+		return {
+			session_id: session.session_id,
 			surface: entry.surface,
-			repo_id: entry.session.repo_id,
-			state: entry.session.state,
-			updated_at: entry.session.updated_at,
-			planning_hash: entry.session.planning_hash ?? null,
-			steering: entry.session.steering ?? null,
-			pending_directives: inbox === null ? 0 : inbox.pendingFor(entry.session.session_id).length,
-		}),
-	);
+			repo_id: session.repo_id,
+			state: session.state,
+			updated_at: session.updated_at,
+			planning_hash: session.planning_hash ?? null,
+			steering: session.steering ?? null,
+			pending_directives: inbox === null ? 0 : inbox.pendingFor(session.session_id).length,
+		};
+	});
 	return { sessions, truncated: visible.length > query.limit };
 }
 
@@ -132,7 +136,7 @@ export function restDirective(record: SteeringRecord): RestDirective {
 		id: directive.id,
 		session_id: directive.targetSessionId,
 		action: directive.action,
-		body: directive.body,
+		body: redact(directive.body),
 		priority: directive.priority,
 		author: directive.author.principalId,
 		created_at: isoOf(directive.createdAtMs),
@@ -164,10 +168,25 @@ export function parseDirectivesQuery(params: URLSearchParams): RestParse<Directi
 	return { ok: true, value: { sessionId: session.value, status: status as DirectiveStatusFilter } };
 }
 
+/** The most acknowledged directives one `GET /steering/directives` reads back from the durable history for a session. */
+export const STEERING_ACKNOWLEDGED_HISTORY_LIMIT = 100;
+
+/** What the durable history added to a directives answer: its records, whether it could be read at all, and whether it was cut. */
+export interface DurableAcknowledged {
+	records: readonly SteeringRecord[];
+	/** `memory-only`: no audit table, only the inbox can answer. `durable`: the history was read. `unavailable`: it was configured and the read failed. */
+	history: "memory-only" | "durable" | "unavailable";
+	truncated: boolean;
+}
+
 /** The directives for one session, highest priority first (the order `steering_list` uses). A read: it changes nothing. */
-export function listRestDirectives(inbox: SteeringInbox, query: DirectivesQuery): RestDirective[] {
-	return inbox
-		.recordsFor(query.sessionId)
+export function listRestDirectives(inbox: SteeringInbox, query: DirectivesQuery, durable: readonly SteeringRecord[] = []): RestDirective[] {
+	const held = inbox.recordsFor(query.sessionId);
+	// The inbox holds the live state of a directive it knows; the history adds only directives a restart left out of memory.
+	const known = new Set(held.map((record) => record.directive.id));
+	const merged = [...held, ...durable.filter((record) => record.directive.targetSessionId === query.sessionId && !known.has(record.directive.id))];
+	return merged
+		.sort((a, b) => compareDirectives(a.directive, b.directive))
 		.filter((record) => query.status === "all" || record.state === query.status)
 		.map(restDirective);
 }
@@ -247,18 +266,27 @@ export function parseAcknowledgeBody(body: unknown, inbox: SteeringInbox | null)
 export interface WaitQuery {
 	sessionId: string;
 	after: string | null;
+	/** The wait this request gets: what the client asked for, held to the server's ceiling. The answer says it as `wait_ms`. */
 	timeoutMs: number;
 }
 
+/** A requested wait is a whole number of at most fifteen digits, so a huge one is clamped to the ceiling and a non-number is still refused. */
+const WAIT_REQUEST_RE = /^\d{1,15}$/;
+
+/**
+ * A requested wait above the ceiling is clamped to `maxMs`, never refused: a client that asks for a longer poll than this
+ * server allows still gets one, and the answer names the wait it got. A request that is not a whole number of at least one is refused.
+ */
 export function parseWaitQuery(params: URLSearchParams, maxMs: number): RestParse<WaitQuery> {
 	const session = requiredSession(params);
 	if (!session.ok) return session;
 	const after = params.get("after");
 	if (after !== null && !DIRECTIVE_ID_RE.test(after)) return { ok: false, error: "after must be a directive id" };
 	const rawTimeout = params.get("timeout_ms");
-	const timeoutMs = rawTimeout === null ? maxMs : wholeNumber(rawTimeout, 1, maxMs);
-	if (timeoutMs === null) return { ok: false, error: `timeout_ms must be a whole number from 1 to ${maxMs}` };
-	return { ok: true, value: { sessionId: session.value, after, timeoutMs } };
+	if (rawTimeout === null) return { ok: true, value: { sessionId: session.value, after, timeoutMs: maxMs } };
+	const requested = WAIT_REQUEST_RE.test(rawTimeout) ? Number(rawTimeout) : 0;
+	if (requested < 1) return { ok: false, error: "timeout_ms must be a whole number of at least 1" };
+	return { ok: true, value: { sessionId: session.value, after, timeoutMs: Math.min(requested, maxMs) } };
 }
 
 // ── statuses ──────────────────────────────────────────────────────────────────

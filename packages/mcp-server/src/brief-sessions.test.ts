@@ -4,14 +4,8 @@
  * store, no clock but a number.
  */
 import { describe, expect, test } from "bun:test";
-import {
-	BRIEF_SESSIONS_SECTION_MAX_CHARS,
-	coarseAge,
-	handoffsSection,
-	sessionsSection,
-	steeringSection,
-	type BriefSteeringInput,
-} from "./brief-sessions.ts";
+import { BRIEF_SESSIONS_SECTION_MAX_CHARS, coarseAge, composeLiveSections, handoffsSection, lateSection, sessionsSection, steeringSection, type BriefHandoffInput, type BriefSteeringInput } from "./brief-sessions.ts";
+import { DeadlineError } from "./deadline.ts";
 import type { BriefSection } from "./brief-profile.ts";
 import type { ContextSession, SessionContext } from "./session-context.ts";
 import { defined } from "./test-support.ts";
@@ -149,5 +143,85 @@ describe("order, content and safety", () => {
 		const steering = printed(steeringSection({ sessionId: "s", state: "ACTIVE", steering: SECRET, pending: [{ id: "d1", action: "annotate", priority: "low", body: `use ${SECRET}`, ageS: 1 }], pendingTotal: 1 }));
 		const handoffs = printed(handoffsSection([{ goal: `deploy with ${SECRET}`, createdAtMs: NOW, verified: true }], NOW));
 		for (const text of [sessions, steering, handoffs]) expect(text).not.toContain(SECRET);
+	});
+});
+
+/** A deadline the test ends by hand: `race` settles a read against it, and `expire` makes every read still pending lose. */
+function manualDeadline(): { race: <V>(read: Promise<V>) => Promise<V>; expire: () => void } {
+	const { promise: expired, reject } = Promise.withResolvers<never>();
+	expired.catch(() => undefined);
+	return {
+		race: <V>(read: Promise<V>): Promise<V> => Promise.race([read, expired]),
+		expire: () => reject(new DeadlineError(1_200, "brief live sections")),
+	};
+}
+
+const steeringInput: BriefSteeringInput = { sessionId: "sess-a", state: "ACTIVE", steering: null, pending: [{ id: "d1", action: "annotate", priority: "normal", body: "read the notes", ageS: 5 }], pendingTotal: 1 };
+const neverReady = <T>(): Promise<T> => new Promise<T>(() => undefined);
+
+describe("composeLiveSections", () => {
+	test("sections come in print order: sessions, steering, handoffs", async () => {
+		const deadline = manualDeadline();
+		const sections = await composeLiveSections(
+			{
+				context: async () => contextOf([contextSession(1)]),
+				steering: () => steeringInput,
+				handoffs: async () => [{ goal: "ship it", createdAtMs: NOW - 5_000, verified: true }],
+			},
+			deadline.race,
+			NOW,
+		);
+		expect(sections.map((section) => section.id)).toEqual(["sessions", "steering", "handoffs"]);
+	});
+
+	test("a source that is not ready when the deadline ends is replaced by a one-line note, and the sections that were ready stay", async () => {
+		const deadline = manualDeadline();
+		const pending = composeLiveSections(
+			{
+				context: () => neverReady<SessionContext>(),
+				steering: () => steeringInput,
+				handoffs: async () => [{ goal: "ship it", createdAtMs: NOW - 5_000, verified: true }],
+			},
+			deadline.race,
+			NOW,
+		);
+		deadline.expire();
+		const sections = await pending;
+		expect(sections.map((section) => section.id)).toEqual(["sessions", "steering", "handoffs"]);
+		const late = printed(sections[0] ?? null);
+		expect(late).toContain("sessions not included: not ready before the brief's deadline");
+		expect(late.split("\n").filter((line) => line.trim() !== "")).toHaveLength(1);
+		expect(printed(sections[2] ?? null)).toContain("ship it");
+	});
+
+	test("a late handoffs read is named too, and never holds the rest of the brief", async () => {
+		const deadline = manualDeadline();
+		const pending = composeLiveSections({ context: null, steering: null, handoffs: () => neverReady<BriefHandoffInput[]>() }, deadline.race, NOW);
+		deadline.expire();
+		const sections = await pending;
+		expect(sections.map((section) => section.id)).toEqual(["handoffs"]);
+		expect(printed(sections[0] ?? null)).toContain("handoffs not included");
+	});
+
+	test("a read that fails, or a section the request does not ask for, leaves no note and no section", async () => {
+		const deadline = manualDeadline();
+		const sections = await composeLiveSections(
+			{
+				context: async () => {
+					throw new Error("ledger down");
+				},
+				steering: () => {
+					throw new Error("inbox unreadable");
+				},
+				handoffs: null,
+			},
+			deadline.race,
+			NOW,
+		);
+		expect(sections).toEqual([]);
+	});
+
+	test("the note is itself inside the section bound", () => {
+		expect(printed(lateSection("sessions", "sessions")).length).toBeLessThanOrEqual(BRIEF_SESSIONS_SECTION_MAX_CHARS);
 	});
 });

@@ -3,7 +3,7 @@
  * ephemeral port with in-memory ports: the audit sink is a list, the waiters' timers and the inbox's clock are injected, and the
  * only waiting is `settle`, which yields the event loop until a condition holds. Nothing here sleeps or reaches a network.
  */
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { loadConfig } from "./config.ts";
@@ -21,6 +21,7 @@ const AUTH_OMP = { authorization: "Bearer tok-omp" };
 const AUTH_CURSOR = { authorization: "Bearer tok-cursor" };
 const STEERING_ENV = { SUBSTRATE_PLANNING_STEERING: "on", SUBSTRATE_PLANNING_STEERING_PRINCIPALS: "omp" };
 const TOKEN_ENV = { ...STEERING_ENV, SUBSTRATE_TOKEN_OMP: "tok-omp", SUBSTRATE_TOKEN_CURSOR: "tok-cursor", SUBSTRATE_OPERATOR_TOKENS: "tok-omp" };
+const SESSIONS_ENV = { ...TOKEN_ENV, SUBSTRATE_BRIEF_SESSIONS: "on" };
 
 class MemorySink implements SteeringHistorySink {
 	readonly entries: SteeringAuditEntry[] = [];
@@ -33,8 +34,11 @@ class FakeTimers implements SteeringWaitTimers {
 	readonly live = new Map<number, () => void>();
 	private next = 0;
 
-	set(run: () => void): number {
+	readonly delays: number[] = [];
+
+	set(run: () => void, ms: number): number {
 		this.next += 1;
+		this.delays.push(ms);
 		this.live.set(this.next, run);
 		return this.next;
 	}
@@ -197,7 +201,7 @@ describe("GET /steering/wait", () => {
 		await post("/steering/queue", queueBody, AUTH_OMP);
 		const response = await get(waitPath, AUTH_CURSOR);
 		expect(response.status).toBe(200);
-		expect(await response.json()).toMatchObject({ directive: { session_id: "sess-a", action: "pause", status: "queued" } });
+		expect(await response.json()).toMatchObject({ directive: { session_id: "sess-a", action: "pause", status: "queued" }, wait_ms: 5000 });
 		expect(waiters.size).toBe(0);
 	});
 
@@ -243,17 +247,24 @@ describe("GET /steering/wait", () => {
 		expect(waiters.size).toBe(0);
 	});
 
-	test("a timeout outside 1 to the server maximum is a 400 and holds no waiter", async () => {
-		const { get, waiters } = await serve(TOKEN_ENV);
+	test("a timeout above the server maximum is clamped to it and the answer says so; below 1 it is a 400 and holds no waiter", async () => {
+		const { get, waiters, timers } = await serve(TOKEN_ENV);
 		expect((await get("/steering/wait?session_id=sess-a&timeout_ms=0", AUTH_CURSOR)).status).toBe(400);
-		expect((await get("/steering/wait?session_id=sess-a&timeout_ms=999999999", AUTH_CURSOR)).status).toBe(400);
 		expect(waiters.size).toBe(0);
+		const pending = get("/steering/wait?session_id=sess-a&timeout_ms=999999999", AUTH_CURSOR);
+		await settle(() => waiters.size === 1);
+		// The default ceiling is 30,000 ms; the injected timer saw that, not the 999,999,999 the client asked for.
+		expect(timers.delays).toEqual([30_000]);
+		timers.fire();
+		const response = await pending;
+		expect(response.status).toBe(204);
+		expect(response.headers.get("x-steering-wait-ms")).toBe("30000");
 	});
 });
 
 describe("the session context digest", () => {
 	test("GET /session/context and the session_context tool answer the same object", async () => {
-		const { get, substrate } = await serve(TOKEN_ENV);
+		const { get, substrate } = await serve(SESSIONS_ENV);
 		const viaRoute = (await (await get("/session/context?repo_id=owner/name&session_id=me", AUTH_CURSOR)).json()) as Record<string, unknown>;
 
 		const caller: McpCaller = { surface: "cursor", isOperator: false };
@@ -275,7 +286,7 @@ describe("the session context digest", () => {
 	});
 
 	test("the tool refuses an anonymous caller and a bad repository without echoing it", async () => {
-		const { substrate } = await serve(TOKEN_ENV);
+		const { substrate } = await serve(SESSIONS_ENV);
 		const connect = async (caller: McpCaller): Promise<Client> => {
 			const mcp = createMcpServer(substrate, caller);
 			const client = new Client({ name: "session-context-test", version: "0.0.0" });
@@ -291,9 +302,42 @@ describe("the session context digest", () => {
 	});
 
 	test("a bad query is a 400 from the route", async () => {
-		const { get } = await serve(TOKEN_ENV);
+		const { get } = await serve(SESSIONS_ENV);
 		expect((await get("/session/context", AUTH_CURSOR)).status).toBe(400);
 		expect((await get("/session/context?repo_id=owner/name&limit=0", AUTH_CURSOR)).status).toBe(400);
+	});
+
+	test("a repository stored as Acme/Widgets is read as Acme/Widgets, and its digest is scoped in lower case", async () => {
+		const { get, substrate } = await serve(SESSIONS_ENV);
+		const asked: string[] = [];
+		const original = substrate.sessionContext.bind(substrate);
+		spyOn(substrate, "sessionContext").mockImplementation(async (request, budgetMs) => {
+			asked.push(request.repoId);
+			return original(request, budgetMs);
+		});
+		const body = (await (await get("/session/context?repo_id=Acme/Widgets", AUTH_CURSOR)).json()) as Record<string, unknown>;
+		expect(asked).toEqual(["Acme/Widgets"]);
+		expect(body).toMatchObject({ repo_id: "acme/widgets" });
+	});
+});
+
+describe("the sessions feature set is opt-in", () => {
+	test("off, the route answers 503 and the tool the same typed refusal, and neither reads anything", async () => {
+		const { get, substrate } = await serve(TOKEN_ENV);
+		const digest = spyOn(substrate, "sessionContext");
+		const route = await get("/session/context?repo_id=owner/name", AUTH_CURSOR);
+		expect(route.status).toBe(503);
+		expect(await route.json()).toMatchObject({ refused: true, reason: "session-context.disabled" });
+
+		const mcp = createMcpServer(substrate, { surface: "cursor", isOperator: false });
+		const client = new Client({ name: "session-context-test", version: "0.0.0" });
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		await Promise.all([mcp.connect(serverTransport), client.connect(clientTransport)]);
+		const result = await client.callTool({ name: "session_context", arguments: { repo_id: "owner/name" } });
+		const content = result.content as Array<{ text?: string }>;
+		expect(result.isError).toBe(true);
+		expect(JSON.parse(content[0]?.text ?? "{}")).toMatchObject({ refused: true, reason: "session-context.disabled" });
+		expect(digest).not.toHaveBeenCalled();
 	});
 });
 

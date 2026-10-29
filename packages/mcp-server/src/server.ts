@@ -67,7 +67,7 @@ import { acknowledgeSteeringWithState, type SteeringAcknowledgeReply } from "./p
 import { listRestDirectives, listSteeringSessions, parseAcknowledgeBody, parseDirectivesQuery, parseQueueBody, parseSessionsQuery, parseWaitQuery, restDirective, steeringHttpStatus, steeringRetryAfterS, steeringUnavailable } from "./planning/steering-rest.ts";
 import { queueSteering, type SteeringWriteResult } from "./planning/steering-tools.ts";
 import { nextQueuedDirective } from "./planning/steering-waiters.ts";
-import { parseSessionContextArgs } from "./session-context.ts";
+import { parseSessionContextArgs, SESSION_CONTEXT_DISABLED, SESSION_CONTEXT_DISABLED_MESSAGE } from "./session-context.ts";
 import type { EventBus } from "./event-bus.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
 import { parseBriefProfile } from "./brief-profile.ts";
@@ -1954,7 +1954,13 @@ export function createHttpServer(
 					sendJson(res, 503, unavailable ?? { status: "not-configured", error: "no steering audit sink is configured" });
 					return;
 				}
-				sendJson(res, 200, { directives: listRestDirectives(substrate.steering.inbox, query.value) });
+				// The inbox answers for what it holds; a directive acknowledged before a restart is read back from the audit history.
+				const durable = query.value.status === "queued" ? { records: [], history: "memory-only" as const, truncated: false } : await substrate.durableAcknowledgedFor(query.value.sessionId);
+				sendJson(res, 200, {
+					directives: listRestDirectives(substrate.steering.inbox, query.value, durable.records),
+					history: durable.history,
+					history_truncated: durable.truncated,
+				});
 				return;
 			}
 
@@ -2007,7 +2013,7 @@ export function createHttpServer(
 				const waited = await substrate.steeringWaiters.wait({ sessionId, timeoutMs, signal: gone.signal, check: () => nextQueuedDirective(inbox, sessionId, after) });
 				switch (waited.status) {
 					case "directive":
-						sendJson(res, 200, { directive: restDirective(waited.record) });
+						sendJson(res, 200, { directive: restDirective(waited.record), wait_ms: timeoutMs });
 						return;
 					case "busy":
 						send(res, 429, JSON.stringify({ error: `too many waiters for this ${waited.scope === "session" ? "session" : "server"}` }), "application/json", { "retry-after": "1" });
@@ -2016,7 +2022,8 @@ export function createHttpServer(
 						return;
 					case "timeout":
 					case "closed":
-						res.writeHead(204);
+						// No body to carry `wait_ms`, so the wait this request got rides a header.
+						res.writeHead(204, { "x-steering-wait-ms": String(timeoutMs) });
 						res.end();
 						return;
 				}
@@ -2025,6 +2032,13 @@ export function createHttpServer(
 			if (req.method === "GET" && url.pathname === "/session/context") {
 				if (surface === null) {
 					sendJson(res, 401, { error: SESSION_CONTEXT_NEEDS_SURFACE });
+					return;
+				}
+				// Opt-in with the sessions feature set: off, the route refuses with the typed reason the tool answers, and the call is
+				// audited as that refusal. It reads nothing.
+				if (!config.briefSessions) {
+					if (!(await auditedRest(res, observability, surface, "session_context", { refused: SESSION_CONTEXT_DISABLED }))) return;
+					sendJson(res, 503, { refused: true, reason: SESSION_CONTEXT_DISABLED, error: SESSION_CONTEXT_DISABLED_MESSAGE });
 					return;
 				}
 				const parsed = parseSessionContextArgs({

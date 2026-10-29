@@ -153,6 +153,41 @@ describe("bounds", () => {
 	});
 });
 
+describe("cuts upstream of the lists", () => {
+	test("a full ledger window may hide older planning changes, so `planning` says it was cut even when it is short", async () => {
+		const digest = await run(sources({ ledger: answer([ledgerRow(1, { planningChanged: 1, sessionId: "obs" })], true) }));
+		expect(digest.planning).toHaveLength(1);
+		expect(digest.truncated.planning).toBe(true);
+		expect(digest.truncated.events).toBe(true);
+	});
+
+	test("more graphs than the handoff read covers means the handoffs listed may not be all of them", async () => {
+		let asked: readonly string[] = [];
+		const digest = await run(
+			sources({
+				claims: answer(Array.from({ length: SESSION_CONTEXT_LIMITS.handoffs + 2 }, (_, n) => claimRow(n))),
+				handoffs: async (graphIds) => {
+					asked = graphIds;
+					return { items: [] };
+				},
+			}),
+		);
+		expect(asked).toHaveLength(SESSION_CONTEXT_LIMITS.handoffs);
+		expect(digest.handoffs).toEqual([]);
+		expect(digest.truncated.handoffs).toBe(true);
+	});
+
+	test("a graph list the source cut itself also marks the handoffs as possibly partial", async () => {
+		const digest = await run(sources({ graphs: answer(["g1"], true), handoffs: answer([handoffRow(1)]) }));
+		expect(digest.truncated.handoffs).toBe(true);
+	});
+
+	test("graphs inside every bound leave `handoffs` whole", async () => {
+		const digest = await run(sources({ claims: answer([claimRow(1)]), graphs: answer(["g1"]), handoffs: answer([handoffRow(1)]) }));
+		expect(digest.truncated.handoffs).toBe(false);
+	});
+});
+
 describe("the caller's own session", () => {
 	test("its presence, steering and ledger rows are left out, and nobody else's", async () => {
 		const steering: SteeringStateRow[] = [
@@ -252,6 +287,26 @@ describe("sources", () => {
 		expect(asked).toEqual(["g1", "g2", "g0", "g9"]);
 	});
 
+	test("a handoff source that answered in part says so in a note and in `truncated`", async () => {
+		const digest = await run(sources({ handoffs: async () => ({ items: [handoffRow(1)], truncated: true, note: "handoffs: 1 of 3 graphs unavailable" }) }));
+		expect(digest.notes).toContain("handoffs: 1 of 3 graphs unavailable");
+		expect(digest.truncated.handoffs).toBe(true);
+		expect(digest.handoffs).toHaveLength(1);
+	});
+
+	test("a handoff source that fails is an unavailable source with a note, not an empty list that looks complete", async () => {
+		const digest = await run(
+			sources({
+				graphs: answer(["g1"]),
+				handoffs: async () => {
+					throw new Error("ledger timed out");
+				},
+			}),
+		);
+		expect(digest.notes).toContain("handoffs: unavailable");
+		expect(digest.handoffs).toEqual([]);
+	});
+
 	test("a lapsed lease is a free node, not a claim; a claim from before leases existed is kept", async () => {
 		const digest = await run(
 			sources({
@@ -313,12 +368,21 @@ describe("planningChangedCount", () => {
 });
 
 describe("parseSessionContextArgs", () => {
-	test("normalises the repo and accepts a session id and a limit as the tool and the route send them", () => {
+	test("keeps the repository spelling the caller sent (trimmed) and accepts a session id and a limit as the tool and the route send them", () => {
 		expect(parseSessionContextArgs({ repo_id: " SwcStudioSpace/Agent-Substrate ", session_id: "sess-1", limit: "5" })).toEqual({
 			ok: true,
-			value: { repoId: REPO, sessionId: "sess-1", limit: 5 },
+			value: { repoId: "SwcStudioSpace/Agent-Substrate", sessionId: "sess-1", limit: 5 },
 		});
 		expect(parseSessionContextArgs({ repo_id: REPO })).toEqual({ ok: true, value: { repoId: REPO, sessionId: null, limit: undefined } });
+	});
+
+	test("a repository stored as Acme/Widgets is asked for as Acme/Widgets, and the digest still scopes it in lower case", async () => {
+		const parsed = parseSessionContextArgs({ repo_id: "Acme/Widgets" });
+		if (!parsed.ok) throw new Error("expected the repository to parse");
+		expect(parsed.value.repoId).toBe("Acme/Widgets");
+		const digest = await assembleSessionContext(parsed.value, sources({ ledger: answer([ledgerRow(1, { planningChanged: 2, sessionId: "obs" })]) }), { nowMs: NOW });
+		expect(digest.repo_id).toBe("acme/widgets");
+		expect(defined(digest.planning[0]).repo).toBe("acme/widgets");
 	});
 
 	test("refuses a missing repo, a bad session id and a limit out of range, naming the field and never the value", () => {

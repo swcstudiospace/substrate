@@ -4,7 +4,8 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { ContextDigest, DigestItem } from "./client.ts";
-import { ageOf, ageText, boundLines, plain, renderDigest, renderSessionLine } from "./render.ts";
+import { plain } from "./plain.ts";
+import { ageOf, ageText, boundLines, renderDigest, renderSessionLine } from "./render.ts";
 
 const item = (source: string, age_s: number, fields: Record<string, unknown> = {}): DigestItem => ({ source, age_s, fields });
 

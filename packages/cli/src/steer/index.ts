@@ -9,9 +9,10 @@
  * 2 usage, 3 refused (the server understood and said no: not an operator, a rate limit, a bad bearer, steering off).
  *
  * `listen` is the one long-running command. It long-polls `/steering/wait`, prints each directive as it arrives,
- * remembers the last id so a reconnect never replays one, backs off after a transport error, and stops on an
- * interrupt, after `--once` has seen a directive, or when `--max-wait-ms` has passed. Its clock, sleep and fetch are
- * injected, so the whole loop is testable without waiting.
+ * remembers the last id (sent as `after`) and every id it already printed (so a server that restarted and replays an
+ * earlier queued directive does not print it twice), backs off after a transport error, and stops on an interrupt,
+ * after `--once` has seen a directive, or when `--max-wait-ms` has passed. Its clock, sleep and fetch are injected, so
+ * the whole loop is testable without waiting; every pause is abortable, so an interrupt ends it at once.
  */
 import {
 	DIRECTIVE_STATUS_FILTERS,
@@ -27,10 +28,13 @@ import {
 	type SteerResult,
 	type WriteReply,
 	DIGEST_LISTS,
+	DIRECTIVE_ID_PATTERN,
 	SESSION_ID_PATTERN,
+	STEER_LIMIT_MAX,
 	createSteerClient,
 } from "./client.ts";
-import { renderDigest, renderDirectiveLine, renderDirectives, renderSessions, renderWriteReply, plain } from "./render.ts";
+import { plain } from "./plain.ts";
+import { renderDigest, renderDirectiveLine, renderDirectives, renderSessions, renderWriteReply } from "./render.ts";
 
 export const EXIT_DONE = 0;
 export const EXIT_FAILED = 1;
@@ -48,18 +52,19 @@ export const STEER_USAGE =
 	"every command takes --surface S (the token's surface; default claude-code)\n" +
 	"exit: 0 done, 1 failed, 2 usage, 3 refused by the server (not an operator, rate limited, bad token, steering off)\n";
 
-/** The server's own long-poll ceiling is `SUBSTRATE_STEERING_WAIT_MAX_MS`; one poll asks for less than that by default. */
+/** One poll asks for this long; the server clamps it to its own ceiling (`SUBSTRATE_STEERING_WAIT_MAX_MS`) and says what it applied, which the loop then uses. */
 export const LISTEN_POLL_MS = 25_000;
 export const LISTEN_BACKOFF_BASE_MS = 1_000;
 export const LISTEN_BACKOFF_MAX_MS = 30_000;
 /** An answer to a long poll that came back sooner than this is not a long poll; the loop pauses so a misbehaving server cannot spin it. */
 export const LISTEN_MIN_POLL_GAP_MS = 200;
 export const LISTEN_MAX_WAIT_MS_LIMIT = 24 * 3_600_000;
-const MAX_LIMIT = 1_000;
+/** A listener remembers at most this many printed directive ids, oldest dropped first. */
+export const LISTEN_PRINTED_MAX = 1_000;
 /** `status` lists the queued directives of at most this many sessions. */
 const STATUS_MAX_DIRECTIVE_SESSIONS = 10;
 const DEFAULT_SURFACE = "claude-code";
-const MAX_DIRECTIVE_ID = 128;
+const DIRECTIVE_ID_HINT = "a directive id (letters, digits, . _ : -; at most 128 characters)";
 const MAX_BODY_CHARS = 4_096;
 
 export interface SteerDeps {
@@ -74,8 +79,8 @@ export interface SteerDeps {
 	/** Test seams. */
 	fetch?: SteerFetch;
 	signalFor?: (timeoutMs: number) => AbortSignal;
-	/** Resolves after `ms`; default a timer. `listen` sleeps only to back off or to space out instant answers. */
-	sleep?: (ms: number) => Promise<void>;
+	/** Resolves after `ms`, or at once when `signal` aborts; default a timer. `listen` sleeps only to back off or to space out instant answers. */
+	sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 	/** Aborted by the entry point on SIGINT: `listen` stops at once and exits 0. */
 	interrupt?: AbortSignal;
 }
@@ -149,8 +154,7 @@ function validate(parsed: ParsedSteer): string | undefined {
 	const { sub, flags, positional } = parsed;
 	if (sub === "ack") {
 		if (positional.length !== 1) return "ack takes exactly one directive id";
-		const id = positional[0] as string;
-		if (id.length === 0 || id.length > MAX_DIRECTIVE_ID) return `the directive id must be 1 to ${MAX_DIRECTIVE_ID} characters`;
+		if (!DIRECTIVE_ID_PATTERN.test(positional[0] as string)) return `the directive id must be ${DIRECTIVE_ID_HINT}`;
 		if (flags.has("applied") === flags.has("declined")) return "ack needs exactly one of --applied or --declined";
 		if (flags.has("confirm") && !flags.has("applied")) return "--confirm only goes with --applied";
 	} else if (positional.length > 0) {
@@ -173,13 +177,13 @@ function validate(parsed: ParsedSteer): string | undefined {
 	const status = flag(parsed, "status");
 	if (status !== undefined && !(DIRECTIVE_STATUS_FILTERS as readonly string[]).includes(status)) return `--status is ${DIRECTIVE_STATUS_FILTERS.join(", ")}`;
 	const limit = flag(parsed, "limit");
-	if (limit !== undefined && positiveInt(limit, MAX_LIMIT) === undefined) return `--limit is a whole number from 1 to ${MAX_LIMIT}`;
+	if (limit !== undefined && positiveInt(limit, STEER_LIMIT_MAX) === undefined) return `--limit is a whole number from 1 to ${STEER_LIMIT_MAX}`;
 	const wait = flag(parsed, "max-wait-ms");
 	if (wait !== undefined && positiveInt(wait, LISTEN_MAX_WAIT_MS_LIMIT) === undefined) return `--max-wait-ms is a whole number of milliseconds from 1 to ${LISTEN_MAX_WAIT_MS_LIMIT}`;
 	const format = flag(parsed, "format");
 	if (format !== undefined && format !== "text" && format !== "json") return "--format is text or json";
 	const after = flag(parsed, "after");
-	if (after !== undefined && (after.length === 0 || after.length > MAX_DIRECTIVE_ID)) return `--after must be a directive id of 1 to ${MAX_DIRECTIVE_ID} characters`;
+	if (after !== undefined && !DIRECTIVE_ID_PATTERN.test(after)) return `--after must be ${DIRECTIVE_ID_HINT}`;
 	const surface = flag(parsed, "surface");
 	if (surface !== undefined && !/^[a-z0-9][a-z0-9-]{0,63}$/.test(surface)) return "--surface must be a surface name";
 	return undefined;
@@ -189,9 +193,17 @@ function validate(parsed: ParsedSteer): string | undefined {
 // Commands
 // ---------------------------------------------------------------------------
 
-function defaultSleep(ms: number): Promise<void> {
+/** A pause that an abort ends at once; its timer is cleared either way, so nothing is left pending. */
+export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+	if (signal?.aborted) return Promise.resolve();
 	const { promise, resolve } = Promise.withResolvers<void>();
-	setTimeout(resolve, ms);
+	const finish = (): void => {
+		clearTimeout(timer);
+		signal?.removeEventListener("abort", finish);
+		resolve();
+	};
+	const timer = setTimeout(finish, ms);
+	signal?.addEventListener("abort", finish, { once: true });
 	return promise;
 }
 
@@ -301,15 +313,15 @@ async function commandStatus(parsed: ParsedSteer, deps: SteerDeps, client: Steer
 	if (queued.length > 0) out.push("pending directives:");
 	for (const entry of queued) {
 		out.push(`  ${plain(entry.session_id, 64)}:`);
-		if (!entry.directives.ok) out.push(`    unavailable: ${entry.directives.message}`);
+		if (!entry.directives.ok) out.push(`    unavailable: ${plain(entry.directives.message, 300)}`);
 		else out.push(...renderDirectives(entry.directives.value, nowMs).map((line) => `    ${line.split("\n").join("\n    ")}`));
 	}
 	if (context.ok) {
 		const counts = DIGEST_LISTS.map((name) => `${name} ${context.value.lists[name].length}`).join(", ");
-		out.push(`context digest (generated ${plain(String(context.value.generated_at), 40)}): ${counts}${context.value.truncated.length > 0 ? `; cut: ${context.value.truncated.join(", ")}` : ""}`);
+		out.push(`context digest (generated ${plain(String(context.value.generated_at), 40)}): ${counts}${context.value.truncated.length > 0 ? `; cut: ${context.value.truncated.map((name) => plain(name, 24)).join(", ")}` : ""}`);
 		out.push("  `substrate steer context` prints it");
 	} else {
-		out.push(`context digest unavailable: ${context.message}`);
+		out.push(`context digest unavailable: ${plain(context.message, 300)}`);
 	}
 	deps.out(`${out.join("\n")}\n`);
 	return EXIT_DONE;
@@ -354,44 +366,70 @@ async function commandListen(parsed: ParsedSteer, deps: SteerDeps, client: Steer
 	const maxWait = flag(parsed, "max-wait-ms");
 	const startedAt = deps.now().getTime();
 	const deadline = maxWait === undefined ? undefined : startedAt + Number(maxWait);
-	const sleep = deps.sleep ?? defaultSleep;
+	const sleep = deps.sleep ?? abortableSleep;
+	// A function, not a property read: the loop reads it again after each await.
+	const interrupted = (): boolean => deps.interrupt?.aborted === true;
 	const once = parsed.flags.has("once");
 	const json = parsed.flags.has("json");
 	let after = flag(parsed, "after");
 	let attempt = 0;
 	let received = 0;
+	// The long poll the server says it applies (it clamps an oversized request); the next poll asks for no more than that.
+	let serverWaitMs: number | undefined;
+	// Insertion order is age: the oldest id goes first when the set is full.
+	const printed = new Set<string>();
+
+	// An answer that came back sooner than a long poll is paced, so a misbehaving server cannot spin the loop.
+	const pace = async (polledAt: number): Promise<void> => {
+		if (deps.now().getTime() - polledAt < LISTEN_MIN_POLL_GAP_MS) await sleep(LISTEN_MIN_POLL_GAP_MS * 5, deps.interrupt);
+	};
 
 	for (;;) {
-		if (deps.interrupt?.aborted) return EXIT_DONE;
+		if (interrupted()) return EXIT_DONE;
 		const remaining = deadline === undefined ? LISTEN_POLL_MS : deadline - deps.now().getTime();
 		if (remaining <= 0) break;
-		const pollMs = Math.min(LISTEN_POLL_MS, remaining);
+		const pollMs = Math.min(LISTEN_POLL_MS, serverWaitMs ?? LISTEN_POLL_MS, remaining);
 		const polledAt = deps.now().getTime();
 		const result = await client.wait({ sessionId, ...(after === undefined ? {} : { after }), timeoutMs: pollMs });
 		// Read again after the await: the signal can fire while the poll is in flight.
-		if (deps.interrupt?.aborted) return EXIT_DONE;
+		if (interrupted()) return EXIT_DONE;
 
 		if (!result.ok) {
+			// A refusal (a 400 with the server's words, a 403, a 429) is the server saying no: retrying would only repeat it.
 			if (!isTransient(result)) return failed(result);
 			const left = deadline === undefined ? Number.POSITIVE_INFINITY : deadline - deps.now().getTime();
 			if (left <= 0) break;
 			const delay = Math.min(LISTEN_BACKOFF_BASE_MS * 2 ** Math.min(attempt, 10), LISTEN_BACKOFF_MAX_MS, left);
 			attempt++;
-			deps.err(`substrate steer listen: ${result.message}; reconnecting in ${Math.ceil(delay / 1_000)}s\n`);
-			await sleep(delay);
+			deps.err(`substrate steer listen: ${plain(result.message, 300)}; reconnecting in ${Math.ceil(delay / 1_000)}s\n`);
+			await sleep(delay, deps.interrupt);
 			continue;
 		}
 		attempt = 0;
+		const { directive, waitMs } = result.value;
+		if (waitMs !== undefined) serverWaitMs = waitMs;
 
-		if (result.value === null) {
-			// A long poll that ended without a directive. One that came back at once is paced so a misbehaving server cannot spin the loop.
-			if (deps.now().getTime() - polledAt < LISTEN_MIN_POLL_GAP_MS) await sleep(LISTEN_MIN_POLL_GAP_MS * 5);
+		if (directive === null) {
+			await pace(polledAt);
 			continue;
 		}
 
-		after = result.value.id;
+		// A reconnect to a server that restarted can answer with a directive already printed (the one it was acknowledged
+		// after is gone from its queue, so `after` no longer places the poll): skip it, move the cursor on, and pace only
+		// when the cursor did not move, so a server that keeps repeating one answer cannot spin the loop.
+		const advanced = directive.id !== after;
+		after = directive.id;
+		if (printed.has(directive.id)) {
+			if (!advanced) await pace(polledAt);
+			continue;
+		}
+		if (printed.size >= LISTEN_PRINTED_MAX) {
+			const oldest = printed.values().next().value;
+			if (oldest !== undefined) printed.delete(oldest);
+		}
+		printed.add(directive.id);
 		received++;
-		deps.out(json ? `${JSON.stringify(result.value)}\n` : `${renderDirectiveLine(result.value, deps.now().getTime())}\n`);
+		deps.out(json ? `${JSON.stringify(directive)}\n` : `${renderDirectiveLine(directive, deps.now().getTime())}\n`);
 		if (once) return EXIT_DONE;
 	}
 	if (!json) deps.err(`substrate steer listen: stopped after ${maxWait} ms with ${received} directive${received === 1 ? "" : "s"}\n`);

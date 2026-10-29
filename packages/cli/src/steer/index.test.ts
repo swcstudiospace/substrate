@@ -10,9 +10,11 @@ import {
 	EXIT_REFUSED,
 	EXIT_USAGE,
 	LISTEN_BACKOFF_MAX_MS,
+	LISTEN_PRINTED_MAX,
 	LISTEN_POLL_MS,
 	STEER_USAGE,
 	type SteerDeps,
+	abortableSleep,
 	parseSteerArgs,
 	runSteer,
 } from "./index.ts";
@@ -163,7 +165,14 @@ describe("the grammar", () => {
 		["listen --max-wait-ms not a number", ["listen", "--session", "s", "--max-wait-ms", "soon"]],
 		["listen --max-wait-ms past a day", ["listen", "--session", "s", "--max-wait-ms", "86400001"]],
 		["a --limit of zero", ["sessions", "--limit", "0"]],
+		["a --limit over the server's 100", ["sessions", "--limit", "101"]],
 		["a --limit over 1000", ["sessions", "--limit", "1001"]],
+		["a context --limit over the server's 100", ["context", "--limit", "101"]],
+		["ack with a directive id the server's routes refuse", ["ack", "bad id", "--applied"]],
+		["ack with a directive id that starts with a dot", ["ack", ".d1", "--applied"]],
+		["ack with a directive id over 128 characters", ["ack", "d".repeat(129), "--applied"]],
+		["listen --after with characters the server refuses", ["listen", "--session", "s", "--after", "bad/id"]],
+		["listen --after over 128 characters", ["listen", "--session", "s", "--after", "d".repeat(129)]],
 		["a --format that is not text or json", ["context", "--format", "yaml"]],
 		["a --surface that is not a surface name", ["sessions", "--surface", "Not A Surface"]],
 	];
@@ -296,6 +305,14 @@ describe("failures are typed and mapped to exit codes", () => {
 		await steer(r, "sessions");
 		expect(text(r.err) + text(r.out)).not.toContain("token-for-default");
 	});
+
+	test("control characters in a server's error text never reach the terminal", async () => {
+		const r = rig();
+		r.reply = () => json({ error: "nope\u001b[2J\u001b[H gone" }, 400);
+		expect(await steer(r, "sessions")).toBe(EXIT_REFUSED);
+		expect(text(r.err)).toContain("nope [2J [H gone");
+		expect(text(r.err)).not.toContain("\u001b");
+	});
 });
 
 describe("status", () => {
@@ -363,6 +380,25 @@ describe("status", () => {
 		expect(printed.context.counts.events).toBe(1);
 		expect(printed.context.truncated).toEqual(["events"]);
 	});
+
+	test("server-supplied names and errors in the text status never carry control characters; --json keeps the raw values", async () => {
+		const answer = (call: Call): Response => {
+			if (call.path === "/steering/sessions") return json({ sessions: [sessionRow("sess-1", { pending_directives: 1 })], truncated: false });
+			if (call.path === "/steering/directives") return json({ error: "bad\u001b[2Jdirectives" }, 400);
+			return json({ ...digest(), truncated: { "ev\u001b[2Jents": true } });
+		};
+		const r = rig();
+		r.reply = answer;
+		expect(await steer(r, "status")).toBe(EXIT_DONE);
+		expect(text(r.out)).not.toContain("\u001b");
+		expect(text(r.out)).toContain("cut: ev [2Jents");
+		expect(text(r.out)).toContain("unavailable: HTTP 400: bad [2Jdirectives");
+		const raw = rig();
+		raw.reply = answer;
+		await steer(raw, "status", "--json");
+		const printed = JSON.parse(text(raw.out)) as { context: { truncated: string[] } };
+		expect(printed.context.truncated).toEqual(["ev\u001b[2Jents"]);
+	});
 });
 
 describe("queue", () => {
@@ -418,6 +454,21 @@ describe("queue", () => {
 		expect(await steer(r, "queue", "--session", "s", "--action", "pause", "--body", "x")).toBe(EXIT_FAILED);
 		expect(text(r.err)).toContain("predates Live Steering");
 	});
+
+	test("a reply that says queued without a directive id is a bad response, exit 1, never a success", async () => {
+		const r = rig();
+		r.reply = () => json({ status: "queued" });
+		expect(await steer(r, "queue", "--session", "s", "--action", "pause", "--body", "x")).toBe(EXIT_FAILED);
+		expect(text(r.err)).toContain("directive_id");
+		expect(r.out).toEqual([]);
+	});
+
+	test("a reply with a status the tools do not have is a bad response, exit 1", async () => {
+		const r = rig();
+		r.reply = () => json({ status: "done", directive_id: "d-1" });
+		expect(await steer(r, "queue", "--session", "s", "--action", "pause", "--body", "x")).toBe(EXIT_FAILED);
+		expect(r.out).toEqual([]);
+	});
 });
 
 describe("ack", () => {
@@ -428,7 +479,7 @@ describe("ack", () => {
 		expect(defined(r.calls[0]).body).toEqual({ directive_id: "d-1", outcome: "applied", confirm: true });
 		expect(text(r.out)).toBe("acknowledged directive d-1\n");
 		const d = rig();
-		d.reply = () => json({ status: "acknowledged", directive_id: "d-2" });
+		d.reply = () => json({ status: "acknowledged", directive_id: "d-2", outcome: "declined" });
 		await steer(d, "ack", "d-2", "--declined");
 		expect(defined(d.calls[0]).body).toEqual({ directive_id: "d-2", outcome: "declined" });
 	});
@@ -436,7 +487,7 @@ describe("ack", () => {
 	test("an applied pause reports the session state and the checkpoint hint", async () => {
 		const r = rig();
 		r.reply = () =>
-			json({ status: "acknowledged", directive_id: "d-1", session_state: { status: "applied", state: "PAUSED" }, checkpoint_hint: { trigger: "steering", directive_id: "d-1" } });
+			json({ status: "acknowledged", directive_id: "d-1", outcome: "applied", session_state: { status: "applied", state: "PAUSED" }, checkpoint_hint: { trigger: "steering", directive_id: "d-1" } });
 		expect(await steer(r, "ack", "d-1", "--applied")).toBe(EXIT_DONE);
 		const printed = text(r.out);
 		expect(printed).toContain("session state: applied -> PAUSED");
@@ -453,9 +504,33 @@ describe("ack", () => {
 
 	test("a checkpoint_hint of the wrong type is a bad response", async () => {
 		const r = rig();
-		r.reply = () => json({ status: "acknowledged", directive_id: "d-1", checkpoint_hint: { trigger: 7 } });
+		r.reply = () => json({ status: "acknowledged", directive_id: "d-1", outcome: "applied", checkpoint_hint: { trigger: 7 } });
 		expect(await steer(r, "ack", "d-1", "--applied")).toBe(EXIT_FAILED);
 		expect(text(r.err)).toContain("checkpoint_hint");
+	});
+
+	test("an acknowledgement without its outcome is a bad response, exit 1", async () => {
+		const r = rig();
+		r.reply = () => json({ status: "acknowledged", directive_id: "d-1" });
+		expect(await steer(r, "ack", "d-1", "--applied")).toBe(EXIT_FAILED);
+		expect(text(r.err)).toContain("outcome");
+		expect(r.out).toEqual([]);
+	});
+
+	test("an unknown directive is the server's typed refusal: exit 3, and not blamed on the server's version or flag", async () => {
+		const r = rig();
+		r.reply = () => json({ status: "refused", error: { code: "not-found" } }, 404);
+		expect(await steer(r, "ack", "d-404", "--applied")).toBe(EXIT_REFUSED);
+		expect(text(r.err)).toContain("refused (not-found)");
+		expect(text(r.err)).not.toContain("predates Live Steering");
+		expect(r.out).toEqual([]);
+	});
+
+	test("a 404 that is not that refusal is still the missing route, exit 1", async () => {
+		const r = rig();
+		r.reply = () => json({ error: "live steering is off (SUBSTRATE_PLANNING_STEERING)" }, 404);
+		expect(await steer(r, "ack", "d-1", "--applied")).toBe(EXIT_FAILED);
+		expect(text(r.err)).toContain("predates Live Steering");
 	});
 });
 
@@ -541,6 +616,13 @@ describe("context", () => {
 		expect(text(r.err)).toContain("predates Live Steering");
 	});
 });
+
+/** A pause that only an abort ends: what a real 30 s backoff is to a Ctrl-C. */
+function untilAbort(signal: AbortSignal | undefined): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	signal?.addEventListener("abort", () => resolve(), { once: true });
+	return promise;
+}
 
 describe("listen", () => {
 	/** A long poll: a 204 that, like the server, returns after the whole wait. */
@@ -688,6 +770,109 @@ describe("listen", () => {
 		expect(r.calls.length).toBeLessThanOrEqual(4);
 	});
 
+	test("a server that clamps the long poll: the next poll asks for what it applied, from the header of a 204", async () => {
+		const r = rig();
+		// A server whose ceiling is one second answers any longer request after one second, and says so.
+		r.reply = (call) => {
+			if (r.calls.length > 1) return delivered("d-1");
+			r.clock.ms += Math.min(Number(call.params.timeout_ms), 1_000);
+			return new Response(null, { status: 204, headers: { "x-steering-wait-ms": "1000" } });
+		};
+		expect(await steer(r, "listen", "--session", "sess-1", "--once")).toBe(EXIT_DONE);
+		expect(r.calls.map((call) => call.params.timeout_ms)).toEqual([String(LISTEN_POLL_MS), "1000"]);
+		expect(r.sleeps).toEqual([]);
+		expect(text(r.out)).toContain("d-1");
+	});
+
+	test("the wait_ms of a delivered directive paces the next poll too", async () => {
+		const r = rig();
+		r.reply = () => {
+			if (r.calls.length === 1) return json({ directive: directive("d-1"), wait_ms: 2_000 });
+			r.interrupt.abort();
+			return new Response(null, { status: 204 });
+		};
+		expect(await steer(r, "listen", "--session", "sess-1")).toBe(EXIT_DONE);
+		expect(r.calls.map((call) => call.params.timeout_ms)).toEqual([String(LISTEN_POLL_MS), "2000"]);
+	});
+
+	test("a 400 with the server's words is a refusal that ends the loop with exit 3, not a transient error to retry", async () => {
+		const r = rig();
+		r.reply = () => json({ error: "timeout_ms must be a whole number from 1 to 1000" }, 400);
+		expect(await steer(r, "listen", "--session", "sess-1")).toBe(EXIT_REFUSED);
+		expect(r.calls).toHaveLength(1);
+		expect(r.sleeps).toEqual([]);
+		expect(text(r.err)).toContain("timeout_ms must be");
+	});
+
+	test("a reconnect line carries no control characters from the server's error", async () => {
+		const r = rig();
+		const script: Reply[] = [json({ error: "busy\u001b[2K\u001b[1A" }, 503)];
+		r.reply = () => script.shift() ?? delivered("d-1");
+		expect(await steer(r, "listen", "--session", "sess-1", "--once")).toBe(EXIT_DONE);
+		expect(text(r.err)).toContain("reconnecting in 1s");
+		expect(text(r.err)).not.toContain("\u001b");
+	});
+
+	test("Ctrl-C during the longest backoff ends the loop at once: the pause gets the interrupt signal", async () => {
+		const requested: number[] = [];
+		const r: Rig = rig({
+			sleep: (ms, signal) => {
+				requested.push(ms);
+				if (requested.length < 6) return Promise.resolve();
+				// The operator presses Ctrl-C while the 30 s pause is running.
+				queueMicrotask(() => r.interrupt.abort());
+				return untilAbort(signal);
+			},
+		});
+		r.reply = () => new TypeError("down");
+		expect(await steer(r, "listen", "--session", "sess-1")).toBe(EXIT_DONE);
+		expect(requested).toEqual([1_000, 2_000, 4_000, 8_000, 16_000, LISTEN_BACKOFF_MAX_MS]);
+		expect(r.calls).toHaveLength(6);
+	});
+
+	test("Ctrl-C during the pause after an instant answer ends the loop at once", async () => {
+		const r: Rig = rig({
+			sleep: (_ms, signal) => {
+				queueMicrotask(() => r.interrupt.abort());
+				return untilAbort(signal);
+			},
+		});
+		r.reply = () => new Response(null, { status: 204 });
+		expect(await steer(r, "listen", "--session", "sess-1")).toBe(EXIT_DONE);
+		expect(r.calls).toHaveLength(1);
+	});
+
+	test("a server that restarted and replays directives already printed: each is printed once and the cursor moves on", async () => {
+		const r = rig();
+		// After the restart the queue still holds d-1 and d-2 (their acknowledgement was lost), so `after: d-2` starts at the first.
+		const script = [delivered("d-1"), delivered("d-2"), delivered("d-1"), delivered("d-2"), delivered("d-3")];
+		r.reply = (call) => script.shift() ?? timedOut(r, call);
+		expect(await steer(r, "listen", "--session", "sess-1", "--max-wait-ms", "30000")).toBe(EXIT_DONE);
+		expect(text(r.out).match(/ queued {2}redirect/g)).toHaveLength(3);
+		expect(r.calls.slice(0, 6).map((call) => call.params.after)).toEqual([undefined, "d-1", "d-2", "d-1", "d-2", "d-3"]);
+		expect(r.sleeps).toEqual([]);
+	});
+
+	test("a server that keeps repeating one printed directive is paced, and prints it once", async () => {
+		const r = rig();
+		r.reply = () => delivered("d-1");
+		expect(await steer(r, "listen", "--session", "sess-1", "--max-wait-ms", "3000")).toBe(EXIT_DONE);
+		expect(text(r.out).match(/ queued {2}redirect/g)).toHaveLength(1);
+		expect(r.sleeps.length).toBeGreaterThan(0);
+		expect(r.sleeps.every((ms) => ms >= 200)).toBe(true);
+		expect(r.calls.length).toBeLessThanOrEqual(5);
+	});
+
+	test("the memory of printed ids is bounded: the oldest is forgotten when it is full", async () => {
+		const r = rig();
+		const ids = Array.from({ length: LISTEN_PRINTED_MAX + 1 }, (_, index) => `d-${index}`);
+		// d-0 was printed first; once LISTEN_PRINTED_MAX newer ids went by it is no longer remembered, so it prints again.
+		const script = [...ids, "d-0"].map((id) => delivered(id));
+		r.reply = (call) => script.shift() ?? timedOut(r, call);
+		expect(await steer(r, "listen", "--session", "sess-1", "--max-wait-ms", "1000")).toBe(EXIT_DONE);
+		expect(text(r.out).match(/^d-0 {2}queued/gm)).toHaveLength(2);
+	});
+
 	test("--json prints one JSON object per directive and nothing else on stdout", async () => {
 		const r = rig();
 		r.reply = (call) => (r.calls.length === 1 ? delivered("d-1") : r.calls.length === 2 ? delivered("d-2") : timedOut(r, call));
@@ -695,5 +880,18 @@ describe("listen", () => {
 		const lines = text(r.out).trimEnd().split("\n");
 		expect(lines.map((line) => (JSON.parse(line) as { id: string }).id)).toEqual(["d-1", "d-2"]);
 		expect(text(r.err)).not.toContain("stopped after");
+	});
+});
+
+describe("abortableSleep", () => {
+	test("an already aborted signal resolves at once, and an abort during the pause ends it; no timer is left to hold the process", async () => {
+		const done = new AbortController();
+		done.abort();
+		await abortableSleep(60_000, done.signal);
+		const live = new AbortController();
+		const pending = abortableSleep(60_000, live.signal);
+		live.abort();
+		await pending;
+		await abortableSleep(0);
 	});
 });
