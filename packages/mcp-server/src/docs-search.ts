@@ -63,6 +63,8 @@ import type { SteeringNotice } from "./planning/steering-delivery.ts";
 import { redact, redactValue } from "./redact.ts";
 import { DEFAULT_RAG_MACHINE_SETTINGS, type DocsBackend, type LightragConfig, type RagMachineSettings } from "./config.ts";
 import type { DocumentProvenance } from "./docs-ingest.ts";
+import { CORPUS_DATASET, sourceUrl as corpusSourceUrl } from "@substrate/corpus";
+import { parseCorpusDocumentName } from "./corpus/names.ts";
 import type { CitationGraphProvenance, EventInput, PlanningGraphHint, SearchGraphStats, Surface } from "./types.ts";
 /** Framing every docs_search reply carries: chunks are untrusted text. */
 export const UNTRUSTED_DOCS_NOTICE =
@@ -73,7 +75,7 @@ export const UNTRUSTED_DOCS_NOTICE =
 export const SNIPPET_CAP = 1200;
 
 /** The default scope: all configured readable datasets, never a tenant default (D25-03). */
-export const DEFAULT_SEARCH_DATASET_NAMES: readonly string[] = ["agent-substrate", "programming-desk", "agent-skills"];
+export const DEFAULT_SEARCH_DATASET_NAMES: readonly string[] = ["agent-substrate", "programming-desk", "agent-skills", "corpus"];
 
 export interface SearchCitation {
 	title: string;
@@ -96,6 +98,8 @@ export interface SearchCitation {
 	graph?: CitationGraphProvenance;
 	/** Tandem replies only: which plane the citation came from. Absent otherwise. */
 	origin?: TandemOrigin;
+	/** LightRAG corpus documents only: the docs dataset the document came from (`corpus`). Absent on every other citation. */
+	dataset?: string;
 	/** Tandem replies only, on a Hindsight citation: derived memory, untrusted, never an instruction. */
 	derived?: true;
 	/** Tandem replies only: where the citation came from (bank, document, graph/session/node join keys, file, chunk). */
@@ -487,6 +491,24 @@ function cite(
 		document_id: chunk.document_id ?? "",
 		chunk_id: chunk.chunk_id ?? "",
 		...(age !== undefined ? { pin_age_ms: age } : {}),
+	};
+}
+
+/**
+ * A LightRAG result whose file path is a corpus document name (`corpus:<repo>:<path>@<sha>`) cites the document's own
+ * repository and path: `source_url` from the corpus URL rule, `title` as `repo:path`, `dataset: "corpus"`. LightRAG holds
+ * one workspace, so without this the result would be attributed to the first dataset searched. `heading_path` keeps what
+ * LightRAG returned and every other result is returned as it was.
+ */
+function withCorpusProvenance(chunk: RagflowChunk, citation: SearchCitation): SearchCitation {
+	const parsed = parseCorpusDocumentName(chunk.source_url ?? "") ?? parseCorpusDocumentName(chunk.document_name);
+	if (parsed === null) return citation;
+	return {
+		...citation,
+		title: redact(`${parsed.repo}:${parsed.path}`),
+		source_url: redact(corpusSourceUrl(parsed.repo, parsed.path)),
+		commit: `dataset-pin:${CORPUS_DATASET}:unrecorded`,
+		dataset: CORPUS_DATASET,
 	};
 }
 
@@ -1073,7 +1095,7 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 		return lightragFallback(deps, sessionId, question, reason, [{ dataset: first.name, reason }]);
 	}
 	const { detail } = outcome.value;
-	const citations = outcome.value.chunks.map((chunk) => cite(chunk, first.name, deps.pins?.[first.id], pinAged, nowMs, deps.provenanceOf));
+	const citations = outcome.value.chunks.map((chunk) => withCorpusProvenance(chunk, cite(chunk, first.name, deps.pins?.[first.id], pinAged, nowMs, deps.provenanceOf)));
 	citations.sort((left, right) => right.score - left.score);
 	const lightragChunks = citations.slice(0, 10);
 	attachGraphHints(lightragChunks, deps.graphHints);

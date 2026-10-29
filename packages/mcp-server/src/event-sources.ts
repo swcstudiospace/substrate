@@ -1383,6 +1383,38 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 			payload: { action: "steering.queued", directive_id: "steer-sample", target_session_id: "wt-sample", steering_action: "pause", priority: "normal" },
 		}),
 	},
+	{
+		id: "docs.corpus.ingest",
+		phase: 63,
+		kind: "note",
+		surface: "caller",
+		actions: ["docs.corpus.ingest"],
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "note",
+			summary: "corpus ingest: 2 ingested, 1 unchanged, 0 tombstoned, 0 refused, 0 failed",
+			session_id: "sess-p63-corpus-ingest",
+			payload: { action: "docs.corpus.ingest", ingested: 2, unchanged: 1, tombstoned: 0, refused: 0, failed: 0, manifest_version: 7 },
+		}),
+	},
+	{
+		id: "docs.corpus.refused",
+		phase: 63,
+		kind: "warning",
+		surface: "caller",
+		actions: ["docs.corpus.refused"],
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "warning",
+			summary: "corpus ingest refused: secret-findings",
+			session_id: "sess-p63-corpus-ingest",
+			payload: { action: "docs.corpus.refused", status: "refused", reason: "secret-findings", count: 1, rules: ["generic-secret"] },
+		}),
+	},
 ];
 
 export const SILENT_SOURCES: readonly SilentSource[] = [
