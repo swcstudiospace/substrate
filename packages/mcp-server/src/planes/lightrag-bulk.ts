@@ -17,6 +17,10 @@
  * - delete: `DELETE /documents/delete_document` (`deleteDocuments` of
  *   `lightrag.ts`), 50 ids per request. The clear-all route is refused by the
  *   one choke point in `lightrag.ts` and is never built here.
+ * - list: `POST /documents/paginated` (`listDocuments`), read-only, 200 per page
+ *   sorted by id, bounded in pages and time; only `corpus:`-named documents are
+ *   returned. A listing the bounds cut short, or with an unreadable entry, is
+ *   `truncated`: what it does not show is unknown, not absent.
  *
  * Document identity (upstream source, not guessed). For a known `file_source`
  * `apipeline_enqueue_documents` derives the document id from the NAME, not the
@@ -35,7 +39,7 @@
  * Every function returns result values and never throws: a transport failure,
  * an open breaker or a timeout is a closed reason on the affected documents.
  */
-import { isAcceptableFileSource } from "@substrate/corpus";
+import { CORPUS_NAME_PREFIX, isAcceptableFileSource } from "@substrate/corpus";
 import type { LightragConfig } from "../config.ts";
 import { deleteDocuments as deleteLightragDocuments, lightragCall, pollParseStatus, type FetchLike } from "./lightrag.ts";
 
@@ -51,9 +55,29 @@ export interface BulkDocumentOutcome {
 	reason?: string | undefined;
 }
 
+/** A plane document as the listing names it: its id and the `file_source` it was stored under. */
+export interface PlaneListedDocument {
+	id: string;
+	name: string;
+}
+
+/** What `listDocuments` answers: the `corpus:` documents it read, and whether the read is incomplete. */
+export type PlaneListing =
+	| {
+			ok: true;
+			/** The `corpus:`-named documents, by id and name. */
+			documents: PlaneListedDocument[];
+			/** The ids (never the names) of every other document: a corpus row may share one with identical text stored by another door. */
+			otherDocumentIds: string[];
+			truncated: boolean;
+	  }
+	| { ok: false; reason: string };
+
 export interface LightragBulkPlane {
 	insertBatch(docs: readonly BulkTextDocument[], options?: { signal?: AbortSignal | undefined }): Promise<BulkDocumentOutcome[]>;
 	deleteDocuments(ids: readonly string[]): Promise<{ deleted: string[]; failed: Array<{ id: string; reason: string }> }>;
+	/** Read-only: the plane's `corpus:`-named documents. `truncated` means a missing document proves nothing. */
+	listDocuments(options?: { signal?: AbortSignal | undefined }): Promise<PlaneListing>;
 }
 
 // The reasons a failed outcome carries: `plane-unavailable`, `timeout`, `rejected`, `conflict`, `pipeline-failed`
@@ -66,6 +90,13 @@ export const BULK_MAX_DOCUMENTS_PER_REQUEST = 100;
 export const BULK_MAX_BYTES_PER_REQUEST = 4_000_000;
 /** Most ids one delete request carries. */
 export const BULK_MAX_DELETE_IDS = 50;
+/** Documents per page the listing asks for: the upstream maximum, so a listing costs the fewest requests. */
+export const BULK_LIST_PAGE_SIZE = 200;
+/** Most pages one listing reads; a plane holding more `corpus:` documents than this many pages is listed as `truncated`. */
+export const BULK_LIST_MAX_PAGES = 250;
+/** Longest one listing may take before it stops and reports `truncated`. */
+export const BULK_LIST_MAX_ELAPSED_MS = 120_000;
+const LIST_REQUEST_TIMEOUT_MS = 15_000;
 
 const BATCH_BASE_TIMEOUT_MS = 30_000;
 const BATCH_PER_DOCUMENT_TIMEOUT_MS = 2_000;
@@ -427,6 +458,44 @@ async function deleteRequest(context: Context, ids: string[]): Promise<{ deleted
 	return { deleted: false, reason: "plane-unavailable" };
 }
 
+/**
+ * Lists the `corpus:`-named documents the plane holds, read-only: `POST /documents/paginated`, pages of
+ * {@link BULK_LIST_PAGE_SIZE} sorted by id, until `pagination.has_next` is false. A page that fails fails the whole listing
+ * (a partial read says nothing about what is absent). The read is bounded by page count and by elapsed time; when either
+ * bound ends it, or an entry on a page could not be read, the listing is `truncated` and a caller must not conclude that a
+ * document is missing from it. A document whose name does not start with `corpus:` is dropped here, so no caller sees it.
+ */
+async function listCorpusDocuments(context: Context): Promise<PlaneListing> {
+	const documents: PlaneListedDocument[] = [];
+	const otherDocumentIds: string[] = [];
+	const started = context.now();
+	let unreadable = false;
+	for (let page = 1; page <= BULK_LIST_MAX_PAGES; page += 1) {
+		if (aborted(context)) return { ok: false, reason: "timeout" };
+		const answered = await lightragCall(context.config, context.fetchImpl, "/documents/paginated", {
+			method: "POST",
+			json: true,
+			body: JSON.stringify({ page, page_size: BULK_LIST_PAGE_SIZE, sort_field: "id", sort_direction: "asc" }),
+			timeoutMs: LIST_REQUEST_TIMEOUT_MS,
+		});
+		if (!answered.ok) return { ok: false, reason: closedReason(answered.reason, context) };
+		const body = answered.body;
+		if (!isRecord(body) || !Array.isArray(body.documents) || !isRecord(body.pagination)) return { ok: false, reason: "plane-unavailable" };
+		for (const entry of body.documents as unknown[]) {
+			if (!isRecord(entry) || typeof entry.id !== "string" || typeof entry.file_path !== "string" || entry.id.length === 0) {
+				unreadable = true;
+			} else if (entry.file_path.startsWith(CORPUS_NAME_PREFIX)) {
+				documents.push({ id: entry.id, name: entry.file_path });
+			} else {
+				otherDocumentIds.push(entry.id);
+			}
+		}
+		if (body.pagination.has_next !== true) return { ok: true, documents, otherDocumentIds, truncated: unreadable };
+		if (context.now() - started >= BULK_LIST_MAX_ELAPSED_MS) return { ok: true, documents, otherDocumentIds, truncated: true };
+	}
+	return { ok: true, documents, otherDocumentIds, truncated: true };
+}
+
 export function createLightragBulkPlane(
 	config: LightragConfig,
 	deps: { fetch?: FetchLike; sleep?: (ms: number) => Promise<void>; now?: () => number } = {},
@@ -470,6 +539,10 @@ export function createLightragBulkPlane(
 				}
 				return outcome;
 			});
+		},
+
+		async listDocuments(options = {}) {
+			return listCorpusDocuments({ config, fetchImpl: withSignal(baseFetch, options.signal), sleep, now, signal: options.signal });
 		},
 
 		async deleteDocuments(ids) {

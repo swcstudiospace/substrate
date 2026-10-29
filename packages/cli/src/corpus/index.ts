@@ -1,17 +1,23 @@
 /**
- * `substrate corpus scan|plan|ingest|status` (v1.7 phase 63).
+ * `substrate corpus scan|plan|ingest|status` (v1.7 phase 63) and `sync|watch|reconcile|hint|hook` (phase 65).
  *
  *   substrate corpus scan   [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--source fs|github|greptile]...
  *                           [--greptile-dir DIR] [--github-owner OWNER] [--max-repos N] [--json] [--entries]
  *   substrate corpus plan   (scan options) [--server URL]
  *   substrate corpus ingest (plan options) [--execute] [--batch-docs N] [--batch-bytes N]
  *   substrate corpus status [--server URL] [--json]
+ *   substrate corpus sync   [--repo R]... [--root DIR]... [--execute] [--fetch] [--json]
+ *   substrate corpus watch  [--root DIR]... [--sweep-s N] [--once]
+ *   substrate corpus reconcile [--execute] [--json]
+ *   substrate corpus hook install|uninstall|status --repo DIR
+ *   substrate corpus hint   --repo DIR
  *
  * Discovery runs here, where the files are; the server never reads a path. `scan` needs no server. `plan` sends entries
  * without bodies. `ingest` is a dry run until `--execute`, then sends the tombstones first, as requests of their own, and
  * then the bodies of the documents the plan says must change in bounded batches. Exit codes: 0 done (every document ingested, updated, unchanged or tombstoned), 1 a request failed or any document ended refused or failed, 2 usage.
  */
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
 	CORPUS_PROTOCOL,
 	CORPUS_SOURCES,
@@ -25,20 +31,42 @@ import {
 	type CorpusSource,
 	type DocTier,
 	type GhRunner,
+	type GitBytesRunner,
 	type GitRunner,
+	defaultGitBytesRunner,
 } from "@substrate/corpus";
 import { createBodyStore, type BodyStore } from "./bodies.ts";
 import { createCorpusClient, type ClientError, type CorpusClient } from "./client.ts";
+import { createHttpEmitter, type EmitDocsSync } from "./events.ts";
+import { type FlagSpec, last, type Parsed, parseFlags, positiveInt } from "./flags.ts";
 import { executeIngest } from "./ingest.ts";
 import { collectInventory, type Inventory, type InventoryOptions } from "./inventory.ts";
 import { printable, renderIngest, renderInventory, renderPlan, renderStatus } from "./render.ts";
+import {
+	HOOK_ACTIONS,
+	type HookAction,
+	type LoopSeams,
+	runHintCommand,
+	runHookCommand,
+	runReconcileCommand,
+	runSyncCommand,
+	runWatchCommand,
+	type WatchContext,
+} from "./watch-commands.ts";
+import { MAX_SWEEP_S, MIN_SWEEP_S, readWatchSettings } from "./watch-settings.ts";
 
 export const USAGE =
 	"substrate corpus scan [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--source fs|github|greptile]... [--greptile-dir DIR]\n" +
 	"                      [--github-owner OWNER] [--max-repos N] [--json] [--entries]\n" +
 	"substrate corpus plan [scan options] [--server URL] [--json]\n" +
 	"substrate corpus ingest [plan options] [--execute] [--batch-docs N] [--batch-bytes N]   (a dry run without --execute; --batch-docs is capped at the server limit of 200)\n" +
-	"substrate corpus status [--server URL] [--json]\n";
+	"substrate corpus status [--server URL] [--json]\n" +
+	"substrate corpus sync [--repo R]... [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--server URL] [--execute] [--fetch] [--json]\n" +
+	"                      (reads only the named repositories through the mirror view; a dry run without --execute; --fetch updates the mirrors first)\n" +
+	"substrate corpus watch [--root DIR]... [--sweep-s N] [--server URL] [--once]   (a long-running loop; --once runs one sweep and exits)\n" +
+	"substrate corpus reconcile [--root DIR]... [--server URL] [--execute] [--json]   (compares the manifest with the docs plane; a dry run without --execute)\n" +
+	"substrate corpus hook install|uninstall|status --repo DIR   (opt-in git hooks for post-merge, post-checkout and post-rewrite hints)\n" +
+	"substrate corpus hint --repo DIR   (writes one hint to the spool; what the hooks run; exits 0)\n";
 
 export const DEFAULT_ROOT = "/root/src/repos";
 export const DEFAULT_BATCH_DOCS = 20;
@@ -59,55 +87,26 @@ export interface CorpusDeps {
 	runner?: GitRunner | undefined;
 	gh?: GhRunner | undefined;
 	readFile?: ((path: string) => Uint8Array) | undefined;
+	/** Test seams of `sync`, `reconcile` and `watch`. */
+	git?: GitBytesRunner | undefined;
+	emit?: EmitDocsSync | undefined;
+	now?: (() => number) | undefined;
+	watch?: Partial<LoopSeams> | undefined;
 }
 
 const SCAN_VALUES = ["root", "tier", "max-bytes", "source", "greptile-dir", "github-owner", "max-repos"] as const;
-
-interface FlagSpec {
-	values: readonly string[];
-	bools: readonly string[];
-}
 
 const SPECS: Record<string, FlagSpec> = {
 	scan: { values: SCAN_VALUES, bools: ["json", "entries", "help"] },
 	plan: { values: [...SCAN_VALUES, "server"], bools: ["json", "help"] },
 	ingest: { values: [...SCAN_VALUES, "server", "batch-docs", "batch-bytes"], bools: ["json", "execute", "help"] },
 	status: { values: ["server"], bools: ["json", "help"] },
+	sync: { values: ["repo", "root", "tier", "max-bytes", "server", "batch-docs", "batch-bytes"], bools: ["execute", "fetch", "json", "help"] },
+	watch: { values: ["root", "tier", "max-bytes", "server", "sweep-s", "batch-docs", "batch-bytes"], bools: ["once", "help"] },
+	reconcile: { values: ["root", "tier", "max-bytes", "server", "batch-docs", "batch-bytes"], bools: ["execute", "json", "help"] },
+	hint: { values: ["repo"], bools: ["help"] },
+	hook: { values: ["repo"], bools: ["help"] },
 };
-
-interface Parsed {
-	values: Map<string, string[]>;
-	bools: Set<string>;
-}
-
-function parseFlags(argv: readonly string[], spec: FlagSpec): Parsed | string {
-	const values = new Map<string, string[]>();
-	const bools = new Set<string>();
-	for (let i = 0; i < argv.length; i++) {
-		const arg = argv[i] ?? "";
-		if (!arg.startsWith("--")) return `unexpected argument ${JSON.stringify(arg)}`;
-		const eq = arg.indexOf("=");
-		const name = arg.slice(2, eq === -1 ? undefined : eq);
-		if (spec.bools.includes(name)) {
-			if (eq !== -1) return `--${name} takes no value`;
-			bools.add(name);
-		} else if (spec.values.includes(name)) {
-			const value = eq === -1 ? argv[i + 1] : arg.slice(eq + 1);
-			if (value === undefined || (eq === -1 && value.startsWith("--")) || value === "") return `--${name} takes a value`;
-			if (eq === -1) i += 1;
-			values.set(name, [...(values.get(name) ?? []), value]);
-		} else {
-			return `unknown flag --${name}`;
-		}
-	}
-	return { values, bools };
-}
-
-function positiveInt(text: string | undefined): number | null {
-	if (text === undefined || !/^[0-9]+$/.test(text)) return null;
-	const value = Number(text);
-	return Number.isSafeInteger(value) && value > 0 ? value : null;
-}
 
 interface ScanArgs {
 	roots: string[];
@@ -117,10 +116,6 @@ interface ScanArgs {
 	greptileDir: string | undefined;
 	githubOwner: string | undefined;
 	maxRepos: number;
-}
-
-function last(parsed: Parsed, name: string): string | undefined {
-	return parsed.values.get(name)?.at(-1);
 }
 
 function resolveScanArgs(parsed: Parsed, env: Record<string, string | undefined>): ScanArgs | string {
@@ -218,7 +213,8 @@ export async function runCorpus(argv: string[], deps: CorpusDeps): Promise<numbe
 		deps.out(USAGE);
 		return 0;
 	}
-	const parsed = parseFlags(argv.slice(1), spec);
+	// `hook` takes its action as the word after the subcommand.
+	const parsed = parseFlags(argv.slice(sub === "hook" ? 2 : 1), spec);
 	if (typeof parsed === "string") {
 		deps.err(`[substrate] corpus ${sub}: ${parsed}\n${USAGE}`);
 		return 2;
@@ -229,6 +225,7 @@ export async function runCorpus(argv: string[], deps: CorpusDeps): Promise<numbe
 	};
 	try {
 		if (sub === "status") return await status(parsed, deps);
+		if (sub === "hint" || sub === "hook") return hintOrHook(sub, argv[1], parsed, deps, usage);
 		const args = resolveScanArgs(parsed, deps.env);
 		if (typeof args === "string") return usage(args);
 		if (sub === "scan") {
@@ -243,6 +240,9 @@ export async function runCorpus(argv: string[], deps: CorpusDeps): Promise<numbe
 		const batchBytes = bytesFlag === undefined ? positiveInt(deps.env.SUBSTRATE_CORPUS_BATCH_BYTES) ?? DEFAULT_BATCH_BYTES : positiveInt(bytesFlag);
 		if (batchDocs === null) return usage("--batch-docs must be a positive integer");
 		if (batchBytes === null) return usage("--batch-bytes must be a positive integer");
+		if (sub === "sync" || sub === "watch" || sub === "reconcile") {
+			return await watchFamily(sub, args, parsed, deps, Math.min(batchDocs, MAX_INGEST_DOCUMENTS), batchBytes, usage);
+		}
 		// The server refuses a request of more documents than its limit, which would stop the whole ingest, so a larger value is lowered.
 		const docsPerRequest = Math.min(batchDocs, MAX_INGEST_DOCUMENTS);
 		if (docsPerRequest < batchDocs) deps.err(`[substrate] corpus ingest: batch of ${batchDocs} documents is above the server limit; using ${docsPerRequest}\n`);
@@ -253,9 +253,66 @@ export async function runCorpus(argv: string[], deps: CorpusDeps): Promise<numbe
 	}
 }
 
+function serverUrl(parsed: Parsed, deps: CorpusDeps): string {
+	return (last(parsed, "server") ?? deps.url).replace(/\/+$/, "");
+}
+
+function hintOrHook(sub: "hint" | "hook", action: string | undefined, parsed: Parsed, deps: CorpusDeps, usage: (message: string) => number): number {
+	const repo = last(parsed, "repo");
+	if (repo === undefined) return usage("--repo DIR is required");
+	if (sub === "hint") return runHintCommand({ settings: readWatchSettings(deps.env), now: deps.now ?? Date.now, err: deps.err }, repo);
+	const known = HOOK_ACTIONS.find((candidate): candidate is HookAction => candidate === action);
+	if (known === undefined) return usage("hook needs one of install, uninstall, status");
+	return runHookCommand({ out: deps.out }, known, resolve(repo));
+}
+
+async function watchFamily(
+	sub: "sync" | "watch" | "reconcile",
+	args: ScanArgs,
+	parsed: Parsed,
+	deps: CorpusDeps,
+	batchDocs: number,
+	batchBytes: number,
+	usage: (message: string) => number,
+): Promise<number> {
+	const url = serverUrl(parsed, deps);
+	const context: WatchContext = {
+		client: clientFor(parsed, deps),
+		roots: args.roots,
+		maxTier: args.maxTier,
+		maxBytes: args.maxBytes,
+		batchDocs,
+		batchBytes,
+		settings: readWatchSettings(deps.env),
+		runner: deps.runner,
+		git: deps.git ?? defaultGitBytesRunner,
+		readFile: deps.readFile ?? ((path) => readFileSync(path)),
+		emit: deps.emit ?? createHttpEmitter({ url, token: deps.token, fetchImpl: deps.fetchImpl }),
+		now: deps.now ?? Date.now,
+		out: deps.out,
+		err: deps.err,
+		loop: deps.watch,
+	};
+	if (sub === "sync") {
+		return await runSyncCommand(context, {
+			repos: parsed.values.get("repo") ?? [],
+			execute: parsed.bools.has("execute"),
+			fetch: parsed.bools.has("fetch"),
+			json: parsed.bools.has("json"),
+		});
+	}
+	if (sub === "reconcile") return await runReconcileCommand(context, { execute: parsed.bools.has("execute"), json: parsed.bools.has("json") });
+	const sweepText = last(parsed, "sweep-s");
+	const sweepS = positiveInt(sweepText);
+	if (sweepText !== undefined && (sweepS === null || sweepS < MIN_SWEEP_S || sweepS > MAX_SWEEP_S)) {
+		return usage(`--sweep-s must be a whole number of seconds from ${MIN_SWEEP_S} to ${MAX_SWEEP_S}`);
+	}
+	return await runWatchCommand(context, { once: parsed.bools.has("once"), sweepS: sweepS ?? undefined });
+}
+
 function clientFor(parsed: Parsed, deps: CorpusDeps): CorpusClient {
 	return createCorpusClient({
-		url: (last(parsed, "server") ?? deps.url).replace(/\/+$/, ""),
+		url: serverUrl(parsed, deps),
 		token: deps.token,
 		timeoutMs: deps.timeoutMs,
 		fetchImpl: deps.fetchImpl,

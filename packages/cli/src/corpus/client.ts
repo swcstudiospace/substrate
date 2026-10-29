@@ -15,6 +15,8 @@ import {
 	type CorpusIngestResponse,
 	type CorpusPlanRequest,
 	type CorpusPlanResponse,
+	type CorpusReconcileRequest,
+	type CorpusReconcileResponse,
 	type CorpusStatusResponse,
 } from "@substrate/corpus";
 
@@ -42,6 +44,7 @@ export interface CorpusClient {
 	plan(request: CorpusPlanRequest): Promise<ClientResult<CorpusPlanResponse>>;
 	ingest(request: CorpusIngestRequest): Promise<ClientResult<CorpusIngestResponse>>;
 	status(): Promise<ClientResult<CorpusStatusResponse>>;
+	reconcile(request: CorpusReconcileRequest): Promise<ClientResult<CorpusReconcileResponse>>;
 }
 
 /** The marker the server puts in a 503 when the corpus feature flag is off. */
@@ -121,7 +124,27 @@ export function isStatusResponse(value: unknown): value is CorpusStatusResponse 
 		Array.isArray(value.byTier) &&
 		value.byTier.every((row) => isRecord(row) && isDocTier(row.tier) && isCount(row.count)) &&
 		(value.lastIngestAt === null || typeof value.lastIngestAt === "string") &&
+		(value.lagSeconds === null || (typeof value.lagSeconds === "number" && Number.isFinite(value.lagSeconds) && value.lagSeconds >= 0)) &&
 		isCount(value.manifestVersion)
+	);
+}
+
+function isRowRef(value: unknown): boolean {
+	return isRecord(value) && typeof value.repo === "string" && typeof value.path === "string";
+}
+
+export function isReconcileResponse(value: unknown): value is CorpusReconcileResponse {
+	if (!isRecord(value) || value.protocol !== CORPUS_PROTOCOL || !isCount(value.manifestVersion)) return false;
+	const { drift, repaired } = value;
+	return (
+		isRecord(drift) &&
+		Array.isArray(drift.missingInPlane) &&
+		drift.missingInPlane.every(isRowRef) &&
+		Array.isArray(drift.orphansInPlane) &&
+		drift.orphansInPlane.every((name) => typeof name === "string") &&
+		isCount(drift.checked) &&
+		typeof drift.truncated === "boolean" &&
+		hasCounts(repaired, ["requeued", "deleted"])
 	);
 }
 
@@ -192,5 +215,6 @@ export function createCorpusClient(config: ClientConfig): CorpusClient {
 		plan: (request) => call("POST", CORPUS_ROUTES.plan, request, isPlanResponse),
 		ingest: (request) => call("POST", CORPUS_ROUTES.ingest, request, isIngestResponse),
 		status: () => call("GET", CORPUS_ROUTES.status, undefined, isStatusResponse),
+		reconcile: (request) => call("POST", CORPUS_ROUTES.reconcile, request, isReconcileResponse),
 	};
 }

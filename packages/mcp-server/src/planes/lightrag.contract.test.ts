@@ -182,9 +182,10 @@ async function driveClient(fixture: Fixture): Promise<Emitted[]> {
 	await pollParseStatus(CONFIG, { dataset_id: "ds", document_id: "unused" }, fetchImpl, { maxPolls: 1, intervalMs: 0 });
 	await resolveDocumentIds(CONFIG, "upload_20260902_170612_abc123", fetchImpl, { maxPolls: 1 });
 	await deleteDocuments(CONFIG, "ds", ["doc-3f2a9c"], fetchImpl);
-	// The bulk plane reaches texts, pipeline_status and track_status; its delete reaches delete_document again.
+	// The bulk plane reaches texts, pipeline_status and track_status; its listing reaches paginated; its delete reaches delete_document again.
 	const bulk = createLightragBulkPlane(CONFIG, { fetch: fetchImpl, sleep: async () => {} });
 	await bulk.insertBatch([{ name: "docs__a__README.md", text: "# Setup\nInstall it." }]);
+	await bulk.listDocuments();
 	await bulk.deleteDocuments(["doc-3f2a9c"]);
 	await probeLightrag(CONFIG, fetchImpl);
 	return emitted;
@@ -270,6 +271,7 @@ const SCENARIOS: Record<string, (sample: unknown) => Promise<unknown>> = {
 		}).insertBatch([{ name: "docs__a__README.md", text: "# Setup" }]);
 	},
 	health: (sample) => probeLightrag(CONFIG, async () => Response.json(sample)),
+	paginated: (sample) => createLightragBulkPlane(CONFIG, { fetch: async () => Response.json(sample), sleep: async () => {} }).listDocuments(),
 };
 
 /** The violations in how the client parses the fixture's sample responses. */
@@ -464,6 +466,11 @@ describe("fail-before: the checker rejects a mutated fixture or a non-conforming
 		const texts = noTexts.routes.find((entry) => entry.id === "texts");
 		if (texts !== undefined) texts.sampleResponse = { status: "success", message: "m" };
 		expect((await checkSamples(noTexts)).some((line) => line.startsWith("texts: "))).toBe(true);
+
+		const noPagination = cloneFixture();
+		const paginated = noPagination.routes.find((entry) => entry.id === "paginated");
+		if (paginated !== undefined) paginated.sampleResponse = { documents: [] };
+		expect((await checkSamples(noPagination)).some((line) => line.startsWith("paginated: "))).toBe(true);
 	});
 
 	test("a route with no parsing scenario, or a read field missing from the sample, is a violation", async () => {

@@ -669,6 +669,16 @@ export class SubstrateInstruments {
 		this.registry.gauge(ENDPOINT_PROXY_PLANES_METRIC, { description: "Data planes whose endpoint is a configured proxy", unit: "{plane}" }).set(count);
 	}
 
+	/**
+	 * The lag the newest corpus sync reported (v1.7 phase 65), in seconds: from the change it saw to the moment its ingest
+	 * finished. One unlabelled gauge, so a repository name never becomes a label. The caller bounds and sanitises the number;
+	 * a value that is not finite or is negative is dropped here as well, so the gauge only ever holds a real lag.
+	 */
+	setCorpusSyncLag(seconds: number): void {
+		if (!Number.isFinite(seconds) || seconds < 0) return;
+		this.registry.gauge(CORPUS_SYNC_LAG_METRIC, { description: "Lag the newest reported corpus sync had behind its source change", unit: "s" }).set(seconds);
+	}
+
 	/** One brief's use of the recall snapshot (uplift-4 S5). `surface` is bounded by the caller; a result outside the closed set is dropped. */
 	recordBriefRecall(sample: { surface: string; result: BriefRecallResult }): void {
 		if (!(BRIEF_RECALL_RESULTS as readonly string[]).includes(sample.result)) return;
@@ -692,3 +702,6 @@ export const OUTBOX_DURABLE_METRIC = "substrate.hindsight.retain_outbox.durable"
 
 /** The gauge `setEndpointProxyPlanes` sets (phase 51, SOTA-07). */
 export const ENDPOINT_PROXY_PLANES_METRIC = "substrate.endpoint.proxy_planes";
+
+/** The gauge `setCorpusSyncLag` sets (v1.7 phase 65): how far behind its source the newest reported corpus sync was, seconds. No repository label. */
+export const CORPUS_SYNC_LAG_METRIC = "substrate.corpus.sync_lag_seconds";

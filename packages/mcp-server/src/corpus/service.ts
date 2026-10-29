@@ -1,5 +1,5 @@
 /**
- * What `POST /corpus/plan`, `POST /corpus/ingest`, `GET /corpus/status` and the `corpus_status` and `corpus_ingest` tools
+ * What `POST /corpus/plan`, `POST /corpus/ingest`, `POST /corpus/reconcile`, `GET /corpus/status` and the `corpus_status` and `corpus_ingest` tools
  * answer: the gates, the request parse, the planner or the ingest, and a status code with a closed reason. The HTTP server and
  * the MCP tools only carry the body in and the answer out, so both doors decide the same way.
  *
@@ -7,17 +7,18 @@
  * off, no index, or no LightRAG backend does nothing.
  */
 import { randomUUID } from "node:crypto";
-import { CORPUS_PROTOCOL, type CorpusIngestResponse, type CorpusPlanResponse, type CorpusStatusResponse } from "@substrate/corpus";
+import { CORPUS_PROTOCOL, type CorpusIngestResponse, type CorpusPlanResponse, type CorpusReconcileResponse, type CorpusStatusResponse } from "@substrate/corpus";
 import type { CorpusSettings } from "../config.ts";
 import type { LightragBulkPlane } from "../planes/lightrag-bulk.ts";
 import type { EventInput, Surface } from "../types.ts";
 import { corpusGate, ingestCorpus, type GateReason } from "./ingest.ts";
 import { planCorpus, planRepos } from "./plan.ts";
+import { reconcileCorpus } from "./reconcile.ts";
 import type { CorpusStore } from "./store.ts";
-import { parseIngestRequest, parsePlanRequest, type RequestRefusal } from "./validate.ts";
+import { parseIngestRequest, parsePlanRequest, parseReconcileRequest, type RequestRefusal } from "./validate.ts";
 
 /** Every reason a corpus door refuses: the gates, the request refusals, and an index that does not answer. Closed. */
-export type CorpusRefusalReason = GateReason | RequestRefusal | "corpus.index-unavailable";
+export type CorpusRefusalReason = GateReason | RequestRefusal | "corpus.index-unavailable" | "corpus.plane-unreachable";
 
 export interface CorpusRefusal {
 	error: string;
@@ -42,14 +43,17 @@ export interface CorpusServiceDeps {
 	plane: LightragBulkPlane | null;
 	emit: (event: EventInput) => Promise<unknown>;
 	signal?: AbortSignal | undefined;
+	/** The clock, epoch ms; tests inject one. */
+	now?: (() => number) | undefined;
 }
 
 const MESSAGES: Readonly<Record<CorpusRefusalReason, string>> = {
 	unauthenticated: "the corpus needs an authenticated surface; nothing was read or changed",
 	"vm-guest": "the corpus is not served to a VM guest; nothing was read or changed",
 	"corpus.disabled": "the corpus is switched off (SUBSTRATE_CORPUS is not on); nothing was read or changed",
-	"corpus.backend-unavailable": "the corpus ingest needs the LightRAG docs backend, which is not configured; nothing was sent",
+	"corpus.backend-unavailable": "the corpus ingest and reconcile need the LightRAG docs backend, which is not configured; nothing was sent",
 	"corpus.index-unavailable": "the corpus manifest is not reachable (no index, or it did not answer); nothing was changed",
+	"corpus.plane-unreachable": "the docs plane did not list its documents; nothing was changed",
 	"bad-request": "the request body is not a valid corpus request",
 	"bad-protocol": "the request names a corpus protocol version this server does not speak",
 	"too-many-entries": "the plan names more entries than one request may carry",
@@ -143,15 +147,41 @@ export async function corpusIngestReply(deps: CorpusServiceDeps, raw: unknown, s
 	return { ok: true, status: 200, body: response };
 }
 
-/** `GET /corpus/status`: the manifest's counts. */
+/** Whole seconds between an ISO instant and `now` (epoch ms), never negative; null for no instant. */
+function ageSeconds(at: string | null, now: number): number | null {
+	if (at === null) return null;
+	const ms = Date.parse(at);
+	return Number.isFinite(ms) ? Math.max(0, Math.round((now - ms) / 1000)) : null;
+}
+
+/** `GET /corpus/status`: the manifest's counts, and `lagSeconds`, the age of its newest write. */
 export async function corpusStatusReply(deps: CorpusServiceDeps, surface: Surface | null): Promise<CorpusReply<CorpusStatusResponse>> {
 	const gated = gateOf(deps, surface, false);
 	if (gated !== null) return gated;
 	const store = deps.store;
 	if (store === null) return refusal(503, "corpus.index-unavailable");
 	try {
-		return { ok: true, status: 200, body: { protocol: CORPUS_PROTOCOL, ...(await store.status()) } };
+		const { newestChangeAt, ...summary } = await store.status();
+		return { ok: true, status: 200, body: { protocol: CORPUS_PROTOCOL, ...summary, lagSeconds: ageSeconds(newestChangeAt, (deps.now ?? Date.now)()) } };
 	} catch {
 		return refusal(503, "corpus.index-unavailable");
 	}
+}
+
+/**
+ * `POST /corpus/reconcile`: compares the manifest's active rows with the docs plane and reports the drift. A dry run
+ * (`execute` false or absent) reads the plane's document listing and the manifest and changes nothing; `execute` marks the
+ * rows whose plane document is gone as removed (the next plan offers them as `add`) and deletes the `corpus:` documents no
+ * row owns. Needs the plane like the ingest does, and shares its lock.
+ */
+export async function corpusReconcileReply(deps: CorpusServiceDeps, raw: unknown, surface: Surface | null): Promise<CorpusReply<CorpusReconcileResponse>> {
+	const gated = gateOf(deps, surface, true);
+	if (gated !== null) return gated;
+	const parsed = parseReconcileRequest(raw);
+	if (!parsed.ok) return refusal(400, parsed.reason, parsed.detail);
+	const { store, plane } = deps;
+	if (store === null || plane === null) return refusal(503, "corpus.index-unavailable");
+	const result = await reconcileCorpus({ store, plane, signal: deps.signal }, parsed.value.execute);
+	if (!result.ok) return refusal(503, result.reason, result.detail);
+	return { ok: true, status: 200, body: result.body };
 }

@@ -142,6 +142,26 @@ export interface ScanOptions {
 	readFile?: ((path: string) => Uint8Array) | undefined;
 	/** Returns null for a path that does not exist and throws for any other failure. */
 	lstat?: ((path: string) => FileStat | null) | undefined;
+	/**
+	 * Only these repository labels are discovered further and read; every other repository is skipped before a file is
+	 * opened. A label that matches nothing is noted (`repo-not-found`) and never covered.
+	 */
+	repos?: readonly string[] | undefined;
+	/**
+	 * Reads one checkout in place of `git ls-files` and the working tree (the mirror view of `view.ts`). Returning null
+	 * leaves the checkout to the plain working-tree scan.
+	 */
+	readCheckout?: ((checkout: Checkout) => CheckoutRead | null) | undefined;
+}
+
+/** What `ScanOptions.readCheckout` hands back for one checkout; every field has the meaning it has in a plain scan. */
+export interface CheckoutRead {
+	entries: CorpusEntry[];
+	/** Where each entry's bytes live, keyed by `documentKey`; a location `readFile` can resolve. */
+	paths: Map<string, string>;
+	skips: SkipLog;
+	/** Anything that kept the read from being complete; a non-empty list leaves the repository out of the coverage. */
+	problems: string[];
 }
 
 export type Inspected =
@@ -256,6 +276,15 @@ export class SkipLog {
 		this.byReason[skip.reason] = (this.byReason[skip.reason] ?? 0) + 1;
 		if (this.listed.length < MAX_LISTED_SKIPS) this.listed.push(skip);
 	}
+
+	/** Adds another log: the counts exactly, the listed skips up to the cap. */
+	absorb(other: SkipLog): void {
+		for (const reason of SKIP_REASONS) {
+			const count = other.byReason[reason];
+			if (count !== undefined) this.byReason[reason] = (this.byReason[reason] ?? 0) + count;
+		}
+		for (const skip of other.listed) if (this.listed.length < MAX_LISTED_SKIPS) this.listed.push(skip);
+	}
 }
 
 interface Reader {
@@ -309,7 +338,12 @@ function readCandidate(reader: Reader, state: RepoState, rel: string, abs: strin
 	reader.paths.set(documentKey(state.repo, rel), abs);
 }
 
-function scanCheckout(reader: Reader, checkout: Checkout, run: GitRunner): RepoState {
+function scanCheckout(
+	reader: Reader,
+	checkout: Checkout,
+	run: GitRunner,
+	readCheckout: ScanOptions["readCheckout"],
+): RepoState {
 	const state: RepoState = {
 		repo: checkout.repo,
 		dir: checkout.dir,
@@ -317,6 +351,18 @@ function scanCheckout(reader: Reader, checkout: Checkout, run: GitRunner): RepoS
 		problems: [],
 		shadowed: 0,
 	};
+	const supplied = readCheckout?.(checkout) ?? null;
+	if (supplied !== null) {
+		// The supplied entries passed the same rules as `readCandidate` applies; only the source of the bytes differs.
+		for (const entry of supplied.entries) {
+			reader.entries.push(entry);
+			const location = supplied.paths.get(documentKey(entry.repo, entry.path));
+			if (location !== undefined) reader.paths.set(documentKey(entry.repo, entry.path), location);
+		}
+		reader.skips.absorb(supplied.skips);
+		state.problems.push(...supplied.problems);
+		return state;
+	}
 	const listed = run(["ls-files", "-z"], checkout.dir);
 	if (listed.code !== 0) {
 		state.problems.push(`git ls-files failed in ${checkout.dir} (exit ${listed.code})`);
@@ -389,7 +435,18 @@ function collapseIdentical(entries: CorpusEntry[]): { kept: CorpusEntry[]; dropp
 
 export async function scanRoots(opts: ScanOptions): Promise<ScanResult> {
 	const run = opts.runner ?? defaultGitRunner;
-	const found = discoverRepos(opts.roots, { run, depth: opts.depth });
+	const discovered = discoverRepos(opts.roots, { run, depth: opts.depth });
+	// A repository filter drops every other label before any file is read.
+	const wanted = opts.repos === undefined ? null : new Set(opts.repos);
+	const found =
+		wanted === null
+			? discovered
+			: {
+					...discovered,
+					checkouts: discovered.checkouts.filter((checkout) => wanted.has(checkout.repo)),
+					collections: discovered.collections.filter((collection) => wanted.has(collection.repo)),
+					duplicates: discovered.duplicates.filter((duplicate) => wanted.has(duplicate.repo)),
+				};
 	const reader: Reader = {
 		maxTier: opts.maxTier ?? DEFAULT_MAX_TIER,
 		maxBytes: opts.maxBytes ?? DEFAULT_MAX_BYTES,
@@ -405,12 +462,18 @@ export async function scanRoots(opts: ScanOptions): Promise<ScanResult> {
 	const duplicateOf = new Map(found.duplicates.map((duplicate) => [duplicate.repo, duplicate]));
 	const readOrder = new Map(found.duplicates.flatMap((duplicate) => duplicate.dirs.map((dir, index): [string, number] => [dir, index])));
 	const units = [
-		...found.checkouts.map((checkout) => ({ dir: checkout.dir, read: () => scanCheckout(reader, checkout, run) })),
+		...found.checkouts.map((checkout) => ({ dir: checkout.dir, read: () => scanCheckout(reader, checkout, run, opts.readCheckout) })),
 		...found.collections.map((collection) => ({ dir: collection.dir, read: () => scanCollection(reader, collection) })),
 	];
 	units.sort((a, b) => (readOrder.get(a.dir) ?? -1) - (readOrder.get(b.dir) ?? -1));
 	const states = units.map((unit) => unit.read());
 	const notes = [...found.notes];
+	if (wanted !== null) {
+		const present = new Set([...found.checkouts.map((checkout) => checkout.repo), ...found.collections.map((collection) => collection.repo)]);
+		for (const label of [...wanted].sort(compareText)) {
+			if (!present.has(label)) notes.push(`repo-not-found: ${label} is not below the roots`);
+		}
+	}
 	for (const state of states) {
 		const duplicate = duplicateOf.get(state.repo);
 		if (duplicate === undefined) continue;

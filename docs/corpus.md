@@ -120,6 +120,11 @@ substrate corpus scan   [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--source
 substrate corpus plan   (scan options) [--server URL] [--json]
 substrate corpus ingest (plan options) [--execute] [--batch-docs N] [--batch-bytes N] [--json]
 substrate corpus status [--server URL] [--json]
+substrate corpus sync   [--repo R]... [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--server URL] [--execute] [--fetch] [--json]
+substrate corpus watch  [--root DIR]... [--sweep-s N] [--server URL] [--once]
+substrate corpus reconcile [--root DIR]... [--server URL] [--execute] [--json]
+substrate corpus hook install|uninstall|status --repo DIR
+substrate corpus hint   --repo DIR
 ```
 
 - `scan` needs no server. It prints the totals by repository, kind and tier, the bytes, the collapsed counts, the skipped
@@ -147,7 +152,13 @@ substrate corpus status [--server URL] [--json]
   `ingested`, `updated`, `unchanged` or `tombstoned`. Re-running is safe: the server skips rows it already recorded, so a run killed half way resumes without
   re-sending them. `--batch-docs` (and `SUBSTRATE_CORPUS_BATCH_DOCS`) above the server limit of 200 documents per
   request is lowered to 200 with a note on stderr.
-- `status` prints the manifest summary.
+- `status` prints the manifest summary, including the seconds since the newest manifest write.
+- `sync`, `watch`, `reconcile`, `hook` and `hint` keep the docs plane in step with the repositories without anyone running
+  `ingest`. `sync --repo R` reads only the named repositories, plans with coverage for those pairs alone, and with
+  `--execute` ingests what changed, then sends one `docs.sync` event; `watch` is the long-running loop; `reconcile` compares
+  the manifest with the plane; `hook` and `hint` are the opt-in git hooks. They read each checkout through the mirror view
+  (a push made elsewhere is found although the checkout did not move) and write nothing into any repository. All of it,
+  the four triggers, the mirror, the spool, the flags and troubleshooting, is in [corpus-watch.md](corpus-watch.md).
 
 ```
 # What is on this host, without a server
@@ -228,7 +239,7 @@ directory named by their hash, not in memory, and removed when the command ends.
 
 ## The routes
 
-All three are audited and admitted like the docs tools and need a bearer of an operator surface. A server with the corpus
+All four are audited and admitted like the docs tools and need a bearer of an operator surface. A server with the corpus
 off answers 503 with `corpus.disabled`; the CLI prints that the server runs with the corpus off. 401 and 403 are reported
 as refused credentials and a refused surface. A request that names another `protocol` is refused.
 
@@ -264,9 +275,18 @@ code such as `secret-findings` or `plane-unavailable`. `counts` has one number p
 
 ### `GET /corpus/status`
 
-Response: `{protocol, total, active, tombstoned, byRepo, byKind, byTier, lastIngestAt, manifestVersion}` with
-`byRepo: [{repo, active, tombstoned}]`, `byKind: [{kind, count}]`, `byTier: [{tier, count}]` and `lastIngestAt` an ISO
-time or null.
+Response: `{protocol, total, active, tombstoned, byRepo, byKind, byTier, lastIngestAt, lagSeconds, manifestVersion}` with
+`byRepo: [{repo, active, tombstoned}]`, `byKind: [{kind, count}]`, `byTier: [{tier, count}]`, `lastIngestAt` an ISO
+time or null and `lagSeconds` the seconds since the newest manifest write, or null when the manifest is empty.
+
+### `POST /corpus/reconcile`
+
+Request: `{protocol, execute}`. Without `execute` it is a dry run. Response: `{protocol, drift, repaired, manifestVersion}`
+with `drift: {missingInPlane: [{repo, path}], orphansInPlane: [name], checked, truncated}` (each list capped at 500; the
+counts and `checked` cover everything, and `truncated` is true when a list was cut or the plane listing was not complete)
+and `repaired: {requeued, deleted}` (both 0 on a dry run). With `execute` the server marks the active rows whose plane
+document is gone as removed, without touching the plane, so the next plan offers them as `add`; and it deletes plane
+documents named `corpus:` that no active row owns. The CLI never sends a document through this route.
 
 ## Limits
 

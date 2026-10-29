@@ -8,6 +8,7 @@ import {
 	BRIEF_RECALL_MODES,
 	BRIEF_RECALL_RESULTS,
 	CACHE_METRIC_CLASSES,
+	CORPUS_SYNC_LAG_METRIC,
 	OUTBOX_DURABLE_METRIC,
 	OUTBOX_OLDEST_METRIC,
 	OUTBOX_SIZE_METRIC,
@@ -75,5 +76,23 @@ describe("setHindsightOutbox", () => {
 		instruments.setHindsightOutbox({ size: 0, oldestAgeSeconds: 0, durable: false });
 		expect(gaugeValue(instruments.snapshot(), OUTBOX_SIZE_METRIC)?.value).toBe(0);
 		expect(gaugeValue(instruments.snapshot(), OUTBOX_DURABLE_METRIC)?.value).toBe(0);
+	});
+});
+
+describe("setCorpusSyncLag (v1.7 phase 65)", () => {
+	test("is one unlabelled gauge with no point until a sync reports, and keeps the newest reading", () => {
+		const instruments = new SubstrateInstruments();
+		expect(gaugeValue(instruments.snapshot(), CORPUS_SYNC_LAG_METRIC)).toBeNull();
+		instruments.setCorpusSyncLag(42);
+		expect(gaugeValue(instruments.snapshot(), CORPUS_SYNC_LAG_METRIC)).toEqual({ value: 42, attributes: {} });
+		instruments.setCorpusSyncLag(3);
+		expect(gaugeValue(instruments.snapshot(), CORPUS_SYNC_LAG_METRIC)?.value).toBe(3);
+	});
+
+	test("a value that is not a real lag leaves the gauge as it was", () => {
+		const instruments = new SubstrateInstruments();
+		instruments.setCorpusSyncLag(7);
+		for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -1]) instruments.setCorpusSyncLag(bad);
+		expect(gaugeValue(instruments.snapshot(), CORPUS_SYNC_LAG_METRIC)?.value).toBe(7);
 	});
 });

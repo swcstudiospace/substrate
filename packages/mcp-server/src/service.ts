@@ -98,7 +98,7 @@ import {
 	type IngestRecord,
 	type PageSettlement,
 } from "./docs-ingest.ts";
-import { LagSettler, TRIGGER_RECORD_DEADLINE_MS, withDeadline, createFreshnessState, evaluateFreshness, type DatasetFreshness, type FreshnessState } from "./docs-freshness.ts";
+import { CORPUS_FRESHNESS_DATASET, LagSettler, TRIGGER_RECORD_DEADLINE_MS, corpusFreshnessRow, withDeadline, createFreshnessState, evaluateFreshness, type DatasetFreshness, type FreshnessState } from "./docs-freshness.ts";
 import { DEFAULT_SEARCH_DATASET_NAMES, DOCS_CONTEXT_LEDGER_BUDGET_MS, UNTRUSTED_DOCS_NOTICE, citationProvenanceCounts, docsContextEvents, docsContextMemories, normalizeRepoId, scopedDatasetName, searchDocs, searchReplyStorable, type DocsContext, type DocsContextEvent, type DocsContextMemory, type SearchReply } from "./docs-search.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
@@ -170,9 +170,10 @@ import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, p
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
 import { lightragOp, probeLightrag, queryForTool, type LightragQueryMode, type LightragToolOutcome } from "./planes/lightrag.ts";
 import { createLightragBulkPlane, type LightragBulkPlane } from "./planes/lightrag-bulk.ts";
-import { corpusIngestReply, corpusPlanReply, corpusStatusReply, type CorpusReply, type CorpusServiceDeps } from "./corpus/service.ts";
+import { corpusIngestReply, corpusPlanReply, corpusReconcileReply, corpusStatusReply, type CorpusReply, type CorpusServiceDeps } from "./corpus/service.ts";
 import type { CorpusStore } from "./corpus/store.ts";
-import type { CorpusIngestResponse, CorpusPlanResponse, CorpusStatusResponse } from "@substrate/corpus";
+import type { CorpusIngestResponse, CorpusPlanResponse, CorpusReconcileResponse, CorpusStatusResponse } from "@substrate/corpus";
+import { memoryPlanningHashStore, type PlanningHashStore } from "./planning-hash-store.ts";
 import { RailwayClient } from "./railway.ts";
 import { nodePlanningFs } from "./planning/fs.ts";
 import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
@@ -621,6 +622,8 @@ const KEY_TURN_PREFIX = "\u0000idempotency:";
 
 /** The dataset planning pages are ingested into: the agent-substrate checkout's dataset (`docs/data-planes.md`). */
 const PLANNING_DATASET = "agent-substrate";
+/** Longest the lag pass waits for the corpus manifest's status before it treats the corpus as unread this pass. */
+const CORPUS_STATUS_DEADLINE_MS = 3_000;
 
 /**
  * One closed UTC hour of the ledger, digested in ingest order for the hourly anchor.
@@ -1440,6 +1443,9 @@ export class Substrate {
 	private readonly planningBaseDir: string;
 	/** Per-path hash of the planning pages as the LightRAG plane last indexed them; null until the first pass. */
 	private planningHashes: Map<string, string> | null = null;
+	/** The store behind `planningHashes`, built on first use; null while `SUBSTRATE_PLANNING_HASH_STORE` is off. */
+	private planningHashStoreCache: PlanningHashStore | null = null;
+	private readonly planningHashSeam: PlanningHashStore | null;
 	/** The planning pass in flight, if any: one at a time, and a request during it marks the next pass dirty. */
 	private planningPass: Promise<void> | null = null;
 	private planningDirty = false;
@@ -1505,6 +1511,8 @@ export class Substrate {
 			lightragFetch?: FetchLike;
 			/** Tests inject the corpus manifest and the LightRAG bulk plane; production builds them from the index and `config.lightrag`. */
 			corpus?: { store?: CorpusStore; plane?: LightragBulkPlane };
+			/** Tests inject the planning refresh's hash store; it is used only while `SUBSTRATE_PLANNING_HASH_STORE` is on. Production uses the index's table, or memory without an index. */
+			planningHashes?: PlanningHashStore;
 			planningBaseDir?: string;
 			desktop?: DesktopDriver | null;
 			railway?: RailwayClient;
@@ -1588,6 +1596,7 @@ export class Substrate {
 		this.hindsightFetch = gatedFetch(this.planes.gate("hindsight"), stores?.hindsightFetch ?? fetch, hindsightOp);
 		this.lightragFetch = gatedFetch(this.planes.gate("lightrag"), stores?.lightragFetch ?? fetch, lightragOp);
 		this.corpusSeam = stores?.corpus ?? null;
+		this.planningHashSeam = stores?.planningHashes ?? null;
 		this.cache =
 			stores?.cache ??
 			createReadThroughCache(config, {
@@ -5426,6 +5435,13 @@ export class Substrate {
 		return reply;
 	}
 
+	/** `POST /corpus/reconcile`. A run that deleted a plane document invalidates every cached `docs_search` answer, as an ingest does. */
+	async corpusReconcile(raw: unknown, callerSurface: Surface | null): Promise<CorpusReply<CorpusReconcileResponse>> {
+		const reply = await corpusReconcileReply(this.corpusDeps(), raw, callerSurface);
+		if (reply.ok && reply.body.repaired.deleted > 0) await this.cache.bump(DOCS_GENERATION_KEY);
+		return reply;
+	}
+
 	/**
 	 * The dependencies every docs ingest in this service runs with: the plane, the record stores, the roots the
 	 * guard checks pages against, and the caller's surface. A refresh's preflight and each of its calls share
@@ -5756,6 +5772,7 @@ export class Substrate {
 			await this.hydrateDocsSeen();
 			const roots = this.config.lightragPlanningRoots;
 			const pages = await scanIngestPages(this.planningBaseDir, roots);
+			await this.loadPlanningHashes();
 			const trigger = planningIngestTrigger(pages, this.planningHashes, roots);
 			if (!trigger.triggered) return;
 			const pending = new Set(trigger.paths);
@@ -5765,7 +5782,14 @@ export class Substrate {
 				const outcome = await this.ingestDocs({ dataset: PLANNING_DATASET, pages: batch }, "substrate");
 				if (!outcome.ok) break;
 				const failed = new Set(outcome.results.filter((result) => result.status === "failed").map((result) => result.path));
-				for (const page of batch) if (!failed.has(page.path)) hashes.set(page.path, planningPageSha(page));
+				const stored = new Map<string, string>();
+				for (const page of batch) {
+					if (failed.has(page.path)) continue;
+					const sha = planningPageSha(page);
+					hashes.set(page.path, sha);
+					stored.set(page.path, sha);
+				}
+				await this.savePlanningHashes(stored);
 			}
 			await this.emit({
 				surface: "substrate",
@@ -5775,6 +5799,39 @@ export class Substrate {
 			});
 		} catch (cause) {
 			process.stderr.write(`[substrate] planning refresh failed — ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
+		}
+	}
+
+	/**
+	 * The store the planning refresh keeps its page hashes in, or null while `SUBSTRATE_PLANNING_HASH_STORE` is off (the
+	 * hashes then live only in `planningHashes`, as before). Built once: a test's seam, else the index's table, else memory.
+	 */
+	private planningHashStore(): PlanningHashStore | null {
+		if (!this.config.planningHashStore) return null;
+		this.planningHashStoreCache ??= this.planningHashSeam ?? this.index?.planningHashStore() ?? memoryPlanningHashStore();
+		return this.planningHashStoreCache;
+	}
+
+	/** Loads the stored hashes into `planningHashes` at the first pass that has none. A store that cannot be read leaves them unset, so this pass ingests everything (the old behaviour) and the next pass tries again. */
+	private async loadPlanningHashes(): Promise<void> {
+		if (this.planningHashes !== null) return;
+		const store = this.planningHashStore();
+		if (store === null) return;
+		try {
+			this.planningHashes = await store.load();
+		} catch (cause) {
+			process.stderr.write(`[substrate] planning hashes not loaded — ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
+		}
+	}
+
+	/** Writes the hashes of the pages a batch put into the plane. A failed write is logged and costs one re-ingest of those pages after a restart; it never fails the pass. */
+	private async savePlanningHashes(entries: ReadonlyMap<string, string>): Promise<void> {
+		const store = this.planningHashStore();
+		if (store === null || entries.size === 0) return;
+		try {
+			await store.save(entries);
+		} catch (cause) {
+			process.stderr.write(`[substrate] planning hashes not saved — ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
 		}
 	}
 
@@ -5840,9 +5897,42 @@ export class Substrate {
 	async settleDocsLag(now: number = Date.now()): Promise<void> {
 		try {
 			await this.hydrateDocsSeen();
-			this.docsLagSettler.settle(this.docsFreshnessRows(now), this.config.docsFreshness, now);
+			const corpus = await this.corpusFreshness(now);
+			const rows = this.docsFreshnessRows(now);
+			const settings = { ...this.config.docsFreshness, corpusMaxAgeS: this.config.corpus.freshMaxAgeS };
+			this.docsLagSettler.settle(corpus === null ? rows : [...rows, corpus], settings, now);
 		} catch (cause) {
 			process.stderr.write(`[substrate] docs lag pass failed — ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
+		}
+	}
+
+	/**
+	 * The corpus's freshness verdict for the lag pass (v1.7 phase 65), or null when it is not judged: the corpus is off,
+	 * `SUBSTRATE_CORPUS_FRESH_MAX_AGE_S` is 0, there is no manifest, or nothing was ever ingested. A manifest that cannot be
+	 * read in time says nothing about freshness, so it repeats the state a marker already holds (a corpus already warned about
+	 * stays lagging) instead of reading as recovered, which would clear the marker and warn again on the next pass.
+	 */
+	private async corpusFreshness(now: number): Promise<DatasetFreshness | null> {
+		const { enabled, freshMaxAgeS } = this.config.corpus;
+		if (!enabled || freshMaxAgeS === 0) return null;
+		const store = this.corpusSeam?.store ?? this.index?.corpusStore() ?? null;
+		if (store === null) return null;
+		try {
+			const status = await withDeadline(store.status(), CORPUS_STATUS_DEADLINE_MS);
+			return corpusFreshnessRow({ lastIngestAt: status.lastIngestAt, now, maxAgeS: freshMaxAgeS });
+		} catch {
+			const marker = this.docsFreshnessState.lag.get(CORPUS_FRESHNESS_DATASET);
+			if (marker === undefined) return null;
+			return {
+				dataset: CORPUS_FRESHNESS_DATASET,
+				freshness_seconds: null,
+				newest_ingested_at: null,
+				stale: true,
+				trigger_lag_seconds: Math.max(0, Math.round((now - Date.parse(marker.since)) / 1000)),
+				lagging_commit: marker.commit,
+				lagging: true,
+				triggers: 0,
+			};
 		}
 	}
 

@@ -53,6 +53,7 @@ import type {
 import { EDGE_KINDS } from "./types.ts";
 import { SteeringAuditSink, bunSteeringAuditReadSql, bunSteeringAuditSql } from "./planning/steering-store.ts";
 import { bunCorpusStore, type CorpusStore } from "./corpus/store.ts";
+import { bunPlanningHashStore, type PlanningHashStore } from "./planning-hash-store.ts";
 import {
 	DEFAULT_LEASE_TTL_SECONDS,
 	decideClaim,
@@ -721,6 +722,23 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 			create index if not exists corpus_documents_sha256_idx on corpus_documents (sha256);
 			create index if not exists corpus_documents_docs_document_id_idx on corpus_documents (docs_document_id)`,
 	},
+	// v1.7 phase 65 (doc watch): the planning refresh's per-page content hashes, so a restart ingests only the pages that
+	// changed. One row per `.planning/` path; written only by the planning refresh while `SUBSTRATE_PLANNING_HASH_STORE=on`
+	// (the default is off, and an empty table costs nothing, so the step always runs, like step 35).
+	// Additive and idempotent: one new table, no existing row touched. An older release never names it. OPERATORS: rehearse on a
+	// restored dump before production, like steps 33 to 35.
+	{
+		version: 36,
+		name: "planning_page_hashes",
+		phase: "expand",
+		down: `drop table if exists planning_page_hashes`,
+		sql: `
+			create table if not exists planning_page_hashes (
+				path       text primary key,
+				sha256     text not null,
+				updated_at timestamptz not null default now()
+			)`,
+	},
 ];
 
 /** The steps `migrate()` runs for these opt-ins, in version order. A step whose opt-in is off is left out and not ledgered. */
@@ -767,6 +785,14 @@ export class IndexStore implements MemoryStore {
 	 */
 	corpusStore(): CorpusStore {
 		return bunCorpusStore(this.sql);
+	}
+
+	/**
+	 * The planning refresh's page hashes over this store's pool (v1.7 phase 65). It only builds the store; no statement runs
+	 * until the refresh loads it, and the table exists after migration step 36.
+	 */
+	planningHashStore(): PlanningHashStore {
+		return bunPlanningHashStore(this.sql);
 	}
 
 	/**

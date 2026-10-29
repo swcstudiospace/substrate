@@ -129,6 +129,57 @@
 			"clientExpects": { "ok": true, "ids": ["doc-3f2a9c"] }
 		},
 		{
+			"id": "paginated",
+			"method": "POST",
+			"path": "/documents/paginated",
+			"source": "lightrag v1.5.7 lightrag_api_routers_document_routes.py:6421-6430 (route), :1198-1239 (DocumentsRequest: every member has a default; page >= 1, page_size 10..200, sort_field created_at|updated_at|id|file_path, sort_direction asc|desc), :1241-1300 (PaginationInfo, PaginatedDocsResponse: documents[], pagination, status_counts), :1100-1119 (DocStatusResponse: id, status, file_path, ...)",
+			"request": {
+				"kind": "json",
+				"required": [],
+				"optional": ["page", "page_size", "sort_field", "sort_direction", "status_filter", "status_filters"],
+				"ignoredByServer": []
+			},
+			"responseFieldsRead": ["documents", "documents[].id", "documents[].file_path", "pagination"],
+			"sampleResponse": {
+				"documents": [
+					{
+						"id": "doc-3f2a9c",
+						"content_summary": "Setup guide",
+						"content_length": 1520,
+						"status": "processed",
+						"created_at": "2026-09-02T17:06:12",
+						"updated_at": "2026-09-02T17:06:40",
+						"track_id": "insert_20260902_171000_ghi012",
+						"chunks_count": 2,
+						"error_msg": null,
+						"metadata": null,
+						"file_path": "corpus:swcstudiospace%2Fagent-substrate:docs%2FREADME.md@0123456789ab"
+					},
+					{
+						"id": "doc-7b1e44",
+						"content_summary": "Other",
+						"content_length": 40,
+						"status": "processed",
+						"created_at": "2026-09-02T17:06:12",
+						"updated_at": "2026-09-02T17:06:40",
+						"track_id": "upload_20260902_170612_abc123",
+						"chunks_count": 1,
+						"error_msg": null,
+						"metadata": null,
+						"file_path": "docs__a__README.md"
+					}
+				],
+				"pagination": { "page": 1, "page_size": 200, "total_count": 2, "total_pages": 1, "has_next": false, "has_prev": false },
+				"status_counts": { "processed": 2 }
+			},
+			"clientExpects": {
+				"ok": true,
+				"documents": [{ "id": "doc-3f2a9c", "name": "corpus:swcstudiospace%2Fagent-substrate:docs%2FREADME.md@0123456789ab" }],
+				"otherDocumentIds": ["doc-7b1e44"],
+				"truncated": false
+			}
+		},
+		{
 			"id": "delete_document",
 			"method": "DELETE",
 			"path": "/documents/delete_document",

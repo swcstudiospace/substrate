@@ -135,5 +135,17 @@ describeLive("the corpus manifest against a live index", () => {
 		expect(status.byTier.some((entry) => entry.tier === 1 && entry.count > 0)).toBe(true);
 		expect(status.manifestVersion).toBe(await store.manifestVersion());
 		expect(typeof status.lastIngestAt).toBe("string");
+		expect(typeof status.newestChangeAt).toBe("string");
+	});
+
+	test("activeRows answers only active rows, ordered by repo and path, and no more than the limit", async () => {
+		await store.recordIngested(doc("b-active.md", { repo: OTHER }));
+		await store.recordIngested(doc("a-active.md", { repo: OTHER }));
+		await store.recordIngested(doc("gone.md", { repo: OTHER }));
+		await store.markTombstoned(OTHER, "gone.md");
+		const mine = (await store.activeRows(100_000)).filter((row) => row.repo === OTHER);
+		expect(mine.map((row) => row.path)).toEqual(["a-active.md", "b-active.md"]);
+		expect(mine.every((row) => row.state === "active")).toBe(true);
+		expect(await store.activeRows(1)).toHaveLength(1);
 	});
 });

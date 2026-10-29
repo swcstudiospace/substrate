@@ -8,6 +8,7 @@ import {
 	type GhRunner,
 	type CorpusIngestResponse,
 	type CorpusPlanResponse,
+	type CorpusReconcileResponse,
 	type CorpusStatusResponse,
 	type IngestStatus,
 	type PlanAction,
@@ -91,7 +92,17 @@ export function statusOf(): CorpusStatusResponse {
 		byKind: [{ kind: "doc", count: 3 }],
 		byTier: [{ tier: 1, count: 4 }],
 		lastIngestAt: "2026-10-29T10:00:00.000Z",
+		lagSeconds: 42,
 		manifestVersion: 9,
+	};
+}
+
+export function reconcileOf(drift: Partial<CorpusReconcileResponse["drift"]> = {}, repaired: CorpusReconcileResponse["repaired"] = { requeued: 0, deleted: 0 }): CorpusReconcileResponse {
+	return {
+		protocol: CORPUS_PROTOCOL,
+		drift: { missingInPlane: [], orphansInPlane: [], checked: 3, truncated: false, ...drift },
+		repaired,
+		manifestVersion: 10,
 	};
 }
 

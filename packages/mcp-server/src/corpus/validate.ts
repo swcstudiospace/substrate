@@ -22,6 +22,7 @@ import {
 	type CorpusEntry,
 	type CorpusIngestRequest,
 	type CorpusPlanRequest,
+	type CorpusReconcileRequest,
 	type CorpusScope,
 } from "@substrate/corpus";
 
@@ -165,4 +166,12 @@ export function parseIngestRequest(raw: unknown): Parsed<CorpusIngestRequest> {
 		tombstones.push({ repo, path });
 	}
 	return { ok: true, value: { protocol: CORPUS_PROTOCOL, documents, tombstones } };
+}
+
+/** `POST /corpus/reconcile`: the protocol version and `execute`. An absent `execute` is a dry run, so a body that forgot it repairs nothing. */
+export function parseReconcileRequest(raw: unknown): Parsed<CorpusReconcileRequest> {
+	if (!isRecord(raw)) return refuse("bad-request", "the body must be a JSON object");
+	if (raw.protocol !== CORPUS_PROTOCOL) return refuse("bad-protocol", `this server speaks protocol ${CORPUS_PROTOCOL}`);
+	if (raw.execute !== undefined && typeof raw.execute !== "boolean") return refuse("bad-request", "execute must be true or false");
+	return { ok: true, value: { protocol: CORPUS_PROTOCOL, execute: raw.execute === true } };
 }

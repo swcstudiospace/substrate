@@ -5,8 +5,8 @@
  * order of a plane write, a manifest write and a plane delete.
  */
 import { createHash } from "node:crypto";
-import type { CorpusDocument, CorpusEntry } from "@substrate/corpus";
-import type { BulkDocumentOutcome, BulkTextDocument, LightragBulkPlane } from "../planes/lightrag-bulk.ts";
+import { CORPUS_NAME_PREFIX, type CorpusDocument, type CorpusEntry } from "@substrate/corpus";
+import type { BulkDocumentOutcome, BulkTextDocument, LightragBulkPlane, PlaneListedDocument, PlaneListing } from "../planes/lightrag-bulk.ts";
 import { planeDocumentIdForName } from "./names.ts";
 import type { CorpusStatusSummary, CorpusStore, ManifestRow, RecordedDocument, RefreshedMetadata } from "./store.ts";
 
@@ -43,6 +43,11 @@ export class FakeStore implements CorpusStore {
 	readonly rows = new Map<string, ManifestRow>();
 	/** Keys whose `recordIngested` throws once, as a database that went away between the plane write and the manifest write. */
 	readonly failRecordOnce = new Set<string>();
+	/** The instants `status()` reports; a test sets them to age the manifest. */
+	lastIngestAt: string | null = null;
+	newestChangeAt: string | null = null;
+	/** When true `activeRows` throws, as a database that stopped answering. */
+	failActiveRows = false;
 	private seq = 0;
 
 	constructor(private readonly log: string[] = []) {}
@@ -98,6 +103,14 @@ export class FakeStore implements CorpusStore {
 		return [...this.rows.values()].filter((row) => row.state === "active" && row.documentId === documentId).length;
 	}
 
+	async activeRows(limit: number): Promise<ManifestRow[]> {
+		if (this.failActiveRows) throw new Error("connection lost");
+		return [...this.rows.values()]
+			.filter((row) => row.state === "active")
+			.sort((left, right) => (left.repo === right.repo ? (left.path < right.path ? -1 : 1) : left.repo < right.repo ? -1 : 1))
+			.slice(0, limit);
+	}
+
 	async manifestVersion(): Promise<number> {
 		return this.seq;
 	}
@@ -112,7 +125,8 @@ export class FakeStore implements CorpusStore {
 			byRepo: [],
 			byKind: [],
 			byTier: [],
-			lastIngestAt: null,
+			lastIngestAt: this.lastIngestAt,
+			newestChangeAt: this.newestChangeAt,
 			manifestVersion: this.seq,
 		};
 	}
@@ -199,5 +213,38 @@ export class FakePlane implements LightragBulkPlane {
 	/** The plane document ids that exist now. */
 	liveIds(): Set<string> {
 		return new Set([...this.documents.values()].map((held) => held.id));
+	}
+
+	/** Answers `listDocuments` with this failure reason while set. */
+	listFailure: string | null = null;
+	/** Makes `listDocuments` report an incomplete read, as a plane with more pages than the bound. */
+	listTruncated = false;
+
+	/** The plane's listing: one entry per distinct id (a shared document is listed once, under its first name). Never fails unless `listFailure` is set. */
+	async listDocuments(): Promise<PlaneListing> {
+		this.calls.push("list");
+		if (this.listFailure !== null) return { ok: false, reason: this.listFailure };
+		const documents: PlaneListedDocument[] = [];
+		const otherDocumentIds: string[] = [];
+		const seen = new Set<string>();
+		for (const [name, held] of this.documents) {
+			if (seen.has(held.id)) continue;
+			seen.add(held.id);
+			if (name.startsWith(CORPUS_NAME_PREFIX)) documents.push({ id: held.id, name });
+			else otherDocumentIds.push(held.id);
+		}
+		return { ok: true, documents, otherDocumentIds, truncated: this.listTruncated };
+	}
+
+	/** A document the plane lost while the manifest still lists it. */
+	vanish(name: string): void {
+		this.documents.delete(name);
+	}
+
+	/** A document the plane holds that no manifest row owns (a killed run, or another door's upload). Returns its id. */
+	plant(name: string, text: string = name): string {
+		const id = planeDocumentIdForName(name);
+		this.documents.set(name, { id, text });
+		return id;
 	}
 }

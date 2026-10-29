@@ -33,7 +33,8 @@ These apply to every source:
   `index.archive`, `alert`, and the v1.6 actions `session.checkpoint`, `session.rollback`,
   `session.rollback.refused`, `memory.forget`, `memory.capsule.export`,
   `memory.capsule.redact`, `anchor.signer.rotate`, `anchor.reanchor`, and the v1.7 actions
-  `docs.corpus.ingest` and `docs.corpus.refused`.
+  `docs.corpus.ingest`, `docs.corpus.refused`, `docs.sync` and `docs.planning` (the server's own
+  planning refresh, `docs.planning`, had no row until phase 65).
 - **Reserved actions are not writable through `events_emit` or `POST /events`.** A reader trusts `anchor.signer.rotate`, `anchor.reanchor`, `session.checkpoint`, `session.rollback`,
   `session.rollback.refused`, `session.rollback.forget_batch` and `memory.forget` by their action alone, and the event carries no proof of its writer, so both
   doors refuse them with a `reserved-action` error (nothing written) unless the caller is an operator emitting as its own surface; the server's own emits do not
@@ -50,7 +51,14 @@ These apply to every source:
   accepted merge-trigger has no recorded ingest after
   `SUBSTRATE_DOCS_TRIGGER_LAG_MIN` and one `note` when it clears, with
   `payload.state`, `dataset`, `commit`, `lag_seconds`, deduped through the
-  docs state file; `docs-canary` — the opt-in live golden canary, one
+  docs state file (v1.7 phase 65 judges the corpus under the same action, with
+  `payload.dataset` `corpus`, when `SUBSTRATE_CORPUS=on` and its last ingest is older than
+  `SUBSTRATE_CORPUS_FRESH_MAX_AGE_S`: `payload.lag_seconds` and `threshold_seconds`, no `commit`);
+  `corpus-sync` — v1.7 phase 65, one `note` per `substrate corpus` sync with
+  `payload.repo`, `trigger` (`manual`, `watch`, `hook`, `sweep`, `reconcile`), `outcome`
+  (`ok`, `partial`, `failed`, `skipped`), `lag_s`, the counts (`added`, `changed`, `updated`,
+  `tombstoned`, `refused`, `failed`) and `duration_ms`, never a path or text; the server reads only `lag_s`;
+  `docs-canary` — the opt-in live golden canary, one
   `warning` per changed failing set, with `payload.failing[{fixture, failed}]`;
   `index-archive` — uplift-4 S2, one `note` per finished index snapshot with
   `payload.snapshot`, `createdAt`, `serverVersion`, `schemaHash` and per-table
@@ -106,6 +114,8 @@ These apply to every source:
 | `docs.ingest.refused` | 25 | `warning` | `caller` | `docs.ingest` | — | — | no |
 | `docs.corpus.ingest` | 63 | `note` | `caller` | `docs.corpus.ingest` | — | — | no |
 | `docs.corpus.refused` | 63 | `warning` | `caller` | `docs.corpus.refused` | — | — | no |
+| `docs.sync` | 65 | `note` | `caller` | `docs.sync` | `corpus-sync` | — | no |
+| `docs.planning` | 65 | `note` | `substrate` | `docs.planning` | — | — | yes |
 | `memory.retain.failed` | 26 | `warning` | `memory-writer` | `memory.retain` | — | — | no |
 | `memory.write.accepted` | 26 | `note` | `memory-writer` | — | — | — | no |
 | `memory.write.conflict` | 26 | `note` | `memory-writer` | — | — | — | no |

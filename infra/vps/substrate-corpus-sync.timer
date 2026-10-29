@@ -1,0 +1,16 @@
+[Unit]
+Description=Run the doc watch sweep every 15 minutes (substrate-corpus-sync.service; staged, opt-in)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+
+[Timer]
+# Every 15 minutes on the quarter hour. The unit is a oneshot, so systemd does not start a second sweep while one is still
+# running. Persistent=true (which applies to OnCalendar timers) runs a sweep missed while the host was down at the next boot.
+#
+# Staged, not installed: copying this file, the environment file and `systemctl enable --now` are operator steps
+# (docs/runbooks/corpus-sync.md). The server must run with SUBSTRATE_CORPUS=on, or every sweep reports corpus.disabled.
+OnCalendar=*:0/15
+Persistent=true
+Unit=substrate-corpus-sync.service
+
+[Install]
+WantedBy=timers.target

@@ -16,6 +16,7 @@ export const CORPUS_ROUTES = {
 	plan: "/corpus/plan",
 	ingest: "/corpus/ingest",
 	status: "/corpus/status",
+	reconcile: "/corpus/reconcile",
 } as const;
 
 /** What a document is, decided from its path alone. Closed: a new kind is a contract change. */
@@ -163,8 +164,47 @@ export interface CorpusStatusResponse {
 	byKind: Array<{ kind: DocKind; count: number }>;
 	byTier: Array<{ tier: DocTier; count: number }>;
 	lastIngestAt: string | null;
+	/** Seconds since the newest manifest write, or null when the manifest holds no row yet. */
+	lagSeconds: number | null;
 	manifestVersion: number;
 }
+
+/** The most items `reconcile` lists in one list; the counts always cover all of them. */
+export const RECONCILE_MAX_ITEMS = 500;
+
+/** `execute: false` is a dry run: the server reports the drift and repairs nothing. */
+export interface CorpusReconcileRequest {
+	protocol: typeof CORPUS_PROTOCOL;
+	execute: boolean;
+}
+
+/** What the docs plane and the manifest disagree about. */
+export interface ReconcileDrift {
+	/** Active manifest rows whose plane document is gone. */
+	missingInPlane: Array<{ repo: string; path: string }>;
+	/** Plane documents named `corpus:` that no active row owns. */
+	orphansInPlane: string[];
+	/** How many active rows and plane documents were compared. */
+	checked: number;
+	/** True when a list was cut at {@link RECONCILE_MAX_ITEMS} or the plane listing was not complete. */
+	truncated: boolean;
+}
+
+export interface CorpusReconcileResponse {
+	protocol: typeof CORPUS_PROTOCOL;
+	drift: ReconcileDrift;
+	/** Rows marked removed so the next plan offers them as `add`, and orphan plane documents deleted; both 0 on a dry run. */
+	repaired: { requeued: number; deleted: number };
+	manifestVersion: number;
+}
+
+/** Why a sync ran. Closed: the `docs.sync` event carries it. */
+export const SYNC_TRIGGERS = ["manual", "watch", "hook", "sweep", "reconcile"] as const;
+export type SyncTrigger = (typeof SYNC_TRIGGERS)[number];
+
+/** How a sync ended. Closed: the `docs.sync` event carries it. */
+export const SYNC_OUTCOMES = ["ok", "partial", "failed", "skipped"] as const;
+export type SyncOutcome = (typeof SYNC_OUTCOMES)[number];
 
 /** The manifest key of a document, also the identity used in logs and proofs. */
 export function documentKey(repo: string, path: string): string {

@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { CORPUS_PROTOCOL, type CorpusIngestRequest, type CorpusPlanRequest } from "@substrate/corpus";
-import { createCorpusClient, isIngestResponse, isPlanResponse, isStatusResponse } from "./client.ts";
-import { CorpusStub, ingestOf, planOf, statusOf } from "./testkit.ts";
+import { createCorpusClient, isIngestResponse, isPlanResponse, isReconcileResponse, isStatusResponse } from "./client.ts";
+import { CorpusStub, ingestOf, planOf, reconcileOf, statusOf } from "./testkit.ts";
 
 const stub = new CorpusStub();
 afterAll(() => stub.stop());
@@ -115,7 +115,27 @@ describe("response guards", () => {
 		expect(isStatusResponse({ ...statusOf(), byKind: [{ kind: "memo", count: 1 }] })).toBe(false);
 		expect(isStatusResponse({ ...statusOf(), byTier: [{ tier: 4, count: 1 }] })).toBe(false);
 		expect(isStatusResponse({ ...statusOf(), lastIngestAt: 5 })).toBe(false);
+		expect(isStatusResponse({ ...statusOf(), lagSeconds: -1 })).toBe(false);
+		expect(isStatusResponse({ ...statusOf(), lagSeconds: "7" })).toBe(false);
 		expect(isPlanResponse(null)).toBe(false);
 		expect(isPlanResponse([plan])).toBe(false);
+	});
+
+	test("posts a reconcile request and returns the guarded drift", async () => {
+		const reply = reconcileOf({ missingInPlane: [{ repo: "Acme/A", path: "README.md" }], orphansInPlane: ["corpus:x"] }, { requeued: 1, deleted: 1 });
+		stub.on("POST /corpus/reconcile", () => ({ status: 200, body: reply }));
+		const result = await client().reconcile({ protocol: CORPUS_PROTOCOL, execute: true });
+		expect(result).toEqual({ ok: true, value: reply });
+		expect(stub.requests("/corpus/reconcile").at(-1)?.body).toEqual({ protocol: CORPUS_PROTOCOL, execute: true });
+	});
+
+	test("refuse a reconcile answer with a wrong shape", () => {
+		expect(isReconcileResponse(reconcileOf())).toBe(true);
+		expect(isReconcileResponse({ ...reconcileOf(), protocol: 2 })).toBe(false);
+		expect(isReconcileResponse({ ...reconcileOf(), drift: { ...reconcileOf().drift, truncated: "no" } })).toBe(false);
+		expect(isReconcileResponse({ ...reconcileOf(), drift: { ...reconcileOf().drift, missingInPlane: [{ repo: "r" }] } })).toBe(false);
+		expect(isReconcileResponse({ ...reconcileOf(), drift: { ...reconcileOf().drift, orphansInPlane: [7] } })).toBe(false);
+		expect(isReconcileResponse({ ...reconcileOf(), repaired: { requeued: 1 } })).toBe(false);
+		expect(isReconcileResponse(null)).toBe(false);
 	});
 });

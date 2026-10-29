@@ -39,7 +39,7 @@ export const FAIL_CLOSED_TOOLS: ReadonlySet<string> = new Set([
 	// v1.6 (phase 61): a rollback commit takes memory other agents read out of force and deletes its plane documents (nearest: `memory_write`),
 	// so an unrecorded one is refused; the client keeps it in its pending journal and delivers it later.
 	"session_rollback_commit",
-	// v1.7 (phase 63): a corpus ingest writes the shared docs dataset every agent reads and deletes plane documents (nearest: `docs_ingest`).
+	// v1.7 (phase 63): a corpus ingest writes the shared docs dataset every agent reads and deletes plane documents (nearest: `docs_ingest`). Phase 65: `POST /corpus/reconcile` with `execute` does the same and is audited here.
 	"corpus_ingest",
 ]);
 
@@ -116,7 +116,7 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	// the client journals an unrecorded checkpoint and re-offers it, so an unwritable audit file must not fail the agent's turn over it.
 	"session_rollback_plan",
 	"session_checkpoint",
-	// v1.7 (phase 63): the corpus manifest status and plan are reads of the index, like `planning_status`.
+	// v1.7 (phase 63): the corpus manifest status and plan are reads of the index, like `planning_status`. Phase 65: so is a dry-run `POST /corpus/reconcile`.
 	"corpus_status",
 ]);
 

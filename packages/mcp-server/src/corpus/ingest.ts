@@ -49,6 +49,14 @@ import type { CorpusStore, ManifestRow } from "./store.ts";
 /** Ingest requests on this process run one at a time: plane writes and deletes of two requests never interleave. */
 const ingestLock = new AsyncMutex();
 
+/**
+ * Runs `work` under the lock every plane write and plane delete of the corpus takes, so the reconcile's repairs and an ingest
+ * never interleave.
+ */
+export function withCorpusLock<T>(work: () => Promise<T>): Promise<T> {
+	return ingestLock.run(work);
+}
+
 /** Why a document is refused before anything is sent. Closed. */
 export const REFUSAL_REASONS = [...DOCUMENT_REFUSALS, "sha-mismatch", "secret-findings"] as const;
 

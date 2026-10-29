@@ -240,6 +240,7 @@ export const REGISTRY_EXEMPT: readonly { name: string; reason: string }[] = [
 	{ name: "PATH", reason: "platform variable passed through to child processes" },
 	{ name: "PYTHONPATH", reason: "platform variable the Lane A harness extends for the dispatcher child" },
 	{ name: "XDG_RUNTIME_DIR", reason: "platform variable naming the per-user runtime directory" },
+	{ name: "XDG_STATE_HOME", reason: "platform variable naming the per-user state directory; the doc watch only reads it to build its default mirror and spool directories" },
 	{ name: "NOTIFY_SOCKET", reason: "set by systemd for a Type=notify unit; read by the watchdog, never configured" },
 	{ name: "WATCHDOG_USEC", reason: "set by systemd from WatchdogSec; never configured" },
 	{ name: "WATCHDOG_PID", reason: "set by systemd; never configured" },
@@ -834,6 +835,15 @@ export const FLAGS: readonly FlagSpec[] = [
 	{ name: "SUBSTRATE_CORPUS_CONCURRENCY", kind: "number", plane: "docs", default: "4", allowed: "1..16", unset: "4 batches in flight at once", readBy: "mcp-server/config.ts", documented: true, doc: "docs/runbooks/corpus-ingest.md" },
 	{ name: "SUBSTRATE_CORPUS_BATCH_DOCS", kind: "number", plane: "docs", default: "20", allowed: "1..200", unset: "20 documents per batch", readBy: "mcp-server/config.ts", documented: true, doc: "docs/runbooks/corpus-ingest.md" },
 	{ name: "SUBSTRATE_CORPUS_BATCH_BYTES", kind: "number", plane: "docs", default: "1000000", allowed: "10000..5000000", unset: "1000000 bytes per batch", readBy: "mcp-server/config.ts", documented: true, doc: "docs/runbooks/corpus-ingest.md" },
+	// Doc watch (v1.7 phase 65).
+	{ name: "SUBSTRATE_CORPUS_FRESH_MAX_AGE_S", kind: "number", plane: "docs", default: "172800", allowed: "whole seconds 0..31536000; 0 judges nothing (not a whole number: the default; above the range: clamped)", unset: "172800 s (two days): while SUBSTRATE_CORPUS=on a corpus whose last ingest is older raises the docs.freshness warning; with the corpus off nothing is judged", readBy: "mcp-server/config.ts", documented: true, doc: "docs/runbooks/corpus-sync.md" },
+	{ name: "SUBSTRATE_PLANNING_HASH_STORE", kind: "toggle", plane: "docs", default: "off", allowed: "on | off", unset: "off: the planning refresh keeps its page hashes in memory only, as before, and every restart re-ingests every planning page; on keeps them in the index table planning_page_hashes (memory when there is no index)", readBy: "mcp-server/config.ts", documented: true, doc: "docs/runbooks/corpus-sync.md" },
+	{ name: "SUBSTRATE_CORPUS_MIRROR_DIR", kind: "string", plane: "clients", default: "$XDG_STATE_HOME/substrate/corpus-mirrors", allowed: "directory path", unset: "<state dir>/corpus-mirrors, where <state dir> is $XDG_STATE_HOME/substrate (an absolute XDG_STATE_HOME), else ~/.local/state/substrate", readBy: "cli/corpus/watch-settings.ts", documented: true, doc: "docs/corpus-watch.md" },
+	{ name: "SUBSTRATE_CORPUS_SPOOL", kind: "string", plane: "clients", default: "$XDG_STATE_HOME/substrate/corpus-hints", allowed: "directory path", unset: "<state dir>/corpus-hints, with the same state dir as the mirrors", readBy: "cli/corpus/watch-settings.ts", documented: true, doc: "docs/corpus-watch.md" },
+	{ name: "SUBSTRATE_CORPUS_DEBOUNCE_MS", kind: "number", plane: "clients", default: "2000", allowed: "100..60000 (not a whole number: the default; out of range: clamped)", unset: "2000 ms of quiet ends a burst of edits", readBy: "cli/corpus/watch-settings.ts", documented: true, doc: "docs/corpus-watch.md" },
+	{ name: "SUBSTRATE_CORPUS_MAX_WAIT_MS", kind: "number", plane: "clients", default: "30000", allowed: "1000..600000, never below the debounce (not a whole number: the default; out of range: clamped)", unset: "30000 ms: a burst that never goes quiet is synced after this long", readBy: "cli/corpus/watch-settings.ts", documented: true, doc: "docs/corpus-watch.md" },
+	{ name: "SUBSTRATE_CORPUS_WATCH_MAX", kind: "number", plane: "clients", default: "2000", allowed: "10..20000 (not a whole number: the default; out of range: clamped)", unset: "2000 directories watched; past it the watcher drops to sweep-only", readBy: "cli/corpus/watch-settings.ts", documented: true, doc: "docs/corpus-watch.md" },
+	{ name: "SUBSTRATE_CORPUS_SWEEP_S", kind: "number", plane: "clients", default: "900", allowed: "30..86400 (not a whole number: the default; out of range: clamped)", unset: "900 s between full sweeps", readBy: "cli/corpus/watch-settings.ts", documented: true, doc: "docs/corpus-watch.md" },
 
 	// ── admission ─────────────────────────────────────────────────────────────
 	{

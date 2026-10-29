@@ -38,11 +38,16 @@ export const DEFAULT_TRIGGER_LAG_MIN = 15;
 export const GAUGE_FRESHNESS_SECONDS = "substrate.docs.freshness_seconds";
 export const GAUGE_TRIGGER_LAG_SECONDS = "substrate.docs.trigger_lag_seconds";
 
+/** The name the corpus is judged under beside the datasets: its lag marker is kept in the same state file. */
+export const CORPUS_FRESHNESS_DATASET = "corpus";
+
 export interface FreshnessSettings {
 	/** Staleness threshold in hours; `0` reports freshness without judging it. */
 	maxAgeHours: number;
 	/** Trigger-lag threshold in minutes; `0` switches trigger bookkeeping and lag detection off. */
 	triggerLagMinutes: number;
+	/** Seconds the corpus may go without an ingest (`SUBSTRATE_CORPUS_FRESH_MAX_AGE_S`), named in the corpus's own events. Absent where the corpus is not judged. */
+	corpusMaxAgeS?: number | undefined;
 }
 
 /** One dataset's verdict; `dataset` is always a name of the trigger table. */
@@ -147,6 +152,31 @@ export function evaluateFreshness(input: FreshnessInput): DatasetFreshness[] {
 	return rows;
 }
 
+/**
+ * The corpus's verdict, judged apart from the datasets (v1.7 phase 65): stale when its newest ingest is older than
+ * `maxAgeS`. It reuses the dataset breach machinery (one marker, one warning per breach, one note when it clears), so the
+ * row stands in a dataset row: `trigger_lag_seconds` is the age and `lagging_commit` the newest ingest's instant. `null`
+ * (judge nothing) when `maxAgeS` is 0 or the manifest has never ingested anything or its instant cannot be read. A corpus
+ * whose documents do not change is as old as its last change, so this warns for a quiet one too; the threshold is the knob.
+ */
+export function corpusFreshnessRow(input: { lastIngestAt: string | null; now: number; maxAgeS: number }): DatasetFreshness | null {
+	if (input.maxAgeS === 0 || input.lastIngestAt === null) return null;
+	const ms = parseMs(input.lastIngestAt);
+	if (ms === null) return null;
+	const age = Math.max(0, Math.round((input.now - ms) / 1000));
+	const stale = age > input.maxAgeS;
+	return {
+		dataset: CORPUS_FRESHNESS_DATASET,
+		freshness_seconds: age,
+		newest_ingested_at: input.lastIngestAt,
+		stale,
+		trigger_lag_seconds: age,
+		lagging_commit: input.lastIngestAt,
+		lagging: stale,
+		triggers: 0,
+	};
+}
+
 /** One gauge point; `dataset` is the only label and comes from the trigger table. */
 export interface GaugeSample {
 	name: string;
@@ -224,7 +254,7 @@ export function freshnessStateFromJson(parsed: unknown): FreshnessState {
 	if (Object.hasOwn(file, "triggers")) state.triggers = triggersFromJson(file.triggers);
 	const lag: unknown = Object.hasOwn(file, "lag") ? file.lag : undefined;
 	if (lag !== null && typeof lag === "object" && !Array.isArray(lag)) {
-		for (const dataset of Object.keys(DATASET_TRIGGERS)) {
+		for (const dataset of [...Object.keys(DATASET_TRIGGERS), CORPUS_FRESHNESS_DATASET]) {
 			if (!Object.hasOwn(lag, dataset)) continue;
 			const marker = (lag as Record<string, unknown>)[dataset];
 			if (marker === null || typeof marker !== "object") continue;
@@ -269,6 +299,22 @@ const COMMIT_MAX = 64;
 
 /** The `warning` for one dataset entering the breach: the commit, the wait and the threshold, never content. */
 export function lagWarningEvent(action: Extract<LagAction, { type: "breach" }>, settings: FreshnessSettings): EventInput {
+	if (action.dataset === CORPUS_FRESHNESS_DATASET) {
+		return {
+			surface: "substrate",
+			kind: "warning",
+			summary: `docs corpus: last ingest ${Math.round(action.lagSeconds / 3600)} h ago${settings.corpusMaxAgeS === undefined ? "" : `, over the ${Math.round(settings.corpusMaxAgeS / 3600)} h limit`}`,
+			session_id: `docs-freshness:${CORPUS_FRESHNESS_DATASET}`,
+			payload: {
+				action: "docs.freshness",
+				runtime: "docs-freshness",
+				state: "lagging",
+				dataset: CORPUS_FRESHNESS_DATASET,
+				lag_seconds: action.lagSeconds,
+				...(settings.corpusMaxAgeS === undefined ? {} : { threshold_seconds: settings.corpusMaxAgeS }),
+			},
+		};
+	}
 	const commit = action.commit.slice(0, COMMIT_MAX);
 	return {
 		surface: "substrate",
@@ -289,6 +335,15 @@ export function lagWarningEvent(action: Extract<LagAction, { type: "breach" }>, 
 
 /** The `note` when the breach clears: the marker that makes the dedupe's end visible on the ledger. */
 export function lagRecoveryEvent(action: Extract<LagAction, { type: "recover" }>, settings: FreshnessSettings): EventInput {
+	if (action.dataset === CORPUS_FRESHNESS_DATASET) {
+		return {
+			surface: "substrate",
+			kind: "note",
+			summary: "docs corpus: ingest is fresh again",
+			session_id: `docs-freshness:${CORPUS_FRESHNESS_DATASET}`,
+			payload: { action: "docs.freshness", runtime: "docs-freshness", state: "recovered", dataset: CORPUS_FRESHNESS_DATASET, ...(settings.corpusMaxAgeS === undefined ? {} : { threshold_seconds: settings.corpusMaxAgeS }) },
+		};
+	}
 	const commit = action.commit.slice(0, COMMIT_MAX);
 	return {
 		surface: "substrate",

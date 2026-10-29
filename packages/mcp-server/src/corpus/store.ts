@@ -50,8 +50,11 @@ export interface RefreshedMetadata {
 	commit?: string | undefined;
 }
 
-/** `status()` without the protocol member the route adds. */
-export type CorpusStatusSummary = Omit<CorpusStatusResponse, "protocol">;
+/**
+ * `status()` without the protocol member and the lag the route computes. `newestChangeAt` is the newest manifest write of any
+ * kind, so the route can age it against its own clock; the freshness check reads `lastIngestAt`.
+ */
+export type CorpusStatusSummary = Omit<CorpusStatusResponse, "protocol" | "lagSeconds"> & { newestChangeAt: string | null };
 
 export interface CorpusStore {
 	/** Every row, any state, whose repo is in `repos`. The planner applies the coverage and tier limits itself. */
@@ -68,6 +71,11 @@ export interface CorpusStore {
 	markTombstoned(repo: string, path: string): Promise<boolean>;
 	/** How many ACTIVE rows hold this plane document id. */
 	activeReferences(documentId: string): Promise<number>;
+	/**
+	 * Up to `limit` ACTIVE rows, ordered by repo and path. A caller that must know whether it saw every row asks for one more
+	 * than it will use: a full answer means there may be more.
+	 */
+	activeRows(limit: number): Promise<ManifestRow[]>;
 	status(): Promise<CorpusStatusSummary>;
 	manifestVersion(): Promise<number>;
 }
@@ -78,6 +86,12 @@ export const STATUS_MAX_REPOS = 1000;
 function numberOf(value: unknown): number {
 	const parsed = Number(value);
 	return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/** An ISO instant from a `timestamptz` column (a Date, or text), or null when the column is null or not a date. */
+function isoOf(value: unknown): string | null {
+	const at = value instanceof Date ? value : typeof value === "string" ? new Date(value) : null;
+	return at !== null && Number.isFinite(at.getTime()) ? at.toISOString() : null;
 }
 
 /** A row from the database, or null when a column holds something the closed lists do not allow. */
@@ -169,9 +183,16 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 			const rows = await sql`select count(*)::int as n from corpus_documents where docs_document_id = ${documentId} and state = 'active'`;
 			return numberOf(rows[0]?.n);
 		},
+		async activeRows(limit: number): Promise<ManifestRow[]> {
+			const rows: Array<Record<string, unknown>> = await sql`select * from corpus_documents where state = 'active' order by repo, path limit ${limit}`;
+			return rows.flatMap((row) => {
+				const parsed = toManifestRow(row);
+				return parsed === null ? [] : [parsed];
+			});
+		},
 		manifestVersion,
 		async status(): Promise<CorpusStatusSummary> {
-			const [totals, byRepo, byKind, byTier, last, version] = await Promise.all([
+			const [totals, byRepo, byKind, byTier, last, newest, version] = await Promise.all([
 				sql`select count(*) filter (where state = 'active')::int as active, count(*) filter (where state = 'tombstoned')::int as tombstoned from corpus_documents`,
 				sql`
 					select repo, count(*) filter (where state = 'active')::int as active, count(*) filter (where state = 'tombstoned')::int as tombstoned
@@ -179,6 +200,7 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 				sql`select kind, count(*)::int as n from corpus_documents where state = 'active' group by kind order by kind`,
 				sql`select tier::int as tier, count(*)::int as n from corpus_documents where state = 'active' group by tier order by tier`,
 				sql`select max(ingested_at) as last from corpus_documents`,
+				sql`select max(updated_at) as newest from corpus_documents`,
 				manifestVersion(),
 			]);
 			const active = numberOf(totals[0]?.active);
@@ -194,7 +216,8 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 					const tier = numberOf(row.tier);
 					return isDocTier(tier) ? [{ tier, count: numberOf(row.n) }] : [];
 				}),
-				lastIngestAt: lastIngest instanceof Date ? lastIngest.toISOString() : typeof lastIngest === "string" ? new Date(lastIngest).toISOString() : null,
+				lastIngestAt: isoOf(lastIngest),
+				newestChangeAt: isoOf(newest[0]?.newest),
 				manifestVersion: version,
 			};
 		},

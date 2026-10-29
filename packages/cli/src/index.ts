@@ -22,7 +22,7 @@
  *   substrate spool status|flush             the collector event spool (docs/collectors.md, "Event spool")
  *   substrate session checkpoint|checkpoints|rollback|recover|sync   session checkpoints and rollback
  *       (exit 0 done, 1 failed, 2 usage, 3 refused, 4 files restored but the ledger commit is pending)
- *   substrate corpus scan|plan|ingest|status   the documentation corpus of every repository (docs/corpus.md)
+ *   substrate corpus scan|plan|ingest|status|sync|watch|reconcile|hook|hint   the documentation corpus of every repository (docs/corpus.md, docs/corpus-watch.md)
  *       (exit 0 done, 1 failed, 2 usage; ingest is a dry run until --execute)
  *   substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair --server-stopped [--repair-orphans]]
  *       the memory consistency verifier: the index, the plane and the ledger compared
@@ -780,7 +780,8 @@ switch (command) {
 				"substrate memory capsule export --out FILE [--session S] [--repo R] [--since ISO] [--limit N] [--store DIR]\n" +
 				"                         | verify FILE [--anchors] | redact FILE --ids a,b --reason TEXT --out FILE2   (substrate memory capsule for the flags)\n" +
 				"substrate spool status [--json] | flush [--json] [--budget-ms N]   (the event spool needs SUBSTRATE_EVENT_SPOOL=on)\n" +
-				"substrate corpus scan | plan | ingest [--execute] | status   (substrate corpus --help for the flags; ingest is a dry run without --execute)\n",
+				"substrate corpus scan | plan | ingest [--execute] | status | sync [--repo R] [--execute] | watch [--once] | reconcile [--execute] | hook install|uninstall|status --repo DIR | hint --repo DIR\n" +
+				"                  (substrate corpus --help for the flags; ingest, sync and reconcile are dry runs without --execute)\n",
 		);
 		process.exit(command ? 2 : 0);
 }

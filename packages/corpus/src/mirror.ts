@@ -1,0 +1,134 @@
+/**
+ * The Substrate-managed mirror of a repository's origin (v1.7 phase 65, decision D65-4).
+ *
+ * A fetch moves refs and never the working tree, and a fetch inside the user's clone writes into that clone's `.git`. So the
+ * default triggers keep their own bare, blobless mirror of the origin (`git clone --mirror --filter=blob:none`, then
+ * `git fetch --prune` inside it) under a directory the caller chooses, and the view (`view.ts`) reads that mirror's default
+ * branch. The only command that touches the user's repository is `git remote get-url origin`, a read of its configuration.
+ *
+ * A failed fetch leaves the mirror at its last successful state: the result says `stale` with a closed reason and the view
+ * keeps reading what is there, so an offline run never replaces newer indexed text with an older checkout. A repository that
+ * has never had a mirror is `absent`, and only then is it read from its working tree alone.
+ *
+ * Pure of the environment: the mirror directory, the timeouts and the runner are parameters.
+ */
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
+import { githubSlug, stripCredentials } from "./discover.ts";
+import { type GitBytesRunner, outputText } from "./gitio.ts";
+
+/** A clone moves the whole history without its file contents. */
+export const MIRROR_CLONE_TIMEOUT_MS = 600_000;
+export const MIRROR_FETCH_TIMEOUT_MS = 120_000;
+/** A read of the checkout's configuration is instant; the bound only guards against a wedged process. */
+const CONFIG_TIMEOUT_MS = 30_000;
+
+/** Hex digits of the origin hash kept in the mirror's directory name. */
+const NAME_HASH_LENGTH = 12;
+const NAME_SLUG_LENGTH = 60;
+
+export const MIRROR_STALE_REASONS = ["fetch-failed", "fetch-timeout"] as const;
+export type MirrorStaleReason = (typeof MIRROR_STALE_REASONS)[number];
+
+export const MIRROR_ABSENT_REASONS = ["no-origin", "not-created", "clone-failed", "clone-timeout", "mirror-dir-unusable"] as const;
+export type MirrorAbsentReason = (typeof MIRROR_ABSENT_REASONS)[number];
+
+/**
+ * - `fetched`: the mirror was created or updated by this run.
+ * - `unfetched`: it exists and this run did not fetch (`fetch: false`); it may be behind the origin.
+ * - `stale`: the fetch failed; the mirror is at its last successful state and is still read.
+ * - `absent`: there is no mirror, so the repository can only be read from its working tree.
+ */
+export type MirrorState =
+	| { status: "fetched"; mirrorDir: string; created: boolean }
+	| { status: "unfetched"; mirrorDir: string }
+	| { status: "stale"; mirrorDir: string; reason: MirrorStaleReason }
+	| { status: "absent"; reason: MirrorAbsentReason };
+
+export interface MirrorOptions {
+	/** False reads an existing mirror as it is and never touches the network (no clone, no fetch). */
+	fetch: boolean;
+	cloneTimeoutMs?: number | undefined;
+	fetchTimeoutMs?: number | undefined;
+}
+
+/** The origin URL exactly as the checkout configures it, or null when it has none. Read-only. */
+export function readOrigin(repoDir: string, run: GitBytesRunner): string | null {
+	const result = run({ args: ["remote", "get-url", "origin"], cwd: repoDir, timeoutMs: CONFIG_TIMEOUT_MS });
+	const url = outputText(result).trim();
+	if (result.code !== 0 || url === "") return null;
+	// A relative path is relative to the checkout, and the clone runs elsewhere.
+	return url.startsWith("./") || url.startsWith("../") ? resolve(repoDir, url) : url;
+}
+
+/** The mirror's directory name: a readable slug and a hash of the origin without credentials, so it never changes for one origin. */
+export function mirrorName(origin: string): string {
+	const stripped = stripCredentials(origin).replace(/\/+$/, "").replace(/\.git$/, "");
+	const readable = (githubSlug(origin) ?? basename(stripped)).replace("/", "-");
+	const slug = readable
+		.replace(/[^A-Za-z0-9._-]/g, "-")
+		.replace(/^[.-]+/, "")
+		.slice(0, NAME_SLUG_LENGTH);
+	const hash = createHash("sha256").update(stripped).digest("hex").slice(0, NAME_HASH_LENGTH);
+	return `${slug === "" ? "repo" : slug}-${hash}`;
+}
+
+/** The directory the mirror of `origin` lives in, below `mirrorRoot`. */
+export function mirrorPath(mirrorRoot: string, origin: string): string {
+	return join(resolve(mirrorRoot), mirrorName(origin));
+}
+
+function isUsableMirror(dir: string, run: GitBytesRunner): boolean {
+	const result = run({ args: ["rev-parse", "--is-bare-repository"], cwd: dir, timeoutMs: CONFIG_TIMEOUT_MS });
+	return result.code === 0 && outputText(result).trim() === "true";
+}
+
+/**
+ * Create or update the mirror of the checkout's origin. Never throws: every failure is a closed reason in the result.
+ * With `fetch: false` an existing mirror is returned as it is and a missing one is reported `absent`/`not-created`.
+ */
+export function ensureMirror(repoDir: string, mirrorRoot: string, run: GitBytesRunner, options: MirrorOptions): MirrorState {
+	const origin = readOrigin(repoDir, run);
+	if (origin === null) return { status: "absent", reason: "no-origin" };
+	const root = resolve(mirrorRoot);
+	const dest = mirrorPath(root, origin);
+	const present = existsSync(dest);
+	if (present && !isUsableMirror(dest, run)) return { status: "absent", reason: "mirror-dir-unusable" };
+	if (present) {
+		if (!options.fetch) return { status: "unfetched", mirrorDir: dest };
+		const fetched = run({
+			args: ["fetch", "--prune", "--quiet", "origin"],
+			cwd: dest,
+			timeoutMs: options.fetchTimeoutMs ?? MIRROR_FETCH_TIMEOUT_MS,
+		});
+		if (fetched.code === 0) return { status: "fetched", mirrorDir: dest, created: false };
+		return { status: "stale", mirrorDir: dest, reason: fetched.timedOut ? "fetch-timeout" : "fetch-failed" };
+	}
+	if (!options.fetch) return { status: "absent", reason: "not-created" };
+	try {
+		// The directory holds the origin URL (which may carry a credential), so only its owner can enter it.
+		mkdirSync(root, { recursive: true, mode: 0o700 });
+	} catch {
+		return { status: "absent", reason: "mirror-dir-unusable" };
+	}
+	// A clone killed half way must not leave a directory that later looks like a mirror, so it lands under a temporary name.
+	const partial = `${dest}.partial-${randomUUID()}`;
+	const cloned = run({
+		args: ["clone", "--mirror", "--filter=blob:none", "--quiet", "--", origin, partial],
+		cwd: root,
+		timeoutMs: options.cloneTimeoutMs ?? MIRROR_CLONE_TIMEOUT_MS,
+	});
+	if (cloned.code !== 0) {
+		rmSync(partial, { recursive: true, force: true });
+		return { status: "absent", reason: cloned.timedOut ? "clone-timeout" : "clone-failed" };
+	}
+	try {
+		renameSync(partial, dest);
+	} catch {
+		// Another run finished the same clone first; its mirror is as good as this one.
+		rmSync(partial, { recursive: true, force: true });
+		if (!existsSync(dest)) return { status: "absent", reason: "mirror-dir-unusable" };
+	}
+	return { status: "fetched", mirrorDir: dest, created: true };
+}
