@@ -21,6 +21,7 @@ import {
 	classifyPlaneReason,
 	extractUsage,
 } from "./instruments.ts";
+import { defined } from "./test-support.ts";
 import { findCounter, findHistogram, mergeHistogram, sumCounter } from "./metrics.ts";
 
 describe("extractUsage", () => {
@@ -68,7 +69,7 @@ describe("recordEmit", () => {
 		instruments.recordEmit({ surface: "omp", graph_id: "ut-1", kind: "shell", stored: true, durationMs: 12 });
 		instruments.recordEmit({ surface: "omp", graph_id: "ut-1", kind: "shell", stored: false, durationMs: 40 });
 
-		const counter = findCounter(instruments.snapshot(), METRIC.emitTotal)!;
+		const counter = defined(findCounter(instruments.snapshot(), METRIC.emitTotal));
 		expect(sumCounter(counter)).toBe(2);
 		expect(sumCounter(counter, { outcome: "stored" })).toBe(1);
 		expect(sumCounter(counter, { outcome: "dropped" })).toBe(1);
@@ -80,7 +81,7 @@ describe("recordEmit", () => {
 		const instruments = new SubstrateInstruments();
 		instruments.recordEmit({ surface: "omp", kind: "shell", stored: false, durationMs: 40 });
 
-		expect(mergeHistogram(findHistogram(instruments.snapshot(), METRIC.emitDuration)!).count).toBe(1);
+		expect(mergeHistogram(defined(findHistogram(instruments.snapshot(), METRIC.emitDuration))).count).toBe(1);
 	});
 
 	test("attributes tokens and cost carried on the payload to the surface and graph", () => {
@@ -94,10 +95,10 @@ describe("recordEmit", () => {
 			payload: { usage: { input_tokens: 1000, output_tokens: 250, cost_usd: 0.02, model: "opus" } },
 		});
 
-		const tokens = findCounter(instruments.snapshot(), METRIC.tokens)!;
+		const tokens = defined(findCounter(instruments.snapshot(), METRIC.tokens));
 		expect(sumCounter(tokens, { graph_id: "ut-2", direction: "input" })).toBe(1000);
 		expect(sumCounter(tokens, { graph_id: "ut-2", direction: "output" })).toBe(250);
-		expect(sumCounter(findCounter(instruments.snapshot(), METRIC.cost)!, { graph_id: "ut-2" })).toBeCloseTo(0.02, 10);
+		expect(sumCounter(defined(findCounter(instruments.snapshot(), METRIC.cost)), { graph_id: "ut-2" })).toBeCloseTo(0.02, 10);
 	});
 
 	test("an event with no usage creates no token series at all", () => {
@@ -114,7 +115,7 @@ describe("recordRequest", () => {
 		instruments.recordRequest({ surface: "omp", route: "/events", status: 202, durationMs: 3 });
 		instruments.recordRequest({ surface: "omp", route: "/events", status: 503, durationMs: 9 });
 
-		const counter = findCounter(instruments.snapshot(), METRIC.requestTotal)!;
+		const counter = defined(findCounter(instruments.snapshot(), METRIC.requestTotal));
 		expect(counter.points).toHaveLength(2);
 		expect(sumCounter(counter, { status: "2xx" })).toBe(1);
 		expect(sumCounter(counter, { status: "5xx" })).toBe(1);
@@ -126,7 +127,7 @@ describe("recordBrief", () => {
 		const instruments = new SubstrateInstruments();
 		instruments.recordBrief({ surface: "omp", ok: false, durationMs: 900 });
 
-		const histogram = findHistogram(instruments.snapshot(), METRIC.briefDuration)!;
+		const histogram = defined(findHistogram(instruments.snapshot(), METRIC.briefDuration));
 		expect(histogram.points[0]?.attributes.outcome).toBe("error");
 		expect(mergeHistogram(histogram).count).toBe(1);
 	});
@@ -140,7 +141,7 @@ describe("recordBriefResult (uplift-3 N7)", () => {
 		for (const state of BRIEF_STATES) {
 			for (const result of BRIEF_RESULTS) instruments.recordBriefResult({ surface: "grok-bot", state, result });
 		}
-		const counter = findCounter(instruments.snapshot(), METRIC.briefResult)!;
+		const counter = defined(findCounter(instruments.snapshot(), METRIC.briefResult));
 		expect(counter.points).toHaveLength(BRIEF_STATES.length * BRIEF_RESULTS.length);
 		expect(sumCounter(counter, { surface: "grok-bot", state: "complete", result: "not_modified" })).toBe(1);
 		expect(sumCounter(counter)).toBe(6);
@@ -151,8 +152,8 @@ describe("recordBriefResult (uplift-3 N7)", () => {
 		const instruments = new SubstrateInstruments();
 		instruments.recordBrief({ surface: "grok-bot", ok: true, durationMs: 50 });
 		instruments.recordBriefResult({ surface: "grok-bot", state: "complete", result: "not_modified" });
-		expect(mergeHistogram(findHistogram(instruments.snapshot(), METRIC.briefDuration)!).count).toBe(1);
-		expect(sumCounter(findCounter(instruments.snapshot(), METRIC.briefResult)!, { result: "not_modified" })).toBe(1);
+		expect(mergeHistogram(defined(findHistogram(instruments.snapshot(), METRIC.briefDuration))).count).toBe(1);
+		expect(sumCounter(defined(findCounter(instruments.snapshot(), METRIC.briefResult)), { result: "not_modified" })).toBe(1);
 	});
 });
 
@@ -173,11 +174,11 @@ describe("brief profile and estimated spend (uplift-4 S1)", () => {
 		instruments.recordBriefProfile({ surface: "grok-bot", profile: "full", mode: "shadow", bytesSaved: 4000 });
 		instruments.recordBriefProfile({ surface: "grok-bot", profile: "full", mode: "shadow", bytesSaved: null });
 		instruments.recordBriefProfile({ surface: "grok-bot", profile: "compact", mode: "enforce", bytesSaved: -30 });
-		const profile = findCounter(instruments.snapshot(), METRIC.briefProfile)!;
+		const profile = defined(findCounter(instruments.snapshot(), METRIC.briefProfile));
 		expect(sumCounter(profile, { surface: "grok-bot", profile: "full", mode: "shadow" })).toBe(2);
 		expect(sumCounter(profile, { profile: "compact", mode: "enforce" })).toBe(1);
 		expect(Object.keys(profile.points[0]?.attributes ?? {}).sort()).toEqual(["mode", "profile", "surface"]);
-		const saved = findCounter(instruments.snapshot(), METRIC.briefProfileBytesSaved)!;
+		const saved = defined(findCounter(instruments.snapshot(), METRIC.briefProfileBytesSaved));
 		expect(sumCounter(saved)).toBe(4000);
 		expect(Object.keys(saved.points[0]?.attributes ?? {})).toEqual(["surface"]);
 	});
@@ -187,17 +188,17 @@ describe("brief profile and estimated spend (uplift-4 S1)", () => {
 		instruments.recordServedTokens({ surface: "grok-bot", tool: "brief", bytes: 3500 });
 		instruments.recordServedTokens({ surface: "grok-bot", tool: "docs", bytes: 10 });
 		instruments.recordServedTokens({ surface: "grok-bot", tool: "recall", bytes: 0 });
-		const served = findCounter(instruments.snapshot(), METRIC.servedTokensEst)!;
+		const served = defined(findCounter(instruments.snapshot(), METRIC.servedTokensEst));
 		expect(sumCounter(served, { tool: "brief" })).toBe(875);
 		expect(sumCounter(served, { tool: "docs" })).toBe(3);
 		expect(sumCounter(served, { tool: "recall" })).toBe(0);
 		expect(Object.keys(served.points[0]?.attributes ?? {}).sort()).toEqual(["surface", "tool"]);
 		expect(METRIC.servedTokensEst).not.toBe(METRIC.tokens);
-		expect(sumCounter(findCounter(instruments.snapshot(), METRIC.tokens)!)).toBe(0);
+		expect(sumCounter(defined(findCounter(instruments.snapshot(), METRIC.tokens)))).toBe(0);
 		// Recording usage the model reported does not move the estimate.
 		instruments.recordUsage({ surface: "grok-bot", payload: { usage: { input_tokens: 100, output_tokens: 50 } } });
-		expect(sumCounter(findCounter(instruments.snapshot(), METRIC.servedTokensEst)!)).toBe(878);
-		expect(sumCounter(findCounter(instruments.snapshot(), METRIC.tokens)!)).toBe(150);
+		expect(sumCounter(defined(findCounter(instruments.snapshot(), METRIC.servedTokensEst)))).toBe(878);
+		expect(sumCounter(defined(findCounter(instruments.snapshot(), METRIC.tokens)))).toBe(150);
 	});
 });
 
@@ -209,10 +210,10 @@ describe("recordClaim", () => {
 		instruments.recordClaim({ surface: "omp", graph_id: "ut-1", outcome: "stolen" });
 		instruments.recordClaim({ surface: "omp", graph_id: "ut-1", outcome: "granted" });
 
-		const claims = findCounter(instruments.snapshot(), METRIC.claims)!;
+		const claims = defined(findCounter(instruments.snapshot(), METRIC.claims));
 		expect(sumCounter(claims)).toBe(2);
 		expect(sumCounter(claims, { outcome: "stolen" })).toBe(1);
-		expect(sumCounter(findCounter(instruments.snapshot(), METRIC.leaseSteals)!)).toBe(1);
+		expect(sumCounter(defined(findCounter(instruments.snapshot(), METRIC.leaseSteals)))).toBe(1);
 	});
 
 	test("a granted claim does not touch the steal counter", () => {
@@ -240,7 +241,7 @@ describe("refused events and anonymous callers", () => {
 		instruments.recordEventRefusal({ reason: "auth" });
 		instruments.recordEventRefusal({ reason: "graph_id" });
 
-		const counter = findCounter(instruments.snapshot(), METRIC.eventsRefused)!;
+		const counter = defined(findCounter(instruments.snapshot(), METRIC.eventsRefused));
 		expect(sumCounter(counter, { reason: "auth" })).toBe(2);
 		expect(sumCounter(counter, { reason: "graph_id" })).toBe(1);
 		expect(sumCounter(counter, { reason: "validation" })).toBe(0);
@@ -251,7 +252,7 @@ describe("refused events and anonymous callers", () => {
 		instruments.recordAnonymous({ route: "/events", claimedSurface: "hermes" });
 		instruments.recordAnonymous({ route: "/handoff", claimedSurface: "none" });
 
-		const counter = findCounter(instruments.snapshot(), METRIC.anonymousRequests)!;
+		const counter = defined(findCounter(instruments.snapshot(), METRIC.anonymousRequests));
 		expect(sumCounter(counter, { route: "/events", claimed_surface: "hermes" })).toBe(1);
 		expect(sumCounter(counter, { route: "/handoff", claimed_surface: "none" })).toBe(1);
 	});
@@ -262,14 +263,14 @@ describe("recordQuarantine and recordAudit", () => {
 		const instruments = new SubstrateInstruments();
 		instruments.recordQuarantine({ surface: "omp", graph_id: "ut-1", reason: "unrecorded-claim" });
 
-		expect(sumCounter(findCounter(instruments.snapshot(), METRIC.quarantines)!, { reason: "unrecorded-claim" })).toBe(1);
+		expect(sumCounter(defined(findCounter(instruments.snapshot(), METRIC.quarantines)), { reason: "unrecorded-claim" })).toBe(1);
 	});
 
 	test("an audit record that could not be written is counted as lost, not as written", () => {
 		const instruments = new SubstrateInstruments();
 		instruments.recordAudit({ decision: "allowed", written: false });
 
-		expect(sumCounter(findCounter(instruments.snapshot(), METRIC.auditAppends)!, { outcome: "lost" })).toBe(1);
+		expect(sumCounter(defined(findCounter(instruments.snapshot(), METRIC.auditAppends)), { outcome: "lost" })).toBe(1);
 	});
 });
 
@@ -283,7 +284,7 @@ describe("recordMemoryExpired", () => {
 		instruments.recordMemoryExpired({ surface: "cursor", kind: "warning", mode: "hidden" });
 		instruments.recordMemoryExpired({ surface: "hermes", kind: "decision", mode: "hidden" });
 
-		const counter = findCounter(instruments.snapshot(), METRIC.memoryExpired)!;
+		const counter = defined(findCounter(instruments.snapshot(), METRIC.memoryExpired));
 		expect(counter.unit).toBe("{entry}");
 		expect(sumCounter(counter, { surface: "cursor", kind: "warning", mode: "served" })).toBe(2);
 		expect(sumCounter(counter, { surface: "cursor", kind: "warning", mode: "hidden" })).toBe(1);
@@ -307,11 +308,11 @@ describe("recordPlane", () => {
 		instruments.recordPlane({ plane: "cache", op: "get", outcome: "error", durationMs: 1, reason: "WRONGTYPE" });
 
 		const snapshot = instruments.snapshot();
-		const duration = findHistogram(snapshot, METRIC.planeDuration)!;
+		const duration = defined(findHistogram(snapshot, METRIC.planeDuration));
 		expect(mergeHistogram(duration, { plane: "greptime" }).count).toBe(2);
 		expect(mergeHistogram(duration, { plane: "greptime", op: "select", outcome: "ok" }).count).toBe(1);
 		expect(mergeHistogram(duration, { outcome: "open" }).count).toBe(1);
-		const errors = findCounter(snapshot, METRIC.planeErrors)!;
+		const errors = defined(findCounter(snapshot, METRIC.planeErrors));
 		expect(sumCounter(errors, { plane: "greptime", reason: "server" })).toBe(1);
 		expect(sumCounter(errors, { plane: "hindsight", reason: "timeout" })).toBe(1);
 		expect(sumCounter(errors, { plane: "ragflow", reason: "open" })).toBe(1);
@@ -343,7 +344,7 @@ describe("recordAdmission", () => {
 		instruments.recordAdmission({ surface: "anonymous", klass: "write", decision: "limited" });
 		instruments.recordAdmission({ surface: "omp", klass: "coordination", decision: "bypass" });
 
-		const counter = findCounter(instruments.snapshot(), METRIC.admissionDecisions)!;
+		const counter = defined(findCounter(instruments.snapshot(), METRIC.admissionDecisions));
 		expect(counter.name).toBe("substrate.admission.decisions");
 		expect(sumCounter(counter, { surface: "grok-bot", class: "read", decision: "allowed" })).toBe(2);
 		expect(sumCounter(counter, { surface: "grok-bot", decision: "shadow_limited" })).toBe(1);
@@ -368,7 +369,7 @@ describe("recordDocsSearch (uplift-3 N5)", () => {
 		instruments.recordDocsSearch({ surface: "omp", outcome: "hit", cached: false, durationMs: 300, citations: { unpinned: 1 } });
 
 		const snapshot = instruments.snapshot();
-		const searches = findCounter(snapshot, METRIC.docsSearch)!;
+		const searches = defined(findCounter(snapshot, METRIC.docsSearch));
 		expect(sumCounter(searches)).toBe(5);
 		expect(sumCounter(searches, { surface: "grok-bot", outcome: "hit", cached: "true" })).toBe(1);
 		expect(sumCounter(searches, { surface: "grok-bot", outcome: "hit", cached: "false" })).toBe(1);
@@ -382,7 +383,7 @@ describe("recordDocsSearch (uplift-3 N5)", () => {
 
 		// A cache hit is counted per citation it returned too: the share of
 		// unrecorded answers is what the counter reads as, hit or loaded.
-		const citations = findCounter(snapshot, METRIC.docsCitations)!;
+		const citations = defined(findCounter(snapshot, METRIC.docsCitations));
 		expect(sumCounter(citations, { provenance: "recorded" })).toBe(6);
 		expect(sumCounter(citations, { provenance: "unrecorded" })).toBe(4);
 		expect(sumCounter(citations, { provenance: "unpinned" })).toBe(1);
@@ -391,7 +392,7 @@ describe("recordDocsSearch (uplift-3 N5)", () => {
 			expect(Object.keys(point.attributes)).toEqual(["provenance"]);
 		}
 
-		const duration = findHistogram(snapshot, METRIC.docsDuration)!;
+		const duration = defined(findHistogram(snapshot, METRIC.docsDuration));
 		expect(mergeHistogram(duration).count).toBe(5);
 		expect(mergeHistogram(duration, { cached: "true" }).count).toBe(1);
 		expect(mergeHistogram(duration, { surface: "omp", cached: "false" }).count).toBe(3);
@@ -414,7 +415,7 @@ describe("recordCache (uplift-4 S4)", () => {
 		instruments.recordCache({ result: "bypass", mode: "off", cacheClass: "user:supplied:name" });
 		instruments.recordCache({ result: "error", mode: "on" });
 
-		const counter = findCounter(instruments.snapshot(), METRIC.cacheOperations)!;
+		const counter = defined(findCounter(instruments.snapshot(), METRIC.cacheOperations));
 		expect(sumCounter(counter)).toBe(7);
 		// The pre-existing consumers select by result and mode only; adding a label keeps them whole.
 		expect(sumCounter(counter, { result: "bypass" })).toBe(1);
