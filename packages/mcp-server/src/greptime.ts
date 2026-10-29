@@ -671,6 +671,43 @@ function assertIsoWindow(from: string, to: string): { fromMs: number; toMs: numb
 	return { fromMs, toMs };
 }
 
+/**
+ * The shortest raw user or password worth scrubbing as a bare substring. Replacing a one-
+ * or two-character value would splice a marker into every word of a diagnostic and still
+ * leave the credential recoverable by elimination; such a value is covered through the
+ * longer forms below (`user:password`, the `Basic` token) and by the redactor's own
+ * patterns instead.
+ */
+const MIN_BARE_SECRET_LENGTH = 4;
+
+/**
+ * Every spelling of the endpoint's credentials a diagnostic could quote: the whole URL (it may
+ * carry `user:password@`), the URL's userinfo parts raw and percent-decoded, the configured
+ * user and password, the `user:password` pair, and the base64 `Basic` token the client sends.
+ */
+function credentialNeedles(config: GreptimeConfig): string[] {
+	const needles: string[] = [config.url];
+	if (config.user !== undefined) {
+		const pair = `${config.user}:${config.password ?? ""}`;
+		needles.push(config.user, pair, Buffer.from(pair).toString("base64"));
+	}
+	if (config.password !== undefined) needles.push(config.password);
+	try {
+		const { username, password } = new URL(config.url);
+		for (const part of [username, password]) {
+			needles.push(part);
+			try {
+				needles.push(decodeURIComponent(part));
+			} catch {
+				// A malformed escape has no decoded spelling to scrub.
+			}
+		}
+	} catch {
+		// A URL that does not parse has no userinfo to extract; the whole string is already listed.
+	}
+	return needles.filter((needle) => needle === config.url || needle.length >= MIN_BARE_SECRET_LENGTH);
+}
+
 export class GreptimeClient {
 	/** Whether the server reads `\` in a literal as an escape. Assumed until probed. */
 	private backslashEscapes = true;
@@ -710,6 +747,9 @@ export class GreptimeClient {
 	/** The current export window's first ingest records; see {@link exportWindow}. Dropped when the last page is served. */
 	private exportIngest: { window: string; since: number; first: Map<string, { ingested_at: number; event_ts: number }> } | null = null;
 
+	/** Credential text scrubbed from every diagnostic; see {@link credentialNeedles}. */
+	private readonly knownSecrets: string[];
+
 	/** The last write probe's verdict; see {@link probeWritable}. */
 	private probe: LedgerProbe = { lastProbeAt: null, lastProbeOk: null, lastProbeError: null };
 	private probeInFlight: Promise<LedgerProbe> | null = null;
@@ -723,11 +763,32 @@ export class GreptimeClient {
 		this.gate = options.gate ?? null;
 		this.ledger = options.ledger ?? DEFAULT_LEDGER_SETTINGS;
 		this.chainTips = this.ledger.chainCache ? new ChainTipCache(this.ledger.chainCacheMax) : null;
+		this.knownSecrets = credentialNeedles(this.config);
 	}
 
 	/** How many sessions' tips are remembered right now; a test seam, and cheap to report. */
 	get chainTipsCached(): number {
 		return this.chainTips?.size ?? 0;
+	}
+
+	/**
+	 * Scrub the configured credentials, then credential-shaped text, out of a diagnostic.
+	 *
+	 * Every message `send` builds from a URL, a response body or a transport error passes
+	 * through here: a proxy that echoes the request, or a fetch error that quotes the URL it
+	 * tried, must not carry the endpoint's credentials into an error, a warning, the breaker's
+	 * `lastError` or a health body.
+	 */
+	private scrub(text: string): string {
+		return redact(redactKnown(text, this.knownSecrets));
+	}
+
+	/** A transport failure with its message scrubbed and its `name` kept (`TimeoutError`, `AbortError`). */
+	private scrubTransportError(cause: unknown): unknown {
+		if (!(cause instanceof Error)) return this.scrub(String(cause));
+		const error = new Error(this.scrub(cause.message));
+		error.name = cause.name;
+		return error;
 	}
 
 	private headers(): Record<string, string> {
@@ -779,14 +840,23 @@ export class GreptimeClient {
 			// timeout, a 5xx — so the gate counts all of it. The raw fetch error is
 			// thrown as-is so a timeout is observed as one, and wrapped below.
 			answer = await callPlane(this.gate, op, async () => {
-				const response = await fetch(url, {
-					method: "POST",
-					headers: this.headers(),
-					body: new URLSearchParams({ sql: statement }),
-					signal: AbortSignal.timeout(timeoutMs),
-				});
-				const text = await response.text();
-				if (response.status >= 500) throw new GreptimeUnavailable(`greptime ${response.status}: ${text.slice(0, 500)}`);
+				let response: Response;
+				let text: string;
+				try {
+					response = await fetch(url, {
+						method: "POST",
+						headers: this.headers(),
+						body: new URLSearchParams({ sql: statement }),
+						signal: AbortSignal.timeout(timeoutMs),
+					});
+					text = await response.text();
+				} catch (cause) {
+					// The gate records this error's message as the breaker's `lastError` and in the
+					// observer's `reason` before the catch below ever runs, so the scrub has to happen
+					// here, on the way in. The name survives: `callPlane` reads it to tell a timeout.
+					throw this.scrubTransportError(cause);
+				}
+				if (response.status >= 500) throw new GreptimeUnavailable(this.scrub(`greptime ${response.status}: ${text.slice(0, 500)}`));
 				return { status: response.status, text };
 			});
 		} catch (cause) {
@@ -796,15 +866,15 @@ export class GreptimeClient {
 		}
 
 		const { status, text } = answer;
-		if (status < 200 || status >= 300) throw new GreptimeError(`greptime ${status}: ${text.slice(0, 500)}`);
+		if (status < 200 || status >= 300) throw new GreptimeError(this.scrub(`greptime ${status}: ${text.slice(0, 500)}`));
 
 		let body: GreptimeResponse;
 		try {
 			body = JSON.parse(text) as GreptimeResponse;
 		} catch {
-			throw new GreptimeError(`greptime returned non-JSON: ${text.slice(0, 200)}`);
+			throw new GreptimeError(this.scrub(`greptime returned non-JSON: ${text.slice(0, 200)}`));
 		}
-		if (body.error) throw new GreptimeError(`greptime: ${body.error}`);
+		if (body.error) throw new GreptimeError(this.scrub(`greptime: ${body.error}`));
 
 		const records = body.output?.[0]?.records;
 		if (!records?.rows) return [];
