@@ -2,11 +2,14 @@
  * The candidates of `plan --neardup`: which planned documents are compared, in which order, how many, and what an excerpt is.
  * Pure over a hand-built inventory and an injected reader, so nothing touches the disk.
  */
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { CORPUS_PROTOCOL, MAX_NEARDUP_TEXT_CHARS, type CorpusEntry, type CorpusPlanResponse, type PlanItem } from "@substrate/corpus";
 import { defined } from "../../../corpus/src/test-support.ts";
 import type { Inventory } from "./inventory.ts";
-import { excerptOf, neardupRequest, selectNeardupItems } from "./neardup.ts";
+import { excerptOf, NEARDUP_EXCERPT_BYTES, neardupRequest, prefixReaderOf, readFilePrefix, selectNeardupItems, withoutPartialTail } from "./neardup.ts";
 
 const encode = (text: string): Uint8Array => new TextEncoder().encode(text);
 
@@ -122,6 +125,95 @@ describe("selectNeardupItems", () => {
 	test("nothing planned to write leaves nothing to compare", () => {
 		const selection = selectNeardupItems(planOf([item("tombstone", "Acme/A", "a.md")]), inventoryOf([entry("Acme/A", "b.md")], {}), readFile, 1000);
 		expect(selection).toEqual({ items: [], candidates: 0, overLimit: 0, github: 0, unreadable: 0 });
+	});
+
+	test("asks the reader for at most the excerpt budget, however large the file is", () => {
+		const asked: number[] = [];
+		// A 100 MB-class file: the reader allocates only what it was asked for, as a real one does.
+		const readPrefix = (_path: string, maxBytes: number): Uint8Array => {
+			asked.push(maxBytes);
+			return new Uint8Array(Math.min(maxBytes, 100_000_000)).fill(0x61);
+		};
+		const entries = [entry("Acme/A", "huge.md")];
+		const plan = planOf([item("add", "Acme/A", "huge.md")]);
+		const selection = selectNeardupItems(plan, inventoryOf(entries, { "Acme/A:huge.md": "/disk/huge.md" }), readPrefix, 1000);
+		expect(asked).toEqual([NEARDUP_EXCERPT_BYTES]);
+		expect(NEARDUP_EXCERPT_BYTES).toBeLessThanOrEqual(16_000);
+		expect(defined(selection.items[0]).text).toBe("a".repeat(MAX_NEARDUP_TEXT_CHARS));
+	});
+
+	test("a multi-byte character cut at the byte boundary is dropped, not decoded to a replacement character", () => {
+		// 16000 bytes of three-byte characters end one byte into the next character.
+		const prefix = encode("\u20AC".repeat(6000)).subarray(0, NEARDUP_EXCERPT_BYTES);
+		expect(prefix.length % 3).toBe(1);
+		const entries = [entry("Acme/A", "euro.md")];
+		const plan = planOf([item("add", "Acme/A", "euro.md")]);
+		const selection = selectNeardupItems(plan, inventoryOf(entries, { "Acme/A:euro.md": "/disk/euro.md" }), () => prefix, 1000);
+		const text = defined(selection.items[0]).text;
+		expect(text).toBe("\u20AC".repeat(MAX_NEARDUP_TEXT_CHARS));
+		expect(text).not.toContain("\uFFFD");
+	});
+
+	test("a file shorter than the budget is read whole", () => {
+		const entries = [entry("Acme/A", "small.md")];
+		const plan = planOf([item("add", "Acme/A", "small.md")]);
+		const selection = selectNeardupItems(plan, inventoryOf(entries, { "Acme/A:small.md": "/disk/small.md" }), () => encode("# tiny"), 1000);
+		expect(defined(selection.items[0]).text).toBe("# tiny");
+	});
+});
+
+describe("withoutPartialTail", () => {
+	const cases: Array<[string, number[], number[]]> = [
+		["ASCII is whole", [0x61, 0x62], [0x61, 0x62]],
+		["a complete two-byte character is kept", [0x61, 0xc3, 0xa9], [0x61, 0xc3, 0xa9]],
+		["a lone two-byte lead is dropped", [0x61, 0xc3], [0x61]],
+		["a three-byte character cut after one byte is dropped", [0x61, 0xe2], [0x61]],
+		["a three-byte character cut after two bytes is dropped", [0x61, 0xe2, 0x82], [0x61]],
+		["a complete three-byte character is kept", [0x61, 0xe2, 0x82, 0xac], [0x61, 0xe2, 0x82, 0xac]],
+		["a four-byte character cut after three bytes is dropped", [0x61, 0xf0, 0x9f, 0x98], [0x61]],
+		["a complete four-byte character is kept", [0x61, 0xf0, 0x9f, 0x98, 0x80], [0x61, 0xf0, 0x9f, 0x98, 0x80]],
+		["nothing stays nothing", [], []],
+	];
+	test.each(cases.map((row) => [row] as const))("%j", (row) => {
+		expect([...withoutPartialTail(Uint8Array.from(row[1]))]).toEqual(row[2]);
+	});
+});
+
+describe("readFilePrefix and prefixReaderOf", () => {
+	const dir = mkdtempSync(join(tmpdir(), "neardup-prefix-"));
+	afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+	test("returns exactly the first bytes of a long file, and the whole of a short one", () => {
+		const long = join(dir, "long.bin");
+		writeFileSync(long, Uint8Array.from({ length: 5000 }, (_, index) => index % 251));
+		const head = readFilePrefix(long, 1234);
+		expect(head).toHaveLength(1234);
+		expect(head[1233]).toBe(1233 % 251);
+		const short = join(dir, "short.txt");
+		writeFileSync(short, "abc");
+		expect([...readFilePrefix(short, NEARDUP_EXCERPT_BYTES)]).toEqual([0x61, 0x62, 0x63]);
+	});
+
+	test("an empty file is an empty prefix and a missing file throws", () => {
+		const empty = join(dir, "empty.txt");
+		writeFileSync(empty, "");
+		expect(readFilePrefix(empty, 100)).toHaveLength(0);
+		expect(() => readFilePrefix(join(dir, "missing.txt"), 100)).toThrow();
+	});
+
+	test("a whole-file reader without a prefix reader is cut to the budget; a prefix reader wins", () => {
+		const whole = (): Uint8Array => Uint8Array.from([1, 2, 3, 4, 5]);
+		expect([...prefixReaderOf(undefined, whole)("/x", 3)]).toEqual([1, 2, 3]);
+		const prefix = (): Uint8Array => Uint8Array.from([9]);
+		expect([...prefixReaderOf(prefix, whole)("/x", 3)]).toEqual([9]);
+		expect(prefixReaderOf(undefined, undefined)).toBe(readFilePrefix);
+	});
+
+	test("an unreadable file is counted as not compared", () => {
+		const entries = [entry("Acme/A", "gone.md")];
+		const plan = planOf([item("add", "Acme/A", "gone.md")]);
+		const selection = selectNeardupItems(plan, inventoryOf(entries, { "Acme/A:gone.md": join(dir, "gone.md") }), readFilePrefix, 1000);
+		expect(selection).toMatchObject({ items: [], unreadable: 1 });
 	});
 });
 

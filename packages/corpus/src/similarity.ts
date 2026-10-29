@@ -74,21 +74,27 @@ function comparePairs(x: NearDuplicatePair, y: NearDuplicatePair): number {
 	return y.similarity - x.similarity || compareKeys(x.a, y.a) || compareKeys(x.b, y.b);
 }
 
-/**
- * The pairs of items whose cosine similarity is at least `threshold`, most similar first, ties by key. Each pair is
- * reported once with `a` ordered before `b`. Items with a zero vector are skipped. Throws a RangeError when the vectors
- * differ in length, the threshold is not finite, or there are more than `NEAR_DUPLICATE_MAX_ITEMS` items.
- *
- * A floating-point dot product of identical vectors can land a hair under 1, so a threshold of exactly 1 is best written
- * as 0.999999.
- */
-export function nearDuplicates(items: readonly NearDuplicateItem[], opts: NearDuplicateOptions): NearDuplicatePair[] {
+interface Unit {
+	key: string;
+	vector: Float64Array;
+}
+
+/** The state of one comparison, shared by the synchronous and the yielding entry points so they cannot drift apart. */
+interface Scan {
+	units: Unit[];
+	threshold: number;
+	maxPairs: number;
+	flushAt: number;
+	pairs: NearDuplicatePair[];
+}
+
+function startScan(items: readonly NearDuplicateItem[], opts: NearDuplicateOptions): Scan {
 	if (!Number.isFinite(opts.threshold)) throw new RangeError("threshold must be a finite number");
 	if (items.length > NEAR_DUPLICATE_MAX_ITEMS) {
 		throw new RangeError(`nearDuplicates compares every pair and accepts at most ${NEAR_DUPLICATE_MAX_ITEMS} items`);
 	}
 	const maxPairs = Math.max(0, Math.floor(opts.maxPairs ?? NEAR_DUPLICATE_DEFAULT_MAX_PAIRS));
-	const units: Array<{ key: string; vector: Float64Array }> = [];
+	const units: Unit[] = [];
 	for (const item of items) {
 		const vector = normalize(item.vector);
 		if (norm(vector) === 0) continue;
@@ -98,24 +104,82 @@ export function nearDuplicates(items: readonly NearDuplicateItem[], opts: NearDu
 		}
 		units.push({ key: item.key, vector });
 	}
-
-	let pairs: NearDuplicatePair[] = [];
 	// Truncating to the best `maxPairs` whenever the buffer reaches four times the cap bounds memory when many pairs match.
-	const flushAt = Math.max(4 * maxPairs, 16);
-	for (let i = 0; i < units.length; i++) {
-		const left = units[i];
-		if (left === undefined) continue;
-		for (let j = i + 1; j < units.length; j++) {
-			const right = units[j];
-			if (right === undefined) continue;
-			let dot = 0;
-			for (let k = 0; k < left.vector.length; k++) dot += (left.vector[k] ?? 0) * (right.vector[k] ?? 0);
-			const similarity = clamp(dot);
-			if (similarity < opts.threshold) continue;
-			const ordered = compareKeys(left.key, right.key) <= 0;
-			pairs.push({ a: ordered ? left.key : right.key, b: ordered ? right.key : left.key, similarity });
-			if (pairs.length >= flushAt) pairs = pairs.sort(comparePairs).slice(0, maxPairs);
-		}
+	return { units, threshold: opts.threshold, maxPairs, flushAt: Math.max(4 * maxPairs, 16), pairs: [] };
+}
+
+/** Compares the unit at `row` with every unit after it and keeps the pairs at or above the threshold. */
+function scanRow(scan: Scan, row: number): void {
+	const { units } = scan;
+	const left = units[row];
+	if (left === undefined) return;
+	for (let j = row + 1; j < units.length; j++) {
+		const right = units[j];
+		if (right === undefined) continue;
+		let dot = 0;
+		for (let k = 0; k < left.vector.length; k++) dot += (left.vector[k] ?? 0) * (right.vector[k] ?? 0);
+		const similarity = clamp(dot);
+		if (similarity < scan.threshold) continue;
+		const ordered = compareKeys(left.key, right.key) <= 0;
+		scan.pairs.push({ a: ordered ? left.key : right.key, b: ordered ? right.key : left.key, similarity });
+		if (scan.pairs.length >= scan.flushAt) scan.pairs = scan.pairs.sort(comparePairs).slice(0, scan.maxPairs);
 	}
-	return pairs.sort(comparePairs).slice(0, maxPairs);
+}
+
+function finishScan(scan: Scan): NearDuplicatePair[] {
+	return scan.pairs.sort(comparePairs).slice(0, scan.maxPairs);
+}
+
+/**
+ * The pairs of items whose cosine similarity is at least `threshold`, most similar first, ties by key. Each pair is
+ * reported once with `a` ordered before `b`. Items with a zero vector are skipped. Throws a RangeError when the vectors
+ * differ in length, the threshold is not finite, or there are more than `NEAR_DUPLICATE_MAX_ITEMS` items.
+ *
+ * A floating-point dot product of identical vectors can land a hair under 1, so a threshold of exactly 1 is best written
+ * as 0.999999.
+ *
+ * The whole comparison runs without yielding to the event loop; a server answering other requests uses
+ * {@link nearDuplicatesYielding}.
+ */
+export function nearDuplicates(items: readonly NearDuplicateItem[], opts: NearDuplicateOptions): NearDuplicatePair[] {
+	const scan = startScan(items, opts);
+	for (let row = 0; row < scan.units.length; row++) scanRow(scan, row);
+	return finishScan(scan);
+}
+
+/** The multiply-adds {@link nearDuplicatesYielding} does between two yields unless told otherwise. */
+export const NEAR_DUPLICATE_YIELD_WORK = 2_000_000;
+
+export interface NearDuplicateYielding {
+	/** Called between blocks of rows so other work can run; resolves when the comparison may continue. */
+	yieldFn: () => Promise<void>;
+	/** Multiply-adds between two yields (a row of `n - i - 1` pairs costs that many times the vector length). Default {@link NEAR_DUPLICATE_YIELD_WORK}. */
+	yieldEvery?: number | undefined;
+	/** Checked before the first block and after every yield; an aborted signal rejects with its reason. */
+	signal?: AbortSignal | undefined;
+}
+
+/**
+ * {@link nearDuplicates} that lets the event loop run between blocks of rows. The cost is the same O(n^2) dot products; a
+ * block is the rows whose work (pairs times vector length) adds up to about `yieldEvery`, so the pause between two yields
+ * does not grow with the number of items. It returns the same pairs in the same order as `nearDuplicates` for the same
+ * input, and every error, the RangeErrors included, is a rejection rather than a synchronous throw.
+ */
+export async function nearDuplicatesYielding(items: readonly NearDuplicateItem[], opts: NearDuplicateOptions, yielding: NearDuplicateYielding): Promise<NearDuplicatePair[]> {
+	yielding.signal?.throwIfAborted();
+	const scan = startScan(items, opts);
+	const budget = yielding.yieldEvery !== undefined && Number.isFinite(yielding.yieldEvery) ? Math.max(1, Math.floor(yielding.yieldEvery)) : NEAR_DUPLICATE_YIELD_WORK;
+	const dimension = scan.units[0]?.vector.length ?? 0;
+	const last = scan.units.length - 1;
+	let work = 0;
+	for (let row = 0; row < scan.units.length; row++) {
+		scanRow(scan, row);
+		work += (last - row) * dimension;
+		// Nothing is left to compare after the last row, so the final block needs no pause.
+		if (work < budget || row >= last) continue;
+		work = 0;
+		await yielding.yieldFn();
+		yielding.signal?.throwIfAborted();
+	}
+	return finishScan(scan);
 }

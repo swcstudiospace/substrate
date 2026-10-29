@@ -313,14 +313,15 @@ time or null.
 | Request timeout of the CLI | 120 seconds |
 | Skipped files listed in a report | 1,000 (the counts per reason are exact) |
 | Identical-copy groups listed | 200 groups of 20 copies (the totals are exact) |
-| Near-duplicate comparison (`nearDuplicates`) | every pair, so at most 5,000 items per call |
-| Items per `POST /corpus/neardup` request | 1,000 |
+| Near-duplicate comparison (`nearDuplicates`) | every pair, so at most 5,000 items per call; it runs without pausing. `nearDuplicatesYielding` is the same comparison with the same result, pausing between blocks of about 2 million multiply-adds |
+| Items per `POST /corpus/neardup` request | 1,000. The comparison is still O(n^2) in the item count (499,500 pairs at 1,000 items) but yields to other requests between blocks, so a large request takes longer without stalling the server |
 | Characters of text per item | 4,000 |
 | Pairs returned (`maxPairs`) | 200 by default, at most 1,000 |
 | Pairs the CLI lists | 50 (the rest is a count) |
 
-`nearDuplicates`, `cosine` and `normalize` in `@substrate/corpus` are pure vector helpers for finding near-duplicate
-documents from embeddings; `POST /corpus/neardup` and `substrate corpus plan --neardup` use them.
+`nearDuplicates`, `nearDuplicatesYielding`, `cosine` and `normalize` in `@substrate/corpus` are pure vector helpers for
+finding near-duplicate documents from embeddings; `POST /corpus/neardup` (through `nearDuplicatesYielding`) and
+`substrate corpus plan --neardup` use them.
 
 ## Near-duplicates (advisory)
 
@@ -331,8 +332,9 @@ it, and the section's first line says so.
 
 The CLI takes the documents the plan would `add`, `update`, `change` or `rename` that come from a file it can read (the
 filesystem and Greptile sources), in `(repo, path)` order and at most `--neardup-max` of them, reads the first 4,000
-characters of each (UTF-8, a byte-order mark kept, an invalid sequence replaced) through the same file reader the scan
-uses, and sends **one** request. Documents from GitHub are not read by a plan, so they are counted ("N documents from
+characters of each (UTF-8, a byte-order mark kept, an invalid sequence replaced) and sends **one** request. Only the
+first 16,000 bytes of a file are read for that (a bounded prefix, never the whole file), and a character cut by that
+boundary is dropped rather than decoded into a replacement. Documents from GitHub are not read by a plan, so they are counted ("N documents from
 GitHub were not compared"); a file that cannot be read is counted as not compared and never fails the command; when more
 candidates exist than the limit the output says "compared the first N of M documents".
 
@@ -353,7 +355,9 @@ When the comparison cannot run (the embedding service is unavailable, the server
 the plan is still printed, one line on stderr names the closed reason (for example `timeout` or `not-configured`), and the
 exit code is 1: a comparison that was asked for and could not be answered must not look like success.
 
-**Egress.** The excerpts leave the machine only for the substrate server, and the server sends them only to the
-operator's TEI service. The fabric compliance check requires that service to be on loopback or an allowed proxy
-(`SUBSTRATE_DB_ENDPOINT_POLICY`), so no excerpt goes to a third party. With `TEI_URL` unset the route answers
-`503 corpus.embeddings-unavailable` (`not-configured`) and nothing is sent anywhere.
+**Egress.** The CLI sends the excerpts to the substrate server over its usual connection, and the server sends them to the
+configured `TEI_URL` and nowhere else. The fabric compliance check reports a failure when that endpoint is neither loopback
+nor an allowed proxy, but it does not block a request: `SUBSTRATE_DB_ENDPOINT_POLICY` defaults to `warn`, which accepts a
+direct (possibly public) `TEI_URL`. Point `TEI_URL` at a private endpoint and set the policy to `enforce` so that startup
+refuses a direct one. With `TEI_URL` unset the route answers `503 corpus.embeddings-unavailable` (`not-configured`) and
+nothing is sent anywhere.

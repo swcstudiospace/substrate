@@ -36,7 +36,7 @@ import { createBodyStore, type BodyStore } from "./bodies.ts";
 import { createCorpusClient, type ClientError, type CorpusClient } from "./client.ts";
 import { executeIngest } from "./ingest.ts";
 import { collectInventory, type Inventory, type InventoryOptions } from "./inventory.ts";
-import { neardupRequest, selectNeardupItems } from "./neardup.ts";
+import { neardupRequest, prefixReaderOf, selectNeardupItems } from "./neardup.ts";
 import { printable, renderIngest, renderInventory, renderNeardup, renderPlan, renderStatus } from "./render.ts";
 
 export const USAGE =
@@ -65,6 +65,8 @@ export interface CorpusDeps {
 	runner?: GitRunner | undefined;
 	gh?: GhRunner | undefined;
 	readFile?: ((path: string) => Uint8Array) | undefined;
+	/** Reads at most `maxBytes` from the start of a file; the near-duplicate excerpts use it so a large file is never loaded whole. Defaults to `readFile` cut to the budget when only that is injected. */
+	readPrefix?: ((path: string, maxBytes: number) => Uint8Array) | undefined;
 }
 
 const SCAN_VALUES = ["root", "tier", "max-bytes", "source", "greptile-dir", "github-owner", "max-repos"] as const;
@@ -327,7 +329,7 @@ async function plan(args: ScanArgs, parsed: Parsed, deps: CorpusDeps, neardup: N
 		return 0;
 	}
 	// The comparison is asked for, so a failure of it is a failure of the command; the plan is printed either way.
-	const selection = selectNeardupItems(result.value, inventory, deps.readFile ?? ((path) => readFileSync(path)), neardup.max);
+	const selection = selectNeardupItems(result.value, inventory, prefixReaderOf(deps.readPrefix, deps.readFile), neardup.max);
 	let reply: CorpusNeardupResponse | null = null;
 	let failure: ClientError | null = null;
 	if (selection.items.length > 0) {

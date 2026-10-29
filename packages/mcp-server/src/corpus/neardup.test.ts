@@ -290,6 +290,57 @@ describe("when the embedding service cannot answer", () => {
 	});
 });
 
+describe("a large comparison does not hold the event loop", () => {
+	const COUNT = 700;
+	const DIMENSION = 32;
+	const path = (index: number): string => `d${String(index).padStart(4, "0")}.md`;
+	const items = Array.from({ length: COUNT }, (_, index) => item(path(index), `doc-${index}`));
+	// The last document is an exact copy of the first, so the answer has one pair to find.
+	const vectorOf = (index: number): Float32Array => Float32Array.from({ length: DIMENSION }, (_, k) => Math.sin(((index === COUNT - 1 ? 0 : index) + 1) * (k + 1)));
+
+	function large(yieldFn?: () => Promise<void>): NeardupDeps {
+		const answer = async (texts: readonly string[]): Promise<TeiEmbedResult> => ({ ok: true, vectors: texts.map((text) => vectorOf(Number(text.slice("doc-".length)))), model: "test-model", dim: DIMENSION });
+		return { ...fake({}, { answer }).deps, ...(yieldFn === undefined ? {} : { yieldFn }) };
+	}
+
+	test("another task queued before the comparison runs before the comparison answers", async () => {
+		const order: string[] = [];
+		const other = new Promise<void>((resolve) => {
+			setImmediate(() => {
+				order.push("other request");
+				resolve();
+			});
+		});
+		const comparison = corpusNeardupReply(large(), request(items), "omp").then((reply) => {
+			order.push("comparison");
+			return reply;
+		});
+		const [, reply] = await Promise.all([other, comparison]);
+		expect(order).toEqual(["other request", "comparison"]);
+		expect(pairNames(okBody(reply))).toContain(`${path(0)}~${path(COUNT - 1)}`);
+	});
+
+	test("the injected yield is called between blocks for a large input and never for a small one, with the same answer", async () => {
+		let blocks = 0;
+		const counted = async (): Promise<void> => {
+			blocks += 1;
+		};
+		const withYield = okBody(await corpusNeardupReply(large(counted), request(items), "omp"));
+		expect(blocks).toBeGreaterThan(1);
+		expect(withYield).toEqual(okBody(await corpusNeardupReply(large(), request(items), "omp")));
+		blocks = 0;
+		okBody(await corpusNeardupReply(large(counted), request(items.slice(0, 5)), "omp"));
+		expect(blocks).toBe(0);
+	});
+
+	test("a yield that fails is not an unavailable embedding service", async () => {
+		const broken = async (): Promise<void> => {
+			throw new Error("loop gone");
+		};
+		await expect(corpusNeardupReply(large(broken), request(items), "omp")).rejects.toThrow("loop gone");
+	});
+});
+
 describe("the gates", () => {
 	const body = request([item("a.md", "a"), item("b.md", "b")]);
 

@@ -14,7 +14,7 @@ import {
 	DEFAULT_NEARDUP_PAIRS,
 	DEFAULT_NEARDUP_THRESHOLD,
 	MAX_NEARDUP_SKIPPED,
-	nearDuplicates,
+	nearDuplicatesYielding,
 	type CorpusNeardupResponse,
 	type EmbeddingReason,
 	type NearDuplicatePair,
@@ -34,6 +34,8 @@ export interface NeardupDeps {
 	vmGuest: boolean;
 	/** The cached embedding service: the only way this door embeds anything. */
 	embeddings: Pick<EmbeddingService, "embed">;
+	/** Releases the event loop between blocks of the comparison. Default: one macrotask (`setImmediate`). A test injects its own. */
+	yieldFn?: (() => Promise<void>) | undefined;
 }
 
 /**
@@ -41,6 +43,13 @@ export interface NeardupDeps {
  * under 1, so a threshold of 1 ("identical") is compared at this value instead.
  */
 const IDENTICAL_THRESHOLD = 0.999999;
+
+/** One macrotask: queued timers, I/O callbacks and other requests run before the comparison resumes. */
+function nextMacrotask(): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	setImmediate(resolve);
+	return promise;
+}
 
 /** Items are keyed by their zero-padded index, so `nearDuplicates` (which orders keys as strings) breaks a tie in the items' (repo, path) order. */
 const KEY_WIDTH = 4;
@@ -87,8 +96,9 @@ export async function corpusNeardupReply(deps: NeardupDeps, raw: unknown, surfac
 	});
 	let found: NearDuplicatePair[];
 	try {
-		// One more than the cap, to learn whether the cap cut anything off.
-		found = nearDuplicates(vectors, { threshold: Math.min(threshold, IDENTICAL_THRESHOLD), maxPairs: maxPairs + 1 });
+		// One more than the cap, to learn whether the cap cut anything off. The comparison is O(n^2) in the items, so it hands the
+		// event loop back between blocks instead of holding the HTTP thread for the whole run; a rejection is handled like a throw.
+		found = await nearDuplicatesYielding(vectors, { threshold: Math.min(threshold, IDENTICAL_THRESHOLD), maxPairs: maxPairs + 1 }, { yieldFn: deps.yieldFn ?? nextMacrotask });
 	} catch (cause) {
 		if (cause instanceof RangeError) return embeddingsUnavailable("dim-mismatch");
 		throw cause;
