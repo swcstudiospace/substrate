@@ -16,6 +16,8 @@
  * than the pinned one (`SUBSTRATE_TEI_MODEL`) or when a vector's length differs from the pinned dimension
  * (`SUBSTRATE_TEI_DIM`). A pin left unset is learned from the first good answer and held for the life of the client.
  * The model is checked on the first call and again every {@link MODEL_RECHECK_MS}; the length on every response.
+ * A refusal (`/info` named another model) stays in force until a later `/info` names the expected model again: while
+ * it stands every call answers `model-mismatch`, a failed `/info` read included.
  *
  * The production caller hands in a `gatedFetch` over the plane's circuit breaker, so an open breaker answers
  * `breaker-open` without a request.
@@ -50,10 +52,18 @@ export interface TeiInfo {
 export type TeiInfoResult = { ok: true; info: TeiInfo } | { ok: false; reason: TeiReason };
 export type TeiHealthResult = { ok: true; latencyMs: number } | { ok: false; reason: TeiReason };
 
+/** Where the model the fabric reports came from. Closed. */
+export const TEI_MODEL_SOURCES = ["pinned", "learned", "observed", "none"] as const;
+export type TeiModelSource = (typeof TEI_MODEL_SOURCES)[number];
+
 /** What the client has seen, for the fabric row. Names and numbers only. */
 export interface TeiSnapshot {
-	/** The pinned model, else the one learned from `/info`; null before either. */
+	/** The pinned model, else the one learned from an embed answer; null before either. This is the model cache keys name. */
 	model: string | null;
+	/** The model `/info` last named, however it was read (a probe included); null before one. Never a cache key. */
+	observedModel: string | null;
+	/** Which of the pin, the learned model and the observed one the fabric shows: the first that is set, in that order. */
+	modelSource: TeiModelSource;
 	/** The pinned dimension, else the length of the last good vector; null before either. */
 	dim: number | null;
 	/** The round trip of the last successful request, ms; null before one. */
@@ -74,7 +84,10 @@ export interface TeiClient {
 	info(timeoutMs?: number): Promise<TeiInfoResult>;
 	/** `GET /health`; one attempt, no retry. */
 	health(timeoutMs?: number): Promise<TeiHealthResult>;
-	/** Health and info together, and the model against its pin: whether embedding can be relied on. */
+	/**
+	 * Health first, then info, one after the other inside one deadline (a half-open breaker admits one request at a time,
+	 * so side by side the second would be refused), and the model against its pin: whether embedding can be relied on.
+	 */
 	probe(timeoutMs?: number): Promise<{ ok: true } | { ok: false; reason: TeiReason }>;
 	snapshot(): TeiSnapshot;
 }
@@ -160,8 +173,11 @@ export function parseVectors(body: unknown, expected: number): { ok: true; vecto
 		const vector = new Float32Array(row.length);
 		for (let index = 0; index < row.length; index += 1) {
 			const value: unknown = row[index];
-			if (typeof value !== "number" || !Number.isFinite(value)) return { ok: false, reason: "bad-response" };
-			vector[index] = value;
+			if (typeof value !== "number") return { ok: false, reason: "bad-response" };
+			// Checked after the narrowing to Float32: 1e100 is finite as a double and Infinity as a float.
+			const narrowed = Math.fround(value);
+			if (!Number.isFinite(narrowed)) return { ok: false, reason: "bad-response" };
+			vector[index] = narrowed;
 		}
 		vectors.push(vector);
 	}
@@ -196,6 +212,10 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 	let batchLimit: number | null = null;
 	let modelCheckedAt: number | null = null;
 	let lastLatencyMs: number | null = null;
+	/** The model `/info` last named, for the fabric row only; never a cache key and never a pin. */
+	let observedModel: string | null = null;
+	/** Set when a read named a model other than the expected one; cleared only by a read that names the expected one. */
+	let modelRefused = false;
 	let verifying: Promise<{ ok: true } | { ok: false; reason: TeiReason }> | null = null;
 
 	const expectedModel = (): string | null => config?.model ?? learnedModel;
@@ -261,7 +281,9 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 		const sent = await send("GET", "/info", undefined, retry, timeoutMs);
 		if (!sent.ok) return sent;
 		const parsed = parseTeiInfo(sent.body);
-		return parsed === null ? { ok: false, reason: "bad-response" } : { ok: true, info: parsed };
+		if (parsed === null) return { ok: false, reason: "bad-response" };
+		observedModel = parsed.modelId;
+		return { ok: true, info: parsed };
 	}
 
 	const info = (timeoutMs: number = config?.timeoutMs ?? 0): Promise<TeiInfoResult> => readInfo(timeoutMs, true);
@@ -291,25 +313,33 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 		return response.status >= 200 && response.status < 300 ? { ok: true } : { ok: false, reason: "unavailable" };
 	}
 
-	/** Reads `/info` and applies the model pin. Learns the model and the batch limit the first time. */
-	async function verifyModel(): Promise<{ ok: true } | { ok: false; reason: TeiReason }> {
+	/**
+	 * Reads `/info` and applies the model pin. Learns the model and the batch limit the first time. A refusal is
+	 * remembered and answered until a read names the expected model again, so a failed read cannot lift it.
+	 */
+	async function verifyModel(timeoutMs: number): Promise<{ ok: true } | { ok: false; reason: TeiReason }> {
 		const first = modelCheckedAt === null;
-		if (!first && now() - (modelCheckedAt ?? 0) < MODEL_RECHECK_MS) return { ok: true };
-		const read = await info();
+		if (!first && !modelRefused && now() - (modelCheckedAt ?? 0) < MODEL_RECHECK_MS) return { ok: true };
+		const read = await readInfo(timeoutMs, true);
 		if (!read.ok) {
+			if (modelRefused) return { ok: false, reason: "model-mismatch" };
 			// A model verified before keeps its verdict through a failed recheck; the next call asks again.
 			return first ? read : { ok: true };
 		}
 		const wanted = expectedModel();
-		if (wanted !== null && read.info.modelId !== wanted) return { ok: false, reason: "model-mismatch" };
+		if (wanted !== null && read.info.modelId !== wanted) {
+			modelRefused = true;
+			return { ok: false, reason: "model-mismatch" };
+		}
+		modelRefused = false;
 		learnedModel ??= read.info.modelId;
 		batchLimit ??= read.info.maxClientBatchSize;
 		modelCheckedAt = now();
 		return { ok: true };
 	}
 
-	function ensureVerified(): Promise<{ ok: true } | { ok: false; reason: TeiReason }> {
-		verifying ??= verifyModel().finally(() => {
+	function ensureVerified(timeoutMs: number): Promise<{ ok: true } | { ok: false; reason: TeiReason }> {
+		verifying ??= verifyModel(timeoutMs).finally(() => {
 			verifying = null;
 		});
 		return verifying;
@@ -319,12 +349,13 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 		if (config === null) return { ok: false, reason: "not-configured" };
 		if (texts.length > MAX_TEXTS_PER_CALL) return { ok: false, reason: "input-refused" };
 		if (texts.length === 0) return { ok: true, vectors: [], model: expectedModel() ?? "", dim: expectedDim() ?? 0 };
-		const verified = await ensureVerified();
+		// One timeout for every request of the call, the model check's included.
+		const timeoutMs = options.timeoutMs ?? config.timeoutMs;
+		const verified = await ensureVerified(timeoutMs);
 		if (!verified.ok) return verified;
 		const model = expectedModel();
 		if (model === null) return { ok: false, reason: "bad-response" };
 		const size = Math.max(1, Math.min(config.batch, batchLimit ?? config.batch));
-		const timeoutMs = options.timeoutMs ?? config.timeoutMs;
 		const vectors: Float32Array[] = [];
 		for (let from = 0; from < texts.length; from += size) {
 			const inputs = texts.slice(from, from + size).map(clampText);
@@ -341,15 +372,28 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 		return { ok: true, vectors, model, dim: expectedDim() ?? vectors[0]?.length ?? 0 };
 	}
 
-	/** One try each of `/health` and `/info`, side by side, so the whole probe stays inside one timeout. */
+	/**
+	 * `/health` then `/info`, one try each and no retry, one after the other inside one deadline. Side by side the second
+	 * request is refused by a half-open breaker (it admits one), so a recovered TEI would read as down.
+	 */
 	async function probe(timeoutMs: number = config?.timeoutMs ?? 0): Promise<{ ok: true } | { ok: false; reason: TeiReason }> {
 		if (config === null) return { ok: false, reason: "not-configured" };
-		const [live, read] = await Promise.all([sendHealth(timeoutMs), readInfo(timeoutMs, false)]);
+		const started = now();
+		const live = await sendHealth(timeoutMs);
 		if (!live.ok) return live;
+		const left = timeoutMs - Math.max(0, now() - started);
+		if (left <= 0) return { ok: false, reason: "timeout" };
+		const read = await readInfo(Math.ceil(left), false);
 		if (!read.ok) return read;
 		const wanted = expectedModel();
 		if (wanted !== null && read.info.modelId !== wanted) return { ok: false, reason: "model-mismatch" };
 		return { ok: true };
+	}
+
+	function snapshot(): TeiSnapshot {
+		const pinned = config?.model ?? null;
+		const source: TeiModelSource = pinned !== null ? "pinned" : learnedModel !== null ? "learned" : observedModel !== null ? "observed" : "none";
+		return { model: expectedModel(), observedModel, modelSource: source, dim: expectedDim(), lastLatencyMs };
 	}
 
 	return {
@@ -358,6 +402,6 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 		health,
 		configured: config !== null,
 		probe,
-		snapshot: () => ({ model: expectedModel(), dim: expectedDim(), lastLatencyMs }),
+		snapshot,
 	};
 }

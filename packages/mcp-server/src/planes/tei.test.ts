@@ -418,7 +418,7 @@ describe("not configured", () => {
 		expect(await client.health()).toEqual({ ok: false, reason: "not-configured" });
 		expect(await client.probe()).toEqual({ ok: false, reason: "not-configured" });
 		expect(tei.calls).toHaveLength(0);
-		expect(client.snapshot()).toEqual({ model: null, dim: null, lastLatencyMs: null });
+		expect(client.snapshot()).toEqual({ model: null, observedModel: null, modelSource: "none", dim: null, lastLatencyMs: null });
 	});
 
 	test("the closed reason list is exactly the eight the callers switch on", () => {
@@ -448,11 +448,11 @@ describe("concurrent first calls and the snapshot", () => {
 		const tei = fakeTei();
 		let tick = 0;
 		const { client } = clientFor(CONFIG, tei.fetch, { now: () => (tick += 5) });
-		expect(client.snapshot()).toEqual({ model: null, dim: null, lastLatencyMs: null });
+		expect(client.snapshot()).toEqual({ model: null, observedModel: null, modelSource: "none", dim: null, lastLatencyMs: null });
 		await client.embed(["a"]);
-		expect(client.snapshot()).toEqual({ model: "test-model", dim: 4, lastLatencyMs: 5 });
+		expect(client.snapshot()).toEqual({ model: "test-model", observedModel: "test-model", modelSource: "learned", dim: 4, lastLatencyMs: 5 });
 		const pinned = clientFor({ ...CONFIG, model: "pinned", dim: 7 }, fakeTei().fetch);
-		expect(pinned.client.snapshot()).toEqual({ model: "pinned", dim: 7, lastLatencyMs: null });
+		expect(pinned.client.snapshot()).toEqual({ model: "pinned", observedModel: null, modelSource: "pinned", dim: 7, lastLatencyMs: null });
 	});
 });
 
@@ -480,11 +480,11 @@ describe("health and probe", () => {
 		expect(await open.client.health()).toEqual({ ok: false, reason: "breaker-open" });
 	});
 
-	test("probe is ok when /health answers and /info names the pinned model, with one try of each and no sleep", async () => {
+	test("probe is ok when /health answers and /info names the pinned model, with one try of each, health first, and no sleep", async () => {
 		const tei = fakeTei();
 		const { client, sleeps } = clientFor({ ...CONFIG, model: "test-model" }, tei.fetch);
 		expect(await client.probe(500)).toEqual({ ok: true });
-		expect(tei.calls.map((call) => call.path).sort()).toEqual(["/health", "/info"]);
+		expect(tei.calls.map((call) => call.path)).toEqual(["/health", "/info"]);
 		expect(sleeps).toEqual([]);
 	});
 
@@ -505,6 +505,154 @@ describe("health and probe", () => {
 		const { client } = clientFor(CONFIG, tei.fetch);
 		expect(await client.probe()).toEqual({ ok: true });
 		expect(client.snapshot().model).toBeNull();
+		expect(client.snapshot().observedModel).toBe("test-model");
+	});
+});
+
+describe("a model refusal stays in force until /info names the expected model again", () => {
+	test("A verified, a recheck sees B, the next /info fails: still model-mismatch with nothing sent, and A's return lifts it", async () => {
+		const tei = fakeTei();
+		const { client, advance } = clientFor(CONFIG, tei.fetch);
+		expect((await client.embed(["a"])).ok).toBe(true);
+		advance(MODEL_RECHECK_MS);
+		tei.state.model = "other-model";
+		expect(await client.embed(["b"])).toEqual({ ok: false, reason: "model-mismatch" });
+		// The next read fails on every attempt: the refusal must not lapse with it, and no vector may be asked for.
+		tei.state.infoReplies.push(...Array.from({ length: MAX_ATTEMPTS }, () => status(503)));
+		expect(await client.embed(["c"])).toEqual({ ok: false, reason: "model-mismatch" });
+		expect(tei.embedCalls()).toHaveLength(1);
+		// B still answers: still refused.
+		expect(await client.embed(["d"])).toEqual({ ok: false, reason: "model-mismatch" });
+		expect(tei.embedCalls()).toHaveLength(1);
+		tei.state.model = "test-model";
+		expect((await client.embed(["e"])).ok).toBe(true);
+		expect(tei.embedCalls()).toHaveLength(2);
+	});
+
+	test("a refusal on the first call of a pinned client holds through a failed /info as well", async () => {
+		const tei = fakeTei({ model: "other-model" });
+		const { client } = clientFor({ ...CONFIG, model: "test-model" }, tei.fetch);
+		expect(await client.embed(["a"])).toEqual({ ok: false, reason: "model-mismatch" });
+		tei.state.infoReplies.push(...Array.from({ length: MAX_ATTEMPTS }, () => status(503)));
+		expect(await client.embed(["b"])).toEqual({ ok: false, reason: "model-mismatch" });
+		expect(tei.embedCalls()).toHaveLength(0);
+	});
+});
+
+describe("one timeout for every request of a call", () => {
+	/** Records the milliseconds every `AbortSignal.timeout` was asked for while `run` executes. */
+	async function recordTimeouts(run: () => Promise<void>): Promise<number[]> {
+		const asked: number[] = [];
+		const original = AbortSignal.timeout;
+		AbortSignal.timeout = (ms: number) => {
+			asked.push(ms);
+			return original.call(AbortSignal, ms);
+		};
+		try {
+			await run();
+		} finally {
+			AbortSignal.timeout = original;
+		}
+		return asked;
+	}
+
+	test("the override reaches the /info of the first check and of a due recheck, and the /embed requests", async () => {
+		const tei = fakeTei({ maxBatch: 1 });
+		const { client, advance } = clientFor(CONFIG, tei.fetch);
+		const first = await recordTimeouts(async () => {
+			await client.embed(["a", "b"], { timeoutMs: 100 });
+		});
+		// /info, then one /embed per batch.
+		expect(tei.calls.map((call) => call.path)).toEqual(["/info", "/embed", "/embed"]);
+		expect(first).toEqual([100, 100, 100]);
+		advance(MODEL_RECHECK_MS);
+		const recheck = await recordTimeouts(async () => {
+			await client.embed(["c"], { timeoutMs: 50 });
+		});
+		expect(recheck).toEqual([50, 50]);
+		const plain = await recordTimeouts(async () => {
+			advance(MODEL_RECHECK_MS);
+			await client.embed(["d"]);
+		});
+		expect(plain).toEqual([CONFIG.timeoutMs, CONFIG.timeoutMs]);
+	});
+});
+
+describe("probe after a recovery", () => {
+	test("a half-open breaker admits /health, which closes it, and then /info: the first probe reports available", async () => {
+		let clock = 0;
+		const registry = new PlaneRegistry({ enabled: true, failureThreshold: 1, openMs: 1000 }, null, () => clock);
+		const breaker = defined(registry.gate("tei").breaker, "tei breaker");
+		breaker.onFailure("down");
+		expect(breaker.state()).toBe("open");
+		clock += 1000;
+		expect(breaker.state()).toBe("half-open");
+		const tei = fakeTei();
+		const { client } = clientFor({ ...CONFIG, model: "test-model" }, gatedFetch(registry.gate("tei"), tei.fetch, teiOp), { now: () => clock });
+		expect(await client.probe(500)).toEqual({ ok: true });
+		expect(breaker.state()).toBe("closed");
+		expect(tei.calls.map((call) => call.path)).toEqual(["/health", "/info"]);
+	});
+
+	test("a failing /health ends the probe without asking /info", async () => {
+		const tei = fakeTei({ healthStatus: 503 });
+		expect(await clientFor(CONFIG, tei.fetch).client.probe(500)).toEqual({ ok: false, reason: "unavailable" });
+		expect(tei.calls.map((call) => call.path)).toEqual(["/health"]);
+	});
+
+	test("both requests share one deadline: a /health that used it all leaves no time for /info", async () => {
+		let clock = 0;
+		const tei = fakeTei();
+		const slowHealth: PlaneFetch = async (input, init) => {
+			if (new URL(String(input)).pathname === "/health") clock += 600;
+			return tei.fetch(input, init);
+		};
+		const { client } = clientFor(CONFIG, slowHealth, { now: () => clock });
+		expect(await client.probe(500)).toEqual({ ok: false, reason: "timeout" });
+		expect(tei.infoCalls()).toHaveLength(0);
+	});
+
+	test("/info gets only the time /health left", async () => {
+		let clock = 0;
+		const tei = fakeTei();
+		const slowHealth: PlaneFetch = async (input, init) => {
+			if (new URL(String(input)).pathname === "/health") clock += 200;
+			return tei.fetch(input, init);
+		};
+		const { client } = clientFor(CONFIG, slowHealth, { now: () => clock });
+		expect(await client.probe(500)).toEqual({ ok: true });
+		expect(tei.calls).toHaveLength(2);
+	});
+});
+
+describe("non-finite numbers in a fresh answer", () => {
+	test("a value that is finite as a double but Infinity as a Float32 is a bad response, as are NaN and an infinity", () => {
+		expect(parseVectors([[1, 1e100]], 1)).toEqual({ ok: false, reason: "bad-response" });
+		expect(parseVectors([[1, -1e100]], 1)).toEqual({ ok: false, reason: "bad-response" });
+		expect(parseVectors([[1, Number.NaN]], 1)).toEqual({ ok: false, reason: "bad-response" });
+		expect(parseVectors([[1, Number.POSITIVE_INFINITY]], 1)).toEqual({ ok: false, reason: "bad-response" });
+		// The largest finite Float32 is still a vector.
+		expect(parseVectors([[3.4e38]], 1).ok).toBe(true);
+	});
+
+	test("embed answers bad-response for a 1e100 in the body", async () => {
+		const tei = fakeTei({ embedReplies: [new Response("[[1,1e100,3,4]]", { status: 200 })] });
+		expect(await clientFor(CONFIG, tei.fetch).client.embed(["a"])).toEqual({ ok: false, reason: "bad-response" });
+	});
+});
+
+describe("the model the fabric shows", () => {
+	test("a probe records the model /info named without pinning it, and an embed's learned model and a pin take over in that order", async () => {
+		const tei = fakeTei();
+		const { client } = clientFor(CONFIG, tei.fetch);
+		expect(client.snapshot()).toMatchObject({ model: null, observedModel: null, modelSource: "none" });
+		expect(await client.probe()).toEqual({ ok: true });
+		expect(client.snapshot()).toMatchObject({ model: null, observedModel: "test-model", modelSource: "observed" });
+		await client.embed(["a"]);
+		expect(client.snapshot()).toMatchObject({ model: "test-model", observedModel: "test-model", modelSource: "learned" });
+		const pinned = clientFor({ ...CONFIG, model: "pinned" }, fakeTei({ model: "pinned" }).fetch);
+		await pinned.client.probe();
+		expect(pinned.client.snapshot()).toMatchObject({ model: "pinned", observedModel: "pinned", modelSource: "pinned" });
 	});
 });
 

@@ -1213,13 +1213,30 @@ function shapeOk(klass: CacheClass, value: unknown): boolean {
 }
 
 /**
+ * `dim` Float32 values from their base64 bytes, or null when the bytes are not that many or any value is NaN or
+ * infinite: such a vector is never a usable embedding, so it must not be served from the cache.
+ */
+export function decodeEmbeddingBytes(dim: number, b64: string): Float32Array | null {
+	const bytes = Buffer.from(b64, "base64");
+	if (bytes.length !== dim * 4) return null;
+	// A copy: a pooled Buffer's offset is not a multiple of four, which a Float32Array view needs.
+	const vector = new Float32Array(new Uint8Array(bytes).buffer);
+	for (const value of vector) {
+		if (!Number.isFinite(value)) return null;
+	}
+	return vector;
+}
+
+/**
  * An `emb` entry is `{ dim, b64 }`: `dim` Float32 values as base64. The length of the text must be the length base64
- * gives `dim * 4` bytes, so a truncated or padded value is refused without decoding it.
+ * gives `dim * 4` bytes, so a truncated or padded value is refused before it is decoded, and the decoded values must
+ * all be finite.
  */
 function embeddingEntryOk(dim: unknown, b64: unknown): boolean {
 	if (typeof dim !== "number" || !Number.isInteger(dim) || dim < 1 || dim > EMB_MAX_DIM) return false;
 	if (typeof b64 !== "string") return false;
-	return b64.length === 4 * Math.ceil((dim * 4) / 3) && /^[A-Za-z0-9+/]+={0,2}$/.test(b64);
+	if (b64.length !== 4 * Math.ceil((dim * 4) / 3) || !/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) return false;
+	return decodeEmbeddingBytes(dim, b64) !== null;
 }
 
 function parseEnvelope<T>(raw: string, klass: CacheClass): { ok: true; value: T } | { ok: false } {

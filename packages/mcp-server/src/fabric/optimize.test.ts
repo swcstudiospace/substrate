@@ -31,7 +31,7 @@ function absentFacts(): FabricFacts {
 			hindsight: absent,
 			tei: absent,
 		},
-		tei: { endpointClass: null, model: null, dimension: null, latencyMs: null },
+		tei: { endpointClass: null, model: null, modelSource: "none", dimension: null, latencyMs: null },
 		eventBusEnabled: null,
 		railway: { status: "unconfigured", projectedMonthlyUsd: null, budgetUsd: null },
 	});

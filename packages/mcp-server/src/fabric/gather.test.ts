@@ -11,7 +11,7 @@ function snapshot(): FabricHealthView {
 	return {
 		cache: { enabled: true, connected: true, mode: "on", hits: 9, misses: 1, errors: 0, bypasses: 0 },
 		eventBus: { enabled: true },
-		tei: { model: "test-model", dimension: 384, latencyMs: 12 },
+		tei: { model: "test-model", modelSource: "pinned", dimension: 384, latencyMs: 12 },
 		breakers: {
 			greptime: { state: "closed" },
 			index: { state: "closed" },
@@ -135,7 +135,7 @@ describe("gatherFabricFacts", () => {
 
 	test("TEI is read like its siblings: a probe that answers is ok, one that does not is unavailable, one that never answers times out, and its facts carry the client's reading", async () => {
 		const facts = await gatherFabricFacts(sources());
-		expect(rowOf(facts, "tei")).toMatchObject({ state: "ok", endpointClass: "loopback", detail: { model: "test-model", dimension: 384, latencyMs: 12 } });
+		expect(rowOf(facts, "tei")).toMatchObject({ state: "ok", endpointClass: "loopback", detail: { model: "test-model", modelSource: "pinned", dimension: 384, latencyMs: 12 } });
 		const down = await gatherFabricFacts(sources({ health: () => ({ ...healthyParts(), tei: Promise.resolve(false) }) }));
 		expect(rowOf(down, "tei")).toMatchObject({ state: "unavailable", source: "probe().tei" });
 		const silent = await gatherFabricFacts(sources({ health: () => ({ ...healthyParts(), tei: never<boolean | null>() }) }), { deadlineMs: 20 });

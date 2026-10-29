@@ -43,11 +43,11 @@ describe("buildFabricCompliance", () => {
 	});
 
 	test("a TEI URL that is neither loopback nor an allowed proxy fails the TEI endpoint check; loopback and proxy pass; unset is not applicable", () => {
-		const direct = check(healthyFacts({ tei: { endpointClass: "direct", model: "m", dimension: 3, latencyMs: 1 } }), "tei-endpoint-private");
+		const direct = check(healthyFacts({ tei: { endpointClass: "direct", model: "m", modelSource: "pinned", dimension: 3, latencyMs: 1 } }), "tei-endpoint-private");
 		expect(direct.status).toBe("FAIL");
 		expect(direct.evidence).not.toContain("http");
 		expect(check(healthyFacts(), "tei-endpoint-private")).toMatchObject({ status: "PASS", evidence: "tei endpoint is loopback" });
-		const proxied = healthyFacts({ tei: { endpointClass: "proxy", model: "m", dimension: 3, latencyMs: 1 } });
+		const proxied = healthyFacts({ tei: { endpointClass: "proxy", model: "m", modelSource: "pinned", dimension: 3, latencyMs: 1 } });
 		expect(check(proxied, "tei-endpoint-private").status).toBe("PASS");
 		expect(check(unconfiguredFacts(), "tei-endpoint-private").status).toBe("NOT_APPLICABLE");
 	});
@@ -88,6 +88,13 @@ describe("buildFabricCompliance", () => {
 
 	test("a clean report passes the redaction check", () => {
 		expect(check(healthyFacts(), "report-redaction").status).toBe("PASS");
+	});
+
+	test("a model only observed from /info is reported and passes the redaction check, and a secret-shaped one fails it", () => {
+		const observed = healthyFacts({ tei: { endpointClass: "loopback", model: "seen-model", modelSource: "observed", dimension: null, latencyMs: 9 } });
+		expect(check(observed, "report-redaction").status).toBe("PASS");
+		const leaky = healthyFacts({ tei: { endpointClass: "loopback", model: `sk-${"a".repeat(24)}`, modelSource: "observed", dimension: null, latencyMs: 9 } });
+		expect(check(leaky, "report-redaction").status).toBe("FAIL");
 	});
 
 	test("a secret-shaped value in a report field fails the redaction check", () => {

@@ -25,8 +25,13 @@ describe("buildFabricStatus", () => {
 		expect(rowOf(unconfiguredFacts(), "tei")).toMatchObject({ state: "unconfigured", endpointClass: "unset" });
 		expect(rowOf(unconfiguredFacts(), "tei").detail).toBeUndefined();
 		const row = rowOf(healthyFacts(), "tei");
-		expect(row).toMatchObject({ state: "ok", endpointClass: "loopback", source: "probe().tei", detail: { model: "test-model", dimension: 384, latencyMs: 12 } });
+		expect(row).toMatchObject({ state: "ok", endpointClass: "loopback", source: "probe().tei", detail: { model: "test-model", modelSource: "pinned", dimension: 384, latencyMs: 12 } });
 		expect(JSON.stringify(row)).not.toContain("http");
+	});
+
+	test("a TEI with no pin and no embed yet still shows the model /info named, and says it was only observed", () => {
+		const facts = healthyFacts({ tei: { endpointClass: "loopback", model: "seen-model", modelSource: "observed", dimension: null, latencyMs: 9 } });
+		expect(rowOf(facts, "tei").detail).toEqual({ model: "seen-model", modelSource: "observed", dimension: null, latencyMs: 9 });
 	});
 
 	test("a configured TEI that does not answer or whose breaker is open is unavailable, a half-open one degraded", () => {

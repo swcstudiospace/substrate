@@ -13,8 +13,8 @@
  * therefore all misses; it still writes.
  */
 import { createHash } from "node:crypto";
-import type { ReadThroughCache } from "./cache.ts";
-import { clampText, type TeiClient, type TeiEmbedOptions, type TeiEmbedResult } from "./planes/tei.ts";
+import { decodeEmbeddingBytes, type ReadThroughCache } from "./cache.ts";
+import { MAX_TEXTS_PER_CALL, clampText, type TeiClient, type TeiEmbedOptions, type TeiEmbedResult } from "./planes/tei.ts";
 
 /** The cache surface the service uses; the production `ReadThroughCache` has it. */
 export type EmbeddingCacheStore = Pick<ReadThroughCache, "peekMany" | "putEntry">;
@@ -53,13 +53,10 @@ export function encodeVector(vector: Float32Array): StoredVector {
 	return { dim: vector.length, b64: Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength).toString("base64") };
 }
 
-/** The vector a stored entry holds, or null when its bytes are not `dim` Float32 values or the dimension is not the wanted one. */
+/** The vector a stored entry holds, or null when its bytes are not `dim` finite Float32 values or the dimension is not the wanted one. */
 export function decodeVector(stored: StoredVector, dim: number): Float32Array | null {
 	if (stored.dim !== dim) return null;
-	const bytes = Buffer.from(stored.b64, "base64");
-	if (bytes.length !== dim * 4) return null;
-	// A copy: a pooled Buffer's offset is not a multiple of four, which a Float32Array view needs.
-	return new Float32Array(new Uint8Array(bytes).buffer);
+	return decodeEmbeddingBytes(dim, stored.b64);
 }
 
 export function createEmbeddingService(deps: EmbeddingServiceDeps): EmbeddingService {
@@ -69,6 +66,9 @@ export function createEmbeddingService(deps: EmbeddingServiceDeps): EmbeddingSer
 		const cache = deps.cache;
 		// Not configured, or no cache: the client answers, and an unconfigured client sends nothing.
 		if (!client.configured || !deps.cacheEnabled || cache === null || texts.length === 0) return client.embed(texts, options);
+		// The same bound as the client's, checked on the ORIGINAL count before any text is clamped, hashed or looked up, so
+		// the answer does not depend on the cache and a huge call allocates nothing.
+		if (texts.length > MAX_TEXTS_PER_CALL) return { ok: false, reason: "input-refused" };
 
 		const clamped = texts.map(clampText);
 		// The same text twice in one call is embedded once.

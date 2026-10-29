@@ -9,7 +9,7 @@ import type { PlaneFetch } from "@substrate/observability";
 import { ReadThroughCache, type CacheRedis } from "./cache.ts";
 import type { TeiConfig } from "./config.ts";
 import { createEmbeddingService, decodeVector, embeddingDigest, encodeVector, type EmbeddingCacheStore } from "./embed.ts";
-import { MAX_TEXT_CHARS, createTeiClient, type TeiEmbedResult } from "./planes/tei.ts";
+import { MAX_TEXTS_PER_CALL, MAX_TEXT_CHARS, createTeiClient, type TeiEmbedResult } from "./planes/tei.ts";
 import { defined } from "./test-support.ts";
 
 const TTL = 1234;
@@ -275,5 +275,79 @@ describe("the stored vector", () => {
 
 	test("the digest is the sha256 of the model, a newline and the text", () => {
 		expect(embeddingDigest("m", "t")).toBe(createHash("sha256").update("m\nt").digest("hex"));
+	});
+});
+
+describe("the input limit does not depend on the cache", () => {
+	test("more texts than one call takes are input-refused with the cache on or off, even when every text is cached, and nothing is read or sent", async () => {
+		const many = Array.from({ length: MAX_TEXTS_PER_CALL + 1 }, () => "x");
+		for (const cacheEnabled of [true, false]) {
+			const tei = fakeTei();
+			const redis = new FakeRedis();
+			const service = serviceOf(PINNED, tei, redis, { cacheEnabled });
+			// Warm the cache so that, once duplicates are removed, a single cached text would answer the whole call.
+			expect((await service.embed(["x"])).ok).toBe(true);
+			const mgets = redis.mgets;
+			const sent = tei.embeds.length;
+			expect(await service.embed(many)).toEqual({ ok: false, reason: "input-refused" });
+			expect(redis.mgets).toBe(mgets);
+			expect(tei.embeds).toHaveLength(sent);
+		}
+	});
+
+	test("exactly the limit is accepted with the cache on", async () => {
+		const service = serviceOf(PINNED, fakeTei(), new FakeRedis());
+		const result = await service.embed(Array.from({ length: MAX_TEXTS_PER_CALL }, () => "x"));
+		expect(result.ok && result.vectors).toHaveLength(MAX_TEXTS_PER_CALL);
+	});
+});
+
+describe("vectors that are not finite are never served or stored", () => {
+	const NAN_BYTES = Buffer.from(new Float32Array([1, Number.NaN, 3, 4]).buffer).toString("base64");
+
+	test("decodeVector refuses bytes of the right length that hold NaN or an infinity", () => {
+		for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+			const b64 = Buffer.from(new Float32Array([1, bad, 3, 4]).buffer).toString("base64");
+			expect(decodeVector({ dim: 4, b64 }, 4)).toBeNull();
+		}
+	});
+
+	test("a cached NaN entry is a miss through the real cache: the text is embedded again and the entry replaced by a finite one", async () => {
+		const tei = fakeTei();
+		const redis = new FakeRedis();
+		const service = serviceOf(PINNED, tei, redis);
+		const key = `substrate:v1:emb:${embeddingDigest("test-model", "a")}`;
+		redis.values.set(key, JSON.stringify({ v: { dim: 4, b64: NAN_BYTES } }));
+		const answered = vectorsOf(await service.embed(["a"]));
+		expect(tei.embeds).toEqual([["a"]]);
+		expect(answered[0]?.every((value) => Number.isFinite(value))).toBe(true);
+		const again = vectorsOf(await service.embed(["a"]));
+		expect(tei.embeds).toHaveLength(1);
+		expect(again).toEqual(answered);
+	});
+
+	test("a store that hands back a NaN entry as a hit is still not served", async () => {
+		const tei = fakeTei();
+		const lying: EmbeddingCacheStore = {
+			peekMany: async <T>(_klass: string, digests: readonly string[]) => digests.map((): T | null => ({ dim: 4, b64: NAN_BYTES }) as T),
+			putEntry: async () => true,
+		};
+		const answered = vectorsOf(await serviceOf(PINNED, tei, new FakeRedis(), { cache: lying }).embed(["a"]));
+		expect(tei.embeds).toEqual([["a"]]);
+		expect(answered[0]?.every((value) => Number.isFinite(value))).toBe(true);
+	});
+
+	test("a fresh 1e100 is finite as a double but Infinity as a float: bad-response, and nothing is cached", async () => {
+		const redis = new FakeRedis();
+		const huge: PlaneFetch = async (input) => {
+			const path = new URL(String(input)).pathname;
+			if (path === "/info") return Response.json({ model_id: "test-model", max_client_batch_size: 64 });
+			return new Response("[[1,1e100,3,4]]", { status: 200 });
+		};
+		const client = createTeiClient(PINNED, { fetch: huge, sleep: async () => {}, random: () => 0.5 });
+		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
+		const service = createEmbeddingService({ client, cache, cacheEnabled: true, ttlS: TTL });
+		expect(await service.embed(["a"])).toEqual({ ok: false, reason: "bad-response" });
+		expect(redis.sets).toEqual([]);
 	});
 });

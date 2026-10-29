@@ -102,6 +102,23 @@ describe("the emb cache class", () => {
 		expect(samples.filter((sample) => sample.result === "error" && sample.cacheClass === "emb")).toHaveLength(digests.length);
 	});
 
+	test("bytes of the right length that hold NaN or an infinity are a miss counted as an error, and are never written", async () => {
+		const redis = new FakeRedis();
+		const samples: CacheSample[] = [];
+		const cache = cacheOf(redis, samples);
+		const entryOf = (values: number[]) => ({ dim: values.length, b64: Buffer.from(new Float32Array(values).buffer).toString("base64") });
+		const bad = [entryOf([0.5, Number.NaN, 2]), entryOf([0.5, Number.POSITIVE_INFINITY, 2]), entryOf([Number.NEGATIVE_INFINITY, 1, 2])];
+		for (const [index, value] of bad.entries()) redis.values.set(digestKey("emb", `nf${index}`), JSON.stringify({ v: value }));
+		const answered = await cache.peekMany(
+			"emb",
+			bad.map((_, index) => `nf${index}`),
+		);
+		expect(answered).toEqual([null, null, null]);
+		expect(samples.filter((sample) => sample.result === "error" && sample.cacheClass === "emb")).toHaveLength(bad.length);
+		for (const value of bad) expect(await cache.putEntry("emb", "w", value, 60)).toBe(false);
+		expect(redis.values.has(digestKey("emb", "w"))).toBe(false);
+	});
+
 	test("putEntry refuses a value of the wrong shape and stores nothing", async () => {
 		const redis = new FakeRedis();
 		const cache = cacheOf(redis);

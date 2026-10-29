@@ -7087,7 +7087,8 @@ export class Substrate {
 				return {
 					cache: this.cache.health(),
 					eventBus: { enabled: this.eventBusHealth().enabled },
-					tei: { model: seen.model, dimension: seen.dim, latencyMs: seen.lastLatencyMs },
+					// The pin, else the model an embed learned, else the one `/info` last named: setup can read it before any embedder exists.
+					tei: { model: seen.model ?? seen.observedModel, modelSource: seen.modelSource, dimension: seen.dim, latencyMs: seen.lastLatencyMs },
 					// The embedding plane is not a reported plane, so its breaker is read from its gate beside the six.
 					breakers: { ...this.planes.snapshots(), tei: this.planes.gate("tei").breaker?.snapshot() ?? null },
 				};

@@ -196,7 +196,7 @@ interface TeiRow {
 	state: string;
 	endpointClass: string;
 	source: string;
-	detail?: { model: string | null; dimension: number | null; latencyMs: number | null };
+	detail?: { model: string | null; modelSource: string; dimension: number | null; latencyMs: number | null };
 }
 
 /** A TEI fake that answers `/health` and `/info`, records every request and keeps the bearer it was sent. */
@@ -232,7 +232,7 @@ describe("the TEI fabric row", () => {
 		const tei = teiProbeFake();
 		const client = await connect(substrateWithTei(TEI_ENV, tei.fetch));
 		const { row } = await teiRowOf(client);
-		expect(row).toMatchObject({ state: "ok", endpointClass: "loopback", source: "probe().tei", detail: { model: "test-model", dimension: 384 } });
+		expect(row).toMatchObject({ state: "ok", endpointClass: "loopback", source: "probe().tei", detail: { model: "test-model", modelSource: "pinned", dimension: 384 } });
 		expect(typeof row?.detail?.latencyMs).toBe("number");
 		expect([...tei.paths].sort()).toEqual(["GET /health", "GET /info"]);
 		expect(tei.bearers.every((bearer) => bearer === `Bearer ${TEI_KEY}`)).toBe(true);
@@ -243,6 +243,17 @@ describe("the TEI fabric row", () => {
 		}
 		expect((await checkOf(client, "resource-state.tei")).status).toBe("PASS");
 		expect((await checkOf(client, "tei-endpoint-private")).status).toBe("PASS");
+	});
+
+	test("with only TEI_URL set a successful probe shows the model /info named, as observed, so setup can copy it into the pin", async () => {
+		const tei = teiProbeFake("served-model");
+		const client = await connect(substrateWithTei({ TEI_URL: "http://127.0.0.1:8080" }, tei.fetch));
+		const { row, text } = await teiRowOf(client);
+		expect(row).toMatchObject({ state: "ok", detail: { model: "served-model", modelSource: "observed", dimension: null } });
+		expect(text).not.toContain("127.0.0.1");
+		// A pin wins over what was observed and says so.
+		const pinned = await connect(substrateWithTei(TEI_ENV, teiProbeFake().fetch));
+		expect((await teiRowOf(pinned)).row?.detail).toMatchObject({ model: "test-model", modelSource: "pinned" });
 	});
 
 	test("a TEI serving another model than the pin, or answering /health with an error, is unavailable and fails its resource check", async () => {

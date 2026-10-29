@@ -635,3 +635,71 @@ describe("no TEI credentials in the repo", () => {
 		}
 	});
 });
+
+/**
+ * No second door to TEI (phase 64): importing the client is not the only way past the server's checks. A CLI or collector
+ * that read `TEI_URL` and posted to `/embed` itself would skip the endpoint policy, the circuit breaker, the input limits
+ * and the cache. Only the config reader, the flag registry and the client name the settings or build a request; tests
+ * inside the package may, because they feed those files fakes.
+ */
+const TEI_DIRECT_ALLOWED = [join(LEDGER_PACKAGE, "config.ts"), join(LEDGER_PACKAGE, "flag-registry.ts"), join(LEDGER_PACKAGE, "planes", "tei.ts")];
+
+function mayReachTeiDirectly(path: string): boolean {
+	return TEI_DIRECT_ALLOWED.includes(path) || (path.startsWith(LEDGER_PACKAGE) && path.endsWith(".test.ts"));
+}
+
+/** A read of the TEI settings by name. */
+const TEI_SETTING = /\bTEI_(?:URL|API_KEY)\b/;
+/** A request path built in a string: `"/embed"`, `` `${base}/embed` ``, `"http://host/embed"`; not `"./embed.ts"` or `/embeddings`. */
+const TEI_EMBED_PATH = /["'`][^"'`]*\/embed(?![\w.-])/;
+
+function reachesTeiDirectly(body: string): boolean {
+	return body
+		.split("\n")
+		.filter((line) => !/^\s*(?:#|\/\/|\/\*|\*|<!--)/.test(line))
+		.some((line) => TEI_SETTING.test(line) || TEI_EMBED_PATH.test(line));
+}
+
+describe("nothing outside the TEI client reads its settings or builds a request to it", () => {
+	test("no source file outside the allow-list names TEI_URL or TEI_API_KEY, or builds an /embed request", async () => {
+		const offenders = (await filesMatching("**/*.{ts,mts,js,mjs}"))
+			.filter((path) => !mayReachTeiDirectly(path))
+			.filter((path) => reachesTeiDirectly(read(path)));
+
+		expect(offenders).toEqual([]);
+	}, SCAN_TIMEOUT_MS);
+
+	test("the scan catches a direct request and a read of the settings, over in-memory samples", () => {
+		for (const body of [
+			'const reply = await fetch(process.env.TEI_URL + "/embed", { method: "POST", body });',
+			"const reply = await fetch(`${base}/embed`, { method: 'POST' });",
+			"const key = Bun.env.TEI_API_KEY;",
+			'const url = new URL("/embed", base);',
+			"  headers: { authorization: `Bearer ${env.TEI_API_KEY}` },",
+		]) {
+			expect({ body, caught: reachesTeiDirectly(body) }).toEqual({ body, caught: true });
+		}
+	});
+
+	test("the scan does not fire on a comment, an import of a file named embed, another route or another setting", () => {
+		for (const body of [
+			"// TEI_URL lives in the server env file",
+			"/** TEI_URL names the instance. */",
+			" * POST /embed answers one vector per input",
+			'import { createEmbeddingService } from "./embed.ts";',
+			'const reply = await fetch(`${server}/embeddings`);',
+			'await fetch(`${server}/docs/search`);',
+			"const model = env.SUBSTRATE_TEI_MODEL;",
+		]) {
+			expect({ body, caught: reachesTeiDirectly(body) }).toEqual({ body, caught: false });
+		}
+	});
+
+	test("the allow-list is the config reader, the flag registry, the client and the package's own tests", () => {
+		expect(TEI_DIRECT_ALLOWED.every((path) => mayReachTeiDirectly(path))).toBe(true);
+		expect(mayReachTeiDirectly(join(LEDGER_PACKAGE, "embed.test.ts"))).toBe(true);
+		for (const path of [join(LEDGER_PACKAGE, "service.ts"), join(LEDGER_PACKAGE, "embed.ts"), join("packages", "cli", "src", "embed.ts"), join("scripts", "x.ts")]) {
+			expect({ path, allowed: mayReachTeiDirectly(path) }).toEqual({ path, allowed: false });
+		}
+	});
+});

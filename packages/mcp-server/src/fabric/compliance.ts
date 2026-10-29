@@ -87,7 +87,10 @@ function auditCheck(): FabricCheck {
 	return { id, status: "PASS", evidence: `${FABRIC_TOOLS.length} tool(s), all fail-open` };
 }
 
-/** The report, as serialised, is unchanged by the redaction rules: no field carries a secret-shaped value. */
+/**
+ * The report, as serialised, is unchanged by the redaction rules: no field carries a secret-shaped value. The TEI row's
+ * model name may be one `/info` merely reported (`modelSource: "observed"`), which is remote text, so it is covered too.
+ */
 function secretFreeReportCheck(status: FabricStatus, suggestions: readonly FabricSuggestion[]): FabricCheck {
 	const id = "report-redaction";
 	const report = JSON.stringify({ resources: status.resources, suggestions });

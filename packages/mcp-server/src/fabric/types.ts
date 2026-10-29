@@ -5,6 +5,7 @@
  * is typed into the fabric, so none can reach a status, a suggestion or a compliance check.
  */
 import type { DbPlane, EndpointClass } from "../db-endpoints.ts";
+import type { TeiModelSource } from "../planes/tei.ts";
 
 /** The eight resources the fabric reports, in report order. */
 export const FABRIC_RESOURCES = [
@@ -41,9 +42,14 @@ export type CostReading = "ok" | "over-budget" | "unpriced" | "unavailable" | "u
 /** The MCP tools this module serves. Each one is read-only and fail-open. */
 export const FABRIC_TOOLS = ["fabric_status", "fabric_optimize", "fabric_compliance"] as const;
 
-/** The embedding service's reading (phase 64): a model name, a dimension and a latency. Never a URL or a key. */
+/**
+ * The embedding service's reading (phase 64): a model name, where that name came from, a dimension and a latency.
+ * Never a URL or a key. `model` is the pin, else the model learned from an embed, else the last one `/info` named;
+ * `modelSource` says which, and is `none` only while `model` is null.
+ */
 export interface FabricTeiDetail {
 	model: string | null;
+	modelSource: TeiModelSource;
 	dimension: number | null;
 	latencyMs: number | null;
 }
