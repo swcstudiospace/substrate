@@ -14,19 +14,36 @@
  * directive's target must have, and `docs_steering_session` accepts any string, so any session id the inbox can target is also
  * one the registry can hold. A session whose id the inbox cannot target simply never receives a directive.
  *
- * Process-local: a restart forgets the sessions, and past the cap the oldest is forgotten. The ledger keeps every transition as
- * an event. A directive acknowledged for a session the registry does not hold is refused by the port (the acknowledgement
- * stands); the registry cannot seed a session of its own because it does not know the session's repo.
+ * Process-local by default: a restart forgets the sessions, and past the cap the oldest is forgotten. With a durable store
+ * injected (`SUBSTRATE_STEERING_SESSIONS_TABLE`, phase 67) each write also goes to `steering_sessions` and `loadDurable` reads
+ * the newest rows back at boot, inside the TTL and the cap. The memory stays authoritative: a store that fails never fails a
+ * steering call, it records one warning note. The ledger keeps every transition as an event. A directive acknowledged for a
+ * session the registry does not hold is refused by the port (the acknowledgement stands); the registry cannot seed a session
+ * of its own because it does not know the session's repo.
  */
 import { nextSteeringSession, steeringSessionPayload, type SteeringSession, type SteeringSessionState } from "../event.ts";
+import { redact } from "../redact.ts";
 import type { EventInput, Surface } from "../types.ts";
 import type { SessionStateName, SessionStatePort, SessionTransitionContext, SessionTransitionResult } from "./steering-delivery.ts";
+import { steeringSessionWithoutSecrets, type SteeringSessionsStore } from "./steering-sessions-store.ts";
 
 /** The most sessions held. Past it the oldest is forgotten. */
 export const STEERING_SESSION_CAP = 1000;
 
 /** `payload.via` of a transition an acknowledgement drove. A transition `docs_steering_session` made carries no `via`. */
 export const STEERING_ACKNOWLEDGE_VIA = "steering_acknowledge";
+
+/** `payload.action` of the warning note a failed durable write records. Registered in `event-sources.ts`. */
+export const STEERING_PERSIST_FAILED_ACTION = "steering.persist_failed";
+
+/** The least time between two persistence warnings from one registry, so a store that is down does not write a note per call. */
+export const STEERING_PERSIST_WARN_INTERVAL_MS = 60_000;
+
+/** Durable writes queued behind a slow store. Past it a write is skipped and counted as a failure; the memory is unaffected. */
+export const STEERING_PERSIST_PENDING_MAX = 256;
+
+/** The default freshness window of a durable load: seven days. */
+export const STEERING_SESSION_TTL_MS = 604_800_000;
 
 /** The store key of one session: the surface that holds it and its id. */
 export function steeringSessionKey(surface: Surface, sessionId: string): string {
@@ -63,6 +80,19 @@ export interface SteeringSessionRegistryDeps {
 	nowMs?: () => number;
 	/** Test seam; defaults to {@link STEERING_SESSION_CAP}. */
 	cap?: number;
+	/** The durable copy (`steering_sessions`). Absent or null keeps the registry process-local, exactly as before. */
+	store?: SteeringSessionsStore | null;
+	/** How old a stored session may be and still load, in milliseconds. Defaults to {@link STEERING_SESSION_TTL_MS}. */
+	ttlMs?: number;
+	/** Where a load failure is reported. Omitted, it goes to stderr as the server's other background notes do. */
+	report?: (line: string) => void;
+}
+
+/** What `loadDurable` did. `failed` is the redacted reason the read or the prune could not finish, or null. */
+export interface SteeringSessionsLoadReport {
+	loaded: number;
+	pruned: number;
+	failed: string | null;
 }
 
 export class SteeringSessionRegistry implements SessionStatePort {
@@ -72,11 +102,21 @@ export class SteeringSessionRegistry implements SessionStatePort {
 	private readonly emit: (event: EventInput) => Promise<unknown>;
 	private readonly nowMs: () => number;
 	private readonly cap: number;
+	private readonly store: SteeringSessionsStore | null;
+	private readonly ttlMs: number;
+	private readonly report: (line: string) => void;
+	/** The tail of the durable write chain: writes reach the store in the order they were made, one at a time. */
+	private writeTail: Promise<void> = Promise.resolve();
+	private pendingWrites = 0;
+	private lastWarnAtMs: number | null = null;
 
 	constructor(deps: SteeringSessionRegistryDeps) {
 		this.emit = deps.emit;
 		this.nowMs = deps.nowMs ?? (() => Date.now());
 		this.cap = deps.cap ?? STEERING_SESSION_CAP;
+		this.store = deps.store ?? null;
+		this.ttlMs = deps.ttlMs ?? STEERING_SESSION_TTL_MS;
+		this.report = deps.report ?? ((line) => void process.stderr.write(`${line}\n`));
 	}
 
 	get size(): number {
@@ -87,8 +127,53 @@ export class SteeringSessionRegistry implements SessionStatePort {
 		return this.held.get(steeringSessionKey(surface, sessionId))?.session;
 	}
 
-	/** Stores or replaces one session and makes it the newest. Past the cap the oldest is forgotten. */
+	/**
+	 * Stores or replaces one session and makes it the newest. Past the cap the oldest is forgotten. With a durable store the
+	 * session is also queued for the table; that write never blocks or fails this call.
+	 */
 	put(surface: Surface, sessionId: string, session: SteeringSession): void {
+		this.hold(surface, sessionId, session);
+		this.persist(surface, session);
+	}
+
+	/** Every held session, newest write first. A copy: changing the result changes nothing here. */
+	entries(): Array<{ surface: Surface; session: SteeringSession }> {
+		return [...this.held.values()].reverse().map((held) => ({ surface: held.surface, session: held.session }));
+	}
+
+	/**
+	 * Reads the durable rows back at boot: the newest `cap` rows updated inside the TTL, adopted oldest first so the newest end
+	 * up newest. A session already held (written before the load finished) is kept as it is. Rows past the TTL are pruned
+	 * from the table. Never throws: a store that fails is reported and the registry starts with what it holds.
+	 */
+	async loadDurable(): Promise<SteeringSessionsLoadReport> {
+		const store = this.store;
+		if (store === null) return { loaded: 0, pruned: 0, failed: null };
+		const sinceMs = this.nowMs() - this.ttlMs;
+		let loaded = 0;
+		let pruned = 0;
+		let failed: string | null = null;
+		try {
+			const rows = await store.loadNewest({ sinceMs, limit: this.cap });
+			for (const row of [...rows].reverse()) {
+				if (this.held.has(steeringSessionKey(row.surface, row.session.session_id))) continue;
+				this.hold(row.surface, row.session.session_id, row.session);
+				loaded += 1;
+			}
+			pruned = await store.prune(sinceMs);
+		} catch (cause) {
+			failed = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
+			this.report(`[substrate] steering sessions: durable load failed (${failed}); the registry starts with ${this.held.size} session(s) in memory`);
+		}
+		return { loaded, pruned, failed };
+	}
+
+	/** Resolves once every durable write queued so far has settled. Never rejects. */
+	async idle(): Promise<void> {
+		await this.writeTail;
+	}
+
+	private hold(surface: Surface, sessionId: string, session: SteeringSession): void {
 		const key = steeringSessionKey(surface, sessionId);
 		this.held.delete(key);
 		if (this.held.size >= this.cap) {
@@ -99,6 +184,45 @@ export class SteeringSessionRegistry implements SessionStatePort {
 		const keys = this.byId.get(sessionId) ?? new Set<string>();
 		keys.add(key);
 		this.byId.set(sessionId, keys);
+	}
+
+	private persist(surface: Surface, session: SteeringSession): void {
+		const store = this.store;
+		if (store === null) return;
+		if (this.pendingWrites >= STEERING_PERSIST_PENDING_MAX) {
+			this.warnPersistFailed(surface, session.session_id, "the durable write queue is full");
+			return;
+		}
+		this.pendingWrites += 1;
+		this.writeTail = this.writeTail
+			.then(() => store.save(surface, steeringSessionWithoutSecrets(session)))
+			.catch((cause: unknown) => {
+				this.warnPersistFailed(surface, session.session_id, cause instanceof Error ? cause.message : String(cause));
+			})
+			.finally(() => {
+				this.pendingWrites -= 1;
+			});
+	}
+
+	/** One warning note per interval, never an error: the session is held in memory whatever the table did. */
+	private warnPersistFailed(surface: Surface, sessionId: string, reason: string): void {
+		const nowMs = this.nowMs();
+		if (this.lastWarnAtMs !== null && nowMs - this.lastWarnAtMs < STEERING_PERSIST_WARN_INTERVAL_MS) return;
+		this.lastWarnAtMs = nowMs;
+		const cut = redact(reason).slice(0, 200);
+		const warning: EventInput = {
+			surface,
+			kind: "warning",
+			summary: `steering session ${redact(sessionId).slice(0, 80)} was not saved to steering_sessions: ${cut}`,
+			session_id: sessionId,
+			payload: { action: STEERING_PERSIST_FAILED_ACTION, reason: cut },
+		};
+		// Started inside an async function so a synchronous throw from `emit` is a rejection like any other.
+		void (async () => {
+			await this.emit(warning);
+		})().catch(() => {
+			// A note the ledger cannot take adds nothing to a write that already failed; the memory still holds the session.
+		});
 	}
 
 	/** The session an id names, across surfaces. A read: it changes nothing. */

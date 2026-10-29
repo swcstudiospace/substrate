@@ -1492,6 +1492,22 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 			payload: { action: "worktree.prune", path: "/srv/worktrees/atlas", head: "0123456789abcdef0123456789abcdef01234567", size_bytes: 1048576, class: "safe", reasons: ["merged"] },
 		}),
 	},
+	{
+		id: "steering.persist_failed",
+		phase: 67,
+		kind: "warning",
+		surface: "caller",
+		actions: ["steering.persist_failed"],
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "warning",
+			summary: "steering session sess-sample was not saved to steering_sessions: connection refused",
+			session_id: "sess-sample",
+			payload: { action: "steering.persist_failed", reason: "connection refused" },
+		}),
+	},
 ];
 
 export const SILENT_SOURCES: readonly SilentSource[] = [

@@ -52,6 +52,7 @@ import type {
 } from "./types.ts";
 import { EDGE_KINDS } from "./types.ts";
 import { SteeringAuditSink, bunSteeringAuditReadSql, bunSteeringAuditSql } from "./planning/steering-store.ts";
+import { bunSteeringSessionsStore, type SteeringSessionsStore } from "./planning/steering-sessions-store.ts";
 import { bunCorpusStore, type CorpusStore } from "./corpus/store.ts";
 import {
 	DEFAULT_LEASE_TTL_SECONDS,
@@ -337,12 +338,12 @@ export const FIRST_REVERSIBLE_VERSION = 33;
  * A migration that runs only when its named opt-in is on. While the opt-in is off, `migrate()` neither runs
  * nor ledgers the step, so turning the opt-in on later applies it on the next boot.
  */
-export type MigrationOptIn = "steering-audit";
+export type MigrationOptIn = "steering-audit" | "steering-sessions";
 
 /** Which opt-in migrations run. A missing key is off. */
-export type MigrationOptIns = Readonly<Record<MigrationOptIn, boolean>>;
+export type MigrationOptIns = Readonly<Partial<Record<MigrationOptIn, boolean>>>;
 
-const MIGRATION_OPT_INS_OFF: MigrationOptIns = { "steering-audit": false };
+const MIGRATION_OPT_INS_OFF: MigrationOptIns = { "steering-audit": false, "steering-sessions": false };
 
 /**
  * Boot DDL in application order. Versions are contiguous and never renumbered:
@@ -757,6 +758,31 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 			);
 			create index if not exists worktrees_repo_seen_idx on worktrees (repo, last_seen_at)`,
 	},
+	// Steering sessions (phase 67, live steering GA): the durable copy of the live steering session registry, so a
+	// session's state, steering text and planning hash survive a restart. Created only under the opt-in
+	// SUBSTRATE_STEERING_SESSIONS_TABLE: while it is off, migrate() skips this step and does not ledger it.
+	// The application upserts one row per (surface, session_id) and drops rows past the TTL when it loads them at boot.
+	// Additive and idempotent: one new table and its index, nothing existing is touched.
+	// OPERATORS: rehearse this step on a restored dump before applying it to production.
+	{
+		version: 37,
+		name: "steering_sessions",
+		optIn: "steering-sessions",
+		phase: "expand",
+		down: `drop table if exists steering_sessions`,
+		sql: `
+			create table if not exists steering_sessions (
+				surface        text not null,
+				session_id     text not null,
+				repo_id        text not null,
+				state          text not null check (state in ('ACTIVE', 'CONTEXT_REFRESH', 'PAUSED', 'RESUMED')),
+				steering       text,
+				planning_hash  text,
+				updated_at     timestamptz not null,
+				primary key (surface, session_id)
+			);
+			create index if not exists steering_sessions_repo_updated_idx on steering_sessions (repo_id, updated_at)`,
+	},
 ];
 
 /** The steps `migrate()` runs for these opt-ins, in version order. A step whose opt-in is off is left out and not ledgered. */
@@ -803,6 +829,15 @@ export class IndexStore implements MemoryStore {
 	 */
 	corpusStore(): CorpusStore {
 		return bunCorpusStore(this.sql);
+	}
+
+	/**
+	 * The durable steering session store over this store's pool (phase 67): the upsert and the boot read behind the registry.
+	 * It only builds the adapter; no statement runs until the registry uses it, and the table exists only when the
+	 * `steering-sessions` opt-in ran its migration step.
+	 */
+	steeringSessions(): SteeringSessionsStore {
+		return bunSteeringSessionsStore(this.sql);
 	}
 
 	/**

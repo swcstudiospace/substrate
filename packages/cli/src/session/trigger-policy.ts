@@ -16,6 +16,7 @@
  *   turn         at most one per TURN_MIN_INTERVAL_MS, and not when the tree is unchanged
  *   plan-step    at most one per PLAN_STEP_MIN_INTERVAL_MS, and not when the tree is unchanged
  *   steering     one per directive id, otherwise unlimited, and not when the tree is unchanged
+ *   context      never a checkpoint: the hook prints the live-context digest and takes no snapshot
  */
 import { createHash } from "node:crypto";
 import type { CheckpointTrigger } from "../../../mcp-server/src/session-events.ts";
@@ -32,8 +33,11 @@ export const TURN_MIN_INTERVAL_MS = 60_000;
  */
 export const PLAN_STEP_MIN_INTERVAL_MS = 10_000;
 
-/** The triggers a host hook may ask for (`manual` and `pre-restore` have their own commands). */
-export const HOOK_TRIGGERS = ["turn", "plan-step", "steering", "baseline"] as const;
+/** The triggers of a host hook that take a checkpoint (`manual` and `pre-restore` have their own commands). */
+export const CHECKPOINT_HOOK_TRIGGERS = ["turn", "plan-step", "steering", "baseline"] as const;
+export type CheckpointHookTrigger = (typeof CHECKPOINT_HOOK_TRIGGERS)[number];
+/** Every trigger `substrate session hook` accepts: the checkpoint triggers, and `context`, which prints a digest instead. */
+export const HOOK_TRIGGERS = [...CHECKPOINT_HOOK_TRIGGERS, "context"] as const;
 export type HookTrigger = (typeof HOOK_TRIGGERS)[number];
 
 /** What the policy needs to know about an existing checkpoint of the session. */

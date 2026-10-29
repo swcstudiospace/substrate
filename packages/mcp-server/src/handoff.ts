@@ -58,6 +58,9 @@ const MAX_NOTES = 1200;
  */
 const MAX_PACKET_BYTES = 12_000;
 
+/** What a signature adds to a packet: an algorithm name, a key id, a timestamp and a hex digest, with room to spare. */
+const MAX_SIGNATURE_BYTES = 1_024;
+
 export interface HandoffParty {
 	surface: Surface;
 	session_id: string | null;
@@ -159,12 +162,52 @@ export interface HandoffInput {
 
 export class InvalidHandoffError extends Error {}
 
+/** Passes of redaction that settle a text, and tries that make its cut text stable. Redaction converges in a pass or two on any real text; a bound keeps a hostile one from looping. */
+const SETTLE_PASSES = 8;
+const STABLE_CUT_ATTEMPTS = 32;
+
+/** The text after redaction has run until another pass changes nothing, or null when it never does. */
+function settle(text: string): string | null {
+	let current = redact(text).trim();
+	for (let pass = 0; pass < SETTLE_PASSES; pass++) {
+		const next = redact(current).trim();
+		if (next === current) return current;
+		current = next;
+	}
+	return null;
+}
+
+/**
+ * One line of a packet: redacted, capped, and stable.
+ *
+ * Redact first, then cap: truncating first can cut a token in half so its own pattern no longer matches, and the fragment would
+ * be signed and stored. Then make it stable, because the event layer redacts every stored string again and the text that was
+ * signed has to be the text that is stored:
+ * - redaction is settled before the cap, so a second pass over the whole text (one that, say, drops a comma after a marker)
+ *   changes nothing later;
+ * - a cap that falls inside a marker (`[REDACTE`) or a value (`password=[REDA`) is completed or replaced by that second pass. If
+ *   the result still fits, it is the form that is kept; if it outgrew the cap, the cut moves back from where it was (never from
+ *   the start) until a second pass changes nothing.
+ * Text that cannot be made stable is not carried, rather than carried in a form that differs from what was signed.
+ */
 function line(value: unknown, limit: number): string | null {
 	if (typeof value !== "string") return null;
-	// Redact first, then cap: truncating first can cut a token in half so its own
-	// pattern no longer matches, and the fragment would be signed and stored.
-	const cleaned = redact(value).trim().slice(0, limit).trim();
-	return cleaned.length > 0 ? cleaned : null;
+	let text = settle(value);
+	if (text === null) return null;
+	let cut = Math.min(text.length, limit);
+	for (let attempt = 0; attempt < STABLE_CUT_ATTEMPTS; attempt++) {
+		const candidate = text.slice(0, cut).trim();
+		const again = redact(candidate);
+		if (again === candidate) return candidate.length > 0 ? candidate : null;
+		if (again.length <= limit) {
+			text = again.trim();
+			cut = Math.min(text.length, limit);
+			continue;
+		}
+		cut = Math.max(0, cut - Math.max(2, again.length - candidate.length + 1));
+		if (cut === 0) return null;
+	}
+	return null;
 }
 
 function lines(value: unknown, maxItems: number): { kept: string[]; dropped: number } {
@@ -355,4 +398,50 @@ export function handoffGaps(packet: HandoffPacket): string[] {
 		gaps.push("no prev_event_hash: the packet is not anchored to the sender's event trail");
 	}
 	return gaps;
+}
+
+/** A named own field of an object read back from storage, untyped. Absent is `undefined`. */
+function storedField(value: object, key: string): unknown {
+	return Object.hasOwn(value, key) ? Reflect.get(value, key) : undefined;
+}
+
+function isStringList(value: unknown, maxItems: number): value is string[] {
+	return Array.isArray(value) && value.length <= maxItems && value.every((item) => typeof item === "string" && item.length <= MAX_LINE);
+}
+
+function isStoredParty(value: unknown): boolean {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+	const surface = storedField(value, "surface");
+	return typeof surface === "string" && surface.length > 0 && surface.length <= MAX_LINE;
+}
+
+/**
+ * Whether a `payload.handoff` read back from the ledger is a packet a reader may use. The ledger takes any payload from
+ * `events_emit`, so a row of kind `handoff` can carry `{}`, a number or a megabyte string. A packet passes when it is an object
+ * with a non-empty goal, `files`, `dod` and `blockers` as lists of strings, `from` and `to` naming a surface, and every field
+ * inside the bounds `buildHandoff` applies (so a genuine packet always passes and a hostile one is the reader's to skip). The
+ * signature is not judged here: an unsigned or unverifiable packet is still a packet, and `verifyHandoff` says what it is.
+ */
+export function isStoredHandoff(value: unknown): value is HandoffPacket {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+	const goal = storedField(value, "goal");
+	if (typeof goal !== "string" || goal.trim().length === 0 || goal.length > MAX_GOAL) return false;
+	if (!isStringList(storedField(value, "files"), MAX_FILES)) return false;
+	if (!isStringList(storedField(value, "dod"), MAX_DOD)) return false;
+	if (!isStringList(storedField(value, "blockers"), MAX_BLOCKERS)) return false;
+	if (!isStoredParty(storedField(value, "from")) || !isStoredParty(storedField(value, "to"))) return false;
+	const notes = storedField(value, "notes");
+	if (notes !== undefined && notes !== null && (typeof notes !== "string" || notes.length > MAX_NOTES)) return false;
+	const signature = storedField(value, "signature");
+	if (signature !== undefined && signature !== null && (typeof signature !== "object" || Array.isArray(signature))) return false;
+	try {
+		// The builder fits the unsigned packet under the budget and signing adds the signature afterwards, so the two are measured
+		// apart: the packet without its signature against the packet budget, the signature against a bound of its own.
+		const unsigned = Object.fromEntries(Object.entries(value).filter(([key]) => key !== "signature"));
+		if (Buffer.byteLength(canonicalJson(unsigned)) > MAX_PACKET_BYTES) return false;
+		return signature === undefined || signature === null || Buffer.byteLength(canonicalJson(signature)) <= MAX_SIGNATURE_BYTES;
+	} catch {
+		// A payload that cannot be serialised is not a packet.
+		return false;
+	}
 }
