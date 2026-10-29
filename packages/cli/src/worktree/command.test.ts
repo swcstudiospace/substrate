@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { existsSync, linkSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { EmitOutcome } from "../../../collectors/src/emit.ts";
 import { type CommandRunner, spawnGit } from "../../../fleet/src/git.ts";
@@ -312,6 +312,24 @@ describe("conflicts", () => {
 		mkdirSync(join(other.dir, "owner", "name"), { recursive: true });
 		const h = harness({ cwd: other.dir }, { SUBSTRATE_WORKTREE_ROOTS: root });
 		expect(await runWorktree(["conflicts", "--repo", "owner/name"], h.deps)).toBe(0);
+		expect(h.out.join("")).toContain("CONFLICT in shared.txt");
+	});
+
+	test("--repo naming a checkout whose directory name ends in a space is still a checkout root", async () => {
+		const original = makeRepo();
+		commit(original.dir, "shared.txt", "one\ntwo\nthree\n");
+		git(original.dir, ["push", "-q", "origin", "main"]);
+		// Moved before any linked worktree exists, so no worktree records the old path.
+		const spaced = `${original.dir} `;
+		renameSync(original.dir, spaced);
+		const repo: TestRepo = { ...original, dir: spaced };
+		const root = tempDir();
+		const a = addWorktree(repo, root, "a");
+		const b = addWorktree(repo, root, "b");
+		commit(a, "shared.txt", "A\ntwo\nthree\n");
+		commit(b, "shared.txt", "B\ntwo\nthree\n");
+		const h = harness();
+		expect(await runWorktree(["conflicts", "--repo", spaced], h.deps)).toBe(0);
 		expect(h.out.join("")).toContain("CONFLICT in shared.txt");
 	});
 });

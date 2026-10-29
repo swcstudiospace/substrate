@@ -368,7 +368,9 @@ async function conflictSearchRoots(args: WorktreeArgs, deps: WorktreeDeps): Prom
 		const dir = resolve(deps.cwd, args.repo);
 		// `git rev-parse --git-dir` also answers inside an ordinary subfolder of a checkout (`owner/name` can be one), so only a
 		// directory that is itself the top of a work tree replaces the configured roots.
-		const top = await gitOut(deps.git, ["rev-parse", "--show-toplevel"], dir);
+		// The raw output, minus git's final newline only: `gitOut` trims, which would shorten a directory name that ends in a space.
+		const result = await deps.git(["rev-parse", "--show-toplevel"], dir);
+		const top = result.code === 0 ? result.stdout.replace(/\n$/, "") : null;
 		if (top !== null && sameDirectory(top, dir)) return [...new Set([dir, ...args.roots.map((root) => resolve(deps.cwd, root))])];
 	}
 	return roots(args, deps);
