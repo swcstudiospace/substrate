@@ -59,7 +59,7 @@ with `isError` on every non-200 case.
 
 ## Registry, versions, refresh, triggers
 
-The dataset registry (`packages/mcp-server/src/docs/registry.ts`) is code:
+The dataset registry (`packages/mcp-server/src/docs-datasets.ts`) is code:
 `agent-substrate`, `agent-skills`, `programming-desk` plus the four
 provisional product datasets (slugs and roots confirmed by the operator;
 until then the live DOCS-03 proof covers the first three only).

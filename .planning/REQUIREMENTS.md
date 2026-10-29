@@ -65,9 +65,9 @@ Source for all entries: `.planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota
   - Target files: packages/mcp-server/src (new railway.ts), docs/data-planes.md, config-reference.md
   - Budget: $50 per month at test scale, confirmed 2026-10-21 (uplift-7/BLOCKING-UNKNOWNS.md item 8).
   - Status (2026-10-28): complete in repo; live proof operator-gated (accepted debt 2026-10-23).
-- [ ] **SOTA-02**: RAGFlow Advanced Hybrid RAG with Hindsight Context. Phase: 46. Source: .planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements):19–24
+- [ ] **SOTA-02**: LightRAG hybrid RAG with Hindsight context and the RAGFlow migration. Phase: 46. Source: .planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements):19–24
   - Acceptance: docs_search returns context-augmented results; tests for hybrid.
-  - Target files: packages/mcp-server/src/planes/ragflow.ts, planes/hindsight.ts, docs/docs-plane.md
+  - Target files: packages/mcp-server/src/planes/lightrag.ts, planes/hindsight.ts, docs/docs-plane.md (planes/ragflow.ts is the legacy fallback backend, to be removed in the migration)
   - Status (2026-10-28): partial; see Phase 46. LightRAG is deployed in naive mode; graph and hybrid modes and the RAGFlow removal are operator-gated.
 - [ ] **SOTA-03**: GreptimeDB + Dragonfly Predictive Analytics & Cache. Phase: 47. Source: .planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements):26–31
   - Acceptance: /slo has predictive rows; cache preloads based on patterns.
@@ -112,21 +112,21 @@ Source for all entries: the operator request of 2026-10-26 as planned by the Ult
 - [x] **SOTA-13**: Tandem memory, LightRAG with Hindsight, with provenance and forget. Phase: 57. Source: .planning/ROADMAP.md Phase 57 (defined 2026-10-26)
   - Acceptance: retain metadata carries graph, session and node ids and recall exposes them with unchanged document ids; merged, deduplicated, cited LightRAG and Hindsight answers with the existing degraded fallback intact; a forget primitive that emits one ledger note per call and keeps the superseded index row; a cross-store consistency verifier reporting JSON drift with a non-zero exit code and no repair without a flag.
   - Target files: packages/mcp-server/src/memory-retain.ts, memory-recall.ts, memory-forget.ts, tandem-recall.ts, docs-search.ts, service.ts
-- [ ] **SOTA-14**: Live session steering for multi-day GSD-Core sessions. Phase: 58. Source: .planning/ROADMAP.md Phase 58 (defined 2026-10-26)
+- [x] **SOTA-14**: Live session steering for multi-day GSD-Core sessions. Phase: 58. Source: .planning/ROADMAP.md Phase 58 (defined 2026-10-26)
   - Acceptance: durable directives that survive a restart and expire to an audited timeout; delivery to the target session within one scan interval and one shared state model for the two steering mechanisms; liveness that outlasts 25 hours of quiet; a STATE.md and ROADMAP.md position model; DragonflyDB limited to hints and ephemeral presence.
   - Target files: packages/mcp-server/src/planning/*, mcp.ts, event.ts, the TimescaleDB index schema (opt-in step), config-reference
-  - Status (2026-10-28): merged (PR #137); criterion 2 partial (gap closure in progress).
-- [ ] **SOTA-15**: Eternal logging, verifiable checkpoint and rollback events on Solana devnet. Phase: 59. Source: .planning/ROADMAP.md Phase 59 (defined 2026-10-26)
+  - Status (2026-10-28): complete in repo (PRs #137 and #147); `phases/58-live-steering/VERIFICATION.md` passed, 5 of 5 criteria, on main 2026-10-28.
+- [x] **SOTA-15**: Eternal logging, verifiable checkpoint and rollback events on Solana devnet. Phase: 59. Source: .planning/ROADMAP.md Phase 59 (defined 2026-10-26)
   - Acceptance: Merkle inclusion proofs for every tree size and index with tamper rejection; a checkpoint verification command reporting one of anchored, pending, unanchored, unverified or mismatch; mainnet and testnet RPC URLs refused at configuration load and at RPC construction; a signer set with validity windows and audited rotation; devnet reset detection apart from tampering with a re-anchor procedure; no transaction sent outside operator-run steps.
   - Target files: packages/ledger/src, packages/mcp-server/src/anchor.ts, service.ts, config.ts, packages/evidence, docs/runbooks
-  - Status (2026-10-28): merged (PRs #128, #129); criterion 5 partial (gap closure in progress).
+  - Status (2026-10-28): Complete in the repository (PRs #128, #129, #150); `.planning/phases/59-eternal-logging/VERIFICATION.md` human_needed: live anchoring, key funding, the anchor timer and any devnet send are operator-gated.
 - [x] **SOTA-16**: Eternal Memory Knowledge Nexus. Phase: 60. Source: .planning/ROADMAP.md Phase 60 (defined 2026-10-26)
   - Acceptance: governed memory records expose id, version, supersession chain, provenance and content hash and verify against an anchored root; deterministic capsules with a digest recorded as a ledger event and a content-addressed blob store (local and an S3-compatible adapter tested against a fake); redaction that keeps the hash and a tombstone; a decision record mapping Anda and KIP concepts with licenses noted.
   - Target files: packages/mcp-server/src (memory verification and capsule modules), docs/adr
 - [ ] **SOTA-17**: Session rollback to an exact chat moment with file revert. Phase: 61. Source: .planning/ROADMAP.md Phase 61 (defined 2026-10-26)
   - Acceptance: tree-hash equality after snapshot, mutate and restore, with recovery after an interruption and never a partial end state; a dry-run, drift refusal and an always-taken safety snapshot; checkpoints at defined boundaries carrying an opaque transcript reference, git tree, manifest digest and chain head; an append-only rollback event with memory supersession and recall exclusion; per-surface transcript handling without rewriting any transcript; rollback from local checkpoints when the chain is unreachable.
   - Target files: packages/worktree-snapshot, packages/cli, packages/collectors, packages/mcp-server/src, docs/runbooks (a TimescaleDB opt-in schema step was listed here and was NOT built: checkpoints are ledger notes plus local pinned git refs)
-  - Status (2026-10-28): merged (PRs #128, #129); criterion 3 partial (gap closure in progress).
+  - Status (2026-10-28): merged (PRs #128, #129, #146, #148); criterion 3 partial: no host installs or fires the hook until an operator installs the printed configuration (ADR 0007, decision D55-4); no live rehearsal.
 - [x] **SOTA-18**: Soak, runbooks and v1.6 close. Phase: 62. Source: .planning/ROADMAP.md Phase 62 (defined 2026-10-26)
   - Acceptance: a simulated multi-day run with bounded memory and handles and clean resume; runbooks for migration rehearsal, LightRAG hosting, chain outage and devnet reset, rollback and key rotation; decision records for store roles, rollback semantics and memo-only anchoring; STATE and ROADMAP reflect every phase and the milestone audit is written.
   - Target files: soak tests, docs/runbooks, docs/adr, .planning
@@ -143,6 +143,8 @@ Anti-features, from `.planning/research/SUMMARY.md` line 72:
 
 ## Traceability (v1.3.x, v1.5 and v1.6)
 
+Checkbox convention: a ticked requirement is satisfied or waived by the operator (its row says which); an unticked one is accepted debt, partial or operator-gated, and its row carries the reason and the date.
+
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | A-D1 | 37 | Complete (PR #89) |
@@ -151,7 +153,7 @@ Anti-features, from `.planning/research/SUMMARY.md` line 72:
 | C-D2 | 39 | Complete (PR #91); signing needs `SUBSTRATE_HANDOFF_KEY` |
 | C-D4 | 39 | Complete (PR #91) |
 | D-D1 | 40 | Complete (PR #92); live proof operator-gated (accepted debt 2026-10-23); no live effect until `SUBSTRATE_BRIEF_RECALL` and `HINDSIGHT_BANKS` are set |
-| D-D3 | 40 | Blocked: restore drill and approval |
+| D-D3 | 40 | Accepted debt 2026-10-23 (STATE.md); not delivered in the repository: the restore drill and retirement exist as a runbook only (40-VERIFICATION criterion 2 NOT MET); needs the restore drill and owner approval |
 | D-D4 | 40 | Complete (PR #92); live proof operator-gated (accepted debt 2026-10-23); narrowed to config-named models, see the phase 40 SUMMARY |
 | E-D1 | 41 | Complete in repo; live proof operator-gated (accepted debt 2026-10-23) |
 | E-D2 | 41 | Complete in repo; live proof operator-gated (accepted debt 2026-10-23) |
@@ -173,10 +175,10 @@ Anti-features, from `.planning/research/SUMMARY.md` line 72:
 | SOTA-11 | 55 | Complete (PR #127, merged 2026-10-28): `index-store.migrate-contract.test.ts`, `index-store.migrate-harness.test.ts`, `rollback-compat.test.ts`, `session-events.test.ts`, `docs/runbooks/index-migration-rehearsal.md`; production rehearsal operator-run. `phases/55-migration-safety/VERIFICATION.md` |
 | SOTA-12 | 56 | Complete (PR #127, merged 2026-10-28): `planes/lightrag.test.ts` (clear-all denylist), `planes/lightrag.contract.test.ts` against `planes/__fixtures__/lightrag-v1.5.7-routes.json`; derived from upstream source, not a live server; deploy operator-gated. `phases/56-lightrag-contract/VERIFICATION.md` |
 | SOTA-13 | 57 | Complete with fakes (PRs #128, #129, merged 2026-10-28): `memory-forget.test.ts`, `service-forget.test.ts`, `tandem-recall.test.ts`, `service-tandem-scope.test.ts`, `consistency-verify.test.ts`; the forget has no automatic expiry or operator trigger; Hindsight document-list route unverified. `phases/57-tandem-memory/VERIFICATION.md` |
-| SOTA-14 | 58 | Merged (PR #137, replaced #131, merged 2026-10-28); criterion 2 partial (gap closure in progress): `planning/steering-durable.test.ts`, `steering-wiring.test.ts`, `planning/position.test.ts`; criterion 2's shared state model is not built. `phases/58-live-steering/VERIFICATION.md` |
-| SOTA-15 | 59 | Merged (PRs #128, #129, merged 2026-10-28); criterion 5 partial (gap closure in progress): `ledger/src/merkle-proof.test.ts`, `checkpoint-verify.test.ts`, `signer-set.test.ts`, `devnet-reset.test.ts`, `reanchor-plan.test.ts`; the re-anchor send is not built; no live devnet proof (operator-gated). `phases/59-eternal-logging/VERIFICATION.md` |
+| SOTA-14 | 58 | Complete (PRs #137 and #147, merged 2026-10-28): the gap (criterion 2, the state join) was closed by #147; `planning/steering-durable.test.ts`, `steering-wiring.test.ts` (`describe("the two steering mechanisms share one state model")`), `planning/session-state.test.ts`, `planning/position.test.ts`; `phases/58-live-steering/VERIFICATION.md` passed 5 of 5 on main 2026-10-28 |
+| SOTA-15 | 59 | Complete in the repository (PRs #128, #129, #150, merged 2026-10-28); VERIFICATION human_needed: live anchoring, key funding, the anchor timer and any devnet send are operator-gated: `ledger/src/merkle-proof.test.ts`, `checkpoint-verify.test.ts`, `signer-set.test.ts`, `devnet-reset.test.ts`, `reanchor-plan.test.ts`, `mcp-server/src/reanchor.test.ts`, `reanchor-run.test.ts`. `phases/59-eternal-logging/VERIFICATION.md` |
 | SOTA-16 | 60 | Complete with fakes (PRs #128, #129, merged 2026-10-28): `memory-record.test.ts`, `memory-verify.test.ts`, `capsule.test.ts`, `blob-store.test.ts`, `blob-store-s3.test.ts`, `cli/src/capsule.test.ts`, ADRs 0002 and 0003; bucket use operator-gated. `phases/60-eternal-nexus/VERIFICATION.md` |
-| SOTA-17 | 61 | Merged (PRs #128, #129, merged 2026-10-28); criterion 3 partial (gap closure in progress): `worktree-snapshot/src/*.test.ts`, `cli/src/session/rollback.test.ts`, `session-rollback.test.ts`, `session-rollback-e2e.test.ts`; automatic checkpoint triggers are not wired; no live rehearsal. `phases/61-session-rollback/VERIFICATION.md` |
+| SOTA-17 | 61 | Merged (PRs #128, #129, #146, #148, merged 2026-10-28); criterion 3 partial: no host installs or fires the hook until an operator installs the printed configuration (ADR 0007, decision D55-4); criteria 1, 2, 4, 5, 6 met: `worktree-snapshot/src/*.test.ts`, `cli/src/session/rollback.test.ts`, `session-rollback.test.ts`, `session-rollback-e2e.test.ts`; no live rehearsal. `phases/61-session-rollback/VERIFICATION.md` |
 | SOTA-18 | 62 | Complete (PR #130, merged 2026-10-28): `mcp-server/src/soak-multiday.test.ts` and `cli/src/session/soak.test.ts` (committed in 8752578), six runbooks, ADRs 0004-0007, `v1.6-MILESTONE-AUDIT.md`; milestone completion is an operator decision. `phases/62-soak-and-close/VERIFICATION.md` |
 
 ---

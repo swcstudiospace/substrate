@@ -7,9 +7,9 @@
 - ✅ **v1.2 Swarm leases, workspace install and lessons bank** — Phases 11-15, shipped 2026-10-08 (ADR 0001 S2, S4, SPE-5830). Archive: [milestones/v1.2-ROADMAP.md](milestones/v1.2-ROADMAP.md) · audit: [milestones/v1.2-MILESTONE-AUDIT.md](milestones/v1.2-MILESTONE-AUDIT.md)
 - ⚠️ **v1.3 Build plan completion** — Phases 16–33; shipped 2026-10-11, closed 2026-10-21 with accepted debt (8 audit rows and 43 operator-gated live proofs). Closeout: [milestones/v1.3-CLOSEOUT.md](milestones/v1.3-CLOSEOUT.md) · tracking: [SPE-8292](https://linear.app/swcstudio/issue/SPE-8292/n7-final-ordered-execution-plan-in-waves)
 - ✅ **v1.4 Substrate contract hardening** — Phases 34-36, completed 2026-10-24 (local, not published). Archive: [milestones/v1.4-ROADMAP.md](milestones/v1.4-ROADMAP.md) · audit: [milestones/v1.4-MILESTONE-AUDIT.md](milestones/v1.4-MILESTONE-AUDIT.md). Source: [.planning/uplift-7/MILESTONE-AUDIT.md](uplift-7/MILESTONE-AUDIT.md) rows 23-25.
-- 🚧 **v1.3.x Should-have hardening** — Phases 37-44, open: 44 passed; 37-43 verified in repo with live proofs pending; 40-43 accepted debt (2026-10-23); 37-39 await an operator waiver. Audit: [v1.3.x-MILESTONE-AUDIT.md](v1.3.x-MILESTONE-AUDIT.md).
-- 🚧 **v1.5 SOTA enhancements** — Phases 45-54, open. Phase 46 partial: criterion 1 in repo; criteria 2-6 need per-run operator approval. Phases 52-54 merged to main (PRs #104 and #134, #136, #135; the drafts #109, #110 and #111 were closed and replaced). 45 and 47-50 accepted debt (2026-10-23); 51 complete (PR #108).
-- 🚧 **v1.6 Contextual Memory, Live Steering and Eternal Rollback** — Phases 55-62, planned 2026-10-26 (Ultrathink graph ut-mvp59le0-8815e6d1). Built 2026-10-26 and merged to main on 2026-10-28: PR #127 (phases 55 and 56), PRs #128 and #129 (phases 57 and 59-61) and PR #130 (phase 62); phase 58 merged as PR #137 (replaces #131, closed). Phases 58, 59 and 61 merged with one partial criterion each (58 criterion 2, 59 criterion 5, 61 criterion 3); gap closure is in progress. Live steps (a LightRAG deploy, anchor funding and the anchor timer, any devnet send, production migrations) stay operator-gated. Not marked complete or archived: that is an operator decision. Discovery record: [phases/55-migration-safety/CONTEXT.md](phases/55-migration-safety/CONTEXT.md). Audit: [v1.6-MILESTONE-AUDIT.md](v1.6-MILESTONE-AUDIT.md).
+- 🚧 **v1.3.x Should-have hardening** — Phases 37-44, open: 44 passed; 37-43 verified in repo with live proofs pending; 40-43 accepted debt (2026-10-23); 37-39 closed by the operator's live-criteria waiver of 2026-10-25. Audit refreshed 2026-10-28: [v1.3.x-MILESTONE-AUDIT.md](v1.3.x-MILESTONE-AUDIT.md).
+- 🚧 **v1.5 SOTA enhancements** — Phases 45-54, open. Phase 46 (verified 2026-10-28, `human_needed`): criterion 1 met in the repository; criterion 3 performed live in naive mode in Run 11 (2026-10-28); criterion 4 NOT met (no parity comparator exists); criterion 5 partial (cutover done, RAGFlow removal operator-gated); criteria 2 and 6 need per-run operator approval; phase 46 is not accepted as debt (operator decision 2026-10-23). Phases 52-54 merged to main (PRs #104 and #134, #136, #135; the drafts #109, #110 and #111 were closed and replaced). 45 and 47-50 accepted debt (2026-10-23); 51 complete (PR #108). Audit: [v1.5-MILESTONE-AUDIT.md](v1.5-MILESTONE-AUDIT.md) (status gaps_found).
+- 🚧 **v1.6 Contextual Memory, Live Steering and Eternal Rollback** — Phases 55-62, planned 2026-10-26 (Ultrathink graph ut-mvp59le0-8815e6d1). Built 2026-10-26 and merged to main on 2026-10-28: PR #127 (phases 55 and 56), PRs #128 and #129 (phases 57 and 59-61) and PR #130 (phase 62); phase 58 merged as PR #137 (replaces #131, closed). Gap closure merged 2026-10-28: PR #147 (phase 58 criterion 2, verified passed 5/5), PR #150 (phase 59 criterion 5, verified human_needed 6/6 in the repository, live proofs operator-gated) and PRs #146 and #148 (phase 61: the checkpoint sequence lock, `substrate session hook`, trigger policy, printed host configuration); phase 61 criterion 3 stays partial because no host runs the hook until an operator installs the printed configuration (ADR 0007, D55-4). Live steps (a LightRAG deploy, anchor funding and the anchor timer, any devnet send, production migrations) stay operator-gated. Not marked complete or archived: that is an operator decision. Discovery record: [phases/55-migration-safety/CONTEXT.md](phases/55-migration-safety/CONTEXT.md). Audit: [v1.6-MILESTONE-AUDIT.md](v1.6-MILESTONE-AUDIT.md).
 
 ## Phases
 
@@ -92,7 +92,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 38: MIRROR** - mirror graph edges into Linear relations and outcomes into evidence. Code in repo. Accepted as debt by the operator on 2026-10-25 (waiver); live criteria open.
 - [x] **Phase 39: DISPATCH** - signed handoff packet and coord drift scan before launch. Code in repo. Accepted as debt by the operator on 2026-10-25 (waiver); live criteria open.
 - [x] **Phase 40: DOCS-MEMORY** - memory plane consolidation; D-D1 amends DOCS-04 to allow brief recall (decided 2026-10-21). Code on main (PR #92). Accepted as debt by the operator on 2026-10-23; live restore drill and approval open (D-D3). Criterion 3 is the narrower scope the owner accepted on 2026-10-22.
-- [x] **Phase 41: ANCHOR** - anchor evidence and teachables. Code on main (PR #116). Accepted as debt by the operator on 2026-10-23; live devnet proof open.
+- [x] **Phase 41: ANCHOR** - anchor evidence and teachables. Code on main (PR #93, commit 3466c508). Accepted as debt by the operator on 2026-10-23; live devnet proof open.
 - [x] **Phase 42: SKILL-CARD** - skills_list audit trail and the F-D4 re-ingest item. Code on main (PR #94). Accepted as debt by the operator on 2026-10-23; live host fast-forward open.
 - [x] **Phase 43: LANE-A** - sandbox egress allowlist and task re-adoption. Complete (PR #97). Accepted as debt by the operator on 2026-10-23; live egress and restart proof open.
 - [x] **Phase 44: UAT** - repeatable UAT script against any SUBSTRATE_URL. Complete (PR #95); verification passed.
@@ -104,21 +104,21 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 47: GreptimeDB + Dragonfly Predictive Analytics & Cache** - SLO burn forecasting and pattern-based cache pre-warming. Accepted as debt on 2026-10-23; live warm-up proof open.
 - [x] **Phase 48: TailscaleDB Secure Unified Proxy Layer** - zero-trust database access through one Tailscale proxy with RBAC, audit and pooling. Accepted as debt on 2026-10-23; live forwarders and cutover open.
 - [x] **Phase 49: Hindsight Graph Memory with Greptime Events** - graph-structured Hindsight memory with causal recall. Accepted as debt on 2026-10-23; live ledger proof open.
-- [x] **Phase 50: Dragonfly Pub/Sub for Real-time Events** - real-time event propagation and event-driven cache invalidation. Accepted as debt on 2026-10-23; live subscription and wake-up latency open.
+- [x] **Phase 50: Dragonfly Pub/Sub for Real-time Events** - real-time event propagation and event-driven cache invalidation (event-driven cache invalidation narrowed out of scope by the owner on 2026-10-22, D50-e). Accepted as debt on 2026-10-23; live subscription and wake-up latency open.
 - [x] **Phase 51: Enterprise Unified Resource Fabric** - one MCP interface across all six resources, depends on phases 45 and 48
 - [x] **Phase 52: GSD-Core planning index and cross-session awareness core** - file-first index, session presence and read-only planning tools (Complete: PR #104 merged 2026-10-27 and PR #134 merged 2026-10-28)
 - [x] **Phase 53: Steering, conflict control and checkpoint/resume** - audited steering inbox, conflict events and resumable checkpoints (Complete: PR #136, replaced draft #110, merged 2026-10-28)
 - [x] **Phase 54: Planning observability and migration inventory** - phase-transition metrics, session STATES and the Railway migration inventory (Complete: PR #135, replaced draft #111, merged 2026-10-28)
 
-### 🚧 v1.6 Contextual Memory, Live Steering and Eternal Rollback (Merged to main 2026-10-28 as PRs #127-#130 and #137; phases 58, 59 and 61 each keep one partial criterion; operator-gated live steps open)
+### 🚧 v1.6 Contextual Memory, Live Steering and Eternal Rollback (Merged to main 2026-10-28 as PRs #127-#130 and #137; only phase 61 keeps a partial criterion (3); operator-gated live steps open)
 
 - [x] **Phase 55: Migration safety, session event vocabulary and the v1.6 baseline** - contract-tested index migrations, the checkpoint and rollback ledger vocabulary, and the milestone discovery record. Merged in PR #127 (2026-10-28); criteria 1-5 met in repo; production rehearsal operator-run.
 - [x] **Phase 56: LightRAG client contract alignment and storage topology** - the client matches upstream v1.5.x and can never emit a clear-all; the hosting topology is decided. No deploy. Merged in PR #127 (2026-10-28); criteria 1-7 met in repo; a P0 clear-all hazard fixed.
 - [x] **Phase 57: Tandem memory, LightRAG with Hindsight, with provenance and forget** - shared join keys, merged cited answers, a forget primitive and a cross-store consistency verifier. Merged in PRs #128 and #129 (2026-10-28); flags default off; two live-only items unverified.
-- [ ] **Phase 58: Live session steering for multi-day GSD-Core sessions** - durable and delivered directives, multi-day liveness, a GSD position model (depends on phases 52-54, now on main). Merged in PR #137 (replaces #131; 2026-10-28); merged; criterion 2 still partial (gap closure in progress): the two steering mechanisms do not yet share one state model.
-- [ ] **Phase 59: Eternal logging, verifiable checkpoint and rollback events on Solana devnet** - Merkle inclusion proofs against the anchored hourly root, signer rotation, devnet reset detection. Roots only. Merged in PRs #128 and #129 (2026-10-28); merged; criterion 5 still partial (gap closure in progress): the re-anchor send is not built; no live devnet proof (operator-gated).
+- [x] **Phase 58: Live session steering for multi-day GSD-Core sessions** - durable and delivered directives, multi-day liveness, a GSD position model (depends on phases 52-54, now on main). Merged in PR #137 (replaces #131; 2026-10-28); PR #147 (2026-10-28) merged the one state model for `docs_steering_session` and the steering inbox, which closed criterion 2; VERIFICATION passed, 5 of 5, on main 2026-10-28.
+- [x] **Phase 59: Eternal logging, verifiable checkpoint and rollback events on Solana devnet** - Merkle inclusion proofs against the anchored hourly root, signer rotation, devnet reset detection. Roots only. Merged in PRs #128 and #129 (2026-10-28); criterion 5 closed by PR #150 (the guarded, operator-run re-anchor executor and the verifier pointer; nothing was sent to any cluster); VERIFICATION human_needed, 6 of 6 criteria met in the repository; live anchoring, key funding, the timer and any devnet send operator-gated.
 - [x] **Phase 60: Eternal Memory Knowledge Nexus** - verifiable, versioned memory records and deterministic capsules, informed by Anda and KIP concepts. Merged in PRs #128 and #129 (2026-10-28); criteria 1-4 met in repo; the `ledger-archive` bucket is operator-gated.
-- [ ] **Phase 61: Session rollback to an exact chat moment with file revert** - journaled, verified restore through a CLI, memory supersession and an append-only rollback event (depends on phases 55, 57-59). Merged in PRs #128 and #129 (2026-10-28); merged; criterion 3 still partial (gap closure in progress): automatic checkpoint triggers are not wired.
+- [ ] **Phase 61: Session rollback to an exact chat moment with file revert** - journaled, verified restore through a CLI, memory supersession and an append-only rollback event (depends on phases 55, 57-59). Merged in PRs #128 and #129 (2026-10-28), with PR #146 (checkpoint sequence lock) and PR #148 (`substrate session hook`, trigger policy, printed host configuration, write-ahead pending journal); criterion 3 still partial: no host installs or fires the hook until an operator installs the printed configuration (ADR 0007, D55-4).
 - [x] **Phase 62: Soak, runbooks and v1.6 close** - a simulated multi-day run, runbooks and ADRs, and the milestone audit. Merged in PR #130 (2026-10-28); soak, runbooks, ADRs 0004-0007 and the audit are written; completing the milestone is an operator decision.
 
 ## Phase Details
@@ -562,7 +562,7 @@ Plans:
   1. Dispatch is a signed handoff packet (goal from the issue, DoD lines, files), and the dispatched context can be replayed from the ledger.
   2. `coord_drift_scan` runs on the worktree before launch, giving a stale-brief warning before acting (v0.3 §2).
 
-**Plans**: 1 plan (PLAN.md, verification and records); verified in phases/39-dispatch/VERIFICATION.md; draft PR open. The C-D2 goal is the issue identifier (DISP-07, decided 2026-10-21)
+**Plans**: 1 plan (PLAN.md, verification and records); verified in phases/39-dispatch/VERIFICATION.md; PR #91 merged (acb6767). The C-D2 goal is the issue identifier (DISP-07, decided 2026-10-21)
 
 ### Phase 40: DOCS-MEMORY
 
@@ -690,7 +690,7 @@ Plans:
   5. Cutover is a logged, reversible switch with a delta pass. RAGFlow code and service are removed only after cutover, after criteria 1 to 4 pass, and after every other RAG-dependent phase passes. The RAG-dependent phases are 25 and 42, plus any other phase whose VERIFICATION names a live RAGFlow call (the phase 46 PLAN confirms that list before cutover). Storage deletion needs its own approval.
   6. Every live step (deploy, ingestion, cutover, storage deletion) runs only after the operator approves it for that run.
 
-**Plans**: 1 plan (PLAN.md, created 2026-10-24 in phases/46-lightrag-hybrid/). Status partial: criterion 1 in repo (tests and docs committed); criterion 4 comparator deferred; criteria 2, 3, 5 and 6 are live steps that need per-run operator approval.
+**Plans**: 1 plan (PLAN.md, created 2026-10-24 in phases/46-lightrag-hybrid/). Status partial (VERIFICATION.md, 2026-10-28, `human_needed`): criterion 1 met in the repository; criterion 3 performed live in naive mode in Run 11 (2026-10-28); criterion 4 NOT met (no parity comparator exists); criterion 5 partial (cutover done, RAGFlow removal operator-gated); criteria 2 and 6 need per-run operator approval; not accepted as debt (operator decision 2026-10-23).
 
 **Operator re-scope, 2026-10-25 (reconciliation note, no criterion text changed):** RAGFlow was checked by the operator and is empty: no datasets, and an empty knowledgebase folder. The operator authorized removing RAGFlow and its associated resources. The `ragflow` Railway service was deleted on 2026-10-25; its volumes were not attached and none were detached. LightRAG is the only docs plane. It indexes three sources, and each is re-indexed when it changes: .planning markdown, repository docs, and complete scraped documentation sites. Storage deletion (the `elasticsearch`, `mysql`, `storage` and `redis` services, which may be shared) still needs its own approval, as criterion 5 requires. The live-step approvals in criteria 2 to 6 are unchanged.
 
@@ -747,7 +747,7 @@ Plans:
 
 ### Phase 50: Dragonfly Pub/Sub for Real-time Events
 
-**Goal**: Dragonfly pub/sub propagates Greptime events to the planes in real time, with event-driven cache invalidation.
+**Goal**: Dragonfly pub/sub propagates Greptime events to the planes in real time, with event-driven cache invalidation (event-driven cache invalidation narrowed out of scope by the owner on 2026-10-22, D50-e).
 
 **Depends on**: none (7-SOTA plan on branch feature/7-sota-enhancements)
 
@@ -801,7 +801,7 @@ Plans:
   5. File-only mode works with every backing service disabled.
   6. All configuration is environment-only, with documented defaults and no hardcoded hosts, ports or paths.
 
-**Plans**: 0 plans on main (created by gsd-plan-phase)
+**Plans**: PLAN.md and SUMMARY.md exist in the phase directory; the phase was built outside gsd-plan-phase (PLAN frontmatter statuses predate the merges)
 
 ### Phase 53: Steering, conflict control and checkpoint/resume
 
@@ -822,7 +822,7 @@ Plans:
   3. A watcher gap marks the session view unknown until a full rescan.
   4. Kill-and-restart at a plan-step boundary yields exactly one completion record, keyed by phase id, plan step and file hash.
 
-**Plans**: 0 plans on main (created by gsd-plan-phase)
+**Plans**: PLAN.md and SUMMARY.md exist in the phase directory; the phase was built outside gsd-plan-phase (PLAN frontmatter statuses predate the merges)
 
 ### Phase 54: Planning observability and migration inventory
 
@@ -842,7 +842,7 @@ Plans:
   2. The session view reports exactly one of the STATES: LOADING, EMPTY, STALE, DEGRADED, ERROR, SUCCESS.
   3. A documented inventory separates disk state from Railway-hosted state and lists host-bound paths and units.
 
-**Plans**: 0 plans on main (created by gsd-plan-phase)
+**Plans**: PLAN.md and SUMMARY.md exist in the phase directory; the phase was built outside gsd-plan-phase (PLAN frontmatter statuses predate the merges)
 
 ### Phase 55: Migration safety, session event vocabulary and the v1.6 baseline
 
@@ -916,7 +916,7 @@ Plans:
 
 **Goal**: Steering directives are durable, are delivered to the target session and are tied to GSD-Core's position, and sessions that run for days stay alive: liveness is decoupled from planning changes and state survives restarts.
 
-**Status**: Merged; criterion 2 still partial (gap closure in progress). Implemented 2026-10-26 on `gsd/v16-58-live-steering` (7edfd79) and merged to main as PR #137 (2026-10-28), which replaced draft PR #131 (closed); its phase 52-54 dependencies are now on main. Criteria 1, 3, 4 and 5 met in the repository; criterion 2 is partial: delivery works, but the adapter that joins the phase's inbox to main's `docs_steering_session` state machine (on main via #112) is not written, so "one state model" is not true end to end.
+**Status**: Complete. Implemented 2026-10-26 on `gsd/v16-58-live-steering` (7edfd79) and merged to main as PR #137 (2026-10-28), which replaced draft PR #131 (closed); its phase 52-54 dependencies are now on main. PR #147 (23ced3cb, 2026-10-28) merged the one state model for `docs_steering_session` and the steering inbox, which closed criterion 2. `.planning/phases/58-live-steering/VERIFICATION.md` (2026-10-28, main 31a9bb36) is `passed`: 5 of 5 criteria met in the repository. Live steps stay operator-gated: production opt-in of the audit table, enabling steering in production, and any multi-day live proof.
 
 **Depends on**: Phase 52, Phase 53, Phase 54 (merged), Phase 57
 
@@ -938,7 +938,7 @@ Plans:
 
 **Goal**: Every checkpoint and rollback is a ledger event that is provably inside an hourly root anchored on Solana devnet, verifiable without trusting the substrate; devnet resets and signer changes are detected and recoverable. Roots only, devnet only.
 
-**Status**: Merged; criterion 5 still partial (gap closure in progress). Implemented 2026-10-26 on `gsd/v16-int` (7b37ea6 proofs and URL guard, 084eb69 verification library, a26841d tools, 2aaa19a re-anchor planner and runbooks, 824ceda signer-set env); merged to main as PRs #128 and #129 (2026-10-28). Criteria 1, 2, 3, 4 and 6 met offline; criterion 5 is partial (classification and a read-only re-anchor dry-run exist, the re-anchor send does not). No transaction was sent and no live devnet proof was run (operator-gated, phase 41). The devnet genesis hash constant, wrong since phase 28, was corrected in ccbfff2.
+**Status**: Complete in the repository; VERIFICATION human_needed (2026-10-28), 6 of 6 criteria met. Implemented 2026-10-26 on `gsd/v16-int` (7b37ea6 proofs and URL guard, 084eb69 verification library, a26841d tools, 2aaa19a re-anchor planner and runbooks, 824ceda signer-set env); merged to main as PRs #128 and #129 (2026-10-28). Criterion 5, partial after those PRs (classification and a read-only re-anchor dry-run existed, the re-anchor send did not), was closed by PR #150 (squash b19ff515): the guarded, operator-run re-anchor executor and the verifier pointer; the send itself is operator-run only and nothing was sent to any cluster. No live devnet proof was run; funding the anchor key, the anchor timer and any devnet send stay operator-gated (phase 41). The devnet genesis hash constant, wrong since phase 28, was corrected in ccbfff2.
 
 **Depends on**: Phase 55 (vocabulary), Phase 41 (anchor job)
 
@@ -982,7 +982,7 @@ Plans:
 
 **Goal**: A session can be rolled back to a checkpoint: files are restored exactly, the chat position is recorded, memory written after the checkpoint stops influencing recall, and the rollback is an append-only event. The revert runs as a CLI under the session's own authority; the substrate server stays read-only on worktrees.
 
-**Status**: Merged; criterion 3 still partial (gap closure in progress). Implemented 2026-10-26 on `gsd/v16-int` (ff51cc7 snapshot library, a26841d server tools, 99ec7e3 and 979b5e2 CLI, 824ceda corrections); merged to main as PRs #128 and #129 (2026-10-28). Criteria 1, 2, 4, 5 and 6 met in the repository; criterion 3 is partial: the triggers are defined and `manual` and `pre-restore` are taken by the CLI, but no hook takes `turn`, `plan-step` or `steering` checkpoints automatically (proposals in ADR 0007). No rollback was rehearsed against the live server or ledger. The phase did not need the draft PRs' code; it stacks on nothing.
+**Status**: Merged; criterion 3 still partial. Implemented 2026-10-26 on `gsd/v16-int` (ff51cc7 snapshot library, a26841d server tools, 99ec7e3 and 979b5e2 CLI, 824ceda corrections); merged to main as PRs #128 and #129 (2026-10-28). PR #146 (checkpoint sequence lock, 71d308f5) and PR #148 (hook entry point `substrate session hook`, trigger policy, printed host configuration, write-ahead pending journal) are merged. `.planning/phases/61-session-rollback/VERIFICATION.md` (2026-10-28) keeps criterion 3 PARTIAL: no host installs or fires the hook until an operator installs the printed configuration (ADR 0007, decision D55-4); criteria 1, 2, 4, 5 and 6 are met in the repository. No rollback was rehearsed against the live server or ledger. The phase did not need the draft PRs' code; it stacks on nothing.
 
 **Depends on**: Phase 55, Phase 57, Phase 58, Phase 59, the worktree snapshot library
 
@@ -1056,20 +1056,20 @@ Plans:
 | 43. LANE-A | v1.3.x | 1/1 | Complete (PR #97); live egress and restart proof open (accepted debt 2026-10-23) | 2026-10-21 |
 | 44. UAT | v1.3.x | 1/1 | Complete (PR #95) | 2026-10-21 |
 | 45. Railway Resource Orchestrator | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live Railway proof open | 2026-10-23 |
-| 46. LightRAG hybrid RAG and the RAGFlow migration | v1.5 | 0/1 | Partial: criterion 1 in repo; criteria 2-6 blocked on per-run operator approval (live) | - |
+| 46. LightRAG hybrid RAG and the RAGFlow migration | v1.5 | 0/1 | Partial: criterion 1 met; 3 live in naive mode (Run 11); 4 NOT met (no comparator); 5 partial (cutover done, removal gated); 2 and 6 need per-run operator approval | - |
 | 47. GreptimeDB + Dragonfly Predictive Analytics & Cache | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live warm-up proof open | 2026-10-23 |
 | 48. TailscaleDB Secure Unified Proxy Layer | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live forwarders and cutover open | 2026-10-23 |
 | 49. Hindsight Graph Memory with Greptime Events | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live ledger proof open | 2026-10-23 |
 | 50. Dragonfly Pub/Sub for Real-time Events | v1.5 | 1/1 | Complete (accepted debt 2026-10-23); live subscription proof open | 2026-10-23 |
 | 51. Enterprise Unified Resource Fabric | v1.5 | 1/1 | Complete (PR #108) | 2026-10-22 |
-| 52. GSD-Core planning index and cross-session awareness core | v1.5 | 0/0 | Complete (PR #104 merged 2026-10-27, PR #134 merged 2026-10-28) | 2026-10-28 |
-| 53. Steering, conflict control and checkpoint/resume | v1.5 | 0/0 | Complete (PR #136, replaced draft #110) | 2026-10-28 |
-| 54. Planning observability and migration inventory | v1.5 | 0/0 | Complete (PR #135, replaced draft #111) | 2026-10-28 |
+| 52. GSD-Core planning index and cross-session awareness core | v1.5 | 1/1 | Complete (PR #104 merged 2026-10-27, PR #134 merged 2026-10-28) | 2026-10-28 |
+| 53. Steering, conflict control and checkpoint/resume | v1.5 | 1/1 | Complete (PR #136, replaced draft #110) | 2026-10-28 |
+| 54. Planning observability and migration inventory | v1.5 | 1/1 | Complete (PR #135, replaced draft #111) | 2026-10-28 |
 | 55. Migration safety, session event vocabulary and the v1.6 baseline | v1.6 | 0/0 | Complete (PR #127); criteria 1-5 met in repo | 2026-10-28 |
 | 56. LightRAG client contract alignment and storage topology | v1.6 | 0/0 | Complete (PR #127); criteria 1-7 met in repo; deploy operator-gated | 2026-10-28 |
 | 57. Tandem memory, LightRAG with Hindsight, with provenance and forget | v1.6 | 0/0 | Complete (PRs #128, #129); criteria 1-5 met with fakes; flags default off | 2026-10-28 |
-| 58. Live session steering for multi-day GSD-Core sessions | v1.6 | 0/0 | Merged (PR #137, replaces #131); criterion 2 still partial (gap closure in progress) | - |
-| 59. Eternal logging, verifiable checkpoint and rollback events on Solana devnet | v1.6 | 0/0 | Merged (PRs #128, #129); criterion 5 still partial (gap closure in progress); live anchoring operator-gated | - |
+| 58. Live session steering for multi-day GSD-Core sessions | v1.6 | 0/0 | Complete (PRs #137, #147); 5 of 5 criteria met in repo (VERIFICATION passed 2026-10-28); live steps operator-gated | 2026-10-28 |
+| 59. Eternal logging, verifiable checkpoint and rollback events on Solana devnet | v1.6 | 0/0 | Complete in the repository (PRs #128, #129, #150): criteria 1-6 met, VERIFICATION human_needed (live anchoring, funding, timer and send operator-gated) | 2026-10-28 |
 | 60. Eternal Memory Knowledge Nexus | v1.6 | 0/0 | Complete (PRs #128, #129); criteria 1-4 met in repo; bucket use operator-gated | 2026-10-28 |
-| 61. Session rollback to an exact chat moment with file revert | v1.6 | 0/0 | Merged (PRs #128, #129); criterion 3 still partial (gap closure in progress) | - |
+| 61. Session rollback to an exact chat moment with file revert | v1.6 | 0/0 | Merged (PRs #128, #129, #146, #148); criterion 3 partial: no host installs or fires the hook until an operator installs the printed configuration (ADR 0007, D55-4); criteria 1, 2, 4, 5, 6 met; no live rehearsal | - |
 | 62. Soak, runbooks and v1.6 close | v1.6 | 0/0 | Complete (PR #130); milestone completion is an operator decision | 2026-10-28 |

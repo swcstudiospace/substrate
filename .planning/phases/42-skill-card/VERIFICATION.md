@@ -37,7 +37,7 @@ covered_files: ["packages/mcp-server/src/config.ts", "packages/mcp-server/src/co
 
 ## Not proven
 
-- The live fast-forward on the host: the `substrate-skills-sync` unit is not installed, `SUBSTRATE_AGENT_SKILLS_ROOT` is not set, and the RAGFlow `agent-skills` dataset is not created (operator-gated).
+- The live fast-forward on the host: the `substrate-skills-sync` unit is not installed, `SUBSTRATE_AGENT_SKILLS_ROOT` is not set, and no `agent-skills` ingest into the LightRAG docs plane (production's docs plane, `SUBSTRATE_DOCS_BACKEND=lightrag`, STATE Run 11) has been run (operator-gated).
 - A dirty working tree in a skills checkout is still ingested under its committed name. Recorded as a known gap in SUMMARY.
 - Partial dataset state after a failed batch: earlier batches stay uploaded while no version is recorded, and the job is marked `stored`. Recorded in SUMMARY.
 - The degraded pin-age behaviour under a real skills-sync failure. Only the fake-plane tests cover it.
@@ -80,7 +80,7 @@ Tests were not run in this task; the orchestrator runs them. Code and test names
   - `packages/mcp-server/src/docs-plane-hardening.test.ts`: "an agent-skills trigger is the fast-forward evidence: its citations stop carrying pin_age_ms"; "a queued refresh whose checkout moved on records no version and reports commit-mismatch".
   - `packages/mcp-server/src/config.test.ts`: "unset names no checkout and warns nothing"; "an absolute path is the checkout, trimmed, and warns nothing"; "a relative path is treated as unset and named at boot".
 - Evidence status: `in-repo proven` (code and tests both found; RAGFlow is a fake plane).
-- Live proof remaining: `PENDING_VALIDATION`. Phase VERIFICATION "Not proven" lists the operator steps: install the `substrate-skills-sync` unit; set `SUBSTRATE_AGENT_SKILLS_ROOT` to an absolute path of the `agent-skills` checkout; create the RAGFlow `agent-skills` dataset; fast-forward the checkout and let the trigger run. Operator check: after the fast-forward, `docs_search` for a term that exists only in the new skill version must return it from the new version (the `agent-skills` version recorded by `POST /docs/merge-trigger`).
+- Live proof remaining: `PENDING_VALIDATION`. Phase VERIFICATION "Not proven" lists the operator steps: install the `substrate-skills-sync` unit; set `SUBSTRATE_AGENT_SKILLS_ROOT` to an absolute path of the `agent-skills` checkout; confirm the docs plane (production serves docs from LightRAG, `SUBSTRATE_DOCS_BACKEND=lightrag`, STATE Run 11; the server selects the plane by `docsBackend`) accepts the `agent-skills` ingest; fast-forward the checkout and let the trigger run. Operator check: after the fast-forward, `docs_search` for a term that exists only in the new skill version must return it from the new version (the `agent-skills` version recorded by `POST /docs/merge-trigger`).
 
 ### Scope note
 

@@ -2,12 +2,12 @@
 gsd_state_version: "1.0"
 milestone: v1.5
 milestone_name: SOTA enhancements
-status: "main 28ea65f4 (2026-10-28). Active milestone v1.5: phases 45-54, 9 of 10 complete, phase 46 open (LightRAG deployed naive-mode; graph/hybrid and RAGFlow removal operator-gated). v1.3.x is complete in repo and awaits operator completion; v1.6 (phases 55-62) also awaits it. No milestone beyond v1.4 archived."
-stopped_at: "Run 11 addendum (PR #141): reconcile planning records, then operator decisions on milestone completion"
-last_updated: "2026-10-28T00:00:00.000Z"
+status: "main b19ff515 (2026-10-28). Run 12 merged 18 PRs (blocking Biome gate, code ratchet, guarded re-anchor, session hooks, steering join, fabric LightRAG row, governance files). Phases 46 and 51-62 re-verified on main; v1.3.x (tech_debt), v1.5 (gaps_found, phase 46) and v1.6 (gaps_found, phase 61 criterion 3) audited. The owner decided on 2026-10-28 to close all three as override closeouts with the open items recorded as accepted debt; the archive step follows in its own PR."
+stopped_at: "Run 12: all code PRs merged; milestone closeouts decided by the owner, archive PR next"
+last_updated: "2026-10-28T22:45:00.000Z"
 last_activity: 2026-10-28
-last_activity_desc: "Run 11: LightRAG deployed, production cut over; docs state-run11b merged"
-state_head: 28ea65f41ca8
+last_activity_desc: "Run 12: quality gates, gap closures for phases 58, 59 and 61, re-verification, audits and the owner's closeout decisions"
+state_head: b19ff515023e
 progress:
   total_phases: 10
   completed_phases: 9
@@ -161,10 +161,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: main = 28ea65f4 (2026-10-28). Active milestone v1.5 (phases 45-54): 9 of 10 phases complete. Phase 46 is open: LightRAG is deployed in naive mode; graph and hybrid modes and the RAGFlow removal are operator-gated. Phases 34-62 are merged to main.
+Phase: main = b19ff515 (2026-10-28). Phases 34-62 are merged to main. Open phase: 46 (LightRAG is deployed in naive mode; graph and hybrid modes, the parity comparator and the RAGFlow removal are open, recorded as accepted debt by the owner on 2026-10-28).
 Plan: —
-Status: v1.3.x is complete in repo and awaits operator completion confirmation; v1.5 and v1.6 also await it (phase 46 is the open v1.5 phase); none is archived beyond v1.4. Gap closure for the v1.6 partial criteria of phases 58, 59 and 61 is in progress.
-Last activity: 2026-10-28 — Run 11: LightRAG deployed, production cut over; planning records reconciled in Run 12
+Status: v1.3.x (tech_debt), v1.5 (gaps_found) and v1.6 (gaps_found) are audited; the owner decided on 2026-10-28 to close each as an override closeout with its open items recorded as accepted debt (section "Accepted debt (owner decision, 2026-10-28)"). Archiving them is the next step (`gsd-tools milestone complete`, one commit each).
+Last activity: 2026-10-28 — Run 12 (graph ut-mvsanldw-54b66625): 18 PRs merged, phases 46 and 51-62 re-verified on main, three milestone audits, closeout decisions
 
 ## Preflight record (2026-10-23, graph ut-mvlknrx6-2849044e)
 
@@ -195,6 +195,20 @@ The operator accepted the operator-gated verification of phases 40-43, 45, and 4
 
 Phase 46 is re-scoped to LightRAG by operator decision and is not accepted as debt. The RAGFlow to LightRAG migration runs inside it.
 
+## Accepted debt (owner decision, 2026-10-28)
+
+Asked once, with the audit numbers, during Run 12; the owner answered close for all three. The acceptance below is dated 2026-10-28 and replaces, for the items named, the 2026-10-23 statement that phase 46 is not accepted as debt. Each item stays OPEN and unsatisfied where the audit says so; accepting it as debt does not mark it passed.
+
+| Milestone | Item | Audit finding | What stays open |
+|-----------|------|---------------|-----------------|
+| v1.3.x | phases 37-43 | human_needed; 37-39 waived 2026-10-25, 40-43 accepted debt 2026-10-23 | the live proofs named in `.planning/v1.3.x-MILESTONE-AUDIT.md`; D-D3 (restore drill and the retirement of the old path) was never delivered in the repository, only its runbook |
+| v1.5 | phase 46 (SOTA-02) | unsatisfied: criterion 4 NOT met (no parity comparator exists), criterion 5 partial (cutover done, RAGFlow code removal gated), criteria 2 and 6 and LightRAG graph/hybrid modes need per-run approval and a real LLM route | everything in `.planning/phases/46-lightrag-hybrid/VERIFICATION.md` marked NOT MET, PARTIAL or OPERATOR-GATED |
+| v1.5 | phases 45, 47-50 | accepted debt since 2026-10-23, unchanged | live Railway, forecast and warm-up, proxy cutover, graph-memory ledger rows and pub/sub proofs |
+| v1.6 | phase 61 criterion 3 (SOTA-17) | PARTIAL: PR #148 shipped `substrate session hook`, the trigger policy and printed host configuration, but no host fires the hook until an operator installs the printed configuration (ADR 0007 decision D55-4) | installing the hook in a host, plus the `steering` and `baseline` hook configurations that the printed output does not cover |
+| v1.6 | phase 59 live proofs (SOTA-15) | human_needed: 6 of 6 criteria met in the repository | anchor key funding, the anchor timer, any devnet send (the re-anchor executor was never run against any cluster), the Eternal Memory bucket |
+
+Not accepted, not silently dropped: the audits' integration findings that are not criteria (the `checkpoint_hint` has no reader in the CLI, `S3BlobStore` has no caller outside its own test, `memoryForget` has only the rollback caller) are listed in `.planning/v1.6-MILESTONE-AUDIT.md` section 5 and remain follow-up work.
+
 ## Deferred Items
 
 Items acknowledged and deferred, most recent first:
@@ -217,6 +231,7 @@ Items acknowledged and deferred, most recent first:
 - Decision 8, resolved 2026-10-24: phase 25's artifacts are archived at .planning/milestones/v1.3-phases/25-docs-search-and-ingest-ragflow/. 25-VERIFICATION read: the live G1 to G4 RAGFlow gates are operator-gated and never run. The criterion 5 candidate list is recorded in the phase 46 SUMMARY.
 - Decision 9, resolved 2026-10-24 from evidence, not by the operator: D-07 is a scope difference. Harness scenario 6 passes on a fresh run (20-VERIFICATION:45, 101); the closeout's "held" on scenario 6 is the live Cursor hook (UAT-04), a separate criterion (v1.3-CLOSEOUT:32). D-18 is a method difference: 34 explicit any by the packages-only `: any` / `as any` method (PREFLIGHT); 37 in 23 files by this pass's wider all-*.ts method, which adds `<any>` and `any[]`.
 - Draft merge check, 2026-10-24 (read-only, git merge-tree --write-tree against main aa2ed6a): PR #104 (gsd/p52-planning-core, ad9e4de) merges cleanly into main. PR #109 (gsd/p52-wiring, d62d649) conflicts in .github/workflows/ci.yml, docs/ci.md, docs/data-planes.md, docs/event-vocabulary.md, packages/audit/src/policy.ts, packages/audit/src/policy.test.ts and .planning/phases/48-tailscale-proxy/VERIFICATION.md. PR #110 (5a8f96a) and PR #111 (eb64f59) conflict in the same set and need rebasing after #109 lands.
+- Resolved 2026-10-28 (Run 12, owner answers): milestone completion for v1.3.x, v1.5 and v1.6 is decided. Each closes as an override closeout with its open items recorded as accepted debt (section "Accepted debt (owner decision, 2026-10-28)").
 
 ## Consistency check (2026-10-24)
 
@@ -626,9 +641,20 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
   - 59, 60 and 61: PRs #128 and #129.
   - 62: PR #130.
   - Phases 53-62 all merged 2026-10-28.
-- **VERIFICATION `verified_on` values are not all reachable from main:** 52: b7d6768 and e135938; 53: 2c50263; 54: 5548c62; 55-57 and 59-62: 8752578; 58: 7edfd79. Checked with `git merge-base --is-ancestor` against main (28ea65f4): only e135938 and 8752578 are ancestors of main. b7d6768, 2c50263, 5548c62 and 7edfd79 are tips of replaced branches and are not reachable from main. Phases 52-62 will be re-verified on main later in this run.
-- **Still open:**
-  - Phase 46: LightRAG runs in naive mode on the bypass LLM; graph and hybrid modes and the RAGFlow removal are operator-gated.
-  - v1.6 partial criteria: phase 58 criterion 2 (join with `docs_steering_session`), phase 59 criterion 5 (re-anchor send) and phase 61 criterion 3 (automatic checkpoint triggers). They are being closed in this run; phases 58, 59 and 61 stay unticked in ROADMAP until then.
-  - Milestone completion confirmations for v1.3.x, v1.5 and v1.6 (operator-only).
+- **VERIFICATION `verified_on` values were not all reachable from main (as of 28ea65f4):** 52: b7d6768 and e135938; 53: 2c50263; 54: 5548c62; 55-57 and 59-62: 8752578; 58: 7edfd79. Only e135938 and 8752578 were ancestors of main; the others were tips of replaced branches. Resolved in the Run 12 record below: phases 46 and 51-62 were re-verified against main on 2026-10-28 (`verified_on: main at 31a9bb36`, phase 59 at `b19ff515`).
+- **Open at the time of this reconciliation (all resolved or decided in the Run 12 record below):**
+  - Phase 46: LightRAG runs in naive mode on the bypass LLM; graph and hybrid modes and the RAGFlow removal are operator-gated (now recorded as accepted debt by the owner, 2026-10-28).
+  - v1.6 partial criteria: phase 58 criterion 2 was closed by PR #147, phase 59 criterion 5 by PR #150, and phase 61 criterion 3 by PR #148 up to the host boundary (no host runs the hook until an operator installs it; accepted debt).
+  - Milestone completion confirmations for v1.3.x, v1.5 and v1.6: given by the owner on 2026-10-28 (close, with the open items as accepted debt).
 - **Remote branches (nothing deleted):** `quality/biome-report-only` is superseded by main's lint-report job. `test/swarm-pins-a16-a30` is superseded because its tests are already on main in `packages/mcp-server/src/server.test.ts`. No branch was deleted.
+
+## Run 12 (graph ut-mvsanldw-54b66625, 2026-10-28): code quality, blocking gates, gap closure, re-verification, audits
+
+- **Request:** raise the code quality and patterns to state of the art; merge every outstanding PR; program the remaining GSD-Core phases and complete the outstanding milestones. Scope assumption, stated and not asked: a ratchet-based, repository-wide enforcement plus closing recorded debt; no blanket rewrite.
+- **How it ran:** the orchestrator dispatched `task` agents, one unit per git worktree, edit-only; the orchestrator ran every gate, committed and pushed. Every PR went through `ultrathink-ship` (Greptile 5/5, no open threads, CI green, squash). The agent-swarm control plane (A01) was not used: its assignments need signed `task.assign` payloads and earlier swarm runs were stuck. Small fixes (a lock name, a fixture token, a README sentence, test titles) were made inline by the orchestrator. Tracking: Linear is blocked by the free-issue limit (fail-open); Notion rows exist.
+- **Merged (18, squash):** #142 CI tooling (uv download retry, exact root pins, the audit gate fails after `review_by`, narrowed permissions); #143 `memory.write` carries the stored `entry_id` and the ledger verifier pairs by it (reports `ledger_pairing_ambiguous` instead of guessing); #144 planning records for phases 52-62; #145 AST-based code ratchet (`scripts/code-ratchet.ts`, baseline only falls); #146 checkpoint sequence lock; #147 one state model for `docs_steering_session` and the steering inbox (phase 58 criterion 2); #148 `substrate session hook`, trigger policy and printed host configuration (phase 61 criterion 3); #149, #151, #152 Biome errors, unused code and untrusted JSON at the CLI/script boundaries (102 errors to 0); #153 fake gh state lock race; #154 and #157 docs-plane wording (LightRAG live, RAGFlow legacy fallback); #155 Biome is a blocking step of the single verify gate plus `noImplicitOverride`, `noImplicitReturns`, `noUnusedLocals`, `noUnusedParameters`; #156 CODEOWNERS, PR template, CONTRIBUTING, SECURITY; #158 the fabric reports a `lightrag` resource; #159 `substrate evidence --node`; #150 the guarded re-anchor executor and the verifier pointer (phase 59 criterion 5; eight automated review rounds and three independent pre-merge reviews; the executor was never run against any cluster).
+- **Behaviour changes worth knowing:** CLI trust-boundary guards (evidence shape, `emit --payload`, `drift --json`); the Muse hook ignores non-object stdin; the audit gate fails once `review_by` has passed; `SweepBatch.then` is renamed `decide`; `substrate verify` judges the signer by the signer set at the transaction's block time and returns unverified when it cannot (no block time, incomplete rotation read, unbuildable set), ranking a proven disagreement above that; the re-anchor lock is `<SUBSTRATE_STATE_DIR or /var/lib/substrate>/substrate-reanchor.lock`.
+- **Verification:** `.planning/phases/46-*`, `51-*` to `62-*` VERIFICATION.md were rewritten against main (b19ff515 for phase 59, 31a9bb36 for the others): files read, nothing run; the CI run on main is the gate record. Results: passed 51-58, 60, 62; human_needed 46 and 59; gaps_found 61 (criterion 3 PARTIAL). Audits written: `v1.3.x-MILESTONE-AUDIT.md` (tech_debt), `v1.5-MILESTONE-AUDIT.md` (gaps_found, new), `v1.6-MILESTONE-AUDIT.md` (gaps_found).
+- **Local test note:** this host was at a load average of 20 to 90 for most of the run; timing-based tests (muse, observer, restore hooks) flaked locally and CI on the runner pool was the authority. Two lock tests (`store-lock`: no ledger variable assignment or token-shaped value in a tracked file) caught fixtures in two PRs before CI did.
+- **Not done, by decision:** `exactOptionalPropertyTypes` (238 findings) and `noPropertyAccessFromIndexSignature` (3076); coverage thresholds; extracting shared helpers between the CLI and the server; breaking the cli to collectors import cycle; parametrised soak tests; the Hindsight document-listing route and the memory `binding` contract; remote branch pruning (about 17 branches without a PR remain, none deleted); the Hindsight lag workflow smoke run.
+- **Operator-gated, untouched:** production runs release `5cf930a0` (the merge of #139), which lacks every PR of this run (#142 to #159; checked with `git log release-r11-20261028..origin/main`), so none of the behaviour changes above is live until the operator deploys; LightRAG graph and hybrid modes need a real LLM route; RAGFlow code removal; funding the anchor key and any devnet send; installing the session hook in a host; the Notion re-login and the Linear plan limit; dropping `hindsight_backup_20261027`; `HINDSIGHT_BANKS` on the host.
