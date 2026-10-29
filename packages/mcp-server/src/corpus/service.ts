@@ -157,15 +157,22 @@ export async function corpusIngestReply(deps: CorpusServiceDeps, raw: unknown, s
 		await emitRefusal(deps, surface, parsed.reason, sessionId);
 		return refusal(400, parsed.reason, parsed.detail);
 	}
-	const response = await ingestCorpus(
-		{ store, plane, settings: deps.settings, emit: deps.emit, surface, sessionId, signal: deps.signal },
-		parsed.value,
-	);
-	// A request that recorded, changed or removed anything (or failed part-way) moved the manifest: the root is stale and a root
-	// event is owed. The keeper coalesces and dedupes by manifest version, so a request that changed nothing writes nothing.
-	const { counts } = response;
-	if (counts.ingested + counts.updated + counts.tombstoned + counts.failed > 0) deps.roots.manifestChanged();
-	return { ok: true, status: 200, body: response };
+	// The root cache is unavailable from the first write to the last: each batch saves its rows before the later ones and the cleanup.
+	// A request that recorded, changed or removed anything (or failed part-way, or threw) moved the manifest: a root event is owed.
+	// The keeper coalesces and dedupes by manifest version, so a request that changed nothing writes nothing.
+	deps.roots.writeStarted();
+	let changed = true;
+	try {
+		const response = await ingestCorpus(
+			{ store, plane, settings: deps.settings, emit: deps.emit, surface, sessionId, signal: deps.signal },
+			parsed.value,
+		);
+		const { counts } = response;
+		changed = counts.ingested + counts.updated + counts.tombstoned + counts.failed > 0;
+		return { ok: true, status: 200, body: response };
+	} finally {
+		deps.roots.writeSettled(changed);
+	}
 }
 
 /** `GET /corpus/status`: the manifest's counts. */

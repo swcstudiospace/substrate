@@ -213,6 +213,83 @@ describe("CorpusRootKeeper", () => {
 		expect(emitted).toEqual([]);
 	});
 
+	test("from the first write of an ingest to its end the cached root is unavailable and nothing read meanwhile is kept", async () => {
+		const { keeper, store } = harness();
+		const manifest = defined(store);
+		seed(manifest, 3);
+		await keeper.read();
+		expect(defined(keeper.peek(), "the cached root").count).toBe(3);
+		keeper.writeStarted();
+		expect(keeper.peek()).toBeNull();
+		// A batch already saved its rows; the manifest is between versions.
+		manifest.seed(makeRow({ repo: REPO, path: "docs/batch.md", sha256: sha256Hex("batch") }));
+		const during = await keeper.read();
+		expect(during.ok && during.snapshot.count).toBe(4);
+		keeper.warm();
+		await flush();
+		expect(keeper.peek()).toBeNull();
+		keeper.writeSettled(true);
+		expect(keeper.peek()).toBeNull();
+		await keeper.read();
+		expect(defined(keeper.peek(), "the settled root").count).toBe(4);
+	});
+
+	test("an ingest that changed nothing leaves the root recomputable and writes no event", async () => {
+		const { clock, emitted, keeper, store } = harness();
+		seed(defined(store), 2);
+		keeper.writeStarted();
+		keeper.writeSettled(false);
+		expect(clock.timers).toEqual([]);
+		await keeper.read();
+		expect(defined(keeper.peek(), "the root").count).toBe(2);
+		expect(emitted).toEqual([]);
+	});
+
+	test("a root write that outlives the window is never repeated for its version, and a newer version is written after it", async () => {
+		const clock = new ManualClock();
+		const store = new FakeStore();
+		const emitted: EventInput[] = [];
+		const releases: Array<() => void> = [];
+		const keeper = new CorpusRootKeeper({
+			store: () => store,
+			emit: (event) =>
+				new Promise<void>((resolve) => {
+					emitted.push(event);
+					releases.push(resolve);
+				}),
+			clock,
+		});
+		seed(store, 2);
+		keeper.manifestChanged();
+		clock.fire();
+		await flush();
+		expect(emitted).toHaveLength(1);
+		// The same version noted again (a failed-only ingest) while the first write is still running: nothing more is written.
+		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
+		keeper.manifestChanged();
+		clock.fire();
+		await flush();
+		expect(emitted).toHaveLength(1);
+		// A newer version noted while it runs waits for it: one root write at a time.
+		store.seed(makeRow({ repo: REPO, path: "docs/newer.md", sha256: sha256Hex("newer") }));
+		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
+		keeper.manifestChanged();
+		clock.fire();
+		await flush();
+		expect(emitted).toHaveLength(1);
+		defined(releases.shift(), "the first write").call(undefined);
+		await flush();
+		expect(emitted.map((event) => event.payload?.manifest_version)).toEqual([2, 3]);
+		defined(releases.shift(), "the second write").call(undefined);
+		await flush();
+		// Nothing is owed for a version already written.
+		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
+		keeper.manifestChanged();
+		clock.fire();
+		await flush();
+		expect(emitted).toHaveLength(2);
+	});
+
 	test("a manifest too large for a root is not emitted and says so on read", async () => {
 		class TooLarge extends FakeStore {
 			override async activeLeaves(): Promise<ActiveLeaves> {

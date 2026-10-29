@@ -313,6 +313,13 @@ async function prove(parsed: Parsed, deps: CorpusDeps): Promise<number> {
 		deps.err(`[substrate] corpus prove failed: the server's proof does not verify: ${printable(verdict.reason)}\n`);
 		return 1;
 	}
+	// A valid proof of another document is still not the one asked for: the file would claim a document it does not cover.
+	if (result.value.repo !== repo || result.value.documentPath !== path) {
+		deps.err(
+			`[substrate] corpus prove failed: the server answered with a proof for a different document (${printable(result.value.repo)} ${printable(result.value.documentPath)}), not ${printable(repo)} ${printable(path)}\n`,
+		);
+		return 1;
+	}
 	const text = `${JSON.stringify(result.value, null, 2)}\n`;
 	const file = last(parsed, "out");
 	if (file !== undefined) {

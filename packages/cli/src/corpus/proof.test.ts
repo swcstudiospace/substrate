@@ -277,7 +277,8 @@ describe("substrate corpus verify --online", () => {
 
 describe("substrate corpus prove", () => {
 	test("asks for the proof by repo and path, prints it, and writes it with --out", async () => {
-		const proof = proofOf(docs(5), 2);
+		const all = [...docs(4), { repo: REPO, path: "docs/a b.md", sha256: "ef".repeat(32) }];
+		const proof = proofOf(all, [...all].sort(compareEntries).findIndex((doc) => doc.path === "docs/a b.md"));
 		stub.on("GET /corpus/proof", () => ({ status: 200, body: proof }));
 		const result = await run(["prove", "--repo", REPO, "--path", "docs/a b.md", "--out", "out.json"]);
 		expect(result.code).toBe(0);
@@ -293,6 +294,23 @@ describe("substrate corpus prove", () => {
 		const result = await run(["prove", "--repo", REPO, "--path", "docs/doc-1.md"]);
 		expect(result.code).toBe(0);
 		expect(result.written.size).toBe(0);
+	});
+
+	test("a valid proof of a different document than the one asked for is reported and not written", async () => {
+		// Each answer verifies, but covers another path, or the same path in another repository.
+		let answer: CorpusProofResponse = proofOf(docs(5), 3);
+		stub.on("GET /corpus/proof", () => ({ status: 200, body: answer }));
+		const otherPath = await run(["prove", "--repo", REPO, "--path", "docs/doc-1.md", "--out", "out.json"]);
+		answer = proofOf(
+			docs(5).map((doc) => ({ ...doc, repo: "Acme/Other" })),
+			3,
+		);
+		const otherRepo = await run(["prove", "--repo", REPO, "--path", "docs/doc-3.md", "--out", "out.json"]);
+		expect({ codes: [otherPath.code, otherRepo.code], different: [otherPath.err.includes("different document"), otherRepo.err.includes("different document")] }).toEqual({
+			codes: [1, 1],
+			different: [true, true],
+		});
+		expect({ written: otherPath.written.size + otherRepo.written.size, out: otherPath.out + otherRepo.out }).toEqual({ written: 0, out: "" });
 	});
 
 	test("a proof the server gives that does not verify is reported and not written", async () => {

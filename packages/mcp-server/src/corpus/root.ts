@@ -136,6 +136,8 @@ export interface CorpusRootKeeperDeps {
  *
  * - The cache holds one snapshot, valid while no change has been noted since it was read (`generation`). The routes also compare
  *   it with the manifest's version, so a write this process did not note is not served as current.
+ * - An ingest brackets its writes with `writeStarted()` and `writeSettled()`. While one is in flight the cache is empty and no read
+ *   is cached, so a search never names a root the batches already saved have outdated.
  * - `manifestChanged()` bumps the generation and schedules one root event. Events are coalesced: at most one per
  *   {@link ROOT_EMIT_MIN_INTERVAL_MS}, and the one that goes out reads the manifest when its timer fires, so the latest state wins.
  *   The timer runs after the request that noted the change has answered, and a failure of any kind is swallowed: a root event
@@ -150,6 +152,11 @@ export class CorpusRootKeeper {
 	private timerPending = false;
 	private lastFireMs: number | null = null;
 	private lastEmittedVersion = -1;
+	/** The ingests whose writes have started and not settled. */
+	private writers = 0;
+	/** The one root write in flight, and whether another was asked for while it ran. */
+	private emitting: Promise<void> | null = null;
+	private emitAgain = false;
 
 	constructor(private readonly deps: CorpusRootKeeperDeps) {
 		this.clock = deps.clock ?? systemRootClock;
@@ -158,14 +165,14 @@ export class CorpusRootKeeper {
 	/** The cached root of the current manifest, or null when none is cached. Never reads the manifest. */
 	peek(): CorpusRootSnapshot | null {
 		const cached = this.cached;
-		if (cached === null || cached.generation !== this.generation) return null;
+		if (this.writers > 0 || cached === null || cached.generation !== this.generation) return null;
 		const { generation: _generation, ...snapshot } = cached;
 		return snapshot;
 	}
 
 	/** Starts the computation the cache is missing, off the caller's path. Never throws; a failed read leaves the cache empty. */
 	warm(): void {
-		if (this.peek() !== null || this.deps.store() === null) return;
+		if (this.writers > 0 || this.peek() !== null || this.deps.store() === null) return;
 		this.read().then(
 			() => undefined,
 			() => undefined,
@@ -191,7 +198,8 @@ export class CorpusRootKeeper {
 		const tree = buildCorpusTree(leaves);
 		const snapshot: CorpusRootSnapshot = { root: rootOf(tree.ordered), count: tree.ordered.length, manifestVersion, skipped: tree.skipped };
 		// A change noted while this read ran makes it stale for the next caller, but it is still the true root of the version it names.
-		if (generation === this.generation) this.cached = { ...snapshot, generation };
+		// While an ingest is writing, the manifest is between versions, so nothing read now is kept.
+		if (generation === this.generation && this.writers === 0) this.cached = { ...snapshot, generation };
 		return { ok: true, snapshot, tree };
 	}
 
@@ -207,6 +215,19 @@ export class CorpusRootKeeper {
 		return this.read();
 	}
 
+	/** An ingest is about to write: the cached root is forgotten and stays unavailable until {@link writeSettled}. */
+	writeStarted(): void {
+		this.writers += 1;
+		this.generation += 1;
+	}
+
+	/** That ingest finished or failed. When it may have changed the manifest, one root event is scheduled. Never throws. */
+	writeSettled(changed: boolean): void {
+		this.writers = Math.max(0, this.writers - 1);
+		if (changed) this.manifestChanged();
+		else this.generation += 1;
+	}
+
 	/** The manifest changed: forget the cached root and schedule one root event. Returns at once and never throws. */
 	manifestChanged(): void {
 		this.generation += 1;
@@ -220,7 +241,26 @@ export class CorpusRootKeeper {
 		}, wait);
 	}
 
+	/** At most one root write runs: a request that arrives meanwhile makes the running one read the manifest again when it ends. */
 	private async emitRoot(): Promise<void> {
+		if (this.emitting !== null) {
+			this.emitAgain = true;
+			return;
+		}
+		this.emitting = this.emitUntilSettled().finally(() => {
+			this.emitting = null;
+		});
+		await this.emitting;
+	}
+
+	private async emitUntilSettled(): Promise<void> {
+		do {
+			this.emitAgain = false;
+			await this.emitOnce();
+		} while (this.emitAgain);
+	}
+
+	private async emitOnce(): Promise<void> {
 		try {
 			const read = await this.read();
 			if (!read.ok || read.snapshot.count === 0 || read.snapshot.manifestVersion <= this.lastEmittedVersion) return;
