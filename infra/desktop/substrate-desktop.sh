@@ -26,6 +26,7 @@ PUBLISH=127.0.0.1:6081:3000
 MIN_FREE_BYTES=10737418240
 GEOMETRY_WAIT_S=${SUBSTRATE_DESKTOP_GEOMETRY_WAIT_S:-60}  # test seam; operators leave it unset
 PROBE_TIMEOUT_S=${SUBSTRATE_DESKTOP_PROBE_TIMEOUT_S:-10}  # test seam; operators leave it unset
+PROBE_KILL_AFTER_S=${SUBSTRATE_DESKTOP_PROBE_KILL_AFTER_S:-2}  # test seam; operators leave it unset
 
 LABEL_KEY=${LABEL%%=*}
 LABEL_VALUE=${LABEL#*=}
@@ -74,7 +75,8 @@ ensure_env_file() {
 # harness's refuseDockerEnv/refuseDockerEndpoint rules. Only a proven local
 # unix:// endpoint proceeds: a failed, timed-out, empty or non-local probe
 # dies here, before image, credential-file, create or start work. The probe is
-# bounded so a hung docker client cannot hang the script.
+# bounded, with a forced kill after the grace period, so a docker client that
+# ignores SIGTERM cannot hang the script.
 require_local_docker() {
 	local host="${DOCKER_HOST:-}" context="${DOCKER_CONTEXT:-}" endpoint
 	case "$host" in
@@ -85,7 +87,7 @@ require_local_docker() {
 		""|default|desktop-linux) ;;
 		*) die "refusing non-local docker context $context" ;;
 	esac
-	if endpoint=$(timeout "$PROBE_TIMEOUT_S" docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null); then
+	if endpoint=$(timeout -k "$PROBE_KILL_AFTER_S" "$PROBE_TIMEOUT_S" docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null); then
 		endpoint=${endpoint%%$'\n'*}
 		case "$endpoint" in
 			unix://*) ;;

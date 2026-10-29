@@ -1,8 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DesktopRunInput } from "../packages/mcp-server/src/desktop/actions.ts";
 import { decodePng, encodePng } from "../packages/mcp-server/src/desktop/png.ts";
 import { RehearsalRefused, refuseSmokeUrl } from "./rehearsal.ts";
-import { dumpedHoldsTyped, findBand, markerText, nonceRgb, parseRpcBody, parseSmokeArgs, refuseUnprovenDockerLocality, sha256Hex, shouldRetryNonce, type NonceRgb } from "./desktop-smoke.ts";
+import { dumpedHoldsTyped, findBand, markerText, nonceRgb, parseRpcBody, parseSmokeArgs, probeTimeoutMs, refuseUnprovenDockerLocality, sha256Hex, shouldRetryNonce, type NonceRgb } from "./desktop-smoke.ts";
 
 /** Paint a test frame: background wash plus solid exact-RGB rectangles. */
 function paintImage(width: number, height: number, bg: NonceRgb, rects: Array<{ x: number; y: number; w: number; h: number; color: NonceRgb }>): Buffer {
@@ -231,5 +234,112 @@ describe("dumpedHoldsTyped", () => {
 	test("clean rows with hashes only do not trip it", () => {
 		const dumped = JSON.stringify([{ kind: "tool.call", payload: { tool: "desktop_run", action: "type", text_len: 90, text_sha256: "ab".repeat(32) } }]);
 		expect(dumpedHoldsTyped(dumped, ["exit\n"])).toBe(false);
+	});
+});
+
+describe("probeTimeoutMs", () => {
+	test("defaults to 10 s and accepts only a positive integer seam", () => {
+		expect(probeTimeoutMs({})).toBe(10_000);
+		expect(probeTimeoutMs({ SUBSTRATE_DESKTOP_SMOKE_PROBE_TIMEOUT_MS: "250" })).toBe(250);
+		for (const bad of ["", "0", "-5", "1.5", "soon"]) {
+			expect(probeTimeoutMs({ SUBSTRATE_DESKTOP_SMOKE_PROBE_TIMEOUT_MS: bad })).toBe(10_000);
+		}
+	});
+});
+
+// The real entry point, run as a child process: a fake `docker` first on PATH
+// logs every call, and a local HTTP server counts every request. The smoke
+// must refuse (exit 2) on an unproven locality probe before it sends one.
+const SMOKE = join(import.meta.dir, "desktop-smoke.ts");
+const smokeMade: string[] = [];
+afterAll(() => {
+	for (const dir of smokeMade.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+type ProbeBehaviour = "broken" | "hang" | "local";
+
+interface SmokeRun {
+	code: number;
+	err: string;
+	dockerLog: string[];
+	requests: number;
+	ms: number;
+}
+
+/** Run the smoke's `main` against a counting twin and a fake docker. */
+async function runSmoke(probe: ProbeBehaviour, env: Record<string, string> = {}): Promise<SmokeRun> {
+	const dir = mkdtempSync(join(tmpdir(), "desktop-smoke-entry-"));
+	smokeMade.push(dir);
+	const stubDir = join(dir, "bin");
+	const logFile = join(dir, "docker.log");
+	const tokensDir = join(dir, "tokens");
+	const runtime = join(dir, "run");
+	mkdirSync(stubDir);
+	mkdirSync(tokensDir);
+	mkdirSync(join(runtime, "substrate-rehearsal", "entry"), { recursive: true });
+	writeFileSync(logFile, "");
+	// The smoke hands `docker` only PATH and HOME, so the log path is baked in.
+	const answer = probe === "broken" ? "exit 1" : probe === "hang" ? "exec sleep 30" : 'echo "unix:///var/run/docker.sock"';
+	writeFileSync(join(stubDir, "docker"), `#!/usr/bin/env bash\necho "docker $*" >>"${logFile}"\n${answer}\n`, { mode: 0o755 });
+	writeFileSync(join(tokensDir, "omp"), "tok-omp\n");
+	writeFileSync(join(tokensDir, "cursor"), "tok-cursor\n");
+
+	let requests = 0;
+	const twin = Bun.serve({
+		port: 0,
+		hostname: "127.0.0.1",
+		fetch() {
+			requests++;
+			return new Response("no", { status: 500 });
+		},
+	});
+	try {
+		writeFileSync(
+			join(runtime, "substrate-rehearsal", "entry", "consumer.env"),
+			`export SUBSTRATE_URL='http://127.0.0.1:${twin.port}'\nexport SUBSTRATE_REHEARSAL_TOKENS_DIR='${tokensDir}'\n`,
+		);
+		const start = Date.now();
+		const child = Bun.spawn([process.execPath, SMOKE, "--name", "entry"], {
+			env: { PATH: `${stubDir}:/usr/bin:/bin`, HOME: dir, XDG_RUNTIME_DIR: runtime, ...env },
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [code, err] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+		return {
+			code,
+			err,
+			dockerLog: readFileSync(logFile, "utf8").split("\n").filter((line) => line.length > 0),
+			requests,
+			ms: Date.now() - start,
+		};
+	} finally {
+		twin.stop(true);
+	}
+}
+
+describe("desktop-smoke entry point locality gate", () => {
+	test("a failed probe exits 2 before any request or further docker call", async () => {
+		const run = await runSmoke("broken");
+		expect(run.code).toBe(2);
+		expect(run.err).toContain("could not prove the local docker endpoint");
+		expect(run.requests).toBe(0);
+		expect(run.dockerLog).toEqual(["docker context inspect --format {{.Endpoints.docker.Host}}"]);
+	});
+
+	test("a hung probe is bounded by the timeout seam, exits 2, sends nothing", async () => {
+		const run = await runSmoke("hang", { SUBSTRATE_DESKTOP_SMOKE_PROBE_TIMEOUT_MS: "500" });
+		expect(run.code).toBe(2);
+		expect(run.err).toContain("could not prove the local docker endpoint");
+		expect(run.ms).toBeLessThan(8_000);
+		expect(run.requests).toBe(0);
+		expect(run.dockerLog).toEqual(["docker context inspect --format {{.Endpoints.docker.Host}}"]);
+	});
+
+	test("a proven local socket proceeds to the first request (the counter is wired)", async () => {
+		const run = await runSmoke("local");
+		expect(run.code).toBe(2);
+		expect(run.err).toContain("is not answering /healthz");
+		expect(run.requests).toBe(1);
+		expect(run.dockerLog).toEqual(["docker context inspect --format {{.Endpoints.docker.Host}}"]);
 	});
 });
