@@ -2,6 +2,7 @@
 
 **Defined:** 2026-10-21
 **Core Value:** Every agent on the host shares one brief, one event log, one governed memory plane, one skills library and one Graph ID.
+**Archived:** all three programs were closed as override closeouts and archived (Run 12): `milestones/v1.3.x-REQUIREMENTS.md`, `milestones/v1.5-REQUIREMENTS.md` and `milestones/v1.6-REQUIREMENTS.md` hold their snapshots. This file stays as the live traceability record: a ticked row is satisfied or waived, an unticked row is accepted debt, partial or operator-gated, and its row carries the reason and the date.
 
 ## Sources
 
