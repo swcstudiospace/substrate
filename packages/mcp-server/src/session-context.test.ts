@@ -121,7 +121,8 @@ describe("bounds", () => {
 		expect(bytes(digest)).toBeLessThanOrEqual(SESSION_CONTEXT_MAX_BYTES);
 		expect(digest.events.length).toBeGreaterThan(0);
 		expect(digest.events.length).toBeLessThan(SESSION_CONTEXT_LIMITS.events);
-		expect(digest.truncated).toEqual({ sessions: false, claims: false, events: true, handoffs: false, planning: false });
+		// Only the events were cut by the byte cap. The twenty claims name twenty graphs and handoffs are read for ten, so that list is reported as cut too.
+		expect(digest.truncated).toEqual({ sessions: false, claims: false, events: true, handoffs: true, planning: false });
 		expect({ sessions: digest.sessions.length, claims: digest.claims.length, handoffs: digest.handoffs.length, planning: digest.planning.length }).toEqual({
 			sessions: 20,
 			claims: 20,

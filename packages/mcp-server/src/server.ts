@@ -2106,6 +2106,9 @@ export function createHttpServer(
 				}
 				if (!(await auditedRest(res, observability, surface, "session_context", { repo_id: parsed.value.repoId, session_id: parsed.value.sessionId, limit: parsed.value.limit ?? null }))) return;
 				sendJson(res, 200, await substrate.sessionContext(parsed.value));
+				return;
+			}
+
 			// The worktree registry (phase 68). A report names a host's checkouts, so an anonymous caller is refused before the body
 			// is read, even on a run that allows untokened callers. A registry that is off, a VM guest and a server with no index are
 			// refused just as early, so nothing is read, audited or stored. The accepted report is audited fail-closed.
