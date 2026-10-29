@@ -162,12 +162,28 @@ export interface HandoffInput {
 
 export class InvalidHandoffError extends Error {}
 
+/** How many times the cap is moved back to make the text a fixed point of redaction. Each move is at least two characters, and the tail is the only part that changes. */
+const STABLE_CUT_ATTEMPTS = 24;
+
 function line(value: unknown, limit: number): string | null {
 	if (typeof value !== "string") return null;
 	// Redact first, then cap: truncating first can cut a token in half so its own
 	// pattern no longer matches, and the fragment would be signed and stored.
-	const cleaned = redact(value).trim().slice(0, limit).trim();
-	return cleaned.length > 0 ? cleaned : null;
+	const redacted = redact(value).trim();
+	// Then make sure the cut text is stable: the event layer redacts every stored string again, and a cap that fell inside a
+	// marker (`[REDACTE`) or a value (`password=[REDA`) is completed or replaced by that second pass, so the stored text would
+	// differ from the text that was signed and could outgrow its cap. Cutting further back until a second pass changes nothing
+	// leaves the stored form equal to the signed form.
+	let cut = Math.min(redacted.length, limit);
+	for (let attempt = 0; attempt < STABLE_CUT_ATTEMPTS; attempt++) {
+		const candidate = redacted.slice(0, cut).trim();
+		const again = redact(candidate);
+		if (again === candidate) return candidate.length > 0 ? candidate : null;
+		cut = Math.max(0, cut - Math.max(2, Math.abs(again.length - candidate.length) + 1));
+		if (cut === 0) return null;
+	}
+	// A text that cannot be made stable is not carried at all, rather than carried in a form that differs from what was signed.
+	return null;
 }
 
 function lines(value: unknown, maxItems: number): { kept: string[]; dropped: number } {

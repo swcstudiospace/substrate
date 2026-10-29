@@ -263,6 +263,24 @@ describe("replayable from the packet alone", () => {
 		expect(verifyHandoff(stored, KEYS)).toEqual({ ok: true, key_id: "k1" });
 	});
 
+	test("text capped inside a redaction marker or a keyed secret is stable through event redaction: signed equals stored and still fits the guard", () => {
+		// The cap falls inside `[REDACTED]` for these: the event layer's second pass used to complete the marker and outgrow the cap.
+		for (const tail of [" password=secret", " api_key=sk-live-123456789", " token: abcdef0123456789abcdef"]) {
+			for (const filler of [1_170, 1_182, 1_185, 1_190, 1_195]) {
+				const goal = `${"A".repeat(filler)}${tail}`;
+				const signed = signHandoff(packet({ goal, notes: `${"B".repeat(filler)}${tail}`, blockers: [`${"C".repeat(filler - 780)}${tail}`] }), SIGNER);
+				const event = normalizeEvent({ surface: "grok-bot", kind: "handoff", summary: "handoff", payload: { handoff: signed } }, null);
+				const stored = event.payload.handoff as HandoffPacket;
+				expect(canonicalJson(stored)).toBe(canonicalJson(signed));
+				expect(isStoredHandoff(stored)).toBe(true);
+				expect(verifyHandoff(stored, KEYS)).toEqual({ ok: true, key_id: "k1" });
+				expect(signed.goal.length).toBeLessThanOrEqual(1_200);
+				// What was redacted stays redacted: the secret itself is not in the packet.
+				expect(JSON.stringify(signed)).not.toMatch(/secret|sk-live|abcdef0123456789abcdef/);
+			}
+		}
+	});
+
 	test("a large packet is trimmed before signing, so the stored packet is the signed one", () => {
 		const signed = signHandoff(
 			packet({
