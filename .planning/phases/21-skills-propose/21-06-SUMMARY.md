@@ -44,3 +44,9 @@ status: complete
 ## Self-Check: PASSED
 
 The commits above exist; the commands named under each coverage entry passed in the final run (tsc exit 0; full suite 1851 pass / 57 skip / 0 fail).
+
+## Amendment 2026-10-11 (capability drift and child-env lineage)
+
+- `pr list` drift (T-21-16): COVERAGE.md is read-only per the 21-06 plan and is preserved as written (`pr list --head --state open`). The shipped engine uses `--state all --json url,number,state` so owner-closed PRs are recovered as `declined` (or reopened onto a new branch) instead of being mistaken for "no PR anywhere". The matrix no longer matches the shipped argv on this flag; no claim that it still matches is made here.
+- Child-env prose (T-21-03/T-21-16): `docs/skills-propose.md` now records the user-selected "Keep current Git isolation" (2026-10-11): four base keys plus seven controlled fixed Git values (never secrets). No acceptor for supply-chain risk is fabricated by this note.
+- Historical proof metrics above (tsc, 1851/57/0) stand as historical and are not replaced by this amendment.

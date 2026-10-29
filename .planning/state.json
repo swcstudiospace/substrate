@@ -31,7 +31,7 @@
     {
       "number": "21",
       "name": "skills_propose",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "22",
@@ -61,7 +61,7 @@
     {
       "number": "27",
       "name": "Ledger primitives and ingest order",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "28",
@@ -76,7 +76,7 @@
     {
       "number": "30",
       "name": "desktop_run",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "31",
@@ -95,9 +95,9 @@
     }
   ],
   "next": {
-    "command": "/gsd:progress --next",
-    "label": "Advance to the next step (plan phase 20)",
-    "reason": "Phase 20 of 18 — needs a plan"
+    "command": "/gsd:verify-work",
+    "label": "Re-verify work",
+    "reason": "Recent verification failed — re-verify or debug"
   },
-  "updated_at": "2026-10-10T15:30:23.887Z"
+  "updated_at": "2026-10-11T03:51:06.850Z"
 }

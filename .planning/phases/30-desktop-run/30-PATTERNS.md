@@ -774,7 +774,7 @@ Do not name `desktop.action` as a kind (D30-21).
 - `## Rollback` (L164);
 - `## Who does what` (L232).
 
-Content comes from D30-21: the allowlist variable (with C9: production refuses everyone until Phase 20 tokens exist), `substrate-desktop.sh up|status`, the basic-auth file (by path only), retention (including the note that the first production run prunes the four September run dirs), the key/text hashing rule, the "never type secrets" residual (T-30-05), the network-egress residual (T-30-07), stale in-container xdotool after a timeout (Pitfall 6), and the rollback (unset the variable → every call refused).
+Content comes from D30-21: the allowlist variable (with C9: production refuses everyone until Phase 20 tokens exist), `substrate-desktop.sh up|status`, the basic-auth file (by path only), retention (including the note that the first production run prunes the four September run dirs), the key/text hashing rule, the "never type secrets" residual (T-30-05), the network-egress residual (T-30-29), stale in-container xdotool after a timeout (Pitfall 6), and the rollback (unset the variable → every call refused).
 
 ### `docs/mcp-audit.md` (docs)
 

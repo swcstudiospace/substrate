@@ -117,7 +117,7 @@ Each task was committed atomically:
 
 ## Decisions Made
 
-- `desktopDirRejected: string | null` holds the rejected relative value so `desktopConfigWarnings` can warn from config alone without re-reading env; a path is not a credential, so quoting it in the warning is safe (T-30-02 covers token values only).
+- `desktopDirRejected: string | null` holds the rejected relative value so `desktopConfigWarnings` can warn from config alone without re-reading env; a path is not a credential, so quoting it in the warning is safe (T-30-16 covers token values only).
 - `isKnownDesktopSurface` is a module-local type guard (`value is Surface`, mirroring `event.ts:38-40` and `memory-policy.ts:78-80`), which both preserves narrowing into the `Set<Surface>` and serves three call sites.
 - Warning wording: one line per gap; the unknown-name line joins all dropped names; the dir line quotes the rejected value and names the default in effect.
 - No driver wiring in `index.ts` — that is plan 30-04's scope; this plan touches only the warnings loop.

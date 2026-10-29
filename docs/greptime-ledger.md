@@ -618,6 +618,21 @@ was written, no host config or systemd step was taken. The runbook with the
 per-step gates lives in `28-04-SUMMARY.md`. The 0-lamport question and the memo
 program id (D27-06) stay [UNVERIFIED] until L8.
 
+**Pending parent run (no result claimed):** the harness since gained a
+supplemental exact-alteration scenario — an already-anchored existing event
+rewritten in place (same id and timestamp, hash recomputed, per-session
+chain still verifying) inside a separate `*_p28alter` table namespace on
+the same scratch server, where a proof-owned loopback proxy serves the
+typed `migrate()` an `agent_events` table without `append_mode` so the
+real store's last-write-wins overwrite applies; the normal ledger tables
+stay append-only, the earlier append beat keeps its history, and a real
+`substrate verify` child process is asserted to exit 1 naming the altered
+hour against the retained anchor. `packages/mcp-server/src/anchor-run.test.ts`
+likewise pins the entry process boundary (missing config exits 2 with
+usage, no CLI/store/RPC effect). Both are implemented but unrun here: the
+47/47 count above stays the historical 2026-10-09 run until the parent
+records the new run.
+
 Rollback for this slice is proof-additive: delete section 8 and the tmp stub
 it writes at runtime; nothing on any ledger needs undoing (production rows
 from a future L7–L8, if approved, are append-only and stay, tagged proof-graph

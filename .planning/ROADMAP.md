@@ -62,16 +62,16 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 18: Guard rails and shared redactor** - One redactor, carrying the September rules and main's counter exemption, guards every publication path (completed 2026-10-09)
 - [x] **Phase 19: Lane B collectors** - herdr, Muse and the Cursor `stop` hook emit from `main` under main's vocabulary, and each Muse repo carries a fresh brief (completed 2026-10-10)
 - [ ] **Phase 20: Production identity and Phase 0 UAT** - Every production client holds its own token, and the eight Phase 0 scenarios pass against `main`
-- [ ] **Phase 21: skills_propose** - An authenticated surface can propose a skill as a PR on agent-skills, with secrets and duplicates refused
+- [x] **Phase 21: skills_propose** - An authenticated surface can propose a skill as a PR on agent-skills, with secrets and duplicates refused (completed 2026-10-11)
 - [ ] **Phase 22: Skills sync, bridge and miners** - Mined skills reach every agent through propose, owner merge and sync, all from code on `main`
 - [ ] **Phase 23: Claim mirror and DoD gate** - Linear and Notion follow every lease transition, and only the Definition-of-Done gate can mark an issue Done
 - [ ] **Phase 24: substrate-dispatcher** - A `dispatch:hermes` label starts a lease-correct Hermes session on the issue's Graph ID in its own worktree
 - [ ] **Phase 25: Docs search and ingest (RAGFlow)** - Agents get cited docs answers through the substrate, and ingest refuses secrets and unsourced pages
 - [ ] **Phase 26: Hindsight recall and Dragonfly cache** - Accepted memories are recalled across surfaces and repeated reads are cached, without slowing or staling the brief
-- [ ] **Phase 27: Ledger primitives and ingest order** - Every closed hour has one deterministic Merkle root over its events in server ingest order
+- [x] **Phase 27: Ledger primitives and ingest order** - Every closed hour has one deterministic Merkle root over its events in server ingest order (completed 2026-10-11)
 - [ ] **Phase 28: Hourly anchor job and verify** - Each closed hour is anchored once on Solana devnet, and `verify` checks a graph against those anchors
 - [ ] **Phase 29: Agent Cards and teachable moments** - Each surface publishes a valid A2A Agent Card listing its accepted teachables, which sit inside anchored hours
-- [ ] **Phase 30: desktop_run** - Authenticated agents drive the dedicated webtop through a closed, audited vocabulary
+- [x] **Phase 30: desktop_run** - Authenticated agents drive the dedicated webtop through a closed, audited vocabulary (completed 2026-10-11)
 - [ ] **Phase 31: Lane A runtime: spike, packaging and VM host** - `substrate-host` runs from `main` with one agentos VM per Graph ID, inside the host's disk and port limits
 - [ ] **Phase 32: Lane A host core** - A host task works its node under the `claude-code` lease, survives a restart and keeps credentials on the host
 - [ ] **Phase 33: Lane A dispatch route and approvals** - `dispatch:claude-code` takes an issue to a gated Done through a Lane A VM, with human approval of permissions
@@ -379,16 +379,16 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 | 18. Guard rails and shared redactor | v1.3 | 4/4 | Complete    | 2026-10-09 |
 | 19. Lane B collectors | v1.3 | 5/5 | Complete    | 2026-10-10 |
 | 20. Production identity and Phase 0 UAT | v1.3 | 0/? | Not started | - |
-| 21. skills_propose | v1.3 | 0/? | Not started | - |
+| 21. skills_propose | v1.3 | 6/6 | Complete    | 2026-10-11 |
 | 22. Skills sync, bridge and miners | v1.3 | 0/? | Not started | - |
 | 23. Claim mirror and DoD gate | v1.3 | 0/? | Not started | - |
 | 24. substrate-dispatcher | v1.3 | 0/? | Not started | - |
 | 25. Docs search and ingest (RAGFlow) | v1.3 | 0/? | Not started | - |
 | 26. Hindsight recall and Dragonfly cache | v1.3 | 0/? | Not started | - |
-| 27. Ledger primitives and ingest order | v1.3 | 0/? | Not started | - |
+| 27. Ledger primitives and ingest order | v1.3 | 4/4 | Complete    | 2026-10-11 |
 | 28. Hourly anchor job and verify | v1.3 | 0/? | Not started | - |
 | 29. Agent Cards and teachable moments | v1.3 | 0/? | Not started | - |
-| 30. desktop_run | v1.3 | 0/? | Not started | - |
+| 30. desktop_run | v1.3 | 7/7 | Complete    | 2026-10-11 |
 | 31. Lane A runtime: spike, packaging and VM host | v1.3 | 0/? | Not started | - |
 | 32. Lane A host core | v1.3 | 0/? | Not started | - |
 | 33. Lane A dispatch route and approvals | v1.3 | 0/? | Not started | - |

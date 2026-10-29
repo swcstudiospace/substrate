@@ -1,10 +1,10 @@
 ---
 phase: 18-guard-rails-and-shared-redactor
-verified: 2026-10-10T12:42:15Z
+verified: 2026-10-11T00:00:00Z
 status: passed
 score: 21/21 must-haves verified
 covered_files: [".planning/phases/18-guard-rails-and-shared-redactor/18-01-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-01-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-02-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-02-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-03-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-03-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-04-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-04-SUMMARY.md", "docs/greptime-ledger.md", "docs/memory-governance.md", "docs/observability.md", "docs/redaction.md", "packages/cli/src/lessons.ts", "packages/mcp-server/src/memory-classify.test.ts", "packages/mcp-server/src/redact-adversarial.test.ts", "packages/mcp-server/src/redact-contract.test.ts", "packages/mcp-server/src/redact-lock.test.ts", "packages/mcp-server/src/redact.test.ts", "packages/mcp-server/src/redact.ts", "packages/mcp-server/src/store-lock.test.ts"]
-covered_digest: "v3:sha256:58122a1e20e74fd7b41160097bb7cee8884f50b45f7aa89ef8d67144e40ebba3"
+covered_digest: "v1:sha256:1fd95d53a5e4056e7e641811d9c99faa489ccbfd2a989128020785fe280bdc48"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
@@ -208,3 +208,15 @@ Known failures, recorded not fixed (both reproduce; both outside phase-18 scope)
 - **F-02** — `packages/cli/src/token.test.ts` "a directory at the token-file path means no token" (reads the real host Cursor token, owned by Phase 20).
 
 Verdict: 21/21 truths stand, no regressions, no new gaps. Fingerprint refreshed via `verification.fingerprint` (v3) over the same 20-file covered set.
+
+## Re-verification after staleness at 76a4b2c (2026-10-11)
+
+Source commit `76a4b2c` (exact). Stale cause isolated by source-history metadata read (`dec0951..76a4b2c` over the 20 covered files): exactly one covered file changed — `docs/greptime-ledger.md` (+6/-1 in commit `76a4b2c`). The other 19 covered files (`redact.ts`, all redact tests, `redact-lock.test.ts`, `store-lock.test.ts`, `lessons.ts`, `memory-classify.test.ts`, `docs/redaction.md`, `docs/memory-governance.md`, `docs/observability.md`, all 8 plan/summary artifacts) are byte-identical since the `dec0951` verification. Must-haves (21 truths D18-01..D18-21) and reqID `LANEB-06` preserved unchanged; no old mutation claim repeated.
+
+Ledger delta (additive, guard-consistent): a `redactKnown`-before-shape-redaction paragraph for SQL/migration/ingest-retry diagnostics ("Only empty known values are ignored; short values are not exempted" — matches truth D18-11 semantics in `redact.ts:305-317`) plus a smoke-sink boundary sentence, and one doc-hygiene line ("prints the database only — no hostname or credential"). No credential shape, token literal, or Railway/hostname literal added. Doc-pointer regression check (truth D18-19): `greptime-ledger.md:225`, `memory-governance.md:135`, `observability.md:121` all intact.
+
+Source-first guard recheck at `76a4b2c` (read-only): `redact` / `redactValue` / `redactKnown` / `redactSkillContent` / `scanSkillFiles` / `REDACTION_RULES` / `RedactionRuleName` exports present; `lessons.ts:809` still calls shared `redactKnown`; no new rule, signature, plugin, or production cutover in the covered set (redactor diff vs `dec0951` empty).
+
+Fresh scope (no test/build/gate/runtime executed by this child; evidence cited from `local://v13-final-green-evidence.json` at `4df30a0` plus `local://v13-final-runtime-evidence.json` `latest_source_gates` at source commit `76a4b2c`): latest full suite 2718 pass / 58 skip / 0 fail across 96 files (types 0, locks 108/0) includes all redactor/adversarial/skill-boundary tests; isolated runtime skills 47/47, ledger 47/47 (28 ledger/ingest + 19 fake-chain), desktop 20/20, vocabulary 29/29 with 28/28 sources stored and 0 refusals; actual ledger failure path `ledger_credential_echo: false` with `ledger_failure_exit: 1`; listed-surface counts 5→5. Operator limitations and historical provenance preserved: restart-gated production widening only (truth D18-20 restart line unchanged), no operator approvals run, no live-gate steps executed.
+
+Verdict: 21/21 truths stand, no regressions, no new gaps. Fingerprint refreshed via `verification.fingerprint` (v1) over the same 20-file covered set.

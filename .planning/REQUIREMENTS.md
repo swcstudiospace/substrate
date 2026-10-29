@@ -38,7 +38,7 @@ Decisions confirmed when the milestone was opened (2026-10-08):
 
 ### Skills plane (build plan §6, Phase 4)
 
-- [ ] **SKILL-01**: `skills_propose` (MCP tool, `POST /skills/propose`, `substrate skills propose`) validates name, paths and frontmatter; redacts and secret-scans, refusing on a finding; dedupes by content hash (`existing` / `declined` / `unchanged`); and opens branch `skill/<surface>/<name>-<ts>-<hex>` with a PR on `swcstudiospace/agent-skills` through `gh`, checking the origin and never force-pushing. Callers authenticate with their surface token; the tool is registered in `mcp.ts`, `observe.ts` and the audit policy.
+- [x] **SKILL-01**: `skills_propose` (MCP tool, `POST /skills/propose`, `substrate skills propose`) validates name, paths and frontmatter; redacts and secret-scans, refusing on a finding; dedupes by content hash (`existing` / `declined` / `unchanged`); and opens branch `skill/<surface>/<name>-<ts>-<hex>` with a PR on `swcstudiospace/agent-skills` through `gh`, checking the origin and never force-pushing. Callers authenticate with their surface token; the tool is registered in `mcp.ts`, `observe.ts` and the audit policy.
 - [ ] **SKILL-02**: `substrate-skills-sync` runs from `main`: fast-forward-only fetch of `/root/agent-skills`; a dirty, off-branch or diverged checkout is refused with a `warning` event; symlinks are projected for Claude Code, Grok Build, `.agents` (Cursor), Muse and the OpenClaw roots, with backup and restore.
 - [ ] **SKILL-03**: The Hermes bridge runs from `main` every 5 minutes, drains `~/.hermes/pending/skills` and the Omp and Grok queues into `skills_propose` after 120 s of quiet, and deletes a queued record only on a final reply.
 - [ ] **SKILL-04**: The Hermes hourly miner cron runs main's code: an unchanged hour skips the model run, a run proposes at most 3 skills through `skill_manage`, and `skills.write_approval` and `memory.write_approval` stay true.
@@ -80,8 +80,8 @@ Decisions confirmed when the milestone was opened (2026-10-08):
 
 ### Ledger anchor (build plan §7, Phase 6)
 
-- [ ] **ANCHOR-01**: An hour's events are decided by server ingest order, recorded append-only without altering `agent_events`, through typed methods that keep `store-lock.test.ts` green.
-- [ ] **ANCHOR-02**: Each closed hour gets an RFC 6962 Merkle root over its event hashes in ingest order, and the memo `substrate:v1:<period_start>:<root>:<count>`.
+- [x] **ANCHOR-01**: An hour's events are decided by server ingest order, recorded append-only without altering `agent_events`, through typed methods that keep `store-lock.test.ts` green.
+- [x] **ANCHOR-02**: Each closed hour gets an RFC 6962 Merkle root over its event hashes in ingest order, and the memo `substrate:v1:<period_start>:<root>:<count>`.
 - [ ] **ANCHOR-03**: An hourly timer (`OnCalendar=hourly`, `Persistent=true`) anchors the previous hour idempotently: a re-run adopts an existing signer-checked memo, and a root mismatch raises an alarm and exits 1.
 - [ ] **ANCHOR-04**: The anchor is sent through the solana CLI with only the keypair path on the command line, on devnet only, and writes an `anchors` row `{period_start, period_end, root, event_count, memo, tx_sig, signer, cluster, slot, anchored_at}`; the DDL is reconciled with the table already live in production.
 - [ ] **ANCHOR-05**: `substrate verify <graph_id>` and `POST /verify` check the chain and, per hour, recompute the root and compare it with the memo read back by `tx_sig`; an hour is `pending` for up to 3 h after it closes and `unverified` (fail-closed) when devnet cannot be read.
@@ -96,11 +96,11 @@ Decisions confirmed when the milestone was opened (2026-10-08):
 
 ### desktop_run (build plan §4.4, Phase 5)
 
-- [ ] **DESK-01**: `desktop_run` drives the dedicated `substrate-desktop` webtop with a closed vocabulary (click, type, key, screenshot), at most 50 actions, a 1–120 s timeout, a fixed `docker exec` argv and one run at a time; screenshots return as MCP image blocks and are kept at mode 0600 for 200 runs or 7 days.
-- [ ] **DESK-02**: Each action produces one event under an existing kind; typed text is recorded only as its length and sha256; image blocks never enter the audit record.
-- [ ] **DESK-03**: Only surfaces on an operator-maintained allowlist may call `desktop_run` (operator decision 2026-10-08); an unlisted surface with a valid token, an anonymous caller and a VM guest are each refused, with a test for each; it is fail-closed in the audit policy.
-- [ ] **DESK-04**: A lifecycle script runs the container only with ≥ 10 GiB free, `--pull never`, loopback port 6081 behind basic auth, unprivileged and without the Docker socket, and never touches `recruitment-desktop`.
-- [ ] **DESK-05**: Proof (isolated): a headless session's `desktop_run` returns a screenshot whose pixels show the typed marker, one event per action lands, and `recruitment-desktop` is untouched.
+- [x] **DESK-01**: `desktop_run` drives the dedicated `substrate-desktop` webtop with a closed vocabulary (click, type, key, screenshot), at most 50 actions, a 1–120 s timeout, a fixed `docker exec` argv and one run at a time; screenshots return as MCP image blocks and are kept at mode 0600 for 200 runs or 7 days.
+- [x] **DESK-02**: Each action produces one event under an existing kind; typed text is recorded only as its length and sha256; image blocks never enter the audit record.
+- [x] **DESK-03**: Only surfaces on an operator-maintained allowlist may call `desktop_run` (operator decision 2026-10-08); an unlisted surface with a valid token, an anonymous caller and a VM guest are each refused, with a test for each; it is fail-closed in the audit policy.
+- [x] **DESK-04**: A lifecycle script runs the container only with ≥ 10 GiB free, `--pull never`, loopback port 6081 behind basic auth, unprivileged and without the Docker socket, and never touches `recruitment-desktop`.
+- [x] **DESK-05**: Proof (isolated): a headless session's `desktop_run` returns a screenshot whose pixels show the typed marker, one event per action lands, and `recruitment-desktop` is untouched.
 
 ### Lane A host (build plan §4.1, Phase 3)
 
@@ -163,7 +163,7 @@ Which phases cover which requirements. Filled in by the roadmap.
 | LANEB-05 | Phase 19 | Complete |
 | LANEB-06 | Phase 18 | Complete |
 | LANEB-07 | Phase 19 | Complete |
-| SKILL-01 | Phase 21 | Pending |
+| SKILL-01 | Phase 21 | Complete |
 | SKILL-02 | Phase 22 | Pending |
 | SKILL-03 | Phase 22 | Pending |
 | SKILL-04 | Phase 22 | Pending |
@@ -193,8 +193,8 @@ Which phases cover which requirements. Filled in by the roadmap.
 | DOCS-05 | Phase 26 | Pending |
 | DOCS-06 | Phase 26 | Pending |
 | DOCS-07 | Phase 26 | Pending |
-| ANCHOR-01 | Phase 27 | Pending |
-| ANCHOR-02 | Phase 27 | Pending |
+| ANCHOR-01 | Phase 27 | Complete |
+| ANCHOR-02 | Phase 27 | Complete |
 | ANCHOR-03 | Phase 28 | Pending |
 | ANCHOR-04 | Phase 28 | Pending |
 | ANCHOR-05 | Phase 28 | Pending |
@@ -203,11 +203,11 @@ Which phases cover which requirements. Filled in by the roadmap.
 | CARD-02 | Phase 29 | Pending |
 | CARD-03 | Phase 29 | Pending |
 | CARD-04 | Phase 29 | Pending |
-| DESK-01 | Phase 30 | Pending |
-| DESK-02 | Phase 30 | Pending |
-| DESK-03 | Phase 30 | Pending |
-| DESK-04 | Phase 30 | Pending |
-| DESK-05 | Phase 30 | Pending |
+| DESK-01 | Phase 30 | Complete |
+| DESK-02 | Phase 30 | Complete |
+| DESK-03 | Phase 30 | Complete |
+| DESK-04 | Phase 30 | Complete |
+| DESK-05 | Phase 30 | Complete |
 | LANEA-01 | Phase 31 | Pending |
 | LANEA-02 | Phase 32 | Pending |
 | LANEA-03 | Phase 32 | Pending |

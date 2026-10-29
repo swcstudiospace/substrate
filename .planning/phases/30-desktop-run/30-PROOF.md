@@ -1,84 +1,94 @@
 # 30-PROOF: desktop_run proof (DESK-05)
 
-**Status: LIVE-GATED — live chain NOT RUN.** The proof chain below drives the
-live `substrate-desktop` display (keystrokes plus captures) and scrubs
-harness containers, so it was neither executed nor simulated. Every live
-verdict field reads `NOT-RUN`. The hermetic evidence (§1) was observed on
-this worktree; the live battery (§2) is implemented as code
-(`scripts/desktop-smoke.ts`, `bun run smoke:desktop`) and awaits a live run.
+**Status: corrected real-runtime proof PASSED 20/20, 2026-10-11.**
+Parent-owned execution on `/root/src/worktrees/agent-substrate-v13-autonomous`,
+revision `4df30a0` plus owned source corrections. No production MCP request,
+model turn, credential read/rotation, service restart, main merge or unrelated
+container change. Final source-union gates are recorded separately; a successful
+runtime proof does not replace them or complete the milestone.
 
-- `band_pixels=NOT-RUN`
-- `band_rect=NOT-RUN`
-- `block_sha=file_sha=event_sha=NOT-RUN`
-- `tool_call_events=NOT-RUN`
-- `audit_mode=NOT-RUN`
-- `unlisted_refusal=NOT-RUN`
-- `no_token_401=NOT-RUN`
-- `port_6081_401=NOT-RUN`
-- `recruitment_inspect=NOT-RUN`
-- `desktop_status=NOT-RUN`
+- `band_pixels=9120`, `baseline_pixels=0`, `band_rect=480x19`, `solid=true`
+- `block_sha=file_sha=event_sha=true` for both screenshots
+- `tool_call_events=5/5`, hash-only payloads, typed text/base64 absent
+- `audit_mode=fail-closed`, `desktop_run_records=2`, content absent
+- `unlisted_refusal=true`, surface-event count `5→5`
+- `no_token_401=true`, `port_6081_401=true`
+- `recruitment_snapshot=absent→absent`, authoritative inventory successful
+- `desktop_status=loopback/unprivileged/no-docker-socket/role-desktop`
 
-## 1. Isolated evidence (observed 2026-10-09, worktree HEAD `cbccd4b`)
+## 1. Historical isolated evidence, 2026-10-09
 
-- `bun test ./scripts/desktop-smoke.test.ts` — **20 pass / 0 fail**
-  (56 expects): band finder exact on synthetic PNG round trips (48×19 rect
-  found byte-exact; absent colour empty; split blobs counted but not solid),
-  marker parses under `DesktopRunInput`, nonce channel reaches `0xC0`,
-  guards refuse production ports and non-loopback hosts.
-- `bun test` (full) — **1735 pass / 57 skip / 0 fail** across 61 files
-  (6493 expects). Baseline held; growth is the 20 new helper tests.
-- `bunx tsc --noEmit` — **clean**.
-- `bun run check:phase-close` — **exit 0**: 4 lock files green
-  (store, vocabulary, event-sources, audit policy), `EVENT_KINDS` unchanged
-  at 12 against `ab62c91`, `SURFACES` baseline plus `substrate` at 27.
-- Lock suites over the new files, each green on its own invocation:
-  store-lock 18 pass, redact-lock 15 pass, redact-contract 7 pass,
-  vocabulary-lock 2 pass.
-- Hermetic refusal probes of the smoke entry (zero requests sent — every
-  refusal precedes any network or container I/O):
-  - `--name no-such-instance-xyz` → exit 2,
-    `no consumer.env for instance …: run rehearsal up first`;
-  - `--bogus-flag` → exit 2, `unknown option --bogus-flag`;
-  - fabricated `consumer.env` with `SUBSTRATE_URL=http://127.0.0.1:7410`
-    → exit 2, `refusing to smoke production :7410`.
+Worktree HEAD `cbccd4b`: helper suite **20 pass / 0 fail**; full suite
+**1735 pass / 57 skip / 0 fail**, 61 files; `tsc` clean; phase-close exit 0,
+`EVENT_KINDS=12`, `SURFACES=27`. Individual historical locks: store18,
+redact-lock15, redact-contract7, vocabulary2 passed. Exit-2 guards refused an
+absent instance, an unknown flag and a fabricated production-port target before
+any request. The initial record had no live verdict; those counts are historical,
+not a separate current execution.
 
-## 2. Live proof chain (NOT-RUN — procedure for the live run)
+## 2. Corrected actual proof, 2026-10-11
 
-Run in order from the Phase 30 worktree, recording the listed numbers here
-before teardown removes the run dir:
+Named twin **`v13-proof-230c1bd0`**, private HOME/XDG runtime, free loopback
+port, `omp` allowlisted and `cursor` unlisted. Existing dedicated desktop had
+verified role `desktop`, geometry `1280x800`, loopback6081, no privilege or Docker
+socket. Its image was already local; nothing was pulled or created by this proof.
+
+Parent command sequence, with scratch credentials sourced privately and never
+printed:
 
 ```sh
-bun run rehearsal up --name p30 --surfaces omp,cursor --desktop-surfaces omp
-bun run smoke:desktop --name p30
-bun run check:phase-close
-bun run rehearsal down --name p30
+bun --no-env-file scripts/rehearsal.ts up --name v13-proof-230c1bd0 --port 0 --skills-fixture --desktop-surfaces omp
+bun --no-env-file scripts/desktop-smoke.ts --name v13-proof-230c1bd0 --surface omp --unlisted cursor
+bun --no-env-file scripts/rehearsal.ts down --name v13-proof-230c1bd0
 ```
 
-Expected readings, per check line:
+Up, proof and down each exited **0**. The proof returned two PNG image blocks and
+five successful action-log entries. The exact nonce RGB occurred in **9120** pixels
+forming one solid **480×19** rectangle and occurred **0** times in the baseline.
+Both returned block hashes matched reply hashes, stored PNG bytes and ledger-event
+hashes; stored sizes were **532677** and **325285** bytes. Five `tool.call` rows under
+the run session carried allowed metadata and typed-text hashes only, never typed
+text or a base64 prefix. The unlisted bearer was refused without a new desktop
+event; tokenless MCP and unauthenticated6081 each returned401. Two audit records
+were fail-closed and content-free.
 
-1. `marker run accepted` — exit path taken; the run text names `run_id`,
-   2 screenshots and 5 log entries.
-2. `band in returned block, none in baseline` — band pixel count (≥ 1500),
-   rectangle (`WxH`), solidity, baseline count (0).
-3. `shot N block sha equals reply sha` — the returned block's sha256
-   (12-char prefix shown) per shot.
-4. `shot N stored file equals reply sha` — stored file size in bytes per
-   shot; equality of block, file and event sha256 values.
-5. `one stored tool.call per action with hashes only` — `5/5` rows under
-   `session_id desktop:<run_id>`, `text_sha256` equal to the typed texts'
-   sha256, no typed text or `iVBOR` in any payload.
-6. `unlisted token refused` + `refusal stored no new event` — the isError
-   refusal line and the unchanged row count.
-7. `no token 401` and `6081 root without credentials 401` — both status
-   lines (credentials never read or printed).
-8. `recruitment-desktop inspect before/after` — the two identical
-   `Id Status StartedAt FinishedAt` lines.
-9. `status shows loopback port, unprivileged, no socket, desktop label` —
-   the four `status` key lines.
-10. `audit holds fail-closed desktop_run with no content` — the
-    `desktop_run` record count, every record `mode: fail-closed`, no typed
-    text or `iVBOR`.
+Before and after, a successful exact-name Docker inventory established the
+unrelated desktop was absent. The snapshot distinguishes present, absent and
+error: appearance, disappearance, changed metadata or any failed probe fails;
+absence is not inferred from an inspect error. No unrelated container was
+created, started, stopped or changed. Down stopped only the owned rehearsal
+process and removed its two scratch store containers. The dedicated desktop
+remains running; every proof-owned terminal was closed.
 
-Per D30-18: if the band pixels come back stale or absent, the pixel clause
-is recorded here as a gap — never passed on window titles. No gap is
-claimed by this record: no live run was attempted.
+The N1 spike is separately recorded in `30-N1-SPIKE.md`: three measured real
+as-ported XWD→PNG repeats, each9120 solid pixels/baseline0, with per-call timings
+and host steal sampled. **`n1_reproduced=false`**; no capture-path change or
+window-title substitute was needed.
+
+The corrected source also refused the parent's failed-locality fixture with
+**zero input actions and zero events**; before correction it had executed one
+input and emitted one event. Unknown Docker locality now fails closed before
+geometry, input, capture or lifecycle operations.
+
+## 3. First actual run — FAILED18/20, preserved
+
+At revision `4df30a0`, twin `p21-a6a927a5`, the first proof exited1 with
+**18/20** checks passed. Both failures were unrelated-desktop inspect checks: a
+successful exact-name inventory returned zero rows, but the old null-on-error
+snapshot conflated legitimate absence with metadata-probe failure.
+
+The first run already observed9120 solid480×19 pixels/baseline0, two PNGs with
+matching block/file/event hashes, five hash-only ledger rows, unchanged unlisted
+surface count5→5, both401 checks, correct desktop status and two fail-closed audit
+records. Its own twin was torn down with exit0 and two owned containers removed.
+This historical18/20 remains a **FAIL**, not a retrospectively renamed pass.
+The corrected20/20 in §2 is a separate observed run.
+
+## 4. Scope and remaining gates
+
+Source: parent values-free `local://v13-final-runtime-evidence.json` and
+`local://v13-phase30-spike-evidence.json`. These are local parent evidence, not
+production approval or a remote deployment receipt. Full source tests, types,
+locks and native review/security/Nyquist/goal-verification reports must be current
+before the phase owner seals Phase30. Phase20 production identity/client/UAT
+checkpoints and the exposed Cursor credential's operator rotation remain pending.

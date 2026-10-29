@@ -132,7 +132,7 @@ Each task was committed atomically:
 ## Decisions Made
 
 - `failed` carries `{run_id, log, error}` split out of the driver result in `runDesktop` (not in the driver), so the MCP mapping is a direct union branch and the driver keeps its single result shape.
-- Pre-run throws (zod parse, bounds, geometry) propagate to the handler catch → redacted 400-char `refusal` (T-30-11), rather than inventing run ids for runs that never started.
+- Pre-run throws (zod parse, bounds, geometry) propagate to the handler catch → redacted 400-char `refusal` (T-30-21), rather than inventing run ids for runs that never started.
 - `x-substrate-propose-key` needs no code: Phase 21 dropped the header, so the HTTP test sends it only to prove it changes nothing.
 - XWD/record fixtures duplicated across `tool.test.ts`/`http.test.ts`/`driver.test.ts` per the 30-01 no-cross-test-import precedent.
 - Static `allowed` table in the confinement test is a `Record<string, true>` (repo `ts-set-map` rule); indexed test access uses `!` (repo precedent).

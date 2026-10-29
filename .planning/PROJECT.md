@@ -19,7 +19,7 @@
 - Lane A: a rivet-agentos host whose `openTask` is keyed by Graph ID, reached from `dispatch:claude-code`, gated on free disk.
 - The eight deferred Phase 0 UAT scenarios (`milestones/v1.0-phases/00-brief/0-UAT.md`).
 
-**Key context:** The September implementation of build-plan phases 1–6 lives on the unmerged branch `docs/data-planes-tailscale` (`acc30a8`, a superset of `substrate/ut-mughkkc0-73909228`); it is ported file by file onto `main`'s v1.2 lease model, and commit `21652a2` is treated as stubs. `substrate-mcp.service` points at the operator's checkout (now on `main`) but crash-loops, because a stray process started 2026-10-01 still holds `127.0.0.1:7410` and serves that day's code; the herdr and Muse collector, dispatcher and host units point at code `main` lacks, and the skills timers fail every five minutes. Phase proofs use isolated stores, and every live run (production service, real stores, devnet, Linear labels) waits for the operator's approval.
+**Key context:** The September implementation lives on `docs/data-planes-tailscale` (`acc30a8`) and is ported file by file onto `main`'s v1.2 lease model; `21652a2` is treated as stubs. The crash-loop/stray-process state recorded at milestone planning preceded Phase 16 and is historical, not the current service verdict. Current isolated integration has seven canonically verified phases; source corrections at `76a4b2c` are not a production deployment or main merge. Every production/store/devnet/client-install action retains its explicit operator gate.
 
 Shipped before: **v1.2 Swarm leases, workspace install and lessons bank** (2026-10-08; phases 11-15; 25/25 requirements).
 
@@ -154,6 +154,10 @@ Revised 2026-09-30 — policy in `docs/data-planes.md`, network in `docs/railway
 - ✓ Audit policy: every MCP tool v1.3 adds has a fail-open or fail-closed entry before it ships, with a test that catches a missing or contrary entry — v1.3 Phase 17
 - ✓ Shared redactor: one `redact.ts` with the September D-04 shapes, main's `COUNTER_KEY` exemption and a digit-requiring `pk-`/`rk-` rule guards events, memory, lessons and skill content; `redact-lock.test.ts` fails the build when any package redacts another way — v1.3 Phase 18
 - ✓ Lane B collectors: snapshot-reconciled herdr events, redacted Muse briefs, installed-bundle Muse hooks and hardened Cursor stop transcripts; actual isolated named-herdr/installed-Muse proof 41/41 with zero refusals — v1.3 Phase 19, branch verification; production cutover remains operator-owned.
+- ✓ Skill proposals: three authenticated/audited doors, caller-body1MB boundary without attribution budget loss, safe dedupe/recovery/dry-run and user-approved fixed Git isolation; actual real-Git/recording-gh proof47/47 — v1.3 Phase21 branch verification; first real library PR/owner merge belongs Phase22.
+- ✓ Ledger primitives/ingest order: RFC6962 roots, server-stamped membership, fresh cross-hour retry and bounded redacted failure diagnostics; actual v0.14.4 scratch47/47 including19 fake-chain checks — v1.3 Phase27; production v1.1.4 and devnet follow-ons remain operator-owned.
+- ✓ Desktop: three measured real fresh-as-ported pixel repeats and separate corrected MCP20/20,9120 solid480×19 pixels/baseline0, hash-only events/images, fail-closed locality/audit/token gates and authoritative unchanged absence — v1.3 Phase30 branch verification; historical18/20 remains failed.
+- ✓ Latest shared branch gate:2718pass/58skip/0fail across96files, types0, credential/vocabulary locks108pass/0fail, bash syntax0/shellcheck0. Phase20 has names-only metadata0/PASS and a recovered159-test client, not installed-client/rotation/soak/production-UAT acceptance.
 
 ## Key Decisions
 
@@ -185,4 +189,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-10 after Phase 19*
+*Last updated: 2026-10-11 after Phases21,27,30; milestone remains active7/18 with operator checkpoints*

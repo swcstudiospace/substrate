@@ -118,9 +118,52 @@ None blocking. All clone-local suites green on first verification pass after imp
 - `git status -sb` in the clone → `## gsd/v1.3-p20-identity-uat` with no upstream, no remote write
 - Agent-substrate worktree files never written by this slice (read-only refs to `mcp.ts` and `token.ts` only)
 
+## Recovery evidence recorded 2026-10-11
+
+The original 2026-10-09 implementation, commits and verification counts
+above are historical and unchanged. The parent restored the cross-repo
+worktree `/root/src/worktrees/claude-ultrathink-p20` on local branch
+`gsd/v1.3-p20-identity-uat` at **`9006476`** and supplied
+`local://v13-phase20-recovered-client-evidence.json`:
+
+- Frozen dependency installation exited **0**.
+- The four targeted files (`src/substrate/register.test.ts`,
+  `src/substrate/brief.test.ts`, `src/mcp/cli.test.ts`,
+  `scripts/mcp-register.test.ts`) reported **159 pass / 0 fail**, exit 0,
+  with the production token directory masked; typecheck exited **0**.
+- **Actual scratch MCP**, not mocked fetch: registration ran twice,
+  both exit 0, then graph `ut-p20-295d4559` read back with surface
+  `claude-code`, node `n1` and step `n1/1`, with no duplicate nodes/steps.
+- A wrong bearer returned **HTTP 401** while the fail-open register CLI
+  still exited 0. Disabled integration reported skipped. Acceptance must
+  therefore require the actual `substrate: registered <graphId>` line
+  **and** graph readback, not the CLI exit alone.
+
+This recovery is source/scratch evidence only. Remote push, draft PR,
+reviewed main landing, stable checkout update and installed-plugin refresh
+are **not done**. No host config, hook installation, production token
+provisioning/rotation or production UAT was performed by this recovery.
+The summary's historical `requirements-completed: [UAT-03]` records the
+20-05 implementation slice, not 20-06 production acceptance or Phase 20
+completion.
+
+The new operator packet is in
+[production identity](../../../docs/runbooks/production-identity.md).
+The three human actions in
+[20-06](20-06-SUMMARY.md) remain **operator-blocked, completed 0/3**.
+An unsafe pre-existing CLI test previously exposed the actual Cursor
+substrate credential; fixture isolation is not production revocation.
+The operator must rotate/revoke it in an approved two-restart list-form
+window. An earlier decision declining rotation does not cover this new
+incident. No credential value is reproduced here.
+
+This documentation slice read source/evidence only and ran no tests,
+scripts, formatters, network calls or runtime checks; verification above
+is the parent's observed recovery evidence, not a new child run.
+
 ## User Setup Required
 
-- Operator approval to push the clone branch, open the upstream PR, merge, and refresh the installed plugin (plan 20-06 Task 2, human-gated — NOT done here)
+- Operator approval for cross-repo branch delivery and a **draft** upstream PR; Desk Quality / Programming Lead Greptile gate and human-approved main landing precede stable checkout/plugin refresh (20-06 Task 2 — NOT done). FAILED, SKIPPED or unavailable review is a blocker, never merge-ready. No agent merge, auto-merge or main push is authorized.
 
 ## Next Phase Readiness
 

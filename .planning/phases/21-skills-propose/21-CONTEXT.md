@@ -125,7 +125,8 @@ Execution starts from a base that holds all three.
 - **D21-14: State and ledger compatibility.** The default state dir and the ledger format (`proposals.jsonl` lines `{ts, content_sha256, name, surface, branch, state, pr_url?, pr_number?}`) stay September's, so the host's existing ledger keeps deduplicating content proposed in September.
   - A missing `mirror.git` is a `ProposeFailed` that names the missing mirror and the 04-02 bootstrap command. The server does not create it.
 - **D21-15: The child environment for `git` and `gh` is an allowlist, not `process.env`.**
-  - The allowlist: `PATH`, `HOME`, `GIT_TERMINAL_PROMPT=0` and `GH_PROMPT_DISABLED=1`.
+  - The four base keys: `PATH`, `HOME`, `GIT_TERMINAL_PROMPT=0` and `GH_PROMPT_DISABLED=1`.
+  - Plus seven controlled fixed Git values (user-selected "Keep current Git isolation", 2026-10-11): `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_SYSTEM=/dev/null` so a hostile host gitconfig (including `url.*.insteadOf`) stays unread, and a two-entry `GIT_CONFIG_COUNT` selecting the `gh` credential helper for GitHub HTTPS. These are fixed hardening values, never forwarded parent secrets.
   - `HOME` is the configured or inherited home, `/root` when unset, so `gh`'s stored credential answers under systemd.
   - Store URLs, surface tokens and the handoff key never reach a child process.
   - `execFile` with an argv, never a shell, and a 120 s timeout.

@@ -15,11 +15,11 @@ requires:
   - phase: 30-desktop-run
     provides: rehearsal --desktop-surfaces flag (plan 30-05)
   - phase: 30-desktop-run
-    provides: N1 spike record with NOT-RUN ladder (plan 30-06)
+    provides: measured N1 spike with three fresh-as-ported real pixel repeats (plan 30-06)
 provides:
   - scripts/desktop-smoke.ts with the D30-19 check battery (bun run smoke:desktop)
-  - scripts/desktop-smoke.test.ts with 20 green helper tests
-  - 30-PROOF.md with hermetic numbers and NOT-RUN live fields
+  - scripts/desktop-smoke.test.ts with behavior and fail-closed snapshot cases exercised by the final parent full suite
+  - 30-PROOF.md with corrected real-runtime 20/20 plus preserved historical 18/20 failure
   - README Desktop section, docs/runbooks/desktop.md, desktop_run audit mark
 affects: [30-proof-live-run, desktop_run production use]
 
@@ -47,7 +47,7 @@ key-files:
 
 key-decisions:
   - "Raw JSON-RPC over fetch instead of the SDK client: bare workspace deps do not resolve from scripts/, and a root dep would churn the lockfile for an already-pinned package"
-  - "Live chain NOT-RUN: the smoke drives the shared display, so per the assignment contract it is implemented as code and flagged, never executed or faked"
+  - "Initial 2026-10-09 execution was code-only; parent later executed the approved isolated real desktop chain on 2026-10-11 and observed 20/20 without a model turn"
   - "Audit silence proven on typed records via the project's own isAuditRecord, not string matching alone"
 
 patterns-established:
@@ -67,13 +67,13 @@ coverage:
         status: pass
     human_judgment: false
   - id: D2
-    description: "Live proof chain implemented as code with the D30-19 battery; live verdict fields recorded NOT-RUN, hermetic refusal paths observed exit 2 (DESK-05)"
+    description: "Actual isolated MCP pixel, image/file/event hash, audit, token refusal and unchanged-desktop proof passed 20/20"
     requirement: "DESK-05"
     verification:
       - kind: manual
         ref: ".planning/phases/30-desktop-run/30-PROOF.md"
-        status: blocked
-    human_judgment: true
+        status: pass
+    human_judgment: false
   - id: D3
     description: "README section plus desktop runbook plus audit mark all name desktop_run; runbook covers allowlist lifecycle auth retention hashing no-secrets and rollback; no kind naming (DESK-05)"
     requirement: "DESK-05"
@@ -85,16 +85,18 @@ coverage:
 
 # Metrics
 duration: 3h00min
-completed: 2026-10-09
+completed: 2026-10-11
 status: complete
 ---
 
 # Phase 30 Plan 07: Smoke, proof, docs Summary
 
-**Scripted headless proof client with the full D30-19 battery, 20 green
-helper tests, docs landed, full suite 1735 pass / 0 fail with tsc and
-phase-close green — the live chain is implemented as code and recorded
-NOT-RUN per the live-gate contract.**
+**Corrected real-runtime proof passed 20/20 on 2026-10-11.** Parent observed
+9120 solid480×19 nonce pixels with baseline0, matching block/file/event hashes,
+five hash-only action events, both401 checks, fail-closed audit and authoritative
+unrelated-desktop absence before/after. The first18/20 remains a separate FAIL.
+Final parent source union:2719pass/58skip/0fail, types0, locks108pass/0fail;
+no separate child run is claimed. Phase20 operator checkpoints remain pending.
 
 ## Performance
 
@@ -117,11 +119,10 @@ NOT-RUN per the live-gate contract.**
   (count/rect/solid exact-RGB check). `scripts/desktop-smoke.test.ts`
   proves all of it plus the guard and RPC-envelope parsing: 20 pass.
   `package.json` gains `smoke:desktop`.
-- Task 2: `30-PROOF.md` records the observed hermetic numbers (helper
-  suite 20/0, full suite 1735/57/0, tsc clean, phase-close exit 0, three
-  exit-2 refusal probes with zero requests sent) and every live verdict
-  field as `NOT-RUN` with the exact chain procedure and per-check reading
-  list. No gap claimed: no live run was attempted (D30-18).
+- Task 2 historical initial record: `30-PROOF.md` originally held hermetic
+  numbers (20/0,1735/57/0, types clean and exit-2 guards) with no live verdict.
+  Current corrected proof is recorded separately:20/20, parent-owned real
+  execution and complete named-twin teardown, without overwriting that history.
 - Task 3: README `## Desktop` prose section (tool, allowlist, hash-only
   events, runbook link); `docs/runbooks/desktop.md` in the parity-runbook
   shape (header table, proof section, fenced chain with exit semantics,
@@ -201,18 +202,35 @@ Each task was committed atomically:
   literals (bearers read from files, short fixture-free code), no second
   redactor or credential regex, no new `EVENT_KINDS`/`SURFACES` entries,
   no secret material in any new file (verified by scan).
-- Live-gated steps implemented as code, flagged NOT-RUN, never executed or
-  faked; no production service, store, or container touched (only hermetic
-  reads: file scan, unit tests, type-check, phase-close).
+- Parent later exercised the corrected real chain separately:20/20 with
+  full owned teardown. The initial18/20 remains FAIL. Shared final source
+  gates are2719pass/58skip/0fail, types0 and locks108pass/0fail; child
+  tasks ran no checks. No production service/store, model or main merge.
+
+## Live follow-up — initial failure and separate corrected pass
+
+- The §2 chain ran once (twin `p21-a6a927a5`, rev `4df30a0`): exit 1,
+  18/20. Both failures are the `recruitment-desktop` inspect checks — the
+  unrelated desktop is absent on this host and the old null-on-error
+  inspect conflated absence with probe failure. Pixel, event, audit,
+  refusal, 401 and status checks all passed (see `30-PROOF.md` §3 for the
+  observed numbers). The FAIL stands; nothing here rewords it.
+- The fail-closed snapshot now distinguishes present/absent/error using
+  authoritative inventory plus conditional inspect. Pure consumer-state
+  tests passed in the final suite; mock-echo/wiring cases and their unused
+  exported seam were removed rather than repinned. No capture-path change;
+  no threshold or check-count change (the battery remains20).
+- Corrected parent twin `v13-proof-230c1bd0` separately passed20/20:
+  9120 solid480×19 pixels/baseline0, matching image/file/event hashes,
+  five hash-only action rows, unlisted5→5, both401s, two fail-closed
+  audit records and authoritative unrelated-desktop absence before/after.
+  Up/down exited0 and removed two owned stores; every own terminal closed.
 
 ## User Setup Required
 
-- **Live run (operator):** an environment with the labelled
-  `substrate-desktop` container up on `127.0.0.1:6081`, then the chain in
-  `30-PROOF.md` §2 (`rehearsal up --name p30 --surfaces omp,cursor
-  --desktop-surfaces omp`, `smoke:desktop --name p30`, `check:phase-close`,
-  `rehearsal down --name p30`) and fill the NOT-RUN verdict fields with the
-  observed numbers — or a stated gap per D30-18 if the band is stale.
+- No first-run or corrected-runtime verdict is pending. Production
+  identity/allowlist/client installation and their approved windows remain
+  operator-owned under Phase20; local proof is not production approval.
 
 ## Next Phase Readiness
 
@@ -224,4 +242,4 @@ Each task was committed atomically:
 
 ---
 *Phase: 30-desktop-run*
-*Completed: 2026-10-09*
+*Initial implementation: 2026-10-09; corrected real proof: 2026-10-11*

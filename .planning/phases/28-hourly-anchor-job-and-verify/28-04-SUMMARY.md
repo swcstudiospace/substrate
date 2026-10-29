@@ -28,13 +28,13 @@ key-files:
   created: []
 
 key-decisions:
-  - "Tamper mechanism is post-anchor append, not dedup-overwrite or duplicate-row: the overwrite needs a non-append-mode scratch table (contradicts the smoke fail-closed gate) and the duplicate breaks the chain too — only the append satisfies both chain-verifies AND root-comparison-proven"
+  - "Tamper mechanism for the recorded 47/47 run is post-anchor append, not dedup-overwrite or duplicate-row: the overwrite needs a non-append-mode scratch table (contradicts the smoke fail-closed gate) and the duplicate breaks the chain too — only the append satisfies both chain-verifies AND root-comparison-proven. Follow-up (pending parent run): supplemental Beat 6 adds the exact existing-leaf alteration in a separate `*_p28alter` namespace via a proof-owned loopback proxy plus the typed dedup fallback; the normal tables stay append-only and the append beat keeps its history"
   - "Anchor ledger events use a recording fake emit: a real emit would land in the anchored hour itself on the real scratch clock and move the root under proof"
   - "Crash is injected exactly (first insertAnchor throws after a real stub-CLI send): memo on chain, no row, next run adopts with adopted:true and no new send"
   - "Scratch name p28anchor --port 17441: port 17410 was held by another rehearsal run; name is a label only"
   - "Live proof DEFERRED in full: L1-L10 recorded below with per-step gates, nothing executed, no devnet packet sent"
 
-requirements-completed: [ANCHOR-06]
+requirements-completed: []
 
 coverage:
   - id: D28-20
@@ -64,12 +64,13 @@ coverage:
 
 duration: ~3h
 completed: 2026-10-09
-status: complete
+status: blocked
+live: 0/10 approved — L1-L10 all DEFERRED (historical, 2026-10-09, not a new decision); no phase complete
 ---
 
 # Phase 28 Plan 04: Fake-chain proof and live runbook Summary
 
-**ANCHOR-06 is proved isolated on a fake chain (47/47) and specced live behind operator gates that were not opened.**
+**Slice record: ANCHOR-06 proved isolated on a fake chain (historical 47/47) and specced live behind operator gates that were not opened. Root ANCHOR-03–06 stay Pending; source/fixture proof is not operator goal completion.**
 
 ## Accomplishments
 
@@ -77,6 +78,7 @@ status: complete
 - Recorded isolated run 47/47 on scratch `greptime/greptimedb:v0.14.4`: send-then-crash (exit 1, 1 send, no row), adopt (row with found tx_sig, `adopted: true`, still 1 send), silent re-run, untouched-verify all `anchored`, tamper-append (chain ok, hour `mismatch` naming the hour).
 - The run caught and fixed a real bug: the open hour failed verify via digest throw; now `pending` (28-02 fixup + regression test).
 - Verification-status entry in `docs/greptime-ledger.md`; `store-lock.test.ts` green (smoke file is the named exemption; no new exemption needed).
+- Follow-up proof work implemented but NOT yet run (pending parent execution, no result claimed): `packages/mcp-server/src/anchor-run.test.ts` pins the entry process boundary (missing config exits 2 with usage, no CLI/store/RPC effect), and section 8 of `scripts/greptime-smoke.ts` gains a supplemental Beat 6 that alters an already-anchored existing event (same id/timestamp, recomputed hash) in a separate `*_p28alter` table namespace — proof-owned loopback proxy, typed dedup fallback, retained anchor, real `substrate verify` child exiting 1 naming the hour. The append beat keeps its history; the new scenario is pending until the parent records its run.
 
 ## Task Commits
 
@@ -86,7 +88,8 @@ status: complete
 
 - Isolated: `bun run rehearsal up --name p28anchor --port 17441` + sourced `stores.env` + `bun run smoke:greptime` (47/47, zero FAIL) + `bun run rehearsal down --name p28anchor`. Full output archived in the session transcript.
 - `bun test packages/mcp-server/src/store-lock.test.ts` green.
-- Live: L1–L10 below, all DEFERRED; no live action taken.
+- Live: L1–L10 below, all DEFERRED (historical); no live action taken.
+- Pending parent execution (no pass claimed): `bun test packages/mcp-server/src/anchor-run.test.ts` and the extended `bun run smoke:greptime` (section 8 Beat 6). Counts from the 2026-10-09 run above stay historical; the new scenario's result is recorded only when the parent runs it.
 
 ## Deviations from Plan
 
@@ -96,7 +99,7 @@ status: complete
 
 ## LIVE-GATED live proof runbook L1–L10 (operator-approved window, funded key)
 
-**Status: all steps DEFERRED — nothing below was executed. No devnet packet left this session, no production row was written, no host or systemd step was taken. Each step needs separate operator approval in an operator-approved window; the executor stops at each gate.**
+**Status: all steps DEFERRED — nothing below was executed. No devnet packet left this session, no production row was written, no host or systemd step was taken. Each step needs its own separate operator approval in an operator-approved window — including the read-only steps L1, L2, L9 and L10; read-only is not an exemption. The executor stops at each gate. These DEFERRED outcomes are historical (2026-10-09), not a new deferral decision.**
 
 - **L1 — env and key identity (read-only).** `grep -c '^SOLANA_RPC_URL='`, `grep -c '^SOLANA_ANCHOR_KEYPAIR='`, `grep -c '^SOLANA_ANCHOR_PUBKEY=' /etc/substrate/substrate.env` (one exact name per check — `'^SOLANA_*='` only repeats the underscore — names only), `stat` owner/mode of the keypair path (never contents), `solana --version`, `solana-keygen pubkey <path>` equality with `SOLANA_ANCHOR_PUBKEY`. Gate: all names present, key root-owned mode 0600, versions sane. Outcome: **DEFERRED**.
 - **L2 — devnet balance (read-only).** `getBalance` on the key. Gate: decide funding need. Outcome: **DEFERRED**.
@@ -106,8 +109,8 @@ status: complete
 - **L6 — install units/drop-in (write/systemd).** Install `substrate-anchor.service`/`.timer` + drop-in, `daemon-reload`, `enable --now substrate-anchor.timer`; read-only doctor after. Gate: systemd approval. Outcome: **DEFERRED**.
 - **L7 — fresh proof-graph events (write/production ledger).** Emit a proof graph's events into production. Gate: production-write approval. Outcome: **DEFERRED**.
 - **L8 — first real anchor (write/devnet + row + event).** Timer tick (recorded `systemctl start` fallback). Settles the 0-lamport question and the memo program id (D27-06). Gate: send approval. Outcome: **DEFERRED** — 0-lamport and program id stay **[UNVERIFIED]**.
-- **L9 — read-back and verify (read-only).** Memo read back by `tx_sig` equals recomputed root+count, signed by the pubkey; `substrate verify <proof graph>` exits 0 every hour anchored. Gate: none beyond L8 (reads only). Outcome: **DEFERRED**.
-- **L10 — re-run adopts (read-only on devnet).** Second `systemctl start` sends nothing (signature list and balance unchanged); `anchor-run.ts --period <H>` takes the adopt path (row unchanged, one `anchor.written` `adopted: true`). Reproducing crash-adoption live would mean deleting a production row, which the client refuses — proven on the fake chain only. Outcome: **DEFERRED**.
+- **L9 — read-back and verify (read-only).** Memo read back by `tx_sig` equals recomputed root+count, signed by the pubkey; `substrate verify <proof graph>` exits 0 every hour anchored. Gate: separate approval required — read-only is not an exemption. Outcome: **DEFERRED** (historical).
+- **L10 — re-run adopts (read-only on devnet).** Second `systemctl start` sends nothing (signature list and balance unchanged); `anchor-run.ts --period <H>` takes the adopt path (row unchanged, one `anchor.written` `adopted: true`). Reproducing crash-adoption live would mean deleting a production row, which the client refuses — proven on the fake chain only. Gate: separate approval required — read-only is not an exemption. Outcome: **DEFERRED** (historical).
 
 Memo program id observation: still-open (settles at L8). No secret value recorded anywhere: names, modes, balances, tx_sigs only when the window runs.
 

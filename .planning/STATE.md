@@ -4,18 +4,18 @@ milestone: v1.3
 milestone_name: Build plan completion
 current_phase: 20
 current_phase_name: Production identity and Phase 0 UAT
-status: blocked
-stopped_at: Phase 20-06 awaits operator identity, client installation and production UAT evidence; independent local verification may continue
-last_updated: "2026-10-10T15:30:23.872Z"
-last_activity: 2026-10-10
-last_activity_desc: Phase 19 complete, transitioned to Phase 20
-state_head: 6f85adb34b042cffc0cea15babea0dc64603c80b
+status: Blocked on Phase 20-06 operator checkpoints and Phase 28 live gates
+stopped_at: Seven phases sealed; operator identity/client/UAT and live-anchor evidence remain pending
+last_updated: "2026-10-11T04:13:19.227Z"
+last_activity: 2026-10-11
+last_activity_desc: Sealed Phases 21, 27 and 30 after complete real isolated proofs; retained operator-only checkpoints
+state_head: 76a4b2c3834cb363e6a620451b47fc0f5ab71811
 progress:
   total_phases: 18
-  completed_phases: 4
+  completed_phases: 7
   total_plans: 50
-  completed_plans: 48
-  percent: 22
+  completed_plans: 49
+  percent: 39
 ---
 
 # State
@@ -155,9 +155,9 @@ which is why Greptime worked immediately and Postgres did not.
 ## Current Position
 
 Phase: 20 — Production identity and Phase 0 UAT
-Plan: 5 of 6 implementation summaries present; 20-06 human actions pending
-Status: Blocked on operator-only live identity, client readiness and UAT checkpoints
-Last activity: 2026-10-10 — Phase 19 complete, transitioned to Phase 20
+Plan: 20-01 through 20-05 implemented; 20-06 human actions 0/3
+Status: Blocked on Phase 20-06 operator checkpoints and Phase 28 live gates
+Last activity: 2026-10-11 — Seven of eighteen phases sealed; no milestone closure or main merge
 
 ## Deferred Items
 
@@ -174,8 +174,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-10
-Stopped at: Phase 19 canonically verified; Phase 20-06 operator checkpoints pending
+Last session: 2026-10-11
+Stopped at: Seven phases sealed; operator identity/client/UAT and live-anchor evidence remain pending
 Resume file: .planning/phases/20-production-identity-and-phase-0-uat/20-06-PLAN.md
 
 ## Performance Metrics
@@ -199,7 +199,7 @@ Resume file: .planning/phases/20-production-identity-and-phase-0-uat/20-06-PLAN.
 
 ## Project Reference
 
-See: `.planning/PROJECT.md` (updated 2026-10-10 after Phase 19).
+See: `.planning/PROJECT.md`; current source and evidence checkpoint recorded after Phases 21, 27 and 30.
 
 **Core value:** Every agent on the host shares one brief, one event log, one governed memory plane, one skills library and one Graph ID.
 **Current focus:** Phase 20 identity/client readiness and production UAT; no live action is self-approved.
@@ -210,6 +210,8 @@ See: `.planning/PROJECT.md` (updated 2026-10-10 after Phase 19).
 | --- | --- | --- |
 | 20 | `20-06` three `checkpoint:human-action` tasks | Operator completes client-first readiness/identity, approved client and plugin installation, soak and actual production UAT with values-free evidence. |
 | 20 | Cursor credential containment | Operator rotates/revokes the Cursor surface credential exposed by the pre-existing unsafe resolver test; no token value is recorded here. |
+| 28 | `28-04` live L1–L10 | Separate approved funded-devnet/deploy/timer/production-write window and actual memo readback/adoption evidence; fake-chain47/47 is not a live seal. |
+| Delivery | Protected-main/remote review gate | Desk Quality through Programming Lead and authorized human landing; this cloud session never merges, enables auto-merge, force-pushes or deletes branches. PR34 remains4/5 and PR41 remains1/5 on current exact heads. |
 
 ### Recovery and current evidence
 
@@ -218,3 +220,10 @@ See: `.planning/PROJECT.md` (updated 2026-10-10 after Phase 19).
 - The documented Phase 20-05 commits `978ce72` and `9006476` exist in the claude-ultrathink object database. Its missing worktree was restored at `9006476` to `/root/src/worktrees/claude-ultrathink-p20` on `gsd/v1.3-p20-identity-uat`; no stable checkout, installed plugin or live client configuration was changed.
 - Native GSD dispatch does not require the separate AgentSwarm runner's signing keys. The discarded signing-key route is not a milestone blocker.
 - User checkout changes observed concurrently on `phase/22-skills-sync-bridge-miners` are not owned by this run and remain untouched.
+- Phases 21, 27 and 30 passed fresh native goal verification and canonical `phase.complete`; total7/18 (39%). Their named requirements and every existing plan/task were reconciled without replaying implemented work.
+- Latest source gate:2718pass/58skip/0fail across96files, types0, unchanged credential/vocabulary locks108pass/0fail, bash syntax0/shellcheck0. The preceding2719pass run was before deletion of one never-passed-to-SUT framing tautology, not an inferred count.
+- Separate real isolated proofs: basic harness4/4, skills3doors47/47 with real Git/recording gh, ledger47/47 (28 ingest checks plus19 fake-chain checks), desktop20/20 and vocabulary29/29. Up/down0, two owned stores removed, every owned terminal closed; no production/model/devnet/main-merge action.
+- Desktop N1: three measured fresh-as-ported repeats, each9120 solid480×19 pixels with baseline0; current20/20 is separate from historical18/20 FAIL. Failed Docker locality now refuses before input/lifecycle effects; authoritative unrelated-desktop absence never substitutes for a failed probe.
+- Phase 20-05 recovered client actually passed159tests/typecheck0 and repeated scratch MCP registration plus graph readback. Names-only identity metadata check passed0 with zero missing/stranded/error entries; bearer equality, installed plugin, rotation, soak and production UAT remain unproved.
+- Native security now has zero high blocking threats for21/27/30 at the unchanged high threshold. Six below-threshold proposed acceptances remain unapproved; no acceptance or production approval was fabricated.
+- Source corrections committed at `76a4b2c`; user checkout/installed clients remain untouched. Existing exact-head remote review scores: PR34=4/5, PR40=5/5, PR41=1/5, PR42=5/5; score alone does not establish open-thread/CI readiness. No review was triggered or PR merged.

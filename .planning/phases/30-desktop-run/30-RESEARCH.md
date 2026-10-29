@@ -551,7 +551,7 @@ const reply = await client.callTool({ name: "desktop_run", arguments: run }, und
 
 1. **C6 key rule** — RESOLVED: CONTEXT D30-11 adopts the tightened predicate (implemented in plan 30-01; listed for the operator as CONTEXT open item 5; recorded in the plan 30-07 runbook).
 2. **First-event-before-ledger (C8)** — RESOLVED: CONTEXT D30-04a refuses before any action when no ledger is configured (plan 30-04).
-3. **Response size** — RESOLVED as a documented residual: 50 screenshots ≈ 35 MB in one MCP reply; no cap in the locked vocabulary; recorded in the plan 30-07 runbook (T-30-09).
+3. **Response size** — RESOLVED as a documented residual: 50 screenshots ≈ 35 MB in one MCP reply; no cap in the locked vocabulary; recorded in the plan 30-07 runbook (T-30-30).
 4. **September evidence PNGs** — RESOLVED as an operator item: the first production run after merge prunes runs older than 7 days from `/var/lib/substrate/desktop`, which includes September's evidence; the harness proof uses its own run directory and never prunes them. The runbook (plan 30-07) tells the operator to copy them aside first if wanted.
 
 ## Environment Availability

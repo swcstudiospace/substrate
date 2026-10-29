@@ -40,6 +40,15 @@
  * signatures into `anchors`, which the real job skips but verification can
  * never find on devnet, so it runs only against a scratch (loopback) ledger
  * and is skipped elsewhere — re-run on the rehearsal stores for that half.
+ * Its first tamper beat appends one event after anchoring (membership change
+ * with the chain intact); its second beat alters an already-anchored existing
+ * event in place — same id and timestamp, recomputed hash — inside a separate
+ * `*_p28alter` table namespace on the same scratch server, where a
+ * proof-owned loopback proxy serves the typed `migrate()` an
+ * `agent_events` table without `append_mode` so the real store's
+ * last-write-wins overwrite applies. The normal ledger tables stay
+ * append-only, and a real `substrate verify` child process exits 1 naming
+ * the altered hour.
  *
  * Prove it on scratch stores, never on production: the rehearsal harness starts a
  * throwaway Greptime and Postgres, and `stores.env` carries their credentials.
@@ -49,17 +58,22 @@
  *   bun run smoke:greptime
  *   bun run rehearsal down --name p27
  */
+import type { Server as BunServer } from "bun";
+import type { Server as NodeHttpServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HOUR_MS, createRpc, execFileRunner, hourEnd, hourStart } from "../packages/ledger/src/index.ts";
 import { DEVNET_GENESIS_HASH, runAnchorJob } from "../packages/mcp-server/src/anchor.ts";
 import { loadConfig } from "../packages/mcp-server/src/config.ts";
-import { AppendOnlyViolation, INGEST_LAG_MS, quote } from "../packages/mcp-server/src/greptime.ts";
+import { AppendOnlyViolation, GreptimeClient, INGEST_LAG_MS, chainTip, quote } from "../packages/mcp-server/src/greptime.ts";
+import { eventHash } from "../packages/mcp-server/src/event.ts";
+import { createObservability, type Observability } from "../packages/mcp-server/src/observe.ts";
+import { createHttpServer } from "../packages/mcp-server/src/server.ts";
 import { Substrate } from "../packages/mcp-server/src/service.ts";
 import { REDACTED, redact, redactKnown } from "../packages/mcp-server/src/redact.ts";
-import type { EventInput } from "../packages/mcp-server/src/types.ts";
+import type { EventInput, SubstrateEvent } from "../packages/mcp-server/src/types.ts";
 import { refuseLedgerUrl } from "./rehearsal.ts";
 
 /** A token-shaped string, assembled at runtime so no token pattern sits in git. */
@@ -584,6 +598,310 @@ check(
 	tampered.hours[0]?.status,
 );
 check(sendCount() === 1, "the tamper caused no send", `${sendCount()} sends`);
+// Beat 6 — the exact G5 alteration: change an already-anchored EXISTING
+// event, not the membership. Beats 1–5 above keep their history; this
+// supplemental scenario runs in a separate `*_p28alter` table namespace on
+// the same scratch server so the normal ledger tables stay append-only. A
+// proof-owned loopback proxy renames the three tables and serves the typed
+// `migrate()` an `agent_events` table WITHOUT `append_mode`, so the real
+// v0.14 store applies its documented last-write-wins overwrite — accepted
+// here through the existing `SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER` typed
+// fallback, exactly the approved 28-04 plan's preferred dedup fixture. A
+// second fake chain keeps this scenario's memos isolated from beats 1–5
+// (a shared listing would alarm on the other hour's root). The anchored
+// hour is two hours back, so it is genuinely closed at verify time; the
+// alteration keeps the event's id and timestamp and recomputes its hash
+// with the existing `eventHash` helper, so the per-session chain still
+// verifies while the hour root moves — and a real `substrate verify`
+// child process exits 1 naming the hour. Guarded like section 8:
+// loopback ledger only, no production key names, no devnet packet.
+{
+const forwardRefusal = refuseLedgerUrl(config.greptime.url);
+check(forwardRefusal === null, "the alter namespace forwards only to a loopback ledger", forwardRefusal ?? undefined);
+if (forwardRefusal === null && config.greptime !== null) {
+const scratchLedger = config.greptime;
+const P = H - 2 * HOUR_MS;
+const P_ISO = new Date(P).toISOString();
+const xState = mkdtempSync(join(tmpdir(), "p28-alter-"));
+let xRpc: BunServer | null = null;
+let xProxy: BunServer | null = null;
+let xHttp: NodeHttpServer | null = null;
+let xObs: Observability | null = null;
+try {
+// Own fake chain: stub CLI plus loopback RPC serving the same four calls.
+writeFileSync(join(xState, "counter"), "0\n");
+writeFileSync(join(xState, "chain.txt"), "");
+mkdirSync(join(xState, "bin"));
+const xStubSolana =
+	"#!/usr/bin/env bash\nset -u\nstate=" + JSON.stringify(xState) + "\n" +
+	`if [[ "\${1:-}" == "pubkey" ]]; then printf '%s\\n' "${FAKE_PUBKEY}"; exit 0; fi\n` +
+	`memo=""; prev=""\nfor arg in "$@"; do if [[ "$prev" == "--with-memo" ]]; then memo="$arg"; fi; prev="$arg"; done\n` +
+	`n=$(cat "$state/counter"); n=$((n + 1)); printf '%s\\n' "$n" > "$state/counter"\n` +
+	`alphabet="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"\n` +
+	`sig="$(printf '5%.0s' {1..86})\${alphabet:$((n % 58)):1}\${alphabet:$(((n / 58) % 58)):1}"\n` +
+	`printf '%s %s\\n' "$sig" "$memo" >> "$state/chain.txt"\n` +
+	`printf '{"signature": "%s"}\\n' "$sig"\n`;
+writeFileSync(join(xState, "bin", "solana"), xStubSolana);
+writeFileSync(join(xState, "bin", "solana-keygen"), `#!/usr/bin/env bash\nprintf '%s\\n' "${FAKE_PUBKEY}"\n`);
+chmodSync(join(xState, "bin", "solana"), 0o700);
+chmodSync(join(xState, "bin", "solana-keygen"), 0o700);
+const xSendCount = () => Number(readFileSync(join(xState, "counter"), "utf8").trim());
+xRpc = Bun.serve({
+	port: 0,
+	hostname: "127.0.0.1",
+	fetch: async (req) => {
+		const body = (await req.json()) as { method: string; params: unknown[]; id: unknown };
+		const entries = new Map(
+			readFileSync(join(xState, "chain.txt"), "utf8")
+				.split("\n")
+				.filter((line) => line !== "")
+				.map((line) => [line.split(" ")[0] ?? "", line.split(" ").slice(1).join(" ")] as const),
+		);
+		let result: unknown = null;
+		if (body.method === "getGenesisHash") result = DEVNET_GENESIS_HASH;
+		else if (body.method === "getBalance") result = { value: 5_000_000 };
+		else if (body.method === "getSignaturesForAddress") {
+			result = [...entries].reverse().map(([signature, memo]) => ({ signature, memo, err: null, slot: 1001 }));
+		} else if (body.method === "getTransaction") {
+			const memo = entries.get(String(body.params[0]));
+			result =
+				memo === undefined
+					? null
+					: {
+							slot: 1001,
+							blockTime: null,
+							meta: { err: null, fee: 5000 },
+							transaction: {
+								message: {
+									accountKeys: [{ pubkey: FAKE_PUBKEY, signer: true }],
+									instructions: [{ programId: FAKE_MEMO_PROGRAM, parsed: memo }],
+								},
+							},
+						};
+		}
+		return Response.json({ jsonrpc: "2.0", id: body.id, result });
+	},
+});
+const xRpcUrl = `http://127.0.0.1:${xRpc.port}`;
+// The namespace proxy: same scratch server, separate tables. Only the
+// events CREATE loses `append_mode`; ingest keeps it, so membership can
+// never dedup while the altered leaf really overwrites.
+const toAlterNamespace = (statement: string): string => {
+	let out = statement
+		.replaceAll('"agent_events"', '"agent_events_p28alter"')
+		.replaceAll('"event_ingest"', '"event_ingest_p28alter"')
+		.replaceAll('"anchors"', '"anchors_p28alter"');
+	if (/^\s*create\b/i.test(out) && out.includes('"agent_events_p28alter"')) {
+		out = out.replace(/\s*WITH\s*\(\s*'append_mode'\s*=\s*'true'\s*\)\s*;?\s*$/i, "");
+	}
+	return out;
+};
+xProxy = Bun.serve({
+	port: 0,
+	hostname: "127.0.0.1",
+	fetch: async (req) => {
+		const incoming = new URL(req.url, "http://127.0.0.1");
+		if (!incoming.pathname.endsWith("/v1/sql")) return new Response("no such route", { status: 404 });
+		const params = new URLSearchParams(await req.text());
+		const sql = params.get("sql");
+		if (sql === null) return new Response("missing sql", { status: 400 });
+		params.set("sql", toAlterNamespace(sql));
+		const headers = new Headers(req.headers);
+		headers.delete("content-length");
+		headers.delete("host");
+		const upstream = await fetch(`${scratchLedger.url}/v1/sql${incoming.search}`, {
+			method: "POST",
+			headers,
+			body: params,
+			signal: AbortSignal.timeout(15_000),
+		});
+		return new Response(await upstream.arrayBuffer(), {
+			status: upstream.status,
+			headers: { "content-type": "application/json" },
+		});
+	},
+});
+const xProxyUrl = `http://127.0.0.1:${xProxy.port}`;
+// Ingest stamps land mid-hour P (closed at verify time); the events table
+// is the dedup one, so the typed client takes its documented fallback.
+const tamperGreptime = new GreptimeClient({ ...scratchLedger, url: xProxyUrl }, undefined, () => P + 30 * 60_000);
+await tamperGreptime.migrate();
+const tamperSolana = {
+	rpcUrl: xRpcUrl,
+	keypairPath: join(xState, "fake-keypair.json"),
+	pubkey: FAKE_PUBKEY,
+	cli: join(xState, "bin", "solana"),
+};
+const tamperSubstrate = new Substrate(
+	{ ...config, allowDeduplicatingLedger: true, solana: tamperSolana },
+	{ index: null, greptime: tamperGreptime },
+);
+const xGraph = `${graphId}-alter`;
+const xSession = `${sessionId}-alter`;
+// One kind per event: on the dedup table the primary key is
+// (surface, repo, graph_id, kind), so distinct kinds keep the three
+// fixture events in distinct series whatever millisecond they share.
+const xEmitted = [];
+const xKinds = ["note", "claim", "warning"] as const;
+for (const [i, kind] of xKinds.entries()) {
+	xEmitted.push(
+		await tamperSubstrate.emit({
+			surface: "claude-code",
+			kind,
+			session_id: xSession,
+			graph_id: xGraph,
+			repo: "smoke-p28alter",
+			summary: `alter proof event ${kind}`,
+			ts: new Date(P + (10 + i * 5) * 60_000).toISOString(),
+		}),
+	);
+}
+check(
+	xEmitted.every((result) => result.stored),
+	`emitted ${xEmitted.length} chained events as the alter graph ${xGraph}`,
+);
+const xAnchorEvents: EventInput[] = [];
+const xJobSubstrate = {
+	hourDigest: tamperSubstrate.hourDigest.bind(tamperSubstrate),
+	emit: async (input: EventInput) => {
+		xAnchorEvents.push(input);
+		return { event: input, stored: true } as never;
+	},
+};
+const xJobRpc = createRpc({ url: xRpcUrl, timeoutMs: 5000, attempts: 2, backoffMs: 100 });
+const xSendsBefore = xSendCount();
+const xRun = await runAnchorJob({
+	greptime: tamperGreptime as never,
+	substrate: xJobSubstrate as never,
+	runner: execFileRunner,
+	rpc: xJobRpc,
+	env: tamperSolana,
+	clock: Date.now,
+});
+check(xRun.code === 0 && xRun.anchored === 1, "the alter fixture anchors its closed hour through the stub CLI");
+check(xSendCount() - xSendsBefore === 1, "anchoring the alter hour sent exactly once", `${xSendCount() - xSendsBefore} sends`);
+check(
+	xAnchorEvents.some((input) => input.surface === "substrate" && input.kind === "note"),
+	"the anchor run reported its write",
+);
+const retained = await tamperGreptime.anchorForPeriod(P).catch(() => null);
+check(retained !== null, "the alter hour's anchors row is retained");
+const R0 = retained?.root ?? "";
+check(R0 !== "", "the retained row carries its root", retained?.tx_sig ?? undefined);
+// The alteration: same id, same timestamp, same series — new summary with
+// the hash recomputed by the existing helper, mirroring exactly how the
+// verifier rebuilds the row. The tip moves but nothing points at the old
+// hash, so the per-session chain still verifies.
+const xRows = await tamperGreptime.readEvents("session_id", xSession);
+const victim = xRows.find((row) => String(row.hash) === chainTip(xRows));
+check(victim !== undefined, "the anchored session's tip reads back");
+if (victim === undefined) throw new Error("alter fixture lost its tip row");
+const victimId = String(victim.id);
+const victimMs = typeof victim.ts === "number" ? victim.ts : Date.parse(String(victim.ts));
+check(Number.isFinite(victimMs), "the tip row carries a readable timestamp");
+const nullText = (value: unknown): string | null =>
+	value === null || value === undefined ? null : String(value);
+let victimPayload: Record<string, unknown> = {};
+try {
+	victimPayload =
+		typeof victim.payload === "string"
+			? (JSON.parse(victim.payload) as Record<string, unknown>)
+			: ((victim.payload as Record<string, unknown> | null) ?? {});
+} catch {
+	victimPayload = {};
+}
+const unhashed = {
+	id: victimId,
+	ts: new Date(victimMs).toISOString(),
+	surface: String(victim.surface) as SubstrateEvent["surface"],
+	session_id: nullText(victim.session_id),
+	graph_id: nullText(victim.graph_id),
+	node_id: nullText(victim.node_id),
+	linear_identifier: nullText(victim.linear_identifier),
+	step: victim.step === null || victim.step === undefined ? null : Number(victim.step),
+	repo: nullText(victim.repo),
+	branch: nullText(victim.branch),
+	actor: String(victim.actor) as SubstrateEvent["actor"],
+	kind: String(victim.kind) as SubstrateEvent["kind"],
+	summary: `${String(victim.summary)} (edited after anchoring)`,
+	payload: victimPayload,
+	prev: nullText(victim.prev),
+};
+const altered: SubstrateEvent = { ...unhashed, hash: eventHash(unhashed) };
+check(altered.hash !== String(victim.hash), "the edited summary recomputes to a new hash");
+await tamperGreptime.insertEvent(altered);
+// Last-write-wins lands on merge: poll for the single replaced row rather
+// than assuming the store merged synchronously.
+let replaced = false;
+for (let attempt = 0; attempt < 50; attempt++) {
+	const reread = await tamperGreptime.readEvents("session_id", xSession).catch(() => []);
+	const matches = reread.filter((row) => String(row.id) === victimId);
+	if (matches.length === 1 && String(matches[0]?.hash) === altered.hash) {
+		replaced = true;
+		break;
+	}
+	await Bun.sleep(100);
+}
+check(replaced, "the altered row replaced the anchored one (no duplicate)");
+const siblings = await tamperGreptime.readEvents("session_id", xSession).catch(() => []);
+check(
+	xEmitted.every((result) => siblings.filter((row) => String(row.id) === result.event.id).length === 1),
+	"every alter event still has exactly one row",
+);
+const R1 = await tamperSubstrate.hourDigest(P);
+check(R1.root !== null && R1.root !== R0, "the recomputed root moved against the retained anchor");
+const xVerify = await tamperSubstrate.verifyGraph(xGraph, { rpc: xJobRpc });
+check(!xVerify.ok, "verify fails after the existing-leaf alteration", "verify still passes");
+check(xVerify.chain.ok, "the per-session chain still verifies after the alteration");
+check(
+	xVerify.hours[0]?.status === "mismatch" && (xVerify.reason ?? "").includes(P_ISO),
+	`verify names hour ${P_ISO} mismatch`,
+	xVerify.hours[0]?.status,
+);
+// The real consumer door: an actual `substrate verify` child process
+// against a real HTTP server over the tampered namespace. The child runs
+// with `env -i`, so only SUBSTRATE_URL reaches it — no store credential,
+// no key, no repo env file (its cwd is the scratch state dir).
+const xServerConfig = { ...loadConfig({}), solana: tamperSolana };
+const xObservability = createObservability(xServerConfig, {});
+xObs = xObservability;
+await xObservability.start();
+const xHttpSubstrate = new Substrate(xServerConfig, { index: null, greptime: tamperGreptime }, xObservability.observer);
+const xNodeHttp = createHttpServer(xHttpSubstrate, xServerConfig, xObservability);
+await new Promise<void>((resolve) => xNodeHttp.listen(0, "127.0.0.1", resolve));
+xHttp = xNodeHttp;
+const xAddress = xNodeHttp.address();
+const xPort = typeof xAddress === "object" && xAddress !== null ? xAddress.port : 0;
+check(xPort > 0, "the verify server listens on loopback");
+const cliPath = new URL("../packages/cli/src/index.ts", import.meta.url).pathname;
+const xCli = Bun.spawn(
+	["env", "-i", `SUBSTRATE_URL=http://127.0.0.1:${xPort}`, process.execPath, cliPath, "verify", xGraph],
+	{ cwd: xState, stdout: "pipe", stderr: "pipe" },
+);
+const [xOut, xErr, xCode] = await Promise.all([
+	new Response(xCli.stdout).text(),
+	new Response(xCli.stderr).text(),
+	xCli.exited,
+]);
+check(xCode === 1, "substrate verify exits 1 over the altered hour", `exit ${xCode}: ${scrub(xOut)}${scrub(xErr)}`);
+check(
+	xOut.includes(`hour ${P_ISO} does not match its anchor`),
+	"the CLI names the altered hour",
+	scrub(xOut + xErr).slice(0, 300),
+);
+check(xOut.includes("chain intact"), "the CLI still reports the chain intact", scrub(xOut + xErr).slice(0, 300));
+check(xSendCount() - xSendsBefore === 1, "alteration and verify sent nothing", `${xSendCount() - xSendsBefore} sends`);
+} catch (cause) {
+check(false, "the alter proof ran to completion", scrub(String(cause)).slice(0, 300));
+} finally {
+if (xHttp !== null) await new Promise<void>((resolve) => xHttp?.close(() => resolve())).catch(() => undefined);
+xObs?.stop();
+xRpc?.stop();
+xProxy?.stop();
+rmSync(xState, { recursive: true, force: true });
+}
+}
+}
 rpcServer.stop();
 } else {
 	process.stdout.write("  skip  fake-chain anchor proof: not a scratch ledger — no fake anchors written\n");

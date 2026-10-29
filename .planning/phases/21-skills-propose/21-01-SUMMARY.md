@@ -211,3 +211,8 @@ None - no external service configuration required.
 - All 9 created/modified files present on disk.
 - All 3 task commits (44fb162, f52f2c2, 9672237) present in history.
 - No stubs: the single `placeholder` grep hit is a pre-existing config.ts comment about short token strings.
+
+## Amendment 2026-10-11 (user-selected: Keep current Git isolation)
+
+- The user explicitly selected "Keep current Git isolation": the seven fixed Git controls already on main (`GIT_CONFIG_GLOBAL/SYSTEM=/dev/null`, two-entry `GIT_CONFIG_COUNT` selecting the `gh` credential helper, plus the two no-prompt flags alongside `PATH`/`HOME`) are retained. The "four-key allowlist" wording in this summary's Threat Flags and in 21-01-PLAN/21-CONTEXT now reads as four base forwarded keys plus seven controlled fixed Git values (never secrets); store/token/handoff values remain excluded. This is not permission to disable security or to accept residual supply-chain risk.
+- Security-contract resolution: T-21-03 is reconciled by the recorded user decision above, not by removing hardening and not by certifying an exact four-key runtime. No historical proof metrics are replaced by this note (BASELINE/SUMMARY counts stand as historical).

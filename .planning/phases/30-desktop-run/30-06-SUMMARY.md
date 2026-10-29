@@ -44,8 +44,8 @@ coverage:
     requirement: "DESK-05"
     verification:
       - kind: manual
-        ref: ".planning/phases/30-desktop-run/30-N1-SPIKE.md"
-        status: blocked
+        ref: ".planning/phases/30-desktop-run/30-N1-SPIKE.md (Current live evidence)"
+        status: pass
     human_judgment: true
   - id: D2
     description: "Vocabulary-internal fix only when the spike demands one; as-ported suites stay green meanwhile"
@@ -59,14 +59,17 @@ coverage:
 # Metrics
 duration: 10min
 completed: 2026-10-09
-status: blocked
+status: complete
 ---
 
 # Phase 30 Plan 06: N1 spike Summary
 
-**LIVE-GATED — the spike ladder drives the real `substrate-desktop` display
-and was never run. `30-N1-SPIKE.md` records the preconditions, the ordered
-ladder and `NOT-RUN` verdict fields; no capture-path code was changed.**
+**Live evidence landed after this plan: the ladder ran 3/3 fresh as ported
+(`n1_reproduced=false`, 9120 px / baseline 0 / solid 480x19 per repeat,
+terminal settle 5000 ms + type settle 200 ms, steal 0–9.15%), recorded in
+`30-N1-SPIKE.md` §Current; the historical NOT-RUN record is kept verbatim
+below it. No capture-path code was changed — the fresh-as-ported branch,
+now with evidence.**
 
 ## Performance
 
@@ -114,14 +117,19 @@ None - the record is procedural, no code executed.
 
 ## Self-Check: PASSED
 
-- Spike file exists with all five verdict fields present as `NOT-RUN` and no title-based pass language.
-- Zero code diff from this plan: `git status` shows only the two planning files.
+- Spike file now carries the live verdict too: `n1_reproduced=false`,
+  `capture_path=as-ported-xwd-root`, settle 5000+200 ms, per-repeat
+  9120/0/solid/480x19 plus per-call timings and steal in §Current.
+- Zero code diff still holds for the capture path: the live evidence takes
+  the fresh-as-ported branch, so `actions.ts`/`driver.ts` and their tests
+  stay untouched.
 
 ## User Setup Required
 
-- **Live run (operator):** an environment with the labelled `substrate-desktop`
-  container up on `127.0.0.1:6081`, then execute the ladder in
-  `30-N1-SPIKE.md` steps 1–5 and fill the verdict fields.
+- **Done by the parent live run:** the ladder executed against the labelled
+  `substrate-desktop` container; no further operator ladder run is needed
+  for the verdict. The corrected full-smoke rerun (snapshot fix) remains
+  parent-owned and pending.
 
 ## Next Phase Readiness
 
