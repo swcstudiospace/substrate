@@ -32,7 +32,7 @@
 
 - [ ] **WATCH-01**: A documentation change in a registered repository reaches the docs plane within a configured lag with no manual command.
 - [ ] **WATCH-02**: Triggers coalesce: a burst of edits costs one sync per repository, and a restart re-ingests nothing that has not changed.
-- [ ] **WATCH-03**: Git hooks and the filesystem watcher never block or fail the user's git command or editor.
+- [ ] **WATCH-03**: The default triggers write nothing into any repository; git hooks are an operator-run opt-in, and neither hooks nor the filesystem watcher ever block or fail the user's git command or editor.
 - [ ] **WATCH-04**: A reconcile timer finds changes that no trigger saw, including a push made from another machine that the local checkout has not pulled, without the local and remote views overwriting each other.
 - [ ] **WATCH-05**: A sync reports its outcome, lag and failures as events and metrics, and a freshness breach raises the existing `docs.freshness` warning.
 
@@ -57,7 +57,7 @@
 
 - [ ] **FLEET-01**: Worktree locations are configurable, and every worktree of a repository is found through git, not through a path convention.
 - [ ] **FLEET-02**: A worktree registry records path, repo, branch, head, base, dirty state, ahead and behind, last activity, size and the attributed session or graph.
-- [ ] **FLEET-03**: `substrate worktree prune` removes only worktrees that are clean, pushed and whose current head is merged (not merely whose branch once was), never the primary checkout, and records each removal.
+- [ ] **FLEET-03**: `substrate worktree prune` removes only worktrees that are clean (ignored files that hold work count), pushed and whose current head is merged (not merely whose branch once was), never the primary checkout, and records each removal.
 - [ ] **FLEET-04**: `substrate worktree conflicts` predicts textual conflicts between the active worktrees of a repository and suggests a merge order.
 - [ ] **FLEET-05**: Worktree creation refuses below a configured free-disk floor, and the doctor reports disk pressure from worktrees.
 - [ ] **FLEET-06**: A session's brief names other sessions' worktrees that touch the same files.
