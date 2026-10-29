@@ -74,6 +74,12 @@ describe("auditMode", () => {
 		});
 	});
 
+	test("the worktree report is an explicit fail-closed write and the registry read an explicit fail-open read", () => {
+		// The report replaces rows other sessions read; a listing is inspection and must not stop on an unwritable audit file.
+		expect({ report: auditMode("worktree_report"), list: auditMode("worktree_list") }).toEqual({ report: "fail-closed", list: "fail-open" });
+		expect({ reportClosed: FAIL_CLOSED_TOOLS.has("worktree_report"), listOpen: FAIL_OPEN_TOOLS.has("worktree_list") }).toEqual({ reportClosed: true, listOpen: true });
+	});
+
 	test("every REST route server.ts audits has a mode", () => {
 		// `auditedRest` refuses a route whose record the chain will not take, so a route
 		// audited under a name in neither list would be fail-closed by accident — a

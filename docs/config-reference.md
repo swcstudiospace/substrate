@@ -41,6 +41,8 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_SKILLS_STATE` | path | /var/lib/substrate/skills | directory | the default state directory. See `docs/skills-propose.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_SKILLS_GH` | string | gh | gh binary | gh from PATH. See `docs/skills-propose.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_SKILLS_GOVERNANCE` | mode | off | off \| report \| enforce (case- and space-insensitive; anything else is off with a boot warning) | off: skills_propose records no registry row, nothing is filtered, and the skills projector makes no fetch (skills_approve and skills_list still exist). See `docs/runbooks/skills-governance.md` | mcp-server/config.ts, projector/skills-governance.ts | yes |
+| `SUBSTRATE_WORKTREE_REGISTRY` | toggle | off | off \| on (case- and space-insensitive; anything else is off) | off: POST /worktrees/report, GET /worktrees and worktree_list answer 503 worktrees.disabled and nothing is stored. See `docs/worktree-fleet-api.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_WORKTREE_REGISTRY_TTL_S` | number | 1209600 | 60..31536000 whole seconds | 1209600 s (14 days): an accepted report deletes its own host's rows last seen longer ago than this. See `docs/worktree-fleet-api.md` | mcp-server/config.ts | yes |
 | `LINEAR_API_KEY` | secret-ref | none | Linear API key | Linear sync is off | mcp-server/config.ts, host/sync.ts | yes |
 | `LINEAR_API_URL` | string | https://api.linear.app/graphql | URL | the real API; the rehearsal points it at a loopback fake. See `docs/rehearsal.md` | mcp-server/config.ts | yes |
 | `NOTION_API_KEY` | secret-ref | none | Notion integration key | Notion sync is off | mcp-server/config.ts, host/sync.ts | yes |
@@ -346,6 +348,9 @@ Which environment a name belongs in is part of the row: the server's shared env 
 
 | Name | Kind | Default | Allowed | Unset means | Read by | In `.env.example` |
 | --- | --- | --- | --- | --- | --- | --- |
+| `SUBSTRATE_WORKTREE_ROOTS` | list | none | colon-separated absolute directories (relative entries are dropped) | no root is configured: the worktree commands and the collector say so and assume no location. See `docs/worktree-fleet-api.md` | fleet/config.ts, cli/worktree, collectors/worktree-graph.ts, scripts/doctor-runtime.ts | yes |
+| `SUBSTRATE_WORKTREE_MIN_FREE_GB` | number | 5 | positive number of gigabytes (anything else is the default) | 5 GB: worktree creation refuses below it (substrate worktree provision, and the dispatcher's ensure_worktree, which reads it in Python and is not covered by the scan). See `docs/worktree-fleet-api.md` | fleet/config.ts, cli/worktree, dispatcher/worktree.py | yes |
+| `SUBSTRATE_WORKTREE_IDLE_DAYS` | number | 14 | positive number of days (anything else is the default) | 14 days: a worktree must be untouched this long before prune may call it safe, and the registry listing calls a worktree stale after it. See `docs/worktree-fleet-api.md` | fleet/config.ts, cli/worktree, mcp-server/config.ts | yes |
 | `SUBSTRATE_TIMEOUT_MS` | number | 1500 | positive ms | 1500 ms (the CLI's lessons calls) | cli/index.ts | yes |
 | `SUBSTRATE_SKILLS_TIMEOUT_MS` | number | 180000 | positive ms | 180000 ms (the CLI's skills calls) | cli/skills.ts | yes |
 | `SUBSTRATE_CLI` | path | the CLI entry in the checkout | path | the built-in path | projector/cursor.ts | yes |

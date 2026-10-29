@@ -56,6 +56,7 @@ import {
 	type Surface,
 } from "./types.ts";
 import type { RagMachineSettings } from "./config.ts";
+import { parseWorktreeListQuery, WORKTREE_LIST_DEFAULT_LIMIT, WORKTREE_LIST_MAX_LIMIT, WORKTREE_LIST_STATES } from "./worktree-registry.ts";
 import { LIGHTRAG_CIRCUIT_OPEN, LIGHTRAG_SNIPPET_CAP } from "./planes/lightrag.ts";
 import {
 	canTransitionRagState,
@@ -2067,6 +2068,34 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				if (failure === null) throw cause;
 				return { ...json(failure.body), isError: true };
 			}
+		},
+	);
+
+	server.registerTool(
+		"worktree_list",
+		{
+			title: "List the registered git worktrees",
+			description:
+				"The worktree registry: the git worktrees the CLI and the collectors reported, `{ worktrees, truncated }`, newest report first. " +
+				"Each row has the host, path, repo, branch, head, base, dirty, ahead, behind, last_commit_at, size_bytes, locked, primary, " +
+				"pr_state (open, merged, closed, none or unknown), the session_id and graph_id when attributed, and first_seen_at and last_seen_at. " +
+				"`state` dirty keeps uncommitted work; stale keeps worktrees whose last commit is older than SUBSTRATE_WORKTREE_IDLE_DAYS. " +
+				`At most ${WORKTREE_LIST_MAX_LIMIT} rows (default ${WORKTREE_LIST_DEFAULT_LIMIT}); truncated says more exist. ` +
+				"A read: it changes nothing. Answers an error worktrees.disabled while SUBSTRATE_WORKTREE_REGISTRY is off.",
+			inputSchema: {
+				repo: z.string().optional().describe("owner/name, to list one repository's worktrees."),
+				host: z.string().optional().describe("the reporting host, to list one machine's worktrees."),
+				state: z.enum(WORKTREE_LIST_STATES).optional().describe("all (the default), dirty or stale."),
+				limit: z.number().int().min(1).max(WORKTREE_LIST_MAX_LIMIT).optional().describe("page size, 1 to 500."),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async (request) => {
+			const query = parseWorktreeListQuery(request);
+			if (!query.ok) return { ...json({ error: "worktrees.invalid", problem: query.problem }), isError: true };
+			const outcome = await substrate.listWorktrees(query.value);
+			if (!outcome.ok) return { ...json(outcome.body), isError: true };
+			return json({ worktrees: outcome.worktrees, truncated: outcome.truncated });
 		},
 	);
 

@@ -31,6 +31,7 @@ import { loadBaselineDirectory, type BaselineDirectoryResult } from "./planning/
 import { loadLivenessSettings, type LivenessConfigResult } from "./planning/observer.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
 import { EVENT_IDEMPOTENCY_MODES, MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type EventIdempotencyMode, type MemoryExpiryMode, type Surface } from "./types.ts";
+import { DEFAULT_WORKTREE_IDLE_DAYS, DEFAULT_WORKTREE_REGISTRY_TTL_S, type WorktreeRegistryMode } from "./worktree-registry.ts";
 
 /** Default hermes-linear-connector base URL (D23-25). */
 export const DEFAULT_HERMES_LINEAR_URL = "http://127.0.0.1:8792";
@@ -435,6 +436,13 @@ export interface SubstrateConfig {
 	skillsGovernance: SkillsGovernanceMode;
 	/** The unrecognised `SUBSTRATE_SKILLS_GOVERNANCE` value, for the boot warning; null when the key parsed or was unset. */
 	skillsGovernanceRejected: string | null;
+	/**
+	 * The worktree registry (phase 68). `mode` is `SUBSTRATE_WORKTREE_REGISTRY`: `off` (the default, and anything that is not `on`)
+	 * answers `POST /worktrees/report`, `GET /worktrees` and `worktree_list` with 503 `worktrees.disabled` and writes nothing.
+	 * `ttlS` is `SUBSTRATE_WORKTREE_REGISTRY_TTL_S`, the age at which a report sweeps its own host's unrefreshed rows. `idleDays`
+	 * is `SUBSTRATE_WORKTREE_IDLE_DAYS`, how long a worktree's last commit may age before a listing calls it `stale`.
+	 */
+	worktreeRegistry: { mode: WorktreeRegistryMode; ttlS: number; idleDays: number };
 	/**
 	 * Surfaces allowed to call `desktop_run`, from `SUBSTRATE_DESKTOP_SURFACES`.
 	 *
@@ -1137,6 +1145,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		...memoryLifecycleFromEnv(env.SUBSTRATE_MEMORY_LIFECYCLE),
 		// uplift-5 S5a
 		...skillsGovernanceFromEnv(env.SUBSTRATE_SKILLS_GOVERNANCE),
+		// Phase 68
+		worktreeRegistry: {
+			mode: (env.SUBSTRATE_WORKTREE_REGISTRY?.trim().toLowerCase() ?? "") === "on" ? "on" : "off",
+			ttlS: boundedInt(env.SUBSTRATE_WORKTREE_REGISTRY_TTL_S, DEFAULT_WORKTREE_REGISTRY_TTL_S, 60, 31_536_000),
+			idleDays: positiveNumberOr(env.SUBSTRATE_WORKTREE_IDLE_DAYS, DEFAULT_WORKTREE_IDLE_DAYS),
+		},
 		// uplift-3 N2
 		...sloCheckpointFromEnv(env.SUBSTRATE_SLO_CHECKPOINT, probes),
 		sloCheckpointS: boundedInt(env.SUBSTRATE_SLO_CHECKPOINT_S, 60, 0, 86_400),
@@ -1383,6 +1397,12 @@ function nonNegativeOr(raw: string | undefined, fallback: number): number {
 function positiveOr(raw: string | undefined, fallback: number): number {
 	const value = Number(raw?.trim());
 	return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+/** A finite number > 0, kept as written (a fraction is fine); anything else is the default. The fleet package reads `SUBSTRATE_WORKTREE_IDLE_DAYS` the same way. */
+function positiveNumberOr(raw: string | undefined, fallback: number): number {
+	const value = Number(raw?.trim());
+	return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 /** uplift-2 R6: a finite number in [0, 1]; anything else is the default. */

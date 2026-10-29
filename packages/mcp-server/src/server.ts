@@ -106,6 +106,7 @@ import type { Substrate } from "./service.ts";
 import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
 import { approvalBodyProblem, approvalFailure, toApprovalRequest } from "./skills/registry.ts";
 import { EVENT_KINDS, SURFACES, type Surface } from "./types.ts";
+import { parseWorktreeListQuery, validateWorktreeReport } from "./worktree-registry.ts";
 import { isLocalPeer, livezBody, LoopLagMonitor } from "./watchdog.ts";
 import { ragRetryDelay } from "./rag-retry.ts";
 import { reservedEmitRefusal } from "./reserved-actions.ts";
@@ -301,6 +302,7 @@ const JSON_BODY_ROUTES: Record<string, true> = {
 	"/docs/merge-trigger": true,
 	"/skills/propose": true,
 	"/skills/approve": true,
+	"/worktrees/report": true,
 	"/mcp": true,
 };
 
@@ -328,6 +330,8 @@ const LIST_NEEDS_SURFACE = "skills_list needs an authenticated surface";
 const INGEST_NEEDS_SURFACE = "docs_ingest needs an authenticated surface; nothing was ingested";
 /** Why an anonymous merge-trigger is refused, even on a run that allows anonymous callers. */
 const MERGE_TRIGGER_NEEDS_SURFACE = "docs merge-trigger needs an authenticated surface; nothing was refreshed";
+/** Why an anonymous worktree report is refused, even on a run that allows anonymous callers. */
+const WORKTREE_REPORT_NEEDS_SURFACE = "worktree report needs an authenticated surface; nothing was stored";
 /** The dataset a post-merge hook triggers when the body names none (DOCS-03's own repo row). */
 const MERGE_TRIGGER_DATASET = "agent-substrate";
 
@@ -1890,6 +1894,62 @@ export function createHttpServer(
 				return;
 			}
 
+			// The worktree registry (phase 68). A report names a host's checkouts, so an anonymous caller is refused before the body
+			// is read, even on a run that allows untokened callers. A registry that is off, a VM guest and a server with no index are
+			// refused just as early, so nothing is read, audited or stored. The accepted report is audited fail-closed.
+			if (req.method === "POST" && url.pathname === "/worktrees/report") {
+				if (surface === null) {
+					sendJson(res, 401, { error: WORKTREE_REPORT_NEEDS_SURFACE });
+					return;
+				}
+				const refusal = substrate.worktreeGate(true);
+				if (refusal !== null) {
+					sendJson(res, refusal.status, refusal.body);
+					return;
+				}
+				const checked = validateWorktreeReport(JSON.parse(await readBody(req)));
+				if (!checked.ok) {
+					sendJson(res, 400, { error: "worktrees.invalid", problem: checked.problem });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "worktree_report", { host: checked.value.host, worktrees: checked.value.worktrees.length }))) return;
+				const outcome = await substrate.reportWorktrees(checked.value, surface);
+				if (!outcome.ok) {
+					sendJson(res, outcome.status, outcome.body);
+					return;
+				}
+				sendJson(res, 200, { stored: outcome.stored, removed: outcome.removed });
+				return;
+			}
+
+			// The registry read, the same filters as the `worktree_list` tool and audited under its name, fail-open.
+			if (req.method === "GET" && url.pathname === "/worktrees") {
+				const refusal = substrate.worktreeGate(false);
+				if (refusal !== null) {
+					sendJson(res, refusal.status, refusal.body);
+					return;
+				}
+				const query = parseWorktreeListQuery({
+					repo: url.searchParams.get("repo") ?? undefined,
+					host: url.searchParams.get("host") ?? undefined,
+					state: url.searchParams.get("state") ?? undefined,
+					limit: url.searchParams.get("limit") ?? undefined,
+				});
+				if (!query.ok) {
+					sendJson(res, 400, { error: "worktrees.invalid", problem: query.problem });
+					return;
+				}
+				const { repo, host, state, limit } = query.value;
+				if (!(await auditedRest(res, observability, surface, "worktree_list", { ...(repo === null ? {} : { repo }), ...(host === null ? {} : { host }), state, limit }))) return;
+				const outcome = await substrate.listWorktrees(query.value);
+				if (!outcome.ok) {
+					sendJson(res, outcome.status, outcome.body);
+					return;
+				}
+				sendJson(res, 200, { worktrees: outcome.worktrees, truncated: outcome.truncated });
+				return;
+			}
+
 			if (url.pathname === "/mcp") {
 				await handleMcp(req, res, substrate, caller, observability, claim, admission);
 				return;
@@ -1897,7 +1957,7 @@ export function createHttpServer(
 
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
-			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/mcp" || url.pathname === "/memory")) {
+			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/mcp" || url.pathname === "/memory" || url.pathname === "/worktrees/report")) {
 				sendJson(res, 413, { error: cause.message });
 				return;
 			}

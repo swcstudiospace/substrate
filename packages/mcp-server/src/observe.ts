@@ -95,6 +95,8 @@ const KNOWN_ROUTES = [
 	"/memory/recall",
 	"/slo/history",
 	"/livez",
+	"/worktrees/report",
+	"/worktrees",
 ] as const;
 
 export function normalizeRoute(pathname: string): string {
@@ -664,6 +666,8 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"steering_queue",
 	"steering_acknowledge",
 	"steering_list",
+	"worktree_list",
+	"worktree_report",
 	// REST routes, as `server.ts` audits them. A route audited under a tool's own name
 	// (`/memory` as `memory_write`) is covered by that name above and not repeated.
 	"brief",
