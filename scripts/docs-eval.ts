@@ -24,7 +24,8 @@
  * under this checkout's `docs/` (the repository name is `SUBSTRATE_DOCS_EVAL_REPO`), asks the server's `POST /docs/search`,
  * prints the metrics and exits 1 when recall at 5 is under `SUBSTRATE_DOCS_SLO_RECALL5`. A question that failed or came back
  * degraded is counted and left out of the scores, and any such question makes the exit 3: an outage is not a retrieval miss and
- * a partial score must not read as a pass. It never runs in tests.
+ * a partial score must not read as a pass. A question the shared redactor would change (it looks like a credential) is never
+ * sent: it is counted as not sent, and a run where every question was held back is exit 3 too. It never runs in tests.
  */
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
@@ -41,6 +42,7 @@ import {
 	runLiveQueries,
 	scoreRun,
 	sloBreaches,
+	unsafeSkippedLine,
 	type EvalDocument,
 	type GoldenQuery,
 	type LiveRun,
@@ -49,6 +51,7 @@ import {
 	type RunScore,
 } from "../packages/corpus/src/index.ts";
 import { createServerEvalSearch } from "../packages/mcp-server/src/docs-eval-server.ts";
+import { redact } from "../packages/mcp-server/src/redact.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 export const FIXTURE_DIR = join(REPO_ROOT, "packages", "corpus", "fixtures", "eval");
@@ -381,7 +384,9 @@ export async function askLive(
 	const repo = io.env.SUBSTRATE_DOCS_EVAL_REPO?.trim() || DEFAULT_EVAL_REPO;
 	const { docs, incomplete } = collectLocalDocuments(io.repoRoot ?? REPO_ROOT, repo);
 	const golden = generateGolden(docs, { maxQueries });
-	return { asked: golden.length, live: await runLiveQueries(golden, { base: url, token, fetchImpl: io.fetchImpl, now: io.now }), incomplete };
+	// The same check ingest applies to a document: a question that the redactor would change is never sent.
+	const live = await runLiveQueries(golden, { base: url, token, fetchImpl: io.fetchImpl, now: io.now, unsafe: (text) => redact(text) !== text });
+	return { asked: golden.length, live, incomplete };
 }
 
 async function runLive(url: string, json: boolean, io: EvalIo): Promise<number> {
@@ -415,6 +420,8 @@ export async function measureGoldenRecall(
 		io.stderr(`docs canary: golden recall not measured, the scan of docs/ was partial (${incomplete.join(", ")}); a recall over part of the documents is not reported`);
 		return null;
 	}
+	const skipped = unsafeSkippedLine(live.skippedUnsafe);
+	if (skipped !== "") io.stderr(`docs canary: ${skipped}`);
 	if (live.failed > 0 || live.degraded > 0 || live.aborted !== null || live.results.length === 0) return null;
 	return { recall5: scoreRun(live.results).recall5, asked };
 }
@@ -437,11 +444,12 @@ export function reportLive(
 	const partial = incomplete.length > 0;
 	if (json) {
 		io.stdout(
-			JSON.stringify({ mode: "live", dataset: LIVE_DEFAULT_DATASET, asked, answered: live.results.length, failed: live.failed, degraded: live.degraded, aborted: live.aborted, partial, incomplete, score, threshold: thresholds.recall5, breaches }),
+			JSON.stringify({ mode: "live", dataset: LIVE_DEFAULT_DATASET, asked, answered: live.results.length, failed: live.failed, degraded: live.degraded, skippedUnsafe: live.skippedUnsafe, aborted: live.aborted, partial, incomplete, score, threshold: thresholds.recall5, breaches }),
 		);
 	} else {
 		io.stdout(formatScore(score));
 		io.stdout(`asked ${asked}, answered ${live.results.length}, failed ${live.failed}, degraded ${live.degraded}${live.aborted === null ? "" : `, stopped early (${live.aborted})`}`);
+		if (live.skippedUnsafe > 0) io.stdout(unsafeSkippedLine(live.skippedUnsafe));
 		if (breaches.length > 0) io.stdout(`FAIL recall@5 ${score.recall5.toFixed(3)} is under the SLO ${thresholds.recall5}${partial ? " (partial scan)" : ""}`);
 		else if (partial && !unusable) io.stdout(`PARTIAL recall@5 ${score.recall5.toFixed(3)} holds the SLO ${thresholds.recall5} over a partial scan`);
 	}

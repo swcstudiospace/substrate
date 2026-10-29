@@ -9,6 +9,7 @@
  * Everything here is pure and deterministic: documents are visited in key order, and a cap is applied with a seeded
  * generator, so the same corpus and options give the same queries on every machine.
  */
+import { createHash } from "node:crypto";
 import { documentKey } from "./protocol.ts";
 
 /** A document as the generator reads it: where it lives and what it says. */
@@ -203,17 +204,22 @@ export function generateGolden(docs: readonly EvalDocument[], options: GenerateG
 	const perDocument = Math.max(1, Math.floor(options.perDocument ?? GOLDEN_QUERIES_PER_DOCUMENT));
 	const maxQueries = Math.max(0, Math.floor(options.maxQueries ?? GOLDEN_DEFAULT_MAX_QUERIES));
 	const random = seededRandom(options.seed ?? GOLDEN_DEFAULT_SEED);
+	// Copies are decided on the WHOLE text: two pages that share their first EVAL_MAX_TEXT_CHARS characters and differ later are
+	// two pages, not one answer group. The cap only limits how much of the canonical copy `outlineOf` reads.
 	const keyed = docs
-		.map((doc) => ({ key: documentKey(doc.repo, doc.path), text: doc.text.slice(0, EVAL_MAX_TEXT_CHARS).replace(/\r\n?/g, "\n") }))
+		.map((doc) => {
+			const text = doc.text.replace(/\r\n?/g, "\n");
+			return { key: documentKey(doc.repo, doc.path), text, digest: createHash("sha256").update(text, "utf8").digest("hex") };
+		})
 		.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 	// The first key in order is the canonical copy of its text.
-	const groups = new Map<string, { key: string; copies: string[] }>();
-	for (const { key, text } of keyed) {
-		const group = groups.get(text);
-		if (group === undefined) groups.set(text, { key, copies: [] });
+	const groups = new Map<string, { key: string; text: string; copies: string[] }>();
+	for (const { key, text, digest } of keyed) {
+		const group = groups.get(digest);
+		if (group === undefined) groups.set(digest, { key, text, copies: [] });
 		else if (key !== group.key) group.copies.push(key);
 	}
-	const ordered = [...groups.entries()].map(([text, group]) => ({ ...group, outline: outlineOf(text) }));
+	const ordered = [...groups.values()].map(({ key, text, copies }) => ({ key, copies, outline: outlineOf(text) }));
 	const titles = ordered.map((group) => normalised(group.outline.title ?? ""));
 	const inTitles = (query: string): number => {
 		const needle = ` ${normalised(query)} `;

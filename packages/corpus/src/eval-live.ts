@@ -32,6 +32,12 @@ export interface LiveOptions {
 	/** Milliseconds on a monotonic clock. */
 	now: () => number;
 	datasets?: readonly string[] | undefined;
+	/**
+	 * REQUIRED: says whether a question must not leave this machine (it looks like it carries a credential). `packages/corpus` is
+	 * pure and cannot hold a detector of its own, so every caller passes the shared redactor's verdict, the check ingest applies
+	 * to documents: `(text) => redact(text) !== text`. A question it flags is not sent, not scored and not counted as failed.
+	 */
+	unsafe: (text: string) => boolean;
 }
 
 export interface LiveRun {
@@ -43,6 +49,15 @@ export interface LiveRun {
 	degraded: number;
 	/** Why the run stopped early, or null when every question was asked. */
 	aborted: "consecutive-failures" | "deadline" | null;
+	/** Questions left unasked because {@link LiveOptions.unsafe} flagged them. Their text is never kept or returned. */
+	skippedUnsafe: number;
+}
+
+/** The one line every report prints when questions were left unasked by the {@link LiveOptions.unsafe} guard; empty for none. */
+export function unsafeSkippedLine(count: number): string {
+	if (count <= 0) return "";
+	const which = count === 1 ? "1 question was" : `${count} questions were`;
+	return `${which} not sent: ${count === 1 ? "it looks" : "they look"} like ${count === 1 ? "it contains" : "they contain"} a credential (the same check ingest applies)`;
 }
 
 /** The `repo:path` key a citation's source URL names, or null for a URL that is not a corpus document's. The inverse of `sourceUrl`. */
@@ -94,7 +109,7 @@ export function ranksFromSearchReply(body: unknown): SearchReply {
 	return { kind: "ranked", keys };
 }
 
-/** Asks every question in turn. Never throws. */
+/** Asks every question in turn, except those `options.unsafe` flags (counted in `skippedUnsafe`). Never throws. */
 export async function runLiveQueries(queries: readonly GoldenQuery[], options: LiveOptions): Promise<LiveRun> {
 	const base = options.base.replace(/\/+$/, "");
 	const datasets = [...(options.datasets ?? [LIVE_DEFAULT_DATASET])];
@@ -103,9 +118,20 @@ export async function runLiveQueries(queries: readonly GoldenQuery[], options: L
 	let failed = 0;
 	let degraded = 0;
 	let consecutive = 0;
-	for (const [index, golden] of queries.entries()) {
-		if (options.now() - startedAt > LIVE_RUN_DEADLINE_MS) return { results, failed, degraded, aborted: "deadline" };
-		if (consecutive >= LIVE_MAX_CONSECUTIVE_FAILURES) return { results, failed, degraded, aborted: "consecutive-failures" };
+	// Decided for every question before the first request, so the count is complete even when the run stops early.
+	// A guard that throws cannot vouch for the question, so the question is not sent.
+	const unsafe = (text: string): boolean => {
+		try {
+			return options.unsafe(text);
+		} catch {
+			return true;
+		}
+	};
+	const askable = queries.map((golden, index) => ({ golden, index })).filter(({ golden }) => !unsafe(golden.query));
+	const skippedUnsafe = queries.length - askable.length;
+	for (const { golden, index } of askable) {
+		if (options.now() - startedAt > LIVE_RUN_DEADLINE_MS) return { results, failed, degraded, aborted: "deadline", skippedUnsafe };
+		if (consecutive >= LIVE_MAX_CONSECUTIVE_FAILURES) return { results, failed, degraded, aborted: "consecutive-failures", skippedUnsafe };
 		const began = options.now();
 		let reply: SearchReply = { kind: "invalid" };
 		try {
@@ -131,5 +157,5 @@ export async function runLiveQueries(queries: readonly GoldenQuery[], options: L
 			failed += 1;
 		}
 	}
-	return { results, failed, degraded, aborted: consecutive >= LIVE_MAX_CONSECUTIVE_FAILURES ? "consecutive-failures" : null };
+	return { results, failed, degraded, aborted: consecutive >= LIVE_MAX_CONSECUTIVE_FAILURES ? "consecutive-failures" : null, skippedUnsafe };
 }

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+	EVAL_MAX_TEXT_CHARS,
 	generateGolden,
 	GOLDEN_LEAD_WORDS,
 	GOLDEN_QUERIES_PER_DOCUMENT,
@@ -132,6 +133,28 @@ describe("generateGolden", () => {
 		const golden = generateGolden([alpha, copy]);
 		expect(golden.map((query) => [query.query, query.expected])).toEqual(generateGolden([alpha]).map((query) => [query.query, query.expected]));
 		for (const query of golden) expect(query.alsoExpected).toEqual(["r/a:milestones/v1/docs/alpha.md"]);
+	});
+
+	describe("pages longer than the read cap", () => {
+		const head = "# Long shared title\n\nThe opening sentence is shared here today.\n\n";
+		const prefix = head + "x".repeat(EVAL_MAX_TEXT_CHARS - head.length);
+		const page = (repo: string, tail: string): EvalDocument => ({ repo, path: "docs/long.md", text: `${prefix}${tail}` });
+
+		test("two pages that differ only after the first 200,000 characters are two pages: their shared questions are dropped, not grouped", () => {
+			const one = page("r/one", "\n\nA first ending.\n");
+			const two = page("r/two", "\n\nA second ending.\n");
+			expect(one.text.slice(0, EVAL_MAX_TEXT_CHARS)).toBe(two.text.slice(0, EVAL_MAX_TEXT_CHARS));
+			expect(generateGolden([one, two])).toEqual([]);
+		});
+
+		test("two byte-identical long pages are still one answer group", () => {
+			const golden = generateGolden([page("r/one", "\n\nThe same ending.\n"), page("r/two", "\n\nThe same ending.\n")]);
+			expect(golden.map((query) => query.query)).toEqual(["Long shared title", "The opening sentence is shared here today"]);
+			for (const query of golden) {
+				expect(query.expected).toBe("r/one:docs/long.md");
+				expect(query.alsoExpected).toEqual(["r/two:docs/long.md"]);
+			}
+		});
 	});
 
 	test("a title that is a phrase of another title is ambiguous too", () => {

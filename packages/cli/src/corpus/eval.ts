@@ -12,6 +12,7 @@ import {
 	runLiveQueries,
 	scoreRun,
 	sloBreaches,
+	unsafeSkippedLine,
 	withCopyGroups,
 	type EvalDocument,
 	type IdenticalGroup,
@@ -19,6 +20,7 @@ import {
 	type SloBreach,
 	type SloThresholds,
 } from "@substrate/corpus";
+import { redact } from "../../../mcp-server/src/redact.ts";
 import { printable } from "./render.ts";
 import type { Inventory } from "./inventory.ts";
 
@@ -123,12 +125,17 @@ function scoreLine(score: RunScore): string {
 	return `recall@1=${score.recall1.toFixed(3)} recall@5=${score.recall5.toFixed(3)} recall@10=${score.recall10.toFixed(3)} mrr=${score.mrr.toFixed(3)} p50=${score.p50Ms.toFixed(1)}ms p95=${score.p95Ms.toFixed(1)}ms`;
 }
 
-/** Why a live run has no verdict, in the numbers the run knows: the searches that did not produce an answer, out of those the set holds. */
-function unscoredReason(questions: number, answered: number, failed: number, degraded: number): string {
+/**
+ * Why a live run has no verdict, in the numbers the run knows: the searches that did not produce an answer, out of those that
+ * were sent. Questions the credential guard kept back were never sent, so they are not in the denominator.
+ */
+function unscoredReason(questions: number, skippedUnsafe: number, answered: number, failed: number, degraded: number): string {
 	if (questions === 0) return "no question could be generated from the documents the scan read";
-	const unanswered = questions - answered;
+	const sent = questions - skippedUnsafe;
+	if (sent === 0) return "every question looks like it contains a credential, so none was sent";
+	const unanswered = sent - answered;
 	const how = failed > 0 && degraded > 0 ? "failed or were answered degraded" : degraded > 0 ? "were answered degraded" : failed > 0 ? "failed" : "were not answered";
-	return `${unanswered} of ${questions} searches ${how}`;
+	return `${unanswered} of ${sent} searches ${how}`;
 }
 
 /** Generates the questions and, with a server, asks them. Never throws. */
@@ -144,7 +151,14 @@ export async function evaluateCorpus(request: EvalRequest): Promise<EvalOutcome>
 		return { code: 0, text, warning: warnings.map((line) => `[substrate] corpus eval: ${printable(line)}\n`).join("") };
 	}
 
-	const live = await runLiveQueries(golden, { base: request.server.url, token: request.server.token, fetchImpl: request.server.fetchImpl, now: request.now });
+	// The same check ingest applies to a document: a question that the redactor would change is never sent.
+	const live = await runLiveQueries(golden, {
+		base: request.server.url,
+		token: request.server.token,
+		fetchImpl: request.server.fetchImpl,
+		now: request.now,
+		unsafe: (text) => redact(text) !== text,
+	});
 	const score = scoreRun(live.results);
 	const answered = live.results.length;
 	const breaches: SloBreach[] = sloBreaches({ freshnessS: null, recall5: answered === 0 ? null : score.recall5, ingestDocsPerS: null }, request.thresholds);
@@ -153,7 +167,8 @@ export async function evaluateCorpus(request: EvalRequest): Promise<EvalOutcome>
 	if (live.failed > 0) notScored.push(`${live.failed} question(s) failed`);
 	if (live.degraded > 0) notScored.push(`${live.degraded} question(s) were answered degraded (a plane outage, not a miss)`);
 	if (live.aborted !== null) notScored.push(`the run stopped early (${live.aborted})`);
-	if (golden.length > 0 && answered === 0 && live.failed === 0 && live.degraded === 0 && live.aborted === null) notScored.push("no question was answered");
+	if (golden.length > 0 && live.skippedUnsafe === golden.length) notScored.push(unsafeSkippedLine(live.skippedUnsafe));
+	else if (golden.length > 0 && answered === 0 && live.failed === 0 && live.degraded === 0 && live.aborted === null) notScored.push("no question was answered");
 	// The exit code is the objective's alone: a partial scan changes the label of the verdict, never whether the run passed.
 	const code = breaches.length > 0 || notScored.length > 0 ? 1 : 0;
 	const allWarnings = [...warnings, ...notScored];
@@ -162,7 +177,8 @@ export async function evaluateCorpus(request: EvalRequest): Promise<EvalOutcome>
 	// unanswered measured nothing it can call a pass, so it never prints that the objective holds.
 	const scored = notScored.length === 0;
 	const verdict: "breach" | "unscored" | "holds" = breaches.length > 0 ? "breach" : scored ? "holds" : "unscored";
-	const unmeasured = `recall@5 not measured (${unscoredReason(golden.length, answered, live.failed, live.degraded)})${scope}`;
+	const unmeasured = `recall@5 not measured (${unscoredReason(golden.length, live.skippedUnsafe, answered, live.failed, live.degraded)})${scope}`;
+	const skippedLine = unsafeSkippedLine(live.skippedUnsafe);
 	const text = request.json
 		? `${JSON.stringify({
 				mode: "live",
@@ -171,6 +187,7 @@ export async function evaluateCorpus(request: EvalRequest): Promise<EvalOutcome>
 				answered,
 				failed: live.failed,
 				degraded: live.degraded,
+				skippedUnsafe: live.skippedUnsafe,
 				aborted: live.aborted,
 				partial,
 				incomplete: request.documents.incomplete,
@@ -186,6 +203,7 @@ export async function evaluateCorpus(request: EvalRequest): Promise<EvalOutcome>
 				`documents read: ${documents}`,
 				...incompleteLines(request.documents),
 				`questions: ${golden.length}, answered ${answered}, failed ${live.failed}, degraded ${live.degraded}`,
+				...(skippedLine === "" ? [] : [skippedLine]),
 				scoreLine(score),
 				verdict === "breach"
 					? `FAIL recall@5 ${score.recall5.toFixed(3)} is under the objective ${request.thresholds.recall5}${scope}`

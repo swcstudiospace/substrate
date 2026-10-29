@@ -372,10 +372,50 @@ describe("the live tier", () => {
 	test("reportLive is 1 for a breach and 0 for a pass when every question was answered", () => {
 		const results: QueryResult[] = [{ query: "q", expected: "a:b.md", ranked: ["a:b.md"], latencyMs: 1 }];
 		const quiet = { env: {}, stdout: () => undefined, stderr: () => undefined };
-		expect(reportLive(1, { results, failed: 0, degraded: 0, aborted: null }, true, quiet)).toBe(0);
+		expect(reportLive(1, { results, failed: 0, degraded: 0, aborted: null, skippedUnsafe: 0 }, true, quiet)).toBe(0);
 		const miss: QueryResult[] = [{ query: "q", expected: "a:b.md", ranked: [], latencyMs: 1 }];
-		expect(reportLive(1, { results: miss, failed: 0, degraded: 0, aborted: null }, true, quiet)).toBe(1);
+		expect(reportLive(1, { results: miss, failed: 0, degraded: 0, aborted: null, skippedUnsafe: 0 }, true, quiet)).toBe(1);
 		expect(scoreRun(miss).recall5).toBe(0);
+	});
+
+	describe("a question that looks like it carries a credential", () => {
+		// Assembled at run time so no credential-shaped literal sits in the source.
+		const KEY = ["sk", "proj", "x".repeat(40)].join("-");
+		const keys = sourceUrl("acme/atlas", "docs/keys.md");
+		const answerKeys = (): Response => Response.json({ chunks: [{ source_url: keys }] });
+		const sentOf = (run: Capture): unknown[] => run.requests.map((request) => (isRecord(request.body) ? request.body.question : null));
+
+		test("is not sent by --live, the others are, and both outputs say how many were held back", async () => {
+			const leaky = tree({ "docs/keys.md": `# Secret handling guide\n\nOur key is ${KEY} for the service.\n` });
+			const human = capture({ repoRoot: leaky, env }, answerKeys);
+			expect(await main(["--live", "http://127.0.0.1:7410"], human.io)).toBe(0);
+			expect(sentOf(human)).toEqual(["Secret handling guide"]);
+			expect(human.out.join("\n")).toContain("1 question was not sent: it looks like it contains a credential (the same check ingest applies)");
+			expect(`${human.out.join("\n")}${human.err.join("\n")}${JSON.stringify(human.requests)}`).not.toContain(KEY);
+			const json = capture({ repoRoot: leaky, env }, answerKeys);
+			await main(["--live", "http://127.0.0.1:7410", "--json"], json.io);
+			expect(JSON.parse(defined(json.out[0]))).toMatchObject({ asked: 2, answered: 1, failed: 0, skippedUnsafe: 1 });
+		});
+
+		test("when every question is held back nothing is sent and the run is unscored: exit 3, never a pass", async () => {
+			const allLeaky = tree({ "docs/keys.md": `# Key ${KEY} here\n` });
+			const run = capture({ repoRoot: allLeaky, env }, answerKeys);
+			expect(await main(["--live", "http://127.0.0.1:7410"], run.io)).toBe(3);
+			expect(run.requests).toEqual([]);
+			expect(`${run.out.join("\n")}${run.err.join("\n")}`).not.toContain(KEY);
+		});
+
+		test("the canary sends nothing for it, says so on stderr, and reports nothing when none could be asked", async () => {
+			const leaky = tree({ "docs/keys.md": `# Secret handling guide\n\nOur key is ${KEY} for the service.\n` });
+			const some = capture({ repoRoot: leaky, env }, answerKeys);
+			expect(await measureGoldenRecall("http://127.0.0.1:7410", "test-bearer", some.io)).toMatchObject({ recall5: 1 });
+			expect(sentOf(some)).toEqual(["Secret handling guide"]);
+			expect(some.err.join("\n")).toContain("docs canary: 1 question was not sent");
+			const allLeaky = tree({ "docs/keys.md": `# Key ${KEY} here\n` });
+			const none = capture({ repoRoot: allLeaky, env }, answerKeys);
+			expect(await measureGoldenRecall("http://127.0.0.1:7410", "test-bearer", none.io)).toBeNull();
+			expect(none.requests).toEqual([]);
+		});
 	});
 
 	test("a scan of docs/ that a bound cut is partial: the canary measures nothing and says why, and the script labels the verdict", async () => {

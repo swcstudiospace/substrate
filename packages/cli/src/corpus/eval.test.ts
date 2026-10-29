@@ -280,3 +280,47 @@ describe("a run that could not score is never reported as holding the objective"
 		expect(json).toMatchObject({ scored: true, verdict: "holds" });
 	});
 });
+
+describe("a question that looks like it carries a credential is never sent", () => {
+	// Assembled at run time so no credential-shaped literal sits in the source.
+	const KEY = ["sk", "proj", "x".repeat(40)].join("-");
+	const KEYS_URL = sourceUrl("acme/atlas", "docs/keys.md");
+	const documentsOf = (text: string): EvalDocuments => ({ ...PLAIN_DOCUMENTS, docs: [{ repo: "acme/atlas", path: "docs/keys.md", text }] });
+
+	function recorded(): { sent: string[]; answer: (question: string) => Response } {
+		const sent: string[] = [];
+		return {
+			sent,
+			answer: (question) => {
+				sent.push(question);
+				return Response.json({ chunks: [{ source_url: KEYS_URL }] });
+			},
+		};
+	}
+
+	test("the others are asked and scored, the skipped one is counted and said, and the key never leaves", async () => {
+		const { sent, answer } = recorded();
+		const documents = documentsOf(`# Secret handling guide\n\nOur key is ${KEY} for the service.\n`);
+		const outcome = await evaluateCorpus(request({ documents, answer }));
+		expect(sent).toEqual(["Secret handling guide"]);
+		expect(outcome.code).toBe(0);
+		expect(outcome.text).toContain("1 question was not sent: it looks like it contains a credential (the same check ingest applies)");
+		expect(JSON.stringify([sent, outcome])).not.toContain(KEY);
+		const json = JSON.parse((await evaluateCorpus(request({ documents, answer, json: true }))).text);
+		expect(json).toMatchObject({ questions: 2, answered: 1, failed: 0, skippedUnsafe: 1, scored: true, verdict: "holds" });
+	});
+
+	test("a run where every question was skipped is unscored and exits non-zero, never a pass", async () => {
+		const { sent, answer } = recorded();
+		const documents = documentsOf(`# Key ${KEY} here\n`);
+		const outcome = await evaluateCorpus(request({ documents, answer }));
+		expect(sent).toEqual([]);
+		expect(outcome.code).toBe(1);
+		expect(outcome.text).toContain("recall@5 not measured (every question looks like it contains a credential, so none was sent)");
+		expect(outcome.text).not.toContain("holds the objective");
+		expect(outcome.warning).toContain("1 question was not sent");
+		expect(JSON.stringify(outcome)).not.toContain(KEY);
+		const json = JSON.parse((await evaluateCorpus(request({ documents, answer, json: true }))).text);
+		expect(json).toMatchObject({ questions: 1, answered: 0, failed: 0, skippedUnsafe: 1, scored: false, verdict: "unscored" });
+	});
+});

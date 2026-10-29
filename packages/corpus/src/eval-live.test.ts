@@ -6,6 +6,7 @@ import {
 	LIVE_RUN_DEADLINE_MS,
 	ranksFromSearchReply,
 	runLiveQueries,
+	unsafeSkippedLine,
 	type LiveOptions,
 } from "./eval-live.ts";
 import { sourceUrl } from "./protocol.ts";
@@ -62,9 +63,12 @@ describe("ranksFromSearchReply", () => {
 	});
 });
 
+/** A guard that flags nothing; the guard is a required option, so every run passes one. */
+const safe = (): boolean => false;
+
 describe("runLiveQueries", () => {
-	function options(fetchImpl: LiveOptions["fetchImpl"], clock: { t: number }): LiveOptions {
-		return { base: "http://127.0.0.1:7410/", token: "test-bearer", fetchImpl, now: () => clock.t };
+	function options(fetchImpl: LiveOptions["fetchImpl"], clock: { t: number }, unsafe: LiveOptions["unsafe"] = safe): LiveOptions {
+		return { base: "http://127.0.0.1:7410/", token: "test-bearer", fetchImpl, now: () => clock.t, unsafe };
 	}
 
 	test("asks POST /docs/search once per question as the bearer, with the corpus dataset, and records rank and latency", async () => {
@@ -89,6 +93,7 @@ describe("runLiveQueries", () => {
 			failed: 0,
 			degraded: 0,
 			aborted: null,
+			skippedUnsafe: 0,
 		});
 		expect(seen).toHaveLength(2);
 		expect(defined(seen[0]).url).toBe("http://127.0.0.1:7410/docs/search");
@@ -167,5 +172,80 @@ describe("runLiveQueries", () => {
 		);
 		expect(stopped.results).toHaveLength(2);
 		expect(stopped.aborted).toBe("deadline");
+	});
+
+	describe("a question the guard flags", () => {
+		const flagged = (text: string): boolean => text.includes("flagged");
+		const asked = (clock: { t: number }, bodies: string[]): LiveOptions["fetchImpl"] => async (_url, init) => {
+			clock.t += 1;
+			bodies.push(String(init?.body));
+			return Response.json({ chunks: [{ source_url: A }] });
+		};
+
+		test("is never sent, is counted, and is neither failed nor scored; the others are asked", async () => {
+			const clock = { t: 0 };
+			const bodies: string[] = [];
+			const queries: GoldenQuery[] = [question(1), { ...question(2), query: "a flagged question" }, question(3)];
+			const run = await runLiveQueries(queries, options(asked(clock, bodies), clock, flagged));
+			expect(run.skippedUnsafe).toBe(1);
+			expect(run.failed).toBe(0);
+			expect(run.aborted).toBeNull();
+			expect(run.results.map((result) => result.query)).toEqual(["question number 1", "question number 3"]);
+			expect(bodies).toHaveLength(2);
+			expect(bodies.join("")).not.toContain("flagged");
+			// The flagged question's text is not kept anywhere in what the run returns.
+			expect(JSON.stringify(run)).not.toContain("flagged");
+			// A question keeps its position in the session id whether or not its neighbours were sent.
+			expect(JSON.parse(defined(bodies[1]))).toMatchObject({ session_id: "docs-eval:2" });
+		});
+
+		test("does not count towards the consecutive failures that stop a run", async () => {
+			const clock = { t: 0 };
+			const bodies: string[] = [];
+			const flaggedQuestions = Array.from({ length: LIVE_MAX_CONSECUTIVE_FAILURES + 2 }, (_, i): GoldenQuery => ({ ...question(i), query: `flagged ${i}` }));
+			const run = await runLiveQueries([...flaggedQuestions, question(1)], options(asked(clock, bodies), clock, flagged));
+			expect(run.skippedUnsafe).toBe(LIVE_MAX_CONSECUTIVE_FAILURES + 2);
+			expect(run.results).toHaveLength(1);
+			expect(run.aborted).toBeNull();
+		});
+
+		test("is still counted when the run stops early", async () => {
+			const clock = { t: 0 };
+			const run = await runLiveQueries(
+				[...[1, 2, 3, 4, 5, 6, 7].map(question), { ...question(8), query: "flagged late" }],
+				options(async () => new Response("no", { status: 503 }), clock, flagged),
+			);
+			expect(run.aborted).toBe("consecutive-failures");
+			expect(run.skippedUnsafe).toBe(1);
+		});
+
+		test("when every question is flagged, nothing is sent and nothing is scored", async () => {
+			const clock = { t: 0 };
+			const bodies: string[] = [];
+			const run = await runLiveQueries([1, 2].map((i): GoldenQuery => ({ ...question(i), query: `flagged ${i}` })), options(asked(clock, bodies), clock, flagged));
+			expect(bodies).toEqual([]);
+			expect(run).toEqual({ results: [], failed: 0, degraded: 0, aborted: null, skippedUnsafe: 2 });
+		});
+
+		test("a guard that throws keeps the question back", async () => {
+			const clock = { t: 0 };
+			const bodies: string[] = [];
+			const run = await runLiveQueries(
+				[question(1)],
+				options(asked(clock, bodies), clock, () => {
+					throw new Error("guard broke");
+				}),
+			);
+			expect(bodies).toEqual([]);
+			expect(run.skippedUnsafe).toBe(1);
+		});
+	});
+
+	describe("unsafeSkippedLine", () => {
+		test("says how many were not sent and why, in the singular and the plural, and nothing for none", () => {
+			expect(unsafeSkippedLine(0)).toBe("");
+			expect(unsafeSkippedLine(1)).toBe("1 question was not sent: it looks like it contains a credential (the same check ingest applies)");
+			expect(unsafeSkippedLine(3)).toBe("3 questions were not sent: they look like they contain a credential (the same check ingest applies)");
+		});
 	});
 });
