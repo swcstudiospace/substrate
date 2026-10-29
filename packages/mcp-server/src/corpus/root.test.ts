@@ -279,10 +279,102 @@ describe("CorpusRootKeeper", () => {
 		expect(emitted).toHaveLength(1);
 		defined(releases.shift(), "the first write").call(undefined);
 		await flush();
+		// The rerun waits out the window from the first write's start, which is long past here, so its timer is armed at once.
+		clock.fire();
+		await flush();
 		expect(emitted.map((event) => event.payload?.manifest_version)).toEqual([2, 3]);
 		defined(releases.shift(), "the second write").call(undefined);
 		await flush();
 		// Nothing is owed for a version already written.
+		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
+		keeper.manifestChanged();
+		clock.fire();
+		await flush();
+		expect(emitted).toHaveLength(2);
+	});
+
+	test("a request that arrives during a slow write waits out the window from that write's start, so writes never come closer than the interval", async () => {
+		const clock = new ManualClock();
+		const store = new FakeStore();
+		const starts: number[] = [];
+		const releases: Array<() => void> = [];
+		const keeper = new CorpusRootKeeper({
+			store: () => store,
+			emit: () =>
+				new Promise<void>((resolve) => {
+					starts.push(clock.now());
+					releases.push(resolve);
+				}),
+			clock,
+		});
+		seed(store, 2);
+		keeper.manifestChanged();
+		clock.fire();
+		await flush();
+		// The first write is slow. A second change is noted after the window, while it still runs.
+		clock.at += 6_000;
+		store.seed(makeRow({ repo: REPO, path: "docs/second.md", sha256: sha256Hex("second") }));
+		keeper.manifestChanged();
+		clock.fire();
+		await flush();
+		defined(releases.shift(), "the first write").call(undefined);
+		await flush();
+		clock.fire();
+		await flush();
+		expect(starts).toEqual([1_000_000, 1_006_000]);
+		// A third change four seconds after the second write began waits the rest of the window from that start, not from the first.
+		clock.at += 4_000;
+		store.seed(makeRow({ repo: REPO, path: "docs/third.md", sha256: sha256Hex("third") }));
+		keeper.manifestChanged();
+		expect(clock.timers.map((timer) => timer.ms)).toEqual([ROOT_EMIT_MIN_INTERVAL_MS - 4_000]);
+	});
+
+	test("nothing is recorded while an ingest is writing, and the settled state is recorded after it", async () => {
+		const { clock, emitted, keeper, store } = harness();
+		const manifest = defined(store);
+		seed(manifest, 2);
+		keeper.manifestChanged();
+		clock.fire();
+		await flush();
+		expect(emitted).toHaveLength(1);
+		keeper.writeStarted();
+		manifest.seed(makeRow({ repo: REPO, path: "docs/batch-1.md", sha256: sha256Hex("batch 1") }));
+		// A timer left over from the previous ingest fires while this one is writing.
+		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
+		keeper.manifestChanged();
+		clock.fire();
+		await flush();
+		expect(emitted).toHaveLength(1);
+		manifest.seed(makeRow({ repo: REPO, path: "docs/batch-2.md", sha256: sha256Hex("batch 2") }));
+		keeper.writeSettled(true);
+		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
+		clock.fire();
+		await flush();
+		expect(emitted.map((event) => event.payload?.count)).toEqual([2, 4]);
+	});
+
+	test("a root is compared, not its version: a final state that shares the version of an earlier read is still recorded", async () => {
+		// Concurrent batches may commit out of order, so two different states can read at the same manifest version.
+		class SharedVersion extends FakeStore {
+			reads = 0;
+			override async activeLeaves(limit: number): Promise<ActiveLeaves> {
+				const real = await super.activeLeaves(limit);
+				this.reads += 1;
+				return { ...real, manifestVersion: 9, leaves: this.reads === 1 ? real.leaves.slice(0, 2) : real.leaves };
+			}
+		}
+		const shared = new SharedVersion();
+		const { clock, emitted, keeper } = harness(shared);
+		seed(shared, 3);
+		keeper.manifestChanged();
+		clock.fire();
+		await flush();
+		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
+		keeper.manifestChanged();
+		clock.fire();
+		await flush();
+		expect(emitted.map((event) => event.payload?.count)).toEqual([2, 3]);
+		// The same state again writes nothing.
 		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
 		keeper.manifestChanged();
 		clock.fire();

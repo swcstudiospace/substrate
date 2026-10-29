@@ -57,9 +57,10 @@ After an ingest request that moved the manifest, the server writes one ledger ev
 
 It goes through the ordinary emit path, so the existing redaction and hash chain apply, and the hour it lands in is covered by that hour's anchor like any other event. The action is reserved (`RESERVED_NOTE_ACTIONS`): `events_emit` and `POST /events` refuse it from an ordinary caller, so only the server (or an operator, as its own surface) can write one. The row is in `docs/event-vocabulary.md` and `packages/mcp-server/src/event-sources.ts`.
 
-- **Coalesced.** At most one event per five seconds. A change that lands inside the window is folded into the next event, and the event that goes out reads the manifest when its timer fires, so the latest state wins. The first change after a quiet period writes at once.
+- **Coalesced.** At most one event per five seconds, counted from the start of the previous write attempt (a slow write does not shorten the window for the next one). A change that lands inside the window is folded into the next event, and the event that goes out reads the manifest when its timer fires, so the latest state wins. The first change after a quiet period writes at once. One root is written at a time.
+- **Settled states only.** While an ingest is writing, the manifest is between versions, so no root is recorded and a search does not name one; the event follows the ingest's last write.
 - **Not in the request's path.** The event is scheduled on a timer and written after the ingest has answered. A failure of any kind (the manifest unreadable, the ledger unavailable) is swallowed: a root event never fails an ingest.
-- **One per manifest version.** A request that changed nothing writes nothing, and a version is never written twice by one process.
+- **One per state.** A root is written only when it differs from the root written last, so a request that changed nothing writes nothing and a state is never written twice by one process, whatever order concurrent batches committed in.
 - **What can be lost.** A root event still waiting in its timer when the server stops is dropped, and one that failed to reach the ledger is not retried. The next change writes the then-current root. `GET /corpus/root` always answers the live manifest, so the root of a document you can prove is the one to ask `GET /corpus/anchor` about.
 - **Not emitted** for the empty manifest, or when the manifest is too large for a root.
 
