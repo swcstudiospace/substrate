@@ -22,6 +22,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@substrate/evidence": "workspace:*",
+        "@substrate/fleet": "workspace:*",
       },
     },
     "packages/collectors": {
@@ -35,6 +36,10 @@
         "@substrate/audit": "workspace:*",
         "@substrate/observability": "workspace:*",
       },
+    },
+    "packages/fleet": {
+      "name": "@substrate/fleet",
+      "version": "0.1.0",
     },
     "packages/host": {
       "name": "@substrate/host",
@@ -485,6 +490,8 @@
     "@substrate/collectors": ["@substrate/collectors@workspace:packages/collectors"],
 
     "@substrate/evidence": ["@substrate/evidence@workspace:packages/evidence"],
+
+    "@substrate/fleet": ["@substrate/fleet@workspace:packages/fleet"],
 
     "@substrate/host": ["@substrate/host@workspace:packages/host"],
 
