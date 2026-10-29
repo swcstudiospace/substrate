@@ -815,7 +815,7 @@ switch (command) {
 				"substrate memory capsule export --out FILE [--session S] [--repo R] [--since ISO] [--limit N] [--store DIR]\n" +
 				"                         | verify FILE [--anchors] | redact FILE --ids a,b --reason TEXT --out FILE2   (substrate memory capsule for the flags)\n" +
 				"substrate spool status [--json] | flush [--json] [--budget-ms N]   (the event spool needs SUBSTRATE_EVENT_SPOOL=on)\n" +
-				"substrate worktree list|status|scan|prune|conflicts|provision|disk ...   (substrate worktree --help; roots from SUBSTRATE_WORKTREE_ROOTS)\n",
+				"substrate worktree list|status|scan|prune|conflicts|provision|disk ...   (substrate worktree --help; roots from SUBSTRATE_WORKTREE_ROOTS)\n" +
 				"substrate corpus scan | plan | ingest [--execute] | status   (substrate corpus --help for the flags; ingest is a dry run without --execute)\n",
 		);
 		process.exit(command ? 2 : 0);
