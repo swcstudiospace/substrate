@@ -5,10 +5,10 @@
  * against a fake `docker` on PATH that records its argv, never the daemon.
  */
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
 	acquireNameLock,
 	withNameLock,
@@ -42,6 +42,7 @@ import {
 	refuseExtraArgs,
 	refuseLedgerUrl,
 	refusePort,
+	UNIT_WORKING_DIRECTORY,
 	refuseSmokeUrl,
 	resolveContainerRemoval,
 	selectStoreContainer,
@@ -168,22 +169,24 @@ describe("isTwinHealthy", () => {
 describe("refusePort", () => {
 	test("refuses the production ports", () => {
 		for (const port of [7410, 7411, 6420]) {
-			expect(refusePort(port, [])).toContain("reserved");
+			expect(refusePort(port)).toContain("reserved");
 		}
 	});
 
-	test("refuses a port that is already listening", () => {
-		expect(refusePort(17410, [17410, 17411])).toContain("listening");
+	test("refuses an out-of-range or fractional port", () => {
+		expect(refusePort(-1)).toContain("bad port");
+		expect(refusePort(65536)).toContain("bad port");
+		expect(refusePort(1.5)).toContain("bad port");
 	});
 
-	test("accepts a free scratch port and port 0", () => {
-		expect(refusePort(17410, [])).toBeNull();
-		expect(refusePort(0, [])).toBeNull();
+	test("accepts a scratch port and port 0", () => {
+		expect(refusePort(17410)).toBeNull();
+		expect(refusePort(0)).toBeNull();
 	});
 
 	test("pickFreePort yields a bindable port outside the reserved set", async () => {
 		const picked = await pickFreePort();
-		expect(refusePort(picked, [])).toBeNull();
+		expect(refusePort(picked)).toBeNull();
 		const srv = createServer();
 		await new Promise<void>((resolve) => srv.listen(picked, "127.0.0.1", () => resolve()));
 		expect(await isPortFree(picked)).toBe(false);
@@ -279,6 +282,34 @@ describe("refuseCheckoutDir", () => {
 	test("refuses the production checkout, allows a worktree", () => {
 		expect(refuseCheckoutDir("/root/src/repos/agent-substrate")).toContain("production checkout");
 		expect(refuseCheckoutDir("/root/src/worktrees/agent-substrate-v13-phase")).toBeNull();
+	});
+
+	test("refuses the production checkout spelled with trailing separators or dot segments", () => {
+		// An exact string match let `<dir>/` and `<dir>/../<name>` through the guard.
+		expect(refuseCheckoutDir(`${UNIT_WORKING_DIRECTORY}/`)).toContain("production checkout");
+		expect(refuseCheckoutDir(`${UNIT_WORKING_DIRECTORY}//`)).toContain("production checkout");
+		expect(refuseCheckoutDir(`${UNIT_WORKING_DIRECTORY}/./`)).toContain("production checkout");
+		expect(refuseCheckoutDir(`${UNIT_WORKING_DIRECTORY}/../${basename(UNIT_WORKING_DIRECTORY)}`)).toContain("production checkout");
+	});
+
+	test("does not refuse a sibling that only shares the production checkout's name prefix", () => {
+		expect(refuseCheckoutDir(`${UNIT_WORKING_DIRECTORY}-v13`)).toBeNull();
+	});
+
+	// The symlink cases need the real production directory on this host to link to.
+	test.skipIf(!existsSync(UNIT_WORKING_DIRECTORY))("refuses a symlink to the production checkout", () => {
+		const root = mkdtempSync(join(tmpdir(), "rehearsal-checkout-"));
+		try {
+			const direct = join(root, "direct");
+			symlinkSync(UNIT_WORKING_DIRECTORY, direct);
+			expect(refuseCheckoutDir(direct)).toContain("production checkout");
+			expect(refuseCheckoutDir(`${direct}/`)).toContain("production checkout");
+			const viaParent = join(root, "parent");
+			symlinkSync(dirname(UNIT_WORKING_DIRECTORY), viaParent);
+			expect(refuseCheckoutDir(join(viaParent, basename(UNIT_WORKING_DIRECTORY)))).toContain("production checkout");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 
