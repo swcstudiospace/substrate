@@ -418,6 +418,15 @@ export function createObservability(
 		indexArchive(source) {
 			instruments.observeIndexArchiveAge(() => source.newestAtMs());
 		},
+		corpusFreshness(source) {
+			instruments.observeCorpusFreshness(() => source.newestAtMs());
+		},
+		corpusIngest(sample) {
+			instruments.setCorpusIngestRate(sample.docsPerSecond);
+		},
+		corpusGolden(sample) {
+			instruments.setCorpusGoldenRecall5(sample.recall5);
+		},
 	};
 
 	/**

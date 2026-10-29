@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { gatherFabricFacts } from "./gather.ts";
 import { buildFabricStatus } from "./status.ts";
+import { SLO_DEFAULTS, type SloReadings } from "@substrate/corpus";
 import { FABRIC_RESOURCES, type FabricCostView, type FabricFacts, type FabricHealthParts, type FabricHealthView, type FabricSources } from "./types.ts";
 
 const NOW = "2026-10-21T00:00:00.000Z";
 const COST: FabricCostView = { status: "ok", projectedMonthlyUsd: 3, budgetUsd: 50 };
+const CORPUS_READINGS: SloReadings = { freshnessS: 120, recall5: 0.9, ingestDocsPerS: 1 };
 
 /** The synchronous view: every breaker closed, the cache answering. */
 function snapshot(): FabricHealthView {
@@ -47,6 +49,7 @@ function sources(overrides: Partial<FabricSources> = {}): FabricSources {
 		health: () => healthyParts(),
 		snapshot,
 		railwayCost: async () => COST,
+		corpus: async () => CORPUS_READINGS,
 		outbox: () => ({ size: 0, oldestAt: null }),
 		config: {
 			endpointPolicy: "enforce",
@@ -54,6 +57,8 @@ function sources(overrides: Partial<FabricSources> = {}): FabricSources {
 			configured: { dragonfly: true, "timescaledb-index": true, greptime: true, ragflow: true, lightrag: true, hindsight: true, tei: true },
 			teiEndpoint: "loopback",
 			dragonflyRefused: false,
+			corpusEnabled: true,
+			docsSlo: { ...SLO_DEFAULTS },
 		},
 		...overrides,
 	};
@@ -161,6 +166,42 @@ describe("gatherFabricFacts", () => {
 		expect(row.state).toBe("unconfigured");
 		expect(row.detail).toBeUndefined();
 		expect(facts.tei.endpointClass).toBeNull();
+	});
+});
+
+describe("the corpus row", () => {
+	test("reads the corpus readings and judges them against the configured thresholds", async () => {
+		const facts = await gatherFabricFacts(sources());
+		expect(facts.corpus).toEqual({ enabled: true, readings: CORPUS_READINGS, thresholds: SLO_DEFAULTS, unread: null });
+		expect(rowOf(facts, "corpus")).toMatchObject({ state: "ok", source: "corpus.slo" });
+		const base = sources();
+		const strict = await gatherFabricFacts({ ...base, config: { ...base.config, docsSlo: { freshnessS: 60, recall5: 0.6, ingestDocsPerS: 0.2 } } });
+		expect(rowOf(strict, "corpus")).toMatchObject({ state: "degraded", source: "corpus.slo: breached freshness" });
+	});
+
+	test("a corpus that is off is not asked and is unconfigured", async () => {
+		let asked = 0;
+		const base = sources();
+		const facts = await gatherFabricFacts({
+			...base,
+			corpus: async () => {
+				asked += 1;
+				return CORPUS_READINGS;
+			},
+			config: { ...base.config, corpusEnabled: false },
+		});
+		expect(asked).toBe(0);
+		expect(facts.corpus.enabled).toBe(false);
+		expect(rowOf(facts, "corpus").state).toBe("unconfigured");
+	});
+
+	test("readings that miss the deadline or throw make the corpus row degraded with the reason, and the planes keep their state", async () => {
+		const slow = await gatherFabricFacts({ ...sources(), corpus: () => never<SloReadings>() }, { deadlineMs: 20 });
+		expect(rowOf(slow, "corpus")).toMatchObject({ state: "degraded", source: "corpus.slo: timeout" });
+		expect(rowOf(slow, "greptime").state).toBe("ok");
+		const broken = await gatherFabricFacts({ ...sources(), corpus: () => Promise.reject(new Error("index gone")) });
+		expect(rowOf(broken, "corpus")).toMatchObject({ state: "degraded", source: "corpus.slo: failed" });
+		expect(broken.corpus.readings).toEqual({ freshnessS: null, recall5: null, ingestDocsPerS: null });
 	});
 });
 

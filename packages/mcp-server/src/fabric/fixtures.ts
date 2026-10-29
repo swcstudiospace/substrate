@@ -1,4 +1,5 @@
 /** Facts builders for the fabric's tests. Every value is a name, an enum or a count, as in production. */
+import { SLO_DEFAULTS } from "@substrate/corpus";
 import type { FabricFacts, ServiceName, ServiceReading } from "./types.ts";
 
 export const CHECKED_AT = "2026-10-21T00:00:00.000Z";
@@ -25,7 +26,7 @@ export function healthyServices(): Record<ServiceName, ServiceReading> {
 	};
 }
 
-/** Every resource configured and answering, every data plane and the embedding service behind a proxy or loopback, the cache answering, the bus on. */
+/** Every resource configured and answering, every data plane and the embedding service behind a proxy or loopback, the cache answering, the bus on, the corpus within its objectives. */
 export function healthyFacts(overrides: Partial<FabricFacts> = {}): FabricFacts {
 	return {
 		checkedAt: CHECKED_AT,
@@ -37,6 +38,7 @@ export function healthyFacts(overrides: Partial<FabricFacts> = {}): FabricFacts 
 		eventBusEnabled: true,
 		outbox: { parked: 0, oldestAt: null },
 		railway: { status: "ok", projectedMonthlyUsd: 3, budgetUsd: 50 },
+		corpus: { enabled: true, readings: { freshnessS: 3600, recall5: 0.9, ingestDocsPerS: 1 }, thresholds: { ...SLO_DEFAULTS }, unread: null },
 		...overrides,
 	};
 }
@@ -62,5 +64,6 @@ export function unconfiguredFacts(): FabricFacts {
 		eventBusEnabled: null,
 		outbox: { parked: 0, oldestAt: null },
 		railway: { status: "unconfigured", projectedMonthlyUsd: null, budgetUsd: null },
+		corpus: { enabled: false, readings: { freshnessS: null, recall5: null, ingestDocsPerS: null }, thresholds: { ...SLO_DEFAULTS }, unread: null },
 	};
 }

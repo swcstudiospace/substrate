@@ -51,7 +51,9 @@ These apply to every source:
   `SUBSTRATE_DOCS_TRIGGER_LAG_MIN` and one `note` when it clears, with
   `payload.state`, `dataset`, `commit`, `lag_seconds`, deduped through the
   docs state file; `docs-canary` — the opt-in live golden canary, one
-  `warning` per changed failing set, with `payload.failing[{fixture, failed}]`;
+  `warning` per changed failing set, with `payload.failing[{fixture, failed}]`, and (v1.7 phase 70) one `note` per
+  run that measured the golden set, with `payload.golden_recall5` and `golden_asked`, which the warning also carries
+  as `golden_recall5` when it was measured;
   `index-archive` — uplift-4 S2, one `note` per finished index snapshot with
   `payload.snapshot`, `createdAt`, `serverVersion`, `schemaHash` and per-table
   `rows`, `bytes`, `sha256`, never rows or a path; `alert` — uplift-4 S3, one
@@ -120,6 +122,7 @@ These apply to every source:
 | `docs.freshness` | 25 | `warning` | `substrate` | `docs.freshness` | `docs-freshness` | — | yes |
 | `docs.freshness.recovered` | 25 | `note` | `substrate` | `docs.freshness` | `docs-freshness` | — | yes |
 | `docs.canary` | 25 | `warning` | `substrate` | `docs.canary` | `docs-canary` | — | yes |
+| `docs.canary.report` | 70 | `note` | `substrate` | `docs.canary` | `docs-canary` | — | yes |
 | `index.archive` | 28 | `note` | `substrate` | `index.archive` | `index-archive` | — | yes |
 | `alert` | 33 | `warning` | `substrate` | `alert` | `alert` | — | yes |
 | `teachable.accepted` | 29 | `note` | `memory-writer` | `teachable` | — | — | no |

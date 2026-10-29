@@ -241,6 +241,10 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_CORPUS_CONCURRENCY` | number | 4 | 1..16 | 4 batches in flight at once. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CORPUS_BATCH_DOCS` | number | 20 | 1..200 | 20 documents per batch. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CORPUS_BATCH_BYTES` | number | 1000000 | 10000..5000000 | 1000000 bytes per batch. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_DOCS_SLO_FRESHNESS_S` | number | 86400 | 1 or more (seconds) | 86400 seconds: the corpus row of fabric_status degrades when the newest manifest change is older than a day; an empty, zero, negative or non-numeric value is the default too. See `docs/corpus-eval.md` | corpus/src/slo.ts | yes |
+| `SUBSTRATE_DOCS_SLO_RECALL5` | number | 0.6 | above 0 up to 1 | 0.6: a golden-set recall at 5 below it degrades the corpus row and fails the canary and `substrate corpus eval`; a value outside the range is the default too. See `docs/corpus-eval.md` | corpus/src/slo.ts | yes |
+| `SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S` | number | 0.2 | above 0 (documents per second) | 0.2: an ingest request that sent documents and averaged below it degrades the corpus row; a request that sent none is not judged; an invalid value is the default too. See `docs/corpus-eval.md` | corpus/src/slo.ts | yes |
+| `SUBSTRATE_DOCS_EVAL_REPO` | string | swcstudiospace/agent-substrate | owner/name | swcstudiospace/agent-substrate: the repository name `scripts/docs-eval.ts --live` and the canary expect this checkout's docs to be ingested under. See `docs/corpus-eval.md` | scripts/docs-eval.ts | yes |
 
 ## Admission budgets and circuit breakers
 

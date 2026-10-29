@@ -539,6 +539,75 @@ describe("the live canary (uplift-4 S7)", () => {
 		expect(silent.tokenReads).toEqual([join("/scratch/tokens", "substrate")]);
 	});
 
+	test("a measured golden recall above the objective posts one note as substrate with the recall and the question count, and the canary still exits 0", async () => {
+		const run = canary();
+		run.goldenIo.goldenRecall = async () => ({ recall5: 0.8, asked: 120 });
+		expect(await main(["--live", "--emit"], run.goldenIo)).toBe(0);
+		const posted = events(run.requests);
+		expect(posted).toHaveLength(1);
+		expect(posted[0]?.authorization).toBe("Bearer tok-substrate");
+		expect(posted[0]?.body).toMatchObject({
+			surface: "substrate",
+			kind: "note",
+			payload: { action: "docs.canary", runtime: "docs-canary", golden_recall5: 0.8, golden_asked: 120 },
+		});
+		expect(run.out).toContain("golden recall@5 0.800 over 120 questions (objective 0.6)");
+		expect(run.state()).toBeNull();
+	});
+
+	test("a golden recall under the objective fails the run and says which flag, still reports it, and the objective is the flag's", async () => {
+		const low = canary();
+		low.goldenIo.goldenRecall = async () => ({ recall5: 0.4, asked: 50 });
+		expect(await main(["--live", "--emit"], low.goldenIo)).toBe(1);
+		expect(low.err.at(-1)).toContain("SUBSTRATE_DOCS_SLO_RECALL5");
+		expect(events(low.requests)).toHaveLength(1);
+		expect(events(low.requests)[0]?.body).toMatchObject({ kind: "note", payload: { golden_recall5: 0.4 } });
+
+		const lenient = canary({ env: { SUBSTRATE_DOCS_SLO_RECALL5: "0.3" } });
+		lenient.goldenIo.goldenRecall = async () => ({ recall5: 0.4, asked: 50 });
+		expect(await main(["--live", "--emit"], lenient.goldenIo)).toBe(0);
+	});
+
+	test("a failing fixture and a measured golden recall post the warning with the recall in it, then the note", async () => {
+		const target = answerable();
+		const run = canary();
+		run.goldenIo.goldenRecall = async () => ({ recall5: 0.9, asked: 10 });
+		run.overrides.set(target.id, (reply) => ({ ...reply, chunks: [] }));
+		expect(await main(["--live", "--emit"], run.goldenIo)).toBe(1);
+		const posted = events(run.requests);
+		expect(posted.map((request) => request.body.kind)).toEqual(["note", "warning"]);
+		expect(posted[1]?.body).toMatchObject({ kind: "warning", payload: { golden_recall5: 0.9, total: fixtures.length } });
+	});
+
+	test("a golden recall that could not be measured, or whose documents cannot be read, is said on stderr and changes nothing else", async () => {
+		const none = canary();
+		none.goldenIo.goldenRecall = async () => null;
+		expect(await main(["--live", "--emit"], none.goldenIo)).toBe(0);
+		expect(none.err.at(-1)).toContain("golden recall not measured");
+		expect(events(none.requests)).toEqual([]);
+
+		const broken = canary();
+		broken.goldenIo.goldenRecall = async () => {
+			throw new Error("ENOENT: no such directory");
+		};
+		expect(await main(["--live", "--emit"], broken.goldenIo)).toBe(0);
+		expect(broken.err.at(-1)).toContain("golden recall not measured");
+		expect(events(broken.requests)).toEqual([]);
+	});
+
+	test("a golden report with no substrate bearer, or one the ledger did not store, is said on stderr and the exit code stays the fixtures'", async () => {
+		const silent = canary({ env: { SUBSTRATE_TOKEN_SUBSTRATE: undefined, SUBSTRATE_TOKEN: undefined, SUBSTRATE_TOKENS_DIR: "/scratch/tokens" } });
+		silent.goldenIo.goldenRecall = async () => ({ recall5: 0.8, asked: 5 });
+		expect(await main(["--live", "--emit"], silent.goldenIo)).toBe(0);
+		expect(silent.err.at(-1)).toContain("golden recall not reported, no substrate bearer");
+		expect(events(silent.requests)).toEqual([]);
+
+		const unstored = canary({ eventStatus: 500 });
+		unstored.goldenIo.goldenRecall = async () => ({ recall5: 0.8, asked: 5 });
+		expect(await main(["--live", "--emit"], unstored.goldenIo)).toBe(0);
+		expect(unstored.err.at(-1)).toContain("golden recall report was not stored");
+	});
+
 	test("plain --live is unchanged: it prints, never asserts, and needs no canary variables", async () => {
 		const run = canary({ env: { SUBSTRATE_DOCS_CANARY: undefined, SUBSTRATE_DOCS_CANARY_MANIFEST: undefined, SUBSTRATE_URL: "http://127.0.0.1:7410", SUBSTRATE_TOKEN: "plain" } });
 		expect(await main(["--live"], run.goldenIo)).toBe(0);

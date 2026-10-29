@@ -52,6 +52,10 @@ A CLI entrypoint may call `process.exit`. A file counts as one when it has a she
 
 `scripts/docs-lint.ts` checks the documents and `bun test` runs it through `scripts/docs-lint.test.ts`, so the CI commands do not change. Two rules apply: every relative markdown link in `docs/`, `.planning/` (archives included), `README.md`, `CONTRIBUTING.md`, `AGENTS.md` and `SECURITY.md` must resolve to a file, and every page under `docs/`, every live `.planning/*.md` file and every file under `.planning/phases/` must have a level-1 title. Archived plans under `.planning/milestones/` are exempt from the title rule only. Link and title checks use Bun's built-in markdown parser, so the lint follows CommonMark: titled, reference, angle-wrapped and percent-encoded link destinations are read as a renderer reads them, and a heading inside code or an HTML comment is not a title. Anchors, absolute paths, URLs, fenced code blocks and inline code are not checked as links; to show an illustrative link without breaking the lint, put it in inline code. Run it alone with `bun test scripts/docs-lint.test.ts`; a failure names the file and the target or title.
 
+### Docs eval
+
+`scripts/docs-eval.ts` scores a self-supervised golden set against a deterministic lexical retriever over `packages/corpus/fixtures/eval/`, and `bun test` runs it through `scripts/docs-eval.test.ts`, so the CI commands do not change. It fails when recall at 5 falls by more than 0.02 or MRR by more than 0.03 against `scripts/docs-eval.baseline.json`, when the set loses questions, or when a group of identical documents is not collapsed to one answer: a change in ranking inputs, de-duplication or the re-rank order. It runs offline in a few seconds. After an intended change, `bun scripts/docs-eval.ts --write-baseline` records the new scores; the guide is [`corpus-eval.md`](corpus-eval.md).
+
 ## CI
 
 | Job | Runner | When | Steps |

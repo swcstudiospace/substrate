@@ -58,6 +58,8 @@ import { join } from "node:path";
 import { DEFAULT_TOKENS_DIR, firstLine, resolveBearer } from "../packages/cli/src/token.ts";
 import { loadGoldenCorpus, searchGoldenOffline } from "../packages/mcp-server/src/docs-golden.ts";
 import { redact } from "../packages/mcp-server/src/redact.ts";
+import { loadSloThresholds } from "../packages/corpus/src/index.ts";
+import { measureGoldenRecall, type GoldenRecallReport } from "./docs-eval.ts";
 
 /** Where the fixtures and their corpus live, relative to the repository root. */
 export const FIXTURE_DIR = join(import.meta.dir, "..", "fixtures", "docs-golden");
@@ -312,6 +314,12 @@ export interface GoldenIo {
 	writeState?: (text: string) => boolean;
 	/** The clock; the current time when omitted. */
 	now?: () => Date;
+	/**
+	 * The self-supervised golden recall (phase 70), taken after the fixtures with the search bearer: `null` when it could not be
+	 * measured. Production reads this checkout's `docs/` through `docs-eval.ts`; a test leaves it out and the canary behaves as it
+	 * did before the golden set existed.
+	 */
+	goldenRecall?: (base: string, bearer: string) => Promise<GoldenRecallReport | null>;
 }
 
 /**
@@ -467,11 +475,18 @@ export interface CanaryEvent {
 	kind: "warning";
 	summary: string;
 	session_id: string;
-	payload: { action: "docs.canary"; runtime: "docs-canary"; total: number; failing: Array<{ fixture: string; failed: string[] }> };
+	payload: {
+		action: "docs.canary";
+		runtime: "docs-canary";
+		total: number;
+		failing: Array<{ fixture: string; failed: string[] }>;
+		/** Present when the golden set was measured in the same run (phase 70). */
+		golden_recall5?: number;
+	};
 }
 
 /** The one warning for a failing set: fixture ids and metric names only, never a citation or a token. */
-export function canaryEvent(failing: ReadonlyArray<{ fixture: string; failed: string[] }>, total: number, stampedAt: string): CanaryEvent {
+export function canaryEvent(failing: ReadonlyArray<{ fixture: string; failed: string[] }>, total: number, stampedAt: string, goldenRecall5: number | null = null): CanaryEvent {
 	const named = failing.slice(0, CANARY_EVENT_MAX);
 	const full = `docs canary regression: ${named.map((entry) => entry.fixture).join(", ")}${failing.length > named.length ? `, +${failing.length - named.length} more` : ""}`;
 	return {
@@ -479,7 +494,26 @@ export function canaryEvent(failing: ReadonlyArray<{ fixture: string; failed: st
 		kind: "warning",
 		summary: full.length <= 200 ? full : `${full.slice(0, 199)}…`,
 		session_id: `docs-canary:${stampedAt}`,
-		payload: { action: "docs.canary", runtime: "docs-canary", total, failing: named },
+		payload: { action: "docs.canary", runtime: "docs-canary", total, failing: named, ...(goldenRecall5 === null ? {} : { golden_recall5: goldenRecall5 }) },
+	};
+}
+
+export interface GoldenReportEvent {
+	surface: "substrate";
+	kind: "note";
+	summary: string;
+	session_id: string;
+	payload: { action: "docs.canary"; runtime: "docs-canary"; golden_recall5: number; golden_asked: number };
+}
+
+/** The note a run posts when it measured the golden set, whatever the fixtures said: the recall and the number of questions, nothing else. */
+export function goldenReportEvent(report: GoldenRecallReport, stampedAt: string): GoldenReportEvent {
+	return {
+		surface: "substrate",
+		kind: "note",
+		summary: `docs canary: golden recall at 5 is ${report.recall5.toFixed(2)} over ${report.asked} questions`,
+		session_id: `docs-canary:${stampedAt}`,
+		payload: { action: "docs.canary", runtime: "docs-canary", golden_recall5: report.recall5, golden_asked: report.asked },
 	};
 }
 
@@ -487,7 +521,9 @@ export function canaryEvent(failing: ReadonlyArray<{ fixture: string; failed: st
  * The canary: every fixture through `POST /docs/search` as `omp`, scored by
  * the same scorer as the offline tier and the printed live tier, plus the
  * attested pin. Exit 0 all pass; 1 a regression (one warning posted when the
- * failing set changed); 2 not configured (named, nothing sent); 3 unusable
+ * failing set changed) or, when `goldenRecall` measured it (phase 70), a golden
+ * recall at 5 under `SUBSTRATE_DOCS_SLO_RECALL5` (a `note` carrying the recall is
+ * posted on every run that measured it); 2 not configured (named, nothing sent); 3 unusable
  * (stale fixtures, an unreadable manifest, a dataset with no version pin, service refused or unreachable, or a degraded
  * answer — an open breaker is an outage, which is the SLO's to report, not a
  * regression to announce; nothing is posted); 4 the dedupe record could not be
@@ -587,6 +623,17 @@ export async function runCanary(io: GoldenIo): Promise<number> {
 	}
 	io.stdout(`${fixtures.length - failing.length}/${fixtures.length} fixtures passed the live canary`);
 
+	// Phase 70: the self-supervised golden set, asked of the same server. A recall under the objective fails the run like a
+	// failing fixture does, so the oneshot's failed state is the visible signal; the note below feeds `corpus.golden_recall5`.
+	const golden = await measureGolden(io, base, bearer);
+	const goldenFloor = loadSloThresholds(io.env).recall5;
+	const goldenBreached = golden !== null && golden.recall5 < goldenFloor;
+	if (golden !== null) {
+		io.stdout(`golden recall@5 ${golden.recall5.toFixed(3)} over ${golden.asked} questions (objective ${goldenFloor})`);
+		if (goldenBreached) io.stderr("docs canary: the golden recall at 5 is under SUBSTRATE_DOCS_SLO_RECALL5");
+		await reportGolden(io, base, golden);
+	}
+
 	const previous = readCanaryState(io.readState?.() ?? null);
 	const current = failing.map((entry) => entry.fixture).sort();
 	const unchanged = previous.length === current.length && previous.every((id, index) => id === current[index]);
@@ -595,7 +642,7 @@ export async function runCanary(io: GoldenIo): Promise<number> {
 			io.stderr("docs canary: all fixtures pass but the dedupe record could not be cleared; the next identical warning would be dropped until it is");
 			return 4;
 		}
-		return 0;
+		return goldenBreached ? 1 : 0;
 	}
 	if (unchanged) return 1;
 	const emitBearer = resolveEmitBearer(io.env, io.readToken);
@@ -603,23 +650,50 @@ export async function runCanary(io: GoldenIo): Promise<number> {
 		io.stderr("docs canary: warning not posted, no substrate bearer (SUBSTRATE_TOKEN_SUBSTRATE, SUBSTRATE_TOKEN or SUBSTRATE_TOKENS_DIR)");
 		return 1;
 	}
-	let stored = false;
-	try {
-		const response = await io.fetchImpl(`${base}/events`, {
-			method: "POST",
-			headers: { "content-type": "application/json", authorization: `Bearer ${emitBearer}` },
-			body: JSON.stringify(canaryEvent(failing, fixtures.length, (io.now?.() ?? new Date()).toISOString())),
-			signal: AbortSignal.timeout(10_000),
-		});
-		await response.text();
-		stored = response.status === 202;
-	} catch {
-		stored = false;
-	}
+	const stored = await postEvent(io, base, emitBearer, canaryEvent(failing, fixtures.length, (io.now?.() ?? new Date()).toISOString(), golden?.recall5 ?? null));
 	// A failed post leaves the old record, so the next run announces it again.
 	if (!stored) io.stderr("docs canary: the warning was not stored; it will be posted again next run");
 	else if (io.writeState?.(`${JSON.stringify({ failing: current })}\n`) === false) io.stderr("docs canary: the dedupe record could not be written; the warning will be posted again next run");
 	return 1;
+}
+
+/** `golden`'s measurement, or `null` with the reason on stderr; it never fails the canary. */
+async function measureGolden(io: GoldenIo, base: string, bearer: string): Promise<GoldenRecallReport | null> {
+	if (io.goldenRecall === undefined) return null;
+	try {
+		const report = await io.goldenRecall(base, bearer);
+		if (report === null) io.stderr("docs canary: golden recall not measured (no documents to ask about, or a question failed or came back degraded)");
+		return report;
+	} catch {
+		io.stderr("docs canary: golden recall not measured (the documents could not be read)");
+		return null;
+	}
+}
+
+/** Posts the golden report as `substrate`. Best effort: a missing bearer or a refused post is said on stderr and changes no exit code. */
+async function reportGolden(io: GoldenIo, base: string, report: GoldenRecallReport): Promise<void> {
+	const emitBearer = resolveEmitBearer(io.env, io.readToken);
+	if (emitBearer === null) {
+		io.stderr("docs canary: golden recall not reported, no substrate bearer (SUBSTRATE_TOKEN_SUBSTRATE, SUBSTRATE_TOKEN or SUBSTRATE_TOKENS_DIR)");
+		return;
+	}
+	if (!(await postEvent(io, base, emitBearer, goldenReportEvent(report, (io.now?.() ?? new Date()).toISOString())))) io.stderr("docs canary: the golden recall report was not stored");
+}
+
+/** One event to `POST /events`; true when the server stored it (202). */
+async function postEvent(io: GoldenIo, base: string, bearer: string, event: CanaryEvent | GoldenReportEvent): Promise<boolean> {
+	try {
+		const response = await io.fetchImpl(`${base}/events`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: `Bearer ${bearer}` },
+			body: JSON.stringify(event),
+			signal: AbortSignal.timeout(10_000),
+		});
+		await response.text();
+		return response.status === 202;
+	} catch {
+		return false;
+	}
 }
 
 /** Write `text` to `file` through a sibling temp file and a rename, so a crash never leaves half a record; false on any failure. */
@@ -649,6 +723,8 @@ if (import.meta.main) {
 			stderr: (line) => process.stderr.write(`${line}\n`),
 			offline: async (fixture) =>
 				(await searchGoldenOffline(corpus, fixture, { commit: fixture.corpus_manifest.dataset_commit ?? "golden-offline" })).reply,
+			goldenRecall: (base, bearer) =>
+				measureGoldenRecall(base, bearer, { env: process.env, fetchImpl: (input, init) => fetch(input, init), now: () => performance.now() }),
 			readState: () => {
 				try {
 					return readFileSync(process.env.SUBSTRATE_DOCS_CANARY_STATE?.trim() || DEFAULT_CANARY_STATE, "utf8");

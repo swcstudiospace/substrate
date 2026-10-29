@@ -67,7 +67,7 @@ describe("fabric tools", () => {
 		}
 	});
 
-	test("fabric_status reports the eight resources, and a resource nothing configures is never ok", async () => {
+	test("fabric_status reports the nine resources, and a resource nothing configures is never ok", async () => {
 		const { fetch } = recordingFetch(() => ({}));
 		const client = await connect(substrateWith({}, fetch));
 		const reply = await call(client, "fabric_status");
@@ -82,8 +82,9 @@ describe("fabric tools", () => {
 			"hindsight",
 			"tei",
 			"tailscale-proxy",
+			"corpus",
 		]);
-		for (const name of ["dragonfly", "timescaledb-index", "greptime", "ragflow", "lightrag", "tei", "tailscale-proxy"]) {
+		for (const name of ["dragonfly", "timescaledb-index", "greptime", "ragflow", "lightrag", "tei", "tailscale-proxy", "corpus"]) {
 			expect(body.resources.find((row) => row.resource === name)?.state).toBe("unconfigured");
 		}
 	});
@@ -131,6 +132,7 @@ describe("fabric tools", () => {
 		}
 		expect(statusOf("resource-state.tailscale-proxy")).toBe("NOT_APPLICABLE");
 		expect(statusOf("tei-endpoint-private")).toBe("NOT_APPLICABLE");
+		expect(statusOf("resource-state.corpus")).toBe("NOT_APPLICABLE");
 		expect(statusOf("audit-policy-fabric-tools")).toBe("PASS");
 		expect(statusOf("report-redaction")).toBe("PASS");
 	});

@@ -21,7 +21,7 @@
  * and is what every deployment gets. `extended` (`SUBSTRATE_METRICS_HISTORY_SERIES`)
  * adds the evidence the promotion advisor reads and the data-plane dashboards
  * draw: cache results, brief profile bytes saved, brief recall results, recall
- * prefetch results, expired-memory reads and three in-process gauges. The mode
+ * prefetch results, expired-memory reads and the in-process gauges. The mode
  * decides what the sampler tracks and writes and what the route serves; a
  * stored row of an extended series stays readable by name to the ledger client
  * (it validates against the union), but no caller reaches it unless the route
@@ -34,6 +34,9 @@ import {
 	AUX_PLANES,
 	BRIEF_RECALL_RESULTS,
 	CACHE_METRIC_RESULTS,
+	CORPUS_FRESHNESS_METRIC,
+	CORPUS_GOLDEN_RECALL5_METRIC,
+	CORPUS_INGEST_RATE_METRIC,
 	DOCS_SEARCH_OUTCOMES,
 	ENDPOINT_PROXY_PLANES_METRIC,
 	INDEX_ARCHIVE_AGE_METRIC,
@@ -139,6 +142,11 @@ const MEMORY_MODE_VALUES: ReadonlySet<string> = new Set<string>(MEMORY_EXPIRED_M
  * LOWER BOUND on the brief class's own share, never an exact one;
  * `admission.decisions` already carries `limited` and
  * `shadow_limited`, so nothing is added for admission.
+ *
+ * The three `corpus.*` gauges (v1.7 phase 70) are the docs plane's service objectives: the age of the newest manifest change
+ * (the worst reading in a step), the documents per second of the last ingest request and the golden-set recall at 5 as the
+ * docs canary last reported it (both averaged: a gauge repeats its last value every interval, so the mean of a step is
+ * that value, never an invented tail).
  */
 export const EXTENDED_METRIC_SERIES: Readonly<Record<string, SeriesSpec>> = {
 	"cache.operations": { kind: "counter", label: "result", values: CACHE_RESULT_VALUES, agg: "sum", unit: "{operation}" },
@@ -150,6 +158,9 @@ export const EXTENDED_METRIC_SERIES: Readonly<Record<string, SeriesSpec>> = {
 	"hindsight.outbox_oldest_age_s": { kind: "gauge", label: null, values: null, agg: "max", unit: "s" },
 	"index.archive_age_s": { kind: "gauge", label: null, values: null, agg: "max", unit: "s" },
 	"endpoint.proxy_planes": { kind: "gauge", label: null, values: null, agg: "max", unit: "{plane}" },
+	"corpus.freshness_seconds": { kind: "gauge", label: null, values: null, agg: "max", unit: "s" },
+	"corpus.ingest_docs_per_s": { kind: "gauge", label: null, values: null, agg: "avg", unit: "{document}/s" },
+	"corpus.golden_recall5": { kind: "gauge", label: null, values: null, agg: "avg", unit: "ratio" },
 };
 
 /** Core plus extended: what the ledger client can store and read, whatever the mode. Never what a caller may ask for; that is {@link metricSeriesFor}. */
@@ -401,6 +412,9 @@ const EXTENDED_GAUGE_SOURCES: ReadonlyArray<{ series: string; metric: string }> 
 	{ series: "hindsight.outbox_oldest_age_s", metric: OUTBOX_OLDEST_METRIC },
 	{ series: "index.archive_age_s", metric: INDEX_ARCHIVE_AGE_METRIC },
 	{ series: "endpoint.proxy_planes", metric: ENDPOINT_PROXY_PLANES_METRIC },
+	{ series: "corpus.freshness_seconds", metric: CORPUS_FRESHNESS_METRIC },
+	{ series: "corpus.ingest_docs_per_s", metric: CORPUS_INGEST_RATE_METRIC },
+	{ series: "corpus.golden_recall5", metric: CORPUS_GOLDEN_RECALL5_METRIC },
 ];
 
 /** A gauge nobody set has no point (the archive age before a first archive), and a non-finite reading is not a number to store: both are skipped. */
@@ -531,6 +545,11 @@ export interface MetricsHistorySamplerDeps {
 	onDrop: (reason: MetricDropReason, rows: number) => void;
 	clock?: () => number;
 	timers?: TimerApi;
+	/**
+	 * Runs before each sample so a reading that needs I/O (the corpus manifest's newest change) is current when the snapshot is
+	 * taken. Fail-open: a rejection costs that reading its refresh, never the sample.
+	 */
+	beforeSample?: (() => Promise<void>) | undefined;
 }
 
 /** Register the drop counter. Called before the registry is seeded, so a checkpoint can restore it. */
@@ -609,6 +628,7 @@ export class MetricsHistorySampler {
 	private async run(): Promise<void> {
 		let rows: MetricSampleRow[] = [];
 		try {
+			await this.deps.beforeSample?.().catch(() => undefined);
 			rows = this.collector.collect(this.deps.snapshot(), this.deps.runwayDays(), this.clock());
 			if (rows.length === 0) return;
 			const result = await this.deps.record(rows);

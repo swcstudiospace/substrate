@@ -134,6 +134,7 @@ const metricsHistory = new MetricsHistorySampler({
 	settings: { enabled: config.metricsHistory.enabled, intervalS: config.metricsHistory.intervalS, series: config.metricsHistory.series },
 	snapshot: () => observability.snapshot(),
 	runwayDays: () => observability.evaluateCapacity()[0]?.observed ?? null,
+	beforeSample: () => substrate.refreshCorpusReadings(),
 	record: async (rows) =>
 		substrate.greptime === null
 			? { stored: 0, drops: { unavailable: rows.length } }

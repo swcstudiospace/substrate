@@ -174,6 +174,7 @@ import { createEmbeddingService, type EmbeddingService } from "./embed.ts";
 import { createLightragBulkPlane, type LightragBulkPlane } from "./planes/lightrag-bulk.ts";
 import { corpusIngestReply, corpusPlanReply, corpusStatusReply, type CorpusReply, type CorpusServiceDeps } from "./corpus/service.ts";
 import type { CorpusStore } from "./corpus/store.ts";
+import { CorpusSloState } from "./corpus/slo.ts";
 import type { CorpusIngestResponse, CorpusPlanResponse, CorpusStatusResponse } from "@substrate/corpus";
 import { RailwayClient } from "./railway.ts";
 import { nodePlanningFs } from "./planning/fs.ts";
@@ -864,6 +865,12 @@ export interface SubstrateObserver {
 	capacity?(sample: { at: number; databaseBytes: number }): void;
 	/** Offered once at construction when `SUBSTRATE_INDEX_ARCHIVE_DIR` is set (uplift-4 S2): `newestAtMs` answers the newest complete index archive's creation time, which `substrate.index.archive.age_seconds` is computed from at snapshot time. */
 	indexArchive?(source: { newestAtMs(): number | null }): void;
+	/** Offered once at construction when `SUBSTRATE_CORPUS=on` (v1.7 phase 70): `newestAtMs` answers the time of the newest corpus manifest change, which `substrate.corpus.freshness_seconds` is computed from at snapshot time. */
+	corpusFreshness?(source: { newestAtMs(): number | null }): void;
+	/** One finished corpus ingest request (phase 70): documents per second of its wall time, 0 when it sent nothing. */
+	corpusIngest?(sample: { docsPerSecond: number }): void;
+	/** The golden-set recall at 5 a `docs.canary` report carried (phase 70). */
+	corpusGolden?(sample: { recall5: number }): void;
 	/** One brief's use of the recall snapshot (uplift-4 S5), recorded when `SUBSTRATE_BRIEF_RECALL` is not `off`. `surface` is bounded to the surface list. */
 	briefRecall?(sample: { surface: string; result: BriefRecallResult }): void;
 	/** One recall prefetch attempt (uplift-4 S5). `surface` is bounded to the surface list. */
@@ -1409,6 +1416,8 @@ export class Substrate {
 	/** Test seam for the corpus manifest and bulk plane; production builds them from the index and the LightRAG config. */
 	private readonly corpusSeam: { store?: CorpusStore; plane?: LightragBulkPlane } | null;
 	private corpusPlaneCache: LightragBulkPlane | null = null;
+	/** The corpus readings behind the SLO gauges and the `corpus` fabric row (phase 70). */
+	private readonly corpusSlo: CorpusSloState;
 	/** Railway control-plane client (Phase 45, D45-a); tests inject a recording fetch through `stores.railway`. */
 	readonly railway: RailwayClient;
 	/** Background retains in flight, drained (bounded) on shutdown. */
@@ -1555,6 +1564,11 @@ export class Substrate {
 		observer: SubstrateObserver = {},
 	) {
 		this.observer = observer;
+		this.corpusSlo = new CorpusSloState({
+			ingestRate: (docsPerSecond) => this.observer.corpusIngest?.({ docsPerSecond }),
+			goldenRecall: (recall5) => this.observer.corpusGolden?.({ recall5 }),
+		});
+		if (config.corpus.enabled) this.observer.corpusFreshness?.({ newestAtMs: () => this.corpusSlo.newestAtMs() });
 		if (config.indexArchive.dir !== null) {
 			const watch = new IndexArchiveWatch(config.indexArchive.dir);
 			this.indexArchiveWatch = watch;
@@ -2410,6 +2424,7 @@ export class Substrate {
 			else if (result.stored) this.observer.eventReplay?.({ result: "appended" });
 		}
 		this.planningEvent(input);
+		if (result.stored) this.noteDocsCanary(result.event);
 		if (result.stored) this.publishHint(result.event);
 		return result;
 	}
@@ -5541,14 +5556,40 @@ export class Substrate {
 	}
 
 	/** `GET /corpus/status` and the `corpus_status` tool. */
-	corpusStatus(callerSurface: Surface | null): Promise<CorpusReply<CorpusStatusResponse>> {
-		return corpusStatusReply(this.corpusDeps(), callerSurface);
+	async corpusStatus(callerSurface: Surface | null): Promise<CorpusReply<CorpusStatusResponse>> {
+		const reply = await corpusStatusReply(this.corpusDeps(), callerSurface);
+		if (reply.ok) this.corpusSlo.setLastChangeFrom(reply.body.lastIngestAt);
+		return reply;
+	}
+
+	/**
+	 * Reads the manifest's newest change into the freshness reading (phase 70). Fail-open and bounded: an index that does not
+	 * answer keeps the previous reading, and a server with the corpus off or no index reads nothing.
+	 */
+	async refreshCorpusReadings(): Promise<void> {
+		if (!this.config.corpus.enabled) return;
+		const store = this.corpusSeam?.store ?? this.index?.corpusStore() ?? null;
+		if (store === null) return;
+		const status = await bounded(() => store.status(), HEALTH_PROBE_MS);
+		if (status !== null) this.corpusSlo.setLastChangeFrom(status.lastIngestAt);
+	}
+
+	/** A stored `docs.canary` report from the canary carries `golden_recall5`, which becomes the corpus recall reading. */
+	private noteDocsCanary(event: SubstrateEvent): void {
+		if (!this.config.corpus.enabled || event.surface !== "substrate") return;
+		if (event.payload.action !== "docs.canary" || event.payload.runtime !== "docs-canary") return;
+		this.corpusSlo.recordGolden(event.payload);
 	}
 
 	/** `POST /corpus/ingest` and the `corpus_ingest` tool. A run that stored or removed anything invalidates every cached `docs_search` answer, as `docs_ingest` does. */
 	async corpusIngest(raw: unknown, callerSurface: Surface | null): Promise<CorpusReply<CorpusIngestResponse>> {
+		const startedAt = performance.now();
 		const reply = await corpusIngestReply(this.corpusDeps(), raw, callerSurface);
 		if (reply.ok && reply.body.counts.ingested + reply.body.counts.tombstoned > 0) await this.cache.bump(DOCS_GENERATION_KEY);
+		if (reply.ok) {
+			this.corpusSlo.recordIngest(reply.body.counts.ingested + reply.body.counts.updated, performance.now() - startedAt);
+			await this.refreshCorpusReadings();
+		}
 		return reply;
 	}
 
@@ -7248,6 +7289,10 @@ export class Substrate {
 				};
 			},
 			railwayCost: () => this.railway.costReport(),
+			corpus: async () => {
+				await this.refreshCorpusReadings();
+				return this.corpusSlo.readings(Date.now());
+			},
 			outbox: () => {
 				const stats = this.retainOutboxStats();
 				return { size: stats.size, oldestAt: stats.oldestAt };
@@ -7266,6 +7311,8 @@ export class Substrate {
 				},
 				teiEndpoint: dbEndpoints.tei ?? null,
 				dragonflyRefused: this.config.dragonflyRefused !== null,
+				corpusEnabled: this.config.corpus.enabled,
+				docsSlo: { ...this.config.docsSlo },
 			},
 		};
 	}

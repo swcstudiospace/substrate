@@ -7,6 +7,7 @@
  * in the fixed `source` phrase. The synchronous counters and breaker states need no wait. The call always returns
  * the facts, and nothing throws to the caller.
  */
+import type { SloReadings } from "@substrate/corpus";
 import type { BreakerReading, FabricCostView, FabricFacts, FabricSources, ServiceName, ServiceReading } from "./types.ts";
 
 /** The per-plane deadline for each read the fabric makes, in ms. */
@@ -51,7 +52,7 @@ export async function gatherFabricFacts(
 	const deadlineMs = options.deadlineMs ?? FABRIC_SOURCE_DEADLINE_MS;
 	const checkedAt = sources.now();
 	const parts = sources.health();
-	const [greptimeRead, indexRead, hindsightRead, ragflowRead, lightragRead, teiRead, costRead] = await Promise.all([
+	const [greptimeRead, indexRead, hindsightRead, ragflowRead, lightragRead, teiRead, costRead, corpusRead] = await Promise.all([
 		within(() => parts.greptime, deadlineMs),
 		within(() => parts.index, deadlineMs),
 		within(() => parts.hindsight, deadlineMs),
@@ -59,6 +60,8 @@ export async function gatherFabricFacts(
 		within(() => parts.lightrag, deadlineMs),
 		within(() => parts.tei, deadlineMs),
 		within<FabricCostView>(() => sources.railwayCost(), deadlineMs),
+		// A server with the corpus off has no readings and is not asked.
+		sources.config.corpusEnabled ? within<SloReadings>(() => sources.corpus(), deadlineMs) : Promise.resolve(null),
 	]);
 	const snapshot = sources.snapshot();
 	const config = sources.config;
@@ -149,5 +152,11 @@ export async function gatherFabricFacts(
 		eventBusEnabled: snapshot.eventBus.enabled,
 		outbox: { parked: outbox.size, oldestAt: outbox.oldestAt },
 		railway,
+		corpus: {
+			enabled: config.corpusEnabled,
+			readings: corpusRead?.ok ? corpusRead.value : { freshnessS: null, recall5: null, ingestDocsPerS: null },
+			thresholds: { ...config.docsSlo },
+			unread: corpusRead === null || corpusRead.ok ? null : corpusRead.reason,
+		},
 	};
 }
