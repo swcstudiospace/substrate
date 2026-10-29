@@ -960,6 +960,20 @@ describe("skills_propose", () => {
 		expect(written).toEqual([]);
 	});
 
+	test("a body over the 1 MB cap is a refused tool error before the service, and one at the cap goes through", async () => {
+		const { client, calls } = await proposing(opened);
+		const bare = Buffer.byteLength(JSON.stringify({ ...args, rationale: "" }), "utf8");
+
+		const over = await call(client, "skills_propose", { ...args, rationale: "x".repeat(1_000_001 - bare) });
+		expect(over.isError).toBe(true);
+		expect(over.json()).toEqual({ refused: true, error: "the proposal is 1000001 bytes as JSON, over the limit of 1000000 bytes" });
+		expect(calls).toEqual([]);
+
+		const atCap = await call(client, "skills_propose", { ...args, rationale: "x".repeat(1_000_000 - bare) });
+		expect(atCap.isError).toBe(false);
+		expect(calls).toHaveLength(1);
+	});
+
 	test("a body that does not match the schema is refused by the protocol, before the service", async () => {
 		const { client, calls } = await proposing(opened);
 		const reply = await call(client, "skills_propose", { ...args, files: ["SKILL.md"] });

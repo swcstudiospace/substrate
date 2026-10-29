@@ -40,7 +40,7 @@ import {
 	isPagedSearch,
 	type Substrate,
 } from "./service.ts";
-import { proposalFailure } from "./skills/request.ts";
+import { proposalBodySizeProblem, proposalFailure } from "./skills/request.ts";
 import { approvalFailure } from "./skills/registry.ts";
 import {
 	ACTORS,
@@ -1988,6 +1988,13 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		},
 		async (request) => {
 			try {
+				// The same 1 MB caller-body cap the REST route enforces on its wire, measured on the args as
+				// received (the zod schema adds no defaults, and attribution is the server's, not the caller's).
+				// Refused as a `refused` tool error before the service, so an oversize rationale or removal
+				// list, which the engine's file-text cap does not count, never reaches it. The HTTP audit gate
+				// has already recorded the call.
+				const sizeProblem = proposalBodySizeProblem(request);
+				if (sizeProblem) return { ...json({ refused: true, error: sizeProblem }), isError: true };
 				return json(await substrate.proposeSkill(request, { surface: callerSurface, isOperator }));
 			} catch (cause) {
 				const failure = proposalFailure(cause);
