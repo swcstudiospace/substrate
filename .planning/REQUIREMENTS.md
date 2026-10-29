@@ -9,7 +9,7 @@
 - `.planning/research/SUMMARY.md` lines 64–72: must-have (64–66), should-have (68), defer (70), anti-features to hold (72).
 - `.planning/research/FEATURES.md` Differentiators table, rows for the 15 v1.3.x IDs at lines 197–222 (table header at line 195).
 - `.planning/milestones/v1.3-REQUIREMENTS.md` line 85 (DOCS-04), cited only for the D-D1 conflict.
-- `.planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements)`: the seven SOTA enhancements, lines 12–59.
+- `.planning/uplift-7/7-SOTA-ENHANCEMENTS.md`: the seven SOTA enhancements, lines 16–63.
 
 Column mapping. The FEATURES.md Differentiators header is `| ID | Area | Feature | Value Proposition | Complexity | Notes |` (line 195). This file uses: Item = Feature; Outcome = Value Proposition; Notes = the FEATURES.md Notes column, verbatim; it sometimes names a dependency and sometimes gives a rationale. Where Notes is empty, the value is "not stated".
 
@@ -59,44 +59,44 @@ Source for all entries: `.planning/research/FEATURES.md` lines 197–222 and `.p
 
 ## v1.5 SOTA requirements
 
-Source for all entries: `.planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements)`. The Acceptance and Target files lines are copied verbatim.
+Source for all entries: `.planning/uplift-7/7-SOTA-ENHANCEMENTS.md`. The Acceptance and Target files lines are copied verbatim.
 
-- [ ] **SOTA-01**: Railway Resource Orchestrator. Phase: 45. Source: .planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements):12–17
+- [ ] **SOTA-01**: Railway Resource Orchestrator. Phase: 45. Source: .planning/uplift-7/7-SOTA-ENHANCEMENTS.md:16–21
   - Acceptance: MCP tool lists Railway resources, basic scale suggestion, cost report in /slo.
   - Target files: packages/mcp-server/src (new railway.ts), docs/data-planes.md, config-reference.md
   - Budget: $50 per month at test scale, confirmed 2026-10-21 (uplift-7/BLOCKING-UNKNOWNS.md item 8).
   - Status (2026-10-28): complete in repo; live proof operator-gated (accepted debt 2026-10-23).
-- [ ] **SOTA-02**: LightRAG hybrid RAG with Hindsight context and the RAGFlow migration. Phase: 46. Source: .planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements):19–24
+- [ ] **SOTA-02**: LightRAG hybrid RAG with Hindsight context and the RAGFlow migration. Phase: 46. Source: .planning/uplift-7/7-SOTA-ENHANCEMENTS.md:23–28
   - Acceptance: docs_search returns context-augmented results; tests for hybrid.
   - Target files: packages/mcp-server/src/planes/lightrag.ts, planes/hindsight.ts, docs/docs-plane.md (planes/ragflow.ts is the legacy fallback backend, to be removed in the migration)
   - Status (2026-10-28): partial; see Phase 46. LightRAG is deployed in naive mode; graph and hybrid modes and the RAGFlow removal are operator-gated.
-- [ ] **SOTA-03**: GreptimeDB + Dragonfly Predictive Analytics & Cache. Phase: 47. Source: .planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements):26–31
+- [ ] **SOTA-03**: GreptimeDB + Dragonfly Predictive Analytics & Cache. Phase: 47. Source: .planning/uplift-7/7-SOTA-ENHANCEMENTS.md:30–35
   - Acceptance: /slo has predictive rows; cache preloads based on patterns.
   - Target files: packages/mcp-server/src/cache.ts, greptime code, observability, data-planes.md
   - Status (2026-10-28): complete in repo; live proof operator-gated (accepted debt 2026-10-23).
-- [ ] **SOTA-04**: TailscaleDB Secure Unified Proxy Layer. Phase: 48. Source: .planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements):33–38
+- [ ] **SOTA-04**: TailscaleDB Secure Unified Proxy Layer. Phase: 48. Source: .planning/uplift-7/7-SOTA-ENHANCEMENTS.md:37–42
   - Acceptance: All DBs accessed via secure proxy; audit events for access.
   - Target files: docs/railway-tailscale.md, data-planes.md, config for DBs
   - Status (2026-10-28): complete in repo; live proof operator-gated (accepted debt 2026-10-23).
-- [ ] **SOTA-05**: Hindsight Graph Memory with Greptime Events. Phase: 49. Source: .planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements):40–45
+- [ ] **SOTA-05**: Hindsight Graph Memory with Greptime Events. Phase: 49. Source: .planning/uplift-7/7-SOTA-ENHANCEMENTS.md:44–49
   - Acceptance: memory_search returns graph-linked results; recall uses causal.
   - Target files: packages/mcp-server/src/planes/hindsight.ts, memory code, greptime
   - Status (2026-10-28): complete in repo; live proof operator-gated (accepted debt 2026-10-23).
-- [ ] **SOTA-06**: Dragonfly Pub/Sub for Real-time Events. Phase: 50. Source: .planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements):47–52
+- [ ] **SOTA-06**: Dragonfly Pub/Sub for Real-time Events. Phase: 50. Source: .planning/uplift-7/7-SOTA-ENHANCEMENTS.md:51–56
   - Acceptance: Real-time notifications for events via Dragonfly; tests.
   - Target files: packages/mcp-server/src/cache.ts, event emit code
   - Status (2026-10-28): complete in repo; live proof operator-gated (accepted debt 2026-10-23).
-- [x] **SOTA-07**: Enterprise Unified Resource Fabric. Phase: 51. Source: .planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements):54–59
+- [x] **SOTA-07**: Enterprise Unified Resource Fabric. Phase: 51. Source: .planning/uplift-7/7-SOTA-ENHANCEMENTS.md:58–63
   - Acceptance: New MCP tools for fabric status, optimization suggestions; compliance report.
   - Target files: packages/mcp-server/src (new fabric/), observability, docs, config-reference
 
-- [x] **SOTA-08**: GSD-Core planning index and cross-session awareness core. Phase: 52. Source: .planning/ROADMAP.md Phase 52 (defined 2026-10-22; not in .planning/7-SOTA-ENHANCEMENTS.md, which lists items 1–7 only)
+- [x] **SOTA-08**: GSD-Core planning index and cross-session awareness core. Phase: 52. Source: .planning/ROADMAP.md Phase 52 (defined 2026-10-22; not in .planning/uplift-7/7-SOTA-ENHANCEMENTS.md, which lists items 1–7 only)
   - Acceptance: deterministic content-hash index of `.planning` artifacts where a full rebuild equals the incremental result; session presence with server-time TTL, stale derived at read time and never deleted; planning-change diffs on the existing event bus carrying paths and hashes, never bodies; read-only MCP tools `planning_status` and `planning_sessions`, each with an entry in `packages/audit/src/policy.ts`; file-only mode works with every backing service disabled; environment-only configuration.
   - Target files: packages/mcp-server/src (new planning/ modules), packages/audit/src/policy.ts, docs, config-reference
-- [x] **SOTA-09**: Steering, conflict control and checkpoint/resume. Phase: 53. Source: .planning/ROADMAP.md Phase 53 (defined 2026-10-22; not in .planning/7-SOTA-ENHANCEMENTS.md, which lists items 1–7 only)
+- [x] **SOTA-09**: Steering, conflict control and checkpoint/resume. Phase: 53. Source: .planning/ROADMAP.md Phase 53 (defined 2026-10-22; not in .planning/uplift-7/7-SOTA-ENHANCEMENTS.md, which lists items 1–7 only)
   - Acceptance: steering directives queued, then acknowledged, then audited in TimescaleDB before any file change, and held with no file change when the audit cannot be written; conflicts between sessions on the same parsed phase or plan id emit events and never auto-resolve; a watcher gap marks the session view unknown until a full rescan; kill-and-restart at a plan-step boundary yields exactly one completion record keyed by phase id, plan step and file hash.
   - Target files: packages/mcp-server/src (planning steering and checkpoint modules), TimescaleDB index schema, config-reference
-- [x] **SOTA-10**: Planning observability and migration inventory. Phase: 54. Source: .planning/ROADMAP.md Phase 54 (defined 2026-10-22; not in .planning/7-SOTA-ENHANCEMENTS.md, which lists items 1–7 only)
+- [x] **SOTA-10**: Planning observability and migration inventory. Phase: 54. Source: .planning/ROADMAP.md Phase 54 (defined 2026-10-22; not in .planning/uplift-7/7-SOTA-ENHANCEMENTS.md, which lists items 1–7 only)
   - Acceptance: each phase transition emits a GreptimeDB metric with a stdout fallback when GreptimeDB is disabled or unreachable; the session view reports exactly one of LOADING, EMPTY, STALE, DEGRADED, ERROR, SUCCESS; a documented inventory separates disk state from Railway-hosted state and lists host-bound paths and units; no cutover, DNS change or production deploy in scope.
   - Target files: packages/observability, docs, config-reference
 

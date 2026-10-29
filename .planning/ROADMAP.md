@@ -657,7 +657,7 @@ Plans:
 
 **Status**: unparked 2026-10-21. Budget ceiling $50 per month at test scale, confirmed by the project owner (uplift-7/BLOCKING-UNKNOWNS.md item 8 default).
 
-**Depends on**: none (7-SOTA plan on branch feature/7-sota-enhancements)
+**Depends on**: none (7-SOTA plan, recovered at `.planning/uplift-7/7-SOTA-ENHANCEMENTS.md` from branch feature/7-sota-enhancements)
 
 **Repos**: agent-substrate (target files: packages/mcp-server/src (new railway.ts), docs/data-planes.md, config-reference.md)
 
@@ -675,7 +675,7 @@ Plans:
 
 **Goal**: Docs answers come from LightRAG with hybrid search and Hindsight context. The RAGFlow to LightRAG migration runs inside this phase: archive, LightRAG deploy, migration job, parity gate, cutover, then RAGFlow removal after the RAG-dependent phases pass. Each live step needs the operator's approval for that run.
 
-**Depends on**: none (7-SOTA plan on branch feature/7-sota-enhancements)
+**Depends on**: none (7-SOTA plan, recovered at `.planning/uplift-7/7-SOTA-ENHANCEMENTS.md` from branch feature/7-sota-enhancements)
 
 **Repos**: agent-substrate (target files: packages/mcp-server/src/planes/lightrag.ts, planes/ragflow.ts (removed in the migration), planes/hindsight.ts, docs/docs-plane.md)
 
@@ -698,7 +698,7 @@ Plans:
 
 **Goal**: Time-series forecasting predicts SLO burn, and the Dragonfly cache pre-warms from observed patterns.
 
-**Depends on**: none (7-SOTA plan on branch feature/7-sota-enhancements)
+**Depends on**: none (7-SOTA plan, recovered at `.planning/uplift-7/7-SOTA-ENHANCEMENTS.md` from branch feature/7-sota-enhancements)
 
 **Repos**: agent-substrate (target files: packages/mcp-server/src/cache.ts, greptime code, observability, data-planes.md)
 
@@ -715,7 +715,7 @@ Plans:
 
 **Goal**: Greptime, Dragonfly and Timescale are reached through one secure Tailscale proxy layer with RBAC, audit and pooling.
 
-**Depends on**: none (7-SOTA plan on branch feature/7-sota-enhancements)
+**Depends on**: none (7-SOTA plan, recovered at `.planning/uplift-7/7-SOTA-ENHANCEMENTS.md` from branch feature/7-sota-enhancements)
 
 **Repos**: agent-substrate (target files: docs/railway-tailscale.md, data-planes.md, config for DBs)
 
@@ -732,7 +732,7 @@ Plans:
 
 **Goal**: Hindsight memory is graph-structured and built from Greptime events, with causal recall.
 
-**Depends on**: none (7-SOTA plan on branch feature/7-sota-enhancements)
+**Depends on**: none (7-SOTA plan, recovered at `.planning/uplift-7/7-SOTA-ENHANCEMENTS.md` from branch feature/7-sota-enhancements)
 
 **Repos**: agent-substrate (target files: packages/mcp-server/src/planes/hindsight.ts, memory code, greptime)
 
@@ -749,7 +749,7 @@ Plans:
 
 **Goal**: Dragonfly pub/sub propagates Greptime events to the planes in real time, with event-driven cache invalidation (event-driven cache invalidation narrowed out of scope by the owner on 2026-10-22, D50-e).
 
-**Depends on**: none (7-SOTA plan on branch feature/7-sota-enhancements)
+**Depends on**: none (7-SOTA plan, recovered at `.planning/uplift-7/7-SOTA-ENHANCEMENTS.md` from branch feature/7-sota-enhancements)
 
 **Repos**: agent-substrate (target files: packages/mcp-server/src/cache.ts, event emit code)
 
