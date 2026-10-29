@@ -364,6 +364,20 @@ describe("the class tables are exhaustive over what the server serves", () => {
 		expect([...classified].filter((route) => !servedRoutes.has(route))).toEqual([]);
 	});
 
+	test("the live steering routes take their tools' classes: queue and acknowledge write, everything else a read", () => {
+		expect({
+			sessions: ROUTE_CLASSES["/steering/sessions"],
+			directives: ROUTE_CLASSES["/steering/directives"],
+			wait: ROUTE_CLASSES["/steering/wait"],
+			queue: ROUTE_CLASSES["/steering/queue"],
+			acknowledge: ROUTE_CLASSES["/steering/acknowledge"],
+			context: ROUTE_CLASSES["/session/context"],
+			tool: TOOL_CLASSES.session_context,
+		}).toEqual({ sessions: "read", directives: "read", wait: "read", queue: "write", acknowledge: "write", context: "read", tool: "read" });
+		expect(ROUTE_CLASSES["/steering/queue"]).toBe(TOOL_CLASSES.steering_queue);
+		expect(ROUTE_CLASSES["/steering/acknowledge"]).toBe(TOOL_CLASSES.steering_acknowledge);
+	});
+
 	test("every tool mcp.ts registers is classified — and nothing stale is listed", () => {
 		expect(registeredTools.size).toBeGreaterThan(20);
 		expect([...registeredTools].filter((tool) => !Object.hasOwn(TOOL_CLASSES, tool))).toEqual([]);

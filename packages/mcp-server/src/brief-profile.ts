@@ -41,6 +41,10 @@ export const BRIEF_SECTION_PRIORITY = {
 	actions: 5,
 	others: 6,
 	recall: 7,
+	// Phase 67: appended live by `SUBSTRATE_BRIEF_SESSIONS`, never cached. A queued directive is as urgent as a warning.
+	steering: 2,
+	sessions: 8,
+	handoffs: 9,
 } as const;
 export type BriefSectionId = keyof typeof BRIEF_SECTION_PRIORITY;
 
@@ -55,6 +59,9 @@ const OMIT_LABEL: Record<BriefSectionId, string> = {
 	actions: "actions",
 	others: "graphs",
 	recall: "recalled",
+	steering: "steering",
+	sessions: "sessions",
+	handoffs: "handoffs",
 };
 
 /** One selectable line of the compact profile. */

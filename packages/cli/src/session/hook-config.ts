@@ -1,10 +1,10 @@
 /**
- * `substrate session hook-config <claude-code|git-post-commit|steering|baseline>`: PRINTS the text an operator would
+ * `substrate session hook-config <claude-code|git-post-commit|steering|baseline|context>`: PRINTS the text an operator would
  * install so a host calls `substrate session hook` (v1.6, phase 61, success criterion 3). It writes no file, edits no
  * settings and installs nothing: installing a hook in a host is an operator step (ADR 0007).
  *
- * One target per checkpoint trigger the hook accepts: `turn` (claude-code), `plan-step` (git-post-commit),
- * `steering` and `baseline`. ADR 0007 maps no host event to the last two, so their text prints the command and
+ * One target per trigger the hook accepts: `turn` (claude-code), `plan-step` (git-post-commit),
+ * `steering`, `baseline` and `context`. ADR 0007 maps no host event to the last three, so their text prints the command and
  * names the event the operator must wire it to; it invents none.
  *
  * Every command in the printed text is a command that exists (`substrate session hook <trigger>`), and the
@@ -12,7 +12,7 @@
  */
 import { HOOK_TIMEOUT_MS } from "./hook.ts";
 
-export const HOOK_CONFIG_TARGETS = ["claude-code", "git-post-commit", "steering", "baseline"] as const;
+export const HOOK_CONFIG_TARGETS = ["claude-code", "git-post-commit", "steering", "baseline", "context"] as const;
 export type HookConfigTarget = (typeof HOOK_CONFIG_TARGETS)[number];
 
 /** The command line a host runs for a trigger. `substrate` must resolve on the host's PATH. */
@@ -20,6 +20,7 @@ export const CLAUDE_CODE_HOOK_COMMAND = "substrate session hook turn";
 export const GIT_POST_COMMIT_HOOK_COMMAND = "substrate session hook plan-step";
 export const STEERING_HOOK_COMMAND = "substrate session hook steering";
 export const BASELINE_HOOK_COMMAND = "substrate session hook baseline";
+export const CONTEXT_HOOK_COMMAND = "substrate session hook context";
 
 /** Claude Code takes a hook timeout in whole seconds; leave room above the hook's own budget so the hook ends itself first. */
 const CLAUDE_CODE_TIMEOUT_SECONDS = Math.ceil(HOOK_TIMEOUT_MS / 1000) + 5;
@@ -82,6 +83,25 @@ function baseline(): string {
 	].join("\n");
 }
 
+/**
+ * The context hook PRINTS the live-context digest (other sessions of the repository, their claims, recent events, handoffs and
+ * planning changes, each with its source and age; at most 4,000 characters), so unlike the others its stdout is kept: the host
+ * injects it into the session. It prints nothing and exits 0 whenever the server cannot answer.
+ */
+function context(): string {
+	return [
+		"#!/bin/sh",
+		"# Run this from the session's worktree, when a session starts or a prompt is submitted. ADR 0007 maps no Claude Code or git event to it; wire it",
+		"# to an event of your host whose stdout the host adds to the session's context (Claude Code does this for a SessionStart or UserPromptSubmit hook).",
+		"# Set SESSION_ID (the string the surface uses for its memory writes) and SURFACE (the surface name the host's memory writes use, e.g. omp or claude-code).",
+		"# The command runs in the foreground, ends itself within its own timeout and is fail-open (`|| true`): when the server cannot answer it prints nothing.",
+		"# Its stdout is the digest; stderr is discarded.",
+		`${CONTEXT_HOOK_COMMAND} --session "$SESSION_ID" --surface "$SURFACE" </dev/null 2>/dev/null || true`,
+		"exit 0",
+		"",
+	].join("\n");
+}
+
 /** The exact text to install for `target`. */
 export function renderHookConfig(target: HookConfigTarget): string {
 	switch (target) {
@@ -93,5 +113,7 @@ export function renderHookConfig(target: HookConfigTarget): string {
 			return steering();
 		case "baseline":
 			return baseline();
+		case "context":
+			return context();
 	}
 }

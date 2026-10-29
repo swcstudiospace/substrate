@@ -5,6 +5,10 @@ duplicating, overwriting or silently abandoning each other's work. Three
 primitives do that, and this is what each of them promises — and what it
 deliberately does not.
 
+Telling a running session what to do next, and showing it what the other
+sessions of its repository are doing, is a fourth mechanism with its own page:
+[Live Steering](live-steering.md) (directives, the context digest, `substrate steer`).
+
 ## Node leases
 
 `graph_claim` takes a **lease**, not a claim.

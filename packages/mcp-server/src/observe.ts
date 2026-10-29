@@ -98,9 +98,16 @@ const KNOWN_ROUTES = [
 	"/memory/recall",
 	"/slo/history",
 	"/livez",
+	"/steering/sessions",
+	"/steering/directives",
+	"/steering/wait",
+	"/steering/queue",
+	"/steering/acknowledge",
+	"/session/context",
 	"/worktrees/report",
 	"/worktrees/claims",
 	"/worktrees",
+	"/corpus/neardup",
 ] as const;
 
 export function normalizeRoute(pathname: string): string {
@@ -671,6 +678,7 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"steering_queue",
 	"steering_acknowledge",
 	"steering_list",
+	"session_context",
 	"worktree_list",
 	"worktree_report",
 	"corpus_status",

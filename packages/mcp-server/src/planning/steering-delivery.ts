@@ -157,6 +157,8 @@ export async function acknowledgeSteeringWithState(
 		const moved = await port.applyTransition(record.directive.targetSessionId, target, { directiveId: result.directive_id });
 		if (!moved.ok) return { ...result, session_state: { status: "refused", state: target, reason: redact(moved.reason).slice(0, 200) } };
 		if (!moved.changed) return { ...result, session_state: { status: "unchanged" } };
+		// The one place the move is known: the REST projection derives its hint from this note, never from action and outcome.
+		wiring.inbox.noteSessionMoved(result.directive_id);
 		return { ...result, session_state: { status: "applied", state: target }, checkpoint_hint: { trigger: "steering", directive_id: result.directive_id } };
 	} catch (cause) {
 		// The acknowledgement is already audited and effective; a port that throws must not turn it into a failed call.

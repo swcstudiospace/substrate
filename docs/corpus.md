@@ -117,7 +117,7 @@ including a leading byte-order mark, and the body sent to the server keeps it, s
 ```
 substrate corpus scan   [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--source fs|github|greptile]...
                         [--greptile-dir DIR] [--github-owner OWNER] [--max-repos N] [--json] [--entries]
-substrate corpus plan   (scan options) [--server URL] [--json]
+substrate corpus plan   (scan options) [--server URL] [--json] [--neardup [--threshold N] [--neardup-max N]]
 substrate corpus ingest (plan options) [--execute] [--batch-docs N] [--batch-bytes N] [--json]
 substrate corpus status [--server URL] [--json]
 ```
@@ -129,6 +129,10 @@ substrate corpus status [--server URL] [--json]
   (repository, source) pairs that were left out of it with the reason, and the first 20 items of each action. It never
   sends bodies. A scan that read nothing completely still plans its entries, with an empty coverage that tombstones
   nothing.
+- `plan --neardup` then compares the documents the plan would add, update, change or rename, and prints the pairs that
+  look alike (see [Near-duplicates](#near-duplicates-advisory)). `--threshold` is a number from 0.5 to 1 (the server's
+  default, 0.92, when absent) and `--neardup-max` a whole number from 1 to 1000 (default 1000); either one without
+  `--neardup` is a usage error, and `ingest` and `status` do not accept `--neardup`.
 - `ingest` plans first. Without `--execute` it prints the plan and exits 0: a dry run, and it says so. With `--execute`
   it sends the tombstones first, as requests of their own with `documents: []` (at most 500 each), then reads the bodies
   of the `add`, `change`, `update` and `rename` items and sends them in batches, and prints the count of each status. The
@@ -228,7 +232,7 @@ directory named by their hash, not in memory, and removed when the command ends.
 
 ## The routes
 
-All three are audited and admitted like the docs tools and need a bearer of an operator surface. A server with the corpus
+All four are audited and admitted like the docs tools and need a bearer of an operator surface. A server with the corpus
 off answers 503 with `corpus.disabled`; the CLI prints that the server runs with the corpus off. 401 and 403 are reported
 as refused credentials and a refused surface. A request that names another `protocol` is refused.
 
@@ -247,6 +251,30 @@ Response: `{protocol, items, counts, manifestVersion}`. Each item is
 `{action: "add"|"change"|"update"|"rename"|"tombstone", repo, path, sha256?, renamedFrom?}`; `renamedFrom` is the manifest
 row the document moved from. `counts` has `add`, `change`, `update`, `rename`, `tombstone` and `unchanged` (unchanged rows
 are counted and never listed). `manifestVersion` increases whenever the manifest changes.
+
+### `POST /corpus/neardup`
+
+Request: `{protocol, items, threshold?, maxPairs?}` where each item is `{repo, path, text}`. `repo` and `path` follow the
+same name and path rules as an entry (a bad one is a 400 with its closed reason, such as `bad-repo` or `bad-path`). At
+most 1,000 items (`too-many-items`); `text` is at most 4,000 characters (`text-too-long`; the CLI cuts its excerpt first),
+and is a string (`bad-text`); a `(repo, path)` twice is `duplicate-entry`. `threshold` is a finite number from 0.5 to 1,
+default 0.92 (`bad-threshold`; 1 means identical vectors); `maxPairs` is a whole number from 1 to 1,000, default 200
+(`bad-max-pairs`). The route reads no manifest and needs no database.
+
+Response: `{protocol, model, dimension, compared, pairs, truncated, skipped}`. `pairs` is
+`[{a: {repo, path}, b: {repo, path}, similarity}]`, the most similar first, `a` before `b` in `(repo, path)` order and
+`similarity` the cosine similarity rounded to four decimals; the answer does not depend on the order of the items.
+`truncated` is true when more pairs than `maxPairs` matched. `compared` is the number of items that were embedded; an item
+whose text is empty (or only white space) is not embedded and is listed in `skipped` as `{repo, path, reason: "empty"}`
+(always present, at most 100 entries). `model` and `dimension` are those of the embedding service, null when no item had
+text to embed. The body is capped at about 18.5 MB (a larger one is 413).
+
+The texts are embedded only through the embedding service (`substrate.embeddings`, the TEI client behind the `emb` cache,
+[embedding-fabric.md](embedding-fabric.md)). When it cannot answer the route is `503 corpus.embeddings-unavailable` with
+one of the client's closed reasons in `detail`: `not-configured` (`TEI_URL` is unset), `breaker-open`, `timeout`,
+`unavailable`, `bad-response`, `model-mismatch`, `dim-mismatch`, `input-refused`. Nothing else is said: no text, excerpt or
+TEI URL appears in a reply, an audit record, an event or a log line, and the audit record (under `corpus_status`, op
+`neardup`) holds the item count only.
 
 ### `POST /corpus/ingest`
 
@@ -285,7 +313,54 @@ time or null.
 | Request timeout of the CLI | 120 seconds |
 | Skipped files listed in a report | 1,000 (the counts per reason are exact) |
 | Identical-copy groups listed | 200 groups of 20 copies (the totals are exact) |
-| Near-duplicate comparison (`nearDuplicates`) | every pair, so at most 5,000 items per call |
+| Near-duplicate comparison (`nearDuplicates`) | every pair, so at most 5,000 items per call; it runs without pausing. `nearDuplicatesYielding` is the same comparison with the same result, pausing between blocks of about 2 million multiply-adds |
+| Items per `POST /corpus/neardup` request | 1,000. The comparison is still O(n^2) in the item count (499,500 pairs at 1,000 items) but yields to other requests between blocks, so a large request takes longer without stalling the server |
+| Characters of text per item | 4,000 |
+| Pairs returned (`maxPairs`) | 200 by default, at most 1,000 |
+| Pairs the CLI lists | 50 (the rest is a count) |
 
-`nearDuplicates`, `cosine` and `normalize` in `@substrate/corpus` are pure vector helpers for finding near-duplicate
-documents from embeddings; no document is dropped on that signal alone.
+`nearDuplicates`, `nearDuplicatesYielding`, `cosine` and `normalize` in `@substrate/corpus` are pure vector helpers for
+finding near-duplicate documents from embeddings; `POST /corpus/neardup` (through `nearDuplicatesYielding`) and
+`substrate corpus plan --neardup` use them.
+
+## Near-duplicates (advisory)
+
+`substrate corpus plan --neardup` prints, after the plan, which documents it would write look like each other, so an
+owner can see a pasted copy or a template before it is ingested. **The signal is advisory: no document is dropped,
+skipped, tombstoned or changed because of it.** The plan, the coverage and every later ingest are the same with or without
+it, and the section's first line says so.
+
+The CLI takes the documents the plan would `add`, `update`, `change` or `rename` that come from a file it can read (the
+filesystem and Greptile sources), in `(repo, path)` order and at most `--neardup-max` of them, reads the first 4,000
+characters of each (UTF-8, a byte-order mark kept, an invalid sequence replaced) and sends **one** request. Only the
+first 16,000 bytes of a file are read for that (a bounded prefix, never the whole file), and a character cut by that
+boundary is dropped rather than decoded into a replacement. The scan refused symbolic links, and the excerpt is read after it,
+so the reader opens the file without following a link (and without blocking on a pipe) and requires it to still be a regular
+file of the size the scan recorded; a document that was swapped for a link or changed since the scan is counted as not
+compared and its target is never read. (Where the platform has no `O_NOFOLLOW`, the regular-file and size checks still apply.) Documents from GitHub are not read by a plan, so they are counted ("N documents from
+GitHub were not compared"); a file that cannot be read is counted as not compared and never fails the command; when more
+candidates exist than the limit the output says "compared the first N of M documents".
+
+```
+near-duplicates (advisory: no document is dropped on this signal)
+  0.9731  Acme/Alpha:docs/guide.md  ~  Acme/Beta:docs/guide.md
+  ... and 3 more
+model: <model id>, dimension: <dimension>
+compared: 120 documents, skipped (empty text): 0
+```
+
+At most 50 pairs are listed and every name is printed with its control characters escaped. An empty candidate list prints
+`near-duplicates: nothing to compare` and exits 0. With `--json` the plan's JSON gets one more key, `neardup`, holding the
+server's reply plus `notCompared: {github, unreadable, overLimit}` (or `{error}` when the comparison could not run);
+without `--neardup` the JSON is unchanged.
+
+When the comparison cannot run (the embedding service is unavailable, the server refused the request, a transport error)
+the plan is still printed, one line on stderr names the closed reason (for example `timeout` or `not-configured`), and the
+exit code is 1: a comparison that was asked for and could not be answered must not look like success.
+
+**Egress.** The CLI sends the excerpts to the substrate server over its usual connection, and the server sends them to the
+configured `TEI_URL` and nowhere else. The fabric compliance check reports a failure when that endpoint is neither loopback
+nor an allowed proxy, but it does not block a request: `SUBSTRATE_DB_ENDPOINT_POLICY` defaults to `warn`, which accepts a
+direct (possibly public) `TEI_URL`. Point `TEI_URL` at a private endpoint and set the policy to `enforce` so that startup
+refuses a direct one. With `TEI_URL` unset the route answers `503 corpus.embeddings-unavailable` (`not-configured`) and
+nothing is sent anywhere.

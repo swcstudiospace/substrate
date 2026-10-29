@@ -2,14 +2,16 @@ import { afterAll, describe, expect, test } from "bun:test";
 import {
 	CORPUS_PROTOCOL,
 	type CorpusIngestRequest,
+	type CorpusNeardupRequest,
 	type CorpusPlanRequest,
 	type CorpusReflectRequest,
 	DEFAULT_GAPS_LIMIT,
+	EMBEDDING_REASONS,
 	MAX_GAPS_LIMIT,
 } from "@substrate/corpus";
 import { defined } from "../../../corpus/src/test-support.ts";
-import { createCorpusClient, isGapsResponse, isIngestResponse, isPlanResponse, isReflectResponse, isStatusResponse } from "./client.ts";
-import { CorpusStub, gapsOf, ingestOf, planOf, reflectOf, statusOf } from "./testkit.ts";
+import { createCorpusClient, isGapsResponse, isIngestResponse, isNeardupResponse, isPlanResponse, isReflectResponse, isStatusResponse } from "./client.ts";
+import { CorpusStub, gapsOf, ingestOf, neardupOf, planOf, reflectOf, statusOf } from "./testkit.ts";
 
 const stub = new CorpusStub();
 afterAll(() => stub.stop());
@@ -180,5 +182,79 @@ describe("response guards", () => {
 		expect(isGapsResponse({ ...gapsOf([]), gaps: [{ ...gap, text: 5 }] })).toBe(false);
 		expect(isGapsResponse({ ...gapsOf([gap]), truncated: "no" })).toBe(false);
 		expect(isGapsResponse({ ...gapsOf([gap]), protocol: 2 })).toBe(false);
+	});
+});
+
+describe("the near-duplicate call", () => {
+	const sent: CorpusNeardupRequest = { protocol: CORPUS_PROTOCOL, items: [{ repo: "Acme/A", path: "a.md", text: "alpha" }], threshold: 0.9 };
+	const pair = { a: { repo: "Acme/A", path: "a.md" }, b: { repo: "Acme/A", path: "b.md" }, similarity: 0.97 };
+
+	test("posts the request with the bearer and returns the guarded answer", async () => {
+		const reply = neardupOf([pair], { skipped: [{ repo: "Acme/A", path: "empty.md", reason: "empty" }] });
+		stub.on("POST /corpus/neardup", () => ({ status: 200, body: reply }));
+		const result = await client().neardup(sent);
+		expect(result).toEqual({ ok: true, value: reply });
+		const seen = stub.requests("/corpus/neardup").at(-1);
+		expect(seen?.authorization).toBe("Bearer tok-1");
+		expect(seen?.body).toEqual(sent);
+	});
+
+	test("a 503 corpus.embeddings-unavailable is the embeddings kind with the server's closed reason", async () => {
+		for (const reason of EMBEDDING_REASONS) {
+			stub.on("POST /corpus/neardup", () => ({ status: 503, body: { error: "the embedding service could not answer", reason: "corpus.embeddings-unavailable", detail: reason } }));
+			const result = await client().neardup(sent);
+			expect(result.ok).toBe(false);
+			if (result.ok) continue;
+			expect(result.error).toMatchObject({ kind: "embeddings", status: 503, reason });
+			expect(result.error.message).toContain(reason);
+		}
+	});
+
+	test("a reason this CLI does not know is still the embeddings kind, without a reason, and the server's text is not echoed", async () => {
+		stub.on("POST /corpus/neardup", () => ({ status: 503, body: { error: "x", reason: "corpus.embeddings-unavailable", detail: "http://tei.internal:8080 is down" } }));
+		const result = await client().neardup(sent);
+		expect(result.ok === false && result.error.kind).toBe("embeddings");
+		expect(result.ok === false && result.error.reason).toBeUndefined();
+		expect(result.ok === false && result.error.message).not.toContain("tei.internal");
+	});
+
+	test("corpus.disabled stays the disabled kind and a plain 503 stays unavailable", async () => {
+		stub.on("POST /corpus/neardup", () => ({ status: 503, body: { error: "x", reason: "corpus.disabled" } }));
+		const off = await client().neardup(sent);
+		expect(off.ok === false && off.error.kind).toBe("disabled");
+		stub.on("POST /corpus/neardup", () => ({ status: 503, body: { error: "plane down" } }));
+		const down = await client().neardup(sent);
+		expect(down.ok === false && down.error.kind).toBe("unavailable");
+	});
+
+	test("a refusal of the request is the http kind with the server's reason text", async () => {
+		stub.on("POST /corpus/neardup", () => ({ status: 400, body: { error: "the threshold is not a number from 0.5 to 1", reason: "bad-threshold" } }));
+		const result = await client().neardup(sent);
+		expect(result.ok === false && result.error).toMatchObject({ kind: "http", status: 400 });
+	});
+
+	test("the guard accepts a model-less answer and refuses a malformed one", () => {
+		expect(isNeardupResponse(neardupOf([], { model: null, dimension: null, compared: 0 }))).toBe(true);
+		expect(isNeardupResponse(neardupOf([pair]))).toBe(true);
+		const good = neardupOf([pair]);
+		for (const bad of [
+			null,
+			{ ...good, protocol: 2 },
+			{ ...good, pairs: [{ ...pair, similarity: "0.9" }] },
+			{ ...good, pairs: [{ a: pair.a, similarity: 0.9 }] },
+			{ ...good, compared: -1 },
+			{ ...good, truncated: "no" },
+			{ ...good, skipped: [{ repo: "Acme/A", path: "x.md", reason: "other" }] },
+			{ ...good, model: 3 },
+			{ ...good, dimension: 1.5 },
+		]) {
+			expect(isNeardupResponse(bad)).toBe(false);
+		}
+	});
+
+	test("an answer of the wrong shape is the invalid kind", async () => {
+		stub.on("POST /corpus/neardup", () => ({ status: 200, body: { protocol: CORPUS_PROTOCOL, pairs: "none" } }));
+		const result = await client().neardup(sent);
+		expect(result.ok === false && result.error.kind).toBe("invalid");
 	});
 });

@@ -8,6 +8,7 @@ import {
 	type GhRunner,
 	type CorpusGapsResponse,
 	type CorpusIngestResponse,
+	type CorpusNeardupResponse,
 	type CorpusPlanResponse,
 	type CorpusReflectResponse,
 	type CorpusStatusResponse,
@@ -139,4 +140,8 @@ export function fakeGhOwner(repos: Record<string, FakeOwnerRepo>): GhRunner {
 		}
 		return { code: 1, stdout: "" };
 	};
+}
+
+export function neardupOf(pairs: CorpusNeardupResponse["pairs"], over: Partial<CorpusNeardupResponse> = {}): CorpusNeardupResponse {
+	return { protocol: CORPUS_PROTOCOL, model: "test-model", dimension: 3, compared: 3, pairs, truncated: false, skipped: [], ...over };
 }
