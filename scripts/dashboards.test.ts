@@ -353,10 +353,10 @@ describe("the threshold lines are the catalogue's targets", () => {
 });
 
 describe("the fabric panels (phase 51)", () => {
-	test("each of the seven fabric resources draws exactly one panel, reading an allow-listed series", () => {
+	test("each of the eight fabric resources draws exactly one panel, reading an allow-listed series", () => {
 		const planes = parse(buildDashboards(), "substrate-data-planes.json");
 		const fabric = planes.panels.filter((panel) => panel.title.startsWith("Fabric: "));
-		expect(FABRIC_RESOURCES).toHaveLength(7);
+		expect(FABRIC_RESOURCES).toHaveLength(8);
 		expect(fabric).toHaveLength(FABRIC_RESOURCES.length);
 		for (const resource of FABRIC_RESOURCES) {
 			const panels = fabric.filter((panel) => panel.title === `Fabric: ${resource}`);

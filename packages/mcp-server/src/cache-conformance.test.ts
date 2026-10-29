@@ -11,7 +11,7 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { CACHE_CLASSES, CACHE_PREFIX, MEMORY_GENERATION_KEY, bunRedis, cacheKey, classOf, snapshotKey, type CacheClass } from "./cache.ts";
 
-const EXPECTED_CLASSES = ["brief", "memory-search", "graph-view", "brief-snapshot", "recall-snapshot", "docs-search", "budget", "gen"] as const;
+const EXPECTED_CLASSES = ["brief", "memory-search", "graph-view", "brief-snapshot", "recall-snapshot", "docs-search", "emb", "budget", "gen"] as const;
 
 const FORBIDDEN_CLASSES = ["idempotency", "idem", "mirror"];
 
@@ -80,7 +80,7 @@ describe("cache conformance", () => {
 		expect(classOf(`${CACHE_PREFIX}:idempotency:abc`)).toBeNull();
 		expect(classOf(`${CACHE_PREFIX}:mirror:abc`)).toBeNull();
 
-		const builders: CacheClass[] = ["brief", "memory-search", "graph-view", "brief-snapshot", "recall-snapshot", "docs-search"];
+		const builders: CacheClass[] = ["brief", "memory-search", "graph-view", "brief-snapshot", "recall-snapshot", "docs-search", "emb"];
 		for (const klass of builders) {
 			const keyed = cacheKey(klass, "conformance", "1", { n: 1 });
 			const snapped = snapshotKey(klass, "conformance", { n: 1 });

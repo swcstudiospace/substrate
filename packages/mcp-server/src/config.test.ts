@@ -25,12 +25,14 @@ import {
 	DEFAULT_SKILLS_REPO,
 	DEFAULT_SKILLS_STATE,
 	configWarnings,
+	embedCacheFromEnv,
 	isOperator,
 	loadConfig,
 	loadLedgerSettings,
 	parseRedisUrl,
 	railwayHostingFromEnv,
 	surfaceForToken,
+	teiFromEnv,
 } from "./config.ts";
 
 // Generated for each run, so no token-shaped literal sits in the repository.
@@ -633,5 +635,70 @@ describe("HINDSIGHT_MENTAL_MODELS", () => {
 		const config = loadConfig({ HINDSIGHT_BANKS: "sub-omp", HINDSIGHT_MENTAL_MODELS: `sub-omp=${ids.join(",")};sub-omp=mm_0` });
 		expect(config.mentalModels.models).toHaveLength(20);
 		expect(config.mentalModels.warnings).toHaveLength(2);
+	});
+});
+
+describe("TEI and the embedding cache (phase 64)", () => {
+	test("with TEI_URL unset there is no TEI, whatever else is set, and no endpoint class", () => {
+		const config = loadConfig({ TEI_API_KEY: "k", SUBSTRATE_TEI_MODEL: "m", SUBSTRATE_TEI_DIM: "384" });
+		expect(config.tei).toBeNull();
+		expect(config.dbEndpoints.tei).toBeUndefined();
+		expect(config.embedCache).toEqual({ enabled: false, ttlS: 604_800 });
+	});
+
+	test("a configured TEI reads its pins and limits, trims the URL, and keeps defaults for a missing or bad number", () => {
+		expect(teiFromEnv({ TEI_URL: " http://127.0.0.1:8080/// " })).toEqual({ url: "http://127.0.0.1:8080", timeoutMs: 10_000, batch: 32 });
+		expect(
+			teiFromEnv({
+				TEI_URL: "http://127.0.0.1:8080",
+				TEI_API_KEY: " key ",
+				SUBSTRATE_TEI_MODEL: " bge ",
+				SUBSTRATE_TEI_DIM: "384",
+				SUBSTRATE_TEI_TIMEOUT_MS: "2500",
+				SUBSTRATE_TEI_BATCH: "8",
+			}),
+		).toEqual({ url: "http://127.0.0.1:8080", apiKey: "key", model: "bge", dim: 384, timeoutMs: 2500, batch: 8 });
+		const bad = teiFromEnv({ TEI_URL: "http://127.0.0.1:8080", SUBSTRATE_TEI_DIM: "wide", SUBSTRATE_TEI_TIMEOUT_MS: "soon", SUBSTRATE_TEI_BATCH: "" });
+		expect(bad).toEqual({ url: "http://127.0.0.1:8080", timeoutMs: 10_000, batch: 32 });
+		expect(teiFromEnv({ TEI_URL: "http://127.0.0.1:8080", SUBSTRATE_TEI_DIM: "0" })?.dim).toBeUndefined();
+		expect(teiFromEnv({ TEI_URL: "http://127.0.0.1:8080", SUBSTRATE_TEI_DIM: "99999" })?.dim).toBeUndefined();
+	});
+
+	test("timeout and batch are clamped, not refused", () => {
+		const high = teiFromEnv({ TEI_URL: "http://127.0.0.1:8080", SUBSTRATE_TEI_TIMEOUT_MS: "9999999", SUBSTRATE_TEI_BATCH: "9999" });
+		expect(high).toMatchObject({ timeoutMs: 120_000, batch: 512 });
+		const low = teiFromEnv({ TEI_URL: "http://127.0.0.1:8080", SUBSTRATE_TEI_TIMEOUT_MS: "1", SUBSTRATE_TEI_BATCH: "0" });
+		expect(low).toMatchObject({ timeoutMs: 100, batch: 1 });
+	});
+
+	test("the embedding cache is off unless exactly `on`, and its TTL is clamped", () => {
+		expect(embedCacheFromEnv({}).enabled).toBe(false);
+		for (const value of ["", "off", "1", "true", "yes", "onn"]) expect(embedCacheFromEnv({ SUBSTRATE_EMBED_CACHE: value }).enabled).toBe(false);
+		expect(embedCacheFromEnv({ SUBSTRATE_EMBED_CACHE: " ON " }).enabled).toBe(true);
+		expect(embedCacheFromEnv({ SUBSTRATE_EMBED_CACHE_TTL_S: "3600" }).ttlS).toBe(3600);
+		expect(embedCacheFromEnv({ SUBSTRATE_EMBED_CACHE_TTL_S: "1" }).ttlS).toBe(60);
+		expect(embedCacheFromEnv({ SUBSTRATE_EMBED_CACHE_TTL_S: "99999999" }).ttlS).toBe(2_592_000);
+		expect(embedCacheFromEnv({ SUBSTRATE_EMBED_CACHE_TTL_S: "forever" }).ttlS).toBe(604_800);
+	});
+
+	test("TEI_URL is classed like a data-plane endpoint: loopback, a listed proxy or direct", () => {
+		expect(loadConfig({ TEI_URL: "http://127.0.0.1:8080" }).dbEndpoints.tei).toBe("loopback");
+		expect(loadConfig({ TEI_URL: "http://tei.example.test:8080", SUBSTRATE_DB_PROXY_ALLOW: "tei.example.test:8080" }).dbEndpoints.tei).toBe("proxy");
+		expect(loadConfig({ TEI_URL: "http://tei.example.test:8080" }).dbEndpoints.tei).toBe("direct");
+		// The database planes' own classes are untouched by it.
+		expect(loadConfig({ TEI_URL: "http://tei.example.test:8080" }).dbEndpoints.classes).toEqual({});
+	});
+
+	test("enforce refuses a direct TEI_URL with a ConfigError that names the variable and not the host", () => {
+		const refuse = () => loadConfig({ TEI_URL: "http://tei.example.test:8080", SUBSTRATE_DB_ENDPOINT_POLICY: "enforce" });
+		expect(refuse).toThrow(ConfigError);
+		let message = "";
+		try {
+			refuse();
+		} catch (error) {
+			message = error instanceof Error ? error.message : String(error);
+		}
+		expect(message).toContain("TEI_URL");
+		expect(message).not.toContain("example.test");
 	});
 });
