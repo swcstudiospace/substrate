@@ -169,6 +169,8 @@ import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachab
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth, type HindsightConfig } from "./planes/hindsight.ts";
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
 import { lightragOp, probeLightrag, queryForTool, type LightragQueryMode, type LightragToolOutcome } from "./planes/lightrag.ts";
+import { createTeiClient, teiOp, type TeiClient } from "./planes/tei.ts";
+import { createEmbeddingService, type EmbeddingService } from "./embed.ts";
 import { RailwayClient } from "./railway.ts";
 import { nodePlanningFs } from "./planning/fs.ts";
 import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
@@ -1381,6 +1383,12 @@ export class Substrate {
 	private readonly hindsightFetch: FetchLike;
 	/** LightRAG fetch, gated on the LightRAG plane's own breaker: a RAGFlow outage never refuses a LightRAG call. Tests inject the fake underneath; production uses the global fetch. */
 	private readonly lightragFetch: FetchLike;
+	/** TEI fetch, gated on the embedding plane's own breaker. Tests inject the fake underneath; production uses the global fetch. */
+	private readonly teiFetch: FetchLike;
+	/** The TEI client (phase 64): unconfigured without `TEI_URL`, when every call answers `not-configured` and sends nothing. */
+	private readonly teiClient: TeiClient;
+	/** The one door to embeddings: the TEI client behind the `emb` cache class (`SUBSTRATE_EMBED_CACHE`). */
+	readonly embeddings: EmbeddingService;
 	/** Railway control-plane client (Phase 45, D45-a); tests inject a recording fetch through `stores.railway`. */
 	readonly railway: RailwayClient;
 	/** Background retains in flight, drained (bounded) on shutdown. */
@@ -1496,6 +1504,7 @@ export class Substrate {
 			ragflowFetch?: FetchLike;
 			hindsightFetch?: FetchLike;
 			lightragFetch?: FetchLike;
+			teiFetch?: FetchLike;
 			planningBaseDir?: string;
 			desktop?: DesktopDriver | null;
 			railway?: RailwayClient;
@@ -1586,6 +1595,14 @@ export class Substrate {
 				},
 				gate: this.planes.gate("cache"),
 			});
+		this.teiFetch = gatedFetch(this.planes.gate("tei"), stores?.teiFetch ?? fetch, teiOp);
+		this.teiClient = createTeiClient(config.tei, { fetch: this.teiFetch });
+		this.embeddings = createEmbeddingService({
+			client: this.teiClient,
+			cache: this.cache,
+			cacheEnabled: config.embedCache.enabled,
+			ttlS: config.embedCache.ttlS,
+		});
 		this.eventBus = stores?.eventBus !== undefined ? stores.eventBus() : productionEventBus(config);
 		// Phase 52 (SOTA-08): the planning reads and the observer share one filesystem and one presence store. Presence rides the cache endpoint; with none, the sessions read says so.
 		const planningDeps = stores?.planning ?? {};
@@ -7062,13 +7079,19 @@ export class Substrate {
 					hindsight: probes.hindsight,
 					ragflow: probes.ragflow,
 					lightrag: probes.lightrag,
+					tei: this.teiProbe(FABRIC_HEALTH_WINDOW_MS),
 				};
 			},
-			snapshot: () => ({
-				cache: this.cache.health(),
-				eventBus: { enabled: this.eventBusHealth().enabled },
-				breakers: this.planes.snapshots(),
-			}),
+			snapshot: () => {
+				const seen = this.teiClient.snapshot();
+				return {
+					cache: this.cache.health(),
+					eventBus: { enabled: this.eventBusHealth().enabled },
+					tei: { model: seen.model, dimension: seen.dim, latencyMs: seen.lastLatencyMs },
+					// The embedding plane is not a reported plane, so its breaker is read from its gate beside the six.
+					breakers: { ...this.planes.snapshots(), tei: this.planes.gate("tei").breaker?.snapshot() ?? null },
+				};
+			},
 			railwayCost: () => this.railway.costReport(),
 			outbox: () => {
 				const stats = this.retainOutboxStats();
@@ -7084,10 +7107,32 @@ export class Substrate {
 					hindsight: hindsightFromEnv() !== null,
 					ragflow: this.config.ragflow !== null,
 					lightrag: this.config.lightrag !== null,
+					tei: this.config.tei !== null,
 				},
+				teiEndpoint: dbEndpoints.tei ?? null,
 				dragonflyRefused: this.config.dragonflyRefused !== null,
 			},
 		};
+	}
+
+	/** The field behind `teiProbe`: the last probe and when it started. */
+	private teiProbeShare: { at: number; probe: Promise<boolean | null> } | null = null;
+
+	/**
+	 * Whether TEI answers `/health` and `/info` with the pinned model: `null` when it is not configured, which sends nothing.
+	 * The fabric's calls inside one window share one probe, and `/healthz` never asks: the embedding plane has no row there.
+	 */
+	private teiProbe(windowMs: number): Promise<boolean | null> {
+		if (this.config.tei === null) return Promise.resolve(null);
+		const now = Date.now();
+		const share = this.teiProbeShare;
+		if (share !== null && now - share.at >= 0 && now - share.at < windowMs) return share.probe;
+		const probe = this.teiClient.probe(HEALTH_PROBE_MS).then(
+			(answer) => answer.ok,
+			() => false,
+		);
+		this.teiProbeShare = { at: now, probe };
+		return probe;
 	}
 
 	/** The last index size report `SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S` keeps, and the measurement still running. */

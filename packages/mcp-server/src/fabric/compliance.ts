@@ -31,6 +31,7 @@ export function buildFabricCompliance(input: {
 	const checks: FabricCheck[] = [
 		endpointsPrivateCheck(facts),
 		endpointPolicyCheck(facts),
+		teiEndpointCheck(facts),
 		auditCheck(),
 		secretFreeReportCheck(status, suggestions),
 		...status.resources.map(resourceCheck),
@@ -62,6 +63,20 @@ function endpointPolicyCheck(facts: FabricFacts): FabricCheck {
 		return { id, status: "PASS", evidence: "policy enforce: a direct endpoint refuses boot" };
 	}
 	return { id, status: "FAIL", evidence: "policy warn: a direct endpoint is reported at boot and still runs" };
+}
+
+/**
+ * The embedding service's endpoint is loopback or an allowed proxy (phase 64). The text sent to it is document content, so a
+ * TEI URL that reaches the public network is a FAIL under either policy; an unset one is not applicable, never a pass.
+ */
+function teiEndpointCheck(facts: FabricFacts): FabricCheck {
+	const id = "tei-endpoint-private";
+	const endpointClass = facts.tei.endpointClass;
+	if (endpointClass === null) return { id, status: "NOT_APPLICABLE", evidence: "TEI is not configured" };
+	if (endpointClass === "direct") {
+		return { id, status: "FAIL", evidence: `direct endpoint under policy ${facts.endpointPolicy}: tei is neither loopback nor in the proxy allow list` };
+	}
+	return { id, status: "PASS", evidence: `tei endpoint is ${endpointClass}` };
 }
 
 /** Every fabric tool is a read, so each must have an explicit fail-open audit decision. */

@@ -11,6 +11,7 @@ function snapshot(): FabricHealthView {
 	return {
 		cache: { enabled: true, connected: true, mode: "on", hits: 9, misses: 1, errors: 0, bypasses: 0 },
 		eventBus: { enabled: true },
+		tei: { model: "test-model", dimension: 384, latencyMs: 12 },
 		breakers: {
 			greptime: { state: "closed" },
 			index: { state: "closed" },
@@ -18,6 +19,7 @@ function snapshot(): FabricHealthView {
 			hindsight: { state: "closed" },
 			ragflow: { state: "closed" },
 			lightrag: { state: "closed" },
+			tei: { state: "closed" },
 		},
 	};
 }
@@ -30,6 +32,7 @@ function healthyParts(): FabricHealthParts {
 		hindsight: Promise.resolve(true),
 		ragflow: Promise.resolve(true),
 		lightrag: Promise.resolve(true),
+		tei: Promise.resolve(true),
 	};
 }
 
@@ -48,7 +51,8 @@ function sources(overrides: Partial<FabricSources> = {}): FabricSources {
 		config: {
 			endpointPolicy: "enforce",
 			endpointClasses: { greptime: "proxy" },
-			configured: { dragonfly: true, "timescaledb-index": true, greptime: true, ragflow: true, lightrag: true, hindsight: true },
+			configured: { dragonfly: true, "timescaledb-index": true, greptime: true, ragflow: true, lightrag: true, hindsight: true, tei: true },
+			teiEndpoint: "loopback",
 			dragonflyRefused: false,
 		},
 		...overrides,
@@ -127,6 +131,36 @@ describe("gatherFabricFacts", () => {
 		const facts = await gatherFabricFacts(sources({ outbox: () => ({ size: 2, oldestAt: "2026-10-20T23:00:00.000Z" }) }));
 		expect(facts.services.hindsight.degraded).toBe(true);
 		expect(facts.outbox).toEqual({ parked: 2, oldestAt: "2026-10-20T23:00:00.000Z" });
+	});
+
+	test("TEI is read like its siblings: a probe that answers is ok, one that does not is unavailable, one that never answers times out, and its facts carry the client's reading", async () => {
+		const facts = await gatherFabricFacts(sources());
+		expect(rowOf(facts, "tei")).toMatchObject({ state: "ok", endpointClass: "loopback", detail: { model: "test-model", dimension: 384, latencyMs: 12 } });
+		const down = await gatherFabricFacts(sources({ health: () => ({ ...healthyParts(), tei: Promise.resolve(false) }) }));
+		expect(rowOf(down, "tei")).toMatchObject({ state: "unavailable", source: "probe().tei" });
+		const silent = await gatherFabricFacts(sources({ health: () => ({ ...healthyParts(), tei: never<boolean | null>() }) }), { deadlineMs: 20 });
+		expect(rowOf(silent, "tei")).toMatchObject({ state: "unavailable", source: "probe().tei: timeout" });
+		expect(rowOf(silent, "lightrag").state).toBe("ok");
+		const refused = await gatherFabricFacts(sources({ health: () => ({ ...healthyParts(), tei: Promise.reject(new Error("boom")) }) }));
+		expect(rowOf(refused, "tei").source).toBe("probe().tei: failed");
+	});
+
+	test("an open TEI breaker makes the row unavailable even though the last probe answered", async () => {
+		const facts = await gatherFabricFacts(sources({ snapshot: () => ({ ...snapshot(), breakers: { ...snapshot().breakers, tei: { state: "open" } } }) }));
+		expect(rowOf(facts, "tei").state).toBe("unavailable");
+	});
+
+	test("an unconfigured TEI is unconfigured and has no detail", async () => {
+		const base = sources();
+		const facts = await gatherFabricFacts({
+			...base,
+			health: () => ({ ...healthyParts(), tei: Promise.resolve(null) }),
+			config: { ...base.config, configured: { ...base.config.configured, tei: false }, teiEndpoint: null },
+		});
+		const row = rowOf(facts, "tei");
+		expect(row.state).toBe("unconfigured");
+		expect(row.detail).toBeUndefined();
+		expect(facts.tei.endpointClass).toBeNull();
 	});
 });
 

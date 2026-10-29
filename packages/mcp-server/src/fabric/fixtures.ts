@@ -21,16 +21,18 @@ export function healthyServices(): Record<ServiceName, ServiceReading> {
 		ragflow: readyService("health().planes.ragflow"),
 		lightrag: readyService("health().planes.lightrag"),
 		hindsight: readyService("health().planes.hindsight"),
+		tei: readyService("probe().tei"),
 	};
 }
 
-/** Every resource configured and answering, every data plane behind a proxy, the cache answering, the bus on. */
+/** Every resource configured and answering, every data plane and the embedding service behind a proxy or loopback, the cache answering, the bus on. */
 export function healthyFacts(overrides: Partial<FabricFacts> = {}): FabricFacts {
 	return {
 		checkedAt: CHECKED_AT,
 		endpointPolicy: "enforce",
 		endpoints: { greptime: "proxy", postgres: "loopback", dragonfly: "loopback" },
 		services: healthyServices(),
+		tei: { endpointClass: "loopback", model: "test-model", dimension: 384, latencyMs: 12 },
 		cache: { mode: "on", hits: 90, misses: 10, errors: 0, bypasses: 0 },
 		eventBusEnabled: true,
 		outbox: { parked: 0, oldestAt: null },
@@ -48,12 +50,14 @@ export function unconfiguredFacts(): FabricFacts {
 		ragflow: absentService(),
 		lightrag: absentService(),
 		hindsight: absentService(),
+		tei: absentService(),
 	};
 	return {
 		checkedAt: CHECKED_AT,
 		endpointPolicy: "warn",
 		endpoints: {},
 		services,
+		tei: { endpointClass: null, model: null, dimension: null, latencyMs: null },
 		cache: null,
 		eventBusEnabled: null,
 		outbox: { parked: 0, oldestAt: null },

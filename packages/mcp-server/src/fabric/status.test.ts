@@ -16,9 +16,24 @@ function withService(name: ServiceName, patch: Partial<FabricFacts["services"][S
 }
 
 describe("buildFabricStatus", () => {
-	test("reports exactly the seven resources, in report order", () => {
+	test("reports exactly the eight resources, in report order, tei between hindsight and the proxy layer", () => {
 		const status = buildFabricStatus(healthyFacts());
 		expect(status.resources.map((row) => row.resource)).toEqual([...FABRIC_RESOURCES]);
+	});
+
+	test("an unconfigured TEI is unconfigured with no detail; a configured one carries its model, dimension and latency and never a URL", () => {
+		expect(rowOf(unconfiguredFacts(), "tei")).toMatchObject({ state: "unconfigured", endpointClass: "unset" });
+		expect(rowOf(unconfiguredFacts(), "tei").detail).toBeUndefined();
+		const row = rowOf(healthyFacts(), "tei");
+		expect(row).toMatchObject({ state: "ok", endpointClass: "loopback", source: "probe().tei", detail: { model: "test-model", dimension: 384, latencyMs: 12 } });
+		expect(JSON.stringify(row)).not.toContain("http");
+	});
+
+	test("a configured TEI that does not answer or whose breaker is open is unavailable, a half-open one degraded", () => {
+		expect(rowOf(withService("tei", { answered: false }), "tei").state).toBe("unavailable");
+		expect(rowOf(withService("tei", { answered: null }), "tei").state).toBe("unavailable");
+		expect(rowOf(withService("tei", { breaker: "open" }), "tei").state).toBe("unavailable");
+		expect(rowOf(withService("tei", { breaker: "half-open" }), "tei").state).toBe("degraded");
 	});
 
 	test("a resource nothing configures is unconfigured and never ok", () => {
@@ -98,7 +113,7 @@ describe("buildFabricStatus", () => {
 		expect(rowOf(facts, "dragonfly").endpointClass).toBe("direct");
 	});
 
-	test("counts add up to the seven rows", () => {
+	test("counts add up to the eight rows", () => {
 		const status = buildFabricStatus(withService("greptime", { answered: false }));
 		const total = status.counts.ok + status.counts.degraded + status.counts.unavailable + status.counts.unconfigured;
 		expect(total).toBe(FABRIC_RESOURCES.length);

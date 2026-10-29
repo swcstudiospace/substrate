@@ -582,3 +582,56 @@ describe("no Hindsight credentials in the repo", () => {
 		}
 	});
 });
+
+/**
+ * The substrate-only door (phase 64): TEI is reached ONLY through `substrate-mcp` (`planes/tei.ts`, behind `embed.ts`).
+ * The CLI, the collectors and the scripts that want a vector ask the server over HTTP; the text they send is document
+ * content, and the server is where the endpoint policy, the breaker and the cache apply.
+ */
+describe("TEI is reachable only through substrate-mcp", () => {
+	test("no package outside the MCP server imports the TEI client or the embedding service", async () => {
+		const offenders = (await filesMatching("**/*.ts"))
+			.filter((path) => !path.startsWith(LEDGER_PACKAGE))
+			.filter((path) =>
+				/(from\s+["'][^"']*|import\s*\(\s*["']|require\s*\(\s*["'])[^"']*(planes\/tei|mcp-server\/src\/embed)/.test(read(path)),
+			);
+
+		expect(offenders).toEqual([]);
+	}, SCAN_TIMEOUT_MS);
+});
+
+const TEI_CREDENTIAL = /\bTEI_(?:URL|API_KEY)["']?\s*[:=]\s*["']?[^\s"']/;
+
+function carriesTeiCredential(body: string): boolean {
+	return body
+		.split("\n")
+		.filter((line) => !/^\s*(?:#|\/\/|\*|<!--)/.test(line))
+		.some((line) => TEI_CREDENTIAL.test(line));
+}
+
+describe("no TEI credentials in the repo", () => {
+	test("no committed non-test file carries a TEI endpoint or key", () => {
+		const offenders = trackedFiles()
+			.filter((path) => !path.endsWith(".test.ts"))
+			.filter((path) => path !== relative(ROOT, import.meta.path))
+			.filter((path) => carriesTeiCredential(read(path)));
+
+		expect(offenders).toEqual([]);
+	}, SCAN_TIMEOUT_MS);
+
+	test("the scan catches an endpoint or key with a value, and not a blank, a bare name or a code read", () => {
+		for (const body of ["TEI_URL=http://x:8080", "TEI_API_KEY=tei-0123456789abcdef", '  "TEI_URL": "http://x:8080"', "TEI_API_KEY: tei-0123456789abcdef"]) {
+			expect({ body, caught: carriesTeiCredential(body) }).toEqual({ body, caught: true });
+		}
+		for (const body of [
+			"TEI_URL=",
+			"TEI_API_KEY=",
+			"SUBSTRATE_TEI_MODEL=bge-small",
+			"Set `TEI_URL` and `TEI_API_KEY`.",
+			"const url = env.TEI_URL?.trim();",
+			"# TEI_API_KEY lives in the server env file",
+		]) {
+			expect({ body, caught: carriesTeiCredential(body) }).toEqual({ body, caught: false });
+		}
+	});
+});

@@ -6,7 +6,7 @@
  */
 import type { DbPlane, EndpointClass } from "../db-endpoints.ts";
 
-/** The seven resources the fabric reports, in report order. */
+/** The eight resources the fabric reports, in report order. */
 export const FABRIC_RESOURCES = [
 	"dragonfly",
 	"timescaledb-index",
@@ -14,6 +14,7 @@ export const FABRIC_RESOURCES = [
 	"ragflow",
 	"lightrag",
 	"hindsight",
+	"tei",
 	"tailscale-proxy",
 ] as const;
 export type FabricResourceName = (typeof FABRIC_RESOURCES)[number];
@@ -40,6 +41,13 @@ export type CostReading = "ok" | "over-budget" | "unpriced" | "unavailable" | "u
 /** The MCP tools this module serves. Each one is read-only and fail-open. */
 export const FABRIC_TOOLS = ["fabric_status", "fabric_optimize", "fabric_compliance"] as const;
 
+/** The embedding service's reading (phase 64): a model name, a dimension and a latency. Never a URL or a key. */
+export interface FabricTeiDetail {
+	model: string | null;
+	dimension: number | null;
+	latencyMs: number | null;
+}
+
 export interface FabricResourceStatus {
 	resource: FabricResourceName;
 	endpointClass: FabricEndpointClass;
@@ -47,6 +55,8 @@ export interface FabricResourceStatus {
 	/** A fixed phrase naming where the reading came from. Never an error text. */
 	source: string;
 	checkedAt: string;
+	/** Present on the `tei` row only, and only when TEI is configured. */
+	detail?: FabricTeiDetail;
 }
 
 export interface FabricStatus {
@@ -98,6 +108,8 @@ export interface FabricFacts {
 	/** The class of each configured data plane. An unconfigured plane has no entry. */
 	endpoints: Partial<Record<DbPlane, EndpointClass>>;
 	services: Record<ServiceName, ServiceReading>;
+	/** The embedding service: the class of `TEI_URL` (null when unset) and what the client has seen. */
+	tei: { endpointClass: EndpointClass | null } & FabricTeiDetail;
 	cache: { mode: "off" | "on" | "degraded"; hits: number; misses: number; errors: number; bypasses: number } | null;
 	eventBusEnabled: boolean | null;
 	/** The Hindsight retain outbox: retains parked for delivery. */
@@ -117,7 +129,9 @@ export interface FabricHealthView {
 		bypasses: number;
 	};
 	eventBus: { enabled: boolean };
-	breakers: Record<"greptime" | "index" | "cache" | "hindsight" | "ragflow" | "lightrag", { readonly state: "closed" | "open" | "half-open" } | null>;
+	/** What the embedding client has seen (phase 64). */
+	tei: FabricTeiDetail;
+	breakers: Record<"greptime" | "index" | "cache" | "hindsight" | "ragflow" | "lightrag" | "tei", { readonly state: "closed" | "open" | "half-open" } | null>;
 }
 
 /**
@@ -131,6 +145,8 @@ export interface FabricHealthParts {
 	hindsight: Promise<boolean | null>;
 	ragflow: Promise<boolean | null>;
 	lightrag: Promise<boolean | null>;
+	/** `null` when TEI is not configured; otherwise whether `/health` and `/info` answered and the model is the pinned one. */
+	tei: Promise<boolean | null>;
 }
 
 /** The structural view of the Railway cost report that the fabric reads. */
@@ -145,6 +161,8 @@ export interface FabricConfigView {
 	endpointPolicy: "warn" | "enforce";
 	endpointClasses: Partial<Record<DbPlane, EndpointClass>>;
 	configured: Record<ServiceName, boolean>;
+	/** The class of `TEI_URL`; null when it is unset. */
+	teiEndpoint: EndpointClass | null;
 	/** The Dragonfly URL was refused by policy: the cache is off, and the boot record says why. */
 	dragonflyRefused: boolean;
 }

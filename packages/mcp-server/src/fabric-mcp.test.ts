@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { auditMode } from "@substrate/audit";
+import { PLANES } from "@substrate/observability";
 import { toolClass } from "./admission.ts";
 import { loadConfig } from "./config.ts";
 import type { FabricSuggestion } from "./fabric/types.ts";
@@ -66,7 +67,7 @@ describe("fabric tools", () => {
 		}
 	});
 
-	test("fabric_status reports the seven resources, and a resource nothing configures is never ok", async () => {
+	test("fabric_status reports the eight resources, and a resource nothing configures is never ok", async () => {
 		const { fetch } = recordingFetch(() => ({}));
 		const client = await connect(substrateWith({}, fetch));
 		const reply = await call(client, "fabric_status");
@@ -79,9 +80,10 @@ describe("fabric tools", () => {
 			"ragflow",
 			"lightrag",
 			"hindsight",
+			"tei",
 			"tailscale-proxy",
 		]);
-		for (const name of ["dragonfly", "timescaledb-index", "greptime", "ragflow", "lightrag", "tailscale-proxy"]) {
+		for (const name of ["dragonfly", "timescaledb-index", "greptime", "ragflow", "lightrag", "tei", "tailscale-proxy"]) {
 			expect(body.resources.find((row) => row.resource === name)?.state).toBe("unconfigured");
 		}
 	});
@@ -124,10 +126,11 @@ describe("fabric tools", () => {
 		expect(reply.text).not.toContain(TOKEN);
 		const body = reply.json() as { checks: Array<{ id: string; status: string; evidence: string }> };
 		const statusOf = (id: string) => body.checks.find((check) => check.id === id)?.status;
-		for (const id of ["resource-state.greptime", "resource-state.timescaledb-index", "resource-state.dragonfly", "resource-state.ragflow", "resource-state.lightrag"]) {
+		for (const id of ["resource-state.greptime", "resource-state.timescaledb-index", "resource-state.dragonfly", "resource-state.ragflow", "resource-state.lightrag", "resource-state.tei"]) {
 			expect(statusOf(id)).toBe("NOT_APPLICABLE");
 		}
 		expect(statusOf("resource-state.tailscale-proxy")).toBe("NOT_APPLICABLE");
+		expect(statusOf("tei-endpoint-private")).toBe("NOT_APPLICABLE");
 		expect(statusOf("audit-policy-fabric-tools")).toBe("PASS");
 		expect(statusOf("report-redaction")).toBe("PASS");
 	});
@@ -176,6 +179,124 @@ describe("the LightRAG fabric row", () => {
 		);
 		const status = (await call(client, "fabric_status")).json() as { resources: Array<{ resource: string; state: string }> };
 		expect(status.resources.find((candidate) => candidate.resource === "lightrag")?.state).toBe("unavailable");
+	});
+});
+
+const TEI_KEY = "tei-secret-key-xyz";
+const TEI_ENV = { TEI_URL: "http://127.0.0.1:8080", TEI_API_KEY: TEI_KEY, SUBSTRATE_TEI_MODEL: "test-model", SUBSTRATE_TEI_DIM: "384" };
+
+/** A substrate with TEI configured, reached only through `teiFetch`. */
+function substrateWithTei(env: Record<string, string>, teiFetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>) {
+	const { fetch } = recordingFetch(() => ({}));
+	return new Substrate(loadConfig(env), { index: null, greptime: null, railway: new RailwayClient(railwayFromEnv({}), { fetch }), teiFetch });
+}
+
+interface TeiRow {
+	resource: string;
+	state: string;
+	endpointClass: string;
+	source: string;
+	detail?: { model: string | null; dimension: number | null; latencyMs: number | null };
+}
+
+/** A TEI fake that answers `/health` and `/info`, records every request and keeps the bearer it was sent. */
+function teiProbeFake(model = "test-model", healthStatus = 200) {
+	const paths: string[] = [];
+	const bearers: Array<string | null> = [];
+	const fetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+		const path = new URL(String(input)).pathname;
+		paths.push(`${init?.method ?? "GET"} ${path}`);
+		bearers.push(new Headers(init?.headers).get("authorization"));
+		if (path === "/info") return Response.json({ model_id: model, max_input_length: 512, max_client_batch_size: 32 });
+		return new Response("", { status: healthStatus });
+	};
+	return { paths, bearers, fetch: fetchImpl };
+}
+
+/** The `tei` row of `fabric_status`, and the reply text. */
+async function teiRowOf(client: Client): Promise<{ row: TeiRow | undefined; text: string }> {
+	const reply = await call(client, "fabric_status");
+	const body = reply.json() as { resources: TeiRow[] };
+	return { row: body.resources.find((candidate) => candidate.resource === "tei"), text: reply.text };
+}
+
+/** One `fabric_compliance` check's status, and the reply text. */
+async function checkOf(client: Client, id: string): Promise<{ status: string | undefined; text: string }> {
+	const reply = await call(client, "fabric_compliance");
+	const body = reply.json() as { checks: Array<{ id: string; status: string }> };
+	return { status: body.checks.find((check) => check.id === id)?.status, text: reply.text };
+}
+
+describe("the TEI fabric row", () => {
+	test("TEI answering with the pinned model is ok: loopback, the model and pinned dimension in its detail, one health and one info request with the bearer, and no URL or key in any report", async () => {
+		const tei = teiProbeFake();
+		const client = await connect(substrateWithTei(TEI_ENV, tei.fetch));
+		const { row } = await teiRowOf(client);
+		expect(row).toMatchObject({ state: "ok", endpointClass: "loopback", source: "probe().tei", detail: { model: "test-model", dimension: 384 } });
+		expect(typeof row?.detail?.latencyMs).toBe("number");
+		expect([...tei.paths].sort()).toEqual(["GET /health", "GET /info"]);
+		expect(tei.bearers.every((bearer) => bearer === `Bearer ${TEI_KEY}`)).toBe(true);
+		for (const name of ["fabric_status", "fabric_optimize", "fabric_compliance"]) {
+			const text = (await call(client, name)).text;
+			expect(text).not.toContain(TEI_KEY);
+			expect(text).not.toContain("127.0.0.1");
+		}
+		expect((await checkOf(client, "resource-state.tei")).status).toBe("PASS");
+		expect((await checkOf(client, "tei-endpoint-private")).status).toBe("PASS");
+	});
+
+	test("a TEI serving another model than the pin, or answering /health with an error, is unavailable and fails its resource check", async () => {
+		for (const tei of [teiProbeFake("other-model"), teiProbeFake("test-model", 503)]) {
+			const client = await connect(substrateWithTei(TEI_ENV, tei.fetch));
+			expect((await teiRowOf(client)).row?.state).toBe("unavailable");
+			expect((await checkOf(client, "resource-state.tei")).status).toBe("FAIL");
+		}
+	});
+
+	test("a TEI URL that is neither loopback nor allowed is a direct endpoint: the row says so, the compliance check fails, and no host is printed; an allowed proxy passes", async () => {
+		const direct = { ...TEI_ENV, TEI_URL: "http://tei.example.test:8080" };
+		const client = await connect(substrateWithTei(direct, teiProbeFake().fetch));
+		const status = await teiRowOf(client);
+		expect(status.row?.endpointClass).toBe("direct");
+		const compliance = await checkOf(client, "tei-endpoint-private");
+		expect(compliance.status).toBe("FAIL");
+		expect(status.text + compliance.text).not.toContain("example.test");
+
+		const proxied = await connect(substrateWithTei({ ...direct, SUBSTRATE_DB_PROXY_ALLOW: "tei.example.test:8080" }, teiProbeFake().fetch));
+		expect((await checkOf(proxied, "tei-endpoint-private")).status).toBe("PASS");
+		expect((await teiRowOf(proxied)).row?.endpointClass).toBe("proxy");
+	});
+
+	test("under the enforce policy a direct TEI URL refuses boot, naming the variable and never the URL", () => {
+		let message = "";
+		try {
+			loadConfig({ TEI_URL: "http://tei.example.test:8080", SUBSTRATE_DB_ENDPOINT_POLICY: "enforce" });
+		} catch (error) {
+			message = error instanceof Error ? error.message : String(error);
+		}
+		expect(message).toContain("TEI_URL");
+		expect(message).not.toContain("example.test");
+		expect(() => loadConfig({ TEI_URL: "http://127.0.0.1:8080", SUBSTRATE_DB_ENDPOINT_POLICY: "enforce" })).not.toThrow();
+	});
+
+	test("with TEI_URL unset the row is unconfigured and nothing is sent to TEI", async () => {
+		const tei = teiProbeFake();
+		const client = await connect(substrateWithTei({}, tei.fetch));
+		expect((await teiRowOf(client)).row).toMatchObject({ state: "unconfigured", endpointClass: "unset" });
+		expect(tei.paths).toEqual([]);
+	});
+
+	test("the embedding service rides the tei plane's breaker: open, it answers breaker-open without a request; the fabric reads it; the six reported planes are unchanged", async () => {
+		const tei = teiProbeFake();
+		const substrate = substrateWithTei(TEI_ENV, tei.fetch);
+		const breaker = defined(substrate.planes.gate("tei").breaker);
+		for (let failures = 0; failures < substrate.config.breaker.failureThreshold; failures += 1) breaker.onFailure("tei 503");
+		expect(breaker.state()).toBe("open");
+		expect(await substrate.embeddings.embed(["a"])).toEqual({ ok: false, reason: "breaker-open" });
+		const client = await connect(substrate);
+		expect((await teiRowOf(client)).row?.state).toBe("unavailable");
+		expect(tei.paths).toEqual([]);
+		expect(Object.keys(substrate.planes.snapshots()).sort()).toEqual([...PLANES].sort());
 	});
 });
 
