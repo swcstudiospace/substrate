@@ -6,7 +6,7 @@ The gate is six checks, run in this order. `bun run verify` runs them locally; `
 |---|---|---|
 | `install` | `bun install --frozen-lockfile` | `bun.lock` matches every `package.json` |
 | `types` | `bunx tsc --noEmit` | the whole workspace typechecks |
-| `lint` | `bunx biome lint --reporter=summary .` | Biome reports no error-level diagnostic; warnings stay visible in the summary but do not fail the step |
+| `lint` | `bunx biome lint --reporter=summary .` | Biome reports no error and no warning: every rule that used to warn is an error now, and the tree has none left |
 | `tests` | `bun test` | the full suite passes |
 | `python` | `uv run --no-project --with httpx==0.28.1 --with pytest==9.1.1 python -m pytest packages/miner/tests packages/dispatcher/tests` | the miner and dispatcher Python suites pass, in an ephemeral environment pinned to the versions they were verified with |
 | `locks` | `bun run check:phase-close` | the event vocabulary, store lock, audit policy and redaction locks hold |
@@ -58,7 +58,7 @@ A CLI entrypoint may call `process.exit`. A file counts as one when it has a she
 
 Fork pull requests run none of these jobs: each job's `if:` skips a pull request whose head repository is not this repository, because a fork's code would otherwise run on the shared runner pool.
 
-Lint is blocking: the `lint` step (`bunx biome lint --reporter=summary .`, also `bun run lint` without the reporter) sits between `Typecheck` and `Tests` in the `verify` job and in `bun run verify`. Biome exits non-zero only on errors, so warnings stay visible but do not block. Biome is pinned exactly to 2.6.3 in the root `package.json` with the `recommended` preset; the formatter is off, so nothing is reformatted. Every root devDependency (`@biomejs/biome`, `@types/bun`, `typescript`) is pinned to an exact version, so a fresh install cannot move the toolchain without a reviewed change.
+Lint is blocking: the `lint` step (`bunx biome lint --reporter=summary .`, also `bun run lint` without the reporter) sits between `Typecheck` and `Tests` in the `verify` job and in `bun run verify`. Biome exits non-zero on errors, and the two rules that used to warn are errors now, so a new non-null assertion or a missed optional chain fails the step; the tree reports no warning. Biome is pinned exactly to 2.6.3 in the root `package.json` with the `recommended` preset; the formatter is off, so nothing is reformatted. Every root devDependency (`@biomejs/biome`, `@types/bun`, `typescript`) is pinned to an exact version, so a fresh install cannot move the toolchain without a reviewed change.
 
 Rule decisions in `biome.json`:
 
@@ -68,13 +68,13 @@ Rule decisions in `biome.json`:
 | `correctness/noUnusedImports`, `noUnusedVariables`, `noUnusedFunctionParameters` | error | dead code; the tree is clean |
 | `style/useConst`, `useImportType` | error | cheap, mechanical, tree is clean (`useImportType` matches `verbatimModuleSyntax`) |
 | `complexity/noCommaOperator`, `useRegexLiterals` | error | obscure constructs; the tree is clean |
-| `style/noNonNullAssertion` | warn | hundreds of existing uses, governed separately by a code ratchet |
-| `complexity/useOptionalChain` | warn | a style preference with existing sites; not worth blocking |
+| `style/noNonNullAssertion` | error | every use was removed; a new `!` fails the step, and the code ratchet's baseline for source is 0 as a second guard (tests narrow with a `defined` helper) |
+| `complexity/useOptionalChain` | error | the existing sites were rewritten where the truthiness test cannot differ; a missed chain fails the step |
 | `suspicious/noTemplateCurlyInString` | off | false positives on intentional `${...}` text such as templates and docs strings |
 | `complexity/useLiteralKeys` | off | conflicts with `noPropertyAccessFromIndexSignature`-style bracket access on index signatures |
 | `style/useTemplate` | off | string concatenation is often clearer; purely stylistic |
 
-The compiler is stricter too: `tsconfig.json` enables `noImplicitOverride`, `noImplicitReturns`, `noUnusedLocals` and `noUnusedParameters` on top of `strict`.
+The compiler is stricter too: `tsconfig.json` enables `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, `noImplicitOverride`, `noImplicitReturns`, `noUnusedLocals` and `noUnusedParameters` on top of `strict`. Under `exactOptionalPropertyTypes` an optional property is either absent or a value of its type: where `undefined` is a legal value the declaration says `key?: T | undefined`, and a serialized or compared object leaves the key out instead of setting it to `undefined`.
 
 Every job runs on the Omega CI runner pool (`[self-hosted, linux, x64, omega-ci]`, [swcstudiospace/Omega-Prime `docs/ci-runners.md`](https://github.com/swcstudiospace/Omega-Prime/blob/main/docs/ci-runners.md)), never on GitHub-hosted runners. Jobs run as an unprivileged user with no Docker and no `sudo`, so there are no service containers. The `verify` job's scratch database comes from [`.github/actions/scratch-postgres`](../.github/actions/scratch-postgres/action.yml): it runs `initdb` and `pg_ctl` from the image's PostgreSQL 16 into `$RUNNER_TEMP`, listening on 127.0.0.1 and a port the kernel reports free for that job (parallel jobs on one runner host never clash), with trust authentication on loopback. It creates `substrate_test` and exports `SUBSTRATE_TEST_PG_URL`. An `if: always()` step of the same action stops the cluster. Both are `uses:` steps, so the job's `run:` lines stay exactly the gate's four commands. The dependency audit runs on pushes to `main`, weekly and on demand, not on pull requests, so a new high or critical advisory fails it until the package is upgraded or listed under the accepted risks below. The weekly scheduled run re-checks the lockfile for advisories published between changes; a red scheduled run is the signal to upgrade.
 
