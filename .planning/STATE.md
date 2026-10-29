@@ -2,7 +2,7 @@
 gsd_state_version: "1.0"
 milestone: v1.6
 milestone_name: Contextual Memory, Live Steering and Eternal Rollback
-status: "Awaiting next milestone. v1.3.x, v1.5 and v1.6 are archived as override closeouts (owner decision 2026-10-28, archived 2026-10-29) with their open items recorded as accepted debt; nothing is open in `.planning/phases/`. Main carries every code PR of Run 12 (last code merge b19ff515, CI green)."
+status: archived
 stopped_at: "Run 12 complete: three milestones archived; next is a new milestone or the operator-gated steps listed in the Run 12 record"
 last_updated: "2026-10-29T00:20:00.000Z"
 last_activity: 2026-10-29

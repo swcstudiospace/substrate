@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { parseStatePart } from "../packages/mcp-server/src/planning/position.ts";
 import { parseFrontmatter } from "../packages/mcp-server/src/skills/frontmatter.ts";
 
 const STATE_PATH = join(import.meta.dir, "..", ".planning", "STATE.md");
@@ -20,6 +21,42 @@ export function checkStateFrontmatter(text: string): string[] {
 	return problems;
 }
 
+/**
+ * The Current Position prose says no phase is open (`Phase: none ...`) but the planning reader still reports one: the reader
+ * prefers the frontmatter's `current_phase` and clears it only for a `status` of exactly `complete`, `completed` or `archived`,
+ * so a closed project whose status is a sentence keeps showing its last phase in `planning_status`. Empty means consistent.
+ */
+export function checkClosedStateHasNoPhase(text: string): string[] {
+	if (!/^Phase:[ \t]*(?:none|n\/a|null)\b/im.test(text)) return [];
+	const parsed = parseStatePart(text);
+	if (!parsed.ok) return ["the planning reader could not parse STATE.md"];
+	return parsed.part.phase === null ? [] : [`the prose says no phase is open, but the reader reports phase ${parsed.part.phase.number}: set status to complete, completed or archived, or clear current_phase`];
+}
+
+const MILESTONES_DIR = join(import.meta.dir, "..", ".planning", "milestones");
+
+/**
+ * Archives that kept links relative to the live ROADMAP.md when `milestone complete` copied it (`phases/...`, `milestones/...`,
+ * `MILESTONES.md`). They predate the closeouts of v1.3.x, v1.5 and v1.6, which rewrote theirs; this list is recorded debt and only shrinks.
+ */
+const LEGACY_BROKEN_LINK_ARCHIVES: readonly string[] = ["v1.2-ROADMAP.md", "v1.3-ROADMAP.md", "v1.4-ROADMAP.md"];
+
+/**
+ * The relative markdown links in an archived planning file that resolve to no file in `dir`. An archive lives in
+ * `.planning/milestones/`, so a link copied from the live roadmap is broken until it is rewritten. Absolute paths, anchors
+ * and URLs are not checked.
+ */
+export function brokenRelativeLinks(text: string, dir: string): string[] {
+	const broken: string[] = [];
+	for (const match of text.matchAll(/\]\(([^)\s]+)\)/g)) {
+		const target = match[1] ?? "";
+		if (/^(?:[a-z][a-z0-9+.-]*:|#|\/)/i.test(target)) continue;
+		const file = target.split("#")[0] ?? "";
+		if (file !== "" && !existsSync(join(dir, file))) broken.push(target);
+	}
+	return broken;
+}
+
 describe("planning integrity", () => {
 	const text = readFileSync(STATE_PATH, "utf8");
 
@@ -36,6 +73,18 @@ describe("planning integrity", () => {
 		expect(checkStateFrontmatter(text)).toEqual([]);
 	});
 
+	test("a STATE.md that says no phase is open is read as having no current phase", () => {
+		expect(checkClosedStateHasNoPhase(text)).toEqual([]);
+	});
+
+	test("the closed-state check catches a sentence status that keeps the last phase alive, and accepts a recognised closed status", () => {
+		const body = "## Current Position\n\nPhase: none open. The milestone is archived.\nPlan: —\n";
+		const sentence = `---\nmilestone: v1.6\nstatus: "Awaiting next milestone"\ncurrent_phase: 62\ncurrent_phase_name: soak-and-close\n---\n${body}`;
+		expect(checkClosedStateHasNoPhase(sentence)).toHaveLength(1);
+		expect(checkClosedStateHasNoPhase(sentence.replace('"Awaiting next milestone"', "archived"))).toEqual([]);
+		expect(checkClosedStateHasNoPhase("---\nmilestone: v1.6\nstatus: active\ncurrent_phase: 62\n---\n## Current Position\n\nPhase: 62 (in progress)\n")).toEqual([]);
+	});
+
 	test("the frontmatter check rejects a missing, unterminated or malformed block", () => {
 		expect(checkStateFrontmatter("no frontmatter\n")).not.toEqual([]);
 		expect(checkStateFrontmatter("---\nmilestone: v1\nstatus: ok\n")).not.toEqual([]);
@@ -43,5 +92,23 @@ describe("planning integrity", () => {
 		expect(checkStateFrontmatter("---\n- milestone\n- status\n---\n")).not.toEqual([]);
 		expect(checkStateFrontmatter("---\nmilestone: v1\n---\n")).toEqual(["status must be a non-empty string"]);
 		expect(checkStateFrontmatter("---\nmilestone: v1\nstatus: ok\n---\nbody\n")).toEqual([]);
+	});
+
+	test("archived planning files link only to files that exist", () => {
+		const broken = readdirSync(MILESTONES_DIR)
+			.filter((name) => name.endsWith(".md") && !LEGACY_BROKEN_LINK_ARCHIVES.includes(name))
+			.flatMap((name) => brokenRelativeLinks(readFileSync(join(MILESTONES_DIR, name), "utf8"), MILESTONES_DIR).map((target) => `${name}: ${target}`));
+		expect(broken).toEqual([]);
+	});
+
+	test("the legacy archive list names only archives that still have a broken link", () => {
+		for (const name of LEGACY_BROKEN_LINK_ARCHIVES) {
+			expect(brokenRelativeLinks(readFileSync(join(MILESTONES_DIR, name), "utf8"), MILESTONES_DIR).length).toBeGreaterThan(0);
+		}
+	});
+
+	test("the link check flags a link copied from the live roadmap and accepts one that resolves", () => {
+		expect(brokenRelativeLinks("[a](phases/55-x/CONTEXT.md) [b](MILESTONES.md) [c](https://example.com/x) [d](#top)", MILESTONES_DIR)).toEqual(["phases/55-x/CONTEXT.md", "MILESTONES.md"]);
+		expect(brokenRelativeLinks("[a](../MILESTONES.md#v16) [b](v1.6-ROADMAP.md)", MILESTONES_DIR)).toEqual([]);
 	});
 });
