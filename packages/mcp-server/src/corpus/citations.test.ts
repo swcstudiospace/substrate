@@ -3,10 +3,10 @@
  * untouched. The corpus dataset is searched by default and has its own row in the dataset table.
  */
 import { describe, expect, test } from "bun:test";
+import { corpusDocumentName } from "@substrate/corpus";
 import { DATASET_TRIGGERS } from "../docs-datasets.ts";
 import { DEFAULT_SEARCH_DATASET_NAMES, searchDocs } from "../docs-search.ts";
 import { defined } from "../test-support.ts";
-import { corpusDocumentName } from "./names.ts";
 import { sha256Hex } from "./testkit.ts";
 
 const NO_GRAPH = { mode: "hybrid" as const, counts: { entities: 0, relations: 0 }, provenance: { entities: [], relations: 0 } };

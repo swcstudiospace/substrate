@@ -13,7 +13,18 @@ import { createHash } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { classify, isExcludedSegment } from "./classify.ts";
-import { type Checkout, type Collection, type DirEntry, defaultGitRunner, discoverRepos, type GitRunner, hasGitEntry, readEntries } from "./discover.ts";
+import {
+	type Checkout,
+	type Collection,
+	type DirEntry,
+	DUPLICATE_LABEL,
+	defaultGitRunner,
+	directoryLabel,
+	discoverRepos,
+	type GitRunner,
+	hasGitEntry,
+	readEntries,
+} from "./discover.ts";
 import {
 	type CorpusCoverage,
 	type CorpusEntry,
@@ -42,6 +53,7 @@ export const SKIP_REASONS = [
 	"not-a-file",
 	"unreadable",
 	"fetch-failed",
+	"bad-path",
 ] as const;
 export type SkipReason = (typeof SKIP_REASONS)[number];
 
@@ -260,11 +272,18 @@ interface RepoState {
 	dir: string;
 	commit: string | undefined;
 	problems: string[];
+	/** Paths left unread because an earlier directory of the same label already supplied them. */
+	shadowed: number;
 }
 
 function readCandidate(reader: Reader, state: RepoState, rel: string, abs: string): void {
 	const found = classify(rel);
 	if (found === null || found.tier > reader.maxTier) return;
+	// Another directory under the same label already supplied this path (root order decides): it is counted, never read twice.
+	if (reader.paths.has(documentKey(state.repo, rel))) {
+		state.shadowed += 1;
+		return;
+	}
 	const loaded = loadDocument(abs, reader);
 	if (!loaded.ok) {
 		reader.skips.add({ repo: state.repo, path: rel, reason: loaded.reason });
@@ -290,6 +309,7 @@ function scanCheckout(reader: Reader, checkout: Checkout, run: GitRunner): RepoS
 		dir: checkout.dir,
 		commit: checkout.head ?? undefined,
 		problems: [],
+		shadowed: 0,
 	};
 	const listed = run(["ls-files", "-z"], checkout.dir);
 	if (listed.code !== 0) {
@@ -303,7 +323,7 @@ function scanCheckout(reader: Reader, checkout: Checkout, run: GitRunner): RepoS
 }
 
 function scanCollection(reader: Reader, collection: Collection): RepoState {
-	const state: RepoState = { repo: collection.repo, dir: collection.dir, commit: undefined, problems: [] };
+	const state: RepoState = { repo: collection.repo, dir: collection.dir, commit: undefined, problems: [], shadowed: 0 };
 	const walk = (dir: string, prefix: string, depth: number): void => {
 		let entries: DirEntry[];
 		try {
@@ -374,10 +394,26 @@ export async function scanRoots(opts: ScanOptions): Promise<ScanResult> {
 		paths: new Map(),
 	};
 
-	const states = [
-		...found.checkouts.map((checkout) => scanCheckout(reader, checkout, run)),
-		...found.collections.map((collection) => scanCollection(reader, collection)),
+	// Directories that share a label are read in root order, so the first one that holds a path keeps it and an empty one
+	// shadows nothing; every other directory keeps its own order.
+	const duplicateOf = new Map(found.duplicates.map((duplicate) => [duplicate.repo, duplicate]));
+	const readOrder = new Map(found.duplicates.flatMap((duplicate) => duplicate.dirs.map((dir, index): [string, number] => [dir, index])));
+	const units = [
+		...found.checkouts.map((checkout) => ({ dir: checkout.dir, read: () => scanCheckout(reader, checkout, run) })),
+		...found.collections.map((collection) => ({ dir: collection.dir, read: () => scanCollection(reader, collection) })),
 	];
+	units.sort((a, b) => (readOrder.get(a.dir) ?? -1) - (readOrder.get(b.dir) ?? -1));
+	const states = units.map((unit) => unit.read());
+	const notes = [...found.notes];
+	for (const state of states) {
+		const duplicate = duplicateOf.get(state.repo);
+		if (duplicate === undefined) continue;
+		// Incomplete on purpose: the label is not a coverage pair, so nothing recorded under it is judged removed.
+		state.problems.unshift(`${DUPLICATE_LABEL}: ${duplicate.dirs.map(directoryLabel).join(", ")}`);
+		if (state.shadowed > 0) {
+			notes.push(`${DUPLICATE_LABEL}: ${state.shadowed} document path(s) of ${directoryLabel(state.dir)} are also in an earlier directory labelled ${state.repo} and were not read`);
+		}
+	}
 
 	const { kept, dropped, groups } = collapseIdentical(reader.entries);
 	for (const entry of dropped) reader.paths.delete(documentKey(entry.repo, entry.path));
@@ -424,7 +460,7 @@ export async function scanRoots(opts: ScanOptions): Promise<ScanResult> {
 			skipped: reader.skips.listed,
 			skippedByReason: reader.skips.byReason,
 			emptyCollections: repos.filter((repo) => repo.complete && repo.files === 0).length,
-			notes: found.notes,
+			notes,
 		},
 	};
 }

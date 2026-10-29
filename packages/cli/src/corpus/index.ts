@@ -9,7 +9,7 @@
  *
  * Discovery runs here, where the files are; the server never reads a path. `scan` needs no server. `plan` sends entries
  * without bodies. `ingest` is a dry run until `--execute`, then sends the tombstones first, as requests of their own, and
- * then the bodies of the documents the plan says must change in bounded batches. Exit codes: 0 done, 1 failed (a request, or a document), 2 usage.
+ * then the bodies of the documents the plan says must change in bounded batches. Exit codes: 0 done (every document ingested, updated, unchanged or tombstoned), 1 a request failed or any document ended refused or failed, 2 usage.
  */
 import { readFileSync } from "node:fs";
 import {
@@ -328,7 +328,8 @@ async function ingest(args: ScanArgs, parsed: Parsed, deps: CorpusDeps, batchDoc
 				: renderIngest(outcome.summary),
 		);
 		if (outcome.fatal !== null) deps.err(`[substrate] corpus ingest stopped: ${describeError(outcome.fatal)}\n`);
-		return outcome.fatal !== null || outcome.summary.counts.failed > 0 ? 1 : 0;
+		const { failed, refused } = outcome.summary.counts;
+		return outcome.fatal !== null || failed > 0 || refused > 0 ? 1 : 0;
 	} finally {
 		store?.close();
 	}

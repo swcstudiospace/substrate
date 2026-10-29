@@ -2,6 +2,7 @@ export * from "./protocol.ts";
 export * from "./classify.ts";
 export * from "./discover.ts";
 export * from "./guards.ts";
+export * from "./names.ts";
 export * from "./scan.ts";
 export * from "./similarity.ts";
 export * from "./adapters/greptile-export.ts";

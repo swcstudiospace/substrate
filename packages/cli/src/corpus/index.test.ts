@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:tes
 import { createHash } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { CORPUS_PROTOCOL, isRecord, MAX_INGEST_DOCUMENTS, MAX_INGEST_TOMBSTONES, type GhRunner, type GitRunner, type IngestStatus, type PlanItem } from "@substrate/corpus";
+import { CORPUS_PROTOCOL, isRecord, isValidRepo, localRepoId, MAX_INGEST_DOCUMENTS, MAX_INGEST_TOMBSTONES, type GhRunner, type GitRunner, type IngestStatus, type PlanItem } from "@substrate/corpus";
 import { defined, fakeGit, tempDir, writeTree } from "../../../corpus/src/test-support.ts";
 import { runCorpus, USAGE } from "./index.ts";
 import { CorpusStub, fakeGhOwner, ingestOf, planOf, statusOf, type Reply, type Seen } from "./testkit.ts";
@@ -260,6 +260,30 @@ describe("substrate corpus plan", () => {
 			expect(list(sent.entries, "entries").every((e) => e.repo === "Acme/Alpha")).toBe(true);
 		});
 
+		test("an empty folder whose name is not a valid label is covered under a safe label and does not block the valid repository", async () => {
+			const { root, runner } = fixture();
+			writeTree(root, { "backup:2026/.keep": "" });
+			const scope = await planScope(["--root", root], { runner });
+			const labels = list(scope.coverage, "coverage").map((pair) => String(pair.repo));
+			expect(labels).toEqual(["Acme/Alpha", "Acme/Beta", localRepoId("backup:2026")]);
+			for (const label of labels) expect({ label, valid: isValidRepo(label) }).toEqual({ label, valid: true });
+		});
+
+		test("a label that two folders under the roots yield is read from both but left out of the coverage, in either root order", async () => {
+			const parent = tempDir("corpus-cli-");
+			dirs.push(parent);
+			writeTree(parent, { "a/notes/.keep": "", "b/notes/docs/guide.md": "guide\n", "c/alpha/.git/HEAD": "", "c/alpha/README.md": "# alpha\n" });
+			const runner = fakeGit({ [join(parent, "c", "alpha")]: { origin: "git@github.com:Acme/Alpha.git", branch: "main", remoteDefault: "main", head: HEAD, files: ["README.md"] } });
+			for (const order of [["a", "b", "c"], ["b", "a", "c"]]) {
+				stub.seen = [];
+				const roots = order.flatMap((name) => ["--root", join(parent, name)]);
+				const scope = await planScope(roots, { runner });
+				expect(scope.coverage).toEqual([{ repo: "Acme/Alpha", source: "fs" }]);
+				const sent = rec(defined(stub.requests("/corpus/plan")[0], "request").body, "request");
+				expect(list(sent.entries, "entries").map((e) => `${e.repo}:${e.path}`)).toEqual(["Acme/Alpha:README.md", "local/notes:docs/guide.md"]);
+			}
+		});
+
 		test("one source only declares its own pairs", async () => {
 			const exportDir = tempDir("greptile-");
 			dirs.push(exportDir);
@@ -376,7 +400,7 @@ describe("substrate corpus ingest", () => {
 		expect(stub.requests("/corpus/ingest")).toHaveLength(1);
 	});
 
-	test("a failed document makes the exit code 1 and is listed with its reason, while a refusal is reported without failing the run", async () => {
+	test("a failed or a refused document makes the exit code 1 and is listed with its reason; only a run where every item ended well exits 0", async () => {
 		const { root, runner } = fixture();
 		planAllAdd();
 		stub.on("POST /corpus/ingest", answerIngest((repo) => repo === "Acme/Beta"));
@@ -386,9 +410,41 @@ describe("substrate corpus ingest", () => {
 		expect(failed.out).toContain("Acme/Beta:README.md  [plane-unavailable]");
 		stub.on("POST /corpus/ingest", answerIngest((repo) => repo === "Acme/Beta", { status: "refused", reason: "secret-findings" }));
 		const refused = await run(["ingest", "--root", root, "--execute"], { runner });
-		expect(refused.code).toBe(0);
+		expect(refused.code).toBe(1);
 		expect(refused.out).toContain("refused (1):");
 		expect(refused.out).toContain("[secret-findings]");
+		stub.on("POST /corpus/ingest", answerIngest());
+		expect((await run(["ingest", "--root", root, "--execute"], { runner })).code).toBe(0);
+	});
+
+	test("a rename to a name the plane would alter keeps the old row: nothing is deleted, the new document is refused with the server's reason, the exit is 1", async () => {
+		const root = tempDir("corpus-cli-");
+		dirs.push(root);
+		writeTree(root, { "alpha/.git/HEAD": "", "alpha/docs/x.[docling].md": "# moved\n", "alpha/README.md": "# alpha\n" });
+		const runner = fakeGit({ [join(root, "alpha")]: { origin: "git@github.com:Acme/Alpha.git", branch: "main", remoteDefault: "main", head: HEAD, files: ["README.md", "docs/x.[docling].md"] } });
+		const items: PlanItem[] = [{ action: "rename", repo: "Acme/Alpha", path: "docs/x.[docling].md", renamedFrom: "docs/old.md" }];
+		stub.on("POST /corpus/plan", () => ({ status: 200, body: planOf(items) }));
+		stub.on("POST /corpus/ingest", answerIngest());
+		const result = await run(["ingest", "--root", root, "--execute"], { runner });
+		expect(result.code).toBe(1);
+		expect(stub.requests("/corpus/ingest")).toEqual([]);
+		expect(result.out).toContain("refused (1):");
+		expect(result.out).toContain("Acme/Alpha:docs/x.[docling].md  [unsafe-name]");
+		expect(result.out).toContain("tombstoned 0");
+	});
+
+	test("a document whose path the server would refuse a whole request for is refused here and never sent", async () => {
+		const root = tempDir("corpus-cli-");
+		dirs.push(root);
+		writeTree(root, { "alpha/.git/HEAD": "", "alpha/README.md": "# alpha\n", "alpha/docs\\odd.md": "odd\n" });
+		const runner = fakeGit({ [join(root, "alpha")]: { origin: "git@github.com:Acme/Alpha.git", branch: "main", remoteDefault: "main", head: HEAD, files: ["README.md", "docs\\odd.md"] } });
+		stub.on("POST /corpus/plan", (seen) => ({ status: 200, body: planOf(addsFor(seen.body)) }));
+		stub.on("POST /corpus/ingest", answerIngest());
+		const result = await run(["ingest", "--root", root, "--execute"], { runner });
+		expect(result.code).toBe(1);
+		const sent = stub.requests("/corpus/ingest").flatMap((s) => ingestParts(s).documents.map((d) => String(d.path)));
+		expect(sent).toEqual(["README.md"]);
+		expect(result.out).toContain("Acme/Alpha:docs\\odd.md  [bad-path]");
 	});
 
 	test("the tombstones go first as a request of their own, and a rename's old row is removed before the new document is sent", async () => {

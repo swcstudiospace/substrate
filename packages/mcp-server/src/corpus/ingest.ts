@@ -25,20 +25,32 @@
  * first makes the plane store the text under its new name, so a search citation names the new path.
  */
 import { createHash } from "node:crypto";
-import { CORPUS_PROTOCOL, documentKey, sourceUrl, type CorpusDocument, type CorpusIngestRequest, type CorpusIngestResponse, type CorpusIngestResultItem, type IngestStatus } from "@substrate/corpus";
-import { findingRules, stripRemoteImages } from "../docs-ingest.ts";
+import {
+	CORPUS_PROTOCOL,
+	DOCUMENT_REFUSALS,
+	corpusDocumentName,
+	documentKey,
+	documentRefusal,
+	sourceUrl,
+	stripRemoteImages,
+	type CorpusDocument,
+	type CorpusIngestRequest,
+	type CorpusIngestResponse,
+	type CorpusIngestResultItem,
+	type IngestStatus,
+} from "@substrate/corpus";
+import { findingRules } from "../docs-ingest.ts";
 import type { BulkDocumentOutcome, BulkTextDocument, LightragBulkPlane } from "../planes/lightrag-bulk.ts";
 import type { EventInput, Surface } from "../types.ts";
 import { AsyncMutex } from "./mutex.ts";
-import { corpusDocumentName, isSafeCorpusName, planeDocumentIdForName } from "./names.ts";
+import { planeDocumentIdForName } from "./names.ts";
 import type { CorpusStore, ManifestRow } from "./store.ts";
-import { MAX_DOCUMENT_BYTES } from "./validate.ts";
 
 /** Ingest requests on this process run one at a time: plane writes and deletes of two requests never interleave. */
 const ingestLock = new AsyncMutex();
 
 /** Why a document is refused before anything is sent. Closed. */
-export const REFUSAL_REASONS = ["too-large", "empty-document", "sha-mismatch", "unsafe-name", "secret-findings"] as const;
+export const REFUSAL_REASONS = [...DOCUMENT_REFUSALS, "sha-mismatch", "secret-findings"] as const;
 
 /** Why a document or tombstone failed after it was accepted for work; a retry sends only these. Closed. */
 export const FAILURE_REASONS = ["plane-unavailable", "timeout", "rejected", "conflict", "pipeline-failed", "duplicate-content", "manifest-unavailable", "delete-failed"] as const;
@@ -200,9 +212,9 @@ async function refreshMetadata(deps: CorpusIngestDeps, tally: Tally, document: C
 
 /** Decides one document: refused, unchanged, or ready to send. A store read that fails fails the document, never the request. */
 async function prepareDocument(deps: CorpusIngestDeps, tally: Tally, document: CorpusDocument): Promise<PreparedDocument | null> {
-	const bytes = Buffer.byteLength(document.body, "utf8");
-	if (bytes > MAX_DOCUMENT_BYTES) {
-		refuse(tally, document, "too-large");
+	const broken = documentRefusal(document);
+	if (broken !== null) {
+		refuse(tally, document, broken);
 		return null;
 	}
 	if (sha256Of(document.body) !== document.sha256) {
@@ -226,15 +238,7 @@ async function prepareDocument(deps: CorpusIngestDeps, tally: Tally, document: C
 		prior = null;
 	}
 	const name = corpusDocumentName(document.repo, document.path, document.sha256);
-	if (!isSafeCorpusName(name)) {
-		refuse(tally, document, "unsafe-name");
-		return null;
-	}
 	const text = stripRemoteImages(document.body).body;
-	if (text.trim().length === 0) {
-		refuse(tally, document, "empty-document");
-		return null;
-	}
 	const rules = findingRules(`${text}\n${name}\n${sourceUrl(document.repo, document.path, document.commit)}\n${document.commit ?? ""}`);
 	if (rules.length > 0) {
 		refuse(tally, document, "secret-findings", rules);

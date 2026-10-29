@@ -16,7 +16,7 @@ Every documentation file is described by one entry. The contract is `packages/co
 
 | Field | Meaning |
 | --- | --- |
-| `repo` | `owner/name` from the origin remote of a GitHub checkout (https, ssh and scp forms, credentials removed, `.git` removed, case kept), else `local/<directory name>` |
+| `repo` | `owner/name` from the origin remote of a GitHub checkout (https, ssh and scp forms, credentials removed, `.git` removed, case kept), else `local/<label of the directory name>` (see Copy collections) |
 | `path` | repository-relative path with forward slashes |
 | `kind` | what the document is, decided from the path alone (table below) |
 | `tier` | 1 authoritative and current, 2 supporting, 3 bulk or historical |
@@ -73,17 +73,29 @@ A `.planning` directory may sit at any depth of a monorepo; the rules apply from
    the canonical one is on the default branch (`refs/remotes/origin/HEAD`, else `main`, else `master`) with the newest HEAD
    commit, ties going to the shortest path. Checkouts with no origin share a label when their directory names match and
    collapse the same way. Every collapse is listed in the report and its notes.
-3. **Copy collections.** A directory with no `.git` that holds documentation is a copy collection and is walked as
-   `local/<directory name>`, with the same exclusions. A checkout nested inside one is found by discovery and is not read
+3. **Copy collections.** A directory with no `.git` that holds documentation is a copy collection and is walked under a
+   label derived from its name (`localRepoId`, see below), with the same exclusions. A checkout nested inside one is found by discovery and is not read
    twice, so a collection of worktrees collapses like any other. A root that holds checkouts is a container: loose files
    directly in it are not scanned. A readable directory directly below a root with no checkout and no documentation in it
    (a collection whose last document was deleted) is still a collection: it is read with zero entries, counted as an
    emptied collection in the report, and covered, so its old rows are removed. A checkout with no documentation left is
-   covered the same way.
+   covered the same way. **Labels.** A directory name that already satisfies the repository rule keeps `local/<name>`
+   unchanged, so rows recorded earlier keep their identity. Any other name (a colon, a slash, a control character, `..`,
+   more than 200 characters in all) becomes `local/<slug>-<8 hex of sha256(name)>`: the slug is the name with every
+   character outside `A-Za-z0-9._-` replaced by `-`, leading dots and dashes removed (`collection` when nothing is left)
+   and cut so the whole label fits the 200-character limit with the hash kept, so two names that slug alike still get
+   different labels. **Duplicate labels.** When more than one folder under the roots yields one label (two roots that
+   both hold a `notes` folder, or a checkout with no origin and a plain folder of one name), the label is **not covered**:
+   there is no coverage pair for it, so nothing recorded under it is judged removed, and the report says
+   `duplicate-label` with the last two components of each folder (`a/notes`, `b/notes`, never an absolute path). Every
+   such folder is still read: an empty folder never shadows a folder with documents, and when more than one holds a path
+   the first folder in root order keeps it and the report counts the paths left unread.
 4. **Files.** For a checkout the candidates are the tracked files (`git ls-files -z`); for a collection they are the files
    of the walk. A file is skipped, with a reason, when it is a symlink (`symlink`), empty (`empty`), larger than
    `--max-bytes` (`too-large`, decided from its size before it is read), contains a NUL byte (`binary`), is not valid UTF-8
-   (`invalid-utf8`), is tracked but gone from the work tree (`missing`) or cannot be read (`unreadable`).
+   (`invalid-utf8`), is tracked but gone from the work tree (`missing`), cannot be read (`unreadable`) or has a path or a
+   repository label the server's rules refuse (`bad-path`: a control character, a backslash, an empty segment or more than
+   1024 characters), so one odd file name cannot make the server refuse the whole plan.
 5. **Identical copies.** Byte-identical files in different `local/*` repositories collapse to the entry with the
    lexically smallest `(repo, path)`. The report lists each kept entry with the copies it stands for
    (`collapsed.identicalCopies`, at most 200 groups of 20 copies, plus the exact totals `identical` and `identicalGroups`),
@@ -121,10 +133,18 @@ substrate corpus status [--server URL] [--json]
   it sends the tombstones first, as requests of their own with `documents: []` (at most 500 each), then reads the bodies
   of the `add`, `change`, `update` and `rename` items and sends them in batches, and prints the count of each status. The
   order matters for a rename: the plane answers an insert of identical text with the document it already holds, so the
-  old document must be gone before the new name is inserted. A rename's old row is removed only when the new document's
-  text can be read, and the new document is sent only when the old row was removed. It exits 1 when a document failed or
-  a request failed as a whole. A `refused` document (for example `secret-findings`) is listed and does not fail the
-  run. Re-running is safe: the server skips rows it already recorded, so a run killed half way resumes without
+  old document must be gone before the new name is inserted. Before it deletes anything, the CLI checks every document it
+  is about to send against the same rules the server applies (the repository label and path rules, the plane-safe
+  document name, the 1,000,000-byte bound, and a body that is not empty once remote images are stripped; the code is
+  shared in `packages/corpus/src/names.ts`, so the two cannot disagree). A rename's old row is removed only when the new
+  document passes those checks and its text can be read with the hash that was planned; otherwise the old row stays
+  active, nothing is deleted, and the new document is listed as `refused` with the server's reason (`unsafe-name`,
+  `too-large`, `empty-document`, `bad-path`, `bad-repo`) or as `failed` (`unreadable`, `changed-since-scan`). The new
+  document is sent only when the old row was removed. A replacement that was accepted for sending and then fails (the
+  plane is down, a timeout) has already lost its old copy: the next run sees the new path as an `add` and sends it
+  again, so nothing is lost silently. It exits 1 when a request failed as a whole or when any document it was asked to
+  ingest ended `refused` or `failed` (the summary lists each with its reason); it exits 0 only when every item ended
+  `ingested`, `updated`, `unchanged` or `tombstoned`. Re-running is safe: the server skips rows it already recorded, so a run killed half way resumes without
   re-sending them. `--batch-docs` (and `SUBSTRATE_CORPUS_BATCH_DOCS`) above the server limit of 200 documents per
   request is lowered to 200 with a note on stderr.
 - `status` prints the manifest summary.
@@ -165,7 +185,8 @@ or refused by a documented rule (empty, binary, too large, symlink, invalid UTF-
 tree, a failed export read and a repository cut by `--max-repos` leave the pair out, and a repository one source read
 completely is not covered for another: after ingesting Greptile documents, a run with `--source fs,greptile --max-repos 1`
 covers the Greptile pair only of the first repository, while the local checkouts stay covered. An emptied collection or
-checkout is covered with zero entries, so its rows are removed. `maxTier` is the tier of the scan, so a narrower scan
+checkout is covered with zero entries, so its rows are removed. A repository label that more than one folder under the
+roots yields (`duplicate-label`, see Copy collections) is never covered, whatever the folders hold. `maxTier` is the tier of the scan, so a narrower scan
 (`--tier 1` after a tier-2 ingest, `--max-repos`, a single `--source`, one `--root`) or a failed one never makes the
 server forget what it did not cover. An empty `coverage` is valid: nothing is tombstoned and the entries are still planned
 and ingested.

@@ -6,14 +6,18 @@
  * Tombstones go first so that a rename deletes the old plane document before the same text is inserted under the new
  * name: the plane answers an insert of identical text with the old document, which the removal would otherwise leave
  * linked. Re-running is safe: the server skips rows it already recorded, so a run killed half way resumes without
- * re-sending. A rename's old row is removed only when the new document's body can be read, and the new document is sent
- * only when the old row was removed.
+ * re-sending. A rename's old row is removed only when the new document passes every check the server applies (readable, the
+ * hash planned, a valid name and path, within the size bound, not empty); otherwise the old row stays, the new document is
+ * reported `refused` or `failed`, and nothing is deleted. The new document is sent only when the old row was removed. When
+ * the new document is accepted for sending and then fails (plane down, timeout) the old copy is already gone: the next run
+ * plans the new path as an `add` and sends it again, so nothing is lost silently.
  */
 import {
 	CORPUS_PROTOCOL,
 	MAX_INGEST_DOCUMENTS,
 	MAX_INGEST_TOMBSTONES,
 	documentKey,
+	documentRefusal,
 	inspectBytes,
 	type CorpusDocument,
 	type CorpusEntry,
@@ -69,6 +73,20 @@ function loadBody(entry: CorpusEntry, input: IngestInput): Body {
 	return { ok: true, body: inspected.text };
 }
 
+type Prepared = { ok: true; body: string } | { ok: false; status: "failed" | "refused"; reason: string };
+
+/**
+ * The body of a document that is also fit to send: readable, unchanged since the scan, and passing the rules the server
+ * would refuse it for (`documentRefusal`, the one shared copy). A document the server would refuse is `refused` here, with the
+ * server's own reason code, before anything is sent or deleted for it.
+ */
+function prepare(entry: CorpusEntry, input: IngestInput): Prepared {
+	const loaded = loadBody(entry, input);
+	if (!loaded.ok) return { ok: false, status: "failed", reason: loaded.reason };
+	const refusal = documentRefusal({ repo: entry.repo, path: entry.path, sha256: entry.sha256, body: loaded.body });
+	return refusal === null ? { ok: true, body: loaded.body } : { ok: false, status: "refused", reason: refusal };
+}
+
 /** The old path of a rename: the plan names the manifest row, in this repository, with or without the `repo:` prefix. */
 function renamedFromPath(item: PlanItem): string | null {
 	if (item.renamedFrom === undefined) return null;
@@ -114,8 +132,9 @@ export async function executeIngest(input: IngestInput): Promise<IngestOutcome> 
 		} else if (item.action === "rename") {
 			const from = renamedFromPath(item);
 			const entry = entryByKey.get(documentKey(item.repo, item.path));
-			// The old text is removed only when the new text can still be sent.
-			if (from !== null && entry !== undefined && loadBody(entry, input).ok) {
+			// The old text is removed only when the new document passes every check the server applies; a replacement
+			// that cannot be sent leaves the old row active and is reported as refused or failed in phase 2.
+			if (from !== null && entry !== undefined && prepare(entry, input).ok) {
 				tombstones.set(documentKey(item.repo, from), { repo: item.repo, path: from });
 				removedBefore.set(documentKey(item.repo, item.path), documentKey(item.repo, from));
 			}
@@ -159,9 +178,9 @@ export async function executeIngest(input: IngestInput): Promise<IngestOutcome> 
 				continue;
 			}
 		}
-		const loaded = loadBody(entry, input);
+		const loaded = prepare(entry, input);
 		if (!loaded.ok) {
-			record(item.repo, item.path, "failed", loaded.reason);
+			record(item.repo, item.path, loaded.status, loaded.reason);
 			continue;
 		}
 		if (batch.length > 0 && (batch.length >= batchDocs || batchBytes + entry.bytes > input.batchBytes)) await flush();

@@ -11,9 +11,12 @@ import {
 	MAX_INGEST_DOCUMENTS,
 	MAX_INGEST_TOMBSTONES,
 	MAX_PLAN_ENTRIES,
+	hasControlCharacter,
 	isCorpusSource,
 	isDocKind,
 	isDocTier,
+	isValidPath,
+	isValidRepo,
 	type CorpusCoverage,
 	type CorpusDocument,
 	type CorpusEntry,
@@ -22,10 +25,6 @@ import {
 	type CorpusScope,
 } from "@substrate/corpus";
 
-/** One document body, as `docs_ingest` caps a page. */
-export const MAX_DOCUMENT_BYTES = 1_000_000;
-export const MAX_PATH_LENGTH = 1024;
-const MAX_REPO_LENGTH = 200;
 const MAX_COMMIT_LENGTH = 100;
 /** The `bytes` column is a Postgres integer. */
 const MAX_ENTRY_BYTES = 2_147_483_647;
@@ -56,33 +55,6 @@ export type Parsed<T> = { ok: true; value: T } | { ok: false; reason: RequestRef
 
 function refuse(reason: RequestRefusal, detail?: string): { ok: false; reason: RequestRefusal; detail?: string | undefined } {
 	return detail === undefined ? { ok: false, reason } : { ok: false, reason, detail };
-}
-
-function hasControlCharacter(text: string): boolean {
-	for (let index = 0; index < text.length; index += 1) {
-		const code = text.charCodeAt(index);
-		if (code < 0x20 || code === 0x7f) return true;
-	}
-	return false;
-}
-
-const OWNER_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-
-/** `owner/name`, or `local/<directory name>` for a checkout with no origin. A repo never holds a colon (document names split on it). */
-export function isValidRepo(repo: string): boolean {
-	if (repo.length === 0 || repo.length > MAX_REPO_LENGTH) return false;
-	if (repo.startsWith("local/")) {
-		const name = repo.slice("local/".length);
-		return name.length > 0 && name !== "." && name !== ".." && !/[/\\:]/.test(name) && !hasControlCharacter(name);
-	}
-	return OWNER_NAME.test(repo);
-}
-
-/** A repository-relative path in normal form: forward slashes, no empty, `.` or `..` segment, not absolute, no control character or NUL. */
-export function isValidPath(path: string): boolean {
-	if (path.length === 0 || path.length > MAX_PATH_LENGTH) return false;
-	if (path.startsWith("/") || path.includes("\\") || hasControlCharacter(path)) return false;
-	return path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
 }
 
 export function isSha256Hex(value: unknown): value is string {

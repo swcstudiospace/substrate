@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { isValidRepo, localRepoId } from "./names.ts";
 import { documentKey } from "./protocol.ts";
 import { buildScope, inspectBytes, MAX_LISTED_SKIPS, type RepoReport, scanRoots, SkipLog } from "./scan.ts";
 import { defined, fakeGit, linkFile, tempDir, writeTree } from "./test-support.ts";
@@ -347,6 +348,85 @@ describe("scanRoots over copy collections", () => {
 			{ repo: "local/c1", source: "fs" },
 			{ repo: "local/c2", source: "fs" },
 		]);
+	});
+
+	test("an empty folder whose name is not a valid label is covered under a safe label, and the valid repository beside it is scanned as before", async () => {
+		const root = fixture({ "backup:2026/.keep": "", "c1/docs/a.md": "a\n" });
+		const result = await scanRoots({ roots: [root], runner: fakeGit({}) });
+		const safe = localRepoId("backup:2026");
+		expect(result.report.repos.map((r) => [r.repo, r.files, r.complete])).toEqual([
+			[safe, 0, true],
+			["local/c1", 1, true],
+		]);
+		const { coverage } = buildScope({ reports: result.report.repos, maxTier: 2 });
+		expect(coverage.map((pair) => pair.repo).sort()).toEqual([safe, "local/c1"].sort());
+		for (const pair of coverage) expect({ repo: pair.repo, valid: isValidRepo(pair.repo) }).toEqual({ repo: pair.repo, valid: true });
+	});
+
+	describe("a label that two directories yield", () => {
+		const A = "# from a\n";
+		const B = "# from b\n";
+
+		function twoRoots(files: Record<string, string>): { a: string; b: string } {
+			const root = fixture(files);
+			return { a: join(root, "a"), b: join(root, "b") };
+		}
+
+		test("an empty folder never shadows a folder with documents, in either root order, and the label is not covered", async () => {
+			const { a, b } = twoRoots({ "a/notes/.keep": "", "b/notes/docs/guide.md": B });
+			for (const roots of [[a, b], [b, a]]) {
+				const result = await scanRoots({ roots, runner: fakeGit({}) });
+				expect(result.entries.map((e) => documentKey(e.repo, e.path))).toEqual(["local/notes:docs/guide.md"]);
+				expect(result.report.repos.map((r) => [r.repo, r.complete])).toEqual([
+					["local/notes", false],
+					["local/notes", false],
+				]);
+				for (const repo of result.report.repos) expect(repo.incomplete).toBe(`duplicate-label: ${roots.map((dir) => `${basename(dir)}/notes`).join(", ")}`);
+				expect(buildScope({ reports: result.report.repos, maxTier: 2 }).coverage).toEqual([]);
+				expect(result.report.emptyCollections).toBe(0);
+			}
+		});
+
+		test("when both hold documents the first in root order wins a path, the rest are all read, and the shadowed paths are reported by name", async () => {
+			const { a, b } = twoRoots({
+				"a/notes/docs/guide.md": A,
+				"a/notes/docs/only-a.md": "only a\n",
+				"b/notes/docs/guide.md": B,
+				"b/notes/docs/only-b.md": "only b\n",
+			});
+			const forward = await scanRoots({ roots: [a, b], runner: fakeGit({}) });
+			expect(forward.entries.map((e) => [e.path, e.sha256])).toEqual([
+				["docs/guide.md", sha(A)],
+				["docs/only-a.md", sha("only a\n")],
+				["docs/only-b.md", sha("only b\n")],
+			]);
+			expect(forward.paths.get("local/notes:docs/guide.md")).toBe(join(a, "notes", "docs", "guide.md"));
+			expect(forward.report.notes.filter((note) => note.startsWith("duplicate-label:"))).toEqual([
+				"duplicate-label: local/notes is yielded by a/notes and b/notes; it is read but left out of the coverage",
+				"duplicate-label: 1 document path(s) of b/notes are also in an earlier directory labelled local/notes and were not read",
+			]);
+			const backward = await scanRoots({ roots: [b, a], runner: fakeGit({}) });
+			expect(backward.entries.find((e) => e.path === "docs/guide.md")?.sha256).toBe(sha(B));
+			expect(backward.entries).toHaveLength(3);
+			expect(buildScope({ reports: backward.report.repos, maxTier: 2 }).coverage).toEqual([]);
+		});
+
+		test("the report text names the directories by their last two components and never an absolute path", async () => {
+			const { a, b } = twoRoots({ "a/notes/.keep": "", "b/notes/docs/guide.md": B });
+			const result = await scanRoots({ roots: [a, b], runner: fakeGit({}) });
+			const text = JSON.stringify([result.report.notes, result.report.repos.map((repo) => repo.incomplete)]);
+			expect(text).toContain("a/notes");
+			expect(text).toContain("b/notes");
+			expect(text.includes(dirname(a))).toBe(false);
+		});
+
+		test("a checkout and a plain directory that map to one label are treated the same way", async () => {
+			const { a, b } = twoRoots({ "a/notes/.git/HEAD": "", "a/notes/README.md": "# checkout\n", "b/notes/docs/guide.md": B });
+			const runner = fakeGit({ [join(a, "notes")]: { branch: "main", files: ["README.md"] } });
+			const result = await scanRoots({ roots: [b, a], runner });
+			expect(result.entries.map((e) => documentKey(e.repo, e.path))).toEqual(["local/notes:README.md", "local/notes:docs/guide.md"]);
+			expect(buildScope({ reports: result.report.repos, maxTier: 2 }).coverage).toEqual([]);
+		});
 	});
 });
 

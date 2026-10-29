@@ -63,8 +63,7 @@ import type { SteeringNotice } from "./planning/steering-delivery.ts";
 import { redact, redactValue } from "./redact.ts";
 import { DEFAULT_RAG_MACHINE_SETTINGS, type DocsBackend, type LightragConfig, type RagMachineSettings } from "./config.ts";
 import type { DocumentProvenance } from "./docs-ingest.ts";
-import { CORPUS_DATASET, sourceUrl as corpusSourceUrl } from "@substrate/corpus";
-import { parseCorpusDocumentName } from "./corpus/names.ts";
+import { CORPUS_DATASET, parseCorpusDocumentName, sourceUrl as corpusSourceUrl } from "@substrate/corpus";
 import type { CitationGraphProvenance, EventInput, PlanningGraphHint, SearchGraphStats, Surface } from "./types.ts";
 /** Framing every docs_search reply carries: chunks are untrusted text. */
 export const UNTRUSTED_DOCS_NOTICE =

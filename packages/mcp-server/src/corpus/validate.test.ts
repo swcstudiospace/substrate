@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { CORPUS_PROTOCOL, MAX_COVERAGE_PAIRS, MAX_INGEST_DOCUMENTS, MAX_INGEST_TOMBSTONES, MAX_PLAN_ENTRIES, type CorpusScope } from "@substrate/corpus";
 import { defined } from "../test-support.ts";
 import { entryOf, makeDocument } from "./testkit.ts";
-import { MAX_PATH_LENGTH, isValidPath, isValidRepo, parseEntry, parseIngestRequest, parsePlanRequest } from "./validate.ts";
+import { parseEntry, parseIngestRequest, parsePlanRequest } from "./validate.ts";
 
 const REPO = "swcstudiospace/agent-substrate";
 const SCOPE: CorpusScope = { coverage: [{ repo: REPO, source: "fs" }], maxTier: 2 };
@@ -11,22 +11,6 @@ const GOOD = entryOf(makeDocument(REPO, "docs/a.md", "text"));
 function refusedReason(result: { ok: boolean; reason?: string }): string | undefined {
 	return result.ok ? undefined : result.reason;
 }
-
-describe("repo and path guards", () => {
-	test("owner/name and local/<directory> are repos; everything else is not", () => {
-		for (const repo of ["swcstudiospace/agent-substrate", "a/b", "local/my notes", "local/dir.with.dots"]) expect({ repo, valid: isValidRepo(repo) }).toEqual({ repo, valid: true });
-		for (const repo of ["", "single", "a/b/c", "local/", "local/a/b", "local/a:b", "local/..", "https://github.com/a/b", "owner/na me", `a/${"x".repeat(250)}`]) {
-			expect({ repo, valid: isValidRepo(repo) }).toEqual({ repo, valid: false });
-		}
-	});
-
-	test("a path is accepted only in normal form", () => {
-		for (const path of ["README.md", "docs/a.md", ".planning/phases/63-x/63-CONTEXT.md", "docs/a:b@c.md"]) expect({ path, valid: isValidPath(path) }).toEqual({ path, valid: true });
-		const bad = ["", "/abs.md", "docs/../x.md", "../x.md", "docs//x.md", "./x.md", "docs/./x.md", "docs\\x.md", "docs/\u0000x.md", "docs/a\nb.md", "docs/", "x".repeat(MAX_PATH_LENGTH + 1)];
-		for (const path of bad) expect({ path: path.slice(0, 20), valid: isValidPath(path) }).toEqual({ path: path.slice(0, 20), valid: false });
-		expect(isValidPath("x".repeat(MAX_PATH_LENGTH))).toBe(true);
-	});
-});
 
 describe("parseEntry refuses with the first closed reason", () => {
 	const cases: Array<[string, Record<string, unknown>, string]> = [

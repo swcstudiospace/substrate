@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { CORPUS_PROTOCOL, type CorpusDocument, type CorpusIngestRequest } from "@substrate/corpus";
+import { CORPUS_PROTOCOL, corpusDocumentName, type CorpusDocument, type CorpusIngestRequest } from "@substrate/corpus";
 import type { EventInput } from "../types.ts";
 import { defined } from "../test-support.ts";
 import { chunkByLimits, corpusGate, ingestCorpus, type CorpusIngestSettings } from "./ingest.ts";
-import { corpusDocumentName, planeDocumentIdForName } from "./names.ts";
+import { planeDocumentIdForName } from "./names.ts";
 import { planCorpus } from "./plan.ts";
 import { FakePlane, FakeStore, makeDocument, makeRow, sha256Hex } from "./testkit.ts";
 

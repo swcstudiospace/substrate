@@ -35,6 +35,7 @@
  * Every function returns result values and never throws: a transport failure,
  * an open breaker or a timeout is a closed reason on the affected documents.
  */
+import { isAcceptableFileSource } from "@substrate/corpus";
 import type { LightragConfig } from "../config.ts";
 import { deleteDocuments as deleteLightragDocuments, lightragCall, pollParseStatus, type FetchLike } from "./lightrag.ts";
 
@@ -87,44 +88,8 @@ export function bulkTimeoutMs(count: number): number {
 	return Math.min(BATCH_MAX_TIMEOUT_MS, BATCH_BASE_TIMEOUT_MS + BATCH_PER_DOCUMENT_TIMEOUT_MS * Math.max(0, count));
 }
 
-// JS `\s` and Python `str.strip()` differ at U+0085 (Python only) and U+FEFF (JS only); an edge of either kind is refused.
-const EDGE_SPACE = /^[\s\u0085]|[\s\u0085]$/;
-
-/** A parser hint upstream may strip from the basename: `name.[engine].ext`. Refused whole: whether a bracket is a hint depends on the server's engines. */
-const PARSER_HINT_SHAPE = /\.\[[^\]]*\]\.[^.]+$/;
-
-/**
- * Whether upstream accepts `name` as a `file_source` UNCHANGED. The server
- * builds document names with this, because the name is the document's identity
- * and a silently rewritten name would map a result to the wrong document.
- *
- * Mirrors `/documents/texts` (lightrag_api_routers_document_routes.py v1.5.7):
- * `reject_unsafe_document_source` (:212-226) refuses control characters
- * (U+0000-U+001F, U+007F), lone surrogates, U+FFFE and U+FFFF; then
- * `normalize_file_path` (:245-254) strips whitespace, maps `""`/`no-file-path`
- * to `unknown_source` (which the route answers 400), keeps only the final path
- * component (`Path(...).name`, so a `/` would drop the directories) and strips a
- * recognised `[engine]` parser hint (lightrag/parser/routing.py:62, :1085-1099).
- * The route also requires the normalised names of one request to be unique.
- */
-export function isAcceptableFileSource(name: string): boolean {
-	if (name.length === 0) return false;
-	for (let index = 0; index < name.length; index += 1) {
-		const unit = name.charCodeAt(index);
-		if (unit <= 0x1f || unit === 0x7f || unit === 0xfffe || unit === 0xffff) return false;
-		if (unit >= 0xd800 && unit <= 0xdbff) {
-			const next = name.charCodeAt(index + 1);
-			if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
-			index += 1;
-		} else if (unit >= 0xdc00 && unit <= 0xdfff) {
-			return false;
-		}
-	}
-	if (EDGE_SPACE.test(name)) return false;
-	if (name === "no-file-path" || name === "unknown_source" || name === "." || name === "..") return false;
-	if (name.includes("/")) return false;
-	return !PARSER_HINT_SHAPE.test(name);
-}
+// `isAcceptableFileSource` (what upstream accepts as a `file_source` unchanged) is the corpus package's rule, shared with the CLI.
+export { isAcceptableFileSource };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);

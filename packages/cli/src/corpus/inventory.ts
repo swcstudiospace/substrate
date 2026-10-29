@@ -23,6 +23,8 @@ import {
 	type RepoReport,
 	MAX_LISTED_SKIPS,
 	documentKey,
+	isValidPath,
+	isValidRepo,
 	scanGithub,
 	scanGreptileExport,
 	scanRoots,
@@ -132,6 +134,12 @@ export async function collectInventory(opts: InventoryOptions): Promise<Inventor
 		notes.push(...result.notes);
 		repos.push(...result.repos);
 		for (const entry of result.entries) {
+			// The server refuses a whole plan request for one entry whose label or path breaks its rules, so such an entry is left out here, counted and listed.
+			if (!isValidRepo(entry.repo) || !isValidPath(entry.path)) {
+				skippedByReason["bad-path"] = (skippedByReason["bad-path"] ?? 0) + 1;
+				if (skipped.length < MAX_LISTED_SKIPS) skipped.push({ repo: entry.repo, path: entry.path, reason: "bad-path" });
+				continue;
+			}
 			const key = documentKey(entry.repo, entry.path);
 			if (seen.has(key)) {
 				notes.push(`${key} was found by more than one source; the first one is kept`);

@@ -86,6 +86,16 @@ describe("collectInventory", () => {
 		expect(inventory.entries).toHaveLength(2);
 	});
 
+	test("an entry whose path the server would refuse is skipped as bad-path, and the rest of the repository is still planned and covered", async () => {
+		const root = tree({ "alpha/.git/HEAD": "", "alpha/README.md": "# alpha\n", "alpha/docs/we\\ird.md": "odd\n" });
+		const runner = fakeGit({ [join(root, "alpha")]: { origin: "git@github.com:Acme/Alpha.git", files: ["README.md", "docs/we\\ird.md"], branch: "main" } });
+		const inventory = await collectInventory({ ...BASE, roots: [root], sources: ["fs"], runner });
+		expect(inventory.entries.map((e) => e.path)).toEqual(["README.md"]);
+		expect(inventory.report.skippedByReason).toEqual({ "bad-path": 1 });
+		expect(inventory.report.skipped).toEqual([{ repo: "Acme/Alpha", path: "docs/we\\ird.md", reason: "bad-path" }]);
+		expect(inventory.scope.coverage).toEqual([{ repo: "Acme/Alpha", source: "fs" }]);
+	});
+
 	test("skip counts add up across sources and the filesystem collapse counts are kept", async () => {
 		const root = tree({ "c1/docs/a.md": "same\n", "c2/docs/a.md": "same\n", "c1/docs/empty.md": "" });
 		const exportDir = tree({ "o/r/empty.md": "" });

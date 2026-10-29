@@ -4,14 +4,16 @@
  * A checkout is a directory with a `.git` entry (a directory, or a file for a linked worktree). Linked worktrees of one
  * repository collapse to one checkout, and so do clones of one origin: the canonical checkout is the one on its default
  * branch with the newest HEAD commit. A directory with no `.git` that holds documentation is a copy collection and is
- * reported separately so the scan can walk it as `local/<directory name>`.
+ * reported separately so the scan can walk it under its `localRepoId` label. A label that more than one directory yields
+ * is reported in `duplicates`: the scan reads those directories but never covers the label.
  *
  * Git is reached through an injected runner that takes an argument vector, never a shell string.
  */
 import { spawnSync } from "node:child_process";
 import { lstatSync, readdirSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { hasDocExtension, isExcludedSegment } from "./classify.ts";
+import { localRepoId } from "./names.ts";
 
 export interface GitResult {
 	code: number;
@@ -56,12 +58,19 @@ export interface Collection {
 }
 
 export interface CollapseRecord {
-	kind: "worktree" | "clone" | "collection";
+	kind: "worktree" | "clone";
 	/** The directory that was folded away. */
 	dir: string;
 	/** The directory it was folded into. */
 	into: string;
 	repo: string;
+}
+
+/** One repository label that several directories under the selected roots yield. */
+export interface DuplicateLabel {
+	repo: string;
+	/** Every directory that yields the label (checkouts and copy collections), in root order. */
+	dirs: string[];
 }
 
 export interface DiscoverOptions {
@@ -75,10 +84,21 @@ export interface DiscoverResult {
 	checkouts: Checkout[];
 	/** Copy collections to scan by walking, sorted by directory. */
 	collections: Collection[];
+	/** Labels yielded by more than one directory, sorted by label. Never covered; see {@link DuplicateLabel}. */
+	duplicates: DuplicateLabel[];
 	/** How many checkouts existed before collapsing. */
 	found: number;
 	collapsed: { clones: number; worktrees: number; records: CollapseRecord[] };
 	notes: string[];
+}
+
+/** The reason a label is left out of the coverage and the word that starts its note. */
+export const DUPLICATE_LABEL = "duplicate-label";
+
+/** The last two components of a directory path: enough to tell two folders apart in a report, never an absolute path. */
+export function directoryLabel(dir: string): string {
+	const parent = basename(dirname(dir));
+	return parent === "" ? basename(dir) : `${parent}/${basename(dir)}`;
 }
 
 export const DEFAULT_DISCOVER_DEPTH = 3;
@@ -103,10 +123,10 @@ export function githubSlug(origin: string): string | null {
 	return null;
 }
 
-/** `owner/name` for a GitHub origin, else `local/<directory name>`. */
+/** `owner/name` for a GitHub origin, else the label of a plain directory (`localRepoId`). */
 export function repoFromOrigin(origin: string | null, dirName: string): string {
 	const slug = origin === null ? null : githubSlug(origin);
-	return slug ?? `local/${dirName}`;
+	return slug ?? localRepoId(dirName);
 }
 
 /** The origin URL without userinfo (`https://user:secret@host/x` becomes `https://host/x`); scp-style URLs are kept. */
@@ -175,9 +195,12 @@ interface Walk {
 	gitDirs: string[];
 	collections: string[];
 	notes: string[];
+	/** The order each directory was first visited in: roots in the order given, then names inside a root. */
+	order: Map<string, number>;
 }
 
 function explore(dir: string, depth: number, walk: Walk): void {
+	if (!walk.order.has(dir)) walk.order.set(dir, walk.order.size);
 	if (hasGitEntry(dir)) {
 		walk.gitDirs.push(dir);
 		return;
@@ -318,6 +341,7 @@ export function discoverRepos(roots: readonly string[], opts: DiscoverOptions = 
 		gitDirs: [],
 		collections: [],
 		notes: [],
+		order: new Map(),
 	};
 	for (const root of new Set(roots.map((root) => resolve(root)))) {
 		if (!isDirectory(root)) {
@@ -350,24 +374,33 @@ export function discoverRepos(roots: readonly string[], opts: DiscoverOptions = 
 		.map((item) => item.checkout)
 		.sort((a, b) => compareText(a.repo, b.repo) || compareText(a.dir, b.dir));
 
-	// A copy collection whose label is already a checkout's repo, or an earlier collection's, adds nothing new.
-	const taken = new Set(checkouts.map((checkout) => checkout.repo));
-	const collections: Collection[] = [];
-	for (const dir of [...new Set(walk.collections)].sort(compareText)) {
-		const repo = `local/${basename(dir)}`;
-		if (taken.has(repo)) {
-			const into = checkouts.find((checkout) => checkout.repo === repo)?.dir ?? collections.find((c) => c.repo === repo)?.dir ?? repo;
-			records.push({ kind: "collection", dir, into, repo });
-			notes.push(`copy collection ${dir} shares the label ${repo} with ${into} and was not scanned`);
-			continue;
-		}
-		taken.add(repo);
-		collections.push({ dir, repo });
+	// A label that more than one directory yields (two copy collections, or a checkout and a copy collection) cannot be
+	// told apart from a live folder that happens to share a name, so it is reported and never covered: the scan reads every
+	// directory that holds documents, an empty one shadows nothing, and no row under the label is judged removed.
+	const collectionDirs = [...new Set(walk.collections)].sort(compareText);
+	const dirsByLabel = new Map<string, string[]>();
+	const claim = (repo: string, dir: string): void => {
+		const dirs = dirsByLabel.get(repo);
+		if (dirs === undefined) dirsByLabel.set(repo, [dir]);
+		else dirs.push(dir);
+	};
+	for (const checkout of checkouts) claim(checkout.repo, checkout.dir);
+	const collections: Collection[] = collectionDirs.map((dir) => ({ dir, repo: localRepoId(basename(dir)) }));
+	for (const collection of collections) claim(collection.repo, collection.dir);
+	const duplicates: DuplicateLabel[] = [];
+	for (const [repo, dirs] of dirsByLabel) {
+		if (dirs.length < 2) continue;
+		// Root order, then discovery order inside a root: the first directory that holds a path wins it.
+		dirs.sort((a, b) => (walk.order.get(a) ?? 0) - (walk.order.get(b) ?? 0));
+		duplicates.push({ repo, dirs });
+		notes.push(`${DUPLICATE_LABEL}: ${repo} is yielded by ${dirs.map(directoryLabel).join(" and ")}; it is read but left out of the coverage`);
 	}
+	duplicates.sort((a, b) => compareText(a.repo, b.repo));
 
 	return {
 		checkouts,
 		collections,
+		duplicates,
 		found: inspected.length,
 		collapsed: {
 			clones: records.filter((record) => record.kind === "clone").length,

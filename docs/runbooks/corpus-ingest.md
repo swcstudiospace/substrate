@@ -41,7 +41,7 @@ substrate corpus status
 
 Start with the default tiers (tier 2 and below is the default; tier 3 is the bulk and historical material) and one root, read the plan, then widen. On the first run every entry is an `add`. The ingest of a few thousand documents takes a while because each document is parsed by LightRAG; the pipeline wait is once per batch, not once per document.
 
-Read the reply of `ingest --execute`: one result per document and tombstone with a status of `ingested`, `updated` (the manifest row was refreshed, LightRAG was not touched), `unchanged`, `tombstoned`, `refused` or `failed`, a closed reason for the last two, the counts, and `manifestVersion`. A run that ends with `failed` items is not an error to fix by hand: run it again and only those items are sent.
+Read the reply of `ingest --execute`: one result per document and tombstone with a status of `ingested`, `updated` (the manifest row was refreshed, LightRAG was not touched), `unchanged`, `tombstoned`, `refused` or `failed`, a closed reason for the last two, the counts, and `manifestVersion`. The command exits 0 only when every item ended `ingested`, `updated`, `unchanged` or `tombstoned`; any `refused` or `failed` item (or a request that failed as a whole) makes it exit 1, and the summary lists each with its reason. A run that ends with `failed` items is not an error to fix by hand: run it again and only those items are sent.
 
 ## Reading status
 
@@ -57,7 +57,7 @@ A narrower scan never tombstones what it did not cover. These leave the earlier 
 
 A manifest row is identified by `(repo, path)`; its `source` column records which source produced it. The same bytes read again from another source, or classified under another kind or tier, are an `update`: the CLI sends the document like an add, the server finds the stored sha256 equal, refreshes `source`, `kind`, `tier` and `commit` in the manifest and answers `updated`, and LightRAG is not touched. This keeps the stored source current, so a document first read from GitHub and later from a local clone can be removed by a filesystem-only scan.
 
-A rename (same sha256, same repo, new path) is planned as one `rename`; the CLI sends the tombstone for the old path first and the document at its new path after it. Because the old plane document is deleted before the text is inserted again, the plane stores the text under its new name and a search citation names the new path.
+A rename (same sha256, same repo, new path) is planned as one `rename`; the CLI sends the tombstone for the old path first and the document at its new path after it. Because the old plane document is deleted before the text is inserted again, the plane stores the text under its new name and a search citation names the new path. The old row is removed only when the new document passes every check the server applies (a safe name and path, the size bound, a non-empty body, the planned hash): a rename to `docs/x.[docling].md` leaves the old row active and reports the new path `refused` with `unsafe-name`. If the new document passes and the plane then fails, the old copy is already gone and the next run plans the new path as an `add`.
 
 ## Stop and resume
 
@@ -101,6 +101,8 @@ One document, status `refused` (never sent, never recorded; fix the file, then r
 | `empty-document` | The body is empty after remote images are stripped. |
 | `sha-mismatch` | The body does not hash to the entry's sha256 (the file changed or is not valid UTF-8 between the scan and the send). Scan again. |
 | `unsafe-name` | The plane would alter or refuse the document name built from the repo and path (a parser hint such as `.[docling].md`, or an edge space). Rename the file. |
+| `bad-path` | The path is not in normal form (a backslash, a control character, an empty or `..` segment, or over 1,024 characters). The CLI refuses it before sending, because the server would refuse the whole request. Rename the file. |
+| `bad-repo` | The repository label is not `owner/name` or `local/<label>`. The CLI refuses it before sending. |
 | `secret-findings` | The redactor found a secret-shaped string. The event names the rule, never the text. Remove the secret from the file. |
 
 One document or tombstone, status `failed` (the plane or the manifest failed; run again and only these are sent):

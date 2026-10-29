@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { defaultGitRunner, discoverRepos, githubSlug, repoFromOrigin, stripCredentials } from "./discover.ts";
+import { isValidRepo, localRepoId } from "./names.ts";
 import { defined, fakeGit, tempDir, writeTree } from "./test-support.ts";
 
 const dirs: string[] = [];
@@ -195,6 +196,57 @@ describe("discoverRepos", () => {
 		const found = discoverRepos([root], { run: fakeGit({ [join(root, "work", "app")]: { branch: "main" } }) });
 		expect(found.collections.map((c) => c.repo)).toEqual(["local/c1", "local/c2", "local/emptied"]);
 		expect(found.checkouts).toHaveLength(1);
+	});
+
+	test("an empty folder whose name is not a valid label is labelled by localRepoId, so the scope built from it is valid", () => {
+		const root = fixture({ "backup:2026/.keep": "", "c1/guide.md": "# guide" });
+		const found = discoverRepos([root], { run: fakeGit({}) });
+		expect(found.collections.map((c) => c.repo)).toEqual([localRepoId("backup:2026"), "local/c1"]);
+		for (const collection of found.collections) expect(isValidRepo(collection.repo)).toBe(true);
+		expect(found.duplicates).toEqual([]);
+	});
+
+	test("a checkout with no origin is labelled by localRepoId too", () => {
+		const root = fixture({ "my:repo/.git/HEAD": "" });
+		const found = discoverRepos([root], { run: fakeGit({ [join(root, "my:repo")]: { branch: "main" } }) });
+		expect(defined(found.checkouts[0], "checkout").repo).toBe(localRepoId("my:repo"));
+		expect(repoFromOrigin(null, "my:repo")).toBe(localRepoId("my:repo"));
+	});
+
+	test("an empty folder and a folder with documents that share a label are both kept and reported, whichever root comes first", () => {
+		const root = fixture({ "a/notes/.keep": "", "b/notes/guide.md": "# guide" });
+		const a = join(root, "a");
+		const b = join(root, "b");
+		const forward = discoverRepos([a, b], { run: fakeGit({}) });
+		expect(forward.collections).toEqual([
+			{ dir: join(a, "notes"), repo: "local/notes" },
+			{ dir: join(b, "notes"), repo: "local/notes" },
+		]);
+		expect(forward.duplicates).toEqual([{ repo: "local/notes", dirs: [join(a, "notes"), join(b, "notes")] }]);
+		const backward = discoverRepos([b, a], { run: fakeGit({}) });
+		expect(backward.duplicates).toEqual([{ repo: "local/notes", dirs: [join(b, "notes"), join(a, "notes")] }]);
+		for (const found of [forward, backward]) {
+			const note = defined(found.notes.find((text) => text.startsWith("duplicate-label:")), "the duplicate-label note");
+			expect(note).toContain("local/notes");
+			expect(note).toContain("a/notes");
+			expect(note).toContain("b/notes");
+			expect(note.includes(root)).toBe(false);
+		}
+	});
+
+	test("a checkout and a copy collection that map to one label are a duplicate, not a collapse", () => {
+		const root = fixture({ "a/notes/.git/HEAD": "", "b/notes/guide.md": "# guide" });
+		const checkout = join(root, "a", "notes");
+		const found = discoverRepos([join(root, "a"), join(root, "b")], { run: fakeGit({ [checkout]: { branch: "main" } }) });
+		expect(found.checkouts.map((c) => c.dir)).toEqual([checkout]);
+		expect(found.collections.map((c) => c.dir)).toEqual([join(root, "b", "notes")]);
+		expect(found.duplicates).toEqual([{ repo: "local/notes", dirs: [checkout, join(root, "b", "notes")] }]);
+		expect(found.collapsed.records).toEqual([]);
+	});
+
+	test("distinct labels are never reported as duplicates", () => {
+		const root = fixture({ "a/notes/guide.md": "# a", "b/other/guide.md": "# b" });
+		expect(discoverRepos([join(root, "a"), join(root, "b")], { run: fakeGit({}) }).duplicates).toEqual([]);
 	});
 
 	test("a collection of linked worktrees of one repository collapses like any other", () => {
