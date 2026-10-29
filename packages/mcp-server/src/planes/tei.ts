@@ -429,6 +429,12 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 			recordRefusal(checkNumber);
 			return { ok: false, reason: "model-mismatch" };
 		}
+		// A probe that names the expected model, started after the newest refusal, lifts it: the service is back on that model.
+		// It learns nothing: only a pin or a model an embed learned is ever expected.
+		if (wanted !== null && modelRefused && checkNumber > refusedBySeq) {
+			modelRefused = false;
+			modelCheckedAt = now();
+		}
 		return { ok: true };
 	}
 

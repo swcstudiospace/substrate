@@ -687,6 +687,25 @@ describe("one timeout for every request of a call", () => {
 		// The second batch was never asked for.
 		expect(embedSeen).toBe(1);
 	});
+
+	test("a later probe that names the expected model clears a refusal a probe recorded, so the next embed needs no new /info", async () => {
+		const healthy = fakeTei();
+		let infoSeen = 0;
+		const fetchImpl: PlaneFetch = async (input, init) => {
+			if (new URL(String(input)).pathname !== "/info") return healthy.fetch(input, init);
+			infoSeen += 1;
+			// Embed's check: A. First probe: B. Second probe: A again. Anything after that fails.
+			if (infoSeen > 3) return new Response("", { status: 503 });
+			return Response.json({ model_id: infoSeen === 2 ? "other-model" : "test-model", max_input_length: 512, max_client_batch_size: 2 });
+		};
+		const { client } = clientFor({ ...CONFIG, model: "test-model" }, fetchImpl);
+		expect((await client.embed(["a"])).ok).toBe(true);
+		expect(await client.probe()).toEqual({ ok: false, reason: "model-mismatch" });
+		expect(await client.probe()).toEqual({ ok: true });
+		// The verdict is fresh again: this embed asks nothing of `/info` (a fourth read would fail).
+		expect((await client.embed(["b"])).ok).toBe(true);
+		expect(infoSeen).toBe(3);
+	});
 });
 
 describe("probe after a recovery", () => {
