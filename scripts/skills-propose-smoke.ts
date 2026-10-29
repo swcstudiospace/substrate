@@ -76,7 +76,7 @@ export function toolReply(body: string): { isError: boolean; value: Record<strin
 			const text = result?.content?.[0]?.text;
 			if (text !== undefined) return { isError: result?.isError === true, value: JSON.parse(text) as Record<string, unknown> };
 		} catch {
-			continue;
+			// A frame that is not JSON (or not a tool reply) is skipped; the next one is tried.
 		}
 	}
 	return null;

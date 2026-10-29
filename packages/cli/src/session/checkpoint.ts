@@ -200,28 +200,28 @@ export interface CreateCheckpointParams {
 	worktree: string;
 	sessionId: string;
 	trigger: CheckpointTrigger;
-	transcriptRef?: TranscriptRef;
-	planRef?: PlanRef;
+	transcriptRef?: TranscriptRef | undefined;
+	planRef?: PlanRef | undefined;
 	/** The surface whose bearer delivers a pending record later. */
 	surface: string;
 	client: RollbackServerClient;
 	now: Clock;
 	randomBytes: RandomBytes;
-	run?: Runner;
+	run?: Runner | undefined;
 	/** Override the pending journal directory (default: `<git dir>/substrate-pending`). */
-	pendingDir?: string;
-	policy?: SnapshotPolicy;
+	pendingDir?: string | undefined;
+	policy?: SnapshotPolicy | undefined;
 	/** Ask for this seq. An existing checkpoint with it is returned; a seq at or below the highest, not existing, is refused. */
-	seq?: number;
+	seq?: number | undefined;
 	/** How long to wait for the checkpoint lock when another process holds it (default 100 tries, 50 ms apart); tests inject `sleep`. */
-	lockWait?: LockWait;
+	lockWait?: LockWait | undefined;
 	/**
 	 * Evaluated under the checkpoint lock, right after the list and before the seq decision, with the snapshot this
 	 * call already took. A decline releases the lock and returns `{ status: "skipped", reason }`: the policy that
 	 * admits a checkpoint and the pin that follows it are one atomic step, so overlapping callers cannot both pass
 	 * on the same history. Without `admit` the result never is a skip.
 	 */
-	admit?: (context: CheckpointAdmitContext) => CheckpointAdmission;
+	admit?: ((context: CheckpointAdmitContext) => CheckpointAdmission) | undefined;
 }
 
 /**
@@ -251,7 +251,7 @@ export async function createCheckpoint(params: CreateCheckpointParams): Promise<
 	const early = decideSeq((await listLocalCheckpoints({ worktree: params.worktree, run, now: params.now })).checkpoints, sessionId, params.seq);
 	if (early.kind === "found") return offerExisting(params, run, early.found);
 
-	const snap = await snapshot({ worktree: params.worktree, policy: params.policy, now: params.now, run });
+	const snap = await snapshot({ worktree: params.worktree, ...(params.policy === undefined ? {} : { policy: params.policy }), now: params.now, run });
 	// When the files were pinned: a checkpoint the server hears of hours later cuts memory at THIS instant, not at its record time.
 	const takenAtMs = params.now().getTime();
 	const ckptId = newCheckpointId(params.randomBytes);

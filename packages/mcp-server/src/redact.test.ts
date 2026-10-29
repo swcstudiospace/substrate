@@ -14,6 +14,7 @@ import {
 	scanSkillFiles,
 } from "./redact.ts";
 import type { RedactionRuleName, SkillRedactionRule } from "./redact.ts";
+import { defined } from "./test-support.ts";
 
 describe("redact", () => {
 	test("leaves ordinary event summaries alone", () => {
@@ -76,7 +77,7 @@ describe("redactValue", () => {
 		expect(out.files).toEqual(["gateway/ws.rs"]);
 		expect(out.env.PGPASSWORD).toBe(REDACTED);
 		expect(out.env.RUST_LOG).toBe("debug");
-		expect(out.nested[0]!.authorization).toBe(REDACTED);
+		expect(defined(out.nested[0]).authorization).toBe(REDACTED);
 	});
 
 	test("passes non-string scalars through untouched", () => {
@@ -863,10 +864,10 @@ describeRoundTrip("harness round trip through the rehearsal twin", () => {
 				typeof event === "object" && event !== null,
 		);
 		const roundTripped = found?.session_id === tag ? found : undefined;
-		expect(roundTripped).toBeDefined();
-		expect(roundTripped!.summary).toContain("REDACTED");
-		for (const secret of secrets) expect(JSON.stringify(roundTripped)).not.toContain(secret);
-		expect(roundTripped!.payload?.input_tokens).toBe(1200);
-		expect(roundTripped!.payload?.output_tokens).toBe(340);
+		const event = defined(roundTripped, "the round-tripped event");
+		expect(event.summary).toContain("REDACTED");
+		for (const secret of secrets) expect(JSON.stringify(event)).not.toContain(secret);
+		expect(event.payload?.input_tokens).toBe(1200);
+		expect(event.payload?.output_tokens).toBe(340);
 	});
 });

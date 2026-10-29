@@ -17,6 +17,7 @@ import { loadConfig, type SubstrateConfig } from "./config.ts";
 import { createObservability, type Observability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
+import { defined } from "./test-support.ts";
 
 interface Harness {
 	base: string;
@@ -253,7 +254,7 @@ describe("when the cache cannot answer", () => {
 		const { port } = server.address() as AddressInfo;
 		try {
 			expect((await fetch(`http://127.0.0.1:${port}/brief`, { method: "POST", headers: CURSOR, body: "{}" })).status).toBe(200);
-			expect(sumCounter(findCounter(observability.snapshot(), METRIC.admissionDecisions)!, { decision: "bypass" })).toBe(1);
+			expect(sumCounter(defined(findCounter(observability.snapshot(), METRIC.admissionDecisions)), { decision: "bypass" })).toBe(1);
 		} finally {
 			observability.stop();
 			server.close();

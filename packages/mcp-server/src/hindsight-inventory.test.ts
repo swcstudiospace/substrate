@@ -37,6 +37,7 @@ import {
 import type { TimerHandle, TimerSeam } from "./recall-snapshot.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
+import { defined } from "./test-support.ts";
 
 const CONFIG: HindsightConfig = { url: "http://fake", apiKey: "test-bearer", bankPrefix: "sub-" };
 const T0 = Date.parse("2026-10-14T09:00:00.000Z");
@@ -280,7 +281,7 @@ describe("HindsightInventory", () => {
 		seed(fake, "sub-extra", 9);
 		seed(fake, HOSTILE, 1);
 		seed(fake, "pd-desk", 7);
-		fake.banks.get("sub-omp")!.mode = "server-default";
+		defined(fake.banks.get("sub-omp"), "sub-omp bank").mode = "server-default";
 		fake.statsOverride["sub-grok-bot"] = { pending_operations: 3, failed_operations: 1 };
 		fake.lastWriteAt["sub-grok-bot"] = new Date(T0 - 90_000).toISOString();
 		const { inventory, calls, clock } = rig({ fake, banks: ["sub-grok-bot", "sub-omp", "sub-missing"] });

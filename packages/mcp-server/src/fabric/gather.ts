@@ -65,9 +65,9 @@ export async function gatherFabricFacts(
 	const { cache, breakers } = snapshot;
 	const greptime = greptimeRead.ok ? greptimeRead.value : null;
 	// A write still waiting at its bound is not a write that succeeded: the Greptime row is unavailable for it, never ok.
-	const writeStalled = greptime !== null && greptime.writeTimedOut;
+	const writeStalled = greptime?.writeTimedOut === true;
 	// No write verdict since boot: the fabric reads the last /healthz probe and never writes, so the write is unknown, and unknown is never ok.
-	const writeUnread = greptime !== null && greptime.up && greptime.writeUnread;
+	const writeUnread = greptime?.up === true && greptime.writeUnread;
 
 	const services: Record<ServiceName, ServiceReading> = {
 		dragonfly: {

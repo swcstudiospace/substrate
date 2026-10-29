@@ -21,7 +21,7 @@ bun run verify                       # the whole gate: install, types, lint, tes
 bun run verify --only types,locks    # selected steps (ids: install, types, lint, tests, python, locks, audit)
 bun run verify --list                # print the steps
 bun run verify --audit               # also run the dependency audit (needs the network)
-bun run lint                         # Biome; errors block the gate, warnings stay visible
+bun run lint                         # Biome; every diagnostic blocks the gate (no warnings are left to ignore)
 bun scripts/code-ratchet.ts --check  # risky-pattern counters against scripts/code-ratchet.baseline.json (also run by bun test)
 ```
 

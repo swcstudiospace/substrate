@@ -35,6 +35,8 @@
  * so one surface's storm cannot spend another's brief budget. See `admission.ts`.
  */
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import type { Transport, TransportSendOptions } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { JSONRPCMessage, MessageExtraInfo } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { auditMode } from "@substrate/audit";
@@ -1110,9 +1112,9 @@ export function createHttpServer(
 				}
 				const { detail: brief, notModified } = await substrate.briefConditional(
 					{
-						repo: typeof body.repo === "string" ? body.repo : undefined,
-						branch: typeof body.branch === "string" ? body.branch : undefined,
-						graph_id: typeof body.graph_id === "string" ? body.graph_id : undefined,
+						...(typeof body.repo === "string" ? { repo: body.repo } : {}),
+						...(typeof body.branch === "string" ? { branch: body.branch } : {}),
+						...(typeof body.graph_id === "string" ? { graph_id: body.graph_id } : {}),
 						surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
 					},
 					req.headers["if-none-match"],
@@ -1371,9 +1373,9 @@ export function createHttpServer(
 					from: { surface: sender, session_id: typeof body.session_id === "string" ? body.session_id : null },
 					to: { surface: to, session_id: typeof body.to_session_id === "string" ? body.to_session_id : null },
 					goal: body.goal,
-					files: Array.isArray(body.files) ? (body.files as string[]) : undefined,
-					dod: Array.isArray(body.dod) ? (body.dod as string[]) : undefined,
-					blockers: Array.isArray(body.blockers) ? (body.blockers as string[]) : undefined,
+					...(Array.isArray(body.files) ? { files: body.files as string[] } : {}),
+					...(Array.isArray(body.dod) ? { dod: body.dod as string[] } : {}),
+					...(Array.isArray(body.blockers) ? { blockers: body.blockers as string[] } : {}),
 					graph_id: typeof body.graph_id === "string" ? body.graph_id : null,
 					node_id: typeof body.node_id === "string" ? body.node_id : null,
 					linear_identifier: typeof body.linear_identifier === "string" ? body.linear_identifier : null,
@@ -1404,8 +1406,8 @@ export function createHttpServer(
 					path: typeof body.path === "string" ? body.path : null,
 					git_tip: typeof body.git_tip === "string" ? body.git_tip : null,
 					branch: typeof body.branch === "string" ? body.branch : null,
-					idle_seconds: typeof body.idle_seconds === "number" ? body.idle_seconds : undefined,
-					limit: typeof body.limit === "number" ? body.limit : undefined,
+					...(typeof body.idle_seconds === "number" ? { idle_seconds: body.idle_seconds } : {}),
+					...(typeof body.limit === "number" ? { limit: body.limit } : {}),
 				});
 				if (body.format === "text") {
 					send(res, 200, `${formatDrift(report)}\n`, "text/plain; charset=utf-8");
@@ -1803,7 +1805,7 @@ export function createHttpServer(
 				// permission decision about the caller: 503 with the reason. A checkout that
 				// cannot be read fails the job the same way and the pinned version keeps serving.
 				const accepted = await substrate.startDocsRefresh(
-					{ ...fields, roots: source.roots, pages: source.pages, head: source.head },
+					{ ...fields, roots: source.roots, pages: source.pages, ...(source.head === undefined ? {} : { head: source.head }) },
 					surface,
 					{ wait: url.searchParams.get("wait") === "1" },
 				);
@@ -2144,6 +2146,38 @@ async function openEventStream(
 }
 
 /**
+ * The SDK's Node transport in stateless mode (no session id generator), behind the `Transport` interface.
+ *
+ * The SDK declares that transport's three callbacks as accessors typed `T | undefined`, which the interface's
+ * optional fields refuse under `exactOptionalPropertyTypes`. This holds the callbacks as plain optional fields
+ * and forwards each callback and each call to the SDK transport one for one, so the wire behaviour is the SDK's.
+ */
+class StatelessHttpTransport implements Transport {
+	onclose?: () => void;
+	onerror?: (error: Error) => void;
+	onmessage?: <T extends JSONRPCMessage>(message: T, extra?: MessageExtraInfo) => void;
+	readonly inner = new StreamableHTTPServerTransport({});
+
+	constructor() {
+		this.inner.onclose = () => this.onclose?.();
+		this.inner.onerror = (error) => this.onerror?.(error);
+		this.inner.onmessage = (message, extra) => this.onmessage?.(message, extra);
+	}
+
+	start(): Promise<void> {
+		return this.inner.start();
+	}
+
+	send(message: JSONRPCMessage, options?: TransportSendOptions): Promise<void> {
+		return this.inner.send(message, options);
+	}
+
+	close(): Promise<void> {
+		return this.inner.close();
+	}
+}
+
+/**
  * Stateless MCP: a fresh server and transport per request. The substrate holds
  * no per-session state of its own — everything it knows lives in Postgres and
  * Greptime — so there is nothing for a long-lived session to protect.
@@ -2199,11 +2233,11 @@ async function handleMcp(
 	}
 
 	const server = createMcpServer(substrate, caller);
-	const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+	const transport = new StatelessHttpTransport();
 	res.on("close", () => {
 		void transport.close();
 		void server.close();
 	});
 	await server.connect(transport);
-	await transport.handleRequest(req, res, body);
+	await transport.inner.handleRequest(req, res, body);
 }

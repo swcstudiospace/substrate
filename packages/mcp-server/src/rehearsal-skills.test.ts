@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EMPTY_STATE, OWNERLESS_LOCK_GRACE_MS, acquireStateLock, fakeGh, fakeGhScript, lockIsStale, readState, runFakeGh, writeState, type FakeGhState } from "./rehearsal-fake-gh.ts";
 import { FIXTURE_REPO, SEED_SKILL, buildSkillsFixture, removeSkillsFixture, skillsPaths } from "./rehearsal-skills.ts";
+import { defined } from "./test-support.ts";
 
 const made: string[] = [];
 afterAll(() => {
@@ -48,7 +49,7 @@ describe("fakeGh", () => {
 		expect(view.code).toBe(0);
 		expect(JSON.parse(view.stdout)).toEqual({ state: "OPEN", url, number: 1 });
 
-		state.prs[0]!.state = "CLOSED";
+		defined(state.prs[0], "first PR").state = "CLOSED";
 		expect(JSON.parse(fakeGh(["pr", "view", url, "--json", "state,url,number"], state).stdout).state).toBe("CLOSED");
 
 		const missing = fakeGh(["pr", "view", `https://github.com/${FIXTURE_REPO}/pull/99`], state);
@@ -59,7 +60,7 @@ describe("fakeGh", () => {
 	test("pr list answers only the open PRs for that head in that library", () => {
 		const state = freshState();
 		fakeGh(createArgv("skill/omp/a-1-abcd"), state);
-		state.prs[0]!.state = "CLOSED";
+		defined(state.prs[0], "first PR").state = "CLOSED";
 		fakeGh(createArgv("skill/omp/a-1-abcd"), state);
 		fakeGh(createArgv("skill/omp/other"), state);
 		fakeGh(createArgv("skill/omp/a-1-abcd", "someone/else"), state);

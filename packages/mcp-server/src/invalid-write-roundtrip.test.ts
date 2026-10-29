@@ -46,7 +46,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import type { Transport, TransportSendOptions } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { ErrorCode, McpError, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import type { AuditRecord } from "@substrate/audit";
 import { loadConfig } from "./config.ts";
 import { IndexStore } from "./index-store.ts";
@@ -56,6 +57,7 @@ import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 import type { ProposeResult, Runner, SkillProposer } from "./skills/propose.ts";
 import { APPROVAL_RULES } from "./skills/registry.ts";
+import { defined } from "./test-support.ts";
 import type { SubstrateEvent } from "./types.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
@@ -107,6 +109,41 @@ function ledgerStub() {
 	};
 }
 
+/**
+ * The SDK's HTTP client transport reports `sessionId` as `string | undefined`, which `Transport`'s optional
+ * `sessionId?: string` rejects under exactOptionalPropertyTypes. This forwards what `Client` uses and leaves
+ * `sessionId` out, which is legal for a connection the client is about to open.
+ */
+class ClientTransport implements Transport {
+	onclose?: () => void;
+	onerror?: (error: Error) => void;
+	onmessage?: (message: JSONRPCMessage) => void;
+	private readonly inner: StreamableHTTPClientTransport;
+
+	constructor(inner: StreamableHTTPClientTransport) {
+		this.inner = inner;
+		inner.onclose = () => this.onclose?.();
+		inner.onerror = (error) => this.onerror?.(error);
+		inner.onmessage = (message) => this.onmessage?.(message);
+	}
+
+	start(): Promise<void> {
+		return this.inner.start();
+	}
+
+	send(message: JSONRPCMessage, options?: TransportSendOptions): Promise<void> {
+		return this.inner.send(message, options);
+	}
+
+	close(): Promise<void> {
+		return this.inner.close();
+	}
+
+	setProtocolVersion(version: string): void {
+		this.inner.setProtocolVersion(version);
+	}
+}
+
 const stops: Array<() => void> = [];
 
 /** Starts the real REST and MCP door on an ephemeral port, over the given stores. */
@@ -136,9 +173,11 @@ async function startHttp(stores: Record<string, unknown>, env: Record<string, st
 		},
 		async mcp() {
 			const client = new Client({ name: "invalid-write-roundtrip", version: "0.0.0" });
-			const transport = new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
-				requestInit: { headers: { authorization: `Bearer ${TOKEN}` } },
-			});
+			const transport = new ClientTransport(
+				new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
+					requestInit: { headers: { authorization: `Bearer ${TOKEN}` } },
+				}),
+			);
 			await client.connect(transport);
 			stops.push(() => {
 				client.close().catch(() => undefined);
@@ -208,7 +247,7 @@ function isRefusalBody(name: string, text: string): boolean {
 	}
 	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return false;
 	const refusalBody = Object.hasOwn(REFUSAL_BODY, name) ? REFUSAL_BODY[name] : undefined;
-	return refusalBody !== undefined && refusalBody(parsed as Record<string, unknown>);
+	return refusalBody?.(parsed as Record<string, unknown>) === true;
 }
 
 /** The first text block of a tool reply, parsed. A non-JSON reply parses to `undefined`. */
@@ -386,7 +425,7 @@ describeLive("memory writes: POST /memory and MCP memory_write", () => {
 			expect(reply).toMatchObject({ outcome: "accepted", verified_persisted: true });
 			expect(await store.readEntry(entryIdOf(reply))).not.toBeNull();
 			const after = await storedState(MEMORY_TABLES);
-			expect(after.counts.memory_entries).toBe(before.counts.memory_entries! + 1);
+			expect(after.counts.memory_entries).toBe(defined(before.counts.memory_entries, "memory_entries count") + 1);
 			expect(after.content.memory_entries).not.toBe(before.content.memory_entries);
 			expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("memory_write", "rest"));
 		});
@@ -438,7 +477,7 @@ describeLive("memory writes: POST /memory and MCP memory_write", () => {
 
 			expect(reply).toMatchObject({ outcome: "accepted", verified_persisted: true });
 			const after = await storedState(MEMORY_TABLES);
-			expect(after.counts.memory_entries).toBe(before.counts.memory_entries! + 1);
+			expect(after.counts.memory_entries).toBe(defined(before.counts.memory_entries, "memory_entries count") + 1);
 			expect(after.content.memory_entries).not.toBe(before.content.memory_entries);
 			expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("memory_write", "mcp"));
 		});
@@ -536,7 +575,7 @@ describeLive("skill proposals: POST /skills/propose and MCP skills_propose", () 
 			expect(response.status).toBe(200);
 			expect(await response.json()).toMatchObject({ status: "opened" });
 			const after = await storedState(SKILL_TABLES);
-			expect(after.counts.skills_registry).toBe(before.counts.skills_registry! + 1);
+			expect(after.counts.skills_registry).toBe(defined(before.counts.skills_registry, "skills_registry count") + 1);
 			expect(after.content.skills_registry).not.toBe(before.content.skills_registry);
 			expect(auditedFields(auditAfter(control.audit, mark))).toEqual(reachedGate("skills_propose", "rest"));
 		});
@@ -606,7 +645,7 @@ describeLive("skill proposals: POST /skills/propose and MCP skills_propose", () 
 
 			expect(reply).toMatchObject({ status: "opened" });
 			const after = await storedState(SKILL_TABLES);
-			expect(after.counts.skills_registry).toBe(before.counts.skills_registry! + 1);
+			expect(after.counts.skills_registry).toBe(defined(before.counts.skills_registry, "skills_registry count") + 1);
 			expect(after.content.skills_registry).not.toBe(before.content.skills_registry);
 			expect(await registryState(name)).toContainEqual({ pr_number: 4343, state: "proposed", decided_by: null, decided_at: null });
 			expect(auditedFields(auditAfter(control.audit, mark))).toEqual(reachedGate("skills_propose", "mcp"));

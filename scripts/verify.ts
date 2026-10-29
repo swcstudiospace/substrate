@@ -3,7 +3,7 @@
  * The repository's verification gate in one command.
  *
  * `bun run verify` runs the checks the CI workflow runs, in the same order:
- * a frozen-lockfile install, `tsc --noEmit`, `biome lint` (errors block, warnings stay visible), the full test suite and the repo
+ * a frozen-lockfile install, `tsc --noEmit`, `biome lint` (every diagnostic blocks), the full test suite and the repo
  * locks (`check:phase-close`). `--audit` adds the known-vulnerability audit,
  * which needs the network. A step's output is shown only when the step fails;
  * otherwise one line per step reports its duration and, for the test suite,

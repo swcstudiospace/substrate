@@ -642,7 +642,8 @@ export function redactSkillContent(
 	let occupied: Occupied[] = [];
 	// `<private>` blocks own their whole span: claim them before any inner
 	// shape can, so block prose never survives beside an inner hit (WR-01).
-	const privateEntry = SKILL_RULES.find((entry) => entry.rule === "private-tag")!;
+	const privateEntry = SKILL_RULES.find((entry) => entry.rule === "private-tag");
+	if (privateEntry === undefined) throw new Error("the private-tag skill rule is missing from SKILL_RULES");
 	for (const [start, end] of privateEntry.scan?.(text) ?? []) {
 		claims.push({ start, end, rule: "private-tag", replace: { start, end, with: privateEntry.replacement }, kind: "redaction" });
 		occupied.push({ start, end, rule: "private-tag" });

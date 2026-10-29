@@ -749,7 +749,7 @@ export async function main(argv: string[]): Promise<number> {
 	const idsBefore = await queryDesktopIds(base, bearer, opts.surface);
 	const probe = await callTool(base, unlistedBearer, 2, "desktop_run", { actions: [{ type: "screenshot" }], timeout: 30 }, PROBE_CALL_TIMEOUT_MS);
 	const probeText = probe.reply?.content.find((block) => block.type === "text")?.text ?? "";
-	const probeRefused = probe.reply !== null && probe.reply.isError && probeText.includes("not enabled");
+	const probeRefused = probe.reply?.isError === true && probeText.includes("not enabled");
 	check(probeRefused, "unlisted token refused", probe.reply === null ? (probe.rpcError ?? "no reply") : `isError ${probe.reply.isError}`);
 	const idsAfter = await queryDesktopIds(base, bearer, opts.surface);
 	const refusalClean =

@@ -88,6 +88,12 @@ export interface SloThresholds {
 	runwayDays?: number;
 }
 
+/**
+ * What a caller may hand over. `loadObservabilityConfig` yields `undefined` for every
+ * threshold the operator left unset, and `stripUndefined` keeps the default for those.
+ */
+export type SloOverrides = { [K in keyof SloThresholds]?: number | undefined };
+
 export const DEFAULT_THRESHOLDS: Required<SloThresholds> = {
 	briefP95Ms: 800,
 	emitSuccessRatio: 0.995,
@@ -106,7 +112,7 @@ export const DEFAULT_THRESHOLDS: Required<SloThresholds> = {
 	runwayDays: 14,
 };
 
-export function sloCatalogue(overrides: SloThresholds = {}): SloTarget[] {
+export function sloCatalogue(overrides: SloOverrides = {}): SloTarget[] {
 	const t = { ...DEFAULT_THRESHOLDS, ...stripUndefined(overrides) };
 	return [
 		{
@@ -157,8 +163,8 @@ export function sloCatalogue(overrides: SloThresholds = {}): SloTarget[] {
 	];
 }
 
-function stripUndefined<T extends object>(value: T): Partial<T> {
-	return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as Partial<T>;
+function stripUndefined(value: SloOverrides): SloThresholds {
+	return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as SloThresholds;
 }
 
 export type SloStatus = "ok" | "breached" | "insufficient-data" | "unmeasurable";
@@ -403,7 +409,7 @@ export function breaches(results: SloResult[]): SloResult[] {
  * its consumers assert that list; it surfaces as the sibling `docs` array on
  * `GET /slo` and is never folded into `breached`.
  */
-export function docsSearchObjective(overrides: SloThresholds = {}): SloTarget {
+export function docsSearchObjective(overrides: SloOverrides = {}): SloTarget {
 	const t = { ...DEFAULT_THRESHOLDS, ...stripUndefined(overrides) };
 	return {
 		kind: "latency-quantile",
@@ -418,7 +424,7 @@ export function docsSearchObjective(overrides: SloThresholds = {}): SloTarget {
 }
 
 /** The `docs` array `GET /slo` serves: one row, `docs.search.p95`, in the catalogue's entry shape. */
-export function evaluateDocsSlos(snapshot: MetricSnapshot[], overrides: SloThresholds = {}): SloResult[] {
+export function evaluateDocsSlos(snapshot: MetricSnapshot[], overrides: SloOverrides = {}): SloResult[] {
 	return evaluateSlos(snapshot, [docsSearchObjective(overrides)]);
 }
 
@@ -441,7 +447,7 @@ export interface SurfaceSloResult extends SloResult {
  * call. Served as the sibling `surfaces` array on `GET /slo`, in the
  * catalogue's entry shape plus `surface`, and never folded into `breached`.
  */
-export function briefBySurfaceObjectives(snapshot: MetricSnapshot[], overrides: SloThresholds = {}): SurfaceSloResult[] {
+export function briefBySurfaceObjectives(snapshot: MetricSnapshot[], overrides: SloOverrides = {}): SurfaceSloResult[] {
 	const t = { ...DEFAULT_THRESHOLDS, ...stripUndefined(overrides) };
 	const histogram = findHistogram(snapshot, METRIC.briefDuration);
 	if (!histogram) return [];

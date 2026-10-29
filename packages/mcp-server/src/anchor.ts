@@ -564,7 +564,7 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 				}
 			}
 		const note = await emitWritten(substrate, digest, verdict.signature, true).catch(() => null);
-		if (!note || note.stored !== true) {
+		if (note?.stored !== true) {
 			// The store already failed one write: a later hour must not send
 			// a new transaction after that. Report and stop like the send path.
 			await failHour(periodIso, "store-failed");
@@ -687,7 +687,7 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 		// is reported as store-failed instead, and the next sweep still skips
 		// this hour by its row.
 		const note = await emitWritten(substrate, digest, signature, false).catch(() => null);
-		if (!note || note.stored !== true) {
+		if (note?.stored !== true) {
 			await failHour(periodIso, "store-failed");
 			process.stderr.write(`[anchor] ${periodIso} anchored but the anchor note was not stored\n`);
 			return result;

@@ -56,11 +56,16 @@ export function holtForecast(points: readonly number[], horizonSteps: number, al
 	if (!Number.isFinite(horizonSteps) || horizonSteps <= 0) return null;
 	const values = points.filter((value) => Number.isFinite(value));
 	if (values.length < 2) return null;
-	let level = values[1]!;
-	let trend = values[1]! - values[0]!;
+	const first = values[0];
+	const second = values[1];
+	if (first === undefined || second === undefined) return null;
+	let level = second;
+	let trend = second - first;
 	for (let i = 2; i < values.length; i++) {
+		const value = values[i];
+		if (value === undefined) break;
 		const previousLevel = level;
-		level = alpha * values[i]! + (1 - alpha) * (previousLevel + trend);
+		level = alpha * value + (1 - alpha) * (previousLevel + trend);
 		trend = beta * (level - previousLevel) + (1 - beta) * trend;
 	}
 	const predicted = level + trend * horizonSteps;

@@ -12,6 +12,7 @@ import { loadConfig, type SubstrateConfig } from "./config.ts";
 import { createObservability, type Observability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
+import { defined } from "./test-support.ts";
 
 class MapRedis implements CacheRedis {
 	readonly values = new Map<string, string>();
@@ -281,14 +282,14 @@ describe("the snapshot records its own deadline (uplift-4 S4)", () => {
 	test("the background refresh rewrites the snapshot with text, sections, until and a new timestamp", async () => {
 		const { substrate, cache, redis, state } = rigOf("enforce", 7_000);
 		await substrate.briefDetailed(request);
-		const before = stored(redis)!.v;
+		const before = defined(stored(redis)).v;
 		state.status = "blocked";
 		await cache.bump(MEMORY_GENERATION_KEY);
 		const stale = await substrate.briefDetailed(request);
 		expect(stale.ageS).toBe(7);
 		expect(stale.text).toContain("active");
 		for (let turn = 0; turn < 16; turn += 1) await settle();
-		const after = stored(redis)!.v;
+		const after = defined(stored(redis)).v;
 		expect(after.text).toContain("blocked");
 		expect(after.text.startsWith("## Substrate brief")).toBe(true);
 		expect(Array.isArray(after.sections)).toBe(true);

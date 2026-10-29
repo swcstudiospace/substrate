@@ -41,6 +41,7 @@ import {
 	type PlaneDeleteResult,
 } from "./memory-forget.ts";
 import type { MemoryEntry } from "./types.ts";
+import { defined } from "./test-support.ts";
 
 const RB = "rb_0123456789abcdefghjkmnpqrs";
 const CKPT = "ckpt_0123456789abcdefghjkmnpqrs";
@@ -296,7 +297,7 @@ describe("forgetEntries: one outcome per entry", () => {
 		const w = seeded();
 		const report = await forgetEntries(w.deps, request(ids, { session_id: "sess-1", checkpoint_id: CKPT }));
 		expect(w.emitted).toHaveLength(1);
-		const note = w.emitted[0]!;
+		const note = defined(w.emitted[0], "emitted note");
 		expect(parseForgetPayload(note.payload)).toEqual(note.payload);
 		expect(note.payload).toEqual({
 			action: FORGET_ACTION,
@@ -401,7 +402,7 @@ describe("forgetEntries: plane failures", () => {
 		const w = world([entry("mem_a")]);
 		w.plane.set("mem_a", { ok: false, reason: `bearer sk-ant-api03-${"A".repeat(60)} ${"x".repeat(500)}`, retryable: false });
 		const report = await forgetEntries(w.deps, request(["mem_a"]));
-		const plane = report.entries[0]!.plane;
+		const plane = defined(report.entries[0], "first report entry").plane;
 		expect(plane.status).toBe("pending");
 		if (plane.status !== "pending") return;
 		expect(plane.reason.length).toBeLessThanOrEqual(200);
@@ -454,7 +455,7 @@ describe("forgetEntries: races at the mark", () => {
 	test("an entry superseded between the read and the mark keeps its real superseder and is not touched on the plane", async () => {
 		const w = world([entry("mem_a"), entry("mem_b")], {
 			beforeMark: (rows) => {
-				rows.get("mem_b")!.superseded_by = "mem_newer";
+				defined(rows.get("mem_b"), "mem_b row").superseded_by = "mem_newer";
 			},
 		});
 		const report = await forgetEntries(w.deps, request(["mem_a", "mem_b"]));
@@ -468,7 +469,7 @@ describe("forgetEntries: races at the mark", () => {
 		let marker = "";
 		const w = world([entry("mem_a")], {
 			beforeMark: (rows) => {
-				rows.get("mem_a")!.superseded_by = marker;
+				defined(rows.get("mem_a"), "mem_a row").superseded_by = marker;
 			},
 		});
 		marker = forgetMarker(forgetIdFor({ reason: "operator", entry_ids: ["mem_a"] }));
@@ -500,7 +501,7 @@ describe("forgetEntries: bounds", () => {
 		expect(ids[0]).toHaveLength(128);
 		const w = world([]);
 		const report = await forgetEntries(w.deps, request(ids, { session_id: "s".repeat(512), reason: "rollback", rollback_id: RB, checkpoint_id: CKPT }));
-		const payload = w.emitted[0]!.payload;
+		const payload = defined(w.emitted[0], "emitted note").payload;
 		expect(report.entry_count).toBe(200);
 		expect(payload.entry_count).toBe(200);
 		expect(payload.entry_ids).toHaveLength(FORGET_PAYLOAD_ENTRY_IDS);
@@ -533,7 +534,7 @@ describe("memory.forget payload validator and builder", () => {
 	test("the event_sources sample is a valid payload", () => {
 		const row = EVENT_SOURCES.find((source) => source.id === "memory.forget");
 		expect(row).toMatchObject({ phase: 57, kind: "note", surface: "caller", actions: ["memory.forget"], carriesRepo: false, periodic: false });
-		const sample = row!.sample();
+		const sample = defined(row, "memory.forget event source").sample();
 		expect(sample.kind).toBe("note");
 		expect(sample.repo).toBeUndefined();
 		const payload = parseForgetPayload(sample.payload);

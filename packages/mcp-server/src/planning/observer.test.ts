@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { defined } from "../test-support.ts";
 import type { EventInput } from "../types.ts";
 import { RecordingPresenceBackend } from "./backend.fixtures.ts";
 import { BaselineStoreError, FileBaselineStore, type BaselineLoad, type BaselineStore, type StoredBaseline } from "./baseline-store.ts";
@@ -385,7 +386,7 @@ describe("planning.transition", () => {
 		await observer.settleTransitions();
 		expect(primary.records).toHaveLength(1);
 		expect(lines).toHaveLength(1);
-		expect(JSON.parse(lines[0]!)).toEqual({ metric: "planning.transition", phaseId: "planning", from: "DEGRADED", to: "DEGRADED", outcome: "applied", ts: "2026-10-22T12:00:00.000Z" });
+		expect(JSON.parse(defined(lines[0]))).toEqual({ metric: "planning.transition", phaseId: "planning", from: "DEGRADED", to: "DEGRADED", outcome: "applied", ts: "2026-10-22T12:00:00.000Z" });
 	});
 });
 

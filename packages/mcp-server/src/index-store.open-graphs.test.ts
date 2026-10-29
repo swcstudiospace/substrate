@@ -19,6 +19,7 @@
 import { SQL } from "bun";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { IndexStore } from "./index-store.ts";
+import { defined } from "./test-support.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
 const RUN = `ut-opengraphs-${Date.now().toString(36)}`;
@@ -38,8 +39,8 @@ const id = (name: string): string => `${RUN}-${name}`;
 
 describeLive("openGraphs against a live index", () => {
 	beforeAll(async () => {
-		store = new IndexStore(PG_URL!);
-		raw = new SQL(PG_URL!);
+		store = new IndexStore(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
+		raw = new SQL(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
 		await store.migrate();
 		await seed();
 	});

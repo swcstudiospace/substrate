@@ -16,6 +16,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { IndexStore, MIGRATION_STEPS, applicableMigrationSteps, indexMigrateLockKey } from "./index-store.ts";
+import { defined } from "./test-support.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
 const describeLive = PG_URL ? describe : describe.skip;
@@ -77,8 +78,9 @@ describeLive("migrate against a live index", () => {
 	let before: { statement: string; lock: string };
 
 	beforeAll(async () => {
-		raw = new SQL(PG_URL!);
-		store = new IndexStore(PG_URL!);
+		const url = defined(PG_URL, "SUBSTRATE_TEST_PG_URL");
+		raw = new SQL(url);
+		store = new IndexStore(url);
 		// The store pool is what `migrate` reserves. A separate client would not show a poisoned session.
 		pool = (store as unknown as { sql: SQL }).sql;
 		before = await timeoutSettings(pool);

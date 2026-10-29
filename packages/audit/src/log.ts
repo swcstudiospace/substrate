@@ -707,7 +707,7 @@ export class AuditLog {
 		let anchorHeld = true;
 
 		const offer = (record: AuditRecord): void => {
-			if (!keep || !keep(record)) return;
+			if (!keep?.(record)) return;
 			matched++;
 			// Counted first and unconditionally: the tally describes every decision for
 			// this selection, and the window below describes only what a bundle can list.

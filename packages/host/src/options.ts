@@ -134,7 +134,7 @@ export type SessionEnvInput = {
 	graphId: string;
 	nodeId: string;
 	/** SUBSTRATE_VM_ANTHROPIC_API_KEY from the host env; read only on a:anthropic_key (D-08). */
-	directKey?: string;
+	directKey?: string | undefined;
 };
 
 /** Exactly the five D-08 keys; nothing else from the host environment reaches sessions.open. */

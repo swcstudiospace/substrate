@@ -26,6 +26,7 @@ import {
 } from "./skills/propose.ts";
 import { REDACTED } from "./redact.ts";
 import type { SubstrateEvent } from "./types.ts";
+import { defined } from "./test-support.ts";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
 const CLI = join(ROOT, "packages", "cli", "src", "index.ts");
@@ -767,7 +768,7 @@ describe("an unexpected fault in the audit path respects the tool's mode", () =>
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
 		await fetch(`${harness.base}/memory`, { method: "POST", headers: JSON_HEADERS, body: deeplyNested() });
 
-		const appends = findCounter(harness.observability.snapshot(), METRIC.auditAppends)!;
+		const appends = defined(findCounter(harness.observability.snapshot(), METRIC.auditAppends), "audit appends counter");
 		expect(sumCounter(appends, { decision: "denied", outcome: "lost" })).toBe(1);
 		expect(sumCounter(appends, { decision: "allowed", outcome: "lost" })).toBe(0);
 	});
@@ -776,7 +777,7 @@ describe("an unexpected fault in the audit path respects the tool's mode", () =>
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
 		await fetch(`${harness.base}/brief`, { method: "POST", headers: JSON_HEADERS, body: deeplyNested() });
 
-		const appends = findCounter(harness.observability.snapshot(), METRIC.auditAppends)!;
+		const appends = defined(findCounter(harness.observability.snapshot(), METRIC.auditAppends), "audit appends counter");
 		expect(sumCounter(appends, { decision: "allowed", outcome: "lost" })).toBe(1);
 		expect(sumCounter(appends, { decision: "denied", outcome: "lost" })).toBe(0);
 	});
@@ -1442,7 +1443,8 @@ describe("POST /skills/propose", () => {
 	});
 
 	test.each(["existing", "unchanged", "declined", "dry_run"] as const)("a %s result is a 200 with the same body", async (status) => {
-		const result: ProposeResult = { ...opened, status, pr_url: undefined };
+		const { pr_url: _prUrl, ...unlinked } = opened;
+		const result: ProposeResult = { ...unlinked, status };
 		const harness = await start(TOKENS, { skills: proposer(result).seam });
 		const reply = await propose(harness, "tok-agent");
 		expect(reply.status).toBe(200);

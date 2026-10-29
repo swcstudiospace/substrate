@@ -223,11 +223,11 @@ export interface RollbackParams {
 	transcript: TranscriptPort;
 	now: Clock;
 	randomBytes: RandomBytes;
-	run?: Runner;
-	pendingDir?: string;
-	policy?: SnapshotPolicy;
+	run?: Runner | undefined;
+	pendingDir?: string | undefined;
+	policy?: SnapshotPolicy | undefined;
 	/** Test seam, passed to `restore` (a thrown SimulatedCrash simulates a dead process). */
-	hooks?: RestoreHooks;
+	hooks?: RestoreHooks | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -415,7 +415,7 @@ export async function rollback(params: RollbackParams): Promise<RollbackResult> 
 	let baseline: LocalCheckpoint;
 	let baselineSkipped: SkippedPath[] = [];
 	try {
-		const current = await snapshot({ worktree: params.worktree, policy: params.policy, now: params.now, run });
+		const current = await snapshot({ worktree: params.worktree, ...(params.policy === undefined ? {} : { policy: params.policy }), now: params.now, run });
 		const found = await findBaseline(params, run, mine, current.tree);
 		baseline = found?.checkpoint ?? mine[mine.length - 1] ?? target;
 		baselineSkipped = found?.skipped ?? (await skippedOfCheckpoint(params, run, baseline)) ?? [];
@@ -484,7 +484,7 @@ export async function rollback(params: RollbackParams): Promise<RollbackResult> 
 	// 4. The exact local plan.
 	let restorePlan: RestorePlan;
 	try {
-		restorePlan = await planRestore({ worktree: params.worktree, target: targetSnapshot, expectedCurrentTree: baseline.tree, expectedCurrentSkipped: baselineSkipped, policy: params.policy, now: params.now, run });
+		restorePlan = await planRestore({ worktree: params.worktree, target: targetSnapshot, expectedCurrentTree: baseline.tree, expectedCurrentSkipped: baselineSkipped, ...(params.policy === undefined ? {} : { policy: params.policy }), now: params.now, run });
 	} catch (error) {
 		return failed("plan-failed", messageOf(error));
 	}
@@ -581,10 +581,10 @@ export async function rollback(params: RollbackParams): Promise<RollbackResult> 
 			expectedCurrentTree: baseline.tree,
 			expectedCurrentSkipped: baselineSkipped,
 			force: params.force,
-			policy: params.policy,
+			...(params.policy === undefined ? {} : { policy: params.policy }),
 			now: params.now,
 			run,
-			hooks: params.hooks,
+			...(params.hooks === undefined ? {} : { hooks: params.hooks }),
 		});
 	} catch (error) {
 		if (error instanceof SimulatedCrash) throw error;

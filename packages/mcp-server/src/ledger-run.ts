@@ -147,8 +147,8 @@ try {
 			const manifest = await archiveWindow(greptime, {
 				day,
 				outDir,
-				pageSize: command.pageSize,
-				minFreeGb,
+				...(command.pageSize === undefined ? {} : { pageSize: command.pageSize }),
+				...(minFreeGb === undefined ? {} : { minFreeGb }),
 				allowRootfs,
 				...(releaseSha !== undefined ? { releaseSha } : {}),
 			});

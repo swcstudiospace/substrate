@@ -20,9 +20,9 @@ import { BRIEF_RECALL_CAP_MS, recallSection, snapshotState, type RecallSnapshot 
 import type { GraphView, MemoryEntry, Surface } from "./types.ts";
 
 export interface BriefRequest {
-	repo?: string;
-	branch?: string;
-	graph_id?: string;
+	repo?: string | undefined;
+	branch?: string | undefined;
+	graph_id?: string | undefined;
 	surface: Surface;
 }
 

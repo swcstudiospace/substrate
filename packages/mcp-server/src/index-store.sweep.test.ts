@@ -21,6 +21,7 @@ import { SQL } from "bun";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { IndexStore } from "./index-store.ts";
 import { DEFAULT_SWEEP_POLICY, SWEEP_CLASSES, type SweepReport } from "./index-sweep.ts";
+import { defined } from "./test-support.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
 const RUN = `ut-sweeptest-${Date.now().toString(36)}`;
@@ -39,8 +40,8 @@ const id = (name: string): string => `${RUN}-${name}`;
 
 describeLive("index sweep against a live index", () => {
 	beforeAll(async () => {
-		store = new IndexStore(PG_URL!);
-		raw = new SQL(PG_URL!);
+		store = new IndexStore(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
+		raw = new SQL(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
 		await store.migrate();
 		await seed();
 	});
@@ -220,13 +221,16 @@ describeLive("index sweep against a live index", () => {
 		// The sweep's own statements, driven by hand inside one transaction with the
 		// pick's lock held, and the claim arriving on a second connection in between —
 		// the window `IndexStore.sweep` cannot be paused in.
-		const graphs = SWEEP_CLASSES.find((cls) => cls.id === "graphs-terminal")!;
+		const graphs = defined(
+			SWEEP_CLASSES.find((cls) => cls.id === "graphs-terminal"),
+			"graphs-terminal sweep class",
+		);
 		const cutoff = new Date(NOW - 90 * DAY_MS).toISOString();
 		const raced = id("g-terminal-race");
 		const free = id("g-terminal-race-free");
 		let lateClaim: Promise<number> | undefined;
 		const outcome = await raw.begin(async (tx) => {
-			const batch = graphs.deleteBatch!(cutoff, 5_000);
+			const batch = defined(graphs.deleteBatch?.(cutoff, 5_000), "graphs-terminal delete batch");
 			const all = (await tx.unsafe(batch.pick.text, batch.pick.params as unknown[])) as Array<Record<string, unknown>>;
 			expect(all.map((row) => String(row.graph_id))).toEqual(expect.arrayContaining([raced, free]));
 			// Only these two go on here; the rest stay for the apply test.
@@ -234,7 +238,8 @@ describeLive("index sweep against a live index", () => {
 			// The claim commits on its own connection after the pick and before the
 			// lock: the lock must wait for nothing, yet read the claimed row version.
 			expect(await claimLive("g-terminal-race")).toBe(1);
-			const locked = (await tx.unsafe(batch.lock!(picked).text, batch.lock!(picked).params as unknown[])) as Array<
+			const lock = defined(batch.lock, "batch.lock")(picked);
+			const locked = (await tx.unsafe(lock.text, lock.params as unknown[])) as Array<
 				Record<string, unknown>
 			>;
 			const liveOf = (graphId: string): unknown[] => locked.filter((row) => String(row.graph_id) === graphId).map((row) => row.live);
@@ -244,7 +249,7 @@ describeLive("index sweep against a live index", () => {
 			// either way it resolves against this transaction's committed outcome).
 			lateClaim = claimLive("g-terminal-race-free");
 			const row: Record<string, unknown> = {};
-			for (const statement of batch.decide!(picked, locked)) {
+			for (const statement of defined(batch.decide, "batch.decide")(picked, locked)) {
 				Object.assign(row, ((await tx.unsafe(statement.text, statement.params as unknown[])) as Array<Record<string, unknown>>)[0]);
 			}
 			return row;
@@ -264,10 +269,10 @@ describeLive("index sweep against a live index", () => {
 			select node_id from graph_nodes where graph_id = ${raced} and claimed_by is null order by node_id`) as Array<Record<string, unknown>>;
 		expect(unleased.map((row) => row.node_id)).toEqual(["n1"]);
 		// The late claimant found its node gone: the CAS matched zero rows, as `claimNode` would report.
-		expect(await lateClaim!).toBe(0);
+		expect(await defined(lateClaim, "late claim")).toBe(0);
 		// And the raced graph is no longer a candidate at all while the lease is live:
 		// the next pick — the count's predicate — does not name it, so no later round retries it.
-		const batch = graphs.deleteBatch!(cutoff, 5_000);
+		const batch = defined(graphs.deleteBatch?.(cutoff, 5_000), "graphs-terminal delete batch");
 		const next = (await raw.unsafe(batch.pick.text, batch.pick.params as unknown[])) as Array<Record<string, unknown>>;
 		expect(next.map((row) => String(row.graph_id))).not.toContain(raced);
 		expect(next.map((row) => String(row.graph_id))).not.toContain(free);

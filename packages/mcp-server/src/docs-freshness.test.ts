@@ -288,7 +288,7 @@ describe("the lag warning's dedupe", () => {
 			const stored = normalizeEvent(event, null);
 			expect(stored.surface).toBe("substrate");
 			expect((event.summary ?? "").length).toBeLessThan(120);
-			expect(String((event.payload ?? {}).commit).length).toBe(64);
+			expect(String(event.payload?.commit).length).toBe(64);
 			expect(stored.kind).toBe(event.kind);
 		}
 		expect(warning.kind).toBe("warning");

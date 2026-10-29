@@ -204,16 +204,31 @@ function substrateWith(env: Record<string, string>, seen: Seen = { replays: [], 
 	return new Substrate(loadConfig(env), { index: null, greptime }, observer);
 }
 
-const base = (extra: Partial<EventInput> = {}): EventInput => ({
-	surface: "omp",
-	kind: "shell",
-	summary: "ran cargo test",
-	session_id: "sess-1",
-	repo: "acme/widgets",
-	graph_id: "ut-1",
-	ts: FIRST_TS,
-	...extra,
-});
+/** Overrides for `base`; `undefined` on these three removes the default, so a test can ask for "no ts", "sessionless" or "no key". */
+type BaseOverrides = Omit<Partial<EventInput>, "ts" | "session_id" | "idempotency_key"> & {
+	ts?: string | undefined;
+	session_id?: string | undefined;
+	idempotency_key?: string | undefined;
+};
+
+const base = (extra: BaseOverrides = {}): EventInput => {
+	const { ts, session_id, idempotency_key, ...rest } = {
+		surface: "omp" as const,
+		kind: "shell" as const,
+		summary: "ran cargo test",
+		session_id: "sess-1",
+		repo: "acme/widgets",
+		graph_id: "ut-1",
+		ts: FIRST_TS,
+		...extra,
+	};
+	return {
+		...rest,
+		...(session_id === undefined ? {} : { session_id }),
+		...(ts === undefined ? {} : { ts }),
+		...(idempotency_key === undefined ? {} : { idempotency_key }),
+	};
+};
 
 const ACCEPT = { SUBSTRATE_EVENT_IDEMPOTENCY: "accept" };
 const ENFORCE = { SUBSTRATE_EVENT_IDEMPOTENCY: "enforce" };

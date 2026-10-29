@@ -19,9 +19,9 @@ const TEAM_STATES = [
 
 interface LinearMutation {
 	kind: "update" | "comment" | "label-create";
-	stateId?: string;
-	addedLabelIds?: string[];
-	removedLabelIds?: string[];
+	stateId?: string | undefined;
+	addedLabelIds?: string[] | undefined;
+	removedLabelIds?: string[] | undefined;
 	body?: string;
 }
 

@@ -40,8 +40,12 @@ function row(id: string) {
 	return found;
 }
 
-function base(over: Partial<HerdrTransition> = {}): HerdrTransition {
-	return {
+/** Optional transition fields a case can take away from the defaults, as opposed to override. */
+type Absentable = "repo" | "branch" | "status" | "previous_status";
+
+/** The defaults with `over` laid on top and each `absent` key left out entirely (the type has no `undefined` values). */
+function base(over: Partial<HerdrTransition> = {}, absent: readonly Absentable[] = []): HerdrTransition {
+	const { repo, branch, status, previous_status, ...rest } = {
 		rowId: "herdr.status_changed",
 		surface: "omp",
 		agent: "omp",
@@ -54,6 +58,13 @@ function base(over: Partial<HerdrTransition> = {}): HerdrTransition {
 		previous_status: "working",
 		herdr_type: "pane.agent_status_changed",
 		...over,
+	} satisfies HerdrTransition;
+	return {
+		...rest,
+		...(repo === undefined || absent.includes("repo") ? {} : { repo }),
+		...(branch === undefined || absent.includes("branch") ? {} : { branch }),
+		...(status === undefined || absent.includes("status") ? {} : { status }),
+		...(previous_status === undefined || absent.includes("previous_status") ? {} : { previous_status }),
 	};
 }
 
@@ -115,20 +126,23 @@ describe("wire names", () => {
 describe("transition conformance", () => {
 	test("each herdr row keeps kind, surface, runtime and repo through normalizeEvent", () => {
 		const cases: HerdrTransition[] = [
-			base({
-				rowId: "herdr.agent_detected",
-				herdr_type: "pane.agent_detected",
-				status: "working",
-				previous_status: undefined,
-			}),
+			base(
+				{
+					rowId: "herdr.agent_detected",
+					herdr_type: "pane.agent_detected",
+					status: "working",
+				},
+				["previous_status"],
+			),
 			base(),
-			base({
-				rowId: "herdr.pane_exited",
-				herdr_type: "pane.exited",
-				status: undefined,
-				previous_status: undefined,
-				end_reason: "pane_gone",
-			}),
+			base(
+				{
+					rowId: "herdr.pane_exited",
+					herdr_type: "pane.exited",
+					end_reason: "pane_gone",
+				},
+				["status", "previous_status"],
+			),
 		];
 		for (const transition of cases) {
 			const ev = transitionToEvent(transition);
@@ -166,7 +180,7 @@ describe("transition conformance", () => {
 	});
 
 	test("no origin still emits, without repo", () => {
-		const ev = transitionToEvent(base({ repo: undefined, branch: undefined }));
+		const ev = transitionToEvent(base({}, ["repo", "branch"]));
 		expect(ev.repo).toBeUndefined();
 		expect(ev.kind).toBe("note");
 	});
@@ -184,7 +198,8 @@ describe("output_matched", () => {
 		expect(out?.summary).not.toContain(secret);
 		expect(JSON.stringify(out?.payload)).not.toContain(secret);
 		expect(out?.payload).toMatchObject({ runtime: "herdr", herdr_type: "pane.output_matched", agent: "omp" });
-		const stored = normalizeEvent(out!, null);
+		if (!out) throw new Error("expected the output_matched push to map to an event");
+		const stored = normalizeEvent(out, null);
 		expect(stored.kind).toBe("note");
 		expect(stored.surface).toBe("omp");
 	});

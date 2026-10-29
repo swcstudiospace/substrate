@@ -40,6 +40,7 @@ import {
 import { ConfigError, loadConfig, loadLedgerSettings, type GreptimeConfig } from "./config.ts";
 import { SURFACES, type EventInput, type SubstrateEvent } from "./types.ts";
 import { MAX_METRIC_BATCH, MAX_METRIC_POINTS, METRIC_SERIES, type MetricSampleRow } from "./metrics-history.ts";
+import { defined } from "./test-support.ts";
 
 const config: GreptimeConfig = { url: "http://greptime.test", user: "u", password: "p", db: "substrate" };
 
@@ -1068,7 +1069,7 @@ describe("eventIdsAfter", () => {
 			if (statement.indexOf("LIMIT") < statement.indexOf("WHERE")) {
 				throw new Error(`statement applies its limit before the cursor boundary: ${statement}`);
 			}
-			const windowMs = Date.parse(window[1]!);
+			const windowMs = Date.parse(defined(window[1], "cursor window bound"));
 			if (!Number.isFinite(windowMs)) throw new Error(`cursor bound is not a timestamp: ${window[1]}`);
 			// An event with any record at or before the full cursor is already
 			// delivered — its window rows (including retries) are all excluded,
@@ -2587,7 +2588,7 @@ describe("metric_samples (uplift-4 S6)", () => {
 		expect(await client.recordMetricSamples([row({ tsMs: NOW + 60_000 })])).toEqual({ stored: 1, drops: {} });
 
 		expect(creates(sql)).toHaveLength(1);
-		const create = creates(sql)[0]!;
+		const create = defined(creates(sql)[0], "a CREATE statement");
 		expect(create).toContain("WITH ('append_mode' = 'true', 'ttl' = '14d')");
 		for (const column of ['"ts" TIMESTAMP TIME INDEX', '"series" STRING', '"labels" STRING', '"kind" STRING', '"value" DOUBLE', '"count" BIGINT']) {
 			expect(create).toContain(column);
@@ -2619,7 +2620,7 @@ describe("metric_samples (uplift-4 S6)", () => {
 			row({ series: "emit.success", labels: {}, value: 0.9, count: 10 }),
 			row({ series: "admission.decisions", labels: { decision: "allowed" }, value: 3, count: 3 }),
 		]);
-		const statement = inserts(sql)[0]!;
+		const statement = defined(inserts(sql)[0], "an INSERT statement");
 		expect(inserts(sql)).toHaveLength(1);
 		expect(statement).toContain('("ts", "series", "labels", "kind", "value", "count") VALUES ');
 		expect(statement.match(/\), \(/g)).toHaveLength(2);
@@ -2638,7 +2639,7 @@ describe("metric_samples (uplift-4 S6)", () => {
 			row({ series: "cache.operations", labels: { mode: "served" } }),
 		]);
 		expect(result).toEqual({ stored: 3, drops: { invalid: 2 } });
-		const statement = inserts(sql)[0]!;
+		const statement = defined(inserts(sql)[0], "an INSERT statement");
 		expect(statement).toContain("'cache.operations', '{\"result\":\"would_serve_stale\"}', 'counter', 4, 4)");
 		expect(statement).toContain("'hindsight.outbox_size', '{}', 'gauge', 7, 1)");
 		expect(statement).toContain("'memory.expired', '{\"mode\":\"served\"}', 'counter', 2, 2)");
@@ -2663,10 +2664,23 @@ describe("metric_samples (uplift-4 S6)", () => {
 		const mixed = stubFetch();
 		const result = await new GreptimeClient(config).recordMetricSamples([...hostile, row()]);
 		expect(result).toEqual({ stored: 1, drops: { invalid: hostile.length } });
-		const statement = inserts(mixed.sql)[0]!;
+		const statement = defined(inserts(mixed.sql)[0], "an INSERT statement");
 		expect(statement).not.toContain("DROP");
 		expect(statement).not.toContain("nope");
 		expect(statement).not.toContain("slash");
+	});
+
+	test("null, undefined and unknown-series entries are counted as invalid without rejecting the batch", async () => {
+		// A producer outside the type system can hand over anything; the predicate stands in for that boundary without a cast.
+		const asRows = (candidate: readonly unknown[]): candidate is readonly MetricSampleRow[] => Array.isArray(candidate);
+		const entries: readonly unknown[] = [row({ tsMs: NOW + 1 }), null, undefined, row({ series: "not.a.series" })];
+		if (!asRows(entries)) throw new Error("expected the entries to be accepted as rows");
+		const { sql } = stubFetch();
+		const result = await new GreptimeClient(config).recordMetricSamples(entries);
+		expect(result).toEqual({ stored: 1, drops: { invalid: 3 } });
+		const statement = defined(inserts(sql)[0], "an INSERT statement");
+		expect(statement).not.toContain("not.a.series");
+		expect(statement.match(/\), \(/g)).toBeNull();
 	});
 
 	test("numbers the columns cannot hold are dropped as invalid", async () => {
@@ -2689,7 +2703,7 @@ describe("metric_samples (uplift-4 S6)", () => {
 		const rows = Array.from({ length: MAX_METRIC_BATCH + 50 }, (_, i) => row({ tsMs: NOW + i }));
 		const result = await new GreptimeClient(config).recordMetricSamples(rows);
 		expect(result).toEqual({ stored: MAX_METRIC_BATCH, drops: { capped: 50 } });
-		expect(inserts(sql)[0]!.match(/\), \(/g)).toHaveLength(MAX_METRIC_BATCH - 1);
+		expect(defined(inserts(sql)[0], "an INSERT statement").match(/\), \(/g)).toHaveLength(MAX_METRIC_BATCH - 1);
 	});
 
 	test("Greptime down: the batch is dropped with a counted reason and nothing throws", async () => {
@@ -2932,24 +2946,24 @@ describe("metric_samples (uplift-4 S6)", () => {
 		});
 
 		test("the effective step is returned, and a labelled series over a long window keeps its OLDEST bucket inside the point cap", async () => {
-			const surfaces = [...METRIC_SERIES["brief.p95"]!.values!];
+			const surfaces = [...defined(defined(METRIC_SERIES["brief.p95"], "the brief.p95 spec").values, "the brief.p95 label values")];
 			expect(surfaces).toHaveLength(new Set([...SURFACES, "other"]).size);
 			// A store holding a row for every surface in every bucket, answering the way the statement asks: newest first, cut at LIMIT.
 			const store = (statement: string): unknown => {
 				if (!statement.includes("date_bin")) return defaultReply(statement);
-				const step = Number(/INTERVAL '(\d+) seconds'/.exec(statement)![1]);
-				const [, from, to] = /"ts" >= '([^']+)' AND "ts" < '([^']+)'/.exec(statement)!;
-				const limit = Number(/LIMIT (\d+)$/.exec(statement)![1]);
-				const first = Math.floor(Date.parse(from!) / 1000 / step) * step * 1000;
+				const step = Number(defined(/INTERVAL '(\d+) seconds'/.exec(statement), "an interval")[1]);
+				const [, from, to] = defined(/"ts" >= '([^']+)' AND "ts" < '([^']+)'/.exec(statement), "a ts window");
+				const limit = Number(defined(/LIMIT (\d+)$/.exec(statement), "a limit")[1]);
+				const first = Math.floor(Date.parse(defined(from, "window start")) / 1000 / step) * step * 1000;
 				const buckets: number[] = [];
-				for (let at = first; at < Date.parse(to!); at += step * 1000) buckets.push(at);
+				for (let at = first; at < Date.parse(defined(to, "window end")); at += step * 1000) buckets.push(at);
 				const rows = buckets.reverse().flatMap((at) => surfaces.map((surface) => [at, JSON.stringify({ surface }), 10, 1]));
 				return records(["bucket", "labels", "value", "count"], rows.slice(0, limit));
 			};
 			for (const days of [1, 14]) {
 				const { sql } = stubFetch(store);
 				const result = await new GreptimeClient(config).readMetricHistory({ series: "brief.p95", fromMs: TO - days * 86_400_000, toMs: TO, stepS: 60 });
-				const step = Number(/INTERVAL '(\d+) seconds'/.exec(select(sql))![1]);
+				const step = Number(defined(/INTERVAL '(\d+) seconds'/.exec(select(sql)), "an interval")[1]);
 				expect(result.stepS).toBe(step);
 				// Raised above the 60 s asked for, to fit the point cap.
 				expect(step).toBeGreaterThan(60);

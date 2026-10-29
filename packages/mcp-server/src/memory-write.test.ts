@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { canonicalJson, sha256Hex } from "./event.ts";
 import { grantFor, parseScope } from "./memory-policy.ts";
 import { REDACTED } from "./redact.ts";
+import { defined } from "./test-support.ts";
 import { SWARM_SURFACES } from "./types.ts";
 import {
 	DERIVED_KEY_WINDOW_MS,
@@ -140,7 +141,7 @@ export class FakeStore implements MemoryStore {
 				(sameAsk || legacyRecoverable || raisedByTest) &&
 				reservationIsOurs) ||
 			(existing.outcome === "accepted" && !existing.explicit && age >= DERIVED_KEY_WINDOW_MS);
-		if (!free) return { claimed: false, existing: { ...existing! } };
+		if (!free) return { claimed: false, existing: { ...defined(existing, "existing claim") } };
 
 		const holder = `hold_${++this.holders}`;
 		const tookOverFrom = inFlight ? (existing?.entry_id ?? null) : null;
@@ -711,7 +712,7 @@ describe("conflict — require-review for global", () => {
 		const request = { scope: "global", kind: "fact" as const, text: "eight agents share one host" };
 		await write(request);
 		const first = await write({ ...request, review_token: REVIEW_TOKEN });
-		store.reviews.push({ ...store.reviews[0]!, id: "memr_stale", state: "pending", entry_id: null });
+		store.reviews.push({ ...defined(store.reviews[0]), id: "memr_stale", state: "pending", entry_id: null });
 
 		store.clock += DERIVED_KEY_WINDOW_MS + 1;
 		const second = await write({ ...request, review_token: REVIEW_TOKEN });
@@ -1987,7 +1988,7 @@ describe("swarm surfaces — default-deny proven from the outside (ADR 0001 S3)"
 			return grantFor(surface, scope, kind);
 		};
 		for (const surface of SWARM_SURFACES) {
-			const other = SWARM_SURFACES.find((candidate) => candidate !== surface)!;
+			const other = defined(SWARM_SURFACES.find((candidate) => candidate !== surface));
 			for (const kind of ["decision", "fact"] as const) {
 				expect(at(surface, "graph:ut-1", kind)).not.toBeNull();
 				expect(at(surface, "repo:acme/widgets", kind)).not.toBeNull();

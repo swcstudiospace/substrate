@@ -22,6 +22,7 @@ import { loadConfig } from "./config.ts";
 import { FakeStore } from "./memory-write.test.ts";
 import { Substrate } from "./service.ts";
 import { ACCEPTED_TEACHABLE } from "./teachable.fixtures.ts";
+import { defined } from "./test-support.ts";
 import type { MemorySearch, MemorySearchPage, SubstrateEvent } from "./types.ts";
 
 const H = Date.UTC(2026, 8, 1, 10);
@@ -238,14 +239,16 @@ describe("teachable anchor coverage", () => {
 		});
 		ledger.anchorHour();
 
-		const decoy = [...ledger.rows.values()].find((row) => row.session_id === "sess-decoy");
-		expect(decoy).toBeDefined();
+		const decoy = defined(
+			[...ledger.rows.values()].find((row) => row.session_id === "sess-decoy"),
+			"the decoy row",
+		);
 		// The digest covers leaf hashes, so the tamper re-hashes the altered
 		// event the way the ledger would have: even a self-consistent edit of
 		// another event in the hour breaks the anchored coverage.
-		const { ingestedAt, hash: _previous, ...unhashed } = decoy!;
+		const { ingestedAt, hash: _previous, ...unhashed } = decoy;
 		const tampered = { ...unhashed, summary: "tampered after anchoring" };
-		ledger.rows.set(decoy!.id, { ...tampered, hash: eventHash(tampered), ingestedAt });
+		ledger.rows.set(decoy.id, { ...tampered, hash: eventHash(tampered), ingestedAt });
 
 		const verdict = await substrate.verifyGraph("ut-teach-29", { now: NOW, rpc: rpc as never });
 

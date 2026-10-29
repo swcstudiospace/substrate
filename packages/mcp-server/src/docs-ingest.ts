@@ -220,7 +220,7 @@ async function addFilePage(absolute: string, path: string, pages: IngestPage[], 
  */
 export function isPlanningPage(path: string): boolean {
 	const clean = normalizeIngestPath(path);
-	return clean !== null && clean.startsWith(".planning/") && clean.endsWith(".md");
+	return clean?.startsWith(".planning/") === true && clean.endsWith(".md");
 }
 
 /**
@@ -541,6 +541,14 @@ export interface IngestDeps {
 	datasetLockWaitMs?: number;
 	/** Where a failed prune is reported; stderr when omitted. */
 	log?: (line: string) => void;
+}
+
+/** The parse budget with unset values left out, so each plane's own defaults apply; `undefined` is never written as a key. */
+function pollBudget(poll: IngestDeps["poll"]): { maxPolls?: number; intervalMs?: number } {
+	return {
+		...(poll?.maxPolls === undefined ? {} : { maxPolls: poll.maxPolls }),
+		...(poll?.intervalMs === undefined ? {} : { intervalMs: poll.intervalMs }),
+	};
 }
 const REMOTE_IMG_TAG = /<img\b[^>]*\bsrc\s*=\s*["']https?:[^>]*>/gi;
 const REMOTE_MD_IMAGE = /!\[[^\]]*\]\(\s*https?:[^)]+\)/g;
@@ -1015,10 +1023,7 @@ async function writeBatch(
 					if (!uploaded.ok) return { ok: false, reason: uploaded.reason };
 					const started = await parseDocuments(config, dataset.id, [uploaded.document_id], deps.fetchImpl);
 					if (!started.ok) return { ok: false, reason: started.reason };
-					const parsed = await pollParseStatus(config, { dataset_id: dataset.id, document_id: uploaded.document_id }, deps.fetchImpl, {
-						maxPolls: deps.poll?.maxPolls,
-						intervalMs: deps.poll?.intervalMs,
-					});
+					const parsed = await pollParseStatus(config, { dataset_id: dataset.id, document_id: uploaded.document_id }, deps.fetchImpl, pollBudget(deps.poll));
 					if (!parsed.ok) return { ok: false, reason: parsed.reason };
 					// The replacement is retrievable; only now may the superseded
 					// document go. A failed delete leaves both documents and is
@@ -1415,7 +1420,7 @@ export async function scrapePlanningPages(
 			errors.push({ path: page.path, error: redact(reason).slice(0, 200) });
 		}
 	}
-	const { hash, changed } = planningPollTick(previousHash, pages, { maxPages: opts.maxPages });
+	const { hash, changed } = planningPollTick(previousHash, pages, opts.maxPages === undefined ? {} : { maxPages: opts.maxPages });
 	const state = errors.length === 0 ? "SUCCESS" : pages.length - errors.length > 0 ? "PARTIAL" : "ERROR";
 	report(state);
 	return { state, pages, sanitized, errors, hash, changed };
@@ -1546,7 +1551,7 @@ async function ingestDocsLightrag(
 					// pipeline is idle, and only that id is stored, cited and deleted.
 					const started = await parseLightragDocuments(lightrag, dataset.id, [], fetchImpl);
 					if (!started.ok) return { ok: false, reason: started.reason };
-					const pollOptions = { maxPolls: deps.poll?.maxPolls, intervalMs: deps.poll?.intervalMs };
+					const pollOptions = pollBudget(deps.poll);
 					const parsed = await pollLightragParseStatus(lightrag, { dataset_id: dataset.id, document_id: uploaded.track_id }, fetchImpl, pollOptions);
 					if (!parsed.ok) return { ok: false, reason: parsed.reason };
 					const tracked = await resolveLightragDocumentIds(lightrag, uploaded.track_id, fetchImpl, pollOptions);

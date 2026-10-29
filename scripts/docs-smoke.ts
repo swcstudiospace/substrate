@@ -909,7 +909,7 @@ async function runSmokeInner(name: string, runDir: string, scriptCheckout: strin
 		check(shapeOk, "search-shape", `status=${String(searched.status)} count=${String(chunks?.length ?? -1)} pool=20`);
 		const reply = shaped<SearchReplyBody>(searched.body);
 		check(typeof reply?.untrusted === "string" && reply.untrusted.includes("untrusted"), "search-untrusted", "framed");
-		const citesOk = chunks !== null && chunks.every(citationShapeOk);
+		const citesOk = chunks?.every(citationShapeOk);
 		check(citesOk === true, "search-citations", `capped=${String(chunks?.every((chunk) => typeof chunk.snippet === "string" && chunk.snippet.length <= 1200) ?? false)}`);
 		check(
 			chunks !== null && chunks.length > 0 && chunks.every((chunk) => isPinGap(chunk.commit)),

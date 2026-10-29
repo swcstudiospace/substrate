@@ -51,8 +51,8 @@ interface Stub {
 }
 
 interface StubRoutes {
-	healthz?: () => Response;
-	events?: (hit: Hit) => Response | Promise<Response>;
+	healthz?: (() => Response) | undefined;
+	events?: ((hit: Hit) => Response | Promise<Response>) | undefined;
 }
 
 const ACCEPTING: StubRoutes = {

@@ -30,14 +30,14 @@
 			"style": {
 				"useConst": "error",
 				"useImportType": "error",
-				"noNonNullAssertion": "warn",
+				"noNonNullAssertion": "error",
 				"useTemplate": "off"
 			},
 			"complexity": {
 				"noCommaOperator": "error",
 				"useRegexLiterals": "error",
 				"useLiteralKeys": "off",
-				"useOptionalChain": "warn"
+				"useOptionalChain": "error"
 			}
 		}
 	},

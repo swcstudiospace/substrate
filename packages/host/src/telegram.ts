@@ -169,7 +169,7 @@ function scrub(text: string, token: string): string {
 export class TelegramClient {
 	token: string;
 	fetchImpl: typeof fetch;
-	constructor(token: string, opts?: { fetchImpl?: typeof fetch }) {
+	constructor(token: string, opts?: { fetchImpl?: typeof fetch | undefined }) {
 		this.token = token;
 		this.fetchImpl = opts?.fetchImpl ?? fetch;
 	}
@@ -224,8 +224,8 @@ export class ApprovalBroker {
 		client?: TelegramClient | null;
 		chatId?: string;
 		userIds?: number[];
-		statePath?: string;
-		log?: (line: string) => void;
+		statePath?: string | undefined;
+		log?: ((line: string) => void) | undefined;
 		respond?: ApprovalDeps["respond"];
 	}) {
 		this.enabled = opts.enabled;

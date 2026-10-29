@@ -13,6 +13,7 @@ import { GreptimeClient, type LedgerCapacity } from "./greptime.ts";
 import { createMcpServer, type McpCaller } from "./mcp.ts";
 import { railwayFromEnv, RailwayClient, type RailwayFetch } from "./railway.ts";
 import { HEALTH_PROBE_MS, Substrate } from "./service.ts";
+import { defined } from "./test-support.ts";
 
 const TOKEN = "fabric-token-abc123";
 const CALLER: McpCaller = { surface: "omp", isOperator: false };
@@ -541,6 +542,6 @@ describe("the size read on the health path", () => {
 		const health = await substrateWithProbes(index, greptime).health({ greptimeTimeoutMs: HEALTH_PROBE_MS });
 		expect(health.capacity.ledger).toEqual(LEDGER_SIZE);
 		expect(started).toHaveLength(1);
-		expect(started[0]! - begun).toBeLessThan(HEALTH_PROBE_MS / 2);
+		expect(defined(started[0], "start time") - begun).toBeLessThan(HEALTH_PROBE_MS / 2);
 	});
 });

@@ -29,7 +29,10 @@ const NOW = new Date("2026-10-26T09:00:00.000Z");
 const LATER = new Date("2026-10-27T09:00:00.000Z");
 const OPTS = { producer: "substrate-mcp", now: () => NOW };
 
-function entry(id: string, text: string, over: Partial<MemoryEntry> = {}, hashVersion: "v1" | "v2" = "v1"): MemoryEntry {
+/** A fixture override: a key may be set to `undefined` to drop the default it replaces. */
+type EntryOverrides = { [K in keyof MemoryEntry]?: MemoryEntry[K] | undefined };
+
+function entry(id: string, text: string, over: EntryOverrides = {}, hashVersion: "v1" | "v2" = "v1"): MemoryEntry {
 	const base = { scope: `repo:scope-of-${id}`, kind: "fact" as const, subject: `subject.of.${id}` as string | undefined, text, writer: "claude-code", ...over };
 	const preimage = { scope: base.scope, kind: base.kind, subject: base.subject ?? null, text: base.text, writer: base.writer };
 	const hash = hashVersion === "v1" ? sha256Hex(canonicalJson(preimage)) : sha256Hex(canonicalJson({ ...preimage, hv: 2, tenant: "swc" }));

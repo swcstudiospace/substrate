@@ -845,7 +845,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 			request.trust === "verified-by-test" && !reviewed && sourceEvent
 				? await (deps.verifySourceEvent?.(sourceEvent) ?? Promise.resolve(false)).catch(() => false)
 				: false;
-		const trust = resolveTrust({ requested: request.trust, reviewed, sourceEventVerified });
+		const trust = resolveTrust({ ...(request.trust === undefined ? {} : { requested: request.trust }), reviewed, sourceEventVerified });
 		const actor = resolveActor(request.actor, reviewed);
 
 		if (plan.requiresReview && !reviewed) {

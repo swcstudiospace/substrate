@@ -18,6 +18,7 @@ import { HEALTH_PROBE_MS, Substrate } from "./service.ts";
 import { healthStatus } from "./server.ts";
 import type { GreptimeConfig } from "./config.ts";
 import type { EventInput } from "./types.ts";
+import { defined } from "./test-support.ts";
 
 const config: GreptimeConfig = { url: "http://greptime.test", user: "u", password: "p", db: "substrate" };
 const T0 = Date.UTC(2026, 9, 13, 12);
@@ -76,7 +77,7 @@ function answer(ledger: FakeLedger, statement: string): unknown {
 	const insert = /^INSERT INTO "agent_events" .* VALUES \(.*, '([0-9a-f]{64})', (?:'([0-9a-f]{64})'|NULL)\)$/s.exec(statement);
 	if (insert) {
 		const session = /VALUES \('[^']*', '[^']*', '[^']*', '([^']*)'/.exec(statement)?.[1] ?? "";
-		ledger.rows.push({ hash: insert[1]!, prev: insert[2] ?? null, session });
+		ledger.rows.push({ hash: defined(insert[1], "event hash"), prev: insert[2] ?? null, session });
 		return affected;
 	}
 	const read = /WHERE "session_id" = '([^']+)'/.exec(statement);
@@ -117,10 +118,10 @@ describe("chain-tip cache", () => {
 		// the chain verifies as a whole.
 		const events = results.map((result) => result.event);
 		expect(events[0]?.prev).toBeNull();
-		expect(events[1]?.prev).toBe(events[0]!.hash);
-		expect(events[2]?.prev).toBe(events[1]!.hash);
+		expect(events[1]?.prev).toBe(defined(events[0], "first event").hash);
+		expect(events[2]?.prev).toBe(defined(events[1], "second event").hash);
 		expect(verifyChain(events)).toEqual({ ok: true });
-		expect(ledger.rows.map((row) => row.prev)).toEqual([null, events[0]!.hash, events[1]!.hash]);
+		expect(ledger.rows.map((row) => row.prev)).toEqual([null, defined(events[0], "first event").hash, defined(events[1], "second event").hash]);
 	});
 
 	test("steady-state emit is two ledger calls: the event row and its ingest record", async () => {
@@ -184,7 +185,7 @@ describe("chain-tip cache", () => {
 		expect(next.stored).toBe(true);
 		expect(ledger.sessionReads()).toBe(3);
 		// It chained onto the row that is actually in the ledger, not the lost one.
-		expect(next.event.prev).toBe(ledger.rows[0]!.hash);
+		expect(next.event.prev).toBe(defined(ledger.rows[0], "first row").hash);
 	});
 
 	test("an unconfirmed ingest record keeps the tip: the event row is stored, so the chain moves on", async () => {

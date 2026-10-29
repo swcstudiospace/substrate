@@ -328,7 +328,7 @@ describe("libraryCopyPlan (D-08 copy route)", () => {
 	});
 });
 
-type FakeCall = { op: "readFile" | "writeFile" | "writeFiles" | "mkdir"; path?: string; paths?: string[]; recursive?: boolean };
+type FakeCall = { op: "readFile" | "writeFile" | "writeFiles" | "mkdir"; path?: string; paths?: string[]; recursive?: boolean | undefined };
 
 /** In-memory stand-in for rivet's VM filesystem (structural: no rivet import). */
 function fakeTarget(opts: { marker?: string; failPaths?: string[]; rejectWriteFiles?: boolean; rejectMkdir?: boolean } = {}) {

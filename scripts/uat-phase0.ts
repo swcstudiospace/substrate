@@ -671,7 +671,7 @@ export async function runChild(
 	const started = performance.now();
 	const childEnv = childProcessEnv(env);
 	try {
-		const proc = Bun.spawn(argv, { env: childEnv, stdin: stdin === undefined ? "ignore" : "pipe", stdout: "pipe", stderr: "pipe", cwd });
+		const proc = Bun.spawn(argv, { env: childEnv, stdin: stdin === undefined ? "ignore" : "pipe", stdout: "pipe", stderr: "pipe", ...(cwd === undefined ? {} : { cwd }) });
 		if (stdin !== undefined && proc.stdin) {
 			const writer = proc.stdin as unknown as { write(s: string): void; end(): void };
 			writer.write(stdin);

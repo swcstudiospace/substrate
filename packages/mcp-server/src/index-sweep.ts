@@ -572,9 +572,9 @@ export async function executeSweep(
 	}
 	if (options.apply) {
 		for (const [i, step] of steps.entries()) {
-			const report = classes[i]!;
+			const report = classes[i];
 			const build = step.cls.deleteBatch;
-			if (!build || report.candidates === 0) continue;
+			if (!report || !build || report.candidates === 0) continue;
 			const maxRounds = Math.ceil(report.candidates / options.batch) + 1;
 			for (let round = 0; round < maxRounds; round++) {
 				const { picked, row } = await runBatch(run, build(step.cutoff, options.batch));

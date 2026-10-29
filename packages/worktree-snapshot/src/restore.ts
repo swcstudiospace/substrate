@@ -107,7 +107,7 @@ async function converge(
 	policy: ResolvedPolicy,
 	goalTree: string,
 	id: string,
-	options: { hooks?: RestoreHooks; cleanupPaths?: readonly string[]; skipped?: readonly SkippedPath[] } = {},
+	options: { hooks?: RestoreHooks | undefined; cleanupPaths?: readonly string[]; skipped?: readonly SkippedPath[] } = {},
 ): Promise<RestorePlan> {
 	const apply = makeApplyContext(ctx, id, goalTree);
 	// Leftovers of a crashed write would otherwise be read as untracked files and planned for deletion.

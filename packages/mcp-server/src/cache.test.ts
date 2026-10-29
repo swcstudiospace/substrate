@@ -34,6 +34,7 @@ import { FakeStore } from "./memory-write.test.ts";
 import { createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
+import { defined } from "./test-support.ts";
 import { clearEnsuredBanks, type FetchLike } from "./planes/hindsight.ts";
 
 /**
@@ -799,7 +800,7 @@ describe("the same answer with the cache off, on and broken", () => {
 			cache: cacheOf(redis),
 		});
 
-		const request = { surface: "cursor" as const, graph_id: "ut-1", repo: undefined };
+		const request = { surface: "cursor" as const, graph_id: "ut-1" };
 		const first = await substrate.brief(request);
 		const second = await substrate.brief(request);
 		expect(second).toBe(first);
@@ -1449,7 +1450,7 @@ describe("GET /healthz", () => {
 		};
 		const counter = findCounter(metrics.metrics, "substrate.cache.operations");
 		expect(counter).toBeDefined();
-		expect(sumCounter(counter!, { result: "bypass" })).toBeGreaterThan(0);
+		expect(sumCounter(defined(counter), { result: "bypass" })).toBeGreaterThan(0);
 	});
 });
 

@@ -434,7 +434,7 @@ describe("SUBSTRATE_ANCHOR_SIGNER_SET is the bootstrap when set", () => {
 		{ pubkey: SIGNER_B, valid_from_ms: BLOCK_TIME_MS + HOUR_MS, valid_until_ms: null, label: "new" },
 	];
 	const withSet = (w: World, signerSet: AnchorVerifyPorts["solana"]["signerSet"], pubkey: string | null): void => {
-		w.ports.solana = { pubkey, problem: null, signerSet, signerSetProblem: null };
+		w.ports.solana = { pubkey, problem: null, ...(signerSet === undefined ? {} : { signerSet }), signerSetProblem: null };
 		w.ports.operatorSurfaces = new Set();
 	};
 

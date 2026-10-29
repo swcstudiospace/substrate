@@ -27,6 +27,7 @@ import {
 	type Timer,
 } from "./consistency-verify.ts";
 import { contentHash, HASH_TENANT, HASH_VERSION_MARKER } from "./memory-write.ts";
+import { defined } from "./test-support.ts";
 import type { MemoryEntry } from "./types.ts";
 
 const NOW = Date.parse("2026-10-26T12:00:00.000Z");
@@ -69,6 +70,12 @@ function entry(id: string, over: Partial<MemoryEntry> = {}): MemoryEntry {
 		idempotency_key: `key-${id}`,
 		...over,
 	};
+}
+
+/** An entry whose `key` was never written, as an old row reads: the key is absent rather than present as `undefined`. */
+function entryWithout(id: string, key: "source_event" | "idempotency_key"): MemoryEntry {
+	const { [key]: _omitted, ...rest } = entry(id);
+	return rest;
 }
 
 const ledgerEvent = (e: MemoryEntry, offsetSeconds = 2): LedgerWriteEvent => ({
@@ -273,8 +280,8 @@ describe("index_entry_missing_in_plane", () => {
 			[
 				entry("mem_sup", { superseded_by: "mem_newer" }),
 				entry("mem_exp", { expired: true }),
-				entry("mem_nosrc", { source_event: undefined }),
-				entry("mem_nokey", { idempotency_key: undefined }),
+				entryWithout("mem_nosrc", "source_event"),
+				entryWithout("mem_nokey", "idempotency_key"),
 			],
 			{ docs: "none" },
 		);
@@ -845,7 +852,7 @@ describe("determinism and content hygiene", () => {
 	test("no finding, detail or status carries content, a subject or a store URL", async () => {
 		const subject = "subject-needle-9921";
 		const w = world([entry("mem_a", { subject }), entry("mem_t", { subject: "tamper" })], { docs: "none", events: "none" });
-		w.entries[1]!.text = "tampered-needle";
+		defined(w.entries[1]).text = "tampered-needle";
 		putDoc(w, "sub-hermes", "bad id with spaces & content-needle", null);
 		const json = formatReportJson(await run(w));
 		for (const needle of [SECRET_TEXT, subject, "tampered-needle", "content-needle", "http://", "https://"]) expect(json).not.toContain(needle);

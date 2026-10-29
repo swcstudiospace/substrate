@@ -64,7 +64,7 @@ export class NotionSync {
 	readonly #baseUrl: string;
 	readonly dataSourceId: string;
 
-	constructor(apiKey: string, opts: { dataSourceId?: string; fetchImpl?: typeof fetch; timeoutMs?: number; baseUrl?: string } = {}) {
+	constructor(apiKey: string, opts: { dataSourceId?: string | undefined; fetchImpl?: typeof fetch | undefined; timeoutMs?: number; baseUrl?: string } = {}) {
 		this.#apiKey = apiKey;
 		this.#fetchImpl = opts.fetchImpl ?? fetch;
 		this.#timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -130,7 +130,7 @@ export class LinearLink {
 	readonly #endpoint: string;
 	#mutation: AttachMutation | null | undefined;
 
-	constructor(apiKey: string, opts: { fetchImpl?: typeof fetch; timeoutMs?: number; endpoint?: string } = {}) {
+	constructor(apiKey: string, opts: { fetchImpl?: typeof fetch | undefined; timeoutMs?: number; endpoint?: string } = {}) {
 		this.#apiKey = apiKey;
 		this.#fetchImpl = opts.fetchImpl ?? fetch;
 		this.#timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;

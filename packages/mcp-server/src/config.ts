@@ -1010,6 +1010,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 	const docsBackendPick = resolveDocsBackend(env);
 	const cache = cacheSettings(env, dbEndpoints.allow);
 	const cachePreloadRequested = loadCachePreloadSettings(env);
+	const sloWebhookUrl = env.SUBSTRATE_SLO_WEBHOOK_URL?.trim() ?? "";
 	if (cachePreloadRequested.enabled && !cache.cacheEnabled && (cache.cacheOff || cache.dragonflyRefused === null)) {
 		throw new ConfigError("SUBSTRATE_CACHE_PRELOAD=on needs the cache, which is off: set DRAGONFLY_URL to an accepted URL and leave SUBSTRATE_CACHE unset or not 0, or set SUBSTRATE_CACHE_PRELOAD=off");
 	}
@@ -1143,7 +1144,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 			enabled: (env.SUBSTRATE_SLO_NOTIFY?.trim() ?? "") === "1",
 			intervalS: boundedInt(env.SUBSTRATE_SLO_NOTIFY_S, 60, 5, 86_400),
 			sustainS: boundedInt(env.SUBSTRATE_SLO_NOTIFY_SUSTAIN_S, 300, 0, 86_400),
-			webhookUrl: /^https?:\/\//i.test(env.SUBSTRATE_SLO_WEBHOOK_URL?.trim() ?? "") ? env.SUBSTRATE_SLO_WEBHOOK_URL!.trim() : null,
+			webhookUrl: /^https?:\/\//i.test(sloWebhookUrl) ? sloWebhookUrl : null,
 		},
 		// uplift-4 S1
 		briefProfile: loadBriefProfileConfig(env),
@@ -2266,7 +2267,9 @@ export function loadMetricsHistorySettings(env: Record<string, string | undefine
 	if (seriesRaw !== "" && seriesRaw !== "core" && seriesRaw !== "extended") {
 		problems.push("SUBSTRATE_METRICS_HISTORY_SERIES is neither `core` nor `extended`, so the core series are used");
 	}
-	const retention = parsed ?? parseMetricsHistoryTtl(DEFAULT_METRICS_HISTORY_TTL)!;
+	const retention = parsed ?? parseMetricsHistoryTtl(DEFAULT_METRICS_HISTORY_TTL);
+	// The default is a literal this module owns, so it always parses; the guard keeps the type honest.
+	if (retention === null) throw new Error("the default metrics-history TTL is not a valid retention");
 	return {
 		enabled: flag === "on" && ledgerConfigured,
 		intervalS: boundedInt(env.SUBSTRATE_METRICS_HISTORY_INTERVAL_S, 60, MIN_METRICS_HISTORY_INTERVAL_S, 3600),

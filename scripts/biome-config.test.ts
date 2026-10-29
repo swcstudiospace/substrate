@@ -17,8 +17,8 @@ const level = (group: string, rule: string): unknown => (rules[group] as Record<
 const PROMOTED: Record<string, readonly string[]> = {
 	suspicious: ["noExplicitAny", "noProto", "noPrototypeBuiltins", "noUselessEscapeInString"],
 	correctness: ["noUnusedImports", "noUnusedVariables", "noUnusedFunctionParameters"],
-	style: ["useConst", "useImportType"],
-	complexity: ["noCommaOperator", "useRegexLiterals"],
+	style: ["useConst", "useImportType", "noNonNullAssertion"],
+	complexity: ["noCommaOperator", "useRegexLiterals", "useOptionalChain"],
 };
 const OFF: Record<string, readonly string[]> = {
 	suspicious: ["noTemplateCurlyInString"],
@@ -64,10 +64,5 @@ describe("biome.json", () => {
 		walk("", rules);
 		const documented = Object.entries(OFF).flatMap(([group, names]) => names.map((name) => `${group}/${name}`));
 		expect(off.sort()).toEqual(documented.sort());
-	});
-
-	test("noNonNullAssertion and useOptionalChain stay warnings", () => {
-		expect(level("style", "noNonNullAssertion")).toBe("warn" as Level);
-		expect(level("complexity", "useOptionalChain")).toBe("warn" as Level);
 	});
 });

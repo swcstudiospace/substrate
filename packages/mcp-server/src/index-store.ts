@@ -809,15 +809,16 @@ export class IndexStore implements MemoryStore {
 	/** Upsert a whole graph. Idempotent by Graph ID, so a re-run never duplicates. */
 	async registerGraph(plan: {
 		graph_id: string;
-		notion_task_page?: string | null;
-		repo?: string | null;
-		branch?: string | null;
-		surface?: Surface | null;
-		status?: string | null;
-		pr_url?: string | null;
-		nodes?: Array<Partial<GraphNode> & { node_id: string }>;
-		steps?: Array<Partial<GraphStep> & { node_id: string; step: number }>;
-		edges?: Array<{ from_node: string; to_node: string; kind: EdgeKind }>;
+		notion_task_page?: string | null | undefined;
+		repo?: string | null | undefined;
+		branch?: string | null | undefined;
+		surface?: Surface | null | undefined;
+		status?: string | null | undefined;
+		pr_url?: string | null | undefined;
+		// The plan arrives parsed from a tool call, whose absent fields may be `undefined`.
+		nodes?: Array<{ [K in keyof GraphNode]?: GraphNode[K] | undefined } & { node_id: string }> | undefined;
+		steps?: Array<{ [K in keyof GraphStep]?: GraphStep[K] | undefined } & { node_id: string; step: number }> | undefined;
+		edges?: Array<{ from_node: string; to_node: string; kind: EdgeKind }> | undefined;
 	}): Promise<GraphView> {
 		await this.sql`
 			insert into graph_index (graph_id, notion_task_page, repo, branch, surface, status, pr_url, updated)
@@ -2251,7 +2252,7 @@ export class IndexStore implements MemoryStore {
 		includeSuperseded = false,
 		read?: MemoryReadOptions,
 	): Promise<MemoryEntry[]> {
-		return (await this.searchMemoryPage({ query, scope, limit, includeSuperseded }, read)).entries;
+		return (await this.searchMemoryPage({ query, ...(scope === undefined ? {} : { scope }), limit, includeSuperseded }, read)).entries;
 	}
 
 	/**
@@ -2775,6 +2776,9 @@ function timestamp(value: unknown): string {
 }
 
 function toQueueRow(row: Record<string, unknown>): GovernanceQueueRow {
+	const subject = optional(row.subject);
+	const ttl = optional(row.ttl);
+	const detail = optional(row.detail);
 	return {
 		id: String(row.id),
 		scope: String(row.scope),
@@ -2783,11 +2787,11 @@ function toQueueRow(row: Record<string, unknown>): GovernanceQueueRow {
 		reason: String(row.reason),
 		created: timestamp(row.created),
 		text: String(row.body),
-		...(optional(row.subject) ? { subject: optional(row.subject) } : {}),
+		...(subject ? { subject } : {}),
 		// Review rows only: the quarantine table holds no retention, because a
 		// quarantined write never got as far as being kept for anything.
-		...(optional(row.ttl) ? { ttl: optional(row.ttl) } : {}),
-		...(optional(row.detail) ? { detail: optional(row.detail) } : {}),
+		...(ttl ? { ttl } : {}),
+		...(detail ? { detail } : {}),
 	};
 }
 
@@ -2833,16 +2837,24 @@ function toSkillRow(row: Record<string, unknown>): SkillRegistryRow {
 
 export function toMemoryEntry(row: Record<string, unknown>, now = Date.now()): MemoryEntry {
 	const reverifyAfter = optional(row.reverify_after);
+	const subject = optional(row.subject);
+	const sourceEvent = optional(row.source_event);
+	const sessionId = optional(row.session_id);
+	const graphId = optional(row.graph_id);
+	const repo = optional(row.repo);
+	const supersedes = optional(row.supersedes);
+	const supersededBy = optional(row.superseded_by);
+	const idempotencyKey = optional(row.idempotency_key);
 	return {
 		id: String(row.id),
 		scope: String(row.scope),
 		kind: row.kind as MemoryEntry["kind"],
 		text: String(row.body),
-		subject: optional(row.subject),
-		source_event: optional(row.source_event),
-		session_id: optional(row.session_id),
-		graph_id: optional(row.graph_id),
-		repo: optional(row.repo),
+		...(subject === undefined ? {} : { subject }),
+		...(sourceEvent === undefined ? {} : { source_event: sourceEvent }),
+		...(sessionId === undefined ? {} : { session_id: sessionId }),
+		...(graphId === undefined ? {} : { graph_id: graphId }),
+		...(repo === undefined ? {} : { repo }),
 		writer: String(row.writer),
 		actor: (row.actor === "human" ? "human" : "agent") as Actor,
 		trust: row.trust as MemoryEntry["trust"],
@@ -2851,12 +2863,12 @@ export function toMemoryEntry(row: Record<string, unknown>, now = Date.now()): M
 		// `version` predates the gate on rows written in Phase 0, where the column
 		// default backfilled it to 1 — which is what those entries honestly were.
 		version: Number(row.version ?? 1),
-		supersedes: optional(row.supersedes),
-		superseded_by: optional(row.superseded_by),
+		...(supersedes === undefined ? {} : { supersedes }),
+		...(supersededBy === undefined ? {} : { superseded_by: supersededBy }),
 		entry_hash: String(row.entry_hash ?? ""),
 		...(reverifyAfter ? { reverify_after: reverifyAfter } : {}),
 		// Derived, not stored: an entry decays where it sits, without a sweeper job.
 		needs_reverification: needsReverification(reverifyAfter, now),
-		idempotency_key: optional(row.idempotency_key),
+		...(idempotencyKey === undefined ? {} : { idempotency_key: idempotencyKey }),
 	};
 }

@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { ARCHIVE_TABLES, exportedColumns, type ArchiveTableSpec, type ColumnType } from "./index-archive-spec.ts";
 import { archiveIndex, refusedScratchUrl, restoreIndexArchive, verifyIndexArchive, type IndexArchiveSource } from "./index-archive.ts";
 import { IndexStore } from "./index-store.ts";
+import { defined } from "./test-support.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
 const describeLive = PG_URL ? describe : describe.skip;
@@ -82,8 +83,8 @@ function fileRows(dir: string, spec: ArchiveTableSpec): unknown[] {
 
 describeLive("index archive against a live index", () => {
 	beforeAll(async () => {
-		store = new IndexStore(PG_URL!);
-		raw = new SQL(PG_URL!);
+		store = new IndexStore(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
+		raw = new SQL(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
 		await store.migrate();
 		out = mkdtempSync(join(tmpdir(), "index-archive-live-"));
 		cwd = mkdtempSync(join(tmpdir(), "index-archive-cwd-"));
@@ -92,7 +93,7 @@ describeLive("index archive against a live index", () => {
 		try {
 			await raw.unsafe(`create database "${name}"`);
 			scratchName = name;
-			scratchUrl = withDatabase(PG_URL!, name);
+			scratchUrl = withDatabase(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"), name);
 		} catch {
 			scratchUrl = null;
 		}
@@ -315,7 +316,7 @@ describeLive("index archive against a live index", () => {
 		const indexes = async (): Promise<string[]> =>
 			((await raw`select indexname from pg_indexes where tablename = 'graph_nodes' order by indexname`) as Array<Record<string, unknown>>).map((row) => String(row.indexname));
 		const before = await indexes();
-		const tuned = new IndexStore(PG_URL!, { tune: "apply" });
+		const tuned = new IndexStore(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"), { tune: "apply" });
 		try {
 			await tuned.migrate();
 			expect(await tuned.tuneGraphNodes()).toBe("already");

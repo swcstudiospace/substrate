@@ -110,7 +110,7 @@ export function isLoopbackHost(hostname: string): boolean {
 	const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
 	if (host === "localhost" || host === "::1") return true;
 	const m = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-	return m !== null && m.slice(1).every((octet) => Number(octet) <= 255);
+	return m?.slice(1).every((octet) => Number(octet) <= 255) === true;
 }
 
 /**

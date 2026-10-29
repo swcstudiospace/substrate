@@ -116,11 +116,13 @@ export function readJournal(dir: string): Journal | null {
 	}
 	const stored = value.policy as Partial<ResolvedPolicy>;
 	const policy = resolvePolicy({
-		maxFileBytes: stored.maxFileBytes,
-		extraSecretPatterns: stored.secretPatterns,
-		extraExcludeDirs: stored.excludeDirs,
-		extraExcludeGlobs: stored.excludeGlobs,
-		ignoredAllowlist: stored.ignoredAllowlist,
+		// `resolvePolicy` falls back to its defaults for an absent key, so a key the
+		// journal never stored is left out rather than passed as `undefined`.
+		...(stored.maxFileBytes === undefined ? {} : { maxFileBytes: stored.maxFileBytes }),
+		...(stored.secretPatterns === undefined ? {} : { extraSecretPatterns: stored.secretPatterns }),
+		...(stored.excludeDirs === undefined ? {} : { extraExcludeDirs: stored.excludeDirs }),
+		...(stored.excludeGlobs === undefined ? {} : { extraExcludeGlobs: stored.excludeGlobs }),
+		...(stored.ignoredAllowlist === undefined ? {} : { ignoredAllowlist: stored.ignoredAllowlist }),
 	});
 	const operations: { op: string; path: string }[] = [];
 	for (const operation of value.operations as unknown[]) {
