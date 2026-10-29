@@ -23,6 +23,7 @@ bun run verify --list                # print the steps
 bun run verify --audit               # also run the dependency audit (needs the network)
 bun run lint                         # Biome; every diagnostic blocks the gate (no warnings are left to ignore)
 bun scripts/code-ratchet.ts --check  # risky-pattern counters against scripts/code-ratchet.baseline.json (also run by bun test)
+bun test scripts/docs-lint.test.ts   # relative links resolve and docs have a level-1 title (docs/, .planning/; also run by bun test)
 ```
 
 `bun run verify` is the gate CI runs; a drift test (`scripts/verify.test.ts`) fails when the workflow and `scripts/verify.ts` disagree. Change a gate command in both together.
