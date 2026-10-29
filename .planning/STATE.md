@@ -1,21 +1,21 @@
 ---
 gsd_state_version: "1.0"
-milestone: v1.6
-milestone_name: Contextual Memory, Live Steering and Eternal Rollback
-status: archived
-stopped_at: "Run 13 complete: remote branch work dispositioned, TODO register closed or gated, strict compiler and lint gates on; next is a new milestone or the operator-gated steps listed in the Run 13 record"
-last_updated: "2026-10-29T06:45:00.000Z"
+milestone: v1.7
+milestone_name: Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet
+status: executing
+stopped_at: "Run 14: milestone v1.7 defined (phases 63-70); implementation waves in progress, see the Run 14 record"
+last_updated: "2026-10-29T13:00:00.000Z"
 last_activity: 2026-10-29
-last_activity_desc: "Run 13: unlanded branch work ported through PRs, TODO register closed or gated, exactOptionalPropertyTypes and zero-warning lint made blocking"
-state_head: bfe9e57713a3
+last_activity_desc: "Run 14: milestone v1.7 defined from the owner's eight-feature request"
+state_head: 9d3f20851a85
 progress:
   total_phases: 8
-  completed_phases: 8
+  completed_phases: 0
   total_plans: 8
-  completed_plans: 8
-  percent: 100
-current_phase: 62
-current_phase_name: soak-and-close
+  completed_plans: 0
+  percent: 0
+current_phase: 63
+current_phase_name: corpus-atlas
 ---
 
 # State
@@ -161,10 +161,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: none open. v1.3.x (37-44), v1.5 (45-54) and v1.6 (55-62) are archived as override closeouts; the last code merge is b19ff515 (CI green).
-Plan: —
-Status: Awaiting next milestone. The accepted debt of the owner's 2026-10-28 decision is in the section "Accepted debt (owner decision, 2026-10-28)"; the operator-gated steps are listed in the Run 12 record.
-Last activity: 2026-10-29 — Run 12 closeout: milestones v1.3.x, v1.5 and v1.6 archived
+Phase: 63 (Corpus Atlas) of v1.7 (phases 63-70), planned. v1.3.x (37-44), v1.5 (45-54) and v1.6 (55-62) are archived as override closeouts; the last code merge before this milestone is 9d3f2085 (CI green).
+Plan: none written (phases are built in orchestrated waves of edit-only units and recorded in SUMMARY.md, as in Runs 12 and 13).
+Status: Executing. The accepted debt of the owner's 2026-10-28 decision is in the section "Accepted debt (owner decision, 2026-10-28)"; the operator-gated steps are listed in the Run 12, Run 13 and Run 14 records.
+Last activity: 2026-10-29 — Run 14: milestone v1.7 defined (phases 63-70)
 
 ## Preflight record (2026-10-23, graph ut-mvlknrx6-2849044e)
 
@@ -662,3 +662,12 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 - **Not done, by decision:** `noPropertyAccessFromIndexSignature` (3076 sites); coverage thresholds; the cli to collectors import cycle (moving `packages/collectors/src/cursor-stop.ts` would break installed Cursor hook paths and needs a decision on a shared leaf module); shared helpers between the CLI and the server (`isRecord`, `errorMessage`, and the control-character regex that carries nine `biome-ignore` comments in eight files); `scripts/rehearsal.ts` `refuseDockerLocality` still lets a run proceed when `docker context inspect` itself fails (documented there as safe because every later docker call then fails; the desktop gates now fail closed); an audit row for an oversize or malformed REST `/skills/propose` body (refused before the audit call by design; the contract is the owner's); `S3BlobStore` (`blob-store-s3.ts`) is exported and tested but no non-test code constructs it; the archive links in the v1.2, v1.3 and v1.4 roadmaps that point at moved files; CI action pins that still run on Node 20; remote branch pruning (candidates are listed in the register, none deleted).
 - **Operator-gated, untouched:** this run deployed nothing. Production was running release `5cf930a0` when it began (the merge of #139, per Run 12), so none of #142 to #172 is live until the operator deploys. Also open: LightRAG graph and hybrid modes need a real LLM route; RAGFlow code removal (closes D-15); funding the anchor key and any devnet send; installing the session hook in a host; the Notion re-login and the Linear plan limit; dropping `hindsight_backup_20261027`; `HINDSIGHT_BANKS` on the host.
 - **Gate record:** every PR passed the full CI gate before merging (frozen install, `tsc` with the strict flags, blocking Biome lint, the full `bun test` suite against a scratch Postgres, the Python suites and the repo locks) and Greptile 5/5 with no open threads. CI on main is cancelled by the next push, so the record is the pull request run of each head; the last code merge is `bfe9e577` (#172).
+
+## Run 14 (2026-10-29): milestone v1.7, docs atlas, self-improving context, live steering GA, worktree fleet
+
+- **Request:** introduce eight features and process improvements for Substrate that use the Solana devnet, GreptimeDB, TimescaleDB, DragonflyDB and the TEI embedding model; ingest the documentation of every repository on the VPS, on GitHub and in the Greptile knowledge bases; trigger a docs upgrade automatically when documentation changes; make the RAG self-improving the way Hindsight is; make Live Steering present (the owner had not heard of it); and optimise many sessions working in git worktrees. Invoked with `gsd-autonomous` while no phase was open, so the milestone was defined first.
+- **Assumptions, stated and not asked:** (1) the eight features are phases 63-70 (Corpus Atlas, Embedding fabric, Doc Watch, Docs Reflect, Live Steering GA, Worktree Fleet, Doc Proofs, Docs SLO and eval); (2) "ingest all documentation" is delivered as the pipeline, a dry-run inventory of this host and the runbook, and the live ingest into production waits for the release deploy, which is the operator's step (the request is put to the owner at the end); (3) TEI has a consumer in Substrate only where one exists (near-duplicate detection, semantic signals), because LightRAG's own embedding binding is configured on the LightRAG server and is locked to its data; (4) devnet use rides the existing hourly anchor, so no transaction is sent by this run; (5) Live Steering is presented as it stands on main (v1.6 phase 58) and its recorded gaps are closed; (6) quality means the Run 13 gates (strict compiler flags, zero Biome diagnostics, ratchet at baseline) hold for all new code.
+- **Inventory (2026-10-29, names and sizes only, no contents read):** `/root/src/repos` holds 110 directories: 72 git checkouts of 44 distinct origins (four origins are cloned more than once: superatlas five times, clippyos four, autonogrammer-ai four, ompos twice) and 38 directories that are not repositories, among them worktree and copy collections (`pumpgrok-wt`, `autonogrammer-wt`, `ompos-units`). They contain 63,063 markdown, mdx, rst and adoc files (727 MB), of which 20,358 sit under `.planning/` in 26 directories and 1,603 under `docs/`. GitHub: 242 repositories in swcstudiospace (165 private, 8 archived) and 171 under SomeRandmGuyy (69 private). Greptile: 23 repositories have knowledge bases (agent-skills, ai-cluster, aimeecodes, autonogrammer-ai, clippyos, coding-fleet, faceless-desk, grok-cloud-sessions, grokrouter, omega-prime, ompos, programming-desk, pumpgrok, purple-team, realm, rust-ai, ship-desk, spectrumwebco-marketing, substrate, supernuxt and three more). Ingesting 63,063 files one page at a time through the current docs plane would take days, which is why phase 63 tiers, de-duplicates and batches.
+- **Evidence that shaped the plan** (main at 9d3f2085; file and line references are in each phase's CONTEXT.md): the docs plane ingests one page at a time (upload, scan, pipeline poll, track status per page), has no delete or rename, stores only source URL, commit and heading, has one LightRAG workspace for all datasets and records no retrieval feedback; the only doc-change path is the server's planning refresh, which keeps its hashes in memory and re-ingests everything after a restart; `POST /docs/merge-trigger` is not called for any repository dataset; LightRAG v1.5.7 has `POST /documents/texts`, which the client does not use; Hindsight's client uses retain with `document_id` replace, recall and document delete, and none of reflect, mental-model creation, observations or directives; steering is pull-only with no command, no REST route and no view, session state is process-local, the brief has no steering or handoff section and `checkpoint_hint` has no reader; claims are per graph node, no component knows the worktrees under `/root/src/worktrees`, and the only disk guard is a 5 GiB floor in the dispatcher; TEI has no client; the hourly anchor covers ledger event hashes only; this host shows 106 directories under `/root/src/worktrees` and 98 percent disk use.
+- **Plan:** one pull request per phase through `ultrathink-ship`; shared contracts are fixed in ROADMAP phase 63; migration step numbers are assigned in merge order (the migrate-contract test needs every version from 1 to N), so each unit takes the next free number when it rebases onto main. Wave A: phases 63 (two units), 64, 67, 68 core, 69 core, 70 core. Wave B after phase 63 merges: 65, 66 and the integrations of 68, 69 and 70. Operator-gated and not done by this run: deploy, timers and hooks, the live ingest, anchor funding.
+- **Ultrathink plan (graph ut-mvtjveh1-26111d38, Notion Task 408bc1a0c7ae813a947efa582daedf83; Linear is blocked by the free-issue limit):** it arrived after the first units were dispatched, as in Runs 12 and 13, and was folded in rather than restarted. Its phases map onto this milestone: audit and feature lock (the Run 14 scouts and the audit record under `.planning/phases/63-corpus-atlas/audit/`), foundations and ingestion (63 and 64), change-triggered sync (65), the self-improving loop (66), worktrees and Live Steering (68 and 67), provenance anchoring (69) and hardening (70 and the closeout). Its eight features differ from this milestone's in one place: observability and the evaluation gate share phase 70, and the TEI embedding fabric (64) is added because TEI has no client. Its non-blocking questions took their defaults: the five capabilities the owner described are inside the eight; Solana devnet is used for anchoring only, through the hourly anchor that already exists; extraction-LLM egress is moot while LightRAG runs in naive mode with the LLM bypass (text goes to embeddings only, no token cost), and a graph mode would need the owner's approval first. Its binding constraints changed the phase text: the default sync triggers write nothing into any repository and git hooks are an operator-run opt-in; new tables are covered by the archive and restore spec; the manifest and the docs plane get a reconcile because they are a dual write; staged units are resource-bounded; and the documents this milestone writes must be retrievable through the finished pipeline.
