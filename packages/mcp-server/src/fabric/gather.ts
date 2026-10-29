@@ -51,12 +51,13 @@ export async function gatherFabricFacts(
 	const deadlineMs = options.deadlineMs ?? FABRIC_SOURCE_DEADLINE_MS;
 	const checkedAt = sources.now();
 	const parts = sources.health();
-	const [greptimeRead, indexRead, hindsightRead, ragflowRead, lightragRead, costRead] = await Promise.all([
+	const [greptimeRead, indexRead, hindsightRead, ragflowRead, lightragRead, teiRead, costRead] = await Promise.all([
 		within(() => parts.greptime, deadlineMs),
 		within(() => parts.index, deadlineMs),
 		within(() => parts.hindsight, deadlineMs),
 		within(() => parts.ragflow, deadlineMs),
 		within(() => parts.lightrag, deadlineMs),
+		within(() => parts.tei, deadlineMs),
 		within<FabricCostView>(() => sources.railwayCost(), deadlineMs),
 	]);
 	const snapshot = sources.snapshot();
@@ -118,6 +119,14 @@ export async function gatherFabricFacts(
 			degraded: outbox.size > 0,
 			source: sourceOf("planes.hindsight", hindsightRead),
 		},
+		tei: {
+			configured: config.configured.tei,
+			held: false,
+			answered: teiRead.ok ? teiRead.value : null,
+			breaker: breakerOf(breakers.tei),
+			degraded: false,
+			source: teiRead.ok ? "probe().tei" : `probe().tei: ${teiRead.reason}`,
+		},
 	};
 
 	const railway: FabricFacts["railway"] = costRead.ok
@@ -129,6 +138,7 @@ export async function gatherFabricFacts(
 		endpointPolicy: config.endpointPolicy,
 		endpoints: { ...config.endpointClasses },
 		services,
+		tei: { endpointClass: config.teiEndpoint, ...snapshot.tei },
 		cache: {
 			mode: cache.mode,
 			hits: cache.hits,

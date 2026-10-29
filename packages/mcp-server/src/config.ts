@@ -88,6 +88,59 @@ export function lightragFromEnv(env: Record<string, string | undefined> = proces
 	return { url, ...(apiKey ? { apiKey } : {}), ...(mode !== null ? { queryMode: mode } : {}) };
 }
 
+/** Default per-request timeout of the TEI client, ms (`SUBSTRATE_TEI_TIMEOUT_MS`). */
+export const DEFAULT_TEI_TIMEOUT_MS = 10_000;
+/** Default most texts per `/embed` request (`SUBSTRATE_TEI_BATCH`); the server's own limit can only lower it. */
+export const DEFAULT_TEI_BATCH = 32;
+/** Default seconds a cached embedding lives (`SUBSTRATE_EMBED_CACHE_TTL_S`): one week. */
+export const DEFAULT_EMBED_CACHE_TTL_S = 604_800;
+
+/**
+ * The TEI (text-embeddings-inference) reach. `TEI_URL` names it; `TEI_API_KEY` is sent as a bearer token when set and
+ * is never logged or reported. `model` and `dim` are the pins (`SUBSTRATE_TEI_MODEL`, `SUBSTRATE_TEI_DIM`): vectors of
+ * two models are not comparable, so a server whose `/info` or answers differ from a pin is refused. A pin left unset is
+ * learned from the first good answer and then held for the life of the process.
+ */
+export interface TeiConfig {
+	url: string;
+	apiKey?: string;
+	model?: string;
+	dim?: number;
+	timeoutMs: number;
+	batch: number;
+}
+
+/** The substrate's TEI reach, or null when `TEI_URL` is unset. A bad number falls back to its default, never a crash. */
+export function teiFromEnv(env: Record<string, string | undefined> = process.env): TeiConfig | null {
+	const url = env.TEI_URL?.trim().replace(/\/+$/, "");
+	if (!url) return null;
+	const apiKey = env.TEI_API_KEY?.trim();
+	const model = env.SUBSTRATE_TEI_MODEL?.trim();
+	const dimRaw = env.SUBSTRATE_TEI_DIM?.trim() ?? "";
+	const dim = /^\d+$/.test(dimRaw) && Number(dimRaw) >= 1 && Number(dimRaw) <= 8192 ? Number(dimRaw) : undefined;
+	return {
+		url,
+		...(apiKey ? { apiKey } : {}),
+		...(model ? { model } : {}),
+		...(dim !== undefined ? { dim } : {}),
+		timeoutMs: boundedInt(env.SUBSTRATE_TEI_TIMEOUT_MS, DEFAULT_TEI_TIMEOUT_MS, 100, 120_000),
+		batch: boundedInt(env.SUBSTRATE_TEI_BATCH, DEFAULT_TEI_BATCH, 1, 512),
+	};
+}
+
+/** The embedding cache switch and TTL: `SUBSTRATE_EMBED_CACHE` is `on` or off (anything else is off), the TTL is seconds. */
+export interface EmbedCacheSettings {
+	enabled: boolean;
+	ttlS: number;
+}
+
+export function embedCacheFromEnv(env: Record<string, string | undefined> = process.env): EmbedCacheSettings {
+	return {
+		enabled: (env.SUBSTRATE_EMBED_CACHE?.trim().toLowerCase() ?? "") === "on",
+		ttlS: boundedInt(env.SUBSTRATE_EMBED_CACHE_TTL_S, DEFAULT_EMBED_CACHE_TTL_S, 60, 2_592_000),
+	};
+}
+
 /**
  * Which docs plane serves this process.
  *
@@ -268,6 +321,10 @@ export interface SubstrateConfig {
 	 * the boot warning names the key only.
 	 */
 	lightragQueryModeRejected: boolean;
+	/** The TEI reach, or null when `TEI_URL` is unset (`teiFromEnv`). Null makes every embed answer `not-configured`. */
+	tei: TeiConfig | null;
+	/** `SUBSTRATE_EMBED_CACHE` and its TTL: the Dragonfly cache of embeddings, off by default. */
+	embedCache: EmbedCacheSettings;
 	/**
 	 * Ms between LightRAG planning polls (SPE-19385).
 	 *
@@ -1066,6 +1123,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		docsBackend: docsBackendPick.backend,
 		docsBackendRejected: docsBackendPick.rejected,
 		lightragQueryModeRejected: resolveLightragQueryMode(env).rejected,
+		tei: teiFromEnv(env),
+		embedCache: embedCacheFromEnv(env),
 		railwayHosting: railwayHostingFromEnv(env),
 		lightragPollMs: positiveOr(env.SUBSTRATE_LIGHTRAG_POLL_MS, DEFAULT_LIGHTRAG_POLL_MS),
 		lightragPlanningRoots: lightragPlanningRoots.length > 0 ? lightragPlanningRoots : [...DEFAULT_LIGHTRAG_PLANNING_ROOTS],
@@ -1743,6 +1802,8 @@ export interface DbEndpointSettings {
 	policy: DbEndpointPolicy;
 	allow: ProxyAllow;
 	classes: Partial<Record<DbPlane, EndpointClass>>;
+	/** The class of `TEI_URL` (phase 64), present only when it is set. Held apart: TEI is not a database plane. */
+	tei?: EndpointClass;
 }
 
 /** The configured data-plane URLs, in the order the boot names them. */
@@ -1790,7 +1851,19 @@ function loadDbEndpointSettings(env: Record<string, string | undefined>): DbEndp
 			);
 		}
 	}
-	return { policy, allow, classes };
+	const result: DbEndpointSettings = { policy, allow, classes };
+	const teiUrl = env.TEI_URL?.trim();
+	if (teiUrl) {
+		const teiClass = classifyEndpoint("tei", teiUrl, allow);
+		result.tei = teiClass;
+		if (policy === "enforce" && teiClass === "direct") {
+			throw new ConfigError(
+				"TEI_URL is a direct endpoint, which SUBSTRATE_DB_ENDPOINT_POLICY=enforce refuses; " +
+					"point it at a loopback forwarder, or list its host:port in SUBSTRATE_DB_PROXY_ALLOW",
+			);
+		}
+	}
+	return result;
 }
 
 /**

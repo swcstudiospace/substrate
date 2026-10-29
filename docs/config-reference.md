@@ -141,6 +141,8 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_CACHE_PRELOAD_TOP` | number | 3 | 1..20 | 3 repos per tick. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CACHE_PRELOAD_S` | number | 300 | 10..3600 | 300 s. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_EVENT_BUS` | toggle | off | on \| off (case- and space-insensitive; anything else refuses boot naming the variable) | off: no pub/sub connection and /events/stream reads the ledger on its poll only; on without DRAGONFLY_URL, or with a refused URL, is off with a boot log line. See `docs/data-planes.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_EMBED_CACHE` | toggle | off | on \| off (case- and space-insensitive; anything else is off) | off: every embed goes to TEI and nothing is read from or written to the emb cache class. See `docs/embedding-fabric.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_EMBED_CACHE_TTL_S` | number | 604800 | 60..2592000 seconds (clamped) | 604800 s (one week); every written entry carries it. See `docs/embedding-fabric.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CACHE_BUMP_SCOPE` | mode | legacy | legacy \| narrow (case- and space-insensitive; anything else is legacy, named at boot) | legacy: a Hindsight retain or outbox replay bumps the memory generation (flushes every brief and search, twice per forwarded write) and a heartbeat flushes graph-scoped briefs. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 
 ## Brief and recall-in-the-brief
@@ -202,6 +204,12 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_LIGHTRAG_QUERY_MODE` | string | hybrid | naive \| local \| global \| hybrid \| mix | hybrid (graph) unless a question starts with /mix or /hybrid or a caller names a mode; an unrecognised value is named in the boot warnings and also means hybrid. A LightRAG with no real LLM (the Railway bypass LLM) builds no graph and needs naive. See `docs/runbooks/lightrag-storage-topology.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LIGHTRAG_PLANNING_ROOTS` | list | .planning/ | comma separated path prefixes | .planning/ | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_BACKEND` | string | reach-derived | lightrag \| ragflow | LIGHTRAG_URL presence decides: set means lightrag, else ragflow. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `TEI_URL` | string | none | TEI base URL, loopback or a host:port in SUBSTRATE_DB_PROXY_ALLOW | the embedding service is unconfigured: every embed answers not-configured, nothing is sent and the tei fabric row is unconfigured; a direct URL refuses boot under SUBSTRATE_DB_ENDPOINT_POLICY=enforce. See `docs/embedding-fabric.md` | mcp-server/config.ts | yes |
+| `TEI_API_KEY` | secret-ref | none | API key, sent as a bearer token to TEI and never logged or reported | TEI is reached unauthenticated. See `docs/embedding-fabric.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_TEI_MODEL` | string | learned | the model_id TEI's /info reports | the first model_id /info reports is learned and held; a TEI that later reports another is refused (model-mismatch). See `docs/embedding-fabric.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_TEI_DIM` | number | learned | 1..8192 | the length of the first good vector is learned and held; a vector of another length is refused (dim-mismatch). See `docs/embedding-fabric.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_TEI_TIMEOUT_MS` | number | 10000 | 100..120000 ms (clamped) | 10000 ms per request. See `docs/embedding-fabric.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_TEI_BATCH` | number | 32 | 1..512 (clamped) | 32 texts per /embed request, lowered to the server's max_client_batch_size when that is smaller. See `docs/embedding-fabric.md` | mcp-server/config.ts | yes |
 | `RAILWAY_TOKEN` | secret-ref | none | Railway API token managing the project | Railway mutations stay stubbed; reads still report the plan | mcp-server/config.ts | yes |
 | `RAILWAY_PROJECT_ID` | string | none | Railway project id hosting LightRAG | unpinned: the plan carries a null project | mcp-server/config.ts | yes |
 | `RAILWAY_ENVIRONMENT_ID` | string | none | Railway environment id | unpinned: the plan carries a null environment | mcp-server/config.ts | yes |
