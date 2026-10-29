@@ -15,7 +15,8 @@
     "packages/observability",
     "packages/audit",
     "packages/evidence",
-    "packages/worktree-snapshot"
+    "packages/worktree-snapshot",
+    "packages/corpus"
   ],
   "scripts": {
     "test": "bun test",

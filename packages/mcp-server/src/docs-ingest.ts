@@ -38,6 +38,7 @@ import type { Dirent, Stats } from "node:fs";
 import { lstat, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { stripRemoteImages } from "@substrate/corpus";
 import {
 	createVersionStore,
 	DATASET_VERSION_RETENTION,
@@ -549,22 +550,6 @@ function pollBudget(poll: IngestDeps["poll"]): { maxPolls?: number; intervalMs?:
 		...(poll?.maxPolls === undefined ? {} : { maxPolls: poll.maxPolls }),
 		...(poll?.intervalMs === undefined ? {} : { intervalMs: poll.intervalMs }),
 	};
-}
-const REMOTE_IMG_TAG = /<img\b[^>]*\bsrc\s*=\s*["']https?:[^>]*>/gi;
-const REMOTE_MD_IMAGE = /!\[[^\]]*\]\(\s*https?:[^)]+\)/g;
-
-/** Strip remote images pre-upload; local image paths are left for the gates. */
-export function stripRemoteImages(body: string): { body: string; stripped: number } {
-	let stripped = 0;
-	const withoutTags = body.replace(REMOTE_IMG_TAG, () => {
-		stripped += 1;
-		return "";
-	});
-	const withoutMd = withoutTags.replace(REMOTE_MD_IMAGE, () => {
-		stripped += 1;
-		return "";
-	});
-	return { body: withoutMd, stripped };
 }
 
 /**

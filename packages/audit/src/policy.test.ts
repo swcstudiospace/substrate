@@ -61,6 +61,7 @@ describe("auditMode", () => {
 			"planning_status",
 			"planning_sessions",
 			"steering_list",
+			"corpus_status",
 		]) {
 			expect(auditMode(tool)).toBe("fail-open");
 		}
@@ -72,6 +73,11 @@ describe("auditMode", () => {
 			queue: "fail-closed",
 			acknowledge: "fail-closed",
 		});
+	});
+
+	test("a corpus ingest is fail-closed and the manifest status read is fail-open", () => {
+		// An ingest writes the shared docs dataset and deletes plane documents, so an unrecorded one is refused.
+		expect({ ingest: auditMode("corpus_ingest"), status: auditMode("corpus_status") }).toEqual({ ingest: "fail-closed", status: "fail-open" });
 	});
 
 	test("every REST route server.ts audits has a mode", () => {
