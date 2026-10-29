@@ -1039,7 +1039,7 @@ Plans:
 
 **Depends on**: none (v1.6 docs plane on main). Phases 64-66, 69 and 70 build on its manifest.
 
-**Repos**: agent-substrate (new package `packages/corpus`; `packages/cli/src/corpus`; `packages/mcp-server/src` corpus module, routes, tools, migration step 35; `docs/corpus.md`, `docs/runbooks/corpus-ingest.md`)
+**Repos**: agent-substrate (new package `packages/corpus`; `packages/cli/src/corpus`; `packages/mcp-server/src` corpus module, routes, tools, a migration step; `docs/corpus.md`, `docs/runbooks/corpus-ingest.md`)
 
 **Requirements**: [ATLAS-01, ATLAS-02, ATLAS-03, ATLAS-04, ATLAS-05, ATLAS-06]
 
@@ -1047,13 +1047,13 @@ Plans:
 
   1. `@substrate/corpus` scans roots and returns sorted, deterministic entries `{repo, path, kind, tier, sha256, bytes, source, commit}`; clones and linked worktrees of one origin collapse to one canonical checkout, byte-identical copies collapse to one entry with a count, and exclusions and size caps hold (fixture trees cover each rule).
   2. `substrate corpus scan`, `plan`, `ingest` and `status` work against a server: `plan` sends entries without bodies and prints add, change, rename and tombstone counts; `ingest` is a dry run until `--execute`.
-  3. Migration step 35 creates `corpus_documents` (additive, reversible, digest fixture and rollback-compat doc updated); `POST /corpus/plan`, `POST /corpus/ingest` and `GET /corpus/status` plus the MCP tools `corpus_status` (read, fail-open) and `corpus_ingest` (write, fail-closed, operator surfaces) are audited and admitted like the docs tools.
+  3. A migration step creates `corpus_documents` (additive, reversible, digest fixture and rollback-compat doc updated); `POST /corpus/plan`, `POST /corpus/ingest` and `GET /corpus/status` plus the MCP tools `corpus_status` (read, fail-open) and `corpus_ingest` (write, fail-closed, operator surfaces) are audited and admitted like the docs tools.
   4. The LightRAG bulk path sends batches through `POST /documents/texts` (LightRAG v1.5.7 `InsertTextsRequest`; the route fixture records it) with bounded concurrency and one pipeline poll per batch, redacts and refuses secrets as `docs_ingest` does, and carries repo, path, kind, tier and commit into the document source.
-  5. A removed or renamed document is tombstoned: its docs-plane document is deleted through `delete_document`, its row says `tombstoned`, and a rename (same sha, new path) is reported as a rename.
+  5. A removed or renamed document is tombstoned: its docs-plane document is deleted through `delete_document` (only when no other active row shares that plane document), its row says `tombstoned`, and a rename (same sha, new path) is reported as a rename. A tombstone is only ever created for a repository the scan covered completely, at the tiers and from the sources it declares in the plan's scope: a narrower scan (`--tier`, `--max-repos`, `--source`, one `--root`), a repository that failed to read, or a truncated tree leaves the earlier documents untouched, and tests show it.
   6. A second identical run reports `unchanged` for every document and sends nothing; a run killed half way resumes without re-sending the documents already recorded.
   7. Source adapters for a Greptile export directory and for GitHub repositories through `gh` produce the same entries; both are bounded by `--max-repos` and `--tier`.
 
-**Contracts** (fixed so the units agree): the manifest key is `(repo, path)`; `repo` is `owner/name` from the origin remote, else `local/<directory>`; the docs dataset is `corpus` (added to `DATASET_TRIGGERS` and `DEFAULT_SEARCH_DATASET_NAMES`); the document source URL is `https://github.com/<owner>/<repo>/blob/<commit>/<path>` for a GitHub origin and `corpus://<repo>/<path>` otherwise; kinds and tiers are the closed lists in `packages/corpus/src/protocol.ts`; flags are `SUBSTRATE_CORPUS_ROOTS`, `SUBSTRATE_CORPUS_CONCURRENCY` (4), `SUBSTRATE_CORPUS_BATCH_DOCS` (20) and `SUBSTRATE_CORPUS_BATCH_BYTES` (1000000).
+**Contracts** (fixed so the units agree): the manifest key is `(repo, path)`; the plan's scope is `{repos, maxTier, sources}` and the server tombstones a row only when its repo, tier and source fall inside it and the scan reported that repo complete; migration step numbers are assigned in merge order, not by phase (the migrate-contract test requires every version from 1 to N, so a unit takes the next free number when it rebases onto main and the table names stay fixed); `repo` is `owner/name` from the origin remote, else `local/<directory>`; the docs dataset is `corpus` (added to `DATASET_TRIGGERS` and `DEFAULT_SEARCH_DATASET_NAMES`); the document source URL is `https://github.com/<owner>/<repo>/blob/<commit>/<path>` for a GitHub origin and `corpus://<repo>/<path>` otherwise; kinds and tiers are the closed lists in `packages/corpus/src/protocol.ts`; flags are `SUBSTRATE_CORPUS_ROOTS`, `SUBSTRATE_CORPUS_CONCURRENCY` (4), `SUBSTRATE_CORPUS_BATCH_DOCS` (20) and `SUBSTRATE_CORPUS_BATCH_BYTES` (1000000).
 
 **Plans**: none written (no gsd-plan-phase run; built in one orchestrated wave of edit-only units, recorded in SUMMARY.md)
 
@@ -1072,7 +1072,7 @@ Plans:
   1. The TEI client (`/embed`, `/info`, `/health`) batches to the server's limit, times out, retries with backoff and opens a breaker; a model or dimension other than `SUBSTRATE_TEI_MODEL` and `SUBSTRATE_TEI_DIM` is refused with a closed reason. A fake TEI server in the tests covers each path.
   2. `SUBSTRATE_EMBED_CACHE=on` caches vectors in Dragonfly under the `emb` class keyed by model and sha256, every key has a TTL, and the cache-conformance test still passes.
   3. `fabric_status` has a `tei` resource (health, model, dimension, breaker) and the compliance check fails a TEI URL that is neither loopback nor an allowed proxy; fabric fixtures and order tests are updated.
-  4. `nearDuplicates` in `@substrate/corpus` takes vectors and returns pairs above a threshold with their similarity; the planner reports them as `near_duplicate_of` and never drops a document on that signal alone.
+  4. `nearDuplicates` in `@substrate/corpus` takes vectors and returns pairs above a threshold with their similarity; `POST /corpus/neardup` embeds document excerpts through the TEI client and returns the pairs, `substrate corpus plan --neardup` prints them, and no document is dropped on that signal alone.
 
 **Plans**: none written (no gsd-plan-phase run; built in one orchestrated wave of edit-only units, recorded in SUMMARY.md)
 
@@ -1091,7 +1091,7 @@ Plans:
   1. `substrate corpus sync --repo R` plans and ingests only that repository's changes; `substrate corpus watch` watches registered roots with a debounce and coalesces a burst into one sync per repository (injected clock and fake watcher in the tests).
   2. The git hooks post-commit, post-merge, post-checkout and post-rewrite send a bounded `docs.changed` hint and always exit 0; the installer never overwrites a foreign hook.
   3. The server's planning refresh reads its state from the manifest instead of an in-memory map, so a restart re-ingests nothing unchanged (test with two server instances over one store).
-  4. `infra/vps/substrate-corpus-watch.service`, `substrate-corpus-sync.service` and `substrate-corpus-sync.timer` are staged like the existing units; the reconcile run finds a change that no trigger reported.
+  4. `infra/vps/substrate-corpus-watch.service`, `substrate-corpus-sync.service` and `substrate-corpus-sync.timer` are staged like the existing units; the reconcile run fetches and then reads the fetched commit's tree directly (`git ls-tree` and `git cat-file`, not the working tree), so a push made elsewhere is found although the local checkout did not move; a remote-only push is a test case.
   5. Each sync emits a `docs.sync` note (event-sources row, vocabulary lock unchanged) and a lag metric; a breach raises the existing `docs.freshness` warning.
 
 **Plans**: none written (no gsd-plan-phase run; built in one orchestrated wave of edit-only units, recorded in SUMMARY.md)
@@ -1102,13 +1102,13 @@ Plans:
 
 **Depends on**: Phase 63 (manifest); Phase 64 (optional semantic signals).
 
-**Repos**: agent-substrate (`packages/corpus/src/authority.ts`, `packages/corpus/src/reflect.ts`, `packages/mcp-server/src` retrieval telemetry, `docs_feedback`, re-rank, migration step 36, docs)
+**Repos**: agent-substrate (`packages/corpus/src/authority.ts`, `packages/corpus/src/reflect.ts`, `packages/mcp-server/src` retrieval telemetry, `docs_feedback`, re-rank, a migration step, docs)
 
 **Requirements**: [REFLECT-01, REFLECT-02, REFLECT-03, REFLECT-04, REFLECT-05]
 
 **Success Criteria** (what must be TRUE):
 
-  1. With `SUBSTRATE_DOCS_TELEMETRY=on` every `docs_search` appends a bounded, redacted row (query hash and a capped redacted text, returned document keys, backend, scores) to `corpus_retrievals` (migration step 36), with retention.
+  1. With `SUBSTRATE_DOCS_TELEMETRY=on` every `docs_search` appends a bounded, redacted row (query hash and a capped redacted text, returned document keys, backend, scores) to `corpus_retrievals` (its own migration step), with retention.
   2. `docs_feedback` (MCP tool and REST route) records helpful, unhelpful, stale, wrong or duplicate against a document key, is audited, admission-limited and idempotent per session and document.
   3. `scoreDocument` is a pure, tested function of tier, kind, recency, supersession and feedback; `SUBSTRATE_DOCS_RERANK=shadow` records what the re-rank would have changed, `on` applies it, `off` is the default.
   4. Supersession is detected for a newer version of the same path, a live document and its milestone archive, and an explicit `superseded-by` marker; citations carry `stale` and `superseded_by`.
@@ -1122,7 +1122,7 @@ Plans:
 
 **Depends on**: none (v1.6 steering and planning planes on main).
 
-**Repos**: agent-substrate (`packages/mcp-server/src` steering routes, `session_context`, brief sections, durable session registry, migration step 37; `packages/cli/src` `steer` and the session hook; docs)
+**Repos**: agent-substrate (`packages/mcp-server/src` steering routes, `session_context`, brief sections, durable session registry, a migration step; `packages/cli/src` `steer` and the session hook; docs)
 
 **Requirements**: [STEER-01, STEER-02, STEER-03, STEER-04, STEER-05, STEER-06]
 
@@ -1131,7 +1131,7 @@ Plans:
   1. `substrate steer sessions|status|queue|ack|list|listen` work over REST routes that carry the same audit, admission and operator guard as the MCP tools; agents still cannot author directives.
   2. `session_context` (MCP tool and `GET /session/context`) returns a bounded, redacted digest of the other live sessions of the caller's repository: presence, worktree and branch, claims, recent events, handoffs and planning changes, each with its source and age.
   3. `memory_brief` gains `sessions`, `steering` and `handoffs` sections behind `SUBSTRATE_BRIEF_SESSIONS`, within the existing size bound.
-  4. With `SUBSTRATE_STEERING_SESSIONS_TABLE` on, session state lives in `steering_sessions` (migration step 37, opt-in like the audit table) and survives a restart; TTL and cap are enforced.
+  4. With `SUBSTRATE_STEERING_SESSIONS_TABLE` on, session state lives in `steering_sessions` (its own migration step, opt-in like the audit table) and survives a restart; TTL and cap are enforced.
   5. `substrate session hook` reads `checkpoint_hint` from an acknowledged directive and writes the named checkpoint; a `context` trigger prints the digest; `hook-config` prints all five triggers.
   6. `GET /steering/wait` long-polls for a directive for one session with a bounded timeout; `steer listen` uses it.
 
@@ -1143,15 +1143,15 @@ Plans:
 
 **Depends on**: Phase 67 for the brief integration (criterion 6) only.
 
-**Repos**: agent-substrate (new package `packages/fleet`; `packages/cli/src/worktree`; `packages/collectors/src/worktree-graph.ts`; `packages/mcp-server/src` registry routes and migration step 38; `packages/dispatcher` disk floor; docs)
+**Repos**: agent-substrate (new package `packages/fleet`; `packages/cli/src/worktree`; `packages/collectors/src/worktree-graph.ts`; `packages/mcp-server/src` registry routes and a migration step; `packages/dispatcher` disk floor; docs)
 
 **Requirements**: [FLEET-01, FLEET-02, FLEET-03, FLEET-04, FLEET-05, FLEET-06]
 
 **Success Criteria** (what must be TRUE):
 
   1. `SUBSTRATE_WORKTREE_ROOTS` replaces the hard-coded root in `worktree-graph.ts`, and `@substrate/fleet` finds worktrees with `git worktree list --porcelain` from every repository under the configured roots, including linked worktrees outside them.
-  2. `POST /worktrees/report` stores the inventory in `worktrees` (migration step 38): path, repo, branch, head, base, dirty, ahead, behind, last commit time, size, session and graph attribution, PR state when known.
-  3. `substrate worktree prune` is a dry run until `--execute`, removes only worktrees that are clean, pushed and merged (or whose PR merged) and idle past a threshold, never the primary checkout or the current directory, and writes one ledger note per removal.
+  2. `POST /worktrees/report` stores the inventory in `worktrees` (its own migration step): path, repo, branch, head, base, dirty, ahead, behind, last commit time, size, session and graph attribution, PR state when known.
+  3. `substrate worktree prune` is a dry run until `--execute`, removes only worktrees that are clean, pushed and idle past a threshold and whose current `HEAD` is an ancestor of the default branch or equals the head commit of a merged PR (a branch that gained commits after its PR merged is never `safe`), never the primary checkout or the current directory, and writes one ledger note per removal; tests include a branch that advanced after its merge.
   4. `substrate worktree conflicts` lists, for one repository, the changed files per worktree against the merge base, the overlapping pairs, a `git merge-tree` prediction of a textual conflict for each pair and a suggested merge order.
   5. `SUBSTRATE_WORKTREE_MIN_FREE_GB` is enforced by `substrate worktree provision` and the dispatcher's `ensure_worktree`, and the doctor reports worktree disk use against it.
   6. With the registry on, `memory_brief` names other sessions' worktrees that touch files the caller's worktree touches.
@@ -1192,7 +1192,7 @@ Plans:
   1. `generateGolden` derives queries from document titles and headings with the expected document key; `scoreRun` computes recall at k, MRR and latency percentiles; `scripts/docs-eval.ts` runs them against a live server with `--execute` and against a fake retriever otherwise.
   2. A deterministic offline harness (a lexical retriever over a fixture corpus) runs in `bun test` and fails when ranking, de-duplication or the re-rank regress.
   3. Ingest throughput, sync lag and retrieval quality are metric series with SLO thresholds in flags; `fabric_status` and the docs canary report a breach; the staged canary timer runs `docs-eval`.
-  4. A test fails on a broken relative link or a missing title in `docs/` and `.planning/` (the broken archive links recorded in Run 13 are fixed).
+  4. A test fails on a broken relative link anywhere in `docs/` and `.planning/` (archives included; the 42 broken links of the three legacy roadmaps and the 8 in the v1.3 pattern records are fixed), and on a missing level-1 title in `docs/` and the live `.planning/` files (archived plans are exempt from the title rule).
   5. `docs/runbooks/docs-rag-operations.md` covers deploy, first ingest, timers, rollback and the command that proves each step.
 
 **Plans**: none written (no gsd-plan-phase run; built in one orchestrated wave of edit-only units, recorded in SUMMARY.md)
