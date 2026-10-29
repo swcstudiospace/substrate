@@ -30,6 +30,7 @@ import {
 import { GRAPHS_GENERATION_KEY, ReadThroughCache, graphGenerationKey, snapshotKey, type CacheRedis } from "./cache.ts";
 import { loadConfig } from "./config.ts";
 import { Substrate, briefEtag, type SubstrateObserver } from "./service.ts";
+import { defined } from "./test-support.ts";
 import { SURFACES } from "./types.ts";
 
 const LIMITS = { nodes: 12, memoryChars: 240, bytes: 3500 };
@@ -156,7 +157,7 @@ describe("SUBSTRATE_BRIEF_PROFILE configuration", () => {
 		const junk = loadBriefProfileConfig({ SUBSTRATE_BRIEF_PROFILE: `on${"x".repeat(100)}` });
 		expect(junk.mode).toBe("shadow");
 		expect(junk.warnings).toHaveLength(1);
-		expect(junk.warnings[0]!.length).toBeLessThan(260);
+		expect(defined(junk.warnings[0]).length).toBeLessThan(260);
 	});
 
 	test("the surface list is comma or whitespace separated and closed against SURFACES", () => {
@@ -295,11 +296,11 @@ describe("full and compact from one set of reads", () => {
 		});
 		const decoded = decodeSections(JSON.stringify(raw));
 		expect(decoded).not.toBeNull();
-		expect(decoded!.every((section) => !Object.keys(section).includes("priority"))).toBe(true);
-		expect(renderCompactBrief(decoded!, COMPLETE, LIMITS)).toBe(honest);
+		expect(defined(decoded).every((section) => !Object.keys(section).includes("priority"))).toBe(true);
+		expect(renderCompactBrief(defined(decoded), COMPLETE, LIMITS)).toBe(honest);
 		// And under a tight cap the same lines are dropped as for the honest entry.
 		const tight = { ...LIMITS, bytes: MIN_COMPACT_BYTES };
-		const crowded = [...decoded!, ...decoded!.filter((section) => section.id === "decisions")];
+		const crowded = [...defined(decoded), ...defined(decoded).filter((section) => section.id === "decisions")];
 		expect(renderCompactBrief(crowded, COMPLETE, tight)).toBe(renderCompactBrief([...sections, ...sections.filter((section) => section.id === "decisions")], COMPLETE, tight));
 	});
 
@@ -308,7 +309,7 @@ describe("full and compact from one set of reads", () => {
 		const { index } = countingIndex({ memory: [entry("decision", long, { version: 3, needs_reverification: true })] });
 		const sections = await composeBriefSections(request, { index: index as never, greptime: null });
 		const text = renderCompactBrief(sections, COMPLETE, LIMITS);
-		const line = text.split("\n").find((candidate) => candidate.startsWith("- all work"))!;
+		const line = defined(text.split("\n").find((candidate) => candidate.startsWith("- all work")));
 		expect(Array.from(line).length).toBeLessThanOrEqual(240);
 		expect(line).toContain("…");
 		expect(line.endsWith("(hermes, human-confirmed, v3) — needs reverification")).toBe(true);
@@ -424,7 +425,7 @@ describe("renderCompactBrief, for random sections", () => {
 				memoryChars: 40 + Math.floor(rand() * 260),
 				bytes: MIN_COMPACT_BYTES + Math.floor(rand() * 3500),
 			};
-			const stateLine = [COMPLETE, "[brief: degraded; failed: graph, recent actions, open graphs, memory]"][seed % 2]!;
+			const stateLine = defined([COMPLETE, "[brief: degraded; failed: graph, recent actions, open graphs, memory]"][seed % 2]);
 			const check = (ok: boolean, what: string): void => {
 				if (!ok) failures.push(`seed ${seed}: ${what}`);
 			};
@@ -438,45 +439,45 @@ describe("renderCompactBrief, for random sections", () => {
 			// Which items survived: tokens lead every line and are never clipped away.
 			const present: Partial<Record<BriefSectionId, number[]>> = {};
 			for (const id of Object.keys(counts) as BriefSectionId[]) {
-				present[id] = Array.from({ length: counts[id]! }, (_, i) => i).filter((i) => text.includes(token(id, i)));
+				present[id] = Array.from({ length: defined(counts[id]) }, (_, i) => i).filter((i) => text.includes(token(id, i)));
 			}
 
 			// Within a section the survivors are a prefix of its compact order.
-			const nodeOrder = (counts.nodes ? Array.from({ length: counts.nodes }, (_, i) => i) : []).sort((a, b) => ranks[a]! - ranks[b]! || a - b);
+			const nodeOrder = (counts.nodes ? Array.from({ length: counts.nodes }, (_, i) => i) : []).sort((a, b) => defined(ranks[a]) - defined(ranks[b]) || a - b);
 			for (const id of Object.keys(counts) as BriefSectionId[]) {
-				const order = id === "nodes" ? nodeOrder : Array.from({ length: counts[id]! }, (_, i) => i);
-				const kept = present[id]!.length;
+				const order = id === "nodes" ? nodeOrder : Array.from({ length: defined(counts[id]) }, (_, i) => i);
+				const kept = defined(present[id]).length;
 				check(
-					JSON.stringify([...present[id]!].sort((a, b) => a - b)) === JSON.stringify(order.slice(0, kept).sort((a, b) => a - b)),
+					JSON.stringify([...defined(present[id])].sort((a, b) => a - b)) === JSON.stringify(order.slice(0, kept).sort((a, b) => a - b)),
 					`${id} survivors are not a prefix of its order`,
 				);
 			}
 
 			// The omitted line names exactly what is missing, and only that.
-			const last = text.split("\n").at(-1)!;
+			const last = defined(text.split("\n").at(-1));
 			const reported: Record<string, number> = {};
 			if (last.startsWith("...omitted: ")) {
 				const body = last.slice("...omitted: ".length).replace(" (profile=compact; request profile=full)", "");
 				for (const part of body.split(", ")) {
 					const [label, count] = part.split(" ");
-					reported[label!] = Number(count);
+					reported[defined(label)] = Number(count);
 				}
 				check(last.endsWith("(profile=compact; request profile=full)"), "omitted line has the wrong ending");
 			}
 			const expected: Record<string, number> = {};
 			for (const id of Object.keys(counts) as BriefSectionId[]) {
-				const missing = counts[id]! - present[id]!.length;
-				if (missing > 0) expected[LABELS[id]!] = missing;
+				const missing = defined(counts[id]) - defined(present[id]).length;
+				if (missing > 0) expected[defined(LABELS[id])] = missing;
 			}
 			check(JSON.stringify(reported) === JSON.stringify(expected), `omitted ${JSON.stringify(reported)}, expected ${JSON.stringify(expected)}`);
 
 			// Priority: a section that lost a line to the byte cap leaves every lower-priority section empty.
 			const byPriority = (Object.keys(counts) as BriefSectionId[]).sort((a, b) => BRIEF_SECTION_PRIORITY[a] - BRIEF_SECTION_PRIORITY[b]);
 			for (const id of byPriority) {
-				const cappedKeep = id === "nodes" ? Math.min(counts.nodes!, limits.nodes) : counts[id]!;
-				if (present[id]!.length < cappedKeep) {
+				const cappedKeep = id === "nodes" ? Math.min(defined(counts.nodes), limits.nodes) : defined(counts[id]);
+				if (defined(present[id]).length < cappedKeep) {
 					for (const lower of byPriority) {
-						if (BRIEF_SECTION_PRIORITY[lower] > BRIEF_SECTION_PRIORITY[id]) check(present[lower]!.length === 0, `${lower} kept a line under a dropped ${id} line`);
+						if (BRIEF_SECTION_PRIORITY[lower] > BRIEF_SECTION_PRIORITY[id]) check(defined(present[lower]).length === 0, `${lower} kept a line under a dropped ${id} line`);
 					}
 				}
 			}
@@ -609,7 +610,7 @@ describe("Substrate.briefDetailed under each mode", () => {
 
 		// A snapshot an older process stored has no sections: there is nothing to build compact from, so full is served.
 		const key = snapshotKey("brief-snapshot", "grok-bot", { repo: "acme/app", branch: null, graph_id: "ut-1" });
-		const stored = JSON.parse(redis.values.get(key)!);
+		const stored = JSON.parse(defined(redis.values.get(key), "stored brief snapshot"));
 		delete stored.v.sections;
 		redis.values.set(key, JSON.stringify(stored));
 		const legacy = await substrate.briefDetailed({ ...REQUEST, surface: "grok-bot" });
@@ -649,7 +650,7 @@ describe("brief profile metrics and the estimated spend", () => {
 		expect(fresh.notModified).toBe(false);
 		expect(fresh.detail.profile).toBe("full");
 		const saved = counterSum(instruments, METRIC.briefProfileBytesSaved, { surface: "grok-bot" });
-		expect(saved).toBe(fresh.detail.bytesSaved!);
+		expect(saved).toBe(defined(fresh.detail.bytesSaved, "bytesSaved"));
 		expect(saved).toBeGreaterThan(5000);
 		const tokens = counterSum(instruments, METRIC.servedTokensEst, { surface: "grok-bot", tool: "brief" });
 		expect(tokens).toBe(Math.ceil(Buffer.byteLength(fresh.detail.text, "utf8") / 4));
@@ -672,7 +673,7 @@ describe("brief profile metrics and the estimated spend", () => {
 		expect(Buffer.byteLength(answer.detail.text, "utf8")).toBeLessThanOrEqual(DEFAULT_COMPACT_BYTES);
 		expect(counterSum(instruments, METRIC.servedTokensEst, { surface: "grok-bot", tool: "brief" })).toBe(Math.ceil(Buffer.byteLength(answer.detail.text, "utf8") / 4));
 		expect(counterSum(instruments, METRIC.briefProfile, { surface: "grok-bot", profile: "compact", mode: "enforce" })).toBe(1);
-		expect(counterSum(instruments, METRIC.briefProfileBytesSaved, { surface: "grok-bot" })).toBe(answer.detail.bytesSaved!);
+		expect(counterSum(instruments, METRIC.briefProfileBytesSaved, { surface: "grok-bot" })).toBe(defined(answer.detail.bytesSaved, "bytesSaved"));
 
 		const off = observed();
 		await substrateOf({ SUBSTRATE_BRIEF_PROFILE: "off" }, index, new FakeRedis(), off.observer).briefConditional({ ...REQUEST, surface: "grok-bot" }, undefined);

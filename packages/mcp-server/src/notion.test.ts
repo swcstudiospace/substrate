@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildProperty, NOTION_VERSION, NOTION_WRITABLE, NotionClient, NotionError, notionPageId } from "./notion.ts";
+import { defined } from "./test-support.ts";
 
 const KEY = "ntn_notion_test_key_0123456789";
 const DS = "be3418f0-d2d8-411b-8677-fa8a95ee63be";
@@ -137,10 +138,10 @@ describe("NotionClient.getPage", () => {
 			Completed: "date",
 		});
 		expect(requests).toHaveLength(1);
-		expect(requests[0]!.method).toBe("GET");
-		expect(requests[0]!.url).toBe(`https://api.notion.com/v1/pages/${PAGE}`);
-		expect(requests[0]!.headers.Authorization).toBe(`Bearer ${KEY}`);
-		expect(requests[0]!.headers["Notion-Version"]).toBe(NOTION_VERSION);
+		expect(defined(requests[0]).method).toBe("GET");
+		expect(defined(requests[0]).url).toBe(`https://api.notion.com/v1/pages/${PAGE}`);
+		expect(defined(requests[0]).headers.Authorization).toBe(`Bearer ${KEY}`);
+		expect(defined(requests[0]).headers["Notion-Version"]).toBe(NOTION_VERSION);
 		expect(NOTION_VERSION).toBe("2025-09-03");
 	});
 
@@ -188,13 +189,13 @@ describe("NotionClient — Agent Task Graph parent check (the key is a workspace
 	};
 
 	for (const id of Object.keys(foreign)) {
-		test(`getPage refuses a page outside the task graph (${foreign[id]!.parent!.type})`, async () => {
+		test(`getPage refuses a page outside the task graph (${defined(defined(foreign[id]).parent).type})`, async () => {
 			const { client } = fakeNotion(foreign);
 
 			await expect(client.getPage(id)).rejects.toThrow("not a row of the Agent Task Graph");
 		});
 
-		test(`updatePage GETs the page first and never PATCHes one outside the task graph (${foreign[id]!.parent!.type})`, async () => {
+		test(`updatePage GETs the page first and never PATCHes one outside the task graph (${defined(defined(foreign[id]).parent).type})`, async () => {
 			const { requests, client } = fakeNotion(foreign);
 
 			const attempt = client.updatePage(id, { Agent: buildProperty("rich_text", "hermes") });
@@ -214,9 +215,9 @@ describe("NotionClient — Agent Task Graph parent check (the key is a workspace
 			`GET https://api.notion.com/v1/pages/${PAGE}`,
 			`PATCH https://api.notion.com/v1/pages/${PAGE}`,
 		]);
-		expect(requests[1]!.body).toEqual({ properties });
-		expect(requests[1]!.headers.Authorization).toBe(`Bearer ${KEY}`);
-		expect(requests[1]!.headers["Notion-Version"]).toBe(NOTION_VERSION);
+		expect(defined(requests[1]).body).toEqual({ properties });
+		expect(defined(requests[1]).headers.Authorization).toBe(`Bearer ${KEY}`);
+		expect(defined(requests[1]).headers["Notion-Version"]).toBe(NOTION_VERSION);
 	});
 
 	test("the configured data source may be written without dashes", async () => {

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Mirror, transitionComment, type MirrorContext, type MirrorOp, type MirrorSuccess } from "./mirror.ts";
 import { LinearClient } from "./linear.ts";
 import { NotionClient } from "./notion.ts";
+import { defined } from "./test-support.ts";
 
 const LIN_KEY = "lin-test-key";
 const NOTION_KEY = "ntn-test-key";
@@ -192,12 +193,12 @@ describe("claim (granted/reclaimed)", () => {
 		expect(failures).toEqual([]);
 		const updates = updatesOf(linear.mutations);
 		expect(updates).toHaveLength(1);
-		expect(updates[0]!.stateId).toBe("st-doing");
-		expect(updates[0]!.addedLabelIds).toEqual(["tl-agent:hermes"]);
-		expect(updates[0]!.removedLabelIds).toEqual(["l-d1", "l-a9"]);
+		expect(defined(updates[0]).stateId).toBe("st-doing");
+		expect(defined(updates[0]).addedLabelIds).toEqual(["tl-agent:hermes"]);
+		expect(defined(updates[0]).removedLabelIds).toEqual(["l-d1", "l-a9"]);
 		const comments = commentsOf(linear.mutations);
 		expect(comments).toHaveLength(1);
-		expect(comments[0]!.body).toBe("Claimed by hermes — session sess-1 (graph g1, node n1)");
+		expect(defined(comments[0]).body).toBe("Claimed by hermes — session sess-1 (graph g1, node n1)");
 		const patch = notion.mutations.find((m) => m.method === "PATCH");
 		expect(patch?.properties?.Agent).toEqual({ rich_text: [{ text: { content: "hermes" } }] });
 		expect(patch?.properties?.["Linear State"]).toEqual({ select: { name: "Doing" } });
@@ -230,7 +231,7 @@ describe("claim (granted/reclaimed)", () => {
 
 		const comments = commentsOf(linear.mutations);
 		expect(comments).toHaveLength(1);
-		expect(comments[0]!.body).toContain("sess-2");
+		expect(defined(comments[0]).body).toContain("sess-2");
 	});
 });
 
@@ -245,11 +246,11 @@ describe("steal", () => {
 		expect(failures).toEqual([]);
 		const updates = updatesOf(linear.mutations);
 		expect(updates).toHaveLength(1);
-		expect(updates[0]!.addedLabelIds).toEqual(["tl-agent:hermes"]);
-		expect(updates[0]!.removedLabelIds).toEqual(["l-ev"]);
+		expect(defined(updates[0]).addedLabelIds).toEqual(["tl-agent:hermes"]);
+		expect(defined(updates[0]).removedLabelIds).toEqual(["l-ev"]);
 		const comments = commentsOf(linear.mutations);
 		expect(comments).toHaveLength(1);
-		expect(comments[0]!.body).toBe("Claimed by hermes — session sess-2 (graph g1, node n1)");
+		expect(defined(comments[0]).body).toBe("Claimed by hermes — session sess-2 (graph g1, node n1)");
 	});
 });
 
@@ -268,9 +269,9 @@ describe.each(["release", "expire", "force"] as const)("%s", (op) => {
 		expect(failures).toEqual([]);
 		const updates = updatesOf(linear.mutations);
 		expect(updates).toHaveLength(1);
-		expect(updates[0]!.stateId).toBe("st-queued");
-		expect(updates[0]!.removedLabelIds).toEqual(["l-a1", "l-a2"]);
-		expect(updates[0]!.addedLabelIds).toBeUndefined();
+		expect(defined(updates[0]).stateId).toBe("st-queued");
+		expect(defined(updates[0]).removedLabelIds).toEqual(["l-a1", "l-a2"]);
+		expect(defined(updates[0]).addedLabelIds).toBeUndefined();
 		expect(commentsOf(linear.mutations)).toHaveLength(0);
 		const patch = notion.mutations.find((m) => m.method === "PATCH");
 		expect(patch?.properties?.Agent).toEqual({ rich_text: [] });
@@ -285,7 +286,7 @@ describe("review and done and close", () => {
 		expect(await mirror.review(ctx())).toEqual([]);
 		const updates = updatesOf(linear.mutations);
 		expect(updates).toHaveLength(1);
-		expect(updates[0]!.stateId).toBe("st-review");
+		expect(defined(updates[0]).stateId).toBe("st-review");
 		expect(commentsOf(linear.mutations)).toHaveLength(0);
 		expect(notion.mutations.find((m) => m.method === "PATCH")?.properties?.["Linear State"]).toEqual({
 			select: { name: "In Review" },
@@ -309,8 +310,8 @@ describe("review and done and close", () => {
 		expect(await mirror.close(ctx())).toEqual([]);
 		const updates = updatesOf(linear.mutations);
 		expect(updates).toHaveLength(1);
-		expect(updates[0]!.stateId).toBeUndefined();
-		expect(updates[0]!.removedLabelIds).toEqual(["l-a1"]);
+		expect(defined(updates[0]).stateId).toBeUndefined();
+		expect(defined(updates[0]).removedLabelIds).toEqual(["l-a1"]);
 		expect(notion.mutations.find((m) => m.method === "PATCH")?.properties).toEqual({ Agent: { rich_text: [] } });
 	});
 });
@@ -352,7 +353,7 @@ describe("swarm comment-only exception (D23-03)", () => {
 			expect(linear.mutations.filter((m) => m.kind === "label-create")).toHaveLength(0);
 			const comments = commentsOf(linear.mutations);
 			expect(comments).toHaveLength(1);
-			expect(comments[0]!.body).toBe(body);
+			expect(defined(comments[0]).body).toBe(body);
 			expect(notion.mutations).toHaveLength(0);
 		});
 	}
@@ -385,7 +386,7 @@ describe("failure semantics: fail-open warnings, never throws (D23-17/18)", () =
 			const failures = await mirror[op](ctx({ evictedHolder: "cursor" }));
 			expect(failures).toHaveLength(1);
 			expect(failures[0]).toEqual({ target: "linear", op, reason: expect.stringContaining("502") });
-			expect(failures[0]!.reason.length).toBeLessThanOrEqual(300);
+			expect(defined(failures[0]).reason.length).toBeLessThanOrEqual(300);
 		}
 	});
 
@@ -485,8 +486,8 @@ describe("failure semantics: fail-open warnings, never throws (D23-17/18)", () =
 
 		const updates = updatesOf(linear.mutations);
 		expect(updates).toHaveLength(2);
-		expect(updates[0]!.stateId).toBe("st-doing");
-		expect(updates[1]!.stateId).toBe("st-queued");
+		expect(defined(updates[0]).stateId).toBe("st-doing");
+		expect(defined(updates[1]).stateId).toBe("st-queued");
 	});
 });
 

@@ -20,6 +20,7 @@ import {
 	toolLabel,
 } from "./observe.ts";
 import { Substrate } from "./service.ts";
+import { defined } from "./test-support.ts";
 
 function rpc(method: string, params?: unknown, id: unknown = 1) {
 	return { jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) };
@@ -124,7 +125,7 @@ describe("auditToolCalls", () => {
 		await observed.start();
 		await auditToolCalls(observed, "muse", [{ id: 1, tool: "memory_brief", args: {} }]);
 
-		const counter = findCounter(observed.snapshot(), METRIC.toolCalls)!;
+		const counter = defined(findCounter(observed.snapshot(), METRIC.toolCalls), "toolCalls counter");
 		expect(sumCounter(counter, { tool: "memory_brief", decision: "allowed" })).toBe(1);
 	});
 
@@ -146,7 +147,7 @@ describe("auditToolCalls", () => {
 
 		expect(denials.get("42")).toContain("graph_claim");
 		expect(denials.get("42")).toContain("audit chain");
-		expect(sumCounter(findCounter(observed.snapshot(), METRIC.toolCalls)!, { decision: "denied" })).toBe(1);
+		expect(sumCounter(defined(findCounter(observed.snapshot(), METRIC.toolCalls), "toolCalls counter"), { decision: "denied" })).toBe(1);
 	});
 
 	test("lets a fail-open tool through when the chain could not record it", async () => {
@@ -156,7 +157,7 @@ describe("auditToolCalls", () => {
 		const { denials } = await auditToolCalls(observed, "omp", [{ id: 1, tool: "events_emit", args: {} }]);
 
 		expect(denials.size).toBe(0);
-		expect(sumCounter(findCounter(observed.snapshot(), METRIC.auditAppends)!, { outcome: "lost" })).toBe(1);
+		expect(sumCounter(defined(findCounter(observed.snapshot(), METRIC.auditAppends), "auditAppends counter"), { outcome: "lost" })).toBe(1);
 	});
 
 	test("an unknown tool is denied, because its audit mode was never decided", async () => {
@@ -346,7 +347,7 @@ describe("auditToolCalls", () => {
 		await observed.start();
 		await auditToolCalls(observed, "omp", [{ id: 1, tool: "wharrgarbl", args: {} }]);
 
-		expect(sumCounter(findCounter(observed.snapshot(), METRIC.toolCalls)!, { tool: "unrecognized" })).toBe(1);
+		expect(sumCounter(defined(findCounter(observed.snapshot(), METRIC.toolCalls), "toolCalls counter"), { tool: "unrecognized" })).toBe(1);
 		expect(observed.audit.recent()[0]?.tool).toBe("wharrgarbl");
 	});
 
@@ -470,10 +471,10 @@ describe("createObservability", () => {
 		});
 
 		const snapshot = observed.snapshot();
-		expect(sumCounter(findCounter(snapshot, METRIC.emitTotal)!, { outcome: "stored" })).toBe(1);
-		expect(sumCounter(findCounter(snapshot, METRIC.tokens)!, { direction: "input" })).toBe(10);
-		expect(sumCounter(findCounter(snapshot, METRIC.claims)!, { outcome: "revoked" })).toBe(1);
-		expect(sumCounter(findCounter(snapshot, METRIC.quarantines)!, { reason: "unrecorded-claim" })).toBe(1);
+		expect(sumCounter(defined(findCounter(snapshot, METRIC.emitTotal), "emitTotal counter"), { outcome: "stored" })).toBe(1);
+		expect(sumCounter(defined(findCounter(snapshot, METRIC.tokens), "tokens counter"), { direction: "input" })).toBe(10);
+		expect(sumCounter(defined(findCounter(snapshot, METRIC.claims), "claims counter"), { outcome: "revoked" })).toBe(1);
+		expect(sumCounter(defined(findCounter(snapshot, METRIC.quarantines), "quarantines counter"), { reason: "unrecorded-claim" })).toBe(1);
 	});
 });
 
@@ -568,9 +569,9 @@ describe("the claim observer", () => {
 		});
 
 		const snapshot = observed.snapshot();
-		expect(sumCounter(findCounter(snapshot, METRIC.leaseSteals)!, {})).toBe(1);
-		expect(sumCounter(findCounter(snapshot, METRIC.claims)!, { outcome: "stolen" })).toBe(1);
-		expect(sumCounter(findCounter(snapshot, METRIC.claims)!, { outcome: "granted" })).toBe(0);
+		expect(sumCounter(defined(findCounter(snapshot, METRIC.leaseSteals), "leaseSteals counter"), {})).toBe(1);
+		expect(sumCounter(defined(findCounter(snapshot, METRIC.claims), "claims counter"), { outcome: "stolen" })).toBe(1);
+		expect(sumCounter(defined(findCounter(snapshot, METRIC.claims), "claims counter"), { outcome: "granted" })).toBe(0);
 		observed.stop();
 	});
 
@@ -587,7 +588,7 @@ describe("the claim observer", () => {
 			quarantineReason: null,
 		});
 
-		expect(sumCounter(findCounter(observed.snapshot(), METRIC.leaseSteals)!, {})).toBe(0);
+		expect(sumCounter(defined(findCounter(observed.snapshot(), METRIC.leaseSteals), "leaseSteals counter"), {})).toBe(0);
 		observed.stop();
 	});
 });
@@ -616,7 +617,7 @@ describe("a withdrawn claim on the audit chain", () => {
 			["graph_claim", "allowed"],
 			["graph_claim", "denied"],
 		]);
-		const withdrawal = records[1]!;
+		const withdrawal = defined(records[1]);
 		expect(withdrawal.reason).toContain("withdrawn after it was allowed");
 		expect(withdrawal.graph_id).toBe("ut-1");
 		expect(withdrawal.node_id).toBe("n4");
