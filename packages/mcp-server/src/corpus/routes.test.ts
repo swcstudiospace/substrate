@@ -1,6 +1,6 @@
 /**
- * `POST /corpus/plan`, `POST /corpus/ingest` and `GET /corpus/status` over a real socket, with a fake manifest and a fake
- * LightRAG bulk plane behind the service. What matters here is the wiring the unit tests cannot see: the gates answer before
+ * `POST /corpus/plan`, `POST /corpus/ingest`, `POST /corpus/neardup` and `GET /corpus/status` over a real socket, with a fake manifest, a fake
+ * LightRAG bulk plane and a fake TEI behind the service. What matters here is the wiring the unit tests cannot see: the gates answer before
  * anything is read or sent, the body cap and the audit are the docs routes', and the happy path reaches the plane.
  */
 import { afterAll, describe, expect, test } from "bun:test";
@@ -31,13 +31,16 @@ interface Harness {
 
 const running: Harness[] = [];
 
-async function start(env: Record<string, string | undefined>, options: { plane?: boolean } = {}): Promise<Harness> {
+type TeiFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+async function start(env: Record<string, string | undefined>, options: { plane?: boolean; teiFetch?: TeiFetch } = {}): Promise<Harness> {
 	const config = loadConfig(env);
 	const observability = createObservability(config, env);
 	await observability.start();
 	const store = new FakeStore();
 	const plane = new FakePlane();
-	const substrate = new Substrate(config, { index: null, greptime: null, corpus: { store, ...(options.plane === false ? {} : { plane }) } }, observability.observer);
+	const stores = { index: null, greptime: null, corpus: { store, ...(options.plane === false ? {} : { plane }) }, ...(options.teiFetch === undefined ? {} : { teiFetch: options.teiFetch }) };
+	const substrate = new Substrate(config, stores, observability.observer);
 	const server = createHttpServer(substrate, config, observability);
 	const listening = Promise.withResolvers<void>();
 	server.listen(0, "127.0.0.1", listening.resolve);
@@ -242,5 +245,107 @@ describe("POST /corpus/plan and GET /corpus/status", () => {
 		const response = await fetch(`${harness.base}/corpus/status`, { headers: AUTH });
 		expect(response.status).toBe(200);
 		expect(await response.json()).toMatchObject({ protocol: CORPUS_PROTOCOL, total: 2, active: 1, tombstoned: 1, manifestVersion: 2 });
+	});
+});
+
+interface NeardupReply {
+	protocol: number;
+	model: string | null;
+	dimension: number | null;
+	compared: number;
+	pairs: Array<{ a: { repo: string; path: string }; b: { repo: string; path: string }; similarity: number }>;
+	truncated: boolean;
+	skipped: Array<{ repo: string; path: string; reason: string }>;
+}
+
+/** A TEI that answers `/info` and `/embed` from a table of vectors by text, and records every path it was asked for. */
+function teiFake(vectors: Record<string, number[]>, model = "test-model"): { fetch: TeiFetch; paths: string[] } {
+	const paths: string[] = [];
+	const fetchImpl: TeiFetch = async (input, init) => {
+		const path = new URL(String(input)).pathname;
+		paths.push(path);
+		if (path === "/info") return Response.json({ model_id: model, max_input_length: 512, max_client_batch_size: 32 });
+		if (path === "/embed") {
+			const body: unknown = JSON.parse(String(init?.body));
+			const inputs = typeof body === "object" && body !== null && "inputs" in body && Array.isArray(body.inputs) ? body.inputs : [];
+			return Response.json(inputs.map((text) => vectors[String(text)] ?? [0, 0, 1]));
+		}
+		return new Response("", { status: 404 });
+	};
+	return { fetch: fetchImpl, paths };
+}
+
+describe("POST /corpus/neardup", () => {
+	const TEI_ON = { ...ON, TEI_URL: "http://127.0.0.1:8080" };
+	const items = [
+		{ repo: REPO, path: "docs/a.md", text: "alpha excerpt" },
+		{ repo: REPO, path: "docs/b.md", text: "beta excerpt" },
+		{ repo: REPO, path: "docs/c.md", text: "gamma excerpt" },
+	];
+	const vectors = { "alpha excerpt": [1, 0, 0], "beta excerpt": [1, 0, 0], "gamma excerpt": [0, 1, 0] };
+	const request = { protocol: CORPUS_PROTOCOL, items };
+
+	test("embeds the excerpts through the service and answers the similar pair, reading no manifest and sending nothing to the plane", async () => {
+		const tei = teiFake(vectors);
+		const harness = await start(TEI_ON, { teiFetch: tei.fetch });
+		const response = await post(harness, "/corpus/neardup", request);
+		expect(response.status).toBe(200);
+		const text = await response.text();
+		const body = JSON.parse(text) as NeardupReply;
+		expect(body).toMatchObject({ protocol: CORPUS_PROTOCOL, model: "test-model", dimension: 3, compared: 3, truncated: false, skipped: [] });
+		expect(body.pairs).toEqual([{ a: { repo: REPO, path: "docs/a.md" }, b: { repo: REPO, path: "docs/b.md" }, similarity: 1 }]);
+		expect(text).not.toContain("excerpt");
+		expect(tei.paths.filter((path) => path === "/embed")).toHaveLength(1);
+		expect(harness.store.rows.size).toBe(0);
+		expect(harness.plane.batches).toEqual([]);
+	});
+
+	test("an anonymous caller is refused 401 and with the corpus off the answer is 503 corpus.disabled, and TEI is never asked", async () => {
+		const tei = teiFake(vectors);
+		const on = await start(TEI_ON, { teiFetch: tei.fetch });
+		expect((await post(on, "/corpus/neardup", request, ANON)).status).toBe(401);
+		const off = await start({ SUBSTRATE_TOKEN_OMP: "tok-omp", TEI_URL: "http://127.0.0.1:8080" }, { teiFetch: tei.fetch });
+		const response = await post(off, "/corpus/neardup", request);
+		expect(response.status).toBe(503);
+		expect(await reasonOf(response)).toBe("corpus.disabled");
+		expect(tei.paths).toEqual([]);
+	});
+
+	test("with TEI_URL unset the answer is 503 corpus.embeddings-unavailable (not-configured) and nothing is sent anywhere", async () => {
+		const tei = teiFake(vectors);
+		const harness = await start(ON, { teiFetch: tei.fetch });
+		const response = await post(harness, "/corpus/neardup", request);
+		expect(response.status).toBe(503);
+		expect(await response.json()).toMatchObject({ reason: "corpus.embeddings-unavailable", detail: "not-configured" });
+		expect(tei.paths).toEqual([]);
+	});
+
+	test("a TEI that names another model than the pinned one is 503 model-mismatch, and the reply holds no text and no TEI address", async () => {
+		const tei = teiFake(vectors, "another-model");
+		const harness = await start({ ...TEI_ON, SUBSTRATE_TEI_MODEL: "pinned-model" }, { teiFetch: tei.fetch });
+		const response = await post(harness, "/corpus/neardup", request);
+		expect(response.status).toBe(503);
+		const text = await response.text();
+		expect(JSON.parse(text)).toMatchObject({ reason: "corpus.embeddings-unavailable", detail: "model-mismatch" });
+		expect(text).not.toContain("excerpt");
+		expect(text).not.toContain("127.0.0.1:8080");
+	});
+
+	test("a refused request is 400 with its closed reason, a body that is not JSON is 415 or 400, and a body over the cap is 413", async () => {
+		const tei = teiFake(vectors);
+		const harness = await start(TEI_ON, { teiFetch: tei.fetch });
+		expect(await reasonOf(await post(harness, "/corpus/neardup", { ...request, threshold: 0.2 }))).toBe("bad-threshold");
+		expect(await reasonOf(await post(harness, "/corpus/neardup", { protocol: 2, items }))).toBe("bad-protocol");
+		expect((await post(harness, "/corpus/neardup", request, { ...AUTH, "content-type": "text/plain" })).status).toBe(415);
+		expect((await post(harness, "/corpus/neardup", "{ not json")).status).toBe(400);
+		const oversized = JSON.stringify({ ...request, padding: "x".repeat(19_000_000) });
+		expect((await post(harness, "/corpus/neardup", oversized)).status).toBe(413);
+		expect(tei.paths).toEqual([]);
+	});
+
+	test("the near-duplicate door is fail-open: an audit chain that cannot take the record does not refuse it", async () => {
+		const tei = teiFake(vectors);
+		const harness = await start({ ...TEI_ON, SUBSTRATE_AUDIT_PATH: unwritableAuditPath() }, { teiFetch: tei.fetch });
+		expect((await post(harness, "/corpus/neardup", request)).status).toBe(200);
 	});
 });

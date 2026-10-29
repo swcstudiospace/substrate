@@ -16,8 +16,8 @@ import { planCorpus, planRepos } from "./plan.ts";
 import type { CorpusStore } from "./store.ts";
 import { parseIngestRequest, parsePlanRequest, type RequestRefusal } from "./validate.ts";
 
-/** Every reason a corpus door refuses: the gates, the request refusals, and an index that does not answer. Closed. */
-export type CorpusRefusalReason = GateReason | RequestRefusal | "corpus.index-unavailable";
+/** Every reason a corpus door refuses: the gates, the request refusals, an index that does not answer and an embedding service that does not. Closed. */
+export type CorpusRefusalReason = GateReason | RequestRefusal | "corpus.index-unavailable" | "corpus.embeddings-unavailable";
 
 export interface CorpusRefusal {
 	error: string;
@@ -50,6 +50,7 @@ const MESSAGES: Readonly<Record<CorpusRefusalReason, string>> = {
 	"corpus.disabled": "the corpus is switched off (SUBSTRATE_CORPUS is not on); nothing was read or changed",
 	"corpus.backend-unavailable": "the corpus ingest needs the LightRAG docs backend, which is not configured; nothing was sent",
 	"corpus.index-unavailable": "the corpus manifest is not reachable (no index, or it did not answer); nothing was changed",
+	"corpus.embeddings-unavailable": "the embedding service could not answer (the closed reason is in detail); nothing was compared",
 	"bad-request": "the request body is not a valid corpus request",
 	"bad-protocol": "the request names a corpus protocol version this server does not speak",
 	"too-many-entries": "the plan names more entries than one request may carry",
@@ -67,9 +68,14 @@ const MESSAGES: Readonly<Record<CorpusRefusalReason, string>> = {
 	"bad-commit": "a commit is not a short printable string",
 	"bad-body": "a document body is not a string",
 	"duplicate-entry": "one (repo, path) appears twice in the request",
+	"too-many-items": "the near-duplicate request names more items than one request may carry",
+	"bad-text": "an item text is not a string",
+	"text-too-long": "an item text is longer than one request may carry",
+	"bad-threshold": "the threshold is not a number from 0.5 to 1",
+	"bad-max-pairs": "maxPairs is not a whole number from 1 to 1000",
 };
 
-function refusal(status: 400 | 401 | 403 | 503, reason: CorpusRefusalReason, detail?: string): CorpusFailure {
+export function refusal(status: 400 | 401 | 403 | 503, reason: CorpusRefusalReason, detail?: string): CorpusFailure {
 	return { ok: false, status, body: { error: MESSAGES[reason], reason, ...(detail === undefined ? {} : { detail }) } };
 }
 

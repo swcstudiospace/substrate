@@ -172,9 +172,10 @@ import { lightragOp, probeLightrag, queryForTool, type LightragQueryMode, type L
 import { createTeiClient, teiOp, type TeiClient } from "./planes/tei.ts";
 import { createEmbeddingService, type EmbeddingService } from "./embed.ts";
 import { createLightragBulkPlane, type LightragBulkPlane } from "./planes/lightrag-bulk.ts";
+import { corpusNeardupReply } from "./corpus/neardup.ts";
 import { corpusIngestReply, corpusPlanReply, corpusStatusReply, type CorpusReply, type CorpusServiceDeps } from "./corpus/service.ts";
 import type { CorpusStore } from "./corpus/store.ts";
-import type { CorpusIngestResponse, CorpusPlanResponse, CorpusStatusResponse } from "@substrate/corpus";
+import type { CorpusIngestResponse, CorpusNeardupResponse, CorpusPlanResponse, CorpusStatusResponse } from "@substrate/corpus";
 import { RailwayClient } from "./railway.ts";
 import { nodePlanningFs } from "./planning/fs.ts";
 import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
@@ -5538,6 +5539,14 @@ export class Substrate {
 	/** `POST /corpus/plan` and the planning half of the `substrate corpus plan` command. */
 	corpusPlan(raw: unknown, callerSurface: Surface | null): Promise<CorpusReply<CorpusPlanResponse>> {
 		return corpusPlanReply(this.corpusDeps(), raw, callerSurface);
+	}
+
+	/**
+	 * `POST /corpus/neardup`: excerpts embedded through the cached embedding service, the similar pairs returned. Advisory: it reads
+	 * no manifest and changes nothing, so it needs no index.
+	 */
+	corpusNeardup(raw: unknown, callerSurface: Surface | null): Promise<CorpusReply<CorpusNeardupResponse>> {
+		return corpusNeardupReply({ settings: this.config.corpus, vmGuest: this.config.vmGuest, embeddings: this.embeddings }, raw, callerSurface);
 	}
 
 	/** `GET /corpus/status` and the `corpus_status` tool. */

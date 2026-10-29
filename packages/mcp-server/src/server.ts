@@ -40,6 +40,7 @@ import type { JSONRPCMessage, MessageExtraInfo } from "@modelcontextprotocol/sdk
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { auditMode } from "@substrate/audit";
+import { MAX_NEARDUP_ITEMS, MAX_NEARDUP_TEXT_CHARS } from "@substrate/corpus";
 import {
 	classifyEventRefusal,
 	evaluateAdmissionSlo,
@@ -280,6 +281,12 @@ const MAX_BODY_BYTES = 1_000_000;
  */
 const DOCS_MAX_BODY_BYTES = 6_000_000;
 
+/**
+ * `POST /corpus/neardup` carries up to 1000 excerpts of 4000 characters. Four bytes per character covers any UTF-8 text with the
+ * usual JSON escapes; the room beyond that is each item's repo, path and member names. A larger body is refused 413.
+ */
+const NEARDUP_MAX_BODY_BYTES = MAX_NEARDUP_ITEMS * (MAX_NEARDUP_TEXT_CHARS * 4 + 2_500);
+
 /** How long a request may take to arrive: its headers, then the whole request. Bounds a slow client, not a response. */
 const HEADERS_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 120_000;
@@ -304,6 +311,7 @@ const JSON_BODY_ROUTES: Record<string, true> = {
 	"/skills/propose": true,
 	"/skills/approve": true,
 	"/worktrees/report": true,
+	"/corpus/neardup": true,
 	"/mcp": true,
 };
 
@@ -1596,6 +1604,20 @@ export function createHttpServer(
 				sendJson(res, reply.status, reply.body);
 				return;
 			}
+			// Advisory near-duplicate pairs (phase 64): the excerpts go to the operator's TEI service through the cached embedding
+			// service and nowhere else. Same gating and audit name as the plan (a read, `corpus_status`); the audit record carries
+			// the item count only, never a text.
+			if (req.method === "POST" && url.pathname === "/corpus/neardup") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req, NEARDUP_MAX_BODY_BYTES));
+				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "neardup", items: listLength(parsed, "items") }))) return;
+				const reply = await substrate.corpusNeardup(parsed, surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
 			if (req.method === "POST" && url.pathname === "/corpus/ingest") {
 				if (surface === null) {
 					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
@@ -2031,7 +2053,7 @@ export function createHttpServer(
 
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
-			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/corpus/plan" || url.pathname === "/corpus/ingest" || url.pathname === "/mcp" || url.pathname === "/memory" || url.pathname === "/worktrees/report")) {
+			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/corpus/plan" || url.pathname === "/corpus/neardup" || url.pathname === "/corpus/ingest" || url.pathname === "/mcp" || url.pathname === "/memory" || url.pathname === "/worktrees/report")) {
 				sendJson(res, 413, { error: cause.message });
 				return;
 			}

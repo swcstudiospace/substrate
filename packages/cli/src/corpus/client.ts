@@ -1,5 +1,5 @@
 /**
- * The HTTP side of `substrate corpus`: three routes of the substrate server, each answer checked by a guard before it is
+ * The HTTP side of `substrate corpus`: the routes of the substrate server, each answer checked by a guard before it is
  * used. A server that speaks another protocol version, answers with the wrong shape, refuses the token or runs with the
  * corpus off is reported as a closed error kind with a message the operator can act on; nothing here throws for those.
  */
@@ -10,12 +10,16 @@ import {
 	PLAN_ACTIONS,
 	isDocKind,
 	isDocTier,
+	isEmbeddingReason,
 	isRecord,
 	type CorpusIngestRequest,
 	type CorpusIngestResponse,
+	type CorpusNeardupRequest,
+	type CorpusNeardupResponse,
 	type CorpusPlanRequest,
 	type CorpusPlanResponse,
 	type CorpusStatusResponse,
+	type EmbeddingReason,
 } from "@substrate/corpus";
 
 export interface ClientConfig {
@@ -27,19 +31,22 @@ export interface ClientConfig {
 	fetchImpl?: typeof fetch | undefined;
 }
 
-export const ERROR_KINDS = ["unauthorized", "forbidden", "disabled", "unavailable", "protocol", "invalid", "http", "network", "timeout"] as const;
+export const ERROR_KINDS = ["unauthorized", "forbidden", "disabled", "unavailable", "embeddings", "protocol", "invalid", "http", "network", "timeout"] as const;
 export type ErrorKind = (typeof ERROR_KINDS)[number];
 
 export interface ClientError {
 	kind: ErrorKind;
 	message: string;
 	status?: number | undefined;
+	/** For `embeddings`: the closed reason the server's embedding service gave, when it gave one this CLI knows. */
+	reason?: EmbeddingReason | undefined;
 }
 
 export type ClientResult<T> = { ok: true; value: T } | { ok: false; error: ClientError };
 
 export interface CorpusClient {
 	plan(request: CorpusPlanRequest): Promise<ClientResult<CorpusPlanResponse>>;
+	neardup(request: CorpusNeardupRequest): Promise<ClientResult<CorpusNeardupResponse>>;
 	ingest(request: CorpusIngestRequest): Promise<ClientResult<CorpusIngestResponse>>;
 	status(): Promise<ClientResult<CorpusStatusResponse>>;
 }
@@ -125,8 +132,27 @@ export function isStatusResponse(value: unknown): value is CorpusStatusResponse 
 	);
 }
 
-function fail(kind: ErrorKind, message: string, status?: number): { ok: false; error: ClientError } {
-	return { ok: false, error: { kind, message, ...(status === undefined ? {} : { status }) } };
+function isNeardupKey(value: unknown): boolean {
+	return isRecord(value) && typeof value.repo === "string" && typeof value.path === "string";
+}
+
+export function isNeardupResponse(value: unknown): value is CorpusNeardupResponse {
+	return (
+		isRecord(value) &&
+		value.protocol === CORPUS_PROTOCOL &&
+		(value.model === null || typeof value.model === "string") &&
+		(value.dimension === null || isCount(value.dimension)) &&
+		isCount(value.compared) &&
+		typeof value.truncated === "boolean" &&
+		Array.isArray(value.pairs) &&
+		value.pairs.every((pair) => isRecord(pair) && isNeardupKey(pair.a) && isNeardupKey(pair.b) && typeof pair.similarity === "number" && Number.isFinite(pair.similarity)) &&
+		Array.isArray(value.skipped) &&
+		value.skipped.every((item) => isNeardupKey(item) && isRecord(item) && item.reason === "empty")
+	);
+}
+
+function fail(kind: ErrorKind, message: string, status?: number, reason?: EmbeddingReason): { ok: false; error: ClientError } {
+	return { ok: false, error: { kind, message, ...(status === undefined ? {} : { status }), ...(reason === undefined ? {} : { reason }) } };
 }
 
 function parseJson(text: string): unknown {
@@ -136,6 +162,16 @@ function parseJson(text: string): unknown {
 		// A body that is not JSON is the "invalid" answer, handled by the caller.
 		return null;
 	}
+}
+
+/** The marker the server puts in a 503 when the embedding service could not answer; its `detail` is the closed reason. */
+const EMBEDDINGS_MARKER = "corpus.embeddings-unavailable";
+
+/** The closed reason of an `embeddings` 503, or undefined when the body is not one or names a reason this CLI does not know. */
+function embeddingsReason(text: string): { reason: EmbeddingReason | undefined } | null {
+	const body = parseJson(text);
+	if (!isRecord(body) || body.reason !== EMBEDDINGS_MARKER) return null;
+	return { reason: isEmbeddingReason(body.detail) ? body.detail : undefined };
 }
 
 /** The server's own explanation, when it sent a short `error` or `reason` string. */
@@ -175,9 +211,14 @@ export function createCorpusClient(config: ClientConfig): CorpusClient {
 			return fail("forbidden", "the server refused this surface (403): the corpus routes need an operator surface", 403);
 		}
 		if (response.status === 503) {
-			return text.includes(DISABLED_MARKER)
-				? fail("disabled", "the server runs with the corpus off (corpus.disabled): enable the corpus flag on the server and retry", 503)
-				: fail("unavailable", `the server is unavailable (503)${detailOf(text)}`, 503);
+			if (text.includes(DISABLED_MARKER)) {
+				return fail("disabled", "the server runs with the corpus off (corpus.disabled): enable the corpus flag on the server and retry", 503);
+			}
+			const embeddings = embeddingsReason(text);
+			if (embeddings !== null) {
+				return fail("embeddings", `the embedding service could not answer (${embeddings.reason ?? "unknown reason"}); nothing was compared`, 503, embeddings.reason);
+			}
+			return fail("unavailable", `the server is unavailable (503)${detailOf(text)}`, 503);
 		}
 		if (!response.ok) return fail("http", `the server answered ${response.status}${detailOf(text)}`, response.status);
 		const parsed = parseJson(text);
@@ -190,6 +231,7 @@ export function createCorpusClient(config: ClientConfig): CorpusClient {
 
 	return {
 		plan: (request) => call("POST", CORPUS_ROUTES.plan, request, isPlanResponse),
+		neardup: (request) => call("POST", CORPUS_ROUTES.neardup, request, isNeardupResponse),
 		ingest: (request) => call("POST", CORPUS_ROUTES.ingest, request, isIngestResponse),
 		status: () => call("GET", CORPUS_ROUTES.status, undefined, isStatusResponse),
 	};

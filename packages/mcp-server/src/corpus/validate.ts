@@ -10,7 +10,12 @@ import {
 	MAX_COVERAGE_PAIRS,
 	MAX_INGEST_DOCUMENTS,
 	MAX_INGEST_TOMBSTONES,
+	MAX_NEARDUP_ITEMS,
+	MAX_NEARDUP_PAIRS,
+	MAX_NEARDUP_TEXT_CHARS,
+	MAX_NEARDUP_THRESHOLD,
 	MAX_PLAN_ENTRIES,
+	MIN_NEARDUP_THRESHOLD,
 	hasControlCharacter,
 	isCorpusSource,
 	isDocKind,
@@ -21,8 +26,10 @@ import {
 	type CorpusDocument,
 	type CorpusEntry,
 	type CorpusIngestRequest,
+	type CorpusNeardupRequest,
 	type CorpusPlanRequest,
 	type CorpusScope,
+	type NeardupItem,
 } from "@substrate/corpus";
 
 const MAX_COMMIT_LENGTH = 100;
@@ -47,6 +54,11 @@ export const REQUEST_REFUSALS = [
 	"bad-source",
 	"bad-commit",
 	"bad-body",
+	"too-many-items",
+	"bad-text",
+	"text-too-long",
+	"bad-threshold",
+	"bad-max-pairs",
 	"duplicate-entry",
 ] as const;
 export type RequestRefusal = (typeof REQUEST_REFUSALS)[number];
@@ -165,4 +177,46 @@ export function parseIngestRequest(raw: unknown): Parsed<CorpusIngestRequest> {
 		tombstones.push({ repo, path });
 	}
 	return { ok: true, value: { protocol: CORPUS_PROTOCOL, documents, tombstones } };
+}
+
+/**
+ * `POST /corpus/neardup`: the protocol version, at most {@link MAX_NEARDUP_ITEMS} items with a valid repo and path (unique
+ * as a pair) and a string `text` of at most {@link MAX_NEARDUP_TEXT_CHARS} characters, an optional threshold and an
+ * optional pair cap. A refusal never echoes a text. Absent `threshold` and `maxPairs` stay absent: the handler applies its defaults.
+ */
+export function parseNeardupRequest(raw: unknown): Parsed<CorpusNeardupRequest> {
+	if (!isRecord(raw)) return refuse("bad-request", "the body must be a JSON object");
+	if (raw.protocol !== CORPUS_PROTOCOL) return refuse("bad-protocol", `this server speaks protocol ${CORPUS_PROTOCOL}`);
+	if (!Array.isArray(raw.items)) return refuse("bad-request", "items must be an array");
+	if (raw.items.length > MAX_NEARDUP_ITEMS) return refuse("too-many-items", `at most ${MAX_NEARDUP_ITEMS}`);
+	const { threshold, maxPairs } = raw;
+	if (threshold !== undefined && (typeof threshold !== "number" || !Number.isFinite(threshold) || threshold < MIN_NEARDUP_THRESHOLD || threshold > MAX_NEARDUP_THRESHOLD)) {
+		return refuse("bad-threshold", `a number from ${MIN_NEARDUP_THRESHOLD} to ${MAX_NEARDUP_THRESHOLD}`);
+	}
+	if (maxPairs !== undefined && (typeof maxPairs !== "number" || !Number.isInteger(maxPairs) || maxPairs < 1 || maxPairs > MAX_NEARDUP_PAIRS)) {
+		return refuse("bad-max-pairs", `a whole number from 1 to ${MAX_NEARDUP_PAIRS}`);
+	}
+	const seen = new Set<string>();
+	const items: NeardupItem[] = [];
+	for (const item of raw.items) {
+		if (!isRecord(item)) return refuse("bad-request", "an item must be an object");
+		const { repo, path, text } = item;
+		if (typeof repo !== "string" || !isValidRepo(repo)) return refuse("bad-repo", typeof repo === "string" ? repo.slice(0, 80) : undefined);
+		if (typeof path !== "string" || !isValidPath(path)) return refuse("bad-path", `${repo}: ${typeof path === "string" ? path.slice(0, 80) : "not a string"}`);
+		if (typeof text !== "string") return refuse("bad-text", `${repo}:${path}`);
+		if (text.length > MAX_NEARDUP_TEXT_CHARS) return refuse("text-too-long", `${repo}:${path}: at most ${MAX_NEARDUP_TEXT_CHARS} characters`);
+		const key = keyOf({ repo, path });
+		if (seen.has(key)) return refuse("duplicate-entry", `${repo}:${path}`);
+		seen.add(key);
+		items.push({ repo, path, text });
+	}
+	return {
+		ok: true,
+		value: {
+			protocol: CORPUS_PROTOCOL,
+			items,
+			...(typeof threshold === "number" ? { threshold } : {}),
+			...(typeof maxPairs === "number" ? { maxPairs } : {}),
+		},
+	};
 }
