@@ -430,11 +430,9 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 			return { ok: false, reason: "model-mismatch" };
 		}
 		// A probe that names the expected model, started after the newest refusal, lifts it: the service is back on that model.
-		// It learns nothing: only a pin or a model an embed learned is ever expected.
-		if (wanted !== null && modelRefused && checkNumber > refusedBySeq) {
-			modelRefused = false;
-			modelCheckedAt = now();
-		}
+		// It learns nothing (only a pin or a model an embed learned is ever expected, and the server's batch limit is read by a
+		// verification) and leaves the verdict's age alone, so a client that never verified still asks `/info` on its first embed.
+		if (wanted !== null && modelRefused && checkNumber > refusedBySeq) modelRefused = false;
 		return { ok: true };
 	}
 

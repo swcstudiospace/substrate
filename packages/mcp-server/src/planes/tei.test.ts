@@ -706,6 +706,24 @@ describe("one timeout for every request of a call", () => {
 		expect((await client.embed(["b"])).ok).toBe(true);
 		expect(infoSeen).toBe(3);
 	});
+
+	test("probes that saw the wrong model and then the right one leave a client that never verified to read the server's batch limit on its first embed", async () => {
+		const tei = fakeTei({ maxBatch: 2 });
+		let infoSeen = 0;
+		const fetchImpl: PlaneFetch = async (input, init) => {
+			if (new URL(String(input)).pathname !== "/info") return tei.fetch(input, init);
+			infoSeen += 1;
+			// Two probes first (the wrong model, then the pinned one); the embed's own check names the pinned model and its limit.
+			return Response.json({ model_id: infoSeen === 1 ? "other-model" : "test-model", max_input_length: 512, max_client_batch_size: 2 });
+		};
+		const { client } = clientFor({ ...CONFIG, model: "test-model", batch: 32 }, fetchImpl);
+		expect(await client.probe()).toEqual({ ok: false, reason: "model-mismatch" });
+		expect(await client.probe()).toEqual({ ok: true });
+		expect((await client.embed(["a", "b", "c", "d", "e"])).ok).toBe(true);
+		expect(infoSeen).toBe(3);
+		// The server's limit of 2 held: five texts went out in three requests, not one of five.
+		expect(tei.embedCalls()).toHaveLength(3);
+	});
 });
 
 describe("probe after a recovery", () => {
