@@ -640,7 +640,7 @@ describe("substrate corpus status --gaps", () => {
 		const text = await run(["status", "--gaps"]);
 		expect(text.out).not.toContain("\u001b");
 		expect(text.out).not.toContain("\u0007");
-		expect(text.out).toContain("a\\u001b[31mred\\u000aforged line\\u2028");
+		expect(text.out).toContain("a\\x1b[31mred\\x0aforged line\\u2028");
 		expect(text.out.split("\n").some((line) => line.startsWith("forged line"))).toBe(false);
 	});
 

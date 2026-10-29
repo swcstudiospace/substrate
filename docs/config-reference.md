@@ -231,6 +231,10 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_CORPUS_CONCURRENCY` | number | 4 | 1..16 | 4 batches in flight at once. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CORPUS_BATCH_DOCS` | number | 20 | 1..200 | 20 documents per batch. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_CORPUS_BATCH_BYTES` | number | 1000000 | 10000..5000000 | 1000000 bytes per batch. See `docs/runbooks/corpus-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_DOCS_TELEMETRY` | toggle | off | off \| on (case- and space-insensitive; anything else is off) | off: a docs search writes no corpus_retrievals row and no retention sweep runs; on appends one bounded, redacted row per search after the answer is built (fail-open) and sweeps rows past the retention at boot and hourly. See `docs/data-planes.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_DOCS_TELEMETRY_RETENTION_DAYS` | number | 30 | 1..365 whole days (outside it is capped; not a whole number is 30) | 30 days; only read while SUBSTRATE_DOCS_TELEMETRY is on. See `docs/data-planes.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_DOCS_RERANK` | mode | off | off \| shadow \| on (case- and space-insensitive; anything else is off) | off: a docs answer is exactly what the plane returned; shadow records what the authority re-rank would change in the telemetry row and leaves the answer alone; on annotates corpus citations with stale and superseded_by and re-orders them by authority. See `docs/data-planes.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_DOCS_GAP_SCORE` | number | 0.2 | a number in [0, 1] (anything else is 0.2) | 0.2: a query whose best citation scored below it, or that returned none, is a gap in GET /corpus/gaps. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 
 ## Admission budgets and circuit breakers
 

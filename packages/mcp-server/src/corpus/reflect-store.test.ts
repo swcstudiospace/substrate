@@ -109,6 +109,8 @@ describeLive("the reflect tables against a live index", () => {
 	});
 
 	test("the gap aggregate lists a query whose best score was none or low, leaves out answered, degraded and old searches, and orders by searches", async () => {
+		// Rows an earlier test of this file left under the same marker are gaps too; start from none.
+		await cleanup`delete from corpus_retrievals where query_hash like ${`${MARKER}%`}`;
 		await store.appendRetrieval(row("gap-none"));
 		await store.appendRetrieval(row("gap-none"));
 		await store.appendRetrieval(row("gap-none", { queryText: "the newest text" }));
