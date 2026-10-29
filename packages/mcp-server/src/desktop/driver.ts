@@ -356,7 +356,8 @@ export function createDesktopDriver(deps: {
 		// fails or times out proves nothing, so it refuses, as an empty endpoint does, and
 		// a non-local endpoint is refused the same way. No refusal names the endpoint.
 		const locality = await call(contextArgv(), Math.max(1, Math.min(ACTION_TIMEOUT_MS, deadline - now())));
-		if (locality === TIMEOUT || locality.code !== 0) throw new Error("docker context probe failed; refusing desktop_run");
+		if (locality === TIMEOUT) throw new Error("docker context probe timed out; refusing desktop_run");
+		if (locality.code !== 0) throw new Error("docker context probe failed; refusing desktop_run");
 		const endpoint = locality.stdout.toString("utf8").trim().split("\n")[0] ?? "";
 		if (endpoint === "") throw new Error("docker context endpoint is empty; refusing desktop_run");
 		if (!endpoint.startsWith("unix://")) throw new Error("docker context endpoint is not local; refusing desktop_run");

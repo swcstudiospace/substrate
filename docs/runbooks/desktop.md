@@ -17,8 +17,9 @@ touches a production store; `recruitment-desktop` is only inspected; no
 command carries or prints a credential.
 
 The check exits `0` on pass, `1` on a failed criterion, `2` when it could not
-ask (no instance, a refused target, missing token files, or an unreachable
-twin). It prints hashes, sizes, counts and booleans — never a bearer, a
+ask (no instance, a refused target, missing token files, an unreachable
+twin, or a docker endpoint that cannot be proven local). It prints hashes,
+sizes, counts and booleans — never a bearer, a
 password or typed text.
 
 It checks, in order:
@@ -88,6 +89,18 @@ anything, and never names `recruitment-desktop`.
 sudo infra/desktop/substrate-desktop.sh up
 sudo infra/desktop/substrate-desktop.sh status
 ```
+
+## Docker locality
+
+The desktop is only ever driven on this host's own docker engine, and the
+proof has to succeed: `up`, the smoke and every `desktop_run` probe the
+effective docker endpoint first (`docker context inspect`, bounded to 10 s in
+the script and the smoke, to the action timeout in the driver) and proceed
+only on a `unix://` socket. A probe that fails, times out or answers nothing
+refuses — the script dies with "could not prove the local docker endpoint",
+the smoke exits `2`, `desktop_run` returns "docker context probe failed" or
+"timed out" — and a non-local endpoint refuses by name. An unproven probe is
+never treated as local.
 
 ## Basic auth
 
