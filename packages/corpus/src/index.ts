@@ -1,5 +1,6 @@
 export * from "./protocol.ts";
 export * from "./classify.ts";
+export * from "./leaf.ts";
 export * from "./discover.ts";
 export * from "./guards.ts";
 export * from "./names.ts";

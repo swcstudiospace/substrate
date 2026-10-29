@@ -6,12 +6,15 @@ import {
 	INGEST_STATUSES,
 	PLAN_ACTIONS,
 	documentKey,
+	type CorpusAnchorResponse,
 	type CorpusPlanResponse,
+	type CorpusProofResponse,
 	type CorpusStatusResponse,
 	type IngestStatus,
 	type PlanItem,
 } from "@substrate/corpus";
 import type { Inventory } from "./inventory.ts";
+import type { OfflineVerdict } from "./proof.ts";
 
 /** Items listed per plan action. */
 export const LIST_LIMIT = 20;
@@ -160,4 +163,71 @@ export function renderStatus(status: CorpusStatusResponse): string {
 	for (const row of status.byRepo.slice(0, REPO_LIMIT)) out.push(`  ${printable(row.repo)}  ${row.active} active  ${row.tombstoned} tombstoned\n`);
 	out.push(more(REPO_LIMIT, status.byRepo.length));
 	return out.join("");
+}
+
+/** The longest piece of server-supplied text a line shows. */
+export const TEXT_LIMIT = 300;
+/** Reasons listed under an anchor status. */
+export const REASON_LIMIT = 10;
+
+/**
+ * Server or file text for a verify line: `printable` (control characters escaped) and cut at {@link TEXT_LIMIT} characters, so a
+ * long reason or name cannot swamp the report.
+ */
+function clip(text: string): string {
+	const safe = printable(text);
+	return safe.length > TEXT_LIMIT ? `${safe.slice(0, TEXT_LIMIT)}...` : safe;
+}
+
+export interface VerifyReport {
+	proof: CorpusProofResponse;
+	offline: OfflineVerdict;
+	/** Whether `--online` was given. */
+	online: boolean;
+	anchor: CorpusAnchorResponse | null;
+	/** Why the anchor check did not run or did not answer, when `--online` was given. */
+	anchorSkipped: string | null;
+	/** What in the anchor answer contradicts the proof. */
+	conflict: string | null;
+}
+
+/** Whether the report is a valid verification: the proof holds and the anchor answer, when there is one, does not contradict it. */
+export function isValidReport(report: VerifyReport): boolean {
+	return report.offline.valid && report.conflict === null;
+}
+
+function anchorLines(report: VerifyReport): string[] {
+	if (!report.online) return ["anchor: not checked (use --online to ask the server)\n"];
+	const { anchor } = report;
+	if (anchor === null) return [`anchor: check skipped, ${clip(report.anchorSkipped ?? "no answer")}\n`];
+	const lines = [`anchor: ${anchor.status}\n`];
+	const signature = anchor.evidence?.signature ?? null;
+	const hourlyRoot = anchor.evidence?.anchoredRoot ?? null;
+	const slot = anchor.evidence?.slot ?? null;
+	if (anchor.hourStart !== null) lines.push(`  hour: ${clip(anchor.hourStart)}\n`);
+	if (anchor.eventId !== null) lines.push(`  root event: ${clip(anchor.eventId)}\n`);
+	if (signature !== null) lines.push(`  transaction: ${clip(signature)}${slot === null ? "" : ` (slot ${slot})`}\n`);
+	if (hourlyRoot !== null) lines.push(`  hourly root: ${clip(hourlyRoot)}\n`);
+	for (const reason of anchor.reasons.slice(0, REASON_LIMIT)) lines.push(`  ${clip(reason)}\n`);
+	lines.push(more(REASON_LIMIT, anchor.reasons.length));
+	if (anchor.status === "unanchored") lines.push("  the root is not inside an anchored hour: the proof still shows the document was in the manifest with this root\n");
+	return lines;
+}
+
+export function renderVerify(report: VerifyReport): string {
+	const { proof, offline } = report;
+	const out: string[] = [
+		`document: ${clip(proof.repo)}:${clip(proof.documentPath)}\n`,
+		`root: ${clip(proof.root)} (leaf ${proof.index + 1} of ${proof.treeSize}, manifest version ${proof.manifestVersion})\n`,
+		offline.valid ? "proof: valid\n" : `proof: INVALID, ${clip(offline.reason)}\n`,
+		...anchorLines(report),
+	];
+	if (report.conflict !== null) out.push(`anchor answer contradicts the proof: ${clip(report.conflict)}\n`);
+	out.push(isValidReport(report) ? "result: valid\n" : "result: invalid\n");
+	return out.join("");
+}
+
+export function jsonVerifyReport(report: VerifyReport): string {
+	const { offline, anchor, anchorSkipped, conflict, online } = report;
+	return `${JSON.stringify({ valid: isValidReport(report), offline, online, anchor, anchorSkipped, conflict }, null, 2)}\n`;
 }

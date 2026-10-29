@@ -33,9 +33,9 @@ These apply to every source:
   `index.archive`, `alert`, and the v1.6 actions `session.checkpoint`, `session.rollback`,
   `session.rollback.refused`, `memory.forget`, `memory.capsule.export`,
   `memory.capsule.redact`, `anchor.signer.rotate`, `anchor.reanchor`, and the v1.7 actions `docs.corpus.ingest`, `docs.corpus.refused`,
-  `worktrees.report` and `worktree.prune`.
+  `docs.corpus.root`, `worktrees.report` and `worktree.prune`.
 - **Reserved actions are not writable through `events_emit` or `POST /events`.** A reader trusts `anchor.signer.rotate`, `anchor.reanchor`, `session.checkpoint`, `session.rollback`,
-  `session.rollback.refused`, `session.rollback.forget_batch` and `memory.forget` by their action alone, and the event carries no proof of its writer, so both
+  `session.rollback.refused`, `session.rollback.forget_batch`, `memory.forget` and `docs.corpus.root` by their action alone, and the event carries no proof of its writer, so both
   doors refuse them with a `reserved-action` error (nothing written) unless the caller is an operator emitting as its own surface; the server's own emits do not
   pass those doors (`RESERVED_NOTE_ACTIONS` in `packages/mcp-server/src/reserved-actions.ts` is the one list). `docs.canary` is the one host-job action in it: the docs canary's
   report feeds the recall gauge and the `corpus` fabric row, so only the `substrate` token acting as itself may write it, and an operator's token is refused too.
@@ -109,6 +109,7 @@ These apply to every source:
 | `docs.ingest.refused` | 25 | `warning` | `caller` | `docs.ingest` | — | — | no |
 | `docs.corpus.ingest` | 63 | `note` | `caller` | `docs.corpus.ingest` | — | — | no |
 | `docs.corpus.refused` | 63 | `warning` | `caller` | `docs.corpus.refused` | — | — | no |
+| `docs.corpus.root` | 69 | `note` | `substrate` | `docs.corpus.root` | — | — | no |
 | `memory.retain.failed` | 26 | `warning` | `memory-writer` | `memory.retain` | — | — | no |
 | `memory.write.accepted` | 26 | `note` | `memory-writer` | — | — | — | no |
 | `memory.write.conflict` | 26 | `note` | `memory-writer` | — | — | — | no |
