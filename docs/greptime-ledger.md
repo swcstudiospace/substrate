@@ -954,6 +954,20 @@ URL, so it cannot leak through a log line, a redirect or an error this code quot
 This is the path INFRA probed green against the Railway service, and it is the one
 to keep using.
 
+Every error the client raises for a transport failure, a non-2xx answer, an
+unparseable body or a SQL error field is scrubbed of the endpoint's credentials
+before it leaves `send`: the URL (and any `user:password@` in it, percent-escapes
+included), the configured user and password, the `user:password` pair and the
+`Basic` token, then the redactor's patterns. Warnings, `IngestNotRecorded`, the
+breaker's `lastError` and the gate's observed `reason` all inherit it. A response body is
+scrubbed whole and only then clipped (500 characters, 200 for non-JSON text), so a
+secret that straddles the cutoff cannot leave a prefix behind; each needle is also
+matched in its JSON-escaped spelling, since a JSON error body echoes `pa"ss` as `pa\"ss`.
+A "table does not exist" answer is recognised from the text the store sent, before the
+scrub, and carried as `GreptimeError.missingTable`, so a user named `found` cannot turn
+an empty metrics history into a 503. A user or password under four characters is not
+scrubbed as a bare substring; it would mangle every word of a diagnostic.
+
 A **Tailscale forwarder** is the preferred shape later: Greptime reachable only on
 the tailnet, with the VPS talking to a tailnet address instead of a public one. It
 changes nothing in this package and adds no variable — `GREPTIME_URL` would simply
