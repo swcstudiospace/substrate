@@ -408,7 +408,8 @@ describe("the live tier", () => {
 		test("the canary sends nothing for it, says so on stderr, and reports nothing when none could be asked", async () => {
 			const leaky = tree({ "docs/keys.md": `# Secret handling guide\n\nOur key is ${KEY} for the service.\n` });
 			const some = capture({ repoRoot: leaky, env }, answerKeys);
-			expect(await measureGoldenRecall("http://127.0.0.1:7410", "test-bearer", some.io)).toMatchObject({ recall5: 1 });
+			// Two questions were generated and one was held back: the canary reports the one that was measured, and stderr says one was not sent.
+			expect(await measureGoldenRecall("http://127.0.0.1:7410", "test-bearer", some.io)).toEqual({ recall5: 1, asked: 1 });
 			expect(sentOf(some)).toEqual(["Secret handling guide"]);
 			expect(some.err.join("\n")).toContain("docs canary: 1 question was not sent");
 			const allLeaky = tree({ "docs/keys.md": `# Key ${KEY} here\n` });

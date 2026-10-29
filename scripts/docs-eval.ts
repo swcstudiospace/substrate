@@ -399,7 +399,11 @@ async function runLive(url: string, json: boolean, io: EvalIo): Promise<number> 
 	return reportLive(asked, live, json, io, incomplete);
 }
 
-/** What the canary reports on the events route: the recall at 5 of the golden set and how many questions it asked. */
+/**
+ * What the canary reports on the events route: the recall at 5 of the golden set and how many questions were measured (answered and
+ * scored). A question the credential guard held back was generated but never asked, so it is not in `asked`; the stderr line says
+ * how many were held back.
+ */
 export interface GoldenRecallReport {
 	recall5: number;
 	asked: number;
@@ -415,7 +419,7 @@ export async function measureGoldenRecall(
 	token: string,
 	io: Pick<EvalIo, "env" | "fetchImpl" | "now" | "repoRoot" | "stderr">,
 ): Promise<GoldenRecallReport | null> {
-	const { asked, live, incomplete } = await askLive(url, token, io, CANARY_GOLDEN_MAX_QUERIES);
+	const { live, incomplete } = await askLive(url, token, io, CANARY_GOLDEN_MAX_QUERIES);
 	if (incomplete.length > 0) {
 		io.stderr(`docs canary: golden recall not measured, the scan of docs/ was partial (${incomplete.join(", ")}); a recall over part of the documents is not reported`);
 		return null;
@@ -423,7 +427,7 @@ export async function measureGoldenRecall(
 	const skipped = unsafeSkippedLine(live.skippedUnsafe);
 	if (skipped !== "") io.stderr(`docs canary: ${skipped}`);
 	if (live.failed > 0 || live.degraded > 0 || live.aborted !== null || live.results.length === 0) return null;
-	return { recall5: scoreRun(live.results).recall5, asked };
+	return { recall5: scoreRun(live.results).recall5, asked: live.results.length };
 }
 
 /**
