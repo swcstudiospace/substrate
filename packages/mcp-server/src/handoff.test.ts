@@ -345,6 +345,29 @@ describe("isStoredHandoff", () => {
 		expect(isStoredHandoff(full)).toBe(true);
 	});
 
+	test("a packet that fit its budget unsigned still passes once signing has added its fields", () => {
+		// Search for a goal length that leaves the builder's packet inside the last 200 bytes of the budget: signing then crosses it.
+		const files = Array.from({ length: 40 }, (_, n) => `${n}`.padStart(3, "0").padEnd(300, "f"));
+		let found: { unsigned: HandoffPacket; signed: HandoffPacket } | null = null;
+		for (let goalLength = 20; goalLength <= 1_200 && found === null; goalLength += 7) {
+			const unsigned = packet({ goal: "g".repeat(goalLength), files });
+			const signed = signHandoff(unsigned, SIGNER);
+			if (Buffer.byteLength(canonicalJson(unsigned)) <= 12_000 && Buffer.byteLength(canonicalJson(signed)) > 12_000) found = { unsigned, signed };
+		}
+		const { unsigned, signed } = defined(found, "a packet that only crosses the budget once signed");
+		expect(isStoredHandoff(unsigned)).toBe(true);
+		expect(isStoredHandoff(signed)).toBe(true);
+		expect(verifyHandoff(signed, KEYS)).toEqual({ ok: true, key_id: "k1" });
+	});
+
+	test("the signature has a bound of its own: a packet cannot hide a large payload in it", () => {
+		const good = packet();
+		expect(isStoredHandoff({ ...good, signature: { alg: HANDOFF_ALG, key_id: "k1", signed_at: "2026-01-01T00:00:00.000Z", value: "a".repeat(64) } })).toBe(true);
+		expect(isStoredHandoff({ ...good, signature: { alg: HANDOFF_ALG, key_id: "k1", value: "a".repeat(2_000) } })).toBe(false);
+		expect(isStoredHandoff({ ...good, signature: "signed" })).toBe(false);
+		expect(isStoredHandoff({ ...good, signature: [] })).toBe(false);
+	});
+
 	test("what is not an object with a goal and lists of strings is refused, never thrown on", () => {
 		const good = packet();
 		const refused: unknown[] = [

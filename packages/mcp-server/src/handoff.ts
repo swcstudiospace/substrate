@@ -58,6 +58,9 @@ const MAX_NOTES = 1200;
  */
 const MAX_PACKET_BYTES = 12_000;
 
+/** What a signature adds to a packet: an algorithm name, a key id, a timestamp and a hex digest, with room to spare. */
+const MAX_SIGNATURE_BYTES = 1_024;
+
 export interface HandoffParty {
 	surface: Surface;
 	session_id: string | null;
@@ -389,8 +392,14 @@ export function isStoredHandoff(value: unknown): value is HandoffPacket {
 	if (!isStoredParty(storedField(value, "from")) || !isStoredParty(storedField(value, "to"))) return false;
 	const notes = storedField(value, "notes");
 	if (notes !== undefined && notes !== null && (typeof notes !== "string" || notes.length > MAX_NOTES)) return false;
+	const signature = storedField(value, "signature");
+	if (signature !== undefined && signature !== null && (typeof signature !== "object" || Array.isArray(signature))) return false;
 	try {
-		return Buffer.byteLength(canonicalJson(value)) <= MAX_PACKET_BYTES;
+		// The builder fits the unsigned packet under the budget and signing adds the signature afterwards, so the two are measured
+		// apart: the packet without its signature against the packet budget, the signature against a bound of its own.
+		const { signature: _signature, ...unsigned } = { ...value };
+		if (Buffer.byteLength(canonicalJson(unsigned)) > MAX_PACKET_BYTES) return false;
+		return signature === undefined || signature === null || Buffer.byteLength(canonicalJson(signature)) <= MAX_SIGNATURE_BYTES;
 	} catch {
 		// A payload that cannot be serialised is not a packet.
 		return false;

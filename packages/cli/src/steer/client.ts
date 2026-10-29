@@ -399,7 +399,10 @@ export function createSteerClient(options: SteerClientOptions): SteerClient {
 		let text: string;
 		try {
 			text = await response.text();
-		} catch {
+		} catch (cause) {
+			// The request's own limit cuts a body that is still arriving just as it cuts a connection that never answered.
+			const name = cause instanceof Error ? cause.name : "";
+			if (name === "TimeoutError" || name === "AbortError") return failure("timeout", `the server did not finish its answer within ${requestTimeoutMs} ms`, status);
 			return failure("bad-response", "the response body could not be read", status);
 		}
 		if (text.length > MAX_RESPONSE_CHARS) return failure("bad-response", `the response is larger than ${MAX_RESPONSE_CHARS} characters`, status);

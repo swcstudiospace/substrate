@@ -312,6 +312,25 @@ describe("transport", () => {
 		expect(JSON.parse(defined(defined(seen[1]).body))).toEqual({ session_id: "s", action: "redirect", body: "x" });
 	});
 
+	test("a body the request limit cuts while it is still arriving is a timeout, not a bad response", async () => {
+		// Headers arrive, then the stream fails the way a body read does when the request's own signal fires.
+		const cut = (name: string): Response =>
+			new Response(
+				new ReadableStream({
+					start(controller) {
+						controller.error(Object.assign(new Error("the operation timed out"), { name }));
+					},
+				}),
+				{ status: 200 },
+			);
+		for (const name of ["TimeoutError", "AbortError"]) {
+			const { client } = clientFor(cut(name));
+			expect(await client.wait({ sessionId: "s", timeoutMs: 1_000 })).toMatchObject({ ok: false, code: "timeout" });
+		}
+		const { client: broken } = clientFor(cut("TypeError"));
+		expect(await broken.wait({ sessionId: "s", timeoutMs: 1_000 })).toMatchObject({ ok: false, code: "bad-response" });
+	});
+
 	test("control characters in a server's error text never reach the message", async () => {
 		const { client } = clientFor(Response.json({ error: "bad\u001b[2J\u001b[Hrequest\u0007" }, { status: 400 }));
 		const result = await client.sessions({});
