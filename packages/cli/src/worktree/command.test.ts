@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { existsSync, linkSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { EmitOutcome } from "../../../collectors/src/emit.ts";
 import { type CommandRunner, spawnGit } from "../../../fleet/src/git.ts";
@@ -330,6 +330,22 @@ describe("conflicts", () => {
 		commit(b, "shared.txt", "B\ntwo\nthree\n");
 		const h = harness();
 		expect(await runWorktree(["conflicts", "--repo", spaced], h.deps)).toBe(0);
+		expect(h.out.join("")).toContain("CONFLICT in shared.txt");
+	});
+
+	test("--repo naming a link to the primary checkout selects that repository", async () => {
+		const repo = makeRepo();
+		commit(repo.dir, "shared.txt", "one\ntwo\nthree\n");
+		git(repo.dir, ["push", "-q", "origin", "main"]);
+		const root = tempDir();
+		const a = addWorktree(repo, root, "a");
+		const b = addWorktree(repo, root, "b");
+		commit(a, "shared.txt", "A\ntwo\nthree\n");
+		commit(b, "shared.txt", "B\ntwo\nthree\n");
+		const link = join(tempDir(), "primary-link");
+		symlinkSync(repo.dir, link);
+		const h = harness();
+		expect(await runWorktree(["conflicts", "--repo", link], h.deps)).toBe(0);
 		expect(h.out.join("")).toContain("CONFLICT in shared.txt");
 	});
 });

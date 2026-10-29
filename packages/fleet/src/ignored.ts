@@ -10,8 +10,8 @@
  * or bound counts as work, and the bounds cover everything visited (files and directories) and the
  * time spent, because the walk is synchronous and no outer timeout can interrupt it.
  */
-import { lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
-import { join } from "node:path";
+import { lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import type { GitRunner } from "./git.ts";
 
 /** Directory names whose contents are rebuilt by a command, wherever they appear in a path. */
@@ -78,6 +78,21 @@ export function sameContent(a: string, b: string): boolean {
 	}
 }
 
+/** The real path of `path`, symbolic links followed; the plain absolute path when it cannot be resolved. */
+function realOrPlain(path: string): string {
+	try {
+		return realpathSync(path);
+	} catch {
+		return resolve(path);
+	}
+}
+
+/** True when `candidate` resolves, links followed, to `root` or a path below it: a "copy" that is the file itself, not a backup of it. */
+function resolvesInside(candidate: string, root: string): boolean {
+	const real = realOrPlain(candidate);
+	return real === root || real.startsWith(`${root}${sep}`);
+}
+
 /** Files below `dir` (relative to `root`), skipping regenerable directories; false when a budget ran out. */
 function filesBelow(root: string, dir: string, out: string[], budget: Budget): boolean {
 	let names: string[];
@@ -132,13 +147,16 @@ export async function findIgnoredWork(path: string, primaryPath: string, git: Gi
 		} else candidates.push(entry);
 	}
 	const work: string[] = [];
+	// A primary that shares a directory with the worktree through a link would "back up" the worktree's files with themselves.
+	const worktreeReal = realOrPlain(path);
 	for (const file of candidates) {
 		// Comparing reads files, so it spends the same time budget; what is left unchecked counts as work.
 		if (!budget.visit()) {
 			complete = false;
 			break;
 		}
-		if (!sameContent(join(path, file), join(primaryPath, file))) work.push(file);
+		const backup = join(primaryPath, file);
+		if (resolvesInside(backup, worktreeReal) || !sameContent(join(path, file), backup)) work.push(file);
 	}
 	if (!complete) work.push(UNKNOWN_IGNORED);
 	return work.sort();

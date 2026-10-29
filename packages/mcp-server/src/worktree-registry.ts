@@ -211,6 +211,12 @@ function validateWorktree(raw: unknown, index: number): Parsed<WorktreeRecord> {
  * Narrows a parsed JSON body into a {@link WorktreeReport}, or names the first problem. The body-size cap is the
  * transport's; this checks the shape, every field, the item cap and that no path repeats (one row per host and path).
  */
+/** Whether one report row would be accepted: the route's own row check, for a reporter that skips a row the route would refuse. */
+export function checkWorktreeRow(row: unknown): { ok: true } | { ok: false; problem: string } {
+	const parsed = validateWorktree(row, 0);
+	return parsed.ok ? { ok: true } : { ok: false, problem: parsed.problem };
+}
+
 export function validateWorktreeReport(body: unknown): Parsed<WorktreeReport> {
 	if (!isRecord(body)) return fail("request body must be a JSON object");
 	if (body.protocol !== WORKTREE_REPORT_PROTOCOL) return fail(`protocol must be ${WORKTREE_REPORT_PROTOCOL}`);

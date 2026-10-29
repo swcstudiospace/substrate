@@ -6,7 +6,7 @@
  * names, merged pull request heads, notes) stay on the host. Graph attribution comes from the
  * configured roots through `graphIdForWorktree`.
  */
-import { WORKTREE_REPORT_MAX_BYTES, WORKTREE_REPORT_MAX_ITEMS } from "../../mcp-server/src/worktree-registry.ts";
+import { checkWorktreeRow, WORKTREE_REPORT_MAX_BYTES, WORKTREE_REPORT_MAX_ITEMS } from "../../mcp-server/src/worktree-registry.ts";
 import { graphIdForWorktree } from "../../collectors/src/worktree-graph.ts";
 import type { WorktreeInfo } from "./inventory.ts";
 import type { PrState } from "./pr.ts";
@@ -95,8 +95,10 @@ export interface ReportPlan {
 /**
  * Every worktree of `inventory`, packed in order into bodies that stay within both route limits: at most
  * `MAX_REPORT_WORKTREES` rows and at most `MAX_REPORT_BYTES` of UTF-8 JSON (long non-ASCII paths make the second
- * limit bind long before the first). A row that cannot fit even in a body of its own is skipped with a reason
- * instead of being sent, because the route would answer 413 and the rest of the fleet would go unreported.
+ * limit bind long before the first). A row the route's own row check would refuse (a path or a branch past its limit, a
+ * label it does not accept) is skipped with the route's reason instead of being sent, because the route would refuse the
+ * whole body and the rest of the fleet would go unreported. A row that passes that check is far smaller than a body, so
+ * it always fits in one of its own.
  */
 export function buildReports(host: string, inventory: readonly WorktreeInfo[], options: ReportOptions = {}): ReportPlan {
 	const reports: WorktreeReport[] = [];
@@ -114,11 +116,13 @@ export function buildReports(host: string, inventory: readonly WorktreeInfo[], o
 	};
 	for (const info of inventory) {
 		const row = toReportWorktree(info, options.roots);
-		const size = Buffer.byteLength(JSON.stringify(row), "utf8");
-		if (envelope + size > MAX_REPORT_BYTES) {
-			skipped.push({ path: info.path, reason: `its report row alone is ${size} bytes; a report body may hold at most ${MAX_REPORT_BYTES}` });
+		// One row the route would refuse (a path or a branch past its limit, a label it does not accept) would reject the whole body.
+		const accepted = checkWorktreeRow(row);
+		if (!accepted.ok) {
+			skipped.push({ path: info.path, reason: `the route would refuse its report row: ${accepted.problem}` });
 			continue;
 		}
+		const size = Buffer.byteLength(JSON.stringify(row), "utf8");
 		if (rows.length >= MAX_REPORT_WORKTREES || bytes + 1 + size > MAX_REPORT_BYTES) flush();
 		// A comma separates a row from the one before it; the first row of a body has none.
 		bytes += (rows.length === 0 ? 0 : 1) + size;

@@ -104,14 +104,14 @@ describe("buildReports", () => {
 		expect(reports.flatMap((report) => report.worktrees.map((row) => row.path))).toEqual(inventory.map((item) => item.path));
 	});
 
-	test("a single row that cannot fit in any body is skipped with a reason and the rest are still reported", () => {
-		const huge = info(`/${"\u65e5".repeat(400_000)}`);
-		const { reports, skipped } = buildReports("h", [info("/a"), huge, info("/b")], { now: NOW, roots: [] });
-		expect(skipped).toHaveLength(1);
-		expect(skipped[0]?.path).toBe(huge.path);
-		expect(skipped[0]?.reason).toContain("alone");
-		expect(reports.flatMap((report) => report.worktrees.map((row) => row.path))).toEqual(["/a", "/b"]);
-		expect(reports.every((report) => bodyBytes(report) <= MAX_REPORT_BYTES)).toBe(true);
+	test("a row the route would refuse for a field limit is skipped with the route's reason, and the other rows are still reported", () => {
+		const longBranch = info("/b", { branch: "x".repeat(300) });
+		const longPath = info(`/${"p".repeat(1100)}`);
+		const { reports, skipped } = buildReports("h", [info("/a"), longBranch, longPath, info("/c")], { now: NOW, roots: [] });
+		expect(skipped.map((row) => row.path)).toEqual([longBranch.path, longPath.path]);
+		expect(skipped[0]?.reason).toContain("branch");
+		expect(skipped[1]?.reason).toContain("path");
+		expect(reports.flatMap((report) => report.worktrees.map((row) => row.path))).toEqual(["/a", "/c"]);
 	});
 
 	test("an empty inventory is one empty report", () => {

@@ -107,7 +107,7 @@ function gigabytes(bytes: number): string {
 /** `--repo R` names a repository as `owner/name` or by the directory of its primary checkout. */
 function matchesRepo(info: WorktreeInfo, filter: string | undefined, cwd: string): boolean {
 	if (filter === undefined) return true;
-	return info.repo === filter || resolve(cwd, filter) === info.repo_dir;
+	return info.repo === filter || sameDirectory(resolve(cwd, filter), info.repo_dir);
 }
 
 function idleDays(args: WorktreeArgs, deps: WorktreeDeps): number | null {

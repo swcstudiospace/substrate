@@ -39,6 +39,14 @@ describe("findIgnoredWork", () => {
 		expect(await findIgnoredWork(worktree, repo, spawnGit)).toEqual([".planning/vendor"]);
 	});
 
+	test("a primary that reaches the worktree's own notes through a directory link does not back them up", async () => {
+		const { repo, worktree } = ignoringWorktree();
+		write(worktree, ".planning/notes.md", "the only copy\n");
+		// The primary's `.planning` is a link to the worktree's: reading `primary/.planning/notes.md` reads the same file.
+		symlinkSync(join(worktree, ".planning"), join(repo, ".planning"));
+		expect(await findIgnoredWork(worktree, repo, spawnGit)).toEqual([".planning/notes.md"]);
+	});
+
 	test("many empty directories exhaust the visit budget, which counts directories and not only files", async () => {
 		const { repo, worktree } = ignoringWorktree();
 		// The same file in the primary keeps the baseline empty and makes git report `.planning/` as one ignored directory.
