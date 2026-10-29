@@ -2,17 +2,17 @@
 gsd_state_version: "1.0"
 milestone: v1.5
 milestone_name: SOTA enhancements
-status: "main b19ff515 (2026-10-28). Run 12 merged 18 PRs (blocking Biome gate, code ratchet, guarded re-anchor, session hooks, steering join, fabric LightRAG row, governance files). Phases 46 and 51-62 re-verified on main; v1.3.x (tech_debt), v1.5 (gaps_found, phase 46) and v1.6 (gaps_found, phase 61 criterion 3) audited. The owner decided on 2026-10-28 to close all three as override closeouts with the open items recorded as accepted debt; the archive step follows in its own PR."
+status: Awaiting next milestone
 stopped_at: "Run 12: all code PRs merged; milestone closeouts decided by the owner, archive PR next"
-last_updated: "2026-10-28T22:45:00.000Z"
-last_activity: 2026-10-28
-last_activity_desc: "Run 12: quality gates, gap closures for phases 58, 59 and 61, re-verification, audits and the owner's closeout decisions"
-state_head: b19ff515023e
+last_updated: "2026-10-29T00:04:28.321Z"
+last_activity: 2026-10-29
+last_activity_desc: Milestone v1.3.x completed and archived
+state_head: 145a0da53dc1613b97b197123440d64343bd9a90
 progress:
   total_phases: 10
   completed_phases: 9
-  total_plans: 7
-  completed_plans: 6
+  total_plans: 10
+  completed_plans: 10
   percent: 90
 current_phase: 46
 current_phase_name: lightrag-hybrid
@@ -161,10 +161,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: main = b19ff515 (2026-10-28). Phases 34-62 are merged to main. Open phase: 46 (LightRAG is deployed in naive mode; graph and hybrid modes, the parity comparator and the RAGFlow removal are open, recorded as accepted debt by the owner on 2026-10-28).
+Phase: Milestone v1.3.x complete
 Plan: —
-Status: v1.3.x (tech_debt), v1.5 (gaps_found) and v1.6 (gaps_found) are audited; the owner decided on 2026-10-28 to close each as an override closeout with its open items recorded as accepted debt (section "Accepted debt (owner decision, 2026-10-28)"). Archiving them is the next step (`gsd-tools milestone complete`, one commit each).
-Last activity: 2026-10-28 — Run 12 (graph ut-mvsanldw-54b66625): 18 PRs merged, phases 46 and 51-62 re-verified on main, three milestone audits, closeout decisions
+Status: Awaiting next milestone
+Last activity: 2026-10-29 — Milestone v1.3.x completed and archived
 
 ## Preflight record (2026-10-23, graph ut-mvlknrx6-2849044e)
 
@@ -219,19 +219,7 @@ Items acknowledged and deferred, most recent first:
 
 ## Operator Next Steps
 
-- Decision 1: waive or verify the live criteria of phases 37-39. Only the operator can waive; v1.3.x cannot complete without it.
-- Resolved 2026-10-28: Decision 1 is resolved. The waiver for phases 37-39 is recorded in 585ef28.
-- Decision 2: approve or defer each phase 46 live step (T5 archive, T6 deploy and health probe, T7 migration and parity gate, T8 cutover and RAGFlow removal), one approval per run.
-- Decision 3: PR #123 stays held. When the run branch ships, choose to close #123 or merge it; the run branch already contains its two commits.
-- Decision 4: merge order for drafts #104 and #109-#111. #109 is based on the stale gsd/p51-fabric-impl; #110 and #111 stack on gsd/p52-wiring.
-- Resolved 2026-10-28: Decision 4 is resolved. During Run 10 the drafts were merged or replaced: #104 (merged), #134, #135 and #136 (replays of #109, #111 and #110), and #137 (replay of #131); #109, #110, #111 and #131 were closed.
-- Decision 5: approve shipping the dependency audit fix (fix/audit-advisories-upgrade, 6106504, local only) as its own PR.
-- Decision 6: approve pushing and opening PRs through the ship path. The Ship step is not run: the run is not finished.
-- Decision 7: out-of-path branches quality/biome-report-only, test/swarm-pins-a16-a30 and the ad9e4de merge on gsd/p52-planning-core: keep or delete.
-- Decision 8, resolved 2026-10-24: phase 25's artifacts are archived at .planning/milestones/v1.3-phases/25-docs-search-and-ingest-ragflow/. 25-VERIFICATION read: the live G1 to G4 RAGFlow gates are operator-gated and never run. The criterion 5 candidate list is recorded in the phase 46 SUMMARY.
-- Decision 9, resolved 2026-10-24 from evidence, not by the operator: D-07 is a scope difference. Harness scenario 6 passes on a fresh run (20-VERIFICATION:45, 101); the closeout's "held" on scenario 6 is the live Cursor hook (UAT-04), a separate criterion (v1.3-CLOSEOUT:32). D-18 is a method difference: 34 explicit any by the packages-only `: any` / `as any` method (PREFLIGHT); 37 in 23 files by this pass's wider all-*.ts method, which adds `<any>` and `any[]`.
-- Draft merge check, 2026-10-24 (read-only, git merge-tree --write-tree against main aa2ed6a): PR #104 (gsd/p52-planning-core, ad9e4de) merges cleanly into main. PR #109 (gsd/p52-wiring, d62d649) conflicts in .github/workflows/ci.yml, docs/ci.md, docs/data-planes.md, docs/event-vocabulary.md, packages/audit/src/policy.ts, packages/audit/src/policy.test.ts and .planning/phases/48-tailscale-proxy/VERIFICATION.md. PR #110 (5a8f96a) and PR #111 (eb64f59) conflict in the same set and need rebasing after #109 lands.
-- Resolved 2026-10-28 (Run 12, owner answers): milestone completion for v1.3.x, v1.5 and v1.6 is decided. Each closes as an override closeout with its open items recorded as accepted debt (section "Accepted debt (owner decision, 2026-10-28)").
+- Start the next milestone with /gsd-new-milestone
 
 ## Consistency check (2026-10-24)
 

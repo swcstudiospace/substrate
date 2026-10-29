@@ -1,7 +1,7 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.3.x — Should-have hardening",
+  "milestone": "v1.5 — SOTA enhancements",
   "phases": [
     {
       "number": "16",
@@ -186,17 +186,57 @@
     {
       "number": "52",
       "name": "GSD-Core planning index and cross-session awareness core",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "53",
       "name": "Steering, conflict control and checkpoint/resume",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "54",
       "name": "Planning observability and migration inventory",
+      "status": "complete"
+    },
+    {
+      "number": "55",
+      "name": "Migration safety, session event vocabulary and the v1.6 baseline",
+      "status": "complete"
+    },
+    {
+      "number": "56",
+      "name": "LightRAG client contract alignment and storage topology",
+      "status": "complete"
+    },
+    {
+      "number": "57",
+      "name": "Tandem memory, LightRAG with Hindsight, with provenance and forget",
+      "status": "complete"
+    },
+    {
+      "number": "58",
+      "name": "Live session steering for multi-day GSD-Core sessions",
+      "status": "complete"
+    },
+    {
+      "number": "59",
+      "name": "Eternal logging, verifiable checkpoint and rollback events on Solana devnet",
+      "status": "complete"
+    },
+    {
+      "number": "60",
+      "name": "Eternal Memory Knowledge Nexus",
+      "status": "complete"
+    },
+    {
+      "number": "61",
+      "name": "Session rollback to an exact chat moment with file revert",
       "status": "pending"
+    },
+    {
+      "number": "62",
+      "name": "Soak, runbooks and v1.6 close",
+      "status": "complete"
     }
   ],
   "next": {
@@ -204,5 +244,5 @@
     "label": "Show progress",
     "reason": "Unsure of state — showing progress"
   },
-  "updated_at": "2026-10-24T06:47:20.629Z"
+  "updated_at": "2026-10-29T00:04:28.733Z"
 }

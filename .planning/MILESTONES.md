@@ -1,5 +1,14 @@
 # Milestones
 
+## v1.3.x v1.3.x (Shipped: 2026-10-29)
+
+**Phases completed:** 8 phases, 8 plans, 0 tasks
+
+**Key accomplishments:**
+- (none recorded)
+
+---
+
 ## v1.4 Substrate contract hardening (Completed locally: 2026-10-24, not published)
 
 **Phases completed:** 3 phases, 3 plans, 0 tasks
