@@ -640,6 +640,53 @@ describe("one timeout for every request of a call", () => {
 		stalled.resolve(Response.json({ model_id: "test-model", max_input_length: 512, max_client_batch_size: 2 }));
 		expect((await first).ok).toBe(true);
 	});
+
+	test("a probe that sees another model stops the embeds that follow, before the verdict would expire", async () => {
+		const healthy = fakeTei();
+		let infoSeen = 0;
+		const fetchImpl: PlaneFetch = async (input, init) => {
+			if (new URL(String(input)).pathname !== "/info") return healthy.fetch(input, init);
+			infoSeen += 1;
+			// The embed's own check names the expected model; the probe, a moment later, sees another one.
+			return Response.json({ model_id: infoSeen === 1 ? "test-model" : "other-model", max_input_length: 512, max_client_batch_size: 2 });
+		};
+		const { client } = clientFor({ ...CONFIG, model: "test-model" }, fetchImpl);
+		expect((await client.embed(["a"])).ok).toBe(true);
+		expect(await client.probe()).toEqual({ ok: false, reason: "model-mismatch" });
+		const embedsBefore = healthy.embedCalls().length;
+		expect(await client.embed(["b"])).toEqual({ ok: false, reason: "model-mismatch" });
+		expect(healthy.embedCalls()).toHaveLength(embedsBefore);
+		// The probe observed a model; it did not pin it.
+		expect(client.snapshot().model).toBe("test-model");
+	});
+
+	test("an embed already running when a refusal is recorded discards what it fetched, between batches too", async () => {
+		const healthy = fakeTei({ maxBatch: 1 });
+		let infoSeen = 0;
+		const firstEmbed = Promise.withResolvers<Response>();
+		let embedSeen = 0;
+		const fetchImpl: PlaneFetch = async (input, init) => {
+			const path = new URL(String(input)).pathname;
+			if (path === "/info") {
+				infoSeen += 1;
+				return Response.json({ model_id: infoSeen === 1 ? "test-model" : "other-model", max_input_length: 512, max_client_batch_size: 1 });
+			}
+			if (path === "/embed") {
+				embedSeen += 1;
+				if (embedSeen === 1) return firstEmbed.promise;
+			}
+			return healthy.fetch(input, init);
+		};
+		const { client } = clientFor({ ...CONFIG, model: "test-model" }, fetchImpl);
+		const running = client.embed(["a", "b"]);
+		// Wait until the first batch is on the wire, then let a probe see the switch.
+		while (embedSeen === 0) await Promise.resolve();
+		expect(await client.probe()).toEqual({ ok: false, reason: "model-mismatch" });
+		firstEmbed.resolve(Response.json([[1, 2, 3, 4]]));
+		expect(await running).toEqual({ ok: false, reason: "model-mismatch" });
+		// The second batch was never asked for.
+		expect(embedSeen).toBe(1);
+	});
 });
 
 describe("probe after a recovery", () => {

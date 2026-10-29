@@ -220,6 +220,8 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 	let checkSeq = 0;
 	/** The start number of the newest check that saw another model: only a check that started after it may lift the refusal. */
 	let refusedBySeq = 0;
+	/** How many refusals have been recorded: an embed that sees this change while it runs discards what it fetched. */
+	let refusalCount = 0;
 	/** Model checks in flight, by the timeout they run under: a call joins a check only when its own timeout is the same. */
 	const verifying = new Map<number, Promise<{ ok: true } | { ok: false; reason: TeiReason }>>();
 
@@ -323,6 +325,13 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 		return modelCheckedAt !== null && !modelRefused && now() - modelCheckedAt < MODEL_RECHECK_MS;
 	}
 
+	/** Remembers that the check numbered `started` saw a model other than the expected one. */
+	function recordRefusal(started: number): void {
+		modelRefused = true;
+		refusedBySeq = Math.max(refusedBySeq, started);
+		refusalCount += 1;
+	}
+
 	/**
 	 * Reads `/info` and applies the model pin. Learns the model and the batch limit the first time. A refusal is
 	 * remembered and answered until a read names the expected model again, so a failed read cannot lift it.
@@ -340,8 +349,7 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 		}
 		const wanted = expectedModel();
 		if (wanted !== null && read.info.modelId !== wanted) {
-			modelRefused = true;
-			refusedBySeq = Math.max(refusedBySeq, started);
+			recordRefusal(started);
 			return { ok: false, reason: "model-mismatch" };
 		}
 		// A reply that names the expected model lifts a refusal only when its check started after the newest check that saw
@@ -379,6 +387,8 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 		if (!verified.ok) return verified;
 		const model = expectedModel();
 		if (model === null) return { ok: false, reason: "bad-response" };
+		// A refusal recorded while this call runs (an overlapping check, a probe) makes what it fetched untrustworthy.
+		const refusals = refusalCount;
 		const size = Math.max(1, Math.min(config.batch, batchLimit ?? config.batch));
 		const vectors: Float32Array[] = [];
 		for (let from = 0; from < texts.length; from += size) {
@@ -392,6 +402,7 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 			if (pinned !== null && width !== pinned) return { ok: false, reason: "dim-mismatch" };
 			learnedDim ??= width;
 			vectors.push(...parsed.vectors);
+			if (refusalCount !== refusals) return { ok: false, reason: "model-mismatch" };
 		}
 		return { ok: true, vectors, model, dim: expectedDim() ?? vectors[0]?.length ?? 0 };
 	}
@@ -407,10 +418,17 @@ export function createTeiClient(config: TeiConfig | null, deps: TeiDeps = {}): T
 		if (!live.ok) return live;
 		const left = timeoutMs - Math.max(0, now() - started);
 		if (left <= 0) return { ok: false, reason: "timeout" };
+		checkSeq += 1;
+		const checkNumber = checkSeq;
 		const read = await readInfo(Math.ceil(left), false);
 		if (!read.ok) return read;
 		const wanted = expectedModel();
-		if (wanted !== null && read.info.modelId !== wanted) return { ok: false, reason: "model-mismatch" };
+		if (wanted !== null && read.info.modelId !== wanted) {
+			// The probe is a check like any other: a model switch it sees stops later embeds too. It records the refusal only; an
+			// unpinned model it merely observed never becomes the expected one.
+			recordRefusal(checkNumber);
+			return { ok: false, reason: "model-mismatch" };
+		}
 		return { ok: true };
 	}
 
