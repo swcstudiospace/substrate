@@ -103,7 +103,8 @@ describe("normalizeEvent", () => {
 	});
 
 	test("an empty optional field is stored as NULL, not as an empty string", () => {
-		const event = normalizeEvent({ ...base, branch: "", node_id: undefined }, null);
+		const { node_id: _present, ...withoutNode } = base;
+		const event = normalizeEvent({ ...withoutNode, branch: "" }, null);
 		expect(event.branch).toBeNull();
 		expect(event.node_id).toBeNull();
 	});

@@ -195,7 +195,8 @@ describe("forwardRetain with an outbox sink", () => {
 		expect(refused.emitted.map((event) => event.payload?.reason)).toEqual(["retain-bad-request"]);
 
 		const unsourced = retainDeps(new HindsightFake());
-		await forwardRetain(unsourced.deps, { ...REQUEST, source_event: undefined }, accepted());
+		const { source_event: _sourceEvent, ...unsourcedRequest } = REQUEST;
+		await forwardRetain(unsourced.deps, unsourcedRequest, accepted());
 		expect(unsourced.queued).toEqual([]);
 		expect(unsourced.emitted.map((event) => event.payload?.reason)).toEqual(["retain.unsourced"]);
 

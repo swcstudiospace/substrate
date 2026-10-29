@@ -194,8 +194,8 @@ interface FileEntry {
 	path: string;
 	abs: string;
 	kind: PlanningKind;
-	phase?: string;
-	plan?: string;
+	phase?: string | undefined;
+	plan?: string | undefined;
 }
 
 interface ErrorEntry {
@@ -709,7 +709,7 @@ function errorRecord(
 	path: string,
 	code: PlanningRecordErrorCode,
 	detail: string,
-	extra: { kind?: PlanningKind; sha256: string | null; bytes: number | null },
+	extra: { kind?: PlanningKind | undefined; sha256: string | null; bytes: number | null },
 ): PlanningErrorRecord {
 	const record: PlanningErrorRecord = { path, sha256: extra.sha256, bytes: extra.bytes, error: { code, detail } };
 	if (extra.kind !== undefined) record.kind = extra.kind;

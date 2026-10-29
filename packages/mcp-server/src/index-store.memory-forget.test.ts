@@ -29,6 +29,7 @@ import {
 	selectForRollback,
 	type ForgetDeps,
 } from "./memory-forget.ts";
+import { defined } from "./test-support.ts";
 
 const squash = (text: string): string => text.replace(/\s+/g, " ").trim();
 const MARKER = forgetMarker(`fg_${"a".repeat(26)}`);
@@ -223,7 +224,7 @@ describe("memoryEntriesCreatedAfter against a fake connection", () => {
 describe("memoryDocumentShared against a fake connection", () => {
 	test("a subject-less entry has a document of its own and sends no SQL", async () => {
 		const { index, statements } = store();
-		expect(await index.memoryDocumentShared({ id: "mem_a", scope: "global", kind: "fact", subject: undefined, writer: "claude-code" })).toBe(false);
+		expect(await index.memoryDocumentShared({ id: "mem_a", scope: "global", kind: "fact", writer: "claude-code" })).toBe(false);
 		expect(await index.memoryDocumentShared({ id: "mem_a", scope: "global", kind: "fact", subject: "", writer: "claude-code" })).toBe(false);
 		expect(statements).toEqual([]);
 	});
@@ -321,8 +322,8 @@ describeLive("forget against a live index", () => {
 	}
 
 	beforeAll(async () => {
-		raw = new SQL(PG_URL!);
-		index = new IndexStore(PG_URL!);
+		raw = new SQL(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
+		index = new IndexStore(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
 		await index.migrate();
 		await put("before", at(-1000));
 		await put("tie", at(0));

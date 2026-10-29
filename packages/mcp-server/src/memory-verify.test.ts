@@ -6,7 +6,10 @@ import type { MemoryEntry } from "./types.ts";
 const BODY = "The staging deploy region is fra1.";
 const EVENT = "evt_0123456789abcdef0123456789";
 
-function entry(over: Partial<MemoryEntry> = {}, hashVersion: "v1" | "v2" = "v1"): MemoryEntry {
+/** A fixture override: a key may be set to `undefined` to drop the default it replaces. */
+type EntryOverrides = { [K in keyof MemoryEntry]?: MemoryEntry[K] | undefined };
+
+function entry(over: EntryOverrides = {}, hashVersion: "v1" | "v2" = "v1"): MemoryEntry {
 	const base = { scope: "repo:agent-substrate", kind: "fact" as const, subject: "deploy.region", text: BODY, writer: "claude-code", ...over };
 	const preimage = { scope: base.scope, kind: base.kind, subject: base.subject ?? null, text: base.text, writer: base.writer };
 	const hash = hashVersion === "v1" ? sha256Hex(canonicalJson(preimage)) : sha256Hex(canonicalJson({ ...preimage, hv: 2, tenant: "swc" }));

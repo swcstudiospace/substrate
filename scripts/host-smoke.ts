@@ -552,7 +552,7 @@ export async function runSmoke(): Promise<SmokeResult[]> {
 		(error: unknown) => String(error),
 	);
 	results.push(
-		check("disk gate refuses", refused !== null && refused.includes(`floor ${DISK_FLOOR_BYTES}`), refused ?? "gate allowed (BAD)"),
+		check("disk gate refuses", refused?.includes(`floor ${DISK_FLOOR_BYTES}`) === true, refused ?? "gate allowed (BAD)"),
 	);
 
 	const apiToken = randomUUID();

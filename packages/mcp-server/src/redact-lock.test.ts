@@ -33,6 +33,7 @@ import { readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { REDACTION_RULES } from "./redact.ts";
 import type { RedactionRuleName } from "./redact.ts";
+import { defined } from "./test-support.ts";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
 const IGNORED = /(?:^|\/)(?:node_modules|\.git|dist|build|\.venv|venv|__pycache__)\//;
@@ -551,7 +552,7 @@ describe("redaction lock", () => {
 			if (detector === null) continue;
 			const rule = REDACTION_RULES.find((entry) => entry.name === name);
 			expect(rule, name).toBeDefined();
-			expect({ name, matched: detector.test(rule!.pattern.source) }).toEqual({ name, matched: true });
+			expect({ name, matched: detector.test(defined(rule, name).pattern.source) }).toEqual({ name, matched: true });
 		}
 	});
 
@@ -793,9 +794,9 @@ describe("detector self-tests", () => {
 		expect(uncovered).toEqual([]);
 		for (const { rule, file, body } of SHAPE_OFFENDERS) {
 			const detector = DETECTOR[rule];
-			expect(detector, rule).not.toBeNull();
-			expect({ rule, caught: detector!.test(body) }).toEqual({ rule, caught: true });
-			expect({ rule, extracted: patternCandidates(file, body).some((candidate) => detector!.test(candidate.text)) }).toEqual({ rule, extracted: true });
+			const matcher = defined(detector, rule);
+			expect({ rule, caught: matcher.test(body) }).toEqual({ rule, caught: true });
+			expect({ rule, extracted: patternCandidates(file, body).some((candidate) => matcher.test(candidate.text)) }).toEqual({ rule, extracted: true });
 			expect({ rule, pipeline: rule4Offenders(file, body).length > 0 }).toEqual({ rule, pipeline: true });
 		}
 	});

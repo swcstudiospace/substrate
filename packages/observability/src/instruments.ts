@@ -480,8 +480,8 @@ export class SubstrateInstruments {
 
 	recordUsage(sample: {
 		surface: string;
-		graph_id?: string | null;
-		payload?: Record<string, unknown>;
+		graph_id?: string | null | undefined;
+		payload?: Record<string, unknown> | undefined;
 	}): Usage | null {
 		const usage = extractUsage(sample.payload);
 		if (!usage) return null;

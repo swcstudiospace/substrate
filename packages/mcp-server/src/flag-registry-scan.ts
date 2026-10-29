@@ -113,7 +113,7 @@ const ACCESS_INDEX = /(?<![A-Za-z0-9_$])[A-Za-z_]*[eE]nv\??\[\s*(["'`])([A-Za-z0
 /** A helper that reads the environment by name: `env("NAME")`, `getEnv("NAME")`; any upper-case name, whatever its prefix. */
 const ACCESS_CALL = /(?<![A-Za-z0-9_$.])[A-Za-z_]*[eE]nv\s*\(\s*(["'`])([A-Z][A-Z0-9_]*)\1\s*[,)]/g;
 /** `const { NAME, OTHER: alias = "x" } = process.env` (also `Bun.env`, `import.meta.env`, any `…env`/`…Env` object); the braces may span lines. */
-const DESTRUCTURE = /\{([^{}]*)\}\s*=\s*(?:process\.env|Bun\.env|import\.meta\.env|[A-Za-z_]*[eE]nv)\b(?!\s*[.(\[])/g;
+const DESTRUCTURE = /\{([^{}]*)\}\s*=\s*(?:process\.env|Bun\.env|import\.meta\.env|[A-Za-z_]*[eE]nv)\b(?!\s*[.([])/g;
 const PREFIX_ALTERNATION = ENV_NAME_PREFIXES.map((prefix) => prefix.replace(/_$/, "")).join("|");
 const LITERAL_NAME = new RegExp(`(["'\`])((?:${PREFIX_ALTERNATION})(?:_[A-Z0-9]+)+)\\1`, "g");
 const LITERAL_PREFIX = new RegExp(`(["'\`])((?:${PREFIX_ALTERNATION})_(?:[A-Z0-9]+_)*)\\1`, "g");

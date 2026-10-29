@@ -141,20 +141,20 @@ export interface HandoffInput {
 	from: HandoffParty;
 	to: HandoffParty;
 	goal: string;
-	files?: string[];
-	dod?: string[];
-	blockers?: string[];
-	graph_id?: string | null;
-	node_id?: string | null;
-	linear_identifier?: string | null;
-	repo?: string | null;
-	branch?: string | null;
+	files?: string[] | undefined;
+	dod?: string[] | undefined;
+	blockers?: string[] | undefined;
+	graph_id?: string | null | undefined;
+	node_id?: string | null | undefined;
+	linear_identifier?: string | null | undefined;
+	repo?: string | null | undefined;
+	branch?: string | null | undefined;
 	prev_event_hash?: string | null;
 	/** The sender's lease on `node_id`, for the release only: it is not put in the packet. */
 	handover_lease_id?: string | null;
-	notes?: string | null;
-	ts?: string;
-	handoff_id?: string;
+	notes?: string | null | undefined;
+	ts?: string | undefined;
+	handoff_id?: string | undefined;
 }
 
 export class InvalidHandoffError extends Error {}

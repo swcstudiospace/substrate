@@ -14,6 +14,7 @@ import { RagflowFake } from "./ragflow-fake.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
 import type { EventInput, SubstrateEvent, Surface } from "./types.ts";
 import { GRAPHS_GENERATION_KEY, graphGenerationKey } from "./cache.ts";
+import { defined } from "./test-support.ts";
 
 /** Records what reached the event log, and stands in for the index. */
 function stubStores(
@@ -1851,7 +1852,7 @@ describe("handoff", () => {
 
 		// The ledger hands back loosely typed rows; the replay has to rebuild the
 		// packet from them and verify what it rebuilt.
-		const row = written[0]!;
+		const row = defined(written[0], "written ledger row");
 		const replay = new Substrate(loadConfig(SIGNING_ENV), {
 			index: null,
 			greptime: {
@@ -2827,7 +2828,8 @@ describe("proposeSkill", () => {
 
 	test("every success status is recorded, and a proposal without a session gets its own", async () => {
 		for (const status of ["existing", "unchanged", "declined"] as const) {
-			const { substrate, events } = world({ ...opened, status, pr_url: undefined });
+			const { pr_url: _prUrl, ...unlinked } = opened;
+			const { substrate, events } = world({ ...unlinked, status });
 			await substrate.proposeSkill(request, asAgent);
 			expect(events[0]?.payload).toMatchObject({ action: "skill.propose", status });
 			expect(events[0]?.payload).not.toHaveProperty("pr_url");
@@ -2850,7 +2852,8 @@ describe("proposeSkill", () => {
 	});
 
 	test("a dry run reaches the proposer with dryRun set and emits nothing, whatever it returns", async () => {
-		const dry: ProposeResult = { ...opened, status: "dry_run", pr_url: undefined, diff_added: 2 };
+		const { pr_url: _prUrl, ...unlinked } = opened;
+		const dry: ProposeResult = { ...unlinked, status: "dry_run", diff_added: 2 };
 		const ok = world(dry);
 		const result = await ok.substrate.proposeSkill({ ...request, dry_run: true }, asAgent);
 		expect(result.status).toBe("dry_run");

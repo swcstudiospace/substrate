@@ -218,7 +218,7 @@ describe("buildPlanningIndex: one bad path never breaks the rest", () => {
 
 		const error = errorFor(indexRecords(index), ".planning/phases/52-planning-awareness-core/CONTEXT.md");
 		expect(error).toMatchObject({ error: { code: "malformed-frontmatter" }, kind: "phase" });
-		expect(error && error.sha256).toMatch(/^[0-9a-f]{64}$/);
+		expect(error?.sha256).toMatch(/^[0-9a-f]{64}$/);
 		const others = (records: PlanningRecord[]) => records.filter((record) => !record.path.endsWith("CONTEXT.md"));
 		expect(others(indexRecords(index))).toEqual(others(baseline));
 	});

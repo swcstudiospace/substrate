@@ -449,7 +449,9 @@ function variable(name: string, label: string, options: readonly string[], selec
 }
 
 function checkVariables(): void {
-	const ttlDays = parseMetricsHistoryTtl(DEFAULT_METRICS_HISTORY_TTL)!.days;
+	const ttl = parseMetricsHistoryTtl(DEFAULT_METRICS_HISTORY_TTL);
+	if (ttl === null) throw new Error(`the default metrics history retention ${DEFAULT_METRICS_HISTORY_TTL} does not parse`);
+	const ttlDays = ttl.days;
 	for (const window of WINDOW_OPTIONS) {
 		const seconds = parseHistoryWindow(window);
 		if (seconds === null || seconds > ttlDays * 86_400) throw new Error(`window option ${window} is refused by /slo/history or longer than the default ${ttlDays}d retention`);

@@ -8,6 +8,7 @@ import type { BreakerSnapshot, BurnResult, CapacitySloResult, NotifyRecord, Plan
 import { loadConfig } from "./config.ts";
 import { NOTIFY_SESSION, NOTIFY_SUMMARY_MAX, SloNotifier, notifyConditions, transitionEvent, type NotifyInputs } from "./slo-notify.ts";
 import type { EventInput } from "./types.ts";
+import { defined } from "./test-support.ts";
 
 const T0 = Date.parse("2026-10-13T12:00:00Z");
 
@@ -154,7 +155,7 @@ describe("SloNotifier", () => {
 			kind: "warning",
 			payload: { action: "slo.transition", runtime: "slo", objective: "brief.p95", state: "breached", observed: 1200, target: 800 },
 		});
-		expect(w.emitted[0]!.summary.length).toBeLessThanOrEqual(NOTIFY_SUMMARY_MAX);
+		expect(defined(w.emitted[0], "emitted note").summary.length).toBeLessThanOrEqual(NOTIFY_SUMMARY_MAX);
 		expect(w.records["brief.p95"]).toEqual({ state: "breached", at: T0 + 300_000 });
 
 		// Still breached: nothing more, however many ticks.

@@ -48,7 +48,7 @@ export const LIGHTRAG_HEALTH_PATH = "/health";
  * Map probe facts onto one hosting state. Pure (no I/O) so the fabric can
  * reuse it without another network call.
  */
-export function resolveLightragHostingState(input: { configured: boolean; healthy?: boolean; provisioning?: boolean }): LightragHostingState {
+export function resolveLightragHostingState(input: { configured: boolean; healthy?: boolean | undefined; provisioning?: boolean | undefined }): LightragHostingState {
 	if (input.provisioning === true) return "PROVISIONING";
 	if (!input.configured) return "UNAVAILABLE";
 	if (input.healthy === true) return "RUNNING";
@@ -222,7 +222,7 @@ export class RailwayResourceOrchestrator {
 	}
 
 	async monitor(
-		args: { serviceId?: string; environmentId?: string; probe?: boolean; provisioning?: boolean; timeoutMs?: number } = {},
+		args: { serviceId?: string; environmentId?: string; probe?: boolean | undefined; provisioning?: boolean | undefined; timeoutMs?: number | undefined } = {},
 	): Promise<
 		OrchestratorOutcome<{
 			status: {

@@ -16,6 +16,7 @@ import { SQL } from "bun";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { IndexStore } from "./index-store.ts";
 import { governMemoryWrite, type MemoryStore } from "./memory-write.ts";
+import { defined } from "./test-support.ts";
 import type { MemoryWriteRequest, MemoryWriteResult } from "./types.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
@@ -71,8 +72,8 @@ function landThenDrop(index: IndexStore): MemoryStore {
 
 describeLive("memory exactly-once against a live index", () => {
 	beforeAll(async () => {
-		store = new IndexStore(PG_URL!);
-		raw = new SQL(PG_URL!);
+		store = new IndexStore(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
+		raw = new SQL(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
 		await store.migrate();
 	});
 

@@ -77,7 +77,7 @@ function describeEvidence(evidence: Evidence): string {
 export function renderEvidenceTable(): string {
 	const rows = ["| Flag | Criterion | Rule | Min samples | Window | Series | Rationale |", "| --- | --- | --- | --- | --- | --- | --- |"];
 	for (const flag of policyFlags()) {
-		for (const evidence of flag.policy!.evidence) {
+		for (const evidence of flag.policy?.evidence ?? []) {
 			rows.push(
 				`| ${code(flag.name)} | ${cell(evidence.id)} | ${cell(code(describeEvidence(evidence)))} | ${evidence.minSamples} | ${evidence.window} | ${evidence.needs} | ${cell(evidence.rationale)} |`,
 			);
@@ -127,7 +127,8 @@ export function renderReference(): string {
 		"| --- | --- | --- | --- | --- | --- |",
 	);
 	for (const flag of policyFlags()) {
-		const policy = flag.policy!;
+		const policy = flag.policy;
+		if (policy === undefined) continue; // policyFlags() only returns flags that have one
 		const also = policy.manual === undefined ? "" : `; ALSO manual (applies even when the advisor says ready): ${policy.manual}`;
 		const evidence = policy.evidence.length > 0 ? `${policy.evidence.map((item) => `${item.id} (${item.needs})`).join("; ")}${also}` : `manual: ${policy.manual ?? "none"}`;
 		out.push(`| ${code(flag.name)} | ${code(policy.safe)} | ${code(policy.enforcing)} | ${cell(policy.step)} | ${cell(policy.rollback)} | ${cell(evidence)} |`);

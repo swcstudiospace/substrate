@@ -75,9 +75,9 @@ describeLive("memory governance against a live index", () => {
 	});
 
 	/** A write through the real gate, against one of the two connections. */
-	function write(store: MemoryStore, request: Partial<MemoryWriteRequest> = {}): Promise<MemoryWriteResult> {
+	function write(store: MemoryStore, request: Partial<MemoryWriteRequest> = {}, options: { withoutRepo?: boolean } = {}): Promise<MemoryWriteResult> {
 		return governMemoryWrite(
-			{ scope: SCOPE, kind: "decision", writer: "hermes", repo: REPO, text: `${MARKER} placeholder`, ...request },
+			{ scope: SCOPE, kind: "decision", writer: "hermes", ...(options.withoutRepo === true ? {} : { repo: REPO }), text: `${MARKER} placeholder`, ...request },
 			{ store, isReviewToken: (token) => token === REVIEW_TOKEN },
 		);
 	}
@@ -512,7 +512,8 @@ describeLive("memory governance against a live index", () => {
 		expect(refused.current_version).toBe(1);
 
 		// Straight back, same key, with the version the refusal named.
-		const retry = await write(b, { ...rewrite, expected_version: refused.current_version ?? undefined });
+		const named = refused.current_version;
+		const retry = await write(b, { ...rewrite, ...(typeof named === "number" ? { expected_version: named } : {}) });
 		expect(retry.outcome).toBe("accepted");
 		expect(retry.verified_persisted).toBe(true);
 		expect(retry.idempotency_key).toBe(`${MARKER}-cv-decision-2`);
@@ -586,7 +587,8 @@ describeLive("memory governance against a live index", () => {
 		expect(record[0]?.outcome).toBe("conflict");
 
 		// Straight back, same key, against the version the conflict named.
-		const retry = await write(b, { ...rewrite, expected_version: loser.current_version ?? undefined });
+		const raced = loser.current_version;
+		const retry = await write(b, { ...rewrite, ...(typeof raced === "number" ? { expected_version: raced } : {}) });
 		expect(retry.outcome).toBe("accepted");
 		expect(retry.verified_persisted).toBe(true);
 		expect(retry.idempotency_key).toBe(`${MARKER}-vr-k1`);
@@ -615,7 +617,8 @@ describeLive("memory governance against a live index", () => {
 		const OTHER_REPO = "swcstudiospace/other-repo";
 		const inRepo = await write(a, { scope: "agent:omp", kind: "fact", writer: "omp", repo: REPO, subject: `repo-a-${RUN}`, text: `${MARKER} omp note for repo a` });
 		const inOther = await write(a, { scope: "agent:omp", kind: "fact", writer: "omp", repo: OTHER_REPO, subject: `repo-b-${RUN}`, text: `${MARKER} omp note for repo b` });
-		const noRepo = await write(a, { scope: "agent:omp", kind: "fact", writer: "omp", repo: undefined, subject: `no-repo-${RUN}`, text: `${MARKER} omp note naming no repo` });
+		// The default repo is dropped (not overridden with a value): this note names none.
+		const noRepo = await write(a, { scope: "agent:omp", kind: "fact", writer: "omp", subject: `no-repo-${RUN}`, text: `${MARKER} omp note naming no repo` }, { withoutRepo: true });
 		expect(inRepo.verified_persisted).toBe(true);
 		expect(inOther.verified_persisted).toBe(true);
 		expect(noRepo.verified_persisted).toBe(true);

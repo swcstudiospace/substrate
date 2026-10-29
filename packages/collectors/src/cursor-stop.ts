@@ -327,17 +327,19 @@ if (import.meta.main) {
 			root: paths.root,
 			destDir: paths.destDir,
 			budgetMs: HOOK_TIMEOUT_MS,
-			flushLesson: (lesson) =>
-				flushSessionLesson({
+			flushLesson: (lesson) => {
+				const token = resolveBearer("cursor", process.env) ?? undefined;
+				return flushSessionLesson({
 					sessionId: lesson.sessionId,
 					text: lesson.text,
-					repo,
+					...(repo === undefined ? {} : { repo }),
 					url: (process.env.SUBSTRATE_URL?.trim() || "http://127.0.0.1:7410").replace(/\/+$/, ""),
-					token: resolveBearer("cursor", process.env) ?? undefined,
+					...(token === undefined ? {} : { token }),
 					timeoutMs: HOOK_TIMEOUT_MS - Math.min(400, Math.floor(HOOK_TIMEOUT_MS / 2)),
 					root: process.cwd(),
 					cwd: process.cwd(),
-				}).then(() => undefined),
+				}).then(() => undefined);
+			},
 		});
 	} catch {
 		// Fail open.

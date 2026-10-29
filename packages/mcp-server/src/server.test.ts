@@ -27,6 +27,7 @@ import {
 import { Substrate } from "./service.ts";
 import { SWARM_SURFACES, type MemoryEntry, type SubstrateEvent, type Surface } from "./types.ts";
 import type { EventBus, EventHint } from "./event-bus.ts";
+import { defined } from "./test-support.ts";
 
 /** Shorthand for a health report; every field defaults to the unhealthy value. */
 function health(over: Partial<Parameters<typeof healthStatus>[0]> = {}) {
@@ -94,7 +95,7 @@ async function serve(
 				body: JSON.stringify(body),
 			}),
 		get: (path: string, headers: Record<string, string> = {}, signal?: AbortSignal) =>
-			fetch(`http://127.0.0.1:${port}${path}`, { headers, signal }),
+			fetch(`http://127.0.0.1:${port}${path}`, { headers, ...(signal === undefined ? {} : { signal }) }),
 		stop: () => {
 			const closed = Promise.withResolvers<void>();
 			observability.stop();
@@ -1408,7 +1409,7 @@ describe("GET /events/stream", () => {
 			insertEvent: async () => {},
 			queryEvents: async () => [] as Array<Record<string, unknown>>,
 			cursorPosition: async (eventId: string) => positions.find((position) => position.id === eventId) ?? null,
-			latestPosition: async () => (positions.length > 0 ? positions[positions.length - 1]! : null),
+			latestPosition: async () => positions[positions.length - 1] ?? null,
 			eventIdsAfter: async (cursor: { id: string; ingestedAt: number }, limit: number) => {
 				reads.push({ cursor, limit });
 				const seen = new Set<string>();
@@ -1441,7 +1442,7 @@ describe("GET /events/stream", () => {
 
 	/** Complete `id:`/`data:` frames in SSE text collected so far. */
 	function frames(text: string): Array<{ id: string; data: string }> {
-		return [...text.matchAll(/id: (.+)\ndata: (.+)\n\n/g)].map((match) => ({ id: match[1]!, data: match[2]! }));
+		return [...text.matchAll(/id: (.+)\ndata: (.+)\n\n/g)].map((match) => ({ id: defined(match[1], "event id"), data: defined(match[2], "event data") }));
 	}
 
 	/**
@@ -1568,7 +1569,7 @@ describe("GET /events/stream", () => {
 			const got = frames(await streamText(response, controller, 3));
 			expect(got.map((frame) => frame.id)).toEqual(["e2", "e3", "e4"]);
 			// The frame body is the ledger event shape the query read returns.
-			const event = JSON.parse(got[0]!.data) as Record<string, unknown>;
+			const event = JSON.parse(defined(got[0], "first event").data) as Record<string, unknown>;
 			expect(event).toMatchObject({ id: "e2", surface: "omp", kind: "note", summary: "second", hash: "h-e2" });
 			// Greptime's epoch millis rebuilt as the ISO string the chain hashed.
 			expect(event.ts).toBe(new Date(BASE + 1).toISOString());

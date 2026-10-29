@@ -31,7 +31,7 @@ const CALL_TIMEOUT_MS = 5000;
 const JOURNAL_INTERVAL_MS = 60_000;
 
 /** Repo and branch for a pane, from its working directory. Runs Git: call it only where a transition needs it. */
-export function attributePane(pane: HerdrPane): { repo?: string; branch?: string } {
+export function attributePane(pane: HerdrPane): { repo?: string | undefined; branch?: string | undefined } {
 	const cwd = pane.cwd ?? pane.foreground_cwd;
 	if (!cwd) return {};
 	return { repo: repoSlug(cwd), branch: branchFor(cwd) };
@@ -84,6 +84,12 @@ interface RpcError {
 	message?: string;
 }
 
+/** What one request resolves to; `error` is read straight off the reply, so it may be `undefined`. */
+interface RpcReply {
+	result?: unknown;
+	error?: RpcError | undefined;
+}
+
 interface RpcMessage {
 	id?: string;
 	result?: unknown;
@@ -98,7 +104,7 @@ export interface HerdrCollectorOptions {
 	debounceMs?: number;
 	pollMs?: number;
 	post?: (event: Parameters<typeof postEvent>[0], source: string) => Promise<EmitOutcome>;
-	attribute?: (pane: HerdrPane) => { repo?: string; branch?: string };
+	attribute?: (pane: HerdrPane) => { repo?: string | undefined; branch?: string | undefined };
 	now?: () => string;
 	/**
 	 * The spool replay run on a tick while watching. Defaults to `drainEventSpool` when
@@ -125,7 +131,7 @@ export class HerdrCollector {
 	private readonly debounceMs: number;
 	private readonly pollMs: number;
 	private readonly post: (event: Parameters<typeof postEvent>[0], source: string) => Promise<EmitOutcome>;
-	private readonly attribute: (pane: HerdrPane) => { repo?: string; branch?: string };
+	private readonly attribute: (pane: HerdrPane) => { repo?: string | undefined; branch?: string | undefined };
 	private readonly now: () => string;
 	private readonly drain: (() => Promise<unknown>) | null;
 	private readonly drainMs: number;
@@ -316,10 +322,10 @@ export class HerdrCollector {
 		return `substrate:herdr:${this.seq}`;
 	}
 
-	private call(method: string, params: unknown, timeoutMs = CALL_TIMEOUT_MS): Promise<{ result?: unknown; error?: RpcError }> {
-		const { promise, resolve } = Promise.withResolvers<{ result?: unknown; error?: RpcError }>();
+	private call(method: string, params: unknown, timeoutMs = CALL_TIMEOUT_MS): Promise<RpcReply> {
+		const { promise, resolve } = Promise.withResolvers<RpcReply>();
 		let settled = false;
-		const finish = (out: { result?: unknown; error?: RpcError }) => {
+		const finish = (out: RpcReply) => {
 			if (settled) return;
 			settled = true;
 			resolve(out);

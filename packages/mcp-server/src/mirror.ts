@@ -477,14 +477,15 @@ class ClaimCommentFailed extends Error {
 
 /** Production wiring: each target only when its API key is configured. */
 export function createMirror(config: SubstrateConfig, fetchImpl?: typeof fetch): Mirror {
+	const fetchOption = fetchImpl === undefined ? {} : { fetchImpl };
 	return new Mirror({
 		linear: config.linearApiKey
-			? new LinearClient(config.linearApiKey, { fetchImpl, endpoint: config.linearApiUrl })
+			? new LinearClient(config.linearApiKey, { ...fetchOption, endpoint: config.linearApiUrl })
 			: null,
 		notion: config.notionApiKey
 			? new NotionClient(config.notionApiKey, {
 					dataSourceId: config.notionTaskGraphDataSource,
-					fetchImpl,
+					...fetchOption,
 					baseUrl: config.notionApiUrl,
 				})
 			: null,

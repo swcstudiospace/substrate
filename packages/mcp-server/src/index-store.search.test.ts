@@ -16,6 +16,7 @@
 import { SQL } from "bun";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { IndexStore } from "./index-store.ts";
+import { defined } from "./test-support.ts";
 import type { MemoryEntry, MemorySearchCursor } from "./types.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
@@ -67,8 +68,8 @@ async function pageThrough(scope: string, subjectPrefix: string, limit: number) 
 
 describeLive("memory search against a live index", () => {
 	beforeAll(async () => {
-		store = new IndexStore(PG_URL!);
-		raw = new SQL(PG_URL!);
+		store = new IndexStore(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
+		raw = new SQL(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
 		await store.migrate();
 	});
 
@@ -157,11 +158,11 @@ describeLive("memory search against a live index", () => {
 
 		// `before` alone is strictly before the instant: the whole tie at it is left out,
 		// and the page starts at the newest entry older than it.
-		const tie = rows[14]!.created;
+		const tie = defined(rows[14], "row 14").created;
 		const after = await store.searchMemoryPage({ scope, subjectPrefix: "lesson:", before: tie, limit: 100 });
 		const createdOf = new Map(rows.map((row) => [row.id, row.created] as const));
 		expect(after.entries.some((entry) => createdOf.get(entry.id) === tie)).toBe(false);
-		expect(after.entries.map((entry) => entry.id)).toEqual(expected.filter((id) => createdOf.get(id)! < tie));
+		expect(after.entries.map((entry) => entry.id)).toEqual(expected.filter((id) => defined(createdOf.get(id), id) < tie));
 	}, 60_000);
 
 	test("keyset boundaries compose with literal prefixes, full text, scope and retired history", async () => {

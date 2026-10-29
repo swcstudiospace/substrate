@@ -104,9 +104,9 @@ export interface SessionDeps {
 	 */
 	readFile?: (path: string, maxBytes: number) => Promise<string>;
 	/** Test seams. */
-	pendingDir?: string;
-	policy?: SnapshotPolicy;
-	hooks?: RestoreHooks;
+	pendingDir?: string | undefined;
+	policy?: SnapshotPolicy | undefined;
+	hooks?: RestoreHooks | undefined;
 	/** Reads the hook envelope for `session hook` (default: the process's stdin, bounded). A test seam. */
 	stdin?: () => Promise<string>;
 	/** The overall budget of `session hook` in milliseconds (default `HOOK_TIMEOUT_MS`). A test seam. */
@@ -259,7 +259,13 @@ export async function runSession(argv: readonly string[], deps: SessionDeps): Pr
 	const clientFor = (forSurface: string, timeoutMs: number): RollbackServerClient => {
 		const token = deps.tokenFor(forSurface);
 		out.protect(token);
-		return createRollbackServerClient({ url: deps.url, token, timeoutMs, fetch: deps.fetch, signalFor: deps.signalFor });
+		return createRollbackServerClient({
+			url: deps.url,
+			...(token === undefined ? {} : { token }),
+			timeoutMs,
+			...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
+			...(deps.signalFor === undefined ? {} : { signalFor: deps.signalFor }),
+		});
 	};
 	const failure = (code: string, message: string, exit = EXIT_FAILED): number => {
 		if (json) out.json({ ok: false, error: { code, message } });
@@ -677,7 +683,7 @@ function renderRollback(out: Output, r: RollbackResult): void {
 
 async function commandRecover(deps: SessionDeps, out: Output, run: Runner, json: boolean, failure: Failure): Promise<number> {
 	try {
-		const result = await recoverRestore({ worktree: deps.worktree, now: deps.now, run, hooks: deps.hooks });
+		const result = await recoverRestore({ worktree: deps.worktree, now: deps.now, run, ...(deps.hooks === undefined ? {} : { hooks: deps.hooks }) });
 		// The commit journalled before the interrupted restore: delivered by `sync` when the restore was finished, dropped when it was not.
 		const dir = deps.pendingDir ?? (await resolvePendingDir(deps.worktree, run));
 		const settled = settleInterruptedRestores(dir, result.recovered ? { id: result.id, direction: result.direction } : null);
@@ -708,7 +714,7 @@ async function commandSync(deps: SessionDeps, out: Output, run: Runner, json: bo
 	let settleNote: string | null = null;
 	if (listPending(dir).items.some((item) => item.kind === "rollback" && item.restoring === true)) {
 		try {
-			const result = await recoverRestore({ worktree: deps.worktree, now: deps.now, run, hooks: deps.hooks });
+			const result = await recoverRestore({ worktree: deps.worktree, now: deps.now, run, ...(deps.hooks === undefined ? {} : { hooks: deps.hooks }) });
 			settleInterruptedRestores(dir, result.recovered ? { id: result.id, direction: result.direction } : null);
 		} catch (error) {
 			settleNote = `an interrupted restore could not be settled before syncing: ${error instanceof Error ? error.message : String(error)}`;

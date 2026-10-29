@@ -15,6 +15,7 @@
 import { SQL } from "bun";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { IndexStore, skillDecisionLockKey } from "./index-store.ts";
+import { defined } from "./test-support.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
 const RUN = Date.now().toString(36);
@@ -50,9 +51,10 @@ function proposal(over: Partial<Parameters<IndexStore["upsertProposedSkill"]>[0]
 
 describeLive("the skills registry against a live index", () => {
 	beforeAll(async () => {
-		a = new IndexStore(PG_URL!);
-		b = new IndexStore(PG_URL!);
-		raw = new SQL(PG_URL!);
+		const url = defined(PG_URL, "SUBSTRATE_TEST_PG_URL");
+		a = new IndexStore(url);
+		b = new IndexStore(url);
+		raw = new SQL(url);
 		await a.migrate();
 		// Idempotent: a second boot over an existing table changes nothing.
 		await a.migrate();

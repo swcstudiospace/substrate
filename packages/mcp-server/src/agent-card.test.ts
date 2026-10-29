@@ -63,19 +63,21 @@ function prefixIndex(rows: MemoryEntry[]) {
 				.sort((a, b) => (b.created === a.created ? (b.id < a.id ? -1 : 1) : b.created < a.created ? -1 : 1));
 			const limit = search.limit ?? 20;
 			let start = 0;
-			if (search.before !== undefined) {
+			const before = search.before;
+			if (before !== undefined) {
 				start = kept.findIndex(
-					(row) => row.created < search.before! || (row.created === search.before && row.id < (search.beforeId ?? "")),
+					(row) => row.created < before || (row.created === before && row.id < (search.beforeId ?? "")),
 				);
 				if (start === -1) start = kept.length;
 			}
 			const page = kept.slice(start, start + limit);
 			const rest = kept.slice(start + limit);
+			const last = page[page.length - 1];
 			return {
 				entries: page,
-				next: rest.length === 0 || page.length === 0
+				next: rest.length === 0 || last === undefined
 					? null
-					: { before: page[page.length - 1]!.created, before_id: page[page.length - 1]!.id },
+					: { before: last.created, before_id: last.id },
 			};
 		},
 	};

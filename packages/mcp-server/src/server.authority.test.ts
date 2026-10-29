@@ -30,7 +30,7 @@ const ENV = {
 	SUBSTRATE_HANDOFF_KEY: "a-test-signing-key",
 };
 
-const released: Array<{ lease_id?: string | null; force?: boolean }> = [];
+const released: Array<{ lease_id?: string | null | undefined; force?: boolean | undefined }> = [];
 const written: SubstrateEvent[] = [];
 
 /** A node held by hermes, judged by the real lease rules, so a forced release has something to take. */

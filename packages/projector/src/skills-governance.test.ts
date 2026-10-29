@@ -80,7 +80,7 @@ function opts(governance: GovernanceOptions | undefined, warnings: WarningEvent[
 			warnings.push(event);
 			return emit(event);
 		},
-		governance,
+		...(governance === undefined ? {} : { governance }),
 	};
 }
 

@@ -55,19 +55,19 @@ export interface HookParams {
 	worktree: string;
 	surface: string;
 	/** `--session`: wins over the envelope. */
-	sessionId?: string;
+	sessionId?: string | undefined;
 	/** `--plan-phase` / `--plan-step`: the plan reference of a `plan-step` checkpoint. */
-	planRef?: PlanRef;
+	planRef?: PlanRef | undefined;
 	client: RollbackServerClient;
 	now: Clock;
 	randomBytes: RandomBytes;
 	/** Reads the whole of stdin. */
 	readStdin: () => Promise<string>;
 	/** Default `HOOK_TIMEOUT_MS`. */
-	timeoutMs?: number;
-	run?: Runner;
-	pendingDir?: string;
-	policy?: SnapshotPolicy;
+	timeoutMs?: number | undefined;
+	run?: Runner | undefined;
+	pendingDir?: string | undefined;
+	policy?: SnapshotPolicy | undefined;
 }
 
 /** Read all of the process's stdin, refusing more than `MAX_ENVELOPE_BYTES`. A terminal has no envelope: that is empty, not a wait. */
@@ -170,11 +170,13 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 		for (const checkpoint of own) {
 			if (checkpoint.trigger === "steering" && checkpoint.plan_ref?.step !== undefined) seen.add(checkpoint.plan_ref.step);
 		}
+		const lastView = asPolicy(last);
+		const lastOfTriggerView = asPolicy(lastOfTrigger);
 		return {
 			trigger: params.trigger,
 			nowMs: params.now().getTime(),
-			last: asPolicy(last),
-			lastOfTrigger: asPolicy(lastOfTrigger),
+			...(lastView === undefined ? {} : { last: lastView }),
+			...(lastOfTriggerView === undefined ? {} : { lastOfTrigger: lastOfTriggerView }),
 			...(key === undefined ? {} : { directiveKey: key, seenDirectiveKeys: seen }),
 			...(currentTreeId === undefined ? {} : { currentTreeId }),
 		};

@@ -444,21 +444,21 @@ export type LedgerEvent = Omit<SubstrateEvent, "payload"> & { payload?: Record<s
 
 /** A ledger read as a caller submits it: flat, snake_case, every field optional. */
 export interface EventQueryInput {
-	session_id?: string;
-	graph_id?: string;
-	node_id?: string;
-	linear_identifier?: string;
-	repo?: string;
-	branch?: string;
-	surface?: string;
-	kind?: string;
-	actor?: string;
+	session_id?: string | undefined;
+	graph_id?: string | undefined;
+	node_id?: string | undefined;
+	linear_identifier?: string | undefined;
+	repo?: string | undefined;
+	branch?: string | undefined;
+	surface?: string | undefined;
+	kind?: string | undefined;
+	actor?: string | undefined;
 	/** Inclusive bounds on `ts`, in any form `new Date()` accepts. */
-	since?: string;
-	until?: string;
-	limit?: number;
-	order?: "asc" | "desc";
-	include_payload?: boolean;
+	since?: string | undefined;
+	until?: string | undefined;
+	limit?: number | undefined;
+	order?: "asc" | "desc" | undefined;
+	include_payload?: boolean | undefined;
 }
 
 export interface EventQueryResult {
@@ -964,24 +964,24 @@ export interface SkillProposalRequest {
 	name: string;
 	files: Record<string, string>;
 	rationale: string;
-	remove?: string[];
+	remove?: string[] | undefined;
 	/** The caller's own surface, or absent. A different one is refused, never re-attributed. */
-	surface?: string;
-	session_id?: string;
-	graph_id?: string;
+	surface?: string | undefined;
+	session_id?: string | undefined;
+	graph_id?: string | undefined;
 	/**
 	 * Memory's `expected_version` contract: the skill version this proposal revises. A mismatch is
 	 * refused before any git work (`SkillProposalStale`, 409); absent keeps today's behaviour.
 	 */
-	expected_version?: number;
+	expected_version?: number | undefined;
 	/** Validate, redact, clone and count the diff; push nothing, call no `gh`, emit nothing. */
-	dry_run?: boolean;
+	dry_run?: boolean | undefined;
 	/** Operator-only. */
-	mode?: TreeMode;
+	mode?: TreeMode | undefined;
 	/** Operator-only. */
-	reopen?: boolean;
+	reopen?: boolean | undefined;
 	/** Operator-only. */
-	allow_doc_examples?: SkillDocExampleRule[];
+	allow_doc_examples?: SkillDocExampleRule[] | undefined;
 }
 
 /** The three shapes of `graph_bind`, decided by which of the two ids were given. */
@@ -1057,21 +1057,21 @@ function isValidMemoryCursor(value: string): boolean {
 
 /** `memory_search`'s arguments, as the tool takes them. */
 export interface MemorySearchRequest {
-	query?: string;
-	scope?: string;
-	limit?: number;
-	include_superseded?: boolean;
+	query?: string | undefined;
+	scope?: string | undefined;
+	limit?: number | undefined;
+	include_superseded?: boolean | undefined;
 	/** Serve entries past their `ttl` under `enforce` (uplift-3 N4). Operator-gated in `mcp.ts`, never here. */
-	include_expired?: boolean;
-	subject_prefix?: string;
-	before?: string;
-	before_id?: string;
+	include_expired?: boolean | undefined;
+	subject_prefix?: string | undefined;
+	before?: string | undefined;
+	before_id?: string | undefined;
 	/** The repo the caller works in. Only `agent:` entries written for it are returned; without it, none are. */
-	repo?: string;
+	repo?: string | undefined;
 	/** Add `graph_links` to the reply: the newest ledger events of each returned entry's graph. Default off. */
-	graph_linked?: boolean;
+	graph_linked?: boolean | undefined;
 	/** Add `causal_chain` to each entry with a `source_event`: the events that preceded it in its session. Default off. */
-	causal?: boolean;
+	causal?: boolean | undefined;
 }
 
 /** Whether a search asks for a page — a cursor back, rather than the bare newest-N list. */
@@ -1091,10 +1091,10 @@ export function isPagedSearch(request: MemorySearchRequest): boolean {
  */
 export function parseMemorySearch(request: MemorySearchRequest): MemorySearch {
 	const search: MemorySearch = {
-		query: request.query,
-		scope: request.scope,
-		limit: request.limit,
-		includeSuperseded: request.include_superseded,
+		...(request.query === undefined ? {} : { query: request.query }),
+		...(request.scope === undefined ? {} : { scope: request.scope }),
+		...(request.limit === undefined ? {} : { limit: request.limit }),
+		...(request.include_superseded === undefined ? {} : { includeSuperseded: request.include_superseded }),
 	};
 	if (request.subject_prefix !== undefined) {
 		const prefix = normalizeSubject(request.subject_prefix);
@@ -1125,8 +1125,8 @@ const LEDGER_READ_CAP = 8;
 
 /** The two `memory_search` options that read the ledger. Both default off, so a reply without them is unchanged. */
 export interface LedgerLinkOptions {
-	graphLinked?: boolean;
-	causal?: boolean;
+	graphLinked?: boolean | undefined;
+	causal?: boolean | undefined;
 }
 
 /** A memory entry as the reply carries it: under `causal`, with the events that preceded its source event. */
@@ -1614,13 +1614,13 @@ export class Substrate {
 				(config.metricsHistory.enabled && transitionWriter !== null
 					? greptimeMetricSink((rows) => transitionWriter.recordMetricSamples(rows, config.metricsHistory.ttl))
 					: stdoutMetricSink()),
-			fallback: planningDeps.fallback,
-			clock: planningDeps.clock,
+			...(planningDeps.fallback === undefined ? {} : { fallback: planningDeps.fallback }),
+			...(planningDeps.clock === undefined ? {} : { clock: planningDeps.clock }),
 			dedup: planningDeps.dedup ?? config.eventIdempotency !== "off",
-			timers: planningDeps.timers,
-			report: planningDeps.report,
-			now: planningDeps.now,
-			baselineSaveIntervalMs: planningDeps.baselineSaveIntervalMs,
+			...(planningDeps.timers === undefined ? {} : { timers: planningDeps.timers }),
+			...(planningDeps.report === undefined ? {} : { report: planningDeps.report }),
+			...(planningDeps.now === undefined ? {} : { now: planningDeps.now }),
+			...(planningDeps.baselineSaveIntervalMs === undefined ? {} : { baselineSaveIntervalMs: planningDeps.baselineSaveIntervalMs }),
 			baselines: planningDeps.baselines !== undefined ? planningDeps.baselines : baselineDirectory === null ? null : new FileBaselineStore(baselineDirectory),
 			// Liveness runs whenever presence does: a quiet checkout is alive while its observer scans.
 			liveness: planningDeps.liveness !== undefined ? planningDeps.liveness : planningPresence === null ? null : { intervalMs: config.planningLiveness.ok ? config.planningLiveness.settings.intervalMs : 0 },
@@ -1639,14 +1639,14 @@ export class Substrate {
 		this.steeringDurable =
 			steeringSeam !== undefined
 				? (steeringSeam.durable ?? null)
-				: config.steeringAuditTable && steeringSettings !== null && steeringSettings.enabled && this.index !== null
+				: config.steeringAuditTable && steeringSettings?.enabled === true && this.index !== null
 					? this.index.steeringAudit()
 					: null;
 		const steeringHistory = this.steeringDurable ?? steeringSeam?.history ?? null;
 		const steeringClock = { nowMs: steeringSeam?.nowMs ?? (() => Date.now()) };
 		const ackTtlMs = this.steeringDurable !== null && config.steeringExpiry.ok ? config.steeringExpiry.settings.ackTtlMs : undefined;
 		const steeringInbox =
-			steeringSettings !== null && steeringSettings.enabled && steeringHistory !== null && steeringErrors.length === 0
+			steeringSettings?.enabled === true && steeringHistory !== null && steeringErrors.length === 0
 				? new SteeringInbox({ history: steeringHistory, clock: steeringClock, policy: ackTtlMs === undefined ? steeringSettings : { ...steeringSettings, ackTtlMs } })
 				: null;
 		this.steering = {
@@ -1657,10 +1657,19 @@ export class Substrate {
 		};
 		this.steeringSessions = new SteeringSessionRegistry({ emit: (event: EventInput) => this.emit(event) });
 		this.sessionState = steeringSeam?.sessionState !== undefined ? steeringSeam.sessionState : steeringInbox !== null ? this.steeringSessions : null;
-		this.steeringHints = new SteeringHintAnnouncer({ emit: async (event: EventInput) => (await this.emit(event)).stored, report: steeringSeam?.report });
+		this.steeringHints = new SteeringHintAnnouncer({
+			emit: async (event: EventInput) => (await this.emit(event)).stored,
+			...(steeringSeam?.report === undefined ? {} : { report: steeringSeam.report }),
+		});
 		this.steeringSweeper =
 			steeringInbox !== null && this.steeringDurable !== null && config.steeringExpiry.ok
-				? new SteeringExpirySweeper({ inbox: steeringInbox, intervalMs: config.steeringExpiry.settings.expirySweepMs, nowMs: steeringSeam?.nowMs, timers: steeringSeam?.timers, report: steeringSeam?.report })
+				? new SteeringExpirySweeper({
+						inbox: steeringInbox,
+						intervalMs: config.steeringExpiry.settings.expirySweepMs,
+						...(steeringSeam?.nowMs === undefined ? {} : { nowMs: steeringSeam.nowMs }),
+						...(steeringSeam?.timers === undefined ? {} : { timers: steeringSeam.timers }),
+						...(steeringSeam?.report === undefined ? {} : { report: steeringSeam.report }),
+					})
 				: null;
 		// uplift-2 R1
 		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays, graphRead: config.requestPath.briefGraphRead };
@@ -2015,9 +2024,9 @@ export class Substrate {
 				// The cached value is the encoded sections (uplift-4 S1), so the last-good is too:
 				// a snapshot without readable sections is not a last-good, and nothing here ever
 				// composes synchronously.
-				swr:
-					this.config.briefSnapshotTtlS > 0
-						? {
+				...(this.config.briefSnapshotTtlS > 0
+					? {
+							swr: {
 								lastGood: async () => {
 									const good = await this.cache.peekQuiet<BriefSnapshot>("brief-snapshot", request.surface, args);
 									if (good === null) return null;
@@ -2050,8 +2059,9 @@ export class Substrate {
 								served: (ageMs: number) => {
 									staleAgeS = Math.floor(ageMs / 1000);
 								},
-							}
-						: undefined,
+							},
+						}
+					: {}),
 			});
 			// What this call composed itself is used as it is: a brief too large to cache would not decode,
 			// and decoding it is what used to compose it a second time.
@@ -2308,7 +2318,7 @@ export class Substrate {
 			}
 		}
 		const served: BriefProfile = compact !== null && resolveBriefProfile(config, surface, requested) === "compact" ? "compact" : "full";
-		const text = served === "compact" ? compact! : full;
+		const text = served === "compact" && compact !== null ? compact : full;
 		return {
 			text,
 			state,
@@ -2444,10 +2454,13 @@ export class Substrate {
 	 * exists to prevent, so the client keeps its copy and retries.
 	 */
 	private async replayOutcome(input: EventInput, key: string): Promise<EmitResult | null> {
+		// The callers only look up with a ledger configured; without one there is nothing to replay, which reads as a miss.
+		const greptime = this.greptime;
+		if (!greptime) return null;
 		const probe = normalizeEvent(input, null, { key });
 		let existing: { id: string; hash: string } | null;
 		try {
-			existing = await this.greptime!.findByIdempotencyKey(probe, key);
+			existing = await greptime.findByIdempotencyKey(probe, key);
 		} catch (cause) {
 			const error = redact(String(cause));
 			process.stderr.write(`[substrate] idempotency lookup failed, event not stored — ${error}\n`);
@@ -2458,14 +2471,14 @@ export class Substrate {
 		const hit: EmitResult = { event, stored: true, deduplicated: true };
 		let membership: unknown;
 		try {
-			membership = await this.greptime!.cursorPosition(event.id);
+			membership = await greptime.cursorPosition(event.id);
 		} catch (cause) {
 			process.stderr.write(`[substrate] event ${event.id} replay matched; ingest membership unconfirmed, nothing written — ${redact(String(cause))}\n`);
 			return { ...hit, warning: INGEST_NOT_RECORDED };
 		}
 		if (membership !== null) return hit;
 		try {
-			await this.greptime!.recordIngest(event);
+			await greptime.recordIngest(event);
 		} catch (cause) {
 			// Any failure, not only `IngestNotRecorded`: the event row exists either way and the
 			// answer to the caller is still "stored".
@@ -2558,13 +2571,17 @@ export class Substrate {
 			actor: oneOf<Actor>("actor", ACTORS, input.actor),
 		};
 		const order = oneOf<"asc" | "desc">("order", ["asc", "desc"], input.order);
+		const since = bound("since", input.since);
+		const until = bound("until", input.until);
+		const limit = rows(input.limit);
+		const includePayload = flag("include_payload", input.include_payload);
 		const query: EventQuery = {
 			match,
-			since: bound("since", input.since),
-			until: bound("until", input.until),
-			limit: rows(input.limit),
-			order,
-			includePayload: flag("include_payload", input.include_payload),
+			...(since === undefined ? {} : { since }),
+			...(until === undefined ? {} : { until }),
+			limit,
+			...(order === undefined ? {} : { order }),
+			includePayload,
 		};
 
 		if (!this.greptime) return { events: [], count: 0, truncated: false, error: "GREPTIME_URL is not set" };
@@ -2948,7 +2965,7 @@ export class Substrate {
 					kind: "fact",
 					limit: 100,
 					includeSuperseded: false,
-					...(before === undefined ? {} : { before, beforeId }),
+					...(before === undefined || beforeId === undefined ? {} : { before, beforeId }),
 				},
 				{ surface },
 			);
@@ -3512,7 +3529,7 @@ export class Substrate {
 	 * own surface in the last seven days (the ledger has no read by payload). Throws `CheckpointVerifyError` for a bad or unknown
 	 * ref; Solana or the ledger being unconfigured is a status (`unverified`), decided before any read. Sends no transaction.
 	 */
-	async checkpointVerify(input: { ckpt_id?: string; event_id?: string; session_id?: string }, caller: { surface: Surface | null }): Promise<CheckpointVerifyToolResult> {
+	async checkpointVerify(input: { ckpt_id?: string | undefined; event_id?: string | undefined; session_id?: string | undefined }, caller: { surface: Surface | null }): Promise<CheckpointVerifyToolResult> {
 		const { ckpt_id: ckptId, event_id: eventId } = input;
 		if ((ckptId === undefined) === (eventId === undefined)) {
 			throw new CheckpointVerifyError("invalid-ref", "pass exactly one of ckpt_id or event_id");
@@ -3540,7 +3557,7 @@ export class Substrate {
 	 * and an entry past its lifetime under `enforce` (operators excepted) answer as absent, so this tool never reveals what a search
 	 * would not. Throws `MemoryVerifyError` for a bad or unreadable id. `verified` does not prove the source event concerns this entry.
 	 */
-	async memoryVerify(id: string, caller: { surface: string | null; repo?: string; isOperator: boolean }): Promise<MemoryVerifyResult & { signer_set?: SignerSetSummary }> {
+	async memoryVerify(id: string, caller: { surface: string | null; repo?: string | undefined; isOperator: boolean }): Promise<MemoryVerifyResult & { signer_set?: SignerSetSummary }> {
 		const index = this.index;
 		if (index === null) throw new MemoryVerifyError("not_found", "no memory index is configured (SUBSTRATE_PG_URL), so no entry can be read");
 		const reader = { surface: caller.surface ?? "unattributed", repo: normalizeIdentifier(caller.repo) };
@@ -3693,12 +3710,16 @@ export class Substrate {
 	 * Without a token a caller still learns that something is parked, where, by whom and
 	 * why. That is the part worth knowing and none of it is the payload.
 	 */
-	async governanceQueue(options: { limit?: number; review_token?: string } = {}): Promise<GovernanceQueue> {
+	async governanceQueue(options: { limit?: number | undefined; review_token?: string | undefined } = {}): Promise<GovernanceQueue> {
 		const authorized = isReviewToken(this.config, options.review_token);
 		if (!this.index) return { authorized, reviews: [], quarantined: [] };
 		const queue = await this.index.governanceQueue(options.limit);
-		const visible = (row: GovernanceQueueRow): GovernanceQueueRow =>
-			authorized ? row : { ...row, text: undefined, subject: undefined };
+		const visible = (row: GovernanceQueueRow): GovernanceQueueRow => {
+			if (authorized) return row;
+			// The body and subject are withheld: the keys are dropped, not set to undefined.
+			const { text: _text, subject: _subject, ...withheld } = row;
+			return withheld;
+		};
 		return {
 			authorized,
 			reviews: queue.reviews.map(visible),
@@ -4115,7 +4136,7 @@ export class Substrate {
 	 * index the answer is a 503, never an empty list: an enforcing reader must be able to tell "nothing is
 	 * approved" from "the registry cannot be read".
 	 */
-	async listSkills(query: { state?: string }, caller: { surface: Surface | null; isOperator: boolean }): Promise<SkillListResult> {
+	async listSkills(query: { state?: string | undefined }, caller: { surface: Surface | null; isOperator: boolean }): Promise<SkillListResult> {
 		if (caller.surface === null) {
 			throw new SkillApprovalDenied(401, "skills_list needs an authenticated surface");
 		}
@@ -4551,7 +4572,7 @@ export class Substrate {
 	async releaseNode(
 		graphId: string,
 		nodeId: string,
-		request: { lease_id?: string | null; force?: boolean },
+		request: { lease_id?: string | null | undefined; force?: boolean | undefined },
 		caller: Surface | null,
 		alsoSetState?: NodeState,
 		dodNote?: DodNote,
@@ -4572,7 +4593,7 @@ export class Substrate {
 	private async fencedRelease(
 		graphId: string,
 		nodeId: string,
-		request: { lease_id?: string | null; force?: boolean },
+		request: { lease_id?: string | null | undefined; force?: boolean | undefined },
 		caller: Surface | null,
 		alsoSetState?: NodeState,
 		dodNote?: DodNote,
@@ -4683,10 +4704,11 @@ export class Substrate {
 	async completeNode(
 		graphId: string,
 		nodeId: string,
-		request: { lease_id?: string | null; force?: boolean; state?: NodeState; dod?: DodEvidence },
+		request: { lease_id?: string | null | undefined; force?: boolean | undefined; state?: NodeState | undefined; dod?: DodEvidence | undefined },
 		caller: Surface | null,
 	) {
-		if (!this.index) throw new Error("graph_complete requires SUBSTRATE_PG_URL");
+		const index = this.index;
+		if (!index) throw new Error("graph_complete requires SUBSTRATE_PG_URL");
 		const targetState = request.state ?? "completed";
 		// The gate covers the one path that can move a Linear issue toward
 		// Done. It needs the caller's lease up front: without one the fenced
@@ -4699,7 +4721,7 @@ export class Substrate {
 			// Linear-linked node completed with no dod and no connector check.
 			let node: GraphNode | null;
 			try {
-				node = await this.index.readNode(graphId, nodeId);
+				node = await index.readNode(graphId, nodeId);
 			} catch {
 				return {
 					completed: false,
@@ -4715,7 +4737,8 @@ export class Substrate {
 				// check off: with no mirror the gate cannot read Linear state,
 				// mirror In Review or ask the connector, so refuse rather than
 				// let `fencedRelease` complete the node blind below.
-				if (!this.mirror) {
+				const mirror = this.mirror;
+				if (!mirror) {
 					return {
 						completed: false,
 						released: false,
@@ -4729,7 +4752,7 @@ export class Substrate {
 					};
 				}
 				return this.serializedCompletion(graphId, nodeId, () =>
-					this.gatedComplete(graphId, nodeId, request, caller, node, linearRef),
+					this.gatedComplete(index, mirror, graphId, nodeId, request, caller, node, linearRef),
 				);
 			}
 		}
@@ -4782,9 +4805,11 @@ export class Substrate {
 	 * both never-throw, and their failures become warnings.
 	 */
 	private async gatedComplete(
+		index: IndexStore,
+		mirror: Mirror,
 		graphId: string,
 		nodeId: string,
-		request: { lease_id?: string | null; force?: boolean; state?: NodeState; dod?: DodEvidence },
+		request: { lease_id?: string | null | undefined; force?: boolean | undefined; state?: NodeState | undefined; dod?: DodEvidence | undefined },
 		caller: Surface | null,
 		node: GraphNode,
 		linearRef: string,
@@ -4816,7 +4841,7 @@ export class Substrate {
 		// the Linear reads and tracker calls around it.
 		const timeoutMs = this.dodGateTest.timeoutMs ?? this.config.dodGateTimeoutMs;
 		const gateTtl = normalizeTtlSeconds(this.config.leaseTtlSeconds + Math.ceil(timeoutMs / 1000) + GATE_TTL_BUFFER_SECONDS);
-		const reviewed = await this.index!.reviewNode(graphId, nodeId, leaseId, caller, gateTtl);
+		const reviewed = await index.reviewNode(graphId, nodeId, leaseId, caller, gateTtl);
 		if (!reviewed.ok || !reviewed.decision.ok) {
 			// `reviewed.ok` is the write landing; `decision.ok` is the read
 			// taken before it. Near expiry the UPDATE can match no row while
@@ -4871,8 +4896,8 @@ export class Substrate {
 		const reporting: MirrorContext = { ...ctx, report: (success) => successes.push(success) };
 		const gate = await runDodGate(
 			{
-				mirror: this.mirror!,
-				fetchImpl: this.dodGateTest.fetchImpl,
+				mirror,
+				...(this.dodGateTest.fetchImpl === undefined ? {} : { fetchImpl: this.dodGateTest.fetchImpl }),
 				hermesLinearUrl: this.dodGateTest.hermesLinearUrl ?? this.config.hermesLinearUrl,
 				timeoutMs,
 			},
@@ -5020,7 +5045,7 @@ export class Substrate {
 	 * its lease id nulled, and the public lease view (holder, epoch, expiry —
 	 * never the id).
 	 */
-	async findNode(ref: { linear_issue_id?: string; linear_identifier?: string }): Promise<
+	async findNode(ref: { linear_issue_id?: string | undefined; linear_identifier?: string | undefined }): Promise<
 		| {
 				found: true;
 				graph_id: string;
@@ -5038,8 +5063,8 @@ export class Substrate {
 		}
 		if (!this.index) return { found: false, reason: "index not configured" };
 		const matches = await this.index.findNodesByLinear({
-			linearIssueId: ref.linear_issue_id,
-			linearIdentifier: ref.linear_identifier,
+			...(ref.linear_issue_id === undefined ? {} : { linearIssueId: ref.linear_issue_id }),
+			...(ref.linear_identifier === undefined ? {} : { linearIdentifier: ref.linear_identifier }),
 		});
 		const wanted = ref.linear_issue_id ?? ref.linear_identifier;
 		if (matches.length > 1) {
@@ -5860,7 +5885,7 @@ export class Substrate {
 		input: Omit<HandoffInput, "prev_event_hash" | "from"> & {
 			/** The authenticated sender. The transport supplies this, not the request body. */
 			from: HandoffInput["from"];
-			release_lease?: boolean;
+			release_lease?: boolean | undefined;
 		},
 	): Promise<{
 		packet: HandoffPacket;
@@ -6008,11 +6033,11 @@ export class Substrate {
 	 */
 	async driftScan(request: {
 		repo: string;
-		path?: string | null;
-		git_tip?: string | null;
-		branch?: string | null;
-		idle_seconds?: number;
-		limit?: number;
+		path?: string | null | undefined;
+		git_tip?: string | null | undefined;
+		branch?: string | null | undefined;
+		idle_seconds?: number | undefined;
+		limit?: number | undefined;
 	}): Promise<DriftReport> {
 		const repo = request.repo;
 		const stored = normalizeIdentifier(repo) ?? repo;

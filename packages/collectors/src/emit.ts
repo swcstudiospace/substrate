@@ -84,9 +84,9 @@ export const COUNTERS_KEY = "counters";
 
 export type EmitOutcome =
 	| { kind: "stored" }
-	| { kind: "refused"; status: number; error?: string }
+	| { kind: "refused"; status: number; error?: string | undefined }
 	/** `spooled` is set when the event was parked for replay: the live attempt failed, the event is not lost. */
-	| { kind: "failed"; status?: number; error?: string; spooled?: true };
+	| { kind: "failed"; status?: number; error?: string | undefined; spooled?: true };
 
 export interface PostEventOptions {
 	/** Per-call bound; collectors pass 3000, hooks at most 1500. */
@@ -189,7 +189,7 @@ export interface RefusalInput {
 	collector: string;
 	source: string;
 	status: number;
-	error?: string;
+	error?: string | undefined;
 	/** The line's `kind`; the event's own kind unless a caller (the spool's `dropped` lines) says otherwise. */
 	kind?: string;
 }
@@ -325,7 +325,7 @@ const REDACTED_FIELDS = ["session_id", "graph_id", "node_id", "linear_identifier
  * change it. Redacting first means a planted secret is neither sent in a form
  * the server would store differently nor ever written to the spool file.
  */
-export function prepareEvent(event: EventInput, opts: { collector?: string; idempotencyKey?: string } = {}): PreparedEvent {
+export function prepareEvent(event: EventInput, opts: { collector?: string; idempotencyKey?: string | undefined } = {}): PreparedEvent {
 	// The server redacts the free-text identifiers, the summary and the payload (`normalizeEvent`),
 	// and parses `ts` before redacting anything; so does this, and `surface`, `kind` and `actor` stay as given.
 	const safe: EventInput = { ...event };
@@ -742,7 +742,7 @@ async function runDrain(spool: EventSpool, opts: DrainOptions): Promise<DrainRes
 	const refusedCredentials = new Set<string>();
 	const report = await spool.drain((entry) => replayEntry(entry, base, timeoutMs, opts.token, refusedCredentials), {
 		budgetMs: opts.budgetMs ?? DEFAULT_DRAIN_BUDGET_MS,
-		all: opts.all,
+		...(opts.all === undefined ? {} : { all: opts.all }),
 	});
 	// Every entry the pass reached was refused for its credential: nothing was sent, nothing consumed.
 	if (report.held === null && refusedCredentials.size > 0 && report.skipped > 0 && report.delivered + report.refused + report.retried === 0) {

@@ -5,6 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { MAX_PAYLOAD_BYTES } from "../event.ts";
+import { defined } from "../test-support.ts";
 import { conflictEvent, conflictIdempotencyKey, conflictOriginMs, conflictSignature, detectConflicts, gateConflictSensitiveWrite, PLANNING_CONFLICT, type ConflictInput, type PlanningConflict } from "./conflicts.ts";
 import type { ClassifiedSession, PlanningReport, TouchedPair, UnknownViewReason } from "./presence.ts";
 
@@ -360,10 +361,10 @@ describe("conflictIdempotencyKey, conflictOriginMs and the keyed conflictEvent",
 		const first = detectConflicts(input([session("alpha", [pair("53", null, NOW - 20_000), pair("54", null, NOW - 1_000)], known()), session("beta", [pair("53", null, NOW - 5_000)], known())]));
 		const [conflict] = first.conflicts;
 		expect(conflict).toBeDefined();
-		expect(conflictOriginMs(conflict!, first.views)).toBe(NOW - 5_000);
+		expect(conflictOriginMs(defined(conflict), first.views)).toBe(NOW - 5_000);
 
 		const later = detectConflicts(input([session("alpha", [pair("53", null, NOW - 20_000), pair("54", null, NOW - 1_000)], known(NOW + 2_000)), session("beta", [pair("53", null, NOW - 5_000)], known(NOW + 2_000))], { nowMs: NOW + 2_000 }));
-		expect(conflictOriginMs(later.conflicts[0]!, later.views)).toBe(NOW - 5_000);
+		expect(conflictOriginMs(defined(later.conflicts[0]), later.views)).toBe(NOW - 5_000);
 	});
 
 	test("a plan-keyed conflict takes its origin from the touches of that plan id", () => {
@@ -371,7 +372,7 @@ describe("conflictIdempotencyKey, conflictOriginMs and the keyed conflictEvent",
 			input([session("alpha", [pair("53", "shared", NOW - 9_000)], known()), session("beta", [pair("54", "shared", NOW - 3_000), pair("54", "other", NOW - 1_000)], known())]),
 		);
 		const [conflict] = report.conflicts.filter((candidate) => candidate.key.by === "plan");
-		expect(conflictOriginMs(conflict!, report.views)).toBe(NOW - 3_000);
+		expect(conflictOriginMs(defined(conflict), report.views)).toBe(NOW - 3_000);
 	});
 
 	test("a keyed event carries the key and the origin as its ts; an unkeyed one carries neither", () => {

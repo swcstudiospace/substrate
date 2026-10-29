@@ -407,7 +407,10 @@ export function apply(changes: readonly Change[]): Change[] {
 		} finally {
 			closeSync(fd);
 		}
-		file.snapshot = snapshot(path)!;
+		// The temp file was created by this call, so it can only be missing if something removed it meanwhile.
+		const written = snapshot(path);
+		if (written === null) throw new ProjectionRefused(`${path} disappeared after it was written`);
+		file.snapshot = written;
 		return file;
 	}
 
@@ -424,7 +427,7 @@ export function apply(changes: readonly Change[]): Change[] {
 			const root = resolve(change.path, ...change.file.split("/").map(() => ".."));
 			pinDirectory(root, false);
 			const directory = pinDirectory(dirname(change.path), true);
-			const name = join(directory.anchor, change.file.split("/").at(-1)!);
+			const name = join(directory.anchor, change.file.split("/").at(-1) ?? change.file);
 			const before = snapshot(name);
 			if ((before?.bytes.toString("utf8") ?? null) !== change.before) {
 				throw new ProjectionRefused(`${change.path} changed since it was planned; re-run`);

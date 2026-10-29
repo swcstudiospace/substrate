@@ -36,14 +36,14 @@ function rpc(result: unknown, init?: { status?: number; isError?: boolean }): Re
 	return new Response(JSON.stringify(body), { status: init?.status ?? 200, headers: { "content-type": "application/json" } });
 }
 
-function client(respond: (seen: Seen) => Response | Promise<Response>, extra: Partial<ClientOptions> = {}): { api: RollbackServerClient; seen: Seen[] } {
+function client(respond: (seen: Seen) => Response | Promise<Response>, extra: Partial<ClientOptions> = {}, bearer: string | null = TOKEN): { api: RollbackServerClient; seen: Seen[] } {
 	const seen: Seen[] = [];
 	const fetch: FetchLike = async (url, init) => {
 		const entry: Seen = { url, headers: init.headers, body: JSON.parse(init.body) as Seen["body"] };
 		seen.push(entry);
 		return respond(entry);
 	};
-	return { api: createRollbackServerClient({ url: "http://127.0.0.1:7410/", token: TOKEN, timeoutMs: 1500, fetch, ...extra }), seen };
+	return { api: createRollbackServerClient({ url: "http://127.0.0.1:7410/", ...(bearer === null ? {} : { token: bearer }), timeoutMs: 1500, fetch, ...extra }), seen };
 }
 
 const PLAN = {
@@ -71,7 +71,7 @@ describe("requests", () => {
 	});
 
 	test("no token means no authorization header", async () => {
-		const { api, seen } = client(() => rpc({ ok: true, ckpt_id: CKPT, event_id: "e", stored: false }), { token: undefined });
+		const { api, seen } = client(() => rpc({ ok: true, ckpt_id: CKPT, event_id: "e", stored: false }), {}, null);
 		await api.recordCheckpoint(RECORD);
 		expect(seen[0]?.headers.authorization).toBeUndefined();
 	});

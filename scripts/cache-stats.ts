@@ -103,7 +103,7 @@ export interface Stats {
 }
 
 export interface CollectOptions {
-	now?: () => number;
+	now?: (() => number) | undefined;
 	keyBudget?: number;
 	wallBudgetMs?: number;
 	scanCount?: number;
@@ -312,7 +312,8 @@ export async function collectStats(client: StatsClient, options: CollectOptions 
 }
 
 export function renderTable(stats: Stats): string {
-	const rows = [["class", "keys", "sized", "bytes", "p99", "max", "types"]];
+	const header = ["class", "keys", "sized", "bytes", "p99", "max", "types"];
+	const rows = [header];
 	for (const entry of stats.classes) {
 		rows.push([
 			entry.class,
@@ -326,7 +327,7 @@ export function renderTable(stats: Stats): string {
 				.join(","),
 		]);
 	}
-	const widths = rows[0]!.map((_, column) => Math.max(...rows.map((row) => (row[column] ?? "").length)));
+	const widths = header.map((_, column) => Math.max(...rows.map((row) => (row[column] ?? "").length)));
 	const lines = rows.map((row) => row.map((cell, column) => cell.padEnd(widths[column] ?? 0)).join("  ").trimEnd());
 	const { recommendation: rec, server } = stats;
 	lines.push(

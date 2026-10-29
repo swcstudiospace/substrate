@@ -98,23 +98,23 @@ export interface EventInput {
 	surface: Surface;
 	kind: EventKind;
 	summary: string;
-	session_id?: string;
-	graph_id?: string;
-	node_id?: string;
-	linear_identifier?: string;
-	step?: number;
-	repo?: string;
-	branch?: string;
-	actor?: Actor;
-	payload?: Record<string, unknown>;
+	session_id?: string | undefined;
+	graph_id?: string | undefined;
+	node_id?: string | undefined;
+	linear_identifier?: string | undefined;
+	step?: number | undefined;
+	repo?: string | undefined;
+	branch?: string | undefined;
+	actor?: Actor | undefined;
+	payload?: Record<string, unknown> | undefined;
 	/** Collector-supplied timestamp; defaults to ingest time. */
-	ts?: string;
+	ts?: string | undefined;
 	/**
 	 * Optional replay key (U5-4a): 8-128 characters from `[A-Za-z0-9._:-]`. Honoured only under
 	 * `SUBSTRATE_EVENT_IDEMPOTENCY=accept|enforce`, where it is stored as the reserved payload
 	 * key `_ik`; under `off` it is ignored unread. See `docs/greptime-ledger.md`.
 	 */
-	idempotency_key?: string;
+	idempotency_key?: string | undefined;
 }
 
 /** An event as stored. Every field below `hash` participates in the chain. */
@@ -197,14 +197,14 @@ export interface MemoryEntryInput {
 	 * over time, which is the identity the `lww` and `versioned` strategies resolve
 	 * against. Without one a write has nothing to collide with and is appended.
 	 */
-	subject?: string;
-	actor?: Actor;
-	source_event?: string;
-	session_id?: string;
-	graph_id?: string;
-	repo?: string;
-	trust?: Trust;
-	ttl?: string;
+	subject?: string | undefined;
+	actor?: Actor | undefined;
+	source_event?: string | undefined;
+	session_id?: string | undefined;
+	graph_id?: string | undefined;
+	repo?: string | undefined;
+	trust?: Trust | undefined;
+	ttl?: string | undefined;
 }
 
 export interface MemoryEntry extends MemoryEntryInput {
@@ -341,18 +341,18 @@ export interface MemoryWriteRequest extends MemoryEntryInput {
 	 * only way to get that guarantee across an arbitrary gap; without one the gate
 	 * derives a key from the content and dedupes retries for a day.
 	 */
-	idempotency_key?: string;
+	idempotency_key?: string | undefined;
 	/**
 	 * The version the caller believes it is replacing, required by the `versioned`
 	 * strategy. A mismatch is a `conflict`, never a silent overwrite.
 	 */
-	expected_version?: number;
+	expected_version?: number | undefined;
 	/**
 	 * A reviewer's token. It is the only thing that releases a `require-review`
 	 * scope, vouches for `human-confirmed` trust or an `actor: "human"` claim, and
 	 * lifts a reviewable quarantine. Never stored, never echoed.
 	 */
-	review_token?: string;
+	review_token?: string | undefined;
 }
 
 /**

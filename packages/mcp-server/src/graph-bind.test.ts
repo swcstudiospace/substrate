@@ -22,6 +22,7 @@ import { loadConfig } from "./config.ts";
 import { IndexStore, type GraphBindResult } from "./index-store.ts";
 import { createMcpServer } from "./mcp.ts";
 import { InvalidBindError, Substrate, parseBindRequest } from "./service.ts";
+import { defined } from "./test-support.ts";
 import type { SubstrateEvent, Surface } from "./types.ts";
 
 const GRAPH_A = "ut-mabc123-0123abcd";
@@ -363,9 +364,10 @@ describeLive("correlation bindings against a live index", () => {
 	let cleanup: SQL;
 
 	beforeAll(async () => {
-		a = new IndexStore(PG_URL!);
-		b = new IndexStore(PG_URL!);
-		cleanup = new SQL(PG_URL!);
+		const url = defined(PG_URL, "SUBSTRATE_TEST_PG_URL");
+		a = new IndexStore(url);
+		b = new IndexStore(url);
+		cleanup = new SQL(url);
 		await a.migrate();
 	});
 
@@ -410,7 +412,7 @@ describeLive("correlation bindings against a live index", () => {
 
 		expect(results.filter((result) => result.status === "created")).toHaveLength(1);
 		expect(results.filter((result) => result.status === "existing")).toHaveLength(11);
-		const winner = results.find((result) => result.status === "created")!.graph_id;
+		const winner = defined(results.find((result) => result.status === "created")).graph_id;
 		for (const result of results) expect(result.graph_id).toBe(winner);
 		// The conflict flag is exactly "the stored graph is not the one I offered".
 		results.forEach((result, i) => {

@@ -18,6 +18,7 @@ import { loadConfig } from "../config.ts";
 import type { EventQuery } from "../greptime.ts";
 import { createMcpServer } from "../mcp.ts";
 import { Substrate } from "../service.ts";
+import { defined } from "../test-support.ts";
 import type { SubstrateEvent, Surface } from "../types.ts";
 import { createDesktopDriver, DesktopBusy, type BufferRunner, type BufferRunResult } from "./driver.ts";
 const ROOT = join(import.meta.dir, "..", "..", "..", "..");
@@ -233,7 +234,7 @@ describe("desktop_run success", () => {
 			log: unknown[];
 		};
 		expect(reply.screenshots).toHaveLength(1);
-		const shot = reply.screenshots[0]!;
+		const shot = defined(reply.screenshots[0], "screenshot");
 		const images = content.slice(1);
 		expect(images).toHaveLength(1);
 		expect(images[0]?.type).toBe("image");

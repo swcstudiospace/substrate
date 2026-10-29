@@ -13,6 +13,7 @@ import {
 	titleArgv,
 	typeArgv,
 } from "./actions.ts";
+import { defined } from "../test-support.ts";
 
 const SHOT = { type: "screenshot" } as const;
 const ok = (value: unknown) => DesktopRunInput.safeParse(value).success;
@@ -107,7 +108,7 @@ describe("argv builders", () => {
 		];
 		for (const argv of all) {
 			expect(argv.slice(0, 5)).toEqual([...EXEC]);
-			expect(["xdotool", "xwd"]).toContain(argv[5]!);
+			expect(["xdotool", "xwd"]).toContain(defined(argv[5]));
 			expect(argv.slice(0, 6)).not.toContain("sh");
 			expect(argv).not.toContain("bash");
 			expect(argv).not.toContain("-c");

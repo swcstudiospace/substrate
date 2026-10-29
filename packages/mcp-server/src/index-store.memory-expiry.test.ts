@@ -190,11 +190,11 @@ describeLive("memory lifetime against a live index", () => {
 		const enforced = await enforce.searchMemoryPage({ scope, query: "", limit: 10 });
 		expect(enforced.entries).toEqual([]);
 
-		expect(await plain.graphLifetime({ scope, graph_id: undefined })).toEqual({ status: "Merged" });
+		expect(await plain.graphLifetime({ scope })).toEqual({ status: "Merged" });
 		expect(await plain.graphLifetime({ scope: SCOPE, graph_id: id("g-open") })).toEqual({ status: "In Progress" });
 		expect(await plain.graphLifetime({ scope: SCOPE, graph_id: id("g-null") })).toEqual({ status: null });
 		expect(await plain.graphLifetime({ scope: SCOPE, graph_id: id("g-gone") })).toBeNull();
-		expect(await plain.graphLifetime({ scope: SCOPE, graph_id: undefined })).toBeNull();
+		expect(await plain.graphLifetime({ scope: SCOPE })).toBeNull();
 	});
 
 	test("a store built without settings is report: tagged, nothing hidden, nothing counted", async () => {

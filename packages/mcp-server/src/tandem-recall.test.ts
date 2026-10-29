@@ -3,6 +3,7 @@
  * one, no randomness but a seeded shuffle, nothing that opens a socket.
  */
 import { describe, expect, test } from "bun:test";
+import { defined } from "./test-support.ts";
 import {
 	DEFAULT_TANDEM_OPTIONS,
 	TANDEM_CONTENT_CAP,
@@ -238,7 +239,7 @@ describe("mergeTandem items", () => {
 			score: 1 / (TANDEM_RRF_K + 1),
 			provenance: { bank: "lightrag", document_id: "doc-1", file_path: "docs/plan.md", chunk_id: "chunk-1" },
 		});
-		expect(Object.hasOwn(item!, "derived")).toBe(false);
+		expect(Object.hasOwn(defined(item), "derived")).toBe(false);
 	});
 
 	test("a Hindsight item is derived and carries its bank, document and graph/session/node join keys", () => {
@@ -256,8 +257,8 @@ describe("mergeTandem items", () => {
 			content: "hindsight memory number 3",
 			provenance: { bank: "sub-omp", document_id: "mwd_3", graph_id: "g-1", session_id: "s-1", node_id: "n-1" },
 		});
-		expect(Object.hasOwn(item!.provenance, "file_path")).toBe(false);
-		expect(Object.hasOwn(item!.provenance, "chunk_id")).toBe(false);
+		expect(Object.hasOwn(defined(item).provenance, "file_path")).toBe(false);
+		expect(Object.hasOwn(defined(item).provenance, "chunk_id")).toBe(false);
 	});
 
 	test("absent join keys are absent, not undefined; a memory with no document id is addressed by its id", () => {
@@ -283,7 +284,7 @@ describe("mergeTandem items", () => {
 			cap: 5,
 		}).items;
 		expect(item?.content).not.toContain(SECRET);
-		expect(item!.content.length).toBeLessThanOrEqual(TANDEM_CONTENT_CAP);
+		expect(defined(item).content.length).toBeLessThanOrEqual(TANDEM_CONTENT_CAP);
 		const [memoryItem] = mergeTandem({ lightrag: [], hindsight: [memory(1, { text: `remember ${SECRET}` })], cap: 5 }).items;
 		expect(memoryItem?.content).not.toContain(SECRET);
 	});

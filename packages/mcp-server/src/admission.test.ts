@@ -37,6 +37,7 @@ import {
 } from "./admission.ts";
 import type { CacheRedis, ScriptOutcome } from "./cache.ts";
 import { DEFAULT_BUDGETS, loadAdmissionSettings } from "./config.ts";
+import { defined } from "./test-support.ts";
 import { SURFACES } from "./types.ts";
 
 /**
@@ -76,7 +77,7 @@ export class FakeBudgetRedis implements CacheRedis {
 		if (this.reply !== undefined) return this.reply;
 		if (script !== BUDGET_SCRIPT) throw new Error("unknown script");
 		const [rps, burst, now, cost] = args.map(Number) as [number, number, number, number];
-		const key = keys[0]!;
+		const key = defined(keys[0], "key");
 		const step = bucketStep(this.buckets.get(key)?.state ?? null, { rps, burst }, now, cost);
 		this.buckets.set(key, { state: step.state, ttlMs: step.ttlMs });
 		return [step.allowed ? 1 : 0, step.tokensLeft, step.retryAfterMs];
@@ -239,7 +240,7 @@ describe("Admission", () => {
 			async () => ({ ok: true, value: ["x", "y", "z"] }),
 		];
 		const admission = new Admission(settings(), {
-			script: () => outcomes.shift()!(),
+			script: () => defined(outcomes.shift(), "outcome")(),
 			now: () => 1,
 			record: (verdict) => recorded.push(verdict),
 		});
@@ -353,8 +354,8 @@ describe("the refusal bodies", () => {
 describe("the class tables are exhaustive over what the server serves", () => {
 	const serverSource = readFileSync(join(import.meta.dir, "server.ts"), "utf8");
 	const mcpSource = readFileSync(join(import.meta.dir, "mcp.ts"), "utf8");
-	const servedRoutes = new Set([...serverSource.matchAll(/url\.pathname === "([^"]+)"/g)].map((match) => match[1]!));
-	const registeredTools = new Set([...mcpSource.matchAll(/registerTool\(\s*"([a-z_]+)"/g)].map((match) => match[1]!));
+	const servedRoutes = new Set([...serverSource.matchAll(/url\.pathname === "([^"]+)"/g)].map((match) => defined(match[1])));
+	const registeredTools = new Set([...mcpSource.matchAll(/registerTool\(\s*"([a-z_]+)"/g)].map((match) => defined(match[1])));
 
 	test("every route server.ts matches on is classified, exempt, or the MCP door — and nothing stale is listed", () => {
 		expect(servedRoutes.size).toBeGreaterThan(10);

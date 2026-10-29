@@ -3,6 +3,7 @@
  * fallback is a typed failure, not swallowed. The clock, writers and stdout are injected.
  */
 import { describe, expect, test } from "bun:test";
+import { defined } from "../test-support.ts";
 import type { MetricWriteResult } from "../greptime.ts";
 import type { MetricSampleRow } from "../metrics-history.ts";
 import {
@@ -151,8 +152,8 @@ describe("stdoutMetricSink", () => {
 		const sink = stdoutMetricSink((line) => lines.push(line));
 		expect(await sink.emit(record())).toEqual({ ok: true });
 		expect(lines).toHaveLength(1);
-		expect(lines[0]!.endsWith("\n")).toBe(true);
-		expect(JSON.parse(lines[0]!)).toEqual({
+		expect(defined(lines[0]).endsWith("\n")).toBe(true);
+		expect(JSON.parse(defined(lines[0]))).toEqual({
 			metric: TRANSITION_SERIES,
 			phaseId: "54",
 			from: "LOADING",

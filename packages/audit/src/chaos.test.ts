@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { METRIC, SubstrateInstruments, evaluateSlos, findCounter, sumCounter } from "@substrate/observability";
 import { AuditLog, AuditUnavailableError } from "./log.ts";
 import { auditMode, decideClaim } from "./policy.ts";
+import { defined } from "./test-support.ts";
 
 const START = 1_790_186_361_000;
 const OUTAGE_MS = 60_000;
@@ -159,8 +160,8 @@ describe("Greptime down for 60 s", () => {
 		}
 
 		const quarantines = findCounter(instruments.snapshot(), METRIC.quarantines);
-		expect(sumCounter(quarantines!, { reason: "unrecorded-claim" })).toBe(10);
-		expect(sumCounter(findCounter(instruments.snapshot(), METRIC.claims)!, { outcome: "revoked" })).toBe(10);
+		expect(sumCounter(defined(quarantines, "quarantines counter"), { reason: "unrecorded-claim" })).toBe(10);
+		expect(sumCounter(defined(findCounter(instruments.snapshot(), METRIC.claims), "claims counter"), { outcome: "revoked" })).toBe(10);
 	});
 
 	test("both halves are recorded in the audit chain, and it verifies", async () => {
@@ -267,7 +268,7 @@ describe("Greptime down for 60 s", () => {
 		clock.now = START + OUTAGE_MS + 1;
 		for (let i = 0; i < 100; i++) await emit("omp", "ut-1");
 
-		const emitTotal = findCounter(instruments.snapshot(), METRIC.emitTotal)!;
+		const emitTotal = defined(findCounter(instruments.snapshot(), METRIC.emitTotal), "emitTotal counter");
 		expect(sumCounter(emitTotal, { outcome: "dropped" })).toBe(100);
 		expect(sumCounter(emitTotal, { outcome: "stored" })).toBe(100);
 		expect(evaluateSlos(instruments.snapshot()).find((slo) => slo.id === "emit.success")?.status).toBe("breached");

@@ -45,6 +45,12 @@ function accepted(overrides: Partial<MemoryWriteResult> = {}): MemoryWriteResult
 	};
 }
 
+/** An unaccepted result: the key is dropped, because an `entry: undefined` override would not survive `exactOptionalPropertyTypes`. */
+function withoutEntry(overrides: Partial<MemoryWriteResult> = {}): MemoryWriteResult {
+	const { entry: _entry, ...rest } = accepted(overrides);
+	return rest;
+}
+
 function sourced() {
 	return { source_event: "evt_proof_run" };
 }
@@ -95,7 +101,7 @@ describe("forwardRetain", () => {
 		const unnamed = await forwardRetain(
 			deps,
 			request,
-			accepted({ entry: entry({ id: "mem_2", scope: "agent:cursor", repo: undefined }), idempotency_key: "mwd_key2" }),
+			accepted({ entry: entry({ id: "mem_2", scope: "agent:cursor" }), idempotency_key: "mwd_key2" }),
 		);
 		expect(named.forwarded).toBe(true);
 		expect(unnamed.forwarded).toBe(true);
@@ -231,9 +237,9 @@ describe("forwardRetain", () => {
 
 	test("unaccepted or unverified writes forward nothing and warn nothing", async () => {
 		for (const result of [
-			accepted({ outcome: "denied", verified_persisted: false, entry: undefined }),
-			accepted({ outcome: "quarantined", verified_persisted: false, entry: undefined }),
-			accepted({ outcome: "conflict", verified_persisted: false, entry: undefined }),
+			withoutEntry({ outcome: "denied", verified_persisted: false }),
+			withoutEntry({ outcome: "quarantined", verified_persisted: false }),
+			withoutEntry({ outcome: "conflict", verified_persisted: false }),
 			accepted({ verified_persisted: false }),
 		]) {
 			const { fake, emitted, deps } = setup();
@@ -402,7 +408,7 @@ describe("supersede", () => {
 		const outcome = await forwardRetain(
 			deps,
 			{ ...sourced(), scope: "repo:acme/app", kind: "fact", text: "x", writer: "cursor" },
-			accepted({ idempotency_key: "mwd_key9", entry: entry({ subject: undefined }) }),
+			accepted({ idempotency_key: "mwd_key9", entry: entry() }),
 		);
 		expect(outcome).toMatchObject({ forwarded: true, document_id: "mwd_key9" });
 	});

@@ -136,8 +136,8 @@ export interface ParityFacts {
 }
 
 export interface VerdictOptions {
-	expectRestarts?: number;
-	expectStart?: number;
+	expectRestarts?: number | undefined;
+	expectStart?: number | undefined;
 }
 
 export interface ParityVerdictResult {
@@ -313,7 +313,7 @@ function spawn(argv: string[], env?: Record<string, string | undefined>): SpawnR
 /** The git repo used to ask whether a release sha is on origin/main. Not the process cwd. */
 function operatorRepo(): string {
 	const requested = process.env.SUBSTRATE_REPO;
-	if (requested && requested.startsWith("/") && !requested.includes("\0") && !requested.includes("\n")) return requested;
+	if (requested?.startsWith("/") && !requested.includes("\0") && !requested.includes("\n")) return requested;
 	return "/root/src/repos/agent-substrate";
 }
 

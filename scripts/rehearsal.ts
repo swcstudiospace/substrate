@@ -231,7 +231,7 @@ export function parseDesktopSurfaces(
  * not a known-local one, could point the harness at someone else's engine.
  * Returns the reason, or null when the daemon resolves locally.
  */
-export function refuseDockerEnv(env: { DOCKER_HOST?: string; DOCKER_CONTEXT?: string }): string | null {
+export function refuseDockerEnv(env: { DOCKER_HOST?: string | undefined; DOCKER_CONTEXT?: string | undefined }): string | null {
 	const host = (env.DOCKER_HOST ?? "").trim();
 	if (host !== "" && !host.startsWith("unix://")) {
 		return `refusing non-local DOCKER_HOST ${host}`;
@@ -748,7 +748,7 @@ async function waitForHealth(
 
 /** A twin `up` may declare ready: /healthz reported a writable index and ledger. */
 export function isTwinHealthy(health: { index: boolean; ledger: boolean; writable: boolean } | null): boolean {
-	return health !== null && health.index && health.ledger && health.writable;
+	return health?.index === true && health.ledger && health.writable;
 }
 
 function killOwn(pid: number): void {

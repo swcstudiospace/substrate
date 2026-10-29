@@ -596,18 +596,19 @@ function transcriptPort(surface: string): TranscriptPort {
 	return {
 		rewind: (request) => {
 			const home = homedir();
+			// omp's default sessions root; an omp started with another profile or agent directory keeps its sessions elsewhere,
+			// which is reported as `unsupported` (the bucket is not found), never guessed.
+			const ompSessionsDir = resolveOmpSessionsDir({
+				candidates: [process.cwd(), git(["rev-parse", "--show-toplevel"])],
+				homeDir: home,
+				tmpRoot: tmpdir(),
+				sessionsRoot: join(home, ".omp", "agent", "sessions"),
+				realpath: (path) => realpathSync(path),
+				isDirectory: (path) => existsSync(path) && statSync(path).isDirectory(),
+			});
 			return createTranscriptPort({
 				surface,
-				// omp's default sessions root; an omp started with another profile or agent directory keeps its sessions elsewhere,
-				// which is reported as `unsupported` (the bucket is not found), never guessed.
-				ompSessionsDir: resolveOmpSessionsDir({
-					candidates: [process.cwd(), git(["rev-parse", "--show-toplevel"])],
-					homeDir: home,
-					tmpRoot: tmpdir(),
-					sessionsRoot: join(home, ".omp", "agent", "sessions"),
-					realpath: (path) => realpathSync(path),
-					isDirectory: (path) => existsSync(path) && statSync(path).isDirectory(),
-				}),
+				...(ompSessionsDir === undefined ? {} : { ompSessionsDir }),
 				listDir: (dir) => readdir(dir),
 				readFile: async (path, maxBytes) => {
 					const info = await stat(path);

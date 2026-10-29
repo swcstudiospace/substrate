@@ -149,7 +149,7 @@ async function run(argv: readonly string[], files: Record<string, string>, env: 
 		stderr: (text) => {
 			stderr += text;
 		},
-		fetchImpl,
+		...(fetchImpl === undefined ? {} : { fetchImpl }),
 		readFile: (path) => {
 			if (!Object.hasOwn(files, path)) throw new Error("ENOENT");
 			return defined(files[path], path);

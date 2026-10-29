@@ -113,7 +113,7 @@ export type SubstrateDockerOptions = {
 	/** U1: injected host resolver for tests; defaults to an A-record DNS lookup. */
 	resolveEgressHost?: (host: string) => Promise<readonly string[]>;
 	/** U1: one warning event per egress refusal, the reconcile warn idiom (action + reason). */
-	warn?: (payload: { action: string; reason: string }) => void;
+	warn?: ((payload: { action: string; reason: string }) => void) | undefined;
 };
 
 /** LANEA-05: image builds and pulls are refused below 10 GiB free (D31-07). */

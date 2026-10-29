@@ -951,7 +951,8 @@ describe("skills_propose", () => {
 	});
 
 	test("a dry run returns the diff counts and emits nothing", async () => {
-		const dry: ProposeResult = { ...opened, status: "dry_run", pr_url: undefined, diff_added: 1, diff_changed: 0, diff_deleted: 0 };
+		const { pr_url: _opened, ...withoutUrl } = opened;
+		const dry: ProposeResult = { ...withoutUrl, status: "dry_run", diff_added: 1, diff_changed: 0, diff_deleted: 0 };
 		const { client, calls, written } = await proposing(dry);
 		const reply = await call(client, "skills_propose", { ...args, dry_run: true });
 

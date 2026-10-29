@@ -253,11 +253,11 @@ export const DEFAULT_CLASS: AdmissionClass = "read";
 export function routeClass(method: string, pathname: string): AdmissionClass | null {
 	if (method === "GET" && Object.hasOwn(MONITOR_ROUTES, pathname)) return null;
 	if (pathname === MCP_ROUTE) return null;
-	return Object.hasOwn(ROUTE_CLASSES, pathname) ? ROUTE_CLASSES[pathname]! : DEFAULT_CLASS;
+	return (Object.hasOwn(ROUTE_CLASSES, pathname) ? ROUTE_CLASSES[pathname] : undefined) ?? DEFAULT_CLASS;
 }
 
 export function toolClass(tool: string): AdmissionClass {
-	return Object.hasOwn(TOOL_CLASSES, tool) ? TOOL_CLASSES[tool]! : DEFAULT_CLASS;
+	return (Object.hasOwn(TOOL_CLASSES, tool) ? TOOL_CLASSES[tool] : undefined) ?? DEFAULT_CLASS;
 }
 
 // ── the decision ─────────────────────────────────────────────────────────────
@@ -364,8 +364,9 @@ export class Admission {
 function parseReply(value: unknown): { allowed: boolean; tokensLeft: number; retryAfterMs: number } | null {
 	if (!Array.isArray(value) || value.length < 3) return null;
 	const [allowed, tokensLeft, retryAfterMs] = value.map((item) => (typeof item === "number" ? item : Number(item)));
+	if (allowed === undefined || tokensLeft === undefined || retryAfterMs === undefined) return null;
 	if (![allowed, tokensLeft, retryAfterMs].every((item) => Number.isFinite(item))) return null;
-	return { allowed: allowed === 1, tokensLeft: tokensLeft!, retryAfterMs: Math.max(0, retryAfterMs!) };
+	return { allowed: allowed === 1, tokensLeft, retryAfterMs: Math.max(0, retryAfterMs) };
 }
 
 /**

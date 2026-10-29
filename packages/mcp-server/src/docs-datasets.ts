@@ -330,7 +330,7 @@ export interface ResolvedDataset {
 
 export interface ResolveDeps {
 	config: RagflowConfig;
-	fetchImpl?: FetchLike;
+	fetchImpl?: FetchLike | undefined;
 	/** Create on a name-miss. False rehearses discovery without creating (G2 owns real creation). */
 	createOnMiss?: boolean;
 	/** The dataset list reader; the plane directly when omitted. */

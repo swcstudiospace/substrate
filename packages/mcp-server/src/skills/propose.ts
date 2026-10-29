@@ -93,9 +93,9 @@ export interface ProposeOptions {
 	reopen?: boolean;
 	ledgerPath?: string;
 	/** Test seam: the state dir holding mirror.git, propose/, mirror.lock, locks/ and the ledger. */
-	stateDir?: string;
+	stateDir?: string | undefined;
 	/** Which library the proposal targets; defaults to September's. */
-	library?: SkillsLibrary;
+	library?: SkillsLibrary | undefined;
 	/** Test seam: how long a live lock is waited for. */
 	lockWaitMs?: number;
 	/** Runs after the ledger replay and before any mirror, clone or push work. It is handed the PR of the merged proposal the ledger holds for this content, or null. A throw refuses the proposal with nothing written; a returned gate refuses it only when the library no longer holds the content. Runs for a dry run too. */

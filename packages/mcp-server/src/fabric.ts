@@ -95,7 +95,7 @@ export interface ComplianceCheck {
 	plane: OptimizationPlane;
 	passed: boolean;
 	detail: string;
-	advisory?: boolean;
+	advisory?: boolean | undefined;
 }
 
 export interface ComplianceReport {

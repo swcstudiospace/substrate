@@ -161,7 +161,7 @@ export async function planBetween(
 	targetTree: string,
 	expectedCurrentTree?: string,
 	skipped: readonly SkippedPath[] = [],
-	options: { expectedSkipped?: readonly SkippedPath[]; truncated?: { total: number } | null } = {},
+	options: { expectedSkipped?: readonly SkippedPath[] | undefined; truncated?: { total: number } | null } = {},
 ): Promise<RestorePlan> {
 	const { kept: named, ignored } = partition(await diffTrees(ctx, currentTree, targetTree), policy);
 	const { kept, skippedInSnapshot } = protectSkipped(named, skipped);

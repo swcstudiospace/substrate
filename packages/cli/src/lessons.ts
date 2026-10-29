@@ -547,14 +547,14 @@ export function renderPriorLessons(ranked: readonly Ranked[], context: { scope: 
 
 export interface ExtractedLesson {
 	text: string;
-	slug?: string;
+	slug?: string | undefined;
 	tags: string[];
-	outcome?: string;
+	outcome?: string | undefined;
 }
 
 export interface SummaryLessons {
-	milestone?: string;
-	phase?: string;
+	milestone?: string | undefined;
+	phase?: string | undefined;
 	/** The SUMMARY's frontmatter tags, which every lesson in it inherits. */
 	tags: string[];
 	/** The bullets under `## Lessons`. */
@@ -685,7 +685,7 @@ export function parseSummary(markdown: string): SummaryLessons {
  * phase is filed under `milestones/<milestone>-phases/<phase>/`, a live one under
  * `phases/<phase>/`.
  */
-export function placeOf(path: string): { milestone?: string; phase?: string } {
+export function placeOf(path: string): { milestone?: string | undefined; phase?: string | undefined } {
 	return {
 		milestone: /(?:^|\/)milestones\/([^/]+?)-phases\//.exec(path)?.[1],
 		phase: /(?:^|\/)(?:[^/]*-)?phases\/([^/]+)\/[^/]+$/.exec(path)?.[1],
@@ -772,7 +772,7 @@ export function interpret(reply: WriteReply): Pick<WriteReport, "status" | "id" 
 
 export interface Connection {
 	url: string;
-	token?: string;
+	token?: string | undefined;
 	timeoutMs: number;
 }
 

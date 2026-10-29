@@ -15,6 +15,7 @@ import {
 	type DriftInputs,
 } from "./drift.ts";
 import { NO_LEASE, type LeaseSnapshot } from "./lease.ts";
+import { defined } from "./test-support.ts";
 import type { EventKind, GraphEdge, Surface } from "./types.ts";
 
 const NOW = Date.parse("2026-09-30T12:00:00.000Z");
@@ -467,7 +468,7 @@ describe("graph edges", () => {
 
 	test("a completed requirement is not drift", () => {
 		const edges: GraphEdge[] = [{ graph_id: "ut-1", from_node: "n2", to_node: "n1", kind: "requires" }];
-		const done = [{ ...nodes[0]!, state: "completed" as const }, nodes[1]!];
+		const done = [{ ...defined(nodes[0]), state: "completed" as const }, defined(nodes[1])];
 		expect(analyzeDrift(inputs({ claims: [claim()], nodes: done, edges })).findings).toEqual([]);
 	});
 

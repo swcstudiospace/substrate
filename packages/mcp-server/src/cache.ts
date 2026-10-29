@@ -181,10 +181,10 @@ export interface CacheRedis {
 export interface ReadThroughOptions {
 	redis: CacheRedis | null;
 	enabled: boolean;
-	now?: () => number;
+	now?: (() => number) | undefined;
 	log?: (line: string) => void;
 	commandTimeoutMs?: number;
-	record?: (sample: CacheSample) => void;
+	record?: ((sample: CacheSample) => void) | undefined;
 	/** The DOCS-06 refusal to report in health, if the cache was refused. */
 	refusedReason?: string;
 	/** Stale-while-revalidate mode and window (`SUBSTRATE_CACHE_SWR`, `SUBSTRATE_CACHE_SWR_WINDOW_S`). Absent is `off`. */
@@ -294,8 +294,8 @@ export function snapshotKey(klass: CacheClass, surface: string, args: unknown): 
 }
 
 export interface BunRedisOptions {
-	gate?: PlaneGate | null;
-	now?: () => number;
+	gate?: PlaneGate | null | undefined;
+	now?: (() => number) | undefined;
 	cooldownMs?: number;
 	connectTimeoutMs?: number;
 	/** The deadline every command races inside the plane gate; `COMMAND_TIMEOUT_MS` by default. */
@@ -829,9 +829,10 @@ export class ReadThroughCache {
 	 * pre-write answer for the whole TTL.
 	 */
 	async bump(key: string): Promise<void> {
-		if (!this.enabled || !this.redis) return;
+		const redis = this.redis;
+		if (!this.enabled || !redis) return;
 		try {
-			await this.attempt(() => this.redis!.incr(key));
+			await this.attempt(() => redis.incr(key));
 			this.staleGenerations.delete(key);
 			this.noteConnected();
 		} catch (cause) {
@@ -967,9 +968,10 @@ export class ReadThroughCache {
 	async script(script: string, keys: readonly string[], args: readonly string[]): Promise<ScriptOutcome> {
 		if (!this.enabled || !this.redis) return { ok: false, reason: "cache off" };
 		const redis = this.redis;
-		if (!redis.eval) return { ok: false, reason: "cache client has no EVAL" };
+		const evaluate = redis.eval;
+		if (!evaluate) return { ok: false, reason: "cache client has no EVAL" };
 		try {
-			const value = await this.attempt(() => redis.eval!(script, keys, args));
+			const value = await this.attempt(() => evaluate.call(redis, script, keys, args));
 			this.noteConnected();
 			return { ok: true, value };
 		} catch (cause) {

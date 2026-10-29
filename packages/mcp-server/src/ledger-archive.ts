@@ -268,7 +268,7 @@ export const devReader: DevReader = (path) => {
  */
 export function refusedMount(
 	outDir: string,
-	options: { cwd: string; dev?: DevReader; releaseRoot?: string; allowRootfs?: boolean },
+	options: { cwd: string; dev?: DevReader | undefined; releaseRoot?: string; allowRootfs?: boolean | undefined },
 ): string | null {
 	if (options.allowRootfs === true) return null;
 	const dev = options.dev ?? devReader;
@@ -449,7 +449,7 @@ export async function archiveWindow(
 		let after: ExportCursor | undefined;
 		let firstPage = true;
 		for (;;) {
-			const page = await greptime.exportWindow({ from, to, after, limit: options.pageSize ?? DEFAULT_PAGE_SIZE });
+			const page = await greptime.exportWindow({ from, to, ...(after === undefined ? {} : { after }), limit: options.pageSize ?? DEFAULT_PAGE_SIZE });
 			const parsed: SubstrateEvent[] = page.events.map(rowToEvent);
 			const hashes = new Map<string, string>();
 			for (const event of parsed) {
@@ -982,8 +982,8 @@ export class LedgerUsageError extends Error {}
 
 export type LedgerCommand =
 	| { command: "coverage"; json: boolean }
-	| { command: "archive"; until?: string; out?: string; pageSize?: number; json: boolean }
-	| { command: "verify-archive"; dir: string; day?: string; json: boolean };
+	| { command: "archive"; until?: string | undefined; out?: string | undefined; pageSize?: number | undefined; json: boolean }
+	| { command: "verify-archive"; dir: string; day?: string | undefined; json: boolean };
 
 export const LEDGER_USAGE =
 	"usage: ledger-run.ts coverage [--json]\n" +

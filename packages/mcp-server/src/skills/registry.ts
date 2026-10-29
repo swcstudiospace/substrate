@@ -224,7 +224,7 @@ export interface SkillApprovalRequest {
 	name: string;
 	pr_number: number;
 	decision: string;
-	reason?: string;
+	reason?: string | undefined;
 }
 
 /** A request whose values passed {@link validateApproval}. */

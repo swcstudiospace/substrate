@@ -365,7 +365,7 @@ export class PlanningObserver {
 		const built = cached === null ? await buildPlanningIndex(root, fsDeps) : await updatePlanningIndex(root, fsDeps, cached);
 
 		const clock = this.deps.presence === null ? null : await readClock(this.deps.presence);
-		const nowMs = clock !== null && clock.ok ? clock.nowMs : null;
+		const nowMs = clock?.ok ? clock.nowMs : null;
 		const gapMoved = nowMs !== null ? this.stampReport(built, nowMs) : this.withdrawReport();
 		const repo = await repoOf(this.deps.fs, root, this.deps.originUrl);
 		if (!built.ok) {
@@ -397,7 +397,7 @@ export class PlanningObserver {
 		const current = this.baseline;
 		const previous = current !== null && current.root === root ? current.snapshot : null;
 		const diff = previous === null ? null : diffPlanningIndex(previous, next);
-		const changed = diff !== null && diff.complete && changesIn(diff) > 0;
+		const changed = diff?.complete === true && changesIn(diff) > 0;
 		let outcome: ObserverOutcome;
 		if (repo.state === "known") {
 			const observed = await observePlanningChange({
@@ -423,7 +423,7 @@ export class PlanningObserver {
 		}
 		// The transition was scheduled, not awaited, and the baseline advanced in `settle` above: the baseline save below saves the
 		// advanced baseline, and nothing after it (heartbeat, liveness beat, announcement) waits on the metric write.
-		const sinceChange = sinceLastScan !== null && sinceLastScan.complete && changesIn(sinceLastScan) > 0;
+		const sinceChange = sinceLastScan?.complete === true && changesIn(sinceLastScan) > 0;
 		const heartbeat = await this.heartbeat(root, sinceChange || gapMoved, ttlMs, repo, nowMs);
 		const liveness = await this.livenessBeat(root, heartbeat, ttlMs, repo, nowMs);
 		await this.announce(root, repo, ttlMs);
@@ -458,7 +458,7 @@ export class PlanningObserver {
 		const recorded = key !== null && key === this.recordedHold;
 		if (outcome !== null && current !== null && !recorded) {
 			this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: baselineState, to: state, outcome, incomplete }, this.deps.clock ?? hostClock));
-		} else if (current !== null && this.recordedHold !== null && diff !== null && diff.complete && changesIn(diff) === 0) {
+		} else if (current !== null && this.recordedHold !== null && diff?.complete === true && changesIn(diff) === 0) {
 			// A revert: the held change is undone, so the baseline matches the checkout again and nothing is published. It is recorded
 			// once, as refused, because the reverted change never reached the ledger.
 			this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: change.observedBefore ?? baselineState, to: state, outcome: "refused" }, this.deps.clock ?? hostClock));

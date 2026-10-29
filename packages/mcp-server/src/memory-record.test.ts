@@ -17,7 +17,10 @@ import type { MemoryEntry } from "./types.ts";
 
 const BODY = "The staging deploy region is fra1; do not move it without the infra lead.";
 
-function entry(over: Partial<MemoryEntry> = {}, hashVersion: "v1" | "v2" = "v1"): MemoryEntry {
+/** Overrides for `entry`; an explicit `undefined` replaces the default, which is how a test builds an entry that lacks a field. */
+type EntryOverrides = { [K in keyof MemoryEntry]?: MemoryEntry[K] | undefined };
+
+function entry(over: EntryOverrides = {}, hashVersion: "v1" | "v2" = "v1"): MemoryEntry {
 	const base = {
 		scope: "repo:agent-substrate",
 		kind: "fact" as const,

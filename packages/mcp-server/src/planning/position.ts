@@ -271,7 +271,7 @@ export function parseRoadmapPart(text: string, frontmatter?: PositionFrontmatter
 }
 
 /** The position from the two parts, the phase directories and the plan files present. Never throws. */
-export function composePosition(input: { state: PartOutcome<StatePart>; roadmap: PartOutcome<RoadmapPart>; phases?: readonly string[]; plans?: readonly string[] }): PositionResult {
+export function composePosition(input: { state: PartOutcome<StatePart>; roadmap: PartOutcome<RoadmapPart>; phases?: readonly string[] | undefined; plans?: readonly string[] | undefined }): PositionResult {
 	try {
 		return compose(input);
 	} catch {
@@ -304,7 +304,7 @@ export function emptyPosition(): Position {
 
 // ── composition ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-function compose(input: { state: PartOutcome<StatePart>; roadmap: PartOutcome<RoadmapPart>; phases?: readonly string[]; plans?: readonly string[] }): PositionResult {
+function compose(input: { state: PartOutcome<StatePart>; roadmap: PartOutcome<RoadmapPart>; phases?: readonly string[] | undefined; plans?: readonly string[] | undefined }): PositionResult {
 	const errors: PositionError[] = [];
 	if (!input.state.ok) errors.push(input.state.error);
 	if (!input.roadmap.ok) errors.push(input.roadmap.error);

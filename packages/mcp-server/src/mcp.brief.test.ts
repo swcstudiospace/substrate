@@ -20,6 +20,7 @@ import { createMcpServer } from "./mcp.ts";
 import { createObservability, type Observability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
+import { defined } from "./test-support.ts";
 
 function graphView(graphId: string) {
 	return {
@@ -262,11 +263,10 @@ describe("memory_brief if_none_match", () => {
 		await restBrief(base);
 		await restBrief(base, first.structured.etag);
 
-		const counter = findCounter(observability.snapshot(), METRIC.briefResult);
-		expect(counter).not.toBeNull();
-		expect(sumCounter(counter!, { surface: "grok-bot", state: "complete", result: "fresh" })).toBe(2);
-		expect(sumCounter(counter!, { surface: "grok-bot", state: "complete", result: "not_modified" })).toBe(2);
-		expect(sumCounter(counter!)).toBe(4);
+		const counter = defined(findCounter(observability.snapshot(), METRIC.briefResult), "brief result counter");
+		expect(sumCounter(counter, { surface: "grok-bot", state: "complete", result: "fresh" })).toBe(2);
+		expect(sumCounter(counter, { surface: "grok-bot", state: "complete", result: "not_modified" })).toBe(2);
+		expect(sumCounter(counter)).toBe(4);
 	});
 
 	test("a surface the body invents is counted as unknown, so the label stays bounded", async () => {
@@ -277,7 +277,7 @@ describe("memory_brief if_none_match", () => {
 			headers: { "content-type": "application/json" },
 		});
 		expect(response.status).toBe(200);
-		const counter = findCounter(observability.snapshot(), METRIC.briefResult)!;
+		const counter = defined(findCounter(observability.snapshot(), METRIC.briefResult), "brief result counter");
 		expect(sumCounter(counter, { surface: "unknown", result: "fresh" })).toBe(1);
 		expect(sumCounter(counter, { surface: "not-a-surface" })).toBe(0);
 	});
@@ -343,7 +343,7 @@ describe("memory_brief profiles (uplift-4 S1)", () => {
 		const { base } = await rig(COMPLETE_INDEX, ENFORCE);
 		const first = await restBriefBody(base, {});
 		expect(first.headers.get("x-substrate-brief-profile")).toBe("compact");
-		const etag = first.headers.get("etag")!;
+		const etag = defined(first.headers.get("etag"), "etag header");
 		const unchanged = await restBriefBody(base, {}, etag);
 		expect(unchanged.status).toBe(304);
 		expect(unchanged.headers.get("x-substrate-brief-profile")).toBe("compact");
@@ -371,13 +371,13 @@ describe("memory_brief profiles (uplift-4 S1)", () => {
 		const { client, observability } = await rig(COMPLETE_INDEX, ENFORCE);
 		const first = await brief(client, ARGS);
 		await brief(client, { ...ARGS, if_none_match: first.structured.etag });
-		const estimated = findCounter(observability.snapshot(), METRIC.servedTokensEst)!;
+		const estimated = defined(findCounter(observability.snapshot(), METRIC.servedTokensEst), "served tokens estimate counter");
 		expect(sumCounter(estimated, { surface: "grok-bot", tool: "brief" })).toBe(Math.ceil(Buffer.byteLength(first.text, "utf8") / 4));
 		expect(sumCounter(estimated)).toBe(sumCounter(estimated, { tool: "brief" }));
-		expect(sumCounter(findCounter(observability.snapshot(), METRIC.tokens)!)).toBe(0);
+		expect(sumCounter(defined(findCounter(observability.snapshot(), METRIC.tokens), "tokens counter"))).toBe(0);
 
 		// The profile counter counts every answer, the 304 included.
-		const profiled = findCounter(observability.snapshot(), METRIC.briefProfile)!;
+		const profiled = defined(findCounter(observability.snapshot(), METRIC.briefProfile), "brief profile counter");
 		expect(sumCounter(profiled, { surface: "grok-bot", profile: "compact", mode: "enforce" })).toBe(2);
 	});
 });

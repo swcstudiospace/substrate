@@ -148,7 +148,7 @@ export class PlanningReader {
 			documents: records.filter(isFileRecord).map(hashRow),
 			errors: records.filter(isErrorRecord).map((record) => ({
 				path: record.path,
-				kind: record.kind,
+				...(record.kind === undefined ? {} : { kind: record.kind }),
 				sha256: record.sha256,
 				bytes: record.bytes,
 				code: record.error.code,

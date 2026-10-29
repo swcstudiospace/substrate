@@ -47,6 +47,7 @@ import { createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 import { SURFACES } from "./types.ts";
+import { defined } from "./test-support.ts";
 
 /** What the route hands the client; the fakes below take it and report the step the real client would run at. */
 type ReadQuery = {
@@ -209,7 +210,7 @@ describe("SampleCollector", () => {
 		const rows = collector.collect(instruments.snapshot(), null, 5000);
 
 		const p95 = seriesRows(rows, "brief.p95");
-		const grok = p95.find((row) => row.labels.surface === "grok-bot")!;
+		const grok = defined(p95.find((row) => row.labels.surface === "grok-bot"), "grok-bot row");
 		expect(grok.count).toBe(20);
 		expect(grok.value).toBeGreaterThan(10);
 		expect(grok.value).toBeLessThanOrEqual(25);
@@ -403,19 +404,19 @@ describe("MetricsHistorySampler", () => {
 			timers: timers.timers,
 		});
 		sampler.start();
-		const tick = timers.handlers[0]!;
+		const tick = defined(timers.handlers[0], "tick handler");
 		tick();
 		tick();
 		tick();
 		await Promise.resolve();
 		expect(calls).toBe(1);
-		release.shift()!();
+		defined(release.shift(), "release")();
 		await sampler.sample();
 		tick();
 		await Promise.resolve();
 		await Promise.resolve();
 		expect(calls).toBe(2);
-		release.shift()!();
+		defined(release.shift(), "release")();
 		await sampler.sample();
 		expect(maxConcurrent).toBe(1);
 		sampler.stop();
@@ -454,13 +455,13 @@ describe("MetricsHistorySampler", () => {
 
 		// Recorded after the in-flight sample was taken: only the fresh one can carry it.
 		instruments.recordBrief({ surface: "grok-bot", ok: true, durationMs: 40 });
-		release.shift()!();
+		defined(release.shift(), "release")();
 		await inFlight;
 		for (let i = 0; i < 50 && batches.length < 2; i++) await Promise.resolve();
 		expect(batches).toHaveLength(2);
-		expect(seriesRows(batches[1]!, "brief.p95")[0]?.count).toBe(1);
+		expect(seriesRows(defined(batches[1], "second batch"), "brief.p95")[0]?.count).toBe(1);
 		expect(flushed).toBe(false);
-		release.shift()!();
+		defined(release.shift(), "release")();
 		await Promise.all([flushing, joined]);
 		expect(flushed).toBe(true);
 		expect(batches).toHaveLength(2);
@@ -593,10 +594,10 @@ describe("metricHistoryAnswer", () => {
 	});
 
 	test("the step is one rule: raised until buckets x label values fit the cap, never lowered, so the oldest bucket survives", () => {
-		const labelled = Object.keys(METRIC_SERIES).filter((name) => (METRIC_SERIES[name]!.values?.size ?? 1) > 1);
-		expect(METRIC_SERIES["brief.p95"]!.values!.size).toBe(new Set([...SURFACES, "other"]).size);
+		const labelled = Object.keys(METRIC_SERIES).filter((name) => (defined(METRIC_SERIES[name], name).values?.size ?? 1) > 1);
+		expect(defined(defined(METRIC_SERIES["brief.p95"]).values).size).toBe(new Set([...SURFACES, "other"]).size);
 		for (const series of Object.keys(METRIC_SERIES)) {
-			const labelValues = METRIC_SERIES[series]!.values?.size ?? 1;
+			const labelValues = defined(METRIC_SERIES[series], series).values?.size ?? 1;
 			for (const windowMs of [3_600_000, 86_400_000, 14 * 86_400_000, 90 * 86_400_000]) {
 				const step = effectiveHistoryStep(series, windowMs, 15);
 				// A window spans at most ceil(window / step) + 1 date_bin buckets.
@@ -980,7 +981,7 @@ describe("the extended series (uplift-5 S6)", () => {
 		expect(metricSeriesFor("extended")).toBe(ALL_METRIC_SERIES);
 		for (const name of extra) {
 			expect(name).toMatch(/^[a-z0-9_.]+$/);
-			const spec = EXTENDED_METRIC_SERIES[name]!;
+			const spec = defined(EXTENDED_METRIC_SERIES[name], name);
 			// Counters add; a gauge is the worst reading in a step. Neither is ever averaged.
 			expect(spec.agg).toBe(spec.kind === "counter" ? "sum" : "max");
 			expect(spec.kind === "counter" || spec.kind === "gauge").toBe(true);
@@ -1159,7 +1160,7 @@ describe("the extended series (uplift-5 S6)", () => {
 
 	test("the step rule counts an extended series' label values: 8 cache results mean at most 2000 / 8 - 1 buckets in 14 days", () => {
 		const windowMs = 14 * 86_400_000;
-		const labels = EXTENDED_METRIC_SERIES["cache.operations"]!.values!.size;
+		const labels = defined(defined(EXTENDED_METRIC_SERIES["cache.operations"]).values).size;
 		expect(labels).toBe(8);
 		const maxBuckets = Math.floor(MAX_METRIC_POINTS / labels) - 1;
 		expect(effectiveHistoryStep("cache.operations", windowMs, 60)).toBe(Math.ceil(windowMs / 1000 / maxBuckets));

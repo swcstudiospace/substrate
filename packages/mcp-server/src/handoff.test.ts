@@ -11,6 +11,7 @@ import {
 	type HandoffPacket,
 } from "./handoff.ts";
 import { REDACTED } from "./redact.ts";
+import { defined } from "./test-support.ts";
 
 const KEYS = new Map([["k1", "a-signing-key-from-substrate-env"]]);
 const SIGNER = { key_id: "k1", key: "a-signing-key-from-substrate-env" };
@@ -134,7 +135,7 @@ describe("signing", () => {
 
 	test("the signature header is covered too — it cannot be back-dated or re-pointed", () => {
 		const signed = signHandoff(packet(), SIGNER);
-		const header = signed.signature!;
+		const header = defined(signed.signature, "signature");
 
 		expect(verifyHandoff({ ...signed, signature: { ...header, signed_at: new Date(0).toISOString() } }, KEYS)).toEqual({
 			ok: false,
@@ -204,7 +205,7 @@ describe("signing", () => {
 
 	test("an unknown algorithm is refused rather than assumed", () => {
 		const signed = signHandoff(packet(), SIGNER);
-		expect(verifyHandoff({ ...signed, signature: { ...signed.signature!, alg: "none" as never } }, KEYS)).toEqual({
+		expect(verifyHandoff({ ...signed, signature: { ...defined(signed.signature, "signature"), alg: "none" as never } }, KEYS)).toEqual({
 			ok: false,
 			reason: "unknown-alg",
 			detail: "none",

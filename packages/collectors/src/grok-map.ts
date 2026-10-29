@@ -28,8 +28,8 @@ export interface GrokEvent {
 export interface GrokContext {
 	/** Session UUID — the directory name, which is more reliable than the field. */
 	sessionId: string;
-	repo?: string;
-	branch?: string;
+	repo?: string | undefined;
+	branch?: string | undefined;
 }
 
 /**
@@ -79,9 +79,9 @@ export function mapGrokEvent(event: GrokEvent, context: GrokContext): EventInput
 	const base = {
 		surface: "grok-build" as const,
 		session_id: context.sessionId,
-		repo: context.repo,
-		branch: context.branch,
-		ts: event.ts,
+		...(context.repo === undefined ? {} : { repo: context.repo }),
+		...(context.branch === undefined ? {} : { branch: context.branch }),
+		...(event.ts === undefined ? {} : { ts: event.ts }),
 	};
 
 	switch (type) {
