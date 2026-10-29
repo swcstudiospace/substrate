@@ -123,6 +123,16 @@ export async function executeIngest(input: IngestInput): Promise<IngestOutcome> 
 
 	const entryByKey = new Map(input.inventory.entries.map((entry) => [documentKey(entry.repo, entry.path), entry]));
 
+	// A file skipped because the server's rules refuse its path never reaches the plan; it is reported here as refused so the run does not look clean.
+	let listedBadPaths = 0;
+	for (const skip of input.inventory.report.skipped) {
+		if (skip.reason !== "bad-path") continue;
+		record(skip.repo, skip.path, "refused", "bad-path");
+		listedBadPaths += 1;
+	}
+	// The skip list is capped, the count is exact.
+	counts.refused += Math.max(0, (input.inventory.report.skippedByReason["bad-path"] ?? 0) - listedBadPaths);
+
 	// Phase 1: every tombstone, in requests of their own, before any document is inserted.
 	const tombstones = new Map<string, { repo: string; path: string }>();
 	const removedBefore = new Map<string, string>();

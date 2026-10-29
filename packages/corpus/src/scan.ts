@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { classify, isExcludedSegment } from "./classify.ts";
+import { isValidPath } from "./names.ts";
 import {
 	type Checkout,
 	type Collection,
@@ -279,6 +280,11 @@ interface RepoState {
 function readCandidate(reader: Reader, state: RepoState, rel: string, abs: string): void {
 	const found = classify(rel);
 	if (found === null || found.tier > reader.maxTier) return;
+	// The server refuses a whole plan for one path that breaks its rules, so such a file is skipped here, before any copy collapse can let it hide a valid copy.
+	if (!isValidPath(rel)) {
+		reader.skips.add({ repo: state.repo, path: rel, reason: "bad-path" });
+		return;
+	}
 	// Another directory under the same label already supplied this path (root order decides): it is counted, never read twice.
 	if (reader.paths.has(documentKey(state.repo, rel))) {
 		state.shadowed += 1;

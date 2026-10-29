@@ -276,6 +276,14 @@ describe("scanRoots over copy collections", () => {
 		expect(second.report.collapsed.identical).toBe(1);
 	});
 
+	test("a path the server refuses is skipped before copies collapse, so the valid identical copy is the one kept", async () => {
+		const root = fixture({ "a/docs\\guide.md": GUIDE, "b/docs/guide.md": GUIDE });
+		const result = await scanRoots({ roots: [root], runner: fakeGit({}) });
+		expect(result.entries.map((e) => documentKey(e.repo, e.path))).toEqual(["local/b:docs/guide.md"]);
+		expect(result.report.skipped).toEqual([{ repo: "local/a", path: "docs\\guide.md", reason: "bad-path" }]);
+		expect(result.report.collapsed.identical).toBe(0);
+	});
+
 	test("identical files inside one repository stay, and identical files in a repository with an origin are never collapsed", async () => {
 		const root = fixture({
 			"c1/docs/a.md": GUIDE,

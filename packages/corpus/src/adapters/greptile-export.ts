@@ -8,6 +8,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type DirEntry, readEntries } from "../discover.ts";
+import { isValidPath } from "../names.ts";
 import { type CorpusEntry, documentKey, type DocTier } from "../protocol.ts";
 import {
 	type AdapterResult,
@@ -110,6 +111,11 @@ export async function scanGreptileExport(dir: string, opts: GreptileScanOptions 
 					continue;
 				}
 				if ((child.kind !== "file" && child.kind !== "symlink") || !child.name.toLowerCase().endsWith(".md")) continue;
+				// The server refuses a whole plan for one path that breaks its rules; such a file is skipped here, before anything else sees it.
+				if (!isValidPath(rel)) {
+					skips.add({ repo: candidate.repo, path: rel, reason: "bad-path" });
+					continue;
+				}
 				const loaded = loadDocument(abs, { maxBytes, readFile, lstat });
 				if (!loaded.ok) {
 					skips.add({ repo: candidate.repo, path: rel, reason: loaded.reason });

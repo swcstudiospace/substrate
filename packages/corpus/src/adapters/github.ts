@@ -12,6 +12,7 @@
 import { execFile } from "node:child_process";
 import { classify } from "../classify.ts";
 import { isRecord } from "../guards.ts";
+import { isValidPath } from "../names.ts";
 import type { CorpusEntry, DocTier } from "../protocol.ts";
 import {
 	type AdapterResult,
@@ -244,6 +245,7 @@ export async function scanGithub(opts: GithubScanOptions): Promise<AdapterResult
 								const refuse = (reason: SkippedFile["reason"]): void => {
 									skipped.push({ repo: repo.slug, path: item.path, reason });
 								};
+								if (!isValidPath(item.path)) return refuse("bad-path");
 								if (item.mode === SYMLINK_MODE) return refuse("symlink");
 								if (item.size === 0) return refuse("empty");
 								if (item.size !== undefined && item.size > maxBytes) return refuse("too-large");
