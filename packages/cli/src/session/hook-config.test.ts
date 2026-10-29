@@ -9,6 +9,7 @@ import { cleanupTemp, makeRepo } from "../../../worktree-snapshot/src/testkit.ts
 import { type SessionDeps, EXIT_DONE, EXIT_USAGE, parseSessionArgs, runSession } from "./command.ts";
 import { BASELINE_HOOK_COMMAND, CLAUDE_CODE_HOOK_COMMAND, GIT_POST_COMMIT_HOOK_COMMAND, HOOK_CONFIG_TARGETS, STEERING_HOOK_COMMAND, renderHookConfig } from "./hook-config.ts";
 import { HOOK_TIMEOUT_MS } from "./hook.ts";
+import { HOOK_TRIGGERS, type HookTrigger } from "./trigger-policy.ts";
 import { FakeTranscript, seededRandomBytes } from "./testkit.ts";
 
 afterAll(cleanupTemp);
@@ -43,9 +44,9 @@ const STEERING_TEXT = `#!/bin/sh
 # Run this from the session's worktree, by the host that applies a steering directive. ADR 0007 maps no Claude Code or git event to it:
 # wire it to the place your host handles the \`checkpoint_hint\` of a \`steering_acknowledge\` reply, which carries the directive_id.
 # After a directive it takes a steering checkpoint, once per directive id; it is skipped when the tree is unchanged.
-# Set SESSION_ID (the string the surface uses for its memory writes) and DIRECTIVE_ID; neither may contain a quote or a backslash.
-# The command is fail-open and runs in the background, so the host never waits.
-printf '{"directive_id":"%s"}' "$DIRECTIVE_ID" | substrate session hook steering --session "$SESSION_ID" >/dev/null 2>&1 &
+# Set SESSION_ID (the string the surface uses for its memory writes), SURFACE (the surface name the host's memory writes use, e.g. omp or claude-code) and DIRECTIVE_ID; none may contain a quote or a backslash.
+# The command runs in the foreground so the checkpoint reflects the tree as it stood when the directive was applied; it ends itself within its own timeout and is fail-open (\`|| true\`), so it never blocks the host.
+printf '{"directive_id":"%s"}' "$DIRECTIVE_ID" | substrate session hook steering --session "$SESSION_ID" --surface "$SURFACE" >/dev/null 2>&1 || true
 exit 0
 `;
 
@@ -53,8 +54,10 @@ const BASELINE_TEXT = `#!/bin/sh
 # Run this from the session's worktree, once when a session starts. ADR 0007 maps no Claude Code or git event to it; it names
 # omp's \`session_start\` and a Swarm lane start (after the lane's worktree and branch exist) as proposals, so wire it to the matching event of your host.
 # It takes the first checkpoint of a session that has none yet, so a rollback can reach back to the start; once the session has a checkpoint it does nothing.
-# Set SESSION_ID to the string the surface uses for its memory writes. The command is fail-open and runs in the background.
-substrate session hook baseline --session "$SESSION_ID" </dev/null >/dev/null 2>&1 &
+# Set SESSION_ID (the string the surface uses for its memory writes) and SURFACE (the surface name the host's memory writes use, e.g. omp or claude-code).
+# The command runs in the foreground, so the host must wait for it before the session may write any file: a background run could capture the session's first edits instead of its start state.
+# It ends itself within its own timeout and is fail-open (\`|| true\`), so it never blocks the host for longer than that.
+substrate session hook baseline --session "$SESSION_ID" --surface "$SURFACE" </dev/null >/dev/null 2>&1 || true
 exit 0
 `;
 
@@ -75,24 +78,35 @@ describe("the printed text", () => {
 		expect(renderHookConfig("baseline")).toBe(BASELINE_TEXT);
 	});
 
-	test("the steering script pipes the directive id as the envelope, runs the steering hook in the background, and exits 0", () => {
+	test("the steering script pipes the directive id as the envelope, runs the steering hook in the foreground with --surface, fail-open, and exits 0", () => {
 		const script = renderHookConfig("steering");
 		expect(script.startsWith("#!/bin/sh\n")).toBe(true);
-		expect(script).toContain(`| ${STEERING_HOOK_COMMAND} --session "$SESSION_ID" >/dev/null 2>&1 &`);
+		expect(script).toContain(`| ${STEERING_HOOK_COMMAND} --session "$SESSION_ID" --surface "$SURFACE" >/dev/null 2>&1 || true`);
+		expect(script).not.toContain("2>&1 &");
 		expect(script).toContain(`'{"directive_id":"%s"}'`);
 		expect(script.endsWith("exit 0\n")).toBe(true);
 	});
 
-	test("the baseline script runs the baseline hook, backgrounded, with stdin and output discarded, and exits 0", () => {
+	test("the baseline script runs the baseline hook in the foreground with --surface, fail-open, stdin and output discarded, and exits 0", () => {
 		const script = renderHookConfig("baseline");
 		expect(script.startsWith("#!/bin/sh\n")).toBe(true);
-		expect(script).toContain(`${BASELINE_HOOK_COMMAND} --session "$SESSION_ID" </dev/null >/dev/null 2>&1 &`);
+		expect(script).toContain(`${BASELINE_HOOK_COMMAND} --session "$SESSION_ID" --surface "$SURFACE" </dev/null >/dev/null 2>&1 || true`);
+		expect(script).not.toContain("2>&1 &");
 		expect(script.endsWith("exit 0\n")).toBe(true);
 	});
 
-	test("the four targets together cover every trigger `session hook` accepts", () => {
+	test("the targets together cover every trigger `session hook` accepts", () => {
+		const printedCommand: Record<HookTrigger, string> = {
+			turn: CLAUDE_CODE_HOOK_COMMAND,
+			"plan-step": GIT_POST_COMMIT_HOOK_COMMAND,
+			steering: STEERING_HOOK_COMMAND,
+			baseline: BASELINE_HOOK_COMMAND,
+		};
 		const text = HOOK_CONFIG_TARGETS.map((target) => renderHookConfig(target)).join("\n");
-		for (const trigger of ["turn", "plan-step", "steering", "baseline"]) expect(text).toContain(`substrate session hook ${trigger}`);
+		for (const trigger of HOOK_TRIGGERS) {
+			expect(printedCommand[trigger]).toBe(`substrate session hook ${trigger}`);
+			expect(text).toContain(printedCommand[trigger]);
+		}
 	});
 
 	test("the claude-code text is valid JSON: a Stop hook running the exact turn command, with room above the hook's own budget", () => {
