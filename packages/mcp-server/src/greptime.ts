@@ -320,7 +320,8 @@ export function chainTip(rows: Array<Record<string, unknown>>): string | null {
  */
 export function ttlOf(ddl: string): string | null {
 	const match = /\bttl'?\s*=\s*'([^']*)'/i.exec(ddl);
-	return match ? match[1]!.trim() : null;
+	const ttl = match?.[1];
+	return ttl === undefined ? null : ttl.trim();
 }
 
 /** Two TTL spellings that mean the same retention: suffixes are case-insensitive and spaces optional. */
@@ -628,7 +629,7 @@ export interface ExportWindowQuery {
 	/** Exclusive ISO upper bound on `ts`. */
 	to: string;
 	/** Resume strictly after this `(ts, id)`; omit for the first page. */
-	after?: ExportCursor;
+	after?: ExportCursor | undefined;
 	/** Rows per page, clamped like every other read (`queryLimit`). */
 	limit?: number;
 }
@@ -1357,7 +1358,7 @@ export class GreptimeClient {
 	): Promise<{ id: string; hash: string } | null> {
 		if (!IDEMPOTENCY_KEY_PATTERN.test(key)) throw new GreptimeError("refusing an idempotency lookup for a malformed key");
 		await this.probeDialect();
-		if (!this.dialectProbed && [cell.repo, cell.graph_id].some((value) => value !== null && value.includes("\\"))) {
+		if (!this.dialectProbed && [cell.repo, cell.graph_id].some((value) => value?.includes("\\") === true)) {
 			// The same refusal `insertEvent` makes: until the dialect is known a backslash cannot be quoted
 			// safely, so a lookup could silently miss the row the original attempt stored.
 			throw new GreptimeError("refusing an idempotency lookup on a value containing a backslash before the server's quoting dialect is known");
@@ -1385,7 +1386,7 @@ export class GreptimeClient {
 			if (found !== null) return found;
 			// A short page is the whole rest of the cell: no exact match there is a genuine miss.
 			if (rows.length < IDEMPOTENCY_LOOKUP_LIMIT) return null;
-			const last = rows[rows.length - 1]!.id;
+			const last = rows[rows.length - 1]?.id;
 			if (typeof last !== "string" || !IDEMPOTENCY_ID.test(last)) {
 				throw new GreptimeError("idempotency lookup refused a row id it cannot page past safely");
 			}
@@ -2319,17 +2320,19 @@ export class GreptimeClient {
 		const drop = (reason: MetricDropReason, count: number): void => {
 			if (count > 0) drops[reason] = (drops[reason] ?? 0) + count;
 		};
-		const accepted: Array<{ row: MetricSampleRow; labels: string }> = [];
+		const accepted: Array<{ row: MetricSampleRow; labels: string; kind: string }> = [];
 		let invalid = 0;
 		let capped = 0;
 		for (const row of rows) {
 			const labels = validMetricRow(row);
-			if (labels === null) {
+			// A row that passed validMetricRow names a series in the allow-list, so a missing spec only repeats that refusal.
+			const kind = ALL_METRIC_SERIES[row.series]?.kind;
+			if (labels === null || kind === undefined) {
 				invalid += 1;
 			} else if (accepted.length >= MAX_METRIC_BATCH) {
 				capped += 1;
 			} else {
-				accepted.push({ row, labels });
+				accepted.push({ row, labels, kind });
 			}
 		}
 		drop("invalid", invalid);
@@ -2344,9 +2347,9 @@ export class GreptimeClient {
 			stage = "insert";
 			const values = accepted
 				.map(
-					({ row, labels }) =>
+					({ row, labels, kind }) =>
 						`(${this.q(new Date(row.tsMs).toISOString())}, ${this.q(row.series)}, ${this.q(labels)}, ` +
-						`${this.q(ALL_METRIC_SERIES[row.series]!.kind)}, ${this.q(row.value)}, ${this.q(row.count)})`,
+						`${this.q(kind)}, ${this.q(row.value)}, ${this.q(row.count)})`,
 				)
 				.join(", ");
 			await this.sql(
@@ -2376,8 +2379,8 @@ export class GreptimeClient {
 	 * through the ledger's breaker.
 	 */
 	async readMetricHistory(query: MetricHistoryQuery): Promise<MetricHistoryResult> {
-		if (!Object.hasOwn(ALL_METRIC_SERIES, query.series)) throw new MetricHistoryInputError("the series is not one this substrate records");
-		const spec = ALL_METRIC_SERIES[query.series]!;
+		const spec = Object.hasOwn(ALL_METRIC_SERIES, query.series) ? ALL_METRIC_SERIES[query.series] : undefined;
+		if (spec === undefined) throw new MetricHistoryInputError("the series is not one this substrate records");
 		const retention = parseMetricsHistoryTtl(query.ttl ?? DEFAULT_METRICS_HISTORY_TTL);
 		if (retention === null) throw new MetricHistoryInputError("the metrics history ttl is not a whole number of days from 1d to 90d");
 		const limit = 8.64e15;

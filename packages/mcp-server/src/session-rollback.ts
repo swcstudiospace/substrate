@@ -150,7 +150,7 @@ export interface SessionRollbackDeps {
 	 */
 	selectEntries(sessionId: string, afterIso: string, untilIso: string | null, writer: string | null): Promise<EntrySelection>;
 	/** One memory entry's writer, session and creation instant by id, in any state (forgotten included), or null when it is gone. Throws when the index cannot be read. */
-	readEntry(id: string): Promise<{ writer: string; session_id?: string; created: string } | null>;
+	readEntry(id: string): Promise<{ writer: string; session_id?: string | undefined; created: string } | null>;
 	/** `Substrate.memoryForget`. */
 	forget(request: ForgetRequest, caller: { surface: Surface; session_id: string }): Promise<ForgetReport>;
 	/** Bound on the anchor check; 0 or less means unbounded. */

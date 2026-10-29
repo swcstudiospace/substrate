@@ -4599,7 +4599,12 @@ export class Substrate {
 		dodNote?: DodNote,
 	) {
 		if (!this.index) throw new Error("graph_release requires SUBSTRATE_PG_URL");
-		const result = await this.index.releaseNode(graphId, nodeId, request, caller, alsoSetState);
+		// Keys are forwarded only when present: the index's request type does not accept an explicit `undefined`.
+		const indexRequest = {
+			...(request.lease_id === undefined ? {} : { lease_id: request.lease_id }),
+			...(request.force === undefined ? {} : { force: request.force }),
+		};
+		const result = await this.index.releaseNode(graphId, nodeId, indexRequest, caller, alsoSetState);
 		const { decision } = result;
 		if (result.released && decision.ok && decision.action !== "noop") {
 			// The holder comes from the decision, which was taken against the row

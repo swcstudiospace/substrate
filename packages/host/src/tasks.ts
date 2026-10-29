@@ -552,7 +552,7 @@ export type TaskServiceDeps = {
 	skills: Skill[];
 	trackers: TrackerLocators;
 	/** D-10 backstop; absent means no tracker sync on this host. */
-	sync?: HostSyncLike;
+	sync?: HostSyncLike | undefined;
 	log?: (line: string) => void;
 	now?: () => Date;
 	/** Heartbeat tick period in ms; the half-TTL default stands in production, tests inject short values. */

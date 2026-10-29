@@ -154,7 +154,7 @@ export interface ReadBackExpectation {
  */
 export function expectationFor(
 	id: string,
-	sample: { kind: string; surface: string; payload?: Record<string, unknown> },
+	sample: { kind: string; surface: string; payload?: Record<string, unknown> | undefined },
 	session: string,
 	postedId: string | null,
 ): ReadBackExpectation {
