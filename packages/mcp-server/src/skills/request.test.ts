@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { REDACTED } from "../redact.ts";
 import { SkillProposalDenied } from "../service.ts";
 import { ProposeFailed, ProposeRefused } from "./propose.ts";
-import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./request.ts";
+import { proposalBodyProblem, proposalBodySizeProblem, proposalFailure, toProposalRequest } from "./request.ts";
 
 const valid = { name: "demo-skill", files: { "SKILL.md": "---\nname: demo-skill\n---\n" }, rationale: "why" };
 
@@ -55,6 +55,28 @@ describe("proposalBodyProblem", () => {
 	test("an unknown surface is named but truncated, so a long value is not echoed back whole", () => {
 		const problem = proposalBodyProblem({ ...valid, surface: "x".repeat(500) }) ?? "";
 		expect(problem.length).toBeLessThan(120);
+	});
+});
+
+describe("proposalBodySizeProblem", () => {
+	/** A body whose serialized JSON is exactly `total` UTF-8 bytes, padded through the rationale. */
+	function bodyOf(total: number, pad = "x"): Record<string, unknown> {
+		const bare = Buffer.byteLength(JSON.stringify({ ...valid, rationale: "" }), "utf8");
+		return { ...valid, rationale: pad.repeat((total - bare) / Buffer.byteLength(pad, "utf8")) };
+	}
+
+	test("a body of exactly the cap fits and one byte more is refused with both numbers named", () => {
+		expect(proposalBodySizeProblem(bodyOf(1_000_000))).toBeNull();
+		expect(proposalBodySizeProblem(bodyOf(1_000_001))).toBe("the proposal is 1000001 bytes as JSON, over the limit of 1000000 bytes");
+	});
+
+	test("the measure is UTF-8 bytes, not characters", () => {
+		// Two-byte characters: the body is over the cap in bytes while its character count is well under it.
+		expect(proposalBodySizeProblem(bodyOf(1_000_002, "é"))).toContain("over the limit");
+	});
+
+	test("fields the file-text cap does not count are counted", () => {
+		expect(proposalBodySizeProblem({ ...valid, remove: Array.from({ length: 100_000 }, () => "old/file.md") })).toContain("over the limit");
 	});
 });
 

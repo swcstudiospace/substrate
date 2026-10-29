@@ -8,7 +8,7 @@
 import { redact } from "../redact.ts";
 import { SkillProposalDenied, SkillProposalStale, type SkillProposalRequest } from "../service.ts";
 import { SURFACES } from "../types.ts";
-import { ProposeFailed, ProposeRefused } from "./propose.ts";
+import { ProposeFailed, ProposeRefused, ROUTE_MAX_BYTES } from "./propose.ts";
 
 /** The most a failed git or gh step may say to a caller (D21-09). */
 const FAILURE_MESSAGE_MAX = 400;
@@ -49,6 +49,22 @@ export function proposalBodyProblem(body: unknown): string | null {
 	if (b.expected_version !== undefined && (typeof b.expected_version !== "number" || !Number.isInteger(b.expected_version) || b.expected_version < 0)) {
 		return "expected_version must be a non-negative integer";
 	}
+	return null;
+}
+
+/**
+ * The proposal body's serialized size as a refusal message, or null when it fits.
+ *
+ * Measured on the caller's own JSON (canonical UTF-8), before the server attributes the call to
+ * its token surface, so attribution never costs the caller budget. The REST route is already
+ * bounded by its 1 MB wire cap; the MCP tool is not (its transport reads up to the docs cap), so
+ * the tool calls this before the service. The engine's cap counts file text only, so a large
+ * rationale or removal list would otherwise reach it. The limit is the engine's own, so the
+ * two guards cannot disagree about it.
+ */
+export function proposalBodySizeProblem(body: object): string | null {
+	const bytes = Buffer.byteLength(JSON.stringify(body), "utf8");
+	if (bytes > ROUTE_MAX_BYTES) return `the proposal is ${bytes} bytes as JSON, over the limit of ${ROUTE_MAX_BYTES} bytes`;
 	return null;
 }
 
