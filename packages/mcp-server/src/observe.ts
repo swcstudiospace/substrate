@@ -104,6 +104,7 @@ const KNOWN_ROUTES = [
 	"/worktrees/report",
 	"/worktrees/claims",
 	"/worktrees",
+	"/corpus/neardup",
 ] as const;
 
 export function normalizeRoute(pathname: string): string {

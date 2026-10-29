@@ -7,6 +7,7 @@ import {
 	PLAN_ACTIONS,
 	documentKey,
 	type CorpusAnchorResponse,
+	type CorpusNeardupResponse,
 	type CorpusPlanResponse,
 	type CorpusProofResponse,
 	type CorpusStatusResponse,
@@ -14,6 +15,7 @@ import {
 	type PlanItem,
 } from "@substrate/corpus";
 import type { Inventory } from "./inventory.ts";
+import type { NeardupSelection } from "./neardup.ts";
 import type { OfflineVerdict } from "./proof.ts";
 
 /** Items listed per plan action. */
@@ -162,6 +164,37 @@ export function renderStatus(status: CorpusStatusResponse): string {
 	];
 	for (const row of status.byRepo.slice(0, REPO_LIMIT)) out.push(`  ${printable(row.repo)}  ${row.active} active  ${row.tombstoned} tombstoned\n`);
 	out.push(more(REPO_LIMIT, status.byRepo.length));
+	return out.join("");
+}
+
+/** Pairs listed in the near-duplicate section; the rest is a count. */
+export const NEARDUP_LIST_LIMIT = 50;
+
+/** Why some planned documents were not compared, one line each; nothing when every one was. */
+function renderNotCompared(selection: NeardupSelection): string {
+	const out: string[] = [];
+	if (selection.github > 0) out.push(`${plural(selection.github, "document")} from GitHub ${selection.github === 1 ? "was" : "were"} not compared (a plan does not read them)\n`);
+	if (selection.unreadable > 0) out.push(`${plural(selection.unreadable, "document")} could not be read and ${selection.unreadable === 1 ? "was" : "were"} not compared\n`);
+	if (selection.overLimit > 0) out.push(`compared the first ${selection.items.length} of ${selection.candidates} documents (--neardup-max)\n`);
+	return out.join("");
+}
+
+/**
+ * The near-duplicate section after a plan. `reply` is null when there was nothing to send. The section says in its first line
+ * that the signal is advisory: no document is dropped, skipped or tombstoned because of it.
+ */
+export function renderNeardup(selection: NeardupSelection, reply: CorpusNeardupResponse | null): string {
+	if (reply === null) return `near-duplicates: nothing to compare\n${renderNotCompared(selection)}`;
+	const out: string[] = ["near-duplicates (advisory: no document is dropped on this signal)\n"];
+	if (reply.pairs.length === 0) out.push("  no pair is at or above the threshold\n");
+	for (const pair of reply.pairs.slice(0, NEARDUP_LIST_LIMIT)) {
+		out.push(`  ${pair.similarity.toFixed(4)}  ${printable(documentKey(pair.a.repo, pair.a.path))}  ~  ${printable(documentKey(pair.b.repo, pair.b.path))}\n`);
+	}
+	out.push(more(NEARDUP_LIST_LIMIT, reply.pairs.length));
+	if (reply.truncated) out.push("more pairs matched than the server returned; raise --threshold to narrow them\n");
+	out.push(`model: ${printable(reply.model ?? "unknown")}, dimension: ${reply.dimension ?? "unknown"}\n`);
+	out.push(`compared: ${plural(reply.compared, "document")}, skipped (empty text): ${selection.items.length - reply.compared}\n`);
+	out.push(renderNotCompared(selection));
 	return out.join("");
 }
 

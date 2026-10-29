@@ -63,6 +63,10 @@ The breaker is the plane `tei`. It is not one of the six planes in `/healthz` an
 
 Rollback: unset `TEI_URL` (nothing is sent), or set `SUBSTRATE_EMBED_CACHE=off` to stop reading and writing the cache. Cached vectors expire by TTL; nothing needs deleting.
 
+## Consumers
+
+One component embeds through `EmbeddingService`: the near-duplicate route `POST /corpus/neardup`, which `substrate corpus plan --neardup` calls ([corpus.md](corpus.md#near-duplicates-advisory)). It sends excerpts of documents (at most 4,000 characters each, at most 1,000 per request) and nothing else, only to the TEI service this page configures, and maps a failure of the service to `503 corpus.embeddings-unavailable` with the client's closed reason in `detail`. With `TEI_URL` unset it answers `not-configured` and sends nothing. The signal is advisory: no document is dropped, skipped or changed because of it.
+
 ## Not done here
 
-No component embeds anything yet; the service and its cache are the product of this change. The near-duplicate detection of phase 64 is a consumer of `EmbeddingService`. LightRAG's own embedding binding is not touched.
+LightRAG's own embedding binding is not touched.
