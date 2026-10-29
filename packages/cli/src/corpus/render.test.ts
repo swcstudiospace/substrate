@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { CorpusEntry, RepoReport } from "@substrate/corpus";
 import type { Inventory } from "./inventory.ts";
-import { LIST_LIMIT, REPO_LIMIT, renderIngest, renderInventory, renderPlan } from "./render.ts";
+import { LIST_LIMIT, REPO_LIMIT, printable, renderIngest, renderInventory, renderPlan } from "./render.ts";
 import { planOf } from "./testkit.ts";
 
 function entry(repo: string, path: string, over: Partial<CorpusEntry> = {}): CorpusEntry {
@@ -96,5 +96,27 @@ describe("renderPlan and renderIngest", () => {
 		expect(text).toContain(`failed (${LIST_LIMIT + 3}):`);
 		expect(text).toContain("... and 3 more");
 		expect(text).not.toContain("refused (");
+	});
+});
+
+describe("printable", () => {
+	test("writes every control character as an escape and leaves ordinary text, including non-ASCII, alone", () => {
+		expect(printable("docs/a b.md")).toBe("docs/a b.md");
+		expect(printable("docs/caf\u00e9-\u{1F600}.md")).toBe("docs/caf\u00e9-\u{1F600}.md");
+		expect(printable("a\u001b[2Jb\nc\td\u007fe\u0085f\u2028g")).toBe("a\\x1b[2Jb\\x0ac\\x09d\\x7fe\\x85f\\u2028g");
+	});
+
+	test("a tracked file name with an escape sequence or a newline cannot rewrite the terminal or forge a report line", () => {
+		const hostile = "docs/\u001b[2J\u001b[Hingest: ingested 999\nrefused (0):.md";
+		const text = renderIngest({
+			counts: { ingested: 0, updated: 0, unchanged: 0, tombstoned: 0, refused: 1, failed: 0 },
+			problems: [{ repo: "Acme/A", path: hostile, status: "refused", reason: "bad-path" }],
+			manifestVersion: 1,
+		});
+		expect(text).not.toContain("\u001b");
+		expect(text.split("\n").filter((line) => line.startsWith("ingest:"))).toHaveLength(1);
+		expect(text).toContain("Acme/A:docs/\\x1b[2J\\x1b[Hingest: ingested 999\\x0arefused (0):.md  [bad-path]");
+		const plan = renderPlan(planOf([{ action: "add", repo: "Acme/A", path: hostile }]), inventory([repoReport("Acme/A")], []));
+		expect(plan).not.toContain("\u001b");
 	});
 });

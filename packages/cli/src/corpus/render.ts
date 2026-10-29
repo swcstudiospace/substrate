@@ -18,6 +18,22 @@ export const LIST_LIMIT = 20;
 /** Repositories listed in an inventory. */
 export const REPO_LIMIT = 100;
 
+/**
+ * A value that came from a file system, an origin or a server answer, safe to print: every control character (escape,
+ * newline, tab, DEL, the C1 range and the Unicode line separators) is written as its escape, so a tracked file name cannot
+ * rewrite the operator's terminal or forge a line of the report. JSON output keeps the raw value.
+ */
+export function printable(text: string): string {
+	let out = "";
+	for (const char of text) {
+		const code = char.codePointAt(0) ?? 0;
+		const control = code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029;
+		if (!control) out += char;
+		else out += code <= 0xff ? `\\x${code.toString(16).padStart(2, "0")}` : `\\u${code.toString(16).padStart(4, "0")}`;
+	}
+	return out;
+}
+
 function plural(count: number, word: string, many = `${word}s`): string {
 	return `${count} ${count === 1 ? word : many}`;
 }
@@ -56,24 +72,24 @@ export function renderInventory(inventory: Inventory): string {
 	const incomplete = report.repos.filter((repo) => !repo.complete);
 	if (incomplete.length > 0) {
 		out.push(`not read completely (left out of a plan's coverage): ${incomplete.length}\n`);
-		for (const repo of incomplete.slice(0, LIST_LIMIT)) out.push(`  ${repo.repo} [${repo.source}]: ${repo.incomplete ?? "incomplete"}\n`);
+		for (const repo of incomplete.slice(0, LIST_LIMIT)) out.push(`  ${printable(repo.repo)} [${repo.source}]: ${printable(repo.incomplete ?? "incomplete")}\n`);
 		out.push(more(LIST_LIMIT, incomplete.length));
 	}
 	const listed = [...report.repos].sort((a, b) => b.files - a.files || (a.repo < b.repo ? -1 : a.repo > b.repo ? 1 : 0));
 	out.push("repositories:\n");
-	for (const repo of listed.slice(0, REPO_LIMIT)) out.push(`  ${repo.repo}  ${repo.files} files  ${repo.bytes} bytes  [${repo.source}]\n`);
+	for (const repo of listed.slice(0, REPO_LIMIT)) out.push(`  ${printable(repo.repo)}  ${repo.files} files  ${repo.bytes} bytes  [${repo.source}]\n`);
 	out.push(more(REPO_LIMIT, listed.length));
 	if (report.notes.length > 0) {
 		out.push("notes:\n");
-		for (const note of report.notes.slice(0, LIST_LIMIT)) out.push(`  ${note}\n`);
+		for (const note of report.notes.slice(0, LIST_LIMIT)) out.push(`  ${printable(note)}\n`);
 		out.push(more(LIST_LIMIT, report.notes.length));
 	}
 	return out.join("");
 }
 
 function describeItem(item: PlanItem): string {
-	const key = documentKey(item.repo, item.path);
-	return item.action === "rename" && item.renamedFrom !== undefined ? `${key}  (from ${item.renamedFrom})` : key;
+	const key = printable(documentKey(item.repo, item.path));
+	return item.action === "rename" && item.renamedFrom !== undefined ? `${key}  (from ${printable(item.renamedFrom)})` : key;
 }
 
 export function renderPlan(plan: CorpusPlanResponse, inventory: Inventory): string {
@@ -87,13 +103,13 @@ export function renderPlan(plan: CorpusPlanResponse, inventory: Inventory): stri
 	const left = report.repos.filter((repo) => !repo.complete);
 	if (left.length > 0) {
 		out.push(`left out of the coverage (${left.length}):\n`);
-		for (const repo of left.slice(0, LIST_LIMIT)) out.push(`  ${repo.repo} [${repo.source}]: ${repo.incomplete ?? "incomplete"}\n`);
+		for (const repo of left.slice(0, LIST_LIMIT)) out.push(`  ${printable(repo.repo)} [${repo.source}]: ${printable(repo.incomplete ?? "incomplete")}\n`);
 		out.push(more(LIST_LIMIT, left.length));
 	}
 	if (report.notes.length > 0) {
 		// Notes say what a source never reached (a repository cap, an unreadable export), which no report row can.
 		out.push("notes:\n");
-		for (const note of report.notes.slice(0, LIST_LIMIT)) out.push(`  ${note}\n`);
+		for (const note of report.notes.slice(0, LIST_LIMIT)) out.push(`  ${printable(note)}\n`);
 		out.push(more(LIST_LIMIT, report.notes.length));
 	}
 	for (const action of PLAN_ACTIONS) {
@@ -127,7 +143,7 @@ export function renderIngest(summary: IngestSummary): string {
 		const rows = summary.problems.filter((problem) => problem.status === status);
 		if (rows.length === 0) continue;
 		out.push(`${status} (${rows.length}):\n`);
-		for (const row of rows.slice(0, LIST_LIMIT)) out.push(`  ${documentKey(row.repo, row.path)}${row.reason === undefined ? "" : `  [${row.reason}]`}\n`);
+		for (const row of rows.slice(0, LIST_LIMIT)) out.push(`  ${printable(documentKey(row.repo, row.path))}${row.reason === undefined ? "" : `  [${printable(row.reason)}]`}\n`);
 		out.push(more(LIST_LIMIT, rows.length));
 	}
 	return out.join("");
@@ -141,7 +157,7 @@ export function renderStatus(status: CorpusStatusResponse): string {
 		`by kind: ${status.byKind.map((row) => `${row.kind} ${row.count}`).join(", ") || "none"}\n`,
 		"repositories:\n",
 	];
-	for (const row of status.byRepo.slice(0, REPO_LIMIT)) out.push(`  ${row.repo}  ${row.active} active  ${row.tombstoned} tombstoned\n`);
+	for (const row of status.byRepo.slice(0, REPO_LIMIT)) out.push(`  ${printable(row.repo)}  ${row.active} active  ${row.tombstoned} tombstoned\n`);
 	out.push(more(REPO_LIMIT, status.byRepo.length));
 	return out.join("");
 }

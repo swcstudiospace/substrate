@@ -31,7 +31,7 @@ import { createBodyStore, type BodyStore } from "./bodies.ts";
 import { createCorpusClient, type ClientError, type CorpusClient } from "./client.ts";
 import { executeIngest } from "./ingest.ts";
 import { collectInventory, type Inventory, type InventoryOptions } from "./inventory.ts";
-import { renderIngest, renderInventory, renderPlan, renderStatus } from "./render.ts";
+import { printable, renderIngest, renderInventory, renderPlan, renderStatus } from "./render.ts";
 
 export const USAGE =
 	"substrate corpus scan [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--source fs|github|greptile]... [--greptile-dir DIR]\n" +
@@ -200,7 +200,7 @@ function jsonReport(inventory: Inventory, withEntries: boolean): string {
 }
 
 function describeError(error: ClientError): string {
-	return error.message;
+	return printable(error.message);
 }
 
 export async function runCorpus(argv: string[], deps: CorpusDeps): Promise<number> {
@@ -248,7 +248,7 @@ export async function runCorpus(argv: string[], deps: CorpusDeps): Promise<numbe
 		if (docsPerRequest < batchDocs) deps.err(`[substrate] corpus ingest: batch of ${batchDocs} documents is above the server limit; using ${docsPerRequest}\n`);
 		return await ingest(args, parsed, deps, docsPerRequest, batchBytes);
 	} catch (cause) {
-		deps.err(`[substrate] corpus ${sub} failed: ${cause instanceof Error ? cause.message : String(cause)}\n`);
+		deps.err(`[substrate] corpus ${sub} failed: ${printable(cause instanceof Error ? cause.message : String(cause))}\n`);
 		return 1;
 	}
 }
