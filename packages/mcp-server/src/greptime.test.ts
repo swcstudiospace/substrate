@@ -2672,7 +2672,7 @@ describe("metric_samples (uplift-4 S6)", () => {
 
 	test("null, undefined and unknown-series entries are counted as invalid without rejecting the batch", async () => {
 		// A producer outside the type system can hand over anything; the predicate stands in for that boundary without a cast.
-		const asRows = (entries: readonly unknown[]): entries is readonly MetricSampleRow[] => true;
+		const asRows = (candidate: readonly unknown[]): candidate is readonly MetricSampleRow[] => Array.isArray(candidate);
 		const entries: readonly unknown[] = [row({ tsMs: NOW + 1 }), null, undefined, row({ series: "not.a.series" })];
 		if (!asRows(entries)) throw new Error("expected the entries to be accepted as rows");
 		const { sql } = stubFetch();
