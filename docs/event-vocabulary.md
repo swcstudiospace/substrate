@@ -32,8 +32,8 @@ These apply to every source:
   `skills.sync`, `dod`, `doctor`, `slo.transition`, `docs.freshness`, `docs.canary`,
   `index.archive`, `alert`, and the v1.6 actions `session.checkpoint`, `session.rollback`,
   `session.rollback.refused`, `memory.forget`, `memory.capsule.export`,
-  `memory.capsule.redact`, `anchor.signer.rotate`, `anchor.reanchor`, and the v1.7 actions
-  `docs.corpus.ingest`, `docs.corpus.refused` and `docs.corpus.root`.
+  `memory.capsule.redact`, `anchor.signer.rotate`, `anchor.reanchor`, and the v1.7 actions `docs.corpus.ingest`, `docs.corpus.refused`,
+  `docs.corpus.root`, `worktrees.report` and `worktree.prune`.
 - **Reserved actions are not writable through `events_emit` or `POST /events`.** A reader trusts `anchor.signer.rotate`, `anchor.reanchor`, `session.checkpoint`, `session.rollback`,
   `session.rollback.refused`, `session.rollback.forget_batch`, `memory.forget` and `docs.corpus.root` by their action alone, and the event carries no proof of its writer, so both
   doors refuse them with a `reserved-action` error (nothing written) unless the caller is an operator emitting as its own surface; the server's own emits do not
@@ -154,6 +154,8 @@ These apply to every source:
 | `anchor.reanchor` | 59 | `note` | `caller` | `anchor.reanchor` | — | — | no |
 | `planning.changed` | 52 | `note` | `substrate` | — | — | origin remote of the planning checkout | no |
 | `steering.queued` | 58 | `note` | `substrate` | `steering.queued` | — | — | no |
+| `worktrees.report` | 68 | `note` | `caller` | `worktrees.report` | — | — | no |
+| `worktree.prune` | 68 | `note` | `caller` | `worktree.prune` | — | the pruned worktree's repository (omitted for a local-only one) | no |
 | `muse.brief_writer` | 19 | — | — | — | — | — | no |
 | `memory.retain` | 26 | — | — | — | — | — | no |
 | `memory.recall` | 26 | — | — | — | — | — | no |

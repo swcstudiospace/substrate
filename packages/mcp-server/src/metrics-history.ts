@@ -31,6 +31,7 @@
  */
 import {
 	ADMISSION_DECISIONS,
+	AUX_PLANES,
 	BRIEF_RECALL_RESULTS,
 	CACHE_METRIC_RESULTS,
 	DOCS_SEARCH_OUTCOMES,
@@ -91,7 +92,8 @@ export interface SeriesSpec {
 
 /** A surface label folds into `other` rather than minting a series for a name outside the closed list. */
 const SURFACE_VALUES: ReadonlySet<string> = new Set<string>([...SURFACES, "other"]);
-const PLANE_VALUES: ReadonlySet<string> = new Set<string>(PLANES);
+/** The reported planes and the auxiliary ones (the embedding service has a gate and a metric label, but no `/healthz` row). */
+const PLANE_VALUES: ReadonlySet<string> = new Set<string>([...PLANES, ...AUX_PLANES]);
 const DECISION_VALUES: ReadonlySet<string> = new Set<string>(ADMISSION_DECISIONS);
 const OUTCOME_VALUES: ReadonlySet<string> = new Set<string>(DOCS_SEARCH_OUTCOMES);
 const TRANSITION_OUTCOME_VALUES: ReadonlySet<string> = new Set<string>(TRANSITION_OUTCOMES);

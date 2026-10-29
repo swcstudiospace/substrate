@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { DiskPressure } from "../packages/fleet/src/index.ts";
 import {
+	compareWorktreeDisk,
+	optionsFromEnv,
+	worktreeOptionsFromEnv,
 	compareDisk,
 	compareLegacyKey,
 	compareRedis,
@@ -571,5 +575,65 @@ describe("emit", () => {
 		expect(body).toContain(LEGACY.name);
 		expect(body).not.toContain(SENTINEL);
 		expect(body).not.toContain(BEARER);
+	});
+});
+
+describe("worktree disk row", () => {
+	const GIB = 1024 ** 3;
+	const policy = loadPolicy(infraDir);
+	const pressure = (freeGb: number, floorGb: number): DiskPressure => ({
+		freeBytes: freeGb * GIB,
+		minFreeBytes: floorGb * GIB,
+		ok: freeGb >= floorGb,
+		worktrees: [
+			{ path: "/wts/huge", bytes: 9 * GIB },
+			{ path: "/wts/big", bytes: 4 * GIB },
+			{ path: "/wts/mid", bytes: 2 * GIB },
+			{ path: "/wts/unmeasured", bytes: null },
+			{ path: "/wts/small", bytes: 1 },
+		],
+	});
+
+	test("below the floor it warns, naming free space, the floor and the three largest worktrees, and never fails the run", async () => {
+		const fx = fixtureHost({ policy, showByUnit: asDeclared(policy), redis: GREEN_REDIS, envFile: "SUBSTRATE_PG_URL=x\n" });
+		const rows = await gatherRows(policy, fx.host, {
+			minFreeGb: 5,
+			maxSwapPagesPerSecond: 0,
+			envFile: "/etc/substrate/substrate.env",
+			worktrees: { roots: ["/wts"], minFreeGb: 5, measure: async () => pressure(2, 5) },
+		});
+		const row = rows.find((candidate) => candidate.check === "worktree disk");
+		expect(row).toMatchObject({ class: "disk", status: "warn" });
+		expect(row?.actual).toContain("2.0 GB free");
+		expect(row?.actual).toContain("5.0 GB floor");
+		expect(row?.actual).toContain("/wts/huge 9.0 GB; /wts/big 4.0 GB; /wts/mid 2.0 GB");
+		expect(row?.actual).not.toContain("/wts/small");
+		expect(exitCode(rows)).toBe(0);
+	});
+
+	test("at or above the floor it is ok, and a failed scan is unknown, not drift", async () => {
+		expect(compareWorktreeDisk(pressure(50, 5))).toMatchObject({ status: "ok", actual: "50.0 GB free" });
+		const fx = fixtureHost({ policy, showByUnit: asDeclared(policy), redis: GREEN_REDIS, envFile: "SUBSTRATE_PG_URL=x\n" });
+		const rows = await gatherRows(policy, fx.host, {
+			minFreeGb: 5,
+			maxSwapPagesPerSecond: 0,
+			envFile: "/etc/substrate/substrate.env",
+			worktrees: {
+				roots: ["/wts"],
+				minFreeGb: 5,
+				measure: async () => {
+					throw new Error("git is missing");
+				},
+			},
+		});
+		expect(rows.find((candidate) => candidate.check === "worktree disk")).toMatchObject({ status: "unknown" });
+		expect(exitCode(rows)).toBe(0);
+	});
+
+	test("the row exists only when SUBSTRATE_WORKTREE_ROOTS is set, and takes its floor from SUBSTRATE_WORKTREE_MIN_FREE_GB", () => {
+		expect(optionsFromEnv({}).worktrees).toBeUndefined();
+		expect(optionsFromEnv({ SUBSTRATE_WORKTREE_ROOTS: "" }).worktrees).toBeUndefined();
+		expect(optionsFromEnv({ SUBSTRATE_WORKTREE_ROOTS: "/a:/b" }).worktrees).toMatchObject({ roots: ["/a", "/b"], minFreeGb: 5 });
+		expect(worktreeOptionsFromEnv({ SUBSTRATE_WORKTREE_ROOTS: "/a", SUBSTRATE_WORKTREE_MIN_FREE_GB: "12" }).worktrees?.minFreeGb).toBe(12);
 	});
 });

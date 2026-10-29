@@ -52,6 +52,8 @@ export const CACHE_TTL = {
 	"brief-snapshot": 3600,
 	"recall-snapshot": MAX_RECALL_TTL_S,
 	"docs-search": 300,
+	// One week, the default of `SUBSTRATE_EMBED_CACHE_TTL_S`; the embedding service sets its own TTL on every write.
+	emb: 604_800,
 } as const;
 
 export type CacheClass = keyof typeof CACHE_TTL;
@@ -66,7 +68,7 @@ export type CacheSwrMode = "off" | "shadow" | "enforce";
  * request classes plus the two that are not a cached answer (`budget` buckets,
  * `gen` counters).
  */
-export const CACHE_CLASSES = ["brief", "memory-search", "graph-view", "brief-snapshot", "recall-snapshot", "docs-search", "budget", "gen"] as const;
+export const CACHE_CLASSES = ["brief", "memory-search", "graph-view", "brief-snapshot", "recall-snapshot", "docs-search", "emb", "budget", "gen"] as const;
 export type CacheKeyClass = (typeof CACHE_CLASSES)[number];
 
 /** The class a `substrate:v1:` key belongs to, or null for anything else. Reads the key name only. */
@@ -292,6 +294,17 @@ export function snapshotKey(klass: CacheClass, surface: string, args: unknown): 
 	const hash = createHash("sha256").update(canonical({ surface, args })).digest("hex");
 	return `${CACHE_PREFIX}:${klass}:${hash}`;
 }
+
+/**
+ * `substrate:v1:<class>:<digest>` for a caller that already holds the content hash. The embedding cache keys
+ * `emb` entries by `sha256(model + "\n" + text)`, so the key says which model a vector came from.
+ */
+export function digestKey(klass: CacheClass, digest: string): string {
+	return `${CACHE_PREFIX}:${klass}:${digest}`;
+}
+
+/** The widest embedding the `emb` class accepts, a bound on what one entry can hold. */
+export const EMB_MAX_DIM = 8192;
 
 export interface BunRedisOptions {
 	gate?: PlaneGate | null | undefined;
@@ -933,11 +946,61 @@ export class ReadThroughCache {
 	}
 
 	/**
+	 * Read generation-free entries by digest in one round trip (`MGET`): one answer per digest, null for a miss, a
+	 * value that fails the class shape, a failed command or a cache that is off. Counts one hit, miss or error per
+	 * digest. Never throws.
+	 */
+	async peekMany<T>(klass: CacheClass, digests: readonly string[]): Promise<Array<T | null>> {
+		const none = digests.map((): T | null => null);
+		if (!this.enabled || !this.redis || digests.length === 0) return none;
+		const redis = this.redis;
+		try {
+			const raws = await this.attempt(() =>
+				readAll(
+					redis,
+					digests.map((digest) => digestKey(klass, digest)),
+				),
+			);
+			this.noteConnected();
+			return digests.map((_, index): T | null => {
+				const raw = raws[index] ?? null;
+				if (raw === null) {
+					this.count("miss", klass);
+					return null;
+				}
+				const parsed = parseEnvelope<T>(raw, klass);
+				if (!parsed.ok) {
+					this.count("error", klass);
+					this.note("malformed cache value");
+					return null;
+				}
+				this.count("hit", klass);
+				return parsed.value;
+			});
+		} catch (cause) {
+			this.fail(cause, true, klass);
+			return none;
+		}
+	}
+
+	/**
+	 * Write one generation-free entry by digest, always with a TTL: `ttlSeconds` below 1 writes nothing. Never throws;
+	 * false means nothing was stored (cache off, bad shape, failed command).
+	 */
+	async putEntry(klass: CacheClass, digest: string, value: unknown, ttlSeconds: number): Promise<boolean> {
+		return this.writeKey(klass, digestKey(klass, digest), value, ttlSeconds < 1 ? 0 : ttlSeconds);
+	}
+
+	/**
 	 * Write a generation-free entry with its own TTL. `ttlSeconds` ≤ 0 writes
 	 * nothing — that is how `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S=0` switches the
 	 * feature off. Never throws; the caller already has its answer.
 	 */
 	async put(klass: CacheClass, surface: string, args: unknown, value: unknown, ttlSeconds: number): Promise<boolean> {
+		return this.writeKey(klass, snapshotKey(klass, surface, args), value, ttlSeconds);
+	}
+
+	private async writeKey(klass: CacheClass, key: string, value: unknown, ttlSeconds: number): Promise<boolean> {
 		if (!this.enabled || !this.redis || ttlSeconds <= 0 || !shapeOk(klass, value)) return false;
 		const redis = this.redis;
 		let encoded: string;
@@ -948,7 +1011,7 @@ export class ReadThroughCache {
 			return false;
 		}
 		try {
-			await this.attempt(() => redis.set(snapshotKey(klass, surface, args), encoded, Math.floor(ttlSeconds)));
+			await this.attempt(() => redis.set(key, encoded, Math.floor(ttlSeconds)));
 			this.noteConnected();
 			return true;
 		} catch (cause) {
@@ -1131,6 +1194,11 @@ function shapeOk(klass: CacheClass, value: unknown): boolean {
 		const reply = value as { chunks?: unknown; untrusted?: unknown };
 		return Array.isArray(reply.chunks) && typeof reply.untrusted === "string";
 	}
+	if (klass === "emb") {
+		if (!value || typeof value !== "object") return false;
+		const entry = value as { dim?: unknown; b64?: unknown };
+		return embeddingEntryOk(entry.dim, entry.b64);
+	}
 	if (klass === "memory-search") {
 		if (Array.isArray(value)) return true;
 		if (!value || typeof value !== "object") return false;
@@ -1142,6 +1210,33 @@ function shapeOk(klass: CacheClass, value: unknown): boolean {
 	if (!value || typeof value !== "object") return false;
 	const graph = value as { graph_id?: unknown; nodes?: unknown };
 	return typeof graph.graph_id === "string" && Array.isArray(graph.nodes);
+}
+
+/**
+ * `dim` Float32 values from their base64 bytes, or null when the bytes are not that many or any value is NaN or
+ * infinite: such a vector is never a usable embedding, so it must not be served from the cache.
+ */
+export function decodeEmbeddingBytes(dim: number, b64: string): Float32Array | null {
+	const bytes = Buffer.from(b64, "base64");
+	if (bytes.length !== dim * 4) return null;
+	// A copy: a pooled Buffer's offset is not a multiple of four, which a Float32Array view needs.
+	const vector = new Float32Array(new Uint8Array(bytes).buffer);
+	for (const value of vector) {
+		if (!Number.isFinite(value)) return null;
+	}
+	return vector;
+}
+
+/**
+ * An `emb` entry is `{ dim, b64 }`: `dim` Float32 values as base64. The length of the text must be the length base64
+ * gives `dim * 4` bytes, so a truncated or padded value is refused before it is decoded, and the decoded values must
+ * all be finite.
+ */
+function embeddingEntryOk(dim: unknown, b64: unknown): boolean {
+	if (typeof dim !== "number" || !Number.isInteger(dim) || dim < 1 || dim > EMB_MAX_DIM) return false;
+	if (typeof b64 !== "string") return false;
+	if (b64.length !== 4 * Math.ceil((dim * 4) / 3) || !/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) return false;
+	return decodeEmbeddingBytes(dim, b64) !== null;
 }
 
 function parseEnvelope<T>(raw: string, klass: CacheClass): { ok: true; value: T } | { ok: false } {

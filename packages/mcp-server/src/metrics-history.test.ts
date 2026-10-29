@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test";
 import type { AddressInfo } from "node:net";
 import {
 	ADMISSION_DECISIONS,
+	AUX_PLANES,
 	BRIEF_RECALL_RESULTS,
 	CACHE_METRIC_RESULTS,
 	DOCS_SEARCH_OUTCOMES,
@@ -1180,7 +1181,7 @@ describe("the extended series (uplift-5 S6)", () => {
 		collector.prime(instruments.snapshot());
 		// Every surface (and one outside the list, which folds into `other`), plane, decision, outcome and result at once.
 		for (const surface of [...SURFACES, "not-a-surface"]) instruments.recordBrief({ surface, ok: true, durationMs: 30 });
-		for (const plane of PLANES) instruments.recordPlane({ plane, op: "select", outcome: "ok", durationMs: 20 });
+		for (const plane of [...PLANES, ...AUX_PLANES]) instruments.recordPlane({ plane, op: "select", outcome: "ok", durationMs: 20 });
 		for (const decision of ADMISSION_DECISIONS) instruments.recordAdmission({ surface: "grok-bot", klass: "read", decision });
 		for (const outcome of DOCS_SEARCH_OUTCOMES) instruments.recordDocsSearch({ surface: "grok-bot", outcome, cached: false, durationMs: 50, citations: {} });
 		instruments.recordEmit({ surface: "grok-bot", kind: "note", stored: true, durationMs: 10 });

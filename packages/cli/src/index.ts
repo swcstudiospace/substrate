@@ -29,6 +29,8 @@
  *       (exit 0 consistent, 1 drift, 2 usage, 3 a store could not be read; docs/runbooks/consistency-verify.md)
  *   substrate memory capsule export|verify|redact ...   memory capsules (docs/runbooks/memory-capsules.md)
  *       (exit 0 done, 1 failed or incomplete, 2 usage, 3 verify --anchors could not finish)
+ *   substrate worktree list|status|scan|prune|conflicts|provision|disk   the worktree fleet (docs/worktree-fleet.md)
+ *       (exit 0 done, 1 a removal, report or creation failed, 2 usage or no worktree root configured)
  *
  * With `SUBSTRATE_EVENT_SPOOL=on`, `emit` parks an event that failed for a retryable reason
  * (network error, timeout, 5xx) in the spool and returns at once — it never replays; `spool flush`
@@ -57,6 +59,8 @@ import { docsTimeout, runDocs } from "./docs.ts";
 import { httpMemory, lessonsTimeout, runLessons } from "./lessons.ts";
 import { runSkills, skillsTimeout } from "./skills.ts";
 import { runLedger } from "./ledger.ts";
+import { freeBytes, spawnGh, spawnGit } from "../../fleet/src/index.ts";
+import { httpClaimsLookup, httpReportPoster, runWorktree } from "./worktree/command.ts";
 import { runSpool } from "./spool.ts";
 import { spoolConfig } from "../../collectors/src/spool.ts";
 import { runSession } from "./session/command.ts";
@@ -70,7 +74,7 @@ import { postEvent as emitEvent } from "../../collectors/src/emit.ts";
 import { INDEX_ARCHIVE_SUBCOMMANDS, INDEX_ARCHIVE_USAGE, runIndexArchive } from "./index-archive.ts";
 import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -78,6 +82,10 @@ const DEFAULT_URL = "http://127.0.0.1:7410";
 const DEFAULT_TIMEOUT_MS = 1500;
 /** Added to the verify budget for `/evidence`: the server builds the bundle after its hour loop, outside that budget. */
 const EVIDENCE_RESPONSE_MARGIN_MS = 5_000;
+/** A worktree report holds up to 500 rows per request, so it gets more time than a hook-sized call. */
+const WORKTREE_REPORT_TIMEOUT_MS = 10_000;
+/** A claims lookup answers from one index read, but prune waits on it before every removal, so it gets more than a hook's budget. */
+const WORKTREE_CLAIMS_TIMEOUT_MS = 5_000;
 
 function base(): string {
 	return (process.env.SUBSTRATE_URL?.trim() || DEFAULT_URL).replace(/\/+$/, "");
@@ -699,6 +707,33 @@ switch (command) {
 	case "index":
 		process.exit(cmdIndex(rest, args));
 		break;
+	case "worktree":
+		process.exit(
+			await runWorktree(rest, {
+				env: process.env,
+				cwd: process.cwd(),
+				host: hostname(),
+				out: (text) => process.stdout.write(text),
+				err: (text) => process.stderr.write(text),
+				git: spawnGit,
+				gh: spawnGh,
+				now: () => new Date(),
+				freeBytes,
+				emit: (event) => emitEvent(event, { timeoutMs: timeout(), collector: "cli", source: "cli.worktree", url: base() }),
+				postReport: httpReportPoster({
+					url: base(),
+					token: resolveBearer("claude-code", process.env) ?? undefined,
+					// A report can hold hundreds of rows; the hook-sized default budget is too short for it.
+					timeoutMs: Math.max(timeout(), WORKTREE_REPORT_TIMEOUT_MS),
+				}),
+				claims: httpClaimsLookup({
+					url: base(),
+					token: resolveBearer("claude-code", process.env) ?? undefined,
+					timeoutMs: Math.max(timeout(), WORKTREE_CLAIMS_TIMEOUT_MS),
+				}),
+			}),
+		);
+		break;
 	case "ledger":
 		process.exit(cmdLedger(rest, args));
 		break;
@@ -780,6 +815,7 @@ switch (command) {
 				"substrate memory capsule export --out FILE [--session S] [--repo R] [--since ISO] [--limit N] [--store DIR]\n" +
 				"                         | verify FILE [--anchors] | redact FILE --ids a,b --reason TEXT --out FILE2   (substrate memory capsule for the flags)\n" +
 				"substrate spool status [--json] | flush [--json] [--budget-ms N]   (the event spool needs SUBSTRATE_EVENT_SPOOL=on)\n" +
+				"substrate worktree list|status|scan|prune|conflicts|provision|disk ...   (substrate worktree --help; roots from SUBSTRATE_WORKTREE_ROOTS)\n" +
 				"substrate corpus scan | plan | ingest [--execute] | status   (substrate corpus --help for the flags; ingest is a dry run without --execute)\n",
 		);
 		process.exit(command ? 2 : 0);

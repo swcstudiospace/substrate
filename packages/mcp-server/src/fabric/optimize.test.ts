@@ -29,8 +29,9 @@ function absentFacts(): FabricFacts {
 			ragflow: absent,
 			lightrag: absent,
 			hindsight: absent,
+			tei: absent,
 		},
-		cache: null,
+		tei: { endpointClass: null, model: null, modelSource: "none", dimension: null, latencyMs: null },
 		eventBusEnabled: null,
 		railway: { status: "unconfigured", projectedMonthlyUsd: null, budgetUsd: null },
 	});

@@ -711,6 +711,127 @@
         "type": "yesoreyeram-infinity-datasource",
         "uid": "substrate-slo-history"
       },
+      "description": "The tei line is the embedding service's call latency at p95. Series `plane.p95` (histogram, max per step, ms), source `substrate.plane.duration`. One line per `plane`.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 25
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "Time",
+              "type": "timestamp"
+            },
+            {
+              "selector": "value",
+              "text": "Value",
+              "type": "number"
+            },
+            {
+              "selector": "labels.plane",
+              "text": "plane",
+              "type": "string"
+            }
+          ],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "substrate-slo-history"
+          },
+          "filters": [],
+          "format": "table",
+          "refId": "A",
+          "root_selector": "points",
+          "source": "url",
+          "type": "json",
+          "url": "/slo/history",
+          "url_options": {
+            "data": "",
+            "method": "GET",
+            "params": [
+              {
+                "key": "series",
+                "value": "plane.p95"
+              },
+              {
+                "key": "window",
+                "value": "$window"
+              },
+              {
+                "key": "step",
+                "value": "$step"
+              }
+            ]
+          }
+        }
+      ],
+      "title": "Fabric: tei",
+      "transformations": [
+        {
+          "id": "partitionByValues",
+          "options": {
+            "fields": [
+              "plane"
+            ]
+          }
+        }
+      ],
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "substrate-slo-history"
+      },
       "description": "A count of the data planes on a configured proxy (SUBSTRATE_DB_PROXY_ALLOW), set at boot from the endpoint classes. Needs SUBSTRATE_METRICS_HISTORY_SERIES=extended. Series `endpoint.proxy_planes` (gauge, max per step, {plane}), source `substrate.endpoint.proxy_planes`.",
       "fieldConfig": {
         "defaults": {
@@ -748,10 +869,10 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
+        "x": 12,
         "y": 25
       },
-      "id": 8,
+      "id": 9,
       "options": {
         "legend": {
           "calcs": [],
@@ -821,7 +942,7 @@
         "x": 0,
         "y": 33
       },
-      "id": 9,
+      "id": 10,
       "panels": [],
       "title": "Planes and docs",
       "type": "row"
@@ -871,7 +992,7 @@
         "x": 0,
         "y": 34
       },
-      "id": 10,
+      "id": 11,
       "options": {
         "legend": {
           "calcs": [],
@@ -992,7 +1113,7 @@
         "x": 12,
         "y": 34
       },
-      "id": 11,
+      "id": 12,
       "options": {
         "legend": {
           "calcs": [],
@@ -1099,7 +1220,7 @@
         "x": 0,
         "y": 42
       },
-      "id": 12,
+      "id": 13,
       "options": {
         "legend": {
           "calcs": [],
@@ -1220,7 +1341,7 @@
         "x": 12,
         "y": 42
       },
-      "id": 13,
+      "id": 14,
       "options": {
         "legend": {
           "calcs": [],
@@ -1341,7 +1462,7 @@
         "x": 0,
         "y": 50
       },
-      "id": 14,
+      "id": 15,
       "options": {
         "legend": {
           "calcs": [],
@@ -1425,7 +1546,7 @@
         "x": 0,
         "y": 58
       },
-      "id": 15,
+      "id": 16,
       "panels": [],
       "title": "Extended series (needs SUBSTRATE_METRICS_HISTORY_SERIES=extended)",
       "type": "row"
@@ -1475,7 +1596,7 @@
         "x": 0,
         "y": 59
       },
-      "id": 16,
+      "id": 17,
       "options": {
         "legend": {
           "calcs": [],
@@ -1596,7 +1717,7 @@
         "x": 12,
         "y": 59
       },
-      "id": 17,
+      "id": 18,
       "options": {
         "legend": {
           "calcs": [],
@@ -1703,7 +1824,7 @@
         "x": 0,
         "y": 67
       },
-      "id": 18,
+      "id": 19,
       "options": {
         "legend": {
           "calcs": [],
@@ -1824,7 +1945,7 @@
         "x": 12,
         "y": 67
       },
-      "id": 19,
+      "id": 20,
       "options": {
         "legend": {
           "calcs": [],
@@ -1945,7 +2066,7 @@
         "x": 0,
         "y": 75
       },
-      "id": 20,
+      "id": 21,
       "options": {
         "legend": {
           "calcs": [],
@@ -2066,7 +2187,7 @@
         "x": 12,
         "y": 75
       },
-      "id": 21,
+      "id": 22,
       "options": {
         "legend": {
           "calcs": [],
@@ -2173,7 +2294,7 @@
         "x": 0,
         "y": 83
       },
-      "id": 22,
+      "id": 23,
       "options": {
         "legend": {
           "calcs": [],
@@ -2280,7 +2401,7 @@
         "x": 12,
         "y": 83
       },
-      "id": 23,
+      "id": 24,
       "options": {
         "legend": {
           "calcs": [],

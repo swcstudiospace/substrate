@@ -57,6 +57,7 @@ import {
 	type Surface,
 } from "./types.ts";
 import type { RagMachineSettings } from "./config.ts";
+import { parseWorktreeListQuery, WORKTREE_LIST_DEFAULT_LIMIT, WORKTREE_LIST_MAX_LIMIT, WORKTREE_LIST_STATES } from "./worktree-registry.ts";
 import { LIGHTRAG_CIRCUIT_OPEN, LIGHTRAG_SNIPPET_CAP } from "./planes/lightrag.ts";
 import {
 	canTransitionRagState,
@@ -2127,6 +2128,34 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		},
 	);
 
+	server.registerTool(
+		"worktree_list",
+		{
+			title: "List the registered git worktrees",
+			description:
+				"The worktree registry: the git worktrees the CLI and the collectors reported, `{ worktrees, truncated }`, newest report first. " +
+				"Each row has the host, path, repo, branch, head, base, dirty, ahead, behind, last_commit_at, size_bytes, locked, primary, " +
+				"pr_state (open, merged, closed, none or unknown), the session_id and graph_id when attributed, and first_seen_at and last_seen_at. " +
+				"`state` dirty keeps uncommitted work; stale keeps worktrees whose last commit is older than SUBSTRATE_WORKTREE_IDLE_DAYS. " +
+				`At most ${WORKTREE_LIST_MAX_LIMIT} rows (default ${WORKTREE_LIST_DEFAULT_LIMIT}); truncated says more exist. ` +
+				"A read: it changes nothing. Answers an error worktrees.disabled while SUBSTRATE_WORKTREE_REGISTRY is off.",
+			inputSchema: {
+				repo: z.string().optional().describe("owner/name, to list one repository's worktrees."),
+				host: z.string().optional().describe("the reporting host, to list one machine's worktrees."),
+				state: z.enum(WORKTREE_LIST_STATES).optional().describe("all (the default), dirty or stale."),
+				limit: z.number().int().min(1).max(WORKTREE_LIST_MAX_LIMIT).optional().describe("page size, 1 to 500."),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async (request) => {
+			const query = parseWorktreeListQuery(request);
+			if (!query.ok) return { ...json({ error: "worktrees.invalid", problem: query.problem }), isError: true };
+			const outcome = await substrate.listWorktrees(query.value);
+			if (!outcome.ok) return { ...json(outcome.body), isError: true };
+			return json({ worktrees: outcome.worktrees, truncated: outcome.truncated });
+		},
+	);
+
 	/** A Railway read: the client's own failures become a tool error carrying the kind and the redacted message only (D45-j). */
 	const railwayRead = async (run: () => Promise<unknown>) => {
 		try {
@@ -2270,9 +2299,9 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 	server.registerTool(
 		"fabric_status",
 		{
-			title: "Status of the seven fabric resources",
+			title: "Status of the eight fabric resources",
 			description:
-				"One row per resource: Dragonfly, the TimescaleDB index, GreptimeDB, RAGFlow, LightRAG, Hindsight and the Tailscale proxy layer. " +
+				"One row per resource: Dragonfly, the TimescaleDB index, GreptimeDB, RAGFlow, LightRAG, Hindsight, TEI (the embedding service) and the Tailscale proxy layer. " +
 				"Each row has its endpoint class (loopback, proxy, direct, unset or not-applicable), a state (ok, degraded, unavailable " +
 				"or unconfigured) and a fixed phrase naming its source. A resource that is not configured is unconfigured, never ok. " +
 				"A read: it changes nothing and needs no approval.",
@@ -2304,7 +2333,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		{
 			title: "Compliance report for the fabric",
 			description:
-				"Pass, fail or not-applicable checks: the data-plane endpoints are private, the endpoint policy is enforce, every fabric " +
+				"Pass, fail or not-applicable checks: the data-plane and embedding endpoints are private, the endpoint policy is enforce, every fabric " +
 				"tool is fail-open in the audit, the report carries no secret-shaped value, and each resource is in state ok. A resource " +
 				"that is not configured is not applicable, never a pass. A read: it changes nothing.",
 			inputSchema: {},

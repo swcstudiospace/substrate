@@ -50,6 +50,7 @@ import {
 	gatherIoEvidence,
 } from "./doctor-vps.ts";
 import { parseSystemctlShow, systemdTimestampToEpoch } from "./parity-check.ts";
+import { type DiskPressure, diskPressure, minFreeGbFromEnv as worktreeMinFreeGb, spawnGit, worktreeRootsFromEnv } from "../packages/fleet/src/index.ts";
 
 export type Status = "ok" | "warn" | "drift" | "unknown";
 export type CheckClass = "units" | "slice" | "redis" | "timers" | "disk" | "swap" | "env";
@@ -769,6 +770,51 @@ export interface DoctorOptions {
 	hardening?: HardeningOptions;
 	/** The report-only `docker reclaimable` row (uplift-5 U5-2). Absent or false: no docker call. */
 	dockerReclaim?: boolean;
+	/** The report-only worktree disk row (phase 68). Absent: no row and no git call. */
+	worktrees?: WorktreeDiskOptions;
+}
+
+/** A worktree disk check: report-only, so it can warn but never drift. */
+export interface WorktreeDiskOptions {
+	roots: string[];
+	minFreeGb: number;
+	/** Test seam; defaults to the fleet library's `diskPressure` over real git. */
+	measure?: (roots: readonly string[], minFreeGb: number) => Promise<DiskPressure>;
+}
+
+const WORKTREE_GIB = 1024 ** 3;
+const WORKTREE_LARGEST_SHOWN = 3;
+
+function worktreeGb(bytes: number): string {
+	return `${(bytes / WORKTREE_GIB).toFixed(1)} GB`;
+}
+
+/** `ok`, or a `warn` naming the free space, the floor and the three largest worktrees. Never `drift`. */
+export function compareWorktreeDisk(pressure: DiskPressure): Row {
+	const base = { class: "disk" as const, check: "worktree disk", expected: `at least ${worktreeGb(pressure.minFreeBytes)} free for worktrees` };
+	if (pressure.ok) return { ...base, status: "ok", actual: `${worktreeGb(pressure.freeBytes)} free`, hint: "" };
+	const largest = pressure.worktrees.slice(0, WORKTREE_LARGEST_SHOWN).map((wt) => `${wt.path} ${wt.bytes === null ? "size unknown" : worktreeGb(wt.bytes)}`);
+	return {
+		...base,
+		status: "warn",
+		actual: `${worktreeGb(pressure.freeBytes)} free, below the ${worktreeGb(pressure.minFreeBytes)} floor; largest worktrees: ${largest.length === 0 ? "none found" : largest.join("; ")}`,
+		hint: "run `substrate worktree prune` (a dry run) to see what is safe to reclaim; nothing is changed by the doctor",
+	};
+}
+
+/** Only when `SUBSTRATE_WORKTREE_ROOTS` names a root: no root, no check, no row. */
+export function worktreeOptionsFromEnv(env: Record<string, string | undefined>): { worktrees?: WorktreeDiskOptions } {
+	const roots = worktreeRootsFromEnv(env);
+	return roots.length === 0 ? {} : { worktrees: { roots, minFreeGb: worktreeMinFreeGb(env) } };
+}
+
+async function gatherWorktreeDisk(options: WorktreeDiskOptions): Promise<Row> {
+	try {
+		const measure = options.measure ?? ((roots: readonly string[], minFreeGb: number) => diskPressure(roots, minFreeGb, { git: spawnGit }));
+		return compareWorktreeDisk(await measure(options.roots, options.minFreeGb));
+	} catch (error) {
+		return { class: "disk", check: "worktree disk", status: "unknown", expected: "report only", actual: "n/a", hint: `the worktree scan failed: ${error instanceof Error ? error.message.slice(0, 120) : "unknown error"}` };
+	}
 }
 
 /** The deploy floor as `deploy-release.sh` reads it: 0-9999 whole gigabytes, default 5. */
@@ -792,6 +838,7 @@ export function optionsFromEnv(env: Record<string, string | undefined>): DoctorO
 		disk: diskGuardrailsFromEnv(env, RELEASE_ROOT),
 		hardening: hardeningOptionsFromEnv(env),
 		dockerReclaim: true,
+		...worktreeOptionsFromEnv(env),
 	};
 }
 
@@ -813,6 +860,7 @@ export async function gatherRows(policy: Policy, host: Host, options: DoctorOpti
 	const df = host.run(["df", "-Pk", "--", RELEASE_ROOT]);
 	rows.push(compareDisk(df === null || df.code !== 0 ? null : parseDfAvailableKb(df.out), options.minFreeGb));
 	if (options.disk !== undefined) rows.push(...gatherDiskGuardrails(host, options.disk));
+	if (options.worktrees !== undefined) rows.push(await gatherWorktreeDisk(options.worktrees));
 	if (options.dockerReclaim === true) rows.push(...gatherDockerReclaim(host));
 	const before = parseVmstatSwap(host.readText("/proc/vmstat") ?? "");
 	await host.sleep(SWAP_SAMPLE_MS);
