@@ -9,12 +9,21 @@ from pathlib import Path
 import pytest
 
 from substrate_dispatcher.worktree import (
-    MIN_FREE_BYTES,
+    DEFAULT_MIN_FREE_GB,
+    MIN_FREE_ENV,
     WorktreeRefused,
     ensure_worktree,
+    min_free_bytes,
     repo_checkout,
     validate_graph_id,
 )
+
+MIN_FREE_BYTES = DEFAULT_MIN_FREE_GB * 1024**3
+
+
+@pytest.fixture(autouse=True)
+def _clean_floor_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(MIN_FREE_ENV, raising=False)
 
 GID = "ut-mufsocbe-c7ced745"
 SLUG = "swcstudiospace/agent-substrate"
@@ -172,3 +181,35 @@ def test_ensure_worktree_disk_floor(repo: Path, tmp_path: Path, free, refused):
         assert not root.exists()
     else:
         assert ensure_worktree(repo, GID, "main", root=root, run=run, disk_usage=usage).is_dir()
+
+
+@pytest.mark.parametrize("raw", ["abc", "0", "-3", "nan", "inf", ""])
+def test_min_free_bytes_falls_back_to_default_for_bad_values(raw: str):
+    assert min_free_bytes({MIN_FREE_ENV: raw}) == MIN_FREE_BYTES
+
+
+def test_min_free_bytes_default_when_unset():
+    assert min_free_bytes({}) == MIN_FREE_BYTES
+
+
+def test_min_free_bytes_reads_the_env():
+    assert min_free_bytes({MIN_FREE_ENV: "20"}) == 20 * 1024**3
+    assert min_free_bytes({MIN_FREE_ENV: "0.5"}) == 1024**3 // 2
+
+
+def test_ensure_worktree_floor_follows_env(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(MIN_FREE_ENV, "20")
+    calls: list = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.run(argv, **kwargs)
+
+    def usage(_path: str) -> Usage:
+        return Usage(100 * 1024**3, 0, 10 * 1024**3)
+
+    with pytest.raises(WorktreeRefused) as err:
+        ensure_worktree(repo, GID, "main", root=tmp_path / "wt", run=run, disk_usage=usage)
+    assert err.value.marker == "low-disk"
+    assert "20 GB" in str(err.value)
+    assert calls == []

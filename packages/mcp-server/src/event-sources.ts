@@ -1415,6 +1415,39 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 			payload: { action: "docs.corpus.refused", status: "refused", reason: "secret-findings", count: 1, rules: ["generic-secret"] },
 		}),
 	},
+	{
+		id: "worktrees.report",
+		phase: 68,
+		kind: "note",
+		surface: "caller",
+		actions: ["worktrees.report"],
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "note",
+			summary: "worktree report from host-a: 12 stored, 0 removed",
+			session_id: "worktrees:host-a",
+			payload: { action: "worktrees.report", stored: 12, removed: 0 },
+		}),
+	},
+	{
+		id: "worktree.prune",
+		phase: 68,
+		kind: "note",
+		surface: "caller",
+		actions: ["worktree.prune"],
+		carriesRepo: true,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "note",
+			summary: "worktree removed: swcstudiospace/substrate gsd/r14-corpus-atlas",
+			repo: "swcstudiospace/substrate",
+			branch: "gsd/r14-corpus-atlas",
+			payload: { action: "worktree.prune", path: "/srv/worktrees/atlas", head: "0123456789abcdef0123456789abcdef01234567", size_bytes: 1048576, class: "safe", reasons: ["merged"] },
+		}),
+	},
 ];
 
 export const SILENT_SOURCES: readonly SilentSource[] = [
