@@ -334,7 +334,10 @@ The CLI takes the documents the plan would `add`, `update`, `change` or `rename`
 filesystem and Greptile sources), in `(repo, path)` order and at most `--neardup-max` of them, reads the first 4,000
 characters of each (UTF-8, a byte-order mark kept, an invalid sequence replaced) and sends **one** request. Only the
 first 16,000 bytes of a file are read for that (a bounded prefix, never the whole file), and a character cut by that
-boundary is dropped rather than decoded into a replacement. Documents from GitHub are not read by a plan, so they are counted ("N documents from
+boundary is dropped rather than decoded into a replacement. The scan refused symbolic links, and the excerpt is read after it,
+so the reader opens the file without following a link (and without blocking on a pipe) and requires it to still be a regular
+file of the size the scan recorded; a document that was swapped for a link or changed since the scan is counted as not
+compared and its target is never read. (Where the platform has no `O_NOFOLLOW`, the regular-file and size checks still apply.) Documents from GitHub are not read by a plan, so they are counted ("N documents from
 GitHub were not compared"); a file that cannot be read is counted as not compared and never fails the command; when more
 candidates exist than the limit the output says "compared the first N of M documents".
 

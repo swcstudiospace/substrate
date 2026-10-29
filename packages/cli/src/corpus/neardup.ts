@@ -5,23 +5,33 @@
  *
  * Nothing here decides what happens to a document. The answer is advisory and only printed.
  */
-import { closeSync, openSync, readSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { CORPUS_PROTOCOL, MAX_NEARDUP_ITEMS, MAX_NEARDUP_TEXT_CHARS, compareEntries, documentKey, type CorpusEntry, type CorpusNeardupRequest, type CorpusPlanResponse, type NeardupItem } from "@substrate/corpus";
 import type { Inventory } from "./inventory.ts";
 
 /** Four bytes is the most one UTF-16 code unit of the excerpt can take in UTF-8, so this many bytes always hold the excerpt. */
 export const NEARDUP_EXCERPT_BYTES = MAX_NEARDUP_TEXT_CHARS * 4;
 
-/** Reads at most `maxBytes` from the start of a file. A reader may return fewer only at the end of the file. */
-export type PrefixReader = (path: string, maxBytes: number) => Uint8Array;
+/**
+ * Reads at most `maxBytes` from the start of a file. A reader may return fewer only at the end of the file. `expectedSize` is the
+ * size the scan recorded: a reader that can check it refuses a file that is not that size any more.
+ */
+export type PrefixReader = (path: string, maxBytes: number, expectedSize?: number) => Uint8Array;
 
 /**
  * The first `maxBytes` of a file and no more: the descriptor is closed on every path and the buffer is never larger than the
  * bytes asked for, so a file accepted through a large `--max-bytes` costs no more than a small one.
  */
-export function readFilePrefix(path: string, maxBytes: number): Uint8Array {
-	const fd = openSync(path, "r");
+export function readFilePrefix(path: string, maxBytes: number, expectedSize?: number): Uint8Array {
+	// The scan refused symbolic links, and that was a while ago: a document replaced by a link while the plan was being made would be
+	// followed here and its target's first characters sent to the server. So the file is opened without following a link (and without
+	// blocking on a pipe), and it has to still be the regular file of the size the scan saw. A platform without `O_NOFOLLOW` keeps
+	// the other two checks.
+	const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
 	try {
+		const stat = fstatSync(fd);
+		if (!stat.isFile()) throw new Error("not a regular file");
+		if (expectedSize !== undefined && stat.size !== expectedSize) throw new Error("the file changed since the scan");
 		const buffer = new Uint8Array(Math.max(0, Math.floor(maxBytes)));
 		let filled = 0;
 		while (filled < buffer.length) {
@@ -121,7 +131,7 @@ export function selectNeardupItems(plan: CorpusPlanResponse, inventory: Inventor
 		if (items.length >= limit) break;
 		examined += 1;
 		try {
-			items.push({ repo: entry.repo, path: entry.path, text: excerptOf(readPrefix(location, NEARDUP_EXCERPT_BYTES)) });
+			items.push({ repo: entry.repo, path: entry.path, text: excerptOf(readPrefix(location, NEARDUP_EXCERPT_BYTES, entry.bytes)) });
 		} catch {
 			// The file went away or became unreadable since the scan; it is counted as not compared and the run goes on.
 			unreadable += 1;

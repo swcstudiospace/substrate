@@ -3,7 +3,7 @@
  * Pure over a hand-built inventory and an injected reader, so nothing touches the disk.
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CORPUS_PROTOCOL, MAX_NEARDUP_TEXT_CHARS, type CorpusEntry, type CorpusPlanResponse, type PlanItem } from "@substrate/corpus";
@@ -214,6 +214,35 @@ describe("readFilePrefix and prefixReaderOf", () => {
 		const plan = planOf([item("add", "Acme/A", "gone.md")]);
 		const selection = selectNeardupItems(plan, inventoryOf(entries, { "Acme/A:gone.md": join(dir, "gone.md") }), readFilePrefix, 1000);
 		expect(selection).toMatchObject({ items: [], unreadable: 1 });
+	});
+
+	test("a document replaced by a symbolic link after the scan is not followed: its target's text is never read or sent", () => {
+		const target = join(dir, "private-notes.txt");
+		writeFileSync(target, "private text that must not leave the machine");
+		const scanned = join(dir, "scanned.md");
+		symlinkSync(target, scanned);
+		expect(() => readFilePrefix(scanned, NEARDUP_EXCERPT_BYTES)).toThrow();
+		const entries = [{ ...entry("Acme/A", "scanned.md"), bytes: 43 }];
+		const selection = selectNeardupItems(planOf([item("add", "Acme/A", "scanned.md")]), inventoryOf(entries, { "Acme/A:scanned.md": scanned }), readFilePrefix, 1000);
+		expect(selection).toMatchObject({ items: [], unreadable: 1 });
+	});
+
+	test("a file that is not the size the scan recorded, or not a regular file, is refused", () => {
+		const file = join(dir, "grown.md");
+		writeFileSync(file, "twelve bytes");
+		expect([...readFilePrefix(file, 100, 12)]).toEqual([...encode("twelve bytes")]);
+		expect(() => readFilePrefix(file, 100, 11)).toThrow("changed since the scan");
+		expect(() => readFilePrefix(dir, 100)).toThrow();
+		const entries = [{ ...entry("Acme/A", "grown.md"), bytes: 99 }];
+		const selection = selectNeardupItems(planOf([item("add", "Acme/A", "grown.md")]), inventoryOf(entries, { "Acme/A:grown.md": file }), readFilePrefix, 1000);
+		expect(selection).toMatchObject({ items: [], unreadable: 1 });
+		// The size the scan recorded is passed to the reader, so an injected reader can check it too.
+		const asked: Array<number | undefined> = [];
+		selectNeardupItems(planOf([item("add", "Acme/A", "grown.md")]), inventoryOf([{ ...entry("Acme/A", "grown.md"), bytes: 12 }], { "Acme/A:grown.md": file }), (_path, _max, size) => {
+			asked.push(size);
+			return encode("x");
+		}, 1000);
+		expect(asked).toEqual([12]);
 	});
 });
 
