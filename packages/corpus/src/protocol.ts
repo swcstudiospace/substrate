@@ -17,6 +17,9 @@ export const CORPUS_ROUTES = {
 	neardup: "/corpus/neardup",
 	ingest: "/corpus/ingest",
 	status: "/corpus/status",
+	root: "/corpus/root",
+	proof: "/corpus/proof",
+	anchor: "/corpus/anchor",
 } as const;
 
 /** What a document is, decided from its path alone. Closed: a new kind is a contract change. */
@@ -242,6 +245,74 @@ export interface CorpusStatusResponse {
 	byTier: Array<{ tier: DocTier; count: number }>;
 	lastIngestAt: string | null;
 	manifestVersion: number;
+}
+
+/**
+ * `GET /corpus/root`: the Merkle root over the active manifest (v1.7 phase 69). `count` is the number of leaves it covers;
+ * `skipped` is how many active rows could not be encoded as a leaf (a malformed hash or name) and so are not covered.
+ */
+export interface CorpusRootResponse {
+	protocol: typeof CORPUS_PROTOCOL;
+	root: string;
+	count: number;
+	manifestVersion: number;
+	skipped: number;
+}
+
+/**
+ * `GET /corpus/proof?repo=R&path=P`: the inclusion proof of one active document. `repo`, `documentPath` and `sha256` are the
+ * triple the leaf commits to; `path` is the RFC 6962 audit path (sibling hashes, leaf to root), which is NOT the document's path.
+ * A verifier recomputes `leaf` from the triple, then checks `index`, `treeSize` and `path` against `root`.
+ */
+export interface CorpusProofResponse {
+	protocol: typeof CORPUS_PROTOCOL;
+	repo: string;
+	documentPath: string;
+	sha256: string;
+	leaf: string;
+	index: number;
+	treeSize: number;
+	path: string[];
+	root: string;
+	manifestVersion: number;
+}
+
+/** How a root's anchor reads: the closed set of the ledger's checkpoint verification, so a root and a checkpoint answer alike. */
+export const CORPUS_ANCHOR_STATUSES = ["anchored", "pending", "unanchored", "unverified", "mismatch"] as const;
+export type CorpusAnchorStatus = (typeof CORPUS_ANCHOR_STATUSES)[number];
+
+/** What the chain and the ledger say about the hour a root event sits in. Every member is null when no check got that far. */
+export interface CorpusAnchorEvidence {
+	/** The hourly Merkle root the anchor memo commits to. */
+	anchoredRoot: string | null;
+	/** The hour's event count the memo commits to; the bound tree size of `hourProof`. */
+	hourEventCount: number | null;
+	/** The root event's own hash, the leaf of the hourly tree. */
+	eventHash: string | null;
+	leafIndex: number | null;
+	/** The audit path of the root event inside the hourly tree, leaf to root. */
+	hourProof: string[] | null;
+	signature: string | null;
+	slot: number | null;
+	signer: string | null;
+	blockTimeMs: number | null;
+	finality: "processed" | "confirmed" | "finalized" | null;
+}
+
+/**
+ * `GET /corpus/anchor?root=HEX64`. `unanchored` is an answer, not an error: no `docs.corpus.root` event carries the root, or
+ * the hour it sits in has no anchor. `count` and `manifestVersion` come from the root event, `hourStart` from its hour.
+ */
+export interface CorpusAnchorResponse {
+	protocol: typeof CORPUS_PROTOCOL;
+	root: string;
+	status: CorpusAnchorStatus;
+	reasons: string[];
+	eventId: string | null;
+	count: number | null;
+	manifestVersion: number | null;
+	hourStart: string | null;
+	evidence: CorpusAnchorEvidence | null;
 }
 
 /** The manifest key of a document, also the identity used in logs and proofs. */

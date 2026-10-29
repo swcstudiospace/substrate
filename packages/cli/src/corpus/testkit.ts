@@ -18,6 +18,8 @@ import {
 export interface Seen {
 	method: string;
 	path: string;
+	/** The query string with its leading `?`, or an empty string. */
+	search: string;
 	authorization: string | null;
 	body: unknown;
 }
@@ -42,6 +44,7 @@ export class CorpusStub {
 			const seen: Seen = {
 				method: request.method,
 				path: new URL(request.url).pathname,
+				search: new URL(request.url).search,
 				authorization: request.headers.get("authorization"),
 				body,
 			};

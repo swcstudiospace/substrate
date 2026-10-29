@@ -20,6 +20,7 @@ import {
 	isCorpusSource,
 	isDocKind,
 	isDocTier,
+	isSha256Hex,
 	isValidPath,
 	isValidRepo,
 	type CorpusCoverage,
@@ -67,10 +68,6 @@ export type Parsed<T> = { ok: true; value: T } | { ok: false; reason: RequestRef
 
 function refuse(reason: RequestRefusal, detail?: string): { ok: false; reason: RequestRefusal; detail?: string | undefined } {
 	return detail === undefined ? { ok: false, reason } : { ok: false, reason, detail };
-}
-
-export function isSha256Hex(value: unknown): value is string {
-	return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 }
 
 /** The one object guard the corpus module uses; fields stay `unknown` and the parsers narrow them. */

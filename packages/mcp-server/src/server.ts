@@ -1641,6 +1641,38 @@ export function createHttpServer(
 				sendJson(res, reply.status, reply.body);
 				return;
 			}
+			// Corpus proofs (v1.7 phase 69): the root, one document's inclusion proof and a root's anchor status. Reads, audited under
+			// `corpus_status` (fail-open) like the plan and the status; an anonymous caller is refused first.
+			if (req.method === "GET" && url.pathname === "/corpus/root") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "root" }))) return;
+				const reply = await substrate.corpusRoot(surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			if (req.method === "GET" && url.pathname === "/corpus/proof") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "proof" }))) return;
+				const reply = await substrate.corpusProof({ repo: url.searchParams.get("repo"), path: url.searchParams.get("path") }, surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			if (req.method === "GET" && url.pathname === "/corpus/anchor") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "anchor" }))) return;
+				const reply = await substrate.corpusAnchor(url.searchParams.get("root"), surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
 			// SPE-19388 LightRAG query surface (SPE-19384 RAG replacement):
 			// REST/JSON over `POST /query`, same Hindsight fallback and
 			// idempotency as the `docs_lightrag_query` MCP tool. Read-only
