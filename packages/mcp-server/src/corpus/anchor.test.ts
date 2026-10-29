@@ -19,6 +19,9 @@ const OTHER_ROOT = "fedcba9876543210".repeat(4);
 const START = Date.UTC(2026, 9, 20, 10);
 const HOUR = new Date(START).toISOString();
 
+/** The hash of the row each helper call made last under an id, so a verdict can name the event it is about. */
+const HASHES = new Map<string, string>();
+
 function rootEvent(id: string, at: number, over: { root?: string; action?: string; payload?: Record<string, unknown> } = {}): SubstrateEvent {
 	const base: Omit<SubstrateEvent, "hash"> = {
 		id,
@@ -37,7 +40,9 @@ function rootEvent(id: string, at: number, over: { root?: string; action?: strin
 		payload: over.payload ?? { action: over.action ?? CORPUS_ROOT_ACTION, root: over.root ?? ROOT, count: 12, manifest_version: 34 },
 		prev: null,
 	};
-	return { ...base, hash: eventHash(base) };
+	const hash = eventHash(base);
+	HASHES.set(id, hash);
+	return { ...base, hash };
 }
 
 const toRow = (event: SubstrateEvent): Record<string, unknown> => ({ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) });
@@ -102,8 +107,9 @@ const EVIDENCE: CheckpointEvidence = {
 	finality: "finalized",
 };
 
-function verdict(status: CheckpointVerifyStatus, id: string, reasons: string[] = []): EventAnchorToolResult {
-	return { status, ref: id, event: { id, ts: HOUR, kind: "note", session_id: CORPUS_ROOT_SESSION }, hour_start: HOUR, evidence: status === "anchored" ? EVIDENCE : { ...EVIDENCE, signature: null, slot: null, signer: null, block_time_ms: null, finality: null }, reasons };
+function verdict(status: CheckpointVerifyStatus, id: string, reasons: string[] = [], eventHashOf: string | undefined = HASHES.get(id)): EventAnchorToolResult {
+	const proven = { ...EVIDENCE, event_hash: eventHashOf ?? EVIDENCE.event_hash };
+	return { status, ref: id, event: { id, ts: HOUR, kind: "note", session_id: CORPUS_ROOT_SESSION }, hour_start: HOUR, evidence: status === "anchored" ? proven : { ...proven, signature: null, slot: null, signer: null, block_time_ms: null, finality: null }, reasons };
 }
 
 function verifierOf(byId: Record<string, EventAnchorToolResult>, asked: string[] = []): AnchorVerifier {
@@ -125,7 +131,7 @@ describe("corpusAnchorStatus classifies a root the way a checkpoint is classifie
 				expect(answer.evidence).toEqual({
 					anchoredRoot: EVIDENCE.anchored_root,
 					hourEventCount: 9,
-					eventHash: EVIDENCE.event_hash,
+					eventHash: defined(HASHES.get("evt_root_1"), "the event's hash"),
 					leafIndex: 4,
 					hourProof: EVIDENCE.proof,
 					signature: EVIDENCE.signature,
@@ -245,5 +251,27 @@ describe("a root carried by several events", () => {
 		const answer = await corpusAnchorStatus(portsOf(ledger), ROOT, broken);
 		expect(answer.status).toBe("unverified");
 		expect(answer.reasons.join(" ")).toContain("rpc exploded");
+	});
+
+	test("a verdict about another row under the same event id is not taken for this root's: the hour proof has to cover the row that names it", async () => {
+		// Two ledger rows share one id. The original names another root and is what the hour proof covers; the appended one names this root.
+		const original = rootEvent("evt_shared", START + 1_000, { root: OTHER_ROOT });
+		const appended = rootEvent("evt_shared", START + 2_000);
+		const ledger = new FakeLedger();
+		ledger.events = [appended, original];
+		const answered = await corpusAnchorStatus(portsOf(ledger), ROOT, verifierOf({ evt_shared: verdict("anchored", "evt_shared", [], original.hash) }));
+		expect(answered).toMatchObject({ status: "unverified", eventId: "evt_shared", evidence: null });
+		expect(answered.reasons.join(" ")).toContain("more than one row");
+	});
+
+	test("a row that copies another's stored hash is told apart by its content, and the verifier's own mismatch verdict is kept", async () => {
+		const original = rootEvent("evt_copy", START + 1_000, { root: OTHER_ROOT });
+		const forged = { ...rootEvent("evt_copy", START + 2_000), hash: original.hash };
+		const ledger = new FakeLedger();
+		ledger.events = [forged, original];
+		const anchored = await corpusAnchorStatus(portsOf(ledger), ROOT, verifierOf({ evt_copy: verdict("anchored", "evt_copy", [], original.hash) }));
+		expect(anchored.status).toBe("unverified");
+		const changed = await corpusAnchorStatus(portsOf(ledger), ROOT, verifierOf({ evt_copy: verdict("mismatch", "evt_copy", ["the event no longer hashes to its stored hash"], original.hash) }));
+		expect(changed.status).toBe("mismatch");
 	});
 });

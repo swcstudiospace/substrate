@@ -18,6 +18,7 @@
 import { CORPUS_PROTOCOL, type CorpusAnchorEvidence, type CorpusAnchorResponse, type CorpusAnchorStatus } from "@substrate/corpus";
 import { CheckpointVerifyError, type CheckpointEvidence } from "../checkpoint-verify.ts";
 import { LOOKUP_ROW_LIMIT, verifyEventRef, type AnchorVerifyPorts, type EventAnchorToolResult } from "../anchor-verify-deps.ts";
+import { eventHash } from "../event.ts";
 import { redact } from "../redact.ts";
 import type { SubstrateEvent } from "../types.ts";
 import { CORPUS_ROOT_ACTION, CORPUS_ROOT_SESSION } from "./root.ts";
@@ -46,6 +47,8 @@ interface Candidate {
 	eventId: string;
 	count: number | null;
 	manifestVersion: number | null;
+	/** The hash of this row's own content, recomputed (never the stored one): what the hour proof has to be about. */
+	contentHash: string;
 }
 
 function describe(cause: unknown): string {
@@ -99,7 +102,8 @@ async function findRootEvents(ports: AnchorVerifyPorts, root: string): Promise<{
 			seen.add(event.id);
 			fresh += 1;
 			if (event.payload["action"] !== CORPUS_ROOT_ACTION || event.payload["root"] !== root) continue;
-			candidates.push({ eventId: event.id, count: integerOf(event.payload["count"]), manifestVersion: integerOf(event.payload["manifest_version"]) });
+			const { hash: _stored, ...content } = event;
+			candidates.push({ eventId: event.id, count: integerOf(event.payload["count"]), manifestVersion: integerOf(event.payload["manifest_version"]), contentHash: eventHash(content) });
 			if (candidates.length >= MAX_ANCHOR_CANDIDATES) return { candidates, gap: null };
 		}
 		if (rows.length < LOOKUP_ROW_LIMIT) return { candidates, gap: unreadableGap(unreadable) };
@@ -143,7 +147,14 @@ function answer(root: string, status: CorpusAnchorStatus, reasons: string[], can
 /** Judges one candidate. A caller error of the verifier (a malformed id, an event that vanished) is a status of its own, never a throw. */
 async function judge(ports: AnchorVerifyPorts, verify: AnchorVerifier, candidate: Candidate): Promise<Judged> {
 	try {
-		return await verify(ports, candidate.eventId);
+		const result = await verify(ports, candidate.eventId);
+		// The verifier reads the event again by id, and a ledger may hold several rows under one id. A verdict is only about this
+		// candidate when the event it judged is the row that names the root, so its content has to hash to the verdict's event hash
+		// (a `mismatch` verdict already says the content changed after it was written, and says it better).
+		if ("evidence" in result && result.status !== "mismatch" && result.evidence.event_hash !== candidate.contentHash) {
+			return { status: "unverified", ref: candidate.eventId, reasons: ["the ledger holds more than one row under this event id: the verdict is about a different row than the one that names this root"] };
+		}
+		return result;
 	} catch (cause) {
 		if (cause instanceof CheckpointVerifyError) {
 			return { status: cause.code === "not-found" ? "unanchored" : "unverified", ref: candidate.eventId, reasons: [describe(cause)] };

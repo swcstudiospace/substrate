@@ -104,6 +104,8 @@ Offline verification proves the document was in the manifest that has that root.
 
 When several events carry one root (the manifest changed without changing the root), the newest five are judged newest first and the first `anchored` one is reported; otherwise the newest one's verdict is.
 
+A verdict counts only when it is about the row that names the root. The checkpoint verifier reads an event again by its id, and a ledger can hold more than one row under one id, so the lookup recomputes the hash of the row it matched (from its content, never the stored hash) and compares it with the event hash in the verdict's evidence. A verdict about a different row is reported as `unverified` with that reason; the verifier's own `mismatch` (the content changed after it was written) is kept as it is.
+
 ### Why a root is `unanchored` on a host that has not enabled the anchor
 
 The hourly anchor job is operator-gated. It sends nothing unless the operator has set `SOLANA_ANCHOR_KEYPAIR` (the funded key) and `SOLANA_ANCHOR_PUBKEY`, the devnet URL guard, the genesis-hash check and a balance check pass, and the operator has enabled `substrate-anchor.timer`. Writing the root event does not enable any of that, and no transaction is sent for the corpus. On a host where the timer is not enabled, every root event stays `unanchored` once its hour is more than three hours old. The job is described in `docs/greptime-ledger.md` ("Anchoring") and its outage handling in `docs/runbooks/anchor-chain-outage.md`. Hours that were not anchored while the job was off are picked up by it within its 7-day lookback.

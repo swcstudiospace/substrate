@@ -136,15 +136,17 @@ async function flush(): Promise<void> {
 function harness(store: FakeStore | null = new FakeStore(), emitFails = false) {
 	const clock = new ManualClock();
 	const emitted: EventInput[] = [];
+	const ledger = { stored: true };
 	const keeper = new CorpusRootKeeper({
 		store: () => store,
 		emit: async (event) => {
 			if (emitFails) throw new Error("ledger unavailable");
 			emitted.push(event);
+			return { stored: ledger.stored };
 		},
 		clock,
 	});
-	return { clock, emitted, keeper, store };
+	return { clock, emitted, keeper, ledger, store };
 }
 
 function seed(store: FakeStore, count: number): void {
@@ -213,6 +215,29 @@ describe("CorpusRootKeeper", () => {
 		expect(emitted).toEqual([]);
 	});
 
+	test("a write the ledger refused is not remembered as written: the same state goes out again on the next event", async () => {
+		const { clock, emitted, keeper, ledger, store } = harness();
+		seed(defined(store), 2);
+		ledger.stored = false;
+		keeper.manifestChanged();
+		clock.fire();
+		await flush();
+		expect(emitted).toHaveLength(1);
+		// A later ingest changes only metadata: the root is the same, and the ledger has no copy of it.
+		ledger.stored = true;
+		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
+		keeper.manifestChanged();
+		clock.fire();
+		await flush();
+		expect(emitted.map((event) => event.payload?.count)).toEqual([2, 2]);
+		// Once the ledger holds it, the state is not written again.
+		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
+		keeper.manifestChanged();
+		clock.fire();
+		await flush();
+		expect(emitted).toHaveLength(2);
+	});
+
 	test("from the first write of an ingest to its end the cached root is unavailable and nothing read meanwhile is kept", async () => {
 		const { keeper, store } = harness();
 		const manifest = defined(store);
@@ -276,9 +301,9 @@ describe("CorpusRootKeeper", () => {
 		const keeper = new CorpusRootKeeper({
 			store: () => store,
 			emit: (event) =>
-				new Promise<void>((resolve) => {
+				new Promise<{ stored: boolean }>((resolve) => {
 					emitted.push(event);
-					releases.push(resolve);
+					releases.push(() => resolve({ stored: true }));
 				}),
 			clock,
 		});
@@ -324,9 +349,9 @@ describe("CorpusRootKeeper", () => {
 		const keeper = new CorpusRootKeeper({
 			store: () => store,
 			emit: () =>
-				new Promise<void>((resolve) => {
+				new Promise<{ stored: boolean }>((resolve) => {
 					starts.push(clock.now());
-					releases.push(resolve);
+					releases.push(() => resolve({ stored: true }));
 				}),
 			clock,
 		});

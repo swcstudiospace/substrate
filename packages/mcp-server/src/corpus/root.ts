@@ -127,7 +127,8 @@ export const systemRootClock: RootClock = {
 export interface CorpusRootKeeperDeps {
 	/** The manifest, or null while the corpus is off or there is no index. Read on each use. */
 	store: () => CorpusStore | null;
-	emit: (event: EventInput) => Promise<unknown>;
+	/** Resolves with `stored: false` when the ledger could not take the event (it does not always throw). */
+	emit: (event: EventInput) => Promise<{ stored: boolean }>;
 	clock?: RootClock | undefined;
 }
 
@@ -286,14 +287,15 @@ export class CorpusRootKeeper {
 			if (!read.ok || read.snapshot.count === 0 || read.snapshot.root === this.lastEmittedRoot) return;
 			const { root, count, manifestVersion } = read.snapshot;
 			this.lastWriteMs = this.clock.now();
-			await this.deps.emit({
+			const written = await this.deps.emit({
 				surface: "substrate",
 				kind: "note",
 				summary: `corpus root ${shortRoot(root)} over ${count} documents (manifest ${manifestVersion})`,
 				session_id: CORPUS_ROOT_SESSION,
 				payload: { action: CORPUS_ROOT_ACTION, root, count, manifest_version: manifestVersion },
 			});
-			this.lastEmittedRoot = root;
+			// A write the ledger refused is not a root it holds: the next event for this state must go out again.
+			if (written.stored) this.lastEmittedRoot = root;
 		} catch {
 			// The ingest this follows already answered; a root that did not reach the ledger is written by the next change.
 		}
