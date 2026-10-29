@@ -72,6 +72,7 @@ import {
 	parseFixtureCounts,
 	RAGFLOW_FIXTURE_SCRIPT,
 } from "../packages/mcp-server/src/rehearsal-ragflow.ts";
+import { procStartSeconds } from "../packages/worktree-snapshot/src/proc-stat.ts";
 
 /** The smoke refused to drive this target; the message names hosts and ports, never values. */
 export class SmokeRefused extends Error {}
@@ -510,13 +511,7 @@ function readStartSeconds(pid: number): number | null {
 	if (stat === null || statLine === null) return null;
 	const btime = /^btime (\d+)$/m.exec(statLine);
 	if (!btime) return null;
-	const close = stat.lastIndexOf(")");
-	if (close < 0) return null;
-	const rest = stat.slice(close + 1).trim().split(/\s+/);
-	if (rest.length < 20) return null;
-	const ticks = Number(rest[19]);
-	if (!Number.isFinite(ticks) || ticks < 0) return null;
-	return Number(btime[1]) + ticks / 100;
+	return procStartSeconds(Number(btime[1]), stat);
 }
 
 /** Local ports a pid listens on, from `ss`; null when ss cannot be read. */

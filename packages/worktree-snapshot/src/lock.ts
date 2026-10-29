@@ -32,6 +32,7 @@ import {
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { WorktreeBusyError } from "./errors.ts";
+import { parseProcStatStartTicks } from "./proc-stat.ts";
 
 export const LOCK_FILE = "substrate-restore.lock";
 
@@ -57,12 +58,11 @@ type LockContent = { pid: number; startedAt: string; procStart: string | null; h
 
 export type WorktreeLock = { token: string; release: () => void };
 
-/** Field 22 of /proc/<pid>/stat (process start time in clock ticks), or null where unavailable. */
+/** The process start time in clock ticks (the identity token kept in the lock), or null where unavailable. */
 export function processStartTicks(pid: number): string | null {
 	try {
-		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-		const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-		return fields[19] ?? null;
+		const ticks = parseProcStatStartTicks(readFileSync(`/proc/${pid}/stat`, "utf8"));
+		return ticks === null ? null : String(ticks);
 	} catch {
 		// Not Linux, or the process is gone: the caller falls back to the pid check alone.
 		return null;

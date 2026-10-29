@@ -24,7 +24,9 @@ bun run parity:check [--json] [--expect-restarts N] [--expect-start EPOCH]
 
 It exits `0` on pass, `1` on a failed criterion, `2` when it could not ask.
 It prints PIDs, states and commits — never an environment value. `--json`
-emits the readings that fill the evidence table below. `--expect-restarts`
+emits the readings that fill the evidence table below as one JSON object on
+stdout and sends every human line to stderr, so `bun run parity:check --json | jq`
+works and a capture of stdout alone is the JSON. `--expect-restarts`
 and `--expect-start` pin the current `NRestarts` and start epoch so the next
 run notices movement.
 
