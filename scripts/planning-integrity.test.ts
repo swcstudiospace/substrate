@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseStatePart } from "../packages/mcp-server/src/planning/position.ts";
 import { parseFrontmatter } from "../packages/mcp-server/src/skills/frontmatter.ts";
+import { brokenRelativeLinks } from "./docs-lint.ts";
 
 const STATE_PATH = join(import.meta.dir, "..", ".planning", "STATE.md");
 
@@ -34,28 +35,6 @@ export function checkClosedStateHasNoPhase(text: string): string[] {
 }
 
 const MILESTONES_DIR = join(import.meta.dir, "..", ".planning", "milestones");
-
-/**
- * Archives that kept links relative to the live ROADMAP.md when `milestone complete` copied it (`phases/...`, `milestones/...`,
- * `MILESTONES.md`). They predate the closeouts of v1.3.x, v1.5 and v1.6, which rewrote theirs; this list is recorded debt and only shrinks.
- */
-const LEGACY_BROKEN_LINK_ARCHIVES: readonly string[] = ["v1.2-ROADMAP.md", "v1.3-ROADMAP.md", "v1.4-ROADMAP.md"];
-
-/**
- * The relative markdown links in an archived planning file that resolve to no file in `dir`. An archive lives in
- * `.planning/milestones/`, so a link copied from the live roadmap is broken until it is rewritten. Absolute paths, anchors
- * and URLs are not checked.
- */
-export function brokenRelativeLinks(text: string, dir: string): string[] {
-	const broken: string[] = [];
-	for (const match of text.matchAll(/\]\(([^)\s]+)\)/g)) {
-		const target = match[1] ?? "";
-		if (/^(?:[a-z][a-z0-9+.-]*:|#|\/)/i.test(target)) continue;
-		const file = target.split("#")[0] ?? "";
-		if (file !== "" && !existsSync(join(dir, file))) broken.push(target);
-	}
-	return broken;
-}
 
 describe("planning integrity", () => {
 	const text = readFileSync(STATE_PATH, "utf8");
@@ -94,21 +73,8 @@ describe("planning integrity", () => {
 		expect(checkStateFrontmatter("---\nmilestone: v1\nstatus: ok\n---\nbody\n")).toEqual([]);
 	});
 
-	test("archived planning files link only to files that exist", () => {
-		const broken = readdirSync(MILESTONES_DIR)
-			.filter((name) => name.endsWith(".md") && !LEGACY_BROKEN_LINK_ARCHIVES.includes(name))
-			.flatMap((name) => brokenRelativeLinks(readFileSync(join(MILESTONES_DIR, name), "utf8"), MILESTONES_DIR).map((target) => `${name}: ${target}`));
-		expect(broken).toEqual([]);
-	});
-
-	test("the legacy archive list names only archives that still have a broken link", () => {
-		for (const name of LEGACY_BROKEN_LINK_ARCHIVES) {
-			expect(brokenRelativeLinks(readFileSync(join(MILESTONES_DIR, name), "utf8"), MILESTONES_DIR).length).toBeGreaterThan(0);
-		}
-	});
-
 	test("the link check flags a link copied from the live roadmap and accepts one that resolves", () => {
-		expect(brokenRelativeLinks("[a](phases/55-x/CONTEXT.md) [b](MILESTONES.md) [c](https://example.com/x) [d](#top)", MILESTONES_DIR)).toEqual(["phases/55-x/CONTEXT.md", "MILESTONES.md"]);
-		expect(brokenRelativeLinks("[a](../MILESTONES.md#v16) [b](v1.6-ROADMAP.md)", MILESTONES_DIR)).toEqual([]);
+		expect(brokenRelativeLinks("[a](phases/55-x/CONTEXT.md) [b](MILESTONES.md) [c](https://example.com/x) [d](#top)", MILESTONES_DIR, existsSync)).toEqual(["phases/55-x/CONTEXT.md", "MILESTONES.md"]);
+		expect(brokenRelativeLinks("[a](../MILESTONES.md#v16) [b](v1.6-ROADMAP.md)", MILESTONES_DIR, existsSync)).toEqual([]);
 	});
 });
