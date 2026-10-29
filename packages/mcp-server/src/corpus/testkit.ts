@@ -35,6 +35,8 @@ export function makeRow(over: Partial<ManifestRow> & Pick<ManifestRow, "repo" | 
 		state: "active",
 		documentId: `doc-${over.path}`,
 		manifestSeq: 1,
+		supersededBy: null,
+		ingestedAt: null,
 		...over,
 	};
 }
@@ -73,7 +75,7 @@ export class FakeStore implements CorpusStore {
 		if (this.failRecordOnce.delete(key)) throw new Error("connection lost");
 		this.log.push(`record:${row.path}`);
 		this.seq += 1;
-		this.rows.set(key, { ...row, commit: row.commit ?? null, state: "active", manifestSeq: this.seq });
+		this.rows.set(key, { ...row, commit: row.commit ?? null, supersededBy: row.supersededBy ?? null, ingestedAt: new Date(0).toISOString(), state: "active", manifestSeq: this.seq });
 	}
 
 	async refreshMetadata(row: RefreshedMetadata): Promise<boolean> {
@@ -81,7 +83,7 @@ export class FakeStore implements CorpusStore {
 		if (held === undefined || held.state !== "active" || held.sha256 !== row.sha256) return false;
 		this.log.push(`refresh:${row.path}`);
 		this.seq += 1;
-		this.rows.set(this.key(row.repo, row.path), { ...held, kind: row.kind, tier: row.tier, source: row.source, commit: row.commit ?? null, manifestSeq: this.seq });
+		this.rows.set(this.key(row.repo, row.path), { ...held, kind: row.kind, tier: row.tier, source: row.source, commit: row.commit ?? null, supersededBy: row.supersededBy ?? null, manifestSeq: this.seq });
 		return true;
 	}
 
@@ -96,6 +98,10 @@ export class FakeStore implements CorpusStore {
 
 	async activeReferences(documentId: string): Promise<number> {
 		return [...this.rows.values()].filter((row) => row.state === "active" && row.documentId === documentId).length;
+	}
+
+	async activeRows(limit: number): Promise<ManifestRow[]> {
+		return [...this.rows.values()].filter((row) => row.state === "active").slice(0, limit);
 	}
 
 	async manifestVersion(): Promise<number> {

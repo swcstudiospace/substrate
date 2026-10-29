@@ -80,6 +80,10 @@ describe("auditMode", () => {
 		expect({ ingest: auditMode("corpus_ingest"), status: auditMode("corpus_status") }).toEqual({ ingest: "fail-closed", status: "fail-open" });
 	});
 
+	test("a docs verdict is fail-open: it is advisory input, so an unwritable audit file must not fail the agent's turn over it", () => {
+		expect(auditMode("docs_feedback")).toBe("fail-open");
+	});
+
 	test("every REST route server.ts audits has a mode", () => {
 		// `auditedRest` refuses a route whose record the chain will not take, so a route
 		// audited under a name in neither list would be fail-closed by accident — a

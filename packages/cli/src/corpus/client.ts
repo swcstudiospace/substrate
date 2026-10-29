@@ -6,15 +6,21 @@
 import {
 	CORPUS_PROTOCOL,
 	CORPUS_ROUTES,
+	DEFAULT_GAPS_LIMIT,
 	INGEST_STATUSES,
+	MAX_GAPS_LIMIT,
 	PLAN_ACTIONS,
+	REFLECT_STATUSES,
 	isDocKind,
 	isDocTier,
 	isRecord,
+	type CorpusGapsResponse,
 	type CorpusIngestRequest,
 	type CorpusIngestResponse,
 	type CorpusPlanRequest,
 	type CorpusPlanResponse,
+	type CorpusReflectRequest,
+	type CorpusReflectResponse,
 	type CorpusStatusResponse,
 } from "@substrate/corpus";
 
@@ -42,6 +48,9 @@ export interface CorpusClient {
 	plan(request: CorpusPlanRequest): Promise<ClientResult<CorpusPlanResponse>>;
 	ingest(request: CorpusIngestRequest): Promise<ClientResult<CorpusIngestResponse>>;
 	status(): Promise<ClientResult<CorpusStatusResponse>>;
+	reflect(request: CorpusReflectRequest): Promise<ClientResult<CorpusReflectResponse>>;
+	/** The queries the corpus could not answer; `limit` is clamped to the server's maximum. */
+	gaps(limit?: number): Promise<ClientResult<CorpusGapsResponse>>;
 }
 
 /** The marker the server puts in a 503 when the corpus feature flag is off. */
@@ -125,6 +134,46 @@ export function isStatusResponse(value: unknown): value is CorpusStatusResponse 
 	);
 }
 
+function isReflectResult(value: unknown): boolean {
+	return (
+		isRecord(value) &&
+		typeof value.repo === "string" &&
+		REFLECT_STATUSES.some((status) => status === value.status) &&
+		isOptionalString(value.reason)
+	);
+}
+
+function isGap(value: unknown): boolean {
+	return (
+		isRecord(value) &&
+		typeof value.queryHash === "string" &&
+		(value.text === null || typeof value.text === "string") &&
+		isCount(value.searches) &&
+		typeof value.lastSeen === "string" &&
+		(value.best === null || (typeof value.best === "number" && Number.isFinite(value.best)))
+	);
+}
+
+export function isReflectResponse(value: unknown): value is CorpusReflectResponse {
+	return (
+		isRecord(value) &&
+		value.protocol === CORPUS_PROTOCOL &&
+		Array.isArray(value.results) &&
+		value.results.every(isReflectResult) &&
+		isCount(value.manifestVersion)
+	);
+}
+
+export function isGapsResponse(value: unknown): value is CorpusGapsResponse {
+	return (
+		isRecord(value) &&
+		value.protocol === CORPUS_PROTOCOL &&
+		Array.isArray(value.gaps) &&
+		value.gaps.every(isGap) &&
+		typeof value.truncated === "boolean"
+	);
+}
+
 function fail(kind: ErrorKind, message: string, status?: number): { ok: false; error: ClientError } {
 	return { ok: false, error: { kind, message, ...(status === undefined ? {} : { status }) } };
 }
@@ -192,5 +241,11 @@ export function createCorpusClient(config: ClientConfig): CorpusClient {
 		plan: (request) => call("POST", CORPUS_ROUTES.plan, request, isPlanResponse),
 		ingest: (request) => call("POST", CORPUS_ROUTES.ingest, request, isIngestResponse),
 		status: () => call("GET", CORPUS_ROUTES.status, undefined, isStatusResponse),
+		reflect: (request) => call("POST", CORPUS_ROUTES.reflect, request, isReflectResponse),
+		// The server refuses a limit above its maximum, so the CLI keeps inside it; a limit that is not a positive integer is the default.
+		gaps: (limit) => {
+			const wanted = limit === undefined || !Number.isInteger(limit) || limit < 1 ? DEFAULT_GAPS_LIMIT : Math.min(limit, MAX_GAPS_LIMIT);
+			return call("GET", `${CORPUS_ROUTES.gaps}?limit=${wanted}`, undefined, isGapsResponse);
+		},
 	};
 }

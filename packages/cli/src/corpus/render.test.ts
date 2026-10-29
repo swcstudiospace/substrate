@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { CorpusEntry, RepoReport } from "@substrate/corpus";
+import type { CorpusEntry, RepoDigest, RepoReport } from "@substrate/corpus";
 import type { Inventory } from "./inventory.ts";
-import { LIST_LIMIT, REPO_LIMIT, printable, renderIngest, renderInventory, renderPlan } from "./render.ts";
-import { planOf } from "./testkit.ts";
+import { GAP_TEXT_LIMIT, LIST_LIMIT, REFLECT_PREVIEW_LIMIT, REPO_LIMIT, printable, renderGaps, renderIngest, renderInventory, renderPlan, renderReflectOutcome, renderReflectPlan } from "./render.ts";
+import type { ReflectCollection } from "./reflect.ts";
+import { gapsOf, planOf } from "./testkit.ts";
 
 function entry(repo: string, path: string, over: Partial<CorpusEntry> = {}): CorpusEntry {
 	return { repo, path, kind: "doc", tier: 1, sha256: "a".repeat(64), bytes: 10, source: "fs", ...over };
@@ -118,5 +119,56 @@ describe("printable", () => {
 		expect(text).toContain("Acme/A:docs/\\x1b[2J\\x1b[Hingest: ingested 999\\x0arefused (0):.md  [bad-path]");
 		const plan = renderPlan(planOf([{ action: "add", repo: "Acme/A", path: hostile }]), inventory([repoReport("Acme/A")], []));
 		expect(plan).not.toContain("\u001b");
+	});
+});
+
+describe("renderReflectPlan, renderReflectOutcome and renderGaps", () => {
+	function digest(repo: string): RepoDigest {
+		return { repo, path: ".substrate/digest.md", text: `# Documentation digest: ${repo}\n`, key: `corpus-digest:${repo}`, sha256: "ab".repeat(32) };
+	}
+
+	test("a dry run shows the text of the first digests only and says how many texts were left out; an executed run shows none", () => {
+		const collection: ReflectCollection = {
+			digests: Array.from({ length: REFLECT_PREVIEW_LIMIT + 2 }, (_, index) => digest(`Acme/R${index}`)),
+			skipped: [{ repo: "Acme/Bad\u001b", reason: "roadmap-empty" }],
+			notes: ["a note\nwith a break"],
+			checkouts: 9,
+		};
+		const dry = renderReflectPlan(collection, false);
+		expect(dry).toContain(`reflect: ${REFLECT_PREVIEW_LIMIT + 2} digests from 9 checkouts found (dry run)`);
+		expect(dry.split("\n").filter((line) => line.startsWith("--- Acme/R"))).toHaveLength(REFLECT_PREVIEW_LIMIT);
+		expect(dry).toContain("Acme/R0  ".concat(String(digest("Acme/R0").text.length), " chars  sha abababababab"));
+		expect(dry).toContain("... and 2 more digest texts (see --json)");
+		expect(dry).toContain("Acme/Bad\\x1b  [roadmap-empty]");
+		expect(dry).toContain("a note\\x0awith a break");
+		expect(dry).not.toContain("\u001b");
+		const executed = renderReflectPlan(collection, true);
+		expect(executed).not.toContain("---");
+		expect(executed).not.toContain("(dry run)");
+	});
+
+	test("the outcome lists counts, refused and failed digests with their reasons, and what was not sent", () => {
+		const text = renderReflectOutcome({
+			counts: { stored: 1, unchanged: 2, refused: 1, failed: 1 },
+			problems: [
+				{ repo: "Acme/A", status: "refused", reason: "secret-findings" },
+				{ repo: "Acme/B", status: "failed" },
+			],
+			notSent: 3,
+			manifestVersion: 4,
+		});
+		expect(text).toContain("reflect: stored 1, unchanged 2, refused 1, failed 1");
+		expect(text).toContain("Acme/A  refused  [secret-findings]");
+		expect(text).toContain("Acme/B  failed\n");
+		expect(text).toContain("not sent: 3 digests");
+	});
+
+	test("gaps are escaped, long query text is cut and the cut list is announced", () => {
+		const long = "q".repeat(GAP_TEXT_LIMIT + 50);
+		const text = renderGaps(gapsOf([{ queryHash: "a".repeat(40), text: long, searches: 2, lastSeen: "2026-10-29T00:00:00.000Z", best: 0 }], true));
+		expect(text).toContain("(the list is cut at the server limit)");
+		expect(text).toContain(`"${"q".repeat(GAP_TEXT_LIMIT)}..."`);
+		expect(text).toContain(`${"a".repeat(12)}  2 searches  best 0.000`);
+		expect(renderGaps(gapsOf([]))).toBe("gaps: 0 queries the corpus could not answer well\n");
 	});
 });

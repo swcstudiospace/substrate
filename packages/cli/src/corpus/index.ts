@@ -1,15 +1,17 @@
 /**
- * `substrate corpus scan|plan|ingest|status` (v1.7 phase 63).
+ * `substrate corpus scan|plan|ingest|reflect|status` (v1.7 phases 63 and 66).
  *
  *   substrate corpus scan   [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--source fs|github|greptile]...
  *                           [--greptile-dir DIR] [--github-owner OWNER] [--max-repos N] [--json] [--entries]
  *   substrate corpus plan   (scan options) [--server URL]
  *   substrate corpus ingest (plan options) [--execute] [--batch-docs N] [--batch-bytes N]
- *   substrate corpus status [--server URL] [--json]
+ *   substrate corpus reflect [--repo R]... [--root DIR]... [--max-bytes N] [--server URL] [--execute] [--json]
+ *   substrate corpus status [--server URL] [--json] [--gaps [--limit N]]
  *
  * Discovery runs here, where the files are; the server never reads a path. `scan` needs no server. `plan` sends entries
  * without bodies. `ingest` is a dry run until `--execute`, then sends the tombstones first, as requests of their own, and
- * then the bodies of the documents the plan says must change in bounded batches. Exit codes: 0 done (every document ingested, updated, unchanged or tombstoned), 1 a request failed or any document ended refused or failed, 2 usage.
+ * then the bodies of the documents the plan says must change in bounded batches. `reflect` builds one digest per repository
+ * from its `.planning` files and is a dry run until `--execute`. Exit codes: 0 done (every document ingested, updated, unchanged or tombstoned; every digest stored or unchanged), 1 a request failed or any document or digest ended refused or failed, 2 usage.
  */
 import { readFileSync } from "node:fs";
 import {
@@ -18,6 +20,7 @@ import {
 	DEFAULT_GITHUB_MAX_REPOS,
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_TIER,
+	MAX_GAPS_LIMIT,
 	MAX_INGEST_DOCUMENTS,
 	isCorpusSource,
 	isDocTier,
@@ -31,14 +34,17 @@ import { createBodyStore, type BodyStore } from "./bodies.ts";
 import { createCorpusClient, type ClientError, type CorpusClient } from "./client.ts";
 import { executeIngest } from "./ingest.ts";
 import { collectInventory, type Inventory, type InventoryOptions } from "./inventory.ts";
-import { printable, renderIngest, renderInventory, renderPlan, renderStatus } from "./render.ts";
+import { collectDigests, executeReflect, type ReflectCollection } from "./reflect.ts";
+import { printable, renderGaps, renderIngest, renderInventory, renderPlan, renderReflectOutcome, renderReflectPlan, renderStatus, supersededEntries } from "./render.ts";
 
 export const USAGE =
 	"substrate corpus scan [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--source fs|github|greptile]... [--greptile-dir DIR]\n" +
 	"                      [--github-owner OWNER] [--max-repos N] [--json] [--entries]\n" +
 	"substrate corpus plan [scan options] [--server URL] [--json]\n" +
 	"substrate corpus ingest [plan options] [--execute] [--batch-docs N] [--batch-bytes N]   (a dry run without --execute; --batch-docs is capped at the server limit of 200)\n" +
-	"substrate corpus status [--server URL] [--json]\n";
+	"substrate corpus reflect [--repo R]... [--root DIR]... [--max-bytes N] [--server URL] [--execute] [--json]\n" +
+	"                      (digest of each repository's .planning/STATE.md and ROADMAP.md; a dry run without --execute; exits 1 when a digest was refused or failed or a repository could not be digested)\n" +
+	"substrate corpus status [--server URL] [--json] [--gaps [--limit N]]   (--gaps lists the queries the corpus could not answer; --limit is capped at the server limit of 200)\n";
 
 export const DEFAULT_ROOT = "/root/src/repos";
 export const DEFAULT_BATCH_DOCS = 20;
@@ -72,7 +78,8 @@ const SPECS: Record<string, FlagSpec> = {
 	scan: { values: SCAN_VALUES, bools: ["json", "entries", "help"] },
 	plan: { values: [...SCAN_VALUES, "server"], bools: ["json", "help"] },
 	ingest: { values: [...SCAN_VALUES, "server", "batch-docs", "batch-bytes"], bools: ["json", "execute", "help"] },
-	status: { values: ["server"], bools: ["json", "help"] },
+	status: { values: ["server", "limit"], bools: ["json", "gaps", "help"] },
+	reflect: { values: ["repo", "root", "max-bytes", "server"], bools: ["json", "execute", "help"] },
 };
 
 interface Parsed {
@@ -123,6 +130,12 @@ function last(parsed: Parsed, name: string): string | undefined {
 	return parsed.values.get(name)?.at(-1);
 }
 
+/** `--root` values, else the colon-separated `SUBSTRATE_CORPUS_ROOTS`, else the default root. */
+function resolveRoots(parsed: Parsed, env: Record<string, string | undefined>): string[] {
+	const configured = (env.SUBSTRATE_CORPUS_ROOTS ?? "").split(":").filter((root) => root !== "");
+	return parsed.values.get("root") ?? (configured.length > 0 ? configured : [DEFAULT_ROOT]);
+}
+
 function resolveScanArgs(parsed: Parsed, env: Record<string, string | undefined>): ScanArgs | string {
 	const tierText = last(parsed, "tier");
 	const tier = tierText === undefined ? DEFAULT_MAX_TIER : Number(tierText);
@@ -152,10 +165,8 @@ function resolveScanArgs(parsed: Parsed, env: Record<string, string | undefined>
 	const githubOwner = last(parsed, "github-owner");
 	if (sources.includes("greptile") && greptileDir === undefined) return "--source greptile needs --greptile-dir DIR";
 	if (sources.includes("github") && githubOwner === undefined) return "--source github needs --github-owner OWNER";
-	const configured = (env.SUBSTRATE_CORPUS_ROOTS ?? "").split(":").filter((root) => root !== "");
-	const given = parsed.values.get("root");
 	return {
-		roots: given ?? (configured.length > 0 ? configured : [DEFAULT_ROOT]),
+		roots: resolveRoots(parsed, env),
 		maxTier: tier,
 		maxBytes,
 		sources,
@@ -229,6 +240,7 @@ export async function runCorpus(argv: string[], deps: CorpusDeps): Promise<numbe
 	};
 	try {
 		if (sub === "status") return await status(parsed, deps);
+		if (sub === "reflect") return await reflect(parsed, deps);
 		const args = resolveScanArgs(parsed, deps.env);
 		if (typeof args === "string") return usage(args);
 		if (sub === "scan") {
@@ -263,13 +275,92 @@ function clientFor(parsed: Parsed, deps: CorpusDeps): CorpusClient {
 }
 
 async function status(parsed: Parsed, deps: CorpusDeps): Promise<number> {
-	const result = await clientFor(parsed, deps).status();
+	const gaps = parsed.bools.has("gaps");
+	const limitText = last(parsed, "limit");
+	if (limitText !== undefined && !gaps) {
+		deps.err("[substrate] corpus status: --limit applies to --gaps\n");
+		return 2;
+	}
+	let limit: number | undefined;
+	if (limitText !== undefined) {
+		limit = positiveInt(limitText) ?? undefined;
+		if (limit === undefined) {
+			deps.err("[substrate] corpus status: --limit must be a positive integer\n");
+			return 2;
+		}
+		// The server refuses a limit above its maximum, so a larger value is lowered.
+		if (limit > MAX_GAPS_LIMIT) {
+			deps.err(`[substrate] corpus status: limit of ${limit} is above the server limit; using ${MAX_GAPS_LIMIT}\n`);
+			limit = MAX_GAPS_LIMIT;
+		}
+	}
+	const client = clientFor(parsed, deps);
+	if (gaps) {
+		const answered = await client.gaps(limit);
+		if (!answered.ok) {
+			deps.err(`[substrate] corpus status --gaps failed: ${describeError(answered.error)}\n`);
+			return 1;
+		}
+		deps.out(parsed.bools.has("json") ? `${JSON.stringify(answered.value, null, 2)}\n` : renderGaps(answered.value));
+		return 0;
+	}
+	const result = await client.status();
 	if (!result.ok) {
 		deps.err(`[substrate] corpus status failed: ${describeError(result.error)}\n`);
 		return 1;
 	}
 	deps.out(parsed.bools.has("json") ? `${JSON.stringify(result.value, null, 2)}\n` : renderStatus(result.value));
 	return 0;
+}
+
+/** The digest JSON: what would be sent (the text included), what could not be built and why. */
+function digestJson(collection: ReflectCollection): unknown[] {
+	return collection.digests.map((digest) => ({
+		repo: digest.repo,
+		path: digest.path,
+		key: digest.key,
+		sha256: digest.sha256,
+		chars: digest.text.length,
+		text: digest.text,
+	}));
+}
+
+async function reflect(parsed: Parsed, deps: CorpusDeps): Promise<number> {
+	const execute = parsed.bools.has("execute");
+	const json = parsed.bools.has("json");
+	const bytesText = last(parsed, "max-bytes");
+	const maxBytes = bytesText === undefined ? DEFAULT_MAX_BYTES : positiveInt(bytesText);
+	if (maxBytes === null) {
+		deps.err("[substrate] corpus reflect: --max-bytes must be a positive integer\n");
+		return 2;
+	}
+	const collection = collectDigests({
+		roots: resolveRoots(parsed, deps.env),
+		repos: parsed.values.get("repo") ?? [],
+		maxBytes,
+		runner: deps.runner,
+		readFile: deps.readFile,
+	});
+	// A repository that has a STATE and could not be digested, or one asked for and not found, is an incomplete run.
+	const incomplete = collection.skipped.length > 0;
+	if (!execute) {
+		deps.out(
+			json
+				? `${JSON.stringify({ dryRun: true, checkouts: collection.checkouts, digests: digestJson(collection), skipped: collection.skipped, notes: collection.notes }, null, 2)}\n`
+				: `${renderReflectPlan(collection, false)}dry run: nothing was sent; add --execute to send these digests\n`,
+		);
+		return incomplete ? 1 : 0;
+	}
+	const outcome = await executeReflect({ digests: collection.digests, client: clientFor(parsed, deps) });
+	if (!json) deps.out(renderReflectPlan(collection, true));
+	deps.out(
+		json
+			? `${JSON.stringify({ checkouts: collection.checkouts, reflect: outcome.summary, skipped: collection.skipped, notes: collection.notes, fatal: outcome.fatal }, null, 2)}\n`
+			: renderReflectOutcome(outcome.summary),
+	);
+	if (outcome.fatal !== null) deps.err(`[substrate] corpus reflect stopped: ${describeError(outcome.fatal)}\n`);
+	const { failed, refused } = outcome.summary.counts;
+	return outcome.fatal !== null || failed > 0 || refused > 0 || incomplete ? 1 : 0;
 }
 
 /** The request a plan sends: the entries without bodies, and the coverage of what the scan read completely. */
@@ -284,7 +375,11 @@ async function plan(args: ScanArgs, parsed: Parsed, deps: CorpusDeps): Promise<n
 		deps.err(`[substrate] corpus plan failed: ${describeError(result.error)}\n`);
 		return 1;
 	}
-	deps.out(parsed.bools.has("json") ? `${JSON.stringify(result.value, null, 2)}\n` : renderPlan(result.value, inventory));
+	deps.out(
+		parsed.bools.has("json")
+			? `${JSON.stringify({ ...result.value, superseded: supersededEntries(inventory.entries) }, null, 2)}\n`
+			: renderPlan(result.value, inventory),
+	);
 	return 0;
 }
 

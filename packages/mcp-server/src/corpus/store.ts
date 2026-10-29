@@ -24,6 +24,10 @@ export interface ManifestRow {
 	/** The docs-plane document this row's active content lives in; null for a row that never reached the plane. */
 	documentId: string | null;
 	manifestSeq: number;
+	/** The repo-relative path of the same repository that replaces this document, from its `superseded-by` marker; null when there is none. */
+	supersededBy: string | null;
+	/** ISO time the current content reached the plane (`ingested_at`, else `updated_at`): a metadata refresh does not move it. Null when the database gave neither. */
+	ingestedAt: string | null;
 }
 
 /** What `recordIngested` writes: the document as the plane now holds it. */
@@ -36,6 +40,7 @@ export interface RecordedDocument {
 	bytes: number;
 	source: CorpusSource;
 	commit?: string | undefined;
+	supersededBy?: string | undefined;
 	documentId: string;
 }
 
@@ -48,6 +53,7 @@ export interface RefreshedMetadata {
 	tier: DocTier;
 	source: CorpusSource;
 	commit?: string | undefined;
+	supersededBy?: string | undefined;
 }
 
 /** `status()` without the protocol member the route adds. */
@@ -68,6 +74,11 @@ export interface CorpusStore {
 	markTombstoned(repo: string, path: string): Promise<boolean>;
 	/** How many ACTIVE rows hold this plane document id. */
 	activeReferences(documentId: string): Promise<number>;
+	/**
+	 * Up to `limit` ACTIVE rows ordered by `(repo, path)`, for the supersession and authority index. A bound, not a page: the
+	 * reader treats a document it never saw as unflagged, so a cap can only cost a flag, never invent one.
+	 */
+	activeRows(limit: number): Promise<ManifestRow[]>;
 	status(): Promise<CorpusStatusSummary>;
 	manifestVersion(): Promise<number>;
 }
@@ -78,6 +89,12 @@ export const STATUS_MAX_REPOS = 1000;
 function numberOf(value: unknown): number {
 	const parsed = Number(value);
 	return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/** An ISO time from a database timestamp (a Date or a string); null for anything else or an unparseable value. */
+function isoOf(value: unknown): string | null {
+	const at = value instanceof Date ? value : typeof value === "string" ? new Date(value) : null;
+	return at === null || Number.isNaN(at.getTime()) ? null : at.toISOString();
 }
 
 /** A row from the database, or null when a column holds something the closed lists do not allow. */
@@ -99,6 +116,8 @@ export function toManifestRow(record: Record<string, unknown>): ManifestRow | nu
 		state,
 		documentId: typeof record.docs_document_id === "string" ? record.docs_document_id : null,
 		manifestSeq: numberOf(record.manifest_seq),
+		supersededBy: typeof record.superseded_by === "string" && record.superseded_by.length > 0 ? record.superseded_by : null,
+		ingestedAt: isoOf(record.ingested_at) ?? isoOf(record.updated_at),
 	};
 }
 
@@ -130,6 +149,7 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 					tier = ${row.tier},
 					source = ${row.source},
 					commit_sha = ${row.commit ?? null},
+					superseded_by = ${row.supersededBy ?? null},
 					updated_at = now(),
 					manifest_seq = nextval(pg_get_serial_sequence('corpus_documents', 'manifest_seq'))
 				where repo = ${row.repo} and path = ${row.path} and state = 'active' and sha256 = ${row.sha256}
@@ -138,8 +158,8 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 		},
 		async recordIngested(row: RecordedDocument): Promise<void> {
 			await sql`
-				insert into corpus_documents (repo, path, kind, tier, sha256, bytes, source, commit_sha, state, docs_document_id, ingested_at, tombstoned_at, updated_at)
-				values (${row.repo}, ${row.path}, ${row.kind}, ${row.tier}, ${row.sha256}, ${row.bytes}, ${row.source}, ${row.commit ?? null}, 'active', ${row.documentId}, now(), null, now())
+				insert into corpus_documents (repo, path, kind, tier, sha256, bytes, source, commit_sha, superseded_by, state, docs_document_id, ingested_at, tombstoned_at, updated_at)
+				values (${row.repo}, ${row.path}, ${row.kind}, ${row.tier}, ${row.sha256}, ${row.bytes}, ${row.source}, ${row.commit ?? null}, ${row.supersededBy ?? null}, 'active', ${row.documentId}, now(), null, now())
 				on conflict (repo, path) do update set
 					kind = excluded.kind,
 					tier = excluded.tier,
@@ -147,6 +167,7 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 					bytes = excluded.bytes,
 					source = excluded.source,
 					commit_sha = excluded.commit_sha,
+					superseded_by = excluded.superseded_by,
 					state = 'active',
 					docs_document_id = excluded.docs_document_id,
 					ingested_at = now(),
@@ -168,6 +189,13 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 		async activeReferences(documentId: string): Promise<number> {
 			const rows = await sql`select count(*)::int as n from corpus_documents where docs_document_id = ${documentId} and state = 'active'`;
 			return numberOf(rows[0]?.n);
+		},
+		async activeRows(limit: number): Promise<ManifestRow[]> {
+			const rows: Array<Record<string, unknown>> = await sql`select * from corpus_documents where state = 'active' order by repo, path limit ${limit}`;
+			return rows.flatMap((row) => {
+				const parsed = toManifestRow(row);
+				return parsed === null ? [] : [parsed];
+			});
 		},
 		manifestVersion,
 		async status(): Promise<CorpusStatusSummary> {

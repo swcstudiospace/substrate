@@ -172,7 +172,12 @@ import { lightragOp, probeLightrag, queryForTool, type LightragQueryMode, type L
 import { createLightragBulkPlane, type LightragBulkPlane } from "./planes/lightrag-bulk.ts";
 import { corpusIngestReply, corpusPlanReply, corpusStatusReply, type CorpusReply, type CorpusServiceDeps } from "./corpus/service.ts";
 import type { CorpusStore } from "./corpus/store.ts";
-import type { CorpusIngestResponse, CorpusPlanResponse, CorpusStatusResponse } from "@substrate/corpus";
+import { DIGEST_KEY_PREFIX, type CorpusGapsResponse, type CorpusIngestResponse, type CorpusPlanResponse, type CorpusReflectResponse, type CorpusStatusResponse } from "@substrate/corpus";
+import { AuthorityIndex } from "./corpus/authority-index.ts";
+import { corpusKeyOf, reflectCitations, type ShadowNote } from "./corpus/rank.ts";
+import { corpusGapsReply, corpusReflectReply, docsFeedbackReply, type FeedbackStored, type ReflectReply, type ReflectServiceDeps, type RetainOutcome } from "./corpus/reflect-service.ts";
+import { RETRIEVAL_SWEEP_BATCH, type ReflectStore } from "./corpus/reflect-store.ts";
+import { RETRIEVAL_SWEEP_INTERVAL_MS, RetrievalRecorder, retrievalRowOf, type RecorderCounters } from "./corpus/telemetry.ts";
 import { RailwayClient } from "./railway.ts";
 import { nodePlanningFs } from "./planning/fs.ts";
 import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
@@ -1388,6 +1393,16 @@ export class Substrate {
 	/** Test seam for the corpus manifest and bulk plane; production builds them from the index and the LightRAG config. */
 	private readonly corpusSeam: { store?: CorpusStore; plane?: LightragBulkPlane } | null;
 	private corpusPlaneCache: LightragBulkPlane | null = null;
+	/** Test seam for the feedback, telemetry and gap tables; production builds them from the index. */
+	private readonly reflectSeam: ReflectStore | null;
+	/** The per-process authority index the `SUBSTRATE_DOCS_RERANK` modes read: active documents, supersession and feedback counts. */
+	private readonly authorityIndex: AuthorityIndex;
+	/** Retrieval telemetry (`SUBSTRATE_DOCS_TELEMETRY`): fail-open, bounded, never on the way to the answer. */
+	private readonly retrievalRecorder: RetrievalRecorder;
+	/** Stops the hourly retrieval-retention sweep; null while it is not running. */
+	private retrievalSweepStop: (() => void) | null = null;
+	/** Re-rank shadow runs since this process started, and the corpus positions they would have moved. */
+	private readonly shadowCounts = { searches: 0, moved: 0 };
 	/** Railway control-plane client (Phase 45, D45-a); tests inject a recording fetch through `stores.railway`. */
 	readonly railway: RailwayClient;
 	/** Background retains in flight, drained (bounded) on shutdown. */
@@ -1505,6 +1520,8 @@ export class Substrate {
 			lightragFetch?: FetchLike;
 			/** Tests inject the corpus manifest and the LightRAG bulk plane; production builds them from the index and `config.lightrag`. */
 			corpus?: { store?: CorpusStore; plane?: LightragBulkPlane };
+			/** Tests inject the feedback, telemetry and gap tables; production builds them from the index. */
+			reflect?: ReflectStore;
 			planningBaseDir?: string;
 			desktop?: DesktopDriver | null;
 			railway?: RailwayClient;
@@ -1588,6 +1605,13 @@ export class Substrate {
 		this.hindsightFetch = gatedFetch(this.planes.gate("hindsight"), stores?.hindsightFetch ?? fetch, hindsightOp);
 		this.lightragFetch = gatedFetch(this.planes.gate("lightrag"), stores?.lightragFetch ?? fetch, lightragOp);
 		this.corpusSeam = stores?.corpus ?? null;
+		this.reflectSeam = stores?.reflect ?? null;
+		this.authorityIndex = new AuthorityIndex({
+			store: () => (this.config.corpus.enabled ? (this.corpusSeam?.store ?? this.index?.corpusStore() ?? null) : null),
+			reflect: () => this.reflectStore(),
+			now: () => Date.now(),
+		});
+		this.retrievalRecorder = new RetrievalRecorder({ store: () => this.reflectStore(), log: (line) => process.stderr.write(`${line}\n`) });
 		this.cache =
 			stores?.cache ??
 			createReadThroughCache(config, {
@@ -5232,14 +5256,146 @@ export class Substrate {
 		// keeps the cache: a reply cached for its question is served, and a miss runs `load`, which answers from
 		// Hindsight on the cooling path, so LightRAG is not asked.
 		const configured = this.config.docsBackend === "lightrag" ? this.config.lightrag !== null : this.config.ragflow !== null;
-		const chunks = question.trim().length === 0 || !configured || input.probe === true ? await load() : await cached();
+		const served = question.trim().length === 0 || !configured || input.probe === true ? await load() : await cached();
+		// The re-rank reads the answer after the cache, per call, so the stored answer never carries it and a manifest change shows at once.
+		const reflected = await this.reflectAnswer(served);
+		const chunks = reflected.reply;
 		// The context is attached per call, after the chunks: a session's events
 		// belong to that session, so the cached answer never carries them.
 		const answered = input.context === true ? { ...chunks, context: await this.docsContextOf(question, callerSurface, sessionId) } : chunks;
 		// The steering notice is per call like the context: it names the calling session's queued directives, so it is attached
 		// after the cache and a reply that carries it is never stored (`searchReplyStorable`).
 		const steering = this.steeringNoticeOf(sessionId);
-		return steering === null ? answered : { ...answered, steering };
+		const final = steering === null ? answered : { ...answered, steering };
+		this.recordRetrieval(surface, question, chunks, reflected.shadow);
+		return final;
+	}
+
+	/**
+	 * The authority re-rank of one answer (v1.7 phase 66). `off` (the default) reads nothing. `shadow` leaves the answer as it
+	 * is and hands back what `on` would have changed, for the telemetry row. `on` annotates the corpus citations the manifest
+	 * holds (`stale`, `superseded_by`) and re-orders them by authority. Fail-open: a degraded answer, an answer that cites no
+	 * corpus document and a manifest that cannot be read in time all come back untouched.
+	 */
+	private async reflectAnswer(reply: SearchReply): Promise<{ reply: SearchReply; shadow: ShadowNote | null }> {
+		const mode = this.config.docsReflect.rerank;
+		if (mode === "off" || reply.degraded === true || !reply.chunks.some((citation) => corpusKeyOf(citation) !== null)) return { reply, shadow: null };
+		const lookup = await this.authorityIndex.lookup();
+		if (lookup === null) return { reply, shadow: null };
+		const reflected = reflectCitations(reply.chunks, lookup, mode);
+		if (reflected.shadow !== undefined) {
+			this.shadowCounts.searches += 1;
+			this.shadowCounts.moved += reflected.shadow.moved;
+			return { reply, shadow: reflected.shadow };
+		}
+		if (reflected.rerank === undefined) return { reply, shadow: null };
+		return { reply: { ...reply, chunks: reflected.chunks, rerank: reflected.rerank }, shadow: null };
+	}
+
+	/** One retrieval row for `SUBSTRATE_DOCS_TELEMETRY=on`, started after the answer is built and never waited for. Fail-open. */
+	private recordRetrieval(surface: Surface, question: string, reply: SearchReply, shadow: ShadowNote | null): void {
+		if (!this.config.docsReflect.telemetry || question.trim().length === 0) return;
+		try {
+			this.retrievalRecorder.record(retrievalRowOf({ surface, question, backend: reply.backend ?? this.config.docsBackend, reply, shadow }));
+		} catch (cause) {
+			process.stderr.write(`[substrate] docs telemetry: retrieval row not built — ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
+		}
+	}
+
+	/** What the telemetry recorder and the re-rank shadow have done since this process started: writes, failures, drops and moved positions. */
+	reflectCounters(): { telemetry: RecorderCounters; shadow: { searches: number; moved: number } } {
+		return { telemetry: this.retrievalRecorder.counters(), shadow: { ...this.shadowCounts } };
+	}
+
+	/** The feedback, telemetry and gap tables, or null when there is no index. */
+	private reflectStore(): ReflectStore | null {
+		return this.reflectSeam ?? this.index?.reflectStore() ?? null;
+	}
+
+	/** The doors of the docs learning loop share the corpus doors' gates and add the learning tables, the gap score and the Hindsight retain. */
+	private reflectDeps(): ReflectServiceDeps {
+		return {
+			...this.corpusDeps(),
+			reflect: this.config.corpus.enabled ? this.reflectStore() : null,
+			gapScore: this.config.docsReflect.gapScore,
+			retainDigest: (input) => this.retainDigest(input),
+		};
+	}
+
+	/**
+	 * Retains one stored digest as a governed `fact` at repo scope under the deterministic subject `corpus-digest:<repo>`: the
+	 * Hindsight document id of a subject-addressed entry is its claim identity, so the next digest replaces this one. Through
+	 * the governance gate like every memory write; a refusal or an outage is a closed reason, never a throw.
+	 */
+	private async retainDigest(input: { repo: string; text: string; surface: Surface; sessionId: string }): Promise<RetainOutcome> {
+		try {
+			const result = await this.writeMemory({
+				scope: `repo:${input.repo}`,
+				kind: "fact",
+				text: input.text,
+				writer: input.surface,
+				subject: `${DIGEST_KEY_PREFIX}${input.repo}`,
+				repo: input.repo,
+				session_id: input.sessionId,
+				ttl: "30d",
+			});
+			if (result.outcome !== "accepted") return { ok: false, reason: result.reason };
+			if (!result.verified_persisted) return { ok: false, reason: "not-verified" };
+			return hindsightFromEnv() === null ? { ok: false, reason: "not-configured" } : { ok: true };
+		} catch {
+			return { ok: false, reason: "memory-write-failed" };
+		}
+	}
+
+	/** `POST /docs/feedback` and the `docs_feedback` tool. */
+	async docsFeedback(raw: unknown, callerSurface: Surface | null): Promise<ReflectReply<FeedbackStored>> {
+		const reply = await docsFeedbackReply(this.reflectDeps(), raw, callerSurface);
+		if (reply.ok) this.authorityIndex.invalidateFeedback();
+		return reply;
+	}
+
+	/** `POST /corpus/reflect`. A run that stored a digest invalidates every cached `docs_search` answer, as an ingest does. */
+	async corpusReflect(raw: unknown, callerSurface: Surface | null): Promise<ReflectReply<CorpusReflectResponse>> {
+		const reply = await corpusReflectReply(this.reflectDeps(), raw, callerSurface);
+		if (reply.ok && reply.body.results.some((result) => result.status === "stored")) {
+			this.authorityIndex.invalidate();
+			await this.cache.bump(DOCS_GENERATION_KEY);
+		}
+		return reply;
+	}
+
+	/** `GET /corpus/gaps`: the queries the corpus could not answer well. `limit` is the query string's raw value. */
+	corpusGaps(rawLimit: string | null, callerSurface: Surface | null): Promise<ReflectReply<CorpusGapsResponse>> {
+		return corpusGapsReply(this.reflectDeps(), rawLimit, callerSurface);
+	}
+
+	/**
+	 * The retrieval-retention sweep: one pass now and one every hour, unref'd so it never holds the process open. Runs only while
+	 * `SUBSTRATE_DOCS_TELEMETRY=on`, so a server with the flag off issues no statement for it. Idempotent.
+	 */
+	startRetrievalSweep(): void {
+		if (this.retrievalSweepStop !== null || !this.config.docsReflect.telemetry) return;
+		const handle = setInterval(() => void this.sweepRetrievals(), RETRIEVAL_SWEEP_INTERVAL_MS);
+		handle.unref();
+		this.retrievalSweepStop = () => clearInterval(handle);
+		void this.sweepRetrievals();
+	}
+
+	stopRetrievalSweep(): void {
+		this.retrievalSweepStop?.();
+		this.retrievalSweepStop = null;
+	}
+
+	/** One bounded retention pass: at most {@link RETRIEVAL_SWEEP_BATCH} rows older than the retention. Fail-open; returns how many rows it deleted. */
+	async sweepRetrievals(): Promise<number> {
+		const store = this.reflectStore();
+		if (store === null) return 0;
+		try {
+			return await store.sweepRetrievals(this.config.docsReflect.retentionDays, RETRIEVAL_SWEEP_BATCH);
+		} catch (cause) {
+			process.stderr.write(`[substrate] docs telemetry: retention sweep failed — ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
+			return 0;
+		}
 	}
 
 	/**
@@ -5422,6 +5578,8 @@ export class Substrate {
 	/** `POST /corpus/ingest` and the `corpus_ingest` tool. A run that stored or removed anything invalidates every cached `docs_search` answer, as `docs_ingest` does. */
 	async corpusIngest(raw: unknown, callerSurface: Surface | null): Promise<CorpusReply<CorpusIngestResponse>> {
 		const reply = await corpusIngestReply(this.corpusDeps(), raw, callerSurface);
+		// An `updated` row (a changed marker, tier or kind) changes supersession and authority but not the plane, so it drops the index only.
+		if (reply.ok && reply.body.counts.ingested + reply.body.counts.updated + reply.body.counts.tombstoned > 0) this.authorityIndex.invalidate();
 		if (reply.ok && reply.body.counts.ingested + reply.body.counts.tombstoned > 0) await this.cache.bump(DOCS_GENERATION_KEY);
 		return reply;
 	}

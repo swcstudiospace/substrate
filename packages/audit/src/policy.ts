@@ -118,6 +118,9 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	"session_checkpoint",
 	// v1.7 (phase 63): the corpus manifest status and plan are reads of the index, like `planning_status`.
 	"corpus_status",
+	// v1.7 (phase 66): a verdict on a cited document is advisory input to the re-rank, the nearest write to `session_checkpoint`:
+	// an unwritable audit file must not fail the agent's turn over it, so the record is fail-open.
+	"docs_feedback",
 ]);
 
 /**

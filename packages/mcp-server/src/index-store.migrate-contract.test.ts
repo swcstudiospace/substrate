@@ -59,6 +59,8 @@ export const REAL_ALLOWLISTS: ContractAllowlists = {
 		skills_registry: "step 17 predates the archive's closed table list and is not part of it; archiving it is a separate change",
 		planning_steering_audit: "step 33 is an opt-in (steering-audit), append-only steering audit table; it is not part of the archive's closed table list and archiving it is a separate change",
 		corpus_documents: "step 35 is the corpus manifest, rebuilt by re-running the corpus scan and ingest; it is not part of the archive's closed table list and archiving it is a separate change",
+		corpus_retrievals: "step 36 is the retrieval telemetry, written only under SUBSTRATE_DOCS_TELEMETRY: a bounded, redacted log that the retention sweep ages out; it is not part of the archive's closed table list, and adding it would change the schema hash that every earlier archive was verified against",
+		corpus_feedback: "step 36 holds the readers' verdicts on corpus documents; it is not part of the archive's closed table list (adding a table changes the schema hash every earlier archive was verified against) and a lost verdict only costs the re-rank some evidence it collects again",
 	},
 };
 

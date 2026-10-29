@@ -49,6 +49,21 @@ describe("scanGreptileExport", () => {
 		expect(readFileSync(location, "utf8")).toBe("# store\n");
 	});
 
+	test("sets supersededBy from a front-matter marker and leaves an invalid one out", async () => {
+		const root = fixture({
+			"Acme/Alpha/old.md": "---\nsuperseded-by: new.md\n---\n# old\n",
+			"Acme/Alpha/new.md": "# new\n",
+			"Acme/Alpha/bad.md": "---\nsuperseded-by: ../up.md\n---\n# bad\n",
+		});
+		const result = await scanGreptileExport(root);
+		expect(Object.fromEntries(result.entries.map((entry) => [entry.path, entry.supersededBy]))).toEqual({
+			"old.md": "new.md",
+			"new.md": undefined,
+			"bad.md": undefined,
+		});
+		expect(result.skipped).toEqual([]);
+	});
+
 	test("applies the size, symlink, empty, binary and UTF-8 rules", async () => {
 		const root = fixture({
 			"o/r/ok.md": "fine\n",
