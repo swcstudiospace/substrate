@@ -48,6 +48,10 @@ Nothing in the suite needs GreptimeDB; the real-store proofs are the rehearsal s
 
 A CLI entrypoint may call `process.exit`. A file counts as one when it has a shebang, uses `import.meta.main`, is named `*-run.ts`, `index.ts` or `main.ts`, lives under `scripts/`, or carries a `// ratchet-entrypoint` line comment (put it above the guard that makes the file run).
 
+### Docs lint
+
+`scripts/docs-lint.ts` checks the documents and `bun test` runs it through `scripts/docs-lint.test.ts`, so the CI commands do not change. Two rules apply: every relative markdown link in `docs/`, `.planning/` (archives included), `README.md`, `CONTRIBUTING.md`, `AGENTS.md` and `SECURITY.md` must resolve to a file, and every page under `docs/`, every live `.planning/*.md` file and every file under `.planning/phases/` must have a level-1 title. Archived plans under `.planning/milestones/` are exempt from the title rule only. Anchors, absolute paths, URLs, fenced code blocks and inline code are not checked as links; to show an illustrative link without breaking the lint, put it in inline code. Run it alone with `bun test scripts/docs-lint.test.ts`; a failure names the file and the target or title.
+
 ## CI
 
 | Job | Runner | When | Steps |

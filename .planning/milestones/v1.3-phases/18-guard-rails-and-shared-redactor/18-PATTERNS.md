@@ -496,7 +496,7 @@ Required sections (CONTEXT §Docs):
 
 | File | Anchor (current text) | Change |
 |---|---|---|
-| `docs/greptime-ledger.md:154-156` | "The patterns are in `redact.ts`, ported from `grok-hermes-connector`'s `redactor.py`. There is no second chance once a row is in an append-only log." | Append: the named rules and D-04 classes are listed in [`redaction.md`](redaction.md). |
+| `docs/greptime-ledger.md:154-156` | "The patterns are in `redact.ts`, ported from `grok-hermes-connector`'s `redactor.py`. There is no second chance once a row is in an append-only log." | Append: the named rules and D-04 classes are listed in ``[`redaction.md`](redaction.md)``. |
 | `docs/memory-governance.md:124` / `:133-134` | `` | `secret` | the write-path redactor changed the text | **no** | `` / "A secret is the one class no token releases…" | Pointer to `redaction.md`, plus one sentence: `<private>` blocks and D-04 shapes now quarantine as `secret`. |
 | `docs/observability.md:115-120` | "> **A bug this surfaced.** `redactValue`'s sensitive-key rule matched the substring `token`…" | Pointer to the counter-exemption section of `redaction.md`. |
 | `docs/mcp-audit.md:162-164` (optional) | "The redactor is **injected** rather than imported — it lives in `packages/mcp-server`, which depends on this package." | Pointer to the lock's seam rule. |
