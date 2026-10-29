@@ -658,7 +658,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 							"a match answers `not_modified: true` and no text",
 					),
 				profile: z.string().optional().describe("full | compact. Unknown values are refused, never coerced; full is always honoured, compact only while the substrate enforces profiles."),
-				session_id: z.string().optional().describe("your own session id. With SUBSTRATE_BRIEF_SESSIONS on it adds your pending steering directives and leaves your own session out of the sessions section; otherwise it changes nothing."),
+				session_id: z.string().optional().describe("your own session id. With SUBSTRATE_BRIEF_SESSIONS on it adds your pending steering directives and leaves your own session out of the sessions section; with SUBSTRATE_WORKTREE_REGISTRY on and `repo` named it adds the worktrees of other sessions that touch files your own worktree touches; otherwise it changes nothing."),
 			},
 			outputSchema: {
 				etag: z.string().describe('weak validator of the brief text, W/"<32 hex>"'),

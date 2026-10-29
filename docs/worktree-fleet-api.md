@@ -38,7 +38,9 @@ JSON, `Content-Type: application/json`, at most **1,000,000 bytes**. The caller 
       "primary": false,
       "pr_state": "open",
       "session_id": "sess-1",
-      "graph_id": "graph-1"
+      "graph_id": "graph-1",
+      "files": ["docs/worktree-fleet.md", "packages/fleet/src/report.ts"],
+      "files_truncated": false
     }
   ]
 }
@@ -61,9 +63,13 @@ Every member is checked; nothing the body carries beyond these members is stored
 | `last_commit_at` | ISO 8601 with an offset, or `null` |
 | `size_bytes` | a non-negative integer, or `null` when the reporter did not measure |
 | `pr_state` | `open`, `merged`, `closed`, `none` or `unknown` |
-| `session_id`, `graph_id` | optional; when present a string of 1 to 255 characters with no control character |
+| `session_id`, `graph_id` | optional; when present a string of 1 to 255 characters with no control character. The CLI sets `session_id` from the server's live claim on the worktree's graph (one holder session) or from `scan --report --session ID` ([worktree-fleet.md](worktree-fleet.md#which-session-a-worktree-belongs-to)). A report that omits `session_id` stores none (NULL): the newest report wins, so a worktree handed to another session never keeps the old attribution |
+| `files` | optional: an array of at most **200** repository-relative paths (no leading `/`, 1 to **400** characters, no control character), or `null`. A path that breaks a rule is dropped and the rest of the entry is kept; duplicates collapse and the list is stored sorted. More than 200 entries is refused (`worktrees.invalid`): a reporter sends the first 200 and `files_truncated: true`. **Absent** means the reporter did not say (an older CLI) and **`null`** means it tried and could not list the files (no merge base, a failed git command); both are stored as unknown, and neither is the same as `[]`, which says the worktree touches nothing. The newest report wins: a report without `files` clears what an earlier one stored |
+| `files_truncated` | optional boolean, default `false`; true when the reporter cut the list at 200. Ignored (stored `false`) when `files` is absent or `null` |
 
 The nullable members must be present (as `null`) rather than left out.
+
+`files` feeds the `worktrees` section of `memory_brief` (see [live-steering.md](live-steering.md)). `GET /worktrees` and `worktree_list` do not return it: a listing of 500 rows would carry up to 100,000 paths. The report's body cap (1,000,000 bytes) is unchanged: one worktree at its largest (200 paths of 400 characters) is under 250 KB encoded, so it always fits a report of its own, and the CLI packs rows into bodies by encoded size.
 
 **Reply, 200:** `{"stored": n, "removed": m}`: `n` is the number of worktrees upserted (the report's length) and `m` the number of rows the retention sweep deleted.
 
@@ -116,7 +122,7 @@ The table is created by migration step `worktrees` (additive, `expand`; see `doc
 
 ## Flags
 
-All five are read by TypeScript; the dispatcher also reads `SUBSTRATE_WORKTREE_MIN_FREE_GB` in Python. `docs/config-reference.md` lists them with the other flags.
+All six are read by TypeScript; the dispatcher also reads `SUBSTRATE_WORKTREE_MIN_FREE_GB` in Python. `docs/config-reference.md` lists them with the other flags.
 
 | Variable | Default | Read by | Meaning |
 | --- | --- | --- | --- |
@@ -125,6 +131,7 @@ All five are read by TypeScript; the dispatcher also reads `SUBSTRATE_WORKTREE_M
 | `SUBSTRATE_WORKTREE_ROOTS` | none | the CLI, the collector, the fleet package, the doctor | colon-separated absolute directories that hold worktrees. Unset: the CLI and the doctor assume no location; the collector's graph attribution falls back to `/var/lib/substrate/worktrees`; the dispatcher does not read it and always uses that directory |
 | `SUBSTRATE_WORKTREE_MIN_FREE_GB` | `5` | the CLI, the fleet package, the dispatcher | the free-disk floor for creating a worktree |
 | `SUBSTRATE_WORKTREE_IDLE_DAYS` | `14` | the server, the CLI, the fleet package | how long a worktree must be untouched before prune may call it safe, and when a listing calls it `stale` |
+| `SUBSTRATE_SESSION_ID` | none | the CLI, the fleet package | the session `substrate worktree scan --report` attributes the worktree holding the current directory to when `--session ID` is absent (the flag wins; a value that is not a session id is a usage error) |
 
 ## Turning it on
 

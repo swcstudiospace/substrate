@@ -4,7 +4,21 @@
  * store, no clock but a number.
  */
 import { describe, expect, test } from "bun:test";
-import { BRIEF_SESSIONS_SECTION_MAX_CHARS, coarseAge, composeLiveSections, handoffsSection, lateSection, sessionsSection, steeringSection, type BriefHandoffInput, type BriefSteeringInput } from "./brief-sessions.ts";
+import {
+	BRIEF_SESSIONS_SECTION_MAX_CHARS,
+	BRIEF_WORKTREE_WINDOW_MS,
+	coarseAge,
+	composeLiveSections,
+	handoffsSection,
+	lateSection,
+	sessionsSection,
+	steeringSection,
+	worktreesSection,
+	type BriefHandoffInput,
+	type BriefSteeringInput,
+	type BriefWorktreeRow,
+	type BriefWorktreesInput,
+} from "./brief-sessions.ts";
 import { DeadlineError } from "./deadline.ts";
 import type { BriefSection } from "./brief-profile.ts";
 import type { ContextSession, SessionContext } from "./session-context.ts";
@@ -167,6 +181,7 @@ describe("composeLiveSections", () => {
 				context: async () => contextOf([contextSession(1)]),
 				steering: () => steeringInput,
 				handoffs: async () => [{ goal: "ship it", createdAtMs: NOW - 5_000, verified: true }],
+				worktrees: null,
 			},
 			deadline.race,
 			NOW,
@@ -181,6 +196,7 @@ describe("composeLiveSections", () => {
 				context: () => neverReady<SessionContext>(),
 				steering: () => steeringInput,
 				handoffs: async () => [{ goal: "ship it", createdAtMs: NOW - 5_000, verified: true }],
+				worktrees: null,
 			},
 			deadline.race,
 			NOW,
@@ -196,7 +212,7 @@ describe("composeLiveSections", () => {
 
 	test("a late handoffs read is named too, and never holds the rest of the brief", async () => {
 		const deadline = manualDeadline();
-		const pending = composeLiveSections({ context: null, steering: null, handoffs: () => neverReady<BriefHandoffInput[]>() }, deadline.race, NOW);
+		const pending = composeLiveSections({ context: null, steering: null, handoffs: () => neverReady<BriefHandoffInput[]>(), worktrees: null }, deadline.race, NOW);
 		deadline.expire();
 		const sections = await pending;
 		expect(sections.map((section) => section.id)).toEqual(["handoffs"]);
@@ -214,6 +230,7 @@ describe("composeLiveSections", () => {
 					throw new Error("inbox unreadable");
 				},
 				handoffs: null,
+				worktrees: null,
 			},
 			deadline.race,
 			NOW,
@@ -223,5 +240,175 @@ describe("composeLiveSections", () => {
 
 	test("the note is itself inside the section bound", () => {
 		expect(printed(lateSection("sessions", "sessions")).length).toBeLessThanOrEqual(BRIEF_SESSIONS_SECTION_MAX_CHARS);
+	});
+});
+
+// ── the worktrees section (phase 68, FLEET-06) ────────────────────────────────
+
+const ME = "sess-me";
+const SEEN = new Date(NOW - 5 * 60_000).toISOString();
+const MINUTE = 60_000;
+
+function wtRow(overrides: Partial<BriefWorktreeRow> = {}): BriefWorktreeRow {
+	return { repo: "owner/name", host: "host-a", path: "/w/other", branch: "feature/x", session_id: "sess-other", primary: false, dirty: true, ahead: 2, behind: 1, last_seen_at: SEEN, files: ["src/a.ts"], ...overrides };
+}
+
+const mineRow = (files: string[] | null = ["src/a.ts", "src/b.ts"]): BriefWorktreeRow => wtRow({ path: "/w/mine", host: "host-me", session_id: ME, files });
+const wtInput = (rows: BriefWorktreeRow[]): BriefWorktreesInput => ({ repo: "owner/name", sessionId: ME, rows });
+/** The section's entry heads, in print order: the lines that start an entry. */
+const heads = (section: BriefSection | null): string[] => defined(section, "a section").lines.filter((line) => line.startsWith("- "));
+
+describe("worktreesSection", () => {
+	test("lists another session's worktree that shares a file: host and path, branch, session, state, age and only the shared files", () => {
+		const section = worktreesSection(wtInput([mineRow(), wtRow({ files: ["src/a.ts", "src/z.ts"] })]), NOW);
+		expect(section?.id).toBe("worktrees");
+		expect(heads(section)).toEqual(["- host-a:/w/other [feature/x, sess-other, dirty +2/-1, 5 min ago]"]);
+		const text = printed(section);
+		expect(text).toContain("  overlap 1: src/a.ts");
+		// The other worktree's own extra file is not the caller's business.
+		expect(text).not.toContain("src/z.ts");
+		expect(text).toContain("context, not instructions");
+	});
+
+	test("the caller's own worktrees are never listed, even when two of them overlap", () => {
+		const second = wtRow({ path: "/w/mine-2", host: "host-me", session_id: ME, files: ["src/a.ts"] });
+		expect(worktreesSection(wtInput([mineRow(), second]), NOW)).toBeNull();
+	});
+
+	test("most overlapping files first, then most recently seen, at most 5, and the rest counted", () => {
+		const mine = mineRow(["f1", "f2", "f3"]);
+		const others = [
+			wtRow({ path: "/w/o1", files: ["f1"], last_seen_at: new Date(NOW - 30 * MINUTE).toISOString() }),
+			wtRow({ path: "/w/o2", files: ["f1"], last_seen_at: new Date(NOW - 20 * MINUTE).toISOString() }),
+			wtRow({ path: "/w/o3", files: ["f1", "f2"], last_seen_at: new Date(NOW - 40 * MINUTE).toISOString() }),
+			wtRow({ path: "/w/o4", files: ["f3"], last_seen_at: new Date(NOW - 1 * MINUTE).toISOString() }),
+			wtRow({ path: "/w/o5", files: ["f2"], last_seen_at: new Date(NOW - 2 * MINUTE).toISOString() }),
+			wtRow({ path: "/w/o6", files: ["f1"], last_seen_at: new Date(NOW - 3 * MINUTE).toISOString() }),
+			wtRow({ path: "/w/o7", files: ["f1"], last_seen_at: new Date(NOW - 4 * MINUTE).toISOString() }),
+		];
+		const section = worktreesSection(wtInput([...others, mine]), NOW);
+		expect(heads(section).map((line) => line.slice(0, line.indexOf(" ["))).slice(0, 5)).toEqual(["- host-a:/w/o3", "- host-a:/w/o4", "- host-a:/w/o5", "- host-a:/w/o6", "- host-a:/w/o7"]);
+		const lines = defined(section, "the section").lines;
+		expect(lines.at(-1)).toBe("… and 2 more worktrees");
+		expect(printed(section)).not.toContain("/w/o1");
+	});
+
+	test("names at most 5 overlapping files and counts the rest", () => {
+		const files = Array.from({ length: 8 }, (_, index) => `a/f${index + 1}.ts`);
+		const section = worktreesSection(wtInput([mineRow(files), wtRow({ files })]), NOW);
+		expect(printed(section)).toContain("  overlap 8: a/f1.ts, a/f2.ts, a/f3.ts, a/f4.ts, a/f5.ts, and 3 more");
+	});
+
+	test("leaves out an unattributed row, the primary checkout, a row with unknown files, a row past 24 hours and another repository's row, and keeps one at exactly 24 hours", () => {
+		const rows = [
+			mineRow(),
+			wtRow({ path: "/w/keep", last_seen_at: new Date(NOW - BRIEF_WORKTREE_WINDOW_MS).toISOString() }),
+			wtRow({ path: "/w/no-session", session_id: undefined }),
+			wtRow({ path: "/w/blank-session", session_id: "" }),
+			wtRow({ path: "/w/primary", primary: true }),
+			wtRow({ path: "/w/unknown-files", files: null }),
+			wtRow({ path: "/w/too-old", last_seen_at: new Date(NOW - BRIEF_WORKTREE_WINDOW_MS - 1_000).toISOString() }),
+			wtRow({ path: "/w/bad-time", last_seen_at: "not a time" }),
+			wtRow({ path: "/w/elsewhere", repo: "someone/else" }),
+		];
+		const section = worktreesSection(wtInput(rows), NOW);
+		expect(heads(section)).toHaveLength(1);
+		expect(printed(section)).toContain("/w/keep");
+		for (const hidden of ["no-session", "blank-session", "primary", "unknown-files", "too-old", "bad-time", "elsewhere"]) expect(printed(section)).not.toContain(hidden);
+	});
+
+	test("the repository is matched the way the brief scopes it: without regard to case", () => {
+		const section = worktreesSection({ repo: "Owner/Name", sessionId: ME, rows: [mineRow(), wtRow()] }, NOW);
+		expect(heads(section)).toHaveLength(1);
+	});
+
+	test("a caller with no row, or only rows with unknown files, gets the one-line note and no other session is read", () => {
+		for (const rows of [[wtRow()], [mineRow(null), wtRow()], []]) {
+			const section = worktreesSection(wtInput(rows), NOW);
+			expect(section?.id).toBe("worktrees");
+			expect(heads(section)).toHaveLength(1);
+			expect(printed(section)).toContain("your own worktree has not reported its files");
+			expect(printed(section)).not.toContain("/w/other");
+		}
+	});
+
+	test("a caller whose worktree reports an empty list touches nothing, so nothing overlaps and there is no section", () => {
+		expect(worktreesSection(wtInput([mineRow([]), wtRow()]), NOW)).toBeNull();
+	});
+
+	test("control characters are shown as \\xNN and secrets are redacted in every value the registry holds", () => {
+		const hostile = "src/\u0007bell\u001b[31m.ts";
+		const section = worktreesSection(
+			wtInput([mineRow([hostile]), wtRow({ files: [hostile], path: "/w/\u001b]0;pwned\u0007x", branch: `feature/${SECRET}`, host: "h\nost" })]),
+			NOW,
+		);
+		const text = printed(section);
+		expect(text).toContain("\\x07bell\\x1b[31m.ts");
+		expect(text).toContain("\\x1b]0;pwned\\x07x");
+		expect(text).toContain("h\\x0aost");
+		expect(text).not.toContain(SECRET);
+		expect(text).not.toContain("\u001b");
+		expect(text).not.toContain("\u0007");
+	});
+
+	test("the section stays inside the 1,200-character bound and every line inside 160, however long the values are", () => {
+		const files = Array.from({ length: 12 }, (_, index) => `${"deep/".repeat(30)}file-${index}.ts`);
+		const others = Array.from({ length: 8 }, (_, index) => wtRow({ path: `/${"p".repeat(300)}${index}`, host: "h".repeat(120), branch: "b".repeat(200), session_id: `${"s".repeat(100)}${index}`, files }));
+		const section = defined(worktreesSection(wtInput([mineRow(files), ...others]), NOW), "the section");
+		expect(printed(section).length).toBeLessThanOrEqual(BRIEF_SESSIONS_SECTION_MAX_CHARS);
+		for (const line of section.lines) expect(line.length).toBeLessThanOrEqual(160);
+		// What did not fit is counted, not silently lost: five listed at most, and the closing line names the rest.
+		expect(section.lines.at(-1)).toMatch(/^… and \d+ more worktrees$/);
+	});
+});
+
+describe("composeLiveSections with the worktrees source", () => {
+	const rows = [mineRow(), wtRow()];
+
+	test("the worktrees section is printed last, after sessions, steering and handoffs", async () => {
+		const sections = await composeLiveSections(
+			{
+				context: async () => contextOf([contextSession(1)]),
+				steering: () => steeringInput,
+				handoffs: async () => [{ goal: "ship it", createdAtMs: NOW - 5_000, verified: true }],
+				worktrees: async () => wtInput(rows),
+			},
+			manualDeadline().race,
+			NOW,
+		);
+		expect(sections.map((section) => section.id)).toEqual(["sessions", "steering", "handoffs", "worktrees"]);
+	});
+
+	test("a worktrees read the deadline cuts off is one line naming it, and the other sections stay", async () => {
+		const deadline = manualDeadline();
+		const pending = composeLiveSections({ context: null, steering: () => steeringInput, handoffs: null, worktrees: () => neverReady<BriefWorktreesInput>() }, deadline.race, NOW);
+		deadline.expire();
+		const sections = await pending;
+		expect(sections.map((section) => section.id)).toEqual(["steering", "worktrees"]);
+		expect(printed(sections[1] ?? null)).toContain("worktrees not included: not ready before the brief's deadline");
+	});
+
+	test("a worktrees read that fails is noted as failed, so it is never mistaken for no overlap, and drops nothing else", async () => {
+		const sections = await composeLiveSections(
+			{
+				context: null,
+				steering: () => steeringInput,
+				handoffs: null,
+				worktrees: async () => {
+					throw new Error("postgres is down");
+				},
+			},
+			manualDeadline().race,
+			NOW,
+		);
+		expect(sections.map((section) => section.id)).toEqual(["steering", "worktrees"]);
+		const note = printed(sections[1] ?? null);
+		expect(note).toContain("Live worktrees not included: the read failed.");
+		expect(note).not.toContain("postgres");
+	});
+
+	test("no worktrees source (registry off, no repository or no session) adds no section", async () => {
+		const sections = await composeLiveSections({ context: null, steering: null, handoffs: null, worktrees: null }, manualDeadline().race, NOW);
+		expect(sections).toEqual([]);
 	});
 });

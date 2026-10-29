@@ -238,6 +238,25 @@ describe("an accepted report", () => {
 		expect(JSON.stringify(note)).not.toContain("/work/");
 	});
 
+	test("carries the changed files: stored sorted with a hostile path dropped, never returned by the listing, and more than 200 paths is a 400 that stores nothing", async () => {
+		const harness = await start(ON);
+		const reply = await post(harness, "tok-agent", body([worktree({ session_id: "sess-9", files: ["b.ts", "a.ts", "bad\nname.ts"], files_truncated: false }), worktree({ path: "/work/b", files: null })]));
+		expect(reply).toEqual({ status: 200, json: { stored: 2, removed: 0 } });
+
+		const rows = await harness.store.candidates({ repo: "swcstudiospace/agent-substrate", limit: 10 });
+		expect(rows.map((row) => [row.path, row.files])).toEqual([
+			["/work/a", ["a.ts", "b.ts"]],
+			["/work/b", null],
+		]);
+		const listed = (await list(harness)).json.worktrees as Array<Record<string, unknown>>;
+		expect(listed.some((row) => "files" in row)).toBe(false);
+
+		const tooMany = await post(harness, "tok-agent", body([worktree({ files: Array.from({ length: 201 }, (_, index) => `f${index}.ts`) })]));
+		expect(tooMany.status).toBe(400);
+		expect(tooMany.json).toMatchObject({ error: "worktrees.invalid" });
+		expect(harness.store.reports).toBe(1);
+	});
+
 	test("reads back through GET /worktrees with the host and the first and last seen stamps", async () => {
 		const harness = await start(ON);
 		await post(harness, "tok-agent", body([worktree({ session_id: "sess-9", graph_id: "graph-9" }), worktree({ path: "/work/b", dirty: true, pr_state: "merged" })]));

@@ -5,6 +5,10 @@
  * exit codes: 0 done, 1 failed (a removal, a report or a creation did not happen), 2 usage or no
  * worktree root configured. Roots come from `--root` or `SUBSTRATE_WORKTREE_ROOTS`; nothing is assumed.
  *
+ * `scan --report` attributes worktrees to sessions from two sources: the server's live claims (one holder
+ * session across every live claim of a graph worktree) and `--session ID` / `SUBSTRATE_SESSION_ID`, which names
+ * the session that owns the worktree holding the current directory and wins over a claim for that worktree.
+ *
  * `prune` is a dry run until `--execute`. With it, only worktrees classified `safe` are removed, each
  * with a plain `git worktree remove` (never `--force`), after the worktree's identity (head, branch) is
  * reloaded from git, it is inspected and classified again, and the server is asked once more for live graph
@@ -14,11 +18,14 @@
  * (fail-open: a note that was not recorded is said so on stderr, and `--json` carries its delivery result).
  */
 import { realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, sep } from "node:path";
 import { graphIdForWorktree } from "../../../collectors/src/worktree-graph.ts";
+import { SESSION_ID_PATTERN } from "../steer/client.ts";
 import {
 	assertDiskFloor,
 	buildReports,
+	CLAIM_CONCURRENCY,
+	claimedSessions,
 	classifyForPrune,
 	type ClaimsFn,
 	type ClaimStatus,
@@ -46,6 +53,7 @@ import {
 	type PruneContext,
 	reloadWorktree,
 	resolveDefaultRef,
+	sessionIdFromEnv,
 	type TreeLinks,
 	type WorktreeInfo,
 	type WorktreeReport,
@@ -57,7 +65,7 @@ import { parseWorktreeArgs, type WorktreeArgs } from "./args.ts";
 
 export const WORKTREE_USAGE =
 	"usage: substrate worktree list|status [--root DIR]... [--repo R] [--json]\n" +
-	"       substrate worktree scan [--root DIR]... [--report] [--json]\n" +
+	"       substrate worktree scan [--root DIR]... [--report [--session ID]] [--json]\n" +
 	"       substrate worktree prune [--root DIR]... [--idle-days N] [--execute] [--json]\n" +
 	"       substrate worktree conflicts [--repo R | --root DIR...] [--json]\n" +
 	"       substrate worktree provision --repo DIR --branch B [--base REF] [--path DIR] [--json]\n" +
@@ -86,8 +94,6 @@ export interface WorktreeDeps {
 const GIB = 1024 ** 3;
 const NO_ROOT = "no worktree root is configured: set SUBSTRATE_WORKTREE_ROOTS (colon separated) or pass --root DIR\n";
 const CLASS_ORDER: readonly PruneClass[] = ["safe", "review", "never"];
-/** Claim lookups in flight at once. */
-const CLAIM_CONCURRENCY = 4;
 /** Link walks (for the freed-space estimate) in flight at once. */
 const LINK_WALK_CONCURRENCY = 2;
 
@@ -151,11 +157,12 @@ function describe(info: WorktreeInfo): string {
 	return parts.join(" ");
 }
 
-async function gather(args: WorktreeArgs, deps: WorktreeDeps, rootList: string[], options: { pr: boolean; measure: boolean; ignored: boolean }): Promise<{ worktrees: WorktreeInfo[]; notes: string[]; repos: number }> {
+async function gather(args: WorktreeArgs, deps: WorktreeDeps, rootList: string[], options: { pr: boolean; measure: boolean; ignored: boolean; files?: boolean }): Promise<{ worktrees: WorktreeInfo[]; notes: string[]; repos: number }> {
 	const inventory = await collectInventory(rootList, {
 		git: deps.git,
 		measure: options.measure,
 		ignored: options.ignored,
+		...(options.files === true ? { files: true } : {}),
 		...(options.pr ? { pr: createPrShared(deps.gh) } : {}),
 	});
 	return { worktrees: inventory.worktrees.filter((info) => matchesRepo(info, args.repo, deps.cwd)), notes: inventory.notes, repos: inventory.repos.length };
@@ -186,16 +193,58 @@ async function commandList(args: WorktreeArgs, deps: WorktreeDeps): Promise<numb
 
 // ── scan ────────────────────────────────────────────────────────────────────
 
+/** Why `--session` (or `SUBSTRATE_SESSION_ID`) is refused: the grammar is the server's, so a bad id could never match a brief. */
+const SESSION_ID_HELP = "a session id (letters, digits, . _ : -; at most 128 characters)";
+
+type SessionChoice = { ok: true; id: string | null } | { ok: false; message: string };
+
+/** The session this scan attributes its own worktree to: `--session`, else `SUBSTRATE_SESSION_ID`; only a report carries one. */
+function scanSession(args: WorktreeArgs, deps: WorktreeDeps): SessionChoice {
+	if (!args.report) {
+		return args.session === undefined ? { ok: true, id: null } : { ok: false, message: "--session attributes a report: use it with --report\n" };
+	}
+	if (args.session !== undefined) {
+		return SESSION_ID_PATTERN.test(args.session) ? { ok: true, id: args.session } : { ok: false, message: `--session must be ${SESSION_ID_HELP}\n` };
+	}
+	const fromEnv = sessionIdFromEnv(deps.env);
+	if (fromEnv === null) return { ok: true, id: null };
+	return SESSION_ID_PATTERN.test(fromEnv) ? { ok: true, id: fromEnv } : { ok: false, message: `SUBSTRATE_SESSION_ID must be ${SESSION_ID_HELP}\n` };
+}
+
+/** The path of the worktree that holds `cwd`: the entry whose real path is the deepest prefix of the real path of `cwd`. */
+function containingWorktree(worktrees: readonly WorktreeInfo[], cwd: string): string | null {
+	const here = realPath(cwd);
+	let best: { path: string; length: number } | null = null;
+	for (const info of worktrees) {
+		const real = realPath(info.path);
+		const inside = here === real || here.startsWith(real.endsWith(sep) ? real : `${real}${sep}`);
+		if (inside && (best === null || real.length > best.length)) best = { path: info.path, length: real.length };
+	}
+	return best === null ? null : best.path;
+}
+
 async function commandScan(args: WorktreeArgs, deps: WorktreeDeps): Promise<number> {
+	const session = scanSession(args, deps);
+	if (!session.ok) return usageError(deps, session.message);
 	const rootList = roots(args, deps);
 	if (rootList.length === 0) return usageError(deps, NO_ROOT);
-	const inventory = await gather(args, deps, rootList, { pr: true, measure: true, ignored: false });
+	// The changed-file lists are for the registry only, so a scan that does not report skips their two git calls per worktree.
+	const inventory = await gather(args, deps, rootList, { pr: true, measure: true, ignored: false, files: args.report });
 	printNotes(inventory.notes, deps);
 	let stored = 0;
+	let attributed = 0;
 	let failure: string | null = null;
 	let skipped: Array<{ path: string; reason: string }> = [];
 	if (args.report) {
-		const plan = buildReports(deps.host, inventory.worktrees, { now: deps.now(), roots: rootList });
+		// The server's live claims first, then the session this scan runs in: an explicit id beats a claim-derived one for its worktree.
+		const sessions = await claimedSessions(inventory.worktrees, rootList, deps.claims);
+		if (session.id !== null) {
+			const own = containingWorktree(inventory.worktrees, deps.cwd);
+			if (own === null) deps.err(`warning: the current directory is inside none of the scanned worktrees, so session ${session.id} is attributed to no worktree\n`);
+			else sessions.set(own, session.id);
+		}
+		attributed = sessions.size;
+		const plan = buildReports(deps.host, inventory.worktrees, { now: deps.now(), roots: rootList, sessions });
 		skipped = plan.skipped;
 		for (const report of plan.reports) {
 			const outcome = await deps.postReport(report);
@@ -209,10 +258,10 @@ async function commandScan(args: WorktreeArgs, deps: WorktreeDeps): Promise<numb
 	// A row too large for any body is left out of the report and named, so the rest of the fleet still gets reported.
 	for (const item of skipped) deps.err(`not reported: ${item.path}: ${item.reason}\n`);
 	if (args.json) {
-		deps.out(`${JSON.stringify({ repositories: inventory.repos, worktrees: inventory.worktrees.length, ...(args.report ? { reported: failure === null && skipped.length === 0, stored, skipped } : {}) })}\n`);
+		deps.out(`${JSON.stringify({ repositories: inventory.repos, worktrees: inventory.worktrees.length, ...(args.report ? { reported: failure === null && skipped.length === 0, stored, attributed, skipped } : {}) })}\n`);
 	} else {
 		deps.out(`scanned ${inventory.worktrees.length} worktrees in ${inventory.repos} repositories\n`);
-		if (args.report && failure === null) deps.out(`reported to the registry: ${stored} stored${skipped.length > 0 ? `, ${skipped.length} not reported` : ""}\n`);
+		if (args.report && failure === null) deps.out(`reported to the registry: ${stored} stored${skipped.length > 0 ? `, ${skipped.length} not reported` : ""}${attributed > 0 ? `, ${attributed} attributed to a session` : ""}\n`);
 	}
 	if (failure !== null) {
 		deps.err(`report failed: ${failure}\n`);
@@ -376,16 +425,18 @@ async function conflictSearchRoots(args: WorktreeArgs, deps: WorktreeDeps): Prom
 	return roots(args, deps);
 }
 
+/** The real path of `path`: symbolic links resolved when it exists, else the path made absolute. */
+function realPath(path: string): string {
+	try {
+		return realpathSync(path);
+	} catch {
+		return resolve(path);
+	}
+}
+
 /** Whether two paths name one directory, symbolic links resolved when they exist. */
 function sameDirectory(a: string, b: string): boolean {
-	const real = (path: string): string => {
-		try {
-			return realpathSync(path);
-		} catch {
-			return resolve(path);
-		}
-	};
-	return real(a) === real(b);
+	return realPath(a) === realPath(b);
 }
 
 async function commandConflicts(args: WorktreeArgs, deps: WorktreeDeps): Promise<number> {

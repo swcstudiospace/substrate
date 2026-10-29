@@ -1,5 +1,5 @@
 /**
- * The three settings the fleet reads, each as a function of an environment object so a test passes its own.
+ * The settings the fleet reads, each as a function of an environment object so a test passes its own.
  *
  * - `SUBSTRATE_WORKTREE_ROOTS`: colon-separated absolute directories that hold worktrees. Unset (or with no
  *   absolute entry) means "no root configured" for the commands here and for the doctor: they say so and assume
@@ -8,6 +8,7 @@
  * - `SUBSTRATE_WORKTREE_MIN_FREE_GB`: the free-disk floor, shared with the Python dispatcher (default 5).
  *   A value that is not a positive number falls back to the default so a typo never switches the floor off.
  * - `SUBSTRATE_WORKTREE_IDLE_DAYS`: how long a worktree must be untouched before prune may call it safe (default 14).
+ * - `SUBSTRATE_SESSION_ID`: the session id `worktree scan --report` attributes the current directory's worktree to (unset: none).
  */
 import { isAbsolute, resolve } from "node:path";
 
@@ -42,4 +43,13 @@ export function minFreeGbFromEnv(env: EnvLike): number {
 
 export function idleDaysFromEnv(env: EnvLike): number {
 	return positiveNumber(env.SUBSTRATE_WORKTREE_IDLE_DAYS) ?? DEFAULT_IDLE_DAYS;
+}
+
+/**
+ * `SUBSTRATE_SESSION_ID`: the session `substrate worktree scan --report` attributes its own worktree to when
+ * `--session` is absent. Unset or blank is no attribution; whether the text is a valid session id is the caller's check.
+ */
+export function sessionIdFromEnv(env: EnvLike): string | null {
+	const raw = env.SUBSTRATE_SESSION_ID?.trim();
+	return raw === undefined || raw === "" ? null : raw;
 }

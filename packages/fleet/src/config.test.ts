@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_IDLE_DAYS, DEFAULT_MIN_FREE_GB, idleDaysFromEnv, minFreeGbFromEnv, worktreeRootsFromEnv } from "./config.ts";
+import { DEFAULT_IDLE_DAYS, DEFAULT_MIN_FREE_GB, idleDaysFromEnv, minFreeGbFromEnv, sessionIdFromEnv, worktreeRootsFromEnv } from "./config.ts";
 
 describe("worktreeRootsFromEnv", () => {
 	test("is empty when unset: no location is assumed", () => {
@@ -26,5 +26,13 @@ describe("numeric flags", () => {
 		expect(minFreeGbFromEnv({ SUBSTRATE_WORKTREE_MIN_FREE_GB: "20" })).toBe(20);
 		expect(minFreeGbFromEnv({ SUBSTRATE_WORKTREE_MIN_FREE_GB: "0.5" })).toBe(0.5);
 		expect(idleDaysFromEnv({ SUBSTRATE_WORKTREE_IDLE_DAYS: "30" })).toBe(30);
+	});
+});
+
+describe("sessionIdFromEnv", () => {
+	test("is the trimmed value, and nothing when unset or blank", () => {
+		expect(sessionIdFromEnv({ SUBSTRATE_SESSION_ID: " sess-1 " })).toBe("sess-1");
+		expect(sessionIdFromEnv({})).toBeNull();
+		expect(sessionIdFromEnv({ SUBSTRATE_SESSION_ID: "  " })).toBeNull();
 	});
 });

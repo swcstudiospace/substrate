@@ -1,10 +1,10 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { WORKTREE_REPO_PATTERN } from "../../mcp-server/src/worktree-registry.ts";
+import { WORKTREE_FILES_MAX, WORKTREE_REPO_PATTERN } from "../../mcp-server/src/worktree-registry.ts";
 import { type CommandRunner, spawnGit } from "./git.ts";
 import { collectInventory, createPrShared, discoverRepos, inspectWorktree, listWorktrees, localRepoLabel, parseWorktreePorcelain, reloadWorktree } from "./inventory.ts";
-import { addWorktree, cleanupTemp, commit, defined, fakeGh, git, makeRepo, tempDir, write } from "./testkit.ts";
+import { addWorktree, cleanupTemp, commit, defined, fakeGh, git, makeRepo, type TestRepo, tempDir, write } from "./testkit.ts";
 
 afterAll(cleanupTemp);
 
@@ -194,6 +194,98 @@ describe("inspectWorktree", () => {
 
 		write(repo.dir, ".planning/STATE.md", "local\n");
 		expect((await inspectWorktree(input, { git: spawnGit, measure: false })).ignored_work).toEqual([]);
+	});
+});
+
+describe("inspectWorktree changed files (the registry report)", () => {
+	async function inspectFiles(repo: TestRepo, path: string, runner: CommandRunner = spawnGit, files = true) {
+		const entry = defined((await listWorktrees(repo.dir, spawnGit))?.find((item) => item.path === path), "entry");
+		return inspectWorktree({ ...entry, repoDir: repo.dir }, { git: runner, measure: false, ignored: false, ...(files ? { files: true } : {}) });
+	}
+	/** A runner that fails one git subcommand the way a broken repository would, and runs the rest for real. */
+	const failing =
+		(command: string): CommandRunner =>
+		async (args, cwd) =>
+			args[0] === command ? { code: 128, stdout: "", stderr: "fatal: simulated failure" } : spawnGit(args, cwd);
+
+	test("lists committed, renamed (a delete and an add), uncommitted and untracked files, sorted, and says nothing was cut", async () => {
+		const repo = makeRepo();
+		commit(repo.dir, "old-name.txt", "same content\nline two\nline three\n");
+		commit(repo.dir, "docs/keep.md", "k\n");
+		git(repo.dir, ["push", "-q", "origin", "main"]);
+		const path = addWorktree(repo, tempDir(), "feat");
+		git(path, ["mv", "old-name.txt", "new-name.txt"]);
+		git(path, ["commit", "-q", "-m", "rename"]);
+		commit(path, "src/new.ts", "x\n");
+		write(path, "docs/keep.md", "changed\n");
+		write(path, "scratch/untracked.txt", "u\n");
+
+		const info = await inspectFiles(repo, path);
+		expect(info.files).toEqual(["docs/keep.md", "new-name.txt", "old-name.txt", "scratch/untracked.txt", "src/new.ts"]);
+		expect(info.files_truncated).toBe(false);
+	});
+
+	test("a scan that does not ask for the files does not list them", async () => {
+		const repo = makeRepo();
+		const path = addWorktree(repo, tempDir(), "quiet");
+		commit(path, "a.txt", "a\n");
+		const info = await inspectFiles(repo, path, spawnGit, false);
+		expect(info.files).toBeUndefined();
+		expect(info.files_truncated).toBeUndefined();
+	});
+
+	test("a list over the cap reports the first 200 in order and says it was cut; exactly 200 is not cut", async () => {
+		const repo = makeRepo();
+		const over = addWorktree(repo, tempDir(), "over");
+		for (let index = 0; index < WORKTREE_FILES_MAX + 5; index += 1) write(over, `bulk/f${String(index).padStart(3, "0")}.txt`, "x\n");
+		git(over, ["add", "-A"]);
+		git(over, ["commit", "-q", "-m", "bulk"]);
+		const cut = await inspectFiles(repo, over);
+		expect(cut.files).toHaveLength(WORKTREE_FILES_MAX);
+		expect(cut.files?.[0]).toBe("bulk/f000.txt");
+		expect(cut.files?.at(-1)).toBe("bulk/f199.txt");
+		expect(cut.files_truncated).toBe(true);
+
+		const exact = addWorktree(repo, tempDir(), "exact");
+		for (let index = 0; index < WORKTREE_FILES_MAX; index += 1) write(exact, `bulk/f${String(index).padStart(3, "0")}.txt`, "x\n");
+		git(exact, ["add", "-A"]);
+		git(exact, ["commit", "-q", "-m", "bulk"]);
+		const whole = await inspectFiles(repo, exact);
+		expect(whole.files).toHaveLength(WORKTREE_FILES_MAX);
+		expect(whole.files_truncated).toBe(false);
+	});
+
+	test("a listing that fails is null with the warning `conflicts` gives, never an empty list: a failed diff, a failed status, and no merge base", async () => {
+		const repo = makeRepo();
+		const path = addWorktree(repo, tempDir(), "broken");
+		commit(path, "a.txt", "a\n");
+
+		const diff = await inspectFiles(repo, path, failing("diff"));
+		expect(diff.files).toBeNull();
+		expect(diff.notes).toContain("git diff failed: fatal: simulated failure");
+		expect(diff.files_truncated).toBeUndefined();
+
+		const status = await inspectFiles(repo, path, failing("status"));
+		expect(status.files).toBeNull();
+		expect(status.notes).toContain("git status failed: fatal: simulated failure");
+
+		const noBase = await inspectFiles(repo, path, failing("merge-base"));
+		expect(noBase.base).toBeNull();
+		expect(noBase.files).toBeNull();
+		expect(noBase.notes).toContain("no merge base: only uncommitted changes are listed");
+	});
+
+	test("a path the registry would refuse (a newline, a control character, over 400 characters) is dropped and counted, and the worktree and its other files stay", async () => {
+		const repo = makeRepo();
+		const path = addWorktree(repo, tempDir(), "hostile");
+		write(path, "ok.txt", "ok\n");
+		write(path, "bad\nname.txt", "x\n");
+		write(path, "ctl\u0007.txt", "x\n");
+		write(path, `${"d".repeat(200)}/${"e".repeat(200)}/long.txt`, "x\n");
+
+		const info = await inspectFiles(repo, path);
+		expect(info.files).toEqual(["ok.txt"]);
+		expect(info.notes.some((note) => note.startsWith("3 changed paths were not reported"))).toBe(true);
 	});
 });
 

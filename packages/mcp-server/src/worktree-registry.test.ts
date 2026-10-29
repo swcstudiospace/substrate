@@ -6,6 +6,8 @@ import {
 	parseWorktreeListQuery,
 	staleCutoff,
 	validateWorktreeReport,
+	WORKTREE_FILE_MAX_CHARS,
+	WORKTREE_FILES_MAX,
 	WORKTREE_LIST_DEFAULT_LIMIT,
 	WORKTREE_LIST_MAX_LIMIT,
 	WORKTREE_PATH_MAX_CHARS,
@@ -139,6 +141,50 @@ describe("validateWorktreeReport", () => {
 	for (const [label, body, problem] of refusals) {
 		test(`refuses ${label}`, () => {
 			const result = validateWorktreeReport(body);
+			expect(result.ok).toBe(false);
+			expect(result.ok ? "" : result.problem).toContain(problem);
+		});
+	}
+});
+
+describe("validateWorktreeReport: the changed files", () => {
+	/** The one worktree of a report made from `overrides`, or undefined when the report is refused. */
+	function only(overrides: Record<string, unknown>) {
+		const parsed = validateWorktreeReport(report({}, [worktree(overrides)]));
+		return parsed.ok ? parsed.value.worktrees[0] : undefined;
+	}
+
+	test("a list is stored sorted and de-duplicated, with the truncation flag as sent", () => {
+		expect(only({ files: ["b.ts", "a.ts", "b.ts"], files_truncated: true })).toMatchObject({ files: ["a.ts", "b.ts"], files_truncated: true });
+	});
+
+	test("absent stays absent, null stays null (unknown) and an empty list stays empty (touches nothing); the flag is true only beside a list", () => {
+		expect(only({})).not.toHaveProperty("files");
+		expect(only({})).not.toHaveProperty("files_truncated");
+		expect(only({ files: null, files_truncated: true })).toMatchObject({ files: null, files_truncated: false });
+		expect(only({ files: [] })).toMatchObject({ files: [], files_truncated: false });
+		expect(only({ files_truncated: true })).not.toHaveProperty("files_truncated");
+	});
+
+	test("a path that breaks a rule is dropped and the entry and its other paths stay", () => {
+		const files = ["ok.ts", "/absolute.ts", "", "x".repeat(WORKTREE_FILE_MAX_CHARS + 1), "new\nline", "tab\tname", "bell\u0007", "c1\u0085", "del\u007f", 7, null, { path: "a" }, "fine/also.ts"];
+		expect(only({ files })).toMatchObject({ files: ["fine/also.ts", "ok.ts"] });
+	});
+
+	test("accepts exactly the cap: 200 paths of 400 characters", () => {
+		const files = Array.from({ length: WORKTREE_FILES_MAX }, (_, index) => `${"x".repeat(WORKTREE_FILE_MAX_CHARS - 10)}${String(index).padStart(10, "0")}`);
+		expect(only({ files })?.files).toHaveLength(WORKTREE_FILES_MAX);
+	});
+
+	const refusals: Array<[string, Record<string, unknown>, string]> = [
+		["more paths than the cap", { files: Array.from({ length: WORKTREE_FILES_MAX + 1 }, (_, index) => `f${index}.ts`) }, `worktrees[0].files must hold at most ${WORKTREE_FILES_MAX} paths`],
+		["files that is a string", { files: "a.ts" }, "worktrees[0].files must be an array of paths, or null"],
+		["files that is an object", { files: { "a.ts": true } }, "worktrees[0].files must be an array of paths, or null"],
+		["files_truncated as a string", { files: [], files_truncated: "yes" }, "worktrees[0].files_truncated must be a boolean"],
+	];
+	for (const [label, overrides, problem] of refusals) {
+		test(`refuses ${label}`, () => {
+			const result = validateWorktreeReport(report({}, [worktree(overrides)]));
 			expect(result.ok).toBe(false);
 			expect(result.ok ? "" : result.problem).toContain(problem);
 		});

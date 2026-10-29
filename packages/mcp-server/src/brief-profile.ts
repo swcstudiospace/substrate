@@ -44,6 +44,8 @@ export const BRIEF_SECTION_PRIORITY = {
 	// Phase 67: appended live by `SUBSTRATE_BRIEF_SESSIONS`, never cached. A queued directive is as urgent as a warning.
 	steering: 2,
 	sessions: 8,
+	// Phase 68: appended live while the worktree registry is on, never cached. Context on who may collide with this session, as droppable as the sessions list.
+	worktrees: 8,
 	handoffs: 9,
 } as const;
 export type BriefSectionId = keyof typeof BRIEF_SECTION_PRIORITY;
@@ -61,6 +63,7 @@ const OMIT_LABEL: Record<BriefSectionId, string> = {
 	recall: "recalled",
 	steering: "steering",
 	sessions: "sessions",
+	worktrees: "worktrees",
 	handoffs: "handoffs",
 };
 

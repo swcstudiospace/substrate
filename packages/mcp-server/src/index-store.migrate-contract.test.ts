@@ -226,6 +226,14 @@ describe("the real MIGRATION_STEPS satisfy the contract", () => {
 		expect(MIGRATION_STEPS.filter((candidate) => candidate.version >= FIRST_REVERSIBLE_VERSION).every((candidate) => candidate.down !== undefined && candidate.phase !== undefined)).toBe(true);
 	});
 
+	test("step 40 (worktree changed files) adds columns only, and its down drops exactly the columns its up adds, with no table allowlist entry", () => {
+		const step40 = MIGRATION_STEPS.filter((candidate) => candidate.version === 40);
+		expect(step40.map((candidate) => candidate.name)).toEqual(["worktrees_changed_files"]);
+		expect(checkMigrationSteps(step40)).toEqual([]);
+		expect(step40[0]?.down).toContain("drop column if exists changed_files");
+		expect(step40[0]?.down).toContain("drop column if exists files_truncated");
+	});
+
 	test("the applied text of every step matches the committed digest fixture", () => {
 		expect(digestViolations(MIGRATION_STEPS, loadFixture()).join("\n")).toBe("");
 	});

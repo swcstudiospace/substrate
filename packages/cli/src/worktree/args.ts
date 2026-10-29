@@ -9,13 +9,13 @@
 export const SUBCOMMANDS = ["list", "status", "scan", "prune", "conflicts", "provision", "disk"] as const;
 export type Subcommand = (typeof SUBCOMMANDS)[number];
 
-const VALUE_FLAGS: ReadonlySet<string> = new Set(["root", "repo", "idle-days", "branch", "base", "path"]);
+const VALUE_FLAGS: ReadonlySet<string> = new Set(["root", "repo", "idle-days", "branch", "base", "path", "session"]);
 const BOOLEAN_FLAGS: ReadonlySet<string> = new Set(["json", "report", "execute"]);
 
 const ALLOWED: Record<Subcommand, readonly string[]> = {
 	list: ["root", "repo", "json"],
 	status: ["root", "repo", "json"],
-	scan: ["root", "report", "json"],
+	scan: ["root", "report", "session", "json"],
 	prune: ["root", "idle-days", "execute", "json"],
 	conflicts: ["root", "repo", "json"],
 	provision: ["repo", "branch", "base", "path", "json"],
@@ -30,6 +30,7 @@ export interface WorktreeArgs {
 	branch: string | undefined;
 	base: string | undefined;
 	path: string | undefined;
+	session: string | undefined;
 	json: boolean;
 	report: boolean;
 	execute: boolean;
@@ -42,7 +43,7 @@ export function parseWorktreeArgs(argv: readonly string[]): ParseResult {
 	if (first === undefined) return { ok: false, error: "missing subcommand" };
 	const command = SUBCOMMANDS.find((name) => name === first);
 	if (command === undefined) return { ok: false, error: `unknown subcommand ${first}` };
-	const args: WorktreeArgs = { command, roots: [], repo: undefined, idleDays: undefined, branch: undefined, base: undefined, path: undefined, json: false, report: false, execute: false };
+	const args: WorktreeArgs = { command, roots: [], repo: undefined, idleDays: undefined, branch: undefined, base: undefined, path: undefined, session: undefined, json: false, report: false, execute: false };
 	for (let index = 0; index < rest.length; index++) {
 		const token = rest[index];
 		if (token === undefined) continue;
@@ -70,6 +71,7 @@ export function parseWorktreeArgs(argv: readonly string[]): ParseResult {
 		else if (name === "idle-days") args.idleDays = value;
 		else if (name === "branch") args.branch = value;
 		else if (name === "base") args.base = value;
+		else if (name === "session") args.session = value;
 		else args.path = value;
 	}
 	return { ok: true, args };

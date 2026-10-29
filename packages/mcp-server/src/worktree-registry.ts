@@ -40,6 +40,13 @@ export const WORKTREE_LIST_MAX_LIMIT = 500;
 /** The ceiling a `ahead` or `behind` count must stay under: the column is a 32-bit integer. */
 const MAX_COUNT = 2_147_483_647;
 
+/** Most paths one worktree's `files` may carry. A reporter with more sends the first this many (sorted) and `files_truncated: true`. */
+export const WORKTREE_FILES_MAX = 200;
+/** Longest path in `files`, in characters. A longer one is dropped, never the entry. */
+export const WORKTREE_FILE_MAX_CHARS = 400;
+/** Most rows the brief's overlap section reads for one repository. */
+export const WORKTREE_BRIEF_CANDIDATES_MAX = 100;
+
 export const WORKTREE_REGISTRY_MODES = ["off", "on"] as const;
 export type WorktreeRegistryMode = (typeof WORKTREE_REGISTRY_MODES)[number];
 
@@ -68,12 +75,22 @@ export interface WorktreeRecord {
 	graph_id?: string;
 }
 
+/**
+ * One worktree of a report: the registry's record plus the paths it touches (phase 68, FLEET-06). `files` absent means the
+ * reporter did not say (an older CLI) and `null` means it tried and could not list them; neither is the same as `[]`, which
+ * says the worktree touches nothing. `files_truncated` is true when the reporter cut the list at {@link WORKTREE_FILES_MAX}.
+ */
+export interface ReportedWorktree extends WorktreeRecord {
+	files?: string[] | null;
+	files_truncated?: boolean;
+}
+
 /** A validated report. `reported_at` is the reporter's own clock, normalised to ISO; the server stamps `last_seen_at` itself. */
 export interface WorktreeReport {
 	protocol: typeof WORKTREE_REPORT_PROTOCOL;
 	host: string;
 	reported_at: string;
-	worktrees: WorktreeRecord[];
+	worktrees: ReportedWorktree[];
 }
 
 /** A registry row as a listing returns it. */
@@ -81,6 +98,18 @@ export interface StoredWorktree extends WorktreeRecord {
 	host: string;
 	first_seen_at: string;
 	last_seen_at: string;
+}
+
+/** A registry row with the paths it last reported, for the brief's overlap section. `files` is null when the row's last report carried none. */
+export interface WorktreeCandidate extends StoredWorktree {
+	files: string[] | null;
+	files_truncated: boolean;
+}
+
+/** The repository (matched case-insensitively, as the brief scopes it) and the row bound of one candidate read. */
+export interface WorktreeCandidateQuery {
+	repo: string;
+	limit: number;
 }
 
 /** A validated listing request. `limit` is within `1..WORKTREE_LIST_MAX_LIMIT`. */
@@ -97,7 +126,7 @@ export interface WorktreeStoreReport {
 	reportedAt: Date;
 	seenAt: Date;
 	ttlS: number;
-	worktrees: readonly WorktreeRecord[];
+	worktrees: readonly ReportedWorktree[];
 }
 
 /** What the store needs to read: `staleBefore` is the instant a commit must predate for the worktree to count as stale. */
@@ -114,6 +143,8 @@ export interface WorktreeRegistryStore {
 	report(input: WorktreeStoreReport): Promise<{ stored: number; removed: number }>;
 	/** At most `filter.limit` rows, newest `last_seen_at` first, ties by host then path. */
 	list(filter: WorktreeStoreFilter): Promise<StoredWorktree[]>;
+	/** At most `query.limit` rows of one repository with their reported files, newest `last_seen_at` first, ties by host then path. One read, for the brief. */
+	candidates(query: WorktreeCandidateQuery): Promise<WorktreeCandidate[]>;
 }
 
 export type Parsed<T> = { ok: true; value: T } | { ok: false; problem: string };
@@ -137,6 +168,26 @@ function hasControlCharacter(text: string): boolean {
 		if (code < 0x20 || code === 0x7f) return true;
 	}
 	return false;
+}
+
+/** Whether `path` is a path a worktree may report as touched: repository-relative, one line, within {@link WORKTREE_FILE_MAX_CHARS}. */
+function isReportableFilePath(path: unknown): path is string {
+	if (typeof path !== "string" || path.length === 0 || path.length > WORKTREE_FILE_MAX_CHARS || path.startsWith("/")) return false;
+	for (let index = 0; index < path.length; index += 1) {
+		const code = path.charCodeAt(index);
+		// C0, DEL and C1 controls: a terminal reads some of them as commands.
+		if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return false;
+	}
+	return true;
+}
+
+/**
+ * The reportable paths of `paths`: entries that are not a path the registry accepts are dropped (one odd file name never
+ * costs the entry), duplicates collapse, and the rest is sorted by code unit. The fleet reporter and the validator both
+ * run this, so what a reporter sends is what the server keeps.
+ */
+export function normalizeWorktreeFiles(paths: readonly unknown[]): string[] {
+	return [...new Set(paths.filter(isReportableFilePath))].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 /** A non-empty single-line string within `WORKTREE_TEXT_MAX_CHARS`. */
@@ -163,7 +214,7 @@ function isListState(value: unknown): value is WorktreeListState {
 	return typeof value === "string" && (WORKTREE_LIST_STATES as readonly string[]).includes(value);
 }
 
-function validateWorktree(raw: unknown, index: number): Parsed<WorktreeRecord> {
+function validateWorktree(raw: unknown, index: number): Parsed<ReportedWorktree> {
 	const at = `worktrees[${index}]`;
 	if (!isRecord(raw)) return fail(`${at} must be an object`);
 	const { path, repo, branch, head, base, dirty, ahead, behind, last_commit_at, size_bytes, locked, primary, pr_state, session_id, graph_id } = raw;
@@ -185,6 +236,15 @@ function validateWorktree(raw: unknown, index: number): Parsed<WorktreeRecord> {
 	if (!isPrState(pr_state)) return fail(`${at}.pr_state must be one of ${WORKTREE_PR_STATES.join(", ")}`);
 	if (session_id !== undefined && !isLabel(session_id)) return fail(`${at}.session_id must be a string of at most ${WORKTREE_TEXT_MAX_CHARS} characters when present`);
 	if (graph_id !== undefined && !isLabel(graph_id)) return fail(`${at}.graph_id must be a string of at most ${WORKTREE_TEXT_MAX_CHARS} characters when present`);
+	let files: string[] | null | undefined;
+	if (raw.files !== undefined) {
+		if (raw.files === null) files = null;
+		else if (!Array.isArray(raw.files)) return fail(`${at}.files must be an array of paths, or null`);
+		else if (raw.files.length > WORKTREE_FILES_MAX) return fail(`${at}.files must hold at most ${WORKTREE_FILES_MAX} paths`);
+		else files = normalizeWorktreeFiles(raw.files);
+	}
+	if (raw.files_truncated !== undefined && typeof raw.files_truncated !== "boolean") return fail(`${at}.files_truncated must be a boolean when present`);
+	const filesTruncated = Array.isArray(files) && raw.files_truncated === true;
 	return {
 		ok: true,
 		value: {
@@ -203,6 +263,7 @@ function validateWorktree(raw: unknown, index: number): Parsed<WorktreeRecord> {
 			pr_state,
 			...(session_id === undefined ? {} : { session_id }),
 			...(graph_id === undefined ? {} : { graph_id }),
+			...(files === undefined ? {} : { files, files_truncated: filesTruncated }),
 		},
 	};
 }
@@ -293,14 +354,17 @@ export class PgWorktreeRegistry implements WorktreeRegistryStore {
 			// One transaction: a reader sees the registry before the report or after it, never the upserts without the sweep.
 			await this.sql.begin(async (tx: SQL) => {
 				for (const worktree of input.worktrees) {
+					// `::text::jsonb`: a bare `::jsonb` makes the driver JSON-encode the string into a scalar (see index-sweep.ts).
+					const filesJson = worktree.files === undefined || worktree.files === null ? null : JSON.stringify(worktree.files);
 					await tx`
 						insert into worktrees (
 							host, path, repo, branch, head, base, dirty, ahead, behind, last_commit_at, size_bytes,
-							locked, is_primary, pr_state, session_id, graph_id, first_seen_at, last_seen_at, reported_at)
+							locked, is_primary, pr_state, session_id, graph_id, changed_files, files_truncated, first_seen_at, last_seen_at, reported_at)
 						values (
 							${input.host}, ${worktree.path}, ${worktree.repo}, ${worktree.branch}, ${worktree.head}, ${worktree.base},
 							${worktree.dirty}, ${worktree.ahead}, ${worktree.behind}, ${worktree.last_commit_at}::timestamptz, ${worktree.size_bytes},
 							${worktree.locked}, ${worktree.primary}, ${worktree.pr_state}, ${worktree.session_id ?? null}, ${worktree.graph_id ?? null},
+							${filesJson}::text::jsonb, ${worktree.files_truncated ?? false},
 							${seenAt}::timestamptz, ${seenAt}::timestamptz, ${reportedAt}::timestamptz)
 						on conflict (host, path) do update
 						set repo = excluded.repo, branch = excluded.branch, head = excluded.head, base = excluded.base,
@@ -308,6 +372,7 @@ export class PgWorktreeRegistry implements WorktreeRegistryStore {
 						    last_commit_at = excluded.last_commit_at, size_bytes = excluded.size_bytes,
 						    locked = excluded.locked, is_primary = excluded.is_primary, pr_state = excluded.pr_state,
 						    session_id = excluded.session_id, graph_id = excluded.graph_id,
+						    changed_files = excluded.changed_files, files_truncated = excluded.files_truncated,
 						    last_seen_at = excluded.last_seen_at, reported_at = excluded.reported_at`;
 				}
 				const swept = (await tx`delete from worktrees where host = ${input.host} and last_seen_at < ${cutoff}::timestamptz returning path`) as unknown[];
@@ -321,7 +386,9 @@ export class PgWorktreeRegistry implements WorktreeRegistryStore {
 		const staleBefore = filter.staleBefore.toISOString();
 		return this.run("worktrees.list", async () => {
 			const rows = (await this.sql`
-				select * from worktrees
+				select host, path, repo, branch, head, base, dirty, ahead, behind, last_commit_at, size_bytes,
+				       locked, is_primary, pr_state, session_id, graph_id, first_seen_at, last_seen_at, reported_at
+				from worktrees
 				where (${filter.repo}::text is null or repo = ${filter.repo})
 				  and (${filter.host}::text is null or host = ${filter.host})
 				  and (${filter.state}::text = 'all'
@@ -330,6 +397,23 @@ export class PgWorktreeRegistry implements WorktreeRegistryStore {
 				order by last_seen_at desc, host collate "C" asc, path collate "C" asc
 				limit ${filter.limit}`) as Array<Record<string, unknown>>;
 			return rows.map(toStoredWorktree);
+		});
+	}
+
+	async candidates(query: WorktreeCandidateQuery): Promise<WorktreeCandidate[]> {
+		return this.run("worktrees.candidates", async () => {
+			const rows = (await this.sql`
+				select host, path, repo, branch, head, base, dirty, ahead, behind, last_commit_at, size_bytes,
+				       locked, is_primary, pr_state, session_id, graph_id, first_seen_at, last_seen_at, reported_at,
+				       changed_files::text as changed_files_text, files_truncated
+				from worktrees
+				where lower(repo) = lower(${query.repo}::text)
+				order by last_seen_at desc, host collate "C" asc, path collate "C" asc
+				limit ${query.limit}`) as Array<Record<string, unknown>>;
+			return rows.map((row) => {
+				const files = filesFromText(row.changed_files_text);
+				return { ...toStoredWorktree(row), files, files_truncated: files !== null && row.files_truncated === true };
+			});
 		});
 	}
 }
@@ -348,6 +432,17 @@ function numberOrNull(value: unknown): number | null {
 
 function textOrNull(value: unknown): string | null {
 	return value === null || value === undefined ? null : String(value);
+}
+
+/** The paths a `changed_files` value holds, read from its text form; null when the column is NULL or does not hold an array. */
+function filesFromText(value: unknown): string[] | null {
+	if (typeof value !== "string") return null;
+	try {
+		const parsed: unknown = JSON.parse(value);
+		return Array.isArray(parsed) ? normalizeWorktreeFiles(parsed) : null;
+	} catch {
+		return null;
+	}
 }
 
 function toStoredWorktree(row: Record<string, unknown>): StoredWorktree {

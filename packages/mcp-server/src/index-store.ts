@@ -783,6 +783,20 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 			);
 			create index if not exists steering_sessions_repo_updated_idx on steering_sessions (repo_id, updated_at)`,
 	},
+	// Worktree overlap in the brief (phase 68, FLEET-06): the paths each worktree last reported touching, so `memory_brief`
+	// can name another session's worktree that edits the same files. Additive: two nullable-or-defaulted columns on the
+	// registry table (step 36), runs with the registry and is not opt-in. NULL means the last report carried no list (an
+	// older reporter, or a listing that failed), never "touches nothing". Steps 38 and 39 belong to other branches.
+	// OPERATORS: rehearse this step on a restored dump before applying it to production. It rewrites no row.
+	{
+		version: 40,
+		name: "worktrees_changed_files",
+		phase: "expand",
+		down: `alter table worktrees drop column if exists changed_files; alter table worktrees drop column if exists files_truncated`,
+		sql: `
+			alter table worktrees add column if not exists changed_files jsonb;
+			alter table worktrees add column if not exists files_truncated boolean not null default false`,
+	},
 ];
 
 /** The steps `migrate()` runs for these opt-ins, in version order. A step whose opt-in is off is left out and not ledgered. */
