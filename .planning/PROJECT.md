@@ -6,6 +6,8 @@
 
 ## Current State
 
+**In progress: v1.7 Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet** (phases 63-70, defined 2026-10-29, Run 14). Eight features: ingest the documentation of every repository into the docs plane and keep it current (Corpus Atlas, Doc Watch), use the owner's TEI service (Embedding fabric), make the docs RAG learn from use (Docs Reflect), make Live Steering visible and cross-session, optimise many sessions' worktrees (Worktree Fleet), prove the corpus from the hourly devnet anchor (Doc Proofs) and measure and guard docs quality (Docs SLO and eval). Requirements: [REQUIREMENTS.md](REQUIREMENTS.md); roadmap: [ROADMAP.md](ROADMAP.md).
+
 Shipped **v1.3.x, v1.5 and v1.6** (2026-10-28, override closeouts): Should-have hardening (phases 37-44), SOTA enhancements (phases 45-54) and Contextual Memory, Live Steering and Eternal Rollback (phases 55-62). Each closed on the owner's decision of 2026-10-28 with its open items recorded as accepted debt (`STATE.md`, "Accepted debt (owner decision, 2026-10-28)"); archives are in `.planning/milestones/`.
 
 - **Docs plane:** LightRAG is the live production docs backend in naive mode since 2026-10-28 (Run 11; release `5cf930a0`, `SUBSTRATE_DOCS_BACKEND=lightrag`); the `ragflow` Railway service was deleted on 2026-10-25, and RAGFlow stays only as the legacy fallback when `LIGHTRAG_URL` is unset. The LightRAG client matches upstream v1.5.7 and can never emit a clear-all (v1.6 phase 56, PR #127). Graph and hybrid modes need a real LLM route.
@@ -56,18 +58,18 @@ Shipped before: **v1.2 Swarm leases, workspace install and lessons bank** (2026-
 
 ## Next Milestone Goals
 
-Candidates after v1.6, not commitments (the first two are carried over from the v1.3 list):
+Carried into v1.7: the `checkpoint_hint` reader and the `steering` and `baseline` hook triggers (STEER-05; the printed configuration covers all four checkpoint triggers since Run 13, PR #166, and a host install stays operator-gated).
+
+Candidates after v1.7, not commitments (the first two are carried over from the v1.3 list):
 
 - ADR S5 gate verdicts as events (SPE-5056).
 - Lessons bank Tier 2: phase lifecycle events, realtime delivery, an outbox and automatic injection at the GSD discuss step.
-- Install the session hook in a host and cover the `steering` and `baseline` triggers, which the printed configuration does not cover (v1.6 phase 61 criterion 3).
-- A reader for `checkpoint_hint`, which `steering_acknowledge` returns and no code in the CLI, collectors or projector reads.
 - A caller for `S3BlobStore`, which has no caller outside its own test (the CLI opens only `LocalBlobStore`).
 - Callers for `memoryForget` expiry and operator reasons; only the rollback commit calls it today.
 - The phase 46 parity comparator (criterion 4) and the RAGFlow code removal (criterion 5, gated on its own approvals).
 - The LightRAG LLM route that graph and hybrid modes need (`shunt login xai` or `hermes auth add xai-oauth --type oauth`, plus a network path from Railway).
-- Funding the anchor key and the first live re-anchor rehearsal.
-- Deploying main: production runs release `5cf930a0`, which lacks PRs #142 to #159.
+- Funding the anchor key and the first live re-anchor rehearsal (also what makes Doc Proofs anchored rather than `unanchored`).
+- Deploying main: production runs release `5cf930a0`, which lacks every PR from #142 on; the v1.7 operator steps (first corpus ingest, staged timers) need that deploy.
 
 ## What this is
 

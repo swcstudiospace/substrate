@@ -51,7 +51,7 @@ Tracked-source gate: each analog path named here was checked with `git ls-files`
 | `docs/runbooks/lane-b-collectors.md` (new) | doc (runbook) | — | Phase 16 `docs/runbooks/production-parity.md` (header table, "Operator step", "Rollback", "Who does what") | exact |
 | `docs/event-vocabulary.md` (modified) | doc (machine-checked table) | — | Phase 17 planned (17-01 Task 3) | planned only |
 | `packages/mcp-server/src/event-sources.ts` (modified, `herdr.pane_exited` row) | config (typed table) | — | Phase 17 planned (17-01 tracer) | planned only |
-| `README.md` (modified) | doc | — | `README.md:64-79` (Layout) + the "Details in [`docs/x.md`](docs/x.md)" lines | exact |
+| `README.md` (modified) | doc | — | `README.md:64-79` (Layout) + the ``Details in [`docs/x.md`](docs/x.md)`` lines | exact |
 | Generated bundle files `hooks/post-tool-use.ts`, `hooks/redact.ts`, `hooks/substrate.json`, `.muse-plugin/plugin.json` (not tracked; written by the projector) | generated artifact | — | `acc30a8:packages/projector/src/muse.ts:34-134` | exact |
 
 ---
