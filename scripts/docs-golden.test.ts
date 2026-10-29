@@ -540,7 +540,7 @@ describe("the live canary (uplift-4 S7)", () => {
 	});
 
 	test("a measured golden recall above the objective posts one note as substrate with the recall and the question count, and the canary still exits 0", async () => {
-		const run = canary();
+		const run = canary({ env: { SUBSTRATE_CORPUS: "on" } });
 		run.goldenIo.goldenRecall = async () => ({ recall5: 0.8, asked: 120 });
 		expect(await main(["--live", "--emit"], run.goldenIo)).toBe(0);
 		const posted = events(run.requests);
@@ -556,21 +556,21 @@ describe("the live canary (uplift-4 S7)", () => {
 	});
 
 	test("a golden recall under the objective fails the run and says which flag, still reports it, and the objective is the flag's", async () => {
-		const low = canary();
+		const low = canary({ env: { SUBSTRATE_CORPUS: "on" } });
 		low.goldenIo.goldenRecall = async () => ({ recall5: 0.4, asked: 50 });
 		expect(await main(["--live", "--emit"], low.goldenIo)).toBe(1);
 		expect(low.err.at(-1)).toContain("SUBSTRATE_DOCS_SLO_RECALL5");
 		expect(events(low.requests)).toHaveLength(1);
 		expect(events(low.requests)[0]?.body).toMatchObject({ kind: "note", payload: { golden_recall5: 0.4 } });
 
-		const lenient = canary({ env: { SUBSTRATE_DOCS_SLO_RECALL5: "0.3" } });
+		const lenient = canary({ env: { SUBSTRATE_CORPUS: "on", SUBSTRATE_DOCS_SLO_RECALL5: "0.3" } });
 		lenient.goldenIo.goldenRecall = async () => ({ recall5: 0.4, asked: 50 });
 		expect(await main(["--live", "--emit"], lenient.goldenIo)).toBe(0);
 	});
 
 	test("a failing fixture and a measured golden recall post the warning with the recall in it, then the note", async () => {
 		const target = answerable();
-		const run = canary();
+		const run = canary({ env: { SUBSTRATE_CORPUS: "on" } });
 		run.goldenIo.goldenRecall = async () => ({ recall5: 0.9, asked: 10 });
 		run.overrides.set(target.id, (reply) => ({ ...reply, chunks: [] }));
 		expect(await main(["--live", "--emit"], run.goldenIo)).toBe(1);
@@ -580,13 +580,13 @@ describe("the live canary (uplift-4 S7)", () => {
 	});
 
 	test("a golden recall that could not be measured, or whose documents cannot be read, is said on stderr and changes nothing else", async () => {
-		const none = canary();
+		const none = canary({ env: { SUBSTRATE_CORPUS: "on" } });
 		none.goldenIo.goldenRecall = async () => null;
 		expect(await main(["--live", "--emit"], none.goldenIo)).toBe(0);
 		expect(none.err.at(-1)).toContain("golden recall not measured");
 		expect(events(none.requests)).toEqual([]);
 
-		const broken = canary();
+		const broken = canary({ env: { SUBSTRATE_CORPUS: "on" } });
 		broken.goldenIo.goldenRecall = async () => {
 			throw new Error("ENOENT: no such directory");
 		};
@@ -596,16 +596,43 @@ describe("the live canary (uplift-4 S7)", () => {
 	});
 
 	test("a golden report with no substrate bearer, or one the ledger did not store, is said on stderr and the exit code stays the fixtures'", async () => {
-		const silent = canary({ env: { SUBSTRATE_TOKEN_SUBSTRATE: undefined, SUBSTRATE_TOKEN: undefined, SUBSTRATE_TOKENS_DIR: "/scratch/tokens" } });
+		const silent = canary({ env: { SUBSTRATE_CORPUS: "on", SUBSTRATE_TOKEN_SUBSTRATE: undefined, SUBSTRATE_TOKEN: undefined, SUBSTRATE_TOKENS_DIR: "/scratch/tokens" } });
 		silent.goldenIo.goldenRecall = async () => ({ recall5: 0.8, asked: 5 });
 		expect(await main(["--live", "--emit"], silent.goldenIo)).toBe(0);
 		expect(silent.err.at(-1)).toContain("golden recall not reported, no substrate bearer");
 		expect(events(silent.requests)).toEqual([]);
 
-		const unstored = canary({ eventStatus: 500 });
+		const unstored = canary({ env: { SUBSTRATE_CORPUS: "on" }, eventStatus: 500 });
 		unstored.goldenIo.goldenRecall = async () => ({ recall5: 0.8, asked: 5 });
 		expect(await main(["--live", "--emit"], unstored.goldenIo)).toBe(0);
 		expect(unstored.err.at(-1)).toContain("golden recall report was not stored");
+	});
+
+	test("with SUBSTRATE_CORPUS off or unset the golden check never runs: no measurement, no note, and a low recall cannot fail the run", async () => {
+		for (const env of [{}, { SUBSTRATE_CORPUS: "off" }, { SUBSTRATE_CORPUS: "true" }, { SUBSTRATE_CORPUS: "" }]) {
+			const run = canary({ env });
+			let measured = 0;
+			run.goldenIo.goldenRecall = async () => {
+				measured += 1;
+				return { recall5: 0.1, asked: 50 };
+			};
+			expect(await main(["--live", "--emit"], run.goldenIo)).toBe(0);
+			expect(measured).toBe(0);
+			expect(events(run.requests)).toEqual([]);
+			expect(run.out.some((line) => line.includes("golden recall"))).toBe(false);
+			expect(run.err).toEqual([]);
+		}
+	});
+
+	test("with SUBSTRATE_CORPUS on (any case, padded) the golden check runs", async () => {
+		const run = canary({ env: { SUBSTRATE_CORPUS: " ON " } });
+		let measured = 0;
+		run.goldenIo.goldenRecall = async () => {
+			measured += 1;
+			return { recall5: 0.1, asked: 50 };
+		};
+		expect(await main(["--live", "--emit"], run.goldenIo)).toBe(1);
+		expect(measured).toBe(1);
 	});
 
 	test("plain --live is unchanged: it prints, never asserts, and needs no canary variables", async () => {

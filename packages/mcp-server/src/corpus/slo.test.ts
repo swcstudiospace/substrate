@@ -15,7 +15,6 @@ import { Substrate } from "../service.ts";
 import { connectAs } from "../session-rollback.testkit.ts";
 import { defined } from "../test-support.ts";
 import type { SubstrateEvent } from "../types.ts";
-import type { CorpusStatusSummary } from "./store.ts";
 import { CorpusSloState } from "./slo.ts";
 import { FakePlane, FakeStore, makeDocument } from "./testkit.ts";
 
@@ -61,14 +60,6 @@ describe("CorpusSloState", () => {
 	});
 });
 
-/** A manifest that reports a last ingest time, as the Postgres one does. */
-class DatedStore extends FakeStore {
-	lastIngestAt: string | null = null;
-	override async status(): Promise<CorpusStatusSummary> {
-		return { ...(await super.status()), lastIngestAt: this.lastIngestAt };
-	}
-}
-
 /** A ledger that keeps every event it is given. */
 class LedgerStub {
 	readonly events: SubstrateEvent[] = [];
@@ -88,7 +79,7 @@ class LedgerStub {
 
 interface World {
 	substrate: Substrate;
-	store: DatedStore;
+	store: FakeStore;
 	ledger: LedgerStub;
 	observability: Observability;
 	gauge(name: string): number | null;
@@ -104,7 +95,7 @@ async function world(env: Record<string, string | undefined> = { SUBSTRATE_CORPU
 	const observability = createObservability(config, env);
 	await observability.start();
 	running.push(observability);
-	const store = new DatedStore();
+	const store = new FakeStore();
 	const ledger = new LedgerStub();
 	const substrate = new Substrate(
 		config,
@@ -192,7 +183,7 @@ describe("freshness", () => {
 		const before = defined((await w.substrate.fabricSources().corpus()).readings.freshnessS);
 		// The manifest moved on, but the read that would have shown it fails: the reading is the last good one, not the new one.
 		w.store.lastIngestAt = new Date().toISOString();
-		w.store.status = async () => {
+		w.store.newestIngestAt = async () => {
 			throw new Error("connection lost");
 		};
 		expect(await w.substrate.refreshCorpusReadings()).toBe("failed");
@@ -207,7 +198,7 @@ describe("freshness", () => {
 		expect(await w.substrate.refreshCorpusReadings()).toBe("ok");
 		const before = defined(w.gauge(CORPUS_FRESHNESS_METRIC), "freshness gauge");
 		w.store.lastIngestAt = new Date().toISOString();
-		w.store.status = () => new Promise<CorpusStatusSummary>(() => undefined);
+		w.store.newestIngestAt = () => new Promise<string | null>(() => undefined);
 		expect(await w.substrate.refreshCorpusReadings(5)).toBe("timeout");
 		// Not refreshed: the newest change is still the old one, so the age is no younger than before.
 		expect(defined(w.gauge(CORPUS_FRESHNESS_METRIC), "freshness gauge")).toBeGreaterThanOrEqual(before);
@@ -218,10 +209,89 @@ describe("freshness", () => {
 		const w = await world();
 		w.store.lastIngestAt = new Date(Date.now() - 1_000).toISOString();
 		expect(corpusRow(await gatherFabricFacts(w.substrate.fabricSources()))).toMatchObject({ state: "ok", source: "corpus.slo" });
-		w.store.status = async () => {
+		w.store.newestIngestAt = async () => {
 			throw new Error("connection lost");
 		};
 		expect(corpusRow(await gatherFabricFacts(w.substrate.fabricSources()))).toMatchObject({ state: "degraded", source: "corpus.slo: failed" });
+	});
+});
+
+describe("the freshness read", () => {
+	/** A manifest read the test settles by hand, so overlapping refreshes can be held in flight. */
+	function heldRead(store: FakeStore) {
+		const waiting: Array<{ resolve: (value: string | null) => void; reject: (cause: Error) => void }> = [];
+		store.newestIngestAt = () => {
+			store.newestReads += 1;
+			const { promise, resolve, reject } = Promise.withResolvers<string | null>();
+			waiting.push({ resolve, reject });
+			return promise;
+		};
+		return waiting;
+	}
+
+	/** Runs the queued microtasks, so every refresh has reached the store; no timer is involved. */
+	async function flush(): Promise<void> {
+		for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+	}
+
+	test("a refresh reads only the newest time: the full status is never asked, on a refresh, an ingest or a fabric read", async () => {
+		const w = await world();
+		w.store.lastIngestAt = new Date(Date.now() - 1_000_000).toISOString();
+		expect(await w.substrate.refreshCorpusReadings()).toBe("ok");
+		await w.substrate.corpusIngest(ingestBody("# A\nthe first document"), "omp");
+		await w.substrate.fabricSources().corpus();
+		expect(w.store.newestReads).toBe(3);
+		expect(w.store.statusReads).toBe(0);
+	});
+
+	test("refreshes that overlap share one store read, and both take its answer", async () => {
+		const w = await world();
+		const waiting = heldRead(w.store);
+		const first = w.substrate.refreshCorpusReadings();
+		const second = w.substrate.refreshCorpusReadings();
+		// Let both reach the store before the read answers.
+		await flush();
+		expect(waiting).toHaveLength(1);
+		defined(waiting[0], "the one read").resolve(new Date(Date.now() - 500_000).toISOString());
+		expect(await Promise.all([first, second])).toEqual(["ok", "ok"]);
+		expect(w.store.newestReads).toBe(1);
+		expect(defined(w.gauge(CORPUS_FRESHNESS_METRIC), "freshness gauge")).toBeGreaterThanOrEqual(500);
+
+		// Once it has settled the next refresh reads again.
+		const third = w.substrate.refreshCorpusReadings();
+		await flush();
+		expect(waiting).toHaveLength(2);
+		defined(waiting[1], "the second read").resolve(null);
+		expect(await third).toBe("ok");
+	});
+
+	test("a read that failed is shared with the refreshes waiting on it and not with the next one", async () => {
+		const w = await world();
+		const waiting = heldRead(w.store);
+		const first = w.substrate.refreshCorpusReadings();
+		const second = w.substrate.refreshCorpusReadings();
+		await flush();
+		defined(waiting[0], "the one read").reject(new Error("connection lost"));
+		expect(await Promise.all([first, second])).toEqual(["failed", "failed"]);
+		expect(waiting).toHaveLength(1);
+
+		const next = w.substrate.refreshCorpusReadings();
+		await flush();
+		expect(waiting).toHaveLength(2);
+		defined(waiting[1], "the next read").resolve(new Date().toISOString());
+		expect(await next).toBe("ok");
+	});
+
+	test("each refresh keeps its own bound while sharing the read: a short one times out and a longer one still gets the answer", async () => {
+		const w = await world();
+		const waiting = heldRead(w.store);
+		const impatient = w.substrate.refreshCorpusReadings(5);
+		const patient = w.substrate.refreshCorpusReadings(60_000);
+		expect(await impatient).toBe("timeout");
+		expect(waiting).toHaveLength(1);
+		defined(waiting[0], "the one read").resolve(new Date(Date.now() - 100_000).toISOString());
+		expect(await patient).toBe("ok");
+		expect(w.store.newestReads).toBe(1);
 	});
 });
 

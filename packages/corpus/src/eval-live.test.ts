@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { GoldenQuery } from "./eval.ts";
+import { scoreRun, type GoldenQuery } from "./eval.ts";
 import {
 	documentKeyOfUrl,
 	LIVE_MAX_CONSECUTIVE_FAILURES,
@@ -38,11 +38,20 @@ describe("documentKeyOfUrl", () => {
 });
 
 describe("ranksFromSearchReply", () => {
-	test("keeps the first appearance of each document in rank order and skips chunks that cite nothing known", () => {
+	test("keeps the first appearance of each corpus document in rank order and a null slot for every result that names none", () => {
 		const reply = ranksFromSearchReply({
 			chunks: [{ source_url: A }, { source_url: "https://github.com/acme/atlas/blob/other/docs/a.md" }, { source_url: B }, { source_url: "https://example.com/x" }, { title: "no url" }, 3],
 		});
-		expect(reply).toEqual({ kind: "ranked", keys: ["acme/atlas:docs/a.md", "acme/atlas:docs/b.md"] });
+		expect(reply).toEqual({ kind: "ranked", keys: ["acme/atlas:docs/a.md", "acme/atlas:docs/b.md", null, null, null] });
+	});
+
+	test("an expected document in sixth place behind five non-corpus results misses at 5 and hits at 10", async () => {
+		const others = [1, 2, 3, 4, 5].map((n) => ({ source_url: `https://example.com/memory/${n}` }));
+		const fetchImpl: LiveOptions["fetchImpl"] = async () => Response.json({ chunks: [...others, { source_url: A }] });
+		const run = await runLiveQueries([question(1)], { base: "http://127.0.0.1:7410", token: "t", fetchImpl, now: () => 0 });
+		const score = scoreRun(run.results);
+		expect(score.recall5).toBe(0);
+		expect(score.recall10).toBe(1);
 	});
 
 	test("a degraded answer is an outage, and a body that is not an answer is invalid", () => {

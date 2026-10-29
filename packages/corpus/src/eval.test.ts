@@ -10,7 +10,9 @@ import {
 	recallAtK,
 	scoreRun,
 	seededRandom,
+	withCopyGroups,
 	type EvalDocument,
+	type GoldenQuery,
 	type QueryResult,
 } from "./eval.ts";
 
@@ -258,5 +260,25 @@ describe("metrics", () => {
 		expect(recallAtK([copied], 2)).toBe(1);
 		expect(mrr([copied])).toBe(0.5);
 		expect(recallAtK([{ ...copied, ranked: ["x", "y"] }], 5)).toBe(0);
+	});
+});
+
+describe("withCopyGroups", () => {
+	const golden = (expected: string, alsoExpected?: string[]): GoldenQuery => ({ query: `ask ${expected}`, expected, kind: "title", ...(alsoExpected === undefined ? {} : { alsoExpected }) });
+
+	test("a question for a group's kept document also accepts the group's copies, and nothing else changes", () => {
+		const out = withCopyGroups([golden("local/c1:a.md"), golden("local/c1:b.md")], [{ keep: "local/c1:a.md", copies: ["local/c2:a.md", "local/c3:a.md"] }]);
+		expect(out[0]?.alsoExpected).toEqual(["local/c2:a.md", "local/c3:a.md"]);
+		expect(out[1]).toEqual(golden("local/c1:b.md"));
+	});
+
+	test("a group whose kept entry no question accepts adds nothing", () => {
+		const input = [golden("local/c1:a.md")];
+		expect(withCopyGroups(input, [{ keep: "local/c9:z.md", copies: ["local/c2:a.md"] }])).toEqual(input);
+	});
+
+	test("copies the generator already found are kept once, and a group keyed on one of them is followed", () => {
+		const out = withCopyGroups([golden("a:x.md", ["a:y.md"])], [{ keep: "a:y.md", copies: ["a:z.md", "a:x.md"] }]);
+		expect(out[0]?.alsoExpected).toEqual(["a:y.md", "a:z.md"]);
 	});
 });

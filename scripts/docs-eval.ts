@@ -226,7 +226,7 @@ export interface OfflineRun {
  */
 export async function duplicateCollapseFailures(
 	docs: readonly EvalDocument[],
-	search: (query: string) => readonly string[] | Promise<readonly string[]>,
+	search: (query: string) => readonly (string | null)[] | Promise<readonly (string | null)[]>,
 ): Promise<string[]> {
 	const groups = new Map<string, string[]>();
 	for (const doc of docs) {
@@ -239,7 +239,7 @@ export async function duplicateCollapseFailures(
 		if (keys.length < 2) continue;
 		const sorted = [...keys].sort();
 		const query = outlineOf(text).title ?? text.split(/\s+/).slice(0, 12).join(" ");
-		const present = (await search(query)).filter((key) => keys.includes(key));
+		const present = (await search(query)).filter((key): key is string => key !== null && keys.includes(key));
 		if (present.length !== 1 || present[0] !== sorted[0]) failures.push(`${sorted.join(" = ")} answered as ${present.length === 0 ? "nothing" : present.join(", ")}`);
 	}
 	return failures;
@@ -260,7 +260,7 @@ export async function runServer(docs: readonly EvalDocument[], now: () => number
 	return runSearch(docs, now, createServerEvalSearch(docs, { rerank }));
 }
 
-async function runSearch(docs: readonly EvalDocument[], now: () => number, search: (query: string) => Promise<readonly string[]>): Promise<OfflineRun> {
+async function runSearch(docs: readonly EvalDocument[], now: () => number, search: (query: string) => Promise<readonly (string | null)[]>): Promise<OfflineRun> {
 	const golden = generateGolden(docs);
 	const results: QueryResult[] = [];
 	for (const question of golden) {

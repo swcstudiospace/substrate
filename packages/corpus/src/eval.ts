@@ -257,18 +257,36 @@ export function generateGolden(docs: readonly EvalDocument[], options: GenerateG
 	return sampleIndexes(unambiguous.length, maxQueries, random).map((index) => unambiguous[index] as GoldenQuery);
 }
 
-/** One question's outcome: the keys a retriever returned best first, and how long it took. */
+/**
+ * Carries identical-copy groups the generator could not see into the expected answers. The scan drops byte-identical files across
+ * `local/*` collections before the documents reach `generateGolden`, so a page's other copies are known only from the scan's
+ * groups (`keep` stands for `copies`). A question whose accepted keys include a group's `keep` also accepts its copies, through
+ * `alsoExpected` like the copies the generator finds itself: the plane keeps one copy of a page and may cite whichever was
+ * ingested first. A group whose `keep` is not an accepted key of any question adds nothing.
+ */
+export function withCopyGroups(golden: readonly GoldenQuery[], groups: ReadonlyArray<{ keep: string; copies: readonly string[] }>): GoldenQuery[] {
+	const copiesOfKept = new Map<string, string[]>();
+	for (const group of groups) copiesOfKept.set(group.keep, [...(copiesOfKept.get(group.keep) ?? []), ...group.copies]);
+	return golden.map((question) => {
+		const accepted = [question.expected, ...(question.alsoExpected ?? [])];
+		const extra = accepted.flatMap((key) => copiesOfKept.get(key) ?? []).filter((key) => !accepted.includes(key));
+		if (extra.length === 0) return question;
+		return { ...question, alsoExpected: [...new Set([...(question.alsoExpected ?? []), ...extra])] };
+	});
+}
+
+/** One question's outcome: the rank slots a retriever returned best first (`null` for a result that is no corpus document, which still takes its place), and how long it took. */
 export interface QueryResult {
 	query: string;
 	expected: string;
 	/** The other identical copies of the expected page (see {@link GoldenQuery.alsoExpected}); a hit on any of them is a hit. */
 	alsoExpected?: readonly string[];
-	ranked: readonly string[];
+	ranked: readonly (string | null)[];
 	latencyMs: number;
 }
 
 /** The outcome of asking `question`: its expected key and its copies carried over, so every runner scores a hit on any copy the same way. */
-export function resultOf(question: GoldenQuery, ranked: readonly string[], latencyMs: number): QueryResult {
+export function resultOf(question: GoldenQuery, ranked: readonly (string | null)[], latencyMs: number): QueryResult {
 	return {
 		query: question.query,
 		expected: question.expected,

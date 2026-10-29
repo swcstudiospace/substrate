@@ -12,7 +12,9 @@ import {
 	runLiveQueries,
 	scoreRun,
 	sloBreaches,
+	withCopyGroups,
 	type EvalDocument,
+	type IdenticalGroup,
 	type RunScore,
 	type SloBreach,
 	type SloThresholds,
@@ -38,6 +40,12 @@ export interface EvalDocuments {
 	unreadable: { count: number; listed: string[] };
 	/** Repositories the scan did not read completely (a failed `git ls-files`, a truncated tree), as its report names them. */
 	incomplete: { count: number; listed: IncompleteRepo[] };
+	/**
+	 * The scan's identical-copy groups (`keep` stands for `copies`, both `repo:path` keys): the copies were dropped before the
+	 * documents were read, so only these groups say which other keys the plane may cite for a page. `unlisted` counts the dropped
+	 * copies the report's caps left out of `groups`; a hit on one of them cannot be recognised.
+	 */
+	copies: { groups: IdenticalGroup[]; unlisted: number };
 }
 
 /** The scan's Markdown documents with their text. A file that cannot be read is counted and named, never fatal: one bad file must not stop the run. */
@@ -63,7 +71,9 @@ export function readEvalDocuments(inventory: Inventory, read: (path: string) => 
 		count: skipped.length,
 		listed: skipped.slice(0, EVAL_LISTED_PROBLEMS).map((repo) => ({ repo: repo.repo, source: repo.source, reason: repo.incomplete ?? "incomplete" })),
 	};
-	return { docs, unreadable, incomplete };
+	const { identical, identicalCopies } = inventory.report.collapsed;
+	const listedCopies = identicalCopies.reduce((sum, group) => sum + group.copies.length, 0);
+	return { docs, unreadable, incomplete, copies: { groups: identicalCopies, unlisted: Math.max(0, identical - listedCopies) } };
 }
 
 export interface EvalServer {
@@ -95,6 +105,7 @@ function problems(documents: EvalDocuments): string[] {
 	const lines = count === 0 ? [] : [`${count} document(s) could not be read from the working tree${listed.length === 0 ? "" : `: ${listed.join(", ")}${count > listed.length ? `, +${count - listed.length} more` : ""}`}`];
 	// A result over a scan that skipped a repository is a result over part of the corpus, and says so wherever the warnings go.
 	if (documents.incomplete.count > 0) lines.push(`partial scan: ${documents.incomplete.count} repository(ies) were not read completely, so the questions and the verdict cover only the rest`);
+	if (documents.copies.unlisted > 0) lines.push(`${documents.copies.unlisted} identical copy(ies) are not listed by the scan, so a search that answers with one of them counts as a miss`);
 	return lines;
 }
 
@@ -112,9 +123,17 @@ function scoreLine(score: RunScore): string {
 	return `recall@1=${score.recall1.toFixed(3)} recall@5=${score.recall5.toFixed(3)} recall@10=${score.recall10.toFixed(3)} mrr=${score.mrr.toFixed(3)} p50=${score.p50Ms.toFixed(1)}ms p95=${score.p95Ms.toFixed(1)}ms`;
 }
 
+/** Why a live run has no verdict, in the numbers the run knows: the searches that did not produce an answer, out of those the set holds. */
+function unscoredReason(questions: number, answered: number, failed: number, degraded: number): string {
+	if (questions === 0) return "no question could be generated from the documents the scan read";
+	const unanswered = questions - answered;
+	const how = failed > 0 && degraded > 0 ? "failed or were answered degraded" : degraded > 0 ? "were answered degraded" : failed > 0 ? "failed" : "were not answered";
+	return `${unanswered} of ${questions} searches ${how}`;
+}
+
 /** Generates the questions and, with a server, asks them. Never throws. */
 export async function evaluateCorpus(request: EvalRequest): Promise<EvalOutcome> {
-	const golden = generateGolden(request.documents.docs, { maxQueries: request.maxQueries });
+	const golden = withCopyGroups(generateGolden(request.documents.docs, { maxQueries: request.maxQueries }), request.documents.copies.groups);
 	const warnings = problems(request.documents);
 	const documents = request.documents.docs.length;
 	const partial = request.documents.incomplete.count > 0;
@@ -139,6 +158,11 @@ export async function evaluateCorpus(request: EvalRequest): Promise<EvalOutcome>
 	const code = breaches.length > 0 || notScored.length > 0 ? 1 : 0;
 	const allWarnings = [...warnings, ...notScored];
 	const scope = partial ? ` (partial: ${request.documents.incomplete.count} repository(ies) not read completely)` : "";
+	// A breach over the answered questions is a breach whatever the rest would have said; otherwise a run with any question
+	// unanswered measured nothing it can call a pass, so it never prints that the objective holds.
+	const scored = notScored.length === 0;
+	const verdict: "breach" | "unscored" | "holds" = breaches.length > 0 ? "breach" : scored ? "holds" : "unscored";
+	const unmeasured = `recall@5 not measured (${unscoredReason(golden.length, answered, live.failed, live.degraded)})${scope}`;
 	const text = request.json
 		? `${JSON.stringify({
 				mode: "live",
@@ -153,6 +177,8 @@ export async function evaluateCorpus(request: EvalRequest): Promise<EvalOutcome>
 				score,
 				threshold: request.thresholds.recall5,
 				breaches,
+				scored,
+				verdict,
 				warnings: allWarnings,
 				unreadable: request.documents.unreadable,
 			})}\n`
@@ -161,9 +187,11 @@ export async function evaluateCorpus(request: EvalRequest): Promise<EvalOutcome>
 				...incompleteLines(request.documents),
 				`questions: ${golden.length}, answered ${answered}, failed ${live.failed}, degraded ${live.degraded}`,
 				scoreLine(score),
-				breaches.length > 0
+				verdict === "breach"
 					? `FAIL recall@5 ${score.recall5.toFixed(3)} is under the objective ${request.thresholds.recall5}${scope}`
-					: `recall@5 holds the objective ${request.thresholds.recall5}${scope}`,
+					: verdict === "unscored"
+						? unmeasured
+						: `recall@5 holds the objective ${request.thresholds.recall5}${scope}`,
 				"",
 			].join("\n");
 	return { code, text, warning: allWarnings.map((line) => `[substrate] corpus eval: ${printable(line)}\n`).join("") };

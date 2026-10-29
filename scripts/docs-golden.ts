@@ -657,9 +657,13 @@ export async function runCanary(io: GoldenIo): Promise<number> {
 	return 1;
 }
 
-/** `golden`'s measurement, or `null` with the reason on stderr; it never fails the canary. */
+/**
+ * `golden`'s measurement, or `null` with the reason on stderr; it never fails the canary. With `SUBSTRATE_CORPUS` off (read the way
+ * the server reads it) nothing was ingested, so the canary sends no extra search and behaves as before the golden set existed.
+ */
 async function measureGolden(io: GoldenIo, base: string, bearer: string): Promise<GoldenRecallReport | null> {
 	if (io.goldenRecall === undefined) return null;
+	if ((io.env.SUBSTRATE_CORPUS?.trim().toLowerCase() ?? "") !== "on") return null;
 	try {
 		const report = await io.goldenRecall(base, bearer);
 		if (report === null) io.stderr("docs canary: golden recall not measured (no documents to ask about, the scan of docs/ was partial, or a question failed or came back degraded)");

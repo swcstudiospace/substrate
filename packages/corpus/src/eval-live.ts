@@ -70,17 +70,26 @@ export function documentKeyOfUrl(url: string): string | null {
 	return null;
 }
 
-export type SearchReply = { kind: "ranked"; keys: string[] } | { kind: "degraded" } | { kind: "invalid" };
+/**
+ * `keys` holds one slot per result of the answer, best first: a corpus document's key, or `null` for a result that names no corpus
+ * document (a Hindsight hit, a page outside the corpus, a chunk with no usable URL). The shared plane answers for more than the
+ * corpus, so such a result still stands in front of the ones behind it; dropping it would let a document in sixth place read as
+ * fourth.
+ */
+export type SearchReply = { kind: "ranked"; keys: (string | null)[] } | { kind: "degraded" } | { kind: "invalid" };
 
-/** The document keys of a `POST /docs/search` answer in rank order, one per document, or `degraded`, or `invalid` when the body is not an answer. */
+/**
+ * The rank slots of a `POST /docs/search` answer in order (see {@link SearchReply}), or `degraded`, or `invalid` when the body is
+ * not an answer. A corpus document appears once, at its first chunk; every other result takes its own slot.
+ */
 export function ranksFromSearchReply(body: unknown): SearchReply {
 	if (!isRecord(body) || !Array.isArray(body.chunks)) return { kind: "invalid" };
 	if (body.degraded === true) return { kind: "degraded" };
-	const keys: string[] = [];
+	const keys: (string | null)[] = [];
 	for (const chunk of body.chunks) {
-		if (!isRecord(chunk) || typeof chunk.source_url !== "string") continue;
-		const key = documentKeyOfUrl(chunk.source_url);
-		if (key !== null && !keys.includes(key)) keys.push(key);
+		const key = isRecord(chunk) && typeof chunk.source_url === "string" ? documentKeyOfUrl(chunk.source_url) : null;
+		if (key === null) keys.push(null);
+		else if (!keys.includes(key)) keys.push(key);
 	}
 	return { kind: "ranked", keys };
 }

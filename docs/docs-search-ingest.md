@@ -524,7 +524,9 @@ read-only against RAGFlow and uses no key of its own.
 
 Since v1.7 phase 70 the same run also asks the self-supervised golden set (the titles, headings and opening
 sentences of this checkout's `docs/`, see [`corpus-eval.md`](corpus-eval.md)) of the same `POST /docs/search`, up to 200
-questions. After the fixtures it prints `golden recall@5 <value> over <n> questions`, posts one `note` as `substrate`
+questions, but only when `SUBSTRATE_CORPUS` is `on` in the canary's environment (`substrate.env` reaches it through the unit's
+`EnvironmentFile`): with it off nothing was ingested, so the canary sends no extra search and runs the fixtures alone, as before.
+After the fixtures it prints `golden recall@5 <value> over <n> questions`, posts one `note` as `substrate`
 (`payload.action: "docs.canary"`, `golden_recall5`, `golden_asked`) on every run that measured it, and carries
 `golden_recall5` in the regression `warning` when it posts one. The server turns a stored report into the
 `corpus.golden_recall5` gauge when `SUBSTRATE_CORPUS` is on. A recall under `SUBSTRATE_DOCS_SLO_RECALL5` (default 0.6) makes the

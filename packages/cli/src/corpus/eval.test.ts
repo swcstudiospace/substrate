@@ -82,7 +82,7 @@ const DOCS: EvalDocument[] = [
 const GUIDE = sourceUrl("acme/atlas", "docs/guide.md");
 const README = sourceUrl("acme/atlas", "README.md");
 
-const PLAIN_DOCUMENTS: EvalDocuments = { docs: DOCS, unreadable: { count: 0, listed: [] }, incomplete: { count: 0, listed: [] } };
+const PLAIN_DOCUMENTS: EvalDocuments = { docs: DOCS, unreadable: { count: 0, listed: [] }, incomplete: { count: 0, listed: [] }, copies: { groups: [], unlisted: 0 } };
 
 function request(over: Partial<EvalRequest> & { answer?: (question: string) => Response } = {}): EvalRequest {
 	const { answer, ...rest } = over;
@@ -193,5 +193,90 @@ describe("evaluateCorpus", () => {
 		const whole = await evaluateCorpus(request());
 		expect(whole.text).not.toContain("partial");
 		expect(JSON.parse((await evaluateCorpus(request({ json: true }))).text)).toMatchObject({ partial: false, incomplete: { count: 0, listed: [] } });
+	});
+});
+
+describe("identical copies the scan collapsed", () => {
+	const LOCAL_DOCS: EvalDocument[] = DOCS.map((doc) => ({ ...doc, repo: "local/c1" }));
+	const KEEP = "local/c1:docs/guide.md";
+	const COPY = "local/c2:docs/guide.md";
+	const COPY_GUIDE = sourceUrl("local/c2", "docs/guide.md");
+	const LOCAL_README = sourceUrl("local/c1", "README.md");
+	// The plane kept the first ingested copy, which is the one in local/c2, and answers with it.
+	const answerWithCopy = (question: string): Response => Response.json({ chunks: [{ source_url: question.includes("estore") || question.includes("Backup") ? COPY_GUIDE : LOCAL_README }] });
+
+	test("readEvalDocuments carries the scan's copy groups and counts the copies its report cap left out", () => {
+		const inventory = inventoryOf({ "docs/a.md": "x" }, "local/c1");
+		inventory.report.collapsed = { clones: 0, worktrees: 0, identical: 3, identicalGroups: 1, identicalCopies: [{ keep: KEEP, copies: [COPY, "local/c3:docs/guide.md"] }] };
+		expect(readEvalDocuments(inventory, () => encode("x")).copies).toEqual({ groups: [{ keep: KEEP, copies: [COPY, "local/c3:docs/guide.md"] }], unlisted: 1 });
+		expect(readEvalDocuments(inventoryOf({ "docs/a.md": "x" }), () => encode("x")).copies).toEqual({ groups: [], unlisted: 0 });
+	});
+
+	test("a hit on a collapsed copy of the kept document scores as a hit", async () => {
+		const documents: EvalDocuments = { ...PLAIN_DOCUMENTS, docs: LOCAL_DOCS, copies: { groups: [{ keep: KEEP, copies: [COPY] }], unlisted: 0 } };
+		const outcome = await evaluateCorpus(request({ documents, answer: answerWithCopy }));
+		expect(outcome.code).toBe(0);
+		expect(outcome.text).toContain("recall@5=1.000");
+
+		// Without the group the same correct answers are misses: the failure this carries across.
+		const without = await evaluateCorpus(request({ documents: { ...documents, copies: { groups: [], unlisted: 0 } }, answer: answerWithCopy }));
+		expect(without.code).toBe(1);
+		expect(without.text).toContain("recall@5=0.500");
+	});
+
+	test("a group whose kept entry is not among the documents adds nothing", async () => {
+		const documents: EvalDocuments = { ...PLAIN_DOCUMENTS, docs: LOCAL_DOCS, copies: { groups: [{ keep: "local/c9:docs/other.md", copies: [COPY] }], unlisted: 0 } };
+		const outcome = await evaluateCorpus(request({ documents, answer: answerWithCopy }));
+		expect(outcome.code).toBe(1);
+		expect(outcome.text).toContain("recall@5=0.500");
+	});
+
+	test("copies the scan did not list are a warning in both forms, and do not change the exit code", async () => {
+		const documents: EvalDocuments = { ...PLAIN_DOCUMENTS, copies: { groups: [], unlisted: 2 } };
+		const human = await evaluateCorpus(request({ documents }));
+		expect(human.code).toBe(0);
+		expect(human.warning).toContain("2 identical copy(ies) are not listed by the scan");
+		const json = JSON.parse((await evaluateCorpus(request({ documents, json: true }))).text);
+		expect(json.warnings.some((line: string) => line.includes("identical copy(ies) are not listed"))).toBe(true);
+	});
+});
+
+describe("a run that could not score is never reported as holding the objective", () => {
+	const guideOnly = (question: string): Response => (question.includes("estore") || question.includes("Backup") ? Response.json({ chunks: [{ source_url: GUIDE }] }) : new Response("no", { status: 503 }));
+
+	test("every search failing says the recall was not measured, in both forms, and exits 1", async () => {
+		const answer = () => new Response("no", { status: 503 });
+		const human = await evaluateCorpus(request({ answer }));
+		expect(human.code).toBe(1);
+		expect(human.text).toContain("recall@5 not measured (4 of 4 searches failed)");
+		expect(human.text).not.toContain("holds the objective");
+		expect(human.text).not.toContain("FAIL");
+		const json = JSON.parse((await evaluateCorpus(request({ answer, json: true }))).text);
+		expect(json).toMatchObject({ answered: 0, scored: false, verdict: "unscored", breaches: [] });
+	});
+
+	test("some searches failing is unscored too, with the numbers, and a partial scan keeps its label", async () => {
+		const human = await evaluateCorpus(request({ answer: guideOnly }));
+		expect(human.code).toBe(1);
+		expect(human.text).toContain("recall@5 not measured (2 of 4 searches failed)");
+		expect(human.text).not.toContain("holds the objective");
+		const incomplete = { count: 1, listed: [{ repo: "acme/gone", source: "fs", reason: "gone" }] };
+		const partial = await evaluateCorpus(request({ answer: guideOnly, documents: { ...PLAIN_DOCUMENTS, incomplete } }));
+		expect(partial.text).toContain("recall@5 not measured (2 of 4 searches failed) (partial: 1 repository(ies) not read completely)");
+		expect(JSON.parse((await evaluateCorpus(request({ answer: guideOnly, json: true }))).text)).toMatchObject({ answered: 2, scored: false, verdict: "unscored" });
+	});
+
+	test("degraded answers are named as such, and a breach among the answered ones still prints FAIL", async () => {
+		const degraded = await evaluateCorpus(request({ answer: () => Response.json({ chunks: [], degraded: true }) }));
+		expect(degraded.text).toContain("recall@5 not measured (4 of 4 searches were answered degraded)");
+		const wrongAndDown = await evaluateCorpus(request({ answer: (question) => (question.includes("estore") || question.includes("Backup") ? Response.json({ chunks: [{ source_url: README }] }) : new Response("no", { status: 503 })) }));
+		expect(wrongAndDown.code).toBe(1);
+		expect(wrongAndDown.text).toContain("FAIL recall@5 0.000 is under the objective 0.6");
+		expect(JSON.parse((await evaluateCorpus(request({ answer: () => new Response("no", { status: 503 }), json: true }))).text).verdict).toBe("unscored");
+	});
+
+	test("a run where every search answered is scored", async () => {
+		const json = JSON.parse((await evaluateCorpus(request({ json: true }))).text);
+		expect(json).toMatchObject({ scored: true, verdict: "holds" });
 	});
 });

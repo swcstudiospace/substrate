@@ -46,10 +46,10 @@ export interface ServerEvalOptions {
 }
 
 /**
- * The server's answer to a question as document keys, best first. A question the plane could not answer (no document shares a
+ * The server's answer to a question as rank slots, best first (`null` for a result that is no corpus document). A question the plane could not answer (no document shares a
  * word with it, or the server degraded) answers nothing: a miss for the scorer, never an exception.
  */
-export type ServerEvalSearch = (question: string) => Promise<string[]>;
+export type ServerEvalSearch = (question: string) => Promise<(string | null)[]>;
 
 export function createServerEvalSearch(docs: readonly EvalDocument[], options: ServerEvalOptions = {}): ServerEvalSearch {
 	const byKey = new Map(docs.map((doc) => [documentKey(doc.repo, doc.path), doc]));

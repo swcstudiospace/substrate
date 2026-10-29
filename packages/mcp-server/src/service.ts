@@ -1419,6 +1419,8 @@ export class Substrate {
 	private readonly corpusSeam: { store?: CorpusStore; plane?: LightragBulkPlane; rootClock?: RootClock; anchorVerifier?: AnchorVerifier; nowMs?: () => number } | null;
 	private corpusPlaneCache: LightragBulkPlane | null = null;
 	private corpusRootKeeper: CorpusRootKeeper | null = null;
+	/** The manifest read behind a freshness refresh while it is in flight, shared by every refresh that overlaps it (phase 70). */
+	private corpusNewestRead: Promise<string | null> | null = null;
 	/** The corpus readings behind the SLO gauges and the `corpus` fabric row (phase 70). */
 	private readonly corpusSlo: CorpusSloState;
 	/** Railway control-plane client (Phase 45, D45-a); tests inject a recording fetch through `stores.railway`. */
@@ -5608,10 +5610,22 @@ export class Substrate {
 		if (!this.config.corpus.enabled) return "ok";
 		const store = this.corpusSeam?.store ?? this.index?.corpusStore() ?? null;
 		if (store === null) return "ok";
-		const read = await within(() => store.status(), boundMs);
+		const read = await within(() => this.newestCorpusIngest(store), boundMs);
 		if (!read.ok) return read.reason;
-		this.corpusSlo.setLastChangeFrom(read.value.lastIngestAt);
+		this.corpusSlo.setLastChangeFrom(read.value);
 		return "ok";
+	}
+
+	/**
+	 * The newest ingest time, as one manifest read that overlapping refreshes share (the ingest path, every fabric read and every
+	 * history sample ask at about the same time). The shared read is forgotten when it settles, so a failure reaches only the
+	 * refreshes that were waiting on it and the next refresh reads again. Each caller keeps its own bound.
+	 */
+	private newestCorpusIngest(store: CorpusStore): Promise<string | null> {
+		this.corpusNewestRead ??= store.newestIngestAt().finally(() => {
+			this.corpusNewestRead = null;
+		});
+		return this.corpusNewestRead;
 	}
 
 	/**
