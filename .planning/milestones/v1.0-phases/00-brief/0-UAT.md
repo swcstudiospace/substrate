@@ -4,9 +4,9 @@ phase: 00-brief
 source: .planning/milestones/v1.0-ROADMAP.md (Phase 0 success criteria) — no SUMMARY.md exists; Phase 0 was built directly from the approved plan rather than through plan-phase/execute-phase
 updated: 2026-10-10T14:05:00Z
 audit_acknowledged:
-  milestone: v1.1
-  at: 2026-10-07
-  gap_snapshot: "partial::scenarios=8"
+  milestone: v1.3.x
+  at: 2026-10-29
+  gap_snapshot: "partial::scenarios=0"
 ---
 
 ## Current Test

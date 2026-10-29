@@ -1,3 +1,10 @@
+---
+audit_acknowledged:
+  milestone: v1.3.x
+  at: 2026-10-29
+  gap_snapshot: "unknown::scenarios=0"
+---
+
 # Phase 20 UAT evidence (plan 20-04)
 
 Repeatable Phase 0 UAT script (`scripts/uat-phase0.ts`, run as
