@@ -335,7 +335,7 @@ export function renderCompactBrief(sections: readonly BriefSection[], stateLine:
 		for (const group of display) {
 			if (group.kept === 0) continue;
 			if (group.section.title !== undefined) out.push(foldLine(group.section.title));
-			for (let i = 0; i < group.kept; i++) out.push(group.lines[i]!);
+			for (const line of group.lines.slice(0, group.kept)) out.push(line);
 		}
 		const missing = groups
 			.map((group) => ({ label: OMIT_LABEL[group.section.id], count: group.capped + group.lines.length - group.kept + (group.section.unlisted ?? 0) }))
@@ -348,9 +348,13 @@ export function renderCompactBrief(sections: readonly BriefSection[], stateLine:
 
 	let cursor = 0;
 	const dropOne = (): boolean => {
-		while (cursor < dropOrder.length && dropOrder[cursor]!.kept === 0) cursor++;
-		if (cursor >= dropOrder.length) return false;
-		dropOrder[cursor]!.kept--;
+		let group = dropOrder[cursor];
+		while (group !== undefined && group.kept === 0) {
+			cursor++;
+			group = dropOrder[cursor];
+		}
+		if (group === undefined) return false;
+		group.kept--;
 		return true;
 	};
 
@@ -358,8 +362,8 @@ export function renderCompactBrief(sections: readonly BriefSection[], stateLine:
 	while (utf8Bytes(text) > cap && dropOne()) text = render();
 	if (utf8Bytes(text) > cap) {
 		const heading = groups.find((group) => group.section.id === "heading" && group.lines.length > 0);
-		if (heading) {
-			const original = heading.lines[0]!;
+		const original = heading?.lines[0];
+		if (heading !== undefined && original !== undefined) {
 			heading.lines[0] = "";
 			const room = cap - utf8Bytes(render());
 			heading.lines[0] = clipBytes(original, Math.max(0, room));

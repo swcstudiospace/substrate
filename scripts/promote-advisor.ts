@@ -161,7 +161,9 @@ export function parseSeriesAnswer(answer: Answer, needs: Evidence["needs"]): Ser
 export function windowSeconds(window: string): number {
 	const match = /^([1-9][0-9]{0,3})([mhd])$/.exec(window);
 	if (match === null) throw new Error(`evidence window ${window} is not <n><m|h|d>`);
-	return Number(match[1]) * WINDOW_UNIT_S[match[2]!]!;
+	const unitSeconds = WINDOW_UNIT_S[match[2] ?? ""];
+	if (unitSeconds === undefined) throw new Error(`evidence window ${window} is not <n><m|h|d>`);
+	return Number(match[1]) * unitSeconds;
 }
 
 export const keyOf = (series: string, window: string): string => `${series}@${window}`;
@@ -257,6 +259,12 @@ export function judgeCriterion(evidence: Evidence, results: ReadonlyMap<string, 
 	}
 	const unjudged = (detail: string, hint: string, samples: number | null = null): Criterion => ({ ...base, verdict: "insufficient-data", observed: null, samples, detail, hint });
 	const windowMs = windowSeconds(evidence.window) * 1000;
+	// Every series the criterion reads went through the loop above, so a miss here is a bug in `requiredSeries`, not a bad input.
+	const answerFor = (series: string): Extract<SeriesResult, { ok: true }> => {
+		const answer = answered.get(series);
+		if (answer === undefined) throw new Error(`series ${series} was not fetched for criterion ${evidence.id}`);
+		return answer;
+	};
 
 	// Window checks first: a number computed over part of the window must not read as the whole.
 	if ([...answered.values()].some((result) => result.truncated)) {
@@ -266,7 +274,7 @@ export function judgeCriterion(evidence: Evidence, results: ReadonlyMap<string, 
 		return unjudged(`history retention is shorter than the ${evidence.window} window`, "raise SUBSTRATE_METRICS_HISTORY_TTL (an existing table needs an operator ALTER, docs/observability.md)");
 	}
 	const coverageTerm = coverageTermOf(evidence);
-	const coverageAnswer = answered.get(coverageTerm.series)!;
+	const coverageAnswer = answerFor(coverageTerm.series);
 	// Coverage is judged on the points the criterion is about (its own label terms), so another surface's full day cannot vouch for a recent burst; an extended criterion is judged on the extended gauge, because extended history only starts when the flag was enabled.
 	const coveragePoints = pick(coverageAnswer.points, coverageTerm);
 	const why = evidence.needs === "extended" ? "extended history only starts when SUBSTRATE_METRICS_HISTORY_SERIES=extended was enabled, and a missing extended counter row is zero only after that; " : "";
@@ -277,7 +285,13 @@ export function judgeCriterion(evidence: Evidence, results: ReadonlyMap<string, 
 	}
 	// Coverage from the first point to now says nothing about a hole in the middle (sampler or ledger down): no stretch of the window, between points or after the last one, may exceed MAX_GAP_FRACTION of it.
 	const stamps = [...new Set(coveragePoints.map((point) => point.tsMs))].sort((a, b) => a - b);
-	const widest = stamps.reduce((gap, stamp, index) => Math.max(gap, index === 0 ? 0 : stamp - stamps[index - 1]!), Math.max(0, coverageAnswer.toMs - stamps[stamps.length - 1]!));
+	let widest = 0;
+	let previous: number | undefined;
+	for (const stamp of stamps) {
+		if (previous !== undefined) widest = Math.max(widest, stamp - previous);
+		previous = stamp;
+	}
+	if (previous !== undefined) widest = Math.max(widest, coverageAnswer.toMs - previous);
 	if (widest > MAX_GAP_FRACTION * windowMs) {
 		return unjudged(`${why}${coverageTerm.series} has a ${hours(widest)} gap in the ${evidence.window} window (allowed ${hours(MAX_GAP_FRACTION * windowMs)}): the sampler or the ledger was down, or there was no traffic`, "check the sampler and the ledger plane in /healthz; rerun when the window is continuous");
 	}
@@ -286,7 +300,7 @@ export function judgeCriterion(evidence: Evidence, results: ReadonlyMap<string, 
 	let ownBlock: Criterion | null = null;
 	if (evidence.needs === "extended") {
 		const ownTerm = evidence.stat === "share" ? (evidence.denominator ?? { series: evidence.numerator.series }) : evidence.numerator;
-		const ownAnswer = answered.get(ownTerm.series)!;
+		const ownAnswer = answerFor(ownTerm.series);
 		const own = pick(ownAnswer.points, ownTerm);
 		const firstMs = own.reduce((min, point) => Math.min(min, point.tsMs), Number.POSITIVE_INFINITY);
 		if (own.length === 0) {
@@ -296,7 +310,7 @@ export function judgeCriterion(evidence: Evidence, results: ReadonlyMap<string, 
 			ownBlock = unjudged(`the policy's own series ${ownTerm.series} started only ${hours(ownAnswer.toMs - firstMs)} ago of the ${evidence.window} window (it records nothing while the flag is off; needs ${Math.round(COVERAGE_MIN * 100)} %)`, "let the policy run in its safe mode for the whole window; rerun then");
 		}
 	}
-	const numeratorPoints = pick(answered.get(evidence.numerator.series)!.points, evidence.numerator);
+	const numeratorPoints = pick(answerFor(evidence.numerator.series).points, evidence.numerator);
 	const thin = (samples: number): Criterion => unjudged(`${samples} samples in the window, needs ${evidence.minSamples}`, "let it soak in the safe mode; rerun when there is traffic", samples);
 	let observed: number;
 	let samples: number;
@@ -304,7 +318,7 @@ export function judgeCriterion(evidence: Evidence, results: ReadonlyMap<string, 
 	if (evidence.stat === "share" || evidence.stat === "ratio") {
 		// No denominator means every point of the numerator's series, so a label set is a share of the whole series.
 		const denominatorTerm = evidence.denominator ?? { series: evidence.numerator.series };
-		const denominatorPoints = pick(answered.get(denominatorTerm.series)!.points, denominatorTerm);
+		const denominatorPoints = pick(answerFor(denominatorTerm.series).points, denominatorTerm);
 		const top = sumValue(numeratorPoints);
 		const bottom = evidence.stat === "share" ? sumValue(denominatorPoints) : sumCount(denominatorPoints);
 		samples = bottom;
@@ -345,7 +359,8 @@ const PRECEDENCE: readonly Verdict[] = ["hold", "series-unavailable", "insuffici
 
 /** A flag's verdict from its criteria: hold, then series-unavailable, then insufficient-data, else ready. */
 export function judgeFlag(flag: FlagSpec, results: ReadonlyMap<string, SeriesResult>): FlagVerdict {
-	const policy = flag.policy!;
+	const policy = flag.policy;
+	if (policy === undefined) throw new Error(`flag ${flag.name} has no promotion policy to judge`);
 	const criteria = policy.evidence.map((evidence) => judgeCriterion(evidence, results));
 	const verdict = PRECEDENCE.find((candidate) => criteria.some((criterion) => criterion.verdict === candidate)) ?? "ready";
 	return { flag: flag.name, safe: policy.safe, enforcing: policy.enforcing, verdict, step: policy.step, rollback: policy.rollback, manual: policy.manual ?? null, criteria };
