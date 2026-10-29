@@ -7,7 +7,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { cleanupTemp, makeRepo } from "../../../worktree-snapshot/src/testkit.ts";
 import { type SessionDeps, EXIT_DONE, EXIT_USAGE, parseSessionArgs, runSession } from "./command.ts";
-import { CLAUDE_CODE_HOOK_COMMAND, GIT_POST_COMMIT_HOOK_COMMAND, HOOK_CONFIG_TARGETS, renderHookConfig } from "./hook-config.ts";
+import { BASELINE_HOOK_COMMAND, CLAUDE_CODE_HOOK_COMMAND, GIT_POST_COMMIT_HOOK_COMMAND, HOOK_CONFIG_TARGETS, STEERING_HOOK_COMMAND, renderHookConfig } from "./hook-config.ts";
 import { HOOK_TIMEOUT_MS } from "./hook.ts";
 import { FakeTranscript, seededRandomBytes } from "./testkit.ts";
 
@@ -39,6 +39,25 @@ substrate session hook plan-step --plan-step "$(git rev-parse --short HEAD)" </d
 exit 0
 `;
 
+const STEERING_TEXT = `#!/bin/sh
+# Run this from the session's worktree, by the host that applies a steering directive. ADR 0007 maps no Claude Code or git event to it:
+# wire it to the place your host handles the \`checkpoint_hint\` of a \`steering_acknowledge\` reply, which carries the directive_id.
+# After a directive it takes a steering checkpoint, once per directive id; it is skipped when the tree is unchanged.
+# Set SESSION_ID (the string the surface uses for its memory writes) and DIRECTIVE_ID; neither may contain a quote or a backslash.
+# The command is fail-open and runs in the background, so the host never waits.
+printf '{"directive_id":"%s"}' "$DIRECTIVE_ID" | substrate session hook steering --session "$SESSION_ID" >/dev/null 2>&1 &
+exit 0
+`;
+
+const BASELINE_TEXT = `#!/bin/sh
+# Run this from the session's worktree, once when a session starts. ADR 0007 maps no Claude Code or git event to it; it names
+# omp's \`session_start\` and a Swarm lane start (after the lane's worktree and branch exist) as proposals, so wire it to the matching event of your host.
+# It takes the first checkpoint of a session that has none yet, so a rollback can reach back to the start; once the session has a checkpoint it does nothing.
+# Set SESSION_ID to the string the surface uses for its memory writes. The command is fail-open and runs in the background.
+substrate session hook baseline --session "$SESSION_ID" </dev/null >/dev/null 2>&1 &
+exit 0
+`;
+
 describe("the printed text", () => {
 	test("claude-code is exactly the pinned settings JSON", () => {
 		expect(renderHookConfig("claude-code")).toBe(CLAUDE_CODE_TEXT);
@@ -46,6 +65,34 @@ describe("the printed text", () => {
 
 	test("git-post-commit is exactly the pinned script", () => {
 		expect(renderHookConfig("git-post-commit")).toBe(GIT_POST_COMMIT_TEXT);
+	});
+
+	test("steering is exactly the pinned script", () => {
+		expect(renderHookConfig("steering")).toBe(STEERING_TEXT);
+	});
+
+	test("baseline is exactly the pinned script", () => {
+		expect(renderHookConfig("baseline")).toBe(BASELINE_TEXT);
+	});
+
+	test("the steering script pipes the directive id as the envelope, runs the steering hook in the background, and exits 0", () => {
+		const script = renderHookConfig("steering");
+		expect(script.startsWith("#!/bin/sh\n")).toBe(true);
+		expect(script).toContain(`| ${STEERING_HOOK_COMMAND} --session "$SESSION_ID" >/dev/null 2>&1 &`);
+		expect(script).toContain(`'{"directive_id":"%s"}'`);
+		expect(script.endsWith("exit 0\n")).toBe(true);
+	});
+
+	test("the baseline script runs the baseline hook, backgrounded, with stdin and output discarded, and exits 0", () => {
+		const script = renderHookConfig("baseline");
+		expect(script.startsWith("#!/bin/sh\n")).toBe(true);
+		expect(script).toContain(`${BASELINE_HOOK_COMMAND} --session "$SESSION_ID" </dev/null >/dev/null 2>&1 &`);
+		expect(script.endsWith("exit 0\n")).toBe(true);
+	});
+
+	test("the four targets together cover every trigger `session hook` accepts", () => {
+		const text = HOOK_CONFIG_TARGETS.map((target) => renderHookConfig(target)).join("\n");
+		for (const trigger of ["turn", "plan-step", "steering", "baseline"]) expect(text).toContain(`substrate session hook ${trigger}`);
 	});
 
 	test("the claude-code text is valid JSON: a Stop hook running the exact turn command, with room above the hook's own budget", () => {
@@ -72,7 +119,7 @@ describe("the printed text", () => {
 
 describe("only commands that exist", () => {
 	test("each printed invocation parses under the session grammar", () => {
-		for (const command of [CLAUDE_CODE_HOOK_COMMAND, GIT_POST_COMMIT_HOOK_COMMAND]) {
+		for (const command of [CLAUDE_CODE_HOOK_COMMAND, GIT_POST_COMMIT_HOOK_COMMAND, STEERING_HOOK_COMMAND, BASELINE_HOOK_COMMAND]) {
 			const [bin, group, ...argv] = command.split(" ");
 			expect(bin).toBe("substrate");
 			expect(group).toBe("session");
@@ -80,6 +127,8 @@ describe("only commands that exist", () => {
 		}
 		// The script adds the plan-step reference the shell substitutes.
 		expect(typeof parseSessionArgs(["hook", "plan-step", "--plan-step", "abc1234"])).toBe("object");
+		expect(typeof parseSessionArgs(["hook", "steering", "--session", "ID"])).toBe("object");
+		expect(typeof parseSessionArgs(["hook", "baseline", "--session", "ID"])).toBe("object");
 	});
 });
 
@@ -123,6 +172,6 @@ describe("through the command", () => {
 		const r = rig();
 		expect(await runSession(["hook-config", "vim"], r.deps)).toBe(EXIT_USAGE);
 		expect(r.out).toEqual([]);
-		expect(r.err.join("")).toContain("hook-config takes exactly one target: claude-code, git-post-commit");
+		expect(r.err.join("")).toContain("hook-config takes exactly one target: claude-code, git-post-commit, steering, baseline");
 	});
 });

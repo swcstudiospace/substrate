@@ -50,7 +50,7 @@ substrate session rollback <ckpt|seq|previous> [--session ID] [--surface S] [--d
 substrate session recover [--json]
 substrate session sync [--json]
 substrate session hook <turn|plan-step|steering|baseline> [--session ID] [--surface S] [--plan-phase P] [--plan-step S] [--verbose]
-substrate session hook-config <claude-code|git-post-commit>
+substrate session hook-config <claude-code|git-post-commit|steering|baseline>
 ```
 
 | Exit | Meaning |
@@ -82,15 +82,19 @@ The limits count checkpoints of the **same** trigger, so a manual checkpoint doe
 **Installing it (an operator step; nothing here installs anything).** Print the configuration and put it where the host reads it:
 
 ```
-substrate session hook-config claude-code        # settings JSON: a Stop hook that runs `substrate session hook turn`
-substrate session hook-config git-post-commit    # a post-commit script body that runs `substrate session hook plan-step` in the background
+substrate session hook-config claude-code        # turn: settings JSON, a Stop hook that runs `substrate session hook turn`
+substrate session hook-config git-post-commit    # plan-step: a post-commit script body that runs `substrate session hook plan-step` in the background
+substrate session hook-config steering           # steering: a script body that pipes the directive id to `substrate session hook steering`
+substrate session hook-config baseline           # baseline: a script body that runs `substrate session hook baseline` once at session start
 ```
 
 - **Claude Code.** Merge the printed `hooks` object into `.claude/settings.json` (this project) or `~/.claude/settings.json` (every project); if a `Stop` list exists, add the entry to it. `substrate` must be on the PATH of the hook (otherwise replace it with `bun <checkout>/packages/cli/src/index.ts`).
 - **git.** Save the printed script as `.git/hooks/post-commit` and `chmod +x` it, or append its command line to an existing `post-commit`. The commit never waits for it. There is no envelope on stdin, so the session is the one that already has checkpoints in the worktree; add `--session ID` to the command line when there could be several.
+- **Steering.** ADR 0007 maps no Claude Code or git event to it, so the printed script is a command to wire, not a file to drop in. Run it from the session's worktree, from the place your host handles the `checkpoint_hint` (`{"trigger":"steering","directive_id":"..."}`) of a `steering_acknowledge` reply, with `SESSION_ID` and `DIRECTIVE_ID` set (neither may contain a quote or a backslash). It takes one checkpoint per directive id.
+- **Baseline.** Likewise no mapped host event: ADR 0007 proposes omp's `session_start` and a Swarm lane start (after the lane's worktree and branch exist). Run the printed command once when the session starts, with `SESSION_ID` set; it does nothing once the session has a checkpoint.
 - **Check it.** After a turn or a commit, `substrate session checkpoints --session ID` should list a `turn` or `plan-step` checkpoint; if not, rerun the command by hand with `--verbose` and the envelope on stdin, for example `echo '{"session_id":"ID","cwd":"/path/to/worktree"}' | substrate session hook turn --verbose`.
 
-**Outside this repository.** Firing the hook from omp, GSD-Core (phase and plan-step boundaries), Ultrathink (plan nodes), Swarm (lane boundaries) or a steering-delivery host is those projects' work: none of them was changed, and none calls the hook today. For steering, a host that applies a directive pipes `{"session_id":"ID","directive_id":"DIRECTIVE"}` to `substrate session hook steering`; no printed configuration exists for it.
+**Outside this repository.** Firing the hook from omp, GSD-Core (phase and plan-step boundaries), Ultrathink (plan nodes), Swarm (lane boundaries) or a steering-delivery host is those projects' work: none of them was changed, and none calls the hook today. The steering and baseline printouts only name the command and the event to wire it to; the envelope for steering is `{"session_id":"ID","directive_id":"DIRECTIVE"}` (or `--session ID` with `{"directive_id":"DIRECTIVE"}`).
 
 ## A worked example
 
