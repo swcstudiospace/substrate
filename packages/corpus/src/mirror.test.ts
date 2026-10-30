@@ -33,6 +33,9 @@ describe("mirrorName", () => {
 		expect(mirrorName("https://git.example.com:8443/team/repo.git")).not.toBe(mirrorName("https://git.example.com:9443/team/repo.git"));
 		expect(mirrorName("https://git.example.com:8443/team/repo.git")).toBe(mirrorName("https://git.example.com:8443/team/repo"));
 		expect(mirrorName("git@git.example.com:/srv/git/repo.git")).not.toBe(mirrorName("git@git.example.com:srv/git/repo.git"));
+		expect(mirrorName("alice@git.example.com:team/repo.git")).not.toBe(mirrorName("bob@git.example.com:team/repo.git"));
+		expect(mirrorName("alice@git.example.com:team/repo.git")).toBe(mirrorName("ssh://alice@git.example.com/team/repo.git"));
+		expect(mirrorName("git@git.example.com:team/repo.git")).toBe(mirrorName("https://git.example.com/team/repo"));
 	});
 
 	test("a mirror created under the old https hash is reused when the origin is rewritten to ssh", () => {
@@ -87,6 +90,20 @@ describe("mirrorName", () => {
 		runGit(w.local, ["remote", "set-url", "origin", origin]);
 		expect(ensureMirror(w.local, w.mirrors, run, { fetch: false })).toEqual({ status: "unfetched", mirrorDir: legacy });
 		runGit(legacy, ["remote", "set-url", "origin", "git@git.example.com:srv/git/repo.git"]);
+		expect(ensureMirror(w.local, w.mirrors, run, { fetch: false })).toEqual({ status: "absent", reason: "mirror-unmatched" });
+	});
+
+	test("a mirror keyed before the SSH account was part of the key is reused only for that account", () => {
+		const w = world();
+		const origin = "alice@git.example.com:team/repo.git";
+		const hash = createHash("sha256").update("git.example.com/team/repo").digest("hex").slice(0, 12);
+		const legacy = join(w.mirrors, `repo-${hash}`);
+		mkdirSync(w.mirrors, { recursive: true });
+		runGit(w.mirrors, ["init", "-q", "--bare", legacy]);
+		runGit(legacy, ["remote", "add", "origin", origin]);
+		runGit(w.local, ["remote", "set-url", "origin", origin]);
+		expect(ensureMirror(w.local, w.mirrors, run, { fetch: false })).toEqual({ status: "unfetched", mirrorDir: legacy });
+		runGit(legacy, ["remote", "set-url", "origin", "bob@git.example.com:team/repo.git"]);
 		expect(ensureMirror(w.local, w.mirrors, run, { fetch: false })).toEqual({ status: "absent", reason: "mirror-unmatched" });
 	});
 

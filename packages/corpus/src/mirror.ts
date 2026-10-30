@@ -81,19 +81,29 @@ function isLocalOrigin(origin: string): boolean {
 	return !/^[^:/\s]+:[^/]/.test(origin);
 }
 
+/** The SSH account of an `ssh://user@host` or scp `user@host:path` origin, or null. `git` is the forge's login, so it never separates two repositories. */
+function sshAccount(origin: string): string | null {
+	const text = origin.trim();
+	const user = (/^ssh:\/\/([^/@:\s]+)@/.exec(text) ?? /^([^@/\s]+)@[^:/\s]+:/.exec(text))?.[1];
+	return user === undefined || user === "git" ? null : user;
+}
+
 function originIdentity(origin: string): string {
 	const slug = githubSlug(origin);
 	if (slug !== null) return `github.com/${slug}`;
 	const stripped = strippedOrigin(origin);
+	// Two accounts on one host can hold different repositories under one path, so a non-`git` account is part of the identity.
+	const account = sshAccount(origin);
+	const prefix = account === null ? "" : `${account}@`;
 	// The leading slash stays: `host:/abs` is the server root and `host:rel` is the SSH user's home, so they must not share a mirror.
 	const withUser = /^([^@/\s]+)@([^:/\s]+):(.*)$/.exec(stripped);
-	if (withUser && !stripped.includes("://")) return `${(withUser[2] ?? "").toLowerCase()}/${withUser[3] ?? ""}`;
+	if (withUser && !stripped.includes("://")) return `${prefix}${(withUser[2] ?? "").toLowerCase()}/${withUser[3] ?? ""}`;
 	const scp = /^([^:/\s]+):([^/].*)$/.exec(stripped);
-	if (scp && !stripped.includes("://")) return `${(scp[1] ?? "").toLowerCase()}/${scp[2] ?? ""}`;
+	if (scp && !stripped.includes("://")) return `${prefix}${(scp[1] ?? "").toLowerCase()}/${scp[2] ?? ""}`;
 	try {
 		const url = new URL(stripped);
 		// `host` keeps a non-default port; `hostname` would make :8443 and :9443 share a mirror. A default port `URL` omits stays omitted.
-		if (url.host !== "") return `${url.host.toLowerCase()}/${url.pathname.replace(/^\/+|\/+$/g, "")}`;
+		if (url.host !== "") return `${prefix}${url.host.toLowerCase()}/${url.pathname.replace(/^\/+|\/+$/g, "")}`;
 	} catch {
 		// A local path is not a URL. Its stripped form is the identity.
 	}
@@ -179,12 +189,24 @@ function portlessIdentity(origin: string): string | null {
 	if (url.hostname === "" || url.port === "") return null;
 	return `${url.hostname.toLowerCase()}/${url.pathname.replace(/^\/+|\/+$/g, "")}`;
 }
-/** The identity used before an absolute SSH path kept its leading slash, or null when this key has no double slash. */
+/** The identity without the SSH account: the one `main` used, and the base the legacy keys are derived from. */
+function identityWithoutAccount(origin: string): string {
+	const identity = originIdentity(origin);
+	const account = sshAccount(origin);
+	return account !== null && identity.startsWith(`${account}@`) ? identity.slice(account.length + 1) : identity;
+}
+
+/** The identity used before an absolute SSH path kept its leading slash, or null when there is no double slash. */
 function slashlessIdentity(origin: string): string | null {
-	const current = originIdentity(origin);
+	const current = identityWithoutAccount(origin);
 	const marker = current.indexOf("//");
 	if (marker <= 0) return null;
 	return `${current.slice(0, marker)}/${current.slice(marker + 2)}`;
+}
+
+/** The identity used before an SSH account was part of the key, or null when this origin names no account. */
+function accountlessIdentity(origin: string): string | null {
+	return sshAccount(origin) === null ? null : identityWithoutAccount(origin);
 }
 
 
@@ -229,7 +251,7 @@ function mirrorForCheckout(_repoDir: string, mirrorRoot: string, origin: string,
 	// A mirror created by an older key is reused only when its stored origin is this one. The hostname-only key
 	// collapsed ports, and the slash-stripped key collapsed an absolute SSH path with a home-relative one. Either
 	// miss must stay incomplete instead of a complete checkout read.
-	for (const previous of [portlessIdentity(origin), slashlessIdentity(origin)]) {
+	for (const previous of [portlessIdentity(origin), slashlessIdentity(origin), accountlessIdentity(origin)]) {
 		if (previous === null) continue;
 		const name = mirrorNameFrom(origin, previous);
 		if (seen.has(name)) continue;
