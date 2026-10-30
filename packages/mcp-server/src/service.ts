@@ -6509,7 +6509,7 @@ export class Substrate {
 	 */
 	private planningHashStore(): PlanningHashStore | null {
 		if (!this.config.planningHashStore) return null;
-		const url = this.config.docsBackend === "lightrag" ? (this.config.lightrag?.url ?? "") : this.config.ragflow.url;
+		const url = this.config.docsBackend === "lightrag" ? (this.config.lightrag?.url ?? "") : (this.config.ragflow?.url ?? "");
 		this.planningHashStoreCache ??= this.planningHashSeam ?? this.index?.planningHashStore(planningDestinationKey(url)) ?? memoryPlanningHashStore();
 		return this.planningHashStoreCache;
 	}
