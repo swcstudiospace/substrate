@@ -80,9 +80,23 @@ function fleet(): Fleet {
 
 const withRoot = (root: string): Record<string, string> => ({ SUBSTRATE_WORKTREE_ROOTS: root });
 
+/** Git verbs that write to a repository or a worktree, plus the worktree, branch, remote and config forms that do. */
+const WRITE_VERBS = ["add", "commit", "push", "reset", "checkout", "switch", "restore", "clean", "gc", "stash", "fetch", "pull", "merge", "rebase", "cherry-pick", "revert", "tag", "update-ref", "rm", "mv", "init", "clone", "prune"];
+const BRANCH_WRITE_FLAGS = ["-d", "-D", "-m", "-M", "-c", "-C", "-f", "-u", "--delete", "--move", "--copy", "--force", "--set-upstream-to", "--unset-upstream"];
+
+/** Whether a recorded git call could change a repository, a worktree, a branch, a remote or its configuration. */
+function isWrite(args: string[]): boolean {
+	if (WRITE_VERBS.includes(args[0] ?? "")) return true;
+	if (args[0] === "worktree") return args[1] !== "list";
+	if (args[0] === "branch") return args.some((arg) => BRANCH_WRITE_FLAGS.includes(arg));
+	if (args[0] === "remote") return ["add", "remove", "rm", "rename", "set-head", "set-url", "prune"].includes(args[1] ?? "");
+	if (args[0] === "config") return !args.some((arg) => arg === "--get" || arg === "--list" || arg === "-l");
+	return false;
+}
+
 describe("usage and roots", () => {
 	test("with no configured root the commands say so and exit 2", async () => {
-		for (const command of ["list", "scan", "prune", "disk", "conflicts"]) {
+		for (const command of ["list", "scan", "prune", "disk", "conflicts", "merge-back"]) {
 			const h = harness();
 			expect(await runWorktree([command], h.deps)).toBe(2);
 			expect(h.err.join("")).toContain("SUBSTRATE_WORKTREE_ROOTS");
@@ -902,18 +916,6 @@ describe("httpClaimsLookup", () => {
 
 describe("guard", () => {
 	const FAILED: CommandResult = { code: 128, stdout: "", stderr: "fatal: injected" };
-	/** Git verbs that write to a repository or a worktree, plus the worktree, branch, remote and config forms that do. */
-	const WRITE_VERBS = ["add", "commit", "push", "reset", "checkout", "switch", "restore", "clean", "gc", "stash", "fetch", "pull", "merge", "rebase", "cherry-pick", "revert", "tag", "update-ref", "rm", "mv", "init", "clone", "prune"];
-	const BRANCH_WRITE_FLAGS = ["-d", "-D", "-m", "-M", "-c", "-C", "-f", "-u", "--delete", "--move", "--copy", "--force", "--set-upstream-to", "--unset-upstream"];
-
-	function isWrite(args: string[]): boolean {
-		if (WRITE_VERBS.includes(args[0] ?? "")) return true;
-		if (args[0] === "worktree") return args[1] !== "list";
-		if (args[0] === "branch") return args.some((arg) => BRANCH_WRITE_FLAGS.includes(arg));
-		if (args[0] === "remote") return ["add", "remove", "rm", "rename", "set-head", "set-url", "prune"].includes(args[1] ?? "");
-		if (args[0] === "config") return !args.some((arg) => arg === "--get" || arg === "--list" || arg === "-l");
-		return false;
-	}
 
 	/** A workspace `<root>/{api,web}`: linked worktrees whose primary checkout sits outside the root. Both are pushed and clean. */
 	function workspace(): { repo: TestRepo; root: string; api: string; web: string } {
@@ -1150,4 +1152,168 @@ describe("guard", () => {
 		expect(text).toContain(`${join(w.root, "loop-b")}: outside every git worktree`);
 		expect(text).not.toContain(join(w.root, "loop-a", "loop-a"));
 	}, 10_000);
+});
+
+describe("merge-back", () => {
+	interface MergeBackJson {
+		dry_run: boolean;
+		recorded: Array<{ path: string; repo: string; branch: string | null; head: string; merged_via: string; ledger: string | null }>;
+		refused: string[];
+		reasons: Record<string, string[]>;
+	}
+
+	/** A runner that records every git call and runs it for real. */
+	function recording(calls: string[][]): CommandRunner {
+		return async (args, cwd) => {
+			calls.push(args);
+			return spawnGit(args, cwd);
+		};
+	}
+
+	/** A branch cut from main, committed, pushed and merged into main: its head is on the default branch and on origin. */
+	function landed(repo: TestRepo, root: string, name: string): string {
+		const path = addWorktree(repo, root, name);
+		commit(path, `${name}.txt`, `${name}\n`);
+		git(path, ["push", "-q", "origin", name]);
+		git(repo.dir, ["merge", "-q", "--no-ff", "-m", `merge ${name}`, name]);
+		git(repo.dir, ["push", "-q", "origin", "main"]);
+		return path;
+	}
+
+	const reasonsOf = (result: MergeBackJson, path: string): string => (result.reasons[path] ?? []).join(" | ");
+
+	test("a dry run writes nothing, emits nothing and runs no write command", async () => {
+		const f = fleet();
+		const calls: string[][] = [];
+		const h = harness({ git: recording(calls) }, withRoot(f.root));
+		expect(await runWorktree(["merge-back", f.merged, f.mergedToo], h.deps)).toBe(0);
+		expect(h.out.join("")).toContain("dry run: 2 worktrees would be recorded, 0 refused");
+		expect(h.events).toEqual([]);
+		expect(calls.length).toBeGreaterThan(0);
+		expect(calls.filter(isWrite)).toEqual([]);
+		expect([f.merged, f.mergedToo].every((path) => existsSync(path))).toBe(true);
+	});
+
+	test("--execute emits one retained note per eligible worktree, named by repository and branch, and removes nothing", async () => {
+		const f = fleet();
+		const calls: string[][] = [];
+		const h = harness({ git: recording(calls) }, withRoot(f.root));
+		expect(await runWorktree(["merge-back", "--execute", f.merged, f.mergedToo], h.deps)).toBe(0);
+		expect(h.events).toHaveLength(2);
+		expect(h.events[0]).toMatchObject({ kind: "note", repo: "acme/widgets", branch: "merged-a", payload: { action: "worktree.merge_back", repo: "acme/widgets", branch: "merged-a", merged_via: "default-branch", retained: true } });
+		expect(h.events[1]).toMatchObject({ payload: { branch: "merged-b" } });
+		for (const event of h.events) {
+			expect(JSON.stringify(event)).not.toContain(f.root);
+			expect(Object.keys(event.payload ?? {})).not.toContain("path");
+		}
+		expect(h.out.join("")).toContain("ledger: worktree.merge_back note recorded");
+		expect(calls.filter(isWrite)).toEqual([]);
+		expect([f.merged, f.mergedToo, f.repo.dir].every((path) => existsSync(path))).toBe(true);
+	});
+
+	test("a squash-merged pull request proves its head: merged_via is pull-request", async () => {
+		const repo = makeRepo();
+		const root = join(tempDir(), "wts");
+		mkdirSync(root);
+		const wt = addWorktree(repo, root, "squashed");
+		const head = commit(wt, "s.txt", "1\n");
+		git(wt, ["push", "-q", "origin", "squashed"]);
+		// A squash merge leaves a different commit on main; only the pull request's head equals the branch head.
+		commit(repo.dir, "s.txt", "1\n", "squash of squashed");
+		git(repo.dir, ["push", "-q", "origin", "main"]);
+		const gh = fakeGh({ squashed: [{ state: "MERGED", headRefOid: head, number: 11 }] });
+		const h = harness({ gh }, withRoot(root));
+		expect(await runWorktree(["merge-back", "--execute", wt], h.deps)).toBe(0);
+		expect(h.events).toHaveLength(1);
+		expect(h.events[0]).toMatchObject({ payload: { head, merged_via: "pull-request", retained: true } });
+	});
+
+	test("a dirty, unpushed, unproven, ignored-work, primary or live-claimed worktree is refused and absent from the notes", async () => {
+		const f = fleet();
+		// The ignored notes are ignored on main before the worktree branches from it, or they would show as untracked files.
+		write(f.repo.dir, ".gitignore", ".planning/\n");
+		git(f.repo.dir, ["add", ".gitignore"]);
+		git(f.repo.dir, ["commit", "-q", "-m", "ignore planning"]);
+		git(f.repo.dir, ["push", "-q", "origin", "main"]);
+		const notes = landed(f.repo, f.root, "notes");
+		write(notes, ".planning/STATE.md", "only here\n");
+		const dirty = landed(f.repo, f.root, "dirty");
+		write(dirty, "scratch.txt", "unsaved\n");
+		const unpushed = addWorktree(f.repo, f.root, "unpushed");
+		commit(unpushed, "u.txt", "u\n");
+		const claimed = landed(f.repo, f.root, "claimed");
+		const all = [f.merged, f.mergedToo, f.review, f.repo.dir, unpushed, dirty, notes, claimed];
+		const claims = async (graphId: string): Promise<ClaimsLookup> => ({ ok: true, claims: graphId === "claimed" ? [CLAIM] : [] });
+
+		const calls: string[][] = [];
+		const dry = harness({ git: recording(calls), claims }, withRoot(f.root));
+		expect(await runWorktree(["merge-back", "--json", ...all], dry.deps)).toBe(1);
+		const result: MergeBackJson = JSON.parse(dry.out.join(""));
+		expect(result.dry_run).toBe(true);
+		expect(result.recorded.map((item) => item.branch)).toEqual(["merged-a", "merged-b"]);
+		expect(result.refused).toEqual([f.review, f.repo.dir, unpushed, dirty, notes, claimed]);
+		expect(reasonsOf(result, f.review)).toContain("HEAD is not proven merged");
+		expect(reasonsOf(result, f.repo.dir)).toContain("the primary checkout is never merged back");
+		expect(reasonsOf(result, unpushed)).toContain("head is not pushed");
+		expect(reasonsOf(result, dirty)).toContain("has uncommitted or untracked changes");
+		expect(reasonsOf(result, notes)).toContain("ignored work: .planning/STATE.md");
+		expect(reasonsOf(result, claimed)).toContain("live claim on graph claimed");
+		expect(dry.events).toEqual([]);
+		expect(calls.filter(isWrite)).toEqual([]);
+
+		const executing = harness({ claims }, withRoot(f.root));
+		expect(await runWorktree(["merge-back", "--execute", ...all], executing.deps)).toBe(1);
+		expect(executing.events.map((event) => event.payload?.branch)).toEqual(["merged-a", "merged-b"]);
+		expect(executing.err.join("")).toBe("");
+		expect(existsSync(join(dirty, "scratch.txt")) && existsSync(join(notes, ".planning", "STATE.md"))).toBe(true);
+	});
+
+	test("a claim that cannot be checked refuses: nothing is recorded and the worktrees stay", async () => {
+		const f = fleet();
+		const h = harness({ claims: async () => ({ ok: false, error: "HTTP 503" }) }, withRoot(f.root));
+		expect(await runWorktree(["merge-back", "--execute", f.merged, f.mergedToo], h.deps)).toBe(1);
+		expect(h.out.join("")).toContain("claims-unverified");
+		expect(h.events).toEqual([]);
+		expect(existsSync(f.merged) && existsSync(f.mergedToo)).toBe(true);
+	});
+
+	test("a worktree outside every configured root has no graph claim to ask about, so it is eligible", async () => {
+		const f = fleet();
+		const outside = join(tempDir(), "outside-root");
+		mkdirSync(outside);
+		const elsewhere = landed(f.repo, outside, "elsewhere");
+		const asked: string[] = [];
+		const h = harness(
+			{
+				claims: async (graphId) => {
+					asked.push(graphId);
+					return { ok: false, error: "never asked" };
+				},
+			},
+			withRoot(f.root),
+		);
+		expect(await runWorktree(["merge-back", "--execute", elsewhere], h.deps)).toBe(0);
+		expect(asked).toEqual([]);
+		expect(h.events.map((event) => event.payload?.branch)).toEqual(["elsewhere"]);
+	});
+
+	test("a directory that is not a worktree is refused and exits 1", async () => {
+		const f = fleet();
+		const plain = tempDir();
+		const h = harness({}, withRoot(f.root));
+		expect(await runWorktree(["merge-back", "--json", plain], h.deps)).toBe(1);
+		const result: MergeBackJson = JSON.parse(h.out.join(""));
+		expect(result.refused).toEqual([plain]);
+		expect(h.events).toEqual([]);
+	});
+
+	test("the parser takes paths for merge-back alone, and it needs a path and a configured root", async () => {
+		expect(parseWorktreeArgs(["merge-back", "/a", "/b", "--execute"])).toMatchObject({ ok: true, args: { command: "merge-back", positional: ["/a", "/b"], execute: true } });
+		expect(parseWorktreeArgs(["merge-back", "--root", "/x"]).ok).toBe(false);
+		expect(parseWorktreeArgs(["merge-back", ""]).ok).toBe(false);
+		const f = fleet();
+		const none = harness({}, withRoot(f.root));
+		expect(await runWorktree(["merge-back"], none.deps)).toBe(2);
+		expect(none.err.join("")).toContain("at least one worktree path");
+	});
 });

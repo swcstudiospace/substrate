@@ -1,5 +1,5 @@
 /**
- * `substrate worktree list|status|scan|prune|conflicts|provision|disk|guard` (phase 68).
+ * `substrate worktree list|status|scan|prune|conflicts|provision|disk|guard|merge-back` (phase 68).
  *
  * The fleet library does the work (`packages/fleet`); this module owns the grammar, the output and the
  * exit codes: 0 done, 1 failed (a removal, a report or a creation did not happen), 2 usage or no
@@ -16,6 +16,10 @@
  * directory under a root is a graph id is `never` while the server reports a live claim on that graph and
  * `review` when that cannot be checked. Every removal leaves one ledger note through the events route
  * (fail-open: a note that was not recorded is said so on stderr, and `--json` carries its delivery result).
+ *
+ * `merge-back` records, as a retained note, that a linked worktree's work is already on the default branch. It never
+ * merges, removes or moves anything; it refuses a worktree that is dirty, unpushed, unproven, holds ignored work or has a
+ * live or unverifiable graph claim (see `merge-back.ts`).
  */
 import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
@@ -63,6 +67,7 @@ import {
 import type { EventInput } from "../../../mcp-server/src/types.ts";
 import type { EmitOutcome } from "../../../collectors/src/emit.ts";
 import { parseWorktreeArgs, type WorktreeArgs } from "./args.ts";
+import { commandMergeBack } from "./merge-back.ts";
 
 export const WORKTREE_USAGE =
 	"usage: substrate worktree list|status [--root DIR]... [--repo R] [--json]\n" +
@@ -71,6 +76,7 @@ export const WORKTREE_USAGE =
 	"       substrate worktree conflicts [--repo R | --root DIR...] [--json]\n" +
 	"       substrate worktree provision --repo DIR --branch B [--base REF] [--path DIR] [--json]\n" +
 	"       substrate worktree disk [--root DIR]... [--json]\n" +
+	"       substrate worktree merge-back PATH... [--execute] [--json]\n" +
 	"       substrate worktree guard DIR [--json]\n";
 
 export type PostOutcome = { ok: true; stored: number } | { ok: false; error: string };
@@ -568,6 +574,10 @@ export async function runWorktree(argv: readonly string[], deps: WorktreeDeps): 
 			return commandDisk(args, deps);
 		case "guard":
 			return commandGuard(args, deps);
+		case "merge-back": {
+			const rootList = roots(args, deps);
+			return rootList.length === 0 ? usageError(deps, NO_ROOT) : commandMergeBack(args, deps, rootList);
+		}
 	}
 }
 
