@@ -120,11 +120,15 @@ substrate corpus scan   [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--source
 substrate corpus plan   (scan options) [--server URL] [--json] [--neardup [--threshold N] [--neardup-max N]]
 substrate corpus ingest (plan options) [--execute] [--batch-docs N] [--batch-bytes N] [--json]
 substrate corpus status [--server URL] [--json]
+substrate corpus eval   [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--max-queries N] [--server URL] [--json]
 ```
 
 - `scan` needs no server. It prints the totals by repository, kind and tier, the bytes, the collapsed counts, the skipped
   reasons and the repositories that were not read completely. `--json` prints `{report}` (with `entries` only when
   `--entries` is given).
+- `eval` generates a golden set of questions from the Markdown documents the scan found and, with `--server`, asks them
+  of `POST /docs/search` and scores recall, MRR and latency. It is read-only and exits 1 when recall at 5 is under the
+  objective; see [`corpus-eval.md`](corpus-eval.md).
 - `plan` scans, then asks the server what a bulk ingest would change: it prints the counts, the coverage, the
   (repository, source) pairs that were left out of it with the reason, and the first 20 items of each action. It never
   sends bodies. A scan that read nothing completely still plans its entries, with an empty coverage that tombstones

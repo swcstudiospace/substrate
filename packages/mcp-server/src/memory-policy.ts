@@ -33,7 +33,7 @@ import {
 // ── scopes ───────────────────────────────────────────────────────────────────
 
 /** Subjects are part of a conflict key, so they are capped like any other identifier. */
-const MAX_SUBJECT = 200;
+export const MAX_SUBJECT = 200;
 
 /**
  * Parse a scope string into the class RBAC is granted against.

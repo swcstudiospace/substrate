@@ -5,8 +5,11 @@
 import {
 	INGEST_STATUSES,
 	PLAN_ACTIONS,
+	REFLECT_STATUSES,
 	documentKey,
 	type CorpusAnchorResponse,
+	type CorpusEntry,
+	type CorpusGapsResponse,
 	type CorpusNeardupResponse,
 	type CorpusPlanResponse,
 	type CorpusProofResponse,
@@ -17,6 +20,7 @@ import {
 import type { Inventory } from "./inventory.ts";
 import type { NeardupSelection } from "./neardup.ts";
 import type { OfflineVerdict } from "./proof.ts";
+import type { ReflectCollection, ReflectSummary } from "./reflect.ts";
 
 /** Items listed per plan action. */
 export const LIST_LIMIT = 20;
@@ -26,14 +30,16 @@ export const REPO_LIMIT = 100;
 /**
  * A value that came from a file system, an origin or a server answer, safe to print: every control character (escape,
  * newline, tab, DEL, the C1 range and the Unicode line separators) is written as its escape, so a tracked file name cannot
- * rewrite the operator's terminal or forge a line of the report. JSON output keeps the raw value.
+ * rewrite the operator's terminal or forge a line of the report. JSON output keeps the raw value. `keepLayout` lets the newline
+ * and the tab through, for a multi-line text shown as a block; every other control character is still escaped.
  */
-export function printable(text: string): string {
+export function printable(text: string, options: { keepLayout?: boolean } = {}): string {
 	let out = "";
 	for (const char of text) {
 		const code = char.codePointAt(0) ?? 0;
+		const layout = options.keepLayout === true && (code === 0x0a || code === 0x09);
 		const control = code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029;
-		if (!control) out += char;
+		if (!control || layout) out += char;
 		else out += code <= 0xff ? `\\x${code.toString(16).padStart(2, "0")}` : `\\u${code.toString(16).padStart(4, "0")}`;
 	}
 	return out;
@@ -92,16 +98,29 @@ export function renderInventory(inventory: Inventory): string {
 	return out.join("");
 }
 
-function describeItem(item: PlanItem): string {
+/** The documents of a scan that name a document replacing them, `{ repo, path, supersededBy }`, in entry order. */
+export function supersededEntries(entries: readonly CorpusEntry[]): Array<{ repo: string; path: string; supersededBy: string }> {
+	const marked: Array<{ repo: string; path: string; supersededBy: string }> = [];
+	for (const entry of entries) {
+		if (entry.supersededBy !== undefined) marked.push({ repo: entry.repo, path: entry.path, supersededBy: entry.supersededBy });
+	}
+	return marked;
+}
+
+function describeItem(item: PlanItem, replacedBy: ReadonlyMap<string, string>): string {
 	const key = printable(documentKey(item.repo, item.path));
-	return item.action === "rename" && item.renamedFrom !== undefined ? `${key}  (from ${printable(item.renamedFrom)})` : key;
+	const base = item.action === "rename" && item.renamedFrom !== undefined ? `${key}  (from ${printable(item.renamedFrom)})` : key;
+	const newer = replacedBy.get(documentKey(item.repo, item.path));
+	return newer === undefined ? base : `${base}  [superseded by ${printable(newer)}]`;
 }
 
 export function renderPlan(plan: CorpusPlanResponse, inventory: Inventory): string {
 	const { scope, report } = inventory;
 	const counts = PLAN_ACTIONS.map((action) => `${action} ${plan.counts[action]}`).join(", ");
+	const replacedBy = new Map(supersededEntries(inventory.entries).map((entry): [string, string] => [documentKey(entry.repo, entry.path), entry.supersededBy]));
 	const out: string[] = [
 		`plan: ${counts} (manifest version ${plan.manifestVersion})\n`,
+		...(replacedBy.size === 0 ? [] : [`superseded markers: ${replacedBy.size} (the documents are marked below)\n`]),
 		`coverage: ${plural(scope.coverage.length, "repository/source pair")} read completely, tier <= ${scope.maxTier}; only manifest rows in these pairs can be tombstoned\n`,
 	];
 	if (scope.coverage.length === 0) out.push("coverage is empty: nothing will be tombstoned, the documents found are still planned and ingested\n");
@@ -122,7 +141,7 @@ export function renderPlan(plan: CorpusPlanResponse, inventory: Inventory): stri
 		const items = plan.items.filter((item) => item.action === action);
 		if (items.length === 0) continue;
 		out.push(`${action} (${items.length}):\n`);
-		for (const item of items.slice(0, LIST_LIMIT)) out.push(`  ${describeItem(item)}\n`);
+		for (const item of items.slice(0, LIST_LIMIT)) out.push(`  ${describeItem(item, replacedBy)}\n`);
 		out.push(more(LIST_LIMIT, items.length));
 	}
 	return out.join("");
@@ -164,6 +183,73 @@ export function renderStatus(status: CorpusStatusResponse): string {
 	];
 	for (const row of status.byRepo.slice(0, REPO_LIMIT)) out.push(`  ${printable(row.repo)}  ${row.active} active  ${row.tombstoned} tombstoned\n`);
 	out.push(more(REPO_LIMIT, status.byRepo.length));
+	return out.join("");
+}
+
+/** The text of one ReflectCollection digest shown in a dry run; the rest are summarised and left to `--json`. */
+export const REFLECT_PREVIEW_LIMIT = 5;
+/** The longest query text printed for a gap; the server already redacted and capped it. */
+export const GAP_TEXT_LIMIT = 120;
+
+function shortHash(hash: string): string {
+	return printable(hash.slice(0, 12));
+}
+
+/** What `corpus reflect` found: the digests it would send, those it could not build and why. A dry run also shows the text. */
+export function renderReflectPlan(collection: ReflectCollection, execute: boolean): string {
+	const out: string[] = [
+		`reflect: ${plural(collection.digests.length, "digest")} from ${plural(collection.checkouts, "checkout")} found${execute ? "" : " (dry run)"}\n`,
+	];
+	for (const digest of collection.digests) {
+		out.push(`  ${printable(digest.repo)}  ${digest.text.length} chars  sha ${shortHash(digest.sha256)}\n`);
+	}
+	if (!execute) {
+		for (const digest of collection.digests.slice(0, REFLECT_PREVIEW_LIMIT)) {
+			out.push(`--- ${printable(digest.repo)} (${printable(digest.path)}, key ${printable(digest.key)})\n${printable(digest.text, { keepLayout: true })}`);
+		}
+		if (collection.digests.length > REFLECT_PREVIEW_LIMIT) {
+			out.push(`  ... and ${collection.digests.length - REFLECT_PREVIEW_LIMIT} more digest texts (see --json)\n`);
+		}
+	}
+	if (collection.skipped.length > 0) {
+		out.push(`not reflected (${collection.skipped.length}):\n`);
+		for (const skip of collection.skipped.slice(0, LIST_LIMIT)) out.push(`  ${printable(skip.repo)}  [${printable(skip.reason)}]\n`);
+		out.push(more(LIST_LIMIT, collection.skipped.length));
+	}
+	if (collection.notes.length > 0) {
+		out.push("notes:\n");
+		for (const note of collection.notes.slice(0, LIST_LIMIT)) out.push(`  ${printable(note)}\n`);
+		out.push(more(LIST_LIMIT, collection.notes.length));
+	}
+	return out.join("");
+}
+
+export function renderReflectOutcome(summary: ReflectSummary): string {
+	const out: string[] = [`reflect: ${REFLECT_STATUSES.map((status) => `${status} ${summary.counts[status]}`).join(", ")}\n`];
+	if (summary.problems.length > 0) {
+		out.push(`refused or failed (${summary.problems.length}):\n`);
+		for (const problem of summary.problems.slice(0, LIST_LIMIT)) {
+			out.push(`  ${printable(problem.repo)}  ${problem.status}${problem.reason === undefined ? "" : `  [${printable(problem.reason)}]`}\n`);
+		}
+		out.push(more(LIST_LIMIT, summary.problems.length));
+	}
+	if (summary.warnings.length > 0) {
+		out.push(`warnings (${summary.warnings.length}): stored, but the memory write did not land as asked:\n`);
+		for (const warning of summary.warnings.slice(0, LIST_LIMIT)) out.push(`  ${printable(warning.repo)}  [${printable(warning.reason)}]\n`);
+		out.push(more(LIST_LIMIT, summary.warnings.length));
+	}
+	if (summary.notSent > 0) out.push(`not sent: ${plural(summary.notSent, "digest")} (an earlier request failed)\n`);
+	return out.join("");
+}
+
+/** The queries the corpus could not answer. Query text is redacted by the server; it is still escaped here. */
+export function renderGaps(response: CorpusGapsResponse): string {
+	const out: string[] = [`gaps: ${plural(response.gaps.length, "query", "queries")} the corpus could not answer well${response.truncated ? " (the list is cut at the server limit)" : ""}\n`];
+	for (const gap of response.gaps) {
+		const text = gap.text === null ? "(text not kept)" : `"${printable(gap.text.length > GAP_TEXT_LIMIT ? `${gap.text.slice(0, GAP_TEXT_LIMIT)}...` : gap.text)}"`;
+		const best = gap.best === null ? "none" : gap.best.toFixed(3);
+		out.push(`  ${shortHash(gap.queryHash)}  ${plural(gap.searches, "search", "searches")}  best ${best}  last ${printable(gap.lastSeen)}  ${text}\n`);
+	}
 	return out.join("");
 }
 

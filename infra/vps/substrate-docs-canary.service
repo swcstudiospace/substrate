@@ -25,6 +25,11 @@ WorkingDirectory=/opt/agent-substrate/current
 # Machine-specific: `command -v bun`. The binary on this host is under
 # /root/.local, which is why the unit still runs as root (no User=) and why
 # ProtectHome=false stays. The code itself is the release at WorkingDirectory.
+# v1.7 phase 70: the same run also asks the self-supervised golden set of this
+# checkout's docs/ (scripts/docs-eval.ts shares the code), posts a `note` with
+# `golden_recall5` on every run that measured it, and exits 1 when that recall is
+# under SUBSTRATE_DOCS_SLO_RECALL5. No new variable is needed here; the repository
+# name is SUBSTRATE_DOCS_EVAL_REPO. See docs/corpus-eval.md.
 ExecStart=/root/.local/share/reflex/bun/bin/bun scripts/docs-golden.ts --live --emit
 
 # /var/lib/substrate, created by systemd and writable under ProtectSystem=full.

@@ -10,6 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { BRIEF_PROFILES, BRIEF_STATES } from "@substrate/observability";
 import { CORPUS_PROTOCOL } from "@substrate/corpus";
+import { FEEDBACK_VERDICTS } from "./corpus/reflect-store.ts";
 import { z } from "zod";
 import { BRIEF_SOURCES } from "./brief.ts";
 import { CheckpointVerifyError } from "./checkpoint-verify.ts";
@@ -1799,6 +1800,30 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 	);
 
 	server.registerTool(
+		"docs_feedback",
+		{
+			title: "Rate a cited corpus document",
+			description:
+				"Tell the docs plane whether a corpus document a `docs_search` citation named was helpful, unhelpful, stale, wrong or a duplicate. " +
+				"`document` is the corpus document key exactly as the citation's title gives it (`repo:path`). One verdict per session and document: " +
+				"the latest wins, so repeating a call is harmless. Verdicts feed the document's authority score (SUBSTRATE_DOCS_RERANK). " +
+				"A document that is not an active row of the corpus manifest answers `unknown-document` and nothing is stored. `note` is accepted and ignored: it is never stored. " +
+				"Needs an authenticated surface; answers `corpus.disabled` while the server runs with SUBSTRATE_CORPUS off.",
+			inputSchema: {
+				document: z.string().describe("The corpus document key from a citation: repo:path."),
+				verdict: z.enum(FEEDBACK_VERDICTS),
+				session_id: z.string().optional().describe("Your session id; the verdict is idempotent per session and document. Omitted: one verdict per surface and document."),
+				note: z.string().optional().describe("Ignored: never stored."),
+			},
+			annotations: { idempotentHint: true },
+		},
+		async ({ document, verdict, session_id }) => {
+			const reply = await substrate.docsFeedback({ document, verdict, ...(session_id === undefined ? {} : { session_id }) }, callerSurface);
+			return reply.ok ? json(reply.body) : { ...json(reply.body), isError: true };
+		},
+	);
+
+	server.registerTool(
 		"docs_lightrag_query",
 		{
 			title: "Query the LightRAG plane",
@@ -2331,11 +2356,12 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 	server.registerTool(
 		"fabric_status",
 		{
-			title: "Status of the eight fabric resources",
+			title: "Status of the nine fabric resources",
 			description:
-				"One row per resource: Dragonfly, the TimescaleDB index, GreptimeDB, RAGFlow, LightRAG, Hindsight, TEI (the embedding service) and the Tailscale proxy layer. " +
+				"One row per resource: Dragonfly, the TimescaleDB index, GreptimeDB, RAGFlow, LightRAG, Hindsight, TEI (the embedding service), the Tailscale proxy layer and the corpus. " +
 				"Each row has its endpoint class (loopback, proxy, direct, unset or not-applicable), a state (ok, degraded, unavailable " +
-				"or unconfigured) and a fixed phrase naming its source. A resource that is not configured is unconfigured, never ok. " +
+				"or unconfigured) and a fixed phrase naming its source. A resource that is not configured is unconfigured, never ok. The corpus row carries " +
+				"the docs plane's three objectives (freshness, golden-set recall at 5, ingest throughput) as readings against their thresholds. " +
 				"A read: it changes nothing and needs no approval.",
 			inputSchema: {},
 			annotations: { readOnlyHint: true },

@@ -471,6 +471,34 @@ describe("buildScope", () => {
 	});
 });
 
+describe("scanRoots supersession markers", () => {
+	const origin = "git@github.com:Acme/Alpha.git";
+
+	test("sets supersededBy from the front matter of tier 1 and 2 documents, drops an invalid marker without a skip, and never reads tier 3", async () => {
+		const root = fixture({
+			"alpha/.git/HEAD": "",
+			"alpha/docs/old.md": "---\nsuperseded-by: docs/new.md\n---\n# old\n",
+			"alpha/docs/new.md": "# new\n",
+			"alpha/docs/bad.md": "---\nsuperseded-by: ../outside.md\n---\n# bad\n",
+			"alpha/docs/url.md": "---\nsuperseded-by: https://example.com/x.md\n---\n# url\n",
+			"alpha/notes/loose.md": "---\nsuperseded-by: docs/new.md\n---\n# loose\n",
+		});
+		const dir = join(root, "alpha");
+		const files = ["docs/old.md", "docs/new.md", "docs/bad.md", "docs/url.md", "notes/loose.md"];
+		const result = await scanRoots({
+			roots: [root],
+			maxTier: 3,
+			runner: fakeGit({ [dir]: { origin, head: HEAD, branch: "main", remoteDefault: "main", files } }),
+		});
+		const markers = Object.fromEntries(result.entries.map((entry) => [entry.path, entry.supersededBy]));
+		expect(markers).toEqual({ "docs/old.md": "docs/new.md", "docs/new.md": undefined, "docs/bad.md": undefined, "docs/url.md": undefined, "notes/loose.md": undefined });
+		// An unusable marker is dropped, never a refusal: the document is still an entry and nothing is skipped.
+		expect(result.entries).toHaveLength(5);
+		expect(result.report.skipped).toEqual([]);
+		expect(Object.hasOwn(defined(result.entries.find((entry) => entry.path === "docs/new.md"), "new"), "supersededBy")).toBe(false);
+	});
+});
+
 function entriesBytes(entries: ReadonlyArray<{ bytes: number }>): number {
 	return entries.reduce((sum, entry) => sum + entry.bytes, 0);
 }

@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { CorpusEntry, RepoReport } from "@substrate/corpus";
+import type { CorpusEntry, RepoDigest, RepoReport } from "@substrate/corpus";
 import type { Inventory } from "./inventory.ts";
-import { LIST_LIMIT, REPO_LIMIT, printable, renderIngest, renderInventory, renderPlan } from "./render.ts";
-import { planOf } from "./testkit.ts";
+import { GAP_TEXT_LIMIT, LIST_LIMIT, REFLECT_PREVIEW_LIMIT, REPO_LIMIT, printable, renderGaps, renderIngest, renderInventory, renderPlan, renderReflectOutcome, renderReflectPlan } from "./render.ts";
+import type { ReflectCollection } from "./reflect.ts";
+import { gapsOf, planOf } from "./testkit.ts";
 
 function entry(repo: string, path: string, over: Partial<CorpusEntry> = {}): CorpusEntry {
 	return { repo, path, kind: "doc", tier: 1, sha256: "a".repeat(64), bytes: 10, source: "fs", ...over };
@@ -106,6 +107,11 @@ describe("printable", () => {
 		expect(printable("a\u001b[2Jb\nc\td\u007fe\u0085f\u2028g")).toBe("a\\x1b[2Jb\\x0ac\\x09d\\x7fe\\x85f\\u2028g");
 	});
 
+	test("a C1 control such as the single-character CSI is escaped, and keepLayout lets only the newline and the tab through", () => {
+		expect(printable("bullet \u009b31mred\u009d0;title\u0007")).toBe("bullet \\x9b31mred\\x9d0;title\\x07");
+		expect(printable("a\nb\tc\u009bd\u0085e\u001bf\rg\u2029h", { keepLayout: true })).toBe("a\nb\tc\\x9bd\\x85e\\x1bf\\x0dg\\u2029h");
+	});
+
 	test("a tracked file name with an escape sequence or a newline cannot rewrite the terminal or forge a report line", () => {
 		const hostile = "docs/\u001b[2J\u001b[Hingest: ingested 999\nrefused (0):.md";
 		const text = renderIngest({
@@ -118,5 +124,84 @@ describe("printable", () => {
 		expect(text).toContain("Acme/A:docs/\\x1b[2J\\x1b[Hingest: ingested 999\\x0arefused (0):.md  [bad-path]");
 		const plan = renderPlan(planOf([{ action: "add", repo: "Acme/A", path: hostile }]), inventory([repoReport("Acme/A")], []));
 		expect(plan).not.toContain("\u001b");
+	});
+});
+
+describe("renderReflectPlan, renderReflectOutcome and renderGaps", () => {
+	function digest(repo: string): RepoDigest {
+		return { repo, path: ".substrate/digest.md", text: `# Documentation digest: ${repo}\n`, key: `corpus-digest:${repo}`, sha256: "ab".repeat(32) };
+	}
+
+	test("a dry run shows the text of the first digests only and says how many texts were left out; an executed run shows none", () => {
+		const collection: ReflectCollection = {
+			digests: Array.from({ length: REFLECT_PREVIEW_LIMIT + 2 }, (_, index) => digest(`Acme/R${index}`)),
+			skipped: [{ repo: "Acme/Bad\u001b", reason: "roadmap-empty" }],
+			notes: ["a note\nwith a break"],
+			checkouts: 9,
+		};
+		const dry = renderReflectPlan(collection, false);
+		expect(dry).toContain(`reflect: ${REFLECT_PREVIEW_LIMIT + 2} digests from 9 checkouts found (dry run)`);
+		expect(dry.split("\n").filter((line) => line.startsWith("--- Acme/R"))).toHaveLength(REFLECT_PREVIEW_LIMIT);
+		expect(dry).toContain("Acme/R0  ".concat(String(digest("Acme/R0").text.length), " chars  sha abababababab"));
+		expect(dry).toContain("... and 2 more digest texts (see --json)");
+		expect(dry).toContain("Acme/Bad\\x1b  [roadmap-empty]");
+		expect(dry).toContain("a note\\x0awith a break");
+		expect(dry).not.toContain("\u001b");
+		const executed = renderReflectPlan(collection, true);
+		expect(executed).not.toContain("---");
+		expect(executed).not.toContain("(dry run)");
+	});
+
+	test("the outcome lists counts, refused and failed digests with their reasons, and what was not sent", () => {
+		const text = renderReflectOutcome({
+			counts: { stored: 1, unchanged: 2, refused: 1, failed: 1 },
+			problems: [
+				{ repo: "Acme/A", status: "refused", reason: "secret-findings" },
+				{ repo: "Acme/B", status: "failed" },
+			],
+			notSent: 3,
+			warnings: [],
+			manifestVersion: 4,
+		});
+		expect(text).toContain("reflect: stored 1, unchanged 2, refused 1, failed 1");
+		expect(text).toContain("Acme/A  refused  [secret-findings]");
+		expect(text).toContain("Acme/B  failed\n");
+		expect(text).toContain("not sent: 3 digests");
+	});
+
+	test("the digest preview escapes every control character of the planning text, C1 included, and keeps its newlines and tabs", () => {
+		const hostile: RepoDigest = { repo: "Acme/Hostile", path: ".substrate/digest.md", text: "# Digest\n- decision \u009b2Jwiped\u001b[H\n\t- indented\u0085next\n", key: "corpus-digest:Acme/Hostile", sha256: "cd".repeat(32) };
+		const dry = renderReflectPlan({ digests: [hostile], skipped: [], notes: [], checkouts: 1 }, false);
+		expect(dry).not.toContain("\u009b");
+		expect(dry).not.toContain("\u0085");
+		expect(dry).not.toContain("\u001b");
+		expect(dry).toContain("# Digest\n- decision \\x9b2Jwiped\\x1b[H\n\t- indented\\x85next\n");
+	});
+
+	test("a stored digest's warning is listed on its own line with the reason escaped, and is not counted as a problem", () => {
+		const text = renderReflectOutcome({
+			counts: { stored: 2, unchanged: 0, refused: 0, failed: 0 },
+			problems: [],
+			warnings: [
+				{ repo: "Acme/A", reason: "hindsight:rbac.no-grant" },
+				{ repo: "Acme/B\u001b", reason: "hindsight:not-configured\u009b" },
+			],
+			notSent: 0,
+			manifestVersion: 4,
+		});
+		expect(text).toContain("warnings (2):");
+		expect(text.split("\n")).toContain("  Acme/A  [hindsight:rbac.no-grant]");
+		expect(text).toContain("  Acme/B\\x1b  [hindsight:not-configured\\x9b]");
+		expect(text).not.toContain("refused or failed");
+		expect(text).not.toContain("\u001b");
+	});
+
+	test("gaps are escaped, long query text is cut and the cut list is announced", () => {
+		const long = "q".repeat(GAP_TEXT_LIMIT + 50);
+		const text = renderGaps(gapsOf([{ queryHash: "a".repeat(40), text: long, searches: 2, lastSeen: "2026-10-29T00:00:00.000Z", best: 0 }], true));
+		expect(text).toContain("(the list is cut at the server limit)");
+		expect(text).toContain(`"${"q".repeat(GAP_TEXT_LIMIT)}..."`);
+		expect(text).toContain(`${"a".repeat(12)}  2 searches  best 0.000`);
+		expect(renderGaps(gapsOf([]))).toBe("gaps: 0 queries the corpus could not answer well\n");
 	});
 });

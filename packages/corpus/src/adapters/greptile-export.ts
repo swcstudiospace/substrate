@@ -21,6 +21,7 @@ import {
 	type RepoReport,
 	SkipLog,
 } from "../scan.ts";
+import { entrySupersededBy } from "../supersession.ts";
 
 /** The tier of every Greptile knowledge-base document. */
 export const GREPTILE_TIER: DocTier = 2;
@@ -122,6 +123,7 @@ export async function scanGreptileExport(dir: string, opts: GreptileScanOptions 
 					if (loaded.problem !== undefined) problems.push(`${rel}: ${loaded.problem}`);
 					continue;
 				}
+				const supersededBy = entrySupersededBy(GREPTILE_TIER, loaded.text);
 				entries.push({
 					repo: candidate.repo,
 					path: rel,
@@ -130,6 +132,7 @@ export async function scanGreptileExport(dir: string, opts: GreptileScanOptions 
 					sha256: loaded.sha256,
 					bytes: loaded.bytes,
 					source: "greptile",
+					...(supersededBy === undefined ? {} : { supersededBy }),
 				});
 				paths.set(documentKey(candidate.repo, rel), abs);
 				files += 1;

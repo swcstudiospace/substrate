@@ -1,14 +1,16 @@
 /**
- * A stub of the three corpus routes over a loopback socket, for the CLI tests: one scripted handler per route, a record
+ * A stub of the corpus routes over a loopback socket, for the CLI tests: one scripted handler per route, a record
  * of what was sent, and builders for answers of the shape the server gives.
  */
 import { createHash } from "node:crypto";
 import {
 	CORPUS_PROTOCOL,
 	type GhRunner,
+	type CorpusGapsResponse,
 	type CorpusIngestResponse,
 	type CorpusNeardupResponse,
 	type CorpusPlanResponse,
+	type CorpusReflectResponse,
 	type CorpusStatusResponse,
 	type IngestStatus,
 	type PlanAction,
@@ -97,6 +99,14 @@ export function statusOf(): CorpusStatusResponse {
 		lastIngestAt: "2026-10-29T10:00:00.000Z",
 		manifestVersion: 9,
 	};
+}
+
+export function reflectOf(results: CorpusReflectResponse["results"]): CorpusReflectResponse {
+	return { protocol: CORPUS_PROTOCOL, results, manifestVersion: 11 };
+}
+
+export function gapsOf(gaps: CorpusGapsResponse["gaps"], truncated = false): CorpusGapsResponse {
+	return { protocol: CORPUS_PROTOCOL, gaps, truncated };
 }
 
 export interface FakeOwnerRepo {

@@ -954,6 +954,14 @@ function extendedActivity(instruments: SubstrateInstruments): void {
 	instruments.recordMemoryExpired({ surface: "claude-code", kind: "decision", mode: "hidden" });
 	instruments.setHindsightOutbox({ size: 7, oldestAgeSeconds: 31.5, durable: true });
 	instruments.observeIndexArchiveAge(() => 1_000, () => 61_000);
+	activateCorpusGauges(instruments);
+}
+
+/** The three corpus gauges (phase 70): freshness read from a manifest change, the last ingest rate and the canary's recall. */
+function activateCorpusGauges(instruments: SubstrateInstruments): void {
+	instruments.observeCorpusFreshness(() => 1_000, () => 91_000);
+	instruments.setCorpusIngestRate(2);
+	instruments.setCorpusGoldenRecall5(0.8);
 }
 
 /** The boot-time call `createObservability` makes (observe.ts), with the count the empty environment configures. */
@@ -983,8 +991,8 @@ describe("the extended series (uplift-5 S6)", () => {
 		for (const name of extra) {
 			expect(name).toMatch(/^[a-z0-9_.]+$/);
 			const spec = defined(EXTENDED_METRIC_SERIES[name], name);
-			// Counters add; a gauge is the worst reading in a step. Neither is ever averaged.
-			expect(spec.agg).toBe(spec.kind === "counter" ? "sum" : "max");
+			// Counters add and a gauge is the worst reading in a step; the corpus rate and recall gauges repeat their last value every interval, so their step is the mean of one value.
+			expect(spec.agg).toBe(spec.kind === "counter" ? "sum" : name === "corpus.ingest_docs_per_s" || name === "corpus.golden_recall5" ? "avg" : "max");
 			expect(spec.kind === "counter" || spec.kind === "gauge").toBe(true);
 			if (spec.label !== null) expect(spec.values?.size).toBeGreaterThan(0);
 		}
@@ -1072,6 +1080,24 @@ describe("the extended series (uplift-5 S6)", () => {
 
 		// Core never reads them.
 		expect(new SampleCollector().collect(instruments.snapshot(), null, 5000)).toEqual([]);
+	});
+
+	test("the corpus gauges are one row each at their reading, an idle ingest rate of 0 included, and an unset one has none", () => {
+		const instruments = new SubstrateInstruments();
+		const collector = new SampleCollector("extended");
+		expect(collector.collect(instruments.snapshot(), null, 1000)).toEqual([]);
+		activateCorpusGauges(instruments);
+		expect(collector.collect(instruments.snapshot(), null, 2000)).toEqual([
+			{ tsMs: 2000, series: "corpus.freshness_seconds", labels: {}, value: 90, count: 1 },
+			{ tsMs: 2000, series: "corpus.ingest_docs_per_s", labels: {}, value: 2, count: 1 },
+			{ tsMs: 2000, series: "corpus.golden_recall5", labels: {}, value: 0.8, count: 1 },
+		]);
+		instruments.setCorpusIngestRate(0);
+		expect(seriesRows(collector.collect(instruments.snapshot(), null, 3000), "corpus.ingest_docs_per_s")[0]?.value).toBe(0);
+		// Core never reads them, and a stored row keeps no label.
+		expect(new SampleCollector().collect(instruments.snapshot(), null, 4000)).toEqual([]);
+		expect(canonicalLabels("corpus.golden_recall5", {})).toBe("{}");
+		expect(canonicalLabels("corpus.golden_recall5", { outcome: "x" })).toBeNull();
 	});
 
 	test("a label value outside the closed set mints no series", () => {
@@ -1192,6 +1218,7 @@ describe("the extended series (uplift-5 S6)", () => {
 		for (const mode of MEMORY_EXPIRED_MODES) instruments.recordMemoryExpired({ surface: "grok-bot", kind: "note", mode });
 		instruments.setHindsightOutbox({ size: 1, oldestAgeSeconds: 1, durable: true });
 		instruments.observeIndexArchiveAge(() => 0, () => 1000);
+		activateCorpusGauges(instruments);
 
 		const rows = collector.collect(instruments.snapshot(), 20, 9000);
 		expect(rows).toHaveLength(bound);

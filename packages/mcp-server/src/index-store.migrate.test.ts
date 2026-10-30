@@ -22,7 +22,7 @@ const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
 const describeLive = PG_URL ? describe : describe.skip;
 
 /** Versions held by branches that are not merged yet: the ledger may skip them, nothing else. Remove an entry when its step lands. */
-const RESERVED_VERSIONS: readonly number[] = [38, 39];
+const RESERVED_VERSIONS: readonly number[] = [39];
 
 describe("migration steps and the migrate lock", () => {
 	test("versions ascend from 1 with no gap but the reserved ones, and names are unique", () => {
