@@ -249,7 +249,7 @@ function overlapLine(shared: readonly string[]): string {
  * first, then most recently seen, at most {@link BRIEF_WORKTREES_MAX}. The caller's files are the union of its own rows'
  * reported paths (rows whose `session_id` is the caller's); with none reported the section is one line saying so, so it never
  * silently vanishes. A row is another session's only when it names a session other than the caller's, is not the primary
- * checkout, whose pull request is not merged or closed, was seen within {@link BRIEF_WORKTREE_WINDOW_MS} and reported its files. A row with `files_truncated` means a
+ * checkout, whose pull request is not merged or closed (or is merged or closed but dirty), was seen within {@link BRIEF_WORKTREE_WINDOW_MS} and reported its files. A row with `files_truncated` means a
  * shared path may sit past the first 200, so the section says the check is incomplete even when no reported path overlaps.
  * Null when nothing overlaps and every reported list is complete.
  */
