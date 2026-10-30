@@ -62,16 +62,75 @@ export function readOrigin(repoDir: string, run: GitBytesRunner): string | null 
 	return url.startsWith("./") || url.startsWith("../") ? resolve(repoDir, url) : url;
 }
 
-/** The mirror's directory name: a readable slug and a hash of the origin without credentials, so it never changes for one origin. */
-export function mirrorName(origin: string): string {
-	const stripped = stripCredentials(origin).replace(/\/+$/, "").replace(/\.git$/, "");
-	const readable = (githubSlug(origin) ?? basename(stripped)).replace("/", "-");
+/** The origin URL without credentials, a trailing slash, or a `.git` suffix. This is the pre-canonical hash input. */
+function strippedOrigin(origin: string): string {
+	return stripCredentials(origin).replace(/\/+$/, "").replace(/\.git$/, "");
+}
+
+/**
+ * One identity for equivalent origin URLs. GitHub https, ssh and scp forms of one slug share it, as do `https://host/path`
+ * and `git@host:path` on any other host. A local path is left as its stripped form, so an existing path-named mirror is
+ * still found. A fork is a different slug and stays a different identity.
+ */
+function originIdentity(origin: string): string {
+	const slug = githubSlug(origin);
+	if (slug !== null) return `github.com/${slug}`;
+	const stripped = strippedOrigin(origin);
+	const scp = /^(?:[^@/\s]+@)?([^:/\s]+):([^/].*)$/.exec(stripped);
+	if (scp && !stripped.includes("://")) return `${(scp[1] ?? "").toLowerCase()}/${scp[2] ?? ""}`;
+	try {
+		const url = new URL(stripped);
+		if (url.hostname !== "") return `${url.hostname.toLowerCase()}/${url.pathname.replace(/^\/+|\/+$/g, "")}`;
+	} catch {
+		// A local path is not a URL. Its stripped form is the identity.
+	}
+	return stripped;
+}
+
+/** Directory name for one hash input. The readable slug stays the GitHub name when there is one. */
+function mirrorNameFrom(origin: string, hashed: string): string {
+	const readable = (githubSlug(origin) ?? basename(strippedOrigin(origin))).replace("/", "-");
 	const slug = readable
 		.replace(/[^A-Za-z0-9._-]/g, "-")
 		.replace(/^[.-]+/, "")
 		.slice(0, NAME_SLUG_LENGTH);
-	const hash = createHash("sha256").update(stripped).digest("hex").slice(0, NAME_HASH_LENGTH);
+	const hash = createHash("sha256").update(hashed).digest("hex").slice(0, NAME_HASH_LENGTH);
 	return `${slug === "" ? "repo" : slug}-${hash}`;
+}
+
+/** The mirror's directory name: a readable slug and a hash of the origin identity, so equivalent URLs share one mirror. */
+export function mirrorName(origin: string): string {
+	return mirrorNameFrom(origin, originIdentity(origin));
+}
+
+/** The directory name a mirror created before identity canonicalization still has: a hash of the stripped URL. */
+function legacyMirrorName(origin: string): string {
+	return mirrorNameFrom(origin, strippedOrigin(origin));
+}
+
+/** URL spellings that used to name their own mirror for this origin. The current spelling is included. */
+function equivalentOrigins(origin: string): string[] {
+	const forms = [origin];
+	const slug = githubSlug(origin);
+	if (slug !== null) {
+		forms.push(
+			`https://github.com/${slug}`,
+			`https://github.com/${slug}.git`,
+			`git@github.com:${slug}`,
+			`git@github.com:${slug}.git`,
+			`ssh://git@github.com/${slug}`,
+			`ssh://git@github.com/${slug}.git`,
+		);
+		return forms;
+	}
+	const identity = originIdentity(origin);
+	const slash = identity.indexOf("/");
+	if (slash > 0 && identity !== strippedOrigin(origin)) {
+		const host = identity.slice(0, slash);
+		const path = identity.slice(slash + 1);
+		forms.push(`https://${host}/${path}`, `https://${host}/${path}.git`, `git@${host}:${path}`, `git@${host}:${path}.git`, `ssh://git@${host}/${path}`, `ssh://git@${host}/${path}.git`);
+	}
+	return forms;
 }
 
 /** The directory the mirror of `origin` lives in, below `mirrorRoot`. */
@@ -109,13 +168,24 @@ function refreshDefaultHead(dir: string, run: GitBytesRunner): "refreshed" | "em
 }
 
 /**
- * The mirror directory for this checkout. The mirror name is a hash of the origin. A mirror is never chosen because it
- * happens to contain a commit: a fork can share that commit with an upstream mirror, and returning it would let a later
- * fetch rewrite the upstream mirror's origin. A checkout whose origin URL moved therefore gets a second mirror.
+ * The mirror directory for this checkout. The name is a hash of the origin identity, so https and ssh of one repository
+ * share it. A mirror created before that canonicalization is still found by the hash of an equivalent URL. A mirror is
+ * never chosen because it happens to contain a commit: a fork can share that commit, and returning it would let a later
+ * fetch rewrite the upstream mirror's origin.
  */
-function mirrorForCheckout(_repoDir: string, mirrorRoot: string, origin: string, _run: GitBytesRunner): string | null {
-	const named = mirrorPath(mirrorRoot, origin);
+function mirrorForCheckout(_repoDir: string, mirrorRoot: string, origin: string, run: GitBytesRunner): string | null {
+	const root = resolve(mirrorRoot);
+	const named = join(root, mirrorName(origin));
+	// Present but unusable is the caller's to refuse. Skipping it would clone over the directory.
 	if (existsSync(named)) return named;
+	const seen = new Set<string>([mirrorName(origin)]);
+	for (const form of equivalentOrigins(origin)) {
+		const name = legacyMirrorName(form);
+		if (seen.has(name)) continue;
+		seen.add(name);
+		const dir = join(root, name);
+		if (existsSync(dir) && isUsableMirror(dir, run)) return dir;
+	}
 	return null;
 }
 

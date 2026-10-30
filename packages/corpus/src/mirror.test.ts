@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { stripCredentials } from "./discover.ts";
 import { defaultGitBytesRunner, type GitBytesRunner } from "./gitio.ts";
 import { ensureMirror, mirrorName, mirrorPath, readOrigin } from "./mirror.ts";
 import { commitAll, fingerprint, gitWorld, runGit, tempDir, writeTree, type GitWorld } from "./test-support.ts";
@@ -24,6 +26,22 @@ describe("mirrorName", () => {
 		expect(mirrorName("https://github.com/Acme/Alpha")).toBe(plain);
 		expect(mirrorName("https://github.com/Acme/Beta.git")).not.toBe(plain);
 		expect(plain).toMatch(/^Acme-Alpha-[0-9a-f]{12}$/);
+		expect(mirrorName("git@github.com:Acme/Alpha")).toBe(plain);
+		expect(mirrorName("ssh://git@github.com/Acme/Alpha.git")).toBe(plain);
+		expect(mirrorName("https://github.com/Other/Alpha.git")).not.toBe(plain);
+		expect(mirrorName("https://git.example.com/foo/bar.git")).toBe(mirrorName("git@git.example.com:foo/bar"));
+	});
+
+	test("a mirror created under the old https hash is reused when the origin is rewritten to ssh", () => {
+		const w = world();
+		const https = "https://github.com/Acme/Alpha.git";
+		const stripped = stripCredentials(https).replace(/\/+$/, "").replace(/\.git$/, "");
+		const hash = createHash("sha256").update(stripped).digest("hex").slice(0, 12);
+		const legacy = join(w.mirrors, `Acme-Alpha-${hash}`);
+		mkdirSync(w.mirrors, { recursive: true });
+		runGit(w.mirrors, ["init", "-q", "--bare", legacy]);
+		runGit(w.local, ["remote", "set-url", "origin", "git@github.com:Acme/Alpha.git"]);
+		expect(ensureMirror(w.local, w.mirrors, run, { fetch: false })).toEqual({ status: "unfetched", mirrorDir: legacy });
 	});
 
 	test("never yields a path separator, a leading dot or an empty slug", () => {
