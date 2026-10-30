@@ -161,10 +161,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: 63 (Corpus Atlas) of v1.7 (phases 63-70), planned. v1.3.x (37-44), v1.5 (45-54) and v1.6 (55-62) are archived as override closeouts; the last code merge before this milestone is 9d3f2085 (CI green).
+Phase: 70 (Docs SLO and eval) is the last shipped phase of v1.7 (phases 63-70). All eight phases merged through PRs #177-#186 (2026-10-29 and 2026-10-30). v1.3.x (37-44), v1.5 (45-54) and v1.6 (55-62) are archived as override closeouts; the last code merge before this milestone is 9d3f2085 (CI green).
 Plan: none written (phases are built in orchestrated waves of edit-only units and recorded in SUMMARY.md, as in Runs 12 and 13).
-Status: Executing. The accepted debt of the owner's 2026-10-28 decision is in the section "Accepted debt (owner decision, 2026-10-28)"; the operator-gated steps are listed in the Run 12, Run 13 and Run 14 records.
-Last activity: 2026-10-29 — Run 14: milestone v1.7 defined (phases 63-70)
+Status: Shipped, milestone audit pending. The v1.7 requirement checkboxes stay open until the audit records evidence for each one. The accepted debt of the owner's 2026-10-28 decision is in the section "Accepted debt (owner decision, 2026-10-28)"; the operator-gated steps are listed in the Run 12, Run 13 and Run 14 records.
+Last activity: 2026-10-30 — reconciled phases 63-70 with their merged PRs (PR #187)
 
 ## Preflight record (2026-10-23, graph ut-mvlknrx6-2849044e)
 
