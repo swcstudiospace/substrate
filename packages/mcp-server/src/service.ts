@@ -3550,13 +3550,17 @@ export class Substrate {
 
 	/**
 	 * The brief's worktree-overlap read (phase 68, FLEET-06): one bounded query for the repository's rows, or null when the
-	 * registry cannot serve (off, or no index), in which case the section is absent and nothing is read. The rows are handed to
-	 * `worktreesSection`, which does the matching in memory.
+	 * registry cannot serve (off, or no index), in which case the section is absent and nothing is read. One row past the
+	 * cap is read and discarded so a capped read is marked incomplete instead of looking like a complete slice.
 	 */
 	private worktreeBriefSource(repo: string, sessionId: string): (() => Promise<BriefWorktreesInput>) | null {
 		const access = this.worktreeAccess(false);
 		if (!access.ok) return null;
-		return async () => ({ repo, sessionId, rows: await access.store.candidates({ repo, limit: WORKTREE_BRIEF_CANDIDATES_MAX }) });
+		return async () => {
+			const rows = await access.store.candidates({ repo, limit: WORKTREE_BRIEF_CANDIDATES_MAX + 1 });
+			const capped = rows.length > WORKTREE_BRIEF_CANDIDATES_MAX;
+			return { repo, sessionId, rows: capped ? rows.slice(0, WORKTREE_BRIEF_CANDIDATES_MAX) : rows, ...(capped ? { capped: true } : {}) };
+		};
 	}
 
 	/**

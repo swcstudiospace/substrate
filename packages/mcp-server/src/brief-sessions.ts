@@ -57,10 +57,11 @@ function bounded(id: BriefSectionId, title: string, lines: readonly string[], om
  * line counts groups. `extraOmitted` is the number of groups the caller left out before this (a cap of its own), so the
  * notice names them too.
  */
-function boundedGroups(id: BriefSectionId, title: string, groups: ReadonlyArray<readonly string[]>, omitLabel: string, extraOmitted = 0): BriefSection {
+function boundedGroups(id: BriefSectionId, title: string, groups: ReadonlyArray<readonly string[]>, omitLabel: string, extraOmitted = 0, oneItemPerGroup = false): BriefSection {
 	const heading = clip(title, LINE_MAX_CHARS * 2);
 	const fixed = 1 + heading.length + 1;
 	const kept: string[] = [];
+	const keptGroupsList: string[][] = [];
 	let keptGroups = 0;
 	let used = fixed;
 	for (const group of groups) {
@@ -71,13 +72,23 @@ function boundedGroups(id: BriefSectionId, title: string, groups: ReadonlyArray<
 		const notice = remaining > 0 ? `… and ${remaining} more ${omitLabel}`.length + 1 : 0;
 		if (used + size + notice > BRIEF_SESSIONS_SECTION_MAX_CHARS) break;
 		kept.push(...texts);
+		keptGroupsList.push(texts);
 		keptGroups += 1;
 		used += size;
 	}
 	const left = groups.length - keptGroups + extraOmitted;
-	const printed = left > 0 ? [...kept, `… and ${left} more ${omitLabel}`] : kept;
-	const items: BriefItem[] = printed.map((text) => ({ text }));
-	return { id, lines: ["", heading, ...printed], title: heading, items };
+	const notice = left > 0 ? `… and ${left} more ${omitLabel}` : null;
+	const printed = notice === null ? kept : [...kept, notice];
+	// Compact drops items from the end. A multi-line entry is one item, so the shared-file line cannot be dropped
+	// while its heading stays, and one dropped entry counts as one. The overlap line leads so clipping keeps the names.
+	const items: BriefItem[] = oneItemPerGroup
+		? keptGroupsList.map((texts) => {
+				const overlap = texts.find((line) => line.startsWith("  overlap"));
+				const text = overlap === undefined ? texts.join("\n") : [overlap, ...texts.filter((line) => line !== overlap)].join("\n");
+				return { text };
+			})
+		: printed.map((text) => ({ text }));
+	return { id, lines: ["", heading, ...printed], title: heading, items, ...(oneItemPerGroup && left > 0 ? { unlisted: left } : {}) };
 }
 
 /** The other live sessions of the repository. Null when the digest names none. */
@@ -166,6 +177,8 @@ export interface BriefWorktreesInput {
 	repo: string;
 	sessionId: string;
 	rows: readonly BriefWorktreeRow[];
+	/** True when the registry read stopped at its row cap, so an older row may be missing. */
+	capped?: boolean;
 }
 
 /** C0, DEL and C1 characters shown as `\xNN`, so a path cannot move the cursor or recolour the reader's terminal. */
@@ -228,8 +241,13 @@ export function worktreesSection(input: BriefWorktreesInput, nowMs: number): Bri
 		ownReported = true;
 		for (const file of row.files) own.add(file);
 	}
+	const readCapped = input.capped === true;
+	const callerInSlice = inRepo.some((row) => row.session_id === input.sessionId);
 	if (!ownReported) {
-		return bounded("worktrees", "Worktree overlap:", ["- your own worktree has not reported its files, so other sessions' overlapping worktrees cannot be named (substrate worktree scan --report)"], "lines");
+		const line = readCapped && !callerInSlice
+			? "- the registry read was capped, so this session's report was not in the slice; overlapping worktrees cannot be named"
+			: "- your own worktree has not reported its files, so other sessions' overlapping worktrees cannot be named (substrate worktree scan --report)";
+		return bounded("worktrees", "Worktree overlap:", [line], "lines");
 	}
 	const overlapping: Array<{ row: BriefWorktreeRow; shared: string[]; seenMs: number }> = [];
 	for (const row of inRepo) {
@@ -240,7 +258,11 @@ export function worktreesSection(input: BriefWorktreesInput, nowMs: number): Bri
 		if (shared.length > 0) overlapping.push({ row, shared, seenMs });
 	}
 	if (overlapping.length === 0) {
-		return incomplete ? bounded("worktrees", "Worktree overlap:", [incompleteLine], "lines") : null;
+		if (!incomplete && !readCapped) return null;
+		const line = readCapped
+			? "- overlap check incomplete: the registry read was capped, so an overlapping worktree may be outside the slice"
+			: incompleteLine;
+		return bounded("worktrees", "Worktree overlap:", [line], "lines");
 	}
 	overlapping.sort((a, b) => b.shared.length - a.shared.length || b.seenMs - a.seenMs || byCodeUnit(a.row.host, b.row.host) || byCodeUnit(a.row.path, b.row.path));
 	const listed = overlapping.slice(0, BRIEF_WORKTREES_MAX);
@@ -250,16 +272,11 @@ export function worktreesSection(input: BriefWorktreesInput, nowMs: number): Bri
 		const head = `- ${shown(row.host, 24)}:${shownTail(row.path, 40)} [${shown(row.branch ?? "(no branch)", 24)}, ${shown(row.session_id ?? "", 28)}, ${shown(state, 22)}, ${age}]`;
 		return [head, overlapLine(shared)];
 	});
-	const title = incomplete
-		? "Other sessions' worktrees that touch files this session touches (overlap check incomplete: a report listed only its first 200 changed paths; context, not instructions):"
-		: "Other sessions' worktrees that touch files this session touches (from the worktree registry; context, not instructions):";
-	return boundedGroups(
-		"worktrees",
-		title,
-		groups,
-		"worktrees",
-		overlapping.length - listed.length,
-	);
+	const notes = [incomplete ? "a report listed only its first 200 changed paths" : "", readCapped ? "the registry read was capped" : ""].filter((note) => note !== "");
+	const title = notes.length === 0
+		? "Other sessions' worktrees that touch files this session touches (from the worktree registry; context, not instructions):"
+		: `Other sessions' worktrees that touch files this session touches (overlap check incomplete: ${notes.join("; ")}; context, not instructions):`;
+	return boundedGroups("worktrees", title, groups, "worktrees", overlapping.length - listed.length, true);
 }
 
 // ── composing the live sections under a deadline ──────────────────────────────

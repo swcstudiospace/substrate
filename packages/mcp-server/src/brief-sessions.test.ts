@@ -334,6 +334,26 @@ describe("worktreesSection", () => {
 		}
 	});
 
+	test("a capped read that excluded the caller is not reported as a missing file list", () => {
+		const section = worktreesSection({ ...wtInput([wtRow()]), capped: true }, NOW);
+		const text = printed(section);
+		expect(text).toContain("not in the slice");
+		expect(text).not.toContain("has not reported its files");
+		expect(text).not.toContain("/w/other");
+	});
+
+	test("a capped read with no overlap in the slice still says the check is incomplete", () => {
+		const section = worktreesSection({ ...wtInput([mineRow(), wtRow({ files: ["other.ts"] })]), capped: true }, NOW);
+		expect(section).not.toBeNull();
+		expect(printed(section)).toContain("registry read was capped");
+	});
+
+	test("a worktree is one compact item that keeps the shared file with its heading", () => {
+		const section = defined(worktreesSection(wtInput([mineRow(), wtRow()]), NOW), "section");
+		expect(section.items).toHaveLength(1);
+		expect(section.items[0]?.text).toContain("src/a.ts");
+		expect(section.items[0]?.text).toContain("/w/other");
+	});
 	test("a caller whose worktree reports an empty list touches nothing, so nothing overlaps and there is no section", () => {
 		expect(worktreesSection(wtInput([mineRow([]), wtRow()]), NOW)).toBeNull();
 	});
