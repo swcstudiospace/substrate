@@ -4,8 +4,8 @@
  * validated (`parsePlanRequest`).
  *
  * A row's identity is `(repo, path)`; its `source` column records which source produced it. An entry that matches an active
- * row is `unchanged` only when the sha256 AND the source, kind and tier agree; the same sha256 under another source, kind
- * or tier is an `update` (a manifest-only refresh, no plane upload), so a document first read from GitHub and later from a
+ * row is `unchanged` only when the sha256 AND the source, kind, tier and `superseded-by` marker agree; the same sha256 under
+ * another source, kind, tier or marker is an `update` (a manifest-only refresh, no plane upload), so a document first read from GitHub and later from a
  * local clone does not keep a stale source that would hide it from a filesystem-only removal. A different sha256 is a
  * `change`.
  *
@@ -51,7 +51,7 @@ export function planCorpus(entries: readonly CorpusEntry[], scope: CorpusScope, 
 		} else if (row.sha256 !== entry.sha256) {
 			counts.change += 1;
 			items.push({ action: "change", repo: entry.repo, path: entry.path, sha256: entry.sha256 });
-		} else if (row.source !== entry.source || row.kind !== entry.kind || row.tier !== entry.tier) {
+		} else if (row.source !== entry.source || row.kind !== entry.kind || row.tier !== entry.tier || row.supersededBy !== (entry.supersededBy ?? null)) {
 			counts.update += 1;
 			items.push({ action: "update", repo: entry.repo, path: entry.path, sha256: entry.sha256 });
 		} else {
@@ -60,8 +60,9 @@ export function planCorpus(entries: readonly CorpusEntry[], scope: CorpusScope, 
 	}
 
 	const covered = new Set(scope.coverage.map((pair) => `${pair.repo}\n${pair.source}`));
+	// A digest is written by the server (`POST /corpus/reflect`), never found by a scan, so a scan that does not report it says nothing about it.
 	const candidates = rows
-		.filter((row) => row.state === "active" && covered.has(`${row.repo}\n${row.source}`) && row.tier <= scope.maxTier && !reported.has(keyOf(row.repo, row.path)))
+		.filter((row) => row.state === "active" && row.kind !== "digest" && covered.has(`${row.repo}\n${row.source}`) && row.tier <= scope.maxTier && !reported.has(keyOf(row.repo, row.path)))
 		.sort(byPath);
 
 	// A removed row and a new entry with the same repo and sha256 are one document that moved: a rename, once.

@@ -24,6 +24,7 @@ import {
 	type SkippedFile,
 	SkipLog,
 } from "../scan.ts";
+import { entrySupersededBy } from "../supersession.ts";
 
 export const DEFAULT_GITHUB_MAX_REPOS = 50;
 export const DEFAULT_GITHUB_CONCURRENCY = 4;
@@ -257,6 +258,7 @@ export async function scanGithub(opts: GithubScanOptions): Promise<AdapterResult
 								}
 								const inspected = inspectBytes(data, maxBytes);
 								if (!inspected.ok) return refuse(inspected.reason);
+								const supersededBy = entrySupersededBy(found.tier, inspected.text);
 								const entry: CorpusEntry = {
 									repo: repo.slug,
 									path: item.path,
@@ -266,6 +268,7 @@ export async function scanGithub(opts: GithubScanOptions): Promise<AdapterResult
 									bytes: inspected.bytes,
 									source: "github",
 									...(commit === undefined ? {} : { commit }),
+									...(supersededBy === undefined ? {} : { supersededBy }),
 								};
 								entries.push(entry);
 								files += 1;

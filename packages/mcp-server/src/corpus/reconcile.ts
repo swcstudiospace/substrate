@@ -134,16 +134,18 @@ async function deleteOrphans(deps: ReconcileDeps, orphans: readonly PlaneListedD
 
 async function run(deps: ReconcileDeps, execute: boolean): Promise<ReconcileResult> {
 	let rows: ManifestRow[];
+	let rowsComplete = false;
 	try {
-		rows = await deps.store.activeRows(RECONCILE_MAX_ROWS + 1);
+		const page = await deps.store.activeRows(RECONCILE_MAX_ROWS);
+		rows = page.rows;
+		rowsComplete = !page.truncated;
 	} catch {
 		return { ok: false, reason: "corpus.index-unavailable" };
 	}
-	const rowsComplete = rows.length <= RECONCILE_MAX_ROWS;
 	const listing = await deps.plane.listDocuments({ signal: deps.signal });
 	if (!listing.ok) return { ok: false, reason: "corpus.plane-unreachable", detail: listing.reason };
 
-	const drift = diffPlane(rowsComplete ? rows : rows.slice(0, RECONCILE_MAX_ROWS), listing, rowsComplete);
+	const drift = diffPlane(rows, listing, rowsComplete);
 	const gone: ManifestRow[] = [];
 	let lookupFailed = false;
 	let unlooked = false;

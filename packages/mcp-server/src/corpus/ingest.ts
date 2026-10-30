@@ -16,9 +16,9 @@
  * Other rules the order of work encodes:
  * - Nothing leaves this module for the plane unless the gates pass (`corpusGate`), the body hashes to its entry's sha256, and
  *   the redactor's secret findings are clean. A refused document is never sent and never recorded.
- * - A document the manifest already holds at that sha, source, kind and tier is `unchanged` and not sent, so a re-run is a
- *   no-op and a killed run resumes with only what it had not recorded. The same sha under another source, kind or tier is
- *   `updated`: the row is refreshed and the plane is not touched.
+ * - A document the manifest already holds at that sha, source, kind, tier and `superseded-by` marker is `unchanged` and not
+ *   sent, so a re-run is a no-op and a killed run resumes with only what it had not recorded. The same sha under another
+ *   source, kind, tier or marker is `updated`: the row is refreshed and the plane is not touched.
  * - A plane failure marks the affected documents `failed` and records nothing, so a retry sends only them.
  *
  * Tombstones run before the documents: a rename is a tombstone and an add of the same text, and deleting the old document
@@ -208,6 +208,7 @@ async function refreshMetadata(deps: CorpusIngestDeps, tally: Tally, document: C
 			tier: document.tier,
 			source: document.source,
 			commit: document.commit,
+			supersededBy: document.supersededBy,
 		});
 		if (!refreshed) return false;
 	} catch {
@@ -237,7 +238,7 @@ async function prepareDocument(deps: CorpusIngestDeps, tally: Tally, document: C
 		return null;
 	}
 	if (prior?.state === "active" && prior.sha256 === document.sha256) {
-		if (prior.source === document.source && prior.kind === document.kind && prior.tier === document.tier) {
+		if (prior.source === document.source && prior.kind === document.kind && prior.tier === document.tier && prior.supersededBy === (document.supersededBy ?? null)) {
 			settle(tally, document.repo, document.path, "unchanged", { documentId: prior.documentId });
 			return null;
 		}
@@ -300,6 +301,7 @@ async function recordOutcome(deps: CorpusIngestDeps, tally: Tally, item: Prepare
 			bytes: item.document.bytes,
 			source: item.document.source,
 			commit: item.document.commit,
+			supersededBy: item.document.supersededBy,
 			documentId: outcome.documentId,
 		});
 	} catch {

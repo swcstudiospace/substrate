@@ -34,6 +34,7 @@ import {
 	type DocTier,
 	documentKey,
 } from "./protocol.ts";
+import { entrySupersededBy } from "./supersession.ts";
 
 export const DEFAULT_MAX_TIER: DocTier = 2;
 export const DEFAULT_MAX_BYTES = 1_000_000;
@@ -331,6 +332,7 @@ function readCandidate(reader: Reader, state: RepoState, rel: string, abs: strin
 		if (loaded.problem !== undefined && reported(reader, state.repo)) state.problems.push(`${rel}: ${loaded.problem}`);
 		return;
 	}
+	const supersededBy = entrySupersededBy(found.tier, loaded.text);
 	reader.entries.push({
 		repo: state.repo,
 		path: rel,
@@ -340,6 +342,7 @@ function readCandidate(reader: Reader, state: RepoState, rel: string, abs: strin
 		bytes: loaded.bytes,
 		source: "fs",
 		...(state.commit === undefined ? {} : { commit: state.commit }),
+		...(supersededBy === undefined ? {} : { supersededBy }),
 	});
 	reader.paths.set(documentKey(state.repo, rel), abs);
 }

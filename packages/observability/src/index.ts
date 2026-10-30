@@ -118,6 +118,9 @@ export {
 	BRIEF_PROFILE_MODES,
 	SERVED_TOKEN_TOOLS,
 	estimateTokens,
+	CORPUS_FRESHNESS_METRIC,
+	CORPUS_GOLDEN_RECALL5_METRIC,
+	CORPUS_INGEST_RATE_METRIC,
 } from "./instruments.ts";
 
 export {

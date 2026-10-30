@@ -946,7 +946,8 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 	{
 		// uplift-4 S7: the opt-in live golden canary (scripts/docs-golden.ts --live
 		// --emit, SUBSTRATE_DOCS_CANARY=1) posts one warning when its failing set
-		// changes, deduped through SUBSTRATE_DOCS_CANARY_STATE.
+		// changes, deduped through SUBSTRATE_DOCS_CANARY_STATE. Phase 70: the
+		// warning also carries `golden_recall5` when the canary measured it.
 		id: "docs.canary",
 		phase: 25,
 		kind: "warning",
@@ -965,6 +966,33 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 				runtime: "docs-canary",
 				total: 4,
 				failing: [{ fixture: "review-gate", failed: ["recall", "commit_match"] }],
+				golden_recall5: 0.58,
+			},
+		}),
+	},
+	{
+		// v1.7 phase 70: the same canary posts one note per run that measured the
+		// golden set, carrying `payload.golden_recall5` (0 to 1) and the number of
+		// questions asked, so the `corpus.golden_recall5` series has a reading
+		// whether or not any fixture regressed. Report only: it never pages.
+		id: "docs.canary.report",
+		phase: 70,
+		kind: "note",
+		surface: { fixed: "substrate" },
+		actions: ["docs.canary"],
+		runtime: "docs-canary",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "note",
+			summary: "docs canary: golden recall at 5 is 0.82 over 120 questions",
+			session_id: "docs-canary:2026-10-14T03:00:00.000Z",
+			payload: {
+				action: "docs.canary",
+				runtime: "docs-canary",
+				golden_recall5: 0.82,
+				golden_asked: 120,
 			},
 		}),
 	},

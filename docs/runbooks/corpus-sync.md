@@ -28,7 +28,7 @@ On the server (`/etc/substrate/substrate.env`):
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `SUBSTRATE_CORPUS` | `off` | `on` opens the corpus routes, including `POST /corpus/reconcile`. Off: every corpus route answers `503 corpus.disabled`. |
-| `SUBSTRATE_PLANNING_HASH_STORE` | `off` | `on` keeps the server's planning refresh hashes in the index table `planning_page_hashes` (migration step 38), loaded at the first pass. Without an index the hashes stay in memory, as with the flag off. Off: a restart re-ingests every planning page. |
+| `SUBSTRATE_PLANNING_HASH_STORE` | `off` | `on` keeps the server's planning refresh hashes in the index table `planning_page_hashes` (migration step 39), loaded at the first pass. Without an index the hashes stay in memory, as with the flag off. Off: a restart re-ingests every planning page. |
 | `SUBSTRATE_CORPUS_FRESH_MAX_AGE_S` | `172800` | While `SUBSTRATE_CORPUS=on`, a corpus whose last ingest is older than this many seconds raises the existing `docs.freshness` warning once, and one note when an ingest clears it. `0` judges nothing. A corpus whose documents never change is as old as its last change, so a quiet corpus warns after the limit; raise the limit for one. |
 
 On the host that runs the CLI, the doc watch flags `SUBSTRATE_CORPUS_MIRROR_DIR`, `SUBSTRATE_CORPUS_SPOOL`,

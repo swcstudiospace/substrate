@@ -18,6 +18,8 @@ export const CORPUS_ROUTES = {
 	ingest: "/corpus/ingest",
 	status: "/corpus/status",
 	reconcile: "/corpus/reconcile",
+	reflect: "/corpus/reflect",
+	gaps: "/corpus/gaps",
 	root: "/corpus/root",
 	proof: "/corpus/proof",
 	anchor: "/corpus/anchor",
@@ -46,6 +48,7 @@ export const DOC_KINDS = [
 	"planning-archive",
 	"planning-other",
 	"greptile-kb",
+	"digest",
 	"other",
 ] as const;
 export type DocKind = (typeof DOC_KINDS)[number];
@@ -72,6 +75,11 @@ export interface CorpusEntry {
 	source: CorpusSource;
 	/** The commit the content was read at, when known. */
 	commit?: string | undefined;
+	/**
+	 * A repo-relative path of the same repository that replaces this document, from its `superseded-by` front-matter marker
+	 * (tier 1 and 2 documents only). The server keeps it only when it is a valid path; an invalid marker is dropped, never a refusal.
+	 */
+	supersededBy?: string | undefined;
 }
 
 /** An entry plus its text, sent only for documents that must change. */
@@ -286,6 +294,61 @@ export type SyncTrigger = (typeof SYNC_TRIGGERS)[number];
 /** How a sync ended. Closed: the `docs.sync` event carries it. */
 export const SYNC_OUTCOMES = ["ok", "partial", "failed", "skipped"] as const;
 export type SyncOutcome = (typeof SYNC_OUTCOMES)[number];
+/** Bounds of `POST /corpus/reflect`: the CLI keeps inside them and the server refuses a request outside them. */
+export const MAX_REFLECT_DIGESTS = 200;
+export const MAX_DIGEST_CHARS = 20_000;
+
+/** The virtual path a repository digest is stored under: it is not a file of the repository. */
+export const DIGEST_PATH = ".substrate/digest.md";
+
+export interface CorpusDigestPayload {
+	repo: string;
+	text: string;
+	/** sha256 of `text` (UTF-8), lowercase hex. */
+	sha256: string;
+}
+
+export interface CorpusReflectRequest {
+	protocol: typeof CORPUS_PROTOCOL;
+	digests: CorpusDigestPayload[];
+}
+
+export const REFLECT_STATUSES = ["stored", "unchanged", "refused", "failed"] as const;
+export type ReflectStatus = (typeof REFLECT_STATUSES)[number];
+
+export interface CorpusReflectResultItem {
+	repo: string;
+	status: ReflectStatus;
+	/** A closed reason code for `refused` and `failed`. */
+	reason?: string | undefined;
+}
+
+export interface CorpusReflectResponse {
+	protocol: typeof CORPUS_PROTOCOL;
+	results: CorpusReflectResultItem[];
+	manifestVersion: number;
+}
+
+/** The most gaps one `GET /corpus/gaps` answers, and how many it answers when `limit` is absent. */
+export const MAX_GAPS_LIMIT = 200;
+export const DEFAULT_GAPS_LIMIT = 50;
+
+/** A query the corpus could not answer well, aggregated by the hash of the query. */
+export interface CorpusGap {
+	queryHash: string;
+	/** The redacted, capped text of the query, when the server kept it. */
+	text: string | null;
+	searches: number;
+	lastSeen: string;
+	/** The best score any of the searches returned; null when none returned a scored citation. */
+	best: number | null;
+}
+
+export interface CorpusGapsResponse {
+	protocol: typeof CORPUS_PROTOCOL;
+	gaps: CorpusGap[];
+	truncated: boolean;
+}
 
 /**
  * `GET /corpus/root`: the Merkle root over the active manifest (v1.7 phase 69). `count` is the number of leaves it covers;

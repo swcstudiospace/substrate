@@ -136,6 +136,17 @@ export function buildFabricSuggestions(status: FabricStatus, facts: FabricFacts)
 		});
 	}
 
+	const corpus = rows.get("corpus");
+	if (corpus?.state === "degraded") {
+		found.push({
+			id: "corpus-slo",
+			resource: "corpus",
+			action: "A docs-plane objective is breached or could not be read. See docs/runbooks/docs-rag-operations.md for what each breach means and the step that fixes it.",
+			evidence: `state degraded; source: ${corpus.source}`,
+			severity: "attention",
+		});
+	}
+
 	const railway = facts.railway;
 	if (railway.status === "over-budget" && railway.projectedMonthlyUsd !== null && railway.budgetUsd !== null) {
 		found.push({

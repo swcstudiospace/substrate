@@ -39,6 +39,23 @@ describe("parseEntry refuses with the first closed reason", () => {
 	});
 });
 
+describe("parseEntry and the superseded-by marker (phase 66)", () => {
+	test("a valid repo-relative marker is kept", () => {
+		expect(parseEntry({ ...GOOD, supersededBy: "docs/new.md" })).toEqual({ ok: true, value: { ...GOOD, supersededBy: "docs/new.md" } });
+	});
+
+	test("a marker that is not a valid path is dropped, never a refusal: one odd front-matter line does not fail a request", () => {
+		for (const supersededBy of ["", "/abs.md", "../up.md", "a//b.md", "https://example.com/x.md", 7, null, { path: "x" }]) {
+			expect({ marker: supersededBy, result: parseEntry({ ...GOOD, supersededBy }) }).toEqual({ marker: supersededBy, result: { ok: true, value: GOOD } });
+		}
+	});
+
+	test("an ingest request carries the marker through to its document", () => {
+		const parsed = parseIngestRequest({ protocol: CORPUS_PROTOCOL, documents: [{ ...GOOD, supersededBy: "docs/new.md", body: "text" }], tombstones: [] });
+		expect(parsed.ok ? parsed.value.documents[0]?.supersededBy : undefined).toBe("docs/new.md");
+	});
+});
+
 describe("parsePlanRequest", () => {
 	const base = { protocol: CORPUS_PROTOCOL, entries: [GOOD], scope: SCOPE };
 

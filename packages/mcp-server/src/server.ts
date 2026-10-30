@@ -316,6 +316,8 @@ const JSON_BODY_ROUTES: Record<string, true> = {
 	"/docs/search": true,
 	"/docs/ingest": true,
 	"/docs/merge-trigger": true,
+	"/docs/feedback": true,
+	"/corpus/reflect": true,
 	"/skills/propose": true,
 	"/skills/approve": true,
 	"/steering/queue": true,
@@ -355,6 +357,13 @@ function listLength(body: unknown, member: string): number {
 	if (body === null || typeof body !== "object" || Array.isArray(body)) return 0;
 	const list: unknown = (body as Record<string, unknown>)[member];
 	return Array.isArray(list) ? list.length : 0;
+}
+
+/** A string member of a request body cut to 200 characters for an audit record, or an empty string when it is not one. */
+function stringMember(body: unknown, member: string): string {
+	if (body === null || typeof body !== "object" || Array.isArray(body)) return "";
+	const value: unknown = (body as Record<string, unknown>)[member];
+	return typeof value === "string" ? value.slice(0, 200) : "";
 }
 /** Why an anonymous merge-trigger is refused, even on a run that allows anonymous callers. */
 const MERGE_TRIGGER_NEEDS_SURFACE = "docs merge-trigger needs an authenticated surface; nothing was refreshed";
@@ -1699,6 +1708,45 @@ export function createHttpServer(
 				sendJson(res, reply.status, reply.body);
 				return;
 			}
+			// The docs learning loop (v1.7 phase 66). Feedback is a write with a fail-open audit (a verdict must not fail an agent's turn);
+			// the digest reflect is a corpus ingest, audited fail-closed under `corpus_ingest`; the gap report is a read, audited under
+			// `corpus_status`. An anonymous caller is refused before the body is read. With `SUBSTRATE_CORPUS` off each answers 503
+			// `corpus.disabled` from `substrate.*` and nothing is read or stored.
+			if (req.method === "POST" && url.pathname === "/docs/feedback") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req));
+				// The note is never audited or stored; the audit record names the document and the verdict only.
+				const fields = { document: stringMember(parsed, "document"), verdict: stringMember(parsed, "verdict") };
+				if (!(await auditedRest(res, observability, surface, "docs_feedback", fields))) return;
+				const reply = await substrate.docsFeedback(parsed, surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			if (req.method === "POST" && url.pathname === "/corpus/reflect") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req, DOCS_MAX_BODY_BYTES));
+				// Counts only: the audit record never carries a digest.
+				if (!(await auditedRest(res, observability, surface, "corpus_ingest", { op: "reflect", digests: listLength(parsed, "digests") }))) return;
+				const reply = await substrate.corpusReflect(parsed, surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			if (req.method === "GET" && url.pathname === "/corpus/gaps") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "gaps" }))) return;
+				const reply = await substrate.corpusGaps(url.searchParams.get("limit"), surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
 			// Corpus proofs (v1.7 phase 69): the root, one document's inclusion proof and a root's anchor status. Reads, audited under
 			// `corpus_status` (fail-open) like the plan and the status; an anonymous caller is refused first.
 			if (req.method === "GET" && url.pathname === "/corpus/root") {
@@ -2273,7 +2321,7 @@ export function createHttpServer(
 
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
-			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/corpus/plan" || url.pathname === "/corpus/neardup" || url.pathname === "/corpus/ingest" || url.pathname === "/corpus/reconcile" || url.pathname === "/mcp" || url.pathname === "/memory" || url.pathname === "/worktrees/report")) {
+			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/docs/feedback" || url.pathname === "/corpus/plan" || url.pathname === "/corpus/neardup" || url.pathname === "/corpus/ingest" || url.pathname === "/corpus/reconcile" || url.pathname === "/corpus/reflect" || url.pathname === "/mcp" || url.pathname === "/memory" || url.pathname === "/worktrees/report")) {
 				sendJson(res, 413, { error: cause.message });
 				return;
 			}

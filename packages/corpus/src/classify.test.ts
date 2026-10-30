@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { classify, hasDocExtension, isExcludedSegment } from "./classify.ts";
-import type { DocKind, DocTier } from "./protocol.ts";
+import { DIGEST_PATH, DOC_KINDS, type DocKind, type DocTier, isDocKind } from "./protocol.ts";
 
 type Row = [path: string, kind: DocKind, tier: DocTier];
 
@@ -58,6 +58,11 @@ const ROWS: Row[] = [
 	["notes/ideas.md", "other", 3],
 	["guide.adoc", "other", 3],
 	["packages/x/docs/page.md", "other", 3],
+	// The repository digest has its own virtual path; only that exact path is a digest.
+	[".substrate/digest.md", "digest", 1],
+	[".Substrate/Digest.md", "digest", 1],
+	["packages/x/.substrate/digest.md", "other", 3],
+	[".substrate/other.md", "other", 3],
 ];
 
 describe("classify", () => {
@@ -110,5 +115,13 @@ describe("classify", () => {
 	test("backslash separators and leading ./ are read as the same path", () => {
 		expect(classify(".\\docs\\adr\\0001.md")).toEqual({ kind: "adr", tier: 1 });
 		expect(classify("./README.md")).toEqual({ kind: "readme", tier: 1 });
+	});
+
+	test("the digest kind is a known kind, and the digest path is the only way to get it", () => {
+		expect(isDocKind("digest")).toBe(true);
+		expect(DOC_KINDS.filter((kind) => kind === "digest")).toHaveLength(1);
+		for (const [path] of ROWS) {
+			if (classify(path)?.kind === "digest") expect(path.toLowerCase()).toBe(DIGEST_PATH);
+		}
 	});
 });

@@ -679,6 +679,31 @@ export class SubstrateInstruments {
 		this.registry.gauge(CORPUS_SYNC_LAG_METRIC, { description: "Lag the newest reported corpus sync had behind its source change", unit: "s" }).set(seconds);
 	}
 
+	/**
+	 * The age of the newest manifest change of the corpus atlas, in seconds (phase 70). `newestAtMs` answers its time or `null`
+	 * while nothing has been read; the age is computed when the registry is snapshotted, so it grows between reads. No point
+	 * until there is a change to age.
+	 */
+	observeCorpusFreshness(newestAtMs: () => number | null, now: () => number = Date.now): void {
+		const gauge = this.registry.gauge(CORPUS_FRESHNESS_METRIC, { description: "Age of the newest corpus manifest change", unit: "s" });
+		gauge.observe = () => {
+			const at = newestAtMs();
+			return at === null ? null : Math.max(0, (now() - at) / 1000);
+		};
+	}
+
+	/** Documents per second of the last corpus ingest request's wall time, 0 when it sent nothing (phase 70). A negative or non-finite rate is not stored. */
+	setCorpusIngestRate(docsPerSecond: number): void {
+		if (!Number.isFinite(docsPerSecond) || docsPerSecond < 0) return;
+		this.registry.gauge(CORPUS_INGEST_RATE_METRIC, { description: "Documents per second of the last corpus ingest request", unit: "{document}/s" }).set(docsPerSecond);
+	}
+
+	/** Recall at 5 of the golden set, as the docs canary last reported it (phase 70). A value outside [0, 1] is not stored. */
+	setCorpusGoldenRecall5(recall: number): void {
+		if (!Number.isFinite(recall) || recall < 0 || recall > 1) return;
+		this.registry.gauge(CORPUS_GOLDEN_RECALL5_METRIC, { description: "Golden-set recall at 5 as the docs canary last reported it", unit: "1" }).set(recall);
+	}
+
 	/** One brief's use of the recall snapshot (uplift-4 S5). `surface` is bounded by the caller; a result outside the closed set is dropped. */
 	recordBriefRecall(sample: { surface: string; result: BriefRecallResult }): void {
 		if (!(BRIEF_RECALL_RESULTS as readonly string[]).includes(sample.result)) return;
@@ -705,3 +730,7 @@ export const ENDPOINT_PROXY_PLANES_METRIC = "substrate.endpoint.proxy_planes";
 
 /** The gauge `setCorpusSyncLag` sets (v1.7 phase 65): how far behind its source the newest reported corpus sync was, seconds. No repository label. */
 export const CORPUS_SYNC_LAG_METRIC = "substrate.corpus.sync_lag_seconds";
+/** The three gauges of the corpus atlas SLOs (phase 70). */
+export const CORPUS_FRESHNESS_METRIC = "substrate.corpus.freshness_seconds";
+export const CORPUS_INGEST_RATE_METRIC = "substrate.corpus.ingest_docs_per_second";
+export const CORPUS_GOLDEN_RECALL5_METRIC = "substrate.corpus.golden_recall5";
