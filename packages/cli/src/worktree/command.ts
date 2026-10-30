@@ -1,5 +1,5 @@
 /**
- * `substrate worktree list|status|scan|prune|conflicts|provision|disk` (phase 68).
+ * `substrate worktree list|status|scan|prune|conflicts|provision|disk|guard` (phase 68).
  *
  * The fleet library does the work (`packages/fleet`); this module owns the grammar, the output and the
  * exit codes: 0 done, 1 failed (a removal, a report or a creation did not happen), 2 usage or no
@@ -55,6 +55,7 @@ import {
 	resolveDefaultRef,
 	sessionIdFromEnv,
 	type TreeLinks,
+	workspaceGuard,
 	type WorktreeInfo,
 	type WorktreeReport,
 	worktreeRootsFromEnv,
@@ -69,7 +70,8 @@ export const WORKTREE_USAGE =
 	"       substrate worktree prune [--root DIR]... [--idle-days N] [--execute] [--json]\n" +
 	"       substrate worktree conflicts [--repo R | --root DIR...] [--json]\n" +
 	"       substrate worktree provision --repo DIR --branch B [--base REF] [--path DIR] [--json]\n" +
-	"       substrate worktree disk [--root DIR]... [--json]\n";
+	"       substrate worktree disk [--root DIR]... [--json]\n" +
+	"       substrate worktree guard DIR [--json]\n";
 
 export type PostOutcome = { ok: true; stored: number } | { ok: false; error: string };
 
@@ -518,6 +520,21 @@ async function commandDisk(args: WorktreeArgs, deps: WorktreeDeps): Promise<numb
 	return 0;
 }
 
+// ── guard ───────────────────────────────────────────────────────────────────
+
+/** `guard DIR` (or one `--root DIR`): refuses when removing the workspace at DIR would lose work. Reads no environment variable. */
+async function commandGuard(args: WorktreeArgs, deps: WorktreeDeps): Promise<number> {
+	const given = [...args.positional, ...args.roots];
+	const only = given[0];
+	if (given.length !== 1 || only === undefined) return usageError(deps, "guard needs exactly one workspace directory: substrate worktree guard DIR\n");
+	const root = resolve(deps.cwd, only);
+	const result = await workspaceGuard(root, deps.git);
+	if (args.json) deps.out(`${JSON.stringify({ root, ok: result.ok, refusals: result.refusals }, null, 2)}\n`);
+	else if (result.ok) deps.out(`ok: ${root} holds no unsaved work\n`);
+	else for (const refusal of result.refusals) deps.out(`refused: ${refusal}\n`);
+	return result.ok ? 0 : 1;
+}
+
 function usageError(deps: WorktreeDeps, message: string): number {
 	deps.err(message);
 	return 2;
@@ -549,6 +566,8 @@ export async function runWorktree(argv: readonly string[], deps: WorktreeDeps): 
 			return commandProvision(args, deps);
 		case "disk":
 			return commandDisk(args, deps);
+		case "guard":
+			return commandGuard(args, deps);
 	}
 }
 

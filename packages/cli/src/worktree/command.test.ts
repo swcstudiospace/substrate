@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { EmitOutcome } from "../../../collectors/src/emit.ts";
-import { type CommandRunner, spawnGit } from "../../../fleet/src/git.ts";
+import { type CommandResult, type CommandRunner, spawnGit } from "../../../fleet/src/git.ts";
 import { addWorktree, cleanupTemp, commit, defined, fakeGh, git, makeRepo, type TestRepo, tempDir, write } from "../../../fleet/src/testkit.ts";
 import type { EventInput } from "../../../mcp-server/src/types.ts";
 import { httpClaimsLookup, httpReportPoster, runWorktree, type PostOutcome, type WorktreeDeps } from "./command.ts";
@@ -897,5 +897,150 @@ describe("httpClaimsLookup", () => {
 		);
 		expect((await anonymous("ut-1")).ok).toBe(false);
 		expect(fetched).toBe(false);
+	});
+});
+
+describe("guard", () => {
+	const FAILED: CommandResult = { code: 128, stdout: "", stderr: "fatal: injected" };
+	/** Git verbs that write to a repository or a worktree, plus the worktree, branch, remote and config forms that do. */
+	const WRITE_VERBS = ["add", "commit", "push", "reset", "checkout", "switch", "restore", "clean", "gc", "stash", "fetch", "pull", "merge", "rebase", "cherry-pick", "revert", "tag", "update-ref", "rm", "mv", "init", "clone", "prune"];
+	const BRANCH_WRITE_FLAGS = ["-d", "-D", "-m", "-M", "-c", "-C", "-f", "-u", "--delete", "--move", "--copy", "--force", "--set-upstream-to", "--unset-upstream"];
+
+	function isWrite(args: string[]): boolean {
+		if (WRITE_VERBS.includes(args[0] ?? "")) return true;
+		if (args[0] === "worktree") return args[1] !== "list";
+		if (args[0] === "branch") return args.some((arg) => BRANCH_WRITE_FLAGS.includes(arg));
+		if (args[0] === "remote") return ["add", "remove", "rm", "rename", "set-head", "set-url", "prune"].includes(args[1] ?? "");
+		if (args[0] === "config") return !args.some((arg) => arg === "--get" || arg === "--list" || arg === "-l");
+		return false;
+	}
+
+	/** A workspace `<root>/{api,web}`: linked worktrees whose primary checkout sits outside the root. Both are pushed and clean. */
+	function workspace(): { repo: TestRepo; root: string; api: string; web: string } {
+		const repo = makeRepo();
+		commit(repo.dir, ".gitignore", "local.env\n", "ignore local.env");
+		git(repo.dir, ["push", "-q", "origin", "main"]);
+		const root = join(tempDir(), "ws");
+		mkdirSync(root);
+		const api = addWorktree(repo, root, "api");
+		const web = addWorktree(repo, root, "web");
+		git(api, ["push", "-q", "origin", "api"]);
+		git(web, ["push", "-q", "origin", "web"]);
+		return { repo, root, api, web };
+	}
+
+	/** The real git with every call recorded; `answer` may replace the result of a call. */
+	function recording(answer: (args: string[]) => CommandResult | null = () => null): { git: CommandRunner; calls: string[][] } {
+		const calls: string[][] = [];
+		const runner: CommandRunner = async (args, cwd) => {
+			calls.push(args);
+			return answer(args) ?? spawnGit(args, cwd);
+		};
+		return { git: runner, calls };
+	}
+
+	test("clean and pushed members pass: exit 0 and nothing refused", async () => {
+		const w = workspace();
+		// The root is a flag, not an environment variable: a configured root that does not exist must change nothing.
+		const h = harness({}, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", w.root], h.deps)).toBe(0);
+		expect(h.out.join("")).toContain("holds no unsaved work");
+	});
+
+	test("an unpushed commit is refused and named", async () => {
+		const w = workspace();
+		commit(w.api, "feature.txt", "work\n");
+		const h = harness({}, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", w.root], h.deps)).toBe(1);
+		expect(h.out.join("")).toContain(`${w.api}: 1 unpushed commit(s)`);
+	});
+
+	test("uncommitted changes are refused and named", async () => {
+		const w = workspace();
+		write(w.web, "scratch.txt", "draft\n");
+		const h = harness({}, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", w.root], h.deps)).toBe(1);
+		expect(h.out.join("")).toContain(`${w.web}: uncommitted changes`);
+	});
+
+	test("ignored work the primary checkout does not hold identically is refused; an identical copy is not", async () => {
+		const w = workspace();
+		write(w.api, "local.env", "TOKEN=1\n");
+		const h = harness({}, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", w.root], h.deps)).toBe(1);
+		expect(h.out.join("")).toContain("ignored work would be lost: local.env");
+		write(w.repo.dir, "local.env", "TOKEN=1\n");
+		const same = harness({}, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", w.root], same.deps)).toBe(0);
+	});
+
+	test("ignored files that cannot be listed are refused, never passed", async () => {
+		const w = workspace();
+		const { git: runner } = recording((args) => (args[0] === "ls-files" ? FAILED : null));
+		const h = harness({ git: runner }, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", w.root], h.deps)).toBe(1);
+		expect(h.out.join("")).toContain("ignored files could not all be listed");
+	});
+
+	test("a failed or unreadable probe is a refusal, never a pass", async () => {
+		const w = workspace();
+		const answers: Array<(args: string[]) => CommandResult | null> = [
+			(args) => (args[0] === "status" ? FAILED : null),
+			(args) => (args[0] === "rev-list" ? FAILED : null),
+			(args) => (args[0] === "rev-list" ? { code: 0, stdout: "not a number\n", stderr: "" } : null),
+		];
+		for (const answer of answers) {
+			const h = harness({ git: recording(answer).git }, withRoot("/nowhere"));
+			expect(await runWorktree(["guard", w.root], h.deps)).toBe(1);
+			expect(h.out.join("")).toContain("cannot be ruled out");
+		}
+	});
+
+	test("a .planning directory in the workspace root is refused: it is outside git", async () => {
+		const w = workspace();
+		write(w.root, ".planning/STATE.md", "state\n");
+		const h = harness({}, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", w.root], h.deps)).toBe(1);
+		expect(h.out.join("")).toContain("workspace .planning is outside git: copy it out first");
+	});
+
+	test("the guard writes nothing: no remove, no branch delete and no other write verb is called", async () => {
+		const w = workspace();
+		commit(w.api, "feature.txt", "work\n");
+		write(w.web, "local.env", "x\n");
+		const { git: runner, calls } = recording();
+		const h = harness({ git: runner }, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", w.root], h.deps)).toBe(1);
+		expect(calls.length).toBeGreaterThan(0);
+		expect(calls.some((args) => args[0] === "worktree" && args[1] === "remove")).toBe(false);
+		expect(calls.some((args) => args[0] === "branch" && (args.includes("-d") || args.includes("-D") || args.includes("--delete")))).toBe(false);
+		expect(calls.filter(isWrite)).toEqual([]);
+		expect(existsSync(w.api) && existsSync(w.web)).toBe(true);
+	});
+
+	test("usage: guard takes exactly one directory and no flag it does not take", async () => {
+		const w = workspace();
+		expect(await runWorktree(["guard"], harness().deps)).toBe(2);
+		expect(await runWorktree(["guard", w.root, w.api], harness().deps)).toBe(2);
+		expect(await runWorktree(["guard", "--root", w.root, w.api], harness().deps)).toBe(2);
+		expect(await runWorktree(["guard", w.root, "--execute"], harness().deps)).toBe(2);
+		expect(await runWorktree(["list", w.root], harness().deps)).toBe(2);
+	});
+
+	test("--json prints the verdict and the refusals", async () => {
+		const w = workspace();
+		commit(w.api, "feature.txt", "work\n");
+		const h = harness({}, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", "--json", "--root", w.root], h.deps)).toBe(1);
+		const body: { ok: boolean; refusals: string[] } = JSON.parse(h.out.join(""));
+		expect(body.ok).toBe(false);
+		expect(body.refusals).toContain(`${w.api}: 1 unpushed commit(s)`);
+	});
+
+	test("the parser takes one positional root for guard alone", () => {
+		expect(parseWorktreeArgs(["guard", "/ws/one", "--json"])).toMatchObject({ ok: true, args: { command: "guard", positional: ["/ws/one"], json: true } });
+		expect(parseWorktreeArgs(["guard", "--root", "/ws/one"])).toMatchObject({ ok: true, args: { roots: ["/ws/one"] } });
+		expect(parseWorktreeArgs(["list", "/ws/one"]).ok).toBe(false);
+		expect(parseWorktreeArgs(["guard", ""]).ok).toBe(false);
 	});
 });
