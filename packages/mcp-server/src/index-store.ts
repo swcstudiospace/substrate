@@ -857,6 +857,40 @@ export function applicableMigrationSteps(optIns: MigrationOptIns): ReadonlyArray
 	return MIGRATION_STEPS.filter((step) => step.optIn === undefined || optIns[step.optIn]);
 }
 
+/**
+ * Not ledgered. Step 39 creates `planning_page_hashes` with primary key `(destination, path)`. A database that applied
+ * an earlier path-only key still has that key, and `ON CONFLICT (destination, path)` does not catch it. Drop that old
+ * table and recreate it. A fresh database already has `destination` in the primary key, so the drop does not run.
+ */
+export const PLANNING_HASH_TABLE_REPAIR = `
+	do $$
+	begin
+		if to_regclass('planning_page_hashes') is not null
+			and not exists (
+				select 1
+				from pg_constraint
+				join pg_attribute
+					on pg_attribute.attrelid = pg_constraint.conrelid
+					and pg_attribute.attnum = any (pg_constraint.conkey)
+				where pg_constraint.conrelid = to_regclass('planning_page_hashes')
+					and pg_constraint.contype = 'p'
+					and pg_attribute.attname = 'destination'
+			) then
+			drop table planning_page_hashes;
+		end if;
+	end
+	$$;
+	create table if not exists planning_page_hashes (
+		destination text not null,
+		path        text not null,
+		sha256      text not null,
+		updated_at  timestamptz not null default now(),
+		primary key (destination, path)
+	);
+	create unique index if not exists planning_page_hashes_destination_path_idx on planning_page_hashes (destination, path);
+`;
+
+
 export class IndexStore implements MemoryStore {
 	private readonly sql: SQL;
 	private readonly gate: PlaneGate | null;
@@ -975,37 +1009,8 @@ export class IndexStore implements MemoryStore {
 			// unique index on `(entry_hash, state)` rejects a second approval). `IF EXISTS`
 			// makes every later boot a no-op once it is gone.
 			await reserved.unsafe(`drop index if exists memory_reviews_hash_idx`);
-			// Not ledgered. planning_page_hashes is a disposable cache. Step 39 already creates the table with
-			// primary key (destination, path). A database that applied an earlier path-only primary key still has that
-			// key, and ON CONFLICT (destination, path) does not catch it, so save() never stores the new row. Drop that
-			// old table and recreate it. A fresh database already has destination in the primary key, so the drop does not run.
-			await reserved.unsafe(`
-				do $$
-				begin
-					if to_regclass('planning_page_hashes') is not null
-						and not exists (
-							select 1
-							from pg_constraint
-							join pg_attribute
-								on pg_attribute.attrelid = pg_constraint.conrelid
-								and pg_attribute.attnum = any (pg_constraint.conkey)
-							where pg_constraint.conrelid = to_regclass('planning_page_hashes')
-								and pg_constraint.contype = 'p'
-								and pg_attribute.attname = 'destination'
-						) then
-						drop table planning_page_hashes;
-					end if;
-				end
-				$$;
-				create table if not exists planning_page_hashes (
-					destination text not null,
-					path        text not null,
-					sha256      text not null,
-					updated_at  timestamptz not null default now(),
-					primary key (destination, path)
-				);
-				create unique index if not exists planning_page_hashes_destination_path_idx on planning_page_hashes (destination, path);
-			`);
+			// Not ledgered. See {@link PLANNING_HASH_TABLE_REPAIR}.
+			await reserved.unsafe(PLANNING_HASH_TABLE_REPAIR);
 		} catch (cause) {
 			migrateFailed = true;
 			throw cause;
