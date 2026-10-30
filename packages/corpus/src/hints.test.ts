@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type HintClock, MAX_HINT_BYTES, MAX_HINT_DIR_BYTES, MAX_HINT_FILES, readHints, writeHint } from "./hints.ts";
 import { defined, tempDir } from "./test-support.ts";
@@ -118,5 +118,34 @@ describe("the hint spool", () => {
 			expect(results.filter((result) => result.reason === "spool-full")).toHaveLength(1);
 			expect(readdirSync(dir).filter((name) => name.endsWith(".json"))).toHaveLength(MAX_HINT_FILES);
 		});
+	});
+
+	test("an old lock with no owner pid is removed, so the spool is not stuck", () => {
+		const dir = spool();
+		mkdirSync(dir, { recursive: true });
+		const lock = join(dir, ".lock");
+		writeFileSync(lock, "");
+		const past = new Date(Date.now() - 60_000);
+		utimesSync(lock, past, past);
+		expect(writeHint(dir, "/work/after", clock()).ok).toBe(true);
+		expect(existsSync(lock)).toBe(false);
+	});
+
+	// Real clock on purpose: the lock is a file shared with another process, and its age is a file timestamp. Fake timers
+	// cannot reach either. The sleep only lets the child reach the lock; the assertion holds whether or not it has.
+	test("a fresh lock with no owner pid is held by its writer, not evicted", async () => {
+		const dir = spool();
+		mkdirSync(dir, { recursive: true });
+		const lock = join(dir, ".lock");
+		writeFileSync(lock, "");
+		const script = `import { writeHint } from ${JSON.stringify(join(import.meta.dir, "hints.ts"))};\nconst result = writeHint(process.env.HINT_SPOOL as string, process.env.HINT_DIR as string, { nowMs: () => 1_700_000_000_000, random: () => "00000001" });\nprocess.stdout.write(JSON.stringify(result));`;
+		const child = Bun.spawn(["bun", "--no-env-file", "-e", script], { stdout: "pipe", stderr: "pipe", env: { ...process.env, HINT_SPOOL: dir, HINT_DIR: "/work/child" } });
+		await Bun.sleep(400);
+		expect(existsSync(lock)).toBe(true);
+		expect(readFileSync(lock, "utf8")).toBe("");
+		rmSync(lock);
+		const result = JSON.parse(await new Response(child.stdout).text()) as { ok: boolean };
+		await child.exited;
+		expect(result.ok).toBe(true);
 	});
 });
