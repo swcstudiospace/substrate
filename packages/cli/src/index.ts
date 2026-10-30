@@ -31,7 +31,7 @@
  *       (exit 0 consistent, 1 drift, 2 usage, 3 a store could not be read; docs/runbooks/consistency-verify.md)
  *   substrate memory capsule export|verify|redact ...   memory capsules (docs/runbooks/memory-capsules.md)
  *       (exit 0 done, 1 failed or incomplete, 2 usage, 3 verify --anchors could not finish)
- *   substrate worktree list|status|scan|prune|conflicts|provision|disk   the worktree fleet (docs/worktree-fleet.md)
+ *   substrate worktree list|status|scan|prune|conflicts|provision|disk|guard   the worktree fleet (docs/worktree-fleet.md)
  *       (exit 0 done, 1 a removal, report or creation failed, 2 usage or no worktree root configured)
  *
  * With `SUBSTRATE_EVENT_SPOOL=on`, `emit` parks an event that failed for a retryable reason
@@ -838,7 +838,7 @@ switch (command) {
 				"substrate memory capsule export --out FILE [--session S] [--repo R] [--since ISO] [--limit N] [--store DIR]\n" +
 				"                         | verify FILE [--anchors] | redact FILE --ids a,b --reason TEXT --out FILE2   (substrate memory capsule for the flags)\n" +
 				"substrate spool status [--json] | flush [--json] [--budget-ms N]   (the event spool needs SUBSTRATE_EVENT_SPOOL=on)\n" +
-				"substrate worktree list|status|scan|prune|conflicts|provision|disk ...   (substrate worktree --help; roots from SUBSTRATE_WORKTREE_ROOTS)\n" +
+				"substrate worktree list|status|scan|prune|conflicts|provision|disk|guard ...   (substrate worktree --help; roots from SUBSTRATE_WORKTREE_ROOTS)\n" +
 				"substrate corpus scan | plan | ingest [--execute] | reflect [--execute] | status [--gaps] | sync [--repo R] [--execute] | watch [--once] | reconcile [--execute] | prove | verify | hook install|uninstall|status --repo DIR | hint --repo DIR\n" +
 				"                  (substrate corpus --help for the flags; ingest, reflect, sync and reconcile are dry runs without --execute)\n",
 		);

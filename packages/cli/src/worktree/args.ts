@@ -6,7 +6,7 @@
  * is inspected, never ignored, since one of the subcommands deletes directories.
  */
 
-export const SUBCOMMANDS = ["list", "status", "scan", "prune", "conflicts", "provision", "disk"] as const;
+export const SUBCOMMANDS = ["list", "status", "scan", "prune", "conflicts", "provision", "disk", "guard"] as const;
 export type Subcommand = (typeof SUBCOMMANDS)[number];
 
 const VALUE_FLAGS: ReadonlySet<string> = new Set(["root", "repo", "idle-days", "branch", "base", "path", "session"]);
@@ -20,11 +20,13 @@ const ALLOWED: Record<Subcommand, readonly string[]> = {
 	conflicts: ["root", "repo", "json"],
 	provision: ["repo", "branch", "base", "path", "json"],
 	disk: ["root", "json"],
+	guard: ["root", "json"],
 };
 
 export interface WorktreeArgs {
 	command: Subcommand;
 	roots: string[];
+	positional: string[];
 	repo: string | undefined;
 	idleDays: string | undefined;
 	branch: string | undefined;
@@ -43,11 +45,15 @@ export function parseWorktreeArgs(argv: readonly string[]): ParseResult {
 	if (first === undefined) return { ok: false, error: "missing subcommand" };
 	const command = SUBCOMMANDS.find((name) => name === first);
 	if (command === undefined) return { ok: false, error: `unknown subcommand ${first}` };
-	const args: WorktreeArgs = { command, roots: [], repo: undefined, idleDays: undefined, branch: undefined, base: undefined, path: undefined, session: undefined, json: false, report: false, execute: false };
+	const args: WorktreeArgs = { command, roots: [], positional: [], repo: undefined, idleDays: undefined, branch: undefined, base: undefined, path: undefined, session: undefined, json: false, report: false, execute: false };
 	for (let index = 0; index < rest.length; index++) {
 		const token = rest[index];
 		if (token === undefined) continue;
-		if (!token.startsWith("--")) return { ok: false, error: `unexpected argument ${token}` };
+		if (!token.startsWith("--")) {
+			if (command !== "guard" || token === "") return { ok: false, error: `unexpected argument ${token}` };
+			args.positional.push(token);
+			continue;
+		}
 		const equals = token.indexOf("=");
 		const name = token.slice(2, equals < 0 ? undefined : equals);
 		if (!ALLOWED[command].includes(name)) return { ok: false, error: `${command} does not take --${name}` };
