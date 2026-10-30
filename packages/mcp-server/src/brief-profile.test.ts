@@ -21,7 +21,6 @@ import {
 	parseBriefProfile,
 	parseSections,
 	renderCompactBrief,
-	utf8Bytes,
 	renderFullBrief,
 	resolveBriefProfile,
 	type BriefItem,
