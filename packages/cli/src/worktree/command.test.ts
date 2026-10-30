@@ -1433,4 +1433,28 @@ describe("merge-back", () => {
 		expect(reasonsOf(result, claimed)).toContain("live claim on graph claimed");
 		expect(h.events).toEqual([]);
 	});
+
+	test("with an origin remote but no origin/HEAD, a topic commit merged only into local main is refused and not recorded", async () => {
+		const repo = makeRepo();
+		git(repo.dir, ["remote", "set-head", "origin", "-d"]);
+		const root = join(tempDir(), "wts");
+		mkdirSync(root);
+		const topic = addWorktree(repo, root, "topic");
+		commit(topic, "t.txt", "t\n");
+		// Merged into the local main only: origin/main never has it, so nothing on origin proves it merged.
+		git(repo.dir, ["merge", "-q", "--no-ff", "-m", "merge topic", "topic"]);
+		const h = harness({}, withRoot(root));
+		expect(await runWorktree(["merge-back", "--execute", topic], h.deps)).toBe(1);
+		expect(h.events).toEqual([]);
+		expect(h.out.join("")).toContain("origin/HEAD is not set, so the default branch cannot be proven merged");
+		expect(existsSync(topic)).toBe(true);
+	});
+
+	test("with origin/HEAD set, a commit that is on origin/main still records", async () => {
+		const f = fleet();
+		const h = harness({}, withRoot(f.root));
+		expect(await runWorktree(["merge-back", "--execute", f.merged], h.deps)).toBe(0);
+		expect(h.events).toHaveLength(1);
+		expect(h.events[0]).toMatchObject({ payload: { branch: "merged-a", merged_via: "default-branch" } });
+	});
 });

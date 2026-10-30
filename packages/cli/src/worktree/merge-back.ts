@@ -91,6 +91,9 @@ async function decide(path: string, rootList: readonly string[], deps: WorktreeD
 	const reasons: string[] = [];
 	if (info.prunable) reasons.push("the worktree directory is missing");
 	if (info.dirty) reasons.push("has uncommitted or untracked changes");
+	// With an origin remote, the default branch is origin's: a local main or master proves nothing about what was pushed.
+	const hasOrigin = (await deps.git(["remote", "get-url", "origin"], info.repo_dir)).code === 0;
+	if (hasOrigin && !(info.default_ref ?? "").startsWith("origin/")) reasons.push("origin/HEAD is not set, so the default branch cannot be proven merged");
 	// A squash merge deletes the remote branch, so a head that a merged pull request has is pushed as far as GitHub knows.
 	if (!info.pushed && !info.pr_merged_heads.includes(info.head)) reasons.push("head is not pushed");
 	let mergedVia: MergedVia | null = null;
