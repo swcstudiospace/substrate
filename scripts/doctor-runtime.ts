@@ -53,7 +53,7 @@ import { parseSystemctlShow, systemdTimestampToEpoch } from "./parity-check.ts";
 import { type DiskPressure, diskPressure, minFreeGbFromEnv as worktreeMinFreeGb, spawnGit, worktreeRootsFromEnv } from "../packages/fleet/src/index.ts";
 
 export type Status = "ok" | "warn" | "drift" | "unknown";
-export type CheckClass = "units" | "slice" | "redis" | "timers" | "disk" | "swap" | "env";
+export type CheckClass = "units" | "slice" | "redis" | "timers" | "disk" | "swap" | "env" | "checkout";
 
 export interface Row {
 	class: CheckClass;
@@ -772,6 +772,8 @@ export interface DoctorOptions {
 	dockerReclaim?: boolean;
 	/** The report-only worktree disk row (phase 68). Absent: no row and no git call. */
 	worktrees?: WorktreeDiskOptions;
+	/** Report-only primary-checkout rows (branch, and behind origin's default). Absent or empty: no row and no git call. */
+	checkouts?: readonly string[];
 }
 
 /** A worktree disk check: report-only, so it can warn but never drift. */
@@ -800,6 +802,50 @@ export function compareWorktreeDisk(pressure: DiskPressure): Row {
 		actual: `${worktreeGb(pressure.freeBytes)} free, below the ${worktreeGb(pressure.minFreeBytes)} floor; largest worktrees: ${largest.length === 0 ? "none found" : largest.join("; ")}`,
 		hint: "run `substrate worktree prune` (a dry run) to see what is safe to reclaim; nothing is changed by the doctor",
 	};
+}
+
+/** The origin default branch: the `ref: refs/heads/NAME<TAB>HEAD` line of `ls-remote --symref`. Null when unreadable. */
+function originDefaultBranch(dir: string, host: Host): string | null {
+	const result = host.run(["git", "-C", dir, "ls-remote", "--symref", "origin", "HEAD"]);
+	if (result === null || result.code !== 0) return null;
+	return /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(result.out)?.[1] ?? null;
+}
+
+/**
+ * A primary checkout against origin's default branch. Report-only: `warn` when
+ * it is off that branch (or detached) and when it is behind origin's head. This
+ * never fetches, so origin's head counts only when it is already in local
+ * history; otherwise behind is `unknown`. Never `drift`, never a failed run.
+ */
+export function compareCheckout(dir: string, host: Host, defaultBranch: string): Row[] {
+	const expected = `on ${defaultBranch}`;
+	const upToDate = `up to date with origin/${defaultBranch}`;
+	const branchCheck = `checkout ${dir} branch`;
+	const behindCheck = `checkout ${dir} behind`;
+	const current = host.run(["git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD"]);
+	const branch = current === null || current.code !== 0 ? "" : current.out.trim();
+	let branchRow: Row;
+	if (branch === "") branchRow = row("checkout", branchCheck, "unknown", expected, "n/a", `git could not read the current branch of ${dir}`);
+	else if (branch === defaultBranch) branchRow = row("checkout", branchCheck, "ok", expected, `on ${branch}`);
+	else branchRow = row("checkout", branchCheck, "warn", expected, branch === "HEAD" ? "detached HEAD" : `on ${branch}`, "not on origin's default branch; the doctor changes nothing, so switch the checkout back if that was not intended");
+
+	const remote = host.run(["git", "-C", dir, "ls-remote", "--symref", "origin", "HEAD"]);
+	const sha = remote === null || remote.code !== 0 ? null : (/^([0-9a-f]{40,64})\tHEAD$/m.exec(remote.out)?.[1] ?? null);
+	if (sha === null) return [branchRow, row("checkout", behindCheck, "unknown", upToDate, "n/a", "origin's head could not be read (no origin remote, or unreachable); behind is unknown")];
+	const count = host.run(["git", "-C", dir, "rev-list", "--count", `HEAD..${sha}`]);
+	if (count === null || count.code !== 0 || !/^\d+$/.test(count.out.trim())) {
+		return [branchRow, row("checkout", behindCheck, "unknown", upToDate, "n/a", `origin's head ${sha.slice(0, 12)} is not in local history; this check never fetches, so behind is unknown`)];
+	}
+	const behind = Number(count.out.trim());
+	if (behind === 0) return [branchRow, row("checkout", behindCheck, "ok", upToDate, `0 commits behind origin/${defaultBranch}`)];
+	return [branchRow, row("checkout", behindCheck, "warn", upToDate, `${behind} commits behind origin/${defaultBranch}`, "fast-forward that checkout (git pull --ff-only); the doctor never fetches or pulls")];
+}
+
+/** One checkout's rows. Origin's default is read first; when that is unreadable the checkout is unknown. */
+function gatherCheckout(host: Host, dir: string): Row[] {
+	const defaultBranch = originDefaultBranch(dir, host);
+	if (defaultBranch === null) return [row("checkout", `checkout ${dir}`, "unknown", "on origin's default branch", "n/a", "origin's default branch could not be read; the doctor never fetches")];
+	return compareCheckout(dir, host, defaultBranch);
 }
 
 /** Only when `SUBSTRATE_WORKTREE_ROOTS` names a root: no root, no check, no row. */
@@ -861,6 +907,7 @@ export async function gatherRows(policy: Policy, host: Host, options: DoctorOpti
 	rows.push(compareDisk(df === null || df.code !== 0 ? null : parseDfAvailableKb(df.out), options.minFreeGb));
 	if (options.disk !== undefined) rows.push(...gatherDiskGuardrails(host, options.disk));
 	if (options.worktrees !== undefined) rows.push(await gatherWorktreeDisk(options.worktrees));
+	for (const dir of options.checkouts ?? []) rows.push(...gatherCheckout(host, dir));
 	if (options.dockerReclaim === true) rows.push(...gatherDockerReclaim(host));
 	const before = parseVmstatSwap(host.readText("/proc/vmstat") ?? "");
 	await host.sleep(SWAP_SAMPLE_MS);

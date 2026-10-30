@@ -6,6 +6,7 @@ import {
 	compareWorktreeDisk,
 	optionsFromEnv,
 	worktreeOptionsFromEnv,
+	compareCheckout,
 	compareDisk,
 	compareLegacyKey,
 	compareRedis,
@@ -308,6 +309,7 @@ function fixtureHost(input: {
 	dfAvailableKb?: number;
 	envFile?: string;
 	vmstat?: [string, string];
+	git?: { branch: string; originBranch: string | null; originSha: string | null; behind: number | null };
 }): FixtureHost {
 	const calls: string[][] = [];
 	const vmstat = input.vmstat ?? ["pswpin 10\npswpout 20\n", "pswpin 10\npswpout 20\n"];
@@ -341,6 +343,17 @@ function fixtureHost(input: {
 				return { code: set ? 0 : 1, out: "" };
 			}
 			if (cmd === "lsblk") return { code: 0, out: "vda bfq\n" };
+			if (cmd === "git" && input.git !== undefined) {
+				const git = input.git;
+				const verb = argv[3];
+				if (verb === "rev-parse") return { code: 0, out: `${git.branch}\n` };
+				if (verb === "ls-remote") {
+					if (git.originSha === null) return { code: 128, out: "fatal: unable to access 'origin'\n" };
+					const ref = git.originBranch === null ? "" : `ref: refs/heads/${git.originBranch}\tHEAD\n`;
+					return { code: 0, out: `${ref}${git.originSha}\tHEAD\n` };
+				}
+				if (verb === "rev-list") return git.behind === null ? { code: 128, out: "fatal: bad revision\n" } : { code: 0, out: `${git.behind}\n` };
+			}
 			return null;
 		},
 		readText(path) {
@@ -635,5 +648,85 @@ describe("worktree disk row", () => {
 		expect(optionsFromEnv({ SUBSTRATE_WORKTREE_ROOTS: "" }).worktrees).toBeUndefined();
 		expect(optionsFromEnv({ SUBSTRATE_WORKTREE_ROOTS: "/a:/b" }).worktrees).toMatchObject({ roots: ["/a", "/b"], minFreeGb: 5 });
 		expect(worktreeOptionsFromEnv({ SUBSTRATE_WORKTREE_ROOTS: "/a", SUBSTRATE_WORKTREE_MIN_FREE_GB: "12" }).worktrees?.minFreeGb).toBe(12);
+	});
+});
+
+describe("checkout", () => {
+	const policy = loadPolicy(infraDir);
+	const DIR = "/srv/agent-substrate";
+	const SHA = "a".repeat(40);
+	type GitFixture = NonNullable<Parameters<typeof fixtureHost>[0]["git"]>;
+	const runWith = async (git: GitFixture, checkouts: readonly string[] = [DIR]) => {
+		const fx = fixtureHost({ policy, showByUnit: asDeclared(policy), redis: GREEN_REDIS, envFile: "SUBSTRATE_PG_URL=x\n", git });
+		const rows = await gatherRows(policy, fx.host, { minFreeGb: 5, maxSwapPagesPerSecond: 0, envFile: "/etc/substrate/substrate.env", checkouts });
+		return { rows, calls: fx.calls, checkout: rows.filter((r) => r.class === "checkout") };
+	};
+
+	test("on the default branch and up to date, both rows are ok and the run is green", async () => {
+		const run = await runWith({ branch: "main", originBranch: "main", originSha: SHA, behind: 0 });
+		expect(run.checkout.map((r) => [r.check, r.status])).toEqual([
+			[`checkout ${DIR} branch`, "ok"],
+			[`checkout ${DIR} behind`, "ok"],
+		]);
+		expect(run.checkout[1]?.actual).toBe("0 commits behind origin/main");
+		expect(exitCode(run.rows)).toBe(0);
+	});
+
+	test("behind origin's head warns with the actual count, and counts from the head the remote named", async () => {
+		const run = await runWith({ branch: "main", originBranch: "main", originSha: SHA, behind: 3 });
+		expect(run.checkout[0]).toMatchObject({ status: "ok" });
+		expect(run.checkout[1]).toMatchObject({ status: "warn", actual: "3 commits behind origin/main" });
+		expect(run.calls).toContainEqual(["git", "-C", DIR, "rev-list", "--count", `HEAD..${SHA}`]);
+		expect(exitCode(run.rows)).toBe(0);
+	});
+
+	test("on another branch it warns and names that branch, and never drifts", async () => {
+		const run = await runWith({ branch: "feature/r15", originBranch: "main", originSha: SHA, behind: 0 });
+		expect(run.checkout[0]).toMatchObject({ status: "warn", expected: "on main", actual: "on feature/r15" });
+		expect(run.checkout.some((r) => r.status === "drift")).toBe(false);
+		expect(exitCode(run.rows)).toBe(0);
+	});
+
+	test("a head not in local history leaves behind unknown, and the branch row still reads", async () => {
+		const run = await runWith({ branch: "main", originBranch: "main", originSha: SHA, behind: null });
+		expect(run.checkout[0]).toMatchObject({ status: "ok" });
+		expect(run.checkout[1]).toMatchObject({ status: "unknown" });
+		expect(run.checkout[1]?.hint).toContain("never fetches");
+	});
+
+	test("an unreachable origin leaves behind unknown, not drift, and the branch row still reads", () => {
+		const fx = fixtureHost({ policy, git: { branch: "main", originBranch: "main", originSha: null, behind: 0 } });
+		const rows = compareCheckout(DIR, fx.host, "main");
+		expect(rows[0]).toMatchObject({ status: "ok" });
+		expect(rows[1]).toMatchObject({ status: "unknown" });
+		expect(rows.some((r) => r.status === "drift")).toBe(false);
+	});
+
+	test("an origin default branch that cannot be read is one unknown row", async () => {
+		const run = await runWith({ branch: "main", originBranch: null, originSha: SHA, behind: 0 });
+		expect(run.checkout).toEqual([expect.objectContaining({ check: `checkout ${DIR}`, status: "unknown" })]);
+	});
+
+	test("a detached HEAD warns, and every git call is fixed argv on that directory", () => {
+		const fx = fixtureHost({ policy, git: { branch: "HEAD", originBranch: "main", originSha: SHA, behind: 0 } });
+		const rows = compareCheckout(DIR, fx.host, "main");
+		expect(rows[0]).toMatchObject({ status: "warn", actual: "detached HEAD" });
+		expect(fx.calls.length).toBeGreaterThan(0);
+		expect(fx.calls.every((c) => c[0] === "git" && c[1] === "-C" && c[2] === DIR)).toBe(true);
+	});
+
+	test("with no checkouts option there are no checkout rows and no git call", async () => {
+		const fx = fixtureHost({ policy, showByUnit: asDeclared(policy), redis: GREEN_REDIS, envFile: "SUBSTRATE_PG_URL=x\n", git: { branch: "main", originBranch: "main", originSha: SHA, behind: 0 } });
+		const rows = await gatherRows(policy, fx.host, { minFreeGb: 5, maxSwapPagesPerSecond: 0, envFile: "/etc/substrate/substrate.env" });
+		expect(rows.some((r) => r.class === "checkout")).toBe(false);
+		expect(fx.calls.some((c) => c[0] === "git")).toBe(false);
+	});
+
+	test("the checkout rows are the only change: every other row matches a run without the option", async () => {
+		const git = { branch: "feature/r15", originBranch: "main", originSha: SHA, behind: 2 };
+		const without = await runWith(git, []);
+		const withRows = await runWith(git);
+		expect(withRows.rows.filter((r) => r.class !== "checkout")).toEqual(without.rows);
+		expect(withRows.checkout.length).toBe(2);
 	});
 });
