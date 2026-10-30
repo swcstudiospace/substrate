@@ -205,7 +205,7 @@ export interface WorktreeInfo {
 	merged: boolean | null;
 	pr_number: number | null;
 	pr_head_sha: string | null;
-	/** Head commits of every merged pull request for the branch. */
+	/** Head commits of the merged pull requests that merged into the default branch: a head merged only into another base is not merged here. */
 	pr_merged_heads: string[];
 	/** Ignored, non-regenerable files that the primary checkout does not hold identically; removal would delete them. */
 	ignored_work: string[];
@@ -356,7 +356,8 @@ export async function inspectWorktree(wt: InspectInput, options: InspectOptions)
 	const noPullRequest = wt.branch === null || wt.detached || wt.branch === defaultName;
 	const wantPr = options.pr !== undefined && !noPullRequest && !wt.primary;
 	const [status, mergeBase, counts, commitTime, ancestorOfDefault, ancestorOfRemote, remoteContains, pr, measurement, ignoredWork] = await Promise.all([
-		git(["status", "--porcelain"], cwd),
+		// `--untracked-files=all` overrides `status.showUntrackedFiles`, which a user may set to hide new files.
+		git(["status", "--porcelain", "--untracked-files=all"], cwd),
 		defaultRef === null ? Promise.resolve(null) : gitOut(git, ["merge-base", defaultRef, "HEAD"], cwd),
 		defaultRef === null ? Promise.resolve(null) : gitOut(git, ["rev-list", "--left-right", "--count", `${defaultRef}...HEAD`], cwd),
 		gitOut(git, ["log", "-1", "--format=%ct", "HEAD"], cwd),
@@ -394,7 +395,7 @@ export async function inspectWorktree(wt: InspectInput, options: InspectOptions)
 	base.pr_state = pr.state;
 	base.pr_number = pr.number;
 	base.pr_head_sha = pr.headSha;
-	base.pr_merged_heads = pr.mergedHeadShas;
+	base.pr_merged_heads = defaultName === null ? [] : pr.mergedHeads.filter((merged) => merged.baseRef === defaultName).map((merged) => merged.headSha);
 	base.ignored_work = ignoredWork;
 	if (measurement !== null) {
 		base.size_bytes = measurement.bytes;

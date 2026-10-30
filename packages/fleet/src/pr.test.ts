@@ -15,7 +15,7 @@ describe("parsePrList", () => {
 			{ state: "MERGED", headRefOid: SHA_A, number: 1 },
 			{ state: "OPEN", headRefOid: SHA_B, number: 2 },
 		]);
-		expect(parsePrList(text)).toEqual({ state: "open", headSha: SHA_B, number: 2, mergedHeadShas: [SHA_A] });
+		expect(parsePrList(text)).toEqual({ state: "open", headSha: SHA_B, number: 2, mergedHeadShas: [SHA_A], mergedHeads: [{ headSha: SHA_A, baseRef: null }] });
 	});
 
 	test("merged outranks closed", () => {
@@ -46,7 +46,7 @@ describe("lookupPr", () => {
 		await lookupPr("feature/x", { run, cwd: "/repo", cache });
 		await lookupPr("feature/y", { run, cwd: "/repo", cache });
 		expect(first.state).toBe("merged");
-		expect(calls[0]).toEqual(["pr", "list", "--head", "feature/x", "--state", "all", "--json", "state,headRefOid,number", "--limit", "5"]);
+		expect(calls[0]).toEqual(["pr", "list", "--head", "feature/x", "--state", "all", "--json", "state,headRefOid,number,baseRefName", "--limit", "5"]);
 		// One call per branch: the second ask for feature/x came from the cache.
 		expect(calls.map((args) => args[3])).toEqual(["feature/x", "feature/y"]);
 	});

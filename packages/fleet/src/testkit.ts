@@ -83,12 +83,13 @@ export function addWorktree(repo: TestRepo, root: string, name: string, branch =
 }
 
 /** A runner for `gh` that answers `pr list` from a table keyed by branch, and records the calls. */
-export function fakeGh(table: Record<string, Array<{ state: string; headRefOid: string; number: number }>>, calls: string[][] = []): CommandRunner {
+export function fakeGh(table: Record<string, Array<{ state: string; headRefOid: string; number: number; baseRefName?: string }>>, calls: string[][] = []): CommandRunner {
 	return async (args) => {
 		calls.push(args);
 		const head = args[args.indexOf("--head") + 1] ?? "";
 		const prs = table[head];
 		if (prs === undefined) return { code: 0, stdout: "[]", stderr: "" };
-		return { code: 0, stdout: JSON.stringify(prs), stderr: "" };
+		// The fixtures' default branch is `main` (see makeRepo), so a pull request without a base merged into it.
+		return { code: 0, stdout: JSON.stringify(prs.map((pr) => ({ ...pr, baseRefName: pr.baseRefName ?? "main" }))), stderr: "" };
 	};
 }

@@ -6,7 +6,7 @@
  * is inspected, never ignored, since one of the subcommands deletes directories.
  */
 
-export const SUBCOMMANDS = ["list", "status", "scan", "prune", "conflicts", "provision", "disk", "guard"] as const;
+export const SUBCOMMANDS = ["list", "status", "scan", "prune", "conflicts", "provision", "disk", "guard", "merge-back"] as const;
 export type Subcommand = (typeof SUBCOMMANDS)[number];
 
 const VALUE_FLAGS: ReadonlySet<string> = new Set(["root", "repo", "idle-days", "branch", "base", "path", "session"]);
@@ -21,6 +21,7 @@ const ALLOWED: Record<Subcommand, readonly string[]> = {
 	provision: ["repo", "branch", "base", "path", "json"],
 	disk: ["root", "json"],
 	guard: ["root", "json"],
+	"merge-back": ["execute", "json"],
 };
 
 export interface WorktreeArgs {
@@ -50,7 +51,7 @@ export function parseWorktreeArgs(argv: readonly string[]): ParseResult {
 		const token = rest[index];
 		if (token === undefined) continue;
 		if (!token.startsWith("--")) {
-			if (command !== "guard" || token === "") return { ok: false, error: `unexpected argument ${token}` };
+			if ((command !== "guard" && command !== "merge-back") || token === "") return { ok: false, error: `unexpected argument ${token}` };
 			args.positional.push(token);
 			continue;
 		}

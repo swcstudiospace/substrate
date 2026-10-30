@@ -1493,6 +1493,24 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		}),
 	},
 	{
+		// The work of a linked worktree is already on the default branch. The note is the proof; the folder is kept and marked retained.
+		id: "worktree.merge_back",
+		phase: 68,
+		kind: "note",
+		surface: "caller",
+		actions: ["worktree.merge_back"],
+		carriesRepo: true,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "note",
+			summary: "worktree merged back: swcstudiospace/substrate gsd/r15-workspace-guard",
+			repo: "swcstudiospace/substrate",
+			branch: "gsd/r15-workspace-guard",
+			payload: { action: "worktree.merge_back", repo: "swcstudiospace/substrate", branch: "gsd/r15-workspace-guard", head: "0123456789abcdef0123456789abcdef01234567", merged_via: "default-branch", retained: true },
+		}),
+	},
+	{
 		id: "steering.persist_failed",
 		phase: 67,
 		kind: "warning",
