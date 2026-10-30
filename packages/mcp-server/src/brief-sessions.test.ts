@@ -319,6 +319,41 @@ describe("worktreesSection", () => {
 		for (const hidden of ["no-session", "blank-session", "primary", "unknown-files", "too-old", "bad-time", "elsewhere"]) expect(printed(section)).not.toContain(hidden);
 	});
 
+	test("another session's worktree whose pull request is merged or closed is left out, and open, none, unknown and absent pr_state rows are kept", () => {
+		const rows = [
+			mineRow(),
+			wtRow({ path: "/w/merged", pr_state: "merged", dirty: false }),
+			wtRow({ path: "/w/closed", pr_state: "closed", dirty: false }),
+			wtRow({ path: "/w/open", pr_state: "open" }),
+			wtRow({ path: "/w/none", pr_state: "none" }),
+			wtRow({ path: "/w/unknown", pr_state: "unknown" }),
+			wtRow({ path: "/w/absent" }),
+		];
+		const section = worktreesSection(wtInput(rows), NOW);
+		expect(heads(section)).toHaveLength(4);
+		for (const hidden of ["/w/merged", "/w/closed"]) expect(printed(section)).not.toContain(hidden);
+		for (const kept of ["/w/open", "/w/none", "/w/unknown", "/w/absent"]) expect(printed(section)).toContain(kept);
+	});
+
+	test("a merged or closed row with uncommitted work still counts, because fresh edits after the merge are live work", () => {
+		const resumed = wtRow({ path: "/w/resumed", pr_state: "merged", dirty: true, files: ["src/a.ts"] });
+		const closedDirty = wtRow({ path: "/w/closed-dirty", pr_state: "closed", dirty: true, files: ["src/a.ts"] });
+		const section = worktreesSection(wtInput([mineRow(["src/a.ts"]), resumed, closedDirty]), NOW);
+		expect(printed(section)).toContain("/w/resumed");
+		expect(printed(section)).toContain("/w/closed-dirty");
+	});
+
+	test("a caller whose only other rows are merged or closed gets no section, and a truncated list on such a row does not say the check is incomplete", () => {
+		expect(worktreesSection(wtInput([mineRow(), wtRow({ pr_state: "merged", dirty: false }), wtRow({ path: "/w/closed", pr_state: "closed", dirty: false })]), NOW)).toBeNull();
+		expect(worktreesSection(wtInput([mineRow(), wtRow({ pr_state: "merged", dirty: false, files_truncated: true })]), NOW)).toBeNull();
+	});
+
+	test("the caller's own row is not affected by its pull request state, so its files still set the overlap", () => {
+		const section = worktreesSection(wtInput([wtRow({ path: "/w/mine", host: "host-me", session_id: ME, files: ["src/a.ts"], pr_state: "merged" }), wtRow()]), NOW);
+		expect(heads(section)).toHaveLength(1);
+		expect(printed(section)).toContain("/w/other");
+	});
+
 	test("the repository is matched the way the brief scopes it: without regard to case", () => {
 		const section = worktreesSection({ repo: "Owner/Name", sessionId: ME, rows: [mineRow(), wtRow()] }, NOW);
 		expect(heads(section)).toHaveLength(1);
