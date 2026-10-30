@@ -179,6 +179,14 @@ function portlessIdentity(origin: string): string | null {
 	if (url.hostname === "" || url.port === "") return null;
 	return `${url.hostname.toLowerCase()}/${url.pathname.replace(/^\/+|\/+$/g, "")}`;
 }
+/** The identity used before an absolute SSH path kept its leading slash, or null when this key has no double slash. */
+function slashlessIdentity(origin: string): string | null {
+	const current = originIdentity(origin);
+	const marker = current.indexOf("//");
+	if (marker <= 0) return null;
+	return `${current.slice(0, marker)}/${current.slice(marker + 2)}`;
+}
+
 
 
 const BRANCH_REF = /^refs\/heads\/([A-Za-z0-9._/-]+)$/;
@@ -218,19 +226,19 @@ function mirrorForCheckout(_repoDir: string, mirrorRoot: string, origin: string,
 		const dir = join(root, name);
 		if (existsSync(dir) && isUsableMirror(dir, run)) return { dir, unmatched: false };
 	}
-	// A mirror created by the hostname-only key is reused only when its stored origin is this server. Another port
-	// that shared that key must not be read as this repository, and must not be replaced by a complete checkout read.
-	const previous = portlessIdentity(origin);
-	if (previous !== null) {
+	// A mirror created by an older key is reused only when its stored origin is this one. The hostname-only key
+	// collapsed ports, and the slash-stripped key collapsed an absolute SSH path with a home-relative one. Either
+	// miss must stay incomplete instead of a complete checkout read.
+	for (const previous of [portlessIdentity(origin), slashlessIdentity(origin)]) {
+		if (previous === null) continue;
 		const name = mirrorNameFrom(origin, previous);
-		if (!seen.has(name)) {
-			const dir = join(root, name);
-			if (existsSync(dir) && isUsableMirror(dir, run)) {
-				const stored = storedOrigin(dir, run);
-				if (stored !== null && originIdentity(stored) === originIdentity(origin)) return { dir, unmatched: false };
-				return { dir: null, unmatched: true };
-			}
-		}
+		if (seen.has(name)) continue;
+		seen.add(name);
+		const dir = join(root, name);
+		if (!existsSync(dir) || !isUsableMirror(dir, run)) continue;
+		const stored = storedOrigin(dir, run);
+		if (stored !== null && originIdentity(stored) === originIdentity(origin)) return { dir, unmatched: false };
+		return { dir: null, unmatched: true };
 	}
 	return { dir: null, unmatched: false };
 }

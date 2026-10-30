@@ -76,6 +76,21 @@ describe("mirrorName", () => {
 		expect(fetching).not.toEqual({ status: "absent", reason: "mirror-unmatched" });
 	});
 
+	test("a slash-stripped absolute SSH mirror is reused only when its stored origin is the absolute form", () => {
+		const w = world();
+		const origin = "git@git.example.com:/srv/git/repo.git";
+		const hash = createHash("sha256").update("git.example.com/srv/git/repo").digest("hex").slice(0, 12);
+		const legacy = join(w.mirrors, `repo-${hash}`);
+		mkdirSync(w.mirrors, { recursive: true });
+		runGit(w.mirrors, ["init", "-q", "--bare", legacy]);
+		runGit(legacy, ["remote", "add", "origin", origin]);
+		runGit(w.local, ["remote", "set-url", "origin", origin]);
+		expect(ensureMirror(w.local, w.mirrors, run, { fetch: false })).toEqual({ status: "unfetched", mirrorDir: legacy });
+		runGit(legacy, ["remote", "set-url", "origin", "git@git.example.com:srv/git/repo.git"]);
+		expect(ensureMirror(w.local, w.mirrors, run, { fetch: false })).toEqual({ status: "absent", reason: "mirror-unmatched" });
+	});
+
+
 
 	test("never yields a path separator, a leading dot or an empty slug", () => {
 		for (const origin of ["/srv/git/../repo.git", "ssh://host/~/weird name!.git", "https://h/.hidden", "/"]) {
