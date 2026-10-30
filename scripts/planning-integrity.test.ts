@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { type RoadmapTableRow, parseStatePart } from "../packages/mcp-server/src/planning/position.ts";
 import { parseFrontmatter } from "../packages/mcp-server/src/skills/frontmatter.ts";
 import { brokenRelativeLinks } from "./docs-lint.ts";
-import { checkPlannedPhaseMerged, parsePulls, requirementsOfRoadmap } from "./planning-shipped-check.ts";
+import { checkPlannedPhaseMerged, completeMergedPulls, expandRanges, parsePulls, requirementsOfRoadmap } from "./planning-shipped-check.ts";
 
 const STATE_PATH = join(import.meta.dir, "..", ".planning", "STATE.md");
 
@@ -182,5 +182,31 @@ describe("planned phases with merged pull requests", () => {
 		expect(parsePulls('[{"title":"feat: WATCH-01","headRefName":"feat/watch-01"}]')).toEqual([{ title: "feat: WATCH-01", branch: "feat/watch-01" }]);
 		expect(typeof parsePulls("not json")).toBe("string");
 		expect(typeof parsePulls('{"title":"x"}')).toBe("string");
+	});
+
+	test("a range with ends beyond the safe integers is left as written, and equal ends expand to one ID", () => {
+		const beyond = "WATCH-9007199254740993..9007199254740993";
+		expect(expandRanges(beyond)).toBe(beyond);
+		expect(expandRanges("WATCH-9007199254740991..9007199254740991")).toBe(" WATCH-9007199254740991 ");
+		expect(expandRanges("WATCH-01..01")).toBe(" WATCH-01 ");
+	});
+
+	test("the merged list is an error once it reaches the limit, never a shorter list that could pass", () => {
+		const two = '[{"title":"a","headRefName":"b"},{"title":"c","headRefName":"d"}]';
+		expect(completeMergedPulls(two, 3)).toEqual([
+			{ title: "a", branch: "b" },
+			{ title: "c", branch: "d" },
+		]);
+		expect(typeof completeMergedPulls(two, 2)).toBe("string");
+	});
+
+	test("each field is matched on its own, so a title and a branch do not join into a phase phrase", () => {
+		const six = [row("6", "Planned")];
+		expect(checkPlannedPhaseMerged(six, new Map(), [{ title: "Phase", branch: "6-docs" }])).toEqual([]);
+	});
+
+	test("a fence closes only with its own marker: a tilde line inside a backtick fence does not end it", () => {
+		const roadmap = ["### Phase 63: Corpus Atlas", "```text", "~~~", "**Requirements**: [FAKE-01]", "```", "**Requirements**: [ATLAS-01]"].join("\n");
+		expect(requirementsOfRoadmap(roadmap).get("63")).toEqual(["ATLAS-01"]);
 	});
 });
