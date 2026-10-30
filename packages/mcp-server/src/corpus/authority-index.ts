@@ -127,6 +127,9 @@ export class AuthorityIndex {
 	 */
 	async lookup(): Promise<AuthorityLookup | null> {
 		if (this.deps.store() === null) return null;
+		// A clear during the no-wait pause must still start the replacement read. Only the wait is paused.
+		void this.ensureManifest();
+		void this.ensureFeedback();
 		// Each load's promise resolves when that load settles. A clear during it installs one follow-up and does not
 		// chain it: the completed promise is released, and this lookup joins the follow-up while its budget remains.
 		if (this.deps.now() >= this.noWaitUntil) {
