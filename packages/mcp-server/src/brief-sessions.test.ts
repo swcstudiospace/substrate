@@ -367,6 +367,24 @@ describe("worktreesSection", () => {
 		expect(rendered).toContain("sess-peer");
 		expect(rendered).toContain("a".repeat(8));
 	});
+
+	test("a compact name keeps a path bracket, a comma in the session, and a whole emoji", () => {
+		const section = defined(
+			worktreesSection(
+				wtInput([
+					mineRow(),
+					wtRow({ path: "/w/feature [review]", session_id: "sess, peer" }),
+					wtRow({ host: "emoji-host", path: "/w/emoji", session_id: "123456789012345😀", files: ["src/a.ts"] }),
+				]),
+				NOW,
+			),
+			"section",
+		);
+		const names = section.items.map((item) => item.text);
+		expect(names.some((text) => text.includes("/w/feature [review]") && text.includes("sess, peer"))).toBe(true);
+		expect(names.some((text) => text.includes("😀"))).toBe(true);
+		expect(names.some((text) => text.includes("\uD83D") && !text.includes("😀"))).toBe(false);
+	});
 	test("a caller whose worktree reports an empty list touches nothing, so nothing overlaps and there is no section", () => {
 		expect(worktreesSection(wtInput([mineRow([]), wtRow()]), NOW)).toBeNull();
 	});
