@@ -50,6 +50,8 @@ describe("mirrorName", () => {
 		const w = world();
 		runGit(w.local, ["remote", "set-url", "origin", "git.example.com:team/repo.git"]);
 		expect(readOrigin(w.local, run)).toBe("git.example.com:team/repo.git");
+		runGit(w.local, ["remote", "set-url", "origin", "git@git.example.com:/srv/git/repo.git"]);
+		expect(readOrigin(w.local, run)).toBe("git@git.example.com:/srv/git/repo.git");
 		runGit(w.local, ["remote", "set-url", "origin", "remotes/repo.git"]);
 		expect(readOrigin(w.local, run)).toBe(join(w.local, "remotes/repo.git"));
 	});
@@ -67,6 +69,8 @@ describe("mirrorName", () => {
 		runGit(legacy, ["remote", "set-url", "origin", "https://git.example.com:9443/team/repo.git"]);
 		expect(ensureMirror(w.local, w.mirrors, run, { fetch: false })).toEqual({ status: "absent", reason: "mirror-unmatched" });
 		expect(existsSync(mirrorPath(w.mirrors, origin))).toBe(false);
+		const fetching = ensureMirror(w.local, w.mirrors, run, { fetch: true, cloneTimeoutMs: 500 });
+		expect(fetching).not.toEqual({ status: "absent", reason: "mirror-unmatched" });
 	});
 
 

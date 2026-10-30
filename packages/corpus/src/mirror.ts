@@ -75,15 +75,19 @@ function strippedOrigin(origin: string): string {
  */
 function isLocalOrigin(origin: string): boolean {
 	if (origin.includes("://")) return false;
-	// scp-style `host:path` or `user@host:path`. The username is optional; a path has a slash before any colon.
-	return !/^(?:[^@/\s]+@)?[^:/\s]+:[^/]/.test(origin);
+	// `user@host:path` is scp even when the path is absolute (`git@host:/srv/git/repo.git`).
+	if (/^[^/\s]+@[^:\s]+:/.test(origin)) return false;
+	// `host:relative/path` is scp. A slash before the colon, or an absolute path with no user, is local.
+	return !/^[^:/\s]+:[^/]/.test(origin);
 }
 
 function originIdentity(origin: string): string {
 	const slug = githubSlug(origin);
 	if (slug !== null) return `github.com/${slug}`;
 	const stripped = strippedOrigin(origin);
-	const scp = /^(?:[^@/\s]+@)?([^:/\s]+):([^/].*)$/.exec(stripped);
+	const withUser = /^([^@/\s]+)@([^:/\s]+):\/?(.*)$/.exec(stripped);
+	if (withUser && !stripped.includes("://")) return `${(withUser[2] ?? "").toLowerCase()}/${withUser[3] ?? ""}`;
+	const scp = /^([^:/\s]+):([^/].*)$/.exec(stripped);
 	if (scp && !stripped.includes("://")) return `${(scp[1] ?? "").toLowerCase()}/${scp[2] ?? ""}`;
 	try {
 		const url = new URL(stripped);
@@ -239,7 +243,7 @@ export function ensureMirror(repoDir: string, mirrorRoot: string, run: GitBytesR
 	if (origin === null) return { status: "absent", reason: "no-origin" };
 	const root = resolve(mirrorRoot);
 	const found = mirrorForCheckout(repoDir, root, origin, run);
-	if (found.unmatched) return { status: "absent", reason: "mirror-unmatched" };
+	if (found.unmatched && !options.fetch) return { status: "absent", reason: "mirror-unmatched" };
 	const dest = found.dir ?? mirrorPath(root, origin);
 	const present = found.dir !== null;
 	if (present && !isUsableMirror(dest, run)) return { status: "absent", reason: "mirror-dir-unusable" };
