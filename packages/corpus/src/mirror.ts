@@ -31,7 +31,7 @@ const NAME_SLUG_LENGTH = 60;
 export const MIRROR_STALE_REASONS = ["fetch-failed", "fetch-timeout"] as const;
 export type MirrorStaleReason = (typeof MIRROR_STALE_REASONS)[number];
 
-export const MIRROR_ABSENT_REASONS = ["no-origin", "not-created", "clone-failed", "clone-timeout", "mirror-dir-unusable"] as const;
+export const MIRROR_ABSENT_REASONS = ["no-origin", "not-created", "clone-failed", "clone-timeout", "mirror-dir-unusable", "mirror-unmatched"] as const;
 export type MirrorAbsentReason = (typeof MIRROR_ABSENT_REASONS)[number];
 
 /**
@@ -59,7 +59,7 @@ export function readOrigin(repoDir: string, run: GitBytesRunner): string | null 
 	const url = outputText(result).trim();
 	if (result.code !== 0 || url === "") return null;
 	// A relative path is relative to the checkout. The clone runs from the mirror, so every local path is resolved here.
-	// Remote forms (`scheme://`, `user@host:path`) are left unchanged.
+	// Remote forms (`scheme://`, `host:path`, `user@host:path`) are left unchanged.
 	return isLocalOrigin(url) ? resolve(repoDir, url) : url;
 }
 
@@ -75,8 +75,8 @@ function strippedOrigin(origin: string): string {
  */
 function isLocalOrigin(origin: string): boolean {
 	if (origin.includes("://")) return false;
-	// scp-style `user@host:path`, not a filesystem path.
-	return !/^[^/\s]+@[^:\s]+:/.test(origin);
+	// scp-style `host:path` or `user@host:path`. The username is optional; a path has a slash before any colon.
+	return !/^(?:[^@/\s]+@)?[^:/\s]+:[^/]/.test(origin);
 }
 
 function originIdentity(origin: string): string {
@@ -156,6 +156,25 @@ function pointOrigin(dir: string, origin: string, run: GitBytesRunner): boolean 
 	const result = run({ args: ["remote", "set-url", "origin", origin], cwd: dir, timeoutMs: CONFIG_TIMEOUT_MS });
 	return result.code === 0;
 }
+/** The origin URL stored on a mirror, unchanged. Unlike {@link readOrigin} it is not resolved against a checkout. */
+function storedOrigin(dir: string, run: GitBytesRunner): string | null {
+	const result = run({ args: ["remote", "get-url", "origin"], cwd: dir, timeoutMs: CONFIG_TIMEOUT_MS });
+	const url = outputText(result).trim();
+	return result.code === 0 && url !== "" ? url : null;
+}
+
+/** The identity used before the port was part of the key, or null when this origin has no explicit port. */
+function portlessIdentity(origin: string): string | null {
+	let url: URL;
+	try {
+		url = new URL(strippedOrigin(origin));
+	} catch {
+		return null;
+	}
+	if (url.hostname === "" || url.port === "") return null;
+	return `${url.hostname.toLowerCase()}/${url.pathname.replace(/^\/+|\/+$/g, "")}`;
+}
+
 
 const BRANCH_REF = /^refs\/heads\/([A-Za-z0-9._/-]+)$/;
 
@@ -181,20 +200,34 @@ function refreshDefaultHead(dir: string, run: GitBytesRunner): "refreshed" | "em
  * never chosen because it happens to contain a commit: a fork can share that commit, and returning it would let a later
  * fetch rewrite the upstream mirror's origin.
  */
-function mirrorForCheckout(_repoDir: string, mirrorRoot: string, origin: string, run: GitBytesRunner): string | null {
+function mirrorForCheckout(_repoDir: string, mirrorRoot: string, origin: string, run: GitBytesRunner): { dir: string | null; unmatched: boolean } {
 	const root = resolve(mirrorRoot);
 	const named = join(root, mirrorName(origin));
 	// Present but unusable is the caller's to refuse. Skipping it would clone over the directory.
-	if (existsSync(named)) return named;
+	if (existsSync(named)) return { dir: named, unmatched: false };
 	const seen = new Set<string>([mirrorName(origin)]);
 	for (const form of equivalentOrigins(origin)) {
 		const name = legacyMirrorName(form);
 		if (seen.has(name)) continue;
 		seen.add(name);
 		const dir = join(root, name);
-		if (existsSync(dir) && isUsableMirror(dir, run)) return dir;
+		if (existsSync(dir) && isUsableMirror(dir, run)) return { dir, unmatched: false };
 	}
-	return null;
+	// A mirror created by the hostname-only key is reused only when its stored origin is this server. Another port
+	// that shared that key must not be read as this repository, and must not be replaced by a complete checkout read.
+	const previous = portlessIdentity(origin);
+	if (previous !== null) {
+		const name = mirrorNameFrom(origin, previous);
+		if (!seen.has(name)) {
+			const dir = join(root, name);
+			if (existsSync(dir) && isUsableMirror(dir, run)) {
+				const stored = storedOrigin(dir, run);
+				if (stored !== null && originIdentity(stored) === originIdentity(origin)) return { dir, unmatched: false };
+				return { dir: null, unmatched: true };
+			}
+		}
+	}
+	return { dir: null, unmatched: false };
 }
 
 /**
@@ -206,8 +239,9 @@ export function ensureMirror(repoDir: string, mirrorRoot: string, run: GitBytesR
 	if (origin === null) return { status: "absent", reason: "no-origin" };
 	const root = resolve(mirrorRoot);
 	const found = mirrorForCheckout(repoDir, root, origin, run);
-	const dest = found ?? mirrorPath(root, origin);
-	const present = found !== null;
+	if (found.unmatched) return { status: "absent", reason: "mirror-unmatched" };
+	const dest = found.dir ?? mirrorPath(root, origin);
+	const present = found.dir !== null;
 	if (present && !isUsableMirror(dest, run)) return { status: "absent", reason: "mirror-dir-unusable" };
 	if (present) {
 		if (!options.fetch) return { status: "unfetched", mirrorDir: dest };

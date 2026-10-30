@@ -46,6 +46,30 @@ describe("mirrorName", () => {
 		expect(ensureMirror(w.local, w.mirrors, run, { fetch: false })).toEqual({ status: "unfetched", mirrorDir: legacy });
 	});
 
+	test("an scp origin without a username is left as a remote, and a relative path is resolved against the checkout", () => {
+		const w = world();
+		runGit(w.local, ["remote", "set-url", "origin", "git.example.com:team/repo.git"]);
+		expect(readOrigin(w.local, run)).toBe("git.example.com:team/repo.git");
+		runGit(w.local, ["remote", "set-url", "origin", "remotes/repo.git"]);
+		expect(readOrigin(w.local, run)).toBe(join(w.local, "remotes/repo.git"));
+	});
+
+	test("a hostname-only mirror is reused when its stored origin is this port, and refused when it is another", () => {
+		const w = world();
+		const origin = "https://git.example.com:8443/team/repo.git";
+		const hash = createHash("sha256").update("git.example.com/team/repo").digest("hex").slice(0, 12);
+		const legacy = join(w.mirrors, `repo-${hash}`);
+		mkdirSync(w.mirrors, { recursive: true });
+		runGit(w.mirrors, ["init", "-q", "--bare", legacy]);
+		runGit(legacy, ["remote", "add", "origin", origin]);
+		runGit(w.local, ["remote", "set-url", "origin", origin]);
+		expect(ensureMirror(w.local, w.mirrors, run, { fetch: false })).toEqual({ status: "unfetched", mirrorDir: legacy });
+		runGit(legacy, ["remote", "set-url", "origin", "https://git.example.com:9443/team/repo.git"]);
+		expect(ensureMirror(w.local, w.mirrors, run, { fetch: false })).toEqual({ status: "absent", reason: "mirror-unmatched" });
+		expect(existsSync(mirrorPath(w.mirrors, origin))).toBe(false);
+	});
+
+
 	test("never yields a path separator, a leading dot or an empty slug", () => {
 		for (const origin of ["/srv/git/../repo.git", "ssh://host/~/weird name!.git", "https://h/.hidden", "/"]) {
 			const name = mirrorName(origin);

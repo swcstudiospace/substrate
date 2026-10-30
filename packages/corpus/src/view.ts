@@ -22,7 +22,7 @@ import { classify } from "./classify.ts";
 import { type GitBytesRunner, type GitOutput, outputText } from "./gitio.ts";
 import { isValidPath } from "./names.ts";
 import { type CorpusEntry, type DocTier, documentKey } from "./protocol.ts";
-import { entrySupersededBy } from "./supersession.ts";
+import { entrySupersededBy, supersededByMarker } from "./supersession.ts";
 import {
 	type CheckoutRead,
 	compareEntries,
@@ -88,7 +88,7 @@ export function readLocation(location: string, run: GitBytesRunner, readFile: (p
 	return result.stdout;
 }
 
-type Verdict = { ok: true; sha256: string; bytes: number; text: string } | { ok: false; reason: SkipReason; problem?: string };
+type Verdict = { ok: true; sha256: string; bytes: number; supersededBy?: string } | { ok: false; reason: SkipReason; problem?: string };
 
 /** Asks the origin, in batches, for the blobs a blobless mirror does not hold yet. A failure is not an error: the read that follows fetches what is left one object at a time. */
 function prefetchMissing(mirrorDir: string, oids: readonly string[], run: GitBytesRunner): void {
@@ -116,7 +116,7 @@ function prefetchMissing(mirrorDir: string, oids: readonly string[], run: GitByt
 	}
 }
 
-/** Hashes and checks every distinct blob once, a bounded batch at a time; only the verdicts are kept, never the bodies. */
+/** Hashes and checks every distinct blob once, a bounded batch at a time. The body is discarded after its supersession marker is taken. */
 function readVerdicts(mirrorDir: string, items: ReadonlyArray<{ oid: string; size: number }>, maxBytes: number, run: GitBytesRunner): Map<string, Verdict> {
 	const sizes = new Map<string, number>();
 	for (const item of items) sizes.set(item.oid, item.size);
@@ -163,7 +163,12 @@ function readVerdicts(mirrorDir: string, items: ReadonlyArray<{ oid: string; siz
 				continue;
 			}
 			const inspected = inspectBytes(data, maxBytes);
-			verdicts.set(oid, inspected.ok ? { ok: true, sha256: inspected.sha256, bytes: inspected.bytes, text: inspected.text } : { ok: false, reason: inspected.reason });
+			if (!inspected.ok) {
+				verdicts.set(oid, { ok: false, reason: inspected.reason });
+				continue;
+			}
+			const marker = supersededByMarker(inspected.text);
+			verdicts.set(oid, { ok: true, sha256: inspected.sha256, bytes: inspected.bytes, ...(marker === null ? {} : { supersededBy: marker }) });
 		}
 		for (const oid of oids) {
 			if (!verdicts.has(oid)) verdicts.set(oid, { ok: false, reason: "unreadable", problem: "git cat-file returned no complete answer" });
@@ -355,7 +360,7 @@ export function buildView(opts: ViewOptions): ViewResult | null {
 	for (const row of queued) {
 		const verdict = verdicts.get(row.item.oid);
 		if (verdict?.ok === true) {
-			const supersededBy = entrySupersededBy(row.tier, verdict.text);
+			const supersededBy = row.tier <= 2 ? verdict.supersededBy : undefined;
 			entries.push({
 				repo,
 				path: row.path,

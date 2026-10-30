@@ -29,6 +29,7 @@ import {
 	type DocTier,
 	type MirrorState,
 	PLAN_ACTIONS,
+	SkipLog,
 	type PlanAction,
 	readLocation,
 	type SyncOutcome,
@@ -317,7 +318,13 @@ async function syncInto(deps: SyncDeps, request: SyncRequest, result: SyncResult
 		};
 		if (state.status === "absent") {
 			report("working-tree");
-			return null;
+			if (state.reason !== "mirror-unmatched") return null;
+			return {
+				entries: [],
+				paths: new Map(),
+				skips: new SkipLog(),
+				problems: ["the previous mirror belongs to a different server port; coverage stays incomplete until a mirror of this origin exists"],
+			};
 		}
 		const view = buildView({
 			repo: checkout.repo,

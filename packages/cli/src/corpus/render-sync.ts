@@ -9,7 +9,7 @@ import { LIST_LIMIT, renderIngest, renderPlan } from "./render.ts";
 import type { MirrorReport, SyncResult } from "./sync.ts";
 
 /** Absent-mirror reasons that deserve a line (a stale mirror always does); no origin and nothing fetched yet are the normal working-tree case. */
-const MIRROR_PROBLEMS: readonly string[] = ["clone-failed", "clone-timeout", "mirror-dir-unusable"];
+const MIRROR_PROBLEMS: readonly string[] = ["clone-failed", "clone-timeout", "mirror-dir-unusable", "mirror-unmatched"];
 
 export interface MirrorProblem {
 	repo: string;
@@ -37,7 +37,9 @@ function renderMirrorProblems(mirrors: readonly MirrorReport[]): string {
 	const out = problems.slice(0, LIST_LIMIT).map((problem) =>
 		problem.kind === "mirror-stale"
 			? `mirror-stale ${problem.repo}: ${problem.reason}; the last good mirror is still read\n`
-			: `mirror ${problem.repo}: ${problem.reason}; read from the working tree alone\n`,
+			: problem.reason === "mirror-unmatched"
+				? `mirror ${problem.repo}: ${problem.reason}; coverage stays incomplete until a mirror of this origin exists\n`
+				: `mirror ${problem.repo}: ${problem.reason}; read from the working tree alone\n`,
 	);
 	return out.join("") + more(LIST_LIMIT, problems.length);
 }
