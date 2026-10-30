@@ -119,8 +119,26 @@ export interface Partition {
 	oversized: string[];
 }
 
-/** Splits an inventory by repository into plans that fit the server's per-request limits. */
-export function partitionInventory(inventory: Inventory, maxEntries = MAX_PLAN_ENTRIES, maxPairs = MAX_COVERAGE_PAIRS): Partition {
+/**
+ * The request bytes a plan group may carry. The server refuses a larger body with 413 (`DOCS_MAX_BODY_BYTES`, 6,000,000 bytes
+ * in `server.ts`); the rest is headroom for the envelope and the scope.
+ */
+export const PLAN_REQUEST_BUDGET_BYTES = 5_000_000;
+
+function jsonBytes(value: unknown): number {
+	return Buffer.byteLength(JSON.stringify(value)) + 1;
+}
+
+/**
+ * Splits an inventory by repository into plans that fit the server's per-request limits: the entry and coverage counts, and
+ * the encoded size. A repository whose own payload is over any limit is `oversized`; the others are still planned.
+ */
+export function partitionInventory(
+	inventory: Inventory,
+	maxEntries = MAX_PLAN_ENTRIES,
+	maxPairs = MAX_COVERAGE_PAIRS,
+	maxBytes = PLAN_REQUEST_BUDGET_BYTES,
+): Partition {
 	const entries = new Map<string, CorpusEntry[]>();
 	for (const entry of inventory.entries) {
 		const mine = entries.get(entry.repo);
@@ -136,22 +154,24 @@ export function partitionInventory(inventory: Inventory, maxEntries = MAX_PLAN_E
 
 	const groups: Inventory[] = [];
 	const oversized: string[] = [];
-	let current: { entries: CorpusEntry[]; coverage: CorpusScope["coverage"] } = { entries: [], coverage: [] };
+	let current: { entries: CorpusEntry[]; coverage: CorpusScope["coverage"]; bytes: number } = { entries: [], coverage: [], bytes: 0 };
 	const close = (): void => {
 		if (current.entries.length === 0 && current.coverage.length === 0) return;
 		groups.push({ ...inventory, entries: current.entries, scope: { coverage: current.coverage, maxTier: inventory.scope.maxTier } });
-		current = { entries: [], coverage: [] };
+		current = { entries: [], coverage: [], bytes: 0 };
 	};
 	for (const label of labelsOf(inventory)) {
 		const mine = entries.get(label) ?? [];
 		const covered = pairs.get(label) ?? [];
-		if (mine.length > maxEntries || covered.length > maxPairs) {
+		const bytes = mine.reduce((sum, entry) => sum + jsonBytes(entry), 0) + covered.reduce((sum, pair) => sum + jsonBytes(pair), 0);
+		if (mine.length > maxEntries || covered.length > maxPairs || bytes > maxBytes) {
 			oversized.push(label);
 			continue;
 		}
-		if (current.entries.length + mine.length > maxEntries || current.coverage.length + covered.length > maxPairs) close();
+		if (current.entries.length + mine.length > maxEntries || current.coverage.length + covered.length > maxPairs || current.bytes + bytes > maxBytes) close();
 		current.entries.push(...mine);
 		current.coverage.push(...covered);
+		current.bytes += bytes;
 	}
 	close();
 	return { groups, oversized };
@@ -360,7 +380,7 @@ async function syncInto(deps: SyncDeps, request: SyncRequest, result: SyncResult
 	}
 
 	const { groups, oversized } = partitionInventory(inventory);
-	for (const label of oversized) result.incomplete.push(`${label}: too many documents for one plan; it was not planned`);
+	for (const label of oversized) result.incomplete.push(`${label}: too large for one plan (entries, coverage or encoded bytes); it was not planned`);
 	const plans: CorpusPlanResponse[] = [];
 	const ingests: IngestSummary[] = [];
 	let fatal: ClientError | null = null;

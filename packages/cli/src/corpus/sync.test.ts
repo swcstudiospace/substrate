@@ -363,6 +363,22 @@ describe("partitionInventory", () => {
 		expect(groups.every((group) => group.entries.length === 0)).toBe(true);
 	});
 
+	test("a repository whose encoded payload is over the byte budget is reported, and the rest still go", () => {
+		const big = inventory({ "a/a": 3, "b/b": 1 });
+		big.entries = big.entries.map((entry) => (entry.repo === "a/a" ? { ...entry, path: `${"x".repeat(2000)}${entry.path}` } : entry));
+		const { groups, oversized } = partitionInventory(big, 100, 100, 5_000);
+		expect(oversized).toEqual(["a/a"]);
+		expect(groups.map((group) => group.scope.coverage.map((pair) => pair.repo))).toEqual([["b/b"]]);
+	});
+
+	test("a group closes when adding the next repository would pass the byte budget", () => {
+		const long = inventory({ "a/a": 1, "b/b": 1, "c/c": 1 });
+		long.entries = long.entries.map((entry) => ({ ...entry, path: `${"y".repeat(1000)}${entry.path}` }));
+		const { groups, oversized } = partitionInventory(long, 100, 100, 2_500);
+		expect(oversized).toEqual([]);
+		expect(groups.map((group) => group.scope.coverage.map((pair) => pair.repo))).toEqual([["a/a", "b/b"], ["c/c"]]);
+	});
+
 	test("grouping appends to the existing array", () => {
 		const inv = inventory({ "a/a": 3 });
 		const { groups } = partitionInventory(inv, 10);
