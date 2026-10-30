@@ -1398,7 +1398,7 @@ describe("merge-back", () => {
 		const h = harness({ emit: async (): Promise<EmitOutcome> => ({ kind: "failed", error: "connection refused" }) }, withRoot(f.root));
 		expect(await runWorktree(["merge-back", "--execute", f.merged], h.deps)).toBe(1);
 		const out = h.out.join("");
-		expect(out.split("\n").some((line) => line.startsWith("recorded "))).toBe(false);
+		expect(out.split("\n").some((line) => line.startsWith(`recorded ${f.merged}`))).toBe(false);
 		expect(out).toContain(`not recorded (failed) ${f.merged}`);
 		expect(out).toContain("recorded 0 worktrees, refused 0, not recorded 1");
 		expect(h.err.join("")).toContain("NOT RECORDED");
