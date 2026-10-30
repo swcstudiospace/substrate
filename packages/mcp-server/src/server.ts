@@ -40,6 +40,7 @@ import type { JSONRPCMessage, MessageExtraInfo } from "@modelcontextprotocol/sdk
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { auditMode } from "@substrate/audit";
+import { MAX_NEARDUP_ITEMS, MAX_NEARDUP_TEXT_CHARS } from "@substrate/corpus";
 import {
 	classifyEventRefusal,
 	evaluateAdmissionSlo,
@@ -63,6 +64,11 @@ import {
 	type SubstrateConfig,
 } from "./config.ts";
 import { Admission, admitBatch, budgetBody, budgetRefusal, routeClass, type AdmissionVerdict } from "./admission.ts";
+import { acknowledgeSteeringWithState, type SteeringAcknowledgeReply } from "./planning/steering-delivery.ts";
+import { listRestDirectives, listSteeringSessions, parseAcknowledgeBody, parseDirectivesQuery, parseQueueBody, parseSessionsQuery, parseWaitQuery, restDirective, steeringHttpStatus, steeringRetryAfterS, steeringUnavailable } from "./planning/steering-rest.ts";
+import { queueSteering, type SteeringWriteResult } from "./planning/steering-tools.ts";
+import { nextQueuedDirective } from "./planning/steering-waiters.ts";
+import { parseSessionContextArgs, SESSION_CONTEXT_DISABLED, SESSION_CONTEXT_DISABLED_MESSAGE } from "./session-context.ts";
 import type { EventBus } from "./event-bus.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
 import { parseBriefProfile } from "./brief-profile.ts";
@@ -283,6 +289,12 @@ const DOCS_MAX_BODY_BYTES = 6_000_000;
 /** A reconcile request is `{protocol, execute}`; a body past this is not one. */
 const RECONCILE_MAX_BODY_BYTES = 4096;
 
+/**
+ * `POST /corpus/neardup` carries up to 1000 excerpts of 4000 characters. Four bytes per character covers any UTF-8 text with the
+ * usual JSON escapes; the room beyond that is each item's repo, path and member names. A larger body is refused 413.
+ */
+const NEARDUP_MAX_BODY_BYTES = MAX_NEARDUP_ITEMS * (MAX_NEARDUP_TEXT_CHARS * 4 + 2_500);
+
 /** How long a request may take to arrive: its headers, then the whole request. Bounds a slow client, not a response. */
 const HEADERS_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 120_000;
@@ -306,7 +318,10 @@ const JSON_BODY_ROUTES: Record<string, true> = {
 	"/docs/merge-trigger": true,
 	"/skills/propose": true,
 	"/skills/approve": true,
+	"/steering/queue": true,
+	"/steering/acknowledge": true,
 	"/worktrees/report": true,
+	"/corpus/neardup": true,
 	"/mcp": true,
 };
 
@@ -343,6 +358,10 @@ function listLength(body: unknown, member: string): number {
 }
 /** Why an anonymous merge-trigger is refused, even on a run that allows anonymous callers. */
 const MERGE_TRIGGER_NEEDS_SURFACE = "docs merge-trigger needs an authenticated surface; nothing was refreshed";
+/** Why an anonymous call to a steering route is refused, even on a run that allows anonymous callers. */
+const STEERING_NEEDS_SURFACE = "the steering routes need an authenticated surface";
+/** Why an anonymous session-context read is refused, even on a run that allows anonymous callers. */
+const SESSION_CONTEXT_NEEDS_SURFACE = "session_context needs an authenticated surface";
 /** Why an anonymous worktree report is refused, even on a run that allows anonymous callers. */
 const WORKTREE_REPORT_NEEDS_SURFACE = "worktree report needs an authenticated surface; nothing was stored";
 /** Why an anonymous claims read is refused: it names the sessions holding a graph's nodes. */
@@ -678,6 +697,29 @@ async function auditedRest(
 	if (denial === null) return true;
 	sendJson(res, 503, { error: denial });
 	return false;
+}
+
+/**
+ * The shared opening of a steering route (phase 67): a bearer that names a surface, and steering switched on. Answers 401 or 404
+ * itself and returns false when it refuses. The anonymous bridge does not reach these routes: a directive and a session list are
+ * both about who is asking.
+ */
+function steeringRouteOpen(res: ServerResponse, substrate: Substrate, surface: Surface | null): boolean {
+	if (surface === null) {
+		sendJson(res, 401, { error: STEERING_NEEDS_SURFACE });
+		return false;
+	}
+	if (!substrate.steering.enabled) {
+		sendJson(res, 404, { error: "live steering is off (SUBSTRATE_PLANNING_STEERING)" });
+		return false;
+	}
+	return true;
+}
+
+/** A steering write's typed result as the response: the tool's own reply body, with the status its refusal maps to and `Retry-After` when rate-limited. */
+function sendSteeringResult(res: ServerResponse, result: SteeringWriteResult | SteeringAcknowledgeReply): void {
+	const retryAfterS = steeringRetryAfterS(result);
+	send(res, steeringHttpStatus(result), JSON.stringify(result), "application/json", retryAfterS === null ? {} : { "retry-after": String(retryAfterS) });
 }
 
 export function createHttpServer(
@@ -1134,6 +1176,7 @@ export function createHttpServer(
 						...(typeof body.repo === "string" ? { repo: body.repo } : {}),
 						...(typeof body.branch === "string" ? { branch: body.branch } : {}),
 						...(typeof body.graph_id === "string" ? { graph_id: body.graph_id } : {}),
+						...(typeof body.session_id === "string" ? { session_id: body.session_id } : {}),
 						surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
 					},
 					req.headers["if-none-match"],
@@ -1604,6 +1647,20 @@ export function createHttpServer(
 				sendJson(res, reply.status, reply.body);
 				return;
 			}
+			// Advisory near-duplicate pairs (phase 64): the excerpts go to the operator's TEI service through the cached embedding
+			// service and nowhere else. Same gating and audit name as the plan (a read, `corpus_status`); the audit record carries
+			// the item count only, never a text.
+			if (req.method === "POST" && url.pathname === "/corpus/neardup") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req, NEARDUP_MAX_BODY_BYTES));
+				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "neardup", items: listLength(parsed, "items") }))) return;
+				const reply = await substrate.corpusNeardup(parsed, surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
 			if (req.method === "POST" && url.pathname === "/corpus/ingest") {
 				if (surface === null) {
 					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
@@ -1999,6 +2056,136 @@ export function createHttpServer(
 				return;
 			}
 
+			// ── live steering GA (phase 67): the steering tools as REST routes, running the tools' own functions with the tools' own
+			// audit class, admission class (`ROUTE_CLASSES`) and operator rule. Each needs a bearer that names a surface, and answers
+			// 404 while SUBSTRATE_PLANNING_STEERING is off, as the tools are not registered then. The author of a directive is the
+			// bearer's surface and only an operator may write: no route takes an author field.
+			if (req.method === "GET" && url.pathname === "/steering/sessions") {
+				if (!steeringRouteOpen(res, substrate, surface)) return;
+				const query = parseSessionsQuery(url.searchParams);
+				if (!query.ok) {
+					sendJson(res, 400, { error: query.error });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "steering_list", { route: "sessions", repo_id: query.value.repoId, limit: query.value.limit }))) return;
+				sendJson(res, 200, listSteeringSessions(substrate.steeringSessions, substrate.steering.inbox, { surface, isOperator: caller.isOperator }, query.value));
+				return;
+			}
+
+			if (req.method === "GET" && url.pathname === "/steering/directives") {
+				if (!steeringRouteOpen(res, substrate, surface)) return;
+				const query = parseDirectivesQuery(url.searchParams);
+				if (!query.ok) {
+					sendJson(res, 400, { error: query.error });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "steering_list", { session_id: query.value.sessionId, status: query.value.status }))) return;
+				const unavailable = steeringUnavailable(substrate.steering);
+				if (unavailable !== null || substrate.steering.inbox === null) {
+					sendJson(res, 503, unavailable ?? { status: "not-configured", error: "no steering audit sink is configured" });
+					return;
+				}
+				// The inbox answers for what it holds; a directive acknowledged before a restart is read back from the audit history.
+				const durable = query.value.status === "queued" ? { records: [], history: "memory-only" as const, truncated: false } : await substrate.durableAcknowledgedFor(query.value.sessionId);
+				sendJson(res, 200, {
+					directives: listRestDirectives(substrate.steering.inbox, query.value, durable.records),
+					history: durable.history,
+					history_truncated: durable.truncated,
+				});
+				return;
+			}
+
+			if (req.method === "POST" && url.pathname === "/steering/queue") {
+				if (!steeringRouteOpen(res, substrate, surface)) return;
+				const input = parseQueueBody(JSON.parse(await readBody(req)));
+				if (!input.ok) {
+					sendJson(res, 400, { error: input.error });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "steering_queue", input.value))) return;
+				const queued = await queueSteering(substrate.steering, { surface, isOperator: caller.isOperator }, input.value);
+				// The same two wake-ups the tool gives, neither able to fail the queue: the long-poll waiters, then the hint note.
+				if (queued.status === "queued") await substrate.onSteeringQueued(queued.directive_id);
+				sendSteeringResult(res, queued);
+				return;
+			}
+
+			if (req.method === "POST" && url.pathname === "/steering/acknowledge") {
+				if (!steeringRouteOpen(res, substrate, surface)) return;
+				const input = parseAcknowledgeBody(JSON.parse(await readBody(req)), substrate.steering.inbox);
+				if (!input.ok) {
+					sendJson(res, 400, { error: input.error });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "steering_acknowledge", input.value))) return;
+				sendSteeringResult(res, await acknowledgeSteeringWithState(substrate.steering, { surface, isOperator: caller.isOperator }, input.value, substrate.sessionState));
+				return;
+			}
+
+			if (req.method === "GET" && url.pathname === "/steering/wait") {
+				if (!steeringRouteOpen(res, substrate, surface)) return;
+				const query = parseWaitQuery(url.searchParams, config.steeringWaitMaxMs);
+				if (!query.ok) {
+					sendJson(res, 400, { error: query.error });
+					return;
+				}
+				// Audited once per call, under the read's name, before the request is held: never per wake-up.
+				if (!(await auditedRest(res, observability, surface, "steering_list", { route: "wait", session_id: query.value.sessionId, after: query.value.after, timeout_ms: query.value.timeoutMs }))) return;
+				const inbox = substrate.steering.inbox;
+				const unavailable = steeringUnavailable(substrate.steering);
+				if (unavailable !== null || inbox === null) {
+					sendJson(res, 503, unavailable ?? { status: "not-configured", error: "no steering audit sink is configured" });
+					return;
+				}
+				// A client that goes away ends its wait: the waiter leaves the registry with its timer and listener.
+				const gone = new AbortController();
+				res.on("close", () => gone.abort());
+				const { sessionId, after, timeoutMs } = query.value;
+				const waited = await substrate.steeringWaiters.wait({ sessionId, timeoutMs, signal: gone.signal, check: () => nextQueuedDirective(inbox, sessionId, after) });
+				switch (waited.status) {
+					case "directive":
+						sendJson(res, 200, { directive: restDirective(waited.record), wait_ms: timeoutMs });
+						return;
+					case "busy":
+						send(res, 429, JSON.stringify({ error: `too many waiters for this ${waited.scope === "session" ? "session" : "server"}` }), "application/json", { "retry-after": "1" });
+						return;
+					case "aborted":
+						return;
+					case "timeout":
+					case "closed":
+						// No body to carry `wait_ms`, so the wait this request got rides a header.
+						res.writeHead(204, { "x-steering-wait-ms": String(timeoutMs) });
+						res.end();
+						return;
+				}
+			}
+
+			if (req.method === "GET" && url.pathname === "/session/context") {
+				if (surface === null) {
+					sendJson(res, 401, { error: SESSION_CONTEXT_NEEDS_SURFACE });
+					return;
+				}
+				// Opt-in with the sessions feature set: off, the route refuses with the typed reason the tool answers, and the call is
+				// audited as that refusal. It reads nothing.
+				if (!config.briefSessions) {
+					if (!(await auditedRest(res, observability, surface, "session_context", { refused: SESSION_CONTEXT_DISABLED }))) return;
+					sendJson(res, 503, { refused: true, reason: SESSION_CONTEXT_DISABLED, error: SESSION_CONTEXT_DISABLED_MESSAGE });
+					return;
+				}
+				const parsed = parseSessionContextArgs({
+					repo_id: url.searchParams.get("repo_id") ?? undefined,
+					session_id: url.searchParams.get("session_id") ?? undefined,
+					limit: url.searchParams.get("limit") ?? undefined,
+				});
+				if (!parsed.ok) {
+					sendJson(res, 400, { error: parsed.error });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "session_context", { repo_id: parsed.value.repoId, session_id: parsed.value.sessionId, limit: parsed.value.limit ?? null }))) return;
+				sendJson(res, 200, await substrate.sessionContext(parsed.value));
+				return;
+			}
+
 			// The worktree registry (phase 68). A report names a host's checkouts, so an anonymous caller is refused before the body
 			// is read, even on a run that allows untokened callers. A registry that is off, a VM guest and a server with no index are
 			// refused just as early, so nothing is read, audited or stored. The accepted report is audited fail-closed.
@@ -2086,7 +2273,7 @@ export function createHttpServer(
 
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
-			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/corpus/plan" || url.pathname === "/corpus/ingest" || url.pathname === "/corpus/reconcile" || url.pathname === "/mcp" || url.pathname === "/memory" || url.pathname === "/worktrees/report")) {
+			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/corpus/plan" || url.pathname === "/corpus/neardup" || url.pathname === "/corpus/ingest" || url.pathname === "/corpus/reconcile" || url.pathname === "/mcp" || url.pathname === "/memory" || url.pathname === "/worktrees/report")) {
 				sendJson(res, 413, { error: cause.message });
 				return;
 			}
@@ -2118,6 +2305,8 @@ export function createHttpServer(
 		anonymousLog.stop();
 		refusalLog.stop();
 		loopLag.stop();
+		// A held `GET /steering/wait` would keep `close` waiting for its connection: end every waiter so none outlives the server.
+		substrate.steeringWaiters.closeAll();
 		// A request still in flight can finish after the timers stop. Flush once more when
 		// the server has actually closed, so its count still reaches stderr.
 		return close((err?: Error) => {

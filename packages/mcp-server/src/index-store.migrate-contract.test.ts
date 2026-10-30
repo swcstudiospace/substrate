@@ -61,7 +61,8 @@ export const REAL_ALLOWLISTS: ContractAllowlists = {
 		planning_steering_audit: "step 33 is an opt-in (steering-audit), append-only steering audit table; it is not part of the archive's closed table list and archiving it is a separate change",
 		corpus_documents: "step 35 is the corpus manifest, rebuilt by re-running the corpus scan and ingest; it is not part of the archive's closed table list and archiving it is a separate change",
 		worktrees: "step 36 is the worktree registry, rebuilt by the next report from each host; archiving stale paths would only restore them, and the closed table list stays as it is",
-		planning_page_hashes: "step 39 holds the planning refresh's page hashes, rebuilt by the next planning scan (a missing row only re-ingests that page); it is not part of the archive's closed table list and archiving it is a separate change",
+		planning_page_hashes: "step 38 holds the planning refresh's page hashes, rebuilt by the next planning scan (a missing row only re-ingests that page); it is not part of the archive's closed table list and archiving it is a separate change",
+		steering_sessions: "step 37 is an opt-in (steering-sessions) restart cache of live steering session state; it is not part of the archive's closed table list and is rebuilt from the live registry, not archived",
 	},
 };
 

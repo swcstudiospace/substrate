@@ -1465,6 +1465,22 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		}),
 	},
 	{
+		id: "steering.persist_failed",
+		phase: 67,
+		kind: "warning",
+		surface: "caller",
+		actions: ["steering.persist_failed"],
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "warning",
+			summary: "steering session sess-sample was not saved to steering_sessions: connection refused",
+			session_id: "sess-sample",
+			payload: { action: "steering.persist_failed", reason: "connection refused" },
+		}),
+	},
+	{
 		// v1.7 phase 65: one note per `substrate corpus` sync (the watcher, a git hook hint, the sweep, a manual run or the
 		// reconcile): the repository, why it ran, how it ended, the lag from the change to the end of the ingest, and counts.
 		// The server reads only `lag_s`, into the `substrate.corpus.sync_lag_seconds` gauge. Names and numbers, never text.

@@ -166,6 +166,7 @@ These apply to every source:
 | `steering.queued` | 58 | `note` | `substrate` | `steering.queued` | — | — | no |
 | `worktrees.report` | 68 | `note` | `caller` | `worktrees.report` | — | — | no |
 | `worktree.prune` | 68 | `note` | `caller` | `worktree.prune` | — | the pruned worktree's repository (omitted for a local-only one) | no |
+| `steering.persist_failed` | 67 | `warning` | `caller` | `steering.persist_failed` | — | — | no |
 | `muse.brief_writer` | 19 | — | — | — | — | — | no |
 | `memory.retain` | 26 | — | — | — | — | — | no |
 | `memory.recall` | 26 | — | — | — | — | — | no |

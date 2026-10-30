@@ -159,11 +159,13 @@ describeLive("the corpus manifest against a live index", () => {
 	});
 
 	test("activeRows answers only active rows, ordered by repo and path, and no more than the limit", async () => {
-		await store.recordIngested(doc("b-active.md", { repo: OTHER }));
-		await store.recordIngested(doc("a-active.md", { repo: OTHER }));
-		await store.recordIngested(doc("gone.md", { repo: OTHER }));
-		await store.markTombstoned(OTHER, "gone.md");
-		const mine = (await store.activeRows(100_000)).filter((row) => row.repo === OTHER);
+		// A sibling test leaves an active row under OTHER. This one uses its own repo so that row is not part of the answer.
+		const repo = `${MARKER}/active-rows`;
+		await store.recordIngested(doc("b-active.md", { repo }));
+		await store.recordIngested(doc("a-active.md", { repo }));
+		await store.recordIngested(doc("gone.md", { repo }));
+		await store.markTombstoned(repo, "gone.md");
+		const mine = (await store.activeRows(100_000)).filter((row) => row.repo === repo);
 		expect(mine.map((row) => row.path)).toEqual(["a-active.md", "b-active.md"]);
 		expect(mine.every((row) => row.state === "active")).toBe(true);
 		expect(await store.activeRows(1)).toHaveLength(1);

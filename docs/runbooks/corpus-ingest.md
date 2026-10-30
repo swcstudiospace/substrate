@@ -10,6 +10,7 @@ Nothing here runs by itself. The server only answers requests, and it answers no
 2. `substrate corpus plan` sends those entries, without bodies, to `POST /corpus/plan` together with the coverage (the (repository, source) pairs the scan read completely) and prints how many documents the server would add, change, update, rename or tombstone. It changes nothing.
 3. `substrate corpus ingest` is a dry run until `--execute`. With it, the CLI sends the tombstones first, as their own request, and then the bodies of the documents that must be added, changed or updated to `POST /corpus/ingest`, in requests of at most 200 documents and 500 tombstones, and the server puts them into LightRAG in batches.
 4. `substrate corpus status` (`GET /corpus/status`, the `corpus_status` tool) reads the manifest's counts.
+5. `substrate corpus plan --neardup` (optional, advisory) also sends the first 4,000 characters of each local document the plan would write to `POST /corpus/neardup` and prints the pairs that look alike. It needs `TEI_URL` on the server (see `docs/embedding-fabric.md`); without it the command prints the plan, writes `not-configured` to stderr and exits 1. No document is dropped, skipped or changed on that signal, and the excerpts go only to the operator's TEI service. Details and limits are in `docs/corpus.md`.
 
 The same server doors are the MCP tools `corpus_status` (read, fail-open audit) and `corpus_ingest` (write, fail-closed audit). The CLI never talks to LightRAG: only the server does.
 
@@ -17,7 +18,7 @@ The same server doors are the MCP tools `corpus_status` (read, fail-open audit) 
 
 | Variable | Read by | Default | Meaning |
 | --- | --- | --- | --- |
-| `SUBSTRATE_CORPUS` | server | `off` | `on` opens the three routes and the two tools. Anything else keeps them closed. |
+| `SUBSTRATE_CORPUS` | server | `off` | `on` opens the four routes and the two tools. Anything else keeps them closed. |
 | `SUBSTRATE_CORPUS_ROOTS` | CLI | `/root/src/repos` | Colon separated directories `substrate corpus scan` reads when no `--root` is given. |
 | `SUBSTRATE_CORPUS_CONCURRENCY` | server and CLI | `4` | Batches in flight at once, 1 to 16. |
 | `SUBSTRATE_CORPUS_BATCH_DOCS` | server and CLI | `20` | Documents per batch, 1 to 200. |
@@ -27,7 +28,7 @@ A value out of range is clamped into range; a value that is not a whole number i
 
 With the flag off, every route answers `503` with `reason: "corpus.disabled"` and nothing is read from the manifest or sent to a plane. That is also the state to return to if something goes wrong: set `SUBSTRATE_CORPUS` to anything but `on` and restart. Documents already in the plane stay and stay searchable; only the doors close.
 
-Authentication: every corpus request needs an authenticated surface (`401` without one) and refuses a VM guest (`403`). The body cap is the docs routes' 6,000,000 bytes (`413`).
+Authentication: every corpus request needs an authenticated surface (`401` without one) and refuses a VM guest (`403`). The body cap is the docs routes' 6,000,000 bytes (`413`); `POST /corpus/neardup` has its own cap of 18,500,000 bytes, which 1,000 excerpts of 4,000 characters fit in.
 
 ## First run
 

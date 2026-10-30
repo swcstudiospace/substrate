@@ -91,6 +91,8 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	"planning_sessions",
 	// Phase 53 (SOTA-09): the steering read. The directives for one session, queued or acknowledged, are inspection only.
 	"steering_list",
+	// Phase 67 (live steering GA): the cross-session digest. A bounded, redacted read of presence, claims and the ledger; it writes nothing.
+	"session_context",
 	// Phase 68 (FLEET-02): the worktree registry read, as an MCP tool and the `GET /worktrees` route under one name. Inspection only.
 	"worktree_list",
 	// The one write that is fail-open on purpose: an event costs a line in the trail,

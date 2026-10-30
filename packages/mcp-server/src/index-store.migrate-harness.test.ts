@@ -36,7 +36,7 @@ interface FakeOptions {
 	/** The advisory unlock query throws, as on a connection that died mid-migration. */
 	failUnlock?: boolean;
 	/** The opt-in migrations the store runs; absent is every opt-in off, the store's default. */
-	migrationOptIns?: { "steering-audit": boolean };
+	migrationOptIns?: { "steering-audit": boolean; "steering-sessions"?: boolean };
 }
 
 /** A recording stand-in for `sql.reserve()`'s connection, with a transactional in-memory `schema_migrations`. */
@@ -139,7 +139,7 @@ function fakeIndex(options: FakeOptions = {}) {
 }
 
 /** The steps `migrate()` runs by default: every opt-in off, so the opt-in steps 33 and 34 are neither run nor ledgered. */
-const ALL = applicableMigrationSteps({ "steering-audit": false }).map((step) => step.version);
+const ALL = applicableMigrationSteps({ "steering-audit": false, "steering-sessions": false }).map((step) => step.version);
 const ALL_WITH_STEERING_AUDIT = applicableMigrationSteps({ "steering-audit": true }).map((step) => step.version);
 
 const PROLOGUE = [
@@ -204,6 +204,26 @@ describe("IndexStore.migrate() against a fake connection", () => {
 		await reserved.unsafe(table?.down ?? "");
 		expect(tables.has("planning_steering_audit")).toBe(false);
 		expect(events.at(-1)).toBe("drop table planning_steering_audit");
+	});
+
+	test("with the steering-sessions opt-in, step 37 applies in its own transaction and its down reverses it; off, it is skipped and not ledgered", async () => {
+		const step = MIGRATION_STEPS.find((candidate) => candidate.version === 37);
+		expect(step?.name).toBe("steering_sessions");
+		expect(step?.down).toBe("drop table if exists steering_sessions");
+		const withSessions = applicableMigrationSteps({ "steering-audit": false, "steering-sessions": true }).map((candidate) => candidate.version);
+		expect(withSessions).toEqual([...ALL, 37].sort((a, b) => a - b));
+		const on = fakeIndex({ migrationOptIns: { "steering-audit": false, "steering-sessions": true } });
+		await on.store.migrate();
+		expect(on.events).toEqual(expectedRun(new Set(), withSessions));
+		expect(on.ledger.has(37)).toBe(true);
+		expect(on.tables.has("steering_sessions")).toBe(true);
+		await on.reserved.unsafe(step?.down ?? "");
+		expect(on.tables.has("steering_sessions")).toBe(false);
+
+		const off = fakeIndex({ migrationOptIns: { "steering-audit": true, "steering-sessions": false } });
+		await off.store.migrate();
+		expect(off.ledger.has(37)).toBe(false);
+		expect(off.tables.has("steering_sessions")).toBe(false);
 	});
 
 	test("an empty ledger: the full ordered sequence, one BEGIN..COMMIT with the ledger insert per step", async () => {

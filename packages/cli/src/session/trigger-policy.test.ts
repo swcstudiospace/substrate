@@ -4,6 +4,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+	CHECKPOINT_HOOK_TRIGGERS,
 	HOOK_TRIGGERS,
 	PLAN_STEP_MIN_INTERVAL_MS,
 	type PolicyCheckpoint,
@@ -22,7 +23,9 @@ describe("the defaults", () => {
 	test("the documented limits", () => {
 		expect(TURN_MIN_INTERVAL_MS).toBe(60_000);
 		expect(PLAN_STEP_MIN_INTERVAL_MS).toBe(10_000);
-		expect([...HOOK_TRIGGERS]).toEqual(["turn", "plan-step", "steering", "baseline"]);
+		expect([...CHECKPOINT_HOOK_TRIGGERS]).toEqual(["turn", "plan-step", "steering", "baseline"]);
+		// `context` is a hook trigger that prints a digest; it is never a checkpoint trigger, so the policy has no row for it.
+		expect([...HOOK_TRIGGERS]).toEqual([...CHECKPOINT_HOOK_TRIGGERS, "context"]);
 	});
 });
 

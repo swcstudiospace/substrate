@@ -86,6 +86,15 @@ function fakeServer(options: { refuse?: (path: string) => boolean; planFails?: b
 		async reconcile() {
 			return { ok: false, error: { kind: "http", message: "unused" } };
 		},
+		async neardup() {
+			return { ok: false, error: { kind: "http", message: "unused" } };
+		},
+		async proof() {
+			return { ok: false, error: { kind: "http", message: "unused" } };
+		},
+		async anchor() {
+			return { ok: false, error: { kind: "http", message: "unused" } };
+		},
 	};
 	return { client, manifest, plans, ingests };
 }

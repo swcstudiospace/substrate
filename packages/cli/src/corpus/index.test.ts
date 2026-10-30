@@ -2,10 +2,10 @@ import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:tes
 import { createHash } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { CORPUS_PROTOCOL, isRecord, isValidRepo, localRepoId, MAX_INGEST_DOCUMENTS, MAX_INGEST_TOMBSTONES, type GhRunner, type GitRunner, type IngestStatus, type PlanItem } from "@substrate/corpus";
+import { CORPUS_PROTOCOL, EMBEDDING_REASONS, isRecord, isValidRepo, localRepoId, MAX_INGEST_DOCUMENTS, MAX_INGEST_TOMBSTONES, type GhRunner, type GitRunner, type IngestStatus, type PlanItem } from "@substrate/corpus";
 import { defined, fakeGit, tempDir, writeTree } from "../../../corpus/src/test-support.ts";
 import { runCorpus, USAGE } from "./index.ts";
-import { CorpusStub, fakeGhOwner, ingestOf, planOf, statusOf, type Reply, type Seen } from "./testkit.ts";
+import { CorpusStub, fakeGhOwner, ingestOf, neardupOf, planOf, statusOf, type Reply, type Seen } from "./testkit.ts";
 
 const stub = new CorpusStub();
 const dirs: string[] = [];
@@ -616,5 +616,271 @@ describe("substrate corpus status", () => {
 		const result = await run(["status"]);
 		expect(result.code).toBe(1);
 		expect(result.err).toContain("403");
+	});
+});
+
+describe("substrate corpus plan --neardup", () => {
+	const ALPHA_README = { repo: "Acme/Alpha", path: "README.md" };
+	const BETA_README = { repo: "Acme/Beta", path: "README.md" };
+	const pairOf = (similarity: number, a = ALPHA_README, b = BETA_README) => ({ a, b, similarity });
+
+	function neardupBody(index = 0): Record<string, unknown> {
+		return rec(defined(stub.requests("/corpus/neardup")[index], "neardup request").body, "neardup request");
+	}
+
+	function neardupAnswers(reply: Reply): void {
+		stub.on("POST /corpus/neardup", () => reply);
+	}
+
+	test("sends one request with the excerpts the plan would write, in order, and prints the advisory section after the plan", async () => {
+		const { root, runner } = fixture();
+		planAllAdd();
+		neardupAnswers({ status: 200, body: neardupOf([pairOf(0.9731)]) });
+		const result = await run(["plan", "--root", root, "--neardup"], { runner });
+		expect(result.code).toBe(0);
+		expect(stub.requests("/corpus/neardup")).toHaveLength(1);
+		expect(defined(stub.requests("/corpus/neardup")[0], "request").authorization).toBe("Bearer tok-1");
+		const body = neardupBody();
+		expect(body.protocol).toBe(CORPUS_PROTOCOL);
+		expect("threshold" in body).toBe(false);
+		expect(body.items).toEqual([
+			{ repo: "Acme/Alpha", path: "README.md", text: "# alpha\n" },
+			{ repo: "Acme/Alpha", path: "docs/guide.md", text: "guide\n" },
+			{ repo: "Acme/Beta", path: "README.md", text: "# beta\n" },
+		]);
+		expect(result.out.startsWith("plan: add 3, change 0")).toBe(true);
+		expect(result.out.slice(result.out.indexOf("near-duplicates"))).toBe(
+			"near-duplicates (advisory: no document is dropped on this signal)\n" +
+				"  0.9731  Acme/Alpha:README.md  ~  Acme/Beta:README.md\n" +
+				"model: test-model, dimension: 3\n" +
+				"compared: 3 documents, skipped (empty text): 0\n",
+		);
+		expect(result.err).toBe("");
+	});
+
+	test("sends only the plan request when --neardup is absent", async () => {
+		const { root, runner } = fixture();
+		planAllAdd();
+		const result = await run(["plan", "--root", root], { runner });
+		expect(result.code).toBe(0);
+		expect(stub.requests("/corpus/neardup")).toEqual([]);
+		expect(result.out).not.toContain("near-duplicates");
+	});
+
+	test("--threshold is sent as given and --neardup-max limits the excerpts and says so", async () => {
+		const { root, runner } = fixture();
+		planAllAdd();
+		neardupAnswers({ status: 200, body: neardupOf([], { compared: 2 }) });
+		const result = await run(["plan", "--root", root, "--neardup", "--threshold", "0.8", "--neardup-max", "2"], { runner });
+		expect(result.code).toBe(0);
+		const body = neardupBody();
+		expect(body.threshold).toBe(0.8);
+		expect(list(body.items, "items").map((item) => item.path)).toEqual(["README.md", "docs/guide.md"]);
+		expect(result.out).toContain("compared the first 2 of 3 documents (--neardup-max)");
+		expect(result.out).toContain("no pair is at or above the threshold");
+	});
+
+	test("the bounds of the options are accepted: threshold 0.5 and 1, a maximum of 1 and of 1000", async () => {
+		const { root, runner } = fixture();
+		planAllAdd();
+		neardupAnswers({ status: 200, body: neardupOf([]) });
+		for (const threshold of ["0.5", "1", ".75", "0.92"]) {
+			stub.seen = [];
+			expect((await run(["plan", "--root", root, "--neardup", "--threshold", threshold], { runner })).code).toBe(0);
+			expect(neardupBody().threshold).toBe(Number(threshold));
+		}
+		for (const max of ["1", "1000"]) {
+			stub.seen = [];
+			expect((await run(["plan", "--root", root, "--neardup", "--neardup-max", max], { runner })).code).toBe(0);
+			expect(list(neardupBody().items, "items")).toHaveLength(Math.min(3, Number(max)));
+		}
+	});
+
+	test("a document from GitHub is counted as not compared and its text never leaves", async () => {
+		const { root, runner } = fixture();
+		const gh = fakeGhOwner({ "Acme/Gamma": { files: { "README.md": "gamma secret\n" } } });
+		planAllAdd();
+		neardupAnswers({ status: 200, body: neardupOf([]) });
+		const result = await run(["plan", "--root", root, "--source", "fs,github", "--github-owner", "Acme", "--neardup"], { runner, gh });
+		expect(result.code).toBe(0);
+		expect(list(neardupBody().items, "items").map((item) => item.repo)).toEqual(["Acme/Alpha", "Acme/Alpha", "Acme/Beta"]);
+		expect(JSON.stringify(stub.requests("/corpus/neardup"))).not.toContain("gamma secret");
+		expect(result.out).toContain("1 document from GitHub was not compared");
+	});
+
+	test("a file that cannot be read is counted as not compared and never fails the command", async () => {
+		const { root, runner } = fixture();
+		let armed = false;
+		stub.on("POST /corpus/plan", (seen) => {
+			// The scan is over once the plan is asked for; from here a read of the guide fails.
+			armed = true;
+			return { status: 200, body: planOf(addsFor(seen.body)) };
+		});
+		neardupAnswers({ status: 200, body: neardupOf([], { compared: 2 }) });
+		const readFile = (path: string): Uint8Array => {
+			if (armed && path.endsWith("guide.md")) throw new Error("EACCES: permission denied");
+			return readFileSync(path);
+		};
+		const result = await run(["plan", "--root", root, "--neardup"], { runner, readFile });
+		expect(result.code).toBe(0);
+		expect(list(neardupBody().items, "items").map((item) => item.path)).toEqual(["README.md", "README.md"]);
+		expect(result.out).toContain("1 document could not be read and was not compared");
+	});
+
+	test("only the documents the plan writes are compared: a tombstone is not, a rename is", async () => {
+		const { root, runner } = fixture();
+		const items: PlanItem[] = [
+			{ action: "rename", repo: "Acme/Alpha", path: "README.md", renamedFrom: "old.md" },
+			{ action: "tombstone", repo: "Acme/Alpha", path: "docs/guide.md" },
+		];
+		stub.on("POST /corpus/plan", () => ({ status: 200, body: planOf(items, 1) }));
+		neardupAnswers({ status: 200, body: neardupOf([], { compared: 1 }) });
+		await run(["plan", "--root", root, "--neardup"], { runner });
+		expect(list(neardupBody().items, "items").map((item) => item.path)).toEqual(["README.md"]);
+	});
+
+	test("with nothing to compare it says so, sends no request and exits 0", async () => {
+		const { root, runner } = fixture();
+		stub.on("POST /corpus/plan", () => ({ status: 200, body: planOf([], 3) }));
+		const result = await run(["plan", "--root", root, "--neardup"], { runner });
+		expect(result.code).toBe(0);
+		expect(result.out).toContain("near-duplicates: nothing to compare\n");
+		expect(result.out).not.toContain("advisory");
+		expect(stub.requests("/corpus/neardup")).toEqual([]);
+		const json = rec(rec(JSON.parse((await run(["plan", "--root", root, "--neardup", "--json"], { runner })).out), "plan").neardup, "neardup");
+		expect(json).toMatchObject({ model: null, dimension: null, compared: 0, pairs: [], notCompared: { github: 0, unreadable: 0, overLimit: 0 } });
+	});
+
+	test("--json adds one key, neardup, holding the reply and what was not compared; without --neardup the output is the plan unchanged", async () => {
+		const { root, runner } = fixture();
+		const plan = planOf([{ action: "add", repo: "Acme/Alpha", path: "README.md" }, { action: "add", repo: "Acme/Beta", path: "README.md" }]);
+		stub.on("POST /corpus/plan", () => ({ status: 200, body: plan }));
+		const reply = neardupOf([pairOf(0.95)], { compared: 2 });
+		neardupAnswers({ status: 200, body: reply });
+		const plain = await run(["plan", "--root", root, "--json"], { runner });
+		expect(plain.out).toBe(`${JSON.stringify(plan, null, 2)}\n`);
+		expect(stub.requests("/corpus/neardup")).toEqual([]);
+		const asked = await run(["plan", "--root", root, "--neardup", "--json"], { runner });
+		expect(asked.code).toBe(0);
+		const parsed = rec(JSON.parse(asked.out), "plan");
+		expect(Object.keys(parsed)).toEqual([...Object.keys(plan), "neardup"]);
+		expect(parsed.neardup).toEqual({ ...reply, notCompared: { github: 0, unreadable: 0, overLimit: 0 } });
+		expect(asked.out).not.toContain("advisory");
+	});
+
+	test.each(EMBEDDING_REASONS.map((reason) => [reason] as const))("when the embedding service cannot answer (%s) the plan is still printed, one line on stderr names the reason, and the exit is 1", async (reason) => {
+		const { root, runner } = fixture();
+		planAllAdd();
+		neardupAnswers({ status: 503, body: { error: "the embedding service could not answer", reason: "corpus.embeddings-unavailable", detail: reason } });
+		const result = await run(["plan", "--root", root, "--neardup"], { runner });
+		expect(result.code).toBe(1);
+		expect(result.out).toContain("plan: add 3");
+		expect(result.out).not.toContain("near-duplicates");
+		const lines = result.err.split("\n").filter((line) => line !== "");
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain(reason);
+	});
+
+	test("a failed comparison is also exit 1 in --json, with { error } under neardup", async () => {
+		const { root, runner } = fixture();
+		planAllAdd();
+		neardupAnswers({ status: 503, body: { error: "x", reason: "corpus.embeddings-unavailable", detail: "timeout" } });
+		const result = await run(["plan", "--root", root, "--neardup", "--json"], { runner });
+		expect(result.code).toBe(1);
+		const parsed = rec(JSON.parse(result.out), "plan");
+		expect(parsed.manifestVersion).toBe(7);
+		const neardup = rec(parsed.neardup, "neardup");
+		expect(Object.keys(neardup)).toEqual(["error"]);
+		expect(String(neardup.error)).toContain("timeout");
+	});
+
+	test("a refusal, a missing route and an answer of the wrong shape are each exit 1 with the plan printed", async () => {
+		const { root, runner } = fixture();
+		planAllAdd();
+		const answers: Reply[] = [
+			{ status: 400, body: { error: "the threshold is not a number from 0.5 to 1", reason: "bad-threshold" } },
+			{ status: 401, body: {} },
+			{ status: 200, body: { protocol: CORPUS_PROTOCOL, pairs: "none" } },
+		];
+		for (const answer of answers) {
+			neardupAnswers(answer);
+			const result = await run(["plan", "--root", root, "--neardup"], { runner });
+			expect(result.code).toBe(1);
+			expect(result.out).toContain("plan: add 3");
+			expect(result.err.split("\n").filter((line) => line !== "")).toHaveLength(1);
+		}
+		stub.routes.delete("POST /corpus/neardup");
+		expect((await run(["plan", "--root", root, "--neardup"], { runner })).code).toBe(1);
+	});
+
+	test("a plan that failed exits 1 and compares nothing", async () => {
+		const { root, runner } = fixture();
+		stub.on("POST /corpus/plan", () => ({ status: 503, body: { error: "x", reason: "corpus.disabled" } }));
+		const result = await run(["plan", "--root", root, "--neardup"], { runner });
+		expect(result.code).toBe(1);
+		expect(stub.requests("/corpus/neardup")).toEqual([]);
+	});
+
+	test("at most 50 pairs are listed, then a count of the rest", async () => {
+		const { root, runner } = fixture();
+		planAllAdd();
+		const pairs = Array.from({ length: 60 }, (_, index) => pairOf(0.99 - index / 1000, ALPHA_README, { repo: "Acme/Beta", path: `copy-${index}.md` }));
+		neardupAnswers({ status: 200, body: neardupOf(pairs, { truncated: true }) });
+		const result = await run(["plan", "--root", root, "--neardup"], { runner });
+		const listed = result.out.split("\n").filter((line) => /^ {2}\d\.\d{4} {2}/.test(line));
+		expect(listed).toHaveLength(50);
+		expect(listed[0]).toBe("  0.9900  Acme/Alpha:README.md  ~  Acme/Beta:copy-0.md");
+		expect(result.out).toContain("  ... and 10 more");
+		expect(result.out).toContain("more pairs matched than the server returned");
+	});
+
+	test("the skipped count is what the server did not embed", async () => {
+		const { root, runner } = fixture();
+		planAllAdd();
+		neardupAnswers({ status: 200, body: neardupOf([], { compared: 2, skipped: [{ repo: "Acme/Alpha", path: "README.md", reason: "empty" }] }) });
+		const result = await run(["plan", "--root", root, "--neardup"], { runner });
+		expect(result.out).toContain("compared: 2 documents, skipped (empty text): 1");
+	});
+
+	test("a name from the server cannot carry a control character into the report", async () => {
+		const { root, runner } = fixture();
+		planAllAdd();
+		const hostile = { repo: "Acme/Alpha", path: "x\u001b[2Jevil\n  0.9999  forged.md" };
+		neardupAnswers({ status: 200, body: neardupOf([pairOf(0.97, hostile, BETA_README)], { model: "m\u001b]0;title\u0007" }) });
+		const result = await run(["plan", "--root", root, "--neardup"], { runner });
+		expect(result.out).not.toContain("\u001b");
+		expect(result.out).not.toContain("\u0007");
+		expect(result.out).toContain("Acme/Alpha:x\\x1b[2Jevil\\x0a  0.9999  forged.md  ~  Acme/Beta:README.md");
+		expect(result.out.split("\n").filter((line) => line.startsWith("  0.9999"))).toEqual([]);
+		expect(result.out).toContain("model: m\\x1b]0;title\\x07");
+	});
+
+	test("the usage errors exit 2 before anything is read or sent, and ingest, scan and status do not accept --neardup", async () => {
+		const { root, runner } = fixture();
+		const withRoot: string[][] = [
+			["plan", "--neardup", "--threshold", "0.49"],
+			["plan", "--neardup", "--threshold", "1.01"],
+			["plan", "--neardup", "--threshold", "abc"],
+			["plan", "--neardup", "--threshold", "-1"],
+			["plan", "--neardup", "--threshold", "0.9x"],
+			["plan", "--neardup", "--threshold"],
+			["plan", "--neardup", "--neardup-max", "0"],
+			["plan", "--neardup", "--neardup-max", "1001"],
+			["plan", "--neardup", "--neardup-max", "x"],
+			["plan", "--neardup", "--neardup-max", "1.5"],
+			["plan", "--threshold", "0.9"],
+			["plan", "--neardup-max", "5"],
+			["plan", "--neardup=1"],
+			["ingest", "--neardup"],
+			["ingest", "--neardup", "--execute"],
+			["ingest", "--threshold", "0.9"],
+			["scan", "--neardup"],
+		];
+		for (const argv of withRoot) {
+			const result = await run([...argv, "--root", root], { runner });
+			expect({ argv, code: result.code }).toEqual({ argv, code: 2 });
+		}
+		expect((await run(["status", "--neardup"])).code).toBe(2);
+		expect(stub.seen).toEqual([]);
 	});
 });

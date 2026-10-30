@@ -47,7 +47,7 @@ function directory(text: string | undefined): string | null {
 /** The state directory of Substrate on this machine; a relative `XDG_STATE_HOME` is ignored, as the XDG rules say. */
 function stateDir(env: Record<string, string | undefined>): string {
 	const xdg = directory(env.XDG_STATE_HOME);
-	if (xdg !== null && xdg.startsWith("/")) return join(xdg, "substrate");
+	if (xdg?.startsWith("/")) return join(xdg, "substrate");
 	return join(directory(env.HOME) ?? homedir(), ".local", "state", "substrate");
 }
 
