@@ -10,7 +10,7 @@
 - ⚠️ **v1.3.x Should-have hardening** — Phases 37-44; closed 2026-10-28 as an override closeout with accepted debt (audit status tech_debt): 44 passed; 37-43 verified in repo and still `human_needed` with live proofs pending; 40-43 accepted debt (2026-10-23); 37-39 closed by the operator's live-criteria waiver of 2026-10-25; D-D3 (restore drill and retirement of the old path) was never delivered in the repository. Archive: [milestones/v1.3.x-ROADMAP.md](milestones/v1.3.x-ROADMAP.md) · audit: [milestones/v1.3.x-MILESTONE-AUDIT.md](milestones/v1.3.x-MILESTONE-AUDIT.md)
 - ⚠️ **v1.5 SOTA enhancements** — Phases 45-54; closed 2026-10-28 as an override closeout with accepted debt (audit status gaps_found). Phase 46 (verified 2026-10-28, `human_needed`): criterion 1 met in the repository; criterion 3 performed live in naive mode in Run 11 (2026-10-28); criterion 4 NOT met (no parity comparator exists); criterion 5 partial (cutover done, RAGFlow code removal gated); criteria 2 and 6 and the LightRAG graph and hybrid modes need per-run operator approval and a real LLM route. The owner accepted phase 46's open criteria (2, 4, 5, 6 and the graph and hybrid modes of 3) as debt on 2026-10-28, superseding for those items the statement of 2026-10-23 that phase 46 is not accepted as debt; SOTA-02 stays unsatisfied. Phases 52-54 merged to main (PRs #104 and #134, #136, #135; the drafts #109, #110 and #111 were closed and replaced). 45 and 47-50 accepted debt (2026-10-23); 51 complete (PR #108). Archive: [milestones/v1.5-ROADMAP.md](milestones/v1.5-ROADMAP.md) · audit: [milestones/v1.5-MILESTONE-AUDIT.md](milestones/v1.5-MILESTONE-AUDIT.md)
 - ⚠️ **v1.6 Contextual Memory, Live Steering and Eternal Rollback** — Phases 55-62, planned 2026-10-26 (Ultrathink graph ut-mvp59le0-8815e6d1); closed 2026-10-28 as an override closeout with accepted debt (audit status gaps_found). Built 2026-10-26 and merged to main on 2026-10-28: PR #127 (phases 55 and 56), PRs #128 and #129 (phases 57 and 59-61) and PR #130 (phase 62); phase 58 merged as PR #137 (replaces #131, closed). Gap closure merged 2026-10-28: PR #147 (phase 58 criterion 2, verified passed 5/5), PR #150 (phase 59 criterion 5, verified human_needed 6/6 in the repository, live proofs operator-gated) and PRs #146 and #148 (phase 61: the checkpoint sequence lock, `substrate session hook`, trigger policy, printed host configuration); phase 61 criterion 3 stays partial because no host runs the hook until an operator installs the printed configuration (ADR 0007, D55-4), accepted as debt by the owner on 2026-10-28 together with phase 59's live proofs. Live steps (a LightRAG deploy, anchor funding and the anchor timer, any devnet send, production migrations) stay operator-gated. Discovery record: [milestones/v1.6-phases/55-migration-safety/CONTEXT.md](milestones/v1.6-phases/55-migration-safety/CONTEXT.md). Archive: [milestones/v1.6-ROADMAP.md](milestones/v1.6-ROADMAP.md) · audit: [milestones/v1.6-MILESTONE-AUDIT.md](milestones/v1.6-MILESTONE-AUDIT.md)
-- 🚧 **v1.7 Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet** — Phases 63-70, defined 2026-10-29 (Run 14): ingest the documentation of every repository into the docs plane and keep it current, make the docs RAG learn from use, make Live Steering visible and cross-session, and manage many sessions' git worktrees. Requirements: [REQUIREMENTS.md](REQUIREMENTS.md).
+- 🚧 **v1.7 Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet** — Phases 63-70, defined 2026-10-29 (Run 14): ingest the documentation of every repository into the docs plane and keep it current, make the docs RAG learn from use, make Live Steering visible and cross-session, and manage many sessions' git worktrees. Phases 63-70 are shipped (PRs #177-#186 on 2026-10-29 and 2026-10-30; follow-ups #187-#193); phases 66, 67 and 68 are PARTIAL, every phase with a VERIFICATION record records gaps, and the milestone is not complete. Requirements: [REQUIREMENTS.md](REQUIREMENTS.md). Audit: [milestones/v1.7-MILESTONE-AUDIT.md](milestones/v1.7-MILESTONE-AUDIT.md).
 
 ## Phases
 
@@ -122,16 +122,16 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [ ] **Phase 61: Session rollback to an exact chat moment with file revert** - journaled, verified restore through a CLI, memory supersession and an append-only rollback event (depends on phases 55, 57-59). Merged in PRs #128 and #129 (2026-10-28), with PR #146 (checkpoint sequence lock) and PR #148 (`substrate session hook`, trigger policy, printed host configuration, write-ahead pending journal); criterion 3 still partial: no host installs or fires the hook until an operator installs the printed configuration (ADR 0007, D55-4).
 - [x] **Phase 62: Soak, runbooks and v1.6 close** - a simulated multi-day run, runbooks and ADRs, and the milestone audit. Merged in PR #130 (2026-10-28); soak, runbooks, ADRs 0004-0007 and the audit are written; completing the milestone is an operator decision.
 
-### 🚧 v1.7 Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet (defined 2026-10-29; in progress)
+### 🚧 v1.7 Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet (defined 2026-10-29; phases shipped 2026-10-29 to 2026-10-30; not complete: owner decisions open)
 
-- [ ] **Phase 63: Corpus Atlas** - scan, classify and de-duplicate the documentation of every repository on the VPS, in GitHub and in the Greptile knowledge bases, and ingest it in bulk with provenance, deletes and one manifest.
-- [ ] **Phase 64: Embedding fabric** - a TEI client with a Dragonfly cache, a fabric resource and near-duplicate detection.
-- [ ] **Phase 65: Doc Watch** - documentation changes reach the docs plane on their own: git hooks, a filesystem watcher, a reconcile timer and manifest-backed state.
-- [ ] **Phase 66: Docs Reflect** - retrieval telemetry, feedback, authority scores, supersession, digests and gap detection make the docs RAG learn from use.
-- [ ] **Phase 67: Live Steering GA** - a steering command and view, cross-session context digests, brief sections, durable session state, the `checkpoint_hint` reader and a long poll.
-- [ ] **Phase 68: Worktree Fleet** - a worktree registry found through git, safe pruning, conflict forecasts, a disk floor and brief warnings for overlapping sessions.
-- [ ] **Phase 69: Doc Proofs** - a Merkle root over the corpus recorded in the ledger so the hourly devnet anchor covers it, with inclusion proofs and verification.
-- [ ] **Phase 70: Docs SLO and eval** - a self-supervised golden set, an offline CI harness, SLO metrics, a docs lint and the operator runbook.
+- [x] **Phase 63: Corpus Atlas** - scan, classify and de-duplicate the documentation of every repository on the VPS, in GitHub and in the Greptile knowledge bases, and ingest it in bulk with provenance, deletes and one manifest. Shipped in PR #177 (2026-10-29); gaps_found: no live ingest.
+- [x] **Phase 64: Embedding fabric** - a TEI client with a Dragonfly cache, a fabric resource and near-duplicate detection. Shipped in PRs #179 and #183 (2026-10-29); gaps_found: TEI never contacted live.
+- [x] **Phase 65: Doc Watch** - documentation changes reach the docs plane on their own: git hooks, a filesystem watcher, a reconcile timer and manifest-backed state. Shipped in PR #186 (2026-10-30); gaps_found: no reconcile timer exists, and the planning state is not yet in the manifest; operator installs the triggers (none is installed).
+- [x] **Phase 66: Docs Reflect** - retrieval telemetry, feedback, authority scores, supersession, digests and gap detection make the docs RAG learn from use. Shipped in PR #184 (2026-10-30); PARTIAL.
+- [x] **Phase 67: Live Steering GA** - a steering command and view, cross-session context digests, brief sections, durable session state, the `checkpoint_hint` reader and a long poll. Shipped in PRs #180 and #192 (2026-10-29 and 2026-10-30); PARTIAL in delivery: the steering and context hooks are not installed, so no session reads its hints.
+- [x] **Phase 68: Worktree Fleet** - a worktree registry found through git, safe pruning, conflict forecasts, a disk floor and brief warnings for overlapping sessions. Shipped in PRs #178, #185, #188, #189, #190 and #193 (2026-10-29 and 2026-10-30); gaps_found, PARTIAL: no scheduler runs the fleet report; the dispatcher ignores `SUBSTRATE_WORKTREE_ROOTS`; the guard has no caller.
+- [x] **Phase 69: Doc Proofs** - a Merkle root over the corpus recorded in the ledger so the hourly devnet anchor covers it, with inclusion proofs and verification. Shipped in PR #181 (2026-10-29); gaps_found: no anchored hour yet.
+- [x] **Phase 70: Docs SLO and eval** - a self-supervised golden set, an offline CI harness, SLO metrics, a docs lint and the operator runbook. Shipped in PR #182 (2026-10-30); gaps_found: the baseline is self-supervised and reads 1.0 on every metric, so it cannot show retrieval quality.
 
 ## Phase Details
 
@@ -1037,6 +1037,8 @@ Plans:
 
 **Goal**: The documentation of every repository the owner keeps (the clones on the VPS, the GitHub organisations, the Greptile knowledge bases) is discovered, classified, de-duplicated and recorded in one manifest, and a bulk path puts new and changed documents into the docs plane with provenance and removes the ones that disappeared.
 
+**Status**: Shipped in PR #177 (2026-10-29). gaps_found: no live ingest; criteria 1, 3 and 4 partial. Record: [63-VERIFICATION.md](phases/63-corpus-atlas/63-VERIFICATION.md).
+
 **Depends on**: none (v1.6 docs plane on main). Phases 64-66, 69 and 70 build on its manifest.
 
 **Repos**: agent-substrate (new package `packages/corpus`; `packages/cli/src/corpus`; `packages/mcp-server/src` corpus module, routes, tools, a migration step; `docs/corpus.md`, `docs/runbooks/corpus-ingest.md`)
@@ -1061,6 +1063,8 @@ Plans:
 
 **Goal**: Substrate itself can embed text with the owner's TEI service, cheaply and safely, and uses it to find near-duplicate documents.
 
+**Status**: Shipped in PRs #179 (2026-10-29) and #183 (2026-10-29). gaps_found: TEI never contacted live; criterion 3 partial. Record: [64-VERIFICATION.md](phases/64-embedding-fabric/64-VERIFICATION.md).
+
 **Depends on**: none for the client; Phase 63 for the planner hook.
 
 **Repos**: agent-substrate (`packages/mcp-server/src/planes/tei.ts`, `packages/mcp-server/src/cache.ts` class `emb`, `packages/mcp-server/src/fabric`, `packages/corpus/src/similarity.ts`, docs)
@@ -1079,6 +1083,8 @@ Plans:
 ### Phase 65: Doc Watch
 
 **Goal**: When documentation changes in a registered repository, the docs plane follows without anyone running a command, and a restart never re-ingests what has not changed.
+
+**Status**: Shipped in PR #186 (2026-10-30). gaps_found: criteria 2 and 3 PARTIAL; no reconcile timer exists. Operator-gated: installing the git hooks, the watch service and the sweep timer. Record: [65-VERIFICATION.md](phases/65-doc-watch/65-VERIFICATION.md).
 
 **Depends on**: Phase 63 (manifest, plan and ingest).
 
@@ -1100,6 +1106,8 @@ Plans:
 
 **Goal**: The docs RAG improves with use, the way Hindsight does: it remembers what was retrieved, learns what helped, prefers the current document to the one it replaced, writes digests of what it knows and reports what it could not answer.
 
+**Status**: Shipped in PR #184 (2026-10-30). PARTIAL; see the milestone audit.
+
 **Depends on**: Phase 63 (manifest); Phase 64 (optional semantic signals).
 
 **Repos**: agent-substrate (`packages/corpus/src/authority.ts`, `packages/corpus/src/reflect.ts`, `packages/mcp-server/src` retrieval telemetry, `docs_feedback`, re-rank, a migration step, docs)
@@ -1119,6 +1127,8 @@ Plans:
 ### Phase 67: Live Steering GA
 
 **Goal**: Live Steering is something an operator can see and use, and a session can learn what the other sessions of its repository are doing.
+
+**Status**: Shipped in PRs #180 (2026-10-29) and #192 (2026-10-30). PARTIAL in delivery: the steering and context hooks are not installed; delivery to a real session has not been shown. Record: [67-VERIFICATION.md](phases/67-live-steering-ga/67-VERIFICATION.md).
 
 **Depends on**: none (v1.6 steering and planning planes on main).
 
@@ -1141,6 +1151,8 @@ Plans:
 
 **Goal**: Many sessions can work in git worktrees of the same repository without filling the disk, losing track of which worktree is whose, or finding out about conflicts at merge time.
 
+**Status**: Shipped in PRs #178 (2026-10-29), #185, #188, #189, #190 and #193 (2026-10-30). PARTIAL (criterion 1): the dispatcher ignores `SUBSTRATE_WORKTREE_ROOTS`. Also open: no scheduler runs the fleet report; merge-back does not close the check-then-note race; a repository with no origin trusts local ancestry; the guard has no caller. Record: [68-VERIFICATION.md](phases/68-worktree-fleet/68-VERIFICATION.md).
+
 **Depends on**: Phase 67 for the brief integration (criterion 6) only.
 
 **Repos**: agent-substrate (new package `packages/fleet`; `packages/cli/src/worktree`; `packages/collectors/src/worktree-graph.ts`; `packages/mcp-server/src` registry routes and a migration step; `packages/dispatcher` disk floor; docs)
@@ -1162,6 +1174,8 @@ Plans:
 
 **Goal**: Which documents the corpus held, and when, can be proved from the Solana devnet anchor the ledger already writes every hour.
 
+**Status**: Shipped in PR #181 (2026-10-29). gaps_found: no anchored hour yet; the anchor job, its key and its timer are operator-gated. Record: [69-VERIFICATION.md](phases/69-doc-proofs/69-VERIFICATION.md).
+
 **Depends on**: Phase 63 (manifest). The anchor job, its funded key and its timer stay operator-gated.
 
 **Repos**: agent-substrate (`packages/corpus/src/merkle.ts`, `packages/cli/src/corpus`, `packages/mcp-server/src` proof route and event, docs)
@@ -1180,6 +1194,8 @@ Plans:
 ### Phase 70: Docs SLO and eval
 
 **Goal**: The docs plane's quality is measured, guarded in CI and operable by someone who did not build it.
+
+**Status**: Shipped in PR #182 (2026-10-30) and PR #176. gaps_found: criteria 3 and 5 PARTIAL; the baseline reads 1.0 on every metric. Record: [70-VERIFICATION.md](phases/70-docs-slo-and-eval/70-VERIFICATION.md). Operator runbook: `docs/runbooks/docs-rag-operations.md`.
 
 **Depends on**: Phase 63; Phases 65 and 66 for the metrics they emit.
 
@@ -1249,11 +1265,11 @@ Plans:
 | 60. Eternal Memory Knowledge Nexus | v1.6 | 0/0 | Complete (PRs #128, #129); criteria 1-4 met in repo; bucket use operator-gated | 2026-10-28 |
 | 61. Session rollback to an exact chat moment with file revert | v1.6 | 0/0 | Merged (PRs #128, #129, #146, #148); criterion 3 partial: no host installs or fires the hook until an operator installs the printed configuration (ADR 0007, D55-4); criteria 1, 2, 4, 5, 6 met; no live rehearsal | - |
 | 62. Soak, runbooks and v1.6 close | v1.6 | 0/0 | Complete (PR #130); milestone completion is an operator decision | 2026-10-28 |
-| 63. Corpus Atlas | v1.7 | 0/0 | Planned | - |
-| 64. Embedding fabric | v1.7 | 0/0 | Planned | - |
-| 65. Doc Watch | v1.7 | 0/0 | Planned | - |
-| 66. Docs Reflect | v1.7 | 0/0 | Planned | - |
-| 67. Live Steering GA | v1.7 | 0/0 | Planned | - |
-| 68. Worktree Fleet | v1.7 | 0/0 | Planned | - |
-| 69. Doc Proofs | v1.7 | 0/0 | Planned | - |
-| 70. Docs SLO and eval | v1.7 | 0/0 | Planned | - |
+| 63. Corpus Atlas | v1.7 | 0/0 | Shipped (PR #177); gaps_found: no live ingest | 2026-10-29 |
+| 64. Embedding fabric | v1.7 | 0/0 | Shipped (PRs #179, #183); gaps_found: TEI never contacted live | 2026-10-29 |
+| 65. Doc Watch | v1.7 | 0/0 | Shipped (PR #186); gaps_found: no reconcile timer; operator installs the triggers | 2026-10-30 |
+| 66. Docs Reflect | v1.7 | 0/0 | Shipped (PR #184); PARTIAL | 2026-10-30 |
+| 67. Live Steering GA | v1.7 | 0/0 | Shipped (PRs #180, #192); PARTIAL in delivery: hooks not installed | 2026-10-30 |
+| 68. Worktree Fleet | v1.7 | 0/0 | Shipped (PRs #178, #185, #188, #189, #190, #193); PARTIAL: no report scheduler; dispatcher ignores roots variable | 2026-10-30 |
+| 69. Doc Proofs | v1.7 | 0/0 | Shipped (PR #181); gaps_found: no anchored hour | 2026-10-29 |
+| 70. Docs SLO and eval | v1.7 | 0/0 | Shipped (PR #182); gaps_found: baseline self-supervised, reads 1.0 | 2026-10-30 |

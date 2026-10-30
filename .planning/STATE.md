@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.7
 milestone_name: Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet
-status: executing
-stopped_at: "Run 14: milestone v1.7 defined (phases 63-70); implementation waves in progress, see the Run 14 record"
-last_updated: "2026-10-29T13:00:00.000Z"
-last_activity: 2026-10-29
-last_activity_desc: "Run 14: milestone v1.7 defined from the owner's eight-feature request"
+status: "phases 63-70 shipped via PRs #177-#193; milestone audit written; owner decisions open"
+stopped_at: "Phases 63-70 shipped on main (PRs #177-#186, follow-ups #188-#193; 2026-10-29 and 2026-10-30); audit at milestones/v1.7-MILESTONE-AUDIT.md; milestone not complete"
+last_updated: "2026-10-30T12:01:23.000Z"
+last_activity: 2026-10-30
+last_activity_desc: "Milestone v1.7 audit written: phases 63-70 shipped; 66, 67 and 68 PARTIAL; owner decisions open"
 state_head: 9d3f20851a85
 progress:
   total_phases: 8
-  completed_phases: 0
-  total_plans: 8
+  completed_phases: 8
+  total_plans: 0
   completed_plans: 0
-  percent: 0
-current_phase: 63
-current_phase_name: corpus-atlas
+  percent: 100
+current_phase: 70
+current_phase_name: docs-slo-and-eval
 ---
 
 # State
