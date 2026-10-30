@@ -1239,7 +1239,7 @@ Plans:
 
 **Success Criteria** (what must be TRUE):
 
-  1. A surface that does not own target session S is refused, with no write and no acknowledgement, from acknowledge, wait and listen on S. Queue writes stay operator-only for every caller.
+  1. A surface that does not own target session S is refused, with no write and no acknowledgement, from every read of S: `/steering/directives`, `/steering/wait`, `steering_list` and the `listen` path. Acknowledge and queue writes stay operator-only for every caller.
   2. The operator surface keeps cross-session access, and each refusal is an audited event.
   3. The steering baseline on `origin/main` 9b482207 (575 pass, 7 skip, 0 fail across the steering and session suites) still passes.
   4. `session_context` still returns the redacted digest of other sessions in the same repository, and its existing test still passes.
