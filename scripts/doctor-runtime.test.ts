@@ -6,6 +6,7 @@ import {
 	compareWorktreeDisk,
 	optionsFromEnv,
 	worktreeOptionsFromEnv,
+	compareCheckout,
 	compareDisk,
 	compareLegacyKey,
 	compareRedis,
@@ -27,6 +28,7 @@ import {
 	LEGACY_KEYS,
 	loadPolicy,
 	main,
+	parseArgs,
 	parseBytes,
 	parseDfAvailableKb,
 	parseMeminfoSwap,
@@ -308,6 +310,7 @@ function fixtureHost(input: {
 	dfAvailableKb?: number;
 	envFile?: string;
 	vmstat?: [string, string];
+	git?: { branch: string; originBranch: string | null; originSha: string | null; behind: number | null; upstream?: string | null };
 }): FixtureHost {
 	const calls: string[][] = [];
 	const vmstat = input.vmstat ?? ["pswpin 10\npswpout 20\n", "pswpin 10\npswpout 20\n"];
@@ -341,6 +344,20 @@ function fixtureHost(input: {
 				return { code: set ? 0 : 1, out: "" };
 			}
 			if (cmd === "lsblk") return { code: 0, out: "vda bfq\n" };
+			if (cmd === "git" && input.git !== undefined) {
+				const git = input.git;
+				const verb = argv[3];
+				if (verb === "rev-parse") {
+					if (argv[5] !== "@{u}") return { code: 0, out: `${git.branch}\n` };
+					return git.upstream ? { code: 0, out: `${git.upstream}\n` } : { code: 128, out: "fatal: no upstream configured\n" };
+				}
+				if (verb === "ls-remote") {
+					if (git.originSha === null) return { code: 128, out: "fatal: unable to access 'origin'\n" };
+					const ref = git.originBranch === null ? "" : `ref: refs/heads/${git.originBranch}\tHEAD\n`;
+					return { code: 0, out: `${ref}${git.originSha}\tHEAD\n` };
+				}
+				if (verb === "rev-list") return git.behind === null ? { code: 128, out: "fatal: bad revision\n" } : { code: 0, out: `${git.behind}\n` };
+			}
 			return null;
 		},
 		readText(path) {
@@ -635,5 +652,146 @@ describe("worktree disk row", () => {
 		expect(optionsFromEnv({ SUBSTRATE_WORKTREE_ROOTS: "" }).worktrees).toBeUndefined();
 		expect(optionsFromEnv({ SUBSTRATE_WORKTREE_ROOTS: "/a:/b" }).worktrees).toMatchObject({ roots: ["/a", "/b"], minFreeGb: 5 });
 		expect(worktreeOptionsFromEnv({ SUBSTRATE_WORKTREE_ROOTS: "/a", SUBSTRATE_WORKTREE_MIN_FREE_GB: "12" }).worktrees?.minFreeGb).toBe(12);
+	});
+});
+
+describe("checkout", () => {
+	const policy = loadPolicy(infraDir);
+	const DIR = "/srv/agent-substrate";
+	const SHA = "a".repeat(40);
+	type GitFixture = NonNullable<Parameters<typeof fixtureHost>[0]["git"]>;
+	const runWith = async (git: GitFixture, checkouts: readonly string[] = [DIR]) => {
+		const fx = fixtureHost({ policy, showByUnit: asDeclared(policy), redis: GREEN_REDIS, envFile: "SUBSTRATE_PG_URL=x\n", git });
+		const rows = await gatherRows(policy, fx.host, { minFreeGb: 5, maxSwapPagesPerSecond: 0, envFile: "/etc/substrate/substrate.env", checkouts });
+		return { rows, calls: fx.calls, checkout: rows.filter((r) => r.class === "checkout") };
+	};
+
+	test("on the default branch and up to date, both rows are ok and the run is green", async () => {
+		const run = await runWith({ branch: "main", originBranch: "main", originSha: SHA, behind: 0 });
+		expect(run.checkout.map((r) => [r.check, r.status])).toEqual([
+			[`checkout ${DIR} branch`, "ok"],
+			[`checkout ${DIR} behind`, "ok"],
+		]);
+		expect(run.checkout[1]?.actual).toBe("0 commits behind origin/main");
+		expect(exitCode(run.rows)).toBe(0);
+	});
+
+	test("behind origin's head warns with the actual count, and counts from the head the remote named", async () => {
+		const run = await runWith({ branch: "main", originBranch: "main", originSha: SHA, behind: 3 });
+		expect(run.checkout[0]).toMatchObject({ status: "ok" });
+		expect(run.checkout[1]).toMatchObject({ status: "warn", actual: "3 commits behind origin/main" });
+		expect(run.calls).toContainEqual(["git", "-C", DIR, "rev-list", "--count", `HEAD..${SHA}`]);
+		expect(exitCode(run.rows)).toBe(0);
+	});
+
+	test("on another branch it warns and names that branch, and never drifts", async () => {
+		const run = await runWith({ branch: "feature/r15", originBranch: "main", originSha: SHA, behind: 0 });
+		expect(run.checkout[0]).toMatchObject({ status: "warn", expected: "on main", actual: "on feature/r15" });
+		expect(run.checkout.some((r) => r.status === "drift")).toBe(false);
+		expect(exitCode(run.rows)).toBe(0);
+	});
+
+	test("a head not in local history leaves behind unknown, and the branch row still reads", async () => {
+		const run = await runWith({ branch: "main", originBranch: "main", originSha: SHA, behind: null });
+		expect(run.checkout[0]).toMatchObject({ status: "ok" });
+		expect(run.checkout[1]).toMatchObject({ status: "unknown" });
+		expect(run.checkout[1]?.hint).toContain("never fetches");
+	});
+
+	test("an origin with no HEAD line leaves behind unknown, not drift, and the branch row still reads", () => {
+		const fx = fixtureHost({ policy, git: { branch: "main", originBranch: "main", originSha: null, behind: 0 } });
+		const rows = compareCheckout(DIR, fx.host, { defaultBranch: "main", sha: null });
+		expect(rows[0]).toMatchObject({ status: "ok" });
+		expect(rows[1]).toMatchObject({ status: "unknown" });
+		expect(rows.some((r) => r.status === "drift")).toBe(false);
+	});
+
+	test("an origin default branch that cannot be read is one unknown row", async () => {
+		const run = await runWith({ branch: "main", originBranch: null, originSha: SHA, behind: 0 });
+		expect(run.checkout).toEqual([expect.objectContaining({ check: `checkout ${DIR}`, status: "unknown" })]);
+	});
+
+	test("a detached HEAD warns, and every git call is fixed argv on that directory", () => {
+		const fx = fixtureHost({ policy, git: { branch: "HEAD", originBranch: "main", originSha: SHA, behind: 0 } });
+		const rows = compareCheckout(DIR, fx.host, { defaultBranch: "main", sha: SHA });
+		expect(rows[0]).toMatchObject({ status: "warn", actual: "detached HEAD" });
+		expect(fx.calls.length).toBeGreaterThan(0);
+		expect(fx.calls.every((c) => c[0] === "git" && c[1] === "-C" && c[2] === DIR)).toBe(true);
+	});
+
+	test("with no checkouts option there are no checkout rows and no git call", async () => {
+		const fx = fixtureHost({ policy, showByUnit: asDeclared(policy), redis: GREEN_REDIS, envFile: "SUBSTRATE_PG_URL=x\n", git: { branch: "main", originBranch: "main", originSha: SHA, behind: 0 } });
+		const rows = await gatherRows(policy, fx.host, { minFreeGb: 5, maxSwapPagesPerSecond: 0, envFile: "/etc/substrate/substrate.env" });
+		expect(rows.some((r) => r.class === "checkout")).toBe(false);
+		expect(fx.calls.some((c) => c[0] === "git")).toBe(false);
+	});
+
+	test("the checkout rows are the only change: every other row matches a run without the option", async () => {
+		const git = { branch: "feature/r15", originBranch: "main", originSha: SHA, behind: 2 };
+		const without = await runWith(git, []);
+		const withRows = await runWith(git);
+		expect(withRows.rows.filter((r) => r.class !== "checkout")).toEqual(without.rows);
+		expect(withRows.checkout.length).toBe(2);
+	});
+
+	test("one checkout reads origin once: one ls-remote per checkout, not one for the name and one for the commit", async () => {
+		const git = { branch: "main", originBranch: "main", originSha: SHA, behind: 0 };
+		const one = await runWith(git, [DIR]);
+		expect(one.calls.filter((c) => c[3] === "ls-remote")).toHaveLength(1);
+		const two = await runWith(git, [DIR, "/srv/other"]);
+		expect(two.calls.filter((c) => c[3] === "ls-remote")).toHaveLength(2);
+	});
+
+	test("a detached checkout's pull advice says it is detached and names the branch to select first", () => {
+		const fx = fixtureHost({ policy, git: { branch: "HEAD", originBranch: "main", originSha: SHA, behind: 2 } });
+		const rows = compareCheckout(DIR, fx.host, { defaultBranch: "main", sha: SHA });
+		expect(rows[1]).toMatchObject({ status: "warn", actual: "2 commits behind origin/main" });
+		expect(rows[1]?.hint).toContain("the checkout is detached");
+		expect(rows[1]?.hint).toContain("select main first (git switch main)");
+	});
+
+	test("a feature branch not tracking origin's default is told to select it first; one tracking it gets the pull", () => {
+		const feature = fixtureHost({ policy, git: { branch: "feature/r15", originBranch: "main", originSha: SHA, behind: 2, upstream: "origin/feature/r15" } });
+		const featureRows = compareCheckout(DIR, feature.host, { defaultBranch: "main", sha: SHA });
+		expect(featureRows[1]?.hint).toContain("the checkout is on feature/r15, which does not track origin/main");
+		expect(featureRows[1]?.hint).toContain("select main first (git switch main)");
+		expect(featureRows[1]?.hint).not.toContain("the checkout is detached");
+		const tracking = fixtureHost({ policy, git: { branch: "dev", originBranch: "main", originSha: SHA, behind: 2, upstream: "origin/main" } });
+		const trackingRows = compareCheckout(DIR, tracking.host, { defaultBranch: "main", sha: SHA });
+		expect(trackingRows[1]?.hint).toBe("fast-forward it with git pull --ff-only; the doctor never fetches or pulls");
+	});
+});
+
+describe("cli --checkout", () => {
+	const policy = loadPolicy(infraDir);
+	const DIR = "/srv/agent-substrate";
+	const git = { branch: "main", originBranch: "main", originSha: "a".repeat(40), behind: 2 };
+
+	test("repeats, needs a directory, and defaults to none", () => {
+		expect(parseArgs([])).toMatchObject({ checkouts: [] });
+		expect(parseArgs(["--checkout", "/a", "--checkout", "/b"])).toMatchObject({ checkouts: ["/a", "/b"] });
+		expect(parseArgs(["--checkout"])).toEqual({ usage: "--checkout needs a directory" });
+		expect(parseArgs(["--checkout", "--json"])).toEqual({ usage: "--checkout needs a directory" });
+	});
+
+	test("with --checkout main reports the branch and behind rows; without it there are none and no git call", async () => {
+		const out: string[] = [];
+		const io = { stdout: (t: string) => out.push(t), stderr: () => {}, post: async () => true };
+		const base = { policy, showByUnit: asDeclared(policy), redis: GREEN_REDIS, envFile: "SUBSTRATE_PG_URL=x\n", git };
+		const withFlag = fixtureHost(base);
+		await main(["--infra", infraDir, "--json", "--checkout", DIR], withFlag.host, {}, io);
+		const withRows = JSON.parse(out.join("")) as { rows: Row[] };
+		const rows = withRows.rows.filter((r) => r.class === "checkout");
+		expect(rows.map((r) => [r.check, r.status])).toEqual([
+			[`checkout ${DIR} branch`, "ok"],
+			[`checkout ${DIR} behind`, "warn"],
+		]);
+		expect(rows[1]?.actual).toBe("2 commits behind origin/main");
+		out.length = 0;
+		const bare = fixtureHost(base);
+		await main(["--infra", infraDir, "--json"], bare.host, {}, io);
+		const bareRows = JSON.parse(out.join("")) as { rows: Row[] };
+		expect(bareRows.rows.some((r) => r.class === "checkout")).toBe(false);
+		expect(bare.calls.some((c) => c[0] === "git")).toBe(false);
 	});
 });
