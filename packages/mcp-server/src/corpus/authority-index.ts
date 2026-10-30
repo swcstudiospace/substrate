@@ -127,16 +127,30 @@ export class AuthorityIndex {
 	 */
 	async lookup(): Promise<AuthorityLookup | null> {
 		if (this.deps.store() === null) return null;
-		const loads = Promise.all([this.ensureManifest(), this.ensureFeedback()]);
+		// Each load's promise resolves when that load settles. A clear during it installs one follow-up and does not
+		// chain it: the completed promise is released, and this lookup joins the follow-up while its budget remains.
 		if (this.deps.now() >= this.noWaitUntil) {
-			const expired = Promise.withResolvers<"timeout">();
-			const timer = setTimeout(() => expired.resolve("timeout"), this.deps.budgetMs ?? LOOKUP_BUDGET_MS);
-			timer.unref();
-			try {
-				const outcome = await Promise.race([loads.then(() => "loaded" as const), expired.promise]);
-				if (outcome === "timeout") this.noWaitUntil = this.deps.now() + VERSION_CHECK_MS;
-			} finally {
-				clearTimeout(timer);
+			const deadline = this.deps.now() + (this.deps.budgetMs ?? LOOKUP_BUDGET_MS);
+			let join = true;
+			while (join && this.deps.now() < deadline) {
+				const manifest = this.ensureManifest();
+				const feedback = this.ensureFeedback();
+				const expired = Promise.withResolvers<"timeout">();
+				const timer = setTimeout(() => expired.resolve("timeout"), deadline - this.deps.now());
+				timer.unref();
+				try {
+					const outcome = await Promise.race([Promise.all([manifest, feedback]).then(() => "loaded" as const), expired.promise]);
+					if (outcome === "timeout") {
+						this.noWaitUntil = this.deps.now() + VERSION_CHECK_MS;
+						join = false;
+					} else {
+						const newerManifest = this.loading !== null && this.loading !== manifest;
+						const newerFeedback = this.loadingFeedback !== null && this.loadingFeedback !== feedback;
+						join = newerManifest || newerFeedback;
+					}
+				} finally {
+					clearTimeout(timer);
+				}
 			}
 		}
 		const snapshot = this.snapshot;
@@ -169,15 +183,13 @@ export class AuthorityIndex {
 
 	/** One manifest load. When it settles, a clear that arrived during it starts exactly one follow-up. */
 	private startManifest(): Promise<void> {
-		// The promise a lookup joined does not resolve until a follow-up owed by a clear during this load has settled too.
-		// Otherwise the search returns the empty snapshot the clear dropped, with time still left in its budget.
-		const load = this.refreshManifest().then(async () => {
+		// Resolves when this load settles. A follow-up is installed and not awaited, so a completed load is not retained
+		// on a chain. lookup joins that follow-up itself, within the budget it already has.
+		const load = this.refreshManifest().finally(() => {
 			if (this.loading !== load) return;
 			if (this.manifestFollowUp) {
 				this.manifestFollowUp = false;
-				const next = this.startManifest();
-				this.loading = next;
-				await next;
+				this.loading = this.startManifest();
 				return;
 			}
 			this.loading = null;
@@ -218,13 +230,11 @@ export class AuthorityIndex {
 
 	/** One feedback load. When it settles, a clear that arrived during it starts exactly one follow-up. */
 	private startFeedback(): Promise<void> {
-		const load = this.refreshFeedback().then(async () => {
+		const load = this.refreshFeedback().finally(() => {
 			if (this.loadingFeedback !== load) return;
 			if (this.feedbackFollowUp) {
 				this.feedbackFollowUp = false;
-				const next = this.startFeedback();
-				this.loadingFeedback = next;
-				await next;
+				this.loadingFeedback = this.startFeedback();
 				return;
 			}
 			this.loadingFeedback = null;
