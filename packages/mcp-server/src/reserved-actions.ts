@@ -8,10 +8,12 @@
  * (`Substrate.emit` from `session_checkpoint`, `session_rollback_commit` and `memoryForget`, which do not pass this check) or,
  * for the signer rotation and the re-anchor record, by an operator; a tokened caller that is not an operator is refused, and an operator is held to its
  * own authenticated surface (the surface `operatorSurfaces` reads rotations and re-anchors from).
+ * The docs canary's report (`docs.canary`) is the one host-job action: only the `substrate` token acting as itself may write it.
  *
  * ONE list: add an action here when a reader starts to treat it as authoritative.
  */
 import { ANCHOR_SIGNER_ROTATE_ACTION } from "@substrate/ledger";
+import { DOCS_CANARY_ACTION, DOCS_CANARY_SURFACE } from "./corpus/slo.ts";
 import { CORPUS_ROOT_ACTION } from "./corpus/root.ts";
 import { FORGET_ACTION } from "./memory-forget.ts";
 import { ANCHOR_REANCHOR_ACTION } from "./reanchor-plan.ts";
@@ -26,8 +28,16 @@ export const RESERVED_NOTE_ACTIONS: ReadonlySet<string> = new Set([
 	SESSION_ROLLBACK_REFUSED_ACTION,
 	FORGET_BATCH_ACTION,
 	FORGET_ACTION,
+	DOCS_CANARY_ACTION,
 	CORPUS_ROOT_ACTION,
 ]);
+
+/**
+ * The reserved actions a host job writes with its own surface token rather than an operator: action to the one surface that may
+ * write it. The `substrate` surface is never an operator (`isOperator` in `config.ts`), so the operator rule cannot cover it. The
+ * docs canary's readings feed the recall gauge and the `corpus` fabric row, so a breach must not be hideable by any other caller.
+ */
+const HOST_JOB_ACTIONS: ReadonlyMap<string, string> = new Map([[DOCS_CANARY_ACTION, DOCS_CANARY_SURFACE]]);
 
 /** The reserved action a payload names, or null. `payload` is whatever the caller sent, so anything that is not an object names none. */
 export function reservedActionOf(payload: unknown): string | null {
@@ -45,6 +55,14 @@ export function reservedActionOf(payload: unknown): string | null {
 export function reservedEmitRefusal(input: { payload: unknown; surface: string; callerSurface: string | null; isOperator: boolean }): string | null {
 	const action = reservedActionOf(input.payload);
 	if (action === null) return null;
+	// A host job's report: its own token, acting as itself, is the one authority. An operator is not (its event would carry no
+	// weight with the reader), except a bare local run, which has no token to check.
+	const hostJob = HOST_JOB_ACTIONS.get(action);
+	if (hostJob !== undefined) {
+		if (input.callerSurface === hostJob && input.surface === hostJob) return null;
+		if (input.callerSurface === null && input.isOperator) return null;
+		return `reserved-action: "${action}" is written by the substrate itself or by the ${hostJob} host job's own token, so this token cannot emit it; nothing was written`;
+	}
 	if (!input.isOperator) return `reserved-action: "${action}" is written by the substrate itself or by an operator, so this token cannot emit it; nothing was written`;
 	if (input.callerSurface !== null && input.surface !== input.callerSurface) {
 		return `reserved-action: "${action}" is attributed to the operator's own surface ${input.callerSurface}, not ${input.surface}; nothing was written`;

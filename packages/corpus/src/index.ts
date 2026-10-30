@@ -8,3 +8,7 @@ export * from "./scan.ts";
 export * from "./similarity.ts";
 export * from "./adapters/greptile-export.ts";
 export * from "./adapters/github.ts";
+export * from "./eval.ts";
+export * from "./eval-lexical.ts";
+export * from "./eval-live.ts";
+export * from "./slo.ts";

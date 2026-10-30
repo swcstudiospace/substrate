@@ -6,6 +6,7 @@
  *   substrate corpus plan   (scan options) [--server URL] [--neardup [--threshold N] [--neardup-max N]]
  *   substrate corpus ingest (plan options) [--execute] [--batch-docs N] [--batch-bytes N]
  *   substrate corpus status [--server URL] [--json]
+ *   substrate corpus eval [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--max-queries N] [--server URL] [--json]
  *   substrate corpus prove  --repo R --path P [--out FILE] [--server URL]
  *   substrate corpus verify FILE [--online] [--server URL] [--json]
  *
@@ -24,7 +25,9 @@ import {
 	DEFAULT_GITHUB_MAX_REPOS,
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_TIER,
+	LIVE_MAX_QUERIES,
 	MAX_INGEST_DOCUMENTS,
+	loadSloThresholds,
 	MAX_NEARDUP_ITEMS,
 	MAX_NEARDUP_THRESHOLD,
 	MIN_NEARDUP_THRESHOLD,
@@ -40,6 +43,7 @@ import {
 } from "@substrate/corpus";
 import { createBodyStore, type BodyStore } from "./bodies.ts";
 import { createCorpusClient, isProofResponse, type ClientError, type CorpusClient } from "./client.ts";
+import { evaluateCorpus, readEvalDocuments } from "./eval.ts";
 import { executeIngest } from "./ingest.ts";
 import { collectInventory, type Inventory, type InventoryOptions } from "./inventory.ts";
 import { neardupRequest, prefixReaderOf, selectNeardupItems } from "./neardup.ts";
@@ -52,6 +56,7 @@ export const USAGE =
 	"substrate corpus plan [scan options] [--server URL] [--json] [--neardup [--threshold 0.5-1] [--neardup-max N]]   (--neardup is advisory: nothing is dropped on it; N is at most 1000)\n" +
 	"substrate corpus ingest [plan options] [--execute] [--batch-docs N] [--batch-bytes N]   (a dry run without --execute; --batch-docs is capped at the server limit of 200)\n" +
 	"substrate corpus status [--server URL] [--json]\n" +
+	"substrate corpus eval [--root DIR]... [--tier 1|2|3] [--max-bytes N] [--max-queries N] [--server URL] [--json]   (the golden set of the local scan; without --server it only counts the questions; exit 1 when recall at 5 is under SUBSTRATE_DOCS_SLO_RECALL5 or the run could not be scored in full; a scan that skipped a repository is listed and labelled partial)\n" +
 	"substrate corpus prove --repo R --path P [--out FILE] [--server URL]   (prints the inclusion proof of one document)\n" +
 	"substrate corpus verify FILE [--online] [--server URL] [--json]   (0 valid, 1 invalid, 2 usage; offline unless --online)\n";
 
@@ -93,6 +98,7 @@ const SPECS: Record<string, FlagSpec> = {
 	plan: { values: [...SCAN_VALUES, "server", "threshold", "neardup-max"], bools: ["json", "neardup", "help"] },
 	ingest: { values: [...SCAN_VALUES, "server", "batch-docs", "batch-bytes"], bools: ["json", "execute", "help"] },
 	status: { values: ["server"], bools: ["json", "help"] },
+	eval: { values: ["root", "tier", "max-bytes", "max-queries", "server"], bools: ["json", "help"] },
 	prove: { values: ["repo", "path", "out", "server"], bools: ["help"] },
 	verify: { values: ["server"], bools: ["json", "online", "help"], positionals: 1 },
 };
@@ -271,6 +277,7 @@ export async function runCorpus(argv: string[], deps: CorpusDeps): Promise<numbe
 			if (typeof neardup === "string") return usage(neardup);
 			return await plan(args, parsed, deps, neardup);
 		}
+		if (sub === "eval") return await evaluate(args, parsed, deps);
 		const docsFlag = last(parsed, "batch-docs");
 		const bytesFlag = last(parsed, "batch-bytes");
 		const batchDocs = docsFlag === undefined ? positiveInt(deps.env.SUBSTRATE_CORPUS_BATCH_DOCS) ?? DEFAULT_BATCH_DOCS : positiveInt(docsFlag);
@@ -304,6 +311,48 @@ async function status(parsed: Parsed, deps: CorpusDeps): Promise<number> {
 	}
 	deps.out(parsed.bools.has("json") ? `${JSON.stringify(result.value, null, 2)}\n` : renderStatus(result.value));
 	return 0;
+}
+
+/** `corpus eval`: the golden set of the local scan, asked of the server when `--server` names one. Read-only on both sides. */
+async function evaluate(args: ScanArgs, parsed: Parsed, deps: CorpusDeps): Promise<number> {
+	let maxQueries = LIVE_MAX_QUERIES;
+	const queriesFlag = last(parsed, "max-queries");
+	if (queriesFlag !== undefined) {
+		const value = positiveInt(queriesFlag);
+		if (value === null) {
+			deps.err("[substrate] corpus eval: --max-queries must be a positive integer\n");
+			return 2;
+		}
+		// The same ceiling the script and the canary ask under, so a typo cannot turn a read into thousands of searches.
+		maxQueries = Math.min(value, LIVE_MAX_QUERIES);
+		if (maxQueries < value) deps.err(`[substrate] corpus eval: ${value} questions is above the limit; asking ${maxQueries}\n`);
+	}
+	const serverFlag = last(parsed, "server");
+	if (serverFlag !== undefined && !/^https?:\/\/\S+$/.test(serverFlag)) {
+		deps.err("[substrate] corpus eval: --server must be an http(s) URL\n");
+		return 2;
+	}
+	if (serverFlag !== undefined && deps.token === undefined) {
+		deps.err("[substrate] corpus eval: --server needs a token (SUBSTRATE_TOKEN, SUBSTRATE_TOKEN_FILE or the tokens directory)\n");
+		return 2;
+	}
+	const inventory = await collectInventory(inventoryOptions(args, deps, undefined));
+	const documents = readEvalDocuments(inventory, deps.readFile ?? ((path) => readFileSync(path)));
+	const fetchImpl = deps.fetchImpl ?? fetch;
+	const outcome = await evaluateCorpus({
+		documents,
+		maxQueries,
+		thresholds: loadSloThresholds(deps.env),
+		server:
+			serverFlag === undefined || deps.token === undefined
+				? null
+				: { url: serverFlag.replace(/\/+$/, ""), token: deps.token, fetchImpl: (input, init) => fetchImpl(input, init) },
+		json: parsed.bools.has("json"),
+		now: () => performance.now(),
+	});
+	deps.out(outcome.text);
+	if (outcome.warning !== "") deps.err(outcome.warning);
+	return outcome.code;
 }
 
 async function prove(parsed: Parsed, deps: CorpusDeps): Promise<number> {

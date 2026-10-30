@@ -179,6 +179,7 @@ import type { AnchorVerifier } from "./corpus/anchor.ts";
 import { CorpusRootKeeper, type RootClock } from "./corpus/root.ts";
 import type { CorpusStore } from "./corpus/store.ts";
 import { shortRoot, type CorpusAnchorResponse, type CorpusIngestResponse, type CorpusNeardupResponse, type CorpusPlanResponse, type CorpusProofResponse, type CorpusRootResponse, type CorpusStatusResponse } from "@substrate/corpus";
+import { CorpusSloState, DOCS_CANARY_ACTION, DOCS_CANARY_SURFACE, type CorpusRefresh } from "./corpus/slo.ts";
 import { RailwayClient } from "./railway.ts";
 import { nodePlanningFs } from "./planning/fs.ts";
 import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
@@ -200,7 +201,7 @@ import { composeLiveSections, type BriefSteeringInput } from "./brief-sessions.t
 import { assembleSessionContext, HANDOFF_READ_LIMIT, OPEN_GRAPHS_READ_LIMIT, planningChangedCount, SESSION_CONTEXT_BUDGET_MS, type SessionContext, type SessionContextRequest } from "./session-context.ts";
 import { sharedDeadline } from "./deadline.ts";
 import type { FabricSources } from "./fabric/types.ts";
-import { FABRIC_HEALTH_WINDOW_MS } from "./fabric/gather.ts";
+import { CORPUS_MANIFEST_READ_MS, FABRIC_HEALTH_WINDOW_MS, within } from "./fabric/gather.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
 import {
@@ -874,6 +875,12 @@ export interface SubstrateObserver {
 	capacity?(sample: { at: number; databaseBytes: number }): void;
 	/** Offered once at construction when `SUBSTRATE_INDEX_ARCHIVE_DIR` is set (uplift-4 S2): `newestAtMs` answers the newest complete index archive's creation time, which `substrate.index.archive.age_seconds` is computed from at snapshot time. */
 	indexArchive?(source: { newestAtMs(): number | null }): void;
+	/** Offered once at construction when `SUBSTRATE_CORPUS=on` (v1.7 phase 70): `newestAtMs` answers the time of the newest corpus manifest change, which `substrate.corpus.freshness_seconds` is computed from at snapshot time. */
+	corpusFreshness?(source: { newestAtMs(): number | null }): void;
+	/** One finished corpus ingest request (phase 70): documents per second of its wall time, 0 when it sent nothing. */
+	corpusIngest?(sample: { docsPerSecond: number }): void;
+	/** The golden-set recall at 5 a `docs.canary` report carried (phase 70). */
+	corpusGolden?(sample: { recall5: number }): void;
 	/** One brief's use of the recall snapshot (uplift-4 S5), recorded when `SUBSTRATE_BRIEF_RECALL` is not `off`. `surface` is bounded to the surface list. */
 	briefRecall?(sample: { surface: string; result: BriefRecallResult }): void;
 	/** One recall prefetch attempt (uplift-4 S5). `surface` is bounded to the surface list. */
@@ -1416,10 +1423,14 @@ export class Substrate {
 	private readonly teiClient: TeiClient;
 	/** The one door to embeddings: the TEI client behind the `emb` cache class (`SUBSTRATE_EMBED_CACHE`). */
 	readonly embeddings: EmbeddingService;
-	/** Test seam for the corpus manifest, bulk plane, root clock and anchor verifier; production builds them from the index, the LightRAG config and the devnet reads. */
-	private readonly corpusSeam: { store?: CorpusStore; plane?: LightragBulkPlane; rootClock?: RootClock; anchorVerifier?: AnchorVerifier } | null;
+	/** Test seam for the corpus manifest, bulk plane, root clock, anchor verifier and ingest clock; production builds them from the index, the LightRAG config and the devnet reads. */
+	private readonly corpusSeam: { store?: CorpusStore; plane?: LightragBulkPlane; rootClock?: RootClock; anchorVerifier?: AnchorVerifier; nowMs?: () => number } | null;
 	private corpusPlaneCache: LightragBulkPlane | null = null;
 	private corpusRootKeeper: CorpusRootKeeper | null = null;
+	/** The manifest read behind a freshness refresh while it is in flight, shared by every refresh that overlaps it (phase 70). */
+	private corpusNewestRead: Promise<string | null> | null = null;
+	/** The corpus readings behind the SLO gauges and the `corpus` fabric row (phase 70). */
+	private readonly corpusSlo: CorpusSloState;
 	/** Railway control-plane client (Phase 45, D45-a); tests inject a recording fetch through `stores.railway`. */
 	readonly railway: RailwayClient;
 	/** Background retains in flight, drained (bounded) on shutdown. */
@@ -1540,8 +1551,8 @@ export class Substrate {
 			hindsightFetch?: FetchLike;
 			lightragFetch?: FetchLike;
 			teiFetch?: FetchLike;
-			/** Tests inject the corpus manifest, the LightRAG bulk plane, the root clock and the anchor verifier; production builds them from the index, `config.lightrag` and the devnet reads. */
-			corpus?: { store?: CorpusStore; plane?: LightragBulkPlane; rootClock?: RootClock; anchorVerifier?: AnchorVerifier };
+			/** Tests inject the corpus manifest, the LightRAG bulk plane, the root clock, the anchor verifier and the clock an ingest request is timed with; production builds them from the index, `config.lightrag` and the devnet reads, and times with `performance.now`. */
+			corpus?: { store?: CorpusStore; plane?: LightragBulkPlane; rootClock?: RootClock; anchorVerifier?: AnchorVerifier; nowMs?: () => number };
 			planningBaseDir?: string;
 			desktop?: DesktopDriver | null;
 			railway?: RailwayClient;
@@ -1572,6 +1583,11 @@ export class Substrate {
 		observer: SubstrateObserver = {},
 	) {
 		this.observer = observer;
+		this.corpusSlo = new CorpusSloState({
+			ingestRate: (docsPerSecond) => this.observer.corpusIngest?.({ docsPerSecond }),
+			goldenRecall: (recall5) => this.observer.corpusGolden?.({ recall5 }),
+		});
+		if (config.corpus.enabled) this.observer.corpusFreshness?.({ newestAtMs: () => this.corpusSlo.newestAtMs() });
 		if (config.indexArchive.dir !== null) {
 			const watch = new IndexArchiveWatch(config.indexArchive.dir);
 			this.indexArchiveWatch = watch;
@@ -2446,6 +2462,7 @@ export class Substrate {
 			else if (result.stored) this.observer.eventReplay?.({ result: "appended" });
 		}
 		this.planningEvent(input);
+		if (result.stored) this.noteDocsCanary(result.event);
 		if (result.stored) this.publishHint(result.event);
 		return result;
 	}
@@ -5826,14 +5843,67 @@ export class Substrate {
 	}
 
 	/** `GET /corpus/status` and the `corpus_status` tool. */
-	corpusStatus(callerSurface: Surface | null): Promise<CorpusReply<CorpusStatusResponse>> {
-		return corpusStatusReply(this.corpusDeps(), callerSurface);
+	async corpusStatus(callerSurface: Surface | null): Promise<CorpusReply<CorpusStatusResponse>> {
+		const reply = await corpusStatusReply(this.corpusDeps(), callerSurface);
+		if (reply.ok) this.corpusSlo.setLastChangeFrom(reply.body.lastIngestAt);
+		return reply;
+	}
+
+	/** The clock an ingest request is timed with: the test seam's when one is injected, else `performance.now`. */
+	private corpusNowMs(): number {
+		return this.corpusSeam?.nowMs?.() ?? performance.now();
+	}
+
+	/**
+	 * Reads the manifest's newest change into the freshness reading (phase 70), bounded by `boundMs` (shorter than the fabric's
+	 * per-source deadline, so the fabric hears a late read as `timeout` and never as a fresh success). A read that fails or runs
+	 * out of time keeps the last good reading and does not refresh it, and the answer says which: `timeout` or `failed`. A server
+	 * with the corpus off or no manifest has nothing to read and answers `ok`.
+	 */
+	async refreshCorpusReadings(boundMs: number = CORPUS_MANIFEST_READ_MS): Promise<CorpusRefresh> {
+		if (!this.config.corpus.enabled) return "ok";
+		const store = this.corpusSeam?.store ?? this.index?.corpusStore() ?? null;
+		if (store === null) return "ok";
+		const read = await within(() => this.newestCorpusIngest(store), boundMs);
+		if (!read.ok) return read.reason;
+		this.corpusSlo.setLastChangeFrom(read.value);
+		return "ok";
+	}
+
+	/**
+	 * The newest ingest time, as one manifest read that overlapping refreshes share (the ingest path, every fabric read and every
+	 * history sample ask at about the same time). The shared read is forgotten when it settles, so a failure reaches only the
+	 * refreshes that were waiting on it and the next refresh reads again. Each caller keeps its own bound.
+	 */
+	private newestCorpusIngest(store: CorpusStore): Promise<string | null> {
+		this.corpusNewestRead ??= store.newestIngestAt().finally(() => {
+			this.corpusNewestRead = null;
+		});
+		return this.corpusNewestRead;
+	}
+
+	/**
+	 * A stored `docs.canary` report from the canary carries `golden_recall5`, which becomes the corpus recall reading. The reading
+	 * is the canary's alone: the doors refuse the action to every caller but a `substrate` host-job token (`reserved-actions.ts`),
+	 * and this check, which holds for the server's own emits too, takes only an event attributed to that surface.
+	 */
+	private noteDocsCanary(event: SubstrateEvent): void {
+		if (!this.config.corpus.enabled || event.surface !== DOCS_CANARY_SURFACE) return;
+		if (event.payload.action !== DOCS_CANARY_ACTION || event.payload.runtime !== "docs-canary") return;
+		this.corpusSlo.recordGolden(event.payload);
 	}
 
 	/** `POST /corpus/ingest` and the `corpus_ingest` tool. A run that stored or removed anything invalidates every cached `docs_search` answer, as `docs_ingest` does. */
 	async corpusIngest(raw: unknown, callerSurface: Surface | null): Promise<CorpusReply<CorpusIngestResponse>> {
+		const startedAt = this.corpusNowMs();
 		const reply = await corpusIngestReply(this.corpusDeps(), raw, callerSurface);
 		if (reply.ok && reply.body.counts.ingested + reply.body.counts.tombstoned > 0) await this.cache.bump(DOCS_GENERATION_KEY);
+		if (reply.ok) {
+			// Documents the plane took, never the metadata-only refreshes (`updated`): those send nothing to LightRAG, and counting
+			// them would let one slow upload hide behind many cheap rows.
+			this.corpusSlo.recordIngest(reply.body.counts.ingested, this.corpusNowMs() - startedAt);
+			await this.refreshCorpusReadings();
+		}
 		return reply;
 	}
 
@@ -7582,6 +7652,11 @@ export class Substrate {
 				};
 			},
 			railwayCost: () => this.railway.costReport(),
+			corpus: async () => {
+				const refreshed = await this.refreshCorpusReadings();
+				// The last good reading is still reported, next to the reason it is not fresh.
+				return { readings: this.corpusSlo.readings(Date.now()), unread: refreshed === "ok" ? null : refreshed };
+			},
 			outbox: () => {
 				const stats = this.retainOutboxStats();
 				return { size: stats.size, oldestAt: stats.oldestAt };
@@ -7600,6 +7675,8 @@ export class Substrate {
 				},
 				teiEndpoint: dbEndpoints.tei ?? null,
 				dragonflyRefused: this.config.dragonflyRefused !== null,
+				corpusEnabled: this.config.corpus.enabled,
+				docsSlo: { ...this.config.docsSlo },
 			},
 		};
 	}
