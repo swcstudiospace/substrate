@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parseStatePart } from "../packages/mcp-server/src/planning/position.ts";
+import { type RoadmapTableRow, parseStatePart } from "../packages/mcp-server/src/planning/position.ts";
 import { parseFrontmatter } from "../packages/mcp-server/src/skills/frontmatter.ts";
 import { brokenRelativeLinks } from "./docs-lint.ts";
+import { checkPlannedPhaseMerged, completeMergedPulls, expandRanges, parsePulls, requirementsOfRoadmap } from "./planning-shipped-check.ts";
 
 const STATE_PATH = join(import.meta.dir, "..", ".planning", "STATE.md");
 
@@ -76,5 +77,136 @@ describe("planning integrity", () => {
 	test("the link check flags a link copied from the live roadmap and accepts one that resolves", () => {
 		expect(brokenRelativeLinks("[a](phases/55-x/CONTEXT.md) [b](MILESTONES.md) [c](https://example.com/x) [d](#top)", MILESTONES_DIR, existsSync)).toEqual(["phases/55-x/CONTEXT.md", "MILESTONES.md"]);
 		expect(brokenRelativeLinks("[a](../MILESTONES.md#v16) [b](v1.6-ROADMAP.md)", MILESTONES_DIR, existsSync)).toEqual([]);
+	});
+});
+
+describe("planned phases with merged pull requests", () => {
+	const row = (number: string, status: string): RoadmapTableRow => ({ milestone: "v1.7", name: `Phase ${number}`, number, status });
+	const requirementsByPhase: Record<string, string[]> = {
+		"63": ["ATLAS-01", "ATLAS-02"],
+		"64": ["EMB-01"],
+		"65": ["WATCH-01", "WATCH-02", "WATCH-03", "WATCH-04", "WATCH-05"],
+		"66": ["REFLECT-01"],
+		"67": ["STEER-01"],
+		"68": ["FLEET-01"],
+		"69": ["PROOF-01"],
+		"70": ["SLO-01"],
+	};
+	const requirements = new Map(Object.entries(requirementsByPhase));
+
+	test("flags the Planned and Not started phases that merged pull requests name, and not a Complete one", () => {
+		const rows = [
+			row("63", "Planned"),
+			row("64", "Planned"),
+			row("65", "Planned"),
+			row("66", "Planned"),
+			row("67", "Complete (PR #150)"),
+			row("68", "Planned"),
+			row("69", "Planned"),
+			row("70", "Not started"),
+		];
+		const merged = [
+			{ title: "feat(atlas): ATLAS-02 corpus scan", branch: "feat/atlas-02" },
+			{ title: "feat(watch): WATCH-01..05 doc watch", branch: "feat/watch" },
+			{ title: "Phase 66: REFLECT-01 retrieval telemetry", branch: "feat/reflect" },
+			{ title: "feat(steer): STEER-01 steering command", branch: "feat/steer" },
+			{ title: "feat(slo): SLO-01 golden set", branch: "feat/slo" },
+		];
+		const findings = checkPlannedPhaseMerged(rows, requirements, merged);
+		expect(findings.map((finding) => finding.split(" ")[1])).toEqual(["63", "65", "66", "70"]);
+	});
+
+	test("phase 6 does not match phase 63, p63 or phase 6.1, and matches phase 6 and p6 as whole tokens", () => {
+		const six = [row("6", "Planned")];
+		const unrelated = [
+			{ title: "Phase 63 corpus atlas", branch: "docs/p63" },
+			{ title: "Phase 6.1 fix", branch: "fix/p6.1" },
+		];
+		expect(checkPlannedPhaseMerged(six, new Map(), unrelated)).toEqual([]);
+		expect(checkPlannedPhaseMerged(six, new Map(), [{ title: "phase 6 cleanup", branch: "" }])).toHaveLength(1);
+		expect(checkPlannedPhaseMerged(six, new Map(), [{ title: "docs", branch: "docs/p6" }])).toHaveLength(1);
+	});
+
+	test("a range names each requirement in it, and an ID outside the range does not match", () => {
+		const watch = [row("65", "Planned")];
+		const cases: Array<[string, number]> = [
+			["WATCH-06 next", 0],
+			["WATCH-03..04 docs", 1],
+			["WATCH-01..WATCH-05 done", 1],
+			["WATCH-01..05", 1],
+		];
+		for (const [title, expected] of cases) {
+			expect(checkPlannedPhaseMerged(watch, requirements, [{ title, branch: "" }])).toHaveLength(expected);
+		}
+	});
+
+	test("requirement IDs match as whole tokens in their exact case", () => {
+		const atlas = [row("63", "Planned")];
+		const cases: Array<[string, string, number]> = [
+			["ATLAS-010 corpus", "", 0],
+			["XATLAS-02 corpus", "", 0],
+			["atlas-02 corpus", "", 0],
+			["corpus", "feat/ATLAS-02-scan", 1],
+		];
+		for (const [title, branch, expected] of cases) {
+			expect(checkPlannedPhaseMerged(atlas, requirements, [{ title, branch }])).toHaveLength(expected);
+		}
+	});
+
+	test("each phase's requirement IDs come from its Requirements line, skipping fenced code, prose and sections past the phase", () => {
+		const roadmap = [
+			"# Roadmap",
+			"## v1.7",
+			"### Phase 63: Corpus Atlas",
+			"**Goal**: scan the corpus",
+			"**Requirements**: [ATLAS-01, ATLAS-02]",
+			"#### Success criteria",
+			"```",
+			"**Requirements**: [FAKE-01]",
+			"```",
+			"### Phase 65: Doc Watch",
+			"**Requirements**: [WATCH-01..05]",
+			"### Phase 66: Docs Reflect",
+			'**Requirements**: uplift-7 audit row "Invalid writes are rejected"',
+			"## Later",
+			"**Requirements**: [LATER-01]",
+		].join("\n");
+		const parsed = requirementsOfRoadmap(roadmap);
+		expect([...parsed.keys()]).toEqual(["63", "65", "66"]);
+		expect(parsed.get("63")).toEqual(["ATLAS-01", "ATLAS-02"]);
+		expect(parsed.get("65")).toEqual(["WATCH-01", "WATCH-02", "WATCH-03", "WATCH-04", "WATCH-05"]);
+		expect(parsed.get("66")).toEqual([]);
+	});
+
+	test("parsePulls reads gh's title and headRefName, and reports output that is not a list", () => {
+		expect(parsePulls('[{"title":"feat: WATCH-01","headRefName":"feat/watch-01"}]')).toEqual([{ title: "feat: WATCH-01", branch: "feat/watch-01" }]);
+		expect(typeof parsePulls("not json")).toBe("string");
+		expect(typeof parsePulls('{"title":"x"}')).toBe("string");
+	});
+
+	test("a range with ends beyond the safe integers is left as written, and equal ends expand to one ID", () => {
+		const beyond = "WATCH-9007199254740993..9007199254740993";
+		expect(expandRanges(beyond)).toBe(beyond);
+		expect(expandRanges("WATCH-9007199254740991..9007199254740991")).toBe(" WATCH-9007199254740991 ");
+		expect(expandRanges("WATCH-01..01")).toBe(" WATCH-01 ");
+	});
+
+	test("the merged list is an error once it reaches the limit, never a shorter list that could pass", () => {
+		const two = '[{"title":"a","headRefName":"b"},{"title":"c","headRefName":"d"}]';
+		expect(completeMergedPulls(two, 3)).toEqual([
+			{ title: "a", branch: "b" },
+			{ title: "c", branch: "d" },
+		]);
+		expect(typeof completeMergedPulls(two, 2)).toBe("string");
+	});
+
+	test("each field is matched on its own, so a title and a branch do not join into a phase phrase", () => {
+		const six = [row("6", "Planned")];
+		expect(checkPlannedPhaseMerged(six, new Map(), [{ title: "Phase", branch: "6-docs" }])).toEqual([]);
+	});
+
+	test("a fence closes only with its own marker: a tilde line inside a backtick fence does not end it", () => {
+		const roadmap = ["### Phase 63: Corpus Atlas", "```text", "~~~", "**Requirements**: [FAKE-01]", "```", "**Requirements**: [ATLAS-01]"].join("\n");
+		expect(requirementsOfRoadmap(roadmap).get("63")).toEqual(["ATLAS-01"]);
 	});
 });
