@@ -10,7 +10,7 @@ import { HINDSIGHT_NOT_CONFIGURED, type ForwardOutcome } from "../memory-retain.
 import type { MemoryWriteRequest, MemoryWriteResult } from "../types.ts";
 import type { RetainOutcome } from "./reflect-service.ts";
 
-/** How long a reflect reply waits for one digest's Hindsight forward, ms. */
+/** How long one digest's Hindsight forward is waited for when the caller sets no bound, ms. */
 export const RETAIN_LEG_WAIT_MS = 5000;
 
 export interface DigestRetainDeps {
@@ -38,11 +38,14 @@ export function deliveryOf(outcome: ForwardOutcome): RetainOutcome {
 /** Writes one digest as a governed memory entry and reports what became of its Hindsight leg. Never throws. */
 export async function retainDigestOutcome(deps: DigestRetainDeps, request: MemoryWriteRequest): Promise<RetainOutcome> {
 	try {
+		const waitMs = deps.waitMs ?? RETAIN_LEG_WAIT_MS;
 		const { result, leg } = await deps.write(request);
 		if (result.outcome !== "accepted") return { ok: false, reason: result.reason };
 		if (!result.verified_persisted) return { ok: false, reason: "not-verified" };
 		if (leg === null) return { ok: false, reason: "not-forwarded" };
-		const settled = await Promise.race([leg, (deps.delay ?? sleep)(deps.waitMs ?? RETAIN_LEG_WAIT_MS).then((): null => null)]);
+		// A spent request budget still starts the write. It does not wait, and it does not report a delivery it did not observe.
+		if (waitMs <= 0) return { ok: false, reason: "pending" };
+		const settled = await Promise.race([leg, (deps.delay ?? sleep)(waitMs).then((): null => null)]);
 		return settled === null ? { ok: false, reason: "pending" } : deliveryOf(settled);
 	} catch {
 		return { ok: false, reason: "memory-write-failed" };

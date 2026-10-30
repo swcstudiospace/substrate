@@ -5732,9 +5732,9 @@ export class Substrate {
 	 * the governance gate like every memory write. The outcome is what the Hindsight forward actually did, read under a short
 	 * bound (`pending` when it is still running or parked for a retry); a refusal or an outage is a closed reason, never a throw.
 	 */
-	private retainDigest(input: { repo: string; text: string; surface: Surface; sessionId: string }): Promise<RetainOutcome> {
+	private retainDigest(input: { repo: string; text: string; surface: Surface; sessionId: string; waitMs?: number }): Promise<RetainOutcome> {
 		return retainDigestOutcome(
-			{ write: (request) => this.writeMemoryWithLeg(request) },
+			{ write: (request) => this.writeMemoryWithLeg(request), waitMs: input.waitMs },
 			{
 				scope: `repo:${input.repo}`,
 				kind: "fact",

@@ -20,6 +20,8 @@ import {
 	gapsLimitOf,
 	parseFeedbackRequest,
 	parseReflectRequest,
+	REFLECT_RETAIN_BUDGET_MS,
+	REFLECT_RETAIN_CONCURRENCY,
 } from "./reflect-service.ts";
 import { FakePlane, FakeStore, makeRow, sha256Hex } from "./testkit.ts";
 
@@ -242,6 +244,32 @@ describe("corpusReflectReply", () => {
 			const reply = ok(await corpusReflectReply(deps, request(digest(REPO, text)), "omp"));
 			expect(reply.results).toEqual([{ repo: REPO, status: "stored", reason: `hindsight:${reason}` }]);
 		}
+	});
+
+	test("stored digests share one retain budget and do not each wait 5s", async () => {
+		let clock = 1_000;
+		const waits: number[] = [];
+		let inFlight = 0;
+		let maxInFlight = 0;
+		const { deps } = world({
+			now: () => clock,
+			retainDigest: async (input) => {
+				waits.push(input.waitMs ?? -1);
+				inFlight += 1;
+				maxInFlight = Math.max(maxInFlight, inFlight);
+				await Promise.resolve();
+				inFlight -= 1;
+				if ((input.waitMs ?? 0) > 0) clock += REFLECT_RETAIN_BUDGET_MS;
+				return { ok: false, reason: "pending" };
+			},
+		});
+		const digests = Array.from({ length: REFLECT_RETAIN_CONCURRENCY * 2 }, (_, index) => digest(`local/repo-${index}`, `${text} ${index}`));
+		const reply = ok(await corpusReflectReply(deps, request(...digests), "omp"));
+		expect(maxInFlight).toBe(REFLECT_RETAIN_CONCURRENCY);
+		expect(waits.slice(0, REFLECT_RETAIN_CONCURRENCY).every((ms) => ms === REFLECT_RETAIN_BUDGET_MS)).toBe(true);
+		expect(waits.slice(REFLECT_RETAIN_CONCURRENCY).every((ms) => ms === 0)).toBe(true);
+		expect(waits.reduce((sum, ms) => sum + ms, 0)).toBeLessThan(digests.length * 5_000);
+		expect(reply.results.every((result) => result.status === "stored" && result.reason === "hindsight:pending")).toBe(true);
 	});
 
 	test("one bad digest never fails the others: each is reported in request order with its own reason", async () => {

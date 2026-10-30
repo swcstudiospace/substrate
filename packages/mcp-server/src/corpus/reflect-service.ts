@@ -38,6 +38,10 @@ export const FEEDBACK_SESSION_CHARS = 200;
 const ECHO_CHARS = 80;
 /** The longest closed reason the Hindsight leg adds to a result. */
 const RETAIN_REASON_CHARS = 80;
+/** Wall-clock budget one `corpusReflectReply` spends waiting on Hindsight forwards, shared by every stored digest. */
+export const REFLECT_RETAIN_BUDGET_MS = 8_000;
+/** How many stored digests one reflect reply retains at once. */
+export const REFLECT_RETAIN_CONCURRENCY = 4;
 
 export const REFLECT_REQUEST_REFUSALS = ["bad-request", "bad-protocol", "empty-request", "too-many-digests"] as const;
 export const FEEDBACK_REFUSALS = ["bad-request", "bad-document", "bad-verdict", "unknown-document"] as const;
@@ -69,13 +73,25 @@ export type ReflectReply<T> = { ok: true; status: 200; body: T } | ReflectFailur
 /** The outcome of retaining one digest in Hindsight through the governance gate. */
 export type RetainOutcome = { ok: true } | { ok: false; reason: string };
 
+/** One stored digest handed to the Hindsight leg. `waitMs` is what remains of {@link REFLECT_RETAIN_BUDGET_MS}. */
+export interface RetainDigestInput {
+	repo: string;
+	text: string;
+	surface: Surface;
+	sessionId: string;
+	/** Ms the leg may be waited for. `0` starts the write and reports `pending` without waiting. */
+	waitMs?: number;
+}
+
 export interface ReflectServiceDeps extends CorpusServiceDeps {
 	/** Feedback, retrieval telemetry and the gap aggregate, or null when this server has no index. */
 	reflect: ReflectStore | null;
 	/** `SUBSTRATE_DOCS_GAP_SCORE`. */
 	gapScore: number;
 	/** Retains one stored digest as a governed memory entry; best effort, never throws. */
-	retainDigest: (input: { repo: string; text: string; surface: Surface; sessionId: string }) => Promise<RetainOutcome>;
+	retainDigest: (input: RetainDigestInput) => Promise<RetainOutcome>;
+	/** Epoch ms for the request-wide retain budget. Tests inject a clock. */
+	now?: (() => number) | undefined;
 }
 
 const MESSAGES: Readonly<Record<ReflectRefusalReason, string>> = {
@@ -208,9 +224,11 @@ function documentOf(item: { repo: string; text: string; sha256: string }): Corpu
 /**
  * `POST /corpus/reflect`: stores each repository digest as the corpus document `(repo, DIGEST_PATH)` through the one ingest
  * path (so redaction, naming, the manifest and the plane rules all apply, and the request waits behind the same single-flight
- * lock as any ingest), then retains each stored digest in Hindsight through the governance gate. The Hindsight leg is best
- * effort: a refusal or an outage becomes the digest's `reason` while its plane document stays stored. A digest the manifest
- * already holds unchanged is not retained again.
+ * lock as any ingest), then retains each stored digest in Hindsight through the governance gate. The Hindsight legs share one
+ * {@link REFLECT_RETAIN_BUDGET_MS} wall-clock budget and run {@link REFLECT_RETAIN_CONCURRENCY} at a time. A leg whose wait
+ * would start after that budget is spent is still written and reported `hindsight:pending`, not waited. A refusal or an outage
+ * becomes the digest's `reason` while its plane document stays stored. A digest the manifest already holds unchanged is not
+ * retained again.
  */
 export async function corpusReflectReply(deps: ReflectServiceDeps, raw: unknown, surface: Surface | null): Promise<ReflectReply<CorpusReflectResponse>> {
 	const gated = gateOf(deps, surface, true);
@@ -246,6 +264,14 @@ export async function corpusReflectReply(deps: ReflectServiceDeps, raw: unknown,
 		}
 	}
 
+	const stored = parsed.items.flatMap((item) => {
+		if (!item.ready) return [];
+		const outcome = ingested.get(item.repo);
+		if (outcome?.status !== "ingested" && outcome?.status !== "updated") return [];
+		return [{ repo: item.repo, text: item.text }];
+	});
+	const retained = await retainStored(deps, stored, surface, sessionId);
+
 	const results: CorpusReflectResultItem[] = [];
 	for (const item of parsed.items) {
 		if (!item.ready) {
@@ -258,11 +284,35 @@ export async function corpusReflectReply(deps: ReflectServiceDeps, raw: unknown,
 		else if (outcome.status === "refused") results.push({ repo: item.repo, status: "refused", ...(outcome.reason === undefined ? {} : { reason: outcome.reason }) });
 		else if (outcome.status !== "ingested" && outcome.status !== "updated") results.push({ repo: item.repo, status: "failed", ...(outcome.reason === undefined ? {} : { reason: outcome.reason }) });
 		else {
-			const retained = await deps.retainDigest({ repo: item.repo, text: item.text, surface, sessionId });
-			results.push({ repo: item.repo, status: "stored", ...(retained.ok ? {} : { reason: `hindsight:${redact(retained.reason).slice(0, RETAIN_REASON_CHARS)}` }) });
+			const leg = retained.get(item.repo) ?? { ok: false as const, reason: "pending" };
+			results.push({ repo: item.repo, status: "stored", ...(leg.ok ? {} : { reason: `hindsight:${redact(leg.reason).slice(0, RETAIN_REASON_CHARS)}` }) });
 		}
 	}
 	return { ok: true, status: 200, body: { protocol: CORPUS_PROTOCOL, results, manifestVersion } };
+}
+
+/**
+ * Retains stored digests at {@link REFLECT_RETAIN_CONCURRENCY}, passing each the ms still left in the request-wide budget
+ * when its wait starts. A later digest whose wait would start at or after the deadline is given `waitMs: 0`.
+ */
+async function retainStored(deps: ReflectServiceDeps, items: ReadonlyArray<{ repo: string; text: string }>, surface: Surface, sessionId: string): Promise<Map<string, RetainOutcome>> {
+	const now = deps.now ?? Date.now;
+	const deadline = now() + REFLECT_RETAIN_BUDGET_MS;
+	const retained = new Map<string, RetainOutcome>();
+	let cursor = 0;
+	const worker = async (): Promise<void> => {
+		for (;;) {
+			const index = cursor;
+			cursor += 1;
+			const item = items[index];
+			if (item === undefined) return;
+			const waitMs = Math.max(0, deadline - now());
+			retained.set(item.repo, await deps.retainDigest({ repo: item.repo, text: item.text, surface, sessionId, waitMs }));
+		}
+	};
+	const workers = Math.min(REFLECT_RETAIN_CONCURRENCY, items.length);
+	if (workers > 0) await Promise.all(Array.from({ length: workers }, () => worker()));
+	return retained;
 }
 
 // ── gaps ─────────────────────────────────────────────────────────────────────

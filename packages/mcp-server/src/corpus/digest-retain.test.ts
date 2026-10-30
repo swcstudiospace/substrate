@@ -91,6 +91,27 @@ describe("retainDigestOutcome", () => {
 		expect(await retainDigestOutcome(deps({ write: async () => ({ result: ACCEPTED, leg: Promise.resolve(parked) }) }), REQUEST)).toEqual({ ok: false, reason: "pending" });
 	});
 
+	test("a wait of 0 starts the write and reports pending without waiting", async () => {
+		let writes = 0;
+		const waited: number[] = [];
+		const outcome = await retainDigestOutcome(
+			{
+				write: async () => {
+					writes += 1;
+					return { result: ACCEPTED, leg: new Promise<ForwardOutcome>(() => undefined) };
+				},
+				waitMs: 0,
+				delay: async (ms) => {
+					waited.push(ms);
+				},
+			},
+			REQUEST,
+		);
+		expect(writes).toBe(1);
+		expect(outcome).toEqual({ ok: false, reason: "pending" });
+		expect(waited).toEqual([]);
+	});
+
 	test("a forward that settles before the bound is read even when the clock would have expired at once", async () => {
 		const landed: ForwardOutcome = { forwarded: true, bank: "sub-omp", document_id: "mwd_key1" };
 		const outcome = await retainDigestOutcome({ write: async () => ({ result: ACCEPTED, leg: Promise.resolve(landed) }), delay: async () => undefined }, REQUEST);

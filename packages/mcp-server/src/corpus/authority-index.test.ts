@@ -159,7 +159,24 @@ describe("AuthorityIndex clears racing loads", () => {
 		const lookup = defined(await index.lookup(), "the lookup after the clear");
 		expect(lookup(documentKey(REPO, "docs/b.md"))).not.toBeNull();
 		expect(lookup(documentKey(REPO, "docs/a.md"))).not.toBeNull();
-		// The old load was not joined: the second lookup ran its own read.
+		// The in-flight read was joined. One follow-up, not a second query started beside it, read the fresh rows.
+		expect(store.rowReads).toBe(2);
+	});
+
+	test("two clears during one in-flight read start only one follow-up", async () => {
+		const { store, index } = world();
+		seed(store, "docs/a.md");
+		const gate = Promise.withResolvers<void>();
+		const rowsRead = Promise.withResolvers<void>();
+		store.rowGate = gate.promise;
+		store.onRowsRead = rowsRead.resolve;
+		const racing = index.lookup();
+		await rowsRead.promise;
+		index.invalidate();
+		index.invalidate();
+		gate.resolve();
+		await racing;
+		await index.lookup();
 		expect(store.rowReads).toBe(2);
 	});
 

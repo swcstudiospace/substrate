@@ -6,9 +6,10 @@
  *   `detectSupersession` pass) only when `manifestVersion()` moved, and the version itself is checked at most once per
  *   {@link VERSION_CHECK_MS}.
  * - The feedback counts are one grouped query, cached for {@link FEEDBACK_TTL_MS}.
- * - A clear (`invalidate`, `invalidateFeedback`) moves a generation. A load records the generation it began under and publishes
- *   only if it is still current, and a clear forgets the load in flight, so the next read starts a fresh one instead of joining
- *   a read that began before the change and may hold the old data.
+ * - A clear (`invalidate`, `invalidateFeedback`) moves a generation and drops the held snapshot, so a load that finishes after
+ *   the clear does not publish. It does not forget the load in flight: lookups keep joining it. A clear while a load runs sets
+ *   a follow-up owed flag; when that load settles, exactly one follow-up starts and the flag clears. Two clears of one flight
+ *   still start one follow-up. A clear while nothing is loading leaves the next lookup to read again.
  * - A manifest with more active rows than {@link AUTHORITY_MAX_ROWS} gives a `partial` snapshot: the copy comparison of
  *   supersession is off for it, because a copy group cut by the cap may have had a third member.
  * - Every read is fail-open: a store that fails keeps the last snapshot, and with none the lookup is null, so a search is
@@ -89,30 +90,34 @@ export class AuthorityIndex {
 	private loading: Promise<void> | null = null;
 	/** Moves with every clear of the manifest snapshot; a load that began under an older value publishes nothing. */
 	private manifestGeneration = 0;
+	/** A clear arrived while `loading` ran; one follow-up starts when that load settles. */
+	private manifestFollowUp = false;
 	private feedback: { counts: Map<string, FeedbackCounts>; loadedAt: number } | null = null;
 	private retryFeedbackAt = 0;
 	private loadingFeedback: Promise<void> | null = null;
 	private feedbackGeneration = 0;
+	/** A clear arrived while `loadingFeedback` ran; one follow-up starts when that load settles. */
+	private feedbackFollowUp = false;
 	/** After a lookup ran out of budget, lookups do not wait for a load until this time, ms: a stalled database costs one budget, not one per search. */
 	private noWaitUntil = 0;
 
 	constructor(private readonly deps: AuthorityIndexDeps) {}
 
-	/** Drops what is held and what is loading, so the next lookup reads again: called after this process changed the manifest or the feedback. */
+	/** Drops what is held so the next lookup reads again: called after this process changed the manifest or the feedback. */
 	invalidate(): void {
 		this.manifestGeneration += 1;
 		this.snapshot = null;
-		this.loading = null;
 		this.retryManifestAt = 0;
+		if (this.loading !== null) this.manifestFollowUp = true;
 		this.invalidateFeedback();
 	}
 
-	/** Drops the feedback counts and the load of them in flight: a verdict was stored. */
+	/** Drops the feedback counts: a verdict was stored. An in-flight load is joined, then followed by one fresh read. */
 	invalidateFeedback(): void {
 		this.feedbackGeneration += 1;
 		this.feedback = null;
-		this.loadingFeedback = null;
 		this.retryFeedbackAt = 0;
+		if (this.loadingFeedback !== null) this.feedbackFollowUp = true;
 	}
 
 	/**
@@ -158,14 +163,22 @@ export class AuthorityIndex {
 		const now = this.deps.now();
 		const held = this.snapshot;
 		if ((held !== null && now - held.checkedAt < VERSION_CHECK_MS) || now < this.retryManifestAt) return Promise.resolve();
-		if (this.loading === null) {
-			const load = this.refreshManifest().finally(() => {
-				// A load that a clear already forgot must not forget the fresh one that replaced it.
-				if (this.loading === load) this.loading = null;
-			});
-			this.loading = load;
-		}
+		if (this.loading === null) this.loading = this.startManifest();
 		return this.loading;
+	}
+
+	/** One manifest load. When it settles, a clear that arrived during it starts exactly one follow-up. */
+	private startManifest(): Promise<void> {
+		const load = this.refreshManifest().finally(() => {
+			if (this.loading !== load) return;
+			if (this.manifestFollowUp) {
+				this.manifestFollowUp = false;
+				this.loading = this.startManifest();
+				return;
+			}
+			this.loading = null;
+		});
+		return load;
 	}
 
 	private async refreshManifest(): Promise<void> {
@@ -195,13 +208,22 @@ export class AuthorityIndex {
 		const now = this.deps.now();
 		const held = this.feedback;
 		if ((held !== null && now - held.loadedAt < FEEDBACK_TTL_MS) || now < this.retryFeedbackAt) return Promise.resolve();
-		if (this.loadingFeedback === null) {
-			const load = this.refreshFeedback().finally(() => {
-				if (this.loadingFeedback === load) this.loadingFeedback = null;
-			});
-			this.loadingFeedback = load;
-		}
+		if (this.loadingFeedback === null) this.loadingFeedback = this.startFeedback();
 		return this.loadingFeedback;
+	}
+
+	/** One feedback load. When it settles, a clear that arrived during it starts exactly one follow-up. */
+	private startFeedback(): Promise<void> {
+		const load = this.refreshFeedback().finally(() => {
+			if (this.loadingFeedback !== load) return;
+			if (this.feedbackFollowUp) {
+				this.feedbackFollowUp = false;
+				this.loadingFeedback = this.startFeedback();
+				return;
+			}
+			this.loadingFeedback = null;
+		});
+		return load;
 	}
 
 	private async refreshFeedback(): Promise<void> {
