@@ -182,4 +182,24 @@ describe("splitDigestRetain", () => {
 		expect(parts[2]?.text.endsWith("\n[cut]\n")).toBe(true);
 		expect(parts[2]?.subject).toBe("corpus-digest:r:open");
 	});
+
+	test("a long label keeps the three sections on distinct subjects", () => {
+		const repo = `local/${"a".repeat(180)}`;
+		const text = ["# Digest", "## Recent decisions", "- a", "## Open items", "- b", "## Project", "name"].join("\n");
+		const parts = splitDigestRetain(repo, text);
+		const subjects = parts.map((part) => part.subject);
+		expect(new Set(subjects).size).toBe(3);
+		expect(subjects.every((subject) => subject.length <= 200)).toBe(true);
+		expect(subjects[1]).not.toBe(subjects[0]?.slice(0, 200));
+		expect(subjects[2]).not.toBe(subjects[0]?.slice(0, 200));
+	});
+
+	test("a bullet that mentions a heading is not a section boundary", () => {
+		const text = ["# Digest", "## Recent decisions", "- Update ## Project in the template", "## Open items", "- b", "## Project", "name"].join("\n");
+		const parts = splitDigestRetain("acme/app", text);
+		expect(parts[0]?.text).toContain("## Project");
+		expect(parts[0]?.text).not.toContain("Update ## Project");
+		expect(parts[1]?.text).toContain("Update ## Project");
+		expect(parts[2]?.text).not.toContain("## Project");
+	});
 });

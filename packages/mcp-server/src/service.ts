@@ -5750,6 +5750,7 @@ export class Substrate {
 	 */
 	private async retainDigest(input: { repo: string; text: string; surface: Surface; sessionId: string; waitMs?: number }): Promise<RetainOutcome> {
 		let truncated = false;
+		let failure: string | null = null;
 		const started = Date.now();
 		const budgetMs = input.waitMs;
 		for (const part of splitDigestRetain(input.repo, input.text)) {
@@ -5768,9 +5769,15 @@ export class Substrate {
 					ttl: "30d",
 				},
 			);
-			if (!outcome.ok) return outcome;
+			// A delivery warning means the index row was still written. Stopping here would leave the later sections
+			// unwritten, and the next unchanged reflect would not restore them.
+			if (!outcome.ok) {
+				if (failure === null) failure = outcome.reason;
+				continue;
+			}
 			if (part.cut || outcome.truncated === true) truncated = true;
 		}
+		if (failure !== null) return { ok: false, reason: failure };
 		return truncated ? { ok: true, truncated: true } : { ok: true };
 	}
 
