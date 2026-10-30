@@ -32,6 +32,7 @@ describe("mirrorName", () => {
 		expect(mirrorName("https://git.example.com/foo/bar.git")).toBe(mirrorName("git@git.example.com:foo/bar"));
 		expect(mirrorName("https://git.example.com:8443/team/repo.git")).not.toBe(mirrorName("https://git.example.com:9443/team/repo.git"));
 		expect(mirrorName("https://git.example.com:8443/team/repo.git")).toBe(mirrorName("https://git.example.com:8443/team/repo"));
+		expect(mirrorName("git@git.example.com:/srv/git/repo.git")).not.toBe(mirrorName("git@git.example.com:srv/git/repo.git"));
 	});
 
 	test("a mirror created under the old https hash is reused when the origin is rewritten to ssh", () => {
@@ -54,6 +55,8 @@ describe("mirrorName", () => {
 		expect(readOrigin(w.local, run)).toBe("git@git.example.com:/srv/git/repo.git");
 		runGit(w.local, ["remote", "set-url", "origin", "remotes/repo.git"]);
 		expect(readOrigin(w.local, run)).toBe(join(w.local, "remotes/repo.git"));
+		runGit(w.local, ["remote", "set-url", "origin", "remotes@backup/repo:copy.git"]);
+		expect(readOrigin(w.local, run)).toBe(join(w.local, "remotes@backup/repo:copy.git"));
 	});
 
 	test("a hostname-only mirror is reused when its stored origin is this port, and refused when it is another", () => {

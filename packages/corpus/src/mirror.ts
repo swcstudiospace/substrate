@@ -75,8 +75,8 @@ function strippedOrigin(origin: string): string {
  */
 function isLocalOrigin(origin: string): boolean {
 	if (origin.includes("://")) return false;
-	// `user@host:path` is scp even when the path is absolute (`git@host:/srv/git/repo.git`).
-	if (/^[^/\s]+@[^:\s]+:/.test(origin)) return false;
+	// `user@host:path` is scp even when the path is absolute. A slash in the host is a local path (`remotes@backup/repo:copy.git`).
+	if (/^[^/\s]+@[^:/\s]+:/.test(origin)) return false;
 	// `host:relative/path` is scp. A slash before the colon, or an absolute path with no user, is local.
 	return !/^[^:/\s]+:[^/]/.test(origin);
 }
@@ -85,7 +85,8 @@ function originIdentity(origin: string): string {
 	const slug = githubSlug(origin);
 	if (slug !== null) return `github.com/${slug}`;
 	const stripped = strippedOrigin(origin);
-	const withUser = /^([^@/\s]+)@([^:/\s]+):\/?(.*)$/.exec(stripped);
+	// The leading slash stays: `host:/abs` is the server root and `host:rel` is the SSH user's home, so they must not share a mirror.
+	const withUser = /^([^@/\s]+)@([^:/\s]+):(.*)$/.exec(stripped);
 	if (withUser && !stripped.includes("://")) return `${(withUser[2] ?? "").toLowerCase()}/${withUser[3] ?? ""}`;
 	const scp = /^([^:/\s]+):([^/].*)$/.exec(stripped);
 	if (scp && !stripped.includes("://")) return `${(scp[1] ?? "").toLowerCase()}/${scp[2] ?? ""}`;
