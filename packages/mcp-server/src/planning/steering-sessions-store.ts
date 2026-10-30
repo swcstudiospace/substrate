@@ -7,8 +7,8 @@
  * talks to and the Postgres adapter behind it; it holds no state, reads no environment and starts no timer.
  *
  * The table is a restart cache of in-process state, not a record: the ledger keeps every transition as an event. So the
- * upsert is last-writer-wins on `(surface, session_id)`, and no request ever reads it. The only delete is the boot prune of
- * rows older than the TTL, which the load would skip anyway.
+ * upsert is last-writer-wins on `(surface, session_id)`, and no request ever reads it. The deletes are the boot prune of rows
+ * older than the TTL and the removal of an ended session's row.
  */
 import type { SQL } from "bun";
 import { STEERING_STATES, type SteeringSession, type SteeringSessionState } from "../event.ts";
@@ -35,6 +35,8 @@ export interface SteeringSessionsStore {
 	loadNewest(query: SteeringSessionsLoadQuery): Promise<StoredSteeringSession[]>;
 	/** Deletes the rows last updated before `beforeMs` and resolves how many went. Rejects with the driver's error. */
 	prune(beforeMs: number): Promise<number>;
+	/** Deletes the row of one session, if there is one. Rejects with the driver's error. */
+	delete(surface: Surface, sessionId: string): Promise<void>;
 }
 
 function isSurface(value: string): value is Surface {
@@ -113,6 +115,9 @@ export function bunSteeringSessionsStore(sql: SQL): SteeringSessionsStore {
 			const removed: Array<Record<string, unknown>> = await sql`
 				delete from steering_sessions where updated_at < ${new Date(beforeMs).toISOString()} returning session_id`;
 			return removed.length;
+		},
+		async delete(surface: Surface, sessionId: string): Promise<void> {
+			await sql`delete from steering_sessions where surface = ${surface} and session_id = ${sessionId}`;
 		},
 	};
 }
