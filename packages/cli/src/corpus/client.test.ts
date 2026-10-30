@@ -184,6 +184,8 @@ describe("response guards", () => {
 		expect(isReconcileResponse({ ...reconcileOf(), drift: { ...reconcileOf().drift, orphansInPlane: [7] } })).toBe(false);
 		expect(isReconcileResponse({ ...reconcileOf(), repaired: { requeued: 1 } })).toBe(false);
 		expect(isReconcileResponse(null)).toBe(false);
+	});
+
 	test("accept the reflect and gaps shapes, with a null best score and a null text", () => {
 		expect(isReflectResponse(reflectOf([{ repo: "r", status: "stored" }, { repo: "s", status: "refused", reason: "secret-findings" }]))).toBe(true);
 		expect(isGapsResponse(gapsOf([{ queryHash: "ab12", text: null, searches: 3, lastSeen: "2026-10-29T10:00:00.000Z", best: null }]))).toBe(true);

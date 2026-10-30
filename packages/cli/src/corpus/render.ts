@@ -176,7 +176,8 @@ export function renderIngest(summary: IngestSummary): string {
 export function renderStatus(status: CorpusStatusResponse): string {
 	const out: string[] = [
 		`corpus: ${status.total} rows, ${status.active} active, ${status.tombstoned} tombstoned (manifest version ${status.manifestVersion})\n`,
-		`last ingest: ${status.lastIngestAt ?? "never"}${status.lagSeconds === null ? "" : ` (${Math.round(status.lagSeconds)} s ago)`}\n`,
+		`last ingest: ${status.lastIngestAt ?? "never"}\n`,
+		`manifest write: ${status.lagSeconds === null ? "never" : `${Math.round(status.lagSeconds)} s ago`}\n`,
 		`by tier: ${status.byTier.map((row) => `${row.tier}: ${row.count}`).join(", ") || "none"}\n`,
 		`by kind: ${status.byKind.map((row) => `${row.kind} ${row.count}`).join(", ") || "none"}\n`,
 		"repositories:\n",

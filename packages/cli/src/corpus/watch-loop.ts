@@ -108,13 +108,22 @@ export function watchTargets(registry: Registry, inventory: Inventory | null): W
 	const dirOf = new Map<string, string>();
 	for (const report of inventory.report.repos) if (report.source === "fs" && !dirOf.has(report.repo)) dirOf.set(report.repo, report.dir);
 	const seen = new Set(targets.map((target) => target.dir));
-	for (const entry of inventory.entries) {
-		const root = dirOf.get(entry.repo);
-		if (root === undefined) continue;
-		const dir = join(root, dirname(entry.path));
-		if (seen.has(dir) || !existsSync(dir)) continue;
+	const addDir = (repo: string, path: string): void => {
+		const root = dirOf.get(repo);
+		if (root === undefined) return;
+		const dir = join(root, dirname(path));
+		if (seen.has(dir) || !existsSync(dir)) return;
 		seen.add(dir);
-		targets.push({ repo: entry.repo, dir });
+		targets.push({ repo, dir });
+	};
+	for (const entry of inventory.entries) addDir(entry.repo, entry.path);
+	// Copies dropped as identical still live in their own directories. Those directories are watched before the watcher applies its limit.
+	for (const group of inventory.report.collapsed.identicalCopies) {
+		for (const copy of group.copies) {
+			const split = copy.indexOf(":");
+			if (split <= 0) continue;
+			addDir(copy.slice(0, split), copy.slice(split + 1));
+		}
 	}
 	return targets;
 }

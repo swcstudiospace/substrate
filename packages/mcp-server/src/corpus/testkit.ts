@@ -145,8 +145,6 @@ export class FakeStore implements CorpusStore {
 		};
 	}
 
-	/** The newest ingest time the manifest reports; a test sets it. The fake holds no clock of its own. */
-	lastIngestAt: string | null = null;
 	/** How many times each way of reading it was used, so a test can say which one a path paid for. */
 	statusReads = 0;
 	newestReads = 0;

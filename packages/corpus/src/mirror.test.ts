@@ -30,6 +30,8 @@ describe("mirrorName", () => {
 		expect(mirrorName("ssh://git@github.com/Acme/Alpha.git")).toBe(plain);
 		expect(mirrorName("https://github.com/Other/Alpha.git")).not.toBe(plain);
 		expect(mirrorName("https://git.example.com/foo/bar.git")).toBe(mirrorName("git@git.example.com:foo/bar"));
+		expect(mirrorName("https://git.example.com:8443/team/repo.git")).not.toBe(mirrorName("https://git.example.com:9443/team/repo.git"));
+		expect(mirrorName("https://git.example.com:8443/team/repo.git")).toBe(mirrorName("https://git.example.com:8443/team/repo"));
 	});
 
 	test("a mirror created under the old https hash is reused when the origin is rewritten to ssh", () => {

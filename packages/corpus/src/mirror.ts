@@ -58,8 +58,9 @@ export function readOrigin(repoDir: string, run: GitBytesRunner): string | null 
 	const result = run({ args: ["remote", "get-url", "origin"], cwd: repoDir, timeoutMs: CONFIG_TIMEOUT_MS });
 	const url = outputText(result).trim();
 	if (result.code !== 0 || url === "") return null;
-	// A relative path is relative to the checkout, and the clone runs elsewhere.
-	return url.startsWith("./") || url.startsWith("../") ? resolve(repoDir, url) : url;
+	// A relative path is relative to the checkout. The clone runs from the mirror, so every local path is resolved here.
+	// Remote forms (`scheme://`, `user@host:path`) are left unchanged.
+	return isLocalOrigin(url) ? resolve(repoDir, url) : url;
 }
 
 /** The origin URL without credentials, a trailing slash, or a `.git` suffix. This is the pre-canonical hash input. */
@@ -70,8 +71,14 @@ function strippedOrigin(origin: string): string {
 /**
  * One identity for equivalent origin URLs. GitHub https, ssh and scp forms of one slug share it, as do `https://host/path`
  * and `git@host:path` on any other host. A local path is left as its stripped form, so an existing path-named mirror is
- * still found. A fork is a different slug and stays a different identity.
+ * still found. A fork is a different slug and stays a different identity. Distinct ports are distinct hosts.
  */
+function isLocalOrigin(origin: string): boolean {
+	if (origin.includes("://")) return false;
+	// scp-style `user@host:path`, not a filesystem path.
+	return !/^[^/\s]+@[^:\s]+:/.test(origin);
+}
+
 function originIdentity(origin: string): string {
 	const slug = githubSlug(origin);
 	if (slug !== null) return `github.com/${slug}`;
@@ -80,7 +87,8 @@ function originIdentity(origin: string): string {
 	if (scp && !stripped.includes("://")) return `${(scp[1] ?? "").toLowerCase()}/${scp[2] ?? ""}`;
 	try {
 		const url = new URL(stripped);
-		if (url.hostname !== "") return `${url.hostname.toLowerCase()}/${url.pathname.replace(/^\/+|\/+$/g, "")}`;
+		// `host` keeps a non-default port; `hostname` would make :8443 and :9443 share a mirror. A default port `URL` omits stays omitted.
+		if (url.host !== "") return `${url.host.toLowerCase()}/${url.pathname.replace(/^\/+|\/+$/g, "")}`;
 	} catch {
 		// A local path is not a URL. Its stripped form is the identity.
 	}

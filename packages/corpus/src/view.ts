@@ -22,6 +22,7 @@ import { classify } from "./classify.ts";
 import { type GitBytesRunner, type GitOutput, outputText } from "./gitio.ts";
 import { isValidPath } from "./names.ts";
 import { type CorpusEntry, type DocTier, documentKey } from "./protocol.ts";
+import { entrySupersededBy } from "./supersession.ts";
 import {
 	type CheckoutRead,
 	compareEntries,
@@ -87,7 +88,7 @@ export function readLocation(location: string, run: GitBytesRunner, readFile: (p
 	return result.stdout;
 }
 
-type Verdict = { ok: true; sha256: string; bytes: number } | { ok: false; reason: SkipReason; problem?: string };
+type Verdict = { ok: true; sha256: string; bytes: number; text: string } | { ok: false; reason: SkipReason; problem?: string };
 
 /** Asks the origin, in batches, for the blobs a blobless mirror does not hold yet. A failure is not an error: the read that follows fetches what is left one object at a time. */
 function prefetchMissing(mirrorDir: string, oids: readonly string[], run: GitBytesRunner): void {
@@ -162,7 +163,7 @@ function readVerdicts(mirrorDir: string, items: ReadonlyArray<{ oid: string; siz
 				continue;
 			}
 			const inspected = inspectBytes(data, maxBytes);
-			verdicts.set(oid, inspected.ok ? { ok: true, sha256: inspected.sha256, bytes: inspected.bytes } : { ok: false, reason: inspected.reason });
+			verdicts.set(oid, inspected.ok ? { ok: true, sha256: inspected.sha256, bytes: inspected.bytes, text: inspected.text } : { ok: false, reason: inspected.reason });
 		}
 		for (const oid of oids) {
 			if (!verdicts.has(oid)) verdicts.set(oid, { ok: false, reason: "unreadable", problem: "git cat-file returned no complete answer" });
@@ -354,7 +355,18 @@ export function buildView(opts: ViewOptions): ViewResult | null {
 	for (const row of queued) {
 		const verdict = verdicts.get(row.item.oid);
 		if (verdict?.ok === true) {
-			entries.push({ repo, path: row.path, kind: row.kind, tier: row.tier, sha256: verdict.sha256, bytes: verdict.bytes, source: "fs", commit: tip });
+			const supersededBy = entrySupersededBy(row.tier, verdict.text);
+			entries.push({
+				repo,
+				path: row.path,
+				kind: row.kind,
+				tier: row.tier,
+				sha256: verdict.sha256,
+				bytes: verdict.bytes,
+				source: "fs",
+				commit: tip,
+				...(supersededBy === undefined ? {} : { supersededBy }),
+			});
 			paths.set(documentKey(repo, row.path), blobLocation(mirrorDir, row.item.oid));
 			continue;
 		}
@@ -381,6 +393,7 @@ export function buildView(opts: ViewOptions): ViewResult | null {
 			if (loaded.problem !== undefined) problem(`${path}: ${loaded.problem}`);
 			continue;
 		}
+		const supersededBy = entrySupersededBy(found.tier, loaded.text);
 		entries.push({
 			repo,
 			path,
@@ -390,6 +403,7 @@ export function buildView(opts: ViewOptions): ViewResult | null {
 			bytes: loaded.bytes,
 			source: "fs",
 			...(head === null ? {} : { commit: head }),
+			...(supersededBy === undefined ? {} : { supersededBy }),
 		});
 		paths.set(documentKey(repo, path), abs);
 	}

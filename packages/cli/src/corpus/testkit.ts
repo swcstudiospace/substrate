@@ -110,6 +110,8 @@ export function reconcileOf(drift: Partial<CorpusReconcileResponse["drift"]> = {
 		repaired,
 		manifestVersion: 10,
 	};
+}
+
 export function reflectOf(results: CorpusReflectResponse["results"]): CorpusReflectResponse {
 	return { protocol: CORPUS_PROTOCOL, results, manifestVersion: 11 };
 }

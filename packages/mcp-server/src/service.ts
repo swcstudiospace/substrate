@@ -1585,8 +1585,6 @@ export class Substrate {
 			hindsightFetch?: FetchLike;
 			lightragFetch?: FetchLike;
 			teiFetch?: FetchLike;
-			/** Tests inject the corpus manifest, the LightRAG bulk plane, the root clock and the anchor verifier; production builds them from the index, `config.lightrag` and the devnet reads. */
-			corpus?: { store?: CorpusStore; plane?: LightragBulkPlane; rootClock?: RootClock; anchorVerifier?: AnchorVerifier };
 			/** Tests inject the planning refresh's hash store; it is used only while `SUBSTRATE_PLANNING_HASH_STORE` is on. Production uses the index's table, or memory without an index. */
 			planningHashes?: PlanningHashStore;
 			/** Tests inject the corpus manifest, the LightRAG bulk plane, the root clock, the anchor verifier and the clock an ingest request is timed with; production builds them from the index, `config.lightrag` and the devnet reads, and times with `performance.now`. */

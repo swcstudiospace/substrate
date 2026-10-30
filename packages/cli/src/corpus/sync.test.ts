@@ -86,6 +86,12 @@ function fakeServer(options: { refuse?: (path: string) => boolean; planFails?: b
 		async reconcile() {
 			return { ok: false, error: { kind: "http", message: "unused" } };
 		},
+		async reflect() {
+			return { ok: false, error: { kind: "http", message: "unused" } };
+		},
+		async gaps() {
+			return { ok: false, error: { kind: "http", message: "unused" } };
+		},
 		async neardup() {
 			return { ok: false, error: { kind: "http", message: "unused" } };
 		},
