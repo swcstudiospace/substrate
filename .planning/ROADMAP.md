@@ -1229,7 +1229,7 @@ Plans:
 
 ### Phase 71: Multi-Session boundary
 
-**Goal**: A steering or session-context call reads and writes only the session its authenticated surface owns, unless the caller is the operator.
+**Goal**: A steering write or wait reaches only a session the caller's authenticated surface owns, unless the caller is the operator. The redacted cross-session digest that `session_context` returns (Phase 67 contract) is unchanged.
 
 **Status**: Not started. Discovery: the steering REST routes (`packages/mcp-server/src/server.ts`) and MCP tools (`packages/mcp-server/src/mcp.ts`) take a caller-supplied target session id, and writes are not checked against the caller's surface.
 
@@ -1242,6 +1242,7 @@ Plans:
   1. A surface that does not own target session S gets a refused status, not a write, from queue, acknowledge and wait on S.
   2. The operator surface keeps cross-session access, and each refusal is an audited event.
   3. The steering baseline on `origin/main` 9b482207 (575 pass, 7 skip, 0 fail across the steering and session suites) still passes.
+  4. `session_context` still returns the redacted digest of other sessions in the same repository, and its existing test still passes.
 
 **Plans**: none written
 
@@ -1270,8 +1271,8 @@ Plans:
 
 **Success Criteria** (what must be TRUE):
 
-  1. Tests edit a stored payload, delete a middle event and truncate the tail. Each is reported as a break with the first broken event id.
-  2. The chain head for each graph is recorded in the hourly anchor.
+  1. Tests save the graph's head before the change, then edit a stored payload, delete a middle event, truncate the last events, and rewrite the whole chain with recalculated `hash` and `prev`. Each is compared with that saved head: the edits and the rewrite report the first differing event id, and truncation reports the first missing event id.
+  2. The chain head for each graph is recorded in the hourly anchor. That recorded head is the trusted earlier proof criterion 1 compares against; a head recomputed from the stored rows is never used as the proof.
 
 **Plans**: none written
 
@@ -1279,14 +1280,14 @@ Plans:
 
 **Goal**: A multi-repo operation that fails partway undoes its completed steps, and a failed undo is recorded, not dropped.
 
-**Status**: Not started. Discovery did not map the multi-repo write path. The unit maps it first.
+**Status**: Not applicable on `origin/main` 9b482207 as far as search can show: no multi-repo, multi-step write exists. Checked and rejected: corpus ingest, skills propose, host commit and push, worktree provision and prune, snapshot restore, session rollback, steer, and the git hook installer. Owner decision needed on whether a cross-repo write path should be built first. Robustness gap found: `packages/collectors/src/install-git-hook.ts` has no try/catch around `writeHook`, so one failing repo aborts the run mid-loop.
 
 **Depends on**: none
 
 **Success Criteria** (what must be TRUE):
 
-  1. Each step of a multi-repo write has a recorded compensation. A failure at step N runs the compensations for steps below N in reverse order.
-  2. A compensation that itself fails is recorded as a dead letter and shown in status.
+  1. Owner decides whether a cross-repo write path is built first; no compensation is built against a path that does not exist.
+  2. The install-git-hook robustness gap is fixed or tracked separately; it is not a compensation case.
 
 **Plans**: none written
 
@@ -1332,6 +1333,7 @@ Plans:
 
   1. A replayed keyed command returns the original result and writes nothing.
   2. Unkeyed commands keep working unchanged (owner decision, 2026-10-30).
+  3. A keyed reply exposes its sequence number, a replay returns the same sequence, and two distinct commands are delivered in sequence order. `restDirective` omits the sequence today, though `SteeringInbox` tracks one internally.
 
 **Plans**: none written
 
