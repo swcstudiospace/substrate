@@ -204,6 +204,31 @@ describe("AuthorityIndex clears racing loads", () => {
 		expect(lookup(documentKey(REPO, "docs/doubted.md"))).toMatchObject({ stale: true });
 	});
 
+	test("a lookup that joins a feedback read a clear has outdated waits for the follow-up and sees the votes", async () => {
+		const { store, reflect, index } = world();
+		seed(store, "docs/doubted.md");
+		const reflectStore = defined(reflect, "the reflect store");
+		const gate = Promise.withResolvers<void>();
+		const counted = Promise.withResolvers<void>();
+		const read = reflectStore.feedbackCounts.bind(reflectStore);
+		reflectStore.feedbackCounts = async (maxKeys) => {
+			const counts = await read(maxKeys);
+			counted.resolve();
+			await gate.promise;
+			return counts;
+		};
+		const first = index.lookup();
+		await counted.promise;
+		for (const session of ["a", "b", "c"]) await reflectStore.upsertFeedback({ documentKey: documentKey(REPO, "docs/doubted.md"), sessionId: session, verdict: "stale", surface: "omp" });
+		index.invalidateFeedback();
+		// Joins the read the clear outdated. It must not answer until the follow-up has the votes.
+		const joined = index.lookup();
+		gate.resolve();
+		const lookup = defined(await joined, "the joined lookup");
+		expect(lookup(documentKey(REPO, "docs/doubted.md"))).toMatchObject({ stale: true });
+		await first;
+	});
+
 	test("a failed read that a clear has already outdated does not hold back the next read", async () => {
 		const { store, index } = world();
 		seed(store, "docs/a.md");

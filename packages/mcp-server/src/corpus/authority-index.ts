@@ -169,11 +169,15 @@ export class AuthorityIndex {
 
 	/** One manifest load. When it settles, a clear that arrived during it starts exactly one follow-up. */
 	private startManifest(): Promise<void> {
-		const load = this.refreshManifest().finally(() => {
+		// The promise a lookup joined does not resolve until a follow-up owed by a clear during this load has settled too.
+		// Otherwise the search returns the empty snapshot the clear dropped, with time still left in its budget.
+		const load = this.refreshManifest().then(async () => {
 			if (this.loading !== load) return;
 			if (this.manifestFollowUp) {
 				this.manifestFollowUp = false;
-				this.loading = this.startManifest();
+				const next = this.startManifest();
+				this.loading = next;
+				await next;
 				return;
 			}
 			this.loading = null;
@@ -214,11 +218,13 @@ export class AuthorityIndex {
 
 	/** One feedback load. When it settles, a clear that arrived during it starts exactly one follow-up. */
 	private startFeedback(): Promise<void> {
-		const load = this.refreshFeedback().finally(() => {
+		const load = this.refreshFeedback().then(async () => {
 			if (this.loadingFeedback !== load) return;
 			if (this.feedbackFollowUp) {
 				this.feedbackFollowUp = false;
-				this.loadingFeedback = this.startFeedback();
+				const next = this.startFeedback();
+				this.loadingFeedback = next;
+				await next;
 				return;
 			}
 			this.loadingFeedback = null;
