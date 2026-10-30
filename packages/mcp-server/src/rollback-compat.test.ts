@@ -637,6 +637,7 @@ const STEPS_ADDED_SINCE_REFERENCE: Readonly<Record<number, string>> = {
 	36: "worktrees",
 	37: "steering_sessions",
 	38: "corpus_reflect",
+	39: "planning_page_hashes",
 	40: "worktrees_changed_files",
 	41: "worktrees_repo_lower_seen_idx",
 };

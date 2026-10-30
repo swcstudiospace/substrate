@@ -8,7 +8,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CORPUS_PROTOCOL } from "@substrate/corpus";
+import { CORPUS_PROTOCOL, corpusDocumentName } from "@substrate/corpus";
 import { loadConfig } from "../config.ts";
 import { createObservability, type Observability } from "../observe.ts";
 import { createHttpServer } from "../server.ts";
@@ -245,6 +245,116 @@ describe("POST /corpus/plan and GET /corpus/status", () => {
 		const response = await fetch(`${harness.base}/corpus/status`, { headers: AUTH });
 		expect(response.status).toBe(200);
 		expect(await response.json()).toMatchObject({ protocol: CORPUS_PROTOCOL, total: 2, active: 1, tombstoned: 1, manifestVersion: 2 });
+	});
+});
+
+describe("POST /corpus/reconcile", () => {
+	const dry = { protocol: CORPUS_PROTOCOL, execute: false };
+	const execute = { protocol: CORPUS_PROTOCOL, execute: true };
+
+	interface ReconcileBody {
+		drift: { missingInPlane: unknown[]; orphansInPlane: string[]; checked: number; truncated: boolean };
+		repaired: { requeued: number; deleted: number };
+	}
+
+	/** The server's own reply; the assertions that follow pin its shape. */
+	async function bodyOf(response: Response): Promise<ReconcileBody> {
+		const body = (await response.json()) as ReconcileBody;
+		return body;
+	}
+
+	/** A harness whose manifest and plane agreed about one document, which the plane then lost, and which gained a stray `corpus:` document. */
+	async function drifted() {
+		const harness = await start(ON);
+		await post(harness, "/corpus/ingest", ingestBody);
+		harness.plane.vanish(corpusDocumentName(document.repo, document.path, document.sha256));
+		const orphan = corpusDocumentName(REPO, "docs/stray.md", sha256Hex("stray"));
+		const orphanId = harness.plane.plant(orphan);
+		return { harness, orphan, orphanId };
+	}
+
+	test("while SUBSTRATE_CORPUS is off it answers 503 corpus.disabled and lists nothing", async () => {
+		const harness = await start({ SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		const response = await post(harness, "/corpus/reconcile", execute);
+		expect(response.status).toBe(503);
+		expect(await reasonOf(response)).toBe("corpus.disabled");
+		expect(harness.plane.calls).toEqual([]);
+	});
+
+	test("an anonymous caller is refused 401 before the body is read; a VM guest 403; no LightRAG plane 503 corpus.backend-unavailable", async () => {
+		const harness = await start(ON);
+		expect((await post(harness, "/corpus/reconcile", "{ not json", ANON)).status).toBe(401);
+		expect(harness.plane.calls).toEqual([]);
+		const guest = await start({ ...ON, SUBSTRATE_VM_GUEST: "1" });
+		expect((await post(guest, "/corpus/reconcile", execute)).status).toBe(403);
+		const bare = await start(ON, { plane: false });
+		const refused = await post(bare, "/corpus/reconcile", dry);
+		expect(refused.status).toBe(503);
+		expect(await reasonOf(refused)).toBe("corpus.backend-unavailable");
+	});
+
+	test("a dry run reports the drift, repairs nothing, and is audited as a read under corpus_status", async () => {
+		const { harness, orphan } = await drifted();
+		const response = await post(harness, "/corpus/reconcile", dry);
+		expect(response.status).toBe(200);
+		const body = await bodyOf(response);
+		expect(body.drift).toEqual({ missingInPlane: [{ repo: REPO, path: "docs/a.md" }], orphansInPlane: [orphan], checked: 1, truncated: false });
+		expect(body.repaired).toEqual({ requeued: 0, deleted: 0 });
+		expect(harness.store.row(REPO, "docs/a.md")?.state).toBe("active");
+		expect(harness.plane.deletes).toEqual([]);
+		const record = defined(harness.observability.audit.recent().find((entry) => entry.tool === "corpus_status"), "the corpus_status audit record");
+		expect(record.decision).toBe("allowed");
+	});
+
+	test("execute repairs the row and the orphan, is audited under corpus_ingest, and the repaired row is offered by the next plan as an add", async () => {
+		const { harness, orphanId } = await drifted();
+		const response = await post(harness, "/corpus/reconcile", execute);
+		expect(response.status).toBe(200);
+		expect((await bodyOf(response)).repaired).toEqual({ requeued: 1, deleted: 1 });
+		expect(harness.store.row(REPO, "docs/a.md")?.state).toBe("tombstoned");
+		expect(harness.plane.deletes).toEqual([[orphanId]]);
+		expect(harness.observability.audit.recent().some((entry) => entry.tool === "corpus_ingest")).toBe(true);
+		const plan = await post(harness, "/corpus/plan", { protocol: CORPUS_PROTOCOL, entries: [entryOf(document)], scope: { coverage: [{ repo: REPO, source: "fs" }], maxTier: 3 } });
+		const planned = (await plan.json()) as { counts: Record<string, number> };
+		expect(planned.counts).toMatchObject({ add: 1 });
+	});
+
+	test("a plane that cannot list is 503 corpus.plane-unreachable and nothing is changed", async () => {
+		const { harness } = await drifted();
+		harness.plane.listFailure = "timeout";
+		const response = await post(harness, "/corpus/reconcile", execute);
+		expect(response.status).toBe(503);
+		expect(await reasonOf(response)).toBe("corpus.plane-unreachable");
+		expect(harness.store.row(REPO, "docs/a.md")?.state).toBe("active");
+		expect(harness.plane.deletes).toEqual([]);
+	});
+
+	test("an audit chain that cannot take the record refuses execute and changes nothing (fail-closed), while a dry run still answers (fail-open)", async () => {
+		const harness = await start({ ...ON, SUBSTRATE_AUDIT_PATH: unwritableAuditPath() });
+		await harness.store.recordIngested({ repo: REPO, path: "docs/a.md", kind: "doc", tier: 1, sha256: document.sha256, bytes: document.bytes, source: "fs", documentId: "doc-gone" });
+		expect((await post(harness, "/corpus/reconcile", dry)).status).toBe(200);
+		expect((await post(harness, "/corpus/reconcile", execute)).status).toBe(503);
+		expect(harness.store.row(REPO, "docs/a.md")?.state).toBe("active");
+	});
+
+	test("a body that is not a reconcile request is refused 400 with its closed reason, and a body past its small cap is 413", async () => {
+		const harness = await start(ON);
+		expect(await reasonOf(await post(harness, "/corpus/reconcile", { protocol: 2, execute: false }))).toBe("bad-protocol");
+		expect(await reasonOf(await post(harness, "/corpus/reconcile", { protocol: CORPUS_PROTOCOL, execute: "yes" }))).toBe("bad-request");
+		expect((await post(harness, "/corpus/reconcile", JSON.stringify({ ...dry, padding: "x".repeat(5000) }))).status).toBe(413);
+		expect(harness.plane.calls).toEqual([]);
+	});
+});
+
+describe("GET /corpus/status lag", () => {
+	test("lagSeconds is the age of the newest manifest write, null for an empty manifest", async () => {
+		const harness = await start(ON);
+		const empty = (await (await fetch(`${harness.base}/corpus/status`, { headers: AUTH })).json()) as { lagSeconds: number | null };
+		expect(empty.lagSeconds).toBeNull();
+		harness.store.newestChangeAt = new Date(Date.now() - 90_000).toISOString();
+		const aged = (await (await fetch(`${harness.base}/corpus/status`, { headers: AUTH })).json()) as { lagSeconds: number | null };
+		expect(aged.lagSeconds).toBeGreaterThanOrEqual(90);
+		expect(aged.lagSeconds).toBeLessThan(120);
 	});
 });
 

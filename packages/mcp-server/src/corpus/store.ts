@@ -80,8 +80,11 @@ export interface ActiveLeaves {
 	truncated: boolean;
 }
 
-/** `status()` without the protocol member the route adds. */
-export type CorpusStatusSummary = Omit<CorpusStatusResponse, "protocol">;
+/**
+ * `status()` without the protocol member and the lag the route computes. `newestChangeAt` is the newest manifest write of any
+ * kind, so the route can age it against its own clock; the freshness check reads `lastIngestAt`.
+ */
+export type CorpusStatusSummary = Omit<CorpusStatusResponse, "protocol" | "lagSeconds"> & { newestChangeAt: string | null };
 
 export interface CorpusStore {
 	/** Every row, any state, whose repo is in `repos`. The planner applies the coverage and tier limits itself. */
@@ -99,9 +102,9 @@ export interface CorpusStore {
 	/** How many ACTIVE rows hold this plane document id. */
 	activeReferences(documentId: string): Promise<number>;
 	/**
-	 * Up to `limit` ACTIVE rows ordered by `(repo, path)`, for the supersession and authority index. `truncated` says the list is
-	 * not the whole active manifest: a reader may treat a document it never saw as unflagged, but must not judge a document by
-	 * comparing it with the copies it did see, because the copies it missed may change the answer.
+	 * Up to `limit` ACTIVE rows ordered by `(repo, path)`, for reconcile and the supersession and authority index. `truncated`
+	 * says the list is not the whole active manifest: a reader may treat a document it never saw as unflagged, but must not
+	 * judge a document by comparing it with the copies it did see, because the copies it missed may change the answer.
 	 */
 	activeRows(limit: number): Promise<ActiveRows>;
 	/**
@@ -251,7 +254,7 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 			return isoOf(rows[0]?.last);
 		},
 		async status(): Promise<CorpusStatusSummary> {
-			const [totals, byRepo, byKind, byTier, last, version] = await Promise.all([
+			const [totals, byRepo, byKind, byTier, last, newest, version] = await Promise.all([
 				sql`select count(*) filter (where state = 'active')::int as active, count(*) filter (where state = 'tombstoned')::int as tombstoned from corpus_documents`,
 				sql`
 					select repo, count(*) filter (where state = 'active')::int as active, count(*) filter (where state = 'tombstoned')::int as tombstoned
@@ -259,6 +262,7 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 				sql`select kind, count(*)::int as n from corpus_documents where state = 'active' group by kind order by kind`,
 				sql`select tier::int as tier, count(*)::int as n from corpus_documents where state = 'active' group by tier order by tier`,
 				sql`select max(ingested_at) as last from corpus_documents`,
+				sql`select max(updated_at) as newest from corpus_documents`,
 				manifestVersion(),
 			]);
 			const active = numberOf(totals[0]?.active);
@@ -275,6 +279,7 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 					return isDocTier(tier) ? [{ tier, count: numberOf(row.n) }] : [];
 				}),
 				lastIngestAt: isoOf(lastIngest),
+				newestChangeAt: isoOf(newest[0]?.newest),
 				manifestVersion: version,
 			};
 		},

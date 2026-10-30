@@ -670,6 +670,16 @@ export class SubstrateInstruments {
 	}
 
 	/**
+	 * The lag the newest corpus sync reported (v1.7 phase 65), in seconds: from the change it saw to the moment its ingest
+	 * finished. One unlabelled gauge, so a repository name never becomes a label. The caller bounds and sanitises the number;
+	 * a value that is not finite or is negative is dropped here as well, so the gauge only ever holds a real lag.
+	 */
+	setCorpusSyncLag(seconds: number): void {
+		if (!Number.isFinite(seconds) || seconds < 0) return;
+		this.registry.gauge(CORPUS_SYNC_LAG_METRIC, { description: "Lag the newest reported corpus sync had behind its source change", unit: "s" }).set(seconds);
+	}
+
+	/**
 	 * The age of the newest manifest change of the corpus atlas, in seconds (phase 70). `newestAtMs` answers its time or `null`
 	 * while nothing has been read; the age is computed when the registry is snapshotted, so it grows between reads. No point
 	 * until there is a change to age.
@@ -718,6 +728,8 @@ export const OUTBOX_DURABLE_METRIC = "substrate.hindsight.retain_outbox.durable"
 /** The gauge `setEndpointProxyPlanes` sets (phase 51, SOTA-07). */
 export const ENDPOINT_PROXY_PLANES_METRIC = "substrate.endpoint.proxy_planes";
 
+/** The gauge `setCorpusSyncLag` sets (v1.7 phase 65): how far behind its source the newest reported corpus sync was, seconds. No repository label. */
+export const CORPUS_SYNC_LAG_METRIC = "substrate.corpus.sync_lag_seconds";
 /** The three gauges of the corpus atlas SLOs (phase 70). */
 export const CORPUS_FRESHNESS_METRIC = "substrate.corpus.freshness_seconds";
 export const CORPUS_INGEST_RATE_METRIC = "substrate.corpus.ingest_docs_per_second";

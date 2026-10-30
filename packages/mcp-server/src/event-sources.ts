@@ -1508,6 +1508,58 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 			payload: { action: "steering.persist_failed", reason: "connection refused" },
 		}),
 	},
+	{
+		// v1.7 phase 65: one note per `substrate corpus` sync (the watcher, a git hook hint, the sweep, a manual run or the
+		// reconcile): the repository, why it ran, how it ended, the lag from the change to the end of the ingest, and counts.
+		// The server reads only `lag_s`, into the `substrate.corpus.sync_lag_seconds` gauge. Names and numbers, never text.
+		id: "docs.sync",
+		phase: 65,
+		kind: "note",
+		surface: "caller",
+		actions: ["docs.sync"],
+		runtime: "corpus-sync",
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "note",
+			summary: "corpus sync swcstudiospace/agent-substrate: ok",
+			session_id: "sess-p65-corpus-sync",
+			payload: {
+				action: "docs.sync",
+				runtime: "corpus-sync",
+				repo: "swcstudiospace/agent-substrate",
+				trigger: "watch",
+				outcome: "ok",
+				lag_s: 12,
+				added: 1,
+				changed: 2,
+				updated: 0,
+				tombstoned: 0,
+				refused: 0,
+				failed: 0,
+				duration_ms: 1840,
+			},
+		}),
+	},
+	{
+		// The server's own planning refresh (`Substrate.runPlanningRefresh`): the `.planning/` pages that changed since the last
+		// pass, and the content hash steering sessions compare against. The action existed without a row until phase 65.
+		id: "docs.planning",
+		phase: 65,
+		kind: "note",
+		surface: { fixed: "substrate" },
+		actions: ["docs.planning"],
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "note",
+			summary: "planning refresh (planning-changed): 1 changed page(s) under .planning/",
+			session_id: "planning-refresh",
+			payload: { action: "docs.planning", reason: "planning-changed", paths: [".planning/STATE.md"], planning_hash: HEX_64 },
+		}),
+	},
 ];
 
 export const SILENT_SOURCES: readonly SilentSource[] = [

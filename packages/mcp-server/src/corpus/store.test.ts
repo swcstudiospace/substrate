@@ -162,6 +162,23 @@ describeLive("the corpus manifest against a live index", () => {
 		expect(status.byTier.some((entry) => entry.tier === 1 && entry.count > 0)).toBe(true);
 		expect(status.manifestVersion).toBe(await store.manifestVersion());
 		expect(typeof status.lastIngestAt).toBe("string");
+		expect(typeof status.newestChangeAt).toBe("string");
+	});
+
+	test("activeRows answers only active rows, ordered by repo and path, and no more than the limit", async () => {
+		// A sibling test leaves an active row under OTHER. This one uses its own repo so that row is not part of the answer.
+		const repo = `${MARKER}/active-rows`;
+		await store.recordIngested(doc("b-active.md", { repo }));
+		await store.recordIngested(doc("a-active.md", { repo }));
+		await store.recordIngested(doc("gone.md", { repo }));
+		await store.markTombstoned(repo, "gone.md");
+		const listed = await store.activeRows(100_000);
+		const mine = listed.rows.filter((row) => row.repo === repo);
+		expect(mine.map((row) => row.path)).toEqual(["a-active.md", "b-active.md"]);
+		expect(mine.every((row) => row.state === "active")).toBe(true);
+		const limited = await store.activeRows(1);
+		expect(limited.rows).toHaveLength(1);
+		expect(limited.truncated).toBe(true);
 	});
 
 	test("the superseded-by marker is stored by a record, replaced by a refresh and cleared by a refresh without one", async () => {

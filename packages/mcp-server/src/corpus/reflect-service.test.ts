@@ -27,7 +27,7 @@ import { FakePlane, FakeStore, makeRow, sha256Hex } from "./testkit.ts";
 
 const REPO = "swcstudiospace/agent-substrate";
 const OTHER = "swcstudiospace/other";
-const OPEN: CorpusSettings = { enabled: true, concurrency: 4, batchDocs: 20, batchBytes: 1_000_000 };
+const OPEN: CorpusSettings = { enabled: true, concurrency: 4, batchDocs: 20, batchBytes: 1_000_000, freshMaxAgeS: 172_800 };
 
 /** The anchor check is never reached by these doors; a port that throws proves it. */
 const UNUSED_PORTS: AnchorVerifyPorts = {

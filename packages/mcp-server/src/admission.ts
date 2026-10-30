@@ -192,6 +192,7 @@ export const ROUTE_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	"/corpus/neardup": "read",
 	"/corpus/status": "read",
 	"/corpus/ingest": "write",
+	"/corpus/reconcile": "write",
 	"/corpus/reflect": "write",
 	"/corpus/gaps": "read",
 	"/docs/feedback": "write",

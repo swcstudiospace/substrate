@@ -9,6 +9,9 @@ import { CircuitBreaker, gatedFetch } from "@substrate/observability";
 import type { LightragConfig } from "../config.ts";
 import { defined } from "../test-support.ts";
 import {
+	BULK_LIST_MAX_ELAPSED_MS,
+	BULK_LIST_MAX_PAGES,
+	BULK_LIST_PAGE_SIZE,
 	BULK_MAX_BYTES_PER_REQUEST,
 	BULK_MAX_DELETE_IDS,
 	BULK_MAX_DOCUMENTS_PER_REQUEST,
@@ -489,5 +492,119 @@ describe("deleteDocuments", () => {
 		const { plane, calls } = fakePlane({});
 		expect(await plane.deleteDocuments([])).toEqual({ deleted: [], failed: [] });
 		expect(calls).toHaveLength(0);
+	});
+});
+
+describe("listDocuments", () => {
+	const CORPUS_A = "corpus:acme%2Fdocs:README.md@0123456789ab";
+	const CORPUS_B = "corpus:acme%2Fdocs:guide.md@ba9876543210";
+
+	function pageOf(entries: readonly unknown[], hasNext: boolean, page = 1): Response {
+		return json({
+			documents: entries,
+			pagination: { page, page_size: BULK_LIST_PAGE_SIZE, total_count: entries.length, total_pages: hasNext ? page + 1 : page, has_next: hasNext, has_prev: page > 1 },
+			status_counts: {},
+		});
+	}
+
+	function entry(id: string, name: string): Record<string, unknown> {
+		return { id, file_path: name, status: "processed", content_summary: "", error_msg: null, metadata: null };
+	}
+
+	test("every page is read in order at the largest page size, sorted by id; only corpus names are returned and other documents give their id alone", async () => {
+		const { plane, calls } = fakePlane({
+			"POST /documents/paginated": [
+				(call) => {
+					const page = isRecord(call.body) ? call.body.page : undefined;
+					if (page === 1) return pageOf([entry("doc-a", CORPUS_A), entry("doc-x", "docs__a__README.md")], true, 1);
+					return pageOf([entry("doc-b", CORPUS_B)], false, 2);
+				},
+			],
+		});
+		const listing = await plane.listDocuments();
+		expect(listing).toEqual({
+			ok: true,
+			documents: [
+				{ id: "doc-a", name: CORPUS_A },
+				{ id: "doc-b", name: CORPUS_B },
+			],
+			otherDocumentIds: ["doc-x"],
+			truncated: false,
+		});
+		const bodies = calls.filter((call) => call.path === "/documents/paginated").map((call) => call.body);
+		expect(bodies).toEqual([
+			{ page: 1, page_size: BULK_LIST_PAGE_SIZE, sort_field: "id", sort_direction: "asc" },
+			{ page: 2, page_size: BULK_LIST_PAGE_SIZE, sort_field: "id", sort_direction: "asc" },
+		]);
+		expect(calls.every((call) => call.method === "POST")).toBe(true);
+	});
+
+	test("a page that fails fails the whole listing: what a partial read lacks proves nothing", async () => {
+		const { plane } = fakePlane({
+			"POST /documents/paginated": [(call) => (isRecord(call.body) && call.body.page === 1 ? pageOf([entry("doc-a", CORPUS_A)], true) : json({ detail: "boom" }, 500))],
+		});
+		expect(await plane.listDocuments()).toEqual({ ok: false, reason: "plane-unavailable" });
+	});
+
+	test("an answer without documents or pagination is a plane failure, not an empty listing", async () => {
+		const { plane } = fakePlane({ "POST /documents/paginated": [json({ unrelated: true })] });
+		expect(await plane.listDocuments()).toEqual({ ok: false, reason: "plane-unavailable" });
+	});
+
+	test("a listing that never ends stops at the page bound and says it is truncated", async () => {
+		const { plane, calls } = fakePlane({ "POST /documents/paginated": [(call) => pageOf([entry(`doc-${String(isRecord(call.body) ? call.body.page : 0)}`, CORPUS_A)], true)] });
+		const listing = await plane.listDocuments();
+		expect(listing.ok && listing.truncated).toBe(true);
+		expect(count(calls, "POST", "/documents/paginated")).toBe(BULK_LIST_MAX_PAGES);
+	});
+
+	test("a listing that runs past its time bound stops and says it is truncated", async () => {
+		let now = 0;
+		let requests = 0;
+		const plane = createLightragBulkPlane(CONFIG, {
+			fetch: async () => {
+				requests += 1;
+				now += BULK_LIST_MAX_ELAPSED_MS / 2;
+				return pageOf([entry(`doc-${requests}`, CORPUS_A)], true, requests);
+			},
+			sleep: async () => {},
+			now: () => now,
+		});
+		const listing = await plane.listDocuments();
+		expect(listing.ok && listing.truncated).toBe(true);
+		expect(requests).toBe(2);
+	});
+
+	test("an entry that cannot be read makes the listing truncated, and the readable ones are still returned", async () => {
+		const { plane } = fakePlane({ "POST /documents/paginated": [pageOf([entry("doc-a", CORPUS_A), { file_path: CORPUS_B }, "garbage"], false)] });
+		expect(await plane.listDocuments()).toEqual({ ok: true, documents: [{ id: "doc-a", name: CORPUS_A }], otherDocumentIds: [], truncated: true });
+	});
+
+	test("a caller whose signal already fired gets a timeout and the plane is not asked", async () => {
+		const { plane, calls } = fakePlane({ "POST /documents/paginated": [pageOf([], false)] });
+		const controller = new AbortController();
+		controller.abort();
+		expect(await plane.listDocuments({ signal: controller.signal })).toEqual({ ok: false, reason: "timeout" });
+		expect(calls).toHaveLength(0);
+	});
+});
+
+describe("lookupDocument", () => {
+	function page(ids: string[], totalCount: number, totalPages: number, page = 1): Response {
+		return json({
+			documents: ids.map((id) => ({ id, file_path: `corpus:${id}`, status: "processed" })),
+			pagination: { page, page_size: BULK_LIST_PAGE_SIZE, total_count: totalCount, total_pages: totalPages, has_next: page < totalPages, has_prev: page > 1 },
+		});
+	}
+
+	test("an id inside a page but missing from it is absent only when a second read still brackets it", async () => {
+		const { plane } = fakePlane({ "POST /documents/paginated": [page(["doc-a", "doc-c"], 2, 1)] });
+		expect(await plane.lookupDocument("doc-b")).toBe("absent");
+		expect(await plane.lookupDocument("doc-a")).toBe("present");
+	});
+
+	test("a failed page is unknown, so a caller cannot treat the id as gone", async () => {
+		const { plane } = fakePlane({ "POST /documents/paginated": [json({ detail: "down" }, 503)] });
+		expect(await plane.lookupDocument("doc-a")).toBe("unknown");
 	});
 });

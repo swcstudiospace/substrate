@@ -1,0 +1,60 @@
+[Unit]
+Description=Agent Substrate doc watch: keeps the docs plane in step with documentation changes (staged, opt-in: needs SUBSTRATE_CORPUS=on on the server; read-only against every repository)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+After=network-online.target substrate-mcp.service
+Wants=network-online.target
+# A missing entry point skips the start silently instead of failing into a restart
+# loop. The path is the pinned release, not the checkout.
+ConditionPathExists=/opt/agent-substrate/current/packages/cli/src/index.ts
+
+[Service]
+Type=simple
+# `substrate corpus watch` watches the registered roots with a debounce, folds a burst into one sync per repository, and
+# sweeps on a timer as well (the watcher drops to sweep-only when the inotify watch limit is reached). It never writes into a
+# repository: it reads the working tree, and the sweep reads a Substrate-managed blobless mirror. Staged, not installed:
+# copying this file, the environment file and `systemctl enable --now` are operator steps (docs/runbooks/corpus-sync.md).
+#
+# Credentials and settings only; nothing secret lives in the repo. /etc/substrate/substrate-corpus.env carries SUBSTRATE_URL,
+# the token the CLI authenticates with, SUBSTRATE_CORPUS_ROOTS and any of the SUBSTRATE_CORPUS_* doc watch flags.
+EnvironmentFile=-/etc/substrate/substrate-corpus.env
+WorkingDirectory=/opt/agent-substrate/current
+# Machine-specific: `command -v bun`. The binary on this host is under /root/.local, which is why the unit still runs as root
+# (no User=) and why ProtectHome=false stays.
+ExecStart=/root/.local/share/reflex/bun/bin/bun packages/cli/src/index.ts corpus watch
+Restart=on-failure
+RestartSec=30
+
+# The only writable state: the mirrors and the hint spool. Not the shared /var/lib/substrate parent, which also holds the audit chain and the retain outbox.
+StateDirectory=substrate/corpus-mirrors
+StateDirectory=substrate/corpus-hints
+StateDirectoryMode=0700
+Environment=SUBSTRATE_CORPUS_MIRROR_DIR=/var/lib/substrate/corpus-mirrors
+Environment=SUBSTRATE_CORPUS_SPOOL=/var/lib/substrate/corpus-hints
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-corpus-watch
+
+# Never starve the shared host: the lowest CPU and disk priority, a CPU ceiling and a memory ceiling. Lives in
+# substrate.slice so it is accounted with the rest.
+Slice=substrate.slice
+Nice=15
+IOSchedulingClass=idle
+CPUQuota=25%
+MemoryMax=512M
+TasksMax=256
+
+# Read-only against every repository: ProtectSystem=strict makes the whole tree read-only, and ReadWritePaths opens exactly the
+# mirror and spool directories. ProtectHome=false stays only because bun lives under /root/.local; the checkouts it reads are
+# not writable for it.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/substrate/corpus-mirrors /var/lib/substrate/corpus-hints
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

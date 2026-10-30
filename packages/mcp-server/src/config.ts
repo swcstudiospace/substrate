@@ -667,6 +667,12 @@ export interface SubstrateConfig {
 	/** The docs plane's three objectives (v1.7 phase 70): `SUBSTRATE_DOCS_SLO_FRESHNESS_S`, `SUBSTRATE_DOCS_SLO_RECALL5`, `SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S`. */
 	docsSlo: SloThresholds;
 	/**
+	 * `SUBSTRATE_PLANNING_HASH_STORE=on` (v1.7 phase 65): the planning refresh keeps its per-page hashes in a store (the index
+	 * when there is one, else this process's memory) and loads them at its first pass, so a restart ingests only the pages
+	 * that changed. Off by default: the hashes live in a map in memory, as before, and every restart re-ingests every page.
+	 */
+	planningHashStore: boolean;
+	/**
 	 * The three documented retrieval knobs sent on every `docs_search`
 	 * retrieval, from `SUBSTRATE_DOCS_SIMILARITY_THRESHOLD` (0.2),
 	 * `SUBSTRATE_DOCS_VECTOR_WEIGHT` (0.3) and `SUBSTRATE_DOCS_TOP_K` (1024).
@@ -1202,6 +1208,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// uplift-2 R6
 		docsPruneSuperseded: (env.SUBSTRATE_DOCS_PRUNE_SUPERSEDED?.trim() ?? "") === "1",
 		corpus: loadCorpusSettings(env),
+		planningHashStore: (env.SUBSTRATE_PLANNING_HASH_STORE?.trim().toLowerCase() ?? "") === "on",
 		docsReflect: loadDocsReflectSettings(env),
 		docsSlo: loadSloThresholds(env),
 		docsRetrieval: {
@@ -1503,11 +1510,15 @@ export interface CorpusSettings {
 	batchDocs: number;
 	/** Bytes per batch (`SUBSTRATE_CORPUS_BATCH_BYTES`). */
 	batchBytes: number;
+	/** Seconds since the last ingest after which `docs.freshness` warns (`SUBSTRATE_CORPUS_FRESH_MAX_AGE_S`); `0` switches the check off. Read only while the corpus is on. */
+	freshMaxAgeS: number;
 }
 
 export const CORPUS_CONCURRENCY_BOUNDS = { min: 1, max: 16, fallback: 4 } as const;
 export const CORPUS_BATCH_DOCS_BOUNDS = { min: 1, max: 200, fallback: 20 } as const;
 export const CORPUS_BATCH_BYTES_BOUNDS = { min: 10_000, max: 5_000_000, fallback: 1_000_000 } as const;
+/** Seconds a corpus may go without an ingest before the freshness warning (`0` judges nothing); two days by default, at most a year. */
+export const CORPUS_FRESH_MAX_AGE_BOUNDS = { min: 0, max: 31_536_000, fallback: 172_800 } as const;
 
 /** A whole number clamped into `[min, max]`; a value that is not a whole number is the fallback, so junk never widens a bound. */
 function clampedIntOr(raw: string | undefined, bounds: { min: number; max: number; fallback: number }): number {
@@ -1522,6 +1533,7 @@ export function loadCorpusSettings(env: Record<string, string | undefined>): Cor
 		concurrency: clampedIntOr(env.SUBSTRATE_CORPUS_CONCURRENCY, CORPUS_CONCURRENCY_BOUNDS),
 		batchDocs: clampedIntOr(env.SUBSTRATE_CORPUS_BATCH_DOCS, CORPUS_BATCH_DOCS_BOUNDS),
 		batchBytes: clampedIntOr(env.SUBSTRATE_CORPUS_BATCH_BYTES, CORPUS_BATCH_BYTES_BOUNDS),
+		freshMaxAgeS: clampedIntOr(env.SUBSTRATE_CORPUS_FRESH_MAX_AGE_S, CORPUS_FRESH_MAX_AGE_BOUNDS),
 	};
 }
 

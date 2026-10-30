@@ -1,5 +1,5 @@
 /**
- * The HTTP side of `substrate corpus`: the routes of the substrate server, each answer checked by a guard before it is
+ * The HTTP side of `substrate corpus`: the corpus routes of the substrate server, each answer checked by a guard before it is
  * used. A server that speaks another protocol version, answers with the wrong shape, refuses the token or runs with the
  * corpus off is reported as a closed error kind with a message the operator can act on; nothing here throws for those.
  */
@@ -27,6 +27,8 @@ import {
 	type CorpusPlanRequest,
 	type CorpusPlanResponse,
 	type CorpusProofResponse,
+	type CorpusReconcileRequest,
+	type CorpusReconcileResponse,
 	type CorpusReflectRequest,
 	type CorpusReflectResponse,
 	type CorpusStatusResponse,
@@ -60,6 +62,7 @@ export interface CorpusClient {
 	neardup(request: CorpusNeardupRequest): Promise<ClientResult<CorpusNeardupResponse>>;
 	ingest(request: CorpusIngestRequest): Promise<ClientResult<CorpusIngestResponse>>;
 	status(): Promise<ClientResult<CorpusStatusResponse>>;
+	reconcile(request: CorpusReconcileRequest): Promise<ClientResult<CorpusReconcileResponse>>;
 	reflect(request: CorpusReflectRequest): Promise<ClientResult<CorpusReflectResponse>>;
 	/** The queries the corpus could not answer; `limit` is clamped to the server's maximum. */
 	gaps(limit?: number): Promise<ClientResult<CorpusGapsResponse>>;
@@ -144,6 +147,7 @@ export function isStatusResponse(value: unknown): value is CorpusStatusResponse 
 		Array.isArray(value.byTier) &&
 		value.byTier.every((row) => isRecord(row) && isDocTier(row.tier) && isCount(row.count)) &&
 		(value.lastIngestAt === null || typeof value.lastIngestAt === "string") &&
+		(value.lagSeconds === null || (typeof value.lagSeconds === "number" && Number.isFinite(value.lagSeconds) && value.lagSeconds >= 0)) &&
 		isCount(value.manifestVersion)
 	);
 }
@@ -267,6 +271,25 @@ export function isAnchorResponse(value: unknown): value is CorpusAnchorResponse 
 	);
 }
 
+function isRowRef(value: unknown): boolean {
+	return isRecord(value) && typeof value.repo === "string" && typeof value.path === "string";
+}
+
+export function isReconcileResponse(value: unknown): value is CorpusReconcileResponse {
+	if (!isRecord(value) || value.protocol !== CORPUS_PROTOCOL || !isCount(value.manifestVersion)) return false;
+	const { drift, repaired } = value;
+	return (
+		isRecord(drift) &&
+		Array.isArray(drift.missingInPlane) &&
+		drift.missingInPlane.every(isRowRef) &&
+		Array.isArray(drift.orphansInPlane) &&
+		drift.orphansInPlane.every((name) => typeof name === "string") &&
+		isCount(drift.checked) &&
+		typeof drift.truncated === "boolean" &&
+		hasCounts(repaired, ["requeued", "deleted"])
+	);
+}
+
 function fail(kind: ErrorKind, message: string, status?: number, reason?: EmbeddingReason): { ok: false; error: ClientError } {
 	return { ok: false, error: { kind, message, ...(status === undefined ? {} : { status }), ...(reason === undefined ? {} : { reason }) } };
 }
@@ -350,6 +373,7 @@ export function createCorpusClient(config: ClientConfig): CorpusClient {
 		neardup: (request) => call("POST", CORPUS_ROUTES.neardup, request, isNeardupResponse),
 		ingest: (request) => call("POST", CORPUS_ROUTES.ingest, request, isIngestResponse),
 		status: () => call("GET", CORPUS_ROUTES.status, undefined, isStatusResponse),
+		reconcile: (request) => call("POST", CORPUS_ROUTES.reconcile, request, isReconcileResponse),
 		reflect: (request) => call("POST", CORPUS_ROUTES.reflect, request, isReflectResponse),
 		// The server refuses a limit above its maximum, so the CLI keeps inside it; a limit that is not a positive integer is the default.
 		gaps: (limit) => {

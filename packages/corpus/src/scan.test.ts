@@ -274,7 +274,37 @@ describe("scanRoots over copy collections", () => {
 		expect(second.entries.filter((e) => e.sha256 === sha(GUIDE)).map((e) => documentKey(e.repo, e.path))).toEqual(["local/c2:docs/guide.md"]);
 		expect(second.report.collapsed.identicalCopies).toEqual([{ keep: "local/c2:docs/guide.md", copies: ["local/c3:docs/guide.md"] }]);
 		expect(second.report.collapsed.identical).toBe(1);
+
 	});
+
+	test("a repository filter still gives an identical file to the same owner a full sweep would", async () => {
+		const root = collections();
+		const filtered = await scanRoots({ roots: [root], repos: ["local/c2"], runner: fakeGit({}) });
+		expect(filtered.entries.map((entry) => documentKey(entry.repo, entry.path))).not.toContain("local/c2:docs/guide.md");
+		expect(filtered.entries.map((entry) => entry.repo)).not.toContain("local/c1");
+		expect(filtered.report.repos.map((repo) => repo.repo)).toEqual(["local/c2"]);
+	});
+
+	test("a later supplied view does not replace an earlier file's location", async () => {
+		const root = fixture({ "a/notes/docs/guide.md": "first\n", "b/notes/.git/HEAD": "", "b/notes/docs/guide.md": "second\n" });
+		const earlier = join(root, "a");
+		const later = join(root, "b");
+		const checkout = join(later, "notes");
+		const result = await scanRoots({
+			roots: [earlier, later],
+			runner: fakeGit({ [checkout]: { branch: "main", files: ["docs/guide.md"] } }),
+			readCheckout: () => ({
+				entries: [{ repo: "local/notes", path: "docs/guide.md", kind: "doc", tier: 1, sha256: "e".repeat(64), bytes: 1, source: "fs" }],
+				paths: new Map([["local/notes:docs/guide.md", "git-blob:later"]]),
+				skips: new SkipLog(),
+				problems: [],
+			}),
+		});
+		expect(result.paths.get("local/notes:docs/guide.md")).toBe(join(earlier, "notes", "docs", "guide.md"));
+		expect(result.entries.filter((entry) => entry.path === "docs/guide.md")).toHaveLength(1);
+		expect(result.entries.find((entry) => entry.path === "docs/guide.md")?.sha256).toBe(sha("first\n"));
+	});
+
 
 	test("a path the server refuses is skipped before copies collapse, so the valid identical copy is the one kept", async () => {
 		const root = fixture({ "a/docs\\guide.md": GUIDE, "b/docs/guide.md": GUIDE });

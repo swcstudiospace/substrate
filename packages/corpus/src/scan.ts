@@ -143,6 +143,26 @@ export interface ScanOptions {
 	readFile?: ((path: string) => Uint8Array) | undefined;
 	/** Returns null for a path that does not exist and throws for any other failure. */
 	lstat?: ((path: string) => FileStat | null) | undefined;
+	/**
+	 * Only these repository labels are discovered further and read; every other repository is skipped before a file is
+	 * opened. A label that matches nothing is noted (`repo-not-found`) and never covered.
+	 */
+	repos?: readonly string[] | undefined;
+	/**
+	 * Reads one checkout in place of `git ls-files` and the working tree (the mirror view of `view.ts`). Returning null
+	 * leaves the checkout to the plain working-tree scan.
+	 */
+	readCheckout?: ((checkout: Checkout) => CheckoutRead | null) | undefined;
+}
+
+/** What `ScanOptions.readCheckout` hands back for one checkout; every field has the meaning it has in a plain scan. */
+export interface CheckoutRead {
+	entries: CorpusEntry[];
+	/** Where each entry's bytes live, keyed by `documentKey`; a location `readFile` can resolve. */
+	paths: Map<string, string>;
+	skips: SkipLog;
+	/** Anything that kept the read from being complete; a non-empty list leaves the repository out of the coverage. */
+	problems: string[];
 }
 
 export type Inspected =
@@ -257,6 +277,15 @@ export class SkipLog {
 		this.byReason[skip.reason] = (this.byReason[skip.reason] ?? 0) + 1;
 		if (this.listed.length < MAX_LISTED_SKIPS) this.listed.push(skip);
 	}
+
+	/** Adds another log: the counts exactly, the listed skips up to the cap. */
+	absorb(other: SkipLog): void {
+		for (const reason of SKIP_REASONS) {
+			const count = other.byReason[reason];
+			if (count !== undefined) this.byReason[reason] = (this.byReason[reason] ?? 0) + count;
+		}
+		for (const skip of other.listed) if (this.listed.length < MAX_LISTED_SKIPS) this.listed.push(skip);
+	}
 }
 
 interface Reader {
@@ -267,6 +296,12 @@ interface Reader {
 	skips: SkipLog;
 	entries: CorpusEntry[];
 	paths: Map<string, string>;
+	/** Null reads every label into the report. A set still reads other `local/*` copies so identical-file ownership does not depend on the trigger. */
+	wanted: ReadonlySet<string> | null;
+}
+
+function reported(reader: Reader, repo: string): boolean {
+	return reader.wanted === null || reader.wanted.has(repo);
 }
 
 interface RepoState {
@@ -283,7 +318,7 @@ function readCandidate(reader: Reader, state: RepoState, rel: string, abs: strin
 	if (found === null || found.tier > reader.maxTier) return;
 	// The server refuses a whole plan for one path that breaks its rules, so such a file is skipped here, before any copy collapse can let it hide a valid copy.
 	if (!isValidPath(rel)) {
-		reader.skips.add({ repo: state.repo, path: rel, reason: "bad-path" });
+		if (reported(reader, state.repo)) reader.skips.add({ repo: state.repo, path: rel, reason: "bad-path" });
 		return;
 	}
 	// Another directory under the same label already supplied this path (root order decides): it is counted, never read twice.
@@ -293,8 +328,8 @@ function readCandidate(reader: Reader, state: RepoState, rel: string, abs: strin
 	}
 	const loaded = loadDocument(abs, reader);
 	if (!loaded.ok) {
-		reader.skips.add({ repo: state.repo, path: rel, reason: loaded.reason });
-		if (loaded.problem !== undefined) state.problems.push(`${rel}: ${loaded.problem}`);
+		if (reported(reader, state.repo)) reader.skips.add({ repo: state.repo, path: rel, reason: loaded.reason });
+		if (loaded.problem !== undefined && reported(reader, state.repo)) state.problems.push(`${rel}: ${loaded.problem}`);
 		return;
 	}
 	const supersededBy = entrySupersededBy(found.tier, loaded.text);
@@ -312,7 +347,12 @@ function readCandidate(reader: Reader, state: RepoState, rel: string, abs: strin
 	reader.paths.set(documentKey(state.repo, rel), abs);
 }
 
-function scanCheckout(reader: Reader, checkout: Checkout, run: GitRunner): RepoState {
+function scanCheckout(
+	reader: Reader,
+	checkout: Checkout,
+	run: GitRunner,
+	readCheckout: ScanOptions["readCheckout"],
+): RepoState {
 	const state: RepoState = {
 		repo: checkout.repo,
 		dir: checkout.dir,
@@ -320,6 +360,26 @@ function scanCheckout(reader: Reader, checkout: Checkout, run: GitRunner): RepoS
 		problems: [],
 		shadowed: 0,
 	};
+	// A repository kept only so identical-file ownership matches a full sweep is read from its working tree. The mirror
+	// fetch belongs to the labels the caller asked to sync; fetching the others reports their failures as this sync's.
+	const supplied = reported(reader, checkout.repo) ? (readCheckout?.(checkout) ?? null) : null;
+	if (supplied !== null) {
+		// The supplied entries passed the same rules as `readCandidate` applies; only the source of the bytes differs.
+		// A later directory of the same label does not replace an earlier location: the first file's bytes are the ones read.
+		for (const entry of supplied.entries) {
+			const key = documentKey(entry.repo, entry.path);
+			if (reader.paths.has(key)) {
+				state.shadowed += 1;
+				continue;
+			}
+			reader.entries.push(entry);
+			// Claim the key even when the supplier omitted a location, so a later directory cannot read a second body.
+			reader.paths.set(key, supplied.paths.get(key) ?? join(checkout.dir, entry.path));
+		}
+		if (reported(reader, checkout.repo)) reader.skips.absorb(supplied.skips);
+		if (reported(reader, checkout.repo)) state.problems.push(...supplied.problems);
+		return state;
+	}
 	const listed = run(["ls-files", "-z"], checkout.dir);
 	if (listed.code !== 0) {
 		state.problems.push(`git ls-files failed in ${checkout.dir} (exit ${listed.code})`);
@@ -392,7 +452,17 @@ function collapseIdentical(entries: CorpusEntry[]): { kept: CorpusEntry[]; dropp
 
 export async function scanRoots(opts: ScanOptions): Promise<ScanResult> {
 	const run = opts.runner ?? defaultGitRunner;
-	const found = discoverRepos(opts.roots, { run, depth: opts.depth });
+	const discovered = discoverRepos(opts.roots, { run, depth: opts.depth });
+	// Identical `local/*` copies are collapsed before a trigger's repository filter, so a watch sync and a full sweep
+	// agree on which copy owns a file. Other labels are still dropped before they are read.
+	const wanted = opts.repos === undefined ? null : new Set(opts.repos);
+	const selected = (repo: string): boolean => wanted === null || wanted.has(repo) || repo.startsWith("local/");
+	const found = {
+		...discovered,
+		checkouts: discovered.checkouts.filter((checkout) => selected(checkout.repo)),
+		collections: discovered.collections.filter((collection) => selected(collection.repo)),
+		duplicates: discovered.duplicates.filter((duplicate) => selected(duplicate.repo)),
+	};
 	const reader: Reader = {
 		maxTier: opts.maxTier ?? DEFAULT_MAX_TIER,
 		maxBytes: opts.maxBytes ?? DEFAULT_MAX_BYTES,
@@ -401,6 +471,7 @@ export async function scanRoots(opts: ScanOptions): Promise<ScanResult> {
 		skips: new SkipLog(),
 		entries: [],
 		paths: new Map(),
+		wanted,
 	};
 
 	// Directories that share a label are read in root order, so the first one that holds a path keeps it and an empty one
@@ -408,15 +479,21 @@ export async function scanRoots(opts: ScanOptions): Promise<ScanResult> {
 	const duplicateOf = new Map(found.duplicates.map((duplicate) => [duplicate.repo, duplicate]));
 	const readOrder = new Map(found.duplicates.flatMap((duplicate) => duplicate.dirs.map((dir, index): [string, number] => [dir, index])));
 	const units = [
-		...found.checkouts.map((checkout) => ({ dir: checkout.dir, read: () => scanCheckout(reader, checkout, run) })),
+		...found.checkouts.map((checkout) => ({ dir: checkout.dir, read: () => scanCheckout(reader, checkout, run, opts.readCheckout) })),
 		...found.collections.map((collection) => ({ dir: collection.dir, read: () => scanCollection(reader, collection) })),
 	];
 	units.sort((a, b) => (readOrder.get(a.dir) ?? -1) - (readOrder.get(b.dir) ?? -1));
 	const states = units.map((unit) => unit.read());
 	const notes = [...found.notes];
+	if (wanted !== null) {
+		const present = new Set([...discovered.checkouts.map((checkout) => checkout.repo), ...discovered.collections.map((collection) => collection.repo)]);
+		for (const label of [...wanted].sort(compareText)) {
+			if (!present.has(label)) notes.push(`repo-not-found: ${label} is not below the roots`);
+		}
+	}
 	for (const state of states) {
 		const duplicate = duplicateOf.get(state.repo);
-		if (duplicate === undefined) continue;
+		if (duplicate === undefined || (wanted !== null && !wanted.has(state.repo))) continue;
 		// Incomplete on purpose: the label is not a coverage pair, so nothing recorded under it is judged removed.
 		state.problems.unshift(`${DUPLICATE_LABEL}: ${duplicate.dirs.map(directoryLabel).join(", ")}`);
 		if (state.shadowed > 0) {
@@ -424,9 +501,18 @@ export async function scanRoots(opts: ScanOptions): Promise<ScanResult> {
 		}
 	}
 
-	const { kept, dropped, groups } = collapseIdentical(reader.entries);
-	for (const entry of dropped) reader.paths.delete(documentKey(entry.repo, entry.path));
+	const collapsed = collapseIdentical(reader.entries);
+	const kept = wanted === null ? collapsed.kept : collapsed.kept.filter((entry) => wanted.has(entry.repo));
+	const dropped = wanted === null ? collapsed.dropped : collapsed.dropped.filter((entry) => wanted.has(entry.repo));
+	const groups = wanted === null ? collapsed.groups : collapsed.groups.filter((group) => [group.keep, ...group.copies].some((key) => wanted.has(key.slice(0, key.indexOf(":")))));
+	for (const entry of collapsed.dropped) reader.paths.delete(documentKey(entry.repo, entry.path));
+	if (wanted !== null) {
+		for (const entry of collapsed.kept) {
+			if (!wanted.has(entry.repo)) reader.paths.delete(documentKey(entry.repo, entry.path));
+		}
+	}
 	kept.sort(compareEntries);
+	const reportedStates = wanted === null ? states : states.filter((state) => wanted.has(state.repo));
 
 	const totals = new Map<string, { files: number; bytes: number }>();
 	for (const entry of kept) {
@@ -435,7 +521,7 @@ export async function scanRoots(opts: ScanOptions): Promise<ScanResult> {
 		total.bytes += entry.bytes;
 		totals.set(entry.repo, total);
 	}
-	const repos = states
+	const repos = reportedStates
 		.map((state): RepoReport => {
 			const total = totals.get(state.repo) ?? { files: 0, bytes: 0 };
 			return {

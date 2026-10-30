@@ -10,8 +10,8 @@ import {
 	MAX_GAPS_LIMIT,
 } from "@substrate/corpus";
 import { defined } from "../../../corpus/src/test-support.ts";
-import { createCorpusClient, isGapsResponse, isIngestResponse, isNeardupResponse, isPlanResponse, isReflectResponse, isStatusResponse } from "./client.ts";
-import { CorpusStub, gapsOf, ingestOf, neardupOf, planOf, reflectOf, statusOf } from "./testkit.ts";
+import { createCorpusClient, isGapsResponse, isIngestResponse, isNeardupResponse, isPlanResponse, isReconcileResponse, isReflectResponse, isStatusResponse } from "./client.ts";
+import { CorpusStub, gapsOf, ingestOf, neardupOf, planOf, reconcileOf, reflectOf, statusOf } from "./testkit.ts";
 
 const stub = new CorpusStub();
 afterAll(() => stub.stop());
@@ -162,8 +162,28 @@ describe("response guards", () => {
 		expect(isStatusResponse({ ...statusOf(), byKind: [{ kind: "memo", count: 1 }] })).toBe(false);
 		expect(isStatusResponse({ ...statusOf(), byTier: [{ tier: 4, count: 1 }] })).toBe(false);
 		expect(isStatusResponse({ ...statusOf(), lastIngestAt: 5 })).toBe(false);
+		expect(isStatusResponse({ ...statusOf(), lagSeconds: -1 })).toBe(false);
+		expect(isStatusResponse({ ...statusOf(), lagSeconds: "7" })).toBe(false);
 		expect(isPlanResponse(null)).toBe(false);
 		expect(isPlanResponse([plan])).toBe(false);
+	});
+
+	test("posts a reconcile request and returns the guarded drift", async () => {
+		const reply = reconcileOf({ missingInPlane: [{ repo: "Acme/A", path: "README.md" }], orphansInPlane: ["corpus:x"] }, { requeued: 1, deleted: 1 });
+		stub.on("POST /corpus/reconcile", () => ({ status: 200, body: reply }));
+		const result = await client().reconcile({ protocol: CORPUS_PROTOCOL, execute: true });
+		expect(result).toEqual({ ok: true, value: reply });
+		expect(stub.requests("/corpus/reconcile").at(-1)?.body).toEqual({ protocol: CORPUS_PROTOCOL, execute: true });
+	});
+
+	test("refuse a reconcile answer with a wrong shape", () => {
+		expect(isReconcileResponse(reconcileOf())).toBe(true);
+		expect(isReconcileResponse({ ...reconcileOf(), protocol: 2 })).toBe(false);
+		expect(isReconcileResponse({ ...reconcileOf(), drift: { ...reconcileOf().drift, truncated: "no" } })).toBe(false);
+		expect(isReconcileResponse({ ...reconcileOf(), drift: { ...reconcileOf().drift, missingInPlane: [{ repo: "r" }] } })).toBe(false);
+		expect(isReconcileResponse({ ...reconcileOf(), drift: { ...reconcileOf().drift, orphansInPlane: [7] } })).toBe(false);
+		expect(isReconcileResponse({ ...reconcileOf(), repaired: { requeued: 1 } })).toBe(false);
+		expect(isReconcileResponse(null)).toBe(false);
 	});
 
 	test("accept the reflect and gaps shapes, with a null best score and a null text", () => {

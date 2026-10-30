@@ -54,6 +54,7 @@ import { EDGE_KINDS } from "./types.ts";
 import { SteeringAuditSink, bunSteeringAuditReadSql, bunSteeringAuditSql } from "./planning/steering-store.ts";
 import { bunSteeringSessionsStore, type SteeringSessionsStore } from "./planning/steering-sessions-store.ts";
 import { bunCorpusStore, type CorpusStore } from "./corpus/store.ts";
+import { bunPlanningHashStore, type PlanningHashStore } from "./planning-hash-store.ts";
 import { bunReflectStore, type ReflectStore } from "./corpus/reflect-store.ts";
 import {
 	DEFAULT_LEASE_TTL_SECONDS,
@@ -827,10 +828,31 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 			);
 			create index if not exists corpus_feedback_document_idx on corpus_feedback (document_key)`,
 	},
+	// v1.7 phase 65 (doc watch): the planning refresh's per-page content hashes, so a restart ingests only the pages that
+	// changed. One row per docs-plane destination and `.planning/` path. `destination` is a hash of the configured docs URL,
+	// never the URL. A cutover to another plane misses the old rows and ingests. Written only while
+	// `SUBSTRATE_PLANNING_HASH_STORE=on` (the default is off, and an empty table costs nothing, so the step always runs, like
+	// step 35). It takes version 39, after step 38 `corpus_reflect`.
+	// Additive and idempotent: one new table, no existing row touched. An older release never names it. OPERATORS: rehearse on a
+	// restored dump before production, like steps 33 to 35.
+	{
+		version: 39,
+		name: "planning_page_hashes",
+		phase: "expand",
+		down: `drop table if exists planning_page_hashes`,
+		sql: `
+			create table if not exists planning_page_hashes (
+				destination text not null,
+				path        text not null,
+				sha256      text not null,
+				updated_at  timestamptz not null default now(),
+				primary key (destination, path)
+			)`,
+	},
 	// Worktree overlap in the brief (phase 68, FLEET-06): the paths each worktree last reported touching, so `memory_brief`
 	// can name another session's worktree that edits the same files. Additive: two nullable-or-defaulted columns on the
 	// registry table (step 36), runs with the registry and is not opt-in. NULL means the last report carried no list (an
-	// older reporter, or a listing that failed), never "touches nothing". Step 39 is still held by the doc-watch branch.
+	// older reporter, or a listing that failed), never "touches nothing".
 	// OPERATORS: rehearse this step on a restored dump before applying it to production. It rewrites no row.
 	{
 		version: 40,
@@ -842,7 +864,7 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 			alter table worktrees add column if not exists files_truncated boolean not null default false`,
 	},
 	// candidates() filters lower(repo) and orders by last_seen_at. worktrees_repo_seen_idx is (repo, last_seen_at) and cannot
-	// serve lower(repo). This index is its own step: step 40's contract is the two columns only. Step 39 stays reserved.
+	// serve lower(repo). This index is its own step: step 40's contract is the two columns only.
 	// OPERATORS: rehearse this step on a restored dump before applying it to production.
 	{
 		version: 41,
@@ -858,6 +880,40 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 export function applicableMigrationSteps(optIns: MigrationOptIns): ReadonlyArray<(typeof MIGRATION_STEPS)[number]> {
 	return MIGRATION_STEPS.filter((step) => step.optIn === undefined || optIns[step.optIn]);
 }
+
+/**
+ * Not ledgered. Step 39 creates `planning_page_hashes` with primary key `(destination, path)`. A database that applied
+ * an earlier path-only key still has that key, and `ON CONFLICT (destination, path)` does not catch it. Drop that old
+ * table and recreate it. A fresh database already has `destination` in the primary key, so the drop does not run.
+ */
+export const PLANNING_HASH_TABLE_REPAIR = `
+	do $$
+	begin
+		if to_regclass('planning_page_hashes') is not null
+			and not exists (
+				select 1
+				from pg_constraint
+				join pg_attribute
+					on pg_attribute.attrelid = pg_constraint.conrelid
+					and pg_attribute.attnum = any (pg_constraint.conkey)
+				where pg_constraint.conrelid = to_regclass('planning_page_hashes')
+					and pg_constraint.contype = 'p'
+					and pg_attribute.attname = 'destination'
+			) then
+			drop table planning_page_hashes;
+		end if;
+	end
+	$$;
+	create table if not exists planning_page_hashes (
+		destination text not null,
+		path        text not null,
+		sha256      text not null,
+		updated_at  timestamptz not null default now(),
+		primary key (destination, path)
+	);
+	create unique index if not exists planning_page_hashes_destination_path_idx on planning_page_hashes (destination, path);
+`;
+
 
 export class IndexStore implements MemoryStore {
 	private readonly sql: SQL;
@@ -918,6 +974,15 @@ export class IndexStore implements MemoryStore {
 	}
 
 	/**
+	 * The planning refresh's page hashes over this store's pool (v1.7 phase 65). `destination` is a hash of the configured
+	 * docs URL. It only builds the store; no statement runs until the refresh loads it, and the table exists after migration step 39.
+	 */
+	planningHashStore(destination: string): PlanningHashStore {
+		const sql = this.sql;
+		return bunPlanningHashStore((strings, ...values) => sql(strings, ...values), destination);
+	}
+
+	/**
 	 * Retrieval telemetry, feedback and the gap aggregate over this store's pool (v1.7 phase 66). It only builds the store; no
 	 * statement runs until the docs reflect code uses it, and the tables exist after migration step 38.
 	 */
@@ -968,6 +1033,8 @@ export class IndexStore implements MemoryStore {
 			// unique index on `(entry_hash, state)` rejects a second approval). `IF EXISTS`
 			// makes every later boot a no-op once it is gone.
 			await reserved.unsafe(`drop index if exists memory_reviews_hash_idx`);
+			// Not ledgered. See {@link PLANNING_HASH_TABLE_REPAIR}.
+			await reserved.unsafe(PLANNING_HASH_TABLE_REPAIR);
 		} catch (cause) {
 			migrateFailed = true;
 			throw cause;

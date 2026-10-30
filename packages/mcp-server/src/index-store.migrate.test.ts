@@ -21,15 +21,11 @@ import { defined } from "./test-support.ts";
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
 const describeLive = PG_URL ? describe : describe.skip;
 
-/** Versions held by branches that are not merged yet: the ledger may skip them, nothing else. Remove an entry when its step lands. */
-const RESERVED_VERSIONS: readonly number[] = [39];
-
 describe("migration steps and the migrate lock", () => {
-	test("versions ascend from 1 with no gap but the reserved ones, and names are unique", () => {
+	test("versions ascend from 1 with no gap, and names are unique", () => {
 		const versions = MIGRATION_STEPS.map((step) => step.version);
 		const last = versions.at(-1) ?? 0;
-		const expected = Array.from({ length: last }, (_, index) => index + 1).filter((version) => !RESERVED_VERSIONS.includes(version));
-		expect(versions).toEqual(expected);
+		expect(versions).toEqual(Array.from({ length: last }, (_, index) => index + 1));
 		expect(new Set(MIGRATION_STEPS.map((step) => step.name)).size).toBe(MIGRATION_STEPS.length);
 	});
 
