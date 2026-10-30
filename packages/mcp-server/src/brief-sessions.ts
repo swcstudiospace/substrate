@@ -20,6 +20,7 @@ import { foldLine, type BriefItem, type BriefSection, type BriefSectionId } from
 import { DeadlineError } from "./deadline.ts";
 import { redact } from "./redact.ts";
 import type { SessionContext } from "./session-context.ts";
+import type { WorktreePrState } from "./worktree-registry.ts";
 
 /** The most characters one section prints (its blank separator, title and lines). */
 export const BRIEF_SESSIONS_SECTION_MAX_CHARS = 1_200;
@@ -192,6 +193,8 @@ export interface BriefWorktreeRow {
 	files: readonly string[] | null;
 	/** True when `files` is only the first 200 sorted paths. Absent or false: the list is complete. */
 	files_truncated?: boolean;
+	/** The pull request state the registry holds for the worktree's branch. "merged" or "closed" leaves another session's row out of the section; absent, "open", "none" and "unknown" keep it. */
+	pr_state?: WorktreePrState | undefined;
 }
 
 /** The caller's session and repository, and the registry rows read for that repository. */
@@ -246,7 +249,7 @@ function overlapLine(shared: readonly string[]): string {
  * first, then most recently seen, at most {@link BRIEF_WORKTREES_MAX}. The caller's files are the union of its own rows'
  * reported paths (rows whose `session_id` is the caller's); with none reported the section is one line saying so, so it never
  * silently vanishes. A row is another session's only when it names a session other than the caller's, is not the primary
- * checkout, was seen within {@link BRIEF_WORKTREE_WINDOW_MS} and reported its files. A row with `files_truncated` means a
+ * checkout, whose pull request is not merged or closed, was seen within {@link BRIEF_WORKTREE_WINDOW_MS} and reported its files. A row with `files_truncated` means a
  * shared path may sit past the first 200, so the section says the check is incomplete even when no reported path overlaps.
  * Null when nothing overlaps and every reported list is complete.
  */
@@ -254,7 +257,9 @@ export function worktreesSection(input: BriefWorktreesInput, nowMs: number): Bri
 	const repo = input.repo.toLowerCase();
 	// A row of another repository is never read, whatever the caller of this function handed over.
 	const inRepo = input.rows.filter((row) => row.repo.toLowerCase() === repo);
-	const incomplete = inRepo.some((row) => row.files_truncated === true);
+	// A merged or closed pull request's row is never listed, so its truncated list cannot make the overlap check incomplete either.
+	const live = inRepo.filter((row) => row.session_id === input.sessionId || (row.pr_state !== "merged" && row.pr_state !== "closed"));
+	const incomplete = live.some((row) => row.files_truncated === true);
 	const incompleteLine = "- overlap check incomplete: a report listed only its first 200 changed paths, so a shared path may be missing";
 	const own = new Set<string>();
 	let ownReported = false;
@@ -273,7 +278,7 @@ export function worktreesSection(input: BriefWorktreesInput, nowMs: number): Bri
 	}
 	const overlapping: Array<{ row: BriefWorktreeRow; shared: string[]; seenMs: number }> = [];
 	for (const row of inRepo) {
-		if (row.session_id === undefined || row.session_id === "" || row.session_id === input.sessionId || row.primary || row.files === null) continue;
+		if (row.session_id === undefined || row.session_id === "" || row.session_id === input.sessionId || row.primary || row.files === null || row.pr_state === "merged" || row.pr_state === "closed") continue;
 		const seenMs = Date.parse(row.last_seen_at);
 		if (!Number.isFinite(seenMs) || nowMs - seenMs > BRIEF_WORKTREE_WINDOW_MS) continue;
 		const shared = row.files.filter((file) => own.has(file));
