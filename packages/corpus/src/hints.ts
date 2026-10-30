@@ -6,9 +6,9 @@
  * the bound says so and never throws, because a hook must not fail the user's git command. Lost hints cost nothing: the
  * periodic sweep and the reconcile run find what no hint reported.
  *
- * Pure of the environment: the directory, the clock and the random source are parameters.
+ * The count and the publish share one lock file next to the spool, so two hook processes cannot both pass the cap and write.
  */
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, constants, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { isRecord } from "./guards.ts";
 
@@ -31,6 +31,58 @@ export interface HintClock {
 	random: () => string;
 }
 
+const HINT_LOCK_WAIT_MS = 30_000;
+
+/** Takes the lock next to the spool. A dead owner's lock is removed; a live one is waited on. Never exceeds the cap by giving up and writing anyway. */
+function acquireHintLock(spoolDir: string): void {
+	const path = `${spoolDir}.lock`;
+	const started = Date.now();
+	for (;;) {
+		try {
+			const fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+			writeSync(fd, `${process.pid}\n`);
+			closeSync(fd);
+			return;
+		} catch (cause) {
+			const code = cause instanceof Error && "code" in cause ? cause.code : undefined;
+			if (code !== "EEXIST") throw cause;
+			let owner = Number.NaN;
+			try {
+				owner = Number(readFileSync(path, "utf8"));
+			} catch {
+				owner = Number.NaN;
+			}
+			let alive = false;
+			if (Number.isInteger(owner) && owner > 0) {
+				try {
+					process.kill(owner, 0);
+					alive = true;
+				} catch (killCause) {
+					alive = killCause instanceof Error && "code" in killCause && killCause.code === "EPERM";
+				}
+			}
+			if (!alive) {
+				try {
+					unlinkSync(path);
+				} catch {
+					// The holder released it between the read and the unlink.
+				}
+				continue;
+			}
+			if (Date.now() - started > HINT_LOCK_WAIT_MS) throw new Error("hint lock wait exceeded");
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+		}
+	}
+}
+
+function releaseHintLock(spoolDir: string): void {
+	try {
+		unlinkSync(`${spoolDir}.lock`);
+	} catch {
+		// Already released. The next writer creates it again.
+	}
+}
+
 /** Writes one hint for the repository at `dir`. Never throws; a refusal is a closed reason. */
 export function writeHint(spoolDir: string, dir: string, clock: HintClock): HintWrite {
 	if (dir === "" || dir.includes("\0") || Buffer.byteLength(dir, "utf8") > MAX_HINT_DIR_BYTES) return { ok: false, reason: "bad-directory" };
@@ -38,6 +90,11 @@ export function writeHint(spoolDir: string, dir: string, clock: HintClock): Hint
 	if (Buffer.byteLength(body, "utf8") > MAX_HINT_BYTES) return { ok: false, reason: "too-large" };
 	try {
 		mkdirSync(spoolDir, { recursive: true, mode: 0o700 });
+		acquireHintLock(spoolDir);
+	} catch {
+		return { ok: false, reason: "spool-unwritable" };
+	}
+	try {
 		const waiting = readdirSync(spoolDir).filter((name) => HINT_FILE.test(name)).length;
 		if (waiting >= MAX_HINT_FILES) return { ok: false, reason: "spool-full" };
 		const name = `${String(Math.floor(clock.nowMs())).padStart(13, "0")}-${clock.random()}.json`;
@@ -48,6 +105,8 @@ export function writeHint(spoolDir: string, dir: string, clock: HintClock): Hint
 	} catch {
 		// A hook never reports; the closed reason is all a caller needs.
 		return { ok: false, reason: "spool-unwritable" };
+	} finally {
+		releaseHintLock(spoolDir);
 	}
 }
 

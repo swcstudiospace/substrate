@@ -13,7 +13,7 @@ import { commitAll, defined, fingerprint, gitWorld, runGit, writeTree, type GitW
 import type { ClientResult, CorpusClient } from "./client.ts";
 import type { Delivery, DocsSync } from "./events.ts";
 import { ingestOf } from "./testkit.ts";
-import { partitionInventory, runSync, type SyncDeps, type SyncRequest } from "./sync.ts";
+import { partitionInventory, runSync, scanRefusalSummary, withoutScanRefusals, type SyncDeps, type SyncRequest } from "./sync.ts";
 import type { Inventory } from "./inventory.ts";
 
 const roots: string[] = [];
@@ -355,5 +355,56 @@ describe("partitionInventory", () => {
 		const { groups } = partitionInventory(inventory({ "a/a": 0, "b/b": 0, "c/c": 0 }), 100, 2);
 		expect(groups.map((group) => group.scope.coverage.length)).toEqual([2, 1]);
 		expect(groups.every((group) => group.entries.length === 0)).toBe(true);
+	});
+
+	test("grouping appends to the existing array", () => {
+		const inv = inventory({ "a/a": 3 });
+		const { groups } = partitionInventory(inv, 10);
+		expect(defined(groups[0], "group").entries[2]).toBe(inv.entries[2]);
+	});
+
+	test("a bad path is counted once for the sweep, not once per group", () => {
+		const inv = inventory({ "a/a": 1, "b/b": 1 });
+		inv.report.skipped = [{ repo: "a/a", path: "bad\\x.md", reason: "bad-path" }];
+		inv.report.skippedByReason = { "bad-path": 1 };
+		const { groups } = partitionInventory(inv, 1);
+		expect(groups).toHaveLength(2);
+		const stripped = groups.map(withoutScanRefusals);
+		expect(stripped.every((group) => group.report.skippedByReason["bad-path"] === 0)).toBe(true);
+		expect(scanRefusalSummary(inv).count).toBe(1);
+	});
+});
+
+describe("the shared repository lock", () => {
+	test("a second sync of the same repository waits until the first has sent", async () => {
+		const w = world();
+		const server = fakeServer();
+		const gate = Promise.withResolvers<void>();
+		const plan = server.client.plan.bind(server.client);
+		let entered = 0;
+		server.client.plan = async (request) => {
+			entered += 1;
+			if (entered === 1) await gate.promise;
+			return plan(request);
+		};
+		const events: DocsSync[] = [];
+		const first = runSync(depsFor(w, server.client, events), request());
+		const started = Date.now();
+		while (entered < 1 && Date.now() - started < 10_000) {
+			const wait = Promise.withResolvers<void>();
+			setTimeout(wait.resolve, 10);
+			await wait.promise;
+		}
+		const second = runSync(depsFor(w, server.client, events), request({ trigger: "watch" }));
+		const pause = Promise.withResolvers<void>();
+		setTimeout(pause.resolve, 40);
+		await pause.promise;
+		expect(entered).toBe(1);
+		expect(server.ingests).toHaveLength(0);
+		gate.resolve();
+		await first;
+		await second;
+		expect(entered).toBe(2);
+		expect(server.ingests.length).toBeGreaterThan(0);
 	});
 });

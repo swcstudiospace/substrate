@@ -151,6 +151,30 @@ describe("corpus hint hooks", () => {
 		expect(readFileSync(hookPath(repo, "post-rewrite"), "utf8")).toContain("echo half");
 	});
 
+	test("a reversed or repeated marker pair is left untouched", () => {
+		const repo = emptyRepo();
+		const path = hookPath(repo, "post-merge");
+		const reversed = `#!/bin/sh\n${CORPUS_BLOCK_END}\necho keep\n${CORPUS_BLOCK_BEGIN}\n`;
+		writeFileSync(path, reversed, { mode: 0o755 });
+		expect(installCorpusHooks(repo, { check: false }).find((report) => report.hook === "post-merge")).toMatchObject({ state: "foreign", detail: "our block is damaged" });
+		expect(readFileSync(path, "utf8")).toBe(reversed);
+		const repeated = `#!/bin/sh\n${CORPUS_BLOCK_BEGIN}\n${CORPUS_BLOCK_BEGIN}\n${CORPUS_BLOCK_END}\n`;
+		writeFileSync(path, repeated, { mode: 0o755 });
+		expect(installCorpusHooks(repo, { check: false }).find((report) => report.hook === "post-merge")?.state).toBe("foreign");
+		expect(readFileSync(path, "utf8")).toBe(repeated);
+	});
+
+	test("install creates a missing core.hooksPath; a status check does not", () => {
+		const repo = emptyRepo();
+		const hooks = join(repo, "custom-hooks");
+		const configured = Bun.spawnSync(["git", "-C", repo, "config", "core.hooksPath", hooks]);
+		expect(configured.exitCode).toBe(0);
+		expect(installCorpusHooks(repo, { check: true }).every((report) => report.state === "absent")).toBe(true);
+		expect(existsSync(hooks)).toBe(false);
+		expect(installCorpusHooks(repo, { check: false }).every((report) => report.state === "installed")).toBe(true);
+		expect(existsSync(join(hooks, "post-merge"))).toBe(true);
+	});
+
 	test("a directory that is not a repository is reported for every hook", () => {
 		const dir = mkdtempSync(join(tmpdir(), "install-hook-plain-"));
 		expect(installCorpusHooks(dir, { check: false }).map((report) => report.state)).toEqual(["not-a-repo", "not-a-repo", "not-a-repo"]);

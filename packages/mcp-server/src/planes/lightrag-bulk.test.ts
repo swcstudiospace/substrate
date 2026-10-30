@@ -588,3 +588,23 @@ describe("listDocuments", () => {
 		expect(calls).toHaveLength(0);
 	});
 });
+
+describe("lookupDocument", () => {
+	function page(ids: string[], totalCount: number, totalPages: number, page = 1): Response {
+		return json({
+			documents: ids.map((id) => ({ id, file_path: `corpus:${id}`, status: "processed" })),
+			pagination: { page, page_size: BULK_LIST_PAGE_SIZE, total_count: totalCount, total_pages: totalPages, has_next: page < totalPages, has_prev: page > 1 },
+		});
+	}
+
+	test("an id inside a page but missing from it is absent only when a second read still brackets it", async () => {
+		const { plane } = fakePlane({ "POST /documents/paginated": [page(["doc-a", "doc-c"], 2, 1)] });
+		expect(await plane.lookupDocument("doc-b")).toBe("absent");
+		expect(await plane.lookupDocument("doc-a")).toBe("present");
+	});
+
+	test("a failed page is unknown, so a caller cannot treat the id as gone", async () => {
+		const { plane } = fakePlane({ "POST /documents/paginated": [json({ detail: "down" }, 503)] });
+		expect(await plane.lookupDocument("doc-a")).toBe("unknown");
+	});
+});

@@ -3,7 +3,7 @@ import { existsSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { defaultGitBytesRunner, type GitBytesRunner } from "./gitio.ts";
 import { ensureMirror, mirrorName, mirrorPath, readOrigin } from "./mirror.ts";
-import { fingerprint, gitWorld, runGit, tempDir, type GitWorld } from "./test-support.ts";
+import { commitAll, fingerprint, gitWorld, runGit, tempDir, writeTree, type GitWorld } from "./test-support.ts";
 
 const run = defaultGitBytesRunner;
 const roots: string[] = [];
@@ -107,5 +107,26 @@ describe("ensureMirror", () => {
 		renameSync(join(w.mirrors, "x"), dest);
 		expect(ensureMirror(w.local, w.mirrors, run, { fetch: true })).toEqual({ status: "absent", reason: "mirror-dir-unusable" });
 		expect(existsSync(join(dest, ".git"))).toBe(true);
+	});
+
+	test("a fetch points the mirror at the checkout's current origin and follows a moved default branch", () => {
+		const w = world();
+		const created = ensureMirror(w.local, w.mirrors, run, { fetch: true });
+		if (created.status !== "fetched") throw new Error("expected a fetched mirror");
+		const rotated = join(w.root, "rotated.git");
+		runGit(w.root, ["clone", "-q", "--bare", w.origin, rotated]);
+		runGit(w.local, ["remote", "set-url", "origin", rotated]);
+		runGit(w.other, ["remote", "set-url", "origin", rotated]);
+		runGit(w.other, ["checkout", "-q", "-b", "docs"]);
+		writeTree(w.other, { "docs/moved.md": "moved\n" });
+		commitAll(w.other, "docs");
+		runGit(w.other, ["push", "-q", "origin", "docs"]);
+		runGit(rotated, ["symbolic-ref", "HEAD", "refs/heads/docs"]);
+		runGit(rotated, ["update-ref", "-d", "refs/heads/main"]);
+		const again = ensureMirror(w.local, w.mirrors, run, { fetch: true });
+		expect(again.status).toBe("fetched");
+		expect(runGit(created.mirrorDir, ["remote", "get-url", "origin"])).toBe(rotated);
+		expect(runGit(created.mirrorDir, ["symbolic-ref", "HEAD"])).toBe("refs/heads/docs");
+		expect(runGit(created.mirrorDir, ["rev-parse", "--verify", "HEAD^{commit}"]).length).toBeGreaterThan(0);
 	});
 });

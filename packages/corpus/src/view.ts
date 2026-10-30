@@ -45,7 +45,7 @@ const READ_TIMEOUT_MS = 300_000;
 const MAX_PROBLEMS = 50;
 
 const OBJECT_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
-const TREE_ROW = /^(\d+) (\w+) ([0-9a-f]+) +(\d+|-)$/;
+const TREE_ROW = /^(\d+) (\w+) ([0-9a-f]+)(?: +(\d+|-))?$/;
 
 export interface ViewOptions {
 	/** The repository label the entries carry. */
@@ -91,18 +91,9 @@ type Verdict = { ok: true; sha256: string; bytes: number } | { ok: false; reason
 
 /** Asks the origin, in batches, for the blobs a blobless mirror does not hold yet. A failure is not an error: the read that follows fetches what is left one object at a time. */
 function prefetchMissing(mirrorDir: string, oids: readonly string[], run: GitBytesRunner): void {
-	const check = run({
-		args: ["cat-file", "--batch-check"],
-		cwd: mirrorDir,
-		input: `${oids.join("\n")}\n`,
-		env: { GIT_NO_LAZY_FETCH: "1" },
-		timeoutMs: READ_TIMEOUT_MS,
-	});
-	if (check.code !== 0) return;
-	const missing = outputText(check)
-		.split("\n")
-		.filter((line) => line.endsWith(" missing"))
-		.map((line) => line.slice(0, line.indexOf(" ")));
+	if (oids.length === 0) return;
+	const present = localSizes(mirrorDir, oids, run);
+	const missing = oids.filter((oid) => !present.has(oid));
 	for (let start = 0; start < missing.length; start += PREFETCH_BATCH) {
 		run({
 			args: [
@@ -197,10 +188,43 @@ function parseTree(text: string): Map<string, TreeItem> {
 		const type = match?.[2];
 		const oid = match?.[3];
 		const size = match?.[4];
-		if (mode === undefined || type === undefined || oid === undefined || size === undefined) continue;
-		items.set(row.slice(tab + 1), { oid, size: size === "-" ? 0 : Number(size), mode, type });
+		if (mode === undefined || type === undefined || oid === undefined) continue;
+		items.set(row.slice(tab + 1), { oid, size: size === undefined || size === "-" ? -1 : Number(size), mode, type });
 	}
 	return items;
+}
+
+/**
+ * Sizes already in the mirror, without asking the origin. A missing blob stays unknown: knowing its size would fetch it.
+ * `cat-file --batch-check` with lazy fetch disabled exits non-zero at the first missing promisor object, after printing
+ * the objects it did have. Those lines are still sizes; the batch resumes after the object that stopped it.
+ */
+function localSizes(mirrorDir: string, oids: readonly string[], run: GitBytesRunner): Map<string, number> {
+	const sizes = new Map<string, number>();
+	let rest = [...oids];
+	while (rest.length > 0) {
+		const check = run({
+			args: ["cat-file", "--batch-check"],
+			cwd: mirrorDir,
+			input: `${rest.join("\n")}\n`,
+			env: { GIT_NO_LAZY_FETCH: "1" },
+			timeoutMs: READ_TIMEOUT_MS,
+		});
+		const printed = new Set<string>();
+		for (const line of outputText(check).split("\n")) {
+			const parts = line.split(" ");
+			const oid = parts[0];
+			const size = Number(parts[2]);
+			if (oid === undefined || parts[1] !== "blob" || !OBJECT_ID.test(oid) || !Number.isSafeInteger(size) || size < 0) continue;
+			sizes.set(oid, size);
+			printed.add(oid);
+		}
+		if (check.code === 0) break;
+		const stopped = rest.findIndex((oid) => !printed.has(oid));
+		if (stopped === -1) break;
+		rest = rest.slice(stopped + 1);
+	}
+	return sizes;
 }
 
 /** Splits `git diff --name-status -z` output into path and whether the path is gone from the working tree. */
@@ -240,11 +264,19 @@ export function buildView(opts: ViewOptions): ViewResult | null {
 		runner({ args, cwd: mirrorDir, ...(input === undefined ? {} : { input }), timeoutMs: READ_TIMEOUT_MS });
 	if (outputText(inMirror(["rev-parse", "--is-bare-repository"])).trim() !== "true") return empty(null, "the mirror is not a readable repository");
 	const tipOut = inMirror(["rev-parse", "--verify", "-q", "HEAD^{commit}"]);
-	if (tipOut.code !== 0) return null;
+	if (tipOut.code !== 0) {
+		// An origin nobody has pushed to has no branch. A HEAD that names a missing branch while other branches exist
+		// is an incomplete read: falling back to the checkout would call that older tree a complete origin.
+		const branches = inMirror(["for-each-ref", "--format=%(objectname)", "refs/heads"]);
+		if (branches.code !== 0 || outputText(branches).trim() !== "") return empty(null, "the mirror's default branch did not resolve to a commit");
+		return null;
+	}
 	const tip = outputText(tipOut).trim();
 	if (!OBJECT_ID.test(tip)) return empty(null, "the mirror's default branch did not resolve to a commit");
 
-	const tree = inMirror(["ls-tree", "-r", "-l", "-z", tip]);
+	// Paths only. `ls-tree -l` looks up every blob to report its size, and a blobless mirror fetches each missing one
+	// before any documentation filter can refuse it.
+	const tree = inMirror(["ls-tree", "-r", "-z", tip]);
 	if (tree.code !== 0) return empty(tip, "git ls-tree failed in the mirror");
 	const base = parseTree(outputText(tree));
 
@@ -281,8 +313,9 @@ export function buildView(opts: ViewOptions): ViewResult | null {
 		problem("git ls-files --others failed in the checkout");
 	}
 
-	// The mirror's part: every eligible document the checkout did not change.
-	const queued: Array<{ path: string; kind: CorpusEntry["kind"]; tier: DocTier; item: TreeItem }> = [];
+	// The mirror's part: every eligible document the checkout did not change. Size is inspected only after the
+	// documentation filter, and a blob is fetched only when that size is not already local.
+	const candidates: Array<{ path: string; kind: CorpusEntry["kind"]; tier: DocTier; item: TreeItem }> = [];
 	for (const [path, item] of base) {
 		if (changed.has(path)) continue;
 		const found = classify(path);
@@ -293,9 +326,27 @@ export function buildView(opts: ViewOptions): ViewResult | null {
 		}
 		if (item.mode === "120000") skips.add({ repo, path, reason: "symlink" });
 		else if (item.type !== "blob") skips.add({ repo, path, reason: "not-a-file" });
-		else if (item.size === 0) skips.add({ repo, path, reason: "empty" });
-		else if (item.size > maxBytes) skips.add({ repo, path, reason: "too-large" });
-		else queued.push({ path, kind: found.kind, tier: found.tier, item });
+		else candidates.push({ path, kind: found.kind, tier: found.tier, item });
+	}
+	const known = localSizes(mirrorDir, candidates.map((row) => row.item.oid), runner);
+	const queued: Array<{ path: string; kind: CorpusEntry["kind"]; tier: DocTier; item: TreeItem }> = [];
+	const needSize: string[] = [];
+	for (const row of candidates) {
+		const size = known.get(row.item.oid);
+		if (size === 0) skips.add({ repo, path: row.path, reason: "empty" });
+		else if (size !== undefined && size > maxBytes) skips.add({ repo, path: row.path, reason: "too-large" });
+		else if (size === undefined) needSize.push(row.item.oid);
+		else queued.push({ path: row.path, kind: row.kind, tier: row.tier, item: { ...row.item, size } });
+	}
+	if (needSize.length > 0) prefetchMissing(mirrorDir, needSize, runner);
+	const fetched = localSizes(mirrorDir, needSize, runner);
+	for (const row of candidates) {
+		if (known.has(row.item.oid)) continue;
+		const size = fetched.get(row.item.oid);
+		if (size === undefined) skips.add({ repo, path: row.path, reason: "unreadable" });
+		else if (size === 0) skips.add({ repo, path: row.path, reason: "empty" });
+		else if (size > maxBytes) skips.add({ repo, path: row.path, reason: "too-large" });
+		else queued.push({ path: row.path, kind: row.kind, tier: row.tier, item: { ...row.item, size } });
 	}
 	const verdicts = readVerdicts(mirrorDir, queued.map((row) => row.item), maxBytes, runner);
 	for (const row of queued) {

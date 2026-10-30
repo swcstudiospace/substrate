@@ -24,8 +24,9 @@ ExecStart=/root/.local/share/reflex/bun/bin/bun packages/cli/src/index.ts corpus
 Restart=on-failure
 RestartSec=30
 
-# The only writable state: the mirrors and the hint spool, under the shared /var/lib/substrate.
-StateDirectory=substrate
+# The only writable state: the mirrors and the hint spool. Not the shared /var/lib/substrate parent, which also holds the audit chain and the retain outbox.
+StateDirectory=substrate/corpus-mirrors
+StateDirectory=substrate/corpus-hints
 StateDirectoryMode=0700
 Environment=SUBSTRATE_CORPUS_MIRROR_DIR=/var/lib/substrate/corpus-mirrors
 Environment=SUBSTRATE_CORPUS_SPOOL=/var/lib/substrate/corpus-hints

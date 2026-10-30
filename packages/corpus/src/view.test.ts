@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { defaultGitBytesRunner } from "./gitio.ts";
+import { defaultGitBytesRunner, type GitBytesRunner } from "./gitio.ts";
 import { ensureMirror, type MirrorState } from "./mirror.ts";
 import { documentKey } from "./protocol.ts";
 import { commitAll, defined, fingerprint, gitWorld, linkFile, runGit, tempDir, writeTree, type GitWorld } from "./test-support.ts";
@@ -250,6 +250,32 @@ describe("buildView", () => {
 
 		expect(shas(view)["docs/a.md"]).toBe(sha("a\n"));
 		expect(view.problems).toEqual([]);
+	});
+
+	test("lists paths before sizes, and does not fetch a non-document blob", () => {
+		const w = world({ "README.md": "# one\n", "docs/a.md": "a\n", "src/app.ts": "export const n = 1;\n" });
+		const state = ensureMirror(w.local, w.mirrors, run, { fetch: true });
+		const mirror = mirrorDirOf(state);
+		const fetched: string[] = [];
+		const runner: GitBytesRunner = (call) => {
+			if (call.args[0] === "ls-tree" && call.args.includes("-l")) throw new Error("ls-tree asked for every blob size");
+			if (call.args.includes("--stdin") && call.input !== undefined) fetched.push(call.input);
+			return run(call);
+		};
+		const view = buildView({ repo: REPO, repoDir: w.local, mirrorDir: mirror, maxTier: 2, maxBytes: 1_000_000, runner });
+		const asset = runGit(mirror, ["rev-parse", "HEAD:src/app.ts"]);
+		expect(defined(view, "view").entries.some((entry) => entry.path === "src/app.ts")).toBe(false);
+		expect(fetched.join("")).not.toContain(asset);
+	});
+
+	test("a dangling HEAD beside other branches is an incomplete read, not an empty origin", () => {
+		const w = world();
+		const mirror = mirrorDirOf(ensureMirror(w.local, w.mirrors, run, { fetch: true }));
+		runGit(mirror, ["symbolic-ref", "HEAD", "refs/heads/missing"]);
+		const view = buildView({ repo: REPO, repoDir: w.local, mirrorDir: mirror, maxTier: 2, maxBytes: 1_000_000, runner: run });
+		expect(view).not.toBeNull();
+		expect(defined(view, "view").problems.join(" ")).toContain("did not resolve");
+		expect(view?.entries).toEqual([]);
 	});
 });
 

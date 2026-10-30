@@ -785,9 +785,11 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 			create index if not exists steering_sessions_repo_updated_idx on steering_sessions (repo_id, updated_at)`,
 	},
 	// v1.7 phase 65 (doc watch): the planning refresh's per-page content hashes, so a restart ingests only the pages that
-	// changed. One row per `.planning/` path; written only by the planning refresh while `SUBSTRATE_PLANNING_HASH_STORE=on`
-	// (the default is off, and an empty table costs nothing, so the step always runs, like step 35). It takes version 38,
-	// after step 37 `steering_sessions`.
+	// changed. One row per docs-plane destination and `.planning/` path. `destination` is a hash of the configured docs URL,
+	// never the URL. A cutover to another plane misses the old rows and ingests. Written only while
+	// `SUBSTRATE_PLANNING_HASH_STORE=on` (the default is off, and an empty table costs nothing, so the step always runs, like
+	// step 35). It takes version 38, after step 37 `steering_sessions`. Not on main: the destination column is part of this
+	// step rather than a later one.
 	// Additive and idempotent: one new table, no existing row touched. An older release never names it. OPERATORS: rehearse on a
 	// restored dump before production, like steps 33 to 35.
 	{
@@ -797,9 +799,11 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 		down: `drop table if exists planning_page_hashes`,
 		sql: `
 			create table if not exists planning_page_hashes (
-				path       text primary key,
-				sha256     text not null,
-				updated_at timestamptz not null default now()
+				destination text not null,
+				path        text not null,
+				sha256      text not null,
+				updated_at  timestamptz not null default now(),
+				primary key (destination, path)
 			)`,
 	},
 ];
@@ -868,11 +872,12 @@ export class IndexStore implements MemoryStore {
 	}
 
 	/**
-	 * The planning refresh's page hashes over this store's pool (v1.7 phase 65). It only builds the store; no statement runs
-	 * until the refresh loads it, and the table exists after migration step 38.
+	 * The planning refresh's page hashes over this store's pool (v1.7 phase 65). `destination` is a hash of the configured
+	 * docs URL. It only builds the store; no statement runs until the refresh loads it, and the table exists after migration step 38.
 	 */
-	planningHashStore(): PlanningHashStore {
-		return bunPlanningHashStore(this.sql);
+	planningHashStore(destination: string): PlanningHashStore {
+		const sql = this.sql;
+		return bunPlanningHashStore((strings, ...values) => sql(strings, ...values), destination);
 	}
 
 	/**
@@ -918,6 +923,11 @@ export class IndexStore implements MemoryStore {
 			// unique index on `(entry_hash, state)` rejects a second approval). `IF EXISTS`
 			// makes every later boot a no-op once it is gone.
 			await reserved.unsafe(`drop index if exists memory_reviews_hash_idx`);
+			// Not ledgered. Step 38 shipped in this release with `destination` in the primary key, but a database that
+			// applied the earlier form of that step (path alone) must still save and load one destination. Adding the
+			// column and a unique index is a no-op once the new table is in place.
+			await reserved.unsafe(`alter table if exists planning_page_hashes add column if not exists destination text not null default ''`);
+			await reserved.unsafe(`create unique index if not exists planning_page_hashes_destination_path_idx on planning_page_hashes (destination, path)`);
 		} catch (cause) {
 			migrateFailed = true;
 			throw cause;

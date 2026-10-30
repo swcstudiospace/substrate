@@ -25,6 +25,7 @@ import {
 import type { Inventory } from "./inventory.ts";
 import type { SyncResult } from "./sync.ts";
 import { syncFailed } from "./sync.ts";
+import { renderSyncWarnings } from "./render-sync.ts";
 import type { WatchSettings } from "./watch-settings.ts";
 
 /** How often the hint spool is read and the clock is looked at when nothing is due sooner. */
@@ -128,7 +129,10 @@ function line(result: SyncResult, request: LoopSyncRequest): string {
 /** Runs one sync and reports it; the loop's only call into the sync. Returns the result for the caller's bookkeeping. */
 async function runOne(deps: WatchLoopDeps, request: LoopSyncRequest): Promise<SyncResult> {
 	const result = await deps.sync(request);
-	(syncFailed(result) ? deps.err : deps.out)(line(result, request));
+	const write = syncFailed(result) ? deps.err : deps.out;
+	write(line(result, request));
+	const warnings = renderSyncWarnings(result);
+	if (warnings !== "") write(warnings);
 	return result;
 }
 

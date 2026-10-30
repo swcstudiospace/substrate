@@ -14,7 +14,8 @@
  *   ids of such documents, to recognise one that a corpus row shares.
  *
  * Absence of evidence is not evidence of absence. A row is `missingInPlane` only when the plane listing is complete (no
- * page bound, time bound or unreadable entry cut it short), and a plane document is an orphan only when every active row was
+ * page bound, time bound or unreadable entry cut it short) and a direct lookup of its id says it is gone. A lookup that
+ * fails leaves the row alone. A plane document is an orphan only when every active row was
  * read (a manifest larger than {@link RECONCILE_MAX_ROWS} is read in part, so a document its unread rows own would look
  * unowned). Either gap makes the reply `truncated` instead.
  *
@@ -141,11 +142,25 @@ async function run(deps: ReconcileDeps, execute: boolean): Promise<ReconcileResu
 	if (!listing.ok) return { ok: false, reason: "corpus.plane-unreachable", detail: listing.reason };
 
 	const drift = diffPlane(rowsComplete ? rows : rows.slice(0, RECONCILE_MAX_ROWS), listing, rowsComplete);
-	const missing = drift.missing.slice(0, RECONCILE_MAX_ITEMS);
+	const gone: ManifestRow[] = [];
+	let lookupFailed = false;
+	for (const row of drift.missing) {
+		if (row.documentId === null) continue;
+		let looked: "present" | "absent" | "unknown" = "unknown";
+		try {
+			looked = await deps.plane.lookupDocument(row.documentId, { signal: deps.signal });
+		} catch {
+			looked = "unknown";
+		}
+		if (looked === "absent") gone.push(row);
+		else if (looked === "unknown") lookupFailed = true;
+	}
+	const missing = gone.slice(0, RECONCILE_MAX_ITEMS);
 	const orphans = drift.orphans.slice(0, RECONCILE_MAX_ITEMS);
-	const truncated = listing.truncated || !rowsComplete || drift.missing.length > RECONCILE_MAX_ITEMS || drift.orphans.length > RECONCILE_MAX_ITEMS;
+	const truncated = listing.truncated || !rowsComplete || gone.length > RECONCILE_MAX_ITEMS || drift.orphans.length > RECONCILE_MAX_ITEMS || lookupFailed;
 
-	// Rows first: marking one removed needs no plane call, so a slow or failing plane delete cannot hold that repair back.
+	// Rows first: marking one removed needs no plane delete, so a slow or failing plane delete cannot hold that repair back.
+	// The lookup above already confirmed the id is gone; a failed lookup never reaches here.
 	const requeued = execute ? await requeue(deps.store, missing) : 0;
 	const deleted = execute ? await deleteOrphans(deps, orphans) : 0;
 

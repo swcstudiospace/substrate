@@ -13,7 +13,7 @@
  * Pure of the environment: the mirror directory, the timeouts and the runner are parameters.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { githubSlug, stripCredentials } from "./discover.ts";
 import { type GitBytesRunner, outputText } from "./gitio.ts";
@@ -84,6 +84,57 @@ function isUsableMirror(dir: string, run: GitBytesRunner): boolean {
 	return result.code === 0 && outputText(result).trim() === "true";
 }
 
+/** Points the mirror's origin at the checkout's current URL. The URL is an argument only; it is never written to a reason. */
+function pointOrigin(dir: string, origin: string, run: GitBytesRunner): boolean {
+	const result = run({ args: ["remote", "set-url", "origin", origin], cwd: dir, timeoutMs: CONFIG_TIMEOUT_MS });
+	return result.code === 0;
+}
+
+const BRANCH_REF = /^refs\/heads\/([A-Za-z0-9._/-]+)$/;
+
+/**
+ * Moves the mirror HEAD onto the origin's current default branch. `empty` is an origin with no branch yet.
+ * A failure leaves HEAD untouched so the caller can refuse to treat the old branch as current.
+ */
+function refreshDefaultHead(dir: string, run: GitBytesRunner): "refreshed" | "empty" | "failed" {
+	const remote = run({ args: ["ls-remote", "--symref", "origin", "HEAD"], cwd: dir, timeoutMs: CONFIG_TIMEOUT_MS });
+	if (remote.code !== 0) return "failed";
+	const match = /^ref: (refs\/heads\/\S+)\tHEAD/m.exec(outputText(remote));
+	if (match === null) return "empty";
+	const ref = match[1] ?? "";
+	const name = BRANCH_REF.exec(ref)?.[1];
+	if (name === undefined || name.includes("..") || name.endsWith("/")) return "failed";
+	const pointed = run({ args: ["symbolic-ref", "HEAD", ref], cwd: dir, timeoutMs: CONFIG_TIMEOUT_MS });
+	return pointed.code === 0 ? "refreshed" : "failed";
+}
+
+/**
+ * The mirror directory for this checkout. The name is a hash of the current origin, so a checkout whose origin URL
+ * moved would otherwise look mirror-less and a fetch would clone a second copy. The mirror that already holds this
+ * checkout's HEAD is the same mirror: it is repointed, not replaced.
+ */
+function mirrorForCheckout(repoDir: string, mirrorRoot: string, origin: string, run: GitBytesRunner): string | null {
+	const named = mirrorPath(mirrorRoot, origin);
+	if (existsSync(named)) return named;
+	const head = run({ args: ["rev-parse", "--verify", "-q", "HEAD^{commit}"], cwd: repoDir, timeoutMs: CONFIG_TIMEOUT_MS });
+	const sha = outputText(head).trim();
+	if (head.code !== 0 || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(sha)) return null;
+	let names: string[];
+	try {
+		names = readdirSync(mirrorRoot);
+	} catch {
+		return null;
+	}
+	for (const name of names) {
+		if (name.includes(".partial-")) continue;
+		const dir = join(mirrorRoot, name);
+		if (!isUsableMirror(dir, run)) continue;
+		const has = run({ args: ["cat-file", "-e", `${sha}^{commit}`], cwd: dir, timeoutMs: CONFIG_TIMEOUT_MS });
+		if (has.code === 0) return dir;
+	}
+	return null;
+}
+
 /**
  * Create or update the mirror of the checkout's origin. Never throws: every failure is a closed reason in the result.
  * With `fetch: false` an existing mirror is returned as it is and a missing one is reported `absent`/`not-created`.
@@ -92,18 +143,22 @@ export function ensureMirror(repoDir: string, mirrorRoot: string, run: GitBytesR
 	const origin = readOrigin(repoDir, run);
 	if (origin === null) return { status: "absent", reason: "no-origin" };
 	const root = resolve(mirrorRoot);
-	const dest = mirrorPath(root, origin);
-	const present = existsSync(dest);
+	const found = mirrorForCheckout(repoDir, root, origin, run);
+	const dest = found ?? mirrorPath(root, origin);
+	const present = found !== null;
 	if (present && !isUsableMirror(dest, run)) return { status: "absent", reason: "mirror-dir-unusable" };
 	if (present) {
 		if (!options.fetch) return { status: "unfetched", mirrorDir: dest };
+		if (!pointOrigin(dest, origin, run)) return { status: "stale", mirrorDir: dest, reason: "fetch-failed" };
 		const fetched = run({
 			args: ["fetch", "--prune", "--quiet", "origin"],
 			cwd: dest,
 			timeoutMs: options.fetchTimeoutMs ?? MIRROR_FETCH_TIMEOUT_MS,
 		});
-		if (fetched.code === 0) return { status: "fetched", mirrorDir: dest, created: false };
-		return { status: "stale", mirrorDir: dest, reason: fetched.timedOut ? "fetch-timeout" : "fetch-failed" };
+		if (fetched.code !== 0) return { status: "stale", mirrorDir: dest, reason: fetched.timedOut ? "fetch-timeout" : "fetch-failed" };
+		const head = refreshDefaultHead(dest, run);
+		if (head === "failed") return { status: "stale", mirrorDir: dest, reason: "fetch-failed" };
+		return { status: "fetched", mirrorDir: dest, created: false };
 	}
 	if (!options.fetch) return { status: "absent", reason: "not-created" };
 	try {

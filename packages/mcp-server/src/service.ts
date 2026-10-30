@@ -179,7 +179,7 @@ import type { AnchorVerifier } from "./corpus/anchor.ts";
 import { CorpusRootKeeper, type RootClock } from "./corpus/root.ts";
 import type { CorpusStore } from "./corpus/store.ts";
 import { shortRoot, type CorpusAnchorResponse, type CorpusIngestResponse, type CorpusNeardupResponse, type CorpusPlanResponse, type CorpusProofResponse, type CorpusReconcileResponse, type CorpusRootResponse, type CorpusStatusResponse } from "@substrate/corpus";
-import { memoryPlanningHashStore, type PlanningHashStore } from "./planning-hash-store.ts";
+import { memoryPlanningHashStore, planningDestinationKey, type PlanningHashStore } from "./planning-hash-store.ts";
 import { RailwayClient } from "./railway.ts";
 import { nodePlanningFs } from "./planning/fs.ts";
 import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
@@ -6234,7 +6234,8 @@ export class Substrate {
 	 */
 	private planningHashStore(): PlanningHashStore | null {
 		if (!this.config.planningHashStore) return null;
-		this.planningHashStoreCache ??= this.planningHashSeam ?? this.index?.planningHashStore() ?? memoryPlanningHashStore();
+		const url = this.config.docsBackend === "lightrag" ? (this.config.lightrag?.url ?? "") : this.config.ragflow.url;
+		this.planningHashStoreCache ??= this.planningHashSeam ?? this.index?.planningHashStore(planningDestinationKey(url)) ?? memoryPlanningHashStore();
 		return this.planningHashStoreCache;
 	}
 

@@ -17,7 +17,7 @@
  * uses the functions below; uninstalling removes only our block.
  */
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, readFileSync, rmSync, type Stats, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, type Stats, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const MARKER = "Agent Substrate — git post-commit collector";
@@ -117,6 +117,23 @@ export interface HookReport {
 
 type Existing = { kind: "none" } | { kind: "foreign"; why: string } | { kind: "ours"; text: string };
 
+function markerCount(text: string, marker: string): number {
+	let count = 0;
+	let from = 0;
+	for (;;) {
+		const at = text.indexOf(marker, from);
+		if (at === -1) return count;
+		count += 1;
+		from = at + marker.length;
+	}
+}
+
+/** One begin before one end. Reversed, repeated or one-sided markers are damaged and must not be rewritten. */
+function intactBlock(text: string): boolean {
+	if (markerCount(text, CORPUS_BLOCK_BEGIN) !== 1 || markerCount(text, CORPUS_BLOCK_END) !== 1) return false;
+	return text.indexOf(CORPUS_BLOCK_BEGIN) < text.indexOf(CORPUS_BLOCK_END);
+}
+
 function readExisting(path: string): Existing {
 	let stat: Stats;
 	try {
@@ -127,12 +144,12 @@ function readExisting(path: string): Existing {
 	}
 	if (!stat.isFile()) return { kind: "foreign", why: "not a regular file" };
 	const text = readFileSync(path, "utf8");
-	if (!text.includes(CORPUS_BLOCK_BEGIN)) return { kind: "foreign", why: "a different hook is installed" };
-	if (!text.includes(CORPUS_BLOCK_END)) return { kind: "foreign", why: "our block is damaged" };
+	if (!text.includes(CORPUS_BLOCK_BEGIN) && !text.includes(CORPUS_BLOCK_END)) return { kind: "foreign", why: "a different hook is installed" };
+	if (!intactBlock(text)) return { kind: "foreign", why: "our block is damaged" };
 	return { kind: "ours", text };
 }
 
-/** The text with our block (markers included) cut out, and the block's range in the original. */
+/** The text with our block (markers included) cut out. The caller has already refused a damaged pair. */
 function cutBlock(text: string): { before: string; after: string } {
 	const begin = text.indexOf(CORPUS_BLOCK_BEGIN);
 	const endMarker = text.indexOf(CORPUS_BLOCK_END, begin);
@@ -155,6 +172,7 @@ export function installCorpusHooks(repo: string, options: { check: boolean; cliP
 		const existing = readExisting(path);
 		if (existing.kind === "foreign") return { hook, state: "foreign", detail: existing.why };
 		if (options.check) return { hook, state: existing.kind === "ours" ? "present" : "absent" };
+		if (existing.kind === "none") mkdirSync(dir, { recursive: true });
 		const block = corpusHookBlock(hook, cliPath);
 		if (existing.kind === "none") {
 			writeFileSync(path, `#!/bin/sh\n${block}`, { mode: 0o755 });

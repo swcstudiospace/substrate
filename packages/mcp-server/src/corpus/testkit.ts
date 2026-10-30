@@ -228,6 +228,10 @@ export class FakePlane implements LightragBulkPlane {
 	listFailure: string | null = null;
 	/** Makes `listDocuments` report an incomplete read, as a plane with more pages than the bound. */
 	listTruncated = false;
+	/** Ids the listing omits even though the plane still holds them. */
+	hiddenFromListing = new Set<string>();
+	/** Ids whose lookup fails closed. */
+	lookupUnknown = new Set<string>();
 
 	/** The plane's listing: one entry per distinct id (a shared document is listed once, under its first name). Never fails unless `listFailure` is set. */
 	async listDocuments(): Promise<PlaneListing> {
@@ -237,12 +241,18 @@ export class FakePlane implements LightragBulkPlane {
 		const otherDocumentIds: string[] = [];
 		const seen = new Set<string>();
 		for (const [name, held] of this.documents) {
-			if (seen.has(held.id)) continue;
+			if (seen.has(held.id) || this.hiddenFromListing.has(held.id)) continue;
 			seen.add(held.id);
 			if (name.startsWith(CORPUS_NAME_PREFIX)) documents.push({ id: held.id, name });
 			else otherDocumentIds.push(held.id);
 		}
 		return { ok: true, documents, otherDocumentIds, truncated: this.listTruncated };
+	}
+
+	async lookupDocument(id: string): Promise<"present" | "absent" | "unknown"> {
+		this.calls.push(`lookup:${id}`);
+		if (this.lookupUnknown.has(id)) return "unknown";
+		return this.liveIds().has(id) ? "present" : "absent";
 	}
 
 	/** A document the plane lost while the manifest still lists it. */

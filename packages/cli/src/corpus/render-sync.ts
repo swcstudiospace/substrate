@@ -42,20 +42,26 @@ function renderMirrorProblems(mirrors: readonly MirrorReport[]): string {
 	return out.join("") + more(LIST_LIMIT, problems.length);
 }
 
-export function renderSync(result: SyncResult): string {
-	const out: string[] = [`sync (${result.trigger}${result.execute ? "" : ", dry run"}): ${result.outcome}; ${result.repos.length} ${result.repos.length === 1 ? "repository" : "repositories"} read\n`];
-	out.push(renderMirrorProblems(result.mirrors));
-	for (const label of result.notFound) out.push(`repo-not-found: ${label} is not below the roots\n`);
+/** Mirror, incomplete-read and lost-event warnings, in the same words `renderSync` uses. */
+export function renderSyncWarnings(result: SyncResult): string {
+	const out: string[] = [renderMirrorProblems(result.mirrors)];
 	if (result.incomplete.length > 0) {
 		out.push(`not read completely (their rows are not judged removed): ${result.incomplete.length}\n`);
 		for (const line of result.incomplete.slice(0, LIST_LIMIT)) out.push(`  ${line}\n`);
 		out.push(more(LIST_LIMIT, result.incomplete.length));
 	}
+	if (result.delivery !== null && !result.delivery.ok) out.push(`docs.sync event not delivered (${result.delivery.reason}); the sync itself is not affected\n`);
+	return out.join("");
+}
+
+export function renderSync(result: SyncResult): string {
+	const out: string[] = [`sync (${result.trigger}${result.execute ? "" : ", dry run"}): ${result.outcome}; ${result.repos.length} ${result.repos.length === 1 ? "repository" : "repositories"} read\n`];
+	out.push(renderSyncWarnings(result));
+	for (const label of result.notFound) out.push(`repo-not-found: ${label} is not below the roots\n`);
 	if (result.plan !== null && result.inventory !== null) out.push(renderPlan(result.plan, result.inventory));
 	if (result.ingest !== null) out.push(renderIngest(result.ingest));
 	if (!result.execute && result.plan !== null) out.push("dry run: nothing was sent; add --execute to sync\n");
 	if (result.error !== null) out.push(`error: ${result.error}\n`);
-	if (result.delivery !== null && !result.delivery.ok) out.push(`docs.sync event not delivered (${result.delivery.reason}); the sync itself is not affected\n`);
 	return out.join("");
 }
 

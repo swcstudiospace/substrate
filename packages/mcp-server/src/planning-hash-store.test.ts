@@ -12,7 +12,7 @@ import { loadConfig } from "./config.ts";
 import type { IngestOutcome } from "./docs-ingest.ts";
 import { normalizeEvent } from "./event.ts";
 import { IndexStore } from "./index-store.ts";
-import { memoryPlanningHashStore, type PlanningHashStore } from "./planning-hash-store.ts";
+import { bunPlanningHashStore, memoryPlanningHashStore, planningDestinationKey, type PlanningHashQuery, type PlanningHashStore } from "./planning-hash-store.ts";
 import { Substrate } from "./service.ts";
 import { defined } from "./test-support.ts";
 import type { EventInput } from "./types.ts";
@@ -89,6 +89,35 @@ describe("the in-memory adapter", () => {
 		]);
 		loaded.set("c.md", "9");
 		expect((await store.load()).has("c.md")).toBe(false);
+	});
+
+	test("the destination key is a hash of the docs URL, stable, and not the URL", () => {
+		const url = "http://lightrag.internal:9621";
+		expect(planningDestinationKey(url)).toBe(planningDestinationKey(url));
+		expect(planningDestinationKey(url)).not.toBe(planningDestinationKey("http://other.internal:9621"));
+		expect(planningDestinationKey(url)).not.toContain(url);
+		expect(planningDestinationKey(url)).toMatch(/^[0-9a-f]{64}$/);
+	});
+});
+
+describe("the Postgres adapter's destination scope", () => {
+	test("a destination change misses the old hashes, so those pages are not treated as already ingested", async () => {
+		const rows: Array<Record<string, unknown>> = [];
+		const sql: PlanningHashQuery = async (strings, ...values) => {
+			const text = strings.join("?");
+			if (text.includes("select")) return rows.filter((row) => row.destination === values[0]);
+			const [destination, path, sha256] = values;
+			const existing = rows.find((row) => row.destination === destination && row.path === path);
+			if (existing === undefined) rows.push({ destination, path, sha256 });
+			else existing.sha256 = sha256;
+			return [];
+		};
+		const first = bunPlanningHashStore(sql, planningDestinationKey("http://plane-a"));
+		await first.save(new Map([["ROADMAP.md", "hash-1"]]));
+		const second = bunPlanningHashStore(sql, planningDestinationKey("http://plane-b"));
+		expect(await second.load()).toEqual(new Map());
+		expect((await first.load()).get("ROADMAP.md")).toBe("hash-1");
+		expect(JSON.stringify(rows)).not.toContain("http://plane-a");
 	});
 });
 
@@ -179,7 +208,8 @@ describeLive("the Postgres adapter against a live index", () => {
 	});
 
 	test("save upserts by path and load reads it back, so a second store object sees what the first wrote", async () => {
-		const written = index.planningHashStore();
+		const destination = planningDestinationKey("http://lightrag.test");
+		const written = index.planningHashStore(destination);
 		await written.save(
 			new Map([
 				[`${MARKER}/a.md`, "1"],
@@ -187,8 +217,9 @@ describeLive("the Postgres adapter against a live index", () => {
 			]),
 		);
 		await written.save(new Map([[`${MARKER}/a.md`, "3"]]));
-		const loaded = await index.planningHashStore().load();
+		const loaded = await index.planningHashStore(destination).load();
 		expect(loaded.get(`${MARKER}/a.md`)).toBe("3");
 		expect(loaded.get(`${MARKER}/b.md`)).toBe("2");
+		expect(await index.planningHashStore(planningDestinationKey("http://other.test")).load()).toEqual(new Map());
 	});
 });

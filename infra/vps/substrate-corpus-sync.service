@@ -15,7 +15,8 @@ EnvironmentFile=-/etc/substrate/substrate-corpus.env
 WorkingDirectory=/opt/agent-substrate/current
 ExecStart=/root/.local/share/reflex/bun/bin/bun packages/cli/src/index.ts corpus watch --once
 
-StateDirectory=substrate
+StateDirectory=substrate/corpus-mirrors
+StateDirectory=substrate/corpus-hints
 StateDirectoryMode=0700
 Environment=SUBSTRATE_CORPUS_MIRROR_DIR=/var/lib/substrate/corpus-mirrors
 Environment=SUBSTRATE_CORPUS_SPOOL=/var/lib/substrate/corpus-hints

@@ -318,3 +318,24 @@ describe("watchTargets", () => {
 		expect(watchTargets(registry, null).map((target) => target.dir)).toEqual([alpha, join(root, "beta")]);
 	});
 });
+
+describe("runOne warnings", () => {
+	test("an ok line is not the only line when a mirror or a read is incomplete", async () => {
+		const h = harness({
+			once: true,
+			sync: () => ({
+				...syncResult("sweep"),
+				mirrors: [{ repo: "Acme/Alpha", status: "stale", reason: "fetch-failed", view: "mirror" }],
+				incomplete: ["Acme/Alpha: the mirror's default branch did not resolve to a commit"],
+				delivery: { ok: false, reason: "http-503" },
+			}),
+		});
+		await runWatchLoop(h.deps);
+		const text = h.out.join("");
+		expect(text).not.toContain("outcome: ok");
+		expect(text).toContain("synced (sweep): ok");
+		expect(text).toContain("mirror-stale Acme/Alpha: fetch-failed");
+		expect(text).toContain("not read completely");
+		expect(text).toContain("docs.sync event not delivered (http-503)");
+	});
+});

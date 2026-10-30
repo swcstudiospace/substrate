@@ -8,6 +8,9 @@
  * A sweep over many repositories scans once and plans in groups that stay inside the server's per-request limits; a
  * repository too large for one plan is reported and left alone (its rows are not judged).
  */
+import { createHash } from "node:crypto";
+import { closeSync, constants, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import { join } from "node:path";
 import {
 	buildView,
 	CORPUS_PROTOCOL,
@@ -16,6 +19,7 @@ import {
 	type CorpusEntry,
 	type CorpusPlanResponse,
 	type CorpusScope,
+	discoverRepos,
 	ensureMirror,
 	type GitBytesRunner,
 	type GitRunner,
@@ -34,7 +38,7 @@ import type { ClientError, CorpusClient } from "./client.ts";
 import { ALL_REPOS, type Delivery, type EmitDocsSync } from "./events.ts";
 import { executeIngest } from "./ingest.ts";
 import { collectInventory, type Inventory } from "./inventory.ts";
-import type { IngestSummary } from "./render.ts";
+import type { IngestProblem, IngestSummary } from "./render.ts";
 
 export interface SyncDeps {
 	client: CorpusClient;
@@ -117,9 +121,17 @@ export interface Partition {
 /** Splits an inventory by repository into plans that fit the server's per-request limits. */
 export function partitionInventory(inventory: Inventory, maxEntries = MAX_PLAN_ENTRIES, maxPairs = MAX_COVERAGE_PAIRS): Partition {
 	const entries = new Map<string, CorpusEntry[]>();
-	for (const entry of inventory.entries) entries.set(entry.repo, [...(entries.get(entry.repo) ?? []), entry]);
+	for (const entry of inventory.entries) {
+		const mine = entries.get(entry.repo);
+		if (mine === undefined) entries.set(entry.repo, [entry]);
+		else mine.push(entry);
+	}
 	const pairs = new Map<string, CorpusScope["coverage"]>();
-	for (const pair of inventory.scope.coverage) pairs.set(pair.repo, [...(pairs.get(pair.repo) ?? []), pair]);
+	for (const pair of inventory.scope.coverage) {
+		const mine = pairs.get(pair.repo);
+		if (mine === undefined) pairs.set(pair.repo, [pair]);
+		else mine.push(pair);
+	}
 
 	const groups: Inventory[] = [];
 	const oversized: string[] = [];
@@ -144,12 +156,109 @@ export function partitionInventory(inventory: Inventory, maxEntries = MAX_PLAN_E
 	return { groups, oversized };
 }
 
+const SYNC_LOCK_WAIT_MS = 120_000;
+
+function lockFile(mirrorDir: string, repo: string): string {
+	return join(mirrorDir, ".locks", createHash("sha256").update(repo).digest("hex").slice(0, 24));
+}
+
+function ownerAlive(path: string): boolean {
+	let owner = Number.NaN;
+	try {
+		owner = Number(readFileSync(path, "utf8"));
+	} catch {
+		return false;
+	}
+	if (!Number.isInteger(owner) || owner <= 0) return false;
+	try {
+		process.kill(owner, 0);
+		return true;
+	} catch (cause) {
+		return cause instanceof Error && "code" in cause && cause.code === "EPERM";
+	}
+}
+
+async function acquireRepoLock(path: string): Promise<void> {
+	const started = Date.now();
+	for (;;) {
+		try {
+			const fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+			writeSync(fd, `${process.pid}\n`);
+			closeSync(fd);
+			return;
+		} catch (cause) {
+			const code = cause instanceof Error && "code" in cause ? cause.code : undefined;
+			if (code !== "EEXIST") throw cause;
+			if (!ownerAlive(path)) {
+				try {
+					unlinkSync(path);
+				} catch {
+					// Released between the check and the unlink.
+				}
+				continue;
+			}
+			if (Date.now() - started > SYNC_LOCK_WAIT_MS) throw new Error("sync lock wait exceeded");
+			const { promise, resolve } = Promise.withResolvers<void>();
+			setTimeout(resolve, 20);
+			await promise;
+		}
+	}
+}
+
+/** One lock per repository, shared by the timer and the watcher, held across scan, plan and send. */
+async function withRepoLocks(deps: SyncDeps, request: SyncRequest, body: () => Promise<void>): Promise<void> {
+	const found = request.repos !== null && request.repos.length > 0 ? null : discoverRepos(deps.roots, { run: deps.runner });
+	const labels =
+		found === null
+			? [...new Set(request.repos ?? [])].sort()
+			: [...new Set([...found.checkouts.map((checkout) => checkout.repo), ...found.collections.map((collection) => collection.repo)])].sort();
+	mkdirSync(join(deps.mirrorDir, ".locks"), { recursive: true, mode: 0o700 });
+	const held: string[] = [];
+	try {
+		for (const label of labels) {
+			const path = lockFile(deps.mirrorDir, label);
+			await acquireRepoLock(path);
+			held.push(path);
+		}
+		await body();
+	} finally {
+		for (const path of held.reverse()) {
+			try {
+				unlinkSync(path);
+			} catch {
+				// Already gone. The next sync creates it.
+			}
+		}
+	}
+}
+
 function describeError(error: ClientError): string {
 	return error.message;
 }
 
 function mirrorReason(state: MirrorState): string | undefined {
 	return state.status === "stale" || state.status === "absent" ? state.reason : undefined;
+}
+
+/** Scan refusals belong to the sweep, not to each plan group. */
+export function withoutScanRefusals(inventory: Inventory): Inventory {
+	return {
+		...inventory,
+		report: {
+			...inventory.report,
+			skipped: inventory.report.skipped.filter((skip) => skip.reason !== "bad-path"),
+			skippedByReason: { ...inventory.report.skippedByReason, "bad-path": 0 },
+		},
+	};
+}
+
+export function scanRefusalSummary(inventory: Inventory): { count: number; problems: IngestProblem[] } {
+	const listed = inventory.report.skipped.filter((skip) => skip.reason === "bad-path");
+	const extra = Math.max(0, (inventory.report.skippedByReason["bad-path"] ?? 0) - listed.length);
+	return {
+		count: listed.length + extra,
+		problems: listed.map((skip) => ({ repo: skip.repo, path: skip.path, status: "refused", reason: "bad-path" })),
+	};
 }
 
 export async function runSync(deps: SyncDeps, request: SyncRequest): Promise<SyncResult> {
@@ -172,7 +281,7 @@ export async function runSync(deps: SyncDeps, request: SyncRequest): Promise<Syn
 		lagS: 0,
 	};
 	try {
-		await syncInto(deps, request, result);
+		await withRepoLocks(deps, request, () => syncInto(deps, request, result));
 	} catch (cause) {
 		result.outcome = "failed";
 		result.error = `unexpected failure: ${cause instanceof Error ? cause.message : String(cause)}`;
@@ -259,7 +368,7 @@ async function syncInto(deps: SyncDeps, request: SyncRequest, result: SyncResult
 		if (!request.execute) continue;
 		const outcome = await executeIngest({
 			plan: planned.value,
-			inventory: group,
+			inventory: withoutScanRefusals(group),
 			client: deps.client,
 			bodies: null,
 			readFile: (location) => readLocation(location, deps.git, deps.readFile),
@@ -280,11 +389,14 @@ async function syncInto(deps: SyncDeps, request: SyncRequest, result: SyncResult
 		};
 	}
 	if (request.execute && ingests.length > 0) {
+		const refusals = scanRefusalSummary(inventory);
 		result.ingest = {
 			counts: sumCounts(INGEST_STATUSES, ingests.map((summary) => summary.counts)),
 			problems: ingests.flatMap((summary) => summary.problems),
 			manifestVersion: ingests[ingests.length - 1]?.manifestVersion ?? null,
 		};
+		result.ingest.counts.refused += refusals.count;
+		result.ingest.problems.push(...refusals.problems);
 	}
 	if (fatal !== null) {
 		result.outcome = "failed";

@@ -101,4 +101,22 @@ describe("the hint spool", () => {
 		for (const name of ["/work/c", "/work/a", "/work/b"]) writeHint(dir, name, time);
 		expect(defined(readHints(dir).dirs, "dirs")).toEqual(["/work/c", "/work/a", "/work/b"]);
 	});
+
+	test("two processes cannot both pass the cap", () => {
+		const dir = spool();
+		const time = clock();
+		for (let i = 0; i < MAX_HINT_FILES - 1; i++) expect(writeHint(dir, `/work/r${i}`, time).ok).toBe(true);
+		const script = `import { writeHint } from ${JSON.stringify(join(import.meta.dir, "hints.ts"))};\nimport { randomBytes } from "node:crypto";\nconst result = writeHint(process.argv[2], process.argv[3], { nowMs: () => Date.now(), random: () => randomBytes(4).toString("hex") });\nprocess.stdout.write(JSON.stringify(result));\n`;
+		const launch = (name: string) => Bun.spawn(["bun", "--no-env-file", "-e", script, dir, name], { stdout: "pipe", stderr: "pipe" });
+		const left = launch("/work/left");
+		const right = launch("/work/right");
+		const done = Promise.all([left.exited, right.exited]);
+		return done.then(async () => {
+			const texts = [await new Response(left.stdout).text(), await new Response(right.stdout).text()];
+			const results = texts.map((text) => JSON.parse(text) as { ok: boolean; reason?: string });
+			expect(results.filter((result) => result.ok)).toHaveLength(1);
+			expect(results.filter((result) => result.reason === "spool-full")).toHaveLength(1);
+			expect(readdirSync(dir).filter((name) => name.endsWith(".json"))).toHaveLength(MAX_HINT_FILES);
+		});
+	});
 });

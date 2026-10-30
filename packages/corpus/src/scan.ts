@@ -295,6 +295,12 @@ interface Reader {
 	skips: SkipLog;
 	entries: CorpusEntry[];
 	paths: Map<string, string>;
+	/** Null reads every label into the report. A set still reads other `local/*` copies so identical-file ownership does not depend on the trigger. */
+	wanted: ReadonlySet<string> | null;
+}
+
+function reported(reader: Reader, repo: string): boolean {
+	return reader.wanted === null || reader.wanted.has(repo);
 }
 
 interface RepoState {
@@ -311,7 +317,7 @@ function readCandidate(reader: Reader, state: RepoState, rel: string, abs: strin
 	if (found === null || found.tier > reader.maxTier) return;
 	// The server refuses a whole plan for one path that breaks its rules, so such a file is skipped here, before any copy collapse can let it hide a valid copy.
 	if (!isValidPath(rel)) {
-		reader.skips.add({ repo: state.repo, path: rel, reason: "bad-path" });
+		if (reported(reader, state.repo)) reader.skips.add({ repo: state.repo, path: rel, reason: "bad-path" });
 		return;
 	}
 	// Another directory under the same label already supplied this path (root order decides): it is counted, never read twice.
@@ -321,8 +327,8 @@ function readCandidate(reader: Reader, state: RepoState, rel: string, abs: strin
 	}
 	const loaded = loadDocument(abs, reader);
 	if (!loaded.ok) {
-		reader.skips.add({ repo: state.repo, path: rel, reason: loaded.reason });
-		if (loaded.problem !== undefined) state.problems.push(`${rel}: ${loaded.problem}`);
+		if (reported(reader, state.repo)) reader.skips.add({ repo: state.repo, path: rel, reason: loaded.reason });
+		if (loaded.problem !== undefined && reported(reader, state.repo)) state.problems.push(`${rel}: ${loaded.problem}`);
 		return;
 	}
 	reader.entries.push({
@@ -351,16 +357,24 @@ function scanCheckout(
 		problems: [],
 		shadowed: 0,
 	};
-	const supplied = readCheckout?.(checkout) ?? null;
+	// A repository kept only so identical-file ownership matches a full sweep is read from its working tree. The mirror
+	// fetch belongs to the labels the caller asked to sync; fetching the others reports their failures as this sync's.
+	const supplied = reported(reader, checkout.repo) ? (readCheckout?.(checkout) ?? null) : null;
 	if (supplied !== null) {
 		// The supplied entries passed the same rules as `readCandidate` applies; only the source of the bytes differs.
+		// A later directory of the same label does not replace an earlier location: the first file's bytes are the ones read.
 		for (const entry of supplied.entries) {
+			const key = documentKey(entry.repo, entry.path);
+			if (reader.paths.has(key)) {
+				state.shadowed += 1;
+				continue;
+			}
 			reader.entries.push(entry);
-			const location = supplied.paths.get(documentKey(entry.repo, entry.path));
-			if (location !== undefined) reader.paths.set(documentKey(entry.repo, entry.path), location);
+			// Claim the key even when the supplier omitted a location, so a later directory cannot read a second body.
+			reader.paths.set(key, supplied.paths.get(key) ?? join(checkout.dir, entry.path));
 		}
-		reader.skips.absorb(supplied.skips);
-		state.problems.push(...supplied.problems);
+		if (reported(reader, checkout.repo)) reader.skips.absorb(supplied.skips);
+		if (reported(reader, checkout.repo)) state.problems.push(...supplied.problems);
 		return state;
 	}
 	const listed = run(["ls-files", "-z"], checkout.dir);
@@ -436,17 +450,16 @@ function collapseIdentical(entries: CorpusEntry[]): { kept: CorpusEntry[]; dropp
 export async function scanRoots(opts: ScanOptions): Promise<ScanResult> {
 	const run = opts.runner ?? defaultGitRunner;
 	const discovered = discoverRepos(opts.roots, { run, depth: opts.depth });
-	// A repository filter drops every other label before any file is read.
+	// Identical `local/*` copies are collapsed before a trigger's repository filter, so a watch sync and a full sweep
+	// agree on which copy owns a file. Other labels are still dropped before they are read.
 	const wanted = opts.repos === undefined ? null : new Set(opts.repos);
-	const found =
-		wanted === null
-			? discovered
-			: {
-					...discovered,
-					checkouts: discovered.checkouts.filter((checkout) => wanted.has(checkout.repo)),
-					collections: discovered.collections.filter((collection) => wanted.has(collection.repo)),
-					duplicates: discovered.duplicates.filter((duplicate) => wanted.has(duplicate.repo)),
-				};
+	const selected = (repo: string): boolean => wanted === null || wanted.has(repo) || repo.startsWith("local/");
+	const found = {
+		...discovered,
+		checkouts: discovered.checkouts.filter((checkout) => selected(checkout.repo)),
+		collections: discovered.collections.filter((collection) => selected(collection.repo)),
+		duplicates: discovered.duplicates.filter((duplicate) => selected(duplicate.repo)),
+	};
 	const reader: Reader = {
 		maxTier: opts.maxTier ?? DEFAULT_MAX_TIER,
 		maxBytes: opts.maxBytes ?? DEFAULT_MAX_BYTES,
@@ -455,6 +468,7 @@ export async function scanRoots(opts: ScanOptions): Promise<ScanResult> {
 		skips: new SkipLog(),
 		entries: [],
 		paths: new Map(),
+		wanted,
 	};
 
 	// Directories that share a label are read in root order, so the first one that holds a path keeps it and an empty one
@@ -469,14 +483,14 @@ export async function scanRoots(opts: ScanOptions): Promise<ScanResult> {
 	const states = units.map((unit) => unit.read());
 	const notes = [...found.notes];
 	if (wanted !== null) {
-		const present = new Set([...found.checkouts.map((checkout) => checkout.repo), ...found.collections.map((collection) => collection.repo)]);
+		const present = new Set([...discovered.checkouts.map((checkout) => checkout.repo), ...discovered.collections.map((collection) => collection.repo)]);
 		for (const label of [...wanted].sort(compareText)) {
 			if (!present.has(label)) notes.push(`repo-not-found: ${label} is not below the roots`);
 		}
 	}
 	for (const state of states) {
 		const duplicate = duplicateOf.get(state.repo);
-		if (duplicate === undefined) continue;
+		if (duplicate === undefined || (wanted !== null && !wanted.has(state.repo))) continue;
 		// Incomplete on purpose: the label is not a coverage pair, so nothing recorded under it is judged removed.
 		state.problems.unshift(`${DUPLICATE_LABEL}: ${duplicate.dirs.map(directoryLabel).join(", ")}`);
 		if (state.shadowed > 0) {
@@ -484,9 +498,18 @@ export async function scanRoots(opts: ScanOptions): Promise<ScanResult> {
 		}
 	}
 
-	const { kept, dropped, groups } = collapseIdentical(reader.entries);
-	for (const entry of dropped) reader.paths.delete(documentKey(entry.repo, entry.path));
+	const collapsed = collapseIdentical(reader.entries);
+	const kept = wanted === null ? collapsed.kept : collapsed.kept.filter((entry) => wanted.has(entry.repo));
+	const dropped = wanted === null ? collapsed.dropped : collapsed.dropped.filter((entry) => wanted.has(entry.repo));
+	const groups = wanted === null ? collapsed.groups : collapsed.groups.filter((group) => [group.keep, ...group.copies].some((key) => wanted.has(key.slice(0, key.indexOf(":")))));
+	for (const entry of collapsed.dropped) reader.paths.delete(documentKey(entry.repo, entry.path));
+	if (wanted !== null) {
+		for (const entry of collapsed.kept) {
+			if (!wanted.has(entry.repo)) reader.paths.delete(documentKey(entry.repo, entry.path));
+		}
+	}
 	kept.sort(compareEntries);
+	const reportedStates = wanted === null ? states : states.filter((state) => wanted.has(state.repo));
 
 	const totals = new Map<string, { files: number; bytes: number }>();
 	for (const entry of kept) {
@@ -495,7 +518,7 @@ export async function scanRoots(opts: ScanOptions): Promise<ScanResult> {
 		total.bytes += entry.bytes;
 		totals.set(entry.repo, total);
 	}
-	const repos = states
+	const repos = reportedStates
 		.map((state): RepoReport => {
 			const total = totals.get(state.repo) ?? { files: 0, bytes: 0 };
 			return {

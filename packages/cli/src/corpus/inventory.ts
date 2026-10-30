@@ -43,7 +43,7 @@ export interface InventoryOptions {
 	runner?: GitRunner | undefined;
 	gh?: GhRunner | undefined;
 	readFile?: ((path: string) => Uint8Array) | undefined;
-	/** Limits the filesystem scan to these repository labels, before any file is read (`corpus sync --repo`). */
+	/** Limits the filesystem report to these labels. Other `local/*` copies are still read so identical-file ownership matches a full sweep. */
 	repos?: readonly string[] | undefined;
 	/** Reads a checkout in place of its working tree (the mirror view); null leaves that checkout to the plain scan. */
 	readCheckout?: ((checkout: Checkout) => CheckoutRead | null) | undefined;

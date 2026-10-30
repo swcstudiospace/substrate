@@ -153,6 +153,27 @@ describe("reconcileCorpus", () => {
 		expect(settled.body.drift).toMatchObject({ missingInPlane: [], orphansInPlane: [] });
 	});
 
+	test("a live id missing from a complete listing is not marked removed, and a failed lookup leaves the row alone", async () => {
+		const { store, plane, documents } = await ingested(["a.md", "b.md"]);
+		const hidden = defined(documents[0], "a.md");
+		const hiddenId = store.row(REPO, "a.md")?.documentId;
+		if (hiddenId === null || hiddenId === undefined) throw new Error("expected a document id");
+		plane.hiddenFromListing.add(hiddenId);
+		const kept = await reconcileCorpus({ store, plane }, true);
+		if (!kept.ok) throw new Error("expected a result");
+		expect(kept.body.drift.missingInPlane).toEqual([]);
+		expect(store.row(REPO, hidden.path)?.state).toBe("active");
+
+		plane.hiddenFromListing.delete(hiddenId);
+		plane.vanish(nameOf(hidden));
+		plane.lookupUnknown.add(hiddenId);
+		const unknown = await reconcileCorpus({ store, plane }, true);
+		if (!unknown.ok) throw new Error("expected a result");
+		expect(unknown.body.drift.missingInPlane).toEqual([]);
+		expect(unknown.body.drift.truncated).toBe(true);
+		expect(store.row(REPO, hidden.path)?.state).toBe("active");
+	});
+
 	test("a delete the plane refused, or did not confirm, is not counted as repaired and the orphan is reported again by the next run", async () => {
 		const { store, plane } = await ingested(["a.md"]);
 		const refused = plane.plant(corpusDocumentName(REPO, "refused.md", sha256Hex("refused")));

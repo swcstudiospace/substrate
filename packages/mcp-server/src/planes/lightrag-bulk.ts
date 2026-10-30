@@ -78,6 +78,11 @@ export interface LightragBulkPlane {
 	deleteDocuments(ids: readonly string[]): Promise<{ deleted: string[]; failed: Array<{ id: string; reason: string }> }>;
 	/** Read-only: the plane's `corpus:`-named documents. `truncated` means a missing document proves nothing. */
 	listDocuments(options?: { signal?: AbortSignal | undefined }): Promise<PlaneListing>;
+	/**
+	 * Whether one document id is in the plane. A listing that reached the last page is not this check: other writers can
+	 * shift a live id off the page it was on. `unknown` leaves the caller's row alone.
+	 */
+	lookupDocument(id: string, options?: { signal?: AbortSignal | undefined }): Promise<"present" | "absent" | "unknown">;
 }
 
 // The reasons a failed outcome carries: `plane-unavailable`, `timeout`, `rejected`, `conflict`, `pipeline-failed`
@@ -496,6 +501,72 @@ async function listCorpusDocuments(context: Context): Promise<PlaneListing> {
 	return { ok: true, documents, otherDocumentIds, truncated: true };
 }
 
+interface IdPage {
+	ids: string[];
+	totalPages: number;
+	totalCount: number;
+}
+
+/** One id-sorted page. Null is a failed read: the caller must not treat that as absence. */
+async function idPage(context: Context, page: number): Promise<IdPage | null> {
+	if (aborted(context)) return null;
+	const answered = await lightragCall(context.config, context.fetchImpl, "/documents/paginated", {
+		method: "POST",
+		json: true,
+		body: JSON.stringify({ page, page_size: BULK_LIST_PAGE_SIZE, sort_field: "id", sort_direction: "asc" }),
+		timeoutMs: LIST_REQUEST_TIMEOUT_MS,
+	});
+	if (!answered.ok || !isRecord(answered.body) || !Array.isArray(answered.body.documents) || !isRecord(answered.body.pagination)) return null;
+	const ids: string[] = [];
+	for (const entry of answered.body.documents as unknown[]) {
+		if (isRecord(entry) && typeof entry.id === "string" && entry.id.length > 0) ids.push(entry.id);
+	}
+	const totalPages = typeof answered.body.pagination.total_pages === "number" ? answered.body.pagination.total_pages : 0;
+	const totalCount = typeof answered.body.pagination.total_count === "number" ? answered.body.pagination.total_count : -1;
+	if (!Number.isInteger(totalPages) || totalPages < 0 || !Number.isInteger(totalCount) || totalCount < 0) return null;
+	return { ids, totalPages, totalCount };
+}
+
+function brackets(page: IdPage, id: string): boolean {
+	const first = page.ids[0];
+	const last = page.ids[page.ids.length - 1];
+	if (first === undefined || last === undefined) return page.totalCount === 0;
+	return id < first || id > last || (id > first && id < last && !page.ids.includes(id));
+}
+
+/**
+ * A point check for one id. The page that should hold it is read twice; a count that moved, or a read that failed, is
+ * `unknown` rather than absence. Reaching the last page of a full listing is not this check.
+ */
+async function lookupDocumentId(context: Context, id: string): Promise<"present" | "absent" | "unknown"> {
+	const wanted = id.trim();
+	if (wanted.length === 0) return "unknown";
+	const first = await idPage(context, 1);
+	if (first === null) return "unknown";
+	if (first.ids.includes(wanted)) return "present";
+	if (first.totalCount === 0) return "absent";
+	let lo = 1;
+	let hi = Math.max(1, first.totalPages);
+	let home = 1;
+	while (lo <= hi) {
+		const mid = Math.floor((lo + hi) / 2);
+		const page = mid === 1 ? first : await idPage(context, mid);
+		if (page === null || page.totalCount !== first.totalCount) return "unknown";
+		if (page.ids.includes(wanted)) return "present";
+		const start = page.ids[0];
+		const end = page.ids[page.ids.length - 1];
+		if (start === undefined || end === undefined) return "unknown";
+		home = mid;
+		if (wanted < start) hi = mid - 1;
+		else if (wanted > end) lo = mid + 1;
+		else return "absent";
+	}
+	const again = home === 1 ? first : await idPage(context, home);
+	if (again === null || again.totalCount !== first.totalCount) return "unknown";
+	if (again.ids.includes(wanted)) return "present";
+	return brackets(again, wanted) ? "absent" : "unknown";
+}
+
 export function createLightragBulkPlane(
 	config: LightragConfig,
 	deps: { fetch?: FetchLike; sleep?: (ms: number) => Promise<void>; now?: () => number } = {},
@@ -543,6 +614,10 @@ export function createLightragBulkPlane(
 
 		async listDocuments(options = {}) {
 			return listCorpusDocuments({ config, fetchImpl: withSignal(baseFetch, options.signal), sleep, now, signal: options.signal });
+		},
+
+		async lookupDocument(id, options = {}) {
+			return lookupDocumentId({ config, fetchImpl: withSignal(baseFetch, options.signal), sleep, now, signal: options.signal }, id);
 		},
 
 		async deleteDocuments(ids) {
