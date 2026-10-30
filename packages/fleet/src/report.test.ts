@@ -205,7 +205,7 @@ describe("the session in a report", () => {
 		["a live claim with no holder", { ok: true, claims: [claim("n1", "sess-1"), claim("n2", null)] }],
 		["no live claim", { ok: true, claims: [] }],
 		["a lookup the server did not answer", { ok: false, error: "HTTP 503" }],
-		["a holder whose id is not a session id", { ok: true, claims: [claim("n1", "not a session id")] }],
+		["a holder whose id has a control character", { ok: true, claims: [claim("n1", "bad\nid")] }],
 	];
 
 	test.each(UNATTRIBUTING)("%s leaves the worktree unattributed, and the report still goes out whole", async (_label, answer) => {

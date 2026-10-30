@@ -295,6 +295,8 @@ interface Group {
 	/** Items the node cap left out before any byte budget applied. */
 	capped: number;
 	kept: number;
+	/** A title with no items. It is one droppable unit, not a line that can never be omitted. */
+	notice: boolean;
 }
 
 function clampLimit(value: number, min: number, max: number): number {
@@ -334,7 +336,9 @@ export function renderCompactBrief(sections: readonly BriefSection[], stateLine:
 			}
 		}
 		const lines = items.map((item) => (section.id === "heading" ? clipPoints(foldLine(item.text), HEADING_CHARS) : clipLine(item, chars)));
-		return { section, index, lines, capped, kept: lines.length };
+		const notice = lines.length === 0 && section.title !== undefined && section.title !== "";
+		// A title-only notice is one unit. kept starts at 1 so the byte budget can drop it like any other line.
+		return { section, index, lines, capped, kept: notice ? 1 : lines.length, notice };
 	});
 	const priorityOf = (group: Group): number => BRIEF_SECTION_PRIORITY[group.section.id];
 	const display = [...groups].sort((a, b) => priorityOf(a) - priorityOf(b) || a.index - b.index);
@@ -344,16 +348,13 @@ export function renderCompactBrief(sections: readonly BriefSection[], stateLine:
 		const out = [stateLine];
 		for (const group of display) {
 			const title = group.section.title === undefined ? undefined : foldLine(group.section.title);
-			// Dropped items hide their title. A title with no items is the notice itself and must still print.
-			if (group.kept === 0) {
-				if (group.lines.length === 0 && title !== undefined && title !== "") out.push(title);
-				continue;
-			}
+			// A dropped notice (kept 0) is omitted, not printed. A kept notice is the title alone.
+			if (group.kept === 0) continue;
 			if (title !== undefined && title !== "") out.push(title);
 			for (const line of group.lines.slice(0, group.kept)) out.push(line);
 		}
 		const missing = groups
-			.map((group) => ({ label: OMIT_LABEL[group.section.id], count: group.capped + group.lines.length - group.kept + (group.section.unlisted ?? 0) }))
+			.map((group) => ({ label: OMIT_LABEL[group.section.id], count: (group.notice ? (group.kept === 0 ? 1 : 0) : group.capped + group.lines.length - group.kept) + (group.section.unlisted ?? 0) }))
 			.filter((entry) => entry.count > 0);
 		if (missing.length > 0) {
 			out.push(`...omitted: ${missing.map((entry) => `${entry.label} ${entry.count}`).join(", ")} (profile=compact; request profile=full)`);

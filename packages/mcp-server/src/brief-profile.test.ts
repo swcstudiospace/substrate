@@ -21,6 +21,7 @@ import {
 	parseBriefProfile,
 	parseSections,
 	renderCompactBrief,
+	utf8Bytes,
 	renderFullBrief,
 	resolveBriefProfile,
 	type BriefItem,
@@ -273,6 +274,27 @@ describe("full and compact from one set of reads", () => {
 				"- ut-2 (omp, active)",
 			].join("\n"),
 		);
+	});
+
+	test("a title-only notice yields to warnings under the byte cap and is counted when it is omitted", () => {
+		const filler = "w".repeat(180);
+		const warnings: BriefSection = {
+			id: "warnings",
+			title: "Warnings",
+			lines: [],
+			items: [{ text: `first warning stays ${filler}` }, { text: `second warning stays ${filler}` }],
+		};
+		// Longer than the omitted line, so dropping the notice frees the room the count then uses. The pair of warnings fits in 512; the notice pushes past it.
+		const notice: BriefSection = { id: "worktrees", title: `Worktrees: the registry could not be read ${"x".repeat(80)}`, lines: [], items: [] };
+		const limits = { nodes: 12, memoryChars: 240, bytes: 512 };
+		const alone = renderCompactBrief([warnings], COMPLETE, limits);
+		expect(alone).toContain("first warning stays");
+		expect(alone).toContain("second warning stays");
+		const crowded = renderCompactBrief([warnings, notice], COMPLETE, limits);
+		expect(crowded).toContain("first warning stays");
+		expect(crowded).toContain("second warning stays");
+		expect(crowded).not.toContain("could not be read");
+		expect(crowded).toContain("worktrees 1");
 	});
 
 	test("the sections survive the cache's encoding, and nothing but that encoding decodes", async () => {
