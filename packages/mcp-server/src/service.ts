@@ -2540,16 +2540,19 @@ export class Substrate {
 		if (sessionId === null) return;
 		const authorized = caller !== undefined && (caller.isOperator || (caller.surface !== null && caller.surface === event.surface));
 		try {
-			const removed = authorized && this.steeringSessions.end(event.surface, sessionId);
+			const outcome = authorized ? this.steeringSessions.end(event.surface, sessionId) : null;
+			const removed = outcome !== null && outcome.removal !== "refused" && outcome.held;
 			const id = redact(sessionId).slice(0, 80);
 			await this.emit({
 				surface: event.surface,
 				kind: "note",
-				summary: authorized
-					? `steering session ${id} ended: ${removed ? "its live session was removed" : "it held no live session"}`
-					: `steering session ${id} end refused: the caller is neither the session's surface nor an operator`,
+				summary: !authorized
+					? `steering session ${id} end refused: the caller is neither the session's surface nor an operator`
+					: outcome?.removal === "refused"
+						? `steering session ${id} end refused: the removal queue is full, so the session stays live`
+						: `steering session ${id} ended: ${removed ? "its live session was removed" : "it held no live session"}`,
 				session_id: sessionId,
-				payload: { action: STEERING_SESSION_ENDED_ACTION, authorized, removed },
+				payload: { action: STEERING_SESSION_ENDED_ACTION, authorized, removed, removal: outcome?.removal ?? null },
 			});
 		} catch (cause) {
 			process.stderr.write(`[substrate] steering: recording the end of session ${redact(sessionId).slice(0, 80)} failed: ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200)}\n`);

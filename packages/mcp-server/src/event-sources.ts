@@ -1521,7 +1521,7 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 			kind: "note",
 			summary: "steering session sess-sample ended: its live session was removed",
 			session_id: "sess-sample",
-			payload: { action: "steering.session_ended", authorized: true, removed: true },
+			payload: { action: "steering.session_ended", authorized: true, removed: true, removal: "queued" },
 		}),
 	},
 	{

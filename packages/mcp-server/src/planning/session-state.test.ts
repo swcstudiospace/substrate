@@ -173,7 +173,7 @@ describe("end", () => {
 		const { reg } = registry();
 		reg.put("claude-code", "s-1", session("s-1", "ACTIVE"));
 		reg.put("claude-code", "s-2", session("s-2", "ACTIVE"));
-		expect(reg.end("claude-code", "s-1")).toBe(true);
+		expect(reg.end("claude-code", "s-1").held).toBe(true);
 		expect(reg.get("claude-code", "s-1")).toBeUndefined();
 		expect(reg.lookup("s-1")).toEqual({ status: "none" });
 		expect(reg.entries().map((entry) => entry.session.session_id)).toEqual(["s-2"]);
@@ -184,8 +184,8 @@ describe("end", () => {
 		const { reg } = registry();
 		reg.put("omp", "s-1", session("s-1", "ACTIVE"));
 		reg.put("cursor", "s-1", session("s-1", "ACTIVE"));
-		expect(reg.end("omp", "s-1")).toBe(true);
-		expect(reg.end("omp", "s-1")).toBe(false);
+		expect(reg.end("omp", "s-1").held).toBe(true);
+		expect(reg.end("omp", "s-1").held).toBe(false);
 		expect(reg.get("cursor", "s-1")?.state).toBe("ACTIVE");
 		expect(reg.lookup("s-1")).toMatchObject({ status: "one", surface: "cursor" });
 	});
