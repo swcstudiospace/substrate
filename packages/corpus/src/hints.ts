@@ -33,6 +33,17 @@ export interface HintClock {
 }
 
 const HINT_LOCK_WAIT_MS = 30_000;
+/** A lock with no owner pid yet is a writer between its open and its write. It is treated as held until it is this old. */
+const HINT_LOCK_UNCLAIMED_STALE_MS = 5_000;
+
+/** Milliseconds since the lock file was last written. Unreadable counts as zero, so a lock that cannot be read is never judged old. */
+function lockAgeMs(path: string): number {
+	try {
+		return Date.now() - statSync(path).mtimeMs;
+	} catch {
+		return 0;
+	}
+}
 
 /** Takes the lock inside the spool. A dead owner's lock is removed; a live one is waited on. Never exceeds the cap by giving up and writing anyway. */
 function acquireHintLock(spoolDir: string): void {
@@ -62,11 +73,19 @@ function acquireHintLock(spoolDir: string): void {
 					alive = killCause instanceof Error && "code" in killCause && killCause.code === "EPERM";
 				}
 			}
-			if (!alive) {
+			if (!alive && Number.isInteger(owner) && owner > 0) {
 				try {
 					unlinkSync(path);
 				} catch {
 					// The holder released it between the read and the unlink.
+				}
+				continue;
+			}
+			if (!alive && lockAgeMs(path) > HINT_LOCK_UNCLAIMED_STALE_MS) {
+				try {
+					unlinkSync(path);
+				} catch {
+					// The writer finished and released it between the read and the unlink.
 				}
 				continue;
 			}
