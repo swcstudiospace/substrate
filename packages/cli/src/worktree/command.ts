@@ -576,7 +576,7 @@ export async function runWorktree(argv: readonly string[], deps: WorktreeDeps): 
 			return commandGuard(args, deps);
 		case "merge-back": {
 			const rootList = roots(args, deps);
-			return rootList.length === 0 ? usageError(deps, NO_ROOT) : commandMergeBack(args, deps, rootList);
+			return rootList.length === 0 ? usageError(deps, "no worktree root is configured: set SUBSTRATE_WORKTREE_ROOTS (colon separated)\n") : commandMergeBack(args, deps, rootList);
 		}
 	}
 }

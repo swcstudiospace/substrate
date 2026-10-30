@@ -1182,6 +1182,14 @@ describe("merge-back", () => {
 
 	const reasonsOf = (result: MergeBackJson, path: string): string => (result.reasons[path] ?? []).join(" | ");
 
+	/** A `gh` that answers `pr list --head` from a table, each pull request with the branch it merged into. */
+	function prGh(table: Record<string, Array<{ state: string; headRefOid: string; number: number; baseRefName: string }>>): CommandRunner {
+		return async (args) => {
+			const head = args[args.indexOf("--head") + 1] ?? "";
+			return { code: 0, stdout: JSON.stringify(table[head] ?? []), stderr: "" };
+		};
+	}
+
 	test("a dry run writes nothing, emits nothing and runs no write command", async () => {
 		const f = fleet();
 		const calls: string[][] = [];
@@ -1221,7 +1229,7 @@ describe("merge-back", () => {
 		// A squash merge leaves a different commit on main; only the pull request's head equals the branch head.
 		commit(repo.dir, "s.txt", "1\n", "squash of squashed");
 		git(repo.dir, ["push", "-q", "origin", "main"]);
-		const gh = fakeGh({ squashed: [{ state: "MERGED", headRefOid: head, number: 11 }] });
+		const gh = prGh({ squashed: [{ state: "MERGED", headRefOid: head, number: 11, baseRefName: "main" }] });
 		const h = harness({ gh }, withRoot(root));
 		expect(await runWorktree(["merge-back", "--execute", wt], h.deps)).toBe(0);
 		expect(h.events).toHaveLength(1);
@@ -1315,5 +1323,114 @@ describe("merge-back", () => {
 		const none = harness({}, withRoot(f.root));
 		expect(await runWorktree(["merge-back"], none.deps)).toBe(2);
 		expect(none.err.join("")).toContain("at least one worktree path");
+	});
+
+	test("a squash-merged branch whose remote branch was deleted is still recorded, by its merged pull request", async () => {
+		const repo = makeRepo();
+		const root = join(tempDir(), "wts");
+		mkdirSync(root);
+		const wt = addWorktree(repo, root, "gone");
+		const head = commit(wt, "g.txt", "1\n");
+		git(wt, ["push", "-q", "origin", "gone"]);
+		commit(repo.dir, "g.txt", "1\n", "squash of gone");
+		git(repo.dir, ["push", "-q", "origin", "main"]);
+		// The squash merge deletes the remote branch and prunes its remote-tracking ref: nothing on origin has this head now.
+		git(wt, ["push", "-q", "origin", "--delete", "gone"]);
+		git(wt, ["update-ref", "-d", "refs/remotes/origin/gone"]);
+		const gh = prGh({ gone: [{ state: "MERGED", headRefOid: head, number: 12, baseRefName: "main" }] });
+		const h = harness({ gh }, withRoot(root));
+		expect(await runWorktree(["merge-back", "--json", wt], h.deps)).toBe(0);
+		const result: MergeBackJson = JSON.parse(h.out.join(""));
+		expect(result.recorded).toMatchObject([{ path: wt, branch: "gone", head, merged_via: "pull-request" }]);
+	});
+
+	test("a pull request merged only into a release branch is not proof that the work reached the default branch", async () => {
+		const repo = makeRepo();
+		const root = join(tempDir(), "wts");
+		mkdirSync(root);
+		const wt = addWorktree(repo, root, "stacked");
+		const head = commit(wt, "st.txt", "1\n");
+		git(wt, ["push", "-q", "origin", "stacked"]);
+		commit(repo.dir, "other.txt", "x\n", "unrelated main work");
+		git(repo.dir, ["push", "-q", "origin", "main"]);
+		const gh = prGh({ stacked: [{ state: "MERGED", headRefOid: head, number: 13, baseRefName: "release" }] });
+		const h = harness({ gh }, withRoot(root));
+		expect(await runWorktree(["merge-back", "--json", wt], h.deps)).toBe(1);
+		const result: MergeBackJson = JSON.parse(h.out.join(""));
+		expect(result.recorded).toEqual([]);
+		expect(reasonsOf(result, wt)).toContain("HEAD is not proven merged");
+		expect(h.events).toEqual([]);
+	});
+
+	test("untracked files count even when status.showUntrackedFiles hides them", async () => {
+		const f = fleet();
+		git(f.repo.dir, ["config", "status.showUntrackedFiles", "no"]);
+		const dirty = landed(f.repo, f.root, "hidden");
+		write(dirty, "new-work.txt", "unsaved\n");
+		const h = harness({}, withRoot(f.root));
+		expect(await runWorktree(["merge-back", "--json", dirty], h.deps)).toBe(1);
+		const result: MergeBackJson = JSON.parse(h.out.join(""));
+		expect(reasonsOf(result, dirty)).toContain("has uncommitted or untracked changes");
+		expect(h.events).toEqual([]);
+	});
+
+	test("a HEAD that moves between the check and the note is refused, not recorded under the commit that was checked", async () => {
+		const f = fleet();
+		const mainSha = git(f.repo.dir, ["rev-parse", "HEAD"]);
+		let listings = 0;
+		const moving: CommandRunner = async (args, cwd) => {
+			const result = await spawnGit(args, cwd);
+			if (args[0] === "worktree" && args[1] === "list" && cwd === f.repo.dir) {
+				listings += 1;
+				// The first listing is the reload that captures merged-a's HEAD; another session moves that HEAD right after it.
+				if (listings === 1) git(f.merged, ["checkout", "-q", "--detach", mainSha]);
+			}
+			return result;
+		};
+		const h = harness({ git: moving }, withRoot(f.root));
+		expect(await runWorktree(["merge-back", "--execute", f.merged, f.mergedToo], h.deps)).toBe(1);
+		expect(h.events.map((event) => event.payload?.branch)).toEqual(["merged-b"]);
+		expect(h.out.join("")).toContain("HEAD or the branch changed");
+	});
+
+	test("a note the ledger did not store is never reported as recorded", async () => {
+		const f = fleet();
+		const h = harness({ emit: async (): Promise<EmitOutcome> => ({ kind: "failed", error: "connection refused" }) }, withRoot(f.root));
+		expect(await runWorktree(["merge-back", "--execute", f.merged], h.deps)).toBe(1);
+		const out = h.out.join("");
+		expect(out.split("\n").some((line) => line.startsWith("recorded "))).toBe(false);
+		expect(out).toContain(`not recorded (failed) ${f.merged}`);
+		expect(out).toContain("recorded 0 worktrees, refused 0, not recorded 1");
+		expect(h.err.join("")).toContain("NOT RECORDED");
+	});
+
+	test("with no root configured the error names only SUBSTRATE_WORKTREE_ROOTS, never --root", async () => {
+		const h = harness({}, {});
+		expect(await runWorktree(["merge-back", "/nowhere/wt"], h.deps)).toBe(2);
+		expect(h.err.join("")).toContain("set SUBSTRATE_WORKTREE_ROOTS (colon separated)");
+		expect(h.err.join("")).not.toContain("--root");
+	});
+
+	test("a symlinked root still finds the graph claim on a worktree git lists under its real path", async () => {
+		const f = fleet();
+		const base = tempDir();
+		mkdirSync(join(base, "data", "wts"), { recursive: true });
+		symlinkSync(join(base, "data"), join(base, "srv"));
+		const claimed = landed(f.repo, join(base, "data", "wts"), "claimed");
+		const asked: string[] = [];
+		const h = harness(
+			{
+				claims: async (graphId) => {
+					asked.push(graphId);
+					return { ok: true, claims: graphId === "claimed" ? [CLAIM] : [] };
+				},
+			},
+			withRoot(join(base, "srv", "wts")),
+		);
+		expect(await runWorktree(["merge-back", "--json", claimed], h.deps)).toBe(1);
+		expect(asked).toEqual(["claimed"]);
+		const result: MergeBackJson = JSON.parse(h.out.join(""));
+		expect(reasonsOf(result, claimed)).toContain("live claim on graph claimed");
+		expect(h.events).toEqual([]);
 	});
 });

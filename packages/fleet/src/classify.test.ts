@@ -147,6 +147,29 @@ describe("classification of real worktrees", () => {
 		expect(result.reasons.join(" ")).toContain("advanced after its pull request merged");
 	});
 
+	test("a head merged only into a non-default base is not pushed once its branch is gone; one merged into the default branch still is", async () => {
+		const repo = makeRepo();
+		const root = tempDir();
+		const stacked = addWorktree(repo, root, "stacked");
+		const head = commit(stacked, "st.txt", "1\n");
+		git(stacked, ["push", "-q", "origin", "stacked"]);
+		// The branch is gone from origin and its remote-tracking ref is pruned: only a merged pull request can vouch for the head.
+		git(stacked, ["push", "-q", "origin", "--delete", "stacked"]);
+		git(stacked, ["update-ref", "-d", "refs/remotes/origin/stacked"]);
+		commit(repo.dir, "other.txt", "x\n", "unrelated main work");
+		git(repo.dir, ["push", "-q", "origin", "main"]);
+
+		const onRelease = fakeGh({ stacked: [{ state: "MERGED", headRefOid: head, number: 14, baseRefName: "release" }] });
+		const refused = classifyForPrune(await inspect(repo.dir, stacked, onRelease), later());
+		expect(refused.class).toBe("never");
+		expect(refused.reasons.join(" ")).toContain("head is not pushed");
+
+		const onMain = fakeGh({ stacked: [{ state: "MERGED", headRefOid: head, number: 14, baseRefName: "main" }] });
+		const counted = classifyForPrune(await inspect(repo.dir, stacked, onMain), later());
+		expect(counted.reasons.join(" ")).not.toContain("head is not pushed");
+		expect(counted.class).toBe("safe");
+	});
+
 	test("the primary checkout and the current directory are never, even when everything else is clean", async () => {
 		const repo = makeRepo();
 		const path = addWorktree(repo, tempDir(), "cwd-here");

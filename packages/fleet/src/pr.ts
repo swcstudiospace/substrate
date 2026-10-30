@@ -10,6 +10,12 @@ import type { CommandRunner } from "./git.ts";
 
 export type PrState = "open" | "merged" | "closed" | "none" | "unknown";
 
+/** One merged pull request: its head commit, and the branch it merged into (null when GitHub did not say). */
+export interface MergedHead {
+	headSha: string;
+	baseRef: string | null;
+}
+
 export interface PrInfo {
 	state: PrState;
 	/** Head commit of the pull request the state describes, null when there is none. */
@@ -17,10 +23,12 @@ export interface PrInfo {
 	number: number | null;
 	/** Head commits of every merged pull request returned for the branch. */
 	mergedHeadShas: string[];
+	/** The same merged pull requests with the branch each merged into: a proof that work reached a branch must name that branch. */
+	mergedHeads: MergedHead[];
 }
 
-export const PR_UNKNOWN: PrInfo = { state: "unknown", headSha: null, number: null, mergedHeadShas: [] };
-export const PR_NONE: PrInfo = { state: "none", headSha: null, number: null, mergedHeadShas: [] };
+export const PR_UNKNOWN: PrInfo = { state: "unknown", headSha: null, number: null, mergedHeadShas: [], mergedHeads: [] };
+export const PR_NONE: PrInfo = { state: "none", headSha: null, number: null, mergedHeadShas: [], mergedHeads: [] };
 
 /** `gh pr list` returns at most this many pull requests for one branch. */
 export const PR_LIST_LIMIT = 5;
@@ -65,6 +73,8 @@ interface RawPr {
 	state: string;
 	headRefOid: string;
 	number: number;
+	/** Absent from answers that predate the field: a merge with no base named proves nothing about the branch. */
+	baseRefName?: string;
 }
 
 function isRawPr(value: unknown): value is RawPr {
@@ -80,7 +90,7 @@ function isRawPr(value: unknown): value is RawPr {
 	);
 }
 
-/** Parse `gh pr list --json state,headRefOid,number`; null when the text is not that shape. */
+/** Parse `gh pr list --json state,headRefOid,number,baseRefName`; null when the text is not that shape. */
 export function parsePrList(text: string): PrInfo | null {
 	let parsed: unknown;
 	try {
@@ -92,18 +102,19 @@ export function parsePrList(text: string): PrInfo | null {
 	const prs = parsed;
 	if (prs.length === 0) return PR_NONE;
 	const states = prs.map((pr) => pr.state.toUpperCase());
-	const mergedHeadShas = prs.filter((_pr, index) => states[index] === "MERGED").map((pr) => pr.headRefOid);
+	const mergedHeads: MergedHead[] = prs.filter((_pr, index) => states[index] === "MERGED").map((pr) => ({ headSha: pr.headRefOid, baseRef: typeof pr.baseRefName === "string" ? pr.baseRefName : null }));
+	const mergedHeadShas = mergedHeads.map((merged) => merged.headSha);
 	// An open pull request outranks a merged one: the branch is still in play. gh lists newest first.
 	for (const [wanted, state] of [["OPEN", "open"], ["MERGED", "merged"], ["CLOSED", "closed"]] as const) {
 		const index = states.indexOf(wanted);
 		const pr = prs[index];
-		if (index >= 0 && pr !== undefined) return { state, headSha: pr.headRefOid, number: pr.number, mergedHeadShas };
+		if (index >= 0 && pr !== undefined) return { state, headSha: pr.headRefOid, number: pr.number, mergedHeadShas, mergedHeads };
 	}
 	return null;
 }
 
 async function ask(branch: string, deps: PrDeps): Promise<PrInfo> {
-	const args = ["pr", "list", "--head", branch, "--state", "all", "--json", "state,headRefOid,number", "--limit", String(PR_LIST_LIMIT)];
+	const args = ["pr", "list", "--head", branch, "--state", "all", "--json", "state,headRefOid,number,baseRefName", "--limit", String(PR_LIST_LIMIT)];
 	const result = await deps.run(args, deps.cwd);
 	if (result.code !== 0) return PR_UNKNOWN;
 	return parsePrList(result.stdout) ?? PR_UNKNOWN;
