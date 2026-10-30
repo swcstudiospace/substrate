@@ -285,3 +285,19 @@ describe("loadDurable", () => {
 		expect(second.reg.lookup("s-1")).toMatchObject({ status: "one", surface: "omp" });
 	});
 });
+
+describe("a removal of an ended session", () => {
+	test("is not dropped when the write queue is full: it waits behind the saves and lands", async () => {
+		const store = new FakeStore();
+		const { reg } = build({ store });
+		store.seed("omp", session("sess-ended", T0));
+		const gate = Promise.withResolvers<void>();
+		store.gate = gate.promise;
+		for (let i = 0; i < STEERING_PERSIST_PENDING_MAX; i += 1) reg.put("omp", `s-${i}`, session(`s-${i}`, T0));
+		reg.end("omp", "sess-ended");
+		gate.resolve();
+		await reg.idle();
+		expect(store.rows.has("omp:sess-ended")).toBe(false);
+		expect(store.rows.has("omp:s-0")).toBe(true);
+	});
+});

@@ -45,6 +45,9 @@ export const STEERING_PERSIST_WARN_INTERVAL_MS = 60_000;
 /** Durable writes queued behind a slow store. Past it a write is skipped and counted as a failure; the memory is unaffected. */
 export const STEERING_PERSIST_PENDING_MAX = 256;
 
+/** How many times a removal is asked of the store before its failure is reported. A removal is not dropped; a store that keeps refusing it is reported. */
+export const STEERING_DELETE_ATTEMPTS = 3;
+
 /** The default freshness window of a durable load: seven days. */
 export const STEERING_SESSION_TTL_MS = 604_800_000;
 
@@ -148,7 +151,7 @@ export class SteeringSessionRegistry implements SessionStatePort {
 		const key = steeringSessionKey(surface, sessionId);
 		const held = this.held.has(key);
 		this.forget(key);
-		this.queueWrite(surface, sessionId, (store) => store.delete(surface, sessionId));
+		this.queueDelete(surface, sessionId);
 		return held;
 	}
 
@@ -207,8 +210,9 @@ export class SteeringSessionRegistry implements SessionStatePort {
 	}
 
 	/**
-	 * Queues one durable write behind the writes already queued, so a save made before a delete cannot land after it. A full
-	 * queue skips the write and warns. Never blocks or fails the caller.
+	 * Queues one durable save behind the saves already queued, so a save made before a removal cannot land after it. A full
+	 * queue skips the save and warns: the table is a restart cache, so a missing row only means the session is not reloaded at
+	 * boot. Never blocks or fails the caller.
 	 */
 	private queueWrite(surface: Surface, sessionId: string, write: (store: SteeringSessionsStore) => Promise<void>): void {
 		const store = this.store;
@@ -222,6 +226,26 @@ export class SteeringSessionRegistry implements SessionStatePort {
 			.then(() => write(store))
 			.catch((cause: unknown) => {
 				this.warnPersistFailed(surface, sessionId, cause instanceof Error ? cause.message : String(cause));
+			})
+			.finally(() => {
+				this.pendingWrites -= 1;
+			});
+	}
+
+	/**
+	 * Queues the removal of one session's row. A removal is never dropped: it does not count against the save cap, so it waits
+	 * behind the saves already queued rather than being skipped when the queue is full. A store that rejects it is asked again,
+	 * up to {@link STEERING_DELETE_ATTEMPTS} times, before the failure is reported.
+	 */
+	private queueDelete(surface: Surface, sessionId: string, attempt = 1): void {
+		const store = this.store;
+		if (store === null) return;
+		this.pendingWrites += 1;
+		this.writeTail = this.writeTail
+			.then(() => store.delete(surface, sessionId))
+			.catch((cause: unknown) => {
+				if (attempt < STEERING_DELETE_ATTEMPTS) this.queueDelete(surface, sessionId, attempt + 1);
+				else this.warnPersistFailed(surface, sessionId, cause instanceof Error ? cause.message : String(cause));
 			})
 			.finally(() => {
 				this.pendingWrites -= 1;

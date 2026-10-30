@@ -642,6 +642,8 @@ export interface EmitResult {
 /** What `emit` is told about the request, beyond the event: the transport's replay marker (`x-substrate-replay: 1`). */
 export interface EmitOptions {
 	replay?: boolean;
+	/** The authenticated caller, when the transport has one. A `session.end` closes steering state only for its session's own surface, or for an operator. */
+	caller?: { surface: string | null; isOperator: boolean };
 }
 
 /** Who is forgetting: the authenticated surface (the ledger note's own `surface`) and, when it has one, its session. */
@@ -2511,7 +2513,7 @@ export class Substrate {
 		this.planningEvent(input);
 		if (result.stored) this.noteDocsCanary(result.event);
 		if (result.stored) this.publishHint(result.event);
-		if (result.stored && result.event.kind === "session.end") await this.endSteeringSession(result.event);
+		if (result.stored && result.event.kind === "session.end") await this.endSteeringSession(result.event, options.caller);
 		return result;
 	}
 
@@ -2528,27 +2530,29 @@ export class Substrate {
 	}
 
 	/**
-	 * Closes a session's steering state when its `session.end` is recorded: the registry forgets the session and its durable row,
-	 * and the inbox closes what is still queued for it and refuses what comes later. The close is recorded as a
-	 * `steering.session_ended` note, so the ledger shows the cause. Never throws into the emit path: a failure goes to stderr.
+	 * Applies a recorded `session.end` to the steering registry. The caller's authenticated surface must be the session's surface
+	 * (the surface the event names), or the caller must be an operator; otherwise the registry is left alone. Either way a
+	 * `steering.session_ended` note records the decision and whether a live session was removed. The effect is only the live
+	 * session and its durable row: queued directives are not touched. Never throws into the emit path.
 	 */
-	private async endSteeringSession(event: SubstrateEvent): Promise<void> {
+	private async endSteeringSession(event: SubstrateEvent, caller: EmitOptions["caller"]): Promise<void> {
 		const sessionId = event.session_id;
 		if (sessionId === null) return;
+		const authorized = caller !== undefined && (caller.isOperator || (caller.surface !== null && caller.surface === event.surface));
 		try {
-			this.steeringSessions.end(event.surface, sessionId);
-			const report = this.steering.inbox === null ? null : await this.steering.inbox.closeForSession(sessionId);
-			const closed = report?.closed.length ?? 0;
-			const failed = report?.failed.length ?? 0;
+			const removed = authorized && this.steeringSessions.end(event.surface, sessionId);
+			const id = redact(sessionId).slice(0, 80);
 			await this.emit({
 				surface: event.surface,
 				kind: "note",
-				summary: `steering session ${redact(sessionId).slice(0, 80)} ended: ${closed} directive(s) closed, ${failed} not closed`,
+				summary: authorized
+					? `steering session ${id} ended: ${removed ? "its live session was removed" : "it held no live session"}`
+					: `steering session ${id} end refused: the caller is neither the session's surface nor an operator`,
 				session_id: sessionId,
-				payload: { action: STEERING_SESSION_ENDED_ACTION, closed, failed },
+				payload: { action: STEERING_SESSION_ENDED_ACTION, authorized, removed },
 			});
 		} catch (cause) {
-			process.stderr.write(`[substrate] steering: closing ended session ${redact(sessionId).slice(0, 80)} failed: ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200)}\n`);
+			process.stderr.write(`[substrate] steering: recording the end of session ${redact(sessionId).slice(0, 80)} failed: ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200)}\n`);
 		}
 	}
 

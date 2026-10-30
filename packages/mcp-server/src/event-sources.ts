@@ -1519,9 +1519,9 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		sample: () => ({
 			surface: "claude-code",
 			kind: "note",
-			summary: "steering session sess-sample ended: 2 directive(s) closed, 0 not closed",
+			summary: "steering session sess-sample ended: its live session was removed",
 			session_id: "sess-sample",
-			payload: { action: "steering.session_ended", closed: 2, failed: 0 },
+			payload: { action: "steering.session_ended", authorized: true, removed: true },
 		}),
 	},
 	{

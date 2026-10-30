@@ -50,9 +50,6 @@ export const STEERING_EXPIRY_SWEEP_BOUNDS_S = { min: 1, max: 3_600 } as const;
 /** One expiry pass closes at most this many directives, so the inbox lock is never held for an unbounded run. */
 export const STEERING_EXPIRY_BATCH = 100;
 
-/** The most sessions remembered as ended. Past it the oldest is forgotten, so the set stays bounded in a long-running process. */
-export const STEERING_ENDED_SESSIONS_MAX = 10_000;
-
 const RATE_WINDOW_MS = 60_000;
 const DIRECTIVE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const PRINCIPAL_RE = /^[A-Za-z0-9][A-Za-z0-9._@:-]{0,127}$/;
@@ -215,8 +212,7 @@ type SimpleSteeringCode =
 	| "not-found"
 	| "wrong-session"
 	| "already-acknowledged"
-	| "confirmation-required"
-	| "target-session-ended";
+	| "confirmation-required";
 
 export type SteeringError =
 	| { code: "invalid-directive" | "invalid-acknowledgement"; issues: string[] }
@@ -266,18 +262,6 @@ export interface SteeringExpiryReport {
 	deferred: number;
 }
 
-/** What closing a session's queued directives did. */
-export interface SteeringCloseReport {
-	/** Closed by this call, as `declined:timeout`. */
-	closed: string[];
-	/** Closed first by someone else with a different acknowledgement; that acknowledgement was adopted. */
-	adopted: string[];
-	/** Still queued: the audit write failed, or conflicted and the stored row could not be read. */
-	failed: SteeringExpiryFailure[];
-	/** Not attempted, because an audit outage ended the pass. */
-	deferred: number;
-}
-
 interface TokenBucket {
 	tokens: number;
 	updatedAtMs: number;
@@ -294,8 +278,6 @@ export class SteeringInbox {
 	/** Delivery order: grows by one for every directive that enters the inbox. Unlike a timestamp it never goes backwards and never ties. */
 	private readonly sequences = new Map<string, number>();
 	private lastSequence = 0;
-	/** Sessions whose `session.end` was recorded, newest last. A directive for one is refused. Process-local: a restart forgets them. */
-	private readonly endedSessions = new Set<string>();
 
 	constructor(private readonly deps: SteeringInboxDeps) {
 		const { ratePerMin } = deps.policy;
@@ -393,14 +375,6 @@ export class SteeringInbox {
 		return this.exclusive(() => this.doExpireStale(nowMs));
 	}
 
-	/**
-	 * Closes the queued directives of a session whose `session.end` was recorded (see `doCloseForSession`), and remembers the
-	 * session as ended: a directive queued for it afterwards is refused with `target-session-ended`, never queued.
-	 */
-	closeForSession(targetSessionId: string): Promise<SteeringCloseReport> {
-		return this.exclusive(() => this.doCloseForSession(targetSessionId));
-	}
-
 	private async doEnqueue(input: unknown): Promise<SteeringResult<SteeringRecord>> {
 		const parsed = SteeringDirectiveSchema.safeParse(input);
 		if (!parsed.success) return fail({ code: "invalid-directive", issues: issuePaths(parsed.error) });
@@ -408,7 +382,6 @@ export class SteeringInbox {
 
 		if (directive.author.kind === "agent") return fail({ code: "agent-author-refused" });
 		if (!this.allowlist.has(directive.author.principalId)) return fail({ code: "principal-not-allowed" });
-		if (this.endedSessions.has(directive.targetSessionId)) return fail({ code: "target-session-ended" });
 		if (this.records.has(directive.id)) return fail({ code: "duplicate-directive" });
 
 		const bucket = this.refilled(directive.targetSessionId, this.limiterNowMs());
@@ -548,62 +521,6 @@ export class SteeringInbox {
 			break;
 		}
 		report.deferred = due.length - attempted;
-		return report;
-	}
-
-	/**
-	 * Closes the queued directives of a session whose `session.end` was recorded. Each is declined as `timeout` (the only reason
-	 * the durable table accepts) through the expiry path's audit, before it leaves the pending set. A directive whose audit
-	 * fails stays queued and is reported; a conflict adopts the stored acknowledgement, as an expiry does.
-	 */
-	private async doCloseForSession(sessionId: string): Promise<SteeringCloseReport> {
-		this.endedSessions.delete(sessionId);
-		this.endedSessions.add(sessionId);
-		if (this.endedSessions.size > STEERING_ENDED_SESSIONS_MAX) {
-			const oldest = this.endedSessions.values().next();
-			if (!oldest.done) this.endedSessions.delete(oldest.value);
-		}
-		const report: SteeringCloseReport = { closed: [], adopted: [], failed: [], deferred: 0 };
-		const queued = [...this.records.values()]
-			.filter((record): record is Extract<SteeringRecord, { state: "queued" }> => record.state === "queued" && record.directive.targetSessionId === sessionId)
-			.sort((a, b) => a.queuedAtMs - b.queuedAtMs || compareText(a.directive.id, b.directive.id));
-		for (const [index, record] of queued.entries()) {
-			const { directive } = record;
-			const saved = await this.savedTransitionAtMs("acknowledged", directive.id);
-			if (!saved.ok) {
-				report.failed.push({ directiveId: directive.id, lastErrorCode: saved.error.code === "audit-unavailable" ? saved.error.lastErrorCode : saved.error.code });
-				report.deferred = queued.length - index - 1;
-				break;
-			}
-			const atMs = saved.value ?? this.deps.clock.nowMs();
-			const audited = await this.auditExpiry({
-				event: "acknowledged",
-				atMs,
-				directiveId: directive.id,
-				targetSessionId: sessionId,
-				outcome: "declined",
-				confirmed: false,
-				reason: "timeout",
-			});
-			if (audited.ok) {
-				this.records.set(directive.id, recordFromStore(directive, record.queuedAtMs, { atMs, outcome: "declined", confirmed: false, reason: "timeout" }));
-				report.closed.push(directive.id);
-				continue;
-			}
-			if (audited.lastErrorCode === AUDIT_CONFLICT_CODE) {
-				const stored = await this.readStoredAcknowledgement(directive.id);
-				if (stored !== null) {
-					this.records.set(directive.id, recordFromStore(directive, record.queuedAtMs, stored));
-					report.adopted.push(directive.id);
-				} else {
-					report.failed.push({ directiveId: directive.id, lastErrorCode: audited.lastErrorCode });
-				}
-				continue;
-			}
-			report.failed.push({ directiveId: directive.id, lastErrorCode: audited.lastErrorCode });
-			report.deferred = queued.length - index - 1;
-			break;
-		}
 		return report;
 	}
 
