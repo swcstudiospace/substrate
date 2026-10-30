@@ -71,7 +71,7 @@ export interface ReflectFailure {
 export type ReflectReply<T> = { ok: true; status: 200; body: T } | ReflectFailure;
 
 /** The outcome of retaining one digest in Hindsight through the governance gate. */
-export type RetainOutcome = { ok: true } | { ok: false; reason: string };
+export type RetainOutcome = { ok: true; truncated?: true } | { ok: false; reason: string };
 
 /** One stored digest handed to the Hindsight leg. `waitMs` is what remains of {@link REFLECT_RETAIN_BUDGET_MS}. */
 export interface RetainDigestInput {
@@ -285,7 +285,8 @@ export async function corpusReflectReply(deps: ReflectServiceDeps, raw: unknown,
 		else if (outcome.status !== "ingested" && outcome.status !== "updated") results.push({ repo: item.repo, status: "failed", ...(outcome.reason === undefined ? {} : { reason: outcome.reason }) });
 		else {
 			const leg = retained.get(item.repo) ?? { ok: false as const, reason: "pending" };
-			results.push({ repo: item.repo, status: "stored", ...(leg.ok ? {} : { reason: `hindsight:${redact(leg.reason).slice(0, RETAIN_REASON_CHARS)}` }) });
+			const reason = leg.ok ? (leg.truncated === true ? "digest:truncated" : undefined) : `hindsight:${redact(leg.reason).slice(0, RETAIN_REASON_CHARS)}`;
+			results.push({ repo: item.repo, status: "stored", ...(reason === undefined ? {} : { reason }) });
 		}
 	}
 	return { ok: true, status: 200, body: { protocol: CORPUS_PROTOCOL, results, manifestVersion } };

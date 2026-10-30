@@ -8,7 +8,7 @@ import { HindsightFake } from "../hindsight-fake.ts";
 import { forwardRetain, type ForwardOutcome, type RetainDeps } from "../memory-retain.ts";
 import { clearEnsuredBanks, type HindsightConfig } from "../planes/hindsight.ts";
 import type { EventInput, MemoryEntry, MemoryWriteRequest, MemoryWriteResult } from "../types.ts";
-import { deliveryOf, retainDigestOutcome, type DigestRetainDeps } from "./digest-retain.ts";
+import { deliveryOf, retainDigestOutcome, splitDigestRetain, type DigestRetainDeps } from "./digest-retain.ts";
 
 const CONFIG: HindsightConfig = { url: "http://fake", apiKey: "test-bearer", bankPrefix: "sub-" };
 
@@ -133,11 +133,53 @@ describe("retainDigestOutcome", () => {
 		});
 		expect(await retainDigestOutcome(throwing, REQUEST)).toEqual({ ok: false, reason: "memory-write-failed" });
 	});
+	test("a landed forward whose write was truncated reports the cut and is still a success", async () => {
+		const landed: ForwardOutcome = { forwarded: true, bank: "sub-omp", document_id: "mwd_key1" };
+		const outcome = await retainDigestOutcome(
+			deps({ write: async () => ({ result: { ...ACCEPTED, truncated: true }, leg: Promise.resolve(landed) }) }),
+			REQUEST,
+		);
+		expect(outcome).toEqual({ ok: true, truncated: true });
+	});
+
+	test("a landed forward without the truncated flag stays a plain success", async () => {
+		const landed: ForwardOutcome = { forwarded: true, bank: "sub-omp", document_id: "mwd_key1" };
+		const outcome = await retainDigestOutcome(deps({ write: async () => ({ result: ACCEPTED, leg: Promise.resolve(landed) }) }), REQUEST);
+		expect(outcome).toEqual({ ok: true });
+	});
 });
 
 describe("deliveryOf", () => {
 	test("keeps the forward's own refusal reason and falls back to a closed one", () => {
 		expect(deliveryOf({ forwarded: false, bank: "b", document_id: "d", reason: "retain.unredacted" })).toEqual({ ok: false, reason: "retain.unredacted" });
 		expect(deliveryOf({ forwarded: false, bank: "b", document_id: "d" })).toEqual({ ok: false, reason: "not-forwarded" });
+	});
+});
+
+
+describe("splitDigestRetain", () => {
+	test("a digest with all three headings yields the three subjects", () => {
+		const text = ["# Digest", "", "## Recent decisions (newest first)", "- a", "", "## Open items (unchecked in the live roadmap)", "- b", "", "## Project", "name"].join("\n");
+		const parts = splitDigestRetain("acme/app", text);
+		expect(parts.map((part) => part.subject)).toEqual(["corpus-digest:acme/app", "corpus-digest:acme/app:decisions", "corpus-digest:acme/app:open"]);
+		expect(parts.every((part) => part.cut === false)).toBe(true);
+		expect(parts[1]?.text.startsWith("## Recent decisions")).toBe(true);
+		expect(parts[1]?.text.includes("## Open items")).toBe(false);
+		expect(parts[2]?.text.startsWith("## Open items")).toBe(true);
+		expect(parts[2]?.text).not.toContain("## Project");
+		expect(parts[0]?.text).toContain("## Project");
+	});
+
+	test("a part longer than 4000 is cut and flagged", () => {
+		const text = `${"x".repeat(4001)}\n## Recent decisions\nshort\n## Open items\n${"y".repeat(5000)}`;
+		const parts = splitDigestRetain("r", text);
+		expect(parts[0]?.cut).toBe(true);
+		expect(parts[0]?.text.length).toBeLessThanOrEqual(4000);
+		expect(parts[0]?.text.endsWith("\n[cut]\n")).toBe(true);
+		expect(parts[1]?.cut).toBe(false);
+		expect(parts[2]?.cut).toBe(true);
+		expect(parts[2]?.text.length).toBeLessThanOrEqual(4000);
+		expect(parts[2]?.text.endsWith("\n[cut]\n")).toBe(true);
+		expect(parts[2]?.subject).toBe("corpus-digest:r:open");
 	});
 });

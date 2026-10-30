@@ -179,7 +179,6 @@ import type { AnchorVerifier } from "./corpus/anchor.ts";
 import { CorpusRootKeeper, type RootClock } from "./corpus/root.ts";
 import type { CorpusStore } from "./corpus/store.ts";
 import {
-	DIGEST_KEY_PREFIX,
 	shortRoot,
 	type CorpusAnchorResponse,
 	type CorpusGapsResponse,
@@ -192,7 +191,7 @@ import {
 	type CorpusStatusResponse,
 } from "@substrate/corpus";
 import { AuthorityIndex } from "./corpus/authority-index.ts";
-import { retainDigestOutcome } from "./corpus/digest-retain.ts";
+import { retainDigestOutcome, splitDigestRetain } from "./corpus/digest-retain.ts";
 import { corpusKeyOf, reflectCitations, type ShadowNote } from "./corpus/rank.ts";
 import { corpusGapsReply, corpusReflectReply, docsFeedbackReply, type FeedbackStored, type ReflectReply, type ReflectServiceDeps, type RetainOutcome } from "./corpus/reflect-service.ts";
 import { RETRIEVAL_SWEEP_BATCH, type ReflectStore } from "./corpus/reflect-store.ts";
@@ -5744,25 +5743,35 @@ export class Substrate {
 	}
 
 	/**
-	 * Retains one stored digest as a governed `fact` at repo scope under the deterministic subject `corpus-digest:<repo>`: the
-	 * Hindsight document id of a subject-addressed entry is its claim identity, so the next digest replaces this one. Through
-	 * the governance gate like every memory write. The outcome is what the Hindsight forward actually did, read under a short
-	 * bound (`pending` when it is still running or parked for a retry); a refusal or an outage is a closed reason, never a throw.
+	 * Retains one stored digest as governed `fact` rows at repo scope. The text is split into the overview, decisions and open
+	 * sections (`corpus-digest:<repo>`, `:decisions`, `:open`) so each retain stays inside the memory text cap. `source_event`
+	 * is this reflect run's session id: a corpus-digest fact is otherwise refused as unsourced. Each written subject retires
+	 * its previous row. A cut is reported, never treated as a failed retain.
 	 */
-	private retainDigest(input: { repo: string; text: string; surface: Surface; sessionId: string; waitMs?: number }): Promise<RetainOutcome> {
-		return retainDigestOutcome(
-			{ write: (request) => this.writeMemoryWithLeg(request), waitMs: input.waitMs },
-			{
-				scope: `repo:${input.repo}`,
-				kind: "fact",
-				text: input.text,
-				writer: input.surface,
-				subject: `${DIGEST_KEY_PREFIX}${input.repo}`,
-				repo: input.repo,
-				session_id: input.sessionId,
-				ttl: "30d",
-			},
-		);
+	private async retainDigest(input: { repo: string; text: string; surface: Surface; sessionId: string; waitMs?: number }): Promise<RetainOutcome> {
+		let truncated = false;
+		const started = Date.now();
+		const budgetMs = input.waitMs;
+		for (const part of splitDigestRetain(input.repo, input.text)) {
+			const waitMs = budgetMs === undefined ? undefined : Math.max(0, budgetMs - (Date.now() - started));
+			const outcome = await retainDigestOutcome(
+				{ write: (request) => this.writeMemoryWithLeg(request), waitMs },
+				{
+					scope: `repo:${input.repo}`,
+					kind: "fact",
+					text: part.text,
+					writer: input.surface,
+					subject: part.subject,
+					repo: input.repo,
+					session_id: input.sessionId,
+					source_event: input.sessionId,
+					ttl: "30d",
+				},
+			);
+			if (!outcome.ok) return outcome;
+			if (part.cut || outcome.truncated === true) truncated = true;
+		}
+		return truncated ? { ok: true, truncated: true } : { ok: true };
 	}
 
 	/** `POST /docs/feedback` and the `docs_feedback` tool. */

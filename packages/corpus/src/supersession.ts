@@ -179,7 +179,13 @@ export function detectSupersession(rows: readonly SupersessionRow[], options: Su
 	const copies = new Map<string, Array<[string, SupersessionRow]>>();
 	for (const [key, row] of options.compareCopies === false ? [] : ordered) {
 		if (!row.repo.startsWith(LOCAL_PREFIX) || row.tier > 2) continue;
-		copies.set(row.path, [...(copies.get(row.path) ?? []), [key, row]]);
+		let group = copies.get(row.path);
+		if (group === undefined) {
+			group = [];
+			copies.set(row.path, group);
+		}
+		// Three members already fail `group.length !== 2`. Do not copy a fourth.
+		if (group.length < 3) group.push([key, row]);
 	}
 	for (const group of copies.values()) {
 		const [first, second] = group;
