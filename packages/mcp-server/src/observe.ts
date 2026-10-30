@@ -92,6 +92,9 @@ const KNOWN_ROUTES = [
 	"/docs/search",
 	"/docs/ingest",
 	"/docs/merge-trigger",
+	"/docs/feedback",
+	"/corpus/reflect",
+	"/corpus/gaps",
 	"/memory/recall",
 	"/slo/history",
 	"/livez",
@@ -425,6 +428,15 @@ export function createObservability(
 		indexArchive(source) {
 			instruments.observeIndexArchiveAge(() => source.newestAtMs());
 		},
+		corpusFreshness(source) {
+			instruments.observeCorpusFreshness(() => source.newestAtMs());
+		},
+		corpusIngest(sample) {
+			instruments.setCorpusIngestRate(sample.docsPerSecond);
+		},
+		corpusGolden(sample) {
+			instruments.setCorpusGoldenRecall5(sample.recall5);
+		},
 	};
 
 	/**
@@ -659,6 +671,7 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"skills_list",
 	"docs_search",
 	"docs_ingest",
+	"docs_feedback",
 	"desktop_run",
 	"railway_list",
 	"railway_monitor",

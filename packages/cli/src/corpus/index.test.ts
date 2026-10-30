@@ -2,10 +2,10 @@ import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:tes
 import { createHash } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { CORPUS_PROTOCOL, EMBEDDING_REASONS, isRecord, isValidRepo, localRepoId, MAX_INGEST_DOCUMENTS, MAX_INGEST_TOMBSTONES, type GhRunner, type GitRunner, type IngestStatus, type PlanItem } from "@substrate/corpus";
+import { CORPUS_PROTOCOL, DEFAULT_GAPS_LIMIT, EMBEDDING_REASONS, isRecord, isValidRepo, localRepoId, MAX_GAPS_LIMIT, MAX_INGEST_DOCUMENTS, MAX_INGEST_TOMBSTONES, type GhRunner, type GitRunner, type IngestStatus, type PlanItem } from "@substrate/corpus";
 import { defined, fakeGit, tempDir, writeTree } from "../../../corpus/src/test-support.ts";
 import { runCorpus, USAGE } from "./index.ts";
-import { CorpusStub, fakeGhOwner, ingestOf, neardupOf, planOf, statusOf, type Reply, type Seen } from "./testkit.ts";
+import { CorpusStub, fakeGhOwner, gapsOf, ingestOf, neardupOf, planOf, reflectOf, statusOf, type Reply, type Seen } from "./testkit.ts";
 
 const stub = new CorpusStub();
 const dirs: string[] = [];
@@ -619,6 +619,243 @@ describe("substrate corpus status", () => {
 	});
 });
 
+describe("substrate corpus status --gaps", () => {
+	const gap = { queryHash: "0123456789abcdef0123", text: "how do I rotate the key", searches: 4, lastSeen: "2026-10-29T10:00:00.000Z", best: 0.1234 };
+
+	test("prints the gaps with hashes, counts and best scores, and --json the raw answer", async () => {
+		stub.on("GET /corpus/gaps", () => ({ status: 200, body: gapsOf([gap, { ...gap, queryHash: "ffff", text: null, searches: 1, best: null }], true) }));
+		const text = await run(["status", "--gaps"]);
+		expect(text.code).toBe(0);
+		expect(text.out).toContain("gaps: 2 queries");
+		expect(text.out).toContain("cut at the server limit");
+		expect(text.out).toContain('0123456789ab  4 searches  best 0.123  last 2026-10-29T10:00:00.000Z  "how do I rotate the key"');
+		expect(text.out).toContain("ffff  1 search  best none");
+		expect(text.out).toContain("(text not kept)");
+		expect(rec(JSON.parse((await run(["status", "--gaps", "--json"])).out), "gaps").truncated).toBe(true);
+		expect(defined(stub.requests("/corpus/gaps")[0], "request").search).toBe(`?limit=${DEFAULT_GAPS_LIMIT}`);
+	});
+
+	test("query text from the server cannot carry a control character to the terminal", async () => {
+		stub.on("GET /corpus/gaps", () => ({ status: 200, body: gapsOf([{ ...gap, text: "a\u001b[31mred\nforged line\u2028", queryHash: "ab\u0007cd" }]) }));
+		const text = await run(["status", "--gaps"]);
+		expect(text.out).not.toContain("\u001b");
+		expect(text.out).not.toContain("\u0007");
+		expect(text.out).toContain("a\\x1b[31mred\\x0aforged line\\u2028");
+		expect(text.out.split("\n").some((line) => line.startsWith("forged line"))).toBe(false);
+	});
+
+	test("--limit is sent, and a value above the server limit is lowered with a message", async () => {
+		stub.on("GET /corpus/gaps", () => ({ status: 200, body: gapsOf([]) }));
+		expect((await run(["status", "--gaps", "--limit", "7"])).code).toBe(0);
+		const capped = await run(["status", "--gaps", "--limit", "100000"]);
+		expect(capped.code).toBe(0);
+		expect(capped.err).toContain(`using ${MAX_GAPS_LIMIT}`);
+		expect(stub.requests("/corpus/gaps").map((seen) => seen.search)).toEqual(["?limit=7", `?limit=${MAX_GAPS_LIMIT}`]);
+	});
+
+	test("a limit that is not a positive integer, or a limit without --gaps, is a usage error and sends nothing", async () => {
+		for (const argv of [["status", "--gaps", "--limit", "abc"], ["status", "--gaps", "--limit", "0"], ["status", "--limit", "5"]]) {
+			const result = await run(argv);
+			expect(result.code).toBe(2);
+		}
+		expect(stub.seen).toEqual([]);
+	});
+
+	test("a server that refuses, or answers with the corpus off, exits 1 with the reason", async () => {
+		stub.on("GET /corpus/gaps", () => ({ status: 403, body: {} }));
+		const refused = await run(["status", "--gaps"]);
+		expect(refused.code).toBe(1);
+		expect(refused.err).toContain("403");
+		stub.on("GET /corpus/gaps", () => ({ status: 503, body: { error: "corpus.disabled" } }));
+		expect((await run(["status", "--gaps"])).err).toContain("corpus off");
+	});
+});
+
+describe("substrate corpus plan with superseded-by markers", () => {
+	function markerFixture(): Fixture {
+		const root = tempDir("corpus-cli-");
+		dirs.push(root);
+		writeTree(root, {
+			"alpha/.git/HEAD": "",
+			"alpha/docs/old.md": "---\nsuperseded-by: docs/new.md\n---\n# old\n",
+			"alpha/docs/new.md": "# new\n",
+		});
+		const alpha = join(root, "alpha");
+		const runner = fakeGit({ [alpha]: { branch: "main", remoteDefault: "main", head: HEAD, origin: "git@github.com:Acme/Alpha.git", files: ["docs/old.md", "docs/new.md"] } });
+		return { root, alpha, beta: "", runner };
+	}
+
+	test("the plan lists a document that carries a marker with the document that replaces it, and says how many there are", async () => {
+		const { root, runner } = markerFixture();
+		planAllAdd();
+		const result = await run(["plan", "--root", root], { runner });
+		expect(result.code).toBe(0);
+		expect(result.out).toContain("superseded markers: 1");
+		expect(result.out).toContain("Acme/Alpha:docs/old.md  [superseded by docs/new.md]");
+		expect(result.out).toContain("  Acme/Alpha:docs/new.md\n");
+		const sent = list(rec(defined(stub.requests("/corpus/plan")[0], "request").body, "request").entries, "entries");
+		expect(sent.find((entry) => entry.path === "docs/old.md")?.supersededBy).toBe("docs/new.md");
+		expect(sent.find((entry) => entry.path === "docs/new.md")?.supersededBy).toBeUndefined();
+	});
+
+	test("--json carries the superseded list next to the server's plan", async () => {
+		const { root, runner } = markerFixture();
+		planAllAdd();
+		const parsed = rec(JSON.parse((await run(["plan", "--root", root, "--json"], { runner })).out), "plan");
+		expect(parsed.manifestVersion).toBe(7);
+		expect(parsed.superseded).toEqual([{ repo: "Acme/Alpha", path: "docs/old.md", supersededBy: "docs/new.md" }]);
+	});
+});
+
+describe("substrate corpus reflect", () => {
+	const STATE = "---\nmilestone: v1.7\nstatus: executing\n---\n\n## Decisions\n\n- keep digests deterministic\n";
+	const ROADMAP = "# Roadmap\n\n- [ ] Phase 66: Docs Reflect\n";
+
+	function reflectFixture(extra: Record<string, string> = {}): { root: string; runner: GitRunner } {
+		const root = tempDir("corpus-cli-");
+		dirs.push(root);
+		writeTree(root, {
+			"alpha/.git/HEAD": "",
+			"alpha/.planning/STATE.md": STATE,
+			"alpha/.planning/ROADMAP.md": ROADMAP,
+			"beta/.git/HEAD": "",
+			"beta/.planning/STATE.md": STATE,
+			...extra,
+		});
+		const base = { branch: "main", remoteDefault: "main", head: HEAD };
+		const runner = fakeGit({
+			[join(root, "alpha")]: { ...base, origin: "git@github.com:Acme/Alpha.git" },
+			[join(root, "beta")]: { ...base, origin: "git@github.com:Acme/Beta.git" },
+		});
+		return { root, runner };
+	}
+
+	function answerAll(status: "stored" | "unchanged" | "refused" | "failed" = "stored", reason?: string) {
+		return (seen: Seen): Reply => {
+			const digests = list(rec(seen.body, "request").digests, "digests");
+			return { status: 200, body: reflectOf(digests.map((item) => ({ repo: String(item.repo), status, ...(reason === undefined ? {} : { reason }) }))) };
+		};
+	}
+
+	test("is a dry run by default: it prints what would be sent and sends nothing", async () => {
+		const { root, runner } = reflectFixture();
+		const result = await run(["reflect", "--root", root], { runner });
+		expect(result.code).toBe(0);
+		expect(stub.seen).toEqual([]);
+		expect(result.out).toContain("reflect: 2 digests from 2 checkouts found (dry run)");
+		expect(result.out).toContain("--- Acme/Alpha (.substrate/digest.md, key corpus-digest:Acme/Alpha)");
+		expect(result.out).toContain("- Phase 66: Docs Reflect");
+		expect(result.out).toContain("dry run: nothing was sent");
+	});
+
+	test("--json on a dry run lists each digest with its key, hash and text", async () => {
+		const { root, runner } = reflectFixture();
+		const parsed = rec(JSON.parse((await run(["reflect", "--root", root, "--json"], { runner })).out), "output");
+		expect(parsed.dryRun).toBe(true);
+		const digests = list(parsed.digests, "digests");
+		expect(digests.map((item) => item.repo)).toEqual(["Acme/Alpha", "Acme/Beta"]);
+		const alpha = defined(digests[0], "alpha");
+		expect(alpha.key).toBe("corpus-digest:Acme/Alpha");
+		expect(alpha.sha256).toBe(createHash("sha256").update(String(alpha.text), "utf8").digest("hex"));
+		expect(stub.seen).toEqual([]);
+	});
+
+	test("--execute sends the digests and exits 0 when every one is stored or unchanged", async () => {
+		const { root, runner } = reflectFixture();
+		stub.on("POST /corpus/reflect", answerAll("stored"));
+		const result = await run(["reflect", "--root", root, "--execute"], { runner });
+		expect(result.code).toBe(0);
+		expect(result.out).toContain("reflect: stored 2, unchanged 0, refused 0, failed 0");
+		const sent = list(rec(defined(stub.requests("/corpus/reflect")[0], "request").body, "request").digests, "digests");
+		expect(sent.map((item) => item.repo)).toEqual(["Acme/Alpha", "Acme/Beta"]);
+		expect(Object.keys(defined(sent[0], "first")).sort()).toEqual(["repo", "sha256", "text"]);
+		stub.seen = [];
+		stub.on("POST /corpus/reflect", answerAll("unchanged"));
+		expect((await run(["reflect", "--root", root, "--execute"], { runner })).code).toBe(0);
+	});
+
+	test.each([
+		["refused", "secret-findings"],
+		["failed", "plane-unavailable"],
+	] as const)("a digest the server %s makes the run exit 1 and the reason is printed", async (status, reason) => {
+		const { root, runner } = reflectFixture();
+		stub.on("POST /corpus/reflect", answerAll(status, reason));
+		const result = await run(["reflect", "--root", root, "--execute"], { runner });
+		expect(result.code).toBe(1);
+		expect(result.out).toContain(`${status} 2`);
+		expect(result.out).toContain(`Acme/Alpha  ${status}  [${reason}]`);
+		const json = rec(JSON.parse((await run(["reflect", "--root", root, "--execute", "--json"], { runner })).out), "output");
+		expect(rec(json.reflect, "reflect").problems).toEqual([
+			{ repo: "Acme/Alpha", status, reason },
+			{ repo: "Acme/Beta", status, reason },
+		]);
+	});
+
+	test("a repository whose planning file cannot be read is reported and makes the run exit 1, even as a dry run, while the others are still digested", async () => {
+		const { root, runner } = reflectFixture({ "beta/.planning/ROADMAP.md": "" });
+		const dry = await run(["reflect", "--root", root], { runner });
+		expect(dry.code).toBe(1);
+		expect(dry.out).toContain("reflect: 1 digest from 2 checkouts found (dry run)");
+		expect(dry.out).toContain("not reflected (1):");
+		expect(dry.out).toContain("Acme/Beta  [roadmap-empty]");
+		stub.on("POST /corpus/reflect", answerAll("stored"));
+		const executed = await run(["reflect", "--root", root, "--execute"], { runner });
+		expect(executed.code).toBe(1);
+		expect(list(rec(defined(stub.requests("/corpus/reflect")[0], "request").body, "request").digests, "digests")).toHaveLength(1);
+		const json = rec(JSON.parse((await run(["reflect", "--root", root, "--json"], { runner })).out), "output");
+		expect(json.skipped).toEqual([{ repo: "Acme/Beta", reason: "roadmap-empty" }]);
+	});
+
+	test("--repo digests only the named repositories and reports one that is not found", async () => {
+		const { root, runner } = reflectFixture();
+		stub.on("POST /corpus/reflect", answerAll("stored"));
+		const only = await run(["reflect", "--root", root, "--repo", "Acme/Beta", "--execute"], { runner });
+		expect(only.code).toBe(0);
+		expect(list(rec(defined(stub.requests("/corpus/reflect")[0], "request").body, "request").digests, "digests").map((item) => item.repo)).toEqual(["Acme/Beta"]);
+		const missing = await run(["reflect", "--root", root, "--repo", "Acme/Nope"], { runner });
+		expect(missing.code).toBe(1);
+		expect(missing.out).toContain("Acme/Nope  [not-found]");
+	});
+
+	test("a server that refuses, or runs with the corpus off, exits 1 with the reason and the digests counted as not sent", async () => {
+		const { root, runner } = reflectFixture();
+		stub.on("POST /corpus/reflect", () => ({ status: 403, body: {} }));
+		const refused = await run(["reflect", "--root", root, "--execute"], { runner });
+		expect(refused.code).toBe(1);
+		expect(refused.err).toContain("403");
+		expect(refused.out).toContain("not sent: 2 digests");
+		stub.on("POST /corpus/reflect", () => ({ status: 503, body: { error: "corpus.disabled" } }));
+		expect((await run(["reflect", "--root", root, "--execute"], { runner })).err).toContain("corpus off");
+	});
+
+	test("a repository without a STATE is left out silently and a run with nothing to digest sends no request", async () => {
+		const root = tempDir("corpus-cli-");
+		dirs.push(root);
+		writeTree(root, { "gamma/.git/HEAD": "", "gamma/README.md": "# gamma\n" });
+		const runner = fakeGit({ [join(root, "gamma")]: { branch: "main", remoteDefault: "main", head: HEAD, origin: "git@github.com:Acme/Gamma.git" } });
+		const result = await run(["reflect", "--root", root, "--execute"], { runner });
+		expect(result.code).toBe(0);
+		expect(result.out).toContain("reflect: stored 0, unchanged 0, refused 0, failed 0");
+		expect(result.out).toContain("1 checkout without .planning/STATE.md not reflected");
+		expect(stub.seen).toEqual([]);
+	});
+
+	test("--max-bytes must be a positive integer, and an unknown flag is a usage error", async () => {
+		expect((await run(["reflect", "--max-bytes", "0"])).code).toBe(2);
+		expect((await run(["reflect", "--tier", "1"])).code).toBe(2);
+		expect(stub.seen).toEqual([]);
+		expect(USAGE).toContain("substrate corpus reflect");
+		expect(USAGE).toContain("[--gaps [--limit N]]");
+	});
+
+	test("the roots come from SUBSTRATE_CORPUS_ROOTS when no --root is given", async () => {
+		const { root, runner } = reflectFixture();
+		const result = await run(["reflect"], { runner, env: { SUBSTRATE_CORPUS_ROOTS: root } });
+		expect(result.code).toBe(0);
+		expect(result.out).toContain("reflect: 2 digests");
+	});
+});
+
 describe("substrate corpus plan --neardup", () => {
 	const ALPHA_README = { repo: "Acme/Alpha", path: "README.md" };
 	const BETA_README = { repo: "Acme/Beta", path: "README.md" };
@@ -757,13 +994,15 @@ describe("substrate corpus plan --neardup", () => {
 		stub.on("POST /corpus/plan", () => ({ status: 200, body: plan }));
 		const reply = neardupOf([pairOf(0.95)], { compared: 2 });
 		neardupAnswers({ status: 200, body: reply });
+		// The plan command adds the entries a plan supersedes (docs reflect), so the unchanged output is the plan plus that list.
+		const shown = { ...plan, superseded: [] };
 		const plain = await run(["plan", "--root", root, "--json"], { runner });
-		expect(plain.out).toBe(`${JSON.stringify(plan, null, 2)}\n`);
+		expect(plain.out).toBe(`${JSON.stringify(shown, null, 2)}\n`);
 		expect(stub.requests("/corpus/neardup")).toEqual([]);
 		const asked = await run(["plan", "--root", root, "--neardup", "--json"], { runner });
 		expect(asked.code).toBe(0);
 		const parsed = rec(JSON.parse(asked.out), "plan");
-		expect(Object.keys(parsed)).toEqual([...Object.keys(plan), "neardup"]);
+		expect(Object.keys(parsed)).toEqual([...Object.keys(shown), "neardup"]);
 		expect(parsed.neardup).toEqual({ ...reply, notCompared: { github: 0, unreadable: 0, overLimit: 0 } });
 		expect(asked.out).not.toContain("advisory");
 	});

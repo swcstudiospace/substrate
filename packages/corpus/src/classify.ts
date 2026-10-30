@@ -4,7 +4,7 @@
  *
  * Pure: no file is opened. The rules run in a fixed order and the first match wins, on the lowercased path.
  */
-import type { DocKind, DocTier } from "./protocol.ts";
+import { DIGEST_PATH, type DocKind, type DocTier } from "./protocol.ts";
 
 export interface Classification {
 	kind: DocKind;
@@ -102,6 +102,9 @@ export function classify(path: string, ctx: ClassifyContext = {}): Classificatio
 	if (name === undefined || !hasDocExtension(name)) return null;
 	const dirs = segments.slice(0, -1);
 	if (dirs.some((segment) => EXCLUDED_SEGMENTS.has(segment))) return null;
+
+	// The repository digest lives at one virtual path that no checkout owns; the match is exact, so a nested copy is not one.
+	if (segments.join("/") === DIGEST_PATH) return { kind: "digest", tier: 1 };
 	const atRoot = ctx.root ?? segments.length === 1;
 
 	// A `.planning` directory may sit at any depth in a monorepo; the rules apply from the first one.

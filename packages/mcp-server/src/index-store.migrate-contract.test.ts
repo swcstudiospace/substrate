@@ -61,7 +61,10 @@ export const REAL_ALLOWLISTS: ContractAllowlists = {
 		planning_steering_audit: "step 33 is an opt-in (steering-audit), append-only steering audit table; it is not part of the archive's closed table list and archiving it is a separate change",
 		corpus_documents: "step 35 is the corpus manifest, rebuilt by re-running the corpus scan and ingest; it is not part of the archive's closed table list and archiving it is a separate change",
 		worktrees: "step 36 is the worktree registry, rebuilt by the next report from each host; archiving stale paths would only restore them, and the closed table list stays as it is",
+		planning_page_hashes: "step 39 holds the planning refresh's page hashes, rebuilt by the next planning scan (a missing row only re-ingests that page); it is not part of the archive's closed table list and archiving it is a separate change",
 		steering_sessions: "step 37 is an opt-in (steering-sessions) restart cache of live steering session state; it is not part of the archive's closed table list and is rebuilt from the live registry, not archived",
+		corpus_retrievals: "step 38 is the retrieval telemetry, written only under SUBSTRATE_DOCS_TELEMETRY: a bounded, redacted log that the retention sweep ages out; it is not part of the archive's closed table list, and adding it would change the schema hash that every earlier archive was verified against",
+		corpus_feedback: "step 38 holds the readers' verdicts on corpus documents; it is not part of the archive's closed table list (adding a table changes the schema hash every earlier archive was verified against) and a lost verdict only costs the re-rank some evidence it collects again",
 	},
 };
 
@@ -224,6 +227,23 @@ describe("the real MIGRATION_STEPS satisfy the contract", () => {
 	test("every real step at or above the first reversible version (33, 34) declares down and phase, and the convention is also enforced through the synthetic lists below", () => {
 		expect(FIRST_REVERSIBLE_VERSION).toBe(33);
 		expect(MIGRATION_STEPS.filter((candidate) => candidate.version >= FIRST_REVERSIBLE_VERSION).every((candidate) => candidate.down !== undefined && candidate.phase !== undefined)).toBe(true);
+	});
+
+	test("step 40 (worktree changed files) adds columns only, and its down drops exactly the columns its up adds, with no table allowlist entry", () => {
+		const step40 = MIGRATION_STEPS.filter((candidate) => candidate.version === 40);
+		expect(step40.map((candidate) => candidate.name)).toEqual(["worktrees_changed_files"]);
+		expect(checkMigrationSteps(step40)).toEqual([]);
+		expect(step40[0]?.down).toContain("drop column if exists changed_files");
+		expect(step40[0]?.down).toContain("drop column if exists files_truncated");
+	});
+
+	test("step 41 (worktree repo lookup) creates only the lower(repo) index, and its down drops that index", () => {
+		const step41 = MIGRATION_STEPS.filter((candidate) => candidate.version === 41);
+		expect(step41.map((candidate) => candidate.name)).toEqual(["worktrees_repo_lower_seen_idx"]);
+		expect(checkMigrationSteps(step41)).toEqual([]);
+		expect(step41[0]?.sql).toContain("create index if not exists worktrees_repo_lower_seen_idx on worktrees (lower(repo), last_seen_at desc)");
+		expect(step41[0]?.down).toBe("drop index if exists worktrees_repo_lower_seen_idx");
+		expect(step41[0]?.sql).not.toContain("add column");
 	});
 
 	test("the applied text of every step matches the committed digest fixture", () => {

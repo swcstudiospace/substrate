@@ -1,6 +1,6 @@
 /**
- * What `POST /corpus/plan`, `POST /corpus/ingest`, `GET /corpus/status`, `GET /corpus/root`, `GET /corpus/proof`, `GET /corpus/anchor` and
- * the `corpus_status` and `corpus_ingest` tools answer: the gates, the request parse, the planner, the ingest or the proof, and a status
+ * What `POST /corpus/plan`, `POST /corpus/ingest`, `POST /corpus/reconcile`, `GET /corpus/status`, `GET /corpus/root`, `GET /corpus/proof`, `GET /corpus/anchor` and
+ * the `corpus_status` and `corpus_ingest` tools answer: the gates, the request parse, the planner, the ingest, the reconcile or the proof, and a status
  * code with a closed reason. The HTTP server and the MCP tools only carry the body in and the answer out, so both doors decide the same way.
  *
  * Every gate is checked before anything is read from the manifest or sent to a plane, so a server with `SUBSTRATE_CORPUS`
@@ -16,6 +16,7 @@ import {
 	type CorpusIngestResponse,
 	type CorpusPlanResponse,
 	type CorpusProofResponse,
+	type CorpusReconcileResponse,
 	type CorpusRootResponse,
 	type CorpusStatusResponse,
 } from "@substrate/corpus";
@@ -26,12 +27,21 @@ import type { EventInput, Surface } from "../types.ts";
 import { corpusAnchorStatus, type AnchorVerifier } from "./anchor.ts";
 import { corpusGate, ingestCorpus, type GateReason } from "./ingest.ts";
 import { planCorpus, planRepos } from "./plan.ts";
+import { reconcileCorpus } from "./reconcile.ts";
 import { inclusionOf, type CorpusRootKeeper } from "./root.ts";
 import type { CorpusStore } from "./store.ts";
-import { parseIngestRequest, parsePlanRequest, type RequestRefusal } from "./validate.ts";
+import { parseIngestRequest, parsePlanRequest, parseReconcileRequest, type RequestRefusal } from "./validate.ts";
 
-/** Every reason a corpus door refuses: the gates, the request refusals, an index that does not answer, an embedding service that does not, and the proof lookups. Closed. */
-export type CorpusRefusalReason = GateReason | RequestRefusal | "corpus.index-unavailable" | "corpus.embeddings-unavailable" | "corpus.too-large" | "not-in-corpus" | "bad-root";
+/** Every reason a corpus door refuses: the gates, the request refusals, an index or plane or embedding service that does not answer, and the proof lookups. Closed. */
+export type CorpusRefusalReason =
+	| GateReason
+	| RequestRefusal
+	| "corpus.index-unavailable"
+	| "corpus.plane-unreachable"
+	| "corpus.embeddings-unavailable"
+	| "corpus.too-large"
+	| "not-in-corpus"
+	| "bad-root";
 
 export interface CorpusRefusal {
 	error: string;
@@ -56,6 +66,8 @@ export interface CorpusServiceDeps {
 	plane: LightragBulkPlane | null;
 	emit: (event: EventInput) => Promise<unknown>;
 	signal?: AbortSignal | undefined;
+	/** The clock, epoch ms; tests inject one. */
+	now?: (() => number) | undefined;
 	/** The root cache and the root event, owned by the service so they outlive one request. */
 	roots: CorpusRootKeeper;
 	/** The ledger and devnet reads the anchor check goes through. */
@@ -66,8 +78,9 @@ const MESSAGES: Readonly<Record<CorpusRefusalReason, string>> = {
 	unauthenticated: "the corpus needs an authenticated surface; nothing was read or changed",
 	"vm-guest": "the corpus is not served to a VM guest; nothing was read or changed",
 	"corpus.disabled": "the corpus is switched off (SUBSTRATE_CORPUS is not on); nothing was read or changed",
-	"corpus.backend-unavailable": "the corpus ingest needs the LightRAG docs backend, which is not configured; nothing was sent",
+	"corpus.backend-unavailable": "the corpus ingest and reconcile need the LightRAG docs backend, which is not configured; nothing was sent",
 	"corpus.index-unavailable": "the corpus manifest is not reachable (no index, or it did not answer); nothing was changed",
+	"corpus.plane-unreachable": "the docs plane did not list its documents; nothing was changed",
 	"corpus.embeddings-unavailable": "the embedding service could not answer (the closed reason is in detail); nothing was compared",
 	"corpus.too-large": "the manifest has more active documents than one root covers; no root was made",
 	"not-in-corpus": "no active document has this repository and path",
@@ -181,16 +194,52 @@ export async function corpusIngestReply(deps: CorpusServiceDeps, raw: unknown, s
 	}
 }
 
-/** `GET /corpus/status`: the manifest's counts. */
+/** Whole seconds between an ISO instant and `now` (epoch ms), never negative; null for no instant. */
+function ageSeconds(at: string | null, now: number): number | null {
+	if (at === null) return null;
+	const ms = Date.parse(at);
+	return Number.isFinite(ms) ? Math.max(0, Math.round((now - ms) / 1000)) : null;
+}
+
+/** `GET /corpus/status`: the manifest's counts, and `lagSeconds`, the age of its newest write. */
 export async function corpusStatusReply(deps: CorpusServiceDeps, surface: Surface | null): Promise<CorpusReply<CorpusStatusResponse>> {
 	const gated = gateOf(deps, surface, false);
 	if (gated !== null) return gated;
 	const store = deps.store;
 	if (store === null) return refusal(503, "corpus.index-unavailable");
 	try {
-		return { ok: true, status: 200, body: { protocol: CORPUS_PROTOCOL, ...(await store.status()) } };
+		const { newestChangeAt, ...summary } = await store.status();
+		return { ok: true, status: 200, body: { protocol: CORPUS_PROTOCOL, ...summary, lagSeconds: ageSeconds(newestChangeAt, (deps.now ?? Date.now)()) } };
 	} catch {
 		return refusal(503, "corpus.index-unavailable");
+	}
+}
+
+/**
+ * `POST /corpus/reconcile`: compares the manifest's active rows with the docs plane and reports the drift. A dry run
+ * (`execute` false or absent) reads the plane's document listing and the manifest and changes nothing; `execute` marks the
+ * rows whose plane document is gone as removed (the next plan offers them as `add`) and deletes the `corpus:` documents no
+ * row owns. Needs the plane like the ingest does, and shares its lock.
+ */
+export async function corpusReconcileReply(deps: CorpusServiceDeps, raw: unknown, surface: Surface | null): Promise<CorpusReply<CorpusReconcileResponse>> {
+	const gated = gateOf(deps, surface, true);
+	if (gated !== null) return gated;
+	const parsed = parseReconcileRequest(raw);
+	if (!parsed.ok) return refusal(400, parsed.reason, parsed.detail);
+	const { store, plane } = deps;
+	if (store === null || plane === null) return refusal(503, "corpus.index-unavailable");
+	const { execute } = parsed.value;
+	// An executed reconcile moves manifest rows like an ingest does, so it brackets its writes the same way: no root is cached or
+	// recorded while it runs, and a request that requeued a row (or failed part-way, or threw) owes a root event. A dry run writes nothing.
+	if (execute) deps.roots.writeStarted();
+	let changed = true;
+	try {
+		const result = await reconcileCorpus({ store, plane, signal: deps.signal }, execute);
+		if (!result.ok) return refusal(503, result.reason, result.detail);
+		changed = result.body.repaired.requeued > 0;
+		return { ok: true, status: 200, body: result.body };
+	} finally {
+		if (execute) deps.roots.writeSettled(changed);
 	}
 }
 

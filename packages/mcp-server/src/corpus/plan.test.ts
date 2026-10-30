@@ -146,3 +146,30 @@ describe("planRepos", () => {
 		expect([...repos].sort()).toEqual([REPO, "acme/other", "acme/third"].sort());
 	});
 });
+
+describe("planCorpus: the superseded-by marker and digests (phase 66)", () => {
+	test("a marker that appeared, changed or went away on the same bytes is an update, and an equal marker is unchanged", () => {
+		const rows = [
+			makeRow({ repo: REPO, path: "appeared.md", sha256: sha256Hex("a") }),
+			makeRow({ repo: REPO, path: "changed.md", sha256: sha256Hex("c"), supersededBy: "old-target.md" }),
+			makeRow({ repo: REPO, path: "gone.md", sha256: sha256Hex("g"), supersededBy: "target.md" }),
+			makeRow({ repo: REPO, path: "same.md", sha256: sha256Hex("s"), supersededBy: "target.md" }),
+		];
+		const plan = planCorpus(
+			[entry("appeared.md", "a", { supersededBy: "target.md" }), entry("changed.md", "c", { supersededBy: "new-target.md" }), entry("gone.md", "g"), entry("same.md", "s", { supersededBy: "target.md" })],
+			SCOPE,
+			rows,
+		);
+		expect(plan.counts).toMatchObject({ update: 3, unchanged: 1, change: 0 });
+		expect(plan.items.map((item) => item.path)).toEqual(["appeared.md", "changed.md", "gone.md"]);
+	});
+
+	test("a digest row is never a tombstone candidate: a scan does not find it, so a scan says nothing about it", () => {
+		const rows = [
+			makeRow({ repo: REPO, path: ".substrate/digest.md", sha256: sha256Hex("digest"), kind: "digest" }),
+			makeRow({ repo: REPO, path: "docs/gone.md", sha256: sha256Hex("gone") }),
+		];
+		const plan = planCorpus([], SCOPE, rows);
+		expect(plan.items).toEqual([{ action: "tombstone", repo: REPO, path: "docs/gone.md", sha256: sha256Hex("gone") }]);
+	});
+});

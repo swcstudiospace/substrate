@@ -274,7 +274,37 @@ describe("scanRoots over copy collections", () => {
 		expect(second.entries.filter((e) => e.sha256 === sha(GUIDE)).map((e) => documentKey(e.repo, e.path))).toEqual(["local/c2:docs/guide.md"]);
 		expect(second.report.collapsed.identicalCopies).toEqual([{ keep: "local/c2:docs/guide.md", copies: ["local/c3:docs/guide.md"] }]);
 		expect(second.report.collapsed.identical).toBe(1);
+
 	});
+
+	test("a repository filter still gives an identical file to the same owner a full sweep would", async () => {
+		const root = collections();
+		const filtered = await scanRoots({ roots: [root], repos: ["local/c2"], runner: fakeGit({}) });
+		expect(filtered.entries.map((entry) => documentKey(entry.repo, entry.path))).not.toContain("local/c2:docs/guide.md");
+		expect(filtered.entries.map((entry) => entry.repo)).not.toContain("local/c1");
+		expect(filtered.report.repos.map((repo) => repo.repo)).toEqual(["local/c2"]);
+	});
+
+	test("a later supplied view does not replace an earlier file's location", async () => {
+		const root = fixture({ "a/notes/docs/guide.md": "first\n", "b/notes/.git/HEAD": "", "b/notes/docs/guide.md": "second\n" });
+		const earlier = join(root, "a");
+		const later = join(root, "b");
+		const checkout = join(later, "notes");
+		const result = await scanRoots({
+			roots: [earlier, later],
+			runner: fakeGit({ [checkout]: { branch: "main", files: ["docs/guide.md"] } }),
+			readCheckout: () => ({
+				entries: [{ repo: "local/notes", path: "docs/guide.md", kind: "doc", tier: 1, sha256: "e".repeat(64), bytes: 1, source: "fs" }],
+				paths: new Map([["local/notes:docs/guide.md", "git-blob:later"]]),
+				skips: new SkipLog(),
+				problems: [],
+			}),
+		});
+		expect(result.paths.get("local/notes:docs/guide.md")).toBe(join(earlier, "notes", "docs", "guide.md"));
+		expect(result.entries.filter((entry) => entry.path === "docs/guide.md")).toHaveLength(1);
+		expect(result.entries.find((entry) => entry.path === "docs/guide.md")?.sha256).toBe(sha("first\n"));
+	});
+
 
 	test("a path the server refuses is skipped before copies collapse, so the valid identical copy is the one kept", async () => {
 		const root = fixture({ "a/docs\\guide.md": GUIDE, "b/docs/guide.md": GUIDE });
@@ -468,6 +498,34 @@ describe("buildScope", () => {
 
 	test("a scan that read nothing covers nothing", () => {
 		expect(buildScope({ reports: [], maxTier: 2 })).toEqual({ coverage: [], maxTier: 2 });
+	});
+});
+
+describe("scanRoots supersession markers", () => {
+	const origin = "git@github.com:Acme/Alpha.git";
+
+	test("sets supersededBy from the front matter of tier 1 and 2 documents, drops an invalid marker without a skip, and never reads tier 3", async () => {
+		const root = fixture({
+			"alpha/.git/HEAD": "",
+			"alpha/docs/old.md": "---\nsuperseded-by: docs/new.md\n---\n# old\n",
+			"alpha/docs/new.md": "# new\n",
+			"alpha/docs/bad.md": "---\nsuperseded-by: ../outside.md\n---\n# bad\n",
+			"alpha/docs/url.md": "---\nsuperseded-by: https://example.com/x.md\n---\n# url\n",
+			"alpha/notes/loose.md": "---\nsuperseded-by: docs/new.md\n---\n# loose\n",
+		});
+		const dir = join(root, "alpha");
+		const files = ["docs/old.md", "docs/new.md", "docs/bad.md", "docs/url.md", "notes/loose.md"];
+		const result = await scanRoots({
+			roots: [root],
+			maxTier: 3,
+			runner: fakeGit({ [dir]: { origin, head: HEAD, branch: "main", remoteDefault: "main", files } }),
+		});
+		const markers = Object.fromEntries(result.entries.map((entry) => [entry.path, entry.supersededBy]));
+		expect(markers).toEqual({ "docs/old.md": "docs/new.md", "docs/new.md": undefined, "docs/bad.md": undefined, "docs/url.md": undefined, "notes/loose.md": undefined });
+		// An unusable marker is dropped, never a refusal: the document is still an entry and nothing is skipped.
+		expect(result.entries).toHaveLength(5);
+		expect(result.report.skipped).toEqual([]);
+		expect(Object.hasOwn(defined(result.entries.find((entry) => entry.path === "docs/new.md"), "new"), "supersededBy")).toBe(false);
 	});
 });
 

@@ -72,6 +72,7 @@ import { parseSessionContextArgs, SESSION_CONTEXT_DISABLED, SESSION_CONTEXT_DISA
 import type { EventBus } from "./event-bus.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
 import { parseBriefProfile } from "./brief-profile.ts";
+import { syncLagSeconds } from "./corpus/sync-event.ts";
 import { DATASET_TRIGGERS } from "./docs-datasets.ts";
 import { freshnessGauges } from "./docs-freshness.ts";
 import { scanIngestPages, readSkillsCheckoutPages, skillsCheckoutRoots, type IngestPage } from "./docs-ingest.ts";
@@ -285,6 +286,8 @@ const MAX_BODY_BYTES = 1_000_000;
  * amplification path.
  */
 const DOCS_MAX_BODY_BYTES = 6_000_000;
+/** A reconcile request is `{protocol, execute}`; a body past this is not one. */
+const RECONCILE_MAX_BODY_BYTES = 4096;
 
 /**
  * `POST /corpus/neardup` carries up to 1000 excerpts of 4000 characters. Four bytes per character covers any UTF-8 text with the
@@ -313,6 +316,8 @@ const JSON_BODY_ROUTES: Record<string, true> = {
 	"/docs/search": true,
 	"/docs/ingest": true,
 	"/docs/merge-trigger": true,
+	"/docs/feedback": true,
+	"/corpus/reflect": true,
 	"/skills/propose": true,
 	"/skills/approve": true,
 	"/steering/queue": true,
@@ -352,6 +357,13 @@ function listLength(body: unknown, member: string): number {
 	if (body === null || typeof body !== "object" || Array.isArray(body)) return 0;
 	const list: unknown = (body as Record<string, unknown>)[member];
 	return Array.isArray(list) ? list.length : 0;
+}
+
+/** A string member of a request body cut to 200 characters for an audit record, or an empty string when it is not one. */
+function stringMember(body: unknown, member: string): string {
+	if (body === null || typeof body !== "object" || Array.isArray(body)) return "";
+	const value: unknown = (body as Record<string, unknown>)[member];
+	return typeof value === "string" ? value.slice(0, 200) : "";
 }
 /** Why an anonymous merge-trigger is refused, even on a run that allows anonymous callers. */
 const MERGE_TRIGGER_NEEDS_SURFACE = "docs merge-trigger needs an authenticated surface; nothing was refreshed";
@@ -1256,8 +1268,13 @@ export function createHttpServer(
 						...(body as object),
 						surface: attribution.surface,
 					} as Parameters<Substrate["emit"]>[0],
-					{ replay: req.headers["x-substrate-replay"] === "1" },
+					{ replay: req.headers["x-substrate-replay"] === "1", caller: { surface, isOperator: caller.isOperator } },
 				);
+				// The sync lag the CLI reports, as a gauge: bounded and sanitised, read only from a stored `docs.sync` note.
+				if (result.stored) {
+					const lag = syncLagSeconds(body.payload);
+					if (lag !== null) observability.instruments.setCorpusSyncLag(lag);
+				}
 				// 503 when the ledger did not take it. The `substrate` CLI ignores the
 				// status and exits 0 either way — failing open is the client's job, and
 				// this surface owes its caller the truth about durability.
@@ -1666,6 +1683,21 @@ export function createHttpServer(
 				sendJson(res, reply.status, reply.body);
 				return;
 			}
+			// The reconcile compares the manifest with the docs plane. A dry run only reads both (fail-open audit under
+			// `corpus_status`); `execute` marks rows removed and deletes `corpus:` plane documents, the ingest's own write
+			// (fail-closed audit under `corpus_ingest`). The class is `write` either way, so a dry run cannot exhaust a read budget.
+			if (req.method === "POST" && url.pathname === "/corpus/reconcile") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req, RECONCILE_MAX_BODY_BYTES));
+				const execute = typeof parsed === "object" && parsed !== null && "execute" in parsed && parsed.execute === true;
+				if (!(await auditedRest(res, observability, surface, execute ? "corpus_ingest" : "corpus_status", { op: "reconcile", execute }))) return;
+				const reply = await substrate.corpusReconcile(parsed, surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
 			if (req.method === "GET" && url.pathname === "/corpus/status") {
 				if (surface === null) {
 					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
@@ -1673,6 +1705,45 @@ export function createHttpServer(
 				}
 				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "status" }))) return;
 				const reply = await substrate.corpusStatus(surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			// The docs learning loop (v1.7 phase 66). Feedback is a write with a fail-open audit (a verdict must not fail an agent's turn);
+			// the digest reflect is a corpus ingest, audited fail-closed under `corpus_ingest`; the gap report is a read, audited under
+			// `corpus_status`. An anonymous caller is refused before the body is read. With `SUBSTRATE_CORPUS` off each answers 503
+			// `corpus.disabled` from `substrate.*` and nothing is read or stored.
+			if (req.method === "POST" && url.pathname === "/docs/feedback") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req));
+				// The note is never audited or stored; the audit record names the document and the verdict only.
+				const fields = { document: stringMember(parsed, "document"), verdict: stringMember(parsed, "verdict") };
+				if (!(await auditedRest(res, observability, surface, "docs_feedback", fields))) return;
+				const reply = await substrate.docsFeedback(parsed, surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			if (req.method === "POST" && url.pathname === "/corpus/reflect") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req, DOCS_MAX_BODY_BYTES));
+				// Counts only: the audit record never carries a digest.
+				if (!(await auditedRest(res, observability, surface, "corpus_ingest", { op: "reflect", digests: listLength(parsed, "digests") }))) return;
+				const reply = await substrate.corpusReflect(parsed, surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			if (req.method === "GET" && url.pathname === "/corpus/gaps") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "gaps" }))) return;
+				const reply = await substrate.corpusGaps(url.searchParams.get("limit"), surface);
 				sendJson(res, reply.status, reply.body);
 				return;
 			}
@@ -2250,7 +2321,7 @@ export function createHttpServer(
 
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
-			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/corpus/plan" || url.pathname === "/corpus/neardup" || url.pathname === "/corpus/ingest" || url.pathname === "/mcp" || url.pathname === "/memory" || url.pathname === "/worktrees/report")) {
+			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/docs/feedback" || url.pathname === "/corpus/plan" || url.pathname === "/corpus/neardup" || url.pathname === "/corpus/ingest" || url.pathname === "/corpus/reconcile" || url.pathname === "/corpus/reflect" || url.pathname === "/mcp" || url.pathname === "/memory" || url.pathname === "/worktrees/report")) {
 				sendJson(res, 413, { error: cause.message });
 				return;
 			}

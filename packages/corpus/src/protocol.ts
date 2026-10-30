@@ -17,6 +17,9 @@ export const CORPUS_ROUTES = {
 	neardup: "/corpus/neardup",
 	ingest: "/corpus/ingest",
 	status: "/corpus/status",
+	reconcile: "/corpus/reconcile",
+	reflect: "/corpus/reflect",
+	gaps: "/corpus/gaps",
 	root: "/corpus/root",
 	proof: "/corpus/proof",
 	anchor: "/corpus/anchor",
@@ -45,6 +48,7 @@ export const DOC_KINDS = [
 	"planning-archive",
 	"planning-other",
 	"greptile-kb",
+	"digest",
 	"other",
 ] as const;
 export type DocKind = (typeof DOC_KINDS)[number];
@@ -71,6 +75,11 @@ export interface CorpusEntry {
 	source: CorpusSource;
 	/** The commit the content was read at, when known. */
 	commit?: string | undefined;
+	/**
+	 * A repo-relative path of the same repository that replaces this document, from its `superseded-by` front-matter marker
+	 * (tier 1 and 2 documents only). The server keeps it only when it is a valid path; an invalid marker is dropped, never a refusal.
+	 */
+	supersededBy?: string | undefined;
 }
 
 /** An entry plus its text, sent only for documents that must change. */
@@ -244,7 +253,101 @@ export interface CorpusStatusResponse {
 	byKind: Array<{ kind: DocKind; count: number }>;
 	byTier: Array<{ tier: DocTier; count: number }>;
 	lastIngestAt: string | null;
+	/** Seconds since the newest manifest write, or null when the manifest holds no row yet. */
+	lagSeconds: number | null;
 	manifestVersion: number;
+}
+
+/** The most items `reconcile` lists in one list; the counts always cover all of them. */
+export const RECONCILE_MAX_ITEMS = 500;
+
+/** `execute: false` is a dry run: the server reports the drift and repairs nothing. */
+export interface CorpusReconcileRequest {
+	protocol: typeof CORPUS_PROTOCOL;
+	execute: boolean;
+}
+
+/** What the docs plane and the manifest disagree about. */
+export interface ReconcileDrift {
+	/** Active manifest rows whose plane document is gone. */
+	missingInPlane: Array<{ repo: string; path: string }>;
+	/** Plane documents named `corpus:` that no active row owns. */
+	orphansInPlane: string[];
+	/** How many active rows and plane documents were compared. */
+	checked: number;
+	/** True when a list was cut at {@link RECONCILE_MAX_ITEMS} or the plane listing was not complete. */
+	truncated: boolean;
+}
+
+export interface CorpusReconcileResponse {
+	protocol: typeof CORPUS_PROTOCOL;
+	drift: ReconcileDrift;
+	/** Rows marked removed so the next plan offers them as `add`, and orphan plane documents deleted; both 0 on a dry run. */
+	repaired: { requeued: number; deleted: number };
+	manifestVersion: number;
+}
+
+/** Why a sync ran. Closed: the `docs.sync` event carries it. */
+export const SYNC_TRIGGERS = ["manual", "watch", "hook", "sweep", "reconcile"] as const;
+export type SyncTrigger = (typeof SYNC_TRIGGERS)[number];
+
+/** How a sync ended. Closed: the `docs.sync` event carries it. */
+export const SYNC_OUTCOMES = ["ok", "partial", "failed", "skipped"] as const;
+export type SyncOutcome = (typeof SYNC_OUTCOMES)[number];
+/** Bounds of `POST /corpus/reflect`: the CLI keeps inside them and the server refuses a request outside them. */
+export const MAX_REFLECT_DIGESTS = 200;
+export const MAX_DIGEST_CHARS = 20_000;
+
+/** The virtual path a repository digest is stored under: it is not a file of the repository. */
+export const DIGEST_PATH = ".substrate/digest.md";
+
+export interface CorpusDigestPayload {
+	repo: string;
+	text: string;
+	/** sha256 of `text` (UTF-8), lowercase hex. */
+	sha256: string;
+}
+
+export interface CorpusReflectRequest {
+	protocol: typeof CORPUS_PROTOCOL;
+	digests: CorpusDigestPayload[];
+}
+
+export const REFLECT_STATUSES = ["stored", "unchanged", "refused", "failed"] as const;
+export type ReflectStatus = (typeof REFLECT_STATUSES)[number];
+
+export interface CorpusReflectResultItem {
+	repo: string;
+	status: ReflectStatus;
+	/** A closed reason code for `refused` and `failed`. */
+	reason?: string | undefined;
+}
+
+export interface CorpusReflectResponse {
+	protocol: typeof CORPUS_PROTOCOL;
+	results: CorpusReflectResultItem[];
+	manifestVersion: number;
+}
+
+/** The most gaps one `GET /corpus/gaps` answers, and how many it answers when `limit` is absent. */
+export const MAX_GAPS_LIMIT = 200;
+export const DEFAULT_GAPS_LIMIT = 50;
+
+/** A query the corpus could not answer well, aggregated by the hash of the query. */
+export interface CorpusGap {
+	queryHash: string;
+	/** The redacted, capped text of the query, when the server kept it. */
+	text: string | null;
+	searches: number;
+	lastSeen: string;
+	/** The best score any of the searches returned; null when none returned a scored citation. */
+	best: number | null;
+}
+
+export interface CorpusGapsResponse {
+	protocol: typeof CORPUS_PROTOCOL;
+	gaps: CorpusGap[];
+	truncated: boolean;
 }
 
 /**

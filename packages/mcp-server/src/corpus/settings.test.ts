@@ -3,7 +3,7 @@ import { loadConfig, loadCorpusSettings } from "../config.ts";
 
 describe("loadCorpusSettings", () => {
 	test("everything unset is the safe default: closed, four batches in flight, twenty documents, one megabyte", () => {
-		expect(loadCorpusSettings({})).toEqual({ enabled: false, concurrency: 4, batchDocs: 20, batchBytes: 1_000_000 });
+		expect(loadCorpusSettings({})).toEqual({ enabled: false, concurrency: 4, batchDocs: 20, batchBytes: 1_000_000, freshMaxAgeS: 172_800 });
 		expect(loadConfig({}).corpus.enabled).toBe(false);
 	});
 
@@ -24,5 +24,22 @@ describe("loadCorpusSettings", () => {
 		const junk = loadCorpusSettings({ SUBSTRATE_CORPUS_CONCURRENCY: "four", SUBSTRATE_CORPUS_BATCH_DOCS: "2.5", SUBSTRATE_CORPUS_BATCH_BYTES: "-1" });
 		expect(junk).toMatchObject({ concurrency: 4, batchDocs: 20, batchBytes: 1_000_000 });
 		expect(loadCorpusSettings({ SUBSTRATE_CORPUS_CONCURRENCY: " 8 " }).concurrency).toBe(8);
+	});
+});
+
+describe("the doc watch settings (v1.7 phase 65)", () => {
+	test("the freshness age is two days unless set; 0 switches the judgement off; a bad value is the default and a huge one is a year", () => {
+		expect(loadCorpusSettings({}).freshMaxAgeS).toBe(172_800);
+		expect(loadCorpusSettings({ SUBSTRATE_CORPUS_FRESH_MAX_AGE_S: "3600" }).freshMaxAgeS).toBe(3600);
+		expect(loadCorpusSettings({ SUBSTRATE_CORPUS_FRESH_MAX_AGE_S: "0" }).freshMaxAgeS).toBe(0);
+		expect(loadCorpusSettings({ SUBSTRATE_CORPUS_FRESH_MAX_AGE_S: "two days" }).freshMaxAgeS).toBe(172_800);
+		expect(loadCorpusSettings({ SUBSTRATE_CORPUS_FRESH_MAX_AGE_S: "-5" }).freshMaxAgeS).toBe(172_800);
+		expect(loadCorpusSettings({ SUBSTRATE_CORPUS_FRESH_MAX_AGE_S: "999999999999" }).freshMaxAgeS).toBe(31_536_000);
+	});
+
+	test("the planning hash store is off unless the word on is given", () => {
+		expect(loadConfig({}).planningHashStore).toBe(false);
+		expect(loadConfig({ SUBSTRATE_PLANNING_HASH_STORE: " On " }).planningHashStore).toBe(true);
+		for (const value of ["1", "true", "yes", "off", ""]) expect({ value, on: loadConfig({ SUBSTRATE_PLANNING_HASH_STORE: value }).planningHashStore }).toEqual({ value, on: false });
 	});
 });

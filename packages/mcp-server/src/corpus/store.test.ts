@@ -33,7 +33,14 @@ describe("toManifestRow", () => {
 	const record = { repo: "a/b", path: "x.md", kind: "doc", tier: 2, sha256: "f".repeat(64), bytes: 5, source: "github", commit_sha: null, state: "active", docs_document_id: "doc-1", manifest_seq: "42" };
 
 	test("reads a database row, with the bigint sequence as a string and a null commit", () => {
-		expect(toManifestRow(record)).toEqual({ repo: "a/b", path: "x.md", kind: "doc", tier: 2, sha256: "f".repeat(64), bytes: 5, source: "github", commit: null, state: "active", documentId: "doc-1", manifestSeq: 42 });
+		expect(toManifestRow(record)).toEqual({ repo: "a/b", path: "x.md", kind: "doc", tier: 2, sha256: "f".repeat(64), bytes: 5, source: "github", commit: null, state: "active", documentId: "doc-1", manifestSeq: 42, supersededBy: null, ingestedAt: null });
+	});
+
+	test("reads the superseded-by marker and the ingestion time, falling back to the update time and to null", () => {
+		const stamp = new Date("2026-03-01T10:00:00.000Z");
+		expect(toManifestRow({ ...record, superseded_by: "docs/new.md", ingested_at: stamp })).toMatchObject({ supersededBy: "docs/new.md", ingestedAt: "2026-03-01T10:00:00.000Z" });
+		expect(toManifestRow({ ...record, ingested_at: null, updated_at: "2026-02-01T00:00:00.000Z" })?.ingestedAt).toBe("2026-02-01T00:00:00.000Z");
+		expect(toManifestRow({ ...record, superseded_by: "", ingested_at: "not a date" })).toMatchObject({ supersededBy: null, ingestedAt: null });
 	});
 
 	test("a row holding a value outside the closed lists is dropped, never guessed at", () => {
@@ -155,5 +162,53 @@ describeLive("the corpus manifest against a live index", () => {
 		expect(status.byTier.some((entry) => entry.tier === 1 && entry.count > 0)).toBe(true);
 		expect(status.manifestVersion).toBe(await store.manifestVersion());
 		expect(typeof status.lastIngestAt).toBe("string");
+		expect(typeof status.newestChangeAt).toBe("string");
+	});
+
+	test("activeRows answers only active rows, ordered by repo and path, and no more than the limit", async () => {
+		// A sibling test leaves an active row under OTHER. This one uses its own repo so that row is not part of the answer.
+		const repo = `${MARKER}/active-rows`;
+		await store.recordIngested(doc("b-active.md", { repo }));
+		await store.recordIngested(doc("a-active.md", { repo }));
+		await store.recordIngested(doc("gone.md", { repo }));
+		await store.markTombstoned(repo, "gone.md");
+		const listed = await store.activeRows(100_000);
+		const mine = listed.rows.filter((row) => row.repo === repo);
+		expect(mine.map((row) => row.path)).toEqual(["a-active.md", "b-active.md"]);
+		expect(mine.every((row) => row.state === "active")).toBe(true);
+		const limited = await store.activeRows(1);
+		expect(limited.rows).toHaveLength(1);
+		expect(limited.truncated).toBe(true);
+	});
+
+	test("the superseded-by marker is stored by a record, replaced by a refresh and cleared by a refresh without one", async () => {
+		await store.recordIngested(doc("old-guide.md", { supersededBy: "new-guide.md" }));
+		expect((await store.rowFor(REPO, "old-guide.md"))?.supersededBy).toBe("new-guide.md");
+		expect(await store.refreshMetadata({ repo: REPO, path: "old-guide.md", sha256: "a".repeat(64), kind: "doc", tier: 1, source: "fs", supersededBy: "other-guide.md" })).toBe(true);
+		expect((await store.rowFor(REPO, "old-guide.md"))?.supersededBy).toBe("other-guide.md");
+		expect(await store.refreshMetadata({ repo: REPO, path: "old-guide.md", sha256: "a".repeat(64), kind: "doc", tier: 1, source: "fs" })).toBe(true);
+		expect((await store.rowFor(REPO, "old-guide.md"))?.supersededBy).toBeNull();
+	});
+
+	test("activeRows lists active rows only, with the ingestion time, and never more than the limit", async () => {
+		await store.recordIngested(doc("rows-a.md"));
+		await store.recordIngested(doc("rows-b.md"));
+		await store.recordIngested(doc("rows-gone.md"));
+		await store.markTombstoned(REPO, "rows-gone.md");
+		const all = await store.activeRows(100_000);
+		const mine = all.rows.filter((row) => row.repo === REPO && row.path.startsWith("rows-"));
+		expect(mine.map((row) => row.path)).toEqual(["rows-a.md", "rows-b.md"]);
+		expect(typeof mine[0]?.ingestedAt).toBe("string");
+		expect(all.truncated).toBe(false);
+		const cut = await store.activeRows(1);
+		expect(cut.rows).toHaveLength(1);
+		expect(cut.truncated).toBe(true);
+	});
+
+	test("newestIngestAt answers a recent ISO time without the counts", async () => {
+		await store.recordIngested(doc("newest.md"));
+		const newest = defined(await store.newestIngestAt(), "newest ingest time");
+		expect(new Date(newest).toISOString()).toBe(newest);
+		expect(Date.now() - Date.parse(newest)).toBeLessThan(60_000);
 	});
 });

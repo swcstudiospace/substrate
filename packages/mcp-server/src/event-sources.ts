@@ -946,7 +946,8 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 	{
 		// uplift-4 S7: the opt-in live golden canary (scripts/docs-golden.ts --live
 		// --emit, SUBSTRATE_DOCS_CANARY=1) posts one warning when its failing set
-		// changes, deduped through SUBSTRATE_DOCS_CANARY_STATE.
+		// changes, deduped through SUBSTRATE_DOCS_CANARY_STATE. Phase 70: the
+		// warning also carries `golden_recall5` when the canary measured it.
 		id: "docs.canary",
 		phase: 25,
 		kind: "warning",
@@ -965,6 +966,33 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 				runtime: "docs-canary",
 				total: 4,
 				failing: [{ fixture: "review-gate", failed: ["recall", "commit_match"] }],
+				golden_recall5: 0.58,
+			},
+		}),
+	},
+	{
+		// v1.7 phase 70: the same canary posts one note per run that measured the
+		// golden set, carrying `payload.golden_recall5` (0 to 1) and the number of
+		// questions asked, so the `corpus.golden_recall5` series has a reading
+		// whether or not any fixture regressed. Report only: it never pages.
+		id: "docs.canary.report",
+		phase: 70,
+		kind: "note",
+		surface: { fixed: "substrate" },
+		actions: ["docs.canary"],
+		runtime: "docs-canary",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "note",
+			summary: "docs canary: golden recall at 5 is 0.82 over 120 questions",
+			session_id: "docs-canary:2026-10-14T03:00:00.000Z",
+			payload: {
+				action: "docs.canary",
+				runtime: "docs-canary",
+				golden_recall5: 0.82,
+				golden_asked: 120,
 			},
 		}),
 	},
@@ -1465,6 +1493,24 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		}),
 	},
 	{
+		// The work of a linked worktree is already on the default branch. The note is the proof; the folder is kept and marked retained.
+		id: "worktree.merge_back",
+		phase: 68,
+		kind: "note",
+		surface: "caller",
+		actions: ["worktree.merge_back"],
+		carriesRepo: true,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "note",
+			summary: "worktree merged back: swcstudiospace/substrate gsd/r15-workspace-guard",
+			repo: "swcstudiospace/substrate",
+			branch: "gsd/r15-workspace-guard",
+			payload: { action: "worktree.merge_back", repo: "swcstudiospace/substrate", branch: "gsd/r15-workspace-guard", head: "0123456789abcdef0123456789abcdef01234567", merged_via: "default-branch", retained: true },
+		}),
+	},
+	{
 		id: "steering.persist_failed",
 		phase: 67,
 		kind: "warning",
@@ -1478,6 +1524,74 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 			summary: "steering session sess-sample was not saved to steering_sessions: connection refused",
 			session_id: "sess-sample",
 			payload: { action: "steering.persist_failed", reason: "connection refused" },
+		}),
+	},
+	{
+		id: "steering.session_ended",
+		phase: 68,
+		kind: "note",
+		surface: "caller",
+		actions: ["steering.session_ended"],
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "note",
+			summary: "steering session sess-sample ended: its live session was removed",
+			session_id: "sess-sample",
+			payload: { action: "steering.session_ended", authorized: true, removed: true, removal: "queued" },
+		}),
+	},
+	{
+		// v1.7 phase 65: one note per `substrate corpus` sync (the watcher, a git hook hint, the sweep, a manual run or the
+		// reconcile): the repository, why it ran, how it ended, the lag from the change to the end of the ingest, and counts.
+		// The server reads only `lag_s`, into the `substrate.corpus.sync_lag_seconds` gauge. Names and numbers, never text.
+		id: "docs.sync",
+		phase: 65,
+		kind: "note",
+		surface: "caller",
+		actions: ["docs.sync"],
+		runtime: "corpus-sync",
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "note",
+			summary: "corpus sync swcstudiospace/agent-substrate: ok",
+			session_id: "sess-p65-corpus-sync",
+			payload: {
+				action: "docs.sync",
+				runtime: "corpus-sync",
+				repo: "swcstudiospace/agent-substrate",
+				trigger: "watch",
+				outcome: "ok",
+				lag_s: 12,
+				added: 1,
+				changed: 2,
+				updated: 0,
+				tombstoned: 0,
+				refused: 0,
+				failed: 0,
+				duration_ms: 1840,
+			},
+		}),
+	},
+	{
+		// The server's own planning refresh (`Substrate.runPlanningRefresh`): the `.planning/` pages that changed since the last
+		// pass, and the content hash steering sessions compare against. The action existed without a row until phase 65.
+		id: "docs.planning",
+		phase: 65,
+		kind: "note",
+		surface: { fixed: "substrate" },
+		actions: ["docs.planning"],
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "note",
+			summary: "planning refresh (planning-changed): 1 changed page(s) under .planning/",
+			session_id: "planning-refresh",
+			payload: { action: "docs.planning", reason: "planning-changed", paths: [".planning/STATE.md"], planning_hash: HEX_64 },
 		}),
 	},
 ];

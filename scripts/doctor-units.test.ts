@@ -277,6 +277,8 @@ describe("repo units", () => {
 			"substrate-collector-grok.service",
 			"substrate-collector-herdr.service",
 			"substrate-collector-muse.service",
+			"substrate-corpus-sync.service",
+			"substrate-corpus-watch.service",
 			"substrate-dispatcher.service",
 			"substrate-docs-canary.service",
 			"substrate-doctor.service",

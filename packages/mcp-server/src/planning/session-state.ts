@@ -36,11 +36,29 @@ export const STEERING_ACKNOWLEDGE_VIA = "steering_acknowledge";
 /** `payload.action` of the warning note a failed durable write records. Registered in `event-sources.ts`. */
 export const STEERING_PERSIST_FAILED_ACTION = "steering.persist_failed";
 
+/** `payload.action` of the note the server records when a session's `session.end` closes its steering state. Registered in `event-sources.ts`. */
+export const STEERING_SESSION_ENDED_ACTION = "steering.session_ended";
+
 /** The least time between two persistence warnings from one registry, so a store that is down does not write a note per call. */
 export const STEERING_PERSIST_WARN_INTERVAL_MS = 60_000;
 
 /** Durable writes queued behind a slow store. Past it a write is skipped and counted as a failure; the memory is unaffected. */
 export const STEERING_PERSIST_PENDING_MAX = 256;
+
+/** How many times a removal is asked of the store before its failure is reported. A removal is not dropped; a store that keeps refusing it is reported. */
+export const STEERING_DELETE_ATTEMPTS = 3;
+
+/** Removals that may wait at once. Past it a new end is refused; a waiting removal is never dropped to make room. */
+export const STEERING_DELETE_PENDING_MAX = 256;
+
+/** What an end did with the durable row: queued, joined to a removal already waiting, refused because the removal queue is full, or nothing (no durable copy). */
+export type SteeringRemovalOutcome = "queued" | "coalesced" | "refused" | "none";
+
+/** What `end` did: whether the registry held the session, and what became of its durable row. */
+export interface SteeringEndOutcome {
+	held: boolean;
+	removal: SteeringRemovalOutcome;
+}
 
 /** The default freshness window of a durable load: seven days. */
 export const STEERING_SESSION_TTL_MS = 604_800_000;
@@ -109,6 +127,10 @@ export class SteeringSessionRegistry implements SessionStatePort {
 	private writeTail: Promise<void> = Promise.resolve();
 	private pendingWrites = 0;
 	private lastWarnAtMs: number | null = null;
+	/** Keys whose removal waits, with no save queued for the key since: a repeat end for one of them joins that removal. */
+	private readonly removalsWaiting = new Map<string, object>();
+	/** Removals queued and not yet settled. Bounded by {@link STEERING_DELETE_PENDING_MAX}; they never count against the save cap. */
+	private waitingRemovals = 0;
 
 	constructor(deps: SteeringSessionRegistryDeps) {
 		this.emit = deps.emit;
@@ -134,6 +156,20 @@ export class SteeringSessionRegistry implements SessionStatePort {
 	put(surface: Surface, sessionId: string, session: SteeringSession): void {
 		this.hold(surface, sessionId, session);
 		this.persist(surface, session);
+	}
+
+	/**
+	 * Forgets a session whose `session.end` was recorded: its entry, its id index and its durable row. The row's removal waits in
+	 * the write chain behind the saves already queued, so a save made earlier cannot put it back. A repeat end while that removal
+	 * waits joins it. When the removal queue is full the end is refused and the session stays live, so a refused end never
+	 * forgets a session whose row would survive a restart.
+	 */
+	end(surface: Surface, sessionId: string): SteeringEndOutcome {
+		const key = steeringSessionKey(surface, sessionId);
+		const held = this.held.has(key);
+		const removal = this.queueDelete(surface, sessionId);
+		if (removal !== "refused") this.forget(key);
+		return { held, removal };
 	}
 
 	/** Every held session, newest write first. A copy: changing the result changes nothing here. */
@@ -187,21 +223,72 @@ export class SteeringSessionRegistry implements SessionStatePort {
 	}
 
 	private persist(surface: Surface, session: SteeringSession): void {
+		// A save queued now lands after any removal waiting for its key, so a later end must queue a removal of its own.
+		this.removalsWaiting.delete(steeringSessionKey(surface, session.session_id));
+		this.queueWrite(surface, session.session_id, (store) => store.save(surface, steeringSessionWithoutSecrets(session)));
+	}
+
+	/**
+	 * Queues one durable save behind the saves already queued, so a save made before a removal cannot land after it. A full
+	 * queue skips the save and warns: the table is a restart cache, so a missing row only means the session is not reloaded at
+	 * boot. Never blocks or fails the caller.
+	 */
+	private queueWrite(surface: Surface, sessionId: string, write: (store: SteeringSessionsStore) => Promise<void>): void {
 		const store = this.store;
 		if (store === null) return;
 		if (this.pendingWrites >= STEERING_PERSIST_PENDING_MAX) {
-			this.warnPersistFailed(surface, session.session_id, "the durable write queue is full");
+			this.warnPersistFailed(surface, sessionId, "the durable write queue is full");
 			return;
 		}
 		this.pendingWrites += 1;
 		this.writeTail = this.writeTail
-			.then(() => store.save(surface, steeringSessionWithoutSecrets(session)))
+			.then(() => write(store))
 			.catch((cause: unknown) => {
-				this.warnPersistFailed(surface, session.session_id, cause instanceof Error ? cause.message : String(cause));
+				this.warnPersistFailed(surface, sessionId, cause instanceof Error ? cause.message : String(cause));
 			})
 			.finally(() => {
 				this.pendingWrites -= 1;
 			});
+	}
+
+	/**
+	 * Queues the removal of one session's row as one link of the write chain. Every attempt, retries included, runs inside that
+	 * link, so a save queued after the removal runs after its last attempt, and idle() waits for all of them. A removal does not
+	 * count against the save cap. A key whose removal already waits joins it. Past {@link STEERING_DELETE_PENDING_MAX} waiting
+	 * removals a new key is refused; no waiting removal is dropped to make room.
+	 */
+	private queueDelete(surface: Surface, sessionId: string): SteeringRemovalOutcome {
+		const store = this.store;
+		if (store === null) return "none";
+		const key = steeringSessionKey(surface, sessionId);
+		if (this.removalsWaiting.has(key)) return "coalesced";
+		if (this.waitingRemovals >= STEERING_DELETE_PENDING_MAX) return "refused";
+		const token = {};
+		this.removalsWaiting.set(key, token);
+		this.waitingRemovals += 1;
+		this.writeTail = this.writeTail
+			.then(() => this.removeRow(store, surface, sessionId))
+			.catch(() => undefined)
+			.finally(() => {
+				if (this.removalsWaiting.get(key) === token) this.removalsWaiting.delete(key);
+				this.waitingRemovals -= 1;
+			});
+		return "queued";
+	}
+
+	/** Removes one row, asking the store again after a rejection, up to {@link STEERING_DELETE_ATTEMPTS} attempts. Never rejects. */
+	private async removeRow(store: SteeringSessionsStore, surface: Surface, sessionId: string): Promise<void> {
+		for (let attempt = 1; ; attempt += 1) {
+			try {
+				await store.delete(surface, sessionId);
+				return;
+			} catch (cause) {
+				if (attempt >= STEERING_DELETE_ATTEMPTS) {
+					this.warnPersistFailed(surface, sessionId, cause instanceof Error ? cause.message : String(cause));
+					return;
+				}
+			}
+		}
 	}
 
 	/** One warning note per interval, never an error: the session is held in memory whatever the table did. */
@@ -213,7 +300,7 @@ export class SteeringSessionRegistry implements SessionStatePort {
 		const warning: EventInput = {
 			surface,
 			kind: "warning",
-			summary: `steering session ${redact(sessionId).slice(0, 80)} was not saved to steering_sessions: ${cut}`,
+			summary: `steering session ${redact(sessionId).slice(0, 80)} was not written to steering_sessions: ${cut}`,
 			session_id: sessionId,
 			payload: { action: STEERING_PERSIST_FAILED_ACTION, reason: cut },
 		};

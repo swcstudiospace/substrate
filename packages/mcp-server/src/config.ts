@@ -6,6 +6,7 @@
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import { assertDevnetRpcUrl, parseSignerSet, SignerSetError, SOLANA_CLI_DEFAULT, type SignerSet } from "@substrate/ledger";
+import { loadSloThresholds, type SloThresholds } from "@substrate/corpus";
 import { ADMISSION_CLASSES, loadBreakerSettings, type AdmissionClass, type BreakerSettings } from "@substrate/observability";
 import { loadBriefProfileConfig, type BriefProfileConfig } from "./brief-profile.ts";
 import { ADMISSION_MODES, type AdmissionMode, type AdmissionSettings, type BucketLimit } from "./admission.ts";
@@ -661,6 +662,16 @@ export interface SubstrateConfig {
 	docsPruneSuperseded: boolean;
 	/** The corpus atlas bulk ingest (v1.7 phase 63): closed unless `SUBSTRATE_CORPUS=on`, with the batching knobs it runs under. */
 	corpus: CorpusSettings;
+	/** The docs learning loop (v1.7 phase 66): telemetry, the authority re-rank and the gap threshold. Every switch is off by default. */
+	docsReflect: DocsReflectSettings;
+	/** The docs plane's three objectives (v1.7 phase 70): `SUBSTRATE_DOCS_SLO_FRESHNESS_S`, `SUBSTRATE_DOCS_SLO_RECALL5`, `SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S`. */
+	docsSlo: SloThresholds;
+	/**
+	 * `SUBSTRATE_PLANNING_HASH_STORE=on` (v1.7 phase 65): the planning refresh keeps its per-page hashes in a store (the index
+	 * when there is one, else this process's memory) and loads them at its first pass, so a restart ingests only the pages
+	 * that changed. Off by default: the hashes live in a map in memory, as before, and every restart re-ingests every page.
+	 */
+	planningHashStore: boolean;
 	/**
 	 * The three documented retrieval knobs sent on every `docs_search`
 	 * retrieval, from `SUBSTRATE_DOCS_SIMILARITY_THRESHOLD` (0.2),
@@ -1197,6 +1208,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// uplift-2 R6
 		docsPruneSuperseded: (env.SUBSTRATE_DOCS_PRUNE_SUPERSEDED?.trim() ?? "") === "1",
 		corpus: loadCorpusSettings(env),
+		planningHashStore: (env.SUBSTRATE_PLANNING_HASH_STORE?.trim().toLowerCase() ?? "") === "on",
+		docsReflect: loadDocsReflectSettings(env),
+		docsSlo: loadSloThresholds(env),
 		docsRetrieval: {
 			similarityThreshold: unitIntervalOr(env.SUBSTRATE_DOCS_SIMILARITY_THRESHOLD, DEFAULT_RETRIEVAL_KNOBS.similarityThreshold),
 			vectorSimilarityWeight: unitIntervalOr(env.SUBSTRATE_DOCS_VECTOR_WEIGHT, ragflowRetrieval.vectorSimilarityWeight),
@@ -1496,11 +1510,15 @@ export interface CorpusSettings {
 	batchDocs: number;
 	/** Bytes per batch (`SUBSTRATE_CORPUS_BATCH_BYTES`). */
 	batchBytes: number;
+	/** Seconds since the last ingest after which `docs.freshness` warns (`SUBSTRATE_CORPUS_FRESH_MAX_AGE_S`); `0` switches the check off. Read only while the corpus is on. */
+	freshMaxAgeS: number;
 }
 
 export const CORPUS_CONCURRENCY_BOUNDS = { min: 1, max: 16, fallback: 4 } as const;
 export const CORPUS_BATCH_DOCS_BOUNDS = { min: 1, max: 200, fallback: 20 } as const;
 export const CORPUS_BATCH_BYTES_BOUNDS = { min: 10_000, max: 5_000_000, fallback: 1_000_000 } as const;
+/** Seconds a corpus may go without an ingest before the freshness warning (`0` judges nothing); two days by default, at most a year. */
+export const CORPUS_FRESH_MAX_AGE_BOUNDS = { min: 0, max: 31_536_000, fallback: 172_800 } as const;
 
 /** A whole number clamped into `[min, max]`; a value that is not a whole number is the fallback, so junk never widens a bound. */
 function clampedIntOr(raw: string | undefined, bounds: { min: number; max: number; fallback: number }): number {
@@ -1515,6 +1533,35 @@ export function loadCorpusSettings(env: Record<string, string | undefined>): Cor
 		concurrency: clampedIntOr(env.SUBSTRATE_CORPUS_CONCURRENCY, CORPUS_CONCURRENCY_BOUNDS),
 		batchDocs: clampedIntOr(env.SUBSTRATE_CORPUS_BATCH_DOCS, CORPUS_BATCH_DOCS_BOUNDS),
 		batchBytes: clampedIntOr(env.SUBSTRATE_CORPUS_BATCH_BYTES, CORPUS_BATCH_BYTES_BOUNDS),
+		freshMaxAgeS: clampedIntOr(env.SUBSTRATE_CORPUS_FRESH_MAX_AGE_S, CORPUS_FRESH_MAX_AGE_BOUNDS),
+	};
+}
+
+/** The docs learning loop's switches (v1.7 phase 66): retrieval telemetry, the authority re-rank and the gap threshold. */
+export interface DocsReflectSettings {
+	/** `SUBSTRATE_DOCS_TELEMETRY=on`. Off by default: a `docs_search` writes no `corpus_retrievals` row and no sweep runs. */
+	telemetry: boolean;
+	/** `SUBSTRATE_DOCS_TELEMETRY_RETENTION_DAYS`: how long a retrieval row is kept. */
+	retentionDays: number;
+	/** `SUBSTRATE_DOCS_RERANK`: `shadow` records what the re-rank would change, `on` applies it, `off` (the default) does neither. */
+	rerank: DocsRerankMode;
+	/** `SUBSTRATE_DOCS_GAP_SCORE`: a query whose best citation scores below this is a gap in `GET /corpus/gaps`. */
+	gapScore: number;
+}
+
+export const DOCS_RERANK_MODES = ["off", "shadow", "on"] as const;
+export type DocsRerankMode = (typeof DOCS_RERANK_MODES)[number];
+
+export const DOCS_TELEMETRY_RETENTION_BOUNDS = { min: 1, max: 365, fallback: 30 } as const;
+export const DOCS_GAP_SCORE_DEFAULT = 0.2;
+
+export function loadDocsReflectSettings(env: Record<string, string | undefined>): DocsReflectSettings {
+	const rerank = env.SUBSTRATE_DOCS_RERANK?.trim().toLowerCase() ?? "";
+	return {
+		telemetry: (env.SUBSTRATE_DOCS_TELEMETRY?.trim().toLowerCase() ?? "") === "on",
+		retentionDays: clampedIntOr(env.SUBSTRATE_DOCS_TELEMETRY_RETENTION_DAYS, DOCS_TELEMETRY_RETENTION_BOUNDS),
+		rerank: rerank === "shadow" || rerank === "on" ? rerank : "off",
+		gapScore: unitIntervalOr(env.SUBSTRATE_DOCS_GAP_SCORE, DOCS_GAP_SCORE_DEFAULT),
 	};
 }
 

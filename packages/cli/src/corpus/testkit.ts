@@ -1,14 +1,17 @@
 /**
- * A stub of the three corpus routes over a loopback socket, for the CLI tests: one scripted handler per route, a record
+ * A stub of the corpus routes over a loopback socket, for the CLI tests: one scripted handler per route, a record
  * of what was sent, and builders for answers of the shape the server gives.
  */
 import { createHash } from "node:crypto";
 import {
 	CORPUS_PROTOCOL,
 	type GhRunner,
+	type CorpusGapsResponse,
 	type CorpusIngestResponse,
 	type CorpusNeardupResponse,
 	type CorpusPlanResponse,
+	type CorpusReconcileResponse,
+	type CorpusReflectResponse,
 	type CorpusStatusResponse,
 	type IngestStatus,
 	type PlanAction,
@@ -95,8 +98,26 @@ export function statusOf(): CorpusStatusResponse {
 		byKind: [{ kind: "doc", count: 3 }],
 		byTier: [{ tier: 1, count: 4 }],
 		lastIngestAt: "2026-10-29T10:00:00.000Z",
+		lagSeconds: 42,
 		manifestVersion: 9,
 	};
+}
+
+export function reconcileOf(drift: Partial<CorpusReconcileResponse["drift"]> = {}, repaired: CorpusReconcileResponse["repaired"] = { requeued: 0, deleted: 0 }): CorpusReconcileResponse {
+	return {
+		protocol: CORPUS_PROTOCOL,
+		drift: { missingInPlane: [], orphansInPlane: [], checked: 3, truncated: false, ...drift },
+		repaired,
+		manifestVersion: 10,
+	};
+}
+
+export function reflectOf(results: CorpusReflectResponse["results"]): CorpusReflectResponse {
+	return { protocol: CORPUS_PROTOCOL, results, manifestVersion: 11 };
+}
+
+export function gapsOf(gaps: CorpusGapsResponse["gaps"], truncated = false): CorpusGapsResponse {
+	return { protocol: CORPUS_PROTOCOL, gaps, truncated };
 }
 
 export interface FakeOwnerRepo {

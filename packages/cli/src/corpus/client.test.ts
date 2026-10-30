@@ -1,7 +1,17 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { CORPUS_PROTOCOL, EMBEDDING_REASONS, type CorpusIngestRequest, type CorpusNeardupRequest, type CorpusPlanRequest } from "@substrate/corpus";
-import { createCorpusClient, isIngestResponse, isNeardupResponse, isPlanResponse, isStatusResponse } from "./client.ts";
-import { CorpusStub, ingestOf, neardupOf, planOf, statusOf } from "./testkit.ts";
+import {
+	CORPUS_PROTOCOL,
+	type CorpusIngestRequest,
+	type CorpusNeardupRequest,
+	type CorpusPlanRequest,
+	type CorpusReflectRequest,
+	DEFAULT_GAPS_LIMIT,
+	EMBEDDING_REASONS,
+	MAX_GAPS_LIMIT,
+} from "@substrate/corpus";
+import { defined } from "../../../corpus/src/test-support.ts";
+import { createCorpusClient, isGapsResponse, isIngestResponse, isNeardupResponse, isPlanResponse, isReconcileResponse, isReflectResponse, isStatusResponse } from "./client.ts";
+import { CorpusStub, gapsOf, ingestOf, neardupOf, planOf, reconcileOf, reflectOf, statusOf } from "./testkit.ts";
 
 const stub = new CorpusStub();
 afterAll(() => stub.stop());
@@ -94,6 +104,43 @@ describe("the corpus client", () => {
 		const closed = await createCorpusClient({ url: "http://127.0.0.1:1", token: undefined, timeoutMs: 2000 }).status();
 		expect(closed.ok === false && closed.error.kind).toBe("network");
 	});
+
+	test("posts a reflect request with the bearer and returns the guarded answer", async () => {
+		const reply = reflectOf([{ repo: "Acme/A", status: "stored" }]);
+		stub.on("POST /corpus/reflect", () => ({ status: 200, body: reply }));
+		const sent: CorpusReflectRequest = { protocol: CORPUS_PROTOCOL, digests: [{ repo: "Acme/A", text: "# d\n", sha256: "a".repeat(64) }] };
+		expect(await client().reflect(sent)).toEqual({ ok: true, value: reply });
+		const seen = defined(stub.requests("/corpus/reflect").at(-1), "reflect request");
+		expect(seen.authorization).toBe("Bearer tok-1");
+		expect(seen.body).toEqual(sent);
+	});
+
+	test("reads the gaps with GET and keeps the limit inside the server's maximum; an invalid limit is the default", async () => {
+		stub.on("GET /corpus/gaps", () => ({ status: 200, body: gapsOf([]) }));
+		for (const limit of [undefined, 7, 1_000_000, 0, -3, 2.5, Number.NaN]) {
+			expect((await client().gaps(limit)).ok).toBe(true);
+		}
+		const searches = stub.requests("/corpus/gaps").map((seen) => seen.search);
+		expect(searches).toEqual([
+			`?limit=${DEFAULT_GAPS_LIMIT}`,
+			"?limit=7",
+			`?limit=${MAX_GAPS_LIMIT}`,
+			`?limit=${DEFAULT_GAPS_LIMIT}`,
+			`?limit=${DEFAULT_GAPS_LIMIT}`,
+			`?limit=${DEFAULT_GAPS_LIMIT}`,
+			`?limit=${DEFAULT_GAPS_LIMIT}`,
+		]);
+		expect(stub.requests("/corpus/gaps")[0]?.method).toBe("GET");
+	});
+
+	test("a reflect answer of the wrong shape is invalid and a disabled corpus is reported as such", async () => {
+		stub.on("POST /corpus/reflect", () => ({ status: 200, body: { protocol: CORPUS_PROTOCOL, results: "none", manifestVersion: 1 } }));
+		const invalid = await client().reflect({ protocol: CORPUS_PROTOCOL, digests: [] });
+		expect(invalid.ok === false && invalid.error.kind).toBe("invalid");
+		stub.on("POST /corpus/reflect", () => ({ status: 503, body: { error: "corpus.disabled" } }));
+		const disabled = await client().reflect({ protocol: CORPUS_PROTOCOL, digests: [] });
+		expect(disabled.ok === false && disabled.error.kind).toBe("disabled");
+	});
 });
 
 describe("response guards", () => {
@@ -115,8 +162,46 @@ describe("response guards", () => {
 		expect(isStatusResponse({ ...statusOf(), byKind: [{ kind: "memo", count: 1 }] })).toBe(false);
 		expect(isStatusResponse({ ...statusOf(), byTier: [{ tier: 4, count: 1 }] })).toBe(false);
 		expect(isStatusResponse({ ...statusOf(), lastIngestAt: 5 })).toBe(false);
+		expect(isStatusResponse({ ...statusOf(), lagSeconds: -1 })).toBe(false);
+		expect(isStatusResponse({ ...statusOf(), lagSeconds: "7" })).toBe(false);
 		expect(isPlanResponse(null)).toBe(false);
 		expect(isPlanResponse([plan])).toBe(false);
+	});
+
+	test("posts a reconcile request and returns the guarded drift", async () => {
+		const reply = reconcileOf({ missingInPlane: [{ repo: "Acme/A", path: "README.md" }], orphansInPlane: ["corpus:x"] }, { requeued: 1, deleted: 1 });
+		stub.on("POST /corpus/reconcile", () => ({ status: 200, body: reply }));
+		const result = await client().reconcile({ protocol: CORPUS_PROTOCOL, execute: true });
+		expect(result).toEqual({ ok: true, value: reply });
+		expect(stub.requests("/corpus/reconcile").at(-1)?.body).toEqual({ protocol: CORPUS_PROTOCOL, execute: true });
+	});
+
+	test("refuse a reconcile answer with a wrong shape", () => {
+		expect(isReconcileResponse(reconcileOf())).toBe(true);
+		expect(isReconcileResponse({ ...reconcileOf(), protocol: 2 })).toBe(false);
+		expect(isReconcileResponse({ ...reconcileOf(), drift: { ...reconcileOf().drift, truncated: "no" } })).toBe(false);
+		expect(isReconcileResponse({ ...reconcileOf(), drift: { ...reconcileOf().drift, missingInPlane: [{ repo: "r" }] } })).toBe(false);
+		expect(isReconcileResponse({ ...reconcileOf(), drift: { ...reconcileOf().drift, orphansInPlane: [7] } })).toBe(false);
+		expect(isReconcileResponse({ ...reconcileOf(), repaired: { requeued: 1 } })).toBe(false);
+		expect(isReconcileResponse(null)).toBe(false);
+	});
+
+	test("accept the reflect and gaps shapes, with a null best score and a null text", () => {
+		expect(isReflectResponse(reflectOf([{ repo: "r", status: "stored" }, { repo: "s", status: "refused", reason: "secret-findings" }]))).toBe(true);
+		expect(isGapsResponse(gapsOf([{ queryHash: "ab12", text: null, searches: 3, lastSeen: "2026-10-29T10:00:00.000Z", best: null }]))).toBe(true);
+		expect(isGapsResponse(gapsOf([], true))).toBe(true);
+	});
+
+	test("refuse a reflect or gaps answer with a wrong protocol, status, count, score or flag", () => {
+		expect(isReflectResponse({ ...reflectOf([]), protocol: 2 })).toBe(false);
+		expect(isReflectResponse({ ...reflectOf([]), results: [{ repo: "r", status: "done" }] })).toBe(false);
+		expect(isReflectResponse({ ...reflectOf([]), manifestVersion: "x" })).toBe(false);
+		const gap = { queryHash: "ab12", text: null, searches: 3, lastSeen: "t", best: 0.2 };
+		expect(isGapsResponse(gapsOf([{ ...gap, searches: -1 }]))).toBe(false);
+		expect(isGapsResponse(gapsOf([{ ...gap, best: Number.NaN }]))).toBe(false);
+		expect(isGapsResponse({ ...gapsOf([]), gaps: [{ ...gap, text: 5 }] })).toBe(false);
+		expect(isGapsResponse({ ...gapsOf([gap]), truncated: "no" })).toBe(false);
+		expect(isGapsResponse({ ...gapsOf([gap]), protocol: 2 })).toBe(false);
 	});
 });
 

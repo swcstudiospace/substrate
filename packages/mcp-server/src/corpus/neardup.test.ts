@@ -12,7 +12,7 @@ import { corpusNeardupReply, type NeardupDeps } from "./neardup.ts";
 import type { CorpusReply } from "./service.ts";
 import { parseNeardupRequest } from "./validate.ts";
 
-const ON: CorpusSettings = { enabled: true, concurrency: 4, batchDocs: 20, batchBytes: 1_000_000 };
+const ON: CorpusSettings = { enabled: true, concurrency: 4, batchDocs: 20, batchBytes: 1_000_000, freshMaxAgeS: 172_800 };
 const OFF: CorpusSettings = { ...ON, enabled: false };
 const REPO = "Acme/Alpha";
 

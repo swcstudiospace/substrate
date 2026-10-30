@@ -84,6 +84,9 @@ a panel shows stored history against the default line.
 | data-planes (extended) | Hindsight retain outbox oldest age | `hindsight.outbox_oldest_age_s` | `substrate.hindsight.retain_outbox.oldest_age_seconds` | none |
 | data-planes (extended) | Index archive age | `index.archive_age_s` | `substrate.index.archive.age_seconds` | none |
 | data-planes (extended) | Data planes on a proxy | `endpoint.proxy_planes` | `substrate.endpoint.proxy_planes` | none |
+| data-planes (extended) | Corpus ingest throughput | `corpus.ingest_docs_per_s` | `substrate.corpus.ingest_docs_per_second` | none |
+| data-planes (extended) | Golden-set recall at 5 | `corpus.golden_recall5` | `substrate.corpus.golden_recall5` | none |
+| data-planes (extended) | Fabric: corpus (the row's own panel, in the fabric row) | `corpus.freshness_seconds` | `substrate.corpus.freshness_seconds` | none |
 
 The units and the one label of each series (a line per `surface`, `plane`, `decision`,
 `outcome`, `result` or `mode`) come from the series' own spec in
@@ -115,6 +118,9 @@ the sampler writes and `/slo/history` serves.
 | `hindsight.outbox_oldest_age_s` | gauge | none | Age of the oldest parked forward; 0 when empty |
 | `index.archive_age_s` | gauge | none | Age of the newest complete index archive; no row until a first archive exists |
 | `endpoint.proxy_planes` | gauge | none | Data planes whose endpoint is a configured proxy, set at boot; a count, with no address |
+| `corpus.freshness_seconds` | gauge | none | Age in seconds of the newest corpus manifest change (v1.7 phase 70); the worst reading in a step, and no row until the manifest has a change or while `SUBSTRATE_CORPUS` is off |
+| `corpus.ingest_docs_per_s` | gauge | none | Documents per second of the last corpus ingest request's wall time, 0 when it sent nothing; the mean of a step, and no row before a first request |
+| `corpus.golden_recall5` | gauge | none | Golden-set recall at 5 as the docs canary last reported it; the mean of a step, and no row until a first report. All three are described in [`corpus-eval.md`](corpus-eval.md) |
 
 Admission needs no new series: `admission.decisions` already carries `limited` and
 `shadow_limited`. The ledger client can store and read an extended series whatever the

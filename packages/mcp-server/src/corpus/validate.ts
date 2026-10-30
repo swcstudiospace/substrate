@@ -29,6 +29,7 @@ import {
 	type CorpusIngestRequest,
 	type CorpusNeardupRequest,
 	type CorpusPlanRequest,
+	type CorpusReconcileRequest,
 	type CorpusScope,
 	type NeardupItem,
 } from "@substrate/corpus";
@@ -78,7 +79,7 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 /** One entry, narrowed field by field. `bytes` is the size of the raw file the sha256 describes. */
 export function parseEntry(raw: unknown): Parsed<CorpusEntry> {
 	if (!isRecord(raw)) return refuse("bad-request", "an entry must be an object");
-	const { repo, path, kind, tier, sha256, bytes, source, commit } = raw;
+	const { repo, path, kind, tier, sha256, bytes, source, commit, supersededBy } = raw;
 	if (typeof repo !== "string" || !isValidRepo(repo)) return refuse("bad-repo", typeof repo === "string" ? repo.slice(0, 80) : undefined);
 	if (typeof path !== "string" || !isValidPath(path)) return refuse("bad-path", `${repo}: ${typeof path === "string" ? path.slice(0, 80) : "not a string"}`);
 	if (!isDocKind(kind)) return refuse("bad-kind", `${repo}:${path}`);
@@ -88,7 +89,9 @@ export function parseEntry(raw: unknown): Parsed<CorpusEntry> {
 	if (!isCorpusSource(source)) return refuse("bad-source", `${repo}:${path}`);
 	if (commit !== undefined && typeof commit !== "string") return refuse("bad-commit", `${repo}:${path}`);
 	if (typeof commit === "string" && (commit.length === 0 || commit.length > MAX_COMMIT_LENGTH || hasControlCharacter(commit))) return refuse("bad-commit", `${repo}:${path}`);
-	return { ok: true, value: { repo, path, kind, tier, sha256, bytes, source, ...(typeof commit === "string" ? { commit } : {}) } };
+	// The marker is advisory: a value that is not a valid repo-relative path is dropped, so one odd front-matter line never refuses a request.
+	const marker = typeof supersededBy === "string" && isValidPath(supersededBy) ? supersededBy : undefined;
+	return { ok: true, value: { repo, path, kind, tier, sha256, bytes, source, ...(typeof commit === "string" ? { commit } : {}), ...(marker === undefined ? {} : { supersededBy: marker }) } };
 }
 
 /**
@@ -174,6 +177,14 @@ export function parseIngestRequest(raw: unknown): Parsed<CorpusIngestRequest> {
 		tombstones.push({ repo, path });
 	}
 	return { ok: true, value: { protocol: CORPUS_PROTOCOL, documents, tombstones } };
+}
+
+/** `POST /corpus/reconcile`: the protocol version and `execute`. An absent `execute` is a dry run, so a body that forgot it repairs nothing. */
+export function parseReconcileRequest(raw: unknown): Parsed<CorpusReconcileRequest> {
+	if (!isRecord(raw)) return refuse("bad-request", "the body must be a JSON object");
+	if (raw.protocol !== CORPUS_PROTOCOL) return refuse("bad-protocol", `this server speaks protocol ${CORPUS_PROTOCOL}`);
+	if (raw.execute !== undefined && typeof raw.execute !== "boolean") return refuse("bad-request", "execute must be true or false");
+	return { ok: true, value: { protocol: CORPUS_PROTOCOL, execute: raw.execute === true } };
 }
 
 /**

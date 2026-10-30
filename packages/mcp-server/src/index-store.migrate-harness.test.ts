@@ -19,6 +19,7 @@ import {
 	INDEX_MIGRATE_STATEMENT_TIMEOUT_MS,
 	IndexStore,
 	MIGRATION_STEPS,
+	PLANNING_HASH_TABLE_REPAIR,
 	applicableMigrationSteps,
 	indexMigrateLockKey,
 } from "./index-store.ts";
@@ -106,6 +107,7 @@ function fakeIndex(options: FakeOptions = {}) {
 				else if (text === "RESET lock_timeout") events.push("reset lock_timeout");
 				else if (text === "RESET statement_timeout") events.push("reset statement_timeout");
 				else if (text === "drop index if exists memory_reviews_hash_idx") events.push("drop memory_reviews_hash_idx");
+				else if (text === squash(PLANNING_HASH_TABLE_REPAIR)) events.push("repair planning_page_hashes");
 				else if (/^drop table if exists \w+$/.test(text)) {
 					const table = text.slice("drop table if exists ".length);
 					tables.delete(table);
@@ -149,7 +151,7 @@ const PROLOGUE = [
 	`set statement_timeout ${INDEX_MIGRATE_STATEMENT_TIMEOUT_MS}`,
 	"create ledger",
 ];
-const EPILOGUE = ["drop memory_reviews_hash_idx", "unlock", "reset lock_timeout", "reset statement_timeout", "release"];
+const EPILOGUE = ["drop memory_reviews_hash_idx", "repair planning_page_hashes", "unlock", "reset lock_timeout", "reset statement_timeout", "release"];
 
 /** What `migrate()` must send when `applied` is already in the ledger and nothing fails. */
 function expectedRun(applied: ReadonlySet<number>, versions: readonly number[] = ALL): string[] {
@@ -211,7 +213,7 @@ describe("IndexStore.migrate() against a fake connection", () => {
 		expect(step?.name).toBe("steering_sessions");
 		expect(step?.down).toBe("drop table if exists steering_sessions");
 		const withSessions = applicableMigrationSteps({ "steering-audit": false, "steering-sessions": true }).map((candidate) => candidate.version);
-		expect(withSessions).toEqual([...ALL, 37]);
+		expect(withSessions).toEqual([...ALL, 37].sort((a, b) => a - b));
 		const on = fakeIndex({ migrationOptIns: { "steering-audit": false, "steering-sessions": true } });
 		await on.store.migrate();
 		expect(on.events).toEqual(expectedRun(new Set(), withSessions));

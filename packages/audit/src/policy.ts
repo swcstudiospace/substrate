@@ -42,7 +42,7 @@ export const FAIL_CLOSED_TOOLS: ReadonlySet<string> = new Set([
 	// Phase 68 (FLEET-02): the worktree report is a REST write (no tool). It replaces the registry rows other sessions read
 	// to see whose worktree is whose, so an unrecorded one is refused; the reporter retries on its next run.
 	"worktree_report",
-	// v1.7 (phase 63): a corpus ingest writes the shared docs dataset every agent reads and deletes plane documents (nearest: `docs_ingest`).
+	// v1.7 (phase 63): a corpus ingest writes the shared docs dataset every agent reads and deletes plane documents (nearest: `docs_ingest`). Phase 65: `POST /corpus/reconcile` with `execute` does the same and is audited here.
 	"corpus_ingest",
 ]);
 
@@ -123,8 +123,11 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	// the client journals an unrecorded checkpoint and re-offers it, so an unwritable audit file must not fail the agent's turn over it.
 	"session_rollback_plan",
 	"session_checkpoint",
-	// v1.7 (phase 63): the corpus manifest status and plan are reads of the index, like `planning_status`.
+	// v1.7 (phase 63): the corpus manifest status and plan are reads of the index, like `planning_status`. Phase 65: so is a dry-run `POST /corpus/reconcile`.
 	"corpus_status",
+	// v1.7 (phase 66): a verdict on a cited document is advisory input to the re-rank, the nearest write to `session_checkpoint`:
+	// an unwritable audit file must not fail the agent's turn over it, so the record is fail-open.
+	"docs_feedback",
 ]);
 
 /**

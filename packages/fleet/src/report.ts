@@ -4,11 +4,16 @@
  * The registry is a report the CLI posts, never something the server derives (it does not touch
  * worktrees). Only the contract's fields are sent: local facts the classifier uses (ignored file
  * names, merged pull request heads, notes) stay on the host. Graph attribution comes from the
- * configured roots through `graphIdForWorktree`.
+ * configured roots through `graphIdForWorktree`. Session attribution comes from the caller (`options.sessions`):
+ * `claimedSessions` derives it from the server's live claims, and the CLI adds the session it runs in. A worktree with
+ * no entry is reported without `session_id`, and the registry stores that as NULL. When the inventory listed them, each row also carries `files` (the
+ * paths it changed, at most `WORKTREE_FILES_MAX`) and `files_truncated`; `files: null` says the listing failed.
  */
 import { checkWorktreeRow, WORKTREE_REPORT_MAX_BYTES, WORKTREE_REPORT_MAX_ITEMS } from "../../mcp-server/src/worktree-registry.ts";
 import { graphIdForWorktree } from "../../collectors/src/worktree-graph.ts";
+import { CLAIM_CONCURRENCY, type ClaimsFn, claimStatus, sessionOfClaims } from "./claims.ts";
 import type { WorktreeInfo } from "./inventory.ts";
+import { mapLimit } from "./pool.ts";
 import type { PrState } from "./pr.ts";
 
 /** The route accepts at most this many worktrees per report. */
@@ -34,6 +39,9 @@ export interface ReportWorktree {
 	primary: boolean;
 	pr_state: PrState;
 	session_id?: string;
+	/** The changed paths the inventory listed; `null` when the listing failed; absent when it was not asked for. */
+	files?: string[] | null;
+	files_truncated?: boolean;
 	graph_id?: string;
 }
 
@@ -48,10 +56,13 @@ export interface ReportOptions {
 	now?: Date;
 	/** Roots used for graph attribution; defaults to the collectors' configured roots. */
 	roots?: readonly string[];
+	/** The session each worktree is attributed to, by path. A worktree with no entry is reported without `session_id`. */
+	sessions?: ReadonlyMap<string, string>;
 }
 
-function toReportWorktree(info: WorktreeInfo, roots: readonly string[] | undefined): ReportWorktree {
-	const graphId = roots === undefined ? graphIdForWorktree(info.path) : graphIdForWorktree(info.path, roots);
+function toReportWorktree(info: WorktreeInfo, options: ReportOptions): ReportWorktree {
+	const graphId = options.roots === undefined ? graphIdForWorktree(info.path) : graphIdForWorktree(info.path, options.roots);
+	const sessionId = options.sessions?.get(info.path);
 	return {
 		path: info.path,
 		repo: info.repo,
@@ -66,7 +77,9 @@ function toReportWorktree(info: WorktreeInfo, roots: readonly string[] | undefin
 		locked: info.locked,
 		primary: info.primary,
 		pr_state: info.pr_state,
+		...(sessionId === undefined ? {} : { session_id: sessionId }),
 		...(graphId === null ? {} : { graph_id: graphId }),
+		...(info.files === undefined ? {} : { files: info.files, files_truncated: info.files_truncated ?? false }),
 	};
 }
 
@@ -76,7 +89,7 @@ export function buildReport(host: string, inventory: readonly WorktreeInfo[], op
 		protocol: REPORT_PROTOCOL,
 		host,
 		reported_at: (options.now ?? new Date()).toISOString(),
-		worktrees: inventory.slice(0, MAX_REPORT_WORKTREES).map((info) => toReportWorktree(info, options.roots)),
+		worktrees: inventory.slice(0, MAX_REPORT_WORKTREES).map((info) => toReportWorktree(info, options)),
 	};
 }
 
@@ -115,7 +128,7 @@ export function buildReports(host: string, inventory: readonly WorktreeInfo[], o
 		bytes = envelope;
 	};
 	for (const info of inventory) {
-		const row = toReportWorktree(info, options.roots);
+		const row = toReportWorktree(info, options);
 		// One row the route would refuse (a path or a branch past its limit, a label it does not accept) would reject the whole body.
 		const accepted = checkWorktreeRow(row);
 		if (!accepted.ok) {
@@ -130,4 +143,35 @@ export function buildReports(host: string, inventory: readonly WorktreeInfo[], o
 	}
 	flush();
 	return { reports: reports.length > 0 ? reports : [empty], skipped };
+}
+
+/**
+ * The session the server's live claims attribute each graph worktree to, by path. Asks about exactly the
+ * worktrees under `roots` that belong to a graph (the condition prune uses), once per graph, with the pool prune
+ * uses. Only a graph whose live claims all name one holder session attributes its worktrees (`sessionOfClaims`).
+ * Fail open: a lookup that fails (or throws) leaves its worktrees unattributed and never stops the report.
+ */
+export async function claimedSessions(inventory: readonly WorktreeInfo[], roots: readonly string[], lookup: ClaimsFn): Promise<Map<string, string>> {
+	const pathsByGraph = new Map<string, string[]>();
+	for (const info of inventory) {
+		const graphId = graphIdForWorktree(info.path, roots);
+		if (graphId === null) continue;
+		const paths = pathsByGraph.get(graphId);
+		if (paths === undefined) pathsByGraph.set(graphId, [info.path]);
+		else paths.push(info.path);
+	}
+	const answers = await mapLimit([...pathsByGraph], CLAIM_CONCURRENCY, async ([graphId, paths]) => {
+		try {
+			return { paths, session: sessionOfClaims(await claimStatus(graphId, lookup)) };
+		} catch {
+			// The lookup's contract is never to throw; if one does, its graph is unattributed like any failed lookup.
+			return { paths, session: null };
+		}
+	});
+	const sessions = new Map<string, string>();
+	for (const { paths, session } of answers) {
+		if (session === null) continue;
+		for (const path of paths) sessions.set(path, session);
+	}
+	return sessions;
 }

@@ -10,3 +10,4 @@ export * from "./pool.ts";
 export * from "./pr.ts";
 export * from "./report.ts";
 export * from "./size.ts";
+export * from "./workspace-guard.ts";

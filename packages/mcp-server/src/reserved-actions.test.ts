@@ -13,7 +13,7 @@ const ACTIONS = [...RESERVED_NOTE_ACTIONS];
 describe("reserved note actions", () => {
 	test("the one list names every action a reader treats as authoritative", () => {
 		expect(ACTIONS.sort()).toEqual(
-			["anchor.reanchor", "anchor.signer.rotate", "docs.corpus.root", "memory.forget", "session.checkpoint", "session.rollback", "session.rollback.forget_batch", "session.rollback.refused"].sort(),
+			["anchor.reanchor", "anchor.signer.rotate", "docs.canary", "docs.corpus.root", "memory.forget", "session.checkpoint", "session.rollback", "session.rollback.forget_batch", "session.rollback.refused"].sort(),
 		);
 		expect(reservedActionOf({ action: "session.checkpoint" })).toBe("session.checkpoint");
 		expect(reservedActionOf({ action: "docs.ingest" })).toBeNull();
@@ -87,5 +87,15 @@ describe("reserved note actions", () => {
 		expect(reservedEmitRefusal({ payload: { action: "docs.ingest" }, surface: "omp", callerSurface: "claude-code", isOperator: false })).toBeNull();
 		expect(reservedEmitRefusal({ payload: { action: "memory.forget" }, surface: "omp", callerSurface: "claude-code", isOperator: false })).toContain("reserved-action");
 		expect(reservedEmitRefusal({ payload: { action: "memory.forget" }, surface: "claude-code", callerSurface: null, isOperator: true })).toBeNull();
+	});
+
+	test("reservedEmitRefusal: docs.canary is the substrate host-job token's alone, acting as itself; a bare local run keeps its authority", () => {
+		const payload = { action: "docs.canary" };
+		expect(reservedEmitRefusal({ payload, surface: "substrate", callerSurface: "substrate", isOperator: false })).toBeNull();
+		expect(reservedEmitRefusal({ payload, surface: "omp", callerSurface: "substrate", isOperator: false })).toContain("reserved-action");
+		expect(reservedEmitRefusal({ payload, surface: "substrate", callerSurface: "claude-code", isOperator: false })).toContain("reserved-action");
+		expect(reservedEmitRefusal({ payload, surface: "omp", callerSurface: "omp", isOperator: true })).toContain("reserved-action");
+		expect(reservedEmitRefusal({ payload, surface: "substrate", callerSurface: null, isOperator: false })).toContain("reserved-action");
+		expect(reservedEmitRefusal({ payload, surface: "substrate", callerSurface: null, isOperator: true })).toBeNull();
 	});
 });

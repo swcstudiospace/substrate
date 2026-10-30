@@ -12,7 +12,8 @@
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, realpathSync, type Stats } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { WORKTREE_REPO_PATTERN } from "../../mcp-server/src/worktree-registry.ts";
+import { normalizeWorktreeFiles, WORKTREE_FILE_MAX_CHARS, WORKTREE_FILES_MAX, WORKTREE_REPO_PATTERN } from "../../mcp-server/src/worktree-registry.ts";
+import { changedFiles } from "./conflicts.ts";
 import { type CommandRunner, type GitRunner, gitOut } from "./git.ts";
 import { mapLimit } from "./pool.ts";
 import { Gate, lookupPr, type PrState, PR_NONE, PR_UNKNOWN, type PrInfo, DEFAULT_PR_CONCURRENCY } from "./pr.ts";
@@ -204,10 +205,18 @@ export interface WorktreeInfo {
 	merged: boolean | null;
 	pr_number: number | null;
 	pr_head_sha: string | null;
-	/** Head commits of every merged pull request for the branch. */
+	/** Head commits of the merged pull requests that merged into the default branch: a head merged only into another base is not merged here. */
 	pr_merged_heads: string[];
 	/** Ignored, non-regenerable files that the primary checkout does not hold identically; removal would delete them. */
 	ignored_work: string[];
+	/**
+	 * The files this worktree changed against its merge base plus its uncommitted changes, sorted, at most `WORKTREE_FILES_MAX`.
+	 * Absent: not asked for (`InspectOptions.files`) or not listed because the directory is gone. `null`: asked and the listing
+	 * failed (no merge base, a failed git command), which is unknown and never "touches nothing"; `notes` says why.
+	 */
+	files?: string[] | null;
+	/** True when more than `WORKTREE_FILES_MAX` paths were changed and `files` holds the first of them. */
+	files_truncated?: boolean;
 	notes: string[];
 }
 
@@ -234,6 +243,8 @@ export interface InspectOptions {
 	measure?: boolean;
 	/** Look for ignored files that hold work (default true); only prune decisions need it. */
 	ignored?: boolean;
+	/** List the changed files for the registry report (default false: it costs two more git calls per worktree). */
+	files?: boolean;
 	maxEntries?: number;
 	maxMs?: number;
 	now?: () => number;
@@ -345,7 +356,8 @@ export async function inspectWorktree(wt: InspectInput, options: InspectOptions)
 	const noPullRequest = wt.branch === null || wt.detached || wt.branch === defaultName;
 	const wantPr = options.pr !== undefined && !noPullRequest && !wt.primary;
 	const [status, mergeBase, counts, commitTime, ancestorOfDefault, ancestorOfRemote, remoteContains, pr, measurement, ignoredWork] = await Promise.all([
-		git(["status", "--porcelain"], cwd),
+		// `--untracked-files=all` overrides `status.showUntrackedFiles`, which a user may set to hide new files.
+		git(["status", "--porcelain", "--untracked-files=all"], cwd),
 		defaultRef === null ? Promise.resolve(null) : gitOut(git, ["merge-base", defaultRef, "HEAD"], cwd),
 		defaultRef === null ? Promise.resolve(null) : gitOut(git, ["rev-list", "--left-right", "--count", `${defaultRef}...HEAD`], cwd),
 		gitOut(git, ["log", "-1", "--format=%ct", "HEAD"], cwd),
@@ -383,13 +395,28 @@ export async function inspectWorktree(wt: InspectInput, options: InspectOptions)
 	base.pr_state = pr.state;
 	base.pr_number = pr.number;
 	base.pr_head_sha = pr.headSha;
-	base.pr_merged_heads = pr.mergedHeadShas;
+	base.pr_merged_heads = defaultName === null ? [] : pr.mergedHeads.filter((merged) => merged.baseRef === defaultName).map((merged) => merged.headSha);
 	base.ignored_work = ignoredWork;
 	if (measurement !== null) {
 		base.size_bytes = measurement.bytes;
 		base.last_activity_at = measurement.lastActivityMs === null ? null : new Date(measurement.lastActivityMs).toISOString();
 		if (measurement.note !== null) base.notes.push(measurement.note);
 	} else base.notes.push("size and activity were not measured");
+	if (options.files === true) {
+		const listing = await changedFiles({ path: cwd, base: base.base }, git);
+		if (listing.notes.length > 0) {
+			// A partial listing would read as "touches less than it does": unknown, with the reason conflicts would give.
+			base.files = null;
+			base.notes.push(...listing.notes);
+		} else {
+			const reportable = normalizeWorktreeFiles(listing.files);
+			if (reportable.length < listing.files.length) {
+				base.notes.push(`${listing.files.length - reportable.length} changed paths were not reported (absolute, over ${WORKTREE_FILE_MAX_CHARS} characters, or holding a control character)`);
+			}
+			base.files = reportable.slice(0, WORKTREE_FILES_MAX);
+			base.files_truncated = reportable.length > WORKTREE_FILES_MAX;
+		}
+	}
 	if (defaultRef === null) base.notes.push("no default branch found (origin/HEAD, main, master)");
 	return base;
 }

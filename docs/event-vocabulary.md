@@ -33,11 +33,13 @@ These apply to every source:
   `index.archive`, `alert`, and the v1.6 actions `session.checkpoint`, `session.rollback`,
   `session.rollback.refused`, `memory.forget`, `memory.capsule.export`,
   `memory.capsule.redact`, `anchor.signer.rotate`, `anchor.reanchor`, and the v1.7 actions `docs.corpus.ingest`, `docs.corpus.refused`,
-  `docs.corpus.root`, `worktrees.report` and `worktree.prune`.
+  `docs.corpus.root`, `worktrees.report`, `worktree.prune`, `docs.sync` and `docs.planning` (the server's own
+  planning refresh, `docs.planning`, had no row until phase 65).
 - **Reserved actions are not writable through `events_emit` or `POST /events`.** A reader trusts `anchor.signer.rotate`, `anchor.reanchor`, `session.checkpoint`, `session.rollback`,
   `session.rollback.refused`, `session.rollback.forget_batch`, `memory.forget` and `docs.corpus.root` by their action alone, and the event carries no proof of its writer, so both
   doors refuse them with a `reserved-action` error (nothing written) unless the caller is an operator emitting as its own surface; the server's own emits do not
-  pass those doors (`RESERVED_NOTE_ACTIONS` in `packages/mcp-server/src/reserved-actions.ts` is the one list).
+  pass those doors (`RESERVED_NOTE_ACTIONS` in `packages/mcp-server/src/reserved-actions.ts` is the one list). `docs.canary` is the one host-job action in it: the docs canary's
+  report feeds the recall gauge and the `corpus` fabric row, so only the `substrate` token acting as itself may write it, and an operator's token is refused too.
 - **`payload.runtime` names a non-agent producer** acting for an agent or for
   the host (`herdr`, `agentos`, `anchor`, `dispatcher`, `skills-sync`,
   `doctor` — the runtime doctor, uplift-3 N1, one `warning` per drift class
@@ -50,8 +52,17 @@ These apply to every source:
   accepted merge-trigger has no recorded ingest after
   `SUBSTRATE_DOCS_TRIGGER_LAG_MIN` and one `note` when it clears, with
   `payload.state`, `dataset`, `commit`, `lag_seconds`, deduped through the
-  docs state file; `docs-canary` — the opt-in live golden canary, one
-  `warning` per changed failing set, with `payload.failing[{fixture, failed}]`;
+  docs state file (v1.7 phase 65 judges the corpus under the same action, with
+  `payload.dataset` `corpus`, when `SUBSTRATE_CORPUS=on` and its last ingest is older than
+  `SUBSTRATE_CORPUS_FRESH_MAX_AGE_S`: `payload.lag_seconds` and `threshold_seconds`, no `commit`);
+  `corpus-sync` — v1.7 phase 65, one `note` per `substrate corpus` sync with
+  `payload.repo`, `trigger` (`manual`, `watch`, `hook`, `sweep`, `reconcile`), `outcome`
+  (`ok`, `partial`, `failed`, `skipped`), `lag_s`, the counts (`added`, `changed`, `updated`,
+  `tombstoned`, `refused`, `failed`) and `duration_ms`, never a path or text; the server reads only `lag_s`;
+  `docs-canary` — the opt-in live golden canary, one
+  `warning` per changed failing set, with `payload.failing[{fixture, failed}]`, and (v1.7 phase 70) one `note` per
+  run that measured the golden set, with `payload.golden_recall5` and `golden_asked`, which the warning also carries
+  as `golden_recall5` when it was measured;
   `index-archive` — uplift-4 S2, one `note` per finished index snapshot with
   `payload.snapshot`, `createdAt`, `serverVersion`, `schemaHash` and per-table
   `rows`, `bytes`, `sha256`, never rows or a path; `alert` — uplift-4 S3, one
@@ -107,6 +118,8 @@ These apply to every source:
 | `docs.corpus.ingest` | 63 | `note` | `caller` | `docs.corpus.ingest` | — | — | no |
 | `docs.corpus.refused` | 63 | `warning` | `caller` | `docs.corpus.refused` | — | — | no |
 | `docs.corpus.root` | 69 | `note` | `substrate` | `docs.corpus.root` | — | — | no |
+| `docs.sync` | 65 | `note` | `caller` | `docs.sync` | `corpus-sync` | — | no |
+| `docs.planning` | 65 | `note` | `substrate` | `docs.planning` | — | — | yes |
 | `memory.retain.failed` | 26 | `warning` | `memory-writer` | `memory.retain` | — | — | no |
 | `memory.write.accepted` | 26 | `note` | `memory-writer` | — | — | — | no |
 | `memory.write.conflict` | 26 | `note` | `memory-writer` | — | — | — | no |
@@ -121,6 +134,7 @@ These apply to every source:
 | `docs.freshness` | 25 | `warning` | `substrate` | `docs.freshness` | `docs-freshness` | — | yes |
 | `docs.freshness.recovered` | 25 | `note` | `substrate` | `docs.freshness` | `docs-freshness` | — | yes |
 | `docs.canary` | 25 | `warning` | `substrate` | `docs.canary` | `docs-canary` | — | yes |
+| `docs.canary.report` | 70 | `note` | `substrate` | `docs.canary` | `docs-canary` | — | yes |
 | `index.archive` | 28 | `note` | `substrate` | `index.archive` | `index-archive` | — | yes |
 | `alert` | 33 | `warning` | `substrate` | `alert` | `alert` | — | yes |
 | `teachable.accepted` | 29 | `note` | `memory-writer` | `teachable` | — | — | no |
@@ -156,7 +170,9 @@ These apply to every source:
 | `steering.queued` | 58 | `note` | `substrate` | `steering.queued` | — | — | no |
 | `worktrees.report` | 68 | `note` | `caller` | `worktrees.report` | — | — | no |
 | `worktree.prune` | 68 | `note` | `caller` | `worktree.prune` | — | the pruned worktree's repository (omitted for a local-only one) | no |
+| `worktree.merge_back` | 68 | `note` | `caller` | `worktree.merge_back` | — | the merged-back worktree's repository (omitted for a local-only one) | no |
 | `steering.persist_failed` | 67 | `warning` | `caller` | `steering.persist_failed` | — | — | no |
+| `steering.session_ended` | 68 | `note` | `caller` | `steering.session_ended` | — | — | no |
 | `muse.brief_writer` | 19 | — | — | — | — | — | no |
 | `memory.retain` | 26 | — | — | — | — | — | no |
 | `memory.recall` | 26 | — | — | — | — | — | no |
