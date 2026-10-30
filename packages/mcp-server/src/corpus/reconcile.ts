@@ -28,6 +28,8 @@ import type { CorpusStore, ManifestRow } from "./store.ts";
 
 /** Most active rows one reconcile reads. A manifest beyond it is judged for missing documents only, never for orphans. */
 export const RECONCILE_MAX_ROWS = 100_000;
+/** How long missing-row lookups may run before the rest are left unconfirmed. The ingest lock is held for the whole reconcile. */
+const RECONCILE_LOOKUP_BUDGET_MS = 8_000;
 
 /** The plane documents a listing named, as `diffPlane` reads them: `PlaneListing` without its failure arm. */
 export interface PlaneSnapshot {
@@ -144,8 +146,16 @@ async function run(deps: ReconcileDeps, execute: boolean): Promise<ReconcileResu
 	const drift = diffPlane(rowsComplete ? rows : rows.slice(0, RECONCILE_MAX_ROWS), listing, rowsComplete);
 	const gone: ManifestRow[] = [];
 	let lookupFailed = false;
+	let unlooked = false;
+	const started = Date.now();
+	let lookups = 0;
 	for (const row of drift.missing) {
 		if (row.documentId === null) continue;
+		if (lookups >= RECONCILE_MAX_ITEMS || Date.now() - started >= RECONCILE_LOOKUP_BUDGET_MS) {
+			unlooked = true;
+			continue;
+		}
+		lookups += 1;
 		let looked: "present" | "absent" | "unknown" = "unknown";
 		try {
 			looked = await deps.plane.lookupDocument(row.documentId, { signal: deps.signal });
@@ -157,7 +167,7 @@ async function run(deps: ReconcileDeps, execute: boolean): Promise<ReconcileResu
 	}
 	const missing = gone.slice(0, RECONCILE_MAX_ITEMS);
 	const orphans = drift.orphans.slice(0, RECONCILE_MAX_ITEMS);
-	const truncated = listing.truncated || !rowsComplete || gone.length > RECONCILE_MAX_ITEMS || drift.orphans.length > RECONCILE_MAX_ITEMS || lookupFailed;
+	const truncated = listing.truncated || !rowsComplete || gone.length > RECONCILE_MAX_ITEMS || drift.orphans.length > RECONCILE_MAX_ITEMS || lookupFailed || unlooked;
 
 	// Rows first: marking one removed needs no plane delete, so a slow or failing plane delete cannot hold that repair back.
 	// The lookup above already confirmed the id is gone; a failed lookup never reaches here.

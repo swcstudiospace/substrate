@@ -109,7 +109,7 @@ describe("ensureMirror", () => {
 		expect(existsSync(join(dest, ".git"))).toBe(true);
 	});
 
-	test("a fetch points the mirror at the checkout's current origin and follows a moved default branch", () => {
+	test("a fetch into a moved origin's own mirror follows that origin's default branch and leaves the previous mirror", () => {
 		const w = world();
 		const created = ensureMirror(w.local, w.mirrors, run, { fetch: true });
 		if (created.status !== "fetched") throw new Error("expected a fetched mirror");
@@ -125,8 +125,26 @@ describe("ensureMirror", () => {
 		runGit(rotated, ["update-ref", "-d", "refs/heads/main"]);
 		const again = ensureMirror(w.local, w.mirrors, run, { fetch: true });
 		expect(again.status).toBe("fetched");
-		expect(runGit(created.mirrorDir, ["remote", "get-url", "origin"])).toBe(rotated);
-		expect(runGit(created.mirrorDir, ["symbolic-ref", "HEAD"])).toBe("refs/heads/docs");
-		expect(runGit(created.mirrorDir, ["rev-parse", "--verify", "HEAD^{commit}"]).length).toBeGreaterThan(0);
+		if (again.status !== "fetched") throw new Error("expected a fetched mirror");
+		expect(again.mirrorDir).not.toBe(created.mirrorDir);
+		expect(runGit(created.mirrorDir, ["remote", "get-url", "origin"])).toBe(w.origin);
+		expect(runGit(again.mirrorDir, ["remote", "get-url", "origin"])).toBe(rotated);
+		expect(runGit(again.mirrorDir, ["symbolic-ref", "HEAD"])).toBe("refs/heads/docs");
+		expect(runGit(again.mirrorDir, ["rev-parse", "--verify", "HEAD^{commit}"]).length).toBeGreaterThan(0);
+	});
+
+	test("a second origin that shares a commit does not receive the first origin's mirror directory", () => {
+		const w = world();
+		const created = ensureMirror(w.local, w.mirrors, run, { fetch: true });
+		if (created.status !== "fetched") throw new Error("expected a fetched mirror");
+		const fork = join(w.root, "fork.git");
+		const checkout = join(w.root, "fork-checkout");
+		runGit(w.root, ["clone", "-q", "--bare", w.origin, fork]);
+		runGit(w.root, ["clone", "-q", fork, checkout]);
+		const again = ensureMirror(checkout, w.mirrors, run, { fetch: true });
+		expect(again.status).toBe("fetched");
+		if (again.status !== "fetched") throw new Error("expected a fetched mirror");
+		expect(again.mirrorDir).not.toBe(created.mirrorDir);
+		expect(runGit(created.mirrorDir, ["remote", "get-url", "origin"])).toBe(w.origin);
 	});
 });

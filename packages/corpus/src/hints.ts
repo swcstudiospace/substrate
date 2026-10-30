@@ -6,7 +6,8 @@
  * the bound says so and never throws, because a hook must not fail the user's git command. Lost hints cost nothing: the
  * periodic sweep and the reconcile run find what no hint reported.
  *
- * The count and the publish share one lock file next to the spool, so two hook processes cannot both pass the cap and write.
+ * The count and the publish share one lock file inside the spool, so two hook processes cannot both pass the cap and write.
+ * The lock does not need the spool's parent to be writable: writeHint creates the spool before taking it.
  */
 import { closeSync, constants, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
@@ -33,9 +34,9 @@ export interface HintClock {
 
 const HINT_LOCK_WAIT_MS = 30_000;
 
-/** Takes the lock next to the spool. A dead owner's lock is removed; a live one is waited on. Never exceeds the cap by giving up and writing anyway. */
+/** Takes the lock inside the spool. A dead owner's lock is removed; a live one is waited on. Never exceeds the cap by giving up and writing anyway. */
 function acquireHintLock(spoolDir: string): void {
-	const path = `${spoolDir}.lock`;
+	const path = join(spoolDir, ".lock");
 	const started = Date.now();
 	for (;;) {
 		try {
@@ -77,7 +78,7 @@ function acquireHintLock(spoolDir: string): void {
 
 function releaseHintLock(spoolDir: string): void {
 	try {
-		unlinkSync(`${spoolDir}.lock`);
+		unlinkSync(join(spoolDir, ".lock"));
 	} catch {
 		// Already released. The next writer creates it again.
 	}

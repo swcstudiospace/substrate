@@ -343,8 +343,10 @@ export function buildView(opts: ViewOptions): ViewResult | null {
 	for (const row of candidates) {
 		if (known.has(row.item.oid)) continue;
 		const size = fetched.get(row.item.oid);
-		if (size === undefined) skips.add({ repo, path: row.path, reason: "unreadable" });
-		else if (size === 0) skips.add({ repo, path: row.path, reason: "empty" });
+		if (size === undefined) {
+			skips.add({ repo, path: row.path, reason: "unreadable" });
+			problem(`${row.path}: the mirror has no size for this document and the fetch did not supply one`);
+		} else if (size === 0) skips.add({ repo, path: row.path, reason: "empty" });
 		else if (size > maxBytes) skips.add({ repo, path: row.path, reason: "too-large" });
 		else queued.push({ path: row.path, kind: row.kind, tier: row.tier, item: { ...row.item, size } });
 	}

@@ -259,13 +259,38 @@ describe("buildView", () => {
 		const fetched: string[] = [];
 		const runner: GitBytesRunner = (call) => {
 			if (call.args[0] === "ls-tree" && call.args.includes("-l")) throw new Error("ls-tree asked for every blob size");
-			if (call.args.includes("--stdin") && call.input !== undefined) fetched.push(call.input);
+			if (call.args.includes("--stdin") && typeof call.input === "string") fetched.push(call.input);
 			return run(call);
 		};
 		const view = buildView({ repo: REPO, repoDir: w.local, mirrorDir: mirror, maxTier: 2, maxBytes: 1_000_000, runner });
 		const asset = runGit(mirror, ["rev-parse", "HEAD:src/app.ts"]);
 		expect(defined(view, "view").entries.some((entry) => entry.path === "src/app.ts")).toBe(false);
 		expect(fetched.join("")).not.toContain(asset);
+	});
+
+	test("a prefetch that still cannot read a blob size records a problem and an unreadable skip", () => {
+		const w = world();
+		const state = ensureMirror(w.local, w.mirrors, run, { fetch: true });
+		const mirror = mirrorDirOf(state);
+		const hidden = runGit(mirror, ["rev-parse", "HEAD:docs/a.md"]);
+		let listed = false;
+		const runner: GitBytesRunner = (call) => {
+			if (call.args[0] === "ls-tree") listed = true;
+			const asksSize = call.args[0] === "cat-file" && (call.args.includes("-s") || call.args.includes("--batch-check"));
+			if (listed && asksSize && call.args.includes("-s") && call.args.includes(hidden)) {
+				return { code: 128, stdout: new Uint8Array(0), timedOut: false };
+			}
+			if (listed && asksSize && typeof call.input === "string" && call.input.includes(hidden)) {
+				const kept = call.input.split("\n").filter((line) => line !== "" && line !== hidden);
+				if (kept.length === 0) return { code: 1, stdout: new Uint8Array(0), timedOut: false };
+				return run({ ...call, input: `${kept.join("\n")}\n` });
+			}
+			return run(call);
+		};
+		const view = defined(buildView({ repo: REPO, repoDir: w.local, mirrorDir: mirror, maxTier: 2, maxBytes: 1_000_000, runner }), "view");
+		expect(view.problems.some((item) => item.includes("docs/a.md") && item.includes("no size"))).toBe(true);
+		expect(view.skips.listed.some((item) => item.path === "docs/a.md" && item.reason === "unreadable")).toBe(true);
+		expect(view.entries.some((entry) => entry.path === "docs/a.md")).toBe(false);
 	});
 
 	test("a dangling HEAD beside other branches is an incomplete read, not an empty origin", () => {

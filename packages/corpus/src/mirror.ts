@@ -13,7 +13,7 @@
  * Pure of the environment: the mirror directory, the timeouts and the runner are parameters.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { githubSlug, stripCredentials } from "./discover.ts";
 import { type GitBytesRunner, outputText } from "./gitio.ts";
@@ -109,29 +109,13 @@ function refreshDefaultHead(dir: string, run: GitBytesRunner): "refreshed" | "em
 }
 
 /**
- * The mirror directory for this checkout. The name is a hash of the current origin, so a checkout whose origin URL
- * moved would otherwise look mirror-less and a fetch would clone a second copy. The mirror that already holds this
- * checkout's HEAD is the same mirror: it is repointed, not replaced.
+ * The mirror directory for this checkout. The mirror name is a hash of the origin. A mirror is never chosen because it
+ * happens to contain a commit: a fork can share that commit with an upstream mirror, and returning it would let a later
+ * fetch rewrite the upstream mirror's origin. A checkout whose origin URL moved therefore gets a second mirror.
  */
-function mirrorForCheckout(repoDir: string, mirrorRoot: string, origin: string, run: GitBytesRunner): string | null {
+function mirrorForCheckout(_repoDir: string, mirrorRoot: string, origin: string, _run: GitBytesRunner): string | null {
 	const named = mirrorPath(mirrorRoot, origin);
 	if (existsSync(named)) return named;
-	const head = run({ args: ["rev-parse", "--verify", "-q", "HEAD^{commit}"], cwd: repoDir, timeoutMs: CONFIG_TIMEOUT_MS });
-	const sha = outputText(head).trim();
-	if (head.code !== 0 || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(sha)) return null;
-	let names: string[];
-	try {
-		names = readdirSync(mirrorRoot);
-	} catch {
-		return null;
-	}
-	for (const name of names) {
-		if (name.includes(".partial-")) continue;
-		const dir = join(mirrorRoot, name);
-		if (!isUsableMirror(dir, run)) continue;
-		const has = run({ args: ["cat-file", "-e", `${sha}^{commit}`], cwd: dir, timeoutMs: CONFIG_TIMEOUT_MS });
-		if (has.code === 0) return dir;
-	}
 	return null;
 }
 

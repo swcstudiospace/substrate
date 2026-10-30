@@ -923,11 +923,37 @@ export class IndexStore implements MemoryStore {
 			// unique index on `(entry_hash, state)` rejects a second approval). `IF EXISTS`
 			// makes every later boot a no-op once it is gone.
 			await reserved.unsafe(`drop index if exists memory_reviews_hash_idx`);
-			// Not ledgered. Step 38 shipped in this release with `destination` in the primary key, but a database that
-			// applied the earlier form of that step (path alone) must still save and load one destination. Adding the
-			// column and a unique index is a no-op once the new table is in place.
-			await reserved.unsafe(`alter table if exists planning_page_hashes add column if not exists destination text not null default ''`);
-			await reserved.unsafe(`create unique index if not exists planning_page_hashes_destination_path_idx on planning_page_hashes (destination, path)`);
+			// Not ledgered. planning_page_hashes is a disposable cache. Step 38 already creates the table with
+			// primary key (destination, path). A database that applied an earlier path-only primary key still has that
+			// key, and ON CONFLICT (destination, path) does not catch it, so save() never stores the new row. Drop that
+			// old table and recreate it. A fresh database already has destination in the primary key, so the drop does not run.
+			await reserved.unsafe(`
+				do $$
+				begin
+					if to_regclass('planning_page_hashes') is not null
+						and not exists (
+							select 1
+							from pg_constraint
+							join pg_attribute
+								on pg_attribute.attrelid = pg_constraint.conrelid
+								and pg_attribute.attnum = any (pg_constraint.conkey)
+							where pg_constraint.conrelid = to_regclass('planning_page_hashes')
+								and pg_constraint.contype = 'p'
+								and pg_attribute.attname = 'destination'
+						) then
+						drop table planning_page_hashes;
+					end if;
+				end
+				$$;
+				create table if not exists planning_page_hashes (
+					destination text not null,
+					path        text not null,
+					sha256      text not null,
+					updated_at  timestamptz not null default now(),
+					primary key (destination, path)
+				);
+				create unique index if not exists planning_page_hashes_destination_path_idx on planning_page_hashes (destination, path);
+			`);
 		} catch (cause) {
 			migrateFailed = true;
 			throw cause;

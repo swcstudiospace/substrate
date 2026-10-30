@@ -106,8 +106,8 @@ describe("the hint spool", () => {
 		const dir = spool();
 		const time = clock();
 		for (let i = 0; i < MAX_HINT_FILES - 1; i++) expect(writeHint(dir, `/work/r${i}`, time).ok).toBe(true);
-		const script = `import { writeHint } from ${JSON.stringify(join(import.meta.dir, "hints.ts"))};\nimport { randomBytes } from "node:crypto";\nconst result = writeHint(process.argv[2], process.argv[3], { nowMs: () => Date.now(), random: () => randomBytes(4).toString("hex") });\nprocess.stdout.write(JSON.stringify(result));\n`;
-		const launch = (name: string) => Bun.spawn(["bun", "--no-env-file", "-e", script, dir, name], { stdout: "pipe", stderr: "pipe" });
+		const script = `import { writeHint } from ${JSON.stringify(join(import.meta.dir, "hints.ts"))};\nimport { randomBytes } from "node:crypto";\nconst result = writeHint(process.env.HINT_SPOOL ?? "", process.env.HINT_DIR ?? "", { nowMs: () => Date.now(), random: () => randomBytes(4).toString("hex") });\nprocess.stdout.write(JSON.stringify(result));\n`;
+		const launch = (name: string) => Bun.spawn(["bun", "--no-env-file", "-e", script], { stdout: "pipe", stderr: "pipe", env: { ...process.env, HINT_SPOOL: dir, HINT_DIR: name } });
 		const left = launch("/work/left");
 		const right = launch("/work/right");
 		const done = Promise.all([left.exited, right.exited]);
