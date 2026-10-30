@@ -246,7 +246,10 @@ describe("the lease-table tune is off unless asked, and the DDL has exactly one 
 		const migrate = source.slice(source.indexOf("async migrate()"), source.indexOf("// ── graph ──"));
 		expect(migrate).toContain('if (this.tune === "apply")');
 		expect(migrate).not.toContain("alter table graph_nodes set");
-		// The one pre-existing drop is the superseded reviews index; the tune adds none.
-		expect([...source.matchAll(/drop index[^`]*/g)].map((match) => match[0].trim())).toEqual(["drop index if exists memory_reviews_hash_idx"]);
+		// The tune adds none. The other drop is migration 41's own down, of the index that step created.
+		expect([...source.matchAll(/drop index[^`]*/g)].map((match) => match[0].trim())).toEqual([
+			"drop index if exists worktrees_repo_lower_seen_idx",
+			"drop index if exists memory_reviews_hash_idx",
+		]);
 	});
 });

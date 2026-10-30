@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { type ClaimsLookup, claimStatus, parseClaimsBody } from "./claims.ts";
+import { type ClaimsLookup, type ClaimStatus, claimStatus, type LiveClaim, NOT_CHECKED, parseClaimsBody, sessionOfClaims } from "./claims.ts";
 
 const GRAPH = "ut-mu1-abcd1234";
 const CLAIM = { node_id: "n1", holder: { surface: "hermes", session_id: "s-1" }, expires_at: "2026-10-29T13:00:00.000Z" };
@@ -30,5 +30,32 @@ describe("claimStatus", () => {
 		expect(await claimStatus(GRAPH, answer({ ok: true, claims: [CLAIM] }))).toEqual({ state: "live", graph_id: GRAPH, claims: [CLAIM] });
 		expect(await claimStatus(GRAPH, answer({ ok: true, claims: [] }))).toEqual({ state: "none", graph_id: GRAPH });
 		expect(await claimStatus(GRAPH, answer({ ok: false, error: "HTTP 503" }))).toEqual({ state: "unverified", graph_id: GRAPH, reason: "HTTP 503" });
+	});
+});
+
+describe("sessionOfClaims", () => {
+	const held = (node: string, session: string): LiveClaim => ({ node_id: node, holder: { surface: "hermes", session_id: session }, expires_at: null });
+	const holderless: LiveClaim = { node_id: "n9", holder: null, expires_at: null };
+
+	test("every live claim held by one session names that session, including a swarm holder", () => {
+		expect(sessionOfClaims({ state: "live", graph_id: GRAPH, claims: [held("n1", "sess-1")] })).toBe("sess-1");
+		expect(sessionOfClaims({ state: "live", graph_id: GRAPH, claims: [held("n1", "sess-1"), held("n2", "sess-1")] })).toBe("sess-1");
+		expect(sessionOfClaims({ state: "live", graph_id: GRAPH, claims: [held("n1", "A05@r1:ut-1")] })).toBe("A05@r1:ut-1");
+	});
+
+	const NAMING_NOBODY: Array<[string, ClaimStatus]> = [
+		["two holder sessions", { state: "live", graph_id: GRAPH, claims: [held("n1", "sess-1"), held("n2", "sess-2")] }],
+		["a claim with no holder beside a held one", { state: "live", graph_id: GRAPH, claims: [held("n1", "sess-1"), holderless] }],
+		["a claim with no holder first", { state: "live", graph_id: GRAPH, claims: [holderless, held("n1", "sess-1")] }],
+		["only a claim with no holder", { state: "live", graph_id: GRAPH, claims: [holderless] }],
+		["a holder whose session id has a control character", { state: "live", graph_id: GRAPH, claims: [held("n1", "bad\nid")] }],
+		["a holder whose session id is empty", { state: "live", graph_id: GRAPH, claims: [held("n1", "")] }],
+		["none", { state: "none", graph_id: GRAPH }],
+		["unverified", { state: "unverified", graph_id: GRAPH, reason: "HTTP 503" }],
+		["not-checked", NOT_CHECKED],
+	];
+
+	test.each(NAMING_NOBODY)("%s attributes nothing", (_label, status) => {
+		expect(sessionOfClaims(status)).toBeNull();
 	});
 });

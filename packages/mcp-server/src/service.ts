@@ -216,7 +216,7 @@ import { SteeringExpirySweeper, SteeringHintAnnouncer, steeringNoticeFor, type S
 import type { SteeringSessionsStore } from "./planning/steering-sessions-store.ts";
 import { SteeringWaiters } from "./planning/steering-waiters.ts";
 import { STEERING_ACKNOWLEDGED_HISTORY_LIMIT, type DurableAcknowledged } from "./planning/steering-rest.ts";
-import { composeLiveSections, type BriefSteeringInput } from "./brief-sessions.ts";
+import { composeLiveSections, type BriefSteeringInput, type BriefWorktreesInput } from "./brief-sessions.ts";
 import { assembleSessionContext, HANDOFF_READ_LIMIT, OPEN_GRAPHS_READ_LIMIT, planningChangedCount, SESSION_CONTEXT_BUDGET_MS, type SessionContext, type SessionContextRequest } from "./session-context.ts";
 import { sharedDeadline } from "./deadline.ts";
 import type { FabricSources } from "./fabric/types.ts";
@@ -308,6 +308,7 @@ import {
 import { liveClaims, type WorktreeClaimsOutcome } from "./worktree-claims.ts";
 import {
 	staleCutoff,
+	WORKTREE_BRIEF_CANDIDATES_MAX,
 	type WorktreeListOutcome,
 	type WorktreeListQuery,
 	type WorktreeRefusal,
@@ -3493,15 +3494,18 @@ export class Substrate {
 	}
 
 	/**
-	 * Phase 67: the brief's live session sections (`SUBSTRATE_BRIEF_SESSIONS`), built per request and never cached: the other
-	 * live sessions of the repo, the caller's pending directives and session state (when `session_id` is named) and the graph's
-	 * handoff packets. Empty with the flag off. Fail-open: a source that fails drops its own section and never the brief. The
+	 * The brief's live sections, built per request and never cached. `SUBSTRATE_BRIEF_SESSIONS` (phase 67) adds the other live
+	 * sessions of the repo, the caller's pending directives and session state (when `session_id` is named) and the graph's
+	 * handoff packets. `SUBSTRATE_WORKTREE_REGISTRY` (phase 68, FLEET-06) adds the worktrees of other sessions that touch files
+	 * the caller's own worktree touches, when the request names both `repo` and `session_id`; it does not need the sessions flag.
+	 * Empty with both off. Fail-open: a source that fails drops its own section and never the brief. The
 	 * reads run under the brief's own budget, started with the brief, so they never hold it past that deadline: a section not
 	 * ready by then is replaced by a one-line note that names it. With no deadline configured (budget 0) the digest's own
 	 * default bound applies, so these reads are never unbounded.
 	 */
 	private async liveBriefSections(request: BriefRequest): Promise<BriefSection[]> {
-		if (!this.config.briefSessions) return [];
+		const sessionsOn = this.config.briefSessions;
+		if (!sessionsOn && this.config.worktreeRegistry.mode !== "on") return [];
 		const nowMs = Date.now();
 		const budgetMs = this.briefOptions.budgetMs > 0 ? this.briefOptions.budgetMs : SESSION_CONTEXT_BUDGET_MS;
 		const deadline = sharedDeadline(budgetMs, "brief live sections");
@@ -3512,9 +3516,9 @@ export class Substrate {
 			const graphId = request.graph_id;
 			return await composeLiveSections(
 				{
-					context: repo === null ? null : () => this.sessionContext({ repoId: repo, sessionId: sessionId ?? null, limit: 10 }, budgetMs),
+					context: !sessionsOn || repo === null ? null : () => this.sessionContext({ repoId: repo, sessionId: sessionId ?? null, limit: 10 }, budgetMs),
 					steering:
-						sessionId === undefined
+						!sessionsOn || sessionId === undefined
 							? null
 							: () => {
 									try {
@@ -3534,7 +3538,7 @@ export class Substrate {
 									}
 								},
 					handoffs:
-						graphId === undefined
+						!sessionsOn || graphId === undefined
 							? null
 							: async () => {
 									const read = await this.recentHandoffsForGraph(graphId);
@@ -3544,6 +3548,7 @@ export class Substrate {
 										return Number.isFinite(createdAtMs) ? [{ goal: entry.packet.goal, createdAtMs, verified: entry.verdict.ok }] : [];
 									});
 								},
+					worktrees: repo === null || sessionId === undefined || sessionId === "" ? null : this.worktreeBriefSource(repo, sessionId),
 				},
 				deadline.race,
 				nowMs,
@@ -3551,6 +3556,21 @@ export class Substrate {
 		} finally {
 			deadline.clear();
 		}
+	}
+
+	/**
+	 * The brief's worktree-overlap read (phase 68, FLEET-06): one bounded query for the repository's rows, or null when the
+	 * registry cannot serve (off, or no index), in which case the section is absent and nothing is read. One row past the
+	 * cap is read and discarded so a capped read is marked incomplete instead of looking like a complete slice.
+	 */
+	private worktreeBriefSource(repo: string, sessionId: string): (() => Promise<BriefWorktreesInput>) | null {
+		const access = this.worktreeAccess(false);
+		if (!access.ok) return null;
+		return async () => {
+			const rows = await access.store.candidates({ repo, limit: WORKTREE_BRIEF_CANDIDATES_MAX + 1 });
+			const capped = rows.length > WORKTREE_BRIEF_CANDIDATES_MAX;
+			return { repo, sessionId, rows: capped ? rows.slice(0, WORKTREE_BRIEF_CANDIDATES_MAX) : rows, ...(capped ? { capped: true } : {}) };
+		};
 	}
 
 	/**

@@ -638,6 +638,8 @@ const STEPS_ADDED_SINCE_REFERENCE: Readonly<Record<number, string>> = {
 	37: "steering_sessions",
 	38: "corpus_reflect",
 	39: "planning_page_hashes",
+	40: "worktrees_changed_files",
+	41: "worktrees_repo_lower_seen_idx",
 };
 /** The highest `MIGRATION_STEPS` version when the pin above was written (commit 9aec7a1). */
 const LAST_STEP_AT_PIN = 32;
@@ -684,6 +686,26 @@ describe("index (Postgres) migration steps added since the 9231f43 reference rel
 		expect(step?.sql).toContain("create table if not exists worktrees");
 		expect(step?.sql).toContain("create index if not exists worktrees_repo_seen_idx");
 		expect(runbook).toContain("`worktrees_repo_seen_idx`");
+	});
+
+	test("the worktree changed-files step (phase 68) adds two columns to the registry table, nullable or defaulted, and is named in the runbook", () => {
+		const step = stepsSinceReference(MIGRATION_STEPS).find((candidate) => candidate.name === "worktrees_changed_files");
+		expect(step?.version).toBe(40);
+		expect(step?.phase).toBe("expand");
+		expect(nonAdditiveStatements(defined(step, "the worktrees_changed_files step"))).toEqual([]);
+		expect(step?.sql).toContain("add column if not exists changed_files jsonb");
+		expect(step?.sql).toContain("add column if not exists files_truncated boolean not null default false");
+		expect(runbook).toContain("`worktrees_changed_files`");
+	});
+
+	test("the worktree repo-lookup step (phase 68) adds only the lower(repo) index, and is named in the runbook", () => {
+		const step = stepsSinceReference(MIGRATION_STEPS).find((candidate) => candidate.name === "worktrees_repo_lower_seen_idx");
+		expect(step?.version).toBe(41);
+		expect(step?.phase).toBe("expand");
+		expect(nonAdditiveStatements(defined(step, "the worktrees_repo_lower_seen_idx step"))).toEqual([]);
+		expect(step?.sql).toContain("create index if not exists worktrees_repo_lower_seen_idx on worktrees (lower(repo), last_seen_at desc)");
+		expect(step?.down).toContain("drop index if exists worktrees_repo_lower_seen_idx");
+		expect(runbook).toContain("`worktrees_repo_lower_seen_idx`");
 	});
 
 	test("the additive rule fires: a drop, a rename, a type change, an unguarded create and a NOT NULL column without a default are each caught", () => {

@@ -31,6 +31,7 @@ All of them are off or empty by default; with every one unset the server behaves
 | `SUBSTRATE_PLANNING_STEERING_PRINCIPALS` | the operator surfaces allowed to queue and acknowledge; empty means nobody can queue |
 | `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` | makes the audit (and so the inbox) durable in `planning_steering_audit`; without it a restart forgets queued directives and writes fail closed |
 | `SUBSTRATE_BRIEF_SESSIONS` | the sessions feature set: adds the `sessions`, `steering` and `handoffs` sections to `memory_brief`, and serves `session_context` and `GET /session/context` (off: both refuse with `session-context.disabled`) |
+| `SUBSTRATE_WORKTREE_REGISTRY` | (phase 68, [worktree-fleet.md](worktree-fleet.md)) with the registry on, `memory_brief` also appends the `worktrees` section below when the request names `repo` and `session_id`; it does not need `SUBSTRATE_BRIEF_SESSIONS` |
 | `SUBSTRATE_STEERING_SESSIONS_TABLE` | persists the session state registry in `steering_sessions` and loads it at boot; the session's free text (`steering`, `planning_hash`) is redacted before it is written and in `GET /steering/sessions` |
 | `SUBSTRATE_STEERING_SESSION_TTL_S` | how old a persisted session may be when it is loaded at boot (default seven days); read only with the table on |
 | `SUBSTRATE_STEERING_WAIT_MAX_MS` | the longest one `GET /steering/wait` holds a request (default 30,000 ms); a longer `timeout_ms` is clamped to it and the answer reports the wait it got |
@@ -107,6 +108,18 @@ substrate steer context --repo acme/widgets --session sess-7
 #   events:
 #   - [ledger, 4s old] kind=commit summary=...
 ```
+
+## Worktree overlap in the brief
+
+With the worktree registry on (`SUBSTRATE_WORKTREE_REGISTRY`) and a `memory_brief` request that names both `repo` and its own `session_id`, the brief appends a `worktrees` section: other sessions' worktrees of the same repository that touch files the asking session's worktree touches. No new variable: the section follows the registry flag plus the request, and it is absent (and nothing is read) without either.
+
+- **The caller's files** are the union of the reported `files` of the registry rows of that repository whose `session_id` is the request's `session_id`. No session named: no section, never a guess. A caller with no such row, or whose rows carry no files, gets one line (`your own worktree has not reported its files ...`) so the section never silently vanishes.
+- **The others** are rows of the same repository (matched case-insensitively, as the brief scopes it) that name a session other than the caller's (an unattributed row is never "another session"), are not the primary checkout, were last seen within 24 hours and reported their files (`files: null` is unknown, not "touches nothing"). Those whose files intersect the caller's are listed, most overlapping files first, then most recently seen, at most **5**.
+- **Each entry** gives the host and path as the registry holds them, the branch, the session id, dirty or clean with `+ahead/-behind`, how long ago it was seen, and the overlapping files (at most 5, then `and N more`). Only files in the caller's own set are ever named; nothing of a worktree that is not in the caller's repository appears.
+- **Bounds and safety.** One registry query per brief, at most 100 rows of the repository, newest first; the matching is in memory. The section is at most 1,200 characters like the other live sections and says `... and N more worktrees` when it cuts. Every string passes the redactor and control characters are shown as `\xNN`. It is read under the brief's own deadline: not ready in time, it is replaced by a one-line note (`Live worktrees not included: not ready before the brief's deadline.`), and a registry read that fails is replaced by `Live worktrees not included: the read failed.`; the rest of the brief is never held or lost.
+- **Never cached, never in the snapshot.** Like the other live sections it is built per request for this caller and appended after the cached text, so it is in no cache key and no stored last-good snapshot.
+
+The lists come from `substrate worktree scan --report` ([worktree-fleet.md](worktree-fleet.md#the-changed-files-in-a-report)); a worktree no report has attributed to a session cannot be matched to one. The attribution comes from a live claim on the worktree's graph that names one session, or from `--session ID` (or `SUBSTRATE_SESSION_ID`) given to the scan that runs in the session's worktree ([worktree-fleet.md](worktree-fleet.md#which-session-a-worktree-belongs-to)); the newest report wins, so a session's hook re-sends it with each report.
 
 ## The hooks
 

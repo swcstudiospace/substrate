@@ -22,9 +22,10 @@ const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
 const describeLive = PG_URL ? describe : describe.skip;
 
 describe("migration steps and the migrate lock", () => {
-	test("versions are 1..N contiguous and names are unique", () => {
+	test("versions ascend from 1 with no gap, and names are unique", () => {
 		const versions = MIGRATION_STEPS.map((step) => step.version);
-		expect(versions).toEqual(MIGRATION_STEPS.map((_, index) => index + 1));
+		const last = versions.at(-1) ?? 0;
+		expect(versions).toEqual(Array.from({ length: last }, (_, index) => index + 1));
 		expect(new Set(MIGRATION_STEPS.map((step) => step.name)).size).toBe(MIGRATION_STEPS.length);
 	});
 

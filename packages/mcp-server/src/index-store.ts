@@ -832,8 +832,7 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 	// changed. One row per docs-plane destination and `.planning/` path. `destination` is a hash of the configured docs URL,
 	// never the URL. A cutover to another plane misses the old rows and ingests. Written only while
 	// `SUBSTRATE_PLANNING_HASH_STORE=on` (the default is off, and an empty table costs nothing, so the step always runs, like
-	// step 35). It takes version 39, after step 38 `corpus_reflect`. Not on main: the destination column is part of this
-	// step rather than a later one.
+	// step 35). It takes version 39, after step 38 `corpus_reflect`.
 	// Additive and idempotent: one new table, no existing row touched. An older release never names it. OPERATORS: rehearse on a
 	// restored dump before production, like steps 33 to 35.
 	{
@@ -849,6 +848,31 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 				updated_at  timestamptz not null default now(),
 				primary key (destination, path)
 			)`,
+	},
+	// Worktree overlap in the brief (phase 68, FLEET-06): the paths each worktree last reported touching, so `memory_brief`
+	// can name another session's worktree that edits the same files. Additive: two nullable-or-defaulted columns on the
+	// registry table (step 36), runs with the registry and is not opt-in. NULL means the last report carried no list (an
+	// older reporter, or a listing that failed), never "touches nothing".
+	// OPERATORS: rehearse this step on a restored dump before applying it to production. It rewrites no row.
+	{
+		version: 40,
+		name: "worktrees_changed_files",
+		phase: "expand",
+		down: `alter table worktrees drop column if exists changed_files; alter table worktrees drop column if exists files_truncated`,
+		sql: `
+			alter table worktrees add column if not exists changed_files jsonb;
+			alter table worktrees add column if not exists files_truncated boolean not null default false`,
+	},
+	// candidates() filters lower(repo) and orders by last_seen_at. worktrees_repo_seen_idx is (repo, last_seen_at) and cannot
+	// serve lower(repo). This index is its own step: step 40's contract is the two columns only.
+	// OPERATORS: rehearse this step on a restored dump before applying it to production.
+	{
+		version: 41,
+		name: "worktrees_repo_lower_seen_idx",
+		phase: "expand",
+		down: `drop index if exists worktrees_repo_lower_seen_idx`,
+		sql: `
+			create index if not exists worktrees_repo_lower_seen_idx on worktrees (lower(repo), last_seen_at desc)`,
 	},
 ];
 

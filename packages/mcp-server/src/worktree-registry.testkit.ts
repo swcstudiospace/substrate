@@ -8,7 +8,7 @@
  */
 import { expect, test } from "bun:test";
 import { defined } from "./test-support.ts";
-import type { WorktreeRecord, WorktreeRegistryStore, WorktreeStoreFilter } from "./worktree-registry.ts";
+import type { ReportedWorktree, WorktreeRegistryStore, WorktreeStoreFilter } from "./worktree-registry.ts";
 
 export interface ContractHarness {
 	store: WorktreeRegistryStore;
@@ -26,7 +26,7 @@ const DAY = 86_400_000;
 
 const at = (base: Date, offsetMs: number): Date => new Date(base.getTime() + offsetMs);
 
-function record(repo: string, path: string, overrides: Partial<WorktreeRecord> = {}): WorktreeRecord {
+function record(repo: string, path: string, overrides: Partial<ReportedWorktree> = {}): ReportedWorktree {
 	return {
 		path,
 		repo,
@@ -201,5 +201,77 @@ export function worktreeStoreContract(harness: () => ContractHarness): void {
 		const later = at(T0, HOUR);
 		await store.report({ host: h, reportedAt: later, seenAt: later, ttlS: 30 * DAY / 1000, worktrees: [record(r, "/work/old-clean", { last_commit_at: "2026-01-01T00:00:00.000Z" })] });
 		expect(defined((await store.list(filter({ host: h, limit: 1 })))[0], "the newest row").path).toBe("/work/old-clean");
+	});
+
+	test("a report's files are stored with the truncation flag and read back as sent; the listing never carries them", async () => {
+		const { store, host, repo } = harness();
+		const h = host("files");
+		const r = repo("files");
+		await store.report({
+			host: h,
+			reportedAt: T0,
+			seenAt: T0,
+			ttlS: DAY / 1000,
+			worktrees: [record(r, "/work/a", { files: ["a.ts", "b/c.ts"], files_truncated: true }), record(r, "/work/b", { files: [] }), record(r, "/work/c", { files: null })],
+		});
+
+		const rows = await store.candidates({ repo: r, limit: 10 });
+		const byPath = new Map(rows.map((row) => [row.path, row]));
+		expect(byPath.get("/work/a")).toMatchObject({ files: ["a.ts", "b/c.ts"], files_truncated: true });
+		// An empty list says "touches nothing" and null says "could not list": the store keeps the two apart.
+		expect(byPath.get("/work/b")).toMatchObject({ files: [], files_truncated: false });
+		expect(byPath.get("/work/c")).toMatchObject({ files: null, files_truncated: false });
+		expect((await store.list(filter({ repo: r }))).some((row) => "files" in row || "files_truncated" in row)).toBe(false);
+	});
+
+	test("the freshest report wins: one that omits files, or says null, clears what an earlier one stored", async () => {
+		const { store, host, repo } = harness();
+		const h = host("clear");
+		const r = repo("clear");
+		await store.report({ host: h, reportedAt: T0, seenAt: T0, ttlS: DAY / 1000, worktrees: [record(r, "/work/a", { files: ["a.ts"], files_truncated: true }), record(r, "/work/b", { files: ["b.ts"] })] });
+
+		const later = at(T0, HOUR);
+		await store.report({ host: h, reportedAt: later, seenAt: later, ttlS: DAY / 1000, worktrees: [record(r, "/work/a"), record(r, "/work/b", { files: null })] });
+
+		const rows = await store.candidates({ repo: r, limit: 10 });
+		expect(rows.map((row) => [row.path, row.files, row.files_truncated])).toEqual([
+			["/work/a", null, false],
+			["/work/b", null, false],
+		]);
+
+		const newest = at(T0, 2 * HOUR);
+		await store.report({ host: h, reportedAt: newest, seenAt: newest, ttlS: DAY / 1000, worktrees: [record(r, "/work/a", { files: ["z.ts"] })] });
+		expect(defined((await store.candidates({ repo: r, limit: 10 })).find((row) => row.path === "/work/a"), "the row").files).toEqual(["z.ts"]);
+	});
+
+	test("the candidate read is one repository (without regard to case), newest report first then host then path, and bounded by its limit", async () => {
+		const { store, host, repo } = harness();
+		const h = host("candidates");
+		const other = host("candidates-2");
+		const r = repo("candidates");
+		await store.report({ host: h, reportedAt: T0, seenAt: T0, ttlS: DAY / 1000, worktrees: [record(r, "/work/b", { files: ["x"] }), record(r, "/work/a", { files: ["x"] }), record(repo("candidates-elsewhere"), "/work/z", { files: ["x"] })] });
+		const later = at(T0, HOUR);
+		await store.report({ host: other, reportedAt: later, seenAt: later, ttlS: DAY / 1000, worktrees: [record(r, "/work/newest", { files: ["x"] })] });
+
+		const all = await store.candidates({ repo: r, limit: 10 });
+		expect(all.map((row) => [row.host, row.path])).toEqual([
+			[other, "/work/newest"],
+			[h, "/work/a"],
+			[h, "/work/b"],
+		]);
+		expect(await store.candidates({ repo: r.toUpperCase(), limit: 10 })).toHaveLength(3);
+		const bounded = await store.candidates({ repo: r, limit: 2 });
+		expect(bounded.map((row) => row.path)).toEqual(["/work/newest", "/work/a"]);
+		expect(await store.candidates({ repo: repo("candidates-none"), limit: 10 })).toEqual([]);
+	});
+
+	test("the retention sweep still removes a row that carries files, and the candidate read no longer returns it", async () => {
+		const { store, host, repo } = harness();
+		const h = host("sweep-files");
+		const r = repo("sweep-files");
+		await store.report({ host: h, reportedAt: T0, seenAt: T0, ttlS: DAY / 1000, worktrees: [record(r, "/work/old", { files: ["a.ts"] })] });
+		const late = at(T0, 2 * DAY);
+		expect(await store.report({ host: h, reportedAt: late, seenAt: late, ttlS: DAY / 1000, worktrees: [record(r, "/work/new", { files: ["b.ts"] })] })).toEqual({ stored: 1, removed: 1 });
+		expect((await store.candidates({ repo: r, limit: 10 })).map((row) => row.path)).toEqual(["/work/new"]);
 	});
 }
