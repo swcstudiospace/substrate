@@ -1229,7 +1229,7 @@ Plans:
 
 ### Phase 71: Multi-Session boundary
 
-**Goal**: A steering write or wait reaches only a session the caller's authenticated surface owns, unless the caller is the operator. The redacted cross-session digest that `session_context` returns (Phase 67 contract) is unchanged.
+**Goal**: A steering read or wait reaches only a session the caller's authenticated surface owns, unless the caller is the operator. Steering writes stay operator-only, as the docs and CLI already state. The redacted cross-session digest that `session_context` returns (Phase 67 contract) is unchanged.
 
 **Status**: Not started. Discovery: the steering REST routes (`packages/mcp-server/src/server.ts`) and MCP tools (`packages/mcp-server/src/mcp.ts`) take a caller-supplied target session id, and writes are not checked against the caller's surface.
 
@@ -1239,7 +1239,7 @@ Plans:
 
 **Success Criteria** (what must be TRUE):
 
-  1. A surface that does not own target session S gets a refused status, not a write, from queue, acknowledge and wait on S.
+  1. A surface that does not own target session S is refused, with no write and no acknowledgement, from acknowledge, wait and listen on S. Queue writes stay operator-only for every caller.
   2. The operator surface keeps cross-session access, and each refusal is an audited event.
   3. The steering baseline on `origin/main` 9b482207 (575 pass, 7 skip, 0 fail across the steering and session suites) still passes.
   4. `session_context` still returns the redacted digest of other sessions in the same repository, and its existing test still passes.
