@@ -144,7 +144,7 @@ import { nodeArtifact, type NodeArtifact } from "./node-artifact.ts";
 import { CAUSAL_WINDOW, LINKED_EVENTS, causalChain, graphLinks, type ReducedEvent } from "./memory-graph.ts";
 import { memoryExpiry, normalizeSubject, visibleToCaller } from "./memory-policy.ts";
 import { briefFanoutOf, fanOutBriefRecall, recallMemories, resolveRecallBanks, UNTRUSTED_MEMORY_NOTICE, type BankAnswer, type RecallReply } from "./memory-recall.ts";
-import { emitRetainWarning, forwardRetain, replayRetain, retainDocumentId, type RetainDeps, type RetainOutboxSink } from "./memory-retain.ts";
+import { emitRetainWarning, forwardRetain, replayRetain, retainDocumentId, type ForwardOutcome, type RetainDeps, type RetainOutboxSink } from "./memory-retain.ts";
 import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
 import { forgetEntries, selectForRollback, type ForgetReport, type ForgetRequest, type PlaneDeleteResult, type RollbackSelectRequest, type RollbackSelection } from "./memory-forget.ts";
@@ -192,10 +192,11 @@ import {
 	type CorpusStatusResponse,
 } from "@substrate/corpus";
 import { AuthorityIndex } from "./corpus/authority-index.ts";
+import { retainDigestOutcome } from "./corpus/digest-retain.ts";
 import { corpusKeyOf, reflectCitations, type ShadowNote } from "./corpus/rank.ts";
 import { corpusGapsReply, corpusReflectReply, docsFeedbackReply, type FeedbackStored, type ReflectReply, type ReflectServiceDeps, type RetainOutcome } from "./corpus/reflect-service.ts";
 import { RETRIEVAL_SWEEP_BATCH, type ReflectStore } from "./corpus/reflect-store.ts";
-import { RETRIEVAL_SWEEP_INTERVAL_MS, RetrievalRecorder, retrievalRowOf, type RecorderCounters } from "./corpus/telemetry.ts";
+import { RETRIEVAL_SWEEP_INTERVAL_MS, RetrievalRecorder, retrievalRowOf, sweepExpiredRetrievals, type RecorderCounters } from "./corpus/telemetry.ts";
 import { RailwayClient } from "./railway.ts";
 import { nodePlanningFs } from "./planning/fs.ts";
 import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
@@ -2742,19 +2743,31 @@ export class Substrate {
 	 * mid-turn can act on and `denied: store.unavailable` is.
 	 */
 	async writeMemory(request: MemoryWriteRequest): Promise<MemoryWriteResult> {
+		return (await this.writeMemoryWithLeg(request)).result;
+	}
+
+	/**
+	 * The memory write and the background Hindsight forward it started. `leg` settles with what the forward did (never rejects) and
+	 * is null when no forward was started (nothing accepted and verified). {@link writeMemory} returns the result alone and never
+	 * waits for the leg; a caller that must report the delivery (a digest) waits for it under its own bound.
+	 */
+	private async writeMemoryWithLeg(request: MemoryWriteRequest): Promise<{ result: MemoryWriteResult; leg: Promise<ForwardOutcome> | null }> {
 		// Reported on every reply, including the ones the gate never sees, so a caller
 		// always learns which surface its write was attributed to.
 		const writer = typeof request.writer === "string" ? request.writer.trim() : "";
 		if (!this.index) {
 			return {
-				outcome: "denied",
-				reason: "store.unavailable",
-				remedy:
-					"memory.write needs the index: SUBSTRATE_PG_URL is not set, so there is nowhere to record this " +
-					"and nothing would read it back. Nothing was stored.",
-				verified_persisted: false,
-				idempotency_key: "",
-				writer,
+				result: {
+					outcome: "denied",
+					reason: "store.unavailable",
+					remedy:
+						"memory.write needs the index: SUBSTRATE_PG_URL is not set, so there is nowhere to record this " +
+						"and nothing would read it back. Nothing was stored.",
+					verified_persisted: false,
+					idempotency_key: "",
+					writer,
+				},
+				leg: null,
 			};
 		}
 
@@ -2829,25 +2842,29 @@ export class Substrate {
 		if (result.outcome === "accepted" && result.verified_persisted && result.entry) {
 			const entry = result.entry;
 			const hindsight = hindsightFromEnv();
-			const run = (): Promise<void> => {
+			const run = (): Promise<ForwardOutcome> => {
 				return forwardRetain(this.retainDeps(hindsight), request, result)
-					.then((outcome) => {
-						if (!outcome.forwarded) return;
-						this.retainOutbox.forget(outcome.bank, outcome.document_id);
-						this.afterLiveRetain(result.writer);
-						return this.cache.bump(this.narrowBumps ? RECALL_GENERATION_KEY : MEMORY_GENERATION_KEY);
+					.then(async (outcome) => {
+						if (outcome.forwarded) {
+							this.retainOutbox.forget(outcome.bank, outcome.document_id);
+							this.afterLiveRetain(result.writer);
+							await this.cache.bump(this.narrowBumps ? RECALL_GENERATION_KEY : MEMORY_GENERATION_KEY);
+						}
+						return outcome;
 					})
-					.then(() => undefined)
-					.catch(() => undefined);
+					.catch((): ForwardOutcome => ({ forwarded: false, bank: "", document_id: "", reason: "retain-error" }));
 			};
 			if (!hindsight) {
-				this.trackRetain(run());
-				return result;
+				const leg = run();
+				this.trackRetain(leg);
+				return { result, leg };
 			}
 			const chainKey = `${hindsight.url} ${bankForSurface(hindsight, result.writer)} ${retainDocumentId(entry, result.idempotency_key)}`;
-			this.trackRetain(this.chainRetain(chainKey, run));
+			const leg = this.chainRetain(chainKey, run);
+			this.trackRetain(leg);
+			return { result, leg };
 		}
-		return result;
+		return { result, leg: null };
 	}
 
 	/**
@@ -5712,11 +5729,13 @@ export class Substrate {
 	/**
 	 * Retains one stored digest as a governed `fact` at repo scope under the deterministic subject `corpus-digest:<repo>`: the
 	 * Hindsight document id of a subject-addressed entry is its claim identity, so the next digest replaces this one. Through
-	 * the governance gate like every memory write; a refusal or an outage is a closed reason, never a throw.
+	 * the governance gate like every memory write. The outcome is what the Hindsight forward actually did, read under a short
+	 * bound (`pending` when it is still running or parked for a retry); a refusal or an outage is a closed reason, never a throw.
 	 */
-	private async retainDigest(input: { repo: string; text: string; surface: Surface; sessionId: string }): Promise<RetainOutcome> {
-		try {
-			const result = await this.writeMemory({
+	private retainDigest(input: { repo: string; text: string; surface: Surface; sessionId: string }): Promise<RetainOutcome> {
+		return retainDigestOutcome(
+			{ write: (request) => this.writeMemoryWithLeg(request) },
+			{
 				scope: `repo:${input.repo}`,
 				kind: "fact",
 				text: input.text,
@@ -5725,13 +5744,8 @@ export class Substrate {
 				repo: input.repo,
 				session_id: input.sessionId,
 				ttl: "30d",
-			});
-			if (result.outcome !== "accepted") return { ok: false, reason: result.reason };
-			if (!result.verified_persisted) return { ok: false, reason: "not-verified" };
-			return hindsightFromEnv() === null ? { ok: false, reason: "not-configured" } : { ok: true };
-		} catch {
-			return { ok: false, reason: "memory-write-failed" };
-		}
+			},
+		);
 	}
 
 	/** `POST /docs/feedback` and the `docs_feedback` tool. */
@@ -5773,12 +5787,16 @@ export class Substrate {
 		this.retrievalSweepStop = null;
 	}
 
-	/** One bounded retention pass: at most {@link RETRIEVAL_SWEEP_BATCH} rows older than the retention. Fail-open; returns how many rows it deleted. */
+	/**
+	 * One retention pass: rows older than the retention are deleted in batches of {@link RETRIEVAL_SWEEP_BATCH}, with a turn of the
+	 * event loop between batches, until nothing more is expired or the pass's batch count or time budget is spent (what is left
+	 * waits for the next hour). Fail-open; returns how many rows it deleted.
+	 */
 	async sweepRetrievals(): Promise<number> {
 		const store = this.reflectStore();
 		if (store === null) return 0;
 		try {
-			return await store.sweepRetrievals(this.config.docsReflect.retentionDays, RETRIEVAL_SWEEP_BATCH);
+			return await sweepExpiredRetrievals(store, { retentionDays: this.config.docsReflect.retentionDays, batch: RETRIEVAL_SWEEP_BATCH });
 		} catch (cause) {
 			process.stderr.write(`[substrate] docs telemetry: retention sweep failed — ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
 			return 0;

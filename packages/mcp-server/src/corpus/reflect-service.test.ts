@@ -6,9 +6,9 @@ import { describe, expect, test } from "bun:test";
 import { CORPUS_PROTOCOL, DIGEST_PATH, MAX_DIGEST_CHARS, MAX_GAPS_LIMIT, MAX_REFLECT_DIGESTS, DEFAULT_GAPS_LIMIT, corpusDocumentName, documentKey, type CorpusReflectResponse } from "@substrate/corpus";
 import type { AnchorVerifyPorts } from "../anchor-verify-deps.ts";
 import type { CorpusSettings } from "../config.ts";
-import type { Surface } from "../types.ts";
+import type { EventInput, Surface } from "../types.ts";
 import { defined } from "../test-support.ts";
-import { CorpusRootKeeper } from "./root.ts";
+import { CorpusRootKeeper, corpusRoot, type RootClock } from "./root.ts";
 import { FakeReflectStore } from "./reflect-testkit.ts";
 import {
 	type ReflectReply,
@@ -236,6 +236,14 @@ describe("corpusReflectReply", () => {
 		expect(store.row(REPO, DIGEST_PATH)?.state).toBe("active");
 	});
 
+	test("a Hindsight leg that is pending or not configured is the digest's reason too, never a bare stored", async () => {
+		for (const reason of ["pending", "not-configured"]) {
+			const { deps } = world({}, () => ({ ok: false, reason }));
+			const reply = ok(await corpusReflectReply(deps, request(digest(REPO, text)), "omp"));
+			expect(reply.results).toEqual([{ repo: REPO, status: "stored", reason: `hindsight:${reason}` }]);
+		}
+	});
+
 	test("one bad digest never fails the others: each is reported in request order with its own reason", async () => {
 		const { store, deps } = world();
 		const leaky = `# Notes\nuse ghp_${"a".repeat(40)} to push`;
@@ -297,6 +305,83 @@ describe("corpusReflectReply", () => {
 	});
 });
 
+describe("corpusReflectReply and the root cache", () => {
+	const text = "# agent-substrate\nMilestone v1.7, phase 66.";
+
+	class ManualClock implements RootClock {
+		readonly timers: Array<() => void> = [];
+		now(): number {
+			return 5_000_000;
+		}
+		setTimer(run: () => void): void {
+			this.timers.push(run);
+		}
+	}
+
+	async function flush(): Promise<void> {
+		for (let turn = 0; turn < 40; turn++) await Promise.resolve();
+	}
+
+	function keepered() {
+		const base = world();
+		const clock = new ManualClock();
+		const rootEvents: EventInput[] = [];
+		const roots = new CorpusRootKeeper({
+			store: () => base.store,
+			emit: async (event) => {
+				rootEvents.push(event);
+				return { stored: true };
+			},
+			clock,
+		});
+		return { ...base, clock, rootEvents, roots, deps: { ...base.deps, roots } };
+	}
+
+	test("a stored digest drops the cached root and owes one root event that covers the digest", async () => {
+		const { roots, clock, rootEvents, deps } = keepered();
+		await roots.read();
+		expect(roots.peek()).not.toBeNull();
+		ok(await corpusReflectReply(deps, request(digest(REPO, text)), "omp"));
+		expect(roots.peek()).toBeNull();
+		expect(clock.timers).toHaveLength(1);
+		defined(clock.timers[0], "the scheduled root timer")();
+		await flush();
+		expect(rootEvents).toHaveLength(1);
+		expect(defined(rootEvents[0], "the root event").payload).toMatchObject({ root: corpusRoot([{ repo: REPO, path: DIGEST_PATH, sha256: sha256Hex(text) }]).root, count: 1 });
+	});
+
+	test("the cache is unavailable while the digest writes, and a digest write that failed owes the event too", async () => {
+		const { roots, clock, store, deps } = keepered();
+		const duringWrite: boolean[] = [];
+		const original = store.recordIngested.bind(store);
+		store.recordIngested = async (row) => {
+			duringWrite.push(roots.peek() === null);
+			return original(row);
+		};
+		await roots.read();
+		ok(await corpusReflectReply(deps, request(digest(REPO, text)), "omp"));
+		expect(duringWrite).toEqual([true]);
+
+		const failing = keepered();
+		failing.store.recordIngested = async () => {
+			throw new Error("connection lost");
+		};
+		const reply = ok(await corpusReflectReply(failing.deps, request(digest(REPO, text)), "omp"));
+		expect(reply.results).toEqual([{ repo: REPO, status: "failed", reason: "manifest-unavailable" }]);
+		expect(failing.clock.timers).toHaveLength(1);
+		expect(clock.timers).toHaveLength(1);
+	});
+
+	test("a repeat that changed nothing schedules no event", async () => {
+		const { roots, clock, deps } = keepered();
+		ok(await corpusReflectReply(deps, request(digest(REPO, text)), "omp"));
+		clock.timers.length = 0;
+		await roots.read();
+		ok(await corpusReflectReply(deps, request(digest(REPO, text)), "omp"));
+		expect(clock.timers).toEqual([]);
+	});
+});
+
 describe("gaps", () => {
 	const row = (queryHash: string, topScore: number | null, over: { degraded?: boolean; text?: string | null } = {}) => ({
 		surface: "omp",
@@ -350,6 +435,15 @@ describe("gaps", () => {
 		const { reflect, deps } = world({ gapScore: 0.05 });
 		await reflect.appendRetrieval(row("low", 0.1));
 		expect(ok(await corpusGapsReply(deps, null, "omp")).gaps).toEqual([]);
+	});
+
+	test("at a gap score of zero a query that returned no citation is still a gap, and a scored one is not", async () => {
+		const { reflect, deps } = world({ gapScore: 0 });
+		await reflect.appendRetrieval(row("none", null));
+		await reflect.appendRetrieval(row("scored-low", 0.01));
+		await reflect.appendRetrieval(row("scored-zero", 0));
+		const gaps = ok(await corpusGapsReply(deps, null, "omp")).gaps;
+		expect(gaps.map((gap) => gap.queryHash)).toEqual(["none"]);
 	});
 
 	test("the gates answer first, and a store that fails is index-unavailable", async () => {

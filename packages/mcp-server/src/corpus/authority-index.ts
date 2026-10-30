@@ -6,6 +6,11 @@
  *   `detectSupersession` pass) only when `manifestVersion()` moved, and the version itself is checked at most once per
  *   {@link VERSION_CHECK_MS}.
  * - The feedback counts are one grouped query, cached for {@link FEEDBACK_TTL_MS}.
+ * - A clear (`invalidate`, `invalidateFeedback`) moves a generation. A load records the generation it began under and publishes
+ *   only if it is still current, and a clear forgets the load in flight, so the next read starts a fresh one instead of joining
+ *   a read that began before the change and may hold the old data.
+ * - A manifest with more active rows than {@link AUTHORITY_MAX_ROWS} gives a `partial` snapshot: the copy comparison of
+ *   supersession is off for it, because a copy group cut by the cap may have had a third member.
  * - Every read is fail-open: a store that fails keeps the last snapshot, and with none the lookup is null, so a search is
  *   answered exactly as it would be with the re-rank off. A failed read is not retried before the next check time, so a
  *   database that is down is asked once per interval, not once per search.
@@ -13,7 +18,7 @@
 import { detectSupersession, documentKey, scoreDocument, type FeedbackCounts, type SupersessionRow } from "@substrate/corpus";
 import { staleByFeedback, type AuthorityLookup } from "./rank.ts";
 import { FEEDBACK_MAX_KEYS, type ReflectStore } from "./reflect-store.ts";
-import type { CorpusStore, ManifestRow } from "./store.ts";
+import type { ActiveRows, CorpusStore, ManifestRow } from "./store.ts";
 
 /** The most active rows one snapshot reads. A document past the cap is never flagged or re-ranked, never wrongly so. */
 export const AUTHORITY_MAX_ROWS = 100_000;
@@ -33,11 +38,13 @@ interface Held {
 	ingestedAtMs: number | null;
 }
 
-interface Snapshot {
+export interface Snapshot {
 	version: number;
 	rows: Map<string, Held>;
 	/** Key of a superseded document -> key of the document that supersedes it. */
 	superseded: Map<string, string>;
+	/** True when the rows are not every active row (the read cap cut them), so no copy comparison was made. */
+	partial: boolean;
 	/** When the version was last confirmed, ms. */
 	checkedAt: number;
 }
@@ -66,13 +73,13 @@ function supersessionRowOf(row: ManifestRow): SupersessionRow {
 	};
 }
 
-function snapshotOf(version: number, rows: readonly ManifestRow[], checkedAt: number): Snapshot {
+export function snapshotOf(version: number, active: ActiveRows, checkedAt: number): Snapshot {
 	const held = new Map<string, Held>();
-	for (const row of rows) {
+	for (const row of active.rows) {
 		const at = row.ingestedAt === null ? Number.NaN : Date.parse(row.ingestedAt);
 		held.set(documentKey(row.repo, row.path), { tier: row.tier, kind: row.kind, ingestedAtMs: Number.isFinite(at) ? at : null });
 	}
-	return { version, rows: held, superseded: detectSupersession(rows.map(supersessionRowOf)), checkedAt };
+	return { version, rows: held, superseded: detectSupersession(active.rows.map(supersessionRowOf), { compareCopies: !active.truncated }), partial: active.truncated, checkedAt };
 }
 
 export class AuthorityIndex {
@@ -80,25 +87,31 @@ export class AuthorityIndex {
 	/** Do not read the manifest again before this time, ms; set after a failed read. */
 	private retryManifestAt = 0;
 	private loading: Promise<void> | null = null;
+	/** Moves with every clear of the manifest snapshot; a load that began under an older value publishes nothing. */
+	private manifestGeneration = 0;
 	private feedback: { counts: Map<string, FeedbackCounts>; loadedAt: number } | null = null;
 	private retryFeedbackAt = 0;
 	private loadingFeedback: Promise<void> | null = null;
+	private feedbackGeneration = 0;
 	/** After a lookup ran out of budget, lookups do not wait for a load until this time, ms: a stalled database costs one budget, not one per search. */
 	private noWaitUntil = 0;
 
 	constructor(private readonly deps: AuthorityIndexDeps) {}
 
-	/** Drops what is held, so the next lookup reads again: called after this process changed the manifest or the feedback. */
+	/** Drops what is held and what is loading, so the next lookup reads again: called after this process changed the manifest or the feedback. */
 	invalidate(): void {
+		this.manifestGeneration += 1;
 		this.snapshot = null;
-		this.feedback = null;
+		this.loading = null;
 		this.retryManifestAt = 0;
-		this.retryFeedbackAt = 0;
+		this.invalidateFeedback();
 	}
 
-	/** Drops the feedback counts only: a verdict was stored. */
+	/** Drops the feedback counts and the load of them in flight: a verdict was stored. */
 	invalidateFeedback(): void {
+		this.feedbackGeneration += 1;
 		this.feedback = null;
+		this.loadingFeedback = null;
 		this.retryFeedbackAt = 0;
 	}
 
@@ -145,27 +158,36 @@ export class AuthorityIndex {
 		const now = this.deps.now();
 		const held = this.snapshot;
 		if ((held !== null && now - held.checkedAt < VERSION_CHECK_MS) || now < this.retryManifestAt) return Promise.resolve();
-		this.loading ??= this.refreshManifest().finally(() => {
-			this.loading = null;
-		});
+		if (this.loading === null) {
+			const load = this.refreshManifest().finally(() => {
+				// A load that a clear already forgot must not forget the fresh one that replaced it.
+				if (this.loading === load) this.loading = null;
+			});
+			this.loading = load;
+		}
 		return this.loading;
 	}
 
 	private async refreshManifest(): Promise<void> {
 		const store = this.deps.store();
 		if (store === null) return;
+		const generation = this.manifestGeneration;
 		const started = this.deps.now();
 		try {
 			const version = await store.manifestVersion();
+			if (generation !== this.manifestGeneration) return;
 			const held = this.snapshot;
 			if (held !== null && held.version === version) {
 				held.checkedAt = started;
 				return;
 			}
-			this.snapshot = snapshotOf(version, await store.activeRows(AUTHORITY_MAX_ROWS), started);
+			const active = await store.activeRows(AUTHORITY_MAX_ROWS);
+			// A change made while the rows were being read: what was read may predate it, so none of it is kept.
+			if (generation !== this.manifestGeneration) return;
+			this.snapshot = snapshotOf(version, active, started);
 		} catch {
-			// Fail-open: keep what is held and ask again after the interval.
-			this.retryManifestAt = started + VERSION_CHECK_MS;
+			// Fail-open: keep what is held and ask again after the interval. A read the process has since cleared says nothing about now.
+			if (generation === this.manifestGeneration) this.retryManifestAt = started + VERSION_CHECK_MS;
 		}
 	}
 
@@ -173,23 +195,28 @@ export class AuthorityIndex {
 		const now = this.deps.now();
 		const held = this.feedback;
 		if ((held !== null && now - held.loadedAt < FEEDBACK_TTL_MS) || now < this.retryFeedbackAt) return Promise.resolve();
-		this.loadingFeedback ??= this.refreshFeedback().finally(() => {
-			this.loadingFeedback = null;
-		});
+		if (this.loadingFeedback === null) {
+			const load = this.refreshFeedback().finally(() => {
+				if (this.loadingFeedback === load) this.loadingFeedback = null;
+			});
+			this.loadingFeedback = load;
+		}
 		return this.loadingFeedback;
 	}
 
 	private async refreshFeedback(): Promise<void> {
 		const store = this.deps.reflect();
+		const generation = this.feedbackGeneration;
 		const started = this.deps.now();
 		if (store === null) {
 			this.feedback = { counts: new Map(), loadedAt: started };
 			return;
 		}
 		try {
-			this.feedback = { counts: await store.feedbackCounts(FEEDBACK_MAX_KEYS), loadedAt: started };
+			const counts = await store.feedbackCounts(FEEDBACK_MAX_KEYS);
+			if (generation === this.feedbackGeneration) this.feedback = { counts, loadedAt: started };
 		} catch {
-			this.retryFeedbackAt = started + FEEDBACK_TTL_MS;
+			if (generation === this.feedbackGeneration) this.retryFeedbackAt = started + FEEDBACK_TTL_MS;
 		}
 	}
 }

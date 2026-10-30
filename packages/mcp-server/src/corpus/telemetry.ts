@@ -31,6 +31,10 @@ export const MAX_PENDING_WRITES = 50;
 export const LOG_EVERY = 100;
 /** How often the retention sweep runs, ms: once at boot and then once an hour. */
 export const RETRIEVAL_SWEEP_INTERVAL_MS = 3_600_000;
+/** The most batches one sweep deletes before it leaves the rest for the next hour. */
+export const SWEEP_MAX_BATCHES = 50;
+/** The most wall time one sweep spends deleting, ms; a batch already running is let finish, so it can run a little over. */
+export const SWEEP_BUDGET_MS = 2000;
 
 /** Trim, lower-case and collapse every run of whitespace: two spellings of one question share a hash. */
 export function normalizeQuery(query: string): string {
@@ -111,7 +115,13 @@ export interface RecorderDeps {
 }
 
 export class RetrievalRecorder {
+	/** The wrappers a caller may wait on; a wrapper leaves when the budget race ends, which can be before its database call has settled. */
 	private readonly pending = new Set<Promise<void>>();
+	/**
+	 * Database writes that have started and not settled. The slot is held until the write itself ends, not until the race gave up:
+	 * a database that answers slowly must not be handed more work than the cap while the earlier calls still run or wait for a connection.
+	 */
+	private inFlight = 0;
 	private readonly counts: RecorderCounters = { written: 0, failed: 0, timedOut: 0, dropped: 0 };
 
 	constructor(private readonly deps: RecorderDeps) {}
@@ -123,7 +133,7 @@ export class RetrievalRecorder {
 	/** Starts the write and returns at once. Never throws and never waits for the database. */
 	record(row: RetrievalRow): void {
 		const store = this.deps.store();
-		if (store === null || this.pending.size >= (this.deps.maxPending ?? MAX_PENDING_WRITES)) {
+		if (store === null || this.inFlight >= (this.deps.maxPending ?? MAX_PENDING_WRITES)) {
 			this.counts.dropped += 1;
 			return;
 		}
@@ -143,9 +153,13 @@ export class RetrievalRecorder {
 		const expired = Promise.withResolvers<"timeout">();
 		const timer = setTimeout(() => expired.resolve("timeout"), budgetMs);
 		timer.unref();
+		this.inFlight += 1;
+		// A store that throws synchronously is a failed write like any other.
+		const append = (async () => store.appendRetrieval(row))().finally(() => {
+			this.inFlight -= 1;
+		});
 		try {
-			// A store that throws synchronously is a failed write like any other.
-			const outcome = await Promise.race([(async () => store.appendRetrieval(row))().then(() => "written" as const), expired.promise]);
+			const outcome = await Promise.race([append.then(() => "written" as const), expired.promise]);
 			if (outcome === "written") {
 				this.counts.written += 1;
 			} else {
@@ -164,4 +178,43 @@ export class RetrievalRecorder {
 		const failures = this.counts.failed + this.counts.timedOut;
 		if (failures === 1 || failures % LOG_EVERY === 0) this.deps.log(`[substrate] docs telemetry: retrieval row not stored (${failures} so far) — ${reason}`);
 	}
+}
+
+export interface SweepOptions {
+	retentionDays: number;
+	/** Rows one delete may take: the store's own bound, so no single statement holds a long lock. */
+	batch: number;
+	maxBatches?: number | undefined;
+	budgetMs?: number | undefined;
+	/** Epoch ms; injected by tests. */
+	now?: (() => number) | undefined;
+	/** Gives the event loop a turn between two batches; injected by tests. */
+	yieldTurn?: (() => Promise<void>) | undefined;
+}
+
+function nextMacrotask(): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	setImmediate(() => resolve());
+	return promise;
+}
+
+/**
+ * Deletes expired retrieval rows in bounded batches until a batch comes back short (nothing more is expired), the batch count is
+ * reached or the time budget is spent, with a turn of the event loop between batches so searches are served meanwhile. What is
+ * left waits for the next sweep. Returns how many rows it deleted. A store that throws propagates its error.
+ */
+export async function sweepExpiredRetrievals(store: ReflectStore, options: SweepOptions): Promise<number> {
+	const now = options.now ?? Date.now;
+	const yieldTurn = options.yieldTurn ?? nextMacrotask;
+	const maxBatches = options.maxBatches ?? SWEEP_MAX_BATCHES;
+	const budgetMs = options.budgetMs ?? SWEEP_BUDGET_MS;
+	const started = now();
+	let deleted = 0;
+	for (let batches = 0; batches < maxBatches; batches += 1) {
+		const removed = await store.sweepRetrievals(options.retentionDays, options.batch);
+		deleted += removed;
+		if (removed < options.batch || now() - started >= budgetMs) break;
+		await yieldTurn();
+	}
+	return deleted;
 }

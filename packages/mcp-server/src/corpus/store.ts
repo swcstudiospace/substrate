@@ -63,6 +63,14 @@ export interface ManifestLeaf {
 	sha256: string;
 }
 
+/** The ACTIVE rows (at most the limit) and whether they are all of them. */
+export interface ActiveRows {
+	/** At most `limit` rows, ordered by `(repo, path)`. */
+	rows: ManifestRow[];
+	/** True when `rows` is not the whole active manifest: more rows are active than `limit`, or a row could not be read. */
+	truncated: boolean;
+}
+
 /** The ACTIVE rows' leaves and the manifest version they were read at, from one consistent read. */
 export interface ActiveLeaves {
 	manifestVersion: number;
@@ -91,10 +99,11 @@ export interface CorpusStore {
 	/** How many ACTIVE rows hold this plane document id. */
 	activeReferences(documentId: string): Promise<number>;
 	/**
-	 * Up to `limit` ACTIVE rows ordered by `(repo, path)`, for the supersession and authority index. A bound, not a page: the
-	 * reader treats a document it never saw as unflagged, so a cap can only cost a flag, never invent one.
+	 * Up to `limit` ACTIVE rows ordered by `(repo, path)`, for the supersession and authority index. `truncated` says the list is
+	 * not the whole active manifest: a reader may treat a document it never saw as unflagged, but must not judge a document by
+	 * comparing it with the copies it did see, because the copies it missed may change the answer.
 	 */
-	activeRows(limit: number): Promise<ManifestRow[]>;
+	activeRows(limit: number): Promise<ActiveRows>;
 	/**
 	 * The leaves of the ACTIVE rows (at most `limit`, `truncated` when there are more) and the manifest version of the very read
 	 * that returned them, so a root made from them names the version it covers.
@@ -211,12 +220,15 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 			const rows = await sql`select count(*)::int as n from corpus_documents where docs_document_id = ${documentId} and state = 'active'`;
 			return numberOf(rows[0]?.n);
 		},
-		async activeRows(limit: number): Promise<ManifestRow[]> {
-			const rows: Array<Record<string, unknown>> = await sql`select * from corpus_documents where state = 'active' order by repo, path limit ${limit}`;
-			return rows.flatMap((row) => {
-				const parsed = toManifestRow(row);
+		async activeRows(limit: number): Promise<ActiveRows> {
+			// One row past the limit tells a full list from a cut one.
+			const records: Array<Record<string, unknown>> = await sql`select * from corpus_documents where state = 'active' order by repo, path limit ${limit + 1}`;
+			const page = records.slice(0, limit);
+			const rows = page.flatMap((record) => {
+				const parsed = toManifestRow(record);
 				return parsed === null ? [] : [parsed];
 			});
+			return { rows, truncated: records.length > limit || rows.length < page.length };
 		},
 		manifestVersion,
 		async activeLeaves(limit: number): Promise<ActiveLeaves> {

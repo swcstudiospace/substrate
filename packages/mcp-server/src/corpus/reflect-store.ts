@@ -73,11 +73,16 @@ export interface GapRow {
 }
 
 export interface GapQuery {
-	/** A query whose best citation scored below this is a gap. */
+	/** A query whose best citation scored below this is a gap; a query that returned no citation is a gap whatever this is. */
 	gapScore: number;
 	days: number;
 	/** The most rows to return. */
 	limit: number;
+}
+
+/** Whether a query whose best citation scored `best` (null: it returned none) is a gap. The SQL of `gaps` says the same. */
+export function isGap(best: number | null, gapScore: number): boolean {
+	return best === null || best < gapScore;
 }
 
 export interface ReflectStore {
@@ -159,7 +164,7 @@ export function bunReflectStore(sql: SQL): ReflectStore {
 				from corpus_retrievals
 				where at >= now() - make_interval(days => ${query.days}) and not degraded
 				group by query_hash
-				having coalesce(max(top_score), 0) < ${query.gapScore}
+				having max(top_score) is null or max(top_score) < ${query.gapScore}
 				order by count(*) desc, max(at) desc, query_hash
 				limit ${query.limit}`;
 			return rows.flatMap((row): GapRow[] => {

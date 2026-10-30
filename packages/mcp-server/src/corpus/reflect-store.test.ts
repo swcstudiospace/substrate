@@ -129,5 +129,8 @@ describeLive("the reflect tables against a live index", () => {
 		expect(defined(gaps[1], "the low gap").best).toBeCloseTo(0.1, 5);
 		expect(typeof gaps[0]?.lastSeen).toBe("string");
 		expect((await store.gaps({ gapScore: 0.2, days: 30, limit: 1 })).length).toBe(1);
+		// With the gap score at zero nothing scores below it, but a query that returned no citation is still a gap.
+		const atZero = (await store.gaps({ gapScore: 0, days: 30, limit: 5000 })).filter((gap) => gap.queryHash.startsWith(MARKER));
+		expect(atZero.map((gap) => gap.queryHash)).toEqual([`${MARKER}-gap-none`]);
 	});
 });

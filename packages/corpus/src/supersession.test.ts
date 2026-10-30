@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { type SupersessionRow, detectSupersession, supersededByMarker } from "./supersession.ts";
+import { type SupersessionRow, detectSupersession, resolveChains, supersededByMarker } from "./supersession.ts";
 
 const OLD = "2026-01-01T00:00:00.000Z";
 const NEW = "2026-06-01T00:00:00.000Z";
@@ -196,5 +196,72 @@ describe("detectSupersession precedence", () => {
 	test("no rows, or rows with nothing to flag, give an empty map", () => {
 		expect(detectSupersession([]).size).toBe(0);
 		expect(detectSupersession([row("Acme/A", "README.md"), row("Acme/B", "README.md")]).size).toBe(0);
+	});
+});
+
+describe("detectSupersession on rows that are not every active row", () => {
+	test("with the copy comparison off a pair of copies is left alone, while a marker and a live counterpart still flag", () => {
+		const rows = [
+			row("local/old", "docs/guide.md", { updatedAt: OLD }),
+			row("local/new", "docs/guide.md", { updatedAt: NEW }),
+			row("Acme/A", "docs/old.md", { supersededBy: "docs/new.md" }),
+			row("Acme/A", "docs/new.md"),
+			row("Acme/A", ".planning/milestones/v1/ROADMAP.md", { tier: 3 }),
+			row("Acme/A", ".planning/ROADMAP.md"),
+		];
+		expect(detectSupersession(rows).has("local/old:docs/guide.md")).toBe(true);
+		const partial = detectSupersession(rows, { compareCopies: false });
+		expect([...partial.keys()].sort()).toEqual(["Acme/A:.planning/milestones/v1/ROADMAP.md", "Acme/A:docs/old.md"]);
+	});
+});
+
+describe("resolveChains", () => {
+	test("resolves each key to the end of its chain, drops looping chains and the tails that run into one, and keeps sorted order", () => {
+		const direct = new Map([
+			["b", "c"],
+			["a", "b"],
+			["loop1", "loop2"],
+			["loop2", "loop1"],
+			["tail", "loop1"],
+		]);
+		expect([...resolveChains(direct)]).toEqual([
+			["a", "c"],
+			["b", "c"],
+		]);
+	});
+
+	test("branches that join share one walk of the common stretch", () => {
+		const direct = new Map([
+			["x1", "mid"],
+			["x2", "mid"],
+			["mid", "end"],
+		]);
+		const resolved = resolveChains(direct);
+		expect(resolved.get("x1")).toBe("end");
+		expect(resolved.get("x2")).toBe("end");
+	});
+
+	test("a chain of 20,000 documents is resolved in a number of steps linear in its length, not quadratic", () => {
+		const length = 20_000;
+		const name = (index: number): string => `d${String(index).padStart(6, "0")}`;
+		const direct = new Map<string, string>();
+		for (let index = 0; index < length; index += 1) direct.set(name(index), name(index + 1));
+		let steps = 0;
+		const resolved = resolveChains(direct, () => {
+			steps += 1;
+		});
+		expect(resolved.size).toBe(length);
+		expect(new Set(resolved.values())).toEqual(new Set([name(length)]));
+		// Walking each document's whole chain would take about length * length / 2 = 200,000,000 steps.
+		expect(steps).toBeLessThanOrEqual(3 * length);
+	});
+
+	test("a long chain of markers through detectSupersession flags every document against the last", () => {
+		const length = 5000;
+		const path = (index: number): string => `docs/v${index}.md`;
+		const rows = Array.from({ length: length + 1 }, (_, index) => row("Acme/A", path(index), index < length ? { supersededBy: path(index + 1) } : {}));
+		const result = detectSupersession(rows);
+		expect(result.size).toBe(length);
+		expect(result.get(`Acme/A:${path(0)}`)).toBe(`Acme/A:${path(length)}`);
 	});
 });

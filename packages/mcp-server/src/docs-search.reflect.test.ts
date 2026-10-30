@@ -286,7 +286,7 @@ describe("SUBSTRATE_DOCS_TELEMETRY", () => {
 		expect(built.substrate.reflectCounters().telemetry).toEqual({ written: 0, failed: 0, timedOut: 0, dropped: 1 });
 	});
 
-	test("retention deletes at most one batch of rows per sweep, and only rows older than the retention window", async () => {
+	test("retention drains every expired batch in one pass, and only rows older than the retention window", async () => {
 		const day = 86_400_000;
 		const bare = (hash: string): RetrievalRow => ({ surface: "omp", queryHash: hash, queryText: null, backend: "lightrag", returned: [], topScore: null, returnedCount: 0, degraded: false, rerank: null });
 		const built = world({ SUBSTRATE_DOCS_TELEMETRY: "on", SUBSTRATE_DOCS_TELEMETRY_RETENTION_DAYS: "30" }, MIXED);
@@ -300,11 +300,9 @@ describe("SUBSTRATE_DOCS_TELEMETRY", () => {
 		await built.reflect.appendRetrieval(bare("recent"));
 		built.clock.now = base + 31 * day;
 
-		expect(await built.substrate.sweepRetrievals()).toBe(RETRIEVAL_SWEEP_BATCH);
-		expect(built.reflect.retrievals).toHaveLength(old - RETRIEVAL_SWEEP_BATCH + 2);
-		expect(await built.substrate.sweepRetrievals()).toBe(old - RETRIEVAL_SWEEP_BATCH);
-		expect(await built.substrate.sweepRetrievals()).toBe(0);
+		expect(await built.substrate.sweepRetrievals()).toBe(old);
 		expect(built.reflect.retrievals.map((entry) => entry.row.queryHash)).toEqual(["boundary", "recent"]);
+		expect(await built.substrate.sweepRetrievals()).toBe(0);
 	});
 
 	test("a retention sweep against a store that fails deletes nothing and does not throw", async () => {

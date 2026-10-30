@@ -30,14 +30,16 @@ export const REPO_LIMIT = 100;
 /**
  * A value that came from a file system, an origin or a server answer, safe to print: every control character (escape,
  * newline, tab, DEL, the C1 range and the Unicode line separators) is written as its escape, so a tracked file name cannot
- * rewrite the operator's terminal or forge a line of the report. JSON output keeps the raw value.
+ * rewrite the operator's terminal or forge a line of the report. JSON output keeps the raw value. `keepLayout` lets the newline
+ * and the tab through, for a multi-line text shown as a block; every other control character is still escaped.
  */
-export function printable(text: string): string {
+export function printable(text: string, options: { keepLayout?: boolean } = {}): string {
 	let out = "";
 	for (const char of text) {
 		const code = char.codePointAt(0) ?? 0;
+		const layout = options.keepLayout === true && (code === 0x0a || code === 0x09);
 		const control = code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029;
-		if (!control) out += char;
+		if (!control || layout) out += char;
 		else out += code <= 0xff ? `\\x${code.toString(16).padStart(2, "0")}` : `\\u${code.toString(16).padStart(4, "0")}`;
 	}
 	return out;
@@ -203,7 +205,7 @@ export function renderReflectPlan(collection: ReflectCollection, execute: boolea
 	}
 	if (!execute) {
 		for (const digest of collection.digests.slice(0, REFLECT_PREVIEW_LIMIT)) {
-			out.push(`--- ${printable(digest.repo)} (${printable(digest.path)}, key ${printable(digest.key)})\n${digest.text}`);
+			out.push(`--- ${printable(digest.repo)} (${printable(digest.path)}, key ${printable(digest.key)})\n${printable(digest.text, { keepLayout: true })}`);
 		}
 		if (collection.digests.length > REFLECT_PREVIEW_LIMIT) {
 			out.push(`  ... and ${collection.digests.length - REFLECT_PREVIEW_LIMIT} more digest texts (see --json)\n`);
@@ -230,6 +232,11 @@ export function renderReflectOutcome(summary: ReflectSummary): string {
 			out.push(`  ${printable(problem.repo)}  ${problem.status}${problem.reason === undefined ? "" : `  [${printable(problem.reason)}]`}\n`);
 		}
 		out.push(more(LIST_LIMIT, summary.problems.length));
+	}
+	if (summary.warnings.length > 0) {
+		out.push(`warnings (${summary.warnings.length}): stored, but the memory write did not land as asked:\n`);
+		for (const warning of summary.warnings.slice(0, LIST_LIMIT)) out.push(`  ${printable(warning.repo)}  [${printable(warning.reason)}]\n`);
+		out.push(more(LIST_LIMIT, summary.warnings.length));
 	}
 	if (summary.notSent > 0) out.push(`not sent: ${plural(summary.notSent, "digest")} (an earlier request failed)\n`);
 	return out.join("");

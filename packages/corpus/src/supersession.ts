@@ -84,12 +84,70 @@ function liveCounterpart(path: string): string | null {
 	return flat === undefined ? null : [...prefix, flat].join("/");
 }
 
+export interface SupersessionOptions {
+	/**
+	 * Whether rule 3 (the two-copy comparison) may run. False when `rows` is known not to be every active row: a copy group is
+	 * judged by its exact size, so a third copy that was never read would turn an ambiguous group into a false "superseded".
+	 * Rules 1 and 2 stay on: each flags by a fact present in the rows read (the marker, the live counterpart), and a row that was
+	 * not read can only cost a flag, never invent one. Default true.
+	 */
+	compareCopies?: boolean | undefined;
+}
+
+/**
+ * Resolves every key of `direct` (flagged document -> the document it points at) to the end of its chain: the first document
+ * on the way that is not itself flagged. A key whose chain loops, or runs into a loop, has no end and is left out. Every
+ * document on a walked path shares the answer of its walk (a known end, or "loops"), so each key is walked once and the pass is
+ * linear however long the chains are. `onStep` is told of each step taken, for a test that bounds the work.
+ */
+export function resolveChains(direct: ReadonlyMap<string, string>, onStep?: () => void): Map<string, string> {
+	// A key maps to its end, or to null when its chain loops.
+	const known = new Map<string, string | null>();
+	const keys = [...direct.keys()].sort(compareText);
+	for (const from of keys) {
+		if (known.has(from)) continue;
+		const path: string[] = [];
+		const onPath = new Set<string>();
+		let end: string | null = null;
+		let current = from;
+		for (;;) {
+			onStep?.();
+			const settled = known.get(current);
+			if (settled !== undefined) {
+				end = settled;
+				break;
+			}
+			const next = direct.get(current);
+			if (next === undefined) {
+				// Not flagged: the chain ends here.
+				end = current;
+				break;
+			}
+			if (onPath.has(current)) {
+				end = null;
+				break;
+			}
+			onPath.add(current);
+			path.push(current);
+			current = next;
+		}
+		for (const key of path) known.set(key, end);
+	}
+	// Sorted by key, as the answer always was, so the order never depends on which chain was walked first.
+	const resolved = new Map<string, string>();
+	for (const key of keys) {
+		const end = known.get(key);
+		if (end !== null && end !== undefined) resolved.set(key, end);
+	}
+	return resolved;
+}
+
 /**
  * Key (`documentKey`) of a superseded document -> key of the document that supersedes it, resolved to the end of its
  * chain. Deterministic whatever the order of `rows`. A chain that loops (two markers that point at each other) has no
  * current document, so none of its members is flagged.
  */
-export function detectSupersession(rows: readonly SupersessionRow[]): Map<string, string> {
+export function detectSupersession(rows: readonly SupersessionRow[], options: SupersessionOptions = {}): Map<string, string> {
 	// One row per key; a repeated key keeps the row that sorts last, so the input order never matters.
 	const byKey = new Map<string, SupersessionRow>();
 	for (const row of [...rows].sort(
@@ -116,9 +174,10 @@ export function detectSupersession(rows: readonly SupersessionRow[]): Map<string
 		if (byKey.has(target)) flag(key, target);
 	}
 
-	// Rule 3 groups the tier 1 and 2 rows of local copy collections by path; only a group of exactly two is judged.
+	// Rule 3 groups the tier 1 and 2 rows of local copy collections by path; only a group of exactly two is judged, and only when
+	// the rows are every active row: a group cut by a read cap may have had a third member.
 	const copies = new Map<string, Array<[string, SupersessionRow]>>();
-	for (const [key, row] of ordered) {
+	for (const [key, row] of options.compareCopies === false ? [] : ordered) {
 		if (!row.repo.startsWith(LOCAL_PREFIX) || row.tier > 2) continue;
 		copies.set(row.path, [...(copies.get(row.path) ?? []), [key, row]]);
 	}
@@ -135,16 +194,5 @@ export function detectSupersession(rows: readonly SupersessionRow[]): Map<string
 		else flag(secondKey, firstKey);
 	}
 
-	const resolved = new Map<string, string>();
-	for (const from of [...direct.keys()].sort(compareText)) {
-		const seen = new Set<string>([from]);
-		let target = direct.get(from);
-		while (target !== undefined && direct.has(target) && !seen.has(target)) {
-			seen.add(target);
-			target = direct.get(target);
-		}
-		// A target that is itself flagged here means the walk met a loop: the chain has no current end.
-		if (target !== undefined && !direct.has(target)) resolved.set(from, target);
-	}
-	return resolved;
+	return resolveChains(direct);
 }

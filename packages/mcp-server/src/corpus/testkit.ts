@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import type { CorpusDocument, CorpusEntry } from "@substrate/corpus";
 import type { BulkDocumentOutcome, BulkTextDocument, LightragBulkPlane } from "../planes/lightrag-bulk.ts";
 import { planeDocumentIdForName } from "./names.ts";
-import type { ActiveLeaves, CorpusStatusSummary, CorpusStore, ManifestRow, RecordedDocument, RefreshedMetadata } from "./store.ts";
+import type { ActiveLeaves, ActiveRows, CorpusStatusSummary, CorpusStore, ManifestRow, RecordedDocument, RefreshedMetadata } from "./store.ts";
 
 export function sha256Hex(text: string): string {
 	return createHash("sha256").update(text, "utf8").digest("hex");
@@ -100,8 +100,9 @@ export class FakeStore implements CorpusStore {
 		return [...this.rows.values()].filter((row) => row.state === "active" && row.documentId === documentId).length;
 	}
 
-	async activeRows(limit: number): Promise<ManifestRow[]> {
-		return [...this.rows.values()].filter((row) => row.state === "active").slice(0, limit);
+	async activeRows(limit: number): Promise<ActiveRows> {
+		const active = [...this.rows.values()].filter((row) => row.state === "active");
+		return { rows: active.slice(0, limit), truncated: active.length > limit };
 	}
 
 	async manifestVersion(): Promise<number> {

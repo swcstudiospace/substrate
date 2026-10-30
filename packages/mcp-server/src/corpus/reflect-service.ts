@@ -225,9 +225,19 @@ export async function corpusReflectReply(deps: ReflectServiceDeps, raw: unknown,
 	const ingested = new Map<string, { status: string; reason?: string | undefined }>();
 	let manifestVersion = 0;
 	if (documents.length > 0) {
-		const response = await ingestCorpus({ store, plane, settings: deps.settings, emit: deps.emit, surface, sessionId, signal: deps.signal }, { protocol: CORPUS_PROTOCOL, documents, tombstones: [] });
-		for (const result of response.results) ingested.set(result.repo, { status: result.status, reason: result.reason });
-		manifestVersion = response.manifestVersion;
+		// Same bracket as `corpusIngestReply`: the root cache is unavailable from the first digest write to the last, and a request
+		// that stored, changed or failed part-way (or threw) owes the root event; one that changed nothing writes nothing.
+		deps.roots.writeStarted();
+		let changed = true;
+		try {
+			const response = await ingestCorpus({ store, plane, settings: deps.settings, emit: deps.emit, surface, sessionId, signal: deps.signal }, { protocol: CORPUS_PROTOCOL, documents, tombstones: [] });
+			const { counts } = response;
+			changed = counts.ingested + counts.updated + counts.tombstoned + counts.failed > 0;
+			for (const result of response.results) ingested.set(result.repo, { status: result.status, reason: result.reason });
+			manifestVersion = response.manifestVersion;
+		} finally {
+			deps.roots.writeSettled(changed);
+		}
 	} else {
 		try {
 			manifestVersion = await store.manifestVersion();

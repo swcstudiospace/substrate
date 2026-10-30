@@ -107,6 +107,11 @@ describe("printable", () => {
 		expect(printable("a\u001b[2Jb\nc\td\u007fe\u0085f\u2028g")).toBe("a\\x1b[2Jb\\x0ac\\x09d\\x7fe\\x85f\\u2028g");
 	});
 
+	test("a C1 control such as the single-character CSI is escaped, and keepLayout lets only the newline and the tab through", () => {
+		expect(printable("bullet \u009b31mred\u009d0;title\u0007")).toBe("bullet \\x9b31mred\\x9d0;title\\x07");
+		expect(printable("a\nb\tc\u009bd\u0085e\u001bf\rg\u2029h", { keepLayout: true })).toBe("a\nb\tc\\x9bd\\x85e\\x1bf\\x0dg\\u2029h");
+	});
+
 	test("a tracked file name with an escape sequence or a newline cannot rewrite the terminal or forge a report line", () => {
 		const hostile = "docs/\u001b[2J\u001b[Hingest: ingested 999\nrefused (0):.md";
 		const text = renderIngest({
@@ -155,12 +160,40 @@ describe("renderReflectPlan, renderReflectOutcome and renderGaps", () => {
 				{ repo: "Acme/B", status: "failed" },
 			],
 			notSent: 3,
+			warnings: [],
 			manifestVersion: 4,
 		});
 		expect(text).toContain("reflect: stored 1, unchanged 2, refused 1, failed 1");
 		expect(text).toContain("Acme/A  refused  [secret-findings]");
 		expect(text).toContain("Acme/B  failed\n");
 		expect(text).toContain("not sent: 3 digests");
+	});
+
+	test("the digest preview escapes every control character of the planning text, C1 included, and keeps its newlines and tabs", () => {
+		const hostile: RepoDigest = { repo: "Acme/Hostile", path: ".substrate/digest.md", text: "# Digest\n- decision \u009b2Jwiped\u001b[H\n\t- indented\u0085next\n", key: "corpus-digest:Acme/Hostile", sha256: "cd".repeat(32) };
+		const dry = renderReflectPlan({ digests: [hostile], skipped: [], notes: [], checkouts: 1 }, false);
+		expect(dry).not.toContain("\u009b");
+		expect(dry).not.toContain("\u0085");
+		expect(dry).not.toContain("\u001b");
+		expect(dry).toContain("# Digest\n- decision \\x9b2Jwiped\\x1b[H\n\t- indented\\x85next\n");
+	});
+
+	test("a stored digest's warning is listed on its own line with the reason escaped, and is not counted as a problem", () => {
+		const text = renderReflectOutcome({
+			counts: { stored: 2, unchanged: 0, refused: 0, failed: 0 },
+			problems: [],
+			warnings: [
+				{ repo: "Acme/A", reason: "hindsight:rbac.no-grant" },
+				{ repo: "Acme/B\u001b", reason: "hindsight:not-configured\u009b" },
+			],
+			notSent: 0,
+			manifestVersion: 4,
+		});
+		expect(text).toContain("warnings (2):");
+		expect(text.split("\n")).toContain("  Acme/A  [hindsight:rbac.no-grant]");
+		expect(text).toContain("  Acme/B\\x1b  [hindsight:not-configured\\x9b]");
+		expect(text).not.toContain("refused or failed");
+		expect(text).not.toContain("\u001b");
 	});
 
 	test("gaps are escaped, long query text is cut and the cut list is announced", () => {

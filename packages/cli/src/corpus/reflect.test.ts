@@ -1,7 +1,7 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
-import { rmSync } from "node:fs";
+import { realpathSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { CORPUS_PROTOCOL, isRecord, MAX_REFLECT_DIGESTS, type GitRunner, type RepoDigest } from "@substrate/corpus";
+import { CORPUS_PROTOCOL, defaultLstat, isRecord, MAX_REFLECT_DIGESTS, type GitRunner, type RepoDigest } from "@substrate/corpus";
 import { defined, fakeGit, tempDir, writeTree } from "../../../corpus/src/test-support.ts";
 import { createCorpusClient } from "./client.ts";
 import { collectDigests, executeReflect } from "./reflect.ts";
@@ -118,6 +118,90 @@ describe("collectDigests", () => {
 		});
 		expect(failing.digests).toEqual([]);
 		expect(failing.skipped).toEqual([{ repo: "Acme/Ok", reason: "state-unreadable" }]);
+	});
+
+	test("a symlinked .planning never leads into another checkout: the repository is left out and the other checkout's text is not read for it", () => {
+		const root = make({
+			"alpha/.git/HEAD": "",
+			"other/.git/HEAD": "",
+			"other/.planning/STATE.md": `${STATE}- PRIVATE decision of the other checkout\n`,
+		});
+		symlinkSync(join(root, "other", ".planning"), join(root, "alpha", ".planning"));
+		const runner = runnerFor(root, { alpha: "Acme/Alpha", other: "Acme/Other" });
+		const result = collectDigests({ roots: [root], repos: [], maxBytes: MAX_BYTES, runner });
+		expect(result.skipped).toEqual([{ repo: "Acme/Alpha", reason: "state-unreadable" }]);
+		// The checkout that owns the files is still read: only the one that reached outside itself is refused.
+		expect(result.digests.map((digest) => digest.repo)).toEqual(["Acme/Other"]);
+		expect(result.digests.some((digest) => digest.repo === "Acme/Alpha")).toBe(false);
+	});
+
+	test("a .planning link that stays inside the checkout is refused too, because every component below the root must be a real directory", () => {
+		const root = make({ "alpha/.git/HEAD": "", "alpha/notes/STATE.md": STATE });
+		symlinkSync(join(root, "alpha", "notes"), join(root, "alpha", ".planning"));
+		const runner = runnerFor(root, { alpha: "Acme/Alpha" });
+		const result = collectDigests({ roots: [root], repos: ["Acme/Alpha"], maxBytes: MAX_BYTES, runner });
+		expect(result.digests).toEqual([]);
+		expect(result.skipped).toEqual([{ repo: "Acme/Alpha", reason: "state-unreadable" }]);
+	});
+
+	test("a planning file that is itself a symlink is refused, whether its target is inside the checkout or not", () => {
+		const root = make({
+			"alpha/.git/HEAD": "",
+			"alpha/.planning/STATE.md": STATE,
+			"alpha/elsewhere.md": "# a roadmap kept elsewhere\n",
+			"beta/.git/HEAD": "",
+			"beta/.planning/STATE.md": STATE,
+		});
+		symlinkSync(join(root, "alpha", "elsewhere.md"), join(root, "alpha", ".planning", "ROADMAP.md"));
+		const outside = make({ "secret.md": "# not this repository's\n" });
+		unlinkSync(join(root, "beta", ".planning", "STATE.md"));
+		symlinkSync(join(outside, "secret.md"), join(root, "beta", ".planning", "STATE.md"));
+		const runner = runnerFor(root, { alpha: "Acme/Alpha", beta: "Acme/Beta" });
+		const result = collectDigests({ roots: [root], repos: [], maxBytes: MAX_BYTES, runner });
+		expect(result.digests).toEqual([]);
+		expect(result.skipped).toEqual([
+			{ repo: "Acme/Alpha", reason: "roadmap-symlink" },
+			{ repo: "Acme/Beta", reason: "state-symlink" },
+		]);
+	});
+
+	test("a plain tree is read in full, every stat going through the resolved checkout root", () => {
+		const root = make({ "alpha/.git/HEAD": "", "alpha/.planning/STATE.md": STATE, "alpha/.planning/PROJECT.md": "# Project\n\nThe project text.\n" });
+		const runner = runnerFor(root, { alpha: "Acme/Alpha" });
+		const seen: string[] = [];
+		const result = collectDigests({
+			roots: [root],
+			repos: [],
+			maxBytes: MAX_BYTES,
+			runner,
+			lstat: (path) => {
+				seen.push(path);
+				return defaultLstat(path);
+			},
+		});
+		expect(result.skipped).toEqual([]);
+		expect(result.digests.map((digest) => digest.repo)).toEqual(["Acme/Alpha"]);
+		expect(seen.length).toBeGreaterThan(0);
+		expect(seen.every((path) => path.startsWith(realpathSync(root)))).toBe(true);
+	});
+
+	test("a file swapped for a link after it was checked is not followed when it is opened", () => {
+		const root = make({ "alpha/.git/HEAD": "", "alpha/.planning/STATE.md": STATE });
+		const outside = make({ "secret.md": STATE });
+		const state = join(root, "alpha", ".planning", "STATE.md");
+		unlinkSync(state);
+		symlinkSync(join(outside, "secret.md"), state);
+		const runner = runnerFor(root, { alpha: "Acme/Alpha" });
+		// The stat reports a regular file, as it would have before the swap: only the open can still refuse.
+		const result = collectDigests({
+			roots: [root],
+			repos: [],
+			maxBytes: MAX_BYTES,
+			runner,
+			lstat: (path) => (path.endsWith("STATE.md") ? { symlink: false, file: true, size: STATE.length } : defaultLstat(path)),
+		});
+		expect(result.digests).toEqual([]);
+		expect(result.skipped).toEqual([{ repo: "Acme/Alpha", reason: "state-unreadable" }]);
 	});
 
 	test("a label that a checkout and a copy collection both yield is not digested", () => {

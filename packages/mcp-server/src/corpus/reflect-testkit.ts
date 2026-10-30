@@ -3,7 +3,7 @@
  * session), the grouped feedback counts and the gap aggregate. Failures and a database that never answers are injected by flag.
  */
 import type { FeedbackCounts } from "@substrate/corpus";
-import type { FeedbackEntry, GapQuery, GapRow, ReflectStore, RetrievalRow } from "./reflect-store.ts";
+import { isGap, type FeedbackEntry, type GapQuery, type GapRow, type ReflectStore, type RetrievalRow } from "./reflect-store.ts";
 
 const DAY_MS = 86_400_000;
 
@@ -70,7 +70,7 @@ export class FakeReflectStore implements ReflectStore {
 		for (const [queryHash, entries] of byHash) {
 			const scores = entries.map((entry) => entry.row.topScore).filter((score): score is number => score !== null);
 			const best = scores.length === 0 ? null : Math.max(...scores);
-			if ((best ?? 0) >= query.gapScore) continue;
+			if (!isGap(best, query.gapScore)) continue;
 			const newest = [...entries].sort((left, right) => right.at - left.at);
 			rows.push({
 				queryHash,

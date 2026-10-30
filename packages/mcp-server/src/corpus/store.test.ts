@@ -178,9 +178,13 @@ describeLive("the corpus manifest against a live index", () => {
 		await store.recordIngested(doc("rows-b.md"));
 		await store.recordIngested(doc("rows-gone.md"));
 		await store.markTombstoned(REPO, "rows-gone.md");
-		const mine = (await store.activeRows(100_000)).filter((row) => row.repo === REPO && row.path.startsWith("rows-"));
+		const all = await store.activeRows(100_000);
+		const mine = all.rows.filter((row) => row.repo === REPO && row.path.startsWith("rows-"));
 		expect(mine.map((row) => row.path)).toEqual(["rows-a.md", "rows-b.md"]);
 		expect(typeof mine[0]?.ingestedAt).toBe("string");
-		expect((await store.activeRows(1)).length).toBe(1);
+		expect(all.truncated).toBe(false);
+		const cut = await store.activeRows(1);
+		expect(cut.rows).toHaveLength(1);
+		expect(cut.truncated).toBe(true);
 	});
 });

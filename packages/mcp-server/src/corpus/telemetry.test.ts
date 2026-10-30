@@ -7,8 +7,8 @@ import { describe, expect, test } from "bun:test";
 import type { SearchCitation } from "../docs-search.ts";
 import { defined } from "../test-support.ts";
 import { FakeReflectStore } from "./reflect-testkit.ts";
-import { RETRIEVAL_KEY_CHARS, RETRIEVAL_MAX_RETURNED, RETRIEVAL_QUERY_TEXT_CHARS, type ReflectStore } from "./reflect-store.ts";
-import { LOG_EVERY, MAX_PENDING_WRITES, RetrievalRecorder, normalizeQuery, queryHash, queryTextOf, retrievalRowOf } from "./telemetry.ts";
+import { RETRIEVAL_KEY_CHARS, RETRIEVAL_MAX_RETURNED, RETRIEVAL_QUERY_TEXT_CHARS, type ReflectStore, type RetrievalRow } from "./reflect-store.ts";
+import { LOG_EVERY, MAX_PENDING_WRITES, RetrievalRecorder, SWEEP_MAX_BATCHES, normalizeQuery, queryHash, queryTextOf, retrievalRowOf, sweepExpiredRetrievals } from "./telemetry.ts";
 
 function citation(title: string, score: number, over: Partial<SearchCitation> = {}): SearchCitation {
 	return { title, source_url: `https://example.com/${title}`, heading_path: "", commit: "dataset-pin:agent-substrate:unrecorded", snippet: "the cited text", score, document_id: "", chunk_id: title, ...over };
@@ -156,9 +156,118 @@ describe("RetrievalRecorder", () => {
 		expect(MAX_PENDING_WRITES).toBeGreaterThan(2);
 	});
 
+	test("a write that gave up waiting keeps its slot until the database call itself settles", async () => {
+		class GatedStore extends FakeReflectStore {
+			readonly gates: Array<() => void> = [];
+			started = 0;
+			override async appendRetrieval(next: RetrievalRow): Promise<void> {
+				this.started += 1;
+				const gate = Promise.withResolvers<void>();
+				this.gates.push(gate.resolve);
+				await gate.promise;
+				return super.appendRetrieval(next);
+			}
+		}
+		const store = new GatedStore();
+		const { recorder: rec } = recorder(store, { writeBudgetMs: 5, maxPending: 2 });
+		rec.record(row);
+		rec.record(row);
+		await rec.idle();
+		expect(rec.counters().timedOut).toBe(2);
+		// Both calls are still running: no third one may start behind them.
+		for (let i = 0; i < 10; i += 1) rec.record(row);
+		expect(store.started).toBe(2);
+		expect(rec.counters().dropped).toBe(10);
+		for (const release of store.gates.splice(0)) release();
+		for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+		rec.record(row);
+		expect(store.started).toBe(3);
+		expect(rec.counters().dropped).toBe(10);
+	});
+
 	test("with no index the row is dropped and counted", () => {
 		const { recorder: rec } = recorder(null);
 		rec.record(row);
 		expect(rec.counters().dropped).toBe(1);
+	});
+});
+
+describe("sweepExpiredRetrievals", () => {
+	const DAY = 86_400_000;
+	const bare = (hash: string): RetrievalRow => ({ surface: "omp", queryHash: hash, queryText: null, backend: "lightrag", returned: [], topScore: null, returnedCount: 0, degraded: false, rerank: null });
+
+	test("3,600 expired rows (an hour of one search a second) are all deleted in one sweep, in batches of the store's bound, yielding between them", async () => {
+		const clock = { now: 1_000_000_000_000 };
+		const store = new FakeReflectStore(() => clock.now);
+		for (let index = 0; index < 3600; index += 1) await store.appendRetrieval(bare(`old-${index}`));
+		clock.now += 31 * DAY;
+		await store.appendRetrieval(bare("fresh"));
+		let yields = 0;
+		const batchSizes: number[] = [];
+		const original = store.sweepRetrievals.bind(store);
+		store.sweepRetrievals = async (days, batch) => {
+			const removed = await original(days, batch);
+			batchSizes.push(removed);
+			return removed;
+		};
+		const deleted = await sweepExpiredRetrievals(store, {
+			retentionDays: 30,
+			batch: 1000,
+			yieldTurn: async () => {
+				yields += 1;
+			},
+		});
+		expect(deleted).toBe(3600);
+		expect(batchSizes).toEqual([1000, 1000, 1000, 600]);
+		// A turn between two batches, none after the short one.
+		expect(yields).toBe(3);
+		expect(store.retrievals.map((entry) => entry.row.queryHash)).toEqual(["fresh"]);
+	});
+
+	test("a batch that comes back exactly full is followed by one more, which finds nothing", async () => {
+		const clock = { now: 1_000_000_000_000 };
+		const store = new FakeReflectStore(() => clock.now);
+		for (let index = 0; index < 20; index += 1) await store.appendRetrieval(bare(`old-${index}`));
+		clock.now += 31 * DAY;
+		expect(await sweepExpiredRetrievals(store, { retentionDays: 30, batch: 10, yieldTurn: async () => undefined })).toBe(20);
+		expect(store.retrievals).toEqual([]);
+	});
+
+	test("a store that never runs dry stops at the time budget, and the batch that was running is the last", async () => {
+		let calls = 0;
+		let now = 0;
+		const endless = new FakeReflectStore();
+		endless.sweepRetrievals = async (_days, batch) => {
+			calls += 1;
+			now += 700;
+			return batch;
+		};
+		const deleted = await sweepExpiredRetrievals(endless, { retentionDays: 30, batch: 1000, now: () => now, yieldTurn: async () => undefined });
+		// 700 ms per batch against a 2,000 ms budget: the third batch ends at 2,100 ms.
+		expect(calls).toBe(3);
+		expect(deleted).toBe(3000);
+	});
+
+	test("a store that never runs dry and is fast stops at the batch count", async () => {
+		let calls = 0;
+		const endless = new FakeReflectStore();
+		endless.sweepRetrievals = async (_days, batch) => {
+			calls += 1;
+			return batch;
+		};
+		const deleted = await sweepExpiredRetrievals(endless, { retentionDays: 30, batch: 1000, now: () => 0, yieldTurn: async () => undefined });
+		expect(calls).toBe(SWEEP_MAX_BATCHES);
+		expect(deleted).toBe(SWEEP_MAX_BATCHES * 1000);
+	});
+
+	test("a store that fails on a later batch propagates its error to the caller, which reports a failed sweep", async () => {
+		const failing = new FakeReflectStore();
+		let calls = 0;
+		failing.sweepRetrievals = async (_days, batch) => {
+			calls += 1;
+			if (calls === 2) throw new Error("connection lost");
+			return batch;
+		};
+		await expect(sweepExpiredRetrievals(failing, { retentionDays: 30, batch: 10, now: () => 0, yieldTurn: async () => undefined })).rejects.toThrow("connection lost");
 	});
 });
