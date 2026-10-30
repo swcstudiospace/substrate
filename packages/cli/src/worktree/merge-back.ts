@@ -114,7 +114,11 @@ async function decide(path: string, rootList: readonly string[], deps: WorktreeD
 	return { eligible: true, info, mergedVia };
 }
 
-/** Whether the worktree still has the HEAD and branch the checks read: a checkout that moved since then was not checked. */
+/**
+ * Whether the worktree still has the HEAD and branch the checks read. The note names `info.head`, the commit the checks verified:
+ * `inspectWorktree` takes that head from the captured input, and whether a commit is merged does not change. A move before this
+ * check is refused. A move after it leaves the note true, because it names the verified commit and not the live checkout.
+ */
 async function unchangedSince(info: WorktreeInfo, deps: WorktreeDeps): Promise<boolean> {
 	const now = await reloadWorktree(info.path, info.repo_dir, deps.git);
 	return now !== null && now.head === info.head && now.branch === info.branch && now.detached === info.detached;
