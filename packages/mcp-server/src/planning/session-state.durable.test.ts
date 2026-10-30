@@ -63,6 +63,10 @@ class FakeStore implements SteeringSessionsStore {
 		return removed;
 	}
 
+	async delete(surface: Surface, sessionId: string): Promise<void> {
+		this.rows.delete(`${surface}:${sessionId}`);
+	}
+
 	seed(surface: Surface, value: SteeringSession): void {
 		this.rows.set(`${surface}:${value.session_id}`, { surface, session: value });
 	}

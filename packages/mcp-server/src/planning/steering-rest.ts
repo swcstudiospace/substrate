@@ -317,6 +317,7 @@ export function steeringHttpStatus(result: SteeringWriteResult | SteeringAcknowl
 				case "wrong-session":
 				case "already-acknowledged":
 				case "confirmation-required":
+				case "target-session-ended":
 					return 409;
 				case "rate-limited":
 					return 429;

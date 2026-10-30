@@ -211,7 +211,7 @@ import { completionStoreView, type CompletionStoreView } from "./planning/checkp
 import type { SteeringWiring } from "./planning/steering-tools.ts";
 import { SteeringInbox, steeringRecordsFromEntries, type SteeringHistorySink } from "./planning/steering.ts";
 import { DEFAULT_STEERING_RESTORE_LIMIT, DEFAULT_STEERING_RESTORE_MAX_PAGES, restoreSteeringInboxPaged, type SteeringAuditSink, type SteeringRestoreStop } from "./planning/steering-store.ts";
-import { SteeringSessionRegistry } from "./planning/session-state.ts";
+import { STEERING_SESSION_ENDED_ACTION, SteeringSessionRegistry } from "./planning/session-state.ts";
 import { SteeringExpirySweeper, SteeringHintAnnouncer, steeringNoticeFor, type SessionStatePort, type SteeringNotice } from "./planning/steering-delivery.ts";
 import type { SteeringSessionsStore } from "./planning/steering-sessions-store.ts";
 import { SteeringWaiters } from "./planning/steering-waiters.ts";
@@ -2511,6 +2511,7 @@ export class Substrate {
 		this.planningEvent(input);
 		if (result.stored) this.noteDocsCanary(result.event);
 		if (result.stored) this.publishHint(result.event);
+		if (result.stored && result.event.kind === "session.end") await this.endSteeringSession(result.event);
 		return result;
 	}
 
@@ -2524,6 +2525,31 @@ export class Substrate {
 		if (bus === null) return;
 		const hint: EventHint = { v: 1, id: event.id, kind: event.kind, surface: event.surface, graph_id: event.graph_id, ts: event.ts };
 		void bus.publish(hint).catch(() => false);
+	}
+
+	/**
+	 * Closes a session's steering state when its `session.end` is recorded: the registry forgets the session and its durable row,
+	 * and the inbox closes what is still queued for it and refuses what comes later. The close is recorded as a
+	 * `steering.session_ended` note, so the ledger shows the cause. Never throws into the emit path: a failure goes to stderr.
+	 */
+	private async endSteeringSession(event: SubstrateEvent): Promise<void> {
+		const sessionId = event.session_id;
+		if (sessionId === null) return;
+		try {
+			this.steeringSessions.end(event.surface, sessionId);
+			const report = this.steering.inbox === null ? null : await this.steering.inbox.closeForSession(sessionId);
+			const closed = report?.closed.length ?? 0;
+			const failed = report?.failed.length ?? 0;
+			await this.emit({
+				surface: event.surface,
+				kind: "note",
+				summary: `steering session ${redact(sessionId).slice(0, 80)} ended: ${closed} directive(s) closed, ${failed} not closed`,
+				session_id: sessionId,
+				payload: { action: STEERING_SESSION_ENDED_ACTION, closed, failed },
+			});
+		} catch (cause) {
+			process.stderr.write(`[substrate] steering: closing ended session ${redact(sessionId).slice(0, 80)} failed: ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200)}\n`);
+		}
 	}
 
 	/**

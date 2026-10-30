@@ -2457,7 +2457,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					"Queues one directive to a planning session, as the calling operator. The principal is the caller's surface and must be on " +
 					"SUBSTRATE_PLANNING_STEERING_PRINCIPALS. Each session has a rate limit. The server assigns the directive id, returned as " +
 					"directive_id; the caller cannot choose it. The directive is audited before it is queued. A refusal carries a typed error: " +
-					"forbidden (operator-required or caller-identity-missing), principal-not-allowed, rate-limited, invalid-directive or " +
+					"forbidden (operator-required or caller-identity-missing), principal-not-allowed, target-session-ended, rate-limited, invalid-directive or " +
 					"audit-unavailable (its code is the driver's, or AUDIT_CONFLICT when the audit row was saved with other content). Answers " +
 					"misconfigured, naming the settings keys, while the steering settings are invalid, and not-configured while no audit sink is injected.",
 				inputSchema: STEERING_QUEUE_INPUT,

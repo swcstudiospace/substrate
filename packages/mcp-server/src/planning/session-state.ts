@@ -36,6 +36,9 @@ export const STEERING_ACKNOWLEDGE_VIA = "steering_acknowledge";
 /** `payload.action` of the warning note a failed durable write records. Registered in `event-sources.ts`. */
 export const STEERING_PERSIST_FAILED_ACTION = "steering.persist_failed";
 
+/** `payload.action` of the note the server records when a session's `session.end` closes its steering state. Registered in `event-sources.ts`. */
+export const STEERING_SESSION_ENDED_ACTION = "steering.session_ended";
+
 /** The least time between two persistence warnings from one registry, so a store that is down does not write a note per call. */
 export const STEERING_PERSIST_WARN_INTERVAL_MS = 60_000;
 
@@ -136,6 +139,19 @@ export class SteeringSessionRegistry implements SessionStatePort {
 		this.persist(surface, session);
 	}
 
+	/**
+	 * Forgets a session whose `session.end` was recorded: its entry, its id index and its durable row. Returns whether the
+	 * registry held it. The row is removed in the same write chain as the saves, so a save queued before the end cannot put it
+	 * back. Idempotent: a repeat changes nothing in memory, and its row delete matches no row.
+	 */
+	end(surface: Surface, sessionId: string): boolean {
+		const key = steeringSessionKey(surface, sessionId);
+		const held = this.held.has(key);
+		this.forget(key);
+		this.queueWrite(surface, sessionId, (store) => store.delete(surface, sessionId));
+		return held;
+	}
+
 	/** Every held session, newest write first. A copy: changing the result changes nothing here. */
 	entries(): Array<{ surface: Surface; session: SteeringSession }> {
 		return [...this.held.values()].reverse().map((held) => ({ surface: held.surface, session: held.session }));
@@ -187,17 +203,25 @@ export class SteeringSessionRegistry implements SessionStatePort {
 	}
 
 	private persist(surface: Surface, session: SteeringSession): void {
+		this.queueWrite(surface, session.session_id, (store) => store.save(surface, steeringSessionWithoutSecrets(session)));
+	}
+
+	/**
+	 * Queues one durable write behind the writes already queued, so a save made before a delete cannot land after it. A full
+	 * queue skips the write and warns. Never blocks or fails the caller.
+	 */
+	private queueWrite(surface: Surface, sessionId: string, write: (store: SteeringSessionsStore) => Promise<void>): void {
 		const store = this.store;
 		if (store === null) return;
 		if (this.pendingWrites >= STEERING_PERSIST_PENDING_MAX) {
-			this.warnPersistFailed(surface, session.session_id, "the durable write queue is full");
+			this.warnPersistFailed(surface, sessionId, "the durable write queue is full");
 			return;
 		}
 		this.pendingWrites += 1;
 		this.writeTail = this.writeTail
-			.then(() => store.save(surface, steeringSessionWithoutSecrets(session)))
+			.then(() => write(store))
 			.catch((cause: unknown) => {
-				this.warnPersistFailed(surface, session.session_id, cause instanceof Error ? cause.message : String(cause));
+				this.warnPersistFailed(surface, sessionId, cause instanceof Error ? cause.message : String(cause));
 			})
 			.finally(() => {
 				this.pendingWrites -= 1;
@@ -213,7 +237,7 @@ export class SteeringSessionRegistry implements SessionStatePort {
 		const warning: EventInput = {
 			surface,
 			kind: "warning",
-			summary: `steering session ${redact(sessionId).slice(0, 80)} was not saved to steering_sessions: ${cut}`,
+			summary: `steering session ${redact(sessionId).slice(0, 80)} was not written to steering_sessions: ${cut}`,
 			session_id: sessionId,
 			payload: { action: STEERING_PERSIST_FAILED_ACTION, reason: cut },
 		};
