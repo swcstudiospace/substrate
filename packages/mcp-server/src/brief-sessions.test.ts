@@ -354,6 +354,19 @@ describe("worktreesSection", () => {
 		expect(section.items[0]?.text).toContain("src/a.ts");
 		expect(section.items[0]?.text).toContain("/w/other");
 	});
+
+	test("a 120-character compact line keeps the worktree name beside a long file list", () => {
+		const shared = ["a".repeat(40), "b".repeat(40), "c".repeat(40)];
+		const section = defined(
+			worktreesSection(wtInput([mineRow(shared), wtRow({ files: shared, host: "build-host", path: "/srv/worktrees/feature", session_id: "sess-peer" })]), NOW),
+			"section",
+		);
+		const rendered = renderCompactBrief([section], "state", { nodes: 12, memoryChars: 120, bytes: 3500 });
+		expect(rendered).toContain("build-host");
+		expect(rendered).toContain("feature");
+		expect(rendered).toContain("sess-peer");
+		expect(rendered).toContain("a".repeat(8));
+	});
 	test("a caller whose worktree reports an empty list touches nothing, so nothing overlaps and there is no section", () => {
 		expect(worktreesSection(wtInput([mineRow([]), wtRow()]), NOW)).toBeNull();
 	});

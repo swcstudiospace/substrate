@@ -79,18 +79,36 @@ function boundedGroups(id: BriefSectionId, title: string, groups: ReadonlyArray<
 	const left = groups.length - keptGroups + extraOmitted;
 	const notice = left > 0 ? `… and ${left} more ${omitLabel}` : null;
 	const printed = notice === null ? kept : [...kept, notice];
-	// Compact drops items from the end. A multi-line entry is one item, so the shared-file line cannot be dropped
-	// while its heading stays, and one dropped entry counts as one. The overlap line leads so clipping keeps the names.
+	// Compact drops items from the end and clips each item to the memory-char cap. A worktree is one item.
+	// Its name stays outside the clip range, so a long file list cannot hide the host, path, or session.
 	const items: BriefItem[] = oneItemPerGroup
-		? keptGroupsList.map((texts) => {
-				const overlap = texts.find((line) => line.startsWith("  overlap"));
-				const text = overlap === undefined ? texts.join("\n") : [overlap, ...texts.filter((line) => line !== overlap)].join("\n");
-				return { text };
-			})
+		? keptGroupsList.map((texts) => compactWorktreeItem(texts))
 		: printed.map((text) => ({ text }));
 	return { id, lines: ["", heading, ...printed], title: heading, items, ...(oneItemPerGroup && left > 0 ? { unlisted: left } : {}) };
 }
 
+/** Host, a path tail, and the session. Short enough that a 120-character compact line still has room for a file name. */
+function compactWorktreeIdentity(head: string): string {
+	const bracket = head.indexOf(" [");
+	const lead = bracket === -1 ? head : head.slice(0, bracket);
+	const body = lead.startsWith("- ") ? lead.slice(2) : lead;
+	const colon = body.indexOf(":");
+	const host = (colon === -1 ? body : body.slice(0, colon)).slice(0, 16);
+	const path = (colon === -1 ? "" : body.slice(colon + 1)).slice(-20);
+	const inside = bracket === -1 ? "" : head.slice(bracket + 2, head.endsWith("]") ? head.length - 1 : head.length);
+	const session = (inside.split(", ")[1] ?? "").slice(0, 16);
+	const identity = session === "" ? `- ${host}:${path}` : `- ${host}:${path} [${session}]`;
+	return identity.length <= 72 ? identity : `${identity.slice(0, 71)}…`;
+}
+
+function compactWorktreeItem(texts: readonly string[]): BriefItem {
+	const head = texts.find((line) => line.startsWith("- ")) ?? texts[0] ?? "";
+	const overlap = texts.find((line) => line.startsWith("  overlap"))?.trim() ?? "";
+	if (overlap === "") return { text: head };
+	const identity = compactWorktreeIdentity(head);
+	const text = `${identity} ${overlap}`;
+	return { text, clip: [identity.length + 1, text.length] };
+}
 /** The other live sessions of the repository. Null when the digest names none. */
 export function sessionsSection(context: SessionContext): BriefSection | null {
 	if (context.sessions.length === 0) return null;
