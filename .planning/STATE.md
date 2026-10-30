@@ -161,9 +161,9 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: milestone v1.7 closed (phases 63-70 shipped on main; the audit is at milestones/v1.7-MILESTONE-AUDIT.md). Phases 66, 67 and 68 are PARTIAL and the owner's decisions are open. v1.3.x (37-44), v1.5 (45-54) and v1.6 (55-62) are archived as override closeouts.
+Phase: milestone v1.7 phases 63-70 are shipped on main; the milestone is not complete. Requirements audit (milestones/v1.7-REQUIREMENTS-AUDIT.md): 20 of 41 requirements MET, 21 PARTIAL, 0 NOT MET. Owner decisions are open. v1.3.x (37-44), v1.5 (45-54) and v1.6 (55-62) are archived as override closeouts.
 Plan: none written (phases are built in orchestrated waves of edit-only units and recorded in SUMMARY.md, as in Runs 12 and 13).
-Status: Closed, with gaps the owner has not accepted (pending; see the milestone audit). The owner's 2026-10-28 decision in the section "Accepted debt (owner decision, 2026-10-28)" covers earlier milestones only; the operator-gated steps are listed in the Run 12, Run 13 and Run 14 records.
+Status: Not complete. Every gap is pending the owner's decision and none is accepted (see the requirements audit). The owner's 2026-10-28 decision in the section "Accepted debt (owner decision, 2026-10-28)" covers earlier milestones only; the operator-gated steps are listed in the Run 12, Run 13 and Run 14 records.
 Last activity: 2026-10-30 — Run 14 closeout: phases 63-70 shipped; Run 15 fixes merged (#188-#193, claude-ultrathink #76).
 
 ## Preflight record (2026-10-23, graph ut-mvlknrx6-2849044e)

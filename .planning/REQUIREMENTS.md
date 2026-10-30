@@ -91,14 +91,14 @@ Checkbox convention: a ticked requirement is satisfied or waived by the operator
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| ATLAS-01 to ATLAS-06 | 63 | Planned |
-| EMB-01 to EMB-04 | 64 | Planned |
-| WATCH-01 to WATCH-05 | 65 | Planned |
-| REFLECT-01 to REFLECT-05 | 66 | Planned |
-| STEER-01 to STEER-06 | 67 | Planned |
-| FLEET-01 to FLEET-06 | 68 | Planned |
-| PROOF-01 to PROOF-04 | 69 | Planned |
-| EVAL-01 to EVAL-05 | 70 | Planned |
+| ATLAS-01 to ATLAS-06 | 63 | Shipped (PR #177); audit: 1 MET, 5 PARTIAL (milestones/v1.7-REQUIREMENTS-AUDIT.md) |
+| EMB-01 to EMB-04 | 64 | Shipped (PRs #179, #183); audit: 4 MET |
+| WATCH-01 to WATCH-05 | 65 | Shipped (PR #186); audit: 1 MET, 4 PARTIAL |
+| REFLECT-01 to REFLECT-05 | 66 | Shipped (PR #184); audit: 2 MET, 3 PARTIAL |
+| STEER-01 to STEER-06 | 67 | Shipped (PRs #180, #192); audit: 4 MET, 2 PARTIAL |
+| FLEET-01 to FLEET-06 | 68 | Shipped (PRs #178, #185, #188 to #190, #193); audit: 4 MET, 2 PARTIAL |
+| PROOF-01 to PROOF-04 | 69 | Shipped (PR #181); audit: 1 MET, 3 PARTIAL |
+| EVAL-01 to EVAL-05 | 70 | Shipped (PR #182); audit: 3 MET, 2 PARTIAL |
 
 ---
 *Requirements defined: 2026-10-29*
