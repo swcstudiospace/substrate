@@ -7,6 +7,7 @@ import { type CommandRunner, spawnGit } from "../../../fleet/src/git.ts";
 import { addWorktree, cleanupTemp, commit, defined, fakeGh, git, makeRepo, type TestRepo, tempDir, write } from "../../../fleet/src/testkit.ts";
 import type { EventInput } from "../../../mcp-server/src/types.ts";
 import { httpClaimsLookup, httpReportPoster, runWorktree, type PostOutcome, type WorktreeDeps } from "./command.ts";
+import type { ClaimsLookup } from "../../../fleet/src/claims.ts";
 import { parseWorktreeArgs } from "./args.ts";
 
 afterAll(cleanupTemp);
@@ -18,7 +19,7 @@ interface Harness {
 	out: string[];
 	err: string[];
 	events: EventInput[];
-	reports: Array<{ worktrees: Array<{ path: string; graph_id?: string }> }>;
+	reports: Array<{ worktrees: Array<{ path: string; graph_id?: string; session_id?: string; files?: string[] | null; files_truncated?: boolean }> }>;
 }
 
 function harness(overrides: Partial<WorktreeDeps> = {}, env: Record<string, string | undefined> = {}): Harness {
@@ -100,6 +101,13 @@ describe("usage and roots", () => {
 	test("--root repeats and --root=DIR works", () => {
 		const parsed = parseWorktreeArgs(["list", "--root", "/a", "--root=/b", "--json"]);
 		expect(parsed).toMatchObject({ ok: true, args: { roots: ["/a", "/b"], json: true } });
+	});
+
+	test("--session belongs to scan alone and needs a value", () => {
+		expect(parseWorktreeArgs(["scan", "--report", "--session", "sess-1"])).toMatchObject({ ok: true, args: { report: true, session: "sess-1" } });
+		expect(parseWorktreeArgs(["scan", "--report", "--session=sess-2"])).toMatchObject({ ok: true, args: { session: "sess-2" } });
+		expect(parseWorktreeArgs(["prune", "--session", "sess-1"]).ok).toBe(false);
+		expect(parseWorktreeArgs(["scan", "--report", "--session"]).ok).toBe(false);
 	});
 });
 
@@ -239,6 +247,39 @@ describe("scan", () => {
 		expect(h.out.join("")).toContain("reported to the registry: 4 stored");
 	});
 
+	test("--report carries each worktree's changed files and the truncation flag, and a scan that does not report never lists them", async () => {
+		const f = fleet();
+		write(f.review, "scratch/new.txt", "u\n");
+		const big = addWorktree(f.repo, f.root, "big-one");
+		for (let count = 0; count < 201; count += 1) write(big, `bulk/f${String(count).padStart(3, "0")}.txt`, "x\n");
+		git(big, ["add", "-A"]);
+		git(big, ["commit", "-q", "-m", "bulk"]);
+
+		const h = harness({}, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report"], h.deps)).toBe(0);
+		const rows = new Map(defined(h.reports[0], "the report").worktrees.map((wt) => [wt.path, wt]));
+		// The merged worktrees and the primary checkout changed nothing against the default branch: an empty list, not null.
+		expect(rows.get(f.merged)).toMatchObject({ files: [], files_truncated: false });
+		expect(rows.get(f.repo.dir)).toMatchObject({ files: [], files_truncated: false });
+		expect(rows.get(f.review)).toMatchObject({ files: ["r.txt", "scratch/new.txt"], files_truncated: false });
+		expect(rows.get(big)?.files).toHaveLength(200);
+		expect(rows.get(big)?.files_truncated).toBe(true);
+
+		const calls: string[][] = [];
+		const quiet = harness(
+			{
+				git: async (args, cwd) => {
+					calls.push(args);
+					return spawnGit(args, cwd);
+				},
+			},
+			withRoot(f.root),
+		);
+		expect(await runWorktree(["scan"], quiet.deps)).toBe(0);
+		expect(calls.length).toBeGreaterThan(0);
+		expect(calls.some((args) => args[0] === "diff")).toBe(false);
+	});
+
 	test("without --report nothing is posted, and a failed post is a non-zero exit", async () => {
 		const f = fleet();
 		const quiet = harness({}, withRoot(f.root));
@@ -274,6 +315,142 @@ describe("scan", () => {
 			},
 		});
 		expect(await down(report)).toEqual({ ok: false, error: "server unreachable" });
+	});
+});
+
+describe("scan --report session attribution", () => {
+	/** The rows that went out with a session, as [path, session], in path order. */
+	function attributed(h: Harness): Array<[string, string]> {
+		const rows = defined(h.reports[0], "the report").worktrees;
+		return rows.flatMap((wt): Array<[string, string]> => (wt.session_id === undefined ? [] : [[wt.path, wt.session_id]])).sort(([a], [b]) => a.localeCompare(b));
+	}
+	/** One live claim per given holder session (`null`: a claim nobody holds), each on its own node. */
+	const holding = (...sessions: Array<string | null>): ClaimsLookup => ({
+		ok: true,
+		claims: sessions.map((session, index) => ({ node_id: `node-${index}`, holder: session === null ? null : { surface: "hermes", session_id: session }, expires_at: "2026-10-29T13:00:00.000Z" })),
+	});
+
+	test("--session attributes exactly the worktree that holds the current directory, a subdirectory of it included", async () => {
+		const f = fleet();
+		mkdirSync(join(f.review, "deep", "er"), { recursive: true });
+		const h = harness({ cwd: join(f.review, "deep", "er") }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report", "--session", "sess-9", "--json"], h.deps)).toBe(0);
+		expect(attributed(h)).toEqual([[f.review, "sess-9"]]);
+		expect(h.reports[0]?.worktrees).toHaveLength(4);
+		const summary: { attributed: number } = JSON.parse(h.out.join(""));
+		expect(summary.attributed).toBe(1);
+	});
+
+	test("the deepest worktree wins when one sits inside another, and the primary checkout is attributed from its own directory", async () => {
+		const f = fleet();
+		mkdirSync(join(f.repo.dir, ".nested"));
+		const nested = addWorktree(f.repo, join(f.repo.dir, ".nested"), "inner");
+		const inside = harness({ cwd: nested }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report", "--session", "sess-in"], inside.deps)).toBe(0);
+		expect(attributed(inside)).toEqual([[nested, "sess-in"]]);
+
+		const primary = harness({ cwd: f.repo.dir }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report", "--session", "sess-main"], primary.deps)).toBe(0);
+		expect(attributed(primary)).toEqual([[f.repo.dir, "sess-main"]]);
+	});
+
+	test("a current directory in no scanned worktree attributes nothing: one warning on stderr, exit 0, and the report still goes out", async () => {
+		const f = fleet();
+		const h = harness({}, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report", "--session", "sess-lost"], h.deps)).toBe(0);
+		expect(attributed(h)).toEqual([]);
+		expect(h.reports[0]?.worktrees).toHaveLength(4);
+		const warnings = h.err.join("").split("\n").filter((line) => line.startsWith("warning:"));
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("sess-lost");
+	});
+
+	const REFUSED: Array<[string, string[], Record<string, string>]> = [
+		["--session with a control character", ["--session", "bad\nid"], {}],
+		["--session empty", ["--session", ""], {}],
+		["--session longer than 255 characters", ["--session", "a".repeat(256)], {}],
+		["--session without --report", ["--session", "sess-1"], {}],
+		["a SUBSTRATE_SESSION_ID that is not a registry label", ["--report"], { SUBSTRATE_SESSION_ID: "bad\nid" }],
+	];
+
+	test.each(REFUSED)("%s is a usage error: exit 2, nothing scanned or posted", async (_label, flags, extraEnv) => {
+		const f = fleet();
+		const h = harness({ cwd: f.review }, { ...withRoot(f.root), ...extraEnv });
+		expect(await runWorktree(["scan", ...flags], h.deps)).toBe(2);
+		expect(h.reports).toEqual([]);
+		expect(h.err.join("")).toMatch(/session/i);
+	});
+
+	test("a swarm holder session is a registry label and is attributed", async () => {
+		const f = fleet();
+		const h = harness({ cwd: f.review }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report", "--session", "A05@r1:ut-1", "--json"], h.deps)).toBe(0);
+		expect(attributed(h)).toEqual([[f.review, "A05@r1:ut-1"]]);
+		expect(JSON.parse(h.out.join(""))).toMatchObject({ attributed: 1 });
+	});
+
+
+	test("SUBSTRATE_SESSION_ID is used when the flag is absent, a blank one is no attribution, and the flag wins over it", async () => {
+		const f = fleet();
+		const fromEnv = harness({ cwd: f.review }, { ...withRoot(f.root), SUBSTRATE_SESSION_ID: "sess-env" });
+		expect(await runWorktree(["scan", "--report"], fromEnv.deps)).toBe(0);
+		expect(attributed(fromEnv)).toEqual([[f.review, "sess-env"]]);
+
+		const blank = harness({ cwd: f.review }, { ...withRoot(f.root), SUBSTRATE_SESSION_ID: "  " });
+		expect(await runWorktree(["scan", "--report"], blank.deps)).toBe(0);
+		expect(attributed(blank)).toEqual([]);
+
+		const both = harness({ cwd: f.review }, { ...withRoot(f.root), SUBSTRATE_SESSION_ID: "sess-env" });
+		expect(await runWorktree(["scan", "--report", "--session", "sess-flag"], both.deps)).toBe(0);
+		expect(attributed(both)).toEqual([[f.review, "sess-flag"]]);
+	});
+
+	test("an env session in a scan that does not report is ignored, not refused", async () => {
+		const f = fleet();
+		const h = harness({ cwd: f.review }, { ...withRoot(f.root), SUBSTRATE_SESSION_ID: "bad id" });
+		expect(await runWorktree(["scan"], h.deps)).toBe(0);
+		expect(h.reports).toEqual([]);
+	});
+
+	test("a live claim naming one session attributes its graph's worktree with no flag at all", async () => {
+		const f = fleet();
+		const asked: string[] = [];
+		const claims: WorktreeDeps["claims"] = async (graphId) => {
+			asked.push(graphId);
+			return graphId === "review-me" ? holding("sess-claim") : { ok: true, claims: [] };
+		};
+		const h = harness({ claims }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report"], h.deps)).toBe(0);
+		expect(attributed(h)).toEqual([[f.review, "sess-claim"]]);
+		// One request per graph under the root; the primary checkout is outside it and is never asked about.
+		expect(asked.sort()).toEqual(["merged-a", "merged-b", "review-me"]);
+	});
+
+	test("an explicit session beats a claim-derived one for its worktree; the other worktrees keep their claim-derived session", async () => {
+		const f = fleet();
+		const claims: WorktreeDeps["claims"] = async (graphId) => (graphId === "review-me" ? holding("sess-claim") : graphId === "merged-a" ? holding("sess-other") : { ok: true, claims: [] });
+		const h = harness({ cwd: f.review, claims }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report", "--session", "sess-own"], h.deps)).toBe(0);
+		const expected: Array<[string, string]> = [
+			[f.review, "sess-own"],
+			[f.merged, "sess-other"],
+		];
+		expect(attributed(h)).toEqual(expected.sort(([a], [b]) => a.localeCompare(b)));
+	});
+
+	const NOT_ATTRIBUTING: Array<[string, ClaimsLookup]> = [
+		["two holder sessions", holding("sess-a", "sess-b")],
+		["a claim with no holder", holding(null)],
+		["no live claim", { ok: true, claims: [] }],
+		["a lookup that failed", { ok: false, error: "HTTP 503" }],
+	];
+
+	test.each(NOT_ATTRIBUTING)("%s leaves the worktree unattributed and the report goes out whole", async (_label, answer) => {
+		const f = fleet();
+		const h = harness({ claims: async () => answer }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report"], h.deps)).toBe(0);
+		expect(attributed(h)).toEqual([]);
+		expect(h.reports[0]?.worktrees).toHaveLength(4);
 	});
 });
 

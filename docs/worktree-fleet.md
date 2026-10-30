@@ -11,6 +11,7 @@ Nothing here assumes where worktrees live. The locations are `SUBSTRATE_WORKTREE
 | `SUBSTRATE_WORKTREE_ROOTS` | Colon-separated absolute directories searched for repositories and their worktrees. Relative entries are ignored. `--root DIR` (repeatable) overrides it for one command. | unset (or no absolute entry): the commands and the doctor assume no location; the commands say so and exit 2 and the doctor adds no row. The collector's graph attribution (`worktreeRoots`) still falls back to the dispatcher directory `/var/lib/substrate/worktrees`, also when no entry is absolute. The dispatcher does not read this variable and always uses that directory. |
 | `SUBSTRATE_WORKTREE_MIN_FREE_GB` | The free-disk floor, in GiB. `worktree provision` and the dispatcher's `ensure_worktree` both refuse to create a worktree below it, and the doctor reports against it. A value that is not a positive number falls back to the default (the dispatcher logs it), so a typo never turns the floor off. | 5 |
 | `SUBSTRATE_WORKTREE_IDLE_DAYS` | How long a worktree must have been untouched before `prune` may call it safe. `--idle-days N` overrides it for one `prune`. | 14 |
+| `SUBSTRATE_SESSION_ID` | The session `scan --report` attributes the worktree holding the current directory to when `--session ID` is absent. The flag wins. A value that is not a session id is a usage error (exit 2). | unset or blank: no attribution from the session; a live claim naming exactly one session can still attribute a graph worktree. |
 
 ## How worktrees are found
 
@@ -26,7 +27,7 @@ For each worktree the inventory records: path, `repo` (`owner/name` from `origin
 
 ```
 substrate worktree list|status [--root DIR]... [--repo R] [--json]
-substrate worktree scan [--root DIR]... [--report] [--json]
+substrate worktree scan [--root DIR]... [--report [--session ID]] [--json]
 substrate worktree prune [--root DIR]... [--idle-days N] [--execute] [--json]
 substrate worktree conflicts [--repo R | --root DIR...] [--json]
 substrate worktree provision --repo DIR --branch B [--base REF] [--path DIR] [--json]
@@ -36,7 +37,7 @@ substrate worktree disk [--root DIR]... [--json]
 Exit codes: 0 done; 1 a removal, report or creation failed; 2 usage, or no worktree root configured. A flag a subcommand does not take is refused before anything runs. `--repo R` is `owner/name` or the directory of the repository's primary checkout. For `conflicts`, a directory named with `--repo` is searched whatever `SUBSTRATE_WORKTREE_ROOTS` holds (a repository outside the roots is not skipped); `--root` entries are added to it, and `owner/name` only filters what the roots hold.
 
 - `list` / `status`: every worktree with its prune class and the numbers above.
-- `scan`: the same inventory; with `--report` it is posted to `POST /worktrees/report` (500 worktrees per request) so the registry can answer for other sessions. A report the server refuses or cannot be reached is exit 1. Bodies are cut by row count (500) and by encoded size (the route's 1,000,000-byte limit less a margin), so long paths never push a body over; a single row too large for any body is not sent, is named on stderr and under `skipped` in `--json`, and the rest of the fleet is still reported.
+- `scan`: the same inventory; with `--report` it is posted to `POST /worktrees/report` (500 worktrees per request) so the registry can answer for other sessions. `--session ID` (or `SUBSTRATE_SESSION_ID`) attributes the worktree holding the current directory to that session, and a worktree whose live claim names one session is attributed to it ([below](#which-session-a-worktree-belongs-to)). A report the server refuses or cannot be reached is exit 1. Bodies are cut by row count (500) and by encoded size (the route's 1,000,000-byte limit less a margin), so long paths never push a body over; a single row too large for any body is not sent, is named on stderr and under `skipped` in `--json`, and the rest of the fleet is still reported. `--json` also carries `attributed`, the number of rows that went out with a session.
 - `disk`: free space on the filesystem of each root (the tightest wins), the floor, and the ten largest linked worktrees.
 - `provision`: checks the floor, then runs `git worktree add -b B <path> <base>`. The default path is `<first root>/<branch with / replaced by ->`, the default base is the default branch (else `HEAD`). Below the floor nothing is created and the exit is 1.
 
@@ -102,9 +103,31 @@ Limits: the prediction compares committed HEADs, so uncommitted edits count towa
 
 ## The report and the registry
 
-`scan --report` posts `{protocol: 1, host, reported_at, worktrees: [...]}`. Only the contract's fields are sent: path, repo, branch, head, base, dirty, ahead, behind, last commit time, size, locked, primary, pull-request state and `graph_id` when the path is `<root>/<graph_id>` under a configured root. Ignored file names, merged pull request heads and notes stay on the host. The route, its flag and its audit are in [worktree-fleet-api.md](worktree-fleet-api.md); with the registry off the server answers 503 and `scan --report` exits 1.
+`scan --report` posts `{protocol: 1, host, reported_at, worktrees: [...]}`. Only the contract's fields are sent: path, repo, branch, head, base, dirty, ahead, behind, last commit time, size, locked, primary, pull-request state, `session_id` when a claim or `--session` names one (below), `graph_id` when the path is `<root>/<graph_id>` under a configured root, and the changed files (below). Ignored file names, merged pull request heads and notes stay on the host. The route, its flag and its audit are in [worktree-fleet-api.md](worktree-fleet-api.md); with the registry off the server answers 503 and `scan --report` exits 1.
 
 `graph_id` attribution (`packages/collectors/src/worktree-graph.ts`) uses the same roots: the first configured root that contains a path decides, and the first segment below it is the id.
+
+### Which session a worktree belongs to
+
+A row carries `session_id` only when this scan can name the session. Two sources, nothing else (no guess from the branch name, the directory name or the file times):
+
+1. **The server's own claims.** For a worktree at `<root>/<graph_id>` the report asks `GET /worktrees/claims?graph_id=` once per graph (the same question and the same pool of 4 requests that `prune` uses). If the answer is `live`, **every** live claim names a holder, and all holders carry the same `session_id`, that id is the row's `session_id` (and `graph_id` as before). Two different holder sessions, a claim with no holder, no live claim, or a lookup that could not be answered (no bearer token, server unreachable, refused, unreadable reply) leave the row unattributed. A failed lookup never stops the report: the row goes out without `session_id`. A claim holder whose session id the registry would refuse (empty, a control character, or longer than 255 characters) is ignored for the same reason a bad `--session` is refused. This is the dispatcher's one-worktree-per-graph checkout; it needs no cooperation from the session.
+2. **The session itself.** `substrate worktree scan --report --session ID` (or `SUBSTRATE_SESSION_ID` when the flag is absent; the flag wins) attributes exactly **one** worktree to `ID`: the one that contains the current directory, meaning the scanned worktree whose real path is the deepest prefix of the real path of the current directory (a worktree nested inside the primary checkout wins over the primary). If none contains it, the id attributes nothing, a one-line warning goes to stderr and the exit is still 0. The id is the registry's label: non-empty, at most 255 characters, no control character (a swarm holder such as `A05@r1:ut-1` is accepted); a control character, an empty string, or more than 255 characters is a usage error, exit 2, as is `--session` without `--report`. An explicit id wins over a claim-derived one for that worktree.
+
+**The newest report wins.** The registry writes what each report says: a report without `session_id` stores NULL for that row, so a worktree handed to another session never keeps the old attribution. The consequences:
+
+- A session's hook (or the session itself) must re-send its attribution with each report. The command is `substrate worktree scan --report --session "$SESSION_ID"`, run from inside that session's worktree.
+- A cron-style scan without `--session` clears an explicit attribution on its next run, unless the dispatcher's live claim names the session. Run the host's periodic scan from the place that knows the session (the session's hook), not from a bare timer.
+- An unattributed row is never listed as another session's in `memory_brief` ([live-steering.md](live-steering.md#worktree-overlap-in-the-brief)), and a session whose own rows are all unattributed gets the one-line note that its own worktree has not reported its files. Unattributed means the brief section has nothing to match, not that the worktree is idle or safe.
+
+### The changed files in a report
+
+With `--report`, each row also carries `files`: the paths the worktree changed against its merge base plus its uncommitted changes (untracked files included; a rename counts as a delete and an add), repository-relative, forward slashes, sorted. It is the same listing `substrate worktree conflicts` makes (`changedFiles` in `packages/fleet/src/conflicts.ts`), so the two never disagree about what a worktree touches. A scan that does not report skips the listing.
+
+- **At most 200 paths of at most 400 characters.** A worktree over 200 reports the first 200 (in sorted order) and `files_truncated: true`. A path that is absolute, longer than 400 characters or holds a control character is dropped from the list (counted in the worktree's notes), never the worktree.
+- **`files: null` means unknown.** When the listing could not be made completely (no merge base because no default branch was found, a failed `git diff` or `git status`), the row carries `files: null` and the same note `conflicts` prints (`no merge base: only uncommitted changes are listed`, `git diff failed: ...`). A partial list is never sent: it would read as "touches less than it does", and an empty list would read as "touches nothing". A row whose directory is gone carries no `files` at all.
+- **The newest report wins.** The registry stores `files` and `files_truncated` on the row (migration step 40) and a later report that omits them (an older CLI) clears them, so a stale list never outlives the worktree's real state. Rows past `SUBSTRATE_WORKTREE_REGISTRY_TTL_S` are swept as before.
+- **What reads them.** `memory_brief` names other sessions' worktrees that touch the files the asking session's worktree touches ([live-steering.md](live-steering.md#worktree-overlap-in-the-brief)). That needs the rows to be attributed to a session: a row with no `session_id` is never listed as another session's, and a session whose own rows carry no `session_id` or no files gets a one-line note that its own worktree has not reported its files.
 
 ## The disk floor
 

@@ -827,6 +827,31 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 			);
 			create index if not exists corpus_feedback_document_idx on corpus_feedback (document_key)`,
 	},
+	// Worktree overlap in the brief (phase 68, FLEET-06): the paths each worktree last reported touching, so `memory_brief`
+	// can name another session's worktree that edits the same files. Additive: two nullable-or-defaulted columns on the
+	// registry table (step 36), runs with the registry and is not opt-in. NULL means the last report carried no list (an
+	// older reporter, or a listing that failed), never "touches nothing". Step 39 is still held by the doc-watch branch.
+	// OPERATORS: rehearse this step on a restored dump before applying it to production. It rewrites no row.
+	{
+		version: 40,
+		name: "worktrees_changed_files",
+		phase: "expand",
+		down: `alter table worktrees drop column if exists changed_files; alter table worktrees drop column if exists files_truncated`,
+		sql: `
+			alter table worktrees add column if not exists changed_files jsonb;
+			alter table worktrees add column if not exists files_truncated boolean not null default false`,
+	},
+	// candidates() filters lower(repo) and orders by last_seen_at. worktrees_repo_seen_idx is (repo, last_seen_at) and cannot
+	// serve lower(repo). This index is its own step: step 40's contract is the two columns only. Step 39 stays reserved.
+	// OPERATORS: rehearse this step on a restored dump before applying it to production.
+	{
+		version: 41,
+		name: "worktrees_repo_lower_seen_idx",
+		phase: "expand",
+		down: `drop index if exists worktrees_repo_lower_seen_idx`,
+		sql: `
+			create index if not exists worktrees_repo_lower_seen_idx on worktrees (lower(repo), last_seen_at desc)`,
+	},
 ];
 
 /** The steps `migrate()` runs for these opt-ins, in version order. A step whose opt-in is off is left out and not ledgered. */

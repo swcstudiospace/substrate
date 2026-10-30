@@ -12,7 +12,8 @@
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, realpathSync, type Stats } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { WORKTREE_REPO_PATTERN } from "../../mcp-server/src/worktree-registry.ts";
+import { normalizeWorktreeFiles, WORKTREE_FILE_MAX_CHARS, WORKTREE_FILES_MAX, WORKTREE_REPO_PATTERN } from "../../mcp-server/src/worktree-registry.ts";
+import { changedFiles } from "./conflicts.ts";
 import { type CommandRunner, type GitRunner, gitOut } from "./git.ts";
 import { mapLimit } from "./pool.ts";
 import { Gate, lookupPr, type PrState, PR_NONE, PR_UNKNOWN, type PrInfo, DEFAULT_PR_CONCURRENCY } from "./pr.ts";
@@ -208,6 +209,14 @@ export interface WorktreeInfo {
 	pr_merged_heads: string[];
 	/** Ignored, non-regenerable files that the primary checkout does not hold identically; removal would delete them. */
 	ignored_work: string[];
+	/**
+	 * The files this worktree changed against its merge base plus its uncommitted changes, sorted, at most `WORKTREE_FILES_MAX`.
+	 * Absent: not asked for (`InspectOptions.files`) or not listed because the directory is gone. `null`: asked and the listing
+	 * failed (no merge base, a failed git command), which is unknown and never "touches nothing"; `notes` says why.
+	 */
+	files?: string[] | null;
+	/** True when more than `WORKTREE_FILES_MAX` paths were changed and `files` holds the first of them. */
+	files_truncated?: boolean;
 	notes: string[];
 }
 
@@ -234,6 +243,8 @@ export interface InspectOptions {
 	measure?: boolean;
 	/** Look for ignored files that hold work (default true); only prune decisions need it. */
 	ignored?: boolean;
+	/** List the changed files for the registry report (default false: it costs two more git calls per worktree). */
+	files?: boolean;
 	maxEntries?: number;
 	maxMs?: number;
 	now?: () => number;
@@ -390,6 +401,21 @@ export async function inspectWorktree(wt: InspectInput, options: InspectOptions)
 		base.last_activity_at = measurement.lastActivityMs === null ? null : new Date(measurement.lastActivityMs).toISOString();
 		if (measurement.note !== null) base.notes.push(measurement.note);
 	} else base.notes.push("size and activity were not measured");
+	if (options.files === true) {
+		const listing = await changedFiles({ path: cwd, base: base.base }, git);
+		if (listing.notes.length > 0) {
+			// A partial listing would read as "touches less than it does": unknown, with the reason conflicts would give.
+			base.files = null;
+			base.notes.push(...listing.notes);
+		} else {
+			const reportable = normalizeWorktreeFiles(listing.files);
+			if (reportable.length < listing.files.length) {
+				base.notes.push(`${listing.files.length - reportable.length} changed paths were not reported (absolute, over ${WORKTREE_FILE_MAX_CHARS} characters, or holding a control character)`);
+			}
+			base.files = reportable.slice(0, WORKTREE_FILES_MAX);
+			base.files_truncated = reportable.length > WORKTREE_FILES_MAX;
+		}
+	}
 	if (defaultRef === null) base.notes.push("no default branch found (origin/HEAD, main, master)");
 	return base;
 }

@@ -104,7 +104,12 @@ function splitNul(text: string): string[] {
 	return text.split("\0").filter((part) => part !== "");
 }
 
-async function changedFiles(wt: ForecastWorktree, git: GitRunner): Promise<{ files: string[]; notes: string[] }> {
+/**
+ * The files a worktree changed against its merge base plus its uncommitted changes (renames are a delete and an add), sorted.
+ * `notes` is non-empty when any part of the listing failed or could not start (no merge base, a failed git command): the
+ * list is then missing files, and a caller that needs the complete set (the registry report) must treat it as unknown.
+ */
+export async function changedFiles(wt: Pick<ForecastWorktree, "path" | "base">, git: GitRunner): Promise<{ files: string[]; notes: string[] }> {
 	const files = new Set<string>();
 	const notes: string[] = [];
 	if (wt.base === null) notes.push("no merge base: only uncommitted changes are listed");
