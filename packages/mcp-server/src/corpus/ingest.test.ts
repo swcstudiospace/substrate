@@ -498,3 +498,35 @@ describe("ingestCorpus: updates", () => {
 		expect(store.row(REPO, "docs/a.md")?.source).toBe("github");
 	});
 });
+
+describe("ingestCorpus: the superseded-by marker (phase 66)", () => {
+	test("a new document records its marker, and the same bytes with an equal marker are unchanged", async () => {
+		const { store, plane, run } = harness();
+		const document = makeDocument(REPO, "docs/old.md", "# old", { supersededBy: "docs/new.md" });
+		await run([document]);
+		expect(store.row(REPO, "docs/old.md")?.supersededBy).toBe("docs/new.md");
+		const batches = plane.batches.length;
+		expect((await run([document])).counts).toMatchObject({ unchanged: 1, updated: 0 });
+		expect(plane.batches).toHaveLength(batches);
+	});
+
+	test("a marker that changed or went away on the same bytes is an update with no plane upload", async () => {
+		const { store, plane, run } = harness();
+		await run([makeDocument(REPO, "docs/old.md", "# old", { supersededBy: "docs/new.md" })]);
+		const batches = plane.batches.length;
+		const moved = await run([makeDocument(REPO, "docs/old.md", "# old", { supersededBy: "docs/newer.md" })]);
+		expect(moved.results[0]?.status).toBe("updated");
+		expect(store.row(REPO, "docs/old.md")?.supersededBy).toBe("docs/newer.md");
+		const cleared = await run([makeDocument(REPO, "docs/old.md", "# old")]);
+		expect(cleared.results[0]?.status).toBe("updated");
+		expect(store.row(REPO, "docs/old.md")?.supersededBy).toBeNull();
+		expect(plane.batches).toHaveLength(batches);
+	});
+
+	test("changed bytes take the marker the new version carries", async () => {
+		const { store, run } = harness();
+		await run([makeDocument(REPO, "docs/old.md", "# old", { supersededBy: "docs/new.md" })]);
+		await run([makeDocument(REPO, "docs/old.md", "# old, edited")]);
+		expect(store.row(REPO, "docs/old.md")?.supersededBy).toBeNull();
+	});
+});

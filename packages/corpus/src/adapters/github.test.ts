@@ -231,4 +231,26 @@ describe("scanGithub", () => {
 		const second = await scanGithub({ owner: "Acme", gh: fakeGh({ "Acme/A": alpha(), "Acme/B": alpha() }), maxBytes: 1000 });
 		expect(JSON.stringify(second.entries)).toBe(JSON.stringify(first.entries));
 	});
+
+	test("sets supersededBy from the front matter of a fetched document and leaves an unusable marker out", async () => {
+		const gh = fakeGh({
+			"Acme/Alpha": {
+				branch: "main",
+				tree: [
+					{ path: "docs/old.md", sha: "s-old" },
+					{ path: "docs/bad.md", sha: "s-bad" },
+					{ path: "docs/new.md", sha: "s-new" },
+				],
+				blobs: {
+					"s-old": "---\nsuperseded-by: docs/new.md\n---\n# old\n",
+					"s-bad": "---\nsuperseded-by: /etc/passwd\n---\n# bad\n",
+					"s-new": "# new\n",
+				},
+			},
+		});
+		const result = await scanGithub({ owner: "Acme", gh });
+		const markers = Object.fromEntries(result.entries.map((entry) => [entry.path, entry.supersededBy]));
+		expect(markers).toEqual({ "docs/old.md": "docs/new.md", "docs/bad.md": undefined, "docs/new.md": undefined });
+		expect(result.skipped).toEqual([]);
+	});
 });

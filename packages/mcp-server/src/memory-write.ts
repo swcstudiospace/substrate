@@ -837,7 +837,13 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 	// in doubt is not.
 	let mayHaveWritten = false;
 	try {
-		const plan = conflictPlan(scope, kind, subject !== null);
+		let plan = conflictPlan(scope, kind, subject !== null);
+		// A fact with a subject still plans `append`, so a new corpus digest would land with `supersedes: null` and leave the
+		// previous row in force. Sharing a Hindsight document id does not retire the index row. `lww` looks up the standing
+		// entry and `insertEntry` retires it in the same transaction; no `expected_version` is required.
+		if (kind === "fact" && subject !== null && subject.startsWith("corpus-digest:")) {
+			plan = { ...plan, resolve: "lww" };
+		}
 		// Only a `verified-by-test` claim standing on a source event needs the ledger
 		// consulted, and only when no reviewer vouched for it — so an ordinary write pays
 		// nothing for this.

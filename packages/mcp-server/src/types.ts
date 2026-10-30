@@ -413,8 +413,9 @@ export interface MemoryWriteResult {
 	trust_downgraded_from?: Trust;
 	/** Which rule allowed the write, for the audit trail. Null on a denial. */
 	grant?: string | null;
+	/** Set only when the stored text was cut to the memory text cap. A cut is not a refusal. */
+	truncated?: true;
 }
-
 /** Linear workflow states, as mapped in ~/.config/hermes-linear/config.yaml. */
 export const NODE_STATES = [
 	"backlog",

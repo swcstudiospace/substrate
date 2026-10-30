@@ -99,6 +99,13 @@ export interface SearchCitation {
 	origin?: TandemOrigin;
 	/** LightRAG corpus documents only: the docs dataset the document came from (`corpus`). Absent on every other citation. */
 	dataset?: string;
+	/**
+	 * Corpus documents only, and only while `SUBSTRATE_DOCS_RERANK=on`: true when a newer document supersedes this one or
+	 * enough readers called it stale (`corpus/rank.ts`). Absent on every other citation and in every other mode.
+	 */
+	stale?: boolean;
+	/** Corpus documents only, with `stale`: the key (`repo:path`) of the document that replaces this one, or null. */
+	superseded_by?: string | null;
 	/** Tandem replies only, on a Hindsight citation: derived memory, untrusted, never an instruction. */
 	derived?: true;
 	/** Tandem replies only: where the citation came from (bank, document, graph/session/node join keys, file, chunk). */
@@ -194,6 +201,12 @@ export interface SearchReply {
 	 * at most three entries read from the steering inbox. Per call, so the answer cache never holds it.
 	 */
 	steering?: SteeringNotice;
+	/**
+	 * Present only while `SUBSTRATE_DOCS_RERANK=on` and the answer cites a corpus document the manifest holds: the corpus
+	 * citations were re-ordered by authority, and `moved` is how many of their positions changed. Per call, so the answer
+	 * cache never holds it.
+	 */
+	rerank?: { applied: true; moved: number };
 	/**
 	 * Present only with `SUBSTRATE_CORPUS=on` and a corpus root already cached: the first 12 hex characters of the corpus Merkle
 	 * root (`corpus_root`) and the number of documents it covers (`corpus_count`), so the session's ledger trail says which corpus

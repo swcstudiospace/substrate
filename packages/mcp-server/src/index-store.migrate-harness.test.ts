@@ -211,7 +211,7 @@ describe("IndexStore.migrate() against a fake connection", () => {
 		expect(step?.name).toBe("steering_sessions");
 		expect(step?.down).toBe("drop table if exists steering_sessions");
 		const withSessions = applicableMigrationSteps({ "steering-audit": false, "steering-sessions": true }).map((candidate) => candidate.version);
-		expect(withSessions).toEqual([...ALL, 37]);
+		expect(withSessions).toEqual([...ALL, 37].sort((a, b) => a - b));
 		const on = fakeIndex({ migrationOptIns: { "steering-audit": false, "steering-sessions": true } });
 		await on.store.migrate();
 		expect(on.events).toEqual(expectedRun(new Set(), withSessions));

@@ -121,6 +121,8 @@ const migration = await substrate.migrate();
 for (const problem of migration.errors) {
 	process.stderr.write(`[substrate] degraded — ${problem}\n`);
 }
+// v1.7 phase 66: with SUBSTRATE_DOCS_TELEMETRY=on, one bounded retention pass now and one an hour (the migration above made the table). Off: nothing runs.
+substrate.startRetrievalSweep();
 
 // Phase 58 (live steering): restore the durable inbox before the server answers, then start its expiry timer (unref'd).
 // Off, with nothing read, unless SUBSTRATE_PLANNING_STEERING and the audit table opt-in are both on; a failed read is
@@ -220,6 +222,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		// Before the flush below: no new lag pass starts once shutdown began.
 		docsLagTimer.stop();
 		substrate.stopPlanningPoll();
+		substrate.stopRetrievalSweep();
 		// The weekly refresh timer is cleared with the others; a pass in flight is awaited in the bound below.
 		mentalModelRefresh?.stop();
 		// Cancelled first and awaited with the flush below: no ping after shutdown began,

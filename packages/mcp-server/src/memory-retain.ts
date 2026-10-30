@@ -67,6 +67,9 @@ export interface RetainDeps {
 	graphLifetime?: (entry: MemoryEntry) => Promise<GraphLifetime | null>;
 }
 
+/** The reason a forward reports when no Hindsight is configured: nothing was sent and nothing warned. */
+export const HINDSIGHT_NOT_CONFIGURED = "hindsight is not configured";
+
 export interface ForwardOutcome {
 	forwarded: boolean;
 	bank: string;
@@ -176,7 +179,7 @@ export async function forwardRetain(
 		return { forwarded: false, bank: "", document_id: "", reason: "not-accepted" };
 	}
 	if (!deps.config) {
-		return { forwarded: false, bank: "", document_id: "", reason: "hindsight is not configured" };
+		return { forwarded: false, bank: "", document_id: "", reason: HINDSIGHT_NOT_CONFIGURED };
 	}
 	const sessionId = typeof request.session_id === "string" && request.session_id.length > 0 ? request.session_id : undefined;
 	const source = typeof request.source_event === "string" && request.source_event.length > 0 ? request.source_event : undefined;
@@ -203,7 +206,7 @@ export async function replayRetain(
 	target: Omit<RetainTarget, "source">,
 ): Promise<ForwardOutcome> {
 	if (!deps.config) {
-		return { forwarded: false, bank: target.bank, document_id: target.documentId, reason: "hindsight is not configured" };
+		return { forwarded: false, bank: target.bank, document_id: target.documentId, reason: HINDSIGHT_NOT_CONFIGURED };
 	}
 	const source = typeof target.entry.source_event === "string" && target.entry.source_event.length > 0 ? target.entry.source_event : undefined;
 	return forwardEntry(deps, deps.config, { ...target, ...(source !== undefined ? { source } : {}) });

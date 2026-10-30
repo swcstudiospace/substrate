@@ -10,6 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { BRIEF_PROFILES, BRIEF_STATES } from "@substrate/observability";
 import { CORPUS_PROTOCOL } from "@substrate/corpus";
+import { FEEDBACK_VERDICTS } from "./corpus/reflect-store.ts";
 import { z } from "zod";
 import { BRIEF_SOURCES } from "./brief.ts";
 import { CheckpointVerifyError } from "./checkpoint-verify.ts";
@@ -1794,6 +1795,30 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		},
 		async ({ documents, tombstones }) => {
 			const reply = await substrate.corpusIngest({ protocol: CORPUS_PROTOCOL, documents: documents ?? [], tombstones: tombstones ?? [] }, callerSurface);
+			return reply.ok ? json(reply.body) : { ...json(reply.body), isError: true };
+		},
+	);
+
+	server.registerTool(
+		"docs_feedback",
+		{
+			title: "Rate a cited corpus document",
+			description:
+				"Tell the docs plane whether a corpus document a `docs_search` citation named was helpful, unhelpful, stale, wrong or a duplicate. " +
+				"`document` is the corpus document key exactly as the citation's title gives it (`repo:path`). One verdict per session and document: " +
+				"the latest wins, so repeating a call is harmless. Verdicts feed the document's authority score (SUBSTRATE_DOCS_RERANK). " +
+				"A document that is not an active row of the corpus manifest answers `unknown-document` and nothing is stored. `note` is accepted and ignored: it is never stored. " +
+				"Needs an authenticated surface; answers `corpus.disabled` while the server runs with SUBSTRATE_CORPUS off.",
+			inputSchema: {
+				document: z.string().describe("The corpus document key from a citation: repo:path."),
+				verdict: z.enum(FEEDBACK_VERDICTS),
+				session_id: z.string().optional().describe("Your session id; the verdict is idempotent per session and document. Omitted: one verdict per surface and document."),
+				note: z.string().optional().describe("Ignored: never stored."),
+			},
+			annotations: { idempotentHint: true },
+		},
+		async ({ document, verdict, session_id }) => {
+			const reply = await substrate.docsFeedback({ document, verdict, ...(session_id === undefined ? {} : { session_id }) }, callerSurface);
 			return reply.ok ? json(reply.body) : { ...json(reply.body), isError: true };
 		},
 	);

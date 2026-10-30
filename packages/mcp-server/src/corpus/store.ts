@@ -24,6 +24,10 @@ export interface ManifestRow {
 	/** The docs-plane document this row's active content lives in; null for a row that never reached the plane. */
 	documentId: string | null;
 	manifestSeq: number;
+	/** The repo-relative path of the same repository that replaces this document, from its `superseded-by` marker; null when there is none. */
+	supersededBy: string | null;
+	/** ISO time the current content reached the plane (`ingested_at`, else `updated_at`): a metadata refresh does not move it. Null when the database gave neither. */
+	ingestedAt: string | null;
 }
 
 /** What `recordIngested` writes: the document as the plane now holds it. */
@@ -36,6 +40,7 @@ export interface RecordedDocument {
 	bytes: number;
 	source: CorpusSource;
 	commit?: string | undefined;
+	supersededBy?: string | undefined;
 	documentId: string;
 }
 
@@ -48,6 +53,7 @@ export interface RefreshedMetadata {
 	tier: DocTier;
 	source: CorpusSource;
 	commit?: string | undefined;
+	supersededBy?: string | undefined;
 }
 
 /** What the Merkle root covers of one document. */
@@ -55,6 +61,14 @@ export interface ManifestLeaf {
 	repo: string;
 	path: string;
 	sha256: string;
+}
+
+/** The ACTIVE rows (at most the limit) and whether they are all of them. */
+export interface ActiveRows {
+	/** At most `limit` rows, ordered by `(repo, path)`. */
+	rows: ManifestRow[];
+	/** True when `rows` is not the whole active manifest: more rows are active than `limit`, or a row could not be read. */
+	truncated: boolean;
 }
 
 /** The ACTIVE rows' leaves and the manifest version they were read at, from one consistent read. */
@@ -85,6 +99,12 @@ export interface CorpusStore {
 	/** How many ACTIVE rows hold this plane document id. */
 	activeReferences(documentId: string): Promise<number>;
 	/**
+	 * Up to `limit` ACTIVE rows ordered by `(repo, path)`, for the supersession and authority index. `truncated` says the list is
+	 * not the whole active manifest: a reader may treat a document it never saw as unflagged, but must not judge a document by
+	 * comparing it with the copies it did see, because the copies it missed may change the answer.
+	 */
+	activeRows(limit: number): Promise<ActiveRows>;
+	/**
 	 * The leaves of the ACTIVE rows (at most `limit`, `truncated` when there are more) and the manifest version of the very read
 	 * that returned them, so a root made from them names the version it covers.
 	 */
@@ -106,7 +126,7 @@ function numberOf(value: unknown): number {
 	return Number.isFinite(parsed) ? parsed : 0;
 }
 
-/** A timestamp column as an ISO string, or null for no value (an empty table, or a row never ingested) or one that is not a time. */
+/** A timestamp column as an ISO string, or null for no value (an empty table, or a row never ingested), anything else, or an unparseable value. */
 function isoOf(value: unknown): string | null {
 	const at = value instanceof Date ? value : typeof value === "string" ? new Date(value) : null;
 	return at === null || !Number.isFinite(at.getTime()) ? null : at.toISOString();
@@ -131,6 +151,8 @@ export function toManifestRow(record: Record<string, unknown>): ManifestRow | nu
 		state,
 		documentId: typeof record.docs_document_id === "string" ? record.docs_document_id : null,
 		manifestSeq: numberOf(record.manifest_seq),
+		supersededBy: typeof record.superseded_by === "string" && record.superseded_by.length > 0 ? record.superseded_by : null,
+		ingestedAt: isoOf(record.ingested_at) ?? isoOf(record.updated_at),
 	};
 }
 
@@ -162,6 +184,7 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 					tier = ${row.tier},
 					source = ${row.source},
 					commit_sha = ${row.commit ?? null},
+					superseded_by = ${row.supersededBy ?? null},
 					updated_at = now(),
 					manifest_seq = nextval(pg_get_serial_sequence('corpus_documents', 'manifest_seq'))
 				where repo = ${row.repo} and path = ${row.path} and state = 'active' and sha256 = ${row.sha256}
@@ -170,8 +193,8 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 		},
 		async recordIngested(row: RecordedDocument): Promise<void> {
 			await sql`
-				insert into corpus_documents (repo, path, kind, tier, sha256, bytes, source, commit_sha, state, docs_document_id, ingested_at, tombstoned_at, updated_at)
-				values (${row.repo}, ${row.path}, ${row.kind}, ${row.tier}, ${row.sha256}, ${row.bytes}, ${row.source}, ${row.commit ?? null}, 'active', ${row.documentId}, now(), null, now())
+				insert into corpus_documents (repo, path, kind, tier, sha256, bytes, source, commit_sha, superseded_by, state, docs_document_id, ingested_at, tombstoned_at, updated_at)
+				values (${row.repo}, ${row.path}, ${row.kind}, ${row.tier}, ${row.sha256}, ${row.bytes}, ${row.source}, ${row.commit ?? null}, ${row.supersededBy ?? null}, 'active', ${row.documentId}, now(), null, now())
 				on conflict (repo, path) do update set
 					kind = excluded.kind,
 					tier = excluded.tier,
@@ -179,6 +202,7 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 					bytes = excluded.bytes,
 					source = excluded.source,
 					commit_sha = excluded.commit_sha,
+					superseded_by = excluded.superseded_by,
 					state = 'active',
 					docs_document_id = excluded.docs_document_id,
 					ingested_at = now(),
@@ -200,6 +224,16 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 		async activeReferences(documentId: string): Promise<number> {
 			const rows = await sql`select count(*)::int as n from corpus_documents where docs_document_id = ${documentId} and state = 'active'`;
 			return numberOf(rows[0]?.n);
+		},
+		async activeRows(limit: number): Promise<ActiveRows> {
+			// One row past the limit tells a full list from a cut one.
+			const records: Array<Record<string, unknown>> = await sql`select * from corpus_documents where state = 'active' order by repo, path limit ${limit + 1}`;
+			const page = records.slice(0, limit);
+			const rows = page.flatMap((record) => {
+				const parsed = toManifestRow(record);
+				return parsed === null ? [] : [parsed];
+			});
+			return { rows, truncated: records.length > limit || rows.length < page.length };
 		},
 		manifestVersion,
 		async activeLeaves(limit: number): Promise<ActiveLeaves> {

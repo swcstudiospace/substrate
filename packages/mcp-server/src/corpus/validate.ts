@@ -78,7 +78,7 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 /** One entry, narrowed field by field. `bytes` is the size of the raw file the sha256 describes. */
 export function parseEntry(raw: unknown): Parsed<CorpusEntry> {
 	if (!isRecord(raw)) return refuse("bad-request", "an entry must be an object");
-	const { repo, path, kind, tier, sha256, bytes, source, commit } = raw;
+	const { repo, path, kind, tier, sha256, bytes, source, commit, supersededBy } = raw;
 	if (typeof repo !== "string" || !isValidRepo(repo)) return refuse("bad-repo", typeof repo === "string" ? repo.slice(0, 80) : undefined);
 	if (typeof path !== "string" || !isValidPath(path)) return refuse("bad-path", `${repo}: ${typeof path === "string" ? path.slice(0, 80) : "not a string"}`);
 	if (!isDocKind(kind)) return refuse("bad-kind", `${repo}:${path}`);
@@ -88,7 +88,9 @@ export function parseEntry(raw: unknown): Parsed<CorpusEntry> {
 	if (!isCorpusSource(source)) return refuse("bad-source", `${repo}:${path}`);
 	if (commit !== undefined && typeof commit !== "string") return refuse("bad-commit", `${repo}:${path}`);
 	if (typeof commit === "string" && (commit.length === 0 || commit.length > MAX_COMMIT_LENGTH || hasControlCharacter(commit))) return refuse("bad-commit", `${repo}:${path}`);
-	return { ok: true, value: { repo, path, kind, tier, sha256, bytes, source, ...(typeof commit === "string" ? { commit } : {}) } };
+	// The marker is advisory: a value that is not a valid repo-relative path is dropped, so one odd front-matter line never refuses a request.
+	const marker = typeof supersededBy === "string" && isValidPath(supersededBy) ? supersededBy : undefined;
+	return { ok: true, value: { repo, path, kind, tier, sha256, bytes, source, ...(typeof commit === "string" ? { commit } : {}), ...(marker === undefined ? {} : { supersededBy: marker }) } };
 }
 
 /**
