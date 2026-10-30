@@ -167,3 +167,34 @@ describe("steeringSessionEvent", () => {
 		expect(Object.hasOwn(event.payload ?? {}, "via")).toBe(false);
 	});
 });
+
+describe("end", () => {
+	test("ending a session removes it from the registry and from every lookup", () => {
+		const { reg } = registry();
+		reg.put("claude-code", "s-1", session("s-1", "ACTIVE"));
+		reg.put("claude-code", "s-2", session("s-2", "ACTIVE"));
+		expect(reg.end("claude-code", "s-1").held).toBe(true);
+		expect(reg.get("claude-code", "s-1")).toBeUndefined();
+		expect(reg.lookup("s-1")).toEqual({ status: "none" });
+		expect(reg.entries().map((entry) => entry.session.session_id)).toEqual(["s-2"]);
+		expect(reg.size).toBe(1);
+	});
+
+	test("a second end is a no-op, and a session of another surface with the same id is left alone", () => {
+		const { reg } = registry();
+		reg.put("omp", "s-1", session("s-1", "ACTIVE"));
+		reg.put("cursor", "s-1", session("s-1", "ACTIVE"));
+		expect(reg.end("omp", "s-1").held).toBe(true);
+		expect(reg.end("omp", "s-1").held).toBe(false);
+		expect(reg.get("cursor", "s-1")?.state).toBe("ACTIVE");
+		expect(reg.lookup("s-1")).toMatchObject({ status: "one", surface: "cursor" });
+	});
+
+	test("an ended session cannot be moved: the transition is refused as not registered and records no note", async () => {
+		const { reg, events } = registry();
+		reg.put("omp", "s-1", session("s-1", "ACTIVE"));
+		reg.end("omp", "s-1");
+		expect(await reg.applyTransition("s-1", "PAUSED", { directiveId: "dir-1" })).toEqual({ ok: false, reason: "session not registered" });
+		expect(events).toHaveLength(0);
+	});
+});

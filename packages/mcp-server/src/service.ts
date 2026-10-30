@@ -211,7 +211,7 @@ import { completionStoreView, type CompletionStoreView } from "./planning/checkp
 import type { SteeringWiring } from "./planning/steering-tools.ts";
 import { SteeringInbox, steeringRecordsFromEntries, type SteeringHistorySink } from "./planning/steering.ts";
 import { DEFAULT_STEERING_RESTORE_LIMIT, DEFAULT_STEERING_RESTORE_MAX_PAGES, restoreSteeringInboxPaged, type SteeringAuditSink, type SteeringRestoreStop } from "./planning/steering-store.ts";
-import { SteeringSessionRegistry } from "./planning/session-state.ts";
+import { STEERING_SESSION_ENDED_ACTION, SteeringSessionRegistry } from "./planning/session-state.ts";
 import { SteeringExpirySweeper, SteeringHintAnnouncer, steeringNoticeFor, type SessionStatePort, type SteeringNotice } from "./planning/steering-delivery.ts";
 import type { SteeringSessionsStore } from "./planning/steering-sessions-store.ts";
 import { SteeringWaiters } from "./planning/steering-waiters.ts";
@@ -642,6 +642,8 @@ export interface EmitResult {
 /** What `emit` is told about the request, beyond the event: the transport's replay marker (`x-substrate-replay: 1`). */
 export interface EmitOptions {
 	replay?: boolean;
+	/** The authenticated caller, when the transport has one. A `session.end` closes steering state only for its session's own surface, or for an operator. */
+	caller?: { surface: string | null; isOperator: boolean };
 }
 
 /** Who is forgetting: the authenticated surface (the ledger note's own `surface`) and, when it has one, its session. */
@@ -2511,6 +2513,7 @@ export class Substrate {
 		this.planningEvent(input);
 		if (result.stored) this.noteDocsCanary(result.event);
 		if (result.stored) this.publishHint(result.event);
+		if (result.stored && result.event.kind === "session.end") await this.endSteeringSession(result.event, options.caller);
 		return result;
 	}
 
@@ -2524,6 +2527,36 @@ export class Substrate {
 		if (bus === null) return;
 		const hint: EventHint = { v: 1, id: event.id, kind: event.kind, surface: event.surface, graph_id: event.graph_id, ts: event.ts };
 		void bus.publish(hint).catch(() => false);
+	}
+
+	/**
+	 * Applies a recorded `session.end` to the steering registry. The caller's authenticated surface must be the session's surface
+	 * (the surface the event names), or the caller must be an operator; otherwise the registry is left alone. Either way a
+	 * `steering.session_ended` note records the decision and whether a live session was removed. The effect is only the live
+	 * session and its durable row: queued directives are not touched. Never throws into the emit path.
+	 */
+	private async endSteeringSession(event: SubstrateEvent, caller: EmitOptions["caller"]): Promise<void> {
+		const sessionId = event.session_id;
+		if (sessionId === null) return;
+		const authorized = caller !== undefined && (caller.isOperator || (caller.surface !== null && caller.surface === event.surface));
+		try {
+			const outcome = authorized ? this.steeringSessions.end(event.surface, sessionId) : null;
+			const removed = outcome !== null && outcome.removal !== "refused" && outcome.held;
+			const id = redact(sessionId).slice(0, 80);
+			await this.emit({
+				surface: event.surface,
+				kind: "note",
+				summary: !authorized
+					? `steering session ${id} end refused: the caller is neither the session's surface nor an operator`
+					: outcome?.removal === "refused"
+						? `steering session ${id} end refused: the removal queue is full, so the session stays live`
+						: `steering session ${id} ended: ${removed ? "its live session was removed" : "it held no live session"}`,
+				session_id: sessionId,
+				payload: { action: STEERING_SESSION_ENDED_ACTION, authorized, removed, removal: outcome?.removal ?? null },
+			});
+		} catch (cause) {
+			process.stderr.write(`[substrate] steering: recording the end of session ${redact(sessionId).slice(0, 80)} failed: ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200)}\n`);
+		}
 	}
 
 	/**

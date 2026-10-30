@@ -1268,7 +1268,7 @@ export function createHttpServer(
 						...(body as object),
 						surface: attribution.surface,
 					} as Parameters<Substrate["emit"]>[0],
-					{ replay: req.headers["x-substrate-replay"] === "1" },
+					{ replay: req.headers["x-substrate-replay"] === "1", caller: { surface, isOperator: caller.isOperator } },
 				);
 				// The sync lag the CLI reports, as a gauge: bounded and sanitised, read only from a stored `docs.sync` note.
 				if (result.stored) {

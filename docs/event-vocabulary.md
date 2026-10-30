@@ -172,6 +172,7 @@ These apply to every source:
 | `worktree.prune` | 68 | `note` | `caller` | `worktree.prune` | — | the pruned worktree's repository (omitted for a local-only one) | no |
 | `worktree.merge_back` | 68 | `note` | `caller` | `worktree.merge_back` | — | the merged-back worktree's repository (omitted for a local-only one) | no |
 | `steering.persist_failed` | 67 | `warning` | `caller` | `steering.persist_failed` | — | — | no |
+| `steering.session_ended` | 68 | `note` | `caller` | `steering.session_ended` | — | — | no |
 | `muse.brief_writer` | 19 | — | — | — | — | — | no |
 | `memory.retain` | 26 | — | — | — | — | — | no |
 | `memory.recall` | 26 | — | — | — | — | — | no |

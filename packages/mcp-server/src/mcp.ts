@@ -1172,7 +1172,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			const { event, stored, error, warning } = await substrate.emit({
 				...args,
 				surface: attribution.surface,
-			});
+			}, { caller: { surface: callerSurface, isOperator } });
 			return json({
 				id: event.id,
 				ts: event.ts,

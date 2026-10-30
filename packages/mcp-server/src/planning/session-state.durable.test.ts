@@ -8,6 +8,7 @@ import type { EventInput, Surface } from "../types.ts";
 import {
 	SteeringSessionRegistry,
 	STEERING_PERSIST_FAILED_ACTION,
+	STEERING_DELETE_PENDING_MAX,
 	STEERING_PERSIST_PENDING_MAX,
 	STEERING_PERSIST_WARN_INTERVAL_MS,
 } from "./session-state.ts";
@@ -61,6 +62,18 @@ class FakeStore implements SteeringSessionsStore {
 			}
 		}
 		return removed;
+	}
+
+	deleteCalls = 0;
+	failDeletes = 0;
+
+	async delete(surface: Surface, sessionId: string): Promise<void> {
+		this.deleteCalls += 1;
+		if (this.failDeletes > 0) {
+			this.failDeletes -= 1;
+			throw new Error("the delete was refused");
+		}
+		this.rows.delete(`${surface}:${sessionId}`);
 	}
 
 	seed(surface: Surface, value: SteeringSession): void {
@@ -279,5 +292,67 @@ describe("loadDurable", () => {
 		await second.reg.loadDurable();
 		expect(second.reg.get("omp", "s-1")).toMatchObject({ state: "PAUSED", steering: "hold", planning_hash: "h1" });
 		expect(second.reg.lookup("s-1")).toMatchObject({ status: "one", surface: "omp" });
+	});
+});
+
+describe("a removal of an ended session", () => {
+	test("is not dropped when the write queue is full: it waits behind the saves and lands", async () => {
+		const store = new FakeStore();
+		const { reg } = build({ store });
+		store.seed("omp", session("sess-ended", T0));
+		const gate = Promise.withResolvers<void>();
+		store.gate = gate.promise;
+		for (let i = 0; i < STEERING_PERSIST_PENDING_MAX; i += 1) reg.put("omp", `s-${i}`, session(`s-${i}`, T0));
+		reg.end("omp", "sess-ended");
+		gate.resolve();
+		await reg.idle();
+		expect(store.rows.has("omp:sess-ended")).toBe(false);
+		expect(store.rows.has("omp:s-0")).toBe(true);
+	});
+
+	test("a save that lands during a waiting removal keeps its row: a retry runs before the save, not after it", async () => {
+		const store = new FakeStore();
+		const { reg } = build({ store });
+		store.seed("omp", session("sess-back", T0));
+		store.failDeletes = 1;
+		const gate = Promise.withResolvers<void>();
+		store.gate = gate.promise;
+		reg.put("omp", "holder", session("holder", T0));
+		reg.end("omp", "sess-back");
+		reg.put("omp", "sess-back", session("sess-back", T0));
+		gate.resolve();
+		await reg.idle();
+		expect(store.deleteCalls).toBe(2);
+		expect(store.rows.has("omp:sess-back")).toBe(true);
+	});
+
+	test("repeated ends for one session queue one removal", async () => {
+		const store = new FakeStore();
+		const { reg } = build({ store });
+		const gate = Promise.withResolvers<void>();
+		store.gate = gate.promise;
+		reg.put("omp", "holder", session("holder", T0));
+		expect(reg.end("omp", "sess-gone").removal).toBe("queued");
+		expect(reg.end("omp", "sess-gone").removal).toBe("coalesced");
+		expect(reg.end("omp", "sess-gone").removal).toBe("coalesced");
+		gate.resolve();
+		await reg.idle();
+		expect(store.deleteCalls).toBe(1);
+	});
+
+	test("a full removal bound refuses the new end, keeps that session live, and still runs every pending removal", async () => {
+		const store = new FakeStore();
+		const { reg } = build({ store });
+		const gate = Promise.withResolvers<void>();
+		store.gate = gate.promise;
+		reg.put("omp", "holder", session("holder", T0));
+		for (let i = 0; i < STEERING_DELETE_PENDING_MAX; i += 1) expect(reg.end("omp", `gone-${i}`).removal).toBe("queued");
+		reg.put("omp", "live", session("live", T0));
+		expect(reg.end("omp", "live")).toEqual({ held: true, removal: "refused" });
+		expect(reg.get("omp", "live")?.session_id).toBe("live");
+		gate.resolve();
+		await reg.idle();
+		expect(store.deleteCalls).toBe(STEERING_DELETE_PENDING_MAX);
+		expect(store.rows.has("omp:live")).toBe(true);
 	});
 });
