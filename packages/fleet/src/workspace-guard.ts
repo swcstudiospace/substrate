@@ -9,7 +9,7 @@
  * `findIgnoredWork`), `git worktree list` and the discovery reads of `discoverRepos`. It never removes a worktree,
  * deletes a branch or writes to a repository. Every probe that fails is a refusal: an unknown fact is never a pass.
  */
-import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { type Dirent, existsSync, readdirSync, realpathSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import type { GitRunner } from "./git.ts";
 import { findIgnoredWork, type IgnoredOptions, UNKNOWN_IGNORED } from "./ignored.ts";
@@ -65,7 +65,7 @@ function isInside(path: string, root: string): boolean {
 	return path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
 }
 
-/** The child directories of `root`; a root that cannot be read is a note and has none. */
+/** The child directories of `root`; a root that cannot be read is a note and has none. Links are not directories here. */
 function childDirectories(root: string, notes: string[]): string[] {
 	try {
 		return readdirSync(root, { withFileTypes: true })
@@ -108,23 +108,28 @@ async function discoverMembers(root: string, git: GitRunner): Promise<Discovered
 
 /**
  * The entries below `dir` that no member owns and that hold no member: a removal would delete them with nothing
- * checking them. An entry that holds a member is searched on; a member's own contents are its own probes' business.
- * The root's `.planning/` has its own refusal and is skipped here.
+ * checking them. Only real directories are searched on, so the walk is a tree that cannot revisit a directory; a
+ * symbolic link is refused as it stands and its target is never read. A member's own contents are its own probes'
+ * business. The root's `.planning/` has its own refusal and is skipped here.
  */
 function looseRefusals(dir: string, members: readonly string[], root: string): string[] {
-	let names: string[];
+	let entries: Dirent[];
 	try {
-		names = readdirSync(dir);
+		entries = readdirSync(dir, { withFileTypes: true });
 	} catch {
 		return [`${dir}: could not be listed, so its files cannot be ruled out`];
 	}
 	const out: string[] = [];
-	for (const name of names) {
-		const path = join(dir, name);
+	for (const entry of entries) {
+		const path = join(dir, entry.name);
 		if (path === join(root, ".planning")) continue;
+		if (entry.isSymbolicLink()) {
+			out.push(`${path}: ${LOOSE_REFUSAL}`);
+			continue;
+		}
 		const real = canonical(path);
 		if (members.includes(real)) continue;
-		if (members.some((member) => isInside(member, real))) out.push(...looseRefusals(path, members, root));
+		if (entry.isDirectory() && members.some((member) => isInside(member, real))) out.push(...looseRefusals(path, members, root));
 		else out.push(`${path}: ${LOOSE_REFUSAL}`);
 	}
 	return out;

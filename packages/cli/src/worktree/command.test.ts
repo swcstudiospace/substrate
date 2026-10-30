@@ -1138,4 +1138,16 @@ describe("guard", () => {
 		await proc.exited;
 		expect(out).toContain("worktree list|status|scan|prune|conflicts|provision|disk|guard");
 	});
+
+	test("directory links back to the root are refused promptly and their targets are never walked", async () => {
+		const w = workspace();
+		symlinkSync(w.root, join(w.root, "loop-a"));
+		symlinkSync(w.root, join(w.root, "loop-b"));
+		const h = harness({}, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", w.root], h.deps)).toBe(1);
+		const text = h.out.join("");
+		expect(text).toContain(`${join(w.root, "loop-a")}: outside every git worktree`);
+		expect(text).toContain(`${join(w.root, "loop-b")}: outside every git worktree`);
+		expect(text).not.toContain(join(w.root, "loop-a", "loop-a"));
+	}, 10_000);
 });
