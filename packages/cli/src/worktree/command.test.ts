@@ -929,14 +929,16 @@ describe("guard", () => {
 		return { repo, root, api, web };
 	}
 
-	/** The real git with every call recorded; `answer` may replace the result of a call. */
-	function recording(answer: (args: string[]) => CommandResult | null = () => null): { git: CommandRunner; calls: string[][] } {
+	/** The real git with every call recorded, with the directory it ran in; `answer` may replace the result of a call. */
+	function recording(answer: (args: string[]) => CommandResult | null = () => null): { git: CommandRunner; calls: string[][]; dirs: string[] } {
 		const calls: string[][] = [];
+		const dirs: string[] = [];
 		const runner: CommandRunner = async (args, cwd) => {
 			calls.push(args);
+			dirs.push(cwd);
 			return answer(args) ?? spawnGit(args, cwd);
 		};
-		return { git: runner, calls };
+		return { git: runner, calls, dirs };
 	}
 
 	test("clean and pushed members pass: exit 0 and nothing refused", async () => {
@@ -1069,5 +1071,71 @@ describe("guard", () => {
 		const h = harness({}, withRoot("/nowhere"));
 		expect(await runWorktree(["guard", w.root], h.deps)).toBe(0);
 		expect(h.out.join("")).not.toContain("primary checkout");
+	});
+
+	test("untracked files are refused even when the user has told git status to hide them", async () => {
+		const w = workspace();
+		git(w.web, ["config", "status.showUntrackedFiles", "no"]);
+		write(w.web, "notes-untracked.txt", "draft\n");
+		const h = harness({}, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", w.root], h.deps)).toBe(1);
+		expect(h.out.join("")).toContain(`${w.web}: uncommitted changes`);
+	});
+
+	test("loose files and directories beside clean members are refused", async () => {
+		const w = workspace();
+		write(w.root, "notes.md", "scratch\n");
+		write(w.root, "scratch/plan.txt", "draft\n");
+		const h = harness({}, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", w.root], h.deps)).toBe(1);
+		const text = h.out.join("");
+		expect(text).toContain(`${join(w.root, "notes.md")}: outside every git worktree`);
+		expect(text).toContain(`${join(w.root, "scratch")}: outside every git worktree`);
+		expect(text).not.toContain("holds no unsaved work");
+	});
+
+	test("a member holding a submodule is refused, since the submodule's files are not checked", async () => {
+		const w = workspace();
+		const lib = makeRepo();
+		git(w.api, ["-c", "protocol.file.allow=always", "submodule", "add", lib.origin, "vendor/lib"]);
+		git(w.api, ["commit", "-q", "-m", "add submodule"]);
+		git(w.api, ["push", "-q", "origin", "api"]);
+		const h = harness({}, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", w.root], h.deps)).toBe(1);
+		expect(h.out.join("")).toContain(`${w.api}: contains submodule(s) at vendor/lib`);
+	});
+
+	test("a primary checkout inside the workspace is refused for its other local branches too", async () => {
+		const repo = makeRepo();
+		const root = join(tempDir(), "ws");
+		mkdirSync(join(root, "group"), { recursive: true });
+		const api = join(root, "group", "api");
+		renameSync(repo.dir, api);
+		git(api, ["checkout", "-q", "-b", "keep"]);
+		commit(api, "keep.txt", "unique\n");
+		git(api, ["checkout", "-q", "main"]);
+		const h = harness({}, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", root], h.deps)).toBe(1);
+		expect(h.out.join("")).toContain(`${api}: primary checkout inside the workspace: never removed by a workspace removal`);
+		expect(h.out.join("")).not.toContain("unpushed commit");
+	});
+
+	test("worktrees of a member's repository outside the workspace are never probed", async () => {
+		const w = workspace();
+		const elsewhere = join(tempDir(), "elsewhere");
+		mkdirSync(elsewhere);
+		const decoy = addWorktree(w.repo, elsewhere, "decoy");
+		const { git: runner, dirs } = recording();
+		const h = harness({ git: runner }, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", w.root], h.deps)).toBe(0);
+		expect(dirs).toContain(w.api);
+		expect(dirs).not.toContain(decoy);
+	});
+
+	test("the top-level help lists guard beside the other worktree subcommands", async () => {
+		const proc = Bun.spawn([process.execPath, join(import.meta.dir, "..", "index.ts")], { stdout: "pipe", stderr: "pipe" });
+		const out = await new Response(proc.stdout).text();
+		await proc.exited;
+		expect(out).toContain("worktree list|status|scan|prune|conflicts|provision|disk|guard");
 	});
 });
