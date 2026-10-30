@@ -149,6 +149,18 @@ describe("what the harness catches", () => {
 	const docs = loadFixtureDocuments();
 	const baselines = defined(parseBaselines(readFileSync(BASELINE_PATH, "utf8")), "committed baseline");
 	const reversed = (hits: readonly LexicalHit[]): readonly LexicalHit[] => [...hits].reverse();
+	const first = docs[0];
+	const last = docs[docs.length - 1];
+	if (first === undefined || last === undefined || first === last) throw new Error("the fixture needs two documents");
+	const spareKey = `${first.repo}:${first.path}`;
+	const otherKey = `${last.repo}:${last.path}`;
+	// A one-hit answer that becomes empty is a shape failure the plane client retries (200 ms, then 400 ms). That wait is not the regression. Swap in a different fixture document so the answer is wrong and still a document.
+	const dropLeading = (hits: readonly LexicalHit[]): readonly LexicalHit[] => {
+		if (hits.length >= 2) return hits.slice(1);
+		const only = hits[0];
+		if (only === undefined) return hits;
+		return [{ key: only.key === spareKey ? otherKey : spareKey, score: only.score }];
+	};
 
 	test("a re-rank that puts the best hit last fails the comparison, in the retriever alone and through the server's search code", async () => {
 		const lexical = compareToBaseline((await runOffline(docs, () => 0, reversed)).score, baselines.lexical);
@@ -160,8 +172,8 @@ describe("what the harness catches", () => {
 	});
 
 	test("a re-rank that drops the leading hit fails it too, on both paths", async () => {
-		expect(compareToBaseline((await runOffline(docs, () => 0, (hits) => hits.slice(1))).score, baselines.lexical).ok).toBe(false);
-		expect(compareToBaseline((await runServer(docs, () => 0, (hits) => hits.slice(1))).score, baselines.server).ok).toBe(false);
+		expect(compareToBaseline((await runOffline(docs, () => 0, dropLeading)).score, baselines.lexical).ok).toBe(false);
+		expect(compareToBaseline((await runServer(docs, () => 0, dropLeading)).score, baselines.server).ok).toBe(false);
 	});
 
 	test("an identity re-rank changes nothing: the hook is a seam, not a behaviour", async () => {
