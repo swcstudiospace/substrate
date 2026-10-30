@@ -37,9 +37,10 @@ describe("sessionOfClaims", () => {
 	const held = (node: string, session: string): LiveClaim => ({ node_id: node, holder: { surface: "hermes", session_id: session }, expires_at: null });
 	const holderless: LiveClaim = { node_id: "n9", holder: null, expires_at: null };
 
-	test("every live claim held by one session names that session", () => {
+	test("every live claim held by one session names that session, including a swarm holder", () => {
 		expect(sessionOfClaims({ state: "live", graph_id: GRAPH, claims: [held("n1", "sess-1")] })).toBe("sess-1");
 		expect(sessionOfClaims({ state: "live", graph_id: GRAPH, claims: [held("n1", "sess-1"), held("n2", "sess-1")] })).toBe("sess-1");
+		expect(sessionOfClaims({ state: "live", graph_id: GRAPH, claims: [held("n1", "A05@r1:ut-1")] })).toBe("A05@r1:ut-1");
 	});
 
 	const NAMING_NOBODY: Array<[string, ClaimStatus]> = [
@@ -47,7 +48,8 @@ describe("sessionOfClaims", () => {
 		["a claim with no holder beside a held one", { state: "live", graph_id: GRAPH, claims: [held("n1", "sess-1"), holderless] }],
 		["a claim with no holder first", { state: "live", graph_id: GRAPH, claims: [holderless, held("n1", "sess-1")] }],
 		["only a claim with no holder", { state: "live", graph_id: GRAPH, claims: [holderless] }],
-		["a holder whose session id is not in the session grammar", { state: "live", graph_id: GRAPH, claims: [held("n1", "has a space")] }],
+		["a holder whose session id has a control character", { state: "live", graph_id: GRAPH, claims: [held("n1", "bad\nid")] }],
+		["a holder whose session id is empty", { state: "live", graph_id: GRAPH, claims: [held("n1", "")] }],
 		["none", { state: "none", graph_id: GRAPH }],
 		["unverified", { state: "unverified", graph_id: GRAPH, reason: "HTTP 503" }],
 		["not-checked", NOT_CHECKED],

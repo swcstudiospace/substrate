@@ -114,6 +114,13 @@ describe("buildReports", () => {
 		expect(skipped[0]?.reason).toContain("branch");
 		expect(skipped[1]?.reason).toContain("path");
 		expect(reports.flatMap((report) => report.worktrees.map((row) => row.path))).toEqual(["/a", "/c"]);
+		// The CLI counts session_id on posted rows only. A skipped row, even one a scan had attributed, is not in a body.
+		const sessions = new Map([["/a", "sess-1"], ["/b", "A05@r1:ut-1"]]);
+		const attributed = buildReports("h", [info("/a"), info("/b", { branch: "x".repeat(300) })], { now: NOW, roots: [], sessions });
+		const posted = attributed.reports.reduce((count, report) => count + report.worktrees.filter((row) => row.session_id !== undefined).length, 0);
+		expect(posted).toBe(1);
+		expect(attributed.reports[0]?.worktrees[0]).toMatchObject({ path: "/a", session_id: "sess-1" });
+		expect(attributed.skipped.map((row) => row.path)).toEqual(["/b"]);
 	});
 
 	test("an empty inventory is one empty report", () => {

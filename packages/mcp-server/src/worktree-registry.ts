@@ -190,10 +190,11 @@ export function normalizeWorktreeFiles(paths: readonly unknown[]): string[] {
 	return [...new Set(paths.filter(isReportableFilePath))].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-/** A non-empty single-line string within `WORKTREE_TEXT_MAX_CHARS`. */
-function isLabel(value: unknown): value is string {
+/** A non-empty single-line string within `WORKTREE_TEXT_MAX_CHARS`, the shape the registry stores for a session id. */
+export function isWorktreeLabel(value: unknown): value is string {
 	return typeof value === "string" && value.length > 0 && value.length <= WORKTREE_TEXT_MAX_CHARS && !hasControlCharacter(value);
 }
+
 
 /** The ISO form of `value`, or null when it is not an ISO 8601 timestamp with an offset. */
 function isoOf(value: unknown): string | null {
@@ -222,9 +223,9 @@ function validateWorktree(raw: unknown, index: number): Parsed<ReportedWorktree>
 		return fail(`${at}.path must be an absolute path of at most ${WORKTREE_PATH_MAX_CHARS} characters with no NUL`);
 	}
 	if (typeof repo !== "string" || !WORKTREE_REPO_PATTERN.test(repo)) return fail(`${at}.repo must be owner/name`);
-	if (branch !== null && !isLabel(branch)) return fail(`${at}.branch must be a string of at most ${WORKTREE_TEXT_MAX_CHARS} characters, or null`);
+	if (branch !== null && !isWorktreeLabel(branch)) return fail(`${at}.branch must be a string of at most ${WORKTREE_TEXT_MAX_CHARS} characters, or null`);
 	if (typeof head !== "string" || !HEAD_PATTERN.test(head)) return fail(`${at}.head must be 40 or 64 hex characters`);
-	if (base !== null && !isLabel(base)) return fail(`${at}.base must be a string of at most ${WORKTREE_TEXT_MAX_CHARS} characters, or null`);
+	if (base !== null && !isWorktreeLabel(base)) return fail(`${at}.base must be a string of at most ${WORKTREE_TEXT_MAX_CHARS} characters, or null`);
 	if (typeof dirty !== "boolean") return fail(`${at}.dirty must be a boolean`);
 	if (ahead !== null && !isCount(ahead, MAX_COUNT)) return fail(`${at}.ahead must be a non-negative integer, or null`);
 	if (behind !== null && !isCount(behind, MAX_COUNT)) return fail(`${at}.behind must be a non-negative integer, or null`);
@@ -234,8 +235,8 @@ function validateWorktree(raw: unknown, index: number): Parsed<ReportedWorktree>
 	if (typeof locked !== "boolean") return fail(`${at}.locked must be a boolean`);
 	if (typeof primary !== "boolean") return fail(`${at}.primary must be a boolean`);
 	if (!isPrState(pr_state)) return fail(`${at}.pr_state must be one of ${WORKTREE_PR_STATES.join(", ")}`);
-	if (session_id !== undefined && !isLabel(session_id)) return fail(`${at}.session_id must be a string of at most ${WORKTREE_TEXT_MAX_CHARS} characters when present`);
-	if (graph_id !== undefined && !isLabel(graph_id)) return fail(`${at}.graph_id must be a string of at most ${WORKTREE_TEXT_MAX_CHARS} characters when present`);
+	if (session_id !== undefined && !isWorktreeLabel(session_id)) return fail(`${at}.session_id must be a string of at most ${WORKTREE_TEXT_MAX_CHARS} characters when present`);
+	if (graph_id !== undefined && !isWorktreeLabel(graph_id)) return fail(`${at}.graph_id must be a string of at most ${WORKTREE_TEXT_MAX_CHARS} characters when present`);
 	let files: string[] | null | undefined;
 	if (raw.files !== undefined) {
 		if (raw.files === null) files = null;

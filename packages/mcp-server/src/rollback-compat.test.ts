@@ -695,6 +695,16 @@ describe("index (Postgres) migration steps added since the 9231f43 reference rel
 		expect(runbook).toContain("`worktrees_changed_files`");
 	});
 
+	test("the worktree repo-lookup step (phase 68) adds only the lower(repo) index, and is named in the runbook", () => {
+		const step = stepsSinceReference(MIGRATION_STEPS).find((candidate) => candidate.name === "worktrees_repo_lower_seen_idx");
+		expect(step?.version).toBe(41);
+		expect(step?.phase).toBe("expand");
+		expect(nonAdditiveStatements(defined(step, "the worktrees_repo_lower_seen_idx step"))).toEqual([]);
+		expect(step?.sql).toContain("create index if not exists worktrees_repo_lower_seen_idx on worktrees (lower(repo), last_seen_at desc)");
+		expect(step?.down).toContain("drop index if exists worktrees_repo_lower_seen_idx");
+		expect(runbook).toContain("`worktrees_repo_lower_seen_idx`");
+	});
+
 	test("the additive rule fires: a drop, a rename, a type change, an unguarded create and a NOT NULL column without a default are each caught", () => {
 		const bad = [
 			"drop table if exists a",

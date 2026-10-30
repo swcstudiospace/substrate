@@ -797,6 +797,17 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 			alter table worktrees add column if not exists changed_files jsonb;
 			alter table worktrees add column if not exists files_truncated boolean not null default false`,
 	},
+	// candidates() filters lower(repo) and orders by last_seen_at. worktrees_repo_seen_idx is (repo, last_seen_at) and cannot
+	// serve lower(repo). This index is its own step: step 40's contract is the two columns only. Steps 38 and 39 stay reserved.
+	// OPERATORS: rehearse this step on a restored dump before applying it to production.
+	{
+		version: 41,
+		name: "worktrees_repo_lower_seen_idx",
+		phase: "expand",
+		down: `drop index if exists worktrees_repo_lower_seen_idx`,
+		sql: `
+			create index if not exists worktrees_repo_lower_seen_idx on worktrees (lower(repo), last_seen_at desc)`,
+	},
 ];
 
 /** The steps `migrate()` runs for these opt-ins, in version order. A step whose opt-in is off is left out and not ledgered. */

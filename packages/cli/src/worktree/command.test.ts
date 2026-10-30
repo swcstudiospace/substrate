@@ -366,11 +366,11 @@ describe("scan --report session attribution", () => {
 	});
 
 	const REFUSED: Array<[string, string[], Record<string, string>]> = [
-		["--session with a space", ["--session", "has space"], {}],
-		["--session starting with a dot", ["--session", ".hidden"], {}],
-		["--session longer than 128 characters", ["--session", "a".repeat(129)], {}],
+		["--session with a control character", ["--session", "bad\nid"], {}],
+		["--session empty", ["--session", ""], {}],
+		["--session longer than 255 characters", ["--session", "a".repeat(256)], {}],
 		["--session without --report", ["--session", "sess-1"], {}],
-		["a SUBSTRATE_SESSION_ID that is not a session id", ["--report"], { SUBSTRATE_SESSION_ID: "bad id" }],
+		["a SUBSTRATE_SESSION_ID that is not a registry label", ["--report"], { SUBSTRATE_SESSION_ID: "bad\nid" }],
 	];
 
 	test.each(REFUSED)("%s is a usage error: exit 2, nothing scanned or posted", async (_label, flags, extraEnv) => {
@@ -380,6 +380,15 @@ describe("scan --report session attribution", () => {
 		expect(h.reports).toEqual([]);
 		expect(h.err.join("")).toMatch(/session/i);
 	});
+
+	test("a swarm holder session is a registry label and is attributed", async () => {
+		const f = fleet();
+		const h = harness({ cwd: f.review }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report", "--session", "A05@r1:ut-1", "--json"], h.deps)).toBe(0);
+		expect(attributed(h)).toEqual([[f.review, "A05@r1:ut-1"]]);
+		expect(JSON.parse(h.out.join(""))).toMatchObject({ attributed: 1 });
+	});
+
 
 	test("SUBSTRATE_SESSION_ID is used when the flag is absent, a blank one is no attribution, and the flag wins over it", async () => {
 		const f = fleet();

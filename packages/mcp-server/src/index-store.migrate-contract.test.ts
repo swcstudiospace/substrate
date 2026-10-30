@@ -234,6 +234,15 @@ describe("the real MIGRATION_STEPS satisfy the contract", () => {
 		expect(step40[0]?.down).toContain("drop column if exists files_truncated");
 	});
 
+	test("step 41 (worktree repo lookup) creates only the lower(repo) index, and its down drops that index", () => {
+		const step41 = MIGRATION_STEPS.filter((candidate) => candidate.version === 41);
+		expect(step41.map((candidate) => candidate.name)).toEqual(["worktrees_repo_lower_seen_idx"]);
+		expect(checkMigrationSteps(step41)).toEqual([]);
+		expect(step41[0]?.sql).toContain("create index if not exists worktrees_repo_lower_seen_idx on worktrees (lower(repo), last_seen_at desc)");
+		expect(step41[0]?.down).toBe("drop index if exists worktrees_repo_lower_seen_idx");
+		expect(step41[0]?.sql).not.toContain("add column");
+	});
+
 	test("the applied text of every step matches the committed digest fixture", () => {
 		expect(digestViolations(MIGRATION_STEPS, loadFixture()).join("\n")).toBe("");
 	});

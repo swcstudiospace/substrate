@@ -20,7 +20,7 @@
 import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { graphIdForWorktree } from "../../../collectors/src/worktree-graph.ts";
-import { SESSION_ID_PATTERN } from "../steer/client.ts";
+import { isWorktreeLabel, WORKTREE_TEXT_MAX_CHARS } from "../../../mcp-server/src/worktree-registry.ts";
 import {
 	assertDiskFloor,
 	buildReports,
@@ -193,8 +193,8 @@ async function commandList(args: WorktreeArgs, deps: WorktreeDeps): Promise<numb
 
 // ── scan ────────────────────────────────────────────────────────────────────
 
-/** Why `--session` (or `SUBSTRATE_SESSION_ID`) is refused: the grammar is the server's, so a bad id could never match a brief. */
-const SESSION_ID_HELP = "a session id (letters, digits, . _ : -; at most 128 characters)";
+/** Why `--session` (or `SUBSTRATE_SESSION_ID`) is refused: the registry stores this shape, so a bad id could never be kept. */
+const SESSION_ID_HELP = `a non-empty label of at most ${WORKTREE_TEXT_MAX_CHARS} characters with no control character`;
 
 type SessionChoice = { ok: true; id: string | null } | { ok: false; message: string };
 
@@ -204,11 +204,11 @@ function scanSession(args: WorktreeArgs, deps: WorktreeDeps): SessionChoice {
 		return args.session === undefined ? { ok: true, id: null } : { ok: false, message: "--session attributes a report: use it with --report\n" };
 	}
 	if (args.session !== undefined) {
-		return SESSION_ID_PATTERN.test(args.session) ? { ok: true, id: args.session } : { ok: false, message: `--session must be ${SESSION_ID_HELP}\n` };
+		return isWorktreeLabel(args.session) ? { ok: true, id: args.session } : { ok: false, message: `--session must be ${SESSION_ID_HELP}\n` };
 	}
 	const fromEnv = sessionIdFromEnv(deps.env);
 	if (fromEnv === null) return { ok: true, id: null };
-	return SESSION_ID_PATTERN.test(fromEnv) ? { ok: true, id: fromEnv } : { ok: false, message: `SUBSTRATE_SESSION_ID must be ${SESSION_ID_HELP}\n` };
+	return isWorktreeLabel(fromEnv) ? { ok: true, id: fromEnv } : { ok: false, message: `SUBSTRATE_SESSION_ID must be ${SESSION_ID_HELP}\n` };
 }
 
 /** The path of the worktree that holds `cwd`: the entry whose real path is the deepest prefix of the real path of `cwd`. */
@@ -243,13 +243,15 @@ async function commandScan(args: WorktreeArgs, deps: WorktreeDeps): Promise<numb
 			if (own === null) deps.err(`warning: the current directory is inside none of the scanned worktrees, so session ${session.id} is attributed to no worktree\n`);
 			else sessions.set(own, session.id);
 		}
-		attributed = sessions.size;
 		const plan = buildReports(deps.host, inventory.worktrees, { now: deps.now(), roots: rootList, sessions });
 		skipped = plan.skipped;
 		for (const report of plan.reports) {
 			const outcome = await deps.postReport(report);
-			if (outcome.ok) stored += outcome.stored;
-			else {
+			if (outcome.ok) {
+				stored += outcome.stored;
+				// Count only rows the posted body still carries. buildReports drops a row the route would refuse, and a failed post never landed.
+				attributed += report.worktrees.reduce((count, row) => count + (row.session_id === undefined ? 0 : 1), 0);
+			} else {
 				failure = outcome.error;
 				break;
 			}

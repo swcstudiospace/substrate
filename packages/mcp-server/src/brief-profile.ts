@@ -86,7 +86,7 @@ export interface BriefSection {
 	id: BriefSectionId;
 	/** Exactly the lines the `full` profile prints for this section, separators included. */
 	lines: string[];
-	/** Compact: a line printed above the items while at least one stays. */
+	/** Compact: a line printed above the items. A title with no items is itself the notice (a failed or late read). */
 	title?: string;
 	/** Compact: the selectable lines, in the section's own order. */
 	items: BriefItem[];
@@ -343,8 +343,13 @@ export function renderCompactBrief(sections: readonly BriefSection[], stateLine:
 	const render = (): string => {
 		const out = [stateLine];
 		for (const group of display) {
-			if (group.kept === 0) continue;
-			if (group.section.title !== undefined) out.push(foldLine(group.section.title));
+			const title = group.section.title === undefined ? undefined : foldLine(group.section.title);
+			// Dropped items hide their title. A title with no items is the notice itself and must still print.
+			if (group.kept === 0) {
+				if (group.lines.length === 0 && title !== undefined && title !== "") out.push(title);
+				continue;
+			}
+			if (title !== undefined && title !== "") out.push(title);
 			for (const line of group.lines.slice(0, group.kept)) out.push(line);
 		}
 		const missing = groups

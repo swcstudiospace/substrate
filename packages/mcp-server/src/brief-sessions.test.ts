@@ -20,7 +20,7 @@ import {
 	type BriefWorktreesInput,
 } from "./brief-sessions.ts";
 import { DeadlineError } from "./deadline.ts";
-import type { BriefSection } from "./brief-profile.ts";
+import { renderCompactBrief, type BriefSection, type CompactLimits } from "./brief-profile.ts";
 import type { ContextSession, SessionContext } from "./session-context.ts";
 import { defined } from "./test-support.ts";
 
@@ -29,6 +29,8 @@ const NOW = Date.parse("2026-10-29T12:00:00.000Z");
 const SECRET = "ghp_Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2";
 
 const printed = (section: BriefSection | null): string => defined(section, "a section").lines.join("\n");
+const COMPACT: CompactLimits = { nodes: 12, memoryChars: 240, bytes: 3500 };
+const COMPACT_STATE = "[brief: complete]";
 
 const contextSession = (n: number, overrides: Partial<ContextSession> = {}): ContextSession => ({
 	session_id: `wt-${n}-${"x".repeat(40)}`,
@@ -351,6 +353,27 @@ describe("worktreesSection", () => {
 		expect(text).not.toContain("\u0007");
 	});
 
+	test("a token split from its prefix by a newline is redacted before the newline is escaped", () => {
+		const token = `ghp_${"a".repeat(24)}`;
+		const path = `/w/\n${token}`;
+		const section = worktreesSection(wtInput([mineRow([`src/\n${token}`]), wtRow({ files: [`src/\n${token}`], path })]), NOW);
+		const text = printed(section);
+		expect(text).toContain("\\x0a");
+		expect(text).not.toContain(token);
+		expect(text).not.toContain("ghp_");
+	});
+
+	test("a truncated file list says the overlap check is incomplete, including when no reported path overlaps", () => {
+		const missed = worktreesSection(wtInput([mineRow(["src/a.ts"]), wtRow({ files: ["src/z.ts"], files_truncated: true })]), NOW);
+		expect(printed(missed)).toContain("overlap check incomplete");
+		expect(heads(missed)).toHaveLength(1);
+
+		const overlapping = worktreesSection(wtInput([mineRow(), wtRow({ files_truncated: true })]), NOW);
+		expect(printed(overlapping)).toContain("overlap check incomplete");
+		expect(heads(overlapping)).toHaveLength(1);
+		expect(printed(overlapping)).toContain("/w/other");
+	});
+
 	test("the section stays inside the 1,200-character bound and every line inside 160, however long the values are", () => {
 		const files = Array.from({ length: 12 }, (_, index) => `${"deep/".repeat(30)}file-${index}.ts`);
 		const others = Array.from({ length: 8 }, (_, index) => wtRow({ path: `/${"p".repeat(300)}${index}`, host: "h".repeat(120), branch: "b".repeat(200), session_id: `${"s".repeat(100)}${index}`, files }));
@@ -405,6 +428,16 @@ describe("composeLiveSections with the worktrees source", () => {
 		const note = printed(sections[1] ?? null);
 		expect(note).toContain("Live worktrees not included: the read failed.");
 		expect(note).not.toContain("postgres");
+		expect(renderCompactBrief([defined(sections[1], "the failed-read note")], COMPACT_STATE, COMPACT)).toContain("the read failed");
+	});
+
+	test("a late worktrees note stays visible in the compact profile", async () => {
+		const deadline = manualDeadline();
+		const pending = composeLiveSections({ context: null, steering: null, handoffs: null, worktrees: () => neverReady<BriefWorktreesInput>() }, deadline.race, NOW);
+		deadline.expire();
+		const sections = await pending;
+		expect(printed(sections[0] ?? null)).toContain("not ready before the brief's deadline");
+		expect(renderCompactBrief(sections, COMPACT_STATE, COMPACT)).toContain("not ready before the brief's deadline");
 	});
 
 	test("no worktrees source (registry off, no repository or no session) adds no section", async () => {

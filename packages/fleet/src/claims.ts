@@ -10,7 +10,7 @@
  * live claim. An unanswered question (no token, server down, refused, unreadable reply) is `unverified`, which
  * the classifier turns into `review`, never into `safe`.
  */
-import { SESSION_ID_RE } from "../../mcp-server/src/planning/presence.ts";
+import { isWorktreeLabel } from "../../mcp-server/src/worktree-registry.ts";
 
 export interface LiveClaim {
 	node_id: string;
@@ -80,9 +80,10 @@ export const CLAIM_CONCURRENCY = 4;
 
 /**
  * The one session a live claim status names, or null. Only a `live` status whose every claim has a holder, with
- * all holders carrying the same session id (in the grammar the server's registry and brief accept), attributes a
- * worktree to a session. Two sessions, a claim with no holder, an id the brief could never match, or any other
- * state is no attribution: a guess here would put a worktree in the wrong session's conflict list.
+ * all holders carrying the same session id in the worktree registry's label shape (non-empty, at most 255 characters,
+ * no control character — a swarm holder such as `A05@r1:ut-1` qualifies), attributes a worktree to a session. Two
+ * sessions, a claim with no holder, an id the registry would refuse, or any other state is no attribution: a guess
+ * here would put a worktree in the wrong session's conflict list.
  */
 export function sessionOfClaims(status: ClaimStatus): string | null {
 	if (status.state !== "live") return null;
@@ -92,5 +93,5 @@ export function sessionOfClaims(status: ClaimStatus): string | null {
 		if (session !== null && claim.holder.session_id !== session) return null;
 		session = claim.holder.session_id;
 	}
-	return session !== null && SESSION_ID_RE.test(session) ? session : null;
+	return session !== null && isWorktreeLabel(session) ? session : null;
 }
