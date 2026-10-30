@@ -257,8 +257,9 @@ export function worktreesSection(input: BriefWorktreesInput, nowMs: number): Bri
 	const repo = input.repo.toLowerCase();
 	// A row of another repository is never read, whatever the caller of this function handed over.
 	const inRepo = input.rows.filter((row) => row.repo.toLowerCase() === repo);
-	// A merged or closed pull request's row is never listed, so its truncated list cannot make the overlap check incomplete either.
-	const live = inRepo.filter((row) => row.session_id === input.sessionId || (row.pr_state !== "merged" && row.pr_state !== "closed"));
+	// A merged or closed pull request's row is left out only when its worktree is clean: pr_state describes the branch's PR history, not fresh edits made after it merged.
+	const finished = (row: BriefWorktreeRow): boolean => (row.pr_state === "merged" || row.pr_state === "closed") && row.dirty !== true;
+	const live = inRepo.filter((row) => row.session_id === input.sessionId || !finished(row));
 	const incomplete = live.some((row) => row.files_truncated === true);
 	const incompleteLine = "- overlap check incomplete: a report listed only its first 200 changed paths, so a shared path may be missing";
 	const own = new Set<string>();
@@ -278,7 +279,7 @@ export function worktreesSection(input: BriefWorktreesInput, nowMs: number): Bri
 	}
 	const overlapping: Array<{ row: BriefWorktreeRow; shared: string[]; seenMs: number }> = [];
 	for (const row of inRepo) {
-		if (row.session_id === undefined || row.session_id === "" || row.session_id === input.sessionId || row.primary || row.files === null || row.pr_state === "merged" || row.pr_state === "closed") continue;
+		if (row.session_id === undefined || row.session_id === "" || row.session_id === input.sessionId || row.primary || row.files === null || finished(row)) continue;
 		const seenMs = Date.parse(row.last_seen_at);
 		if (!Number.isFinite(seenMs) || nowMs - seenMs > BRIEF_WORKTREE_WINDOW_MS) continue;
 		const shared = row.files.filter((file) => own.has(file));
