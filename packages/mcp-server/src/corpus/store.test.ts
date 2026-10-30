@@ -187,4 +187,11 @@ describeLive("the corpus manifest against a live index", () => {
 		expect(cut.rows).toHaveLength(1);
 		expect(cut.truncated).toBe(true);
 	});
+
+	test("newestIngestAt answers a recent ISO time without the counts", async () => {
+		await store.recordIngested(doc("newest.md"));
+		const newest = defined(await store.newestIngestAt(), "newest ingest time");
+		expect(new Date(newest).toISOString()).toBe(newest);
+		expect(Date.now() - Date.parse(newest)).toBeLessThan(60_000);
+	});
 });

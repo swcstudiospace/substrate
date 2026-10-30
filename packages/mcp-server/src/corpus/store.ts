@@ -110,6 +110,11 @@ export interface CorpusStore {
 	 */
 	activeLeaves(limit: number): Promise<ActiveLeaves>;
 	status(): Promise<CorpusStatusSummary>;
+	/**
+	 * When the newest document was ingested (an ISO time), or null when none has been: the one value the freshness reading needs,
+	 * read without the counts and groupings `status()` runs. A reader that wants the time must not pay for the table.
+	 */
+	newestIngestAt(): Promise<string | null>;
 	manifestVersion(): Promise<number>;
 }
 
@@ -121,10 +126,10 @@ function numberOf(value: unknown): number {
 	return Number.isFinite(parsed) ? parsed : 0;
 }
 
-/** An ISO time from a database timestamp (a Date or a string); null for anything else or an unparseable value. */
+/** A timestamp column as an ISO string, or null for no value (an empty table, or a row never ingested), anything else, or an unparseable value. */
 function isoOf(value: unknown): string | null {
 	const at = value instanceof Date ? value : typeof value === "string" ? new Date(value) : null;
-	return at === null || Number.isNaN(at.getTime()) ? null : at.toISOString();
+	return at === null || !Number.isFinite(at.getTime()) ? null : at.toISOString();
 }
 
 /** A row from the database, or null when a column holds something the closed lists do not allow. */
@@ -241,6 +246,10 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 			const leaves = rows.flatMap((row) => (typeof row.repo === "string" && typeof row.path === "string" && typeof row.sha256 === "string" ? [{ repo: row.repo, path: row.path, sha256: row.sha256 }] : []));
 			return { manifestVersion, leaves: leaves.slice(0, limit), truncated: leaves.length > limit };
 		},
+		async newestIngestAt(): Promise<string | null> {
+			const rows = await sql`select max(ingested_at) as last from corpus_documents`;
+			return isoOf(rows[0]?.last);
+		},
 		async status(): Promise<CorpusStatusSummary> {
 			const [totals, byRepo, byKind, byTier, last, version] = await Promise.all([
 				sql`select count(*) filter (where state = 'active')::int as active, count(*) filter (where state = 'tombstoned')::int as tombstoned from corpus_documents`,
@@ -265,7 +274,7 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 					const tier = numberOf(row.tier);
 					return isDocTier(tier) ? [{ tier, count: numberOf(row.n) }] : [];
 				}),
-				lastIngestAt: lastIngest instanceof Date ? lastIngest.toISOString() : typeof lastIngest === "string" ? new Date(lastIngest).toISOString() : null,
+				lastIngestAt: isoOf(lastIngest),
 				manifestVersion: version,
 			};
 		},

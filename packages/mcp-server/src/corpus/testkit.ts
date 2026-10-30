@@ -119,6 +119,7 @@ export class FakeStore implements CorpusStore {
 	}
 
 	async status(): Promise<CorpusStatusSummary> {
+		this.statusReads += 1;
 		const rows = [...this.rows.values()];
 		const active = rows.filter((row) => row.state === "active");
 		return {
@@ -128,9 +129,20 @@ export class FakeStore implements CorpusStore {
 			byRepo: [],
 			byKind: [],
 			byTier: [],
-			lastIngestAt: null,
+			lastIngestAt: this.lastIngestAt,
 			manifestVersion: this.seq,
 		};
+	}
+
+	/** The newest ingest time the manifest reports; a test sets it. The fake holds no clock of its own. */
+	lastIngestAt: string | null = null;
+	/** How many times each way of reading it was used, so a test can say which one a path paid for. */
+	statusReads = 0;
+	newestReads = 0;
+
+	async newestIngestAt(): Promise<string | null> {
+		this.newestReads += 1;
+		return this.lastIngestAt;
 	}
 }
 

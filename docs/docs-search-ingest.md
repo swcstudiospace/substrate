@@ -522,6 +522,20 @@ a failed post keeps the old record, so the next run posts again. The record is
 written through a temp file and a rename. It is
 read-only against RAGFlow and uses no key of its own.
 
+Since v1.7 phase 70 the same run also asks the self-supervised golden set (the titles, headings and opening
+sentences of this checkout's `docs/`, see [`corpus-eval.md`](corpus-eval.md)) of the same `POST /docs/search`, up to 200
+questions, but only when `SUBSTRATE_CORPUS` is `on` in the canary's environment (`substrate.env` reaches it through the unit's
+`EnvironmentFile`): with it off nothing was ingested, so the canary sends no extra search and runs the fixtures alone, as before.
+After the fixtures it prints `golden recall@5 <value> over <n> questions`, posts one `note` as `substrate`
+(`payload.action: "docs.canary"`, `golden_recall5`, `golden_asked`) on every run that measured it, and carries
+`golden_recall5` in the regression `warning` when it posts one. The server turns a stored report into the
+`corpus.golden_recall5` gauge when `SUBSTRATE_CORPUS` is on. A recall under `SUBSTRATE_DOCS_SLO_RECALL5` (default 0.6) makes the
+run exit 1 and names the flag on stderr; it does not post a warning of its own. The recall is not measured, with a line on
+stderr and no change to the exit code, when the checkout has no `docs/` to ask about or any question failed or came back
+degraded: a recall over only the answered questions would read better than it is. It is only meaningful once this
+repository's documents are in the corpus under the name `SUBSTRATE_DOCS_EVAL_REPO` (default
+`swcstudiospace/agent-substrate`); before that every question misses.
+
 Seeding the corpus and its pins (do this BEFORE enabling the canary). Search
 adds `dataset_commit` to a citation only from a dataset's recorded version
 (the `versions` list of `SUBSTRATE_DOCS_STATE_FILE`); `docs ingest` stores

@@ -1,0 +1,16 @@
+{
+	"lexical": {
+		"queries": 93,
+		"recall1": 1,
+		"recall5": 1,
+		"recall10": 1,
+		"mrr": 1
+	},
+	"server": {
+		"queries": 93,
+		"recall1": 1,
+		"recall5": 1,
+		"recall10": 1,
+		"mrr": 1
+	}
+}

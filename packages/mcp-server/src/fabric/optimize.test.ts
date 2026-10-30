@@ -42,6 +42,21 @@ describe("buildFabricSuggestions", () => {
 		expect(suggest(healthyFacts())).toEqual([]);
 	});
 
+	test("a breached corpus objective is one attention suggestion that names the breach, and a corpus within its objectives or switched off says nothing", () => {
+		const breached = healthyFacts({ corpus: { ...healthyFacts().corpus, readings: { freshnessS: 999_999, recall5: 0.9, ingestDocsPerS: 1 } } });
+		expect(suggest(breached)).toEqual([
+			{
+				id: "corpus-slo",
+				resource: "corpus",
+				action: expect.stringContaining("docs-rag-operations"),
+				evidence: "state degraded; source: corpus.slo: breached freshness",
+				severity: "attention",
+			},
+		]);
+		expect(ids(healthyFacts())).toEqual([]);
+		expect(ids(healthyFacts({ corpus: { ...breached.corpus, enabled: false } }))).toEqual([]);
+	});
+
 	test("nothing configured emits nothing, because no rule has evidence", () => {
 		expect(suggest(absentFacts())).toEqual([]);
 	});

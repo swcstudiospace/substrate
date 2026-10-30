@@ -6,6 +6,7 @@
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import { assertDevnetRpcUrl, parseSignerSet, SignerSetError, SOLANA_CLI_DEFAULT, type SignerSet } from "@substrate/ledger";
+import { loadSloThresholds, type SloThresholds } from "@substrate/corpus";
 import { ADMISSION_CLASSES, loadBreakerSettings, type AdmissionClass, type BreakerSettings } from "@substrate/observability";
 import { loadBriefProfileConfig, type BriefProfileConfig } from "./brief-profile.ts";
 import { ADMISSION_MODES, type AdmissionMode, type AdmissionSettings, type BucketLimit } from "./admission.ts";
@@ -663,6 +664,8 @@ export interface SubstrateConfig {
 	corpus: CorpusSettings;
 	/** The docs learning loop (v1.7 phase 66): telemetry, the authority re-rank and the gap threshold. Every switch is off by default. */
 	docsReflect: DocsReflectSettings;
+	/** The docs plane's three objectives (v1.7 phase 70): `SUBSTRATE_DOCS_SLO_FRESHNESS_S`, `SUBSTRATE_DOCS_SLO_RECALL5`, `SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S`. */
+	docsSlo: SloThresholds;
 	/**
 	 * The three documented retrieval knobs sent on every `docs_search`
 	 * retrieval, from `SUBSTRATE_DOCS_SIMILARITY_THRESHOLD` (0.2),
@@ -1200,6 +1203,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		docsPruneSuperseded: (env.SUBSTRATE_DOCS_PRUNE_SUPERSEDED?.trim() ?? "") === "1",
 		corpus: loadCorpusSettings(env),
 		docsReflect: loadDocsReflectSettings(env),
+		docsSlo: loadSloThresholds(env),
 		docsRetrieval: {
 			similarityThreshold: unitIntervalOr(env.SUBSTRATE_DOCS_SIMILARITY_THRESHOLD, DEFAULT_RETRIEVAL_KNOBS.similarityThreshold),
 			vectorSimilarityWeight: unitIntervalOr(env.SUBSTRATE_DOCS_VECTOR_WEIGHT, ragflowRetrieval.vectorSimilarityWeight),

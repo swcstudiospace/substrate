@@ -37,7 +37,8 @@ These apply to every source:
 - **Reserved actions are not writable through `events_emit` or `POST /events`.** A reader trusts `anchor.signer.rotate`, `anchor.reanchor`, `session.checkpoint`, `session.rollback`,
   `session.rollback.refused`, `session.rollback.forget_batch`, `memory.forget` and `docs.corpus.root` by their action alone, and the event carries no proof of its writer, so both
   doors refuse them with a `reserved-action` error (nothing written) unless the caller is an operator emitting as its own surface; the server's own emits do not
-  pass those doors (`RESERVED_NOTE_ACTIONS` in `packages/mcp-server/src/reserved-actions.ts` is the one list).
+  pass those doors (`RESERVED_NOTE_ACTIONS` in `packages/mcp-server/src/reserved-actions.ts` is the one list). `docs.canary` is the one host-job action in it: the docs canary's
+  report feeds the recall gauge and the `corpus` fabric row, so only the `substrate` token acting as itself may write it, and an operator's token is refused too.
 - **`payload.runtime` names a non-agent producer** acting for an agent or for
   the host (`herdr`, `agentos`, `anchor`, `dispatcher`, `skills-sync`,
   `doctor` — the runtime doctor, uplift-3 N1, one `warning` per drift class
@@ -51,7 +52,9 @@ These apply to every source:
   `SUBSTRATE_DOCS_TRIGGER_LAG_MIN` and one `note` when it clears, with
   `payload.state`, `dataset`, `commit`, `lag_seconds`, deduped through the
   docs state file; `docs-canary` — the opt-in live golden canary, one
-  `warning` per changed failing set, with `payload.failing[{fixture, failed}]`;
+  `warning` per changed failing set, with `payload.failing[{fixture, failed}]`, and (v1.7 phase 70) one `note` per
+  run that measured the golden set, with `payload.golden_recall5` and `golden_asked`, which the warning also carries
+  as `golden_recall5` when it was measured;
   `index-archive` — uplift-4 S2, one `note` per finished index snapshot with
   `payload.snapshot`, `createdAt`, `serverVersion`, `schemaHash` and per-table
   `rows`, `bytes`, `sha256`, never rows or a path; `alert` — uplift-4 S3, one
@@ -121,6 +124,7 @@ These apply to every source:
 | `docs.freshness` | 25 | `warning` | `substrate` | `docs.freshness` | `docs-freshness` | — | yes |
 | `docs.freshness.recovered` | 25 | `note` | `substrate` | `docs.freshness` | `docs-freshness` | — | yes |
 | `docs.canary` | 25 | `warning` | `substrate` | `docs.canary` | `docs-canary` | — | yes |
+| `docs.canary.report` | 70 | `note` | `substrate` | `docs.canary` | `docs-canary` | — | yes |
 | `index.archive` | 28 | `note` | `substrate` | `index.archive` | `index-archive` | — | yes |
 | `alert` | 33 | `warning` | `substrate` | `alert` | `alert` | — | yes |
 | `teachable.accepted` | 29 | `note` | `memory-writer` | `teachable` | — | — | no |
