@@ -1043,4 +1043,31 @@ describe("guard", () => {
 		expect(parseWorktreeArgs(["list", "/ws/one"]).ok).toBe(false);
 		expect(parseWorktreeArgs(["guard", ""]).ok).toBe(false);
 	});
+
+	test("a root that is itself a primary checkout is refused, and its state is still reported", async () => {
+		const repo = makeRepo();
+		write(repo.dir, "dirty.txt", "draft\n");
+		const h = harness({}, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", repo.dir], h.deps)).toBe(1);
+		expect(h.out.join("")).toContain(`${repo.dir}: primary checkout inside the workspace: never removed by a workspace removal`);
+		expect(h.out.join("")).toContain(`${repo.dir}: uncommitted changes`);
+	});
+
+	test("a nested primary checkout under the root is refused", async () => {
+		const repo = makeRepo();
+		const root = join(tempDir(), "ws");
+		mkdirSync(join(root, "group"), { recursive: true });
+		const nested = join(root, "group", "api");
+		renameSync(repo.dir, nested);
+		const h = harness({}, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", root], h.deps)).toBe(1);
+		expect(h.out.join("")).toContain(`${nested}: primary checkout inside the workspace: never removed by a workspace removal`);
+	});
+
+	test("a root holding only linked worktrees, clean and pushed, is not refused as a primary", async () => {
+		const w = workspace();
+		const h = harness({}, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", w.root], h.deps)).toBe(0);
+		expect(h.out.join("")).not.toContain("primary checkout");
+	});
 });

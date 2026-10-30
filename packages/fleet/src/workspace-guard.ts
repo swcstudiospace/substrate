@@ -1,7 +1,8 @@
 /**
  * Whether removing a workspace directory (`<root>/<graph_id>`) would lose work. The removal itself knows nothing
  * of git, so this runs before it: every member worktree must be clean, fully pushed and free of ignored work that
- * only it holds, and the workspace must hold no `.planning/` directory, which lives outside git.
+ * only it holds, the workspace must hold no primary checkout (a `.git` directory: a removal must never take one), and
+ * the workspace must hold no `.planning/` directory, which lives outside git.
  *
  * Read-only by construction: it runs `git status`, `git rev-list`, `git ls-files` (through `findIgnoredWork`),
  * `git worktree list` and the read-only probes of `collectInventory`. It never removes a worktree, deletes a branch
@@ -15,6 +16,7 @@ import { collectInventory, listWorktrees } from "./inventory.ts";
 import { mapLimit } from "./pool.ts";
 
 export const PLANNING_REFUSAL = "workspace .planning is outside git: copy it out first";
+export const PRIMARY_REFUSAL = "primary checkout inside the workspace: never removed by a workspace removal";
 
 const GUARD_CONCURRENCY = 4;
 /** Ignored paths named in one refusal before the rest are counted. */
@@ -36,6 +38,8 @@ interface Member {
 	path: string;
 	/** The primary checkout of the member's repository: the copy `findIgnoredWork` compares against. */
 	primaryDir: string;
+	/** True for a primary checkout, which a workspace removal must never take. */
+	primary: boolean;
 }
 
 interface Discovered {
@@ -58,17 +62,23 @@ function isInside(path: string, root: string): boolean {
 }
 
 /**
- * The member worktrees below `root`. First from `collectInventory`, which finds repositories through their `.git`
- * entries; when that finds no linked worktree under the root, from the direct children of the root that have a `.git`.
+ * The member worktrees below `root`, primary checkouts included. `collectInventory` finds repositories through their
+ * `.git` entries at any depth below the root, nested primaries too. The root and its direct children that have a `.git`
+ * are listed as well, so a primary that is the root itself, or that has no linked worktree to lead the inventory to it,
+ * is still found. Each worktree is named once.
  */
 async function discoverMembers(root: string, git: GitRunner): Promise<Discovered> {
 	const inventory = await collectInventory([root], { git, measure: false, ignored: false });
-	const under = inventory.worktrees.filter((wt) => isInside(canonical(wt.path), root));
-	if (under.some((wt) => !wt.primary)) return { members: under.map((wt) => ({ path: wt.path, primaryDir: wt.repo_dir })), notes: inventory.notes };
-	return fromChildren(root, git, [...inventory.notes]);
+	const members = new Map<string, Member>();
+	for (const wt of inventory.worktrees) {
+		if (isInside(canonical(wt.path), root)) members.set(canonical(wt.path), { path: wt.path, primaryDir: wt.repo_dir, primary: wt.primary });
+	}
+	const direct = await fromDirectories(root, git, [...inventory.notes]);
+	for (const member of direct.members) if (!members.has(canonical(member.path))) members.set(canonical(member.path), member);
+	return { members: [...members.values()], notes: direct.notes };
 }
 
-async function fromChildren(root: string, git: GitRunner, notes: string[]): Promise<Discovered> {
+async function fromDirectories(root: string, git: GitRunner, notes: string[]): Promise<Discovered> {
 	let names: string[];
 	try {
 		names = readdirSync(root, { withFileTypes: true })
@@ -78,19 +88,18 @@ async function fromChildren(root: string, git: GitRunner, notes: string[]): Prom
 	} catch {
 		return { members: [], notes: [...notes, `could not read ${root}`] };
 	}
+	const candidates = [root, ...names.map((name) => join(root, name))].filter((dir) => existsSync(join(dir, ".git")));
 	const members = new Map<string, Member>();
-	for (const name of names) {
-		const child = join(root, name);
-		if (!existsSync(join(child, ".git"))) continue;
-		const listed = await listWorktrees(child, git);
+	for (const dir of candidates) {
+		const listed = await listWorktrees(dir, git);
 		const primary = listed?.[0];
 		if (listed === null || primary === undefined) {
-			notes.push(`git worktree list failed in ${child}`);
+			notes.push(`git worktree list failed in ${dir}`);
 			continue;
 		}
 		for (const entry of listed) {
 			if (entry.bare || !isInside(canonical(entry.path), root)) continue;
-			members.set(canonical(entry.path), { path: entry.path, primaryDir: primary.path });
+			members.set(canonical(entry.path), { path: entry.path, primaryDir: primary.path, primary: entry.primary });
 		}
 	}
 	return { members: [...members.values()], notes };
@@ -123,12 +132,14 @@ async function probe(member: Member, git: GitRunner, options: WorkspaceGuardOpti
 
 /**
  * Whether the workspace at `root` can be removed without losing work. Reads only: see the module comment. The
- * refusals are ordered: discovery problems, then each member's reasons, then the workspace's own `.planning/`.
+ * refusals are ordered: discovery problems, then each primary checkout, then each member's reasons (every member is
+ * still probed, so its state is reported), then the workspace's own `.planning/`.
  */
 export async function workspaceGuard(root: string, git: GitRunner, options: WorkspaceGuardOptions = {}): Promise<WorkspaceGuardResult> {
 	const rootReal = canonical(resolve(root));
 	const discovered = await discoverMembers(rootReal, git);
 	const refusals = discovered.notes.map((note) => `could not check ${root}: ${note}`);
+	for (const member of discovered.members) if (member.primary) refusals.push(`${member.path}: ${PRIMARY_REFUSAL}`);
 	const probes = await mapLimit(discovered.members, GUARD_CONCURRENCY, (member) => probe(member, git, options));
 	refusals.push(...probes.flat());
 	if (existsSync(join(rootReal, ".planning"))) refusals.push(PLANNING_REFUSAL);
