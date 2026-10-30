@@ -2,7 +2,7 @@
 phase: 65-doc-watch
 milestone: v1.7
 requirements: [WATCH-01, WATCH-02, WATCH-03, WATCH-04, WATCH-05]
-status: merged to main in PR #186 (squash aa19c926); PARTIAL in delivery: the watcher, the sweep timer, the hook installer and the reconcile are staged or opt-in, and no host has them installed; no live sync and no production ingest were run
+status: "merged to main in PR #186 (squash aa19c926); PARTIAL in delivery: the watcher, the sweep timer, the hook installer and the reconcile are staged or opt-in, and no host has them installed; no live sync and no production ingest were run"
 ---
 
 # 65-SUMMARY: Doc Watch, four triggers into one idempotent sync

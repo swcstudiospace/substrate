@@ -2,7 +2,7 @@
 phase: 68-worktree-fleet
 verified: 2026-10-30
 status: gaps_found
-score: 5 of 6 success criteria MET in the repository (2, 3, 4, 5, 6, with caveats), 1 PARTIAL (criterion 1: the dispatcher ignores the roots variable); overall PARTIAL, with the three gaps ROADMAP names (no report scheduler, merge-back race not closed, no-origin repositories trust local ancestry) and the guard without a caller
+score: "5 of 6 success criteria MET in the repository (2, 3, 4, 5, 6, with caveats), 1 PARTIAL (criterion 1: the dispatcher ignores the roots variable); overall PARTIAL, with the three gaps ROADMAP names (no report scheduler, merge-back race not closed, no-origin repositories trust local ancestry) and the guard without a caller"
 verified_on: phase 68 merge commits read at 286c4fb1 (the last of them); the local `main` ref (aa2ed6a0, 2026-10-24) is older and does not contain them; nothing was run by the author of this record
 ---
 
