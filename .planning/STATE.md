@@ -1,21 +1,21 @@
 ---
 gsd_state_version: "1.0"
-milestone: v1.7
-milestone_name: Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet
-status: "phases 63-70 shipped via PRs #177-#193; milestone audit written; owner decisions open"
-stopped_at: "Phases 63-70 shipped on main (PRs #177-#186, follow-ups #188-#193; 2026-10-29 and 2026-10-30); audit at milestones/v1.7-MILESTONE-AUDIT.md; milestone not complete"
-last_updated: "2026-10-30T12:01:23.000Z"
-last_activity: 2026-10-30
-last_activity_desc: "Milestone v1.7 audit written: phases 63-70 shipped; 66, 67 and 68 PARTIAL; owner decisions open"
+milestone: v1.8
+milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
+status: "v1.8 defined (phases 71-78, none complete); v1.7 phases 63-70 shipped; v1.7 owner decisions open"
+stopped_at: "v1.8 defined in ROADMAP by PR #198 (phases 71-78, not started); implementation units on gsd/hardening-* branches"
+last_updated: "2026-10-31T00:30:00.000Z"
+last_activity: 2026-10-31
+last_activity_desc: "Milestone v1.8 defined: phases 71-78 in ROADMAP; no phase complete"
 state_head: 9d3f20851a85
 progress:
   total_phases: 8
-  completed_phases: 8
+  completed_phases: 0
   total_plans: 0
   completed_plans: 0
-  percent: 100
-current_phase: 70
-current_phase_name: docs-slo-and-eval
+  percent: 0
+current_phase: 71
+current_phase_name: multi-session-boundary
 ---
 
 # State
