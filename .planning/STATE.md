@@ -2,11 +2,11 @@
 gsd_state_version: "1.0"
 milestone: v1.8
 milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
-status: "v1.8 defined (phases 71-78, none complete); v1.7 phases 63-70 shipped; v1.7 owner decisions open"
-stopped_at: "v1.8 defined in ROADMAP by PR #198 (phases 71-78, not started); implementation units on gsd/hardening-* branches"
+status: "v1.8 Phase 71 gap-closure planning; no implementation phase complete; v1.7 owner decisions remain open"
+stopped_at: "Phase 71 ownership gates validated but incomplete; CONTEXT records full acceptance criteria and approved direct workflow execution"
 last_updated: "2026-10-31T00:30:00.000Z"
 last_activity: 2026-10-31
-last_activity_desc: "Milestone v1.8 defined: phases 71-78 in ROADMAP; no phase complete"
+last_activity_desc: "Recovered missing validation jobs; documented Phase 71 security gaps; resumed discuss-plan-execute with owner-approved workflow-file dispatch"
 state_head: 9d3f20851a85
 progress:
   total_phases: 8

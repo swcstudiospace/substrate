@@ -1,4 +1,4 @@
-# Requirements: Agent Substrate — v1.7 Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet
+# Requirements: Agent Substrate — v1.7 and v1.8
 
 **Defined:** 2026-10-29
 **Core Value:** Every agent on the host shares one brief, one event log, one governed memory plane, one skills library and one Graph ID.
@@ -102,3 +102,39 @@ Checkbox convention: a ticked requirement is satisfied or waived by the operator
 
 ---
 *Requirements defined: 2026-10-29*
+
+## v1.8 Hardening requirements
+
+**Accepted:** 2026-10-30; session-credential protocol and direct installed-workflow execution approved 2026-10-31. Exactly eight features: three security, three redundancy, two hardening. None is complete. These criteria preserve the accepted request; the abbreviated milestone-definition text does not waive them.
+
+### Security
+
+- [ ] **HARD-S1 — Session boundary enforcement (Phase 71):** Recheck authenticated per-session binding on each private live-session operation. Server-issued identifiers and separate binding credentials use cryptographic randomness; durable ownership, revocation, and tombstones prevent takeover/reuse across restart. Foreign, unknown, wrong-proof, expired, and closed targets yield the same not-found response. Keep only credential hashes in the authority; never leak proofs through logs, discovery, cache keys, audit, or prompts. Preserve the redacted repository-wide context digest and keep historical event/checkpoint labels separate.
+- [ ] **HARD-S2 — Repository allowlist and scoped credentials (Phase 72):** Address registered repositories by identifier, not user-supplied raw paths/URLs. Canonicalize paths and enforce component-wise allowed roots on each operation; reject traversal and symlink escape, including after registration. Resolve least-privilege credentials by repository-specific references; repo A credentials cannot authorize repo B. Use argv-only git execution.
+- [ ] **HARD-S3 — Ledger tamper evidence (Phase 73):** Chain canonical content checksums using a standard hash; on-demand and scheduled verification detect modified, deleted, gapped, or reordered entries and report the first bad position. State explicitly which trusted earlier proof supports truncation/rewrite detection; never claim hashes recomputed solely from modified rows prove the missing history.
+
+### Redundancy
+
+- [ ] **HARD-R1 — Cross-repo compensating actions (Phase 74):** Execute a real operation across at least two registered repositories with a durable per-step transaction log and idempotent retries. Forced failure leaves compensated state or explicit needs-attention state; no silent partial success. Absence of an existing transaction path is not delivery.
+- [ ] **HARD-R2 — DragonflyDB degradation (Phase 75):** Reuse the existing cache-plane circuit breaker and bounded timeouts. On outage, private authority remains durable; reads fall back to the documented source or report degradation. Reject writes that cannot be made durable with retryable errors. No authoritative state exists only in the cache or an in-memory fallback.
+- [ ] **HARD-R3 — Telemetry buffer/dead-letter (Phase 76):** Each destination has a bounded queue with backpressure. Failed batches retry with exponential backoff and jitter, then retain original payload and error in a durable dead-letter store. Per-record dedupe makes replay idempotent; export queue depth/dead-letter metrics. Preserve event-chain ordering and truthful write acknowledgements.
+
+### Hardening
+
+- [ ] **HARD-H1 — Steering idempotency and ordering (Phase 77):** Keyed commands carry a client-generated idempotency key and per-session monotonic sequence. Same-key/same-payload replay returns the identical original result without another effect; changed payload under the same key is refused. Follow one documented out-of-order rule. Enforce schema/size caps and durable replay state. The owner explicitly retained legacy unkeyed commands; they receive no false idempotency guarantee.
+- [ ] **HARD-H2 — Cross-layer reconciliation (Phase 78):** A scheduled, bounded read-only job compares counts and checksums for records that should exist in multiple layers. It reports missing/orphaned/mismatched records with evidence, run/window limits, and suggested repairs; it never mutates authoritative data automatically or treats unavailable probes as clean.
+
+### Delivery and traceability
+
+Every feature requires CONTEXT, executable PLAN files, SUMMARY, and exercised verification. Run the repository test, lint, and typecheck commands plus targeted failure-injection cases; live-service checks follow existing guards. Preserve the existing Live-Steering behavior except the explicitly approved secure-session lifecycle. No new unpinned dependency. Do not mark the milestone complete without all eight criteria and its audit. Deployment, real credentials, production migrations, timers/hooks, funding, and devnet sends remain operator-gated.
+
+| Requirement | Category | Phase | Status |
+|-------------|----------|-------|--------|
+| HARD-S1 | Security | 71 | Gap-closure planning; preliminary gate incomplete |
+| HARD-S2 | Security | 72 | Not started |
+| HARD-S3 | Security | 73 | Preliminary edits validated; not complete |
+| HARD-R1 | Redundancy | 74 | Not started; earlier no-op was not delivery |
+| HARD-R2 | Redundancy | 75 | Preliminary edits validated; not complete |
+| HARD-R3 | Redundancy | 76 | Not started |
+| HARD-H1 | Hardening | 77 | Not started |
+| HARD-H2 | Hardening | 78 | Not started |

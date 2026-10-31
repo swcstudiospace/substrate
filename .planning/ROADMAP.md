@@ -1229,9 +1229,9 @@ Plans:
 
 ### Phase 71: Multi-Session boundary
 
-**Goal**: A steering read or wait reaches only a session the caller's authenticated surface owns, unless the caller is the operator. Steering writes stay operator-only, as the docs and CLI already state. The redacted cross-session digest that `session_context` returns (Phase 67 contract) is unchanged.
+**Goal**: Enforce authenticated bindings on live session-scoped reads and writes. Foreign and unknown targets return indistinguishable not-found responses. Live session identifiers are unguessable and never reused. Preserve operator-only steering writes and the redacted repository-wide `session_context` digest.
 
-**Status**: Not started. Discovery: the steering REST routes (`packages/mcp-server/src/server.ts`) and MCP tools (`packages/mcp-server/src/mcp.ts`) take a caller-supplied target session id, and writes are not checked against the caller's surface.
+**Status**: Gap-closure planning. Preliminary steering ownership gates pass targeted tests but return 403, accept caller-chosen session IDs, and rely on a best-effort session registry. These do not satisfy the accepted security feature. Decisions: [71-CONTEXT.md](phases/71-multi-session-boundary/71-CONTEXT.md).
 
 **Depends on**: none
 
@@ -1239,10 +1239,11 @@ Plans:
 
 **Success Criteria** (what must be TRUE):
 
-  1. A surface that does not own target session S is refused, with no write and no acknowledgement, from every read of S: `/steering/directives`, `/steering/wait`, `steering_list` and the `listen` path. Acknowledge and queue writes stay operator-only for every caller.
-  2. The operator surface keeps cross-session access, and each refusal is an audited event.
-  3. The steering baseline on `origin/main` 9b482207 (575 pass, 7 skip, 0 fail across the steering and session suites) still passes.
-  4. `session_context` still returns the redacted digest of other sessions in the same repository, and its existing test still passes.
+  1. Foreign and unknown live session IDs produce the same 404 status, body, and headers on every private session read or write, including directive lists, wait/listen, MCP steering tools, docs-session registration/transitions, and session-scoped steering augmentation. No directive, acknowledgement, or session state changes on refusal.
+  2. Operator authority remains explicit; permitted cross-session operations remain available. Refusal audits hash requested identifiers and record no private session body. Principal-keyed limiting runs before binding lookup.
+  3. Server-issued session identities have at least 128 bits of cryptographic randomness; durable ownership and closed-session tombstones prevent reissue or cross-surface takeover, including after restart. An unavailable authority fails closed rather than accepting a volatile substitute.
+  4. The existing operator-only queue/ack contract and legacy unkeyed command shape remain unchanged. All affected callers migrate to the explicit session identity lifecycle; no alias silently bypasses binding checks.
+  5. The redacted repo-wide `session_context` digest remains available as designed in Phase 67. Re-run the recorded steering regression file set and the new isolation/revocation/restart failure-injection cases; record pass/skip counts and any deliberate contract changes.
 
 **Plans**: none written
 
