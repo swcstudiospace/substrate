@@ -11,6 +11,7 @@
 - ⚠️ **v1.5 SOTA enhancements** — Phases 45-54; closed 2026-10-28 as an override closeout with accepted debt (audit status gaps_found). Phase 46 (verified 2026-10-28, `human_needed`): criterion 1 met in the repository; criterion 3 performed live in naive mode in Run 11 (2026-10-28); criterion 4 NOT met (no parity comparator exists); criterion 5 partial (cutover done, RAGFlow code removal gated); criteria 2 and 6 and the LightRAG graph and hybrid modes need per-run operator approval and a real LLM route. The owner accepted phase 46's open criteria (2, 4, 5, 6 and the graph and hybrid modes of 3) as debt on 2026-10-28, superseding for those items the statement of 2026-10-23 that phase 46 is not accepted as debt; SOTA-02 stays unsatisfied. Phases 52-54 merged to main (PRs #104 and #134, #136, #135; the drafts #109, #110 and #111 were closed and replaced). 45 and 47-50 accepted debt (2026-10-23); 51 complete (PR #108). Archive: [milestones/v1.5-ROADMAP.md](milestones/v1.5-ROADMAP.md) · audit: [milestones/v1.5-MILESTONE-AUDIT.md](milestones/v1.5-MILESTONE-AUDIT.md)
 - ⚠️ **v1.6 Contextual Memory, Live Steering and Eternal Rollback** — Phases 55-62, planned 2026-10-26 (Ultrathink graph ut-mvp59le0-8815e6d1); closed 2026-10-28 as an override closeout with accepted debt (audit status gaps_found). Built 2026-10-26 and merged to main on 2026-10-28: PR #127 (phases 55 and 56), PRs #128 and #129 (phases 57 and 59-61) and PR #130 (phase 62); phase 58 merged as PR #137 (replaces #131, closed). Gap closure merged 2026-10-28: PR #147 (phase 58 criterion 2, verified passed 5/5), PR #150 (phase 59 criterion 5, verified human_needed 6/6 in the repository, live proofs operator-gated) and PRs #146 and #148 (phase 61: the checkpoint sequence lock, `substrate session hook`, trigger policy, printed host configuration); phase 61 criterion 3 stays partial because no host runs the hook until an operator installs the printed configuration (ADR 0007, D55-4), accepted as debt by the owner on 2026-10-28 together with phase 59's live proofs. Live steps (a LightRAG deploy, anchor funding and the anchor timer, any devnet send, production migrations) stay operator-gated. Discovery record: [milestones/v1.6-phases/55-migration-safety/CONTEXT.md](milestones/v1.6-phases/55-migration-safety/CONTEXT.md). Archive: [milestones/v1.6-ROADMAP.md](milestones/v1.6-ROADMAP.md) · audit: [milestones/v1.6-MILESTONE-AUDIT.md](milestones/v1.6-MILESTONE-AUDIT.md)
 - 🚧 **v1.7 Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet** — Phases 63-70, defined 2026-10-29 (Run 14): ingest the documentation of every repository into the docs plane and keep it current, make the docs RAG learn from use, make Live Steering visible and cross-session, and manage many sessions' git worktrees. Phases 63-70 are shipped (PRs #177-#186 on 2026-10-29 and 2026-10-30; follow-ups #187-#193); phases 66, 67 and 68 are PARTIAL, every phase with a VERIFICATION record records gaps, and the milestone is not complete. Requirements: [REQUIREMENTS.md](REQUIREMENTS.md). Audit: [milestones/v1.7-MILESTONE-AUDIT.md](milestones/v1.7-MILESTONE-AUDIT.md).
+- 🚧 **v1.8 Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation** — Phases 71-78, defined 2026-10-30: eight features from the round-15 discovery; not started.
 
 ## Phases
 
@@ -132,6 +133,19 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 68: Worktree Fleet** - a worktree registry found through git, safe pruning, conflict forecasts, a disk floor and brief warnings for overlapping sessions. Shipped in PRs #178, #185, #188, #189, #190 and #193 (2026-10-29 and 2026-10-30); gaps_found, PARTIAL: no scheduler runs the fleet report; the dispatcher ignores `SUBSTRATE_WORKTREE_ROOTS`; the guard has no caller.
 - [x] **Phase 69: Doc Proofs** - a Merkle root over the corpus recorded in the ledger so the hourly devnet anchor covers it, with inclusion proofs and verification. Shipped in PR #181 (2026-10-29); gaps_found: no anchored hour yet.
 - [x] **Phase 70: Docs SLO and eval** - a self-supervised golden set, an offline CI harness, SLO metrics, a docs lint and the operator runbook. Shipped in PR #182 (2026-10-30); gaps_found: the baseline is self-supervised and reads 1.0 on every metric, so it cannot show retrieval quality.
+
+### 🚧 v1.8 Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation (defined 2026-10-30; not started)
+
+Eight phases from the round-15 discovery. Owner decisions (2026-10-30): all eight features accepted; unkeyed steering commands keep working unchanged. Dependencies: 72 and 77 need 71; 76 shares the ledger write path with 73; 78 needs 73, 75 and 76. Operator-gated and not run by this milestone: deploy, Railway writes, devnet sends, anchor funding, hook and timer installs, the LightRAG LLM route, production bulk ingest.
+
+- [ ] **Phase 71: Multi-Session boundary** - steering and session context bound to the owning surface
+- [ ] **Phase 72: Repo allowlist and scoped credentials** - a session addresses only allowlisted repositories
+- [ ] **Phase 73: Ledger tamper evidence** - rewrites, reorders and tail truncation detected and anchored
+- [ ] **Phase 74: Cross-repo compensating actions** - failed multi-repo writes undo completed steps
+- [ ] **Phase 75: DragonflyDB degradation** - the cache breaker degrades reads to the authoritative store
+- [ ] **Phase 76: Telemetry buffer and dead-letter** - failed event writes buffered, retried and dead-lettered
+- [ ] **Phase 77: Steering idempotency and ordering** - keyed commands apply once; unkeyed commands unchanged
+- [ ] **Phase 78: Cross-layer reconciliation** - ledger, index and cache drift reported, never auto-repaired
 
 ## Phase Details
 
@@ -1213,6 +1227,131 @@ Plans:
 
 **Plans**: none written (no gsd-plan-phase run; built in one orchestrated wave of edit-only units, recorded in SUMMARY.md)
 
+### Phase 71: Multi-Session boundary
+
+**Goal**: A steering read or wait reaches only a session the caller's authenticated surface owns, unless the caller is the operator. Steering writes stay operator-only, as the docs and CLI already state. The redacted cross-session digest that `session_context` returns (Phase 67 contract) is unchanged.
+
+**Status**: Not started. Discovery: the steering REST routes (`packages/mcp-server/src/server.ts`) and MCP tools (`packages/mcp-server/src/mcp.ts`) take a caller-supplied target session id, and writes are not checked against the caller's surface.
+
+**Depends on**: none
+
+**Repos**: agent-substrate (`packages/mcp-server/src/server.ts`, `packages/mcp-server/src/planning/steering.ts`, `packages/mcp-server/src/mcp.ts`, `packages/cli/src/steer/`)
+
+**Success Criteria** (what must be TRUE):
+
+  1. A surface that does not own target session S is refused, with no write and no acknowledgement, from every read of S: `/steering/directives`, `/steering/wait`, `steering_list` and the `listen` path. Acknowledge and queue writes stay operator-only for every caller.
+  2. The operator surface keeps cross-session access, and each refusal is an audited event.
+  3. The steering baseline on `origin/main` 9b482207 (575 pass, 7 skip, 0 fail across the steering and session suites) still passes.
+  4. `session_context` still returns the redacted digest of other sessions in the same repository, and its existing test still passes.
+
+**Plans**: none written
+
+### Phase 72: Repo allowlist and scoped credentials
+
+**Goal**: A session can address only the repositories on its allowlist, and each repository's credential is scoped to that repository.
+
+**Status**: Not started. Discovery: git calls use argv arrays with no shell string; no per-session repository allowlist was found. The unit confirms that before building it.
+
+**Depends on**: Phase 71
+
+**Success Criteria** (what must be TRUE):
+
+  1. A repository outside the session's allowlist is refused at the API and the CLI before any git call runs.
+  2. A credential scoped to one repository cannot read another repository's worktrees or corpus.
+
+**Plans**: none written
+
+### Phase 73: Ledger tamper evidence
+
+**Goal**: A rewrite, reorder, deletion or tail truncation of the event ledger is detected by recomputing the chain from the stored rows, and the verified head is anchored.
+
+**Status**: Not started. Discovery: `verifyChain` (`packages/mcp-server/src/event.ts:313`) recomputes a session chain, and `Substrate.verifyGraph` (`packages/mcp-server/src/service.ts`) reports the verdict. The gap is measured in the unit: tail truncation and whole-ledger rewrites are not yet proven detected.
+
+**Depends on**: none
+
+**Success Criteria** (what must be TRUE):
+
+  1. Tests save the graph's head before the change, then edit a stored payload, delete a middle event, truncate the last events, and rewrite the whole chain with recalculated `hash` and `prev`. Each is compared with that saved head: the edits and the rewrite report the first differing event id, and truncation reports the first missing event id.
+  2. The chain head for each graph is recorded in the hourly anchor. That recorded head is the trusted earlier proof criterion 1 compares against; a head recomputed from the stored rows is never used as the proof.
+
+**Plans**: none written
+
+### Phase 74: Cross-repo compensating actions
+
+**Goal**: A multi-repo operation that fails partway undoes its completed steps, and a failed undo is recorded, not dropped.
+
+**Status**: Not applicable on `origin/main` 9b482207 as far as search can show: no multi-repo, multi-step write exists. Checked and rejected: corpus ingest, skills propose, host commit and push, worktree provision and prune, snapshot restore, session rollback, steer, and the git hook installer. Owner decision needed on whether a cross-repo write path should be built first. Robustness gap found: `packages/collectors/src/install-git-hook.ts` has no try/catch around `writeHook`, so one failing repo aborts the run mid-loop.
+
+**Depends on**: none
+
+**Success Criteria** (what must be TRUE):
+
+  1. Owner decides whether a cross-repo write path is built first; no compensation is built against a path that does not exist.
+  2. The install-git-hook robustness gap is fixed or tracked separately; it is not a compensation case.
+
+**Plans**: none written
+
+### Phase 75: DragonflyDB degradation
+
+**Goal**: When the cache plane is open or unreachable, reads fall back to the authoritative store without losing state, and admission behaves as declared.
+
+**Status**: Not started. Discovery: the cache plane already runs through `callPlane` and `CircuitBreaker` (`packages/observability/src/breaker.ts:99`), and no authoritative state lives only in the cache. The gap: the degradation of admission budgets and generation keys under an open breaker is not tested.
+
+**Depends on**: none
+
+**Success Criteria** (what must be TRUE):
+
+  1. With the cache breaker open, brief and recall return authoritative results. A test proves it.
+  2. Admission under an open breaker follows a declared policy per class (fail open or closed), set in flags.
+
+**Plans**: none written
+
+### Phase 76: Telemetry buffer and dead-letter
+
+**Goal**: An event that fails to write to GreptimeDB is buffered, retried and dead-lettered with a record. No event is dropped silently.
+
+**Status**: Not started. Discovery: `insertEvent` (`packages/mcp-server/src/greptime.ts:1217`) has no retry, and a failure returns `stored: false` (`packages/mcp-server/src/service.ts:2699`) with nothing queued.
+
+**Depends on**: Phase 73 (shared ledger write path)
+
+**Success Criteria** (what must be TRUE):
+
+  1. A failed event write enters a bounded buffer, is retried with backoff, and after the retry budget is written to a dead-letter store with its hash.
+  2. Buffer and dead-letter depth are reported in `/healthz` and bounded by a flag.
+
+**Plans**: none written
+
+### Phase 77: Steering idempotency and ordering
+
+**Goal**: A steering command carrying an idempotency key applies once across retries and carries a sequence number, so the reader sees delivery order.
+
+**Status**: Not started. Discovery: no steering command carries a client idempotency key or a sequence number today.
+
+**Depends on**: Phase 71
+
+**Success Criteria** (what must be TRUE):
+
+  1. A replayed keyed command returns the original result and writes nothing.
+  2. Unkeyed commands keep working unchanged (owner decision, 2026-10-30).
+  3. A keyed reply exposes its sequence number, a replay returns the same sequence, and two distinct commands are delivered in sequence order. `restDirective` omits the sequence today, though `SteeringInbox` tracks one internally.
+
+**Plans**: none written
+
+### Phase 78: Cross-layer reconciliation
+
+**Goal**: The ledger, the index and the cache agree, and any drift is reported with evidence. No drift is repaired destructively without a confirmed plan.
+
+**Status**: Not started. Discovery: `substrate_coord_drift_scan` compares git HEAD, the ledger and leases. It does not compare GreptimeDB against TimescaleDB.
+
+**Depends on**: Phases 73, 75, 76
+
+**Success Criteria** (what must be TRUE):
+
+  1. A scheduled reconcile reports per-layer counts and the first mismatching key, and writes nothing on a clean run.
+  2. Repair is a separate confirmed step with a plan record, following the corpus delete rules.
+
+**Plans**: none written
+
 
 ## Progress
 
@@ -1273,3 +1412,11 @@ Plans:
 | 68. Worktree Fleet | v1.7 | 0/0 | Shipped (PRs #178, #185, #188, #189, #190, #193); PARTIAL: no report scheduler; dispatcher ignores roots variable | 2026-10-30 |
 | 69. Doc Proofs | v1.7 | 0/0 | Shipped (PR #181); gaps_found: no anchored hour | 2026-10-29 |
 | 70. Docs SLO and eval | v1.7 | 0/0 | Shipped (PR #182); gaps_found: baseline self-supervised, reads 1.0 | 2026-10-30 |
+| 71. Multi-Session boundary | v1.8 | 0/0 | Not started | - |
+| 72. Repo allowlist and scoped credentials | v1.8 | 0/0 | Not started | - |
+| 73. Ledger tamper evidence | v1.8 | 0/0 | Not started | - |
+| 74. Cross-repo compensating actions | v1.8 | 0/0 | Not started | - |
+| 75. DragonflyDB degradation | v1.8 | 0/0 | Not started | - |
+| 76. Telemetry buffer and dead-letter | v1.8 | 0/0 | Not started | - |
+| 77. Steering idempotency and ordering | v1.8 | 0/0 | Not started | - |
+| 78. Cross-layer reconciliation | v1.8 | 0/0 | Not started | - |
