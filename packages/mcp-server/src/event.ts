@@ -384,10 +384,8 @@ export function repoScopePrefix(repoId: string): string {
 }
 
 /**
- * The non-blocking context payload a steering transition carries on its
- * event: the action, the repo scope, both states and — on a planning
- * trigger — the old and new planning hashes. Emitting it never throws;
- * callers that cannot read it ignore unknown payload keys as before.
+ * Public metadata only: live events remain readable through historical queries.
+ * Private directions, planning hashes and proof material never belong here.
  */
 export function steeringSessionPayload(session: SteeringSession, previous?: SteeringSessionState): Record<string, unknown> {
 	return {
@@ -395,9 +393,8 @@ export function steeringSessionPayload(session: SteeringSession, previous?: Stee
 		repo_id: session.repo_id,
 		session_id: session.session_id,
 		state: session.state,
+		updated_at: session.updated_at,
 		...(previous !== undefined ? { previous_state: previous } : {}),
-		...(session.planning_hash !== undefined ? { planning_hash: session.planning_hash } : {}),
-		...(session.steering !== undefined ? { steering: session.steering.slice(0, 2000) } : {}),
 		non_blocking: true,
 	};
 }

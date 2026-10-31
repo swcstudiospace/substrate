@@ -88,6 +88,8 @@ describe("the grammar is refused before any work", () => {
 		["an unknown flag", ["checkpoint", "--bogus"]],
 		["a flag of another subcommand", ["recover", "--force"]],
 		["--session on sync", ["sync", "--session", "x"]],
+		["--steering-session on historical checkpoint", ["checkpoint", "--steering-session", "live"]],
+		["--binding-file on historical checkpoint listing", ["checkpoints", "--binding-file", "/private/live.json"]],
 		["a value flag with no value", ["checkpoint", "--trigger"]],
 		["a value flag followed by a flag", ["checkpoint", "--trigger", "--json"]],
 		["a repeated flag", ["checkpoint", "--json", "--json"]],
@@ -130,6 +132,46 @@ describe("the grammar is refused before any work", () => {
 			if (typeof parsed === "string") continue;
 			expect(parsed.positional).toEqual(["ckpt_" + "a".repeat(26)]);
 			expect([...parsed.flags.keys()].sort()).toEqual(["dry-run", "json"]);
+		}
+	});
+
+	test("hook parsing separates historical and live identities, requires values and rejects proof flags", () => {
+		const live = `ls_${"a".repeat(64)}`;
+		const parsed = parseSessionArgs(["hook", "steering", "--session", "history", "--steering-session", live, "--binding-file", "/private/live.json"]);
+		expect(typeof parsed).toBe("object");
+		if (typeof parsed === "string") throw new Error("hook arguments unexpectedly refused");
+		expect(parsed.flags.get("session")).toBe("history");
+		expect(parsed.flags.get("steering-session")).toBe(live);
+		expect(parsed.flags.get("binding-file")).toBe("/private/live.json");
+		for (const argv of [
+			["hook", "steering", "--steering-session"],
+			["hook", "steering", "--binding-file"],
+			["hook", "steering", "--steering-session", "--verbose"],
+			["hook", "steering", "--binding-file", "--verbose"],
+			["hook", "steering", "--steering-session", live, "--steering-session", live],
+			["hook", "steering", "--binding-file", "a", "--binding-file", "b"],
+			["hook", "steering", "--session-binding", "c".repeat(64)],
+		]) expect(typeof parseSessionArgs(argv)).toBe("string");
+		expect(SESSION_USAGE).toContain("--session HISTORICAL_ID");
+		expect(SESSION_USAGE).toContain("--steering-session LIVE_ID");
+		expect(SESSION_USAGE).toContain("--binding-file PATH");
+	});
+
+	test("rejected proof flags never echo their token or value, including joined syntax and verbose hooks", async () => {
+		const proof = "e".repeat(64);
+		for (const flags of [["--session-binding", proof], [`--session-binding=${proof}`], [`--${proof}`]]) {
+			for (const prefix of [["checkpoint"], ["hook", "steering", "--verbose"]]) {
+				const argv = [...prefix, ...flags];
+				const reason = parseSessionArgs(argv);
+				expect(typeof reason).toBe("string");
+				expect(reason).not.toContain(proof);
+				const r = rig({ fetch: neverCalled, steerFetch: async () => { throw new Error("the network must not be used"); } });
+				expect(await runSession(argv, r.deps)).toBe(prefix[0] === "hook" ? EXIT_DONE : EXIT_USAGE);
+				expect(text(r.out)).toBe("");
+				expect(text(r.err)).toContain("unknown flag");
+				expect(text(r.err)).not.toContain(proof);
+				expect(r.server.calls).toEqual([]);
+			}
 		}
 	});
 

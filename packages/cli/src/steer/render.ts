@@ -55,11 +55,11 @@ export function renderSessionLine(session: SteerSession, nowMs: number): string 
 		`state=${plain(session.state, 32)}`,
 		`repo=${plain(session.repo_id, 64)}`,
 		`updated ${agoText(session.updated_at, nowMs)}`,
-		`pending=${session.pending_directives}`,
 	];
+	if (session.pending_directives !== undefined) parts.push(`pending=${session.pending_directives}`);
 	const steering = stateOf(session.steering);
 	if (steering !== undefined) parts.push(`steering=${steering}`);
-	if (session.planning_hash !== null) parts.push(`planning=${plain(session.planning_hash.slice(0, HASH_SHOWN_CHARS), HASH_SHOWN_CHARS)}`);
+	if (session.planning_hash !== undefined && session.planning_hash !== null) parts.push(`planning=${plain(session.planning_hash.slice(0, HASH_SHOWN_CHARS), HASH_SHOWN_CHARS)}`);
 	return parts.join("  ");
 }
 

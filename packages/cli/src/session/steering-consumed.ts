@@ -33,9 +33,9 @@ const ENVELOPE_OVERHEAD_CHARS = 1_024;
 export const CONSUMED_STATE_MAX_BYTES = CONSUMED_HARD_MAX * (MAX_ID_CHARS + ID_OVERHEAD_CHARS) + ENVELOPE_OVERHEAD_CHARS;
 const STATE_DIR_NAME = "substrate-steering";
 
-/** `<git dir>/substrate-steering/consumed-<digest of the session id>.json`, derived from the pending journal's directory. */
-export function consumedPath(pendingDir: string, sessionId: string): string {
-	const digest = createHash("sha256").update(sessionId).digest("hex").slice(0, 16);
+/** Beside the pending journal; historical checkpoint labels and live incarnations have independent caches. */
+export function consumedPath(pendingDir: string, sessionId: string, steeringSessionId: string): string {
+	const digest = createHash("sha256").update(JSON.stringify([sessionId, steeringSessionId])).digest("hex");
 	return join(dirname(pendingDir), STATE_DIR_NAME, `consumed-${digest}.json`);
 }
 
@@ -68,8 +68,8 @@ export function retainListed(ids: readonly string[], listed: ReadonlySet<string>
 }
 
 /** Write the consumed ids atomically, keeping the newest `CONSUMED_HARD_MAX`. Throws on an I/O error; the hook ignores it. */
-export function writeConsumed(path: string, sessionId: string, ids: readonly string[]): void {
-	const body = JSON.stringify({ version: 1, session_id: sessionId, directive_ids: ids.slice(-CONSUMED_HARD_MAX) });
+export function writeConsumed(path: string, sessionId: string, steeringSessionId: string, ids: readonly string[]): void {
+	const body = JSON.stringify({ version: 2, session_id: sessionId, steering_session_id: steeringSessionId, directive_ids: ids.slice(-CONSUMED_HARD_MAX) });
 	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 	const temporary = `${path}.tmp`;
 	const fd = openSync(temporary, "w", 0o600);

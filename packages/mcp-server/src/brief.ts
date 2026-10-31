@@ -23,11 +23,10 @@ export interface BriefRequest {
 	repo?: string | undefined;
 	branch?: string | undefined;
 	graph_id?: string | undefined;
-	/**
-	 * The asking session (phase 67). Used only by the live session sections (`SUBSTRATE_BRIEF_SESSIONS`): its own pending
-	 * directives, and the sessions listed leave it out. It is in no cache key and changes nothing while the flag is off.
-	 */
+	/** Historical self-exclusion and worktree attribution only; never private authority. */
 	session_id?: string | undefined;
+	/** Explicit private live handle; proof travels separately in trusted service options. */
+	steering_session_id?: string | undefined;
 	surface: Surface;
 }
 

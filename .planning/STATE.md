@@ -2,17 +2,17 @@
 gsd_state_version: "1.0"
 milestone: v1.8
 milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
-status: "v1.8 Phase 71 gap-closure planning; no implementation phase complete; v1.7 owner decisions remain open"
-stopped_at: "Phase 71 ownership gates validated but incomplete; CONTEXT records full acceptance criteria and approved direct workflow execution"
-last_updated: "2026-10-31T00:30:00.000Z"
+status: "v1.8 Phase 71 locally verified; human_needed: awaiting-review / pending QUALITY; no phase signed off"
+stopped_at: "Phase 71 code and all local gates pass; independent sign-off awaits Desk Quality / Programming Lead. Required SendToAgent/Desk connector is not mounted; draft delivery and held review handoff required."
+last_updated: "2026-10-31T04:13:53.000Z"
 last_activity: 2026-10-31
-last_activity_desc: "Recovered missing validation jobs; documented Phase 71 security gaps; resumed discuss-plan-execute with owner-approved workflow-file dispatch"
+last_activity_desc: "Phase 71: 11596 root passes, 2 unrelated skips, zero failures; native CLI/PostgreSQL smoke passed; mandatory external review remains unobserved"
 state_head: 9d3f20851a85
 progress:
   total_phases: 8
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
+  total_plans: 4
+  completed_plans: 4
   percent: 0
 current_phase: 71
 current_phase_name: multi-session-boundary
@@ -671,3 +671,11 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 - **Evidence that shaped the plan** (main at 9d3f2085; file and line references are in each phase's CONTEXT.md): the docs plane ingests one page at a time (upload, scan, pipeline poll, track status per page), has no delete or rename, stores only source URL, commit and heading, has one LightRAG workspace for all datasets and records no retrieval feedback; the only doc-change path is the server's planning refresh, which keeps its hashes in memory and re-ingests everything after a restart; `POST /docs/merge-trigger` is not called for any repository dataset; LightRAG v1.5.7 has `POST /documents/texts`, which the client does not use; Hindsight's client uses retain with `document_id` replace, recall and document delete, and none of reflect, mental-model creation, observations or directives; steering is pull-only with no command, no REST route and no view, session state is process-local, the brief has no steering or handoff section and `checkpoint_hint` has no reader; claims are per graph node, no component knows the worktrees under `/root/src/worktrees`, and the only disk guard is a 5 GiB floor in the dispatcher; TEI has no client; the hourly anchor covers ledger event hashes only; this host shows 106 directories under `/root/src/worktrees` and 98 percent disk use.
 - **Plan:** one pull request per phase through `ultrathink-ship`; shared contracts are fixed in ROADMAP phase 63; migration step numbers are assigned in merge order (the migrate-contract test needs every version from 1 to N), so each unit takes the next free number when it rebases onto main. Wave A: phases 63 (two units), 64, 67, 68 core, 69 core, 70 core. Wave B after phase 63 merges: 65, 66 and the integrations of 68, 69 and 70. Operator-gated and not done by this run: deploy, timers and hooks, the live ingest, anchor funding.
 - **Ultrathink plan (graph ut-mvtjveh1-26111d38, Notion Task 408bc1a0c7ae813a947efa582daedf83; Linear is blocked by the free-issue limit):** it arrived after the first units were dispatched, as in Runs 12 and 13, and was folded in rather than restarted. Its phases map onto this milestone: audit and feature lock (the Run 14 scouts and the audit record under `.planning/phases/63-corpus-atlas/audit/`), foundations and ingestion (63 and 64), change-triggered sync (65), the self-improving loop (66), worktrees and Live Steering (68 and 67), provenance anchoring (69) and hardening (70 and the closeout). Its eight features differ from this milestone's in one place: observability and the evaluation gate share phase 70, and the TEI embedding fabric (64) is added because TEI has no client. Its non-blocking questions took their defaults: the five capabilities the owner described are inside the eight; Solana devnet is used for anchoring only, through the hourly anchor that already exists; extraction-LLM egress is moot while LightRAG runs in naive mode with the LLM bypass (text goes to embeddings only, no token cost), and a graph mode would need the owner's approval first. Its binding constraints changed the phase text: the default sync triggers write nothing into any repository and git hooks are an operator-run opt-in; new tables are covered by the archive and restore spec; the manifest and the docs plane get a reconcile because they are a dual write; staged units are resource-bounded; and the documents this milestone writes must be retrievable through the finished pipeline.
+
+## Needs Human
+
+| Phase | State | Blocker | Resume |
+|-------|-------|---------|--------|
+| 71 | awaiting-review / pending QUALITY | Local acceptance passed; native Programming Lead held-message dispatch or an authorized Desk connector is not exposed. No external Greptile clearance observed. | Complete LEAD → QUALITY review, address findings, then `/gsd:verify-work 71` |
+
+No phase or milestone completion is inferred from local tests, draft delivery, or the earlier planning PR. Deployment, production migration/recovery, real credentials and host hooks/timers remain operator-gated.

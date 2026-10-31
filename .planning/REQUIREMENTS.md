@@ -130,7 +130,7 @@ Every feature requires CONTEXT, executable PLAN files, SUMMARY, and exercised ve
 
 | Requirement | Category | Phase | Status |
 |-------------|----------|-------|--------|
-| HARD-S1 | Security | 71 | Gap-closure planning; preliminary gate incomplete |
+| HARD-S1 | Security | 71 | Locally verified (5/5); awaiting-review / pending QUALITY |
 | HARD-S2 | Security | 72 | Not started |
 | HARD-S3 | Security | 73 | Preliminary edits validated; not complete |
 | HARD-R1 | Redundancy | 74 | Not started; earlier no-op was not delivery |

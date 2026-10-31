@@ -81,6 +81,23 @@ describe("argDigest", () => {
 		expect(argDigest([1, 2]).keys).toEqual([]);
 		expect(argDigest([1, 2]).digest).not.toBeNull();
 	});
+
+	test("live binding arguments remain canonical evidence without becoming stored metadata", () => {
+		const sessionId = `ls_${"a".repeat(64)}`;
+		const proof = "b".repeat(64);
+		const args = { session_id: sessionId, session_binding: proof, steering: "PRIVATE-DIRECTION-MARKER", planning_hash: "PRIVATE-PLAN-MARKER" };
+		const record = buildRecord(
+			{ surface: "omp", tool: "docs_steering_session", decision: "allowed", mode: "fail-closed", session_id: null, args },
+			{ seq: 1, prev: null },
+			new Date("2026-10-31T00:00:00.000Z"),
+		);
+		expect(record.arg_keys).toEqual(["planning_hash", "session_binding", "session_id", "steering"]);
+		expect(record.arg_digest).toBe(sha256Hex(canonicalJson(args)));
+		expect(record.arg_digest).not.toBe(argDigest({ ...args, session_binding: "c".repeat(64) }).digest);
+		expect(record.session_id).toBeNull();
+		for (const marker of [sessionId, proof, args.steering, args.planning_hash]) expect(JSON.stringify(record)).not.toContain(marker);
+		expect(verifyAuditChain([record])).toEqual({ ok: true, records: 1 });
+	});
 });
 
 describe("buildRecord", () => {

@@ -1,5 +1,5 @@
 /**
- * `substrate steer sessions|status|queue|ack|list|listen|context` (v1.7, phase 67): Live Steering from a terminal.
+ * `substrate steer open|heartbeat|close|sessions|status|queue|ack|list|listen|context`: Live Steering from a terminal.
  *
  * The commands are thin: they call the REST routes the server mounts for the steering MCP tools and print what comes
  * back. The server decides who may queue and acknowledge (operators on the allow-listed principals); an agent's token
@@ -7,7 +7,7 @@
  *
  * Exit codes: 0 done, 1 failed (the server was not reached, answered with an error or with a body that is not a reply),
  * 2 usage, 3 refused (the server understood and said no, or is not set up for steering: not an operator, a rate limit, a bad
- * bearer, a typed `misconfigured` or `not-configured` answer, a route that is missing because steering is off).
+ * bearer, a typed session/not-configured refusal, or a route missing because steering is off).
  *
  * `listen` is the one long-running command. It long-polls `/steering/wait`, prints each directive as it arrives,
  * remembers the last id (sent as `after`) and every id it already printed (so a server that restarted and replays an
@@ -38,6 +38,7 @@ import {
 } from "./client.ts";
 import { plain } from "./plain.ts";
 import { renderDigest, renderDirectiveLine, renderDirectives, renderSessions, renderWriteReply } from "./render.ts";
+import { BindingRecordError, LIVE_SESSION_ID_PATTERN, bindingRecordPath, loadBindingRecord, saveBindingRecord, serverIdentity, updateBindingExpiry, removeBindingRecord, type LiveSessionBindingRecord } from "./binding-record.ts";
 
 export const EXIT_DONE = 0;
 export const EXIT_FAILED = 1;
@@ -45,12 +46,14 @@ export const EXIT_USAGE = 2;
 export const EXIT_REFUSED = 3;
 
 export const STEER_USAGE =
-	"usage: substrate steer sessions [--repo R] [--limit N] [--json]\n" +
-	"       substrate steer status [--repo R] [--session ID] [--json]\n" +
+	"usage: substrate steer open [--repo R] [--binding-file PATH] [--json]\n" +
+	"       substrate steer heartbeat|close --session ID [--binding-file PATH] [--json]\n" +
+	"       substrate steer sessions [--repo R] [--limit N] [--json]\n" +
+	"       substrate steer status [--repo R] [--session ID [--binding-file PATH]] [--json]\n" +
 	"       substrate steer queue --session ID --action pause|redirect|annotate --body TEXT [--priority low|normal|high] [--conflicts] [--json]   (operators only)\n" +
 	"       substrate steer ack DIRECTIVE (--applied | --declined) [--confirm] [--json]   (operators only)\n" +
-	"       substrate steer list --session ID [--status queued|acknowledged|all] [--json]\n" +
-	"       substrate steer listen --session ID [--once] [--max-wait-ms N] [--after DIRECTIVE] [--json]\n" +
+	"       substrate steer list --session ID [--binding-file PATH] [--status queued|acknowledged|all] [--json]\n" +
+	"       substrate steer listen --session ID [--binding-file PATH] [--once] [--max-wait-ms N] [--after DIRECTIVE] [--json]\n" +
 	"       substrate steer context [--repo R] [--session ID] [--limit N] [--format text|json]\n" +
 	"every command takes --surface S (the token's surface; default claude-code)\n" +
 	"exit: 0 done, 1 failed, 2 usage, 3 refused by the server (not an operator, rate limited, bad token, steering off or not configured)\n";
@@ -64,8 +67,6 @@ export const LISTEN_MIN_POLL_GAP_MS = 200;
 export const LISTEN_MAX_WAIT_MS_LIMIT = 24 * 3_600_000;
 /** A listener remembers at most this many printed directive ids, oldest dropped first. */
 export const LISTEN_PRINTED_MAX = 1_000;
-/** `status` lists the queued directives of at most this many sessions. */
-const STATUS_MAX_DIRECTIVE_SESSIONS = 10;
 const DEFAULT_SURFACE = "claude-code";
 const DIRECTIVE_ID_HINT = "a directive id (letters, digits, . _ : -; at most 128 characters)";
 const MAX_BODY_CHARS = 4_096;
@@ -86,23 +87,28 @@ export interface SteerDeps {
 	sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 	/** Aborted by the entry point on SIGINT: `listen` stops at once and exits 0. */
 	interrupt?: AbortSignal;
+	/** Isolated private state directory; production uses the standard per-user directory. */
+	bindingDirectory?: string;
 }
 
 // ---------------------------------------------------------------------------
 // Grammar
 // ---------------------------------------------------------------------------
 
-type Sub = "sessions" | "status" | "queue" | "ack" | "list" | "listen" | "context";
+type Sub = "open" | "heartbeat" | "close" | "sessions" | "status" | "queue" | "ack" | "list" | "listen" | "context";
 
-const SUBCOMMANDS: readonly Sub[] = ["sessions", "status", "queue", "ack", "list", "listen", "context"];
-const VALUE_FLAGS: readonly string[] = ["repo", "limit", "session", "action", "body", "priority", "status", "max-wait-ms", "after", "format", "surface"];
+const SUBCOMMANDS: readonly Sub[] = ["open", "heartbeat", "close", "sessions", "status", "queue", "ack", "list", "listen", "context"];
+const VALUE_FLAGS: readonly string[] = ["repo", "limit", "session", "binding-file", "action", "body", "priority", "status", "max-wait-ms", "after", "format", "surface"];
 const ALLOWED: Record<Sub, readonly string[]> = {
+	open: ["repo", "binding-file", "json", "surface"],
+	heartbeat: ["session", "binding-file", "json", "surface"],
+	close: ["session", "binding-file", "json", "surface"],
 	sessions: ["repo", "limit", "json", "surface"],
-	status: ["repo", "session", "json", "surface"],
+	status: ["repo", "session", "binding-file", "json", "surface"],
 	queue: ["session", "action", "body", "priority", "conflicts", "json", "surface"],
 	ack: ["applied", "declined", "confirm", "json", "surface"],
-	list: ["session", "status", "json", "surface"],
-	listen: ["session", "once", "max-wait-ms", "after", "json", "surface"],
+	list: ["session", "binding-file", "status", "json", "surface"],
+	listen: ["session", "binding-file", "once", "max-wait-ms", "after", "json", "surface"],
 	context: ["repo", "session", "limit", "format", "surface"],
 };
 
@@ -137,7 +143,7 @@ export function parseSteerArgs(argv: readonly string[]): ParsedSteer | string {
 			continue;
 		}
 		const name = token.slice(2);
-		if (!allowed.includes(name)) return `unknown flag ${token} for \`steer ${sub}\``;
+		if (!allowed.includes(name)) return `unknown flag for \`steer ${sub}\``;
 		if (flags.has(name)) return `${token} given more than once`;
 		if (VALUE_FLAGS.includes(name)) {
 			const value = argv[i + 1];
@@ -166,7 +172,9 @@ function validate(parsed: ParsedSteer): string | undefined {
 
 	const session = flag(parsed, "session");
 	if (session !== undefined && !SESSION_ID_PATTERN.test(session)) return "--session must be a session id (letters, digits, . _ : -; at most 128 characters)";
-	if ((sub === "queue" || sub === "list" || sub === "listen") && session === undefined) return `${sub} needs --session ID`;
+	if (["queue", "list", "listen", "heartbeat", "close"].includes(sub) && session === undefined) return `${sub} needs --session ID`;
+	if (sub === "status" && flags.has("binding-file") && session === undefined) return "--binding-file needs --session ID";
+	if (session !== undefined && ["list", "listen", "status", "heartbeat", "close"].includes(sub) && !LIVE_SESSION_ID_PATTERN.test(session)) return "--session must be a server-issued live handle (ls_ followed by 64 lowercase hexadecimal characters)";
 
 	if (sub === "queue") {
 		const action = flag(parsed, "action");
@@ -211,7 +219,7 @@ export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> 
 }
 
 /** Failures that mean "the server said no" rather than "it could not answer". */
-const REFUSAL_CODES: Record<string, true> = { unauthorized: true, refused: true, "not-found": true };
+const REFUSAL_CODES: Record<string, true> = { unauthorized: true, refused: true, "not-found": true, "session-not-found": true, "session-unavailable": true };
 
 export async function runSteer(argv: readonly string[], deps: SteerDeps): Promise<number> {
 	if (argv.length === 0 || argv[0] === "help" || argv[0] === "--help" || argv[0] === "-h") {
@@ -239,8 +247,63 @@ export async function runSteer(argv: readonly string[], deps: SteerDeps): Promis
 	};
 	const jsonLine = (value: unknown): void => deps.out(`${JSON.stringify(value)}\n`);
 	const lines = (text: readonly string[]): void => deps.out(`${text.join("\n")}\n`);
+	let selected: { path: string; record: LiveSessionBindingRecord } | undefined;
+	const selectedSession = flag(parsed, "session");
+	if (selectedSession !== undefined && ["list", "listen", "status", "heartbeat", "close"].includes(parsed.sub)) {
+		try {
+			const identity = serverIdentity(deps.url);
+			const path = bindingRecordPath(identity, surface, selectedSession, { ...(deps.bindingDirectory === undefined ? {} : { directory: deps.bindingDirectory }), ...(flag(parsed, "binding-file") === undefined ? {} : { path: flag(parsed, "binding-file") as string }) });
+			selected = { path, record: loadBindingRecord(path, { server_identity: identity, surface, session_id: selectedSession }) };
+		} catch (error) {
+			if (!(error instanceof BindingRecordError && error.code === "missing" && flag(parsed, "binding-file") === undefined && parsed.sub !== "heartbeat")) {
+				deps.err("substrate steer: the selected private binding record is missing, unsafe or mismatched; no credential was reset\n");
+				return EXIT_FAILED;
+			}
+		}
+	}
+	const sessionBinding = selected?.record.session_binding;
 
 	switch (parsed.sub) {
+		case "open": {
+			const repoId = flag(parsed, "repo") ?? deps.repo();
+			if (repoId === undefined || repoId.trim().length === 0) { deps.err("substrate steer open: supply --repo R or use a repository with an origin\n"); return EXIT_USAGE; }
+			try { serverIdentity(deps.url); } catch { deps.err("substrate steer open: invalid configured server URL\n"); return EXIT_FAILED; }
+			const result = await client.open({ repoId });
+			if (!result.ok) return failed(result);
+			try {
+				const value = result.value;
+				const path = saveBindingRecord({ version: 1, server_identity: serverIdentity(deps.url), surface, session_id: value.session_id, session_binding: value.session_binding, expires_at: value.expires_at }, {
+					...(deps.bindingDirectory === undefined ? {} : { directory: deps.bindingDirectory }),
+					...(flag(parsed, "binding-file") === undefined ? {} : { path: flag(parsed, "binding-file") as string }),
+				});
+				const publicResult = { status: value.status, session_id: value.session_id, repo_id: value.repo_id, state: value.state, updated_at: value.updated_at, expires_at: value.expires_at, binding_file: path };
+				if (json) jsonLine(publicResult);
+				else deps.out(`issued ${value.session_id}; expires ${value.expires_at}; binding file ${plain(path, 4096)}\n`);
+				return EXIT_DONE;
+			} catch {
+				deps.err("substrate steer open: private binding persistence failed; the unused issued identity expires, and its lost credential cannot be recovered or reset\n");
+				return EXIT_FAILED;
+			}
+		}
+		case "heartbeat": {
+			if (selected === undefined) { deps.err("substrate steer heartbeat: a matching private binding record is required\n"); return EXIT_FAILED; }
+			const result = await client.heartbeat({ sessionId: selected.record.session_id, sessionBinding });
+			if (!result.ok) return failed(result);
+			try { updateBindingExpiry(selected.path, selected.record, result.value.expires_at); }
+			catch { deps.err("substrate steer heartbeat: renewed on server, but local expiry could not be saved; credential unchanged\n"); return EXIT_FAILED; }
+			if (json) jsonLine(result.value); else deps.out(`renewed ${result.value.session_id}; expires ${result.value.expires_at}\n`);
+			return EXIT_DONE;
+		}
+		case "close": {
+			const result = await client.close({ sessionId: selectedSession as string, sessionBinding });
+			if (!result.ok) return failed(result);
+			if (selected !== undefined) {
+				try { removeBindingRecord(selected.path, selected.record); }
+				catch { deps.err("substrate steer close: closed on server; the matching local record could not be removed\n"); return EXIT_FAILED; }
+			}
+			if (json) jsonLine(result.value); else deps.out(`closed ${result.value.session_id}; at ${result.value.closed_at}\n`);
+			return EXIT_DONE;
+		}
 		case "sessions": {
 			const limit = flag(parsed, "limit");
 			const result = await client.sessions({ repoId: flag(parsed, "repo") ?? deps.repo(), ...(limit === undefined ? {} : { limit: Number(limit) }) });
@@ -250,19 +313,19 @@ export async function runSteer(argv: readonly string[], deps: SteerDeps): Promis
 			return EXIT_DONE;
 		}
 		case "status":
-			return await commandStatus(parsed, deps, client, failed);
+			return await commandStatus(parsed, deps, client, failed, sessionBinding);
 		case "queue":
 		case "ack":
 			return await commandWrite(parsed, deps, client, failed);
 		case "list": {
-			const result = await client.directives({ sessionId: flag(parsed, "session") as string, status: (flag(parsed, "status") ?? "all") as DirectiveStatusFilter });
+			const result = await client.directives({ sessionId: flag(parsed, "session") as string, status: (flag(parsed, "status") ?? "all") as DirectiveStatusFilter, sessionBinding });
 			if (!result.ok) return failed(result);
 			if (json) jsonLine(result.value);
 			else lines(renderDirectives(result.value, deps.now().getTime()));
 			return EXIT_DONE;
 		}
 		case "listen":
-			return await commandListen(parsed, deps, client, failed);
+			return await commandListen(parsed, deps, client, failed, sessionBinding);
 		default: {
 			const limit = flag(parsed, "limit");
 			const result = await client.context({
@@ -281,18 +344,24 @@ export async function runSteer(argv: readonly string[], deps: SteerDeps): Promis
 type Failed = (failure: SteerFailure) => number;
 
 /** Sessions, their pending directives and a digest summary in one view. */
-async function commandStatus(parsed: ParsedSteer, deps: SteerDeps, client: SteerClient, failed: Failed): Promise<number> {
+async function commandStatus(parsed: ParsedSteer, deps: SteerDeps, client: SteerClient, failed: Failed, sessionBinding?: string): Promise<number> {
 	const repoId = flag(parsed, "repo") ?? deps.repo();
 	const only = flag(parsed, "session");
 	const sessions = await client.sessions({ repoId });
 	if (!sessions.ok) return failed(sessions);
-	const shown = sessions.value.sessions.filter((session) => only === undefined || session.session_id === only);
+	const shown = sessions.value.sessions.filter((session) => only === undefined || session.session_id === only).map((session) => only !== undefined ? session : ({
+		session_id: session.session_id, surface: session.surface, repo_id: session.repo_id, state: session.state, updated_at: session.updated_at,
+		...(session.expires_at === undefined ? {} : { expires_at: session.expires_at }),
+	}));
 	const nowMs = deps.now().getTime();
 
-	// Directives are read for the sessions that have some pending, or for the one the operator named.
-	const wanted = (only === undefined ? shown.filter((session) => session.pending_directives > 0) : [{ session_id: only }]).slice(0, STATUS_MAX_DIRECTIVE_SESSIONS);
+	// Untargeted discovery never fans out into private command histories or counts.
 	const queued: Array<{ session_id: string; directives: SteerResult<SteerDirective[]> }> = [];
-	for (const session of wanted) queued.push({ session_id: session.session_id, directives: await client.directives({ sessionId: session.session_id, status: "queued" }) });
+	if (only !== undefined) {
+		const directives = await client.directives({ sessionId: only, status: "queued", sessionBinding });
+		if (!directives.ok) return failed(directives);
+		queued.push({ session_id: only, directives });
+	}
 
 	// The digest is context: a server without it still gives a useful status.
 	const context = await client.context({ repoId, sessionId: only });
@@ -365,7 +434,7 @@ async function commandWrite(parsed: ParsedSteer, deps: SteerDeps, client: SteerC
 const isTransient = (failure: SteerFailure): boolean => failure.code === "unreachable" || failure.code === "timeout" || failure.code === "server-error";
 
 /** The long-poll loop. See the module comment for when it stops. */
-async function commandListen(parsed: ParsedSteer, deps: SteerDeps, client: SteerClient, failed: Failed): Promise<number> {
+async function commandListen(parsed: ParsedSteer, deps: SteerDeps, client: SteerClient, failed: Failed, sessionBinding?: string): Promise<number> {
 	const sessionId = flag(parsed, "session") as string;
 	const maxWait = flag(parsed, "max-wait-ms");
 	const startedAt = deps.now().getTime();
@@ -402,7 +471,7 @@ async function commandListen(parsed: ParsedSteer, deps: SteerDeps, client: Steer
 		const pollMs = Math.min(LISTEN_POLL_MS, serverWaitMs ?? LISTEN_POLL_MS, remaining);
 		const polledAt = deps.now().getTime();
 		// With a budget the request itself is cut at its end: a stalled connection cannot hold the command past `--max-wait-ms`.
-		const result = await client.wait({ sessionId, ...(after === undefined ? {} : { after }), timeoutMs: pollMs, ...(deadline === undefined ? {} : { requestBudgetMs: remaining }) });
+		const result = await client.wait({ sessionId, sessionBinding, ...(after === undefined ? {} : { after }), timeoutMs: pollMs, ...(deadline === undefined ? {} : { requestBudgetMs: remaining }) });
 		// Read again after the await: the signal can fire while the poll is in flight.
 		if (interrupted()) return EXIT_DONE;
 

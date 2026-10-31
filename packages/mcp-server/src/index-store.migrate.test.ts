@@ -29,6 +29,17 @@ describe("migration steps and the migrate lock", () => {
 		expect(new Set(MIGRATION_STEPS.map((step) => step.name)).size).toBe(MIGRATION_STEPS.length);
 	});
 
+	test("live session authority is always migrated, independently of restart-cache opt-in", () => {
+		const steps = applicableMigrationSteps({ "steering-audit": false, "steering-sessions": false });
+		const authority = steps.find((step) => step.version === 42);
+		expect(authority).toMatchObject({ name: "live_session_bindings", phase: "expand" });
+		expect(authority?.optIn).toBeUndefined();
+		expect(authority?.sql).toContain("session_id text primary key");
+		expect(authority?.sql).toContain("binding_proof_hash text not null");
+		expect(authority?.sql).not.toContain("steering_sessions");
+		expect(authority?.down).toBe("drop table if exists live_session_bindings");
+	});
+
 	test("the advisory lock key is a single line", () => {
 		expect(indexMigrateLockKey()).toBe("substrate.index.migrate");
 		expect(indexMigrateLockKey().includes("\n")).toBe(false);

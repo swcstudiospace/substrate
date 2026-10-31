@@ -1,10 +1,10 @@
 /**
- * The Postgres index.
+ * The Postgres coordination index and durable live-session authority.
  *
- * A cache over Notion and Linear so the brief does not call either API on every
- * prompt. It is written by ultrathink's kickoff/sync skills (via graph.register),
- * by hermes-linear-poller events and by substrate-dispatcher. It is never the
- * source of truth — a disagreement is resolved by refreshing from Notion/Linear.
+ * Graph and tracker projections cache Notion/Linear state and are refreshed
+ * when they disagree with those sources. Live-session bindings are different:
+ * their immutable ownership, credential hashes, leases and terminal identities
+ * are authoritative and cannot be reconstructed from tracker or cache rows.
  */
 import { SQL } from "bun";
 import { randomUUID } from "node:crypto";
@@ -52,7 +52,7 @@ import type {
 } from "./types.ts";
 import { EDGE_KINDS } from "./types.ts";
 import { SteeringAuditSink, bunSteeringAuditReadSql, bunSteeringAuditSql } from "./planning/steering-store.ts";
-import { bunSteeringSessionsStore, type SteeringSessionsStore } from "./planning/steering-sessions-store.ts";
+import { bunLiveSessionAuthority, type LiveSessionAuthority } from "./planning/steering-sessions-store.ts";
 import { bunCorpusStore, type CorpusStore } from "./corpus/store.ts";
 import { bunPlanningHashStore, type PlanningHashStore } from "./planning-hash-store.ts";
 import { bunReflectStore, type ReflectStore } from "./corpus/reflect-store.ts";
@@ -874,6 +874,34 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 		sql: `
 			create index if not exists worktrees_repo_lower_seen_idx on worktrees (lower(repo), last_seen_at desc)`,
 	},
+	// Security authority, not restart cache: retain terminal identities permanently. Native PostgreSQL backups must
+	// include this table. Documentary down destroys non-reuse evidence and is never an automatic rollback action.
+	{
+		version: 42,
+		name: "live_session_bindings",
+		phase: "expand",
+		down: `drop table if exists live_session_bindings`,
+		sql: `
+			create table if not exists live_session_bindings (
+				session_id text primary key,
+				owner_surface text not null,
+				repo_id text not null,
+				binding_proof_hash text not null,
+				issued_at timestamptz not null,
+				last_seen_at timestamptz not null,
+				expires_at timestamptz not null,
+				updated_at timestamptz not null,
+				closed_at timestamptz,
+				close_reason text,
+				state text not null,
+				steering text,
+				planning_hash text
+			);
+			create index if not exists live_session_bindings_owner_repo_id_idx
+				on live_session_bindings (owner_surface, repo_id, session_id) where closed_at is null;
+			create index if not exists live_session_bindings_repo_id_idx
+				on live_session_bindings (repo_id, session_id) where closed_at is null`,
+	},
 ];
 
 /** The steps `migrate()` runs for these opt-ins, in version order. A step whose opt-in is off is left out and not ledgered. */
@@ -956,13 +984,9 @@ export class IndexStore implements MemoryStore {
 		return bunCorpusStore(this.sql);
 	}
 
-	/**
-	 * The durable steering session store over this store's pool (phase 67): the upsert and the boot read behind the registry.
-	 * It only builds the adapter; no statement runs until the registry uses it, and the table exists only when the
-	 * `steering-sessions` opt-in ran its migration step.
-	 */
-	steeringSessions(): SteeringSessionsStore {
-		return bunSteeringSessionsStore(this.sql);
+	/** Mandatory durable security authority over this pool; historical restart-cache rows cannot grant access. */
+	liveSessions(options: { leaseSeconds: number }): LiveSessionAuthority {
+		return bunLiveSessionAuthority(this.sql, options);
 	}
 
 	/**

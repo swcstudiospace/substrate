@@ -180,6 +180,8 @@ export const ROUTE_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	"/docs/lightrag/query": "read",
 	// Phase 67 (live steering GA): the steering routes mirror the steering tools. A held long poll is one admission, like one read.
 	"/steering/sessions": "read",
+	"/steering/sessions/heartbeat": "write",
+	"/steering/sessions/close": "write",
 	"/steering/directives": "read",
 	"/steering/wait": "read",
 	"/steering/queue": "write",
@@ -240,6 +242,8 @@ export const TOOL_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	docs_feedback: "write",
 	skills_propose: "write",
 	docs_steering_session: "write",
+	steering_session_heartbeat: "write",
+	steering_session_close: "write",
 	skills_approve: "write",
 	skills_list: "read",
 	railway_list: "read",
@@ -254,6 +258,8 @@ export const TOOL_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	steering_queue: "write",
 	steering_acknowledge: "write",
 	steering_list: "read",
+	live_session_discovery: "read",
+	steering_wait: "read",
 	session_context: "read",
 	worktree_list: "read",
 	railway_scale: "write",
@@ -279,6 +285,7 @@ export const DEFAULT_CLASS: AdmissionClass = "read";
 export function routeClass(method: string, pathname: string): AdmissionClass | null {
 	if (method === "GET" && Object.hasOwn(MONITOR_ROUTES, pathname)) return null;
 	if (pathname === MCP_ROUTE) return null;
+	if (method === "POST" && pathname === "/steering/sessions") return "write";
 	return (Object.hasOwn(ROUTE_CLASSES, pathname) ? ROUTE_CLASSES[pathname] : undefined) ?? DEFAULT_CLASS;
 }
 

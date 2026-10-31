@@ -579,7 +579,7 @@ describe("GET /livez over a real socket", () => {
 		await observability.start();
 		const substrate = new Substrate(
 			config,
-			{ index: downStore(touches), greptime: downStore(touches) } as unknown as ConstructorParameters<typeof Substrate>[1],
+			{ index: downStore(touches), greptime: downStore(touches), steering: { history: null, liveSessions: null } } as unknown as ConstructorParameters<typeof Substrate>[1],
 			observability.observer,
 		);
 		const server = createHttpServer(substrate, config, observability);

@@ -64,10 +64,10 @@ import {
 	type SubstrateConfig,
 } from "./config.ts";
 import { Admission, admitBatch, budgetBody, budgetRefusal, routeClass, type AdmissionVerdict } from "./admission.ts";
-import { acknowledgeSteeringWithState, type SteeringAcknowledgeReply } from "./planning/steering-delivery.ts";
-import { listRestDirectives, listSteeringSessions, parseAcknowledgeBody, parseDirectivesQuery, parseQueueBody, parseSessionsQuery, parseWaitQuery, restDirective, steeringHttpStatus, steeringRetryAfterS, steeringUnavailable } from "./planning/steering-rest.ts";
-import { queueSteering, type SteeringWriteResult } from "./planning/steering-tools.ts";
-import { nextQueuedDirective } from "./planning/steering-waiters.ts";
+import type { SteeringAcknowledgeReply } from "./planning/steering-delivery.ts";
+import { parseAcknowledgeBody, parseDirectivesQuery, parseQueueBody, parseSessionsQuery, parseWaitQuery, restDirective, steeringHttpStatus, steeringRetryAfterS, SteeringReadUnavailableError } from "./planning/steering-rest.ts";
+import { acknowledgeSteeringWithState, DOCS_SEARCH_INPUT, LIVE_SESSION_TARGET_INPUT, LIVE_SESSION_UPDATE_INPUT, LiveSessionBoundaryError, queueSteering, type LiveCallFailure, type PreparedLiveDispatch, type SteeringWriteResult } from "./planning/steering-tools.ts";
+import { z, ZodError } from "zod";
 import { parseSessionContextArgs, SESSION_CONTEXT_DISABLED, SESSION_CONTEXT_DISABLED_MESSAGE } from "./session-context.ts";
 import type { EventBus } from "./event-bus.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
@@ -109,7 +109,7 @@ import {
 } from "./observe.ts";
 import { MetricHistoryMemo, bucketedValues, metricHistoryAnswer } from "./metrics-history.ts";
 import { redact } from "./redact.ts";
-import type { Substrate } from "./service.ts";
+import { LIVE_BRIEF_INPUT, type Substrate } from "./service.ts";
 import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
 import { approvalBodyProblem, approvalFailure, toApprovalRequest } from "./skills/registry.ts";
 import { EVENT_KINDS, SURFACES, type Surface } from "./types.ts";
@@ -322,6 +322,9 @@ const JSON_BODY_ROUTES: Record<string, true> = {
 	"/skills/approve": true,
 	"/steering/queue": true,
 	"/steering/acknowledge": true,
+	"/steering/sessions": true,
+	"/steering/sessions/heartbeat": true,
+	"/steering/sessions/close": true,
 	"/worktrees/report": true,
 	"/corpus/neardup": true,
 	"/mcp": true,
@@ -729,6 +732,24 @@ function steeringRouteOpen(res: ServerResponse, substrate: Substrate, surface: S
 function sendSteeringResult(res: ServerResponse, result: SteeringWriteResult | SteeringAcknowledgeReply): void {
 	const retryAfterS = steeringRetryAfterS(result);
 	send(res, steeringHttpStatus(result), JSON.stringify(result), "application/json", retryAfterS === null ? {} : { "retry-after": String(retryAfterS) });
+}
+function sessionBindingOf(req: IncomingMessage): string | undefined {
+	const value = req.headers["x-substrate-session-binding"];
+	return typeof value === "string" ? (value.length <= 128 ? value : "invalid") : value === undefined ? undefined : "invalid";
+}
+function liveBatchRefusal(body: unknown, refusal: LiveCallFailure): unknown {
+	const elements = Array.isArray(body) ? body : [body];
+	const replies = elements.flatMap((element: unknown) => {
+		const message = element !== null && typeof element === "object" ? element as Record<string, unknown> : {};
+		if (!Object.hasOwn(message, "id")) return [];
+		const params = message.params !== null && typeof message.params === "object" ? message.params as Record<string, unknown> : {};
+		const args = params.arguments !== null && typeof params.arguments === "object" ? params.arguments as Record<string, unknown> : {};
+		const live = typeof params.name === "string" && (["docs_steering_session", "steering_session_heartbeat", "steering_session_close", "steering_queue", "steering_acknowledge", "steering_list"].includes(params.name) || (["docs_search", "memory_brief"].includes(params.name) && typeof args.steering_session_id === "string"));
+		return [live
+			? { jsonrpc: "2.0", id: message.id ?? null, result: { content: [{ type: "text", text: JSON.stringify(refusal, null, 2) }], isError: true } }
+			: { jsonrpc: "2.0", id: message.id ?? null, error: { code: -32000, message: "batch not dispatched", data: { code: "batch-not-dispatched" } } }];
+	});
+	return Array.isArray(body) ? replies : replies[0];
 }
 
 export function createHttpServer(
@@ -1164,7 +1185,9 @@ export function createHttpServer(
 
 			if (req.method === "POST" && url.pathname === "/brief") {
 				const raw = await readBody(req);
-				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+				// REST historically permits arbitrary attribution labels; MCP keeps its closed surface enum.
+				// This label never supplies the separately resolved live caller or binding credential.
+				const body = LIVE_BRIEF_INPUT.omit({ session_binding: true, if_none_match: true }).extend({ surface: z.string().optional() }).parse(raw ? JSON.parse(raw) : {});
 				rememberClaim(claim, body);
 				// A tokened caller's brief is its own surface's: a body naming another is refused, not served as theirs.
 				const briefRefusal = surfaceClaimRefusal(surface, body.surface);
@@ -1172,7 +1195,7 @@ export function createHttpServer(
 					sendJson(res, 403, { error: briefRefusal });
 					return;
 				}
-				if (!(await auditedRest(res, observability, surface, "brief", body))) return;
+				if (body.steering_session_id === undefined && !(await auditedRest(res, observability, surface, "brief", body))) return;
 				// uplift-4 S1: an unknown profile is the caller's mistake, refused here
 				// and never coerced to one the caller did not ask for.
 				const requested = parseBriefProfile(body.profile);
@@ -1186,12 +1209,14 @@ export function createHttpServer(
 						...(typeof body.branch === "string" ? { branch: body.branch } : {}),
 						...(typeof body.graph_id === "string" ? { graph_id: body.graph_id } : {}),
 						...(typeof body.session_id === "string" ? { session_id: body.session_id } : {}),
+						...(typeof body.steering_session_id === "string" ? { steering_session_id: body.steering_session_id } : {}),
 						surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
 					},
 					req.headers["if-none-match"],
 					requested.profile,
 					// The profile follows the resolved bearer, never the body's `surface` (attribution only).
 					surface,
+					{ caller: { surface, isOperator: caller.isOperator }, sessionBinding: sessionBindingOf(req), invocationArgs: body, transport: "rest" },
 				);
 				// uplift-2 R1: the caller can tell a degraded or snapshot brief from a
 				// complete one and skip one it already holds. A degraded answer is still
@@ -1268,7 +1293,7 @@ export function createHttpServer(
 						...(body as object),
 						surface: attribution.surface,
 					} as Parameters<Substrate["emit"]>[0],
-					{ replay: req.headers["x-substrate-replay"] === "1", caller: { surface, isOperator: caller.isOperator } },
+					{ replay: req.headers["x-substrate-replay"] === "1" },
 				);
 				// The sync lag the CLI reports, as a gauge: bounded and sanitised, read only from a stored `docs.sync` note.
 				if (result.stored) {
@@ -1510,37 +1535,12 @@ export function createHttpServer(
 			// the audit gate like every other read and an unreachable plane
 			// answers degraded rather than refusing the turn.
 			if (req.method === "POST" && url.pathname === "/docs/search") {
-				const parsed: unknown = JSON.parse(await readBody(req));
-				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-					sendJson(res, 400, { error: "request body must be a JSON object" });
-					return;
-				}
-				if (!("question" in parsed) || typeof parsed.question !== "string") {
-					sendJson(res, 400, { error: "question is required" });
-					return;
-				}
-				const datasets = "datasets" in parsed ? parsed.datasets : undefined;
-				const sessionId = "session_id" in parsed ? parsed.session_id : undefined;
-				const context = "context" in parsed ? parsed.context : undefined;
-				if (
-					(datasets !== undefined && !(Array.isArray(datasets) && datasets.every((name) => typeof name === "string"))) ||
-					(sessionId !== undefined && typeof sessionId !== "string") ||
-					(context !== undefined && typeof context !== "boolean")
-				) {
-					sendJson(res, 400, { error: "datasets must be a string array, session_id a string and context a boolean" });
-					return;
-				}
-				const fields: Record<string, unknown> = {
-					question: parsed.question,
-					...(datasets !== undefined ? { datasets } : {}),
-					...(sessionId !== undefined ? { session_id: sessionId } : {}),
-					...(context !== undefined ? { context } : {}),
-				};
-				if (!(await auditedRest(res, observability, surface, "docs_search", fields))) return;
+				const fields = DOCS_SEARCH_INPUT.omit({ session_binding: true }).parse(JSON.parse(await readBody(req)));
+				if (fields.steering_session_id === undefined && !(await auditedRest(res, observability, surface, "docs_search", fields))) return;
 				// SPE-19388: the REST search reports into the same process-wide
 				// RAG machine as the MCP tool. Replies are unchanged.
 				const searchBackend = config.docsBackend;
-				const admission = ragMachine.admitQuery(config.ragMachine.halfOpenMs);
+				const admission = fields.steering_session_id === undefined ? ragMachine.admitQuery(config.ragMachine.halfOpenMs) : "serve";
 				const report = { probe: admission === "probe" };
 				try {
 					// Admission as docs_lightrag_query: after the cooldown one search is the half-open probe and leaves ERROR
@@ -1549,23 +1549,24 @@ export function createHttpServer(
 					if (admission === "probe") {
 						ragMachine.transition("STEERING", `docs_search:${searchBackend}`);
 						ragMachine.transition("CONTEXT_REFRESH", `docs_search:retrieve:${searchBackend}`);
-					} else if (admission === "serve") {
+					} else if (admission === "serve" && fields.steering_session_id === undefined) {
 						ragMachine.enterRefresh(`docs_search:${searchBackend}`, `docs_search:retrieve:${searchBackend}`);
 					}
-					const reply = await substrate.searchDocs({ ...fields, probe: admission === "probe", cooling: admission === "refuse" }, surface);
+					const reply = await substrate.searchDocs({ ...fields, probe: admission === "probe", cooling: admission === "refuse" }, surface, { caller: { surface, isOperator: caller.isOperator }, sessionBinding: sessionBindingOf(req), invocationArgs: fields, transport: "rest" });
 					if (admission !== "refuse") {
 						if (reply.degraded === true) {
-							ragMachine.recordFailure(config.ragMachine, `docs_search: ${reply.reason ?? "degraded"}`, report);
+							ragMachine.recordFailure(config.ragMachine, fields.steering_session_id === undefined ? `docs_search: ${reply.reason ?? "degraded"}` : "docs_search: degraded", report);
 						} else {
 							ragMachine.recordSuccess("docs_search:served", report);
 						}
 					}
 					sendJson(res, 200, reply);
 				} catch (cause) {
+					if (cause instanceof LiveSessionBoundaryError) throw cause;
 					if (admission !== "refuse") {
 						ragMachine.recordFailure(
 							config.ragMachine,
-							`docs_search threw: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}`,
+							"docs_search failed",
 							report,
 						);
 					}
@@ -2108,6 +2109,22 @@ export function createHttpServer(
 			// audit class, admission class (`ROUTE_CLASSES`) and operator rule. Each needs a bearer that names a surface, and answers
 			// 404 while SUBSTRATE_PLANNING_STEERING is off, as the tools are not registered then. The author of a directive is the
 			// bearer's surface and only an operator may write: no route takes an author field.
+			if (req.method === "POST" && url.pathname === "/steering/sessions") {
+				if (!steeringRouteOpen(res, substrate, surface)) return;
+				const input = LIVE_SESSION_UPDATE_INPUT.omit({ session_binding: true, session_id: true, previous_state: true }).parse(JSON.parse(await readBody(req)));
+				sendJson(res, 200, await substrate.updateLiveSession({ surface, isOperator: caller.isOperator }, input, { transport: "rest" }));
+				return;
+			}
+			if (req.method === "POST" && (url.pathname === "/steering/sessions/heartbeat" || url.pathname === "/steering/sessions/close")) {
+				if (!steeringRouteOpen(res, substrate, surface)) return;
+				const input = LIVE_SESSION_TARGET_INPUT.omit({ session_binding: true }).parse(JSON.parse(await readBody(req)));
+				const options = { sessionBinding: sessionBindingOf(req), transport: "rest" as const };
+				const result = url.pathname === "/steering/sessions/close"
+					? await substrate.closeLiveSession({ surface, isOperator: caller.isOperator }, input, options)
+					: await substrate.heartbeatLiveSession({ surface, isOperator: caller.isOperator }, input, options);
+				sendJson(res, 200, result);
+				return;
+			}
 			if (req.method === "GET" && url.pathname === "/steering/sessions") {
 				if (!steeringRouteOpen(res, substrate, surface)) return;
 				const query = parseSessionsQuery(url.searchParams);
@@ -2115,8 +2132,7 @@ export function createHttpServer(
 					sendJson(res, 400, { error: query.error });
 					return;
 				}
-				if (!(await auditedRest(res, observability, surface, "steering_list", { route: "sessions", repo_id: query.value.repoId, limit: query.value.limit }))) return;
-				sendJson(res, 200, listSteeringSessions(substrate.steeringSessions, substrate.steering.inbox, { surface, isOperator: caller.isOperator }, query.value));
+				sendJson(res, 200, await substrate.listLiveSessions({ surface, isOperator: caller.isOperator }, query.value));
 				return;
 			}
 
@@ -2127,19 +2143,8 @@ export function createHttpServer(
 					sendJson(res, 400, { error: query.error });
 					return;
 				}
-				if (!(await auditedRest(res, observability, surface, "steering_list", { session_id: query.value.sessionId, status: query.value.status }))) return;
-				const unavailable = steeringUnavailable(substrate.steering);
-				if (unavailable !== null || substrate.steering.inbox === null) {
-					sendJson(res, 503, unavailable ?? { status: "not-configured", error: "no steering audit sink is configured" });
-					return;
-				}
-				// The inbox answers for what it holds; a directive acknowledged before a restart is read back from the audit history.
-				const durable = query.value.status === "queued" ? { records: [], history: "memory-only" as const, truncated: false } : await substrate.durableAcknowledgedFor(query.value.sessionId);
-				sendJson(res, 200, {
-					directives: listRestDirectives(substrate.steering.inbox, query.value, durable.records),
-					history: durable.history,
-					history_truncated: durable.truncated,
-				});
+				const listed = await substrate.readLiveDirectives({ surface, isOperator: caller.isOperator }, query.value, sessionBindingOf(req));
+				sendJson(res, 200, listed);
 				return;
 			}
 
@@ -2150,8 +2155,7 @@ export function createHttpServer(
 					sendJson(res, 400, { error: input.error });
 					return;
 				}
-				if (!(await auditedRest(res, observability, surface, "steering_queue", input.value))) return;
-				const queued = await queueSteering(substrate.steering, { surface, isOperator: caller.isOperator }, input.value);
+				const queued = await queueSteering(substrate.steering, { surface, isOperator: caller.isOperator }, { ...input.value, session_binding: sessionBindingOf(req) }, undefined, "rest");
 				// The same two wake-ups the tool gives, neither able to fail the queue: the long-poll waiters, then the hint note.
 				if (queued.status === "queued") await substrate.onSteeringQueued(queued.directive_id);
 				sendSteeringResult(res, queued);
@@ -2160,13 +2164,12 @@ export function createHttpServer(
 
 			if (req.method === "POST" && url.pathname === "/steering/acknowledge") {
 				if (!steeringRouteOpen(res, substrate, surface)) return;
-				const input = parseAcknowledgeBody(JSON.parse(await readBody(req)), substrate.steering.inbox);
+				const input = parseAcknowledgeBody(JSON.parse(await readBody(req)));
 				if (!input.ok) {
 					sendJson(res, 400, { error: input.error });
 					return;
 				}
-				if (!(await auditedRest(res, observability, surface, "steering_acknowledge", input.value))) return;
-				sendSteeringResult(res, await acknowledgeSteeringWithState(substrate.steering, { surface, isOperator: caller.isOperator }, input.value, substrate.sessionState));
+				sendSteeringResult(res, await acknowledgeSteeringWithState(substrate.steering, { surface, isOperator: caller.isOperator }, { ...input.value, session_binding: sessionBindingOf(req) }, substrate.sessionState, undefined, "rest"));
 				return;
 			}
 
@@ -2177,19 +2180,11 @@ export function createHttpServer(
 					sendJson(res, 400, { error: query.error });
 					return;
 				}
-				// Audited once per call, under the read's name, before the request is held: never per wake-up.
-				if (!(await auditedRest(res, observability, surface, "steering_list", { route: "wait", session_id: query.value.sessionId, after: query.value.after, timeout_ms: query.value.timeoutMs }))) return;
-				const inbox = substrate.steering.inbox;
-				const unavailable = steeringUnavailable(substrate.steering);
-				if (unavailable !== null || inbox === null) {
-					sendJson(res, 503, unavailable ?? { status: "not-configured", error: "no steering audit sink is configured" });
-					return;
-				}
 				// A client that goes away ends its wait: the waiter leaves the registry with its timer and listener.
 				const gone = new AbortController();
 				res.on("close", () => gone.abort());
-				const { sessionId, after, timeoutMs } = query.value;
-				const waited = await substrate.steeringWaiters.wait({ sessionId, timeoutMs, signal: gone.signal, check: () => nextQueuedDirective(inbox, sessionId, after) });
+				const { timeoutMs } = query.value;
+				const waited = await substrate.waitLiveDirectives({ surface, isOperator: caller.isOperator }, query.value, sessionBindingOf(req), gone.signal);
 				switch (waited.status) {
 					case "directive":
 						sendJson(res, 200, { directive: restDirective(waited.record), wait_ms: timeoutMs });
@@ -2321,6 +2316,10 @@ export function createHttpServer(
 
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
+			if (cause instanceof LiveSessionBoundaryError) { sendSteeringResult(res, cause.refusal); return; }
+			if (cause instanceof SteeringReadUnavailableError) { sendJson(res, 503, cause.result); return; }
+			if (cause instanceof ZodError) { sendJson(res, 400, { error: "invalid request fields" }); return; }
+			if (cause instanceof BodyTooLargeError && url.pathname.startsWith("/steering/")) { sendJson(res, 413, { error: "request body too large" }); return; }
 			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/docs/feedback" || url.pathname === "/corpus/plan" || url.pathname === "/corpus/neardup" || url.pathname === "/corpus/ingest" || url.pathname === "/corpus/reconcile" || url.pathname === "/corpus/reflect" || url.pathname === "/mcp" || url.pathname === "/memory" || url.pathname === "/worktrees/report")) {
 				sendJson(res, 413, { error: cause.message });
 				return;
@@ -2650,15 +2649,24 @@ async function handleMcp(
 		return;
 	}
 
-	const { denials } = await auditToolCalls(observability, caller.surface, calls);
-	if (denials.size > 0) {
-		// 200 with a JSON-RPC error, not an HTTP error: the request was well-formed and
-		// the refusal is the answer to it, which is what an MCP client knows how to read.
-		sendJson(res, 200, auditRefusal(body, denials));
+	const prepared = await substrate.prepareLiveBatch(caller, calls);
+	if (!prepared.ok) {
+		const retry: Record<string, string> = prepared.refusal.status === "refused" && prepared.refusal.error.code === "principal-rate-limited" ? { "retry-after": String(prepared.refusal.error.retry_after_s) } : {};
+		const answer = liveBatchRefusal(body, prepared.refusal);
+		if (answer === undefined || (Array.isArray(answer) && answer.length === 0)) { res.writeHead(202).end(); return; }
+		send(res, 200, JSON.stringify(answer), "application/json", retry);
 		return;
 	}
-
-	const server = createMcpServer(substrate, caller);
+	let preparedLiveDispatch: PreparedLiveDispatch | undefined;
+	if (prepared.live) {
+		const audited = await substrate.auditPreparedBatch(prepared.batch, calls, "mcp");
+		if (!audited.ok) { sendJson(res, 200, auditRefusal(body, audited.denials)); return; }
+		preparedLiveDispatch = audited.dispatch;
+	} else {
+		const { denials } = await auditToolCalls(observability, caller.surface, calls);
+		if (denials.size > 0) { sendJson(res, 200, auditRefusal(body, denials)); return; }
+	}
+	const server = createMcpServer(substrate, caller, { preparedLiveDispatch });
 	const transport = new StatelessHttpTransport();
 	res.on("close", () => {
 		void transport.close();
