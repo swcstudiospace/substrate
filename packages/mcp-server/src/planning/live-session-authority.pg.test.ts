@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import { IndexStore, MIGRATION_STEPS } from "../index-store.ts";
 import { defined } from "../test-support.ts";
-import { bunLiveSessionAuthority, type LiveSessionAuthority, type LiveSessionCaller } from "./steering-sessions-store.ts";
+import { bunLiveSessionAuthority, EXPIRY_PASS_LIMIT, type LiveSessionAuthority, type LiveSessionCaller } from "./steering-sessions-store.ts";
 import { issueLiveSession } from "./live-session.test-support.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
@@ -266,5 +266,39 @@ describeLive("durable live-session authority against controlled PostgreSQL (two 
 		expect(await authority.read(entry.access, "private-read")).toEqual(unavailable);
 		expect(await authority.close(entry.access)).toEqual(unavailable);
 		expect((await a.read(entry.access, "private-read")).ok).toBe(true);
+	});
+
+	test("discovery expires abandoned sessions in bounded passes; identities stay terminal and free text is cleared", async () => {
+		const scoped = `${repo}-expiry`;
+		const abandoned = await issued(a, owner, scoped);
+		const bulk = EXPIRY_PASS_LIMIT + 3;
+		await raw`update live_session_bindings set expires_at = clock_timestamp() - interval '1 second' where session_id = ${abandoned.sessionId}`;
+		await raw`insert into live_session_bindings
+			(session_id, owner_surface, repo_id, binding_proof_hash, issued_at, last_seen_at, expires_at, updated_at, state, steering, planning_hash)
+			select 'ls_' || lpad(to_hex(n), 64, '0'), 'omp', ${scoped}, repeat('0', 64),
+				clock_timestamp() - interval '2 hours', clock_timestamp() - interval '2 hours', clock_timestamp() - interval '1 hour',
+				clock_timestamp() - interval '2 hours', 'ACTIVE', 'expired-direction', 'expired-plan'
+			from generate_series(1, ${bulk}::int) as n`;
+		const counts = async () => {
+			const rows: Array<{ total: number; open: number; tombstoned: number }> = await raw`
+				select count(*)::int as total,
+					count(*) filter (where closed_at is null)::int as open,
+					count(*) filter (where closed_at is not null and close_reason = 'expired' and steering is null and planning_hash is null)::int as tombstoned
+				from live_session_bindings where repo_id = ${scoped}`;
+			return defined(rows[0], "scoped counts");
+		};
+		expect(await counts()).toEqual({ total: bulk + 1, open: bulk + 1, tombstoned: 0 });
+		expect(await a.listMetadata({ repoId: scoped, limit: 10 })).toEqual({ ok: true, sessions: [] });
+		// One discovery call closes at most EXPIRY_PASS_LIMIT rows across all repositories, so this scope still holds a backlog.
+		expect((await counts()).open).toBeGreaterThanOrEqual(bulk + 1 - EXPIRY_PASS_LIMIT);
+		for (let round = 0; round < 10 && (await counts()).open > 0; round += 1) {
+			await a.listMetadata({ repoId: scoped, limit: 10 });
+		}
+		expect(await counts()).toEqual({ total: bulk + 1, open: 0, tombstoned: bulk + 1 });
+		const rows: Array<Record<string, unknown>> = await raw`select * from live_session_bindings where session_id = ${abandoned.sessionId}`;
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toMatchObject({ close_reason: "expired", steering: null, planning_hash: null });
+		expect(rows[0]?.closed_at).not.toBeNull();
+		expect(await a.read(abandoned.access, "private-read")).toEqual(denied);
 	});
 });

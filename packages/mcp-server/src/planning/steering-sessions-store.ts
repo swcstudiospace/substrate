@@ -165,6 +165,28 @@ function metadataOf(row: Record<string, unknown>): LiveSessionMetadata {
 	};
 }
 
+/** Upper bound on expired, still-open sessions one discovery call marks terminal; the remainder wait for later calls. */
+export const EXPIRY_PASS_LIMIT = 100;
+
+/**
+ * Marks up to EXPIRY_PASS_LIMIT expired, still-open sessions terminal. The row keeps its identity; free text is cleared the
+ * way `close` clears it, and the `where closed_at is null` partial indexes stop covering it. Expiry is monotone (renewal needs
+ * a live row), so a row expired at scan time is still expired once locked. Rows locked elsewhere are skipped, never awaited.
+ * Driver errors propagate to the caller, which answers with the sanitized unavailable result.
+ */
+async function expireDue(sql: SQL): Promise<void> {
+	await sql.begin(async (tx) => {
+		await tx`
+			with due as (
+				select session_id from live_session_bindings
+				where closed_at is null and expires_at <= clock_timestamp()
+				limit ${EXPIRY_PASS_LIMIT} for update skip locked)
+			update live_session_bindings as b
+			set closed_at = clock_timestamp(), close_reason = 'expired', steering = null, planning_hash = null
+			from due where b.session_id = due.session_id`;
+	});
+}
+
 /**
  * Mandatory PostgreSQL authority, wholly independent of the optional restart cache above.
  * Mutations lock first, then obtain wall-clock SQL time (not the transaction-start timestamp).
@@ -202,6 +224,8 @@ export function bunLiveSessionAuthority(
 			if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 200 || (query.cursor !== undefined && !LIVE_ID.test(query.cursor))) return unavailable();
 			const repo = query.repoId === undefined ? null : scopeRepoId(query.repoId);
 			if (repo === "") return unavailable();
+			// Discovery is the maintenance point: expired sessions leave the live indexes before the scan reads them.
+			await expireDue(sql);
 			// All predicates precede LIMIT. SQL selects only the public columns, even for operators.
 			const rows: Array<Record<string, unknown>> = await sql`
 				select session_id, owner_surface, repo_id, state, updated_at, expires_at

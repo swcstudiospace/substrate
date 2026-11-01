@@ -1,7 +1,7 @@
 import type { SQL } from "bun";
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { bunLiveSessionAuthority, type LiveSessionCaller, type LiveSessionOperation } from "./steering-sessions-store.ts";
+import { bunLiveSessionAuthority, EXPIRY_PASS_LIMIT, type LiveSessionCaller, type LiveSessionOperation } from "./steering-sessions-store.ts";
 import { createTestLiveSessionAuthority, issueLiveSession } from "./live-session.test-support.ts";
 
 const owner: LiveSessionCaller = { surface: "omp", isOperator: false };
@@ -115,13 +115,32 @@ describe("live authority driver boundary", () => {
 		const driver = scriptedSql(() => [row()]);
 		const authority = bunLiveSessionAuthority(driver.sql, { leaseSeconds: 3600 });
 		expect((await authority.listVisible(owner, { repoId: "owner/name", limit: 1 })).ok).toBe(true);
-		const text = driver.statements[0] ?? "";
+		const text = driver.statements.at(-1) ?? "";
 		expect(text.indexOf("owner_surface =")).toBeLessThan(text.indexOf("limit"));
 		expect(text.indexOf("repo_id =")).toBeLessThan(text.indexOf("limit"));
 		expect(text).not.toContain("steering");
 		expect(text).not.toContain("binding_proof_hash");
 		expect(await authority.listVisible(owner, { limit: 201 })).toEqual(unavailable);
 		expect(await authority.listMetadata({ repoId: "owner/name", limit: 1, cursor: "bad" })).toEqual(unavailable);
+	});
+
+	test("discovery runs one bounded expiry pass before the scan; a pass failure is unavailable and skips the scan", async () => {
+		const failing = scriptedSql((text) => {
+			if (text.includes("with due as")) throw new Error("sensitive driver message");
+			return [];
+		});
+		expect(await bunLiveSessionAuthority(failing.sql, { leaseSeconds: 3600 }).listMetadata({ repoId: "owner/name", limit: 10 })).toEqual(unavailable);
+		expect(failing.statements).toHaveLength(1);
+		let passValues: unknown[] = [];
+		const driver = scriptedSql((text, values) => {
+			if (text.includes("with due as")) passValues = values;
+			return [];
+		});
+		expect(await bunLiveSessionAuthority(driver.sql, { leaseSeconds: 3600 }).listMetadata({ repoId: "owner/name", limit: 10 })).toEqual({ ok: true, sessions: [] });
+		expect(driver.statements).toHaveLength(2);
+		expect(driver.statements[0]).toContain("for update skip locked");
+		expect(driver.statements[1]).toContain("from live_session_bindings");
+		expect(passValues).toEqual([EXPIRY_PASS_LIMIT]);
 	});
 });
 
