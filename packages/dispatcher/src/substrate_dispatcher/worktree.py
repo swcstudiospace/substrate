@@ -97,12 +97,15 @@ class WorktreeRefused(Exception):
 
     ``marker`` is a stable key for once-only Linear comments: "invalid-graph-id", "no-checkout",
     "low-disk", "path-conflict", or "git-failed" when a git command itself fails.
+
+    ``fields`` fill the placeholders of the marker's Linear comment; "low-disk" names the checked path.
     """
 
-    def __init__(self, reason: str, marker: str) -> None:
+    def __init__(self, reason: str, marker: str, *, fields: Mapping[str, str] | None = None) -> None:
         super().__init__(reason)
         self.reason = reason
         self.marker = marker
+        self.fields = dict(fields or {})
 
 
 def validate_graph_id(graph_id: str) -> str:
@@ -192,6 +195,7 @@ def ensure_worktree(
         raise WorktreeRefused(
             f"only {free / 1024**3:.1f} GB free on {floor_path}; a worktree needs at least {floor / 1024**3:g} GB",
             "low-disk",
+            fields={"path": floor_path, "gb": f"{floor / 1024**3:g}"},
         )
 
     repo = Path(repo)

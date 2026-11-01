@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from substrate_dispatcher.dispatch import COMMENT_PREFIX, comment_body
 from substrate_dispatcher.worktree import (
     DEFAULT_MIN_FREE_GB,
     MIN_FREE_ENV,
@@ -279,3 +280,43 @@ def test_low_disk_on_the_chosen_root_refuses_before_any_git_command(repo: Path, 
     assert err.value.marker == "low-disk"
     assert run.calls == []
     assert not root.exists()
+
+
+def test_low_disk_comment_names_the_checked_path_when_roots_are_set(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(WORKTREE_ROOTS_ENV, str(tmp_path / "volume" / "worktrees"))
+
+    def usage(_path: str) -> Usage:
+        return Usage(100 * 1024**3, 0, 1024**3)
+
+    with pytest.raises(WorktreeRefused) as err:
+        ensure_worktree(repo, GID, "main", run=Recorder(), disk_usage=usage)
+
+    assert comment_body(err.value.marker, **err.value.fields) == (
+        f"{COMMENT_PREFIX} [low-disk] under 5 GB free on {tmp_path}; no worktree created, not dispatching"
+    )
+
+
+def test_low_disk_comment_names_slash_when_no_roots_are_set(repo: Path, tmp_path: Path):
+    def usage(_path: str) -> Usage:
+        return Usage(100 * 1024**3, 0, 1024**3)
+
+    with pytest.raises(WorktreeRefused) as err:
+        ensure_worktree(repo, GID, "main", root=tmp_path / "wt", run=Recorder(), disk_usage=usage)
+
+    assert comment_body(err.value.marker, **err.value.fields) == (
+        f"{COMMENT_PREFIX} [low-disk] under 5 GB free on /; no worktree created, not dispatching"
+    )
+
+
+def test_low_disk_comment_states_the_configured_floor(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(MIN_FREE_ENV, "10")
+
+    def usage(_path: str) -> Usage:
+        return Usage(100 * 1024**3, 0, 1024**3)
+
+    with pytest.raises(WorktreeRefused) as err:
+        ensure_worktree(repo, GID, "main", root=tmp_path / "wt", run=Recorder(), disk_usage=usage)
+
+    assert comment_body(err.value.marker, **err.value.fields) == (
+        f"{COMMENT_PREFIX} [low-disk] under 10 GB free on /; no worktree created, not dispatching"
+    )
