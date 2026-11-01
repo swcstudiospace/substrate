@@ -10,12 +10,13 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { ADMISSION_CLASSES, ADMISSION_DECISIONS, type AdmissionClass } from "@substrate/observability";
+import { ADMISSION_CLASSES, ADMISSION_DECISIONS, type BreakerOpenError, type AdmissionClass } from "@substrate/observability";
 import {
 	ADMISSION_MODES,
 	ANONYMOUS_IDENTITY,
 	Admission,
 	BUDGET_SCRIPT,
+	DEFAULT_ADMISSION_BREAKER_POLICY,
 	DEFAULT_CLASS,
 	MCP_ROUTE,
 	MONITOR_ROUTES,
@@ -31,12 +32,13 @@ import {
 	retryAfterSeconds,
 	routeClass,
 	toolClass,
+	type AdmissionBreakerPolicy,
 	type AdmissionSettings,
 	type AdmissionVerdict,
 	type BucketState,
 } from "./admission.ts";
 import type { CacheRedis, ScriptOutcome } from "./cache.ts";
-import { DEFAULT_BUDGETS, loadAdmissionSettings } from "./config.ts";
+import { ConfigError, DEFAULT_BUDGETS, loadAdmissionSettings, loadConfig } from "./config.ts";
 import { defined } from "./test-support.ts";
 import { SURFACES } from "./types.ts";
 
@@ -53,18 +55,23 @@ export class FakeBudgetRedis implements CacheRedis {
 	fail: string | null = null;
 	/** When set, `EVAL` resolves this instead of the bucket's reply. */
 	reply: unknown = undefined;
+	/** When set, every command is refused with this, as an open breaker refuses a command before it is sent. */
+	refusal: BreakerOpenError | null = null;
 
 	async get(key: string): Promise<string | null> {
+		if (this.refusal) throw this.refusal;
 		if (this.fail) throw new Error(this.fail);
 		return this.values.get(key) ?? null;
 	}
 
 	async set(key: string, value: string): Promise<void> {
+		if (this.refusal) throw this.refusal;
 		if (this.fail) throw new Error(this.fail);
 		this.values.set(key, value);
 	}
 
 	async incr(key: string): Promise<number> {
+		if (this.refusal) throw this.refusal;
 		if (this.fail) throw new Error(this.fail);
 		const next = Number(this.values.get(key) ?? "0") + 1;
 		this.values.set(key, String(next));
@@ -72,6 +79,7 @@ export class FakeBudgetRedis implements CacheRedis {
 	}
 
 	async eval(script: string, keys: readonly string[], args: readonly string[]): Promise<unknown> {
+		if (this.refusal) throw this.refusal;
 		this.calls.push({ script, keys, args });
 		if (this.fail) throw new Error(this.fail);
 		if (this.reply !== undefined) return this.reply;
@@ -171,6 +179,7 @@ function settings(over: Partial<AdmissionSettings> = {}): AdmissionSettings {
 		classes: { read: { rps: 1, burst: 2 }, write: { rps: 1, burst: 1 }, coordination: { rps: 5, burst: 5 } },
 		anonymous: { rps: 1, burst: 1 },
 		overrides: {},
+		breakerPolicy: DEFAULT_ADMISSION_BREAKER_POLICY,
 		...over,
 	};
 }
@@ -293,6 +302,74 @@ describe("Admission", () => {
 		expect(limitFor(configured, "grok-bot", "write")).toEqual({ rps: 1, burst: 1 });
 		expect(limitFor(configured, "cursor", "read")).toEqual({ rps: 1, burst: 2 });
 		expect(limitFor(configured, null, "read")).toEqual({ rps: 1, burst: 1 });
+	});
+});
+
+describe("the cache breaker's refusal, by class policy (phase 75)", () => {
+	const breakerOpen = async (): Promise<ScriptOutcome> => ({ ok: false, reason: "cache circuit open; retry in 2 s", breakerRetryAfterMs: 2_000 });
+	const READ = { surface: "cursor" as const, klass: "read" as const, cost: 1 };
+
+	function policyOver(breakerPolicy: Partial<Record<AdmissionClass, AdmissionBreakerPolicy>>, mode: AdmissionSettings["mode"] = "enforce") {
+		const recorded: AdmissionVerdict[] = [];
+		const admission = new Admission(settings({ mode, breakerPolicy: { ...DEFAULT_ADMISSION_BREAKER_POLICY, ...breakerPolicy } }), {
+			script: breakerOpen,
+			now: () => 1,
+			record: (verdict) => recorded.push(verdict),
+		});
+		return { admission, recorded };
+	}
+
+	test("with no flag set every class is fail-open: an open breaker admits and counts a bypass, as it did before", async () => {
+		expect(loadAdmissionSettings({}).breakerPolicy).toEqual({ read: "fail-open", write: "fail-open", coordination: "fail-open" });
+		const { admission, recorded } = policyOver({});
+		for (const klass of ADMISSION_CLASSES) {
+			expect(await admission.admit({ surface: "cursor", klass, cost: 1 })).toMatchObject({ decision: "bypass", tokensLeft: null, retryAfterS: 0 });
+		}
+		expect(recorded.map((entry) => entry.decision)).toEqual(["bypass", "bypass", "bypass"]);
+	});
+
+	test("a fail-closed class is refused in enforce with the breaker's wait, and the other classes stay fail-open", async () => {
+		const { admission, recorded } = policyOver({ read: "fail-closed" });
+		expect(await admission.admit(READ)).toEqual({ decision: "refused", surface: "cursor", klass: "read", cost: 1, tokensLeft: null, retryAfterMs: 2_000, retryAfterS: 2 });
+		expect((await admission.admit({ ...READ, klass: "write" })).decision).toBe("bypass");
+		expect(recorded.map((entry) => entry.decision)).toEqual(["refused", "bypass"]);
+	});
+
+	test("shadow records the refusal it would make and never answers it", async () => {
+		const { admission, recorded } = policyOver({ read: "fail-closed" }, "shadow");
+		expect((await admission.admit(READ)).decision).toBe("shadow_limited");
+		expect(recorded.map((entry) => entry.decision)).toEqual(["shadow_limited"]);
+	});
+
+	test("only a breaker refusal is policed: another cache failure stays a bypass in a fail-closed class", async () => {
+		const admission = new Admission(settings({ breakerPolicy: { ...DEFAULT_ADMISSION_BREAKER_POLICY, read: "fail-closed" } }), {
+			script: async () => ({ ok: false, reason: "connect ECONNREFUSED" }),
+		});
+		expect((await admission.admit(READ)).decision).toBe("bypass");
+	});
+
+	test("a refused batch is refused whole, and its body names the cache rather than a budget", async () => {
+		const { admission } = policyOver({ coordination: "fail-closed" });
+		const refused = defined(await admitBatch(admission, "cursor", [{ tool: "graph_heartbeat" }]), "refusal");
+		expect(refused).toMatchObject({ decision: "refused", klass: "coordination" });
+		expect(budgetBody(refused)).toEqual({ error: "cache_unavailable", class: "coordination", retry_after_s: 2 });
+		expect(budgetRefusal({ id: 7 }, refused)).toMatchObject({ id: 7, error: { data: { error: "cache_unavailable" } } });
+	});
+
+	test("SUBSTRATE_BUDGET_<CLASS>_BREAKER parses per class, trimmed and case-insensitive; blank is fail-open", () => {
+		const parsed = loadAdmissionSettings({
+			SUBSTRATE_BUDGET_READ_BREAKER: " Fail-Closed ",
+			SUBSTRATE_BUDGET_WRITE_BREAKER: "   ",
+			SUBSTRATE_BUDGET_COORDINATION_BREAKER: "fail-closed",
+		});
+		expect(parsed.breakerPolicy).toEqual({ read: "fail-closed", write: "fail-open", coordination: "fail-closed" });
+		expect(loadAdmissionSettings({}).breakerPolicy).toEqual({ read: "fail-open", write: "fail-open", coordination: "fail-open" });
+	});
+
+	test("an invalid SUBSTRATE_BUDGET_<CLASS>_BREAKER refuses boot and names the variable", () => {
+		expect(() => loadAdmissionSettings({ SUBSTRATE_BUDGET_WRITE_BREAKER: "closed" })).toThrow(ConfigError);
+		expect(() => loadAdmissionSettings({ SUBSTRATE_BUDGET_WRITE_BREAKER: "closed" })).toThrow("SUBSTRATE_BUDGET_WRITE_BREAKER");
+		expect(() => loadConfig({ SUBSTRATE_BUDGET_READ_BREAKER: "fail-open-ish" })).toThrow(ConfigError);
 	});
 });
 
@@ -429,7 +506,7 @@ describe("the class tables are exhaustive over what the server serves", () => {
 
 	test("the label sets the metric is bounded by are the ones the decision uses", () => {
 		expect([...ADMISSION_CLASSES]).toEqual(["read", "write", "coordination"]);
-		expect([...ADMISSION_DECISIONS]).toEqual(["allowed", "limited", "shadow_limited", "bypass"]);
+		expect([...ADMISSION_DECISIONS]).toEqual(["allowed", "limited", "shadow_limited", "bypass", "refused"]);
 		const classes = new Set<AdmissionClass>([...Object.values(ROUTE_CLASSES), ...Object.values(TOOL_CLASSES)]);
 		expect([...classes].sort()).toEqual([...ADMISSION_CLASSES].sort());
 	});

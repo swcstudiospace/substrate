@@ -345,8 +345,8 @@ export function evaluateSlos(snapshot: MetricSnapshot[], catalogue: SloTarget[] 
  * `admission.limited_rate`: refusals ÷ decisions of `substrate.admission.decisions`,
  * at most 1 %. Beside the catalogue like the plane and burn objectives, because
  * the catalogue is pinned to SPE-4793's four. `decided` is every decision the
- * bucket itself made — `allowed`, `limited`, `shadow_limited` — so a `bypass`
- * (the cache not answering) neither helps nor hurts the rate; `limited` alone is
+ * bucket itself made — `allowed`, `limited`, `shadow_limited` — so a `bypass` or a
+ * `refused` (the cache not answering) neither helps nor hurts the rate; `limited` alone is
  * the numerator, so in `shadow` mode the rate is 0 whatever the shadow refusals
  * say, and the shadow count is read from the metric while the budgets are tuned.
  * 100 decisions before it is judged: a 1 % ceiling cannot be told from noise on

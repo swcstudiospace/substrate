@@ -9,7 +9,7 @@ import { assertDevnetRpcUrl, parseSignerSet, SignerSetError, SOLANA_CLI_DEFAULT,
 import { loadSloThresholds, type SloThresholds } from "@substrate/corpus";
 import { ADMISSION_CLASSES, loadBreakerSettings, type AdmissionClass, type BreakerSettings } from "@substrate/observability";
 import { loadBriefProfileConfig, type BriefProfileConfig } from "./brief-profile.ts";
-import { ADMISSION_MODES, type AdmissionMode, type AdmissionSettings, type BucketLimit } from "./admission.ts";
+import { ADMISSION_BREAKER_POLICIES, ADMISSION_MODES, type AdmissionBreakerPolicy, type AdmissionMode, type AdmissionSettings, type BucketLimit } from "./admission.ts";
 import { classifyEndpoint, parseProxyAllow, type DbPlane, type EndpointClass, type ProxyAllow } from "./db-endpoints.ts";
 import { DEFAULT_INGEST_ROOTS } from "./docs-ingest.ts";
 import { loadInventoryConfig, type InventoryConfig } from "./hindsight-inventory.ts";
@@ -684,7 +684,7 @@ export interface SubstrateConfig {
 	 * `SUBSTRATE_BUDGETS` (`off` | `shadow` | `enforce`, default `shadow`) and
 	 * the per-class buckets from `SUBSTRATE_BUDGET_<CLASS>_RPS` / `_BURST`, with
 	 * per-surface `SUBSTRATE_BUDGET_<SURFACE>_<CLASS>_RPS` / `_BURST` overrides
-	 * and the shared `SUBSTRATE_BUDGET_ANONYMOUS_RPS` / `_BURST`. See `admission.ts`.
+	 * and the shared `SUBSTRATE_BUDGET_ANONYMOUS_RPS` / `_BURST`, and each class's `SUBSTRATE_BUDGET_<CLASS>_BREAKER` (what an open cache breaker does to it). See `admission.ts`.
 	 */
 	admission: AdmissionSettings;
 	/**
@@ -1823,6 +1823,12 @@ export function loadAdmissionSettings(env: Record<string, string | undefined>): 
 			};
 		}
 	}
+	const breakerPolicy = Object.fromEntries(
+		ADMISSION_CLASSES.map((klass) => {
+			const name = `SUBSTRATE_BUDGET_${klass.toUpperCase()}_BREAKER`;
+			return [klass, breakerPolicyOf(name, env[name])];
+		}),
+	) as Record<AdmissionClass, AdmissionBreakerPolicy>;
 	return {
 		mode,
 		classes,
@@ -1831,7 +1837,20 @@ export function loadAdmissionSettings(env: Record<string, string | undefined>): 
 			burst: positiveOr(env.SUBSTRATE_BUDGET_ANONYMOUS_BURST, DEFAULT_BUDGETS.anonymous.burst),
 		},
 		overrides,
+		breakerPolicy,
 	};
+}
+
+/**
+ * `SUBSTRATE_BUDGET_<CLASS>_BREAKER`, trimmed and lowercased. Unset or blank is `fail-open`, the default. `fail-open` and
+ * `fail-closed` are the only other values; anything else refuses boot, so a typo for `fail-closed` cannot silently admit.
+ * (`SUBSTRATE_BUDGETS` keeps its older fallback to `shadow`.)
+ */
+function breakerPolicyOf(name: string, raw: string | undefined): AdmissionBreakerPolicy {
+	const value = raw?.trim().toLowerCase() ?? "";
+	if (value === "") return "fail-open";
+	if ((ADMISSION_BREAKER_POLICIES as readonly string[]).includes(value)) return value as AdmissionBreakerPolicy;
+	throw new ConfigError(`${name}=${JSON.stringify(raw)} is not fail-open or fail-closed; set one of those, or unset it for fail-open`);
 }
 
 /**
