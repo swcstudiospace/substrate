@@ -315,11 +315,15 @@ same reason the plane and burn objectives are:
 | `admission.limited_rate` | `limited / (allowed + limited + shadow_limited)` of `substrate.admission.decisions` ≤ **1 %**; `insufficient-data` under 100 decisions |
 
 A `bypass` — the cache plane not answering the bucket, which admits the caller —
-is not a decision and sits in neither the numerator nor the denominator, so a
-cache outage can neither breach this objective nor dilute it into `ok`. Only an
-enforced refusal (`limited`) is a refusal; in the default `shadow` mode the
-rate is 0 whatever `shadow_limited` counts, and that series is what the budgets
-are tuned from before `SUBSTRATE_BUDGETS=enforce`. The identity label is the
+and a `refused` — a class set `fail-closed` by `SUBSTRATE_BUDGET_<CLASS>_BREAKER`,
+answered 503 while the cache plane is open, in `enforce` mode — are not decisions.
+Both sit in neither the numerator nor the denominator, so a cache outage can
+neither breach this objective nor dilute it into `ok`. The numerator is `limited`
+alone. In the default `shadow` mode the rate is 0 whatever `shadow_limited`
+counts, and that series is what the budgets are tuned from before
+`SUBSTRATE_BUDGETS=enforce`. Fewer than 100 decided requests is `insufficient-data`,
+so an outage that refuses most traffic can read as insufficient data, not a
+breach; the `refused` series is what shows it. The identity label is the
 bearer's surface, never one a body named, so the series are bounded by the
 surface list plus `anonymous`. The bucket and the 429 a refused caller sees are
 described in [`data-planes.md`](data-planes.md) and [`grok-bot.md`](grok-bot.md);
