@@ -26,7 +26,7 @@ import { hindsightBanksFromEnv } from "./planes/hindsight.ts";
 import { loadRecallConfig, parseRecallScope, type RecallConfig, type RecallScope } from "./recall-snapshot.ts";
 import { DEFAULT_TANDEM_OPTIONS, parseTandemOptions, type TandemOptions } from "./tandem-recall.ts";
 import { loadCheckpointDirectory, loadPlanningSettings, type CheckpointDirectoryResult, type PlanningConfigResult } from "./planning/config.ts";
-import { loadSteeringExpirySettings, loadSteeringSettings, steeringToolsRegistered, type SteeringConfigResult, type SteeringExpiryConfigResult } from "./planning/steering.ts";
+import { loadSteeringExpirySettings, loadSteeringIdempotencySettings, loadSteeringSettings, steeringToolsRegistered, type SteeringConfigResult, type SteeringExpiryConfigResult, type SteeringIdempotencyConfigResult } from "./planning/steering.ts";
 import { steeringAuditTableEnabled } from "./planning/steering-store.ts";
 import { loadBaselineDirectory, type BaselineDirectoryResult } from "./planning/baseline-store.ts";
 import { loadLivenessSettings, type LivenessConfigResult } from "./planning/observer.ts";
@@ -766,6 +766,8 @@ export interface SubstrateConfig {
 	steeringRegistered: boolean;
 	/** `SUBSTRATE_PLANNING_STEERING_ACK_TTL_S` and `SUBSTRATE_PLANNING_STEERING_EXPIRY_SWEEP_S` (phase 58): the acknowledgement deadline and the expiry sweep interval. A bad value is a typed result, and the steering tools answer `misconfigured`. See `planning/steering.ts`. */
 	steeringExpiry: SteeringExpiryConfigResult;
+	/** `SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_TTL_S` and `SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_CAP` (phase 77): how long a keyed queue replays and how many keyed queues are kept. A bad value is a typed result. See `planning/steering.ts`. */
+	steeringIdempotency: SteeringIdempotencyConfigResult;
 	/** `SUBSTRATE_PLANNING_BASELINE_DIR` (phase 58): where the observer keeps its publish baseline durably. Unset keeps it in memory. See `planning/baseline-store.ts`. */
 	planningBaseline: BaselineDirectoryResult;
 	/** `SUBSTRATE_PLANNING_LIVENESS_INTERVAL_MS` (phase 58): how often a quiet checkout refreshes its presence record. See `planning/observer.ts`. */
@@ -1278,6 +1280,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		briefSessions: toggleOn(env.SUBSTRATE_BRIEF_SESSIONS),
 		// Phase 58 (live steering): the acknowledgement deadline and the expiry sweep interval. Environment only; a bad value is a typed result.
 		steeringExpiry: loadSteeringExpirySettings(env),
+		// Phase 77 (steering idempotency): the keyed-queue replay retention and capacity. Environment only; a bad value is a typed result.
+		steeringIdempotency: loadSteeringIdempotencySettings(env),
 		// Phase 58: the durable observer baseline directory and the liveness interval. Environment only; a bad value is a typed result.
 		planningBaseline: loadBaselineDirectory(env),
 		planningLiveness: loadLivenessSettings(env),

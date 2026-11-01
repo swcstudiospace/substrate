@@ -20,7 +20,9 @@
  *
  * Every mutating call runs under one lock, so audit order, rate tokens and state never interleave.
  */
+import { createHash } from "node:crypto";
 import { z } from "zod";
+import { IDEMPOTENCY_KEY_PATTERN } from "../event.ts";
 import { redact } from "../redact.ts";
 import { errnoCode } from "./index.ts";
 import { SESSION_ID_RE } from "./presence.ts";
@@ -49,6 +51,17 @@ export const DEFAULT_STEERING_EXPIRY_SWEEP_S = 60;
 export const STEERING_EXPIRY_SWEEP_BOUNDS_S = { min: 1, max: 3_600 } as const;
 /** One expiry pass closes at most this many directives, so the inbox lock is never held for an unbounded run. */
 export const STEERING_EXPIRY_BATCH = 100;
+
+/** Keyed-queue replay retention, in whole seconds, from `SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_TTL_S`. A retry within it returns the original reply and writes nothing. */
+export const STEERING_IDEMPOTENCY_TTL_ENV = "SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_TTL_S";
+export const DEFAULT_STEERING_IDEMPOTENCY_TTL_S = 86_400;
+/** Inclusive bounds, in seconds: one minute to thirty days. Outside them the value is refused, not clamped. */
+export const STEERING_IDEMPOTENCY_TTL_BOUNDS_S = { min: 60, max: 2_592_000 } as const;
+/** The most keyed queues the replay store keeps, from `SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_CAP`. At the cap the oldest is forgotten first. */
+export const STEERING_IDEMPOTENCY_CAP_ENV = "SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_CAP";
+export const DEFAULT_STEERING_IDEMPOTENCY_CAP = 10_000;
+/** Inclusive bounds. Outside them the value is refused, not clamped. */
+export const STEERING_IDEMPOTENCY_CAP_BOUNDS = { min: 1, max: 1_000_000 } as const;
 
 const RATE_WINDOW_MS = 60_000;
 const DIRECTIVE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -131,6 +144,7 @@ const SteeringRestoreEntrySchema = z
 		directive: SteeringDirectiveSchema,
 		queuedAtMs: z.number().int().nonnegative(),
 		acknowledgement: SteeringStoredAcknowledgementSchema.nullish(),
+		sequence: z.number().int().positive().nullish(),
 	})
 	.strict();
 
@@ -156,7 +170,7 @@ export type SteeringRecord =
 
 /** What the audit sink receives. Only the directive snapshot carries content, and it is already redacted. */
 export type SteeringAuditEntry =
-	| { event: "queued"; atMs: number; directive: SteeringDirective }
+	| { event: "queued"; atMs: number; directive: SteeringDirective; sequence?: number }
 	| {
 			event: "acknowledged";
 			atMs: number;
@@ -203,6 +217,10 @@ export interface SteeringInboxDeps {
 	history: SteeringHistorySink;
 	clock: SteeringClock;
 	policy: SteeringPolicy;
+	/** The durable sequence counter and replay records. Absent, the inbox keeps both in memory: one process, and nothing survives a restart. */
+	store?: SteeringIdempotencyStore;
+	/** Keyed-queue replay retention and capacity. Absent, the defaults of this module are used. */
+	idempotency?: SteeringIdempotencySettings;
 }
 
 type SimpleSteeringCode =
@@ -212,7 +230,8 @@ type SimpleSteeringCode =
 	| "not-found"
 	| "wrong-session"
 	| "already-acknowledged"
-	| "confirmation-required";
+	| "confirmation-required"
+	| "idempotency-conflict";
 
 export type SteeringError =
 	| { code: "invalid-directive" | "invalid-acknowledgement"; issues: string[] }
@@ -267,6 +286,73 @@ interface TokenBucket {
 	updatedAtMs: number;
 }
 
+/** A keyed queue as the replay store keeps it: what it asked for, the directive it queued, its delivery sequence, and when its key stops replaying. */
+export interface SteeringReplayRecord {
+	scopeKey: string;
+	fingerprint: string;
+	directive: SteeringDirective;
+	queuedAtMs: number;
+	sequence: number;
+	expiresAtMs: number;
+}
+
+/**
+ * The durable side of the inbox's delivery order and replay: the per-session sequence counter and the keyed replay records. Production
+ * keeps both in the steering store, so they survive a restart. Without a store the inbox keeps them in {@link MemorySteeringIdempotencyStore}.
+ */
+export interface SteeringIdempotencyStore {
+	/** The next delivery sequence of a target session. A number is never handed out twice, across processes and restarts. */
+	nextSequence(sessionId: string): Promise<number>;
+	/** Makes the session's counter pass a sequence already in use, so the next number handed out is new. */
+	advancePast(sessionId: string, sequence: number): Promise<void>;
+	/** The live replay record for a scope key at `nowMs`, or null. A record at or past its expiry is not live. */
+	findReplay(scopeKey: string, nowMs: number): Promise<SteeringReplayRecord | null>;
+	/** Keeps an accepted keyed queue. Expired records are pruned, a live record for the key is never overwritten, and at most `cap` records are kept. */
+	saveReplay(record: SteeringReplayRecord, nowMs: number, cap: number): Promise<void>;
+}
+
+/** One process, no restart: the default store when none is injected. */
+export class MemorySteeringIdempotencyStore implements SteeringIdempotencyStore {
+	private readonly tails = new Map<string, number>();
+	private readonly replays = new Map<string, SteeringReplayRecord>();
+
+	async nextSequence(sessionId: string): Promise<number> {
+		const next = (this.tails.get(sessionId) ?? 0) + 1;
+		this.tails.set(sessionId, next);
+		return next;
+	}
+
+	async advancePast(sessionId: string, sequence: number): Promise<void> {
+		if ((this.tails.get(sessionId) ?? 0) < sequence) this.tails.set(sessionId, sequence);
+	}
+
+	async findReplay(scopeKey: string, nowMs: number): Promise<SteeringReplayRecord | null> {
+		const held = this.replays.get(scopeKey);
+		return held === undefined || held.expiresAtMs <= nowMs ? null : structuredClone(held);
+	}
+
+	async saveReplay(record: SteeringReplayRecord, nowMs: number, cap: number): Promise<void> {
+		for (const [key, held] of this.replays) if (held.expiresAtMs <= nowMs) this.replays.delete(key);
+		if (this.replays.has(record.scopeKey)) return;
+		this.replays.set(record.scopeKey, structuredClone(record));
+		while (this.replays.size > cap) {
+			const oldest = this.replays.keys().next();
+			if (oldest.done) break;
+			this.replays.delete(oldest.value);
+		}
+	}
+}
+
+/** What a keyed queue asks for. A replay must match it. The id and clock are left out, since a replay never regenerates the id. */
+function fingerprintOf(directive: SteeringDirective): string {
+	return createHash("sha256").update(JSON.stringify([directive.action, directive.priority, directive.targetSessionId, directive.body, directive.planRef ?? null, directive.conflictsWithActivePlan])).digest("hex");
+}
+/** What a queue returns: the record, and whether the call replayed an earlier keyed queue. A replay wrote nothing, so it announces nothing. */
+export interface SteeringReceipt {
+	record: SteeringRecord;
+	replayed: boolean;
+}
+
 export class SteeringInbox {
 	private readonly records = new Map<string, SteeringRecord>();
 	private readonly buckets = new Map<string, TokenBucket>();
@@ -275,9 +361,12 @@ export class SteeringInbox {
 	private readonly allowlist: ReadonlySet<string>;
 	private readonly capacity: number;
 	private tail: Promise<unknown> = Promise.resolve();
-	/** Delivery order: grows by one for every directive that enters the inbox. Unlike a timestamp it never goes backwards and never ties. */
+	/** Delivery order, per target session: each session's directives take 1, 2, 3... in the order they enter this inbox. Never repeats, whatever the clock says. */
 	private readonly sequences = new Map<string, number>();
-	private lastSequence = 0;
+	/** The number a queue took whose audit then failed, kept for the retry of the same directive: the committed row may already hold it. Cleared when that retry is audited. */
+	private readonly reservedSequences = new Map<string, number>();
+	private readonly store: SteeringIdempotencyStore;
+	private readonly idempotency: SteeringIdempotencySettings;
 
 	constructor(private readonly deps: SteeringInboxDeps) {
 		const { ratePerMin } = deps.policy;
@@ -290,11 +379,30 @@ export class SteeringInbox {
 		}
 		this.capacity = ratePerMin;
 		this.allowlist = new Set(deps.policy.allowlist);
+		this.store = deps.store ?? new MemorySteeringIdempotencyStore();
+		const idempotency = deps.idempotency ?? { ttlMs: DEFAULT_STEERING_IDEMPOTENCY_TTL_S * 1_000, cap: DEFAULT_STEERING_IDEMPOTENCY_CAP };
+		if (!Number.isSafeInteger(idempotency.ttlMs) || idempotency.ttlMs < 1 || !Number.isSafeInteger(idempotency.cap) || idempotency.cap < 1) {
+			throw new RangeError("idempotency ttlMs and cap must be positive integers");
+		}
+		this.idempotency = idempotency;
 	}
 
-	/** Validate, authorise, rate-limit, audit, then queue. */
-	enqueue(input: unknown): Promise<SteeringResult<SteeringRecord>> {
-		return this.exclusive(() => this.doEnqueue(input));
+	/**
+	 * Validate, authorise, then replay or rate-limit, audit, and queue. With an `idempotencyKey`, a repeat of a queue this inbox
+	 * accepted within the replay retention returns the original record and writes nothing. The key is scoped to the author and
+	 * target session, and a repeat that asks for something different is refused `idempotency-conflict`. Only accepted queues are
+	 * kept, so a refused attempt is a fresh attempt on retry.
+	 */
+	enqueue(input: unknown, idempotencyKey?: string): Promise<SteeringResult<SteeringRecord>> {
+		return this.exclusive(async () => {
+			const receipt = await this.doEnqueue(input, idempotencyKey);
+			return receipt.ok ? { ok: true, value: receipt.value.record } : receipt;
+		});
+	}
+
+	/** As {@link SteeringInbox.enqueue}, and it says whether the call was a replay. */
+	enqueueReceipt(input: unknown, idempotencyKey?: string): Promise<SteeringResult<SteeringReceipt>> {
+		return this.exclusive(() => this.doEnqueue(input, idempotencyKey));
 	}
 
 	/** Validate, check the session and the confirm rule, audit, then record the outcome. */
@@ -375,16 +483,30 @@ export class SteeringInbox {
 		return this.exclusive(() => this.doExpireStale(nowMs));
 	}
 
-	private async doEnqueue(input: unknown): Promise<SteeringResult<SteeringRecord>> {
+	private async doEnqueue(input: unknown, idempotencyKey: string | undefined): Promise<SteeringResult<SteeringReceipt>> {
 		const parsed = SteeringDirectiveSchema.safeParse(input);
 		if (!parsed.success) return fail({ code: "invalid-directive", issues: issuePaths(parsed.error) });
 		const directive = parsed.data;
+		if (idempotencyKey !== undefined && !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) return fail({ code: "invalid-directive", issues: ["idempotency_key"] });
 
 		if (directive.author.kind === "agent") return fail({ code: "agent-author-refused" });
 		if (!this.allowlist.has(directive.author.principalId)) return fail({ code: "principal-not-allowed" });
+
+		const seenMs = this.limiterNowMs();
+		const replay = idempotencyKey === undefined ? null : { scopeKey: JSON.stringify([directive.author.principalId, directive.targetSessionId, idempotencyKey]), fingerprint: fingerprintOf(directive) };
+		if (replay !== null) {
+			const held = await this.storeCall(() => this.store.findReplay(replay.scopeKey, seenMs));
+			if (!held.ok) return held;
+			if (held.value !== null) {
+				if (held.value.fingerprint !== replay.fingerprint) return fail({ code: "idempotency-conflict" });
+				if (!this.sequences.has(held.value.directive.id)) this.sequences.set(held.value.directive.id, held.value.sequence);
+				return { ok: true, value: { record: { state: "queued", directive: held.value.directive, queuedAtMs: held.value.queuedAtMs }, replayed: true } };
+			}
+		}
+
 		if (this.records.has(directive.id)) return fail({ code: "duplicate-directive" });
 
-		const bucket = this.refilled(directive.targetSessionId, this.limiterNowMs());
+		const bucket = this.refilled(directive.targetSessionId, seenMs);
 		if (bucket.tokens < 1) {
 			const retryAfterMs = Math.ceil(((1 - bucket.tokens) * RATE_WINDOW_MS) / this.capacity);
 			return fail({ code: "rate-limited", retryAfterMs });
@@ -393,14 +515,47 @@ export class SteeringInbox {
 		const saved = await this.savedTransitionAtMs("queued", directive.id);
 		if (!saved.ok) return saved;
 		const nowMs = saved.value ?? this.deps.clock.nowMs();
-		const audited = await this.audit({ event: "queued", atMs: nowMs, directive });
-		if (!audited.ok) return audited;
+		const reserved = this.reservedSequences.get(directive.id);
+		const sequenced = reserved === undefined ? await this.storeCall(() => this.store.nextSequence(directive.targetSessionId)) : { ok: true as const, value: reserved };
+		if (!sequenced.ok) return sequenced;
+		const sequence = sequenced.value;
+		const audited = await this.audit({ event: "queued", atMs: nowMs, directive, sequence });
+		if (!audited.ok) {
+			this.reservedSequences.set(directive.id, sequence);
+			return audited;
+		}
+		this.reservedSequences.delete(directive.id);
 
 		this.buckets.set(directive.targetSessionId, { tokens: bucket.tokens - 1, updatedAtMs: bucket.updatedAtMs });
 		const record: SteeringRecord = { state: "queued", directive, queuedAtMs: nowMs };
 		this.records.set(directive.id, record);
-		this.sequences.set(directive.id, ++this.lastSequence);
-		return { ok: true, value: structuredClone(record) };
+		this.sequences.set(directive.id, sequence);
+		if (replay !== null) {
+			await this.keepReplay({ scopeKey: replay.scopeKey, fingerprint: replay.fingerprint, directive, queuedAtMs: nowMs, sequence, expiresAtMs: nowMs + this.idempotency.ttlMs }, seenMs);
+		}
+		return { ok: true, value: { record: structuredClone(record), replayed: false } };
+	}
+
+	/** A store call as a typed result: a failure is `audit-unavailable` with the driver's code, and is never thrown into the queue. */
+	private async storeCall<T>(run: () => Promise<T>): Promise<SteeringResult<T>> {
+		try {
+			return { ok: true, value: await run() };
+		} catch (cause) {
+			return fail({ code: "audit-unavailable", attempts: 1, lastErrorCode: errnoCode(cause) });
+		}
+	}
+
+	/**
+	 * Saves the replay record of an accepted keyed queue, after its audit row. A crash between the two leaves a queued directive with no
+	 * record, so a retry applies again (plan residual R2). A failed save does not fail the queue: the directive is audited and queued, and
+	 * an error would invite a retry that queues it a second time. The failure is reported on stderr, with its code only.
+	 */
+	private async keepReplay(record: SteeringReplayRecord, nowMs: number): Promise<void> {
+		try {
+			await this.store.saveReplay(record, nowMs, this.idempotency.cap);
+		} catch (cause) {
+			process.stderr.write(`[substrate] steering replay record not saved (${errnoCode(cause)}); a retry of its key would queue again\n`);
+		}
 	}
 
 	private async doAcknowledge(input: unknown): Promise<SteeringResult<SteeringRecord>> {
@@ -444,31 +599,37 @@ export class SteeringInbox {
 		return { ok: true, value: structuredClone(record) };
 	}
 
-	private doRestore(entries: readonly unknown[]): SteeringRestoreReport {
+	private async doRestore(entries: readonly unknown[]): Promise<SteeringRestoreReport> {
 		const report: SteeringRestoreReport = { restored: [], unchanged: [], skipped: [] };
-		entries.forEach((entry, index) => {
+		for (const [index, entry] of entries.entries()) {
 			const parsed = SteeringRestoreEntrySchema.safeParse(entry);
 			if (!parsed.success) {
 				report.skipped.push({ index, directiveId: wellFormedDirectiveId(entry), code: "invalid-entry", issues: issuePaths(parsed.error) });
-				return;
+				continue;
 			}
-			const { directive, queuedAtMs, acknowledgement } = parsed.data;
+			const { directive, queuedAtMs, acknowledgement, sequence } = parsed.data;
 			// No human flow can audit an agent author, so such a row did not come from this inbox. It is not loaded.
 			if (directive.author.kind === "agent") {
 				report.skipped.push({ index, directiveId: directive.id, code: "agent-author-refused", issues: [] });
-				return;
+				continue;
 			}
 			const current = this.records.get(directive.id);
 			if (current !== undefined && (current.state === "acknowledged" || acknowledgement == null)) {
 				report.unchanged.push(directive.id);
-				return;
+				continue;
 			}
 			this.records.set(directive.id, recordFromStore(directive, queuedAtMs, acknowledgement ?? null));
-			// A directive this process has not seen takes the next sequence number in restore order. One already held keeps its own.
-			if (!this.sequences.has(directive.id)) this.sequences.set(directive.id, ++this.lastSequence);
+			// A directive this process has not seen keeps the sequence it was delivered with. An entry written before sequences were stored takes its session's next.
+			if (!this.sequences.has(directive.id)) this.sequences.set(directive.id, await this.restoredSequence(directive.targetSessionId, sequence ?? null));
 			report.restored.push(directive.id);
-		});
+		}
 		return report;
+	}
+
+	private async restoredSequence(sessionId: string, stored: number | null): Promise<number> {
+		if (stored === null) return this.store.nextSequence(sessionId);
+		await this.store.advancePast(sessionId, stored);
+		return stored;
 	}
 
 	private async doExpireStale(nowMs: number): Promise<SteeringExpiryReport> {
@@ -662,6 +823,28 @@ export function loadSteeringExpirySettings(env: Readonly<Record<string, string |
 	const sweepS = integerSetting(env, STEERING_EXPIRY_SWEEP_ENV, DEFAULT_STEERING_EXPIRY_SWEEP_S, STEERING_EXPIRY_SWEEP_BOUNDS_S, errors);
 	if (errors.length > 0) return { ok: false, errors };
 	return { ok: true, settings: { ackTtlMs: ttlS * 1_000, expirySweepMs: sweepS * 1_000 } };
+}
+
+/** The keyed-queue replay retention and capacity the inbox runs with. */
+export interface SteeringIdempotencySettings {
+	/** Milliseconds a keyed queue replays after it was queued. */
+	ttlMs: number;
+	/** The most keyed queues the store keeps. */
+	cap: number;
+}
+
+export type SteeringIdempotencyConfigResult = { ok: true; settings: SteeringIdempotencySettings } | { ok: false; errors: SteeringConfigError[] };
+
+/**
+ * The keyed-queue replay retention and capacity, from the environment. The retention is whole seconds and the cap is whole records. A
+ * malformed or out-of-range value is a typed error naming its key, never a fallback; an unset key takes its default.
+ */
+export function loadSteeringIdempotencySettings(env: Readonly<Record<string, string | undefined>>): SteeringIdempotencyConfigResult {
+	const errors: SteeringConfigError[] = [];
+	const ttlS = integerSetting(env, STEERING_IDEMPOTENCY_TTL_ENV, DEFAULT_STEERING_IDEMPOTENCY_TTL_S, STEERING_IDEMPOTENCY_TTL_BOUNDS_S, errors);
+	const cap = integerSetting(env, STEERING_IDEMPOTENCY_CAP_ENV, DEFAULT_STEERING_IDEMPOTENCY_CAP, STEERING_IDEMPOTENCY_CAP_BOUNDS, errors);
+	if (errors.length > 0) return { ok: false, errors };
+	return { ok: true, settings: { ttlMs: ttlS * 1_000, cap } };
 }
 
 /**
