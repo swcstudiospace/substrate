@@ -4,7 +4,7 @@ import { AuditUnavailableError } from "@substrate/audit";
 import type { McpToolCall } from "./observe.ts";
 import { defined } from "./test-support.ts";
 import { issueLiveSession } from "./planning/live-session.test-support.ts";
-import { listSteering, queueSteering } from "./planning/steering-tools.ts";
+import { listSteering, LiveSessionBoundaryError, queueSteering } from "./planning/steering-tools.ts";
 import { AUTH_OWNER, AUTH_FOREIGN, OWNER, OPERATOR, UNKNOWN, NOT_FOUND, call, cleanupLiveHarness, serveLive, toolValue } from "./live-session-consumer.test-support.ts";
 
 const replySchema = z.object({ jsonrpc: z.literal("2.0"), id: z.number(), result: z.unknown().optional(), error: z.object({ code: z.number(), message: z.string() }).optional() });
@@ -125,6 +125,50 @@ describe("HTTP MCP preflight and actual dispatch", () => {
 		expect(toolValue(await h.rpc(call(61, "steering_session_heartbeat", args)))).toMatchObject({ error: { code: "principal-rate-limited" } });
 		expect(heartbeat).not.toHaveBeenCalled(); expect(h.batches).toHaveLength(1);
 		expect(await h.authority.read(row.access, "private-read")).toEqual({ ok: true, snapshot: row.snapshot });
+	});
+
+	test("invalid live-tool arguments are a tool error that keeps the caller's id", async () => {
+		const h = await serveLive();
+		const heartbeat = spyOn(h.authority, "heartbeat");
+		const reply = replySchema.parse(await h.rpc(call(70, "steering_session_heartbeat", {})));
+		expect(reply.id).toBe(70);
+		expect(z.object({ isError: z.literal(true) }).parse(reply.result).isError).toBe(true);
+		expect(toolValue(reply)).toMatchObject({ error: "invalid arguments", problem: expect.stringContaining("session_id") });
+		expect(defined(h.rpcEnvelopes.at(-1), "the refused HTTP envelope").status).toBe(200);
+		expect(heartbeat).not.toHaveBeenCalled(); expect(h.batches).toHaveLength(0); expect(h.ledger.events).toHaveLength(0);
+		const replies = z.array(replySchema).parse(await h.rpc([call(71, "steering_session_heartbeat", {}), call(72, "events_query", { limit: 1 })]));
+		expect(replies.map((entry) => entry.id).sort()).toEqual([71, 72]);
+		expect(z.object({ isError: z.literal(true) }).parse(replies.find((entry) => entry.id === 71)?.result).isError).toBe(true);
+		expect(replies.find((entry) => entry.id === 72)?.error?.message).toBe("batch not dispatched");
+		expect(h.batches).toHaveLength(0);
+	});
+
+	test("valid live-tool arguments keep the success path", async () => {
+		const h = await serveLive(); const row = await issueLiveSession(h.authority, { caller: OWNER });
+		const reply = replySchema.parse(await h.rpc(call(73, "steering_session_heartbeat", { session_id: row.sessionId, session_binding: row.sessionBinding })));
+		expect(reply.id).toBe(73);
+		expect(toolValue(reply)).toMatchObject({ status: "renewed", session_id: row.sessionId });
+		expect(h.batches).toHaveLength(1);
+	});
+
+	test("a failing live dependency or boundary refusal is a tool error that keeps the caller's id, not a crash", async () => {
+		const h = await serveLive(); const row = await issueLiveSession(h.authority, { caller: OWNER });
+		const args = { session_id: row.sessionId, session_binding: row.sessionBinding };
+		const stderr = spyOn(process.stderr, "write").mockImplementation(() => true);
+		spyOn(h.substrate, "prepareLiveBatch").mockRejectedValueOnce(new Error("preparation store unreachable"));
+		const prepareFault = replySchema.parse(await h.rpc(call(74, "steering_session_heartbeat", args)));
+		expect(prepareFault.id).toBe(74);
+		expect(toolValue(prepareFault)).toEqual({ error: "internal error", correlation_id: expect.any(String) });
+		expect(stderr).toHaveBeenCalledWith(expect.stringContaining("preparation store unreachable"));
+		const audit = spyOn(h.substrate, "auditPreparedBatch").mockRejectedValueOnce(new Error("audit store unreachable"));
+		const auditFault = replySchema.parse(await h.rpc(call(75, "steering_session_heartbeat", args)));
+		expect(auditFault.id).toBe(75);
+		expect(toolValue(auditFault)).toEqual({ error: "internal error", correlation_id: expect.any(String) });
+		audit.mockRejectedValueOnce(new LiveSessionBoundaryError(NOT_FOUND));
+		const boundary = replySchema.parse(await h.rpc(call(76, "steering_session_heartbeat", args)));
+		expect(boundary.id).toBe(76);
+		expect(toolValue(boundary)).toEqual(NOT_FOUND);
+		expect(h.batches).toHaveLength(0); expect(h.ledger.events).toHaveLength(0);
 	});
 
 	test("prepared contexts are one-use, argument-bound, caller-bound and cannot silently reprepare", async () => {

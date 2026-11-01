@@ -737,19 +737,60 @@ function sessionBindingOf(req: IncomingMessage): string | undefined {
 	const value = req.headers["x-substrate-session-binding"];
 	return typeof value === "string" ? (value.length <= 128 ? value : "invalid") : value === undefined ? undefined : "invalid";
 }
-function liveBatchRefusal(body: unknown, refusal: LiveCallFailure): unknown {
+/** A live batch that failed before any call ran, as its caller reads it: the arguments it could not parse, or an internal fault under its correlation id. */
+type LiveBatchFault = { error: "invalid arguments"; problem: string } | { error: "internal error"; correlation_id: string };
+function liveBatchRefusal(body: unknown, refusal: LiveCallFailure | LiveBatchFault): unknown {
 	const elements = Array.isArray(body) ? body : [body];
 	const replies = elements.flatMap((element: unknown) => {
 		const message = element !== null && typeof element === "object" ? element as Record<string, unknown> : {};
 		if (!Object.hasOwn(message, "id")) return [];
 		const params = message.params !== null && typeof message.params === "object" ? message.params as Record<string, unknown> : {};
 		const args = params.arguments !== null && typeof params.arguments === "object" ? params.arguments as Record<string, unknown> : {};
-		const live = typeof params.name === "string" && (["docs_steering_session", "steering_session_heartbeat", "steering_session_close", "steering_queue", "steering_acknowledge", "steering_list"].includes(params.name) || (["docs_search", "memory_brief"].includes(params.name) && typeof args.steering_session_id === "string"));
+		const live = typeof params.name === "string" && (["docs_steering_session", "steering_session_heartbeat", "steering_session_close", "steering_queue", "steering_acknowledge", "steering_list"].includes(params.name) || (["docs_search", "memory_brief"].includes(params.name) && args.steering_session_id !== undefined));
 		return [live
 			? { jsonrpc: "2.0", id: message.id ?? null, result: { content: [{ type: "text", text: JSON.stringify(refusal, null, 2) }], isError: true } }
 			: { jsonrpc: "2.0", id: message.id ?? null, error: { code: -32000, message: "batch not dispatched", data: { code: "batch-not-dispatched" } } }];
 	});
 	return Array.isArray(body) ? replies : replies[0];
+}
+
+/**
+ * Answers a live batch whose preparation or audit threw. A boundary refusal and an invalid argument list are tool errors the
+ * caller can act on. Any other throw is a dependency failure: it is logged under a correlation id and answered the same way,
+ * so the caller gets a reply rather than a crashed request.
+ */
+function sendLiveFault(res: ServerResponse, body: unknown, cause: unknown): void {
+	if (cause instanceof LiveSessionBoundaryError) {
+		sendLiveRefusal(res, liveBatchRefusal(body, cause.refusal));
+		return;
+	}
+	if (cause instanceof ZodError) {
+		const problem = cause.issues.map((issue) => `${issue.path.map(String).join(".") || "arguments"}: ${issue.message}`).join("; ");
+		sendLiveRefusal(res, liveBatchRefusal(body, { error: "invalid arguments", problem }));
+		return;
+	}
+	const correlationId = randomUUID();
+	process.stderr.write(`[substrate] POST /mcp correlation=${correlationId}: ${String(cause)}\n`);
+	sendLiveRefusal(res, liveBatchRefusal(body, { error: "internal error", correlation_id: correlationId }));
+}
+
+/** Runs one live step of an MCP batch. A throw is answered by `sendLiveFault`; `undefined` tells the caller it was answered. */
+async function settleLiveStep<T>(res: ServerResponse, body: unknown, step: () => Promise<T>): Promise<T | undefined> {
+	try {
+		return await step();
+	} catch (cause) {
+		sendLiveFault(res, body, cause);
+		return undefined;
+	}
+}
+
+/** A live batch's answer: `202` when no call expects a reply, otherwise its JSON-RPC replies at `200`. */
+function sendLiveRefusal(res: ServerResponse, answer: unknown, headers: Record<string, string> = {}): void {
+	if (answer === undefined || (Array.isArray(answer) && answer.length === 0)) {
+		res.writeHead(202).end();
+		return;
+	}
+	send(res, 200, JSON.stringify(answer), "application/json", headers);
 }
 
 export function createHttpServer(
@@ -2649,17 +2690,18 @@ async function handleMcp(
 		return;
 	}
 
-	const prepared = await substrate.prepareLiveBatch(caller, calls);
+	const prepared = await settleLiveStep(res, body, () => substrate.prepareLiveBatch(caller, calls));
+	if (prepared === undefined) return;
 	if (!prepared.ok) {
 		const retry: Record<string, string> = prepared.refusal.status === "refused" && prepared.refusal.error.code === "principal-rate-limited" ? { "retry-after": String(prepared.refusal.error.retry_after_s) } : {};
-		const answer = liveBatchRefusal(body, prepared.refusal);
-		if (answer === undefined || (Array.isArray(answer) && answer.length === 0)) { res.writeHead(202).end(); return; }
-		send(res, 200, JSON.stringify(answer), "application/json", retry);
+		sendLiveRefusal(res, liveBatchRefusal(body, prepared.refusal), retry);
 		return;
 	}
 	let preparedLiveDispatch: PreparedLiveDispatch | undefined;
 	if (prepared.live) {
-		const audited = await substrate.auditPreparedBatch(prepared.batch, calls, "mcp");
+		const batch = prepared.batch;
+		const audited = await settleLiveStep(res, body, () => substrate.auditPreparedBatch(batch, calls, "mcp"));
+		if (audited === undefined) return;
 		if (!audited.ok) { sendJson(res, 200, auditRefusal(body, audited.denials)); return; }
 		preparedLiveDispatch = audited.dispatch;
 	} else {
