@@ -364,13 +364,15 @@ export const ADMISSION_SLO: Exclude<SloTarget, { kind: "latency-quantile" }> = {
 };
 
 /**
- * The bypasses are not decisions, so they are taken out of the denominator
- * rather than summed by `evaluateRatio`: a cache outage must not dilute the
- * refusal rate into `ok`.
+ * Only the bucket's own decisions (`allowed`, `limited`, `shadow_limited`) form the
+ * denominator. `bypass` and `refused` are not decisions: a cache outage must not dilute
+ * the refusal rate into `ok`, so 97 allowed, 3 limited and 900 refused is 3 %, a breach.
  */
 export function evaluateAdmissionSlo(snapshot: MetricSnapshot[], target = ADMISSION_SLO): SloResult {
 	const counter = findCounter(snapshot, target.denominator.metric);
-	const decided = counter ? sumCounter(counter) - sumCounter(counter, { decision: "bypass" }) : 0;
+	const decided = counter
+		? ["allowed", "limited", "shadow_limited"].reduce((total, decision) => total + sumCounter(counter, { decision }), 0)
+		: 0;
 	const limited = counter ? sumCounter(counter, target.numerator.where) : 0;
 	const base = { id: target.id, title: target.title, statement: target.statement, unit: "ratio" as const, target: target.target };
 	if (decided < target.minSamples) {
