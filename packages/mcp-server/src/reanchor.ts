@@ -561,6 +561,24 @@ interface RecordedState {
 	stale: string | null;
 }
 
+/** The heads root a saved hour's memo commits to, or undefined for a v1 memo. */
+function savedHeadsRoot(hour: SavedPlanHour): string | undefined {
+	return parseMemo(hour.memo)?.headsRootHex;
+}
+
+/**
+ * The refusal for a memo by the signer that has this hour's period, root and count but not its heads root. The signer already sent a
+ * memo for this hour, so sending again would duplicate it, and adopting it would record a memo the verifier rejects. A v1 and a v2 memo
+ * are different memos, so neither matches the other.
+ */
+function headsRootRefusal(hour: SavedPlanHour, onChain: string | undefined): Refusal {
+	const headsText = (heads: string | undefined): string => (heads === undefined ? "no heads root (a v1 memo)" : `heads root ${heads}`);
+	return new Refusal(
+		"root-mismatch",
+		`${hour.period_start}: the cluster already holds a memo by the signer for this hour with ${headsText(onChain)}, not the stored ${headsText(savedHeadsRoot(hour))}`,
+	);
+}
+
 /**
  * Gate 6a, for one hour: the NEWEST `anchor.reanchor` note bound to the hour (same root, count and previous signature; chosen by
  * `newestBoundNote`, the same choice the verifier makes) is the only pointer that counts. Its transaction being on this cluster,
@@ -606,6 +624,7 @@ async function recordedSignature(hour: SavedPlanHour, deps: ReanchorDeps, signer
 			memo.count === hour.event_count &&
 			signedByAcceptedKey(found, signers, hour, newest.payload.new_tx_sig)
 		) {
+			if (memo.headsRootHex !== savedHeadsRoot(hour)) throw headsRootRefusal(hour, memo.headsRootHex);
 			return { signature: newest.payload.new_tx_sig, stale: null };
 		}
 	}
@@ -657,8 +676,8 @@ async function listEarlierSends(hours: readonly SavedPlanHour[], deps: ReanchorD
 }
 
 /**
- * Gate 6c, for one hour: the hinted transactions are confirmed by reading them. The same root and count adopt; a different root or
- * count for this hour is refused. Returns the signature to adopt, or null when no hinted transaction is this hour's memo by the signer.
+ * Gate 6c, for one hour: the hinted transactions are confirmed by reading them. The same period, root, count and heads root adopt (a v1
+ * memo has no heads root, so it adopts only a v1 hour); any other memo by the signer for this hour is refused. Returns the signature to adopt, or null when no hinted transaction is this hour's memo by the signer.
  */
 async function confirmEarlierSend(hour: SavedPlanHour, signatures: readonly string[], deps: ReanchorDeps, signers: SignerSet): Promise<string | null> {
 	const { rpc } = deps;
@@ -675,7 +694,10 @@ async function confirmEarlierSend(hour: SavedPlanHour, signatures: readonly stri
 		const memo = parseMemo(confirmed.memo);
 		if (memo === null || memo.periodStartMs !== hour.period_start_ms) continue;
 		if (!signedByAcceptedKey(confirmed, signers, hour, signature)) continue;
-		if (memo.rootHex === hour.root && memo.count === hour.event_count) return signature;
+		if (memo.rootHex === hour.root && memo.count === hour.event_count) {
+			if (memo.headsRootHex !== savedHeadsRoot(hour)) throw headsRootRefusal(hour, memo.headsRootHex);
+			return signature;
+		}
 		throw new Refusal("root-mismatch", `${hour.period_start}: the cluster already holds a memo by the signer for this hour with root ${memo.rootHex} over ${memo.count} events, not the stored ${hour.root} over ${hour.event_count}`);
 	}
 	return null;

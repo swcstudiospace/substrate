@@ -991,6 +991,70 @@ describe("a v2 hour's memo is checked against the heads its members give", () =>
 		w.eventRows = () => members();
 		expect(await w.run(ONE)).toMatchObject({ code: 0, refused: null, sent: 1 });
 	});
+
+	/** The v2 hour H1 as a saved plan: its stored row and digest carry `memo`, and its members give it. */
+	function savedV2(memo: string): World {
+		const w = new World();
+		w.rows.set(H1, { ...(w.rows.get(H1) as AnchorRow), memo });
+		w.digestOverride.set(H1, { root: rootFor(1), count: countFor(1), memo, eventIds: IDS });
+		w.eventRows = () => members();
+		return w;
+	}
+
+	/** One memo by the signer on chain for H1, listed as an earlier send would be. Returns its signature. */
+	function listOnChain(w: World, memo: string): string {
+		const signature = newSig(7);
+		w.listing = [{ signature, memo, err: null, slot: 5 }];
+		w.chain.set(signature, { ...TX_TEMPLATE, memo });
+		return signature;
+	}
+
+	test("a v2 memo on chain with the saved period, root, count and heads root is adopted: no transfer, one note", async () => {
+		const memo = v2Over(members());
+		const w = savedV2(memo);
+		const adopted = listOnChain(w, memo);
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 0, refused: null, sent: 0, adopted: 1 });
+		expect(result.stdout).toContain(`${hourIso(H1)} adopted ${adopted}`);
+		expect(w.sendCalls).toEqual([]);
+		expect(w.emitted).toHaveLength(1);
+		expect(w.emitted[0]?.payload).toMatchObject({ new_tx_sig: adopted, previous_tx_sig: oldSig(1) });
+	});
+
+	test("a v2 memo on chain with the same period, root and count but another heads root is refused, never adopted", async () => {
+		const memo = v2Over(members());
+		const rival = formatMemoV2({ periodStartMs: H1, rootHex: rootFor(1), count: countFor(1), headsRootHex: rootFor(9) });
+		const w = savedV2(memo);
+		listOnChain(w, rival);
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 1, refused: "root-mismatch", sent: 0, adopted: 0 });
+		expect(result.stderr).toContain(`heads root ${rootFor(9)}`);
+		w.expectUntouched();
+	});
+
+	test("a v1 memo on chain for the same period, root and count is refused for a v2 hour, never adopted", async () => {
+		const memo = v2Over(members());
+		const v1 = formatMemo({ periodStartMs: H1, rootHex: rootFor(1), count: countFor(1) });
+		const w = savedV2(memo);
+		listOnChain(w, v1);
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 1, refused: "root-mismatch", sent: 0, adopted: 0 });
+		expect(result.stderr).toContain("no heads root (a v1 memo)");
+		w.expectUntouched();
+	});
+
+	test("a rerun after a refused heads-root conflict refuses again and records no success", async () => {
+		const memo = v2Over(members());
+		const rival = formatMemoV2({ periodStartMs: H1, rootHex: rootFor(1), count: countFor(1), headsRootHex: rootFor(9) });
+		const w = savedV2(memo);
+		listOnChain(w, rival);
+		const planned: Planned[] = [{ hourMs: H1, n: 1, memo }];
+		expect(await w.run(planned)).toMatchObject({ code: 1, refused: "root-mismatch", sent: 0, adopted: 0 });
+		const rerun = await w.run(planned);
+		expect(rerun).toMatchObject({ code: 1, refused: "root-mismatch", sent: 0, adopted: 0 });
+		expect(rerun.stdout).not.toContain("adopted");
+		w.expectUntouched();
+	});
 });
 
 function noteRecord(n: number, hourMs: number, signature: string, over: { previous?: string; id?: string } = {}): ReanchorRecord {
